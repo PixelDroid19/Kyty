@@ -140,13 +140,15 @@ struct GpuMappingLifecycleTestState
 		Complete,
 	};
 
-	std::array<Event, 6>     events {};
+	std::array<Event, 7>     events {};
 	uint32_t                 event_count      = 0;
 	uint64_t                 register_vaddr   = 0;
 	uint64_t                 register_size    = 0;
 	KernelGpuMappingBacking  register_backing = KernelGpuMappingBacking::Flexible;
 	uint64_t                 invalidate_vaddr = 0;
 	uint64_t                 invalidate_size  = 0;
+	std::array<KernelGpuMappingRange, 2> invalidated_ranges {};
+	size_t                   invalidated_range_count = 0;
 	uint64_t                 release_vaddr    = 0;
 	uint64_t                 release_size     = 0;
 	uint64_t                 protect_vaddr    = 0;
@@ -177,11 +179,14 @@ struct GpuMappingLifecycleTestState
 		return completion(data);
 	}
 
-	static bool InvalidateRange(void* context, uint64_t vaddr, uint64_t size)
+	static bool InvalidateRanges(void* context, const KernelGpuMappingRange* ranges, size_t range_count)
 	{
-		auto* state             = static_cast<GpuMappingLifecycleTestState*>(context);
-		state->invalidate_vaddr = vaddr;
-		state->invalidate_size  = size;
+		auto* state = static_cast<GpuMappingLifecycleTestState*>(context);
+		if (ranges == nullptr || range_count == 0 || range_count > state->invalidated_ranges.size()) { return false; }
+		state->invalidated_range_count = range_count;
+		for (size_t i = 0; i < range_count; ++i) { state->invalidated_ranges[i] = ranges[i]; }
+		state->invalidate_vaddr = ranges[0].vaddr;
+		state->invalidate_size  = ranges[0].size;
 		state->Record(Event::Invalidate);
 		return true;
 	}
@@ -236,7 +241,7 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAda
 	GpuMappingLifecycleCallbacks callbacks {};
 	callbacks.context          = &state;
 	callbacks.register_range   = GpuMappingLifecycleTestState::RegisterRange;
-	callbacks.invalidate_range = GpuMappingLifecycleTestState::InvalidateRange;
+	callbacks.invalidate_ranges = GpuMappingLifecycleTestState::InvalidateRanges;
 	callbacks.release_range    = GpuMappingLifecycleTestState::ReleaseRange;
 	EXPECT_FALSE(lifecycle.Install(callbacks));
 	EXPECT_FALSE(lifecycle.ProtectRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, nullptr));
@@ -245,6 +250,7 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAda
 
 	ASSERT_TRUE(lifecycle.RegisterRange(0x100000u, 0x4000u, KernelGpuMappingBacking::Physical));
 	ASSERT_TRUE(lifecycle.InvalidateRange(0x100000u, 0x4000u));
+	EXPECT_EQ(state.invalidated_range_count, 1u);
 	ASSERT_TRUE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, &state));
 	ASSERT_TRUE(lifecycle.ProtectRange(0x104000u, 0x8000u, GpuMappingLifecycleTestState::Complete, &state));
 
@@ -265,6 +271,20 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAda
 	EXPECT_EQ(state.events[4], GpuMappingLifecycleTestState::Event::Protect);
 	EXPECT_EQ(state.events[5], GpuMappingLifecycleTestState::Event::Complete);
 
+	const std::array<KernelGpuMappingRange, 2> ranges {{{0x200000u, 0x4000u}, {0x300000u, 0x8000u}}};
+	ASSERT_TRUE(lifecycle.InvalidateRanges(ranges.data(), ranges.size()));
+	EXPECT_EQ(state.invalidated_range_count, ranges.size());
+	EXPECT_EQ(state.invalidated_ranges[0].vaddr, ranges[0].vaddr);
+	EXPECT_EQ(state.invalidated_ranges[0].size, ranges[0].size);
+	EXPECT_EQ(state.invalidated_ranges[1].vaddr, ranges[1].vaddr);
+	EXPECT_EQ(state.invalidated_ranges[1].size, ranges[1].size);
+	EXPECT_EQ(state.event_count, 7u);
+	EXPECT_EQ(state.events[6], GpuMappingLifecycleTestState::Event::Invalidate);
+	const std::array<KernelGpuMappingRange, 2> invalid_ranges {{{0x400000u, 0x4000u}, {0x500000u, 0u}}};
+	EXPECT_FALSE(lifecycle.InvalidateRanges(invalid_ranges.data(), invalid_ranges.size()));
+	EXPECT_FALSE(lifecycle.InvalidateRanges(nullptr, 0));
+	EXPECT_EQ(state.event_count, 7u);
+
 	EXPECT_FALSE(lifecycle.Install(callbacks));
 }
 
@@ -276,7 +296,7 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortAllowsAdapterReentrancy)
 	GpuMappingLifecycleCallbacks callbacks {};
 	callbacks.context          = &state;
 	callbacks.register_range   = GpuMappingLifecycleTestState::RegisterRange;
-	callbacks.invalidate_range = GpuMappingLifecycleTestState::InvalidateRange;
+	callbacks.invalidate_ranges = GpuMappingLifecycleTestState::InvalidateRanges;
 	callbacks.release_range    = GpuMappingLifecycleTestState::ReentrantReleaseRange;
 	callbacks.protect_range    = GpuMappingLifecycleTestState::ProtectRange;
 	ASSERT_TRUE(lifecycle.Install(callbacks));
@@ -309,7 +329,7 @@ struct ProtectUnmapRace
 
 	static void RegisterRange(void* /*context*/, uint64_t /*vaddr*/, uint64_t /*size*/, KernelGpuMappingBacking /*backing*/) {}
 
-	static bool InvalidateRange(void* /*context*/, uint64_t /*vaddr*/, uint64_t /*size*/) { return true; }
+	static bool InvalidateRanges(void* /*context*/, const KernelGpuMappingRange* /*ranges*/, size_t /*range_count*/) { return true; }
 
 	static bool ReleaseRange(void* context, uint64_t /*vaddr*/, uint64_t /*size*/, KernelGpuMappingCompletion completion, void* data)
 	{
@@ -350,7 +370,7 @@ struct ProtectUnmapRace
 int RunProtectUnmapRace()
 {
 	static ProtectUnmapRace            race;
-	const GpuMappingLifecycleCallbacks callbacks {&race, ProtectUnmapRace::RegisterRange, ProtectUnmapRace::InvalidateRange,
+	const GpuMappingLifecycleCallbacks callbacks {&race, ProtectUnmapRace::RegisterRange, ProtectUnmapRace::InvalidateRanges,
 	                                              ProtectUnmapRace::ReleaseRange, ProtectUnmapRace::ProtectRange};
 	if (!GetGpuMappingLifecyclePort().Install(callbacks))
 	{
@@ -434,7 +454,7 @@ struct ProtectOwnerReuseRace
 		}
 	}
 
-	static bool InvalidateRange(void* context, uint64_t /*vaddr*/, uint64_t /*size*/)
+	static bool InvalidateRanges(void* context, const KernelGpuMappingRange* /*ranges*/, size_t /*range_count*/)
 	{
 		auto* race = static_cast<ProtectOwnerReuseRace*>(context);
 		race->copy_invalidations++;
@@ -503,7 +523,7 @@ int RunProtectOwnerReuseRace(bool replacement_gpu_owner)
 	static ProtectOwnerReuseRace race;
 	race.replacement_gpu_owner = replacement_gpu_owner;
 
-	const GpuMappingLifecycleCallbacks callbacks {&race, ProtectOwnerReuseRace::RegisterRange, ProtectOwnerReuseRace::InvalidateRange,
+	const GpuMappingLifecycleCallbacks callbacks {&race, ProtectOwnerReuseRace::RegisterRange, ProtectOwnerReuseRace::InvalidateRanges,
 	                                              ProtectOwnerReuseRace::ReleaseRange, ProtectOwnerReuseRace::ProtectRange};
 	if (!GetGpuMappingLifecyclePort().Install(callbacks))
 	{
@@ -1357,6 +1377,57 @@ TEST(EmulatorKernelMemory, MprotectUpdatesTrackedProtectionSlices)
 	EXPECT_EQ(protection, 0x03);
 
 	EXPECT_EQ(KernelMunmap(base, kSize), OK);
+}
+
+TEST(EmulatorKernelMemory, MprotectUpdatesPartialProtectionAcrossAdjacentOwnerTypes)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t kGuestPage     = 0x4000;
+	constexpr size_t kOwnerSize     = 2 * kGuestPage;
+	constexpr size_t kRangeOffset   = kGuestPage;
+	constexpr size_t kRangeSize     = 2 * kGuestPage;
+	constexpr size_t kReservationSize = 2 * kOwnerSize;
+	void*            reservation    = nullptr;
+	ASSERT_EQ(KernelReserveVirtualRange(&reservation, kReservationSize, 0, kReservationSize), OK);
+	const auto base = reinterpret_cast<uint64_t>(reservation);
+
+	int64_t physical_address = 0;
+	ASSERT_EQ(KernelAllocateMainDirectMemory(kOwnerSize, kGuestPage, 12, &physical_address), OK);
+	void* physical_mapping = reservation;
+	ASSERT_EQ(KernelMapDirectMemory(&physical_mapping, kOwnerSize, 0x03, 0x10, physical_address, kGuestPage), OK);
+
+	void* flexible_mapping = reinterpret_cast<void*>(base + kOwnerSize);
+	ASSERT_EQ(KernelMapNamedFlexibleMemory(&flexible_mapping, kOwnerSize, 0x03, 0x10, "mprotect-mixed-owner-range"), OK);
+	ASSERT_EQ(physical_mapping, reservation);
+	ASSERT_EQ(flexible_mapping, reinterpret_cast<void*>(base + kOwnerSize));
+
+	const auto protected_address = base + kRangeOffset;
+	const int  protect_result    = KernelMprotect(reinterpret_cast<void*>(protected_address), kRangeSize, 0x01);
+	std::array<int, 4> protection {-1, -1, -1, -1};
+	std::array<int, 4> query_result {};
+	for (size_t page = 0; page < protection.size(); ++page)
+	{
+		query_result[page] = KernelQueryMemoryProtection(reinterpret_cast<void*>(base + page * kGuestPage), nullptr, nullptr,
+		                                                 &protection[page]);
+	}
+	const bool writable_before = Core::VirtualMemory::IsRangeWritable(base, kGuestPage);
+	const bool writable_inside = Core::VirtualMemory::IsRangeWritable(protected_address, kRangeSize);
+	const bool writable_after  = Core::VirtualMemory::IsRangeWritable(base + kRangeOffset + kRangeSize, kGuestPage);
+
+	const int physical_unmap = KernelMunmap(base, kOwnerSize);
+	const int flexible_unmap = KernelMunmap(base + kOwnerSize, kOwnerSize);
+	const int physical_release = KernelCheckedReleaseDirectMemory(physical_address, kOwnerSize);
+
+	EXPECT_EQ(protect_result, OK);
+	EXPECT_EQ(query_result, (std::array<int, 4> {OK, OK, OK, OK}));
+	EXPECT_EQ(protection, (std::array<int, 4> {0x03, 0x01, 0x01, 0x03}));
+	EXPECT_TRUE(writable_before);
+	EXPECT_FALSE(writable_inside);
+	EXPECT_TRUE(writable_after);
+	EXPECT_EQ(physical_unmap, OK);
+	EXPECT_EQ(flexible_unmap, OK);
+	EXPECT_EQ(physical_release, OK);
 }
 
 // Covers the explicit Gen5 protection family observed in one allocation path.

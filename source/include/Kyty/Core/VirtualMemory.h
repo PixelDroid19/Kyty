@@ -240,11 +240,9 @@ bool           CopyToGuestOrLent(uint64_t destination, const void* source, uint6
 // Splitting a mapping (a partial unmap or replacement elsewhere in it), guest protection changes,
 // and write-lease removal or rearm keep the identity; unmapping drops it. Identities are never
 // reused within the process. A snapshot is a fixed-size value: it owns no host resources and
-// needs no release. The byte budget covers the largest deferred host publication (the 48 KiB
-// guest GDS window); kMaxSegments covers that budget at 4 KiB host pages from any start offset.
-struct GuestMappingSnapshot
+// needs no release.
+struct GuestMappingIdentitySnapshot
 {
-	static constexpr uint64_t kMaxBytes    = 48u * 1024u;
 	static constexpr uint32_t kMaxSegments = 16;
 
 	struct Segment
@@ -259,17 +257,55 @@ struct GuestMappingSnapshot
 	uint32_t segment_count          = 0;
 	Segment  segments[kMaxSegments] = {};
 };
+
+// Copy snapshots retain the bounded deferred-publication budget. The segment capacity covers
+// that budget at 4 KiB host pages from any start offset.
+struct GuestMappingSnapshot: GuestMappingIdentitySnapshot
+{
+	static constexpr uint64_t kMaxBytes = 48u * 1024u;
+};
+
+struct WritableGuestTransactionRange
+{
+	uint64_t address = 0;
+	uint64_t size = 0;
+	const GuestMappingSnapshot* expected_mapping = nullptr;
+};
+
+using WritableGuestTransactionVisitor = void (*)(const GuestMappingIdentitySnapshot* identity, void* context) noexcept;
+
+// Bound the complete transaction independently of each mapping snapshot's segment budget.
+static constexpr uint32_t kMaxWritableGuestTransactionRanges = 1024;
+
 // Captures, in one VM transaction, the mapping identities of a range that is entirely guest owned.
 // Capture is metadata only: it does not consult protection, so a read-only or NoAccess range of a
 // guest mapping is captured, and a write lease's native protection is irrelevant. Fails, leaving an
 // empty snapshot that every copy refuses, when any byte is not guest owned, or when the range
 // exceeds the byte or segment budget.
 bool CaptureGuestMappingSnapshot(uint64_t address, uint64_t size, GuestMappingSnapshot* snapshot);
+// Identity-only captures have the same segment limit without the copy snapshot's byte limit.
+// They are metadata only and do not consult protection.
+bool CaptureGuestMappingIdentitySnapshot(uint64_t address, uint64_t size, GuestMappingIdentitySnapshot* snapshot);
+// Tests whether every byte of a structurally valid identity snapshot still belongs to its captured
+// mapping instance.
+bool GuestMappingIdentityMatches(const GuestMappingIdentitySnapshot& identity);
 // Copies `size` bytes to the snapshot's range only when `size` equals its size, every byte still
 // belongs to the captured mapping instance, and the guest protection permits writes now. Identity,
 // write access, and the copy are one transaction with unmap, map, and protection changes. A
 // refusal copies nothing. Like CopyToGuest, it does not lift a write lease's native protection.
 bool CopyToGuestIfMappingMatches(const GuestMappingSnapshot& snapshot, const void* source, uint64_t size);
+// Preflights every range as guest-owned and writable under one VM transaction, then invokes the
+// visitor once while map, unmap, and protection changes remain excluded. Each expected mapping
+// snapshot must describe its range exactly and still match its mapping identities. An index of -1
+// passes nullptr; otherwise the selected range's identity snapshot is passed for the duration of
+// the callback. Invalid input, stale identities, or a range with more than kMaxSegments mapping
+// instances rejects before the visitor. The callback must not call virtual-memory, mapping,
+// protection, or dirty-tracker APIs. It must not retain the identity pointer. This transaction does
+// not acquire a HostWriteLease and does not roll back callback side effects; callers are responsible
+// for limiting pointer writes to the validated ranges.
+bool VisitWritableGuestTransaction(const WritableGuestTransactionRange* ranges, uint32_t count,
+	                               int32_t capture_identity_range_index,
+	                               WritableGuestTransactionVisitor visitor, void* context);
 enum class ProtectionChangeStatus : uint32_t
 {
 	Success,

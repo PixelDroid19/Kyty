@@ -2,6 +2,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "Emulator/Log.h"
 #include "../../../emulator/src/Graphics/ShaderResourceFoldCapture.h"
 #include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
@@ -94,12 +95,13 @@ struct Evaluation
 };
 
 // Production ShaderParseUsage2 under an optional reader (nullptr is the default read).
-std::unique_ptr<ParseOutput> Parse(const Evaluation& eval, ShaderGuestDescriptorReader* reader)
+std::unique_ptr<ParseOutput> Parse(const Evaluation& eval, ShaderGuestDescriptorReader* reader,
+                                   const ShaderScalarFlow* code_flow = nullptr, const ShaderScalarFlow* eud_flow = nullptr)
 {
 	auto                                    output = std::make_unique<ParseOutput>(eval.initial);
 	const ScopedShaderGuestDescriptorReader scope(reader);
 	ShaderParseUsage2(&eval.user_data, &output->usage, &output->bind, eval.user_sgpr, eval.user_sgpr_num, eval.Code(), 0,
-	                  eval.vertex_resource_types);
+	                  eval.vertex_resource_types, nullptr, code_flow, eud_flow);
 	return output;
 }
 
@@ -392,6 +394,22 @@ TEST(EmulatorShaderResourceFoldReplay, StableTableRecordsTwoReadsAndReplaysExact
 	EXPECT_EQ(report.canonical_output, ShaderResourceFoldCanonicalOutput(captured->usage, captured->bind));
 }
 
+TEST(EmulatorShaderResourceFoldReplay, DistinctEudCodeUsesItsOwnScalarFlow)
+{
+	EnsurePs5Config();
+	const auto eval = BuildEudStorageEvaluation();
+	const auto flow = ShaderScalarFlowOf(eval->code);
+	ParseOutput output;
+	ShaderParseUsage2(&eval->user_data, &output.usage, &output.bind, eval->user_sgpr, eval->user_sgpr_num, nullptr, 0, false,
+	                  &eval->code, nullptr, flow.get());
+
+	ASSERT_EQ(output.bind.storage_buffers.buffers_num, 1);
+	for (int field = 0; field < 4; ++field)
+	{
+		EXPECT_EQ(output.bind.storage_buffers.buffers[0].fields[field], k_storage_words[field]);
+	}
+}
+
 // A table that changes between the snapshot read and its verification read is
 // recorded as the production retry: four ordered reads, not one collapsed snapshot.
 TEST(EmulatorShaderResourceFoldReplay, MutatedTableRecordsRetryAsFourOrderedReads)
@@ -494,8 +512,9 @@ TEST(EmulatorShaderResourceFoldReplay, ConsumedDescriptorMutationChangesBoundWor
 {
 	EnsurePs5Config();
 	const auto                 eval = BuildEudStorageEvaluation();
+	const auto                 flow = ShaderScalarFlowOf(*eval->Code());
 	ShaderResourceFoldRecorder recorder(k_recorded_reads_cap);
-	const auto                 captured   = Parse(*eval, &recorder);
+	const auto                 captured   = Parse(*eval, &recorder, flow.get());
 	auto                       transcript = recorder.Transcript();
 	constexpr std::array<uint32_t, 4> mutated = {0x00003000u, 0x00000012u, 0x00000024u, 0x00000036u};
 	for (auto& read: transcript.reads)
@@ -513,13 +532,26 @@ TEST(EmulatorShaderResourceFoldReplay, ConsumedDescriptorMutationChangesBoundWor
 
 	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eval->table + k_consumed_first_dword * sizeof(uint32_t), mutated.data(),
 	                                             sizeof(mutated)));
-	const auto production = Parse(*eval, nullptr);
+	const auto production = Parse(*eval, nullptr, flow.get());
 	ASSERT_EQ(production->bind.storage_buffers.buffers_num, 1);
 	for (int field = 0; field < 4; ++field)
 	{
 		EXPECT_EQ(production->bind.storage_buffers.buffers[0].fields[field], mutated[field]);
 	}
 	EXPECT_EQ(report.canonical_output, ShaderResourceFoldCanonicalOutput(production->usage, production->bind));
+
+	const auto replacement = BuildEudStorageEvaluation();
+	constexpr std::array<uint32_t, 4> replacement_words = {0x00004000u, 0x00000014u, 0x00000028u, 0x0000003cu};
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(replacement->table + k_consumed_first_dword * sizeof(uint32_t),
+	                                             replacement_words.data(), sizeof(replacement_words)));
+	eval->user_sgpr.value[28] = static_cast<uint32_t>(replacement->table);
+	eval->user_sgpr.value[29] = static_cast<uint32_t>(replacement->table >> 32u);
+	const auto pointer_updated = Parse(*eval, nullptr, flow.get());
+	ASSERT_EQ(pointer_updated->bind.storage_buffers.buffers_num, 1);
+	for (int field = 0; field < 4; ++field)
+	{
+		EXPECT_EQ(pointer_updated->bind.storage_buffers.buffers[0].fields[field], replacement_words[field]);
+	}
 }
 
 // A parse without code (code==nullptr) is captured with code_present=0 and replays exactly.

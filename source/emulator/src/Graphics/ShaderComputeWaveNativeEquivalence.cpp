@@ -126,7 +126,8 @@ bool IsSccReaderType(ShaderInstructionType type)
 		case ShaderInstructionType::SCselectB64:
 		case ShaderInstructionType::SCmovB32:
 		case ShaderInstructionType::SCmovB64:
-		case ShaderInstructionType::SAddcU32: return true;
+		case ShaderInstructionType::SAddcU32:
+		case ShaderInstructionType::SSubbU32: return true;
 		default: return false;
 	}
 }
@@ -239,7 +240,8 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, Dec
 	const auto name = magic_enum::enum_name(instruction.type);
 	// V_CMPX writes only EXEC; the decoder's VCC destination is a placeholder.
 	const bool exec_compare = out->vector && NameStartsWith(name, "VCmpx");
-	out->writes_scc_data    = NameStartsWith(name, "SCmp") || instruction.type == ShaderInstructionType::SAbsI32;
+	out->writes_scc_data    = NameStartsWith(name, "SCmp") || instruction.type == ShaderInstructionType::SAbsI32 ||
+	                          instruction.type == ShaderInstructionType::SSubbU32 || instruction.type == ShaderInstructionType::SAshrI64;
 	if (IsLaneCrossingType(instruction.type))
 	{
 		return Failure(instruction.pc, "instruction reads another lane or a wave-wide count");
@@ -439,7 +441,7 @@ struct UniformityState
 {
 	std::bitset<256> uniform;
 	bool             exec_full   = false;
-	bool             vcc_uniform = false;
+	std::bitset<2>   vcc_uniform;
 	bool             reached     = false;
 
 	bool Merge(const UniformityState& other)
@@ -452,7 +454,7 @@ struct UniformityState
 		}
 		const auto merged_uniform = uniform & other.uniform;
 		const bool merged_exec    = exec_full && other.exec_full;
-		const bool merged_vcc     = vcc_uniform && other.vcc_uniform;
+		const auto merged_vcc     = vcc_uniform & other.vcc_uniform;
 		const bool changed        = merged_uniform != uniform || merged_exec != exec_full || merged_vcc != vcc_uniform;
 		uniform                   = merged_uniform;
 		exec_full                 = merged_exec;
@@ -460,6 +462,43 @@ struct UniformityState
 		return changed;
 	}
 };
+
+// VCC_LO may name one dword or the full pair; VCC_HI names only the high
+// dword. Keep the uniformity proof at that same granularity.
+bool VccRange(const ShaderOperand& operand, unsigned* first, unsigned* count)
+{
+	if (operand.type == ShaderOperandType::VccLo)
+	{
+		*first = 0u;
+	} else if (operand.type == ShaderOperandType::VccHi)
+	{
+		*first = 1u;
+	} else
+	{
+		return false;
+	}
+	const unsigned available = 2u - *first;
+	if (operand.size <= 0 || static_cast<unsigned>(operand.size) > available) { return false; }
+	*count = static_cast<unsigned>(operand.size);
+	return true;
+}
+
+bool IsUniformVccOperand(const ShaderOperand& operand, const UniformityState& state)
+{
+	unsigned first = 0u;
+	unsigned count = 0u;
+	if (!VccRange(operand, &first, &count)) { return false; }
+	for (unsigned word = 0u; word < count; ++word)
+	{
+		if (!state.vcc_uniform.test(first + word)) { return false; }
+	}
+	return true;
+}
+
+bool IsUniformVccPair(const UniformityState& state)
+{
+	return state.vcc_uniform.all();
+}
 
 bool WritesExecOperand(const ShaderInstruction& instruction)
 {
@@ -492,7 +531,7 @@ bool SourcesAreWaveUniform(const ShaderInstruction& instruction, const Uniformit
 		}
 		if (operand.type == ShaderOperandType::VccLo || operand.type == ShaderOperandType::VccHi)
 		{
-			if (!state.vcc_uniform) { return false; }
+			if (!IsUniformVccOperand(operand, state)) { return false; }
 			continue;
 		}
 		UnitSet    units;
@@ -526,7 +565,15 @@ void ApplyUniformity(const ShaderInstruction& instruction, const DecodedInstruct
 		} else if (destination->type == ShaderOperandType::VccLo || destination->type == ShaderOperandType::VccHi)
 		{
 			// A compare or carry defines VCC from its sources; any other writer of VCC is not modelled.
-			state->vcc_uniform = pure_vector && uniform_value;
+			unsigned first = 0u;
+			unsigned count = 0u;
+			if (!VccRange(*destination, &first, &count))
+			{
+				state->vcc_uniform.reset();
+				continue;
+			}
+			const bool uniform_mask = pure_vector && uniform_value;
+			for (unsigned word = 0u; word < count; ++word) { state->vcc_uniform.set(first + word, uniform_mask); }
 		}
 	}
 	// SAVEEXEC forms and V_CMPX rewrite EXEC implicitly; the rest name it as a destination.
@@ -803,7 +850,7 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 			{
 				uniformity = SolveUniformity(instructions, decoded, in, successors);
 			}
-			if (!uniformity[index].reached || !uniformity[index].vcc_uniform)
+			if (!uniformity[index].reached || !IsUniformVccPair(uniformity[index]))
 			{
 				return Failure(instruction.pc, "loop condition is not provably wave-uniform");
 			}

@@ -167,6 +167,45 @@ bool IsScalarPairCopyInstruction(const ShaderInstruction& instruction)
 	       (IsScalarPairVariable(instruction.src[0]) || IsIntegerInlineConstantPair(instruction.src[0]));
 }
 
+bool IsScalarBfeI64Control(const ShaderOperand& operand)
+{
+	if (IsOrdinarySgpr(operand) || IsIntegerOrLiteralConstant(operand) ||
+	    (operand.type == ShaderOperandType::FloatInlineConstant && operand.size == 0 && ComputeWaveOperandIsPlain(operand)))
+	{
+		return true;
+	}
+	if (operand.size != 1 || operand.register_id != 0 || !ComputeWaveOperandIsPlain(operand))
+	{
+		return false;
+	}
+	switch (operand.type)
+	{
+		case ShaderOperandType::VccLo:
+		case ShaderOperandType::VccHi:
+		case ShaderOperandType::ExecLo:
+		case ShaderOperandType::ExecHi:
+		case ShaderOperandType::M0:
+		case ShaderOperandType::Scc: return true;
+		default: return false;
+	}
+}
+
+bool IsScalarBfeI64Instruction(const ShaderInstruction& instruction)
+{
+	const auto scalar_pair = [](const ShaderOperand& operand)
+	{
+		return operand.type == ShaderOperandType::Sgpr && operand.size == 2 && (operand.register_id % 2 == 0) &&
+		       ComputeWaveOperandIsPlain(operand) && ComputeWaveRegisterRangeIsValid(operand.register_id, operand.size, kMaxSgpr);
+	};
+	if (instruction.type != ShaderInstructionType::SBfeI64 ||
+	    !IsExactTupleBase(instruction, ShaderInstructionFormat::Sdst2Ssrc02Ssrc1, 2) || !scalar_pair(instruction.dst) ||
+	    !scalar_pair(instruction.src[0]) || !IsScalarBfeI64Control(instruction.src[1]))
+	{
+		return false;
+	}
+	return IsUnusedDestination(instruction.src[2]) && IsUnusedDestination(instruction.src[3]);
+}
+
 bool IsWholeQuadMaskInstruction(const ShaderInstruction& instruction)
 {
 	return IsExactTupleBase(instruction, ShaderInstructionFormat::Sdst2Ssrc02, 1) && IsScalarPairVariable(instruction.dst) &&
@@ -614,6 +653,8 @@ String8 ComputeWaveUnsupportedReason(const ShaderInstruction& instruction)
 			return "SLshlB32 in paired compute-wave requires VccHi, one ordinary SGPR, and a plain 0..31 inline shift amount";
 		case ShaderInstructionType::SBfmB64:
 			return "SBfmB64 requires a two-word scalar destination and two plain scalar-word sources";
+		case ShaderInstructionType::SBfeI64:
+			return "SBfeI64 requires an even in-range SGPR destination/source pair and a plain scalar control operand";
 		case ShaderInstructionType::SInstPrefetch:
 			return "SInstPrefetch requires SOPP opcode 0x20 and an exact defined 1-to-3-line hint immediate";
 		case ShaderInstructionType::SMovB64:
@@ -956,6 +997,9 @@ ShaderComputeWaveInstructionKind ClassifySpecificComputeWaveInstruction(const Sh
 		case ShaderInstructionType::SBfmB64:
 			return IsScalarBitfieldMaskInstruction(instruction) ? ShaderComputeWaveInstructionKind::ScalarMask
 			                                               : ShaderComputeWaveInstructionKind::Unsupported;
+		case ShaderInstructionType::SBfeI64:
+			return IsScalarBfeI64Instruction(instruction) ? ShaderComputeWaveInstructionKind::ScalarGeneric
+			                                              : ShaderComputeWaveInstructionKind::Unsupported;
 		case ShaderInstructionType::SMovB32:
 			return IsScalarCopyInstruction(instruction) ? ShaderComputeWaveInstructionKind::ScalarCopy
 			                                            : ShaderComputeWaveInstructionKind::Unsupported;
@@ -1081,6 +1125,10 @@ bool ShaderComputeWaveGenericLdsSupported(const ShaderInstruction& instruction)
 bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instruction)
 {
 	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
+	if (instruction.type == ShaderInstructionType::SBfeI64)
+	{
+		return IsScalarBfeI64Instruction(instruction);
+	}
 	if (instruction.type == ShaderInstructionType::SWqmB64)
 	{
 		return IsWholeQuadMaskInstruction(instruction);

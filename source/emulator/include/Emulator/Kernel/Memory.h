@@ -130,7 +130,7 @@ int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void*
 // Read-write host view of the direct-memory pages behind a physical guest
 // mapping, for importing guest memory into a device independently of the
 // guest view's protection. Returns 0 for non-physical or partial ranges.
-[[nodiscard]] uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size);
+[[nodiscard]] uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size, uint64_t alignment = 0);
 bool                 KernelUnmapPhysicalAlias(uint64_t alias);
 struct KernelPhysicalSpan
 {

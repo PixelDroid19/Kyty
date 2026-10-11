@@ -9,6 +9,301 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## ATRAC9 decoder checkpoint (2026-10-11)
+
+- ATRAC9 superframes decode through the bundled LibAtrac9 instead of FFmpeg.
+  FFmpeg's decoder rejects valid superframes whose baseline-relative scale
+  factors wrap past 31; two titles stopped on that strict AJM rejection, and
+  both now reach gameplay with audio. Inputs are copied into a zero-padded
+  buffer, frame consumption is bounded by the superframe, and a failed frame
+  restarts the stream.
+- `SetGaplessDecode` with reset one is admitted on an ATRAC9 instance that
+  already decoded: it restarts the priming trim and the finite output limit.
+  A title reconfigures decoded instances that way, always with no pending PCM
+  in the observed run. Reset zero after a decode, an unlimited total, prior
+  skipped frames and the same reset on Opus instances are still refused.
+
+## Contract-closure checkpoint (2026-10-10)
+
+These are working-tree results at translator129, not a compatibility claim or
+validation of every later edit. The latest focused audio checkpoint ran 101
+cases: 100 passed and the no-FFmpeg admission case skipped because this host
+has the backend. The full CPU suite ran 2,357 cases: 2,352 passed, with five
+documented platform/environment skips and no failures. Strict emulator
+boundaries and all 13 graphics-table provenance checks passed. The Vulkan
+validation layer was confirmed at instance and device creation in the suite,
+with no matching validation errors. Temporary, default-off investigation
+instrumentation remains in this build; it is not a final clean-build result.
+An earlier scalar native integration passed 81 numerical cases, including 12
+signed 64-bit bitfield cases, on the available Intel device. AMD, NVIDIA,
+Windows, the pinned Nix environment and live CI were not exercised.
+
+- The optional raw shader dump now owns the same immutable words used by the
+  parser, has a bounded registered extent and excludes unsupported fused or
+  truncated forms. The exact four-byte extent and adjacent-byte canary fixture
+  passes; no fresh guest-memory read is used to produce the raw dump.
+- A missing-heap optional alias query returns an empty result before indexing
+  the heap container. Its public query fixture passes. This does not admit
+  resource creation from unregistered memory or qualify every alias consumer.
+- Two native reader-lifetime fixtures first reproduced a tracked snapshot
+  changing after recording or becoming refreshable while a queued reader was
+  pending. Both establish a nonempty table and a successful initial device
+  load; the pending fixture uses an enabled timeline semaphore. Reader-aware
+  preparation now defers changed snapshots, retains the latest reader per
+  queue, and acknowledges exact submission completion after publication.
+  Draw and dispatch retries wait outside recording locks and prepare against
+  the current command buffer. A further native fixture reproduced unbounded
+  retired-table growth while a reader remained pending. Retired snapshots now
+  have a 32-table cap; a full reader-bearing set defers preparation rather than
+  invalidating its contents. The 12-case address suite passes. A second guard
+  at the actual refresh point handles dirty writes after the initial preflight;
+  that exact interleaving lacks a
+  deterministic fixture. Independent source review found no supported reader
+  lifetime defect. Native fixtures do not yet exercise production command-
+  processor rotation and retry; fresh guest regression remains pending. Clean
+  reader-bearing preparations scan tracked chunks twice, an unmeasured cost.
+  No workload corruption or performance cause has been demonstrated.
+- Direct ATRAC9 initialization, decoding and reset retain per-instance decoder
+  state and stage guest writes behind mapping-identity validation. The positive
+  synthetic fixture has independently decoded, nonzero PCM. Reset retention
+  and the result counter remain bounded implementation qualifications; no
+  broader guest decoder contract or real-title audio acceptance is claimed.
+  The live decoder budget includes committed and staged replacements before
+  opening another decoder. Full-budget rejection and raw batch-queue error
+  clearing pass their atomic-publication fixtures.
+- Direct mono/stereo Opus split decoding now retains decoder state, snapshots
+  descriptor arrays, validates complete length-prefixed packet records, admits
+  whole packet records, scatters actual PCM bytes and
+  publishes results behind mapping-identity validation. Synthetic numerical,
+  reset, partial-progress, descriptor-lifetime and malformed-input cases pass.
+  A private trace ties the queued job to its result argument. Static analysis
+  subsequently establishes that the factory publishes the same live state
+  object to both the submission registry and the consumer's owner field. The
+  submission loop passes that object to the enqueue path. The unrelated outer
+  readiness callback receives a different object and is not result evidence.
+  The cumulative counter's frame units remain an implementation qualification,
+  not demonstrated hardware equivalence.
+  A fresh strict guest run still stopped after an autosave
+  notice, before a confirmed menu. A bounded debugger capture identifies the
+  first rejected operation as `SetGaplessDecode` in the queued-job pre-scan,
+  before any initialization or decode in that six-operation batch. The batch
+  also requests `SetResampleParametersEx` and `GetResampleInfo`; captured rate
+  arguments are one, zero increment and zero flags. The same-object consumer
+  reads a float at the resample result's offset eight and a signed count at
+  offset twelve, clamping negative counts to zero before sample accounting.
+  These accesses establish a result prefix, not the full output extent or the
+  semantics of other rate profiles. The admitted initial gapless profile now
+  removes priming frames once and caps the finite decoded output across calls.
+  Neutral resampling requires explicit configuration, and its info query stages
+  only the known 16-byte prefix behind the same mapping-identity checks. Clear
+  and initialization reset both qualifications. Numerical split-call trimming,
+  exact-prefix/tail preservation and unsupported-profile atomicity cases pass.
+  The updated focused audio suites ran 105 cases: 104 passed and the no-backend
+  admission case skipped on this FFmpeg-enabled host. A fresh strict run then
+  reached a visually inspected new-game menu. One consumed input edge progressed
+  to another strict `SetResampleParametersEx` rejection. An entry-point capture
+  shows ratio one and zero increment with flag bit zero set, on another newly
+  initialized and cleared Opus instance. The guest's producer sets this bit at
+  initialization and clears it after successful submission. The neutral profile
+  now admits that marker only in the fresh initialize-then-clear window, with no
+  prior resample configuration or decode. Configuration or decode consumes the
+  window; later clears cannot reopen it without another initialization. Positive
+  numerical cases cover both flag values, and unsupported sequences preserve
+  output canaries. The focused audio suites ran 106 cases: 105 passed and the
+  no-backend admission case skipped on this FFmpeg-enabled host. Broader flag,
+  rate-change and reset semantics remain unqualified. A fresh strict run reached
+  the same new-game menu and progressed after input beyond the former marker
+  rejection. During the following video-opening sequence it rejected an Opus
+  input that did not parse as complete U16LE packet records. Capturing the input
+  boundary and descriptor contents is the next audio frontier; gameplay and
+  audible-output acceptance remain open.
+  A later transaction-confirmed observation records a zero-input-consumption,
+  zero-output result followed by reuse of the same input address with a changed
+  head and preserved overlapping tail. This excludes a claim that the earlier
+  planned cursor alone proves guest consumption; the native writer and result
+  consumer remain unobserved. Opus split decoding now drains retained PCM first,
+  admits a complete packet even when only part of its decoded PCM fits, and
+  retains at most one packet's permitted tail. Preflight simulates pending
+  frames and gapless state in job order, including Initialize and Clear; runtime
+  checks its result against that plan. The cumulative counter still counts
+  delivered per-channel frames. Numerical cases cover exact PCM across partial
+  output and an input-free drain, scatter boundaries, priming and finite output
+  limits, and same-batch Clear ordering. Independent clean-build validation ran
+  106 focused audio cases: 105 passed and the no-backend admission case skipped.
+  Strict emulator boundaries and all 13 graphics-table checks passed. One fresh
+  strict run animated the opening for six minutes and consumed one input edge;
+  a repeat on the same binary again rejected an incomplete length-prefixed
+  packet stream before input. The partial-PCM defect is covered, but the
+  intermittent guest input-boundary failure is not closed. Counter equivalence,
+  audible output and gameplay remain unverified. The existing decoder-state
+  mutation before guest-write commit also remains a transaction qualification.
+  A later bounded observation localizes a failing input's lifetime: the complete
+  enqueue-time snapshot contains one valid length-prefixed packet, but the same
+  descriptor ranges contain a changed head at batch-start preflight. The output
+  and result ranges are separate from that input. The instance still has pending
+  PCM and remains below its finite output limit, excluding completion at that
+  limit for this occurrence. Static consumer dataflow independently shows that
+  result offset eight advances a bounded input cursor in bytes, and offset
+  sixteen participates in cumulative output accounting. The ordinary native
+  producer appends at the ring tail; a separate transition path can reset the
+  cursor without clearing occupancy. Neither path has been observed writing the
+  changed interval yet. A subsequent bounded ring observation found unchanged
+  input through successful submissions, with cursor advances matching committed
+  consumed bytes. In a later failing sequence, the first batch-start rejection
+  was an ordinary invalid-parameter return while the input still contained a
+  complete packet. Repeated failed starts retained queued jobs; later enqueues
+  hit the resource limit, and a retained job then failed packet validation after
+  its input storage was reused. A focused follow-up identified that first return
+  as exhaustion of the host transaction's 16-range limit when adding the batch
+  error range. The prior ranges passed extent, non-overlap and mapping-snapshot
+  validation. This demonstrates an internal batch-capacity defect; it does not
+  establish the failed-batch disposal contract or justify taking a payload
+  snapshot earlier. The transaction now accepts up to 1,024 ranges under one
+  mapping lock, while AJM independently bounds a complete batch to 546 plans:
+  32 jobs with at most 16 output descriptors and one result each, plus the batch
+  error and identifier. Per-range byte and mapping-segment limits are unchanged.
+  Stable leases cover both whole-batch preflight and publication; ranges are
+  never committed in chunks. The old capacity reproduced failures in a
+  1,024-range transaction fixture and an 18-range audio batch. With the repair,
+  163 focused cases ran: 159 passed and four backend/platform cases skipped.
+  The late read-only-range fixtures preserve all earlier output canaries, and
+  successful audio publication matches independently decoded PCM. A further
+  focused run passes the maximum 546-plan audio batch and verifies that retrying
+  the same queued batch after a late read-only identifier failure preserves
+  decoder progress and produces the expected PCM, counters and canaries. Strict
+  emulator boundaries and all 13 graphics-table checks passed. Independent
+  source review found no material capacity defect. A fresh strict run on the
+  clean repaired build reached a later unsupported `SetResampleParametersEx`
+  request. A bounded follow-up captures ratio one, zero increment and flag two
+  on an already configured decoder near its finite output limit, with pending
+  PCM still present. Static native caller dataflow derives flag two from a
+  source-record bit, permits an empty-input decode when it is set, and prevents
+  fetching a new source block at that boundary. A bounded opt-in experiment
+  preserves pending decoder PCM across this neutral-rate marker. Two finite
+  streams then publish partial output across successive batches, consume an
+  additional complete record where needed, and reach their configured output
+  limits with no pending decoder PCM. Separate resample-info counts remain
+  zero. The marker therefore does not prove that source input is empty, and
+  decoder-held PCM must not be conflated with resampler-held samples. A repeat
+  captures the next rejected setter before publication: a constant ratio of
+  approximately 0.91565, zero increment and zero flags on a freshly cleared
+  stereo Opus instance. The experiment's setter budget was not exhausted.
+  Native producer dataflow budgets source frames as the ceiling of requested
+  output frames times the larger of the current and target ratios. It therefore
+  supports source-step ratio direction, rather than treating the request as
+  neutral. Stateful non-unit resampling and its source/output accounting remain
+  unimplemented. The experiment and its temporary test modes have been retired;
+  the restored source and rebuilt executables match the clean capacity repair.
+  The experiment is not a production admission or native-equivalence claim;
+  consumer completion, input lifetime, audio output, and shared-title acceptance
+  remain open. Executable validation is Linux-only.
+  Unsupported-operation failures now reach the existing operation-specific
+  diagnostic instead of an earlier generic unimplemented assertion.
+- AudioOut2 currently snapshots a non-main port's PCM but omits it during
+  context submission, leaving that PCM unconsumed. This is an identified host
+  routing gap, not yet a verified explanation of a particular title's audio.
+  Object type and attribute contracts, spatial mixing, rate alignment and
+  consumption require native evidence before this route can be admitted.
+  Object routing does not establish streaming append semantics. A bounded native
+  argument capture now records an eight-channel float main port at 48 kHz with
+  a 512-frame grain. Its attribute list contains the PCM pointer and eight
+  float gains; the current one-entry admission rejects this two-entry list.
+  Mono object ports also receive PCM, gain and four-byte attributes numbered
+  five or eight. Their routing and metadata semantics remain unqualified.
+  Two fresh strict shared-audio runs on the clean capacity repair stop in
+  `SetGaplessDecode`. One request is now captured at both enqueue and rejection:
+  initialized ATRAC9, instance flags 0x401, reset one, finite total 488448,
+  priming 256 and zero prior-skipped frames. The Opus-only admission rejects it
+  before parsing the trimming fields. A private codec-independent candidate is
+  prepared but has not been applied, compiled or behaviorally validated. The
+  second title's debugger stopped at a guest memory fault before audio; that
+  stop does not establish a fatal emulator fault or its gapless profile.
+- Direct pixel-resource and geometry-state packets now interpret the supplied
+  count as values only, consistently with the outer parser. Focused packet
+  cases pass. Pixel export analysis recognizes a wave32 EXEC-low clear before
+  a null final color export and invalidates depth coverage proof on EXEC
+  restoration. Waterfall analysis accounts for EXEC-high writes and distinguishes
+  relative-source from relative-destination moves. Wide scalar buffer loads
+  include the signed immediate offset with modular address arithmetic. Focused
+  numerical/analysis regressions reproduced the affected behavior before the
+  fixes and pass afterward. None establishes the cause of the menu glyph fault.
+
+The remaining menu glyph investigation has a narrower verified frontier. The
+affected draw samples a single-channel atlas whose entire CPU upload backing
+contains `0xcd`; a valid live shader probe independently samples alpha
+`205/255`. This explains solid glyph rectangles for that occurrence. A complete
+retained tracked-write history has no overlapping DMA or immediate-write entry,
+and the recorded owner is a CPU-upload texture. These observations do not cover
+untracked native CPU stores or every possible GPU-only alias. A bounded hardware
+access watch now links a verified native `0xcd` fill to a
+CPU layout/scatter routine: its source load touches the watched filled range,
+and its destination base matches the subsequently bound single-channel atlas.
+The decoded load/store sequence confirms that sampled source-to-writer path,
+not a complete whole-atlas write history. The earlier indirect content-preparation
+method now resolves to an internal command-stream producer. Its live source is
+a separate, entirely zero-filled scratch buffer; the observed receiver state
+selects the stream path. A separate CPU-descriptor update is gated off in that
+entry snapshot. The stream consumer, completed upload and latest texture owner
+remain unresolved; the return probe did not complete, so no whole-update result
+is inferred. HLE-only memory traces cannot exclude native guest writers because
+exported guest symbols may take precedence. An earlier image-copy diagnostic
+lacked transfer-source usage
+and is excluded from evidence. One observed black transition remains intermittent.
+A fresh strict run retained the colored menu through multiple no-input captures
+and reached another visible panel after a bounded input hold. The glyph blocks
+persisted in both states. This does not establish that the black transition is
+fixed or that every input route is qualified. A later bounded command probe
+observed the filled-source access but no command-producer entry. Its
+thread-restricted breakpoint was removed during shutdown, and the capture
+gate did not open. A process-wide follow-up accepted the producer on that
+same thread, but its child-method entry probe did not fire. Neither run
+demonstrates premature guest-thread exit or completed command publication;
+the actual indirect parent call and its return need observation.
+A further guarded probe confirms the parent call's register-derived target and
+arms its thunk entry, but neither the thunk nor the child entry is observed
+before bounded teardown. The later filled-source access still reads unchanged
+bytes. No command-publication witness or qualifying capture is present, and
+the debugger's client exit cannot qualify the unknown inferior termination.
+Repeating an unobserved entry probe is not evidence of a guest-thread failure;
+the next experiment must observe the call's actual next instruction directly.
+
+One strict performance investigation stalled after two presents, with no
+menu capture and no reported strict-breaker event. Its snapshots show completed
+initial graphics work and no pending device-address preparation. A repeat
+with temporary traces disabled advanced to an in-world scene, including one
+unreadable dialogue panel, without a captured main menu. Neither run sent
+runner input; effective physical or keyboard input was not observed. This
+single pair does not establish that tracing caused the stall. A fresh
+shader-performance-configured run reached a visually inspected menu
+after an explicit bounded hold on the initial confirmation screen. Its stable
+20.035-second window produced 96 presents (4.792 per second), below the required
+threshold. It compiled no shaders or pipelines in that window. Draw state setup
+and resource binding remained substantial CPU stages; their nested counters
+cannot establish exclusive costs. The earlier below-threshold menu sample used
+a different dirty binary and shader setting, so the small rate difference is not
+a controlled improvement result. A separate host-sampling attempt stopped at two
+presents before any menu or input. The profiler reports conflicting signal/timer
+configuration, so its timing attribution is not accepted as a menu measurement.
+Its samples nevertheless identify event-flag waits and condition-variable
+broadcasts as a bounded investigation lead. A focused idle-waiter reproduction
+confirmed that broadcasts after wait returns let unmatched waiters wake each
+other without a guest state change. Rebuilding both source versions for the
+same isolated fixture measured 537.518 ms of aggregate process CPU in a 250 ms
+window before the change and 0.123 ms afterward. Wait returns now notify only
+when cancellation drains the last sleeping waiter; call completion notifies
+only when deletion drains the last active call. Explicit Set and cancellation
+and deletion state-change broadcasts remain intact. The lifetime suite passed
+eight cases with one unavailable native-busy fixture skip. This proves the
+isolated wake-storm correction, not a menu-rate improvement or the cause of
+every startup stall. A subsequent strict, visually reviewed menu window recorded
+121 presents in 20.034 seconds (6.040 per second), still below the threshold.
+The reset-bounded counters recorded 128,656 draws, 5.382 seconds of state setup
+and 8.077 seconds of resource binding. Binding includes 2.888 seconds of storage
+preparation and 2.670 seconds of texture preparation; these nested measurements
+must not be added to their parent. The different binaries and independent runs
+do not isolate the cause of the rate difference. Completed multi-workload
+acceptance remains open.
+
 ## Mission
 
 Kyty is an experimental PlayStation 4 and PlayStation 5 emulator. This fork is
@@ -252,7 +547,7 @@ When switching private fixtures (or adding a second root):
 - Commit messages: host/build behavior only (e.g. `build: upgrade vendored SDL2
   to 2.32.10`), never private title names.
 
-## Current verified frontier
+## Current status and verified frontier
 
 ### Dirty-page lookup and admission during a camp transition (2026-10-09)
 
@@ -311,6 +606,211 @@ reused. This preserves lifetime evidence at a capacity and performance cost.
 Long-session performance, other GPUs, complete gameplay and audio remain
 unverified. Dark camp captures also receive a low-entropy heuristic verdict,
 including the reference capture; scene recognition requires visual inspection.
+
+### Contract-closure validation checkpoint at translator127 (2026-10-09)
+
+On retry 2, the focused CPU suite passed 278/278 and selected native integrations
+passed 37/37; the Vulkan validation scan found no matching identifiers. Native
+PARAM validation covers 30 nonzero-mask pair cases and two EXEC controls, with
+the enabled-component results proven. Repeated partial-vertex retention,
+compressed PARAM exports and VSKIP remain unqualified.
+
+The full CPU suite completed on retry 4 in 55.84 seconds: 2,317 cases across
+147 suites, with 2,313 passed, four skipped and zero failed. The skips were
+three OS-owned virtual-memory cases and
+`EmulatorKernelLifetimes.FailedPthreadDestroyPreservesNativeObject`, which is
+unavailable on this host. The fresh `LastTest` evidence was 526,062 bytes
+(SHA-256 `a317373c...e6b364`); the validation scan found no VUID and the
+foreign-monitor count was 0. All eight source, table, shader and archive gates
+exited 0 on retry 4. The pinned Nix environment was unavailable; validation
+used the host build.
+
+Earlier attempts are historical: full CPU retry 2 stopped at
+`VertexExportsDeclareParametersUsedByTheShader` because `exp_control=0xff` was
+unknown; the same default was present in PARAM7/8, which that run did not reach.
+Setting it to zero made the exact three-test filter pass 3/3 on retry 3, but the
+full retry 3 was interrupted when an external guest run began.
+
+No guest execution result is included in this checkpoint. It establishes no
+menu, gameplay, 20 FPS performance or cross-vendor result.
+
+**Historical finding — guest device-address snapshot refresh and in-flight readers.** Static source inspection showed
+`SnapshotGuest` copies refreshed guest bytes into `chunk.copy` in place, and tracked chunks pass the same allocation
+to host-pointer import (`GuestDeviceAddress.cpp:183-199, 429-504, 961-973`). `CommandBuffer::Execute` submits work
+and returns before fence completion; command-buffer rotation can begin recording another slot while earlier
+submitted work remains pending (`GraphicsRenderCommandBuffer.cpp:1562-1613; GraphicsRun.cpp:537-582`). The
+write-back dependency path waits for pending storage write-backs, not for every asynchronous device-address reader
+(`GraphicsRun.cpp:2779-2795; GuestDeviceAddress.cpp:843-852`). Range invalidation and release are explicitly
+quiesced operations, while `GuestDeviceAddressPrepare` refresh has no corresponding reader-fence wait
+(`GuestDeviceAddress.cpp:761-813, 961-973`). Escalation found no visible reader-completion guarantee for this refresh;
+host coherency does not establish device execution completion. If refresh overlaps a reader, a host/device data gap is
+possible, but the guest trigger is unknown and no runtime cause has been proven. No runtime overlap or corruption has
+been observed. The reader-aware repair and its focused native validation are
+recorded in the current checkpoint above. Real workload causality remains
+unknown; page-granular refresh remains on hold.
+
+### Historical contract-closure validation checkpoint at translator126 (2026-10-09)
+
+This was a frozen validation checkpoint for shader translator 126 and geometry translator 86. The available default
+and integration targets build successfully. No guest was launched with this checkpoint, so it establishes no guest
+frontier, menu, performance, compatibility or cross-vendor result. A later translator change requires a new checkpoint
+and fresh validation.
+
+The broader acceptance target remains a visibly verified main menu held above 20 FPS. Earlier pre-126 measurements
+recorded 5.33 FPS (median 185 ms, p95 201 ms) for the older binary and 3.79 FPS (median 259 ms, p95 358 ms) for a
+combined candidate. Those runs did not meet the target and do not describe translator126. A prior run of the remaining
+action workload also failed to reach a menu; its guest-memory import observation is historical and was not repeated
+with translator126.
+
+The focused CPU filter passed 277/277 tests. The full CPU suite passed 2,312 of 2,316 tests, with four skips and no
+failures; the skips were three host virtual-memory cases unavailable on this host and one native pthread-destroy
+preservation case. Selected native integration passed 36/36 tests. The native `ParameterExecWriteback` fixture passed
+its full-EXEC and zero-EXEC cases. A five-case native UINT16 writeback matrix passed for R16, RG16 and RGBA16 formats,
+including partial component masks, mixed MRT attachments and the bypass case. These fixtures ran on the available
+Intel Vulkan device and do not establish guest output or behavior on other GPUs. All eight source, table, shader and
+archive gates exited successfully. The Vulkan validation error scan returned no matching identifiers.
+The pinned Nix environment was unavailable; validation used the configured host build.
+
+At translator126, the validated PARAM EXEC fixture used the full mask; its partial-mask path still wrote a whole
+vector and remained under repair.
+
+The retained scalar-flow analysis with immutable program owners builds and passes the focused and full CPU suites;
+no performance comparison exists. Remaining holds include DCC plane profile, ownership and completion; indexed
+vertex, texture and sampler bounds and lifetime; AudioOut2 and append semantics; the independent one-byte
+`SW_64KB_R_X` offset oracle; NGG and fragment transport; ShaderDumpGuestProgram extent and lifetime; conditional
+command-buffer branch semantics; and Windows physical-memory proof. AMD/NVIDIA GPU execution, other OS execution,
+the pinned Nix environment and live CI remain unverified. The zero-fill AJM fake-success path now produces a strict
+unsupported-run refusal without publishing output, result or batch state; the real compressed decoder is still
+unimplemented.
+
+No title route, performance acceptance or remaining open contract is closed by this checkpoint.
+
+### Interop integration and single-precision MODE contracts (2026-10-09)
+
+Historical integration snapshot at translator 122; the translator126 validation checkpoint above supersedes its
+build and test status. The runtime observations in this section are not results for translator126.
+
+This branch integrates the published fronts branch at `a54f6c7c` into the interop branch (`1605d37a`) with a
+three-way merge from their common base `b208fb3e`. Both sides are kept: the bounded SRC1 translation, partial-export
+refusals, memory, loader, libc, network, VideoOut and compute-coordinate repairs of the interop branch, and the
+published queue-depth, `vcc_hi`, gradient, waterfall, export-flow, tiling, descriptor-bound, view-identity and
+write-observation work. The guest descriptor snapshot keeps the published vector form and reads through the scoped
+descriptor reader, so exact resource-fold capture still sees every descriptor-table read. Translator versions 103
+and 120 both described emitters that this tree no longer produces; the merged emitter is version 121 and the MODE
+changes below are version 122. The geometry translator stays at 86.
+
+**CLAMP, OMOD and IEEE mode (f32 and f16).** Kyty dropped the VOP3 `CLAMP` bit in IEEE mode. The ISA text is
+ambiguous here: section 6.2 mentions `CLAMP` in the same paragraph that ends "output modifiers are ignored if the
+IEEE mode bit is set", while section 3.5 lets only `DX10_CLAMP` choose the clamped NaN result. The decision rests on
+two independent sources that agree IEEE mode keeps the clamp: published RDNA2 hardware measurements of
+`v_mul`/`v_add` with `clamp` saturate in both IEEE modes, and an LLVM 23 compile for gfx1030 folds a `[0, 1]` clamp
+into the `clamp` bit of a kernel whose descriptor sets `ieee_mode 1`. The f32 and half emitters now apply `CLAMP` in every mode; this supersedes the translator-34 entry
+below for `CLAMP` only. `OMOD` now follows the ISA: it is ignored in IEEE mode and whenever single-precision output
+denormals are enabled (`FP_DENORM` bit 5). When applied, it steps the exponent on the bit pattern: zero and
+denormal results become +0, `mul:2`/`mul:4` saturate to infinity, a `div:2` result that leaves the normal range
+becomes +0, and infinities and NaNs pass unchanged. A host `OpFMul` had kept -0 and denormals and ignored both mode
+conditions. Open divergence: the ISA flushes -0 to +0, but the same published measurements return -0 for `div:2`
+of the smallest negative normal. As for the min/max case below, Kyty keeps the ISA result and the published
+contract outranks the single secondary source until RDNA2 hardware confirms either.
+
+**V_MIN/V_MAX/MIN3/MAX3/MED3_F32.** The emitters follow the ISA 12.7/12.12 pseudo-code: in IEEE mode a signaling
+NaN is returned quieted (first operand first); otherwise a NaN first operand returns the second operand and a NaN
+second operand returns the first; the minimum of signed zeros is -0 and the maximum +0; MED3 returns MIN3 when any
+operand is NaN. Previously signaling NaNs passed unquieted in IEEE mode, signed zeros used the host's unspecified
+choice, and MIN3/MAX3/MED3 used host `FMin`/`FMax` NaN handling. Open divergence: with two NaN operands the ISA
+returns the second operand, but the published hardware rows of the same secondary project return the first. Kyty
+keeps the ISA order (a published contract outranks a single secondary source); the payload choice needs a
+measurement on RDNA2 hardware.
+
+Compute programs use their recorded launch controls; unknown compute controls keep the previous defaults (no
+DX10 clamp, no IEEE, f32 output denormals flushed). The MODE word already enters every stage's shader identity.
+Half-precision clamps keep their existing admission: with f16 output denormals enabled they are refused outside
+IEEE mode but admitted in IEEE mode. A half clamp is exact, so the IEEE case applies it; the asymmetry is recorded,
+not resolved, and no workload in the sweep reached either case.
+
+Verification: `EmulatorShaderArithmetic.FloatModeClampOutputModifierAndMinMaxContracts` emits and validates
+production modules for each mode and evaluates them with the CPU contract evaluator; a compute variant runs the
+same cases on compute modules with recorded launch controls. It failed on the previous
+emitters (the IEEE clamp returned NaN for DX10 clamp) and passes after the change. Two earlier assertions that
+encoded the old behaviour were updated with the evidence above: the half conversion clamp in the same suite and
+the IEEE clamp-source check in the graphics diagnostics integration. The SDWA `mul:4` and min/max selection packet
+tests now check the new emission. No GPU execution of these exact cases exists on AMD hardware.
+
+**Host context requests.** `HostContextTrampoline` now publishes `completed` with a single-byte store issued after
+the saved context is copied back and after RSP has left the request-owned stack; the raising thread no longer
+reads the request after queuing it. A real-signal regression (`OverlappingContextRequestsCompleteAndReclaim`)
+delivers 800 overlapping requests from two raisers to two guest threads, checks every handler call, both targets'
+resumed execution and the final reclamation. It passes 3 of 3 runs on the fix. The old ordering also passed 50 runs, all with `MALLOC_PERTURB_` (25 also with
+the opt-in context trace, which produced no output in the test host), so the use-after-free window itself is not
+reproduced; the test is a completion,
+reclaim and liveness regression. Still open: a request queued to a thread that exits before taking the signal is
+never completed, so its 1 MiB stack is retained for the process lifetime (`LibKernel.cpp`, `KernelRaiseException`).
+This repair is not linked to the fishing adventure's startup freeze.
+
+**Diagnostic bounds.** The opt-in material trace and the rejected vertex-layout logger now bound their traversals
+to the fixed attribute, resource and sampler arrays while printing the decoded counts unchanged. The vertex input
+decoder refused nothing and wrote past those arrays when a layout merged more than 16 attributes into one buffer,
+used more than 16 buffers or resources, or named a semantic beyond the 16-entry fetch table; each case is now an
+explicit refusal. A fetch-table index above 15 only reads guest memory and keeps its warning.
+
+**New refusal evidence.** A critical transient-pool refusal now also reports the refused usage's used and free
+entries, used four-byte and four-byte-zero entries, snapshots and duplicate payloads. The D16 depth-reference refusal
+now names each containing render target's format, extent, samples, layers, mips and content stamp, and every
+overlapping object's content origin, sequence, submission, update times, in-use, dependency and write-back state.
+
+**Runtime observations (Intel Arc A770, Mesa 26.2.4, strict, Native, Silent).**
+
+| Run | Workload | Result |
+| --- | --- | --- |
+| d1900, d1901 | Robot dungeon workload, wait deadline 15 s and sync-wait tracking | 202 s each, advancing; zero suspended waits and zero producer-not-found; stall not reproduced |
+| d1902 | Mechanical-fist platformer | 27 s, guest locks null+0x58 from the compressor preset path (startup race reproduced) |
+| d1903 | Mechanical-fist platformer, debugger attached | Passes the race; stops at 30 s on the unresolved `sceAgcCbBranch` import |
+| d1904 | Arcade racing workload | 162 s, race reached, no D16 refusal; frame-time profile matches the previous sweep |
+| d1905 | Isometric roguelike, allocator error-edge probe | 165 s, probe armed, zero error edges, zero null faults |
+| d1906 | Fishing adventure, sync-wait tracking | 162 s, advancing; startup freeze not reproduced |
+| d1907 | Pixel cave platformer | Excluded: a long blocking agent request starved the observer, which stopped the run at 105 s |
+| d1908 | Pixel cave platformer, route ends at 120 s, agent holds | Cave scene reached; held Square and Cross were each read by the guest in 90 samples; character unchanged |
+
+`sceAgcCbBranch` exists only in held local work whose compare semantics are unproven, so the mechanical-fist
+platformer cannot reach its earlier storage-capacity refusal on the published contracts; the capacity front stays
+unmeasured on this tree. The pixel cave platformer's earlier "wake up" endpoint did not reproduce on this tree:
+both the shortened route (d1908) and the unchanged sweep route (d1919) reach the cave. Its earlier cause is not
+established, and that endpoint is not evidence of lost input.
+
+**Final sweep (d1910-d1922, one executable for every route, SHA-256
+`2bdf2ccdb2e8750bbb43d1f9b16247ff0410d54809899d628a5d819cab1f048f`).** The final source differs from that executable
+only in the `div:2` underflow sign above and in tests. No route stopped on a fatal error except the
+mechanical-fist platformer, and no event-ring drops occurred. Final captures were reviewed visually against the
+previous sweep's endpoints. All observer `gameplay_accepted` values are false; scene and action acceptance needs
+the playable gate's checkpoints.
+
+| Workload | Seconds | Final scene |
+| --- | --- | --- |
+| Fishing adventure | 163 | Boat, sailing tutorial and HUD |
+| Perspective puzzle | 292 | Lit room with desk; transient loading stall, then healthy watches to the end |
+| Sword platformer sequel | 162 | Cave, character and HUD |
+| Isometric roguelike | 163 | Initial area, character and HUD; no null row copy |
+| Watercolor platformer | 162 | Pale figure on a nearly white image, as before; acceptance needs a same-scene reference |
+| Penitent platformer | 161 | Cavern, character and HUD |
+| Prison roguelike | 162 | Initial area, item tooltip and HUD |
+| Camp brawler | 202 | Black throughout (see below) |
+| Sandbox | 203 | Seeded ready-to-play setup with complete text |
+| Pixel cave platformer | 161 | Cave with ladders and character |
+| Robot dungeon workload | 203 | Tutorial scene with HUD and movement prompt; healthy watches; earlier present stall not reproduced |
+| Arcade racing workload | 165 | Race with HUD; no D16 refusal |
+| Mechanical-fist platformer | 58 | Passes the startup race; refuses the one-byte `SW_64KB_R_X` 400x5x5 volume |
+
+The camp brawler stays black and issues about 3% of its earlier draws while presenting normally. A build of the
+merge result without this entry's changes reproduces the same black endpoint (d1923), so the cause precedes this
+change set. Inference, not tested: the earlier endpoint came from the local candidate with the held audio context
+bundle, which this tree does not contain, so the missing context admission is the leading candidate. A Console
+printf run that shows whether the AudioOut2 context calls are refused would decide it. The mechanical-fist
+platformer's one-byte volume equation is also held local work, so it remains a refusal here.
+
+The strict playable gate on the isometric roguelike install with the final source fails as measured: input is
+delivered (three taps, six guest read-state samples), but `no_runtime_failure` reports the first error
+`gfx_storage_frontier`, no local baseline exists, and no reviewed scene/action checkpoint fixture exists. No
+gameplay acceptance is claimed.
 
 ### Classic runtime and input boundaries (2026-10-08)
 
@@ -758,6 +1258,9 @@ The existing evidence limits for indexed resources, compression metadata and
 CPU-demand publication continue to apply.
 ### Publication selection and held contracts (2026-10-09)
 
+Historical publication-selection snapshot at translator 120. The translator126 checkpoint above supersedes this
+section's build and test counts; its held-contract notes are updated below where later evidence changed their status.
+
 The selected source revision is `b7456c71da384bcfbc484990a5363c121a8fdd29`, with translator version 120.
 It contains the reviewed mutex, video-decoder, scalar/EUD, image-gradient, export-flow, pixel-LDS, memory-observation,
 storage-snapshot, format-view, Standard256B and vertex-input corrections. Storage-upload and depth-refusal diagnostics
@@ -781,16 +1284,19 @@ Independent review holds these contracts from publication:
   `AudioOut2Set3DLatency` returns success without storing or applying latency. The absence of current object-port
   rendering does not prove that global latency has no effect. The queue-depth correction's local tests do not
   establish a safe independent subset of the startup path.
-- **Non-indexed indirect draw:** the parser drops the vertex/instance patch offsets, and the argument record is
-  copied without a mapped-range or address-overflow guard. The API, HLE export, parser, dispatcher, renderer and
-  associated tests remain local together.
+- **Non-indexed indirect draw:** the earlier local candidate that omitted the vertex/instance patch offsets is
+  absent from the translator126 target. The current indexed-indirect path validates and copies its complete
+  20-byte argument span through checked guest-memory access. This bounds the indexed record only; non-indexed
+  offset semantics and behavior remain unimplemented and unverified.
 - **Conditional command-buffer branch:** `GraphicsCbBranch` treats comparison function zero as unconditional and
   ignores the compare and not-taken operands. The mapping is inferred from a different packet contract; no independent
   call trace, guest disassembly or behavioral contract verifies it.
 - **One-byte `SW_64KB_R_X` detile:** the round-trip input and reference use the same production offset helper.
   An independent offset oracle is still required, including block transitions and slice behavior.
-- **Unsigned 16-bit exports and new attachment formats:** synthetic SPIR-V checks do not establish native writeback.
-  The unsigned output interface/emitter and new single/two-channel unsigned attachment mappings remain local.
+- **Unsigned 16-bit exports and new attachment formats:** the earlier source audit had only synthetic SPIR-V evidence.
+  At translator126, a five-case native raster/readback matrix now validates production translation and writeback for
+  R16, RG16 and RGBA16, including partial component masks, mixed MRT attachments and a bypass case on the available
+  Intel Vulkan device. This closes those bounded fixture cases only; guest execution and other GPUs remain untested.
 
 The adjacent-mapping indirect-register snapshot change retains a separate range check followed by a host copy.
 It bounds register count and validates the complete allocated span, but does not prove atomicity against a concurrent
@@ -818,18 +1324,17 @@ selected published source; none is a gameplay or visual acceptance.
   conversion clamps to 0xffff (signed: to [-0x8000, 0x7fff]). Two independent compiler contracts agree, so the
   range-proof guard that only admitted provably in-range sources is replaced by `UMin` / `SClamp` for any source.
   The signed emitter also stopped selecting a `uint` into a `float` destination, which produced invalid SPIR-V.
-- **UINT16 color exports (local candidate; held).** `SPI_SHADER_COL_FORMAT` UINT16_ABGR (7) into a UINT color buffer locally declares a
+- **UINT16 color exports (historically held local candidate).** `SPI_SHADER_COL_FORMAT` UINT16_ABGR (7) into a UINT color buffer locally declares a
   `v4uint` fragment output and stores the raw 16-bit components of each export dword (`OpBitFieldUExtract`), keeping
   disabled components. FP16 (mode 4) exports into UINT buffers keep the established float interface; the sandbox
   regression recorded above came from keying on the buffer number type alone. `R16G16_UINT` (format 5, type 4) is a
-  local render-target format. This more selective emitter still lacks the verified native writeback contract
-  required by the withdrawal below; the emitter and new unsigned attachment mappings are excluded from publication.
-- **`sceAgcDcbDrawIndirect` (NID 1q1titRBL6o; local candidate; held).** Emits `IT_DRAW_INDIRECT` with the non-indexed patch offsets. The
-  command processor reads the 16-byte argument record from the base set by `SetBaseIndirectArgs` and draws through
-  the auto-index path with the start vertex added to `GE_INDX_OFFSET` and the start instance as `firstInstance`. Like
-  the indexed form, the patch offsets (user-SGPR writes of the start values) are not applied; a start vertex above
-  `INT32_MAX` is refused. The argument copy also lacks a mapped-range and address-overflow guard. These incomplete
-  semantics prevent publication of the API, parser, dispatcher and renderer path.
+  local render-target format. **Status update at translator126:** the five-case native UINT16 matrix described above
+  now passes exact readback on the available Intel Vulkan device. This supersedes the earlier absence of native
+  writeback evidence for those formats, but does not establish guest-route or cross-vendor acceptance.
+- **Non-indexed indirect draw (historical local candidate; absent from translator126 target).** The earlier candidate
+  emitted `IT_DRAW_INDIRECT` and used a 16-byte argument record, but did not apply the vertex/instance patch offsets
+  or validate the complete guest span. That candidate is not present in this target. The indexed path now checks its
+  20-byte argument span before copying; this does not implement or establish the non-indexed contract.
 - **SGPR104 and SGPR105.** The RDNA2 scalar operand range is 0..105; the parser stopped at 103, and the shared lowering
   preconditions and compute-wave analyses used the same limit, so a pixel shader reading `s104` was refused as an
   invalid instruction before native wave analysis. The limits follow the ISA; the NGG passthrough proof, which keeps
@@ -974,6 +1479,9 @@ frontier is not revalidated. No further repeat sweep or speculative render chang
 
 ### Open source-audit findings (2026-10-08)
 
+Update 2026-10-09: the context-request ordering and both trace traversals below are repaired; see the interop
+integration entry above. The original finding is kept for its evidence.
+
 Source audit found a separate Linux context-request lifetime defect in `LibKernel.cpp`,
 `HostContextTrampoline` / `ReclaimCompletedHostContextRequests`: `completed` is published before the trampoline's
 last request reads and before it leaves the request-owned stack. A raise to another thread may reclaim both at
@@ -1055,6 +1563,14 @@ experiment. Its precise hardware behavior for this mismatched pairing remains
 unresolved; restoring execution is not evidence of correct integer writes.
 Unsigned color-interface support needs a verified export/attachment contract
 and an end-to-end native writeback comparison before reintroduction.
+
+**Status update at translator126:** a five-case native UINT16 matrix now
+validates exact production writeback for R16, RG16 and RGBA16 integer-export
+cases, including partial component masks, mixed MRT attachments and bypass on
+the available Intel Vulkan device. This resolves the earlier lack of native
+writeback evidence for those tested combinations only. The FP16-export to
+UINT16-attachment pairing observed above remains unresolved, as do guest-route
+and cross-vendor acceptance.
 
 The preceding candidate passed all 24 export tests and 1,959 full-suite tests
 with eight optional/environment skips, yet failed native validation. Those
@@ -1702,53 +2218,64 @@ earlier builds and identifying their actual output-producing draws is the
 current visual investigation; neither defect has a confirmed connection to
 this array refusal.
 
-Separate existing interface limits remain: integer color targets can
-still enter floating-point output declarations in `ShaderSpirvGenerator.cpp`.
-The existing floating-point MRT emitters also terminate an inactive invocation
-at nonterminal exports, preventing a later EXEC restore from reaching another
-export. The next direction is a focused continuation fixture and a final
-valid-mask ownership proof. These paths remain outside the published changes and have no established
-connection to the deferred menu defect.
+**Audit-closure update at translator126 (2026-10-09).** The following statuses
+supersede specific observations recorded on 2026-10-07:
 
-A separate diagnostic defect was found in `ShaderDumpGuestProgram`
-(`Shader.cpp:782`): its raw-byte extent uses the final instruction PC plus
-eight without clamping to the registered shader range, and parsing and raw
-dumping do not share a lifetime lock. A four-byte final instruction can cause
-adjacent readable bytes to be included, while a mapping replacement can pair
-a listing with different bytes. This remains unfixed. The next direction is
-a mapped-range-clamped snapshot with widened extent arithmetic and one
-lifetime owner; use a bounded decoded listing for the current investigation.
+- The tested nonterminal pixel color exports now skip inactive stores and
+  rejoin later shader code. Terminal exports retain their discard behavior.
+  This does not establish parameter-export enable-mask semantics.
+- The packed-mip image-store path and GDS append/consume operations now gate
+  their side effects by EXEC. Focused packed-mip coverage and the selected
+  native GDS integration pass; unrelated or unmodeled forms remain excluded.
+- The whole-pair VCC propagation risk is fixed: one-word writes do not promote
+  a varying two-word mask to uniform. Focused positive and negative proof cases
+  pass.
+- The native `ParameterExecWriteback` fixture passes its full-EXEC and
+  zero-EXEC variants. This establishes only EXEC behavior for its full-enable
+  mask; partial full-precision PARAM masks, accumulation, compressed PARAM and
+  VSKIP remain unqualified or refused. Pixel color-export masks are a separate
+  contract.
+- The current working tree bounds the optional vertex-layout logger's walks
+  over attribute, buffer and resource arrays to their 16-entry capacities.
+  That source change is not in HEAD at this checkpoint and has no separate
+  logger-specific runtime validation.
+- The `ShaderDumpGuestProgram` extent and mapping-lifetime finding remains
+  open. Its raw-byte extent still needs a mapped-range clamp and one lifetime
+  owner.
 
-Separate existing side-effect risks remain outside this admission change:
-`ShaderSpirvImage.cpp:4196` emits a packed-mip image store without an EXEC
-branch, and `ShaderSpirvBuffer.cpp:2370` and `:2403` emit GDS append/consume
-atomics without checking EXEC. An instruction reached by an inactive guest
-lane can therefore perform an external memory operation. The next direction
-is a validated emitted-module fixture with inactive EXEC and a guard that
-dominates each operation. No connection to the current native refusal is
-established; these families must retain strict admission exclusions.
+The following observations retain their original 2026-10-07 date. Integer
+color output evidence is now limited to the translator126 five-case UINT16
+native matrix described above; other integer formats remain unqualified. The
+inactive nonterminal pixel-export finding is superseded for the tested forms,
+with no established connection to the deferred menu defect.
 
-An adjacent pre-existing risk remains in `DefineUniformMask`: marking a
-one-word VCC-low write uniform can set the whole VCC flag even if VCC-high is
-still varying. `ShaderFragmentMaskFlow::SetUniformMask` has the same promotion
-and also needs the complete-pair invariant. The triggering sequence is a
-varying comparison followed by a
-uniform low-word mask copy and a wave64 VCC branch. The next direction is a
-width-specific pair invariant and a focused negative case; the new two-word
-intersection rule does not relax one-word propagation.
+The `ShaderDumpGuestProgram` diagnostic finding was recorded at
+`Shader.cpp:782`: its raw-byte extent used the final instruction PC plus eight
+without clamping to the registered shader range, and parsing and raw dumping
+did not share a lifetime lock. A four-byte final instruction could include
+adjacent readable bytes, while a mapping replacement could pair a listing
+with different bytes. The extent and lifetime snapshot remain open; use a
+bounded decoded listing until they are repaired.
 
-The parameter-export emitter in `ShaderSpirvVector.cpp` also stores its output
-and updates its optional UV probe without an EXEC guard. A parameter export
-reached with inactive lanes can therefore perform side effects. That existing
-path needs an active-lane contract check and correction; no connection to the
-observed interface artifacts has been established.
+The 2026-10-07 side-effect observation named a packed-mip image store and GDS
+append/consume operations that lacked EXEC guards. Those findings are
+superseded by the EXEC-gated implementations and test evidence above. Other
+shader memory operations still require their own proof and admission.
 
-The optional vertex-layout failure logger in `GraphicsRenderPipeline.cpp:449`
-and `:459` iterates the rejected raw buffer/resource counts. Counts above the
-16-entry capacities can make the diagnostic itself read outside those arrays;
-the validator has already rejected them. Bound those logging loops while
-retaining the original counts in the report. The current two-resource,
-two-buffer refusal does not trigger this adjacent diagnostic defect.
+The 2026-10-07 VCC observation described whole-pair uniform promotion after a
+one-word write. That behavior is superseded by the complete-pair rule above;
+unsupported mask forms remain subject to strict refusal.
+
+The 2026-10-07 parameter-export observation described unguarded writes and an
+optional UV probe. The translator126 fixture establishes EXEC behavior only
+for its full-enable-mask case. Parameter component-enable behavior remains an
+open contract question, and no claim is made about partial-mask accumulation.
+
+The 2026-10-07 vertex-layout logger observation described raw-count walks past
+fixed arrays after validation refused the layout. The current working tree
+caps those walks at 16 attributes, buffers and resources while retaining the
+original counts in the report. This change is not in HEAD at the translator126
+checkpoint and still needs independent logger-specific validation.
 
 ### Implicit sampling preserves volume coordinates (2026-10-07)
 
@@ -8035,7 +8562,8 @@ global NaN rewrite. The fused vertex stage reported `dx10_clamp=1` and
 floating `CLAMP` output modifier: ordinary unclamped `V_ADD`/`V_MUL`/`V_FMA`
 still propagate NaN. Kyty now carries the effective VS/GS/PS mode into shader
 identity and emits the mode-correct post-operation clamp (`NaN -> +0` only for
-DX10 clamp, preserve NaN otherwise, and ignore output modifiers in IEEE mode).
+DX10 clamp, preserve NaN otherwise, and ignore output modifiers in IEEE mode). Superseded 2026-10-09 for `CLAMP`:
+IEEE mode ignores `OMOD` only; see the interop integration entry.
 Translator version 34 prevents cache aliasing with earlier modules. Focused
 SPIR-V integration validates the DX10, non-DX10, unclamped, and IEEE variants;
 this is a general ISA correction, not a compatibility claim. The exact shader

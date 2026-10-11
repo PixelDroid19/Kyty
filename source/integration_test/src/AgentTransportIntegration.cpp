@@ -112,6 +112,71 @@ void RunInterrupt(const std::string& endpoint)
 	Transport::Close(&listener);
 }
 
+void SetEnvironment(const char* name, const char* value)
+{
+#if defined(_WIN32)
+	Expect(_putenv_s(name, value) == 0, "test environment variable must be set");
+#else
+	Expect(::setenv(name, value, 1) == 0, "test environment variable must be set");
+#endif
+}
+
+void RestoreEnvironment(const char* name, bool was_set, const std::string& previous_value)
+{
+#if defined(_WIN32)
+	Expect(_putenv_s(name, was_set ? previous_value.c_str() : "") == 0, "test environment variable must be restored");
+#else
+	const int result = was_set ? ::setenv(name, previous_value.c_str(), 1) : ::unsetenv(name);
+	Expect(result == 0, "test environment variable must be restored");
+#endif
+}
+
+void RunAgentServerStopWithIdleClient(const std::string& endpoint)
+{
+	const char* const previous = std::getenv("KYTY_AGENT_ENDPOINT");
+	const bool        was_set  = previous != nullptr;
+	const std::string previous_value = was_set ? previous : "";
+	SetEnvironment("KYTY_AGENT_ENDPOINT", endpoint.c_str());
+	Expect(!Kyty::Emulator::Agent::Active(), "agent server starts inactive");
+	Expect(Kyty::Emulator::Agent::StartFromEnv(), "agent server starts for shutdown integration");
+
+	Transport::Connection client {};
+	for (uint32_t attempt = 0; attempt < 100; ++attempt)
+	{
+		if (Transport::Connect(endpoint.c_str(), &client) == Transport::Result::Ok)
+		{
+			break;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	Expect(client.native != 0, "connect agent server shutdown client");
+	const std::string requests = R"({"id":1,"tool":"ping","args":{}})" "\n{";
+	Expect(Transport::WriteAll(&client, requests.data(), requests.size()) == Transport::Result::Ok,
+	       "send first request and partial next request");
+	std::string response;
+	Expect(Transport::ReadLine(&client, &response, 4096) == Transport::Result::Ok, "read first response before shutdown");
+	Expect(response.find(R"("ok":true)") != std::string::npos, "first request reaches the accepted client handler");
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	std::atomic<bool> stop_finished {false};
+	std::thread stopper([&]() {
+		Kyty::Emulator::Agent::Stop();
+		stop_finished = true;
+	});
+	for (uint32_t attempt = 0; attempt < 200 && !stop_finished.load(); ++attempt)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	if (!stop_finished.load())
+	{
+		Die("agent Stop returns with an idle accepted client");
+	}
+	stopper.join();
+	Expect(!Kyty::Emulator::Agent::Active(), "agent server becomes inactive after Stop");
+	Transport::Close(&client);
+	RestoreEnvironment("KYTY_AGENT_ENDPOINT", was_set, previous_value);
+}
+
 void RunCliWaitReady(const std::string& endpoint)
 {
 	Transport::Listener listener {};
@@ -302,11 +367,8 @@ void RunCliScheduledPresentTap(const std::string& endpoint)
 		const std::string response = Kyty::Emulator::Agent::Internal::DispatchLine(request);
 		const std::string payload  = response + "\n";
 		const bool        wrote    = Transport::WriteAll(&connection, payload.data(), payload.size()) == Transport::Result::Ok;
-		const bool expected_request = request.find("\"tool\":\"pad_tap\"") != std::string::npos &&
-		                              request.find("\"button\":\"cross\"") != std::string::npos &&
-		                              request.find("\"at_present\":8000") != std::string::npos &&
-		                              request.find("\"repeat\":2") != std::string::npos &&
-		                              request.find("\"present_delta\":40") != std::string::npos;
+		const bool expected_request =
+		    request == R"({"id":1,"tool":"pad_tap","args":{"button":"cross","at_present":8000,"repeat":2,"present_delta":40}})";
 		server_ok = expected_request && response.find("\"ok\":true") != std::string::npos && wrote;
 		Transport::Close(&connection);
 	});
@@ -419,6 +481,180 @@ void RunCliScheduledPresentTap(const std::string& endpoint)
 	AgentPadClear();
 }
 
+void RunCliImmediatePadTapPressSamplesOne(const std::string& endpoint)
+{
+	using Kyty::Libs::Controller::AgentPadClear;
+
+	AgentPadClear();
+	Transport::Listener listener {};
+	Expect(Transport::Listen(&listener, endpoint.c_str()) == Transport::Result::Ok, "listen immediate one-sample tap");
+
+	std::atomic<bool> server_ok {false};
+	std::thread server([&]() {
+		Transport::Connection connection {};
+		if (Transport::Accept(&listener, &connection) != Transport::Result::Ok)
+		{
+			return;
+		}
+		std::string request;
+		if (Transport::ReadLine(&connection, &request, 4096) != Transport::Result::Ok)
+		{
+			Transport::Close(&connection);
+			return;
+		}
+		const std::string response = Kyty::Emulator::Agent::Internal::DispatchLine(request);
+		const std::string payload  = response + "\n";
+		const bool        wrote    = Transport::WriteAll(&connection, payload.data(), payload.size()) == Transport::Result::Ok;
+		server_ok = request == R"({"id":1,"tool":"pad_tap","args":{"button":"cross","press_samples":1}})" &&
+		            response.find("\"ok\":true") != std::string::npos && wrote;
+		Transport::Close(&connection);
+	});
+
+	char arg0[] = "kyty_agent";
+	char arg1[] = "--endpoint";
+	char arg3[] = "pad";
+	char arg4[] = "tap";
+	char arg5[] = "cross";
+	char arg6[] = "--press-samples";
+	char arg7[] = "1";
+	char* argv[] = {arg0, arg1, const_cast<char*>(endpoint.c_str()), arg3, arg4, arg5, arg6, arg7};
+	const int rc = Kyty::AgentCli::Main(8, argv);
+	if (rc != 0)
+	{
+		Transport::Interrupt(&listener);
+	}
+	server.join();
+	Expect(rc == 0, "cli immediate one-sample tap exits successfully");
+	Expect(server_ok.load(), "cli sends exact immediate press_samples request and receives success");
+	Transport::Close(&listener);
+	AgentPadClear();
+}
+
+void RunCliScheduledPadTapPressSamplesOne(const std::string& endpoint)
+{
+	using Kyty::Libs::Controller::AgentPadApplyReadStateSample;
+	using Kyty::Libs::Controller::AgentPadClear;
+	using Kyty::Libs::Controller::AgentPadGetReadStats;
+	using Kyty::Libs::Controller::AgentPadOnPresent;
+	using Kyty::Libs::Controller::AgentPadReadStats;
+	using Kyty::Libs::Controller::PAD_BUTTON_CROSS;
+
+	AgentPadClear();
+	AgentPadReadStats stats_before {};
+	AgentPadGetReadStats(&stats_before);
+	Transport::Listener listener {};
+	Expect(Transport::Listen(&listener, endpoint.c_str()) == Transport::Result::Ok, "listen scheduled one-sample tap");
+
+	std::atomic<bool> server_ok {false};
+	std::thread server([&]() {
+		Transport::Connection connection {};
+		if (Transport::Accept(&listener, &connection) != Transport::Result::Ok)
+		{
+			return;
+		}
+		std::string request;
+		if (Transport::ReadLine(&connection, &request, 4096) != Transport::Result::Ok)
+		{
+			Transport::Close(&connection);
+			return;
+		}
+		const std::string response = Kyty::Emulator::Agent::Internal::DispatchLine(request);
+		const std::string payload  = response + "\n";
+		const bool        wrote    = Transport::WriteAll(&connection, payload.data(), payload.size()) == Transport::Result::Ok;
+		server_ok = request ==
+		                R"({"id":1,"tool":"pad_tap","args":{"button":"cross","at_present":8200,"repeat":1,"present_delta":0,"press_samples":1}})" &&
+		            response.find("\"ok\":true") != std::string::npos && wrote;
+		Transport::Close(&connection);
+	});
+
+	char arg0[] = "kyty_agent";
+	char arg1[] = "--endpoint";
+	char arg3[] = "pad";
+	char arg4[] = "tap";
+	char arg5[] = "cross";
+	char arg6[] = "--at-present";
+	char arg7[] = "8200";
+	char arg8[] = "--press-samples";
+	char arg9[] = "1";
+	char* argv[] = {arg0, arg1, const_cast<char*>(endpoint.c_str()), arg3, arg4, arg5, arg6, arg7, arg8, arg9};
+	const int rc = Kyty::AgentCli::Main(10, argv);
+	if (rc != 0)
+	{
+		Transport::Interrupt(&listener);
+	}
+	server.join();
+	Expect(rc == 0, "cli scheduled one-sample tap exits successfully");
+	Expect(server_ok.load(), "cli sends exact scheduled press_samples request and receives success");
+	Transport::Close(&listener);
+
+	const std::string scheduled = Kyty::Emulator::Agent::Internal::DispatchLine(R"({"id":1,"tool":"status","args":{}})");
+	Expect(scheduled.find("\"scheduled_taps\":1") != std::string::npos &&
+	           scheduled.find("\"next_target_present\":8200") != std::string::npos,
+	       "status retains the scheduled one-sample tap target");
+	Expect(AgentPadOnPresent(8200).started == 1, "one-sample tap starts on its scheduled present");
+
+	uint32_t sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	Expect((sample & PAD_BUTTON_CROSS) == 0, "scheduled one-sample tap begins released");
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	Expect((sample & PAD_BUTTON_CROSS) == PAD_BUTTON_CROSS, "scheduled one-sample press reaches the guest");
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	Expect((sample & PAD_BUTTON_CROSS) == 0, "scheduled one-sample tap ends released on the next advancing sample");
+
+	AgentPadReadStats stats_after {};
+	AgentPadGetReadStats(&stats_after);
+	Expect(stats_after.delivered_taps == stats_before.delivered_taps + 1 && !stats_after.tap_pending,
+	       "scheduled one-sample tap delivers once and completes");
+	AgentPadClear();
+}
+
+void RunCliPressSamplesRejectsBeforeConnect(const std::string& endpoint, const char* value)
+{
+	Transport::Listener listener {};
+	Expect(Transport::Listen(&listener, endpoint.c_str()) == Transport::Result::Ok, "listen invalid press-samples request");
+
+	std::atomic<bool> accept_entered {false};
+	std::atomic<bool> connected {false};
+	std::thread server([&]() {
+		Transport::Connection connection {};
+		accept_entered = true;
+		if (Transport::Accept(&listener, &connection) != Transport::Result::Ok)
+		{
+			return;
+		}
+		connected = true;
+		std::string request;
+		if (Transport::ReadLine(&connection, &request, 4096) == Transport::Result::Ok)
+		{
+			const std::string response = "{\"id\":1,\"ok\":true,\"protocol_version\":" +
+			                             std::to_string(Kyty::Agent::kProtocolVersion) + ",\"result\":{}}\n";
+			(void)Transport::WriteAll(&connection, response.data(), response.size());
+		}
+		Transport::Close(&connection);
+	});
+	while (!accept_entered.load())
+	{
+		std::this_thread::yield();
+	}
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+	char  arg0[] = "kyty_agent";
+	char  arg1[] = "--endpoint";
+	char  arg3[] = "pad";
+	char  arg4[] = "tap";
+	char  arg5[] = "cross";
+	char  arg6[] = "--press-samples";
+	char* argv[] = {arg0, arg1, const_cast<char*>(endpoint.c_str()), arg3, arg4, arg5, arg6, const_cast<char*>(value)};
+	const int rc = Kyty::AgentCli::Main(8, argv);
+	Transport::Interrupt(&listener);
+	server.join();
+	Expect(rc == 125, "cli rejects invalid press-samples value");
+	Expect(!connected.load(), "invalid press-samples value is rejected before connecting");
+	Transport::Close(&listener);
+}
+
 void RunRawNulLine(const std::string& endpoint)
 {
 	Transport::Listener listener {};
@@ -471,6 +707,53 @@ void RunRawNulLine(const std::string& endpoint)
 	Transport::Close(&listener);
 }
 
+void ExpectRawLineResult(const std::string& endpoint, const std::string& payload, size_t max_size,
+	                     Transport::Result expected_result, const std::string& expected_line, const char* message)
+{
+	Transport::Listener listener {};
+	Expect(Transport::Listen(&listener, endpoint.c_str()) == Transport::Result::Ok, "listen raw line limit");
+
+	std::atomic<Transport::Result> result {Transport::Result::IoError};
+	std::string                     line_result;
+	std::thread server([&]() {
+		Transport::Connection connection {};
+		if (Transport::Accept(&listener, &connection) != Transport::Result::Ok)
+		{
+			return;
+		}
+		std::string line;
+		result      = Transport::ReadLine(&connection, &line, max_size);
+		line_result = line;
+		Transport::Close(&connection);
+	});
+
+	Transport::Connection client {};
+	for (uint32_t attempt = 0; attempt < 100; ++attempt)
+	{
+		if (Transport::Connect(endpoint.c_str(), &client) == Transport::Result::Ok)
+		{
+			break;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	Expect(client.native != 0, "connect raw line limit");
+	Expect(Transport::WriteAll(&client, payload.data(), payload.size()) == Transport::Result::Ok, "write CR line test case");
+	server.join();
+	Expect(result.load() == expected_result, message);
+	Expect(line_result == expected_line, "CR stripping preserves the line payload");
+	Transport::Close(&client);
+	Transport::Close(&listener);
+}
+
+void RunRawLineLimit(const std::string& endpoint)
+{
+	constexpr size_t kLimit = 8;
+	ExpectRawLineResult(endpoint + "-boundary", "x" + std::string(kLimit - 2, '\r') + "\n", kLimit,
+	                    Transport::Result::Ok, "x", "line at the raw byte budget is accepted");
+	ExpectRawLineResult(endpoint + "-over-budget", "x" + std::string(kLimit - 1, '\r') + "\n", kLimit,
+	                    Transport::Result::MessageTooLarge, "x", "discarded CR bytes count toward the raw line budget");
+}
+
 } // namespace
 
 int main()
@@ -479,11 +762,17 @@ int main()
 	Expect(!Transport::IsValidEndpoint("relative-endpoint"), "relative endpoint rejected");
 	RunRoundTrip(UniqueEndpoint("roundtrip"));
 	RunInterrupt(UniqueEndpoint("interrupt"));
+	RunAgentServerStopWithIdleClient(UniqueEndpoint("shutdown-idle-client"));
 	RunCliWaitReady(UniqueEndpoint("wait-ready"));
 	RunCliDebugSnapshotWorkflow(UniqueEndpoint("debug-snapshot"));
 	RunCliTraceRtLifetimeArm(UniqueEndpoint("lifetime-arm"));
+	RunCliImmediatePadTapPressSamplesOne(UniqueEndpoint("immediate-tap-one-sample"));
 	RunCliScheduledPresentTap(UniqueEndpoint("scheduled-present-tap"));
+	RunCliScheduledPadTapPressSamplesOne(UniqueEndpoint("scheduled-tap-one-sample"));
+	RunCliPressSamplesRejectsBeforeConnect(UniqueEndpoint("tap-press-samples-zero"), "0");
+	RunCliPressSamplesRejectsBeforeConnect(UniqueEndpoint("tap-press-samples-three"), "3");
 	RunRawNulLine(UniqueEndpoint("raw-nul"));
+	RunRawLineLimit(UniqueEndpoint("raw-line-limit"));
 	std::puts("agent transport integration passed");
 	return 0;
 }

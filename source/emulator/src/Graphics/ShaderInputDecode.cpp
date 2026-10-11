@@ -116,7 +116,12 @@ void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5)
 				{
 					if (b.num_records != r.NumRecords()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: b.num_records != r.NumRecords() condition ignored (continuing)\n"); }
 					b.addr = base;
-					if (b.attr_num >= ShaderVertexInputBuffer::ATTR_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: b.attr_num >= ShaderVertexInputBuffer::ATTR_MAX condition ignored (continuing)\n"); }
+					// The fixed attribute table is a decoder limit; refusing keeps the count honest.
+					if (b.attr_num >= ShaderVertexInputBuffer::ATTR_MAX)
+					{
+						EXIT("unsupported vertex input layout: buffer %d merges more than %d attributes\n", bi,
+						     ShaderVertexInputBuffer::ATTR_MAX);
+					}
 					b.attr_indices[b.attr_num++] = ri;
 					merged                       = true;
 					break;
@@ -126,7 +131,10 @@ void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5)
 
 		if (!merged)
 		{
-			if (info->buffers_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->buffers_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
+			if (info->buffers_num >= ShaderVertexInputInfo::RES_MAX)
+			{
+				EXIT("unsupported vertex input layout: more than %d vertex buffers\n", ShaderVertexInputInfo::RES_MAX);
+			}
 			int bi                            = info->buffers_num++;
 			info->buffers[bi].addr            = (ps5 ? r.Base48() : r.Base44());
 			info->buffers[bi].stride          = r.Stride();
@@ -219,7 +227,10 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 			if (inst.src[1].type != ShaderOperandType::Sgpr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[1].type != ShaderOperandType::Sgpr condition ignored (continuing)\n"); }
 			if (inst.src[2].type != ShaderOperandType::IntegerInlineConstant || inst.src[2].constant.i != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[2].type != ShaderOperandType::IntegerInlineConstant || inst.src[2].constant.i != 0 condition ignored (continuing)\n"); }
 
-			if (info->resources_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->resources_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
+			if (info->resources_num >= ShaderVertexInputInfo::RES_MAX)
+			{
+				EXIT("unsupported vertex input layout: more than %d vertex resources\n", ShaderVertexInputInfo::RES_MAX);
+			}
 
 			int t = inst.src[1].register_id;
 			EXIT_IF(t < 0 || t + 3 >= kSgprs);
@@ -262,7 +273,11 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 			max_semantic = input_semantics[i].semantic + 1u;
 		}
 	}
-	if (max_semantic > static_cast<uint32_t>(ShaderVertexInputInfo::RES_MAX)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: max_semantic > static_cast<uint32_t>(ShaderVertexInputInfo::RES_MAX) condition ignored (continuing)\n"); }
+	if (max_semantic > static_cast<uint32_t>(ShaderVertexInputInfo::RES_MAX))
+	{
+		EXIT("unsupported vertex input layout: semantic %u exceeds the %d-entry fetch table\n", max_semantic - 1u,
+		     ShaderVertexInputInfo::RES_MAX);
+	}
 	for (uint32_t i = 0; i < max_semantic; i++)
 	{
 		info->fetch_attrib_data[i] = attrib[i];
@@ -308,7 +323,10 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 			}
 		}
 
-		if (info->resources_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->resources_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
+		if (info->resources_num >= ShaderVertexInputInfo::RES_MAX)
+		{
+			EXIT("unsupported vertex input layout: more than %d fetched attributes\n", ShaderVertexInputInfo::RES_MAX);
+		}
 
 		auto& r           = info->resources[info->resources_num];
 		auto& rd          = info->resources_dst[info->resources_num];

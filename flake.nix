@@ -20,13 +20,21 @@
             pkg-config
             gcc
             python3
-            gdb
-            SDL2
+            git
             vulkan-loader
             vulkan-headers
             spirv-tools
-            glslang
+            shaderc
             ffmpeg
+            alsa-lib
+            libpulseaudio
+            xorg.libX11
+            xorg.libXext
+            xorg.libXrandr
+            xorg.libXcursor
+            xorg.libXi
+            xorg.libXfixes
+            xorg.libXScrnSaver
           ];
         };
 

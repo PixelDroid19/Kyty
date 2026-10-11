@@ -26,6 +26,17 @@
 #include <thread>
 #include <vector>
 
+#if defined(__linux__) && defined(__GLIBC__) && defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+struct DwarfEhBasesForTest
+{
+	void* text_base;
+	void* data_base;
+	void* function;
+};
+
+extern "C" void* _Unwind_Find_FDE(const void* address, DwarfEhBasesForTest* bases);
+#endif
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 #include <fcntl.h>
 #include <sys/resource.h>
@@ -42,6 +53,26 @@ public:
 	static Program* AttachSyntheticExportModule(RuntimeLinker* rt, const Core::String& file_name)
 	{
 		return rt->AttachSyntheticExportModule(file_name);
+	}
+
+	static void RegisterProgramEhFrame(Program* program)
+	{
+		RuntimeLinker::RegisterProgramEhFrame(program);
+	}
+
+	static bool ValidateSymbolTableMetadata(const DynamicInfo& info)
+	{
+		return RuntimeLinker::ValidateSymbolTableMetadata(info);
+	}
+
+	static bool ValidateDynamicStringReferences(const Elf64* elf, const DynamicInfo& info)
+	{
+		return RuntimeLinker::ValidateDynamicStringReferences(elf, info);
+	}
+
+	static bool IsSymbolTableIndexValid(const DynamicInfo& info, uint32_t index)
+	{
+		return RuntimeLinker::IsSymbolTableIndexValid(info, index);
 	}
 
 	static uint8_t* GetDynamicTls(RuntimeLinker* rt, Program* program)
@@ -176,6 +207,144 @@ std::vector<uint8_t> MakeDynamicBytes(const std::vector<Elf64_Dyn>& entries)
 		AppendPod(&out, entry);
 	}
 	return out;
+}
+
+std::vector<uint8_t> MakeElfWithDynamicSymbolInfo(uint64_t symbol_table_address, uint64_t symbol_table_size,
+                                                  uint64_t string_table_address, uint64_t string_table_size,
+                                                  uint64_t symbol_entry_size)
+{
+	constexpr uint64_t kLoadAddress = 0x1000;
+	constexpr uint64_t kSymbolOffset = 0x20;
+	constexpr uint64_t kStringOffset = 0x40;
+
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_flags = PF_R;
+	load.header.p_vaddr = kLoadAddress;
+	load.header.p_memsz = 0x100;
+	load.bytes.resize(0x100);
+
+	Elf64_Sym symbol {};
+	symbol.st_name = 1;
+	std::memcpy(load.bytes.data() + kSymbolOffset, &symbol, sizeof(symbol));
+	const char strings[] = "\0name\0";
+	std::memcpy(load.bytes.data() + kStringOffset, strings, sizeof(strings));
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_SYMTAB, kLoadAddress + kSymbolOffset),
+	                                 MakeDyn(DT_OS_SYMTABSZ, symbol_table_size),
+	                                 MakeDyn(DT_SYMENT, symbol_entry_size),
+	                                 MakeDyn(DT_STRTAB, kLoadAddress + kStringOffset),
+	                                 MakeDyn(DT_STRSZ, string_table_size),
+	                                 MakeDyn(DT_NULL, 0)});
+
+	// Patch the addresses after building the standard layout so each case can
+	// independently place a table at, or beyond, the PT_LOAD boundary.
+	if (symbol_table_address != 0)
+	{
+		Elf64_Dyn value = MakeDyn(DT_SYMTAB, symbol_table_address);
+		std::memcpy(dynamic.bytes.data(), &value, sizeof(value));
+	}
+	if (string_table_address != 0)
+	{
+		Elf64_Dyn value = MakeDyn(DT_STRTAB, string_table_address);
+		std::memcpy(dynamic.bytes.data() + 3 * sizeof(Elf64_Dyn), &value, sizeof(value));
+	}
+
+	return MakeRawElf({load, dynamic});
+}
+
+std::vector<uint8_t> MakeElfWithHashDerivedSymbolInfo(uint32_t symbol_count, uint64_t reported_hash_size = 0)
+{
+	constexpr uint64_t kLoadAddress = 0x1000;
+	constexpr uint64_t kSymbolOffset = 0x20;
+	constexpr uint64_t kStringOffset = 0x40;
+	constexpr uint64_t kHashOffset = 0x80;
+
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_flags = PF_R;
+	load.header.p_vaddr = kLoadAddress;
+	load.header.p_memsz = 0x100;
+	load.bytes.resize(0x100);
+
+	Elf64_Sym symbol {};
+	std::memcpy(load.bytes.data() + kSymbolOffset, &symbol, sizeof(symbol));
+	const char strings[] = "\0name\0";
+	std::memcpy(load.bytes.data() + kStringOffset, strings, sizeof(strings));
+
+	std::vector<uint32_t> hash(2 + 1 + symbol_count);
+	hash[0] = 1;
+	hash[1] = symbol_count;
+	std::memcpy(load.bytes.data() + kHashOffset, hash.data(), hash.size() * sizeof(uint32_t));
+	if (reported_hash_size == 0) { reported_hash_size = hash.size() * sizeof(uint32_t); }
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_HASH, kLoadAddress + kHashOffset),
+	                                 MakeDyn(DT_OS_HASHSZ, reported_hash_size),
+	                                 MakeDyn(DT_SYMTAB, kLoadAddress + kSymbolOffset),
+	                                 MakeDyn(DT_SYMENT, sizeof(Elf64_Sym)),
+	                                 MakeDyn(DT_STRTAB, kLoadAddress + kStringOffset),
+	                                 MakeDyn(DT_STRSZ, sizeof(strings)),
+	                                 MakeDyn(DT_NULL, 0)});
+
+	return MakeRawElf({load, dynamic});
+}
+
+std::vector<uint8_t> MakeSyntheticUnwindElf()
+{
+	constexpr uint64_t kImageSize = 0x1000;
+	constexpr uint64_t kHeaderOffset = 0x20;
+	constexpr uint64_t kFrameOffset = 0x80;
+	constexpr uint64_t kCodeOffset = 0x200;
+	constexpr uint64_t kFdePcRelativeFieldOffset = 0x19;
+
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_flags = PF_R | PF_X;
+	load.header.p_vaddr = 0;
+	load.header.p_memsz = kImageSize;
+	load.bytes.resize(kImageSize);
+
+	const uint8_t eh_frame_header[8] = {1, 0x1b, 0x03, 0x3b, 0, 0, 0, 0};
+	std::memcpy(load.bytes.data() + kHeaderOffset, eh_frame_header, sizeof(eh_frame_header));
+	const int32_t frame_delta = static_cast<int32_t>(kFrameOffset - (kHeaderOffset + 4));
+	std::memcpy(load.bytes.data() + kHeaderOffset + 4, &frame_delta, sizeof(frame_delta));
+
+	const uint32_t cie_length = 13;
+	const uint32_t cie_id = 0;
+	std::memcpy(load.bytes.data() + kFrameOffset, &cie_length, sizeof(cie_length));
+	std::memcpy(load.bytes.data() + kFrameOffset + 4, &cie_id, sizeof(cie_id));
+	load.bytes[kFrameOffset + 8] = 1;
+	std::memcpy(load.bytes.data() + kFrameOffset + 9, "zR", 3);
+	load.bytes[kFrameOffset + 12] = 1;
+	load.bytes[kFrameOffset + 13] = 0x78;
+	load.bytes[kFrameOffset + 14] = 16;
+	load.bytes[kFrameOffset + 15] = 1;
+	load.bytes[kFrameOffset + 16] = 0x1b;
+
+	const uint64_t fde_offset = kFrameOffset + 17;
+	const uint32_t fde_length = 13;
+	const uint32_t cie_pointer = static_cast<uint32_t>(fde_offset + 4 - kFrameOffset);
+	const int32_t code_delta = static_cast<int32_t>(kCodeOffset - (kFrameOffset + kFdePcRelativeFieldOffset));
+	const uint32_t code_size = 0x20;
+	const uint32_t end_marker = 0;
+	std::memcpy(load.bytes.data() + fde_offset, &fde_length, sizeof(fde_length));
+	std::memcpy(load.bytes.data() + fde_offset + 4, &cie_pointer, sizeof(cie_pointer));
+	std::memcpy(load.bytes.data() + fde_offset + 8, &code_delta, sizeof(code_delta));
+	std::memcpy(load.bytes.data() + fde_offset + 12, &code_size, sizeof(code_size));
+	load.bytes[fde_offset + 16] = 0;
+	std::memcpy(load.bytes.data() + fde_offset + 17, &end_marker, sizeof(end_marker));
+
+	ElfSegmentFixture eh_frame_header_segment {};
+	eh_frame_header_segment.header.p_type = PT_GNU_EH_FRAME;
+	eh_frame_header_segment.header.p_vaddr = kHeaderOffset;
+	eh_frame_header_segment.header.p_memsz = sizeof(eh_frame_header);
+	eh_frame_header_segment.bytes.assign(eh_frame_header, eh_frame_header + sizeof(eh_frame_header));
+
+	return MakeRawElf({load, eh_frame_header_segment});
 }
 
 std::vector<uint8_t> MakeSelfWrappedElf(Elf64_Half type, uint8_t abi_version = 2, bool alternate_signature = false,
@@ -738,6 +907,107 @@ TEST(EmulatorModuleLoad, ElfRejectsPartialDynamicEntry)
 	Elf64 elf;
 	elf.Open(path);
 	EXPECT_FALSE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfBoundsDynamicSymbolAndStringTables)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_symbol_table_bounds_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	auto is_valid = [&temp](const String& name, const std::vector<uint8_t>& image)
+	{
+		const auto path = temp.root + name;
+		if (!WriteBinary(path, image)) { return false; }
+		Elf64 elf;
+		elf.Open(path);
+		return elf.IsValid();
+	};
+
+	constexpr uint64_t kSymbolAddress = 0x1020;
+	constexpr uint64_t kStringAddress = 0x1040;
+	EXPECT_TRUE(is_valid(U"valid.bin", MakeElfWithDynamicSymbolInfo(0, sizeof(Elf64_Sym), 0, 6, sizeof(Elf64_Sym))));
+	EXPECT_FALSE(is_valid(U"partial-symbol.bin",
+	                      MakeElfWithDynamicSymbolInfo(0, sizeof(Elf64_Sym) + 1, 0, 6, sizeof(Elf64_Sym))));
+	EXPECT_FALSE(is_valid(U"outside-symbol.bin",
+	                      MakeElfWithDynamicSymbolInfo(0x10f8, sizeof(Elf64_Sym), 0, 6, sizeof(Elf64_Sym))));
+	EXPECT_FALSE(is_valid(U"outside-strings.bin",
+	                      MakeElfWithDynamicSymbolInfo(0, sizeof(Elf64_Sym), 0x10fc, 6, sizeof(Elf64_Sym))));
+	EXPECT_FALSE(is_valid(U"wrong-stride.bin",
+	                      MakeElfWithDynamicSymbolInfo(kSymbolAddress, sizeof(Elf64_Sym), kStringAddress, 6,
+	                                                   sizeof(Elf64_Sym) - 1)));
+}
+
+TEST(EmulatorModuleLoad, ElfBoundsHashDerivedSymbolTable)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_hash_derived_symbol_bounds_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	auto is_valid = [&temp](const String& name, const std::vector<uint8_t>& image)
+	{
+		const auto path = temp.root + name;
+		if (!WriteBinary(path, image)) { return false; }
+		Elf64 elf;
+		elf.Open(path);
+		return elf.IsValid();
+	};
+
+	EXPECT_TRUE(is_valid(U"valid.bin", MakeElfWithHashDerivedSymbolInfo(1)));
+	EXPECT_FALSE(is_valid(U"outside-symbol-table.bin", MakeElfWithHashDerivedSymbolInfo(20)));
+	EXPECT_FALSE(is_valid(U"outside-hash-size.bin", MakeElfWithHashDerivedSymbolInfo(1, 0x81)));
+}
+
+TEST(EmulatorModuleLoad, RuntimeLinkerBoundsSymbolNamesAndRelocationIndices)
+{
+	Elf64_Sym symbols[2] {};
+	symbols[1].st_name = 1;
+	char strings[] = {'\0', 'n', 'a', 'm', 'e', '\0'};
+	DynamicInfo info {};
+	info.str_table = strings;
+	info.str_table_size = sizeof(strings);
+	info.symbol_table = symbols;
+	info.symbol_table_total_size = sizeof(symbols);
+	info.symbol_table_entry_size = sizeof(Elf64_Sym);
+
+	EXPECT_TRUE(RuntimeLinkerIntegrationAccess::ValidateSymbolTableMetadata(info));
+	EXPECT_TRUE(RuntimeLinkerIntegrationAccess::IsSymbolTableIndexValid(info, 0));
+	EXPECT_TRUE(RuntimeLinkerIntegrationAccess::IsSymbolTableIndexValid(info, 1));
+	EXPECT_FALSE(RuntimeLinkerIntegrationAccess::IsSymbolTableIndexValid(info, 2));
+
+	symbols[1].st_name = sizeof(strings);
+	EXPECT_FALSE(RuntimeLinkerIntegrationAccess::ValidateSymbolTableMetadata(info));
+	symbols[1].st_name = 1;
+	strings[sizeof(strings) - 1] = 'x';
+	EXPECT_FALSE(RuntimeLinkerIntegrationAccess::ValidateSymbolTableMetadata(info));
+}
+
+TEST(EmulatorModuleLoad, RuntimeLinkerRejectsDynamicStringOffsetsOutsideStringTable)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_loader_dynamic_string_bounds_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_flags = PF_R;
+	load.header.p_vaddr = 0x1000;
+	load.header.p_memsz = 0x100;
+	load.bytes.resize(0x100);
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_STRTAB, 0x1040), MakeDyn(DT_STRSZ, 6), MakeDyn(DT_NEEDED, 6), MakeDyn(DT_NULL, 0)});
+
+	const auto path = temp.root + U"invalid-needed-offset.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeRawElf({load, dynamic})));
+
+	Elf64 elf;
+	elf.Open(path);
+	ASSERT_TRUE(elf.IsValid());
+
+	char strings[] = {'\0', 'n', 'a', 'm', 'e', '\0'};
+	DynamicInfo info {};
+	info.str_table = strings;
+	info.str_table_size = sizeof(strings);
+	EXPECT_FALSE(RuntimeLinkerIntegrationAccess::ValidateDynamicStringReferences(&elf, info));
 }
 
 TEST(EmulatorModuleLoad, ElfRejectsDynamicSegmentPastFileEnd)
@@ -2062,6 +2332,25 @@ TEST(EmulatorModuleLoad, LibkernelRegistersDlsym)
 	EXPECT_EQ(address, preserved);
 }
 
+TEST(EmulatorModuleLoad, KernelStopUnloadRejectsUnknownModuleHandle)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+
+	const auto* record = symbols.Find(LibkernelFunc(u"QKd0qM58Qes"));
+	ASSERT_NE(record, nullptr);
+	ASSERT_NE(record->vaddr, 0u);
+
+	using StopUnloadModule = int(KYTY_SYSV_ABI*)(int32_t, size_t, const void*, uint32_t, const void*, int*);
+	constexpr int kResultSentinel = 0x13572468;
+	int           result         = kResultSentinel;
+	const int     status         = reinterpret_cast<StopUnloadModule>(record->vaddr)(
+	    std::numeric_limits<int32_t>::max(), 0, nullptr, 0, nullptr, &result);
+
+	EXPECT_EQ(status, Kyty::Libs::LibKernel::KERNEL_ERROR_ESRCH);
+	EXPECT_EQ(result, kResultSentinel);
+}
+
 TEST(EmulatorModuleLoad, Ps5UtilRegistersThreadContextRequest)
 {
 	SymbolDatabase symbols;
@@ -2102,6 +2391,40 @@ TEST(EmulatorModuleLoad, MainModuleHandleResolvesToPrimaryExecutable)
 	EXPECT_EQ(rt.FindProgramById(0), main);
 	EXPECT_EQ(rt.FindProgramById(main->unique_id), main);
 }
+
+#if defined(__linux__) && defined(__GLIBC__) && defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+TEST(EmulatorModuleLoad, UnloadDeregistersSyntheticEhFrameBeforeFreeingImage)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_loader_eh_frame_lifetime_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	const String path = temp.root + U"synthetic.elf";
+	ASSERT_TRUE(WriteBinary(path, MakeSyntheticUnwindElf()));
+
+	RuntimeLinker runtime;
+	Program* program = RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&runtime, path);
+	ASSERT_NE(program, nullptr);
+	program->elf = new Elf64;
+	program->elf->Open(path);
+	ASSERT_TRUE(program->elf->IsValid());
+
+	const auto* phdr = program->elf->GetPhdr();
+	ASSERT_NE(phdr, nullptr);
+	const uint64_t image_size = 0x1000;
+	program->base_vaddr = Kyty::Core::VirtualMemory::Alloc(0, image_size, Kyty::Core::VirtualMemory::Mode::ExecuteReadWrite);
+	ASSERT_NE(program->base_vaddr, 0u);
+	program->base_size = image_size;
+	ASSERT_TRUE(program->elf->LoadSegment(program->base_vaddr, phdr[0].p_offset, phdr[0].p_filesz));
+
+	RuntimeLinkerIntegrationAccess::RegisterProgramEhFrame(program);
+	ASSERT_TRUE(program->eh_frame_registered);
+	const auto code_address = reinterpret_cast<const void*>(program->base_vaddr + 0x201);
+	DwarfEhBasesForTest unwind_bases {};
+	ASSERT_NE(_Unwind_Find_FDE(code_address, &unwind_bases), nullptr);
+
+	runtime.UnloadProgram(program);
+	EXPECT_EQ(_Unwind_Find_FDE(code_address, &unwind_bases), nullptr);
+}
+#endif
 
 TEST(EmulatorModuleLoad, NetRegistersEpollCreate)
 {

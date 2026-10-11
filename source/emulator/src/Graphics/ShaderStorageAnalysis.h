@@ -50,11 +50,12 @@ bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, co
 void ShaderAccumulateScalarBufferLoadSpan(const ShaderInstruction& inst, uint64_t* required_bytes, bool* dynamic_offset);
 void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                          ShaderParsedUsage* info, const uint32_t* extended_buffer, uint16_t eud_size_dw,
-                                         int user_data_register_base);
+                                         int user_data_register_base, const ShaderScalarFlow& scalar_flow);
 void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
-                                             int user_sgpr_num, int user_data_register_base);
+                                             int user_sgpr_num, int user_data_register_base, const ShaderScalarFlow& scalar_flow);
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
-                                        ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base);
+                                        ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base,
+                                        const ShaderScalarFlow& scalar_flow);
 // Source of guest descriptor-table words for ShaderSnapshotGuestDescriptorTable.
 // Without an active scope the production read is Core::VirtualMemory::CopyFromGuest.
 class ShaderGuestDescriptorReader

@@ -34,7 +34,8 @@ namespace {
 uint32_t g_stdio_prepare_count = 0;
 bool     g_stdio_made_writable = false;
 
-void IgnoreLinearFrame(uint64_t /*base*/, size_t /*size*/, uint32_t /*row_pitch_bytes*/) {}
+bool IgnoreLinearFrame(uint64_t /*base*/, size_t /*size*/, uint32_t /*row_pitch_bytes*/,
+	                   const Kyty::Core::VirtualMemory::GuestMappingIdentitySnapshot&) { return true; }
 
 void IgnoreUnregisterFrame(uint64_t /*base*/) {}
 

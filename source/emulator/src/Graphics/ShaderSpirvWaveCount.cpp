@@ -119,30 +119,38 @@ bool Spirv::EmitComputeWaveAppend(const ShaderInstruction& instruction, uint32_t
 	{
 		return false;
 	}
-	const char* atomic = instruction.type == ShaderInstructionType::DsAppend ? "OpAtomicIAdd" : "OpAtomicISub";
-	const auto  zero   = GetConstantUint(0u);
-	const auto  one    = GetConstantUint(1u);
-	const auto  scope  = GetConstantUint(3u);
-	const auto  p      = String8::FromPrintf("wave_append_%u", index);
+	const char* atomic         = instruction.type == ShaderInstructionType::DsAppend ? "OpAtomicIAdd" : "OpAtomicISub";
+	const auto  zero           = GetConstantUint(0u);
+	const auto  device_scope   = GetConstantUint(1u);
+	const auto  subgroup_scope = GetConstantUint(3u);
+	const auto  p              = String8::FromPrintf("wave_append_%u", index);
 
-	// Only the elected invocation contributes the count, so the other
-	// invocations' atomics add zero and cannot change the counter.
-	String8 source = String8::FromPrintf(
-	    "%%%s_lo = OpLoad %%uint %%exec_lo\n"
-	    "%%%s_hi = OpLoad %%uint %%exec_hi\n"
-	    "%%%s_clo = OpBitCount %%uint %%%s_lo\n"
-	    "%%%s_chi = OpBitCount %%uint %%%s_hi\n"
-	    "%%%s_count = OpIAdd %%uint %%%s_clo %%%s_chi\n"
-	    "%%%s_elect = OpGroupNonUniformElect %%bool %%%s\n"
-	    "%%%s_value = OpSelect %%uint %%%s_elect %%%s_count %%%s\n",
-	    p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), scope.c_str(),
-	    p.c_str(), p.c_str(), p.c_str(), zero.c_str());
+	// Count the paired EXEC mask once, but skip the GDS access entirely for empty EXEC.
+	String8 source;
+	source += String8::FromPrintf("%%%s_lo = OpLoad %%uint %%exec_lo\n", p.c_str());
+	source += String8::FromPrintf("%%%s_hi = OpLoad %%uint %%exec_hi\n", p.c_str());
+	source += String8::FromPrintf("%%%s_clo = OpBitCount %%uint %%%s_lo\n", p.c_str(), p.c_str());
+	source += String8::FromPrintf("%%%s_chi = OpBitCount %%uint %%%s_hi\n", p.c_str(), p.c_str());
+	source += String8::FromPrintf("%%%s_count = OpIAdd %%uint %%%s_clo %%%s_chi\n", p.c_str(), p.c_str(), p.c_str());
+	source += String8::FromPrintf("%%%s_elect = OpGroupNonUniformElect %%bool %%%s\n", p.c_str(), subgroup_scope.c_str());
+	source += String8::FromPrintf("%%%s_has_active = OpINotEqual %%bool %%%s_count %%%s\n", p.c_str(), p.c_str(), zero.c_str());
+	source += String8::FromPrintf("%%%s_do_atomic = OpLogicalAnd %%bool %%%s_elect %%%s_has_active\n", p.c_str(), p.c_str(), p.c_str());
+	source += String8::FromPrintf("               OpSelectionMerge %%%s_atomic_merge None\n"
+	                              "               OpBranchConditional %%%s_do_atomic %%%s_atomic_do %%%s_atomic_skip\n"
+	                              "%%%s_atomic_do = OpLabel\n",
+	                              p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str());
 	source += EmitGdsCounterPointer(instruction.ds_offset, p);
-	source += String8::FromPrintf(
-	    "%%%s_old = %s %%uint %%%s_ptr %%%s %%%s %%%s_value\n"
-	    "%%%s_first = OpGroupNonUniformBroadcastFirst %%uint %%%s %%%s_old\n"
-	    "               OpMemoryBarrier %%%s %%uint_72\n",
-	    p.c_str(), atomic, p.c_str(), one.c_str(), zero.c_str(), p.c_str(), p.c_str(), scope.c_str(), p.c_str(), one.c_str());
+	source += String8::FromPrintf("%%%s_old_leader = %s %%uint %%%s_ptr %%%s %%%s %%%s_count\n", p.c_str(), atomic, p.c_str(),
+	                              device_scope.c_str(), zero.c_str(), p.c_str());
+	source += String8::FromPrintf("               OpBranch %%%s_atomic_merge\n", p.c_str());
+	source += String8::FromPrintf("%%%s_atomic_skip = OpLabel\n", p.c_str());
+	source += String8::FromPrintf("               OpBranch %%%s_atomic_merge\n", p.c_str());
+	source += String8::FromPrintf("%%%s_atomic_merge = OpLabel\n", p.c_str());
+	source += String8::FromPrintf("%%%s_old = OpPhi %%uint %%%s_old_leader %%%s_atomic_do %%%s %%%s_atomic_skip\n", p.c_str(), p.c_str(),
+	                              p.c_str(), zero.c_str(), p.c_str());
+	source += String8::FromPrintf("%%%s_first = OpGroupNonUniformBroadcastFirst %%uint %%%s %%%s_old\n", p.c_str(), subgroup_scope.c_str(),
+	                              p.c_str());
+	source += String8::FromPrintf("               OpMemoryBarrier %%%s %%uint_72\n", device_scope.c_str());
 	for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
 	{
 		if (!EmitGuardedStore(*this, instruction.dst, bank, p + "_first", p + "_" + BankName(bank), &source))

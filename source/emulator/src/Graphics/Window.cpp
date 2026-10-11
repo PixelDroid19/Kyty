@@ -28,6 +28,7 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VulkanQueueIdentity.h"
+#include "Emulator/Graphics/VulkanQueueSelection.h"
 #include "Emulator/Graphics/WindowControls.h"
 #include "Emulator/Host/CaptureImageCodec.h"
 #include "Emulator/Host/HostInput.h"
@@ -62,6 +63,7 @@ namespace Kyty::Libs::Graphics {
 
 constexpr float FPS_AVERAGE_FRAMES = 5.0f;
 constexpr float FPS_UPDATE_TIME    = 0.25f;
+constexpr VkImageUsageFlags SWAPCHAIN_IMAGE_USAGE = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
 // Lock-free mirror of the presented-frame counter. Submission-thread tooling
 // needs the frame index without touching window state owned by the UI thread.
@@ -1676,15 +1678,13 @@ struct VulkanQueues
 {
 	uint32_t          family_count = 0;
 	Vector<uint32_t>  family_used;
-	Vector<QueueInfo> available;
 	Vector<QueueInfo> graphics;
 	Vector<QueueInfo> compute;
 	Vector<QueueInfo> transfer;
 	Vector<QueueInfo> present;
 };
 
-static void VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, uint32_t graphics_num, uint32_t compute_num,
-                             uint32_t transfer_num, uint32_t present_num, VulkanQueues* out)
+static bool VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, VulkanQueues* out)
 {
 	EXIT_IF(device == nullptr);
 	EXIT_IF(surface == nullptr);
@@ -1696,6 +1696,7 @@ static void VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, uint
 	vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nullptr);
 	Vector<VkQueueFamilyProperties> queue_families(queue_family_count);
 	vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_families.GetData());
+	Vector<VulkanQueueFamilyCapabilities> capabilities(queue_family_count);
 
 	qs.family_count = queue_family_count;
 
@@ -1703,134 +1704,57 @@ static void VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, uint
 	for (auto& f: queue_families)
 	{
 		VkBool32 presentation_supported = VK_FALSE;
-		vkGetPhysicalDeviceSurfaceSupportKHR(device, family, surface, &presentation_supported);
-
-		for (uint32_t i = 0; i < f.queueCount; i++)
+		const auto    surface_result = vkGetPhysicalDeviceSurfaceSupportKHR(device, family, surface, &presentation_supported);
+		if (surface_result != VK_SUCCESS)
 		{
-			QueueInfo info;
-			info.family   = family;
-			info.index    = i;
-			info.graphics = (f.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
-			info.compute  = (f.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
-			info.transfer = (f.queueFlags & VK_QUEUE_TRANSFER_BIT) != 0;
-			info.present  = (presentation_supported == VK_TRUE);
-
-			qs.available.Add(info);
+			KYTY_LOG_DEBUG("Failed to query Vulkan surface support for queue family %u: result=%d\n", family,
+			               static_cast<int>(surface_result));
+			return false;
 		}
 
+		capabilities[family] = {f.queueCount, f.queueFlags, presentation_supported == VK_TRUE};
 		qs.family_used.Add(0);
-
 		family++;
 	}
 
-	// Preferred path: assign each role a dedicated (unshared) queue, consuming it
-	// from the pool. This works on desktop GPUs that expose many queues/families.
-	for (uint32_t i = 0; i < graphics_num; i++)
+	VulkanQueueFamilySelection selection;
+	const auto selection_result = VulkanSelectCommonRenderQueueFamily(capabilities.GetData(), capabilities.Size(), &selection);
+	if (selection_result != VulkanQueueSelectionResult::Success)
 	{
-		if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.graphics == b; }); qs.available.IndexValid(index))
-		{
-			qs.family_used[qs.available.At(index).family]++;
-			qs.graphics.Add(qs.available.At(index));
-			qs.available.RemoveAt(index);
-		}
+		KYTY_LOG_DEBUG("No single Vulkan queue family supports the renderer's graphics, compute, transfer and present operations.\n");
+		return false;
 	}
 
-	// Keep exclusive resources on the graphics queue family whenever possible.
-	// The renderer uses VK_SHARING_MODE_EXCLUSIVE and does not emit queue-family
-	// ownership transfers, so selecting a separate compute/transfer family makes
-	// uploads and presentation invalid on drivers that expose dedicated families.
-	if (!qs.graphics.IsEmpty())
+	const auto&               selected = capabilities[selection.family];
+	VulkanQueueRoleAllocation allocation;
+	if (VulkanAllocateSharedQueueRoles(selected.queue_count, GraphicContext::QUEUE_COMPUTE_NUM, &allocation) !=
+	    VulkanQueueSelectionResult::Success)
 	{
-		const QueueInfo primary = qs.graphics.At(0);
-		if (primary.compute)
-		{
-			qs.compute.Add(primary);
-		}
-		if (primary.transfer)
-		{
-			qs.transfer.Add(primary);
-		}
-		if (primary.present)
-		{
-			qs.present.Add(primary);
-		}
+		KYTY_LOG_DEBUG("Failed to allocate queue roles in the selected Vulkan family.\n");
+		return false;
 	}
 
-	if (qs.compute.IsEmpty())
+	auto make_queue = [&](uint32_t index)
 	{
-		for (uint32_t i = 0; i < compute_num; i++)
-		{
-			if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.compute == b; }); qs.available.IndexValid(index))
-			{
-				qs.family_used[qs.available.At(index).family]++;
-				qs.compute.Add(qs.available.At(index));
-				qs.available.RemoveAt(index);
-			}
-		}
-	}
+		QueueInfo queue;
+		queue.family   = selection.family;
+		queue.index    = index;
+		queue.graphics = (selected.queue_flags & VK_QUEUE_GRAPHICS_BIT) != 0;
+		queue.compute  = (selected.queue_flags & VK_QUEUE_COMPUTE_BIT) != 0;
+		queue.transfer = (selected.queue_flags & VK_QUEUE_TRANSFER_BIT) != 0 || queue.graphics || queue.compute;
+		queue.present  = selected.present;
+		return queue;
+	};
 
-	if (qs.transfer.IsEmpty())
+	qs.family_used[selection.family] = allocation.family_used;
+	qs.graphics.Add(make_queue(allocation.graphics_index));
+	for (uint32_t i = 0; i < allocation.compute_count; i++)
 	{
-		for (uint32_t i = 0; i < transfer_num; i++)
-		{
-			if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.transfer == b; }); qs.available.IndexValid(index))
-			{
-				qs.family_used[qs.available.At(index).family]++;
-				qs.transfer.Add(qs.available.At(index));
-				qs.available.RemoveAt(index);
-			}
-		}
+		qs.compute.Add(make_queue(allocation.compute_first_index + i));
 	}
-
-	if (qs.present.IsEmpty())
-	{
-		for (uint32_t i = 0; i < present_num; i++)
-		{
-			if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.present == b; }); qs.available.IndexValid(index))
-			{
-				qs.family_used[qs.available.At(index).family]++;
-				qs.present.Add(qs.available.At(index));
-				qs.available.RemoveAt(index);
-			}
-		}
-	}
-
-	// Fallback for GPUs that expose a single queue family with a single queue
-	// (notably Metal via MoltenVK on Apple Silicon): the one queue supports
-	// graphics, compute, transfer and present, so share it across every role
-	// that could not be given a dedicated queue above.
-	{
-		bool      have_shared = false;
-		QueueInfo shared;
-		if (!qs.graphics.IsEmpty())
-		{
-			shared      = qs.graphics.At(0);
-			have_shared = true;
-		} else if (!qs.available.IsEmpty())
-		{
-			shared = qs.available.At(0);
-			qs.family_used[shared.family]++;
-			qs.graphics.Add(shared);
-			qs.available.RemoveAt(0);
-			have_shared = true;
-		}
-
-		if (have_shared)
-		{
-			if (qs.compute.IsEmpty())
-			{
-				qs.compute.Add(shared);
-			}
-			if (qs.transfer.IsEmpty())
-			{
-				qs.transfer.Add(shared);
-			}
-			if (qs.present.IsEmpty() && shared.present)
-			{
-				qs.present.Add(shared);
-			}
-		}
-	}
+	qs.transfer.Add(make_queue(allocation.transfer_index));
+	qs.present.Add(make_queue(allocation.present_index));
+	return true;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1881,14 +1805,14 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		KYTY_LOG_DEBUG("Vulkan device: %s\n", device_properties.deviceName);
 
 		VulkanQueues qs;
-		VulkanFindQueues(device, surface, GraphicContext::QUEUE_GFX_NUM, GraphicContext::QUEUE_COMPUTE_NUM, GraphicContext::QUEUE_UTIL_NUM,
-		                 GraphicContext::QUEUE_PRESENT_NUM, &qs);
-
-		if (qs.graphics.Size() != GraphicContext::QUEUE_GFX_NUM ||
+		if (!VulkanFindQueues(device, surface, &qs))
+		{
+			skip_device = true;
+		} else if (qs.graphics.Size() != GraphicContext::QUEUE_GFX_NUM ||
 		    !(qs.compute.Size() >= 1 && qs.compute.Size() <= GraphicContext::QUEUE_COMPUTE_NUM) ||
 		    qs.transfer.Size() != GraphicContext::QUEUE_UTIL_NUM || qs.present.Size() != GraphicContext::QUEUE_PRESENT_NUM)
 		{
-			KYTY_LOG_DEBUG("Not enough queues\n");
+			KYTY_LOG_DEBUG("Selected Vulkan queue family does not satisfy the renderer's queue counts.\n");
 			skip_device = true;
 		}
 
@@ -1978,9 +1902,9 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		{
 			VulkanGetSurfaceCapabilities(device, surface, out_capabilities);
 
-			if ((out_capabilities->capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0)
+			if ((out_capabilities->capabilities.supportedUsageFlags & SWAPCHAIN_IMAGE_USAGE) != SWAPCHAIN_IMAGE_USAGE)
 			{
-				KYTY_LOG_DEBUG("Surface cannot be destination of blit\n");
+				KYTY_LOG_DEBUG("Surface does not support the required swapchain image usage flags\n");
 				skip_device = true;
 			}
 		}
@@ -2486,6 +2410,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	EXIT_IF(swapchain_images_count == nullptr);
 
 	if (r->formats.IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->formats.IsEmpty() condition ignored (continuing)\n"); }
+	if ((r->capabilities.supportedUsageFlags & SWAPCHAIN_IMAGE_USAGE) != SWAPCHAIN_IMAGE_USAGE)
+	{
+		KYTY_LOG_DEBUG("Surface no longer supports the required swapchain image usage flags\n");
+		return nullptr;
+	}
 
 	VkExtent2D extent {};
 	// Surface extents: only clamp when the max bound is usable (min <= max).
@@ -2541,12 +2470,24 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 
 	create_info.imageExtent           = extent;
 	create_info.imageArrayLayers      = 1;
-	create_info.imageUsage            = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	create_info.imageUsage            = SWAPCHAIN_IMAGE_USAGE;
 	create_info.imageSharingMode      = VK_SHARING_MODE_EXCLUSIVE;
 	create_info.queueFamilyIndexCount = 0;
 	create_info.pQueueFamilyIndices   = nullptr;
 	create_info.preTransform          = r->capabilities.currentTransform;
-	create_info.compositeAlpha        = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	constexpr VkCompositeAlphaFlagBitsKHR alpha_modes[] = {
+	    VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+	    VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+	};
+	for (const auto mode: alpha_modes)
+	{
+		if ((r->capabilities.supportedCompositeAlpha & mode) != 0)
+		{
+			create_info.compositeAlpha = mode;
+			break;
+		}
+	}
+	EXIT_IF(create_info.compositeAlpha == 0);
 	// Capability-driven present mode: prefer MAILBOX (low-latency triple-buffer)
 	// then IMMEDIATE, else FIFO (guaranteed vsync). Hardcoding FIFO alone can
 	// couple host present to display refresh with only minImageCount images.
@@ -3054,9 +2995,28 @@ static void VulkanCreate(WindowContext* ctx)
 			features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 			features2.pNext = &address_features;
 			vkGetPhysicalDeviceFeatures2(ctx->graphic_ctx.physical_device, &features2);
-			ctx->graphic_ctx.guest_device_address_supported = has_ext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) &&
-			                                                  address_features.bufferDeviceAddress == VK_TRUE &&
-			                                                  features2.features.shaderInt64 == VK_TRUE;
+			const bool host_memory_extension = has_ext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+			VkExternalMemoryFeatureFlags host_buffer_features = 0;
+			VkExternalMemoryHandleTypeFlags host_buffer_compatible_types = 0;
+			if (host_memory_extension)
+			{
+				VkPhysicalDeviceExternalBufferInfo external_buffer_info {};
+				external_buffer_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
+				external_buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+				                            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+				external_buffer_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+				VkExternalBufferProperties external_buffer_properties {};
+				external_buffer_properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES;
+				vkGetPhysicalDeviceExternalBufferProperties(ctx->graphic_ctx.physical_device, &external_buffer_info,
+				                                           &external_buffer_properties);
+				host_buffer_features = external_buffer_properties.externalMemoryProperties.externalMemoryFeatures;
+				host_buffer_compatible_types = external_buffer_properties.externalMemoryProperties.compatibleHandleTypes;
+			}
+			ctx->graphic_ctx.guest_device_address_supported =
+			    host_memory_extension && (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
+			    (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0 &&
+			    (host_buffer_compatible_types & VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT) != 0 &&
+			    address_features.bufferDeviceAddress == VK_TRUE && features2.features.shaderInt64 == VK_TRUE;
 			if (ctx->graphic_ctx.guest_device_address_supported &&
 			    !device_extensions.Contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, [](auto s, auto l) { return strcmp(s, l) == 0; }))
 			{

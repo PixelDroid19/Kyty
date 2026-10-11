@@ -23,6 +23,8 @@
 
 namespace Kyty::Libs::Graphics {
 
+struct ShaderScalarFlow;
+
 namespace HW {
 struct VertexShaderInfo;
 struct PixelShaderInfo;
@@ -168,6 +170,7 @@ enum class ShaderInstructionType : uint32_t
 	SBfeI32,
 	SBfeU32,
 	SBfeU64,
+	SBfeI64,
 	SBfmB32,
 	SBfmB64,
 	SBarrier,
@@ -589,6 +592,8 @@ enum class ShaderInstructionType : uint32_t
 	TBufferLoadFormatXyz,
 	BufferAtomicSwap,
 	ImageSampleO,
+	SSubbU32,
+	SAshrI64,
 
 	ZMax
 };
@@ -1086,6 +1091,14 @@ struct ShaderControlFlowBlock
 	ShaderInstruction last;
 };
 
+enum class ShaderGuestSourceSnapshotStatus: uint8_t
+{
+	Unavailable,
+	Captured,
+	Truncated,
+	UnsupportedContinuation,
+};
+
 class ShaderCode
 {
 public:
@@ -1147,6 +1160,22 @@ public:
 	// program's own base address.
 	[[nodiscard]] uint32_t GetContinuationPc() const { return m_continuation_pc; }
 	void                   SetContinuationPc(uint32_t pc) { m_continuation_pc = pc; }
+	[[nodiscard]] const std::shared_ptr<const std::vector<uint32_t>>& GetGuestSourceSnapshot() const
+	{
+		return m_guest_source_snapshot;
+	}
+	[[nodiscard]] ShaderGuestSourceSnapshotStatus GetGuestSourceSnapshotStatus() const { return m_guest_source_snapshot_status; }
+	void SetGuestSourceSnapshot(std::shared_ptr<const std::vector<uint32_t>> snapshot)
+	{
+		m_guest_source_snapshot = snapshot;
+		m_guest_source_snapshot_status = snapshot != nullptr ? ShaderGuestSourceSnapshotStatus::Captured :
+		                                                       ShaderGuestSourceSnapshotStatus::Unavailable;
+	}
+	void SetGuestSourceSnapshotStatus(ShaderGuestSourceSnapshotStatus status)
+	{
+		m_guest_source_snapshot.reset();
+		m_guest_source_snapshot_status = status;
+	}
 
 private:
 	uint32_t                  m_continuation_pc = UINT32_MAX;
@@ -1159,6 +1188,8 @@ private:
 	uint32_t                  m_pixel_extra_lds_dwords = 0;
 	int                       m_pixel_parameter_sgpr = -1;
 	Vector<ShaderDebugPrintf> m_debug_printfs;
+	std::shared_ptr<const std::vector<uint32_t>> m_guest_source_snapshot;
+	ShaderGuestSourceSnapshotStatus             m_guest_source_snapshot_status = ShaderGuestSourceSnapshotStatus::Unavailable;
 	uint32_t                  m_vs_embedded_id = 0;
 	uint32_t                  m_ps_embedded_id = 0;
 	bool                      m_vs_embedded    = false;
@@ -2313,6 +2344,18 @@ struct ShaderPixelColorExports
 	uint8_t partial_targets = 0;  // bit per target with any color export whose EN is not 0xF
 };
 
+// Values derived only from a parsed pixel program. Descriptor and user-data
+// predicates remain per draw because their inputs can change between draws.
+struct ShaderImmutablePixelAnalysis
+{
+	bool has_only_null_exports = false;
+	ShaderPixelColorExports color_exports;
+	bool uses_native_wave_state = false;
+	bool prevents_noop_pixel_elision = false;
+	bool has_getpc = false;
+	bool has_global_memory_load = false;
+};
+
 [[nodiscard]] ShaderPixelColorExports ShaderSummarizePixelColorExports(const ShaderCode& code);
 
 struct ShaderPixelInputInfo
@@ -2407,14 +2450,17 @@ struct ShaderUserData
 	uint16_t     sharp_resource_count[4];
 };
 
+// Cached scalar flows must correspond to their code stream; EUD descriptor code can differ from general code.
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
                        int user_data_register_base = 0, bool vertex_resource_types = true,
-                       const ShaderCode* eud_descriptor_code = nullptr);
+                       const ShaderCode* eud_descriptor_code = nullptr, const ShaderScalarFlow* cached_code_flow = nullptr,
+                       const ShaderScalarFlow* cached_eud_flow = nullptr);
 
 [[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num,
                                                    int eud_pointer_register, const ShaderCode* code,
-                                                   int user_data_register_base, uint32_t* required_end_dw);
+                                                   int user_data_register_base, uint32_t* required_end_dw,
+                                                   const ShaderScalarFlow* scalar_flow = nullptr);
 [[nodiscard]] bool ShaderGen5EudExpandEndDwordsForSharpImages(const ShaderUserData* user_data, int user_sgpr_num,
                                                                const uint32_t* eud_snapshot, uint32_t snapshot_dwords,
                                                                uint32_t* required_end_dw);

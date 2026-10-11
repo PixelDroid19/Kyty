@@ -1220,6 +1220,41 @@ void DescriptorCache::FreeDescriptor(VulkanImage* image)
 	}
 }
 
+void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
+{
+	EXIT_IF(ctx == nullptr || ctx->device == VK_NULL_HANDLE);
+	Core::LockGuard lock(m_mutex);
+
+	for (auto& pool: m_pools)
+	{
+		if (pool.pool != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorPool(ctx->device, pool.pool, nullptr);
+			pool.pool = VK_NULL_HANDLE;
+		}
+	}
+	for (auto& set: m_sets)
+	{
+		delete set.set;
+		set.set = nullptr;
+	}
+	for (const auto& [key, layout]: m_descriptor_set_layouts)
+	{
+		(void)key;
+		if (layout != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorSetLayout(ctx->device, layout, nullptr);
+		}
+	}
+
+	m_descriptor_set_layouts.clear();
+	m_sets_map.Clear();
+	m_sets.Clear();
+	m_pools.Clear();
+	m_first_free_set  = -1;
+	m_first_free_pool = -1;
+}
+
 VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind)
 {
 	ShaderDescriptorLayoutPlan plan {};

@@ -4,6 +4,7 @@
 #include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Shader.h"
@@ -268,6 +269,19 @@ ImageModuleFixture MakeSampledShapesImageModule(uint32_t shapes, ShaderInstructi
 }
 
 } // namespace
+
+TEST(EmulatorGraphicsResources, FindObjectsWithoutRegisteredHeapReturnsEmpty)
+{
+	ASSERT_EXIT(
+	    {
+		    InitializeImageModuleTest();
+		    GpuMemoryInit();
+		    const auto objects = GpuMemoryFindObjects(0x0000005100000000ull, 0x1000ull, GpuMemoryObjectType::StorageBuffer, true, false);
+		    RequireImageModule(objects.IsEmpty(), "unregistered GPU range has no alias objects");
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
 
 TEST(EmulatorGraphicsResources, EmitsAndValidatesUintSampledWithFloatStorage)
 {

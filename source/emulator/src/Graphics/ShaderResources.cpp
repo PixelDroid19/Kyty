@@ -14,6 +14,7 @@
 #include <bitset>
 #include <cstdint>
 #include <climits>
+#include <memory>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -322,7 +323,8 @@ static bool ShaderGen5EudAddSharpSpan(int offset_dw, int dwords, int user_sgpr_n
 }
 
 bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num, int eud_pointer_register,
-                                    const ShaderCode* code, int user_data_register_base, uint32_t* required_end_dw)
+                                    const ShaderCode* code, int user_data_register_base, uint32_t* required_end_dw,
+                                    const ShaderScalarFlow* scalar_flow)
 {
 	if (user_data == nullptr || required_end_dw == nullptr || user_sgpr_num < 0 ||
 	    user_sgpr_num > HW::UserSgprInfo::SGPRS_MAX || eud_pointer_register < 0 ||
@@ -359,7 +361,12 @@ bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sg
 
 	if (code != nullptr)
 	{
-		const auto  flow         = ShaderScalarFlowOf(*code);
+		std::shared_ptr<const ShaderScalarFlow> computed_flow;
+		if (scalar_flow == nullptr)
+		{
+			computed_flow = ShaderScalarFlowOf(*code);
+		}
+		const auto* flow = scalar_flow != nullptr ? scalar_flow : computed_flow.get();
 		const auto& entry_values = flow->holding_entry_value;
 		for (uint32_t index = 0; index < code->GetInstructions().Size() && index < entry_values.size(); ++index)
 		{
@@ -1227,7 +1234,8 @@ static bool ShaderAddDynamicScalarResource(ShaderBindResources* bind, ShaderPars
 // keyed by the S_LOAD PC because the destination registers can be reused.
 void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResources* bind,
 	                                             const HW::UserSgprInfo& user_sgpr, ShaderParsedUsage* info,
-	                                             const uint32_t* extended_buffer, uint16_t eud_size_dw, int user_data_register_base)
+	                                             const uint32_t* extended_buffer, uint16_t eud_size_dw, int user_data_register_base,
+	                                             const ShaderScalarFlow& scalar_flow)
 {
 	EXIT_IF(bind == nullptr || info == nullptr);
 	if (!bind->extended.used || extended_buffer == nullptr)
@@ -1235,8 +1243,7 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 		return;
 	}
 	const uint32_t instruction_count = code.GetInstructions().Size();
-	const auto    flow              = ShaderScalarFlowOf(code);
-	const auto&   entry_values      = flow->holding_entry_value;
+	const auto& entry_values = scalar_flow.holding_entry_value;
 	ShaderCollectSplitTextureResources(code, bind, info, extended_buffer, eud_size_dw, user_data_register_base, entry_values);
 
 	for (uint32_t index = 0; index < instruction_count && index < entry_values.size(); ++index)
@@ -1340,15 +1347,15 @@ static bool ShaderPartitionDescriptorLoad(const ShaderCode& code, uint32_t index
 // descriptor of a multi-descriptor load must have consumers. Buffer
 // descriptors keep their existing paths.
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
-                                        ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base)
+                                        ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base,
+                                        const ShaderScalarFlow& scalar_flow)
 {
 	EXIT_IF(bind == nullptr || info == nullptr);
 	if (srt_size_dw < 2u)
 	{
 		return;
 	}
-	const auto     flow              = ShaderScalarFlowOf(code);
-	const auto&    entry_values      = flow->holding_entry_value;
+	const auto& entry_values = scalar_flow.holding_entry_value;
 	const uint32_t instruction_count = code.GetInstructions().Size();
 	for (uint32_t index = 0; index < instruction_count && index < entry_values.size(); ++index)
 	{
@@ -1497,11 +1504,11 @@ static int ShaderAddAssembledStorageResource(ShaderStorageResources* resources, 
 // each consumer gets the storage resource its words select, and the V#
 // registers are written with that resource's metadata right before it.
 void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
-                                             int user_sgpr_num, int user_data_register_base)
+	                                             int user_sgpr_num, int user_data_register_base,
+	                                             const ShaderScalarFlow& scalar_flow)
 {
 	EXIT_IF(bind == nullptr);
-	const auto  flow         = ShaderScalarFlowOf(code);
-	const auto& sources      = flow->entry_sources;
+	const auto& sources      = scalar_flow.entry_sources;
 	const auto& instructions = code.GetInstructions();
 	for (uint32_t index = 0; index < instructions.Size() && index < sources.size(); ++index)
 	{

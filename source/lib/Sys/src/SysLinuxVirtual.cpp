@@ -1779,7 +1779,8 @@ bool sys_virtual_copy_to_guest(uint64_t destination, const void* source, uint64_
 
 // Records one segment per mapping instance, clipped to [address, address + size).
 // Fails when a byte is not guest owned or the segment budget is exceeded.
-static bool capture_guest_mapping_snapshot_locked(uintptr_t address, uint64_t size, VirtualMemory::GuestMappingSnapshot* snapshot)
+static bool capture_guest_mapping_identity_snapshot_locked(uintptr_t address, uint64_t size,
+	                                                       VirtualMemory::GuestMappingIdentitySnapshot* snapshot)
 {
 	const uintptr_t end     = address + static_cast<uintptr_t>(size);
 	snapshot->address       = address;
@@ -1799,7 +1800,7 @@ static bool capture_guest_mapping_snapshot_locked(uintptr_t address, uint64_t si
 			last->size += next - cursor;
 		} else
 		{
-			if (snapshot->segment_count == VirtualMemory::GuestMappingSnapshot::kMaxSegments)
+			if (snapshot->segment_count == VirtualMemory::GuestMappingIdentitySnapshot::kMaxSegments)
 			{
 				return false;
 			}
@@ -1811,7 +1812,7 @@ static bool capture_guest_mapping_snapshot_locked(uintptr_t address, uint64_t si
 }
 
 // Every byte of every segment still belongs to the mapping instance captured for it.
-static bool guest_mapping_snapshot_matches_locked(const VirtualMemory::GuestMappingSnapshot& snapshot)
+static bool guest_mapping_identity_snapshot_matches_locked(const VirtualMemory::GuestMappingIdentitySnapshot& snapshot)
 {
 	for (uint32_t i = 0; i < snapshot.segment_count; ++i)
 	{
@@ -1841,14 +1842,14 @@ bool sys_virtual_protect_guest_if_mapping_matches(uint64_t address, uint64_t siz
 		return false;
 	}
 
-	VirtualMemory::GuestMappingSnapshot snapshot {};
+	VirtualMemory::GuestMappingIdentitySnapshot snapshot {};
 	snapshot.address       = address;
 	snapshot.size          = size;
 	snapshot.segment_count = 1;
 	snapshot.segments[0]   = {address, size, mapping_identity};
 
 	pthread_mutex_lock(&g_virtual_mutex);
-	const bool matches = guest_mapping_snapshot_matches_locked(snapshot);
+	const bool matches = guest_mapping_identity_snapshot_matches_locked(snapshot);
 	const bool result  = matches && protect_range_locked(address, size, mode, old_mode, true);
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return result;
@@ -1864,9 +1865,31 @@ bool sys_virtual_capture_guest_mapping_snapshot(uint64_t address, uint64_t size,
 	}
 
 	pthread_mutex_lock(&g_virtual_mutex);
-	const bool captured = capture_guest_mapping_snapshot_locked(static_cast<uintptr_t>(address), size, snapshot);
+	const bool captured = capture_guest_mapping_identity_snapshot_locked(static_cast<uintptr_t>(address), size, snapshot);
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return captured;
+}
+
+bool sys_virtual_capture_guest_mapping_identity_snapshot(uint64_t address, uint64_t size,
+	                                                     VirtualMemory::GuestMappingIdentitySnapshot* snapshot)
+{
+	if (snapshot == nullptr || size == 0 || address > UINTPTR_MAX - size)
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool captured = capture_guest_mapping_identity_snapshot_locked(static_cast<uintptr_t>(address), size, snapshot);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return captured;
+}
+
+bool sys_virtual_guest_mapping_identity_matches(const VirtualMemory::GuestMappingIdentitySnapshot& identity)
+{
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool matches = guest_mapping_identity_snapshot_matches_locked(identity);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return matches;
 }
 
 bool sys_virtual_copy_to_guest_if_mapping_matches(const VirtualMemory::GuestMappingSnapshot& snapshot, const void* source)
@@ -1880,7 +1903,8 @@ bool sys_virtual_copy_to_guest_if_mapping_matches(const VirtualMemory::GuestMapp
 	}
 
 	pthread_mutex_lock(&g_virtual_mutex);
-	if (!guest_mapping_snapshot_matches_locked(snapshot) || !range_has_protection_locked(page_start, page_end, PROT_WRITE))
+	if (!guest_mapping_identity_snapshot_matches_locked(snapshot) ||
+	    !range_has_protection_locked(page_start, page_end, PROT_WRITE))
 	{
 		pthread_mutex_unlock(&g_virtual_mutex);
 		return false;
@@ -1888,6 +1912,69 @@ bool sys_virtual_copy_to_guest_if_mapping_matches(const VirtualMemory::GuestMapp
 	std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(snapshot.address)), source, static_cast<size_t>(snapshot.size));
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return true;
+}
+
+bool sys_virtual_visit_writable_guest_transaction(const VirtualMemory::WritableGuestTransactionRange* ranges,
+	                                               uint32_t count, int32_t capture_identity_range_index,
+	                                               VirtualMemory::WritableGuestTransactionVisitor visitor,
+	                                               void* context)
+{
+	if (ranges == nullptr || count == 0 || count > VirtualMemory::kMaxWritableGuestTransactionRanges || visitor == nullptr ||
+	    capture_identity_range_index < -1 || capture_identity_range_index >= static_cast<int32_t>(count))
+	{
+		return false;
+	}
+
+	VirtualMemory::GuestMappingIdentitySnapshot captured_identity {};
+	bool                                      valid = true;
+	pthread_mutex_lock(&g_virtual_mutex);
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		const auto& range = ranges[i];
+		if (range.size == 0 || range.address > UINTPTR_MAX || range.size > UINTPTR_MAX - range.address)
+		{
+			valid = false;
+			break;
+		}
+
+		uintptr_t page_start = 0;
+		uintptr_t page_end   = 0;
+		if (!get_host_page_range(static_cast<uintptr_t>(range.address), range.size, &page_start, &page_end) ||
+		    !range_is_guest_owned_locked(static_cast<uintptr_t>(range.address), range.size) ||
+		    !range_has_protection_locked(page_start, page_end, PROT_WRITE))
+		{
+			valid = false;
+			break;
+		}
+
+		VirtualMemory::GuestMappingIdentitySnapshot current_identity {};
+		if (!capture_guest_mapping_identity_snapshot_locked(static_cast<uintptr_t>(range.address), range.size,
+		                                                    &current_identity))
+		{
+			valid = false;
+			break;
+		}
+
+		if (range.expected_mapping != nullptr &&
+		    (range.expected_mapping->address != range.address || range.expected_mapping->size != range.size ||
+		     !guest_mapping_identity_snapshot_matches_locked(*range.expected_mapping)))
+		{
+			valid = false;
+			break;
+		}
+
+		if (static_cast<int32_t>(i) == capture_identity_range_index)
+		{
+			captured_identity = current_identity;
+		}
+	}
+
+	if (valid)
+	{
+		visitor(capture_identity_range_index == -1 ? nullptr : &captured_identity, context);
+	}
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return valid;
 }
 
 VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint64_t address, uint64_t size,

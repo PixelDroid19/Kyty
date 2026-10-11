@@ -92,6 +92,10 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::R16Sfloat, 2};
 	}
+	if (format == 0x2u && channel_type == 0x4u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R16Uint, 2};
+	}
 	if (format == 0x3u && channel_type == 0x0u && channel_order == 0x0u)
 	{
 		return {RenderTextureFormat::R8G8Unorm, 2};
@@ -103,6 +107,10 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	if (format == 0x5u && channel_type == 0x7u && channel_order == 0x0u)
 	{
 		return {RenderTextureFormat::R16G16Sfloat, 4};
+	}
+	if (format == 0x5u && channel_type == 0x4u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R16G16Uint, 4};
 	}
 	// CB data formats 6 (10_11_11) and 7 (11_11_10) with FLOAT both pack into
 	// the same 32-bit 10/11/11 layout. Vulkan's only colour-attachable match is
@@ -360,6 +368,8 @@ uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format)
 		case RenderTextureFormat::B8G8R8A8Srgb: return VK_FORMAT_B8G8R8A8_SRGB;
 		case RenderTextureFormat::R16Sfloat: return VK_FORMAT_R16_SFLOAT;
 		case RenderTextureFormat::R16G16Sfloat: return VK_FORMAT_R16G16_SFLOAT;
+		case RenderTextureFormat::R16Uint: return VK_FORMAT_R16_UINT;
+		case RenderTextureFormat::R16G16Uint: return VK_FORMAT_R16G16_UINT;
 		case RenderTextureFormat::R32Sfloat: return VK_FORMAT_R32_SFLOAT;
 		case RenderTextureFormat::B10G11R11Ufloat: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
 		case RenderTextureFormat::A2R10G10B10Unorm: return VK_FORMAT_A2R10G10B10_UNORM_PACK32;

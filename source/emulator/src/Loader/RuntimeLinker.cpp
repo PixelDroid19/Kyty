@@ -43,6 +43,7 @@
 // titles, which throw/catch managed exceptions through __cxa_throw).
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 extern "C" void __register_frame(const void* begin);
+extern "C" void __deregister_frame(const void* begin);
 #endif
 
 #ifdef KYTY_EMU_ENABLED
@@ -758,6 +759,50 @@ static void get_dyn_ptr(Elf64* elf, T* out, Elf64_Sxword tag)
 	}
 }
 
+static const char* GetBoundedElfString(const DynamicInfo& info, uint64_t offset)
+{
+	if (info.str_table == nullptr || info.str_table_size == 0 || info.str_table_size > std::numeric_limits<size_t>::max() ||
+	    offset >= info.str_table_size)
+	{
+		return nullptr;
+	}
+
+	return info.str_table[static_cast<size_t>(info.str_table_size - 1)] == '\0' ?
+	           info.str_table + static_cast<size_t>(offset) :
+	           nullptr;
+}
+
+static bool IsDynamicSymbolIndexValid(const DynamicInfo& info, uint32_t index)
+{
+	if (info.symbol_table == nullptr || info.symbol_table_entry_size != sizeof(Elf64_Sym) ||
+	    info.symbol_table_total_size % sizeof(Elf64_Sym) != 0)
+	{
+		return false;
+	}
+	return index < info.symbol_table_total_size / sizeof(Elf64_Sym);
+}
+
+bool RuntimeLinker::ValidateDynamicStringReferences(const Elf64* elf, const DynamicInfo& info)
+{
+	if (elf == nullptr) { return false; }
+
+	auto validate_offsets = [&elf, &info](Elf64_Sxword tag, bool packed_offset)
+	{
+		for (const auto* entry: elf->GetDynList(tag))
+		{
+			const uint64_t offset = packed_offset ? entry->d_un.d_val & 0xffffffffu : entry->d_un.d_val;
+			if (GetBoundedElfString(info, offset) == nullptr) { return false; }
+		}
+		return true;
+	};
+
+	return validate_offsets(DT_NEEDED, false) && validate_offsets(DT_SONAME, false) &&
+	       validate_offsets(DT_OS_NEEDED_MODULE, true) && validate_offsets(DT_OS_NEEDED_MODULE_1, true) &&
+	       validate_offsets(DT_OS_MODULE_INFO, true) && validate_offsets(DT_OS_MODULE_INFO_1, true) &&
+	       validate_offsets(DT_OS_IMPORT_LIB, true) && validate_offsets(DT_OS_IMPORT_LIB_1, true) &&
+	       validate_offsets(DT_OS_EXPORT_LIB, true) && validate_offsets(DT_OS_EXPORT_LIB_1, true);
+}
+
 static void KYTY_SYSV_ABI ProgramExitHandler()
 {
 	Core::Singleton<RuntimeLinker>::Instance()->StopAllModules();
@@ -845,6 +890,10 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 		case R_X86_64_JUMP_SLOT: addend = 0; [[fallthrough]];
 		case R_X86_64_64:
 		{
+			if (!IsDynamicSymbolIndexValid(*program->dynamic_info, symbol))
+			{
+				EXIT("ELF relocation references a symbol outside the symbol table\n");
+			}
 			auto         sym          = symbols[symbol];
 			auto         bind         = sym.GetBind();
 			auto         sym_type     = sym.GetType();
@@ -881,6 +930,7 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 		}
 		break;
 		case R_X86_64_RELATIVE:
+			if (symbol != 0) { EXIT("ELF relative relocation has a nonzero symbol index\n"); }
 			ret.value    = ret.base_vaddr + addend;
 			ret.resolved = true;
 			break;
@@ -891,6 +941,10 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 			uint64_t symbol_offset = 0;
 			if (symbol != 0)
 			{
+				if (!IsDynamicSymbolIndexValid(*program->dynamic_info, symbol))
+				{
+					EXIT("ELF relocation references a symbol outside the symbol table\n");
+				}
 				symbol_offset = symbols[symbol].st_value;
 			}
 			EXIT_IF(program->tls.module_id == 0);
@@ -2857,6 +2911,8 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 
 void RuntimeLinker::DeleteProgram(Program* p)
 {
+	UnregisterProgramEhFrame(p);
+
 	if (p->rt != nullptr && p->tls.module_id != 0)
 	{
 		Core::LockGuard tls_lock(p->rt->m_static_tls_mutex);
@@ -2923,6 +2979,17 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program)
 	get_dyn_value(elf, &program->dynamic_info->symbol_table_total_size, DT_OS_SYMTABSZ);
 	get_dyn_value(elf, &program->dynamic_info->symbol_table_entry_size, DT_OS_SYMENT);
 	get_dyn_value(elf, &program->dynamic_info->symbol_table_entry_size, DT_SYMENT);
+	if (program->dynamic_info->symbol_table != nullptr && program->dynamic_info->symbol_table_total_size == 0 &&
+	    !elf->HasDynValue(DT_OS_SYMTABSZ) && elf->HasDynValue(DT_HASH))
+	{
+		if (program->dynamic_info->hash_table == nullptr) { EXIT("elf is not valid: %s\n", program->file_name.C_Str()); }
+		const auto* hash = static_cast<const uint32_t*>(program->dynamic_info->hash_table);
+		program->dynamic_info->symbol_table_total_size = static_cast<uint64_t>(hash[1]) * sizeof(Elf64_Sym);
+	}
+	if (!ValidateSymbolTableMetadata(*program->dynamic_info) || !ValidateDynamicStringReferences(elf, *program->dynamic_info))
+	{
+		EXIT("elf is not valid: %s\n", program->file_name.C_Str());
+	}
 
 	get_dyn_ptr(elf, &program->dynamic_info->init_vaddr, DT_INIT);
 	get_dyn_ptr(elf, &program->dynamic_info->fini_vaddr, DT_FINI);
@@ -2974,12 +3041,13 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program)
 	get_dyn_values(elf, &needed, DT_NEEDED);
 	for (auto need: needed)
 	{
-		program->dynamic_info->needed.Add(program->dynamic_info->str_table + need);
+		program->dynamic_info->needed.Add(GetBoundedElfString(*program->dynamic_info, need));
 	}
 
-	uint64_t so_name = 0;
-	get_dyn_value(elf, &so_name, DT_SONAME);
-	program->dynamic_info->so_name = program->dynamic_info->str_table + so_name;
+	if (const auto* so_name = elf->GetDynValue(DT_SONAME); so_name != nullptr)
+	{
+		program->dynamic_info->so_name = GetBoundedElfString(*program->dynamic_info, so_name->d_un.d_val);
+	}
 
 	if (elf->HasDynValue(DT_OS_NEEDED_MODULE) && elf->HasDynValue(DT_OS_NEEDED_MODULE_1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	if (elf->HasDynValue(DT_OS_MODULE_INFO) && elf->HasDynValue(DT_OS_MODULE_INFO_1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
@@ -3036,7 +3104,7 @@ static void InstallRelocateHandler(Program* program)
 // registered, the host _Unwind_RaiseException can unwind them and reach the
 // guest's own landing pads. Registered once per program (idempotent flag) after
 // relocations so the CIE personality indirection through the GOT is resolved.
-static void RegisterProgramEhFrame(Program* program)
+void RuntimeLinker::RegisterProgramEhFrame(Program* program)
 {
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 	if (program == nullptr || program->elf == nullptr || program->eh_frame_registered)
@@ -3076,7 +3144,24 @@ static void RegisterProgramEhFrame(Program* program)
 		__register_frame(reinterpret_cast<const void*>(decoded.frame_addr));
 		program->eh_frame_vaddr      = decoded.frame_addr;
 		program->eh_frame_registered = true;
+		break;
 	}
+#else
+	(void)program;
+#endif
+}
+
+void RuntimeLinker::UnregisterProgramEhFrame(Program* program)
+{
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+	if (program == nullptr || !program->eh_frame_registered || program->eh_frame_vaddr == 0)
+	{
+		return;
+	}
+
+	__deregister_frame(reinterpret_cast<const void*>(program->eh_frame_vaddr));
+	program->eh_frame_vaddr      = 0;
+	program->eh_frame_registered = false;
 #else
 	(void)program;
 #endif
@@ -3177,6 +3262,46 @@ const LibraryId* RuntimeLinker::FindLibrary(const Program& program, const String
 	return nullptr;
 }
 
+bool RuntimeLinker::ValidateSymbolTableMetadata(const DynamicInfo& info)
+{
+	if (info.str_table == nullptr)
+	{
+		if (info.str_table_size != 0) { return false; }
+	} else if (info.str_table_size == 0 || info.str_table_size > std::numeric_limits<size_t>::max())
+	{
+		return false;
+	} else if (info.str_table[0] != '\0' || info.str_table[static_cast<size_t>(info.str_table_size - 1)] != '\0')
+	{
+		return false;
+	}
+
+	if (info.symbol_table == nullptr)
+	{
+		return info.symbol_table_total_size == 0 &&
+		       (info.symbol_table_entry_size == 0 || info.symbol_table_entry_size == sizeof(Elf64_Sym));
+	}
+
+	if (info.symbol_table_total_size == 0 || info.symbol_table_total_size > std::numeric_limits<size_t>::max() ||
+	    info.symbol_table_entry_size != sizeof(Elf64_Sym) || info.symbol_table_total_size % sizeof(Elf64_Sym) != 0 ||
+	    info.str_table == nullptr || info.str_table_size == 0)
+	{
+		return false;
+	}
+
+	const uint64_t symbol_count = info.symbol_table_total_size / sizeof(Elf64_Sym);
+	for (uint64_t i = 0; i < symbol_count; i++)
+	{
+		if (GetBoundedElfString(info, info.symbol_table[i].st_name) == nullptr) { return false; }
+	}
+
+	return true;
+}
+
+bool RuntimeLinker::IsSymbolTableIndexValid(const DynamicInfo& info, uint32_t index)
+{
+	return IsDynamicSymbolIndexValid(info, index);
+}
+
 void RuntimeLinker::CreateSymbolDatabase(Program* program)
 {
 	KYTY_LOADER_PROFILE_FUNCTION();
@@ -3184,6 +3309,10 @@ void RuntimeLinker::CreateSymbolDatabase(Program* program)
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->export_symbols != nullptr);
 	EXIT_IF(program->import_symbols != nullptr);
+	if (program->dynamic_info == nullptr || !ValidateSymbolTableMetadata(*program->dynamic_info))
+	{
+		EXIT("elf is not valid: %s\n", program->file_name.C_Str());
+	}
 
 	program->export_symbols = new SymbolDatabase;
 	program->import_symbols = new SymbolDatabase;
@@ -3195,12 +3324,11 @@ void RuntimeLinker::CreateSymbolDatabase(Program* program)
 			return;
 		}
 
-		for (auto* sym = program->dynamic_info->symbol_table;
-		     reinterpret_cast<uint8_t*>(sym) <
-		     reinterpret_cast<uint8_t*>(program->dynamic_info->symbol_table) + program->dynamic_info->symbol_table_total_size;
-		     sym++)
+		const uint64_t symbol_count = program->dynamic_info->symbol_table_total_size / sizeof(Elf64_Sym);
+		for (uint64_t i = 0; i < symbol_count; i++)
 		{
-			String id   = String::FromUtf8(program->dynamic_info->str_table + sym->st_name);
+			auto* sym  = program->dynamic_info->symbol_table + i;
+			String id  = String::FromUtf8(GetBoundedElfString(*program->dynamic_info, sym->st_name));
 			auto   bind = sym->GetBind();
 			auto   type = sym->GetType();
 			auto   ids  = id.Split(U'#');

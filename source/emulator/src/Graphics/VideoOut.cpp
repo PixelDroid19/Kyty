@@ -530,7 +530,8 @@ public:
 	SubmitFlipStatus SubmitFlip(int handle, int index, int64_t flip_arg);
 	SubmitFlipStatus SubmitFlipInternal(int handle, int index, int64_t flip_arg);
 	void             QueueGpuFlip(int handle);
-	bool             RunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action, void* data);
+	bool             RunBufferUnmapTransaction(const VideoOutBufferRange* ranges, size_t range_count, VideoOutQuiescedAction action,
+	                                           void* data);
 
 	void Init(uint32_t width, uint32_t height);
 
@@ -2381,10 +2382,14 @@ void VideoOutContext::DetachRegisteredBuffersForUnmapLocked(uint64_t vaddr, uint
 	}
 }
 
-bool VideoOutContext::RunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action, void* data)
+bool VideoOutContext::RunBufferUnmapTransaction(const VideoOutBufferRange* ranges, size_t range_count,
+                                                VideoOutQuiescedAction action, void* data)
 {
-	EXIT_IF(size == 0);
-	EXIT_IF(action == nullptr);
+	if (ranges == nullptr || range_count == 0 || action == nullptr) { return false; }
+	for (size_t i = 0; i < range_count; ++i)
+	{
+		if (ranges[i].vaddr == 0 || ranges[i].size == 0 || ranges[i].vaddr > UINT64_MAX - ranges[i].size) { return false; }
+	}
 
 	auto drain = m_host_access_gate.Drain();
 
@@ -2411,7 +2416,10 @@ bool VideoOutContext::RunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, V
 
 	{
 		Core::LockGuard lock(m_mutex);
-		DetachRegisteredBuffersForUnmapLocked(vaddr, size);
+		for (size_t i = 0; i < range_count; ++i)
+		{
+			DetachRegisteredBuffersForUnmapLocked(ranges[i].vaddr, ranges[i].size);
+		}
 	}
 
 	return action(data);
@@ -2628,7 +2636,17 @@ void VideoOutWaitFlipDone(int handle, int index)
 bool VideoOutRunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action, void* data)
 {
 	EXIT_IF(g_video_out_context == nullptr);
-	return g_video_out_context->RunBufferUnmapTransaction(vaddr, size, action, data);
+	EXIT_IF(size == 0);
+	EXIT_IF(action == nullptr);
+	const VideoOutBufferRange range {vaddr, size};
+	return VideoOutRunBufferUnmapTransaction(&range, 1, action, data);
+}
+
+bool VideoOutRunBufferUnmapTransaction(const VideoOutBufferRange* ranges, size_t range_count, VideoOutQuiescedAction action,
+                                       void* data)
+{
+	EXIT_IF(g_video_out_context == nullptr);
+	return g_video_out_context->RunBufferUnmapTransaction(ranges, range_count, action, data);
 }
 
 KYTY_SYSV_ABI int VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status)

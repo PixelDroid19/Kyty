@@ -1,7 +1,19 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
+#include "Emulator/Log.h"
 #include "../../../emulator/src/Graphics/ShaderParseInternal.h"
+#include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
+
+#include "ShaderArithmeticTestInterpreter.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <sstream>
+#include <string>
 
 UT_BEGIN(EmulatorShaderWaterfall);
 
@@ -249,6 +261,131 @@ static ShaderInstruction M0Write(uint32_t pc)
 	return inst;
 }
 
+static void InitializeWaterfallEmitterTest()
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	class ValidationConfig final: public Config::ConfigSource
+	{
+	public:
+		bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+		int64_t GetInteger(const Core::String&) const override { return 0; }
+		bool GetBool(const Core::String&) const override { return true; }
+		Core::String GetString(const Core::String&) const override { return {}; }
+	} validation;
+	Config::Load(validation);
+}
+
+static void PrintWaterfallSourceFailureContext(const String8& source)
+{
+	std::istringstream lines(source.c_str());
+	std::string        line;
+	uint32_t           printed = 0;
+	while (std::getline(lines, line))
+	{
+		const bool relevant = line.find("%m0") != std::string::npos || line.find("%rel_") != std::string::npos ||
+		                      line.find("%v30") != std::string::npos || line.find("%v40") != std::string::npos ||
+		                      line.find("%v41") != std::string::npos;
+		if (!relevant) { continue; }
+		if (printed == 32u)
+		{
+			std::fprintf(stderr, "  ... source context truncated after %u relevant lines\n", printed);
+			break;
+		}
+		const auto size = line.size() > 512u ? 512 : static_cast<int>(line.size());
+		std::fprintf(stderr, "  %.*s%s\n", size, line.data(), line.size() > 512u ? "..." : "");
+		++printed;
+	}
+	if (printed == 0u)
+	{
+		std::fprintf(stderr, "  no M0 or relative-move source lines found (%u source bytes)\n", source.Size());
+	}
+}
+
+[[noreturn]] static void RunGeneratedLaneIndexValueContract()
+{
+	InitializeWaterfallEmitterTest();
+
+	auto waterfall = ValidWaterfall();
+	ShaderLowerWaterfallMoves(&waterfall.code);
+	const auto* lowered_move = AtPc(waterfall.code, waterfall.move_pc);
+	if (lowered_move == nullptr || lowered_move->src_num != 2 || lowered_move->format != ShaderInstructionFormat::SVdstSVsrc0SVsrc1)
+	{
+		std::_Exit(2);
+	}
+
+	// Keep the production-lowered move, while giving the emitter one additional
+	// named VGPR candidate with a distinct value for the lane and stale-M0 paths.
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderInstruction candidate {};
+	candidate.pc        = 4u;
+	candidate.type      = ShaderInstructionType::VMovB32;
+	candidate.format    = ShaderInstructionFormat::SVdstSVsrc0;
+	candidate.dst       = Vgpr(5u);
+	candidate.src[0]    = Vgpr(41u);
+	candidate.src_num   = 1;
+	auto move  = *lowered_move;
+	move.pc    = 0u;
+	code.GetInstructions().Add(move);
+	code.GetInstructions().Add(candidate);
+	code.GetInstructions().Add(M0Write(8u)); // Declare the test's seeded stale M0 input after the instruction under test.
+	code.GetInstructions().Add(EndProgram(12u));
+
+	ShaderComputeInputInfo input {};
+	// Match the established native wave32 compute fixtures: the workgroup has
+	// one full guest wave and the physical subgroup has the same width.
+	input.threads_num[0] = 32u;
+	input.threads_num[1] = input.threads_num[2] = 1u;
+	input.float_mode = 0xc0u;
+	input.fp_mode_known = true;
+	input.wave_layout = {ShaderComputeWaveStrategy::Native, {32, 1, 1}, {32, 1, 1}, 32, 32, 1, 1, 0};
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	Vector<uint32_t> binary;
+	String8          error;
+	if (source.IsEmpty())
+	{
+		std::fprintf(stderr, "waterfall lane-index fixture: SpirvGenerateSource returned empty output for native wave32 local size 32\n");
+		std::fflush(stderr);
+		std::_Exit(3);
+	}
+	if (!ShaderToolchain::Run(source, &binary, &error))
+	{
+		std::fprintf(stderr, "waterfall lane-index fixture: ShaderToolchain::Run failed: %s\n", error.c_str());
+		PrintWaterfallSourceFailureContext(source);
+		std::fflush(stderr);
+		std::_Exit(4);
+	}
+	if (binary.IsEmpty())
+	{
+		std::fprintf(stderr, "waterfall lane-index fixture: ShaderToolchain::Run returned an empty binary\n");
+		std::fflush(stderr);
+		std::_Exit(5);
+	}
+
+	const ShaderArithmeticTest::Program program(source.c_str());
+	const auto result = program.Run({{"%v5", 0u},
+	                                 {"%v7", 1u}, // lane index selects VGPR 41
+	                                 {"%v30", 0xdeadbeefu},
+	                                 {"%v40", 0x3f000000u}, // stale M0=0 would select this value
+	                                 {"%v41", 0x3f800000u},
+	                                 {"%m0", 0u},
+	                                 {"%exec_lo", UINT32_MAX},
+	                                 {"%exec_hi", 0u},
+	                                 {"%exec_lane_lo", 1u},
+	                                 {"%exec_lane_hi", 0u},
+	                                 {"%scc", 0u}},
+	                                "%v30");
+	if (result != 0x3f800000u)
+	{
+		std::fprintf(stderr, "waterfall lane-index fixture: lane index 1 with M0 0 produced 0x%08x; expected 0x3f800000\n", result);
+		std::fflush(stderr);
+		std::_Exit(6);
+	}
+	std::_Exit(0);
+}
+
 } // namespace
 
 TEST(EmulatorShaderWaterfall, RewritesLaneIndicesAndKeepsMaskUpdates)
@@ -355,6 +492,32 @@ TEST(EmulatorShaderWaterfall, RefusesUnprovenRestAndExecEntryState)
 	AppendWaterfallBody(&clobbered_exec);
 	ShaderLowerWaterfallMoves(&clobbered_exec.code);
 	ExpectWaterfallRetained(clobbered_exec);
+}
+
+TEST(EmulatorShaderWaterfall, RefusesExecHiClobberBeforeLoopHead)
+{
+	WaterfallFixture clobbered_exec_hi {};
+	clobbered_exec_hi.code.GetInstructions().Add(RestFromExec(0u, clobbered_exec_hi.rest_register));
+	ShaderInstruction exec_hi_write {};
+	exec_hi_write.pc                = 4u;
+	exec_hi_write.type              = ShaderInstructionType::SMovB32;
+	exec_hi_write.format            = ShaderInstructionFormat::SVdstSVsrc0;
+	exec_hi_write.dst.type          = ShaderOperandType::ExecHi;
+	exec_hi_write.dst.size          = 1;
+	exec_hi_write.src[0].type       = ShaderOperandType::IntegerInlineConstant;
+	exec_hi_write.src[0].constant.u = 1u;
+	exec_hi_write.src_num           = 1;
+	clobbered_exec_hi.code.GetInstructions().Add(exec_hi_write);
+	clobbered_exec_hi.head_pc = 8u;
+	AppendWaterfallBody(&clobbered_exec_hi);
+
+	ShaderLowerWaterfallMoves(&clobbered_exec_hi.code);
+	ExpectWaterfallRetained(clobbered_exec_hi);
+}
+
+TEST(EmulatorShaderWaterfall, GeneratedMoveUsesLaneIndexInsteadOfStaleM0)
+{
+	ASSERT_EXIT(RunGeneratedLaneIndexValueContract(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorShaderWaterfall, RefusesLiveValuesAcrossIndirectPcTransfers)

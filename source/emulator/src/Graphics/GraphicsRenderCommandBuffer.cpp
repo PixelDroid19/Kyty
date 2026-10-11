@@ -29,6 +29,7 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -38,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -827,8 +829,22 @@ static ImageTransitionSource ResolveImageTransitionSource(VkImageLayout layout)
 	}
 }
 
+// Occupancy of one usage class at a refusal: which entries are still bound in this
+// command buffer, how many carry identical bytes, and how many are snapshots.
+struct TransientPoolUsageOccupancy
+{
+	uint32_t used               = 0;
+	uint32_t free               = 0;
+	uint32_t used_four_byte     = 0;
+	uint32_t used_four_byte_zero = 0;
+	uint32_t used_snapshots     = 0;
+	uint32_t used_duplicates    = 0;
+	uint32_t largest_duplicate_group = 0;
+};
+
 static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, uint32_t usage, uint32_t usage_entries,
-                                                      uint32_t total_entries, uint64_t total_bytes)
+                                                      uint32_t total_entries, uint64_t total_bytes,
+                                                      const TransientPoolUsageOccupancy& occupancy)
 {
 	const auto critical_class = GpuMemoryTransientBufferAllocationClass::Critical;
 	const bool usage_cap_failed = !GpuMemoryTransientBufferPoolCanAllocate(usage_entries, 0u, 0u, 1u, critical_class);
@@ -858,9 +874,13 @@ static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, u
 	std::fprintf(stderr,
 	             "KYTY_TRANSIENT_POOL_CAPACITY_REJECT event=%" PRIu32 " class=critical(%u) requested=%" PRIu64
 	             " usage=0x%08" PRIx32 " usage_entries=%" PRIu32 " total_entries=%" PRIu32 " total_bytes=%" PRIu64
-	             " max_bytes=%" PRIu64 " usage_cap_failed=%d entry_cap_failed=%d byte_cap_failed=%d\n",
+	             " max_bytes=%" PRIu64 " usage_cap_failed=%d entry_cap_failed=%d byte_cap_failed=%d used=%" PRIu32 " free=%" PRIu32
+	             " used_4b=%" PRIu32 " used_4b_zero=%" PRIu32 " used_snapshots=%" PRIu32 " used_duplicates=%" PRIu32
+	             " largest_duplicate_group=%" PRIu32 "\n",
 	             report_number, static_cast<unsigned>(critical_class), requested_size, usage, usage_entries, total_entries,
-	             total_bytes, max_bytes, usage_cap_failed ? 1 : 0, entry_cap_failed ? 1 : 0, byte_cap_failed ? 1 : 0);
+	             total_bytes, max_bytes, usage_cap_failed ? 1 : 0, entry_cap_failed ? 1 : 0, byte_cap_failed ? 1 : 0, occupancy.used,
+	             occupancy.free, occupancy.used_four_byte, occupancy.used_four_byte_zero, occupancy.used_snapshots,
+	             occupancy.used_duplicates, occupancy.largest_duplicate_group);
 }
 
 class TransientBufferPool
@@ -954,7 +974,7 @@ public:
 		for (auto it = m_entries.rbegin(); it != m_entries.rend(); ++it)
 		{
 			auto* candidate = *it;
-			if (candidate->used && !candidate->scratch && candidate->snapshot_valid && candidate->usage == usage &&
+			if (!candidate->scratch && candidate->snapshot_valid && candidate->usage == usage &&
 			    candidate->snapshot_vaddr == vaddr && candidate->snapshot_size == size)
 			{
 				previous = candidate;
@@ -973,6 +993,7 @@ public:
 			*validation_ns += reuse_validation_ns;
 			if (matches)
 			{
+				previous->used = true;
 				previous->buffer.descriptor_range = size;
 				*reused                           = true;
 				return &previous->buffer;
@@ -1178,8 +1199,8 @@ private:
 			{
 				if (allocation_class == GpuMemoryTransientBufferAllocationClass::Critical)
 				{
-					ReportCriticalTransientPoolCapacityReject(size, usage, usage_entries,
-					                                          static_cast<uint32_t>(m_entries.size()), m_total_bytes);
+					ReportCriticalTransientPoolCapacityReject(size, usage, usage_entries, static_cast<uint32_t>(m_entries.size()),
+					                                          m_total_bytes, MeasureOccupancy(usage));
 				}
 				return nullptr;
 			}
@@ -1202,6 +1223,45 @@ private:
 		}
 		entry->zero_carrier = false;
 		return entry;
+	}
+
+	// Refusal diagnostics only: groups used entries of one usage by size and committed bytes.
+	TransientPoolUsageOccupancy MeasureOccupancy(uint32_t usage) const
+	{
+		TransientPoolUsageOccupancy occupancy {};
+		std::unordered_map<uint64_t, uint32_t> groups;
+		for (const auto* entry: m_entries)
+		{
+			if (entry->scratch || entry->usage != usage)
+			{
+				continue;
+			}
+			if (!entry->used)
+			{
+				occupancy.free++;
+				continue;
+			}
+			occupancy.used++;
+			occupancy.used_snapshots += entry->snapshot_valid ? 1u : 0u;
+			const uint64_t bytes = std::min<uint64_t>(entry->buffer.descriptor_range, entry->size);
+			if (bytes == 4u)
+			{
+				occupancy.used_four_byte++;
+				uint32_t word = 0;
+				std::memcpy(&word, entry->mapped, sizeof(word));
+				occupancy.used_four_byte_zero += word == 0u ? 1u : 0u;
+			}
+			uint64_t hash = 1469598103934665603ull ^ bytes;
+			const auto* data = static_cast<const uint8_t*>(entry->mapped);
+			for (uint64_t i = 0; i < std::min<uint64_t>(bytes, 4096u); ++i)
+			{
+				hash = (hash ^ data[i]) * 1099511628211ull;
+			}
+			const uint32_t members = ++groups[hash];
+			occupancy.used_duplicates += members > 1u ? 1u : 0u;
+			occupancy.largest_duplicate_group = std::max(occupancy.largest_duplicate_group, members);
+		}
+		return occupancy;
 	}
 
 	void DiscardNew(GraphicContext* ctx, Entry* entry)
@@ -1262,6 +1322,7 @@ void CommandBuffer::Allocate()
 		if (!m_pool->busy[i])
 		{
 			m_pool->busy[i] = true;
+			MarkCommandBufferResetting();
 			const auto reset_result = vkResetCommandBuffer(m_pool->buffers[i], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 			if (reset_result != VK_SUCCESS)
 			{
@@ -1269,6 +1330,7 @@ void CommandBuffer::Allocate()
 				EXIT("vkResetCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(reset_result), m_queue,
 				     i);
 			}
+			ReleasePipelineLeases();
 			m_index = i;
 			break;
 		}
@@ -1298,6 +1360,7 @@ void CommandBuffer::Free()
 	}
 
 	m_pool->busy[m_index] = false;
+	MarkCommandBufferResetting();
 	const auto reset_result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 	if (reset_result != VK_SUCCESS)
 	{
@@ -1305,14 +1368,91 @@ void CommandBuffer::Free()
 		EXIT("vkResetCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(reset_result), m_queue,
 		     m_index);
 	}
+	ReleasePipelineLeases();
 	m_index = static_cast<uint32_t>(-1);
 
 	if (!IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsInvalid() condition ignored (continuing)\n"); }
 }
 
+bool CommandBuffer::AttachPipelineLease(VulkanPipeline* pipeline, bool* added)
+{
+	if (pipeline == nullptr || added == nullptr || m_pool == nullptr || m_index == static_cast<uint32_t>(-1) || m_execute)
+	{
+		return false;
+	}
+
+	std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
+	if (!m_recording || m_resetting)
+	{
+		return false;
+	}
+	if (std::find(m_pipeline_leases.begin(), m_pipeline_leases.end(), pipeline) != m_pipeline_leases.end())
+	{
+		*added = false;
+		return true;
+	}
+	const size_t max_pipeline_leases = PipelineCache::MaxPipelineCount();
+	if (m_pipeline_leases.size() >= max_pipeline_leases)
+	{
+		return false;
+	}
+	if (m_pipeline_leases.capacity() < max_pipeline_leases)
+	{
+		m_pipeline_leases.reserve(max_pipeline_leases);
+	}
+
+	m_pipeline_leases.push_back(pipeline);
+	*added = true;
+	return true;
+}
+
+void CommandBuffer::MarkCommandBufferResetting()
+{
+	std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
+	m_recording = false;
+	m_resetting = true;
+}
+
+void CommandBuffer::ReleasePipelineLeases()
+{
+	std::vector<VulkanPipeline*> leases;
+	{
+		std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
+		leases.swap(m_pipeline_leases);
+	}
+
+	if (!leases.empty())
+	{
+		EXIT_IF(g_render_ctx == nullptr);
+		auto* pipeline_cache = g_render_ctx->GetPipelineCache();
+		EXIT_IF(pipeline_cache == nullptr);
+		for (auto* pipeline: leases)
+		{
+			pipeline_cache->ReleasePipelineLease(pipeline);
+		}
+		leases.clear();
+	}
+
+	// Keep the bounded pointer-vector capacity with the command buffer for its
+	// next recording instead of allocating again on every reset.
+	{
+		std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
+		if (m_pipeline_leases.empty())
+		{
+			m_pipeline_leases.swap(leases);
+		}
+		m_recording = false;
+		m_resetting = false;
+	}
+}
+
 void CommandBuffer::Begin() const
 {
 	EXIT_IF(IsInvalid());
+	{
+		std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
+		EXIT_IF(m_recording || m_resetting);
+	}
 	if (m_transient_buffers != nullptr)
 	{
 		m_transient_buffers->Reset();
@@ -1335,6 +1475,10 @@ void CommandBuffer::Begin() const
 	{
 		VulkanSubmitFaultReport("command_buffer_begin", result);
 		EXIT("vkBeginCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(result), m_queue, m_index);
+	}
+	{
+		std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
+		m_recording = true;
 	}
 }
 
@@ -1398,6 +1542,10 @@ void CommandBuffer::End() const
 	{
 		VulkanSubmitFaultReport("command_buffer_end", result);
 		EXIT("vkEndCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(result), m_queue, m_index);
+	}
+	{
+		std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
+		m_recording = false;
 	}
 	DebugStatsRecordCommandBuffer();
 }
@@ -1603,6 +1751,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 			    EXIT("vkResetFences failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(fence_reset_result), m_queue,
 			         m_index);
 		    }
+		    MarkCommandBufferResetting();
 		    const auto command_reset_result =
 		        vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 		    if (command_reset_result != VK_SUCCESS)
@@ -1611,6 +1760,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 			    EXIT("vkResetCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(command_reset_result),
 			         m_queue, m_index);
 		    }
+		    ReleasePipelineLeases();
 		    m_execute = false;
 	    });
 	if (status == VK_NOT_READY)
@@ -1655,6 +1805,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 			    }
 			    if (reset_command_buffer)
 			    {
+				    MarkCommandBufferResetting();
 				    const auto command_reset_result =
 				        vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 				    if (command_reset_result != VK_SUCCESS)
@@ -1663,6 +1814,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 					    EXIT("vkResetCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n",
 					         static_cast<int>(command_reset_result), m_queue, m_index);
 				    }
+				    ReleasePipelineLeases();
 			    }
 			    m_execute = false;
 		    });

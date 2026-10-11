@@ -54,6 +54,7 @@ DOMAIN_SOURCE_GLOBS = {
         "src/AudioAvPlayer.cpp",
         "src/AudioHost.cpp",
         "src/AudioNgs2.cpp",
+        "src/AudioNgs2Sampler.cpp",
         "src/Dialog.cpp",
         "src/Controller.cpp",
     ),

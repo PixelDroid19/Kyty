@@ -1,6 +1,4 @@
 #include "Emulator/Kernel/EventFlag.h"
-#include "Emulator/Kernel/Pthread.h"
-#include "Emulator/Kernel/Errors.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -8,13 +6,19 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Timer.h"
 
+#include "Emulator/Kernel/Errors.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Log.h"
 
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <unordered_set>
+#include <limits>
+#include <memory>
+#include <unordered_map>
+#include <utility>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -22,37 +26,63 @@ namespace Kyty::Kernel::EventFlag {
 
 KERNEL_LIB_NAME();
 
-// Live EventFlag object registry. Guest may pass a garbage pointer when a
-// waiter races ahead of CreateEventFlag; never dereference unregistered
-// handles (observed Linux VibrationTrackThread SIGSEGV on 0xcccccccc…).
-static Core::Mutex                          g_event_flag_registry_mutex;
-static std::unordered_set<KernelEventFlag>  g_live_event_flags;
+// Handles are odd pointer-sized tokens, never object addresses. Their increasing
+// identities are not reused during process lifetime; even values belong to semaphores.
+// The registry validates handles and pins objects while calls race with deletion.
+static Core::Mutex                                                                  g_event_flag_registry_mutex;
+static std::unordered_map<KernelEventFlag, std::shared_ptr<KernelEventFlagPrivate>> g_live_event_flags;
+static std::uintptr_t                                                               g_next_event_flag_identity = 1;
 
-static bool EventFlagIsLive(KernelEventFlag ef)
+static constexpr std::uintptr_t kMaxEventFlagIdentity = std::numeric_limits<std::uintptr_t>::max() >> 1u;
+
+static std::shared_ptr<KernelEventFlagPrivate> EventFlagAcquire(KernelEventFlag ef)
 {
 	if (ef == nullptr)
 	{
-		return false;
+		return {};
 	}
 	Core::LockGuard lock(g_event_flag_registry_mutex);
-	return g_live_event_flags.find(ef) != g_live_event_flags.end();
+	auto            it = g_live_event_flags.find(ef);
+	return it == g_live_event_flags.end() ? std::shared_ptr<KernelEventFlagPrivate> {} : it->second;
 }
 
-static void EventFlagRegister(KernelEventFlag ef)
+static KernelEventFlag EventFlagRegister(const std::shared_ptr<KernelEventFlagPrivate>& ef)
 {
 	EXIT_IF(ef == nullptr);
 	Core::LockGuard lock(g_event_flag_registry_mutex);
-	g_live_event_flags.insert(ef);
+	if (g_next_event_flag_identity > kMaxEventFlagIdentity)
+	{
+		EXIT("EventFlag token identity space exhausted\n");
+		std::abort();
+	}
+
+	const std::uintptr_t token_value = (g_next_event_flag_identity++ << 1u) | std::uintptr_t {1};
+	const auto           handle      = reinterpret_cast<KernelEventFlag>(token_value);
+	const auto [it, inserted]        = g_live_event_flags.emplace(handle, ef);
+	(void)it;
+	if (!inserted)
+	{
+		EXIT("EventFlag token identity was reused\n");
+		std::abort();
+	}
+	return handle;
 }
 
-static void EventFlagUnregister(KernelEventFlag ef)
+static std::shared_ptr<KernelEventFlagPrivate> EventFlagUnregister(KernelEventFlag ef)
 {
 	if (ef == nullptr)
 	{
-		return;
+		return {};
 	}
 	Core::LockGuard lock(g_event_flag_registry_mutex);
-	g_live_event_flags.erase(ef);
+	auto            it = g_live_event_flags.find(ef);
+	if (it == g_live_event_flags.end())
+	{
+		return {};
+	}
+	auto object = std::move(it->second);
+	g_live_event_flags.erase(it);
+	return object;
 }
 
 class KernelEventFlagPrivate
@@ -86,9 +116,10 @@ public:
 
 	KYTY_CLASS_NO_COPY(KernelEventFlagPrivate);
 
-	void   Set(uint64_t bits);
-	void   Clear(uint64_t bits);
-	void   Cancel(uint64_t bits, int* num_waiting_threads);
+	Result Set(uint64_t bits);
+	Result Clear(uint64_t bits);
+	Result Cancel(uint64_t bits, int* num_waiting_threads);
+	Result Delete();
 	Result Wait(uint64_t bits, WaitMode wait_mode, ClearMode clear_mode, uint64_t* result, uint32_t* ptr_micros);
 
 	Result Poll(uint64_t bits, WaitMode wait_mode, ClearMode clear_mode, uint64_t* result)
@@ -98,7 +129,11 @@ public:
 	}
 
 	[[nodiscard]] const String& GetName() const { return m_name; }
-	[[nodiscard]] uint64_t      GetBits() const { return m_bits; }
+	[[nodiscard]] uint64_t      GetBits() const
+	{
+		Core::LockGuard lock(m_mutex);
+		return m_bits;
+	}
 
 private:
 	enum class Status
@@ -108,42 +143,66 @@ private:
 		Deleted
 	};
 
-	Core::Mutex   m_mutex;
-	Core::CondVar m_cond_var;
-	Status        m_status          = Status::Set;
-	int           m_waiting_threads = 0;
-	String        m_name;
-	bool          m_single_thread = false;
-	uint64_t      m_bits          = 0;
+	class WaitCallGuard
+	{
+	public:
+		explicit WaitCallGuard(KernelEventFlagPrivate* object): m_object(object) { m_object->m_active_wait_calls++; }
+		~WaitCallGuard()
+		{
+			m_object->m_active_wait_calls--;
+			if (m_object->m_status == Status::Deleted && m_object->m_active_wait_calls == 0)
+			{
+				m_object->m_cond_var.SignalAll();
+			}
+		}
+
+	private:
+		KernelEventFlagPrivate* m_object;
+	};
+
+	mutable Core::Mutex m_mutex;
+	Core::CondVar       m_cond_var;
+	Status              m_status            = Status::Set;
+	int                 m_waiting_threads   = 0;
+	int                 m_active_wait_calls = 0;
+	String              m_name;
+	bool                m_single_thread = false;
+	uint64_t            m_bits          = 0;
 };
 
 KernelEventFlagPrivate::~KernelEventFlagPrivate()
 {
+	(void)Delete();
+}
+
+KernelEventFlagPrivate::Result KernelEventFlagPrivate::Delete()
+{
 	Core::LockGuard lock(m_mutex);
 
-	while (m_status != Status::Set)
+	while (m_status == Status::Canceled)
 	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
+		m_cond_var.Wait(&m_mutex);
+	}
+	if (m_status == Status::Deleted)
+	{
+		return Result::Deleted;
 	}
 
 	m_status = Status::Deleted;
-
 	m_cond_var.SignalAll();
-
-	while (m_waiting_threads > 0)
+	while (m_active_wait_calls > 0)
 	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
+		m_cond_var.Wait(&m_mutex);
 	}
+
+	return Result::Ok;
 }
 
 KernelEventFlagPrivate::Result KernelEventFlagPrivate::Wait(uint64_t bits, WaitMode wait_mode, ClearMode clear_mode, uint64_t* result,
                                                             uint32_t* ptr_micros)
 {
 	Core::LockGuard lock(m_mutex);
+	WaitCallGuard   active_call(this);
 
 	uint32_t micros     = 0;
 	bool     infinitely = true;
@@ -156,13 +215,64 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Wait(uint64_t bits, WaitM
 	uint32_t    elapsed = 0;
 	Core::Timer t;
 	t.Start();
+	const auto condition_satisfied = [this, bits, wait_mode]
+	{ return (wait_mode == WaitMode::And && (m_bits & bits) == bits) || (wait_mode == WaitMode::Or && (m_bits & bits) != 0); };
+	if (m_status == Status::Deleted)
+	{
+		if (result != nullptr)
+		{
+			*result = m_bits;
+		}
+		if (ptr_micros != nullptr)
+		{
+			*ptr_micros = micros;
+		}
+		return Result::Deleted;
+	}
+
+	while (m_status == Status::Canceled && !condition_satisfied())
+	{
+		if (elapsed >= micros && !infinitely)
+		{
+			if (result != nullptr)
+			{
+				*result = m_bits;
+			}
+			if (ptr_micros != nullptr)
+			{
+				*ptr_micros = 0;
+			}
+			return Result::TimedOut;
+		}
+
+		if (infinitely)
+		{
+			m_cond_var.Wait(&m_mutex);
+		} else
+		{
+			m_cond_var.WaitFor(&m_mutex, micros - elapsed);
+		}
+		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
+		if (m_status == Status::Deleted)
+		{
+			if (result != nullptr)
+			{
+				*result = m_bits;
+			}
+			if (ptr_micros != nullptr)
+			{
+				*ptr_micros = (elapsed >= micros ? 0 : micros - elapsed);
+			}
+			return Result::Deleted;
+		}
+	}
 
 	if (m_single_thread && m_waiting_threads > 0)
 	{
 		return Result::AlreadyWaiting;
 	}
 
-	while (!((wait_mode == WaitMode::And && (m_bits & bits) == bits) || (wait_mode == WaitMode::Or && (m_bits & bits) != 0)))
+	while (!condition_satisfied())
 	{
 		if ((elapsed >= micros && !infinitely))
 		{
@@ -185,6 +295,10 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Wait(uint64_t bits, WaitM
 		}
 
 		m_waiting_threads--;
+		if (m_status == Status::Canceled && m_waiting_threads == 0)
+		{
+			m_cond_var.SignalAll();
+		}
 
 		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
 
@@ -236,51 +350,53 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Wait(uint64_t bits, WaitM
 	return Result::Ok;
 }
 
-void KernelEventFlagPrivate::Set(uint64_t bits)
+KernelEventFlagPrivate::Result KernelEventFlagPrivate::Set(uint64_t bits)
 {
 	Core::LockGuard lock(m_mutex);
 
-	if (m_status == Status::Deleted) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	while (m_status != Status::Set)
+	while (m_status == Status::Canceled)
 	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
+		m_cond_var.Wait(&m_mutex);
+	}
+	if (m_status == Status::Deleted)
+	{
+		return Result::Deleted;
 	}
 
 	m_bits |= bits;
 
 	m_cond_var.SignalAll();
+	return Result::Ok;
 }
 
-void KernelEventFlagPrivate::Clear(uint64_t bits)
+KernelEventFlagPrivate::Result KernelEventFlagPrivate::Clear(uint64_t bits)
 {
 	Core::LockGuard lock(m_mutex);
 
-	if (m_status == Status::Deleted) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	while (m_status != Status::Set)
+	while (m_status == Status::Canceled)
 	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
+		m_cond_var.Wait(&m_mutex);
+	}
+	if (m_status == Status::Deleted)
+	{
+		return Result::Deleted;
 	}
 
 	m_bits &= bits;
+	return Result::Ok;
 }
 
-void KernelEventFlagPrivate::Cancel(uint64_t bits, int* num_waiting_threads)
+KernelEventFlagPrivate::Result KernelEventFlagPrivate::Cancel(uint64_t bits, int* num_waiting_threads)
 {
 	Core::LockGuard lock(m_mutex);
 
-	if (m_status == Status::Deleted) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	while (m_status != Status::Set)
+	while (m_status == Status::Canceled)
 	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
+		m_cond_var.Wait(&m_mutex);
+	}
+	if (m_status == Status::Deleted)
+	{
+		return Result::Deleted;
 	}
 
 	if (num_waiting_threads != nullptr)
@@ -295,19 +411,26 @@ void KernelEventFlagPrivate::Cancel(uint64_t bits, int* num_waiting_threads)
 
 	while (m_waiting_threads > 0)
 	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
+		m_cond_var.Wait(&m_mutex);
+		if (m_status == Status::Deleted)
+		{
+			return Result::Deleted;
+		}
 	}
 
 	m_status = Status::Set;
+	m_cond_var.SignalAll();
+	return Result::Ok;
 }
 
 int KYTY_SYSV_ABI KernelCreateEventFlag(KernelEventFlag* ef, const char* name, uint32_t attr, uint64_t init_pattern, const void* param)
 {
 	PRINT_NAME();
 
-	if (param != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (param != nullptr)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+	}
 
 	if (ef == nullptr || name == nullptr)
 	{
@@ -325,8 +448,8 @@ int KYTY_SYSV_ABI KernelCreateEventFlag(KernelEventFlag* ef, const char* name, u
 	const bool single = thread_mode != 0x20u;
 	const bool fifo   = queue_mode != 0x02u;
 
-	*ef = new KernelEventFlagPrivate(String::FromUtf8(name), single, fifo, init_pattern);
-	EventFlagRegister(*ef);
+	auto object = std::make_shared<KernelEventFlagPrivate>(String::FromUtf8(name), single, fifo, init_pattern);
+	*ef         = EventFlagRegister(object);
 
 	KYTY_LOG_DEBUG("\tEventFlag create: %s\n", name);
 	KYTY_LOG_DEBUG("\tEventFlag ptr    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(*ef));
@@ -338,15 +461,13 @@ int KYTY_SYSV_ABI KernelDeleteEventFlag(KernelEventFlag ef)
 {
 	PRINT_NAME();
 
-	if (!EventFlagIsLive(ef))
+	auto object = EventFlagUnregister(ef);
+	if (!object)
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	EventFlagUnregister(ef);
-	delete ef;
-
-	return OK;
+	return object->Delete() == KernelEventFlagPrivate::Result::Ok ? OK : KERNEL_ERROR_EACCES;
 }
 
 int KYTY_SYSV_ABI KernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, uint32_t wait_mode, uint64_t* result_pat,
@@ -355,7 +476,8 @@ int KYTY_SYSV_ABI KernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
 	PRINT_NAME();
 	KYTY_GUEST_WAIT(PthreadWaitKind::EventFlag, ef);
 
-	if (!EventFlagIsLive(ef))
+	auto object = EventFlagAcquire(ef);
+	if (!object)
 	{
 		KYTY_LOG_DEBUG("\tEventFlag wait: invalid handle 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ef));
 		return KERNEL_ERROR_ESRCH;
@@ -390,13 +512,12 @@ int KYTY_SYSV_ABI KernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
 		const uint32_t               n = wait_logs.fetch_add(1);
 		if (n < 64u)
 		{
-			KYTY_LOG_DEBUG(
-			             "EVENTFLAG_WAIT name=%s want=0x%016" PRIx64 " have=0x%016" PRIx64 " mode=0x%x timeout=%s\n",
-			             ef->GetName().C_Str(), bit_pattern, ef->GetBits(), wait_mode, timeout == nullptr ? "inf" : "finite");
+			KYTY_LOG_DEBUG("EVENTFLAG_WAIT name=%s want=0x%016" PRIx64 " have=0x%016" PRIx64 " mode=0x%x timeout=%s\n",
+			               object->GetName().C_Str(), bit_pattern, object->GetBits(), wait_mode, timeout == nullptr ? "inf" : "finite");
 		}
 	}
 
-	auto result = ef->Wait(bit_pattern, wait, clear, result_pat, timeout);
+	auto result = object->Wait(bit_pattern, wait, clear, result_pat, timeout);
 
 	int ret = OK;
 
@@ -416,7 +537,8 @@ int KYTY_SYSV_ABI KernelPollEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
 {
 	PRINT_NAME();
 
-	if (!EventFlagIsLive(ef))
+	auto object = EventFlagAcquire(ef);
+	if (!object)
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
@@ -444,7 +566,7 @@ int KYTY_SYSV_ABI KernelPollEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
 		default: EXIT("unknown mode: %u\n", wait_mode);
 	}
 
-	auto result = ef->Poll(bit_pattern, wait, clear, result_pat);
+	auto result = object->Poll(bit_pattern, wait, clear, result_pat);
 
 	int ret = OK;
 
@@ -464,7 +586,8 @@ int KYTY_SYSV_ABI KernelSetEventFlag(KernelEventFlag ef, uint64_t bit_pattern)
 {
 	PRINT_NAME();
 
-	if (!EventFlagIsLive(ef))
+	auto object = EventFlagAcquire(ef);
+	if (!object)
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
@@ -475,41 +598,37 @@ int KYTY_SYSV_ABI KernelSetEventFlag(KernelEventFlag ef, uint64_t bit_pattern)
 		const uint32_t               n = set_logs.fetch_add(1);
 		if (n < 128u)
 		{
-			KYTY_LOG_DEBUG( "EVENTFLAG_SET name=%s bits=0x%016" PRIx64 "\n", ef->GetName().C_Str(), bit_pattern);
+			KYTY_LOG_DEBUG("EVENTFLAG_SET name=%s bits=0x%016" PRIx64 "\n", object->GetName().C_Str(), bit_pattern);
 		}
 	}
 
-	ef->Set(bit_pattern);
-
-	return OK;
+	return object->Set(bit_pattern) == KernelEventFlagPrivate::Result::Ok ? OK : KERNEL_ERROR_EACCES;
 }
 
 int KYTY_SYSV_ABI KernelClearEventFlag(KernelEventFlag ef, uint64_t bit_pattern)
 {
 	PRINT_NAME();
 
-	if (!EventFlagIsLive(ef))
+	auto object = EventFlagAcquire(ef);
+	if (!object)
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	ef->Clear(bit_pattern);
-
-	return OK;
+	return object->Clear(bit_pattern) == KernelEventFlagPrivate::Result::Ok ? OK : KERNEL_ERROR_EACCES;
 }
 
 int KYTY_SYSV_ABI KernelCancelEventFlag(KernelEventFlag ef, uint64_t set_pattern, int* num_wait_threads)
 {
 	PRINT_NAME();
 
-	if (!EventFlagIsLive(ef))
+	auto object = EventFlagAcquire(ef);
+	if (!object)
 	{
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	ef->Cancel(set_pattern, num_wait_threads);
-
-	return OK;
+	return object->Cancel(set_pattern, num_wait_threads) == KernelEventFlagPrivate::Result::Ok ? OK : KERNEL_ERROR_EACCES;
 }
 
 } // namespace Kyty::Kernel::EventFlag

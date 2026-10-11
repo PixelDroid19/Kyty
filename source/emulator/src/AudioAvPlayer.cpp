@@ -405,9 +405,9 @@ static void avplayer_dump_lifetime(const char* event, const AvPlayerInternal* pl
 	}
 }
 
-static void register_video_frame(uint8_t* frame, size_t bytes, uint32_t pitch)
+static bool register_video_frame(uint8_t* frame, size_t bytes, uint32_t pitch)
 {
-	VideoFrameMemory::RegisterLinearFrame(reinterpret_cast<uint64_t>(frame), bytes, pitch);
+	return VideoFrameMemory::RegisterLinearFrame(reinterpret_cast<uint64_t>(frame), bytes, pitch);
 }
 
 static void unregister_video_frame(uint8_t* frame)
@@ -485,7 +485,11 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 				return false;
 			}
 			r->video_frames.push_back(AvPlayerInternal::VideoFrameBuffer {frame, true});
-			register_video_frame(frame, size, video_frame_pitch(luma_width));
+			if (!register_video_frame(frame, size, video_frame_pitch(luma_width)))
+			{
+				release_synthetic_video(r);
+				return false;
+			}
 			if (r->closing.load(std::memory_order_acquire))
 			{
 				release_synthetic_video(r);
@@ -503,7 +507,8 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 		const auto aligned_address = (raw_address + 255u) & ~static_cast<uintptr_t>(255u);
 		r->synthetic_storage_data  = reinterpret_cast<uint8_t*>(aligned_address);
 		r->video_frames.push_back(AvPlayerInternal::VideoFrameBuffer {r->synthetic_storage_data, false});
-		register_video_frame(r->synthetic_storage_data, size, video_frame_pitch(luma_width));
+		// This host-owned scratch buffer has no guest mapping identity to register.
+		(void)register_video_frame(r->synthetic_storage_data, size, video_frame_pitch(luma_width));
 		if (r->closing.load(std::memory_order_acquire))
 		{
 			release_synthetic_video(r);

@@ -31,6 +31,7 @@
 #include "Emulator/Graphics/DepthStencilCopy.h"
 #include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
@@ -181,6 +182,69 @@ struct VulkanPipeline
 	VkExtent2D                      framebuffer_extent {};
 };
 
+// A cache entry remains alive while a recorded executable command buffer can
+// still be submitted with it. Retirement hides it from new lookups and destroys
+// it only when its last recording lease is released.
+class PipelineLifetimeState
+{
+public:
+	[[nodiscard]] bool Acquire()
+	{
+		if (m_retirement_requested || m_references == UINT32_MAX)
+		{
+			return false;
+		}
+		m_references++;
+		return true;
+	}
+
+	[[nodiscard]] bool Release()
+	{
+		if (m_references == 0)
+		{
+			return false;
+		}
+		m_references--;
+		return m_retirement_requested && m_references == 0;
+	}
+
+	[[nodiscard]] bool RequestRetirement()
+	{
+		m_retirement_requested = true;
+		return m_references == 0;
+	}
+
+	[[nodiscard]] bool CanEvict() const { return !m_retirement_requested && m_references == 0; }
+	[[nodiscard]] bool RetirementRequested() const { return m_retirement_requested; }
+	[[nodiscard]] uint32_t ReferenceCount() const { return m_references; }
+
+private:
+	uint32_t m_references = 0;
+	bool     m_retirement_requested = false;
+};
+
+template <typename IsEvictable>
+[[nodiscard]] inline uint32_t PipelineCacheNextEvictableIndex(uint32_t size, uint32_t* cursor, IsEvictable is_evictable)
+{
+	if (size == 0 || cursor == nullptr)
+	{
+		return UINT32_MAX;
+	}
+
+	const uint32_t first = *cursor % size;
+	for (uint32_t offset = 0; offset < size; offset++)
+	{
+		const uint32_t index = (first + offset) % size;
+		if (is_evictable(index))
+		{
+			*cursor = (index + 1u) % size;
+			return index;
+		}
+	}
+
+	return UINT32_MAX;
+}
+
 class PipelineCache
 {
 public:
@@ -188,17 +252,22 @@ public:
 	virtual ~PipelineCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(PipelineCache);
 
-	VulkanPipeline* CreatePipeline(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
+	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
 	                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
 	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
 	                               const VulkanSampleLocationState& sample_locations);
-	VulkanPipeline* CreatePipeline(const ShaderComputeInputInfo* input_info, const HW::ComputeShaderInfo* cs_regs,
+	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, const ShaderComputeInputInfo* input_info,
+	                               const HW::ComputeShaderInfo* cs_regs,
 	                               const HW::ShaderRegisters* sh_regs);
 	void            DeletePipeline(VulkanPipeline* pipeline);
 	void            DeletePipelines(VulkanFramebuffer* framebuffer);
 	void            DeleteAllPipelines();
+	void            ReleasePipelineLease(VulkanPipeline* pipeline);
+	[[nodiscard]] static constexpr uint32_t MaxPipelineCount() { return MAX_PIPELINES; }
 
 private:
+	friend class PipelineLifetimeTestAccess;
+
 	static constexpr uint32_t MAX_PIPELINES = 512;
 
 	struct Pipeline
@@ -210,9 +279,12 @@ private:
 		VulkanPipeline*            pipeline       = nullptr;
 		PipelineStaticParameters*  static_params  = nullptr;
 		PipelineDynamicParameters* dynamic_params = nullptr;
+		PipelineLifetimeState      lifetime;
 	};
 
-	[[nodiscard]] VulkanPipeline* Find(const Pipeline& p) const;
+	[[nodiscard]] Pipeline* Find(const Pipeline& p);
+	[[nodiscard]] uint32_t  FindAvailableSlot();
+	void                    AttachPipelineLease(CommandBuffer* recording_buffer, Pipeline& pipeline);
 
 	void DeletePipelineInternal(uint32_t id);
 	void SaveDriverCacheIfDue();
@@ -278,6 +350,8 @@ public:
 	                                   VulkanBuffer* vsharp_buffer, const ShaderBindResources& bind);
 	void                 FreeDescriptor(VulkanBuffer* buffer);
 	void                 FreeDescriptor(VulkanImage* image);
+	// Test contexts own their device and discard the cache before destroying it.
+	void                 DeleteAllForTesting(GraphicContext* ctx);
 
 private:
 	struct Set
@@ -755,6 +829,22 @@ struct RenderColorInfo
 	uint32_t                  targets_num = 0;
 	RenderColorAttachmentInfo attachment[TARGETS_MAX] {};
 };
+
+enum class VulkanColorAttachmentBlendAdmission
+{
+	Supported,
+	InvalidInput,
+	MissingFormatFeature,
+};
+
+[[nodiscard]] inline VkBool32 VulkanResolveColorAttachmentBlendEnable(bool blend_enable, bool blend_bypass)
+{
+	return blend_enable && !blend_bypass ? VK_TRUE : VK_FALSE;
+}
+
+// Uses the render-pass view format; bound color images use optimal tiling.
+[[nodiscard]] VulkanColorAttachmentBlendAdmission VulkanValidateColorAttachmentBlendRequest(
+	VkPhysicalDevice physical_device, VkFormat attachment_format, bool blend_enable, bool blend_bypass);
 
 // Opt-in PS bind probe. KYTY_TRACE_DRAW_PS is a hex checksum, a comma-separated
 // list of up to four checksums, or "*" / "all" for a unique-checksum census.
@@ -1581,7 +1671,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr,
                      uint64_t shader_checksum = 0, const VulkanImage* stencil_attached_depth = nullptr,
-                     const ShaderStorageImageTileCoverage* storage_seed_coverage = nullptr);
+                     const ShaderStorageImageTileCoverage* storage_seed_coverage = nullptr,
+                     const GuestDeviceAddressTable* device_address_table = nullptr);
 void TraceRenderTargetLifetimeDraw(uint64_t submit_id, const DrawMaterialTraceContext& draw);
 void TraceRenderTargetLifetimePassBegin(uint64_t submit_id, const RenderColorInfo& color,
 	                                    const VulkanFramebuffer& framebuffer);
@@ -1614,7 +1705,8 @@ void MaybeDumpPrimitiveDrawPlan(const char* path, uint32_t primitive_type, uint3
 bool AutoDrawModifierSupported(uint64_t draw_modifier);
 void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
 	                                uint32_t index_count, uint32_t index_type_and_size, const void* index_addr,
-	                                uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance);
+	                                uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
+	                                SubmissionId* pending_submission);
 
 } // namespace Kyty::Libs::Graphics
 

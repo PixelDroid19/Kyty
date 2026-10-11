@@ -70,6 +70,26 @@ bool VertexInputLayoutLogEnabled()
 
 // SamplerCache::GetSamplerId, PipelineCache, CreatePipelineInternal
 
+VulkanColorAttachmentBlendAdmission VulkanValidateColorAttachmentBlendRequest(VkPhysicalDevice physical_device,
+                                                                              VkFormat attachment_format, bool blend_enable,
+                                                                              bool blend_bypass)
+{
+	if (physical_device == VK_NULL_HANDLE || attachment_format == VK_FORMAT_UNDEFINED)
+	{
+		return VulkanColorAttachmentBlendAdmission::InvalidInput;
+	}
+	if (VulkanResolveColorAttachmentBlendEnable(blend_enable, blend_bypass) == VK_FALSE)
+	{
+		return VulkanColorAttachmentBlendAdmission::Supported;
+	}
+
+	VkFormatProperties properties {};
+	vkGetPhysicalDeviceFormatProperties(physical_device, attachment_format, &properties);
+	return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0u
+	           ? VulkanColorAttachmentBlendAdmission::Supported
+	           : VulkanColorAttachmentBlendAdmission::MissingFormatFeature;
+}
+
 uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized)
 {
 	if (operation == State::ImageSampleOperation::Mixed)
@@ -445,18 +465,21 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		{
 			if (FILE* f = fopen("/tmp/kyty_vil.log", "a"))
 			{
+				// Decoded counts are reported as-is; the fixed arrays bound the traversal.
+				const int buffer_count   = std::min(vs_input_info->buffers_num, ShaderVertexInputInfo::RES_MAX);
+				const int resource_count = std::min(vs_input_info->resources_num, ShaderVertexInputInfo::RES_MAX);
 				fprintf(f, "VIL FAIL: resources=%d buffers=%d\n", vs_input_info->resources_num, vs_input_info->buffers_num);
-				for (int bi = 0; bi < vs_input_info->buffers_num; bi++)
+				for (int bi = 0; bi < buffer_count; bi++)
 				{
 					const auto& b = vs_input_info->buffers[bi];
 					fprintf(f, "  buf[%d] addr=0x%llx stride=%u records=%u attr_num=%d\n", bi, (unsigned long long)b.addr, b.stride,
 					        b.num_records, b.attr_num);
-					for (int ai = 0; ai < b.attr_num && ai < 16; ai++)
+					for (int ai = 0; ai < b.attr_num && ai < ShaderVertexInputBuffer::ATTR_MAX; ai++)
 					{
 						fprintf(f, "    attr[%d] resource=%d offset=%u\n", ai, b.attr_indices[ai], b.attr_offsets[ai]);
 					}
 				}
-				for (int ri = 0; ri < vs_input_info->resources_num; ri++)
+				for (int ri = 0; ri < resource_count; ri++)
 				{
 					const auto& r = vs_input_info->resources[ri];
 					fprintf(f,
@@ -622,7 +645,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 		auto& att               = color_blend_attachments[rt];
 		att.colorWriteMask      = color_write_mask;
-		att.blendEnable         = (static_params->blend_enable[rt] && !static_params->blend_bypass[rt]) ? VK_TRUE : VK_FALSE;
+		att.blendEnable         = VulkanResolveColorAttachmentBlendEnable(static_params->blend_enable[rt], static_params->blend_bypass[rt]);
 		const auto color_blend  = get_blend_factors(static_params->color_srcblend[rt], static_params->color_destblend[rt]);
 		const auto alpha_blend  = (static_params->separate_alpha_blend[rt]
 		                               ? get_blend_factors(static_params->alpha_srcblend[rt], static_params->alpha_destblend[rt])
@@ -1134,9 +1157,12 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 	if (!m_pipelines.IndexValid(id)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_pipelines.IndexValid(id) condition ignored (continuing)\n"); }
 
 	Pipeline& p = m_pipelines[id];
+	if (p.pipeline == nullptr)
+	{
+		return;
+	}
 
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(p.pipeline == nullptr);
 	EXIT_IF(p.pipeline->pipeline == nullptr);
 	EXIT_IF(p.pipeline->pipeline_layout == nullptr);
 	EXIT_IF(p.static_params == nullptr);
@@ -1144,6 +1170,10 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 
 	EXIT_IF(p.pipeline->static_params != p.static_params);
 	EXIT_IF(p.pipeline->dynamic_params != p.dynamic_params);
+	if (!p.lifetime.RequestRetirement())
+	{
+		return;
+	}
 
 	DumpPipeline("delete", id);
 
@@ -1161,22 +1191,69 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 	vkDestroyPipelineLayout(gctx->device, p.pipeline->pipeline_layout, nullptr);
 
 	delete p.pipeline;
-
-	p.pipeline = nullptr;
+	p = {};
 }
 
-VulkanPipeline* PipelineCache::Find(const Pipeline& p) const
+PipelineCache::Pipeline* PipelineCache::Find(const Pipeline& p)
 {
-	for (const auto& pn: m_pipelines)
+	for (auto& pn: m_pipelines)
 	{
-		if (pn.pipeline != nullptr && p.render_pass_id == pn.render_pass_id && p.vs_shader_id == pn.vs_shader_id &&
+		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.render_pass_id == pn.render_pass_id &&
+		    p.vs_shader_id == pn.vs_shader_id &&
 		    p.ps_shader_id == pn.ps_shader_id && p.cs_shader_id == pn.cs_shader_id && *p.static_params == *pn.static_params &&
 		    *p.dynamic_params == *pn.dynamic_params)
 		{
-			return pn.pipeline;
+			return &pn;
 		}
 	}
 	return nullptr;
+}
+
+uint32_t PipelineCache::FindAvailableSlot()
+{
+	for (uint32_t index = 0; index < m_pipelines.Size(); index++)
+	{
+		if (m_pipelines[index].pipeline == nullptr)
+		{
+			return index;
+		}
+	}
+
+	if (m_pipelines.Size() < PipelineCache::MAX_PIPELINES)
+	{
+		return m_pipelines.Size();
+	}
+
+	const auto evict =
+	    PipelineCacheNextEvictableIndex(m_pipelines.Size(), &m_evict_cursor, [this](uint32_t index)
+	                                    { return m_pipelines[index].pipeline != nullptr && m_pipelines[index].lifetime.CanEvict(); });
+	if (evict == UINT32_MAX)
+	{
+		EXIT("pipeline cache limit reached: all %u pipeline entries are leased by recorded command buffers\n",
+		     PipelineCache::MAX_PIPELINES);
+	}
+	return evict;
+}
+
+void PipelineCache::AttachPipelineLease(CommandBuffer* recording_buffer, Pipeline& pipeline)
+{
+	EXIT_IF(recording_buffer == nullptr);
+	EXIT_IF(pipeline.pipeline == nullptr);
+	if (!pipeline.lifetime.Acquire())
+	{
+		EXIT("attempted to lease a retired or saturated Vulkan pipeline\n");
+	}
+
+	bool added = false;
+	if (!recording_buffer->AttachPipelineLease(pipeline.pipeline, &added))
+	{
+		(void)pipeline.lifetime.Release();
+		EXIT("failed to attach Vulkan pipeline to its recording command buffer\n");
+	}
+	if (!added)
+	{
+		EXIT_IF(pipeline.lifetime.Release());
+	}
 }
 
 void PipelineCache::SaveDriverCacheIfDue()
@@ -1237,13 +1314,15 @@ void PipelineCache::SaveDriverCacheIfDue()
 	}
 }
 
-VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
+VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color,
+                                              RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
                                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
                                               const VulkanSampleLocationState& sample_locations)
 {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 
+	EXIT_IF(recording_buffer == nullptr);
 	EXIT_IF(framebuffer == nullptr);
 	EXIT_IF(depth == nullptr);
 	EXIT_IF(color == nullptr);
@@ -1393,11 +1472,26 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 				p.static_params->blend_enable[rt] = false;
 				continue;
 			}
-			const auto& blend                         = ctx->GetBlendControl(rt);
-			p.static_params->color_mask[rt]           = State::ResolveColorWriteAgainstDepth(
+			const uint8_t requested_mask = State::ResolveColorWriteAgainstDepth(
 			    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), sh_regs.m_cbShaderMask, rt),
-			    ctx->GetDepthControl().color_writes_on_depth_pass_disable,
-			    ctx->GetDepthControl().color_writes_on_depth_fail_enable);
+			    ctx->GetDepthControl().color_writes_on_depth_pass_disable, ctx->GetDepthControl().color_writes_on_depth_fail_enable);
+			const uint8_t export_enable           = ps_input_info->color_exports.enable[rt];
+			const bool    export_summary_available = !ps_regs.ps_embedded;
+			const uint8_t export_admitted_mask =
+			    State::ResolveColorWriteAgainstExport(requested_mask, export_enable, export_summary_available);
+			if (export_summary_available && export_enable == 0u)
+			{
+				p.static_params->color_mask[rt]   = export_admitted_mask;
+				p.static_params->blend_enable[rt] = false;
+				continue;
+			}
+			const bool uint16_mrt_output = ps_input_info->target_output_mode[rt] == 7u &&
+			                               ps_input_info->target_output_number[rt] == 4u &&
+			                               ps_input_info->target_output_order[rt] == 0u;
+			const auto& blend               = ctx->GetBlendControl(rt);
+			p.static_params->color_mask[rt] = uint16_mrt_output
+			                                      ? State::ResolveColorWriteAgainstUint16Export(export_admitted_mask, export_enable)
+			                                      : export_admitted_mask;
 			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
 			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
 			p.static_params->color_destblend[rt]      = blend.color_destblend;
@@ -1443,11 +1537,31 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		*found->dynamic_params = *p.dynamic_params;
 		delete p.static_params;
 		delete p.dynamic_params;
+		AttachPipelineLease(recording_buffer, *found);
 		SaveDriverCacheIfDue();
-		return found;
+		return found->pipeline;
 	}
 
 	const auto miss_start = std::chrono::steady_clock::now();
+	for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
+	{
+		if (!RenderColorSlotActive(*color, rt))
+		{
+			continue;
+		}
+
+		const auto& attachment = color->attachment[rt];
+		const auto  admission  = VulkanValidateColorAttachmentBlendRequest(gctx->physical_device, attachment.attachment_format,
+		                                                                  p.static_params->blend_enable[rt],
+		                                                                  p.static_params->blend_bypass[rt]);
+		if (admission != VulkanColorAttachmentBlendAdmission::Supported)
+		{
+			EXIT("unsupported graphics color attachment blend: reason=%u target=%u format=%u blend_enable=%u blend_bypass=%u\n",
+			     static_cast<uint32_t>(admission), rt, static_cast<uint32_t>(attachment.attachment_format),
+			     p.static_params->blend_enable[rt] ? 1u : 0u, p.static_params->blend_bypass[rt] ? 1u : 0u);
+		}
+	}
+
 	if (vs_input_info->position1_usage == ShaderVertexPosition1Usage::ClipDistance0)
 	{
 		VkPhysicalDeviceFeatures features {};
@@ -1537,61 +1651,42 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		EXIT_IF(geometry_translation.binary.IsEmpty());
 	}
 
+	const uint32_t slot = FindAvailableSlot();
 	p.pipeline = CreatePipelineInternal(framebuffer->render_pass, vs_input_info, vs_translation.binary, ps_input_info,
 	                                    ps_translation.binary, geometry_translation.binary, p.static_params, p.dynamic_params);
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 	p.pipeline->framebuffer_extent = framebuffer->extent;
 
-	bool updated = false;
-	int  index   = 0;
-	for (auto& pn: m_pipelines)
+	if (slot < m_pipelines.Size())
 	{
-		if (pn.pipeline == nullptr)
+		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
 		{
-			pn      = p;
-			updated = true;
-
-			DumpPipeline("create", index);
-
-			break;
-		}
-		index++;
-	}
-
-	if (!updated)
-	{
-		if (m_pipelines.Size() >= PipelineCache::MAX_PIPELINES)
-		{
-			// Bound host pipeline object growth for long sessions: recycle a
-			// slot instead of EXIT_NOT_IMPLEMENTED when variants exceed the cap.
-			const uint32_t evict = PipelineCacheNextEvictIndex(m_pipelines.Size(), &m_evict_cursor);
 			DebugStatsRecordPipelineEviction();
-			DeletePipelineInternal(evict);
-			m_pipelines[static_cast<int>(evict)] = p;
-			DumpPipeline("create", static_cast<int>(evict));
-		} else
-		{
-			EXIT_IF(m_pipelines.Size() != static_cast<uint32_t>(index));
-
-			m_pipelines.Add(p);
-
-			DumpPipeline("create", index);
+			DeletePipelineInternal(slot);
 		}
+		m_pipelines[static_cast<int>(slot)] = p;
+	} else
+	{
+		EXIT_IF(slot != m_pipelines.Size());
+		m_pipelines.Add(p);
 	}
+	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
+	DumpPipeline("create", static_cast<int>(slot));
 
 	m_driver_cache_dirty = true;
 	SaveDriverCacheIfDue();
 	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(miss_ns));
-	return p.pipeline;
+	return m_pipelines[static_cast<int>(slot)].pipeline;
 }
 
-VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* input_info, const HW::ComputeShaderInfo* cs_regs,
-                                              const HW::ShaderRegisters* sh_regs)
+VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, const ShaderComputeInputInfo* input_info,
+                                              const HW::ComputeShaderInfo* cs_regs, const HW::ShaderRegisters* sh_regs)
 {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
 
+	EXIT_IF(recording_buffer == nullptr);
 	EXIT_IF(cs_regs == nullptr);
 	EXIT_IF(sh_regs == nullptr);
 
@@ -1622,8 +1717,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 		*found->dynamic_params = *p.dynamic_params;
 		delete p.static_params;
 		delete p.dynamic_params;
+		AttachPipelineLease(recording_buffer, *found);
 		SaveDriverCacheIfDue();
-		return found;
+		return found->pipeline;
 	}
 
 	const auto miss_start = std::chrono::steady_clock::now();
@@ -1641,40 +1737,32 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 	DebugStatsRecordShaderTranslationCache(cs_translation.hit, cs_translation.evicted);
 	EXIT_IF(cs_translation.binary.IsEmpty());
 
+	const uint32_t slot = FindAvailableSlot();
 	p.pipeline = CreatePipelineInternal(input_info, cs_translation.binary, p.static_params, p.dynamic_params /*, params2*/);
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 
-	bool updated = false;
-	for (auto& pn: m_pipelines)
+	if (slot < m_pipelines.Size())
 	{
-		if (pn.pipeline == nullptr)
+		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
 		{
-			pn      = p;
-			updated = true;
-			break;
-		}
-	}
-
-	if (!updated)
-	{
-		if (m_pipelines.Size() >= PipelineCache::MAX_PIPELINES)
-		{
-			const uint32_t evict = PipelineCacheNextEvictIndex(m_pipelines.Size(), &m_evict_cursor);
 			DebugStatsRecordPipelineEviction();
-			DeletePipelineInternal(evict);
-			m_pipelines[static_cast<int>(evict)] = p;
-		} else
-		{
-			m_pipelines.Add(p);
+			DeletePipelineInternal(slot);
 		}
+		m_pipelines[static_cast<int>(slot)] = p;
+	} else
+	{
+		EXIT_IF(slot != m_pipelines.Size());
+		m_pipelines.Add(p);
 	}
+	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
+	DumpPipeline("create", static_cast<int>(slot));
 
 	m_driver_cache_dirty = true;
 	SaveDriverCacheIfDue();
 	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));
-	return p.pipeline;
+	return m_pipelines[static_cast<int>(slot)].pipeline;
 }
 
 void PipelineCache::DeletePipeline(VulkanPipeline* pipeline)
@@ -1715,6 +1803,25 @@ void PipelineCache::DeleteAllPipelines()
 	for (uint32_t index = 0; index < m_pipelines.Size(); index++)
 	{
 		DeletePipelineInternal(index);
+	}
+}
+
+void PipelineCache::ReleasePipelineLease(VulkanPipeline* pipeline)
+{
+	EXIT_IF(pipeline == nullptr);
+	Core::LockGuard lock(m_mutex);
+	const auto      index = m_pipelines.Find(pipeline, [](const auto& entry, const auto* value) { return value == entry.pipeline; });
+	EXIT_IF(!m_pipelines.IndexValid(index));
+	if (!m_pipelines.IndexValid(index))
+	{
+		return;
+	}
+
+	Pipeline& entry = m_pipelines[index];
+	EXIT_IF(entry.lifetime.ReferenceCount() == 0);
+	if (entry.lifetime.Release())
+	{
+		DeletePipelineInternal(static_cast<uint32_t>(index));
 	}
 }
 

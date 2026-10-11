@@ -53,7 +53,8 @@ extern const char SCC_OVERFLOW_SUB_1[];
 extern const char SCC_CARRY_1[];
 extern const char CLAMP_DX10[];
 extern const char CLAMP_PASSTHROUGH[];
-extern const char MULTIPLY[];
+extern const char OUTPUT_MODIFIER_SCALE[];
+extern const char OUTPUT_MODIFIER_HALVE[];
 
 } // namespace Kyty::Libs::Graphics
 

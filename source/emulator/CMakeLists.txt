@@ -241,7 +241,7 @@ target_include_directories(kyty_audio_video_backend PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
 	"${CMAKE_SOURCE_DIR}/include"
 )
-target_link_libraries(kyty_audio_video_backend PUBLIC core)
+target_link_libraries(kyty_audio_video_backend PUBLIC core PRIVATE libatrac9)
 
 if(MSVC OR MINGW)
 	target_link_libraries(emulator PRIVATE psapi)

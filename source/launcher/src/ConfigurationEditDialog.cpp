@@ -98,6 +98,18 @@ ConfigurationEditDialog::ConfigurationEditDialog(Kyty::Configuration* info, Conf
 	connect(&m_process, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
 	        [=](int /*exitCode*/, QProcess::ExitStatus /*exitStatus*/) { m_ui->test_button->setEnabled(true); });
 #endif
+	connect(&m_process, &QProcess::errorOccurred, this,
+	        [=](QProcess::ProcessError error)
+	        {
+		        if (error != QProcess::FailedToStart)
+		        {
+			        return;
+		        }
+
+		        m_ui->test_button->setEnabled(true);
+		        QMessageBox::critical(this, tr("Error"),
+		                              tr("Can't start process: ") + m_process.program() + QLatin1Char('\n') + m_process.errorString());
+	        });
 
 	layout()->setSizeConstraint(QLayout::SetFixedSize);
 

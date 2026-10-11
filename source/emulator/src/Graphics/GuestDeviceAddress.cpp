@@ -1,5 +1,6 @@
 #include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "GuestHostImportPlan.h"
 
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
@@ -8,14 +9,17 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>
+#include <cstddef>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <set>
 #include <utility>
 #include <vector>
@@ -29,17 +33,22 @@ namespace {
 // the table's zero prefix), in chunks bounded to keep each pin modest.
 constexpr uint64_t kChunkBytes = 64ull << 20u;
 constexpr uint64_t kPageBytes  = kGuestDeviceAddressPageBytes;
+// Bound host padding independently from the guest-visible chunk size.
+constexpr uint64_t kMaxHostImportPaddingBytes = 2ull << 20u;
+// Keep a bounded number of old address tables alive while submissions may reference them.
+constexpr std::size_t kMaxRetiredTables = 32;
 
 struct Chunk
 {
-	uint64_t       guest  = 0;
-	uint64_t       size   = 0; // bytes the table maps to this chunk
-	uint64_t       span   = 0; // imported bytes
-	VkDeviceMemory memory = nullptr;
-	VkBuffer       buffer = nullptr;
+	uint64_t       guest      = 0;
+	uint64_t       size       = 0; // bytes the table maps to this chunk
+	uint64_t       span       = 0; // imported bytes
+	VkDeviceMemory memory     = nullptr;
+	VkBuffer       buffer     = nullptr;
 	uint64_t       device = 0;
 	uint64_t       alias  = 0;       // writable host view that was imported
 	void*          copy   = nullptr; // tracked snapshot that was imported
+	std::size_t    copy_alignment = 0;
 	uint64_t       generation = 0;   // dirty-tracker generation of the snapshot
 	bool           tracked    = false; // snapshot is refreshed from tracker generations
 	bool           registered = false; // this chunk holds a dirty-tracker registration
@@ -63,6 +72,12 @@ struct Table
 	uint32_t       entries = 0;
 };
 
+struct Reader
+{
+	SubmissionId submission {};
+	bool         active = false;
+};
+
 struct Registry
 {
 	std::mutex                mutex;
@@ -77,6 +92,7 @@ struct Registry
 	bool                                         population_scanned = false;
 	Table                     table;
 	std::vector<Table>        retired;
+	std::array<Reader, GraphicContext::QUEUES_NUM> readers {}; // Latest registered reader for each queue.
 	// Sorted, disjoint union of the registered ranges; rebuilt after a change.
 	std::shared_ptr<const GpuMemoryGuestRanges> merged;
 };
@@ -87,12 +103,71 @@ Registry& GetRegistry()
 	return registry;
 }
 
+void ClearReaders(Registry* registry)
+{
+	for (auto& reader: registry->readers) { reader = {}; }
+}
+
+bool ValidReader(SubmissionId reader)
+{
+	return reader.sequence != 0 && reader.queue.Value() < GraphicContext::QUEUES_NUM;
+}
+
+SubmissionId PendingReaderForSnapshotRefresh(const Registry& registry)
+{
+	bool changed = false;
+	for (const uint64_t base: registry.tracked)
+	{
+		for (const auto& chunk: registry.ranges.at(base).chunks)
+		{
+			changed = changed || (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span,
+			                                                                                   chunk.generation));
+			if (changed) { break; }
+		}
+		if (changed) { break; }
+	}
+	if (!changed) { return {}; }
+	for (const auto& reader: registry.readers)
+	{
+		if (reader.active) { return reader.submission; }
+	}
+	return {};
+}
+
+SubmissionId FirstActiveReader(const Registry& registry)
+{
+	for (const auto& reader: registry.readers)
+	{
+		if (reader.active) { return reader.submission; }
+	}
+	return {};
+}
+
+void* AllocateHostSnapshot(uint64_t size, uint64_t alignment) noexcept
+{
+	const auto max_size = static_cast<uint64_t>(std::numeric_limits<std::size_t>::max());
+	if (size == 0 || size > max_size || alignment > max_size || !GuestHostImportPlan::IsPowerOfTwo(alignment))
+	{
+		return nullptr;
+	}
+	return ::operator new(static_cast<std::size_t>(size), static_cast<std::align_val_t>(static_cast<std::size_t>(alignment)),
+	                      std::nothrow);
+}
+
+void FreeHostSnapshot(void* snapshot, std::size_t alignment) noexcept
+{
+	if (snapshot != nullptr)
+	{
+		::operator delete(snapshot, static_cast<std::align_val_t>(alignment));
+	}
+}
+
 void DestroyChunk(VkDevice device, const Chunk& chunk)
 {
 	vkDestroyBuffer(device, chunk.buffer, nullptr);
 	vkFreeMemory(device, chunk.memory, nullptr);
 	Kernel::Memory::KernelUnmapPhysicalAlias(chunk.alias);
-	std::free(chunk.copy);
+	FreeHostSnapshot(chunk.copy, chunk.copy_alignment);
 	if (chunk.registered)
 	{
 		(void)GpuDirtyPageTracker::Instance().UnregisterRange(chunk.guest, chunk.span);
@@ -208,6 +283,24 @@ bool FindMemoryType(VkPhysicalDevice physical, uint32_t type_bits, VkMemoryPrope
 	return false;
 }
 
+bool FindHostImportMemoryType(VkPhysicalDevice physical, uint32_t type_bits, uint32_t* index)
+{
+	VkPhysicalDeviceMemoryProperties properties {};
+	vkGetPhysicalDeviceMemoryProperties(physical, &properties);
+	if (properties.memoryTypeCount > VK_MAX_MEMORY_TYPES)
+	{
+		return false;
+	}
+	uint32_t flags[VK_MAX_MEMORY_TYPES] {};
+	for (uint32_t i = 0; i < properties.memoryTypeCount; i++)
+	{
+		flags[i] = properties.memoryTypes[i].propertyFlags;
+	}
+	return GuestHostImportPlan::SelectMemoryType(
+	    type_bits, flags, properties.memoryTypeCount,
+	    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, index);
+}
+
 VkBuffer CreateAddressBuffer(VkDevice device, uint64_t size, bool external)
 {
 	VkExternalMemoryBufferCreateInfo external_info {};
@@ -234,24 +327,152 @@ uint64_t BufferDeviceAddress(VkDevice device, VkBuffer buffer)
 	return vkGetBufferDeviceAddress(device, &info);
 }
 
-// Imports [guest, guest + size) of host memory as a device-addressable buffer.
-// Imports `size` bytes of host memory at `pointer` as a device-addressable
-// buffer. Host-pointer import requires writable, page-aligned memory.
-bool ImportPointer(GraphicContext* ctx, void* pointer, uint64_t size, Chunk* out)
+struct PreparedHostImport
 {
-	static auto get_properties = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
-	    vkGetDeviceProcAddr(ctx->device, "vkGetMemoryHostPointerPropertiesEXT"));
-	VkMemoryHostPointerPropertiesEXT host_properties {};
-	host_properties.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
-	uint32_t type_index   = 0;
-	if (get_properties == nullptr ||
-	    get_properties(ctx->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, pointer, &host_properties) != VK_SUCCESS ||
-	    !FindMemoryType(ctx->physical_device, host_properties.memoryTypeBits, 0, &type_index))
+	VkDevice            device                  = VK_NULL_HANDLE;
+	VkBuffer            buffer                  = VK_NULL_HANDLE;
+	VkDeviceMemory      memory                  = VK_NULL_HANDLE;
+	VkMemoryRequirements requirements          {};
+	uint64_t            min_pointer_alignment = 0;
+	VkBool32            requires_dedicated    = VK_FALSE;
+	VkBool32            prefers_dedicated     = VK_FALSE;
+
+	PreparedHostImport() = default;
+	PreparedHostImport(const PreparedHostImport&) = delete;
+	PreparedHostImport& operator=(const PreparedHostImport&) = delete;
+
+	~PreparedHostImport()
+	{
+		Reset();
+	}
+
+	void Reset()
+	{
+		if (buffer != VK_NULL_HANDLE)
+		{
+			vkDestroyBuffer(device, buffer, nullptr);
+			buffer = VK_NULL_HANDLE;
+		}
+		if (memory != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(device, memory, nullptr);
+			memory = VK_NULL_HANDLE;
+		}
+	}
+
+	void Release(Chunk* chunk)
+	{
+		chunk->buffer = buffer;
+		chunk->memory = memory;
+		chunk->device = BufferDeviceAddress(device, buffer);
+		buffer        = VK_NULL_HANDLE;
+		memory        = VK_NULL_HANDLE;
+	}
+
+	bool Prepare(GraphicContext* ctx, uint64_t size)
+	{
+		device = ctx->device;
+		VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties {};
+		host_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT;
+		VkPhysicalDeviceProperties2 physical_properties {};
+		physical_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+		physical_properties.pNext = &host_properties;
+		vkGetPhysicalDeviceProperties2(ctx->physical_device, &physical_properties);
+		min_pointer_alignment = host_properties.minImportedHostPointerAlignment;
+		if (!GuestHostImportPlan::IsPowerOfTwo(min_pointer_alignment))
+		{
+			return false;
+		}
+
+		buffer = CreateAddressBuffer(device, size, true);
+		if (buffer == VK_NULL_HANDLE)
+		{
+			return false;
+		}
+
+		VkMemoryDedicatedRequirements dedicated {};
+		dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS;
+		VkMemoryRequirements2 requirements2 {};
+		requirements2.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+		requirements2.pNext = &dedicated;
+		VkBufferMemoryRequirementsInfo2 buffer_requirements {};
+		buffer_requirements.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2;
+		buffer_requirements.buffer = buffer;
+		vkGetBufferMemoryRequirements2(device, &buffer_requirements, &requirements2);
+		requirements       = requirements2.memoryRequirements;
+		requires_dedicated = dedicated.requiresDedicatedAllocation;
+		prefers_dedicated  = dedicated.prefersDedicatedAllocation;
+		if (requirements.size == 0 || !GuestHostImportPlan::IsPowerOfTwo(requirements.alignment))
+		{
+			return false;
+		}
+		if (requires_dedicated == VK_TRUE)
+		{
+			return false;
+		}
+		return true;
+	}
+};
+
+// Imports host memory into the prepared device-addressable buffer. Requirements
+// and host-pointer alignment are queried once, before the import properties.
+bool ImportPointer(GraphicContext* ctx, void* pointer, uint64_t span, uint64_t host_capacity, bool physical_alias,
+	               PreparedHostImport* prepared, Chunk* out)
+{
+	if (pointer == nullptr || prepared == nullptr || out == nullptr || prepared->buffer == VK_NULL_HANDLE ||
+	    !GuestHostImportPlan::IsPointerAligned(reinterpret_cast<uintptr_t>(pointer), prepared->min_pointer_alignment))
 	{
 		return false;
 	}
-	VkBuffer buffer = CreateAddressBuffer(ctx->device, size, true);
-	if (buffer == nullptr)
+	uint64_t allocation_alignment = std::max(prepared->min_pointer_alignment, static_cast<uint64_t>(alignof(std::max_align_t)));
+	if (!GuestHostImportPlan::IsPowerOfTwo(allocation_alignment))
+	{
+		return false;
+	}
+	if (physical_alias &&
+	    !GuestHostImportPlan::IsPhysicalImportShapeValid(reinterpret_cast<uintptr_t>(pointer), span, prepared->requirements.size,
+	                                                    prepared->min_pointer_alignment, prepared->requires_dedicated == VK_TRUE))
+	{
+		return false;
+	}
+	uint64_t snapshot_capacity = 0;
+	if (!physical_alias &&
+	    (!GuestHostImportPlan::PlanOwnedSnapshotCapacity(span, prepared->requirements.size, allocation_alignment,
+	                                                     kMaxHostImportPaddingBytes, &snapshot_capacity) ||
+	     snapshot_capacity != host_capacity))
+	{
+		return false;
+	}
+	auto get_properties = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
+	    vkGetDeviceProcAddr(ctx->device, "vkGetMemoryHostPointerPropertiesEXT"));
+	VkMemoryHostPointerPropertiesEXT host_properties {};
+	host_properties.sType     = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
+	uint32_t type_index = 0;
+	const VkResult property_result =
+	    get_properties == nullptr
+	        ? VK_ERROR_EXTENSION_NOT_PRESENT
+	        : get_properties(ctx->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, pointer, &host_properties);
+	if (property_result != VK_SUCCESS)
+	{
+		return false;
+	}
+	GuestHostImportPlan::ImportPlan plan;
+	const bool planned = physical_alias
+	                         ? GuestHostImportPlan::PlanPhysicalImport(
+	                               reinterpret_cast<uintptr_t>(pointer), span, prepared->requirements.size,
+	                               prepared->min_pointer_alignment, host_properties.memoryTypeBits,
+	                               prepared->requirements.memoryTypeBits, prepared->requires_dedicated == VK_TRUE,
+	                               prepared->prefers_dedicated == VK_TRUE, &plan)
+	                         : GuestHostImportPlan::PlanOwnedSnapshotImport(
+	                               reinterpret_cast<uintptr_t>(pointer), span, prepared->requirements.size,
+	                               prepared->min_pointer_alignment, allocation_alignment, kMaxHostImportPaddingBytes,
+	                               host_properties.memoryTypeBits, prepared->requirements.memoryTypeBits,
+	                               prepared->requires_dedicated == VK_TRUE, prepared->prefers_dedicated == VK_TRUE, &plan);
+	if (!planned || plan.host_capacity != host_capacity)
+	{
+		return false;
+	}
+	if (!FindHostImportMemoryType(ctx->physical_device, plan.memory_type_bits, &type_index))
 	{
 		return false;
 	}
@@ -266,22 +487,16 @@ bool ImportPointer(GraphicContext* ctx, void* pointer, uint64_t size, Chunk* out
 	VkMemoryAllocateInfo allocate {};
 	allocate.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 	allocate.pNext           = &flags;
-	allocate.allocationSize  = size;
+	allocate.allocationSize  = plan.allocation_size;
 	allocate.memoryTypeIndex = type_index;
-	VkDeviceMemory memory    = nullptr;
-	if (vkAllocateMemory(ctx->device, &allocate, nullptr, &memory) != VK_SUCCESS ||
-	    vkBindBufferMemory(ctx->device, buffer, memory, 0) != VK_SUCCESS)
+	const VkResult allocation_result = vkAllocateMemory(ctx->device, &allocate, nullptr, &prepared->memory);
+	const VkResult bind_result = allocation_result == VK_SUCCESS ? vkBindBufferMemory(ctx->device, prepared->buffer, prepared->memory, 0)
+	                                                             : VK_NOT_READY;
+	if (allocation_result != VK_SUCCESS || bind_result != VK_SUCCESS)
 	{
-		if (memory != nullptr)
-		{
-			vkFreeMemory(ctx->device, memory, nullptr);
-		}
-		vkDestroyBuffer(ctx->device, buffer, nullptr);
 		return false;
 	}
-	out->memory = memory;
-	out->buffer = buffer;
-	out->device = BufferDeviceAddress(ctx->device, buffer);
+	prepared->Release(out);
 	return true;
 }
 
@@ -292,21 +507,40 @@ bool ImportPointer(GraphicContext* ctx, void* pointer, uint64_t size, Chunk* out
 // revalidate a page that lost write access, which loses the device.
 bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t span, Chunk* out)
 {
+	if (ctx == nullptr || out == nullptr || guest == 0 || (guest % kPageBytes) != 0 || size == 0 || span == 0 || span > size ||
+	    span > kChunkBytes || (span % kPageBytes) != 0 || guest > UINT64_MAX - span)
+	{
+		return false;
+	}
 	*out       = {};
 	out->guest = guest;
 	out->size  = size;
 	out->span  = span;
-	if (const uint64_t alias = Kernel::Memory::KernelMapPhysicalAlias(guest, span); alias != 0)
+	PreparedHostImport prepared;
+	if (!prepared.Prepare(ctx, span))
 	{
-		out->alias = alias;
-		if (ImportPointer(ctx, reinterpret_cast<void*>(alias), span, out))
+		return false;
+	}
+	if (const uint64_t alias = Kernel::Memory::KernelMapPhysicalAlias(guest, span, prepared.min_pointer_alignment); alias != 0)
+	{
+		if (ImportPointer(ctx, reinterpret_cast<void*>(alias), span, span, true, &prepared, out))
 		{
+			out->alias = alias;
 			return true;
 		}
+		prepared.Reset();
 		Kernel::Memory::KernelUnmapPhysicalAlias(alias);
 		return false;
 	}
-	void* copy = std::aligned_alloc(kPageBytes, span);
+	const uint64_t allocation_alignment = std::max(prepared.min_pointer_alignment, static_cast<uint64_t>(alignof(std::max_align_t)));
+	uint64_t       copy_capacity       = 0;
+	if (!GuestHostImportPlan::PlanOwnedSnapshotCapacity(span, prepared.requirements.size, allocation_alignment,
+	                                                  kMaxHostImportPaddingBytes, &copy_capacity) ||
+	    allocation_alignment > std::numeric_limits<size_t>::max() || copy_capacity > std::numeric_limits<size_t>::max())
+	{
+		return false;
+	}
+	void* copy = AllocateHostSnapshot(copy_capacity, allocation_alignment);
 	// Writable memory: a snapshot refreshed when the dirty tracker sees CPU
 	// writes; the chunk registers the range so the tracker covers it.
 	// Memory the guest keeps non-writable (guest mprotect to read-only) cannot
@@ -317,18 +551,21 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	out->registered      = copy != nullptr && writable && tracker.RegisterRange(guest, span);
 	const bool tracked   = out->registered && SnapshotGuest(copy, guest, span, &out->generation);
 	const bool immutable = copy != nullptr && !writable && Core::VirtualMemory::CopyFromGuest(copy, guest, span);
-	if ((tracked || immutable) && ImportPointer(ctx, copy, span, out))
+	const bool imported = (tracked || immutable) && ImportPointer(ctx, copy, span, copy_capacity, false, &prepared, out);
+	if (imported)
 	{
-		out->copy    = copy;
-		out->tracked = tracked;
+		out->copy           = copy;
+		out->copy_alignment = static_cast<std::size_t>(allocation_alignment);
+		out->tracked        = tracked;
 		return true;
 	}
+	prepared.Reset();
 	if (out->registered)
 	{
 		(void)tracker.UnregisterRange(guest, span);
 		out->registered = false;
 	}
-	std::free(copy);
+	FreeHostSnapshot(copy, static_cast<std::size_t>(allocation_alignment));
 	return false;
 }
 
@@ -479,8 +716,8 @@ bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 	return true;
 }
 
-// Writes a fresh host-visible table; the previous one stays alive until the
-// next quiesced invalidation or release because in-flight work may still read it.
+// Writes a fresh host-visible table; keep the previous one alive while any
+// registered reader may still reference it.
 bool RebuildTable(GraphicContext* ctx, Registry* registry)
 {
 	// The device lookup binary-searches entries by guest base.
@@ -575,6 +812,7 @@ void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vad
 {
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
+	ClearReaders(&registry);
 	const uint64_t              end = vaddr + size;
 	for (auto it = FirstOverlapCandidate(&registry.ranges, vaddr); it != registry.ranges.end() && it->first < end; ++it)
 	{
@@ -587,6 +825,7 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 {
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
+	ClearReaders(&registry);
 	const uint64_t              end = vaddr + size;
 	// Pieces of a partially unmapped range stay mapped and stay registered.
 	std::vector<std::pair<uint64_t, Range>> survivors;
@@ -728,19 +967,19 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 	return true;
 }
 
-bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uint32_t* entry_count)
+static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Registry* registry, GuestDeviceAddressTable* table,
+	                                                    SubmissionId* dependency)
 {
-	if (ctx == nullptr || table_address == nullptr || entry_count == nullptr || !ctx->guest_device_address_supported)
+	EXIT_IF(registry == nullptr || table == nullptr || dependency == nullptr);
+	if (ctx == nullptr || !ctx->guest_device_address_supported)
 	{
-		return false;
+		return GuestDeviceAddressPrepareResult::Failed;
 	}
 	const DebugStatsScopedTimer prepare_timer(DebugStatsRecordGuestAddressPrepare);
-	auto&                       registry = GetRegistry();
-	std::lock_guard<std::mutex> lock(registry.mutex);
 	// Query before scanning: a page populated during the scan changes the next query.
 	Core::VirtualMemory::SharedBackingPopulation population;
 	const bool known    = Kernel::Memory::KernelQueryPhysicalPopulation(&population);
-	const bool physical = !known || !registry.population_scanned || population != registry.scanned_population;
+	const bool physical = !known || !registry->population_scanned || population != registry->scanned_population;
 	// Ranges number in the thousands for some titles: time each phase once
 	// per preparation, not once per range.
 	{
@@ -752,47 +991,132 @@ bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uin
 			{
 				return false;
 			}
-			registry.dirty = registry.dirty || changed;
+			registry->dirty = registry->dirty || changed;
 			if (range->tracked_chunks != 0)
 			{
-				registry.tracked.insert(base);
+				registry->tracked.insert(base);
 			}
 			return true;
 		};
-		if (physical && !ImportPhysicalRanges(ctx, &registry))
+		if (physical && !ImportPhysicalRanges(ctx, registry))
 		{
-			return false;
+			return GuestDeviceAddressPrepareResult::Failed;
 		}
-		for (const uint64_t base: registry.flexible)
+		for (const uint64_t base: registry->flexible)
 		{
-			if (!revisit(base, &registry.ranges.at(base)))
+			if (!revisit(base, &registry->ranges.at(base)))
 			{
-				return false;
+				return GuestDeviceAddressPrepareResult::Failed;
 			}
 		}
 	}
 	// Refresh snapshots the CPU wrote since they were taken; the imported
 	// host memory is coherent, so the device sees the refresh directly.
 	const DebugStatsScopedTimer refresh_timer(DebugStatsRecordGuestAddressRefresh);
-	for (const uint64_t base: registry.tracked)
+	for (const uint64_t base: registry->tracked)
 	{
-		for (auto& chunk: registry.ranges.at(base).chunks)
+		for (auto& chunk: registry->ranges.at(base).chunks)
 		{
-			if (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span, chunk.generation) &&
-			    !SnapshotGuest(chunk.copy, chunk.guest, chunk.span, &chunk.generation))
+			if (!chunk.tracked || !GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span, chunk.generation))
 			{
-				return false;
+				continue;
+			}
+			// A write fault can dirty this snapshot after the whole-registry preflight
+			// above. Check again at the refresh point before replacing bytes that an
+			// in-flight GPU reader may still observe.
+			if (const SubmissionId pending = FirstActiveReader(*registry); pending.sequence != 0)
+			{
+				*dependency = pending;
+				return GuestDeviceAddressPrepareResult::PendingReader;
+			}
+			if (!SnapshotGuest(chunk.copy, chunk.guest, chunk.span, &chunk.generation))
+			{
+				return GuestDeviceAddressPrepareResult::Failed;
 			}
 		}
 	}
-	if (registry.dirty && !RebuildTable(ctx, &registry))
+	if (registry->dirty)
+	{
+		const SubmissionId active_reader       = FirstActiveReader(*registry);
+		const bool         retires_current     = registry->table.buffer != nullptr;
+		const bool         would_exceed_budget = retires_current && registry->retired.size() >= kMaxRetiredTables;
+		if (would_exceed_budget && active_reader.sequence != 0)
+		{
+			*dependency = active_reader;
+			return GuestDeviceAddressPrepareResult::PendingReader;
+		}
+		if (active_reader.sequence == 0)
+		{
+			DestroyRetiredTables(ctx->device, registry);
+		}
+		if (!RebuildTable(ctx, registry))
+		{
+			return GuestDeviceAddressPrepareResult::Failed;
+		}
+	}
+	registry->scanned_population = population;
+	registry->population_scanned = known;
+	table->address               = registry->table.device;
+	table->entry_count           = registry->table.entries;
+	return GuestDeviceAddressPrepareResult::Ready;
+}
+
+bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uint32_t* entry_count)
+{
+	if (ctx == nullptr || table_address == nullptr || entry_count == nullptr || !ctx->guest_device_address_supported)
 	{
 		return false;
 	}
-	registry.scanned_population = population;
-	registry.population_scanned = known;
-	*table_address              = registry.table.device;
-	*entry_count   = registry.table.entries;
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	if (const SubmissionId dependency = PendingReaderForSnapshotRefresh(registry); dependency.sequence != 0)
+	{
+		return false;
+	}
+	GuestDeviceAddressTable table {};
+	SubmissionId dependency {};
+	if (PrepareLocked(ctx, &registry, &table, &dependency) != GuestDeviceAddressPrepareResult::Ready) { return false; }
+	*table_address = table.address;
+	*entry_count   = table.entry_count;
+	return true;
+}
+
+GuestDeviceAddressPrepareResult GuestDeviceAddressPrepareForRead(GraphicContext* ctx, SubmissionId reader,
+	                                                              GuestDeviceAddressTable* table, SubmissionId* dependency)
+{
+	if (dependency != nullptr) { *dependency = {}; }
+	if (ctx == nullptr || table == nullptr || dependency == nullptr || !ctx->guest_device_address_supported || !ValidReader(reader))
+	{
+		return GuestDeviceAddressPrepareResult::Failed;
+	}
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	if (const SubmissionId pending = PendingReaderForSnapshotRefresh(registry); pending.sequence != 0)
+	{
+		*dependency = pending;
+		return GuestDeviceAddressPrepareResult::PendingReader;
+	}
+	GuestDeviceAddressTable prepared {};
+	const auto result = PrepareLocked(ctx, &registry, &prepared, dependency);
+	if (result != GuestDeviceAddressPrepareResult::Ready) { return result; }
+	auto& latest_reader = registry.readers[reader.queue.Value()];
+	// This slot is scoped to reader.queue, so sequence ordering is never compared across queues.
+	if (!latest_reader.active || reader.sequence >= latest_reader.submission.sequence)
+	{
+		latest_reader = {reader, true};
+	}
+	*table                              = prepared;
+	return GuestDeviceAddressPrepareResult::Ready;
+}
+
+bool GuestDeviceAddressAcknowledgeReader(SubmissionId completed)
+{
+	if (!ValidReader(completed)) { return false; }
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	auto&                       reader = registry.readers[completed.queue.Value()];
+	if (!reader.active || reader.submission != completed) { return false; }
+	reader = {};
 	return true;
 }
 

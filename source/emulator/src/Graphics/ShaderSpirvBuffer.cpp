@@ -2367,6 +2367,76 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 	return false;
 }
 
+static bool EmitOrdinaryNativeGdsAppend(const ShaderInstruction& inst, uint32_t index, Spirv* spirv, String8* dst_source)
+{
+	const auto* bind_info = spirv == nullptr ? nullptr : spirv->GetBindInfo();
+	if (spirv == nullptr || dst_source == nullptr || bind_info == nullptr || bind_info->gds_pointers.pointers_num <= 0 ||
+	    bind_info->gds_pointers.binding_index < 0 || !spirv->NativeComputeWaveLayoutIsValid() ||
+	    (inst.type != ShaderInstructionType::DsAppend && inst.type != ShaderInstructionType::DsConsume) ||
+	    inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1)
+	{
+		return false;
+	}
+
+	const auto destination = operand_variable_to_str(inst.dst);
+	if (destination.type != SpirvType::Float || destination.value.IsEmpty())
+	{
+		return false;
+	}
+
+	const auto zero           = spirv->GetConstantUint(0u);
+	const auto device_scope   = spirv->GetConstantUint(1u);
+	const auto subgroup_scope = spirv->GetConstantUint(3u);
+	if (zero.IsEmpty() || device_scope.IsEmpty() || subgroup_scope.IsEmpty() || zero == "unknown_uint_constant" ||
+	    device_scope == "unknown_uint_constant" || subgroup_scope == "unknown_uint_constant")
+	{
+		return false;
+	}
+
+	const auto tag    = String8::FromPrintf("gds_exec_%u", index);
+	const auto atomic = inst.type == ShaderInstructionType::DsAppend ? "OpAtomicIAdd" : "OpAtomicISub";
+	const auto id     = [](const String8& name) { return String8::FromPrintf("%%%s", name.c_str()); };
+	String8    source;
+	// EXEC is wave-uniform here; count both words to obtain the wave's single counter delta.
+	source += String8::FromPrintf("%%%s_lo = OpLoad %%uint %%packed_exec_lo\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_hi = OpLoad %%uint %%packed_exec_hi\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_count_lo = OpBitCount %%uint %%%s_lo\n", tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("%%%s_count_hi = OpBitCount %%uint %%%s_hi\n", tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("%%%s_count = OpIAdd %%uint %%%s_count_lo %%%s_count_hi\n", tag.c_str(), tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("%%%s_elected = OpGroupNonUniformElect %%bool %%%s\n", tag.c_str(), subgroup_scope.c_str());
+	source += String8::FromPrintf("%%%s_has_active = OpINotEqual %%bool %%%s_count %s\n", tag.c_str(), tag.c_str(), id(zero).c_str());
+	source +=
+	    String8::FromPrintf("%%%s_do_atomic = OpLogicalAnd %%bool %%%s_elected %%%s_has_active\n", tag.c_str(), tag.c_str(), tag.c_str());
+	// Keep pointer construction and the RMW inside the elected, nonempty arm so empty EXEC has no GDS access.
+	source += String8::FromPrintf("               OpSelectionMerge %%%s_atomic_merge None\n"
+	                              "               OpBranchConditional %%%s_do_atomic %%%s_atomic_do %%%s_atomic_skip\n"
+	                              "%%%s_atomic_do = OpLabel\n",
+	                              tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+	source += spirv->EmitGdsCounterPointer(inst.ds_offset, tag);
+	source += String8::FromPrintf("%%%s_old_leader = %s %%uint %%%s_ptr %%%s %%%s %%%s_count\n", tag.c_str(), atomic, tag.c_str(),
+	                              device_scope.c_str(), zero.c_str(), tag.c_str());
+	source += String8::FromPrintf("               OpBranch %%%s_atomic_merge\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_atomic_skip = OpLabel\n", tag.c_str());
+	source += String8::FromPrintf("               OpBranch %%%s_atomic_merge\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_atomic_merge = OpLabel\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_old = OpPhi %%uint %%%s_old_leader %%%s_atomic_do %%%s %%%s_atomic_skip\n", tag.c_str(),
+	                              tag.c_str(), tag.c_str(), zero.c_str(), tag.c_str());
+	// Reconverge before broadcasting the old counter, then preserve inactive destination VGPRs.
+	source += String8::FromPrintf("%%%s_broadcast = OpGroupNonUniformBroadcastFirst %%uint %%%s %%%s_old\n", tag.c_str(),
+	                              subgroup_scope.c_str(), tag.c_str());
+	source += "               OpMemoryBarrier %uint_1 %uint_72\n";
+	source += String8::FromPrintf("%%%s_exec_lane = OpLoad %%uint %%exec_lane_lo\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_active = OpINotEqual %%bool %%%s_exec_lane %s\n", tag.c_str(), tag.c_str(), id(zero).c_str());
+	source += String8::FromPrintf("%%%s_previous = OpLoad %%float %%%s\n", tag.c_str(), destination.value.c_str());
+	source += String8::FromPrintf("%%%s_previous_bits = OpBitcast %%uint %%%s_previous\n", tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("%%%s_selected = OpSelect %%uint %%%s_active %%%s_broadcast %%%s_previous_bits\n", tag.c_str(),
+	                              tag.c_str(), tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("%%%s_result = OpBitcast %%float %%%s_selected\n", tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("               OpStore %%%s %%%s_result\n", destination.value.c_str(), tag.c_str());
+	*dst_source += source;
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -2374,27 +2444,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
 
 	if (bind_info != nullptr && bind_info->gds_pointers.pointers_num > 0)
 	{
-		String8 index_str = String8::FromPrintf("%u", index);
-
-		if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-
-		auto dst_value = operand_variable_to_str(inst.dst);
-
-		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-		// TODO() check VSKIP
-		// TODO() check EXEC
-
-		static const char* text = R"(
-        %t198_<index> = OpAtomicIAdd %uint %gds_counter_<index>_ptr %uint_1 %uint_0 %uint_1
-        %t199_<index> = OpBitcast %float %t198_<index>
-               OpStore %<dst> %t199_<index>
-               OpMemoryBarrier %uint_1 %uint_72
-)";
-		*dst_source += spirv->EmitGdsCounterPointer(inst.ds_offset, "gds_counter_" + index_str);
-		*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<index>", index_str);
-
-		return true;
+		return EmitOrdinaryNativeGdsAppend(inst, index, spirv, dst_source);
 	}
 
 	return false;
@@ -2407,27 +2457,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds)
 
 	if (bind_info != nullptr && bind_info->gds_pointers.pointers_num > 0)
 	{
-		String8 index_str = String8::FromPrintf("%u", index);
-
-		if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-
-		auto dst_value = operand_variable_to_str(inst.dst);
-
-		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-		// TODO() check VSKIP
-		// TODO() check EXEC
-
-		static const char* text = R"(
-        %t198_<index> = OpAtomicISub %uint %gds_counter_<index>_ptr %uint_1 %uint_0 %uint_1
-        %t199_<index> = OpBitcast %float %t198_<index>
-               OpStore %<dst> %t199_<index>
-               OpMemoryBarrier %uint_1 %uint_72
-)";
-		*dst_source += spirv->EmitGdsCounterPointer(inst.ds_offset, "gds_counter_" + index_str);
-		*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<index>", index_str);
-
-		return true;
+		return EmitOrdinaryNativeGdsAppend(inst, index, spirv, dst_source);
 	}
 
 	return false;
@@ -3430,14 +3460,26 @@ String8 Spirv::WrapVertexScalarBufferProbe(const ShaderInstruction& inst, uint32
 	return before + original + after;
 }
 
-static String8 SBufferOffsetDefinition(Spirv* spirv, const ShaderOperand& offset, uint32_t index)
+static String8 SBufferOffsetDefinition(Spirv* spirv, const ShaderOperand& offset, uint32_t index, int32_t immediate)
 {
 	if (operand_is_constant(offset))
 	{
 		return String8::FromPrintf("        %%t102_%u = OpBitcast %%int %%%s", index, spirv->GetConstant(offset).c_str());
 	}
-	return String8::FromPrintf("        %%t102_raw_%u = OpLoad %%uint %%%s\n        %%t102_%u = OpBitcast %%int %%t102_raw_%u", index,
-	                           operand_variable_to_str(offset).value.c_str(), index, index);
+
+	const auto raw = String8::FromPrintf("%%t102_raw_%u", index);
+	String8    definition = String8::FromPrintf("        %s = OpLoad %%uint %%%s\n", raw.c_str(), operand_variable_to_str(offset).value.c_str());
+	if (immediate != 0)
+	{
+		const auto adjusted = String8::FromPrintf("%%t102_imm_%u", index);
+		definition += String8::FromPrintf("        %s = OpIAdd %%uint %s %%%s\n", adjusted.c_str(), raw.c_str(),
+		                                  spirv->GetConstantUint(static_cast<uint32_t>(immediate)).c_str());
+		definition += String8::FromPrintf("        %%t102_%u = OpBitcast %%int %s", index, adjusted.c_str());
+		return definition;
+	}
+
+	definition += String8::FromPrintf("        %%t102_%u = OpBitcast %%int %s", index, raw.c_str());
+	return definition;
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
@@ -3486,7 +3528,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
 			text = text.ReplaceStr(String8::FromPrintf("<p%d>", i), dst_value[i].value);
 		}
 
-		*dst_source += text.ReplaceStr("<offset_def>", SBufferOffsetDefinition(spirv, inst.src[1], index))
+		*dst_source += text.ReplaceStr("<offset_def>", SBufferOffsetDefinition(spirv, inst.src[1], index, inst.smem_imm_offset))
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 		                   .ReplaceStr("<offset>", offset)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value);
@@ -3543,7 +3585,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 			text = text.ReplaceStr(String8::FromPrintf("<p%d>", i), dst_value[i].value);
 		}
 
-		*dst_source += text.ReplaceStr("<offset_def>", SBufferOffsetDefinition(spirv, inst.src[1], index))
+		*dst_source += text.ReplaceStr("<offset_def>", SBufferOffsetDefinition(spirv, inst.src[1], index, inst.smem_imm_offset))
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 		                   .ReplaceStr("<offset>", offset)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value);

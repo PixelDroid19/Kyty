@@ -72,14 +72,49 @@ static String get_build_string()
 	return str;
 }
 
-static void run_script(const String& lua_file_name, const StringList& args)
+static String quote_lua_string(const String& value)
 {
-	RunString(U"arg = {}");
+	String result = U"\"";
+	FOR (i, value)
+	{
+		const char32_t character = value.At(i);
+		switch (character)
+		{
+			case U'\\': result += U"\\\\"; break;
+			case U'"': result += U"\\\""; break;
+			case U'\n': result += U"\\n"; break;
+			case U'\r': result += U"\\r"; break;
+			case U'\t': result += U"\\t"; break;
+			case U'\b': result += U"\\b"; break;
+			case U'\f': result += U"\\f"; break;
+			default:
+				if (character < 0x20u || character == 0x7fu)
+				{
+					result += String::FromPrintf("\\%03u", static_cast<unsigned>(character));
+				} else
+				{
+					result += character;
+				}
+				break;
+		}
+	}
+	result += U'"';
+	return result;
+}
+
+static ScriptError run_script(const String& lua_file_name, const StringList& args)
+{
+	ScriptError err = RunString(U"arg = {}");
 	FOR (i, args)
 	{
+		if (err != ScriptError::Ok)
+		{
+			break;
+		}
 		if (i >= 2)
 		{
-			RunString(String::FromPrintf("arg[%d] = '%s'", i - 1, args.At(i).C_Str()));
+			const String value = quote_lua_string(args.At(i));
+			err              = RunString(String::FromPrintf("arg[%u] = %s", static_cast<unsigned>(i - 1), value.C_Str()));
 		}
 	}
 
@@ -92,7 +127,10 @@ static void run_script(const String& lua_file_name, const StringList& args)
 		is_file   = false;
 	}
 
-	ScriptError err = is_file ? RunFile(lua_file_name) : RunString(statement);
+	if (err == ScriptError::Ok)
+	{
+		err = is_file ? RunFile(lua_file_name) : RunString(statement);
+	}
 
 	if (err != ScriptError::Ok)
 	{
@@ -107,6 +145,7 @@ static void run_script(const String& lua_file_name, const StringList& args)
 			default: printf("unknown error\n");
 		}
 	}
+	return err;
 }
 
 KYTY_SCRIPT_FUNC(kyty_run_tests)
@@ -187,9 +226,11 @@ int main(int argc, char* argv[])
 	slist.Add(BuildTools, {Core, Scripts});
 	slist.Add(UnitTest, {Core});
 
+	int exit_code = 0;
 	if (!slist.InitAll(false))
 	{
 		printf("Failed to initialize '%s' subsystem: %s\n", slist.GetFailName(), slist.GetFailMsg());
+		exit_code = 1;
 	} else
 	{
 		register_unit_test_script();
@@ -212,7 +253,7 @@ int main(int argc, char* argv[])
 				}
 				args.Add(str);
 			}
-			run_script(args.At(1), args);
+			exit_code = (run_script(args.At(1), args) == ScriptError::Ok ? 0 : 1);
 		} else
 		{
 			printf("%s\n", get_build_string().C_Str());
@@ -229,5 +270,5 @@ int main(int argc, char* argv[])
 		return 125;
 	}
 
-	return 0;
+	return exit_code;
 }

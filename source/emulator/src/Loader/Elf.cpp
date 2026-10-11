@@ -822,6 +822,96 @@ bool Elf64::ValidateDynamicRanges() const
 		return false;
 	};
 
+	auto is_dynamic_data_range = [this](uint64_t address, uint64_t size) {
+		return m_dynamic_data != nullptr && address <= m_dynamic_data_size && size <= m_dynamic_data_size - address;
+	};
+
+	auto read_mapped_range = [this, &is_mapped_range](uint64_t address, uint64_t size, void* destination) {
+		if (m_f == nullptr || destination == nullptr || !is_mapped_range(address, size)) { return false; }
+		for (Elf64_Half i = 0; i < m_ehdr->e_phnum; i++)
+		{
+			const auto& phdr = m_phdr[i];
+			if ((phdr.p_type != PT_LOAD && phdr.p_type != PT_OS_RELRO) || address < phdr.p_vaddr) { continue; }
+			const uint64_t offset = address - phdr.p_vaddr;
+			if (offset > phdr.p_filesz || size > phdr.p_filesz - offset || phdr.p_offset > std::numeric_limits<uint64_t>::max() - offset)
+			{
+				continue;
+			}
+			uint64_t physical_offset = 0;
+			if (ResolveSegmentFileOffset(phdr.p_offset + offset, size, &physical_offset) &&
+			    ReadExact(*m_f, physical_offset, destination, size))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+
+	const auto* hash = GetDynValue(DT_HASH);
+	uint32_t hash_chain_count = 0;
+	if (hash != nullptr)
+	{
+		uint32_t hash_header[2] {};
+		if (!read_mapped_range(hash->d_un.d_ptr, sizeof(hash_header), hash_header)) { return false; }
+		const uint64_t hash_word_count = static_cast<uint64_t>(hash_header[0]) + hash_header[1] + 2;
+		if (!is_mapped_range(hash->d_un.d_ptr, hash_word_count * sizeof(uint32_t)))
+		{
+			return false;
+		}
+		hash_chain_count = hash_header[1];
+	}
+
+	const auto* str_table = GetDynValue(DT_STRTAB);
+	if (str_table == nullptr) { str_table = GetDynValue(DT_OS_STRTAB); }
+	const auto* str_table_size = GetDynValue(DT_STRSZ);
+	if (str_table_size == nullptr) { str_table_size = GetDynValue(DT_OS_STRSZ); }
+	if (str_table != nullptr || str_table_size != nullptr)
+	{
+		if (str_table == nullptr || str_table_size == nullptr || str_table_size->d_un.d_val == 0) { return false; }
+		const bool os_data = GetDynValue(DT_STRTAB) == nullptr;
+		const bool in_range = os_data ? is_dynamic_data_range(str_table->d_un.d_ptr, str_table_size->d_un.d_val) :
+		                               is_mapped_range(str_table->d_un.d_ptr, str_table_size->d_un.d_val);
+		if (!in_range) { return false; }
+	}
+
+	const auto* symbol_table = GetDynValue(DT_SYMTAB);
+	if (symbol_table == nullptr) { symbol_table = GetDynValue(DT_OS_SYMTAB); }
+	const auto* symbol_table_size = GetDynValue(DT_OS_SYMTABSZ);
+	const auto* symbol_entry_size = GetDynValue(DT_SYMENT);
+	if (symbol_entry_size == nullptr) { symbol_entry_size = GetDynValue(DT_OS_SYMENT); }
+	if ((GetDynValue(DT_SYMENT) != nullptr && GetDynValue(DT_SYMENT)->d_un.d_val != sizeof(Elf64_Sym)) ||
+	    (GetDynValue(DT_OS_SYMENT) != nullptr && GetDynValue(DT_OS_SYMENT)->d_un.d_val != sizeof(Elf64_Sym)))
+	{
+		return false;
+	}
+	if (symbol_table != nullptr || (symbol_table_size != nullptr && symbol_table_size->d_un.d_val != 0))
+	{
+		if (symbol_table == nullptr || symbol_entry_size == nullptr) { return false; }
+		const uint64_t size = symbol_table_size != nullptr ? symbol_table_size->d_un.d_val :
+		                      (hash != nullptr ? static_cast<uint64_t>(hash_chain_count) * sizeof(Elf64_Sym) : 0);
+		if (size == 0 || size % sizeof(Elf64_Sym) != 0) { return false; }
+		const bool os_data = GetDynValue(DT_SYMTAB) == nullptr;
+		const bool in_range = os_data ? is_dynamic_data_range(symbol_table->d_un.d_ptr, size) :
+		                               is_mapped_range(symbol_table->d_un.d_ptr, size);
+		if (!in_range) { return false; }
+	}
+	if (symbol_table == nullptr && symbol_table_size != nullptr && symbol_table_size->d_un.d_val != 0) { return false; }
+
+	const auto* os_hash = GetDynValue(DT_OS_HASH);
+	const auto* os_hash_size = GetDynValue(DT_OS_HASHSZ);
+	// RuntimeLinker reads DT_OS_HASHSZ independently of which hash pointer tag is set.
+	if (os_hash_size != nullptr)
+	{
+		if (os_hash != nullptr)
+		{
+			if (!is_dynamic_data_range(os_hash->d_un.d_ptr, os_hash_size->d_un.d_val)) { return false; }
+		} else if (os_hash_size->d_un.d_val != 0 &&
+		           (hash == nullptr || !is_mapped_range(hash->d_un.d_ptr, os_hash_size->d_un.d_val)))
+		{
+			return false;
+		}
+	}
+
 	auto validate_rela = [this, &is_mapped_range](Elf64_Sxword pointer_tag, Elf64_Sxword size_tag, bool os_data) {
 		const auto* pointer = GetDynValue(pointer_tag);
 		const auto* table_size = GetDynValue(size_tag);

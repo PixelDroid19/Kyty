@@ -1,0 +1,91 @@
+name: PR Contract Validation
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kyty-pr-contract-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: CPU contract (DevTools ${{ matrix.devtools }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        devtools: ['ON', 'OFF']
+    env:
+      KYTY_BUILD_DEVTOOLS: ${{ matrix.devtools }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Configure, build, and run CPU contracts
+        run: |
+          nix develop --no-write-lock-file --command bash -euo pipefail -c '
+            cmake -S source -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DKYTY_PROJECT_NAME=Emulator \
+              -DKYTY_WARNINGS_ARE_ERRORS=OFF \
+              -DKYTY_BUILD_LAUNCHER=OFF \
+              -DKYTY_BUILD_DEVTOOLS="$KYTY_BUILD_DEVTOOLS" \
+              -DKYTY_BUILD_UNIT_TESTS=ON \
+              -DKYTY_GENERATE_MAP_CSV=OFF \
+              -DBUILD_TESTING=ON
+            cmake --build build --parallel 2
+            ctest --test-dir build --output-on-failure --parallel 2 --timeout 300 \
+              --tests-regex "^(KytyUnitTest|KytyArchitectureBoundaryChecker[.]SyntheticFixtures|KytyGraphicsTables[.](Provenance|SyntheticFixtures|Regeneration|DerivedOutputsMatch)|KytyGen5DetileShader[.]CheckedInSpirv|KytyAgentTransport[.]NativeRoundTrip)$"
+            python3 scripts/check_emulator_boundaries.py source --strict
+          '
+
+      - name: Build Vulkan integration executables
+        if: matrix.devtools == 'ON'
+        run: |
+          nix develop --no-write-lock-file --command cmake --build build \
+            --parallel 2 --target \
+            kyty_gds_transfer_integration \
+            kyty_texture_one_dimensional_array_integration \
+            kyty_shader_compute_integration \
+            kyty_shader_gds_exec_integration \
+            kyty_shader_wave64_integration \
+            kyty_graphics_diagnostics_integration \
+            kyty_agent_transport_integration
+
+      - name: Detect a Vulkan render device
+        id: vulkan
+        if: matrix.devtools == 'ON'
+        shell: bash
+        run: |
+          if compgen -G '/dev/dri/renderD*' > /dev/null; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run GPU integration contracts
+        if: matrix.devtools == 'ON' && steps.vulkan.outputs.available == 'true'
+        run: |
+          nix develop --no-write-lock-file --command ctest --test-dir build \
+            --output-on-failure --parallel 1 --timeout 300 \
+            --tests-regex '^Kyty(GraphicsIntegration|TextureIntegration|ShaderComputeIntegration|GraphicsDiagnosticsIntegration)[.]'
+
+      - name: Record GPU integration skips
+        if: matrix.devtools == 'ON' && steps.vulkan.outputs.available != 'true'
+        shell: bash
+        run: |
+          message='GPU integration contracts skipped: this runner exposes no Vulkan render device at /dev/dri/renderD*.'
+          echo "$message"
+          echo "- $message" >> "$GITHUB_STEP_SUMMARY"

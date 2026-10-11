@@ -226,7 +226,8 @@ system is destroyed (outside the system's state lock).
 ## NGS2 ATRAC9 path
 
 Waveform format 0x40 uses `ElementaryAudioDecoder` (in `AudioVideoBackend`), which
-wraps the FFmpeg build's decoder. Its extradata is the 12-byte RIFF format tail:
+decodes through the bundled LibAtrac9 (`source/3rdparty/LibAtrac9`, unmodified
+upstream sources) and does not need FFmpeg. Its extradata is the 12-byte RIFF format tail:
 version (zero in the standard setup, which carries no version word; the decoder
 accepts 2 or less), the FE-prefixed config, and a reserved word. Setup opens a
 decoder once and fails unless the channel count and rate it derives from the
@@ -292,8 +293,11 @@ proves device creation, not sound generation.
 
 ## Known limits
 
-- ATRAC9 decoding is checked only with a generated silent superframe; non-silent
-  output needs a private fixture (see the ATRAC9 path section). Unverified
+- ATRAC9 decoding is checked only with generated superframes; non-silent
+  output needs a private fixture (see the ATRAC9 path section). Against FFmpeg's
+  decoder, private superframes match within -42 dB in the coded band, with
+  inverted polarity and a different band-extension reconstruction; no hardware
+  reference decides between them. Unverified
   CustomSampler formats still fail at their real frontier instead of returning
   decoded silence.
 - SDL can convert the supported PCM channel counts, but semantic surround

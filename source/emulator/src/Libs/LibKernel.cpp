@@ -233,7 +233,10 @@ static int KYTY_SYSV_ABI KernelStopUnloadModule(KernelModule handle, size_t args
 
 	auto* program = rt->FindProgramById(handle);
 
-	if (program == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (program == nullptr)
+	{
+		return KERNEL_ERROR_ESRCH;
+	}
 
 	if (g_get_thread_atexit_count_func != nullptr && g_get_thread_atexit_count_func(program->unique_id) > 0)
 	{
@@ -967,6 +970,9 @@ struct HostContextRequest
 	std::atomic_bool           completed {false};
 };
 
+// HostContextTrampoline publishes completion with a single-byte store from assembly.
+static_assert(sizeof(std::atomic_bool) == 1 && std::atomic_bool::is_always_lock_free);
+
 static std::mutex                       g_host_context_requests_mutex;
 static std::vector<HostContextRequest*> g_host_context_requests;
 static std::atomic<uint64_t>            g_host_context_next_trace_id {1};
@@ -1068,17 +1074,23 @@ static void CopyHostContext(SignalMcontext* guest, const ucontext_t* host)
 {
 	HostContextTrace("trampoline_enter", request->trace_id, request, nullptr, request->handler, 0);
 	const uint64_t guest_result = Loader::GuestCall::Invoke(request->handler, 30, reinterpret_cast<uint64_t>(&request->guest_context), 0);
-	request->completed.store(true, std::memory_order_release);
 	HostContextTrace("trampoline_done", request->trace_id, request, nullptr, request->handler, guest_result);
 
 	// Returning through rt_sigreturn instead of setcontext preserves Linux's
 	// restart handling for a futex or other syscall interrupted by this signal.
+	// The request owns this stack and the saved contexts. Its completion is
+	// published only after the last read of the request and after RSP has left
+	// the request-owned stack, so a concurrent reclaim can never free memory
+	// that this thread is still executing on or reading from.
 	*request->signal_context = request->resume_context;
+	const uintptr_t signal_frame = request->signal_frame;
+	std::atomic_bool* completed = &request->completed;
 	asm volatile("mov %0, %%rsp\n\t"
-	             "mov %1, %%rax\n\t"
+	             "movb $1, (%1)\n\t"
+	             "mov %2, %%rax\n\t"
 	             "syscall\n\t"
 	             :
-	             : "r"(request->signal_frame), "i"(SYS_rt_sigreturn)
+	             : "r"(signal_frame), "r"(completed), "i"(SYS_rt_sigreturn)
 	             : "memory", "rax");
 	std::abort();
 	__builtin_unreachable();
@@ -1192,11 +1204,14 @@ int KYTY_SYSV_ABI KernelRaiseException(Kernel::Pthread thread, int signum)
 		g_host_context_requests.push_back(request);
 	}
 
-	const int result = PthreadSignalWithValue(thread, HostContextSignal(), request);
-	HostContextTrace("raise_queued", request->trace_id, request, thread, request->handler, static_cast<uint64_t>(result));
+	// Once queued, the target thread may complete and another raise may reclaim
+	// the request at any moment; only the copied identity is traced afterwards.
+	const uint64_t trace_id = request->trace_id;
+	const int      result   = PthreadSignalWithValue(thread, HostContextSignal(), request);
+	HostContextTrace("raise_queued", trace_id, request, thread, handler, static_cast<uint64_t>(result));
 	if (result != OK)
 	{
-		HostContextTrace("raise_failed", request->trace_id, request, thread, request->handler, static_cast<uint64_t>(result));
+		HostContextTrace("raise_failed", trace_id, request, thread, handler, static_cast<uint64_t>(result));
 		std::lock_guard lock(g_host_context_requests_mutex);
 		const auto      iterator = std::find(g_host_context_requests.begin(), g_host_context_requests.end(), request);
 		if (iterator != g_host_context_requests.end())
@@ -1208,6 +1223,16 @@ int KYTY_SYSV_ABI KernelRaiseException(Kernel::Pthread thread, int signum)
 	return result;
 #else
 	return KERNEL_ERROR_EINVAL;
+#endif
+}
+
+size_t KernelHostContextRequestsPending()
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	std::lock_guard lock(g_host_context_requests_mutex);
+	return g_host_context_requests.size();
+#else
+	return 0;
 #endif
 }
 

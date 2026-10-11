@@ -63,6 +63,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <vector>
 #include <mutex>
 #include <string>
@@ -1439,12 +1440,123 @@ static void CheckBoundedMappedShaderSnapshots()
 	ShaderMapUserData(UINT64_MAX - 3u, {});
 }
 
+static void CheckBoundedShaderDumpSnapshot(const char* dump_dir)
+{
+	SetSubmitFaultTestEnvironment("KYTY_TRANSPORT_DUMP", dump_dir);
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	ShaderInit();
+
+	const uint64_t page_size = Core::VirtualMemory::GetPageSize();
+	const uint64_t address   = Core::VirtualMemory::Alloc(0, page_size, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	constexpr uint32_t end_program = 0xbf810000u;
+	const std::array<uint32_t, 2> original_words {end_program, 0x11223344u};
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(address, original_words.data(), sizeof(original_words)));
+	ShaderMappedData mapped {};
+	mapped.code_size_bytes = sizeof(uint32_t);
+	ShaderMapUserData(address, mapped);
+
+	HW::PixelShaderInfo regs {};
+	regs.ps_regs.data_addr = address;
+	regs.ps_regs.chksum   = 1u;
+	HW::ShaderRegisters shader_regs {};
+	auto                parsed = ShaderParsePS(&regs, &shader_regs);
+	ASSERT_EQ(parsed.GetInstructions().Size(), 1u);
+	EXPECT_EQ(parsed.GetInstructions().At(0).type, ShaderInstructionType::SEndpgm);
+	ASSERT_NE(parsed.GetGuestSourceSnapshot(), nullptr);
+	EXPECT_EQ(parsed.GetGuestSourceSnapshotStatus(), ShaderGuestSourceSnapshotStatus::Captured);
+	ASSERT_EQ(parsed.GetGuestSourceSnapshot()->size(), 1u);
+	EXPECT_EQ(parsed.GetGuestSourceSnapshot()->front(), end_program);
+
+	const uint32_t replacement = 0xbf800000u;
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(address, &replacement, sizeof(replacement)));
+	mapped.code_size_bytes = sizeof(original_words);
+	ShaderMapUserData(address, mapped);
+	(void)ShaderDumpGuestProgram(dump_dir, "ps", regs.ps_regs.chksum, address, parsed);
+
+	ShaderCode unknown_source;
+	ShaderInstruction maximum_pc {};
+	maximum_pc.type = ShaderInstructionType::SEndpgm;
+	maximum_pc.pc   = UINT32_MAX;
+	unknown_source.GetInstructions().Add(maximum_pc);
+	EXPECT_EQ(unknown_source.GetGuestSourceSnapshotStatus(), ShaderGuestSourceSnapshotStatus::Unavailable);
+	(void)ShaderDumpGuestProgram(dump_dir, "cs", 3u, address, unknown_source);
+	EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(dump_dir) / "cs_0000000000000003.bin"));
+
+	const uint32_t oversized_bytes = kShaderProgramSnapshotBytesMax + sizeof(uint32_t);
+	const uint64_t oversized_allocation = ((oversized_bytes + page_size - 1u) / page_size) * page_size;
+	const uint64_t oversized_address =
+	    Core::VirtualMemory::Alloc(0, oversized_allocation, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(oversized_address, 0u);
+	std::vector<uint32_t> oversized_words(oversized_bytes / sizeof(uint32_t), 0u);
+	oversized_words[0] = end_program;
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(oversized_address, oversized_words.data(), oversized_bytes));
+	mapped.code_size_bytes = oversized_bytes;
+	ShaderMapUserData(oversized_address, mapped);
+	HW::ComputeShaderInfo oversized_regs {};
+	oversized_regs.cs_regs.data_addr = oversized_address;
+	oversized_regs.cs_regs.chksum   = 2u;
+	const auto oversized_code = ShaderParseCS(&oversized_regs, &shader_regs);
+	ASSERT_EQ(oversized_code.GetInstructions().Size(), 1u);
+	EXPECT_EQ(oversized_code.GetGuestSourceSnapshotStatus(), ShaderGuestSourceSnapshotStatus::Truncated);
+	(void)ShaderDumpGuestProgram(dump_dir, "cs", oversized_regs.cs_regs.chksum, oversized_address, oversized_code);
+	EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(dump_dir) / "cs_0000000000000002.bin"));
+
+	SetSubmitFaultTestEnvironment("KYTY_TRANSPORT_DUMP", "");
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(address, &end_program, sizeof(end_program)));
+	mapped.code_size_bytes = sizeof(end_program);
+	ShaderMapUserData(address, mapped);
+	const auto disabled_dump_code = ShaderParsePS(&regs, &shader_regs);
+	EXPECT_EQ(disabled_dump_code.GetGuestSourceSnapshotStatus(), ShaderGuestSourceSnapshotStatus::Unavailable);
+	EXPECT_EQ(disabled_dump_code.GetGuestSourceSnapshot(), nullptr);
+
+	ShaderMapUserData(address, {});
+	ShaderMapUserData(oversized_address, {});
+	EXPECT_TRUE(Core::VirtualMemory::Free(address));
+	EXPECT_TRUE(Core::VirtualMemory::Free(oversized_address));
+
+	const auto raw_path = std::filesystem::path(dump_dir) / "ps_0000000000000001.bin";
+	std::ifstream raw_file(raw_path, std::ios::binary);
+	ASSERT_TRUE(raw_file.is_open());
+	const std::string dumped_bytes((std::istreambuf_iterator<char>(raw_file)), std::istreambuf_iterator<char>());
+	constexpr uint32_t expected_word = 0xbf810000u;
+	EXPECT_EQ(dumped_bytes.size(), sizeof(expected_word));
+	EXPECT_EQ(dumped_bytes, std::string(reinterpret_cast<const char*>(&expected_word), sizeof(expected_word)));
+}
+
+static void RunBoundedShaderDumpSnapshot()
+{
+	ScopedTestDirectory dump_directory("shader-dump-snapshot");
+	ASSERT_FALSE(dump_directory.Path().empty());
+	const auto dump_path = dump_directory.Path().string();
+	CheckBoundedShaderDumpSnapshot(dump_path.c_str());
+	std::error_code error;
+	std::filesystem::remove_all(dump_directory.Path(), error);
+	EXPECT_FALSE(error);
+}
+
 TEST(EmulatorGraphicsState, SkippedShaderSnapshotsRespectMetadataBoundsAndReadableLifetime)
 {
 	ScopedSubmitFaultDeathTestStyle death_test_style;
 	ASSERT_EXIT(
 	    {
 		    CheckBoundedMappedShaderSnapshots();
+		    std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, RegisteredShaderDumpUsesBoundedImmutableSource)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	ASSERT_EXIT(
+	    {
+		    RunBoundedShaderDumpSnapshot();
 		    std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
 	    },
 	    ::testing::ExitedWithCode(0), "");
@@ -6162,6 +6274,21 @@ TEST(EmulatorGraphicsState, ReclaimsSingleSurfaceForDepthStencilReuse)
 	                                                       GpuMemoryObjectType::DepthStencilBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsDepthStencilReclaimSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Crosses,
 	                                                       GpuMemoryObjectType::Texture));
+}
+
+TEST(EmulatorGraphicsState, ReclaimsDepthStencilRedeclaredAtTheSameBase)
+{
+	constexpr uint64_t base = 0x527430000ull;
+	EXPECT_TRUE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base,
+	                                                     GpuMemoryObjectType::DepthStencilBuffer, base));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base + 0x10000u,
+	                                                      GpuMemoryObjectType::DepthStencilBuffer, base));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::RenderTexture, base,
+	                                                      GpuMemoryObjectType::DepthStencilBuffer, base));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base,
+	                                                      GpuMemoryObjectType::Texture, base));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, 0u,
+	                                                      GpuMemoryObjectType::DepthStencilBuffer, 0u));
 }
 
 TEST(EmulatorGraphicsState, LinksPendingStorageBeforeDepthStencilReuse)

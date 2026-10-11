@@ -589,7 +589,13 @@ void Flow::SetUniformMask(const ShaderOperand& dst, bool uniform)
 	unsigned count = 0;
 	if (!ScalarRange(dst, &first, &count)) { return; }
 	for (unsigned word = 0; word < count; ++word) { m_state.uniform_mask.set(first + word, uniform); }
-	if (dst.type == Operand::VccLo) { m_state.vcc_uniform = uniform; } // wave32 compares define VCC_LO only
+	if (dst.type == Operand::VccLo || dst.type == Operand::VccHi)
+	{
+		ShaderOperand vcc {};
+		vcc.type = Operand::VccLo;
+		vcc.size = 2;
+		m_state.vcc_uniform = IsUniformMask(vcc);
+	}
 }
 
 // Compare of uniform sources, a copy of such a mask, EXEC narrowed by one (nonzero exactly when the compare holds),
@@ -745,7 +751,7 @@ bool Flow::Branch(const ShaderInstruction& inst)
 			vcc.type = Operand::VccLo;
 			vcc.size = 2;
 			if ((Taint(vcc) & kMixed) != 0u) { return Fail(inst, "VCC branch on a mask pair partly overwritten by a number"); }
-			divergent = !m_state.vcc_uniform;
+			divergent = !IsUniformMask(vcc);
 			break;
 		}
 		case Type::SCbranchScc0:

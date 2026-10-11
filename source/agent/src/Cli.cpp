@@ -39,7 +39,7 @@ void PrintUsage()
 	                     "  kyty_agent --endpoint ENDPOINT score\n"
 	                     "  kyty_agent --endpoint ENDPOINT trace-rt-lifetime-arm\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad down|up BUTTON\n"
-	                     "  kyty_agent --endpoint ENDPOINT pad tap BUTTON [--at-present N [--repeat R --present-delta D]]\n"
+	                     "  kyty_agent --endpoint ENDPOINT pad tap BUTTON [--press-samples 1|2] [--at-present N [--repeat R --present-delta D]]\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad hold BUTTON --delta N [--timeout-ms N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad axis AXIS VALUE|clear\n"
 	                     "  kyty_agent --endpoint ENDPOINT wait-ready [--timeout-ms N]\n"
@@ -662,14 +662,16 @@ int Main(int argc, char** argv)
 				uint64_t at_present         = 0;
 				uint64_t repeat             = 1;
 				uint64_t present_delta      = 0;
+				uint64_t press_samples      = 2;
 				bool     have_at_present    = false;
 				bool     have_repeat        = false;
 				bool     have_present_delta = false;
+				bool     have_press_samples = false;
 				for (; i < argc; ++i)
 				{
 					const char* flag = argv[i];
 					if (std::strcmp(flag, "--at-present") == 0 || std::strcmp(flag, "--repeat") == 0 ||
-					    std::strcmp(flag, "--present-delta") == 0)
+					    std::strcmp(flag, "--present-delta") == 0 || std::strcmp(flag, "--press-samples") == 0)
 					{
 						const char* value = RequireArg(argc, argv, &i, flag);
 						uint64_t*  target = nullptr;
@@ -682,10 +684,14 @@ int Main(int argc, char** argv)
 						{
 							target = &repeat;
 							seen   = &have_repeat;
-						} else
+						} else if (std::strcmp(flag, "--present-delta") == 0)
 						{
 							target = &present_delta;
 							seen   = &have_present_delta;
+						} else
+						{
+							target = &press_samples;
+							seen   = &have_press_samples;
 						}
 						if (value == nullptr || *seen || !ParseDecimalUnsigned(value, target))
 						{
@@ -698,6 +704,11 @@ int Main(int argc, char** argv)
 					std::fprintf(stderr, "kyty_agent: unknown pad tap flag %s\n", flag);
 					return 125;
 				}
+				if (have_press_samples && (press_samples < 1 || press_samples > 2))
+				{
+					std::fprintf(stderr, "kyty_agent: --press-samples must be 1 or 2\n");
+					return 125;
+				}
 				if (!have_at_present)
 				{
 					if (have_repeat || have_present_delta)
@@ -705,17 +716,28 @@ int Main(int argc, char** argv)
 						std::fprintf(stderr, "kyty_agent: --repeat and --present-delta require --at-present\n");
 						return 125;
 					}
-					return Call(endpoint,
-					            "{\"id\":1,\"tool\":\"pad_tap\",\"args\":{\"button\":\"" + JsonEscape(button) + "\"}}");
+					std::string request = "{\"id\":1,\"tool\":\"pad_tap\",\"args\":{\"button\":\"" + JsonEscape(button) + "\"";
+					if (have_press_samples)
+					{
+						request += ",\"press_samples\":" + std::to_string(press_samples);
+					}
+					request += "}}";
+					return Call(endpoint, request);
 				}
 				if (at_present == 0 || repeat == 0 || (repeat > 1 && (!have_present_delta || present_delta == 0)))
 				{
 					std::fprintf(stderr, "kyty_agent: scheduled tap requires future --at-present, --repeat >= 1, and positive --present-delta for repeats\n");
 					return 125;
 				}
-				return Call(endpoint, "{\"id\":1,\"tool\":\"pad_tap\",\"args\":{\"button\":\"" + JsonEscape(button) +
-				                          "\",\"at_present\":" + std::to_string(at_present) + ",\"repeat\":" + std::to_string(repeat) +
-				                          ",\"present_delta\":" + std::to_string(present_delta) + "}}");
+				std::string request = "{\"id\":1,\"tool\":\"pad_tap\",\"args\":{\"button\":\"" + JsonEscape(button) +
+				                      "\",\"at_present\":" + std::to_string(at_present) + ",\"repeat\":" + std::to_string(repeat) +
+				                      ",\"present_delta\":" + std::to_string(present_delta);
+				if (have_press_samples)
+				{
+					request += ",\"press_samples\":" + std::to_string(press_samples);
+				}
+				request += "}}";
+				return Call(endpoint, request);
 			}
 			if (i != argc)
 			{

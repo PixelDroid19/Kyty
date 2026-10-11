@@ -6,6 +6,8 @@
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
 
+#include "ShaderArithmeticTestInterpreter.h"
+
 #include <cstdlib>
 
 UT_BEGIN(EmulatorShaderSopkDecode);
@@ -68,6 +70,14 @@ String8 Generate(const ShaderCode& code)
 bool Has(const String8& source, const char* text)
 {
 	return source.FindIndex(text) != Core::STRING8_INVALID_INDEX;
+}
+
+uint32_t EvaluateSopkScc(uint32_t opcode, uint32_t s5)
+{
+	const uint32_t words[] = {Sopk(opcode, 5u, 0xfff0u), kSEndpgm};
+	const auto     source = Generate(Parse(words));
+	const ShaderArithmeticTest::Program program(source.c_str());
+	return program.Run({{"%s5", s5}}, "%scc");
 }
 
 [[noreturn]] void ParseAndExit(uint32_t first)
@@ -135,6 +145,21 @@ TEST(EmulatorShaderSopkDecode, CmovkDecodesAsConditionalMoveKeepingOldValue)
 	EXPECT_TRUE(Has(source, "OpLoad %uint %scc"));
 	EXPECT_TRUE(Has(source, "OpSelect %uint"));
 	EXPECT_TRUE(Has(source, "OpStore %s7"));
+}
+
+TEST(EmulatorShaderSopkDecode, CmpkInterpretsSimm16AccordingToSignedness)
+{
+	// CMPK operands use sign extension for I32 and zero extension for U32 (RDNA2 ISA).
+	// These inputs distinguish -16 from 0xfff0 in the emitted comparisons.
+	InitializeDecodeTest(true);
+	const uint32_t signed_words[]   = {Sopk(0x07u, 5u, 0xfff0u), kSEndpgm}; // s_cmpk_lt_i32 s5, -16
+	const uint32_t unsigned_words[] = {Sopk(0x0bu, 5u, 0xfff0u), kSEndpgm}; // s_cmpk_gt_u32 s5, 0xfff0
+	const auto     signed_code      = Parse(signed_words);
+	const auto     unsigned_code    = Parse(unsigned_words);
+	ASSERT_EQ(signed_code.GetInstructions().At(0).src[1].constant.i, -16);
+	ASSERT_EQ(unsigned_code.GetInstructions().At(0).src[1].constant.u, 0xfff0u);
+	EXPECT_EQ(EvaluateSopkScc(0x07u, 0u), 0u);
+	EXPECT_EQ(EvaluateSopkScc(0x0bu, 0x00010000u), 1u);
 }
 
 TEST(EmulatorShaderSopkDecode, ControlsStillDecodeDefinedOpcodes)

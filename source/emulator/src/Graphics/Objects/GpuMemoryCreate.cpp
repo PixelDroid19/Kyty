@@ -1370,7 +1370,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				// Same link as the mixed-parent form: the texture uploads guest bytes.
 				overlap = true;
-			} else if (GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type))
+			} else if (GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type) ||
+			           GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, h.block.vaddr[0], info.type, vaddr[0]))
 			{
 				delete_all = true;
 			} else
@@ -1891,7 +1892,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					const auto& h = heap.objects[obj.object_id];
 					EXIT_IF(h.free);
 					const auto& o = h.info;
-					if (!GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type))
+					if (!GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type) &&
+					    !GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, h.block.vaddr[0], info.type, vaddr[0]))
 					{
 						multi_depth_stencil_reclaim = false;
 						break;

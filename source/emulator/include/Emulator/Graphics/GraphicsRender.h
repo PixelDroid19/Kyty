@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -28,6 +29,7 @@ class Shader;
 
 class CommandBuffer;
 class CommandProcessor;
+class PipelineCache;
 class TransientBufferPool;
 class DiagnosticDumpWriter;
 struct ShaderNativeWaveInfo;
@@ -39,6 +41,7 @@ struct StorageTextureVulkanImage;
 struct RenderTextureVulkanImage;
 struct VulkanCommandPool;
 struct VulkanBuffer;
+struct VulkanPipeline;
 struct VulkanFramebuffer;
 struct RenderDepthInfo;
 struct RenderColorInfo;
@@ -683,6 +686,12 @@ public:
 	VulkanBuffer* AllocateTransientScratchBuffer(uint64_t size, uint32_t usage);
 
 private:
+	friend class PipelineCache;
+
+	[[nodiscard]] bool AttachPipelineLease(VulkanPipeline* pipeline, bool* added);
+	void               MarkCommandBufferResetting();
+	void               ReleasePipelineLeases();
+
 	VulkanCommandPool* m_pool    = nullptr;
 	uint32_t           m_index   = static_cast<uint32_t>(-1);
 	int                m_queue   = -1;
@@ -692,6 +701,12 @@ private:
 	bool               m_has_submission = false;
 	TransientBufferPool* m_transient_buffers = nullptr;
 	TransientBufferPool* m_transient_scratch_buffers = nullptr;
+
+	mutable std::mutex           m_pipeline_lease_mutex;
+	std::vector<VulkanPipeline*> m_pipeline_leases;
+	mutable bool                 m_recording = false;
+	bool                         m_resetting = false;
+
 	bool               m_has_guest_context = false;
 	uint64_t           m_guest_submit = 0;
 	uint32_t           m_pm4_op       = 0;
@@ -710,9 +725,11 @@ void GraphicsRenderCreateContext();
 
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
-                             uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance);
+                             uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
+                             SubmissionId* pending_submission);
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
-	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count);
+	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count,
+	                             SubmissionId* pending_submission);
 void GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr);
 void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value);
@@ -745,13 +762,14 @@ enum class ComputeDispatchResult
 	Completed,
 	ProcessorWriteBackRequired,
 	SubmissionCompletionRequired,
+	ReaderCompletionRequired,
 };
 // Preparation and recording share one resource analysis. A required write-back
-// leaves the command buffer untouched; retry after completing it with fresh inputs.
+// or submission wait leaves the command buffer untouched; retry with fresh inputs.
 [[nodiscard]] ComputeDispatchResult GraphicsRenderDispatchDirect(
     uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, bool processor_writeback_complete,
-    SubmissionId* pending_writeback);
+    SubmissionId* pending_submission);
 void GraphicsRenderMemoryBarrier(CommandBuffer* buffer);
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);

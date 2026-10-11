@@ -32,12 +32,14 @@ constexpr uint32_t kEndProgram  = 0xbf810000u;
 
 struct ProbeCase
 {
-	const char*               name = nullptr;
-	std::vector<uint32_t>     shader_words;
+	std::string                     name;
+	std::vector<uint32_t>           shader_words;
 	std::vector<ScalarRegisterSeed> register_seeds;
-	int                       result_register = -1;
-	std::array<uint32_t, 4>   expected {};
-	Kyty::Vector<uint32_t>    spirv;
+	int                             result_register = -1;
+	std::array<uint32_t, 4>         expected {};
+	Kyty::Vector<uint32_t>          spirv;
+	bool                            nonempty_exec = false;
+	int                             result_vgpr   = -1;
 };
 
 struct ProgramBaseProbe
@@ -93,6 +95,11 @@ uint32_t Bitset1Word(uint32_t destination, uint32_t source)
 	return (0x17du << 23u) | (destination << 16u) | (0x1du << 8u) | source;
 }
 
+uint32_t Sop2Word(uint32_t opcode, uint32_t destination, uint32_t source0, uint32_t source1)
+{
+	return 0x80000000u | (opcode << 23u) | (destination << 16u) | (source1 << 8u) | source0;
+}
+
 uint32_t GetPcB64Word(uint32_t destination)
 {
 	return (0x17du << 23u) | (destination << 16u) | (0x1fu << 8u);
@@ -103,14 +110,42 @@ uint32_t Compare64NotEqualWord(uint32_t source0, uint32_t source1)
 	return 0xbf000000u | (0x13u << 16u) | (source1 << 8u) | source0;
 }
 
+uint32_t Vop1Word(uint32_t destination, uint32_t opcode, uint32_t source)
+{
+	return (0x3fu << 25u) | (destination << 17u) | (opcode << 9u) | source;
+}
+
 void PrepareCase(ProbeCase* test_case)
 {
-	Kyty::Core::String8 source;
-	Kyty::Core::String8 error;
+	Kyty::Core::String8                          source;
+	Kyty::Core::String8                          error;
+	Kyty::Libs::Graphics::ShaderComputeInputInfo input_info {};
+	input_info.threads_num[0] = 1;
+	input_info.threads_num[1] = 1;
+	input_info.threads_num[2] = 1;
+	const int result_register = test_case->result_vgpr >= 0 ? -1 : test_case->result_register;
 	if (!Kyty::Libs::Graphics::BuildScalarProbeSource(test_case->shader_words.data(), test_case->shader_words.size(),
-	                                                  test_case->register_seeds, test_case->result_register, &source, &error))
+	                                                  test_case->register_seeds, result_register, -1, input_info, &source, &error,
+	                                                  test_case->nonempty_exec))
 	{
 		Fail(std::string(test_case->name) + ": source generation failed: " + error.c_str());
+	}
+	if (test_case->result_vgpr >= 0)
+	{
+		std::string       text(source.GetDataConst(), source.Size());
+		const std::string anchor   = "OpStore %probe_ptr_0 %uint_0";
+		const size_t      position = text.find(anchor);
+		if (position == std::string::npos || text.find(anchor, position + anchor.size()) != std::string::npos)
+		{
+			Fail(std::string(test_case->name) + ": generated source has no unique VGPR probe output");
+		}
+		const std::string result = Kyty::Core::String8::FromPrintf("%%probe_result_float = OpLoad %%float %%v%d\n"
+		                                                           "%%probe_result_bits = OpBitcast %%uint %%probe_result_float\n"
+		                                                           "OpStore %%probe_ptr_0 %%probe_result_bits",
+		                                                           test_case->result_vgpr)
+		                               .GetDataConst();
+		text.replace(position, anchor.size(), result);
+		source = text.c_str();
 	}
 	if (!Run(source, &test_case->spirv, &error) || test_case->spirv.IsEmpty())
 	{
@@ -189,7 +224,7 @@ int RunCase(const ProbeCase& test_case, const VulkanComputeProbe& vulkan)
 		Fail(std::string(test_case.name) + ": numeric mismatch; got {" + std::to_string(actual[0]) + ", " +
 		     std::to_string(actual[1]) + ", " + std::to_string(actual[2]) + ", " + std::to_string(actual[3]) + "}");
 	}
-	std::printf("%s PASS\n", test_case.name);
+	std::printf("%s PASS\n", test_case.name.c_str());
 	return 0;
 }
 
@@ -228,7 +263,7 @@ int RunProgramBaseProbe(const ProgramBaseProbe& probe, const VulkanComputeProbe&
 std::vector<ProbeCase> MakeCases()
 {
 	std::vector<ProbeCase> cases;
-	cases.reserve(10);
+	cases.reserve(84);
 	const auto bitset_expectation = [](uint32_t result) { return std::array<uint32_t, 4> {result, kSeedScc, kSeedExecLo, kSeedExecHi}; };
 	const uint32_t endpgm = kEndProgram;
 
@@ -258,6 +293,149 @@ std::vector<ProbeCase> MakeCases()
 	                 bitset_expectation(0x56785678u), {}});
 	cases.push_back({"PackVccHiAliasAndZero", {move(107, 9), pack(107, 107, 128), move(17, 107), endpgm}, {{9, 0x12345678u}}, 17,
 	                 bitset_expectation(0x5678u), {}});
+
+	// The first subtraction supplies the borrowed-in state consumed by S_SUBB_U32.
+	cases.push_back({"SubbBorrowClearedBySub",
+	                 {Sop2Word(0x01u, 9u, 10u, 11u), Sop2Word(0x05u, 8u, 12u, 13u), endpgm},
+	                 {{10u, 5u}, {11u, 5u}, {12u, 9u}, {13u, 4u}}, 8,
+	                 {5u, 0u, kSeedExecLo, kSeedExecHi}, {}});
+	cases.push_back({"SubbBorrowFromSubWithMaxSource",
+	                 {Sop2Word(0x01u, 9u, 10u, 11u), Sop2Word(0x05u, 8u, 12u, 13u), endpgm},
+	                 {{10u, 2u}, {11u, 3u}, {12u, UINT32_MAX}, {13u, UINT32_MAX}}, 8,
+	                 {UINT32_MAX, 1u, kSeedExecLo, kSeedExecHi}, {}});
+
+	// VOP1's VGPR source encoding is 256 + register. A literal V_MOV_B32
+	// supplies exact input bits; the test-only SSBO export observes the VGPR.
+	const auto add_conversion = [&](const char* name, uint32_t opcode, uint32_t input_bits, uint32_t expected)
+	{
+		cases.push_back({name,
+		                 {Vop1Word(0, 0x01u, 0xffu), input_bits, Vop1Word(1, opcode, 256u), endpgm},
+		                 {},
+		                 -1,
+		                 {expected, kSeedScc, 1u, 0u},
+		                 {},
+		                 true,
+		                 1});
+	};
+	const auto add_unsigned = [&](const char* name, uint32_t input_bits, uint32_t expected)
+	{
+		add_conversion(name, 0x07u, input_bits, expected); // v_cvt_u32_f32
+	};
+	const auto add_signed = [&](const char* name, uint32_t input_bits, uint32_t expected)
+	{
+		add_conversion(name, 0x08u, input_bits, expected); // v_cvt_i32_f32
+	};
+	add_unsigned("CvtU32QuietNaN", 0x7fc12345u, 0u);
+	add_unsigned("CvtU32SignalingNaN", 0x7f800001u, 0u);
+	add_unsigned("CvtU32PositiveInfinity", 0x7f800000u, 0xffffffffu);
+	add_unsigned("CvtU32NegativeInfinity", 0xff800000u, 0u);
+	add_unsigned("CvtU32LargestInRange", 0x4f7fffffu, 0xffffff00u);
+	add_unsigned("CvtU32PositiveOverflow", 0x4f800000u, 0xffffffffu);
+	add_unsigned("CvtU32PositiveFraction", 0x40700000u, 3u);
+	add_unsigned("CvtU32NegativeFraction", 0xc0700000u, 0u);
+	add_signed("CvtI32QuietNaN", 0x7fc12345u, 0u);
+	add_signed("CvtI32SignalingNaN", 0x7f800001u, 0u);
+	add_signed("CvtI32PositiveInfinity", 0x7f800000u, 0x7fffffffu);
+	add_signed("CvtI32NegativeInfinity", 0xff800000u, 0x80000000u);
+	add_signed("CvtI32LargestInRange", 0x4effffffu, 0x7fffff80u);
+	add_signed("CvtI32PositiveOverflow", 0x4f000000u, 0x7fffffffu);
+	add_signed("CvtI32SmallestInRange", 0xcf000000u, 0x80000000u);
+	add_signed("CvtI32NegativeOverflow", 0xcf000001u, 0x80000000u);
+	add_signed("CvtI32PositiveFraction", 0x40700000u, 3u);
+	add_signed("CvtI32NegativeFraction", 0xc0700000u, 0xfffffffdu);
+
+	const auto arithmetic_right32 = [](uint32_t value, uint32_t shift) {
+		if (shift == 0u) { return value; }
+		const uint32_t extension = (value & 0x80000000u) != 0u ? UINT32_MAX << (32u - shift) : 0u;
+		return (value >> shift) | extension;
+	};
+	const auto arithmetic_right64_words = [&](uint32_t low, uint32_t high, uint32_t shift) {
+		shift &= 63u;
+		if (shift == 0u) { return std::array<uint32_t, 2> {low, high}; }
+		if (shift < 32u)
+		{
+			return std::array<uint32_t, 2> {(low >> shift) | (high << (32u - shift)), arithmetic_right32(high, shift)};
+		}
+		return std::array<uint32_t, 2> {arithmetic_right32(high, shift - 32u), arithmetic_right32(high, 31u)};
+	};
+	const auto add_ashr_probe = [&](const std::string& name, uint32_t destination, uint32_t result_register,
+	                                uint32_t low, uint32_t high, uint32_t shift) {
+		const auto expected_words = arithmetic_right64_words(low, high, shift);
+		const uint32_t expected_scc = (expected_words[0] | expected_words[1]) != 0u ? 1u : 0u;
+		cases.push_back({name,
+		                 {Sop2Word(0x23u, destination, 20u, 22u), endpgm},
+		                 {{20u, low}, {21u, high}, {22u, shift}}, static_cast<int>(result_register),
+		                 {result_register == destination ? expected_words[0] : expected_words[1], expected_scc, 0u, 0u}, {}});
+	};
+	constexpr std::array<uint32_t, 6> shift_counts {0u, 1u, 31u, 32u, 33u, 63u};
+	for (const bool negative: {false, true})
+	{
+		constexpr uint32_t low = 0x89abcdefu;
+		const uint32_t high = negative ? 0x81234567u : 0x01234567u;
+		const char* sign = negative ? "Negative" : "Positive";
+		for (const uint32_t shift: shift_counts)
+		{
+			const std::string base = std::string("AshrI64") + sign + std::to_string(shift);
+			add_ashr_probe(base + "ExactLow", 20u, 20u, low, high, shift);
+			add_ashr_probe(base + "ExactHigh", 20u, 21u, low, high, shift);
+			if (shift == 1u || shift == 32u || shift == 63u)
+			{
+				// The even-aligned destination pair s22:s23 overlaps the scalar shift operand s22.
+				add_ashr_probe(base + "ShiftSourceAliasLow", 22u, 22u, low, high, shift);
+				add_ashr_probe(base + "ShiftSourceAliasHigh", 22u, 23u, low, high, shift);
+			}
+		}
+	}
+	// Beyond-end widths use the admitted bit-vector clamp model; this oracle
+	// does not establish how PS5 hardware defines those cases.
+	const auto signed_bfe_i64_words = [](uint32_t low, uint32_t high, uint32_t control)
+	{
+		const uint32_t offset          = control & 0x3fu;
+		const uint32_t requested_width = (control >> 16u) & 0x7fu;
+		const uint32_t remaining_width = 64u - offset;
+		const uint32_t width           = requested_width < remaining_width ? requested_width : remaining_width;
+		if (width == 0u)
+		{
+			return std::array<uint32_t, 2> {0u, 0u};
+		}
+
+		const uint64_t source     = (static_cast<uint64_t>(high) << 32u) | low;
+		const uint64_t shifted    = source >> offset;
+		const uint64_t field_mask = width == 64u ? ~uint64_t {0} : (uint64_t {1} << width) - 1u;
+		uint64_t       result     = shifted & field_mask;
+		if (width < 64u && (result & (uint64_t {1} << (width - 1u))) != 0u)
+		{
+			result |= ~field_mask;
+		}
+		return std::array<uint32_t, 2> {static_cast<uint32_t>(result), static_cast<uint32_t>(result >> 32u)};
+	};
+	const auto add_bfe_i64_probe = [&](const char* name, uint32_t destination, uint32_t source_register, uint32_t result_word,
+	                                   uint32_t source_low, uint32_t source_high, uint32_t offset, uint32_t width)
+	{
+		const uint32_t control      = offset | (width << 16u);
+		const auto     result_words = signed_bfe_i64_words(source_low, source_high, control);
+		const uint32_t expected_scc = (result_words[0] | result_words[1]) != 0u ? 1u : 0u;
+		cases.push_back({name,
+		                 {Sop2Word(0x2au, destination, source_register, 24u), endpgm},
+		                 {{source_register, source_low}, {source_register + 1u, source_high}, {24u, control}},
+		                 static_cast<int>(destination + result_word),
+		                 {result_words[result_word], expected_scc, kSeedExecLo, kSeedExecHi},
+		                 {}});
+	};
+	constexpr uint32_t kBfeSourceLow  = 0x89abcdefu;
+	constexpr uint32_t kBfeSourceHigh = 0xf1234567u;
+	add_bfe_i64_probe("BfeI64WidthZeroLow", 20u, 22u, 0u, kBfeSourceLow, kBfeSourceHigh, 0u, 0u);
+	add_bfe_i64_probe("BfeI64WidthZeroHigh", 20u, 22u, 1u, kBfeSourceLow, kBfeSourceHigh, 0u, 0u);
+	add_bfe_i64_probe("BfeI64Width64Low", 20u, 22u, 0u, kBfeSourceLow, kBfeSourceHigh, 0u, 64u);
+	add_bfe_i64_probe("BfeI64Width64High", 20u, 22u, 1u, kBfeSourceLow, kBfeSourceHigh, 0u, 64u);
+	add_bfe_i64_probe("BfeI64Offset31ClampsTo33Low", 20u, 22u, 0u, kBfeSourceLow, kBfeSourceHigh, 31u, 64u);
+	add_bfe_i64_probe("BfeI64Offset31ClampsTo33High", 20u, 22u, 1u, kBfeSourceLow, kBfeSourceHigh, 31u, 64u);
+	add_bfe_i64_probe("BfeI64Offset32ClampsTo32High", 20u, 22u, 1u, kBfeSourceLow, kBfeSourceHigh, 32u, 64u);
+	add_bfe_i64_probe("BfeI64Offset63ClampsToOneLow", 20u, 22u, 0u, kBfeSourceLow, kBfeSourceHigh, 63u, 64u);
+	add_bfe_i64_probe("BfeI64Offset63ClampsToOneHigh", 20u, 22u, 1u, kBfeSourceLow, kBfeSourceHigh, 63u, 64u);
+	add_bfe_i64_probe("BfeI64HighOnlyResultSetsScc", 20u, 22u, 0u, 0u, 1u, 0u, 64u);
+	add_bfe_i64_probe("BfeI64AliasedSourceDestinationLow", 22u, 22u, 0u, kBfeSourceLow, kBfeSourceHigh, 32u, 64u);
+	add_bfe_i64_probe("BfeI64AliasedSourceDestinationHigh", 22u, 22u, 1u, kBfeSourceLow, kBfeSourceHigh, 32u, 64u);
 	return cases;
 }
 

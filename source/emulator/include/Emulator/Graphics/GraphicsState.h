@@ -207,6 +207,10 @@ struct ColorTargetLayout
 // CB_TARGET_MASK admits a render-target channel and CB_SHADER_MASK admits the
 // corresponding pixel-shader export. Vulkan must receive their intersection.
 [[nodiscard]] uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32_t target_index);
+// Only suppress an absent export when its summary came from a parsed program.
+[[nodiscard]] uint8_t ResolveColorWriteAgainstExport(uint8_t channel_mask, uint8_t export_enable, bool summary_available);
+// UINT16 compressed exports only write channels selected by EXP.EN.
+[[nodiscard]] uint8_t ResolveColorWriteAgainstUint16Export(uint8_t channel_mask, uint8_t export_enable);
 // DB_DEPTH_CONTROL can suppress color on a depth pass (Z-only update) or allow
 // color on a depth fail. A later untextured draw that shares the previous
 // mesh and depth would otherwise replace the textured color.
@@ -214,8 +218,7 @@ struct ColorTargetLayout
                                                     bool enable_color_on_depth_fail);
 // A no-export pixel shader can still be required for depth/stencil, discard, or explicit memory effects.
 // The latter are verified from decoded shader code before disabling the stage.
-[[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader,
-                                            const HW::DepthControl& depth);
+[[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, const HW::DepthControl& depth);
 
 // Dual-source (SRC1) admission for blend0 with its guest decision reasons. Guest state is checked
 // before host capability, so each refusal names the first failing input.

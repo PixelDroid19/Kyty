@@ -1,32 +1,43 @@
-#include "Kyty/UnitTest.h"
 #include "Kyty/Core/VirtualMemory.h"
+#include "Kyty/UnitTest.h"
 
 #include "Emulator/Audio.h"
 #include "Emulator/AudioNgs2Sampler.h"
-#include "Emulator/AudioVideoBackend.h"
 #include "Emulator/AudioPcm.h"
+#include "Emulator/AudioVideoBackend.h"
 #include "Emulator/Config.h"
 #include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
 #include "SDL.h"
+#include "UnitTestEmulatorAudioFixtures.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
-#include <cstddef>
-#include <cstdio>
-#include <cstring>
-#include <cstdlib>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <memory>
 #include <string>
-#include <type_traits>
 #include <thread>
+#include <type_traits>
 #include <vector>
+
+#if defined(__linux__)
+#include <cerrno>
+#include <csignal>
+#include <new>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace Kyty::Libs::LibC {
 void* KYTY_SYSV_ABI c_malloc(size_t size);
@@ -82,6 +93,1595 @@ public:
 private:
 	GuestReadableBlock m_storage;
 };
+
+#if defined(__linux__)
+class GuestSharedBlock
+{
+public:
+	explicit GuestSharedBlock(size_t size)
+	{
+		const uint64_t page_size = Core::VirtualMemory::GetPageSize();
+		if (page_size == 0 || size == 0)
+		{
+			return;
+		}
+		m_size    = ((size + page_size - 1u) / page_size) * page_size;
+		m_backing = Core::VirtualMemory::CreateSharedBacking(m_size);
+		if (m_backing != nullptr)
+		{
+			m_address = Core::VirtualMemory::MapSharedAligned(m_backing, 0, 0, m_size, Core::VirtualMemory::Mode::ReadWrite, page_size);
+		}
+	}
+	~GuestSharedBlock()
+	{
+		if (m_address != 0)
+		{
+			(void)Core::VirtualMemory::Free(m_address);
+		}
+		if (m_backing != nullptr)
+		{
+			Core::VirtualMemory::DestroySharedBacking(m_backing);
+		}
+	}
+	GuestSharedBlock(const GuestSharedBlock&)            = delete;
+	GuestSharedBlock& operator=(const GuestSharedBlock&) = delete;
+
+	[[nodiscard]] bool  IsValid() const { return m_address != 0; }
+	[[nodiscard]] void* Data() const { return reinterpret_cast<void*>(m_address); }
+
+private:
+	uint64_t                            m_size    = 0;
+	uint64_t                            m_address = 0;
+	Core::VirtualMemory::SharedBacking* m_backing = nullptr;
+};
+#endif
+
+bool IsAjmBytePattern(const void* memory, size_t size, uint8_t expected)
+{
+	if (size == 0)
+	{
+		return true;
+	}
+	const auto* bytes = static_cast<const uint8_t*>(memory);
+	return std::all_of(bytes, bytes + size, [expected](uint8_t value) { return value == expected; });
+}
+
+#if defined(__linux__)
+constexpr int AJM_STRICT_EXIT_STATUS = 65; // dbg_exit(321) is truncated by POSIX process status.
+
+struct AjmBatchSharedResults
+{
+	alignas(uint64_t) uint8_t data_output[32];
+	alignas(uint64_t) uint8_t init_result[32];
+	alignas(uint64_t) uint8_t decode_result[32];
+	alignas(uint64_t) uint8_t sideband_output[56];
+	Ajm::AjmBatchError error;
+	uint32_t           batch_id;
+};
+
+class SharedAjmBatchResults
+{
+public:
+	SharedAjmBatchResults()
+	{
+		void* const storage = ::mmap(nullptr, sizeof(AjmBatchSharedResults), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+		if (storage != MAP_FAILED)
+		{
+			m_results = ::new (storage) AjmBatchSharedResults {};
+			Reset();
+		}
+	}
+	~SharedAjmBatchResults()
+	{
+		if (m_results != nullptr)
+		{
+			m_results->~AjmBatchSharedResults();
+			(void)::munmap(m_results, sizeof(*m_results));
+		}
+	}
+	SharedAjmBatchResults(const SharedAjmBatchResults&)            = delete;
+	SharedAjmBatchResults& operator=(const SharedAjmBatchResults&) = delete;
+
+	[[nodiscard]] bool                   IsValid() const { return m_results != nullptr; }
+	[[nodiscard]] AjmBatchSharedResults* Data() const { return m_results; }
+	void Reset() { std::memset(m_results, 0xa5, sizeof(*m_results)); }
+
+private:
+	AjmBatchSharedResults* m_results = nullptr;
+};
+
+constexpr size_t AJM_OPUS_TEST_OUTPUT_CAPACITY = 12288;
+constexpr size_t AJM_OPUS_TEST_BELOW_PACKET_CAPACITY = 512 * 2 * sizeof(int16_t);
+bool WaitForAjmChild(pid_t child, int* status)
+{
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	for (;;)
+	{
+		const pid_t result = ::waitpid(child, status, WNOHANG);
+		if (result == child)
+		{
+			return true;
+		}
+		if (result < 0 && errno != EINTR)
+		{
+			(void)::kill(child, SIGKILL);
+			(void)::waitpid(child, status, 0);
+			return false;
+		}
+		if (std::chrono::steady_clock::now() >= deadline)
+		{
+			(void)::kill(child, SIGKILL);
+			while (::waitpid(child, status, 0) < 0 && errno == EINTR)
+			{
+			}
+			return false;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+}
+
+template <typename Callback>
+bool RunAjmStrictChild(Callback callback, int* status)
+{
+	const pid_t child = ::fork();
+	if (child < 0)
+	{
+		return false;
+	}
+	if (child == 0)
+	{
+		callback();
+		std::_Exit(0);
+	}
+	return WaitForAjmChild(child, status);
+}
+
+enum class AjmDataTestOperation : uint8_t
+{
+	Decode,
+	DecodeSingle,
+	DecodeSplit,
+	Encode,
+	Run,
+	RunSplit,
+};
+
+int QueueAjmDataTestOperation(AjmDataTestOperation operation, void* batch, uint32_t instance, const uint8_t* input, uint8_t* data_output,
+                              uint8_t* decode_result, uint8_t* sideband_output)
+{
+	constexpr size_t     input_size  = 4;
+	constexpr size_t     output_size = 32;
+	constexpr uint64_t   run_flags   = (1ull << 47u) | 1u;
+	const Ajm::AjmBuffer input_buffer {const_cast<uint8_t*>(input), input_size};
+	const Ajm::AjmBuffer output_buffer {data_output, output_size};
+	const Ajm::AjmBuffer input_buffers[] {input_buffer};
+	const Ajm::AjmBuffer output_buffers[] {output_buffer};
+	switch (operation)
+	{
+		case AjmDataTestOperation::Decode:
+			return Ajm::AjmBatchJobDecode(batch, instance, input, input_size, data_output, output_size, decode_result);
+		case AjmDataTestOperation::DecodeSingle:
+			return Ajm::AjmBatchJobDecodeSingle(batch, instance, input, input_size, data_output, output_size, decode_result);
+		case AjmDataTestOperation::DecodeSplit:
+		{
+			GuestReadableBlock input_descriptor_storage(sizeof(input_buffer));
+			GuestReadableBlock output_descriptor_storage(sizeof(output_buffer));
+			if (!input_descriptor_storage.IsValid() || !output_descriptor_storage.IsValid())
+			{
+				return static_cast<int32_t>(0x80930005u);
+			}
+			auto* const guest_input_buffer  = static_cast<Ajm::AjmBuffer*>(input_descriptor_storage.Data());
+			auto* const guest_output_buffer = static_cast<Ajm::AjmBuffer*>(output_descriptor_storage.Data());
+			*guest_input_buffer             = input_buffer;
+			*guest_output_buffer            = output_buffer;
+			// DecodeSplit snapshots descriptor metadata at enqueue, so these mappings may be released on return.
+			return Ajm::AjmBatchJobDecodeSplit(batch, instance, guest_input_buffer, 1, guest_output_buffer, 1, decode_result);
+		}
+		case AjmDataTestOperation::Encode:
+			return Ajm::AjmBatchJobEncode(batch, instance, input, input_size, data_output, output_size, decode_result);
+		case AjmDataTestOperation::Run:
+			return Ajm::AjmBatchJobRun(batch, instance, run_flags, input, input_size, data_output, output_size, sideband_output, 56);
+		case AjmDataTestOperation::RunSplit:
+			return Ajm::AjmBatchJobRunSplit(batch, instance, run_flags, input_buffers, 1, output_buffers, 1, sideband_output, 56);
+	}
+	std::abort();
+}
+
+int RunAjmOpusSplitScenario(const std::array<uint8_t, 648>& framed_input, const std::array<std::vector<uint8_t>, 4>& expected_packet_pcm)
+{
+	constexpr size_t framed_packet_bytes = 162;
+	constexpr size_t packet_pcm_bytes = 960 * 2 * sizeof(int16_t);
+	constexpr size_t first_output_bytes = 3 * packet_pcm_bytes;
+	constexpr size_t tail_output_bytes = packet_pcm_bytes - AJM_OPUS_TEST_BELOW_PACKET_CAPACITY;
+	constexpr size_t pcm_frame_bytes = 2 * sizeof(int16_t);
+	constexpr size_t pending_first_bytes = 371 * pcm_frame_bytes;
+	constexpr size_t pending_carry_bytes = 512 * pcm_frame_bytes;
+	constexpr size_t pending_final_bytes = 77 * pcm_frame_bytes;
+	constexpr size_t pending_case_bytes = 2 * packet_pcm_bytes;
+	std::vector<uint8_t> expected_pcm;
+	for (const auto& packet: expected_packet_pcm)
+	{
+		expected_pcm.insert(expected_pcm.end(), packet.begin(), packet.end());
+	}
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock             config_storage(12);
+	GuestReadableBlock             input_storage(framed_input.size());
+	GuestReadableBlock             input_descriptors_storage(17 * sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock             output_descriptor_storage(17 * sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock             below_packet_output_storage(AJM_OPUS_TEST_BELOW_PACKET_CAPACITY + sizeof(int32_t));
+	GuestReadableBlock             output_storage(AJM_OPUS_TEST_OUTPUT_CAPACITY);
+	GuestReadableBlock             init_result_storage(32);
+	GuestReadableBlock             below_packet_result_storage(32);
+	GuestReadableBlock             first_result_storage(32);
+	GuestReadableBlock             second_result_storage(32);
+	GuestReadableBlock             clear_result_storage(32);
+	GuestReadableBlock             reset_result_storage(32);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	if (!config_storage.IsValid() || !input_storage.IsValid() || !input_descriptors_storage.IsValid() ||
+	    !output_descriptor_storage.IsValid() || !below_packet_output_storage.IsValid() || !output_storage.IsValid() ||
+	    !init_result_storage.IsValid() || !below_packet_result_storage.IsValid() || !first_result_storage.IsValid() ||
+	    !second_result_storage.IsValid() || !clear_result_storage.IsValid() || !reset_result_storage.IsValid() ||
+	    !error_storage.IsValid() || !batch_id_storage.IsValid())
+	{
+		return 2;
+	}
+
+	constexpr uint8_t opus_config[12] = {2, 0, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+	std::memcpy(config_storage.Data(), opus_config, sizeof(opus_config));
+	std::memcpy(input_storage.Data(), framed_input.data(), framed_input.size());
+	std::memset(init_result_storage.Data(), 0xa5, 32);
+	std::memset(below_packet_result_storage.Data(), 0xa5, 32);
+	std::memset(first_result_storage.Data(), 0xa5, 32);
+	std::memset(second_result_storage.Data(), 0xa5, 32);
+	std::memset(clear_result_storage.Data(), 0xa5, 32);
+	std::memset(reset_result_storage.Data(), 0xa5, 32);
+
+	uint32_t context = 0;
+	if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 24, 0) != 0)
+	{
+		return 3;
+	}
+	uint32_t instance = 0;
+	if (Ajm::AjmInstanceCreate(context, 24, 0x1002, &instance) != 0 || instance != ((24u << 14u) | 1u))
+	{
+		return 4;
+	}
+
+	auto* const               input_buffers  = static_cast<Ajm::AjmBuffer*>(input_descriptors_storage.Data());
+	auto* const               output_buffers = static_cast<Ajm::AjmBuffer*>(output_descriptor_storage.Data());
+	auto* const               input_bytes    = static_cast<uint8_t*>(input_storage.Data());
+	alignas(uint64_t) uint8_t batch[256] {};
+	for (size_t index = 0; index < 17; ++index)
+	{
+		input_buffers[index]  = {input_bytes, 1};
+		output_buffers[index] = {output_storage.Data(), 1};
+	}
+	constexpr int32_t invalid_parameter = static_cast<int32_t>(0x80930005u);
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 17, output_buffers, 1, nullptr) != invalid_parameter ||
+	    Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 17, nullptr) != invalid_parameter)
+	{
+		return 9;
+	}
+	input_buffers[0]  = {input_bytes, 1024u * 1024u + 1u};
+	output_buffers[0] = {output_storage.Data(), AJM_OPUS_TEST_OUTPUT_CAPACITY};
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 1, nullptr) != invalid_parameter)
+	{
+		return 8;
+	}
+
+	if (Ajm::AjmBatchJobInitialize(batch, instance, config_storage.Data(), 12, init_result_storage.Data()) != 0)
+	{
+		return 10;
+	}
+	input_buffers[0]  = {input_bytes, 487};
+	input_buffers[1]  = {input_bytes + 487, 161};
+	output_buffers[0] = {below_packet_output_storage.Data(), AJM_OPUS_TEST_BELOW_PACKET_CAPACITY};
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 2, output_buffers, 1, below_packet_result_storage.Data()) != 0)
+	{
+		return 11;
+	}
+	// Descriptor metadata is snapshotted at enqueue; the pointed-to input bytes are copied at Start.
+	input_buffers[0]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	input_buffers[1]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[0] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+
+	auto start_and_wait = [&]()
+	{
+		*batch_id_storage.Data() = 0;
+		*error_storage.Data()    = {};
+		if (Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()) != 0 || *batch_id_storage.Data() == 0 ||
+		    error_storage.Data()->error_code != 0)
+		{
+			return false;
+		}
+		return Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()) == 0;
+	};
+	std::memset(below_packet_output_storage.Data(), 0xa5, AJM_OPUS_TEST_BELOW_PACKET_CAPACITY + sizeof(int32_t));
+	if (!start_and_wait())
+	{
+		return 12;
+	}
+	auto read_i32 = [](const uint8_t* result, size_t offset)
+	{
+		int32_t value = 0;
+		std::memcpy(&value, result + offset, sizeof(value));
+		return value;
+	};
+	auto read_u64 = [](const uint8_t* result, size_t offset)
+	{
+		uint64_t value = 0;
+		std::memcpy(&value, result + offset, sizeof(value));
+		return value;
+	};
+	auto opus_decode_result_matches = [&](const void* result, size_t consumed, size_t produced, uint64_t delivered)
+	{
+		const auto* bytes = static_cast<const uint8_t*>(result);
+		return IsAjmBytePattern(bytes, 8, 0) && IsAjmBytePattern(bytes + 24, 8, 0xa5) &&
+		       read_i32(bytes, 8) == static_cast<int32_t>(consumed) && read_i32(bytes, 12) == static_cast<int32_t>(produced) &&
+		       read_u64(bytes, 16) == delivered;
+	};
+	if (!IsAjmBytePattern(init_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(init_result_storage.Data()) + 8, 24, 0xa5) ||
+	    !IsAjmBytePattern(below_packet_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(below_packet_result_storage.Data()) + 24, 8, 0xa5) ||
+	    std::memcmp(below_packet_output_storage.Data(), expected_pcm.data(), AJM_OPUS_TEST_BELOW_PACKET_CAPACITY) != 0)
+	{
+		return 16;
+	}
+	if (read_i32(static_cast<const uint8_t*>(below_packet_result_storage.Data()), 0) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(below_packet_result_storage.Data()), 4) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(below_packet_result_storage.Data()), 8) != static_cast<int32_t>(framed_packet_bytes) ||
+	    read_i32(static_cast<const uint8_t*>(below_packet_result_storage.Data()), 12) !=
+	        static_cast<int32_t>(AJM_OPUS_TEST_BELOW_PACKET_CAPACITY) ||
+	    read_u64(static_cast<const uint8_t*>(below_packet_result_storage.Data()), 16) != AJM_OPUS_TEST_BELOW_PACKET_CAPACITY / 4)
+	{
+		return 17;
+	}
+
+	input_buffers[0]  = {input_bytes + framed_packet_bytes, 325};
+	input_buffers[1]  = {input_bytes + 487, 161};
+	output_buffers[0] = {output_storage.Data(), 5001};
+	output_buffers[1] = {static_cast<uint8_t*>(output_storage.Data()) + 5001, first_output_bytes - 5001};
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 2, output_buffers, 2, first_result_storage.Data()) != 0)
+	{
+		return 18;
+	}
+	input_buffers[0]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	input_buffers[1]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[0] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[1] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	std::memset(output_storage.Data(), 0xa5, AJM_OPUS_TEST_OUTPUT_CAPACITY);
+	if (!start_and_wait())
+	{
+		return 19;
+	}
+	if (!IsAjmBytePattern(static_cast<const uint8_t*>(first_result_storage.Data()) + 24, 8, 0xa5))
+	{
+		return 20;
+	}
+	// Interpret the cumulative counter as per-channel frames for this oracle; its AJM unit remains inferred.
+	if (read_i32(static_cast<const uint8_t*>(first_result_storage.Data()), 0) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(first_result_storage.Data()), 4) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(first_result_storage.Data()), 8) != 3 * static_cast<int32_t>(framed_packet_bytes) ||
+	    read_i32(static_cast<const uint8_t*>(first_result_storage.Data()), 12) != 3 * static_cast<int32_t>(packet_pcm_bytes) ||
+	    read_u64(static_cast<const uint8_t*>(first_result_storage.Data()), 16) !=
+	        (AJM_OPUS_TEST_BELOW_PACKET_CAPACITY + first_output_bytes) / 4 ||
+	    std::memcmp(output_storage.Data(), expected_pcm.data() + AJM_OPUS_TEST_BELOW_PACKET_CAPACITY, first_output_bytes) != 0 ||
+	    !IsAjmBytePattern(static_cast<uint8_t*>(output_storage.Data()) + 3 * packet_pcm_bytes,
+	                      AJM_OPUS_TEST_OUTPUT_CAPACITY - 3 * packet_pcm_bytes, 0xa5))
+	{
+		return 17;
+	}
+
+	std::memset(output_storage.Data(), 0xa5, AJM_OPUS_TEST_OUTPUT_CAPACITY);
+	std::memset(second_result_storage.Data(), 0xa5, 32);
+	output_buffers[0] = {output_storage.Data(), AJM_OPUS_TEST_OUTPUT_CAPACITY};
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, nullptr, 0, output_buffers, 1, second_result_storage.Data()) != 0 ||
+	    !start_and_wait())
+	{
+		return 13;
+	}
+	if (!IsAjmBytePattern(static_cast<const uint8_t*>(second_result_storage.Data()) + 24, 8, 0xa5) ||
+	    read_i32(static_cast<const uint8_t*>(second_result_storage.Data()), 8) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(second_result_storage.Data()), 12) != static_cast<int32_t>(tail_output_bytes) ||
+	    read_u64(static_cast<const uint8_t*>(second_result_storage.Data()), 16) != 4u * 960u ||
+	    std::memcmp(output_storage.Data(), expected_pcm.data() + expected_pcm.size() - tail_output_bytes, tail_output_bytes) != 0 ||
+	    !IsAjmBytePattern(static_cast<uint8_t*>(output_storage.Data()) + tail_output_bytes, AJM_OPUS_TEST_OUTPUT_CAPACITY - tail_output_bytes,
+	                      0xa5))
+	{
+		return 18;
+	}
+
+	input_buffers[0] = {input_bytes, framed_packet_bytes};
+	output_buffers[0] = {below_packet_output_storage.Data(), AJM_OPUS_TEST_BELOW_PACKET_CAPACITY};
+	std::memset(below_packet_output_storage.Data(), 0xa5, AJM_OPUS_TEST_BELOW_PACKET_CAPACITY + sizeof(int32_t));
+	std::memset(below_packet_result_storage.Data(), 0xa5, 32);
+	std::memset(clear_result_storage.Data(), 0xa5, 32);
+	std::memset(reset_result_storage.Data(), 0xa5, 32);
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 1, below_packet_result_storage.Data()) != 0 ||
+	    Ajm::AjmBatchJobClearContext(batch, instance, clear_result_storage.Data()) != 0)
+	{
+		return 14;
+	}
+	input_buffers[0]  = {input_bytes, framed_packet_bytes};
+	output_buffers[0] = {output_storage.Data(), AJM_OPUS_TEST_BELOW_PACKET_CAPACITY};
+	std::memset(output_storage.Data(), 0xa5, AJM_OPUS_TEST_OUTPUT_CAPACITY);
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 1, reset_result_storage.Data()) != 0)
+	{
+		return 14;
+	}
+	input_buffers[0] = {input_bytes + framed_packet_bytes, framed_packet_bytes};
+	output_buffers[0] = {static_cast<uint8_t*>(output_storage.Data()) + AJM_OPUS_TEST_BELOW_PACKET_CAPACITY,
+	                     2 * packet_pcm_bytes - AJM_OPUS_TEST_BELOW_PACKET_CAPACITY};
+	std::memset(second_result_storage.Data(), 0xa5, 32);
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 1, second_result_storage.Data()) != 0)
+	{
+		return 14;
+	}
+	input_buffers[0]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[0] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	if (!start_and_wait())
+	{
+		return 14;
+	}
+	if (read_i32(static_cast<const uint8_t*>(below_packet_result_storage.Data()), 0) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(below_packet_result_storage.Data()), 4) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(below_packet_result_storage.Data()), 8) != static_cast<int32_t>(framed_packet_bytes) ||
+	    read_i32(static_cast<const uint8_t*>(below_packet_result_storage.Data()), 12) != static_cast<int32_t>(AJM_OPUS_TEST_BELOW_PACKET_CAPACITY) ||
+	    read_u64(static_cast<const uint8_t*>(below_packet_result_storage.Data()), 16) !=
+	        3840u + AJM_OPUS_TEST_BELOW_PACKET_CAPACITY / 4 ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(below_packet_result_storage.Data()) + 24, 8, 0xa5) ||
+	    !IsAjmBytePattern(static_cast<uint8_t*>(below_packet_output_storage.Data()) + AJM_OPUS_TEST_BELOW_PACKET_CAPACITY,
+	                      sizeof(int32_t), 0xa5) ||
+	    !IsAjmBytePattern(clear_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(clear_result_storage.Data()) + 8, 24, 0xa5) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(reset_result_storage.Data()) + 24, 8, 0xa5) ||
+	    read_i32(static_cast<const uint8_t*>(reset_result_storage.Data()), 8) != static_cast<int32_t>(framed_packet_bytes) ||
+	    read_i32(static_cast<const uint8_t*>(reset_result_storage.Data()), 12) != static_cast<int32_t>(AJM_OPUS_TEST_BELOW_PACKET_CAPACITY) ||
+	    read_u64(static_cast<const uint8_t*>(reset_result_storage.Data()), 16) != AJM_OPUS_TEST_BELOW_PACKET_CAPACITY / 4 ||
+	    !IsAjmBytePattern(second_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(second_result_storage.Data()) + 24, 8, 0xa5) ||
+	    read_i32(static_cast<const uint8_t*>(second_result_storage.Data()), 8) != static_cast<int32_t>(framed_packet_bytes) ||
+	    read_i32(static_cast<const uint8_t*>(second_result_storage.Data()), 12) !=
+	        static_cast<int32_t>(2 * packet_pcm_bytes - AJM_OPUS_TEST_BELOW_PACKET_CAPACITY) ||
+	    read_u64(static_cast<const uint8_t*>(second_result_storage.Data()), 16) != 1920u ||
+	    std::memcmp(output_storage.Data(), expected_pcm.data(), 2 * packet_pcm_bytes) != 0 ||
+	    !IsAjmBytePattern(static_cast<uint8_t*>(output_storage.Data()) + 2 * packet_pcm_bytes, AJM_OPUS_TEST_OUTPUT_CAPACITY - 2 * packet_pcm_bytes,
+	                      0xa5))
+	{
+		return 19;
+	}
+
+	// Keep 589 frames pending, drain them across two bounded outputs, then retry the offered packet.
+	std::memset(output_storage.Data(), 0xa5, AJM_OPUS_TEST_OUTPUT_CAPACITY);
+	std::memset(clear_result_storage.Data(), 0xa5, 32);
+	std::memset(reset_result_storage.Data(), 0xa5, 32);
+	input_buffers[0]  = {input_bytes, framed_packet_bytes};
+	output_buffers[0] = {output_storage.Data(), pending_first_bytes};
+	if (Ajm::AjmBatchJobClearContext(batch, instance, clear_result_storage.Data()) != 0 ||
+	    Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 1, reset_result_storage.Data()) != 0)
+	{
+		return 21;
+	}
+	input_buffers[0]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[0] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	if (!start_and_wait() || !IsAjmBytePattern(clear_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(clear_result_storage.Data()) + 8, 24, 0xa5) ||
+	    !opus_decode_result_matches(reset_result_storage.Data(), framed_packet_bytes, pending_first_bytes,
+	                                pending_first_bytes / pcm_frame_bytes))
+	{
+		return 22;
+	}
+
+	input_buffers[0]  = {input_bytes + framed_packet_bytes, framed_packet_bytes};
+	output_buffers[0] = {static_cast<uint8_t*>(output_storage.Data()) + pending_first_bytes, pending_carry_bytes};
+	std::memset(first_result_storage.Data(), 0xa5, 32);
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 1, first_result_storage.Data()) != 0)
+	{
+		return 23;
+	}
+	input_buffers[0]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[0] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	if (!start_and_wait() || !opus_decode_result_matches(first_result_storage.Data(), 0, pending_carry_bytes,
+	                                                     (pending_first_bytes + pending_carry_bytes) / pcm_frame_bytes))
+	{
+		return 24;
+	}
+
+	output_buffers[0] = {static_cast<uint8_t*>(output_storage.Data()) + pending_first_bytes + pending_carry_bytes,
+	                     pending_final_bytes};
+	std::memset(second_result_storage.Data(), 0xa5, 32);
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, nullptr, 0, output_buffers, 1, second_result_storage.Data()) != 0)
+	{
+		return 25;
+	}
+	output_buffers[0] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	if (!start_and_wait() || !opus_decode_result_matches(second_result_storage.Data(), 0, pending_final_bytes,
+	                                                     packet_pcm_bytes / pcm_frame_bytes))
+	{
+		return 26;
+	}
+
+	input_buffers[0]  = {input_bytes + framed_packet_bytes, framed_packet_bytes};
+	output_buffers[0] = {static_cast<uint8_t*>(output_storage.Data()) + packet_pcm_bytes, packet_pcm_bytes};
+	std::memset(below_packet_result_storage.Data(), 0xa5, 32);
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 1, below_packet_result_storage.Data()) != 0)
+	{
+		return 27;
+	}
+	input_buffers[0]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[0] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	if (!start_and_wait() || !opus_decode_result_matches(below_packet_result_storage.Data(), framed_packet_bytes, packet_pcm_bytes,
+	                                                     2 * packet_pcm_bytes / pcm_frame_bytes) ||
+	    std::memcmp(output_storage.Data(), expected_pcm.data(), pending_case_bytes) != 0 ||
+	    !IsAjmBytePattern(static_cast<uint8_t*>(output_storage.Data()) + pending_case_bytes,
+	                      AJM_OPUS_TEST_OUTPUT_CAPACITY - pending_case_bytes, 0xa5) ||
+	    std::memcmp(input_storage.Data(), framed_input.data(), framed_input.size()) != 0)
+	{
+		return 28;
+	}
+
+	constexpr size_t batch_decoder_count = 15;
+	std::array<uint32_t, batch_decoder_count>                       batch_instances {};
+	std::array<std::unique_ptr<GuestReadableBlock>, batch_decoder_count> batch_output_storage;
+	std::array<std::unique_ptr<GuestReadableBlock>, batch_decoder_count> batch_result_storage;
+	for (size_t index = 0; index < batch_decoder_count; ++index)
+	{
+		if (Ajm::AjmInstanceCreate(context, 24, 0x1002, &batch_instances[index]) != 0)
+		{
+			return 29;
+		}
+		batch_output_storage[index] = std::make_unique<GuestReadableBlock>(packet_pcm_bytes + sizeof(uint32_t));
+		batch_result_storage[index] = std::make_unique<GuestReadableBlock>(32);
+		if (!batch_output_storage[index]->IsValid() || !batch_result_storage[index]->IsValid())
+		{
+			return 30;
+		}
+		std::memset(batch_output_storage[index]->Data(), 0xa5, packet_pcm_bytes + sizeof(uint32_t));
+		std::memset(batch_result_storage[index]->Data(), 0xa5, 32);
+		std::memset(init_result_storage.Data(), 0xa5, 32);
+		if (Ajm::AjmBatchJobInitialize(batch, batch_instances[index], config_storage.Data(), 12, init_result_storage.Data()) != 0 ||
+		    !start_and_wait() || !IsAjmBytePattern(init_result_storage.Data(), 8, 0) ||
+		    !IsAjmBytePattern(static_cast<const uint8_t*>(init_result_storage.Data()) + 8, 24, 0xa5))
+		{
+			return 31;
+		}
+	}
+
+	auto queue_batch_decode = [&](void* queued_batch, size_t packet_index)
+	{
+		uint8_t* const packet = input_bytes + packet_index * framed_packet_bytes;
+		for (size_t index = 0; index < batch_decoder_count; ++index)
+		{
+			input_buffers[0]  = {packet, framed_packet_bytes};
+			output_buffers[0] = {batch_output_storage[index]->Data(), packet_pcm_bytes};
+			if (Ajm::AjmBatchJobDecodeSplit(queued_batch, batch_instances[index], input_buffers, 1, output_buffers, 1,
+			                                batch_result_storage[index]->Data()) != 0)
+			{
+				return false;
+			}
+		}
+		input_buffers[0]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+		output_buffers[0] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+		return true;
+	};
+	auto start_and_wait_queued_batch = [&](void* queued_batch)
+	{
+		*batch_id_storage.Data() = 0;
+		*error_storage.Data()    = {};
+		if (Ajm::AjmBatchStart(context, queued_batch, 0, error_storage.Data(), batch_id_storage.Data()) != 0 ||
+		    *batch_id_storage.Data() == 0 || error_storage.Data()->error_code != 0)
+		{
+			return false;
+		}
+		return Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()) == 0 &&
+		       error_storage.Data()->error_code == 0;
+	};
+
+	// Disjoint PCM/result pairs for every decoder make the final output preflight fail late.
+	alignas(uint64_t) uint8_t invalid_output_batch[512] {};
+	std::memset(error_storage.Data(), 0xa5, sizeof(Ajm::AjmBatchError));
+	*batch_id_storage.Data() = 0xa5a5a5a5u;
+	if (!queue_batch_decode(invalid_output_batch, 0) || !batch_output_storage.back()->Protect(Core::VirtualMemory::Mode::Read))
+	{
+		return 32;
+	}
+	const int32_t invalid_output_status =
+	    Ajm::AjmBatchStart(context, invalid_output_batch, 0, error_storage.Data(), batch_id_storage.Data());
+	const bool output_mapping_restored = batch_output_storage.back()->Protect(Core::VirtualMemory::Mode::ReadWrite);
+	if (!output_mapping_restored)
+	{
+		return 33;
+	}
+	if (invalid_output_status != invalid_parameter || !IsAjmBytePattern(error_storage.Data(), sizeof(Ajm::AjmBatchError), 0xa5) ||
+	    *batch_id_storage.Data() != 0xa5a5a5a5u)
+	{
+		return 34;
+	}
+	for (size_t index = 0; index < batch_decoder_count; ++index)
+	{
+		if (!IsAjmBytePattern(batch_output_storage[index]->Data(), packet_pcm_bytes + sizeof(uint32_t), 0xa5) ||
+		    !IsAjmBytePattern(batch_result_storage[index]->Data(), 32, 0xa5))
+		{
+			return 35;
+		}
+	}
+
+	// Retry the first packet on every instance; exact oracle PCM proves the refused batch did not advance them.
+	alignas(uint64_t) uint8_t valid_output_batch[512] {};
+	for (size_t index = 0; index < batch_decoder_count; ++index)
+	{
+		std::memset(batch_output_storage[index]->Data(), 0xa5, packet_pcm_bytes + sizeof(uint32_t));
+		std::memset(batch_result_storage[index]->Data(), 0xa5, 32);
+	}
+	if (!queue_batch_decode(valid_output_batch, 0) || !start_and_wait_queued_batch(valid_output_batch) ||
+	    *batch_id_storage.Data() == 0 || error_storage.Data()->error_code != 0 ||
+	    std::memcmp(input_storage.Data(), framed_input.data(), framed_input.size()) != 0)
+	{
+		return 36;
+	}
+	for (size_t index = 0; index < batch_decoder_count; ++index)
+	{
+		if (!opus_decode_result_matches(batch_result_storage[index]->Data(), framed_packet_bytes, packet_pcm_bytes,
+		                                packet_pcm_bytes / pcm_frame_bytes) ||
+		    std::memcmp(batch_output_storage[index]->Data(), expected_packet_pcm[0].data(), packet_pcm_bytes) != 0 ||
+		    !IsAjmBytePattern(static_cast<uint8_t*>(batch_output_storage[index]->Data()) + packet_pcm_bytes, sizeof(uint32_t), 0xa5))
+		{
+			return 37;
+		}
+	}
+
+	// Reset each decoder independently, then fill a batch with the most scattered outputs a job can publish.
+	constexpr size_t max_batch_packets_per_decoder = 4;
+	constexpr size_t max_batch_job_count          = batch_decoder_count * max_batch_packets_per_decoder;
+	constexpr size_t max_scatter_count            = 16;
+	constexpr size_t max_scatter_bytes            = packet_pcm_bytes / max_scatter_count;
+	constexpr size_t max_scatter_stride           = max_scatter_bytes + sizeof(uint32_t);
+	constexpr size_t max_output_storage_bytes     = max_scatter_count * max_scatter_stride;
+	static_assert(packet_pcm_bytes % max_scatter_count == 0);
+	static_assert(sizeof(Ajm::AjmBatchError) == 32);
+	static_assert(max_batch_job_count * (max_scatter_count + 1) + 2 == 1022);
+
+	alignas(uint64_t) uint8_t reset_batches[batch_decoder_count][512] {};
+	for (size_t index = 0; index < batch_decoder_count; ++index)
+	{
+		std::memset(clear_result_storage.Data(), 0xa5, 32);
+		if (Ajm::AjmBatchJobClearContext(reset_batches[index], batch_instances[index], clear_result_storage.Data()) != 0 ||
+		    !start_and_wait_queued_batch(reset_batches[index]) || !IsAjmBytePattern(clear_result_storage.Data(), 8, 0) ||
+		    !IsAjmBytePattern(static_cast<const uint8_t*>(clear_result_storage.Data()) + 8, 24, 0xa5))
+		{
+			return 39;
+		}
+	}
+
+	struct MaxCapacityJobStorage
+	{
+		std::unique_ptr<GuestReadableBlock> output;
+		std::unique_ptr<GuestReadableBlock> result;
+	};
+	std::array<MaxCapacityJobStorage, max_batch_job_count> max_batch_storage;
+	for (size_t job_index = 0; job_index < max_batch_job_count; ++job_index)
+	{
+		max_batch_storage[job_index].output = std::make_unique<GuestReadableBlock>(max_output_storage_bytes);
+		max_batch_storage[job_index].result = std::make_unique<GuestReadableBlock>(32);
+		if (!max_batch_storage[job_index].output->IsValid() || !max_batch_storage[job_index].result->IsValid())
+		{
+			return 40;
+		}
+		std::memset(max_batch_storage[job_index].output->Data(), 0xa5, max_output_storage_bytes);
+		std::memset(max_batch_storage[job_index].result->Data(), 0xa5, 32);
+	}
+	GuestReadableBlock max_batch_error_storage(sizeof(Ajm::AjmBatchError) + sizeof(uint32_t));
+	GuestReadableBlock max_batch_id_storage(2 * sizeof(uint32_t));
+	if (!max_batch_error_storage.IsValid() || !max_batch_id_storage.IsValid())
+	{
+		return 41;
+	}
+	auto* const max_batch_error = static_cast<Ajm::AjmBatchError*>(max_batch_error_storage.Data());
+	auto* const max_batch_id    = static_cast<uint32_t*>(max_batch_id_storage.Data());
+
+	alignas(uint64_t) uint8_t max_capacity_batch[512] {};
+	for (size_t packet_index = 0; packet_index < max_batch_packets_per_decoder; ++packet_index)
+	{
+		for (size_t decoder_index = 0; decoder_index < batch_decoder_count; ++decoder_index)
+		{
+			const size_t job_index = packet_index * batch_decoder_count + decoder_index;
+			input_buffers[0]        = {input_bytes + packet_index * framed_packet_bytes, framed_packet_bytes};
+			for (size_t scatter_index = 0; scatter_index < max_scatter_count; ++scatter_index)
+			{
+				auto* const output = static_cast<uint8_t*>(max_batch_storage[job_index].output->Data()) +
+				                     scatter_index * max_scatter_stride;
+				output_buffers[scatter_index] = {output, max_scatter_bytes};
+			}
+			if (Ajm::AjmBatchJobDecodeSplit(max_capacity_batch, batch_instances[decoder_index], input_buffers, 1, output_buffers,
+			                                max_scatter_count, max_batch_storage[job_index].result->Data()) != 0)
+			{
+				return 42;
+			}
+		}
+	}
+	input_buffers[0] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	for (size_t scatter_index = 0; scatter_index < max_scatter_count; ++scatter_index)
+	{
+		output_buffers[scatter_index] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	}
+
+	std::memset(max_batch_error_storage.Data(), 0xa5, sizeof(Ajm::AjmBatchError) + sizeof(uint32_t));
+	std::memset(max_batch_id_storage.Data(), 0xa5, 2 * sizeof(uint32_t));
+	if (!max_batch_id_storage.Protect(Core::VirtualMemory::Mode::Read))
+	{
+		return 43;
+	}
+	const int32_t max_batch_id_status =
+	    Ajm::AjmBatchStart(context, max_capacity_batch, 0, max_batch_error, max_batch_id);
+	const bool max_batch_id_mapping_restored = max_batch_id_storage.Protect(Core::VirtualMemory::Mode::ReadWrite);
+	if (!max_batch_id_mapping_restored)
+	{
+		return 44;
+	}
+	if (max_batch_id_status != invalid_parameter ||
+	    !IsAjmBytePattern(max_batch_error_storage.Data(), sizeof(Ajm::AjmBatchError) + sizeof(uint32_t), 0xa5) ||
+	    !IsAjmBytePattern(max_batch_id_storage.Data(), 2 * sizeof(uint32_t), 0xa5))
+	{
+		return 45;
+	}
+	for (size_t job_index = 0; job_index < max_batch_job_count; ++job_index)
+	{
+		if (!IsAjmBytePattern(max_batch_storage[job_index].output->Data(), max_output_storage_bytes, 0xa5) ||
+		    !IsAjmBytePattern(max_batch_storage[job_index].result->Data(), 32, 0xa5))
+		{
+			return 46;
+		}
+	}
+	if (std::memcmp(input_storage.Data(), framed_input.data(), framed_input.size()) != 0)
+	{
+		return 47;
+	}
+
+	// Retry the same queued batch after the late preflight failure; no jobs are enqueued again.
+	auto start_and_wait_max_batch = [&]()
+	{
+		*max_batch_id       = 0;
+		*max_batch_error    = {};
+		if (Ajm::AjmBatchStart(context, max_capacity_batch, 0, max_batch_error, max_batch_id) != 0 || *max_batch_id == 0 ||
+		    max_batch_error->error_code != 0)
+		{
+			return false;
+		}
+		return Ajm::AjmBatchWait(context, *max_batch_id, UINT32_MAX, max_batch_error) == 0 &&
+		       max_batch_error->error_code == 0;
+	};
+	if (!start_and_wait_max_batch() ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(max_batch_error_storage.Data()) + sizeof(Ajm::AjmBatchError),
+	                      sizeof(uint32_t), 0xa5) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(max_batch_id_storage.Data()) + sizeof(uint32_t), sizeof(uint32_t), 0xa5) ||
+	    std::memcmp(input_storage.Data(), framed_input.data(), framed_input.size()) != 0)
+	{
+		return 48;
+	}
+	for (size_t packet_index = 0; packet_index < max_batch_packets_per_decoder; ++packet_index)
+	{
+		for (size_t decoder_index = 0; decoder_index < batch_decoder_count; ++decoder_index)
+		{
+			const size_t job_index = packet_index * batch_decoder_count + decoder_index;
+			if (!opus_decode_result_matches(max_batch_storage[job_index].result->Data(), framed_packet_bytes, packet_pcm_bytes,
+			                                (packet_index + 1) * packet_pcm_bytes / pcm_frame_bytes))
+			{
+				return 49;
+			}
+			for (size_t scatter_index = 0; scatter_index < max_scatter_count; ++scatter_index)
+			{
+				const auto* const output = static_cast<const uint8_t*>(max_batch_storage[job_index].output->Data()) +
+				                           scatter_index * max_scatter_stride;
+				if (std::memcmp(output, expected_packet_pcm[packet_index].data() + scatter_index * max_scatter_bytes,
+				                max_scatter_bytes) != 0 ||
+				    !IsAjmBytePattern(output + max_scatter_bytes, sizeof(uint32_t), 0xa5))
+				{
+					return 50;
+				}
+			}
+		}
+	}
+
+	// The guest owns the batch storage, so a batch of many small jobs is bounded only by the ranges it publishes.
+	constexpr size_t small_job_count       = 5 * batch_decoder_count;
+	constexpr size_t small_job_result_size = 32;
+	GuestReadableBlock small_job_results(small_job_count * small_job_result_size);
+	if (!small_job_results.IsValid())
+	{
+		return 51;
+	}
+	std::memset(small_job_results.Data(), 0xa5, small_job_count * small_job_result_size);
+	alignas(uint64_t) uint8_t small_job_batch[512] {};
+	for (size_t job_index = 0; job_index < small_job_count; ++job_index)
+	{
+		auto* const result = static_cast<uint8_t*>(small_job_results.Data()) + job_index * small_job_result_size;
+		if (Ajm::AjmBatchJobClearContext(small_job_batch, batch_instances[job_index % batch_decoder_count], result) != 0)
+		{
+			return 52;
+		}
+	}
+	if (!start_and_wait_queued_batch(small_job_batch))
+	{
+		return 53;
+	}
+	for (size_t job_index = 0; job_index < small_job_count; ++job_index)
+	{
+		const auto* const result = static_cast<const uint8_t*>(small_job_results.Data()) + job_index * small_job_result_size;
+		if (!IsAjmBytePattern(result, 8, 0) || !IsAjmBytePattern(result + 8, small_job_result_size - 8, 0xa5))
+		{
+			return 54;
+		}
+	}
+
+	// Initializing the control abandons the jobs queued on it; only jobs queued afterwards run.
+	auto* const abandoned_result = static_cast<uint8_t*>(small_job_results.Data());
+	auto* const started_result   = abandoned_result + small_job_result_size;
+	std::memset(small_job_results.Data(), 0xa5, 2 * small_job_result_size);
+	alignas(uint64_t) uint8_t reinitialized_storage[64] {};
+	if (Ajm::AjmBatchJobClearContext(small_job_batch, batch_instances[0], abandoned_result) != 0 ||
+	    Ajm::AjmBatchInitializeBuffer(reinitialized_storage, sizeof(reinitialized_storage), small_job_batch) != 0 ||
+	    Ajm::AjmBatchJobClearContext(small_job_batch, batch_instances[0], started_result) != 0 ||
+	    !start_and_wait_queued_batch(small_job_batch))
+	{
+		return 55;
+	}
+	if (!IsAjmBytePattern(abandoned_result, small_job_result_size, 0xa5) || !IsAjmBytePattern(started_result, 8, 0) ||
+	    !IsAjmBytePattern(started_result + 8, small_job_result_size - 8, 0xa5))
+	{
+		return 56;
+	}
+
+	for (const uint32_t batch_instance: batch_instances)
+	{
+		if (Ajm::AjmInstanceDestroy(context, batch_instance) != 0)
+		{
+			return 38;
+		}
+	}
+	if (Ajm::AjmInstanceDestroy(context, instance) != 0 || Ajm::AjmFinalize(context) != 0)
+	{
+		return 15;
+	}
+	return 0;
+}
+
+int RunAjmOpusGaplessScenario(const std::array<uint8_t, 648>& framed_input, const std::vector<uint8_t>& expected_output,
+                              uint32_t resample_flags, uint64_t gapless_reset)
+{
+	constexpr size_t output_capacity   = 9000;
+	constexpr size_t output_split      = 4000;
+	constexpr size_t output_bytes      = 2000 * 2 * sizeof(int16_t);
+	constexpr size_t first_call_frames = 2 * 960 - 312 - 8;
+	constexpr size_t first_call_bytes  = first_call_frames * 2 * sizeof(int16_t);
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock             config_storage(12);
+	GuestReadableBlock             gapless_storage(8);
+	GuestReadableBlock             input_storage(framed_input.size());
+	GuestReadableBlock             input_descriptors_storage(2 * sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock             output_descriptors_storage(2 * sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock             output_storage(output_capacity);
+	GuestReadableBlock             init_result_storage(32);
+	GuestReadableBlock             clear_result_storage(32);
+	GuestReadableBlock             gapless_result_storage(32);
+	GuestReadableBlock             resample_result_storage(32);
+	GuestReadableBlock             resample_info_storage(24);
+	GuestReadableBlock             decode_result_storage(32);
+	GuestReadableBlock             second_decode_result_storage(32);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	if (!config_storage.IsValid() || !gapless_storage.IsValid() || !input_storage.IsValid() || !input_descriptors_storage.IsValid() ||
+	    !output_descriptors_storage.IsValid() || !output_storage.IsValid() || !init_result_storage.IsValid() ||
+	    !clear_result_storage.IsValid() || !gapless_result_storage.IsValid() || !resample_result_storage.IsValid() ||
+	    !resample_info_storage.IsValid() || !decode_result_storage.IsValid() || !second_decode_result_storage.IsValid() ||
+	    !error_storage.IsValid() || !batch_id_storage.IsValid() || expected_output.size() != output_bytes)
+	{
+		return 2;
+	}
+
+	constexpr uint8_t opus_config[12]   = {2, 0, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+	constexpr uint8_t gapless_config[8] = {0xd0, 0x07, 0, 0,
+	                                       0x38, 0x01, 0, 0}; // 2000 output frames, 312 priming frames, 0 already skipped.
+	std::memcpy(config_storage.Data(), opus_config, sizeof(opus_config));
+	std::memcpy(gapless_storage.Data(), gapless_config, sizeof(gapless_config));
+	std::memcpy(input_storage.Data(), framed_input.data(), framed_input.size());
+	std::memset(init_result_storage.Data(), 0xa5, 32);
+	std::memset(clear_result_storage.Data(), 0xa5, 32);
+	std::memset(gapless_result_storage.Data(), 0xa5, 32);
+	std::memset(resample_result_storage.Data(), 0xa5, 32);
+	std::memset(resample_info_storage.Data(), 0xa5, 24);
+	std::memset(decode_result_storage.Data(), 0xa5, 32);
+	std::memset(second_decode_result_storage.Data(), 0xa5, 32);
+	std::memset(output_storage.Data(), 0xa5, output_capacity);
+
+	uint32_t context = 0;
+	if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 24, 0) != 0)
+	{
+		return 3;
+	}
+	uint32_t instance = 0;
+	if (Ajm::AjmInstanceCreate(context, 24, 0x1002, &instance) != 0 || instance != ((24u << 14u) | 1u))
+	{
+		return 4;
+	}
+
+	auto* const input_buffers    = static_cast<Ajm::AjmBuffer*>(input_descriptors_storage.Data());
+	auto* const output_buffers   = static_cast<Ajm::AjmBuffer*>(output_descriptors_storage.Data());
+	auto* const input_bytes      = static_cast<uint8_t*>(input_storage.Data());
+	auto* const output_bytes_ptr = static_cast<uint8_t*>(output_storage.Data());
+	input_buffers[0]             = {input_bytes, 161};
+	input_buffers[1]             = {input_bytes + 161, 163};
+	output_buffers[0]            = {output_bytes_ptr, output_split};
+	output_buffers[1]            = {output_bytes_ptr + output_split, first_call_bytes - output_split};
+	alignas(uint64_t) uint8_t batch[256] {};
+	if (Ajm::AjmBatchJobInitialize(batch, instance, config_storage.Data(), 12, init_result_storage.Data()) != 0 ||
+	    Ajm::AjmBatchJobClearContext(batch, instance, clear_result_storage.Data()) != 0 ||
+	    Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_storage.Data(), gapless_reset, gapless_result_storage.Data()) != 0 ||
+	    Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 1.0f, 0.0f, resample_flags, resample_result_storage.Data()) != 0 ||
+	    Ajm::AjmBatchJobGetResampleInfo(batch, instance, resample_info_storage.Data()) != 0 ||
+	    Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 2, output_buffers, 2, decode_result_storage.Data()) != 0)
+	{
+		return 5;
+	}
+
+	// Config and descriptor metadata are captured by the enqueue calls.
+	std::memset(config_storage.Data(), 0xa5, 12);
+	std::memset(gapless_storage.Data(), 0xa5, 8);
+	input_buffers[0]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	input_buffers[1]  = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[0] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[1] = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+
+	*batch_id_storage.Data() = 0;
+	*error_storage.Data()    = {};
+	if (Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()) != 0 || *batch_id_storage.Data() == 0 ||
+	    error_storage.Data()->error_code != 0 ||
+	    Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()) != 0)
+	{
+		return 6;
+	}
+	auto read_i32 = [](const uint8_t* result, size_t offset)
+	{
+		int32_t value = 0;
+		std::memcpy(&value, result + offset, sizeof(value));
+		return value;
+	};
+	uint64_t samples = 0;
+	std::memcpy(&samples, static_cast<const uint8_t*>(decode_result_storage.Data()) + 16, sizeof(samples));
+	float resample_ratio = 0.0f;
+	std::memcpy(&resample_ratio, static_cast<const uint8_t*>(resample_info_storage.Data()) + 8, sizeof(resample_ratio));
+	if (!IsAjmBytePattern(init_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(init_result_storage.Data()) + 8, 24, 0xa5) ||
+	    !IsAjmBytePattern(clear_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(clear_result_storage.Data()) + 8, 24, 0xa5) ||
+	    !IsAjmBytePattern(gapless_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(gapless_result_storage.Data()) + 8, 24, 0xa5) ||
+	    !IsAjmBytePattern(resample_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(resample_result_storage.Data()) + 8, 24, 0xa5) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(resample_info_storage.Data()) + 16, 8, 0xa5) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(decode_result_storage.Data()) + 24, 8, 0xa5) ||
+	    read_i32(static_cast<const uint8_t*>(resample_info_storage.Data()), 0) != 0 || resample_ratio != 1.0f ||
+	    read_i32(static_cast<const uint8_t*>(resample_info_storage.Data()), 12) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(decode_result_storage.Data()), 0) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(decode_result_storage.Data()), 4) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(decode_result_storage.Data()), 8) != 324 ||
+	    read_i32(static_cast<const uint8_t*>(decode_result_storage.Data()), 12) != static_cast<int32_t>(first_call_bytes) ||
+	    samples != first_call_frames || std::memcmp(output_storage.Data(), expected_output.data(), first_call_bytes) != 0 ||
+	    !IsAjmBytePattern(output_bytes_ptr + first_call_bytes, output_capacity - first_call_bytes, 0xa5))
+	{
+		return 7;
+	}
+
+	input_buffers[0]  = {input_bytes + 324, 161};
+	input_buffers[1]  = {input_bytes + 485, 163};
+	output_buffers[0] = {output_bytes_ptr, output_split};
+	output_buffers[1] = {output_bytes_ptr + output_split, output_capacity - output_split};
+	std::memset(output_storage.Data(), 0xa5, output_capacity);
+	if (Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 2, output_buffers, 2, second_decode_result_storage.Data()) != 0)
+	{
+		return 8;
+	}
+	input_buffers[0]         = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	input_buffers[1]         = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[0]        = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	output_buffers[1]        = {reinterpret_cast<void*>(static_cast<uintptr_t>(1)), SIZE_MAX};
+	*batch_id_storage.Data() = 0;
+	*error_storage.Data()    = {};
+	if (Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()) != 0 || *batch_id_storage.Data() == 0 ||
+	    error_storage.Data()->error_code != 0 ||
+	    Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()) != 0)
+	{
+		return 9;
+	}
+	uint64_t second_samples = 0;
+	std::memcpy(&second_samples, static_cast<const uint8_t*>(second_decode_result_storage.Data()) + 16, sizeof(second_samples));
+	const size_t  second_call_bytes = output_bytes - first_call_bytes;
+	const int32_t second_consumed   = read_i32(static_cast<const uint8_t*>(second_decode_result_storage.Data()), 8);
+	if (!IsAjmBytePattern(static_cast<const uint8_t*>(second_decode_result_storage.Data()) + 24, 8, 0xa5) ||
+	    read_i32(static_cast<const uint8_t*>(second_decode_result_storage.Data()), 0) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(second_decode_result_storage.Data()), 4) != 0 || second_consumed != 162 ||
+	    read_i32(static_cast<const uint8_t*>(second_decode_result_storage.Data()), 12) != static_cast<int32_t>(second_call_bytes) ||
+	    second_samples != 2000 || std::memcmp(output_storage.Data(), expected_output.data() + first_call_bytes, second_call_bytes) != 0 ||
+	    !IsAjmBytePattern(output_bytes_ptr + second_call_bytes, output_capacity - second_call_bytes, 0xa5))
+	{
+		return 10;
+	}
+
+	if (Ajm::AjmInstanceDestroy(context, instance) != 0 || Ajm::AjmFinalize(context) != 0)
+	{
+		return 11;
+	}
+	return 0;
+}
+
+// Splits one decoded packet across two batches: the second batch repeats the neutral profile with flags 2 before draining
+// the pending PCM, as observed at the end of finite gapless streams.
+int RunAjmOpusNeutralFlag2Scenario(const std::array<uint8_t, 162>& framed_input, const std::vector<uint8_t>& expected_output)
+{
+	constexpr size_t frame_bytes        = 2 * sizeof(int16_t);
+	constexpr size_t first_output_bytes = 240 * frame_bytes;
+	constexpr size_t drain_output_bytes = 720 * frame_bytes;
+	if (expected_output.size() != first_output_bytes + drain_output_bytes)
+	{
+		return 2;
+	}
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock             config_storage(12);
+	GuestReadableBlock             input_storage(framed_input.size());
+	GuestReadableBlock             input_descriptors_storage(sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock             output_descriptors_storage(2 * sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock             output_storage(expected_output.size() + 64);
+	GuestReadableBlock             init_result_storage(16);
+	GuestReadableBlock             resample_result_storage(32);
+	GuestReadableBlock             decode_result_storage(64);
+	GuestReadableBlock             info_result_storage(24);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	if (!config_storage.IsValid() || !input_storage.IsValid() || !input_descriptors_storage.IsValid() ||
+	    !output_descriptors_storage.IsValid() || !output_storage.IsValid() || !init_result_storage.IsValid() ||
+	    !resample_result_storage.IsValid() || !decode_result_storage.IsValid() || !info_result_storage.IsValid() ||
+	    !error_storage.IsValid() || !batch_id_storage.IsValid())
+	{
+		return 3;
+	}
+
+	constexpr uint8_t opus_config[12] = {2, 0, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+	std::memcpy(config_storage.Data(), opus_config, sizeof(opus_config));
+	std::memcpy(input_storage.Data(), framed_input.data(), framed_input.size());
+	std::memset(output_storage.Data(), 0xa5, expected_output.size() + 64);
+	std::memset(resample_result_storage.Data(), 0xa5, 32);
+	std::memset(decode_result_storage.Data(), 0xa5, 64);
+	std::memset(info_result_storage.Data(), 0xa5, 24);
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 24, 0) != 0 ||
+	    Ajm::AjmInstanceCreate(context, 24, 0x1002, &instance) != 0)
+	{
+		return 4;
+	}
+
+	auto* const output         = static_cast<uint8_t*>(output_storage.Data());
+	auto* const decode_results = static_cast<uint8_t*>(decode_result_storage.Data());
+	auto* const input_buffers  = static_cast<Ajm::AjmBuffer*>(input_descriptors_storage.Data());
+	auto* const output_buffers = static_cast<Ajm::AjmBuffer*>(output_descriptors_storage.Data());
+	input_buffers[0]           = {input_storage.Data(), framed_input.size()};
+	output_buffers[0]          = {output, first_output_bytes};
+	output_buffers[1]          = {output + first_output_bytes, drain_output_bytes};
+	const auto run_batch       = [&](const auto& queue_jobs)
+	{
+		alignas(uint64_t) uint8_t batch[512] {};
+		*batch_id_storage.Data() = 0;
+		*error_storage.Data()    = {};
+		return queue_jobs(batch) && Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()) == 0 &&
+		       *batch_id_storage.Data() != 0 && error_storage.Data()->error_code == 0 &&
+		       Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()) == 0;
+	};
+	if (!run_batch(
+	        [&](uint8_t* batch)
+	        {
+		        return Ajm::AjmBatchJobInitialize(batch, instance, config_storage.Data(), sizeof(opus_config), init_result_storage.Data()) ==
+		                   0 &&
+		               Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 1.0f, 0.0f, 0, resample_result_storage.Data()) == 0 &&
+		               Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 1, decode_results) == 0;
+	        }))
+	{
+		return 5;
+	}
+	if (!run_batch(
+	        [&](uint8_t* batch)
+	        {
+		        auto* const marker_results = static_cast<uint8_t*>(resample_result_storage.Data()) + 16;
+		        return Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 1.0f, 0.0f, 2, marker_results) == 0 &&
+		               Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers + 1, 1, decode_results + 32) == 0 &&
+		               Ajm::AjmBatchJobGetResampleInfo(batch, instance, info_result_storage.Data()) == 0;
+	        }))
+	{
+		return 6;
+	}
+
+	auto read_i32 = [](const uint8_t* result, size_t offset)
+	{
+		int32_t value = 0;
+		std::memcpy(&value, result + offset, sizeof(value));
+		return value;
+	};
+	auto read_u64 = [](const uint8_t* result, size_t offset)
+	{
+		uint64_t value = 0;
+		std::memcpy(&value, result + offset, sizeof(value));
+		return value;
+	};
+	const auto* const resample_results = static_cast<const uint8_t*>(resample_result_storage.Data());
+	const auto* const info             = static_cast<const uint8_t*>(info_result_storage.Data());
+	float             info_ratio       = 0.0f;
+	std::memcpy(&info_ratio, info + 8, sizeof(info_ratio));
+	if (!IsAjmBytePattern(resample_results, 8, 0) || !IsAjmBytePattern(resample_results + 16, 8, 0) ||
+	    !IsAjmBytePattern(resample_results + 24, 8, 0xa5) || read_i32(decode_results, 0) != 0 || read_i32(decode_results, 4) != 0 ||
+	    read_i32(decode_results, 8) != static_cast<int32_t>(framed_input.size()) ||
+	    read_i32(decode_results, 12) != static_cast<int32_t>(first_output_bytes) || read_u64(decode_results, 16) != 240 ||
+	    read_i32(decode_results, 32) != 0 || read_i32(decode_results, 36) != 0 || read_i32(decode_results, 40) != 0 ||
+	    read_i32(decode_results, 44) != static_cast<int32_t>(drain_output_bytes) || read_u64(decode_results, 48) != 960 ||
+	    !IsAjmBytePattern(decode_results + 56, 8, 0xa5) || std::memcmp(output, expected_output.data(), expected_output.size()) != 0 ||
+	    !IsAjmBytePattern(output + expected_output.size(), 64, 0xa5) || read_i32(info, 0) != 0 || read_i32(info, 4) != 0 ||
+	    info_ratio != 1.0f || read_i32(info, 12) != 0 || !IsAjmBytePattern(info + 16, 8, 0xa5))
+	{
+		return 7;
+	}
+
+	if (Ajm::AjmInstanceDestroy(context, instance) != 0 || Ajm::AjmFinalize(context) != 0)
+	{
+		return 8;
+	}
+	return 0;
+}
+
+struct AjmResampleCall
+{
+	float    ratio         = 1.0f;
+	uint32_t output_frames = 0;
+	uint32_t flags         = 0;
+	// Restarts the stream like a guest reusing its instance: clear and gapless again, then decode with no new setter.
+	bool  restart = false;
+	float change  = 0.0f;
+	// The guest skips the setter while its ratio and change per sample are unchanged; the running profile carries on.
+	bool send_setter = true;
+};
+
+struct AjmResampleCallResult
+{
+	int32_t  input_consumed  = 0;
+	int32_t  output_bytes    = 0;
+	uint64_t admitted_frames = 0;
+	int32_t  held_frames     = 0;
+	float    info_ratio      = 0.0f;
+};
+
+constexpr size_t AJM_OPUS_FIXTURE_RECORD_SIZE = sizeof(uint16_t) + AudioTestFixtures::kGeneratedOpusSinePacket.size();
+
+// Drives one finite stereo Opus stream through resampled split decodes, one batch per call. Like the guest, each batch
+// repeats the resample setter and resubmits the input from the first unconsumed byte; once everything is consumed, the
+// whole input is offered again.
+int RunAjmOpusResampleStream(size_t record_count, uint32_t total_frames, uint16_t priming_frames, const std::vector<AjmResampleCall>& calls,
+                             std::vector<uint8_t>* pcm, std::vector<AjmResampleCallResult>* results)
+{
+	constexpr size_t frame_bytes = 2 * sizeof(int16_t);
+	uint32_t         max_frames  = 0;
+	for (const auto& call: calls)
+	{
+		max_frames = std::max(max_frames, call.output_frames);
+	}
+	if (pcm == nullptr || results == nullptr || record_count == 0 || calls.empty() || max_frames == 0)
+	{
+		return 2;
+	}
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	const size_t                   input_size = record_count * AJM_OPUS_FIXTURE_RECORD_SIZE;
+	GuestReadableBlock             config_storage(12);
+	GuestReadableBlock             gapless_storage(8);
+	GuestReadableBlock             input_storage(input_size);
+	GuestReadableBlock             descriptors_storage(2 * sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock             output_storage(static_cast<size_t>(max_frames) * frame_bytes + 64);
+	GuestReadableBlock             control_results_storage(64);
+	GuestReadableBlock             decode_result_storage(32);
+	GuestReadableBlock             info_result_storage(24);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	if (!config_storage.IsValid() || !gapless_storage.IsValid() || !input_storage.IsValid() || !descriptors_storage.IsValid() ||
+	    !output_storage.IsValid() || !control_results_storage.IsValid() || !decode_result_storage.IsValid() ||
+	    !info_result_storage.IsValid() || !error_storage.IsValid() || !batch_id_storage.IsValid())
+	{
+		return 3;
+	}
+
+	constexpr uint8_t opus_config[12] = {2, 0, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+	const uint8_t     gapless_config[8] = {static_cast<uint8_t>(total_frames),        static_cast<uint8_t>(total_frames >> 8u),
+	                                       static_cast<uint8_t>(total_frames >> 16u), static_cast<uint8_t>(total_frames >> 24u),
+	                                       static_cast<uint8_t>(priming_frames),      static_cast<uint8_t>(priming_frames >> 8u),
+	                                       0,
+	                                       0};
+	std::memcpy(config_storage.Data(), opus_config, sizeof(opus_config));
+	std::memcpy(gapless_storage.Data(), gapless_config, sizeof(gapless_config));
+	auto* const input = static_cast<uint8_t*>(input_storage.Data());
+	for (size_t record = 0; record < record_count; ++record)
+	{
+		uint8_t* const framed = input + record * AJM_OPUS_FIXTURE_RECORD_SIZE;
+		framed[0]             = static_cast<uint8_t>(AudioTestFixtures::kGeneratedOpusSinePacket.size());
+		framed[1]             = static_cast<uint8_t>(AudioTestFixtures::kGeneratedOpusSinePacket.size() >> 8u);
+		std::memcpy(framed + sizeof(uint16_t), AudioTestFixtures::kGeneratedOpusSinePacket.data(),
+		            AudioTestFixtures::kGeneratedOpusSinePacket.size());
+	}
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 24, 0) != 0 ||
+	    Ajm::AjmInstanceCreate(context, 24, 0x1002, &instance) != 0)
+	{
+		return 4;
+	}
+
+	auto* const output          = static_cast<uint8_t*>(output_storage.Data());
+	auto* const control_results = static_cast<uint8_t*>(control_results_storage.Data());
+	auto* const descriptors     = static_cast<Ajm::AjmBuffer*>(descriptors_storage.Data());
+	const auto* decode_result   = static_cast<const uint8_t*>(decode_result_storage.Data());
+	const auto* info            = static_cast<const uint8_t*>(info_result_storage.Data());
+	size_t      consumed        = 0;
+	pcm->clear();
+	results->clear();
+	for (size_t call_index = 0; call_index < calls.size(); ++call_index)
+	{
+		const AjmResampleCall& call         = calls[call_index];
+		consumed                            = call.restart ? 0 : consumed;
+		const size_t           input_offset = consumed == input_size ? 0 : consumed;
+		const size_t           output_bytes = static_cast<size_t>(call.output_frames) * frame_bytes;
+		descriptors[0]                      = {input + input_offset, input_size - input_offset};
+		descriptors[1]                      = {output, output_bytes};
+		std::memset(output, 0xa5, output_bytes + 64);
+		std::memset(decode_result_storage.Data(), 0xa5, 32);
+		std::memset(info_result_storage.Data(), 0xa5, 24);
+		alignas(uint64_t) uint8_t batch[512] {};
+		if (call_index == 0 &&
+		    (Ajm::AjmBatchJobInitialize(batch, instance, config_storage.Data(), sizeof(opus_config), control_results) != 0 ||
+		     Ajm::AjmBatchJobClearContext(batch, instance, control_results + 16) != 0 ||
+		     Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_storage.Data(), 0, control_results + 32) != 0))
+		{
+			return 5;
+		}
+		if (call.restart && (Ajm::AjmBatchJobClearContext(batch, instance, control_results + 16) != 0 ||
+		                     Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_storage.Data(), 0, control_results + 32) != 0))
+		{
+			return 5;
+		}
+		if ((!call.restart && call.send_setter &&
+		     Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, call.ratio, call.change, call.flags, control_results + 48) != 0) ||
+		    Ajm::AjmBatchJobDecodeSplit(batch, instance, descriptors, 1, descriptors + 1, 1, decode_result_storage.Data()) != 0 ||
+		    Ajm::AjmBatchJobGetResampleInfo(batch, instance, info_result_storage.Data()) != 0)
+		{
+			return 6;
+		}
+		*batch_id_storage.Data() = 0;
+		*error_storage.Data()    = {};
+		if (Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()) != 0 || *batch_id_storage.Data() == 0 ||
+		    error_storage.Data()->error_code != 0 ||
+		    Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()) != 0)
+		{
+			return 7;
+		}
+
+		AjmResampleCallResult result {};
+		int32_t               status = -1;
+		std::memcpy(&status, decode_result, sizeof(status));
+		std::memcpy(&result.input_consumed, decode_result + 8, sizeof(result.input_consumed));
+		std::memcpy(&result.output_bytes, decode_result + 12, sizeof(result.output_bytes));
+		std::memcpy(&result.admitted_frames, decode_result + 16, sizeof(result.admitted_frames));
+		std::memcpy(&result.info_ratio, info + 8, sizeof(result.info_ratio));
+		std::memcpy(&result.held_frames, info + 12, sizeof(result.held_frames));
+		if (status != 0 || result.input_consumed < 0 || static_cast<size_t>(result.input_consumed) > input_size - input_offset ||
+		    result.output_bytes < 0 || static_cast<size_t>(result.output_bytes) > output_bytes ||
+		    !IsAjmBytePattern(output + result.output_bytes, output_bytes + 64 - static_cast<size_t>(result.output_bytes), 0xa5) ||
+		    !IsAjmBytePattern(decode_result + 24, 8, 0xa5) || !IsAjmBytePattern(info, 8, 0) || !IsAjmBytePattern(info + 16, 8, 0xa5))
+		{
+			return 8;
+		}
+		consumed = input_offset + static_cast<size_t>(result.input_consumed);
+		pcm->insert(pcm->end(), output, output + result.output_bytes);
+		results->push_back(result);
+	}
+
+	if (Ajm::AjmInstanceDestroy(context, instance) != 0 || Ajm::AjmFinalize(context) != 0)
+	{
+		return 9;
+	}
+	return 0;
+}
+
+// Checks the guest-visible source accounting of a finished finite stream: the admitted counter A never exceeds the
+// source total, at most two interpolation frames are held, and A minus held lands on the total exactly.
+bool AjmResampleStreamEndsOnSourceTotal(const std::vector<AjmResampleCallResult>& results, uint32_t total_frames, float final_ratio)
+{
+	if (results.empty())
+	{
+		return false;
+	}
+	for (const auto& result: results)
+	{
+		if (result.admitted_frames > total_frames || result.held_frames < 0 || result.held_frames > 2 ||
+		    static_cast<uint64_t>(result.held_frames) > result.admitted_frames)
+		{
+			return false;
+		}
+	}
+	const auto& last = results.back();
+	return last.admitted_frames == total_frames && last.held_frames == 0 && last.info_ratio == final_ratio;
+}
+
+// A cleared ratio-1 instance restarts its stream with no new setter: the output and counters match a fresh stream and
+// GetResampleInfo still reports the ratio-1 profile.
+int RunAjmOpusClearedNeutralRestartScenario()
+{
+	constexpr uint32_t total_frames = 1500;
+	constexpr uint16_t priming      = 312;
+
+	std::vector<uint8_t>               fresh_pcm;
+	std::vector<AjmResampleCallResult> fresh_results;
+	if (const int status = RunAjmOpusResampleStream(2, total_frames, priming, {{1.0f, 4096}, {1.0f, 512}}, &fresh_pcm, &fresh_results);
+	    status != 0)
+	{
+		return status;
+	}
+	std::vector<uint8_t>               restarted_pcm;
+	std::vector<AjmResampleCallResult> restarted_results;
+	const std::vector<AjmResampleCall> calls = {{1.0f, 600}, {1.0f, 4096, 0, true}, {1.0f, 512}};
+	if (const int status = RunAjmOpusResampleStream(2, total_frames, priming, calls, &restarted_pcm, &restarted_results); status != 0)
+	{
+		return 20 + status;
+	}
+	constexpr size_t first_bytes = 600 * 2 * sizeof(int16_t);
+	if (restarted_pcm.size() != first_bytes + fresh_pcm.size() ||
+	    !std::equal(fresh_pcm.begin(), fresh_pcm.end(), restarted_pcm.begin() + first_bytes) ||
+	    restarted_results[1].admitted_frames != total_frames || restarted_results[1].held_frames != 0 ||
+	    restarted_results[1].info_ratio != 1.0f || restarted_results[1].input_consumed != fresh_results[0].input_consumed ||
+	    !AjmResampleStreamEndsOnSourceTotal(restarted_results, total_frames, 1.0f))
+	{
+		return 40;
+	}
+	return 0;
+}
+
+// A stream started with the reset marker ends like any other: the flags 2 marker on its last calls keeps its state.
+int RunAjmOpusResetMarkerStreamEndScenario()
+{
+	constexpr uint32_t total_frames = 1500;
+	constexpr uint16_t priming      = 312;
+
+	std::vector<uint8_t>               fresh_pcm;
+	std::vector<AjmResampleCallResult> fresh_results;
+	if (const int status = RunAjmOpusResampleStream(2, total_frames, priming, {{1.0f, 4096}, {1.0f, 512}}, &fresh_pcm, &fresh_results);
+	    status != 0)
+	{
+		return status;
+	}
+	std::vector<uint8_t>               marked_pcm;
+	std::vector<AjmResampleCallResult> marked_results;
+	const std::vector<AjmResampleCall> calls = {{1.0f, 600, 1}, {1.0f, 4096, 2}, {1.0f, 512, 2}};
+	if (const int status = RunAjmOpusResampleStream(2, total_frames, priming, calls, &marked_pcm, &marked_results); status != 0)
+	{
+		return 20 + status;
+	}
+	if (marked_pcm != fresh_pcm || !AjmResampleStreamEndsOnSourceTotal(marked_results, total_frames, 1.0f))
+	{
+		return 40;
+	}
+	return 0;
+}
+
+int RunAjmOpusResampleSplitInvarianceScenario()
+{
+	constexpr float    ratio        = 0x1.df108cp-1f;
+	constexpr uint32_t total_frames = 1500;
+	constexpr uint16_t priming      = 312;
+
+	std::vector<uint8_t>               whole_pcm;
+	std::vector<AjmResampleCallResult> whole_results;
+	if (const int status = RunAjmOpusResampleStream(2, total_frames, priming, {{ratio, 4096}, {ratio, 512}}, &whole_pcm, &whole_results);
+	    status != 0)
+	{
+		return status;
+	}
+	// Near the end of a finite stream the guest repeats the running ratio with flags 2; the stream state carries over.
+	std::vector<AjmResampleCall> split_calls;
+	for (const uint32_t frames: {97u, 1u, 250u, 513u, 2u, 333u, 640u, 64u})
+	{
+		split_calls.push_back({ratio, frames, split_calls.size() < 5 ? 0u : 2u});
+	}
+	std::vector<uint8_t>               split_pcm;
+	std::vector<AjmResampleCallResult> split_results;
+	if (const int status = RunAjmOpusResampleStream(2, total_frames, priming, split_calls, &split_pcm, &split_results); status != 0)
+	{
+		return 20 + status;
+	}
+
+	// The source total maps to ceil(total / ratio) output frames; the last ones interpolate past the final source frame.
+	const auto expected_frames = static_cast<size_t>(std::ceil(static_cast<double>(total_frames) / static_cast<double>(ratio)));
+	int64_t    split_consumed  = 0;
+	for (const auto& result: split_results)
+	{
+		split_consumed += result.input_consumed;
+	}
+	const auto& whole_end = whole_results.back();
+	const auto& split_end = split_results.back();
+	if (whole_pcm.size() != expected_frames * 4 || split_pcm != whole_pcm ||
+	    !AjmResampleStreamEndsOnSourceTotal(whole_results, total_frames, ratio) ||
+	    !AjmResampleStreamEndsOnSourceTotal(split_results, total_frames, ratio) ||
+	    whole_results[0].input_consumed != static_cast<int32_t>(2 * AJM_OPUS_FIXTURE_RECORD_SIZE) ||
+	    split_consumed != static_cast<int64_t>(2 * AJM_OPUS_FIXTURE_RECORD_SIZE) || whole_end.input_consumed != 0 ||
+	    whole_end.output_bytes != 0 || split_end.input_consumed != 0 || split_end.output_bytes != 0)
+	{
+		return 40;
+	}
+	return 0;
+}
+
+int RunAjmOpusResampleValueScenario(const std::vector<AjmResampleCall>& calls, uint32_t total_frames, uint16_t priming,
+                                    const std::vector<uint8_t>& expected_pcm, const std::vector<AjmResampleCallResult>& expected_results)
+{
+	std::vector<uint8_t>               pcm;
+	std::vector<AjmResampleCallResult> results;
+	if (const int status = RunAjmOpusResampleStream(2, total_frames, priming, calls, &pcm, &results); status != 0)
+	{
+		return status;
+	}
+	if (pcm != expected_pcm || results.size() != expected_results.size())
+	{
+		return 40;
+	}
+	for (size_t index = 0; index < results.size(); ++index)
+	{
+		const auto& result   = results[index];
+		const auto& expected = expected_results[index];
+		if (result.input_consumed != expected.input_consumed || result.output_bytes != expected.output_bytes ||
+		    result.admitted_frames != expected.admitted_frames || result.held_frames != expected.held_frames ||
+		    result.info_ratio != expected.info_ratio)
+		{
+			return 41 + static_cast<int>(index);
+		}
+	}
+	return 0;
+}
+
+int RunAjmOpusResampleInfoScenario(const std::array<uint8_t, 162>& framed_input, const std::vector<uint8_t>& expected_output)
+{
+	constexpr size_t output_bytes = 960 * 2 * sizeof(int16_t);
+	if (expected_output.size() != output_bytes)
+	{
+		return 2;
+	}
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock             config_storage(12);
+	GuestReadableBlock             input_storage(framed_input.size());
+	GuestReadableBlock             input_descriptors_storage(sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock             output_descriptors_storage(sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock             output_storage(output_bytes + 64);
+	GuestReadableBlock             init_result_storage(16);
+	GuestReadableBlock             resample_result_storage(16);
+	GuestReadableBlock             decode_result_storage(32);
+	GuestReadableBlock             info_result_storage(24);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	if (!config_storage.IsValid() || !input_storage.IsValid() || !input_descriptors_storage.IsValid() ||
+	    !output_descriptors_storage.IsValid() || !output_storage.IsValid() || !init_result_storage.IsValid() ||
+	    !resample_result_storage.IsValid() || !decode_result_storage.IsValid() || !info_result_storage.IsValid() ||
+	    !error_storage.IsValid() || !batch_id_storage.IsValid())
+	{
+		return 3;
+	}
+
+	constexpr uint8_t opus_config[12] = {2, 0, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+	std::memcpy(config_storage.Data(), opus_config, sizeof(opus_config));
+	std::memcpy(input_storage.Data(), framed_input.data(), framed_input.size());
+	std::memset(output_storage.Data(), 0xa5, output_bytes + 64);
+	std::memset(init_result_storage.Data(), 0xa5, 16);
+	std::memset(resample_result_storage.Data(), 0xa5, 16);
+	std::memset(decode_result_storage.Data(), 0xa5, 32);
+	std::memset(info_result_storage.Data(), 0xa5, 24);
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 24, 0) != 0 ||
+	    Ajm::AjmInstanceCreate(context, 24, 0x1002, &instance) != 0)
+	{
+		return 4;
+	}
+
+	auto* const input_buffers  = static_cast<Ajm::AjmBuffer*>(input_descriptors_storage.Data());
+	auto* const output_buffers = static_cast<Ajm::AjmBuffer*>(output_descriptors_storage.Data());
+	input_buffers[0]           = {input_storage.Data(), framed_input.size()};
+	output_buffers[0]          = {output_storage.Data(), output_bytes};
+	alignas(uint64_t) uint8_t batch[256] {};
+	if (Ajm::AjmBatchJobInitialize(batch, instance, config_storage.Data(), sizeof(opus_config), init_result_storage.Data()) != 0 ||
+	    Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 1.0f, 0.0f, 0, resample_result_storage.Data()) != 0 ||
+	    Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 1, decode_result_storage.Data()) != 0 ||
+	    Ajm::AjmBatchJobGetResampleInfo(batch, instance, info_result_storage.Data()) != 0)
+	{
+		return 5;
+	}
+
+	*batch_id_storage.Data() = 0;
+	*error_storage.Data()    = {};
+	if (Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()) != 0 || *batch_id_storage.Data() == 0 ||
+	    error_storage.Data()->error_code != 0 ||
+	    Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()) != 0)
+	{
+		return 6;
+	}
+
+	auto read_i32 = [](const uint8_t* result, size_t offset)
+	{
+		int32_t value = 0;
+		std::memcpy(&value, result + offset, sizeof(value));
+		return value;
+	};
+	auto read_u64 = [](const uint8_t* result, size_t offset)
+	{
+		uint64_t value = 0;
+		std::memcpy(&value, result + offset, sizeof(value));
+		return value;
+	};
+	float info_ratio = 0.0f;
+	std::memcpy(&info_ratio, static_cast<const uint8_t*>(info_result_storage.Data()) + 8, sizeof(info_ratio));
+	if (!IsAjmBytePattern(init_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(init_result_storage.Data()) + 8, 8, 0xa5) ||
+	    !IsAjmBytePattern(resample_result_storage.Data(), 8, 0) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(resample_result_storage.Data()) + 8, 8, 0xa5) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(decode_result_storage.Data()) + 24, 8, 0xa5) ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(info_result_storage.Data()) + 16, 8, 0xa5) ||
+	    read_i32(static_cast<const uint8_t*>(decode_result_storage.Data()), 0) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(decode_result_storage.Data()), 4) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(decode_result_storage.Data()), 8) != static_cast<int32_t>(framed_input.size()) ||
+	    read_i32(static_cast<const uint8_t*>(decode_result_storage.Data()), 12) != static_cast<int32_t>(output_bytes) ||
+	    read_u64(static_cast<const uint8_t*>(decode_result_storage.Data()), 16) != 960 ||
+	    std::memcmp(output_storage.Data(), expected_output.data(), output_bytes) != 0 ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(output_storage.Data()) + output_bytes, 64, 0xa5) ||
+	    read_i32(static_cast<const uint8_t*>(info_result_storage.Data()), 0) != 0 ||
+	    read_i32(static_cast<const uint8_t*>(info_result_storage.Data()), 4) != 0 || info_ratio != 1.0f ||
+	    read_i32(static_cast<const uint8_t*>(info_result_storage.Data()), 12) != 0)
+	{
+		return 7;
+	}
+
+	if (Ajm::AjmInstanceDestroy(context, instance) != 0 || Ajm::AjmFinalize(context) != 0)
+	{
+		return 8;
+	}
+	return 0;
+}
+#endif
 
 // Generic host stand-in for the guest runtime: it calls the target as an ordinary
 // function with the forwarded arguments, so AvPlayer file and event callbacks run
@@ -1297,8 +2897,79 @@ TEST(EmulatorAudio, SerializesAjmControlBatchJob)
 	EXPECT_EQ(*reinterpret_cast<void**>(batch + 40u), sideband_output);
 }
 
-TEST(EmulatorAudio, CompletesAjmBufferBatchWithBoundedOutputs)
+TEST(EmulatorAudio, RejectsQueuedAjmDataOperationsBeforeCommittingResults)
 {
+#if !defined(__linux__)
+	GTEST_SKIP() << "bounded shared-memory refusal check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t context = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+
+	alignas(uint64_t) uint8_t batch[64] {};
+	void* const               batch_address = batch;
+	const uint8_t             input[]       = {0x41, 0x4a, 0x4d, 0x01};
+	GuestReadableBlock        config_storage(8);
+	ASSERT_TRUE(config_storage.IsValid());
+	auto* const   config          = static_cast<uint8_t*>(config_storage.Data());
+	const uint8_t config_bytes[8] = {0xfe, 0x70, 0x1f, 0xf0, 0, 0, 0, 0};
+	std::memcpy(config, config_bytes, sizeof(config_bytes));
+	const AjmDataTestOperation operations[] = {AjmDataTestOperation::Decode,      AjmDataTestOperation::DecodeSingle,
+	                                           AjmDataTestOperation::DecodeSplit, AjmDataTestOperation::Encode,
+	                                           AjmDataTestOperation::Run,         AjmDataTestOperation::RunSplit};
+	for (const auto operation: operations)
+	{
+		uint32_t instance = 0;
+		ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
+		SharedAjmBatchResults shared_results;
+		ASSERT_TRUE(shared_results.IsValid());
+		auto* const shared = shared_results.Data();
+		if (operation == AjmDataTestOperation::Run || operation == AjmDataTestOperation::RunSplit)
+		{
+			ASSERT_EQ(Ajm::AjmBatchJobInitialize(batch_address, instance, config, 8, shared->decode_result), 0);
+			ASSERT_EQ(Ajm::AjmBatchJobDecode(batch_address, instance, input, sizeof(input), shared->data_output,
+			                                 sizeof(shared->data_output), shared->decode_result),
+			          0);
+		}
+		ASSERT_EQ(QueueAjmDataTestOperation(operation, batch_address, instance, input, shared->data_output, shared->decode_result,
+		                                    shared->sideband_output),
+		          0);
+
+		int status = 0;
+		ASSERT_TRUE(RunAjmStrictChild([context, batch_address, shared]
+		                              { (void)Ajm::AjmBatchStart(context, batch_address, 0, &shared->error, &shared->batch_id); }, &status))
+		    << "strict AJM refusal timed out";
+		ASSERT_TRUE(WIFEXITED(status));
+		EXPECT_EQ(WEXITSTATUS(status), AJM_STRICT_EXIT_STATUS);
+		EXPECT_TRUE(IsAjmBytePattern(shared->data_output, sizeof(shared->data_output), 0xa5));
+		EXPECT_TRUE(IsAjmBytePattern(shared->decode_result, sizeof(shared->decode_result), 0xa5));
+		EXPECT_TRUE(IsAjmBytePattern(shared->sideband_output, sizeof(shared->sideband_output), 0xa5));
+		EXPECT_TRUE(IsAjmBytePattern(&shared->error, sizeof(shared->error), 0xa5));
+		EXPECT_TRUE(IsAjmBytePattern(&shared->batch_id, sizeof(shared->batch_id), 0xa5));
+		ASSERT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	}
+
+	GuestValue<Ajm::AjmBatchError> cleanup_error;
+	GuestValue<uint32_t>           cleanup_batch_id;
+	ASSERT_TRUE(cleanup_error.IsValid());
+	ASSERT_TRUE(cleanup_batch_id.IsValid());
+	ASSERT_EQ(Ajm::AjmBatchStart(context, batch, 0, cleanup_error.Data(), cleanup_batch_id.Data()), 0);
+	ASSERT_EQ(Ajm::AjmBatchWait(context, *cleanup_batch_id.Data(), UINT32_MAX, cleanup_error.Data()), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+#endif
+}
+
+TEST(EmulatorAudio, RejectsMixedAjmControlAndRunBeforeWritingAnyJobOutput)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "bounded shared-memory refusal check requires Linux";
+#else
 	if (!Config::IsInitialized())
 	{
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
@@ -1311,75 +2982,39 @@ TEST(EmulatorAudio, CompletesAjmBufferBatchWithBoundedOutputs)
 	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
 	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
 
-	alignas(uint64_t) uint8_t batch[128] {};
-	uint8_t                   input[8] {};
-	uint8_t                   output[16];
-	alignas(uint64_t) uint8_t sideband[32];
-	std::memset(output, 0xa5, sizeof(output));
-	std::memset(sideband, 0xa5, sizeof(sideband));
-	auto* end = static_cast<uint8_t*>(Ajm::AjmBatchJobRunBufferRa(batch, instance, (1ull << 47u) | 1u, input, sizeof(input), output,
-	                                                              sizeof(output), sideband, sizeof(sideband), nullptr));
+	alignas(uint64_t) uint8_t batch[160] {};
+	void* const               batch_address = batch;
+	const uint8_t            input[] = {0x41, 0x4a, 0x4d, 0x02};
+	SharedAjmBatchResults    shared_results;
+	ASSERT_TRUE(shared_results.IsValid());
+	auto* const shared = shared_results.Data();
+	auto* const control_end = static_cast<uint8_t*>(Ajm::AjmBatchJobControlBufferRa(
+	    batch, instance, 0, nullptr, 0, shared->sideband_output, 8, nullptr));
+	ASSERT_NE(control_end, nullptr);
+	auto* const end = static_cast<uint8_t*>(Ajm::AjmBatchJobRunBufferRa(
+	    control_end, instance, (1ull << 47u) | 1u, const_cast<uint8_t*>(input), sizeof(input), shared->data_output,
+	    sizeof(shared->data_output), shared->sideband_output + 8, sizeof(shared->sideband_output) - 8, nullptr));
 	ASSERT_NE(end, nullptr);
 
-	Ajm::AjmBatchError error {};
-	uint32_t           batch_id = 0;
-	ASSERT_EQ(Ajm::AjmBatchStartBuffer(context, batch, static_cast<uint32_t>(end - batch), 0, &error, &batch_id), 0);
-	EXPECT_NE(batch_id, 0u);
-	EXPECT_EQ(error.error_code, 0);
-	for (auto value: output)
-	{
-		EXPECT_EQ(value, 0u);
-	}
-	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 0u), 0);
-	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 8u), static_cast<int32_t>(sizeof(input)));
-	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 12u), static_cast<int32_t>(sizeof(output)));
-	EXPECT_EQ(Ajm::AjmBatchWait(context, batch_id, UINT32_MAX, &error), 0);
-	EXPECT_EQ(Ajm::AjmBatchWait(context, batch_id, UINT32_MAX, &error), static_cast<int32_t>(0x80930004u));
+	int status = 0;
+	ASSERT_TRUE(RunAjmStrictChild([context, batch_address, end, shared] {
+				  (void)Ajm::AjmBatchStartBuffer(context, static_cast<uint8_t*>(batch_address),
+				                                static_cast<uint32_t>(end - static_cast<uint8_t*>(batch_address)), 0, &shared->error,
+				                                &shared->batch_id);
+			  }, &status))
+	    << "strict AJM refusal timed out";
+	ASSERT_TRUE(WIFEXITED(status));
+	EXPECT_EQ(WEXITSTATUS(status), AJM_STRICT_EXIT_STATUS);
+	EXPECT_TRUE(IsAjmBytePattern(shared->data_output, sizeof(shared->data_output), 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(shared->sideband_output, sizeof(shared->sideband_output), 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(&shared->error, sizeof(shared->error), 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(&shared->batch_id, sizeof(shared->batch_id), 0xa5));
 	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
 	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+#endif
 }
 
-TEST(EmulatorAudio, WritesCombinedAjmSidebandsInAbiOrder)
-{
-	if (!Config::IsInitialized())
-	{
-		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-	}
-	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-
-	uint32_t context  = 0;
-	uint32_t instance = 0;
-	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
-	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
-	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
-
-	alignas(uint64_t) uint8_t batch[128] {};
-	uint8_t                   input[256] {};
-	uint8_t                   output[4096] {};
-	alignas(uint64_t) uint8_t sideband[56];
-	std::memset(sideband, 0xa5, sizeof(sideband));
-	constexpr uint64_t flags = (1ull << 46u) | (1ull << 47u) | (1ull << 12u) | 1u;
-	auto* end = static_cast<uint8_t*>(Ajm::AjmBatchJobRunBufferRa(batch, instance, flags, input, sizeof(input), output, sizeof(output),
-	                                                              sideband, sizeof(sideband), nullptr));
-	ASSERT_NE(end, nullptr);
-
-	Ajm::AjmBatchError error {};
-	uint32_t           batch_id = 0;
-	ASSERT_EQ(Ajm::AjmBatchStartBuffer(context, batch, static_cast<uint32_t>(end - batch), 40, &error, &batch_id), 0);
-	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 0u), 0);
-	EXPECT_EQ(*reinterpret_cast<uint32_t*>(sideband + 8u), 2u);
-	EXPECT_EQ(*reinterpret_cast<uint32_t*>(sideband + 12u), 3u);
-	EXPECT_EQ(*reinterpret_cast<uint32_t*>(sideband + 16u), 48000u);
-	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 32u), static_cast<int32_t>(sizeof(input)));
-	EXPECT_EQ(*reinterpret_cast<int32_t*>(sideband + 36u), static_cast<int32_t>(sizeof(output)));
-	EXPECT_EQ(*reinterpret_cast<uint64_t*>(sideband + 40u), sizeof(output) / 4u);
-	EXPECT_EQ(*reinterpret_cast<uint32_t*>(sideband + 48u), 1u);
-	EXPECT_EQ(Ajm::AjmBatchWait(context, batch_id, UINT32_MAX, &error), 0);
-	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
-	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
-}
-
-TEST(EmulatorAudio, CompletesQueuedAjmDecodeJobs)
+TEST(EmulatorAudio, CompletesControlOnlyAjmBufferBatch)
 {
 	if (!Config::IsInitialized())
 	{
@@ -1394,33 +3029,74 @@ TEST(EmulatorAudio, CompletesQueuedAjmDecodeJobs)
 	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
 
 	alignas(uint64_t) uint8_t batch[64] {};
-	uint8_t                   config[8] {0xfe, 0x72, 0x09, 0xf0};
-	uint8_t                   init_result[8];
-	uint8_t                   input[32] {};
-	uint8_t                   output[128];
-	alignas(uint64_t) uint8_t decode_result[32];
-	std::memset(init_result, 0xa5, sizeof(init_result));
-	std::memset(output, 0xa5, sizeof(output));
-	std::memset(decode_result, 0xa5, sizeof(decode_result));
+	alignas(uint64_t) uint8_t sideband[8];
+	std::memset(sideband, 0xa5, sizeof(sideband));
+	auto* const end = static_cast<uint8_t*>(Ajm::AjmBatchJobControlBufferRa(batch, instance, 0, nullptr, 0, sideband,
+	                                                                       sizeof(sideband), nullptr));
+	ASSERT_NE(end, nullptr);
 
-	ASSERT_EQ(Ajm::AjmBatchJobInitialize(batch, instance, config, sizeof(config), init_result), 0);
-	ASSERT_EQ(
-	    Ajm::AjmBatchJobDecode(batch, instance, input, sizeof(input), output, sizeof(output), decode_result, nullptr, 0, decode_result), 0);
 	Ajm::AjmBatchError error {};
 	uint32_t           batch_id = 0;
-	ASSERT_EQ(Ajm::AjmBatchStart(context, batch, 0, &error, &batch_id), 0);
+	ASSERT_EQ(Ajm::AjmBatchStartBuffer(context, batch, static_cast<uint32_t>(end - batch), 0, &error, &batch_id), 0);
 	EXPECT_NE(batch_id, 0u);
-	for (auto value: output)
-	{
-		EXPECT_EQ(value, 0u);
-	}
-	EXPECT_EQ(*reinterpret_cast<int32_t*>(decode_result + 0u), 0);
-	EXPECT_EQ(*reinterpret_cast<uint32_t*>(decode_result + 8u), sizeof(input));
-	EXPECT_EQ(*reinterpret_cast<uint32_t*>(decode_result + 12u), sizeof(output));
-	EXPECT_EQ(*reinterpret_cast<uint64_t*>(decode_result + 16u), sizeof(output) / 4u);
+	EXPECT_EQ(error.error_code, 0);
+	EXPECT_TRUE(IsAjmBytePattern(sideband, sizeof(sideband), 0));
 	EXPECT_EQ(Ajm::AjmBatchWait(context, batch_id, UINT32_MAX, &error), 0);
 	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
 	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
+TEST(EmulatorAudio, ClearsErrorWhenAjmBufferBatchQueueIsFull)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	struct AjmContextCleanup
+	{
+		~AjmContextCleanup()
+		{
+			if (context != 0)
+			{
+				(void)Ajm::AjmFinalize(context);
+			}
+		}
+
+		uint32_t context = 0;
+	} cleanup;
+	auto&              context               = cleanup.context;
+	constexpr uint32_t completed_batch_limit = 256;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+
+	uint8_t               empty_batch = 0;
+	Ajm::AjmBatchError    error {};
+	uint32_t              batch_id = 0;
+	std::vector<uint32_t> batch_ids;
+	batch_ids.reserve(completed_batch_limit);
+	for (uint32_t index = 0; index < completed_batch_limit; ++index)
+	{
+		std::memset(&error, 0xa5, sizeof(error));
+		batch_id = 0xa5a5a5a5u;
+		ASSERT_EQ(Ajm::AjmBatchStartBuffer(context, &empty_batch, 0, 0, &error, &batch_id), 0);
+		EXPECT_TRUE(IsAjmBytePattern(&error, sizeof(error), 0));
+		EXPECT_NE(batch_id, 0u);
+		batch_ids.push_back(batch_id);
+	}
+
+	std::memset(&error, 0xa5, sizeof(error));
+	batch_id = 0xa5a5a5a5u;
+	EXPECT_EQ(Ajm::AjmBatchStartBuffer(context, &empty_batch, 0, 0, &error, &batch_id), static_cast<int32_t>(0x80930007u));
+	EXPECT_TRUE(IsAjmBytePattern(&error, sizeof(error), 0));
+	EXPECT_EQ(batch_id, 0xa5a5a5a5u);
+
+	for (const uint32_t completed_batch_id: batch_ids)
+	{
+		ASSERT_EQ(Ajm::AjmBatchWait(context, completed_batch_id, UINT32_MAX, &error), 0);
+	}
+	ASSERT_EQ(Ajm::AjmFinalize(context), 0);
+	cleanup.context = 0;
 }
 
 TEST(EmulatorAudio, AcceptsExtendedAudio3dOpenParameters)
@@ -1431,37 +3107,44 @@ TEST(EmulatorAudio, AcceptsExtendedAudio3dOpenParameters)
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	alignas(uint64_t) uint8_t parameters[0x28]      = {};
-	*reinterpret_cast<uint64_t*>(parameters + 0x00) = sizeof(parameters);
-	*reinterpret_cast<uint32_t*>(parameters + 0x08) = 0x200;
-	*reinterpret_cast<uint32_t*>(parameters + 0x0c) = 0;
-	*reinterpret_cast<uint32_t*>(parameters + 0x10) = 128;
-	*reinterpret_cast<uint32_t*>(parameters + 0x14) = 4;
-	*reinterpret_cast<uint32_t*>(parameters + 0x18) = 2;
-	*reinterpret_cast<uint32_t*>(parameters + 0x20) = 2;
-
-	uint32_t port = UINT32_MAX;
+	GuestReadableBlock guest_storage(0x80);
+	ASSERT_TRUE(guest_storage.IsValid());
+	auto* guest_bytes = static_cast<uint8_t*>(guest_storage.Data());
+	std::memset(guest_bytes, 0, 0x80);
+	*reinterpret_cast<uint64_t*>(guest_bytes + 0x00) = 0x28;
+	*reinterpret_cast<uint32_t*>(guest_bytes + 0x08) = 0x200;
+	*reinterpret_cast<uint32_t*>(guest_bytes + 0x0c) = 0;
+	*reinterpret_cast<uint32_t*>(guest_bytes + 0x10) = 128;
+	*reinterpret_cast<uint32_t*>(guest_bytes + 0x14) = 4;
+	*reinterpret_cast<uint32_t*>(guest_bytes + 0x18) = 2;
+	*reinterpret_cast<uint32_t*>(guest_bytes + 0x20) = 2;
+	auto* port = reinterpret_cast<uint32_t*>(guest_bytes + 0x40);
+	auto* queue_level = reinterpret_cast<uint32_t*>(guest_bytes + 0x44);
+	auto* queue_available = reinterpret_cast<uint32_t*>(guest_bytes + 0x48);
+	auto* capability_count = reinterpret_cast<uint32_t*>(guest_bytes + 0x4c);
+	auto* capabilities = reinterpret_cast<uint32_t*>(guest_bytes + 0x50);
+	*port = UINT32_MAX;
 	ASSERT_EQ(Audio3d::Audio3dInitialize(0), 0);
-	ASSERT_EQ(Audio3d::Audio3dPortOpen(255, reinterpret_cast<const Audio3d::Audio3dOpenParameters*>(parameters), &port), 0);
-	EXPECT_LT(port, 4u);
+	ASSERT_EQ(Audio3d::Audio3dPortOpen(255, reinterpret_cast<const Audio3d::Audio3dOpenParameters*>(guest_bytes), port), 0);
+	EXPECT_LT(*port, 4u);
 
-	uint32_t queue_level     = UINT32_MAX;
-	uint32_t queue_available = 0;
-	EXPECT_EQ(Audio3d::Audio3dPortGetQueueLevel(port, &queue_level, &queue_available), 0);
-	EXPECT_EQ(queue_level, 0u);
-	EXPECT_EQ(queue_available, 4u);
+	*queue_level = UINT32_MAX;
+	*queue_available = 0;
+	EXPECT_EQ(Audio3d::Audio3dPortGetQueueLevel(*port, queue_level, queue_available), 0);
+	EXPECT_EQ(*queue_level, 0u);
+	EXPECT_EQ(*queue_available, 4u);
 
-	uint32_t capability_count = 0;
-	ASSERT_EQ(Audio3d::Audio3dPortGetAttributesSupported(port, nullptr, &capability_count), 0);
-	ASSERT_EQ(capability_count, 3u);
-	uint32_t capabilities[3] = {};
-	ASSERT_EQ(Audio3d::Audio3dPortGetAttributesSupported(port, capabilities, &capability_count), 0);
-	EXPECT_EQ(capability_count, 3u);
+	*capability_count = 0;
+	ASSERT_EQ(Audio3d::Audio3dPortGetAttributesSupported(*port, nullptr, capability_count), 0);
+	ASSERT_EQ(*capability_count, 3u);
+	*capability_count = 3;
+	ASSERT_EQ(Audio3d::Audio3dPortGetAttributesSupported(*port, capabilities, capability_count), 0);
+	EXPECT_EQ(*capability_count, 3u);
 	EXPECT_EQ(capabilities[0], 1u);
 	EXPECT_EQ(capabilities[1], 3u);
 	EXPECT_EQ(capabilities[2], 9u);
 
-	EXPECT_EQ(Audio3d::Audio3dAudioOutOpen(port, 255, 126, 0, 256, 48000, 1), static_cast<int32_t>(0x80ea0004u));
+	EXPECT_EQ(Audio3d::Audio3dAudioOutOpen(*port, 255, 126, 0, 256, 48000, 1), static_cast<int32_t>(0x80ea0004u));
 	EXPECT_EQ(Audio3d::Audio3dAudioOutOutput(1, nullptr), static_cast<int32_t>(0x80ea0004u));
 	EXPECT_EQ(Audio3d::Audio3dAudioOutClose(999), static_cast<int32_t>(0x80ea0002u));
 }
@@ -2680,6 +4363,45 @@ TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
 	EXPECT_NE(output[0], 0.0f);
 	EXPECT_FLOAT_EQ(output[0], output[1]);
 
+	// A block submitted while one plays queues behind it: the first keeps playing and the second follows without a gap.
+	GuestReadableBlock next_storage(sizeof(int16_t) * kSourceFrames + sizeof(uint64_t) * 5);
+	ASSERT_TRUE(next_storage.IsValid());
+	auto* next_source = static_cast<int16_t*>(next_storage.Data());
+	std::fill_n(next_source, kSourceFrames, int16_t {-16384});
+	auto* next_context = reinterpret_cast<uint64_t*>(next_source + kSourceFrames);
+	next_context[0]    = 0;
+	next_context[1]    = sizeof(int16_t) * kSourceFrames;
+	next_context[2]    = 0;
+	next_context[3]    = kSourceFrames;
+	next_context[4]    = 0;
+	*reinterpret_cast<uintptr_t*>(waveform_param + 8)  = reinterpret_cast<uintptr_t>(next_source);
+	*reinterpret_cast<uintptr_t*>(waveform_param + 24) = reinterpret_cast<uintptr_t>(next_context);
+	ASSERT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(waveform_param)), 0);
+	ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
+	EXPECT_GT(output[0], 0.0f);
+	// 48 kHz output frames 512..767 read 44.1 kHz source frames 470..704: the first block ends at 512.
+	ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
+	EXPECT_GT(output[0], 0.0f);
+	EXPECT_LT(output[2 * 255], 0.0f);
+	for (int grain = 0; grain < 3; grain++)
+	{
+		ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
+	}
+	EXPECT_FLOAT_EQ(output[0], 0.0f);
+
+	// A block started part-way: the byte offset skips the silent first half, and size and frames count the rest.
+	std::fill_n(next_source, kSourceFrames / 2, int16_t {0});
+	next_context[0] = sizeof(int16_t) * kSourceFrames / 2;
+	next_context[1] = sizeof(int16_t) * kSourceFrames / 2;
+	next_context[3] = kSourceFrames / 2;
+	ASSERT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(waveform_param)), 0);
+	ASSERT_EQ(Ngs2::Ngs2VoiceRunCommands(voice, play_command, 1), 0);
+	ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
+	EXPECT_LT(output[0], 0.0f);
+	next_context[0] = 1;
+	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(waveform_param)),
+	          static_cast<int32_t>(0x804a0309u));
+
 	GuestReadableBlock destroyed_rack_info_storage(sizeof(uint64_t) * 8);
 	ASSERT_TRUE(destroyed_rack_info_storage.IsValid());
 	auto* destroyed_rack_info = static_cast<uint64_t*>(destroyed_rack_info_storage.Data());
@@ -3415,8 +5137,7 @@ TEST(EmulatorAudio, Ngs2RoutesASamplerThroughASubmixerToItsMasteringBuffer)
 	EXPECT_FLOAT_EQ(stereo[0], 0.0f);
 
 	// A mastering voice whose setup names another channel count than its buffer refuses the render.
-	infos[5] = (uint64_t {2} << 32u) | kWaveformPcmI16;
-	infos[4] = kMonoBytes * 2;
+	ASSERT_EQ(SetRoutingValue(mono_mastering.voice, 0x30000000u, 2), 0);
 	EXPECT_EQ(Ngs2::Ngs2SystemRender(rig.system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(infos), 2),
 	          static_cast<int32_t>(0x804a0206u));
 
@@ -3590,17 +5311,18 @@ TEST(EmulatorAudio, Ngs2SamplerEventsStopPauseAndResumePlayback)
 
 	SamplerRig rig;
 	ASSERT_TRUE(CreateSamplerRig(&rig));
-	// A ramp twice a grain long: frame k is k / 512 of full scale.
-	GuestReadableBlock pcm_storage(sizeof(int16_t) * kSamplerGrainFrames * 2);
+	// A ramp three grains long: frame k is k * 32 / 32768 of full scale.
+	constexpr uint32_t kFrames = kSamplerGrainFrames * 3;
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * kFrames);
 	ASSERT_TRUE(pcm_storage.IsValid());
 	auto* pcm = static_cast<int16_t*>(pcm_storage.Data());
-	for (uint32_t k = 0; k < kSamplerGrainFrames * 2; k++)
+	for (uint32_t k = 0; k < kFrames; k++)
 	{
-		pcm[k] = static_cast<int16_t>(k * 64);
+		pcm[k] = static_cast<int16_t>(k * 32);
 	}
 	SamplerBlock block {};
-	block.data_size   = sizeof(int16_t) * kSamplerGrainFrames * 2;
-	block.num_samples = kSamplerGrainFrames * 2;
+	block.data_size   = sizeof(int16_t) * kFrames;
+	block.num_samples = kFrames;
 	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 48000), 0);
 	ASSERT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, block), 0);
 	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
@@ -3609,7 +5331,7 @@ TEST(EmulatorAudio, Ngs2SamplerEventsStopPauseAndResumePlayback)
 	ASSERT_TRUE(output_storage.IsValid());
 	const auto* output = static_cast<const float*>(output_storage.Data());
 	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
-	EXPECT_NEAR(output[2 * 1], 64.0f / 32768.0f, 1e-6f);
+	EXPECT_NEAR(output[2 * 1], 32.0f / 32768.0f, 1e-6f);
 
 	// Pause (0x10) renders silence and keeps the position; resume (0x20) continues from it.
 	ASSERT_EQ(RunSamplerEvent(rig.voice, 0x10), 0);
@@ -3617,10 +5339,9 @@ TEST(EmulatorAudio, Ngs2SamplerEventsStopPauseAndResumePlayback)
 	EXPECT_EQ(output[2 * 1], 0.0f);
 	ASSERT_EQ(RunSamplerEvent(rig.voice, 0x20), 0);
 	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
-	EXPECT_NEAR(output[0], static_cast<float>(kSamplerGrainFrames * 64) / 32768.0f, 1e-6f);
+	EXPECT_NEAR(output[0], static_cast<float>(kSamplerGrainFrames * 32) / 32768.0f, 1e-6f);
 
-	// Stop (0x2) ends playback: the voice reports stopped, then empty.
-	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+	// Stop (0x2) ends playback with a grain still queued: the voice reports stopped, then empty.
 	ASSERT_EQ(RunSamplerEvent(rig.voice, 0x2), 0);
 	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
 	EXPECT_EQ(output[0], 0.0f);
@@ -3895,14 +5616,13 @@ private:
 	std::vector<uint8_t> m_bits;
 };
 
-// One silent mono frame, built from the decoder's public bitstream rules: new
-// block parameters with three bands, no band extension, a gradient whose curve
-// starts past the ten coded units (gradient 0 everywhere), fixed-length
-// scalefactors of 9 (coarse precision 9, so coefficients are 10-bit fixed
-// fields), and 24 zero coefficients.
-void PutSilentAtrac9Frame(BitWriter* writer)
+// One mono frame with three bands, no band extension, a gradient whose curve
+// starts past the ten coded units, ten fixed-length scalefactors of 24, and 24
+// fixed-length coarse and fine coefficient fields. A zero coefficient value
+// produces silence; a nonzero value produces a measurable PCM16 signal.
+void PutAtrac9Frame(BitWriter* writer, uint16_t coefficient_value, bool first_in_superframe)
 {
-	writer->Put(0, 1);  // first block in the packet
+	writer->Put(first_in_superframe ? 0 : 1, 1); // 0 only in the superframe's first frame
 	writer->Put(0, 1);  // parameters not reused
 	writer->Put(0, 4);  // band count 3
 	writer->Put(0, 1);  // no band extension
@@ -3914,29 +5634,37 @@ void PutSilentAtrac9Frame(BitWriter* writer)
 	writer->Put(0, 4);  // gradient boundary
 	writer->Put(0, 1);  // no band extension data
 	writer->Put(1, 2);  // scalefactors: fixed length
-	writer->Put(2, 2);  // length 4
-	writer->Put(9, 5);  // base 9
+	writer->Put(3, 2);  // length 5
 	for (int unit = 0; unit < 10; unit++)
 	{
-		writer->Put(0, 4);
+		writer->Put(24, 5);
 	}
 	for (int coefficient = 0; coefficient < 24; coefficient++)
 	{
-		writer->Put(0, 10);
+		writer->Put(coefficient_value, 16);
+	}
+	for (int coefficient = 0; coefficient < 24; coefficient++)
+	{
+		writer->Put(coefficient_value, 10);
 	}
 	writer->Align();
 }
 
-std::vector<uint8_t> BuildSilentAtrac9Superframe()
+std::vector<uint8_t> BuildAtrac9Superframe(uint16_t coefficient_value)
 {
 	BitWriter writer;
 	for (int frame = 0; frame < 4; frame++)
 	{
-		PutSilentAtrac9Frame(&writer);
+		PutAtrac9Frame(&writer, coefficient_value, frame == 0);
 	}
 	auto bytes = writer.Bytes();
 	bytes.resize(kSyntheticAtrac9Superframe, 0);
 	return bytes;
+}
+
+std::vector<uint8_t> BuildSilentAtrac9Superframe()
+{
+	return BuildAtrac9Superframe(0);
 }
 
 int32_t SetSamplerAtrac9Format(uintptr_t voice, uint32_t channels, uint32_t sample_rate, uint32_t config_data)
@@ -4005,6 +5733,217 @@ int32_t RenderTwoBlockEnds(SamplerRig* rig, uintptr_t handler, GuestReadableBloc
 	::Kyty::Emulator::GuestRuntimePort::Install({});
 	g_sampler_reentry = {};
 	return result;
+}
+
+constexpr uint32_t kAtrac9GaplessPrimingFrames = 256;
+constexpr uint32_t kAtrac9GaplessTotalFrames   = 1500; // Ends inside the second superframe.
+
+struct AjmDecodeResultFields
+{
+	int32_t  status          = -1;
+	int32_t  codec_result    = -1;
+	int32_t  input_consumed  = -1;
+	int32_t  output_produced = -1;
+	uint64_t delivered       = UINT64_MAX;
+};
+
+AjmDecodeResultFields ReadAjmDecodeResult(const void* storage)
+{
+	const auto*           bytes = static_cast<const uint8_t*>(storage);
+	AjmDecodeResultFields fields {};
+	std::memcpy(&fields.status, bytes, sizeof(fields.status));
+	std::memcpy(&fields.codec_result, bytes + 4, sizeof(fields.codec_result));
+	std::memcpy(&fields.input_consumed, bytes + 8, sizeof(fields.input_consumed));
+	std::memcpy(&fields.output_produced, bytes + 12, sizeof(fields.output_produced));
+	std::memcpy(&fields.delivered, bytes + 16, sizeof(fields.delivered));
+	return fields;
+}
+
+bool IsAjmDecodeResult(const void* storage, int32_t input_consumed, int32_t output_produced, uint64_t delivered)
+{
+	const auto fields = ReadAjmDecodeResult(storage);
+	return fields.status == 0 && fields.codec_result == 0 && fields.input_consumed == input_consumed &&
+	       fields.output_produced == output_produced && fields.delivered == delivered &&
+	       IsAjmBytePattern(static_cast<const uint8_t*>(storage) + 24, 8, 0xa5);
+}
+
+bool IsAjmControlResult(const void* storage)
+{
+	return IsAjmBytePattern(storage, 8, 0) && IsAjmBytePattern(static_cast<const uint8_t*>(storage) + 8, 24, 0xa5);
+}
+
+// Runs one finite gapless ATRAC9 stream through three batches: a first call that trims the priming frames and retains the
+// rest of the superframe, a two-job batch that drains pending PCM, decodes the next superframe up to the output limit and
+// drains the remainder without new input, a call after the limit, and a reset that restarts the stream's accounting.
+// `expected` is the oracle PCM after trimming.
+int RunAjmAtrac9GaplessScenario(const std::vector<uint8_t>& first_superframe, const std::vector<uint8_t>& second_superframe,
+                                const std::vector<int16_t>& expected, uint64_t reset)
+{
+	constexpr size_t first_frames  = 600;
+	constexpr size_t second_frames = 500;
+	constexpr size_t drain_frames  = 512;
+	constexpr size_t drained       = kAtrac9GaplessTotalFrames - first_frames - second_frames;
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (expected.size() != kAtrac9GaplessTotalFrames || first_superframe.size() != kSyntheticAtrac9Superframe ||
+	    second_superframe.size() != kSyntheticAtrac9Superframe)
+	{
+		return 2;
+	}
+
+	GuestReadableBlock             config_storage(8);
+	GuestReadableBlock             gapless_storage(8);
+	GuestReadableBlock             input_storage(2 * kSyntheticAtrac9Superframe);
+	GuestReadableBlock             first_output(first_frames * sizeof(int16_t));
+	GuestReadableBlock             second_output(second_frames * sizeof(int16_t));
+	GuestReadableBlock             drain_output(drain_frames * sizeof(int16_t));
+	GuestReadableBlock             late_output(drain_frames * sizeof(int16_t));
+	GuestReadableBlock             init_result(32);
+	GuestReadableBlock             gapless_result(32);
+	GuestReadableBlock             first_result(32);
+	GuestReadableBlock             second_result(32);
+	GuestReadableBlock             drain_result(32);
+	GuestReadableBlock             late_result(32);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	for (const GuestReadableBlock* block: {&config_storage, &gapless_storage, &input_storage, &first_output, &second_output, &drain_output,
+	                                       &late_output, &init_result, &gapless_result, &first_result, &second_result, &drain_result,
+	                                       &late_result})
+	{
+		if (!block->IsValid())
+		{
+			return 3;
+		}
+	}
+	if (!error_storage.IsValid() || !batch_id_storage.IsValid())
+	{
+		return 3;
+	}
+	auto* const input = static_cast<uint8_t*>(input_storage.Data());
+	std::memcpy(input, first_superframe.data(), kSyntheticAtrac9Superframe);
+	std::memcpy(input + kSyntheticAtrac9Superframe, second_superframe.data(), kSyntheticAtrac9Superframe);
+	std::memcpy(config_storage.Data(), kSyntheticAtrac9Config, sizeof(kSyntheticAtrac9Config));
+	std::memset(static_cast<uint8_t*>(config_storage.Data()) + sizeof(kSyntheticAtrac9Config), 0, 4);
+	// Total output frames (LE32), priming frames (LE16), already skipped frames (LE16).
+	const uint8_t gapless_config[8] = {static_cast<uint8_t>(kAtrac9GaplessTotalFrames), static_cast<uint8_t>(kAtrac9GaplessTotalFrames >> 8u),
+	                                   0,
+	                                   0,
+	                                   static_cast<uint8_t>(kAtrac9GaplessPrimingFrames),
+	                                   static_cast<uint8_t>(kAtrac9GaplessPrimingFrames >> 8u),
+	                                   0,
+	                                   0};
+	std::memcpy(gapless_storage.Data(), gapless_config, sizeof(gapless_config));
+	for (const GuestReadableBlock* block: {&init_result, &gapless_result, &first_result, &second_result, &drain_result, &late_result})
+	{
+		std::memset(block->Data(), 0xa5, 32);
+	}
+	std::memset(first_output.Data(), 0xa5, first_frames * sizeof(int16_t));
+	std::memset(second_output.Data(), 0xa5, second_frames * sizeof(int16_t));
+	std::memset(drain_output.Data(), 0xa5, drain_frames * sizeof(int16_t));
+	std::memset(late_output.Data(), 0xa5, drain_frames * sizeof(int16_t));
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 1, 0) != 0 ||
+	    Ajm::AjmInstanceCreate(context, 1, 0x401, &instance) != 0)
+	{
+		return 4;
+	}
+	const auto run_batch = [&](uint8_t* batch)
+	{
+		*batch_id_storage.Data() = 0;
+		*error_storage.Data()    = {};
+		return Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()) == 0 && *batch_id_storage.Data() != 0 &&
+		       error_storage.Data()->error_code == 0 &&
+		       Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()) == 0;
+	};
+
+	alignas(uint64_t) uint8_t first_batch[256] {};
+	if (Ajm::AjmBatchJobInitialize(first_batch, instance, config_storage.Data(), 8, init_result.Data()) != 0 ||
+	    Ajm::AjmBatchJobSetGaplessDecode(first_batch, instance, gapless_storage.Data(), reset, gapless_result.Data()) != 0 ||
+	    Ajm::AjmBatchJobDecode(first_batch, instance, input, 2 * kSyntheticAtrac9Superframe, first_output.Data(),
+	                           first_frames * sizeof(int16_t), first_result.Data()) != 0)
+	{
+		return 5;
+	}
+	std::memset(gapless_storage.Data(), 0xa5, 8); // The setter snapshots its configuration when queued.
+	if (!run_batch(first_batch))
+	{
+		return 6;
+	}
+	// Only the first superframe is consumed: its 768 frames after priming exceed the 600-frame output.
+	if (!IsAjmControlResult(init_result.Data()) || !IsAjmControlResult(gapless_result.Data()) ||
+	    !IsAjmDecodeResult(first_result.Data(), static_cast<int32_t>(kSyntheticAtrac9Superframe),
+	                       static_cast<int32_t>(first_frames * sizeof(int16_t)), first_frames) ||
+	    std::memcmp(first_output.Data(), expected.data(), first_frames * sizeof(int16_t)) != 0)
+	{
+		return 7;
+	}
+
+	alignas(uint64_t) uint8_t second_batch[256] {};
+	if (Ajm::AjmBatchJobDecode(second_batch, instance, input + kSyntheticAtrac9Superframe, kSyntheticAtrac9Superframe,
+	                           second_output.Data(), second_frames * sizeof(int16_t), second_result.Data()) != 0 ||
+	    Ajm::AjmBatchJobDecode(second_batch, instance, nullptr, 0, drain_output.Data(), drain_frames * sizeof(int16_t),
+	                           drain_result.Data()) != 0 ||
+	    !run_batch(second_batch))
+	{
+		return 8;
+	}
+	if (!IsAjmDecodeResult(second_result.Data(), static_cast<int32_t>(kSyntheticAtrac9Superframe),
+	                       static_cast<int32_t>(second_frames * sizeof(int16_t)), first_frames + second_frames) ||
+	    std::memcmp(second_output.Data(), expected.data() + first_frames, second_frames * sizeof(int16_t)) != 0)
+	{
+		return 9;
+	}
+	// The input-free call drains the retained frames up to the output limit and leaves the rest of its buffer untouched.
+	if (!IsAjmDecodeResult(drain_result.Data(), 0, static_cast<int32_t>(drained * sizeof(int16_t)), kAtrac9GaplessTotalFrames) ||
+	    std::memcmp(drain_output.Data(), expected.data() + first_frames + second_frames, drained * sizeof(int16_t)) != 0 ||
+	    !IsAjmBytePattern(static_cast<const uint8_t*>(drain_output.Data()) + drained * sizeof(int16_t),
+	                      (drain_frames - drained) * sizeof(int16_t), 0xa5))
+	{
+		return 10;
+	}
+
+	// After the limit no frame is produced and no superframe is consumed (host qualification, not a captured result).
+	alignas(uint64_t) uint8_t late_batch[64] {};
+	if (Ajm::AjmBatchJobDecode(late_batch, instance, input, kSyntheticAtrac9Superframe, late_output.Data(), drain_frames * sizeof(int16_t),
+	                           late_result.Data()) != 0 ||
+	    !run_batch(late_batch))
+	{
+		return 11;
+	}
+	if (!IsAjmDecodeResult(late_result.Data(), 0, 0, kAtrac9GaplessTotalFrames) ||
+	    !IsAjmBytePattern(late_output.Data(), drain_frames * sizeof(int16_t), 0xa5))
+	{
+		return 12;
+	}
+
+	// A reset reconfigures the decoded instance: priming is trimmed again and output resumes up to the new limit.
+	std::memcpy(gapless_storage.Data(), gapless_config, sizeof(gapless_config));
+	std::memset(gapless_result.Data(), 0xa5, 32);
+	std::memset(late_result.Data(), 0xa5, 32);
+	alignas(uint64_t) uint8_t reset_batch[128] {};
+	if (Ajm::AjmBatchJobSetGaplessDecode(reset_batch, instance, gapless_storage.Data(), 1, gapless_result.Data()) != 0 ||
+	    Ajm::AjmBatchJobDecode(reset_batch, instance, input, kSyntheticAtrac9Superframe, late_output.Data(), drain_frames * sizeof(int16_t),
+	                           late_result.Data()) != 0 ||
+	    !run_batch(reset_batch))
+	{
+		return 14;
+	}
+	if (!IsAjmControlResult(gapless_result.Data()) ||
+	    !IsAjmDecodeResult(late_result.Data(), static_cast<int32_t>(kSyntheticAtrac9Superframe),
+	                       static_cast<int32_t>(drain_frames * sizeof(int16_t)), kAtrac9GaplessTotalFrames + drain_frames))
+	{
+		return 15;
+	}
+	if (Ajm::AjmInstanceDestroy(context, instance) != 0 || Ajm::AjmFinalize(context) != 0)
+	{
+		return 13;
+	}
+	return 0;
 }
 
 } // namespace
@@ -4339,6 +6278,1795 @@ TEST(EmulatorAudio, ElementaryAudioDecoderDecodesAGeneratedSilentSuperframe)
 	// Bytes that are not a superframe fail instead of decoding to silence.
 	const std::vector<uint8_t> zeros(kSyntheticAtrac9Superframe, 0);
 	EXPECT_FALSE(decoder->Decode(zeros.data(), zeros.size(), &pcm));
+}
+
+TEST(EmulatorAudio, AjmAtrac9DecodeUsesPendingPcmAndPublishesOnlyObservedResultPrefix)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "ATRAC9 backend is unavailable";
+	}
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
+
+	GuestReadableBlock             config_storage(8);
+	GuestReadableBlock             input_storage(kSyntheticAtrac9Superframe);
+	GuestReadableBlock             first_output_storage(512 * sizeof(int16_t));
+	GuestReadableBlock             second_output_storage(512 * sizeof(int16_t));
+	GuestReadableBlock             init_result_storage(32);
+	GuestReadableBlock             first_result_storage(32);
+	GuestReadableBlock             second_result_storage(32);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	ASSERT_TRUE(config_storage.IsValid());
+	ASSERT_TRUE(input_storage.IsValid());
+	ASSERT_TRUE(first_output_storage.IsValid());
+	ASSERT_TRUE(second_output_storage.IsValid());
+	ASSERT_TRUE(init_result_storage.IsValid());
+	ASSERT_TRUE(first_result_storage.IsValid());
+	ASSERT_TRUE(second_result_storage.IsValid());
+	ASSERT_TRUE(error_storage.IsValid());
+	ASSERT_TRUE(batch_id_storage.IsValid());
+
+	auto* const config = static_cast<uint8_t*>(config_storage.Data());
+	std::memcpy(config, kSyntheticAtrac9Config, sizeof(kSyntheticAtrac9Config));
+	std::memset(config + sizeof(kSyntheticAtrac9Config), 0, 4);
+	std::memset(input_storage.Data(), 0xa5, kSyntheticAtrac9Superframe);
+	std::memset(first_output_storage.Data(), 0xa5, 512 * sizeof(int16_t));
+	std::memset(second_output_storage.Data(), 0xa5, 512 * sizeof(int16_t));
+	std::memset(init_result_storage.Data(), 0xa5, 32);
+	std::memset(first_result_storage.Data(), 0xa5, 32);
+	std::memset(second_result_storage.Data(), 0xa5, 32);
+	*error_storage.Data()    = {};
+	*batch_id_storage.Data() = 0;
+
+	alignas(uint64_t) uint8_t batch[64] {};
+	ASSERT_EQ(Ajm::AjmBatchJobInitialize(batch, instance, config, 8, init_result_storage.Data()), 0);
+	std::memset(config, 0, 8); // Initialize snapshots its config when queued.
+	ASSERT_EQ(Ajm::AjmBatchJobDecode(batch, instance, input_storage.Data(), kSyntheticAtrac9Superframe, first_output_storage.Data(),
+	                                 512 * sizeof(int16_t), first_result_storage.Data()),
+	          0);
+	ASSERT_EQ(Ajm::AjmBatchJobDecode(batch, instance, nullptr, 0, second_output_storage.Data(), 512 * sizeof(int16_t),
+	                                 second_result_storage.Data()),
+	          0);
+
+	const auto signal_superframe = BuildAtrac9Superframe(0x1ffu);
+	ASSERT_EQ(signal_superframe.size(), kSyntheticAtrac9Superframe);
+	std::memcpy(input_storage.Data(), signal_superframe.data(), signal_superframe.size()); // Decode snapshots input at Start.
+	EXPECT_TRUE(IsAjmBytePattern(init_result_storage.Data(), 32, 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(first_result_storage.Data(), 32, 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(second_result_storage.Data(), 32, 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(first_output_storage.Data(), 512 * sizeof(int16_t), 0xa5));
+
+	ASSERT_EQ(Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()), 0);
+	EXPECT_NE(*batch_id_storage.Data(), 0u);
+	EXPECT_EQ(error_storage.Data()->error_code, 0);
+	EXPECT_TRUE(IsAjmBytePattern(init_result_storage.Data(), 8, 0));
+	EXPECT_TRUE(IsAjmBytePattern(static_cast<uint8_t*>(init_result_storage.Data()) + 8, 24, 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(static_cast<uint8_t*>(first_result_storage.Data()) + 24, 8, 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(static_cast<uint8_t*>(second_result_storage.Data()) + 24, 8, 0xa5));
+
+	const auto* first_result             = static_cast<const uint8_t*>(first_result_storage.Data());
+	const auto* second_result            = static_cast<const uint8_t*>(second_result_storage.Data());
+	int32_t     first_status             = 0;
+	int32_t     first_codec_result       = 0;
+	int32_t     first_input_consumed     = 0;
+	int32_t     first_output_produced    = 0;
+	uint64_t    first_samples_delivered  = 0;
+	int32_t     second_input_consumed    = 0;
+	int32_t     second_output_produced   = 0;
+	uint64_t    second_samples_delivered = 0;
+	std::memcpy(&first_status, first_result, sizeof(first_status));
+	std::memcpy(&first_codec_result, first_result + 4, sizeof(first_codec_result));
+	std::memcpy(&first_input_consumed, first_result + 8, sizeof(first_input_consumed));
+	std::memcpy(&first_output_produced, first_result + 12, sizeof(first_output_produced));
+	std::memcpy(&first_samples_delivered, first_result + 16, sizeof(first_samples_delivered));
+	std::memcpy(&second_input_consumed, second_result + 8, sizeof(second_input_consumed));
+	std::memcpy(&second_output_produced, second_result + 12, sizeof(second_output_produced));
+	std::memcpy(&second_samples_delivered, second_result + 16, sizeof(second_samples_delivered));
+	EXPECT_EQ(first_status, 0);
+	EXPECT_EQ(first_codec_result, 0);
+	EXPECT_EQ(first_input_consumed, static_cast<int32_t>(kSyntheticAtrac9Superframe));
+	EXPECT_EQ(first_output_produced, 512 * static_cast<int32_t>(sizeof(int16_t)));
+	EXPECT_EQ(first_samples_delivered, 512u);
+	EXPECT_EQ(second_input_consumed, 0);
+	EXPECT_EQ(second_output_produced, 512 * static_cast<int32_t>(sizeof(int16_t)));
+	EXPECT_EQ(second_samples_delivered, 1024u);
+	const auto* first_pcm  = static_cast<const int16_t*>(first_output_storage.Data());
+	const auto* second_pcm = static_cast<const int16_t*>(second_output_storage.Data());
+	EXPECT_NE(std::count(first_pcm, first_pcm + 512, 0), 512);
+	EXPECT_NE(std::count(second_pcm, second_pcm + 512, 0), 512);
+
+	ASSERT_EQ(Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()), 0);
+	alignas(uint64_t) uint8_t pending_decode_batch[32] {};
+	std::memset(first_output_storage.Data(), 0xa5, 512 * sizeof(int16_t));
+	std::memset(first_result_storage.Data(), 0xa5, 32);
+	ASSERT_EQ(Ajm::AjmBatchJobDecode(pending_decode_batch, instance, input_storage.Data(), kSyntheticAtrac9Superframe,
+	                                 first_output_storage.Data(), 512 * sizeof(int16_t), first_result_storage.Data()),
+	          0);
+	ASSERT_EQ(Ajm::AjmBatchStart(context, pending_decode_batch, 0, error_storage.Data(), batch_id_storage.Data()), 0);
+	std::memcpy(&first_samples_delivered, static_cast<const uint8_t*>(first_result_storage.Data()) + 16, sizeof(first_samples_delivered));
+	EXPECT_EQ(first_samples_delivered, 1536u);
+	std::memcpy(&first_input_consumed, static_cast<const uint8_t*>(first_result_storage.Data()) + 8, sizeof(first_input_consumed));
+	EXPECT_EQ(first_input_consumed, static_cast<int32_t>(kSyntheticAtrac9Superframe));
+	std::memcpy(&first_output_produced, static_cast<const uint8_t*>(first_result_storage.Data()) + 12, sizeof(first_output_produced));
+	EXPECT_EQ(first_output_produced, 512 * static_cast<int32_t>(sizeof(int16_t)));
+	ASSERT_EQ(Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()), 0);
+
+	alignas(uint64_t) uint8_t clear_batch[32] {};
+	GuestReadableBlock        clear_result_storage(32);
+	ASSERT_TRUE(clear_result_storage.IsValid());
+	std::memset(clear_result_storage.Data(), 0xa5, 32);
+	ASSERT_EQ(Ajm::AjmBatchJobClearContext(clear_batch, instance, clear_result_storage.Data()), 0);
+	EXPECT_TRUE(IsAjmBytePattern(clear_result_storage.Data(), 32, 0xa5));
+	ASSERT_EQ(Ajm::AjmBatchStart(context, clear_batch, 0, error_storage.Data(), batch_id_storage.Data()), 0);
+	EXPECT_TRUE(IsAjmBytePattern(clear_result_storage.Data(), 8, 0));
+	EXPECT_TRUE(IsAjmBytePattern(static_cast<uint8_t*>(clear_result_storage.Data()) + 8, 24, 0xa5));
+	ASSERT_EQ(Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()), 0);
+
+	alignas(uint64_t) uint8_t clear_decode_batch[64] {};
+	std::memset(first_output_storage.Data(), 0xa5, 512 * sizeof(int16_t));
+	std::memset(first_result_storage.Data(), 0xa5, 32);
+	ASSERT_EQ(Ajm::AjmBatchJobDecode(clear_decode_batch, instance, input_storage.Data(), kSyntheticAtrac9Superframe,
+	                                 first_output_storage.Data(), 512 * sizeof(int16_t), first_result_storage.Data()),
+	          0);
+	ASSERT_EQ(Ajm::AjmBatchStart(context, clear_decode_batch, 0, error_storage.Data(), batch_id_storage.Data()), 0);
+	std::memcpy(&first_samples_delivered, static_cast<const uint8_t*>(first_result_storage.Data()) + 16, sizeof(first_samples_delivered));
+	EXPECT_EQ(first_samples_delivered, 512u);
+	std::memcpy(&first_input_consumed, static_cast<const uint8_t*>(first_result_storage.Data()) + 8, sizeof(first_input_consumed));
+	EXPECT_EQ(first_input_consumed, static_cast<int32_t>(kSyntheticAtrac9Superframe));
+	std::memcpy(&first_output_produced, static_cast<const uint8_t*>(first_result_storage.Data()) + 12, sizeof(first_output_produced));
+	EXPECT_EQ(first_output_produced, 512 * static_cast<int32_t>(sizeof(int16_t)));
+	ASSERT_EQ(Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()), 0);
+
+	alignas(uint64_t) uint8_t invalid_output_batch[32] {};
+	std::memset(first_result_storage.Data(), 0xa5, 32);
+	std::memset(error_storage.Data(), 0xa5, sizeof(Ajm::AjmBatchError));
+	*batch_id_storage.Data() = 0xa5a5a5a5u;
+	ASSERT_EQ(Ajm::AjmBatchJobDecode(invalid_output_batch, instance, input_storage.Data(), kSyntheticAtrac9Superframe,
+	                                 reinterpret_cast<void*>(static_cast<uintptr_t>(1)), sizeof(int16_t), first_result_storage.Data()),
+	          0);
+	EXPECT_EQ(Ajm::AjmBatchStart(context, invalid_output_batch, 0, error_storage.Data(), batch_id_storage.Data()),
+	          static_cast<int32_t>(0x80930005u));
+	EXPECT_TRUE(IsAjmBytePattern(first_result_storage.Data(), 32, 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(error_storage.Data(), sizeof(Ajm::AjmBatchError), 0xa5));
+	EXPECT_EQ(*batch_id_storage.Data(), 0xa5a5a5a5u);
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
+TEST(EmulatorAudio, AjmAtrac9ResampleEnabledInstanceDecodesDirectAndSplitJobsThroughTheNeutralProfile)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "ATRAC9 backend is unavailable";
+	}
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+	// Revision 1 with the resample flag, as a shipped title creates it.
+	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x1001, &instance), 0);
+
+	GuestReadableBlock             config_storage(8);
+	GuestReadableBlock             input_storage(kSyntheticAtrac9Superframe);
+	GuestReadableBlock             output_storage(512 * sizeof(int16_t));
+	GuestReadableBlock             results_storage(32 * 4);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	ASSERT_TRUE(config_storage.IsValid());
+	ASSERT_TRUE(input_storage.IsValid());
+	ASSERT_TRUE(output_storage.IsValid());
+	ASSERT_TRUE(results_storage.IsValid());
+	ASSERT_TRUE(error_storage.IsValid());
+	ASSERT_TRUE(batch_id_storage.IsValid());
+	auto* const config = static_cast<uint8_t*>(config_storage.Data());
+	std::memcpy(config, kSyntheticAtrac9Config, sizeof(kSyntheticAtrac9Config));
+	// A shipped title passes 0x20 after the config bytes.
+	const uint32_t trailing_word = 0x20;
+	std::memcpy(config + sizeof(kSyntheticAtrac9Config), &trailing_word, sizeof(trailing_word));
+	const auto signal_superframe = BuildAtrac9Superframe(0x1ffu);
+	ASSERT_EQ(signal_superframe.size(), kSyntheticAtrac9Superframe);
+	std::memcpy(input_storage.Data(), signal_superframe.data(), signal_superframe.size());
+	auto* const results = static_cast<uint8_t*>(results_storage.Data());
+	std::memset(results, 0xa5, 32 * 4);
+	*error_storage.Data()    = {};
+	*batch_id_storage.Data() = 0;
+
+	alignas(uint64_t) uint8_t batch[128] {};
+	ASSERT_EQ(Ajm::AjmBatchJobInitialize(batch, instance, config, 8, results), 0);
+	ASSERT_EQ(Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 1.0f, 0.0f, 0, results + 32), 0);
+	ASSERT_EQ(Ajm::AjmBatchJobGetResampleInfo(batch, instance, results + 64), 0);
+	ASSERT_EQ(Ajm::AjmBatchJobDecode(batch, instance, input_storage.Data(), kSyntheticAtrac9Superframe, output_storage.Data(),
+	                                 512 * sizeof(int16_t), results + 96),
+	          0);
+	ASSERT_EQ(Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()), 0);
+	EXPECT_EQ(error_storage.Data()->error_code, 0);
+	float reported_ratio = 0.0f;
+	std::memcpy(&reported_ratio, results + 64 + 8, sizeof(reported_ratio));
+	EXPECT_EQ(reported_ratio, 1.0f);
+	int32_t output_produced = 0;
+	std::memcpy(&output_produced, results + 96 + 12, sizeof(output_produced));
+	EXPECT_EQ(output_produced, 512 * static_cast<int32_t>(sizeof(int16_t)));
+	const auto* pcm = static_cast<const int16_t*>(output_storage.Data());
+	EXPECT_NE(std::count(pcm, pcm + 512, 0), 512);
+	ASSERT_EQ(Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()), 0);
+
+	// A split job is the same decode with its input gathered and its PCM scattered, in descriptor order.
+	GuestReadableBlock split_output_storage(512 * sizeof(int16_t));
+	GuestReadableBlock descriptors_storage(sizeof(Ajm::AjmBuffer) * 4);
+	ASSERT_TRUE(split_output_storage.IsValid());
+	ASSERT_TRUE(descriptors_storage.IsValid());
+	auto* const input        = static_cast<uint8_t*>(input_storage.Data());
+	auto* const split_output = static_cast<uint8_t*>(split_output_storage.Data());
+	auto* const descriptors  = static_cast<Ajm::AjmBuffer*>(descriptors_storage.Data());
+	descriptors[0]           = {input, kSyntheticAtrac9Superframe / 2};
+	descriptors[1]           = {input + kSyntheticAtrac9Superframe / 2, kSyntheticAtrac9Superframe - kSyntheticAtrac9Superframe / 2};
+	descriptors[2]           = {split_output, 200 * sizeof(int16_t)};
+	descriptors[3]           = {split_output + 200 * sizeof(int16_t), 312 * sizeof(int16_t)};
+	std::memset(split_output, 0xa5, 512 * sizeof(int16_t));
+	alignas(uint64_t) uint8_t split_batch[128] {};
+	ASSERT_EQ(Ajm::AjmBatchJobClearContext(split_batch, instance, results), 0);
+	// The guest restarts a stream on a reused instance with the reset marker after Clear.
+	ASSERT_EQ(Ajm::AjmBatchJobSetResampleParametersEx(split_batch, instance, 1.0f, 0.0f, 1, results + 32), 0);
+	ASSERT_EQ(Ajm::AjmBatchJobDecodeSplit(split_batch, instance, descriptors, 2, descriptors + 2, 2, results + 96), 0);
+	ASSERT_EQ(Ajm::AjmBatchStart(context, split_batch, 0, error_storage.Data(), batch_id_storage.Data()), 0);
+	EXPECT_EQ(std::memcmp(split_output, pcm, 512 * sizeof(int16_t)), 0);
+	ASSERT_EQ(Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()), 0);
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
+TEST(EmulatorAudio, AjmAtrac9ResamplesAFiniteStreamAtTheGuestRatio)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "ATRAC9 backend is unavailable";
+	}
+
+	constexpr uint32_t kSourceFrames = kSyntheticAtrac9Superframe;
+	constexpr uint32_t kOutputFrames = 2 * kSourceFrames + 64;
+	GuestReadableBlock             config_storage(8);
+	GuestReadableBlock             gapless_storage(8);
+	GuestReadableBlock             input_storage(kSyntheticAtrac9Superframe);
+	GuestReadableBlock             neutral_output(kSourceFrames * sizeof(int16_t));
+	GuestReadableBlock             resampled_output(kOutputFrames * sizeof(int16_t));
+	GuestReadableBlock             results_storage(32 * 5);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	for (const GuestReadableBlock* block: {&config_storage, &gapless_storage, &input_storage, &neutral_output, &resampled_output, &results_storage})
+	{
+		ASSERT_TRUE(block->IsValid());
+	}
+	ASSERT_TRUE(error_storage.IsValid());
+	ASSERT_TRUE(batch_id_storage.IsValid());
+	std::memcpy(config_storage.Data(), kSyntheticAtrac9Config, sizeof(kSyntheticAtrac9Config));
+	std::memset(static_cast<uint8_t*>(config_storage.Data()) + sizeof(kSyntheticAtrac9Config), 0, 4);
+	const auto superframe = BuildAtrac9Superframe(0x1ffu);
+	ASSERT_EQ(superframe.size(), kSyntheticAtrac9Superframe);
+	std::memcpy(input_storage.Data(), superframe.data(), superframe.size());
+	// A finite stream of exactly one superframe: total output frames (LE32), no priming, nothing skipped.
+	const uint8_t gapless_config[8] = {static_cast<uint8_t>(kSourceFrames), static_cast<uint8_t>(kSourceFrames >> 8u), 0, 0, 0, 0, 0, 0};
+	std::memcpy(gapless_storage.Data(), gapless_config, sizeof(gapless_config));
+	auto* const results = static_cast<uint8_t*>(results_storage.Data());
+	std::memset(results, 0xa5, 32 * 5);
+	std::memset(resampled_output.Data(), 0xa5, kOutputFrames * sizeof(int16_t));
+
+	uint32_t context  = 0;
+	uint32_t neutral  = 0;
+	uint32_t instance = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x1001, &neutral), 0);
+	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x1001, &instance), 0);
+	const auto run_batch = [&](uint8_t* batch)
+	{
+		*batch_id_storage.Data() = 0;
+		*error_storage.Data()    = {};
+		ASSERT_EQ(Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()), 0);
+		EXPECT_EQ(error_storage.Data()->error_code, 0);
+		ASSERT_EQ(Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()), 0);
+	};
+
+	alignas(uint64_t) uint8_t neutral_batch[128] {};
+	ASSERT_EQ(Ajm::AjmBatchJobInitialize(neutral_batch, neutral, config_storage.Data(), 8, results), 0);
+	ASSERT_EQ(Ajm::AjmBatchJobDecode(neutral_batch, neutral, input_storage.Data(), kSyntheticAtrac9Superframe, neutral_output.Data(),
+	                                 kSourceFrames * sizeof(int16_t), results + 32),
+	          0);
+	run_batch(neutral_batch);
+	EXPECT_TRUE(IsAjmDecodeResult(results + 32, kSyntheticAtrac9Superframe, kSourceFrames * sizeof(int16_t), kSourceFrames));
+
+	// At ratio 0.5 every source frame gives two output frames: the frame itself, then the midpoint to the next one. The
+	// last frame of the finished stream is held, and the decode reports the source frames it consumed.
+	alignas(uint64_t) uint8_t batch[192] {};
+	ASSERT_EQ(Ajm::AjmBatchJobInitialize(batch, instance, config_storage.Data(), 8, results), 0);
+	ASSERT_EQ(Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_storage.Data(), 0, results + 64), 0);
+	ASSERT_EQ(Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 0.5f, 0.0f, 0, results + 96), 0);
+	ASSERT_EQ(Ajm::AjmBatchJobDecode(batch, instance, input_storage.Data(), kSyntheticAtrac9Superframe, resampled_output.Data(),
+	                                 kOutputFrames * sizeof(int16_t), results + 128),
+	          0);
+	run_batch(batch);
+	EXPECT_TRUE(IsAjmDecodeResult(results + 128, kSyntheticAtrac9Superframe, 2 * kSourceFrames * sizeof(int16_t), kSourceFrames));
+	const auto* source = static_cast<const int16_t*>(neutral_output.Data());
+	const auto* output = static_cast<const int16_t*>(resampled_output.Data());
+	ASSERT_NE(std::count(source, source + kSourceFrames, 0), static_cast<std::ptrdiff_t>(kSourceFrames));
+	for (uint32_t frame = 0; frame < kSourceFrames; ++frame)
+	{
+		ASSERT_EQ(output[2 * frame], source[frame]) << frame;
+		const int next = frame + 1 < kSourceFrames ? source[frame + 1] : source[frame];
+		ASSERT_LE(std::abs(2 * output[2 * frame + 1] - (source[frame] + next)), 2) << frame;
+	}
+	EXPECT_TRUE(IsAjmBytePattern(output + 2 * kSourceFrames, 64 * sizeof(int16_t), 0xa5));
+
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, neutral), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+}
+
+TEST(EmulatorAudio, AjmAtrac9GaplessTrimsPrimingAndCapsFiniteOutputAcrossCalls)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "ATRAC9 backend is unavailable";
+	}
+
+	const auto first_superframe  = BuildAtrac9Superframe(0x1ffu);
+	const auto second_superframe = BuildAtrac9Superframe(0x0c3u);
+	ASSERT_NE(first_superframe, second_superframe);
+
+	// The oracle decodes both superframes as one stream through a separate decoder and applies the AJM S16 rounding.
+	const uint8_t extradata[12] = {0, 0, 0, 0, kSyntheticAtrac9Config[0], kSyntheticAtrac9Config[1], kSyntheticAtrac9Config[2],
+	                               kSyntheticAtrac9Config[3], 0, 0, 0, 0};
+	std::string   error;
+	auto oracle = AudioVideoBackend::ElementaryAudioDecoder::Open(AudioVideoBackend::AudioCodec::Atrac9, extradata, sizeof(extradata),
+	                                                              kSyntheticAtrac9Superframe, 1, kSyntheticAtrac9Rate, &error);
+	ASSERT_TRUE(oracle != nullptr) << error;
+	std::vector<int16_t> stream;
+	for (const auto* superframe: {&first_superframe, &second_superframe})
+	{
+		std::vector<float> decoded;
+		ASSERT_TRUE(oracle->Decode(superframe->data(), superframe->size(), &decoded)) << oracle->LastError();
+		ASSERT_EQ(decoded.size(), static_cast<size_t>(kSyntheticAtrac9Superframe));
+		for (const float sample: decoded)
+		{
+			ASSERT_TRUE(std::isfinite(sample));
+			const auto rounded = std::llround(std::clamp(static_cast<double>(sample), -1.0, 1.0) * 32768.0);
+			stream.push_back(static_cast<int16_t>(std::clamp<long long>(rounded, INT16_MIN, INT16_MAX)));
+		}
+	}
+	const std::vector<int16_t> expected(stream.begin() + kAtrac9GaplessPrimingFrames,
+	                                    stream.begin() + kAtrac9GaplessPrimingFrames + kAtrac9GaplessTotalFrames);
+	const auto first_part  = expected.begin() + (kSyntheticAtrac9Superframe - kAtrac9GaplessPrimingFrames);
+	ASSERT_TRUE(std::any_of(expected.begin(), first_part, [](int16_t value) { return value != 0; }));
+	ASSERT_TRUE(std::any_of(first_part, expected.end(), [](int16_t value) { return value != 0; }));
+	ASSERT_FALSE(std::equal(stream.begin(), stream.begin() + kSyntheticAtrac9Superframe, stream.begin() + kSyntheticAtrac9Superframe));
+
+	ASSERT_EXIT(std::_Exit(RunAjmAtrac9GaplessScenario(first_superframe, second_superframe, expected, 1)), ::testing::ExitedWithCode(0),
+	            "");
+	ASSERT_EXIT(std::_Exit(RunAjmAtrac9GaplessScenario(first_superframe, second_superframe, expected, 0)), ::testing::ExitedWithCode(0),
+	            "");
+#endif
+}
+
+TEST(EmulatorAudio, RejectsAjmAtrac9GaplessChangesAfterDecodeBeforeGuestPublication)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "strict AJM refusal check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "ATRAC9 backend is unavailable";
+	}
+
+	constexpr size_t output_size = 512 * sizeof(int16_t);
+	GuestReadableBlock config_storage(8);
+	GuestReadableBlock gapless_storage(8);
+	GuestReadableBlock input_storage(kSyntheticAtrac9Superframe);
+	GuestSharedBlock   pcm_storage(output_size);
+	GuestSharedBlock   result_storage(sizeof(AjmBatchSharedResults));
+	ASSERT_TRUE(config_storage.IsValid());
+	ASSERT_TRUE(gapless_storage.IsValid());
+	ASSERT_TRUE(input_storage.IsValid());
+	ASSERT_TRUE(pcm_storage.IsValid());
+	ASSERT_TRUE(result_storage.IsValid());
+	std::memcpy(config_storage.Data(), kSyntheticAtrac9Config, sizeof(kSyntheticAtrac9Config));
+	std::memset(static_cast<uint8_t*>(config_storage.Data()) + sizeof(kSyntheticAtrac9Config), 0, 4);
+	const auto superframe = BuildAtrac9Superframe(0x1ffu);
+	std::memcpy(input_storage.Data(), superframe.data(), superframe.size());
+	void* const config_address  = config_storage.Data();
+	void* const gapless_address = gapless_storage.Data();
+	void* const input_address   = input_storage.Data();
+	void* const pcm_address     = pcm_storage.Data();
+	auto* const shared          = ::new (result_storage.Data()) AjmBatchSharedResults {};
+	const auto  outputs_untouched = [shared, pcm = pcm_storage.Data()]
+	{
+		return IsAjmBytePattern(shared->init_result, sizeof(shared->init_result), 0xa5) &&
+		       IsAjmBytePattern(shared->decode_result, sizeof(shared->decode_result), 0xa5) &&
+		       IsAjmBytePattern(shared->sideband_output, sizeof(shared->sideband_output), 0xa5) &&
+		       IsAjmBytePattern(&shared->error, sizeof(shared->error), 0xa5) &&
+		       IsAjmBytePattern(&shared->batch_id, sizeof(shared->batch_id), 0xa5) && IsAjmBytePattern(pcm, output_size, 0xa5);
+	};
+
+	// A reset may reconfigure a decoded instance; without one, or with no total, the change is refused.
+	enum class Scenario : uint8_t
+	{
+		ResetZeroAfterDecodeInBatch,
+		UnlimitedTotal,
+	};
+	for (const Scenario scenario: {Scenario::ResetZeroAfterDecodeInBatch, Scenario::UnlimitedTotal})
+	{
+		SCOPED_TRACE(static_cast<int>(scenario));
+		std::memset(shared, 0xa5, sizeof(*shared));
+		std::memset(pcm_storage.Data(), 0xa5, output_size);
+		uint8_t gapless_config[8] = {0xdc, 0x05, 0, 0, 0x00, 0x01, 0, 0}; // 1500 output frames, 256 priming frames.
+		if (scenario == Scenario::UnlimitedTotal)
+		{
+			gapless_config[0] = 0;
+			gapless_config[1] = 0;
+		}
+		std::memcpy(gapless_storage.Data(), gapless_config, sizeof(gapless_config));
+		const uint64_t reset = scenario == Scenario::ResetZeroAfterDecodeInBatch ? 0 : 1;
+
+		int status = 0;
+		ASSERT_TRUE(RunAjmStrictChild(
+		    [=]
+		    {
+			    uint32_t                  context  = 0;
+			    uint32_t                  instance = 0;
+			    alignas(uint64_t) uint8_t batch[256] {};
+			    if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 1, 0) != 0 ||
+			        Ajm::AjmInstanceCreate(context, 1, 0x401, &instance) != 0)
+			    {
+				    std::_Exit(91);
+			    }
+			    if (Ajm::AjmBatchJobInitialize(batch, instance, config_address, 8, shared->init_result) != 0)
+			    {
+				    std::_Exit(93);
+			    }
+			    const bool decode_first = scenario != Scenario::UnlimitedTotal;
+			    if (decode_first && Ajm::AjmBatchJobDecode(batch, instance, input_address, kSyntheticAtrac9Superframe, pcm_address,
+			                                               output_size, shared->decode_result) != 0)
+			    {
+				    std::_Exit(94);
+			    }
+			    if (Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_address, reset, shared->sideband_output) != 0 ||
+			        !outputs_untouched())
+			    {
+				    std::_Exit(95);
+			    }
+			    const int32_t start_status = Ajm::AjmBatchStart(context, batch, 0, &shared->error, &shared->batch_id);
+			    std::fprintf(stderr, "AjmBatchStart unexpectedly returned %d for ATRAC9 gapless scenario %u\n", start_status,
+			                 static_cast<unsigned>(scenario));
+			    std::_Exit(96);
+		    },
+		    &status))
+		    << "strict AJM gapless refusal timed out";
+		ASSERT_TRUE(WIFEXITED(status));
+		EXPECT_EQ(WEXITSTATUS(status), AJM_STRICT_EXIT_STATUS);
+		EXPECT_TRUE(outputs_untouched());
+	}
+#endif
+}
+
+TEST(EmulatorAudio, AjmAtrac9PreflightCountsPreparedDecodersAgainstLiveLimit)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "ATRAC9 backend is unavailable";
+	}
+
+	struct AjmContextCleanup
+	{
+		~AjmContextCleanup()
+		{
+			if (context == 0)
+			{
+				return;
+			}
+			for (const uint32_t instance: instances)
+			{
+				if (instance != 0)
+				{
+					(void)Ajm::AjmInstanceDestroy(context, instance);
+				}
+			}
+			(void)Ajm::AjmFinalize(context);
+		}
+
+		uint32_t              context = 0;
+		std::vector<uint32_t> instances;
+	} cleanup;
+	auto&              context       = cleanup.context;
+	constexpr uint32_t decoder_limit = 64;
+	// Eight result ranges plus error and batch ID fit within the writable guest transaction limit.
+	constexpr uint32_t setup_jobs_per_batch  = 8;
+	constexpr uint32_t replacement_job_limit = 32;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+
+	GuestReadableBlock             config_storage(8);
+	GuestReadableBlock             results_storage(decoder_limit * 32u);
+	GuestReadableBlock             replacement_results_storage(replacement_job_limit * 32u);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	ASSERT_TRUE(config_storage.IsValid());
+	ASSERT_TRUE(results_storage.IsValid());
+	ASSERT_TRUE(replacement_results_storage.IsValid());
+	ASSERT_TRUE(error_storage.IsValid());
+	ASSERT_TRUE(batch_id_storage.IsValid());
+
+	auto* const config = static_cast<uint8_t*>(config_storage.Data());
+	std::memcpy(config, kSyntheticAtrac9Config, sizeof(kSyntheticAtrac9Config));
+	std::memset(config + sizeof(kSyntheticAtrac9Config), 0, 4);
+
+	cleanup.instances.resize(decoder_limit);
+	for (uint32_t& instance: cleanup.instances)
+	{
+		ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
+	}
+
+	alignas(uint64_t) uint8_t batch[64] {};
+	for (uint32_t first_instance = 0; first_instance < decoder_limit; first_instance += setup_jobs_per_batch)
+	{
+		const uint32_t end_instance = first_instance + setup_jobs_per_batch;
+		for (uint32_t index = first_instance; index < end_instance; ++index)
+		{
+			void* const result = static_cast<uint8_t*>(results_storage.Data()) + index * 32u;
+			std::memset(result, 0xa5, 32);
+			ASSERT_EQ(Ajm::AjmBatchJobInitialize(batch, cleanup.instances[index], config, 8, result), 0);
+		}
+
+		ASSERT_EQ(Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()), 0);
+		for (uint32_t index = first_instance; index < end_instance; ++index)
+		{
+			const auto* result = static_cast<const uint8_t*>(results_storage.Data()) + index * 32u;
+			EXPECT_TRUE(IsAjmBytePattern(result, 8, 0));
+			EXPECT_TRUE(IsAjmBytePattern(result + 8, 24, 0xa5));
+		}
+		ASSERT_EQ(Ajm::AjmBatchWait(context, *batch_id_storage.Data(), UINT32_MAX, error_storage.Data()), 0);
+	}
+
+	std::memset(replacement_results_storage.Data(), 0xa5, replacement_job_limit * 32u);
+	std::memset(error_storage.Data(), 0xa5, sizeof(Ajm::AjmBatchError));
+	*batch_id_storage.Data() = 0xa5a5a5a5u;
+	for (uint32_t index = 0; index < replacement_job_limit; ++index)
+	{
+		void* const result = static_cast<uint8_t*>(replacement_results_storage.Data()) + index * 32u;
+		ASSERT_EQ(Ajm::AjmBatchJobInitialize(batch, cleanup.instances[index], config, 8, result), 0);
+	}
+
+	EXPECT_EQ(Ajm::AjmBatchStart(context, batch, 0, error_storage.Data(), batch_id_storage.Data()), static_cast<int32_t>(0x80930007u));
+	EXPECT_TRUE(IsAjmBytePattern(replacement_results_storage.Data(), replacement_job_limit * 32u, 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(error_storage.Data(), sizeof(Ajm::AjmBatchError), 0xa5));
+	EXPECT_EQ(*batch_id_storage.Data(), 0xa5a5a5a5u);
+
+	for (const uint32_t instance: cleanup.instances)
+	{
+		ASSERT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	}
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+	cleanup.context = 0;
+}
+
+TEST(EmulatorAudio, AjmOpusSplitRetainsPartialPacketPcmAndConsumesEachRecordOnce)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	constexpr size_t packet_bytes        = AudioTestFixtures::kGeneratedOpusSinePacket.size();
+	constexpr size_t packet_frames       = 960;
+	constexpr size_t packet_count        = 4;
+	constexpr size_t framed_packet_bytes = sizeof(uint16_t) + packet_bytes;
+	constexpr size_t input_bytes         = packet_count * framed_packet_bytes;
+	static_assert(input_bytes == 648);
+
+	std::array<uint8_t, input_bytes> framed_input {};
+	for (size_t packet = 0; packet < packet_count; ++packet)
+	{
+		const size_t offset      = packet * framed_packet_bytes;
+		framed_input[offset]     = static_cast<uint8_t>(packet_bytes);
+		framed_input[offset + 1] = static_cast<uint8_t>(packet_bytes >> 8u);
+		std::memcpy(framed_input.data() + offset + sizeof(uint16_t), AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes);
+	}
+
+	std::string decoder_error;
+	auto        oracle = AudioVideoBackend::ElementaryAudioDecoder::OpenOpus(2, 48000, &decoder_error);
+	ASSERT_TRUE(oracle != nullptr) << decoder_error;
+	std::array<std::vector<uint8_t>, packet_count> expected_packet_pcm;
+	for (size_t packet = 0; packet < packet_count; ++packet)
+	{
+		std::vector<float> decoded;
+		ASSERT_TRUE(oracle->Decode(AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes, &decoded)) << oracle->LastError();
+		ASSERT_EQ(decoded.size(), packet_frames * 2);
+		auto& expected = expected_packet_pcm[packet];
+		expected.reserve(decoded.size() * sizeof(int16_t));
+		for (const float sample: decoded)
+		{
+			ASSERT_TRUE(std::isfinite(sample));
+			const double bounded = std::clamp(static_cast<double>(sample), -1.0, 1.0);
+			const auto   rounded = std::llround(bounded * 32768.0);
+			const auto   value   = static_cast<int16_t>(std::clamp<long long>(rounded, INT16_MIN, INT16_MAX));
+			const auto   bits    = static_cast<uint16_t>(value);
+			expected.push_back(static_cast<uint8_t>(bits));
+			expected.push_back(static_cast<uint8_t>(bits >> 8u));
+		}
+	}
+	ASSERT_EQ(expected_packet_pcm[0].size(), packet_frames * 2 * sizeof(int16_t));
+	EXPECT_TRUE(std::any_of(expected_packet_pcm[0].begin(), expected_packet_pcm[0].end(), [](uint8_t value) { return value != 0; }));
+
+	ASSERT_EXIT(std::_Exit(RunAjmOpusSplitScenario(framed_input, expected_packet_pcm)), ::testing::ExitedWithCode(0), "");
+#endif
+}
+
+TEST(EmulatorAudio, AjmOpusGaplessFreshResetTrimsPrimingFramesAtNeutralResampleRate)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	constexpr size_t packet_bytes        = AudioTestFixtures::kGeneratedOpusSinePacket.size();
+	constexpr size_t packet_count        = 4;
+	constexpr size_t framed_packet_bytes = sizeof(uint16_t) + packet_bytes;
+	constexpr size_t input_bytes         = packet_count * framed_packet_bytes;
+	constexpr size_t priming_frames      = 312;
+	constexpr size_t output_frames       = 2000;
+	constexpr size_t output_bytes        = output_frames * 2 * sizeof(int16_t);
+	static_assert(input_bytes == 648);
+
+	std::array<uint8_t, input_bytes> framed_input {};
+	for (size_t packet = 0; packet < packet_count; ++packet)
+	{
+		const size_t offset      = packet * framed_packet_bytes;
+		framed_input[offset]     = static_cast<uint8_t>(packet_bytes);
+		framed_input[offset + 1] = static_cast<uint8_t>(packet_bytes >> 8u);
+		std::memcpy(framed_input.data() + offset + sizeof(uint16_t), AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes);
+	}
+
+	std::string decoder_error;
+	auto        oracle = AudioVideoBackend::ElementaryAudioDecoder::OpenOpus(2, 48000, &decoder_error);
+	ASSERT_TRUE(oracle != nullptr) << decoder_error;
+	std::vector<uint8_t> continuous_pcm;
+	continuous_pcm.reserve(packet_count * 960 * 2 * sizeof(int16_t));
+	for (size_t packet = 0; packet < packet_count; ++packet)
+	{
+		std::vector<float> decoded;
+		ASSERT_TRUE(oracle->Decode(AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes, &decoded)) << oracle->LastError();
+		ASSERT_EQ(decoded.size(), 960u * 2u);
+		for (const float sample: decoded)
+		{
+			ASSERT_TRUE(std::isfinite(sample));
+			const double bounded = std::clamp(static_cast<double>(sample), -1.0, 1.0);
+			const auto   rounded = std::llround(bounded * 32768.0);
+			const auto   value   = static_cast<int16_t>(std::clamp<long long>(rounded, INT16_MIN, INT16_MAX));
+			const auto   bits    = static_cast<uint16_t>(value);
+			continuous_pcm.push_back(static_cast<uint8_t>(bits));
+			continuous_pcm.push_back(static_cast<uint8_t>(bits >> 8u));
+		}
+	}
+	const size_t trim_bytes = priming_frames * 2 * sizeof(int16_t);
+	ASSERT_GE(continuous_pcm.size(), trim_bytes + output_bytes);
+	std::vector<uint8_t> expected_output(continuous_pcm.begin() + static_cast<std::ptrdiff_t>(trim_bytes),
+	                                     continuous_pcm.begin() + static_cast<std::ptrdiff_t>(trim_bytes + output_bytes));
+	ASSERT_TRUE(std::any_of(expected_output.begin(), expected_output.end(), [](uint8_t value) { return value != 0; }));
+
+	ASSERT_EXIT(std::_Exit(RunAjmOpusGaplessScenario(framed_input, expected_output, 0, 0)), ::testing::ExitedWithCode(0), "");
+	ASSERT_EXIT(std::_Exit(RunAjmOpusGaplessScenario(framed_input, expected_output, 1, 0)), ::testing::ExitedWithCode(0), "");
+	// Before any decode, reset one configures the same fresh stream as reset zero.
+	ASSERT_EXIT(std::_Exit(RunAjmOpusGaplessScenario(framed_input, expected_output, 0, 1)), ::testing::ExitedWithCode(0), "");
+#endif
+}
+
+TEST(EmulatorAudio, AjmOpusGetResampleInfoReportsNeutralResampleStateAfterDecodeSplit)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	constexpr size_t packet_bytes = AudioTestFixtures::kGeneratedOpusSinePacket.size();
+	static_assert(packet_bytes + sizeof(uint16_t) == 162);
+	std::array<uint8_t, 162> framed_input {};
+	framed_input[0] = static_cast<uint8_t>(packet_bytes);
+	framed_input[1] = static_cast<uint8_t>(packet_bytes >> 8u);
+	std::memcpy(framed_input.data() + sizeof(uint16_t), AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes);
+
+	std::string decoder_error;
+	auto        oracle = AudioVideoBackend::ElementaryAudioDecoder::OpenOpus(2, 48000, &decoder_error);
+	ASSERT_TRUE(oracle != nullptr) << decoder_error;
+	std::vector<float> decoded;
+	ASSERT_TRUE(oracle->Decode(AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes, &decoded)) << oracle->LastError();
+	ASSERT_EQ(decoded.size(), 960u * 2u);
+	std::vector<uint8_t> expected_output;
+	expected_output.reserve(decoded.size() * sizeof(int16_t));
+	for (const float sample: decoded)
+	{
+		ASSERT_TRUE(std::isfinite(sample));
+		const double bounded = std::clamp(static_cast<double>(sample), -1.0, 1.0);
+		const auto   rounded = std::llround(bounded * 32768.0);
+		const auto   value   = static_cast<int16_t>(std::clamp<long long>(rounded, INT16_MIN, INT16_MAX));
+		const auto   bits    = static_cast<uint16_t>(value);
+		expected_output.push_back(static_cast<uint8_t>(bits));
+		expected_output.push_back(static_cast<uint8_t>(bits >> 8u));
+	}
+	ASSERT_EQ(expected_output.size(), 960u * 2u * sizeof(int16_t));
+	ASSERT_TRUE(std::any_of(expected_output.begin(), expected_output.end(), [](uint8_t value) { return value != 0; }));
+
+	ASSERT_EXIT(std::_Exit(RunAjmOpusResampleInfoScenario(framed_input, expected_output)), ::testing::ExitedWithCode(0), "");
+#endif
+}
+
+TEST(EmulatorAudio, AjmOpusNeutralFlag2ProfilePreservesPendingPcmAcrossBatches)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	constexpr size_t packet_bytes = AudioTestFixtures::kGeneratedOpusSinePacket.size();
+	static_assert(packet_bytes + sizeof(uint16_t) == 162);
+	std::array<uint8_t, 162> framed_input {};
+	framed_input[0] = static_cast<uint8_t>(packet_bytes);
+	framed_input[1] = static_cast<uint8_t>(packet_bytes >> 8u);
+	std::memcpy(framed_input.data() + sizeof(uint16_t), AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes);
+
+	std::string decoder_error;
+	auto        oracle = AudioVideoBackend::ElementaryAudioDecoder::OpenOpus(2, 48000, &decoder_error);
+	ASSERT_TRUE(oracle != nullptr) << decoder_error;
+	std::vector<float> decoded;
+	ASSERT_TRUE(oracle->Decode(AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes, &decoded)) << oracle->LastError();
+	ASSERT_EQ(decoded.size(), 960u * 2u);
+	std::vector<uint8_t> expected_output;
+	expected_output.reserve(decoded.size() * sizeof(int16_t));
+	for (const float sample: decoded)
+	{
+		ASSERT_TRUE(std::isfinite(sample));
+		const double bounded = std::clamp(static_cast<double>(sample), -1.0, 1.0);
+		const auto   rounded = std::llround(bounded * 32768.0);
+		const auto   value   = static_cast<int16_t>(std::clamp<long long>(rounded, INT16_MIN, INT16_MAX));
+		const auto   bits    = static_cast<uint16_t>(value);
+		expected_output.push_back(static_cast<uint8_t>(bits));
+		expected_output.push_back(static_cast<uint8_t>(bits >> 8u));
+	}
+	ASSERT_TRUE(std::any_of(expected_output.begin() + 240 * 4, expected_output.end(), [](uint8_t value) { return value != 0; }));
+
+	ASSERT_EXIT(std::_Exit(RunAjmOpusNeutralFlag2Scenario(framed_input, expected_output)), ::testing::ExitedWithCode(0), "");
+#endif
+}
+
+TEST(EmulatorAudio, AjmOpusResampledOutputIsInvariantToGuestCallSplitsAndEndsOnTheSourceTotal)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+	ASSERT_EXIT(std::_Exit(RunAjmOpusResampleSplitInvarianceScenario()), ::testing::ExitedWithCode(0), "");
+#endif
+}
+
+TEST(EmulatorAudio, AjmOpusFlag2EndMarkerKeepsAStreamStartedWithTheResetMarker)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+	ASSERT_EXIT(std::_Exit(RunAjmOpusResetMarkerStreamEndScenario()), ::testing::ExitedWithCode(0), "");
+#endif
+}
+
+TEST(EmulatorAudio, AjmOpusClearedNeutralInstanceRestartsWithoutANewResampleProfile)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+	ASSERT_EXIT(std::_Exit(RunAjmOpusClearedNeutralRestartScenario()), ::testing::ExitedWithCode(0), "");
+#endif
+}
+
+// The sample values check Kyty's host filter choice (linear interpolation with a held edge), not a native filter. Dyadic
+// ratios keep the source positions exact so the expected values can be computed independently.
+namespace {
+
+// Decodes the two-record fixture stream with an independent decoder and keeps the gapless window of source frames.
+void DecodeAjmOpusFixtureSource(uint32_t total_frames, uint16_t priming, std::vector<float>* source)
+{
+	constexpr size_t channels = 2;
+	std::string      decoder_error;
+	auto             oracle = AudioVideoBackend::ElementaryAudioDecoder::OpenOpus(2, 48000, &decoder_error);
+	ASSERT_TRUE(oracle != nullptr) << decoder_error;
+	std::vector<float> decoded;
+	for (int record = 0; record < 2; ++record)
+	{
+		std::vector<float> packet;
+		ASSERT_TRUE(oracle->Decode(AudioTestFixtures::kGeneratedOpusSinePacket.data(), AudioTestFixtures::kGeneratedOpusSinePacket.size(),
+		                           &packet))
+		    << oracle->LastError();
+		ASSERT_EQ(packet.size(), 960u * channels);
+		decoded.insert(decoded.end(), packet.begin(), packet.end());
+	}
+	ASSERT_GE(decoded.size(), (priming + total_frames) * channels);
+	source->assign(decoded.begin() + priming * channels, decoded.begin() + (priming + total_frames) * channels);
+}
+
+// Independent model of the resampled stream: each output frame interpolates linearly at the source position, then the
+// position advances by the ratio, which moves by the change per sample from the last setter. A is the furthest source
+// frame read, C the frames at or after the position, and the result ratio the current one.
+void BuildAjmResampleOracle(const std::vector<float>& source, uint32_t total_frames, uint16_t priming,
+                            const std::vector<AjmResampleCall>& calls, std::vector<uint8_t>* expected_pcm,
+                            std::vector<AjmResampleCallResult>* expected_results)
+{
+	constexpr size_t channels       = 2;
+	double           position       = 0.0;
+	uint64_t         admitted       = 0;
+	uint64_t         decoded_frames = 0;
+	float            anchor         = 1.0f;
+	float            change         = 0.0f;
+	uint64_t         profile_frames = 0;
+	for (const auto& call: calls)
+	{
+		if (call.send_setter)
+		{
+			anchor         = call.ratio;
+			change         = call.change;
+			profile_frames = 0;
+		}
+		uint32_t frames = 0;
+		for (; frames < call.output_frames && position < total_frames; ++frames)
+		{
+			const auto   index    = static_cast<size_t>(position);
+			const double fraction = position - static_cast<double>(index);
+			const bool   next     = fraction != 0.0 && index + 1 < total_frames;
+			admitted              = std::max<uint64_t>(admitted, index + (fraction != 0.0 ? 2u : 1u));
+			for (size_t channel = 0; channel < channels; ++channel)
+			{
+				const double a     = source[index * channels + channel];
+				const double b     = next ? source[(index + 1) * channels + channel] : a;
+				const auto   value = static_cast<float>(fraction == 0.0 ? a : a + fraction * (b - a));
+				const auto   bits  = static_cast<uint16_t>(static_cast<int16_t>(
+                    std::clamp<long long>(std::llround(std::clamp(static_cast<double>(value), -1.0, 1.0) * 32768.0), INT16_MIN, INT16_MAX)));
+				expected_pcm->push_back(static_cast<uint8_t>(bits));
+				expected_pcm->push_back(static_cast<uint8_t>(bits >> 8u));
+			}
+			position += static_cast<double>(anchor) + static_cast<double>(change) * static_cast<double>(profile_frames);
+			++profile_frames;
+		}
+		admitted                     = std::min<uint64_t>(admitted, total_frames);
+		const uint64_t needed_frames = admitted == 0 ? 0 : priming + admitted;
+		const uint64_t packets       = (needed_frames + 959) / 960;
+		AjmResampleCallResult result {};
+		result.input_consumed  = static_cast<int32_t>((packets - decoded_frames) * AJM_OPUS_FIXTURE_RECORD_SIZE);
+		decoded_frames         = packets;
+		result.output_bytes    = static_cast<int32_t>(frames * channels * sizeof(int16_t));
+		result.admitted_frames = admitted;
+		result.held_frames     = static_cast<int32_t>(admitted - std::min<uint64_t>(admitted, static_cast<uint64_t>(position)));
+		result.info_ratio =
+		    static_cast<float>(static_cast<double>(anchor) + static_cast<double>(change) * static_cast<double>(profile_frames));
+		expected_results->push_back(result);
+	}
+}
+
+} // namespace
+
+TEST(EmulatorAudio, AjmOpusResamplerInterpolatesLinearlyAcrossRatioChangesBetweenBatches)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	constexpr uint32_t total_frames = 1500;
+	constexpr uint16_t priming      = 312;
+	std::vector<float> source;
+	ASSERT_NO_FATAL_FAILURE(DecodeAjmOpusFixtureSource(total_frames, priming, &source));
+
+	const std::vector<AjmResampleCall> calls = {{0.9375f, 700}, {1.25f, 4096}, {1.25f, 64}};
+	std::vector<uint8_t>               expected_pcm;
+	std::vector<AjmResampleCallResult> expected_results;
+	BuildAjmResampleOracle(source, total_frames, priming, calls, &expected_pcm, &expected_results);
+	ASSERT_EQ(expected_results[0].output_bytes, 700 * 4);
+	ASSERT_NE(expected_results[0].held_frames, 0);
+	ASSERT_EQ(expected_results[1].admitted_frames, total_frames);
+	ASSERT_EQ(expected_results[1].held_frames, 0);
+	ASSERT_EQ(expected_results[2].output_bytes, 0);
+
+	ASSERT_EXIT(std::_Exit(RunAjmOpusResampleValueScenario(calls, total_frames, priming, expected_pcm, expected_results)),
+	            ::testing::ExitedWithCode(0), "");
+#endif
+}
+
+
+TEST(EmulatorAudio, AjmOpusResamplerMovesTheRatioPerOutputFrameAcrossSetterlessCalls)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	constexpr uint32_t total_frames = 1500;
+	constexpr uint16_t priming      = 312;
+	std::vector<float> source;
+	ASSERT_NO_FATAL_FAILURE(DecodeAjmOpusFixtureSource(total_frames, priming, &source));
+
+	// Like the guest: a ramp from ratio 0 towards 1 over 3072 output frames, a call without a setter while the ratio and
+	// change are unchanged, then a setter re-anchored on the reported ratio with (target - current) / frames.
+	constexpr float ramp = 0x1.555556p-12f;
+	const float     ramp_end_ratio =
+	    static_cast<float>(static_cast<double>(ramp) * 2024.0);
+	const float                  settle = (1.0f - ramp_end_ratio) / 3072.0f;
+	std::vector<AjmResampleCall> calls  = {{0.0f, 1024, 0, false, ramp},
+	                                       {0.0f, 1000, 0, false, ramp, false},
+	                                       {ramp_end_ratio, 4096, 0, false, settle},
+	                                       {ramp_end_ratio, 64, 0, false, settle, false}};
+	std::vector<uint8_t>               expected_pcm;
+	std::vector<AjmResampleCallResult> expected_results;
+	BuildAjmResampleOracle(source, total_frames, priming, calls, &expected_pcm, &expected_results);
+	ASSERT_EQ(expected_results[0].info_ratio, static_cast<float>(static_cast<double>(ramp) * 1024.0));
+	ASSERT_EQ(expected_results[1].info_ratio, ramp_end_ratio);
+	ASSERT_EQ(expected_results[1].output_bytes, 1000 * 4);
+	ASSERT_LT(expected_results[1].admitted_frames, total_frames);
+	ASSERT_EQ(expected_results[2].admitted_frames, total_frames);
+	ASSERT_EQ(expected_results[2].held_frames, 0);
+	ASSERT_EQ(expected_results[3].output_bytes, 0);
+
+	ASSERT_EXIT(std::_Exit(RunAjmOpusResampleValueScenario(calls, total_frames, priming, expected_pcm, expected_results)),
+	            ::testing::ExitedWithCode(0), "");
+#endif
+}
+
+TEST(EmulatorAudio, RejectsUnobservedAjmOpusResampleProfilesAtomically)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "strict AJM refusal check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	GuestReadableBlock config_storage(12);
+	GuestReadableBlock gapless_storage(8);
+	ASSERT_TRUE(config_storage.IsValid());
+	ASSERT_TRUE(gapless_storage.IsValid());
+	constexpr uint8_t opus_config[12]   = {2, 0, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+	constexpr uint8_t gapless_config[8] = {0xd0, 0x07, 0, 0, 0x38, 0x01, 0, 0};
+	std::memcpy(config_storage.Data(), opus_config, sizeof(opus_config));
+	std::memcpy(gapless_storage.Data(), gapless_config, sizeof(gapless_config));
+	void* const config_address  = config_storage.Data();
+	void* const gapless_address = gapless_storage.Data();
+
+	GuestSharedBlock result_storage(sizeof(AjmBatchSharedResults));
+	ASSERT_TRUE(result_storage.IsValid());
+	auto* const shared            = ::new (result_storage.Data()) AjmBatchSharedResults {};
+	const auto  outputs_untouched = [shared]
+	{
+		return IsAjmBytePattern(shared->data_output, sizeof(shared->data_output), 0xa5) &&
+		       IsAjmBytePattern(shared->init_result, sizeof(shared->init_result), 0xa5) &&
+		       IsAjmBytePattern(shared->decode_result, sizeof(shared->decode_result), 0xa5) &&
+		       IsAjmBytePattern(shared->sideband_output, sizeof(shared->sideband_output), 0xa5) &&
+		       IsAjmBytePattern(&shared->error, sizeof(shared->error), 0xa5) &&
+		       IsAjmBytePattern(&shared->batch_id, sizeof(shared->batch_id), 0xa5);
+	};
+
+	struct Profile
+	{
+		const char* name;
+		bool        gapless;
+		float       running_ratio;
+		float       ratio;
+		float       delta;
+		uint32_t    flags;
+	};
+	const Profile profiles[] = {
+	    {"non-unity ratio without gapless", false, 0.0f, 0.9375f, 0.0f, 0},
+	    {"reset marker at non-unity ratio", true, 0.0f, 0.9375f, 0.0f, 1},
+	    {"flags 2 changing a non-unity ratio", true, 0.9375f, 0.875f, 0.0f, 2},
+	    {"flags 2 after a non-unity profile", true, 0.9375f, 1.0f, 0.0f, 2},
+	    {"moving ratio without gapless", false, 0.0f, 1.0f, 0x1p-20f, 0},
+	    {"reset marker on a moving ratio", true, 0.0f, 1.0f, 0x1p-20f, 1},
+	    {"zero ratio moving down", true, 0.0f, 0.0f, -0x1p-20f, 0},
+	    {"zero ratio", true, 0.0f, 0.0f, 0.0f, 0},
+	    {"negative ratio", true, 0.0f, -1.0f, 0.0f, 0},
+	};
+	for (const Profile& profile: profiles)
+	{
+		SCOPED_TRACE(profile.name);
+		std::memset(shared, 0xa5, sizeof(*shared));
+		int status = 0;
+		ASSERT_TRUE(RunAjmStrictChild(
+		    [=]
+		    {
+			    uint32_t                  context  = 0;
+			    uint32_t                  instance = 0;
+			    alignas(uint64_t) uint8_t batch[256] {};
+			    if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 24, 0) != 0 ||
+			        Ajm::AjmInstanceCreate(context, 24, 0x1002, &instance) != 0 ||
+			        Ajm::AjmBatchJobInitialize(batch, instance, config_address, sizeof(opus_config), shared->init_result) != 0 ||
+			        Ajm::AjmBatchJobClearContext(batch, instance, nullptr) != 0)
+			    {
+				    std::_Exit(90);
+			    }
+			    if (profile.gapless && Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_address, 0, shared->sideband_output) != 0)
+			    {
+				    std::_Exit(91);
+			    }
+			    if (profile.running_ratio != 0.0f &&
+			        Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, profile.running_ratio, 0.0f, 0, shared->sideband_output + 8) != 0)
+			    {
+				    std::_Exit(92);
+			    }
+			    if (Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, profile.ratio, profile.delta, profile.flags,
+			                                                shared->sideband_output + 16) != 0 ||
+			        !outputs_untouched())
+			    {
+				    std::_Exit(93);
+			    }
+			    const int32_t start_status = Ajm::AjmBatchStart(context, batch, 0, &shared->error, &shared->batch_id);
+			    std::fprintf(stderr, "AjmBatchStart unexpectedly returned %d for resample profile %s\n", start_status, profile.name);
+			    std::_Exit(96);
+		    },
+		    &status))
+		    << "strict AJM resample refusal timed out";
+		ASSERT_TRUE(WIFEXITED(status));
+		EXPECT_EQ(WEXITSTATUS(status), AJM_STRICT_EXIT_STATUS);
+		EXPECT_TRUE(outputs_untouched());
+	}
+#endif
+}
+
+TEST(EmulatorAudio, RejectsAjmResampleUseWithoutAnAdmittedProfileAtomically)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "strict AJM refusal check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	constexpr size_t   packet_bytes = AudioTestFixtures::kGeneratedOpusSinePacket.size();
+	GuestReadableBlock config_storage(12);
+	GuestReadableBlock gapless_storage(8);
+	GuestReadableBlock input_storage(sizeof(uint16_t) + packet_bytes);
+	GuestReadableBlock descriptors_storage(2 * sizeof(Ajm::AjmBuffer));
+	ASSERT_TRUE(config_storage.IsValid());
+	ASSERT_TRUE(gapless_storage.IsValid());
+	ASSERT_TRUE(input_storage.IsValid());
+	ASSERT_TRUE(descriptors_storage.IsValid());
+	constexpr uint8_t opus_config[12]   = {2, 0, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+	constexpr uint8_t gapless_config[8] = {0xd0, 0x07, 0, 0, 0x38, 0x01, 0, 0};
+	std::memcpy(config_storage.Data(), opus_config, sizeof(opus_config));
+	std::memcpy(gapless_storage.Data(), gapless_config, sizeof(gapless_config));
+	auto* const framed = static_cast<uint8_t*>(input_storage.Data());
+	framed[0]          = static_cast<uint8_t>(packet_bytes);
+	framed[1]          = static_cast<uint8_t>(packet_bytes >> 8u);
+	std::memcpy(framed + sizeof(uint16_t), AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes);
+	void* const config_address  = config_storage.Data();
+	void* const gapless_address = gapless_storage.Data();
+	auto* const descriptors     = static_cast<Ajm::AjmBuffer*>(descriptors_storage.Data());
+
+	GuestSharedBlock result_storage(sizeof(AjmBatchSharedResults));
+	ASSERT_TRUE(result_storage.IsValid());
+	auto* const shared = ::new (result_storage.Data()) AjmBatchSharedResults {};
+	std::memset(shared, 0xa5, sizeof(*shared));
+	const auto outputs_untouched = [shared]
+	{
+		return IsAjmBytePattern(shared->data_output, sizeof(shared->data_output), 0xa5) &&
+		       IsAjmBytePattern(shared->init_result, sizeof(shared->init_result), 0xa5) &&
+		       IsAjmBytePattern(shared->decode_result, sizeof(shared->decode_result), 0xa5) &&
+		       IsAjmBytePattern(shared->sideband_output, sizeof(shared->sideband_output), 0xa5) &&
+		       IsAjmBytePattern(&shared->error, sizeof(shared->error), 0xa5) &&
+		       IsAjmBytePattern(&shared->batch_id, sizeof(shared->batch_id), 0xa5);
+	};
+
+	// A cleared ratio-1 instance keeps its profile; whether a non-unity one survives Clear is not observed.
+	enum class Scenario : uint8_t
+	{
+		InfoBeforeAnyProfile,
+		DecodeAfterClearingNonUnityProfile,
+	};
+	const Scenario scenarios[] = {Scenario::InfoBeforeAnyProfile, Scenario::DecodeAfterClearingNonUnityProfile};
+	for (const Scenario scenario: scenarios)
+	{
+		SCOPED_TRACE(static_cast<int>(scenario));
+		std::memset(shared, 0xa5, sizeof(*shared));
+		int status = 0;
+		ASSERT_TRUE(RunAjmStrictChild(
+		    [=]
+		    {
+			    uint32_t                  context  = 0;
+			    uint32_t                  instance = 0;
+			    alignas(uint64_t) uint8_t batch[512] {};
+			    if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 24, 0) != 0 ||
+			        Ajm::AjmInstanceCreate(context, 24, 0x1002, &instance) != 0 ||
+			        Ajm::AjmBatchJobInitialize(batch, instance, config_address, sizeof(opus_config), shared->init_result) != 0)
+			    {
+				    std::_Exit(90);
+			    }
+			    if (scenario == Scenario::DecodeAfterClearingNonUnityProfile)
+			    {
+				    descriptors[0] = {framed, sizeof(uint16_t) + packet_bytes};
+				    descriptors[1] = {shared->data_output, sizeof(shared->data_output)};
+				    if (Ajm::AjmBatchJobClearContext(batch, instance, nullptr) != 0 ||
+				        Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_address, 0, nullptr) != 0 ||
+				        Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 0.9375f, 0.0f, 0, shared->sideband_output) != 0 ||
+				        Ajm::AjmBatchJobClearContext(batch, instance, nullptr) != 0 ||
+				        Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_address, 0, nullptr) != 0 ||
+				        Ajm::AjmBatchJobDecodeSplit(batch, instance, descriptors, 1, descriptors + 1, 1, shared->decode_result) != 0)
+				    {
+					    std::_Exit(91);
+				    }
+			    }
+			    if ((scenario == Scenario::InfoBeforeAnyProfile &&
+			         Ajm::AjmBatchJobGetResampleInfo(batch, instance, shared->decode_result) != 0) ||
+			        !outputs_untouched())
+			    {
+				    std::_Exit(92);
+			    }
+			    const int32_t start_status = Ajm::AjmBatchStart(context, batch, 0, &shared->error, &shared->batch_id);
+			    std::fprintf(stderr, "AjmBatchStart unexpectedly returned %d (0x%08x) for resample-info scenario %u\n", start_status,
+			                 static_cast<uint32_t>(start_status), static_cast<unsigned>(scenario));
+			    std::_Exit(96);
+		    },
+		    &status))
+		    << "strict AJM resample-info refusal timed out";
+		ASSERT_TRUE(WIFEXITED(status));
+		EXPECT_EQ(WEXITSTATUS(status), AJM_STRICT_EXIT_STATUS);
+		EXPECT_TRUE(outputs_untouched());
+	}
+#endif
+}
+
+TEST(EmulatorAudio, RejectsUnsupportedAjmGaplessProfilesBeforeGuestPublication)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "strict AJM refusal check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	constexpr size_t   packet_bytes = AudioTestFixtures::kGeneratedOpusSinePacket.size();
+	constexpr size_t   packet_size  = sizeof(uint16_t) + packet_bytes;
+	constexpr size_t   output_size  = 960 * 2 * sizeof(int16_t);
+	GuestReadableBlock config_storage(12);
+	GuestReadableBlock gapless_storage(8);
+	GuestReadableBlock input_storage(packet_size);
+	GuestReadableBlock input_descriptor_storage(sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock output_descriptor_storage(sizeof(Ajm::AjmBuffer));
+	GuestSharedBlock   pcm_storage(output_size);
+	ASSERT_TRUE(config_storage.IsValid());
+	ASSERT_TRUE(gapless_storage.IsValid());
+	ASSERT_TRUE(input_storage.IsValid());
+	ASSERT_TRUE(input_descriptor_storage.IsValid());
+	ASSERT_TRUE(output_descriptor_storage.IsValid());
+	ASSERT_TRUE(pcm_storage.IsValid());
+
+	constexpr uint8_t opus_config[12] = {2, 0, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+	std::memcpy(config_storage.Data(), opus_config, sizeof(opus_config));
+	void* const config_address         = config_storage.Data();
+	void* const gapless_config_address = gapless_storage.Data();
+	auto* const input_bytes            = static_cast<uint8_t*>(input_storage.Data());
+	input_bytes[0]                     = static_cast<uint8_t>(packet_bytes);
+	input_bytes[1]                     = static_cast<uint8_t>(packet_bytes >> 8u);
+	std::memcpy(input_bytes + sizeof(uint16_t), AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes);
+	auto* const input_buffers  = static_cast<Ajm::AjmBuffer*>(input_descriptor_storage.Data());
+	auto* const output_buffers = static_cast<Ajm::AjmBuffer*>(output_descriptor_storage.Data());
+	input_buffers[0]           = {input_bytes, packet_size};
+	output_buffers[0]          = {pcm_storage.Data(), output_size};
+
+	enum class Scenario : uint8_t
+	{
+		ResetOneAfterDecode,
+		PriorSkippedFrames,
+		ChangedProfileAfterDecode,
+		UnlimitedTotal,
+	};
+	const Scenario scenarios[] = {Scenario::ResetOneAfterDecode, Scenario::PriorSkippedFrames, Scenario::ChangedProfileAfterDecode,
+	                              Scenario::UnlimitedTotal};
+	GuestSharedBlock result_storage(sizeof(AjmBatchSharedResults));
+	ASSERT_TRUE(result_storage.IsValid());
+	auto* const shared = ::new (result_storage.Data()) AjmBatchSharedResults {};
+	std::memset(shared, 0xa5, sizeof(*shared));
+	const auto outputs_untouched = [shared, pcm = pcm_storage.Data()]
+	{
+		return IsAjmBytePattern(shared->data_output, sizeof(shared->data_output), 0xa5) &&
+		       IsAjmBytePattern(shared->init_result, sizeof(shared->init_result), 0xa5) &&
+		       IsAjmBytePattern(shared->decode_result, sizeof(shared->decode_result), 0xa5) &&
+		       IsAjmBytePattern(shared->sideband_output, sizeof(shared->sideband_output), 0xa5) &&
+		       IsAjmBytePattern(&shared->error, sizeof(shared->error), 0xa5) &&
+		       IsAjmBytePattern(&shared->batch_id, sizeof(shared->batch_id), 0xa5) && IsAjmBytePattern(pcm, output_size, 0xa5);
+	};
+	for (const Scenario scenario: scenarios)
+	{
+		SCOPED_TRACE(static_cast<int>(scenario));
+		std::memset(shared, 0xa5, sizeof(*shared));
+		std::memset(pcm_storage.Data(), 0xa5, output_size);
+		uint8_t  gapless_config[8] = {0xd0, 0x07, 0, 0, 0x38, 0x01, 0, 0};
+		uint64_t reset             = 0;
+		if (scenario == Scenario::ResetOneAfterDecode)
+		{
+			reset = 1;
+		} else if (scenario == Scenario::PriorSkippedFrames)
+		{
+			gapless_config[6] = 1;
+		} else if (scenario == Scenario::UnlimitedTotal)
+		{
+			gapless_config[0] = 0;
+			gapless_config[1] = 0;
+		} else
+		{
+			gapless_config[0] = 0xe8; // Changed total output limit: 2024 frames.
+			gapless_config[1] = 0x07;
+		}
+		std::memcpy(gapless_storage.Data(), gapless_config, sizeof(gapless_config));
+
+		int status = 0;
+		ASSERT_TRUE(RunAjmStrictChild(
+		    [=]
+		    {
+			    uint32_t                  context  = 0;
+			    uint32_t                  instance = 0;
+			    alignas(uint64_t) uint8_t batch[256] {};
+			    if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 24, 0) != 0 ||
+			        Ajm::AjmInstanceCreate(context, 24, 0x1002, &instance) != 0 ||
+			        Ajm::AjmBatchJobInitialize(batch, instance, config_address, 12, shared->init_result) != 0 ||
+			        Ajm::AjmBatchJobClearContext(batch, instance, nullptr) != 0)
+			    {
+				    std::_Exit(91);
+			    }
+			    if (scenario == Scenario::ChangedProfileAfterDecode || scenario == Scenario::ResetOneAfterDecode)
+			    {
+				    if (Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_config_address, 0, shared->sideband_output) != 0 ||
+				        Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 1.0f, 0.0f, 0, nullptr) != 0 ||
+				        Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 1, output_buffers, 1, shared->decode_result) != 0)
+				    {
+					    std::_Exit(92);
+				    }
+				    uint8_t changed_config[8] = {0xe8, 0x03, 0, 0, 0x38, 0x01, 0, 0}; // 1000 output frames.
+				    std::memcpy(gapless_config_address, changed_config, sizeof(changed_config));
+				    if (Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_config_address, reset, nullptr) != 0)
+				    {
+					    std::_Exit(93);
+				    }
+			    } else if (Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_config_address, reset, shared->sideband_output) != 0)
+			    {
+				    std::_Exit(94);
+			    }
+			    if (!outputs_untouched())
+			    {
+				    std::_Exit(95);
+			    }
+			    const int32_t start_status = Ajm::AjmBatchStart(context, batch, 0, &shared->error, &shared->batch_id);
+			    std::fprintf(stderr, "AjmBatchStart unexpectedly returned %d (0x%08x) for gapless scenario %u\n", start_status,
+			                 static_cast<uint32_t>(start_status), static_cast<unsigned>(scenario));
+			    std::_Exit(96);
+		    },
+		    &status))
+		    << "strict AJM profile refusal timed out";
+		ASSERT_TRUE(WIFEXITED(status));
+		EXPECT_EQ(WEXITSTATUS(status), AJM_STRICT_EXIT_STATUS);
+		EXPECT_TRUE(outputs_untouched());
+	}
+#endif
+}
+
+TEST(EmulatorAudio, RejectsAjmResampleResetMarkerOutsideAClearedWindowAtomically)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "strict AJM refusal check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	constexpr size_t   packet_bytes = AudioTestFixtures::kGeneratedOpusSinePacket.size();
+	constexpr size_t   packet_size  = sizeof(uint16_t) + packet_bytes;
+	constexpr size_t   output_size  = 960 * 2 * sizeof(int16_t);
+	GuestReadableBlock config_storage(12);
+	GuestReadableBlock gapless_storage(8);
+	GuestReadableBlock input_storage(packet_size);
+	GuestReadableBlock input_descriptor_storage(sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock output_descriptor_storage(sizeof(Ajm::AjmBuffer));
+	GuestSharedBlock   pcm_storage(output_size);
+	ASSERT_TRUE(config_storage.IsValid());
+	ASSERT_TRUE(gapless_storage.IsValid());
+	ASSERT_TRUE(input_storage.IsValid());
+	ASSERT_TRUE(input_descriptor_storage.IsValid());
+	ASSERT_TRUE(output_descriptor_storage.IsValid());
+	ASSERT_TRUE(pcm_storage.IsValid());
+
+	constexpr uint8_t opus_config[12]   = {2, 0, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+	constexpr uint8_t gapless_config[8] = {0xd0, 0x07, 0, 0, 0x38, 0x01, 0, 0};
+	std::memcpy(config_storage.Data(), opus_config, sizeof(opus_config));
+	std::memcpy(gapless_storage.Data(), gapless_config, sizeof(gapless_config));
+	auto* const input_bytes = static_cast<uint8_t*>(input_storage.Data());
+	input_bytes[0]          = static_cast<uint8_t>(packet_bytes);
+	input_bytes[1]          = static_cast<uint8_t>(packet_bytes >> 8u);
+	std::memcpy(input_bytes + sizeof(uint16_t), AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes);
+	auto* const input_buffers             = static_cast<Ajm::AjmBuffer*>(input_descriptor_storage.Data());
+	auto* const output_buffers            = static_cast<Ajm::AjmBuffer*>(output_descriptor_storage.Data());
+	input_buffers[0]                      = {input_bytes, packet_size};
+	output_buffers[0]                     = {pcm_storage.Data(), output_size};
+	void* const config_address            = config_storage.Data();
+	void* const gapless_config_address    = gapless_storage.Data();
+	const Ajm::AjmBuffer* const input_descriptor_address  = input_buffers;
+	const Ajm::AjmBuffer* const output_descriptor_address = output_buffers;
+
+	enum class Scenario : uint8_t
+	{
+		BeforeClear,
+		AfterResampleConfiguration,
+		AfterDecode,
+		Flag2WithoutNeutralProfile,
+		UnknownFlag3,
+	};
+	const Scenario   scenarios[] = {Scenario::BeforeClear, Scenario::AfterResampleConfiguration, Scenario::AfterDecode,
+	                                Scenario::Flag2WithoutNeutralProfile, Scenario::UnknownFlag3};
+	GuestSharedBlock result_storage(sizeof(AjmBatchSharedResults));
+	ASSERT_TRUE(result_storage.IsValid());
+	auto* const shared            = ::new (result_storage.Data()) AjmBatchSharedResults {};
+	const auto  outputs_untouched = [shared, pcm = pcm_storage.Data()]
+	{
+		return IsAjmBytePattern(shared->data_output, sizeof(shared->data_output), 0xa5) &&
+		       IsAjmBytePattern(shared->init_result, sizeof(shared->init_result), 0xa5) &&
+		       IsAjmBytePattern(shared->decode_result, sizeof(shared->decode_result), 0xa5) &&
+		       IsAjmBytePattern(shared->sideband_output, sizeof(shared->sideband_output), 0xa5) &&
+		       IsAjmBytePattern(&shared->error, sizeof(shared->error), 0xa5) &&
+		       IsAjmBytePattern(&shared->batch_id, sizeof(shared->batch_id), 0xa5) && IsAjmBytePattern(pcm, output_size, 0xa5);
+	};
+	for (const Scenario scenario: scenarios)
+	{
+		SCOPED_TRACE(static_cast<int>(scenario));
+		std::memset(shared, 0xa5, sizeof(*shared));
+		std::memset(pcm_storage.Data(), 0xa5, output_size);
+		int status = 0;
+		ASSERT_TRUE(RunAjmStrictChild(
+		    [=]
+		    {
+			    uint32_t                  context  = 0;
+			    uint32_t                  instance = 0;
+			    alignas(uint64_t) uint8_t batch[256] {};
+			    if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 24, 0) != 0 ||
+			        Ajm::AjmInstanceCreate(context, 24, 0x1002, &instance) != 0 ||
+			        Ajm::AjmBatchJobInitialize(batch, instance, config_address, sizeof(opus_config), shared->init_result) != 0)
+			    {
+				    std::_Exit(90);
+			    }
+			    if (scenario != Scenario::BeforeClear && Ajm::AjmBatchJobClearContext(batch, instance, nullptr) != 0)
+			    {
+				    std::_Exit(91);
+			    }
+			    if (Ajm::AjmBatchJobSetGaplessDecode(batch, instance, gapless_config_address, 0, shared->sideband_output) != 0)
+			    {
+				    std::_Exit(92);
+			    }
+			    if (scenario == Scenario::AfterResampleConfiguration &&
+			        Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 1.0f, 0.0f, 0, shared->sideband_output + 8) != 0)
+			    {
+				    std::_Exit(93);
+			    }
+			    if (scenario == Scenario::AfterDecode &&
+			        Ajm::AjmBatchJobDecodeSplit(batch, instance, input_descriptor_address, 1, output_descriptor_address, 1,
+			                                    shared->decode_result) != 0)
+			    {
+				    std::_Exit(94);
+			    }
+			    uint32_t reset_flags = 1;
+			    if (scenario == Scenario::Flag2WithoutNeutralProfile)
+			    {
+				    reset_flags = 2;
+			    } else if (scenario == Scenario::UnknownFlag3)
+			    {
+				    reset_flags = 3;
+			    }
+			    if (Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 1.0f, 0.0f, reset_flags, shared->sideband_output + 16) != 0 ||
+			        !outputs_untouched())
+			    {
+				    std::_Exit(96);
+			    }
+			    const int32_t start_status = Ajm::AjmBatchStart(context, batch, 0, &shared->error, &shared->batch_id);
+			    std::fprintf(stderr, "AjmBatchStart unexpectedly returned %d (0x%08x) for resample reset-marker scenario %u\n",
+			                 start_status, static_cast<uint32_t>(start_status), static_cast<unsigned>(scenario));
+			    std::_Exit(97);
+		    },
+		    &status))
+		    << "strict AJM resample reset-marker refusal timed out";
+		ASSERT_TRUE(WIFEXITED(status));
+		EXPECT_EQ(WEXITSTATUS(status), AJM_STRICT_EXIT_STATUS);
+		EXPECT_TRUE(outputs_untouched());
+	}
+#endif
+}
+
+TEST(EmulatorAudio, RejectsMalformedAjmOpusRecordsBeforePublishingGuestWrites)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "isolated AJM decoder check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP() << "Opus backend is unavailable";
+	}
+
+	constexpr size_t packet_bytes        = AudioTestFixtures::kGeneratedOpusSinePacket.size();
+	constexpr size_t framed_packet_bytes = sizeof(uint16_t) + packet_bytes;
+	constexpr size_t output_capacity     = AJM_OPUS_TEST_OUTPUT_CAPACITY;
+	constexpr size_t result_offset       = output_capacity;
+	constexpr size_t split_result_offset = result_offset + 32;
+	constexpr size_t error_offset        = split_result_offset + 32;
+	static_assert(sizeof(Ajm::AjmBatchError) % alignof(uint32_t) == 0);
+	constexpr size_t batch_id_offset = error_offset + sizeof(Ajm::AjmBatchError);
+
+	GuestReadableBlock config_storage(12);
+	GuestReadableBlock input_storage(framed_packet_bytes + 1);
+	GuestReadableBlock input_descriptor_storage(2 * sizeof(Ajm::AjmBuffer));
+	GuestReadableBlock output_descriptor_storage(sizeof(Ajm::AjmBuffer));
+	GuestSharedBlock   output_storage(batch_id_offset + sizeof(uint32_t));
+	ASSERT_TRUE(config_storage.IsValid());
+	ASSERT_TRUE(input_storage.IsValid());
+	ASSERT_TRUE(input_descriptor_storage.IsValid());
+	ASSERT_TRUE(output_descriptor_storage.IsValid());
+	ASSERT_TRUE(output_storage.IsValid());
+
+	constexpr uint8_t opus_config[12] = {2, 0, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0};
+	std::memcpy(config_storage.Data(), opus_config, sizeof(opus_config));
+	auto* const config      = static_cast<const uint8_t*>(config_storage.Data());
+	auto* const input_bytes = static_cast<uint8_t*>(input_storage.Data());
+	input_bytes[0]          = static_cast<uint8_t>(packet_bytes);
+	input_bytes[1]          = static_cast<uint8_t>(packet_bytes >> 8u);
+	std::memcpy(input_bytes + sizeof(uint16_t), AudioTestFixtures::kGeneratedOpusSinePacket.data(), packet_bytes);
+	input_bytes[framed_packet_bytes] = 0xa5; // Incomplete next record after a valid packet.
+
+	auto* const input_buffers  = static_cast<Ajm::AjmBuffer*>(input_descriptor_storage.Data());
+	auto* const output_buffers = static_cast<Ajm::AjmBuffer*>(output_descriptor_storage.Data());
+	input_buffers[0]           = {input_bytes, framed_packet_bytes};
+	input_buffers[1]           = {input_bytes + framed_packet_bytes, 1};
+	auto* const output_bytes   = static_cast<uint8_t*>(output_storage.Data());
+	std::memset(output_bytes, 0xa5, batch_id_offset + sizeof(uint32_t));
+	output_buffers[0]             = {output_bytes, output_capacity};
+	void* const initialize_result = output_bytes + result_offset;
+	void* const split_result      = output_bytes + split_result_offset;
+	auto* const error             = reinterpret_cast<Ajm::AjmBatchError*>(output_bytes + error_offset);
+	auto* const batch_id          = reinterpret_cast<uint32_t*>(output_bytes + batch_id_offset);
+
+	int child_status = 0;
+	ASSERT_TRUE(RunAjmStrictChild(
+	    [=]
+	    {
+		    uint32_t                  context  = 0;
+		    uint32_t                  instance = 0;
+		    alignas(uint64_t) uint8_t batch[128] {};
+		    if (Ajm::AjmInitialize(0, &context) != 0 || Ajm::AjmModuleRegister(context, 24, 0) != 0 ||
+		        Ajm::AjmInstanceCreate(context, 24, 0x1002, &instance) != 0 ||
+		        Ajm::AjmBatchJobInitialize(batch, instance, config, 12, initialize_result) != 0 ||
+		        Ajm::AjmBatchJobDecodeSplit(batch, instance, input_buffers, 2, output_buffers, 1, split_result) != 0)
+		    {
+			    std::_Exit(81);
+		    }
+		    (void)Ajm::AjmBatchStart(context, batch, 0, error, batch_id);
+		    std::_Exit(82);
+	    },
+	    &child_status));
+	ASSERT_TRUE(WIFEXITED(child_status));
+	EXPECT_EQ(WEXITSTATUS(child_status), AJM_STRICT_EXIT_STATUS);
+	EXPECT_TRUE(IsAjmBytePattern(output_bytes, batch_id_offset + sizeof(uint32_t), 0xa5));
+#endif
+}
+
+TEST(EmulatorAudio, AjmBatchUsesFullInstanceIdentityBeforePublishingResults)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t owner_context = 0;
+	uint32_t other_context = 0;
+	uint32_t instance      = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &owner_context), 0);
+	ASSERT_EQ(Ajm::AjmInitialize(0, &other_context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(owner_context, 1, 0), 0);
+	ASSERT_EQ(Ajm::AjmInstanceCreate(owner_context, 1, 0x401, &instance), 0);
+
+	GuestReadableBlock             output_storage(sizeof(int16_t));
+	GuestReadableBlock             result_storage(32);
+	GuestValue<Ajm::AjmBatchError> error_storage;
+	GuestValue<uint32_t>           batch_id_storage;
+	ASSERT_TRUE(output_storage.IsValid());
+	ASSERT_TRUE(result_storage.IsValid());
+	ASSERT_TRUE(error_storage.IsValid());
+	ASSERT_TRUE(batch_id_storage.IsValid());
+	std::memset(output_storage.Data(), 0xa5, sizeof(int16_t));
+	std::memset(result_storage.Data(), 0xa5, 32);
+	std::memset(error_storage.Data(), 0xa5, sizeof(Ajm::AjmBatchError));
+	*batch_id_storage.Data() = 0xa5a5a5a5u;
+
+	alignas(uint64_t) uint8_t batch[32] {};
+	ASSERT_EQ(Ajm::AjmBatchJobDecode(batch, instance, nullptr, 0, output_storage.Data(), sizeof(int16_t), result_storage.Data()), 0);
+	EXPECT_EQ(Ajm::AjmBatchStart(other_context, batch, 0, error_storage.Data(), batch_id_storage.Data()),
+	          static_cast<int32_t>(0x80930003u));
+	EXPECT_TRUE(IsAjmBytePattern(output_storage.Data(), sizeof(int16_t), 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(result_storage.Data(), 32, 0xa5));
+	EXPECT_TRUE(IsAjmBytePattern(error_storage.Data(), sizeof(Ajm::AjmBatchError), 0xa5));
+	EXPECT_EQ(*batch_id_storage.Data(), 0xa5a5a5a5u);
+
+	EXPECT_EQ(Ajm::AjmFinalize(owner_context), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(other_context), 0);
+}
+
+TEST(EmulatorAudio, RejectsUnsupportedAjmDirectControlsAtomicallyAfterDecodePrefix)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "strict AJM refusal check requires Linux";
+#else
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t context  = 0;
+	uint32_t instance = 0;
+	ASSERT_EQ(Ajm::AjmInitialize(0, &context), 0);
+	ASSERT_EQ(Ajm::AjmModuleRegister(context, 1, 0), 0);
+	ASSERT_EQ(Ajm::AjmInstanceCreate(context, 1, 0x401, &instance), 0);
+
+	GuestReadableBlock config_storage(8);
+	const auto         superframe = BuildSilentAtrac9Superframe();
+	GuestReadableBlock input_storage(superframe.size());
+	ASSERT_TRUE(config_storage.IsValid());
+	ASSERT_TRUE(input_storage.IsValid());
+	auto* const config = static_cast<uint8_t*>(config_storage.Data());
+	std::memcpy(config, kSyntheticAtrac9Config, sizeof(kSyntheticAtrac9Config));
+	std::memset(config + sizeof(kSyntheticAtrac9Config), 0, 4);
+	std::memcpy(input_storage.Data(), superframe.data(), superframe.size());
+
+	enum class UnsupportedControl : uint8_t
+	{
+		SetGapless,
+		GetGapless,
+		SetResample,
+		SetResampleEx,
+		GetResampleInfo,
+		GetInfo,
+		GetCodecInfo,
+		GetStatistics,
+		Control,
+	};
+	// A gapless reset after the decode is admitted, so SetGapless is not listed.
+	const UnsupportedControl operations[] = {UnsupportedControl::GetGapless,      UnsupportedControl::SetResample,
+	                                         UnsupportedControl::SetResampleEx,   UnsupportedControl::GetResampleInfo,
+	                                         UnsupportedControl::GetInfo,         UnsupportedControl::GetCodecInfo,
+	                                         UnsupportedControl::GetStatistics,   UnsupportedControl::Control};
+
+	alignas(uint64_t) uint8_t batch[64] {};
+	void* const               batch_address = batch;
+	GuestSharedBlock results_storage(sizeof(AjmBatchSharedResults));
+	ASSERT_TRUE(results_storage.IsValid());
+	auto* const shared = ::new (results_storage.Data()) AjmBatchSharedResults {};
+	std::memset(shared, 0xa5, sizeof(*shared));
+	const auto  outputs_untouched = [shared]
+	{
+		return IsAjmBytePattern(shared->data_output, sizeof(shared->data_output), 0xa5) &&
+		       IsAjmBytePattern(shared->init_result, sizeof(shared->init_result), 0xa5) &&
+		       IsAjmBytePattern(shared->decode_result, sizeof(shared->decode_result), 0xa5) &&
+		       IsAjmBytePattern(shared->sideband_output, sizeof(shared->sideband_output), 0xa5) &&
+		       IsAjmBytePattern(&shared->error, sizeof(shared->error), 0xa5) &&
+		       IsAjmBytePattern(&shared->batch_id, sizeof(shared->batch_id), 0xa5);
+	};
+
+	for (const auto operation: operations)
+	{
+		std::memset(shared, 0xa5, sizeof(*shared));
+		int status = 0;
+		ASSERT_TRUE(RunAjmStrictChild(
+		    [context, instance, batch_address, config, input = input_storage.Data(), shared, operation, outputs_untouched]
+		    {
+			    if (Ajm::AjmBatchJobInitialize(batch_address, instance, config, 8, shared->init_result) != 0 || !outputs_untouched())
+			    {
+				    std::_Exit(90);
+			    }
+			    if (Ajm::AjmBatchJobDecode(batch_address, instance, input, kSyntheticAtrac9Superframe, shared->data_output,
+			                               sizeof(shared->data_output), shared->decode_result) != 0 ||
+			        !outputs_untouched())
+			    {
+				    std::_Exit(91);
+			    }
+
+			    int enqueue_status = 0;
+			    switch (operation)
+			    {
+				    case UnsupportedControl::SetGapless:
+					    enqueue_status = Ajm::AjmBatchJobSetGaplessDecode(batch_address, instance, config, 1, shared->sideband_output);
+					    break;
+				    case UnsupportedControl::GetGapless:
+					    enqueue_status = Ajm::AjmBatchJobGetGaplessDecode(batch_address, instance, shared->sideband_output);
+					    break;
+				    case UnsupportedControl::SetResample:
+					    enqueue_status = Ajm::AjmBatchJobSetResampleParameters(batch_address, instance, 1.0f, 0, shared->sideband_output);
+					    break;
+				    case UnsupportedControl::SetResampleEx:
+					    enqueue_status =
+					        Ajm::AjmBatchJobSetResampleParametersEx(batch_address, instance, 1.0f, 0.0f, 0, shared->sideband_output);
+					    break;
+				    case UnsupportedControl::GetResampleInfo:
+					    enqueue_status = Ajm::AjmBatchJobGetResampleInfo(batch_address, instance, shared->sideband_output);
+					    break;
+				    case UnsupportedControl::GetInfo:
+					    enqueue_status = Ajm::AjmBatchJobGetInfo(batch_address, instance, shared->sideband_output);
+					    break;
+				    case UnsupportedControl::GetCodecInfo:
+					    enqueue_status =
+					        Ajm::AjmBatchJobGetCodecInfo(batch_address, instance, shared->sideband_output, sizeof(shared->sideband_output));
+					    break;
+				    case UnsupportedControl::GetStatistics:
+					    enqueue_status = Ajm::AjmBatchJobGetStatistics(batch_address, 0.0f, shared->sideband_output);
+					    break;
+				    case UnsupportedControl::Control:
+					    enqueue_status = Ajm::AjmBatchJobControl(batch_address, instance, 0, nullptr, 0, shared->sideband_output,
+					                                             sizeof(shared->sideband_output));
+					    break;
+			    }
+			    if (enqueue_status != 0 || !outputs_untouched())
+			    {
+				    std::_Exit(92);
+			    }
+			    const int32_t start_status = Ajm::AjmBatchStart(context, batch_address, 0, &shared->error, &shared->batch_id);
+			    std::fprintf(stderr, "AjmBatchStart unexpectedly returned %d (0x%08x) for unsupported control %u\n", start_status,
+			                 static_cast<uint32_t>(start_status), static_cast<unsigned>(operation));
+			    std::_Exit(96);
+		    },
+		    &status))
+		    << "strict AJM refusal timed out";
+		ASSERT_TRUE(WIFEXITED(status));
+		EXPECT_EQ(WEXITSTATUS(status), AJM_STRICT_EXIT_STATUS);
+		EXPECT_TRUE(outputs_untouched());
+	}
+
+	EXPECT_EQ(Ajm::AjmInstanceDestroy(context, instance), 0);
+	EXPECT_EQ(Ajm::AjmFinalize(context), 0);
+#endif
 }
 
 TEST(EmulatorAudio, StandardSamplerAtrac9SetupRequiresConfigThatMatchesTheFormat)

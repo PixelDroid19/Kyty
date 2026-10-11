@@ -134,22 +134,22 @@ int KYTY_SYSV_ABI   AjmBatchWait(uint32_t context, uint32_t batch_id, uint32_t t
 int KYTY_SYSV_ABI   AjmBatchCancel(uint32_t context, uint32_t batch_id);
 int KYTY_SYSV_ABI   AjmBatchJobInitialize(void* batch, uint32_t instance, const void* config, size_t config_size, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobClearContext(void* batch, uint32_t instance, void* result);
-int KYTY_SYSV_ABI   AjmBatchJobSetGaplessDecode(void* batch, uint32_t instance, const void* config, uint64_t enabled, void* result);
+int KYTY_SYSV_ABI   AjmBatchJobSetGaplessDecode(void* batch, uint32_t instance, const void* config, uint64_t reset, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobGetGaplessDecode(void* batch, uint32_t instance, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobSetResampleParameters(void* batch, uint32_t instance, float ratio, uint32_t flags, void* result);
-int KYTY_SYSV_ABI   AjmBatchJobSetResampleParametersEx(void* batch, uint32_t instance, float ratio_start,
-                                                       float ratio_change_per_sample, uint32_t flags, void* result);
+int KYTY_SYSV_ABI   AjmBatchJobSetResampleParametersEx(void* batch, uint32_t instance, float ratio_start, float ratio_change_per_sample,
+                                                       uint32_t flags, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobGetResampleInfo(void* batch, uint32_t instance, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobDecode(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
-                                      size_t data_output_size, void* result, void* return_address, uint64_t reserved, void* result_alias);
-int KYTY_SYSV_ABI   AjmBatchJobDecodeSingle(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
-                                            size_t data_output_size, void* result);
-int KYTY_SYSV_ABI   AjmBatchJobDecodeSplit(void* batch, uint32_t instance, const AjmBuffer* data_input_buffers,
-                                           size_t data_input_buffer_count, const AjmBuffer* data_output_buffers,
-                                           size_t data_output_buffer_count, void* result);
-int KYTY_SYSV_ABI   AjmBatchJobEncode(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
                                       size_t data_output_size, void* result);
-int KYTY_SYSV_ABI   AjmBatchJobGetInfo(void* batch, uint32_t instance, void* result);
+int KYTY_SYSV_ABI AjmBatchJobDecodeSingle(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
+                                          size_t data_output_size, void* result);
+int KYTY_SYSV_ABI AjmBatchJobDecodeSplit(void* batch, uint32_t instance, const AjmBuffer* data_input_buffers,
+                                         size_t data_input_buffer_count, const AjmBuffer* data_output_buffers,
+                                         size_t data_output_buffer_count, void* result);
+int KYTY_SYSV_ABI AjmBatchJobEncode(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
+                                    size_t data_output_size, void* result);
+int KYTY_SYSV_ABI AjmBatchJobGetInfo(void* batch, uint32_t instance, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobGetCodecInfo(void* batch, uint32_t instance, void* result, size_t result_size);
 int KYTY_SYSV_ABI   AjmBatchJobGetStatistics(void* batch, float interval, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobControl(void* batch, uint32_t instance, uint64_t flags, const void* sideband_input, size_t sideband_input_size,

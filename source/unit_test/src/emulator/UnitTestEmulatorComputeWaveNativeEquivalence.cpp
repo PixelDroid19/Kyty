@@ -110,6 +110,25 @@ static constexpr uint32_t kCmpV1Below8 = 0x7d880288u; // v_cmp_gt_u32 vcc, 8, v1
 static constexpr uint32_t kCmpV0V1     = 0x7d880300u; // v_cmp_gt_u32 vcc, v0, v1 (v0 is a per-lane input)
 static constexpr uint32_t kBackVccnz3  = 0xbf87fffdu; // s_cbranch_vccnz -3 dwords
 static constexpr uint32_t kBackExecz3  = 0xbf88fffdu; // s_cbranch_execz -3 dwords
+static constexpr uint32_t kCmpEqVccHiFalse  = 0xd4c2006bu; // v_cmp_eq_u32_e64 vcc_hi, 0, 1 (uniform zero in the high word)
+static constexpr uint32_t kCmpEqVccHiSources = 0x00010280u; // inline 0, inline 1
+
+TEST(EmulatorComputeWaveNativeEquivalence, AdmitsLoopWhenBothVccWordsStayUniform)
+{
+	// The ordinary VOPC comparison defines both VCC words uniformly. The VOP3
+	// comparison then rewrites only VCC_HI, also uniformly, and the loop branch
+	// still observes a uniform 64-bit pair.
+	ExpectNativeEquivalence({kExecFull, kMovV1Zero, kCmpV1Below8, kCmpEqVccHiFalse, kCmpEqVccHiSources, kBackVccnz3, kEnd}, true, 0, "");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsLoopWhenOnlyVccHiIsUniform)
+{
+	// The first compare leaves VCC_LO varying by lane. This VOP3 compare writes
+	// only the high dword and makes that dword uniformly zero. A VCC branch reads
+	// both words, so different host subgroups can still disagree on this back edge.
+	ExpectNativeEquivalence({kExecFull, kCmpNeVcc, kCmpEqVccHiFalse, kCmpEqVccHiSources, kBackVccnz3, kEnd}, false, 0x10u,
+	                        "wave-uniform");
+}
 
 TEST(EmulatorComputeWaveNativeEquivalence, AdmitsALoopOnAWaveUniformCounter)
 {

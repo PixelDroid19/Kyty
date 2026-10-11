@@ -14,11 +14,12 @@
 #include "Emulator/Log.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -45,8 +46,22 @@ struct MemoryProtectionBlock
 	VirtualMemory::Mode mode;
 };
 
+enum class MappingClaimStatus : uint8_t
+{
+	NotFound,
+	Claimed,
+	Busy,
+};
+
+enum class PhysicalReleaseClaimStatus : uint8_t
+{
+	Claimed,
+	NotAllocated,
+	Busy,
+};
+
 static bool apply_protection_blocks(std::vector<MemoryProtectionBlock>* blocks, uint64_t address, uint64_t size, int prot,
-                                    VirtualMemory::Mode mode)
+                                    VirtualMemory::Mode mode, bool require_coverage = true)
 {
 	if (blocks == nullptr || !is_representable_range(address, size))
 	{
@@ -66,22 +81,25 @@ static bool apply_protection_blocks(std::vector<MemoryProtectionBlock>* blocks, 
 	std::sort(covered.begin(), covered.end(),
 	          [](const MemoryProtectionBlock& left, const MemoryProtectionBlock& right) { return left.address < right.address; });
 
-	uint64_t cursor = address;
-	for (const auto& block: covered)
+	if (require_coverage)
 	{
-		if (block.address > cursor)
+		uint64_t cursor = address;
+		for (const auto& block: covered)
+		{
+			if (block.address > cursor)
+			{
+				return false;
+			}
+			cursor = std::max(cursor, block.address + block.size);
+			if (cursor >= end)
+			{
+				break;
+			}
+		}
+		if (cursor < end)
 		{
 			return false;
 		}
-		cursor = std::max(cursor, block.address + block.size);
-		if (cursor >= end)
-		{
-			break;
-		}
-	}
-	if (cursor < end)
-	{
-		return false;
 	}
 
 	std::vector<MemoryProtectionBlock> updated;
@@ -110,6 +128,8 @@ static bool apply_protection_blocks(std::vector<MemoryProtectionBlock>* blocks, 
 	*blocks = std::move(updated);
 	return true;
 }
+
+class KernelMemoryProtectionTransaction;
 
 static void remove_protection_blocks(std::vector<MemoryProtectionBlock>* blocks, uint64_t address, uint64_t size)
 {
@@ -180,8 +200,9 @@ public:
 		// Monotonic lifetime marker consumed by ClaimUnmap. It records that
 		// cleanup is required, not the mapping's latest protection.
 		KernelGpuMappingAccessMode gpu_cleanup_mode;
-		bool                    unmap_pending     = false;
-		bool                    physical_released = false;
+		bool                    unmap_pending            = false;
+		bool                    gpu_registration_pending = false;
+		bool                    physical_released        = false;
 	};
 
 	PhysicalMemory()
@@ -214,7 +235,8 @@ public:
 
 	bool     Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
 	bool     Release(uint64_t start, size_t len);
-	bool     FindMappingsForPhysicalRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings);
+	PhysicalReleaseClaimStatus ClaimDirectRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings);
+	void     AbortDirectRelease(uint64_t start, size_t len);
 	struct MappedView
 	{
 		uint64_t vaddr    = 0;
@@ -225,21 +247,19 @@ public:
 	std::vector<MappedView> OverlappingViews(uint64_t vaddr, uint64_t size);
 	uint64_t Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, KernelGpuMappingAccessMode gpu_mode,
 	             uint64_t alignment, bool fixed, bool replace_owned_reservation, bool* physical_range_valid);
-	bool     ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
+	MappingClaimStatus ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode,
+	                              bool allow_pending_direct_release = false);
 	bool     CompleteUnmap(uint64_t vaddr, uint64_t size);
 	// Unmapping part of one mapping: the claim marks the mapping, the completion
 	// unmaps [cut_vaddr, cut_vaddr + cut_size) and keeps the rest as mappings.
-	bool     ClaimCut(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
+	MappingClaimStatus ClaimCut(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
 	bool     CompleteCut(uint64_t vaddr, uint64_t size, uint64_t cut_vaddr, uint64_t cut_size);
 	void     AbortCut(uint64_t vaddr, uint64_t size);
 	bool     DecommitRange(uint64_t vaddr, uint64_t size);
-	bool     ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode);
-	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode, uint64_t* mapping_addr,
-	                                                uint64_t* mapping_size);
 	bool     Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, KernelGpuMappingAccessMode* gpu_mode,
 	              uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool     Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
-	uint64_t MapAlias(uint64_t vaddr, uint64_t size);
+	uint64_t MapAlias(uint64_t vaddr, uint64_t size, uint64_t alignment);
 	void     FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t count);
 	uint64_t TotalAllocatedBytes();
 	void     FillSnapshot(KernelMemorySnapshot* snapshot);
@@ -255,12 +275,15 @@ public:
 	}
 
 private:
+	friend class KernelMemoryProtectionTransaction;
+
 	static constexpr uint64_t kNextGenAutoMapBegin = 0x2000000000ull;
 	static constexpr uint64_t kNextGenAutoMapEnd   = 0x40000000000ull;
 	// Every byte of [start, start + len) belongs to an allocation; adjacent
 	// allocations may share the range. With memory_type, they must also share
 	// one memory type, which is returned.
 	[[nodiscard]] bool IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len, int* memory_type = nullptr) const;
+	[[nodiscard]] bool IsDirectReleasePendingUnlocked(uint64_t start, uint64_t size) const;
 	// Live views never overlap, so the one holding an address is the nearest
 	// live view at or below it. Titles keep thousands of views; per-address
 	// queries search an index ordered by guest address instead of the list.
@@ -284,6 +307,12 @@ private:
 	std::vector<uint32_t>              m_mapped_order; // m_mapped indices by guest address
 	bool                               m_mapped_order_stale = false;
 	std::vector<MemoryProtectionBlock> m_protections;
+	struct PendingDirectRelease
+	{
+		uint64_t start;
+		uint64_t size;
+	};
+	std::vector<PendingDirectRelease>  m_pending_direct_releases;
 	Core::Mutex                        m_mutex;
 	VirtualMemory::SharedBacking*      m_backing = nullptr;
 	uint64_t                           m_next_gen_auto_map_cursor = kNextGenAutoMapBegin;
@@ -299,7 +328,8 @@ public:
 		int                     prot;
 		VirtualMemory::Mode     mode;
 		KernelGpuMappingAccessMode gpu_cleanup_mode;
-		bool                    unmap_pending = false;
+		bool                    unmap_pending            = false;
+		bool                    gpu_registration_pending = false;
 	};
 
 	enum class GpuOwnerProtection : uint8_t
@@ -307,6 +337,7 @@ public:
 		Applied,
 		NotOwner,
 		UnmapPending,
+		RegistrationPending,
 		NeedsQuiescence,
 		Failed,
 	};
@@ -327,21 +358,20 @@ public:
 	void            FillSnapshot(KernelMemorySnapshot* snapshot);
 
 	bool                            Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mode mode, KernelGpuMappingAccessMode gpu_mode);
-	bool                            ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
+	MappingClaimStatus              ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
 	bool                            CompleteUnmap(uint64_t vaddr, uint64_t size);
 	// Live (not unmapping) mappings overlapping [vaddr, vaddr + size) as {vaddr, size}.
 	std::vector<std::pair<uint64_t, uint64_t>> OverlappingMappings(uint64_t vaddr, uint64_t size);
-	bool                            ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode);
 	GpuOwnerProtection ProtectGpuOwner(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode, bool quiesced,
 	                                   uint64_t* mapping_identity);
-	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode, uint64_t* mapping_addr,
-	                                                uint64_t* mapping_size);
 	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, KernelGpuMappingAccessMode* gpu_mode);
 
 	[[nodiscard]] Core::Mutex&                  GetMutex() { return m_mutex; }
 	[[nodiscard]] const Vector<AllocatedBlock>& GetBlocks() const { return m_allocated; }
 
 private:
+	friend class KernelMemoryProtectionTransaction;
+
 	bool ProtectionCoversLocked(uint64_t vaddr, uint64_t size, bool* writable) const;
 
 	Vector<AllocatedBlock>             m_allocated;
@@ -623,6 +653,223 @@ static FlexibleMemory* g_flexible_memory = nullptr;
 static ReservedMemory* g_reserved_memory = nullptr;
 static callback_func_t g_alloc_callback  = nullptr;
 static callback_func_t g_free_callback   = nullptr;
+// Order mapping registration against lifecycle claims. Teardown claims publish
+// pending owner/range state, then drop this gate before GPU quiescence callbacks.
+static std::recursive_mutex g_gpu_mapping_lifecycle_mutex;
+
+class KernelMemoryProtectionTransaction
+{
+public:
+	enum class Result : uint8_t
+	{
+		Applied,
+		Failed,
+		Busy,
+		InvalidPromotion,
+	};
+
+	struct GpuRegistration
+	{
+		KernelGpuMappingRegistrationAction action = KernelGpuMappingRegistrationAction::Retain;
+		uint64_t                          address = 0;
+		uint64_t                          size    = 0;
+		KernelGpuMappingBacking           backing = KernelGpuMappingBacking::Flexible;
+	};
+	struct GpuOwnerUpdate
+	{
+		KernelGpuMappingAccessMode* target                     = nullptr;
+		KernelGpuMappingAccessMode  value                      = KernelGpuMappingAccessMode::NoAccess;
+		bool*                       registration_pending_target = nullptr;
+	};
+
+	template <typename Owner>
+	static Result StageGpuPromotion(Owner& owner, uint64_t address, uint64_t size, KernelGpuMappingAccessMode gpu_mode,
+	                                KernelGpuMappingBacking backing, GpuRegistration* registration, GpuOwnerUpdate* update)
+	{
+		if (owner.unmap_pending || owner.gpu_registration_pending)
+		{
+			return Result::Busy;
+		}
+
+		auto new_cleanup_mode = owner.gpu_cleanup_mode;
+		const auto promotion =
+		    KernelPromoteGpuMappingRange(owner.map_vaddr, owner.map_size, address, size, gpu_mode, &new_cleanup_mode);
+		const auto action = KernelGpuMappingRegistrationActionFor(promotion);
+		if (action == KernelGpuMappingRegistrationAction::Reject)
+		{
+			return promotion == KernelGpuMappingPromotionStatus::UnmapPending ? Result::Busy : Result::InvalidPromotion;
+		}
+		*registration = {action, owner.map_vaddr, owner.map_size, backing};
+		*update       = {&owner.gpu_cleanup_mode, new_cleanup_mode,
+		                 action == KernelGpuMappingRegistrationAction::RegisterOwnerMapping ? &owner.gpu_registration_pending : nullptr};
+		return Result::Applied;
+	}
+
+	static bool CompleteOwnerRegistration(const GpuRegistration& registration)
+	{
+		if (registration.action != KernelGpuMappingRegistrationAction::RegisterOwnerMapping || g_physical_memory == nullptr ||
+		    g_flexible_memory == nullptr)
+		{
+			return false;
+		}
+
+		Core::LockGuard physical_lock(g_physical_memory->m_mutex);
+		Core::LockGuard flexible_lock(g_flexible_memory->m_mutex);
+		if (registration.backing == KernelGpuMappingBacking::Physical)
+		{
+			for (auto& owner: g_physical_memory->m_mapped)
+			{
+				if (owner.map_vaddr == registration.address && owner.map_size == registration.size && owner.gpu_registration_pending)
+				{
+					owner.gpu_registration_pending = false;
+					return true;
+				}
+			}
+		} else
+		{
+			for (auto& owner: g_flexible_memory->m_allocated)
+			{
+				if (owner.map_vaddr == registration.address && owner.map_size == registration.size && owner.gpu_registration_pending)
+				{
+					owner.gpu_registration_pending = false;
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	static Result Apply(uint64_t address, uint64_t size, int prot, VirtualMemory::Mode mode,
+	                    KernelGpuMappingAccessMode gpu_mode, VirtualMemory::Mode* old_mode, GpuRegistration* registration)
+	{
+		if (g_physical_memory == nullptr || g_flexible_memory == nullptr || !is_representable_range(address, size) || old_mode == nullptr ||
+		    registration == nullptr)
+		{
+			return Result::Failed;
+		}
+
+		// Keep both owner tables stable through GPU-promotion preflight, host
+		// protection and the matching metadata commit.
+		Core::LockGuard physical_lock(g_physical_memory->m_mutex);
+		Core::LockGuard flexible_lock(g_flexible_memory->m_mutex);
+		GpuRegistration staged_registration {};
+		GpuOwnerUpdate  staged_gpu_update {};
+		const uint64_t  end = address + size;
+		for (const auto& owner: g_physical_memory->m_mapped)
+		{
+			const uint64_t overlap_start = std::max(address, owner.map_vaddr);
+			const uint64_t overlap_end   = std::min(end, owner.map_vaddr + owner.map_size);
+			if (overlap_start < overlap_end)
+			{
+				const uint64_t physical_start = owner.phys_addr + (overlap_start - owner.map_vaddr);
+				if (owner.unmap_pending || owner.gpu_registration_pending ||
+				    g_physical_memory->IsDirectReleasePendingUnlocked(physical_start, overlap_end - overlap_start))
+				{
+					return Result::Busy;
+				}
+			}
+		}
+		for (const auto& owner: g_flexible_memory->m_allocated)
+		{
+			if (owner.map_vaddr < end && address < owner.map_vaddr + owner.map_size &&
+			    (owner.unmap_pending || owner.gpu_registration_pending))
+			{
+				return Result::Busy;
+			}
+		}
+
+		if (gpu_mode != KernelGpuMappingAccessMode::NoAccess)
+		{
+			size_t         overlapping_owners = 0;
+			for (const auto& owner: g_physical_memory->m_mapped)
+			{
+				overlapping_owners += owner.map_vaddr < end && address < owner.map_vaddr + owner.map_size ? 1u : 0u;
+			}
+			for (const auto& owner: g_flexible_memory->m_allocated)
+			{
+				overlapping_owners += owner.map_vaddr < end && address < owner.map_vaddr + owner.map_size ? 1u : 0u;
+			}
+			if (overlapping_owners > 1)
+			{
+				return Result::Busy;
+			}
+
+			const auto physical_owner = std::find_if(
+			    g_physical_memory->m_mapped.begin(), g_physical_memory->m_mapped.end(),
+			    [address, size](const PhysicalMemory::MappedBlock& owner)
+			    { return address >= owner.map_vaddr && size <= owner.map_size && address - owner.map_vaddr <= owner.map_size - size; });
+			if (physical_owner != g_physical_memory->m_mapped.end())
+			{
+				const uint64_t owner_phys_addr = physical_owner->phys_addr + (address - physical_owner->map_vaddr);
+				if (physical_owner->physical_released)
+				{
+					return Result::InvalidPromotion;
+				}
+				if (g_physical_memory->IsDirectReleasePendingUnlocked(owner_phys_addr, size))
+				{
+					return Result::Busy;
+				}
+				const auto result = StageGpuPromotion(*physical_owner, address, size, gpu_mode, KernelGpuMappingBacking::Physical,
+				                                      &staged_registration, &staged_gpu_update);
+				if (result != Result::Applied)
+				{
+					return result;
+				}
+			} else
+			{
+				const auto flexible_owner = std::find_if(
+				    g_flexible_memory->m_allocated.begin(), g_flexible_memory->m_allocated.end(),
+				    [address, size](const FlexibleMemory::AllocatedBlock& owner)
+				    { return address >= owner.map_vaddr && size <= owner.map_size && address - owner.map_vaddr <= owner.map_size - size; });
+				if (flexible_owner != g_flexible_memory->m_allocated.end())
+				{
+					const auto result = StageGpuPromotion(*flexible_owner, address, size, gpu_mode, KernelGpuMappingBacking::Flexible,
+					                                      &staged_registration, &staged_gpu_update);
+					if (result != Result::Applied)
+					{
+						return result;
+					}
+				} else
+				{
+					if (overlapping_owners != 0)
+					{
+						// A GPU-visible span that only intersects a tracked owner
+						// cannot safely publish that owner's cleanup lifetime.
+						return Result::Busy;
+					}
+					staged_registration = {KernelGpuMappingRegistrationAction::RegisterProtectedRange, address, size,
+					                      KernelGpuMappingBacking::Flexible};
+				}
+			}
+		}
+
+		auto physical_protections = g_physical_memory->m_protections;
+		auto flexible_protections = g_flexible_memory->m_protections;
+		if (!apply_protection_blocks(&physical_protections, address, size, prot, mode, false) ||
+		    !apply_protection_blocks(&flexible_protections, address, size, prot, mode, false))
+		{
+			return Result::Failed;
+		}
+
+		if (!VirtualMemory::ProtectGuest(address, size, mode, old_mode))
+		{
+			return Result::Failed;
+		}
+
+		g_physical_memory->m_protections = std::move(physical_protections);
+		g_flexible_memory->m_protections = std::move(flexible_protections);
+		if (staged_gpu_update.target != nullptr)
+		{
+			*staged_gpu_update.target = staged_gpu_update.value;
+			if (staged_gpu_update.registration_pending_target != nullptr)
+			{
+				*staged_gpu_update.registration_pending_target = true;
+			}
+		}
+		*registration = staged_registration;
+		return Result::Applied;
+	}
+};
 
 void MemorySubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
@@ -827,6 +1074,17 @@ bool PhysicalMemory::IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len,
 	return false;
 }
 
+bool PhysicalMemory::IsDirectReleasePendingUnlocked(uint64_t start, uint64_t size) const
+{
+	if (!is_representable_range(start, size))
+	{
+		return false;
+	}
+	const uint64_t end = start + size;
+	return std::any_of(m_pending_direct_releases.begin(), m_pending_direct_releases.end(), [start, end](const PendingDirectRelease& pending)
+	                   { return start < pending.start + pending.size && pending.start < end; });
+}
+
 bool PhysicalMemory::Release(uint64_t start, size_t len)
 {
 	if (len == 0 || start > std::numeric_limits<uint64_t>::max() - len)
@@ -840,6 +1098,24 @@ bool PhysicalMemory::Release(uint64_t start, size_t len)
 		return false;
 	}
 	const uint64_t end = start + len;
+	const auto     exact_pending_release = std::find_if(m_pending_direct_releases.begin(), m_pending_direct_releases.end(),
+	                                               [start, len](const PendingDirectRelease& pending)
+	                                               { return pending.start == start && pending.size == len; });
+	for (const auto& pending: m_pending_direct_releases)
+	{
+		if (start < pending.start + pending.size && pending.start < end && (pending.start != start || pending.size != len))
+		{
+			return false;
+		}
+	}
+	for (const auto& mapping: m_mapped)
+	{
+		if (mapping.phys_addr < end && start < mapping.phys_addr + mapping.map_size &&
+		    (mapping.gpu_registration_pending || (Config::IsNextGen() && exact_pending_release == m_pending_direct_releases.end())))
+		{
+			return false;
+		}
+	}
 
 	Vector<AllocatedBlock> remaining;
 	for (const auto& block: m_allocated)
@@ -924,32 +1200,58 @@ bool PhysicalMemory::Release(uint64_t start, size_t len)
 	{
 		(void)VirtualMemory::DiscardSharedBackingRange(m_backing, start, len);
 	}
+	if (exact_pending_release != m_pending_direct_releases.end())
+	{
+		m_pending_direct_releases.erase(exact_pending_release);
+	}
 	return true;
 }
 
-bool PhysicalMemory::FindMappingsForPhysicalRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings)
+PhysicalReleaseClaimStatus PhysicalMemory::ClaimDirectRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings)
 {
 	if (mappings == nullptr || len == 0 || start > std::numeric_limits<uint64_t>::max() - len)
 	{
-		return false;
+		return PhysicalReleaseClaimStatus::NotAllocated;
 	}
 
 	Core::LockGuard lock(m_mutex);
 	if (!IsAllocatedRangeCoveredUnlocked(start, len))
 	{
-		return false;
+		return PhysicalReleaseClaimStatus::NotAllocated;
+	}
+	if (IsDirectReleasePendingUnlocked(start, len))
+	{
+		return PhysicalReleaseClaimStatus::Busy;
 	}
 	const uint64_t end = start + len;
 
 	mappings->Clear();
 	for (const auto& mapping: m_mapped)
 	{
-		if (mapping.phys_addr < end && start < mapping.phys_addr + mapping.map_size)
+		if (mapping.phys_addr >= end || start >= mapping.phys_addr + mapping.map_size)
 		{
-			mappings->Add(mapping);
+			continue;
 		}
+		if (mapping.unmap_pending || mapping.gpu_registration_pending)
+		{
+			return PhysicalReleaseClaimStatus::Busy;
+		}
+		mappings->Add(mapping);
 	}
-	return true;
+	m_pending_direct_releases.push_back({start, len});
+	return PhysicalReleaseClaimStatus::Claimed;
+}
+
+void PhysicalMemory::AbortDirectRelease(uint64_t start, size_t len)
+{
+	Core::LockGuard lock(m_mutex);
+	const auto     pending = std::find_if(m_pending_direct_releases.begin(), m_pending_direct_releases.end(),
+	                                 [start, len](const PendingDirectRelease& release)
+	                                 { return release.start == start && release.size == len; });
+	if (pending != m_pending_direct_releases.end())
+	{
+		m_pending_direct_releases.erase(pending);
+	}
 }
 
 std::vector<PhysicalMemory::MappedView> PhysicalMemory::OverlappingViews(uint64_t vaddr, uint64_t size)
@@ -1129,6 +1431,10 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 		return 0;
 	}
 	*physical_range_valid = true;
+	if (IsDirectReleasePendingUnlocked(phys_addr, map_size))
+	{
+		return 0;
+	}
 
 	uint64_t map_vaddr = 0;
 	if (fixed)
@@ -1189,13 +1495,15 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	b.mode             = mode;
 	b.memory_type      = memory_type;
 	b.gpu_cleanup_mode = gpu_mode;
+	b.gpu_registration_pending = gpu_mode != KernelGpuMappingAccessMode::NoAccess;
 	AddMappedUnlocked(b);
 	m_protections.push_back({map_vaddr, map_size, prot, mode});
 
 	return map_vaddr;
 }
 
-bool PhysicalMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode)
+MappingClaimStatus PhysicalMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode,
+                                              bool allow_pending_direct_release)
 {
 	EXIT_IF(gpu_mode == nullptr);
 
@@ -1203,48 +1511,25 @@ bool PhysicalMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingA
 
 	for (auto& b: m_mapped)
 	{
-		if (b.map_vaddr == vaddr && b.map_size == size && !b.unmap_pending)
+		if (b.map_vaddr == vaddr && b.map_size == size)
 		{
+			const bool direct_release_pending = IsDirectReleasePendingUnlocked(b.phys_addr, b.map_size);
+			if (b.gpu_registration_pending || (direct_release_pending && !allow_pending_direct_release) ||
+			    (allow_pending_direct_release && !direct_release_pending))
+			{
+				return MappingClaimStatus::Busy;
+			}
+			if (b.unmap_pending)
+			{
+				return MappingClaimStatus::NotFound;
+			}
 			*gpu_mode       = b.gpu_cleanup_mode;
 			b.unmap_pending = true;
-			return true;
+			return MappingClaimStatus::Claimed;
 		}
 	}
 
-	return false;
-}
-
-KernelGpuMappingPromotionStatus PhysicalMemory::PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode,
-                                                                uint64_t* mapping_addr, uint64_t* mapping_size)
-{
-	if (mapping_addr == nullptr || mapping_size == nullptr || !is_representable_range(vaddr, size))
-	{
-		return KernelGpuMappingPromotionStatus::InvalidArgument;
-	}
-
-	Core::LockGuard lock(m_mutex);
-	for (auto& block: m_mapped)
-	{
-		auto       cleanup_mode = block.gpu_cleanup_mode;
-		const auto result       = KernelPromoteGpuMappingRange(block.map_vaddr, block.map_size, vaddr, size, gpu_mode, &cleanup_mode);
-		if (result == KernelGpuMappingPromotionStatus::NotContained)
-		{
-			continue;
-		}
-		if (result == KernelGpuMappingPromotionStatus::InvalidArgument)
-		{
-			return result;
-		}
-		if (block.unmap_pending)
-		{
-			return KernelGpuMappingPromotionStatus::UnmapPending;
-		}
-		block.gpu_cleanup_mode = cleanup_mode;
-		*mapping_addr          = block.map_vaddr;
-		*mapping_size          = block.map_size;
-		return result;
-	}
-	return KernelGpuMappingPromotionStatus::NotContained;
+	return MappingClaimStatus::NotFound;
 }
 
 bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
@@ -1327,20 +1612,28 @@ static void erase_protection_span(std::vector<MemoryProtectionBlock>* blocks, ui
 	*blocks = std::move(kept);
 }
 
-bool PhysicalMemory::ClaimCut(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode)
+MappingClaimStatus PhysicalMemory::ClaimCut(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode)
 {
 	EXIT_IF(gpu_mode == nullptr);
 	Core::LockGuard lock(m_mutex);
 	for (auto& b: m_mapped)
 	{
-		if (b.map_vaddr == vaddr && b.map_size == size && !b.unmap_pending)
+		if (b.map_vaddr == vaddr && b.map_size == size)
 		{
+			if (b.gpu_registration_pending || IsDirectReleasePendingUnlocked(b.phys_addr, b.map_size))
+			{
+				return MappingClaimStatus::Busy;
+			}
+			if (b.unmap_pending)
+			{
+				return MappingClaimStatus::NotFound;
+			}
 			*gpu_mode       = b.gpu_cleanup_mode;
 			b.unmap_pending = true;
-			return true;
+			return MappingClaimStatus::Claimed;
 		}
 	}
-	return false;
+	return MappingClaimStatus::NotFound;
 }
 
 bool PhysicalMemory::CompleteCut(uint64_t vaddr, uint64_t size, uint64_t cut_vaddr, uint64_t cut_size)
@@ -1420,7 +1713,9 @@ bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 		{
 			continue;
 		}
-		if (mapping.unmap_pending || mapping.gpu_cleanup_mode != KernelGpuMappingAccessMode::NoAccess)
+		const uint64_t phys_addr = mapping.phys_addr + (vaddr - mapping.map_vaddr);
+		if (mapping.unmap_pending || mapping.gpu_registration_pending || IsDirectReleasePendingUnlocked(phys_addr, size) ||
+		    mapping.gpu_cleanup_mode != KernelGpuMappingAccessMode::NoAccess)
 		{
 			return false;
 		}
@@ -1453,18 +1748,14 @@ bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 	return false;
 }
 
-bool PhysicalMemory::ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode)
-{
-	Core::LockGuard lock(m_mutex);
-	return apply_protection_blocks(&m_protections, vaddr, size, prot, mode);
-}
-
 // Maps a read-write view of the backing pages behind [vaddr, vaddr + size) at
 // a host-chosen address. The view shares bytes with the guest mapping and
 // ignores its protection, which the dirty-page tracker may have lowered.
-uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size)
+uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size, uint64_t alignment)
 {
-	if (size == 0)
+	const uint64_t page_size = VirtualMemory::GetPageSize();
+	alignment = alignment == 0 ? page_size : alignment;
+	if (size == 0 || alignment < page_size || (alignment & (alignment - 1u)) != 0)
 	{
 		return 0;
 	}
@@ -1472,20 +1763,34 @@ uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size)
 	const MappedBlock* live = FindLiveViewUnlocked(vaddr);
 	if (live != nullptr && size <= live->map_size && vaddr - live->map_vaddr <= live->map_size - size)
 	{
-		return VirtualMemory::MapSharedAligned(m_backing, 0, live->phys_addr + (vaddr - live->map_vaddr), size,
-		                                       VirtualMemory::Mode::ReadWrite, VirtualMemory::GetPageSize());
+		const uint64_t phys_addr = live->phys_addr + (vaddr - live->map_vaddr);
+		// Registration publishes committed backing. Its pending state excludes
+		// teardown, but a reader of the published range already needs an alias.
+		if (live->physical_released || IsDirectReleasePendingUnlocked(phys_addr, size))
+		{
+			return 0;
+		}
+		const auto alias = VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr, size,
+		                                                 VirtualMemory::Mode::ReadWrite, alignment);
+		return alias;
 	}
 	for (const auto& mapping: m_mapped)
 	{
-		if (vaddr < mapping.map_vaddr || size > mapping.map_size || vaddr - mapping.map_vaddr > mapping.map_size - size)
+		if (mapping.unmap_pending || mapping.physical_released || vaddr < mapping.map_vaddr ||
+		    size > mapping.map_size || vaddr - mapping.map_vaddr > mapping.map_size - size)
 		{
 			continue;
 		}
 		// CPU protection segments can split one physical mapping. The alias
 		// follows its backing bytes and must remain independent of those rights.
-		const uint64_t offset = mapping.phys_addr + (vaddr - mapping.map_vaddr);
-		return VirtualMemory::MapSharedAligned(m_backing, 0, offset, size, VirtualMemory::Mode::ReadWrite,
-		                                       VirtualMemory::GetPageSize());
+		const uint64_t phys_addr = mapping.phys_addr + (vaddr - mapping.map_vaddr);
+		if (IsDirectReleasePendingUnlocked(phys_addr, size))
+		{
+			return 0;
+		}
+		const auto alias = VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr, size, VirtualMemory::Mode::ReadWrite,
+		                                                 alignment);
+		return alias;
 	}
 	return 0;
 }
@@ -1640,6 +1945,7 @@ bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mo
 	b.prot             = prot;
 	b.mode             = mode;
 	b.gpu_cleanup_mode = gpu_mode;
+	b.gpu_registration_pending = gpu_mode != KernelGpuMappingAccessMode::NoAccess;
 
 	m_allocated.Add(b);
 	m_protections.push_back({vaddr, len, prot, mode});
@@ -1662,7 +1968,7 @@ std::vector<std::pair<uint64_t, uint64_t>> FlexibleMemory::OverlappingMappings(u
 	return mappings;
 }
 
-bool FlexibleMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode)
+MappingClaimStatus FlexibleMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode)
 {
 	EXIT_IF(gpu_mode == nullptr);
 
@@ -1670,48 +1976,23 @@ bool FlexibleMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingA
 
 	for (auto& b: m_allocated)
 	{
-		if (b.map_vaddr == vaddr && b.map_size == size && !b.unmap_pending)
+		if (b.map_vaddr == vaddr && b.map_size == size)
 		{
+			if (b.gpu_registration_pending)
+			{
+				return MappingClaimStatus::Busy;
+			}
+			if (b.unmap_pending)
+			{
+				return MappingClaimStatus::NotFound;
+			}
 			*gpu_mode       = b.gpu_cleanup_mode;
 			b.unmap_pending = true;
-			return true;
+			return MappingClaimStatus::Claimed;
 		}
 	}
 
-	return false;
-}
-
-KernelGpuMappingPromotionStatus FlexibleMemory::PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode,
-                                                                uint64_t* mapping_addr, uint64_t* mapping_size)
-{
-	if (mapping_addr == nullptr || mapping_size == nullptr || !is_representable_range(vaddr, size))
-	{
-		return KernelGpuMappingPromotionStatus::InvalidArgument;
-	}
-
-	Core::LockGuard lock(m_mutex);
-	for (auto& block: m_allocated)
-	{
-		auto       cleanup_mode = block.gpu_cleanup_mode;
-		const auto result       = KernelPromoteGpuMappingRange(block.map_vaddr, block.map_size, vaddr, size, gpu_mode, &cleanup_mode);
-		if (result == KernelGpuMappingPromotionStatus::NotContained)
-		{
-			continue;
-		}
-		if (result == KernelGpuMappingPromotionStatus::InvalidArgument)
-		{
-			return result;
-		}
-		if (block.unmap_pending)
-		{
-			return KernelGpuMappingPromotionStatus::UnmapPending;
-		}
-		block.gpu_cleanup_mode = cleanup_mode;
-		*mapping_addr          = block.map_vaddr;
-		*mapping_size          = block.map_size;
-		return result;
-	}
-	return KernelGpuMappingPromotionStatus::NotContained;
+	return MappingClaimStatus::NotFound;
 }
 
 bool FlexibleMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
@@ -1740,12 +2021,6 @@ bool FlexibleMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 	}
 
 	return false;
-}
-
-bool FlexibleMemory::ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode)
-{
-	Core::LockGuard lock(m_mutex);
-	return apply_protection_blocks(&m_protections, vaddr, size, prot, mode);
 }
 
 static bool is_cpu_writable(VirtualMemory::Mode mode)
@@ -1797,6 +2072,10 @@ FlexibleMemory::GpuOwnerProtection FlexibleMemory::ProtectGpuOwner(uint64_t vadd
 	if (owner->unmap_pending)
 	{
 		return GpuOwnerProtection::UnmapPending;
+	}
+	if (owner->gpu_registration_pending)
+	{
+		return GpuOwnerProtection::RegistrationPending;
 	}
 	if (!writable && !quiesced)
 	{
@@ -1927,6 +2206,7 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 	{
 		return KERNEL_ERROR_EBUSY;
 	}
+	std::lock_guard<std::recursive_mutex> lifecycle_lock(g_gpu_mapping_lifecycle_mutex);
 	const auto start_us =
 	    trace_flex ? std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() : 0;
 	if (trace_flex)
@@ -2000,6 +2280,9 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 			       static_cast<uint64_t>(len));
 		}
 		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len, KernelGpuMappingBacking::Flexible));
+		const KernelMemoryProtectionTransaction::GpuRegistration registration {
+		    KernelGpuMappingRegistrationAction::RegisterOwnerMapping, out_addr, len, KernelGpuMappingBacking::Flexible};
+		EXIT_IF(!KernelMemoryProtectionTransaction::CompleteOwnerRegistration(registration));
 	}
 
 	if (g_alloc_callback != nullptr)
@@ -2064,6 +2347,7 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, in
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+	std::lock_guard<std::recursive_mutex> lifecycle_lock(g_gpu_mapping_lifecycle_mutex);
 
 	uint64_t reserved_addr = 0;
 	const bool decommitted = fixed && g_reserved_memory->AddFromMapping(
@@ -2136,6 +2420,38 @@ static bool complete_pending_mapping_unmap(void* data)
 	return complete_mapping_unmap(*static_cast<const PendingUnmap*>(data));
 }
 
+static int unmap_physical_mapping_for_direct_release(uint64_t vaddr, uint64_t size)
+{
+	PendingUnmap pending {};
+	pending.vaddr = vaddr;
+	pending.size  = size;
+
+	std::unique_lock<std::recursive_mutex> lifecycle_lock(g_gpu_mapping_lifecycle_mutex);
+	const auto claim = g_physical_memory->ClaimUnmap(vaddr, size, &pending.gpu_mode, true);
+	if (claim == MappingClaimStatus::Busy)
+	{
+		return KERNEL_ERROR_EBUSY;
+	}
+	if (claim != MappingClaimStatus::Claimed)
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	lifecycle_lock.unlock();
+
+	const bool done = pending.gpu_mode == KernelGpuMappingAccessMode::NoAccess
+	                      ? complete_mapping_unmap(pending)
+	                      : GetGpuMappingLifecyclePort().ReleaseRange(pending.vaddr, pending.size, complete_pending_mapping_unmap, &pending);
+	if (!done)
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	if (g_free_callback != nullptr)
+	{
+		g_free_callback(vaddr, size);
+	}
+	return OK;
+}
+
 struct PendingCut
 {
 	uint64_t vaddr     = 0;
@@ -2159,10 +2475,21 @@ static int cut_physical_mapping(uint64_t vaddr, uint64_t size, uint64_t start, u
 	const uint64_t cut_end   = std::min(vaddr + size, end);
 	PendingCut     cut {vaddr, size, cut_start, cut_end - cut_start};
 	auto           gpu_mode = KernelGpuMappingAccessMode::NoAccess;
-	if (cut_start >= cut_end || !g_physical_memory->ClaimCut(vaddr, size, &gpu_mode))
+	if (cut_start >= cut_end)
 	{
 		return KERNEL_ERROR_ENOENT;
 	}
+	std::unique_lock<std::recursive_mutex> lifecycle_lock(g_gpu_mapping_lifecycle_mutex);
+	const auto claim = g_physical_memory->ClaimCut(vaddr, size, &gpu_mode);
+	if (claim == MappingClaimStatus::Busy)
+	{
+		return KERNEL_ERROR_EBUSY;
+	}
+	if (claim != MappingClaimStatus::Claimed)
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	lifecycle_lock.unlock();
 	const bool done = gpu_mode == KernelGpuMappingAccessMode::NoAccess
 	                      ? complete_pending_cut(&cut)
 	                      : GetGpuMappingLifecyclePort().ReleaseRange(cut.cut_vaddr, cut.cut_size, complete_pending_cut, &cut);
@@ -2255,31 +2582,51 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+	std::unique_lock<std::recursive_mutex> lifecycle_lock(g_gpu_mapping_lifecycle_mutex);
 
 	PendingUnmap pending {};
 	pending.vaddr = vaddr;
 	pending.size  = len;
+	bool result   = false;
 
-	bool mapping_claimed = g_physical_memory->ClaimUnmap(vaddr, len, &pending.gpu_mode);
+	const auto physical_claim = g_physical_memory->ClaimUnmap(vaddr, len, &pending.gpu_mode);
+	if (physical_claim == MappingClaimStatus::Busy)
+	{
+		return KERNEL_ERROR_EBUSY;
+	}
+	bool mapping_claimed = physical_claim == MappingClaimStatus::Claimed;
 	if (!mapping_claimed)
 	{
-		mapping_claimed = g_flexible_memory->ClaimUnmap(vaddr, len, &pending.gpu_mode);
+		const auto flexible_claim = g_flexible_memory->ClaimUnmap(vaddr, len, &pending.gpu_mode);
+		if (flexible_claim == MappingClaimStatus::Busy)
+		{
+			return KERNEL_ERROR_EBUSY;
+		}
+		mapping_claimed = flexible_claim == MappingClaimStatus::Claimed;
 		if (mapping_claimed)
 		{
 			pending.owner = PendingUnmapOwner::Flexible;
 		}
 	}
+	if (mapping_claimed)
+	{
+		lifecycle_lock.unlock();
+	} else if (g_reserved_memory != nullptr)
+	{
+		// Reserved NoAccess ranges never enter the GPU lifetime graph. Keep the
+		// lifecycle gate only while consuming this reservation record.
+		result = g_reserved_memory->Consume(vaddr, len);
+		lifecycle_lock.unlock();
+	} else
+	{
+		lifecycle_lock.unlock();
+	}
 
-	bool result = false;
 	if (mapping_claimed)
 	{
 		result = pending.gpu_mode == KernelGpuMappingAccessMode::NoAccess
 		             ? complete_mapping_unmap(pending)
 		             : GetGpuMappingLifecyclePort().ReleaseRange(pending.vaddr, pending.size, complete_pending_mapping_unmap, &pending);
-	} else if (g_reserved_memory != nullptr)
-	{
-		// Reserved NoAccess ranges never enter the GPU lifetime graph.
-		result = g_reserved_memory->Consume(vaddr, len);
 	}
 	if (!result)
 	{
@@ -2415,20 +2762,26 @@ static int release_direct_memory(int64_t start, size_t len)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+	std::unique_lock<std::recursive_mutex> lifecycle_lock(g_gpu_mapping_lifecycle_mutex);
 
 	Vector<PhysicalMemory::MappedBlock> mappings;
-	if (!g_physical_memory->FindMappingsForPhysicalRelease(static_cast<uint64_t>(start), len, &mappings))
+	const bool next_gen = Config::IsNextGen();
+	switch (g_physical_memory->ClaimDirectRelease(static_cast<uint64_t>(start), len, &mappings))
 	{
-		return KERNEL_ERROR_ENOENT;
+		case PhysicalReleaseClaimStatus::Claimed: break;
+		case PhysicalReleaseClaimStatus::NotAllocated: return KERNEL_ERROR_ENOENT;
+		case PhysicalReleaseClaimStatus::Busy: return KERNEL_ERROR_EBUSY;
 	}
+	lifecycle_lock.unlock();
 
-	if (!Config::IsNextGen())
+	if (!next_gen)
 	{
 		for (const auto& mapping: mappings)
 		{
-			const int unmap_result = KernelMunmap(mapping.map_vaddr, mapping.map_size);
+			const int unmap_result = unmap_physical_mapping_for_direct_release(mapping.map_vaddr, mapping.map_size);
 			if (unmap_result != OK)
 			{
+				g_physical_memory->AbortDirectRelease(static_cast<uint64_t>(start), len);
 				return unmap_result;
 			}
 		}
@@ -2441,28 +2794,36 @@ static int release_direct_memory(int64_t start, size_t len)
 		bool needs_gpu_invalidation = false;
 		for (const auto& mapping: mappings)
 		{
-			if (mapping.unmap_pending)
+			if (mapping.unmap_pending || mapping.gpu_registration_pending)
 			{
+				g_physical_memory->AbortDirectRelease(static_cast<uint64_t>(start), len);
 				return KERNEL_ERROR_EBUSY;
 			}
 			needs_gpu_invalidation = needs_gpu_invalidation || mapping.gpu_cleanup_mode != KernelGpuMappingAccessMode::NoAccess;
 		}
 		if (needs_gpu_invalidation && !GetGpuMappingLifecyclePort().IsInstalled())
 		{
+			g_physical_memory->AbortDirectRelease(static_cast<uint64_t>(start), len);
 			return KERNEL_ERROR_EBUSY;
 		}
 		// Only the view of the released pages loses its contents; the rest of
 		// each mapping stays live (a partial release keeps it mapped).
 		const uint64_t release_end = static_cast<uint64_t>(start) + len;
+		Vector<KernelGpuMappingRange> invalidation_ranges;
 		for (const auto& mapping: mappings)
 		{
 			const uint64_t lo = std::max(static_cast<uint64_t>(start), mapping.phys_addr);
 			const uint64_t hi = std::min(release_end, mapping.phys_addr + mapping.map_size);
-			if (mapping.gpu_cleanup_mode != KernelGpuMappingAccessMode::NoAccess &&
-			    !GetGpuMappingLifecyclePort().InvalidateRange(mapping.map_vaddr + (lo - mapping.phys_addr), hi - lo))
+			if (mapping.gpu_cleanup_mode != KernelGpuMappingAccessMode::NoAccess)
 			{
-				return KERNEL_ERROR_EBUSY;
+				invalidation_ranges.Add(KernelGpuMappingRange {mapping.map_vaddr + (lo - mapping.phys_addr), hi - lo});
 			}
+		}
+		if (!invalidation_ranges.IsEmpty() &&
+		    !GetGpuMappingLifecyclePort().InvalidateRanges(invalidation_ranges.GetData(), invalidation_ranges.Size()))
+		{
+			g_physical_memory->AbortDirectRelease(static_cast<uint64_t>(start), len);
+			return KERNEL_ERROR_EBUSY;
 		}
 	}
 
@@ -2470,6 +2831,7 @@ static int release_direct_memory(int64_t start, size_t len)
 
 	if (!result)
 	{
+		g_physical_memory->AbortDirectRelease(static_cast<uint64_t>(start), len);
 		return KERNEL_ERROR_ENOENT;
 	}
 
@@ -2605,10 +2967,15 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	{
 		return KERNEL_ERROR_EBUSY;
 	}
+	std::unique_lock<std::recursive_mutex> lifecycle_lock(g_gpu_mapping_lifecycle_mutex);
 
 	if (fixed && (flags & kMapNoOverwrite) == 0)
 	{
+		// The cleanup can invoke GPU quiescence. Drop the lifecycle gate while
+		// KernelMunmap runs, then serialize the new map after cleanup completes.
+		lifecycle_lock.unlock();
 		const int cleared = clear_fixed_map_target(in_addr, len);
+		lifecycle_lock.lock();
 		if (cleared != OK)
 		{
 			return cleared;
@@ -2666,6 +3033,9 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess)
 	{
 		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len, KernelGpuMappingBacking::Physical));
+		const KernelMemoryProtectionTransaction::GpuRegistration registration {
+		    KernelGpuMappingRegistrationAction::RegisterOwnerMapping, out_addr, len, KernelGpuMappingBacking::Physical};
+		EXIT_IF(!KernelMemoryProtectionTransaction::CompleteOwnerRegistration(registration));
 	}
 
 	if (g_alloc_callback != nullptr)
@@ -2758,13 +3128,13 @@ int KYTY_SYSV_ABI KernelQueryMemoryProtection(void* addr, void** start, void** e
 	return OK;
 }
 
-uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size)
+uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size, uint64_t alignment)
 {
 	if (g_physical_memory == nullptr)
 	{
 		return 0;
 	}
-	return g_physical_memory->MapAlias(vaddr, size);
+	return g_physical_memory->MapAlias(vaddr, size, alignment);
 }
 
 bool KernelUnmapPhysicalAlias(uint64_t alias)
@@ -3209,6 +3579,17 @@ static bool protect_flexible_gpu_owner(uint64_t vaddr, uint64_t size, int prot, 
 			*result = KERNEL_ERROR_ENOENT;
 			return true;
 		case FlexibleMemory::GpuOwnerProtection::UnmapPending:
+			if (!protection.quiescence_requested)
+			{
+				// A concurrent teardown owns the lifecycle gate; retry the generic
+				// protection path only after that transaction has completed.
+				return false;
+			}
+			*result = KERNEL_ERROR_EBUSY;
+			return true;
+		case FlexibleMemory::GpuOwnerProtection::RegistrationPending:
+			// Registration is serialized by the same gate acquired by the caller.
+			return false;
 		case FlexibleMemory::GpuOwnerProtection::NeedsQuiescence: *result = KERNEL_ERROR_EBUSY; return true;
 		case FlexibleMemory::GpuOwnerProtection::Failed: *result = KERNEL_ERROR_ENOENT; return true;
 	}
@@ -3255,45 +3636,33 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 	{
 		return owner_result;
 	}
+	// The flexible-owner quiescence path above must stay outside this gate so it
+	// can observe an unmap claim and revalidate the captured mapping identity.
+	std::lock_guard<std::recursive_mutex> lifecycle_lock(g_gpu_mapping_lifecycle_mutex);
 
 	VirtualMemory::Mode old_mode {};
-	// The guest-only transition validates ownership and applies host protection
-	// under one VM transaction, so a Free()/reuse cannot interleave here.
-	const bool          ok = VirtualMemory::ProtectGuest(aligned_vaddr, aligned_len, mode, &old_mode);
-	if (!ok)
+	KernelMemoryProtectionTransaction::GpuRegistration registration {};
+	switch (KernelMemoryProtectionTransaction::Apply(aligned_vaddr, aligned_len, prot, mode, gpu_mode, &old_mode, &registration))
 	{
-		return KERNEL_ERROR_ENOENT;
-	}
-
-	if (!g_physical_memory->ApplyProtection(aligned_vaddr, aligned_len, prot, mode))
-	{
-		(void)g_flexible_memory->ApplyProtection(aligned_vaddr, aligned_len, prot, mode);
+		case KernelMemoryProtectionTransaction::Result::Applied: break;
+		case KernelMemoryProtectionTransaction::Result::Failed: return KERNEL_ERROR_ENOENT;
+		case KernelMemoryProtectionTransaction::Result::Busy: return KERNEL_ERROR_EBUSY;
+		case KernelMemoryProtectionTransaction::Result::InvalidPromotion: return KERNEL_ERROR_EINVAL;
 	}
 
 	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess)
 	{
-		uint64_t mapping_addr = 0;
-		uint64_t mapping_size = 0;
-		auto     promotion    = g_physical_memory->PromoteGpuRange(aligned_vaddr, aligned_len, gpu_mode, &mapping_addr, &mapping_size);
-		const auto backing    = promotion == KernelGpuMappingPromotionStatus::NotContained ? KernelGpuMappingBacking::Flexible
-		                                                                                     : KernelGpuMappingBacking::Physical;
-		if (promotion == KernelGpuMappingPromotionStatus::NotContained)
+		// Publish outside the owner locks, while the lifecycle gate prevents
+		// teardown from claiming the mapping before registration completes.
+		if (registration.action == KernelGpuMappingRegistrationAction::RegisterOwnerMapping)
 		{
-			promotion = g_flexible_memory->PromoteGpuRange(aligned_vaddr, aligned_len, gpu_mode, &mapping_addr, &mapping_size);
-		}
-		const auto registration_action = KernelGpuMappingRegistrationActionFor(promotion);
-		if (registration_action == KernelGpuMappingRegistrationAction::Reject)
-		{
-			return promotion == KernelGpuMappingPromotionStatus::UnmapPending ? KERNEL_ERROR_EBUSY : KERNEL_ERROR_EINVAL;
-		}
-		if (registration_action == KernelGpuMappingRegistrationAction::RegisterOwnerMapping)
-		{
-			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(mapping_addr, mapping_size, backing));
-		} else if (registration_action == KernelGpuMappingRegistrationAction::RegisterProtectedRange)
+			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(registration.address, registration.size, registration.backing));
+			EXIT_IF(!KernelMemoryProtectionTransaction::CompleteOwnerRegistration(registration));
+		} else if (registration.action == KernelGpuMappingRegistrationAction::RegisterProtectedRange)
 		{
 			// Guest-owned mappings outside the physical/flexible records still
 			// need lifecycle registration after their guest protection changes.
-			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(aligned_vaddr, aligned_len, KernelGpuMappingBacking::Flexible));
+			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(registration.address, registration.size, registration.backing));
 		}
 	}
 

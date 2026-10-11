@@ -45,6 +45,15 @@
 
 namespace Kyty::Libs::Graphics {
 
+constexpr uint8_t kShaderColorExportModeUint16Abgr = 7u;
+constexpr uint8_t kShaderColorExportNumberUint     = 4u;
+
+[[nodiscard]] constexpr bool ShaderIsUint16MrtOutput(const ShaderPixelInputInfo* input, uint32_t target)
+{
+	return input != nullptr && target < 8u && input->target_output_mode[target] == kShaderColorExportModeUint16Abgr &&
+	       input->target_output_number[target] == kShaderColorExportNumberUint && input->target_output_order[target] == 0u;
+}
+
 // Function-local array backing ds_*_addtid_b32 spill slots in non-compute
 // stages: indexed by (M0[15:0] + offset) >> 2 and private to each invocation.
 constexpr uint32_t kDsAddtidSpillDwords = 1024u;
@@ -280,16 +289,48 @@ public:
 
 	void                                      SetPsInputInfo(const ShaderPixelInputInfo* input_info) { m_ps_input_info = input_info; }
 	[[nodiscard]] const ShaderPixelInputInfo* GetPsInputInfo() const { return m_ps_input_info; }
-	[[nodiscard]] bool IsDx10ClampEnabled() const
+	// Effective MODE controls of the translated stage: the initial RSRC1 controls of a
+	// graphics stage, or the recorded launch controls of a compute program. Unknown
+	// compute controls keep the emitters' long-standing assumption (no DX10 clamp, no
+	// IEEE mode, single-precision denormals flushed); the half-precision emitters refuse
+	// that case themselves.
+	struct FloatModeControls
 	{
-		return (m_code.GetType() == ShaderType::Vertex && m_vs_input_info != nullptr && m_vs_input_info->dx10_clamp) ||
-		       (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && m_ps_input_info->dx10_clamp);
-	}
-	[[nodiscard]] bool IsIeeeModeEnabled() const
+		uint8_t float_mode = 0;
+		bool    dx10_clamp = false;
+		bool    ieee_mode  = false;
+	};
+	[[nodiscard]] FloatModeControls GetFloatModeControls() const
 	{
-		return (m_code.GetType() == ShaderType::Vertex && m_vs_input_info != nullptr && m_vs_input_info->ieee_mode) ||
-		       (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && m_ps_input_info->ieee_mode);
+		FloatModeControls controls {};
+		switch (m_code.GetType())
+		{
+			case ShaderType::Vertex:
+				if (m_vs_input_info != nullptr)
+				{
+					controls = {m_vs_input_info->float_mode, m_vs_input_info->dx10_clamp, m_vs_input_info->ieee_mode};
+				}
+				break;
+			case ShaderType::Pixel:
+				if (m_ps_input_info != nullptr)
+				{
+					controls = {m_ps_input_info->float_mode, m_ps_input_info->dx10_clamp, m_ps_input_info->ieee_mode};
+				}
+				break;
+			case ShaderType::Compute:
+				if (m_cs_input_info != nullptr && m_cs_input_info->fp_mode_known)
+				{
+					controls = {m_cs_input_info->float_mode, m_cs_input_info->dx10_clamp, m_cs_input_info->ieee_mode};
+				}
+				break;
+			default: break;
+		}
+		return controls;
 	}
+	[[nodiscard]] bool IsDx10ClampEnabled() const { return GetFloatModeControls().dx10_clamp; }
+	[[nodiscard]] bool IsIeeeModeEnabled() const { return GetFloatModeControls().ieee_mode; }
+	// MODE.FP_DENORM single-precision field (bits 5:4): bit 5 clear flushes output denormals.
+	[[nodiscard]] bool Float32OutputDenormalsFlushed() const { return (GetFloatModeControls().float_mode & 0x20u) == 0u; }
 
 	[[nodiscard]] bool EmitPixelRgbaProbe(String8* dst_source, uint32_t index, const String8& value_id,
 	                                      const char* symbol_prefix, bool include_frag_coord = false) const;
@@ -488,6 +529,8 @@ struct RecompilerFunc
 	const char*                     param[4]  = {nullptr, nullptr, nullptr, nullptr};
 	SccCheck                        scc_check = SccCheck::None;
 };
+
+KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_I64_Sdst2Ssrc02Ssrc1);
 
 bool operand_is_constant(ShaderOperand op);
 bool operand_is_variable(ShaderOperand op);

@@ -89,10 +89,13 @@ bool GraphicsRenderUnbindContextForTesting(GraphicContext* ctx)
 	{
 		return false;
 	}
-	// The caller-owned VkDevice remains live throughout GDS/pool/sampler teardown;
-	// only then clear the global binding.
-	g_render_ctx->GetGdsBuffer()->ReleaseForTesting(ctx);
+	// The fixture waits for submitted work and releases its current recording first,
+	// so cache-owned objects and descriptor references can now be destroyed safely.
 	g_command_pool.DeleteAllForTesting();
+	g_render_ctx->GetPipelineCache()->DeleteAllPipelines();
+	g_render_ctx->GetDescriptorCache()->DeleteAllForTesting(ctx);
+	// Keep each Vulkan buffer alive until descriptor sets that reference it are gone.
+	g_render_ctx->GetGdsBuffer()->ReleaseForTesting(ctx);
 	g_render_ctx->GetSamplerCache()->DeleteAllForTesting(ctx);
 	g_render_ctx->SetGraphicCtx(nullptr);
 	g_test_bound_graphic_context = nullptr;

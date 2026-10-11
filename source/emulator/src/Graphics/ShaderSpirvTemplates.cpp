@@ -1688,10 +1688,41 @@ const char CLAMP_PASSTHROUGH[] = R"(
                OpStore %<dst> %c200_<index>
 )";
 
-const char MULTIPLY[] = R"(
-		%m197_<index> = OpLoad %float %<dst>
-        %m200_<index> = OpFMul %float %m197_<index> %<mul>
-               OpStore %<dst> %m200_<index>
+// OMOD on a single-precision result (ISA 6.2): the exponent is stepped on the bit pattern.
+// Zero and denormal results flush to +0, the scale saturates to infinity, infinities and
+// NaNs pass unchanged. <step>/<limit> select mul:2 or mul:4.
+const char OUTPUT_MODIFIER_SCALE[] = R"(
+		%om_in_<index> = OpLoad %float %<dst>
+		%om_bits_<index> = OpBitcast %uint %om_in_<index>
+		%om_mag_<index> = OpBitwiseAnd %uint %om_bits_<index> %uint_0x7fffffff
+		%om_sign_<index> = OpBitwiseAnd %uint %om_bits_<index> %uint_0x80000000
+		%om_tiny_<index> = OpULessThan %bool %om_mag_<index> %uint_0x00800000
+		%om_special_<index> = OpUGreaterThan %bool %om_mag_<index> %uint_0x7f7fffff
+		%om_overflow_<index> = OpUGreaterThanEqual %bool %om_mag_<index> %<limit>
+		%om_scaled_<index> = OpIAdd %uint %om_bits_<index> %<step>
+		%om_inf_<index> = OpBitwiseOr %uint %om_sign_<index> %uint_0x7f800000
+		%om_finite_<index> = OpSelect %uint %om_overflow_<index> %om_inf_<index> %om_scaled_<index>
+		%om_flushed_<index> = OpSelect %uint %om_tiny_<index> %uint_0 %om_finite_<index>
+		%om_out_bits_<index> = OpSelect %uint %om_special_<index> %om_bits_<index> %om_flushed_<index>
+		%om_out_<index> = OpBitcast %float %om_out_bits_<index>
+               OpStore %<dst> %om_out_<index>
+)";
+
+// OMOD div:2: a result whose halving leaves the normal range flushes to +0, as zero and
+// denormal results do (ISA 6.2: "-0 is flushed to +0").
+const char OUTPUT_MODIFIER_HALVE[] = R"(
+		%om_in_<index> = OpLoad %float %<dst>
+		%om_bits_<index> = OpBitcast %uint %om_in_<index>
+		%om_mag_<index> = OpBitwiseAnd %uint %om_bits_<index> %uint_0x7fffffff
+		%om_tiny_<index> = OpULessThan %bool %om_mag_<index> %uint_0x00800000
+		%om_special_<index> = OpUGreaterThan %bool %om_mag_<index> %uint_0x7f7fffff
+		%om_underflow_<index> = OpULessThan %bool %om_mag_<index> %uint_0x01000000
+		%om_scaled_<index> = OpISub %uint %om_bits_<index> %uint_0x00800000
+		%om_finite_<index> = OpSelect %uint %om_underflow_<index> %uint_0 %om_scaled_<index>
+		%om_flushed_<index> = OpSelect %uint %om_tiny_<index> %uint_0 %om_finite_<index>
+		%om_out_bits_<index> = OpSelect %uint %om_special_<index> %om_bits_<index> %om_flushed_<index>
+		%om_out_<index> = OpBitcast %float %om_out_bits_<index>
+               OpStore %<dst> %om_out_<index>
 )";
 
 } // namespace Kyty::Libs::Graphics

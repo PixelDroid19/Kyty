@@ -222,7 +222,13 @@ void Body::DefineUniformMask(const ShaderOperand& op, bool uniform)
 	unsigned count = 0;
 	if (!ScalarRange(op, &first, &count)) { return; }
 	for (unsigned word = 0; word < count; ++word) { m_state.uniform_mask.set(first + word, uniform); }
-	if (op.type == Operand::VccLo) { m_state.vcc_uniform = uniform; } // wave32 compares define VCC_LO only
+	if (op.type == Operand::VccLo || op.type == Operand::VccHi)
+	{
+		ShaderOperand vcc {};
+		vcc.type = Operand::VccLo;
+		vcc.size = 2;
+		m_state.vcc_uniform = IsUniformMask(vcc);
+	}
 }
 
 bool Body::IsUniformMask(const ShaderOperand& op) const
@@ -277,7 +283,10 @@ bool Body::Branch(const ShaderInstruction& inst)
 	const bool divergent = inst.type == Type::SCbranchExecz || inst.type == Type::SCbranchExecnz;
 	if (inst.type == Type::SCbranchVccz || inst.type == Type::SCbranchVccnz)
 	{
-		if (!m_state.vcc_uniform) { return Fail(inst, "VCC branch on a comparison that is not wave-uniform"); }
+		ShaderOperand vcc {};
+		vcc.type = Operand::VccLo;
+		vcc.size = 2;
+		if (!IsUniformMask(vcc)) { return Fail(inst, "VCC branch on a comparison that is not wave-uniform"); }
 	} else if (inst.type == Type::SCbranchScc0 || inst.type == Type::SCbranchScc1)
 	{
 		if (m_state.scalar[kSccWord] != kClean) { return Fail(inst, "SCC branch on launch-dependent data"); }
@@ -858,6 +867,8 @@ bool Body::Step(const ShaderInstruction& inst)
 	}
 	if (ShaderInstructionTypeChangesExec(inst.type)) { return ExecWrite(inst); }
 	if (IsScalarLoad(inst.type)) { return ScalarLoad(inst); }
+	if (inst.type == Type::SSubbU32) { return Fail(inst, "S_SUBB_U32 borrow-in is not modeled by the NGG front proof"); }
+	if (inst.type == Type::SAshrI64) { return Fail(inst, "S_ASHR_I64 pair shifts are not modeled by the NGG front proof"); }
 	if (IsScalarAlu(inst.type)) { return ScalarAlu(inst); }
 	if (IsLaneLocalImageRead(inst.type)) { return ImageRead(inst); }
 	if (inst.type == Type::VWritelaneB32 || inst.type == Type::VReadlaneB32) { return ScalarSpill(inst); }

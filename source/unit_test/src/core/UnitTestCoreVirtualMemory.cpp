@@ -11,6 +11,7 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #if !defined(_WIN32)
 #include <csignal>
@@ -73,6 +74,83 @@ struct LeaseRecorder
 		self->last = change;
 	}
 };
+
+struct WritableTransactionWrite
+{
+	uint64_t first_address = 0;
+	uint64_t second_address = 0;
+	uint64_t expected_identity_address = 0;
+	uint64_t expected_identity_size = 0;
+	uint64_t expected_identity = 0;
+	uint8_t first_value = 0;
+	uint8_t second_value = 0;
+	uint32_t calls = 0;
+	bool identity_matches = false;
+};
+
+void WriteWritableTransactionMarkers(const GuestMappingIdentitySnapshot* identity, void* context) noexcept
+{
+	auto* write = static_cast<WritableTransactionWrite*>(context);
+	write->calls++;
+	write->identity_matches = identity != nullptr && identity->address == write->expected_identity_address &&
+	                          identity->size == write->expected_identity_size && identity->segment_count == 1 &&
+	                          identity->segments[0].identity == write->expected_identity;
+	*reinterpret_cast<volatile uint8_t*>(write->first_address) = write->first_value;
+	*reinterpret_cast<volatile uint8_t*>(write->second_address) = write->second_value;
+}
+
+struct WritableTransactionBatch
+{
+	const uint64_t* addresses = nullptr;
+	const uint8_t* values = nullptr;
+	uint32_t count = 0;
+	uint32_t calls = 0;
+};
+
+void WriteWritableTransactionBatch(const GuestMappingIdentitySnapshot* /*identity*/, void* context) noexcept
+{
+	auto* batch = static_cast<WritableTransactionBatch*>(context);
+	batch->calls++;
+	for (uint32_t i = 0; i < batch->count; i++)
+	{
+		*reinterpret_cast<volatile uint8_t*>(batch->addresses[i]) = batch->values[i];
+	}
+}
+
+struct ScopedGuestAllocation
+{
+	explicit ScopedGuestAllocation(uint64_t size): address(Alloc(0, size, Mode::ReadWrite)) {}
+	~ScopedGuestAllocation()
+	{
+		if (address != 0)
+		{
+			Free(address);
+		}
+	}
+
+	ScopedGuestAllocation(const ScopedGuestAllocation&) = delete;
+	ScopedGuestAllocation& operator=(const ScopedGuestAllocation&) = delete;
+
+	uint64_t address = 0;
+};
+
+struct WritableTransactionGate
+{
+	std::atomic<bool> entered {false};
+	std::atomic<bool> release {false};
+	std::atomic<bool> received_null_identity {false};
+};
+
+void HoldWritableTransaction(const GuestMappingIdentitySnapshot* identity, void* context) noexcept
+{
+	auto* gate = static_cast<WritableTransactionGate*>(context);
+	gate->received_null_identity.store(identity == nullptr, std::memory_order_release);
+	gate->entered.store(true, std::memory_order_release);
+	while (!gate->release.load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
 // Whether the host mapping containing `address` is writable, from the kernel's
@@ -964,6 +1042,217 @@ TEST(CoreVirtualMemory, GuestMappingSnapshotCaptureRequiresOwnershipWithinBudget
 
 	std::array<uint8_t, 16> host {};
 	EXPECT_FALSE(CaptureGuestMappingSnapshot(reinterpret_cast<uint64_t>(host.data()), host.size(), &snapshot));
+}
+
+TEST(CoreVirtualMemory, WritableGuestTransactionPreflightsMixedRangesBeforeVisiting)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t first  = Alloc(0, page_size, Mode::ReadWrite);
+	const uint64_t second = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(first, 0u);
+	ASSERT_NE(second, 0u);
+
+	GuestMappingSnapshot first_snapshot;
+	GuestMappingSnapshot second_snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(first, 1u, &first_snapshot));
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(second, 1u, &second_snapshot));
+	*reinterpret_cast<volatile uint8_t*>(first)  = 0x11u;
+	*reinterpret_cast<volatile uint8_t*>(second) = 0x22u;
+
+	ASSERT_EQ(second_snapshot.segment_count, 1u);
+	ASSERT_NE(second_snapshot.segments[0].identity, 0u);
+	WritableGuestTransactionRange ranges[] = {{first, 1u, &first_snapshot}, {second, 1u, nullptr}};
+	WritableTransactionWrite      write;
+	write.first_address = first;
+	write.second_address = second;
+	write.expected_identity_address = second;
+	write.expected_identity_size = 1u;
+	write.expected_identity = second_snapshot.segments[0].identity;
+	write.first_value = 0xa1u;
+	write.second_value = 0xb2u;
+	EXPECT_TRUE(VisitWritableGuestTransaction(ranges, 2u, 1, &WriteWritableTransactionMarkers, &write));
+	EXPECT_EQ(write.calls, 1u);
+	EXPECT_TRUE(write.identity_matches);
+	EXPECT_EQ(*reinterpret_cast<volatile uint8_t*>(first), 0xa1u);
+	EXPECT_EQ(*reinterpret_cast<volatile uint8_t*>(second), 0xb2u);
+
+	// Replacing the second mapping leaves the expected snapshot structurally valid but stale. The
+	// first range is still writable; a successful callback would overwrite both sentinels.
+	*reinterpret_cast<volatile uint8_t*>(first) = 0xc3u;
+	ASSERT_TRUE(Free(second));
+	if (!AllocFixed(second, page_size, Mode::ReadWrite))
+	{
+		EXPECT_TRUE(Free(first));
+		GTEST_SKIP() << "the host could not remap the released address for the stale-identity check";
+	}
+	*reinterpret_cast<volatile uint8_t*>(second) = 0xd4u;
+	ranges[1].expected_mapping = &second_snapshot;
+	write.calls = 0;
+	write.identity_matches = false;
+	EXPECT_FALSE(VisitWritableGuestTransaction(ranges, 2u, 1, &WriteWritableTransactionMarkers, &write));
+	EXPECT_EQ(write.calls, 0u);
+	EXPECT_EQ(*reinterpret_cast<volatile uint8_t*>(first), 0xc3u);
+	EXPECT_EQ(*reinterpret_cast<volatile uint8_t*>(second), 0xd4u);
+
+	EXPECT_FALSE(VisitWritableGuestTransaction(ranges, 0u, -1, &WriteWritableTransactionMarkers, &write));
+	EXPECT_FALSE(VisitWritableGuestTransaction(ranges, 2u, 2, &WriteWritableTransactionMarkers, &write));
+	EXPECT_FALSE(VisitWritableGuestTransaction(ranges, kMaxWritableGuestTransactionRanges + 1u, -1,
+	                                           &WriteWritableTransactionMarkers, &write));
+	EXPECT_FALSE(VisitWritableGuestTransaction(ranges, 2u, -1, nullptr, &write));
+	EXPECT_EQ(write.calls, 0u);
+	EXPECT_TRUE(Free(first));
+	EXPECT_TRUE(Free(second));
+}
+
+// A large disjoint batch is visited once only after every range is writable.
+TEST(CoreVirtualMemory, WritableGuestTransactionAccepts1024RangesAtomically)
+{
+	constexpr uint32_t kRangeCount = 1024;
+	const uint64_t    page_size   = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+
+	const uint64_t allocation_size = page_size * (static_cast<uint64_t>(kRangeCount) * 2u - 1u);
+	ScopedGuestAllocation memory(allocation_size);
+	ASSERT_NE(memory.address, 0u);
+
+	std::vector<GuestMappingSnapshot>            snapshots(kRangeCount);
+	std::vector<WritableGuestTransactionRange>    ranges(kRangeCount);
+	std::vector<uint64_t>                         addresses(kRangeCount);
+	std::vector<uint8_t>                          initial_values(kRangeCount);
+	std::vector<uint8_t>                          committed_values(kRangeCount);
+	for (uint32_t i = 0; i < kRangeCount; i++)
+	{
+		addresses[i]        = memory.address + page_size * static_cast<uint64_t>(i * 2u);
+		initial_values[i]   = static_cast<uint8_t>(0x30u + i % 0x40u);
+		committed_values[i] = static_cast<uint8_t>(0x90u + i % 0x40u);
+		*reinterpret_cast<volatile uint8_t*>(addresses[i]) = initial_values[i];
+		ASSERT_TRUE(CaptureGuestMappingSnapshot(addresses[i], 1u, &snapshots[i]));
+		ranges[i] = {addresses[i], 1u, &snapshots[i]};
+	}
+
+	WritableTransactionBatch batch {addresses.data(), committed_values.data(), kRangeCount, 0u};
+	ASSERT_TRUE(VisitWritableGuestTransaction(ranges.data(), kRangeCount, -1, &WriteWritableTransactionBatch, &batch));
+	EXPECT_EQ(batch.calls, 1u);
+	for (uint32_t i = 0; i < kRangeCount; i++)
+	{
+		EXPECT_EQ(*reinterpret_cast<volatile uint8_t*>(addresses[i]), committed_values[i]);
+		*reinterpret_cast<volatile uint8_t*>(addresses[i]) = initial_values[i];
+	}
+
+	// If a late range is read-only, no visitor call may publish even the first marker.
+	batch.calls = 0;
+	batch.count = 1;
+	const uint64_t last_address = addresses.back();
+	ASSERT_TRUE(ProtectGuest(last_address, page_size, Mode::Read));
+	EXPECT_FALSE(VisitWritableGuestTransaction(ranges.data(), kRangeCount, -1, &WriteWritableTransactionBatch, &batch));
+	EXPECT_EQ(batch.calls, 0u);
+	for (uint32_t i = 0; i < kRangeCount; i++)
+	{
+		EXPECT_EQ(*reinterpret_cast<volatile uint8_t*>(addresses[i]), initial_values[i]);
+	}
+
+	EXPECT_TRUE(ProtectGuest(last_address, page_size, Mode::ReadWrite));
+	EXPECT_TRUE(Free(memory.address));
+	memory.address = 0;
+}
+
+TEST(CoreVirtualMemory, WritableGuestTransactionSerializesFreeUntilVisitorCompletes)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t address = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	const WritableGuestTransactionRange range {address, 1u, nullptr};
+	WritableTransactionGate             gate;
+	std::atomic<bool>                    visit_done {false};
+	std::atomic<bool>                    visit_result {false};
+	std::thread visitor([&]() {
+		visit_result.store(VisitWritableGuestTransaction(&range, 1u, -1, &HoldWritableTransaction, &gate),
+		                   std::memory_order_release);
+		visit_done.store(true, std::memory_order_release);
+	});
+
+	const auto visitor_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!gate.entered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < visitor_deadline)
+	{
+		std::this_thread::yield();
+	}
+	if (!gate.entered.load(std::memory_order_acquire))
+	{
+		gate.release.store(true, std::memory_order_release);
+		visitor.join();
+		EXPECT_TRUE(Free(address));
+		FAIL() << "writable transaction visitor did not start";
+	}
+
+	std::atomic<bool> free_started {false};
+	std::atomic<bool> free_done {false};
+	std::atomic<bool> free_result {false};
+	std::thread       freer([&]() {
+		free_started.store(true, std::memory_order_release);
+		free_result.store(Free(address), std::memory_order_release);
+		free_done.store(true, std::memory_order_release);
+	});
+	const auto free_start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (!free_started.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < free_start_deadline)
+	{
+		std::this_thread::yield();
+	}
+	EXPECT_TRUE(free_started.load(std::memory_order_acquire));
+	const auto blocked_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+	while (!free_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < blocked_deadline)
+	{
+		std::this_thread::yield();
+	}
+	const bool free_was_blocked = !free_done.load(std::memory_order_acquire);
+
+	gate.release.store(true, std::memory_order_release);
+	visitor.join();
+	freer.join();
+	EXPECT_TRUE(free_was_blocked);
+	EXPECT_TRUE(visit_done.load(std::memory_order_acquire));
+	EXPECT_TRUE(visit_result.load(std::memory_order_acquire));
+	EXPECT_TRUE(gate.received_null_identity.load(std::memory_order_acquire));
+	EXPECT_TRUE(free_done.load(std::memory_order_acquire));
+	EXPECT_TRUE(free_result.load(std::memory_order_acquire));
+}
+
+TEST(CoreVirtualMemory, GuestMappingIdentitySnapshotHasNoCopyByteBudget)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t range_size = GuestMappingSnapshot::kMaxBytes + page_size;
+	const uint64_t address    = Alloc(0, range_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+
+	GuestMappingIdentitySnapshot identity;
+	ASSERT_TRUE(CaptureGuestMappingIdentitySnapshot(address, range_size, &identity));
+	EXPECT_EQ(identity.size, range_size);
+	EXPECT_TRUE(GuestMappingIdentityMatches(identity));
+
+	GuestMappingSnapshot copy_snapshot;
+	EXPECT_FALSE(CaptureGuestMappingSnapshot(address, range_size, &copy_snapshot));
+	EXPECT_EQ(copy_snapshot.segment_count, 0u);
+	EXPECT_TRUE(Free(address));
+}
+
+TEST(CoreVirtualMemory, GuestMappingIdentitySnapshotRefusesAReplacementMapping)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t address = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	GuestMappingIdentitySnapshot identity;
+	ASSERT_TRUE(CaptureGuestMappingIdentitySnapshot(address, 1u, &identity));
+	ASSERT_TRUE(Free(address));
+
+	if (!AllocFixed(address, page_size, Mode::ReadWrite))
+	{
+		GTEST_SKIP() << "the host could not remap the released address for the stale-identity check";
+	}
+	EXPECT_FALSE(GuestMappingIdentityMatches(identity));
+	EXPECT_TRUE(Free(address));
 }
 
 // An armed write lease removes write natively while the guest protection stays

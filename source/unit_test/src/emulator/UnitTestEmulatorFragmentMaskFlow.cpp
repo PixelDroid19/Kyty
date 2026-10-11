@@ -169,6 +169,48 @@ Words VInterpP1(uint32_t destination, uint32_t source, uint32_t attribute, uint3
 	return {0xc8000000u | (destination << 18u) | (attribute << 10u) | (channel << 8u) | source};
 }
 
+Words UniformVccLowCompare()
+{
+	// SDWA VOPC compares two scalar operands and writes the architectural VCC pair.
+	// Both source selectors are SGPRs; the default DWORD selects preserve the inputs.
+	return {0x7c000000u | (0xc5u << 17u) | (1u << 9u) | 249u,
+	        20u | (6u << 16u) | (1u << 23u) | (6u << 24u) | (1u << 31u)};
+}
+
+std::vector<Words> VccBranchWithOneVaryingWord(bool varying_high_word)
+{
+	std::vector<Words> slots;
+	slots.push_back(UniformVccLowCompare());
+	Words save_low;
+	Sop1(save_low, 3, 30, kVccLo); // preserve the low comparison mask in s30
+	slots.push_back(save_low);
+	if (varying_high_word)
+	{
+		// gfx1030 VOPC SDWA: v_cmp_ne_u32 vcc_hi, 0, v0.
+		slots.push_back({0x7d8a00f9u, 0x0686eb80u});
+	}
+	Words restore_low;
+	Sop1(restore_low, 3, kVccLo, 30); // only VCC_LO is copied from a uniform mask
+	slots.push_back(restore_low);
+	Words branch;
+	Sopp(branch, 7, 1); // skip the scalar write when the VCC branch is taken
+	slots.push_back(branch);
+	Words scalar_write;
+	Sop1(scalar_write, 3, 20, Inline(1));
+	slots.push_back(scalar_write);
+	Words scalar_read;
+	Vop1(scalar_read, 1, 3, 20); // read after the join is safe only if the full VCC branch is uniform
+	slots.push_back(scalar_read);
+	Words zero;
+	Vop1(zero, 1, 2, Inline(0));
+	slots.push_back(zero);
+	slots.push_back(Mrt0Export(2, 2, 2, 2));
+	Words end;
+	Sopp(end, 1);
+	slots.push_back(end);
+	return slots;
+}
+
 struct AddtidOp
 {
 	Words words;
@@ -917,6 +959,23 @@ TEST(EmulatorFragmentMaskFlow, UniformBranchesNeedNoDivergenceRuleAndMaskedSccIs
 		const auto by_scc = ShaderAnalyzeFragmentMaskFlow(ParsePixel(masked));
 		Check(!by_scc.lane_local && Contains(by_scc.reason, "SCC branch"), "a branch on a mask-derived SCC is refused");
 
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentMaskFlow, VccBranchRequiresUniformityOfTheWholePair)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto full_pair = ParsePixel(VccBranchWithOneVaryingWord(false));
+		const auto uniform = ShaderAnalyzeFragmentMaskFlow(full_pair);
+		Check(uniform.lane_local, "a full-pair uniform compare still supports a uniform VCC branch");
+
+		const auto low_only = ParsePixel(VccBranchWithOneVaryingWord(true));
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(low_only);
+		Check(!flow.lane_local && Contains(flow.reason, "divergent control flow"),
+		      "a uniform VCC_LO copy cannot promote a varying VCC_HI word at the join");
+		ExpectNotLaneLocal(low_only, "paired-wave and Wave32 admission see the varying word in the VCC branch pair");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }

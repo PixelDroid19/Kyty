@@ -91,6 +91,22 @@ static int ResolveVertexParameterCount(const ShaderCode& code, const ShaderVerte
 	return count;
 }
 
+static bool ShaderInstructionClearsExecLoToZero(const ShaderInstruction& inst)
+{
+	const bool width_matches =
+	    (inst.type == ShaderInstructionType::SMovB32 && inst.format == ShaderInstructionFormat::SVdstSVsrc0) ||
+	    (inst.type == ShaderInstructionType::SMovB64 && inst.format == ShaderInstructionFormat::Sdst2Ssrc02);
+	return width_matches && inst.dst.type == ShaderOperandType::ExecLo && inst.src_num == 1 &&
+	       inst.src[0].type == ShaderOperandType::IntegerInlineConstant && inst.src[0].constant.i == 0;
+}
+
+static bool ShaderInstructionClearsWholeExec(const ShaderInstruction& inst, const ShaderPixelInputInfo* pixel_input)
+{
+	if (!ShaderInstructionClearsExecLoToZero(inst)) { return false; }
+	return inst.type == ShaderInstructionType::SMovB64 ||
+	       (pixel_input != nullptr && pixel_input->native_wave.guest_wave_size == 32u);
+}
+
 static bool ShaderCodeCanDiscard(const ShaderCode& code)
 {
 	const auto& instructions = code.GetInstructions();
@@ -104,9 +120,8 @@ static bool ShaderCodeCanDiscard(const ShaderCode& code)
 		if (index == 0 || index + 1 >= instructions.Size()) { continue; }
 		const auto& previous = instructions.At(index - 1);
 		const auto& next     = instructions.At(index + 1);
-		if (previous.type == ShaderInstructionType::SMovB64 && previous.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
-		    previous.dst.type == ShaderOperandType::ExecLo && previous.src[0].type == ShaderOperandType::IntegerInlineConstant &&
-		    previous.src[0].constant.i == 0 && current.type == ShaderInstructionType::Exp && ShaderIsNullMrtDoneFormat(current.format) &&
+		if (ShaderInstructionClearsExecLoToZero(previous) && current.type == ShaderInstructionType::Exp &&
+		    ShaderIsNullMrtDoneFormat(current.format) &&
 		    next.type == ShaderInstructionType::SEndpgm)
 		{
 			return true;
@@ -143,7 +158,7 @@ static bool ShaderCodeHasPixelDepthExport(const ShaderCode& code)
 // valid-mask-only export). A branch target may be entered from any branch, so it
 // starts a new block; a conditional branch's fall-through only continues its
 // own block. Indirect jumps have no static target and are rejected.
-static bool ShaderCodeHasSafePixelDepthExport(const ShaderCode& code)
+static bool ShaderCodeHasSafePixelDepthExport(const ShaderCode& code, const ShaderPixelInputInfo* pixel_input)
 {
 	if (code.GetType() != ShaderType::Pixel)
 	{
@@ -162,6 +177,7 @@ static bool ShaderCodeHasSafePixelDepthExport(const ShaderCode& code)
 	bool        any_depth    = false;
 	bool        block_depth  = false;
 	bool        exec_cleared = false;
+	bool        exec_empty_or_unknown = false;
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		const auto& inst = instructions.At(index);
@@ -169,6 +185,7 @@ static bool ShaderCodeHasSafePixelDepthExport(const ShaderCode& code)
 		{
 			block_depth  = false;
 			exec_cleared = false;
+			exec_empty_or_unknown = false;
 		}
 		if (inst.type == ShaderInstructionType::Unknown || inst.type == ShaderInstructionType::SSetpcB64 ||
 		    inst.type == ShaderInstructionType::SSwappcB64)
@@ -181,13 +198,23 @@ static bool ShaderCodeHasSafePixelDepthExport(const ShaderCode& code)
 			{
 				return false;
 			}
-			any_depth   = true;
-			block_depth = true;
+			any_depth = true;
+			// An export issued under an empty EXEC mask proves nothing about
+			// lanes that a later restore can make live. Keep a prior valid export
+			// when the mask was only narrowed after that export.
+			if (!exec_empty_or_unknown) { block_depth = true; }
 		}
 		if (ShaderInstructionWritesExec(inst))
 		{
-			exec_cleared = inst.type == ShaderInstructionType::SMovB64 && inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
-			               inst.src[0].constant.i == 0;
+			const bool exec_zero = ShaderInstructionClearsExecLoToZero(inst);
+			exec_cleared = ShaderInstructionClearsWholeExec(inst, pixel_input);
+			exec_empty_or_unknown =
+			    exec_zero && (inst.type == ShaderInstructionType::SMovB64 || pixel_input == nullptr ||
+			                  pixel_input->native_wave.guest_wave_size == 0u || pixel_input->native_wave.guest_wave_size == 32u);
+			// Directly assigning zero to EXEC only removes lanes; it cannot introduce
+			// lanes that lacked an earlier depth write. Other updates may restore lanes,
+			// so require a new Pixel-Z export after them.
+			if (!exec_zero) { block_depth = false; }
 		}
 		if (inst.type == ShaderInstructionType::SEndpgm)
 		{
@@ -199,6 +226,7 @@ static bool ShaderCodeHasSafePixelDepthExport(const ShaderCode& code)
 			}
 			block_depth  = false;
 			exec_cleared = false;
+			exec_empty_or_unknown = false;
 		}
 	}
 
@@ -248,7 +276,7 @@ void Spirv::GenerateSource()
 		EXIT("native-wave compute coordinate layout unsupported or inconsistent\n");
 	}
 
-	if (ShaderCodeHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code))
+	if (ShaderCodeHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
 		               "WARNING: pixel depth export rejected: control flow cannot prove a FragDepth write before every non-discard exit\n");
@@ -645,7 +673,7 @@ void Spirv::WriteHeader()
 			// Location 0 always uses %outColor (legacy name). Additional RTs that
 			// have a non-zero target_output_mode are declared as %outColorN.
 			if (!ShaderHasOnlyNullPixelExports(m_code)) { vars.Add("%outColor"); }
-			if (ShaderCodeHasSafePixelDepthExport(m_code))
+			if (ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 			{
 				vars.Add("%fragDepth");
 			}
@@ -705,7 +733,7 @@ void Spirv::WriteHeader()
 				extensions.Add("OpExtension \"SPV_KHR_maximal_reconvergence\"");
 				execution_modes.Add("OpExecutionMode %main MaximallyReconvergesKHR\n");
 			}
-			if (ShaderCodeHasSafePixelDepthExport(m_code))
+			if (ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 			{
 				execution_modes.Add("OpExecutionMode %main DepthReplacing\n");
 			}
@@ -903,7 +931,7 @@ void Spirv::WriteAnnotations()
 			{
 				EXIT("dual-source pixel module requires MRT0 and MRT1 color exports only\n");
 			}
-			if (ShaderCodeHasSafePixelDepthExport(m_code))
+			if (ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 			{
 				vars.Add("OpDecorate %fragDepth BuiltIn FragDepth");
 			}
@@ -1201,6 +1229,8 @@ void Spirv::WriteTypes()
            %_ptr_Input_v4float = OpTypePointer Input %v4float
             %_ptr_Input_v3uint = OpTypePointer Input %v3uint
           %_ptr_Output_v4float = OpTypePointer Output %v4float
+           %_ptr_Output_v4uint = OpTypePointer Output %v4uint
+            %_ptr_Output_uint = OpTypePointer Output %uint
            %_ptr_Output_float = OpTypePointer Output %float
              %_ptr_Output_int = OpTypePointer Output %int
           %_ptr_Function_float = OpTypePointer Function %float
@@ -1649,7 +1679,8 @@ void Spirv::WriteGlobalVariables()
 
 	if (GetHostShaderType() == ShaderType::Pixel && !ShaderHasOnlyNullPixelExports(m_code))
 	{
-		vars.Add("%outColor = OpVariable %_ptr_Output_v4float Output");
+		const char* pointer_type = ShaderIsUint16MrtOutput(m_ps_input_info, 0u) ? "%_ptr_Output_v4uint" : "%_ptr_Output_v4float";
+		vars.Add(String8::FromPrintf("%%outColor = OpVariable %s Output", pointer_type));
 	}
 	if (GetHostShaderType() == ShaderType::Pixel && m_ps_input_info != nullptr && !ShaderHasOnlyNullPixelExports(m_code))
 	{
@@ -1657,11 +1688,13 @@ void Spirv::WriteGlobalVariables()
 		{
 			if (m_ps_input_info->target_output_mode[rt] != 0)
 			{
-				vars.Add(String8::FromPrintf("%%outColor%d = OpVariable %%_ptr_Output_v4float Output", rt));
+				const char* pointer_type =
+				    ShaderIsUint16MrtOutput(m_ps_input_info, static_cast<uint32_t>(rt)) ? "%_ptr_Output_v4uint" : "%_ptr_Output_v4float";
+				vars.Add(String8::FromPrintf("%%outColor%d = OpVariable %s Output", rt, pointer_type));
 			}
 		}
 	}
-	if (GetHostShaderType() == ShaderType::Pixel && ShaderCodeHasSafePixelDepthExport(m_code))
+	if (GetHostShaderType() == ShaderType::Pixel && ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 	{
 		vars.Add("%fragDepth = OpVariable %_ptr_Output_float Output");
 	}
@@ -3060,6 +3093,14 @@ void Spirv::FindConstants()
 	AddConstantUint(0x40000000u);
 	AddConstantUint(0x7fffffffu);
 	AddConstantUint(0x80000000u);
+	// Float min/max NaN selection, single-precision output modifiers and float-to-integer
+	// conversion boundaries work on bit patterns. The predecessor f32 values keep SPIR-V
+	// conversion inputs in range where the next f32 would already exceed the integer limit.
+	for (uint32_t value: {0x003fffffu, 0x00400000u, 0x00800000u, 0x01000000u, 0x4effffffu, 0x4f7fffffu, 0x7e800000u, 0x7f000000u,
+	                      0x7f7fffffu, 0x7f800000u, 0x7fc00000u, 0xcf000000u, 0xffffffffu})
+	{
+		AddConstantUint(value);
+	}
 	if (spirv_uses_mbcnt(m_code))
 	{
 		// Numeric MBCNT constructs a prefix even in metadata-free fixtures.
@@ -3413,6 +3454,21 @@ void Spirv::FindConstants()
 	{
 		AddConstantUint(m_ps_input_info->front_face_all_bits ? 1u : 0x3f800000u);
 		AddConstantUint(m_ps_input_info->front_face_all_bits ? 0u : 0xbf800000u);
+	}
+	if (m_ps_input_info != nullptr)
+	{
+		for (uint32_t target = 0; target < 8u; ++target)
+		{
+			if (ShaderIsUint16MrtOutput(m_ps_input_info, target))
+			{
+				AddConstantUint(0u);
+				AddConstantUint(1u);
+				AddConstantUint(2u);
+				AddConstantUint(3u);
+				AddConstantUint(16u);
+				break;
+			}
+		}
 	}
 	if (m_ps_input_info != nullptr && (m_ps_input_info->system_input_enable & 0x300u) != 0 &&
 	    !m_ps_input_info->host_to_guest_scale.IsIdentity())

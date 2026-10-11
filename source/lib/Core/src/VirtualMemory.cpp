@@ -2201,19 +2201,19 @@ bool CopyToGuestOrLent(uint64_t destination, const void* source, uint64_t size)
 	return true;
 }
 
-static bool guest_mapping_range_in_budget(uint64_t address, uint64_t size)
+static bool guest_mapping_identity_range_is_valid(uint64_t address, uint64_t size)
 {
-	return size != 0 && size <= GuestMappingSnapshot::kMaxBytes && address <= UINT64_MAX - size;
+	return size != 0 && address <= UINT64_MAX - size;
 }
 
 // Structural check only: segments must tile the range exactly, in order, each with a nonzero
 // identity. An empty or structurally invalid token is rejected here before the VM is consulted.
 // This is not authentication: whether each identity still covers its bytes is checked by the
 // backend, and a well-formed token that splits one mapping into adjacent segments is harmless.
-static bool guest_mapping_snapshot_well_formed(const GuestMappingSnapshot& snapshot)
+static bool guest_mapping_identity_snapshot_well_formed(const GuestMappingIdentitySnapshot& snapshot)
 {
-	if (!guest_mapping_range_in_budget(snapshot.address, snapshot.size) || snapshot.segment_count == 0 ||
-	    snapshot.segment_count > GuestMappingSnapshot::kMaxSegments)
+	if (!guest_mapping_identity_range_is_valid(snapshot.address, snapshot.size) || snapshot.segment_count == 0 ||
+	    snapshot.segment_count > GuestMappingIdentitySnapshot::kMaxSegments)
 	{
 		return false;
 	}
@@ -2231,6 +2231,12 @@ static bool guest_mapping_snapshot_well_formed(const GuestMappingSnapshot& snaps
 	return cursor == end;
 }
 
+static bool guest_mapping_snapshot_well_formed(const GuestMappingSnapshot& snapshot)
+{
+	return snapshot.size <= GuestMappingSnapshot::kMaxBytes &&
+	       guest_mapping_identity_snapshot_well_formed(snapshot);
+}
+
 bool CaptureGuestMappingSnapshot(uint64_t address, uint64_t size, GuestMappingSnapshot* snapshot)
 {
 	if (snapshot == nullptr)
@@ -2239,7 +2245,8 @@ bool CaptureGuestMappingSnapshot(uint64_t address, uint64_t size, GuestMappingSn
 	}
 	*snapshot = {};
 	GuestMappingSnapshot captured;
-	if (!guest_mapping_range_in_budget(address, size) || !sys_virtual_capture_guest_mapping_snapshot(address, size, &captured) ||
+	if (size > GuestMappingSnapshot::kMaxBytes || !guest_mapping_identity_range_is_valid(address, size) ||
+	    !sys_virtual_capture_guest_mapping_snapshot(address, size, &captured) ||
 	    !guest_mapping_snapshot_well_formed(captured))
 	{
 		return false;
@@ -2248,10 +2255,62 @@ bool CaptureGuestMappingSnapshot(uint64_t address, uint64_t size, GuestMappingSn
 	return true;
 }
 
+bool CaptureGuestMappingIdentitySnapshot(uint64_t address, uint64_t size, GuestMappingIdentitySnapshot* snapshot)
+{
+	if (snapshot == nullptr)
+	{
+		return false;
+	}
+	*snapshot = {};
+	GuestMappingIdentitySnapshot captured;
+	if (!guest_mapping_identity_range_is_valid(address, size) ||
+	    !sys_virtual_capture_guest_mapping_identity_snapshot(address, size, &captured) ||
+	    !guest_mapping_identity_snapshot_well_formed(captured))
+	{
+		return false;
+	}
+	*snapshot = captured;
+	return true;
+}
+
+bool GuestMappingIdentityMatches(const GuestMappingIdentitySnapshot& identity)
+{
+	return guest_mapping_identity_snapshot_well_formed(identity) &&
+	       sys_virtual_guest_mapping_identity_matches(identity);
+}
+
 bool CopyToGuestIfMappingMatches(const GuestMappingSnapshot& snapshot, const void* source, uint64_t size)
 {
 	return source != nullptr && size == snapshot.size && guest_mapping_snapshot_well_formed(snapshot) &&
 	       sys_virtual_copy_to_guest_if_mapping_matches(snapshot, source);
+}
+
+bool VisitWritableGuestTransaction(const WritableGuestTransactionRange* ranges, uint32_t count,
+	                               int32_t capture_identity_range_index,
+	                               WritableGuestTransactionVisitor visitor, void* context)
+{
+	if (ranges == nullptr || count == 0 || count > kMaxWritableGuestTransactionRanges || visitor == nullptr ||
+	    capture_identity_range_index < -1 || capture_identity_range_index >= static_cast<int32_t>(count))
+	{
+		return false;
+	}
+
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		const auto& range = ranges[i];
+		if (!guest_mapping_identity_range_is_valid(range.address, range.size))
+		{
+			return false;
+		}
+		if (range.expected_mapping != nullptr &&
+		    (range.expected_mapping->address != range.address || range.expected_mapping->size != range.size ||
+		     !guest_mapping_snapshot_well_formed(*range.expected_mapping)))
+		{
+			return false;
+		}
+	}
+
+	return sys_virtual_visit_writable_guest_transaction(ranges, count, capture_identity_range_index, visitor, context);
 }
 
 ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor, void* context,

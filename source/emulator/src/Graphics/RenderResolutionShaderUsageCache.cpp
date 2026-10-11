@@ -55,7 +55,8 @@ RenderResolutionShaderUsageResult RenderResolutionShaderUsageCache::GetOrAnalyze
 	if (auto found = m_state->entries.find(key); found != m_state->entries.end())
 	{
 		found->second.last_use = ++m_state->use_seq;
-		return {found->second.analysis.usage, found->second.analysis.code, true, false, found->second.analysis.native_wave};
+		return {found->second.analysis.usage, found->second.analysis.code, true, false, found->second.analysis.native_wave,
+		        found->second.analysis.pixel_analysis, found->second.analysis.scalar_flow};
 	}
 
 	bool evicted = false;
@@ -74,7 +75,7 @@ RenderResolutionShaderUsageResult RenderResolutionShaderUsageCache::GetOrAnalyze
 	}
 	const auto analysis = analyzer();
 	m_state->entries.emplace(key, Entry {analysis, ++m_state->use_seq});
-	return {analysis.usage, analysis.code, false, evicted, analysis.native_wave};
+	return {analysis.usage, analysis.code, false, evicted, analysis.native_wave, analysis.pixel_analysis, analysis.scalar_flow};
 }
 
 } // namespace Kyty::Libs::Graphics

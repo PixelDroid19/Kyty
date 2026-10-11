@@ -1,3 +1,4 @@
+#include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Loader/GuestProgramName.h"
@@ -63,17 +64,25 @@ void TestSetHostPaused(bool paused)
 	g_last_pause = paused ? 1 : 0;
 }
 
-int    g_register_count = 0;
-int    g_unregister_count = 0;
-int    g_notify_count = 0;
-uint64_t g_last_base = 0;
-uint64_t g_last_size = 0;
+int      g_register_count       = 0;
+int      g_unregister_count     = 0;
+int      g_notify_count         = 0;
+uint64_t g_last_base            = 0;
+uint64_t g_last_size            = 0;
+uint64_t g_last_identity_base   = 0;
+uint64_t g_last_identity_size   = 0;
+uint32_t g_last_row_pitch_bytes = 0;
 
-void TestRegisterLinearFrame(uint64_t base, size_t size, uint32_t row_pitch_bytes)
+bool TestRegisterLinearFrame(uint64_t base, size_t size, uint32_t row_pitch_bytes,
+	                         const Kyty::Core::VirtualMemory::GuestMappingIdentitySnapshot& identity)
 {
 	g_register_count++;
-	g_last_base = base;
-	g_last_size = size;
+	g_last_base            = base;
+	g_last_size            = size;
+	g_last_row_pitch_bytes = row_pitch_bytes;
+	g_last_identity_base   = identity.address;
+	g_last_identity_size   = identity.size;
+	return true;
 }
 
 void TestUnregisterFrame(uint64_t base)
@@ -251,24 +260,57 @@ TEST(EmulatorNeutralPorts, VideoFrameMemoryInstallsCompleteBundlesOnly)
 	complete.notify_host_write     = TestNotifyHostWrite;
 	EXPECT_TRUE(Kyty::Emulator::VideoFrameMemory::InstallCallbacks(complete));
 
-	Kyty::Emulator::VideoFrameMemory::RegisterLinearFrame(0x1000, 4096, 1024);
+	struct GuestAllocation
+	{
+		uint64_t address = 0;
+		~GuestAllocation()
+		{
+			if (address != 0)
+			{
+				(void)Kyty::Core::VirtualMemory::Free(address);
+			}
+		}
+	} frame {Kyty::Core::VirtualMemory::Alloc(0, 4096, Kyty::Core::VirtualMemory::Mode::ReadWrite)};
+	ASSERT_NE(frame.address, 0u);
+
+	EXPECT_TRUE(Kyty::Emulator::VideoFrameMemory::RegisterLinearFrame(frame.address, 4096, 1024));
 	EXPECT_EQ(g_register_count, 1);
-	EXPECT_EQ(g_last_base, 0x1000u);
+	EXPECT_EQ(g_last_base, frame.address);
 	EXPECT_EQ(g_last_size, 4096u);
+	EXPECT_EQ(g_last_row_pitch_bytes, 1024u);
+	EXPECT_EQ(g_last_identity_base, frame.address);
+	EXPECT_EQ(g_last_identity_size, 4096u);
+	EXPECT_FALSE(Kyty::Emulator::VideoFrameMemory::RegisterLinearFrame(0x1000, 4096, 1024));
+	EXPECT_EQ(g_register_count, 1);
+
+	Kyty::Core::VirtualMemory::GuestMappingIdentitySnapshot identity {};
+	ASSERT_TRUE(Kyty::Core::VirtualMemory::CaptureGuestMappingIdentitySnapshot(frame.address, 4096, &identity));
+	EXPECT_TRUE(Kyty::Emulator::VideoFrameMemory::RegisterLinearFrame(frame.address, 4096, 1024, identity));
+	EXPECT_EQ(g_register_count, 2);
+
+	identity.address++;
+	EXPECT_FALSE(Kyty::Emulator::VideoFrameMemory::RegisterLinearFrame(frame.address, 4096, 1024, identity));
+	EXPECT_EQ(g_register_count, 2);
+	identity.address = frame.address;
+	identity.size++;
+	EXPECT_FALSE(Kyty::Emulator::VideoFrameMemory::RegisterLinearFrame(frame.address, 4096, 1024, identity));
+	EXPECT_EQ(g_register_count, 2);
 
 	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(0x2000, 512);
 	EXPECT_EQ(g_notify_count, 1);
 	EXPECT_EQ(g_last_base, 0x2000u);
 	EXPECT_EQ(g_last_size, 512u);
 
-	Kyty::Emulator::VideoFrameMemory::UnregisterFrame(0x1000);
+	Kyty::Emulator::VideoFrameMemory::UnregisterFrame(frame.address);
 	EXPECT_EQ(g_unregister_count, 1);
-	EXPECT_EQ(g_last_base, 0x1000u);
+	EXPECT_EQ(g_last_base, frame.address);
 
 	// Empty bundle restores no-op dispatch.
 	EXPECT_TRUE(Kyty::Emulator::VideoFrameMemory::InstallCallbacks({}));
+	EXPECT_TRUE(Kyty::Emulator::VideoFrameMemory::RegisterLinearFrame(frame.address, 4096, 1024));
 	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(1, 1);
 	EXPECT_EQ(g_notify_count, 1);
+	EXPECT_EQ(g_register_count, 2);
 }
 
 TEST(EmulatorNeutralPorts, PresentationStatsQueriesFailClosedBeforeInstall)

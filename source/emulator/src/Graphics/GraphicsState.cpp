@@ -307,9 +307,22 @@ ColorTargetLayout ResolveColorTargetLayout(uint32_t mask, uint32_t configured_ta
 
 uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32_t target_index)
 {
-	if (target_index >= ColorTargetLayout::kMaxTargets) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: target_index >= ColorTargetLayout::kMaxTargets condition ignored (continuing)\n"); }
+	if (target_index >= ColorTargetLayout::kMaxTargets)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: target_index >= ColorTargetLayout::kMaxTargets condition ignored (continuing)\n");
+	}
 	const uint32_t shift = target_index * 4u;
 	return static_cast<uint8_t>(((target_mask >> shift) & (shader_mask >> shift)) & 0xFu);
+}
+
+uint8_t ResolveColorWriteAgainstExport(uint8_t channel_mask, uint8_t export_enable, bool summary_available)
+{
+	return summary_available && export_enable == 0u ? 0u : channel_mask;
+}
+
+uint8_t ResolveColorWriteAgainstUint16Export(uint8_t channel_mask, uint8_t export_enable)
+{
+	return static_cast<uint8_t>(channel_mask & (export_enable & 0x0fu));
 }
 
 uint8_t ResolveColorWriteAgainstDepth(uint8_t channel_mask, bool disable_color_on_depth_pass, bool enable_color_on_depth_fail)

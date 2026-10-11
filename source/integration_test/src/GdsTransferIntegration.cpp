@@ -5,6 +5,7 @@
 #include "Kyty/Math/MathAll.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/GpuMemoryFault.h"
 #include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GpuSubmissionCoordinator.h"
@@ -41,6 +42,9 @@ extern char** environ; // NOLINT
 // publication (labels, then deferred releases). Strict refusals run in child processes.
 
 namespace Kyty::Libs::Graphics {
+
+// Initialize the production packet tables without starting GraphicsRunInit's detached GPU ring.
+void graphics_init_jmp_tables();
 
 namespace {
 
@@ -88,6 +92,45 @@ void InitializeSubsystems()
 
 std::atomic<uint32_t> g_validation_errors {0};
 
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
+void RouteGpuMemoryFault(const Kyty::Core::VirtualMemory::ExceptionHandler::ExceptionInfo* info)
+{
+	if (info->type == Kyty::Core::VirtualMemory::ExceptionHandler::ExceptionType::AccessViolation)
+	{
+#if defined(__APPLE__)
+		constexpr auto access = Kyty::Core::VirtualMemory::ExceptionHandler::AccessViolationType::Unknown;
+#else
+		const auto access = info->access_violation_type;
+#endif
+		if (Kyty::Emulator::GpuMemoryFault::GetPort().HandleAccessViolation(info->access_violation_vaddr, access))
+		{
+			return;
+		}
+	}
+	Kyty::Core::VirtualMemory::FatalFault(info);
+}
+
+void InstallGpuDirtyTrackingFaultRoute()
+{
+	const Kyty::Emulator::GpuMemoryFault::Callbacks callbacks {
+	    GpuMemoryCheckAccessViolation,
+	    GpuDirtyPageTrackerNotifyFaultHandlerInstalled,
+	};
+	auto& port = Kyty::Emulator::GpuMemoryFault::GetPort();
+	Expect(port.Install(callbacks), "GPU memory fault callbacks install once");
+	Expect(Kyty::Core::VirtualMemory::ExceptionHandler::InstallVectored(RouteGpuMemoryFault),
+	       "the host access-fault handler installs");
+	port.NotifyFaultHandlerInstalled();
+	Expect(GpuDirtyPageTracker::Instance().Enabled(), "dirty tracking enables after the host fault handler installs");
+}
+#else
+void InstallGpuDirtyTrackingFaultRoute()
+{
+	std::fprintf(stderr, "skip: host access-fault tracking is unavailable; armed-destination case not exercised\n");
+	std::_Exit(kSkipExit);
+}
+#endif
+
 VKAPI_ATTR VkBool32 VKAPI_CALL ValidationCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                    VkDebugUtilsMessageTypeFlagsEXT /*types*/,
                                                    const VkDebugUtilsMessengerCallbackDataEXT* data, void* /*user*/)
@@ -111,11 +154,13 @@ public:
 	{
 		if (bound)
 		{
-			// Releases GDS, command pools and samplers while the device is still alive.
+			// Releases render caches and GDS before destroying the device.
 			Expect(GraphicsRenderUnbindContextForTesting(&context), "GDS test context must unbind");
 		}
 		if (context.device != VK_NULL_HANDLE)
 		{
+			// This fixture owns the remaining allocator blocks after unbind returns its buffers.
+			VulkanMemoryPoolRelease(&context);
 			vkDestroyDevice(context.device, nullptr);
 		}
 		if (messenger != VK_NULL_HANDLE)
@@ -402,7 +447,7 @@ void Dma(CommandProcessor* cp, uint32_t src_sel, uint64_t src, uint32_t dst_sel,
 	    KYTY_PM4(7, Pm4::IT_DMA_DATA, 0u),       (dst_sel << 20u) | (src_sel << 29u), static_cast<uint32_t>(src),
 	    static_cast<uint32_t>(src >> 32u),       static_cast<uint32_t>(dst),          static_cast<uint32_t>(dst >> 32u),
 	    bytes};
-	const auto consumed = cp_op_dma_data(cp, packet[0], packet.data() + 1, 6u, 6u);
+	const auto consumed = cp_op_dma_data(cp, packet[0], packet.data() + 1, 6u, 6u, 7u);
 	Expect(consumed == 6u, "DMA_DATA consumes exactly its six body dwords");
 }
 
@@ -413,15 +458,28 @@ uint64_t GdsByte(uint64_t dw_offset)
 
 struct Fixture
 {
-	GdsVulkanContext          vulkan;
 	GpuSubmissionCoordinator  coordinator;
+	GdsVulkanContext          vulkan;
 	CommandProcessor*         processor = nullptr;
+
+	~Fixture()
+	{
+		if (processor != nullptr)
+		{
+			processor->SubmitAndWait();
+			auto* recording = processor->RecordingBufferForTesting();
+			Expect(recording != nullptr, "the fixture keeps its current recording for teardown");
+			recording->Free();
+		}
+	}
 };
 
 // Command processors are process-lifetime objects; the fixture keeps that lifetime.
 Fixture* CreateFixture()
 {
 	auto* fixture = new Fixture;
+	GpuMemoryInit();
+	InstallGpuDirtyTrackingFaultRoute();
 	if (!fixture->vulkan.Initialize())
 	{
 		std::fprintf(stderr, "skip: no Vulkan 1.4 graphics+compute device\n");
@@ -429,9 +487,9 @@ Fixture* CreateFixture()
 	}
 	// The production graphics subsystem initializes these before any submission; the shader map
 	// backs every Gen5 dispatch lookup.
-	GpuMemoryInit();
 	LabelInit();
 	ShaderInit();
+	graphics_init_jmp_tables();
 	fixture->processor = new CommandProcessor(&fixture->coordinator, GraphicContext::QUEUE_GFX);
 	fixture->processor->BufferInit();
 	return fixture;
@@ -519,11 +577,7 @@ void VerifyGdsToGdsCopies(Fixture* f)
 void VerifyArmedDestinationPublication(Fixture* f)
 {
 	auto& tracker = GpuDirtyPageTracker::Instance();
-	if (!tracker.Enabled())
-	{
-		std::fprintf(stderr, "note: dirty tracking disabled; armed-destination case not exercised\n");
-		return;
-	}
+	Expect(tracker.Enabled(), "the armed-destination case requires enabled dirty tracking");
 	GuestPages source(f->vulkan.Context(), 16);
 	GuestPages destination(f->vulkan.Context(), 16);
 	source.Words()[0] = 0xc0ffee01u;
@@ -697,6 +751,23 @@ void VerifyProductionAppend(Fixture* f)
 	Expect(after.Words()[1] == 7u, "the neighbouring GDS dword is untouched");
 }
 
+void RunIndirectDraw(CommandProcessor* cp, uint64_t args_address)
+{
+	std::array<uint32_t, 9> packet {
+	    KYTY_PM4(4, Pm4::IT_SET_BASE, 0u), 1u, static_cast<uint32_t>(args_address & ~uint64_t {7u}),
+	    static_cast<uint32_t>(args_address >> 32u), KYTY_PM4(5, Pm4::IT_DRAW_INDEX_INDIRECT, 0u), 0u, 0u, 0u, 2u,
+	};
+	cp->Run(packet.data(), static_cast<uint32_t>(packet.size()), nullptr);
+}
+
+// A zero-count record still exercises SET_BASE, packet dispatch, address validation, and the
+// production guest read, then exits before any Vulkan draw state is needed.
+void VerifyProductionDrawIndexIndirectZeroCount(Fixture* f)
+{
+	GuestPages args(f->vulkan.Context(), 16);
+	RunIndirectDraw(f->processor, args.Address());
+}
+
 // Strict refusals. Each runs in its own process and must end with the EXIT status, never with a
 // crash, a skipped packet, or stale bytes.
 void RefuseDestinationPastWindow(Fixture* f)
@@ -734,6 +805,14 @@ void RefuseZeroByteGdsPacket(Fixture* f)
 {
 	GuestPages destination(f->vulkan.Context(), 16);
 	Dma(f->processor, kSelGds, GdsByte(0), kSelMemory, destination.Address(), 0);
+}
+
+void RefuseUnreadableIndirectDrawArguments(Fixture* f)
+{
+	GuestPages args(f->vulkan.Context(), 16);
+	Expect(Kyty::Core::VirtualMemory::ProtectGuest(args.Address(), args.Size(), Kyty::Core::VirtualMemory::Mode::NoAccess),
+	       "indirect draw arguments become unreadable while their GPU allocation remains registered");
+	RunIndirectDraw(f->processor, args.Address());
 }
 
 // The destination loses write access before the publication completes. In production a mapping
@@ -782,13 +861,14 @@ struct Scenario
 	void (*run)(Fixture*);
 };
 
-constexpr std::array<Scenario, 9> kRefusals {{
+constexpr std::array<Scenario, 10> kRefusals {{
     {"--refuse-destination-past-window", RefuseDestinationPastWindow},
     {"--refuse-overlapping-gds-copy", RefuseOverlappingGdsCopy},
     {"--refuse-unaligned-memory-source", RefuseUnalignedMemorySource},
     {"--refuse-unreadable-memory-source", RefuseUnreadableMemorySource},
     {"--refuse-unallocated-destination", RefuseUnallocatedDestination},
     {"--refuse-zero-byte-gds-packet", RefuseZeroByteGdsPacket},
+    {"--refuse-unreadable-indirect-draw-arguments", RefuseUnreadableIndirectDrawArguments},
     {"--refuse-read-only-destination", RefuseReadOnlyDestinationAtPublication},
     {"--refuse-unmapped-destination", RefuseUnmappedDestinationAtPublication},
     {"--refuse-remapped-destination", RefuseRemappedDestinationAtPublication},
@@ -846,6 +926,7 @@ int main(int argc, char** argv)
 	auto* fixture = CreateFixture();
 	VerifyRoundtripAndLastDwords(fixture);
 	VerifyZeroCountRecordsNothing(fixture);
+	VerifyProductionDrawIndexIndirectZeroCount(fixture);
 	VerifyStreamOrderSnapshotIsolation(fixture);
 	VerifyGdsToGdsCopies(fixture);
 	VerifyArmedDestinationPublication(fixture);

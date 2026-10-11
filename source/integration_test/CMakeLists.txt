@@ -150,6 +150,22 @@ add_executable(kyty_shader_compute_integration
 	src/shader_compute/VulkanProgramBaseProbe.cpp
 	src/shader_compute/VulkanWaveProbe.cpp
 )
+
+add_executable(kyty_shader_gds_exec_integration
+	src/shader_compute/ShaderGdsExecIntegration.cpp
+)
+target_link_libraries(kyty_shader_gds_exec_integration PRIVATE core emulator vulkan-1)
+target_include_directories(kyty_shader_gds_exec_integration PRIVATE
+	"${CMAKE_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+add_test(NAME KytyShaderComputeIntegration.GdsExec
+	COMMAND $<TARGET_FILE:kyty_shader_gds_exec_integration>)
+set_tests_properties(KytyShaderComputeIntegration.GdsExec PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 90
+	SKIP_RETURN_CODE 77
+)
 target_link_libraries(kyty_shader_compute_integration PRIVATE core emulator vulkan-1)
 target_include_directories(kyty_shader_compute_integration PRIVATE
 	"${CMAKE_SOURCE_DIR}/include"
@@ -331,6 +347,26 @@ add_test(
 	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --dual-source-blend-raster-only
 )
 set_tests_properties(KytyGraphicsDiagnosticsIntegration.DualSourceBlendRaster PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+	SKIP_RETURN_CODE 77
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.Uint16MrtWriteback
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --uint16-mrt-writeback-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.Uint16MrtWriteback PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+	SKIP_RETURN_CODE 77
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.ParameterExecWriteback
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --parameter-exec-writeback-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.ParameterExecWriteback PROPERTIES
 	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 120
 	SKIP_RETURN_CODE 77
@@ -815,6 +851,7 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_kernel_memory_integration
 	kyty_graphics_diagnostics_integration
 	kyty_shader_compute_integration
+	kyty_shader_gds_exec_integration
 	kyty_shader_wave64_integration
 	kyty_texture_one_dimensional_array_integration
 	kyty_gds_transfer_integration

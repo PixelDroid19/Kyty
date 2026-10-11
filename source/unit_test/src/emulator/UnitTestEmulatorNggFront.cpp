@@ -188,6 +188,25 @@ Words SdwaFloatCompareBody(uint32_t src1_modifiers)
 	return body;
 }
 
+Words VccBranchWithOneUniformWordBody(bool varying_high_word)
+{
+	const Words base = SdwaFloatCompareBody(0u);
+	Words body(base.begin(), base.begin() + 5); // retain both scalar sources, the uniform VGPR and its comparison
+	Words preserve_low;
+	Sop1(preserve_low, 3, 40u, 106u); // save the low word of the full uniform comparison
+	body.insert(body.end(), preserve_low.begin(), preserve_low.end());
+	if (varying_high_word)
+	{
+		const auto varying_high = VopcSdwaF32(0x04, false, 107u, 5u, true, Inline(0), false);
+		body.insert(body.end(), varying_high.begin(), varying_high.end()); // VCC_HI now varies by vertex
+	}
+	Words restore_low;
+	Sop1(restore_low, 3, 106u, 40u); // restore only VCC_LO from its uniform copy
+	body.insert(body.end(), restore_low.begin(), restore_low.end());
+	body.insert(body.end(), base.begin() + 5, base.end()); // keep the original branch and terminal export after the VCC writes
+	return body;
+}
+
 Words CompareMaskAnd64Body(bool partial_vcc, bool varying_sgpr_mask)
 {
 	Words body;
@@ -768,6 +787,29 @@ TEST(EmulatorNggFront, AUniformCompareUnderPartialExecCannotSteerAUniformBranch)
 		const auto front = ShaderProveNggFrontLaneLocal(partial, 64u);
 		Check(!front.lane_local && front.reason.ContainsStr("not wave-uniform"),
 		      "restoring EXEC does not make a VCC mask uniform when inactive lanes were not compared");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggFront, AUniformLowVccCopyCannotHideAVaryingHighWordFromTheBranch)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto uniform_pair = Parse(PrologueThenBody(VccBranchWithOneUniformWordBody(false)));
+		for (uint32_t width: {32u, 64u})
+		{
+			const auto admitted = ShaderProveNggFrontLaneLocal(uniform_pair, width);
+			Check(admitted.lane_local,
+			      admitted.reason.IsEmpty() ? "a full-pair uniform VCC branch remains admitted" : admitted.reason.c_str());
+		}
+
+		const auto low_only = Parse(PrologueThenBody(VccBranchWithOneUniformWordBody(true)));
+		for (uint32_t width: {32u, 64u})
+		{
+			const auto refused = ShaderProveNggFrontLaneLocal(low_only, width);
+			Check(!refused.lane_local && refused.reason.ContainsStr("not wave-uniform"),
+			      "VCC_HI remains varying after a one-word VCC_LO copy");
+		}
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }

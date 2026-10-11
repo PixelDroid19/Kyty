@@ -36,7 +36,8 @@ it on, and always while a guest IME dialog runs:
 - An IME dialog edits the text the title placed in its buffer, bounded by the
   dialog's maximum length. Backspace deletes the last character and `Enter`
   confirms the text. The dialog then finishes with an OK result. No system
-  keyboard is drawn, so the window title shows the text being typed.
+  keyboard is drawn, so the window title shows the text being typed. Only a
+  host keyboard can confirm the dialog; pad input does not reach it.
 
 The typed character comes from the host key code: letters follow Shift and
 Caps Lock, and Latin-1 letters are typed too. Keys whose shifted character

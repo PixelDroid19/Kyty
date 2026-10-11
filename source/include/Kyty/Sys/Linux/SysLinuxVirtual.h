@@ -60,7 +60,14 @@ bool     sys_virtual_visit_readable_guest_range(uint64_t address, uint64_t size,
 bool     sys_virtual_copy_from_guest(void* destination, uint64_t source, uint64_t size);
 bool     sys_virtual_copy_to_guest(uint64_t destination, const void* source, uint64_t size);
 bool     sys_virtual_capture_guest_mapping_snapshot(uint64_t address, uint64_t size, VirtualMemory::GuestMappingSnapshot* snapshot);
+bool     sys_virtual_capture_guest_mapping_identity_snapshot(uint64_t address, uint64_t size,
+	                                                         VirtualMemory::GuestMappingIdentitySnapshot* snapshot);
+bool     sys_virtual_guest_mapping_identity_matches(const VirtualMemory::GuestMappingIdentitySnapshot& identity);
 bool     sys_virtual_copy_to_guest_if_mapping_matches(const VirtualMemory::GuestMappingSnapshot& snapshot, const void* source);
+bool     sys_virtual_visit_writable_guest_transaction(const VirtualMemory::WritableGuestTransactionRange* ranges,
+	                                                   uint32_t count, int32_t capture_identity_range_index,
+	                                                   VirtualMemory::WritableGuestTransactionVisitor visitor,
+	                                                   void* context);
 VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint64_t address, uint64_t size,
 	                                                                      VirtualMemory::CapturedProtectionVisitor visitor,
 	                                                                      void* context,

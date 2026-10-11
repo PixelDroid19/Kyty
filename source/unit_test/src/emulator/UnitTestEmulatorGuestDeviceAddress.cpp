@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Kernel/Errors.h"
+#include "Emulator/Kernel/GpuMappingLifecycle.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Log.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvInternal.h"
@@ -18,9 +19,12 @@
 #include <chrono>
 #include <cinttypes>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -43,6 +47,7 @@ struct Device
 	GraphicContext context {};
 	VkQueue queue = VK_NULL_HANDLE;
 	uint32_t family = 0;
+	bool timeline_semaphore_supported = false;
 
 	bool Init()
 	{
@@ -66,10 +71,13 @@ struct Device
 			if (std::none_of(extensions.begin(), extensions.end(), [](const auto& e)
 			                { return std::strcmp(e.extensionName, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) == 0; })) { continue; }
 			VkPhysicalDeviceBufferDeviceAddressFeatures address {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+			VkPhysicalDeviceTimelineSemaphoreFeatures timeline {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+			address.pNext = &timeline;
 			VkPhysicalDeviceFeatures2 features {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 			features.pNext = &address;
 			vkGetPhysicalDeviceFeatures2(physical, &features);
 			if (!address.bufferDeviceAddress || !features.features.shaderInt64) { continue; }
+			const bool supports_timeline_semaphore = timeline.timelineSemaphore == VK_TRUE;
 			vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
 			std::vector<VkQueueFamilyProperties> families(count);
 			vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families.data());
@@ -84,6 +92,7 @@ struct Device
 			VkDeviceCreateInfo device_info {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 			address.bufferDeviceAddressCaptureReplay = VK_FALSE;
 			address.bufferDeviceAddressMultiDevice = VK_FALSE;
+			timeline.timelineSemaphore = supports_timeline_semaphore ? VK_TRUE : VK_FALSE;
 			VkPhysicalDeviceFeatures enabled {};
 			enabled.shaderInt64 = VK_TRUE;
 			device_info.pNext = &address;
@@ -95,6 +104,7 @@ struct Device
 			if (vkCreateDevice(physical, &device_info, nullptr, &context.device) != VK_SUCCESS) { continue; }
 			context.physical_device = physical;
 			context.guest_device_address_supported = true;
+			timeline_semaphore_supported = supports_timeline_semaphore;
 			vkGetDeviceQueue(context.device, family, 0, &queue);
 			return true;
 		}
@@ -368,8 +378,12 @@ constexpr uint64_t kWritableOffset  = kGuestPageBytes - kGuestDeviceAddressPageB
 constexpr uint64_t kNeighbourOffset = kGuestPageBytes;
 constexpr uint32_t kMarkerA         = 0xa1a10000u;
 constexpr uint32_t kMarkerB         = 0xb2b20000u;
+constexpr uint32_t kMarkerC         = 0xc3c30000u;
 constexpr uint32_t kNeighbourA      = 0xc3c30000u;
 constexpr uint32_t kNeighbourB      = 0xd4d40000u;
+constexpr uint32_t kPhysicalRegistrationMarker = 0xe5e50000u;
+constexpr uint32_t kPhysicalReleaseMarker     = 0xf6f60000u;
+constexpr uint32_t kRetiredTablePressureBudget = 32;
 
 // Routes the kernel's GPU-mapping lifecycle to the device-address registry of
 // one owned device, as the graphics adapter does; the queue drains before any
@@ -392,6 +406,34 @@ struct LifecycleBridge
 	std::mutex              mutex;
 	std::condition_variable changed;
 	std::thread             unmapper;
+	std::mutex              registration_mutex;
+	std::condition_variable registration_changed;
+	bool                    hold_next_registration = false;
+	bool                    registration_entered   = false;
+	bool                    registration_permitted = true;
+
+	void HoldNextRegistration()
+	{
+		std::lock_guard<std::mutex> lock(registration_mutex);
+		hold_next_registration = true;
+		registration_entered   = false;
+		registration_permitted = false;
+	}
+
+	bool WaitForRegistration(std::chrono::milliseconds timeout)
+	{
+		std::unique_lock<std::mutex> lock(registration_mutex);
+		return registration_changed.wait_for(lock, timeout, [this] { return registration_entered; });
+	}
+
+	void PermitRegistration()
+	{
+		{
+			std::lock_guard<std::mutex> lock(registration_mutex);
+			registration_permitted = true;
+		}
+		registration_changed.notify_all();
+	}
 
 	bool UnmapConcurrently()
 	{
@@ -412,15 +454,36 @@ struct LifecycleBridge
 
 	static void Register(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingBacking backing)
 	{
-		(void)context;
+		auto* bridge = static_cast<LifecycleBridge*>(context);
 		GuestDeviceAddressRegisterRange(vaddr, size, backing == Kernel::Memory::KernelGpuMappingBacking::Physical);
+		std::unique_lock<std::mutex> lock(bridge->registration_mutex);
+		if (bridge->hold_next_registration)
+		{
+			bridge->hold_next_registration = false;
+			bridge->registration_entered   = true;
+			bridge->registration_changed.notify_all();
+			(void)bridge->registration_changed.wait_for(lock, std::chrono::seconds(5),
+			                                           [bridge] { return bridge->registration_permitted; });
+		}
 	}
 
-	static bool Invalidate(void* context, uint64_t vaddr, uint64_t size)
+	static bool Invalidate(void* context, const Kernel::Memory::KernelGpuMappingRange* ranges, size_t range_count)
 	{
 		auto* bridge = static_cast<LifecycleBridge*>(context);
+		if (ranges == nullptr || range_count == 0) { return false; }
+		for (size_t i = 0; i < range_count; ++i)
+		{
+			if (ranges[i].vaddr == 0 || ranges[i].size == 0 ||
+			    ranges[i].vaddr > std::numeric_limits<uint64_t>::max() - ranges[i].size)
+			{
+				return false;
+			}
+		}
 		if (vkQueueWaitIdle(bridge->device.queue) != VK_SUCCESS) { return false; }
-		GuestDeviceAddressInvalidateRangeQuiesced(&bridge->device.context, vaddr, size);
+		for (size_t i = 0; i < range_count; ++i)
+		{
+			GuestDeviceAddressReleaseRangeQuiesced(&bridge->device.context, ranges[i].vaddr, ranges[i].size);
+		}
 		return true;
 	}
 
@@ -507,7 +570,7 @@ struct GuestLoad
 		return vkCreateFence(vk, &fence_info, nullptr, &fence) == VK_SUCCESS ? 0 : 17;
 	}
 
-	bool Dispatch(uint64_t table, uint32_t entries, uint64_t guest)
+	bool Record(uint64_t table, uint32_t entries, uint64_t guest)
 	{
 		const VkDevice vk = device->context.device;
 		const uint32_t push[] = {static_cast<uint32_t>(table), static_cast<uint32_t>(table >> 32), entries, 0,
@@ -524,21 +587,35 @@ struct GuestLoad
 		barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 		barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
 		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
-		if (vkEndCommandBuffer(command) != VK_SUCCESS) { return false; }
-		VkSubmitInfo submit {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-		submit.commandBufferCount = 1;
-		submit.pCommandBuffers = &command;
-		return vkQueueSubmit(device->queue, 1, &submit, fence) == VK_SUCCESS &&
-		       vkWaitForFences(vk, 1, &fence, VK_TRUE, 5000000000ull) == VK_SUCCESS;
+		return vkEndCommandBuffer(command) == VK_SUCCESS;
 	}
 
-	int Expect(const char* stage, uint64_t table, uint32_t entries, uint64_t guest, uint32_t marker)
+	bool Submit(VkSemaphore wait_timeline = VK_NULL_HANDLE, uint64_t wait_value = 0)
 	{
-		if (!Dispatch(table, entries, guest))
+		VkSubmitInfo submit {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+		VkTimelineSemaphoreSubmitInfo timeline_info {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+		VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+		if (wait_timeline != VK_NULL_HANDLE)
 		{
-			std::fprintf(stderr, "%s: dispatch failed\n", stage);
-			return 20;
+			timeline_info.waitSemaphoreValueCount = 1;
+			timeline_info.pWaitSemaphoreValues = &wait_value;
+			submit.pNext = &timeline_info;
+			submit.waitSemaphoreCount = 1;
+			submit.pWaitSemaphores = &wait_timeline;
+			submit.pWaitDstStageMask = &wait_stage;
 		}
+		submit.commandBufferCount = 1;
+		submit.pCommandBuffers = &command;
+		return vkQueueSubmit(device->queue, 1, &submit, fence) == VK_SUCCESS;
+	}
+
+	VkResult Wait(uint64_t timeout = 5000000000ull) const
+	{
+		return vkWaitForFences(device->context.device, 1, &fence, VK_TRUE, timeout);
+	}
+
+	int CheckOutput(const char* stage, uint32_t marker) const
+	{
 		for (unsigned word = 0; word < 32; ++word)
 		{
 			if (output.words[word] != (marker | word))
@@ -548,6 +625,21 @@ struct GuestLoad
 			}
 		}
 		return 0;
+	}
+
+	bool Dispatch(uint64_t table, uint32_t entries, uint64_t guest)
+	{
+		return Record(table, entries, guest) && Submit() && Wait() == VK_SUCCESS;
+	}
+
+	int Expect(const char* stage, uint64_t table, uint32_t entries, uint64_t guest, uint32_t marker)
+	{
+		if (!Dispatch(table, entries, guest))
+		{
+			std::fprintf(stderr, "%s: dispatch failed\n", stage);
+			return 20;
+		}
+		return CheckOutput(stage, marker);
 	}
 };
 
@@ -705,6 +797,732 @@ int CpuOnlyTransitionProbe()
 	return ExpectOwnerReleased(&bridge, base);
 }
 
+// A command buffer recorded against the production table retains its original
+// snapshot even when CPU writes arrive before that command buffer is submitted.
+int RecordedGuestDeviceAddressReadRetainsSnapshotProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
+	const uint64_t base = MapSeededOwner();
+	if (base == 0) { return 40; }
+
+	auto* const    owner = reinterpret_cast<void*>(base);
+	const uint64_t guest = base + kWritableOffset;
+	GuestDeviceAddressTable table {};
+	SubmissionId dependency {};
+	if (Kernel::Memory::KernelMprotect(owner, kOwnerBytes, 0x12) != 0) { return 41; }
+	const SubmissionId initial_reader {GpuQueueId(0), 1};
+	if (GuestDeviceAddressPrepareForRead(&bridge.device.context, initial_reader, &table, &dependency) !=
+	    GuestDeviceAddressPrepareResult::Ready)
+	{
+		return 42;
+	}
+	if (table.entry_count == 0)
+	{
+		std::fprintf(stderr, "initial GDA table has no entries\n");
+		return 43;
+	}
+	if (load.Expect("initial GDA load", table.address, table.entry_count, guest, kMarkerA) != 0) { return 44; }
+	if (!GuestDeviceAddressAcknowledgeReader(initial_reader)) { return 45; }
+
+	const SubmissionId recorded_reader {GpuQueueId(0), 2};
+	if (GuestDeviceAddressPrepareForRead(&bridge.device.context, recorded_reader, &table, &dependency) !=
+	    GuestDeviceAddressPrepareResult::Ready)
+	{
+		return 46;
+	}
+	const GuestDeviceAddressTable recorded_table = table;
+	if (!load.Record(recorded_table.address, recorded_table.entry_count, guest)) { return 47; }
+
+	WriteMarker(guest, kMarkerB);
+	const SubmissionId retry_reader {GpuQueueId(0), 3};
+	GuestDeviceAddressTable pending_table {0xabcdefu, 77u};
+	const auto pending_result = GuestDeviceAddressPrepareForRead(&bridge.device.context, retry_reader, &pending_table, &dependency);
+	const bool pending_table_stable = pending_table.address == 0xabcdefu && pending_table.entry_count == 77u;
+	const bool submitted = load.Submit();
+	const VkResult completed = submitted ? load.Wait() : VK_ERROR_UNKNOWN;
+	const bool acknowledged = completed == VK_SUCCESS && GuestDeviceAddressAcknowledgeReader(recorded_reader);
+	int status = 0;
+	if (pending_result != GuestDeviceAddressPrepareResult::PendingReader || dependency != recorded_reader) { status = 48; }
+	if (!pending_table_stable && status == 0) { status = 49; }
+	if ((!submitted || completed != VK_SUCCESS) && status == 0) { status = 50; }
+	if (!acknowledged && status == 0) { status = 51; }
+	if (completed == VK_SUCCESS && load.CheckOutput("recorded snapshot", kMarkerA) != 0 && status == 0) { status = 52; }
+	GuestDeviceAddressTable refreshed_table {};
+	const SubmissionId refreshed_reader {GpuQueueId(0), 4};
+	const auto refreshed = completed == VK_SUCCESS
+	                           ? GuestDeviceAddressPrepareForRead(&bridge.device.context, refreshed_reader, &refreshed_table,
+	                                                             &dependency)
+	                           : GuestDeviceAddressPrepareResult::Failed;
+	if (refreshed != GuestDeviceAddressPrepareResult::Ready && status == 0) { status = 53; }
+	if (refreshed == GuestDeviceAddressPrepareResult::Ready &&
+	    load.Expect("recorded snapshot refresh", refreshed_table.address, refreshed_table.entry_count, guest, kMarkerB) != 0 &&
+	    status == 0)
+	{
+		status = 54;
+	}
+	if (refreshed == GuestDeviceAddressPrepareResult::Ready && !GuestDeviceAddressAcknowledgeReader(refreshed_reader) && status == 0)
+	{
+		status = 55;
+	}
+	if (completed == VK_SUCCESS)
+	{
+		const int release_status = ExpectOwnerReleased(&bridge, base);
+		if (release_status != 0 && status == 0) { status = release_status; }
+	}
+	if (status != 0)
+	{
+		std::fprintf(stderr,
+		             "pending_result=%u dependency=%" PRIu64 " pending_table_stable=%d submitted=%d completed=%d "
+		             "recorded_entries=%u refreshed_entries=%u\n",
+		             static_cast<unsigned>(pending_result), dependency.sequence, pending_table_stable ? 1 : 0, submitted ? 1 : 0,
+		             completed, recorded_table.entry_count, refreshed_table.entry_count);
+	}
+	return status;
+}
+
+// A queued shader waits for a host-signaled timeline value. Dirty refresh must
+// report a dependency promptly, leave the reader's bytes stable, and let a
+// retry observe the CPU write after the reader fence completes.
+int PendingGuestDeviceAddressReaderDefersRefreshProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
+	if (!bridge.device.timeline_semaphore_supported) { return 77; }
+	const uint64_t base = MapSeededOwner();
+	if (base == 0) { return 40; }
+
+	auto* const    owner = reinterpret_cast<void*>(base);
+	const uint64_t guest = base + kWritableOffset;
+	GuestDeviceAddressTable table {};
+	SubmissionId dependency {};
+	if (Kernel::Memory::KernelMprotect(owner, kOwnerBytes, 0x12) != 0) { return 41; }
+	const SubmissionId initial_reader {GpuQueueId(0), 10};
+	if (GuestDeviceAddressPrepareForRead(&bridge.device.context, initial_reader, &table, &dependency) !=
+	    GuestDeviceAddressPrepareResult::Ready)
+	{
+		return 42;
+	}
+	if (table.entry_count == 0)
+	{
+		std::fprintf(stderr, "initial GDA table has no entries\n");
+		return 43;
+	}
+	if (load.Expect("initial GDA load", table.address, table.entry_count, guest, kMarkerA) != 0) { return 44; }
+	if (!GuestDeviceAddressAcknowledgeReader(initial_reader)) { return 45; }
+	const SubmissionId pending_reader {GpuQueueId(0), 20};
+	if (GuestDeviceAddressPrepareForRead(&bridge.device.context, pending_reader, &table, &dependency) !=
+	    GuestDeviceAddressPrepareResult::Ready)
+	{
+		return 46;
+	}
+	VkSemaphoreTypeCreateInfo type_info {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+	type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+	type_info.initialValue = 0;
+	VkSemaphoreCreateInfo semaphore_info {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+	semaphore_info.pNext = &type_info;
+	VkSemaphore gate = VK_NULL_HANDLE;
+	if (vkCreateSemaphore(bridge.device.context.device, &semaphore_info, nullptr, &gate) != VK_SUCCESS) { return 47; }
+
+	const bool recorded = load.Record(table.address, table.entry_count, guest);
+	const bool submitted = recorded && load.Submit(gate, 1);
+	const VkResult pending = submitted ? load.Wait(10000000ull) : VK_ERROR_UNKNOWN;
+	WriteMarker(guest, kMarkerB);
+
+	struct PrepareResult
+	{
+		std::mutex                         mutex;
+		std::condition_variable            changed;
+		bool                               returned = false;
+		GuestDeviceAddressPrepareResult    result = GuestDeviceAddressPrepareResult::Failed;
+		GuestDeviceAddressTable            table {0xabcdefu, 77u};
+		SubmissionId                       dependency {};
+	};
+	auto result = std::make_shared<PrepareResult>();
+	std::thread prepare_thread;
+	if (submitted && pending == VK_TIMEOUT)
+	{
+		const SubmissionId retry_reader {GpuQueueId(0), 21};
+		prepare_thread = std::thread([result, ctx = &bridge.device.context, retry_reader]
+		{
+			GuestDeviceAddressTable refreshed_table = result->table;
+			SubmissionId dependency {};
+			const auto prepare = GuestDeviceAddressPrepareForRead(ctx, retry_reader, &refreshed_table, &dependency);
+			{
+				std::lock_guard<std::mutex> lock(result->mutex);
+				result->result = prepare;
+				result->table = refreshed_table;
+				result->dependency = dependency;
+				result->returned = true;
+			}
+			result->changed.notify_all();
+		});
+	}
+	bool returned_before_release = false;
+	{
+		std::unique_lock<std::mutex> lock(result->mutex);
+		returned_before_release = result->changed.wait_for(lock, std::chrono::milliseconds(250), [result] { return result->returned; });
+	}
+
+	// Always release the queue wait before joining, including a failed setup
+	// path, so the isolated child cannot strand a queue submission.
+	VkSemaphoreSignalInfo signal_info {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+	signal_info.semaphore = gate;
+	signal_info.value = 1;
+	const VkResult signal_result = vkSignalSemaphore(bridge.device.context.device, &signal_info);
+	const VkResult completed = submitted ? load.Wait() : VK_ERROR_UNKNOWN;
+	const bool acknowledged = completed == VK_SUCCESS && GuestDeviceAddressAcknowledgeReader(pending_reader);
+	bool returned_after_release = false;
+	if (prepare_thread.joinable())
+	{
+		{
+			std::unique_lock<std::mutex> lock(result->mutex);
+			returned_after_release = result->changed.wait_for(lock, std::chrono::seconds(5), [result] { return result->returned; });
+		}
+		if (returned_after_release) { prepare_thread.join(); }
+		else { prepare_thread.detach(); }
+	}
+	// Keep the semaphore alive if the bounded completion wait failed: a submitted queue may still reference it.
+	// RunIsolated exits this child after the probe, so such a failed fixture cannot leak into another test.
+	if (!submitted || completed == VK_SUCCESS) { vkDestroySemaphore(bridge.device.context.device, gate, nullptr); }
+
+	GuestDeviceAddressPrepareResult pending_prepare = GuestDeviceAddressPrepareResult::Failed;
+	GuestDeviceAddressTable pending_table {};
+	SubmissionId pending_dependency {};
+	if (returned_before_release || returned_after_release)
+	{
+		std::lock_guard<std::mutex> lock(result->mutex);
+		pending_prepare = result->result;
+		pending_table = result->table;
+		pending_dependency = result->dependency;
+	}
+	const bool pending_table_stable = pending_table.address == 0xabcdefu && pending_table.entry_count == 77u;
+
+	int status = 0;
+	if (!recorded || !submitted) { status = 46; }
+	if (pending != VK_TIMEOUT && status == 0) { status = 47; }
+	if (!returned_before_release && status == 0) { status = 48; }
+	if (pending_prepare != GuestDeviceAddressPrepareResult::PendingReader && status == 0) { status = 49; }
+	if (pending_dependency != pending_reader && status == 0) { status = 50; }
+	if (!pending_table_stable && status == 0) { status = 51; }
+	if (signal_result != VK_SUCCESS && status == 0) { status = 52; }
+	if (completed != VK_SUCCESS && status == 0) { status = 53; }
+	if (!acknowledged && status == 0) { status = 54; }
+	if (completed == VK_SUCCESS && load.CheckOutput("pending reader", kMarkerA) != 0 && status == 0) { status = 55; }
+
+	GuestDeviceAddressTable retry_table {};
+	SubmissionId retry_reader {GpuQueueId(0), 22};
+	SubmissionId retry_dependency {};
+	const auto retry_prepare = completed == VK_SUCCESS && returned_after_release
+	                               ? GuestDeviceAddressPrepareForRead(&bridge.device.context, retry_reader, &retry_table,
+	                                                                 &retry_dependency)
+	                               : GuestDeviceAddressPrepareResult::Failed;
+	int retry_output = -1;
+	if (retry_prepare != GuestDeviceAddressPrepareResult::Ready && status == 0) { status = 56; }
+	if (retry_prepare == GuestDeviceAddressPrepareResult::Ready)
+	{
+		retry_output = load.Expect("post-fence refresh", retry_table.address, retry_table.entry_count, guest, kMarkerB);
+		if (retry_output != 0 && status == 0) { status = 57; }
+		if (!GuestDeviceAddressAcknowledgeReader(retry_reader) && status == 0) { status = 58; }
+	}
+
+	// This native fixture owns one Vulkan queue. Distinct logical queue IDs
+	// exercise the registry's independent slots and exact-ACK behavior only.
+	const SubmissionId stale_reader {GpuQueueId(0), 100};
+	const SubmissionId latest_reader {GpuQueueId(0), 101};
+	const SubmissionId other_queue_reader {GpuQueueId(1), 1};
+	const SubmissionId exact_retry_reader {GpuQueueId(0), 102};
+	GuestDeviceAddressTable exact_table {};
+	SubmissionId exact_dependency {};
+	auto exact_prepare = GuestDeviceAddressPrepareForRead(&bridge.device.context, stale_reader, &exact_table, &exact_dependency);
+	if (exact_prepare != GuestDeviceAddressPrepareResult::Ready && status == 0) { status = 59; }
+	if (exact_prepare == GuestDeviceAddressPrepareResult::Ready &&
+	    load.Expect("stale reader", exact_table.address, exact_table.entry_count, guest, kMarkerB) != 0 && status == 0)
+	{
+		status = 60;
+	}
+	exact_prepare = GuestDeviceAddressPrepareForRead(&bridge.device.context, latest_reader, &exact_table, &exact_dependency);
+	if (exact_prepare != GuestDeviceAddressPrepareResult::Ready && status == 0) { status = 61; }
+	if (exact_prepare == GuestDeviceAddressPrepareResult::Ready &&
+	    load.Expect("latest same-queue reader", exact_table.address, exact_table.entry_count, guest, kMarkerB) != 0 && status == 0)
+	{
+		status = 62;
+	}
+	// An out-of-order registration for an older sequence must not replace the newer reader.
+	exact_prepare = GuestDeviceAddressPrepareForRead(&bridge.device.context, stale_reader, &exact_table, &exact_dependency);
+	if (exact_prepare != GuestDeviceAddressPrepareResult::Ready && status == 0) { status = 73; }
+	exact_prepare =
+	    GuestDeviceAddressPrepareForRead(&bridge.device.context, other_queue_reader, &exact_table, &exact_dependency);
+	if (exact_prepare != GuestDeviceAddressPrepareResult::Ready && status == 0) { status = 63; }
+	if (exact_prepare == GuestDeviceAddressPrepareResult::Ready &&
+	    load.Expect("other-queue reader", exact_table.address, exact_table.entry_count, guest, kMarkerB) != 0 && status == 0)
+	{
+		status = 64;
+	}
+	if (GuestDeviceAddressAcknowledgeReader(stale_reader) && status == 0) { status = 65; }
+
+	WriteMarker(guest, kMarkerC);
+	GuestDeviceAddressTable exact_pending_table {0x123456u, 99u};
+	const auto pending_latest = GuestDeviceAddressPrepareForRead(&bridge.device.context, exact_retry_reader, &exact_pending_table,
+	                                                            &exact_dependency);
+	if ((pending_latest != GuestDeviceAddressPrepareResult::PendingReader || exact_dependency != latest_reader ||
+	     exact_pending_table.address != 0x123456u || exact_pending_table.entry_count != 99u) &&
+	    status == 0)
+	{
+		status = 66;
+	}
+	if (!GuestDeviceAddressAcknowledgeReader(latest_reader) && status == 0) { status = 67; }
+	exact_pending_table = {0x123456u, 99u};
+	const auto pending_other = GuestDeviceAddressPrepareForRead(&bridge.device.context, exact_retry_reader, &exact_pending_table,
+	                                                           &exact_dependency);
+	if ((pending_other != GuestDeviceAddressPrepareResult::PendingReader || exact_dependency != other_queue_reader ||
+	     exact_pending_table.address != 0x123456u || exact_pending_table.entry_count != 99u) &&
+	    status == 0)
+	{
+		status = 68;
+	}
+	if (!GuestDeviceAddressAcknowledgeReader(other_queue_reader) && status == 0) { status = 69; }
+	exact_prepare = GuestDeviceAddressPrepareForRead(&bridge.device.context, exact_retry_reader, &exact_table, &exact_dependency);
+	if (exact_prepare != GuestDeviceAddressPrepareResult::Ready && status == 0) { status = 70; }
+	if (exact_prepare == GuestDeviceAddressPrepareResult::Ready &&
+	    load.Expect("independent queue refresh", exact_table.address, exact_table.entry_count, guest, kMarkerC) != 0 && status == 0)
+	{
+		status = 71;
+	}
+	if (exact_prepare == GuestDeviceAddressPrepareResult::Ready &&
+	    !GuestDeviceAddressAcknowledgeReader(exact_retry_reader) && status == 0)
+	{
+		status = 72;
+	}
+
+	if (completed == VK_SUCCESS && returned_after_release)
+	{
+		const int release_status = ExpectOwnerReleased(&bridge, base);
+		if (release_status != 0 && status == 0) { status = release_status; }
+	}
+	if (status != 0)
+	{
+		std::fprintf(stderr,
+		             "recorded=%d submitted=%d pending=%d returned_before_release=%d returned_after_release=%d "
+		             "prepare=%u dependency=%u:%" PRIu64 " table_stable=%d signal=%d completed=%d retry=%u "
+		             "exact=%u\n",
+		             recorded ? 1 : 0, submitted ? 1 : 0, pending, returned_before_release ? 1 : 0,
+		             returned_after_release ? 1 : 0, static_cast<unsigned>(pending_prepare), pending_dependency.queue.Value(),
+		             pending_dependency.sequence, pending_table_stable ? 1 : 0, signal_result, completed,
+		             static_cast<unsigned>(retry_prepare), static_cast<unsigned>(exact_prepare));
+	}
+	return status;
+}
+
+// Keep a real GPU read of the first GDA table pending while repeated range
+// additions retire table versions. The registry must stop before exceeding
+// its retired-table budget, preserve the queue's newest reader dependency, and
+// resume only after that reader's fence completes.
+int RetiredGuestDeviceAddressTablesStayReadableProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	GuestLoad              latest_load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0)
+	{
+		return status;
+	}
+	if (!bridge.device.timeline_semaphore_supported)
+	{
+		return 77;
+	}
+	if (const int status = latest_load.Init(&bridge.device); status != 0)
+	{
+		return status;
+	}
+
+	constexpr uint64_t page_bytes = kGuestDeviceAddressPageBytes;
+	constexpr uint64_t page_count = kRetiredTablePressureBudget + 2u;
+	constexpr uint64_t owner_size = page_count * page_bytes;
+	const uint64_t     owner      = Core::VirtualMemory::Alloc(0, owner_size, Core::VirtualMemory::Mode::ReadWrite);
+	if (owner == 0)
+	{
+		return 40;
+	}
+	for (uint64_t page = 0; page < page_count; ++page)
+	{
+		WriteMarker(owner + page * page_bytes, kMarkerA);
+	}
+	if (!Core::VirtualMemory::Protect(owner, owner_size, Core::VirtualMemory::Mode::Read))
+	{
+		return 41;
+	}
+
+	const SubmissionId      first_reader {GpuQueueId(0), 200};
+	const SubmissionId      latest_reader {GpuQueueId(0), 201};
+	SubmissionId            dependency {};
+	GuestDeviceAddressTable table {};
+	GuestDeviceAddressRegisterRange(owner, page_bytes, false);
+	if (GuestDeviceAddressPrepareForRead(&bridge.device.context, first_reader, &table, &dependency) !=
+	        GuestDeviceAddressPrepareResult::Ready ||
+	    table.entry_count != 1)
+	{
+		return 42;
+	}
+	GuestDeviceAddressTable latest_table {};
+	if (GuestDeviceAddressPrepareForRead(&bridge.device.context, latest_reader, &latest_table, &dependency) !=
+	        GuestDeviceAddressPrepareResult::Ready ||
+	    latest_table.address != table.address || latest_table.entry_count != table.entry_count)
+	{
+		return 43;
+	}
+	if (!load.Record(table.address, table.entry_count, owner) || !latest_load.Record(table.address, table.entry_count, owner))
+	{
+		return 44;
+	}
+
+	VkSemaphoreTypeCreateInfo type_info {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+	type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+	type_info.initialValue  = 0;
+	VkSemaphoreCreateInfo semaphore_info {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+	semaphore_info.pNext = &type_info;
+	VkSemaphore gate     = VK_NULL_HANDLE;
+	if (vkCreateSemaphore(bridge.device.context.device, &semaphore_info, nullptr, &gate) != VK_SUCCESS)
+	{
+		return 45;
+	}
+
+	const bool     submitted_first  = load.Submit(gate, 1);
+	const bool     submitted_latest = submitted_first && latest_load.Submit(gate, 1);
+	const VkResult first_pending    = submitted_first ? load.Wait(10000000ull) : VK_ERROR_UNKNOWN;
+	const VkResult latest_pending   = submitted_latest ? latest_load.Wait(10000000ull) : VK_ERROR_UNKNOWN;
+	int            status           = 0;
+	if (!submitted_first || !submitted_latest)
+	{
+		status = 46;
+	}
+	if (first_pending != VK_TIMEOUT || latest_pending != VK_TIMEOUT)
+	{
+		if (status == 0)
+		{
+			status = 47;
+		}
+	}
+
+	GuestDeviceAddressTable last_table         = latest_table;
+	uint32_t                completed_rebuilds = 0;
+	for (uint32_t page = 1; page <= kRetiredTablePressureBudget; ++page)
+	{
+		GuestDeviceAddressRegisterRange(owner + page * page_bytes, page_bytes, false);
+		GuestDeviceAddressTable next_table {};
+		const auto              result = GuestDeviceAddressPrepareForRead(&bridge.device.context, first_reader, &next_table, &dependency);
+		if (result != GuestDeviceAddressPrepareResult::Ready || next_table.entry_count != page + 1u)
+		{
+			if (status == 0)
+			{
+				status = 48;
+			}
+			break;
+		}
+		last_table = next_table;
+		completed_rebuilds++;
+	}
+
+	GuestDeviceAddressRegisterRange(owner + (kRetiredTablePressureBudget + 1u) * page_bytes, page_bytes, false);
+	GuestDeviceAddressTable pending_table {0xabcdefu, 77u};
+	const auto         pending_result = GuestDeviceAddressPrepareForRead(&bridge.device.context, first_reader, &pending_table, &dependency);
+	const SubmissionId pressure_dependency      = dependency;
+	const bool         pending_output_unchanged = pending_table.address == 0xabcdefu && pending_table.entry_count == 77u;
+
+	// Always release and drain every submitted command before any return path.
+	VkSemaphoreSignalInfo signal_info {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+	signal_info.semaphore           = gate;
+	signal_info.value               = 1;
+	const VkResult signal_result    = vkSignalSemaphore(bridge.device.context.device, &signal_info);
+	const VkResult first_completed  = submitted_first ? load.Wait() : VK_ERROR_UNKNOWN;
+	const VkResult latest_completed = submitted_latest ? latest_load.Wait() : VK_ERROR_UNKNOWN;
+	if ((!submitted_first || first_completed == VK_SUCCESS) && (!submitted_latest || latest_completed == VK_SUCCESS))
+	{
+		vkDestroySemaphore(bridge.device.context.device, gate, nullptr);
+	}
+
+	if (completed_rebuilds != kRetiredTablePressureBudget && status == 0)
+	{
+		status = 49;
+	}
+	if (pending_result != GuestDeviceAddressPrepareResult::PendingReader && status == 0)
+	{
+		status = 50;
+	}
+	if (pressure_dependency != latest_reader && status == 0)
+	{
+		status = 51;
+	}
+	if (!pending_output_unchanged && status == 0)
+	{
+		status = 52;
+	}
+	if (signal_result != VK_SUCCESS && status == 0)
+	{
+		status = 53;
+	}
+	if (first_completed != VK_SUCCESS || latest_completed != VK_SUCCESS)
+	{
+		if (status == 0)
+		{
+			status = 54;
+		}
+	}
+	if (first_completed == VK_SUCCESS && load.CheckOutput("retired table first reader", kMarkerA) != 0 && status == 0)
+	{
+		status = 55;
+	}
+	if (latest_completed == VK_SUCCESS && latest_load.CheckOutput("retired table latest reader", kMarkerA) != 0 && status == 0)
+	{
+		status = 56;
+	}
+	if (GuestDeviceAddressAcknowledgeReader(first_reader) && status == 0)
+	{
+		status = 57;
+	}
+	if (latest_completed == VK_SUCCESS && !GuestDeviceAddressAcknowledgeReader(latest_reader) && status == 0)
+	{
+		status = 58;
+	}
+
+	GuestDeviceAddressTable retry_table {};
+	const SubmissionId      retry_reader {GpuQueueId(0), 202};
+	const auto retry_result = latest_completed == VK_SUCCESS
+	                              ? GuestDeviceAddressPrepareForRead(&bridge.device.context, retry_reader, &retry_table, &dependency)
+	                              : GuestDeviceAddressPrepareResult::Failed;
+	if ((retry_result != GuestDeviceAddressPrepareResult::Ready || retry_table.entry_count != page_count) && status == 0)
+	{
+		status = 59;
+	}
+	if (retry_result == GuestDeviceAddressPrepareResult::Ready)
+	{
+		if (load.Expect("retired table post-fence retry", retry_table.address, retry_table.entry_count, owner, kMarkerA) != 0 &&
+		    status == 0)
+		{
+			status = 60;
+		}
+		if (!GuestDeviceAddressAcknowledgeReader(retry_reader) && status == 0)
+		{
+			status = 61;
+		}
+	}
+	if (status != 0)
+	{
+		std::fprintf(stderr,
+		             "rebuilds=%u pending=%u dependency=%u:%" PRIu64 " output_stable=%d signal=%d first=%d latest=%d "
+		             "last_entries=%u pending_entries=%u retry=%u retry_entries=%u\n",
+		             completed_rebuilds, static_cast<unsigned>(pending_result), pressure_dependency.queue.Value(),
+		             pressure_dependency.sequence, pending_output_unchanged ? 1 : 0, signal_result, first_completed, latest_completed,
+		             last_table.entry_count, pending_table.entry_count, static_cast<unsigned>(retry_result), retry_table.entry_count);
+	}
+	return status;
+}
+
+// A physical owner becomes visible in the GDA registry before its kernel map
+// registration completes. Keep that callback open while another thread writes
+// the backing, maps a direct alias, and prepares a shader load from the range.
+int PhysicalRegistrationAliasProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
+
+	int64_t physical = 0;
+	if (Kernel::Memory::KernelAllocateMainDirectMemory(kOwnerBytes, kOwnerBytes, 12, &physical) != 0) { return 40; }
+	void* mapping = nullptr;
+	int   map_result = -1;
+	bridge.HoldNextRegistration();
+	std::thread mapper(
+	    [&] { map_result = Kernel::Memory::KernelMapDirectMemory(&mapping, kOwnerBytes, 0x12, 0, physical, kOwnerBytes); });
+
+	const bool registration_held = bridge.WaitForRegistration(std::chrono::seconds(2));
+	uint64_t   alias              = 0;
+	uint64_t   table              = 0;
+	uint32_t   entries            = 0;
+	bool       alias_created      = false;
+	bool       alias_shares_bytes = false;
+	bool       prepared           = false;
+	int        load_status        = -1;
+	int        status             = 0;
+	if (!registration_held)
+	{
+		status = 41;
+	} else if (mapping == nullptr)
+	{
+		status = 42;
+	} else
+	{
+		const auto guest = reinterpret_cast<uint64_t>(mapping);
+		WriteMarker(guest, kPhysicalRegistrationMarker);
+		alias = Kernel::Memory::KernelMapPhysicalAlias(guest, kOwnerBytes);
+		if (alias != 0)
+		{
+			alias_created = true;
+			const auto* guest_words = reinterpret_cast<const uint32_t*>(guest);
+			const auto* alias_words = reinterpret_cast<const uint32_t*>(alias);
+			alias_shares_bytes = guest_words[0] == (kPhysicalRegistrationMarker | 0u) &&
+			                     alias_words[0] == (kPhysicalRegistrationMarker | 0u) &&
+			                     guest_words[31] == (kPhysicalRegistrationMarker | 31u) &&
+			                     alias_words[31] == (kPhysicalRegistrationMarker | 31u);
+			(void)Kernel::Memory::KernelUnmapPhysicalAlias(alias);
+			alias = 0;
+		}
+		prepared = GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries);
+		if (prepared)
+		{
+			load_status = load.Expect("physical registration in flight", table, entries, guest, kPhysicalRegistrationMarker);
+		}
+		if (!alias_created) { status = 43; }
+		if (!alias_shares_bytes && status == 0) { status = 44; }
+		if (!prepared && status == 0) { status = 45; }
+		if (load_status != 0 && status == 0) { status = 46; }
+	}
+
+	// Always release the callback before joining, including every failed probe
+	// path, so this isolated child cannot retain a blocked mapper thread.
+	bridge.PermitRegistration();
+	mapper.join();
+	const bool mapped = map_result == 0 && mapping != nullptr;
+	const int  unmap_result = mapped ? Kernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(mapping), kOwnerBytes) : 0;
+	const int  release_result = Kernel::Memory::KernelCheckedReleaseDirectMemory(physical, kOwnerBytes);
+	if (!mapped && status == 0) { status = 47; }
+	if (unmap_result != 0 && status == 0) { status = 48; }
+	if (release_result != 0 && status == 0) { status = 49; }
+	if (status != 0)
+	{
+		std::fprintf(stderr,
+		             "registration_held=%d map=%d alias=%d shared=%d prepared=%d entries=%u load=%d unmap=%d release=%d\n",
+		             registration_held ? 1 : 0, map_result, alias_created ? 1 : 0, alias_shares_bytes ? 1 : 0,
+		             prepared ? 1 : 0, entries, load_status, unmap_result, release_result);
+	}
+	return status;
+}
+
+// Releasing the physical allocation retires its GPU address range while the
+// CPU virtual mapping remains queryable until the guest explicitly unmaps it.
+int PhysicalReleaseRetiresDeviceAddressRangeProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
+
+	int64_t physical = 0;
+	if (Kernel::Memory::KernelAllocateMainDirectMemory(kOwnerBytes, kOwnerBytes, 12, &physical) != 0) { return 40; }
+	void* mapping = nullptr;
+	const int map_result = Kernel::Memory::KernelMapDirectMemory(&mapping, kOwnerBytes, 0x12, 0, physical, kOwnerBytes);
+	if (map_result != 0 || mapping == nullptr)
+	{
+		if (mapping != nullptr) { (void)Kernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(mapping), kOwnerBytes); }
+		(void)Kernel::Memory::KernelCheckedReleaseDirectMemory(physical, kOwnerBytes);
+		return 41;
+	}
+
+	const auto guest = reinterpret_cast<uint64_t>(mapping);
+	WriteMarker(guest, kPhysicalReleaseMarker);
+	uint64_t table = 0;
+	uint32_t entries = 0;
+	const bool prepared_before = GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries);
+	const int load_status = prepared_before
+	                            ? load.Expect("physical owner before release", table, entries, guest, kPhysicalReleaseMarker)
+	                            : -1;
+	const int release_result = Kernel::Memory::KernelCheckedReleaseDirectMemory(physical, kOwnerBytes);
+	int       protection = -1;
+	const bool mapping_stays_live = Kernel::Memory::KernelQueryMemoryProtection(mapping, nullptr, nullptr, &protection) == 0 &&
+	                               protection == 0x12 && Core::VirtualMemory::IsRangeWritable(guest, kOwnerBytes);
+	table = 0;
+	entries = 0;
+	const bool prepared_after = release_result == 0 && GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries);
+	const uint32_t entries_after_release = entries;
+	int status = 0;
+	if (!prepared_before || load_status != 0) { status = 42; }
+	if (release_result != 0 && status == 0) { status = 43; }
+	if (!mapping_stays_live && status == 0) { status = 44; }
+	if (!prepared_after && status == 0) { status = 45; }
+	if (prepared_after && entries_after_release != 0 && status == 0) { status = 46; }
+
+	const int unmap_result = Kernel::Memory::KernelMunmap(guest, kOwnerBytes);
+	const int retry_release_result = release_result == 0 ? 0 : Kernel::Memory::KernelCheckedReleaseDirectMemory(physical, kOwnerBytes);
+	uint64_t empty_table = 0;
+	uint32_t empty_entries = 0;
+	const bool empty_after_unmap = unmap_result == 0 && GuestDeviceAddressPrepare(&bridge.device.context, &empty_table, &empty_entries) &&
+	                               empty_entries == 0;
+	if (unmap_result != 0 && status == 0) { status = 47; }
+	if (retry_release_result != 0 && status == 0) { status = 48; }
+	if (!empty_after_unmap && status == 0) { status = 49; }
+	if (status != 0)
+	{
+		std::fprintf(stderr,
+		             "map=%d prepared_before=%d load=%d release=%d mapping_live=%d prepared_after=%d entries_after_release=%u "
+		             "unmap=%d retry_release=%d empty_after_unmap=%d\n",
+		             map_result, prepared_before ? 1 : 0, load_status, release_result, mapping_stays_live ? 1 : 0,
+		             prepared_after ? 1 : 0, entries_after_release, unmap_result, retry_release_result, empty_after_unmap ? 1 : 0);
+	}
+	return status;
+}
+
+// A partial direct-memory release retires only the released tail and leaves
+// the still-allocated head usable by the GPU and by the guest CPU mapping.
+int PartialPhysicalReleasePreservesHeadProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
+
+	int64_t physical = 0;
+	if (Kernel::Memory::KernelAllocateMainDirectMemory(kOwnerBytes, kOwnerBytes, 12, &physical) != 0) { return 40; }
+	void* mapping = nullptr;
+	const int map_result = Kernel::Memory::KernelMapDirectMemory(&mapping, kOwnerBytes, 0x12, 0, physical, kOwnerBytes);
+	if (map_result != 0 || mapping == nullptr)
+	{
+		if (mapping != nullptr) { (void)Kernel::Memory::KernelMunmap(reinterpret_cast<uint64_t>(mapping), kOwnerBytes); }
+		(void)Kernel::Memory::KernelCheckedReleaseDirectMemory(physical, kOwnerBytes);
+		return 41;
+	}
+
+	const auto guest = reinterpret_cast<uint64_t>(mapping);
+	const auto tail = guest + 3 * kGuestPageBytes;
+	WriteMarker(guest, kMarkerA);
+	WriteMarker(tail, kMarkerB);
+	uint64_t table = 0;
+	uint32_t entries = 0;
+	bool prepared_before = GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries);
+	int load_head_before = prepared_before ? load.Expect("partial physical owner head before release", table, entries, guest, kMarkerA) : -1;
+	int load_tail_before = prepared_before ? load.Expect("partial physical owner tail before release", table, entries, tail, kMarkerB) : -1;
+	const int release_result = Kernel::Memory::KernelCheckedReleaseDirectMemory(physical + 3 * kGuestPageBytes, kGuestPageBytes);
+	int protection = -1;
+	const bool head_stays_live = Kernel::Memory::KernelQueryMemoryProtection(mapping, nullptr, nullptr, &protection) == 0 &&
+	                             protection == 0x12 && Core::VirtualMemory::IsRangeWritable(guest, kGuestPageBytes);
+	table = 0;
+	entries = 0;
+	const bool prepared_after = release_result == 0 && GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries);
+	const int load_head_after = prepared_after ? load.Expect("partial physical release preserves head", table, entries, guest, kMarkerA) : -1;
+	int status = 0;
+	if (!prepared_before || load_head_before != 0 || load_tail_before != 0) { status = 42; }
+	if (release_result != 0 && status == 0) { status = 43; }
+	if (!head_stays_live && status == 0) { status = 44; }
+	if (!prepared_after && status == 0) { status = 45; }
+	if (load_head_after != 0 && status == 0) { status = 46; }
+
+	const int unmap_result = Kernel::Memory::KernelMunmap(guest, kOwnerBytes);
+	const int release_remaining_result = release_result == 0
+	                                         ? Kernel::Memory::KernelCheckedReleaseDirectMemory(physical, 3 * kGuestPageBytes)
+	                                         : Kernel::Memory::KernelCheckedReleaseDirectMemory(physical, kOwnerBytes);
+	if (unmap_result != 0 && status == 0) { status = 47; }
+	if (release_remaining_result != 0 && status == 0) { status = 48; }
+	if (status != 0)
+	{
+		std::fprintf(stderr,
+		             "map=%d prepared_before=%d head_before=%d tail_before=%d release=%d head_live=%d prepared_after=%d "
+		             "entries_after=%u head_after=%d unmap=%d release_remaining=%d\n",
+		             map_result, prepared_before ? 1 : 0, load_head_before, load_tail_before, release_result,
+		             head_stays_live ? 1 : 0, prepared_after ? 1 : 0, entries, load_head_after, unmap_result,
+		             release_remaining_result);
+	}
+	return status;
+}
+
 // An unmap claimed while a writable protection waits for quiescence makes the
 // protection fail: the owner keeps its read-only rights, the GPU keeps reading
 // the same imports through the same table, and the unmap then completes.
@@ -777,6 +1595,15 @@ TEST(EmulatorGuestDeviceAddress, VulkanLoadPreservesWordsAcrossImportedPageBound
 TEST(EmulatorGuestDeviceAddress, AnAnonymousRangeImportsATouchedPageOnTheNextPreparation) { RunIsolated(AnonymousResidencyProbe); }
 TEST(EmulatorGuestDeviceAddress, AWritableGpuProtectionStopsReadingTheReadOnlyCopy) { RunIsolated(WritableTransitionProbe); }
 TEST(EmulatorGuestDeviceAddress, RestoredGpuReadAfterCpuOnlyProtectionSeesCpuWrites) { RunIsolated(CpuOnlyTransitionProbe); }
+TEST(EmulatorGuestDeviceAddress, RecordedGuestDeviceAddressReadRetainsSnapshot) { RunIsolated(RecordedGuestDeviceAddressReadRetainsSnapshotProbe); }
+TEST(EmulatorGuestDeviceAddress, PendingGuestDeviceAddressReaderDefersRefresh) { RunIsolated(PendingGuestDeviceAddressReaderDefersRefreshProbe); }
+TEST(EmulatorGuestDeviceAddress, RetiredGuestDeviceAddressTablesStayReadableAndBoundRebuilds)
+{
+	RunIsolated(RetiredGuestDeviceAddressTablesStayReadableProbe);
+}
+TEST(EmulatorGuestDeviceAddress, PhysicalAliasIsAvailableDuringOwnerRegistration) { RunIsolated(PhysicalRegistrationAliasProbe); }
+TEST(EmulatorGuestDeviceAddress, PhysicalReleaseRetiresDeviceAddressRange) { RunIsolated(PhysicalReleaseRetiresDeviceAddressRangeProbe); }
+TEST(EmulatorGuestDeviceAddress, PartialPhysicalReleasePreservesHead) { RunIsolated(PartialPhysicalReleasePreservesHeadProbe); }
 TEST(EmulatorGuestDeviceAddress, AProtectionRefusedForAPendingUnmapKeepsRightsAndImports) { RunIsolated(PendingUnmapProtectionProbe); }
 
 UT_END();

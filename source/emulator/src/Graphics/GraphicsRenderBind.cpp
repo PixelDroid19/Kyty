@@ -224,16 +224,19 @@ static DrawMaterialTraceSession BeginDrawMaterialTrace(const DrawMaterialTraceCo
 	return session;
 }
 
+// The decoder's count is reported unchanged by the trace; only the traversal of
+// the fixed arrays is bounded, so an excessive count cannot read past them.
 static int FindDrawMaterialTraceSamplerIndex(const ShaderSamplerResources& samplers, int slot, int descriptor_index)
 {
-	for (int i = 0; i < samplers.samplers_num; ++i)
+	const int count = std::min(samplers.samplers_num, ShaderSamplerResources::RES_MAX);
+	for (int i = 0; i < count; ++i)
 	{
 		if (samplers.slots[i] == slot)
 		{
 			return i;
 		}
 	}
-	if (descriptor_index >= 0 && descriptor_index < samplers.samplers_num)
+	if (descriptor_index >= 0 && descriptor_index < count)
 	{
 		return descriptor_index;
 	}
@@ -1949,27 +1952,19 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 					             event.submit_id, event.object_type, event.content_sequence);
 				}
 			}
-			for (int ai = 0; ai < vertex.attr_num; ++ai)
+			// Counts are printed as decoded; the fixed attribute and resource arrays bound the traversal.
+			const int attr_count     = std::min(vertex.attr_num, ShaderVertexInputBuffer::ATTR_MAX);
+			const int resource_count = std::min(draw.vertex_input->resources_num, ShaderVertexInputInfo::RES_MAX);
+			for (int ai = 0; ai < attr_count; ++ai)
 			{
 				const int idx = vertex.attr_indices[ai];
-				const int semantic = (idx >= 0 && idx < draw.vertex_input->resources_num) ? draw.vertex_input->resources_dst[idx].semantic : -1;
-				const uint32_t fmt = (idx >= 0 && idx < draw.vertex_input->resources_num)
-				                         ? static_cast<uint32_t>(draw.vertex_input->resources[idx].Format())
-				                         : 0u;
-				const int regs = (idx >= 0 && idx < draw.vertex_input->resources_num)
-				                     ? draw.vertex_input->resources_dst[idx].registers_num
-				                     : 0;
-				const uint32_t dstsel = (idx >= 0 && idx < draw.vertex_input->resources_num)
-				                            ? draw.vertex_input->resources[idx].DstSelXYZW()
-				                            : 0u;
-				const uint32_t swizzle = (idx >= 0 && idx < draw.vertex_input->resources_num &&
-				                          draw.vertex_input->resources[idx].SwizzleEnabled())
-				                             ? 1u
-				                             : 0u;
-				const uint32_t add_tid = (idx >= 0 && idx < draw.vertex_input->resources_num &&
-				                          draw.vertex_input->resources[idx].AddTid())
-				                             ? 1u
-				                             : 0u;
+				const bool resource_valid = idx >= 0 && idx < resource_count;
+				const int semantic = resource_valid ? draw.vertex_input->resources_dst[idx].semantic : -1;
+				const uint32_t fmt = resource_valid ? static_cast<uint32_t>(draw.vertex_input->resources[idx].Format()) : 0u;
+				const int regs = resource_valid ? draw.vertex_input->resources_dst[idx].registers_num : 0;
+				const uint32_t dstsel = resource_valid ? draw.vertex_input->resources[idx].DstSelXYZW() : 0u;
+				const uint32_t swizzle = (resource_valid && draw.vertex_input->resources[idx].SwizzleEnabled()) ? 1u : 0u;
+				const uint32_t add_tid = (resource_valid && draw.vertex_input->resources[idx].AddTid()) ? 1u : 0u;
 				std::fprintf(out,
 				    "KYTY_TRACE_DRAW_PS_VERTEX_ATTR ordinal=%u buffer=%d attr=%d resource=%d semantic=%d offset=%u fmt=%u regs=%d"
 				    " dstsel=0x%x swizzle=%u add_tid=%u\n",
@@ -1982,10 +1977,10 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 					return;
 				}
 				const uint64_t record_offset = static_cast<uint64_t>(sample) * vertex.stride;
-				for (int ai = 0; ai < vertex.attr_num && ai < 4; ++ai)
+				for (int ai = 0; ai < attr_count && ai < 4; ++ai)
 				{
 					const int idx = vertex.attr_indices[ai];
-					if (idx < 0 || idx >= draw.vertex_input->resources_num)
+					if (idx < 0 || idx >= resource_count)
 					{
 						continue;
 					}
@@ -4088,13 +4083,45 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			    textures.desc[i].sample_operation, sampled_shape, numeric_type == GuestImageNumericType::FloatingPoint, resolved_view);
 			if (!decision.compatible)
 			{
+				// The refusal names the parent's shape and the tracked content state of every overlapping
+				// object, the evidence needed to choose a view, a copy or a write-back for this transition.
+				char parent_state[640] = "";
+				int  state_written     = 0;
+				const auto parents = FindRenderTexture(buffer, addr, size.size, false);
+				for (int pi = 0; pi < static_cast<int>(parents.Size()) && pi < 2 && state_written >= 0 &&
+				                 static_cast<size_t>(state_written) < sizeof(parent_state);
+				     pi++)
+				{
+					const auto* parent = parents.At(pi);
+					state_written += std::snprintf(parent_state + state_written, sizeof(parent_state) - static_cast<size_t>(state_written),
+					                               " rt%d=vkfmt%u:%ux%u:samples%u:layers%u:mips%u:stamp%" PRIu64, pi,
+					                               static_cast<uint32_t>(parent->format), parent->GetGuestExtent().width,
+					                               parent->GetGuestExtent().height, static_cast<uint32_t>(parent->samples),
+					                               parent->array_layers, parent->mip_levels, parent->content_stamp);
+				}
+				GpuMemoryRangeProvenance provenance {};
+				if (GpuMemoryQueryRangeProvenance(addr, size.size, &provenance))
+				{
+					for (uint32_t pe = 0; pe < provenance.entry_count && state_written >= 0 &&
+					                      static_cast<size_t>(state_written) < sizeof(parent_state);
+					     pe++)
+					{
+						const auto& e = provenance.entries[pe];
+						state_written += std::snprintf(
+						    parent_state + state_written, sizeof(parent_state) - static_cast<size_t>(state_written),
+						    " obj%u=%u/%u:origin%u:seq%" PRIu64 ":submit%" PRIu64 ":cpu%" PRIu64 ":gpu%" PRIu64 ":in_use%d:deps_done%d:wb%d", pe,
+						    static_cast<uint32_t>(e.type), static_cast<uint32_t>(e.relation), static_cast<uint32_t>(e.content_origin),
+						    e.content_sequence, e.submit_id, e.cpu_update_time, e.gpu_update_time, e.in_use ? 1 : 0,
+						    e.dependencies_complete ? 1 : 0, e.write_back_capable ? 1 : 0);
+					}
+				}
 				EXIT("unsupported depth-reference image binding: operation=%u shape=%u numeric=%u view=%u format=%u tile=%u "
-				     "materialize=%s addr=0x%012" PRIx64 " size=0x%" PRIx64 " %ux%u pitch=%u levels=%u depth=%u base_array=%u%s\n",
+				     "materialize=%s addr=0x%012" PRIx64 " size=0x%" PRIx64 " %ux%u pitch=%u levels=%u depth=%u base_array=%u%s%s\n",
 				     static_cast<uint32_t>(textures.desc[i].sample_operation), static_cast<uint32_t>(sampled_shape),
 				     static_cast<uint32_t>(numeric_type), static_cast<uint32_t>(resolved_view), fmt, tile, materialize,
 				     static_cast<uint64_t>(addr), static_cast<uint64_t>(size.size), static_cast<uint32_t>(width),
 				     static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels),
-				     static_cast<uint32_t>(r.Depth()), static_cast<uint32_t>(r.BaseArray5()), depth_refusal);
+				     static_cast<uint32_t>(r.Depth()), static_cast<uint32_t>(r.BaseArray5()), depth_refusal, parent_state);
 			}
 		}
 		if (const char* dump_texture_bind = std::getenv("KYTY_DUMP_TEXTURE_BIND"); dump_texture_bind != nullptr)
@@ -4591,7 +4618,8 @@ static uint32_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
-                     const VulkanImage* stencil_attached_depth, const ShaderStorageImageTileCoverage* storage_seed_coverage)
+                     const VulkanImage* stencil_attached_depth, const ShaderStorageImageTileCoverage* storage_seed_coverage,
+                     const GuestDeviceAddressTable* device_address_table)
 {
 	KYTY_PROFILER_FUNCTION();
 	InvalidateComputeColorFills(bind);
@@ -4619,13 +4647,6 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.samplers.samplers_num > DescriptorCache::SAMPLERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind.samplers.samplers_num > DescriptorCache::SAMPLERS_MAX condition ignored (continuing)\n"); }
 
 		bool need_descriptor = false;
-		// Complete and materialize prior GPU storage writes before this bind can
-		// register writable objects for its still-recording submission.
-		if (bind.device_address_used)
-		{
-			GuestDeviceAddressWriteBack(g_render_ctx->GetGraphicCtx(), GpuQueueId(static_cast<uint32_t>(buffer->GetQueueIndex())));
-		}
-
 		VulkanBuffer* storage_buffers[DescriptorCache::BUFFERS_MAX] = {};
 		VulkanImage*  textures2d_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX] = {};
 		int           textures2d_sampled_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
@@ -4693,16 +4714,11 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		}
 		if (bind.device_address_used)
 		{
-			uint64_t table   = 0;
-			uint32_t entries = 0;
+			EXIT_IF(device_address_table == nullptr || device_address_table->address == 0);
 			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.device_address_offset_dw);
-			if (!GuestDeviceAddressPrepare(g_render_ctx->GetGraphicCtx(), &table, &entries))
-			{
-				EXIT("guest memory device addressing is unavailable for a shader that dereferences guest pointers\n");
-			}
-			sgprs_ptr[0] = static_cast<uint32_t>(table);
-			sgprs_ptr[1] = static_cast<uint32_t>(table >> 32u);
-			sgprs_ptr[2] = entries;
+			sgprs_ptr[0] = static_cast<uint32_t>(device_address_table->address);
+			sgprs_ptr[1] = static_cast<uint32_t>(device_address_table->address >> 32u);
+			sgprs_ptr[2] = device_address_table->entry_count;
 			sgprs_ptr[3] = 0;
 			sgprs_ptr += 4;
 		}

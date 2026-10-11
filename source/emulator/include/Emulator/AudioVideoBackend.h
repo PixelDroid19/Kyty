@@ -141,17 +141,20 @@ enum class AudioCodec : uint8_t
 	Atrac9,
 };
 
-// Decodes one superframe at a time into interleaved float PCM at the source
-// rate. The extradata is the 12-byte tail of the RIFF WAVEFORMATEXTENSIBLE
-// format: a version dword (at most 2), the FE-prefixed config dword, and a
-// reserved dword. Open fails unless the decoder derives the channel count and
-// sample rate that the caller expects from the config.
+// Decodes ATRAC9 superframes or individual Opus packets into interleaved float
+// PCM at the codec's source rate. ATRAC9 extradata is the 12-byte tail of the
+// RIFF WAVEFORMATEXTENSIBLE format: a version dword (at most 2), the FE-prefixed
+// config dword, and a reserved dword. Open requires the decoder's channel count
+// and sample rate to match the caller's expectations.
 class ElementaryAudioDecoder final
 {
 public:
 	struct State;
 
 	static constexpr size_t kAtrac9ExtradataSize = 12;
+	static constexpr size_t kOpusMaxPacketBytes  = 65535;
+	// Opus packets may encode up to 120 ms: 5760 samples per channel at 48 kHz.
+	static constexpr uint32_t kOpusMaxPacketSamples = 5760;
 	// Limits fixed by the ATRAC9 config: up to 8 channels (7.1), 192 kHz, frames
 	// of at most 256 samples and 2048 bytes, and 1 or 4 frames per superframe.
 	static constexpr uint32_t kAtrac9MaxChannels          = 8;
@@ -162,21 +165,43 @@ public:
 	static std::unique_ptr<ElementaryAudioDecoder> Open(AudioCodec codec, const uint8_t* extradata, size_t extradata_size,
 	                                                    uint32_t block_align, uint32_t channels, uint32_t sample_rate,
 	                                                    std::string* error = nullptr);
+	// Opens the demonstrated four-byte ATRAC9 config subset. Nonzero low config
+	// bits with no established contract are refused. The decoder determines the
+	// channel count and sample rate; block alignment is derived from the config.
+	static std::unique_ptr<ElementaryAudioDecoder> OpenAtrac9FromConfig(const uint8_t* config, size_t config_size,
+	                                                                    std::string* error = nullptr);
+	// Opens a raw mono or stereo Opus stream at 48 kHz with FFmpeg's standard
+	// channel mapping. No extradata or AJM configuration is passed to FFmpeg.
+	static std::unique_ptr<ElementaryAudioDecoder> OpenOpus(uint32_t channels, uint32_t sample_rate, std::string* error = nullptr);
 
 	~ElementaryAudioDecoder();
 
 	ElementaryAudioDecoder(const ElementaryAudioDecoder&)            = delete;
 	ElementaryAudioDecoder& operator=(const ElementaryAudioDecoder&) = delete;
 
-	// Decodes exactly one packet of block_align bytes. The interleaved samples
-	// replace the contents of interleaved; a packet may produce no samples.
+	// Decodes one ATRAC9 superframe or one Opus packet. Opus packets must contain
+	// 1 to kOpusMaxPacketBytes bytes. Interleaved samples replace the contents of
+	// interleaved; a packet may produce no samples while the decoder is delayed.
 	bool Decode(const uint8_t* packet, size_t size, std::vector<float>* interleaved);
 	// Drops the overlap state so that the next packet starts a new stream.
-	void Reset();
+	void                      Reset();
 	[[nodiscard]] const char* LastError() const;
+	[[nodiscard]] uint32_t    Channels() const;
+	[[nodiscard]] uint32_t    SampleRate() const;
+	// Returns zero for Opus, whose packets have variable length.
+	[[nodiscard]] uint32_t BlockAlign() const;
 
 private:
+	struct ExpectedFormat
+	{
+		uint32_t channels    = 0;
+		uint32_t sample_rate = 0;
+	};
+
 	ElementaryAudioDecoder();
+	static std::unique_ptr<ElementaryAudioDecoder> OpenAtrac9(const uint8_t* extradata, size_t extradata_size,
+	                                                        uint32_t block_align, const ExpectedFormat* expected_format,
+	                                                        std::string* error);
 
 	std::unique_ptr<State> state_;
 };

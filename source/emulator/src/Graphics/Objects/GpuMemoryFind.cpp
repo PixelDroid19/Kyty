@@ -49,8 +49,10 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 	Vector<GpuMemoryObject> ret;
 
 	int heap_id = GetHeapId(vaddr[0], size[0]);
-
-	if (heap_id < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: heap_id < 0 condition ignored (continuing)\n"); }
+	if (heap_id < 0)
+	{
+		return ret;
+	}
 
 	auto& heap = m_heaps[heap_id];
 

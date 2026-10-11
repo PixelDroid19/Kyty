@@ -14,6 +14,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 #if defined(_WIN32)
 #include <io.h>
@@ -1704,11 +1705,17 @@ void EnableMimgModuleValidation()
 // The descriptor is registered as the T# type defines it: types 12 and 13 in the array bank,
 // 8 and 9 in the flat bank. Format 22 is R32_FLOAT and 20 is R32_UINT.
 Core::String8 EmitValidatedMimgTailModule(const ShaderCode& code, bool writable, bool sampler = false, uint32_t texture_type = 9u,
-                                          uint32_t texture_format = 22u)
+                                          uint32_t texture_format = 22u, bool paired_compute_wave = false)
 {
 	ShaderPixelInputInfo pixel {};
 	ShaderComputeInputInfo compute {};
 	compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+	if (paired_compute_wave)
+	{
+		compute.threads_num[0] = 64u;
+		compute.thread_ids_num = 1;
+		compute.wave_layout    = {ShaderComputeWaveStrategy::Paired64On32, {64u, 1u, 1u}, {32u, 1u, 1u}, 64u, 32u, 2u, 1u, 0u};
+	}
 	auto& bind = code.GetType() == ShaderType::Pixel ? pixel.bind : compute.bind;
 	const auto shape = ShaderGen5SampledTextureShapeForType(static_cast<uint8_t>(texture_type));
 	const bool array = shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
@@ -2207,6 +2214,37 @@ TEST(EmulatorShaderMimg, EmitsAndValidatesParsedSamplerlessImageModules)
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, PackedMipAndOrdinaryStoresRespectEachPairedExecBank)
+{
+	ASSERT_EXIT((
+	                []
+	                {
+		                InitMimgParser();
+		                EnableMimgModuleValidation();
+		                for (const uint32_t opcode: {0x08u, 0x09u})
+		                {
+			                const bool        mip       = opcode == 0x09u;
+			                const auto        code      = ParseMimgTailInstruction(opcode, 0u, 0u, 0xfu, ShaderType::Compute, 0u, 1u);
+			                const auto        source    = EmitValidatedMimgTailModule(code, true, false, 9u, 22u, true);
+			                const std::string operation = mip ? "image_store_mip" : "image_store";
+			                const std::string active    = mip ? operation + "_active_0" : "image_store_enabled_0";
+			                const std::string write     = mip ? operation + "_write_0" : "image_store_write_0";
+			                const std::string merge     = mip ? operation + "_merge_0" : "image_store_merge_0";
+			                for (const char* bank: {"low", "high"})
+			                {
+				                const std::string suffix = "_" + std::string(bank);
+				                const std::string branch =
+				                    "OpBranchConditional %" + active + suffix + " %" + write + suffix + " %" + merge + suffix;
+				                RequireMimgTail(source.ContainsStr(branch.c_str()), "each bank branches on its own active EXEC bit");
+				                RequireMimgTail(source.ContainsStr(("OpImageWrite %t27_0" + suffix).c_str()),
+				                                "each active bank emits its storage write");
+			                }
+		                }
+		                std::_Exit(0);
+	                }()),
+	            ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorShaderMimg, EmitsAndValidatesParsedSampleWithRealSampler)

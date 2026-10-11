@@ -75,8 +75,8 @@ using Kyty::Core::VirtualMemory::Protect;
 using Kyty::Libs::Graphics::GpuDirtyPageProtectionOps;
 using Kyty::Libs::Graphics::GpuDirtyPageTableIndex;
 using Kyty::Libs::Graphics::GpuDirtyPageTracker;
-using Kyty::Libs::Graphics::GpuDirtyPageTrackerNotifyFaultHandlerInstalled;
 using Kyty::Libs::Graphics::GpuDirtyPageTrackerTestAccess;
+using Kyty::Libs::Graphics::GpuDirtyPageTrackerNotifyFaultHandlerInstalled;
 using Kyty::Libs::Graphics::GpuDirtyProtectionState;
 using Kyty::Libs::Graphics::GpuDirtyProtectionStateHandlesFault;
 using Kyty::Libs::Graphics::GpuDirtyProtectionStateNeedsArmingRollback;
@@ -136,7 +136,9 @@ struct HostWriteCallbacks
 	{
 		g_host_write_tracker = tracker;
 		installed = Kyty::Emulator::VideoFrameMemory::InstallCallbacks({
-		    [](uint64_t, size_t, uint32_t) {}, [](uint64_t) {},
+		    [](uint64_t, size_t, uint32_t,
+		       const Kyty::Core::VirtualMemory::GuestMappingIdentitySnapshot&) { return true; },
+		    [](uint64_t) {},
 		    [](uint64_t address, uint64_t size) { (void)g_host_write_tracker->NotifyWrite(address, size); },
 		    [](uint64_t address, uint64_t size)
 		    {
@@ -1081,6 +1083,184 @@ TEST(EmulatorGraphicsDirtyTracking, ReregisteredRetiredPageRecapturesNativeProte
 	EXPECT_EQ(protection.calls[1].mode, Mode::ExecuteReadWrite);
 	EXPECT_EQ(protection.calls[0].token, 0x407u);
 	EXPECT_EQ(protection.calls[1].token, 0x407u);
+}
+
+// Reusing a retired page identity must wait for the VM publisher to finish its
+// authority change. Once the replacement mapping is published, the page must
+// capture and restore the replacement mapping's protection token.
+TEST(EmulatorGraphicsDirtyTracking, RetiredPageRegistrationWaitsForMappingChangePublication)
+{
+	Mapping mapping(1);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page_size = GetPageSize();
+	FakeProtection      protection {mapping.address, page_size, {Mode::ReadWrite}};
+	GpuDirtyPageTracker tracker(protection.Ops());
+
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, page_size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, page_size));
+	ASSERT_TRUE(tracker.UnregisterRange(mapping.address, page_size));
+	ASSERT_NE(protection.authority, nullptr);
+
+	const auto* authority = protection.authority;
+	Kyty::Core::SysWriteLeases leases;
+	leases.Add(mapping.address, mapping.address + page_size, static_cast<uint32_t>(Mode::ReadWrite), authority);
+	std::vector<Kyty::Core::SysWriteLeaseRun> fenced;
+	leases.BeginUnmap(mapping.address, mapping.address + page_size, &fenced);
+	const bool expected_authority_fenced = fenced.size() == 1u && fenced[0].address == mapping.address &&
+	                                      fenced[0].end == mapping.address + page_size && fenced[0].authority == authority;
+
+	std::atomic<bool> registration_done {false};
+	std::atomic<bool> registration_result {false};
+	std::thread       registration([&]
+	                     {
+		                     registration_result.store(tracker.RegisterRange(mapping.address, page_size), std::memory_order_release);
+		                     registration_done.store(true, std::memory_order_release);
+	                     });
+	const auto writer_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (!GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 1u) &&
+	       std::chrono::steady_clock::now() < writer_deadline)
+	{
+		std::this_thread::yield();
+	}
+	const bool writer_waited_for_publication = GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 1u);
+
+	// Simulate the replacement mapping becoming native-visible before EndUnmap
+	// publishes its identity to the tracker.
+	const uint32_t new_token = 0x407u;
+	protection.original_modes[0] = Mode::ExecuteReadWrite;
+	protection.current_modes[0]  = Mode::ExecuteReadWrite;
+	protection.original_tokens[0] = new_token;
+	leases.EndUnmap(mapping.address, mapping.address + page_size, fenced, true);
+	registration.join();
+
+	EXPECT_TRUE(expected_authority_fenced);
+	EXPECT_EQ(GpuDirtyPageTrackerTestAccess::PublisherCount(tracker), 0u);
+	EXPECT_TRUE(writer_waited_for_publication);
+	EXPECT_TRUE(registration_result.load(std::memory_order_acquire));
+
+	const auto observation = tracker.BeginRead(mapping.address, page_size);
+	EXPECT_TRUE(observation.tracked);
+	const uint32_t restores_before = protection.signal_safe_calls;
+	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address));
+	EXPECT_EQ(protection.signal_safe_calls, restores_before + 1u);
+	EXPECT_FALSE(protection.signal_safe_tokens.empty());
+	if (!protection.signal_safe_tokens.empty())
+	{
+		EXPECT_EQ(protection.signal_safe_tokens.back(), new_token);
+	}
+	EXPECT_EQ(protection.current_modes[0], Mode::ExecuteReadWrite);
+	EXPECT_TRUE(tracker.ChangedSince(mapping.address, page_size, observation.generation));
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, page_size));
+}
+
+// A pending identity writer must let another run in an active VM transaction
+// announce its change, then wait for both publications before reusing a page.
+TEST(EmulatorGraphicsDirtyTracking, RetiredPageWriterJoinsMultiRunMappingChange)
+{
+	Mapping mapping(3);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page_size = GetPageSize();
+	const uintptr_t     first     = mapping.address;
+	const uintptr_t     second    = mapping.address + 2u * page_size;
+	FakeProtection      protection {mapping.address, page_size, std::vector<Mode>(3, Mode::ReadWrite)};
+	GpuDirtyPageTracker tracker(protection.Ops());
+	ASSERT_TRUE(tracker.RegisterRange(first, page_size));
+	ASSERT_TRUE(tracker.RegisterRange(second, page_size));
+	ASSERT_TRUE(tracker.Rearm(first, page_size));
+	ASSERT_TRUE(tracker.Rearm(second, page_size));
+	ASSERT_TRUE(tracker.UnregisterRange(first, page_size));
+	ASSERT_TRUE(tracker.UnregisterRange(second, page_size));
+	ASSERT_NE(protection.authority, nullptr);
+
+	const auto* authority = protection.authority;
+	Kyty::Core::SysWriteLeases leases;
+	leases.Add(first, first + page_size, static_cast<uint32_t>(Mode::ReadWrite), authority);
+	leases.Add(second, second + page_size, static_cast<uint32_t>(Mode::ReadWrite), authority);
+	std::vector<Kyty::Core::SysWriteLeaseRun> first_fenced;
+	leases.BeginUnmap(first, first + page_size, &first_fenced);
+
+	std::atomic<bool> registration_done {false};
+	std::atomic<bool> registration_result {false};
+	std::thread       registration([&]
+	                     {
+		                     registration_result.store(tracker.RegisterRange(first, page_size), std::memory_order_release);
+		                     registration_done.store(true, std::memory_order_release);
+	                     });
+	const auto writer_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (!GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 1u) &&
+	       std::chrono::steady_clock::now() < writer_deadline)
+	{
+		std::this_thread::yield();
+	}
+	const bool writer_waited_for_first = GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 1u);
+
+	std::atomic<bool> second_begin_done {false};
+	std::atomic<bool> release_second_end {false};
+	std::thread       second_begin([&]
+	                    {
+		                    std::vector<Kyty::Core::SysWriteLeaseRun> second_fenced;
+		                    leases.BeginUnmap(second, second + page_size, &second_fenced);
+		                    second_begin_done.store(true, std::memory_order_release);
+		                    while (!release_second_end.load(std::memory_order_acquire))
+		                    {
+			                    std::this_thread::yield();
+		                    }
+		                    leases.EndUnmap(second, second + page_size, second_fenced, true);
+	                    });
+	const auto second_begin_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while ((!second_begin_done.load(std::memory_order_acquire) ||
+	        !GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 2u)) &&
+	       std::chrono::steady_clock::now() < second_begin_deadline)
+	{
+		std::this_thread::yield();
+	}
+	const bool second_begin_completed_before_first_end = second_begin_done.load(std::memory_order_acquire) &&
+	                                                     GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 2u);
+
+	// Commit the replacement only when the second run was collected before the
+	// first end. On the timeout path, an aborted first run releases the writer
+	// without mutating the lease registry while the second begin may be pending.
+	const uint32_t new_token = 0x417u;
+	if (second_begin_completed_before_first_end)
+	{
+		protection.original_modes[0] = Mode::ExecuteReadWrite;
+		protection.current_modes[0]  = Mode::ExecuteReadWrite;
+		protection.original_tokens[0] = new_token;
+	}
+	leases.EndUnmap(first, first + page_size, first_fenced, second_begin_completed_before_first_end);
+	const bool writer_waited_for_second =
+	    GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 1u) &&
+	    !registration_done.load(std::memory_order_acquire);
+	release_second_end.store(true, std::memory_order_release);
+	second_begin.join();
+	const auto registration_done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (!registration_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < registration_done_deadline)
+	{
+		std::this_thread::yield();
+	}
+	registration.join();
+
+	EXPECT_EQ(first_fenced.size(), 1u);
+	EXPECT_TRUE(writer_waited_for_first);
+	EXPECT_TRUE(second_begin_completed_before_first_end);
+	EXPECT_TRUE(writer_waited_for_second);
+	EXPECT_TRUE(registration_done.load(std::memory_order_acquire));
+	EXPECT_TRUE(registration_result.load(std::memory_order_acquire));
+	EXPECT_EQ(GpuDirtyPageTrackerTestAccess::PublisherCount(tracker), 0u);
+
+	const auto observation = tracker.BeginRead(first, page_size);
+	EXPECT_TRUE(observation.tracked);
+	const uint32_t restores_before = protection.signal_safe_calls;
+	EXPECT_TRUE(tracker.HandleWriteFault(first));
+	EXPECT_EQ(protection.signal_safe_calls, restores_before + 1u);
+	EXPECT_FALSE(protection.signal_safe_tokens.empty());
+	if (!protection.signal_safe_tokens.empty())
+	{
+		const uint32_t expected_token = second_begin_completed_before_first_end ? new_token :
+		                                static_cast<uint32_t>(Mode::ReadWrite);
+		EXPECT_EQ(protection.signal_safe_tokens.back(), expected_token);
+	}
+	EXPECT_TRUE(tracker.UnregisterRange(first, page_size));
 }
 
 TEST(EmulatorGraphicsDirtyTracking, UnregisterCoalescesContiguousPagesWithEqualNativeProtection)
@@ -2618,183 +2798,6 @@ TEST(EmulatorGraphicsDirtyTracking, HashSpanWalkerRefusesWholeRecordWithNoAccess
 TEST(EmulatorGraphicsDirtyTracking, HashSpanWalkerRefusesMetadataHoleAtNoAccessTail)
 {
 	ASSERT_EXIT({ RunHashSpanProbe(HashSpanProbeMode::MetadataHoleNoAccessTail); std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
-}
-
-TEST(EmulatorGraphicsDirtyTracking, RetiredPageRegistrationWaitsForMappingChangePublication)
-{
-	Mapping mapping(1);
-	ASSERT_NE(mapping.address, 0u);
-	const uint64_t      page_size = GetPageSize();
-	FakeProtection      protection {mapping.address, page_size, {Mode::ReadWrite}};
-	GpuDirtyPageTracker tracker(protection.Ops());
-
-	ASSERT_TRUE(tracker.RegisterRange(mapping.address, page_size));
-	ASSERT_TRUE(tracker.Rearm(mapping.address, page_size));
-	ASSERT_TRUE(tracker.UnregisterRange(mapping.address, page_size));
-	ASSERT_NE(protection.authority, nullptr);
-
-	const auto*                authority = protection.authority;
-	Kyty::Core::SysWriteLeases leases;
-	leases.Add(mapping.address, mapping.address + page_size, static_cast<uint32_t>(Mode::ReadWrite), authority);
-	std::vector<Kyty::Core::SysWriteLeaseRun> fenced;
-	leases.BeginUnmap(mapping.address, mapping.address + page_size, &fenced);
-	const bool expected_authority_fenced = fenced.size() == 1u && fenced[0].address == mapping.address &&
-	                                       fenced[0].end == mapping.address + page_size && fenced[0].authority == authority;
-
-	std::atomic<bool> registration_done {false};
-	std::atomic<bool> registration_result {false};
-	std::thread       registration(
-	    [&]
-	    {
-		    registration_result.store(tracker.RegisterRange(mapping.address, page_size), std::memory_order_release);
-		    registration_done.store(true, std::memory_order_release);
-	    });
-	const auto writer_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-	while (!GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 1u) &&
-	       std::chrono::steady_clock::now() < writer_deadline)
-	{
-		std::this_thread::yield();
-	}
-	const bool writer_waited_for_publication = GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 1u);
-
-	// Simulate the replacement mapping becoming native-visible before EndUnmap
-	// publishes its identity to the tracker.
-	const uint32_t new_token      = 0x407u;
-	protection.original_modes[0]  = Mode::ExecuteReadWrite;
-	protection.current_modes[0]   = Mode::ExecuteReadWrite;
-	protection.original_tokens[0] = new_token;
-	leases.EndUnmap(mapping.address, mapping.address + page_size, fenced, true);
-	registration.join();
-
-	EXPECT_TRUE(expected_authority_fenced);
-	EXPECT_EQ(GpuDirtyPageTrackerTestAccess::PublisherCount(tracker), 0u);
-	EXPECT_TRUE(writer_waited_for_publication);
-	EXPECT_TRUE(registration_result.load(std::memory_order_acquire));
-
-	const auto observation = tracker.BeginRead(mapping.address, page_size);
-	EXPECT_TRUE(observation.tracked);
-	const uint32_t restores_before = protection.signal_safe_calls;
-	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address));
-	EXPECT_EQ(protection.signal_safe_calls, restores_before + 1u);
-	EXPECT_FALSE(protection.signal_safe_tokens.empty());
-	if (!protection.signal_safe_tokens.empty())
-	{
-		EXPECT_EQ(protection.signal_safe_tokens.back(), new_token);
-	}
-	EXPECT_EQ(protection.current_modes[0], Mode::ExecuteReadWrite);
-	EXPECT_TRUE(tracker.ChangedSince(mapping.address, page_size, observation.generation));
-	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, page_size));
-}
-
-// A pending identity writer must let another run in an active VM transaction
-// announce its change, then wait for both publications before reusing a page.
-
-TEST(EmulatorGraphicsDirtyTracking, RetiredPageWriterJoinsMultiRunMappingChange)
-{
-	Mapping mapping(3);
-	ASSERT_NE(mapping.address, 0u);
-	const uint64_t      page_size = GetPageSize();
-	const uintptr_t     first     = mapping.address;
-	const uintptr_t     second    = mapping.address + 2u * page_size;
-	FakeProtection      protection {mapping.address, page_size, std::vector<Mode>(3, Mode::ReadWrite)};
-	GpuDirtyPageTracker tracker(protection.Ops());
-	ASSERT_TRUE(tracker.RegisterRange(first, page_size));
-	ASSERT_TRUE(tracker.RegisterRange(second, page_size));
-	ASSERT_TRUE(tracker.Rearm(first, page_size));
-	ASSERT_TRUE(tracker.Rearm(second, page_size));
-	ASSERT_TRUE(tracker.UnregisterRange(first, page_size));
-	ASSERT_TRUE(tracker.UnregisterRange(second, page_size));
-	ASSERT_NE(protection.authority, nullptr);
-
-	const auto*                authority = protection.authority;
-	Kyty::Core::SysWriteLeases leases;
-	leases.Add(first, first + page_size, static_cast<uint32_t>(Mode::ReadWrite), authority);
-	leases.Add(second, second + page_size, static_cast<uint32_t>(Mode::ReadWrite), authority);
-	std::vector<Kyty::Core::SysWriteLeaseRun> first_fenced;
-	leases.BeginUnmap(first, first + page_size, &first_fenced);
-
-	std::atomic<bool> registration_done {false};
-	std::atomic<bool> registration_result {false};
-	std::thread       registration(
-	    [&]
-	    {
-		    registration_result.store(tracker.RegisterRange(first, page_size), std::memory_order_release);
-		    registration_done.store(true, std::memory_order_release);
-	    });
-	const auto writer_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-	while (!GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 1u) &&
-	       std::chrono::steady_clock::now() < writer_deadline)
-	{
-		std::this_thread::yield();
-	}
-	const bool writer_waited_for_first = GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 1u);
-
-	std::atomic<bool> second_begin_done {false};
-	std::atomic<bool> release_second_end {false};
-	std::thread       second_begin(
-	    [&]
-	    {
-		    std::vector<Kyty::Core::SysWriteLeaseRun> second_fenced;
-		    leases.BeginUnmap(second, second + page_size, &second_fenced);
-		    second_begin_done.store(true, std::memory_order_release);
-		    while (!release_second_end.load(std::memory_order_acquire))
-		    {
-			    std::this_thread::yield();
-		    }
-		    leases.EndUnmap(second, second + page_size, second_fenced, true);
-	    });
-	const auto second_begin_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-	while ((!second_begin_done.load(std::memory_order_acquire) ||
-	        !GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 2u)) &&
-	       std::chrono::steady_clock::now() < second_begin_deadline)
-	{
-		std::this_thread::yield();
-	}
-	const bool second_begin_completed_before_first_end =
-	    second_begin_done.load(std::memory_order_acquire) && GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 2u);
-
-	// Commit the replacement only when the second run was collected before the
-	// first end. On the timeout path, an aborted first run releases the writer
-	// without mutating the lease registry while the second begin may be pending.
-	const uint32_t new_token = 0x417u;
-	if (second_begin_completed_before_first_end)
-	{
-		protection.original_modes[0]  = Mode::ExecuteReadWrite;
-		protection.current_modes[0]   = Mode::ExecuteReadWrite;
-		protection.original_tokens[0] = new_token;
-	}
-	leases.EndUnmap(first, first + page_size, first_fenced, second_begin_completed_before_first_end);
-	const bool writer_waited_for_second =
-	    GpuDirtyPageTrackerTestAccess::WriterPendingWithPublisherCount(tracker, 1u) && !registration_done.load(std::memory_order_acquire);
-	release_second_end.store(true, std::memory_order_release);
-	second_begin.join();
-	const auto registration_done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-	while (!registration_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < registration_done_deadline)
-	{
-		std::this_thread::yield();
-	}
-	registration.join();
-
-	EXPECT_EQ(first_fenced.size(), 1u);
-	EXPECT_TRUE(writer_waited_for_first);
-	EXPECT_TRUE(second_begin_completed_before_first_end);
-	EXPECT_TRUE(writer_waited_for_second);
-	EXPECT_TRUE(registration_done.load(std::memory_order_acquire));
-	EXPECT_TRUE(registration_result.load(std::memory_order_acquire));
-	EXPECT_EQ(GpuDirtyPageTrackerTestAccess::PublisherCount(tracker), 0u);
-
-	const auto observation = tracker.BeginRead(first, page_size);
-	EXPECT_TRUE(observation.tracked);
-	const uint32_t restores_before = protection.signal_safe_calls;
-	EXPECT_TRUE(tracker.HandleWriteFault(first));
-	EXPECT_EQ(protection.signal_safe_calls, restores_before + 1u);
-	EXPECT_FALSE(protection.signal_safe_tokens.empty());
-	if (!protection.signal_safe_tokens.empty())
-	{
-		const uint32_t expected_token = second_begin_completed_before_first_end ? new_token : static_cast<uint32_t>(Mode::ReadWrite);
-		EXPECT_EQ(protection.signal_safe_tokens.back(), expected_token);
-	}
-	EXPECT_TRUE(tracker.UnregisterRange(first, page_size));
 }
 
 UT_END();

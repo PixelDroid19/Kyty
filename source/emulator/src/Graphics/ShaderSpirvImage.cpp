@@ -4673,7 +4673,14 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
          %t172_<index> = OpIAdd %v2uint %t160_<index> %t73_<index>
          %image_store_mip_float_<index> = OpCompositeConstruct %v4float<channel_values>
          %t88_<index> = <texel_conversion> %<image_vector> %image_store_mip_float_<index>
-                OpImageWrite %t27_<index> %t172_<index> %t88_<index>
+         %image_store_mip_exec_<index> = OpLoad %uint %exec_lo
+         %image_store_mip_active_<index> = OpINotEqual %bool %image_store_mip_exec_<index> %uint_0
+               OpSelectionMerge %image_store_mip_merge_<index> None
+               OpBranchConditional %image_store_mip_active_<index> %image_store_mip_write_<index> %image_store_mip_merge_<index>
+         %image_store_mip_write_<index> = OpLabel
+               OpImageWrite %t27_<index> %t172_<index> %t88_<index>
+               OpBranch %image_store_mip_merge_<index>
+         %image_store_mip_merge_<index> = OpLabel
 )";
 		*dst_source += String8(text)
 		                   .ReplaceStr("ImageL", uint_alias ? "ImageLU" : "ImageL")

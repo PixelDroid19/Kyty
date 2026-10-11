@@ -11,6 +11,7 @@
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
@@ -28,6 +29,7 @@
 #include "../../emulator/src/Graphics/GraphicsRenderInternal.h"
 #include "../../emulator/src/Graphics/GraphicsRunInternal.h"
 #include "../../emulator/src/Graphics/Objects/GpuMemoryInternal.h"
+#include "../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 #include "Emulator/Log.h"
 
 #include "spirv-tools/libspirv.hpp"
@@ -645,9 +647,9 @@ void VerifyVertexClipProbeContract()
 	ShaderVertexInputInfo ieee_input = dx10_input;
 	ieee_input.ieee_mode             = true;
 	const auto ieee_source = SpirvGenerateSource(clamped_code, &ieee_input, nullptr, nullptr);
-	Expect(ieee_source.FindIndex("dx10_clamp_nan_0") == Kyty::Core::STRING8_INVALID_INDEX &&
-	           ieee_source.FindIndex("FClamp") == Kyty::Core::STRING8_INVALID_INDEX,
-	       "IEEE mode ignores the floating output clamp modifier");
+	Expect(ieee_source.FindIndex("%c200_0 = OpSelect %float %dx10_clamp_nan_0 %float_0_000000 %dx10_clamp_numeric_0") !=
+	           Kyty::Core::STRING8_INVALID_INDEX,
+	       "IEEE mode keeps the floating clamp modifier and its DX10 NaN rule");
 	ExpectValidSpirv(dx10_source, "DX10 clamp-modifier source validates");
 	ExpectValidSpirv(passthrough_source, "NaN-preserving clamp-modifier source validates");
 	ExpectValidSpirv(unclamped_source, "ordinary unclamped VALU source validates");
@@ -1505,9 +1507,12 @@ void VerifyVertexClipProbeContract()
 	ShaderCode resolver_code {};
 	resolver_code.SetType(ShaderType::Vertex);
 	resolver_code.GetInstructions().Add(resolver_load);
+	// Keep the appended fixture PCs ordered after the synthetic MUBUF while preserving parsed spacing.
 	for (const auto& instruction: vertex_code.GetInstructions())
 	{
-		resolver_code.GetInstructions().Add(instruction);
+		auto relocated_instruction = instruction;
+		relocated_instruction.pc += 0x48u;
+		resolver_code.GetInstructions().Add(relocated_instruction);
 	}
 	ShaderVertexInputInfo resolver_input = probe_vertex_input;
 	resolver_input.clip_probe.diagnostic_identity = set_identity_1;
@@ -1527,10 +1532,12 @@ void VerifyVertexClipProbeContract()
 	ordinary_resolver_input.clip_probe_descriptor_set     = kVertexClipProbeInvalidDescriptorSet;
 	const auto ordinary_resolver_source = SpirvGenerateSource(resolver_code, &ordinary_resolver_input, nullptr, nullptr);
 	Expect(ordinary_resolver_source.FindIndex("%buf_addr_valid_c_0_0 = OpLogicalAnd %bool") !=
-	               Kyty::Core::STRING8_INVALID_INDEX &&
-	           ordinary_resolver_source.FindIndex("vertex_resolver_") == Kyty::Core::STRING8_INVALID_INDEX &&
-	           ordinary_resolver_source.FindIndex("vertex_clip_probe") == Kyty::Core::STRING8_INVALID_INDEX,
-	       "ordinary embedded MUBUF retains its existing resolver without host diagnostic storage or stores");
+	           Kyty::Core::STRING8_INVALID_INDEX,
+	       "ordinary embedded MUBUF retains its existing address-validity guard");
+	Expect(ordinary_resolver_source.FindIndex("vertex_resolver_") == Kyty::Core::STRING8_INVALID_INDEX,
+	       "ordinary embedded MUBUF has no live-resolver diagnostic stores");
+	Expect(ordinary_resolver_source.FindIndex("vertex_clip_probe") == Kyty::Core::STRING8_INVALID_INDEX,
+	       "ordinary embedded MUBUF has no vertex clip-probe storage or stores");
 	ExpectValidSpirv(ordinary_resolver_source, "ordinary embedded MUBUF source validates without live-resolver probe");
 	const auto resolver_source = SpirvGenerateSource(resolver_code, &resolver_input, nullptr, nullptr);
 	const auto resolver_decision = resolver_source.FindIndex("%buf_addr_valid_c_0_0 = OpLogicalAnd %bool");
@@ -1555,11 +1562,19 @@ void VerifyVertexClipProbeContract()
 	ShaderParse(xy_param0_shader, &xy_param0_code);
 	Expect(xy_param0_code.GetInstructions().At(1).format == ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3 &&
 	           xy_param0_code.GetInstructions().At(1).exp_enable_mask == 0x03u,
-	       "XY-only PARAM0 fixture reaches the established full-format fallback while retaining its channel mask");
+	       "XY-only PARAM0 fixture retains its channel mask in the full-format instruction");
 	const auto xy_param0_source = SpirvGenerateSource(xy_param0_code, &probe_vertex_input, nullptr, nullptr);
-	Expect(xy_param0_source.FindIndex("OpStore %param0 %t4_1") != Kyty::Core::STRING8_INVALID_INDEX &&
+	Expect(xy_param0_source.FindIndex("%exp_component_0_1 = OpAccessChain %_ptr_Output_float %param0 %uint_0") !=
+	               Kyty::Core::STRING8_INVALID_INDEX &&
+	           xy_param0_source.FindIndex("OpStore %exp_component_0_1 %t0_1") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           xy_param0_source.FindIndex("%exp_component_1_1 = OpAccessChain %_ptr_Output_float %param0 %uint_1") !=
+	               Kyty::Core::STRING8_INVALID_INDEX &&
+	           xy_param0_source.FindIndex("OpStore %exp_component_1_1 %t1_1") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           xy_param0_source.FindIndex("OpStore %exp_component_2_1") == Kyty::Core::STRING8_INVALID_INDEX &&
+	           xy_param0_source.FindIndex("OpStore %exp_component_3_1") == Kyty::Core::STRING8_INVALID_INDEX &&
+	           xy_param0_source.FindIndex("OpStore %param0 %t4_1") == Kyty::Core::STRING8_INVALID_INDEX &&
 	           xy_param0_source.FindIndex("vertex_param0_probe_exports_ptr_1") != Kyty::Core::STRING8_INVALID_INDEX,
-	       "XY-only PARAM0 preserves the export and populates the complete X/Y diagnostic contract");
+	       "XY-only PARAM0 stores only enabled X/Y channels and retains the X/Y diagnostic probe");
 	ExpectValidSpirv(xy_param0_source, "XY-only PARAM0 selected source validates with PARAM0 probe atomics");
 	const uint32_t x_only_param0_shader[] = {
 	    0xbf800000u, 0xf8000201u, 0x03020100u, 0xf80008cfu, 0x03020100u, 0xbf810000u,
@@ -1568,9 +1583,15 @@ void VerifyVertexClipProbeContract()
 	x_only_param0_code.SetType(ShaderType::Vertex);
 	ShaderParse(x_only_param0_shader, &x_only_param0_code);
 	const auto x_only_param0_source = SpirvGenerateSource(x_only_param0_code, &probe_vertex_input, nullptr, nullptr);
-	Expect(x_only_param0_source.FindIndex("OpStore %param0 %t4_1") != Kyty::Core::STRING8_INVALID_INDEX &&
+	Expect(x_only_param0_source.FindIndex("%exp_component_0_1 = OpAccessChain %_ptr_Output_float %param0 %uint_0") !=
+	               Kyty::Core::STRING8_INVALID_INDEX &&
+	           x_only_param0_source.FindIndex("OpStore %exp_component_0_1 %t0_1") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           x_only_param0_source.FindIndex("OpStore %exp_component_1_1") == Kyty::Core::STRING8_INVALID_INDEX &&
+	           x_only_param0_source.FindIndex("OpStore %exp_component_2_1") == Kyty::Core::STRING8_INVALID_INDEX &&
+	           x_only_param0_source.FindIndex("OpStore %exp_component_3_1") == Kyty::Core::STRING8_INVALID_INDEX &&
+	           x_only_param0_source.FindIndex("OpStore %param0 %t4_1") == Kyty::Core::STRING8_INVALID_INDEX &&
 	           x_only_param0_source.FindIndex("vertex_param0_probe_") == Kyty::Core::STRING8_INVALID_INDEX,
-	       "PARAM0 without Y preserves the existing export but cannot populate the X/Y diagnostic contract");
+	       "X-only PARAM0 stores only enabled X and cannot populate the X/Y diagnostic contract");
 	ExpectValidSpirv(x_only_param0_source, "X-only PARAM0 selected source validates without PARAM0 probe atomics");
 	ShaderVertexInputInfo probe_vertex_input_set_1 = probe_vertex_input;
 	probe_vertex_input_set_1.clip_probe.diagnostic_identity = set_identity_1;
@@ -1977,12 +1998,12 @@ void VerifyVertexClipProbeContract()
 	pixel_depth_bypass_branch.type            = ShaderInstructionType::SBranch;
 	pixel_depth_bypass_branch.format          = ShaderInstructionFormat::Label;
 	pixel_depth_bypass_branch.src[0]          = {.type = ShaderOperandType::LiteralConstant};
-	pixel_depth_bypass_branch.src[0].constant = {.i = 4}; // pc 0 + 4 + 4 = pc 8 (s_endpgm)
+	pixel_depth_bypass_branch.src[0].constant = {.i = 8}; // pc 0 + 4 + 8 = pc 12 (s_endpgm)
 	pixel_depth_bypass_branch.src_num         = 1;
 	auto pixel_depth_bypass_export = pixel_depth_export;
 	pixel_depth_bypass_export.pc   = 4;
 	ShaderInstruction pixel_depth_bypass_end {};
-	pixel_depth_bypass_end.pc     = 8;
+	pixel_depth_bypass_end.pc     = 12;
 	pixel_depth_bypass_end.type   = ShaderInstructionType::SEndpgm;
 	pixel_depth_bypass_end.format = ShaderInstructionFormat::Empty;
 	ShaderCode pixel_depth_bypass_code {};
@@ -1994,9 +2015,11 @@ void VerifyVertexClipProbeContract()
 	const auto pixel_depth_bypass_source = SpirvGenerateSource(pixel_depth_bypass_code, nullptr, &pixel_depth_input, nullptr);
 	Expect(pixel_depth_bypass_source.FindIndex("OpKytyPixelDepthControlFlowRejected") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "pixel-depth export rejects an early-return branch that bypasses the FragDepth store");
-	const auto pixel_depth_bypass_binary = ShaderRecompilePS(pixel_depth_bypass_code, &pixel_depth_input);
-	Expect(pixel_depth_bypass_binary.IsEmpty(),
-	       "pixel-depth early-return bypass remains rejected through pixel shader recompilation");
+	Kyty::Vector<uint32_t> pixel_depth_bypass_binary;
+	Kyty::Core::String8     pixel_depth_bypass_error;
+	Expect(!ShaderToolchain::Run(pixel_depth_bypass_source, &pixel_depth_bypass_binary, &pixel_depth_bypass_error) &&
+	           pixel_depth_bypass_binary.IsEmpty(),
+	       "pixel-depth early-return bypass remains rejected at the SPIR-V compiler boundary");
 
 	ShaderInstruction guest_atomic {};
 	guest_atomic.type              = ShaderInstructionType::BufferAtomicAdd;
@@ -4230,6 +4253,9 @@ public:
 		}
 		if (context.device != VK_NULL_HANDLE)
 		{
+			// The test context owns this device, so release empty pooled blocks
+			// after renderer resources are retired and before destroying the device.
+			VulkanMemoryPoolRelease(&context);
 			vkDestroyDevice(context.device, nullptr);
 		}
 		if (context.instance != VK_NULL_HANDLE)
@@ -4238,7 +4264,7 @@ public:
 		}
 	}
 
-	[[nodiscard]] bool Initialize(bool dual_source = false)
+	[[nodiscard]] bool Initialize(bool dual_source = false, bool independent_blend = false)
 	{
 		VkApplicationInfo application {};
 		application.sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -4269,9 +4295,14 @@ public:
 			if (properties.apiVersion < VK_API_VERSION_1_4) { continue; }
 			VkPhysicalDeviceFeatures supported_features {};
 			vkGetPhysicalDeviceFeatures(physical, &supported_features);
-			if (dual_source && supported_features.dualSrcBlend == VK_FALSE) { continue; }
+			if ((dual_source && supported_features.dualSrcBlend == VK_FALSE) ||
+			    (independent_blend && supported_features.independentBlend == VK_FALSE))
+			{
+				continue;
+			}
 			VkPhysicalDeviceFeatures enabled_features {};
-			enabled_features.dualSrcBlend = dual_source ? VK_TRUE : VK_FALSE;
+			enabled_features.dualSrcBlend       = dual_source ? VK_TRUE : VK_FALSE;
+			enabled_features.independentBlend    = independent_blend ? VK_TRUE : VK_FALSE;
 			uint32_t extension_count = 0;
 			if (vkEnumerateDeviceExtensionProperties(physical, nullptr, &extension_count, nullptr) != VK_SUCCESS)
 			{
@@ -4316,7 +4347,7 @@ public:
 				device_info.sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 				device_info.queueCreateInfoCount = 1;
 				device_info.pQueueCreateInfos    = &queue_info;
-				device_info.pEnabledFeatures        = dual_source ? &enabled_features : nullptr;
+				device_info.pEnabledFeatures        = (dual_source || independent_blend) ? &enabled_features : nullptr;
 				device_info.enabledExtensionCount   = load_store_op_none_extension != nullptr ? 1u : 0u;
 				device_info.ppEnabledExtensionNames =
 				    load_store_op_none_extension != nullptr ? &load_store_op_none_extension : nullptr;
@@ -4649,6 +4680,179 @@ private:
 	bool            m_readback = false;
 };
 
+class HostUint16MrtTarget
+{
+public:
+	explicit HostUint16MrtTarget(GraphicContext* context, std::array<VkFormat, 2> formats): m_context(context), m_formats(formats) {}
+	~HostUint16MrtTarget() { Done(); }
+
+	[[nodiscard]] bool Create()
+	{
+		if (m_context == nullptr || m_context->device == VK_NULL_HANDLE || m_context->physical_device == VK_NULL_HANDLE)
+		{
+			return false;
+		}
+		VkPhysicalDeviceProperties properties {};
+		vkGetPhysicalDeviceProperties(m_context->physical_device, &properties);
+		if (properties.limits.maxColorAttachments < m_formats.size())
+		{
+			return false;
+		}
+		for (const auto format: m_formats)
+		{
+			VkImageFormatProperties format_properties {};
+			if (vkGetPhysicalDeviceImageFormatProperties(m_context->physical_device, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+			                                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 0u,
+			                                             &format_properties) != VK_SUCCESS ||
+			    (format_properties.sampleCounts & VK_SAMPLE_COUNT_1_BIT) == 0u)
+			{
+				return false;
+			}
+		}
+
+		for (uint32_t index = 0u; index < m_formats.size(); ++index)
+		{
+			VkImageCreateInfo image_info {};
+			image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+			image_info.imageType     = VK_IMAGE_TYPE_2D;
+			image_info.format        = m_formats[index];
+			image_info.extent        = {HostNanRasterTarget::kExtent, HostNanRasterTarget::kExtent, 1u};
+			image_info.mipLevels     = 1u;
+			image_info.arrayLayers   = 1u;
+			image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
+			image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+			image_info.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+			image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+			image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			Expect(vkCreateImage(m_context->device, &image_info, nullptr, &m_images[index]) == VK_SUCCESS,
+			       "UINT16 MRT image creation succeeds after format capability checks");
+
+			VkMemoryRequirements requirements {};
+			vkGetImageMemoryRequirements(m_context->device, m_images[index], &requirements);
+			uint32_t memory_type = 0u;
+			Expect(FindHostNanRasterMemoryType(m_context->physical_device, requirements.memoryTypeBits, &memory_type),
+			       "UINT16 MRT image has device-local memory");
+			VkMemoryAllocateInfo memory_info {};
+			memory_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+			memory_info.allocationSize  = requirements.size;
+			memory_info.memoryTypeIndex = memory_type;
+			Expect(vkAllocateMemory(m_context->device, &memory_info, nullptr, &m_memories[index]) == VK_SUCCESS &&
+			           vkBindImageMemory(m_context->device, m_images[index], m_memories[index], 0u) == VK_SUCCESS,
+			       "UINT16 MRT image receives device-local memory");
+
+			VkImageViewCreateInfo view_info {};
+			view_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			view_info.image                           = m_images[index];
+			view_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+			view_info.format                          = m_formats[index];
+			view_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+			view_info.subresourceRange.baseMipLevel   = 0u;
+			view_info.subresourceRange.levelCount     = 1u;
+			view_info.subresourceRange.baseArrayLayer = 0u;
+			view_info.subresourceRange.layerCount     = 1u;
+			Expect(vkCreateImageView(m_context->device, &view_info, nullptr, &m_views[index]) == VK_SUCCESS,
+			       "UINT16 MRT image view creation succeeds");
+		}
+
+		VkAttachmentDescription attachments[2] {};
+		VkAttachmentReference   references[2] {};
+		for (uint32_t index = 0u; index < m_formats.size(); ++index)
+		{
+			attachments[index].format         = m_formats[index];
+			attachments[index].samples        = VK_SAMPLE_COUNT_1_BIT;
+			attachments[index].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+			attachments[index].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+			attachments[index].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			attachments[index].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			attachments[index].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+			attachments[index].finalLayout    = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+			references[index].attachment      = index;
+			references[index].layout          = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		}
+		VkSubpassDescription subpass {};
+		subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.colorAttachmentCount = static_cast<uint32_t>(m_formats.size());
+		subpass.pColorAttachments    = references;
+		VkSubpassDependency dependency {};
+		dependency.srcSubpass      = 0u;
+		dependency.dstSubpass      = VK_SUBPASS_EXTERNAL;
+		dependency.srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		dependency.dstStageMask    = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		dependency.srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		dependency.dstAccessMask   = VK_ACCESS_TRANSFER_READ_BIT;
+		dependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+		VkRenderPassCreateInfo render_pass_info {};
+		render_pass_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		render_pass_info.attachmentCount = static_cast<uint32_t>(m_formats.size());
+		render_pass_info.pAttachments    = attachments;
+		render_pass_info.subpassCount    = 1u;
+		render_pass_info.pSubpasses      = &subpass;
+		render_pass_info.dependencyCount = 1u;
+		render_pass_info.pDependencies   = &dependency;
+		Expect(vkCreateRenderPass(m_context->device, &render_pass_info, nullptr, &render_pass) == VK_SUCCESS,
+		       "UINT16 MRT render pass creation succeeds");
+		VkFramebufferCreateInfo framebuffer_info {};
+		framebuffer_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		framebuffer_info.renderPass      = render_pass;
+		framebuffer_info.attachmentCount = static_cast<uint32_t>(m_formats.size());
+		framebuffer_info.pAttachments    = m_views.data();
+		framebuffer_info.width           = HostNanRasterTarget::kExtent;
+		framebuffer_info.height          = HostNanRasterTarget::kExtent;
+		framebuffer_info.layers          = 1u;
+		Expect(vkCreateFramebuffer(m_context->device, &framebuffer_info, nullptr, &framebuffer) == VK_SUCCESS,
+		       "UINT16 MRT framebuffer creation succeeds");
+		return true;
+	}
+
+	void Done()
+	{
+		if (m_context == nullptr || m_context->device == VK_NULL_HANDLE)
+		{
+			return;
+		}
+		if (framebuffer != VK_NULL_HANDLE)
+		{
+			vkDestroyFramebuffer(m_context->device, framebuffer, nullptr);
+			framebuffer = VK_NULL_HANDLE;
+		}
+		if (render_pass != VK_NULL_HANDLE)
+		{
+			vkDestroyRenderPass(m_context->device, render_pass, nullptr);
+			render_pass = VK_NULL_HANDLE;
+		}
+		for (uint32_t index = 0u; index < m_formats.size(); ++index)
+		{
+			if (m_views[index] != VK_NULL_HANDLE)
+			{
+				vkDestroyImageView(m_context->device, m_views[index], nullptr);
+				m_views[index] = VK_NULL_HANDLE;
+			}
+			if (m_images[index] != VK_NULL_HANDLE)
+			{
+				vkDestroyImage(m_context->device, m_images[index], nullptr);
+				m_images[index] = VK_NULL_HANDLE;
+			}
+			if (m_memories[index] != VK_NULL_HANDLE)
+			{
+				vkFreeMemory(m_context->device, m_memories[index], nullptr);
+				m_memories[index] = VK_NULL_HANDLE;
+			}
+		}
+	}
+
+	VkRenderPass  render_pass = VK_NULL_HANDLE;
+	VkFramebuffer framebuffer = VK_NULL_HANDLE;
+
+	[[nodiscard]] VkImage Image(uint32_t index) const { return index < m_images.size() ? m_images[index] : VK_NULL_HANDLE; }
+
+private:
+	GraphicContext*               m_context = nullptr;
+	std::array<VkFormat, 2>       m_formats {};
+	std::array<VkImage, 2>        m_images {};
+	std::array<VkDeviceMemory, 2> m_memories {};
+	std::array<VkImageView, 2>    m_views {};
+};
+
 Kyty::Core::String8 HostNanRasterVertexShaderSource(bool nan_position_z)
 {
 	// 0x7fc00000 is IEEE-754 binary32 quiet NaN. Only gl_Position.z of
@@ -4721,6 +4925,102 @@ OpFunctionEnd
 )spv";
 }
 
+Kyty::Core::String8 HostParameterExecFragmentShaderSource()
+{
+	return R"spv(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %param0 %param1 %color
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %param0 Location 0
+OpDecorate %param1 Location 1
+OpDecorate %color Location 0
+%void = OpTypeVoid
+%function = OpTypeFunction %void
+%float = OpTypeFloat 32
+%v4float = OpTypeVector %float 4
+%ptr_Input_v4float = OpTypePointer Input %v4float
+%ptr_Output_v4float = OpTypePointer Output %v4float
+%param0 = OpVariable %ptr_Input_v4float Input
+%param1 = OpVariable %ptr_Input_v4float Input
+%color = OpVariable %ptr_Output_v4float Output
+%float_1 = OpConstant %float 1
+%main = OpFunction %void None %function
+%entry = OpLabel
+%param0_value = OpLoad %v4float %param0
+%param1_value = OpLoad %v4float %param1
+%red = OpCompositeExtract %float %param0_value 0
+%green = OpCompositeExtract %float %param0_value 1
+%blue = OpCompositeExtract %float %param1_value 2
+%color_value = OpCompositeConstruct %v4float %red %green %blue %float_1
+OpStore %color %color_value
+OpReturn
+OpFunctionEnd
+)spv";
+}
+
+Kyty::Core::String8 HostParameterMaskFragmentShaderSource(bool consume_param1, uint32_t enable_mask)
+{
+	if (enable_mask == 0u || enable_mask > 0xfu) { return {}; }
+	const uint32_t location = consume_param1 ? 1u : 0u;
+	Kyty::Core::String8 source = R"spv(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main")spv";
+	// Disabled lanes are a defined fragment marker; they never read guest inputs.
+	const char* channels[4] = {"%float_1", "%float_1", "%float_1", "%float_1"};
+	static const char* const lane_names[] = {"%lane_0", "%lane_1", "%lane_2", "%lane_3"};
+	for (uint32_t component = 0u; component < 4u; ++component)
+	{
+		if ((enable_mask & (1u << component)) == 0u) { continue; }
+		source += Kyty::Core::String8::FromPrintf(" %%param_component_%u", component);
+		channels[component] = lane_names[component];
+	}
+	source += R"spv( %color
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %color Location 0
+)spv";
+	for (uint32_t component = 0u; component < 4u; ++component)
+	{
+		if ((enable_mask & (1u << component)) == 0u) { continue; }
+		source += Kyty::Core::String8::FromPrintf("OpDecorate %%param_component_%u Location %u\n"
+	                              "OpDecorate %%param_component_%u Component %u\n",
+	                              component, location, component, component);
+	}
+	source += R"spv(
+%void = OpTypeVoid
+%function = OpTypeFunction %void
+%float = OpTypeFloat 32
+%v4float = OpTypeVector %float 4
+%ptr_Input_float = OpTypePointer Input %float
+%ptr_Output_v4float = OpTypePointer Output %v4float
+)spv";
+	source += R"spv(
+%color = OpVariable %ptr_Output_v4float Output
+%float_1 = OpConstant %float 1
+)spv";
+	for (uint32_t component = 0u; component < 4u; ++component)
+	{
+		if ((enable_mask & (1u << component)) == 0u) { continue; }
+		source += Kyty::Core::String8::FromPrintf("%%param_component_%u = OpVariable %%ptr_Input_float Input\n", component);
+	}
+	source += R"spv(
+%main = OpFunction %void None %function
+%entry = OpLabel
+)spv";
+	for (uint32_t component = 0u; component < 4u; ++component)
+	{
+		if ((enable_mask & (1u << component)) == 0u) { continue; }
+		source += Kyty::Core::String8::FromPrintf("%%lane_%u = OpLoad %%float %%param_component_%u\n", component, component);
+	}
+	source += Kyty::Core::String8::FromPrintf("%%color_value = OpCompositeConstruct %%v4float %s %s %s %s\n"
+	                              "OpStore %%color %%color_value\n"
+	                              "OpReturn\n"
+	                              "OpFunctionEnd\n",
+	                              channels[0], channels[1], channels[2], channels[3]);
+	return source;
+}
+
 VkShaderModule CreateHostNanRasterShaderModule(VkDevice device, const Kyty::Core::String8& source, const char* message)
 {
 	if (device == VK_NULL_HANDLE)
@@ -4742,10 +5042,12 @@ VkShaderModule CreateHostNanRasterShaderModule(VkDevice device, const Kyty::Core
 
 VkPipeline CreateHostNanRasterPipeline(VkDevice device, VkRenderPass render_pass, VkPipelineLayout pipeline_layout,
 	                                   VkShaderModule vertex_shader, VkShaderModule fragment_shader,
-	                                   const VkPipelineColorBlendAttachmentState* blend_attachment = nullptr)
+	                                   const VkPipelineColorBlendAttachmentState* blend_attachment = nullptr,
+	                                   uint32_t color_attachment_count = 1u)
 {
 	if (device == VK_NULL_HANDLE || render_pass == VK_NULL_HANDLE || pipeline_layout == VK_NULL_HANDLE ||
-	    vertex_shader == VK_NULL_HANDLE || fragment_shader == VK_NULL_HANDLE)
+	    vertex_shader == VK_NULL_HANDLE || fragment_shader == VK_NULL_HANDLE || color_attachment_count == 0u ||
+	    color_attachment_count > 8u || (color_attachment_count > 1u && blend_attachment == nullptr))
 	{
 		return VK_NULL_HANDLE;
 	}
@@ -4799,7 +5101,7 @@ VkPipeline CreateHostNanRasterPipeline(VkDevice device, VkRenderPass render_pass
 	                                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 	VkPipelineColorBlendStateCreateInfo color_blend {};
 	color_blend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	color_blend.attachmentCount = 1u;
+	color_blend.attachmentCount = color_attachment_count;
 	color_blend.pAttachments    = blend_attachment != nullptr ? blend_attachment : &color_blend_attachment;
 	VkGraphicsPipelineCreateInfo pipeline_info {};
 	pipeline_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -5450,7 +5752,7 @@ void VerifyEventWriteExecutionContract()
 		    KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u),
 		    0x07u,
 		};
-		const auto consumed = cp_op_event_write(processor, stream[0], stream.data() + 1, stream.size(), stream.size());
+		const auto consumed = cp_op_event_write(processor, stream[0], stream.data() + 1, 3u, 5u, 6u);
 		Expect(consumed == 3u, "four-dword EVENT_WRITE consumes exactly its three body dwords");
 		Expect(stream[consumed + 1u] == KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u),
 		       "EVENT_WRITE parser leaves the following packet aligned");
@@ -5531,6 +5833,95 @@ void AppendDualSourceLiteral(std::vector<uint32_t>* words, uint32_t reg, uint32_
 {
 	words->push_back(0x7e0002ffu | (reg << 17u)); // v_mov_b32 vN, literal
 	words->push_back(value);
+}
+
+std::vector<uint32_t> NativeParameterExecGuestWords(bool overwrite_with_full_exec)
+{
+	std::vector<uint32_t> words;
+	words.push_back(0xbf800000u); // s_nop 0 keeps the terminal export in the established shader context.
+
+	// Initialize each exported vector before any EXP can observe it.
+	AppendDualSourceLiteral(&words, 8u, 0x3f800000u);  // PARAM0 seed A: R=1
+	AppendDualSourceLiteral(&words, 9u, 0x00000000u);  // PARAM0 seed A: G=0
+	AppendDualSourceLiteral(&words, 10u, 0x00000000u); // PARAM0 seed A: B=0
+	AppendDualSourceLiteral(&words, 11u, 0x3f800000u); // PARAM0 seed A: A=1
+	AppendDualSourceLiteral(&words, 12u, 0x00000000u); // PARAM0 overwrite B: R=0
+	AppendDualSourceLiteral(&words, 13u, 0x3f800000u); // PARAM0 overwrite B: G=1
+	AppendDualSourceLiteral(&words, 14u, 0x00000000u); // PARAM0 overwrite B: B=0
+	AppendDualSourceLiteral(&words, 15u, 0x3f800000u); // PARAM0 overwrite B: A=1
+	AppendDualSourceLiteral(&words, 16u, 0x00000000u); // PARAM1 C: R=0
+	AppendDualSourceLiteral(&words, 17u, 0x00000000u); // PARAM1 C: G=0
+	AppendDualSourceLiteral(&words, 18u, 0x3f800000u); // PARAM1 C: B=1
+	AppendDualSourceLiteral(&words, 19u, 0x3f800000u); // PARAM1 C: A=1
+
+	// Convert the production prolog's bit-cast VertexIndex in v0 to float. The
+	// equality masks select (-1,-1), (3,-1), and (-1,3) for vertices 0, 1, and 2.
+	AppendDualSourceLiteral(&words, 1u, 0x3f800000u); // compare value 1
+	AppendDualSourceLiteral(&words, 2u, 0x40000000u); // compare value 2
+	AppendDualSourceLiteral(&words, 3u, 0xbf800000u); // coordinate -1
+	AppendDualSourceLiteral(&words, 4u, 0x40400000u); // coordinate 3
+	words.push_back(0x7e000000u | (20u << 17u) | (0x05u << 9u) | 256u); // v_cvt_f32_i32 v20, v0
+	words.push_back(0x7c000000u | (0x02u << 17u) | (1u << 9u) | (256u + 20u)); // v_cmp_eq_f32 vcc, v20, v1
+	words.push_back((21u << 17u) | (4u << 9u) | (256u + 3u)); // v_cndmask_b32 v21, v3, v4, vcc
+	words.push_back(0x7c000000u | (0x02u << 17u) | (2u << 9u) | (256u + 20u)); // v_cmp_eq_f32 vcc, v20, v2
+	words.push_back((22u << 17u) | (4u << 9u) | (256u + 3u)); // v_cndmask_b32 v22, v3, v4, vcc
+	words.push_back(0x7e000000u | (0x01u << 9u) | (256u + 21u)); // v_mov_b32 v0, v21
+	words.push_back(0x7e000000u | (1u << 17u) | (0x01u << 9u) | (256u + 22u)); // v_mov_b32 v1, v22
+	AppendDualSourceLiteral(&words, 2u, 0x00000000u); // POS0.z
+	AppendDualSourceLiteral(&words, 3u, 0x3f800000u); // POS0.w
+
+	words.push_back(0xf800020fu); // EXP PARAM0 with all four components enabled
+	words.push_back(0x0b0a0908u); // A from v8..v11
+	words.push_back(overwrite_with_full_exec ? 0xbefe04c1u : 0xbefe0480u); // EXEC full (control) or zero (masked overwrite)
+	words.push_back(0xf800020fu); // EXP PARAM0 overwrite attempt B
+	words.push_back(0x0f0e0d0cu); // B from v12..v15
+	words.push_back(0xbefe04c1u); // Restore full EXEC before later outputs
+	words.push_back(0xf800021fu); // EXP PARAM1
+	words.push_back(0x13121110u); // C from v16..v19
+	words.push_back(0xf80008cfu); // EXP POS0, all components enabled, DONE
+	words.push_back(0x03020100u); // position from v0..v3
+	words.push_back(0xbf810000u); // s_endpgm
+	return words;
+}
+
+std::vector<uint32_t> NativeParameterMaskGuestWords(uint32_t param0_mask, uint32_t param1_mask)
+{
+	std::vector<uint32_t> words;
+	words.push_back(0xbf800000u); // Keep the terminal export in the established shader context.
+
+	// Distinct binary32 0/1 values make every enabled component visible in RGBA8 readback.
+	AppendDualSourceLiteral(&words, 8u, 0x3f800000u);  // PARAM0: R=1
+	AppendDualSourceLiteral(&words, 9u, 0x00000000u);  // PARAM0: G=0
+	AppendDualSourceLiteral(&words, 10u, 0x3f800000u); // PARAM0: B=1
+	AppendDualSourceLiteral(&words, 11u, 0x00000000u); // PARAM0: A=0
+	AppendDualSourceLiteral(&words, 16u, 0x00000000u); // PARAM1: R=0
+	AppendDualSourceLiteral(&words, 17u, 0x3f800000u); // PARAM1: G=1
+	AppendDualSourceLiteral(&words, 18u, 0x00000000u); // PARAM1: B=0
+	AppendDualSourceLiteral(&words, 19u, 0x3f800000u); // PARAM1: A=1
+
+	// Build the same oversized triangle used by the full-mask EXEC fixture.
+	AppendDualSourceLiteral(&words, 1u, 0x3f800000u); // compare value 1
+	AppendDualSourceLiteral(&words, 2u, 0x40000000u); // compare value 2
+	AppendDualSourceLiteral(&words, 3u, 0xbf800000u); // coordinate -1
+	AppendDualSourceLiteral(&words, 4u, 0x40400000u); // coordinate 3
+	words.push_back(0x7e000000u | (20u << 17u) | (0x05u << 9u) | 256u); // v_cvt_f32_i32 v20, v0
+	words.push_back(0x7c000000u | (0x02u << 17u) | (1u << 9u) | (256u + 20u)); // v_cmp_eq_f32 vcc, v20, v1
+	words.push_back((21u << 17u) | (4u << 9u) | (256u + 3u)); // v_cndmask_b32 v21, v3, v4, vcc
+	words.push_back(0x7c000000u | (0x02u << 17u) | (2u << 9u) | (256u + 20u)); // v_cmp_eq_f32 vcc, v20, v2
+	words.push_back((22u << 17u) | (4u << 9u) | (256u + 3u)); // v_cndmask_b32 v22, v3, v4, vcc
+	words.push_back(0x7e000000u | (0x01u << 9u) | (256u + 21u)); // v_mov_b32 v0, v21
+	words.push_back(0x7e000000u | (1u << 17u) | (0x01u << 9u) | (256u + 22u)); // v_mov_b32 v1, v22
+	AppendDualSourceLiteral(&words, 2u, 0x00000000u); // POS0.z
+	AppendDualSourceLiteral(&words, 3u, 0x3f800000u); // POS0.w
+
+	words.push_back(0xf8000200u | param0_mask); // EXP PARAM0 with this EN mask
+	words.push_back(0x0b0a0908u);               // PARAM0 from v8..v11
+	words.push_back(0xf8000210u | param1_mask); // EXP PARAM1 with a distinct EN mask
+	words.push_back(0x13121110u);               // PARAM1 from v16..v19
+	words.push_back(0xf80008cfu);               // EXP POS0, all components enabled, DONE
+	words.push_back(0x03020100u);               // position from v0..v3
+	words.push_back(0xbf810000u);               // s_endpgm
+	return words;
 }
 
 // Full exports carry binary32 colors in v0..v7. COMPR exports carry binary16 pairs in v0..v3.
@@ -5824,6 +6215,533 @@ void ExpectDualSourceRasterPixels(const uint8_t* pixels, const char* variant)
 	       "outside corners keep the clear color exactly");
 }
 
+constexpr int kUint16MrtUnavailableExit = 77;
+
+struct Uint16MrtRasterCase
+{
+	std::array<VkFormat, 2>              formats;
+	std::array<uint8_t, 2>               enable_masks;
+	std::array<VkColorComponentFlags, 2> write_masks;
+	bool                                 blend_enable = false;
+	bool                                 blend_bypass = false;
+};
+
+std::array<uint32_t, 2> Uint16MrtBytesPerPixel(const std::array<VkFormat, 2>& formats)
+{
+	std::array<uint32_t, 2> bytes {};
+	for (uint32_t target = 0u; target < formats.size(); ++target)
+	{
+		switch (formats[target])
+		{
+			case VK_FORMAT_R16_UINT: bytes[target] = 2u; break;
+			case VK_FORMAT_R16G16_UINT: bytes[target] = 4u; break;
+			case VK_FORMAT_R16G16B16A16_UINT: bytes[target] = 8u; break;
+			default: Expect(false, "UINT16 fixture only uses R16, RG16 and RGBA16 targets");
+		}
+	}
+	return bytes;
+}
+
+std::vector<uint32_t> Uint16MrtGuestWords(const Uint16MrtRasterCase& test)
+{
+	std::vector<uint32_t> words;
+	// Active MRT1 is nonterminal. Its packed halves differ from MRT0, proving that
+	// the outputs use the correct physical register slots.
+	if (test.enable_masks[1] != 0u)
+	{
+		AppendDualSourceLiteral(&words, 17u, 0x7654beefu); // MRT1: R=0xbeef, G=0x7654
+		AppendDualSourceLiteral(&words, 61u, 0x4321cafeu); // MRT1: B=0xcafe, A=0x4321
+		words.push_back(DualSourceExportWord(1u, test.enable_masks[1], 4u));
+		words.push_back(17u | (61u << 8u));
+	}
+	AppendDualSourceLiteral(&words, 17u, 0xabcd1234u); // MRT0: R=0x1234, G=0xabcd
+	AppendDualSourceLiteral(&words, 61u, 0xef015678u); // MRT0: B=0x5678, A=0xef01
+	words.push_back(DualSourceExportWord(0u, test.enable_masks[0], test.enable_masks[1] == 0u ? 4u : 7u));
+	words.push_back(17u | (61u << 8u));
+	if (test.enable_masks[1] == 0u)
+	{
+		// EN=0 with DONE+COMPR is the guest's null terminator. Keep it last so
+		// the preceding MRT0 write remains a nonterminal export.
+		words.push_back(DualSourceExportWord(1u, 0u, 7u));
+		words.push_back(17u | (61u << 8u));
+	}
+	words.push_back(0xbf810000u);
+	return words;
+}
+
+ShaderCode ParseUint16MrtGuestProgram(const Uint16MrtRasterCase& test)
+{
+	const auto words = Uint16MrtGuestWords(test);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	Expect(ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &code),
+	       "UINT16 MRT fixture parses guest words through the production parser");
+	return code;
+}
+
+ShaderPixelInputInfo Uint16MrtInput(const ShaderCode& code)
+{
+	ShaderPixelInputInfo input {};
+	for (uint32_t target = 0u; target < 2u; ++target)
+	{
+		input.target_output_mode[target]   = 7u;
+		input.target_output_number[target] = 4u;
+		input.target_output_order[target]  = 0u;
+	}
+	input.color_exports = ShaderSummarizePixelColorExports(code);
+	return input;
+}
+
+void RenderUint16MrtCase(GraphicContext* context, const Uint16MrtRasterCase& test, VkShaderModule vertex_shader,
+                         VkShaderModule fragment_shader, VkPipelineLayout pipeline_layout, const ShaderPixelColorExports& exports,
+                         uint32_t case_index)
+{
+	HostUint16MrtTarget target(context, test.formats);
+	if (!target.Create())
+	{
+		std::fprintf(stderr, "uint16_mrt_writeback unavailable: R16_UINT/RG16_UINT/RGBA16_UINT MRT capability is missing\n");
+		std::_Exit(kUint16MrtUnavailableExit);
+	}
+	VkPipelineColorBlendAttachmentState blend[2] {};
+	for (uint32_t index = 0u; index < test.write_masks.size(); ++index)
+	{
+		const auto admission = VulkanValidateColorAttachmentBlendRequest(context->physical_device, test.formats[index], test.blend_enable,
+		                                                               test.blend_bypass);
+		Expect(admission == VulkanColorAttachmentBlendAdmission::Supported,
+		       "UINT16 MRT pipeline request passes production color blend capability admission");
+		blend[index].blendEnable = VulkanResolveColorAttachmentBlendEnable(test.blend_enable, test.blend_bypass);
+
+		uint8_t requested_mask = 0u;
+		if ((test.write_masks[index] & VK_COLOR_COMPONENT_R_BIT) != 0u)
+		{
+			requested_mask |= 0x1u;
+		}
+		if ((test.write_masks[index] & VK_COLOR_COMPONENT_G_BIT) != 0u)
+		{
+			requested_mask |= 0x2u;
+		}
+		if ((test.write_masks[index] & VK_COLOR_COMPONENT_B_BIT) != 0u)
+		{
+			requested_mask |= 0x4u;
+		}
+		if ((test.write_masks[index] & VK_COLOR_COMPONENT_A_BIT) != 0u)
+		{
+			requested_mask |= 0x8u;
+		}
+		const uint8_t resolved_mask = exports.enable[index] == 0u
+		                                  ? 0u
+		                                  : State::ResolveColorWriteAgainstUint16Export(requested_mask, exports.enable[index]);
+		if ((resolved_mask & 0x1u) != 0u)
+		{
+			blend[index].colorWriteMask |= VK_COLOR_COMPONENT_R_BIT;
+		}
+		if ((resolved_mask & 0x2u) != 0u)
+		{
+			blend[index].colorWriteMask |= VK_COLOR_COMPONENT_G_BIT;
+		}
+		if ((resolved_mask & 0x4u) != 0u)
+		{
+			blend[index].colorWriteMask |= VK_COLOR_COMPONENT_B_BIT;
+		}
+		if ((resolved_mask & 0x8u) != 0u)
+		{
+			blend[index].colorWriteMask |= VK_COLOR_COMPONENT_A_BIT;
+		}
+	}
+	const auto pipeline =
+	    CreateHostNanRasterPipeline(context->device, target.render_pass, pipeline_layout, vertex_shader, fragment_shader, blend, 2u);
+	Expect(pipeline != VK_NULL_HANDLE, "UINT16 MRT graphics pipeline is created with per-target write masks");
+
+	const auto                        bytes_per_pixel = Uint16MrtBytesPerPixel(test.formats);
+	const std::array<VkDeviceSize, 2> offsets         = {0u, static_cast<VkDeviceSize>(HostNanRasterTarget::kExtent) *
+	                                                             HostNanRasterTarget::kExtent * bytes_per_pixel[0]};
+	const VkDeviceSize                readback_size =
+	    static_cast<VkDeviceSize>(HostNanRasterTarget::kExtent) * HostNanRasterTarget::kExtent * (bytes_per_pixel[0] + bytes_per_pixel[1]);
+	HostReadbackBuffer readback(context, readback_size);
+	Expect(readback.Create(), "UINT16 MRT readback buffer is host-visible");
+
+	CommandBuffer command_buffer(GraphicContext::QUEUE_GFX);
+	command_buffer.Begin();
+	auto* vk_buffer = command_buffer.GetPool()->buffers[command_buffer.GetIndex()];
+	Expect(vk_buffer != VK_NULL_HANDLE, "UINT16 MRT fixture resolves its exact Vulkan command buffer");
+	VkClearValue                                 clear[2] {};
+	const std::array<std::array<uint16_t, 4>, 2> sentinels = {{{0x1111u, 0x2222u, 0x3333u, 0x4444u}, {0x5555u, 0x6666u, 0x7777u, 0x8888u}}};
+	for (uint32_t target_index = 0u; target_index < 2u; ++target_index)
+	{
+		for (uint32_t channel = 0u; channel < 4u; ++channel)
+		{
+			clear[target_index].color.uint32[channel] = sentinels[target_index][channel];
+		}
+	}
+	VkRenderPassBeginInfo begin {};
+	begin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	begin.renderPass        = target.render_pass;
+	begin.framebuffer       = target.framebuffer;
+	begin.renderArea.extent = {HostNanRasterTarget::kExtent, HostNanRasterTarget::kExtent};
+	begin.clearValueCount   = 2u;
+	begin.pClearValues      = clear;
+	vkCmdBeginRenderPass(vk_buffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+	vkCmdDraw(vk_buffer, 3u, 1u, 0u, 0u);
+	vkCmdEndRenderPass(vk_buffer);
+
+	VkBufferImageCopy regions[2] {};
+	for (uint32_t index = 0u; index < 2u; ++index)
+	{
+		regions[index].bufferOffset     = offsets[index];
+		regions[index].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+		regions[index].imageExtent      = {HostNanRasterTarget::kExtent, HostNanRasterTarget::kExtent, 1u};
+		vkCmdCopyImageToBuffer(vk_buffer, target.Image(index), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.Handle(), 1u,
+		                       &regions[index]);
+	}
+	VkBufferMemoryBarrier buffer_barrier {};
+	buffer_barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	buffer_barrier.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+	buffer_barrier.dstAccessMask       = VK_ACCESS_HOST_READ_BIT;
+	buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	buffer_barrier.buffer              = readback.Handle();
+	buffer_barrier.offset              = 0u;
+	buffer_barrier.size                = VK_WHOLE_SIZE;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0u, 0u, nullptr, 1u, &buffer_barrier, 0u,
+	                     nullptr);
+	command_buffer.End();
+	command_buffer.Execute();
+	Expect(CompleteFenceWithoutBlockingSleep(&command_buffer), "UINT16 MRT fixture reaches its exact copy fence");
+	std::vector<uint8_t> pixels(static_cast<size_t>(readback_size));
+	readback.Read(pixels.data());
+
+	constexpr uint32_t                           center_x = 4u;
+	constexpr uint32_t                           center_y = 4u;
+	const std::array<std::array<uint16_t, 4>, 2> payloads = {{{0x1234u, 0xabcdu, 0x5678u, 0xef01u}, {0xbeefu, 0x7654u, 0xcafeu, 0x4321u}}};
+	for (uint32_t target_index = 0u; target_index < 2u; ++target_index)
+	{
+		const uint32_t components = bytes_per_pixel[target_index] / sizeof(uint16_t);
+		const size_t   target_pixel =
+		    static_cast<size_t>(offsets[target_index]) +
+		    (static_cast<size_t>(center_y) * HostNanRasterTarget::kExtent + center_x) * bytes_per_pixel[target_index];
+		for (uint32_t component = 0u; component < components; ++component)
+		{
+			uint16_t actual = 0u;
+			std::memcpy(&actual, pixels.data() + target_pixel + component * sizeof(uint16_t), sizeof(actual));
+			const bool written =
+			    (test.enable_masks[target_index] & (1u << component)) != 0u && (test.write_masks[target_index] & (1u << component)) != 0u;
+			const uint16_t expected = written ? payloads[target_index][component] : sentinels[target_index][component];
+			Expect(actual == expected, "center pixel matches the exact enabled UINT16 payload or seeded channel sentinel");
+		}
+		const size_t corner_pixel = static_cast<size_t>(offsets[target_index]);
+		for (uint32_t component = 0u; component < components; ++component)
+		{
+			uint16_t actual = 0u;
+			std::memcpy(&actual, pixels.data() + corner_pixel + component * sizeof(uint16_t), sizeof(actual));
+			Expect(actual == sentinels[target_index][component], "outside corner retains every exact seeded UINT16 sentinel");
+		}
+	}
+	std::fprintf(stderr, "uint16_mrt_writeback case=%u formats=%u/%u partial_en=%u/%u byte_readback=exact\n", case_index,
+	             static_cast<unsigned>(test.formats[0]), static_cast<unsigned>(test.formats[1]), test.enable_masks[0],
+	             test.enable_masks[1]);
+	vkDestroyPipeline(context->device, pipeline, nullptr);
+}
+
+void VerifyColorAttachmentBlendAdmission(VkPhysicalDevice physical_device, const std::array<VkFormat, 3>& integer_formats)
+{
+	Expect(VulkanValidateColorAttachmentBlendRequest(VK_NULL_HANDLE, integer_formats[0], false, false) ==
+	           VulkanColorAttachmentBlendAdmission::InvalidInput,
+	       "color blend admission rejects a missing physical device");
+	Expect(VulkanValidateColorAttachmentBlendRequest(physical_device, VK_FORMAT_UNDEFINED, false, false) ==
+	           VulkanColorAttachmentBlendAdmission::InvalidInput,
+	       "color blend admission rejects an undefined attachment view format");
+
+	bool unsupported_format_tested = false;
+	for (const auto format: integer_formats)
+	{
+		const bool blendable = FormatBlendable(physical_device, format);
+		Expect(VulkanValidateColorAttachmentBlendRequest(physical_device, format, false, false) ==
+		           VulkanColorAttachmentBlendAdmission::Supported,
+		       "disabled UINT16 blend request is admitted");
+		Expect(VulkanValidateColorAttachmentBlendRequest(physical_device, format, true, true) ==
+		           VulkanColorAttachmentBlendAdmission::Supported &&
+		           VulkanResolveColorAttachmentBlendEnable(true, true) == VK_FALSE,
+		       "bypassed UINT16 blend request is admitted with Vulkan blending disabled");
+		const auto enabled_admission = VulkanValidateColorAttachmentBlendRequest(physical_device, format, true, false);
+		Expect(enabled_admission == (blendable ? VulkanColorAttachmentBlendAdmission::Supported
+		                                      : VulkanColorAttachmentBlendAdmission::MissingFormatFeature),
+		       "enabled UINT16 blend request follows the actual format feature query");
+		unsupported_format_tested = unsupported_format_tested || !blendable;
+	}
+	if (!unsupported_format_tested)
+	{
+		constexpr VkFormat format = VK_FORMAT_R32G32B32A32_UINT;
+		Expect(!FormatBlendable(physical_device, format), "R32G32B32A32_UINT is nonblendable on this device");
+		Expect(VulkanValidateColorAttachmentBlendRequest(physical_device, format, true, false) ==
+		           VulkanColorAttachmentBlendAdmission::MissingFormatFeature,
+		       "enabled request is refused for an actual nonblendable integer format");
+	}
+
+	const std::array<VkFormat, 4> blendable_format_candidates = {
+	    VK_FORMAT_R8G8B8A8_UNORM,
+	    VK_FORMAT_B8G8R8A8_UNORM,
+	    VK_FORMAT_R16G16B16A16_SFLOAT,
+	    VK_FORMAT_R32G32B32A32_SFLOAT,
+	};
+	VkFormat blendable_format = VK_FORMAT_UNDEFINED;
+	for (const auto format: blendable_format_candidates)
+	{
+		if (FormatBlendable(physical_device, format))
+		{
+			blendable_format = format;
+			break;
+		}
+	}
+	if (blendable_format != VK_FORMAT_UNDEFINED)
+	{
+		Expect(VulkanValidateColorAttachmentBlendRequest(physical_device, blendable_format, true, false) ==
+		           VulkanColorAttachmentBlendAdmission::Supported &&
+		           VulkanResolveColorAttachmentBlendEnable(true, false) == VK_TRUE,
+		       "enabled blend request is admitted for a queried blendable native format");
+	} else
+	{
+		std::fprintf(stderr, "uint16_mrt_writeback blend-positive-format unavailable: no candidate advertises color attachment blending\n");
+	}
+}
+
+int VerifyUint16MrtWriteback()
+{
+	VulkanSamplerContext vulkan;
+	if (!vulkan.Initialize(false, true))
+	{
+		std::fprintf(stderr, "uint16_mrt_writeback unavailable: no Vulkan 1.4 graphics device with independentBlend\n");
+		return kUint16MrtUnavailableExit;
+	}
+	GpuMemoryInit();
+	const auto format_r16    = ResolveRenderTextureFormat(2u, 4u, 0u);
+	const auto format_rg16   = ResolveRenderTextureFormat(5u, 4u, 0u);
+	const auto format_rgba16 = ResolveRenderTextureFormat(12u, 4u, 0u);
+	Expect(format_r16.format == RenderTextureFormat::R16Uint && format_r16.bytes_per_element == 2u &&
+	           format_rg16.format == RenderTextureFormat::R16G16Uint && format_rg16.bytes_per_element == 4u &&
+	           format_rgba16.format == RenderTextureFormat::R16G16B16A16Uint && format_rgba16.bytes_per_element == 8u,
+	       "production attachment resolver accepts exactly the probed UINT16 channel types");
+	const std::array<VkFormat, 3> integer_formats = {
+	    static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_r16.format)),
+	    static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_rg16.format)),
+	    static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_rgba16.format)),
+	};
+	VerifyColorAttachmentBlendAdmission(vulkan.context.physical_device, integer_formats);
+
+	const std::array<Uint16MrtRasterCase, 5> cases = {{
+	    {std::array<VkFormat, 2> {static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_r16.format)),
+	                              static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_rg16.format))},
+	     {3u, 3u},
+	     {VK_COLOR_COMPONENT_R_BIT, VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT}},
+	    {std::array<VkFormat, 2> {static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_rg16.format)),
+	                              static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_rgba16.format))},
+	     {3u, 12u},
+	     {VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT,
+	      VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT}},
+	    {std::array<VkFormat, 2> {static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_rgba16.format)),
+	                              static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_r16.format))},
+	     {12u, 3u},
+	     {VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+	      VK_COLOR_COMPONENT_R_BIT}},
+	    {std::array<VkFormat, 2> {static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_rgba16.format)),
+	                              static_cast<VkFormat>(VulkanResolveRenderTextureFormat(format_rgba16.format))},
+	     {3u, 0u},
+	     {VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+	      VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT}},
+	    {std::array<VkFormat, 2> {integer_formats[0], integer_formats[1]},
+	     {3u, 3u},
+	     {VK_COLOR_COMPONENT_R_BIT, VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT}, true, true},
+	}};
+	const auto vertex_shader = CreateHostNanRasterShaderModule(vulkan.context.device, HostNanRasterVertexShaderSource(false),
+	                                                           "UINT16 MRT vertex shader assembles and validates");
+	Expect(vertex_shader != VK_NULL_HANDLE, "UINT16 MRT vertex shader module is created on the native Vulkan device");
+	VkPipelineLayoutCreateInfo layout_info {};
+	layout_info.sType                = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+	Expect(vkCreatePipelineLayout(vulkan.context.device, &layout_info, nullptr, &pipeline_layout) == VK_SUCCESS,
+	       "UINT16 MRT pipeline layout is created");
+	for (uint32_t index = 0u; index < cases.size(); ++index)
+	{
+		auto       code            = ParseUint16MrtGuestProgram(cases[index]);
+		auto       input           = Uint16MrtInput(code);
+		const auto fragment_source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+		Expect(!fragment_source.IsEmpty(), "production translator emits UINT16 MRT fragment source for each EN mask");
+		const auto fragment_shader = CreateHostNanRasterShaderModule(
+		    vulkan.context.device, fragment_source, "production UINT16 MRT SPIR-V assembles and validates for each EN mask");
+		Expect(fragment_shader != VK_NULL_HANDLE, "production UINT16 MRT fragment shader module is created on the native Vulkan device");
+		RenderUint16MrtCase(&vulkan.context, cases[index], vertex_shader, fragment_shader, pipeline_layout, input.color_exports, index);
+		vkDestroyShaderModule(vulkan.context.device, fragment_shader, nullptr);
+	}
+	vkDestroyPipelineLayout(vulkan.context.device, pipeline_layout, nullptr);
+	vkDestroyShaderModule(vulkan.context.device, vertex_shader, nullptr);
+	std::fprintf(stderr, "uint16_mrt_writeback production_spirv=true production_parser=true native_readback=exact\n");
+	return 0;
+}
+
+constexpr int kNativeParameterExecUnavailableExit = 77;
+
+int VerifyNativeParameterExecWriteback()
+{
+	VulkanSamplerContext vulkan;
+	if (!vulkan.Initialize())
+	{
+		std::fprintf(stderr, "parameter_exec_writeback unavailable: no Vulkan 1.4 graphics device\n");
+		return kNativeParameterExecUnavailableExit;
+	}
+	GpuMemoryInit();
+
+	HostNanRasterTarget target(&vulkan.context, true);
+	Expect(target.Create(), "PARAM EXEC fixture creates a clearable and transferable color target");
+	const auto fragment_shader = CreateHostNanRasterShaderModule(
+	    vulkan.context.device, HostParameterExecFragmentShaderSource(), "PARAM EXEC fragment interface assembles and validates");
+	Expect(fragment_shader != VK_NULL_HANDLE, "PARAM EXEC fragment module reads PARAM0.xy and PARAM1.z");
+	VkPipelineLayoutCreateInfo layout_info {};
+	layout_info.sType                = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+	Expect(vkCreatePipelineLayout(vulkan.context.device, &layout_info, nullptr, &pipeline_layout) == VK_SUCCESS,
+	       "PARAM EXEC fixture creates an empty pipeline layout");
+
+	const std::array<bool, 2> overwrite_modes = {true, false};
+	for (const bool overwrite_with_full_exec: overwrite_modes)
+	{
+		const auto        words = NativeParameterExecGuestWords(overwrite_with_full_exec);
+		ShaderCode        code;
+		code.SetType(ShaderType::Vertex);
+		Expect(ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(words[0])), &code),
+		       "PARAM EXEC vertex guest words parse through the production shader parser");
+		uint32_t exp_count = 0u;
+		for (uint32_t index = 0u; index < code.GetInstructions().Size(); ++index)
+		{
+			if (code.GetInstructions().At(index).type == ShaderInstructionType::Exp)
+			{
+				++exp_count;
+			}
+		}
+		Expect(exp_count == 4u, "PARAM EXEC fixture parses both PARAM0 exports, PARAM1, and terminal POS0");
+
+		ShaderVertexInputInfo vertex_input {};
+		const auto binary = ShaderRecompileVS(code, &vertex_input);
+		Expect(!binary.IsEmpty(), "PARAM EXEC vertex program recompiles through the production vertex translator");
+		ExpectValidSpirv(binary, "PARAM EXEC production vertex binary validates");
+		VkShaderModuleCreateInfo module_info {};
+		module_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		module_info.codeSize = binary.Size() * sizeof(uint32_t);
+		module_info.pCode    = binary.GetData();
+		VkShaderModule vertex_shader = VK_NULL_HANDLE;
+		Expect(vkCreateShaderModule(vulkan.context.device, &module_info, nullptr, &vertex_shader) == VK_SUCCESS,
+		       "PARAM EXEC production vertex module is accepted by the native Vulkan device");
+		const auto pipeline = CreateHostNanRasterPipeline(vulkan.context.device, target.render_pass, pipeline_layout,
+		                                                  vertex_shader, fragment_shader);
+		Expect(pipeline != VK_NULL_HANDLE, "PARAM EXEC creates the native no-attribute triangle pipeline");
+
+		std::array<uint8_t, kDualSourceReadbackBytes> pixels {};
+		RenderDualSourceTriangle(&vulkan.context, target, pipeline, pixels.data());
+		constexpr uint32_t center_offset = (HostNanRasterTarget::kExtent / 2u * HostNanRasterTarget::kExtent +
+		                                   HostNanRasterTarget::kExtent / 2u) * 4u;
+		const std::array<uint8_t, 4> actual = {pixels[center_offset], pixels[center_offset + 1u], pixels[center_offset + 2u],
+		                                     pixels[center_offset + 3u]};
+		const std::array<uint8_t, 4> expected = overwrite_with_full_exec ? std::array<uint8_t, 4> {0u, 255u, 255u, 255u} :
+		                                                               std::array<uint8_t, 4> {255u, 0u, 255u, 255u};
+		std::fprintf(stderr, "parameter_exec_writeback mode=%s center=(%u,%u,%u,%u) expected=(%u,%u,%u,%u)\n",
+		             overwrite_with_full_exec ? "full" : "zero", actual[0], actual[1], actual[2], actual[3], expected[0],
+		             expected[1], expected[2], expected[3]);
+		Expect(actual == expected, "native PARAMN EXEC raster center matches the exact mode-specific color");
+
+		vkDestroyPipeline(vulkan.context.device, pipeline, nullptr);
+		vkDestroyShaderModule(vulkan.context.device, vertex_shader, nullptr);
+	}
+
+	// Each pair exercises different EN masks on PARAM0 and PARAM1. Both outputs
+	// cycle through every nonzero mask, and each draw consumes only one output.
+	for (uint32_t param0_mask = 1u; param0_mask <= 0xfu; ++param0_mask)
+	{
+		const uint32_t param1_mask = (param0_mask % 0xfu) + 1u;
+		const auto     words       = NativeParameterMaskGuestWords(param0_mask, param1_mask);
+		ShaderCode     code;
+		code.SetType(ShaderType::Vertex);
+		Expect(ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(words[0])), &code),
+		       "partial PARAM vertex guest words parse through the production shader parser");
+		uint32_t param_export_count = 0u;
+		uint32_t parsed_param0_mask = 0u;
+		uint32_t parsed_param1_mask = 0u;
+		for (uint32_t index = 0u; index < code.GetInstructions().Size(); ++index)
+		{
+			const auto& instruction = code.GetInstructions().At(index);
+			if (instruction.type != ShaderInstructionType::Exp) { continue; }
+			const uint32_t target = (instruction.raw_word >> 4u) & 0x3fu;
+			if (target == 0x20u)
+			{
+				parsed_param0_mask = instruction.exp_enable_mask;
+				++param_export_count;
+			} else if (target == 0x21u)
+			{
+				parsed_param1_mask = instruction.exp_enable_mask;
+				++param_export_count;
+			}
+		}
+		Expect(param_export_count == 2u && parsed_param0_mask == param0_mask && parsed_param1_mask == param1_mask,
+		       "partial PARAM fixture retains its two distinct production-parsed EN masks");
+
+		ShaderVertexInputInfo vertex_input {};
+		const auto              binary = ShaderRecompileVS(code, &vertex_input);
+		Expect(!binary.IsEmpty(), "partial PARAM vertex program recompiles through the production vertex translator");
+		ExpectValidSpirv(binary, "partial PARAM production vertex binary validates");
+		VkShaderModuleCreateInfo module_info {};
+		module_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		module_info.codeSize = binary.Size() * sizeof(uint32_t);
+		module_info.pCode    = binary.GetData();
+		VkShaderModule vertex_shader = VK_NULL_HANDLE;
+		Expect(vkCreateShaderModule(vulkan.context.device, &module_info, nullptr, &vertex_shader) == VK_SUCCESS,
+		       "partial PARAM production vertex module is accepted by the native Vulkan device");
+
+		for (const bool consume_param1: {false, true})
+		{
+			const uint32_t consumed_mask = consume_param1 ? param1_mask : param0_mask;
+			const auto     fragment_source = HostParameterMaskFragmentShaderSource(consume_param1, consumed_mask);
+			Expect(!fragment_source.IsEmpty(), "partial PARAM fragment reads only enabled channels from one output");
+			const auto fragment_shader = CreateHostNanRasterShaderModule(
+			    vulkan.context.device, fragment_source, "partial PARAM fragment interface assembles and validates");
+			Expect(fragment_shader != VK_NULL_HANDLE, "partial PARAM fragment module is accepted by the native Vulkan device");
+			const auto pipeline = CreateHostNanRasterPipeline(vulkan.context.device, target.render_pass, pipeline_layout,
+			                                                  vertex_shader, fragment_shader);
+			Expect(pipeline != VK_NULL_HANDLE, "partial PARAM creates a native no-attribute triangle pipeline");
+
+			std::array<uint8_t, kDualSourceReadbackBytes> pixels {};
+			RenderDualSourceTriangle(&vulkan.context, target, pipeline, pixels.data());
+			constexpr uint32_t center_offset = (HostNanRasterTarget::kExtent / 2u * HostNanRasterTarget::kExtent +
+			                                   HostNanRasterTarget::kExtent / 2u) * 4u;
+			const std::array<uint8_t, 4> actual = {pixels[center_offset], pixels[center_offset + 1u], pixels[center_offset + 2u],
+			                                     pixels[center_offset + 3u]};
+			// Partial masks contain a 1.0 fragment marker; full-mask guest patterns contain 1.0.
+			// Neither group can pass from the zero-cleared target without rasterizing the triangle.
+			std::array<uint8_t, 4> expected = consume_param1 ? std::array<uint8_t, 4> {0u, 255u, 0u, 255u} :
+			                                               std::array<uint8_t, 4> {255u, 0u, 255u, 0u};
+			for (uint32_t component = 0u; component < 4u; ++component)
+			{
+				if ((consumed_mask & (1u << component)) == 0u)
+				{
+					// This lane is the fragment's defined 1.0 marker, not an expected guest export.
+					expected[component] = 255u;
+				}
+			}
+			Expect(actual == expected, "native partial PARAM readback matches the full RGBA marker and enabled guest lanes");
+			std::fprintf(stderr,
+			             "parameter_mask_writeback output=PARAM%u mask=0x%x pair=(0x%x,0x%x) center=(%u,%u,%u,%u)\n",
+			             consume_param1 ? 1u : 0u, consumed_mask, param0_mask, param1_mask, actual[0], actual[1], actual[2],
+			             actual[3]);
+
+			vkDestroyPipeline(vulkan.context.device, pipeline, nullptr);
+			vkDestroyShaderModule(vulkan.context.device, fragment_shader, nullptr);
+		}
+		vkDestroyShaderModule(vulkan.context.device, vertex_shader, nullptr);
+	}
+
+	vkDestroyPipelineLayout(vulkan.context.device, pipeline_layout, nullptr);
+	vkDestroyShaderModule(vulkan.context.device, fragment_shader, nullptr);
+	std::fprintf(stderr, "parameter_exec_writeback production_vs=true parser=true native_readback=exact parameter_masks=1..F\n");
+	return 0;
+}
+
 // One guest variant through the production path. Only an Eligible decision sets the dual-source flag.
 void RenderDualSourceVariant(VulkanSamplerContext* vulkan, bool packed, uint8_t* pixels)
 {
@@ -5947,6 +6865,14 @@ int main(int argc, char** argv)
 	if (argc == 2 && std::strcmp(argv[1], "--dual-source-blend-raster-only") == 0)
 	{
 		return VerifyDualSourceBlendRaster();
+	}
+	if (argc == 2 && std::strcmp(argv[1], "--uint16-mrt-writeback-only") == 0)
+	{
+		return VerifyUint16MrtWriteback();
+	}
+	if (argc == 2 && std::strcmp(argv[1], "--parameter-exec-writeback-only") == 0)
+	{
+		return VerifyNativeParameterExecWriteback();
 	}
 	if (argc == 2 && std::strcmp(argv[1], "--host-nan-raster-baseline-only") == 0)
 	{

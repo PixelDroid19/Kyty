@@ -7,6 +7,9 @@
 #include "Emulator/Common.h"
 #include "Emulator/Kernel/EventQueue.h"
 
+#include <cstddef>
+#include <cstdint>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -18,6 +21,12 @@ struct VideoOutVulkanImage;
 namespace Kyty::Libs::VideoOut {
 
 using VideoOutQuiescedAction = bool (*)(void*);
+
+struct VideoOutBufferRange
+{
+	uint64_t vaddr = 0;
+	uint64_t size  = 0;
+};
 
 // VideoOut owns its guest error contract. Keeping these values beside the
 // VideoOut ABI prevents graphics code from depending on the aggregate Libs
@@ -91,6 +100,8 @@ VideoOutRegisteredHostExtentStatus VideoOutSelectRegisteredHostExtent(Graphics::
 void                               VideoOutWaitFlipDone(int handle, int index);
 bool                               VideoOutRunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action,
                                                                     void* data);
+bool                               VideoOutRunBufferUnmapTransaction(const VideoOutBufferRange* ranges, size_t range_count,
+                                                                    VideoOutQuiescedAction action, void* data);
 
 // Pure helper: map handle 0 to the sole opened slot when exactly one port is
 // open (Gen5 WaitUntilSafe encodes handle 0 while Open returns 1). Non-zero
