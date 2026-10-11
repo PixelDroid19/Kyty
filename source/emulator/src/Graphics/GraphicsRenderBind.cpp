@@ -2557,9 +2557,9 @@ static void EmitDrawMaterialTraceStorage(FILE* out, uint32_t ordinal, const char
 // vertex/storage/texture/sampler preparation and descriptor bind
 
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
-                                               VkBufferUsageFlags usage)
+                                               VkBufferUsageFlags usage, uint64_t read_begin)
 {
-	if (buffer == nullptr || !read_only || size == 0u || size > kGpuMemoryMaxTransientReadOnlyBytes)
+	if (buffer == nullptr || !read_only || size == 0u || size > kGpuMemoryMaxTransientReadOnlyBytes || read_begin >= size)
 	{
 		return nullptr;
 	}
@@ -2568,13 +2568,14 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 	uint64_t upload_ns     = 0u;
 	uint64_t compare_ns    = 0u;
 	bool     reused        = false;
-	auto*    result = buffer->CaptureTransientSnapshotBuffer(addr, size, usage, &validation_ns, &upload_ns, &compare_ns, &reused);
+	auto*    result =
+	    buffer->CaptureTransientSnapshotBuffer(addr, size, read_begin, usage, &validation_ns, &upload_ns, &compare_ns, &reused);
 	DebugStatsRecordTransientBufferProbe(validation_ns, 0, upload_ns, result != nullptr, reused, compare_ns);
 	return result;
 }
 
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
-	                   uint32_t required_records)
+	                   uint32_t first_record, uint32_t required_records)
 {
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 
@@ -2589,8 +2590,12 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 		const uint32_t available = buffer_info.num_records - shift;
 		const uint32_t records   = required_records == 0 ? available : std::min(available, required_records);
 		const uint64_t size     = ShaderBufferByteSize(buffer_info.stride, records);
+		// Every binding steps per vertex, so records below the draw's first are never fetched.
+		const uint64_t read_begin =
+		    buffer_info.stride != 0u && first_record < records ? static_cast<uint64_t>(buffer_info.stride) * first_record : 0u;
 
-		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+		auto* vertices =
+		    TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin);
 		if (vertices == nullptr)
 		{
 			vertices = static_cast<VulkanBuffer*>(

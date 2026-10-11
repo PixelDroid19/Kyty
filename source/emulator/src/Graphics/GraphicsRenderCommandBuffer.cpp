@@ -898,6 +898,8 @@ class TransientBufferPool
 		bool         snapshot_valid = false;
 		uint64_t     snapshot_vaddr = 0;
 		uint64_t     snapshot_size  = 0;
+		// Snapshot bytes start here; the bytes before it hold no guest data.
+		uint64_t     snapshot_begin = 0;
 		bool         zero_carrier   = false;
 		// Bytes at or past this offset are known to be zero.
 		uint64_t     nonzero_end    = 0;
@@ -952,10 +954,11 @@ public:
 		return buffer;
 	}
 
-	VulkanBuffer* Capture(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t* validation_ns,
-	                      uint64_t* upload_ns, uint64_t* compare_ns, bool* reused)
+	VulkanBuffer* Capture(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage,
+	                      uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns, bool* reused)
 	{
 		EXIT_IF(ctx == nullptr || validation_ns == nullptr || upload_ns == nullptr || compare_ns == nullptr || reused == nullptr);
+		EXIT_IF(read_begin >= size);
 		*validation_ns = 0u;
 		*upload_ns     = 0u;
 		*compare_ns    = 0u;
@@ -978,7 +981,7 @@ public:
 		{
 			auto* candidate = *it;
 			if (!candidate->scratch && candidate->snapshot_valid && candidate->usage == usage &&
-			    candidate->snapshot_vaddr == vaddr && candidate->snapshot_size == size)
+			    candidate->snapshot_vaddr == vaddr && candidate->snapshot_size == size && candidate->snapshot_begin <= read_begin)
 			{
 				previous = candidate;
 				break;
@@ -988,7 +991,9 @@ public:
 		{
 			bool     matches             = false;
 			uint64_t reuse_validation_ns = 0u;
-			if (!GpuMemoryCompareSnapshotReadOnlyBuffer(vaddr, size, previous->mapped, &matches, &reuse_validation_ns, compare_ns))
+			if (!GpuMemoryCompareSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
+			                                            static_cast<const uint8_t*>(previous->mapped) + read_begin, &matches,
+			                                            &reuse_validation_ns, compare_ns))
 			{
 				*validation_ns += reuse_validation_ns;
 				return nullptr;
@@ -1007,7 +1012,7 @@ public:
 		if (entry == nullptr)
 		{
 			const auto preflight_start = std::chrono::steady_clock::now();
-			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr, size);
+			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin);
 			*validation_ns += static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - preflight_start).count());
 			if (!eligible)
@@ -1027,7 +1032,9 @@ public:
 		uint64_t copy_ns              = 0u;
 		// A refused capture may already have copied part of the range.
 		entry->nonzero_end = std::max(entry->nonzero_end, size);
-		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr, size, entry->mapped, &atomic_validation_ns, &copy_ns))
+		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
+		                                            static_cast<uint8_t*>(entry->mapped) + read_begin, &atomic_validation_ns,
+		                                            &copy_ns))
 		{
 			*validation_ns += atomic_validation_ns;
 			finish_upload_time();
@@ -1038,10 +1045,11 @@ public:
 			return nullptr;
 		}
 		*validation_ns += atomic_validation_ns;
-		DebugStatsRecordUpload(size, copy_ns);
+		DebugStatsRecordUpload(size - read_begin, copy_ns);
 		entry->snapshot_valid = true;
 		entry->snapshot_vaddr = vaddr;
 		entry->snapshot_size  = size;
+		entry->snapshot_begin = read_begin;
 		Commit(entry, size);
 		finish_upload_time();
 		return &entry->buffer;
@@ -1062,7 +1070,8 @@ public:
 			}
 
 			if (!entry->used || entry->scratch || !entry->snapshot_valid || entry->mapped == nullptr ||
-			    entry->snapshot_vaddr != expected_vaddr || entry->snapshot_size == 0u || entry->snapshot_size > entry->size ||
+			    entry->snapshot_vaddr != expected_vaddr || offset < entry->snapshot_begin || entry->snapshot_size == 0u ||
+			    entry->snapshot_size > entry->size ||
 			    offset > entry->snapshot_size || size > entry->snapshot_size - offset || offset > storage_buffer->descriptor_range ||
 			    size > storage_buffer->descriptor_range - offset || offset > entry->size || size > entry->size - offset)
 			{
@@ -1512,15 +1521,17 @@ VulkanBuffer* CommandBuffer::UploadTransientZeroCarrier(uint32_t usage)
 	return m_transient_buffers->ZeroCarrier(g_render_ctx->GetGraphicCtx(), usage);
 }
 
-VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t* validation_ns,
-	                                                         uint64_t* upload_ns, uint64_t* compare_ns, bool* reused)
+VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage,
+	                                                         uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns,
+	                                                         bool* reused)
 {
 	EXIT_IF(IsInvalid());
 	if (m_transient_buffers == nullptr)
 	{
 		m_transient_buffers = new TransientBufferPool;
 	}
-	return m_transient_buffers->Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, usage, validation_ns, upload_ns, compare_ns, reused);
+	return m_transient_buffers->Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, read_begin, usage, validation_ns, upload_ns,
+	                                    compare_ns, reused);
 }
 
 bool CommandBuffer::ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,

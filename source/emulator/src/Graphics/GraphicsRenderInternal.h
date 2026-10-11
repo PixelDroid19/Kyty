@@ -1608,8 +1608,9 @@ void GraphicsRenderStorageImageBarrier(VkCommandBuffer vk_buffer, VulkanImage* i
 // --- Core (color / dump) ---
 
 void FormatTextureList(const ShaderTextureResources& textures, char* buffer, size_t buffer_size);
+// Bytes before read_begin are never read through the returned buffer and are not captured.
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
-                                               VkBufferUsageFlags usage);
+                                               VkBufferUsageFlags usage, uint64_t read_begin = 0);
 
 bool                            RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot);
 bool                            RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot);
@@ -1673,8 +1674,9 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
                                             const RenderDepthInfo& depth);
 
 // --- Bind ---
+// The draw fetches only records [first_record, required_records); zero required_records means every declared record.
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
-	                   uint32_t required_records);
+	                   uint32_t first_record, uint32_t required_records);
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr,

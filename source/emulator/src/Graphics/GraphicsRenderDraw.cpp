@@ -67,6 +67,8 @@ uint64_t DrawStageElapsedNs(DrawStageClock::time_point start)
 
 struct VertexRecordRequirement
 {
+	// Records [first, records) are the only ones the draw can fetch.
+	uint32_t first   = 0;
 	uint32_t records = 0;
 	bool     valid   = true;
 };
@@ -82,8 +84,9 @@ VertexRecordRequirement ResolveLinearVertexRecords(int32_t first_vertex, uint32_
 		return {.valid = false};
 	}
 	const uint64_t records = static_cast<uint64_t>(first_vertex) + vertex_count;
-	return records <= UINT32_MAX ? VertexRecordRequirement {.records = static_cast<uint32_t>(records)}
-	                             : VertexRecordRequirement {.valid = false};
+	return records <= UINT32_MAX
+	           ? VertexRecordRequirement {.first = static_cast<uint32_t>(first_vertex), .records = static_cast<uint32_t>(records)}
+	           : VertexRecordRequirement {.valid = false};
 }
 
 // Smallest and largest index value; one loop per index width so it vectorizes.
@@ -134,7 +137,7 @@ VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint
 	{
 		return {.valid = false};
 	}
-	return {.records = static_cast<uint32_t>(last) + 1u};
+	return {.first = static_cast<uint32_t>(first), .records = static_cast<uint32_t>(last) + 1u};
 }
 
 uint32_t ResolveVertexClipProbeDescriptorSet(const ShaderVertexInputInfo& vs_input_info,
@@ -1669,7 +1672,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	SetDynamicParams(vk_buffer, pipeline);
 
 	const auto     vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_records);
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
@@ -1988,7 +1991,7 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, guest_vertex_input->bind,
 		                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, 0, nullptr, nullptr,
 		                device_address_table);
-		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input, vertex_records);
+		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input, 0, vertex_records);
 		if (index_buffer != nullptr)
 		{
 			vkCmdBindIndexBuffer(vk_buffer, index_buffer->buffer, 0, index_type);
@@ -2652,7 +2655,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	SetDynamicParams(vk_buffer, pipeline);
 
 	const auto     vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_records);
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,

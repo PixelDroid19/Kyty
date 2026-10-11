@@ -9,6 +9,43 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Vertex snapshots from the first fetched record (2026-10-11)
+
+- The Unity fishing title copied about 48 GB of guest memory per 26 s
+  gameplay window, almost all of it command-buffer vertex snapshots. A
+  temporary per-site counter over 10 s showed:
+  - 36.5k fresh vertex captures, 14.0 GB in total.
+  - 11.3k of them (10.0 GB) reused the base address of an earlier snapshot
+    in the same command buffer, with a larger size. The guest declares a
+    vertex range that grows from draw to draw over one shared buffer, so
+    each capture copied again from record 0.
+  - No capture repeated an earlier base and size with changed contents.
+  - Only 373 captures (0.3 GB) fit inside an earlier snapshot. Reusing a
+    contained view with an explicit offset would recover about 2% of the
+    bytes on this title; it was not implemented.
+  - The declared range always equalled the captured size, so capturing the
+    whole declared range would not help either.
+  - No index scan reached the restart value.
+- Every vertex binding steps per vertex, and the draw's vertex offset and
+  binding offset are unchanged. A draw can therefore fetch only records
+  `[first, last]` of its index (or linear vertex) range.
+  - The snapshot now copies only from the first fetched record. Bytes are
+    placed at their own offsets in a buffer of the same size, so the
+    shader sees the same addresses.
+  - The bytes before the first record hold no guest data. The entry records
+    where its snapshot begins.
+  - Exact reuse requires an earlier snapshot that begins at or before the
+    request, and compares only the requested range inside the same
+    dirty-page transaction.
+  - Index, storage and depth/stencil-copy captures still start at byte 0.
+- Same route, gameplay windows 5-7:
+  - Uploaded bytes fell from 47.5-49.2 GB to 10.5-11.9 GB per window.
+  - Snapshot upload time fell from 2.8 s to 1.0 s per window.
+  - The title measured 8.2-9.4 fps (p50 104-114 ms), against 8.4-8.7
+    before. The capture is correct.
+- Controls, with correct captures: the racing title's race window measured
+  82.9 fps and the beat 'em up 11.1 fps.
+
 ## Per-draw scan costs (2026-10-11)
 
 - Two per-draw scans on the command-processor thread were removed from the

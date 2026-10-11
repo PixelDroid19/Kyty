@@ -675,8 +675,9 @@ public:
 	VulkanBuffer* UploadTransientBuffer(const void* data, uint64_t size, uint32_t usage);
 	// One zero dword shared by every empty descriptor of this recording.
 	VulkanBuffer* UploadTransientZeroCarrier(uint32_t usage);
-	VulkanBuffer* CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t* validation_ns,
-	                                             uint64_t* upload_ns, uint64_t* compare_ns, bool* reused);
+	// Captures guest bytes [vaddr + read_begin, vaddr + size) at the same offsets of a buffer of size bytes.
+	VulkanBuffer* CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage,
+	                                             uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns, bool* reused);
 	// Reads at most 16 bytes from the immutable guest snapshot already uploaded for this command buffer.
 	// This never rereads guest memory; the buffer must still belong to the current recording.
 	[[nodiscard]] bool ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
