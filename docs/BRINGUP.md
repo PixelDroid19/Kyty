@@ -9,6 +9,36 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Index buffer objects through the mapping: excluded (2026-10-11)
+
+- A fence-wait backtrace counter over the Unity fishing title's 200 s route
+  (Intel A770) attributed the waits as follows:
+
+  | Source | Share of waits |
+  | --- | --- |
+  | `UtilFillImage` texture creates from `PrepareTextures` | 32% |
+  | `WAIT_REG_MEM` completing the current producer submission | 28% |
+  | Device-address draw retry (`RetryGuestDeviceAddressDraw` in `DrawIndex`) | 19% |
+  | Index buffer object create/update (`UtilCopyBuffer`) | 14% |
+
+- Tried: index buffer objects in host-visible coherent memory, written
+  through the mapping, the same contract as the vertex buffer objects.
+  - Fence waits fell from 43.6 to 33.6 per frame, and fence time from 21.7
+    to 15.8 ms per frame.
+  - Frame rate was neutral: perf-5 ran at 10.7 fps with 1,158 draws per
+    frame, as before.
+  - The title's boot stalled at frame 3 in 4 of 16 runs, against 0 of
+    about 25 runs before the change and 0 of 12 runs after reverting it.
+    In the stall, the command-processor thread was runnable inside the
+    driver's graphics pipeline creation (`CreatePipelineInternal`), and
+    every other thread waited.
+- Reverted, root cause unknown. The waited utility copy changes the timing
+  around pipeline creation; that path needs its own investigation before
+  index uploads drop the fence again.
+- The Unity fishing title's frame time is per-draw binding work at about
+  1,160 draws per frame: resource binding 40-44%, texture descriptors 18%,
+  state setup 16-18%. Removing fence waits alone does not move it.
+
 ## AJM batch input budget (2026-10-11)
 
 - After the resample-marker fix, the beat 'em up's strict combat run ended
