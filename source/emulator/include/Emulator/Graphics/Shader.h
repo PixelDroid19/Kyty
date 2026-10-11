@@ -2164,9 +2164,22 @@ void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info, bool streams_r
 // vertex-attribute fetches, with the input resource each one reads.
 [[nodiscard]] Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const ShaderCode&            code,
                                                                                     const ShaderVertexInputInfo& info);
+// MUBUF/MTBUF instructions of a fetch-embedded vertex program, scanned once per program and
+// fetch-register pair. Each fetch candidate keeps the attribute semantic it reads; whether it
+// becomes a fetch depends on the input resources of the draw.
+struct ShaderVertexStreamAccessScan
+{
+	int fetch_attrib_reg = 0;
+	int fetch_buffer_reg = 0;
+	// A MUBUF/MTBUF instruction that is never a fetch candidate always reads its stream.
+	bool                             unconditional_reader = false;
+	Vector<std::pair<uint32_t, int>> fetch_candidates;
+};
+[[nodiscard]] ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& code, int fetch_attrib_reg,
+                                                                          int fetch_buffer_reg);
 // Only a MUBUF/MTBUF instruction left after that rewrite addresses a vertex-stream SSBO.
 // False when every such instruction becomes a fetch: the streams then have no reader.
-[[nodiscard]] bool ShaderVertexStreamStorageHasReader(const ShaderCode& code, const ShaderVertexInputInfo& info);
+[[nodiscard]] bool ShaderVertexStreamStorageHasReader(const ShaderVertexStreamAccessScan& scan, const ShaderVertexInputInfo& info);
 
 // Why the fused NGG front of this vertex stage was not proven width neutral at its guest
 // width ("" when it was, or when the stage has no fused front). For the native-wave

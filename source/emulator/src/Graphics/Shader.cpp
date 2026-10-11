@@ -1081,6 +1081,9 @@ struct ShaderVertexProgram
 	ShaderNativeWaveVerdict native_wave;
 	// Width-neutrality of the fused NGG front, proved once for this immutable code.
 	ShaderNggFrontVerdict  ngg_front;
+	// Vertex-stream access scan of `code` for the last fetch-register pair it was asked for.
+	mutable std::mutex                                          stream_access_mutex;
+	mutable std::shared_ptr<const ShaderVertexStreamAccessScan> stream_access;
 };
 
 struct ShaderVertexProgramKeyHash
@@ -3476,6 +3479,26 @@ Kyty::Core::String8 ShaderVertexNggFrontRefusal(const ShaderVertexInputInfo& inf
 	                                                  : Kyty::Core::String8();
 }
 
+// Whether a vertex-stream SSBO of this draw has a reader left after the fetch rewrite. The
+// scan depends only on the immutable code and the fetch registers; the draw supplies the
+// input resources that decide which candidates become fetches.
+static bool VertexProgramStreamsRead(const ShaderVertexProgram& program, const ShaderVertexInputInfo& info)
+{
+	std::shared_ptr<const ShaderVertexStreamAccessScan> scan;
+	{
+		std::lock_guard<std::mutex> lock(program.stream_access_mutex);
+		scan = program.stream_access;
+	}
+	if (scan == nullptr || scan->fetch_attrib_reg != info.fetch_attrib_reg || scan->fetch_buffer_reg != info.fetch_buffer_reg)
+	{
+		scan = std::make_shared<const ShaderVertexStreamAccessScan>(
+		    ShaderScanVertexStreamAccesses(program.code, info.fetch_attrib_reg, info.fetch_buffer_reg));
+		std::lock_guard<std::mutex> lock(program.stream_access_mutex);
+		program.stream_access = scan;
+	}
+	return ShaderVertexStreamStorageHasReader(*scan, info);
+}
+
 void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
                           const GraphicsGeRawRegister* shader_stages)
 {
@@ -3653,7 +3676,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		// The generator compiles program->code for a Gen5 non-embedded stage
 		// (ShaderParseVS), so the stream readers are decided on that code.
 		const bool streams_read = !(ps5 && !regs->vs_embedded && info->program != nullptr) ||
-		                          ShaderVertexStreamStorageHasReader(info->program->code, *info);
+		                          VertexProgramStreamsRead(*info->program, *info);
 		ShaderAppendVertexStreamStorage(info, streams_read);
 
 		constexpr uint32_t user_data_base = 8;

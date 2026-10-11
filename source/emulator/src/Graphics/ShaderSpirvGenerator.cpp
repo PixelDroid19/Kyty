@@ -2413,7 +2413,10 @@ String8 Spirv::EmitNativeThreadLimitExec() const
 	return source;
 }
 
-Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const ShaderCode& code, const ShaderVertexInputInfo& info)
+// Format loads of a fetch-embedded vertex program that the attribute and buffer table
+// registers type as vertex-attribute fetches, with the attribute semantic each one reads.
+static Vector<std::pair<ShaderInstruction, int>> DetectVertexFetchSemantics(const ShaderCode& code, int fetch_attrib_reg,
+                                                                           int fetch_buffer_reg)
 {
 	enum class Type
 	{
@@ -2442,8 +2445,8 @@ Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const Sha
 	auto vgpr_reg = [](const ShaderOperand& op) { return op.register_id; };
 
 	int shift_regs = 8;
-	int attrib_reg = info.fetch_attrib_reg + shift_regs;
-	int buffer_reg = info.fetch_buffer_reg + shift_regs;
+	int attrib_reg = fetch_attrib_reg + shift_regs;
+	int buffer_reg = fetch_buffer_reg + shift_regs;
 
 	Vector<ShaderControlFlowBlock> blocks;
 
@@ -2528,26 +2531,7 @@ Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const Sha
 					                       sgprs[sgpr_reg(inst.src[1])].type == Type::Buffer &&
 					                       sgprs[sgpr_reg(inst.src[2])].type == Type::Attrib)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(vgprs[vgpr_reg(inst.src[0])].type == Type::Index && condition ignored (continuing)\n"); }
 
-					const int semantic = sgprs[sgpr_reg(inst.src[1])].attrib_id;
-					int       resource = -1;
-					for (int i = 0; i < info.resources_num; i++)
-					{
-						if (info.resources_dst[i].semantic == semantic)
-						{
-							resource = i;
-							break;
-						}
-					}
-					if (resource < 0)
-					{
-						// No attribute-table semantic: keep BufferLoadFormat and
-						// address through the live V# / vertex-stream SSBO.
-						KYTY_LOG_DEBUG("WARNING: vertex fetch semantic missing input resource (continuing)\n");
-						break;
-					}
-
-					load_instructions.Add({inst, resource});
-
+					load_instructions.Add({inst, sgprs[sgpr_reg(inst.src[1])].attrib_id});
 					break;
 				}
 				default: break;
@@ -2558,9 +2542,45 @@ Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const Sha
 	return load_instructions;
 }
 
-bool ShaderVertexStreamStorageHasReader(const ShaderCode& code, const ShaderVertexInputInfo& info)
+static int FindVertexInputResource(const ShaderVertexInputInfo& info, int semantic)
 {
-	const auto fetch_loads = ShaderDetectVertexFetchLoads(code, info);
+	for (int i = 0; i < info.resources_num; i++)
+	{
+		if (info.resources_dst[i].semantic == semantic)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const ShaderCode& code, const ShaderVertexInputInfo& info)
+{
+	Vector<std::pair<ShaderInstruction, int>> load_instructions;
+	for (const auto& [inst, semantic]: DetectVertexFetchSemantics(code, info.fetch_attrib_reg, info.fetch_buffer_reg))
+	{
+		const int resource = FindVertexInputResource(info, semantic);
+		if (resource < 0)
+		{
+			// No attribute-table semantic: keep BufferLoadFormat and
+			// address through the live V# / vertex-stream SSBO.
+			KYTY_LOG_DEBUG("WARNING: vertex fetch semantic missing input resource (continuing)\n");
+			continue;
+		}
+		load_instructions.Add({inst, resource});
+	}
+	return load_instructions;
+}
+
+ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& code, int fetch_attrib_reg, int fetch_buffer_reg)
+{
+	ShaderVertexStreamAccessScan scan;
+	scan.fetch_attrib_reg = fetch_attrib_reg;
+	scan.fetch_buffer_reg = fetch_buffer_reg;
+	for (const auto& [inst, semantic]: DetectVertexFetchSemantics(code, fetch_attrib_reg, fetch_buffer_reg))
+	{
+		scan.fetch_candidates.Add(std::pair<uint32_t, int> {inst.pc, semantic});
+	}
 	for (const auto& inst: code.GetInstructions())
 	{
 		const auto name = Core::EnumName8(inst.type);
@@ -2568,7 +2588,35 @@ bool ShaderVertexStreamStorageHasReader(const ShaderCode& code, const ShaderVert
 		{
 			continue;
 		}
-		if (!fetch_loads.Contains(inst.pc, [](const auto& load, uint32_t pc) { return load.first.pc == pc; }))
+		if (!scan.fetch_candidates.Contains(inst.pc, [](const auto& candidate, uint32_t pc) { return candidate.first == pc; }))
+		{
+			scan.unconditional_reader = true;
+			break;
+		}
+	}
+	return scan;
+}
+
+bool ShaderVertexStreamStorageHasReader(const ShaderVertexStreamAccessScan& scan, const ShaderVertexInputInfo& info)
+{
+	if (scan.unconditional_reader)
+	{
+		return true;
+	}
+	const auto fetched = [&](uint32_t pc)
+	{
+		for (const auto& [candidate_pc, semantic]: scan.fetch_candidates)
+		{
+			if (candidate_pc == pc && FindVertexInputResource(info, semantic) >= 0)
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	for (const auto& candidate: scan.fetch_candidates)
+	{
+		if (!fetched(candidate.first))
 		{
 			return true;
 		}

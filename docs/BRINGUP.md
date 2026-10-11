@@ -9,6 +9,32 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Per-draw vertex-stream reader scan (2026-10-11)
+
+- Timers around each part of the draw state setup on the racing title
+  (discrete device, race scene) put about 65 us of every draw into one
+  check: whether a vertex-stream SSBO keeps a reader after the generator
+  rewrites format loads into fetches. Each draw repeated the full symbolic
+  fetch detection over the linked program and named every instruction
+  through its enum string. That was about 36% of the command-processor
+  thread.
+- The detection depends only on the immutable program code and the two
+  fetch-table registers. It now runs once per cached vertex program and
+  register pair, and keeps each fetch candidate with its attribute semantic.
+  Each draw resolves only those semantics against its own input resources,
+  so the verdict stays per draw.
+- Equivalence: a temporary build computed both verdicts on every draw:
+  376,832 draws on the racing title, 114,688 on the Unity fishing title and
+  16,384 on the beat 'em up, with zero mismatches.
+- Measured on the same route against two baseline runs: the race window
+  rose from 45-46 to 70 fps (p95 frame time 91-101 ms to 60 ms), and the
+  three earlier windows rose 27-60%. Captures of the race scene are
+  unchanged.
+- Remaining per-draw costs from the same timers: pixel input info and probe
+  validation (25-40 us per draw on the racing title) and guest device-address
+  read preparation, which costs about 1.4 ms per draw on the beat 'em up and
+  is its dominant cost.
+
 ## Guest physical memory on host-pointer-restricted drivers (2026-10-11)
 
 - The integrated RADV device stopped every title that dereferences guest
