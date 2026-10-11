@@ -40,8 +40,12 @@ memory. Either pass resets the byte count.
 ## Verification
 
 ```bash
-_build_linux/kyty_unit_test --gtest_brief=1
+cmake --build <owned-build> --parallel 2 --target kyty_unit_test
+<owned-build>/kyty_unit_test
 ```
+
+The run must end with a `[  PASSED  ]` line and no `[  FAILED  ]` line; an
+unknown flag prints the help text and exits with status 0 without running tests.
 
 For a bounded runtime check, run a title through a phase that creates many
 buffers between presents, sample the run's cgroup memory and confirm that live
