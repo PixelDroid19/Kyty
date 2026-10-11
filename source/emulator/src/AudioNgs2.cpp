@@ -3,6 +3,7 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/VirtualMemory.h"
 
+#include "Emulator/AudioNgs2Reverb.h"
 #include "Emulator/AudioNgs2Sampler.h"
 #include "Emulator/AudioVideoBackend.h"
 #include "Emulator/GuestRuntimePort.h"
@@ -349,6 +350,38 @@ struct Ngs2RoutingValueParam
 };
 static_assert(sizeof(Ngs2RoutingValueParam) == 16);
 
+struct Ngs2ReverbSetupParam
+{
+	Ngs2VoiceParamHeader header;
+	uint32_t             num_input_channels;
+	uint32_t             num_output_channels;
+	uint32_t             flags;
+	uint32_t             reserved;
+};
+static_assert(sizeof(Ngs2ReverbSetupParam) == 24);
+
+// The I3DL2 block of a reverb voice. The reserved words are not checked: the guest library writes 8 to the first.
+struct Ngs2ReverbI3dl2Param
+{
+	Ngs2VoiceParamHeader header;
+	float                wet;
+	float                dry;
+	int32_t              room;
+	int32_t              room_hf;
+	uint32_t             reflection_pattern;
+	float                decay_time;
+	float                decay_hf_ratio;
+	int32_t              reflections;
+	float                reflections_delay;
+	int32_t              reverb;
+	float                reverb_delay;
+	float                diffusion;
+	float                density;
+	float                hf_reference;
+	uint32_t             reserved[8];
+};
+static_assert(sizeof(Ngs2ReverbI3dl2Param) == 96);
+
 // Input of a block callback handler. Only callback_data (+0), flag (+0x10) and
 // user_data (+0x18) are confirmed by a native callback's reads. The other offsets
 // are inferred from a classic header and are not verified on a guest: real values
@@ -421,6 +454,8 @@ constexpr uint32_t kNgs2SamplerPitchId  = 0x10000005u;
 constexpr uint32_t kNgs2VoiceParamCallback          = 0x7u;
 constexpr uint32_t kNgs2VoiceParamPatch             = 0x5u;
 constexpr uint32_t kNgs2SubmixerSetupId             = 0x20000000u;
+constexpr uint32_t kNgs2ReverbSetupId               = 0x20010000u;
+constexpr uint32_t kNgs2ReverbI3dl2Id               = 0x20010001u;
 constexpr uint32_t kNgs2MasteringSetupId            = 0x30000000u;
 constexpr uint32_t kNgs2MasteringOutputId           = 0x30000005u;
 // Host bound on the render buffers of one SystemRender call; titles pass one or three.
@@ -953,6 +988,7 @@ struct Ngs2VoiceRecord
 	float                              port_volume     = 1.0f;
 	uint32_t                           output_channels = 0;
 	uint32_t                           output_index    = 0;
+	Ngs2Reverb::Reverb                 reverb;
 };
 
 static uint32_t Ngs2GetVoiceStateFlags(const Ngs2VoiceRecord& voice)
@@ -1992,6 +2028,11 @@ static int32_t Ngs2MixerRunCommand(Ngs2VoiceRecord& voice, Ngs2RackType type, co
 	{
 		return kNgs2InvalidControl;
 	}
+	if (type == Ngs2RackType::Reverb && Ngs2IsImmediateStop(event))
+	{
+		// An immediate stop ends the reverb tail as well.
+		voice.reverb.Reset();
+	}
 	voice.event = event;
 	return OK;
 }
@@ -2026,6 +2067,49 @@ static int32_t Ngs2RoutingControl(Ngs2VoiceRecord& voice, Ngs2RackType type, con
 		return OK;
 	}
 	return kNgs2InvalidControl;
+}
+
+// Setup and I3DL2 parameters of a reverb voice. The bus is stereo, so only the stereo setup is admitted; a setup clears
+// the tail and loads the default parameters.
+static int32_t Ngs2ReverbControl(Ngs2VoiceRecord& voice, const Ngs2VoiceParamHeader& header, const Ngs2VoiceParamHeader* param_list)
+{
+	if (header.id == kNgs2ReverbSetupId)
+	{
+		Ngs2ReverbSetupParam setup {};
+		if (header.size != sizeof(setup) || !Ngs2ReadGuest(&setup, reinterpret_cast<const Ngs2ReverbSetupParam*>(param_list)) ||
+		    setup.num_input_channels != 2 || setup.num_output_channels != 2 || setup.flags != 0 || setup.reserved != 0)
+		{
+			return kNgs2InvalidControl;
+		}
+		return voice.reverb.Configure(voice.system->option.sample_rate) ? OK : kNgs2InvalidControl;
+	}
+	Ngs2ReverbI3dl2Param param {};
+	if (header.id != kNgs2ReverbI3dl2Id || header.size != sizeof(param) ||
+	    !Ngs2ReadGuest(&param, reinterpret_cast<const Ngs2ReverbI3dl2Param*>(param_list)))
+	{
+		return kNgs2InvalidControl;
+	}
+	Ngs2Reverb::Params params;
+	params.wet                = param.wet;
+	params.dry                = param.dry;
+	params.room               = param.room;
+	params.room_hf            = param.room_hf;
+	params.reflection_pattern = param.reflection_pattern;
+	params.decay_time         = param.decay_time;
+	params.decay_hf_ratio     = param.decay_hf_ratio;
+	params.reflections        = param.reflections;
+	params.reflections_delay  = param.reflections_delay;
+	params.reverb             = param.reverb;
+	params.reverb_delay       = param.reverb_delay;
+	params.diffusion          = param.diffusion;
+	params.density            = param.density;
+	params.hf_reference       = param.hf_reference;
+	if (!Ngs2Reverb::Normalize(&params))
+	{
+		return kNgs2InvalidControl;
+	}
+	voice.reverb.SetParams(params);
+	return OK;
 }
 
 static bool Ngs2IsRoutingRack(Ngs2RackType type)
@@ -2310,8 +2394,8 @@ static uint32_t Ngs2RouteDistance(const Ngs2VoiceRecord& voice)
 }
 
 // Renders every source voice into its own bus, then runs the routing voices down the graph: a playing submixer passes
-// its input on at its gain, a playing mastering voice writes it to its render buffer. Reverb processing is not
-// implemented, so a reverb voice passes nothing on. Only the system lease and the state lock are held; callbacks are
+// its input on at its gain, a playing reverb voice passes it on through its reverb (every grain, so a tail outlives
+// its input), a playing mastering voice writes it to its render buffer. Only the system lease and the state lock are held; callbacks are
 // queued, not run. system_out receives the record (not a lease) for the later dispatch.
 // defer_callbacks is set when the calling thread holds the explicit system lock. Each render bounds its callback batch
 // before changing voice state; when the caller holds the explicit lock, the deferred list must also have room for every
@@ -2404,7 +2488,24 @@ static int32_t Ngs2MixSystem(uintptr_t system_handle, const Ngs2RenderBufferInfo
 		(void)unused_distance;
 		const auto input = inputs.find(voice);
 		const auto rack  = voice->rack.lock();
-		if (input == inputs.end() || rack == nullptr || voice->state != Ngs2VoicePlayState::Playing)
+		if (rack == nullptr || voice->state != Ngs2VoicePlayState::Playing)
+		{
+			continue;
+		}
+		if (rack->type == Ngs2RackType::Reverb)
+		{
+			if (input == inputs.end())
+			{
+				std::fill(bus.begin(), bus.end(), 0.0);
+			} else
+			{
+				bus = input->second;
+			}
+			voice->reverb.Process(bus.data(), grain, bus.data());
+			Ngs2RouteBus(*voice, bus, &inputs);
+			continue;
+		}
+		if (input == inputs.end())
 		{
 			continue;
 		}
@@ -2936,6 +3037,10 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 	if (rack != nullptr && (rack->type == Ngs2RackType::Submixer || rack->type == Ngs2RackType::Mastering))
 	{
 		return Ngs2RoutingControl(*voice.Get(), rack->type, header, param_list);
+	}
+	if (rack != nullptr && rack->type == Ngs2RackType::Reverb)
+	{
+		return Ngs2ReverbControl(*voice.Get(), header, param_list);
 	}
 	if (rack == nullptr || rack->type != Ngs2RackType::CustomSampler)
 	{

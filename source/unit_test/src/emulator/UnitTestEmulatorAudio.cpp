@@ -3240,6 +3240,123 @@ TEST(EmulatorAudio, Ngs2RoutesASamplerThroughASubmixerToItsMasteringBuffer)
 	(void)Ngs2::Ngs2RackDestroy(submixer.rack, nullptr);
 }
 
+namespace {
+
+constexpr uint32_t kReverbRackId = 0x2001;
+
+int32_t SetReverbSetup(uintptr_t voice, uint32_t channels, uint32_t flags)
+{
+	GuestReadableBlock storage(24);
+	if (!storage.IsValid())
+	{
+		return kSamplerInvalidControl;
+	}
+	auto* param = static_cast<uint8_t*>(storage.Data());
+	std::memset(param, 0, 24);
+	*reinterpret_cast<uint16_t*>(param + 0)  = 24;
+	*reinterpret_cast<uint32_t*>(param + 4)  = 0x20010000u;
+	*reinterpret_cast<uint32_t*>(param + 8)  = channels; // input channels
+	*reinterpret_cast<uint32_t*>(param + 12) = channels; // output channels
+	*reinterpret_cast<uint32_t*>(param + 16) = flags;
+	return Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(param));
+}
+
+// The 96-byte I3DL2 block of a late-reverb-only room, with the first reserved word set as the guest library sets it.
+int32_t SetReverbI3dl2(uintptr_t voice, float wet, float dry)
+{
+	GuestReadableBlock storage(96);
+	if (!storage.IsValid())
+	{
+		return kSamplerInvalidControl;
+	}
+	auto* param = static_cast<uint8_t*>(storage.Data());
+	std::memset(param, 0, 96);
+	*reinterpret_cast<uint16_t*>(param + 0) = 96;
+	*reinterpret_cast<uint32_t*>(param + 4) = 0x20010001u;
+	const float floats[]                    = {wet, dry};
+	std::memcpy(param + 8, floats, sizeof(floats));
+	const float   decay[]       = {2.0f, 1.0f};             // decay_time, decay_hf_ratio
+	const int32_t reflections   = -10000;                   // no early reflections
+	const float   diffusion[]   = {100.0f, 100.0f, 5000.0f}; // diffusion, density, hf_reference
+	std::memcpy(param + 28, decay, sizeof(decay));
+	std::memcpy(param + 36, &reflections, sizeof(reflections));
+	std::memcpy(param + 52, diffusion, sizeof(diffusion));
+	*reinterpret_cast<uint32_t*>(param + 64) = 8;
+	return Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(param));
+}
+
+float RenderPeak(uintptr_t system, GuestReadableBlock* output_storage)
+{
+	if (RenderSamplerGrain(system, output_storage->Data()) != 0)
+	{
+		return -1.0f;
+	}
+	const auto* output = static_cast<const float*>(output_storage->Data());
+	float       peak   = 0.0f;
+	for (uint32_t i = 0; i < kSamplerGrainFrames * 2; i++)
+	{
+		peak = std::max(peak, std::abs(output[i]));
+	}
+	return peak;
+}
+
+} // namespace
+
+TEST(EmulatorAudio, Ngs2ReverbVoicePassesItsInputThroughTheReverb)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	PlayingRack reverb;
+	ASSERT_TRUE(CreatePlayingRack(rig.system, kReverbRackId, &reverb));
+	// The bus is stereo: other channel counts and flags are refused.
+	EXPECT_EQ(SetReverbSetup(reverb.voice, 8, 0), kSamplerInvalidControl);
+	EXPECT_EQ(SetReverbSetup(reverb.voice, 2, 1), kSamplerInvalidControl);
+	ASSERT_EQ(SetReverbSetup(reverb.voice, 2, 0), 0);
+	ASSERT_EQ(PatchVoice(rig.voice, reverb.voice), 0);
+	ASSERT_EQ(PatchVoice(reverb.voice, rig.mastering.rack), 0);
+
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * kSamplerGrainFrames);
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	const auto* output = static_cast<const float*>(output_storage.Data());
+
+	// A voice that was only set up passes silence.
+	ASSERT_TRUE(PlayConstantBlock(rig.voice, &pcm_storage, 16384));
+	EXPECT_EQ(RenderPeak(rig.system, &output_storage), 0.0f);
+
+	// No wet gain: the dry path alone.
+	ASSERT_EQ(SetReverbI3dl2(reverb.voice, 0.0f, 0.5f), 0);
+	EXPECT_EQ(SetReverbI3dl2(reverb.voice, std::numeric_limits<float>::quiet_NaN(), 0.5f), kSamplerInvalidControl);
+	ASSERT_TRUE(PlayConstantBlock(rig.voice, &pcm_storage, 16384));
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	EXPECT_FLOAT_EQ(output[0], 0.25f);
+	EXPECT_FLOAT_EQ(output[kSamplerGrainFrames * 2 - 1], 0.25f);
+
+	// Wet only: the tail goes on after the sampler ends, until an immediate stop clears it.
+	ASSERT_EQ(SetReverbI3dl2(reverb.voice, 1.0f, 0.0f), 0);
+	ASSERT_TRUE(PlayConstantBlock(rig.voice, &pcm_storage, 16384));
+	float tail = 0.0f;
+	for (uint32_t grain = 0; grain < 24; grain++)
+	{
+		const float peak = RenderPeak(rig.system, &output_storage);
+		ASSERT_GE(peak, 0.0f);
+		tail = grain >= 12 ? std::max(tail, peak) : tail;
+	}
+	EXPECT_GT(tail, 0.0f);
+	ASSERT_EQ(RunSamplerEvent(reverb.voice, 0x4), 0);
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	ASSERT_EQ(RunSamplerEvent(reverb.voice, kSamplerPlayEvent), 0);
+	EXPECT_EQ(RenderPeak(rig.system, &output_storage), 0.0f);
+
+	(void)Ngs2::Ngs2RackDestroy(reverb.rack, nullptr);
+}
+
 TEST(EmulatorAudio, Ngs2PortInfoReportsThePortVolumeAndPatchDestination)
 {
 	if (!Config::IsInitialized())

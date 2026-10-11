@@ -67,6 +67,7 @@ UT_LINK(EmulatorLibcCxaDynamicCast);
 UT_LINK(EmulatorLibcCxxLocale);
 UT_LINK(EmulatorSaveData);
 UT_LINK(EmulatorAudio);
+UT_LINK(EmulatorAudioNgs2Reverb);
 UT_LINK(EmulatorPad);
 UT_LINK(EmulatorIme);
 UT_LINK(EmulatorLibcString);
