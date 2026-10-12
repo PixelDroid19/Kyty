@@ -1,6 +1,7 @@
 #include "ShaderSpirvInternal.h"
 
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderComputeWaveLayout.h"
 
 #include <limits>
 
@@ -113,18 +114,15 @@ bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
 		return false;
 	}
 
-	uint64_t local_xy = 0;
-	uint64_t local_size = 0;
-	if (layout.guest_local[0] == 0u || layout.guest_local[0] % kNativeSubgroupSize != 0u || layout.guest_local[1] == 0u ||
-	    layout.guest_local[2] == 0u || !MultiplyU64(layout.guest_local[0], layout.guest_local[1], &local_xy) ||
-	    !MultiplyU64(local_xy, layout.guest_local[2], &local_size) || local_xy > UINT32_MAX || local_size > UINT32_MAX)
+	uint32_t physical_local[3] {};
+	if (!ShaderNativeWave32PhysicalLocal(layout.guest_local, physical_local))
 	{
 		return false;
 	}
 
 	for (uint32_t axis = 0; axis < 3u; axis++)
 	{
-		if (layout.guest_local[axis] != input->threads_num[axis] || layout.physical_local[axis] != layout.guest_local[axis])
+		if (layout.guest_local[axis] != input->threads_num[axis] || layout.physical_local[axis] != physical_local[axis])
 		{
 			return false;
 		}
@@ -209,7 +207,9 @@ bool Spirv::EmitNativeComputeWaveProlog(String8* output) const
 	const auto  size_x  = GetConstantUint(local[0]);
 	const auto  size_y  = GetConstantUint(local[1]);
 	const auto  size_xy = GetConstantUint(local[0] * local[1]);
-	if (!IsKnownUintConstant(wave) || !IsKnownUintConstant(size_x) || !IsKnownUintConstant(size_y) || !IsKnownUintConstant(size_xy))
+	const auto  lanes   = GetConstantUint(local[0] * local[1] * local[2]);
+	if (!IsKnownUintConstant(wave) || !IsKnownUintConstant(size_x) || !IsKnownUintConstant(size_y) || !IsKnownUintConstant(size_xy) ||
+	    !IsKnownUintConstant(lanes))
 	{
 		return false;
 	}
@@ -223,11 +223,13 @@ bool Spirv::EmitNativeComputeWaveProlog(String8* output) const
 %native_wave_coord_y_div = OpUDiv %uint %native_wave_logical_index %<size_x>
 %native_wave_coord_y = OpUMod %uint %native_wave_coord_y_div %<size_y>
 %native_wave_coord_z = OpUDiv %uint %native_wave_logical_index %<size_xy>
+%native_wave_in_group = OpULessThan %bool %native_wave_logical_index %<lanes>
 )")
 	                .ReplaceStr("<wave>", wave)
 	                .ReplaceStr("<size_x>", size_x)
 	                .ReplaceStr("<size_y>", size_y)
-	                .ReplaceStr("<size_xy>", size_xy);
+	                .ReplaceStr("<size_xy>", size_xy)
+	                .ReplaceStr("<lanes>", lanes);
 	if (m_cs_input_info->thread_ids_num >= 1) { AppendNativeComputeWaveCoordinate(output, "x", 0u); }
 	if (m_cs_input_info->thread_ids_num >= 2) { AppendNativeComputeWaveCoordinate(output, "y", 1u); }
 	if (m_cs_input_info->thread_ids_num >= 3) { AppendNativeComputeWaveCoordinate(output, "z", 2u); }

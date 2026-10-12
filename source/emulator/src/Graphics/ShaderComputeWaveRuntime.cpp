@@ -251,6 +251,10 @@ ShaderComputeWavePreflightResult ShaderBuildComputeWaveDispatchPlan(const Shader
 		candidate.wave_layout.guest_local[axis]    = request.local_size[axis];
 		candidate.wave_layout.physical_local[axis] = request.local_size[axis];
 	}
+	if (request.is_next_gen && !ShaderNativeWave32PhysicalLocal(candidate.wave_layout.guest_local, candidate.wave_layout.physical_local))
+	{
+		return Rejected(ShaderComputeWavePreflightReason::ArithmeticOverflow);
+	}
 
 	const bool thread_dimensions = !request.is_next_gen && (request.dispatch_mode & kUseThreadDimensions) != 0u;
 	for (uint32_t axis = 0; axis < 3u; ++axis)

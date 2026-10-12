@@ -764,7 +764,8 @@ void Spirv::WriteHeader()
 		case ShaderType::Compute:
 			if (m_cs_input_info != nullptr)
 			{
-				const auto* local_size = UsesComputeWaveBanks() ? m_cs_input_info->wave_layout.physical_local : m_cs_input_info->threads_num;
+				const auto* local_size = UsesComputeWaveBanks() || UsesNativeComputeWave() ? m_cs_input_info->wave_layout.physical_local
+				                                                                           : m_cs_input_info->threads_num;
 				execution_modes.Add(String8::FromPrintf("OpExecutionMode %%main LocalSize %u %u %u", local_size[0], local_size[1], local_size[2]));
 				if (m_cs_input_info->lds_dwords > 0)
 				{
@@ -1842,7 +1843,7 @@ void Spirv::WriteGlobalVariables()
 		case ShaderType::Compute:
 			if (m_cs_input_info != nullptr)
 			{
-				if (UsesComputeWaveBanks())
+				if (UsesComputeWaveBanks() || UsesNativeComputeWave())
 				{
 					// WorkgroupSize takes precedence over LocalSize in Vulkan;
 					// both must describe physical invocations, not guest lanes.
@@ -2325,7 +2326,15 @@ void Spirv::WriteLocalVariables()
 		            "OpStore %execz %uint_0\nOpStore %scc %uint_0\n";
 	} else
 	{
-		m_source += "OpStore %exec_lane_lo %uint_1\nOpStore %exec_lane_hi %uint_0\nOpStore %scc %uint_0\n";
+		if (UsesNativeComputeWave())
+		{
+			m_source += "%native_wave_in_group_exec = OpSelect %uint %native_wave_in_group %uint_1 %uint_0\n"
+			            "OpStore %exec_lane_lo %native_wave_in_group_exec\n";
+		} else
+		{
+			m_source += "OpStore %exec_lane_lo %uint_1\n";
+		}
+		m_source += "OpStore %exec_lane_hi %uint_0\nOpStore %scc %uint_0\n";
 		if (m_cs_input_info != nullptr && m_bind != nullptr && m_bind->thread_limits_used)
 		{
 			m_source += EmitNativeThreadLimitExec();
@@ -2407,8 +2416,11 @@ String8 Spirv::EmitNativeThreadLimitExec() const
 		                              a.c_str(), a.c_str(), a.c_str(), a.c_str(), a.c_str(), a.c_str());
 	}
 	source += "%tl_native_xy = OpLogicalAnd %bool %tl_native_0_ok %tl_native_1_ok\n"
-	          "%tl_native_ok = OpLogicalAnd %bool %tl_native_xy %tl_native_2_ok\n"
-	          "%tl_native_exec = OpSelect %uint %tl_native_ok %uint_1 %uint_0\n"
+	          "%tl_native_ok = OpLogicalAnd %bool %tl_native_xy %tl_native_2_ok\n";
+	// Padding lanes of a partial trailing wave stay inactive under any limit.
+	source += UsesNativeComputeWave() ? "%tl_native_live = OpLogicalAnd %bool %tl_native_ok %native_wave_in_group\n"
+	                                  : "%tl_native_live = OpCopyObject %bool %tl_native_ok\n";
+	source += "%tl_native_exec = OpSelect %uint %tl_native_live %uint_1 %uint_0\n"
 	          "OpStore %exec_lane_lo %tl_native_exec\n";
 	return source;
 }
@@ -3538,6 +3550,9 @@ void Spirv::FindConstants()
 			{
 				AddConstantUint(dimension);
 			}
+		}
+		if (UsesComputeWaveBanks() || UsesNativeComputeWave())
+		{
 			for (const auto dimension: m_cs_input_info->wave_layout.physical_local)
 			{
 				AddConstantUint(dimension);
@@ -3548,6 +3563,7 @@ void Spirv::FindConstants()
 			const auto& local = m_cs_input_info->wave_layout.guest_local;
 			AddConstantUint(32u);
 			AddConstantUint(local[0] * local[1]);
+			AddConstantUint(local[0] * local[1] * local[2]);
 		}
 	}
 	FindFragmentConstants();

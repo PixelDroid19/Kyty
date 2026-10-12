@@ -316,8 +316,7 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	{
 		if (layout.guest_wave_size != kNativeSubgroupSize ||
 		    (layout.native_subgroup_size != 0u && layout.native_subgroup_size != kNativeSubgroupSize) || layout.banks != 1u ||
-		    layout.waves != 0u || layout.guest_local[0] % kNativeSubgroupSize != 0u ||
-		    (spirv_version < 0x00010600u && !capabilities.full_subgroups_enabled) ||
+		    layout.waves != 0u || (spirv_version < 0x00010600u && !capabilities.full_subgroups_enabled) ||
 		    (require_size && (!capabilities.size_control_enabled || !capabilities.compute_required_size_supported ||
 		                     capabilities.min_subgroup_size > kNativeSubgroupSize ||
 		                     capabilities.max_subgroup_size < kNativeSubgroupSize)))
@@ -325,23 +324,23 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 			return false;
 		}
 
-		uint64_t local_invocations = 1u;
+		uint32_t physical_local[3] {};
 		uint64_t max_workgroup_invocations = 0u;
 		uint64_t shared_bytes = 0u;
-		if (!MultiplyU64(kNativeSubgroupSize, capabilities.max_subgroups, &max_workgroup_invocations) ||
+		if (!ShaderNativeWave32PhysicalLocal(layout.guest_local, physical_local) ||
+		    !MultiplyU64(kNativeSubgroupSize, capabilities.max_subgroups, &max_workgroup_invocations) ||
 		    !MultiplyU64(layout.lds_dwords, sizeof(uint32_t), &shared_bytes))
 		{
 			return false;
 		}
 		for (uint32_t axis = 0; axis < 3u; ++axis)
 		{
-			if (layout.guest_local[axis] == 0u || layout.physical_local[axis] != layout.guest_local[axis] ||
-			    layout.guest_local[axis] > capabilities.max_local_size[axis] ||
-			    !MultiplyU64(local_invocations, layout.guest_local[axis], &local_invocations))
+			if (layout.physical_local[axis] != physical_local[axis] || physical_local[axis] > capabilities.max_local_size[axis])
 			{
 				return false;
 			}
 		}
+		const uint64_t local_invocations = physical_local[0];
 		if (local_invocations > capabilities.max_invocations || local_invocations > max_workgroup_invocations ||
 		    shared_bytes > capabilities.max_shared_bytes)
 		{

@@ -9,6 +9,64 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Native wave32 compute in whole host subgroups (2026-10-12)
+
+- On the AMD host the robot platformer reached its PS logo level (102
+  presents, agent phase `interactive`). The strict run then stopped at about
+  60 s with `native-wave compute coordinate layout unsupported or
+  inconsistent`.
+- A bounded diagnostic named the dispatch: a wave32 compute program that reads
+  wave state (`native_wave_sensitive`), with a 1x1x1 thread group, no LDS and
+  no thread limits.
+- The native route rebuilt each guest lane index as host subgroup id x 32 +
+  subgroup lane. Full host subgroups need a host X that is a multiple of 32, so
+  the route refused every guest group whose X was not. A group of fewer than
+  32 lanes is one partial guest wave: the lanes past the group never launch on
+  the hardware.
+- Change: the host workgroup is now `(ceil(N / 32) x 32, 1, 1)` for a guest
+  group of N lanes (`ShaderNativeWave32PhysicalLocal`). Guest coordinates are
+  still rebuilt from the linear, X-first lane index. Lanes at or past N start
+  with EXEC clear, which is the same rule as for lanes past the dispatch
+  thread limits; the thread-limit test ANDs with it. `LocalSize` and
+  `gl_WorkGroupSize` use the physical shape. The dispatch plan, the SPIR-V
+  validator and the Vulkan subgroup attach all check the same shape.
+  Translator version 131.
+- Tests: the dispatch plan maps a 1x1x1 wave32 group to (32,1,1) and a 16x8
+  group to (128,1,1). The Vulkan attach admits the padded shape and still
+  refuses a host X that is not a multiple of 32.
+- Verification. Unit suite: 2,380 pass. Boundary and table gates pass.
+  Intel frontier sweep, one run each:
+  - The atmospheric platformer, the gothic action platformer, the ninja
+    platformer, the roguelike dungeon crawler, the pixel exploration title, the
+    artillery title and the robot platformer reach the time limit, with peaks of
+    2,845, 3,361, 1,424, 5,792, 1,291, 1,950 and 3,541 MB.
+  - The mechanical-fist platformer stops at an unresolved graphics import. The
+    same stop appears on runs of earlier binaries, alternating with its known
+    stops.
+  - The racing title races at 86.9 fps, the Unity fishing title runs at
+    8.6-11.0 fps, and the beat 'em up at 9.4-10.3 fps. All are within the
+    earlier ranges.
+  On AMD:
+  - The racing title races at 39.1 fps.
+  - The 2D title that dereferences guest pointers, the atmospheric platformer
+    and the roguelike dungeon crawler reach the time limit.
+  - The beat 'em up runs at 2.2-3.0 fps against an earlier 2.4-3.4. This is
+    the known per-submit import cost.
+- Result on AMD: the strict run passes the former stop. It now stops at about
+  60 s on `!create_all_the_same`. A 960-wide StorageTexture at
+  0x53bcf0000 overlaps 11 live objects of a 26 MB transient pool: two
+  CPU-uploaded StorageBuffers, two 1920x1080 RenderTextures (Crosses), a
+  2432-wide StorageTexture, a 2432x1368 RenderTexture (Contains), and a
+  640-wide StorageTexture (IsContainedWithin). This is open. The pool reuses
+  the same memory across passes, so it needs an aliasing policy for transient
+  GPU-owned memory, not another relation special case.
+- On Intel the same title stops presenting at about 26 s, before this
+  dispatch. The command processor spends about 99% of its time inside the
+  Intel Vulkan driver creating a compute pipeline from
+  `GraphicsRenderDispatchDirect`, measured with the perf-event stack sampler.
+  The process stays alive, which is why the frontier sweep counts it as
+  reaching the time limit. Open; the program has not been identified yet.
+
 ## Physical device-address imports in whole blocks (2026-10-11)
 
 - The racing title's physical ranges imported a chunk for every newly resident
@@ -73,10 +131,10 @@ fail on the current HEAD before acting on them.
   the two AJM commits. That excludes this change and those commits, but leaves
   audio unchecked for these runs.
 - Frontier sweep with the change on Intel, one 90 s run each (150 s for the
-  platformer collection title), with peak memory:
+  robot platformer), with peak memory:
   - The atmospheric platformer, the gothic action platformer, the ninja
     platformer, the roguelike dungeon crawler, the pixel exploration title,
-    the artillery title and the platformer collection title all reach the
+    the artillery title and the robot platformer all reach the
     time limit.
   - Peaks: 2,514, 3,079, 1,164, 5,916, 1,320, 2,011 and 3,542 MB. On the base
     binary the roguelike dungeon crawler peaks at 6,176 MB.

@@ -853,9 +853,11 @@ TEST(EmulatorNativeWaveAdmission, NativeWave32Spirv16FullSubgroupsUseActualModul
 	layout.strategy = ShaderComputeWaveStrategy::Native;
 	layout.guest_wave_size = layout.native_subgroup_size = 32;
 	layout.banks = 1;
-	layout.guest_local[0] = layout.physical_local[0] = 32;
-	layout.guest_local[1] = layout.physical_local[1] = 2;
-	layout.guest_local[2] = layout.physical_local[2] = 1;
+	layout.guest_local[0] = 32;
+	layout.guest_local[1] = 2;
+	layout.guest_local[2] = 1;
+	layout.physical_local[0] = 64;
+	layout.physical_local[1] = layout.physical_local[2] = 1;
 	VkPipelineShaderStageCreateInfo stage {};
 	stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required {};
@@ -881,12 +883,25 @@ TEST(EmulatorNativeWaveAdmission, NativeWave32Spirv16FullSubgroupsUseActualModul
 	EXPECT_EQ(stage.pNext, nullptr);
 	EXPECT_EQ(stage.flags, 0u);
 
-	// Total workgroup size being divisible by 32 does not prove full subgroups
-	// when X itself is not a multiple of the effective subgroup size.
+	// Full subgroups need a host X that is a multiple of the subgroup size, so
+	// the guest shape is never launched as is when its X is not.
 	layout.guest_local[0] = layout.physical_local[0] = 16;
 	layout.guest_local[1] = layout.physical_local[1] = 4;
 	EXPECT_FALSE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, fixed_capabilities, &stage, &required,
 	                                                            false, 0x00010600u));
+	layout.physical_local[0] = 64;
+	layout.physical_local[1] = 1;
+	EXPECT_TRUE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, fixed_capabilities, &stage, &required,
+	                                                           false, 0x00010600u));
+
+	// A group smaller than one wave pads to one subgroup of inactive lanes.
+	layout.guest_local[0] = layout.guest_local[1] = 1;
+	layout.physical_local[0] = 1;
+	EXPECT_FALSE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, fixed_capabilities, &stage, &required,
+	                                                            false, 0x00010600u));
+	layout.physical_local[0] = 32;
+	EXPECT_TRUE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, fixed_capabilities, &stage, &required,
+	                                                           false, 0x00010600u));
 }
 
 UT_END();
