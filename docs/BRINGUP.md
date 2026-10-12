@@ -658,6 +658,33 @@ previous section; the count of live ranges stays open.
   the skip never fired. Discarded.
 - The next work on this site needs a span index that answers overlap without
   visiting every slot.
+- Tried on 2026-10-12, together, and measured as one change:
+  - visit only the slots stored in the current epoch, with swap-remove on
+    invalidation;
+  - classify `SLoad` instruction types from a table built once, instead of a
+    mnemonic prefix compare per instruction and draw.
+- Result on Intel, unchanged route, perf-5..7: 10.5, 10.5 and 10.3 fps
+  against 10.6, 10.3 and 10.8 fps. Within run noise. Reverted.
+  - The `ResetHash` share was not profiled again, so this does not show that
+    the scan cost went away. The cache is near full during gameplay, so
+    visiting live slots still visits most of them.
+- A frame-pointer profile of the same window put `GraphicsRenderDrawIndex`
+  at 73% of on-CPU time on the command-processor thread:
+
+  | Path | Inclusive |
+  | --- | --- |
+  | `BindDescriptors` | 32% |
+  | `GpuMemory::CreateObject` | 21% |
+  | `ShaderGetInputInfoPS` | 10.6% |
+  | `CaptureTransientSnapshotBuffer` | 10% |
+  | `GpuDirtyPageTracker::BeginRead`, almost all in `Rearm` | 6.8% |
+
+  - In steady state `Rearm` walks every page of an already armed range, one
+    table lookup and one failed compare-exchange per page.
+- The window averages about 63 µs per draw at about 1,160 draws per frame,
+  plus about 21 ms per frame of fence waits that an on-CPU sampler does not
+  see. 60 fps would need about 14 µs per draw. That calls for reusing
+  per-draw binding work across draws, not for trimming single leaves.
 
 ## Index buffer objects through the mapping: excluded (2026-10-11)
 
