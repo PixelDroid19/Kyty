@@ -48,6 +48,46 @@ static void ChangeColor(QListWidgetItem* item)
 	}
 }
 
+// Presets scale the fixed render resolution from the host window size.
+static void ApplyGraphicsPreset(Ui::ConfigurationEditDialog* ui, Kyty::Configuration::GraphicsPreset preset)
+{
+	using Preset = Kyty::Configuration::GraphicsPreset;
+	using Mode   = Kyty::Configuration::RenderResolutionMode;
+	using Scope  = Kyty::Configuration::RenderResolutionScope;
+	using Filter = Kyty::Configuration::PresentationFilter;
+	using Aniso  = Kyty::Configuration::TextureAnisotropy;
+
+	struct Settings
+	{
+		Mode   mode;
+		Scope  scope;
+		int    percent;
+		Filter filter;
+		Aniso  anisotropy;
+	};
+	Settings settings {};
+	switch (preset)
+	{
+		case Preset::Custom: return;
+		case Preset::Native: settings = {Mode::Native, Scope::Display, 100, Filter::Linear, Aniso::Guest}; break;
+		case Preset::Quality: settings = {Mode::Fixed, Scope::RenderTargets, 100, Filter::Linear, Aniso::X16}; break;
+		case Preset::Balanced: settings = {Mode::Fixed, Scope::RenderTargets, 75, Filter::Fsr, Aniso::X8}; break;
+		case Preset::Performance: settings = {Mode::Fixed, Scope::RenderTargets, 50, Filter::Fsr, Aniso::Guest}; break;
+	}
+
+	auto scaled = [&](const QSpinBox* screen, QSpinBox* render)
+	{
+		const int value = (screen->value() * settings.percent / 100) & ~1;
+		render->setValue(std::clamp(value, render->minimum(), render->maximum()));
+	};
+	ui->comboBox_render_resolution_mode->setCurrentText(EnumToText(settings.mode));
+	ui->comboBox_render_resolution_scope->setCurrentText(EnumToText(settings.scope));
+	scaled(ui->spinBox_screen_width, ui->spinBox_render_width);
+	scaled(ui->spinBox_screen_height, ui->spinBox_render_height);
+	ui->comboBox_presentation_filter->setCurrentText(EnumToText(settings.filter));
+	ui->comboBox_texture_anisotropy->setCurrentText(EnumToText(settings.anisotropy));
+}
+
 ConfigurationEditDialog::ConfigurationEditDialog(Kyty::Configuration* info, ConfigurationListWidget* parent)
     : QDialog(parent, Qt::WindowCloseButtonHint), m_ui(new Ui::ConfigurationEditDialog), m_info(info), m_parent(parent)
 {
@@ -96,6 +136,8 @@ ConfigurationEditDialog::ConfigurationEditDialog(Kyty::Configuration* info, Conf
 		        auto filter = TextToEnum<Kyty::Configuration::PresentationFilter>(text);
 		        m_ui->spinBox_fsr_sharpness->setEnabled(filter == Kyty::Configuration::PresentationFilter::Fsr);
 	        });
+	connect(m_ui->comboBox_graphics_preset, &QComboBox::currentTextChanged,
+	        [=](const QString& text) { ApplyGraphicsPreset(m_ui, TextToEnum<Kyty::Configuration::GraphicsPreset>(text)); });
 	connect(m_ui->base_directory_lineedit, &QLineEdit::textChanged, this, &ConfigurationEditDialog::scan_elfs);
 	connect(m_ui->param_file_lineedit, &QLineEdit::textChanged, this, &ConfigurationEditDialog::load_param_sfo);
 	connect(m_ui->listWidget_elfs, &QListWidget::itemChanged, this, &ChangeColor);
@@ -190,6 +232,8 @@ void ConfigurationEditDialog::Init()
 	ListInit(m_ui->comboBox_render_resolution_scope, m_info->render_resolution_scope);
 	ListInit(m_ui->comboBox_presentation_filter, m_info->presentation_filter);
 	m_ui->spinBox_fsr_sharpness->setValue(m_info->presentation_fsr_sharpness);
+	ListInit(m_ui->comboBox_texture_anisotropy, m_info->texture_anisotropy);
+	ListInit(m_ui->comboBox_graphics_preset, Kyty::Configuration::GraphicsPreset::Custom);
 	m_ui->checkBox_neo->setChecked(m_info->neo);
 	m_ui->checkBox_shader_validation->setChecked(m_info->shader_validation_enabled);
 	m_ui->checkBox_vulkan_validation->setChecked(m_info->vulkan_validation_enabled);
@@ -270,6 +314,7 @@ static void UpdateInfo(Kyty::Configuration* info, Ui::ConfigurationEditDialog* u
 	info->render_resolution_scope    = TextToEnum<Kyty::Configuration::RenderResolutionScope>(ui->comboBox_render_resolution_scope->currentText());
 	info->presentation_filter        = TextToEnum<Kyty::Configuration::PresentationFilter>(ui->comboBox_presentation_filter->currentText());
 	info->presentation_fsr_sharpness = ui->spinBox_fsr_sharpness->value();
+	info->texture_anisotropy         = TextToEnum<Kyty::Configuration::TextureAnisotropy>(ui->comboBox_texture_anisotropy->currentText());
 	info->neo                        = ui->checkBox_neo->isChecked();
 	info->vulkan_validation_enabled  = ui->checkBox_vulkan_validation->isChecked();
 	info->shader_validation_enabled  = ui->checkBox_shader_validation->isChecked();

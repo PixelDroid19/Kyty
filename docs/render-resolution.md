@@ -17,6 +17,11 @@ The active render-resolution keys are:
 - `PresentationFilter`: `Linear`, `Nearest` or `Fsr`.
 - `PresentationFsrSharpness`: RCAS sharpness for `Fsr`, `0` to `100`. The
   default is `90`.
+- `TextureAnisotropy`: `Guest` (default), `X2`, `X4`, `X8` or `X16`. `Guest`
+  keeps each sampler's own anisotropy. A level raises every sampler with linear
+  minification to at least that ratio; point-sampled and unnormalized samplers
+  keep their guest state. This is a host image-quality option, not a
+  resolution setting.
 
 The matching environment variables are:
 
@@ -26,10 +31,18 @@ The matching environment variables are:
 - `KYTY_RENDER_RESOLUTION_HEIGHT`
 - `KYTY_PRESENTATION_FILTER`
 - `KYTY_PRESENTATION_FSR_SHARPNESS`
+- `KYTY_TEXTURE_ANISOTROPY`
 
 The launcher's configuration dialog edits every key above. The scope is
 enabled only in `Fixed` mode and the sharpness only with the `Fsr` filter,
 because the emulator ignores them otherwise.
+
+The dialog's graphics preset only fills these fields and is not stored.
+`Native` selects native resolution, linear presentation and guest
+anisotropy. `Quality`, `Balanced` and `Performance` select `Fixed` with
+`RenderTargets` at 100, 75 and 50 percent of the window size, with linear,
+`Fsr` and `Fsr` presentation and `X16`, `X8` and guest anisotropy. A fixed
+resolution raises frame rate only when a title is bound by GPU pixel work.
 
 `ScreenWidth` and `ScreenHeight` configure only the host window and swapchain.
 They do not select the guest render resolution.
