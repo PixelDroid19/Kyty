@@ -796,6 +796,7 @@ struct RenderDepthInfo
 	float                       depth_max_bounds         = 0.0f;
 	bool                        stencil_clear_enable     = false;
 	uint8_t                     stencil_clear_value      = 0;
+	bool                        stencil_plane            = false;
 	bool                        stencil_test_enable      = false;
 	bool                        sampled                  = false;
 	bool                        update_compression_state = false;

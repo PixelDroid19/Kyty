@@ -365,6 +365,30 @@ static bool ResolveDepthMetaStorageIdentity(uint64_t submit_id, const RenderDept
 	return true;
 }
 
+// A zero HTILE word marks every sample of its 8x8 tile cleared, and the
+// attachment clear covers every sample, so multisampled targets qualify. A
+// depth-only target has no stencil plane to lose. Clearing either aspect of a
+// combined D32S8 image starts the render pass from UNDEFINED, so it qualifies
+// only when the guest also initializes stencil in the same first use;
+// otherwise Vulkan could discard a stencil plane whose metadata semantics are
+// not modeled.
+static bool DepthMetaComputeFillTranslatable(const RenderDepthInfo& depth, const DepthMetaClearEvent& pending)
+{
+	if (pending.pattern.kind != DepthMetaPatternKind::UniformZero || pending.pattern.first_word != 0u)
+	{
+		return false;
+	}
+	if (depth.depth_clear_value != 0.0f || std::signbit(depth.depth_clear_value))
+	{
+		return false;
+	}
+	if (!depth.stencil_plane)
+	{
+		return true;
+	}
+	return depth.format == VK_FORMAT_D32_SFLOAT_S8_UINT && depth.stencil_clear_enable && depth.stencil_clear_value == 0u;
+}
+
 static bool ConsumeDepthMetaClear(uint64_t submit_id, const RenderDepthInfo& depth, DepthMetaClearEvent* event)
 {
 	DepthMetaTraceSnapshot snapshot {};
@@ -382,15 +406,7 @@ static bool ConsumeDepthMetaClear(uint64_t submit_id, const RenderDepthInfo& dep
 	{
 		return false;
 	}
-	// Clearing either aspect of a combined D32S8 image starts the render pass
-	// from UNDEFINED. Only translate the captured zero-fill family when the
-	// guest also initializes stencil in the same first use; otherwise Vulkan
-	// could discard a stencil plane whose metadata semantics are not modeled.
-	// A zero HTILE word marks every sample of its 8x8 tile cleared, and the
-	// attachment clear covers every sample, so multisampled targets qualify.
-	if (depth.format != VK_FORMAT_D32_SFLOAT_S8_UINT || snapshot.pending_event.pattern.kind != DepthMetaPatternKind::UniformZero ||
-	    snapshot.pending_event.pattern.first_word != 0u || depth.depth_clear_value != 0.0f ||
-	    std::signbit(depth.depth_clear_value) || !depth.stencil_clear_enable || depth.stencil_clear_value != 0u)
+	if (!DepthMetaComputeFillTranslatable(depth, snapshot.pending_event))
 	{
 		(void)DepthMetaDiscardComputeFill(identity, snapshot.pending_event.sequence);
 		return false;
@@ -720,6 +736,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 
 	r->stencil_clear_enable = rc.stencil_clear_enable;
 	r->stencil_clear_value  = hw.GetStencilClearValue();
+	r->stencil_plane        = effective_stencil != 0;
 	// EXIT_NOT_IMPLEMENTED(r->stencil_clear_enable);
 
 	r->stencil_test_enable = dc.stencil_enable;
@@ -733,6 +750,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 		r->suppress_depth_write = false;
 		r->stencil_test_enable  = false;
 		r->stencil_clear_enable = false;
+		r->stencil_plane        = false;
 		r->width                = 0;
 		r->height               = 0;
 	}
