@@ -9,6 +9,69 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Guest device-address imports and per-submit cost on RADV (2026-10-11)
+
+Open performance defect on AMD; no fix landed.
+
+- Host: Radeon 610M integrated GPU, amdgpu kernel driver, RADV
+  (`VK_DRIVER_FILES` pointing at the RADV ICD). Strict runs, scripted routes.
+- Measured frame rates on this host:
+  - The racing title's race: 15.4 fps.
+  - The beat 'em up: stays on its loading screen at 1.4-2 fps for the whole
+    window.
+  - The Unity fishing title: loses the device at gameplay load, about 88 s
+    into the hold route (see the defect below).
+- Temporary submit timers (not committed) around `vkQueueSubmit` in
+  `CommandBuffer::Execute`
+  (`source/emulator/src/Graphics/GraphicsRenderCommandBuffer.cpp`), on the
+  beat 'em up:
+  - The cost of one submit grows linearly with the number of live imported
+    device memory objects: 0.34 ms at 879 imports, 5.78 ms at 6,895.
+  - After about 90 s there had been 7,661 graphics submits and 12,819
+    utility-queue submits, totalling 20 s and 29 s inside `vkQueueSubmit`.
+  - With buffer device address enabled, RADV hands every imported buffer
+    object to the kernel on every submit. Driver-allocated memory does not
+    add to this cost; imports do.
+- The imports are guest device-address chunks
+  (`source/emulator/src/Graphics/GuestDeviceAddress.cpp`), one per resident
+  run of a GPU-mapped guest range. Censuses at the same moment, roughly 90 s
+  into the run:
+  - Device-address registry: 6,168 live ranges and 6,365 chunks. Releases
+    work: no range is overwritten or left overlapping, and every unmap or
+    physical release removes its chunks.
+  - Kernel: 12,458 live GPU-visible views (2.85 GB) and 7,642 direct-memory
+    allocation blocks (3.26 GB). Of those blocks, only 5 are 64 MiB or larger.
+    1.99 GB of the physical backing is populated.
+  - The live set is therefore the title's own and keeps growing while it
+    loads. On Intel it reaches about 12,000 imports at 150 s. The xe driver
+    does not show the per-submit cost, but the count is not bounded there
+    either.
+- Exclusions:
+  - Merging a new run with adjacent chunks of the same range does not help.
+    Of 14,078 new runs, 13,784 were isolated physical runs and every sampled
+    one was a whole fresh range (no chunk yet, offset 0).
+  - Importing per allocation block does not bound the count: 7,642 blocks.
+  - Merging exactly contiguous physical runs would save about 14%: 1,798 of
+    12,800 imports touch the end of an earlier one.
+- What would bound it: importing the physical backing in fixed windows.
+  12,800 imports fall into 794 windows of 2 MiB, or 29 of 64 MiB. Two
+  constraints stand in the way:
+  - Every allocation, and every release with no remaining view, punches the
+    backing (`DiscardSharedBackingRange`, `source/emulator/src/Kernel/Memory.cpp`
+    in `AllocateUnlocked` and the release paths). A window that pinned those
+    pages keeps the old ones, so the GPU would read stale data.
+  - A window also pins and populates its unallocated gap pages.
+
+  A window design has to invalidate on every discard, or zero pages in place
+  inside pinned windows, and it needs its own lifetime rules for tables and
+  publications.
+- Open defect: on the AMD host the Unity fishing title raises a GPU
+  page-permission fault at gameplay load, about 88 s in. The fault is in the
+  shader caches (SQC/TCP), at a different address each run, and the device is
+  lost. The binary from before this session's changes does the same. Next
+  step: take a native capture of the last submit before the fault and check
+  its device-address table and resource descriptors against live imports.
+
 ## Range-query cache invalidation through compact spans (2026-10-11)
 
 - A stack sampler on the Unity fishing title's gameplay (Intel A770, scripted
