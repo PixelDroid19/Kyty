@@ -47,10 +47,14 @@ fail on the current HEAD before acting on them.
     imports, and image and sampler indices were all excluded. The fault also
     reproduced with serialized submits and RADV shader sync.
 - Verified:
-  - AMD Raphael (RADV), strict 200 s fishing-title runs: three consecutive
-    runs with the fix reach gameplay without device loss (7.2-7.4 fps in the
-    hold windows). Before the fix, most baseline runs lost the device at
-    180-183 s.
+  - AMD Raphael (RADV), strict 200 s fishing-title runs:
+    - A run with the final binary reached gameplay (mayor dialogue in the
+      town) with no device loss, at 7.2-7.4 fps in the hold windows.
+    - Two earlier runs with the same fix plus layout logging also kept the
+      device; their fps (3.4-7.1) is not representative.
+    - Before the fix, most baseline runs lost the device at 180-183 s. No
+      baseline fps exists for the hold windows, so the AMD fps is a first
+      measurement and not a comparison.
   - Intel Arc A770: a strict 200 s run reaches gameplay with no error, at
     10.3-10.9 fps in the hold windows. A baseline run on the same route
     measured 9.3-12.5 fps, so the difference is within the window spread.
@@ -62,9 +66,13 @@ fail on the current HEAD before acting on them.
     isometric roguelike, the pixel exploration title, the artillery title,
     the roguelite action platformer and the racing title ended with status 1
     and the same capture counts as the previous binary, with coherent last
-    captures. The racing title's window 4 ran at 96 fps (136 draws/f),
-    against 84 fps (145 draws/f) before. The robot platformer still produces
-    no capture on Intel, as before.
+    captures. The racing title's window 4 ran at 96 fps against 84 fps
+    before, which is within the spread between windows. The robot
+    platformer still produces no capture on Intel, as before.
+  - AMD strict sweep (`Fixed` + RenderTargets): the same eight titles ended
+    with status 1 and the same capture counts. The racing title ran at
+    24.5 fps against about 24 before. The robot platformer still stops at
+    about 61 s on `!create_all_the_same`, as before.
   - Unit suites: 997 shader and graphics tests, including two new getpc
     typed-load cases. Gate scripts: boundaries, graphics tables.
 
