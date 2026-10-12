@@ -52,6 +52,13 @@ fail on the current HEAD before acting on them.
   - The beat 'em up's ranges are small and were already imported whole, so
     it does not change on either host. Its first Intel pair differed by
     10-17% with higher fence waits; the reversed second pair is equal.
+  - The first Intel racing pair reached different scenes: 41.5 fps at 210
+    draws per frame with the change, against 96.0 fps at 123 without. The
+    base binary never reached the heavier scene, so a regression in heavier
+    race scenes is not excluded on Intel.
+  - From about 00:55 UTC another application loaded the host. That covers
+    every Intel row, which widens their error bars. The AMD racing pairs ran
+    before it.
 - Peak run memory (cgroup `memory.peak`):
   - AMD beat 'em up: 3,161 to 3,530 MB.
   - Intel beat 'em up: 5,894-5,927 to 5,902-6,166 MB. The run limit is
@@ -65,6 +72,25 @@ fail on the current HEAD before acting on them.
   signal for every binary, including the base binary and one built without
   the two AJM commits. That excludes this change and those commits, but leaves
   audio unchecked for these runs.
+- Frontier sweep with the change on Intel, one 90 s run each (150 s for the
+  platformer collection title), with peak memory:
+  - The atmospheric platformer, the gothic action platformer, the ninja
+    platformer, the roguelike dungeon crawler, the pixel exploration title,
+    the artillery title and the platformer collection title all reach the
+    time limit.
+  - Peaks: 2,514, 3,079, 1,164, 5,916, 1,320, 2,011 and 3,542 MB. On the base
+    binary the roguelike dungeon crawler peaks at 6,176 MB.
+  - The mechanical-fist platformer stops at 26-32 s with either binary:
+    - Base (2 of 2): a strict volume-layout refusal at 32 s.
+    - With the change: 2 of 3 runs crash in `PthreadMutexLock` on a guest
+      mutex pointer of 0x58 at 27-28 s, and the third run is a strict import
+      refusal. The crash is the open weak-pointer race recorded for that
+      title (about 26 s). No device-address frame is on its stack.
+- The Unity fishing title on AMD with the change: 24 fps in the menu window,
+  then the same device loss at about 85 s. The failing submit is on the
+  utility queue, whose context the kernel reports as innocent, and RADV
+  creates one kernel context per queue. The faulting work is therefore on
+  another of the emulator's queues.
 - Remaining on AMD: the live count of GPU views (next section). The beat
   'em up holds about 6,000 small ranges, each one import.
 
@@ -89,9 +115,10 @@ previous section; the count of live ranges stays open.
     device memory objects: 0.34 ms at 879 imports, 5.78 ms at 6,895.
   - After about 90 s there had been 7,661 graphics submits and 12,819
     utility-queue submits, totalling 20 s and 29 s inside `vkQueueSubmit`.
-  - With buffer device address enabled, RADV hands every imported buffer
-    object to the kernel on every submit. Driver-allocated memory does not
-    add to this cost; imports do.
+  - The cost follows the import count. About 20 driver-allocated memory
+    objects were live throughout, so their share was not measured. This is
+    consistent with RADV passing every imported buffer object to the kernel
+    on each submit when buffer device address is enabled.
 - The imports are guest device-address chunks
   (`source/emulator/src/Graphics/GuestDeviceAddress.cpp`), one per resident
   run of a GPU-mapped guest range. Censuses at the same moment, roughly 90 s
