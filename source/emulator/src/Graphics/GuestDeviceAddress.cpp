@@ -29,10 +29,13 @@
 namespace Kyty::Libs::Graphics {
 namespace {
 
-// Imports cover resident pages only (never-touched pages read as zero through
-// the table's zero prefix), in chunks bounded to keep each pin modest.
+// Imports cover resident pages only, widened to whole blocks for physical
+// ranges (pages outside every import read as zero through the table's zero
+// prefix), in chunks bounded to keep each pin modest.
 constexpr uint64_t kChunkBytes = 64ull << 20u;
 constexpr uint64_t kPageBytes  = kGuestDeviceAddressPageBytes;
+// A physical range imports every block holding a resident page.
+constexpr uint64_t kPhysicalImportBlockBytes = 2ull << 20u;
 // Bound host padding independently from the guest-visible chunk size.
 constexpr uint64_t kMaxHostImportPaddingBytes = 2ull << 20u;
 // Keep a bounded number of old address tables alive while submissions may reference them.
@@ -667,6 +670,26 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	return false;
 }
 
+// Marks every page of an import block that holds a resident page. `resident`
+// covers range pages [first, first + resident->size()); blocks are counted
+// from the range base and clipped to that span.
+void ExpandToImportBlocks(uint64_t first, std::vector<uint8_t>* resident)
+{
+	constexpr uint64_t block_pages = kPhysicalImportBlockBytes / kPageBytes;
+	const uint64_t     pages       = resident->size();
+	for (uint64_t page = 0; page < pages;)
+	{
+		const uint64_t block_end = std::min(pages, ((first + page) / block_pages + 1u) * block_pages - first);
+		const auto     begin     = resident->begin() + static_cast<std::ptrdiff_t>(page);
+		const auto     end       = resident->begin() + static_cast<std::ptrdiff_t>(block_end);
+		if (std::any_of(begin, end, [](uint8_t value) { return value != 0; }))
+		{
+			std::fill(begin, end, uint8_t {1});
+		}
+		page = block_end;
+	}
+}
+
 bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64_t first, uint64_t last,
                         std::vector<uint8_t>* resident, bool* changed)
 {
@@ -677,6 +700,14 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 	if (!Core::VirtualMemory::QueryResidentPages(span_address, span_size, resident->data()))
 	{
 		return false;
+	}
+	// Guest writes reach physical pages one at a time, and importing each newly
+	// resident run gave a chunk per page or two. Whole blocks bound the chunks
+	// per range; the pages a block import populates are imported with it, and a
+	// block without a resident page is not pinned.
+	if (range->physical_backing)
+	{
+		ExpandToImportBlocks(first, resident);
 	}
 	// A snapshot chunk is either tracked or immutable as a whole, so a run of a
 	// flexible range ends where CPU write access changes; physical runs import
@@ -699,7 +730,7 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 		const uint64_t guest = base + (first + page) * kPageBytes;
 		const uint64_t size  = (end - page) * kPageBytes;
 		Chunk          chunk;
-		// Do not pin an extra guest page: the import itself would make that
+		// Do not pin a page outside the run: the import itself would make that
 		// page resident and every subsequent prepare would import another one.
 		// Translated loads split at page boundaries instead.
 		if (!ImportChunk(ctx, guest, size, size, &chunk))

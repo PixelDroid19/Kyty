@@ -1462,6 +1462,63 @@ int PhysicalReleaseRetiresDeviceAddressRangeProbe()
 	return status;
 }
 
+// Physical pages written one at a time are imported as their whole 2 MiB block:
+// two separate writes give one entry, repeated preparation imports nothing new
+// and leaves the untouched block unpopulated, and a write there adds its block.
+int PhysicalImportCoversResidentBlockProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
+
+	constexpr uint64_t kBlockBytes = 0x200000;
+	constexpr uint64_t kBytes      = 2u * kBlockBytes;
+	constexpr uint64_t kBlockPages = kBlockBytes / kGuestDeviceAddressPageBytes;
+	int64_t            physical    = 0;
+	if (Kernel::Memory::KernelAllocateMainDirectMemory(kBytes, kBlockBytes, 12, &physical) != 0) { return 40; }
+	void* mapping = nullptr;
+	if (Kernel::Memory::KernelMapDirectMemory(&mapping, kBytes, 0x12, 0, physical, kBlockBytes) != 0 || mapping == nullptr)
+	{
+		(void)Kernel::Memory::KernelCheckedReleaseDirectMemory(physical, kBytes);
+		return 41;
+	}
+	const auto guest = reinterpret_cast<uint64_t>(mapping);
+	const auto second_block_resident = [&]
+	{
+		std::vector<uint8_t> resident(kBlockPages);
+		return Core::VirtualMemory::QueryResidentPages(guest + kBlockBytes, kBlockBytes, resident.data())
+		           ? std::count_if(resident.begin(), resident.end(), [](uint8_t value) { return value != 0; })
+		           : -1;
+	};
+	WriteMarker(guest, kMarkerA);
+	WriteMarker(guest + kBlockBytes / 2u, kMarkerB);
+	uint64_t table   = 0;
+	uint32_t entries = 0;
+	int      status  = 0;
+	if (!GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries) || entries != 1) { status = 42; }
+	if (status == 0) { status = load.Expect("block head", table, entries, guest, kMarkerA); }
+	if (status == 0) { status = load.Expect("block middle", table, entries, guest + kBlockBytes / 2u, kMarkerB); }
+	for (unsigned round = 0; round < 4 && status == 0; ++round)
+	{
+		if (!GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries) || entries != 1) { status = 43; }
+		if (status == 0 && second_block_resident() != 0) { status = 44; }
+	}
+	WriteMarker(guest + kBlockBytes + kGuestPageBytes, kMarkerC);
+	if (status == 0 && (!GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries) || entries != 2)) { status = 45; }
+	if (status == 0) { status = load.Expect("second block", table, entries, guest + kBlockBytes + kGuestPageBytes, kMarkerC); }
+
+	const int unmap_result   = Kernel::Memory::KernelMunmap(guest, kBytes);
+	const int release_result = Kernel::Memory::KernelCheckedReleaseDirectMemory(physical, kBytes);
+	if (unmap_result != 0 && status == 0) { status = 46; }
+	if (release_result != 0 && status == 0) { status = 47; }
+	if (status != 0)
+	{
+		std::fprintf(stderr, "status=%d entries=%u second_block_resident=%ld unmap=%d release=%d\n", status, entries,
+		             static_cast<long>(second_block_resident()), unmap_result, release_result);
+	}
+	return status;
+}
+
 // A partial direct-memory release retires only the released tail and leaves
 // the still-allocated head usable by the GPU and by the guest CPU mapping.
 int PartialPhysicalReleasePreservesHeadProbe()
@@ -1604,6 +1661,7 @@ TEST(EmulatorGuestDeviceAddress, RetiredGuestDeviceAddressTablesStayReadableAndB
 TEST(EmulatorGuestDeviceAddress, PhysicalAliasIsAvailableDuringOwnerRegistration) { RunIsolated(PhysicalRegistrationAliasProbe); }
 TEST(EmulatorGuestDeviceAddress, PhysicalReleaseRetiresDeviceAddressRange) { RunIsolated(PhysicalReleaseRetiresDeviceAddressRangeProbe); }
 TEST(EmulatorGuestDeviceAddress, PartialPhysicalReleasePreservesHead) { RunIsolated(PartialPhysicalReleasePreservesHeadProbe); }
+TEST(EmulatorGuestDeviceAddress, PhysicalImportCoversResidentBlock) { RunIsolated(PhysicalImportCoversResidentBlockProbe); }
 TEST(EmulatorGuestDeviceAddress, AProtectionRefusedForAPendingUnmapKeepsRightsAndImports) { RunIsolated(PendingUnmapProtectionProbe); }
 
 UT_END();

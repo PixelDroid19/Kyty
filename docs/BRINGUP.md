@@ -9,9 +9,69 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Physical device-address imports in whole blocks (2026-10-11)
+
+- The racing title's physical ranges imported a chunk for every newly resident
+  run. Guest writes reach those pages one or two at a time, so one 2 MiB range
+  held 364 chunks for 455 imported pages. The title kept about 4,200 imports
+  over only 241 GPU-visible physical views. On the AMD host each submit then
+  cost about 4.6 ms, and the race issues 16 submits per frame (see the next
+  section).
+- A physical range now imports every 2 MiB block, counted from the range base
+  and clipped to the range, that holds a resident page. Neighbouring blocks
+  share a chunk up to the existing 64 MiB chunk bound.
+  - Pages the import itself populates belong to the imported block, so
+    preparation does not chase residency it created (the self-induced growth
+    recorded on 2026-09-29).
+  - A block with no resident page is not pinned.
+  - The pages belong to the same live allocation, which is discarded only at
+    allocation and release, so the GPU and the CPU keep seeing the same pages.
+  - Flexible (snapshot) ranges are unchanged.
+- Focused test
+  `EmulatorGuestDeviceAddress.PhysicalImportCoversResidentBlock` covers:
+  - Two separate writes in one block give one entry.
+  - Repeated preparation adds nothing and leaves the untouched block
+    unpopulated.
+  - A write in the second block adds one entry.
+
+  It fails without the change (two entries).
+- Measured on the same routes, alternated runs, `KYTY_RUN_PERF=1`:
+
+  | Host | Title | Window | Before (fps) | After (fps) |
+  | --- | --- | --- | --- | --- |
+  | Radeon 610M, RADV | Racing title race | perf-4 | 13.4, 15.4 | 40.0, 29.2 |
+  | Radeon 610M, RADV | Beat 'em up loading | perf-3..4 | 6.0, 7.2 | 7.0, 5.7 |
+  | Arc A770, xe | Racing title race | perf-4 | 99.3 | 102.6 |
+  | Arc A770, xe | Unity fishing title gameplay | perf-4..7 | 10.6, 9.9, 9.8, 10.0 | 8.7, 8.8, 9.4, 10.7 |
+  | Arc A770, xe | Beat 'em up combat | perf-7..9 | 10.4, 9.6, 8.7 / 10.9, 9.6, 8.5 | 9.7, 8.0, 7.2 / 10.9, 9.3, 8.4 |
+
+  Notes on the table:
+  - In the second AMD racing run the route went faster. Its perf-4 is a
+    heavier race scene (270 draws per frame, against 170), and the race ended
+    on "time over" within the run. Its captures are correct.
+  - The beat 'em up's ranges are small and were already imported whole, so
+    it does not change on either host. Its first Intel pair differed by
+    10-17% with higher fence waits; the reversed second pair is equal.
+- Peak run memory (cgroup `memory.peak`):
+  - AMD beat 'em up: 3,161 to 3,530 MB.
+  - Intel beat 'em up: 5,894-5,927 to 5,902-6,166 MB. The run limit is
+    `MemoryHigh=7G`.
+  - Intel racing title: the same within noise (1,929-2,321 against
+    2,131-2,618 MB).
+- The 2D title that dereferences guest pointers runs on both hosts with no
+  import failure: 102-111 fps on Intel and 28 fps on AMD.
+- Not verified: audio. From about 00:55 UTC another application was playing
+  audio on the host. After that the audio probe measured decaying or no
+  signal for every binary, including the base binary and one built without
+  the two AJM commits. That excludes this change and those commits, but leaves
+  audio unchecked for these runs.
+- Remaining on AMD: the live count of GPU views (next section). The beat
+  'em up holds about 6,000 small ranges, each one import.
+
 ## Guest device-address imports and per-submit cost on RADV (2026-10-11)
 
-Open performance defect on AMD; no fix landed.
+Open performance defect on AMD. Fragmentation within a range is fixed in the
+previous section; the count of live ranges stays open.
 
 - Host: Radeon 610M integrated GPU, amdgpu kernel driver, RADV
   (`VK_DRIVER_FILES` pointing at the RADV ICD). Strict runs, scripted routes.
