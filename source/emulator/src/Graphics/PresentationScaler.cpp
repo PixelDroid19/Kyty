@@ -105,7 +105,7 @@ PresentationEncodeStage* EnsureEncodeStage(GraphicContext* context, VulkanSwapch
 void BlitThroughEncodeStage(CommandBuffer* command_buffer, VulkanImage* source, VulkanSwapchain* swapchain, PresentationEncodeStage* stage,
                             VkFilter filter)
 {
-	auto* cmd = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	auto* cmd = command_buffer->RecordOutsideRenderPass();
 	// The previous present may still be copying out of the stage on this queue: order that read before this write.
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
 	UtilBlitImageTo(command_buffer, source, stage->image.image, swapchain->swapchain_extent, filter);

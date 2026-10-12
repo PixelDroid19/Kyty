@@ -1464,9 +1464,10 @@ void CommandBuffer::ReleasePipelineLeases()
 	}
 }
 
-void CommandBuffer::Begin() const
+void CommandBuffer::Begin()
 {
 	EXIT_IF(IsInvalid());
+	m_open_render_pass.reset();
 	{
 		std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
 		EXIT_IF(m_recording || m_resetting);
@@ -1551,11 +1552,11 @@ VulkanBuffer* CommandBuffer::AllocateTransientScratchBuffer(uint64_t size, uint3
 	return m_transient_scratch_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage);
 }
 
-void CommandBuffer::End() const
+void CommandBuffer::End()
 {
 	EXIT_IF(IsInvalid());
 
-	auto* buffer = m_pool->buffers[m_index];
+	auto* buffer = RecordOutsideRenderPass();
 
 	const auto result = vkEndCommandBuffer(buffer);
 	if (result != VK_SUCCESS)
@@ -1850,17 +1851,49 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 	}
 }
 
+// A new instance on the same framebuffer would start from exactly the state the
+// open one holds when no attachment is cleared, discarded or transitioned.
+static bool RenderPassContinuesAttachments(const VulkanFramebuffer& framebuffer, const RenderColorInfo& color,
+                                           const RenderDepthInfo& depth, bool with_color, bool with_depth)
+{
+	if (with_depth && (depth.depth_clear_enable || depth.stencil_clear_enable ||
+	                   framebuffer.depth_load_op != VK_ATTACHMENT_LOAD_OP_LOAD ||
+	                   depth.vulkan_buffer->layout != framebuffer.depth_initial_layout))
+	{
+		return false;
+	}
+	const uint32_t color_count = with_color ? std::min(color.targets_num, VulkanFramebuffer::TARGETS_MAX) : 0u;
+	for (uint32_t slot = 0; slot < color_count; slot++)
+	{
+		const auto* image = color.attachment[slot].vulkan_buffer;
+		if (image != nullptr &&
+		    (framebuffer.color_load_op[slot] != VK_ATTACHMENT_LOAD_OP_LOAD || image->layout != framebuffer.color_initial_layout[slot]))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
-                                    const VulkanSampleLocationState* sample_locations) const
+                                    const VulkanSampleLocationState* sample_locations)
 {
 	EXIT_IF(IsInvalid());
-
-	auto* buffer = m_pool->buffers[m_index];
-
 	EXIT_IF(framebuffer == nullptr);
 
-	bool with_depth = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
-	bool with_color = (RenderColorHasActiveTarget(*color) && RenderColorFirstActiveImage(*color) != nullptr);
+	bool       with_depth     = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
+	const bool with_color     = (RenderColorHasActiveTarget(*color) && RenderColorFirstActiveImage(*color) != nullptr);
+	const bool custom_samples = sample_locations != nullptr && VulkanSampleLocationsEnabled(*sample_locations);
+	if (m_open_render_pass.has_value() && m_open_render_pass->continuable && !custom_samples &&
+	    m_open_render_pass->render_pass == framebuffer->render_pass && m_open_render_pass->framebuffer == framebuffer->framebuffer &&
+	    RenderPassContinuesAttachments(*framebuffer, *color, *depth, with_color, with_depth))
+	{
+		DebugStatsRecordRenderPassContinuation();
+		return;
+	}
+	CloseRenderPass();
+
+	auto* buffer = m_pool->buffers[m_index];
 
 	if (!with_depth && !with_color) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !with_depth && !with_color condition ignored (continuing)\n"); }
 
@@ -2038,6 +2071,8 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	}
 
 	vkCmdBeginRenderPass(buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+	DebugStatsRecordRenderPassBegin();
+	m_open_render_pass = OpenRenderPass {framebuffer->render_pass, framebuffer->framebuffer, !custom_samples};
 	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
 		if (!with_color || color->attachment[slot].vulkan_buffer == nullptr ||
@@ -2077,13 +2112,49 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	}
 }
 
-void CommandBuffer::EndRenderPass() const
+void CommandBuffer::CloseRenderPass()
 {
 	EXIT_IF(IsInvalid());
+	if (!m_open_render_pass.has_value())
+	{
+		return;
+	}
+	m_open_render_pass.reset();
 
 	auto* buffer = m_pool->buffers[m_index];
-
 	vkCmdEndRenderPass(buffer);
+
+	// Without this dependency hosts can hang when a later draw samples a color
+	// target written earlier in the same command buffer.
+	VkMemoryBarrier memory_barrier {};
+	memory_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	memory_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+	                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+	vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+	                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+	                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+	                     0, 1, &memory_barrier, 0, nullptr, 0, nullptr);
+}
+
+VkCommandBuffer CommandBuffer::RecordOutsideRenderPass()
+{
+	EXIT_IF(IsInvalid());
+	CloseRenderPass();
+	return m_pool->buffers[m_index];
+}
+
+VkCommandBuffer CommandBuffer::RecordState() const
+{
+	EXIT_IF(IsInvalid());
+	return m_pool->buffers[m_index];
+}
+
+VkCommandBuffer CommandBuffer::RecordInsideRenderPass() const
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(!m_open_render_pass.has_value());
+	return m_pool->buffers[m_index];
 }
 
 

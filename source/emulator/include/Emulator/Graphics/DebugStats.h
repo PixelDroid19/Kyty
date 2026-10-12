@@ -319,6 +319,8 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t wait_flip_done        = 0;
 	uint64_t wait_flip_done_ns     = 0;
 	uint64_t wait_flip_done_max_ns = 0;
+	uint64_t render_pass_begins        = 0;
+	uint64_t render_pass_continuations = 0;
 	uint64_t in_flight_current     = 0;
 	uint64_t in_flight_max         = 0;
 	uint64_t frame_samples         = 0;
@@ -430,6 +432,9 @@ void DebugStatsRecordAlloc(uint64_t bytes);
 void DebugStatsRecordFree(uint64_t bytes);
 void DebugStatsRecordFlip(double fps, double frame_time_ms);
 void DebugStatsRecordBufferFlush();
+// A draw either begins a render pass instance or continues the one an earlier draw left open.
+void DebugStatsRecordRenderPassBegin();
+void DebugStatsRecordRenderPassContinuation();
 void DebugStatsRecordCommandBuffer();
 void DebugStatsRecordCommandProcessorRun(uint64_t elapsed_ns);
 void DebugStatsRecordDrawProcessor(uint64_t elapsed_ns);

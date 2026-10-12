@@ -1646,7 +1646,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
 	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordState();
 
 	int32_t vertex_offset = 0;
 	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info, &vertex_offset, vertex_offset_add))
@@ -1806,6 +1806,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		vertex_clip_probe->CaptureAttachmentBeforePass(buffer);
 	}
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
+	auto* pass_buffer = buffer->RecordInsideRenderPass();
 	if (vertex_clip_probe != nullptr)
 	{
 		vertex_clip_probe->BeginDepthPassQuery(buffer);
@@ -1815,13 +1816,13 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
-			vkCmdDrawIndexed(vk_buffer, primitive_plan.chunk_count, instance_count, i, vertex_offset, first_instance);
+			vkCmdDrawIndexed(pass_buffer, primitive_plan.chunk_count, instance_count, i, vertex_offset, first_instance);
 			DebugStatsRecordDraw();
 			host_draws++;
 		}
 	} else
 	{
-		vkCmdDrawIndexed(vk_buffer, primitive_plan.draw_count, instance_count, 0, vertex_offset, first_instance);
+		vkCmdDrawIndexed(pass_buffer, primitive_plan.draw_count, instance_count, 0, vertex_offset, first_instance);
 		DebugStatsRecordDraw();
 		host_draws++;
 	}
@@ -1832,26 +1833,12 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		vertex_clip_probe->EndDepthPassQuery(buffer);
 	}
 
-	buffer->EndRenderPass();
+	// The pass stays open for a following draw on the same framebuffer. The
+	// vertex-clip probe reads its results with transfers outside it.
 	if (vertex_clip_probe != nullptr)
 	{
+		buffer->CloseRenderPass();
 		vertex_clip_probe->Finish(buffer);
-	}
-
-	// Explicit attachment-write → later shader/attachment-read dependency across the
-	// render-pass boundary. Without this, hosts can hang when the next draw samples
-	// a color target written earlier in the same command buffer.
-	if (vk_buffer != nullptr)
-	{
-		VkMemoryBarrier memory_barrier {};
-		memory_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-		memory_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-		memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-		                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-		                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-		                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-		                     0, 1, &memory_barrier, 0, nullptr, 0, nullptr);
 	}
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
@@ -1876,7 +1863,7 @@ static bool GraphicsRenderDepthStencilCopyClearSource(uint64_t submit_id, Comman
 	if (source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 	TraceRenderTargetLifetimeDepthClearPass(submit_id, *source, *source_framebuffer);
 	buffer->BeginRenderPass(source_framebuffer, &no_color, source, &sample_locations);
-	buffer->EndRenderPass();
+	buffer->CloseRenderPass();
 	return true;
 }
 
@@ -2000,7 +1987,7 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 	EXIT_IF(guest_geometry && guest_vertex_input == nullptr);
 	EXIT_IF(index_buffer != nullptr && !guest_geometry);
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordState();
 	auto* depth_stencil_copy_renderer = g_render_ctx->GetDepthStencilCopyRenderer();
 	const auto draw = depth_stencil_copy_renderer->PrepareDraw(g_render_ctx->GetGraphicCtx(), request);
 	depth_stencil_copy_renderer->BindPreparedDraw(vk_buffer, draw);
@@ -2035,7 +2022,7 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 		vkCmdDraw(vk_buffer, vertex_count, 1, 0, 0);
 	}
 	DebugStatsRecordDraw();
-	buffer->EndRenderPass();
+	buffer->CloseRenderPass();
 }
 
 void GraphicsRenderDepthStencilCopyWriteDepthStencil(
@@ -2314,8 +2301,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	// plane independently of the geometry used for the color expansion.
 	const bool source_modified = GraphicsRenderDepthStencilCopyClearSource(submit_id, buffer, &source_setup, sample_locations);
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
-	GraphicsRenderDepthStencilBarrier(vk_buffer, source);
+	GraphicsRenderDepthStencilBarrier(buffer, source);
 	if (source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL condition ignored (continuing)\n"); }
 
 	RenderDepthInfo no_depth;
@@ -2619,7 +2605,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
 	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordState();
 
 	// GE_INDX_OFFSET is the first vertex of an auto-index draw, as it is the base
 	// vertex of an indexed one; batches sharing one vertex buffer depend on it.
@@ -2784,6 +2770,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		vertex_clip_probe->CaptureAttachmentBeforePass(buffer);
 	}
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
+	auto* pass_buffer = buffer->RecordInsideRenderPass();
 	if (vertex_clip_probe != nullptr)
 	{
 		vertex_clip_probe->BeginDepthPassQuery(buffer);
@@ -2795,13 +2782,13 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
-			vkCmdDraw(vk_buffer, primitive_plan.chunk_count, instance_count, first_vertex + i, 0);
+			vkCmdDraw(pass_buffer, primitive_plan.chunk_count, instance_count, first_vertex + i, 0);
 			DebugStatsRecordDraw();
 			host_draws++;
 		}
 	} else if (!clear_only)
 	{
-		vkCmdDraw(vk_buffer, primitive_plan.draw_count, instance_count, first_vertex, 0);
+		vkCmdDraw(pass_buffer, primitive_plan.draw_count, instance_count, first_vertex, 0);
 		DebugStatsRecordDraw();
 		host_draws++;
 	}
@@ -2815,23 +2802,12 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		vertex_clip_probe->EndDepthPassQuery(buffer);
 	}
 
-	buffer->EndRenderPass();
+	// The pass stays open for a following draw on the same framebuffer. The
+	// vertex-clip probe reads its results with transfers outside it.
 	if (vertex_clip_probe != nullptr)
 	{
+		buffer->CloseRenderPass();
 		vertex_clip_probe->Finish(buffer);
-	}
-
-	if (vk_buffer != nullptr)
-	{
-		VkMemoryBarrier memory_barrier {};
-		memory_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-		memory_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-		memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-		                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-		                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-		                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-		                     0, 1, &memory_barrier, 0, nullptr, 0, nullptr);
 	}
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
@@ -3177,7 +3153,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		}
 	}
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(buffer, &input_info, &sh_ctx->GetCs(), &ctx->GetShaderRegisters());
 

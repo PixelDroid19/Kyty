@@ -1622,9 +1622,9 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
                                      VulkanSampleLocationState* sample_locations);
 
 // Internal image barriers (VkCommandBuffer overloads; public API uses CommandBuffer*).
-void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, VulkanImage* image);
-void GraphicsRenderDepthStencilBarrier(VkCommandBuffer vk_buffer, VulkanImage* image);
-void GraphicsRenderStorageImageBarrier(VkCommandBuffer vk_buffer, VulkanImage* image);
+void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* image);
+void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, VulkanImage* image);
+void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image);
 
 // --- Core (color / dump) ---
 

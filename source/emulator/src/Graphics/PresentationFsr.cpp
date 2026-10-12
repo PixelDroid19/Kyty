@@ -390,7 +390,7 @@ bool PresentationFsrRecord(CommandBuffer* command_buffer, GraphicContext* contex
 	parameters.sharpness       = PresentationFsrSharpnessStops(sharpness_percent);
 	parameters.flags           = (PresentationSourceHoldsLinearLight(source->format) ? kFlagSourceLinear : 0u) |
 	                   (IsSrgbTarget(target_format) ? kFlagTargetLinear : 0u);
-	RecordPasses(command_buffer->GetPool()->buffers[command_buffer->GetIndex()], fsr, parameters, target, target_extent);
+	RecordPasses(command_buffer->RecordOutsideRenderPass(), fsr, parameters, target, target_extent);
 	return true;
 }
 

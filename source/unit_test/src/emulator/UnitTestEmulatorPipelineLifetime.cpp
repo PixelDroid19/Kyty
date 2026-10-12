@@ -586,7 +586,7 @@ TEST(EmulatorPipelineLifetime, CacheInvalidationKeepsBoundPipelineAliveUntilPend
 
 	command_buffer.Begin();
 	ASSERT_TRUE(PipelineLifetimeTestAccess::Attach(*cache, command_buffer, pipeline));
-	const auto command = command_buffer.GetPool()->buffers[command_buffer.GetIndex()];
+	const auto command = command_buffer.RecordOutsideRenderPass();
 	vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, raw_pipeline);
 	vkCmdDispatch(command, 1, 1, 1);
 	command_buffer.End();

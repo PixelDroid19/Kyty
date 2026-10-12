@@ -664,7 +664,7 @@ void VerifyGpuProducerSourceIsDeviceBuffer(Fixture* f)
 	VulkanCreateBuffer(ctx, 16, storage);
 	Expect(storage->buffer != nullptr, "the fixture backing admits a device fill");
 
-	const VkCommandBuffer cmd = buffer->GetPool()->buffers[buffer->GetIndex()];
+	const VkCommandBuffer cmd = buffer->RecordOutsideRenderPass();
 	VkBufferMemoryBarrier barrier {};
 	barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
 	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;

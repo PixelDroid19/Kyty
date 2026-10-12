@@ -174,7 +174,7 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t
 	EXIT_IF(dst_image->image == nullptr);
 	RequireGuestAddressableImage(dst_image, "buffer-to-image upload");
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -203,7 +203,7 @@ void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uin
 {
 	EXIT_IF(buffer == nullptr || src_buffer == nullptr || src_buffer->buffer == nullptr || dst_image == nullptr ||
 	        dst_image->image == nullptr);
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 	VkBufferImageCopy region {};
@@ -227,7 +227,7 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 	EXIT_IF(src_array_layer >= src_image->array_layers);
 	RequireGuestAddressableImage(src_image, "image-to-buffer readback");
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
@@ -256,7 +256,7 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_buffer == nullptr || regions.IsEmpty());
 	EXIT_IF(src_image->image == VK_NULL_HANDLE || dst_buffer->buffer == VK_NULL_HANDLE);
 	RequireGuestAddressableImage(src_image, "image-to-buffer readback");
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer,
 	                       regions.Size(), regions.GetDataConst());
@@ -268,7 +268,7 @@ static void UtilImageDepthToBuffer(CommandBuffer* buffer, VulkanImage* src_image
                                    uint64_t src_layout)
 {
 	EXIT_IF(dst_buffer == nullptr || dst_buffer->buffer == nullptr || src_image == nullptr || src_image->image == nullptr);
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 	const auto transition_aspects = DepthFormatAspectMask(src_image->format);
 	set_image_layout(vk_buffer, src_image, 0, 1, transition_aspects, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	VkBufferImageCopy region {};
@@ -290,7 +290,7 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanIm
 	EXIT_IF(dst_image->image == nullptr);
 	RequireGuestAddressableImage(dst_image, "buffer-to-image upload");
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	EXIT_IF(regions.Size() == 0u);
 
@@ -431,7 +431,7 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 	EXIT_IF(dst_image == nullptr);
 	EXIT_IF(dst_image->image == nullptr);
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	if (regions.Size() >= 16)
 	{
@@ -493,7 +493,7 @@ void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_
 	EXIT_IF(src_image->image == nullptr);
 	EXIT_IF(dst_image == nullptr);
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	VulkanImage swapchain_image(VulkanImageType::Unknown);
 
@@ -570,7 +570,7 @@ void UtilBlitImageToImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanI
 		return;
 	}
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 	set_image_layout(vk_buffer, src_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, source_layout,
@@ -867,7 +867,7 @@ void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image)
 
 	buffer.Begin();
 
-	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
+	auto* vk_buffer = buffer.RecordOutsideRenderPass();
 
 	const VkImageAspectFlags aspect_mask = DepthFormatAspectMask(image->format);
 
@@ -890,7 +890,7 @@ void UtilSetImageLayoutOptimal(VulkanImage* image)
 
 	buffer.Begin();
 
-	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
+	auto* vk_buffer = buffer.RecordOutsideRenderPass();
 
 	VkImageAspectFlags aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT;
 
@@ -971,7 +971,7 @@ void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
 	}
 
-	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
+	auto* vk_buffer = buffer.RecordOutsideRenderPass();
 
 	buffer.Begin();
 

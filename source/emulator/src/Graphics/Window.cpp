@@ -3593,7 +3593,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
 
-	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
+	auto* vk_buffer = buffer.RecordOutsideRenderPass();
 
 	buffer.Begin();
 
@@ -3719,7 +3719,7 @@ void WindowDrawBlank()
 
 	CommandBuffer buffer(GraphicContext::QUEUE_PRESENT);
 	EXIT_IF(buffer.IsInvalid());
-	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
+	auto* vk_buffer = buffer.RecordOutsideRenderPass();
 
 	buffer.Begin();
 	RecordBlankSwapchainImage(vk_buffer, g_window_ctx->swapchain->swapchain_images[g_window_ctx->swapchain->current_index]);

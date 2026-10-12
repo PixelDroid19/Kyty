@@ -1121,6 +1121,8 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	out += ",\"transient_buffer_upload_ns\":" + std::to_string(performance.transient_buffer_upload_ns);
 	out += ",\"wait_reg_mem_satisfied\":" + std::to_string(performance.wait_reg_mem_satisfied);
 	out += ",\"wait_reg_mem_current_producer\":" + std::to_string(performance.wait_reg_mem_current_producer);
+	out += ",\"render_pass_begins\":" + std::to_string(performance.render_pass_begins);
+	out += ",\"render_pass_continuations\":" + std::to_string(performance.render_pass_continuations);
 	out += ",\"wait_reg_mem_queued_producer\":" + std::to_string(performance.wait_reg_mem_queued_producer);
 	out += ",\"wait_reg_mem_producer_mismatch\":" + std::to_string(performance.wait_reg_mem_producer_mismatch);
 	out += ",\"wait_reg_mem_producer_not_found\":" + std::to_string(performance.wait_reg_mem_producer_not_found);

@@ -1021,7 +1021,7 @@ TileGpuDetileStatus TileGpuDetileDepthD16Inline(GraphicContext* ctx, CommandBuff
 		return TileGpuDetileStatus::ResourceUnavailable;
 	}
 
-	auto vk_buffer = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	auto vk_buffer = command_buffer->RecordOutsideRenderPass();
 	// The command buffer deliberately reuses one bounded scratch allocation.
 	// Complete any earlier shader/copy reads before the next transfer clear.
 	VkMemoryBarrier before_clear {};
@@ -1136,7 +1136,7 @@ bool StorageTextureCopyRawRenderAlias(GraphicContext* ctx, CommandBuffer* comman
 	const VkImageLayout destination_layout = destination->layout;
 	UtilImageToBuffer(command_buffer, source, source_buffer, source->extent.width, source_layout);
 	UtilImageToBuffer(command_buffer, destination, destination_buffer, destination->extent.width, destination_layout);
-	auto vk_buffer = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	auto vk_buffer = command_buffer->RecordOutsideRenderPass();
 	VkMemoryBarrier before_compute {};
 	before_compute.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	before_compute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1320,7 +1320,7 @@ bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer*
 	{
 		return false;
 	}
-	auto vk_buffer = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	auto vk_buffer = command_buffer->RecordOutsideRenderPass();
 	for (uint32_t index = 0u; index < sources.Size(); ++index)
 	{
 		const auto& source = sources.At(index);

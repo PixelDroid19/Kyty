@@ -471,7 +471,7 @@ void VertexClipProbeRenderer::Arm(CommandBuffer* buffer, VkPipelineLayout pipeli
 
 	InitializeRawStatsLocked();
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 	EXIT_IF(vk_buffer == VK_NULL_HANDLE);
 	vkCmdBindDescriptorSets(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, m_pending_draw.descriptor_set, 1,
 	                        &m_descriptor_set, 0, nullptr);
@@ -516,7 +516,7 @@ void VertexClipProbeRenderer::CaptureAttachmentBeforePass(CommandBuffer* buffer)
 	const VkImageLayout restore_layout = attachment->layout;
 	UtilImageToBuffer(buffer, attachment, &m_attachment_before_readback_buffer,
 	                  m_pending_draw.attachment_readback_width, static_cast<uint64_t>(restore_layout), 0u);
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 	EXIT_IF(vk_buffer == VK_NULL_HANDLE);
 	VkBufferMemoryBarrier before_barrier {};
 	before_barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
@@ -543,7 +543,7 @@ void VertexClipProbeRenderer::BeginDepthPassQuery(CommandBuffer* buffer)
 	{
 		return;
 	}
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordState();
 	EXIT_IF(vk_buffer == VK_NULL_HANDLE);
 	vkCmdBeginQuery(vk_buffer, m_depth_pass_query_pool, 0u, 0u);
 	m_pending_draw.depth_query_active = true;
@@ -561,7 +561,7 @@ void VertexClipProbeRenderer::EndDepthPassQuery(CommandBuffer* buffer)
 		return;
 	}
 	EXIT_IF(!m_pending_draw.depth_query_active);
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordState();
 	EXIT_IF(vk_buffer == VK_NULL_HANDLE);
 	vkCmdEndQuery(vk_buffer, m_depth_pass_query_pool, 0u);
 	m_pending_draw.depth_query_active   = false;
@@ -574,7 +574,7 @@ void VertexClipProbeRenderer::Finish(CommandBuffer* buffer)
 	EXIT_IF(m_lifecycle.GetState() != VertexClipProbeState::Recording || m_pending_draw.buffer != buffer ||
 	        m_pending_draw.depth_query_active || m_raw_stats_buffer.buffer == VK_NULL_HANDLE);
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 	EXIT_IF(vk_buffer == VK_NULL_HANDLE);
 	if (m_pending_draw.attachment_readback_requested && m_pending_draw.attachment_readback_image != nullptr)
 	{

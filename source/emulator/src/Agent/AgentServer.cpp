@@ -351,6 +351,8 @@ std::string PerformanceResult(bool reset)
 	out += ',';
 	out += "\"wait_reg_mem_satisfied\":" + std::to_string(stats.wait_reg_mem_satisfied);
 	out += ",\"wait_reg_mem_current_producer\":" + std::to_string(stats.wait_reg_mem_current_producer);
+	out += ",\"render_pass_begins\":" + std::to_string(stats.render_pass_begins);
+	out += ",\"render_pass_continuations\":" + std::to_string(stats.render_pass_continuations);
 	out += ",\"wait_reg_mem_queued_producer\":" + std::to_string(stats.wait_reg_mem_queued_producer);
 	out += ",\"wait_reg_mem_producer_mismatch\":" + std::to_string(stats.wait_reg_mem_producer_mismatch);
 	out += ",\"wait_reg_mem_producer_not_found\":" + std::to_string(stats.wait_reg_mem_producer_not_found);

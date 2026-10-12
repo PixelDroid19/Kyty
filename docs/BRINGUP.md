@@ -9,6 +9,84 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Render pass continuation across draws (2026-10-12)
+
+- Contract: a draw continues the render pass instance that the previous draw
+  left open when its framebuffer and render pass are the same, and when
+  beginning a new instance would neither clear, discard nor transition an
+  attachment. Those conditions are: every attachment uses `LOAD`, its tracked
+  layout equals the framebuffer's initial layout, there is no depth or stencil
+  clear, and there are no custom sample locations. Skipping the begin
+  therefore skips no barrier or load operation.
+- How the pass is closed:
+  - `CommandBuffer` owns the open instance. Every other recording path
+    obtains its handle through `RecordOutsideRenderPass`, which ends the
+    instance first and emits the attachment-write to shader/attachment-read
+    dependency that used to follow every draw.
+  - Sampled-image and storage-image barriers take the `CommandBuffer`, so a
+    draw that samples a live attachment closes the instance before its
+    layout transition.
+  - Bindings, dynamic state and query scopes use `RecordState`, and draws use
+    `RecordInsideRenderPass`.
+  - `End()` closes the open instance.
+- Cause found: the Unity fishing title records about 1,160 draws per frame, and
+  each one began and ended its own render pass followed by a full memory
+  barrier. Of 1.5 M passes in a census, 86% followed a pass on the same
+  framebuffer with `LOAD` everywhere. GPU time was a fixed cost per draw:
+  `rcs` busy measured 49% at both 1280x720 and 640x360.
+- Verified on Intel Arc A770 (Xe KMD), `Fixed` 1280x720 + RenderTargets:
+  - Unity fishing title, perf windows 5-7:
+    - fps: 11.0 / 10.3 / 8.9 before, 11.4 / 11.2 / 11.6 after;
+    - fence wait per draw: 17.7 / 18.1 / 20.5 µs before, 15.4 / 15.2 /
+      15.1 µs after;
+    - `rcs` busy over a 15 s sample in window 5: 29.2% after. The 49.3%
+      before was sampled on the preceding build of the same branch, not on
+      the immediate parent.
+  - Window 5 counted 30,292 render pass begins and 316,174 continuations. The
+    title is now bound by the command processor's CPU time.
+  - Vulkan validation layer, with four errors filtered that also reproduce at
+    the same point on the previous binary or come from pipeline creation:
+    - `VUID-vkCmdDraw*-imageLayout-00344`: a draw samples its own color
+      attachment;
+    - `VUID-vkCmdDraw*-None-09600`: a depth layout mismatch at submit;
+    - `VUID-RuntimeSpirv-OpEntryPoint-08743`.
+    With those filtered, a 150 s run of the fishing title and a 115 s run of
+    the racing title report no error. The emulator exits at the first
+    validation error, so these runs do not compare how often the filtered
+    layout errors occur. A count comparison between both binaries without
+    exiting is still open.
+  - Strict sweep:
+    - Status 1 with captures matching the previous binary: the watercolour
+      platformer, the gothic action platformer, the ninja platformer, the
+      pixel exploration title, the artillery title, the roguelite action
+      platformer and the racing title.
+    - The isometric roguelike stopped once with status 139: a guest-thread
+      write to address 0x40 inside a host copy. This matches the signature of
+      the intermittent null upload-buffer copy recorded below, but was not
+      symbolized. Its rerun reached status 1 with matching captures.
+    - The robot platformer is unchanged (no capture, as before).
+- AMD Raphael (RADV):
+  - The racing title's window 4 went from 20.0 fps (611 draws/f) to
+    24.0 fps (572 draws/f).
+  - The fishing title stops at 182-183 s with `VK_ERROR_DEVICE_LOST` on both
+    the previous and the new binary.
+- Graphics diagnostics (16 integration tests) pass, as do the focused unit
+  suites (615 tests).
+- Open defects:
+  - AMD fishing-title device loss, reproducible at about 182 s.
+    - The kernel reports a gfxhub page fault from `fc_script` on ring 24,
+      client `SQC (data)` (a scalar data read) with permission faults,
+      followed by a timeout on the `gfx_0.0.0` ring. RADV marks the graphics
+      context "innocent", so the faulting submission is the emulator's own
+      work on the other ring.
+    - Direction: map the faulting address against the guest mappings and
+      identify the last submission on that ring.
+  - The beat 'em up title runs at 11.1-14.2 fps on Intel and 9.4-11.6 fps on
+    AMD, with about 300 compute dispatches per frame, one per draw. It is not
+    render-pass bound.
+  - The fishing title's CP thread spends 7% in `GpuMemory::ResetHash` and 7% in
+    `GpuDirtyPageTracker::Rearm` (through `BeginRead`), per draw.
+
 ## Depth-only compute HTILE clears (2026-10-12)
 
 - Contract: the proven zero-word `ComputeMetadataFill` HTILE event (see the

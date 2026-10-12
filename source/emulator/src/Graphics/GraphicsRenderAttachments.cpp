@@ -137,7 +137,7 @@ static bool ApplyComputeColorFillImages(CommandBuffer* buffer, const ComputeColo
 			return false;
 		}
 	}
-	auto vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto vk_buffer = buffer->RecordOutsideRenderPass();
 	// Also order same-layout TRANSFER_DST WAW, for which the layout helper
 	// deliberately emits no transition, and the preceding normal CS stores.
 	VkMemoryBarrier write_barrier {};
@@ -275,7 +275,7 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 	// object is the guest result; a wider object could hold older pending writes.
 	GpuMemoryStorageWriteIdentity identity {};
 	if (buffer == nullptr || !GpuMemoryFindExactWritableStorage(fill.address, fill.size, &identity) ||
-	    !GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->GetPool()->buffers[buffer->GetIndex()],
+	    !GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
 	                                         *identity.buffer, fill.address, fill.size))
 	{
 		return false;
@@ -426,7 +426,7 @@ void GraphicsRenderMemoryBarrier(CommandBuffer* buffer)
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	VkMemoryBarrier mem_barrier {};
 	mem_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -438,7 +438,7 @@ void GraphicsRenderMemoryBarrier(CommandBuffer* buffer)
 	                     0, nullptr);
 }
 
-void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, VulkanImage* image)
+void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* image)
 {
 	EXIT_IF(image == nullptr);
 
@@ -464,7 +464,7 @@ void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, VulkanImage* 
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
 		image_memory_barrier.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
 
-		vkCmdPipelineBarrier(vk_buffer,
+		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(),
 		                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
 		                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 		                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -475,7 +475,7 @@ void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, VulkanImage* 
 	}
 }
 
-void GraphicsRenderDepthStencilBarrier(VkCommandBuffer vk_buffer, VulkanImage* image)
+void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, VulkanImage* image)
 {
 	EXIT_IF(image == nullptr);
 
@@ -508,7 +508,7 @@ void GraphicsRenderDepthStencilBarrier(VkCommandBuffer vk_buffer, VulkanImage* i
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
 		image_memory_barrier.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
 
-		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		                     VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
 		                     &image_memory_barrier);
 
@@ -516,7 +516,7 @@ void GraphicsRenderDepthStencilBarrier(VkCommandBuffer vk_buffer, VulkanImage* i
 	}
 }
 
-void GraphicsRenderStorageImageBarrier(VkCommandBuffer vk_buffer, VulkanImage* image)
+void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image)
 {
 	EXIT_IF(image == nullptr);
 
@@ -575,7 +575,7 @@ void GraphicsRenderStorageImageBarrier(VkCommandBuffer vk_buffer, VulkanImage* i
 
 	const VkPipelineStageFlags dst_stage =
 	    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-	vkCmdPipelineBarrier(vk_buffer, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+	vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 	image->layout = image_memory_barrier.newLayout;
 }
 
@@ -586,13 +586,11 @@ void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, uint64_t vaddr, u
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
-
 	auto images = FindRenderTexture(buffer, vaddr, size, false);
 
 	for (auto* image: images)
 	{
-		GraphicsRenderRenderTextureBarrier(vk_buffer, image);
+		GraphicsRenderRenderTextureBarrier(buffer, image);
 	}
 }
 
@@ -603,13 +601,11 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, ui
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
-
 	auto images = FindDepthStencil(buffer, vaddr, size, false);
 
 	for (auto* image: images)
 	{
-		GraphicsRenderDepthStencilBarrier(vk_buffer, image);
+		GraphicsRenderDepthStencilBarrier(buffer, image);
 	}
 }
 
@@ -1529,7 +1525,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 		     dst->extent.width, dst->extent.height);
 	}
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 	TransitionColorImage(vk_buffer, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
 	                     VK_PIPELINE_STAGE_TRANSFER_BIT);
 	TransitionColorImage(vk_buffer, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,

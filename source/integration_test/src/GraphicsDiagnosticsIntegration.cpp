@@ -5166,7 +5166,7 @@ void VerifyHostNanRasterBaseline()
 	{
 		CommandBuffer command_buffer(GraphicContext::QUEUE_GFX);
 		command_buffer.Begin();
-		auto* vk_buffer = command_buffer.GetPool()->buffers[command_buffer.GetIndex()];
+		auto* vk_buffer = command_buffer.RecordOutsideRenderPass();
 		Expect(vk_buffer != VK_NULL_HANDLE, "host NaN raster baseline resolves its exact Vulkan command buffer");
 		vkCmdResetQueryPool(vk_buffer, query_pool, 0u, 2u);
 		VkRenderPassBeginInfo begin {};
@@ -5239,7 +5239,7 @@ void VerifyVertexClipProbeMatchOrdinal()
 	EventRing::Instance().ResetForTests();
 	selected.Begin();
 	probe_renderer->Arm(&selected, pipeline_layout);
-	auto* vk_buffer = selected.GetPool()->buffers[selected.GetIndex()];
+	auto* vk_buffer = selected.RecordOutsideRenderPass();
 	Expect(vk_buffer != VK_NULL_HANDLE, "match-ordinal probe resolves its Vulkan command buffer");
 	VkRenderPassBeginInfo begin {};
 	begin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -5392,7 +5392,7 @@ void VerifyVertexClipProbeDepthStencilQuery(bool depth_test_enabled, bool depth_
 		       "vertex clip query reserves its selected command buffer");
 		selected.Begin();
 		probe_renderer->Arm(&selected, pipeline_layout);
-		auto* vk_buffer = selected.GetPool()->buffers[selected.GetIndex()];
+		auto* vk_buffer = selected.RecordOutsideRenderPass();
 		Expect(vk_buffer != VK_NULL_HANDLE, "vertex clip query resolves its Vulkan command buffer");
 		VkRenderPassBeginInfo begin {};
 		begin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -6137,7 +6137,7 @@ void RenderDualSourceTriangle(GraphicContext* context, const HostNanRasterTarget
 	Expect(readback.Create(), "dual-source readback buffer is created host-visible");
 	CommandBuffer command_buffer(GraphicContext::QUEUE_GFX);
 	command_buffer.Begin();
-	auto* vk_buffer = command_buffer.GetPool()->buffers[command_buffer.GetIndex()];
+	auto* vk_buffer = command_buffer.RecordOutsideRenderPass();
 	Expect(vk_buffer != VK_NULL_HANDLE, "dual-source raster resolves its exact Vulkan command buffer");
 
 	VkClearValue clear {};
@@ -6362,7 +6362,7 @@ void RenderUint16MrtCase(GraphicContext* context, const Uint16MrtRasterCase& tes
 
 	CommandBuffer command_buffer(GraphicContext::QUEUE_GFX);
 	command_buffer.Begin();
-	auto* vk_buffer = command_buffer.GetPool()->buffers[command_buffer.GetIndex()];
+	auto* vk_buffer = command_buffer.RecordOutsideRenderPass();
 	Expect(vk_buffer != VK_NULL_HANDLE, "UINT16 MRT fixture resolves its exact Vulkan command buffer");
 	VkClearValue                                 clear[2] {};
 	const std::array<std::array<uint16_t, 4>, 2> sentinels = {{{0x1111u, 0x2222u, 0x3333u, 0x4444u}, {0x5555u, 0x6666u, 0x7777u, 0x8888u}}};

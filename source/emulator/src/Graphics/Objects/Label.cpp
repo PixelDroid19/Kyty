@@ -914,7 +914,7 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label)
 
 	label->cp = buffer->GetParent();
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	if (vk_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_buffer == nullptr condition ignored (continuing)\n"); }
 

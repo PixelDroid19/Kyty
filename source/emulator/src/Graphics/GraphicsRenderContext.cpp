@@ -331,11 +331,10 @@ void GdsBuffer::Init(GraphicContext* ctx, CommandBuffer* buffer)
 }
 
 // GDS is only accessed through recorded commands, so the host never maps it while submitted work
-// may still use it. CP packets are recorded between render helpers, each of which ends the render
-// pass it begins, so these transfers are never inside a render pass.
+// may still use it. The handle ends an open render pass first, so these transfers stay outside one.
 static VkCommandBuffer GdsCommandBuffer(CommandBuffer* buffer)
 {
-	return buffer->GetPool()->buffers[buffer->GetIndex()];
+	return buffer->RecordOutsideRenderPass();
 }
 
 static void GdsRangeBarrier(VkCommandBuffer cmd, VkBuffer target, uint64_t offset, uint64_t size, VkPipelineStageFlags src_stage,

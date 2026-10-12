@@ -4833,7 +4833,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			need_descriptor = true;
 		}
 
-		auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+		auto* vk_buffer = buffer->RecordState();
 
 		if (bind.textures2D.textures_num > 0)
 		{
@@ -4920,7 +4920,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			                                                  textures3d_sampled_uint_view,
 			                                                  bind.textures2D.textures3d_sampled_uint_num);
 
-			const auto transition_sampled_images = [&vk_buffer](VulkanImage** images, int count)
+			const auto transition_sampled_images = [buffer](VulkanImage** images, int count)
 			{
 				for (int i = 0; i < count; i++)
 				{
@@ -4930,12 +4930,12 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 					}
 					if (images[i]->type == VulkanImageType::DepthStencil)
 					{
-						GraphicsRenderDepthStencilBarrier(vk_buffer, images[i]);
+						GraphicsRenderDepthStencilBarrier(buffer, images[i]);
 					} else if (images[i]->type == VulkanImageType::RenderTexture || images[i]->type == VulkanImageType::VideoOut ||
 					           images[i]->type == VulkanImageType::StorageTexture)
 					{
 						// Storage images written by compute also need SHADER_READ before sampling.
-						GraphicsRenderRenderTextureBarrier(vk_buffer, images[i]);
+						GraphicsRenderRenderTextureBarrier(buffer, images[i]);
 					}
 				}
 			};
@@ -4950,7 +4950,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			{
 				auto* storage_image = textures2d_storage[i];
 				const auto old_layout = storage_image->layout;
-				GraphicsRenderStorageImageBarrier(vk_buffer, storage_image);
+				GraphicsRenderStorageImageBarrier(buffer, storage_image);
 				if (std::getenv("KYTY_DUMP_STORAGE_IMAGE") != nullptr)
 				{
 					static std::atomic_uint storage_image_logs {0};

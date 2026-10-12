@@ -626,13 +626,25 @@ public:
 
 	void Allocate();
 	void Free();
-	void Begin() const;
-	void End() const;
+	void Begin();
+	void End();
 	void Execute();
 	void ExecuteWithSemaphore(VkSemaphore signal_semaphore);
+	// Consecutive draws on one framebuffer share a render pass instance: a draw
+	// continues the instance an earlier draw left open when beginning a new one
+	// would neither clear, discard nor transition an attachment.
 	void BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
-	                     const VulkanSampleLocationState* sample_locations = nullptr) const;
-	void EndRenderPass() const;
+	                     const VulkanSampleLocationState* sample_locations = nullptr);
+	// Ends the open render pass instance and makes its attachment writes visible
+	// to later shader and attachment reads.
+	void CloseRenderPass();
+	// Transfers, barriers, dispatches, events and query resets are illegal inside
+	// a render pass instance; this handle ends an open one first. Bindings, push
+	// constants, dynamic state and query scopes are legal in both scopes
+	// (RecordState), draws only inside one (RecordInsideRenderPass).
+	[[nodiscard]] VkCommandBuffer RecordOutsideRenderPass();
+	[[nodiscard]] VkCommandBuffer RecordState() const;
+	[[nodiscard]] VkCommandBuffer RecordInsideRenderPass() const;
 	void WaitForFence();
 	void WaitForFenceWithoutLabelCallbacks();
 	void WaitForFenceAndReset();
@@ -640,6 +652,7 @@ public:
 	[[nodiscard]] bool TryCompleteFenceAndResetWithoutLabelCallbacks();
 
 	[[nodiscard]] uint32_t GetIndex() const { return m_index; }
+	// Pool and fence ownership only; commands go through the Record* handles.
 	VulkanCommandPool*     GetPool() { return m_pool; }
 	[[nodiscard]] bool     IsExecute() const { return m_execute; }
 	void                   SetSubmissionId(SubmissionId submission)
@@ -689,6 +702,13 @@ public:
 private:
 	friend class PipelineCache;
 
+	struct OpenRenderPass
+	{
+		VkRenderPass  render_pass = nullptr;
+		VkFramebuffer framebuffer = nullptr;
+		bool          continuable = false;
+	};
+
 	[[nodiscard]] bool AttachPipelineLease(VulkanPipeline* pipeline, bool* added);
 	void               MarkCommandBufferResetting();
 	void               ReleasePipelineLeases();
@@ -707,6 +727,7 @@ private:
 	std::vector<VulkanPipeline*> m_pipeline_leases;
 	mutable bool                 m_recording = false;
 	bool                         m_resetting = false;
+	std::optional<OpenRenderPass> m_open_render_pass;
 
 	bool               m_has_guest_context = false;
 	uint64_t           m_guest_submit = 0;
