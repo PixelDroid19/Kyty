@@ -24,8 +24,9 @@ fail on the current HEAD before acting on them.
   bilinear. Its mean channels matched a bilinear upscale within 0.004, so
   there is no transfer-function shift. At 1:1 the racing title differed from
   its re-encoded source by an MAE of 0.0044, which is the RCAS sharpening
-  alone. That run also measured 46.2 fps in its gameplay window, which led to
-  skipping equal extents.
+  alone. The passes add work at 1:1 for no added detail, so equal extents
+  skip them. The FSR cost against `Linear` at the same window size has not
+  been measured.
 - Not a performance fix on its own. `Fixed` scales only the display attachment
   cohort. On AMD the beat 'em up stayed flat: 7.1, 4.1 and 3.6 fps under
   `Fixed` against 6.9, 4.1 and 3.8 at `Native`, GPU about 80% busy. Its
@@ -33,8 +34,8 @@ fail on the current HEAD before acting on them.
   and sets 3840x2160 buffer attributes without querying the resolution or
   output status, so the reported display mode cannot lower it.
 - Temporal upscalers (FSR 2+, FSR 4, XeSS) and frame generation are not
-  offered. They need motion vectors, depth and jitter from the renderer, and
-  the current FidelityFX SDK does not support Vulkan.
+  offered. They need the renderer's motion vectors, depth and jitter. The
+  FidelityFX SDK requirements are listed in `docs/render-resolution.md`.
 
 ## Indexed physical mapping lookup (2026-10-12)
 

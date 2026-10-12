@@ -117,13 +117,15 @@ current framing and aspect-ratio policy.
   only), which is what led to the rule that equal extents skip the passes.
   The swapchain on both hosts is UNORM BGRA, so the sRGB-swapchain branch has
   not run.
-- Temporal upscalers are not offered: FSR 2 and later, FSR 4 (ML) and XeSS
-  all need per-pixel motion vectors, depth and a jittered projection from
-  the renderer. A presentation stage, or an emulator in general, does not
-  have these for an arbitrary guest. The current FidelityFX SDK also states
-  that Vulkan is not supported. FSR 4 ships as a signed DirectX 12 binary
-  and requires an AMD 7000 series discrete GPU or a 9000 series GPU. Its
-  frame generation needs the same inputs.
+- Temporal upscalers are not offered. FSR 2 and later, FSR 4 (ML) and XeSS
+  all need the renderer's per-pixel motion vectors, depth and jittered
+  projection. A presentation stage, or an emulator in general, does not have
+  these for an arbitrary guest. On top of that, the FidelityFX SDK documents:
+  - FSR 4 needs its signed binary distribution and "an AMD 7000 series
+    discrete GPU or AMD 9000 series GPU or later".
+  - ML frame generation needs "Windows 11, DirectX 12 Agility SDK 1.4.9 and
+    an AMD 9000 series GPU or later".
+  - Its known-issues table states "Vulkan is currently not supported in SDK".
 
 ## Diagnostics
 
