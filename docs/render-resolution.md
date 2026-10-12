@@ -10,6 +10,8 @@ tiling, descriptors, and ABI data remain guest values.
 The active render-resolution keys are:
 
 - `RenderResolutionMode`: `Fixed` or `Native`.
+- `RenderResolutionScope`: `Display` (default) or `RenderTargets`. See
+  [Render-target scope](#render-target-scope).
 - `RenderResolutionWidth`: fixed render target width. The default is `1280`.
 - `RenderResolutionHeight`: fixed render target height. The default is `720`.
 - `PresentationFilter`: `Linear`, `Nearest` or `Fsr`.
@@ -19,6 +21,7 @@ The active render-resolution keys are:
 The matching environment variables are:
 
 - `KYTY_RENDER_RESOLUTION_MODE`
+- `KYTY_RENDER_RESOLUTION_SCOPE`
 - `KYTY_RENDER_RESOLUTION_WIDTH`
 - `KYTY_RENDER_RESOLUTION_HEIGHT`
 - `KYTY_PRESENTATION_FILTER`
@@ -51,6 +54,43 @@ Resources that share memory propagate the selected state across aliases before
 materialization. When a late binding changes the state, the framebuffer is
 replanned and rebound. Non-converging plans are errors; they are not substituted
 with a best-effort extent.
+
+## Render-target scope
+
+`Display` applies `Fixed` to the VideoOut cohort only. `RenderTargets` also
+plans offscreen render textures and their depth whose guest extent equals the
+registered display extent. The scope takes effect only under `Fixed`. It is
+opt-in because some titles use scaled targets in ways the contract below
+refuses.
+
+A new color target is a scaling candidate only when all of these hold:
+
+- it is GPU-owned: no CPU upload on update and no write-back;
+- it is single-sample;
+- its range is aliased by nothing but at most one exact storage-buffer view
+  and one exact texture view;
+- the device supports the format, samples and usage at the host extent.
+
+A new depth target follows the same rule. Storage views of its planes are its
+only allowed aliases, because depth is never uploaded from guest memory and
+never written back to it. HTILE and multisampled depth stay native.
+
+A target that already exists fixes its own extent: a Vulkan image cannot change
+extent in place. Every color target and the depth of a pass form one cohort with
+one guest extent and one host extent. The cohort scales only when every member
+agrees, and a committed member decides the extent for new ones. Mixed guest
+extents keep the cohort native. A committed scaled member beside a native one,
+or beside a display buffer, is unsupported and stops the run.
+
+A scaled cohort uses the same viewport, scissor and pixel-shader host-to-guest
+transform as the display cohort. Shader reads of a scaled image are allowed
+only through normalized sampling without texel offsets. Integer texel access,
+size queries, texel offsets and storage access stop the run. Copies, resolves
+and depth copies between images at different host extents stop the run as
+well, and so does a depth pass that would address a scaled depth at another
+extent.
+
+`BRINGUP.md` records the measured effect and the titles that hit each refusal.
 
 ## States
 

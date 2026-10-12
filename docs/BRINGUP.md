@@ -9,6 +9,114 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Offscreen render-target scaling, opt-in (2026-10-12)
+
+- `RenderResolutionScope = RenderTargets` (`KYTY_RENDER_RESOLUTION_SCOPE`)
+  extends `Fixed` from the display cohort to offscreen render textures and
+  their depth when they match the registered display extent. `Display` stays
+  the default. `docs/render-resolution.md` has the cohort, alias and read
+  rules.
+- Cause it targets. On AMD the beat 'em up draws about 320 sprites per frame
+  into two 3840x2160 render textures and about 31 into a third with depth.
+  Every consumer samples them with normalized coordinates. Limiting those
+  draws to one quadrant in a removed diagnostic raised it from 4.1 to 8-11
+  fps and cut GPU busy from 82% to 48%, so fill dominates.
+- Alias evidence, from code reading:
+  - GPU-owned render textures and depth targets never load from or write back
+    to guest memory.
+  - Storage-buffer and texture views of the same range are linked without a
+    copy, and a storage buffer updates only from guest bytes.
+  - So one exact buffer or texture view cannot observe or change the scaled
+    texels. Depth accepts storage views of its planes for the same reason.
+  - Anything else keeps the target native.
+- Measured on AMD Raphael (RADV) at the beat 'em up gameplay windows, `Fixed`
+  1280x720, with a build of the tree at `29047d27`:
+  - RenderTargets: 13.4, 11.8 and 10.2 fps at 300, 335 and 364 draws per
+    frame, 260 s, status 1.
+  - Display: 6.9, 4.0 and 3.7 fps at 243, 316 and 321 draws per frame.
+  - Captures stay healthy, with no seams or offsets.
+- On Intel Arc A770 the beat 'em up is CPU-bound and stays flat under
+  RenderTargets: 13.9, 12.5 and 10.9 fps against 14.2, 12.7 and 11.6 at
+  `Native`. Its captures are correct.
+- Refusals. On both hosts these stop with a diagnostic instead of mixing
+  extents, so the scope is not the default:
+  - The watercolour platformer stops at a compute storage access to a scaled
+    render texture (`GraphicsRenderBind.cpp`, "storage access to a
+    resolution-scaled image").
+  - The racing title stops at a cohort that pairs a committed scaled render
+    texture with a native one ("mismatched_host_extent",
+    `attachment_index=1`).
+  - Direction: decide scaling from the target's later uses, or materialize a
+    native copy when a scaled target meets a native-only consumer.
+- `Fixed` + RenderTargets keeps status 1:
+  - on Intel: the gothic action platformer, the ninja platformer, the
+    isometric roguelike, the pixel exploration title, the artillery title,
+    the roguelite action platformer, the robot platformer and the Unity
+    fishing title;
+  - on AMD: the isometric roguelike and the roguelite action platformer
+    (three of three runs).
+  - The other frontier titles were not run under this scope on AMD.
+- Regression evidence for this change and the descriptor-cache bound below.
+  Builds of the uncommitted tree, whose content matches `ba2288f3` and
+  `29047d27`, keep status 1:
+  - `Fixed` + `Display` on Intel for the watercolour platformer, the gothic
+    action platformer, the ninja platformer, the isometric roguelike, the
+    pixel exploration title, the artillery title, the roguelite action
+    platformer, the racing title, the robot platformer and the Unity fishing
+    title;
+  - `Fixed` + `Display` on AMD for the racing title, the roguelite action
+    platformer, the watercolour platformer, the isometric roguelike and the
+    beat 'em up;
+  - `Native` on both hosts for the same sets.
+  - The mechanical-fist platformer still stops at the unresolved `Agc` import
+    it hit before these changes.
+  - Intel A/B at `Native` is neutral. The baseline was a dirty tree at
+    `a45f6a70` carrying the indexed-lookup change:
+    - racing title: 84.3, 90.1 and 85.9 fps against 90.7 and 87.6;
+    - Unity fishing title: 10.5, 9.8 and 10.5 against 10.6, 9.5 and 10.6.
+- The sweep wrapper used for frontier runs sets
+  `KYTY_RENDER_RESOLUTION_MODE=Native`, while `scripts/run_guest.lua` defaults
+  to `Fixed`. Earlier frontier numbers measured `Native` unless they name
+  `Fixed`.
+- Open, found while verifying:
+  - The beat 'em up draws large white quads over a forest scene at native
+    extent on AMD. They already appear in a dirty-tree build at `a45f6a70`,
+    which predates these changes.
+  - The roguelite action platformer on AMD stopped at about 93 s with
+    "indirect register packet references invalid guest storage: class=0x13
+    address=0x0000002000000001 count=7" (`GraphicsRun.cpp:1263`). It happened
+    in two of three runs at `Native` with the RenderTargets scope set, before
+    `29047d27` made the scope inert at `Native`. That earlier code recorded
+    extra submission uses for its extent lookups.
+    - Without the scope it passed six of six runs, and under `Fixed` +
+      RenderTargets it passed three of three. The cause is not established.
+    - The identical value in both failures points to a deterministic parse of
+      stale or misaligned command words.
+    - Next step: dump the packet window around the offset in a bounded
+      diagnostic.
+
+## Bounded descriptor-set cache (2026-10-12)
+
+- Cause. Descriptor sets were freed only with a resource they reference.
+  Under render-target scaling the beat 'em up ran fast enough to grow the
+  cache to 261,632 sets in 512 pools. The trigger was compute sets binding
+  two long-lived storage buffers in many combinations, about 13.7k resources
+  in all. Then:
+  - `vkCreateDescriptorPool` returned `VK_ERROR_OUT_OF_HOST_MEMORY`;
+  - the failure was ignored;
+  - RADV read offset 0xb4 of the null pool in `radv_AllocateDescriptorSets`
+    and exited with status 139.
+  This also explains the 0xb4 fault in the earlier quadrant experiment.
+- Fix:
+  - Each set records the submissions that used it.
+  - Past 65,536 live sets, the 8,192 least recently used tracked sets leave
+    the cache. They are freed through the deferred deletion queue once those
+    submissions complete.
+  - A failed pool creation now stops with its `VkResult`.
+- Verified with a removed diagnostic. The run went 260 s with status 1 and 40
+  trims. Every candidate set was tracked, pools settled at 129 instead of
+  512, and peak RSS fell from 11.4 GB to 9.3 GB.
+
 ## FSR 1.0 presentation upscaling (2026-10-12)
 
 - `PresentationFilter = Fsr` upscales the final image to the swapchain with
@@ -27,8 +135,9 @@ fail on the current HEAD before acting on them.
   alone. The passes add work at 1:1 for no added detail, so equal extents
   skip them. The FSR cost against `Linear` at the same window size has not
   been measured.
-- Not a performance fix on its own. `Fixed` scales only the display attachment
-  cohort. On AMD the beat 'em up stayed flat: 7.1, 4.1 and 3.6 fps under
+- Not a performance fix on its own. `Fixed` with the default `Display` scope
+  scales only the display attachment cohort; see the opt-in render-target scope
+  above. On AMD the beat 'em up stayed flat: 7.1, 4.1 and 3.6 fps under
   `Fixed` against 6.9, 4.1 and 3.8 at `Native`, GPU about 80% busy. Its
   3840x2160 offscreen passes keep their guest size. That title opens VideoOut
   and sets 3840x2160 buffer attributes without querying the resolution or
