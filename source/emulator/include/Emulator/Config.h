@@ -69,6 +69,17 @@ enum class PresentationFilter
 	Fsr
 };
 
+// Host texture filtering override. Guest keeps each sampler's own anisotropy;
+// a level raises linear-minified samplers to at least that ratio.
+enum class TextureAnisotropy
+{
+	Guest,
+	X2,
+	X4,
+	X8,
+	X16
+};
+
 void Load(const ConfigSource& cfg);
 
 // The primary guest executable establishes this once per runtime session.
@@ -90,6 +101,7 @@ uint32_t GetRenderResolutionWidth();
 uint32_t GetRenderResolutionHeight();
 PresentationFilter GetPresentationFilter();
 uint32_t GetPresentationFsrSharpness();
+TextureAnisotropy GetTextureAnisotropy();
 bool     IsNeo();
 bool     IsNextGen();
 bool     VulkanValidationEnabled();

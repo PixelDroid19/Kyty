@@ -66,6 +66,20 @@ bool VertexInputLayoutLogEnabled()
 	return value != nullptr && std::strcmp(value, "0") != 0 && std::strcmp(value, "off") != 0 && std::strcmp(value, "false") != 0;
 }
 
+// Device selection requires maxSamplerAnisotropy >= 16, so every level is valid.
+float HostTextureAnisotropyRatio()
+{
+	switch (Config::GetTextureAnisotropy())
+	{
+		case Config::TextureAnisotropy::Guest: return 1.0f;
+		case Config::TextureAnisotropy::X2: return 2.0f;
+		case Config::TextureAnisotropy::X4: return 4.0f;
+		case Config::TextureAnisotropy::X8: return 8.0f;
+		case Config::TextureAnisotropy::X16: return 16.0f;
+	}
+	return 1.0f;
+}
+
 } // namespace
 
 // SamplerCache::GetSamplerId, PipelineCache, CreatePipelineInternal
@@ -123,26 +137,10 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	s.allow_unnormalized  = allow_unnormalized;
 	s.vk                  = nullptr;
 
-	bool  aniso       = false;
-	float aniso_ratio = 1.0f;
-	auto  mag_filter  = r.XyMagFilter();
-	auto  min_filter  = r.XyMinFilter();
+	auto mag_filter = r.XyMagFilter();
+	auto min_filter = r.XyMinFilter();
 
-	if (mag_filter == 2 || mag_filter == 3 || min_filter == 2 || min_filter == 3)
-	{
-		aniso = true;
-		switch (r.MaxAnisoRatio())
-		{
-			case 0: aniso_ratio = 1.0f; break;
-			case 1: aniso_ratio = 2.0f; break;
-			case 2: aniso_ratio = 4.0f; break;
-			case 3: aniso_ratio = 8.0f; break;
-			case 4:
-				aniso_ratio = 16.0f;
-				break;
-				KYTY_LOG_DEBUG("WARNING: unknown aniso ratio (continuing)\n");
-		}
-	}
+	const auto anisotropy = State::ResolveSamplerAnisotropy(mag_filter, min_filter, r.MaxAnisoRatio(), HostTextureAnisotropyRatio());
 
 	auto              mip_filter = r.MipFilter();
 	const auto        lod_range  = State::ResolveSamplerLodRange(r.MinLod(), r.MaxLod(), r.LodBias(), mip_filter);
@@ -195,8 +193,8 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	sampler_info.addressModeV            = address[1];
 	sampler_info.addressModeW            = address[2];
 	sampler_info.mipLodBias              = lod_range.lod_bias;
-	sampler_info.anisotropyEnable        = (aniso ? VK_TRUE : VK_FALSE);
-	sampler_info.maxAnisotropy           = aniso_ratio;
+	sampler_info.anisotropyEnable        = (anisotropy.enabled ? VK_TRUE : VK_FALSE);
+	sampler_info.maxAnisotropy           = anisotropy.max_ratio;
 	sampler_info.compareEnable           = sampler_comparison.enabled ? VK_TRUE : VK_FALSE;
 	sampler_info.compareOp               = get_compare_op(sampler_comparison.function);
 	sampler_info.minLod                  = min_lod;

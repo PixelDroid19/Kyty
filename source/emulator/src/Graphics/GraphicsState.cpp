@@ -588,6 +588,28 @@ UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormaliz
 	        .reset_lod_bias     = true};
 }
 
+SamplerAnisotropy ResolveSamplerAnisotropy(uint8_t mag_filter, uint8_t min_filter, uint8_t max_aniso_ratio, float host_min_ratio)
+{
+	static constexpr float kGuestRatios[] = {1.0f, 2.0f, 4.0f, 8.0f, 16.0f};
+
+	SamplerAnisotropy anisotropy {};
+	if (mag_filter == 2 || mag_filter == 3 || min_filter == 2 || min_filter == 3)
+	{
+		anisotropy.enabled = true;
+		if (max_aniso_ratio < std::size(kGuestRatios))
+		{
+			anisotropy.max_ratio = kGuestRatios[max_aniso_ratio];
+		}
+	}
+	const bool linear_min = min_filter == 1 || min_filter == 3;
+	if (linear_min && host_min_ratio > 1.0f && host_min_ratio > anisotropy.max_ratio)
+	{
+		anisotropy.enabled   = true;
+		anisotropy.max_ratio = host_min_ratio;
+	}
+	return anisotropy;
+}
+
 SamplerLodRange ResolveSamplerLodRange(uint16_t min_lod_u48, uint16_t max_lod_u48, uint16_t lod_bias_bits, uint8_t mip_filter)
 {
 	SamplerLodRange range {};

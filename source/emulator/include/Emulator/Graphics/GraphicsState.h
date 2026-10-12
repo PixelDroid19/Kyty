@@ -391,6 +391,18 @@ struct SamplerLodRange
 [[nodiscard]] SamplerLodRange ResolveSamplerLodRange(uint16_t min_lod_u48, uint16_t max_lod_u48, uint16_t lod_bias_bits,
                                                      uint8_t mip_filter);
 
+// S# XY_MAG/MIN_FILTER 2 and 3 select anisotropic point and linear filtering;
+// MAX_ANISO_RATIO 0..4 is 1x..16x. A host level above 1 raises samplers whose
+// minification is linear (1 or 3) to at least that ratio.
+struct SamplerAnisotropy
+{
+	bool  enabled   = false;
+	float max_ratio = 1.0f;
+};
+
+[[nodiscard]] SamplerAnisotropy ResolveSamplerAnisotropy(uint8_t mag_filter, uint8_t min_filter, uint8_t max_aniso_ratio,
+                                                         float host_min_ratio);
+
 } // namespace Kyty::Libs::Graphics::State
 
 #endif // KYTY_EMU_ENABLED
