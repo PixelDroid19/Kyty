@@ -319,9 +319,11 @@ static bool CreateLuaScript(Kyty::Configuration* info, const QString& file_name)
 		s << "\t ScreenWidth = " << info->screen_width << ";\n";
 		s << "\t ScreenHeight = " << info->screen_height << ";\n";
 		s << "\t RenderResolutionMode = " << LuaStringLiteral(EnumToText(info->render_resolution_mode)) << ";\n";
+		s << "\t RenderResolutionScope = " << LuaStringLiteral(EnumToText(info->render_resolution_scope)) << ";\n";
 		s << "\t RenderResolutionWidth = " << info->render_resolution_width << ";\n";
 		s << "\t RenderResolutionHeight = " << info->render_resolution_height << ";\n";
 		s << "\t PresentationFilter = " << LuaStringLiteral(EnumToText(info->presentation_filter)) << ";\n";
+		s << "\t PresentationFsrSharpness = " << info->presentation_fsr_sharpness << ";\n";
 		s << "\t Neo = " << (info->neo ? "true" : "false") << ";\n";
 		s << "\t VulkanValidationEnabled = " << (info->vulkan_validation_enabled ? "true" : "false") << ";\n";
 		s << "\t ShaderValidationEnabled = " << (info->shader_validation_enabled ? "true" : "false") << ";\n";

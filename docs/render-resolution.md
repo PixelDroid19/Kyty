@@ -27,6 +27,10 @@ The matching environment variables are:
 - `KYTY_PRESENTATION_FILTER`
 - `KYTY_PRESENTATION_FSR_SHARPNESS`
 
+The launcher's configuration dialog edits every key above. The scope is
+enabled only in `Fixed` mode and the sharpness only with the `Fsr` filter,
+because the emulator ignores them otherwise.
+
 `ScreenWidth` and `ScreenHeight` configure only the host window and swapchain.
 They do not select the guest render resolution.
 

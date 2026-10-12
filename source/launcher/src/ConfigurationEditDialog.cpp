@@ -88,6 +88,13 @@ ConfigurationEditDialog::ConfigurationEditDialog(Kyty::Configuration* info, Conf
 		        bool fixed = (mode == Kyty::Configuration::RenderResolutionMode::Fixed);
 		        m_ui->spinBox_render_width->setEnabled(fixed);
 		        m_ui->spinBox_render_height->setEnabled(fixed);
+		        m_ui->comboBox_render_resolution_scope->setEnabled(fixed);
+	        });
+	connect(m_ui->comboBox_presentation_filter, &QComboBox::currentTextChanged,
+	        [=](const QString& text)
+	        {
+		        auto filter = TextToEnum<Kyty::Configuration::PresentationFilter>(text);
+		        m_ui->spinBox_fsr_sharpness->setEnabled(filter == Kyty::Configuration::PresentationFilter::Fsr);
 	        });
 	connect(m_ui->base_directory_lineedit, &QLineEdit::textChanged, this, &ConfigurationEditDialog::scan_elfs);
 	connect(m_ui->param_file_lineedit, &QLineEdit::textChanged, this, &ConfigurationEditDialog::load_param_sfo);
@@ -180,7 +187,9 @@ void ConfigurationEditDialog::Init()
 	ListInit(m_ui->comboBox_render_resolution_mode, m_info->render_resolution_mode);
 	m_ui->spinBox_render_width->setValue(m_info->render_resolution_width);
 	m_ui->spinBox_render_height->setValue(m_info->render_resolution_height);
+	ListInit(m_ui->comboBox_render_resolution_scope, m_info->render_resolution_scope);
 	ListInit(m_ui->comboBox_presentation_filter, m_info->presentation_filter);
+	m_ui->spinBox_fsr_sharpness->setValue(m_info->presentation_fsr_sharpness);
 	m_ui->checkBox_neo->setChecked(m_info->neo);
 	m_ui->checkBox_shader_validation->setChecked(m_info->shader_validation_enabled);
 	m_ui->checkBox_vulkan_validation->setChecked(m_info->vulkan_validation_enabled);
@@ -213,7 +222,9 @@ void ConfigurationEditDialog::Init()
 		bool fixed = (m_info->render_resolution_mode == Kyty::Configuration::RenderResolutionMode::Fixed);
 		m_ui->spinBox_render_width->setEnabled(fixed);
 		m_ui->spinBox_render_height->setEnabled(fixed);
+		m_ui->comboBox_render_resolution_scope->setEnabled(fixed);
 	}
+	m_ui->spinBox_fsr_sharpness->setEnabled(m_info->presentation_filter == Kyty::Configuration::PresentationFilter::Fsr);
 }
 
 void ConfigurationEditDialog::SetTitle(const QString& str)
@@ -248,18 +259,20 @@ static void UpdateList(QStringList* list, QStringList* list_selected, QListWidge
 
 static void UpdateInfo(Kyty::Configuration* info, Ui::ConfigurationEditDialog* ui)
 {
-	info->name                      = ui->name_lineedit->text();
-	info->basedir                   = ui->base_directory_lineedit->text();
-	info->param_file                = ui->param_file_lineedit->text();
-	info->screen_width              = ui->spinBox_screen_width->value();
-	info->screen_height             = ui->spinBox_screen_height->value();
-	info->render_resolution_mode    = TextToEnum<Kyty::Configuration::RenderResolutionMode>(ui->comboBox_render_resolution_mode->currentText());
-	info->render_resolution_width   = ui->spinBox_render_width->value();
-	info->render_resolution_height  = ui->spinBox_render_height->value();
-	info->presentation_filter       = TextToEnum<Kyty::Configuration::PresentationFilter>(ui->comboBox_presentation_filter->currentText());
-	info->neo                       = ui->checkBox_neo->isChecked();
-	info->vulkan_validation_enabled = ui->checkBox_vulkan_validation->isChecked();
-	info->shader_validation_enabled = ui->checkBox_shader_validation->isChecked();
+	info->name                       = ui->name_lineedit->text();
+	info->basedir                    = ui->base_directory_lineedit->text();
+	info->param_file                 = ui->param_file_lineedit->text();
+	info->screen_width               = ui->spinBox_screen_width->value();
+	info->screen_height              = ui->spinBox_screen_height->value();
+	info->render_resolution_mode     = TextToEnum<Kyty::Configuration::RenderResolutionMode>(ui->comboBox_render_resolution_mode->currentText());
+	info->render_resolution_width    = ui->spinBox_render_width->value();
+	info->render_resolution_height   = ui->spinBox_render_height->value();
+	info->render_resolution_scope    = TextToEnum<Kyty::Configuration::RenderResolutionScope>(ui->comboBox_render_resolution_scope->currentText());
+	info->presentation_filter        = TextToEnum<Kyty::Configuration::PresentationFilter>(ui->comboBox_presentation_filter->currentText());
+	info->presentation_fsr_sharpness = ui->spinBox_fsr_sharpness->value();
+	info->neo                        = ui->checkBox_neo->isChecked();
+	info->vulkan_validation_enabled  = ui->checkBox_vulkan_validation->isChecked();
+	info->shader_validation_enabled  = ui->checkBox_shader_validation->isChecked();
 	info->shader_optimization_type =
 	    TextToEnum<Kyty::Configuration::ShaderOptimizationType>(ui->comboBox_shader_optimization_type->currentText());
 	info->shader_log_direction = TextToEnum<Kyty::Configuration::ShaderLogDirection>(ui->comboBox_shader_log_direction->currentText());
