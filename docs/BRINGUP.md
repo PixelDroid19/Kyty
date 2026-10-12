@@ -9,6 +9,42 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Depth-only compute HTILE clears (2026-10-12)
+
+- Contract: the proven zero-word `ComputeMetadataFill` HTILE event (see the
+  graphics handoff, "Compute HTILE fill restores coherent geometry") now
+  becomes a Vulkan depth `CLEAR` for a depth-only target too. Whether the
+  target has a stencil plane comes from the guest registers
+  (`ResolveEffectiveStencilFormat`), not from the host format. A combined
+  target still qualifies only as D32S8 with a guest stencil-zero clear in the
+  same first use; other combined formats stay refused.
+- Cause found: the racing title clears its 2048x1024 D16 shadow atlas each
+  frame with this event. It was discarded, so the atlas kept earlier depth and
+  reverse-Z `GEQUAL` rejected the new casters; the cars' shadows smeared over
+  the track. The handoff records the viewport, in-shader bias and hardware
+  depth-bias exclusions.
+- Verified on Intel Arc A770, `Fixed` 1280x720 + RenderTargets, one strict
+  run per title: the watercolour platformer, the gothic action platformer, the
+  ninja platformer, the isometric roguelike, the pixel exploration title, the
+  artillery title, the roguelite action platformer, the robot platformer and
+  the Unity fishing title keep status 1; the racing title keeps status 1 on
+  Intel and on AMD Raphael (RADV). Race captures show correct car shadows. The
+  graphics diagnostics integration (17) and the graphics-state unit tests pass.
+- Not attributed: the racing title's drive window measured 29.0 fps on Intel
+  and 20.0 fps on AMD, against 83-89 and 40.4 fps in earlier sessions. Menu
+  windows, which this change does not touch, were also slower (352 against
+  426 fps), a user GPU workload was running, and the window fell at another
+  point of the race (`draws/f` 575 against 132). No same-session baseline was
+  run, so the cause of the difference is open.
+- Open defect found while excluding the viewport: `ResolveViewportDepth`
+  (`GraphicsState.cpp`, the overload taking ZMIN/ZMAX) clamps the endpoints of
+  the Vulkan depth range. That remaps depth linearly instead of clamping it:
+  with range [0, 1] and ZMIN 0.5, depth 0.75 becomes 0.875 instead of 0.75.
+  It is exact only when ZMIN/ZMAX contain the range, which holds for every
+  target traced so far. Direction: keep the viewport range unclamped and
+  apply ZMIN/ZMAX as a depth clamp range (depth clamp with a custom range
+  where the device supports it; otherwise refuse narrower ranges).
+
 ## Render-target demotion under the RenderTargets scope (2026-10-12)
 
 - Contract: scaling a color target is speculative. The first use that needs

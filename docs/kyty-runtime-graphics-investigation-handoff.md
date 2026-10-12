@@ -5540,6 +5540,45 @@ two jobs under the bounded zero-swap profile, and the existing short integration
 contract passes. Those final guard-only changes have not yet repeated the
 private strict route, so do not present them as a new runtime acceptance result.
 
+## Depth-only compute HTILE fill and stale shadow depth (2026-10-12)
+
+Symptom: in the racing title's race window the vehicle shadows were smeared
+across the track and the barrier, with shapes that trailed earlier caster
+positions instead of following the cars. The shadow atlas is a 2048x1024 D16
+target with HTILE, two 1024-wide cascades, reverse-Z `GEQUAL` casters and a
+zero depth clear value.
+
+Excluded first, one bounded strict run each:
+
+- Viewport depth transform of the atlas: `zscale` 1, `zoffset` 0, ZMIN/ZMAX
+  [0, 1] and DX clip space, so the Vulkan depth range is exactly [0, 1].
+- The engine's in-shader caster bias: the SPIR-V of the caster applies the
+  same normal and depth bias as the guest ISA, about 56 D16 units.
+- The hardware depth bias: constant -4 and slope -40/16 are translated
+  consistently by `ResolveDepthBias`.
+
+Cause: a temporary log at depth-target setup (removed) recorded both atlas
+incarnations with `htile=1`, the register depth clear disabled, and a pending
+`ComputeMetadataFill` event with a uniform zero pattern before the first bind
+of each frame. None was ever consumed. The consumer accepted that event only
+for a combined D32S8 target and discarded it otherwise, so the D16 atlas kept
+the previous frames' depth and `GEQUAL` rejected the new casters.
+
+Fix: a zero HTILE word marks the tile cleared in both the depth-only and the
+stencil-tiled layouts; the stencil-clear requirement only protects the stencil
+plane of a combined image. Whether a target has a stencil plane is now taken
+from the guest target (`ResolveEffectiveStencilFormat`), and a depth-only
+target translates the same proven event to `CLEAR`. The zero pattern, the
+bit-exact positive zero clear value, the storage identity, coverage and
+generation checks are unchanged, and combined targets other than D32S8 stay
+refused.
+
+Verification on Intel Arc A770, `Fixed` 1280x720 + RenderTargets: a strict
+run with a temporary consumption log (removed) consumed the atlas event every
+frame, and the race captures show a crisp shadow under each car instead of the
+stale smear on the track and barrier. The previously consumed D32S8 events
+are still consumed.
+
 ## Remaining producer-side color/material corruption
 
 The post-depth temporal sequence changes the diagnosis. Geometry no longer
