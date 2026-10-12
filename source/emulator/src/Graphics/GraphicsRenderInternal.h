@@ -30,6 +30,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DepthStencilCopy.h"
 #include "Emulator/Graphics/GdsRange.h"
+#include "Emulator/Graphics/GpuDeferredDeletionQueue.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/GraphicsRender.h"
@@ -339,7 +340,9 @@ public:
 	VulkanDescriptorSet* Allocate(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                 Free(VulkanDescriptorSet* set);
 
-	VulkanDescriptorSet* GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
+	// The set is recorded as used by `buffer`'s submission; an untracked use
+	// keeps the set until a resource it references is deleted.
+	VulkanDescriptorSet* GetDescriptor(CommandBuffer* buffer, Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
 	                                   const int* textures2d_sampled_view, VulkanImage** textures2d_sampled_depth,
 	                                   const int* textures2d_sampled_depth_view, VulkanImage** textures2d_array_sampled,
 	                                   const int* textures2d_array_sampled_view, VulkanImage** textures3d_sampled,
@@ -394,6 +397,9 @@ private:
 		uint64_t             gds_buffers_id[GDS_BUFFER_MAX]                = {};
 		bool                 vsharp_uniform_buffer                         = false;
 		VulkanBufferDescriptorKey vsharp_uniform_buffer_key                = {};
+		GpuSubmissionHighWater uses;
+		bool                   untracked_use = false;
+		uint64_t               last_use      = 0;
 	};
 
 	struct Pool
@@ -409,9 +415,17 @@ private:
 	static uint32_t CalcHash(const Set& s);
 	static void     CollectResourceIds(const Set& s, std::vector<uint64_t>* ids);
 
-	VulkanDescriptorSet* FindSet(const Set& s);
+	// Live sets are bounded: past the limit, the least recently used tracked
+	// sets leave the cache and are freed once their submissions complete.
+	static constexpr uint32_t LIVE_SETS_MAX = 65536;
+	static constexpr uint32_t TRIM_SETS     = 8192;
+
+	int                  FindSet(const Set& s);
 	void                 IndexSet(int index);
+	VulkanDescriptorSet* UnindexSet(int index);
 	void                 ReleaseSet(int index);
+	void                 RecordSetUse(int index, CommandBuffer* buffer);
+	void                 TrimSets();
 	template <typename References>
 	void FreeSetsReferencing(uint64_t unique_id, References references);
 
@@ -420,6 +434,8 @@ private:
 	Vector<Set>  m_sets;
 	int          m_first_free_set  = -1;
 	int          m_first_free_pool = -1;
+	uint32_t     m_live_sets       = 0;
+	uint64_t     m_use_clock       = 0;
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
 	// Live set indices by the unique id of each image or buffer they reference.

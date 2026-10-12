@@ -4904,7 +4904,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (need_descriptor)
 		{
 			auto* descriptor_set = g_render_ctx->GetDescriptorCache()->GetDescriptor(
-			    stage, storage_buffers, textures2d_sampled, textures2d_sampled_view, textures2d_sampled_depth,
+			    buffer, stage, storage_buffers, textures2d_sampled, textures2d_sampled_view, textures2d_sampled_depth,
 			    textures2d_sampled_depth_view, textures2d_array_sampled,
 			    textures2d_array_sampled_view, textures3d_sampled, textures3d_sampled_view, textures2d_sampled_uint,
 			    textures2d_sampled_uint_view, textures2d_array_sampled_uint, textures2d_array_sampled_uint_view,

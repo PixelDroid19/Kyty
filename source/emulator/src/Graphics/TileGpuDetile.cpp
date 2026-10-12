@@ -1013,7 +1013,7 @@ TileGpuDetileStatus TileGpuDetileDepthD16Inline(GraphicContext* ctx, CommandBuff
 	uint64_t      no_samplers[DescriptorCache::SAMPLERS_MAX]                = {};
 	VulkanBuffer* no_gds[DescriptorCache::GDS_BUFFER_MAX]                   = {};
 	auto* descriptor = g_render_ctx->GetDescriptorCache()->GetDescriptor(
-	    DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
+	    command_buffer, DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
 	    no_images, no_views, no_images, no_views, no_images, no_views, no_images, no_views, no_storage_images, no_storage_views,
 	    no_samplers, no_gds, nullptr, bind);
 	if (descriptor == nullptr || descriptor->set == VK_NULL_HANDLE)
@@ -1125,7 +1125,7 @@ bool StorageTextureCopyRawRenderAlias(GraphicContext* ctx, CommandBuffer* comman
 	uint64_t      no_samplers[DescriptorCache::SAMPLERS_MAX]                = {};
 	VulkanBuffer* no_gds[DescriptorCache::GDS_BUFFER_MAX]                   = {};
 	auto* descriptor = g_render_ctx->GetDescriptorCache()->GetDescriptor(
-	    DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
+	    command_buffer, DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
 	    no_images, no_views, no_images, no_views, no_images, no_views, no_images, no_views, no_storage_images, no_storage_views,
 	    no_samplers, no_gds, nullptr, bind);
 	if (descriptor == nullptr || descriptor->set == VK_NULL_HANDLE)
@@ -1313,7 +1313,7 @@ bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer*
 	uint64_t      no_samplers[DescriptorCache::SAMPLERS_MAX]                = {};
 	VulkanBuffer* no_gds[DescriptorCache::GDS_BUFFER_MAX]                   = {};
 	auto* descriptor = g_render_ctx->GetDescriptorCache()->GetDescriptor(
-	    DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
+	    command_buffer, DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
 	    no_images, no_views, no_images, no_views, no_images, no_views, no_images, no_views, no_storage_images, no_storage_views,
 	    no_samplers, no_gds, nullptr, bind);
 	if (descriptor == nullptr || descriptor->set == VK_NULL_HANDLE)

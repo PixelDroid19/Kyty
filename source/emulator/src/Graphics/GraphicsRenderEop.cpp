@@ -201,7 +201,7 @@ static GraphicsGdsTransferResult GdsPublishToGuest(CommandBuffer* buffer, uint64
 		EXIT("GDS publication staging map failed\n");
 	}
 	// Ownership passes to the deferred release before any command can reference the record.
-	GpuMemoryDeferUntilSubmissionComplete(recording, [record]() { GdsReleasePublication(record); });
+	GpuMemoryDeferUntilSubmissionsComplete({recording}, [record]() { GdsReleasePublication(record); });
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 

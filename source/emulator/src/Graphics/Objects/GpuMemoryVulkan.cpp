@@ -557,11 +557,12 @@ GpuMemoryGdsSource GpuMemory::AcquireGdsSource(GraphicContext* ctx, CommandBuffe
 	return source;
 }
 
-void GpuMemory::DeferUntilSubmissionComplete(SubmissionId submission, std::function<void()> task)
+void GpuMemory::DeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task)
 {
-	if (m_deferred_deletions.Enqueue({submission}, std::move(task)) != GpuDeferredDeletionResult::Success)
+	const size_t count = submissions.size();
+	if (count == 0 || m_deferred_deletions.Enqueue(std::move(submissions), std::move(task)) != GpuDeferredDeletionResult::Success)
 	{
-		EXIT("deferred GDS release rejected: queue=%u sequence=%" PRIu64 "\n", submission.queue.Value(), submission.sequence);
+		EXIT("deferred release rejected: submissions=%zu\n", count);
 	}
 }
 
@@ -571,10 +572,10 @@ GpuMemoryGdsSource GpuMemoryAcquireGdsSource(GraphicContext* ctx, CommandBuffer*
 	return g_gpu_memory->AcquireGdsSource(ctx, buffer, vaddr, size);
 }
 
-void GpuMemoryDeferUntilSubmissionComplete(SubmissionId submission, std::function<void()> task)
+void GpuMemoryDeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
-	g_gpu_memory->DeferUntilSubmissionComplete(submission, std::move(task));
+	g_gpu_memory->DeferUntilSubmissionsComplete(std::move(submissions), std::move(task));
 }
 
 } // namespace Kyty::Libs::Graphics

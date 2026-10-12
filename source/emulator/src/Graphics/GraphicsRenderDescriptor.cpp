@@ -262,9 +262,11 @@ void DescriptorCache::CreatePool()
 
 	Pool pool {};
 
-	vkCreateDescriptorPool(gctx->device, &pool_info, nullptr, &pool.pool);
-
-	if (pool.pool == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pool.pool == nullptr condition ignored (continuing)\n"); }
+	if (const VkResult result = vkCreateDescriptorPool(gctx->device, &pool_info, nullptr, &pool.pool); result != VK_SUCCESS)
+	{
+		EXIT("vkCreateDescriptorPool failed: result=%d pools=%u live_sets=%u\n", static_cast<int>(result), static_cast<unsigned>(m_pools.Size()),
+		     m_live_sets);
+	}
 
 	pool.free           = true;
 	pool.next_free_pool = m_first_free_pool;
@@ -437,7 +439,7 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
+int DescriptorCache::FindSet(const Set& s)
 {
 	const auto* list = m_sets_map.Find(s.hash);
 	if (list != nullptr)
@@ -590,16 +592,16 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 				}
 				if (match)
 				{
-					return set.set;
+					return index;
 				}
 			}
 		}
 	}
-	return nullptr;
+	return -1;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
+VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
                                                     const int* textures2d_sampled_view, VulkanImage** textures2d_sampled_depth,
                                                     const int* textures2d_sampled_depth_view, VulkanImage** textures2d_array_sampled,
                                                     const int* textures2d_array_sampled_view, VulkanImage** textures3d_sampled,
@@ -613,6 +615,8 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
                                                     VulkanBuffer* vsharp_buffer, const ShaderBindResources& bind)
 {
 	KYTY_PROFILER_BLOCK("DescriptorCache::GetDescriptor::search");
+
+	TrimSets();
 
 	int        storage_buffers_num    = bind.storage_buffers.buffers_num;
 	const int  sampled_total = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_sampled_depth_num +
@@ -754,9 +758,10 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	}
 	nset.hash = CalcHash(nset);
 
-	if (auto* f = FindSet(nset); f != nullptr)
+	if (const int found = FindSet(nset); found != -1)
 	{
-		return f;
+		RecordSetUse(found, buffer);
+		return m_sets[found].set;
 	}
 
 	KYTY_PROFILER_END_BLOCK;
@@ -1120,6 +1125,8 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 		ids.Add(index);
 	}
 	IndexSet(index);
+	m_live_sets++;
+	RecordSetUse(index, buffer);
 
 	return new_set;
 }
@@ -1159,7 +1166,7 @@ void DescriptorCache::IndexSet(int index)
 	}
 }
 
-void DescriptorCache::ReleaseSet(int index)
+VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 {
 	auto& set = m_sets[index];
 	EXIT_IF(set.set == nullptr);
@@ -1176,7 +1183,7 @@ void DescriptorCache::ReleaseSet(int index)
 			m_sets_by_resource.erase(it);
 		}
 	}
-	Free(set.set);
+	auto* released    = set.set;
 	set.set           = nullptr;
 	set.next_free_set = m_first_free_set;
 	m_first_free_set  = index;
@@ -1185,6 +1192,69 @@ void DescriptorCache::ReleaseSet(int index)
 	if (hash_ids.IsEmpty())
 	{
 		m_sets_map.Remove(set.hash);
+	}
+	EXIT_IF(m_live_sets == 0);
+	m_live_sets--;
+	return released;
+}
+
+void DescriptorCache::ReleaseSet(int index)
+{
+	Free(UnindexSet(index));
+}
+
+void DescriptorCache::RecordSetUse(int index, CommandBuffer* buffer)
+{
+	auto& set    = m_sets[index];
+	set.last_use = ++m_use_clock;
+	SubmissionId submission {};
+	if (buffer == nullptr || !buffer->GetSubmissionId(&submission) || set.uses.RecordUse(submission) != GpuDeferredDeletionResult::Success)
+	{
+		set.untracked_use = true;
+	}
+}
+
+// Sets are otherwise released only with a resource they reference, so long-lived
+// resources bound in many combinations grow the cache until pool allocation fails.
+// At the live limit the least recently used tracked sets are unindexed at once and
+// freed after every submission that recorded them completes.
+void DescriptorCache::TrimSets()
+{
+	struct Retired
+	{
+		std::vector<SubmissionId> submissions;
+		VulkanDescriptorSet*      set;
+	};
+	std::vector<Retired> retired;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (m_live_sets < LIVE_SETS_MAX)
+		{
+			return;
+		}
+		std::vector<std::pair<uint64_t, int>> candidates;
+		for (int index = 0; index < static_cast<int>(m_sets.Size()); index++)
+		{
+			const auto& set = m_sets.At(index);
+			if (set.set != nullptr && !set.untracked_use && !set.uses.Dependencies().empty())
+			{
+				candidates.emplace_back(set.last_use, index);
+			}
+		}
+		const size_t count = std::min<size_t>(candidates.size(), TRIM_SETS);
+		std::partial_sort(candidates.begin(), candidates.begin() + static_cast<ptrdiff_t>(count), candidates.end());
+		for (size_t i = 0; i < count; i++)
+		{
+			const int index = candidates[i].second;
+			retired.push_back({m_sets.At(index).uses.Dependencies(), UnindexSet(index)});
+		}
+	}
+	// The deletion queue may run a ready task synchronously, and resource deletion
+	// enters this cache under the GPU memory lock: enqueue without holding m_mutex.
+	for (auto& entry: retired)
+	{
+		auto* set = entry.set;
+		GpuMemoryDeferUntilSubmissionsComplete(std::move(entry.submissions), [this, set]() { Free(set); });
 	}
 }
 
@@ -1281,6 +1351,7 @@ void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
 	m_pools.Clear();
 	m_first_free_set  = -1;
 	m_first_free_pool = -1;
+	m_live_sets       = 0;
 }
 
 VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind)

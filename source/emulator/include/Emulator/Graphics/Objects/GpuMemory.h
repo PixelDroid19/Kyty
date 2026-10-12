@@ -1136,9 +1136,9 @@ struct GpuMemoryGdsSource
 	GpuMemoryObjectType writer = GpuMemoryObjectType::Invalid;
 };
 [[nodiscard]] GpuMemoryGdsSource GpuMemoryAcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
-// Runs `task` when `submission` is published, after its labels have fired. A
-// discarded recording's task runs once a later submission on its queue completes.
-void GpuMemoryDeferUntilSubmissionComplete(SubmissionId submission, std::function<void()> task);
+// Runs `task` when every submission is published, after its labels have fired.
+// A discarded recording's task runs once a later submission on its queue completes.
+void GpuMemoryDeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task);
 // Exception handling accepts only a page fault caused by an armed tracker
 // protection. Known host/HLE writers use the explicit range notification.
 bool GpuMemoryCheckAccessViolation(uint64_t vaddr, Core::VirtualMemory::ExceptionHandler::AccessViolationType access);
