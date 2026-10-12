@@ -43,8 +43,10 @@ fail on the current HEAD before acting on them.
   - The mechanical-fist platformer stops at an unresolved graphics import. The
     same stop appears on runs of earlier binaries, alternating with its known
     stops.
-  - The racing title races at 86.9 fps, the Unity fishing title runs at
-    8.6-11.0 fps, and the beat 'em up at 9.4-10.3 fps. All are within the
+  - The racing title races at 86.9 fps in a different scene (147 draws per
+    frame, against 123 in the earlier baseline). It is a single unpaired
+    run, so it is not a speed comparison. The Unity fishing title runs at
+    8.6-11.0 fps, and the beat 'em up at 9.4-10.3 fps. Both are within their
     earlier ranges.
   On AMD:
   - The racing title races at 39.1 fps.
@@ -224,6 +226,21 @@ previous section; the count of live ranges stays open.
   A window design has to invalidate on every discard, or zero pages in place
   inside pinned windows, and it needs its own lifetime rules for tables and
   publications.
+- Discard census for the beat 'em up (2026-10-12): a temporary counter on
+  the four `DiscardSharedBackingRange` sites (allocation, release with no
+  view, and the two unmap paths), one strict 260 s run on the combat route.
+  The guest's allocation pattern does not depend on the host GPU; this run
+  was on the Intel host.
+  - Loading (first 157 s): 28,220 allocation discards, 12,081 MB in total.
+    The release and unmap sites together fired 14 times (77 MB).
+  - Combat windows perf-7..9 (83 s): 91 allocation discards (36 MB), about
+    one per second. The release and unmap sites did not fire.
+  - So in combat the direct-memory layout is stable. Windows over several
+    ranges that are dropped whenever a discard overlaps them would be
+    rebuilt about once per second, not every frame. The hazard is an
+    invalidation hook, not a blocker. Loading churns and would rebuild
+    windows constantly, so windows must be cheap to drop there. Not
+    implemented yet.
 - Open defect: on the AMD host the Unity fishing title raises a GPU
   page-permission fault at gameplay load, about 88 s in. The fault is in the
   shader caches (SQC/TCP), at a different address each run, and the device is
