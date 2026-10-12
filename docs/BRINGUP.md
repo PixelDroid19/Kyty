@@ -65,7 +65,21 @@ fail on the current HEAD before acting on them.
   Intel Vulkan driver creating a compute pipeline from
   `GraphicsRenderDispatchDirect`, measured with the perf-event stack sampler.
   The process stays alive, which is why the frontier sweep counts it as
-  reaching the time limit. Open; the program has not been identified yet.
+  reaching the time limit.
+  - A bounded capture of each compute pipeline creation names the cause. It is
+    not a hang. Two paired wave64 programs (16x16 groups) translate to block
+    dispatcher modules of 321,491 and 346,836 words: 925 blocks and 353
+    function variables. The Intel driver compiles the first in 32.2 s, and the
+    second does not finish inside the 60 s window.
+  - Smaller modules show the same superlinear cost: 104,131 words take 2.8 s
+    and 126,719 take 3.6 s.
+  - This is the compile-capacity limit recorded under the paired dispatcher
+    entries below. Optimizer passes, native structuring, broadcasts and
+    Workgroup materialization are already excluded there as sufficient fixes,
+    so they were not repeated.
+  - The emitted code re-derives the lane EXEC bit for every VALU write in both
+    banks (about 12 operations per guest operation). That is a size lead, not
+    a proven fix for the interference-graph peak.
 
 ## Physical device-address imports in whole blocks (2026-10-11)
 
