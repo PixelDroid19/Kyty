@@ -9,6 +9,33 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## FSR 1.0 presentation upscaling (2026-10-12)
+
+- `PresentationFilter = Fsr` upscales the final image to the swapchain with
+  AMD FidelityFX Super Resolution 1.0 (EASU, then RCAS). The headers are
+  vendored unmodified under `source/3rdparty/fidelityfx_fsr1` (MIT).
+  `PresentationFsrSharpness` (0 to 100, default 90) sets the RCAS strength.
+  `docs/render-resolution.md` describes the pipeline and its limits.
+- The passes run only when the final image fits inside the swapchain and is
+  smaller on at least one axis. Otherwise the linear blit runs.
+- Verified on Intel with a 1920x1080 window, `Fixed` 1280x720, and a bounded
+  dump of the stage images in a temporary diagnostic that has been removed.
+  The beat 'em up was upscaled from 1280x720 to 1920x1080, sharper than
+  bilinear. Its mean channels matched a bilinear upscale within 0.004, so
+  there is no transfer-function shift. At 1:1 the racing title differed from
+  its re-encoded source by an MAE of 0.0044, which is the RCAS sharpening
+  alone. That run also measured 46.2 fps in its gameplay window, which led to
+  skipping equal extents.
+- Not a performance fix on its own. `Fixed` scales only the display attachment
+  cohort. On AMD the beat 'em up stayed flat: 7.1, 4.1 and 3.6 fps under
+  `Fixed` against 6.9, 4.1 and 3.8 at `Native`, GPU about 80% busy. Its
+  3840x2160 offscreen passes keep their guest size. That title opens VideoOut
+  and sets 3840x2160 buffer attributes without querying the resolution or
+  output status, so the reported display mode cannot lower it.
+- Temporal upscalers (FSR 2+, FSR 4, XeSS) and frame generation are not
+  offered. They need motion vectors, depth and jitter from the renderer, and
+  the current FidelityFX SDK does not support Vulkan.
+
 ## Indexed physical mapping lookup (2026-10-12)
 
 - In beat 'em up combat on the AMD host, `PhysicalMemory::Find(vaddr)` took

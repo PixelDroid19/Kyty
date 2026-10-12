@@ -56,7 +56,8 @@ enum class RenderResolutionMode
 enum class PresentationFilter
 {
 	Linear,
-	Nearest
+	Nearest,
+	Fsr
 };
 
 void Load(const ConfigSource& cfg);
@@ -78,6 +79,7 @@ RenderResolutionMode GetRenderResolutionMode();
 uint32_t GetRenderResolutionWidth();
 uint32_t GetRenderResolutionHeight();
 PresentationFilter GetPresentationFilter();
+uint32_t GetPresentationFsrSharpness();
 bool     IsNeo();
 bool     IsNextGen();
 bool     VulkanValidationEnabled();

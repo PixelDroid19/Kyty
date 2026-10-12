@@ -42,6 +42,7 @@
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Tile.h"
+#include "Emulator/Graphics/PresentationFsr.h"
 #include "Emulator/Graphics/PresentationScaler.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
@@ -3557,6 +3558,21 @@ TEST(EmulatorGraphicsState, PresentationEncodesLinearLightBeforeAUnormSwapchain)
 	EXPECT_EQ(PresentationSrgbTwin(VK_FORMAT_B8G8R8A8_UNORM), VK_FORMAT_B8G8R8A8_SRGB);
 	EXPECT_EQ(PresentationSrgbTwin(VK_FORMAT_R8G8B8A8_UNORM), VK_FORMAT_R8G8B8A8_SRGB);
 	EXPECT_EQ(PresentationSrgbTwin(VK_FORMAT_A2B10G10R10_UNORM_PACK32), VK_FORMAT_UNDEFINED);
+}
+
+TEST(EmulatorGraphicsState, RunsFsrOnlyForPresentationUpscales)
+{
+	EXPECT_TRUE(PresentationFsrApplies({1280, 720}, {1920, 1080}));
+	EXPECT_TRUE(PresentationFsrApplies({1920, 800}, {1920, 1080}));
+	// Equal extents gain nothing from an upscaler, and a larger source on either axis is a downscale.
+	EXPECT_FALSE(PresentationFsrApplies({1920, 1080}, {1920, 1080}));
+	EXPECT_FALSE(PresentationFsrApplies({3840, 2160}, {1920, 1080}));
+	EXPECT_FALSE(PresentationFsrApplies({2560, 720}, {1920, 1080}));
+	EXPECT_FALSE(PresentationFsrApplies({0, 720}, {1920, 1080}));
+	// Sharpness percent maps to RCAS stops: 100 is the sharpest (0 stops), 0 the softest (2 stops).
+	EXPECT_FLOAT_EQ(PresentationFsrSharpnessStops(100), 0.0f);
+	EXPECT_FLOAT_EQ(PresentationFsrSharpnessStops(50), 1.0f);
+	EXPECT_FLOAT_EQ(PresentationFsrSharpnessStops(0), 2.0f);
 }
 
 TEST(EmulatorGraphicsState, KeepsColorExportsLogicalForPhysicalAttachmentOrder)

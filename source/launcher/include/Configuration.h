@@ -114,7 +114,8 @@ public:
 	enum class PresentationFilter
 	{
 		Linear,
-		Nearest
+		Nearest,
+		Fsr
 	};
 	Q_ENUM(PresentationFilter)
 

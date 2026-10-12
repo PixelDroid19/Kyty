@@ -830,11 +830,21 @@ void AppendRenderResolutionPerformanceJson(const Libs::Graphics::RenderResolutio
 		}
 		return "unknown";
 	};
+	const auto presentation_filter_name = [](Config::PresentationFilter filter)
+	{
+		switch (filter)
+		{
+			case Config::PresentationFilter::Linear: return "linear";
+			case Config::PresentationFilter::Nearest: return "nearest";
+			case Config::PresentationFilter::Fsr: return "fsr";
+		}
+		return "unknown";
+	};
 	const auto& decision = resolution.candidate_decision;
 	*out += "\"render_resolution\":{\"mode\":\"";
 	*out += Config::IsInitialized() && Config::GetRenderResolutionMode() == Config::RenderResolutionMode::Native ? "native" : "fixed";
 	*out += "\",\"presentation_filter\":\"";
-	*out += Config::IsInitialized() && Config::GetPresentationFilter() == Config::PresentationFilter::Nearest ? "nearest" : "linear";
+	*out += Config::IsInitialized() ? presentation_filter_name(Config::GetPresentationFilter()) : "linear";
 	*out += "\",\"target\":{\"width\":" + std::to_string(resolution.target_extent.width);
 	*out += ",\"height\":" + std::to_string(resolution.target_extent.height);
 	*out += "},\"guest_display\":{\"registered\":";
