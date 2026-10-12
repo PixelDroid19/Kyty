@@ -293,6 +293,8 @@ private:
 	// live view at or below it. Titles keep thousands of views; per-address
 	// queries search an index ordered by guest address instead of the list.
 	[[nodiscard]] const MappedBlock* FindLiveViewUnlocked(uint64_t vaddr);
+	// m_protections stays ordered by address and its blocks never overlap.
+	[[nodiscard]] const MemoryProtectionBlock* FindProtectionUnlocked(uint64_t vaddr) const;
 	// Backing offset of a live view of [vaddr, vaddr + size) whose physical
 	// range is neither released nor pending release.
 	[[nodiscard]] bool FindAliasablePhysicalUnlocked(uint64_t vaddr, uint64_t size, uint64_t* phys_addr);
@@ -1526,7 +1528,9 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	b.gpu_cleanup_mode = gpu_mode;
 	b.gpu_registration_pending = gpu_mode != KernelGpuMappingAccessMode::NoAccess;
 	AddMappedUnlocked(b);
-	m_protections.push_back({map_vaddr, map_size, prot, mode});
+	const auto protection = std::upper_bound(m_protections.begin(), m_protections.end(), map_vaddr,
+	                                         [](uint64_t address, const MemoryProtectionBlock& block) { return address < block.address; });
+	m_protections.insert(protection, {map_vaddr, map_size, prot, mode});
 
 	return map_vaddr;
 }
@@ -1974,6 +1978,18 @@ const PhysicalMemory::MappedBlock* PhysicalMemory::FindLiveViewUnlocked(uint64_t
 	return nullptr;
 }
 
+const MemoryProtectionBlock* PhysicalMemory::FindProtectionUnlocked(uint64_t vaddr) const
+{
+	auto next = std::upper_bound(m_protections.begin(), m_protections.end(), vaddr,
+	                             [](uint64_t address, const MemoryProtectionBlock& block) { return address < block.address; });
+	if (next == m_protections.begin())
+	{
+		return nullptr;
+	}
+	--next;
+	return vaddr - next->address < next->size ? &*next : nullptr;
+}
+
 bool PhysicalMemory::Find(uint64_t phys_addr, bool next, AllocatedBlock* out)
 {
 	EXIT_IF(out == nullptr);
@@ -2010,53 +2026,58 @@ bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 {
 	Core::LockGuard lock(m_mutex);
 
-	return std::any_of(m_mapped.begin(), m_mapped.end(),
-	                   [this, vaddr, base_addr, len, prot, mode, gpu_mode, phys_addr, memory_type](auto& b)
-	                   {
-		                   if (vaddr >= b.map_vaddr && vaddr - b.map_vaddr < b.map_size)
-		                   {
-			                   const auto protection =
-			                       std::find_if(m_protections.begin(), m_protections.end(), [vaddr](const MemoryProtectionBlock& block)
-			                                    { return vaddr >= block.address && vaddr - block.address < block.size; });
-			                   const bool has_protection = protection != m_protections.end();
-			                   // A region never extends past its mapping, whatever protection block covers it.
-			                   const uint64_t region_begin = has_protection ? std::max(protection->address, b.map_vaddr) : b.map_vaddr;
-			                   const uint64_t region_end   = has_protection
-			                                                     ? std::min(protection->address + protection->size, b.map_vaddr + b.map_size)
-			                                                     : b.map_vaddr + b.map_size;
-			                   if (base_addr != nullptr)
-			                   {
-				                   *base_addr = region_begin;
-			                   }
-			                   if (len != nullptr)
-			                   {
-				                   *len = region_end - region_begin;
-			                   }
-			                   if (prot != nullptr)
-			                   {
-				                   *prot = has_protection ? protection->prot : b.prot;
-			                   }
-			                   if (mode != nullptr)
-			                   {
-				                   *mode = has_protection ? protection->mode : b.mode;
-			                   }
-			                   if (gpu_mode != nullptr)
-			                   {
-				                   *gpu_mode = b.gpu_cleanup_mode;
-			                   }
-			                   if (phys_addr != nullptr)
-			                   {
-				                   *phys_addr = b.phys_addr + (region_begin - b.map_vaddr);
-			                   }
-			                   if (memory_type != nullptr)
-			                   {
-				                   *memory_type = b.memory_type;
-			                   }
+	// Views are disjoint: each one holds its host pages until CompleteUnmap
+	// removes it, so the view that starts last at or below vaddr is the only
+	// candidate. Pending views stay visible here.
+	const auto next_view = std::upper_bound(m_mapped_order.begin(), m_mapped_order.end(), vaddr,
+	                                        [this](uint64_t address, uint32_t index) { return address < m_mapped[index].map_vaddr; });
+	if (next_view == m_mapped_order.begin())
+	{
+		return false;
+	}
+	const MappedBlock& b = m_mapped[*std::prev(next_view)];
+	if (vaddr - b.map_vaddr >= b.map_size)
+	{
+		return false;
+	}
 
-			                   return true;
-		                   }
-		                   return false;
-	                   });
+	const MemoryProtectionBlock* protection = FindProtectionUnlocked(vaddr);
+	const bool                   has_protection = protection != nullptr;
+	// A region never extends past its mapping, whatever protection block covers it.
+	const uint64_t region_begin = has_protection ? std::max(protection->address, b.map_vaddr) : b.map_vaddr;
+	const uint64_t region_end   = has_protection
+	                                  ? std::min(protection->address + protection->size, b.map_vaddr + b.map_size)
+	                                  : b.map_vaddr + b.map_size;
+	if (base_addr != nullptr)
+	{
+		*base_addr = region_begin;
+	}
+	if (len != nullptr)
+	{
+		*len = region_end - region_begin;
+	}
+	if (prot != nullptr)
+	{
+		*prot = has_protection ? protection->prot : b.prot;
+	}
+	if (mode != nullptr)
+	{
+		*mode = has_protection ? protection->mode : b.mode;
+	}
+	if (gpu_mode != nullptr)
+	{
+		*gpu_mode = b.gpu_cleanup_mode;
+	}
+	if (phys_addr != nullptr)
+	{
+		*phys_addr = b.phys_addr + (region_begin - b.map_vaddr);
+	}
+	if (memory_type != nullptr)
+	{
+		*memory_type = b.memory_type;
+	}
+
+	return true;
 }
 
 bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mode mode, KernelGpuMappingAccessMode gpu_mode)

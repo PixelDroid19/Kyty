@@ -9,6 +9,56 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Indexed physical mapping lookup (2026-10-12)
+
+- In beat 'em up combat on the AMD host, `PhysicalMemory::Find(vaddr)` took
+  27% of the command-processor thread. It is reached through
+  `KernelQueryMappedRange` and `KernelQueryMemoryProtection` from the
+  GPU-memory hash and descriptor paths. Each call scanned all views (about
+  26,700) and then all protection blocks (about 26,700).
+- Views do not overlap: each holds its host pages until `CompleteUnmap`
+  removes it. The lookup now takes the last view that starts at or below the
+  address from the existing address index, including views pending unmap as
+  before.
+- Protection blocks also do not overlap, and every helper that changes them
+  keeps them in address order. `Map` now inserts its block in order, and the
+  lookup is a binary search.
+- Equivalence: a temporary build computed the old and the new answer on every
+  call. The beat 'em up on AMD (1,048,576 calls into combat), the Unity
+  fishing title on Intel (720,896 calls) and the racing title on Intel showed
+  zero mismatches.
+- Measured against the previous build (`a45f6a70`) on the same routes:
+
+  | Host | Title, window | Before | After |
+  | --- | --- | --- | --- |
+  | Intel | beat 'em up, combat perf-7/8/9 | 12.2 / 10.2 / 9.6 fps | 14.2 / 12.7 / 11.6 fps |
+  | Intel | Unity fishing title, perf-4..7 | 6.9 / 10.2 / 10.1 / 9.6 fps | 10.4 / 10.5 / 9.5 / 8.3 fps |
+  | AMD | beat 'em up, combat perf-7/8/9 | 6.6 / 3.9 / 3.8 fps | 6.9 / 4.1 / 3.8 fps |
+
+  - The Intel beat 'em up p50 fell from 80-103 ms to 72-87 ms at the same
+    draw counts.
+  - The Unity fishing title keeps only about 620 views, so its result is
+    within run-to-run variance.
+  - On AMD the command-processor thread fell from 30% to 25% CPU, while the
+    GPU's gfx engine rose from 77% to 83% busy. That scene is GPU-bound, so its
+    frame rate did not move.
+  - The racing-title pair landed on different scenes (142 and 360 draws per
+    frame) and is not used.
+- Intel frontier sweep with this change: the atmospheric platformer, the
+  gothic action platformer, the ninja platformer, the roguelike dungeon
+  crawler, the pixel exploration title, the artillery title, the robot
+  platformer and the 2D title that dereferences guest pointers all reach their
+  time limits as before.
+- Open, not caused by this change: the mechanical-fist platformer often ends
+  with a host access violation in `PthreadStaticObjects::CreateObject`
+  (`Kernel/PthreadObjects.cpp:21`, reached from `PthreadMutexLock` and
+  `PthreadMutexUnlock`). The guest passes the mutex address `0x58`, a member of
+  a null object, and the static-initializer check reads it. Previous build:
+  2 of 2 runs. This build: 2 of 3 runs; the third stopped at the known Gen5
+  volume-layout refusal. This is likely the open object-lifetime race recorded
+  for that title. Direction: find which guest object is null when the lock is
+  taken, starting with the thread that took it.
+
 ## Shared physical device-address windows (2026-10-12)
 
 - On the AMD host the beat 'em up never left its loading screen within its
