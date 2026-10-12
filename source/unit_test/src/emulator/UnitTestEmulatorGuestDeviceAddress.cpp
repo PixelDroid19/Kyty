@@ -88,7 +88,13 @@ struct Device
 			queue_info.queueFamilyIndex = family;
 			queue_info.queueCount = 1;
 			queue_info.pQueuePriorities = &priority;
-			const char* extension = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
+			// Devices that refuse shared host pointers import guest physical
+			// memory as dma-bufs, as the runtime device does.
+			const auto has_extension = [&](const char* name)
+			{ return std::any_of(extensions.begin(), extensions.end(), [name](const auto& e) { return std::strcmp(e.extensionName, name) == 0; }); };
+			const bool dma_buf = has_extension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) && has_extension(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+			const char* enabled_extensions[] = {VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+			                                    VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME};
 			VkDeviceCreateInfo device_info {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 			address.bufferDeviceAddressCaptureReplay = VK_FALSE;
 			address.bufferDeviceAddressMultiDevice = VK_FALSE;
@@ -99,11 +105,12 @@ struct Device
 			device_info.pEnabledFeatures = &enabled;
 			device_info.queueCreateInfoCount = 1;
 			device_info.pQueueCreateInfos = &queue_info;
-			device_info.enabledExtensionCount = 1;
-			device_info.ppEnabledExtensionNames = &extension;
+			device_info.enabledExtensionCount = dma_buf ? 3u : 1u;
+			device_info.ppEnabledExtensionNames = enabled_extensions;
 			if (vkCreateDevice(physical, &device_info, nullptr, &context.device) != VK_SUCCESS) { continue; }
 			context.physical_device = physical;
 			context.guest_device_address_supported = true;
+			context.guest_dma_buf_import_supported = dma_buf;
 			timeline_semaphore_supported = supports_timeline_semaphore;
 			vkGetDeviceQueue(context.device, family, 0, &queue);
 			return true;
@@ -1519,6 +1526,73 @@ int PhysicalImportCoversResidentBlockProbe()
 	return status;
 }
 
+// Direct memory released and allocated again while a device window over its
+// block stays imported for a neighbouring range: the new owner's CPU view
+// starts zeroed, and the device reads what the CPU then writes there.
+int PhysicalWindowReallocationProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
+
+	constexpr uint64_t kBlockBytes = 0x200000;
+	int64_t            physical    = 0;
+	if (Kernel::Memory::KernelAllocateMainDirectMemory(kBlockBytes, kBlockBytes, 12, &physical) != 0) { return 40; }
+	void* head = nullptr;
+	void* tail = nullptr;
+	if (Kernel::Memory::KernelMapDirectMemory(&head, kOwnerBytes, 0x12, 0, physical, kOwnerBytes) != 0 ||
+	    Kernel::Memory::KernelMapDirectMemory(&tail, kOwnerBytes, 0x12, 0, physical + kOwnerBytes, kOwnerBytes) != 0)
+	{
+		return 41;
+	}
+	const auto head_guest = reinterpret_cast<uint64_t>(head);
+	const auto tail_guest = reinterpret_cast<uint64_t>(tail);
+	WriteMarker(head_guest, kMarkerA);
+	WriteMarker(tail_guest, kMarkerB);
+	uint64_t table   = 0;
+	uint32_t entries = 0;
+	int      status  = 0;
+	if (!GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries)) { status = 42; }
+	if (status == 0) { status = load.Expect("head before reuse", table, entries, head_guest, kMarkerA); }
+	if (status == 0) { status = load.Expect("tail before reuse", table, entries, tail_guest, kMarkerB); }
+
+	int64_t again = 0;
+	void*   reuse = nullptr;
+	if (status == 0 && (Kernel::Memory::KernelMunmap(tail_guest, kOwnerBytes) != 0 ||
+	                    Kernel::Memory::KernelCheckedReleaseDirectMemory(physical + kOwnerBytes, kOwnerBytes) != 0))
+	{
+		status = 43;
+	}
+	if (status == 0 && (Kernel::Memory::KernelAllocateDirectMemory(physical + kOwnerBytes, physical + 2 * kOwnerBytes, kOwnerBytes,
+	                                                               kOwnerBytes, 12, &again) != 0 ||
+	                    again != physical + static_cast<int64_t>(kOwnerBytes)))
+	{
+		status = 44;
+	}
+	if (status == 0 && Kernel::Memory::KernelMapDirectMemory(&reuse, kOwnerBytes, 0x12, 0, again, kOwnerBytes) != 0) { status = 45; }
+	const auto reuse_guest = reinterpret_cast<uint64_t>(reuse);
+	if (status == 0)
+	{
+		const auto* words = reinterpret_cast<const uint32_t*>(reuse_guest);
+		status            = std::all_of(words, words + 32, [](uint32_t word) { return word == 0; }) ? 0 : 46;
+	}
+	if (status == 0)
+	{
+		WriteMarker(reuse_guest, kMarkerC);
+		if (!GuestDeviceAddressPrepare(&bridge.device.context, &table, &entries)) { status = 47; }
+	}
+	if (status == 0) { status = load.Expect("reused tail", table, entries, reuse_guest, kMarkerC); }
+	if (status == 0) { status = load.Expect("head after reuse", table, entries, head_guest, kMarkerA); }
+
+	if (reuse != nullptr && Kernel::Memory::KernelMunmap(reuse_guest, kOwnerBytes) != 0 && status == 0) { status = 48; }
+	if (Kernel::Memory::KernelMunmap(head_guest, kOwnerBytes) != 0 && status == 0) { status = 49; }
+	if (status != 0)
+	{
+		std::fprintf(stderr, "status=%d entries=%u again=0x%" PRIx64 "\n", status, entries, static_cast<uint64_t>(again));
+	}
+	return status;
+}
+
 // A partial direct-memory release retires only the released tail and leaves
 // the still-allocated head usable by the GPU and by the guest CPU mapping.
 int PartialPhysicalReleasePreservesHeadProbe()
@@ -1662,6 +1736,7 @@ TEST(EmulatorGuestDeviceAddress, PhysicalAliasIsAvailableDuringOwnerRegistration
 TEST(EmulatorGuestDeviceAddress, PhysicalReleaseRetiresDeviceAddressRange) { RunIsolated(PhysicalReleaseRetiresDeviceAddressRangeProbe); }
 TEST(EmulatorGuestDeviceAddress, PartialPhysicalReleasePreservesHead) { RunIsolated(PartialPhysicalReleasePreservesHeadProbe); }
 TEST(EmulatorGuestDeviceAddress, PhysicalImportCoversResidentBlock) { RunIsolated(PhysicalImportCoversResidentBlockProbe); }
+TEST(EmulatorGuestDeviceAddress, PhysicalWindowReallocationReadsFreshPages) { RunIsolated(PhysicalWindowReallocationProbe); }
 TEST(EmulatorGuestDeviceAddress, AProtectionRefusedForAPendingUnmapKeepsRightsAndImports) { RunIsolated(PendingUnmapProtectionProbe); }
 
 UT_END();

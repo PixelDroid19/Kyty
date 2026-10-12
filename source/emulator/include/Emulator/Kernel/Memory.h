@@ -132,10 +132,20 @@ int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void*
 // guest view's protection. Returns 0 for non-physical or partial ranges.
 [[nodiscard]] uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size, uint64_t alignment = 0);
 bool                 KernelUnmapPhysicalAlias(uint64_t alias);
-// Exports the direct-memory pages behind a physical guest mapping as a dma-buf
-// that the caller owns. False for the ranges KernelMapPhysicalAlias rejects;
-// otherwise *dma_buf is the descriptor, or -1 when the host cannot export it.
-[[nodiscard]] bool   KernelExportPhysicalDmaBuf(uint64_t vaddr, uint64_t size, int* dma_buf);
+// Direct-memory offset behind a physical guest mapping of [vaddr, vaddr + size).
+// False for the ranges KernelMapPhysicalAlias rejects.
+[[nodiscard]] bool   KernelResolvePhysical(uint64_t vaddr, uint64_t size, uint64_t* phys_addr);
+// Device windows over direct memory [phys_addr, phys_addr + size), independent
+// of the allocations inside them. Windows are disjoint; while one is pinned,
+// discarding its pages zeroes them in place so the device keeps the CPU's
+// pages. The alias form returns 0 on refusal and is freed with
+// KernelUnmapPhysicalAlias. The dma-buf form returns false on refusal;
+// otherwise *dma_buf is the descriptor the caller owns, or -1 when the host
+// cannot export it (the window is then not pinned). Each successful pin is
+// ended by KernelUnpinPhysicalWindow with the same interval.
+[[nodiscard]] uint64_t KernelMapPinnedPhysicalWindow(uint64_t phys_addr, uint64_t size, uint64_t alignment);
+[[nodiscard]] bool   KernelExportPinnedPhysicalWindowDmaBuf(uint64_t phys_addr, uint64_t size, int* dma_buf);
+void                 KernelUnpinPhysicalWindow(uint64_t phys_addr, uint64_t size);
 struct KernelPhysicalSpan
 {
 	uint64_t vaddr       = 0;

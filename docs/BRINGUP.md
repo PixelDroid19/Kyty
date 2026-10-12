@@ -9,6 +9,76 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Shared physical device-address windows (2026-10-12)
+
+- On the AMD host the beat 'em up never left its loading screen within its
+  260 s route (2.0-3.5 fps, 3-4 draws per frame). Every submit paid RADV's
+  validation of each imported memory object, and the title keeps about 6,000
+  small direct-memory ranges, each imported on its own.
+- A temporary discard census on that host (not committed) counted 55-70
+  direct-memory allocations per second through the whole run, about 0.6 per
+  submit. Windows that are dropped and rebuilt whenever an allocation reuses
+  their pages would therefore thrash on this host.
+- Change:
+  - Physical ranges read direct memory through shared windows. A window is
+    an aligned power-of-two interval of whole 2 MiB blocks, at most 64 MiB,
+    imported once and used by every range whose pages it holds; windows are
+    disjoint. A range adds table entries, not imports.
+  - Kernel records each window's pinned interval
+    (`KernelMapPinnedPhysicalWindow`, `KernelExportPinnedPhysicalWindowDmaBuf`,
+    `KernelUnpinPhysicalWindow`). Every backing discard (allocation, release
+    and the two unmap paths) now zeroes pinned intervals in place and
+    punches only the rest. A punched page under a dma-buf or host-pointer
+    pin kept serving the device while the CPU faulted in a fresh one.
+  - `KernelExportPhysicalDmaBuf` is removed; graphics resolves the backing
+    offset with `KernelResolvePhysical`.
+- Tests:
+  - New: direct memory released and allocated again under a window that a
+    neighbouring range keeps imported reads zero on the CPU, and the device
+    reads what the CPU then writes. With the in-place zeroing disabled the
+    device read the previous owner's marker on RADV.
+  - The test device now enables dma-buf import where the device offers it,
+    as the runtime device does. Before, every physical device-address test
+    failed on RADV (the device refuses shared host pointers); all 14 pass
+    on both hosts. Full unit suite on Intel: 2,380 pass, 12 skipped. One
+    audio rack test timed out once under the full suite and passed 3 of 3
+    runs alone.
+- Measured on the same routes, `KYTY_RUN_PERF=1`, base binary first or
+  alternated, peak cgroup memory:
+
+  | Host | Title | Window | Base (fps) | Windows (fps) | Peak MB base / windows |
+  | --- | --- | --- | --- | --- | --- |
+  | Radeon 610M, RADV | Beat 'em up | perf-2..5 | 2.7, 9.1, 5.2, 2.2 | 12.1, 11.5, 6.9, 9.3 | 5,026 / 5,152 |
+  | Radeon 610M, RADV | Beat 'em up | perf-7..9 | 2.1, 2.2, 2.0 (loading) | 5.0, 3.8, 3.7 (in game) | |
+  | Radeon 610M, RADV | Racing title race | perf-4 | 42.4 | 40.9 | 1,994 / 2,110 |
+  | Arc A770, xe | Racing title race | perf-4 | 87.3 | 86.8 | 1,999 / 2,206 |
+  | Arc A770, xe | Beat 'em up combat | perf-7..9 | 12.5, 10.8, 9.9 | 12.3, 10.5, 9.6 | 6,331 / 6,294 |
+  | Arc A770, xe | Unity fishing title | perf-4..7 | 8.5, 10.6, 10.2, 9.5 / 8.1, 9.0, 9.6, 8.7 | 6.7, 8.4, 10.4, 9.3 | 4,031-4,914 / 4,126 |
+
+  - The beat 'em up on AMD now leaves its loading screen and reaches the
+    first in-game scene and dialogue at 230-314 draws per frame; the base
+    binary stays on the loading screen at 4 draws per frame. The captures
+    are correct.
+  - The fishing title's windows run was one window behind the base run
+    (its perf-5 has the draw count of the base perf-4), so its per-window
+    rows are not paired.
+- The Unity fishing title's frame-3 boot stall is not caused by this change,
+  and is not specific to the excluded index-buffer change below: in 16
+  interleaved 45 s boots per binary it stalled once with the windows and
+  once with the base binary. A further 200 s windows run also stalled there.
+  Open; it now has a base-binary reproduction.
+- Frontier with the change:
+  - AMD: the 2D title that dereferences guest pointers, the atmospheric
+    platformer and the roguelike dungeon crawler reach the time limit.
+  - Intel: the atmospheric platformer, the gothic action platformer, the
+    ninja platformer, the roguelike dungeon crawler, the pixel exploration
+    title, the artillery title and the robot platformer reach the time
+    limit, with peaks of 2,783, 3,383, 1,195, 5,751, 1,323, 1,946 and
+    3,544 MB. The mechanical-fist platformer stops at its known strict
+    volume-layout refusal.
+- Remaining on AMD: the beat 'em up's in-game scene runs at 3.7-5 fps.
+  Not profiled yet.
+
 ## Native wave32 compute in whole host subgroups (2026-10-12)
 
 - On the AMD host the robot platformer reached its PS logo level (102
@@ -235,12 +305,11 @@ previous section; the count of live ranges stays open.
     The release and unmap sites together fired 14 times (77 MB).
   - Combat windows perf-7..9 (83 s): 91 allocation discards (36 MB), about
     one per second. The release and unmap sites did not fire.
-  - So in combat the direct-memory layout is stable. Windows over several
-    ranges that are dropped whenever a discard overlaps them would be
-    rebuilt about once per second, not every frame. The hazard is an
-    invalidation hook, not a blocker. Loading churns and would rebuild
-    windows constantly, so windows must be cheap to drop there. Not
-    implemented yet.
+  - So in combat on Intel the direct-memory layout is stable. Loading
+    churns, and the AMD host spends its whole run loading (see "Shared
+    physical device-address windows"), so windows dropped on every
+    overlapping discard would thrash there. The implemented design zeroes
+    pinned pages in place instead.
 - Open defect: on the AMD host the Unity fishing title raises a GPU
   page-permission fault at gameplay load, about 88 s in. The fault is in the
   shader caches (SQC/TCP), at a different address each run, and the device is

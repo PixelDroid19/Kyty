@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <vector>
 
@@ -260,7 +261,10 @@ public:
 	              uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool     Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 	uint64_t MapAlias(uint64_t vaddr, uint64_t size, uint64_t alignment);
-	bool     ExportDmaBuf(uint64_t vaddr, uint64_t size, int* dma_buf);
+	bool     ResolvePhysical(uint64_t vaddr, uint64_t size, uint64_t* phys_addr);
+	uint64_t MapPinnedWindow(uint64_t phys_addr, uint64_t size, uint64_t alignment);
+	bool     ExportPinnedWindowDmaBuf(uint64_t phys_addr, uint64_t size, int* dma_buf);
+	void     UnpinWindow(uint64_t phys_addr, uint64_t size);
 	void     FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t count);
 	uint64_t TotalAllocatedBytes();
 	void     FillSnapshot(KernelMemorySnapshot* snapshot);
@@ -292,6 +296,12 @@ private:
 	// Backing offset of a live view of [vaddr, vaddr + size) whose physical
 	// range is neither released nor pending release.
 	[[nodiscard]] bool FindAliasablePhysicalUnlocked(uint64_t vaddr, uint64_t size, uint64_t* phys_addr);
+	// Records a device window over backing [phys_addr, phys_addr + size);
+	// false when the interval is invalid or overlaps a pinned window.
+	[[nodiscard]] bool PinWindowUnlocked(uint64_t phys_addr, uint64_t size);
+	// Drops the bytes of backing [start, start + len): pinned windows are
+	// zeroed in place, the rest is punched out of the backing.
+	[[nodiscard]] bool DiscardBackingUnlocked(uint64_t start, uint64_t len);
 	// m_mapped_order stays sorted through every change. Re-sorting all views on
 	// the first lookup after a change cost milliseconds with tens of thousands
 	// of views, and titles map and unmap every frame.
@@ -330,6 +340,10 @@ private:
 	std::vector<PendingDirectRelease>  m_pending_direct_releases;
 	Core::Mutex                        m_mutex;
 	VirtualMemory::SharedBacking*      m_backing = nullptr;
+	// Disjoint backing intervals that device imports hold pinned, by offset.
+	// A pinned page that is punched out keeps serving the device while CPU
+	// views fault in a fresh one, so discards zero these intervals in place.
+	std::map<uint64_t, uint64_t>       m_pinned_windows;
 	uint64_t                           m_next_gen_auto_map_cursor = kNextGenAutoMapBegin;
 };
 
@@ -1033,7 +1047,7 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 	// shared backing. Reusing that range starts a new allocation lifetime, which
 	// must not expose bytes retained by the previous owner. Discard before
 	// publishing the allocation; all aliases then observe the same fresh pages.
-	if (!VirtualMemory::DiscardSharedBackingRange(m_backing, candidate, len))
+	if (!DiscardBackingUnlocked(candidate, len))
 	{
 		return false;
 	}
@@ -1213,7 +1227,7 @@ bool PhysicalMemory::Release(uint64_t start, size_t len)
 	                                      { return mapped.phys_addr < end && mapped.phys_addr + mapped.map_size > start; });
 	if (!still_mapped)
 	{
-		(void)VirtualMemory::DiscardSharedBackingRange(m_backing, start, len);
+		(void)DiscardBackingUnlocked(start, len);
 	}
 	if (exact_pending_release != m_pending_direct_releases.end())
 	{
@@ -1593,7 +1607,7 @@ bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 			}
 			if (!still_allocated && !still_mapped)
 			{
-				(void)VirtualMemory::DiscardSharedBackingRange(m_backing, phys_addr, map_size);
+				(void)DiscardBackingUnlocked(phys_addr, map_size);
 			}
 			return true;
 		}
@@ -1694,7 +1708,7 @@ bool PhysicalMemory::CompleteCut(uint64_t vaddr, uint64_t size, uint64_t cut_vad
                                                  { return cut_phys < m.phys_addr + m.map_size && m.phys_addr < cut_phys + cut_size; });
 		if (!allocated && !still_shown)
 		{
-			(void)VirtualMemory::DiscardSharedBackingRange(m_backing, cut_phys, cut_size);
+			(void)DiscardBackingUnlocked(cut_phys, cut_size);
 		}
 		return true;
 	}
@@ -1808,21 +1822,112 @@ uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size, uint64_t alignm
 	return VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr, size, VirtualMemory::Mode::ReadWrite, alignment);
 }
 
-bool PhysicalMemory::ExportDmaBuf(uint64_t vaddr, uint64_t size, int* dma_buf)
+bool PhysicalMemory::ResolvePhysical(uint64_t vaddr, uint64_t size, uint64_t* phys_addr)
 {
-	*dma_buf = -1;
 	if (size == 0)
 	{
 		return false;
 	}
 	Core::LockGuard lock(m_mutex);
-	uint64_t        phys_addr = 0;
-	if (!FindAliasablePhysicalUnlocked(vaddr, size, &phys_addr))
+	return FindAliasablePhysicalUnlocked(vaddr, size, phys_addr);
+}
+
+bool PhysicalMemory::PinWindowUnlocked(uint64_t phys_addr, uint64_t size)
+{
+	const uint64_t page_size = VirtualMemory::GetPageSize();
+	if (size == 0 || (phys_addr % page_size) != 0 || (size % page_size) != 0 || phys_addr > BackingSize() ||
+	    size > BackingSize() - phys_addr)
+	{
+		return false;
+	}
+	const auto next = m_pinned_windows.lower_bound(phys_addr);
+	if (next != m_pinned_windows.end() && next->first < phys_addr + size)
+	{
+		return false;
+	}
+	if (next != m_pinned_windows.begin() && std::prev(next)->first + std::prev(next)->second > phys_addr)
+	{
+		return false;
+	}
+	m_pinned_windows.emplace(phys_addr, size);
+	return true;
+}
+
+uint64_t PhysicalMemory::MapPinnedWindow(uint64_t phys_addr, uint64_t size, uint64_t alignment)
+{
+	const uint64_t page_size = VirtualMemory::GetPageSize();
+	alignment = alignment == 0 ? page_size : alignment;
+	if (alignment < page_size || (alignment & (alignment - 1u)) != 0)
+	{
+		return 0;
+	}
+	Core::LockGuard lock(m_mutex);
+	if (!PinWindowUnlocked(phys_addr, size))
+	{
+		return 0;
+	}
+	const uint64_t alias = VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr, size, VirtualMemory::Mode::ReadWrite, alignment);
+	if (alias == 0)
+	{
+		m_pinned_windows.erase(phys_addr);
+	}
+	return alias;
+}
+
+bool PhysicalMemory::ExportPinnedWindowDmaBuf(uint64_t phys_addr, uint64_t size, int* dma_buf)
+{
+	*dma_buf = -1;
+	Core::LockGuard lock(m_mutex);
+	if (!PinWindowUnlocked(phys_addr, size))
 	{
 		return false;
 	}
 	*dma_buf = VirtualMemory::ExportSharedBackingDmaBuf(m_backing, phys_addr, size);
+	if (*dma_buf < 0)
+	{
+		m_pinned_windows.erase(phys_addr);
+	}
 	return true;
+}
+
+void PhysicalMemory::UnpinWindow(uint64_t phys_addr, uint64_t size)
+{
+	Core::LockGuard lock(m_mutex);
+	const auto      window = m_pinned_windows.find(phys_addr);
+	if (window != m_pinned_windows.end() && window->second == size)
+	{
+		m_pinned_windows.erase(window);
+	}
+}
+
+bool PhysicalMemory::DiscardBackingUnlocked(uint64_t start, uint64_t len)
+{
+	const uint64_t end    = start + len;
+	uint64_t       cursor = start;
+	auto           window = m_pinned_windows.upper_bound(start);
+	if (window != m_pinned_windows.begin() && std::prev(window)->first + std::prev(window)->second > start)
+	{
+		--window;
+	}
+	for (; window != m_pinned_windows.end() && window->first < end; ++window)
+	{
+		const uint64_t zero_begin = std::max(window->first, start);
+		const uint64_t zero_end   = std::min(window->first + window->second, end);
+		if (cursor < zero_begin && !VirtualMemory::DiscardSharedBackingRange(m_backing, cursor, zero_begin - cursor))
+		{
+			return false;
+		}
+		const uint64_t view = VirtualMemory::MapSharedAligned(m_backing, 0, zero_begin, zero_end - zero_begin,
+		                                                      VirtualMemory::Mode::ReadWrite, VirtualMemory::GetPageSize());
+		if (view == 0)
+		{
+			return false;
+		}
+		std::memset(reinterpret_cast<void*>(view), 0, zero_end - zero_begin);
+		(void)VirtualMemory::Free(view);
+		cursor = zero_end;
+	}
+	return cursor >= end || VirtualMemory::DiscardSharedBackingRange(m_backing, cursor, end - cursor);
 }
 
 void PhysicalMemory::FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t count)
@@ -3156,14 +3261,32 @@ uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size, uint64_t alignmen
 	return g_physical_memory->MapAlias(vaddr, size, alignment);
 }
 
-bool KernelExportPhysicalDmaBuf(uint64_t vaddr, uint64_t size, int* dma_buf)
+bool KernelResolvePhysical(uint64_t vaddr, uint64_t size, uint64_t* phys_addr)
+{
+	return phys_addr != nullptr && g_physical_memory != nullptr && g_physical_memory->ResolvePhysical(vaddr, size, phys_addr);
+}
+
+uint64_t KernelMapPinnedPhysicalWindow(uint64_t phys_addr, uint64_t size, uint64_t alignment)
+{
+	return g_physical_memory == nullptr ? 0 : g_physical_memory->MapPinnedWindow(phys_addr, size, alignment);
+}
+
+bool KernelExportPinnedPhysicalWindowDmaBuf(uint64_t phys_addr, uint64_t size, int* dma_buf)
 {
 	if (dma_buf == nullptr)
 	{
 		return false;
 	}
 	*dma_buf = -1;
-	return g_physical_memory != nullptr && g_physical_memory->ExportDmaBuf(vaddr, size, dma_buf);
+	return g_physical_memory != nullptr && g_physical_memory->ExportPinnedWindowDmaBuf(phys_addr, size, dma_buf);
+}
+
+void KernelUnpinPhysicalWindow(uint64_t phys_addr, uint64_t size)
+{
+	if (g_physical_memory != nullptr)
+	{
+		g_physical_memory->UnpinWindow(phys_addr, size);
+	}
 }
 
 bool KernelUnmapPhysicalAlias(uint64_t alias)

@@ -29,12 +29,13 @@
 namespace Kyty::Libs::Graphics {
 namespace {
 
-// Imports cover resident pages only, widened to whole blocks for physical
-// ranges (pages outside every import read as zero through the table's zero
-// prefix), in chunks bounded to keep each pin modest.
+// Imports cover resident pages only, widened to whole direct-memory blocks for
+// physical ranges (pages outside every import read as zero through the table's
+// zero prefix), in chunks bounded to keep each pin modest.
 constexpr uint64_t kChunkBytes = 64ull << 20u;
 constexpr uint64_t kPageBytes  = kGuestDeviceAddressPageBytes;
-// A physical range imports every block holding a resident page.
+// Physical ranges read direct memory through shared windows: aligned
+// power-of-two intervals of whole blocks, at most one chunk long.
 constexpr uint64_t kPhysicalImportBlockBytes = 2ull << 20u;
 // Bound host padding independently from the guest-visible chunk size.
 constexpr uint64_t kMaxHostImportPaddingBytes = 2ull << 20u;
@@ -49,13 +50,25 @@ struct Chunk
 	VkDeviceMemory memory     = nullptr;
 	VkBuffer       buffer     = nullptr;
 	uint64_t       device = 0;
+	uint64_t       buffer_offset = 0; // where `guest` lies in `buffer`
 	uint64_t       alias  = 0;       // writable host view that was imported
 	bool           physical = false; // imports the direct-memory pages themselves
+	bool           windowed = false; // reads through the physical window at `window`
+	uint64_t       window   = 0;
 	void*          copy   = nullptr; // tracked snapshot that was imported
 	std::size_t    copy_alignment = 0;
 	uint64_t       generation = 0;   // dirty-tracker generation of the snapshot
 	bool           tracked    = false; // snapshot is refreshed from tracker generations
 	bool           registered = false; // this chunk holds a dirty-tracker registration
+};
+
+// A device import of direct memory [offset, offset + size) that every
+// physical chunk inside it reads through. Its pages stay pinned in Kernel.
+struct PhysicalWindow
+{
+	uint64_t size   = 0;
+	Chunk    import;
+	uint32_t users  = 0;
 };
 
 struct Range
@@ -86,6 +99,10 @@ struct Registry
 {
 	std::mutex                mutex;
 	std::map<uint64_t, Range> ranges;
+	// Disjoint, by direct-memory offset. RADV validates every imported memory
+	// object on each submit, and titles map thousands of small direct-memory
+	// ranges, so ranges share the windows over their pages.
+	std::map<uint64_t, PhysicalWindow> windows;
 	// Titles map thousands of ranges. Preparation revisits flexible ranges and
 	// refreshes snapshots every time, so it walks these subsets, not every range.
 	std::set<uint64_t>        flexible;
@@ -166,7 +183,7 @@ void FreeHostSnapshot(void* snapshot, std::size_t alignment) noexcept
 	}
 }
 
-void DestroyChunk(VkDevice device, const Chunk& chunk)
+void DestroyImport(VkDevice device, const Chunk& chunk)
 {
 	vkDestroyBuffer(device, chunk.buffer, nullptr);
 	vkFreeMemory(device, chunk.memory, nullptr);
@@ -176,6 +193,24 @@ void DestroyChunk(VkDevice device, const Chunk& chunk)
 	{
 		(void)GpuDirtyPageTracker::Instance().UnregisterRange(chunk.guest, chunk.span);
 	}
+}
+
+void DestroyChunk(VkDevice device, Registry* registry, const Chunk& chunk)
+{
+	if (!chunk.windowed)
+	{
+		DestroyImport(device, chunk);
+		return;
+	}
+	const auto window = registry->windows.find(chunk.window);
+	EXIT_IF(window == registry->windows.end() || window->second.users == 0);
+	if (--window->second.users != 0)
+	{
+		return;
+	}
+	DestroyImport(device, window->second.import);
+	Kernel::Memory::KernelUnpinPhysicalWindow(window->first, window->second.size);
+	registry->windows.erase(window);
 }
 
 // Registered ranges mirror live guest mappings and are disjoint, so the only
@@ -210,7 +245,7 @@ void DropChunks(VkDevice device, Registry* registry, uint64_t base, Range* range
 			++kept;
 			continue;
 		}
-		DestroyChunk(device, *chunk);
+		DestroyChunk(device, registry, *chunk);
 		range->tracked_chunks -= chunk->tracked ? 1u : 0u;
 		const auto first = static_cast<size_t>((chunk->guest - base) / kPageBytes);
 		const auto last  = std::min(range->imported.size(), static_cast<size_t>((chunk->guest + chunk->span - base) / kPageBytes));
@@ -574,12 +609,12 @@ PhysicalImport ProbePhysicalImport(GraphicContext* ctx)
 	if (view != 0 && ImportPointer(ctx, reinterpret_cast<void*>(view), kPageBytes, kPageBytes, true, &prepared, &probe))
 	{
 		result = PhysicalImport::HostPointer;
-		DestroyChunk(ctx->device, probe);
+		DestroyImport(ctx->device, probe);
 	} else if (backing != nullptr && ctx->guest_dma_buf_import_supported &&
 	           ImportDmaBuf(ctx, Core::VirtualMemory::ExportSharedBackingDmaBuf(backing, 0, kPageBytes), kPageBytes, &probe))
 	{
 		result = PhysicalImport::DmaBuf;
-		DestroyChunk(ctx->device, probe);
+		DestroyImport(ctx->device, probe);
 	}
 	if (view != 0)
 	{
@@ -594,8 +629,122 @@ PhysicalImport ProbePhysicalImport(GraphicContext* ctx)
 	return result;
 }
 
+// Imports direct memory [offset, offset + size) as a window pinned in Kernel,
+// through a writable alias of the backing or, where the device refuses shared
+// host pointers, a dma-buf of it.
+bool ImportWindow(GraphicContext* ctx, uint64_t offset, uint64_t size, Chunk* out)
+{
+	*out       = {};
+	out->size  = size;
+	out->span  = size;
+	static const PhysicalImport physical_import = ProbePhysicalImport(ctx);
+	if (physical_import == PhysicalImport::DmaBuf)
+	{
+		int dma_buf = -1;
+		if (!Kernel::Memory::KernelExportPinnedPhysicalWindowDmaBuf(offset, size, &dma_buf) || dma_buf < 0)
+		{
+			return false;
+		}
+		if (ImportDmaBuf(ctx, dma_buf, size, out))
+		{
+			return true;
+		}
+		Kernel::Memory::KernelUnpinPhysicalWindow(offset, size);
+		return false;
+	}
+	PreparedHostImport prepared;
+	if (physical_import != PhysicalImport::HostPointer || !prepared.Prepare(ctx, size))
+	{
+		return false;
+	}
+	const uint64_t alias = Kernel::Memory::KernelMapPinnedPhysicalWindow(offset, size, prepared.min_pointer_alignment);
+	if (alias == 0)
+	{
+		return false;
+	}
+	if (ImportPointer(ctx, reinterpret_cast<void*>(alias), size, size, true, &prepared, out))
+	{
+		out->alias    = alias;
+		out->physical = true;
+		return true;
+	}
+	prepared.Reset();
+	Kernel::Memory::KernelUnmapPhysicalAlias(alias);
+	Kernel::Memory::KernelUnpinPhysicalWindow(offset, size);
+	return false;
+}
+
+// The window holding direct-memory offset `offset`, imported if none does. A
+// new window is the largest aligned power-of-two run of blocks, at most one
+// chunk, that starts at the block of `offset` and ends by `limit` and before
+// the next window.
+PhysicalWindow* AcquireWindow(GraphicContext* ctx, Registry* registry, uint64_t offset, uint64_t limit, uint64_t* base)
+{
+	auto next = registry->windows.upper_bound(offset);
+	if (next != registry->windows.begin())
+	{
+		auto holder = std::prev(next);
+		if (offset - holder->first < holder->second.size)
+		{
+			*base = holder->first;
+			return &holder->second;
+		}
+	}
+	const uint64_t start = offset / kPhysicalImportBlockBytes * kPhysicalImportBlockBytes;
+	if (next != registry->windows.end())
+	{
+		limit = std::min(limit, next->first);
+	}
+	uint64_t size = kPhysicalImportBlockBytes;
+	while (size < kChunkBytes && start % (size * 2u) == 0 && limit - start >= size * 2u)
+	{
+		size *= 2u;
+	}
+	PhysicalWindow window;
+	window.size = size;
+	if (!ImportWindow(ctx, start, size, &window.import))
+	{
+		std::fprintf(stderr, "guest physical window import failed: offset=0x%012" PRIx64 " size=0x%" PRIx64 "\n", start, size);
+		return nullptr;
+	}
+	*base = start;
+	return &registry->windows.emplace(start, window).first->second;
+}
+
+// Maps guest [guest, guest + size), backed by direct memory from `offset`, to
+// the windows over those pages, one chunk per window.
+bool ImportPhysicalRun(GraphicContext* ctx, Registry* registry, Range* range, uint64_t guest, uint64_t offset, uint64_t size)
+{
+	const uint64_t end   = offset + size;
+	const uint64_t limit = (end + kPhysicalImportBlockBytes - 1u) / kPhysicalImportBlockBytes * kPhysicalImportBlockBytes;
+	for (uint64_t cursor = offset; cursor < end;)
+	{
+		uint64_t        base   = 0;
+		PhysicalWindow* window = AcquireWindow(ctx, registry, cursor, limit, &base);
+		if (window == nullptr)
+		{
+			return false;
+		}
+		const uint64_t piece_end = std::min(end, base + window->size);
+		Chunk          chunk;
+		chunk.guest         = guest + (cursor - offset);
+		chunk.size          = piece_end - cursor;
+		chunk.span          = chunk.size;
+		chunk.buffer        = window->import.buffer;
+		chunk.buffer_offset = cursor - base;
+		chunk.device        = window->import.device + chunk.buffer_offset;
+		chunk.physical      = true;
+		chunk.windowed      = true;
+		chunk.window        = base;
+		window->users++;
+		range->chunks.push_back(chunk);
+		cursor = piece_end;
+	}
+	return true;
+}
+
 // Imports [guest, guest + span) for a chunk mapping [guest, guest + size)
-// from a writable alias of physical direct memory, or else from a snapshot.
+// from a snapshot of flexible memory.
 // The guest view itself is never imported: dirty tracking and guest mprotect
 // change its protection, and a driver that pins host pages (a userptr) cannot
 // revalidate a page that lost write access, which loses the device.
@@ -610,27 +759,9 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	out->guest = guest;
 	out->size  = size;
 	out->span  = span;
-	static const PhysicalImport physical_import = ProbePhysicalImport(ctx);
-	int                         dma_buf         = -1;
-	if (physical_import == PhysicalImport::DmaBuf && Kernel::Memory::KernelExportPhysicalDmaBuf(guest, span, &dma_buf))
-	{
-		return ImportDmaBuf(ctx, dma_buf, span, out);
-	}
 	PreparedHostImport prepared;
 	if (!prepared.Prepare(ctx, span))
 	{
-		return false;
-	}
-	if (const uint64_t alias = Kernel::Memory::KernelMapPhysicalAlias(guest, span, prepared.min_pointer_alignment); alias != 0)
-	{
-		if (ImportPointer(ctx, reinterpret_cast<void*>(alias), span, span, true, &prepared, out))
-		{
-			out->alias    = alias;
-			out->physical = true;
-			return true;
-		}
-		prepared.Reset();
-		Kernel::Memory::KernelUnmapPhysicalAlias(alias);
 		return false;
 	}
 	const uint64_t allocation_alignment = std::max(prepared.min_pointer_alignment, static_cast<uint64_t>(alignof(std::max_align_t)));
@@ -671,8 +802,8 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 }
 
 // Marks every page of an import block that holds a resident page. `resident`
-// covers range pages [first, first + resident->size()); blocks are counted
-// from the range base and clipped to that span.
+// covers consecutive direct-memory pages from page index `first`; blocks are
+// counted in direct memory and clipped to that span.
 void ExpandToImportBlocks(uint64_t first, std::vector<uint8_t>* resident)
 {
 	constexpr uint64_t block_pages = kPhysicalImportBlockBytes / kPageBytes;
@@ -690,6 +821,14 @@ void ExpandToImportBlocks(uint64_t first, std::vector<uint8_t>* resident)
 	}
 }
 
+// Marks range pages [first, last) imported.
+void MarkImported(Range* range, uint64_t first, uint64_t last)
+{
+	range->imported_pages += last - first;
+	std::fill(range->imported.begin() + static_cast<std::ptrdiff_t>(first), range->imported.begin() + static_cast<std::ptrdiff_t>(last),
+	          1);
+}
+
 bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64_t first, uint64_t last,
                         std::vector<uint8_t>* resident, bool* changed)
 {
@@ -701,19 +840,10 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 	{
 		return false;
 	}
-	// Guest writes reach physical pages one at a time, and importing each newly
-	// resident run gave a chunk per page or two. Whole blocks bound the chunks
-	// per range; the pages a block import populates are imported with it, and a
-	// block without a resident page is not pinned.
-	if (range->physical_backing)
-	{
-		ExpandToImportBlocks(first, resident);
-	}
-	// A snapshot chunk is either tracked or immutable as a whole, so a run of a
-	// flexible range ends where CPU write access changes; physical runs import
-	// through an alias whatever the guest view's protection.
+	// A snapshot chunk is either tracked or immutable as a whole, so a run
+	// ends where CPU write access changes.
 	const auto writable = [&](uint64_t page)
-	{ return !range->physical_backing && Core::VirtualMemory::IsRangeWritable(base + (first + page) * kPageBytes, kPageBytes); };
+	{ return Core::VirtualMemory::IsRangeWritable(base + (first + page) * kPageBytes, kPageBytes); };
 	for (uint64_t page = 0; page < pages;)
 	{
 		if ((*resident)[page] == 0)
@@ -741,9 +871,57 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 		}
 		range->chunks.push_back(chunk);
 		range->tracked_chunks += chunk.tracked ? 1u : 0u;
-		range->imported_pages += end - page;
-		std::fill(range->imported.begin() + static_cast<std::ptrdiff_t>(first + page),
-		          range->imported.begin() + static_cast<std::ptrdiff_t>(first + end), 1);
+		MarkImported(range, first + page, first + end);
+		*changed = true;
+		page     = end;
+	}
+	return true;
+}
+
+// Physical runs read through windows whatever the guest view's protection.
+bool ImportPhysicalSpan(GraphicContext* ctx, Registry* registry, uint64_t base, Range* range, uint64_t first, uint64_t last,
+                        std::vector<uint8_t>* resident, bool* changed)
+{
+	const uint64_t pages        = last - first;
+	const uint64_t span_address = base + first * kPageBytes;
+	const uint64_t span_size    = pages * kPageBytes;
+	resident->resize(static_cast<size_t>(pages));
+	if (!Core::VirtualMemory::QueryResidentPages(span_address, span_size, resident->data()))
+	{
+		return false;
+	}
+	if (std::none_of(resident->begin(), resident->end(), [](uint8_t value) { return value != 0; }))
+	{
+		return true;
+	}
+	uint64_t offset = 0;
+	if (!Kernel::Memory::KernelResolvePhysical(span_address, span_size, &offset))
+	{
+		std::fprintf(stderr, "guest import failed: base=0x%012" PRIx64 " size=0x%" PRIx64 " has no direct memory\n", span_address,
+		             span_size);
+		return false;
+	}
+	// Guest writes reach physical pages one at a time, and importing each newly
+	// resident run gave a chunk per page or two. Whole blocks bound the chunks
+	// per range; the pages a block import populates are imported with it, and a
+	// block without a resident page is not pinned.
+	ExpandToImportBlocks(offset / kPageBytes, resident);
+	for (uint64_t page = 0; page < pages;)
+	{
+		if ((*resident)[page] == 0)
+		{
+			page++;
+			continue;
+		}
+		const uint64_t end = static_cast<uint64_t>(std::find(resident->begin() + static_cast<std::ptrdiff_t>(page), resident->end(),
+		                                                     uint8_t {0}) -
+		                                           resident->begin());
+		if (!ImportPhysicalRun(ctx, registry, range, span_address + page * kPageBytes, offset + page * kPageBytes,
+		                       (end - page) * kPageBytes))
+		{
+			return false;
+		}
+		MarkImported(range, first + page, first + end);
 		*changed = true;
 		page     = end;
 	}
@@ -832,7 +1010,7 @@ bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 		{
 			continue;
 		}
-		if (!ImportResidentSpan(ctx, span.base, span.range, span.first, span.last, &resident, &changed))
+		if (!ImportPhysicalSpan(ctx, registry, span.base, span.range, span.first, span.last, &resident, &changed))
 		{
 			return false;
 		}
@@ -965,7 +1143,7 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 		const bool     physical   = it->second.physical_backing;
 		for (const auto& chunk: it->second.chunks)
 		{
-			DestroyChunk(ctx->device, chunk);
+			DestroyChunk(ctx->device, &registry, chunk);
 		}
 		registry.flexible.erase(base);
 		registry.tracked.erase(base);
@@ -1072,7 +1250,7 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 			return false;
 		}
 		const uint64_t piece_end = std::min(end, found->guest + found->size);
-		pieces.push_back({found->buffer, {cursor - vaddr, cursor - found->guest, piece_end - cursor}});
+		pieces.push_back({found->buffer, {cursor - vaddr, found->buffer_offset + (cursor - found->guest), piece_end - cursor}});
 		cursor = piece_end;
 	}
 	// Earlier device-address reads of the range and the producer's writes
