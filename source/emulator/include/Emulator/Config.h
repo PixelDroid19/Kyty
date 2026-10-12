@@ -53,6 +53,15 @@ enum class RenderResolutionMode
 	Fixed
 };
 
+// Which guest render targets a Fixed render resolution may scale. Display
+// covers the display buffers and their depth; RenderTargets also covers
+// offscreen color targets at the guest display extent.
+enum class RenderResolutionScope
+{
+	Display,
+	RenderTargets
+};
+
 enum class PresentationFilter
 {
 	Linear,
@@ -76,6 +85,7 @@ bool     IsInitialized();
 uint32_t GetScreenWidth();
 uint32_t GetScreenHeight();
 RenderResolutionMode GetRenderResolutionMode();
+RenderResolutionScope GetRenderResolutionScope();
 uint32_t GetRenderResolutionWidth();
 uint32_t GetRenderResolutionHeight();
 PresentationFilter GetPresentationFilter();

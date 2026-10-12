@@ -3930,6 +3930,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		        analysis.scalar_flow == nullptr || analysis.resource_memo == nullptr);
 		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
 		ps_info->image_size_query          = analysis.usage.image_size_query;
+		ps_info->texel_offset_sampling     = analysis.usage.texel_offset_sampling;
 		ps_info->native_wave = analysis.native_wave->Get(*analysis.code, ps_wave32 ? 32u : 64u);
 		ps_info->required_subgroup_size = analysis.pixel_analysis->uses_native_wave_state ? ps_info->native_wave.guest_wave_size : 0u;
 		ps_info->has_only_null_exports = analysis.pixel_analysis->has_only_null_exports;

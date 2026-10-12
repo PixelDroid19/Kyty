@@ -42,18 +42,30 @@ bool ResolveRenderTextureArrayView(uint64_t bytes_per_layer, uint32_t base_layer
 	return true;
 }
 
-bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming)
+// Everything except the layer count: format, guest and host extent, tiling,
+// pitch, ownership and sample count.
+static bool RenderTextureSharesImageDescription(const uint64_t* existing, const uint64_t* incoming)
 {
-	if (existing == nullptr || incoming == nullptr)
-	{
-		return false;
-	}
 	for (int param = RenderTextureObject::PARAM_FORMAT; param <= RenderTextureObject::PARAM_SAMPLES; param++)
 	{
 		if (existing[param] != incoming[param])
 		{
 			return false;
 		}
+	}
+	return existing[RenderTextureObject::PARAM_HOST_WIDTH] == incoming[RenderTextureObject::PARAM_HOST_WIDTH] &&
+	       existing[RenderTextureObject::PARAM_HOST_HEIGHT] == incoming[RenderTextureObject::PARAM_HOST_HEIGHT];
+}
+
+bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming)
+{
+	if (existing == nullptr || incoming == nullptr)
+	{
+		return false;
+	}
+	if (!RenderTextureSharesImageDescription(existing, incoming))
+	{
+		return false;
 	}
 	if (existing[RenderTextureObject::PARAM_TILED] == 0u || existing[RenderTextureObject::PARAM_WRITE_BACK] != 0u)
 	{
@@ -70,12 +82,9 @@ bool RenderTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t
 	{
 		return false;
 	}
-	for (int param = RenderTextureObject::PARAM_FORMAT; param <= RenderTextureObject::PARAM_SAMPLES; param++)
+	if (!RenderTextureSharesImageDescription(existing, incoming))
 	{
-		if (existing[param] != incoming[param])
-		{
-			return false;
-		}
+		return false;
 	}
 	const auto existing_layers = existing[RenderTextureObject::PARAM_ARRAY_LAYERS];
 	const auto incoming_layers = incoming[RenderTextureObject::PARAM_ARRAY_LAYERS];
@@ -392,11 +401,13 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 
 	const auto width     = params[RenderTextureObject::PARAM_WIDTH];
 	const auto height    = params[RenderTextureObject::PARAM_HEIGHT];
+	const auto host_width  = params[RenderTextureObject::PARAM_HOST_WIDTH];
+	const auto host_height = params[RenderTextureObject::PARAM_HOST_HEIGHT];
 	const auto vk_format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(
 	    static_cast<RenderTextureFormat>(params[RenderTextureObject::PARAM_FORMAT])));
 	const auto samples    = static_cast<VkSampleCountFlagBits>(params[RenderTextureObject::PARAM_SAMPLES]);
 	const auto array_layers = static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]);
-	if (vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 || array_layers == 0)
+	if (vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 || host_width == 0 || host_height == 0 || array_layers == 0)
 	{
 		EXIT("invalid render-texture image description\n");
 	}
@@ -409,7 +420,7 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	}
 
 	VulkanResolutionAttachmentRequest capability_request {};
-	capability_request.extent       = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+	capability_request.extent       = {static_cast<uint32_t>(host_width), static_cast<uint32_t>(host_height)};
 	capability_request.format       = vk_format;
 	capability_request.usage        = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 	                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -432,6 +443,7 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 
 	auto* vk_obj = new RenderTextureVulkanImage;
 	vk_obj->SetNativeExtent(width, height);
+	vk_obj->SetHostExtent(host_width, host_height);
 	vk_obj->format = vk_format;
 	vk_obj->image  = nullptr;
 	vk_obj->samples = samples;
@@ -584,7 +596,8 @@ bool RenderTextureObject::Equal(const uint64_t* other) const
 	        params[PARAM_HEIGHT] == other[PARAM_HEIGHT] && params[PARAM_TILED] == other[PARAM_TILED] &&
 	        params[PARAM_NEO] == other[PARAM_NEO] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WRITE_BACK] == other[PARAM_WRITE_BACK] && params[PARAM_SAMPLES] == other[PARAM_SAMPLES] &&
-	        params[PARAM_ARRAY_LAYERS] == other[PARAM_ARRAY_LAYERS]);
+	        params[PARAM_ARRAY_LAYERS] == other[PARAM_ARRAY_LAYERS] && params[PARAM_HOST_WIDTH] == other[PARAM_HOST_WIDTH] &&
+	        params[PARAM_HOST_HEIGHT] == other[PARAM_HOST_HEIGHT]);
 }
 
 GpuObject::create_func_t RenderTextureObject::GetCreateFunc() const

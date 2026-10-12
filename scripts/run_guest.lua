@@ -56,6 +56,7 @@ local cfg = {
 	ScreenWidth = env_number('KYTY_SCREEN_WIDTH', 1280);
 	ScreenHeight = env_number('KYTY_SCREEN_HEIGHT', 720);
 	RenderResolutionMode = env_or('KYTY_RENDER_RESOLUTION_MODE', 'Fixed');
+	RenderResolutionScope = env_or('KYTY_RENDER_RESOLUTION_SCOPE', 'Display');
 	RenderResolutionWidth = env_number('KYTY_RENDER_RESOLUTION_WIDTH', 1280);
 	RenderResolutionHeight = env_number('KYTY_RENDER_RESOLUTION_HEIGHT', 720);
 	PresentationFilter = env_or('KYTY_PRESENTATION_FILTER', 'Linear');

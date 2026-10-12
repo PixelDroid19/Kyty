@@ -21,6 +21,9 @@ struct RenderShaderCoordinateUsage
 	bool fragment_coordinates_supported = false;
 	bool integer_image_coordinates      = false;
 	bool image_size_query               = false;
+	// Texel offsets are normalized by the bound image size, which is the host
+	// size of a scaled image. Only reads of scaled images are affected.
+	bool texel_offset_sampling          = false;
 };
 
 enum class RenderResolutionPlanReason : uint8_t
@@ -75,6 +78,21 @@ struct RenderResolutionPlan
 // remain native; any unrelated committed extent is an explicit error.
 [[nodiscard]] RenderResolutionPlan ReconcileCommittedRenderExtent(const RenderResolutionPlan& candidate,
                                                                    ResolutionExtent committed_extent);
+// One attachment of an offscreen cohort: its guest extent, the host extent it
+// has (committed) or would choose (new).
+struct RenderResolutionCohortMember
+{
+	ResolutionExtent guest;
+	ResolutionExtent host;
+	bool             committed = false;
+};
+
+// Offscreen color targets and their depth rasterize through one viewport.
+// Committed members fix the cohort extent and new members must be able to
+// follow it; without a committed member the cohort scales only when every new
+// member chose the same scaled extent. Mixed guest extents stay native.
+[[nodiscard]] RenderResolutionPlan EvaluateRenderTargetCohort(const RenderResolutionCohortMember* members, uint32_t count);
+
 // Only instruction-derived hazards are reported here. Fragment-coordinate use
 // comes from normalized pixel input state, and its support is set only after a
 // valid host-to-guest scale has been built.

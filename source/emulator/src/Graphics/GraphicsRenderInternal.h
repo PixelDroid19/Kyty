@@ -845,6 +845,10 @@ struct RenderColorAttachmentInfo
 	bool                  tile                    = false;
 	bool                  neo                     = false;
 	bool                  write_back              = false;
+	// Vulkan extent a render-texture cohort selected; zero lets the attachment
+	// keep its committed extent or choose its own.
+	uint32_t              host_width              = 0;
+	uint32_t              host_height             = 0;
 };
 
 struct RenderColorInfo
@@ -1685,6 +1689,8 @@ RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffer* buff
                                                              const RenderDepthInfo& depth);
 RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color, const RenderDepthInfo& depth,
                                                     ShaderPixelInputInfo* ps);
+RenderResolutionPlan PrepareRenderTargetResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color, const RenderDepthInfo& depth,
+                                                         ShaderPixelInputInfo* ps);
 void RequireSupportedRenderResolutionPlan(const RenderResolutionPlan& decision);
 void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision, const RenderColorInfo& color,
                                             const RenderDepthInfo& depth);
@@ -1693,12 +1699,28 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
 // The draw fetches only records [first_record, required_records); zero required_records means every declared record.
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
 	                   uint32_t first_record, uint32_t required_records);
+// How a shader stage may read a resolution-scaled image. Normalized sampling
+// without texel offsets reads the same content at any host extent; integer
+// texel access, size queries and texel offsets address host texels.
+enum class ScaledImageReadAccess : uint8_t
+{
+	Refused,
+	NormalizedSampling,
+};
+
+[[nodiscard]] inline ScaledImageReadAccess ResolvePixelScaledImageReadAccess(const ShaderPixelInputInfo& ps)
+{
+	const bool host_texel_access = ps.integer_image_coordinates || ps.image_size_query || ps.texel_offset_sampling;
+	return host_texel_access ? ScaledImageReadAccess::Refused : ScaledImageReadAccess::NormalizedSampling;
+}
+
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr,
                      uint64_t shader_checksum = 0, const VulkanImage* stencil_attached_depth = nullptr,
                      const ShaderStorageImageTileCoverage* storage_seed_coverage = nullptr,
-                     const GuestDeviceAddressTable* device_address_table = nullptr);
+                     const GuestDeviceAddressTable* device_address_table = nullptr,
+                     ScaledImageReadAccess scaled_image_reads = ScaledImageReadAccess::Refused);
 void TraceRenderTargetLifetimeDraw(uint64_t submit_id, const DrawMaterialTraceContext& draw);
 void TraceRenderTargetLifetimePassBegin(uint64_t submit_id, const RenderColorInfo& color,
 	                                    const VulkanFramebuffer& framebuffer);

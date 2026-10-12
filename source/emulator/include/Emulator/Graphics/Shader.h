@@ -2389,6 +2389,7 @@ struct ShaderPixelInputInfo
 	bool                   front_face_all_bits       = false;
 	bool                   integer_image_coordinates = false;
 	bool                   image_size_query          = false;
+	bool                   texel_offset_sampling     = false;
 	bool                   ps_pixel_kill_enable      = false;
 	bool                   ps_early_z                = false;
 	bool                   ps_execute_on_noop        = false;

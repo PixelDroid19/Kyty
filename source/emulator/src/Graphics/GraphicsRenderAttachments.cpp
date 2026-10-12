@@ -797,6 +797,31 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	}
 }
 
+static bool RenderTargetResolutionScopeEnabled()
+{
+	return Config::GetRenderResolutionScope() == Config::RenderResolutionScope::RenderTargets;
+}
+
+// A depth image keeps the extent it was created with. A pass that asks for
+// another extent would replace it and lose its contents.
+static void RequireCommittedDepthExtent(CommandBuffer* buffer, const RenderDepthInfo& depth, uint32_t host_width, uint32_t host_height)
+{
+	if (!RenderTargetResolutionScopeEnabled())
+	{
+		return;
+	}
+	for (const auto& object: GpuMemoryFindObjectsForSubmission(buffer, depth.vaddr, depth.size, depth.vaddr_num,
+	                                                           GpuMemoryObjectType::DepthStencilBuffer, true, false))
+	{
+		const auto* image = static_cast<const DepthStencilVulkanImage*>(object.obj);
+		if (image != nullptr && image->IsResolutionScaled() && (image->extent.width != host_width || image->extent.height != host_height))
+		{
+			EXIT("depth pass cannot address a resolution-scaled depth image: guest=%ux%u host=%ux%u requested=%ux%u\n",
+			     image->GetGuestExtent().width, image->GetGuestExtent().height, image->extent.width, image->extent.height, host_width, host_height);
+		}
+	}
+}
+
 void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* r, uint32_t host_width,
                                        uint32_t host_height,
                                        const VulkanSampleLocationState* sample_locations)
@@ -810,6 +835,7 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	}
 	host_width  = host_width == 0 ? r->width : host_width;
 	host_height = host_height == 0 ? r->height : host_height;
+	RequireCommittedDepthExtent(buffer, *r, host_width, host_height);
 	const bool sample_locations_compatible =
 	    (sample_locations != nullptr && VulkanSampleLocationsEnabled(*sample_locations));
 	DepthStencilBufferObject vulkan_buffer_info(r->format, r->width, r->height, host_width, host_height, r->htile, r->neo, r->sampled,
@@ -1103,6 +1129,81 @@ void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, Rende
 	}
 }
 
+static bool VulkanSupportsResolutionAttachment(VkFormat format, VkSampleCountFlagBits samples, VkImageUsageFlags usage,
+                                               ResolutionExtent extent)
+{
+	VulkanResolutionAttachmentRequest request;
+	request.extent        = extent;
+	request.format        = format;
+	request.sample_count  = samples;
+	request.usage         = usage;
+	const auto capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), request);
+	return capability.status == VulkanRenderResolutionCapabilityStatus::Success &&
+	       capability.decision.status == RenderResolutionImageCapabilityStatus::Supported;
+}
+
+// A new offscreen color target scales only under the RenderTargets scope, at
+// the registered guest display extent, as a GPU-owned single-sample target that
+// no other object aliases. The choice depends on the attachment alone, so
+// every pass over the same target selects the same Vulkan extent.
+static ResolutionExtent RenderTextureCandidateHostExtent(const RenderColorAttachmentInfo& attachment)
+{
+	const ResolutionExtent guest {attachment.width, attachment.height};
+	const auto             snapshot = RenderResolutionGetSnapshot();
+	if (!snapshot.guest_registered || guest != snapshot.guest_display_extent)
+	{
+		return guest;
+	}
+	ResolutionResourceInfo resource;
+	resource.kind            = ResolutionResourceKind::ColorAttachment;
+	resource.sample_count    = static_cast<uint32_t>(attachment.samples);
+	resource.cpu_transfer    = RenderTextureMayCpuUploadOnUpdate(attachment.tile, attachment.write_back);
+	resource.ambiguous_alias = !RenderResolutionAliasAllowsRanges(&attachment.base_addr, &attachment.size, 1,
+	                                                              GpuMemoryObjectType::RenderTexture, true);
+	const auto decision      = RenderResolutionEvaluate(guest, resource);
+	if (decision.classification != ResolutionClassification::Scaled)
+	{
+		return guest;
+	}
+	const auto format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
+	const auto usage  = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+	                                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+	return VulkanSupportsResolutionAttachment(format, attachment.samples, usage, decision.host_extent) ? decision.host_extent : guest;
+}
+
+// A live image at the same range keeps the extent it was created with; a
+// Vulkan image cannot change extent in place.
+static bool FindCommittedRenderTextureExtent(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment,
+                                             ResolutionExtent* host)
+{
+	if (!RenderTargetResolutionScopeEnabled())
+	{
+		return false;
+	}
+	for (const auto* image: FindRenderTexture(buffer, attachment.base_addr, attachment.size, true))
+	{
+		if (image->MatchesGuestExtent(attachment.width, attachment.height))
+		{
+			*host = {image->extent.width, image->extent.height};
+			return true;
+		}
+	}
+	return false;
+}
+
+// Only a render-target cohort, which also maps the viewport, may create a
+// scaled target. Other passes keep a committed extent or stay native.
+static ResolutionExtent RenderTextureMaterializationExtent(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
+{
+	if (attachment.host_width != 0)
+	{
+		return {attachment.host_width, attachment.host_height};
+	}
+	ResolutionExtent host {attachment.width, attachment.height};
+	(void)FindCommittedRenderTextureExtent(buffer, attachment, &host);
+	return host;
+}
+
 void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, RenderColorInfo* r)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -1140,12 +1241,19 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		}
 
 		if (attachment.type != RenderColorType::RenderTexture) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment.type != RenderColorType::RenderTexture condition ignored (continuing)\n"); }
+		const auto host = RenderTextureMaterializationExtent(buffer, attachment);
 		RenderTextureObject vulkan_buffer_info(attachment.render_texture_format, attachment.width, attachment.height, attachment.tile,
 		                                      attachment.neo, attachment.pitch, attachment.write_back,
-		                                      static_cast<uint32_t>(attachment.samples), attachment.image_layers);
+		                                      static_cast<uint32_t>(attachment.samples), attachment.image_layers, host.width,
+		                                      host.height);
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, attachment.base_addr, attachment.size, vulkan_buffer_info));
 		if (buffer_vulkan == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_vulkan == nullptr condition ignored (continuing)\n"); }
+		if (buffer_vulkan->extent.width != host.width || buffer_vulkan->extent.height != host.height)
+		{
+			EXIT("render texture materialized at an unexpected extent: guest=%ux%u expected=%ux%u actual=%ux%u\n", attachment.width,
+			     attachment.height, host.width, host.height, buffer_vulkan->extent.width, buffer_vulkan->extent.height);
+		}
 		attachment.vulkan_buffer     = buffer_vulkan;
 		attachment.attachment_format = buffer_vulkan->format;
 		attachment.attachment_view   = VulkanImage::VIEW_DEFAULT;
@@ -1355,6 +1463,12 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	if (src->GetGuestExtent().width != dst->GetGuestExtent().width ||
 	                     src->GetGuestExtent().height != dst->GetGuestExtent().height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src->GetGuestExtent().width != dst->GetGuestExtent().width || condition ignored (continuing)\n"); }
 	if (src->extent.width != dst->extent.width || src->extent.height != dst->extent.height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src->extent.width != dst->extent.width || src->extent.height != dst->extent.height condition ignored (continuing)\n"); }
+	if ((src->IsResolutionScaled() || dst->IsResolutionScaled()) &&
+	    (src->extent.width != dst->extent.width || src->extent.height != dst->extent.height))
+	{
+		EXIT("color resolve across render resolutions: source=%ux%u destination=%ux%u\n", src->extent.width, src->extent.height,
+		     dst->extent.width, dst->extent.height);
+	}
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 	TransitionColorImage(vk_buffer, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
@@ -1698,6 +1812,152 @@ RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer, Rende
 		}
 	}
 	return decision;
+}
+
+namespace {
+
+// A new depth target follows the same rule as a new color target, with the
+// depth-specific native reasons (HTILE metadata, samples, aliases).
+ResolutionExtent DepthCandidateHostExtent(const RenderDepthInfo& depth)
+{
+	const ResolutionExtent guest {depth.width, depth.height};
+	const auto             snapshot = RenderResolutionGetSnapshot();
+	if (!snapshot.guest_registered || guest != snapshot.guest_display_extent)
+	{
+		return guest;
+	}
+	ResolutionResourceInfo resource;
+	resource.kind            = ResolutionResourceKind::DepthStencilAttachment;
+	resource.compressed      = depth.htile;
+	resource.sample_count    = static_cast<uint32_t>(depth.samples);
+	GpuMemoryOverlapSnapshot overlaps;
+	resource.ambiguous_alias = !GpuMemoryQueryOverlaps(depth.vaddr, depth.size, depth.vaddr_num, &overlaps) ||
+	                           !RenderResolutionAliasAllowsDepthTargetSnapshot(overlaps);
+	const auto decision      = RenderResolutionEvaluate(guest, resource);
+	if (decision.classification != ResolutionClassification::Scaled)
+	{
+		return guest;
+	}
+	const auto usage = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+	                                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (depth.sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0));
+	return VulkanSupportsResolutionAttachment(depth.format, depth.samples, usage, decision.host_extent) ? decision.host_extent : guest;
+}
+
+bool DescribeDepthCohortMember(CommandBuffer* buffer, const RenderDepthInfo& depth, RenderResolutionCohortMember* member)
+{
+	member->guest     = {depth.width, depth.height};
+	const auto images = GpuMemoryFindObjectsForSubmission(buffer, depth.vaddr, depth.size, depth.vaddr_num,
+	                                                      GpuMemoryObjectType::DepthStencilBuffer, true, false);
+	if (images.Size() > 1)
+	{
+		return false;
+	}
+	if (images.IsEmpty())
+	{
+		member->host      = DepthCandidateHostExtent(depth);
+		member->committed = false;
+		return true;
+	}
+	const auto* image = static_cast<const DepthStencilVulkanImage*>(images[0].obj);
+	if (image == nullptr)
+	{
+		return false;
+	}
+	member->host      = {image->extent.width, image->extent.height};
+	member->committed = true;
+	return true;
+}
+
+} // namespace
+
+// Offscreen color targets and their depth rasterize through one viewport, so
+// the whole cohort shares one guest and one host extent. Shader reads of a
+// scaled target are checked where the target is bound.
+RenderResolutionPlan PrepareRenderTargetResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color, const RenderDepthInfo& depth,
+                                                         ShaderPixelInputInfo* ps)
+{
+	EXIT_IF(buffer == nullptr || color == nullptr || ps == nullptr);
+	RenderResolutionPlan native;
+	native.classification = ResolutionClassification::Native;
+	native.reason         = RenderResolutionPlanReason::None;
+	if (!RenderTargetResolutionScopeEnabled() || !RenderColorHasActiveTarget(*color))
+	{
+		return native;
+	}
+
+	RenderResolutionCohortMember members[RenderColorInfo::TARGETS_MAX + 1];
+	uint32_t                     count         = 0;
+	bool                         other_targets = false;
+	for (uint32_t slot = 0; slot < color->targets_num && slot < RenderColorInfo::TARGETS_MAX; slot++)
+	{
+		if (!RenderColorSlotConfigured(*color, slot))
+		{
+			continue;
+		}
+		const auto& attachment = color->attachment[slot];
+		if (attachment.type != RenderColorType::RenderTexture)
+		{
+			other_targets = true;
+			continue;
+		}
+		auto& member     = members[count++];
+		member.guest     = {attachment.width, attachment.height};
+		member.committed = FindCommittedRenderTextureExtent(buffer, attachment, &member.host);
+		member.host      = member.committed ? member.host : RenderTextureCandidateHostExtent(attachment);
+	}
+	if (count == 0)
+	{
+		return native;
+	}
+	// A display buffer beside render textures belongs to the display cohort,
+	// so the render textures stay native next to it.
+	if (other_targets)
+	{
+		for (uint32_t index = 0; index < count; index++)
+		{
+			members[index].host = members[index].committed ? members[index].host : members[index].guest;
+		}
+	}
+	if (depth.format != VK_FORMAT_UNDEFINED && !DescribeDepthCohortMember(buffer, depth, &members[count++]))
+	{
+		RenderResolutionPlan ambiguous;
+		ambiguous.classification            = ResolutionClassification::Unsupported;
+		ambiguous.reason                    = RenderResolutionPlanReason::MismatchedHostExtent;
+		ambiguous.guest_extent              = members[0].guest;
+		ambiguous.host_extent               = members[0].host;
+		ambiguous.attachment_count          = count;
+		ambiguous.blocking_attachment_index = count - 1;
+		return ambiguous;
+	}
+
+	auto plan = EvaluateRenderTargetCohort(members, count);
+	if (other_targets && plan.classification == ResolutionClassification::Scaled)
+	{
+		plan.classification = ResolutionClassification::Unsupported;
+		plan.reason         = RenderResolutionPlanReason::MismatchedHostExtent;
+	}
+	if (plan.classification == ResolutionClassification::Scaled &&
+	    BuildRenderHostToGuestScale({plan.guest_extent.width, plan.guest_extent.height}, {plan.host_extent.width, plan.host_extent.height},
+	                                &ps->host_to_guest_scale) != RenderResolutionShaderScaleStatus::Success)
+	{
+		plan.classification = ResolutionClassification::Unsupported;
+		plan.reason         = RenderResolutionPlanReason::ShaderCoordinateAccess;
+	}
+	if (plan.classification == ResolutionClassification::Unsupported)
+	{
+		return plan;
+	}
+	for (uint32_t slot = 0; slot < color->targets_num && slot < RenderColorInfo::TARGETS_MAX; slot++)
+	{
+		if (!RenderColorSlotConfigured(*color, slot))
+		{
+			continue;
+		}
+		auto& attachment       = color->attachment[slot];
+		attachment.host_width  = plan.classification == ResolutionClassification::Scaled ? plan.host_extent.width : attachment.width;
+		attachment.host_height = plan.classification == ResolutionClassification::Scaled ? plan.host_extent.height : attachment.height;
+	}
+	return plan;
 }
 
 void RequireSupportedRenderResolutionPlan(const RenderResolutionPlan& decision)

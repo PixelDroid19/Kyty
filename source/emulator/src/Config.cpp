@@ -13,6 +13,7 @@ struct Config
 	uint32_t               screen_width                = 1280;
 	uint32_t               screen_height               = 720;
 	RenderResolutionMode   render_resolution_mode      = RenderResolutionMode::Fixed;
+	RenderResolutionScope  render_resolution_scope     = RenderResolutionScope::Display;
 	uint32_t               render_resolution_width     = 1280;
 	uint32_t               render_resolution_height    = 720;
 	PresentationFilter     presentation_filter         = PresentationFilter::Nearest;
@@ -107,6 +108,7 @@ void Load(const ConfigSource& cfg)
 	LoadInt(g_config->screen_width, cfg, U"ScreenWidth");
 	LoadInt(g_config->screen_height, cfg, U"ScreenHeight");
 	LoadStrictEnum(g_config->render_resolution_mode, cfg, U"RenderResolutionMode");
+	LoadStrictEnum(g_config->render_resolution_scope, cfg, U"RenderResolutionScope");
 	LoadInt(g_config->render_resolution_width, cfg, U"RenderResolutionWidth");
 	LoadInt(g_config->render_resolution_height, cfg, U"RenderResolutionHeight");
 	LoadStrictEnum(g_config->presentation_filter, cfg, U"PresentationFilter");
@@ -152,6 +154,11 @@ uint32_t GetScreenHeight()
 RenderResolutionMode GetRenderResolutionMode()
 {
 	return g_config->render_resolution_mode;
+}
+
+RenderResolutionScope GetRenderResolutionScope()
+{
+	return g_config->render_resolution_scope;
 }
 
 uint32_t GetRenderResolutionWidth()

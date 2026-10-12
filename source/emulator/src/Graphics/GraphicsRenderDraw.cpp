@@ -1380,6 +1380,20 @@ static GuestDeviceAddressReadPreparation PrepareGuestDeviceAddressForRead(
 	return GuestDeviceAddressReadPreparation::PendingWriteBack;
 }
 
+// The display cohort owns display buffers and depth-only display passes; the
+// render-target cohort owns scaled offscreen color targets and their depth.
+static const RenderResolutionPlan& SelectMaterializationResolution(const RenderColorInfo&      color,
+                                                                   const RenderResolutionPlan& depth_only,
+                                                                   const RenderResolutionPlan& display,
+                                                                   const RenderResolutionPlan& target)
+{
+	if (!RenderColorHasActiveTarget(color))
+	{
+		return depth_only;
+	}
+	return target.classification == ResolutionClassification::Scaled ? target : display;
+}
+
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
@@ -1604,9 +1618,12 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
+	const auto target_resolution = PrepareRenderTargetResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
+	RequireSupportedRenderResolutionPlan(target_resolution);
 	DebugStatsRecordDrawStateSetup(DrawStageElapsedNs(state_setup_start));
 	const auto materialization_start = DrawStageClock::now();
-	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
+	const auto& materialization_resolution = SelectMaterializationResolution(color_info, depth_only_resolution, resolution,
+	                                                                         target_resolution);
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
 	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.width : 0,
@@ -1762,7 +1779,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum,
-	                stencil_attached_depth, nullptr, &device_address_table);
+	                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info));
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 
 	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
@@ -2280,6 +2297,12 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		if (!supported_target_format) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !supported_target_format condition ignored (continuing)\n"); }
 	}
 	if (source->samples != target->samples || source->samples != sample_locations.sample_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source->samples != target->samples || source->samples != sample_locations.sample_count condition ignored (continuing)\n"); }
+	if ((source->IsResolutionScaled() || target->IsResolutionScaled()) &&
+	    (source->extent.width != target->extent.width || source->extent.height != target->extent.height))
+	{
+		EXIT("depth-stencil copy across render resolutions: source=%ux%u target=%ux%u\n", source->extent.width, source->extent.height,
+		     target->extent.width, target->extent.height);
+	}
 	const auto source_guest = source->GetGuestExtent();
 	const auto target_guest = target->GetGuestExtent();
 	if (source_guest.width != target_guest.width || source_guest.height != target_guest.height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source_guest.width != target_guest.width || source_guest.height != target_guest.height condition ignored (continuing)\n"); }
@@ -2567,9 +2590,12 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
+	const auto target_resolution = PrepareRenderTargetResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
+	RequireSupportedRenderResolutionPlan(target_resolution);
 	DebugStatsRecordDrawStateSetup(DrawStageElapsedNs(state_setup_start));
 	const auto materialization_start = DrawStageClock::now();
-	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
+	const auto& materialization_resolution = SelectMaterializationResolution(color_info, depth_only_resolution, resolution,
+	                                                                         target_resolution);
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
 	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.width : 0,
@@ -2745,7 +2771,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum,
-	                stencil_attached_depth, nullptr, &device_address_table);
+	                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info));
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 

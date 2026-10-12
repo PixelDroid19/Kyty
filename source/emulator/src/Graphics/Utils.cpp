@@ -145,12 +145,34 @@ static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uin
 	dst_image->layout = new_image_layout;
 }
 
+// A resolution-scaled render target stores host texels. Transfers that address
+// guest texels or guest bytes would read or write the wrong pixels, so they
+// are refused instead of silently resampled.
+static void RequireGuestAddressableImage(const VulkanImage* image, const char* operation)
+{
+	if (image == nullptr || image->type != VulkanImageType::RenderTexture || !image->IsResolutionScaled())
+	{
+		return;
+	}
+	EXIT("%s cannot address a resolution-scaled render target: guest=%ux%u host=%ux%u\n", operation, image->guest_extent.width,
+	     image->guest_extent.height, image->extent.width, image->extent.height);
+}
+
+// Render targets with the same guest and host extent share one texel grid, so
+// a host-extent copy between them stays exact.
+static bool ImagesShareTexelGrid(const VulkanImage* lhs, const VulkanImage* rhs)
+{
+	return lhs->guest_extent.width == rhs->guest_extent.width && lhs->guest_extent.height == rhs->guest_extent.height &&
+	       lhs->extent.width == rhs->extent.width && lhs->extent.height == rhs->extent.height;
+}
+
 void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image, uint64_t dst_layout)
 {
 	EXIT_IF(src_buffer == nullptr);
 	EXIT_IF(src_buffer->buffer == nullptr);
 	EXIT_IF(dst_image == nullptr);
 	EXIT_IF(dst_image->image == nullptr);
+	RequireGuestAddressableImage(dst_image, "buffer-to-image upload");
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
@@ -203,6 +225,7 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 	EXIT_IF(src_image == nullptr);
 	EXIT_IF(src_image->image == nullptr);
 	EXIT_IF(src_array_layer >= src_image->array_layers);
+	RequireGuestAddressableImage(src_image, "image-to-buffer readback");
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
@@ -232,6 +255,7 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 {
 	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_buffer == nullptr || regions.IsEmpty());
 	EXIT_IF(src_image->image == VK_NULL_HANDLE || dst_buffer->buffer == VK_NULL_HANDLE);
+	RequireGuestAddressableImage(src_image, "image-to-buffer readback");
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer,
@@ -264,6 +288,7 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanIm
 	EXIT_IF(src_buffer->buffer == nullptr);
 	EXIT_IF(dst_image == nullptr);
 	EXIT_IF(dst_image->image == nullptr);
+	RequireGuestAddressableImage(dst_image, "buffer-to-image upload");
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
@@ -418,6 +443,11 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 
 	for (const auto& requested: regions)
 	{
+		if (requested.src_image != nullptr && !ImagesShareTexelGrid(requested.src_image, dst_image))
+		{
+			RequireGuestAddressableImage(requested.src_image, "image copy");
+			RequireGuestAddressableImage(dst_image, "image copy");
+		}
 		ImageImageCopy r {};
 		if (!NormalizeImageImageCopy(requested, dst_image, &r))
 		{

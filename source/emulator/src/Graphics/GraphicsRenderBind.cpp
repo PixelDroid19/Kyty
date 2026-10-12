@@ -51,6 +51,7 @@
 #include <cinttypes>
 #include <chrono>
 #include <cstring>
+#include <initializer_list>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -4620,11 +4621,55 @@ static uint32_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const
 	return mask;
 }
 
+static bool AnyResolutionScaledImage(VulkanImage* const* images, int count)
+{
+	for (int i = 0; i < count; i++)
+	{
+		if (images[i] != nullptr && images[i]->IsResolutionScaled())
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// Under the RenderTargets scope a scaled image may only be sampled with
+// normalized coordinates by a stage that never addresses host texels; storage
+// views and unnormalized samplers would read or write host texels as guest ones.
+static void RequireScaledImageReads(ScaledImageReadAccess access, const ShaderSamplerResources& samplers, DescriptorCache::Stage stage,
+                                    std::initializer_list<VulkanImage* const*> sampled, VulkanImage* const* storage)
+{
+	if (AnyResolutionScaledImage(storage, DescriptorCache::TEXTURES_STORAGE_MAX))
+	{
+		EXIT("storage access to a resolution-scaled image: stage=%u\n", static_cast<unsigned>(stage));
+	}
+	bool sampled_scaled = false;
+	for (auto* images: sampled)
+	{
+		sampled_scaled = sampled_scaled || AnyResolutionScaledImage(images, DescriptorCache::TEXTURES_SAMPLED_MAX);
+	}
+	if (!sampled_scaled)
+	{
+		return;
+	}
+	if (access != ScaledImageReadAccess::NormalizedSampling)
+	{
+		EXIT("shader stage %u addresses host texels of a resolution-scaled image\n", static_cast<unsigned>(stage));
+	}
+	for (int i = 0; i < samplers.samplers_num; i++)
+	{
+		if (samplers.samplers[i].ForceUnormCoords())
+		{
+			EXIT("unnormalized sampler reads a resolution-scaled image: stage=%u\n", static_cast<unsigned>(stage));
+		}
+	}
+}
+
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
                      const VulkanImage* stencil_attached_depth, const ShaderStorageImageTileCoverage* storage_seed_coverage,
-                     const GuestDeviceAddressTable* device_address_table)
+                     const GuestDeviceAddressTable* device_address_table, ScaledImageReadAccess scaled_image_reads)
 {
 	KYTY_PROFILER_FUNCTION();
 	InvalidateComputeColorFills(bind);
@@ -4696,6 +4741,13 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			                textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures3d_sampled_uint,
 			                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr, &trace_session,
 			                stencil_attached_depth);
+			if (Config::GetRenderResolutionScope() == Config::RenderResolutionScope::RenderTargets)
+			{
+				RequireScaledImageReads(scaled_image_reads, bind.samplers, stage,
+				                        {textures2d_sampled, textures2d_sampled_depth, textures2d_array_sampled, textures3d_sampled,
+				                         textures2d_sampled_uint, textures2d_array_sampled_uint, textures3d_sampled_uint},
+				                        textures2d_storage);
+			}
 			if (record_draw_timing) { DebugStatsRecordDrawDescriptorTexture(BindingStageElapsedNs(stage_start)); }
 			need_descriptor = true;
 		}

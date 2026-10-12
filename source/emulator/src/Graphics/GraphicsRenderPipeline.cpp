@@ -1314,6 +1314,15 @@ void PipelineCache::SaveDriverCacheIfDue()
 	}
 }
 
+// A resolution cohort shares one guest and one host extent, so its first
+// attachment describes the framebuffer. Depth-only passes use the depth image.
+static const VulkanImage* ResolutionScaledFramebufferImage(const RenderColorInfo& color, const RenderDepthInfo& depth)
+{
+	const auto*        attachment = RenderColorFirstConfiguredAttachment(color);
+	const VulkanImage* image      = attachment != nullptr ? attachment->vulkan_buffer : depth.vulkan_buffer;
+	return image != nullptr && image->IsResolutionScaled() ? image : nullptr;
+}
+
 VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color,
                                               RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
@@ -1398,12 +1407,11 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	p.dynamic_params->scissor_ltrb[1]    = scissor.top;
 	p.dynamic_params->scissor_ltrb[2]    = scissor.right;
 	p.dynamic_params->scissor_ltrb[3]    = scissor.bottom;
-	if (color->targets_num == 1 && color->attachment[0].type == RenderColorType::DisplayBuffer &&
-	    color->attachment[0].vulkan_buffer != nullptr && color->attachment[0].vulkan_buffer->IsResolutionScaled())
+	if (const auto* scaled_image = ResolutionScaledFramebufferImage(*color, *depth); scaled_image != nullptr)
 	{
 		RenderResolutionTransform transform;
-		const ResolutionExtent        guest {color->attachment[0].width, color->attachment[0].height};
-		const ResolutionExtent        host {color->attachment[0].vulkan_buffer->extent.width, color->attachment[0].vulkan_buffer->extent.height};
+		const ResolutionExtent        guest {scaled_image->guest_extent.width, scaled_image->guest_extent.height};
+		const ResolutionExtent        host {scaled_image->extent.width, scaled_image->extent.height};
 		if (CreateRenderResolutionTransform(guest, host, &transform) != RenderResolutionTransformStatus::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: CreateRenderResolutionTransform(guest, host, &transform) != RenderResolutionTransformStatus::Success condition ignored (continuing)\n"); }
 
 		const auto         xy = State::ResolveViewportXy(p.dynamic_params->viewport_scale[0], p.dynamic_params->viewport_offset[0],
