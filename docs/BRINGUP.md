@@ -9,6 +9,33 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Command-processor costs after render pass continuation (2026-10-12)
+
+Intel Arc A770, `Fixed` 1280x720 + RenderTargets, the Unity fishing title in
+gameplay (about 1,160 draws per frame, 11.6 fps). A line-level CPU profile of
+the command-processor thread over 15 s puts 6.7% on the span scan of
+`GpuMemoryMaterializationCache::InvalidateRange` and 4.7% on the probe loop of
+`GpuDirtyPageTracker::FindPage`. No other source line takes more than 2%.
+
+- Excluded: long probe chains in the dirty-page table. Diagnostic counters
+  on the same route measured 79-90 k live pages and 75-79 k tombstones in the
+  262,144-slot table, with an average of 1.3 probe steps per lookup and 2.6-3.3
+  per miss. The cost is volume instead. Each `Rearm` performs about 400 page
+  lookups, and `GpuMemory::Update` re-arms every bound object once per guest
+  command batch, which gets a new submit id. The title submits about 78
+  batches per frame.
+- Inconclusive, not merged: a memo of recently invalidated clean ranges in
+  `InvalidateRange`. The fps windows were 11.9 / 11.5 / 10.9 against
+  11.2-11.6 before, and the phase counters were unchanged. The spread between
+  windows of one binary (about 9%) exceeds the largest gain the change could
+  give (about 6%). A repeat must compare the line share, not fps.
+- Excluded for the beat 'em up: emulator-inserted dispatches. Its roughly 300
+  dispatches per frame all come from guest `DISPATCH_DIRECT` and
+  `DISPATCH_INDIRECT` packets.
+- The remaining cost is spread across per-draw binding with no single item
+  above about 8%. Reaching 60 fps on this title needs a cheaper contract for
+  revalidating resources per guest batch, not another local optimization.
+
 ## Render pass continuation across draws (2026-10-12)
 
 - Contract: a draw continues the render pass instance that the previous draw
