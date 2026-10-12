@@ -51,10 +51,13 @@ fail on the current HEAD before acting on them.
     - `VUID-vkCmdDraw*-None-09600`: a depth layout mismatch at submit;
     - `VUID-RuntimeSpirv-OpEntryPoint-08743`.
     With those filtered, a 150 s run of the fishing title and a 115 s run of
-    the racing title report no error. The emulator exits at the first
-    validation error, so these runs do not compare how often the filtered
-    layout errors occur. A count comparison between both binaries without
-    exiting is still open.
+    the racing title report no error. Because the emulator exits at the first
+    validation error, a second pair of 150 s fishing-title runs logged every
+    error to a file without exiting and without a filter:
+    - before: 503 k draws, 6,374 `imageLayout-00344` (12.7 per 1,000 draws),
+      5,900 `None-09600` (11.7), 20 `OpEntryPoint-08743`;
+    - after: 579 k draws, 5,344 (9.2), 6,424 (11.1), 26;
+    - no other VUID in either run. The continuation adds no layout error.
   - Strict sweep:
     - Status 1 with captures matching the previous binary: the watercolour
       platformer, the gothic action platformer, the ninja platformer, the
