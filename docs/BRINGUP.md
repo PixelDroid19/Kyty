@@ -216,6 +216,14 @@ the command-processor thread over 15 s puts 6.7% on the span scan of
   slower menu load moved that window to the race start, where the whole field
   is on screen (`draws/f` 575 against 132). That window does not compare runs
   whose load times differ.
+- Repeat on the build with runtime typed descriptors: one 125 s strict
+  racing-title run per host (`Fixed` + RenderTargets, a capture every 4 s,
+  29 captures each). Every race capture on Intel (10) and on AMD (8) shows the
+  car's shadow attached under the car. The wing and wheel shapes are stable
+  between speeds and frames, and no smear trails behind the car. The edges
+  show only ordinary shadow-map stepping. In the sweep on that build, the
+  fixed perf window measured 96 fps on Intel and 24.5 fps on AMD, back at
+  or above the levels before this change.
 - Open defect found while excluding the viewport: `ResolveViewportDepth`
   (`GraphicsState.cpp`, the overload taking ZMIN/ZMAX) clamps the endpoints of
   the Vulkan depth range. That remaps depth linearly instead of clamping it:
