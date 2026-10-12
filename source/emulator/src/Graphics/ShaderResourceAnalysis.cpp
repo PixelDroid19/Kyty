@@ -28,6 +28,27 @@ bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const S
 	return false;
 }
 
+bool ShaderVectorBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst,
+                                             int user_data_register_base)
+{
+	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
+	    ShaderStorageBufferResourceIsBound(bind, inst.src[1], user_data_register_base))
+	{
+		return false;
+	}
+	for (uint32_t mapping = 0; mapping < bind.dynamic_sloads.records.Size(); ++mapping)
+	{
+		const auto& record = bind.dynamic_sloads.records.At(mapping);
+		if (record.kind == ShaderDynamicSLoadResourceKind::StorageBuffer &&
+		    record.destination_register == inst.src[1].register_id && inst.pc > record.instruction_pc &&
+		    inst.pc <= record.last_consumer_pc)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format)
 {
 	// GFX10+ unified formats 75, 76 and 77 are 32_32_32_32 with UINT,

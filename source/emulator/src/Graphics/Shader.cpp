@@ -3826,6 +3826,34 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 	return true;
 }
 
+// Instructions that dereference guest memory through a computed address: BVH
+// traversal, and scalar loads whose base is not the mapped extended pointer.
+// A vector buffer load whose V# no discovered resource describes reads
+// through a descriptor built at run time.
+static bool ShaderHasRuntimeDescriptorLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_register_base,
+                                           const char* type_prefix)
+{
+	const auto& instructions = code.GetInstructions();
+	return std::any_of(instructions.begin(), instructions.end(),
+	                   [&](const auto& inst)
+	                   {
+		                   return ShaderInstructionTypeStartsWith(inst.type, type_prefix) &&
+		                          ShaderVectorBufferUsesRuntimeDescriptor(bind, inst, user_data_register_base);
+	                   });
+}
+
+bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_register_base)
+{
+	return ShaderHasRuntimeDescriptorLoad(code, bind, user_data_register_base, "BufferLoad");
+}
+
+// Typed loads count outside the vertex stage only: there the stream resolver
+// owns the fetched stream V#s, whose base is a guest address by design.
+static bool ShaderHasUnboundTypedBufferLoad(const ShaderCode& code, const ShaderBindResources& bind)
+{
+	return ShaderHasRuntimeDescriptorLoad(code, bind, 0, "TBufferLoad");
+}
+
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                           ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable)
 {
@@ -3950,7 +3978,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->bind.program_base = ps_info->bind.program_base_used ? regs->ps_regs.data_addr : 0u;
 		const auto& instructions = analysis.code->GetInstructions();
 		ps_info->bind.device_address_used =
-		    analysis.pixel_analysis->has_global_memory_load ||
+		    analysis.pixel_analysis->has_global_memory_load || ShaderHasUnboundBufferLoad(*analysis.code, ps_info->bind) ||
+		    ShaderHasUnboundTypedBufferLoad(*analysis.code, ps_info->bind) ||
 		    std::any_of(instructions.begin(), instructions.end(), [&bind = ps_info->bind](const auto& inst) {
 			    return ShaderScalarBufferUsesRuntimeDescriptor(bind, inst) || ShaderScalarLoadNeedsGuestAddress(inst, bind);
 		    });
@@ -3976,26 +4005,6 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	ShaderCalcBindingIndices(&ps_info->bind);
 }
 
-// Instructions that dereference guest memory through a computed address: BVH
-// traversal, and scalar loads whose base is not the mapped extended pointer.
-// A vector buffer load whose V# register range is not a bound storage buffer
-// reads through a descriptor built at run time.
-bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_register_base)
-{
-	for (const auto& inst: code.GetInstructions())
-	{
-		if (!ShaderInstructionTypeStartsWith(inst.type, "BufferLoad") || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr)
-		{
-			continue;
-		}
-		if (!ShaderStorageBufferResourceIsBound(bind, inst.src[1], user_data_register_base))
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
 bool ShaderHasGlobalMemoryLoad(const ShaderCode& code)
 {
 	return code.HasAnyOf({ShaderInstructionType::GlobalLoadDword, ShaderInstructionType::GlobalLoadDwordx2,
@@ -4004,7 +4013,7 @@ bool ShaderHasGlobalMemoryLoad(const ShaderCode& code)
 
 static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBindResources& bind)
 {
-	if (ShaderHasUnboundBufferLoad(code, bind) || ShaderHasGlobalMemoryLoad(code))
+	if (ShaderHasUnboundBufferLoad(code, bind) || ShaderHasUnboundTypedBufferLoad(code, bind) || ShaderHasGlobalMemoryLoad(code))
 	{
 		return true;
 	}

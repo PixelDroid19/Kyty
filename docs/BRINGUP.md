@@ -9,6 +9,65 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Runtime-built typed buffer descriptors (2026-10-12)
+
+- Cause of the AMD fishing-title device loss at about 182 s: one pixel
+  shader builds a V# from `s_getpc` (base = program address + a constant
+  offset, 64 records, a format word written by the shader) and reads it with
+  `TBUFFER_LOAD_FORMAT_X ... idxen` (32_FLOAT). The Gen5 MTBUF lowering used
+  the V#'s first dword, the low half of a code address, as the index into the
+  storage-buffer descriptor array. RADV computes that descriptor address
+  modulo 2^32, so the fetch lands on an arbitrary page in the descriptor
+  window. When the page is unmapped, the kernel reports an `SQC (data)`
+  fault. Guest addresses differ between runs, which explains why the loss is
+  intermittent. The fault page and the set bases logged for the faulting
+  pipeline give an index that matches a 256-aligned code base.
+- Contract: a vector buffer load whose V# no discovered resource describes
+  holds a guest base. That means no bound storage-buffer register and no
+  mapped descriptor `S_LOAD` whose destination reaches this consumer. Such a
+  load is read through guest device addressing
+  (`ShaderVectorBufferUsesRuntimeDescriptor`). The MUBUF paths already did
+  this; the five Gen5 MTBUF recompilers now do too, outside the vertex stage.
+  The supported typed formats are unconverted 32-bit floats, so the dwords
+  are read as stored. The instruction's format sizes the element for the
+  range check ("the MTBUF derives the data format from the instruction").
+  Pixel and compute shaders with such a load request the device-address
+  table.
+- Limit: vertex-stage MTBUF loads keep the stream resolver, which owns the
+  fetched stream V#s. A vertex shader that builds a typed V# from `s_getpc`
+  is still clamped to zero by that resolver.
+- Excluded on the way:
+  - The vertex shader of the faulting pipeline indexes the descriptor array
+    only through metadata blocks 0 and 1. Its layout was stable for a whole
+    200 s run.
+  - The pixel shader's metadata blocks were always slots.
+  - Transient V# uniform uploads: each entry is its own buffer, keyed by
+    unique id plus range.
+  - Buffer-object use after free, the guest device-address table and its
+    imports, and image and sampler indices were all excluded. The fault also
+    reproduced with serialized submits and RADV shader sync.
+- Verified:
+  - AMD Raphael (RADV), strict 200 s fishing-title runs: three consecutive
+    runs with the fix reach gameplay without device loss (7.2-7.4 fps in the
+    hold windows). Before the fix, most baseline runs lost the device at
+    180-183 s.
+  - Intel Arc A770: a strict 200 s run reaches gameplay with no error, at
+    10.3-10.9 fps in the hold windows. A baseline run on the same route
+    measured 9.3-12.5 fps, so the difference is within the window spread.
+    Draws that use this pixel shader now pay a guest write-back before the
+    table is read. On Intel, this load used to read through an arbitrary
+    descriptor, so capture differences in those draws are corrections.
+  - Intel strict sweep (`Fixed` + RenderTargets): the watercolour
+    platformer, the gothic action platformer, the ninja platformer, the
+    isometric roguelike, the pixel exploration title, the artillery title,
+    the roguelite action platformer and the racing title ended with status 1
+    and the same capture counts as the previous binary, with coherent last
+    captures. The racing title's window 4 ran at 96 fps (136 draws/f),
+    against 84 fps (145 draws/f) before. The robot platformer still produces
+    no capture on Intel, as before.
+  - Unit suites: 997 shader and graphics tests, including two new getpc
+    typed-load cases. Gate scripts: boundaries, graphics tables.
+
 ## Command-processor costs after render pass continuation (2026-10-12)
 
 Intel Arc A770, `Fixed` 1280x720 + RenderTargets, the Unity fishing title in
@@ -103,7 +162,8 @@ the command-processor thread over 15 s puts 6.7% on the span scan of
 - Graphics diagnostics (16 integration tests) pass, as do the focused unit
   suites (615 tests).
 - Open defects:
-  - AMD fishing-title device loss, reproducible at about 182 s.
+  - AMD fishing-title device loss, reproducible at about 182 s. Fixed by
+    "Runtime-built typed buffer descriptors" above.
     - The kernel reports a gfxhub page fault from `fc_script` on ring 24,
       client `SQC (data)` (a scalar data read) with permission faults,
       followed by a timeout on the `gfx_0.0.0` ring. RADV marks the graphics
