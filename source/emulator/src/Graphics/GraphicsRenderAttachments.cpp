@@ -23,6 +23,7 @@
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/RenderResolutionAlias.h"
+#include "Emulator/Graphics/RenderResolutionDemotion.h"
 #include "Emulator/Graphics/RenderResolutionImageCapability.h"
 #include "Emulator/Graphics/RenderResolutionPlanner.h"
 #include "Emulator/Graphics/RenderResolutionPolicy.h"
@@ -1132,13 +1133,14 @@ void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, Rende
 }
 
 static bool VulkanSupportsResolutionAttachment(VkFormat format, VkSampleCountFlagBits samples, VkImageUsageFlags usage,
-                                               ResolutionExtent extent)
+                                               ResolutionExtent extent, VkFormatFeatureFlags format_features = 0)
 {
 	VulkanResolutionAttachmentRequest request;
-	request.extent        = extent;
-	request.format        = format;
-	request.sample_count  = samples;
-	request.usage         = usage;
+	request.extent          = extent;
+	request.format          = format;
+	request.sample_count    = samples;
+	request.usage           = usage;
+	request.format_features = format_features;
 	const auto capability = EvaluateVulkanResolutionAttachment(g_render_ctx->GetGraphicCtx(), request);
 	return capability.status == VulkanRenderResolutionCapabilityStatus::Success &&
 	       capability.decision.status == RenderResolutionImageCapabilityStatus::Supported;
@@ -1146,13 +1148,16 @@ static bool VulkanSupportsResolutionAttachment(VkFormat format, VkSampleCountFla
 
 // A new offscreen color target scales only under the RenderTargets scope, at
 // the registered guest display extent, as a GPU-owned single-sample target that
-// no other object aliases. The choice depends on the attachment alone, so
-// every pass over the same target selects the same Vulkan extent.
+// no other object aliases and that was never demoted. The choice depends on the
+// attachment alone, so every pass over the same target selects the same Vulkan
+// extent. A scaled target must be blittable, so any later use that needs guest
+// texels can resample it back to the guest extent.
 static ResolutionExtent RenderTextureCandidateHostExtent(const RenderColorAttachmentInfo& attachment)
 {
 	const ResolutionExtent guest {attachment.width, attachment.height};
 	const auto             snapshot = RenderResolutionGetSnapshot();
-	if (!snapshot.guest_registered || guest != snapshot.guest_display_extent)
+	if (!snapshot.guest_registered || guest != snapshot.guest_display_extent ||
+	    RenderResolutionRangeDemoted(attachment.base_addr, attachment.size))
 	{
 		return guest;
 	}
@@ -1170,7 +1175,9 @@ static ResolutionExtent RenderTextureCandidateHostExtent(const RenderColorAttach
 	const auto format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
 	const auto usage  = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 	                                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-	return VulkanSupportsResolutionAttachment(format, attachment.samples, usage, decision.host_extent) ? decision.host_extent : guest;
+	const auto blit   = static_cast<VkFormatFeatureFlags>(VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT);
+	return VulkanSupportsResolutionAttachment(format, attachment.samples, usage, decision.host_extent, blit) ? decision.host_extent
+	                                                                                                       : guest;
 }
 
 // A live image at the same range keeps the extent it was created with; a
@@ -1204,6 +1211,38 @@ static ResolutionExtent RenderTextureMaterializationExtent(CommandBuffer* buffer
 	ResolutionExtent host {attachment.width, attachment.height};
 	(void)FindCommittedRenderTextureExtent(buffer, attachment, &host);
 	return host;
+}
+
+RenderTextureVulkanImage* DemoteScaledRenderTexture(uint64_t submit_id, CommandBuffer* buffer, RenderTextureVulkanImage* image,
+                                                    uint64_t vaddr, uint64_t size, const RenderColorInfo* pass_color)
+{
+	EXIT_IF(buffer == nullptr || image == nullptr || !image->IsResolutionScaled());
+	for (uint32_t slot = 0; pass_color != nullptr && slot < pass_color->targets_num && slot < RenderColorInfo::TARGETS_MAX; slot++)
+	{
+		if (pass_color->attachment[slot].vulkan_buffer == image)
+		{
+			EXIT("a pass reads guest texels of its own resolution-scaled color attachment: slot=%u\n", slot);
+		}
+	}
+	GpuMemoryObjectDescription object;
+	if (!GpuMemoryDescribeObject(vaddr, size, image, &object) || object.type != GpuMemoryObjectType::RenderTexture)
+	{
+		EXIT("resolution-scaled render texture has no single guest range: vaddr=0x%016" PRIx64 " size=0x%" PRIx64 "\n", vaddr, size);
+	}
+	RenderResolutionDemoteRange(object.vaddr, object.size);
+	const auto*         params = object.params;
+	RenderTextureObject native(static_cast<RenderTextureFormat>(params[RenderTextureObject::PARAM_FORMAT]),
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_WIDTH]),
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_HEIGHT]),
+	                           params[RenderTextureObject::PARAM_TILED] != 0, params[RenderTextureObject::PARAM_NEO] != 0,
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_PITCH]),
+	                           params[RenderTextureObject::PARAM_WRITE_BACK] != 0,
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_SAMPLES]),
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]));
+	auto* demoted = static_cast<RenderTextureVulkanImage*>(
+	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, object.vaddr, object.size, native));
+	EXIT_IF(demoted == nullptr || demoted == image || demoted->IsResolutionScaled());
+	return demoted;
 }
 
 void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, RenderColorInfo* r)
@@ -1845,6 +1884,32 @@ ResolutionExtent DepthCandidateHostExtent(const RenderDepthInfo& depth)
 	return VulkanSupportsResolutionAttachment(depth.format, depth.samples, usage, decision.host_extent) ? decision.host_extent : guest;
 }
 
+// A cohort that cannot keep its scaled members returns to the guest extent:
+// committed scaled color targets are demoted (their content is resampled when
+// they materialize) and new members stay native. A committed scaled depth
+// target cannot be demoted and keeps the cohort unsupported.
+void DemoteRenderTargetCohort(const RenderColorInfo& color, const uint32_t* member_slots, uint32_t color_count,
+                              RenderResolutionCohortMember* members, uint32_t count)
+{
+	for (uint32_t index = 0; index < count; index++)
+	{
+		auto& member = members[index];
+		if (!member.committed)
+		{
+			member.host = member.guest;
+			continue;
+		}
+		if (index >= color_count || member.host == member.guest)
+		{
+			continue;
+		}
+		const auto& attachment = color.attachment[member_slots[index]];
+		RenderResolutionDemoteRange(attachment.base_addr, attachment.size);
+		member.host      = member.guest;
+		member.committed = false;
+	}
+}
+
 bool DescribeDepthCohortMember(CommandBuffer* buffer, const RenderDepthInfo& depth, RenderResolutionCohortMember* member)
 {
 	member->guest     = {depth.width, depth.height};
@@ -1888,6 +1953,7 @@ RenderResolutionPlan PrepareRenderTargetResolutionCohort(CommandBuffer* buffer, 
 	}
 
 	RenderResolutionCohortMember members[RenderColorInfo::TARGETS_MAX + 1];
+	uint32_t                     member_slots[RenderColorInfo::TARGETS_MAX] {};
 	uint32_t                     count         = 0;
 	bool                         other_targets = false;
 	for (uint32_t slot = 0; slot < color->targets_num && slot < RenderColorInfo::TARGETS_MAX; slot++)
@@ -1902,8 +1968,9 @@ RenderResolutionPlan PrepareRenderTargetResolutionCohort(CommandBuffer* buffer, 
 			other_targets = true;
 			continue;
 		}
-		auto& member     = members[count++];
-		member.guest     = {attachment.width, attachment.height};
+		member_slots[count] = slot;
+		auto& member        = members[count++];
+		member.guest        = {attachment.width, attachment.height};
 		member.committed = FindCommittedRenderTextureExtent(buffer, attachment, &member.host);
 		member.host      = member.committed ? member.host : RenderTextureCandidateHostExtent(attachment);
 	}
@@ -1911,6 +1978,7 @@ RenderResolutionPlan PrepareRenderTargetResolutionCohort(CommandBuffer* buffer, 
 	{
 		return native;
 	}
+	const uint32_t color_count = count;
 	// A display buffer beside render textures belongs to the display cohort,
 	// so the render textures stay native next to it.
 	if (other_targets)
@@ -1944,6 +2012,11 @@ RenderResolutionPlan PrepareRenderTargetResolutionCohort(CommandBuffer* buffer, 
 	{
 		plan.classification = ResolutionClassification::Unsupported;
 		plan.reason         = RenderResolutionPlanReason::ShaderCoordinateAccess;
+	}
+	if (plan.classification == ResolutionClassification::Unsupported)
+	{
+		DemoteRenderTargetCohort(*color, member_slots, color_count, members, count);
+		plan = EvaluateRenderTargetCohort(members, count);
 	}
 	if (plan.classification == ResolutionClassification::Unsupported)
 	{

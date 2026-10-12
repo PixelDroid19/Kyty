@@ -1160,6 +1160,17 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer,
                                                           GpuMemoryObjectType type, bool exact, bool only_first);
 bool                    GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 bool                    GpuMemoryQueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
+
+struct GpuMemoryObjectDescription
+{
+	GpuMemoryObjectType type                         = GpuMemoryObjectType::Invalid;
+	uint64_t            vaddr                        = 0;
+	uint64_t            size                         = 0;
+	uint64_t            params[GpuObject::PARAMS_MAX] = {};
+};
+// Describes the single-range object `obj` among the objects overlapping
+// [vaddr, vaddr + size): its own guest range and its creation parameters.
+bool GpuMemoryDescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
 // Validates a bounded allocated range and classifies its cached GPU overlaps.
 // Capture/compare additionally require dirty-page tracking and reject a read
 // if a CPU/HLE writer changes the range during that transaction.

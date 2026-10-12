@@ -1714,13 +1714,21 @@ enum class ScaledImageReadAccess : uint8_t
 	return host_texel_access ? ScaledImageReadAccess::Refused : ScaledImageReadAccess::NormalizedSampling;
 }
 
+// A use that addresses guest texels demotes a resolution-scaled render target:
+// its range stops scaling and its content is resampled into a guest-extent
+// image. `pass_color` holds the color attachments of the current pass, or is
+// null when the pass has none; a pass cannot demote its own attachment.
+RenderTextureVulkanImage* DemoteScaledRenderTexture(uint64_t submit_id, CommandBuffer* buffer, RenderTextureVulkanImage* image,
+                                                    uint64_t vaddr, uint64_t size, const RenderColorInfo* pass_color);
+
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr,
                      uint64_t shader_checksum = 0, const VulkanImage* stencil_attached_depth = nullptr,
                      const ShaderStorageImageTileCoverage* storage_seed_coverage = nullptr,
                      const GuestDeviceAddressTable* device_address_table = nullptr,
-                     ScaledImageReadAccess scaled_image_reads = ScaledImageReadAccess::Refused);
+                     ScaledImageReadAccess scaled_image_reads = ScaledImageReadAccess::Refused,
+                     const RenderColorInfo* pass_color = nullptr);
 void TraceRenderTargetLifetimeDraw(uint64_t submit_id, const DrawMaterialTraceContext& draw);
 void TraceRenderTargetLifetimePassBegin(uint64_t submit_id, const RenderColorInfo& color,
 	                                    const VulkanFramebuffer& framebuffer);

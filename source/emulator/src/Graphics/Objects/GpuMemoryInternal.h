@@ -328,6 +328,7 @@ public:
 	                                    bool only_first, const SubmissionId* submission = nullptr);
 	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 	bool                    QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
+	bool                    DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
 	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size);
 	bool                    CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns,
 	                                                      uint64_t* copy_ns);

@@ -91,6 +91,23 @@ bool RenderTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t
 	return incoming_layers > 0u && existing_layers >= incoming_layers;
 }
 
+bool RenderTextureChangesHostExtent(const uint64_t* existing, const uint64_t* incoming)
+{
+	if (existing == nullptr || incoming == nullptr)
+	{
+		return false;
+	}
+	for (int param = RenderTextureObject::PARAM_FORMAT; param <= RenderTextureObject::PARAM_ARRAY_LAYERS; param++)
+	{
+		if (existing[param] != incoming[param])
+		{
+			return false;
+		}
+	}
+	return existing[RenderTextureObject::PARAM_HOST_WIDTH] != incoming[RenderTextureObject::PARAM_HOST_WIDTH] ||
+	       existing[RenderTextureObject::PARAM_HOST_HEIGHT] != incoming[RenderTextureObject::PARAM_HOST_HEIGHT];
+}
+
 RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order)
 {
 	if (format == 0x1u && channel_type == 0x0u && channel_order == 0x0u)
@@ -496,12 +513,42 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	return vk_obj;
 }
 
+// The same target at another host extent: resample the live image so its
+// content survives the extent change.
+static void* create_resampled_render_texture(GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* params,
+                                             RenderTextureVulkanImage* source, VulkanMemory* mem)
+{
+	EXIT_IF(buffer == nullptr || source == nullptr || source->guest_size == 0u);
+	const uint64_t guest_size = source->guest_size;
+	auto*          vk_obj     = create_render_texture_image(ctx, params, mem, &guest_size);
+
+	VkFormatProperties properties {};
+	vkGetPhysicalDeviceFormatProperties(ctx->physical_device, vk_obj->format, &properties);
+	const bool linear = (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+	UtilBlitImageToImage(buffer, source, vk_obj, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
+	                     static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+
+	create_render_texture_image_views(ctx, vk_obj);
+	return vk_obj;
+}
+
 static void* create2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* params, GpuMemoryScenario scenario,
                           const Vector<GpuMemoryObject>& objects, VulkanMemory* mem)
 {
 	KYTY_PROFILER_BLOCK("RenderTextureObject::CreateFromObjects");
 
 	EXIT_IF(objects.IsEmpty());
+	if (scenario == GpuMemoryScenario::Common && objects.Size() == 1 && objects.At(0).type == GpuMemoryObjectType::RenderTexture)
+	{
+		auto* source = static_cast<RenderTextureVulkanImage*>(objects.At(0).obj);
+		EXIT_IF(source == nullptr);
+		if (source->array_layers == params[RenderTextureObject::PARAM_ARRAY_LAYERS] &&
+		    (source->extent.width != params[RenderTextureObject::PARAM_HOST_WIDTH] ||
+		     source->extent.height != params[RenderTextureObject::PARAM_HOST_HEIGHT]))
+		{
+			return create_resampled_render_texture(ctx, buffer, params, source, mem);
+		}
+	}
 	uint64_t       growing_guest_size = 0;
 	const uint64_t* guest_size        = nullptr;
 	if (scenario == GpuMemoryScenario::Common && objects.Size() == 1 &&

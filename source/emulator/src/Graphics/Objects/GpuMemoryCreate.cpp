@@ -1237,6 +1237,23 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// Equals: same guest range re-registered as StorageBuffer (captured
 				// post-menu). RO share: partial overlapping RO views.
 				overlap = true;
+			} else if (o.object.type == GpuMemoryObjectType::RenderTexture && info.type == GpuMemoryObjectType::RenderTexture &&
+			           obj.relation == OverlapType::Equals && RenderTextureChangesHostExtent(o.params, info.params))
+			{
+				// A target returns at another host extent (a demoted resolution-scaled
+				// target). A Vulkan image cannot change extent, so the content is
+				// resampled into a new image and the old one retires.
+				if (buffer == nullptr || h.block.vaddr_num != 1 || vaddr_num != 1 || !h.others.IsEmpty() ||
+				    !GpuMemoryIsGpuOwnedRenderTextureParams(o.params))
+				{
+					EXIT("render target cannot change host extent: vaddr=0x%016" PRIx64 " size=0x%" PRIx64 " links=%u host=%" PRIu64
+					     "x%" PRIu64 " requested=%" PRIu64 "x%" PRIu64 "\n",
+					     vaddr[0], size[0], static_cast<uint32_t>(h.others.Size()), o.params[RenderTextureObject::PARAM_HOST_WIDTH],
+					     o.params[RenderTextureObject::PARAM_HOST_HEIGHT], info.params[RenderTextureObject::PARAM_HOST_WIDTH],
+					     info.params[RenderTextureObject::PARAM_HOST_HEIGHT]);
+				}
+				create_from_objects = true;
+				retire_after_copy_ids.Add(obj.object_id);
 			} else if (buffer != nullptr && o.object.type == GpuMemoryObjectType::RenderTexture &&
 			           info.type == GpuMemoryObjectType::RenderTexture && obj.relation == OverlapType::IsContainedWithin &&
 			           h.block.vaddr_num == 1 && vaddr_num == 1 && h.block.vaddr[0] == vaddr[0] && h.block.size[0] < size[0] &&

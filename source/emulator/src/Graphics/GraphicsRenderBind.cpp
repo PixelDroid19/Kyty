@@ -3215,7 +3215,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
                             int* images_sampled_uint_view, VulkanImage** images_sampled_array_uint,
                             int* images_sampled_array_uint_view, VulkanImage** images_sampled_3d_uint,
                             int* images_sampled_3d_uint_view, int* images_storage_view, uint32_t storage_seed_skip_mask,
-                            uint32_t** sgprs, DrawMaterialTraceSession* material_trace, const VulkanImage* stencil_attached_depth)
+                            uint32_t** sgprs, DrawMaterialTraceSession* material_trace, const VulkanImage* stencil_attached_depth,
+                            bool scaled_sampling_refused, const RenderColorInfo* pass_color)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -3732,6 +3733,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					}
 					tex         = rtex.At(static_cast<int>(alias_index));
 					materialize = rt_exact ? "rt-exact" : "rt-inexact";
+					// Storage views and refused sampling address guest texels.
+					if (tex->IsResolutionScaled() && (textures.desc[i].textures2d_without_sampler || scaled_sampling_refused))
+					{
+						tex = DemoteScaledRenderTexture(submit_id, buffer, rtex.At(static_cast<int>(alias_index)), addr, size.size,
+						                                pass_color);
+						materialize = "rt-demoted";
+					}
 				}
 			}
 			// Live StorageTexture (compute/UAV) can own GPU pixels without ever
@@ -4636,6 +4644,24 @@ static bool AnyResolutionScaledImage(VulkanImage* const* images, int count)
 // Under the RenderTargets scope a scaled image may only be sampled with
 // normalized coordinates by a stage that never addresses host texels; storage
 // views and unnormalized samplers would read or write host texels as guest ones.
+static bool ScaledSamplingRefused(ScaledImageReadAccess access, const ShaderSamplerResources& samplers)
+{
+	if (access != ScaledImageReadAccess::NormalizedSampling)
+	{
+		return true;
+	}
+	for (int i = 0; i < samplers.samplers_num; i++)
+	{
+		if (samplers.samplers[i].ForceUnormCoords())
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// Render targets are demoted where they are bound; any scaled image left here
+// has no demotion path.
 static void RequireScaledImageReads(ScaledImageReadAccess access, const ShaderSamplerResources& samplers, DescriptorCache::Stage stage,
                                     std::initializer_list<VulkanImage* const*> sampled, VulkanImage* const* storage)
 {
@@ -4648,20 +4674,9 @@ static void RequireScaledImageReads(ScaledImageReadAccess access, const ShaderSa
 	{
 		sampled_scaled = sampled_scaled || AnyResolutionScaledImage(images, DescriptorCache::TEXTURES_SAMPLED_MAX);
 	}
-	if (!sampled_scaled)
+	if (sampled_scaled && ScaledSamplingRefused(access, samplers))
 	{
-		return;
-	}
-	if (access != ScaledImageReadAccess::NormalizedSampling)
-	{
-		EXIT("shader stage %u addresses host texels of a resolution-scaled image\n", static_cast<unsigned>(stage));
-	}
-	for (int i = 0; i < samplers.samplers_num; i++)
-	{
-		if (samplers.samplers[i].ForceUnormCoords())
-		{
-			EXIT("unnormalized sampler reads a resolution-scaled image: stage=%u\n", static_cast<unsigned>(stage));
-		}
+		EXIT("shader stage %u reads guest texels of a resolution-scaled image\n", static_cast<unsigned>(stage));
 	}
 }
 
@@ -4669,7 +4684,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
                      const VulkanImage* stencil_attached_depth, const ShaderStorageImageTileCoverage* storage_seed_coverage,
-                     const GuestDeviceAddressTable* device_address_table, ScaledImageReadAccess scaled_image_reads)
+                     const GuestDeviceAddressTable* device_address_table, ScaledImageReadAccess scaled_image_reads,
+                     const RenderColorInfo* pass_color)
 {
 	KYTY_PROFILER_FUNCTION();
 	InvalidateComputeColorFills(bind);
@@ -4740,7 +4756,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			                textures3d_sampled_view, textures2d_sampled_uint, textures2d_sampled_uint_view,
 			                textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures3d_sampled_uint,
 			                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr, &trace_session,
-			                stencil_attached_depth);
+			                stencil_attached_depth, ScaledSamplingRefused(scaled_image_reads, bind.samplers), pass_color);
 			if (Config::GetRenderResolutionScope() == Config::RenderResolutionScope::RenderTargets)
 			{
 				RequireScaledImageReads(scaled_image_reads, bind.samplers, stage,

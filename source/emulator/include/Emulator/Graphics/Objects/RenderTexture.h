@@ -56,6 +56,8 @@ struct RenderTextureArrayView
                                                  RenderTextureArrayView* view);
 [[nodiscard]] bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
 [[nodiscard]] bool RenderTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t* incoming);
+// The same guest target, layers included, requested at another host extent.
+[[nodiscard]] bool RenderTextureChangesHostExtent(const uint64_t* existing, const uint64_t* incoming);
 
 [[nodiscard]] RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order);
 [[nodiscard]] uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format);

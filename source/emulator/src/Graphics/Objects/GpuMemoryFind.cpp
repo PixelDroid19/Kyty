@@ -94,6 +94,39 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 	return ret;
 }
 
+bool GpuMemory::DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out)
+{
+	EXIT_IF(obj == nullptr || out == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+
+	const int heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return false;
+	}
+	auto& heap = m_heaps[heap_id];
+	for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1))
+	{
+		const auto& h = heap.objects[block.object_id];
+		EXIT_IF(h.free);
+		if (h.info.object.obj != obj)
+		{
+			continue;
+		}
+		if (h.block.vaddr_num != 1)
+		{
+			return false;
+		}
+		out->type  = h.info.object.type;
+		out->vaddr = h.block.vaddr[0];
+		out->size  = h.block.size[0];
+		std::memcpy(out->params, h.info.params, sizeof(out->params));
+		return true;
+	}
+	return false;
+}
+
 bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out)
 {
 	if (out == nullptr)

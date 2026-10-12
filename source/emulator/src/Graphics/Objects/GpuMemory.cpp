@@ -840,6 +840,16 @@ bool GpuMemoryQueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRange
 	return g_gpu_memory != nullptr && g_gpu_memory->QueryRangeProvenance(vaddr, size, out);
 }
 
+bool GpuMemoryDescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out)
+{
+	if (out == nullptr || obj == nullptr || size == 0)
+	{
+		return false;
+	}
+	*out = GpuMemoryObjectDescription {};
+	return g_gpu_memory != nullptr && g_gpu_memory->DescribeObject(vaddr, size, obj, out);
+}
+
 void GpuMemoryResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type)
 {
 	EXIT_IF(g_gpu_memory == nullptr);

@@ -556,6 +556,47 @@ void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_
 	                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
+void UtilBlitImageToImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, VkFilter filter, uint64_t dst_layout)
+{
+	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_image == nullptr);
+	EXIT_IF(src_image->image == nullptr || dst_image->image == nullptr);
+	EXIT_IF(src_image->format != dst_image->format || src_image->array_layers != dst_image->array_layers ||
+	        src_image->samples != VK_SAMPLE_COUNT_1_BIT || dst_image->samples != VK_SAMPLE_COUNT_1_BIT);
+
+	// An image that was never written holds no texels to carry over.
+	const auto source_layout = src_image->layout;
+	if (source_layout == VK_IMAGE_LAYOUT_UNDEFINED)
+	{
+		return;
+	}
+
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	set_image_layout(vk_buffer, src_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, source_layout,
+	                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+	VkImageBlit region {};
+	region.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.srcSubresource.mipLevel       = 0;
+	region.srcSubresource.baseArrayLayer = 0;
+	region.srcSubresource.layerCount     = src_image->array_layers;
+	region.srcOffsets[1].x               = static_cast<int>(src_image->extent.width);
+	region.srcOffsets[1].y               = static_cast<int>(src_image->extent.height);
+	region.srcOffsets[1].z               = 1;
+	region.dstSubresource                = region.srcSubresource;
+	region.dstOffsets[1].x               = static_cast<int>(dst_image->extent.width);
+	region.dstOffsets[1].y               = static_cast<int>(dst_image->extent.height);
+	region.dstOffsets[1].z               = 1;
+	vkCmdBlitImage(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_image->image,
+	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter);
+
+	set_image_layout(vk_buffer, src_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                 source_layout);
+	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	                 static_cast<VkImageLayout>(dst_layout));
+}
+
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter)
 {
 	EXIT_IF(dst_swapchain == nullptr);
