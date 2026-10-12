@@ -69,7 +69,9 @@ A new color target is a scaling candidate only when all of these hold:
 - it is single-sample;
 - its range is aliased by nothing but at most one exact storage-buffer view
   and one exact texture view;
-- the device supports the format, samples and usage at the host extent.
+- the device supports the format, samples and usage at the host extent, and
+  can blit the format in both directions;
+- its range was never demoted (see below).
 
 A new depth target follows the same rule. Storage views of its planes are its
 only allowed aliases, because depth is never uploaded from guest memory and
@@ -79,16 +81,35 @@ A target that already exists fixes its own extent: a Vulkan image cannot change
 extent in place. Every color target and the depth of a pass form one cohort with
 one guest extent and one host extent. The cohort scales only when every member
 agrees, and a committed member decides the extent for new ones. Mixed guest
-extents keep the cohort native. A committed scaled member beside a native one,
-or beside a display buffer, is unsupported and stops the run.
+extents keep the cohort native.
 
 A scaled cohort uses the same viewport, scissor and pixel-shader host-to-guest
 transform as the display cohort. Shader reads of a scaled image are allowed
-only through normalized sampling without texel offsets. Integer texel access,
-size queries, texel offsets and storage access stop the run. Copies, resolves
-and depth copies between images at different host extents stop the run as
-well, and so does a depth pass that would address a scaled depth at another
-extent.
+only through normalized sampling without texel offsets.
+
+### Demotion
+
+Scaling a color target is speculative: the first use that needs guest texels
+revokes it. Demotion records the target's guest range, so the range never
+scales again, and resamples the scaled image into a new image at the guest
+extent (a linear blit when the format supports linear filtering, nearest
+otherwise). The scaled image retires after the copy. Two uses demote:
+
+- a cohort that cannot keep its scaled members, such as a committed scaled
+  color target beside a native depth or a display buffer. Its committed scaled
+  color targets are demoted and its new members stay native;
+- a storage view, integer texel access, size query, texel offset or
+  unnormalized sampler that binds a scaled color target. A pass cannot demote
+  its own color attachment; that stops the run.
+
+The demotion set holds 256 ranges. Once it is full, every range counts as
+demoted and new targets stay native.
+
+Depth is not demoted. A committed scaled depth beside a native member, a depth
+pass that would address a scaled depth at another extent, and any scaled image
+other than a color render target reaching a refused use stop the run. Copies,
+resolves and depth copies between images at different host extents stop the
+run as well.
 
 `BRINGUP.md` records the measured effect and the titles that hit each refusal.
 

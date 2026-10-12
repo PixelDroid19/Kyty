@@ -9,6 +9,62 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Render-target demotion under the RenderTargets scope (2026-10-12)
+
+- Contract: scaling a color target is speculative. The first use that needs
+  guest texels demotes it: its range is recorded, so it never scales again,
+  and the scaled image is resampled into a guest-extent image that replaces
+  it. `docs/render-resolution.md` lists the demoting uses and the remaining
+  refusals. Depth is not demoted.
+- Pieces:
+  - a bounded demotion set (`RenderResolutionDemotion.cpp`, 256 ranges, then
+    saturated: every range counts as demoted);
+  - a scaled color candidate must also support blit source and destination
+    for its format;
+  - `GpuMemoryCreate.cpp` treats a render texture requested at the same range
+    with only another host extent as create-from-objects plus retire, and the
+    render-texture create path blits every layer (linear when the format
+    filters linearly);
+  - the render-target cohort demotes its committed scaled color members and
+    keeps new members native instead of returning an unsupported plan;
+  - the texture binding path demotes a scaled render texture selected for a
+    storage view or for a stage whose sampling is refused, unless it is a
+    color attachment of the same pass.
+- Cross-queue ordering: the resample is recorded into the command buffer of
+  the consumer, before its use, so it inherits the ordering the guest already
+  gives that consumer's direct read.
+- Measured with a temporary counter (removed) on Intel Arc A770 and AMD
+  Raphael (RADV), `Fixed` 1280x720 + RenderTargets:
+  - the watercolour platformer demotes four 0x870000-byte ranges, once each,
+    at the binding path, and runs to the end of its 90 s route; captures match
+    the `Display` scope run of the same scene. Intel 174 and 138 fps, AMD 53,
+    64 and 54 fps.
+  - the racing title demotes two ranges, once each, at the cohort and drives:
+    Intel 83.3 and 89.1 fps in the drive window (two runs), AMD 32.6 fps.
+    Captures show the same defective car shadow quads as `Native`.
+  - the beat 'em up demotes nothing. AMD: 12.0, 11.6, 10.2 and 12.5, 10.8,
+    10.2 fps against 13.0, 11.7 and 10.0 for a build of `5e6a9216` in the
+    same session; p50 frame times match (77, 80-82 and 94-96 ms). Every color
+    format RADV exposes as an attachment supports blit in both directions, so
+    the new capability requirement does not change which targets scale there.
+- `Fixed` + RenderTargets on Intel keeps status 1 for the watercolour
+  platformer, the gothic action platformer, the ninja platformer, the
+  isometric roguelike, the pixel exploration title, the artillery title, the
+  roguelite action platformer, the racing title and the robot platformer.
+  On AMD the same set keeps status 1 except the robot platformer; the racing
+  title drives at 40.4 fps there.
+- Open, found while verifying: the robot platformer on AMD stops at about
+  78 s with `!create_all_the_same` (`GpuMemoryCreate.cpp:2186`): a 960-wide
+  StorageTexture at 0x53bcf0000 crosses and contains eleven storage-buffer,
+  storage-texture and render-texture parents. It stops the same way with a
+  build of `5e6a9216` under `Fixed` + RenderTargets and with this change at
+  `Native`, so it predates the change and does not depend on the scope.
+  Direction: classify which parents the dispatch overwrites and which it
+  reads, from a bounded dump of the parents' guest ranges and formats.
+- Not done: depth demotion, and making RenderTargets the default (that needs
+  full sweeps on both hosts and repeated runs of the roguelite action
+  platformer on AMD).
+
 ## Offscreen render-target scaling, opt-in (2026-10-12)
 
 - `RenderResolutionScope = RenderTargets` (`KYTY_RENDER_RESOLUTION_SCOPE`)
@@ -38,16 +94,15 @@ fail on the current HEAD before acting on them.
 - On Intel Arc A770 the beat 'em up is CPU-bound and stays flat under
   RenderTargets: 13.9, 12.5 and 10.9 fps against 14.2, 12.7 and 11.6 at
   `Native`. Its captures are correct.
-- Refusals. On both hosts these stop with a diagnostic instead of mixing
-  extents, so the scope is not the default:
-  - The watercolour platformer stops at a compute storage access to a scaled
+- Refusals at this commit, on both hosts; both are resolved by the demotion
+  entry below:
+  - The watercolour platformer stopped at a compute storage access to a scaled
     render texture (`GraphicsRenderBind.cpp`, "storage access to a
     resolution-scaled image").
-  - The racing title stops at a cohort that pairs a committed scaled render
-    texture with a native one ("mismatched_host_extent",
-    `attachment_index=1`).
-  - Direction: decide scaling from the target's later uses, or materialize a
-    native copy when a scaled target meets a native-only consumer.
+  - The racing title stopped at a cohort that pairs a committed scaled color
+    target with a committed native depth ("mismatched_host_extent",
+    `attachment_index=1`). A bounded diagnostic showed the depth is
+    HTILE-compressed, so it was never a scaling candidate.
 - `Fixed` + RenderTargets keeps status 1:
   - on Intel: the gothic action platformer, the ninja platformer, the
     isometric roguelike, the pixel exploration title, the artillery title,
