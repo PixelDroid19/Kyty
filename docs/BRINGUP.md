@@ -30,12 +30,16 @@ fail on the current HEAD before acting on them.
   the Unity fishing title keep status 1; the racing title keeps status 1 on
   Intel and on AMD Raphael (RADV). Race captures show correct car shadows. The
   graphics diagnostics integration (17) and the graphics-state unit tests pass.
-- Not attributed: the racing title's drive window measured 29.0 fps on Intel
-  and 20.0 fps on AMD, against 83-89 and 40.4 fps in earlier sessions. Menu
-  windows, which this change does not touch, were also slower (352 against
-  426 fps), a user GPU workload was running, and the window fell at another
-  point of the race (`draws/f` 575 against 132). No same-session baseline was
-  run, so the cause of the difference is open.
+  Each title's last captures match its previous RenderTargets sweep, apart
+  from scene timing and the artillery title's random map.
+- Performance: unchanged. Two same-session strict runs at the harness
+  default resolution, before and after the change, sampled the race every
+  4 s while a user GPU workload was running: 25.6-52.5 fps before and
+  25.9-55.6 fps after. A perf window at a fixed time offset measured 29.0 fps
+  on Intel and 20.0 fps on AMD against 83-89 and 40.4 fps earlier, because a
+  slower menu load moved that window to the race start, where the whole field
+  is on screen (`draws/f` 575 against 132). That window does not compare runs
+  whose load times differ.
 - Open defect found while excluding the viewport: `ResolveViewportDepth`
   (`GraphicsState.cpp`, the overload taking ZMIN/ZMAX) clamps the endpoints of
   the Vulkan depth range. That remaps depth linearly instead of clamping it:
