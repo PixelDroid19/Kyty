@@ -797,9 +797,11 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	}
 }
 
+// The scope selects what Fixed applies to; at Native it changes nothing.
 static bool RenderTargetResolutionScopeEnabled()
 {
-	return Config::GetRenderResolutionScope() == Config::RenderResolutionScope::RenderTargets;
+	return Config::GetRenderResolutionMode() == Config::RenderResolutionMode::Fixed &&
+	       Config::GetRenderResolutionScope() == Config::RenderResolutionScope::RenderTargets;
 }
 
 // A depth image keeps the extent it was created with. A pass that asks for
