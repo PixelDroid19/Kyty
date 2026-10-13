@@ -9,6 +9,42 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: storage image over a sampled and a buffer view (2026-10-13)
+
+- Observed: after the pixel append fix, the Intel run stopped at 228 s on
+  `!create_all_the_same`. The new object is a 128x128 R32 StorageTexture
+  (64 KiB). Its range equals two live objects:
+  - a sampled Texture with the same format, pitch, extent, tile and swizzle,
+    created with its guest upload skipped;
+  - a StorageBuffer of 4,096 16-byte records, uploaded from guest memory,
+    with a write-back, not in use.
+  The single-parent path already links each of these relations
+  (`GpuMemoryAllowsTextureStorageAlias`). The multi-parent path had no rule
+  for mixed parent types, so it reached the EXIT.
+- Change (`GpuMemoryCreate.cpp`): `multi_storage_texture_alias` replaces only
+  that EXIT. It links the new image when every parent independently passes
+  `GpuMemoryAllowsTextureStorageAlias` and has published its content to
+  guest memory: no texture materialized from a device image, and no buffer
+  with an unfinished writable write-back. The image seeds from guest bytes.
+  No earlier branch changes, so titles that did not reach the EXIT keep
+  their path.
+- Verified:
+  - Intel robot platformer, twice: past the overlap, 1,277 frames at
+    3.4-10.9 fps. It stops at 253 s on the 32-entry texture table: the
+    shader declares more read-only texture slots. That is the next stop.
+  - Unit tests: 2,414 pass.
+- Open (coherence, not verified):
+  - Storage images have no write-back
+    (`StorageTexture.h:53`).
+  - A buffer write-back does not invalidate a StorageTexture parent
+    (`GpuMemory.h:775`).
+  - So the image's writes do not reach the sampled view (which holds no guest
+    bytes) or the buffer view. The other direction works: a buffer
+    write-back changes guest bytes, and the image's hash check reloads them.
+  - Suggested direction: publish storage-image writes to linked views, by
+    copy or write-back. Judge it with a scored capture of a scene that uses
+    this range.
+
 ## Robot platformer: pixel GDS append under the launch EXEC (2026-10-13)
 
 - Observed: the same linked-list pixel program allocates its node slot as
