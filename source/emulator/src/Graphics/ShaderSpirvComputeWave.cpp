@@ -260,7 +260,8 @@ const ShaderFragmentLaneReductions& Spirv::FragmentLaneReductions() const
 		    m_ps_input_info->native_wave.proof == ShaderNativeWaveProof::FragmentPartialWave &&
 		    m_ps_input_info->native_wave.refusal_reason == nullptr)
 		{
-			m_lane_reductions = ShaderFindFragmentLaneReductions(m_code, ShaderAnalyzeFragmentMaskFlow(m_code));
+			m_lane_reductions = ShaderFindFragmentLaneReductions(
+			    m_code, ShaderAnalyzeFragmentMaskFlow(m_code, m_ps_input_info->native_wave.guest_wave_size));
 		}
 	}
 	return m_lane_reductions;

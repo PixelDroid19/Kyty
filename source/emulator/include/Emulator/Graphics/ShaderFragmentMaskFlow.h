@@ -62,7 +62,9 @@ struct ShaderFragmentMaskFlow
 //  - Derivative texture fetches are refused inside a divergent region or divergent loop.
 //  - S_WQM_B64 is the identity on an existing quad lane; it is only closed inside a
 //    validated save/widen/restore bracket with no export and no save-area write.
-[[nodiscard]] ShaderFragmentMaskFlow ShaderAnalyzeFragmentMaskFlow(const ShaderCode& code);
+//  - In a guest wave32 (guest_wave_size 32) a VALU lane mask is one dword (ShaderWave32LaneMasks): a compare
+//    leaves the upper SGPR of its destination pair, which the program may hold a number in.
+[[nodiscard]] ShaderFragmentMaskFlow ShaderAnalyzeFragmentMaskFlow(const ShaderCode& code, uint32_t guest_wave_size);
 
 } // namespace Kyty::Libs::Graphics
 

@@ -1027,7 +1027,7 @@ TEST(EmulatorNativeWaveAdmission, WholeWaveOrReductionRunsAsAPartialWaveOfAnyWid
 	const auto info = ShaderAnalyzeNativeWave(code, 64);
 	EXPECT_EQ(info.proof, ShaderNativeWaveProof::FragmentPartialWave);
 	EXPECT_EQ(info.refusal_reason, nullptr);
-	const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code));
+	const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code, 64u));
 	ASSERT_EQ(reductions.reductions.size(), 1u);
 	EXPECT_FALSE(reductions.IsStep(2));
 	EXPECT_TRUE(reductions.IsStep(3));

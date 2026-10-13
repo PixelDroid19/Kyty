@@ -270,7 +270,7 @@ bool HasPrivatePixelAddtidSpills(const ShaderCode& code)
 class Flow
 {
 public:
-	ShaderFragmentMaskFlow Run(const ShaderCode& code);
+	ShaderFragmentMaskFlow Run(const ShaderCode& code, bool wave32);
 
 private:
 	bool Fail(const ShaderInstruction& inst, const char* reason)
@@ -280,6 +280,8 @@ private:
 		m_result.reason     = reason;
 		return false;
 	}
+	[[nodiscard]] ShaderOperand Vcc() const;
+	[[nodiscard]] bool          IsMaskOp(Type type, Type b64, Type b32) const { return type == b64 || (m_wave32 && type == b32); }
 	[[nodiscard]] uint8_t Taint(const ShaderOperand& operand) const;
 	[[nodiscard]] uint8_t SourceTaint(const ShaderInstruction& inst) const;
 	bool                  CheckSources(const ShaderInstruction& inst, bool* propagates);
@@ -326,6 +328,7 @@ private:
 	bool                          m_changed = false; // a back edge changed a loop-head state during this walk
 	bool                          m_lane_preserving = false; // the write being defined keeps every inactive lane's bit
 	bool                          m_addtid_spills = false;
+	bool                          m_wave32        = false; // VCC is its low word (the program's lane masks are narrowed)
 	// SCC holds "some lane of a mask is set", written by the last SCC writer with no join since.
 	bool                          m_scc_any_lane         = false;
 	bool                          m_scc_any_lane_uniform = false;
@@ -338,6 +341,15 @@ private:
 	const ShaderCode*             m_code    = nullptr;
 	uint32_t                      m_index   = 0; // instruction being stepped
 };
+
+// The VCC a branch or VCCZ tests: a wave32 uses only its low word.
+ShaderOperand Flow::Vcc() const
+{
+	ShaderOperand vcc {};
+	vcc.type = Operand::VccLo;
+	vcc.size = m_wave32 ? 1 : 2;
+	return vcc;
+}
 
 uint8_t Flow::Taint(const ShaderOperand& operand) const
 {
@@ -461,28 +473,31 @@ static bool SameScalar(const ShaderOperand& a, const ShaderOperand& b)
 bool Flow::PreservesLanesOutsideRegion(const ShaderInstruction& inst) const
 {
 	if (inst.src_num != 2 || inst.dst.type == Operand::ExecLo) { return false; }
-	if (inst.type == Type::SAndB64)
+	if (IsMaskOp(inst.type, Type::SAndB64, Type::SAndB32))
 	{
 		return (SameScalar(inst.dst, inst.src[0]) && OneOutsideRegion(inst.src[1])) ||
 		       (SameScalar(inst.dst, inst.src[1]) && OneOutsideRegion(inst.src[0]));
 	}
-	if (inst.type != Type::SOrB64 && inst.type != Type::SAndn2B64 && inst.type != Type::SXorB64) { return false; }
+	if (!IsMaskOp(inst.type, Type::SOrB64, Type::SOrB32) && !IsMaskOp(inst.type, Type::SAndn2B64, Type::SAndn2B32) &&
+	    !IsMaskOp(inst.type, Type::SXorB64, Type::SXorB32))
+	{
+		return false;
+	}
 	return SameScalar(inst.dst, inst.src[0]) && ZeroOutsideRegion(inst.src[1]);
 }
 
-// Evaluated before the write: whether the 64-bit result has every outside lane's bit set.
+// Evaluated before the write: whether the lane-mask result has every outside lane's bit set.
 bool Flow::ResultOneOutsideRegion(const ShaderInstruction& inst) const
 {
 	if (m_regions.empty() || inst.dst.type == Operand::ExecLo || ShaderInstructionWritesExec(inst)) { return false; }
-	switch (inst.type)
-	{
-		case Type::SOrn2B64: return inst.src_num == 2 && (OneOutsideRegion(inst.src[0]) || ZeroOutsideRegion(inst.src[1]));
-		case Type::SOrB64: return inst.src_num == 2 && (OneOutsideRegion(inst.src[0]) || OneOutsideRegion(inst.src[1]));
-		case Type::SAndB64: return inst.src_num == 2 && OneOutsideRegion(inst.src[0]) && OneOutsideRegion(inst.src[1]);
-		case Type::SNotB64: return inst.src_num == 1 && ZeroOutsideRegion(inst.src[0]);
-		case Type::SMovB64: return inst.src_num == 1 && OneOutsideRegion(inst.src[0]);
-		default: return false;
-	}
+	const Type type = inst.type;
+	const bool two  = inst.src_num == 2;
+	if (IsMaskOp(type, Type::SOrn2B64, Type::SOrn2B32)) { return two && (OneOutsideRegion(inst.src[0]) || ZeroOutsideRegion(inst.src[1])); }
+	if (IsMaskOp(type, Type::SOrB64, Type::SOrB32)) { return two && (OneOutsideRegion(inst.src[0]) || OneOutsideRegion(inst.src[1])); }
+	if (IsMaskOp(type, Type::SAndB64, Type::SAndB32)) { return two && OneOutsideRegion(inst.src[0]) && OneOutsideRegion(inst.src[1]); }
+	if (IsMaskOp(type, Type::SNotB64, Type::SNotB32)) { return inst.src_num == 1 && ZeroOutsideRegion(inst.src[0]); }
+	if (IsMaskOp(type, Type::SMovB64, Type::SMovB32)) { return inst.src_num == 1 && OneOutsideRegion(inst.src[0]); }
+	return false;
 }
 
 void Flow::MarkOneOutsideRegion(const ShaderOperand& dst)
@@ -519,18 +534,18 @@ void Flow::TrackRegionSubset(const ShaderInstruction& inst, bool exec_subset_bef
 	};
 	const bool writes_exec = ShaderInstructionWritesExec(inst);
 	if (StartsWith(inst.type, "VCmp") && !writes_exec && exec_subset_before) { mark(inst.dst); }
-	if (inst.type == Type::SMovB64 && inst.src[0].type == Operand::ExecLo && inst.dst.type != Operand::ExecLo && exec_subset_before)
-	{
-		mark(inst.dst);
-	}
+	const bool move       = IsMaskOp(inst.type, Type::SMovB64, Type::SMovB32);
+	const bool and_saveexec = IsMaskOp(inst.type, Type::SAndSaveexecB64, Type::SAndSaveexecB32);
+	if (move && inst.src[0].type == Operand::ExecLo && inst.dst.type != Operand::ExecLo && exec_subset_before) { mark(inst.dst); }
 	if (!writes_exec) { return; }
-	if (inst.type == Type::SAndSaveexecB64 && exec_subset_before) { mark(inst.dst); }
+	if (and_saveexec && exec_subset_before) { mark(inst.dst); }
+	const bool to_exec = inst.dst.type == Operand::ExecLo;
 	bool subset = false;
 	if (WritesExecOnly(inst.type)) { subset = exec_subset_before; }
-	if (inst.type == Type::SMovB64 && inst.dst.type == Operand::ExecLo) { subset = subset_of(inst.src[0]); }
-	if (inst.type == Type::SAndB64 && inst.dst.type == Operand::ExecLo) { subset = subset_of(inst.src[0]) || subset_of(inst.src[1]); }
-	if (inst.type == Type::SAndSaveexecB64) { subset = exec_subset_before || subset_of(inst.src[0]); }
-	if (inst.type == Type::SAndn2B64 && inst.dst.type == Operand::ExecLo) { subset = subset_of(inst.src[0]); }
+	if (move && to_exec) { subset = subset_of(inst.src[0]); }
+	if (IsMaskOp(inst.type, Type::SAndB64, Type::SAndB32) && to_exec) { subset = subset_of(inst.src[0]) || subset_of(inst.src[1]); }
+	if (and_saveexec) { subset = exec_subset_before || subset_of(inst.src[0]); }
+	if (IsMaskOp(inst.type, Type::SAndn2B64, Type::SAndn2B32) && to_exec) { subset = subset_of(inst.src[0]); }
 	region.exec_subset = subset;
 }
 
@@ -559,7 +574,7 @@ bool Flow::Define(const ShaderInstruction& inst, const ShaderOperand& dst, uint8
 		m_state.uniform_mask.reset(first + word);
 	}
 	MarkWritten(first, count);
-	if (dst.type == Operand::VccLo || dst.type == Operand::VccHi) { m_state.vcc_uniform = false; }
+	if (dst.type == Operand::VccLo || (dst.type == Operand::VccHi && !m_wave32)) { m_state.vcc_uniform = false; }
 	return true;
 }
 
@@ -606,13 +621,7 @@ void Flow::SetUniformMask(const ShaderOperand& dst, bool uniform)
 	unsigned count = 0;
 	if (!ScalarRange(dst, &first, &count)) { return; }
 	for (unsigned word = 0; word < count; ++word) { m_state.uniform_mask.set(first + word, uniform); }
-	if (dst.type == Operand::VccLo || dst.type == Operand::VccHi)
-	{
-		ShaderOperand vcc {};
-		vcc.type = Operand::VccLo;
-		vcc.size = 2;
-		m_state.vcc_uniform = IsUniformMask(vcc);
-	}
+	if (dst.type == Operand::VccLo || (dst.type == Operand::VccHi && !m_wave32)) { m_state.vcc_uniform = IsUniformMask(Vcc()); }
 }
 
 // Compare of uniform sources, a copy of such a mask, EXEC narrowed by one (nonzero exactly when the compare holds),
@@ -806,9 +815,7 @@ bool Flow::Branch(const ShaderInstruction& inst)
 		case Type::SCbranchVccz:
 		case Type::SCbranchVccnz:
 		{
-			ShaderOperand vcc {};
-			vcc.type = Operand::VccLo;
-			vcc.size = 2;
+			const auto vcc = Vcc();
 			if ((Taint(vcc) & kMixed) != 0u) { return Fail(inst, "VCC branch on a mask pair partly overwritten by a number"); }
 			divergent = !IsUniformMask(vcc);
 			break;
@@ -1086,9 +1093,10 @@ bool Flow::Walk()
 	return true;
 }
 
-ShaderFragmentMaskFlow Flow::Run(const ShaderCode& code)
+ShaderFragmentMaskFlow Flow::Run(const ShaderCode& code, bool wave32)
 {
 	m_code                   = &code;
+	m_wave32                 = wave32;
 	const auto& instructions = code.GetInstructions();
 	if (code.GetType() != ShaderType::Pixel || instructions.IsEmpty() ||
 	    instructions.At(instructions.Size() - 1u).type != Type::SEndpgm)
@@ -1147,10 +1155,13 @@ bool Flow::RefineLoopExemptions(bool admitted)
 
 } // namespace
 
-ShaderFragmentMaskFlow ShaderAnalyzeFragmentMaskFlow(const ShaderCode& code)
+ShaderFragmentMaskFlow ShaderAnalyzeFragmentMaskFlow(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	Flow flow;
-	return flow.Run(code);
+	if (guest_wave_size != 32u) { return flow.Run(code, false); }
+	auto narrowed = code;
+	for (auto& inst: narrowed.GetInstructions()) { inst = ShaderWave32LaneMasks(inst); }
+	return flow.Run(narrowed, true);
 }
 
 } // namespace Kyty::Libs::Graphics

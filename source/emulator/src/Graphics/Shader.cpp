@@ -684,6 +684,33 @@ bool ShaderNativePackedResult(const ShaderInstruction& inst)
 	       inst.format == ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair;
 }
 
+ShaderInstruction ShaderWave32LaneMasks(const ShaderInstruction& inst)
+{
+	auto narrowed = inst;
+	// S_BFM_B64 shares the compare format but writes 64 bits of data.
+	if (!ShaderInstructionTypeStartsWith(inst.type, "V")) { return narrowed; }
+	const auto narrow = [](ShaderOperand* operand)
+	{
+		if (operand->size == 2 && (operand->type == ShaderOperandType::Sgpr || operand->type == ShaderOperandType::VccLo))
+		{
+			operand->size = 1;
+		}
+	};
+	switch (inst.format)
+	{
+		case ShaderInstructionFormat::SmaskVsrc0Vsrc1: narrow(&narrowed.dst); break;
+		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1:
+		case ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair: narrow(&narrowed.dst2); break;
+		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2:
+			narrow(&narrowed.dst2);
+			narrow(&narrowed.src[2]);
+			break;
+		case ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2: narrow(&narrowed.src[2]); break;
+		default: break;
+	}
+	return narrowed;
+}
+
 bool ShaderUsesNativeWaveState(const ShaderCode& code)
 {
 	for (const auto& inst: code.GetInstructions())
@@ -1013,7 +1040,7 @@ ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t gu
 	// proof runs on every program: besides rescuing what the monotone one refuses, it is what
 	// accounts for EXEC writes (a WQM widening and its restore) that the monotone one cannot.
 	const bool monotone_masks = ShaderMasksStayLaneLocal(code, regions, &mask_pc);
-	const auto mask_flow      = ShaderAnalyzeFragmentMaskFlow(code);
+	const auto mask_flow      = ShaderAnalyzeFragmentMaskFlow(code, guest_wave_size);
 	// ADDTID uses a per-invocation spill array in the pixel emitter. Mask
 	// monotonicity alone cannot establish the stores, reads and lane ownership.
 	const bool addtid = code.HasAnyOf({ShaderInstructionType::DsWriteAddtidB32, ShaderInstructionType::DsReadAddtidB32});

@@ -11,6 +11,11 @@ namespace Kyty::Libs::Graphics {
 // analysis, so that both classify EXEC/VCC words and packed results identically.
 [[nodiscard]] bool ShaderNativeMaskOperand(const ShaderOperand& operand);
 [[nodiscard]] bool ShaderNativePackedResult(const ShaderInstruction& inst);
+// A wave32 ignores the upper halves of EXEC and VCC (RDNA2 ISA 2.1, 3.x), so a VALU lane mask
+// (compare or carry-out destination, carry-in or V_CNDMASK condition) is one dword: the upper
+// SGPR of the pair is neither written nor read. Returns the instruction with each such SGPR/VCC
+// pair narrowed to its low word; an EXEC destination keeps its pair.
+[[nodiscard]] ShaderInstruction ShaderWave32LaneMasks(const ShaderInstruction& inst);
 [[nodiscard]] bool ShaderInstructionTypeChangesExec(ShaderInstructionType type);
 [[nodiscard]] bool ShaderInstructionWritesExec(const ShaderInstruction& inst);
 // Branches, program transfers and S_ENDPGM.

@@ -9,6 +9,63 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: wave32 lane masks are one dword (2026-10-13)
+
+- Observed: after the SDWA fix, the same Intel pixel program (guest wave32)
+  was refused at pc 0xf48 with `reason=mask observed as a number`:
+  - 0xf30 writes a number into `vcc_hi` (`s_bfe_u32`).
+  - 0xf40 runs `v_cmp_eq_u32 vcc, 3, vcc_hi`.
+  - 0xf48 and 0xf5c read `vcc_hi` back as that number.
+  The mask flow had marked both VCC words as lane bits at 0xf40.
+- Contract (RDNA2 ISA 2.1: "the upper half of EXEC and VCC are ignored for
+  wave32 waves"; 3.x: "when used by a wave32, the upper 32 bits of VCC are
+  unused and only the lower 32 bits contribute to VCCZ"):
+  - In a wave32 program, every VALU lane mask is one dword: compare and
+    carry-out destinations, carry-in and the `v_cndmask` condition.
+  - The upper SGPR of the encoded pair is neither written nor read, so it
+    may hold a number across the instruction.
+  - The guest relies on this, as shown above.
+- Implementation:
+  - `ShaderWave32LaneMasks` narrows those operands; `S_BFM_B64` shares the
+    compare format and is excluded.
+  - `ShaderAnalyzeFragmentMaskFlow` takes the guest wave size. At 32 it
+    walks the narrowed program, branches on VCC_LO only, and accepts the B32
+    mask algebra (AND, OR, ANDN2, XOR, ORN2, NOT, MOV, AND_SAVEEXEC) wherever
+    the region rules accepted the B64 forms.
+  - Wave64 behaviour is unchanged.
+  - The emitter already kept the upper word in wave32: `ResolveMaskAccesses`
+    stores only the low ballot word and drops the high-word clear.
+- Next stop: the same program now clears the mask flow and stops at
+  pc 0x166c with `fragment row DPP source participation is unproven`. This
+  is a wave32 whole-wave OR reduction:
+  - `s_orn2_saveexec_b32`, then a `v_cndmask` seed;
+  - four row-DPP `v_or_b32`;
+  - `v_readlane` 15 and 31, then `s_or_b32`.
+  The partial-wave reduction proof (`ShaderFragmentLaneReduction.cpp`)
+  covers only wave64: `S_ORN2_SAVEEXEC_B64`, 64 lanes and B64 mask algebra.
+  Extending it to wave32 (lane sets 0-15 and 16-31) is the direction. The
+  DPP precondition stays: a host shuffle from an inactive or absent lane is
+  undefined.
+- Verified:
+  - The mask flow proof was checked offline on the dumped program.
+  - Unit tests: 2,410 pass. A new case runs the same program at both widths:
+    wave32 keeps the number in VCC_HI, wave64 refuses it. The
+    whole-pair VCC branch case now states the wave32 result.
+  - A temporary per-program check (env-gated, removed) showed that no pixel
+    program of the racing title, the watercolour platformer or the fishing
+    title runs as wave32. Their analysis is unchanged.
+  - Strict regressions on AMD (RADV, warm), no error:
+    - racing title: 5.6k / 7.4k / 9.3k / 10.2k;
+    - watercolour platformer: 3.6k at 60 s;
+    - fishing title: 3.1k at 180 s.
+  - On Intel the three titles ran without new errors, under a concurrent
+    host GPU job on the same device, so their frame rates are not
+    comparable:
+    - One racing title run hit the open intermittent depth-reference
+      refusal recorded below.
+    - One stopped in `String::Size` before the first frame, and did not
+      reproduce on two reruns.
+
 ## Robot platformer: SDWA low destination selects (2026-10-13)
 
 - Observed: the Intel stop at pc 0x157c of a 1920x1080 pixel program is
@@ -36,7 +93,7 @@ fail on the current HEAD before acting on them.
     do shifted selects, reserved `DST_UNUSED`, clamp and output modifiers.
 - Verified: a unit test pins the admitted and refused control words. A
   strict Intel run of the robot platformer passed pc 0x157c and stopped at
-  the wave32 VCC case below.
+  the wave32 VCC case above.
 - Defect found, not fixed: the host-visible compute scratch pool
   (`TransientBufferPool::Scratch`, `GraphicsRenderCommandBuffer.cpp:1090`) frees
   entries only in `Free()`. A command buffer that detiles many large
