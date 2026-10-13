@@ -504,7 +504,7 @@ static bool StorageSeedInputsAreDisjoint(const ShaderBindResources& bind, const 
 	return true;
 }
 
-uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen, uint32_t groups_x,
+uint64_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen, uint32_t groups_x,
                                           uint32_t groups_y, uint32_t groups_z)
 {
 	if (!next_gen || input_info.storage_image_write_only_mask == 0u ||
@@ -517,11 +517,11 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 	}
 
 	const uint64_t global_z = static_cast<uint64_t>(groups_z) * input_info.threads_num[2];
-	uint32_t       result   = 0u;
+	uint64_t       result   = 0u;
 	for (int i = 0; i < input_info.bind.textures2D.textures_num; ++i)
 	{
 		const auto& descriptor = input_info.bind.textures2D.desc[i];
-		if ((input_info.storage_image_write_only_mask & (1u << static_cast<uint32_t>(i))) == 0u ||
+		if ((input_info.storage_image_write_only_mask & (uint64_t {1} << static_cast<uint32_t>(i))) == 0u ||
 		    !descriptor.textures2d_without_sampler)
 		{
 			continue;
@@ -567,7 +567,7 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 		}
 		if (global_x <= UINT32_MAX && global_y <= UINT32_MAX && global_x >= width && global_y >= height && global_z >= depth)
 		{
-			result |= 1u << static_cast<uint32_t>(i);
+			result |= uint64_t {1} << static_cast<uint32_t>(i);
 		}
 	}
 	if (result != 0u)
@@ -3161,7 +3161,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	const uint32_t storage_seed_skip_mask =
+	const uint64_t storage_seed_skip_mask =
 	    ShaderComputeStorageSeedSkipMask(input_info, Config::IsNextGen(), thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
 	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr,

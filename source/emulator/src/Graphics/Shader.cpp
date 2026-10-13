@@ -4367,7 +4367,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			{
 				info->storage_image_tile_coverage[i] = coverage;
 				descriptor.storage_image_write_only = true;
-				info->storage_image_write_only_mask |= 1u << static_cast<uint32_t>(i);
+				info->storage_image_write_only_mask |= uint64_t {1} << static_cast<uint32_t>(i);
 				continue;
 			}
 			if (descriptor.dynamic_sload)
@@ -4378,7 +4378,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			if (image_use.writes && !image_use.reads)
 			{
 				descriptor.storage_image_write_only = true;
-				info->storage_image_write_only_mask |= 1u << static_cast<uint32_t>(i);
+				info->storage_image_write_only_mask |= uint64_t {1} << static_cast<uint32_t>(i);
 			}
 		}
 		info->empty_gate = AnalyzeShaderComputeEmptyGate(code, info->bind);

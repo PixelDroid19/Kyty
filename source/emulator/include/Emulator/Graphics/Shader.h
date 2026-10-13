@@ -1915,8 +1915,8 @@ struct ShaderTextureResources
 {
 	// This table combines sampled and storage images. The host descriptor
 	// classes have separate limits, checked when constructing their layouts.
-	static constexpr int RES_MAX = 32;
-	static_assert(RES_MAX <= 32, "storage-image write-only masks use one uint32_t bit per logical resource");
+	static constexpr int RES_MAX = 64;
+	static_assert(RES_MAX <= 64, "storage-image write-only masks use one uint64_t bit per logical resource");
 	// A virtual sampled-texture descriptor carries a local index and the
 	// SPIR-V image shape of its target descriptor array. Vulkan descriptor
 	// arrays are statically typed, so 2D, 2D-array and 3D images cannot share
@@ -2321,7 +2321,7 @@ struct ShaderComputeInputInfo
 	bool                group_id[3]        = {false, false, false};
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;
-	uint32_t            storage_image_write_only_mask = 0;
+	uint64_t            storage_image_write_only_mask = 0;
 	ShaderStorageImageTileCoverage storage_image_tile_coverage[ShaderTextureResources::RES_MAX] {};
 	ShaderComputeEmptyGate empty_gate;
 	ShaderComputeMetaFillEvidence meta_fill;
@@ -2329,7 +2329,7 @@ struct ShaderComputeInputInfo
 	ShaderBindResources bind;
 };
 
-[[nodiscard]] uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen,
+[[nodiscard]] uint64_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen,
                                                        uint32_t groups_x, uint32_t groups_y, uint32_t groups_z);
 
 [[nodiscard]] constexpr uint32_t ShaderComputeLdsDwords(uint16_t granulated_lds_size)

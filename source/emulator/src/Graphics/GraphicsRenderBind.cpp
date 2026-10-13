@@ -3214,7 +3214,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
                             VulkanImage** images_sampled_3d, int* images_sampled_3d_view, VulkanImage** images_sampled_uint,
                             int* images_sampled_uint_view, VulkanImage** images_sampled_array_uint,
                             int* images_sampled_array_uint_view, VulkanImage** images_sampled_3d_uint,
-                            int* images_sampled_3d_uint_view, int* images_storage_view, uint32_t storage_seed_skip_mask,
+                            int* images_sampled_3d_uint_view, int* images_storage_view, uint64_t storage_seed_skip_mask,
                             uint32_t** sgprs, DrawMaterialTraceSession* material_trace, const VulkanImage* stencil_attached_depth,
                             bool scaled_sampling_refused, const RenderColorInfo* pass_color)
 {
@@ -4011,7 +4011,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 				StorageTextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
 				                                         r.Type(), depth, base_array,
-				                                         (storage_seed_skip_mask & (1u << static_cast<uint32_t>(i))) != 0);
+				                                         (storage_seed_skip_mask & (uint64_t {1} << static_cast<uint32_t>(i))) != 0);
 				tex = static_cast<StorageTextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 				if (tex != nullptr)
@@ -4586,8 +4586,8 @@ static void PrepareDirectSgprs(const ShaderDirectSgprsResources& direct_sgprs, u
 	}
 }
 
-static uint32_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const ShaderBindResources& bind,
-                                                    VulkanBuffer* const* uploaded_buffers, uint32_t mask,
+static uint64_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const ShaderBindResources& bind,
+                                                    VulkanBuffer* const* uploaded_buffers, uint64_t mask,
                                                     const ShaderStorageImageTileCoverage* coverage)
 {
 	if (coverage == nullptr)
@@ -4601,7 +4601,7 @@ static uint32_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const
 	}
 	for (int i = 0; i < bind.textures2D.textures_num; ++i)
 	{
-		const uint32_t bit = 1u << static_cast<uint32_t>(i);
+		const uint64_t bit = uint64_t {1} << static_cast<uint32_t>(i);
 		if ((mask & bit) == 0u || coverage[i].origin_byte_offset < 0)
 		{
 			continue;
@@ -4682,7 +4682,7 @@ static void RequireScaledImageReads(ScaledImageReadAccess access, const ShaderSa
 
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
-                     uint32_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
+                     uint64_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
                      const VulkanImage* stencil_attached_depth, const ShaderStorageImageTileCoverage* storage_seed_coverage,
                      const GuestDeviceAddressTable* device_address_table, ScaledImageReadAccess scaled_image_reads,
                      const RenderColorInfo* pass_color)

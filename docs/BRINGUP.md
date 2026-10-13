@@ -9,6 +9,49 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: 64-entry shader texture table (2026-10-13)
+
+- Observed: after the storage-image alias fix, the Intel run stopped at
+  253 s on `shader texture resource capacity exceeded`
+  (`ShaderGetTextureBuffer`, `Shader.cpp:2181`). The table held 32 entries.
+  The stopping pixel program reads 43 distinct non-empty 8-dword image
+  descriptors. 40 of them are in the extended user data, each read by a
+  constant-offset `s_load_dwordx8`; the program has no dynamic descriptor
+  loads. So the guest really binds more than 32 images in one stage.
+- Host limits: `maxPerStageDescriptorSampledImages` is 33,554,432 on the
+  Intel A770 (ANV) and 8,388,606 on the AMD Raphael iGPU (RADV). The table
+  size is a host bookkeeping cap, not a Vulkan limit.
+- Change (`Shader.h`): `ShaderTextureResources::RES_MAX` is 64. The
+  storage-image write-only and seed-skip masks, which hold one bit per table
+  entry, become `uint64_t` (`Shader.cpp`, `GraphicsRenderDraw.cpp`,
+  `GraphicsRenderBind.cpp`, `GraphicsRenderInternal.h`). The descriptor-cache
+  arrays and the metadata push-constant bound follow `RES_MAX`.
+- Verified:
+  - Intel robot platformer: past the stop, 300 s with no error, 1,287
+    frames at 2.9-7.2 fps. The captures still show the dark loading screen.
+  - Intel racing title: 15.3k / 18.1k / 24.5k / 25.6k frames, at or above
+    the previous run.
+  - AMD (RADV): racing title 9.9k frames, unchanged; watercolour platformer
+    3.4k and 3.9k frames.
+  - AMD fishing title, same tree and route, 200 s:
+
+    | Table size | Final frame |
+    | --- | --- |
+    | 32 | 2,860 |
+    | 64 | 2,792 / 2,814 / 2,858 |
+
+    The two sizes overlap. Earlier runs on the tree before the alias fix
+    reached 3,058-3,106. The table size does not explain that gap. During
+    these runs another user process held one core at ~95% (load average
+    about 6), so the gap is not attributed.
+  - Unit tests: 2,413 pass. The one failure is the known intermittent
+    `StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
+    timeout (see the 2026-10-11 entry); it passes alone 3/3.
+- Open: per-draw structures grow with the table (`ShaderPixelInputInfo`
+  6,392 bytes, `ShaderVertexInputInfo` 8,984 bytes), and `BindDescriptors`
+  zero-initializes and scans the full arrays rather than the bound counts.
+  No cost was measured above noise.
+
 ## Robot platformer: storage image over a sampled and a buffer view (2026-10-13)
 
 - Observed: after the pixel append fix, the Intel run stopped at 228 s on
@@ -31,7 +74,8 @@ fail on the current HEAD before acting on them.
 - Verified:
   - Intel robot platformer, twice: past the overlap, 1,277 frames at
     3.4-10.9 fps. It stops at 253 s on the 32-entry texture table: the
-    shader declares more read-only texture slots. That is the next stop.
+    shader declares more read-only texture slots. The 64-entry table entry
+    above takes it past that stop.
   - Unit tests: 2,414 pass.
 - Open (coherence, not verified):
   - Storage images have no write-back
