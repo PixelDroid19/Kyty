@@ -9,6 +9,79 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: worldmap admission chain (2026-10-13)
+
+- Four general fixes move the robot platformer from its early stops to the
+  worldmap level load on both hosts:
+  - **Tiled storage writers composed into linear views.** A linear storage
+    view over memory last written through single-level 2D storage images in
+    the 64 KB R_X layout is composed from those images, as it already was from
+    tiled render targets. The newest complete writer of each range wins.
+  - **Loop exits that break through an arm.** The CFG structurizer accepts a
+    loop exit that enters an arm placed between the header and the latch when
+    every path of the arm stays under the header, leaves only to the merge and
+    shares no block with another exit or with what follows the merge
+    (`ShaderControlFlowGraph.cpp:IsBreakArm`). Only graphs refused before are
+    affected.
+  - **Wave32 lane masks in scalar flow.** A wave32 `V_CMP`/carry-out writes only
+    the low SGPR of its pair. The scalar flow read every program as wave64, so
+    a compare into `s[13:14]` hid that `s14` still held its entry value. A
+    compute shader's extended user data load through `s[14:15]` then lost its
+    descriptor mapping (emitter refusal on `S_LOAD_DWORDX4` at 0x1740). The flow
+    now keys on the guest wave size. Compute resource analysis passes the
+    dispatch plan's size; the other stages keep the conservative wave64
+    reading.
+  - **Any-lane mask tests.** `S_CMP_LG_U64`/`S_CMP_EQ_U64 mask, 0` followed by a
+    forward SCC branch asks what `S_CBRANCH_VCCZ` asks. The fragment mask flow
+    opens a divergent region for it instead of refusing the compare as a
+    numeric observation. The summary is cleared by any other SCC writer or a
+    join. Every other SCC reader and back edges stay refused. Masks that may
+    hold helper bits under WQM qualify, as they do for VCCZ.
+- Current frontier on both hosts: a 1920x1080 worldmap pixel shader (wave64,
+  3 colour targets, depth write, blend) is refused by native wave admission.
+  It is now classified `FragmentNeutral32` (it was `ExactSubgroup` before the
+  any-lane fix). The refusal is participation: "fragment row DPP source
+  participation is unproven" at the first of four `V_OR_B32` row-shift steps
+  (`row_shr` 1/2/4/8, `bound_ctrl` 0), in a whole-wave OR reduction.
+  - The reduction is: `s_orn2_saveexec` region,
+    `v_cndmask 0, x, live&exec`, the row scan, `v_permlanex16`, then
+    `v_readlane` 31 and 63 after the restore and `s_or` of the two halves.
+  - The same shader also has three `v_readfirstlane` waterfall loops, refused
+    with "target quad is not proven to retain a participating real member".
+  - Helpers relay partial ORs through the scan, so neutral initial values do
+    not make a non-participating helper's shuffle source defined. This
+    refusal is correct and must not be relaxed.
+  - A whole-wave reduction proof is a viable direction: lower the readlanes
+    as subgroup OR reductions of the initializer, valid at every host width.
+    It needs the initializer's condition proven narrow, the scan registers
+    dead after the region, and EXEC after the region proven within the
+    region's entry EXEC.
+- Intel-specific gate: the Arc A770 lists only COMPUTE, TASK and MESH in
+  `requiredSubgroupSizeStages`, and fragment subgroups vary from 8 to 32.
+  `FragmentNeutral32` therefore has no legal mapping on Intel
+  (`host=unavailable mapping=0`) even with the participation proof. Intel
+  needs a proof valid at every width, or the fragment wave transport (the
+  compute stage can pin 32). AMD (RADV) can pin fragment 64 and reports
+  `mapping=1`.
+- Scoping experiment (temporary, uncommitted bypass of the participation
+  refusals): AMD then stops at a vertex program with
+  `ngg_front_refusal{... reason=complete program exceeds the 1024-instruction
+  proof bound}`. RADV cannot pin the vertex stage to 64 either.
+- Open gap: the pixel and vertex resource analyses still read scalar flow as
+  wave64 (conservative, not a correctness defect).
+- Verified:
+  - Intel Arc A770, strict runs with a fresh SPIR-V cache:
+    - the racing title (125 s) is in a race;
+    - the watercolour platformer (90 s) is in the intro;
+    - the fishing title (200 s) is docked in gameplay.
+    - All three end with status 1 and no error.
+  - The robot platformer reaches the worldmap level load and stops at the
+    pixel shader above, on Intel (160 s) and on AMD (267 s). AMD stopped at
+    about 61 s before.
+  - Unit suites: 596 shader, fragment, compute and NGG tests, including new
+    break-arm, wave32 mask and any-lane cases. Gate script: boundaries
+    (strict).
+
 ## Runtime-built typed buffer descriptors (2026-10-12)
 
 - Cause of the AMD fishing-title device loss at about 182 s: one pixel
