@@ -594,6 +594,7 @@ enum class ShaderInstructionType : uint32_t
 	ImageSampleO,
 	SSubbU32,
 	SAshrI64,
+	ImageAtomicSwap,
 
 	ZMax
 };
@@ -2037,7 +2038,9 @@ struct ShaderBindResources
 	                                                       int user_data_register_base);
 [[nodiscard]] int ShaderFindImageStorageTextureDescriptor(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind,
                                                          int user_data_register_base);
-[[nodiscard]] bool ShaderImageAtomicAddSupported(const ShaderInstruction& instruction);
+// IMAGE_ATOMIC_ADD and IMAGE_ATOMIC_SWAP: 32-bit read-modify-writes of one storage image texel.
+[[nodiscard]] bool ShaderIsImageAtomic(ShaderInstructionType type);
+[[nodiscard]] bool ShaderImageAtomicSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind);
 [[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);
 [[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,

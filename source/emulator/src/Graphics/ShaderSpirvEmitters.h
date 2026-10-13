@@ -48,7 +48,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadAddtidB32_VdstOffset);
 KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty);
 KYTY_RECOMPILER_FUNC(Recompile_SBitset1B32);
 KYTY_RECOMPILER_FUNC(Recompile_SAbsI32);
-KYTY_RECOMPILER_FUNC(Recompile_ImageAtomicAdd);
+KYTY_RECOMPILER_FUNC(Recompile_ImageAtomic);
 KYTY_RECOMPILER_FUNC(Recompile_SGetpcB64);
 KYTY_RECOMPILER_FUNC(Recompile_VFmaMixF32);
 KYTY_RECOMPILER_FUNC(Recompile_SCmpEqLgU64);

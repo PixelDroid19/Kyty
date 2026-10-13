@@ -708,7 +708,7 @@ void Spirv::WriteHeader()
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
 			vars.Add("%textures2D_L");
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd})) { vars.Add("%textures2D_LU"); }
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap})) { vars.Add("%textures2D_LU"); }
 		}
 		if (m_bind->samplers.samplers_num > 0)
 		{
@@ -1222,7 +1222,7 @@ void Spirv::WriteAnnotations()
 			m_source += String8(textures_annotations_l)
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_storage_index));
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap}))
 			{
 				m_source += String8(textures_annotations_l).ReplaceStr("textures2D_L", "textures2D_LU")
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
@@ -1620,7 +1620,7 @@ static const char* textures_loaded_types = R"(
 		}
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
-			const bool has_atomics = m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd});
+			const bool has_atomics = m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
 			const bool shared_atomic_type = has_atomics && uint_storage && std::strcmp(image_format, "R32ui") == 0 &&
 			                                std::strcmp(storage_arrayed, "0") == 0;
 			if (shared_atomic_type)
@@ -1808,7 +1808,7 @@ void Spirv::WriteGlobalVariables()
 		{
 			vars.Add(String8::FromPrintf("%%textures2D_L = OpVariable %%_ptr_UniformConstant__arr_ImageL_uint_%d UniformConstant",
 			                             m_bind->textures2D.textures2d_storage_num));
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap}))
 			{
 				vars.Add(String8::FromPrintf("%%textures2D_LU = OpVariable %%_ptr_UniformConstant__arr_ImageLU_uint_%d UniformConstant",
 				                             m_bind->textures2D.textures2d_storage_num));

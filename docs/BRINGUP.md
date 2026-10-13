@@ -9,6 +9,27 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: image atomic swap with a GLC return (2026-10-13)
+
+- Observed: after the Wave32 OR reductions, the Intel run stopped at
+  `ShaderParseMIMG.cpp:49`. The parser admitted GLC only on
+  IMAGE_ATOMIC_ADD (0x11). The stopping program is a per-pixel linked list:
+  `image_atomic_swap v9, v[0:1], s[0:7] glc` exchanges a new node index into
+  a 2D R32_UINT head image, and the node is written through buffer stores.
+- Contract:
+  - RDNA2 ISA: IMAGE_ATOMIC_SWAP (opcode 15) is `tmp = MEM; MEM = DATA;
+    RETURN = tmp`.
+  - GLC on an atomic selects the pre-op return (ISA 8.1.10).
+  - Load and store cache policy (GLC on non-atomics) is still refused.
+- Change:
+  - `ImageAtomicSwap` is a new instruction type. It shares the parse,
+    admission (`ShaderImageAtomicSupported`), storage-usage and emission
+    paths of IMAGE_ATOMIC_ADD through `ShaderIsImageAtomic`.
+  - `Recompile_ImageAtomic` emits `OpAtomicExchange` or `OpAtomicIAdd` on
+    one R32 texel, in compute and pixel stages.
+- Verified: unit tests cover both opcodes with and without GLC, and the
+  sampler-operand refusal for both.
+
 ## Robot platformer: Wave32 whole-wave OR reductions (2026-10-13)
 
 - Observed: once the Wave32 lane masks were narrowed, the Intel pixel

@@ -290,7 +290,7 @@ RenderShaderCoordinateUsage AnalyzeResolutionShaderUsage(const ShaderCode& code)
 	usage.integer_image_coordinates =
 	    code.HasAnyOf({ShaderInstructionType::ImageGetResinfo, ShaderInstructionType::ImageLoad,
 	                   ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
-	                   ShaderInstructionType::ImageAtomicAdd});
+	                   ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
 	usage.texel_offset_sampling = code.HasAnyOf({ShaderInstructionType::ImageSampleO, ShaderInstructionType::ImageSampleLzO});
 	for (const auto& inst: code.GetInstructions())
 	{
