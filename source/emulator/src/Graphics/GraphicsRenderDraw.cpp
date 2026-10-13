@@ -576,7 +576,7 @@ uint64_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 		static std::atomic_uint32_t logged {0};
 		if (dump && logged.fetch_add(1, std::memory_order_relaxed) < 32u)
 		{
-			KYTY_LOG_DEBUG("KYTY_STORAGE_SEED_SKIP mask=0x%08" PRIx32 "\n", result);
+			KYTY_LOG_DEBUG("KYTY_STORAGE_SEED_SKIP mask=0x%016" PRIx64 "\n", result);
 		}
 	}
 	return result;
