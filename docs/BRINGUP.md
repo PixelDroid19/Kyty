@@ -9,6 +9,63 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: Wave32 whole-wave OR reductions (2026-10-13)
+
+- Observed: once the Wave32 lane masks were narrowed, the Intel pixel
+  program stopped at pc 0x166c with `fragment row DPP source participation is
+  unproven`. The construct is the Wave32 form of the wave64 worldmap
+  reduction:
+  - `s_mov_b32 s32, exec_lo` ... `s_orn2_saveexec_b32 vcc_lo, s32`;
+  - `v_cndmask_b32 v23, 0, v23, s33`, with `s33 = s32 & s64`;
+  - four `v_or_b32` with `row_shr:1/2/4/8`;
+  - `s_mov_b32 exec_lo, vcc_lo`, an unrelated `v_rsq_f32`, then
+    `v_readlane` of lanes 15 and 31 and `s_or_b32`.
+- Contract:
+  - RDNA2 ISA: V_READLANE_B32 takes `lane % 32` in a wave32 and ignores EXEC.
+  - The upper halves of EXEC and VCC are ignored in a wave32.
+  - Row DPP stays within a 16-lane row in both widths.
+- Change:
+  - The neutral-region proof (`ShaderFragmentNeutralRegionEnd`) takes the
+    guest wave size. For Wave32 it accepts the B32 save, ORN2_SAVEEXEC,
+    AND and restore forms on single SGPRs. It runs on the narrowed program,
+    and the select is classified with its encoded pair condition.
+  - Every other region user (tier, partial-wave reads, emitter) still asks
+    for the Wave64 form only. In a Wave64 program a B32 entry widens only
+    EXEC_LO, so it never forms a region.
+  - The reduction proof uses the guest lane count, refuses a constant lane
+    at or above it, and follows the B32 mask algebra for the residual
+    (stale-lane) obligation.
+  - The mask flow result records the guest width it was proven for.
+  - `FragmentPartialWave` is no longer limited to Wave64. Host selection
+    already limits it to host subgroups no wider than the guest wave, so a
+    host invocation id is the guest lane.
+  - At both widths, instructions that name no network register, keep EXEC,
+    and are neither branches nor labels may now sit between the restore and
+    the reads.
+- Verified:
+  - The dumped program now proves `FragmentPartialWave`, with one reduction
+    whose reads cover lanes `0xffff` and `0xffff0000`.
+  - Unit tests: 2,412 pass. New cases:
+    - the Wave32 sequence and its SPIR-V emission;
+    - refusal at Wave64;
+    - refusal for lane 32;
+    - stale lanes after a B32 WQM;
+    - independent versus observing instructions before the reads (Wave64).
+  - Strict AMD (RADV) runs, no error:
+
+    | Title | Frames |
+    | --- | --- |
+    | racing title | 7.6k / 9.4k / 11.2k / 12.0k |
+    | watercolour platformer | 4.1k at 60 s |
+    | fishing title | 3.1k at 180 s |
+- Robot platformer, cold SPIR-V caches:
+  - AMD: 303 s without error, 941 frames at 3.3-5.3 fps, still on the
+    publisher logo. The previous run loaded at about 0.4 fps.
+  - Intel (Arc, no concurrent GPU job): 1,190 frames at 3.5-8.3 fps. It
+    passes the logo into a dark loading transition, then stops at 251 s on
+    `ShaderParseMIMG.cpp:49`: `glc == 1` on a MIMG opcode other than 0x11.
+    That is the next stop.
+
 ## Robot platformer: wave32 lane masks are one dword (2026-10-13)
 
 - Observed: after the SDWA fix, the same Intel pixel program (guest wave32)

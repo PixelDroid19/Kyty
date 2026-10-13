@@ -11,9 +11,10 @@
 
 namespace Kyty::Libs::Graphics {
 
-// A whole-wave OR reduction of a Wave64 fragment program: a proven neutral region (EXEC widened to every
-// lane, a V_CNDMASK_B32 seed `cond ? x : 0`) whose row-shift DPP and PERMLANE steps only OR the seeds of
-// other lanes together, read back by static V_READLANE_B32 right after EXEC is restored.
+// A whole-wave OR reduction of a Wave64 or Wave32 fragment program: a proven neutral region (EXEC widened to
+// every lane, a V_CNDMASK_B32 seed `cond ? x : 0`) whose row-shift DPP and PERMLANE steps only OR the seeds of
+// other lanes together, read back by static V_READLANE_B32 after EXEC is restored. Only instructions that name
+// no register of the steps and keep EXEC may sit between the restore and the reads.
 //
 // Each read is the OR of the seed over a fixed set of guest lanes. A host subgroup of any width computes it
 // as one subgroup reduction: the condition holds only covered lanes, so a helper lane and a lane the

@@ -16,6 +16,8 @@ namespace Kyty::Libs::Graphics {
 // SGPR of the pair is neither written nor read. Returns the instruction with each such SGPR/VCC
 // pair narrowed to its low word; an EXEC destination keeps its pair.
 [[nodiscard]] ShaderInstruction ShaderWave32LaneMasks(const ShaderInstruction& inst);
+// The program with ShaderWave32LaneMasks applied to every instruction.
+[[nodiscard]] ShaderCode ShaderWave32LaneMaskProgram(const ShaderCode& code);
 [[nodiscard]] bool ShaderInstructionTypeChangesExec(ShaderInstructionType type);
 [[nodiscard]] bool ShaderInstructionWritesExec(const ShaderInstruction& inst);
 // Branches, program transfers and S_ENDPGM.

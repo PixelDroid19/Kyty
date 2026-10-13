@@ -37,18 +37,44 @@ bool Unused(const ShaderOperand& operand)
 	return Plain(operand) && operand.size == 0 && (operand.type == ShaderOperandType::Unknown || operand.type == ShaderOperandType::Null);
 }
 
-bool Pair(const ShaderOperand& operand)
+// The scalar form of a lane mask: an SGPR pair and the B64 opcodes in a Wave64 program; one SGPR and the
+// B32 opcodes in a Wave32 program, whose upper halves of EXEC and VCC are ignored (RDNA2 ISA 2.1) and whose
+// VALU lane masks ShaderWave32LaneMasks narrowed to their low word.
+struct MaskForm
 {
-	const bool scalar =
-	    operand.type == ShaderOperandType::Sgpr && operand.register_id >= 0 && operand.register_id <= 102 && (operand.register_id & 1) == 0;
+	int                     size;
+	ShaderInstructionType   move;
+	ShaderInstructionType   conjunction;
+	ShaderInstructionType   entry;
+	ShaderInstructionFormat::Format unary;
+	ShaderInstructionFormat::Format binary;
+};
+
+constexpr MaskForm kWave64Masks {2,
+                                 ShaderInstructionType::SMovB64,
+                                 ShaderInstructionType::SAndB64,
+                                 ShaderInstructionType::SOrn2SaveexecB64,
+                                 ShaderInstructionFormat::Sdst2Ssrc02,
+                                 ShaderInstructionFormat::Sdst2Ssrc02Ssrc12};
+constexpr MaskForm kWave32Masks {1,
+                                 ShaderInstructionType::SMovB32,
+                                 ShaderInstructionType::SAndB32,
+                                 ShaderInstructionType::SOrn2SaveexecB32,
+                                 ShaderInstructionFormat::SVdstSVsrc0,
+                                 ShaderInstructionFormat::SVdstSVsrc0SVsrc1};
+
+bool Pair(const MaskForm& form, const ShaderOperand& operand)
+{
+	const bool aligned = form.size == 1 || (operand.register_id & 1) == 0;
+	const bool scalar  = operand.type == ShaderOperandType::Sgpr && operand.register_id >= 0 && operand.register_id + form.size <= 104 && aligned;
 	const bool special =
 	    (operand.type == ShaderOperandType::ExecLo || operand.type == ShaderOperandType::VccLo) && operand.register_id == 0;
-	return Plain(operand) && operand.size == 2 && (scalar || special);
+	return Plain(operand) && operand.size == form.size && (scalar || special);
 }
 
-bool SamePair(const ShaderOperand& left, const ShaderOperand& right)
+bool SamePair(const MaskForm& form, const ShaderOperand& left, const ShaderOperand& right)
 {
-	return Pair(left) && Pair(right) && left.type == right.type && left.register_id == right.register_id;
+	return Pair(form, left) && Pair(form, right) && left.type == right.type && left.register_id == right.register_id;
 }
 
 bool Overlaps(const ShaderOperand& destination, const ShaderOperand& pair)
@@ -59,16 +85,25 @@ bool Overlaps(const ShaderOperand& destination, const ShaderOperand& pair)
 	}
 	if (pair.type == ShaderOperandType::Sgpr)
 	{
-		return destination.type == pair.type && destination.register_id < pair.register_id + 2 &&
+		return destination.type == pair.type && destination.register_id < pair.register_id + pair.size &&
 		       pair.register_id < destination.register_id + destination.size;
 	}
-	return destination.type == pair.type || (pair.type == ShaderOperandType::VccLo && destination.type == ShaderOperandType::VccHi) ||
-	       (pair.type == ShaderOperandType::ExecLo && destination.type == ShaderOperandType::ExecHi);
+	const bool upper = pair.size == 2 && ((pair.type == ShaderOperandType::VccLo && destination.type == ShaderOperandType::VccHi) ||
+	                                      (pair.type == ShaderOperandType::ExecLo && destination.type == ShaderOperandType::ExecHi));
+	return destination.type == pair.type || upper;
 }
 
 bool Writes(const ShaderInstruction& instruction, const ShaderOperand& pair)
 {
 	return Overlaps(instruction.dst, pair) || Overlaps(instruction.dst2, pair);
+}
+
+ShaderOperand Exec(const MaskForm& form)
+{
+	ShaderOperand exec {};
+	exec.type = ShaderOperandType::ExecLo;
+	exec.size = form.size;
+	return exec;
 }
 
 bool WritesExec(const ShaderInstruction& instruction)
@@ -109,10 +144,10 @@ bool LabelAt(const ShaderCode& code, uint32_t pc)
 	return false;
 }
 
-bool ScalarMove(const ShaderInstruction& instruction, const ShaderOperand& destination, const ShaderOperand& source)
+bool ScalarMove(const MaskForm& form, const ShaderInstruction& instruction, const ShaderOperand& destination, const ShaderOperand& source)
 {
-	return instruction.type == ShaderInstructionType::SMovB64 && instruction.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
-	       instruction.src_num == 1 && SamePair(instruction.dst, destination) && SamePair(instruction.src[0], source) &&
+	return instruction.type == form.move && instruction.format == form.unary && instruction.src_num == 1 &&
+	       SamePair(form, instruction.dst, destination) && SamePair(form, instruction.src[0], source) &&
 	       Unused(instruction.dst2) && Unused(instruction.src[1]) && Unused(instruction.src[2]) && Unused(instruction.src[3]) &&
 	       !instruction.vop_sdwa && instruction.vop3_op_sel == 0u && instruction.vop3_omod == 0u;
 }
@@ -177,13 +212,14 @@ bool BypassesDefinition(const ShaderCode& code, uint32_t first_pc, uint32_t last
 	return false;
 }
 
-bool SavedMaskIsAllocated(const ShaderCode& code, uint32_t before, const ShaderOperand& mask, const ShaderOperand& exec)
+bool SavedMaskIsAllocated(const MaskForm& form, const ShaderCode& code, uint32_t before, const ShaderOperand& mask,
+                          const ShaderOperand& exec)
 {
 	const auto& instructions = code.GetInstructions();
 	for (uint32_t cursor = before; cursor > 0;)
 	{
 		const auto& instruction = instructions.At(--cursor);
-		if (ScalarMove(instruction, mask, exec))
+		if (ScalarMove(form, instruction, mask, exec))
 		{
 			return !BypassesDefinition(code, instruction.pc, instructions.At(before).pc);
 		}
@@ -195,17 +231,15 @@ bool SavedMaskIsAllocated(const ShaderCode& code, uint32_t before, const ShaderO
 	return false;
 }
 
-bool SavedMaskEqualsExec(const ShaderCode& code, uint32_t begin, const ShaderOperand& mask, uint32_t* anchor)
+bool SavedMaskEqualsExec(const MaskForm& form, const ShaderCode& code, uint32_t begin, const ShaderOperand& mask, uint32_t* anchor)
 {
-	ShaderOperand exec {};
-	exec.type = ShaderOperandType::ExecLo;
-	exec.size = 2;
+	const auto exec = Exec(form);
 	for (uint32_t cursor = begin; cursor > 0;)
 	{
 		const auto& instruction = code.GetInstructions().At(--cursor);
-		const bool  copied      = ScalarMove(instruction, mask, exec);
-		const bool  restored    = ScalarMove(instruction, exec, mask);
-		if ((copied || (restored && SavedMaskIsAllocated(code, cursor, mask, exec))) &&
+		const bool  copied      = ScalarMove(form, instruction, mask, exec);
+		const bool  restored    = ScalarMove(form, instruction, exec, mask);
+		if ((copied || (restored && SavedMaskIsAllocated(form, code, cursor, mask, exec))) &&
 		    !BypassesDefinition(code, instruction.pc, code.GetInstructions().At(begin).pc))
 		{
 			*anchor = cursor;
@@ -219,29 +253,30 @@ bool SavedMaskEqualsExec(const ShaderCode& code, uint32_t begin, const ShaderOpe
 	return false;
 }
 
-bool MaskSubset(const ShaderCode& code, uint32_t begin, uint32_t anchor, const ShaderOperand& condition, const ShaderOperand& mask)
+bool MaskSubset(const MaskForm& form, const ShaderCode& code, uint32_t begin, uint32_t anchor, const ShaderOperand& condition,
+                const ShaderOperand& mask)
 {
-	if (SamePair(condition, mask))
+	if (SamePair(form, condition, mask))
 	{
 		return true;
 	}
-	if (!Pair(condition) || condition.type != ShaderOperandType::Sgpr)
+	if (!Pair(form, condition) || condition.type != ShaderOperandType::Sgpr)
 	{
 		return false;
 	}
 	for (uint32_t cursor = begin; cursor > anchor + 1u;)
 	{
 		const auto& instruction = code.GetInstructions().At(--cursor);
-		if (ScalarMove(instruction, condition, mask))
+		if (ScalarMove(form, instruction, condition, mask))
 		{
 			return true;
 		}
 		if (Writes(instruction, condition))
 		{
-			return instruction.type == ShaderInstructionType::SAndB64 && instruction.format == ShaderInstructionFormat::Sdst2Ssrc02Ssrc12 &&
-			       instruction.src_num == 2 && SamePair(instruction.dst, condition) && Unused(instruction.dst2) &&
-			       Pair(instruction.src[0]) && Pair(instruction.src[1]) &&
-			       (SamePair(instruction.src[0], mask) || SamePair(instruction.src[1], mask)) && Unused(instruction.src[2]) &&
+			return instruction.type == form.conjunction && instruction.format == form.binary && instruction.src_num == 2 &&
+			       SamePair(form, instruction.dst, condition) && Unused(instruction.dst2) && Pair(form, instruction.src[0]) &&
+			       Pair(form, instruction.src[1]) &&
+			       (SamePair(form, instruction.src[0], mask) || SamePair(form, instruction.src[1], mask)) && Unused(instruction.src[2]) &&
 			       Unused(instruction.src[3]) && ScalarMetadata(instruction);
 		}
 		if (Transfer(instruction) || LabelAt(code, instruction.pc))
@@ -263,20 +298,26 @@ bool Contribution(const ShaderOperand& operand)
 	return !operand.dpp && (operand.type != ShaderOperandType::Vgpr || VectorRegister(operand));
 }
 
-bool InitializerShape(const ShaderInstruction& instruction)
+// The classifier admits the select with its condition as encoded, an SGPR pair; a Wave32 program reads only
+// the low word of it (narrowed), which must be one mask of the form.
+bool InitializerShape(const MaskForm& form, const ShaderInstruction& instruction)
 {
+	auto encoded = instruction;
+	if (form.size == 1 && Pair(form, instruction.src[2])) { encoded.src[2].size = 2; }
 	return instruction.type == ShaderInstructionType::VCndmaskB32 && instruction.format == ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2 &&
-	       instruction.src_num == 3 && ShaderClassifyComputeWaveInstruction(instruction) == ShaderComputeWaveInstructionKind::BankedAlu &&
+	       instruction.src_num == 3 && Pair(form, instruction.src[2]) &&
+	       ShaderClassifyComputeWaveInstruction(encoded) == ShaderComputeWaveInstructionKind::BankedAlu &&
 	       VectorDestination(instruction) && VectorMetadata(instruction) && instruction.vop3_op_sel == 0u && Unused(instruction.src[3]);
 }
 
 // Lanes outside the condition receive the zero constant. The condition is
 // a subset of the saved mask, itself a subset of the captured allocation.
-bool Initializer(const ShaderCode& code, uint32_t begin, uint32_t anchor, const ShaderOperand& mask, const ShaderOperand& saved)
+bool Initializer(const MaskForm& form, const ShaderCode& code, uint32_t begin, uint32_t anchor, const ShaderOperand& mask,
+                 const ShaderOperand& saved)
 {
 	const auto& instruction = code.GetInstructions().At(begin + 1u);
-	return InitializerShape(instruction) && ZeroConstant(instruction.src[0]) && Contribution(instruction.src[1]) &&
-	       !Overlaps(saved, instruction.src[2]) && MaskSubset(code, begin, anchor, instruction.src[2], mask);
+	return InitializerShape(form, instruction) && ZeroConstant(instruction.src[0]) && Contribution(instruction.src[1]) &&
+	       !Overlaps(saved, instruction.src[2]) && MaskSubset(form, code, begin, anchor, instruction.src[2], mask);
 }
 
 bool DefinedSource(const ShaderOperand& operand, const VectorSet& defined)
@@ -323,12 +364,9 @@ bool PureVector(const ShaderInstruction& instruction, const VectorSet& defined)
 	return DefinedSources(instruction, defined) && (!instruction.src[0].dpp || defined[instruction.dst.register_id]);
 }
 
-bool Restores(const ShaderInstruction& instruction, const ShaderOperand& saved)
+bool Restores(const MaskForm& form, const ShaderInstruction& instruction, const ShaderOperand& saved)
 {
-	ShaderOperand exec {};
-	exec.type = ShaderOperandType::ExecLo;
-	exec.size = 2;
-	return ScalarMove(instruction, exec, saved);
+	return ScalarMove(form, instruction, Exec(form), saved);
 }
 
 // Row shift/rotate/mirror/broadcast controls stay inside the 16-lane row.
@@ -398,7 +436,7 @@ bool GhostZeroSources(const ShaderInstruction& instruction, const VectorSet& zer
 	return true;
 }
 
-bool ClosedRegion(const ShaderCode& code, uint32_t begin, const ShaderOperand& saved, NeutralRegion* region)
+bool ClosedRegion(const MaskForm& form, const ShaderCode& code, uint32_t begin, const ShaderOperand& saved, NeutralRegion* region)
 {
 	region->begin = begin;
 	region->written = {};
@@ -412,7 +450,7 @@ bool ClosedRegion(const ShaderCode& code, uint32_t begin, const ShaderOperand& s
 		{
 			return false;
 		}
-		if (Restores(instruction, saved))
+		if (Restores(form, instruction, saved))
 		{
 			region->end         = cursor;
 			region->zero_closed = true;
@@ -448,29 +486,30 @@ bool ClosedRegion(const ShaderCode& code, uint32_t begin, const ShaderOperand& s
 	return false;
 }
 
-bool RegionEntry(const ShaderCode& code, uint32_t index)
+bool RegionEntry(const MaskForm& form, const ShaderCode& code, uint32_t index)
 {
 	const auto& instruction = code.GetInstructions().At(index);
 	const auto& mask        = instruction.src[0];
 	const auto& saved       = instruction.dst;
-	return instruction.type == ShaderInstructionType::SOrn2SaveexecB64 && instruction.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
-	       instruction.src_num == 1 && Pair(mask) && mask.type == ShaderOperandType::Sgpr && Pair(saved) &&
+	return instruction.type == form.entry && instruction.format == form.unary && instruction.src_num == 1 && Pair(form, mask) &&
+	       mask.type == ShaderOperandType::Sgpr && Pair(form, saved) &&
 	       saved.type != ShaderOperandType::ExecLo && !Overlaps(saved, mask) && Unused(instruction.dst2) && Unused(instruction.src[1]) &&
 	       Unused(instruction.src[2]) && Unused(instruction.src[3]) && ScalarMetadata(instruction) && !LabelAt(code, instruction.pc) &&
 	       !LabelAt(code, code.GetInstructions().At(index + 1u).pc);
 }
 
-bool AnalyzeRegion(const ShaderCode& code, uint32_t index, NeutralRegion* region)
+bool AnalyzeRegion(const MaskForm& form, const ShaderCode& code, uint32_t index, NeutralRegion* region)
 {
 	if (code.GetType() != ShaderType::Pixel || index >= code.GetInstructions().Size() || code.GetInstructions().Size() - index < 2u ||
-	    !RegionEntry(code, index))
+	    !RegionEntry(form, code, index))
 	{
 		return false;
 	}
 	const auto& instruction = code.GetInstructions().At(index);
 	uint32_t    anchor      = 0;
-	return SavedMaskEqualsExec(code, index, instruction.src[0], &anchor) &&
-	       Initializer(code, index, anchor, instruction.src[0], instruction.dst) && ClosedRegion(code, index, instruction.dst, region);
+	return SavedMaskEqualsExec(form, code, index, instruction.src[0], &anchor) &&
+	       Initializer(form, code, index, anchor, instruction.src[0], instruction.dst) &&
+	       ClosedRegion(form, code, index, instruction.dst, region);
 }
 
 std::vector<NeutralRegion> CollectRegions(const ShaderCode& code)
@@ -479,7 +518,7 @@ std::vector<NeutralRegion> CollectRegions(const ShaderCode& code)
 	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
 		NeutralRegion region;
-		if (AnalyzeRegion(code, index, &region))
+		if (AnalyzeRegion(kWave64Masks, code, index, &region))
 		{
 			regions.push_back(region);
 		}
@@ -569,13 +608,14 @@ bool DefinedBeforeRead(const ShaderCode& code, const std::vector<NeutralRegion>&
 bool ShaderFragmentNeutralRegionSupported(const ShaderCode& code, uint32_t index)
 {
 	NeutralRegion region;
-	return AnalyzeRegion(code, index, &region);
+	return AnalyzeRegion(kWave64Masks, code, index, &region);
 }
 
-bool ShaderFragmentNeutralRegionEnd(const ShaderCode& code, uint32_t index, uint32_t* end)
+bool ShaderFragmentNeutralRegionEnd(const ShaderCode& code, uint32_t guest_wave_size, uint32_t index, uint32_t* end)
 {
 	NeutralRegion region;
-	if (!AnalyzeRegion(code, index, &region)) { return false; }
+	if (guest_wave_size != 32u && guest_wave_size != 64u) { return false; }
+	if (!AnalyzeRegion(guest_wave_size == 32u ? kWave32Masks : kWave64Masks, code, index, &region)) { return false; }
 	*end = region.end;
 	return true;
 }

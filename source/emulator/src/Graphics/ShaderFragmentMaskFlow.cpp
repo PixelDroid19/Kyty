@@ -1159,9 +1159,10 @@ ShaderFragmentMaskFlow ShaderAnalyzeFragmentMaskFlow(const ShaderCode& code, uin
 {
 	Flow flow;
 	if (guest_wave_size != 32u) { return flow.Run(code, false); }
-	auto narrowed = code;
-	for (auto& inst: narrowed.GetInstructions()) { inst = ShaderWave32LaneMasks(inst); }
-	return flow.Run(narrowed, true);
+	const auto narrowed = ShaderWave32LaneMaskProgram(code);
+	auto       result   = flow.Run(narrowed, true);
+	result.guest_wave_size = 32u;
+	return result;
 }
 
 } // namespace Kyty::Libs::Graphics

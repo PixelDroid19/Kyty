@@ -711,6 +711,13 @@ ShaderInstruction ShaderWave32LaneMasks(const ShaderInstruction& inst)
 	return narrowed;
 }
 
+ShaderCode ShaderWave32LaneMaskProgram(const ShaderCode& code)
+{
+	auto narrowed = code;
+	for (auto& inst: narrowed.GetInstructions()) { inst = ShaderWave32LaneMasks(inst); }
+	return narrowed;
+}
+
 bool ShaderUsesNativeWaveState(const ShaderCode& code)
 {
 	for (const auto& inst: code.GetInstructions())
@@ -944,7 +951,7 @@ static uint32_t ShaderFragmentFirstQuadLoss(const ShaderCode& code)
 	return first;
 }
 
-// Whether a lane-local Wave64 pixel program runs as a partially populated guest wave. Which pixels share a
+// Whether a lane-local Wave64 or Wave32 pixel program runs as a partially populated guest wave. Which pixels share a
 // wave is the rasterizer's choice, so a host subgroup of any width holding whole quads is such a wave, as long
 // as nothing observes a lane by its position:
 //  - an OR reduction proven by ShaderFindFragmentLaneReductions folds only lanes that hold their seed, so a
@@ -1137,7 +1144,7 @@ ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t gu
 		{
 			// The exact-participation proof failed; a program free of lane positions still runs as a
 			// partially populated wave. Otherwise the first participation refusal names the obstacle.
-			if (guest_wave_size == 64u && !writes_exec_outside_region && ShaderFragmentRunsAsPartialWave(code, mask_flow))
+			if (!writes_exec_outside_region && ShaderFragmentRunsAsPartialWave(code, mask_flow))
 			{
 				info.proof = ShaderNativeWaveProof::FragmentPartialWave;
 				return info;

@@ -23,7 +23,7 @@ using Operand = ShaderOperandType;
 constexpr uint32_t kLanes = 64;
 constexpr int      kVgprs = 256;
 
-// Per guest lane: the lanes whose seed the register holds the OR of.
+// Per guest lane (the first guest_wave_size are used): the lanes whose seed the register holds the OR of.
 using LaneSets  = std::array<uint64_t, kLanes>;
 using Network   = std::map<int, LaneSets>;
 using VectorSet = std::bitset<kVgprs>;
@@ -111,7 +111,7 @@ const LaneSets* Known(const Network& network, const ShaderOperand& operand)
 
 // D = S0 | S1 with S0 optionally row-shifted. A lane whose shift leaves the row keeps D or takes zero
 // (BOUND_CTRL); with D the unshifted source both give that source's value, so the bit's meaning never matters.
-bool OrStep(const ShaderInstruction& inst, Network* network)
+bool OrStep(const ShaderInstruction& inst, uint32_t lanes, Network* network)
 {
 	if (inst.src_num != 2 || inst.format != ShaderInstructionFormat::SVdstSVsrc0SVsrc1 || inst.vop3_op_sel != 0u) { return false; }
 	const auto& shifted = inst.src[0];
@@ -126,7 +126,7 @@ bool OrStep(const ShaderInstruction& inst, Network* network)
 		return false;
 	}
 	LaneSets result {};
-	for (uint32_t lane = 0; lane < kLanes; ++lane)
+	for (uint32_t lane = 0; lane < lanes; ++lane)
 	{
 		uint32_t source = lane;
 		const bool read = !shifted.dpp || RowSource(shifted.dpp_ctrl, lane, &source);
@@ -137,7 +137,7 @@ bool OrStep(const ShaderInstruction& inst, Network* network)
 }
 
 // Every lane is active inside the region, so the FI and BOUND_CTRL bits (OP_SEL[1:0]) change nothing.
-bool PermuteStep(const ShaderInstruction& inst, Network* network)
+bool PermuteStep(const ShaderInstruction& inst, uint32_t lanes, Network* network)
 {
 	uint32_t select_low  = 0;
 	uint32_t select_high = 0;
@@ -150,26 +150,27 @@ bool PermuteStep(const ShaderInstruction& inst, Network* network)
 	if (source == nullptr) { return false; }
 	const bool cross = inst.type == Type::VPermlanex16B32;
 	LaneSets   result {};
-	for (uint32_t lane = 0; lane < kLanes; ++lane) { result[lane] = (*source)[PermuteSource(cross, select_low, select_high, lane)]; }
+	for (uint32_t lane = 0; lane < lanes; ++lane) { result[lane] = (*source)[PermuteSource(cross, select_low, select_high, lane)]; }
 	(*network)[inst.dst.register_id] = result;
 	return true;
 }
 
-bool Step(const ShaderInstruction& inst, Network* network)
+bool Step(const ShaderInstruction& inst, uint32_t lanes, Network* network)
 {
 	if (!PlainVector(inst)) { return false; }
-	if (inst.type == Type::VOrB32) { return OrStep(inst, network); }
-	if (inst.type == Type::VPermlane16B32 || inst.type == Type::VPermlanex16B32) { return PermuteStep(inst, network); }
+	if (inst.type == Type::VOrB32) { return OrStep(inst, lanes, network); }
+	if (inst.type == Type::VPermlane16B32 || inst.type == Type::VPermlanex16B32) { return PermuteStep(inst, lanes, network); }
 	return false;
 }
 
-// V_READLANE_B32 sdst, vsrc, lane with a static lane and a register of the network.
-bool NetworkRead(const ShaderInstruction& inst, const Network& network, uint64_t* lanes)
+// V_READLANE_B32 sdst, vsrc, lane with a static lane of the guest wave and a register of the network. The ISA
+// takes the lane select modulo the wave width; a select past it is refused.
+bool NetworkRead(const ShaderInstruction& inst, const Network& network, uint32_t wave_lanes, uint64_t* lanes)
 {
 	uint32_t lane = 0;
 	if (inst.type != Type::VReadlaneB32 || inst.src_num != 2 || inst.vop3_op_sel != 0u || !Unmodified(inst.dst) ||
 	    (inst.dst.type != Operand::Sgpr && inst.dst.type != Operand::VccLo && inst.dst.type != Operand::VccHi) ||
-	    !PlainRegister(inst.src[0]) || !Constant(inst.src[1], &lane) || lane >= kLanes)
+	    !PlainRegister(inst.src[0]) || !Constant(inst.src[1], &lane) || lane >= wave_lanes)
 	{
 		return false;
 	}
@@ -184,6 +185,29 @@ void AddRange(const ShaderOperand& operand, VectorSet* set)
 	if (operand.type != Operand::Vgpr || operand.register_id < 0) { return; }
 	const int count = std::max(operand.size, 1);
 	for (int reg = operand.register_id; reg < operand.register_id + count && reg < kVgprs; ++reg) { set->set(static_cast<size_t>(reg)); }
+}
+
+bool IsBranch(Type type)
+{
+	return type == Type::SBranch || type == Type::SCbranchScc0 || type == Type::SCbranchScc1 || type == Type::SCbranchVccz ||
+	       type == Type::SCbranchVccnz || type == Type::SCbranchExecz || type == Type::SCbranchExecnz;
+}
+
+// A straight-line instruction that names no network register and keeps EXEC: the reads after it see the
+// same network.
+bool Independent(const ShaderInstruction& inst, const VectorSet& network)
+{
+	if (IsBranch(inst.type) || inst.type == Type::SEndpgm || ShaderInstructionTypeStartsWith(inst.type, "SSetpc") ||
+	    ShaderInstructionTypeStartsWith(inst.type, "SSwappc") || ShaderInstructionWritesExec(inst))
+	{
+		return false;
+	}
+	VectorSet named;
+	for (const auto& source: inst.src) { AddRange(source, &named); }
+	for (const auto& address: inst.mimg_address) { AddRange(address, &named); }
+	AddRange(inst.dst, &named);
+	AddRange(inst.dst2, &named);
+	return (named & network).none();
 }
 
 // A VALU write of every lane EXEC holds, reading nothing of its destination: no accumulator, interpolation,
@@ -254,42 +278,54 @@ bool ScalarWords(const ShaderOperand& operand, unsigned* first, unsigned* count)
 	return LaneFlow::ScalarRange(operand, first, count);
 }
 
-bool InReference(const PathState& state, const ShaderOperand& operand)
+// The lane mask width of the guest wave: an SGPR pair and the B64 forms in a Wave64 program, one SGPR and the
+// B32 forms in a Wave32 program (its VALU lane masks narrowed to their low word).
+struct MaskWidth
+{
+	bool wave32 = false;
+
+	[[nodiscard]] int  Words() const { return wave32 ? 1 : 2; }
+	[[nodiscard]] bool Is(Type type, Type b64, Type b32) const { return type == (wave32 ? b32 : b64); }
+};
+
+bool InReference(const PathState& state, const ShaderOperand& operand, MaskWidth width)
 {
 	if (operand.type == Operand::IntegerInlineConstant && operand.constant.u == 0u) { return true; }
-	if (operand.type == Operand::ExecLo && operand.size == 2) { return state.exec_in_reference; }
+	if (operand.type == Operand::ExecLo && operand.size == width.Words()) { return state.exec_in_reference; }
 	unsigned first = 0;
 	unsigned count = 0;
-	if (operand.size != 2 || !ScalarWords(operand, &first, &count)) { return false; }
-	return state.in_reference.test(first) && state.in_reference.test(first + 1u);
+	if (operand.size != width.Words() || !ScalarWords(operand, &first, &count)) { return false; }
+	for (unsigned word = first; word < first + count; ++word)
+	{
+		if (word >= LaneFlow::kWords || !state.in_reference.test(word)) { return false; }
+	}
+	return true;
 }
 
-// Whether a 64-bit mask result is a subset of R: V_CMP results (inactive lanes read zero) and copies of EXEC
+// Whether a lane mask result is a subset of R: V_CMP results (inactive lanes read zero) and copies of EXEC
 // taken inside R, and AND/ANDN2/OR/select/move of masks that are.
-bool ResultInReference(const ShaderInstruction& inst, const PathState& state)
+bool ResultInReference(const ShaderInstruction& inst, const PathState& state, MaskWidth width)
 {
-	const auto in = [&](int source) { return source < inst.src_num && InReference(state, inst.src[source]); };
+	const auto in = [&](int source) { return source < inst.src_num && InReference(state, inst.src[source], width); };
 	if (ShaderInstructionTypeStartsWith(inst.type, "VCmp")) { return state.exec_in_reference; }
 	if (ShaderInstructionTypeChangesExec(inst.type)) { return state.exec_in_reference; } // the saved old EXEC
-	switch (inst.type)
+	if (width.Is(inst.type, Type::SMovB64, Type::SMovB32) || width.Is(inst.type, Type::SAndn2B64, Type::SAndn2B32)) { return in(0); }
+	if (width.Is(inst.type, Type::SAndB64, Type::SAndB32)) { return in(0) || in(1); }
+	if (width.Is(inst.type, Type::SOrB64, Type::SOrB32) || width.Is(inst.type, Type::SCselectB64, Type::SCselectB32))
 	{
-		case Type::SMovB64: return in(0);
-		case Type::SAndB64: return in(0) || in(1);
-		case Type::SAndn2B64: return in(0);
-		case Type::SOrB64:
-		case Type::SCselectB64: return in(0) && in(1);
-		default: return false;
+		return in(0) && in(1);
 	}
+	return false;
 }
 
-void TrackReference(const ShaderInstruction& inst, PathState* state)
+void TrackReference(const ShaderInstruction& inst, MaskWidth width, PathState* state)
 {
 	if (LaneFlow::WritesExecOnly(inst.type))
 	{
 		state->exec_is_reference = false; // EXEC &= compare stays inside R
 		return;
 	}
-	const bool result_in = ResultInReference(inst, *state);
+	const bool result_in = ResultInReference(inst, *state, width);
 	if (ShaderInstructionWritesExec(inst))
 	{
 		bool exec_in = false;
@@ -297,7 +333,8 @@ void TrackReference(const ShaderInstruction& inst, PathState* state)
 		if (ShaderInstructionTypeChangesExec(inst.type) && inst.dst.type != Operand::ExecLo)
 		{
 			// S_AND_SAVEEXEC: EXEC = S0 & EXEC; the other SAVEEXEC forms may leave R.
-			exec_in = inst.type == Type::SAndSaveexecB64 && (state->exec_in_reference || InReference(*state, inst.src[0]));
+			exec_in = width.Is(inst.type, Type::SAndSaveexecB64, Type::SAndSaveexecB32) &&
+			          (state->exec_in_reference || InReference(*state, inst.src[0], width));
 		}
 		state->exec_in_reference = exec_in;
 		state->exec_is_reference = false;
@@ -312,7 +349,7 @@ void TrackReference(const ShaderInstruction& inst, PathState* state)
 	if (inst.dst.type == Operand::ExecLo || inst.dst.type == Operand::ExecHi || !ScalarWords(inst.dst, &first, &count)) { return; }
 	for (unsigned word = first; word < first + count && word < LaneFlow::kWords; ++word)
 	{
-		state->in_reference.set(word, result_in && inst.dst.size == 2);
+		state->in_reference.set(word, result_in && inst.dst.size == width.Words());
 	}
 }
 
@@ -337,7 +374,7 @@ bool ResidualReadAllowed(const ShaderInstruction& inst, const PathState& state)
 // Applies one instruction to the network registers of a path. Any mention of a live register other than
 // an overwrite would observe a value the host never computed; an overwrite while EXEC holds every launched
 // lane ends the register, any other overwrite leaves it residual against the EXEC of that moment.
-bool Visit(const ShaderInstruction& inst, bool exec_full, PathState* state)
+bool Visit(const ShaderInstruction& inst, bool exec_full, MaskWidth width, PathState* state)
 {
 	VectorSet read;
 	for (const auto& source: inst.src) { AddRange(source, &read); }
@@ -367,14 +404,8 @@ bool Visit(const ShaderInstruction& inst, bool exec_full, PathState* state)
 		state->live &= ~killed;
 		state->residual |= killed;
 	}
-	TrackReference(inst, state);
+	TrackReference(inst, width, state);
 	return true;
-}
-
-bool IsBranch(Type type)
-{
-	return type == Type::SBranch || type == Type::SCbranchScc0 || type == Type::SCbranchScc1 || type == Type::SCbranchVccz ||
-	       type == Type::SCbranchVccnz || type == Type::SCbranchExecz || type == Type::SCbranchExecnz;
 }
 
 bool IndexOfPc(const ShaderCode& code, int64_t pc, uint32_t* index)
@@ -421,7 +452,7 @@ bool NetworkDead(const ShaderCode& code, const ShaderFragmentMaskFlow& masks, ui
 			}
 			known = state;
 			const auto& inst = instructions.At(index);
-			if (!Visit(inst, masks.exec_full[index], &state)) { return false; }
+			if (!Visit(inst, masks.exec_full[index], MaskWidth {masks.guest_wave_size == 32u}, &state)) { return false; }
 			if (inst.type == Type::SEndpgm) { break; }
 			if (ShaderInstructionTypeStartsWith(inst.type, "SSetpc") || ShaderInstructionTypeStartsWith(inst.type, "SSwappc")) { return false; }
 			if (!IsBranch(inst.type))
@@ -446,21 +477,14 @@ bool ProveReduction(const ShaderCode& code, const ShaderFragmentMaskFlow& masks,
 	// The region proof made the seed V_CNDMASK_B32 0, x, cond with cond inside the region's EXEC; the
 	// mask flow adds that cond holds only covered lanes.
 	if (!masks.live_condition[seed_index]) { return false; }
-	const int seed = instructions.At(seed_index).dst.register_id;
-	Network   network;
-	auto&     own = network[seed];
-	for (uint32_t lane = 0; lane < kLanes; ++lane) { own[lane] = uint64_t {1} << lane; }
+	const uint32_t wave_lanes = masks.guest_wave_size;
+	const int      seed       = instructions.At(seed_index).dst.register_id;
+	Network        network;
+	auto&          own = network[seed];
+	for (uint32_t lane = 0; lane < wave_lanes; ++lane) { own[lane] = uint64_t {1} << lane; }
 	for (uint32_t index = seed_index + 1u; index < restore; ++index)
 	{
-		if (!Step(instructions.At(index), &network)) { return false; }
-	}
-	// The reads directly follow the restore, before anything can change the seed register.
-	uint32_t cursor = restore + 1u;
-	for (; cursor < instructions.Size() && !LabelAt(code, instructions.At(cursor).pc); ++cursor)
-	{
-		uint64_t lanes = 0;
-		if (!NetworkRead(instructions.At(cursor), network, &lanes)) { break; }
-		reduction->reads.push_back({cursor, lanes});
+		if (!Step(instructions.At(index), wave_lanes, &network)) { return false; }
 	}
 	VectorSet live;
 	for (const auto& [reg, sets]: network)
@@ -468,7 +492,22 @@ bool ProveReduction(const ShaderCode& code, const ShaderFragmentMaskFlow& masks,
 		(void)sets;
 		live.set(static_cast<size_t>(reg));
 	}
-	if (reduction->reads.empty() || !NetworkDead(code, masks, cursor, live)) { return false; }
+	// The reads follow the restore, before anything can change the seed register; an independent
+	// instruction may sit between them.
+	uint32_t after = restore + 1u;
+	for (uint32_t cursor = restore + 1u; cursor < instructions.Size() && !LabelAt(code, instructions.At(cursor).pc); ++cursor)
+	{
+		const auto& inst  = instructions.At(cursor);
+		uint64_t    lanes = 0;
+		if (NetworkRead(inst, network, wave_lanes, &lanes))
+		{
+			reduction->reads.push_back({cursor, lanes});
+			after = cursor + 1u;
+			continue;
+		}
+		if (!Independent(inst, live)) { break; }
+	}
+	if (reduction->reads.empty() || !NetworkDead(code, masks, after, live)) { return false; }
 	reduction->seed_index = seed_index;
 	reduction->restore    = restore;
 	reduction->seed       = seed;
@@ -500,14 +539,27 @@ const ShaderFragmentLaneReduction* ShaderFragmentLaneReductions::ReadAt(uint32_t
 ShaderFragmentLaneReductions ShaderFindFragmentLaneReductions(const ShaderCode& code, const ShaderFragmentMaskFlow& masks)
 {
 	ShaderFragmentLaneReductions result;
-	const auto&                  instructions = code.GetInstructions();
-	if (code.GetType() != ShaderType::Pixel || !masks.lane_local || masks.exec_full.size() != instructions.Size()) { return result; }
+	if (code.GetType() != ShaderType::Pixel || !masks.lane_local || masks.exec_full.size() != code.GetInstructions().Size() ||
+	    (masks.guest_wave_size != 32u && masks.guest_wave_size != 64u))
+	{
+		return result;
+	}
+	// The mask flow of a Wave32 program was proven on its narrowed lane masks; the regions are too.
+	const bool  wave32       = masks.guest_wave_size == 32u;
+	const auto  narrowed     = wave32 ? ShaderWave32LaneMaskProgram(code) : ShaderCode {};
+	const auto& program      = wave32 ? narrowed : code;
+	const auto& instructions = program.GetInstructions();
+	const Type  entry_type   = wave32 ? Type::SOrn2SaveexecB32 : Type::SOrn2SaveexecB64;
 	for (uint32_t entry = 0; entry < instructions.Size(); ++entry)
 	{
 		uint32_t restore = 0;
-		if (instructions.At(entry).type != Type::SOrn2SaveexecB64 || !ShaderFragmentNeutralRegionEnd(code, entry, &restore)) { continue; }
+		if (instructions.At(entry).type == entry_type) { }
+		if (instructions.At(entry).type != entry_type || !ShaderFragmentNeutralRegionEnd(program, masks.guest_wave_size, entry, &restore))
+		{
+			continue;
+		}
 		ShaderFragmentLaneReduction reduction;
-		if (ProveReduction(code, masks, entry, restore, &reduction)) { result.reductions.push_back(std::move(reduction)); }
+		if (ProveReduction(program, masks, entry, restore, &reduction)) { result.reductions.push_back(std::move(reduction)); }
 	}
 	return result;
 }

@@ -16,8 +16,10 @@
 
 #include "spirv/unified1/spirv.hpp"
 
+#include <array>
 #include <cstring>
 #include <initializer_list>
+#include <utility>
 #include <vector>
 
 UT_BEGIN(EmulatorNativeWaveAdmission);
@@ -209,8 +211,8 @@ ShaderInstruction Endpgm()
 
 // The whole-wave OR of a seed `cond ? v9 : 0` (cond = the entry EXEC): row-shift ORs fold each row onto its
 // last lane, PERMLANEX16 brings the other row of each half, and lanes 31 and 63 are read after the restore.
-// `tail` follows the reads.
-ShaderCode Reduction(std::initializer_list<ShaderInstruction> tail, uint8_t row_mask = 15)
+// `between` sits between the restore and the reads, `tail` follows the reads.
+ShaderCode Reduction(std::initializer_list<ShaderInstruction> tail, uint8_t row_mask = 15, std::initializer_list<ShaderInstruction> between = {})
 {
 	const auto exec  = Operand(ShaderOperandType::ExecLo, 0, 2);
 	const auto mask  = Operand(ShaderOperandType::Sgpr, 36, 2);
@@ -232,9 +234,41 @@ ShaderCode Reduction(std::initializer_list<ShaderInstruction> tail, uint8_t row_
 	                                     permute,
 	                                     Vector(ShaderInstructionType::VOrB32, 10, Operand(ShaderOperandType::Vgpr, 10),
 	                                            Operand(ShaderOperandType::Vgpr, 9)),
-	                                     Unary(ShaderInstructionType::SMovB64, exec, saved, true),
-	                                     Readlane(0, 31),
-	                                     Readlane(1, 63)};
+	                                     Unary(ShaderInstructionType::SMovB64, exec, saved, true)};
+	body.insert(body.end(), between.begin(), between.end());
+	body.push_back(Readlane(0, 31));
+	body.push_back(Readlane(1, 63));
+	body.insert(body.end(), tail.begin(), tail.end());
+	body.push_back(Endpgm());
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	for (auto inst: body)
+	{
+		inst.pc = code.GetInstructions().Size() * 4u;
+		code.GetInstructions().Add(inst);
+	}
+	return code;
+}
+
+// The Wave32 form of the reduction, as a guest program encodes it: B32 EXEC save, ORN2_SAVEEXEC and restore on
+// single SGPRs, the select condition encoded as a pair, row-shift ORs folding each row onto its last lane, and
+// lanes 15 and `high_lane` read after an unrelated VALU instruction.
+ShaderCode Wave32Reduction(std::initializer_list<ShaderInstruction> tail, uint32_t high_lane = 31)
+{
+	const auto exec  = Operand(ShaderOperandType::ExecLo, 0, 1);
+	const auto mask  = Operand(ShaderOperandType::Sgpr, 36, 1);
+	const auto saved = Operand(ShaderOperandType::VccLo, 0, 1);
+	std::vector<ShaderInstruction> body {Unary(ShaderInstructionType::SMovB32, mask, exec),
+	                                     Unary(ShaderInstructionType::SOrn2SaveexecB32, saved, mask),
+	                                     Select(Operand(ShaderOperandType::Sgpr, 36, 2)),
+	                                     RowShiftOr(1),
+	                                     RowShiftOr(2),
+	                                     RowShiftOr(4),
+	                                     RowShiftOr(8),
+	                                     Unary(ShaderInstructionType::SMovB32, exec, saved),
+	                                     Unary(ShaderInstructionType::VMovB32, Operand(ShaderOperandType::Vgpr, 12), Constant(1)),
+	                                     Readlane(0, 15),
+	                                     Readlane(1, high_lane)};
 	body.insert(body.end(), tail.begin(), tail.end());
 	body.push_back(Endpgm());
 	ShaderCode code;
@@ -1065,6 +1099,43 @@ TEST(EmulatorNativeWaveAdmission, PartialWaveRefusesObservedNetworkValues)
 	row_refusal(Reduction({Clear(9), Clear(10)}, 3));
 }
 
+TEST(EmulatorNativeWaveAdmission, ReductionReadsMayFollowInstructionsThatNameNoNetworkRegister)
+{
+	const auto unrelated = Unary(ShaderInstructionType::VMovB32, Operand(ShaderOperandType::Vgpr, 12), Constant(1));
+	const auto code      = Reduction({Clear(9), Clear(10)}, 15, {unrelated});
+	EXPECT_EQ(ShaderAnalyzeNativeWave(code, 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code, 64u));
+	ASSERT_EQ(reductions.reductions.size(), 1u);
+	uint64_t lanes = 0;
+	EXPECT_EQ(reductions.ReadAt(10, &lanes), nullptr);
+	ASSERT_NE(reductions.ReadAt(11, &lanes), nullptr);
+	EXPECT_EQ(lanes, 0x00000000ffffffffull);
+	// An instruction that reads a network register before the reads observes a step result.
+	const auto observes = Unary(ShaderInstructionType::VMovB32, Operand(ShaderOperandType::Vgpr, 12), Operand(ShaderOperandType::Vgpr, 10));
+	EXPECT_NE(ShaderAnalyzeNativeWave(Reduction({Clear(9), Clear(10)}, 15, {observes}), 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+}
+
+TEST(EmulatorNativeWaveAdmission, Wave32OrReductionRunsAsAPartialWave)
+{
+	const auto code = Wave32Reduction({Clear(10)});
+	const auto info = ShaderAnalyzeNativeWave(code, 32);
+	EXPECT_EQ(info.proof, ShaderNativeWaveProof::FragmentPartialWave);
+	EXPECT_EQ(info.refusal_reason, nullptr);
+	const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code, 32u));
+	ASSERT_EQ(reductions.reductions.size(), 1u);
+	EXPECT_TRUE(reductions.IsStep(3));
+	EXPECT_FALSE(reductions.IsStep(7));
+	uint64_t lanes = 0;
+	ASSERT_NE(reductions.ReadAt(9, &lanes), nullptr);
+	EXPECT_EQ(lanes, 0x000000000000ffffull);
+	ASSERT_NE(reductions.ReadAt(10, &lanes), nullptr);
+	EXPECT_EQ(lanes, 0x00000000ffff0000ull);
+	// In a Wave64 program the B32 forms move only the low half of EXEC: no region, no reduction.
+	EXPECT_NE(ShaderAnalyzeNativeWave(code, 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	// A lane select past the Wave32 width is not a static lane of the wave.
+	EXPECT_NE(ShaderAnalyzeNativeWave(Wave32Reduction({Clear(10)}, 32), 32).proof, ShaderNativeWaveProof::FragmentPartialWave);
+}
+
 TEST(EmulatorNativeWaveAdmission, PartialWaveKeepsStaleLanesOutsideTheRestoredExec)
 {
 	const auto exec  = Operand(ShaderOperandType::ExecLo, 0, 2);
@@ -1078,6 +1149,11 @@ TEST(EmulatorNativeWaveAdmission, PartialWaveKeepsStaleLanesOutsideTheRestoredEx
 	EXPECT_NE(widened.refusal_reason, nullptr);
 	// After WQM EXEC holds every launched lane, so an overwrite ends the register in all of them.
 	EXPECT_EQ(ShaderAnalyzeNativeWave(Reduction({widen, Clear(9), Clear(10), read}), 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	// The same obligation in a Wave32 program follows its B32 EXEC writes.
+	const auto exec32  = Operand(ShaderOperandType::ExecLo, 0, 1);
+	const auto widen32 = Unary(ShaderInstructionType::SWqmB32, exec32, exec32);
+	EXPECT_EQ(ShaderAnalyzeNativeWave(Wave32Reduction({Clear(10), read}), 32).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	EXPECT_NE(ShaderAnalyzeNativeWave(Wave32Reduction({Clear(10), widen32, read}), 32).proof, ShaderNativeWaveProof::FragmentPartialWave);
 }
 
 TEST(EmulatorNativeWaveAdmission, PartialWaveReductionEmitsOneSubgroupOrPerRead)
@@ -1086,28 +1162,33 @@ TEST(EmulatorNativeWaveAdmission, PartialWaveReductionEmitsOneSubgroupOrPerRead)
 		NggFixture::Initialize();
 		ScopedShaderValidation validation;
 		if (!Config::ShaderValidationEnabled()) { std::_Exit(4); }
-		const auto           code = Reduction({Clear(9), Clear(10)});
-		ShaderPixelInputInfo input {};
-		input.native_wave = ShaderAnalyzeNativeWave(code, 64);
-		if (input.native_wave.proof != ShaderNativeWaveProof::FragmentPartialWave) { std::_Exit(1); }
-		const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
-		const auto count  = [&source](const char* text)
+		// Wave64: six network steps; Wave32: four.
+		const std::array<std::pair<ShaderCode, uint32_t>, 2> programs {{{Reduction({Clear(9), Clear(10)}), 64u}, {Wave32Reduction({Clear(10)}), 32u}}};
+		for (const auto& [code, wave]: programs)
 		{
-			size_t found = 0;
-			for (auto at = source.FindIndex(text); at != Core::STRING8_INVALID_INDEX; at = source.FindIndex(text, at + 1)) { found++; }
-			return found;
-		};
-		// The six network steps are not run; each of the two reads is one subgroup OR of its lanes' seeds.
-		if (count("; reduction step:") != 6u || count("= OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %lr_part_") != 2u)
-		{
-			std::_Exit(2);
-		}
-		Kyty::Vector<uint32_t> binary;
-		String8                error;
-		if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
-		{
-			std::fprintf(stderr, "%s\n", error.c_str());
-			std::_Exit(3);
+			ShaderPixelInputInfo input {};
+			input.native_wave = ShaderAnalyzeNativeWave(code, wave);
+			if (input.native_wave.proof != ShaderNativeWaveProof::FragmentPartialWave) { std::_Exit(1); }
+			const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+			const auto count  = [&source](const char* text)
+			{
+				size_t found = 0;
+				for (auto at = source.FindIndex(text); at != Core::STRING8_INVALID_INDEX; at = source.FindIndex(text, at + 1)) { found++; }
+				return found;
+			};
+			// The network steps are not run; each of the two reads is one subgroup OR of its lanes' seeds.
+			if (count("; reduction step:") != (wave == 64u ? 6u : 4u) ||
+			    count("= OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %lr_part_") != 2u)
+			{
+				std::_Exit(2);
+			}
+			Kyty::Vector<uint32_t> binary;
+			String8                error;
+			if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+			{
+				std::fprintf(stderr, "%s\n", error.c_str());
+				std::_Exit(3);
+			}
 		}
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");

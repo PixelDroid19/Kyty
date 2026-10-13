@@ -35,6 +35,8 @@ struct ShaderFragmentMaskFlow
 	// Per instruction, only when lane_local: a V_CNDMASK_B32 whose condition holds only lanes of the entry
 	// EXEC, so no helper lane and no lane outside the launched quads.
 	std::vector<bool> live_condition;
+	// The guest wave width the proof was made for (32 or 64).
+	uint32_t guest_wave_size = 64;
 };
 
 // Flow-sensitive mask provenance for a fragment program (S_ENDPGM last, no memory write
