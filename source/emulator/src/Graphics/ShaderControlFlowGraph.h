@@ -18,7 +18,12 @@
 // the merge is the first exit target after the latch, in program order of the
 // exiting branch, that every other exit leaves alone: an other exit may only
 // enter a region dominated by the loop header that neither reaches the merge
-// nor shares a block with the merge's region. A conditional branch into a
+// nor shares a block with the merge's region. Without a conditional latch, an
+// other exit may also enter a break arm: a region placed between the header and
+// the latch, dominated by the header, that leaves only to the merge, shares no
+// block with any other exit's region and none with what the merge reaches
+// before the header; the arm lies in the loop construct and its transfers to
+// the merge are breaks. A conditional branch into a
 // discard tail (as ShaderCode::ReadBlock reports it) is a terminating arm that
 // the emitter lowers with its own kill body, not a loop exit.
 //
