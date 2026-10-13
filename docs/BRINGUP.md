@@ -63,17 +63,25 @@ fail on the current HEAD before acting on them.
     the previous run.
   - AMD (RADV): racing title 9.9k frames, unchanged; watercolour platformer
     3.4k and 3.9k frames.
-  - AMD fishing title, same tree and route, 200 s:
+  - AMD fishing title, same tree and route, 200 s. Steady rate is frames per
+    30 s over the last three capture intervals:
 
-    | Table size | Final frame |
-    | --- | --- |
-    | 32 | 2,860 |
-    | 64 | 2,792 / 2,814 / 2,858 |
+    | Table size | Perf counters | Final frame | Steady rate |
+    | --- | --- | --- | --- |
+    | 32 | on | 2,860 | 188-207 |
+    | 64 | on | 2,304 (slow load) | 192-196 |
+    | 64 | off | 2,792 / 2,814 / 2,858 | 136-225 |
 
-    The two sizes overlap. Earlier runs on the tree before the alias fix
-    reached 3,058-3,106. The table size does not explain that gap. During
-    these runs another user process held one core at ~95% (load average
-    about 6), so the gap is not attributed.
+    The two sizes overlap. Runs on earlier binaries reached 3,058-3,106
+    frames at 206-238 frames per 30 s. That gap is not attributed:
+    - The storage-image alias change only replaces an EXIT that this title
+      never reached.
+    - Foreign processes loaded the host during some of the later runs
+      (load average 4-12).
+    - A repeat on HEAD under a load average of 12 gave 141-152 frames per
+      30 s, so it does not separate the two causes.
+    - The HEAD run before it stalled at frame 3 at boot. That is the known
+      intermittent boot stall, which also reproduces on older binaries.
   - Unit tests: 2,413 pass. The one failure is the known intermittent
     `StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
     timeout (see the 2026-10-11 entry); it passes alone 3/3.
