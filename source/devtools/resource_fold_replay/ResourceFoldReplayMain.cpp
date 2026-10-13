@@ -14,13 +14,14 @@
 // then the summary line "fingerprint=<hex> output_matches_document=<0|1>".
 //
 // Exit codes:
-//   0  replay consumed every recorded read and reproduced the recorded output
-//      byte for byte; with --validate-only, the document passed schema and
+//   0  direct, cold-memo and warm-memo replay consumed every recorded read and
+//      reproduced the recorded output byte for byte; with --validate-only,
+//      the document passed schema and
 //      safe-input validation (the evaluator may still refuse it during replay)
 //   1  usage error
 //   2  the document is malformed, outside the schema bounds, or not a PS5 document
 //   3  the transcript holds reads that production never requested
-//   4  replay consumed the transcript but the output differs from the document
+//   4  replay output differs from the document or between memo states
 //   5  the runtime configuration could not be initialized
 
 #include "../../emulator/src/Graphics/ShaderResourceFoldCapture.h"

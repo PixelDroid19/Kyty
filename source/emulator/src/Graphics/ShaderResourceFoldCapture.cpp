@@ -1513,6 +1513,32 @@ private:
 	bool m_previous;
 };
 
+struct ReplayEvaluation
+{
+	ShaderResourceFoldReplayStatus status = ShaderResourceFoldReplayStatus::Ok;
+	std::string                    canonical_output;
+};
+
+// Runs one parse against the exact reconstructed inputs and a fresh transcript
+// reader. The caller supplies a memo only for the cold and warm comparisons.
+ReplayEvaluation EvaluateReplay(const ReplayCase& replay, const ShaderCodeResourceMemo* code_memo)
+{
+	ShaderResourceFoldReplayReader reader(replay.transcript);
+	auto                           usage = std::make_unique<ShaderParsedUsage>();
+	auto                           bind  = std::make_unique<ShaderBindResources>();
+	bind->push_constant_offset           = replay.push_constant_offset;
+	bind->push_constant_size             = replay.push_constant_size;
+	bind->descriptor_set_slot            = replay.descriptor_set_slot;
+	usage->vertex_attrib                 = replay.vertex_attrib;
+	usage->vertex_attrib_reg             = replay.vertex_attrib_reg;
+	{
+		const ScopedShaderGuestDescriptorReader reader_scope(&reader);
+		ShaderParseUsage2(&replay.user_data, usage.get(), bind.get(), replay.user_sgpr, replay.user_sgpr_num, replay.code.get(),
+		                  replay.user_data_register_base, replay.vertex_resource_types, nullptr, nullptr, nullptr, code_memo);
+	}
+	return {reader.Status(), ShaderResourceFoldCanonicalOutput(*usage, *bind)};
+}
+
 } // namespace
 
 // ---- Public API -------------------------------------------------------------
@@ -1728,25 +1754,25 @@ bool ShaderResourceFoldReplayDocument(const std::string& document, ShaderResourc
 		return Fail(error, "configured guest platform does not match the document");
 	}
 
-	// Replay answers from the transcript only; the scope is the production read seam.
-	ShaderResourceFoldReplayReader reader(replay.transcript);
-	auto                           usage = std::make_unique<ShaderParsedUsage>();
-	auto                           bind  = std::make_unique<ShaderBindResources>();
-	bind->push_constant_offset           = replay.push_constant_offset;
-	bind->push_constant_size             = replay.push_constant_size;
-	bind->descriptor_set_slot            = replay.descriptor_set_slot;
-	usage->vertex_attrib                 = replay.vertex_attrib;
-	usage->vertex_attrib_reg             = replay.vertex_attrib_reg;
+	// Replay answers from the transcript only; each parse gets a fresh reader and
+	// output state. Keep the direct parse authoritative for existing failure
+	// reporting, then require cold and warm memo results to match it on success.
+	const ReplayCaptureSuppression suppression;
+	const auto                    direct = EvaluateReplay(replay, nullptr);
+	bool                          memo_equivalent = false;
+	if (direct.status == ShaderResourceFoldReplayStatus::Ok)
 	{
-		const ReplayCaptureSuppression          suppression;
-		const ScopedShaderGuestDescriptorReader reader_scope(&reader);
-		ShaderParseUsage2(&replay.user_data, usage.get(), bind.get(), replay.user_sgpr, replay.user_sgpr_num, replay.code.get(),
-		                  replay.user_data_register_base, replay.vertex_resource_types);
+		ShaderCodeResourceMemo memo;
+		const auto             cold = EvaluateReplay(replay, &memo);
+		const auto             warm = EvaluateReplay(replay, &memo);
+		memo_equivalent = cold.status == direct.status && warm.status == direct.status &&
+		                  cold.canonical_output == direct.canonical_output && warm.canonical_output == direct.canonical_output;
 	}
-	report->status                  = reader.Status();
-	report->canonical_output        = ShaderResourceFoldCanonicalOutput(*usage, *bind);
+	report->status                  = direct.status;
+	report->canonical_output        = direct.canonical_output;
 	report->fingerprint             = ShaderResourceFoldFingerprint(report->canonical_output);
-	report->output_matches_document = report->status == ShaderResourceFoldReplayStatus::Ok && report->canonical_output == replay.canonical_output;
+	report->output_matches_document = report->status == ShaderResourceFoldReplayStatus::Ok && memo_equivalent &&
+	                                  report->canonical_output == replay.canonical_output;
 	return true;
 }
 

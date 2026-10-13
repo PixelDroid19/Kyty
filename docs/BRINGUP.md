@@ -9,6 +9,105 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Static SRT resource-plan prototype (2026-10-12)
+
+- Scope: memoize the instruction index, constant table offset and ordered
+  descriptor partitions for eligible pointer-table loads. The recipe belongs
+  to the existing immutable shader-code memo; each load has at most four
+  partitions. Publication uses the memo's mutex, and no guest address,
+  descriptor word, binding or Vulkan object is retained in the recipe.
+- Each evaluation still checks the current scalar entry values, SRT span,
+  user-data register base and overlap with the active EUD pointer. It then
+  reads the current pointer and takes the same verified descriptor snapshot.
+  Loads with an incomplete descriptor partition remain rejected as a whole.
+  Callers without a memo still check current eligibility before analysing
+  partitions. No guest contract, SPIR-V output or device feature is changed.
+- The production memo is supplied by the Gen5 pixel-shader path. Compute
+  retains direct evaluation; vertex parsing does not use this collector.
+  An SRT span smaller than two dwords returns before plan lookup or creation.
+  Existing state-setup timers include this work but do not isolate it; there
+  is no plan-specific hit or eligibility counter. The current runtime
+  evidence does not establish how often the measured workload uses a plan.
+- Offline resource-fold replay now evaluates the recorded inputs directly,
+  then with a cold and warm code memo, using fresh output objects and a fresh
+  transcript reader each time. Success requires the same complete canonical
+  output and exact transcript consumption on all three paths. This is a
+  focused correctness gate, not a GPU or performance benchmark.
+- Validation: Release builds of the emulator, unit-test binary and replay
+  tool pass. The focused resource-plan, pointer, replay and translation-cache
+  suites pass 51 tests, including pointer/content changes, current span/base,
+  a warmed SRT plan subsequently aliased by EUD, four-way descriptor
+  partitions, and incomplete-partition rejection. The replay CLI and playable
+  harness pass 86 Python tests; these are tool-contract tests, not gameplay
+  acceptance. Strict dependency boundaries and all 13 graphics table hashes
+  pass. Independent source and fixture reviews found no material defect.
+- Baseline measurement at `ff89d40f`, Release build, Intel Arc A770 with Xe
+  KMD and Mesa 26.2.4, fixed 1280x720 render targets, Performance shader optimization and
+  silent logging: the Unity fishing menu was visually confirmed before three
+  approximately 15-second windows. Present deltas measured 12.68, 13.50 and
+  15.10 FPS. Every window had zero shader compilations and zero graphics or
+  compute pipeline lookup misses. Graphics pipeline lookup occupied only
+  75.7--83.6 ms per window; it does not explain the dominant steady-frame cost.
+  Nested CPU timers must not be added or interpreted as GPU elapsed time.
+- Reproducibility limits: the unchanged baseline also stalled before menu
+  presentation in two attempts. Another reached the save notice but did not
+  pass the visual menu gate. The agent's `interactive` phase classifies
+  presentation progress, not the guest scene. These attempts are excluded
+  from FPS comparisons. An XDG-cache environment difference alone does not
+  explain the startup stall, which also occurred without that override.
+- The prototype reached the same visually confirmed menu in a strict run on
+  the Intel host after holding Cross for three seconds at the save notice.
+  Its native capture passed scoring. An external compilation began during
+  the subsequent warm-up, so the private measurement controller terminated
+  its own process and invalidated the run before collecting any timed
+  window. This establishes menu rendering for that run, not sustained
+  performance or gameplay acceptance.
+- Later attempts with uncontrolled host input reached intro or gameplay
+  before the menu measurement gate; none supplied valid timing windows.
+  Shared private save state was initially suspected, but an initially empty
+  isolated save directory still reached gameplay while host input was active.
+  That excludes shared save state as the sole explanation. Paired runs must
+  control both the initial save state and input ownership.
+- A subsequent controlled ABBA sequence completed on the same Intel host,
+  driver and rendering settings. Each process used a fresh private save root,
+  the same warmed shader/pipeline caches and the same scripted input route.
+  The lighthouse menu was visually confirmed before a 15-second warm-up and
+  three approximately 15-second measurement windows. No input or capture was
+  sent during a timed window. Strict guest mode had no permissive features;
+  Vulkan validation was disabled for timing. Final native captures from all
+  four processes passed material-health scoring and retained the menu. This
+  does not establish pixel equivalence or resolve existing visual defects.
+  Independent visual review found broad tan patches across the water in A1's
+  final capture, absent from its initial menu capture and the other three
+  runs' menu captures. The baseline outlier's cause and onset are unknown;
+  scoring alone does not establish visual equivalence, and these samples
+  cannot attribute the discrepancy to the prototype.
+
+  | Process order | Variant | Window FPS | Total presents / elapsed seconds |
+  | --- | --- | --- | --- |
+  | A1 | Baseline | 14.08 / 14.50 / 13.70 | 636 / 45.132 = 14.092 FPS |
+  | B1 | Prototype | 14.68 / 14.50 / 14.49 | 657 / 45.136 = 14.556 FPS |
+  | B2 | Prototype | 14.61 / 14.63 / 14.30 | 655 / 45.129 = 14.514 FPS |
+  | A2 | Baseline | 14.41 / 14.23 / 14.17 | 644 / 45.127 = 14.271 FPS |
+
+- Combined measured throughput was 14.181 FPS for the baseline and 14.535
+  FPS for the prototype, an observed difference of 2.49%. There were only two
+  process runs per variant; the three windows within a process are not
+  independent experiments. All twelve windows were healthy and recorded
+  zero SPIR-V compilations, pipeline lookup misses or Vulkan pipeline creates.
+  The per-draw state-setup total did not decrease: 11.297 us before versus
+  11.480 us with the prototype. Resource binding was 27.469 versus 28.084 us;
+  aggregate draw-processor time was 51.512 versus 52.451 us. These nested CPU
+  timers are not additive, and none isolates pointer-table plan work.
+- Performance benefit remains unproven: this pilot does not establish a
+  meaningful CPU-cost reduction or reach the 20 FPS menu target. Before
+  extending the optimization, measure actual plan invocations, eligible
+  candidates and analysis time on the workload. Preserve the focused replay
+  and contract gates for each change; repeat this controlled menu comparison
+  when the measured path changes instead of sweeping every title each time.
+  No AMD or NVIDIA runtime validation was completed for this prototype. The
+  code-only cache introduces no GPU-vendor branch or Vulkan feature dependency.
+
 ## Render pass continuation across draws (2026-10-12)
 
 - Contract: a draw continues the render pass instance that the previous draw

@@ -128,7 +128,7 @@ struct ShaderResourceFoldReplayReport
 	ShaderResourceFoldReplayStatus status = ShaderResourceFoldReplayStatus::Ok;
 	std::string                    canonical_output;
 	uint64_t                       fingerprint             = 0;
-	bool                           output_matches_document = false; // exact byte comparison
+	bool                           output_matches_document = false; // direct, cold memo and warm memo agree byte for byte
 };
 
 // Schema and safe-input validation: strictly parses one bounded schema-v3 document
@@ -139,6 +139,7 @@ struct ShaderResourceFoldReplayReport
 
 // ShaderResourceFoldValidateDocument, then production ShaderParseUsage2 against the
 // recorded transcript only. The configured guest platform must match the document.
+// Successful evaluation also requires equivalent cold and warm code-memo parses.
 // Returns false with *error for rejected documents. A refused replay halts through
 // the production EXIT path.
 [[nodiscard]] bool ShaderResourceFoldReplayDocument(const std::string& document, ShaderResourceFoldReplayReport* report,

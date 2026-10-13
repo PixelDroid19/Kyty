@@ -49,6 +49,7 @@ UT_LINK(EmulatorGraphicsDirtyLookup);
 UT_LINK(EmulatorGraphicsGdsRange);
 UT_LINK(EmulatorGraphicsOperationTrace);
 UT_LINK(EmulatorShaderResourceFoldReplay);
+UT_LINK(EmulatorShaderResourcePlans);
 UT_LINK(EmulatorShaderControlFlowGraph);
 UT_LINK(EmulatorLabelPublication);
 UT_LINK(EmulatorGuestDeviceAddress);

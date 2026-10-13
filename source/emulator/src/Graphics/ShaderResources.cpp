@@ -1355,24 +1355,18 @@ static bool ShaderLoadsThroughSrtPointer(const ShaderInstruction& sload, const s
 	return entry_values.test(static_cast<size_t>(reg)) && entry_values.test(static_cast<size_t>(reg + 1));
 }
 
-struct ShaderDescriptorBlock
-{
-	ShaderInstruction     load;
-	int                   first_dword = 0;
-	ShaderDynamicSLoadUse use;
-};
-
 // Splits the destination of a pointer-table load into descriptors with
 // consumers: a block used as one T# or S# stays whole, an 8-dword block may
 // also hold two S#, and a 16-dword load is two 8-dword halves. Each block is
 // analysed as its own load of the same PC.
 static bool ShaderPartitionDescriptorLoad(const ShaderCode& code, uint32_t index, const ShaderInstruction& sload, int first_dword,
-                                          int dwords, std::vector<ShaderDescriptorBlock>* blocks)
+                                          int dwords, ShaderPointerTableResourcePlan* plan)
 {
+	EXIT_IF(plan == nullptr);
 	if (dwords == 16)
 	{
-		return ShaderPartitionDescriptorLoad(code, index, sload, first_dword, 8, blocks) &&
-		       ShaderPartitionDescriptorLoad(code, index, sload, first_dword + 8, 8, blocks);
+		return ShaderPartitionDescriptorLoad(code, index, sload, first_dword, 8, plan) &&
+		       ShaderPartitionDescriptorLoad(code, index, sload, first_dword + 8, 8, plan);
 	}
 	ShaderInstruction block = sload;
 	block.type              = dwords == 4 ? ShaderInstructionType::SLoadDwordx4 : ShaderInstructionType::SLoadDwordx8;
@@ -1381,11 +1375,115 @@ static bool ShaderPartitionDescriptorLoad(const ShaderCode& code, uint32_t index
 	const auto use          = ShaderFindDynamicSLoadUse(code, index, block, true);
 	if (use.valid && use.found && use.kind != ShaderDynamicSLoadResourceKind::StorageBuffer)
 	{
-		blocks->push_back({block, first_dword, use});
+		if (plan->partition_count >= plan->partitions.size())
+		{
+			return false;
+		}
+		plan->partitions[plan->partition_count++] = {static_cast<uint8_t>(first_dword), static_cast<uint8_t>(dwords), use};
 		return true;
 	}
-	return dwords == 8 && ShaderPartitionDescriptorLoad(code, index, sload, first_dword, 4, blocks) &&
-	       ShaderPartitionDescriptorLoad(code, index, sload, first_dword + 4, 4, blocks);
+	return dwords == 8 && ShaderPartitionDescriptorLoad(code, index, sload, first_dword, 4, plan) &&
+	       ShaderPartitionDescriptorLoad(code, index, sload, first_dword + 4, 4, plan);
+}
+
+static int ShaderPointerTableSLoadDwords(const ShaderInstruction& sload)
+{
+	if (sload.type == ShaderInstructionType::SLoadDwordx16 && sload.dst.type == ShaderOperandType::Sgpr && sload.dst.size == 16 &&
+	    sload.src_num >= 2 && sload.src[0].type == ShaderOperandType::Sgpr && sload.src[0].size == 2)
+	{
+		return 16;
+	}
+	return ShaderDescriptorSLoadDwords(sload);
+}
+
+static bool ShaderBuildPointerTableResourcePlan(const ShaderCode& code, uint32_t index, ShaderPointerTableResourcePlan* plan)
+{
+	EXIT_IF(plan == nullptr);
+	if (index >= code.GetInstructions().Size())
+	{
+		return false;
+	}
+	const auto& sload       = code.GetInstructions().At(index);
+	const int   dword_count = ShaderPointerTableSLoadDwords(sload);
+	int         offset_dw   = 0;
+	if (dword_count == 0 || !ShaderGetSmemConstantDwordOffset(sload, &offset_dw) || offset_dw < 0 ||
+	    static_cast<uint32_t>(dword_count) > kMaxSrtPointerTableDwords ||
+	    static_cast<uint32_t>(offset_dw) > kMaxSrtPointerTableDwords - static_cast<uint32_t>(dword_count))
+	{
+		return false;
+	}
+
+	ShaderPointerTableResourcePlan candidate {};
+	candidate.instruction_index = index;
+	candidate.offset_dw         = static_cast<uint16_t>(offset_dw);
+	candidate.dword_count       = static_cast<uint8_t>(dword_count);
+	if (!ShaderPartitionDescriptorLoad(code, index, sload, 0, dword_count, &candidate))
+	{
+		return false;
+	}
+	*plan = candidate;
+	return true;
+}
+
+const std::vector<ShaderPointerTableResourcePlan>& ShaderCodeResourceMemo::PointerTableResourcePlans(const ShaderCode& code) const
+{
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_pointer_table_resource_plans_ready)
+		{
+			return m_pointer_table_resource_plans;
+		}
+	}
+	std::vector<ShaderPointerTableResourcePlan> plans;
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		ShaderPointerTableResourcePlan plan {};
+		if (ShaderBuildPointerTableResourcePlan(code, index, &plan))
+		{
+			plans.push_back(plan);
+		}
+	}
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (!m_pointer_table_resource_plans_ready)
+	{
+		m_pointer_table_resource_plans       = std::move(plans);
+		m_pointer_table_resource_plans_ready = true;
+	}
+	return m_pointer_table_resource_plans;
+}
+
+static void ShaderMaterializePointerTableResourcePlan(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
+                                                      ShaderParsedUsage* info, int user_data_register_base,
+                                                      const ShaderPointerTableResourcePlan& plan)
+{
+	const auto&           sload   = code.GetInstructions().At(plan.instruction_index);
+	const int             pointer = sload.src[0].register_id - user_data_register_base;
+	const uint64_t        address = ((static_cast<uint64_t>(user_sgpr.value[pointer + 1]) & 0xffffu) << 32u) | user_sgpr.value[pointer];
+	const uint32_t        table_dwords = static_cast<uint32_t>(plan.offset_dw) + plan.dword_count;
+	std::vector<uint32_t> table(table_dwords);
+	if (!ShaderSnapshotGuestDescriptorTable(address, table_dwords, &table))
+	{
+		EXIT("unreadable descriptor table behind an SRT pointer: pc=0x%08" PRIx32 " sgpr=%d address=0x%016" PRIx64 " dwords=%d\n", sload.pc,
+		     pointer, address, static_cast<int>(table_dwords));
+	}
+
+	const uint32_t instruction_count = code.GetInstructions().Size();
+	for (uint32_t index = 0; index < plan.partition_count; ++index)
+	{
+		const auto&       partition = plan.partitions[index];
+		ShaderInstruction block     = sload;
+		block.type            = partition.dword_count == 4 ? ShaderInstructionType::SLoadDwordx4 : ShaderInstructionType::SLoadDwordx8;
+		block.dst.register_id = sload.dst.register_id + partition.first_dword;
+		block.dst.size        = partition.dword_count;
+		if (!ShaderAddDynamicScalarResource(bind, info, block, static_cast<int>(plan.offset_dw) + partition.first_dword, partition.use,
+		                                    user_sgpr, table.data(), instruction_count))
+		{
+			EXIT("unable to materialize SRT pointer descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u textures=%d "
+			     "samplers=%d\n",
+			     sload.pc, static_cast<int>(plan.offset_dw) + partition.first_dword, block.dst.size,
+			     static_cast<unsigned>(partition.use.kind), bind->textures2D.textures_num, bind->samplers.samplers_num);
+		}
+	}
 }
 
 // An SRT can hold 64-bit pointers to descriptor tables. A T# or S# read through
@@ -1395,55 +1493,55 @@ static bool ShaderPartitionDescriptorLoad(const ShaderCode& code, uint32_t index
 // descriptors keep their existing paths.
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                         ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base,
-                                        const ShaderScalarFlow& scalar_flow)
+                                        const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo)
 {
 	EXIT_IF(bind == nullptr || info == nullptr);
 	if (srt_size_dw < 2u)
 	{
 		return;
 	}
-	const auto& entry_values = scalar_flow.holding_entry_value;
+	const auto&    entry_values      = scalar_flow.holding_entry_value;
 	const uint32_t instruction_count = code.GetInstructions().Size();
+	if (memo != nullptr)
+	{
+		for (const auto& plan: memo->PointerTableResourcePlans(code))
+		{
+			const uint32_t index = plan.instruction_index;
+			if (index >= entry_values.size())
+			{
+				continue;
+			}
+			const auto& sload = code.GetInstructions().At(index);
+			if (!ShaderLoadsThroughSrtPointer(sload, entry_values[index], srt_size_dw, user_data_register_base, *bind))
+			{
+				continue;
+			}
+			ShaderMaterializePointerTableResourcePlan(code, bind, user_sgpr, info, user_data_register_base, plan);
+		}
+		return;
+	}
+
 	for (uint32_t index = 0; index < instruction_count && index < entry_values.size(); ++index)
 	{
 		const auto& sload       = code.GetInstructions().At(index);
-		const int   dword_count = sload.type == ShaderInstructionType::SLoadDwordx16 && sload.dst.type == ShaderOperandType::Sgpr &&
-		                                    sload.dst.size == 16 && sload.src_num >= 2 && sload.src[0].type == ShaderOperandType::Sgpr &&
-		                                    sload.src[0].size == 2
-		                              ? 16
-		                              : ShaderDescriptorSLoadDwords(sload);
+		const int   dword_count = ShaderPointerTableSLoadDwords(sload);
 		int         offset_dw   = 0;
-		std::vector<ShaderDescriptorBlock> blocks;
 		if (dword_count == 0 || !ShaderLoadsThroughSrtPointer(sload, entry_values[index], srt_size_dw, user_data_register_base, *bind) ||
 		    !ShaderGetSmemConstantDwordOffset(sload, &offset_dw) || offset_dw < 0 ||
 		    static_cast<uint32_t>(dword_count) > kMaxSrtPointerTableDwords ||
-		    static_cast<uint32_t>(offset_dw) > kMaxSrtPointerTableDwords - static_cast<uint32_t>(dword_count) ||
-		    !ShaderPartitionDescriptorLoad(code, index, sload, 0, dword_count, &blocks))
+		    static_cast<uint32_t>(offset_dw) > kMaxSrtPointerTableDwords - static_cast<uint32_t>(dword_count))
 		{
 			continue;
 		}
-
-		const int      pointer = sload.src[0].register_id - user_data_register_base;
-		const uint64_t address = ((static_cast<uint64_t>(user_sgpr.value[pointer + 1]) & 0xffffu) << 32u) | user_sgpr.value[pointer];
-		const uint32_t table_dwords = static_cast<uint32_t>(offset_dw) + static_cast<uint32_t>(dword_count);
-		std::vector<uint32_t> table(table_dwords);
-		if (!ShaderSnapshotGuestDescriptorTable(address, table_dwords, &table))
+		ShaderPointerTableResourcePlan plan {};
+		plan.instruction_index = index;
+		plan.offset_dw         = static_cast<uint16_t>(offset_dw);
+		plan.dword_count       = static_cast<uint8_t>(dword_count);
+		if (!ShaderPartitionDescriptorLoad(code, index, sload, 0, dword_count, &plan))
 		{
-			EXIT("unreadable descriptor table behind an SRT pointer: pc=0x%08" PRIx32 " sgpr=%d address=0x%016" PRIx64
-			     " dwords=%d\n",
-			     sload.pc, pointer, address, offset_dw + dword_count);
+			continue;
 		}
-		for (const auto& block: blocks)
-		{
-			if (!ShaderAddDynamicScalarResource(bind, info, block.load, offset_dw + block.first_dword, block.use, user_sgpr, table.data(),
-			                                    instruction_count))
-			{
-				EXIT("unable to materialize SRT pointer descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u textures=%d "
-				     "samplers=%d\n",
-				     sload.pc, offset_dw + block.first_dword, block.load.dst.size, static_cast<unsigned>(block.use.kind),
-				     bind->textures2D.textures_num, bind->samplers.samplers_num);
-			}
-		}
+		ShaderMaterializePointerTableResourcePlan(code, bind, user_sgpr, info, user_data_register_base, plan);
 	}
 }
 

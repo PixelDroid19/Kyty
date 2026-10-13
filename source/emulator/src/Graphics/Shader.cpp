@@ -3191,7 +3191,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	}
 	if (code != nullptr && !vertex_resource_types)
 	{
-		ShaderCollectPointerTableResources(*code, bind, user_sgpr, info, user_data->srt_size_dw, user_data_register_base, *code_flow);
+		ShaderCollectPointerTableResources(*code, bind, user_sgpr, info, user_data->srt_size_dw, user_data_register_base, *code_flow,
+		                                   code_memo);
 	}
 
 	// Gen5 metadata is advisory: some shaders address an S# descriptor directly

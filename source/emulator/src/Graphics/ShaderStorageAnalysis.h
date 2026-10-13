@@ -8,6 +8,7 @@
 
 #include "ShaderDebugInternal.h"
 
+#include <array>
 #include <bitset>
 #include <cstdint>
 #include <map>
@@ -47,6 +48,24 @@ struct ShaderDynamicSLoadUse
 	bool                        valid              = true;
 };
 
+// Code-only recipe for a descriptor S_LOAD through an SRT pointer. The
+// bounded partition array covers the at most four descriptors in an x16 load.
+struct ShaderPointerTableResourcePartition
+{
+	uint8_t               first_dword = 0;
+	uint8_t               dword_count = 0;
+	ShaderDynamicSLoadUse use {};
+};
+
+struct ShaderPointerTableResourcePlan
+{
+	uint32_t                                           instruction_index = 0;
+	uint16_t                                           offset_dw         = 0;
+	uint8_t                                            dword_count       = 0;
+	uint8_t                                            partition_count   = 0;
+	std::array<ShaderPointerTableResourcePartition, 4> partitions {};
+};
+
 // Scalar bytes read through one dynamic S_LOAD mapping, as computed by
 // ShaderDynamicSLoadScalarSpan from a zero byte count.
 struct ShaderDynamicSLoadSpan
@@ -69,6 +88,8 @@ public:
 	// Consumers of every whole-descriptor S_LOAD up to the first branch, indexed
 	// by instruction; other entries keep the default value.
 	[[nodiscard]] const std::vector<ShaderDynamicSLoadUse>& DescriptorSLoadUses(const ShaderCode& code) const;
+	// Sparse code-only recipes for candidate descriptor loads through SRT pointers.
+	[[nodiscard]] const std::vector<ShaderPointerTableResourcePlan>& PointerTableResourcePlans(const ShaderCode& code) const;
 	[[nodiscard]] ShaderDynamicSLoadSpan DynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping) const;
 
 private:
@@ -79,6 +100,8 @@ private:
 	mutable std::unordered_map<int, ShaderSamplerOperationEvidence> m_sampler_operation;
 	mutable std::vector<ShaderDynamicSLoadUse>                      m_descriptor_sload_uses;
 	mutable bool                                                    m_descriptor_sload_uses_ready = false;
+	mutable std::vector<ShaderPointerTableResourcePlan>             m_pointer_table_resource_plans;
+	mutable bool                                                    m_pointer_table_resource_plans_ready = false;
 	// Keyed by load PC, last consumer PC, destination register and dword count.
 	mutable std::map<std::tuple<uint32_t, uint32_t, int, int>, ShaderDynamicSLoadSpan> m_dynamic_sload_spans;
 };
@@ -121,7 +144,7 @@ void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindR
                                              int user_sgpr_num, int user_data_register_base, const ShaderScalarFlow& scalar_flow);
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                         ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base,
-                                        const ShaderScalarFlow& scalar_flow);
+                                        const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo);
 // Source of guest descriptor-table words for ShaderSnapshotGuestDescriptorTable.
 // Without an active scope the production read is Core::VirtualMemory::CopyFromGuest.
 class ShaderGuestDescriptorReader
