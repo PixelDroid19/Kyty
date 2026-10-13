@@ -293,6 +293,8 @@ private:
 	[[nodiscard]] bool    IsUniformMaskIn(const std::bitset<kWords>& masks, const ShaderOperand& operand) const;
 	void                  SetUniformMask(const ShaderOperand& dst, bool uniform);
 	bool                  Step(const ShaderInstruction& inst);
+	[[nodiscard]] bool    IsAnyLaneTest(const ShaderInstruction& inst) const;
+	void                  AnyLaneTest(const ShaderInstruction& inst);
 	[[nodiscard]] bool    IsScalarSpill(const ShaderInstruction& inst) const;
 	bool                  ScalarSpill(const ShaderInstruction& inst);
 	bool                  Branch(const ShaderInstruction& inst);
@@ -316,6 +318,9 @@ private:
 	bool                          m_changed = false; // a back edge changed a loop-head state during this walk
 	bool                          m_lane_preserving = false; // the write being defined keeps every inactive lane's bit
 	bool                          m_addtid_spills = false;
+	// SCC holds "some lane of a mask is set", written by the last SCC writer with no join since.
+	bool                          m_scc_any_lane         = false;
+	bool                          m_scc_any_lane_uniform = false;
 	// Taint of every word a static spill wrote to a (VGPR, lane) slot; it only grows across walks.
 	std::map<std::pair<int, int>, uint8_t> m_spills;
 	const ShaderCode*             m_code    = nullptr;
@@ -757,6 +762,14 @@ bool Flow::Branch(const ShaderInstruction& inst)
 		case Type::SCbranchScc0:
 		case Type::SCbranchScc1:
 		{
+			if (m_scc_any_lane)
+			{
+				// The question S_CBRANCH_VCCZ asks of VCC: a host subgroup answers it for its own lanes. Only
+				// the VCC/EXEC forms make a loop lane divergent (FindLoops), so a back edge stays refused.
+				if (target <= inst.pc) { return Fail(inst, "loop branch on an any-lane test"); }
+				divergent = !m_scc_any_lane_uniform;
+				break;
+			}
 			const uint8_t scc = m_state.scalar[kSccWord];
 			// "No lane survives" (SCC of a narrow mask) may skip to a tail that does nothing.
 			const bool survivors_only = (scc & kMask) != 0u && (scc & (kDiverged | kMixed | kWide)) == 0u;
@@ -797,7 +810,11 @@ bool Flow::Branch(const ShaderInstruction& inst)
 // stay: the next walk starts from them again until no back edge changes anything.
 void Flow::EnterJoin(uint32_t pc)
 {
-	if (const auto entry = m_entry.find(pc); entry != m_entry.end()) { m_state.Merge(entry->second); }
+	if (const auto entry = m_entry.find(pc); entry != m_entry.end())
+	{
+		m_state.Merge(entry->second);
+		m_scc_any_lane = false;
+	}
 	for (auto region = m_regions.begin(); region != m_regions.end();)
 	{
 		if (region->end_pc != pc)
@@ -843,8 +860,39 @@ bool Flow::ScalarSpill(const ShaderInstruction& inst)
 	return Define(inst, inst.dst, slot != m_spills.end() ? slot->second : kClean);
 }
 
+// S_CMP_LG_U64 / S_CMP_EQ_U64 of a lane mask against zero: whether any lane's bit is set. The pair must be
+// lane bits only; a word that is also a number or divergent does not qualify. Helper bits under WQM may count,
+// as they do for VCCZ: the packed host mask gathers every quad member's bit the guest compare produced.
+bool Flow::IsAnyLaneTest(const ShaderInstruction& inst) const
+{
+	if ((inst.type != Type::SCmpLgU64 && inst.type != Type::SCmpEqU64) || inst.src_num != 2) { return false; }
+	const auto zero = [](const ShaderOperand& operand)
+	{ return Plain(operand) && operand.type == Operand::IntegerInlineConstant && operand.constant.i == 0; };
+	const ShaderOperand* mask = zero(inst.src[1]) ? &inst.src[0] : (zero(inst.src[0]) ? &inst.src[1] : nullptr);
+	unsigned first = 0;
+	unsigned count = 0;
+	if (mask == nullptr || !Plain(*mask) || !ScalarRange(*mask, &first, &count) || count != 2u) { return false; }
+	const auto lane_bits = [](uint8_t taint) { return (taint & kMask) != 0u && (taint & ~(kMask | kWide)) == 0u; };
+	return lane_bits(m_state.scalar[first]) && lane_bits(m_state.scalar[first + 1u]);
+}
+
+void Flow::AnyLaneTest(const ShaderInstruction& inst)
+{
+	const auto& mask = IsConstant(inst.src[0]) ? inst.src[1] : inst.src[0];
+	m_state.scalar[kSccWord] = kMask; // every other SCC reader still refuses it
+	MarkWritten(kSccWord, 1u);
+	m_scc_any_lane         = true;
+	m_scc_any_lane_uniform = IsUniformMask(mask);
+}
+
 bool Flow::Step(const ShaderInstruction& inst)
 {
+	if (IsAnyLaneTest(inst))
+	{
+		AnyLaneTest(inst);
+		return true;
+	}
+	if (IsCompare(inst.type) || (IsScalarAlu(inst.type) && WritesScc(inst.type))) { m_scc_any_lane = false; }
 	if (WritesMemory(inst.type) && !(m_addtid_spills && IsAddtid(inst.type)))
 	{
 		return Fail(inst, "memory write: helper lanes would be observable");
@@ -927,6 +975,7 @@ bool Flow::Walk()
 {
 	m_state   = {};
 	m_changed = false;
+	m_scc_any_lane = false;
 	m_regions.clear();
 	// EXEC, VCC and SCC enter undefined or lane dependent: treat them as masks.
 	for (unsigned word : {kVccLoWord, kVccLoWord + 1u, kExecLoWord, kExecLoWord + 1u, kSccWord}) { m_state.scalar[word] = kMask; }

@@ -980,6 +980,67 @@ TEST(EmulatorFragmentMaskFlow, VccBranchRequiresUniformityOfTheWholePair)
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
+// "Does any lane hold the condition": a per-lane compare into VCC, S_CMP_LG_U64 VCC, 0 and an SCC branch
+// over a block that every lane of the wave runs when one does. `consumer` follows the compare; `wqm` runs the
+// compare with the helper lanes of each quad enabled and restores EXEC before the export.
+std::vector<Words> AnyLaneProgram(const Words& consumer, bool wqm = false)
+{
+	std::vector<Words> slots(1);
+	auto& words = slots[0];
+	if (wqm)
+	{
+		Sop1(words, 4, 6, kExecLo);                              // s_mov_b64 s[6:7], exec
+		Sop1(words, 10, kExecLo, kExecLo);                       // s_wqm_b64 exec, exec
+	}
+	Append(words, Vopc(0xc5, Inline(0), 0u));                    // v_cmp_ne_u32 vcc, 0, v0 (per lane)
+	Append(words, Sopc(0x13, kVccLo, Inline(0)));                // s_cmp_lg_u64 vcc, 0
+	Append(words, consumer);
+	if (wqm) { Sop1(words, 4, kExecLo, 6); }                     // s_mov_b64 exec, s[6:7]
+	Vop1(words, 1, 2, Inline(0));                                // v_mov_b32 v2, 0
+	words.insert(words.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
+	Sopp(words, 1);
+	return slots;
+}
+
+TEST(EmulatorFragmentMaskFlow, AnAnyLaneTestBranchesLikeTheVccBranch)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Words skip;
+		Sopp(skip, 4, 3);                                            // s_cbranch_scc0 over the next three dwords
+		skip.insert(skip.end(), {0xf4200508u, 0xfa000004u});         // s_buffer_load_dword s20, s[16:19], 4
+		Vop1(skip, 1, 1, Inline(1));                                 // v_mov_b32 v1, 1
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(skip)));
+		Check(flow.lane_local, "a forward branch on an any-lane test opens a divergent region");
+		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(skip, true))).lane_local,
+		      "helper bits under WQM may answer the test, as they do for VCCZ");
+
+		Words leak = skip;
+		Vop1(leak, 1, 3, 20);                                        // join: v_mov_b32 v3, s20
+		const auto leaked = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(leak)));
+		Check(!leaked.lane_local && Contains(leaked.reason, "divergent control flow"), "its region's scalars diverge at the join");
+
+		Words select;
+		Sop2(select, 10, 20, Inline(1), Inline(0));                  // s_cselect_b32 s20, 1, 0
+		const auto selected = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(select)));
+		Check(!selected.lane_local && Contains(selected.reason, "SCC derived from a mask"), "any other SCC reader is refused");
+
+		Words loop;
+		Sopp(loop, 4, 0xfffdu);                                      // s_cbranch_scc0 back to the vector compare
+		const auto looped = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(loop)));
+		Check(!looped.lane_local && Contains(looped.reason, "loop branch on an any-lane test"), "a back edge is refused");
+
+		Words overwritten;
+		Append(overwritten, Sopc(6, 20, Inline(0)));                 // s_cmp_eq_u32 s20, 0 replaces the test
+		Sop1(overwritten, 4, 4, kVccLo);                             // s_mov_b64 s[4:5], vcc
+		Sop2(overwritten, 15, 4, 4, Inline(1));                      // s_and_b64 s[4:5], s[4:5], 1: SCC is a mask again
+		Append(overwritten, skip);
+		const auto replaced = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(overwritten)));
+		Check(!replaced.lane_local && Contains(replaced.reason, "SCC branch"), "only the last SCC writer counts");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 std::vector<Words> AsSlots(const Words& words)
 {
 	return {words};
