@@ -4089,7 +4089,10 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		}
 		const auto user_sgpr_num =
 		    ShaderResolveGen5UserSgprCount(regs->cs_regs.user_sgpr, regs->cs_user_sgpr.count, data.user_data->eud_size_dw);
-		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code, 0, false);
+		// The dispatch plan fixed the guest wave size; lane masks follow it.
+		const auto scalar_flow = ShaderScalarFlowOf(code, info->wave_layout.guest_wave_size);
+		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code, 0, false,
+		                  nullptr, scalar_flow.get());
 		if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->wave_layout.guest_wave_size == 32u)
 		{
 			info->native_wave_sensitive = ShaderUsesNativeWaveState(code);

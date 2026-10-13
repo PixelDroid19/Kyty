@@ -33,15 +33,20 @@ constexpr int8_t kShaderSgprNoEntrySource = -1;
 using ShaderSgprEntrySources              = std::array<int8_t, kShaderScalarLivenessSgprs>;
 [[nodiscard]] std::vector<ShaderSgprEntrySources> ShaderSgprEntrySourcesAt(const ShaderCode& code);
 
-// The three results above for one program, computed once per distinct program
-// and shared: per-draw callers read them without copying.
+// The three results above use wave64 lane masks. A V_CMP or carry-out names an
+// SGPR pair; a wave32 program writes only its low dword, so the wave64 reading
+// overstates its definitions and stays conservative.
+//
+// The results for one program and guest wave size, computed once per distinct
+// pair and shared: per-draw callers read them without copying. Any size other
+// than 32 reads as wave64.
 struct ShaderScalarFlow
 {
 	std::bitset<kShaderScalarLivenessSgprs>              live_at_entry;
 	std::vector<ShaderSgprEntrySources>                  entry_sources;
 	std::vector<std::bitset<kShaderScalarLivenessSgprs>> holding_entry_value;
 };
-[[nodiscard]] std::shared_ptr<const ShaderScalarFlow> ShaderScalarFlowOf(const ShaderCode& code);
+[[nodiscard]] std::shared_ptr<const ShaderScalarFlow> ShaderScalarFlowOf(const ShaderCode& code, uint32_t guest_wave_size = 64u);
 
 } // namespace Kyty::Libs::Graphics
 
