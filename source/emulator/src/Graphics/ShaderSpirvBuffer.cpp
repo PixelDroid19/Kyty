@@ -11,6 +11,7 @@
 #include "Emulator/Graphics/ShaderComputeWaveLds.h"
 #include "Emulator/Graphics/ShaderComputeWaveResourceAnalysis.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
@@ -508,14 +509,14 @@ static bool emit_gen5_raw_buffer_load(Spirv* spirv, const ShaderInstruction& ins
 	return true;
 }
 
-// True when the instruction's V# register range is one of the bound storage
-// buffers; any other V# is built at run time (for example from s_getpc).
-static bool buffer_resource_is_bound(const Spirv* spirv, const ShaderOperand& resource)
+// True when no discovered resource describes the instruction's V#; such a V#
+// is built at run time (for example from s_getpc) and holds a guest base.
+static bool buffer_descriptor_is_runtime(const Spirv* spirv, const ShaderInstruction& inst)
 {
 	const auto* bind = spirv->GetBindInfo();
 	const auto* vertex = spirv->GetVsInputInfo();
 	const int user_data_base = vertex != nullptr && vertex->gs_prolog ? 8 : 0;
-	return bind != nullptr && ShaderStorageBufferResourceIsBound(*bind, resource, user_data_base);
+	return bind != nullptr && ShaderVectorBufferUsesRuntimeDescriptor(*bind, inst, user_data_base);
 }
 
 // Address of a MUBUF access through a V# that no binding describes: the
@@ -625,18 +626,19 @@ static bool emit_guest_store_words(const ShaderInstruction& inst, const String8&
 	return true;
 }
 
-// MUBUF load through a V# that no binding describes, read through guest
-// device addressing; out-of-range accesses read zero.
+// Buffer load of `dwords` unconverted dwords through a V# that no binding
+// describes, read through guest device addressing; an access of
+// `access_bytes` out of range reads zero.
 static bool emit_guest_buffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t dwords,
-                                   String8* dst_source)
+                                   uint32_t access_bytes, String8* dst_source)
 {
-	if (!spirv->UsesGuestDeviceAddress() || dwords == 0 || dwords > 4u)
+	if (!spirv->UsesGuestDeviceAddress() || dwords == 0 || dwords > 4u || access_bytes < dwords * 4u)
 	{
 		return false;
 	}
 	const auto tag = String8::FromPrintf("gbl_%d", instruction_index);
 	String8    source;
-	if (!emit_guest_buffer_access_begin(spirv, inst, tag, spirv->GetConstantUint(dwords * 4u), &source) ||
+	if (!emit_guest_buffer_access_begin(spirv, inst, tag, spirv->GetConstantUint(access_bytes), &source) ||
 	    !spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", static_cast<int>(dwords), tag + "_g", &source) ||
 	    !emit_guest_store_words(inst, tag + "_g", dwords, &source) || !emit_guest_buffer_access_end(spirv, inst, tag, dwords, &source))
 	{
@@ -1356,9 +1358,9 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
-		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 1, dst_source);
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 1, 4u, dst_source);
 	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -1448,9 +1450,9 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx2_Vdata2VaddrSvSoffsIdxen)
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
-		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 2, dst_source);
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 2, 8u, dst_source);
 	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -1515,9 +1517,9 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx4_Vdata4VaddrSvSoffsIdxen)
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
-		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 4, dst_source);
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 4, 16u, dst_source);
 	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -1581,9 +1583,9 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx3_Vdata3VaddrSvSoffsIdxen)
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
-		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 3, dst_source);
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 3, 12u, dst_source);
 	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -1650,7 +1652,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 1u, dst_source);
 	}
@@ -1722,7 +1724,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXy_Vdata2VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 2u, dst_source);
 	}
@@ -1741,7 +1743,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 3u, dst_source);
 	}
@@ -1759,7 +1761,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 4u, dst_source);
 	}
@@ -3958,10 +3960,31 @@ static bool TBufferFloatLoadSupported(const ShaderInstruction& inst, uint8_t com
 	}
 }
 
+// Gen5 typed load through a V# that no binding describes. The supported
+// formats are unconverted 32-bit floats, so the element dwords are read as
+// stored; the instruction's format sizes the element for the range check.
+// Vertex stages keep the stream resolver, which owns the fetched stream V#s.
+static bool tbuffer_load_uses_guest_address(const Spirv* spirv, const ShaderInstruction& inst)
+{
+	return Config::IsNextGen() && spirv->GetVsInputInfo() == nullptr && buffer_descriptor_is_runtime(spirv, inst) &&
+	       spirv->UsesGuestDeviceAddress();
+}
+
+static bool emit_guest_tbuffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t components,
+                                    String8* dst_source)
+{
+	const uint32_t element_bytes = std::max(ShaderGen5TextureBytesPerElement(inst.mtbuf_format), components * 4u);
+	return emit_guest_buffer_load(spirv, inst, instruction_index, components, element_bytes, dst_source);
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatX_Vdata1VaddrSvSoffsIdxenFloat1)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!TBufferFloatLoadSupported(inst, 1)) { return false; }
+	if (tbuffer_load_uses_guest_address(spirv, inst))
+	{
+		return emit_guest_tbuffer_load(spirv, inst, static_cast<int>(index), 1u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -4021,6 +4044,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxenFloa
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!TBufferFloatLoadSupported(inst, 4)) { return false; }
+	if (tbuffer_load_uses_guest_address(spirv, inst))
+	{
+		return emit_guest_tbuffer_load(spirv, inst, static_cast<int>(index), 4u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -4086,6 +4113,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXy_Vdata2VaddrSvSoffsIdxenFloat2
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!TBufferFloatLoadSupported(inst, 2)) { return false; }
+	if (tbuffer_load_uses_guest_address(spirv, inst))
+	{
+		return emit_guest_tbuffer_load(spirv, inst, static_cast<int>(index), 2u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
 	{
@@ -4135,8 +4166,13 @@ OpStore %temp_int_5 %int_64
 KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxenFloat3)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!TBufferFloatLoadSupported(inst, 3)) { return false; }
+	if (tbuffer_load_uses_guest_address(spirv, inst))
+	{
+		return emit_guest_tbuffer_load(spirv, inst, static_cast<int>(index), 3u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
-	if (!TBufferFloatLoadSupported(inst, 3) || bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
+	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
 	{
 		return false;
 	}
@@ -4147,6 +4183,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4Vaddr2SvSoffsOffenIdx
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!TBufferFloatLoadSupported(inst, 4)) { return false; }
+	if (tbuffer_load_uses_guest_address(spirv, inst))
+	{
+		return emit_guest_tbuffer_load(spirv, inst, static_cast<int>(index), 4u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)

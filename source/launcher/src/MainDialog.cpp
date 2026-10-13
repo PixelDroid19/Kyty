@@ -324,6 +324,7 @@ static bool CreateLuaScript(Kyty::Configuration* info, const QString& file_name)
 		s << "\t RenderResolutionHeight = " << info->render_resolution_height << ";\n";
 		s << "\t PresentationFilter = " << LuaStringLiteral(EnumToText(info->presentation_filter)) << ";\n";
 		s << "\t PresentationFsrSharpness = " << info->presentation_fsr_sharpness << ";\n";
+		s << "\t TextureAnisotropy = " << LuaStringLiteral(EnumToText(info->texture_anisotropy)) << ";\n";
 		s << "\t Neo = " << (info->neo ? "true" : "false") << ";\n";
 		s << "\t VulkanValidationEnabled = " << (info->vulkan_validation_enabled ? "true" : "false") << ";\n";
 		s << "\t ShaderValidationEnabled = " << (info->shader_validation_enabled ? "true" : "false") << ";\n";

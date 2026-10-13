@@ -1838,6 +1838,12 @@ struct ShaderBindResources;
 // indices at s8; negative stream sentinels never identify shader registers.
 [[nodiscard]] bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
                                                        int user_data_register_base = 0);
+// A vector buffer V# that no discovered resource describes: neither a bound
+// storage buffer register nor the destination of a mapped descriptor S_LOAD
+// that reaches this consumer. It is built at run time (for example from
+// s_getpc), so its base is a guest address, never a descriptor slot.
+[[nodiscard]] bool ShaderVectorBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst,
+                                                           int user_data_register_base = 0);
 // GLOBAL memory loads dereference per-lane guest addresses through the
 // guest device address table.
 [[nodiscard]] bool ShaderHasGlobalMemoryLoad(const ShaderCode& code);

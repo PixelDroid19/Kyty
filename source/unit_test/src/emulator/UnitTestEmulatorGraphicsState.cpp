@@ -7633,6 +7633,25 @@ TEST(EmulatorGraphicsState, ResolvesSamplerLodRangeFromSSharpFixedPoint)
 	EXPECT_NEAR(minus_one.lod_bias, -1.0f / 256.0f, 1.0e-6f);
 }
 
+TEST(EmulatorGraphicsState, ResolvesSamplerAnisotropyFromSSharpAndHostLevel)
+{
+	using namespace Kyty::Libs::Graphics::State;
+	const auto guest = ResolveSamplerAnisotropy(3u, 3u, 3u, 1.0f);
+	EXPECT_TRUE(guest.enabled);
+	EXPECT_FLOAT_EQ(guest.max_ratio, 8.0f);
+	EXPECT_FALSE(ResolveSamplerAnisotropy(1u, 1u, 4u, 1.0f).enabled);
+	EXPECT_FLOAT_EQ(ResolveSamplerAnisotropy(2u, 0u, 7u, 1.0f).max_ratio, 1.0f);
+
+	const auto raised = ResolveSamplerAnisotropy(1u, 1u, 0u, 16.0f);
+	EXPECT_TRUE(raised.enabled);
+	EXPECT_FLOAT_EQ(raised.max_ratio, 16.0f);
+	EXPECT_FLOAT_EQ(ResolveSamplerAnisotropy(3u, 3u, 4u, 4.0f).max_ratio, 16.0f);
+	const auto point = ResolveSamplerAnisotropy(0u, 0u, 0u, 16.0f);
+	EXPECT_FALSE(point.enabled);
+	EXPECT_FLOAT_EQ(point.max_ratio, 1.0f);
+	EXPECT_FLOAT_EQ(ResolveSamplerAnisotropy(2u, 2u, 1u, 16.0f).max_ratio, 2.0f);
+}
+
 // GraphicsInit must publish API version and feature-flag words into the guest
 // AGC state buffer; leaving them unset lets titles take a null-deref after
 // CreateShader / register-default use (see GraphicsInitWriteGuestState).

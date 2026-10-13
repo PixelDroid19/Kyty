@@ -226,6 +226,81 @@ TEST(EmulatorShaderGetpc, NggBoundBufferUsesShiftedShaderRegister)
 	EXPECT_FALSE(binary.IsEmpty());
 }
 
+// A typed load through a V# built from s_getpc reads guest bytes; its base
+// must never become a descriptor-array index. A V# that a mapped descriptor
+// S_LOAD writes keeps the bound lowering.
+static String8 GetpcTypedLoadSource(bool mapped_sload)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction getpc {};
+	getpc.type   = ShaderInstructionType::SGetpcB64;
+	getpc.format = ShaderInstructionFormat::Sdst2;
+	getpc.dst    = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	ShaderInstruction load {};
+	load.pc                   = 4;
+	load.type                 = ShaderInstructionType::TBufferLoadFormatX;
+	load.format               = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxenFloat1;
+	load.dst                  = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	load.src[0]               = {.type = ShaderOperandType::Vgpr, .register_id = 5, .size = 1};
+	load.src[1]               = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 4};
+	load.src[2].type          = ShaderOperandType::IntegerInlineConstant;
+	load.src[2].constant.u    = 0;
+	load.src_num              = 3;
+	load.buffer_idxen         = true;
+	load.buffer_flags         = 0;
+	load.mtbuf_format         = 22; // 32_FLOAT
+	load.mtbuf_format_is_gen5 = true;
+	load.mtbuf_components     = 1;
+	ShaderInstruction end {};
+	end.pc     = 12;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(getpc);
+	code.GetInstructions().Add(load);
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+	input.bind.program_base_used                 = true;
+	input.bind.device_address_used               = true;
+	input.bind.storage_buffers.buffers_num        = 1;
+	input.bind.storage_buffers.start_register[0] = 8;
+	input.bind.storage_buffers.usages[0]          = ShaderStorageUsage::ReadOnly;
+	if (mapped_sload)
+	{
+		ShaderDynamicSLoadMapping record {};
+		record.destination_register = 0;
+		record.dword_count          = 4;
+		record.last_consumer_pc     = load.pc;
+		input.bind.dynamic_sloads.records.Add(record);
+	}
+	ShaderCalcBindingIndices(&input.bind);
+	return SpirvGenerateSource(code, nullptr, nullptr, &input);
+}
+
+TEST(EmulatorShaderGetpc, RuntimeTypedBufferLoadReadsGuestAddress)
+{
+	const auto source = GetpcTypedLoadSource(false);
+	EXPECT_NE(source.FindIndex("%gbl_1_d0 = OpLoad %uint %s0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%gen5_tbuffer_load_1"), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
+
+TEST(EmulatorShaderGetpc, MappedTypedBufferLoadKeepsBoundLowering)
+{
+	const auto source = GetpcTypedLoadSource(true);
+	EXPECT_EQ(source.FindIndex("%gbl_1_d0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gen5_tbuffer_load_1"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorShaderGetpc, BufferNamespaceClassificationMatchesLoweringAndIgnoresStreamSentinels)
 {
 	ShaderBindResources bind {};

@@ -9,7 +9,69 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Static resource-plan integration validation (2026-10-12)
+
+- Integrated the six committed changes through `412e8c4d` with the static
+  pointer-table prototype preserved in `6f5c0e90`. The only textual merge
+  conflict was this manual's two new sections; both histories are retained.
+  The automatically merged shader parser keeps the code memo argument and
+  the runtime-built typed-buffer classifier, pixel/compute device-address
+  decisions, and vertex stream-resolver exclusion. No new optimization or
+  dynamic-state cache was added during integration.
+- Preservation and review: the seven non-overlapping prototype code/test
+  files match their pre-merge hashes, including all six resource-plan tests
+  and their registration. The sixteen non-overlapping incoming paths match
+  the pinned source commit. Independent source review found no material
+  integration defect. No temporary diagnostics were imported.
+- Fresh Release/Ninja build, two jobs, tests/devtools/launcher enabled:
+  `fc_script`, `kyty_unit_test`, `kyty_resource_fold_replay`, `kyty_agent`,
+  `launcher`, and `kyty_graphics_diagnostics_integration` all build.
+  The system toolchain and Qt 6 were available; the optional pinned Nix shell
+  fetch was interrupted before switching to the installed toolchain.
+- Integrated correctness gates: 354 tests pass across
+  `EmulatorShaderResourcePlans.*`, `EmulatorShaderResourceFoldReplay.*`,
+  `EmulatorShaderResourcePointers.*`, `EmulatorShaderTranslationCache.*`,
+  `EmulatorShaderGetpc.*`, and `EmulatorGraphicsState.*`. Both incoming
+  runtime-typed and mapped-typed getpc cases pass. The explicitly built
+  graphics diagnostics executable passes all 14 selected CTest cases.
+  `check_emulator_boundaries.py --strict source` and the 13-entry graphics
+  table manifest pass. With the newly built replay tool, the replay CLI
+  and playable harness Python suites pass 9 and 77 tests respectively;
+  the harness's separate strict runtime profile skips without a guest root.
+  These tool tests are not gameplay acceptance.
+- Separate bounded strict run of the Unity fishing title: Intel Arc A770,
+  Xe KMD, Mesa 26.2.4, fixed 1280x720 RenderTargets, Performance shader
+  optimization, Guest anisotropy and Silent logging. Empty private saves,
+  private caches, a virtual Wayland display and a private device view
+  isolated host keyboard/controller input. No concurrent build or emulator
+  was detected. This particular run used a hidden virtual display; the
+  maintainer requires a visible desktop window for future local runs.
+- Native captures visually confirm the lighthouse menu, the opening
+  sequence, and the initial harbour dialogue. A bounded Cross hold clears
+  the save notice; subsequent Cross and Circle taps advance the observed
+  route. A 15-second menu watch reports continued progress. Both menu and
+  harbour captures pass material-health scoring; that does not establish
+  pixel equivalence or absence of visual defects. The process remains live
+  until its 240-second deadline and is then terminated by the controller;
+  no crash or device loss was observed. Cleanup leaves no owned emulator or
+  virtual compositor process.
+- Diagnostic limits: strict mode reports zero enabled permissive features,
+  missing-import use and continuations; the sampled sync-wait count is zero.
+  Agent input is diagnostic and is not a supported-runtime compatibility
+  claim. The captured `gfx_storage_frontier` error events have the same
+  payload as the pre-integration baseline and prototype; they did not stop
+  progress in this run and remain unresolved. This is a bounded scene and
+  input check, not sustained gameplay acceptance, a fresh A/B performance
+  comparison, or AMD/NVIDIA validation. The tested binary was built with the
+  merge pending; private binary hashes, source hashes and Git tree identities
+  tie the evidence to the integrated code rather than its parent revision.
+
 ## Static SRT resource-plan prototype (2026-10-12)
+
+The measurements and runtime observations below are historical evidence on
+`ff89d40f` and its prototype, before integration of runtime-built typed
+buffer descriptors. They do not validate the integrated tree or establish
+a causal performance benefit for the static resource plans.
 
 - Scope: memoize the instruction index, constant table offset and ordered
   descriptor partitions for eligible pointer-table loads. The recipe belongs
@@ -108,6 +170,100 @@ fail on the current HEAD before acting on them.
   No AMD or NVIDIA runtime validation was completed for this prototype. The
   code-only cache introduces no GPU-vendor branch or Vulkan feature dependency.
 
+## Runtime-built typed buffer descriptors (2026-10-12)
+
+- Cause of the AMD fishing-title device loss at about 182 s: one pixel
+  shader builds a V# from `s_getpc` (base = program address + a constant
+  offset, 64 records, a format word written by the shader) and reads it with
+  `TBUFFER_LOAD_FORMAT_X ... idxen` (32_FLOAT). The Gen5 MTBUF lowering used
+  the V#'s first dword, the low half of a code address, as the index into the
+  storage-buffer descriptor array. RADV computes that descriptor address
+  modulo 2^32, so the fetch lands on an arbitrary page in the descriptor
+  window. When the page is unmapped, the kernel reports an `SQC (data)`
+  fault. Guest addresses differ between runs, which explains why the loss is
+  intermittent. The fault page and the set bases logged for the faulting
+  pipeline give an index that matches a 256-aligned code base.
+- Contract: a vector buffer load whose V# no discovered resource describes
+  holds a guest base. That means no bound storage-buffer register and no
+  mapped descriptor `S_LOAD` whose destination reaches this consumer. Such a
+  load is read through guest device addressing
+  (`ShaderVectorBufferUsesRuntimeDescriptor`). The MUBUF paths already did
+  this; the five Gen5 MTBUF recompilers now do too, outside the vertex stage.
+  The supported typed formats are unconverted 32-bit floats, so the dwords
+  are read as stored. The instruction's format sizes the element for the
+  range check ("the MTBUF derives the data format from the instruction").
+  Pixel and compute shaders with such a load request the device-address
+  table.
+- Limit: vertex-stage MTBUF loads keep the stream resolver, which owns the
+  fetched stream V#s. A vertex shader that builds a typed V# from `s_getpc`
+  is still clamped to zero by that resolver.
+- Excluded on the way:
+  - The vertex shader of the faulting pipeline indexes the descriptor array
+    only through metadata blocks 0 and 1. Its layout was stable for a whole
+    200 s run.
+  - The pixel shader's metadata blocks were always slots.
+  - Transient V# uniform uploads: each entry is its own buffer, keyed by
+    unique id plus range.
+  - Buffer-object use after free, the guest device-address table and its
+    imports, and image and sampler indices were all excluded. The fault also
+    reproduced with serialized submits and RADV shader sync.
+- Verified:
+  - AMD Raphael (RADV), strict 200 s fishing-title runs:
+    - A run with the final binary reached gameplay (mayor dialogue in the
+      town) with no device loss, at 7.2-7.4 fps in the hold windows.
+    - Two earlier runs with the same fix plus layout logging also kept the
+      device; their fps (3.4-7.1) is not representative.
+    - Before the fix, most baseline runs lost the device at 180-183 s. No
+      baseline fps exists for the hold windows, so the AMD fps is a first
+      measurement and not a comparison.
+  - Intel Arc A770: a strict 200 s run reaches gameplay with no error, at
+    10.3-10.9 fps in the hold windows. A baseline run on the same route
+    measured 9.3-12.5 fps, so the difference is within the window spread.
+    Draws that use this pixel shader now pay a guest write-back before the
+    table is read. On Intel, this load used to read through an arbitrary
+    descriptor, so capture differences in those draws are corrections.
+  - Intel strict sweep (`Fixed` + RenderTargets): the watercolour
+    platformer, the gothic action platformer, the ninja platformer, the
+    isometric roguelike, the pixel exploration title, the artillery title,
+    the roguelite action platformer and the racing title ended with status 1
+    and the same capture counts as the previous binary, with coherent last
+    captures. The racing title's window 4 ran at 96 fps against 84 fps
+    before, which is within the spread between windows. The robot
+    platformer still produces no capture on Intel, as before.
+  - AMD strict sweep (`Fixed` + RenderTargets): the same eight titles ended
+    with status 1 and the same capture counts. The racing title ran at
+    24.5 fps against about 24 before. The robot platformer still stops at
+    about 61 s on `!create_all_the_same`, as before.
+  - Unit suites: 997 shader and graphics tests, including two new getpc
+    typed-load cases. Gate scripts: boundaries, graphics tables.
+
+## Command-processor costs after render pass continuation (2026-10-12)
+
+Intel Arc A770, `Fixed` 1280x720 + RenderTargets, the Unity fishing title in
+gameplay (about 1,160 draws per frame, 11.6 fps). A line-level CPU profile of
+the command-processor thread over 15 s puts 6.7% on the span scan of
+`GpuMemoryMaterializationCache::InvalidateRange` and 4.7% on the probe loop of
+`GpuDirtyPageTracker::FindPage`. No other source line takes more than 2%.
+
+- Excluded: long probe chains in the dirty-page table. Diagnostic counters
+  on the same route measured 79-90 k live pages and 75-79 k tombstones in the
+  262,144-slot table, with an average of 1.3 probe steps per lookup and 2.6-3.3
+  per miss. The cost is volume instead. Each `Rearm` performs about 400 page
+  lookups, and `GpuMemory::Update` re-arms every bound object once per guest
+  command batch, which gets a new submit id. The title submits about 78
+  batches per frame.
+- Inconclusive, not merged: a memo of recently invalidated clean ranges in
+  `InvalidateRange`. The fps windows were 11.9 / 11.5 / 10.9 against
+  11.2-11.6 before, and the phase counters were unchanged. The spread between
+  windows of one binary (about 9%) exceeds the largest gain the change could
+  give (about 6%). A repeat must compare the line share, not fps.
+- Excluded for the beat 'em up: emulator-inserted dispatches. Its roughly 300
+  dispatches per frame all come from guest `DISPATCH_DIRECT` and
+  `DISPATCH_INDIRECT` packets.
+- The remaining cost is spread across per-draw binding with no single item
+  above about 8%. Reaching 60 fps on this title needs a cheaper contract for
+  revalidating resources per guest batch, not another local optimization.
+
 ## Render pass continuation across draws (2026-10-12)
 
 - Contract: a draw continues the render pass instance that the previous draw
@@ -175,7 +331,8 @@ fail on the current HEAD before acting on them.
 - Graphics diagnostics (16 integration tests) pass, as do the focused unit
   suites (615 tests).
 - Open defects:
-  - AMD fishing-title device loss, reproducible at about 182 s.
+  - AMD fishing-title device loss, reproducible at about 182 s. Fixed by
+    "Runtime-built typed buffer descriptors" above.
     - The kernel reports a gfxhub page fault from `fc_script` on ring 24,
       client `SQC (data)` (a scalar data read) with permission faults,
       followed by a timeout on the `gfx_0.0.0` ring. RADV marks the graphics
@@ -220,6 +377,14 @@ fail on the current HEAD before acting on them.
   slower menu load moved that window to the race start, where the whole field
   is on screen (`draws/f` 575 against 132). That window does not compare runs
   whose load times differ.
+- Repeat on the build with runtime typed descriptors: one 125 s strict
+  racing-title run per host (`Fixed` + RenderTargets, a capture every 4 s,
+  29 captures each). Every race capture on Intel (10) and on AMD (8) shows the
+  car's shadow attached under the car. The wing and wheel shapes are stable
+  between speeds and frames, and no smear trails behind the car. The edges
+  show only ordinary shadow-map stepping. In the sweep on that build, the
+  fixed perf window measured 96 fps on Intel and 24.5 fps on AMD, back at
+  or above the levels before this change.
 - Open defect found while excluding the viewport: `ResolveViewportDepth`
   (`GraphicsState.cpp`, the overload taking ZMIN/ZMAX) clamps the endpoints of
   the Vulkan depth range. That remaps depth linearly instead of clamping it:

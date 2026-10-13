@@ -18,6 +18,7 @@ struct Config
 	uint32_t               render_resolution_height    = 720;
 	PresentationFilter     presentation_filter         = PresentationFilter::Nearest;
 	uint32_t               presentation_fsr_sharpness  = 90;
+	TextureAnisotropy      texture_anisotropy          = TextureAnisotropy::Guest;
 	bool                   neo                         = true;
 	GuestPlatform          guest_platform              = GuestPlatform::Unknown;
 	bool                   vulkan_validation_enabled   = false;
@@ -113,6 +114,7 @@ void Load(const ConfigSource& cfg)
 	LoadInt(g_config->render_resolution_height, cfg, U"RenderResolutionHeight");
 	LoadStrictEnum(g_config->presentation_filter, cfg, U"PresentationFilter");
 	LoadInt(g_config->presentation_fsr_sharpness, cfg, U"PresentationFsrSharpness");
+	LoadStrictEnum(g_config->texture_anisotropy, cfg, U"TextureAnisotropy");
 	if (g_config->presentation_fsr_sharpness > 100)
 	{
 		EXIT("Invalid config value for PresentationFsrSharpness: %u is above 100\n", g_config->presentation_fsr_sharpness);
@@ -179,6 +181,11 @@ PresentationFilter GetPresentationFilter()
 uint32_t GetPresentationFsrSharpness()
 {
 	return g_config->presentation_fsr_sharpness;
+}
+
+TextureAnisotropy GetTextureAnisotropy()
+{
+	return g_config->texture_anisotropy;
 }
 
 bool IsNeo()

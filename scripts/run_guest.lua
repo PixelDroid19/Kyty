@@ -61,6 +61,7 @@ local cfg = {
 	RenderResolutionHeight = env_number('KYTY_RENDER_RESOLUTION_HEIGHT', 720);
 	PresentationFilter = env_or('KYTY_PRESENTATION_FILTER', 'Linear');
 	PresentationFsrSharpness = env_number('KYTY_PRESENTATION_FSR_SHARPNESS', 90);
+	TextureAnisotropy = env_or('KYTY_TEXTURE_ANISOTROPY', 'Guest');
 	Neo = true;
 	VulkanValidationEnabled = env_bool('KYTY_VULKAN_VALIDATION', false);
 	ShaderValidationEnabled = env_bool('KYTY_SHADER_VALIDATION', false);
