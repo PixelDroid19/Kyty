@@ -647,6 +647,12 @@ bool ShaderVccBranchIsWaveUniform(const ShaderCode& code, uint32_t instruction_i
 	{
 		return false;
 	}
+	// The branch reads the low word alone. Under a narrowed EXEC the compare holds only EXEC lanes, which may all
+	// sit in the high word; the packed branch on both words decides that case.
+	if (!ShaderExecRemainsInitial(code, static_cast<uint32_t>(compare_index)))
+	{
+		return false;
+	}
 
 	for (uint32_t index = static_cast<uint32_t>(compare_index + 1); index < instruction_index; ++index)
 	{
