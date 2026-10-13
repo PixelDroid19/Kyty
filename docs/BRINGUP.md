@@ -9,6 +9,61 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: whole-wave OR reductions as partial waves (2026-10-13)
+
+- Fix: the worldmap pixel shader's whole-wave OR reduction is admitted with
+  a new proof, `FragmentPartialWave`. A Wave64 pixel program on a host
+  subgroup of any width is a partially populated guest wave. When its only
+  whole-wave observations are proven OR reductions and reads that stay
+  inside launched quads, the proof holds at every host width. It therefore
+  needs no `requiredSubgroupSize` for the fragment stage, which the Intel
+  Arc host cannot provide.
+  - Reduction contract (`ShaderFragmentLaneReduction.cpp`): a proven neutral
+    region with a `v_cndmask` seed whose condition holds only lanes of the
+    entry EXEC (no helper, no lane outside the launched quads). Its steps are
+    row-shift DPP ORs with full row and bank masks, `v_permlanex16` and
+    plain ORs. The reads are static `v_readlane` after the EXEC restore,
+    before the first export or indirect jump.
+  - Lowering: each read is one `OpGroupNonUniformBitwiseOr` over the seeds of
+    its guest lane set (lane 31 reads lanes 0-31; lane 63 reads 32-63),
+    followed by a quad-uniform broadcast. The network steps are not emitted.
+  - Network liveness: after the reads, every path must overwrite the network
+    registers before any other read. An overwrite under a non-full EXEC
+    leaves the register "residual", stale only in launched lanes outside the
+    restored mask. A residual register may be read only while EXEC stays
+    inside that mask (tracked through mask algebra, joined monotonically
+    across loops), and never through DPP, readlane/writelane/permlane, DS or
+    a non-lane-local image read.
+  - The fragment mask flow now records, per instruction, whether EXEC holds
+    only lanes of the launched quads, all of them, and which `v_cndmask`
+    conditions are live-only.
+- Excluded, from a temporary diagnostic in the analysis: requiring a full
+  EXEC for the overwrite. The worldmap shader kills the network registers
+  under the discard mask (`s_andn2 ... vcc` then `s_wqm`), so that rule
+  refused it on both of its paths.
+- Excluded: exact-state deduplication in the liveness walk. A loop head in
+  the same shader produced more than 16 distinct states; the walk now joins
+  states monotonically.
+- Current frontier on both hosts: a wave64 vertex program, refused with
+  `ngg_front_refusal{... reason=complete program exceeds the 1024-instruction
+  proof bound}`. Neither Intel nor RADV can pin the vertex stage to 64 lanes.
+- Verified:
+  - The robot platformer passes the worldmap pixel stop and stops at the
+    vertex bound on Intel Arc A770 (172 s) and on AMD RADV (272 s, fixed
+    render-target resolution), strict runs.
+  - Regressions, one strict run each on both hosts (status 1, no error): the
+    racing title is in a race, the watercolour platformer is in the intro
+    and the fishing title is docked in gameplay. The capture frame counts
+    match the previous runs.
+    - The first Intel run of the racing title after a host reboot (cold disk
+      cache and a fresh SPIR-V cache) was still loading at 90 s. A warm rerun
+      matched the previous runs frame for frame.
+  - Unit tests: 980 tests across the shader, fragment, compute, NGG, packet,
+    state and detile suites. New admission cases cover the proof, refusal
+    of observed network values and of row-masked steps, stale lanes under
+    WQM, and SPIR-V emission validated with `spirv-val`. Gate script:
+    boundaries (strict).
+
 ## Robot platformer: worldmap admission chain (2026-10-13)
 
 - Four general fixes move the robot platformer from its early stops to the
