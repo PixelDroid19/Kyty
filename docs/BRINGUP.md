@@ -9,6 +9,41 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: SDWA low destination selects (2026-10-13)
+
+- Observed: the Intel stop at pc 0x157c of a 1920x1080 pixel program is
+  `v_cvt_i32_f32` in SDWA form with control dword 0x0006140d
+  (`dst_sel=WORD_0`, `dst_unused=PRESERVE`). The lowering preconditions
+  refused every destination select other than DWORD.
+- Contract (RDNA2 ISA, SDWA table 88; the LLVM AMDGPU modifier syntax gives
+  the same ranges):
+  - `DST_SEL` 0-3 select a byte, 4 bits [15:0], 5 bits [31:16], 6 the dword.
+  - `DST_UNUSED` 0 pads the other bits with zeros, 1 sign-extends the
+    field, 2 keeps the prior bits, 3 is reserved.
+  - Neither source says where the result sits for `WORD_1`/`BYTE_1-3`
+    (shifted into the field or taken from the matching bits). Only one
+    secondary implementation shifts it, which is a lead only.
+- Implementation:
+  - `ShaderSdwaLowDestinationSupported` admits `BYTE_0` and `WORD_0` with
+    `DST_UNUSED` 0-2.
+  - It applies to VOP1 and VOP2 with a plain single-VGPR destination, no
+    clamp or output modifier, and no MAC or dot forms.
+  - The per-lane emitter (`EmitSdwaLowDestinationInstruction`) runs the
+    ordinary instruction as a whole-dword write, then merges its low field
+    into the prior value (pad, sign-extend or preserve). An inactive lane
+    keeps the prior value.
+  - Paired and native compute-wave banks still refuse these selects, and so
+    do shifted selects, reserved `DST_UNUSED`, clamp and output modifiers.
+- Verified: a unit test pins the admitted and refused control words. A
+  strict Intel run of the robot platformer passed pc 0x157c and stopped at
+  the wave32 VCC case below.
+- Defect found, not fixed: the host-visible compute scratch pool
+  (`TransientBufferPool::Scratch`, `GraphicsRenderCommandBuffer.cpp:1090`) frees
+  entries only in `Free()`. A command buffer that detiles many large
+  resources fills its 16 MiB, and the detile then falls back to the CPU with
+  `ResourceUnavailable`. A per-submit reset or a size-aware reuse that keeps
+  the two-buffer detile rule is the direction.
+
 ## Robot platformer: raw texels between aliased depth and colour views (2026-10-13)
 
 - Observed: one 960x540 range (1024x640x4 bytes, 64 KiB blocks) is
@@ -54,11 +89,9 @@ fail on the current HEAD before acting on them.
   - The instruction is `v_cvt_i32_f32` in SDWA form (control dword
     0x0006140d: `dst_sel=WORD_0`, `dst_unused=PRESERVE`, `src0_sel=DWORD`),
     a 16-bit partial write that keeps the high half of the VGPR.
-  - Defect found, not fixed: `ShaderParseVOP1.cpp:39` only warns on
-    `dst_sel != 6`, so the ordinary emitter writes the whole dword. A
-    general SDWA destination select (`WORD`/`BYTE` with
-    `PRESERVE`/`PAD`/`SEXT`) is needed as a read-modify-write of the
-    destination.
+  - The parser kept the destination select and the lowering preconditions
+    refused it (fail closed); the per-lane merge is in "SDWA low destination
+    selects" above.
 - Verified:
   - The robot platformer on AMD (RADV, `Fixed` + RenderTargets) ran 600 s
     and then 300 s, both status 1 with no error. It is still loading the

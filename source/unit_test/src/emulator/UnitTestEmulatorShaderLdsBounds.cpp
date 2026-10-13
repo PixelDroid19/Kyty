@@ -988,11 +988,14 @@ TEST(EmulatorShaderLdsBounds, NativeAndPairedSdwaRejectUnrepresentedControls)
 	for (bool paired: {false, true})
 	{
 		ASSERT_EXIT(RunSdwa(0x00000616u, paired), ::testing::ExitedWithCode(0), "");
-		for (uint32_t control: {0x00070616u, 0x00400616u, 0x01000616u, 0x00080616u, 0x00000016u})
+		for (uint32_t control: {0x00070616u, 0x00400616u, 0x01000616u, 0x00080616u})
 		{
 			EXPECT_EXIT(RunSdwa(control, paired), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::VMovB32, true));
 		}
 	}
+	// A BYTE_0 destination select is merged by the per-lane emitter; the paired banks have no merge.
+	ASSERT_EXIT(RunSdwa(0x00000016u, false), ::testing::ExitedWithCode(0), "");
+	EXPECT_EXIT(RunSdwa(0x00000016u, true), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::VMovB32, true));
 }
 
 TEST(EmulatorShaderLdsBounds, NativeMtbufPreservesHintsAndRejectsTfeAndD16Aliases)

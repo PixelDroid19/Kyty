@@ -53,7 +53,6 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		EXIT("unsupported SDWA reverse-borrow selection");
 	}
 
-	if (dst_sel != 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_sel != 6 condition ignored (continuing)\n"); }
 	if (sdwa && dst_sel == 6 && dst_u != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sdwa && dst_sel == 6 && dst_u != 0 condition ignored (continuing)\n"); }
 	if (src0_sel > 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sel > 6 condition ignored (continuing)\n"); }
 	if (src0_sext != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sext != 0 condition ignored (continuing)\n"); }

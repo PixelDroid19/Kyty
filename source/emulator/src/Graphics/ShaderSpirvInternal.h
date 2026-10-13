@@ -180,6 +180,10 @@ public:
 	[[nodiscard]] bool EmitComputeWaveBufferLoadInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveGenericInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
 	                                                     uint32_t index, String8* output);
+	// Emits a per-lane instruction whose SDWA destination selects only its VGPR's low byte or word
+	// (ShaderSdwaLowDestinationSupported): the whole-dword result, then the merge into the prior bits.
+	[[nodiscard]] bool EmitSdwaLowDestinationInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
+	                                                     uint32_t index, String8* output);
 	[[nodiscard]] String8 EmitMetadataLoad(int row, int field, const String8& id) const;
 	// Writes the metadata of each assembled V# the instruction consumes into its
 	// descriptor SGPRs (see ShaderAssembledDescriptor).

@@ -984,7 +984,7 @@ ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t gu
 	}
 	for (const auto& inst: code.GetInstructions())
 	{
-		if (!ShaderInstructionLoweringPreconditions(inst))
+		if (!ShaderInstructionPerLaneLoweringPreconditions(inst))
 		{
 			info.refusal_pc = inst.pc;
 			info.refusal_reason = "invalid instruction before native wave analysis";

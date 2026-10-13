@@ -1,6 +1,7 @@
 #include "Kyty/Core/MagicEnum.h"
 #include "ShaderSpirvInternal.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderComputeWaveSdwa.h"
 
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
@@ -244,6 +245,60 @@ uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
 	return descriptor_set;
 }
 
+bool Spirv::EmitSdwaLowDestinationInstruction(const RecompilerFunc* func, const ShaderInstruction& instruction, uint32_t index,
+                                              String8* output)
+{
+	if (output == nullptr || func == nullptr || func->type != instruction.type || func->format != instruction.format ||
+	    !ShaderSdwaLowDestinationSupported(instruction))
+	{
+		return false;
+	}
+	String8 whole;
+	if (!func->func(static_cast<int>(index), m_code, &whole, this, func->param, func->scc_check))
+	{
+		return false;
+	}
+	// ISA table 88: DST_SEL BYTE_0/WORD_0 takes the result's low bits; DST_U pads the rest with zeros (0),
+	// sign-extends the field (1) or keeps the prior bits (2). An inactive lane keeps its prior value.
+	const uint32_t control = instruction.vop_sdwa_ctrl;
+	const uint32_t width   = ((control >> 8u) & 7u) == 0u ? 8u : 16u;
+	const uint32_t field   = (1u << width) - 1u;
+	const uint32_t dst_u   = (control >> 11u) & 3u;
+	const int      vgpr    = instruction.dst.register_id;
+
+	String8 merged;
+	if (dst_u == 0u)
+	{
+		merged = String8::FromPrintf("%%sdwa_merged_%u = OpBitwiseAnd %%uint %%sdwa_new_bits_%u %%%s\n", index, index,
+		                             GetConstantUint(field).c_str());
+	} else if (dst_u == 1u)
+	{
+		merged = String8::FromPrintf("%%sdwa_merged_%u = OpBitFieldSExtract %%uint %%sdwa_new_bits_%u %%%s %%%s\n", index, index,
+		                             GetConstantUint(0u).c_str(), GetConstantUint(width).c_str());
+	} else
+	{
+		merged = String8::FromPrintf("%%sdwa_kept_%u = OpBitwiseAnd %%uint %%sdwa_old_bits_%u %%%s\n"
+		                             "%%sdwa_field_%u = OpBitwiseAnd %%uint %%sdwa_new_bits_%u %%%s\n"
+		                             "%%sdwa_merged_%u = OpBitwiseOr %%uint %%sdwa_kept_%u %%sdwa_field_%u\n",
+		                             index, index, GetConstantUint(~field).c_str(), index, index, GetConstantUint(field).c_str(), index,
+		                             index, index);
+	}
+	*output += String8::FromPrintf("%%sdwa_old_%u = OpLoad %%float %%v%d\n", index, vgpr);
+	*output += whole;
+	*output += String8::FromPrintf("%%sdwa_new_%u = OpLoad %%float %%v%d\n"
+	                               "%%sdwa_new_bits_%u = OpBitcast %%uint %%sdwa_new_%u\n"
+	                               "%%sdwa_old_bits_%u = OpBitcast %%uint %%sdwa_old_%u\n",
+	                               index, vgpr, index, index, index, index);
+	*output += merged;
+	*output += String8::FromPrintf("%%sdwa_exec_%u = OpLoad %%uint %%exec_lo\n"
+	                               "%%sdwa_active_%u = OpINotEqual %%bool %%sdwa_exec_%u %%uint_0\n"
+	                               "%%sdwa_value_%u = OpSelect %%uint %%sdwa_active_%u %%sdwa_merged_%u %%sdwa_old_bits_%u\n"
+	                               "%%sdwa_store_%u = OpBitcast %%float %%sdwa_value_%u\n"
+	                               "OpStore %%v%d %%sdwa_store_%u\n",
+	                               index, index, index, index, index, index, index, index, index, vgpr, index);
+	return true;
+}
+
 void Spirv::GenerateSource()
 {
 	m_source.Clear();
@@ -252,7 +307,9 @@ void Spirv::GenerateSource()
 	// format malformed operands through the debug instruction printer here.
 	for (const auto& inst: m_code.GetInstructions())
 	{
-		if (!ShaderInstructionLoweringPreconditions(inst))
+		const bool represented =
+		    UsesComputeWaveBanks() ? ShaderInstructionLoweringPreconditions(inst) : ShaderInstructionPerLaneLoweringPreconditions(inst);
+		if (!represented)
 		{
 			EXIT("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64 " pc=0x%08" PRIx32
 			     " reason=lowering-preconditions src_num=%d mimg_address_num=%d sopp=0x%02x raw=0x%08" PRIx32 "\n",
@@ -2754,6 +2811,11 @@ void Spirv::WriteInstructions()
 		const auto wave_kind = UsesFragmentCompute() ? ShaderClassifyFragmentWaveInstruction(inst, *m_ps_input_info)
 		                      : UsesComputeWaveBanks() ? ShaderClassifyComputeWaveInstruction(inst)
 		                                             : ShaderComputeWaveInstructionKind::Unsupported;
+		const bool low_destination = ShaderSdwaLowDestinationSupported(inst);
+		if (low_destination && (UsesComputeWaveBanks() || wave_kind != ShaderComputeWaveInstructionKind::Unsupported))
+		{
+			EXIT("SDWA low destination select outside the per-lane emitter: pc=0x%08" PRIx32 "\n", inst.pc);
+		}
 		if (wave_kind == ShaderComputeWaveInstructionKind::PixelInterpolation || wave_kind == ShaderComputeWaveInstructionKind::PixelExport)
 		{
 			ok = EmitFragmentInstruction(inst, static_cast<uint32_t>(index), &dst);
@@ -2815,7 +2877,8 @@ void Spirv::WriteInstructions()
 			EXIT_IF(func->type != inst.type);
 			EXIT_IF(func->format != inst.format);
 			if (UsesFragmentCompute() && inst.type == ShaderInstructionType::SEndpgm) { dst += FragmentEpilog(); }
-			ok = func->func(index, m_code, &dst, this, func->param, func->scc_check);
+			ok = low_destination ? EmitSdwaLowDestinationInstruction(func, inst, static_cast<uint32_t>(index), &dst)
+			                     : func->func(index, m_code, &dst, this, func->param, func->scc_check);
 		}
 
 		if (!ok)

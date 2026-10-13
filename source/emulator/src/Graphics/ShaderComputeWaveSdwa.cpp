@@ -141,6 +141,36 @@ bool ShaderComputeWaveSdwaVop2IdentitySupported(const ShaderInstruction& instruc
 	       (instruction.vop_sdwa_ctrl & kSdwaVop2IdentityFixedMask) == kSdwaVop2IdentityFixedBits;
 }
 
+bool ShaderSdwaLowDestinationSupported(const ShaderInstruction& instruction)
+{
+	const uint32_t control = instruction.vop_sdwa_ctrl;
+	const uint32_t dst_sel = (control >> 8u) & 7u;
+	const uint32_t dst_u   = (control >> 11u) & 3u;
+	const bool     vop1    = instruction.format == ShaderInstructionFormat::SVdstSVsrc0 && instruction.src_num == 1;
+	const bool     vop2    = instruction.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1 && instruction.src_num == 2;
+	if (!instruction.vop_sdwa || (!vop1 && !vop2) || (dst_sel != 0u && dst_sel != 4u) || dst_u > 2u || (control & 0xe000u) != 0u)
+	{
+		return false;
+	}
+	// Accumulating forms read the destination as an operand.
+	const auto name = ShaderInstructionTypeName(instruction.type);
+	if (name.find("Mac") != std::string_view::npos || name.find("Dot") != std::string_view::npos)
+	{
+		return false;
+	}
+	const auto& dst = instruction.dst;
+	return OperandIsPlain(dst) && dst.type == ShaderOperandType::Vgpr && dst.size == 1 &&
+	       RegisterRangeIsValid(dst.register_id, dst.size, kMaxVgpr) && instruction.dst2.type == ShaderOperandType::Unknown &&
+	       instruction.dst2.size == 0;
+}
+
+ShaderInstruction ShaderSdwaWholeDestination(const ShaderInstruction& instruction)
+{
+	auto whole = instruction;
+	whole.vop_sdwa_ctrl = (instruction.vop_sdwa_ctrl & ~0x1f00u) | (6u << 8u);
+	return whole;
+}
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

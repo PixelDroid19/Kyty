@@ -843,6 +843,15 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 	return true;
 }
 
+bool ShaderInstructionPerLaneLoweringPreconditions(const ShaderInstruction& instruction)
+{
+	if (ShaderSdwaLowDestinationSupported(instruction))
+	{
+		return ShaderInstructionLoweringPreconditions(ShaderSdwaWholeDestination(instruction));
+	}
+	return ShaderInstructionLoweringPreconditions(instruction);
+}
+
 bool ShaderComputeWaveTypeIsExecCompare(ShaderInstructionType type)
 {
 	switch (type)
