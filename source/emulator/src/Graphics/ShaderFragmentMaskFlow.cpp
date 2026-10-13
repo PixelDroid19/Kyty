@@ -18,6 +18,11 @@ using namespace LaneFlow;
 using Type    = ShaderInstructionType;
 using Operand = ShaderOperandType;
 
+// A mask that may lack any launched lane, down to whole quads.
+constexpr uint8_t kPartial = kNotFull | kMissesQuad;
+// Extent of the undefined entry VCC, and of each per-instruction fact not reached by the walk.
+constexpr uint8_t kUnknownExtent = kExtent;
+
 bool Plain(const ShaderOperand& operand)
 {
 	return !operand.dpp && !operand.absolute && !operand.negate && !operand.clamp;
@@ -308,6 +313,9 @@ private:
 	void                  MarkAcceptedExecWrites(const ShaderCode& code);
 	bool                  ExecWide() const { return (m_state.scalar[kExecLoWord] & kWide) != 0u; }
 	[[nodiscard]] uint8_t WideResult(const ShaderInstruction& inst) const;
+	[[nodiscard]] uint8_t ExtentResult(const ShaderInstruction& inst) const;
+	void                  RecordFacts(uint32_t index, const ShaderInstruction& inst);
+	void                  PublishFacts();
 	bool                  InertDeadTail(uint32_t pc) const;
 
 	ShaderFragmentMaskFlow        m_result;
@@ -323,6 +331,10 @@ private:
 	bool                          m_scc_any_lane_uniform = false;
 	// Taint of every word a static spill wrote to a (VGPR, lane) slot; it only grows across walks.
 	std::map<std::pair<int, int>, uint8_t> m_spills;
+	// Per instruction, from the walk in progress: the extent of EXEC before it, and the taint of a
+	// V_CNDMASK_B32 condition (all extent bits where the walk did not reach it).
+	std::vector<uint8_t>          m_exec_extent;
+	std::vector<uint8_t>          m_condition;
 	const ShaderCode*             m_code    = nullptr;
 	uint32_t                      m_index   = 0; // instruction being stepped
 };
@@ -537,7 +549,7 @@ bool Flow::Define(const ShaderInstruction& inst, const ShaderOperand& dst, uint8
 		if ((taint & kMask) == 0u) { return Fail(inst, "EXEC assigned a numeric value"); }
 		if ((taint & kDiverged) != 0u) { return Fail(inst, "EXEC assigned a divergent scalar"); }
 		if ((taint & kMixed) != 0u) { return Fail(inst, "EXEC assigned a mask pair partly overwritten by a number"); }
-		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (taint & kWide));
+		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (taint & (kWide | kExtent)));
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 		return true; // EXEC is one bit per lane by construction; it is never region state
 	}
@@ -662,6 +674,48 @@ uint8_t Flow::WideResult(const ShaderInstruction& inst) const
 	if (StartsWith(type, "SAnd")) { return (any_mask && all_wide) ? kWide : kClean; }
 	if (AnyPrefix(type, {"SOrn2", "SNand", "SNor", "SXnor", "SNot"})) { return kWide; }
 	return (any_wide || (nonzero_constant && StartsWith(type, "S") && !IsSelect(type) && !StartsWith(type, "SMov"))) ? kWide : kClean;
+}
+
+// Extent of the mask an instruction produces against the launched quads. Only a copy keeps a full mask
+// (every launched lane), and S_WQM makes one from a mask that meets every launched quad, as the entry EXEC
+// does. Anything else may lose lanes; the complements and nonzero constants may also add lanes the host
+// subgroup does not hold.
+uint8_t Flow::ExtentResult(const ShaderInstruction& inst) const
+{
+	const Type type   = inst.type;
+	const auto extent = [&](int source) { return static_cast<uint8_t>(Taint(inst.src[source]) & kExtent); };
+	if ((type == Type::SMovB64 || type == Type::SMovB32) && inst.src_num == 1)
+	{
+		if (!IsConstant(inst.src[0])) { return extent(0); }
+		return inst.src[0].constant.u == 0u ? kPartial : kExtent;
+	}
+	if (StartsWith(type, "SWqm") && inst.src_num == 1)
+	{
+		const uint8_t source = extent(0);
+		return static_cast<uint8_t>((source & kOuter) | ((source & kMissesQuad) != 0u ? kPartial : kClean));
+	}
+	if (StartsWith(type, "VCmp") || ShaderNativePackedResult(inst))
+	{
+		return static_cast<uint8_t>((m_state.scalar[kExecLoWord] & kOuter) | kPartial);
+	}
+	bool any_mask = false, any_outer = false, all_outer = true, nonzero_constant = false;
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		if ((Taint(inst.src[source]) & kMask) != 0u)
+		{
+			const bool outer = (extent(source) & kOuter) != 0u;
+			any_mask         = true;
+			any_outer        = any_outer || outer;
+			all_outer        = all_outer && outer;
+		} else if (IsConstant(inst.src[source]) && inst.src[source].constant.u != 0u)
+		{
+			nonzero_constant = true;
+		}
+	}
+	if (StartsWith(type, "SAndn2")) { return static_cast<uint8_t>((inst.src_num > 0 ? extent(0) & kOuter : kOuter) | kPartial); }
+	if (StartsWith(type, "SAnd")) { return static_cast<uint8_t>(((any_mask && all_outer) ? kOuter : kClean) | kPartial); }
+	if (AnyPrefix(type, {"SOrn2", "SNand", "SNor", "SXnor", "SNot"})) { return kExtent; }
+	return static_cast<uint8_t>(((any_outer || nonzero_constant) ? kOuter : kClean) | kPartial);
 }
 
 // Code that runs when no lane survives and produces nothing: optionally EXEC = 0, a null
@@ -872,7 +926,7 @@ bool Flow::IsAnyLaneTest(const ShaderInstruction& inst) const
 	unsigned first = 0;
 	unsigned count = 0;
 	if (mask == nullptr || !Plain(*mask) || !ScalarRange(*mask, &first, &count) || count != 2u) { return false; }
-	const auto lane_bits = [](uint8_t taint) { return (taint & kMask) != 0u && (taint & ~(kMask | kWide)) == 0u; };
+	const auto lane_bits = [](uint8_t taint) { return (taint & kMask) != 0u && (taint & ~(kMask | kWide | kExtent)) == 0u; };
 	return lane_bits(m_state.scalar[first]) && lane_bits(m_state.scalar[first + 1u]);
 }
 
@@ -923,13 +977,19 @@ bool Flow::Step(const ShaderInstruction& inst)
 	const bool empty_mask = (inst.type == Type::SMovB64 || inst.type == Type::SMovB32) && inst.src_num == 1 &&
 	                        inst.src[0].type == Operand::IntegerInlineConstant && inst.src[0].constant.i == 0;
 	if (empty_mask && inst.dst.type == Operand::ExecLo) { produced |= kMask; }
-	if ((produced & kMask) != 0u) { produced = static_cast<uint8_t>((produced & ~kWide) | WideResult(inst)); }
+	if ((produced & kMask) != 0u) { produced = static_cast<uint8_t>((produced & ~kWide) | WideResult(inst) | ExtentResult(inst)); }
+	const uint8_t exec_extent = m_state.scalar[kExecLoWord] & kExtent;
 	if (WritesExecOnly(inst.type))
 	{
 		// EXEC &= compare: it narrows, so it stays wide only if it already was.
-		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (ExecWide() ? kWide : kClean));
+		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (ExecWide() ? kWide : kClean) | (exec_extent & kOuter) | kPartial);
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 		return true;
+	}
+	// S_*_SAVEEXEC: the destination is a copy of the old EXEC.
+	if (ShaderInstructionTypeChangesExec(inst.type) && inst.dst.type != Operand::ExecLo)
+	{
+		produced = static_cast<uint8_t>((produced & ~kExtent) | exec_extent);
 	}
 	const bool exec_subset_before = !m_regions.empty() && m_regions.back().exec_subset;
 	const bool one_outside_after  = ResultOneOutsideRegion(inst);
@@ -945,7 +1005,8 @@ bool Flow::Step(const ShaderInstruction& inst)
 		// S_*_SAVEEXEC: the destination took the old EXEC; EXEC is now the combination.
 		const bool narrowing = StartsWith(inst.type, "SAnd") && !StartsWith(inst.type, "SAndn");
 		const bool wide = narrowing ? (ExecWide() && (Taint(inst.src[0]) & kWide) != 0u) : true;
-		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (wide ? kWide : kClean));
+		const bool outer = narrowing ? ((exec_extent & kOuter) != 0u && (Taint(inst.src[0]) & kOuter) != 0u) : true;
+		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (wide ? kWide : kClean) | (outer ? kOuter : kClean) | kPartial);
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 	}
 	TrackUniformMask(inst, uniform_sources);
@@ -969,6 +1030,29 @@ void Flow::MarkAcceptedExecWrites(const ShaderCode& code)
 	}
 }
 
+// The state a walk steps an instruction with already joins every path into it, so the facts of the
+// walk that reaches the fixpoint hold for the program.
+void Flow::RecordFacts(uint32_t index, const ShaderInstruction& inst)
+{
+	m_exec_extent[index] = static_cast<uint8_t>(m_state.scalar[kExecLoWord] & kExtent);
+	m_condition[index]   = inst.type == Type::VCndmaskB32 && inst.src_num == 3 ? Taint(inst.src[2]) : kUnknownExtent;
+}
+
+void Flow::PublishFacts()
+{
+	const size_t size = m_exec_extent.size();
+	m_result.exec_in_quads.assign(size, false);
+	m_result.exec_full.assign(size, false);
+	m_result.live_condition.assign(size, false);
+	for (size_t index = 0; index < size; ++index)
+	{
+		const uint8_t condition = m_condition[index];
+		m_result.exec_in_quads[index]  = (m_exec_extent[index] & kOuter) == 0u;
+		m_result.exec_full[index]      = m_exec_extent[index] == kClean;
+		m_result.live_condition[index] = (condition & kMask) != 0u && (condition & (kWide | kOuter | kMixed | kDiverged)) == 0u;
+	}
+}
+
 // One pass over the program in address order from the entry state, merging the states that
 // arrive at branch targets. Forward edges are complete within a pass; back edges feed the next.
 bool Flow::Walk()
@@ -977,15 +1061,21 @@ bool Flow::Walk()
 	m_changed = false;
 	m_scc_any_lane = false;
 	m_regions.clear();
-	// EXEC, VCC and SCC enter undefined or lane dependent: treat them as masks.
+	// EXEC, VCC and SCC enter undefined or lane dependent: treat them as masks. The entry EXEC holds
+	// the covered lanes, at least one of each launched quad; nothing is known of the entry VCC.
 	for (unsigned word : {kVccLoWord, kVccLoWord + 1u, kExecLoWord, kExecLoWord + 1u, kSccWord}) { m_state.scalar[word] = kMask; }
+	for (unsigned word : {kVccLoWord, kVccLoWord + 1u}) { m_state.scalar[word] |= kUnknownExtent; }
+	for (unsigned word : {kExecLoWord, kExecLoWord + 1u}) { m_state.scalar[word] |= kNotFull; }
 	const auto& instructions = m_code->GetInstructions();
+	m_exec_extent.assign(instructions.Size(), kUnknownExtent);
+	m_condition.assign(instructions.Size(), kUnknownExtent);
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		const auto& inst = instructions.At(index);
 		EnterJoin(inst.pc);
 		if (!m_state.reachable) { continue; }
 		m_index = index;
+		RecordFacts(index, inst);
 		if (!Step(inst)) { return false; }
 	}
 	if (!m_regions.empty())
@@ -1032,6 +1122,7 @@ ShaderFragmentMaskFlow Flow::Fixpoint()
 		{
 			m_result.lane_local = true;
 			MarkAcceptedExecWrites(*m_code);
+			PublishFacts();
 			return m_result;
 		}
 	}

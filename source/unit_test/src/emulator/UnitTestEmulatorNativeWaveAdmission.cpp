@@ -1,12 +1,18 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/FragmentTransportAdmission.h"
 #include "Emulator/Graphics/GraphicsGeState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
+#include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
+#include "Emulator/Graphics/ShaderFragmentMaskFlow.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
+#include "NggPassthroughFixture.h"
+#include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 
 #include "spirv/unified1/spirv.hpp"
 
@@ -19,6 +25,25 @@ UT_BEGIN(EmulatorNativeWaveAdmission);
 using namespace Libs::Graphics;
 
 namespace {
+
+class ScopedShaderValidation final: public Config::ConfigSource
+{
+public:
+	ScopedShaderValidation(): m_previous(Config::ShaderValidationEnabled()) { Config::Load(*this); }
+	~ScopedShaderValidation() override
+	{
+		m_enabled = m_previous;
+		Config::Load(*this);
+	}
+	bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+	int64_t GetInteger(const Core::String&) const override { return 0; }
+	bool GetBool(const Core::String&) const override { return m_enabled; }
+	Core::String GetString(const Core::String&) const override { return {}; }
+
+private:
+	bool m_previous;
+	bool m_enabled = true;
+};
 
 ShaderComputeWaveVulkanState Host()
 {
@@ -135,6 +160,97 @@ ShaderCode NeutralRegion()
 	return Program({Unary(ShaderInstructionType::SMovB64, mask, exec, true),
 	                Unary(ShaderInstructionType::SOrn2SaveexecB64, saved, mask, true), Select(mask), row,
 	                Unary(ShaderInstructionType::SMovB64, exec, saved, true)});
+}
+
+ShaderOperand Constant(uint32_t value)
+{
+	auto operand       = Operand(ShaderOperandType::IntegerInlineConstant, 0, 0);
+	operand.constant.u = value;
+	return operand;
+}
+
+ShaderInstruction Vector(ShaderInstructionType type, int dst, ShaderOperand a, ShaderOperand b)
+{
+	ShaderInstruction inst {};
+	inst.type = type;
+	inst.format = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	inst.dst = Operand(ShaderOperandType::Vgpr, dst);
+	inst.src[0] = a;
+	inst.src[1] = b;
+	inst.src_num = 2;
+	return inst;
+}
+
+// v10 |= v10 shifted right by `shift` lanes inside each row.
+ShaderInstruction RowShiftOr(uint32_t shift, uint8_t row_mask = 15)
+{
+	auto inst = Vector(ShaderInstructionType::VOrB32, 10, Operand(ShaderOperandType::Vgpr, 10), Operand(ShaderOperandType::Vgpr, 10));
+	inst.src[0].dpp = true;
+	inst.src[0].dpp_ctrl = static_cast<uint16_t>(0x110u + shift);
+	inst.src[0].dpp_row_mask = row_mask;
+	inst.src[0].dpp_bank_mask = 15;
+	return inst;
+}
+
+ShaderInstruction Readlane(int dst, uint32_t lane)
+{
+	auto inst = Vector(ShaderInstructionType::VReadlaneB32, 0, Operand(ShaderOperandType::Vgpr, 10), Constant(lane));
+	inst.dst = Operand(ShaderOperandType::Sgpr, dst);
+	return inst;
+}
+
+ShaderInstruction Endpgm()
+{
+	ShaderInstruction inst {};
+	inst.type = ShaderInstructionType::SEndpgm;
+	inst.format = ShaderInstructionFormat::Empty;
+	return inst;
+}
+
+// The whole-wave OR of a seed `cond ? v9 : 0` (cond = the entry EXEC): row-shift ORs fold each row onto its
+// last lane, PERMLANEX16 brings the other row of each half, and lanes 31 and 63 are read after the restore.
+// `tail` follows the reads.
+ShaderCode Reduction(std::initializer_list<ShaderInstruction> tail, uint8_t row_mask = 15)
+{
+	const auto exec  = Operand(ShaderOperandType::ExecLo, 0, 2);
+	const auto mask  = Operand(ShaderOperandType::Sgpr, 36, 2);
+	const auto saved = Operand(ShaderOperandType::VccLo, 0, 2);
+	ShaderInstruction permute {};
+	permute.type = ShaderInstructionType::VPermlanex16B32;
+	permute.format = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+	permute.dst = Operand(ShaderOperandType::Vgpr, 9);
+	permute.src[0] = Operand(ShaderOperandType::Vgpr, 10);
+	permute.src[1] = permute.src[2] = Constant(0xffffffffu);
+	permute.src_num = 3;
+	std::vector<ShaderInstruction> body {Unary(ShaderInstructionType::SMovB64, mask, exec, true),
+	                                     Unary(ShaderInstructionType::SOrn2SaveexecB64, saved, mask, true),
+	                                     Select(mask),
+	                                     RowShiftOr(1, row_mask),
+	                                     RowShiftOr(2),
+	                                     RowShiftOr(4),
+	                                     RowShiftOr(8),
+	                                     permute,
+	                                     Vector(ShaderInstructionType::VOrB32, 10, Operand(ShaderOperandType::Vgpr, 10),
+	                                            Operand(ShaderOperandType::Vgpr, 9)),
+	                                     Unary(ShaderInstructionType::SMovB64, exec, saved, true),
+	                                     Readlane(0, 31),
+	                                     Readlane(1, 63)};
+	body.insert(body.end(), tail.begin(), tail.end());
+	body.push_back(Endpgm());
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	for (auto inst: body)
+	{
+		inst.pc = code.GetInstructions().Size() * 4u;
+		code.GetInstructions().Add(inst);
+	}
+	return code;
+}
+
+// Overwrites of the network registers under the restored EXEC.
+ShaderInstruction Clear(int vgpr)
+{
+	return Unary(ShaderInstructionType::VMovB32, Operand(ShaderOperandType::Vgpr, vgpr), Constant(0));
 }
 
 } // namespace
@@ -902,6 +1018,99 @@ TEST(EmulatorNativeWaveAdmission, NativeWave32Spirv16FullSubgroupsUseActualModul
 	layout.physical_local[0] = 32;
 	EXPECT_TRUE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, fixed_capabilities, &stage, &required,
 	                                                           false, 0x00010600u));
+}
+
+
+TEST(EmulatorNativeWaveAdmission, WholeWaveOrReductionRunsAsAPartialWaveOfAnyWidth)
+{
+	const auto code = Reduction({Clear(9), Clear(10)});
+	const auto info = ShaderAnalyzeNativeWave(code, 64);
+	EXPECT_EQ(info.proof, ShaderNativeWaveProof::FragmentPartialWave);
+	EXPECT_EQ(info.refusal_reason, nullptr);
+	const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code));
+	ASSERT_EQ(reductions.reductions.size(), 1u);
+	EXPECT_FALSE(reductions.IsStep(2));
+	EXPECT_TRUE(reductions.IsStep(3));
+	EXPECT_TRUE(reductions.IsStep(8));
+	EXPECT_FALSE(reductions.IsStep(9));
+	uint64_t lanes = 0;
+	ASSERT_NE(reductions.ReadAt(10, &lanes), nullptr);
+	EXPECT_EQ(lanes, 0x00000000ffffffffull);
+	ASSERT_NE(reductions.ReadAt(11, &lanes), nullptr);
+	EXPECT_EQ(lanes, 0xffffffff00000000ull);
+	EXPECT_EQ(reductions.reductions[0].seed, 10);
+}
+
+TEST(EmulatorNativeWaveAdmission, PartialWaveRefusesObservedNetworkValues)
+{
+	const auto row_refusal = [](const ShaderCode& code)
+	{
+		const auto info = ShaderAnalyzeNativeWave(code, 64);
+		EXPECT_NE(info.proof, ShaderNativeWaveProof::FragmentPartialWave);
+		ASSERT_NE(info.refusal_reason, nullptr);
+		EXPECT_NE(std::strstr(info.refusal_reason, "row DPP"), nullptr) << info.refusal_reason;
+		EXPECT_EQ(info.refusal_pc, 12u);
+	};
+	// An intermediate lane of the network is read before it is overwritten.
+	row_refusal(Reduction({Unary(ShaderInstructionType::VMovB32, Operand(ShaderOperandType::Vgpr, 11), Operand(ShaderOperandType::Vgpr, 9)),
+	                       Clear(9), Clear(10)}));
+	// An export reads a network register.
+	ShaderInstruction export_color {};
+	export_color.type = ShaderInstructionType::Exp;
+	export_color.format = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone;
+	for (int source = 0; source < 4; ++source) { export_color.src[source] = Operand(ShaderOperandType::Vgpr, 9 + source); }
+	export_color.src_num = 4;
+	row_refusal(Reduction({export_color}));
+	// A row-masked step is not an OR of the whole row.
+	row_refusal(Reduction({Clear(9), Clear(10)}, 3));
+}
+
+TEST(EmulatorNativeWaveAdmission, PartialWaveKeepsStaleLanesOutsideTheRestoredExec)
+{
+	const auto exec  = Operand(ShaderOperandType::ExecLo, 0, 2);
+	const auto read  = Unary(ShaderInstructionType::VMovB32, Operand(ShaderOperandType::Vgpr, 11), Operand(ShaderOperandType::Vgpr, 10));
+	const auto widen = Unary(ShaderInstructionType::SWqmB64, exec, exec, true);
+	// The overwrite under the restored EXEC leaves lanes outside it stale; reading inside it is exact.
+	EXPECT_EQ(ShaderAnalyzeNativeWave(Reduction({Clear(9), Clear(10), read}), 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	// Widening EXEC lets a stale lane compute with the network value.
+	const auto widened = ShaderAnalyzeNativeWave(Reduction({Clear(9), Clear(10), widen, read}), 64);
+	EXPECT_NE(widened.proof, ShaderNativeWaveProof::FragmentPartialWave);
+	EXPECT_NE(widened.refusal_reason, nullptr);
+	// After WQM EXEC holds every launched lane, so an overwrite ends the register in all of them.
+	EXPECT_EQ(ShaderAnalyzeNativeWave(Reduction({widen, Clear(9), Clear(10), read}), 64).proof, ShaderNativeWaveProof::FragmentPartialWave);
+}
+
+TEST(EmulatorNativeWaveAdmission, PartialWaveReductionEmitsOneSubgroupOrPerRead)
+{
+	ASSERT_EXIT(([] {
+		NggFixture::Initialize();
+		ScopedShaderValidation validation;
+		if (!Config::ShaderValidationEnabled()) { std::_Exit(4); }
+		const auto           code = Reduction({Clear(9), Clear(10)});
+		ShaderPixelInputInfo input {};
+		input.native_wave = ShaderAnalyzeNativeWave(code, 64);
+		if (input.native_wave.proof != ShaderNativeWaveProof::FragmentPartialWave) { std::_Exit(1); }
+		const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+		const auto count  = [&source](const char* text)
+		{
+			size_t found = 0;
+			for (auto at = source.FindIndex(text); at != Core::STRING8_INVALID_INDEX; at = source.FindIndex(text, at + 1)) { found++; }
+			return found;
+		};
+		// The six network steps are not run; each of the two reads is one subgroup OR of its lanes' seeds.
+		if (count("; reduction step:") != 6u || count("= OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %lr_part_") != 2u)
+		{
+			std::_Exit(2);
+		}
+		Kyty::Vector<uint32_t> binary;
+		String8                error;
+		if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+		{
+			std::fprintf(stderr, "%s\n", error.c_str());
+			std::_Exit(3);
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
 }
 
 UT_END();

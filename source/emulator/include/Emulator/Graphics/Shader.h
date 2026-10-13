@@ -2083,6 +2083,9 @@ enum class ShaderNativeWaveProof : uint32_t
 	QuadLocal,
 	ExactSubgroup,
 	FragmentNeutral32,
+	// A Wave64 pixel program whose only whole-wave observations are proven OR reductions and reads that
+	// stay inside launched quads, run as a partially populated guest wave on a host subgroup of any width.
+	FragmentPartialWave,
 };
 
 struct ShaderNativeWaveInfo

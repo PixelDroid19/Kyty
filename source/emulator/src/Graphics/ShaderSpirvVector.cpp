@@ -3489,6 +3489,42 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
 	return true;
 }
 
+// A V_READLANE_B32 of a proven whole-wave OR reduction: the OR of the seed over the invocations whose
+// guest lane is in `lanes`. The seed register still holds the seed, since the network steps were not
+// emitted. Lanes the subgroup does not hold contribute nothing, as absent guest lanes seed zero; the
+// quad transfer gives helpers, which a general collective may leave undefined, their quad's result.
+static bool RecompileLaneReductionRead(uint32_t index, const ShaderFragmentLaneReduction& reduction, uint64_t lanes,
+                                       const String8& dst, String8* dst_source, Spirv* spirv)
+{
+	ShaderOperand seed;
+	seed.type        = ShaderOperandType::Vgpr;
+	seed.register_id = reduction.seed;
+	seed.size        = 1;
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8       load_seed;
+	if (!operand_load_uint(spirv, seed, "lr_seed_<index>", index_str, &load_seed)) { return false; }
+	static const char* text = R"(
+        <load_seed>
+        %lr_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
+        %lr_upper_<index> = OpUGreaterThanEqual %bool %lr_lane_<index> %uint_32
+        %lr_word_<index> = OpSelect %uint %lr_upper_<index> %<high> %<low>
+        %lr_shift_<index> = OpBitwiseAnd %uint %lr_lane_<index> %uint_31
+        %lr_shifted_<index> = OpShiftRightLogical %uint %lr_word_<index> %lr_shift_<index>
+        %lr_bit_<index> = OpBitwiseAnd %uint %lr_shifted_<index> %uint_1
+        %lr_member_<index> = OpINotEqual %bool %lr_bit_<index> %uint_0
+        %lr_part_<index> = OpSelect %uint %lr_member_<index> %lr_seed_<index> %uint_0
+        %lr_raw_<index> = OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %lr_part_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load_seed>", load_seed)
+	                   .ReplaceStr("<low>", spirv->GetConstantUint(static_cast<uint32_t>(lanes)))
+	                   .ReplaceStr("<high>", spirv->GetConstantUint(static_cast<uint32_t>(lanes >> 32u)))
+	                   .ReplaceStr("<index>", index_str);
+	*dst_source += spirv->NativeQuadUniform(String8("lr_raw_") + index_str, "uint", String8("lr_") + index_str);
+	*dst_source += String8::FromPrintf("OpStore %%%s %%lr_%u\n", dst.c_str(), index);
+	return true;
+}
+
 // v_readlane_b32 ignores EXEC and reads the requested physical wave lane.
 KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 {
@@ -3500,6 +3536,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
+
+	uint64_t reduction_lanes = 0;
+	if (const auto* reduction = spirv->FragmentLaneReductions().ReadAt(index, &reduction_lanes); reduction != nullptr)
+	{
+		return RecompileLaneReductionRead(index, *reduction, reduction_lanes, dst_value.value, dst_source, spirv);
+	}
 
 	int spill_register = 0;
 	int spill_lane     = 0;

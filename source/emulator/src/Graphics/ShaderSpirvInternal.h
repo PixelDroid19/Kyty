@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 
 #include "ShaderControlFlowGraph.h"
@@ -148,6 +149,9 @@ public:
 	// READLANE over the ghost half) run only inside proven neutral regions or
 	// against proven-neutral sources.
 	[[nodiscard]] bool UsesFragmentWaveTier() const;
+	// The whole-wave OR reductions of a pixel program admitted as FragmentPartialWave; empty otherwise.
+	// Their network steps are not emitted and each read lowers to one subgroup reduction of the seed.
+	[[nodiscard]] const ShaderFragmentLaneReductions& FragmentLaneReductions() const;
 	[[nodiscard]] bool UsesFragmentCompute() const { return m_fragment_compute_info != nullptr; }
 	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.
 	// Compute lowers it onto the shared %lds array; other stages carry it in
@@ -511,6 +515,8 @@ private:
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
 	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
 	mutable int                   m_native_wave_tier = -1;
+	mutable bool                  m_lane_reductions_ready = false;
+	mutable ShaderFragmentLaneReductions m_lane_reductions;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;

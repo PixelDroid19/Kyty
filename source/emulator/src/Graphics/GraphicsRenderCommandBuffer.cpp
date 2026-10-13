@@ -250,7 +250,8 @@ bool NativeWaveInputSensitive(const ShaderNativeWaveInfo& wave)
 	{
 		case ShaderNativeWaveProof::ExactSubgroup:
 		case ShaderNativeWaveProof::QuadLocal:
-		case ShaderNativeWaveProof::FragmentNeutral32: return true;
+		case ShaderNativeWaveProof::FragmentNeutral32:
+		case ShaderNativeWaveProof::FragmentPartialWave: return true;
 		case ShaderNativeWaveProof::Unclassified:
 		case ShaderNativeWaveProof::LaneLocal: return false;
 	}

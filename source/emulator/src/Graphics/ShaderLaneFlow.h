@@ -32,6 +32,12 @@ constexpr uint8_t kMask     = 2; // EXEC-derived lane bits
 constexpr uint8_t kDiverged = 4; // written under lane-divergent control flow: differs between lanes after the join
 constexpr uint8_t kMixed    = 8; // a register pair whose words disagree on being a mask
 constexpr uint8_t kWide     = 16; // a mask that may include helper lanes (reached through S_WQM, a complement or an OR)
+// Extent of a mask against the lanes of the launched quads (the fragment mask flow only). Each bit says what
+// the mask may do, so joins keep merging by union; a mask with none of them is exactly every launched lane.
+constexpr uint8_t kOuter      = 32;  // may hold a lane outside the launched quads (a complement, a nonzero constant)
+constexpr uint8_t kNotFull    = 64;  // may lack a lane of a launched quad
+constexpr uint8_t kMissesQuad = 128; // may lack every lane of some launched quad (implies kNotFull)
+constexpr uint8_t kExtent     = kOuter | kNotFull | kMissesQuad;
 
 [[nodiscard]] bool StartsWith(ShaderInstructionType type, const char* prefix);
 [[nodiscard]] bool AnyPrefix(ShaderInstructionType type, std::initializer_list<const char*> prefixes);

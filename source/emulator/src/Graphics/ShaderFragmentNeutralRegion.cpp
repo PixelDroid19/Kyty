@@ -572,6 +572,14 @@ bool ShaderFragmentNeutralRegionSupported(const ShaderCode& code, uint32_t index
 	return AnalyzeRegion(code, index, &region);
 }
 
+bool ShaderFragmentNeutralRegionEnd(const ShaderCode& code, uint32_t index, uint32_t* end)
+{
+	NeutralRegion region;
+	if (!AnalyzeRegion(code, index, &region)) { return false; }
+	*end = region.end;
+	return true;
+}
+
 ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentPartialWaveReads(const ShaderCode& code)
 {
 	ShaderComputeWaveAnalysisResult result;

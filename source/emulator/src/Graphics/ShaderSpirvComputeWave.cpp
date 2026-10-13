@@ -251,6 +251,21 @@ bool Spirv::UsesFragmentWaveTier() const
 	return m_native_wave_tier != 0;
 }
 
+const ShaderFragmentLaneReductions& Spirv::FragmentLaneReductions() const
+{
+	if (!m_lane_reductions_ready)
+	{
+		m_lane_reductions_ready = true;
+		if (m_code.GetType() == ShaderType::Pixel && !UsesFragmentCompute() && m_ps_input_info != nullptr &&
+		    m_ps_input_info->native_wave.proof == ShaderNativeWaveProof::FragmentPartialWave &&
+		    m_ps_input_info->native_wave.refusal_reason == nullptr)
+		{
+			m_lane_reductions = ShaderFindFragmentLaneReductions(m_code, ShaderAnalyzeFragmentMaskFlow(m_code));
+		}
+	}
+	return m_lane_reductions;
+}
+
 bool Spirv::UsesDsAddtid() const
 {
 	for (const auto& inst: m_code.GetInstructions())

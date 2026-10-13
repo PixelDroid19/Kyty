@@ -2738,6 +2738,11 @@ void Spirv::WriteInstructions()
 		{
 			WriteLabel(index);
 		}
+		if (FragmentLaneReductions().IsStep(static_cast<uint32_t>(index)))
+		{
+			m_source += String8::FromPrintf("; reduction step: %s\n", ShaderCode::DbgInstructionToStr(inst).c_str());
+			continue;
+		}
 
 		String8 dst = MaterializeAssembledDescriptors(inst);
 		String8 dst_debug;
@@ -3217,6 +3222,15 @@ void Spirv::FindConstants()
 					AddConstantUint(inst.src[source].dpp_ctrl & 15u);
 				}
 			}
+		}
+	}
+	for (const auto& reduction: FragmentLaneReductions().reductions)
+	{
+		// Each read selects the seeds of its guest lanes by a two-word lane set.
+		for (const auto& read: reduction.reads)
+		{
+			AddConstantUint(static_cast<uint32_t>(read.lanes));
+			AddConstantUint(static_cast<uint32_t>(read.lanes >> 32u));
 		}
 	}
 	if (!UsesFragmentWaveTier() && spirv_uses_dpp_row(m_code))

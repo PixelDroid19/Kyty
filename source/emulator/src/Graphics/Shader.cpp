@@ -20,6 +20,7 @@
 #include "Emulator/Graphics/ShaderComputeWaveControlFlowAnalysis.h"
 #include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "Emulator/Graphics/ShaderComputeWaveNativeEquivalence.h"
+#include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
 #include "Emulator/Graphics/ShaderFragmentMaskFlow.h"
 #include "Emulator/Graphics/ShaderNggFront.h"
 #include "ShaderNativeWaveInternal.h"
@@ -884,6 +885,94 @@ static bool ShaderFragmentQuadMayLoseMember(const ShaderInstruction& inst)
 	       inst.type == ShaderInstructionType::SSwappcB64;
 }
 
+static bool ShaderIsDirectBranch(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::SBranch || type == ShaderInstructionType::SCbranchScc0 ||
+	       type == ShaderInstructionType::SCbranchScc1 || type == ShaderInstructionType::SCbranchVccz ||
+	       type == ShaderInstructionType::SCbranchVccnz || type == ShaderInstructionType::SCbranchExecz ||
+	       type == ShaderInstructionType::SCbranchExecnz;
+}
+
+// The first instruction that may run after a quad lost a member: the first loss, or the head of a loop
+// whose body holds one, since the next iteration runs the head again.
+static uint32_t ShaderFragmentFirstQuadLoss(const ShaderCode& code)
+{
+	const auto&           instructions = code.GetInstructions();
+	std::vector<uint32_t> losses;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		if (ShaderFragmentQuadMayLoseMember(instructions.At(index))) { losses.push_back(index); }
+	}
+	uint32_t first = losses.empty() ? instructions.Size() : losses.front();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (!ShaderIsDirectBranch(inst.type) || inst.src_num < 1 || inst.src[0].constant.i >= 0) { continue; }
+		const int64_t target_pc = static_cast<int64_t>(inst.pc) + 4 + inst.src[0].constant.i;
+		uint32_t      head      = index;
+		while (head > 0 && static_cast<int64_t>(instructions.At(head).pc) > target_pc) { --head; }
+		const bool holds_loss = std::any_of(losses.begin(), losses.end(), [&](uint32_t loss) { return loss >= head && loss <= index; });
+		if (holds_loss) { first = std::min(first, head); }
+	}
+	return first;
+}
+
+// Whether a lane-local Wave64 pixel program runs as a partially populated guest wave. Which pixels share a
+// wave is the rasterizer's choice, so a host subgroup of any width holding whole quads is such a wave, as long
+// as nothing observes a lane by its position:
+//  - an OR reduction proven by ShaderFindFragmentLaneReductions folds only lanes that hold their seed, so a
+//    lane outside the subgroup is an absent guest lane that seeds zero;
+//  - quad DPP and a READFIRSTLANE over an EXEC inside the launched quads see only lanes that exist, while no
+//    quad has lost a member yet;
+//  - scalar spills keep their own storage;
+//  - everything else that names a lane (row DPP, PERMLANE, other READLANE/WRITELANE, MBCNT, append/consume)
+//    is refused.
+static bool ShaderFragmentRunsAsPartialWave(const ShaderCode& code, const ShaderFragmentMaskFlow& masks)
+{
+	const auto& instructions = code.GetInstructions();
+	if (!masks.lane_local || masks.exec_in_quads.size() != instructions.Size()) { return false; }
+	const auto     reductions = ShaderFindFragmentLaneReductions(code, masks);
+	const uint32_t loss       = ShaderFragmentFirstQuadLoss(code);
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		if (reductions.IsStep(index)) { continue; }
+		const auto& inst  = instructions.At(index);
+		const bool  whole = index < loss;
+		uint64_t    lanes = 0;
+		int         reg   = 0;
+		int         lane  = 0;
+		switch (inst.type)
+		{
+			case ShaderInstructionType::VReadlaneB32:
+				if (reductions.ReadAt(index, &lanes) != nullptr ? !whole
+				                                                : !IsStaticScalarSpillRead(inst, &reg, &lane) ||
+				                                                      !HasLiveScalarSpill(code, index, reg, lane))
+				{
+					return false;
+				}
+				break;
+			case ShaderInstructionType::VWritelaneB32:
+				if (!IsStaticScalarSpillWrite(inst, &reg, &lane) || !IsScalarSpillStore(code, index, reg, lane)) { return false; }
+				break;
+			case ShaderInstructionType::VReadfirstlaneB32:
+				if (!ShaderReadfirstlaneCanUseUniformCopy(code, index) && (!whole || !masks.exec_in_quads[index])) { return false; }
+				break;
+			case ShaderInstructionType::VPermlane16B32:
+			case ShaderInstructionType::VPermlanex16B32:
+			case ShaderInstructionType::VMbcntLoU32B32:
+			case ShaderInstructionType::VMbcntHiU32B32:
+			case ShaderInstructionType::DsAppend:
+			case ShaderInstructionType::DsConsume: return false;
+			default: break;
+		}
+		for (int source = 0; source < inst.src_num; ++source)
+		{
+			if (inst.src[source].dpp && (inst.src[source].dpp_ctrl > 0xffu || !whole)) { return false; }
+		}
+	}
+	return true;
+}
+
 ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	ShaderNativeWaveInfo info;
@@ -1019,6 +1108,13 @@ ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t gu
 		}
 		if (refusal != nullptr)
 		{
+			// The exact-participation proof failed; a program free of lane positions still runs as a
+			// partially populated wave. Otherwise the first participation refusal names the obstacle.
+			if (guest_wave_size == 64u && !writes_exec_outside_region && ShaderFragmentRunsAsPartialWave(code, mask_flow))
+			{
+				info.proof = ShaderNativeWaveProof::FragmentPartialWave;
+				return info;
+			}
 			info.refusal_pc = inst.pc;
 			info.refusal_reason = refusal;
 			return info;

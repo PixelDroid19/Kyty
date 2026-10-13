@@ -28,6 +28,13 @@ struct ShaderFragmentMaskFlow
 	// of a validated whole-quad wrapper (save EXEC, S_WQM_B64 EXEC, restore EXEC) are
 	// closed; a lone S_WQM_B64 widening EXEC is not.
 	std::vector<bool> closed_exec_write;
+	// Per instruction, only when lane_local, for the lanes of the launched quads (the host invocations):
+	// before it, EXEC holds no other lane (exec_in_quads), or exactly all of them (exec_full).
+	std::vector<bool> exec_in_quads;
+	std::vector<bool> exec_full;
+	// Per instruction, only when lane_local: a V_CNDMASK_B32 whose condition holds only lanes of the entry
+	// EXEC, so no helper lane and no lane outside the launched quads.
+	std::vector<bool> live_condition;
 };
 
 // Flow-sensitive mask provenance for a fragment program (S_ENDPGM last, no memory write

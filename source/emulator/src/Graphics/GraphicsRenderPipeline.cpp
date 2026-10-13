@@ -369,7 +369,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		// These stages use flags0. SPIR-V 1.6 itself permits varying widths.
 		const auto selection = ShaderSelectNativeSubgroup(gctx->compute_wave_vulkan_state, stage, gctx->subgroup_size,
 		                                                  wave.guest_wave_size, wave.proof == ShaderNativeWaveProof::LaneLocal ||
-		                                                  wave.proof == ShaderNativeWaveProof::QuadLocal,
+		                                                  wave.proof == ShaderNativeWaveProof::QuadLocal ||
+		                                                  wave.proof == ShaderNativeWaveProof::FragmentPartialWave,
 		                                                  wave.proof == ShaderNativeWaveProof::FragmentNeutral32,
 		                                                  spirv_version >= 0x00010600u);
 		const char* reason = wave.refusal_reason;
