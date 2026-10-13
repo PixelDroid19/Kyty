@@ -534,6 +534,24 @@ TEST(EmulatorNggFront, ProvesAFusedFrontWithScalarLoadsUniformBranchesAndLaneSel
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorNggFront, TheInstructionBoundAppliesToThePrologueNotToTheBody)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Words body;
+		for (uint32_t i = 0; i < ShaderNggPassthroughInstructionLimit; ++i) { Vop1(body, 1, 13, Inline(0)); } // v_mov_b32 v13, 0
+		Append(body, FetchBody());
+		const auto code = Parse(PrologueThenBody(body));
+		Check(code.GetInstructions().Size() > ShaderNggPassthroughInstructionLimit, "the program exceeds the bound");
+		for (uint32_t width: {32u, 64u}) { Check(ShaderProveNggFrontLaneLocal(code, width).lane_local, "a long body after a short prologue is proved"); }
+		Words padded(ShaderNggPassthroughInstructionLimit, 0xbf800000u); // s_nop 0
+		Append(padded, PrologueThenBody(FetchBody()));
+		const auto late = ShaderAnalyzeNggPassthroughPrologue(Parse(padded), {64, 3, 2});
+		Check(!late.prologue_proven && late.rejection == ShaderNggPassthroughRejection::InstructionLimit, "a prologue past the bound is refused");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorNggFront, AScalarPairCopyRetainsTheSavedVertexExecMask)
 {
 	ASSERT_EXIT(([] {
