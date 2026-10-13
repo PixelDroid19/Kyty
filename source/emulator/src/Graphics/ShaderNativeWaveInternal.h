@@ -22,6 +22,12 @@ namespace Kyty::Libs::Graphics {
 [[nodiscard]] bool ShaderInstructionWritesExec(const ShaderInstruction& inst);
 // Branches, program transfers and S_ENDPGM.
 [[nodiscard]] bool ShaderInstructionIsControlFlowBoundary(const ShaderInstruction& inst);
+// Index of the first EXEC write or control-flow boundary. Every instruction before it runs once, under
+// the launch EXEC: the valid mask of the wave's pixels (RDNA2 ISA 3.x; an export with VM sends EXEC as it).
+[[nodiscard]] uint32_t ShaderLaunchExecEnd(const ShaderCode& code);
+// V_MBCNT_{LO,HI}_U32_B32 at `index` whose mask is its own half of the launch EXEC, so with S1 it counts the
+// valid pixels below the lane.
+[[nodiscard]] bool ShaderCountsLaunchExec(const ShaderCode& code, uint32_t index, uint32_t launch_exec_end);
 
 } // namespace Kyty::Libs::Graphics
 

@@ -1,6 +1,7 @@
 #include "ShaderSpirvInternal.h"
 
 #include "ShaderSpirvEmitters.h"
+#include "ShaderNativeWaveInternal.h"
 #include "ShaderSpirvLds.h"
 #include "ShaderSpirvTemplates.h"
 #include "ShaderStorageAnalysis.h"
@@ -2439,30 +2440,73 @@ static bool EmitOrdinaryNativeGdsAppend(const ShaderInstruction& inst, uint32_t 
 	return true;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
+// A pixel ds_append/ds_consume under the launch EXEC of a partially populated wave: the subgroup's valid
+// pixels are the wave's active lanes, so one of them updates the counter by their count and every valid
+// pixel receives its previous value. A helper's atomic has no effect, so the leader is a valid pixel.
+static bool EmitFragmentGdsAppend(const ShaderCode& code, const ShaderInstruction& inst, uint32_t index, Spirv* spirv,
+                                  String8* dst_source)
+{
+	const auto* bind_info = spirv->GetBindInfo();
+	if (dst_source == nullptr || bind_info == nullptr || bind_info->gds_pointers.binding_index < 0 ||
+	    !spirv->UsesFragmentPartialWave() || index >= ShaderLaunchExecEnd(code) || inst.dst.type != ShaderOperandType::Vgpr ||
+	    inst.dst.size != 1)
+	{
+		return false;
+	}
+	const auto destination = operand_variable_to_str(inst.dst);
+	if (destination.type != SpirvType::Float || destination.value.IsEmpty()) { return false; }
+
+	const auto tag = String8::FromPrintf("gds_pixel_%u", index);
+	// The leader's lane is the same in every invocation, so the shuffle reads one value.
+	static const char* text = R"(
+%<t>_count = OpGroupNonUniformBallotBitCount %uint %uint_3 Reduce %<t>_ballot
+%<t>_leader = OpGroupNonUniformBallotFindLSB %uint %uint_3 %<t>_ballot
+%<t>_lane = OpLoad %uint %gl_SubgroupInvocationID
+%<t>_is_leader = OpIEqual %bool %<t>_lane %<t>_leader
+%<t>_do_atomic = OpLogicalAnd %bool %<t>_is_leader %<t>_ballot_valid
+OpSelectionMerge %<t>_atomic_merge None
+OpBranchConditional %<t>_do_atomic %<t>_atomic_do %<t>_atomic_skip
+%<t>_atomic_do = OpLabel
+<pointer>
+%<t>_old_leader = <atomic> %uint %<t>_ptr %uint_1 %uint_0 %<t>_count
+OpBranch %<t>_atomic_merge
+%<t>_atomic_skip = OpLabel
+OpBranch %<t>_atomic_merge
+%<t>_atomic_merge = OpLabel
+%<t>_old = OpPhi %uint %<t>_old_leader %<t>_atomic_do %uint_0 %<t>_atomic_skip
+%<t>_broadcast = OpGroupNonUniformShuffle %uint %uint_3 %<t>_old %<t>_leader
+%<t>_previous = OpLoad %float %<dst>
+%<t>_previous_bits = OpBitcast %uint %<t>_previous
+%<t>_selected = OpSelect %uint %<t>_ballot_valid %<t>_broadcast %<t>_previous_bits
+%<t>_result = OpBitcast %float %<t>_selected
+OpStore %<dst> %<t>_result
+)";
+	*dst_source += spirv->NativeValidPixelBallot(tag + "_ballot") +
+	               String8(text)
+	                   .ReplaceStr("<pointer>", spirv->EmitGdsCounterPointer(inst.ds_offset, tag))
+	                   .ReplaceStr("<atomic>", inst.type == ShaderInstructionType::DsAppend ? "OpAtomicIAdd" : "OpAtomicISub")
+	                   .ReplaceStr("<dst>", destination.value)
+	                   .ReplaceStr("<t>", tag);
+	return true;
+}
+
+static bool EmitGdsAppend(const ShaderCode& code, uint32_t index, Spirv* spirv, String8* dst_source)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (bind_info == nullptr || bind_info->gds_pointers.pointers_num <= 0) { return false; }
+	return code.GetType() == ShaderType::Pixel ? EmitFragmentGdsAppend(code, inst, index, spirv, dst_source)
+	                                           : EmitOrdinaryNativeGdsAppend(inst, index, spirv, dst_source);
+}
 
-	if (bind_info != nullptr && bind_info->gds_pointers.pointers_num > 0)
-	{
-		return EmitOrdinaryNativeGdsAppend(inst, index, spirv, dst_source);
-	}
-
-	return false;
+KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
+{
+	return EmitGdsAppend(code, index, spirv, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds)
 {
-	const auto& inst      = code.GetInstructions().At(index);
-	const auto* bind_info = spirv->GetBindInfo();
-
-	if (bind_info != nullptr && bind_info->gds_pointers.pointers_num > 0)
-	{
-		return EmitOrdinaryNativeGdsAppend(inst, index, spirv, dst_source);
-	}
-
-	return false;
+	return EmitGdsAppend(code, index, spirv, dst_source);
 }
 
 namespace {

@@ -4,6 +4,7 @@
 #include "ShaderSpirvF16.h"
 #include "ShaderSpirvTemplates.h"
 #include "ShaderMaskAnalysis.h"
+#include "ShaderNativeWaveInternal.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
@@ -3272,8 +3273,9 @@ KYTY_RECOMPILER_FUNC(Recompile_VCubeMaF32_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
-static bool RecompileNativeMbcnt(const ShaderInstruction& inst, uint32_t index, bool low_half, Spirv* spirv, String8* dst_source)
+static bool RecompileNativeMbcnt(const ShaderCode& code, uint32_t index, bool low_half, Spirv* spirv, String8* dst_source)
 {
+	const auto& inst = code.GetInstructions().At(index);
 	EXIT_IF(spirv == nullptr || dst_source == nullptr);
 	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || !operand_is_variable(inst.dst) || inst.dst.clamp ||
 	    inst.dst.multiplier != 1.0f)
@@ -3290,7 +3292,16 @@ static bool RecompileNativeMbcnt(const ShaderInstruction& inst, uint32_t index, 
 	const String8 index_str = String8::FromPrintf("%u", index);
 	String8       mask_load;
 	String8       accumulator_load;
-	if (!operand_load_uint(spirv, inst.src[0], "mbcnt_mask_<index>", index_str, &mask_load) ||
+	// A count of the launch EXEC in a partially populated wave counts its valid pixels; helpers hold EXEC
+	// bits in the numeric word only as members of the launched quads.
+	const bool launch_count = code.GetType() == ShaderType::Pixel && spirv->UsesFragmentPartialWave() &&
+	                          ShaderCountsLaunchExec(code, index, ShaderLaunchExecEnd(code));
+	if (launch_count)
+	{
+		mask_load = spirv->NativeValidPixelBallot("mbcnt_valid_<index>") +
+		            String8::FromPrintf("%%mbcnt_mask_<index> = OpCompositeExtract %%uint %%mbcnt_valid_<index> %d\n", low_half ? 0 : 1);
+	}
+	if ((!launch_count && !operand_load_uint(spirv, inst.src[0], "mbcnt_mask_<index>", index_str, &mask_load)) ||
 	    !operand_load_uint(spirv, inst.src[1], "mbcnt_acc_<index>", index_str, &accumulator_load))
 	{
 		return false;
@@ -3333,24 +3344,22 @@ static bool RecompileNativeMbcnt(const ShaderInstruction& inst, uint32_t index, 
 
 KYTY_RECOMPILER_FUNC(Recompile_VMbcntHiU32B32_SVdstSVsrc0SVsrc1)
 {
-	const auto& inst = code.GetInstructions().At(index);
 	// Numeric counting uses the same logical-lane contract in both stages.
 	if (code.GetType() != ShaderType::Pixel && code.GetType() != ShaderType::Compute)
 	{
 		return false;
 	}
-	return RecompileNativeMbcnt(inst, index, false, spirv, dst_source);
+	return RecompileNativeMbcnt(code, index, false, spirv, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMbcntLoU32B32_SVdstSVsrc0SVsrc1)
 {
-	const auto& inst = code.GetInstructions().At(index);
 	// Numeric counting uses the same logical-lane contract in both stages.
 	if (code.GetType() != ShaderType::Pixel && code.GetType() != ShaderType::Compute)
 	{
 		return false;
 	}
-	return RecompileNativeMbcnt(inst, index, true, spirv, dst_source);
+	return RecompileNativeMbcnt(code, index, true, spirv, dst_source);
 }
 
 /* XXX: Bfrev, Not */

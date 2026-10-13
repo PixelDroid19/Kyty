@@ -598,8 +598,11 @@ void Spirv::WriteHeader()
 	    UsesNativeComputeWave() || UsesFragmentWaveTier())
 	{
 		capabilities.Add("OpCapability GroupNonUniform");
+		// A pixel append reads its leader's counter value with a shuffle.
+		const bool pixel_append = GetHostShaderType() == ShaderType::Pixel &&
+		                          m_code.HasAnyOf({ShaderInstructionType::DsAppend, ShaderInstructionType::DsConsume});
 		if ((spirv_uses_dpp(m_code) && GetHostShaderType() != ShaderType::Pixel) || spirv_uses_dpp_row(m_code) ||
-		    spirv_uses_lane_exchange(m_code) || UsesComputeWaveBanks() || UsesFragmentWaveTier())
+		    spirv_uses_lane_exchange(m_code) || UsesComputeWaveBanks() || UsesFragmentWaveTier() || pixel_append)
 		{
 			capabilities.Add("OpCapability GroupNonUniformShuffle");
 		}

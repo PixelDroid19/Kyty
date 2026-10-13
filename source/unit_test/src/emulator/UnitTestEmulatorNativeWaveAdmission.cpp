@@ -10,6 +10,7 @@
 #include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
 #include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
 #include "Emulator/Graphics/ShaderFragmentMaskFlow.h"
+#include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "NggPassthroughFixture.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
@@ -1179,6 +1180,76 @@ TEST(EmulatorNativeWaveAdmission, PartialWaveReductionEmitsOneSubgroupOrPerRead)
 			// The network steps are not run; each of the two reads is one subgroup OR of its lanes' seeds.
 			if (count("; reduction step:") != (wave == 64u ? 6u : 4u) ||
 			    count("= OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %lr_part_") != 2u)
+			{
+				std::_Exit(2);
+			}
+			Kyty::Vector<uint32_t> binary;
+			String8                error;
+			if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+			{
+				std::fprintf(stderr, "%s\n", error.c_str());
+				std::_Exit(3);
+			}
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+// A pixel append allocation: each valid pixel takes counter + MBCNT(launch EXEC) as its slot.
+//   v_mbcnt_hi_u32_b32 v7, exec_hi, 0 / s_mov_b32 m0, s20 / ds_append v6 gds / v_mbcnt_lo_u32_b32 v0, <mask>, v7
+static ShaderCode AppendAllocation(bool branch_first, uint32_t low_mask = 126u)
+{
+	std::vector<uint32_t> words;
+	if (branch_first) { words.push_back(0xbf820000u); } // s_branch to the next instruction
+	for (uint32_t word: {0xd7660007u, 0x0001007fu, 0xbefc0314u, 0xd8f80000u | (1u << 17u), 0x06000000u, 0xd7650000u,
+	                     low_mask | (263u << 9u), 0xbf810000u})
+	{
+		words.push_back(word);
+	}
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	EXPECT_TRUE(ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &code));
+	return code;
+}
+
+TEST(EmulatorNativeWaveAdmission, LaunchExecAppendAllocationRunsAsAPartialWave)
+{
+	NggFixture::Initialize();
+	for (uint32_t wave: {32u, 64u})
+	{
+		EXPECT_EQ(ShaderAnalyzeNativeWave(AppendAllocation(false), wave).proof, ShaderNativeWaveProof::FragmentPartialWave);
+		// After a branch EXEC is no longer known to be the launch mask.
+		EXPECT_NE(ShaderAnalyzeNativeWave(AppendAllocation(true), wave).proof, ShaderNativeWaveProof::FragmentPartialWave);
+		// VCC_LO is not the valid-pixel mask the counter was advanced by.
+		EXPECT_NE(ShaderAnalyzeNativeWave(AppendAllocation(false, 106u), wave).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	}
+}
+
+TEST(EmulatorNativeWaveAdmission, PartialWaveAppendCountsOnlyValidPixels)
+{
+	ASSERT_EXIT(([] {
+		NggFixture::Initialize();
+		ScopedShaderValidation validation;
+		if (!Config::ShaderValidationEnabled()) { std::_Exit(4); }
+		const auto code = AppendAllocation(false);
+		for (uint32_t wave: {32u, 64u})
+		{
+			ShaderPixelInputInfo input {};
+			input.native_wave                         = ShaderAnalyzeNativeWave(code, wave);
+			input.bind.gds_pointers.pointers_num      = 1;
+			input.bind.gds_pointers.start_register[0] = 20;
+			ShaderCalcBindingIndices(&input.bind);
+			if (input.native_wave.proof != ShaderNativeWaveProof::FragmentPartialWave) { std::_Exit(1); }
+			const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+			const auto count  = [&source](const char* text)
+			{
+				size_t found = 0;
+				for (auto at = source.FindIndex(text); at != Core::STRING8_INVALID_INDEX; at = source.FindIndex(text, at + 1)) { found++; }
+				return found;
+			};
+			// One counter update, sized and led by the valid-pixel ballot both MBCNTs count.
+			if (count("OpAtomicIAdd") != 1u || count("_valid = OpLogicalAnd %bool") != 3u ||
+			    count("OpGroupNonUniformElect") != 0u || count("OpGroupNonUniformBroadcastFirst") != 0u)
 			{
 				std::_Exit(2);
 			}

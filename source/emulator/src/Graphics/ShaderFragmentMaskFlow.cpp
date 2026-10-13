@@ -114,6 +114,18 @@ void CollectWrites(const ShaderInstruction& inst, std::bitset<kWords>* written)
 	if (IsCompare(inst.type) || (IsScalarAlu(inst.type) && WritesScc(inst.type))) { written->set(kSccWord); }
 }
 
+// Buffer, image and GDS counter writes. A Vulkan helper's write to them has no effect; LDS and scratch are
+// invocation storage in a pixel program, which a helper does write.
+bool WritesDeviceMemory(const ShaderInstruction& inst)
+{
+	if (inst.type == Type::DsAppend || inst.type == Type::DsConsume) { return inst.format == ShaderInstructionFormat::VdstGds; }
+	for (const char* prefix: {"BufferStore", "BufferAtomic", "TBufferStore", "ImageStore", "ImageAtomic", "Global"})
+	{
+		if (StartsWith(inst.type, prefix)) { return true; }
+	}
+	return false;
+}
+
 bool IsAddtid(Type type)
 {
 	return type == Type::DsWriteAddtidB32 || type == Type::DsReadAddtidB32;
@@ -340,6 +352,7 @@ private:
 	std::vector<uint8_t>          m_condition;
 	const ShaderCode*             m_code    = nullptr;
 	uint32_t                      m_index   = 0; // instruction being stepped
+	uint32_t                      m_launch_exec_end = 0; // ShaderLaunchExecEnd of m_code
 };
 
 // The VCC a branch or VCCZ tests: a wave32 uses only its low word.
@@ -390,7 +403,9 @@ bool Flow::CheckSources(const ShaderInstruction& inst, bool* propagates)
 	{
 		if (Taint(inst.mimg_address[address]) != kClean) { return Fail(inst, "mask used as an image address"); }
 	}
-	for (int source = 0; source < inst.src_num; ++source)
+	// A count of the launch EXEC is a number; whether its lane positions hold is the admission's question.
+	const int first = ShaderCountsLaunchExec(*m_code, m_index, m_launch_exec_end) ? 1 : 0;
+	for (int source = first; source < inst.src_num; ++source)
 	{
 		const auto& operand = inst.src[source];
 		if (operand.type == Operand::ExecZ || operand.type == Operand::VccZ)
@@ -954,7 +969,10 @@ bool Flow::Step(const ShaderInstruction& inst)
 		return true;
 	}
 	if (IsCompare(inst.type) || (IsScalarAlu(inst.type) && WritesScc(inst.type))) { m_scc_any_lane = false; }
-	if (WritesMemory(inst.type) && !(m_addtid_spills && IsAddtid(inst.type)))
+	// Under the launch EXEC no helper lane is in EXEC, as no Vulkan helper's device-memory write takes effect,
+	// so such a write observes the same lanes on both.
+	const bool launch_write = m_index < m_launch_exec_end && WritesDeviceMemory(inst);
+	if (WritesMemory(inst.type) && !(m_addtid_spills && IsAddtid(inst.type)) && !launch_write)
 	{
 		return Fail(inst, "memory write: helper lanes would be observable");
 	}
@@ -1097,6 +1115,7 @@ ShaderFragmentMaskFlow Flow::Run(const ShaderCode& code, bool wave32)
 {
 	m_code                   = &code;
 	m_wave32                 = wave32;
+	m_launch_exec_end        = ShaderLaunchExecEnd(code);
 	const auto& instructions = code.GetInstructions();
 	if (code.GetType() != ShaderType::Pixel || instructions.IsEmpty() ||
 	    instructions.At(instructions.Size() - 1u).type != Type::SEndpgm)

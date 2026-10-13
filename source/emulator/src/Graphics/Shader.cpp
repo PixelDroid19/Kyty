@@ -416,6 +416,29 @@ bool ShaderInstructionIsControlFlowBoundary(const ShaderInstruction& inst)
 	}
 }
 
+uint32_t ShaderLaunchExecEnd(const ShaderCode& code)
+{
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (ShaderInstructionWritesExec(inst) || ShaderInstructionIsControlFlowBoundary(inst)) { return index; }
+	}
+	return instructions.Size();
+}
+
+bool ShaderCountsLaunchExec(const ShaderCode& code, uint32_t index, uint32_t launch_exec_end)
+{
+	if (index >= launch_exec_end || index >= code.GetInstructions().Size()) { return false; }
+	const auto& inst = code.GetInstructions().At(index);
+	const auto  half = inst.type == ShaderInstructionType::VMbcntLoU32B32   ? ShaderOperandType::ExecLo
+	                   : inst.type == ShaderInstructionType::VMbcntHiU32B32 ? ShaderOperandType::ExecHi
+	                                                                        : ShaderOperandType::Unknown;
+	const auto& mask = inst.src[0];
+	return half != ShaderOperandType::Unknown && inst.src_num == 2 && mask.type == half && mask.size == 1 && !mask.negate &&
+	       !mask.absolute && mask.multiplier == 1.0f;
+}
+
 static bool ShaderOperandWritesVccWord(const ShaderOperand& dst, ShaderOperandType word)
 {
 	if (word == ShaderOperandType::VccLo)
@@ -959,6 +982,8 @@ static uint32_t ShaderFragmentFirstQuadLoss(const ShaderCode& code)
 //  - quad DPP and a READFIRSTLANE over an EXEC inside the launched quads see only lanes that exist, while no
 //    quad has lost a member yet;
 //  - scalar spills keep their own storage;
+//  - under the launch EXEC (ShaderLaunchExecEnd) a GDS append/consume and an MBCNT of that EXEC see only the
+//    wave's valid pixels, which the subgroup's non-helper invocations are, at their own lanes;
 //  - everything else that names a lane (row DPP, PERMLANE, other READLANE/WRITELANE, MBCNT, append/consume)
 //    is refused.
 static bool ShaderFragmentRunsAsPartialWave(const ShaderCode& code, const ShaderFragmentMaskFlow& masks)
@@ -967,6 +992,7 @@ static bool ShaderFragmentRunsAsPartialWave(const ShaderCode& code, const Shader
 	if (!masks.lane_local || masks.exec_in_quads.size() != instructions.Size()) { return false; }
 	const auto     reductions = ShaderFindFragmentLaneReductions(code, masks);
 	const uint32_t loss       = ShaderFragmentFirstQuadLoss(code);
+	const uint32_t launch     = ShaderLaunchExecEnd(code);
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		if (reductions.IsStep(index)) { continue; }
@@ -991,12 +1017,16 @@ static bool ShaderFragmentRunsAsPartialWave(const ShaderCode& code, const Shader
 			case ShaderInstructionType::VReadfirstlaneB32:
 				if (!ShaderReadfirstlaneCanUseUniformCopy(code, index) && (!whole || !masks.exec_in_quads[index])) { return false; }
 				break;
-			case ShaderInstructionType::VPermlane16B32:
-			case ShaderInstructionType::VPermlanex16B32:
 			case ShaderInstructionType::VMbcntLoU32B32:
 			case ShaderInstructionType::VMbcntHiU32B32:
+				if (!ShaderCountsLaunchExec(code, index, launch)) { return false; }
+				break;
 			case ShaderInstructionType::DsAppend:
-			case ShaderInstructionType::DsConsume: return false;
+			case ShaderInstructionType::DsConsume:
+				if (index >= launch || inst.format != ShaderInstructionFormat::VdstGds) { return false; }
+				break;
+			case ShaderInstructionType::VPermlane16B32:
+			case ShaderInstructionType::VPermlanex16B32: return false;
 			default: break;
 		}
 		for (int source = 0; source < inst.src_num; ++source)
@@ -2300,22 +2330,25 @@ static void ShaderGetGdsPointer(ShaderGdsResources* info, bool* direct_sgprs, in
 // via m0, which the driver feeds from an SGPR holding the descriptor. Return
 // that SGPR when the instruction stream shows both the GDS use and the m0
 // feed, -1 otherwise.
+// The SGPR that M0 was copied from when each GDS instruction runs, in program order; -1 unless every GDS
+// instruction sees the same one. A later M0 write (an interpolation base, say) does not name the counter.
 static int ShaderGdsPointerSourceSgpr(const ShaderCode& code)
 {
-	bool uses_gds = false;
-	int  source   = -1;
+	int gds_source = -1;
+	int m0_source  = -1;
 	for (const auto& inst: code.GetInstructions())
 	{
 		if (inst.format == ShaderInstructionFormat::VdstGds)
 		{
-			uses_gds = true;
+			if (m0_source < 0 || (gds_source >= 0 && gds_source != m0_source)) { return -1; }
+			gds_source = m0_source;
 		}
-		if (inst.dst.type == ShaderOperandType::M0 && inst.src_num > 0 && inst.src[0].type == ShaderOperandType::Sgpr)
+		if (inst.dst.type == ShaderOperandType::M0)
 		{
-			source = inst.src[0].register_id;
+			m0_source = inst.src_num > 0 && inst.src[0].type == ShaderOperandType::Sgpr ? inst.src[0].register_id : -1;
 		}
 	}
-	return uses_gds ? source : -1;
+	return gds_source;
 }
 
 // A direct-resource slot is ambiguous in driver metadata when it can name the

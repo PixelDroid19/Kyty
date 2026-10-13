@@ -40,7 +40,7 @@ struct ShaderFragmentMaskFlow
 };
 
 // Flow-sensitive mask provenance for a fragment program (S_ENDPGM last, no memory write
-// anywhere). Backward branches are loops; the states are iterated to a fixpoint.
+// after the launch EXEC ends, see ShaderLaunchExecEnd). Backward branches are loops; the states are iterated to a fixpoint.
 //
 // Under the host model each fragment invocation stands for one guest lane of an
 // existing quad, so EXEC and every mask derived from it is one bit per invocation.

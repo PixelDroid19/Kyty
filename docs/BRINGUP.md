@@ -9,6 +9,53 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: pixel GDS append under the launch EXEC (2026-10-13)
+
+- Observed: the same linked-list pixel program allocates its node slot as
+  `v_mbcnt_hi v7, exec_hi, 0` / `s_mov m0, s20` / `ds_append v6 gds` /
+  `v_mbcnt_lo v0, exec_lo, v7`, before any EXEC write or branch. The
+  program starts with `exp null vm done` and has no `s_wqm`. The native
+  wave proof refused it twice: MBCNT observes EXEC as a number, and a
+  memory write runs while helper lanes are live in the host invocation.
+- Contract:
+  - RDNA2 ISA: EXEC is the wave's valid mask until the program writes it,
+    and `exp ... vm` sends EXEC as the valid mask.
+  - DS_APPEND adds `count_bits(EXEC)` at `M0.base + offset` and returns the
+    pre-op value to every valid lane.
+  - V_MBCNT_HI is a plain source move in Wave32, so MBCNT over EXEC is the
+    exclusive prefix of valid lanes at both widths.
+  - Vulkan: helper invocations have no effect on stores and atomics, and
+    their atomic results are undefined.
+- Change:
+  - `ShaderLaunchExecEnd` marks the first EXEC write or control-flow
+    boundary. `ShaderCountsLaunchExec` accepts only MBCNT_LO/HI over
+    EXEC_LO/EXEC_HI before it.
+  - The partial-wave admission and the fragment mask flow accept those
+    MBCNTs and GDS append/consume (and device memory writes) before that
+    point. LDS and scratch writes stay refused.
+  - Pixel emission builds a valid-pixel ballot (`exec_lane_lo` and not a
+    helper). MBCNT counts it. One valid lane updates the counter by its bit
+    count, and the pre-op value is shuffled to every valid lane.
+  - The GDS pointer SGPR is the M0 source at the GDS instructions, not the
+    last M0 write in the program (here M0 is later reloaded for
+    interpolation).
+- Verified:
+  - The dumped program proves `FragmentPartialWave` at both widths.
+  - Unit tests: admission at both widths; refusal after a branch and for a
+    non-EXEC mask; SPIR-V with one counter atomic, no elect or broadcast,
+    and validated by the toolchain.
+  - Strict AMD (RADV) runs, no error:
+
+    | Title | Frames |
+    | --- | --- |
+    | racing title | 5.6k / 7.5k / 9.3k / 9.9k |
+    | watercolour platformer | 4.1k at 60 s |
+    | fishing title | 2.0k, then 3.1k on a repeat, at 180 s (the first run loaded slower; same steady rate) |
+  - Intel robot platformer: 1,160 frames at 1.8-7.9 fps, past the
+    linked-list program. It stops at 228 s on `!create_all_the_same`: a
+    64 KiB StorageTexture whose range equals a sampled Texture and a
+    StorageBuffer. That is the next stop.
+
 ## Robot platformer: image atomic swap with a GLC return (2026-10-13)
 
 - Observed: after the Wave32 OR reductions, the Intel run stopped at
