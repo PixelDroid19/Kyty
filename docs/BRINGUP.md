@@ -75,6 +75,8 @@ fail on the current HEAD before acting on them.
     - the watercolour platformer (90 s) is in the intro;
     - the fishing title (200 s) is docked in gameplay.
     - All three end with status 1 and no error.
+    - The same three runs on AMD (RADV, fixed render-target resolution):
+      racing, intro and docked gameplay, each with status 1 and no error.
   - The robot platformer reaches the worldmap level load and stops at the
     pixel shader above, on Intel (160 s) and on AMD (267 s). AMD stopped at
     about 61 s before.
