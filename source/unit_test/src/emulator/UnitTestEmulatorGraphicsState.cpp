@@ -3294,6 +3294,28 @@ TEST(EmulatorGraphicsState, MixedRawRenderSourcesRequireCompleteOlderCoverage)
 	                                                             destination_bytes - 8u));
 }
 
+TEST(EmulatorGraphicsState, RawStorageSourceUsesTiledSingleLevelLayout)
+{
+	constexpr uint64_t base = 0x200000u;
+	constexpr uint64_t destination_address = base + 0x300000u;
+	constexpr uint64_t destination_bytes = 960u * 540u * 8u;
+	const StorageTextureObject tiled(0u, 0u, 71u, 2432u, 1368u, 2432u, 0u, 1u, 27u, false, DstSel(4, 5, 6, 7));
+	StorageTextureRawRenderSource source {};
+	ASSERT_TRUE(StorageTextureDescribeRawStorageSource(tiled.params, base, 0x1a20000u, &source));
+	EXPECT_EQ(source.bytes_per_pixel, 8u);
+	EXPECT_EQ(source.pitch, 2432u);
+	EXPECT_TRUE(StorageTextureRawRenderSourceCovers(source, destination_address, destination_bytes));
+	EXPECT_FALSE(StorageTextureDescribeRawStorageSource(tiled.params, base, 0x1a10000u, &source));
+	const StorageTextureObject depth_tiled(0u, 0u, 71u, 2432u, 1368u, 2432u, 0u, 1u, 24u, false, DstSel(4, 5, 6, 7));
+	EXPECT_FALSE(StorageTextureDescribeRawStorageSource(depth_tiled.params, base, 0x1a20000u, &source));
+	const StorageTextureObject mipped(0u, 0u, 71u, 2432u, 1368u, 2432u, 0u, 2u, 27u, false, DstSel(4, 5, 6, 7));
+	EXPECT_FALSE(StorageTextureDescribeRawStorageSource(mipped.params, base, 0x1a20000u, &source));
+	// The store emitter applies this selector in the shader, so the image keeps
+	// guest byte order.
+	const StorageTextureObject swizzled(0u, 0u, 71u, 2432u, 1368u, 2432u, 0u, 1u, 27u, false, DstSel(6, 5, 4, 7));
+	EXPECT_TRUE(StorageTextureDescribeRawStorageSource(swizzled.params, base, 0x1a20000u, &source));
+}
+
 TEST(EmulatorGraphicsState, StorageTextureBackingSupportsSamplingAfterComputeWrites)
 {
 	const auto usage = StorageTextureGetImageUsage();

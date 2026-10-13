@@ -834,6 +834,46 @@ bool GpuMemory::create_cpu_texture_storage_alias(const Vector<OverlappedBlock>& 
 	return exact_seed;
 }
 
+bool GpuMemory::create_describe_raw_source(const Object& parent, uint64_t neo, StorageTextureRawRenderSource* source)
+{
+	const auto& owner = parent.info;
+	if (owner.object.obj == nullptr || parent.block.vaddr_num != 1)
+	{
+		return false;
+	}
+	if (owner.object.type == GpuMemoryObjectType::RenderTexture)
+	{
+		auto* image = static_cast<RenderTextureVulkanImage*>(owner.object.obj);
+		if (owner.params[RenderTextureObject::PARAM_NEO] != neo || !image->fully_defined_from_clear ||
+		    !StorageTextureDescribeRawRenderSource(owner.params, parent.block.vaddr[0], parent.block.size[0], source))
+		{
+			return false;
+		}
+		source->image = image;
+		return StorageTextureRawRenderSourceImageMatches(*source);
+	}
+	// A storage image holds defined content from creation: it is seeded from
+	// guest bytes, or its first dispatch provably writes every texel.
+	if (owner.object.type != GpuMemoryObjectType::StorageTexture || owner.params[StorageTextureObject::PARAM_NEO] != neo ||
+	    !StorageTextureDescribeRawStorageSource(owner.params, parent.block.vaddr[0], parent.block.size[0], source))
+	{
+		return false;
+	}
+	source->image = static_cast<StorageTextureVulkanImage*>(owner.object.obj);
+	return StorageTextureRawRenderSourceImageMatches(*source);
+}
+
+// Render targets record their device writes on each draw; storage images are
+// written through their writable binds.
+uint64_t GpuMemory::create_raw_source_write_time(const ObjectInfo& owner)
+{
+	if (owner.object.type == GpuMemoryObjectType::StorageTexture)
+	{
+		return owner.write_time;
+	}
+	return owner.gpu_update_time > owner.cpu_update_time ? owner.gpu_update_time : 0u;
+}
+
 bool GpuMemory::create_all_the_same(const Vector<OverlappedBlock>& others, int heap_id)
 {
 	auto&               heap = m_heaps[heap_id];
@@ -885,12 +925,13 @@ String GpuMemory::create_dbg_parents(int heap_id, const Vector<OverlappedBlock>&
 	{
 		const auto& h = heap.objects[d.object_id];
 		list.Add(String::FromPrintf("\t parent id=%d type=%s rel=%s scenario=%s parents=%u read_only=%d in_use=%d origin=%s"
-		                            " cpu_time=%" PRIu64 " gpu_time=%" PRIu64 " vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 " params:%s",
+		                            " cpu_time=%" PRIu64 " gpu_time=%" PRIu64 " write_time=%" PRIu64 " vaddr=0x%016" PRIx64
+		                            " size=0x%016" PRIx64 " params:%s",
 		                            d.object_id, Core::EnumName(h.info.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
 		                            Core::EnumName(h.scenario).C_Str(), static_cast<unsigned>(h.others.Size()), h.info.read_only ? 1 : 0,
 		                            h.info.in_use ? 1 : 0, Core::EnumName(h.info.content_origin).C_Str(),
 		                            static_cast<uint64_t>(h.info.cpu_update_time), static_cast<uint64_t>(h.info.gpu_update_time),
-		                            h.block.vaddr[0], h.block.size[0], params(h.info.params).C_Str()));
+		                            static_cast<uint64_t>(h.info.write_time), h.block.vaddr[0], h.block.size[0], params(h.info.params).C_Str()));
 	}
 	return list.Concat(U'\n');
 }
@@ -1712,40 +1753,28 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			}
 
 			// A linear image may reinterpret bytes written by several tiled render
-			// targets. Select one complete older clear, then replay every newer
-			// GPU-written render view in write order. Unknown newer writers still fail.
+			// targets and storage images. Select the newest complete writer that
+			// covers it, then replay every newer GPU-written view in write order.
+			// Unknown newer writers still fail.
 			bool multi_raw_render_composite = false;
 			if (!multi_raw_render_alias && buffer != nullptr && vaddr_num == 1 &&
 			    info.type == GpuMemoryObjectType::StorageTexture &&
 			    StorageTextureCanCompositeRawRenderDestination(info.params, vaddr[0], size[0]))
 			{
+				const uint64_t neo = info.params[StorageTextureObject::PARAM_NEO];
 				auto describe = [&](int id, StorageTextureRawRenderSource* source)
-				{
-					const auto& parent = heap.objects[id];
-					const auto& owner  = parent.info;
-					if (owner.object.type != GpuMemoryObjectType::RenderTexture || owner.object.obj == nullptr ||
-					    owner.params[RenderTextureObject::PARAM_NEO] != info.params[StorageTextureObject::PARAM_NEO] ||
-					    !static_cast<RenderTextureVulkanImage*>(owner.object.obj)->fully_defined_from_clear ||
-					    parent.block.vaddr_num != 1 ||
-					    !StorageTextureDescribeRawRenderSource(owner.params, parent.block.vaddr[0], parent.block.size[0], source))
-					{
-						return false;
-					}
-					source->image = static_cast<RenderTextureVulkanImage*>(owner.object.obj);
-					return true;
-				};
+				{ return create_describe_raw_source(heap.objects[id], neo, source); };
 				int baseline_id = -1;
 				uint64_t baseline_time = 0u;
 				for (const auto& parent: others)
 				{
-					const auto& owner = heap.objects[parent.object_id].info;
+					const uint64_t write_time = create_raw_source_write_time(heap.objects[parent.object_id].info);
 					StorageTextureRawRenderSource source {};
-					if (owner.gpu_update_time > owner.cpu_update_time && owner.gpu_update_time > baseline_time &&
-					    describe(parent.object_id, &source) &&
+					if (write_time > baseline_time && describe(parent.object_id, &source) &&
 					    StorageTextureRawRenderSourceCovers(source, vaddr[0], size[0]))
 					{
 						baseline_id   = parent.object_id;
-						baseline_time = owner.gpu_update_time;
+						baseline_time = write_time;
 					}
 				}
 				if (baseline_id >= 0)
@@ -1760,7 +1789,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 							multi_raw_render_composite = false;
 							break;
 						}
-						if (owner.gpu_update_time <= owner.cpu_update_time || owner.gpu_update_time <= baseline_time)
+						const uint64_t write_time = create_raw_source_write_time(owner);
+						if (write_time <= baseline_time)
 						{
 							continue;
 						}
@@ -1770,7 +1800,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 							multi_raw_render_composite = false;
 							break;
 						}
-						ordered.emplace_back(owner.gpu_update_time, parent.object_id);
+						ordered.emplace_back(write_time, parent.object_id);
 					}
 					if (multi_raw_render_composite)
 					{
@@ -2478,8 +2508,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		{
 			auto& parent = heap.objects[id];
 			StorageTextureRawRenderSource source {};
-			EXIT_IF(!StorageTextureDescribeRawRenderSource(parent.info.params, parent.block.vaddr[0], parent.block.size[0], &source));
-			source.image = static_cast<RenderTextureVulkanImage*>(parent.info.object.obj);
+			EXIT_IF(!create_describe_raw_source(parent, info.params[StorageTextureObject::PARAM_NEO], &source));
 			RecordUse(&parent.info, buffer);
 			sources.Add(source);
 		}
