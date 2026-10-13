@@ -9,6 +9,36 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: Gen5 dispatch TUNNEL_ENABLE (2026-10-13)
+
+- Observed: with the 64-entry table, a 600 s Intel run passed the title
+  screen and loaded the intro level. It stopped at 461 s on
+  `compute dispatch admission rejected: mode=0x0000a041
+  reason=unsupported_dispatch_mode` (`GraphicsRenderDraw.cpp`). The
+  initiator is COMPUTE_SHADER_EN, ORDER_MODE and CS_W32_EN plus bit 13.
+- Contract:
+  - The GFX10.3 register header (`gc_10_3_0_sh_mask.h`, Linux amdgpu) names
+    bit 13 of COMPUTE_DISPATCH_INITIATOR `TUNNEL_ENABLE`.
+  - A Mesa Vulkan driver sets it on every GFX10+ dispatch and says the
+    vendor's own driver does too. The kernel driver honours it only on
+    high-priority compute queues; elsewhere it is a no-op. It asks the
+    scheduler to prioritise the dispatch's waves and does not change
+    groups, lanes or results.
+- Change: `ShaderComputeDispatchExecutionMode` clears `TUNNEL_ENABLE` on
+  Gen5 before the dispatch plan, the lane order and the input info see the
+  mode. Every other unknown bit stays refused. Gen4 is unchanged.
+- Verified:
+  - Intel robot platformer: 723 s with no error, 1,989 frames. The intro
+    level starts (`Level has started: intro_next`). The captures show the
+    title menu (logo and buttons) over a black scene, with the publisher
+    logo text still drawn under it; the intro level is dark. That is the
+    next problem.
+  - The guest logs `JsParticle heap memory is full!` from the intro level
+    on (32 lines). Not investigated.
+  - Intel racing title: 14.9k / 19.4k / 24.9k / 25.7k frames, no error
+    (previous run 25.6k).
+  - Unit tests: the 154 compute-wave and dispatch tests pass.
+
 ## Robot platformer: 64-entry shader texture table (2026-10-13)
 
 - Observed: after the storage-image alias fix, the Intel run stopped at

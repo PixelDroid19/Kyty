@@ -9,6 +9,7 @@ namespace {
 constexpr uint32_t kComputeShaderEnable   = 0x0001u;
 constexpr uint32_t kUseThreadDimensions   = 0x0020u;
 constexpr uint32_t kOrderMode             = 0x0040u;
+constexpr uint32_t kTunnelEnable          = 0x2000u;
 constexpr uint32_t kWave32Enable          = 0x8000u;
 constexpr uint32_t kGen5AllowedNativeBits = kComputeShaderEnable | kOrderMode | kWave32Enable;
 
@@ -171,6 +172,11 @@ constexpr uint32_t kGen5AllowedNativeBits = kComputeShaderEnable | kOrderMode | 
 }
 
 } // namespace
+
+uint32_t ShaderComputeDispatchExecutionMode(uint32_t dispatch_mode, bool is_next_gen) noexcept
+{
+	return is_next_gen ? dispatch_mode & ~kTunnelEnable : dispatch_mode;
+}
 
 ShaderComputeWavePreflightResult ShaderBuildComputeWaveDispatchPlan(const ShaderComputeWavePreflightRequest& request,
                                                                     const ShaderComputeWaveCapabilities&     capabilities,

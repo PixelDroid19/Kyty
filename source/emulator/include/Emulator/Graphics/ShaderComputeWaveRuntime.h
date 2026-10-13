@@ -62,6 +62,10 @@ struct ShaderComputeWaveDispatchPlan
 	uint32_t thread_limits[3] {};
 };
 
+// The DISPATCH_INITIATOR bits that decide how a dispatch executes. Gen5 TUNNEL_ENABLE (bit 13) only asks the
+// queue scheduler to prioritise the dispatch's waves; groups, lanes and results do not depend on it.
+[[nodiscard]] uint32_t ShaderComputeDispatchExecutionMode(uint32_t dispatch_mode, bool is_next_gen) noexcept;
+
 [[nodiscard]] ShaderComputeWavePreflightResult ShaderBuildComputeWaveDispatchPlan(const ShaderComputeWavePreflightRequest& request,
                                                                                   const ShaderComputeWaveCapabilities&     capabilities,
                                                                                   ShaderComputeWaveDispatchPlan*           plan) noexcept;

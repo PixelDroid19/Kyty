@@ -2955,7 +2955,7 @@ static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint
 
 	ShaderComputeWavePreflightRequest request {};
 	request.is_next_gen           = Config::IsNextGen();
-	request.dispatch_mode         = mode;
+	request.dispatch_mode         = ShaderComputeDispatchExecutionMode(mode, request.is_next_gen);
 	request.raw_dispatch_count[0] = thread_group_x;
 	request.raw_dispatch_count[1] = thread_group_y;
 	request.raw_dispatch_count[2] = thread_group_z;
@@ -2967,7 +2967,8 @@ static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint
 	// These are the ordinary GFX10.3 group-count modes. Unknown scheduling or
 	// partial controls never inherit a verified guest lane order.
 	request.lane_order =
-	    request.is_next_gen && (mode == 0x01u || mode == 0x41u) ? ShaderGuestLaneOrder::LinearXFirst : ShaderGuestLaneOrder::Unverified;
+	    request.is_next_gen && (request.dispatch_mode == 0x01u || request.dispatch_mode == 0x41u) ? ShaderGuestLaneOrder::LinearXFirst
+	                                                                                           : ShaderGuestLaneOrder::Unverified;
 	const auto                    capabilities = ShaderComputeWaveVulkanBuildCapabilities(graphic_context->compute_wave_vulkan_state);
 	const auto preflight = ShaderBuildComputeWaveDispatchPlan(request, capabilities, plan);
 	if (preflight.status == ShaderComputeWavePreflightStatus::NoWork)
