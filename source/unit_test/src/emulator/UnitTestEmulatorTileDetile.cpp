@@ -2325,4 +2325,19 @@ TEST(EmulatorTileDetile, ClassifiesDetiledCubeFaceContentAfterUploadPath)
 	EXPECT_FALSE(Gen5ClassifyDetiledCubeFace(linear.data(), linear.size(), layout, 0u, 56u, 8u, &planted));
 }
 
+TEST(EmulatorTileDetile, FourByteRenderTargetAndDepthLayoutsAddressTexelsAlike)
+{
+	// A depth target over a 32-bit render target's range reads the same texel at each (x, y): the mode 27 and
+	// mode 24 4-byte layouts agree on the block grid and within every 128x128 block.
+	constexpr uint32_t k_pitch  = 384u;
+	constexpr uint32_t k_height = 300u;
+	for (uint32_t y = 0; y < k_height; ++y)
+	{
+		for (uint32_t x = 0; x < k_pitch; ++x)
+		{
+			ASSERT_EQ(TileGetSw64kRxOffset(x, y, k_pitch, 4u), TileGetDepth64KBOffset(x, y, k_pitch, 4u)) << x << "," << y;
+		}
+	}
+}
+
 UT_END();

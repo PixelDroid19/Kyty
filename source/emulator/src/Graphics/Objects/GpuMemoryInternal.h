@@ -524,6 +524,11 @@ private:
 	                                     const uint64_t* vaddr, const uint64_t* size, int vaddr_num) const;
 	bool create_maybe_deleted(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
 	bool create_all_the_same(const Vector<OverlappedBlock>& others, int heap_id);
+	// The parent a new depth target or storage view takes its raw texels from: of the Equals parents it reinterprets
+	// (DepthStencilBufferCanSeedFromRenderTexture, StorageTextureSharesDepthTexels), the one the device wrote last,
+	// after every writable use or upload of each other overlapping parent, none of them pending a write-back.
+	// -1 when none qualifies.
+	[[nodiscard]] int create_texel_bits_seed(const Vector<OverlappedBlock>& others, const GpuObject& info, int heap_id) const;
 	// Raw composite sources: a tiled render target or storage image whose blocks
 	// a linear storage image reinterprets, and the time its device content was
 	// last written (0 when the device never wrote it).

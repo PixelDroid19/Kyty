@@ -698,6 +698,9 @@ public:
 	// Reusable scratch for commands recorded in this buffer. Callers must order
 	// write/read/write hazards explicitly; lifetime extends through its fence.
 	VulkanBuffer* AllocateTransientScratchBuffer(uint64_t size, uint32_t usage);
+	// Device-local staging for an image-to-image copy through a buffer, kept apart from the scratch above so
+	// compute scratch cannot exhaust its budget. The same ordering and lifetime rules apply.
+	VulkanBuffer* AllocateTransientCopyBuffer(uint64_t size);
 
 private:
 	friend class PipelineCache;
@@ -722,6 +725,7 @@ private:
 	bool               m_has_submission = false;
 	TransientBufferPool* m_transient_buffers = nullptr;
 	TransientBufferPool* m_transient_scratch_buffers = nullptr;
+	TransientBufferPool* m_transient_copy_buffers    = nullptr;
 
 	mutable std::mutex           m_pipeline_lease_mutex;
 	std::vector<VulkanPipeline*> m_pipeline_leases;

@@ -22,6 +22,7 @@
 #include "Emulator/Graphics/Objects/StorageBuffer.h"
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
+#include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/GuestMemory.h"
 #include "Emulator/Log.h"
@@ -874,6 +875,65 @@ uint64_t GpuMemory::create_raw_source_write_time(const ObjectInfo& owner)
 	return owner.gpu_update_time > owner.cpu_update_time ? owner.gpu_update_time : 0u;
 }
 
+// A depth target over a render target or storage view, or a storage view over a depth target, that reinterprets
+// its 32-bit texels.
+static bool CreateReadsTexelBits(const GpuObject& info, GpuMemoryObjectType parent_type, const uint64_t* parent_params)
+{
+	if (info.type == GpuMemoryObjectType::DepthStencilBuffer && parent_type == GpuMemoryObjectType::RenderTexture)
+	{
+		return DepthStencilBufferCanSeedFromRenderTexture(info.params, parent_params, Config::IsNextGen());
+	}
+	if (info.type == GpuMemoryObjectType::DepthStencilBuffer && parent_type == GpuMemoryObjectType::StorageTexture)
+	{
+		return StorageTextureSharesDepthTexels(parent_params, info.params, Config::IsNextGen());
+	}
+	if (info.type == GpuMemoryObjectType::StorageTexture && parent_type == GpuMemoryObjectType::DepthStencilBuffer)
+	{
+		return StorageTextureSharesDepthTexels(info.params, parent_params, Config::IsNextGen());
+	}
+	return false;
+}
+
+int GpuMemory::create_texel_bits_seed(const Vector<OverlappedBlock>& others, const GpuObject& info, int heap_id) const
+{
+	const auto& heap      = m_heaps[heap_id];
+	int         seed      = -1;
+	uint64_t    seed_time = 0;
+	for (const auto& obj: others)
+	{
+		const auto& o = heap.objects[obj.object_id].info;
+		if (obj.relation != OverlapType::Equals || !CreateReadsTexelBits(info, o.object.type, o.params))
+		{
+			continue;
+		}
+		// The device's last writable use of the candidate, or its last device update.
+		const uint64_t written = std::max(o.write_time, create_raw_source_write_time(o));
+		if (written > seed_time)
+		{
+			seed      = obj.object_id;
+			seed_time = written;
+		}
+	}
+	if (seed < 0)
+	{
+		return -1;
+	}
+	for (const auto& obj: others)
+	{
+		const auto& o = heap.objects[obj.object_id].info;
+		if (o.in_use && o.write_back_func != nullptr && !o.read_only)
+		{
+			return -1;
+		}
+		// Any later write or upload to an overlapping view may have changed the bytes the new object reads.
+		if (obj.object_id != seed && std::max(o.write_time, o.gpu_update_time) >= seed_time)
+		{
+			return -1;
+		}
+	}
+	return seed;
+}
+
 bool GpuMemory::create_all_the_same(const Vector<OverlappedBlock>& others, int heap_id)
 {
 	auto&               heap = m_heaps[heap_id];
@@ -1165,6 +1225,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	bool        delete_all             = false;
 	bool        create_from_objects    = false;
 	int         render_alias_parent_id = -1;
+	int         texel_bits_parent_id   = -1;
 	Vector<StorageTextureRenderAliasCopy> render_alias_copies;
 	// Render targets whose blocks seed a new storage view, oldest write first.
 	std::vector<std::pair<uint64_t, int>> render_alias_sources;
@@ -1428,6 +1489,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				// Same link as the mixed-parent form: the texture uploads guest bytes.
 				overlap = true;
+			} else if (buffer != nullptr && selective_reclaim_ids.IsEmpty() && create_texel_bits_seed(others, info, heap_id) == obj.object_id)
+			{
+				// The new object reinterprets the texels this parent last held: copy them, then retire it. A depth
+				// target copies while it is created; a storage view, created from guest bytes, is overwritten after.
+				create_from_objects = info.type == GpuMemoryObjectType::DepthStencilBuffer;
+				texel_bits_parent_id = create_from_objects ? -1 : obj.object_id;
+				retire_after_copy_ids.Add(obj.object_id);
 			} else if (GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type) ||
 			           GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, h.block.vaddr[0], info.type, vaddr[0]))
 			{
@@ -2033,7 +2101,26 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				delete_all = true;
 			} else if (multi_depth_stencil_reclaim)
 			{
-				if (depth_stencil_reclaim_ids.Size() == others.Size())
+				const bool all_reclaimed = depth_stencil_reclaim_ids.Size() == others.Size();
+				const int  seed_id       = all_reclaimed && buffer != nullptr && selective_reclaim_ids.IsEmpty()
+				                               ? create_texel_bits_seed(others, info, heap_id)
+				                               : -1;
+				if (seed_id >= 0)
+				{
+					// The depth target reinterprets the bytes one render target rendered: copy them from it alone,
+					// then retire every reclaimed parent.
+					Vector<OverlappedBlock> seed;
+					for (const auto& obj: others)
+					{
+						if (obj.object_id == seed_id)
+						{
+							seed.Add(obj);
+						}
+					}
+					create_from_objects   = true;
+					retire_after_copy_ids = depth_stencil_reclaim_ids;
+					others                = seed;
+				} else if (all_reclaimed)
 				{
 					delete_all = true;
 				} else
@@ -2500,6 +2587,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			StorageTextureCopyRenderAlias(buffer, static_cast<RenderTextureVulkanImage*>(parent.object.obj),
 				                              static_cast<StorageTextureVulkanImage*>(o.object.obj), render_alias_copies);
 		}
+	}
+	if (texel_bits_parent_id >= 0)
+	{
+		auto& parent = heap.objects[texel_bits_parent_id].info;
+		RecordUse(&parent, buffer);
+		EXIT_IF(!UtilCopyTexelBits(buffer, static_cast<DepthStencilVulkanImage*>(parent.object.obj),
+		                           static_cast<StorageTextureVulkanImage*>(o.object.obj), static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL)));
 	}
 	if (!mixed_raw_render_source_ids.empty())
 	{

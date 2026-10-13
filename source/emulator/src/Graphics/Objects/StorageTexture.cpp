@@ -9,6 +9,7 @@
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
@@ -854,6 +855,32 @@ bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_
 	return VulkanColorTexelBytes(render_format) != storage_bytes ||
 	       (exact_range && (render[RenderTextureObject::PARAM_WIDTH] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u) ||
 	                        render[RenderTextureObject::PARAM_HEIGHT] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu)));
+}
+
+bool StorageTextureSharesDepthTexels(const uint64_t* storage, const uint64_t* depth, bool next_gen)
+{
+	if (!next_gen || storage == nullptr || depth == nullptr)
+	{
+		return false;
+	}
+	const auto width  = depth[DepthStencilBufferObject::PARAM_GUEST_WIDTH];
+	const auto height = depth[DepthStencilBufferObject::PARAM_GUEST_HEIGHT];
+	if (depth[DepthStencilBufferObject::PARAM_FORMAT] != VK_FORMAT_D32_SFLOAT || depth[DepthStencilBufferObject::PARAM_HTILE] != 0u ||
+	    depth[DepthStencilBufferObject::PARAM_SAMPLES] != 1u || width == 0u || width > UINT32_MAX ||
+	    depth[DepthStencilBufferObject::PARAM_HOST_WIDTH] != width || depth[DepthStencilBufferObject::PARAM_HOST_HEIGHT] != height)
+	{
+		return false;
+	}
+	const auto packed = storage[StorageTextureObject::PARAM_FORMAT];
+	const auto tile   = storage[StorageTextureObject::PARAM_TILE];
+	const auto format = VulkanResolveGuestImageFormat(GuestImageUsage::Storage, static_cast<uint8_t>(packed >> 8u),
+	                                                  static_cast<uint8_t>(packed), static_cast<uint16_t>(packed >> 16u));
+	return (format == VK_FORMAT_R32_SFLOAT || format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) &&
+	       (tile == 24u || tile == 27u) && storage[StorageTextureObject::PARAM_LEVELS] == 1u &&
+	       storage[StorageTextureObject::PARAM_RESOURCE_TYPE] == 9u && storage[StorageTextureObject::PARAM_DEPTH] == 1u &&
+	       storage[StorageTextureObject::PARAM_BASE_ARRAY] == 0u &&
+	       storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] == ((width << 32u) | height) &&
+	       storage[StorageTextureObject::PARAM_PITCH] == TileAlign64KBPitch(static_cast<uint32_t>(width), 4u);
 }
 
 bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming)

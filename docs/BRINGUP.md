@@ -9,6 +9,77 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: raw texels between aliased depth and colour views (2026-10-13)
+
+- Observed: one 960x540 range (1024x640x4 bytes, 64 KiB blocks) is
+  time-shared every frame by a B10G11R11 render target (mode 27), a
+  10_11_11 storage view (mode 27), an R32F storage view (mode 24, one level)
+  and a D32 depth target with no HTILE. A bounded diagnostic showed the depth
+  bound read-only (`LEQUAL`, depth writes off, no clear) and the R32F
+  storage view as its producer: image-store analysis marks it fully
+  overwritten. The previous code had no relation for depth over storage, so
+  the read-only depth started undefined and hit the read-only clear refusal.
+- Contract:
+  - The 4-byte depth (mode 24) and render-target (mode 27) layouts address
+    texels alike. A unit test pins this.
+  - A depth target over an equal-range render target or matching storage
+    view, and a storage view over such a depth target, copy the raw 32-bit
+    words of the newest writer (`create_texel_bits_seed`), then retire it.
+  - Matching means:
+    - one sample, one layer, one level;
+    - an equal extent;
+    - a pitch equal to the depth's 64 KiB-aligned width;
+    - R32F or B10G11R11 colour;
+    - no HTILE;
+    - host extent equal to guest.
+  - Any later write to another overlapping view refuses the seed.
+- Copy (`UtilCopyTexelBits`): image to buffer to image, with no conversion.
+  Its staging is a device-local per-command-buffer pool
+  (`AllocateTransientCopyBuffer`). The host-visible compute scratch pool did
+  not work for it: on Intel, two detile entries (8.3 MB and 6.6 MB, other
+  usage masks) already held 14.9 of its 16 MiB, so the 2 MB copy was
+  refused at about 140-150 s.
+- Limit: Intel Arc (DG2) does not expose `VK_EXT_depth_range_unrestricted`,
+  so a depth upload outside [0,1] is outside VUID-07931 there. RADV exposes
+  it.
+- Excluded:
+  - Clamping the words into a depth image destroys the bit pattern the
+    colour views read back, so it was rejected.
+  - The nondeterministic `!create_all_the_same` at another range in the same
+    title (78 s, Intel) is the documented transient-pool class. This seed
+    path did not run there.
+- Next stop (Intel, reproduced twice at 178-189 s, 1920x1080 pixel stage):
+  - `native_admission{... pc=0x157c reason=invalid instruction before native
+    wave analysis}`.
+  - The instruction is `v_cvt_i32_f32` in SDWA form (control dword
+    0x0006140d: `dst_sel=WORD_0`, `dst_unused=PRESERVE`, `src0_sel=DWORD`),
+    a 16-bit partial write that keeps the high half of the VGPR.
+  - Defect found, not fixed: `ShaderParseVOP1.cpp:39` only warns on
+    `dst_sel != 6`, so the ordinary emitter writes the whole dword. A
+    general SDWA destination select (`WORD`/`BYTE` with
+    `PRESERVE`/`PAD`/`SEXT`) is needed as a read-modify-write of the
+    destination.
+- Verified:
+  - The robot platformer on AMD (RADV, `Fixed` + RenderTargets) ran 600 s
+    and then 300 s, both status 1 with no error. It is still loading the
+    worldmap at about 0.4 fps, with black captures.
+  - On Intel it ran 178-189 s, until the SDWA stop above.
+  - Regressions (strict, no errors):
+
+    | GPU | Title | This change | Baseline |
+    | --- | --- | --- | --- |
+    | Intel A770 | racing title | 16.0k / 20.6k / 26.1k / 27.5k frames at 30 / 60 / 90 / 120 s | 15.4k / 20.1k / 25.7k / 27.0k |
+    | Intel A770 | watercolour platformer | 10.7k at 60 s | about 10.5k |
+    | Intel A770 | fishing title | 5.6k at 180 s | about 5.5k |
+    | AMD (warm cache) | racing title | 6.3k / 8.4k / 10.3k / 11.2k | 5.7k / 7.5k / 9.4k / 10.3k |
+    | AMD (warm cache) | watercolour platformer | 4.1k at 60 s | about 4.1k |
+    | AMD (warm cache) | fishing title | 3.1k at 180 s | about 3.0k |
+
+    The first AMD pass ran right after a host reboot. It was 25-35% lower
+    from the first window on, and recovered on rerun.
+  - Unit tests: 344 graphics-state and detile tests. Gate scripts:
+    boundaries, graphics tables.
+
 ## Robot platformer: whole-wave OR reductions as partial waves (2026-10-13)
 
 - Fix: the worldmap pixel shader's whole-wave OR reduction is admitted with
