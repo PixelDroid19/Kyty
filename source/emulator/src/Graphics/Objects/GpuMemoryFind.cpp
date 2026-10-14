@@ -122,6 +122,39 @@ Vector<GpuMemoryObject> GpuMemory::FindEqualObjects(uint64_t vaddr, uint64_t siz
 	return ret;
 }
 
+Vector<GpuMemoryObject> GpuMemory::FindObjectsWithRange(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,
+                                                        const SubmissionId& submission)
+{
+	Core::LockGuard lock(m_mutex);
+
+	Vector<GpuMemoryObject> ret;
+
+	const int heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return ret;
+	}
+	auto& heap = m_heaps[heap_id];
+	for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1, false))
+	{
+		auto& h = heap.objects[block.object_id];
+		EXIT_IF(h.free);
+		bool range_equal = false;
+		for (int i = 0; i < h.block.vaddr_num; ++i)
+		{
+			range_equal = range_equal || (h.block.vaddr[i] == vaddr && h.block.size[i] == size);
+		}
+		if (h.info.object.type != type || !range_equal)
+		{
+			continue;
+		}
+		RecordUse(&h.info, submission);
+		h.info.use_last_frame = GpuMemoryAliasLookupUseFrame(m_current_frame, h.info.use_last_frame);
+		ret.Add(h.info.object);
+	}
+	return ret;
+}
+
 bool GpuMemory::DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out)
 {
 	EXIT_IF(obj == nullptr || out == nullptr);

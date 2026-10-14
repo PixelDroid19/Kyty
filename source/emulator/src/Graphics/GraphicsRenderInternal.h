@@ -1676,6 +1676,9 @@ struct ComputeUniformBufferFill
 // Ordered compute fills of color-image aliases (docs/graphics-compute-uniform-color-fill.md).
 void               InvalidateComputeColorFills(const ShaderBindResources& bind);
 [[nodiscard]] bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// A proven uniform fill of a live depth image's whole stencil plane clears its
+// host stencil aspect in recording order.
+[[nodiscard]] bool PropagateComputeUniformStencilFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 // A proven uniform fill of a DCC metadata range with a clear key is held until
 // a render target or shader image with that metadata base consumes it.
 [[nodiscard]] bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);

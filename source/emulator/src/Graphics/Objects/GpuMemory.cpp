@@ -819,6 +819,15 @@ Vector<GpuMemoryObject> GpuMemoryFindEqualObjectsForSubmission(CommandBuffer* bu
 	return g_gpu_memory->FindEqualObjects(vaddr, size, type, submission);
 }
 
+Vector<GpuMemoryObject> GpuMemoryFindObjectsWithRangeForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	EXIT_IF(buffer == nullptr);
+	SubmissionId submission;
+	EXIT_IF(!buffer->GetSubmissionId(&submission));
+	return g_gpu_memory->FindObjectsWithRange(vaddr, size, type, submission);
+}
+
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                                                           GpuMemoryObjectType type, bool exact, bool only_first)
 {

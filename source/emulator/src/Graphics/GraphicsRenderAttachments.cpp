@@ -318,6 +318,61 @@ bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUnifor
 	return observation.tracked && g_compute_color_fills.Publish(identity, submission, words, observation);
 }
 
+// Moves every aspect of a depth-stencil image to new_layout after all earlier accesses.
+static void TransitionDepthStencilImage(VkCommandBuffer vk_buffer, VulkanImage* image, VkImageLayout new_layout)
+{
+	VkImageMemoryBarrier barrier {};
+	barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.srcAccessMask                   = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+	barrier.dstAccessMask                   = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+	barrier.oldLayout                       = image->layout;
+	barrier.newLayout                       = new_layout;
+	barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image                           = image->image;
+	barrier.subresourceRange.aspectMask     = DepthFormatAspectMask(image->format);
+	barrier.subresourceRange.baseMipLevel   = 0;
+	barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
+	barrier.subresourceRange.baseArrayLayer = 0;
+	barrier.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1,
+	                     &barrier);
+	image->layout = new_layout;
+}
+
+bool PropagateComputeUniformStencilFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+{
+	// Every byte of the plane receives the same 8-bit stencil value.
+	const uint32_t value = fill.words[0] & 0xffu;
+	const bool uniform_bytes = std::all_of(fill.words.begin(), fill.words.end(), [&](uint32_t word) { return word == value * 0x01010101u; });
+	if (!uniform_bytes || !ComputeColorFillUsesGraphicsQueue(buffer))
+	{
+		return false;
+	}
+	bool cleared = false;
+	for (const auto& object:
+	     GpuMemoryFindObjectsWithRangeForSubmission(buffer, fill.address, fill.size, GpuMemoryObjectType::DepthStencilBuffer))
+	{
+		auto* image = static_cast<DepthStencilVulkanImage*>(object.obj);
+		// A first use keeps its undefined-contents clear; custom sample
+		// locations would have to accompany every layout transition.
+		if (image == nullptr || image->image == nullptr || image->stencil_vaddr != fill.address ||
+		    image->layout == VK_IMAGE_LAYOUT_UNDEFINED || image->sample_locations_compatible)
+		{
+			continue;
+		}
+		auto       vk_buffer      = buffer->RecordOutsideRenderPass();
+		const auto restore_layout = image->layout;
+		TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		const VkClearDepthStencilValue clear {0.0f, value};
+		const VkImageSubresourceRange  range {VK_IMAGE_ASPECT_STENCIL_BIT, 0u, image->mip_levels, 0u, image->array_layers};
+		vkCmdClearDepthStencilImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
+		TransitionDepthStencilImage(vk_buffer, image, restore_layout);
+		cleared = true;
+	}
+	return cleared;
+}
+
 bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
 {
 	// Any other fill of the metadata, including the uncompressed key, ends a pending clear.
@@ -990,6 +1045,8 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 	if (r->vulkan_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->vulkan_buffer == nullptr condition ignored (continuing)\n"); }
+	const bool stencil_plane        = r->stencil_buffer_size > 0 && DepthFormatHasStencil(r->format);
+	r->vulkan_buffer->stencil_vaddr = stencil_plane ? r->stencil_buffer_vaddr : 0u;
 	if (sample_locations_compatible && !r->vulkan_buffer->sample_locations_compatible)
 	{
 		KYTY_LOG_DEBUG( "KYTY_GRAPHICS: depth image was created without custom sample-location compatibility\n");

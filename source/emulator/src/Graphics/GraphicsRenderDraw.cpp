@@ -3204,7 +3204,8 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	GraphicsOperationTraceDispatch(input_info.bind);
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
 	// The buffer write always executes. A proven full uniform fill additionally updates its exact
-	// color-image aliases in this recording; partial thread groups would leave the range uncovered.
+	// color-image aliases and stencil planes in this recording; partial thread groups would leave
+	// the range uncovered.
 	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
 	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
 	ComputeUniformBufferFill fill;
@@ -3212,6 +3213,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	    ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill))
 	{
 		(void)PropagateComputeUniformColorFill(buffer, fill);
+		(void)PropagateComputeUniformStencilFill(buffer, fill);
 		(void)PublishComputeColorDccClear(buffer, fill);
 		(void)PublishUniformDepthMetaFill(submit_id, fill);
 		(void)PublishComputeUniformFillToGuestAddress(buffer, fill);

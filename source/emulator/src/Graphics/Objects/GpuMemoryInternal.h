@@ -329,6 +329,7 @@ public:
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
 	Vector<GpuMemoryObject> FindEqualObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission);
+	Vector<GpuMemoryObject> FindObjectsWithRange(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission);
 	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 	bool                    QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
 	bool                    DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
