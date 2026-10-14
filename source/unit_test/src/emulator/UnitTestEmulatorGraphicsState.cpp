@@ -4857,11 +4857,11 @@ TEST(EmulatorGraphicsState, SeparatesHtileMetaClearFromRegisterDepthClear)
 TEST(EmulatorGraphicsState, DepthAttachmentLoadOpsClearWhenGuestDepthClear)
 {
 	using namespace Kyty::Libs::Graphics;
-	// HTILE/register clear → loadOp CLEAR + UNDEFINED.
+	// HTILE/register depth clear → depth CLEAR; the combined image keeps its stencil.
 	auto ds = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, true, false);
 	EXPECT_EQ(ds.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
-	EXPECT_EQ(ds.stencil_load, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
-	EXPECT_EQ(ds.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+	EXPECT_EQ(ds.stencil_load, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(ds.initial_layout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
 	auto both = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, true, true);
 	EXPECT_EQ(both.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);

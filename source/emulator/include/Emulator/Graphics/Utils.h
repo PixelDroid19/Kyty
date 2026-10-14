@@ -570,8 +570,8 @@ struct DepthAttachmentLoadOps
 };
 
 // Guest HTILE/register clears map to attachment loadOp CLEAR. No invented color CLEAR0.
-// When not clearing, LOAD OPTIMAL preserves prior DS contents. Depth-only CLEAR uses
-// UNDEFINED init, so stencil cannot LOAD in that pass (DONT_CARE unless stencil clears).
+// When not clearing, LOAD OPTIMAL preserves prior DS contents. A depth-only CLEAR of a
+// combined image keeps OPTIMAL and LOADs stencil, which the guest clear leaves intact.
 // Stencil-only CLEAR keeps OPTIMAL because depth still LOADs prior contents.
 // First GPU-owned use (tracked UNDEFINED) has no prior contents: the depth object
 // never uploads guest bytes. LOAD then samples undefined host pixels (often ~1).
@@ -593,14 +593,15 @@ struct DepthAttachmentLoadOps
 	} else if (stencil_clear)
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	} else if (clear_depth)
+	} else if (first_use)
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	} else
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_LOAD;
 	}
-	ops.initial_layout = clear_depth ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	const bool loads_any = ops.depth_load == VK_ATTACHMENT_LOAD_OP_LOAD || ops.stencil_load == VK_ATTACHMENT_LOAD_OP_LOAD;
+	ops.initial_layout   = loads_any ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
 	return ops;
 }
 
