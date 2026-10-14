@@ -1638,7 +1638,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	// stream has a chance to continue.
 	if (source_rt.base.addr == 0 || destination_rt.base.addr == 0)
 	{
-		if (std::getenv("KYTY_DUMP_COLOR_RESOLVE") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_COLOR_RESOLVE"); env != nullptr)
 		{
 			static uint32_t skipped_logs = 0;
 			if (skipped_logs < 32u)
@@ -1655,7 +1655,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	}
 	if (!DescribeRenderColorSlotInfo(buffer, source_rt, &source)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !DescribeRenderColorSlotInfo(buffer, source_rt, &source) condition ignored (continuing)\n"); }
 	if (!DescribeRenderColorSlotInfo(buffer, destination_rt, &destination)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !DescribeRenderColorSlotInfo(buffer, destination_rt, &destination) condition ignored (continuing)\n"); }
-	if (std::getenv("KYTY_DUMP_COLOR_RESOLVE") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_COLOR_RESOLVE"); env != nullptr)
 	{
 		static uint32_t describe_logs = 0;
 		if (describe_logs < 32u)
@@ -1681,7 +1681,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	auto* src = source.attachment[0].vulkan_buffer;
 	auto* dst = destination.attachment[0].vulkan_buffer;
 	if (src == nullptr || dst == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr || dst == nullptr condition ignored (continuing)\n"); }
-	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env != nullptr)
 	{
 		static uint32_t logs = 0;
 		if (logs < 32u)

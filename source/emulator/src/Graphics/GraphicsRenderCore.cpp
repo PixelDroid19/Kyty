@@ -235,7 +235,7 @@ void GraphicsPeekRememberedSceneTargets(GraphicContext* ctx)
 	// Full-screen HDR/depth readback is a separate opt-in. Binding it to
 	// KYTY_TRACE_DRAW_PS raced native capture (layout tracker EXIT at
 	// Utils.cpp:37) and allocated two 1920×1080 buffers on every present≥3840.
-	const char* trace = std::getenv("KYTY_TRACE_SCENE_PEEK");
+	static const char* trace = std::getenv("KYTY_TRACE_SCENE_PEEK");
 	if (ctx == nullptr || trace == nullptr || trace[0] == '\0')
 	{
 		return;
@@ -250,7 +250,7 @@ void GraphicsPeekRememberedSceneTargets(GraphicContext* ctx)
 		return;
 	}
 	FILE* out = stderr;
-	if (const char* path = std::getenv("KYTY_TRACE_DRAW_PS_LOG"); path != nullptr && path[0] != '\0')
+	if (static const char* path = std::getenv("KYTY_TRACE_DRAW_PS_LOG"); path != nullptr && path[0] != '\0')
 	{
 		char scene_path[512];
 		std::snprintf(scene_path, sizeof(scene_path), "%s.scene", path);
@@ -710,7 +710,7 @@ void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& 
 void MaybeDumpColorTargets(GraphicContext* ctx, const RenderColorInfo& color)
 {
 	static const char* spec = std::getenv("KYTY_DUMP_RT");
-	const char*        trace = std::getenv("KYTY_TRACE_DRAW_PS");
+	static const char* trace = std::getenv("KYTY_TRACE_DRAW_PS");
 	if (ctx == nullptr)
 	{
 		return;

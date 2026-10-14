@@ -584,7 +584,7 @@ uint64_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 
 static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint64_t draw_modifier)
 {
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -600,7 +600,7 @@ static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint
 
 static void MaybeDumpIndexDrawSkip(const char* reason, uint32_t index_count, uint64_t draw_modifier, uint32_t type)
 {
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -682,7 +682,7 @@ static uint64_t PixelShaderSnapshotHash(const ShaderPixelInputInfo& input)
 
 static void MaybeDumpPixelShaderTextureBytes(uint64_t shader_id, int index, const ShaderTextureResource& resource)
 {
-	if (std::getenv("KYTY_DUMP_PS_BYTES") == nullptr || !Config::IsNextGen() || resource.TileMode() != 5u)
+	if (static const char* env = std::getenv("KYTY_DUMP_PS_BYTES"); env == nullptr || !Config::IsNextGen() || resource.TileMode() != 5u)
 	{
 		return;
 	}
@@ -743,7 +743,7 @@ static void MaybeDumpPixelShaderSnapshot(const char* path, const HW::Shader& sh,
 	static std::set<uint64_t> seen;
 	static uint32_t           logs  = 0;
 	uint32_t                  limit = 128u;
-	if (const char* env_limit = std::getenv("KYTY_DUMP_PS_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	if (static const char* env_limit = std::getenv("KYTY_DUMP_PS_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
 	{
 		const auto parsed = std::strtoul(env_limit, nullptr, 10);
 		if (parsed > 0u && parsed <= 4096u)
@@ -818,7 +818,7 @@ static void MaybeDumpPixelShaderSnapshot(const char* path, const HW::Shader& sh,
 static void MaybeDumpVideoDrawReady(const char* path, const HW::Shader& sh, const ShaderPixelInputInfo& ps_input,
                                     const RenderColorInfo& color, uint32_t count, uint32_t primitive_type)
 {
-	if (std::getenv("KYTY_DUMP_VIDEO_DRAW") == nullptr || !Config::IsNextGen())
+	if (static const char* env = std::getenv("KYTY_DUMP_VIDEO_DRAW"); env == nullptr || !Config::IsNextGen())
 	{
 		return;
 	}
@@ -873,7 +873,7 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 {
 	MaybeDumpPixelShaderSnapshot("index", sh, ps_input, index_count, primitive_type);
 	MaybeDumpVideoDrawReady("index", sh, ps_input, color, index_count, primitive_type);
-	if (std::getenv("KYTY_DUMP_DRAW2") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW2"); env != nullptr)
 	{
 		static uint32_t draw2_logs = 0;
 		if (draw2_logs < 5000)
@@ -894,13 +894,13 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 			}
 		}
 	}
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
 	static uint32_t logs = 0;
 	uint32_t limit = 48u;
-	if (const char* env_limit = std::getenv("KYTY_DUMP_DRAW_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	if (static const char* env_limit = std::getenv("KYTY_DUMP_DRAW_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
 	{
 		const auto parsed = std::strtoul(env_limit, nullptr, 10);
 		if (parsed > 0u && parsed <= 100000u)
@@ -970,7 +970,7 @@ static void MaybeDumpAutoDrawReady(const RenderColorInfo& color, const RenderDep
 {
 	MaybeDumpPixelShaderSnapshot("auto", sh, ps_input, index_count, primitive_type);
 	MaybeDumpVideoDrawReady("auto", sh, ps_input, color, index_count, primitive_type);
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -1048,7 +1048,7 @@ bool GraphicsResolvePrimitiveDrawPlan(uint32_t primitive_type, uint32_t guest_co
 
 static bool PrimitiveDumpMatches(uint32_t primitive_type)
 {
-	const char* selector = std::getenv("KYTY_DUMP_PRIMITIVE");
+	static const char* selector = std::getenv("KYTY_DUMP_PRIMITIVE");
 	if (selector == nullptr || selector[0] == '\0')
 	{
 		return false;
@@ -1074,7 +1074,7 @@ void MaybeDumpPrimitiveDrawPlan(const char* path, uint32_t primitive_type, uint3
 
 	static uint32_t logs = 0;
 	uint32_t        limit = 128u;
-	if (const char* env_limit = std::getenv("KYTY_DUMP_PRIMITIVE_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	if (static const char* env_limit = std::getenv("KYTY_DUMP_PRIMITIVE_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
 	{
 		const auto parsed = std::strtoul(env_limit, nullptr, 10);
 		if (parsed > 0u && parsed <= 100000u)
@@ -1189,7 +1189,7 @@ GraphicsSkippedGeState GraphicsDescribeSkippedGeState(const HW::Context& ctx, co
 static void MaybeReportNativeWaveInput(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shader,
                                       const ShaderVertexInputInfo& input, const GraphicsNativeWaveDrawInfo& draw)
 {
-	const char* prefix = std::getenv("KYTY_NATIVE_WAVE_REPORT");
+	static const char* prefix = std::getenv("KYTY_NATIVE_WAVE_REPORT");
 	if (prefix == nullptr || prefix[0] == '\0')
 	{
 		return;
@@ -1410,11 +1410,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	EXIT_IF(buffer->IsInvalid());
 
 	// Diagnostic A/B: KYTY_AB_SKIP_ALL_DRAWS=1 skips graphics draws (DEVICE_LOST triage).
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_ALL_DRAWS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_ALL_DRAWS"); ab != nullptr && ab[0] != '\0')
 	{
 		return;
 	}
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_INDEXED_DRAWS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_INDEXED_DRAWS"); ab != nullptr && ab[0] != '\0')
 	{
 		return;
 	}
@@ -1429,7 +1429,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		return;
 	}
 	// Diagnostic A/B: skip draws whose depth target is a 1x1 D/S surface while color is larger.
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_TINY_DEPTH"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_TINY_DEPTH"); ab != nullptr && ab[0] != '\0')
 	{
 		RenderDepthInfo probe {};
 		DescribeRenderDepthInfo(*ctx, &probe);
@@ -1441,7 +1441,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		}
 	}
 	// Diagnostic A/B: skip embedded-VS draws (vs data_addr == 0).
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_EMBEDDED_VS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_EMBEDDED_VS"); ab != nullptr && ab[0] != '\0')
 	{
 		const auto& vs = sh_ctx->GetVs();
 		if (vs.vs_embedded || vs.vs_regs.data_addr == 0)
@@ -1452,7 +1452,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		}
 	}
 	// Diagnostic A/B: skip draws whose PS data_addr matches KYTY_AB_SKIP_PS_ADDR (hex).
-	if (const char* ab_ps = std::getenv("KYTY_AB_SKIP_PS_ADDR"); ab_ps != nullptr && ab_ps[0] != '\0')
+	if (static const char* ab_ps = std::getenv("KYTY_AB_SKIP_PS_ADDR"); ab_ps != nullptr && ab_ps[0] != '\0')
 	{
 		char*      end     = nullptr;
 		const auto skip_ps = std::strtoull(ab_ps, &end, 0);
@@ -1462,7 +1462,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 			return;
 		}
 	}
-	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env != nullptr)
 	{
 		static uint32_t logs = 0;
 		if (logs < 48u)
@@ -2392,11 +2392,11 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	EXIT_IF(buffer == nullptr || buffer->IsInvalid());
 
 	// Diagnostic A/B: KYTY_AB_SKIP_ALL_DRAWS=1 skips graphics draws (DEVICE_LOST triage).
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_ALL_DRAWS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_ALL_DRAWS"); ab != nullptr && ab[0] != '\0')
 	{
 		return;
 	}
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_AUTO_DRAWS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_AUTO_DRAWS"); ab != nullptr && ab[0] != '\0')
 	{
 		return;
 	}
@@ -2409,7 +2409,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	{
 		return;
 	}
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_TINY_DEPTH"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_TINY_DEPTH"); ab != nullptr && ab[0] != '\0')
 	{
 		RenderDepthInfo probe {};
 		DescribeRenderDepthInfo(*ctx, &probe);
@@ -2420,7 +2420,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 			return;
 		}
 	}
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_EMBEDDED_VS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_EMBEDDED_VS"); ab != nullptr && ab[0] != '\0')
 	{
 		const auto& vs = sh_ctx->GetVs();
 		if (vs.vs_embedded || vs.vs_regs.data_addr == 0)
@@ -2430,7 +2430,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 			return;
 		}
 	}
-	if (const char* ab_ps = std::getenv("KYTY_AB_SKIP_PS_ADDR"); ab_ps != nullptr && ab_ps[0] != '\0')
+	if (static const char* ab_ps = std::getenv("KYTY_AB_SKIP_PS_ADDR"); ab_ps != nullptr && ab_ps[0] != '\0')
 	{
 		char*      end     = nullptr;
 		const auto skip_ps = std::strtoull(ab_ps, &end, 0);
@@ -2509,7 +2509,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	const auto& shader_regs        = ctx->GetShaderRegisters();
 	if (const auto* target = RenderColorFirstConfiguredAttachment(color_info); target != nullptr)
 	{
-		if (const char* ab = std::getenv("KYTY_AB_SKIP_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
+		if (static const char* ab = std::getenv("KYTY_AB_SKIP_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
 		{
 			char*      end       = nullptr;
 			const auto skip_addr = std::strtoull(ab, &end, 0);
@@ -2518,7 +2518,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 				return;
 			}
 		}
-		if (const char* ab = std::getenv("KYTY_AB_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
+		if (static const char* ab = std::getenv("KYTY_AB_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
 		{
 			char*      end       = nullptr;
 			const auto only_addr = std::strtoull(ab, &end, 0);
@@ -2625,7 +2625,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	const uint32_t vertex_records = vertex_requirement.records;
 
 	bool clear_only = false;
-	if (const char* ab = std::getenv("KYTY_AB_CLEAR_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_CLEAR_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
 	{
 		char*      end        = nullptr;
 		const auto clear_addr = std::strtoull(ab, &end, 0);
@@ -3081,19 +3081,19 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	//   KYTY_AB_SKIP_ALL_CS=1 — skip every compute dispatch
 	//   KYTY_AB_SKIP_TEX_CS=1 — skip compute that binds textures
 	//   KYTY_AB_SKIP_CS_ADDR=0x... — skip one guest CS data address (hex)
-	if (const char* ab_all = std::getenv("KYTY_AB_SKIP_ALL_CS"); ab_all != nullptr && ab_all[0] != '\0')
+	if (static const char* ab_all = std::getenv("KYTY_AB_SKIP_ALL_CS"); ab_all != nullptr && ab_all[0] != '\0')
 	{
 		KYTY_LOG_DEBUG( "KYTY_AB_SKIP_ALL_CS skip shader=0x%012" PRIx64 "\n", cs_regs.cs_regs.data_addr);
 		return ComputeDispatchResult::Completed;
 	}
-	if (const char* ab_skip = std::getenv("KYTY_AB_SKIP_TEX_CS");
+	if (static const char* ab_skip = std::getenv("KYTY_AB_SKIP_TEX_CS");
 	    ab_skip != nullptr && ab_skip[0] != '\0' && input_info.bind.textures2D.textures_num > 0)
 	{
 		KYTY_LOG_DEBUG( "KYTY_AB_SKIP_TEX_CS skip shader=0x%012" PRIx64 " textures=%d\n", cs_regs.cs_regs.data_addr,
 		             input_info.bind.textures2D.textures_num);
 		return ComputeDispatchResult::Completed;
 	}
-	if (const char* ab_addr = std::getenv("KYTY_AB_SKIP_CS_ADDR"); ab_addr != nullptr && ab_addr[0] != '\0')
+	if (static const char* ab_addr = std::getenv("KYTY_AB_SKIP_CS_ADDR"); ab_addr != nullptr && ab_addr[0] != '\0')
 	{
 		char*      end      = nullptr;
 		const auto skip_addr = std::strtoull(ab_addr, &end, 0);
@@ -3104,8 +3104,8 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		}
 	}
 	static const char* dump_dispatch = std::getenv("KYTY_DUMP_DISPATCH");
-	const char*        dump_cs_id    = std::getenv("KYTY_DUMP_CS_ID");
-	const char*        dump_texture  = std::getenv("KYTY_DUMP_CS_TEXTURE");
+	static const char* dump_cs_id    = std::getenv("KYTY_DUMP_CS_ID");
+	static const char* dump_texture  = std::getenv("KYTY_DUMP_CS_TEXTURE");
 	bool               selected_cs   = true;
 	bool               selector_used = false;
 	if (dump_cs_id != nullptr && dump_cs_id[0] != '\0')
@@ -3123,7 +3123,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	selected_cs = selector_used && selected_cs;
 	static uint32_t    dispatch_logs = 0;
 	uint32_t           dispatch_limit = 256u;
-	if (const char* env_limit = std::getenv("KYTY_DUMP_DISPATCH_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	if (static const char* env_limit = std::getenv("KYTY_DUMP_DISPATCH_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
 	{
 		const auto parsed = std::strtoul(env_limit, nullptr, 10);
 		if (parsed > 0u && parsed <= 100000u)

@@ -1380,7 +1380,7 @@ static void WaitForSuspendedRuns(CommandProcessor* cp, CommandProcessor::Suspend
 			     suspended->mask, suspended->function, suspended->size, cp->QueueIndex(), static_cast<int>(producer),
 			     dependency.producer.queue.Value(), dependency.producer.sequence);
 		}
-		if (std::getenv("KYTY_WAIT_TRACE") != nullptr)
+		if (static const char* env = std::getenv("KYTY_WAIT_TRACE"); env != nullptr)
 		{
 			const auto& suspended = first != nullptr ? *first : *second;
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
@@ -2011,7 +2011,7 @@ void CommandProcessor::SetIndirectArgsBaseAddress(uint32_t base_index, uint64_t 
 		default: if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); } break;
 	}
 
-	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Debug, 64, "KYTY_DUMP_INDIRECT set_base index=%u addr=0x%012" PRIx64 "\n", base_index, address);
 	}
@@ -2059,7 +2059,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 		submit_id = m_sumbit_id;
 		index_type_and_size = m_index_type_and_size;
 		instance_count = m_num_instances;
-		if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env != nullptr)
 		{
 			static uint32_t logs = 0;
 			if (logs < 48u)
@@ -2162,7 +2162,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		}
 		if (args.index_count_per_instance == 0 || args.instance_count == 0)
 		{
-			if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+			if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 			{
 				static uint32_t logs = 0;
 				if (logs < 64u)
@@ -2191,7 +2191,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		                                                                                     : args.index_count_per_instance;
 		index_addr = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(args.start_index_location) * index_bytes);
 
-		if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 		{
 			const int32_t base_vertex_location = static_cast<int32_t>(args.base_vertex_location);
 			static uint32_t logs = 0;
@@ -2297,7 +2297,7 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 		if (args.thread_group_x == 0 || args.thread_group_y == 0 || args.thread_group_z == 0)
 		{
-			if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+			if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 			{
 				static uint32_t logs = 0;
 				if (logs < 64u)
@@ -2310,7 +2310,7 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 			return;
 		}
 
-		if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 		{
 			static uint32_t logs = 0;
 			if (logs < 64u)
@@ -2335,7 +2335,7 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 		submit_id = m_sumbit_id;
 		instance_count = m_num_instances;
 
-		if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env != nullptr)
 		{
 			static uint32_t auto_logs = 0;
 			if (auto_logs < 48u)
