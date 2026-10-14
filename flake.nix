@@ -14,6 +14,9 @@
       devShells.${system} = {
         # Build and test toolchain for the C++ emulator and the Python tools.
         default = pkgs.mkShell {
+          # The project sets its own warning flags; the wrapper's format hardening
+          # turns the vendored profiler's -Wno-format into an error.
+          hardeningDisable = [ "format" ];
           packages = with pkgs; [
             cmake
             ninja
@@ -35,12 +38,14 @@
             xorg.libXi
             xorg.libXfixes
             xorg.libXScrnSaver
+            xorg.libxcb
           ];
         };
 
         # Adds the public ROCm HIP tools for the optional hardware arithmetic oracle.
         # Running the oracle still needs an AMD GPU exposed through /dev/kfd.
         oracle = pkgs.mkShell {
+          hardeningDisable = [ "format" ];
           inputsFrom = [ self.devShells.${system}.default ];
           packages = with pkgs.rocmPackages; [
             hipcc
