@@ -42,6 +42,17 @@ fail on the current HEAD before acting on them.
   2048-span scan. ABBA on Intel against the fix above: 11.73 / 11.97 FPS with it
   and 11.83 / 11.67 FPS without it. The scan is not on the critical path at this
   frame rate.
+- Ten-second agent window after the fix (Intel, sailing): 11.3 FPS, 82.5 ms of
+  command-processor time per frame, that thread at 73% of one core (3% of it in
+  the kernel), 1157 draws per frame (about 71 us each). Of the 82.5 ms, 15.7 ms
+  are fence waits (32.6 per frame) and 11.1 ms `WAIT_REG_MEM` (212 per frame):
+  a third of the frame is the command processor waiting for the GPU, which is
+  why neither the host CPU nor the GPU shows high utilization. Resource binding
+  takes 39 ms (texture descriptors 17 ms), object lookups 19.7 ms for 6768
+  calls (nearly all cached or fast reuse, not object churn), and uploads move
+  47 MB per frame; the slowest creates are 8.3 MB textures re-uploaded on fast
+  reuse at 15-20 ms each. On AMD the same thread is 60% busy, 19% of it in the
+  kernel.
 - Remaining ranked costs and directions, not yet changed: `FindBlocks` from
   `CanSnapshotReadOnlyBuffer` and `CaptureSnapshotReadOnlyBuffer`
   (`GpuMemoryFind.cpp:371` and `:413`) spends most of its time sorting long
