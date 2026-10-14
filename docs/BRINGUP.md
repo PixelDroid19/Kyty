@@ -70,9 +70,10 @@ fail on the current HEAD before acting on them.
   15 FPS against 11; the dock capture renders correctly.
 - Excluded for the racing title: `ResetHash` self time is the inlined
   materialization-cache `InvalidateRange` scan (the only loop before
-  `GetHeapId` in its disassembly). Scanning only live slots raised its share
-  from 5.9% to 8.0% (the cache fills within a submission, and the list adds an
-  indirection). Remembering recently scanned clean ranges, already excluded
+  `GetHeapId` in its disassembly). Scanning only live slots showed no gain in
+  one window of a different scene (its share 8.0% against 5.9%, at 550 against
+  780 draws per frame, so the shares are not comparable; cache occupancy was not
+  measured). Remembering recently scanned clean ranges, already excluded
   for the fishing title above, left it at 6.9%: a store overlapping the
   attachment, most likely the attachment's own materialization, clears the memo
   every draw. A spatial index of the spans is the remaining direction.
