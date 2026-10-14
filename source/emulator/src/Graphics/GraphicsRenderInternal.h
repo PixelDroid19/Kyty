@@ -1700,6 +1700,8 @@ void ConsumeImageColorDccClear(CommandBuffer* buffer, const ColorDccImage& image
 StorageTextureVulkanImage*         FindLatestStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 Vector<StorageTextureVulkanImage*> FindOverlappingStorageTextures(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 Vector<DepthStencilVulkanImage*>   FindDepthStencil(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
+// The depth-stencil image whose stencil plane is exactly [vaddr, vaddr + size) and spans width x height texels, or nullptr.
+DepthStencilVulkanImage*           FindStencilPlane(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, uint32_t width, uint32_t height);
 
 // --- Attachments ---
 void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r);

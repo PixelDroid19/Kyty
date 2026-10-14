@@ -45,7 +45,8 @@ static int SampledViewIndex(int view)
 
 static bool IsDepthSampledView(int view)
 {
-	return SampledViewIndex(view) == VulkanImage::VIEW_DEPTH_TEXTURE || SampledViewIndex(view) == VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY;
+	return SampledViewIndex(view) == VulkanImage::VIEW_DEPTH_TEXTURE || SampledViewIndex(view) == VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY ||
+	       SampledViewIndex(view) == VulkanImage::VIEW_STENCIL_TEXTURE;
 }
 
 // A depth plane sampled while the same image's stencil is a writable attachment
@@ -1530,6 +1531,25 @@ Vector<StorageTextureVulkanImage*> FindOverlappingStorageTextures(CommandBuffer*
 	}
 
 	return ret;
+}
+
+// The depth-stencil image whose stencil plane is exactly [vaddr, vaddr + size) and spans width x height texels, or nullptr.
+DepthStencilVulkanImage* FindStencilPlane(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, uint32_t width, uint32_t height)
+{
+	EXIT_IF(buffer == nullptr);
+	DepthStencilVulkanImage* found = nullptr;
+	for (const auto& object: GpuMemoryFindObjectsWithRangeForSubmission(buffer, vaddr, size, GpuMemoryObjectType::DepthStencilBuffer))
+	{
+		auto*      image  = static_cast<DepthStencilVulkanImage*>(object.obj);
+		const auto extent = image->GetGuestExtent();
+		if (image->stencil_vaddr != vaddr || extent.width != width || extent.height != height)
+		{
+			continue;
+		}
+		EXIT_IF(found != nullptr && found != image);
+		found = image;
+	}
+	return found;
 }
 
 Vector<DepthStencilVulkanImage*> FindDepthStencil(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact)

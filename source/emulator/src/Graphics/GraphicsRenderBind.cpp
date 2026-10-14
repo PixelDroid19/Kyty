@@ -3566,12 +3566,25 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		VulkanImage* tex            = nullptr;
 		bool         render_texture = false;
 		bool         depth_texture  = false;
+		bool         stencil_texture = false;
 		const char*  materialize    = "unresolved";
 		char         depth_refusal[192] = "";
 		// A live storage image read through another format of its texel size.
 		VkFormat     reinterpret_format = VK_FORMAT_UNDEFINED;
 
-		if (check_depth_texture)
+		// An 8-bit unsigned read of a live depth target's stencil plane reads the
+		// stencil the device wrote; guest memory holds only the plane's last upload.
+		if (gen5 && check_depth_texture && fmt == 5u && !arrayed_2d && !three_dimensional)
+		{
+			tex = FindStencilPlane(buffer, addr, size.size, width, height);
+			if (tex != nullptr)
+			{
+				depth_texture   = true;
+				stencil_texture = true;
+				materialize     = "stencil-plane";
+			}
+		}
+		if (check_depth_texture && !stencil_texture)
 		{
 			auto dtex     = FindDepthStencil(buffer, addr, size.size, true);
 			const bool depth_exact = !dtex.IsEmpty();
@@ -4290,7 +4303,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			         ? VulkanImage::VIEW_3D
 			         : (depth_texture ? (arrayed_2d ? VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY : VulkanImage::VIEW_DEPTH_TEXTURE)
 			                          : (arrayed_2d ? VulkanImage::VIEW_ARRAY : VulkanImage::VIEW_DEFAULT)));
-			if (depth_texture && tex == stencil_attached_depth)
+			if (stencil_texture)
+			{
+				if (tex == stencil_attached_depth)
+				{
+					EXIT("stencil plane 0x%012" PRIx64 " sampled while the draw writes it\n", static_cast<uint64_t>(addr));
+				}
+				sampled_views[*sampled_index] = VulkanImage::VIEW_STENCIL_TEXTURE;
+			} else if (depth_texture && tex == stencil_attached_depth)
 			{
 				sampled_views[*sampled_index] |= VulkanImage::VIEW_STENCIL_ATTACHED_DEPTH;
 			}
