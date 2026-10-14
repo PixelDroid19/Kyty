@@ -918,6 +918,7 @@ public:
 		}
 
 		const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+		UnindexSnapshot(entry);
 		entry->snapshot_valid = false;
 		entry->nonzero_end    = std::max(entry->nonzero_end, size);
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
@@ -977,17 +978,7 @@ public:
 			const uint64_t excluded_ns = *validation_ns > UINT64_MAX - *compare_ns ? UINT64_MAX : *validation_ns + *compare_ns;
 			*upload_ns = total_ns > excluded_ns ? total_ns - excluded_ns : 0u;
 		};
-		Entry*     previous      = nullptr;
-		for (auto it = m_entries.rbegin(); it != m_entries.rend(); ++it)
-		{
-			auto* candidate = *it;
-			if (!candidate->scratch && candidate->snapshot_valid && candidate->usage == usage &&
-			    candidate->snapshot_vaddr == vaddr && candidate->snapshot_size == size && candidate->snapshot_begin <= read_begin)
-			{
-				previous = candidate;
-				break;
-			}
-		}
+		Entry* previous = FindSnapshot(vaddr, size, usage, read_begin);
 		if (previous != nullptr)
 		{
 			bool     matches             = false;
@@ -1047,10 +1038,12 @@ public:
 		}
 		*validation_ns += atomic_validation_ns;
 		DebugStatsRecordUpload(size - read_begin, copy_ns);
+		UnindexSnapshot(entry);
 		entry->snapshot_valid = true;
 		entry->snapshot_vaddr = vaddr;
 		entry->snapshot_size  = size;
 		entry->snapshot_begin = read_begin;
+		m_snapshots[SnapshotKey {vaddr, size, usage}].push_back(entry);
 		Commit(entry, size);
 		finish_upload_time();
 		return &entry->buffer;
@@ -1164,10 +1157,69 @@ public:
 			delete entry;
 		}
 		m_entries.clear();
+		m_snapshots.clear();
 		m_total_bytes = 0;
 	}
 
 private:
+	struct SnapshotKey
+	{
+		uint64_t vaddr = 0;
+		uint64_t size  = 0;
+		uint32_t usage = 0;
+
+		bool operator==(const SnapshotKey& other) const
+		{
+			return vaddr == other.vaddr && size == other.size && usage == other.usage;
+		}
+	};
+	struct SnapshotKeyHash
+	{
+		size_t operator()(const SnapshotKey& key) const
+		{
+			uint64_t hash = key.vaddr * 0x9e3779b97f4a7c15ull;
+			hash ^= key.size + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u);
+			hash ^= key.usage + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u);
+			return static_cast<size_t>(hash);
+		}
+	};
+
+	// Latest committed entry first: the one most likely to still match guest memory.
+	Entry* FindSnapshot(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin) const
+	{
+		const auto it = m_snapshots.find(SnapshotKey {vaddr, size, usage});
+		if (it == m_snapshots.end())
+		{
+			return nullptr;
+		}
+		for (auto entry = it->second.rbegin(); entry != it->second.rend(); ++entry)
+		{
+			if ((*entry)->snapshot_begin <= read_begin)
+			{
+				return *entry;
+			}
+		}
+		return nullptr;
+	}
+
+	void UnindexSnapshot(Entry* entry)
+	{
+		if (!entry->snapshot_valid)
+		{
+			return;
+		}
+		const auto it = m_snapshots.find(SnapshotKey {entry->snapshot_vaddr, entry->snapshot_size, entry->usage});
+		EXIT_IF(it == m_snapshots.end());
+		auto&      entries = it->second;
+		const auto indexed = std::find(entries.begin(), entries.end(), entry);
+		EXIT_IF(indexed == entries.end());
+		entries.erase(indexed);
+		if (entries.empty())
+		{
+			m_snapshots.erase(it);
+		}
+	}
+
 	Entry* Acquire(GraphicContext* ctx, uint64_t size, uint32_t usage, GpuMemoryTransientBufferAllocationClass allocation_class,
 	               bool allow_create, bool* created)
 	{
@@ -1316,6 +1368,8 @@ private:
 	}
 
 	std::vector<Entry*> m_entries;
+	// Entries holding a valid snapshot, by the guest range and usage they hold.
+	std::unordered_map<SnapshotKey, std::vector<Entry*>, SnapshotKeyHash> m_snapshots;
 	uint64_t            m_total_bytes = 0;
 };
 
