@@ -299,12 +299,11 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 			KYTY_LOG_DEBUG("reg = %u, size = %u, va[%u] = 0x%08" PRIx32 "\n", reg, size, i, attrib[in.semantic]);
 		}
 
-		size_t   index       = attrib[in.semantic] & 0x1fu;
-		uint32_t format      = (attrib[in.semantic] >> 5u) & 0x1ffu;
-		uint32_t offset      = (attrib[in.semantic] >> 14u) & 0xfffu;
-		uint32_t fetch_index = (attrib[in.semantic] >> 26u) & 0x1u;
+		const auto     decoded = ShaderDecodeGen5VertexAttrib(attrib[in.semantic]);
+		const size_t   index   = decoded.slot;
+		const uint32_t offset  = decoded.offset;
 
-		if (fetch_index != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fetch_index != 0 condition ignored (continuing)\n"); }
+		if (decoded.instance) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fetch_index != 0 condition ignored (continuing)\n"); }
 
 		if (index >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
 
@@ -316,9 +315,9 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 			if (vertex_attr_log < 32u)
 			{
 				KYTY_LOG_DEBUG(
-				             "KYTY_VERTEX_ATTR semantic=%u raw=0x%08" PRIx32 " index=%zu format=0x%03" PRIx32 " offset=0x%03" PRIx32
+				             "KYTY_VERTEX_ATTR semantic=%u raw=0x%08" PRIx32 " index=%zu format=%u components=%u offset=0x%03" PRIx32
 				             " attrib=%p buffer=%p sharp=%p words=%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 "\n",
-				             in.semantic, attrib[in.semantic], index, format, offset, static_cast<const void*>(attrib),
+				             in.semantic, attrib[in.semantic], index, decoded.format, decoded.components, offset, static_cast<const void*>(attrib),
 				             static_cast<const void*>(buffer), static_cast<const void*>(sharp), sharp[0], sharp[1], sharp[2], sharp[3]);
 			}
 		}
@@ -336,38 +335,18 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 		r.fields[1]       = sharp[1];
 		r.fields[2]       = sharp[2];
 		r.fields[3]       = sharp[3];
-		if (format != 0)
+		rd.registers_num = static_cast<int>(size);
+		if (decoded.format != 0)
 		{
-			const auto     input_format    = VulkanResolveGen5VertexAttribInputFormat(static_cast<uint16_t>(format));
-			const uint32_t component_count = input_format.component_count;
-			if (input_format.format == VK_FORMAT_UNDEFINED || component_count == 0)
+			const auto input_format = VulkanResolveGen5VertexInputFormat(decoded.format);
+			if (input_format.format == VK_FORMAT_UNDEFINED)
 			{
-				// Keep the V# format/DST_SEL. Overwriting with unified 0 makes
-				// VulkanBuildVertexInputLayout reject a live RGB32F stream.
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-				               "WARNING: unknown vertex attrib format 0x%x; keeping buffer format\n", format);
-			} else
-			{
-				if (size == 0 || size > 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size == 0 || size > 4 condition ignored (continuing)\n"); }
-				uint32_t swizzle = DstSel(4, 0, 0, 1);
-				switch (component_count)
-				{
-					case 2: swizzle = DstSel(4, 5, 0, 1); break;
-					case 3: swizzle = DstSel(4, 5, 6, 1); break;
-					case 4: swizzle = DstSel(4, 5, 6, 7); break;
-					default: break;
-				}
-				r.fields[3] = (r.fields[3] & ~((0x7fu << 12u) | 0xfffu)) |
-				              (static_cast<uint32_t>(input_format.unified_format) << 12u) | swizzle;
+				EXIT("unsupported vertex attribute format %u (%u components)\n", decoded.format, decoded.components);
 			}
-			// The semantic controls the shader input width; the backing format
-			// controls storage and descriptor swizzles. Either may have more
-			// components: shaders can ignore stored components or consume the
-			// descriptor's default channels.
-			rd.registers_num = static_cast<int>(size);
-		} else
-		{
-			rd.registers_num = static_cast<int>(size);
+			// The semantic controls the shader input width; the override sets
+			// storage format and DST_SEL. Either may have more components.
+			r.fields[3] = (r.fields[3] & ~((0x7fu << 12u) | 0xfffu)) | (static_cast<uint32_t>(decoded.format) << 12u) |
+			              ShaderGen5VertexAttribDstSel(decoded.components);
 		}
 		if (offset != 0)
 		{

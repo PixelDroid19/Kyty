@@ -1663,15 +1663,9 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).format, VK_FORMAT_UNDEFINED);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).component_count, 0u);
 
-	// Attrib words store either a 9-bit encoded id (0x12a) or the unified
-	// guest format (74/64/29). Both must resolve; 74/64 are the live stride-48
-	// position/UV ids.
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(0x12a).format, VK_FORMAT_R32G32B32_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(74).format, VK_FORMAT_R32G32B32_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(74).component_count, 3u);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(64).format, VK_FORMAT_R32G32_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(29).format, VK_FORMAT_R16G16_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(0).format, VK_FORMAT_UNDEFINED);
+	// Gen5 format 50 is 2_10_10_10_UNORM: R in the low 10 bits, 2-bit A on top.
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).format, VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).component_count, 4u);
 
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(14, 7).format, VK_FORMAT_R32G32B32A32_SFLOAT);
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(13, 7).component_count, 3u);
@@ -1681,13 +1675,39 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_TRUE(ShaderIsGen5SingleComponent32BitBufferFormat(22));
 }
 
+TEST(EmulatorGraphicsPackets, DecodesGen5VertexAttribControlWord)
+{
+	// Format override field is (data_format << 2) | (components - 1).
+	const uint32_t normal = (0x018u << 14u) | (0x10bu << 5u) | 3u;
+	const auto     decoded = ShaderDecodeGen5VertexAttrib(normal);
+	EXPECT_EQ(decoded.slot, 3u);
+	EXPECT_EQ(decoded.format, 66u);
+	EXPECT_EQ(decoded.components, 4u);
+	EXPECT_EQ(decoded.offset, 0x018u);
+	EXPECT_FALSE(decoded.instance);
+
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x12au << 5u).format, 74u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x12au << 5u).components, 3u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x101u << 5u).format, 64u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x101u << 5u).components, 2u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x05du << 5u).format, 23u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x0cbu << 5u).format, 50u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x10au << 5u).components, 3u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0u).format, 0u);
+	EXPECT_TRUE(ShaderDecodeGen5VertexAttrib(1u << 26u).instance);
+
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(1u), DstSel(4, 0, 0, 1));
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(2u), DstSel(4, 5, 0, 1));
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(3u), DstSel(4, 5, 6, 1));
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(4u), DstSel(4, 5, 6, 7));
+}
+
 TEST(EmulatorGraphicsPackets, ResolvesNormalized16BitVertexFormat)
 {
 	const auto format = VulkanResolveGen5VertexInputFormat(66u);
 	EXPECT_EQ(format.format, VK_FORMAT_R16G16B16A16_SNORM);
 	EXPECT_EQ(format.component_count, 4u);
 	EXPECT_EQ(format.numeric_class, VulkanVertexInputNumericClass::Float);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(66u).format, format.format);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0u).format, VK_FORMAT_UNDEFINED);
 }
 

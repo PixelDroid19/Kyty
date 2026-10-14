@@ -1221,6 +1221,42 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 	return x | (y << 3u) | (z << 6u) | (w << 9u);
 }
 
+// Gen5 vertex attribute control word, decoded the way guest fetch code does:
+// bits 0..4 V# slot, 5..6 component count - 1, 7..13 buffer data format
+// (0 keeps the V# format and DST_SEL), 14..25 byte offset, 26 instance index.
+struct ShaderGen5VertexAttrib
+{
+	uint32_t slot       = 0;
+	uint32_t components = 0;
+	uint8_t  format     = 0;
+	uint32_t offset     = 0;
+	bool     instance   = false;
+};
+
+constexpr ShaderGen5VertexAttrib ShaderDecodeGen5VertexAttrib(uint32_t word)
+{
+	ShaderGen5VertexAttrib attrib;
+	attrib.slot       = word & 0x1fu;
+	attrib.components = ((word >> 5u) & 0x3u) + 1u;
+	attrib.format     = static_cast<uint8_t>((word >> 7u) & 0x7fu);
+	attrib.offset     = (word >> 14u) & 0xfffu;
+	attrib.instance   = ((word >> 26u) & 0x1u) != 0;
+	return attrib;
+}
+
+// DST_SEL the guest writes for a format override: present components are
+// identity, missing Y/Z read 0 and missing W reads 1.
+constexpr uint32_t ShaderGen5VertexAttribDstSel(uint32_t components)
+{
+	switch (components)
+	{
+		case 1: return DstSel(4, 0, 0, 1);
+		case 2: return DstSel(4, 5, 0, 1);
+		case 3: return DstSel(4, 5, 6, 1);
+		default: return DstSel(4, 5, 6, 7);
+	}
+}
+
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format);
