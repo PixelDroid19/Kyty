@@ -174,14 +174,19 @@ private:
 
 	// Exact registered range [begin, end). Write and fallback evidence lives in
 	// page and block metadata; a range is HashFallback once any of its pages was
-	// marked after the range registered. The edge caches are query state, used
-	// only under the registration mutex.
+	// marked after the range registered. The edge caches and the armed proof are
+	// query state, used only under the registration mutex.
 	struct RangeRecord
 	{
 		uint32_t             refs             = 0;
 		uint64_t             registered_epoch = 0;
 		mutable EdgeEvidence head {};
 		mutable EdgeEvidence tail {};
+		// Block change total read before a rearm found every page armed. A page
+		// leaves Armed only through a write, fallback or authority change that
+		// advances its block, so an equal total proves the range still armed.
+		uint64_t armed_block_changes = 0;
+		bool     armed_proven        = false;
 	};
 	using RangeKey = std::pair<uintptr_t, uintptr_t>;
 
@@ -231,6 +236,7 @@ private:
 	[[nodiscard]] const BlockEntry* FindBlock(uintptr_t page) const noexcept;
 	[[nodiscard]] uint32_t          FindOrCreateBlock(uintptr_t page) noexcept;
 	[[nodiscard]] BlockEntry*       BlockOf(const PageEntry* page) noexcept;
+	[[nodiscard]] bool              BlockChangesOf(uintptr_t first, uintptr_t last, uint64_t* changes) const noexcept;
 	[[nodiscard]] RangeEvidence     SegmentEvidence(uintptr_t first_index, uintptr_t last_index) const noexcept;
 	[[nodiscard]] RangeEvidence     RangeEvidenceOf(const RangeKey& range, const RangeRecord& record) const noexcept;
 	[[nodiscard]] bool              RangeIsFallback(const RangeKey& range, const RangeRecord& record) const noexcept;
