@@ -4080,6 +4080,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 		}
 
+		if (gen5 && tex != nullptr && r.MetaCompress())
+		{
+			ColorDccImage image {};
+			image.address           = addr;
+			image.size              = size.size;
+			image.dcc_addr          = r.MetaAddr() << 8u;
+			image.width             = static_cast<uint32_t>(width);
+			image.height            = static_cast<uint32_t>(height);
+			image.bytes_per_element = ShaderGen5TextureBytesPerElement(fmt);
+			image.alpha_on_msb      = r.DccAlphaPos();
+			image.single_surface    = levels == 1u && !arrayed_2d && !three_dimensional;
+			ConsumeImageColorDccClear(buffer, image);
+		}
 		if (tex == nullptr)
 		{
 			if (std::strcmp(materialize, "unresolved") == 0)

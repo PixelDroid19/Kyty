@@ -8,6 +8,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/ColorDccClear.h"
 #include "Emulator/Graphics/ComputeColorFill.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -51,6 +52,8 @@
 namespace Kyty::Libs::Graphics {
 
 static ComputeColorFillEvents g_compute_color_fills;
+// Pending DCC metadata clears, keyed by the metadata range the guest filled.
+static ComputeColorFillEvents g_color_dcc_clears;
 static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, VkImageLayout new_layout, VkAccessFlags dst_access,
                                  VkPipelineStageFlags dst_stage);
 
@@ -120,8 +123,11 @@ static Vector<VulkanImage*> FindComputeColorFillImages(CommandBuffer* buffer, ui
 	return images;
 }
 
-static bool ApplyComputeColorFillImages(CommandBuffer* buffer, const ComputeColorFillIdentity& identity,
-                                        const std::array<uint32_t, 4>& words, const Vector<VulkanImage*>& images)
+// Clears every exact color-image alias of [address, address + size) to the
+// value decode gives for the image format.
+template <typename Decode>
+static bool ClearColorImageAliases(CommandBuffer* buffer, uint64_t address, uint64_t size, const Vector<VulkanImage*>& images,
+                                   Decode decode)
 {
 	if (!ComputeColorFillUsesGraphicsQueue(buffer) || images.IsEmpty()) { return false; }
 	// Validate the entire alias set before emitting anything. Partial success
@@ -130,8 +136,8 @@ static bool ApplyComputeColorFillImages(CommandBuffer* buffer, const ComputeColo
 	for (uint32_t i = 0; i < images.Size(); ++i)
 	{
 		const auto* image = images[i];
-		if (image == nullptr || image->image == nullptr || !DecodeGuestUniformFillTexel(words, image->format, &clears[i]) ||
-		    image->guest_size != identity.size || image->samples != VK_SAMPLE_COUNT_1_BIT ||
+		if (image == nullptr || image->image == nullptr || !decode(image->format, &clears[i]) || image->guest_size != size ||
+		    image->samples != VK_SAMPLE_COUNT_1_BIT ||
 		    (image->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
 		{
 			return false;
@@ -161,14 +167,21 @@ static bool ApplyComputeColorFillImages(CommandBuffer* buffer, const ComputeColo
 		TransitionColorImage(vk_buffer, image, restore_layout, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
 		                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 	}
-	GpuMemoryResetHash(&identity.address, &identity.size, 1, GpuMemoryObjectType::RenderTexture);
-	GpuMemoryResetHash(&identity.address, &identity.size, 1, GpuMemoryObjectType::Texture);
+	GpuMemoryResetHash(&address, &size, 1, GpuMemoryObjectType::RenderTexture);
+	GpuMemoryResetHash(&address, &size, 1, GpuMemoryObjectType::Texture);
 	return true;
+}
+
+static bool ApplyComputeColorFillImages(CommandBuffer* buffer, const ComputeColorFillIdentity& identity,
+                                        const std::array<uint32_t, 4>& words, const Vector<VulkanImage*>& images)
+{
+	return ClearColorImageAliases(buffer, identity.address, identity.size, images, [&](VkFormat format, VkClearColorValue* clear)
+	                              { return DecodeGuestUniformFillTexel(words, format, clear); });
 }
 
 void InvalidateComputeColorFills(const ShaderBindResources& bind)
 {
-	if (g_compute_color_fills.Empty()) { return; }
+	if (g_compute_color_fills.Empty() && g_color_dcc_clears.Empty()) { return; }
 	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
 	{
 		if (ShaderStorageUsageIsReadOnly(bind.storage_buffers.usages[i])) { continue; }
@@ -177,10 +190,14 @@ void InvalidateComputeColorFills(const ShaderBindResources& bind)
 		if (resource.Base48() == 0u || size == 0u || resource.Base48() > UINT64_MAX - size)
 		{
 			g_compute_color_fills.DiscardAll();
+			g_color_dcc_clears.DiscardAll();
 			return;
 		}
 		g_compute_color_fills.DiscardOverlaps(resource.Base48(), size);
+		g_color_dcc_clears.DiscardOverlaps(resource.Base48(), size);
 	}
+	// A DCC clear survives writable image binds: its consumer re-resolves the
+	// metadata range, which refuses a storage image over that range.
 	for (int i = 0; i < bind.textures2D.textures_num; ++i)
 	{
 		if (bind.textures2D.desc[i].usage != ShaderTextureUsage::ReadOnly)
@@ -299,6 +316,113 @@ bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUnifor
 	// writes even when there is no subsequent storage rebind or flush.
 	const auto observation = GpuDirtyPageTracker::Instance().BeginRead(identity.address, identity.size);
 	return observation.tracked && g_compute_color_fills.Publish(identity, submission, words, observation);
+}
+
+bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+{
+	// Any other fill of the metadata, including the uncompressed key, ends a pending clear.
+	g_color_dcc_clears.DiscardOverlaps(fill.address, fill.size);
+	ColorDccClearCode code {};
+	ComputeColorFillIdentity identity {};
+	SubmissionId submission;
+	if (!ColorDccClearCodeFromFill(fill.words, &code) || !ComputeColorFillUsesGraphicsQueue(buffer) ||
+	    !ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true) || !buffer->GetSubmissionId(&submission))
+	{
+		return false;
+	}
+	const auto observation = GpuDirtyPageTracker::Instance().BeginRead(identity.address, identity.size);
+	return observation.tracked && g_color_dcc_clears.Publish(identity, submission, fill.words, observation);
+}
+
+// Removes the pending clear of the metadata plane at dcc_address and returns it
+// when the same storage incarnation still holds it and it rewrote every key of
+// the width x height surface.
+static bool TakeColorDccClear(CommandBuffer* buffer, uint64_t dcc_address, uint32_t width, uint32_t height, uint32_t bytes_per_element,
+                              ColorDccClearCode* code)
+{
+	const auto* pending = g_color_dcc_clears.FindAt(dcc_address);
+	if (pending == nullptr) { return false; }
+	const uint64_t address = pending->identity.address;
+	const uint64_t size    = pending->identity.size;
+	ComputeColorFillIdentity identity {};
+	SubmissionId submission;
+	if (!ResolveComputeColorFillIdentity(address, size, &identity, false) || !buffer->GetSubmissionId(&submission))
+	{
+		g_color_dcc_clears.DiscardOverlaps(address, size);
+		return false;
+	}
+	ComputeColorFillEvent event {};
+	return g_color_dcc_clears.Consume(identity, submission, &event) &&
+	       GpuDirtyPageTracker::Instance().ReadObservationIsStable(address, size, event.cpu_observation) &&
+	       ColorDccFillCoversSurface(address, size, dcc_address, width, height, bytes_per_element) &&
+	       ColorDccClearCodeFromFill(event.words, code);
+}
+
+// Channel count of the host formats whose DCC clear values are decoded.
+static uint32_t ColorDccClearChannels(VkFormat format)
+{
+	switch (format)
+	{
+		case VK_FORMAT_R16G16B16A16_SFLOAT:
+		case VK_FORMAT_R8G8B8A8_UNORM:
+		case VK_FORMAT_R8G8B8A8_SRGB:
+		case VK_FORMAT_B8G8R8A8_UNORM:
+		case VK_FORMAT_B8G8R8A8_SRGB: return 4u;
+		case VK_FORMAT_R32_SFLOAT: return 1u;
+		default: return 0u;
+	}
+}
+
+static bool DecodeColorDccClear(ColorDccClearCode code, bool alpha_on_msb, VkFormat format, VkClearColorValue* clear)
+{
+	std::array<float, 4> rgba {};
+	if (!ColorDccClearValue(code, alpha_on_msb, ColorDccClearChannels(format), &rgba)) { return false; }
+	*clear = {};
+	for (uint32_t channel = 0; channel < 4u; ++channel) { clear->float32[channel] = rgba[channel]; }
+	return true;
+}
+
+// A render target bound with DCC reads its pending metadata clear: the clear
+// key, or for the register key the target's clear words, becomes its contents.
+static void ConsumeColorDccClear(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
+{
+	ColorDccClearCode code {};
+	if (g_color_dcc_clears.Empty() || attachment.dcc_addr == 0u ||
+	    !TakeColorDccClear(buffer, attachment.dcc_addr, attachment.width, attachment.height, attachment.bytes_per_element, &code))
+	{
+		return;
+	}
+	const auto target_format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
+	(void)ClearColorImageAliases(buffer, attachment.base_addr, attachment.size,
+	                             FindComputeColorFillImages(buffer, attachment.base_addr, attachment.size),
+	                             [&](VkFormat format, VkClearColorValue* clear)
+	                             {
+		                             if (code != ColorDccClearCode::Register)
+		                             {
+			                             return DecodeColorDccClear(code, attachment.dcc_alpha_on_msb, format, clear);
+		                             }
+		                             if (format != target_format || ColorDccClearChannels(format) == 0u) { return false; }
+		                             *clear = DecodeGuestColorClearWords(attachment.clear_word0, attachment.clear_word1, format);
+		                             return true;
+	                             });
+}
+
+// The first shader access to an image, read or write, follows its pending
+// metadata clear, so the clear becomes the image contents before the access.
+// A clear the image cannot represent is dropped so it never lands over later writes.
+void ConsumeImageColorDccClear(CommandBuffer* buffer, const ColorDccImage& image)
+{
+	ColorDccClearCode code {};
+	// The texture unit decodes the clear keys but not the register key.
+	if (g_color_dcc_clears.Empty() || image.dcc_addr == 0u ||
+	    !TakeColorDccClear(buffer, image.dcc_addr, image.width, image.height, image.bytes_per_element, &code) ||
+	    !image.single_surface || code == ColorDccClearCode::Register)
+	{
+		return;
+	}
+	(void)ClearColorImageAliases(buffer, image.address, image.size, FindComputeColorFillImages(buffer, image.address, image.size),
+	                             [&](VkFormat format, VkClearColorValue* clear)
+	                             { return DecodeColorDccClear(code, image.alpha_on_msb, format, clear); });
 }
 
 static void ConsumeComputeColorFill(CommandBuffer* buffer, uint64_t address, uint64_t size)
@@ -1046,6 +1170,14 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		attachment.existing_video_image = video_image.image;
 	}
 
+	// DCC clears are decoded for single-level, single-slice, single-sample targets only.
+	if (rt.info.dcc_compression_enable && rt.attrib2.num_mip_levels == 0u && rt.view.current_mip_level == 0u &&
+	    attachment.image_layers == 1u && attachment.samples == VK_SAMPLE_COUNT_1_BIT)
+	{
+		attachment.dcc_addr          = rt.dcc_addr.addr;
+		attachment.dcc_alpha_on_msb  = ColorDccAlphaOnMsb(rt.info.channel_order);
+		attachment.bytes_per_element = render_format.bytes_per_element;
+	}
 	attachment.cmask_fast_clear_enable = rt.info.cmask_fast_clear_enable;
 	attachment.clear_word0             = rt.clear_word0.word0;
 	attachment.clear_word1             = rt.clear_word1.word1;
@@ -1313,6 +1445,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		attachment.attachment_format = buffer_vulkan->format;
 		attachment.attachment_view   = VulkanImage::VIEW_DEFAULT;
 		ConsumeComputeColorFill(buffer, attachment.base_addr, attachment.size);
+		ConsumeColorDccClear(buffer, attachment);
 	}
 }
 

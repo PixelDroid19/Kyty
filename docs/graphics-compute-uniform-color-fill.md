@@ -56,6 +56,43 @@ by it, leaving only the UI visible.
 This is not general buffer/image coherence or support for other clear kernels,
 compressed formats, partial fills or arbitrary alias topologies.
 
+## DCC metadata clears
+
+The same kernel also fills color DCC metadata. Gen5 color DCC keeps one key
+byte per 256-byte compressed block; a key that names a clear state makes every
+texel of its block read as that state. A fill whose bytes all hold one of the
+clear keys `0x00` (all channels 0), `0x40` (color 0, alpha 1), `0x80` (color 1,
+alpha 0), `0xc0` (all channels 1) or `0x20` (the target's
+`CB_COLOR_CLEAR_WORD0/1`) is held as a pending clear of that metadata range,
+with the same storage identity, submission and dirty-page rules as above. Any
+other fill of the range, including the uncompressed key `0xff`, or any
+writable storage-buffer bind over it, drops the pending clear.
+
+The first access to the color surface consumes the clear once, before the
+access: a render target bound with DCC (`CB_COLOR_DCC_BASE`) or a shader image,
+read or written, whose T# enables compression and names that metadata base.
+The clear becomes the contents of every exact color-image alias of the
+surface. It is applied only when the fill starts at the metadata base and holds
+at least one key per 256 bytes of texels, and only to single-level,
+single-slice, single-sample surfaces. Keys `0x40` and `0x80` are decoded only
+for four-channel formats with alpha in the most significant channel
+(`COMP_SWAP` STD or ALT for a target, `ALPHA_IS_ON_MSB` for a T#); the register
+key is decoded only for a render target whose image format is the target
+format. A shader image access that cannot apply the clear still drops it, so a
+clear never lands on contents written after it.
+
+Evidence: the robot platformer resets its UI layer metadata with `0x40` every
+frame and draws the UI over it. Without the clear the UI accumulated earlier
+frames (stale publisher text, smeared logo) and, because the composite uses the
+UI alpha as scene transmittance, hid the 3D scene. Its lighting target is reset
+with `0x00` and then written by four lighting compute passes before its first
+render-target bind; consuming the clear at that later bind erased the lighting,
+so the clear is consumed at the first shader image access instead.
+
+Not modelled: the pipe-dependent padding of the metadata plane (the coverage
+check uses the unpadded key count), mip chains, arrays, MSAA, REV component
+swaps and register-key clears read through the texture unit.
+
 Focused tests: `EmulatorComputeColorFill.*` (program recognition and rejection,
 event consume-once, identity and queue mismatch, bounded eviction and texel
 decoding). The GPU integration cases of the September working copy

@@ -828,6 +828,10 @@ struct RenderColorAttachmentInfo
 	RenderColorType       type                    = RenderColorType::NoColorOutput;
 	VulkanImage*          vulkan_buffer           = nullptr;
 	uint64_t              base_addr               = 0;
+	// DCC metadata base of a single-level, single-slice target; zero otherwise.
+	uint64_t              dcc_addr                = 0;
+	bool                  dcc_alpha_on_msb        = false;
+	uint32_t              bytes_per_element       = 0;
 	bool                  cmask_fast_clear_enable = false;
 	uint32_t              clear_word0             = 0;
 	uint32_t              clear_word1             = 0;
@@ -1672,6 +1676,23 @@ struct ComputeUniformBufferFill
 // Ordered compute fills of color-image aliases (docs/graphics-compute-uniform-color-fill.md).
 void               InvalidateComputeColorFills(const ShaderBindResources& bind);
 [[nodiscard]] bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// A proven uniform fill of a DCC metadata range with a clear key is held until
+// a render target or shader image with that metadata base consumes it.
+[[nodiscard]] bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+
+// A color image bound to a shader, read or written, whose T# enables DCC.
+struct ColorDccImage
+{
+	uint64_t address           = 0;
+	uint64_t size              = 0;
+	uint64_t dcc_addr          = 0;
+	uint32_t width             = 0;
+	uint32_t height            = 0;
+	uint32_t bytes_per_element = 0;
+	bool     alpha_on_msb      = false;
+	bool     single_surface    = false; // one level, one slice
+};
+void ConsumeImageColorDccClear(CommandBuffer* buffer, const ColorDccImage& image);
 Vector<StorageTextureVulkanImage*> FindStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 Vector<DepthStencilVulkanImage*>   FindDepthStencil(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 

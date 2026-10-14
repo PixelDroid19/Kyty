@@ -3183,6 +3183,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	    ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill))
 	{
 		(void)PropagateComputeUniformColorFill(buffer, fill);
+		(void)PublishComputeColorDccClear(buffer, fill);
 		(void)PublishComputeUniformFillToGuestAddress(buffer, fill);
 	}
 	DebugStatsRecordDispatch();
