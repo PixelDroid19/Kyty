@@ -28,10 +28,15 @@ fail on the current HEAD before acting on them.
   set per resource; `FreeSetsReferencing` still frees in ascending index order.
   `UnindexSet` disappears from the line profile. ABBA on Intel, 200 s per run,
   the last four capture intervals: baseline 11.0 / 9.3 FPS, change 11.25 /
-  11.25 FPS. Regression runs with the change, scripted routes, captures
-  checked: the racing title on Intel 38-42 FPS racing, the beat 'em up on Intel
-  14-15 FPS against a same-session baseline of 11-12 FPS, the 2D action title on
-  AMD 28 FPS in its menu; no fatal stop and no visual difference.
+  11.25 FPS. Regression runs with the change, scripted routes, the last four
+  captures checked by index: the racing title on Intel 38-42 FPS racing; the
+  beat 'em up on Intel renders its intro, dialogue and walking scenes correctly
+  (its route desynchronized between runs, so its frame rates are not
+  comparable); the 2D action title on AMD reaches gameplay with no HTILE trails;
+  the fishing title on AMD 7.3-7.7 FPS at the dock dialogue, which the slower
+  host reaches later (5.0-7.3 FPS there before the change). No fatal stop.
+  `scripts/kyty_playable_regression.py` cannot run on this host (no private
+  profile or guest root).
 - Excluded: remembering up to eight recently scanned clean ranges in the
   materialization cache so that a repeated `InvalidateRange` returns before its
   2048-span scan. ABBA on Intel against the fix above: 11.73 / 11.97 FPS with it
