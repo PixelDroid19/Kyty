@@ -287,6 +287,15 @@ VulkanDescriptorSet* DescriptorCache::Allocate(Stage stage, const ShaderDescript
 	{
 		return nullptr;
 	}
+	// The caller writes every binding of the layout, so a released set of the
+	// same layout serves without a pool allocation.
+	if (const auto recycled = m_recycled_sets.find(layout); recycled != m_recycled_sets.end() && !recycled->second.empty())
+	{
+		auto* set = recycled->second.back();
+		recycled->second.pop_back();
+		m_recycled_count--;
+		return set;
+	}
 
 	auto* ret = new VulkanDescriptorSet;
 
@@ -356,6 +365,20 @@ void DescriptorCache::Free(VulkanDescriptorSet* set)
 	}
 
 	delete set;
+}
+
+void DescriptorCache::Recycle(VulkanDescriptorSet* set)
+{
+	EXIT_IF(set == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+	if (m_recycled_count >= RECYCLED_SETS_MAX)
+	{
+		Free(set);
+		return;
+	}
+	m_recycled_sets[set->layout].push_back(set);
+	m_recycled_count++;
 }
 
 uint32_t DescriptorCache::CalcHash(const Set& s)
@@ -1199,9 +1222,19 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 	return released;
 }
 
+// A resource can be deleted while a submission that bound one of its sets is
+// still pending; only a set with every recorded use complete may be rewritten.
 void DescriptorCache::ReleaseSet(int index)
 {
-	Free(UnindexSet(index));
+	const auto& set      = m_sets.At(index);
+	const bool  complete = !set.untracked_use && GpuMemorySubmissionsComplete(set.uses.Dependencies());
+	auto*       released = UnindexSet(index);
+	if (complete)
+	{
+		Recycle(released);
+		return;
+	}
+	Free(released);
 }
 
 void DescriptorCache::RecordSetUse(int index, CommandBuffer* buffer)
@@ -1255,7 +1288,7 @@ void DescriptorCache::TrimSets()
 	for (auto& entry: retired)
 	{
 		auto* set = entry.set;
-		GpuMemoryDeferUntilSubmissionsComplete(std::move(entry.submissions), [this, set]() { Free(set); });
+		GpuMemoryDeferUntilSubmissionsComplete(std::move(entry.submissions), [this, set]() { Recycle(set); });
 	}
 }
 
@@ -1336,6 +1369,16 @@ void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
 		delete set.set;
 		set.set = nullptr;
 	}
+	for (auto& [layout, sets]: m_recycled_sets)
+	{
+		(void)layout;
+		for (auto* set: sets)
+		{
+			delete set;
+		}
+	}
+	m_recycled_sets.clear();
+	m_recycled_count = 0;
 	for (const auto& [key, layout]: m_descriptor_set_layouts)
 	{
 		(void)key;

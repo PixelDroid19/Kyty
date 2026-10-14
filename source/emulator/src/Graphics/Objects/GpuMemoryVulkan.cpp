@@ -566,6 +566,11 @@ void GpuMemory::DeferUntilSubmissionsComplete(std::vector<SubmissionId> submissi
 	}
 }
 
+bool GpuMemory::SubmissionsComplete(const std::vector<SubmissionId>& submissions) const
+{
+	return m_deferred_deletions.AreDependenciesComplete(submissions);
+}
+
 GpuMemoryGdsSource GpuMemoryAcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
@@ -576,6 +581,12 @@ void GpuMemoryDeferUntilSubmissionsComplete(std::vector<SubmissionId> submission
 {
 	EXIT_IF(g_gpu_memory == nullptr);
 	g_gpu_memory->DeferUntilSubmissionsComplete(std::move(submissions), std::move(task));
+}
+
+bool GpuMemorySubmissionsComplete(const std::vector<SubmissionId>& submissions)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	return g_gpu_memory->SubmissionsComplete(submissions);
 }
 
 } // namespace Kyty::Libs::Graphics

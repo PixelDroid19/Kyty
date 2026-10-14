@@ -340,6 +340,8 @@ public:
 
 	VulkanDescriptorSet* Allocate(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                 Free(VulkanDescriptorSet* set);
+	// Keeps a set whose submissions all completed for the next set of its layout.
+	void                 Recycle(VulkanDescriptorSet* set);
 
 	// The set is recorded as used by `buffer`'s submission; an untracked use
 	// keeps the set until a resource it references is deleted.
@@ -420,6 +422,9 @@ private:
 	// sets leave the cache and are freed once their submissions complete.
 	static constexpr uint32_t LIVE_SETS_MAX = 65536;
 	static constexpr uint32_t TRIM_SETS     = 8192;
+	// Released sets wait for reuse by the next set of their layout, up to this
+	// many in all; past it they return to their pool.
+	static constexpr uint32_t RECYCLED_SETS_MAX = 8192;
 
 	int                  FindSet(const Set& s);
 	void                 IndexSet(int index);
@@ -443,6 +448,8 @@ private:
 	std::unordered_map<uint64_t, std::unordered_set<int>> m_sets_by_resource;
 
 	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
+	std::unordered_map<VkDescriptorSetLayout, std::vector<VulkanDescriptorSet*>> m_recycled_sets;
+	uint32_t                                                               m_recycled_count = 0;
 };
 
 class SamplerCache

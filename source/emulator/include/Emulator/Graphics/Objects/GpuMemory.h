@@ -1144,6 +1144,8 @@ struct GpuMemoryGdsSource
 // Runs `task` when every submission is published, after its labels have fired.
 // A discarded recording's task runs once a later submission on its queue completes.
 void GpuMemoryDeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task);
+// True when every submission has completed on its queue.
+[[nodiscard]] bool GpuMemorySubmissionsComplete(const std::vector<SubmissionId>& submissions);
 // Exception handling accepts only a page fault caused by an armed tracker
 // protection. Known host/HLE writers use the explicit range notification.
 bool GpuMemoryCheckAccessViolation(uint64_t vaddr, Core::VirtualMemory::ExceptionHandler::AccessViolationType access);

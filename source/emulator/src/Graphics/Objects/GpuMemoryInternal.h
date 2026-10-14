@@ -350,6 +350,7 @@ public:
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
 	[[nodiscard]] GpuMemoryGdsSource AcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 	void DeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task);
+	[[nodiscard]] bool SubmissionsComplete(const std::vector<SubmissionId>& submissions) const;
 
 	// Sync: CPU -> GPU
 	void Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
