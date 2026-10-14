@@ -2817,6 +2817,49 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	DebugStatsRecordDrawCommandEmission(DrawStageElapsedNs(command_emission_start));
 }
 
+// The single writable storage object exactly covering a metadata fill
+// destination, live and produced no later than this submission.
+static const GpuMemoryRangeProvenanceEntry* FindDepthMetaFillStorage(uint64_t submit_id, uint64_t address, uint64_t size,
+                                                                     GpuMemoryRangeProvenance* provenance)
+{
+	if (size == 0u || !GpuMemoryQueryRangeProvenance(address, size, provenance) || provenance->truncated)
+	{
+		return nullptr;
+	}
+	const GpuMemoryRangeProvenanceEntry* storage = nullptr;
+	for (uint32_t i = 0; i < provenance->entry_count; ++i)
+	{
+		const auto& entry = provenance->entries[i];
+		if (entry.type != GpuMemoryObjectType::StorageBuffer || entry.relation != GpuMemoryOverlapType::Equals || entry.read_only)
+		{
+			continue;
+		}
+		if (storage != nullptr)
+		{
+			return nullptr;
+		}
+		storage = &entry;
+	}
+	if (storage == nullptr || !storage->in_use || !storage->write_back_capable || storage->logical_generation == 0u ||
+	    storage->backing_generation == 0u || storage->submit_id > submit_id)
+	{
+		return nullptr;
+	}
+	return storage;
+}
+
+static bool PublishDepthMetaFillWord(uint64_t submit_id, uint64_t address, uint64_t size, const GpuMemoryRangeProvenanceEntry& storage,
+                                     uint32_t word)
+{
+	DepthMetaStorageIdentity identity {};
+	identity.address                     = address;
+	identity.size                        = size;
+	identity.logical_generation          = storage.logical_generation;
+	identity.backing_generation          = storage.backing_generation;
+	identity.producer_or_consumer_submit = submit_id;
+	return DepthMetaPublishComputeFill(identity, word);
+}
+
 static bool TryPublishComputeDepthMetaFill(uint64_t submit_id, const ShaderComputeInputInfo& input, uint32_t thread_group_x,
                                            uint32_t thread_group_y, uint32_t thread_group_z)
 {
@@ -2898,38 +2941,24 @@ static bool TryPublishComputeDepthMetaFill(uint64_t submit_id, const ShaderCompu
 
 	const uint64_t destination_size = ShaderBufferByteSize(destination.Stride(), destination.NumRecords());
 	GpuMemoryRangeProvenance provenance {};
-	if (destination_size == 0u || !GpuMemoryQueryRangeProvenance(destination.Base48(), destination_size, &provenance) ||
-	    provenance.truncated)
-	{
-		return false;
-	}
-	const GpuMemoryRangeProvenanceEntry* storage = nullptr;
-	for (uint32_t i = 0; i < provenance.entry_count; ++i)
-	{
-		const auto& entry = provenance.entries[i];
-		if (entry.type != GpuMemoryObjectType::StorageBuffer || entry.relation != GpuMemoryOverlapType::Equals || entry.read_only)
-		{
-			continue;
-		}
-		if (storage != nullptr)
-		{
-			return false;
-		}
-		storage = &entry;
-	}
-	if (storage == nullptr || !storage->in_use || !storage->write_back_capable || storage->logical_generation == 0u ||
-	    storage->backing_generation == 0u || storage->submit_id > submit_id)
-	{
-		return false;
-	}
+	const auto* storage = FindDepthMetaFillStorage(submit_id, destination.Base48(), destination_size, &provenance);
+	return storage != nullptr && PublishDepthMetaFillWord(submit_id, destination.Base48(), destination_size, *storage, source_word);
+}
 
-	DepthMetaStorageIdentity identity {};
-	identity.address                     = destination.Base48();
-	identity.size                        = destination_size;
-	identity.logical_generation          = storage->logical_generation;
-	identity.backing_generation          = storage->backing_generation;
-	identity.producer_or_consumer_submit = submit_id;
-	return DepthMetaPublishComputeFill(identity, source_word);
+// The generic uniform fill kernel also resets HTILE. A fill of storage bound as
+// a depth target's metadata publishes the same event as the dedicated metadata
+// kernel, so the next bind of that target sees the clear in recording order.
+static bool PublishUniformDepthMetaFill(uint64_t submit_id, const ComputeUniformBufferFill& fill)
+{
+	const auto& words = fill.words;
+	if (words[1] != words[0] || words[2] != words[0] || words[3] != words[0])
+	{
+		return false;
+	}
+	GpuMemoryRangeProvenance provenance {};
+	const auto* storage = FindDepthMetaFillStorage(submit_id, fill.address, fill.size, &provenance);
+	return storage != nullptr && storage->depth_meta_bound &&
+	       PublishDepthMetaFillWord(submit_id, fill.address, fill.size, *storage, words[0]);
 }
 
 static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x, uint32_t thread_group_y,
@@ -3184,6 +3213,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	{
 		(void)PropagateComputeUniformColorFill(buffer, fill);
 		(void)PublishComputeColorDccClear(buffer, fill);
+		(void)PublishUniformDepthMetaFill(submit_id, fill);
 		(void)PublishComputeUniformFillToGuestAddress(buffer, fill);
 	}
 	DebugStatsRecordDispatch();

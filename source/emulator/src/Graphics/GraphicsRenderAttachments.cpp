@@ -489,15 +489,20 @@ static bool ResolveDepthMetaStorageIdentity(uint64_t submit_id, const RenderDept
 	return true;
 }
 
-// A zero HTILE word marks every sample of its 8x8 tile cleared, and the
-// attachment clear covers every sample, so multisampled targets qualify. A
-// depth-only target has no stencil plane to lose. Clearing either aspect of a
-// combined D32S8 image starts the render pass from UNDEFINED, so it qualifies
-// only when the guest also initializes stencil in the same first use;
-// otherwise Vulkan could discard a stencil plane whose metadata semantics are
-// not modeled.
+// An HTILE word with a zero ZMask marks every sample of its 8x8 tile cleared
+// to DB_DEPTH_CLEAR, and the attachment clear covers every sample, so
+// multisampled targets qualify. The word's Z range must hold that clear value.
+// 0xfffffff0 has a maximum Z of 1.0 in both layouts: [1, 1] without stencil
+// tiling, and base 1.0 with SMem 3 (expanded) with it, so the stencil plane
+// keeps its contents and the pass loads it. A zero word encodes [0, 0] and,
+// with stencil tiling, SMem 0 (cleared), so a combined D32S8 target qualifies
+// only when the guest clears stencil to zero in the same use.
 static bool DepthMetaComputeFillTranslatable(const RenderDepthInfo& depth, const DepthMetaClearEvent& pending)
 {
+	if (pending.pattern.kind == DepthMetaPatternKind::RecognizedClear)
+	{
+		return depth.depth_clear_value == 1.0f;
+	}
 	if (pending.pattern.kind != DepthMetaPatternKind::UniformZero || pending.pattern.first_word != 0u)
 	{
 		return false;

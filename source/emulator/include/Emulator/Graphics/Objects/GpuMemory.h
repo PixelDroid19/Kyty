@@ -170,6 +170,7 @@ struct GpuMemoryRangeProvenanceEntry
 	bool                   dependencies_complete = false;
 	bool                   check_hash             = false;
 	bool                   dirty_registered       = false;
+	bool                   depth_meta_bound       = false;
 };
 
 struct GpuMemoryRangeProvenance

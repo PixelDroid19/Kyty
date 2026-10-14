@@ -247,6 +247,7 @@ bool GpuMemory::QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRan
 		entry.dependencies_complete = m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies());
 		entry.check_hash            = info.check_hash;
 		entry.dirty_registered      = info.dirty_registered;
+		entry.depth_meta_bound      = info.depth_meta_bound;
 		    return true;
 	    });
 	out->truncated = !complete;
