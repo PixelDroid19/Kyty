@@ -6,9 +6,26 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <algorithm>
 #include <cinttypes>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <vector>
+
+// Public-domain outline rasterizer (TrueType and CFF). Static linkage keeps it
+// private to this translation unit.
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
+#define STBTT_STATIC
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "imstb_truetype.h"
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -17,6 +34,12 @@ namespace Kyty::Libs {
 LIB_VERSION("Font", 1, "Font", 1, 1);
 
 namespace Font {
+
+static constexpr int FONT_ERROR_INVALID_PARAMETER   = static_cast<int>(0x80460002u);
+static constexpr int FONT_ERROR_INVALID_FONT_HANDLE = static_cast<int>(0x80460005u);
+static constexpr int FONT_ERROR_FONT_OPEN_FAILED    = static_cast<int>(0x80460036u);
+static constexpr int FONT_ERROR_NO_SUPPORT_GLYPH    = static_cast<int>(0x80460042u);
+static constexpr int FONT_ERROR_NO_SUPPORT_SURFACE  = static_cast<int>(0x80460050u);
 
 // Guest SceFontMemory descriptor filled by sceFontMemoryInit. Layout matches
 // the public Prospero font memory handle used by CreateLibrary / renderer paths.
@@ -159,50 +182,57 @@ struct RendererState
 	uint64_t          edition;
 };
 
+// Font face decoded from guest-supplied font bytes. The bytes are copied so the
+// face outlives the guest buffer; font sets without bytes have no face.
+static constexpr uint32_t FONT_DATA_MAX_SIZE = 64u * 1024u * 1024u;
+
+struct FontFace
+{
+	std::vector<uint8_t> bytes;
+	stbtt_fontinfo       info {};
+};
+
+static std::shared_ptr<const FontFace> LoadFontFace(const void* data, uint32_t size)
+{
+	const auto* src  = static_cast<const uint8_t*>(data);
+	auto        face = std::make_shared<FontFace>();
+	face->bytes.assign(src, src + size);
+	const int offset = stbtt_GetFontOffsetForIndex(face->bytes.data(), 0);
+	if (offset < 0 || stbtt_InitFont(&face->info, face->bytes.data(), offset) == 0)
+	{
+		return nullptr;
+	}
+	return face;
+}
+
 // Opaque font handle returned by OpenFontSet / OpenFontMemory / OpenFontInstance.
 // Layout is host-owned; guest only treats the pointer as an opaque FontHandle.
-// Glyph rasterization is synthetic (filled rectangle) until a real face decoder
-// is wired; that is enough for boot layout and non-null render results.
-static constexpr uint32_t kFontGlyphMaxDim = 64;
-
-struct FontTransImage
-{
-	uint8_t* address;
-	uint32_t width_byte;
-	uint32_t image_width;
-	uint32_t image_height;
-};
-
 struct FontHandleState
 {
-	void*       library;
-	const void* data;
-	uint32_t    size;
-	uint32_t    font_set_type;
-	uint32_t    open_mode;
-	int         attribute;
-	void*       renderer;
-	float       scale_w;
-	float       scale_h;
-	float       effect_slant;
-	float       effect_weight_x;
-	float       effect_weight_y;
-	uint32_t    effect_weight_mode;
-	uint8_t     glyph_bits[kFontGlyphMaxDim * kFontGlyphMaxDim];
-	FontTransImage trans_image;
+	void*                           library;
+	std::shared_ptr<const FontFace> face;
+	uint32_t                        font_set_type;
+	uint32_t                        open_mode;
+	int                             attribute;
+	void*                           renderer;
+	float                           scale_w;
+	float                           scale_h;
+	float                           effect_slant;
+	float                           effect_weight_delta_x;
+	float                           effect_weight_delta_y;
+	uint32_t                        effect_weight_mode;
 };
 
-static int OpenFontHandle(void* library, const void* data, uint32_t size, uint32_t font_set_type,
+static int OpenFontHandle(void* library, std::shared_ptr<const FontFace> face, uint32_t font_set_type,
                           uint32_t open_mode, void** font_out)
 {
 	if (font_out == nullptr)
 	{
-		return -1;
+		return FONT_ERROR_INVALID_PARAMETER;
 	}
 	auto* handle               = new FontHandleState {};
 	handle->library            = library;
-	handle->data               = data;
-	handle->size               = size;
+	handle->face               = std::move(face);
 	handle->font_set_type      = font_set_type;
 	handle->open_mode          = open_mode;
 	handle->attribute          = 0;
@@ -211,8 +241,8 @@ static int OpenFontHandle(void* library, const void* data, uint32_t size, uint32
 	handle->scale_w            = 8.0f;
 	handle->scale_h            = 16.0f;
 	handle->effect_slant       = 0.0f;
-	handle->effect_weight_x    = 0.0f;
-	handle->effect_weight_y    = 0.0f;
+	handle->effect_weight_delta_x = 0.0f;
+	handle->effect_weight_delta_y = 0.0f;
 	handle->effect_weight_mode = 0;
 	*font_out                  = handle;
 	return OK;
@@ -221,6 +251,8 @@ static int OpenFontHandle(void* library, const void* data, uint32_t size, uint32
 // sceFontOpenFontSet — NID cKYtVmeSTcw
 // ABI: (library, font_set_type, open_mode, detail*, handle*). detail may be null.
 // Observed Astro: font_set_type=0x180700c7, open_mode=2, detail=null.
+// System font sets carry no guest bytes, so the handle has no face and glyph
+// queries report NO_SUPPORT_GLYPH.
 static int KYTY_SYSV_ABI FontOpenFontSet(void* library, uint32_t font_set_type, uint32_t open_mode,
                                          const void* detail, void** font_out)
 {
@@ -230,12 +262,12 @@ static int KYTY_SYSV_ABI FontOpenFontSet(void* library, uint32_t font_set_type, 
 	KYTY_LOG_DEBUG("\t open_mode     = 0x%" PRIx32 "\n", open_mode);
 	KYTY_LOG_DEBUG("\t detail        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(detail));
 	KYTY_LOG_DEBUG("\t font_out      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_out));
-	return OpenFontHandle(library, detail, 0, font_set_type, open_mode, font_out);
+	return OpenFontHandle(library, nullptr, font_set_type, open_mode, font_out);
 }
 
 // sceFontOpenFontMemory — NID KXUpebrFk1U
 // After package font APR resolve, Astro opens guest-mapped OTF bytes:
-// (library, font_address, font_size, detail*, handle*). Observed size 0x13534 (Cobe-Heavy.otf).
+// (library, font_address, font_size, detail*, handle*). Observed size 0x13534 (CFF outlines).
 static int KYTY_SYSV_ABI FontOpenFontMemory(void* library, const void* font_address, uint32_t font_size,
                                             const void* detail, void** font_out)
 {
@@ -246,7 +278,16 @@ static int KYTY_SYSV_ABI FontOpenFontMemory(void* library, const void* font_addr
 	KYTY_LOG_DEBUG("\t detail       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(detail));
 	KYTY_LOG_DEBUG("\t font_out     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_out));
 	(void)detail;
-	return OpenFontHandle(library, font_address, font_size, 0, 0, font_out);
+	if (font_address == nullptr || font_size == 0 || font_size > FONT_DATA_MAX_SIZE)
+	{
+		return FONT_ERROR_INVALID_PARAMETER;
+	}
+	auto face = LoadFontFace(font_address, font_size);
+	if (face == nullptr)
+	{
+		return FONT_ERROR_FONT_OPEN_FAILED;
+	}
+	return OpenFontHandle(library, std::move(face), 0, 0, font_out);
 }
 
 // sceFontOpenFontInstance — NID JzCH3SCFnAU (source may be null; setup_font optional).
@@ -258,11 +299,10 @@ static int KYTY_SYSV_ABI FontOpenFontInstance(void* font_handle, void* setup_fon
 	KYTY_LOG_DEBUG("\t font_out    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(font_out));
 	if (font_handle == nullptr)
 	{
-		return OpenFontHandle(nullptr, setup_font, 0, 0, 0, font_out);
+		return OpenFontHandle(nullptr, nullptr, 0, 0, font_out);
 	}
 	const auto* source = static_cast<const FontHandleState*>(font_handle);
-	return OpenFontHandle(source->library, source->data, source->size, source->font_set_type,
-	                      source->open_mode, font_out);
+	return OpenFontHandle(source->library, source->face, source->font_set_type, source->open_mode, font_out);
 }
 
 // sceFontCloseFont — NID vzHs3C8lWJk
@@ -376,6 +416,8 @@ static int KYTY_SYSV_ABI FontSetEffectSlant(void* font_handle, float slant_ratio
 }
 
 // sceFontSetEffectWeight — NID v0phZwa4R5o
+// Weights are scales around 1.0 (neutral); the font keeps the deviation from
+// 1.0, limited to +/-0.04.
 static int KYTY_SYSV_ABI FontSetEffectWeight(void* font_handle, float weight_x, float weight_y, uint32_t mode)
 {
 	PRINT_NAME();
@@ -384,9 +426,9 @@ static int KYTY_SYSV_ABI FontSetEffectWeight(void* font_handle, float weight_x, 
 	{
 		return -1;
 	}
-	font->effect_weight_x    = weight_x;
-	font->effect_weight_y    = weight_y;
-	font->effect_weight_mode = mode;
+	font->effect_weight_delta_x = std::clamp(weight_x - 1.0f, -0.04f, 0.04f);
+	font->effect_weight_delta_y = std::clamp(weight_y - 1.0f, -0.04f, 0.04f);
+	font->effect_weight_mode    = mode;
 	return OK;
 }
 
@@ -406,8 +448,7 @@ static int KYTY_SYSV_ABI FontDefineAttribute(void* font_handle, int attribute, i
 	return OK;
 }
 
-// Guest layout descriptors (three floats each). Values are synthetic until a
-// real face rasterizer is wired; must be non-zero so text layout continues.
+// Guest layout descriptors (three floats each).
 struct FontHorizontalLayout
 {
 	float base_line_y;
@@ -422,21 +463,55 @@ struct FontVerticalLayout
 	float effect_width;
 };
 
+// Font units scaled to pixels and rounded to the 26.6 fixed-point grid used by
+// the guest font driver.
+static float ScaleFontUnits(int units, float scale)
+{
+	return std::round(static_cast<float>(units) * scale * 64.0f) / 64.0f;
+}
+
 // sceFontGetHorizontalLayout — NID imxVx8lm+KM
+// Baseline and line height come from the face bounding box at the current
+// pixel scale; a vertical weight effect widens both edges by half its size.
 static int KYTY_SYSV_ABI FontGetHorizontalLayout(void* font_handle, FontHorizontalLayout* layout)
 {
 	PRINT_NAME();
-	if (font_handle == nullptr || layout == nullptr)
+	if (layout == nullptr)
 	{
-		return -1;
+		return FONT_ERROR_INVALID_PARAMETER;
 	}
-	const auto* font  = static_cast<const FontHandleState*>(font_handle);
-	const float height = (font->scale_h > 0.0f ? font->scale_h : 16.0f);
-	layout->base_line_y   = height * 0.75f;
-	layout->line_height   = height;
-	layout->effect_height = height;
-	KYTY_LOG_DEBUG("\t handle = 0x%016" PRIx64 " layout=%p h=%f\n", reinterpret_cast<uint64_t>(font_handle),
-	       static_cast<void*>(layout), static_cast<double>(height));
+	*layout          = {};
+	const auto* font = static_cast<const FontHandleState*>(font_handle);
+	if (font == nullptr)
+	{
+		return FONT_ERROR_INVALID_FONT_HANDLE;
+	}
+	if (font->face == nullptr)
+	{
+		// Known gap: system font sets have no face here, yet the guest requires
+		// their layout. These placeholder values keep its text layout running;
+		// real values need the system font set's face.
+		layout->base_line_y   = font->scale_h * 0.75f;
+		layout->line_height   = font->scale_h;
+		layout->effect_height = font->scale_h;
+		return OK;
+	}
+	const stbtt_fontinfo& info  = font->face->info;
+	const float           scale = stbtt_ScaleForMappingEmToPixels(&info, font->scale_h);
+	int                   x0    = 0;
+	int                   y0    = 0;
+	int                   x1    = 0;
+	int                   y1    = 0;
+	stbtt_GetFontBoundingBox(&info, &x0, &y0, &x1, &y1);
+	const float half_effect = static_cast<float>(static_cast<int>(font->effect_weight_delta_y * font->scale_h * 64.0f) / 2) /
+	                          64.0f;
+	const float top         = ScaleFontUnits(y1, scale) + half_effect;
+	const float bottom      = ScaleFontUnits(y0, scale) - half_effect;
+	layout->base_line_y     = top;
+	layout->line_height     = top - bottom;
+	layout->effect_height   = half_effect;
+	KYTY_LOG_DEBUG("\t handle = 0x%016" PRIx64 " base_line=%f line_height=%f\n", reinterpret_cast<uint64_t>(font_handle),
+	               static_cast<double>(layout->base_line_y), static_cast<double>(layout->line_height));
 	return OK;
 }
 
@@ -475,8 +550,8 @@ static int KYTY_SYSV_ABI FontSetupRenderEffectWeight(void* font_handle, float we
 	return FontSetEffectWeight(font_handle, weight_x, weight_y, mode);
 }
 
-// Guest glyph metrics (width/height + horizontal/vertical bearings). Synthetic
-// until a face rasterizer is bound; non-zero advances keep text layout moving.
+// Guest glyph metrics (width/height + horizontal/vertical bearings), in pixels.
+// Horizontal bearing_y is the distance from the baseline up to the glyph top.
 struct FontGlyphMetrics
 {
 	float width;
@@ -495,22 +570,55 @@ struct FontGlyphMetrics
 	} vertical;
 };
 
-static void FillSyntheticGlyphMetrics(const FontHandleState* font, FontGlyphMetrics* metrics)
+struct FontGlyphRef
 {
-	if (metrics == nullptr)
+	const stbtt_fontinfo* info;
+	int                   index;
+	float                 scale_x;
+	float                 scale_y;
+};
+
+// Resolves a character code to a glyph of the handle's face at its pixel scale.
+static int FindGlyph(const FontHandleState* font, uint32_t code, FontGlyphRef* glyph)
+{
+	if (font == nullptr)
 	{
-		return;
+		return FONT_ERROR_INVALID_FONT_HANDLE;
 	}
-	const float width  = (font != nullptr && font->scale_w > 0.0f) ? font->scale_w : 8.0f;
-	const float height = (font != nullptr && font->scale_h > 0.0f) ? font->scale_h : 16.0f;
-	metrics->width                = width;
-	metrics->height               = height;
-	metrics->horizontal.bearing_x = 0.0f;
-	metrics->horizontal.bearing_y = height * 0.75f;
-	metrics->horizontal.advance   = width;
-	metrics->vertical.bearing_x   = 0.0f;
-	metrics->vertical.bearing_y   = 0.0f;
-	metrics->vertical.advance     = height;
+	if (font->face == nullptr)
+	{
+		return FONT_ERROR_NO_SUPPORT_GLYPH;
+	}
+	const stbtt_fontinfo& info  = font->face->info;
+	const int             index = stbtt_FindGlyphIndex(&info, static_cast<int>(code));
+	if (index == 0)
+	{
+		return FONT_ERROR_NO_SUPPORT_GLYPH;
+	}
+	glyph->info    = &info;
+	glyph->index   = index;
+	glyph->scale_x = stbtt_ScaleForMappingEmToPixels(&info, font->scale_w);
+	glyph->scale_y = stbtt_ScaleForMappingEmToPixels(&info, font->scale_h);
+	return OK;
+}
+
+// Vertical metrics stay zero: only horizontal layout is implemented.
+static void FillGlyphMetrics(const FontGlyphRef& glyph, FontGlyphMetrics* metrics)
+{
+	int x0 = 0;
+	int y0 = 0;
+	int x1 = 0;
+	int y1 = 0;
+	stbtt_GetGlyphBox(glyph.info, glyph.index, &x0, &y0, &x1, &y1);
+	int advance = 0;
+	int lsb     = 0;
+	stbtt_GetGlyphHMetrics(glyph.info, glyph.index, &advance, &lsb);
+	*metrics                      = {};
+	metrics->width                = static_cast<float>(x1 - x0) * glyph.scale_x;
+	metrics->height               = static_cast<float>(y1 - y0) * glyph.scale_y;
+	metrics->horizontal.bearing_x = static_cast<float>(x0) * glyph.scale_x;
+	metrics->horizontal.bearing_y = static_cast<float>(y1) * glyph.scale_y;
+	metrics->horizontal.advance   = static_cast<float>(advance) * glyph.scale_x;
 }
 
 // sceFontGetRenderCharGlyphMetrics — NID IQtleGLL5pQ (handle, code, metrics*)
@@ -520,7 +628,18 @@ static int KYTY_SYSV_ABI FontGetRenderCharGlyphMetrics(void* font_handle, uint32
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t handle = 0x%016" PRIx64 " code=0x%" PRIx32 " metrics=0x%016" PRIx64 "\n",
 	       reinterpret_cast<uint64_t>(font_handle), code, reinterpret_cast<uint64_t>(metrics));
-	FillSyntheticGlyphMetrics(static_cast<const FontHandleState*>(font_handle), metrics);
+	if (metrics == nullptr)
+	{
+		return FONT_ERROR_INVALID_PARAMETER;
+	}
+	*metrics = {};
+	FontGlyphRef glyph {};
+	const int    result = FindGlyph(static_cast<const FontHandleState*>(font_handle), code, &glyph);
+	if (result != OK)
+	{
+		return result;
+	}
+	FillGlyphMetrics(glyph, metrics);
 	return OK;
 }
 
@@ -605,13 +724,20 @@ static int KYTY_SYSV_ABI FontGenerateCharGlyph(void* font_handle, uint32_t code,
 	PRINT_NAME();
 	if (glyph_out == nullptr)
 	{
-		return -1;
+		return FONT_ERROR_INVALID_PARAMETER;
 	}
-	auto* glyph       = new GlyphState {};
-	glyph->font       = static_cast<FontHandleState*>(font_handle);
-	glyph->code       = code;
-	glyph->attribute  = attribute;
-	FillSyntheticGlyphMetrics(glyph->font, &glyph->metrics);
+	auto*        font = static_cast<FontHandleState*>(font_handle);
+	FontGlyphRef ref {};
+	const int    result = FindGlyph(font, code, &ref);
+	if (result != OK)
+	{
+		return result;
+	}
+	auto* glyph      = new GlyphState {};
+	glyph->font      = font;
+	glyph->code      = code;
+	glyph->attribute = attribute;
+	FillGlyphMetrics(ref, &glyph->metrics);
 	*glyph_out = glyph;
 	KYTY_LOG_DEBUG("\t handle=0x%016" PRIx64 " code=0x%" PRIx32 " glyph=%p\n",
 	       reinterpret_cast<uint64_t>(font_handle), code, static_cast<void*>(glyph));
@@ -660,10 +786,12 @@ struct FontGlyphImageMetrics
 	uint32_t height;
 };
 
+// trans_image is a staging image pointer; the glyph is written straight into
+// the guest surface, so it is always null.
 struct FontRenderResult
 {
-	const FontTransImage* trans_image;
-	FontSurfaceImage      surface_image;
+	const void*      trans_image;
+	FontSurfaceImage surface_image;
 	struct
 	{
 		uint32_t x;
@@ -674,131 +802,169 @@ struct FontRenderResult
 	FontGlyphImageMetrics image_metrics;
 };
 
-static void PrepareSyntheticGlyphImage(FontHandleState* font, uint32_t /*code*/)
+static constexpr int FONT_GLYPH_BITMAP_MAX_DIM = 2048;
+
+struct FontPixelRect
 {
-	if (font == nullptr)
+	int x0;
+	int y0;
+	int x1;
+	int y1;
+};
+
+static bool IsRenderableSurface(const FontRenderSurface* surf)
+{
+	if (surf == nullptr || surf->buffer == nullptr || surf->width <= 0 || surf->height <= 0)
 	{
-		return;
+		return false;
 	}
-	uint32_t width  = static_cast<uint32_t>(font->scale_w > 0.0f ? font->scale_w : 8.0f);
-	uint32_t height = static_cast<uint32_t>(font->scale_h > 0.0f ? font->scale_h : 16.0f);
-	if (width > kFontGlyphMaxDim)
+	if (surf->pixel_size_byte != 1 && surf->pixel_size_byte != 4)
 	{
-		width = kFontGlyphMaxDim;
+		return false;
 	}
-	if (height > kFontGlyphMaxDim)
-	{
-		height = kFontGlyphMaxDim;
-	}
-	if (width == 0)
-	{
-		width = 1;
-	}
-	if (height == 0)
-	{
-		height = 1;
-	}
-	// Solid filled glyph box (visible block). Real outlines can replace this later.
-	std::memset(font->glyph_bits, 0, sizeof(font->glyph_bits));
-	for (uint32_t y = 0; y < height; ++y)
-	{
-		for (uint32_t x = 0; x < width; ++x)
-		{
-			font->glyph_bits[y * kFontGlyphMaxDim + x] = 0xffu;
-		}
-	}
-	font->trans_image.address      = font->glyph_bits;
-	font->trans_image.width_byte   = kFontGlyphMaxDim;
-	font->trans_image.image_width  = width;
-	font->trans_image.image_height = height;
+	return surf->width_byte >= surf->width * surf->pixel_size_byte;
 }
 
-static void DrawGlyphToSurface(const FontTransImage& image, FontRenderSurface* surf, float x, float y)
+static FontPixelRect SurfaceClip(const FontRenderSurface& surf)
 {
-	if (surf == nullptr || surf->buffer == nullptr || surf->width <= 0 || surf->height <= 0 ||
-	    surf->width_byte <= 0 || surf->pixel_size_byte <= 0 || image.address == nullptr)
-	{
-		return;
-	}
-	auto*     dst        = static_cast<uint8_t*>(surf->buffer);
-	const int pixel_size = surf->pixel_size_byte;
-	const int start_x    = static_cast<int>(x) > 0 ? static_cast<int>(x) : 0;
-	const int start_y    = static_cast<int>(y) > 0 ? static_cast<int>(y) : 0;
-	const int end_x      = start_x + static_cast<int>(image.image_width) < surf->width
-	                           ? start_x + static_cast<int>(image.image_width)
-	                           : surf->width;
-	const int end_y      = start_y + static_cast<int>(image.image_height) < surf->height
-	                           ? start_y + static_cast<int>(image.image_height)
-	                           : surf->height;
-	for (int yy = start_y; yy < end_y; ++yy)
-	{
-		for (int xx = start_x; xx < end_x; ++xx)
-		{
-			const uint8_t src =
-			    image.address[static_cast<uint32_t>(yy - start_y) * image.width_byte +
-			                  static_cast<uint32_t>(xx - start_x)];
-			if (src == 0)
-			{
-				continue;
-			}
-			uint8_t* pixel = dst + yy * surf->width_byte + xx * pixel_size;
-			for (int i = 0; i < pixel_size; ++i)
-			{
-				pixel[i] = src;
-			}
-		}
-	}
+	const auto clamp_x = [&](uint32_t v) { return static_cast<int>(std::min(v, static_cast<uint32_t>(surf.width))); };
+	const auto clamp_y = [&](uint32_t v) { return static_cast<int>(std::min(v, static_cast<uint32_t>(surf.height))); };
+	return {clamp_x(surf.scissor.x0), clamp_y(surf.scissor.y0), clamp_x(surf.scissor.x1), clamp_y(surf.scissor.y1)};
 }
 
-// sceFontRenderCharGlyphImageHorizontal — NIDs kAenWy1Zw5o / 3G4zhgKuxE8 / i6UNdSig1uE
-// (handle, code, surface, x, y, metrics*, result*).
+// Rasterizes the glyph with the pen's sub-pixel phase and writes its coverage
+// into every channel of each pixel inside the clipped glyph box. Returns the
+// written rectangle, which is empty when the glyph is clipped away.
+static int DrawGlyphToSurface(const FontGlyphRef& glyph, const FontRenderSurface& surf, float x, float y,
+                              FontPixelRect* written)
+{
+	const float pen_x   = std::floor(x);
+	const float pen_y   = std::floor(y);
+	const float shift_x = x - pen_x;
+	const float shift_y = y - pen_y;
+	int         bx0     = 0;
+	int         by0     = 0;
+	int         bx1     = 0;
+	int         by1     = 0;
+	stbtt_GetGlyphBitmapBoxSubpixel(glyph.info, glyph.index, glyph.scale_x, glyph.scale_y, shift_x, shift_y, &bx0, &by0,
+	                                &bx1, &by1);
+	const int glyph_w = bx1 - bx0;
+	const int glyph_h = by1 - by0;
+	if (glyph_w > FONT_GLYPH_BITMAP_MAX_DIM || glyph_h > FONT_GLYPH_BITMAP_MAX_DIM)
+	{
+		return FONT_ERROR_NO_SUPPORT_GLYPH;
+	}
+	const int dst_x = static_cast<int>(pen_x) + bx0;
+	const int dst_y = static_cast<int>(pen_y) + by0;
+	const auto clip = SurfaceClip(surf);
+	*written        = {std::max(dst_x, clip.x0), std::max(dst_y, clip.y0), std::min(dst_x + glyph_w, clip.x1),
+	                   std::min(dst_y + glyph_h, clip.y1)};
+	if (written->x0 >= written->x1 || written->y0 >= written->y1)
+	{
+		*written = {written->x0, written->y0, written->x0, written->y0};
+		return OK;
+	}
+	std::vector<uint8_t> coverage(static_cast<size_t>(glyph_w) * static_cast<size_t>(glyph_h));
+	stbtt_MakeGlyphBitmapSubpixel(glyph.info, coverage.data(), glyph_w, glyph_h, glyph_w, glyph.scale_x, glyph.scale_y,
+	                              shift_x, shift_y, glyph.index);
+	auto*      base       = static_cast<uint8_t*>(surf.buffer);
+	const auto pixel_size = static_cast<size_t>(surf.pixel_size_byte);
+	for (int row = written->y0; row < written->y1; ++row)
+	{
+		const uint8_t* src = coverage.data() + static_cast<size_t>(row - dst_y) * static_cast<size_t>(glyph_w);
+		uint8_t*       dst = base + static_cast<size_t>(row) * static_cast<size_t>(surf.width_byte);
+		for (int column = written->x0; column < written->x1; ++column)
+		{
+			std::memset(dst + static_cast<size_t>(column) * pixel_size, src[column - dst_x], pixel_size);
+		}
+	}
+	return OK;
+}
+
+// Image metrics snap the glyph box and advance outward to whole pixels relative
+// to the pen position. stride is the snapped distance to the next pen position
+// that still clears the glyph's right edge.
+static FontGlyphImageMetrics GlyphImageMetrics(const FontGlyphMetrics& metrics, float x, float y)
+{
+	const float left_f    = x + metrics.horizontal.bearing_x;
+	const float top_f     = y + metrics.horizontal.bearing_y;
+	const float right_f   = left_f + metrics.width;
+	const float bottom_f  = top_f - metrics.height;
+	const float advance_f = x + metrics.horizontal.advance;
+	const int   left      = static_cast<int>(std::floor(left_f));
+	const int   top       = static_cast<int>(std::ceil(top_f));
+	const int   right     = static_cast<int>(std::ceil(right_f));
+	const int   bottom    = static_cast<int>(std::floor(bottom_f));
+	const int   advance   = static_cast<int>(std::ceil(advance_f));
+	int         stride    = advance;
+	if (advance_f != static_cast<float>(advance))
+	{
+		const int fitted = static_cast<int>((static_cast<float>(right) - right_f) + advance_f);
+		stride           = std::max(advance_f <= right_f ? fitted : right + 1, fitted);
+	}
+	FontGlyphImageMetrics image {};
+	image.bearing_x = static_cast<float>(left) - x;
+	image.bearing_y = static_cast<float>(top) - y;
+	image.advance   = static_cast<float>(advance) - x;
+	image.stride    = static_cast<float>(stride) - x;
+	image.width     = static_cast<uint32_t>(std::max(0, right - left));
+	image.height    = static_cast<uint32_t>(std::max(0, top - bottom));
+	return image;
+}
+
+static void FillRenderResult(const FontRenderSurface& surf, const FontPixelRect& written,
+                             const FontGlyphMetrics& metrics, float x, float y, FontRenderResult* result)
+{
+	const auto pixel_size                 = static_cast<size_t>(surf.pixel_size_byte);
+	*result                               = {};
+	result->update_rect.x                 = static_cast<uint32_t>(written.x0);
+	result->update_rect.y                 = static_cast<uint32_t>(written.y0);
+	result->update_rect.w                 = static_cast<uint32_t>(written.x1 - written.x0);
+	result->update_rect.h                 = static_cast<uint32_t>(written.y1 - written.y0);
+	result->surface_image.address         = static_cast<uint8_t*>(surf.buffer) +
+	                                        static_cast<size_t>(written.y0) * static_cast<size_t>(surf.width_byte) +
+	                                        static_cast<size_t>(written.x0) * pixel_size;
+	result->surface_image.width_byte      = static_cast<uint32_t>(surf.width_byte);
+	result->surface_image.pixel_size_byte = static_cast<uint8_t>(surf.pixel_size_byte);
+	result->image_metrics                 = GlyphImageMetrics(metrics, x, y);
+}
+
+// sceFontRenderCharGlyphImageHorizontal — NID kAenWy1Zw5o
+// (handle, code, surface, x, y, metrics*, result*). (x, y) is the pen position
+// on the baseline in surface pixels.
 static int KYTY_SYSV_ABI FontRenderCharGlyphImageHorizontal(void* font_handle, uint32_t code,
                                                             FontRenderSurface* surf, float x, float y,
                                                             FontGlyphMetrics* metrics,
                                                             FontRenderResult* result)
 {
 	PRINT_NAME();
-	auto* font = static_cast<FontHandleState*>(font_handle);
-	if (font == nullptr)
-	{
-		return -1;
-	}
-	PrepareSyntheticGlyphImage(font, code);
-	FontGlyphMetrics local_metrics {};
-	auto*            draw_metrics = metrics != nullptr ? metrics : &local_metrics;
-	FillSyntheticGlyphMetrics(font, draw_metrics);
-
-	if (result != nullptr)
-	{
-		const int top_x = static_cast<int>(x + draw_metrics->horizontal.bearing_x);
-		const int top_y = static_cast<int>(y - draw_metrics->horizontal.bearing_y);
-		result->trans_image                   = &font->trans_image;
-		result->surface_image.address         = surf != nullptr ? static_cast<uint8_t*>(surf->buffer) : nullptr;
-		result->surface_image.width_byte      = surf != nullptr && surf->width_byte > 0
-		                                           ? static_cast<uint32_t>(surf->width_byte)
-		                                           : 0;
-		result->surface_image.pixel_size_byte =
-		    surf != nullptr && surf->pixel_size_byte > 0 ? static_cast<uint8_t>(surf->pixel_size_byte) : 0;
-		result->surface_image.pixel_format = 0;
-		result->update_rect.x              = top_x > 0 ? static_cast<uint32_t>(top_x) : 0;
-		result->update_rect.y              = top_y > 0 ? static_cast<uint32_t>(top_y) : 0;
-		result->update_rect.w              = font->trans_image.image_width;
-		result->update_rect.h              = font->trans_image.image_height;
-		result->image_metrics.bearing_x    = 0.0f;
-		result->image_metrics.bearing_y    = draw_metrics->horizontal.bearing_y;
-		result->image_metrics.advance      = draw_metrics->horizontal.advance;
-		result->image_metrics.stride       = draw_metrics->horizontal.advance;
-		result->image_metrics.width        = font->trans_image.image_width;
-		result->image_metrics.height       = font->trans_image.image_height;
-	}
-
-	const float top_x = x + draw_metrics->horizontal.bearing_x;
-	const float top_y = y - draw_metrics->horizontal.bearing_y;
-	DrawGlyphToSurface(font->trans_image, surf, top_x, top_y);
-
 	KYTY_LOG_DEBUG("\t handle=0x%016" PRIx64 " code=0x%" PRIx32 " surf=%p x=%f y=%f\n",
-	       reinterpret_cast<uint64_t>(font_handle), code, static_cast<void*>(surf),
-	       static_cast<double>(x), static_cast<double>(y));
+	       reinterpret_cast<uint64_t>(font_handle), code, static_cast<void*>(surf), static_cast<double>(x),
+	       static_cast<double>(y));
+	if (metrics == nullptr || result == nullptr)
+	{
+		return FONT_ERROR_INVALID_PARAMETER;
+	}
+	*metrics = {};
+	*result  = {};
+	if (!IsRenderableSurface(surf))
+	{
+		return FONT_ERROR_NO_SUPPORT_SURFACE;
+	}
+	FontGlyphRef glyph {};
+	int          rc = FindGlyph(static_cast<const FontHandleState*>(font_handle), code, &glyph);
+	if (rc != OK)
+	{
+		return rc;
+	}
+	FillGlyphMetrics(glyph, metrics);
+	FontPixelRect written {};
+	rc = DrawGlyphToSurface(glyph, *surf, x, y, &written);
+	if (rc != OK)
+	{
+		return rc;
+	}
+	FillRenderResult(*surf, written, *metrics, x, y, result);
 	return OK;
 }
 
@@ -840,10 +1006,7 @@ LIB_DEFINE(InitFont_1)
 	LIB_FUNC("C-4Qw5Srlyw", Font::FontGenerateCharGlyph);
 	LIB_FUNC("LHDoRWVFGqk", Font::FontDeleteGlyph);
 	LIB_FUNC("8-zmgsxkBek", Font::FontGlyphDefineAttribute);
-	// Three NIDs alias the same horizontal glyph blit entry on Gen5 Font_v1.
 	LIB_FUNC("kAenWy1Zw5o", Font::FontRenderCharGlyphImageHorizontal);
-	LIB_FUNC("3G4zhgKuxE8", Font::FontRenderCharGlyphImageHorizontal);
-	LIB_FUNC("i6UNdSig1uE", Font::FontRenderCharGlyphImageHorizontal);
 }
 
 } // namespace Kyty::Libs
