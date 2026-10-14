@@ -1163,7 +1163,7 @@ void DescriptorCache::IndexSet(int index)
 	CollectResourceIds(m_sets.At(index), &ids);
 	for (const auto id: ids)
 	{
-		m_sets_by_resource[id].push_back(index);
+		m_sets_by_resource[id].insert(index);
 	}
 }
 
@@ -1178,7 +1178,7 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 		auto it = m_sets_by_resource.find(id);
 		EXIT_IF(it == m_sets_by_resource.end());
 		auto& indices = it->second;
-		indices.erase(std::remove(indices.begin(), indices.end(), index), indices.end());
+		indices.erase(index);
 		if (indices.empty())
 		{
 			m_sets_by_resource.erase(it);
@@ -1269,7 +1269,7 @@ void DescriptorCache::FreeSetsReferencing(uint64_t unique_id, References referen
 	{
 		return;
 	}
-	std::vector<int> candidates = it->second;
+	std::vector<int> candidates(it->second.begin(), it->second.end());
 	std::sort(candidates.begin(), candidates.end());
 	for (const int index: candidates)
 	{

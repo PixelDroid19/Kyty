@@ -58,6 +58,7 @@
 #include <cstring>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -439,7 +440,7 @@ private:
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
 	// Live set indices by the unique id of each image or buffer they reference.
-	std::unordered_map<uint64_t, std::vector<int>> m_sets_by_resource;
+	std::unordered_map<uint64_t, std::unordered_set<int>> m_sets_by_resource;
 
 	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
 };
