@@ -112,6 +112,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		view_descriptor.components  = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
 		                               VK_COMPONENT_SWIZZLE_IDENTITY};
 		view_descriptor.aspect_mask = VK_IMAGE_ASPECT_STENCIL_BIT;
+		// Stencil readers declare a non-arrayed 2D image.
+		view_descriptor.view_type = VK_IMAGE_VIEW_TYPE_2D;
 		if (
 		    !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_STENCIL_TEXTURE])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[V condition ignored (continuing)\n"); }
 	}
