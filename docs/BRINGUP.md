@@ -9,6 +9,25 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Static pointer-table resource plans: no measured gain (2026-10-14, excluded)
+
+- Change under test: `travel/static-resource-plans` (memoized pointer-table
+  resource plans, `6f5c0e90`) merged with this branch at `4c54c61d`; baseline is
+  the same tree without the plans. Release builds, strict runs, the same
+  scripted route, the same warmed SPIR-V cache, fixed 1280x720 RenderTargets.
+  The plans build passes 2425 unit tests (2419 plus its six plan tests).
+- Fishing title, open-sea sailing, Intel Arc A770, ABBA order over three
+  processes per variant (200 s each, the last four capture intervals): the
+  baseline averaged 10.20 / 10.57 / 10.50 FPS (10.42) and the plans 8.70 /
+  10.47 / 10.00 FPS (9.72). Without the lowest plans run, 10.5 versus 10.2.
+  AMD, one pair at the same route: 6.2 versus 7.0 FPS, inside the run-to-run
+  spread. The racing title pair desynchronized its route (different scenes) and
+  is not comparable.
+- Conclusion: no measurable frame-rate benefit on either host; this agrees with
+  the earlier pilot, whose own state-setup timers did not decrease. The branch
+  is kept unmerged. Revisit only with a counter that shows plan invocations on
+  a CP-bound workload.
+
 ## Robot platformer: title screen save cards (2026-10-14, open)
 
 - Observed (Intel A770, strict, `generic` route, 390 s, no error): the title
