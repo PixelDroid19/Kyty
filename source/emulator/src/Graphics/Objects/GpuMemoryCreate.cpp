@@ -1116,7 +1116,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	int heap_id = GetHeapId(vaddr[0], size[0]);
 
-	// Guest libc heap (host malloc) is never MapDirectMemory'd. Dreaming Sarah
+	// Guest libc heap (host malloc) is never MapDirectMemory'd. A Construct title
 	// embeds small VS V# tables there (fetch_embedded); register a page cover
 	// so VertexBuffer/IndexBuffer staging can memcpy from that memory.
 	// Already holding m_mutex — do not call SetAllocatedRange (it re-locks).

@@ -25,7 +25,7 @@ KYTY_SYSV_ABI int c_memcpy_s(void* d, size_t dn, const void* s, size_t n)
 	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(d), n < dn ? n : dn);
 	return (::memcpy(d, s, n < dn ? n : dn), 0);
 }
-// Gen5 libc_v1 memmove_s — NID B59+zQQCcbU (Astro after strtoull).
+// Gen5 libc_v1 memmove_s — NID B59+zQQCcbU (observed after strtoull).
 KYTY_SYSV_ABI int c_memmove_s(void* d, size_t dn, const void* s, size_t n)
 {
 	if (d == nullptr || s == nullptr)
@@ -46,7 +46,7 @@ KYTY_SYSV_ABI void* c_memset(void* d, int c, size_t n)
 	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(d), n);
 	return ::memset(d, c, n);
 }
-// Gen5 libc_v1 memset_s — NID h8GwqPFbu6I (Astro after DrawIndexIndirect).
+// Gen5 libc_v1 memset_s — NID h8GwqPFbu6I (observed after DrawIndexIndirect).
 // SysV: rdi=s, rsi=smax, rdx=c, rcx=n. Returns 0 on success.
 KYTY_SYSV_ABI int c_memset_s(void* s, size_t smax, int c, size_t n)
 {

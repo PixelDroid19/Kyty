@@ -2272,7 +2272,7 @@ TEST(EmulatorGraphicsPackets, EncodesWriteDataCachePolicy2ControlWord)
 	EXPECT_EQ(cmd[5], 0x22222222u);
 }
 
-// DrawIndexAuto accepts modifier 0x80000000 (Astro post-compute) as well as
+// DrawIndexAuto accepts modifier 0x80000000 (observed after compute) as well as
 // the historical 0x40000000 default.
 TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoModifier80000000)
 {
@@ -2469,7 +2469,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDispatchIndirect)
 	EXPECT_EQ(cmd[2], (1u & 0xa038u) | 0x41u);
 }
 
-// sceAgcDcbDrawIndexIndirect with modifier 0x80000000 (Astro after DrawIndexAuto).
+// sceAgcDcbDrawIndexIndirect with modifier 0x80000000 (observed after DrawIndexAuto).
 TEST(EmulatorGraphicsPackets, EncodesDcbDrawIndexIndirectModifier80000000)
 {
 	struct AlignasCommandBuffer
@@ -2507,7 +2507,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDrawIndexIndirectModifier80000000)
 	EXPECT_EQ(cmd[4], 2u);
 }
 
-// Placeholder address 0 is reserved then patched before submit (Astro path).
+// Placeholder address 0 is reserved then patched before submit (observed guest path).
 TEST(EmulatorGraphicsPackets, EncodesWriteDataZeroAddressThenPatches)
 {
 	struct AlignasCommandBuffer
@@ -3832,7 +3832,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbResetQueueAsClearState)
 	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u));
 	EXPECT_EQ(cmd[1], 0u);
 
-	// Astro-style non-0x3ff op with non-zero state selector.
+	// Guest-observed non-0x3ff op with non-zero state selector.
 	uint32_t* cmd2 = Gen5::GraphicsDcbResetQueue(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x001u, 0x5u);
 	ASSERT_NE(cmd2, nullptr);
 	EXPECT_EQ(cmd2[0], KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u));
@@ -8741,7 +8741,7 @@ TEST(EmulatorGraphicsPackets, EncodesGen4DrawIndexOffset)
 	EXPECT_EQ(command[8], 0u);
 }
 
-// Captured UI batch (Dreaming Sarah title logo): IndexBase holds 0,1,2,1,2,3 for a
+// Captured UI batch (a Construct title's logo): IndexBase holds 0,1,2,1,2,3 for a
 // 4-vert quad. NID B+aG9DUnTKA must emit Offset (not Auto) so those indices apply.
 TEST(EmulatorGraphicsPackets, DrawIndexOffsetEncodesUiQuadIndexCount)
 {

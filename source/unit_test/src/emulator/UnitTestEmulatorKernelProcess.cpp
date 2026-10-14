@@ -1221,7 +1221,7 @@ TEST(EmulatorKernelProcess, PackageFontFallbackScoresWeightAndFamily)
 	EXPECT_EQ(ScorePackageFontFallback(U"FuturaStd-Bold.otf", U"FuturaStd-Bold.otf"), 100000);
 }
 
-// Incomplete Astro dumps store object defs as .odxb while the guest opens .odx.
+// Some packages store object defs as .odxb while the guest opens .odx.
 TEST(EmulatorKernelProcess, HostExtensionAliasMapsOdxToOdxb)
 {
 	EnsureKernelProcessSubsystems();
@@ -1267,7 +1267,7 @@ TEST(EmulatorKernelProcess, OpenLinuxFileReportsTimestampsByDescriptor)
 	Core::File::DeleteFile(path);
 }
 
-// Astro path builders open /app0/prein/... while package files live under /app0/data/prein/...
+// Guest path builders open /app0/<tree>/... while package files live under /app0/data/<tree>/...
 TEST(EmulatorKernelProcess, HostApp0DataSegmentMapsPreinUnderData)
 {
 	EnsureKernelProcessSubsystems();

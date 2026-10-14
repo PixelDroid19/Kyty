@@ -1,4 +1,4 @@
-# Blasphemous 2: renderer bring-up notes
+# Gothic action platformer: renderer bring-up notes
 
 This note records the general renderer and HLE contracts corrected while
 bringing the strict path through the opening sequence and into the first

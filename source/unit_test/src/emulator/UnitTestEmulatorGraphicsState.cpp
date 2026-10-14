@@ -4926,7 +4926,7 @@ TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 	EXPECT_NE(symbols.Find(query), nullptr);
 }
 
-// Gen5 ACB/DCB sizing helpers and Trinity query contracts used by Astro boot.
+// Gen5 ACB/DCB sizing helpers and Trinity query contracts used at boot.
 TEST(EmulatorGraphicsState, Gen5AgcSizeHelpersAndTrinityMode)
 {
 	if (!Config::IsInitialized())
@@ -4951,7 +4951,7 @@ TEST(EmulatorGraphicsState, Gen5AgcSizeHelpersAndTrinityMode)
 	EXPECT_NE(GraphicsWriteDataPatchSetAddressOrOffset(bad_cmd, 0), OK);
 }
 
-// Missing Gen5 AGC / AgcDriver exports that blocked Astro after Ampr/VideoOut.
+// Missing Gen5 AGC / AgcDriver exports that blocked a title after Ampr/VideoOut.
 TEST(EmulatorGraphicsState, ResolvesGen5AgcAndDriverExports)
 {
 	if (!Config::IsInitialized())
@@ -5101,7 +5101,7 @@ TEST(EmulatorGraphicsState, ClassifiesConstantStorageResourcesAsReadOnly)
 	EXPECT_FALSE(ShaderStorageUsageIsReadOnly(ShaderStorageUsage::Unknown));
 }
 
-// Guest malloc/new → host heap; small V# bases land here (Dreaming Sarah).
+// Guest malloc/new → host heap; small V# bases land here (seen on a Construct title).
 TEST(EmulatorGraphicsState, ClassifiesHostGuestMallocRangesForLazyGpuHeaps)
 {
 	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0, 0x40));

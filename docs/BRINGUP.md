@@ -4658,9 +4658,9 @@ Scope: same strict configuration on the reference host (Intel Arc A770, Mesa `xe
 command-processor thread and the DRM `fdinfo` engine counters for the device. A pixel-art title whose vertex front is
 bindless (V#s loaded from tables at runtime offsets) and whose only compute shader is the SDK's 16-byte buffer fill
 went from 41 ms to 22 ms per frame (24 to 45 fps) on its start screen. Regression set (runs d586-d602, 90 s each,
-previous run in parentheses): Blasphemous 2 107 fps (98), Dreaming Sarah 248 (251), Let's Build a Zoo 239 (220),
-Formula Retro Racing 229 in the race (181), The Messenger 594 (378), Dead Cells 201 (112), ANIMAL WELL 37 in its
-new-game route (23), Worms 59 (59), JoJo 220 (203), Hades 59 (49), the .NET beat 'em up 11 (11). DREDGE ran clean once
+previous run in parentheses): the gothic action platformer 107 fps (98), the Construct title 248 (251), the zoo builder 239 (220),
+the racing title 229 in the race (181), the ninja platformer 594 (378), the 2D action title 201 (112), the cave exploration title 37 in its
+new-game route (23), the artillery title 59 (59), the anime fighting title 220 (203), the isometric roguelike 59 (49), the .NET beat 'em up 11 (11). The fishing title ran clean once
 (66 fps, was 52) and twice stopped at 12-14 s on its known stale extended-user-data V# (the same words as runs d221,
 d466 and d571).
 
@@ -4841,7 +4841,7 @@ Investigated and left open:
 
 Third round (same day):
 
-- **Published fills skipped write-backs that still had work (regression from the first round).** Dead Cells' gameplay
+- **Published fills skipped write-backs that still had work (regression from the first round).** The 2D action title's gameplay
   smeared sprites horizontally (trails behind the character) and, some seconds later, turned the whole scene white;
   only the HUD survived. It happened in most runs since the device-side publication of uniform fills, and in some
   runs never, depending on how submissions overlapped. Bisection: publishing the fill's bytes into the guest view
@@ -4868,7 +4868,7 @@ Third round (same day):
   walks only flexible ranges and ranges holding tracked snapshots instead of all ranges and chunks. Over 180 s the
   preparation total went from 32.7 s to 7.1 s (maximum 123 to 59 ms).
 
-- **Hades reaches gameplay.** Three independent defects stood between its title and the House of Hades:
+- **The isometric roguelike reaches gameplay.** Three independent defects stood between its title and its hub:
   - *Branch-heavy shader compile never finished.* After cross, the command processor sampled 70% of the process in
     `ArmReachesBeforeJoin`: a 2,299-instruction pixel shader with 254 branches. Selection-join queries were repeated
     for every label and branch during emission, located instructions by scanning the program, and ordered a join's
@@ -4882,18 +4882,18 @@ Third round (same day):
     atlases (CPU-written) stayed empty, so each label showed only its plate. The tile-9 host detiler matches the
     GFX10 SW_64KB_S pattern for 1, 2, 4, 8 and 16-byte elements, so any such uncompressed format now uploads when no
     live surface covers it.
-  Hades now shows its menus and walks in the House at about 10 fps (open: performance, and a crash at 8-11 s in
+  The isometric roguelike now shows its menus and walks in its hub at about 10 fps (open: performance, and a crash at 8-11 s in
   some runs where its GPU allocator returns a null block and a row copy writes to 0x40; its direct-memory allocate
   and map calls do not fail in those runs).
 
-- **Linear mip chains.** JoJo's characters showed shredded textures: almost every material is a linear (tile 0)
+- **Linear mip chains.** The anime fighting title's characters showed shredded textures: almost every material is a linear (tile 0)
   BC1/BC3 texture with a full mip chain, and the linear fallback laid levels out from level 0 with halved pitches.
   GFX10 linear mip chains (addrlib `HwlComputeSurfaceInfoLinear`) store the levels from the smallest one to level 0,
   each with its element pitch aligned to 256 bytes, element sizes halving on their own (4x4 blocks for BC). The
   fallback now computes that layout and each mip upload uses its own pitch; the rule reproduces all 2,135
   multi-level entries of the SDK-generated linear RGBA8 table (offsets, sizes, padded pitch and total).
 
-- **SDK pattern fill.** Hades clears its 1920x1152 targets every frame with the SDK pattern-fill kernel
+- **SDK pattern fill.** The isometric roguelike clears its 1920x1152 targets every frame with the SDK pattern-fill kernel
   (`buffer_store_format_x` of `values[i % period]` for `i` below a count, 32-bit UINT records). It was never
   recognized, so the clear reached the storage buffer but not the render-target images: rooms with strong lighting
   showed saturated green, smeared columns and stale silhouettes. The uniform-fill proof now matches that kernel's
@@ -4902,7 +4902,7 @@ Third round (same day):
   time 11.8 s to 0.8 s over 120 s). A first attempt never matched: the proof rejected programs with indirect labels,
   which every conditional branch records for its fall-through, so its measured cost was not the fill's.
 - **Device-address scans over writable storage only.** Before a draw or dispatch that reads guest addresses, GPU
-  memory looked for storage buffers with pending GPU writes by walking every live storage buffer, twice; JoJo keeps
+  memory looked for storage buffers with pending GPU writes by walking every live storage buffer, twice; the anime fighting title keeps
   about 4,000 alive and the ordered-set walk was the top host hotspot of its cutscene. The scans now walk the
   in-use, writable subset.
 - **Partially released direct mappings keep their live part.** The .NET beat 'em up's runtime shrinks a buffer by
@@ -4923,7 +4923,7 @@ Third round (same day):
 - **Write-back and overlap scans use indexes.** Completed-submission write-backs walked every object of every heap
   (12,546 heaps, ~16,000 objects, on every completion); they now visit an index of in-use writable objects (18 on
   average). Overlap queries walked every heap; the heap span index now lists every heap covering a span. Loading
-  frames went from 18-23 to 30-36 fps on that title and Dead Cells' walk route from 47-63 to 86 fps.
+  frames went from 18-23 to 30-36 fps on that title and the 2D action title's walk route from 47-63 to 86 fps.
 - **Unsigned-only shaders read the unsigned descriptor banks.** The .NET beat 'em up's logo video was a uniform
   green screen: its Theora planes are written by a dispatch as R8_UINT storage images and sampled by a shader that
   samples only unsigned textures, which bound the float banks and read zero (BT.709 of zero planes is (0, 77, 0)).
@@ -4965,12 +4965,12 @@ Third round (same day):
 
 Investigated and left open:
 
-- JoJo's in-engine cutscenes run at about 5 fps. The guest spends most of its time spinning on GPU labels
+- The anime fighting title's in-engine cutscenes run at about 5 fps. The guest spends most of its time spinning on GPU labels
   (`while (*label != 1)` after an ACB submission, and two similar loops), so the frame rate is the round trip of its
   compute work. Each of its ~20 dispatches per frame completes with a write-back of a 15 MB storage buffer of which
   about 53 KB changed; the page comparison reads all 15 MB (3 ms per dispatch, 27% of the time). Skipping it is not
   correct (the CPU may read the results); the planned fix copies GPU-written pages on demand. The dirty-page tracker
-  also accepts only 512 ranges, so most of JoJo's buffers fall back to full hashes (250 GB hashed in 2 minutes).
+  also accepts only 512 ranges, so most of the anime fighting title's buffers fall back to full hashes (250 GB hashed in 2 minutes).
 - The .NET beat 'em up now reaches gameplay with correct sprites, text and HUD glyphs, but runs at 7-25 fps under
   the harness (two CPU cores, shader validation). Remaining host costs: every upload still waits on its own
   util-queue fence (about 11 s of fence waits per minute), the device-address residency rescan after population
@@ -4982,7 +4982,7 @@ Investigated and left open:
   util-queue submission with a fence wait (`UtilFillImage`/`UtilFillBuffer`): 92,541 waits in 180 s, about 23 ms of
   every 48 ms frame. Next: record uploads into the consuming command buffer. Its host footprint (4.5 GB of guest
   memory plus 4 GB of emulator heap) also exceeds the harness cgroup's 7 GiB `memory.high`, which throttles it.
-- Dead Cells sometimes stops after about a minute of gameplay on a G-buffer pixel shader that needs fragment wave
+- The 2D action title sometimes stops after about a minute of gameplay on a G-buffer pixel shader that needs fragment wave
   transport (a derivative fetch inside a lane-divergent loop at pc 0x114, 642x362, four targets); seen in runs d472,
   d721 and d729, so it predates this round.
 
@@ -5157,10 +5157,10 @@ Third round (same day), mostly runtime-library correctness found by Unreal Engin
   loaded module bases, so a freeze names the waiting code without a debugger. Only a contended mutex lock is
   recorded, so the uncontended path stays a single trylock.
 
-Regression set after these repairs (run d406-d417, 90 s each, same host): GRIS 119 fps (104 before), Blasphemous 2
-85 (70), Dreaming Sarah 195 (89), Let's Build a Zoo 202 (83), The Messenger 320 (269), Dead Cells 94 (82), JoJo 87
-(54), ANIMAL WELL 22 (20), Formula Retro Racing back to its 3D views at about 110-120 fps in the race. A longer
-Blasphemous 2 run reaches gameplay; its intro frames vary with load timing between runs.
+Regression set after these repairs (run d406-d417, 90 s each, same host): the watercolour platformer 119 fps (104 before), the gothic action platformer
+85 (70), the Construct title 195 (89), the zoo builder 202 (83), the ninja platformer 320 (269), the 2D action title 94 (82), the anime fighting title 87
+(54), the cave exploration title 22 (20), the racing title back to its 3D views at about 110-120 fps in the race. A longer
+run of the gothic action platformer reaches gameplay; its intro frames vary with load timing between runs.
 
 Open blockers (one root cause each, none investigated past the point stated):
 
@@ -7509,7 +7509,7 @@ median analysis time changes from 103.025 to 9.278 microseconds. A separate
 its median changes from 142.952 to 72.728 microseconds. These measure this CPU
 analysis alone and do not establish an equivalent frame-rate improvement.
 
-`ninja -C _build_linux_astro_play_s1 -j2 fc_script` succeeds. Strict source
+`ninja -C _build_linux_<slug> -j2 fc_script` succeeds. Strict source
 boundaries and the graphics-table manifest pass. A fresh strict Silent/Native
 run under read-only debugger probes preserves the same first pixel-emitter
 failure at PC 0xfec. A 58.031-second warm window contains 229 presents with a

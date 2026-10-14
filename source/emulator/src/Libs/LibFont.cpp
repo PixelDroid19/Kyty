@@ -250,7 +250,7 @@ static int OpenFontHandle(void* library, std::shared_ptr<const FontFace> face, u
 
 // sceFontOpenFontSet — NID cKYtVmeSTcw
 // ABI: (library, font_set_type, open_mode, detail*, handle*). detail may be null.
-// Observed Astro: font_set_type=0x180700c7, open_mode=2, detail=null.
+// Observed on a Gen5 title: open_mode=2 with a null detail.
 // System font sets carry no guest bytes, so the handle has no face and glyph
 // queries report NO_SUPPORT_GLYPH.
 static int KYTY_SYSV_ABI FontOpenFontSet(void* library, uint32_t font_set_type, uint32_t open_mode,
@@ -266,8 +266,8 @@ static int KYTY_SYSV_ABI FontOpenFontSet(void* library, uint32_t font_set_type, 
 }
 
 // sceFontOpenFontMemory — NID KXUpebrFk1U
-// After package font APR resolve, Astro opens guest-mapped OTF bytes:
-// (library, font_address, font_size, detail*, handle*). Observed size 0x13534 (CFF outlines).
+// After package font APR resolve, a Gen5 title opens guest-mapped OTF bytes:
+// (library, font_address, font_size, detail*, handle*). Observed with CFF outlines.
 static int KYTY_SYSV_ABI FontOpenFontMemory(void* library, const void* font_address, uint32_t font_size,
                                             const void* detail, void** font_out)
 {
@@ -314,7 +314,7 @@ static int KYTY_SYSV_ABI FontCloseFont(void* font_handle)
 }
 
 // sceFontCreateRendererWithEdition — NID WaSFJoRWXaI
-// (memory, selection, edition, renderer_out). Observed Astro after OpenFontMemory.
+// (memory, selection, edition, renderer_out). Observed after OpenFontMemory.
 static int KYTY_SYSV_ABI FontCreateRendererWithEdition(const FontMemory* memory, void* selection,
                                                        uint64_t edition, void** renderer)
 {
@@ -980,7 +980,7 @@ LIB_DEFINE(InitFont_1)
 	LIB_FUNC("SsRbbCiWoGw", Font::FontSupportSystemFonts);
 	LIB_FUNC("mz2iTY0MK4A", Font::FontSupportExternalFonts);
 	LIB_FUNC("CUKn5pX-NVY", Font::FontAttachDeviceCacheBuffer);
-	// Gen5 Font_v1 open + renderer + layout + glyph metrics for Astro font bring-up.
+	// Gen5 Font_v1 open + renderer + layout + glyph metrics.
 	LIB_FUNC("cKYtVmeSTcw", Font::FontOpenFontSet);
 	LIB_FUNC("KXUpebrFk1U", Font::FontOpenFontMemory);
 	LIB_FUNC("JzCH3SCFnAU", Font::FontOpenFontInstance);
