@@ -11,11 +11,12 @@ fail on the current HEAD before acting on them.
 
 ## Fishing title: command-processor CPU costs (2026-10-14, partly fixed)
 
-- Context: on Intel the fishing title sails at 10-11 FPS with host CPU and GPU
+- Context: on Intel the fishing title runs its dock scenes (the scripted
+  route ends at the dock dialogue and the undock prompt) at 10-11 FPS with host CPU and GPU
   both far from saturated. The emulated command processor is one thread per
   guest queue, as on hardware, and that thread is the limit: about 100 ms of
   command-processor time per presented frame with a stack sampler attached.
-- Flat profile of that thread while sailing (release build, strict run, the
+- Flat profile of that thread at the dock (release build, strict run, the
   scripted route): `GpuMemory::FindBlocks` 9.3%, `DescriptorCache::UnindexSet`
   8.9%, driver descriptor-set allocation 6% plus 1.3% free,
   `GpuMemoryClassifyRangeSets` 3.7%, `ResetHash` 3.6%,
@@ -42,7 +43,7 @@ fail on the current HEAD before acting on them.
   2048-span scan. ABBA on Intel against the fix above: 11.73 / 11.97 FPS with it
   and 11.83 / 11.67 FPS without it. The scan is not on the critical path at this
   frame rate.
-- Ten-second agent window after the fix (Intel, sailing): 11.3 FPS, 82.5 ms of
+- Ten-second agent window after the fix (Intel, at the dock): 11.3 FPS, 82.5 ms of
   command-processor time per frame, that thread at 73% of one core (3% of it in
   the kernel), 1157 draws per frame (about 71 us each). Of the 82.5 ms, 15.7 ms
   are fence waits (32.6 per frame) and 11.1 ms `WAIT_REG_MEM` (212 per frame):
@@ -63,6 +64,35 @@ fail on the current HEAD before acting on them.
   per layout would remove the driver calls. The fence-hole registry is
   unsorted (`Objects/Label.cpp:113-252`); a sorted index with the longest hole
   length bounds each overlap query.
+- Fixed in part: write-back waits. A `WAIT_REG_MEM` on a label that the
+  current submission writes was consolidated into one barrier only for a plain
+  label store; a store whose `RELEASE_MEM` also writes back caches (about five
+  per frame, ~2 ms each) still submitted and waited. Ceiling, a diagnostic build
+  that consolidated every current-producer wait regardless of effects: 11.3 to
+  13.1 FPS, `WAIT_REG_MEM` 11.1 to 0.03 ms and fence waits 15.7 to 7.1 ms per
+  frame, the dock captures unchanged. Producer effects over that run: 284672
+  plain stores, 20328 store plus write-back, no notification. A second
+  diagnostic snapshotted the pending writable storage ranges at each forced
+  write-back consolidation and counted later object lookups in the same batch
+  over them: only depth-stencil objects (in a quarter of the consolidations);
+  no texture, vertex, index or render target. Guest-memory readers (memory
+  reads, GDS transfers, device-address views) already wait for pending storage
+  themselves, so the synchronous wait only protects GPU objects that alias the
+  storage, which the write-back refreshes or invalidates. The rule now
+  consolidates a store plus write-back when no pending writable storage has an
+  alias (`GraphicsWaitRegMemCanConsolidateCurrentProducer`,
+  `GpuMemoryPendingStorageHasAliases`); aliased cases and notifications stay
+  synchronous. Window with the rule: `WAIT_REG_MEM` 1.6 ms and fence waits
+  13.5 ms per frame; the last capture intervals 10.8 / 12.7 / 11.7 / 12.3 and
+  11.7 / 13.2 FPS against 10.5 / 11.8 / 10.9 / 11.8 and 10.7 / 12.1 / 11.5 /
+  10.7 FPS for the previous build, a gain of about 0.7 FPS that one ten-second
+  window (11.0 FPS, slower uploads) did not show. Regression with the rule:
+  the beat 'em up reaches gameplay in a 300 s run and renders its combat scenes
+  correctly (no gain there, its waits are device-address write-backs); the
+  racing title 41.3 / 40.6 FPS against 41.3 / 38.7; the fishing dock captures
+  match by index. Unrelated and pre-existing: some fishing-title launches never
+  present a first frame (same symptom on three earlier builds, 2026-10-12 and
+  2026-10-13).
 
 ## Static pointer-table resource plans: no measured gain (2026-10-14, excluded)
 
@@ -71,7 +101,7 @@ fail on the current HEAD before acting on them.
   the same tree without the plans. Release builds, strict runs, the same
   scripted route, the same warmed SPIR-V cache, fixed 1280x720 RenderTargets.
   The plans build passes 2425 unit tests (2419 plus its six plan tests).
-- Fishing title, open-sea sailing, Intel Arc A770, ABBA order over three
+- Fishing title, the same scripted dock route, Intel Arc A770, ABBA order over three
   processes per variant (200 s each, the last four capture intervals): the
   baseline averaged 10.20 / 10.57 / 10.50 FPS (10.42) and the plans 8.70 /
   10.47 / 10.00 FPS (9.72). Without the lowest plans run, 10.5 versus 10.2.
