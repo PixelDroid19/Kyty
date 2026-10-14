@@ -852,6 +852,22 @@ enum class GraphicsGdsTransferResult : uint8_t
 // Publishes a GDS span to guest memory when the recording's submission is published.
 [[nodiscard]] GraphicsGdsTransferResult GraphicsRenderReadGds(CommandBuffer* buffer, uint32_t* dst, uint64_t dw_offset, uint64_t dw_count);
 
+// The command processor reads packet operands such as indirect arguments at record time; the guest
+// bytes are current only when no GPU writer, earlier in the recording or on another queue, still
+// owns newer content. Anything but Read copied nothing.
+enum class GraphicsGuestReadResult : uint8_t
+{
+	Read,
+	// The recording owns the range: submit and wait, then retry.
+	ProcessorWriteBackRequired,
+	// Another queue's incomplete submission owns the range: wait for it, then retry.
+	SubmissionCompletionRequired,
+	// A texture-type writer owns the range, or the guest bytes are unreadable.
+	Unsupported,
+};
+[[nodiscard]] GraphicsGuestReadResult GraphicsRenderReadCurrentGuestBytes(CommandBuffer* buffer, uint64_t vaddr, void* dst, uint64_t size,
+                                                                         SubmissionId* dependency);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

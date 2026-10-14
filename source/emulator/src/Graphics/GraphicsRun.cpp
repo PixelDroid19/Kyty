@@ -2279,15 +2279,16 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 		uint32_t thread_group_z;
 	};
 
+	// The arguments are often written by an earlier dispatch of this recording.
 	DispatchIndirectArgs args {};
+	if (address == 0 || !ReadCurrentGuestBytes(address, &args, sizeof(args)))
+	{
+		EXIT("unreadable dispatch-indirect arguments: address=0x%016" PRIx64 "\n", address);
+	}
 	{
 		Core::LockGuard lock(m_mutex);
 
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-		if (address == 0 || !Core::VirtualMemory::CopyFromGuest(&args, address, sizeof(args)))
-		{
-			EXIT("unreadable dispatch-indirect arguments: address=0x%016" PRIx64 "\n", address);
-		}
 		if (args.thread_group_x == 0 || args.thread_group_y == 0 || args.thread_group_z == 0)
 		{
 			if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
@@ -2863,6 +2864,41 @@ void CommandProcessor::WaitDeviceAddressWriteBacks()
 			     pending.sequence);
 		}
 	}
+}
+
+bool CommandProcessor::ReadCurrentGuestBytes(uint64_t vaddr, void* dst, uint64_t size)
+{
+	// The same admission as a memory->GDS transfer: content this recording owns is written back by
+	// submitting it, and content another queue owns is waited for. No lock is held while waiting.
+	SubmissionId dependency;
+	for (uint32_t attempt = 0; attempt < 64u; ++attempt)
+	{
+		GraphicsGuestReadResult result = GraphicsGuestReadResult::Unsupported;
+		{
+			Core::LockGuard lock(m_mutex);
+			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+			result = GraphicsRenderReadCurrentGuestBytes(m_buffer[m_current_buffer], vaddr, dst, size, &dependency);
+		}
+		switch (result)
+		{
+			case GraphicsGuestReadResult::Read: return true;
+			case GraphicsGuestReadResult::ProcessorWriteBackRequired: WriteBack(); continue;
+			case GraphicsGuestReadResult::SubmissionCompletionRequired:
+				if (OwnsSubmissionQueue(dependency))
+				{
+					WaitSubmission(dependency);
+				} else
+				{
+					EXIT_IF(g_gpu == nullptr);
+					g_gpu->WaitSubmission(dependency);
+				}
+				continue;
+			case GraphicsGuestReadResult::Unsupported: return false;
+		}
+	}
+	EXIT("guest read did not stabilize: vaddr=0x%016" PRIx64 " queue=%u sequence=%" PRIu64 "\n", vaddr, dependency.queue.Value(),
+	     dependency.sequence);
+	return false;
 }
 
 void CommandProcessor::WriteBack()

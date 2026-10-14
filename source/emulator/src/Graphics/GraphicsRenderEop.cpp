@@ -679,6 +679,31 @@ GraphicsGdsTransferResult GraphicsRenderReadGds(CommandBuffer* buffer, uint32_t*
 	return GdsPublishToGuest(buffer, dw_offset, dst, dw_count);
 }
 
+GraphicsGuestReadResult GraphicsRenderReadCurrentGuestBytes(CommandBuffer* buffer, uint64_t vaddr, void* dst, uint64_t size,
+                                                            SubmissionId* dependency)
+{
+	EXIT_IF(g_render_ctx == nullptr);
+	EXIT_IF(dst == nullptr || dependency == nullptr);
+	*dependency = {};
+
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+
+	const auto source = GpuMemoryAcquireGdsSource(g_render_ctx->GetGraphicCtx(), buffer, vaddr, size);
+	switch (source.status)
+	{
+		case GpuMemoryGdsSourceStatus::GuestBytesCurrent:
+			return Core::VirtualMemory::CopyFromGuest(dst, vaddr, size) ? GraphicsGuestReadResult::Read : GraphicsGuestReadResult::Unsupported;
+		// A device buffer holds newer bytes than guest memory until the recording is written back.
+		case GpuMemoryGdsSourceStatus::DeviceBuffer:
+		case GpuMemoryGdsSourceStatus::ProcessorWriteBackRequired: return GraphicsGuestReadResult::ProcessorWriteBackRequired;
+		case GpuMemoryGdsSourceStatus::SubmissionCompletionRequired:
+			*dependency = source.dependency;
+			return GraphicsGuestReadResult::SubmissionCompletionRequired;
+		case GpuMemoryGdsSourceStatus::Unsupported: return GraphicsGuestReadResult::Unsupported;
+	}
+	return GraphicsGuestReadResult::Unsupported;
+}
+
 void GraphicsRenderMemoryFree(uint64_t vaddr, uint64_t size)
 {
 	GpuMemoryFree(g_render_ctx->GetGraphicCtx(), vaddr, size);
