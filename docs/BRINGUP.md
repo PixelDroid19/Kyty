@@ -9,6 +9,58 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: exposure fill and DCC metadata clears (2026-10-14)
+
+- Observed: after `TUNNEL_ENABLE` the Intel intro showed only the UI over a
+  black scene, with stale publisher text and a smeared logo. Bound-image
+  readbacks at present 1400 showed the 3D scene rendered correctly into its
+  2432x1368 RGBA16F targets (space backdrop, streaks, the console-shaped
+  ship). So the black came from the final composite, not from skipped
+  geometry.
+- Cause 1, exposure: the composite pixel program multiplies the tonemapped
+  scene by an exposure read from a 1x1 RGBA32F storage image. The guest
+  resets the exposure state each frame with the uniform compute fill kernel,
+  `(1, -1, 0.5, 0.18)`. The fill decoder refused RGBA32F, so the sampled
+  texture stayed zero and the exposure pass wrote zero. Fixed in 582c6662: a
+  16-byte texel is the fill quad itself.
+- Cause 2, UI layer: the UI target (3840x2160 RGBA16F, DCC on) has its
+  metadata filled with key `0x40` (color 0, alpha 1, per the Mesa
+  `ac_descriptors.h` keys) before the UI draws. Kyty ignored metadata fills,
+  so the UI accumulated earlier frames. The composite uses the UI alpha as
+  scene transmittance, so the accumulated UI also hid the scene.
+- Cause 3, lighting: the lighting target's metadata is filled with `0x00` and
+  four lighting compute passes then write the target as a storage image
+  before its first render-target bind. Consuming the clear at that bind
+  erased the lighting and left the ship as a black silhouette.
+- Change (fabd1ecb, contract in `docs/graphics-compute-uniform-color-fill.md`):
+  - A metadata fill with a clear key is a pending clear.
+  - The first access consumes it before the access happens: a render target
+    with that DCC base, or a shader image, read or written, whose T# enables
+    compression with that metadata base.
+  - It is applied only to single-level, single-slice, single-sample surfaces
+    whose fill holds one key per 256 bytes of texels.
+- Verified (Intel A770, strict, `generic` route, 330 s, no error, 1,482
+  frames): the captures show the publisher text, the studio logo over the warp
+  tunnel, the title logo and the lit ship. A diagnostic run of the same
+  tree applied seven metadata clears in present 1400. Racing title (Intel,
+  125 s), fishing title and watercolour platformer (AMD, 200 s and 90 s): no
+  error, and the same states as the 1d692f53 baselines. The fishing title
+  keeps its in-game rate (about 150 frames per 26-30 s capture interval in
+  both runs). Unit tests: 2,418 pass, 12 skipped, 0 failures. Table and
+  boundary gates pass.
+- Open, found while verifying:
+  - Flat blue streak shapes cover the scene. They are drawn by instanced
+    particle draws (48 vertices x 150 and x 300 instances) into the 1920x1080
+    effect layer and the 960x540 half-resolution layer, and composited by the
+    pass that writes the scene before TAA. The shapes exist with and without
+    the metadata clears; only their color changes.
+  - Some frames show a black top-left quadrant in the half-resolution layer
+    (960x540 written into a 1920x1080 surface).
+  - The skip prompt's text is drawn as filled squares.
+  - Not modelled: the pipe-dependent padding of the metadata plane, mip
+    chains, arrays, MSAA, reversed component swaps, and register-key clears
+    read through the texture unit.
+
 ## Robot platformer: Gen5 dispatch TUNNEL_ENABLE (2026-10-13)
 
 - Observed: with the 64-entry table, a 600 s Intel run passed the title
@@ -5066,7 +5118,9 @@ gates pass):
   print the backing image and every overlapping parent with its parameters; the paired-wave compute refusal and the
   pixel transport refusal share `ShaderDumpGuestProgram` (`KYTY_TRANSPORT_DUMP`).
 
-Why the screen is still black (evidence, not yet a proven sole cause): the skipped-draw report names a geometry
+Superseded on 2026-10-14 (see "Robot platformer: exposure fill and DCC metadata clears"): the black screen was the
+composite multiplying the scene by a zero exposure, under an accumulated UI layer; the skipped merged ES/GS
+programs are particle emitters. Earlier reading, kept for the record: the skipped-draw report names a geometry
 state the renderer does not model: GE stages `0x00002030` (merged ES/GS), ES and GS-back programs bound, legacy GS
 zero, `max_vert=0x48`, `out_prim=2`, `ge_ngg=0x46`, `max_out=0xd8`, primitive/vertex group sizes 3 and 0x18
 (`ShouldSkipUnsupportedGeShader` models only the `0x02002000` passthrough). The decoded GS-back program (540
