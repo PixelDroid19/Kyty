@@ -954,6 +954,12 @@ bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQue
 	return g_gpu_memory->PendingStorageWriteBack(ranges, consumer, dependency);
 }
 
+bool GpuMemoryPendingStorageHasAliases()
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	return g_gpu_memory->PendingStorageHasAliases();
+}
+
 bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity)
 {
 	return g_gpu_memory != nullptr && identity != nullptr && g_gpu_memory->FindExactWritableStorage(vaddr, size, identity);

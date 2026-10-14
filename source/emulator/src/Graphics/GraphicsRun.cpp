@@ -897,8 +897,11 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	// ordered before everything recorded after it, and it is published when the
 	// batch's fence completes either way. A full barrier keeps its memory
 	// effects visible without splitting the submission.
+	const auto effects = static_cast<uint8_t>(dependency.effects);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, effects,
+	                                                    producer_is_current_submission && (effects & 2u) != 0u &&
+	                                                        GpuMemoryPendingStorageHasAliases()))
 	{
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
@@ -977,8 +980,11 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	// ordered before everything recorded after it, and it is published when the
 	// batch's fence completes either way. A full barrier keeps its memory
 	// effects visible without splitting the submission.
+	const auto effects = static_cast<uint8_t>(dependency.effects);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, effects,
+	                                                    producer_is_current_submission && (effects & 2u) != 0u &&
+	                                                        GpuMemoryPendingStorageHasAliases()))
 	{
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;

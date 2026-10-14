@@ -1089,6 +1089,10 @@ void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRa
 // Reports one incomplete submission use of a writable StorageBuffer overlapping
 // any of the ranges, with the same publication exemption.
 [[nodiscard]] bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency);
+// True when a writable StorageBuffer with an incomplete submission use shares
+// guest bytes with another GPU object. Its write-back refreshes or invalidates
+// those aliases, so a wait that publishes it must stay synchronous.
+[[nodiscard]] bool GpuMemoryPendingStorageHasAliases();
 // An in-use writable StorageBuffer whose single block is exactly a requested range.
 struct GpuMemoryStorageWriteIdentity
 {

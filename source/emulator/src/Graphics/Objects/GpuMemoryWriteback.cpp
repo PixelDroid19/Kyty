@@ -500,6 +500,26 @@ bool GpuMemory::PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQ
 	return false;
 }
 
+bool GpuMemory::PendingStorageHasAliases()
+{
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	for (const auto& [heap_id, object_id]: m_writable_storage)
+	{
+		const auto& object = m_heaps[heap_id].objects[object_id];
+		const auto& info   = object.info;
+		if (object.others.IsEmpty() || !info.in_use || info.read_only || info.object.obj == nullptr)
+		{
+			continue;
+		}
+		if (!m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies()))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer)
 {
 	EXIT_IF(ctx == nullptr);

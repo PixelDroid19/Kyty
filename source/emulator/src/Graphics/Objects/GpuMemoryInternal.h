@@ -344,6 +344,7 @@ public:
 	void WriteBackAllCompleted(GraphicContext* ctx);
 	void               WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer);
 	[[nodiscard]] bool PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency);
+	[[nodiscard]] bool PendingStorageHasAliases();
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);

@@ -7023,16 +7023,19 @@ TEST(EmulatorGraphicsState, LabelFenceGdsStoreProtectsEveryWrittenDword)
 // SubmitAndFlip without an embedded R_FLIP/0x777 must still flip after BufferFlush.
 // Detect SubmitAndFlip via an explicit batch flag — not flip.handle != 0 (handle 0
 // is legal, and plain Submit also zeroes the flip fields).
-TEST(EmulatorGraphicsState, OnlyAPlainLabelStoreOfTheCurrentSubmissionConsolidatesAWait)
+TEST(EmulatorGraphicsState, ACurrentSubmissionWaitConsolidatesStoresAndUnaliasedWriteBacks)
 {
 	constexpr uint8_t store     = 1u;
 	constexpr uint8_t writeback = 2u;
 	constexpr uint8_t notify    = 4u;
-	EXPECT_TRUE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store));
-	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(false, store));
-	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | writeback));
-	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | notify));
-	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, 0u));
+	EXPECT_TRUE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store, false));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(false, store, false));
+	EXPECT_TRUE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | writeback, false));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | writeback, true));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(false, store | writeback, false));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | notify, false));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | writeback | notify, false));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, 0u, false));
 }
 
 TEST(EmulatorGraphicsState, EveryCompletionPayloadDefersBatchCompletion)
