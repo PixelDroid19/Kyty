@@ -9,6 +9,45 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Fishing title: command-processor CPU costs (2026-10-14, partly fixed)
+
+- Context: on Intel the fishing title sails at 10-11 FPS with host CPU and GPU
+  both far from saturated. The emulated command processor is one thread per
+  guest queue, as on hardware, and that thread is the limit: about 100 ms of
+  command-processor time per presented frame with a stack sampler attached.
+- Flat profile of that thread while sailing (release build, strict run, the
+  scripted route): `GpuMemory::FindBlocks` 9.3%, `DescriptorCache::UnindexSet`
+  8.9%, driver descriptor-set allocation 6% plus 1.3% free,
+  `GpuMemoryClassifyRangeSets` 3.7%, `ResetHash` 3.6%,
+  `LabelFenceRegistry::Snapshot` 3% (`LabelStoragePublication::Upload`, one
+  linear pass over every registered fence hole per storage upload), dirty-page
+  `Rearm` 2.9%.
+- Fixed: the per-resource index of live descriptor sets held a vector per
+  resource and removed a set with a linear erase, so a frequently bound image
+  or buffer made every unindex O(sets referencing it). The index is now a hash
+  set per resource; `FreeSetsReferencing` still frees in ascending index order.
+  `UnindexSet` disappears from the line profile. ABBA on Intel, 200 s per run,
+  the last four capture intervals: baseline 11.0 / 9.3 FPS, change 11.25 /
+  11.25 FPS. Regression runs with the change, scripted routes, captures
+  checked: the racing title on Intel 38-42 FPS racing, the beat 'em up on Intel
+  14-15 FPS against a same-session baseline of 11-12 FPS, the 2D action title on
+  AMD 28 FPS in its menu; no fatal stop and no visual difference.
+- Excluded: remembering up to eight recently scanned clean ranges in the
+  materialization cache so that a repeated `InvalidateRange` returns before its
+  2048-span scan. ABBA on Intel against the fix above: 11.73 / 11.97 FPS with it
+  and 11.83 / 11.67 FPS without it. The scan is not on the critical path at this
+  frame rate.
+- Remaining ranked costs and directions, not yet changed: `FindBlocks` from
+  `CanSnapshotReadOnlyBuffer` and `CaptureSnapshotReadOnlyBuffer`
+  (`GpuMemoryFind.cpp:371` and `:413`) spends most of its time sorting long
+  overlap lists from 1 MiB page buckets that hold many small objects; measure the
+  overlap count per query before choosing an index. Descriptor sets are
+  allocated and freed one by one from `VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT`
+  pools (`GraphicsRenderDescriptor.cpp:279` and `:337`); recycling freed sets
+  per layout would remove the driver calls. The fence-hole registry is
+  unsorted (`Objects/Label.cpp:113-252`); a sorted index with the longest hole
+  length bounds each overlap query.
+
 ## Static pointer-table resource plans: no measured gain (2026-10-14, excluded)
 
 - Change under test: `travel/static-resource-plans` (memoized pointer-table
