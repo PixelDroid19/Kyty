@@ -33,10 +33,18 @@ fail on the current HEAD before acting on them.
   not exclusions): the temporal antialiasing output and its history image
   are already black on the lower cards, and so is the HDR scene target
   except near the ring.
-- Not excluded: the stencil plane that gates the lighting pass. It was
-  discarded on depth-only clears before 55565820, and a compute fill of its
-  HTILE stencil fields is still not applied (open defect below).
 - Excluded:
+  - The stencil plane read by the lighting passes, as cause of the black
+    cards and the second logo. The guest clears the plane (2048x1280, 8-bit)
+    with the uniform fill kernel each frame. Its stencil writes on that depth
+    target use ALWAYS, REPLACE_TEST 128 and write mask 0x80; a capped probe
+    of every depth state on the target over 200 s saw no other writing
+    state. Four lighting dispatches sample it; the half-resolution normal
+    encoder and the light classifier do not read it at all, so the empty
+    light lists do not depend on it. With d72457e5 (fill clears
+    the host stencil, confirmed on every frame) and 55cd634d (the 8_UINT
+    sample binds the device stencil, confirmed by the sample bind catalog),
+    the screen is unchanged on Intel.
   - Ordering between the dispatches: memory barriers separate them in the
     command stream.
   - Translation of the classifier's control flow switch, `ds_append`,
@@ -45,7 +53,9 @@ fail on the current HEAD before acting on them.
     four readers bind the same exact storage view, with no older alias.
   - The G-buffer pass: MRT export translation (compressed, MRT0-4), per-MRT
     write masks (0xf, blending off) and depth-stencil state (LEQUAL with
-    write; stencil EQUAL, REPLACE, reference 4) are correct.
+    write) are correct. Its stencil state is the ALWAYS / REPLACE_TEST 128 /
+    mask 0x80 state above; an earlier note of EQUAL, REPLACE, reference 4 is
+    not supported by the register probe.
   - An earlier exclusion that read a 1x1x1 indirect dispatch as "counter 0"
     was flawed: it used stale indirect arguments (fixed below).
 - Changes made while localizing (none changes this screen visibly):
@@ -74,12 +84,21 @@ fail on the current HEAD before acting on them.
   `kyty_playable_regression.py` reports `honest_skip_no_guest_root` here (no
   local profile or guest root); it must run without `python3 -I` because it
   imports a sibling module.
+- Robot platformer on AMD (390 s, no error) on d72457e5..5236078d: 3.3-4.2
+  presents/s on the title screen, then about 0.4 once the next scene loads,
+  as on 13 October; it reaches frame 888 at the seventh capture against 865
+  before, and the last captures show the tunnel instead of black. The
+  racing, 2D action, fishing and watercolour titles show no regression on
+  that range (in-race 34-43 on Intel; 28-29, 5-7 and 68/43 presents/s on
+  AMD).
 - Open defects found here:
   - A guest compute fill of the stencil part of HTILE is not applied to the
     host stencil plane: `DepthMetaComputeFillTranslatable`
-    (`GraphicsRenderAttachments.cpp:500`) only translates depth. Direction:
-    translate SMem-cleared words to a stencil clear when the stencil clear
-    register agrees.
+    (`GraphicsRenderAttachments.cpp:500`) only translates depth. This title
+    clears the stencil plane itself and its HTILE word marks stencil
+    expanded (SMem 3), so no SMem-cleared word has been observed yet.
+    Direction: translate SMem-cleared words to a stencil clear when the
+    stencil clear register agrees.
   - `FindDepthStencil` (`GraphicsRenderDescriptor.cpp:1535`) asks for the
     first object only, so a recycled range with depth views in two formats
     can bind the stale one, as storage textures did before c8e3537c.
