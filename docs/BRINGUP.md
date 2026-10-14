@@ -68,6 +68,14 @@ fail on the current HEAD before acting on them.
   at the dock, 1157-1163 draws per frame: 52.6-54.4 us per draw against
   65.3-67.9 with the previous commit and 78.6-82.7 before this section, about
   15 FPS against 11; the dock capture renders correctly.
+- Regression runs on `6caf6261`, scripted routes: the fishing title on AMD
+  holds the dock at 9.1-9.2 FPS (7.3-7.7 FPS recorded before), 69-72 us per draw
+  at 1161-1163 draws per frame, and its dock capture matches the Intel one; the
+  robot platformer on Intel reaches the studio logo and the loading phase at
+  the same frame counts as `2696e271` (1120 against 1091 and 1118 presents in
+  200 s). Its black rectangle over the nebula fade-in is pre-existing (the
+  `2696e271` capture at frame 928 shows it). One 4.5 s gap between presents in
+  its loading phase made the agent report `stalled` once; presents resumed.
 - Excluded for the racing title: `ResetHash` self time is the inlined
   materialization-cache `InvalidateRange` scan (the only loop before
   `GetHeapId` in its disassembly). Scanning only live slots showed no gain in
