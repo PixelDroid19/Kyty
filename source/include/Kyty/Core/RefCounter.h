@@ -3,9 +3,13 @@
 
 #include "Kyty/Core/Common.h"
 
+#include <atomic>
+
 namespace Kyty::Core {
 
-template <class MutexPolicy>
+// Shared ownership for copy-on-write containers. Only the count is shared
+// between threads; mutating one container from two threads still needs the
+// caller's own synchronization.
 class RefCounter
 {
 public:
@@ -15,70 +19,38 @@ public:
 
 	void Release() const
 	{
-		Lock();
-		if (DecRef() == 0)
+		const uint32_t previous = m_refs.fetch_sub(1, std::memory_order_acq_rel);
+		EXIT_IF(previous == 0);
+		if (previous == 1)
 		{
-			Unlock();
 			delete this;
-		} else
-		{
-			Unlock();
 		}
 	}
 
 	template <class PtrType>
 	void CopyPtr(PtrType** dst, PtrType* src) const
 	{
-		Lock();
+		m_refs.fetch_add(1, std::memory_order_relaxed);
 		*dst = src;
-		AddRef();
-		Unlock();
 	}
 
+	// The copy is taken before this reference is dropped, so another owner
+	// releasing at the same time cannot free the source first.
 	template <class PtrType>
 	void CopyOnWrite(PtrType** data) const
 	{
-		Lock();
-		if (Refs() > 1)
+		if (m_refs.load(std::memory_order_acquire) > 1)
 		{
-			if (DecRef() == 0)
-			{
-				Unlock();
-				delete this;
-			} else
-			{
-				Unlock();
-			}
-
-			*data = new PtrType(**data);
-		} else
-		{
-			Unlock();
+			auto* copy = new PtrType(**data);
+			Release();
+			*data = copy;
 		}
 	}
 
 	KYTY_CLASS_NO_COPY(RefCounter);
 
 private:
-	uint32_t AddRef() const { return ++m_refs; }
-
-	uint32_t Refs() const { return m_refs; }
-
-	uint32_t DecRef() const
-	{
-		EXIT_IF(m_refs == 0);
-
-		uint32_t ret = --m_refs;
-
-		return ret;
-	}
-
-	void Lock() const { m_mutex.Lock(); }
-
-	void Unlock() const { m_mutex.Unlock(); }
-
-	mutable uint32_t    m_refs = {1};
-	mutable MutexPolicy m_mutex;
+	mutable std::atomic<uint32_t> m_refs {1};
 };
 
 } // namespace Kyty::Core

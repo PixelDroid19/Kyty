@@ -65,6 +65,11 @@ struct ShaderComputeWaveLayout
 	uint32_t                  lds_dwords           = 0;
 };
 
+// Native wave32 runs one host invocation per guest lane in whole 32-lane
+// subgroups: the guest group is laid out linearly along X, so its trailing
+// wave may be partial and the padding lanes start with EXEC clear.
+[[nodiscard]] bool ShaderNativeWave32PhysicalLocal(const uint32_t (&guest_local)[3], uint32_t (&physical_local)[3]) noexcept;
+
 [[nodiscard]] ShaderComputeWaveLayoutStatus ShaderBuildPairedComputeWaveLayout(const ShaderComputeWaveRequest&      request,
                                                                                const ShaderComputeWaveCapabilities& capabilities,
                                                                                ShaderComputeWaveLayout*             layout);

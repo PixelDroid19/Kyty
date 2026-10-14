@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -289,10 +290,6 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(mem->memory != nullptr);
-	if (mem->requirements.size == 0)
-	{
-		mem->requirements.size = 4096;
-	}
 
 	VkPhysicalDeviceMemoryProperties memory_properties {};
 	vkGetPhysicalDeviceMemoryProperties(ctx->physical_device, &memory_properties);
@@ -307,12 +304,22 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource
 		}
 	}
 
+	// No memory type matches the requested flags: fail before any state or driver call changes.
+	if (index == memory_properties.memoryTypeCount)
+	{
+		return false;
+	}
+
+	if (mem->requirements.size == 0)
+	{
+		mem->requirements.size = 4096;
+	}
+
 	mem->type       = index;
 	mem->offset     = 0;
 	mem->pool_block = nullptr;
 
-	if (index < memory_properties.memoryTypeCount &&
-	    PoolAllocate(ctx, mem, index, memory_properties.memoryTypes[index].propertyFlags, resource))
+	if (PoolAllocate(ctx, mem, index, memory_properties.memoryTypes[index].propertyFlags, resource))
 	{
 		mem->unique_id = ++seq;
 		g_mem_stat->allocated[index] += mem->requirements.size;
@@ -434,9 +441,141 @@ void VulkanBindBufferMemory(GraphicContext* ctx, VulkanBuffer* buffer, VulkanMem
 	EXIT_IF(buffer == nullptr);
 
 	const auto bind_start = std::chrono::steady_clock::now();
-	vkBindBufferMemory(ctx->device, buffer->buffer, mem->memory, mem->offset);
+	const auto result     = vkBindBufferMemory(ctx->device, buffer->buffer, mem->memory, mem->offset);
 	const auto bind_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - bind_start).count();
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanBind, static_cast<uint64_t>(bind_ns));
+
+	if (result != VK_SUCCESS)
+	{
+		EXIT("vkBindBufferMemory failed: size = %" PRIu64 ", offset = %" PRIu64 ", VkResult=%d\n", mem->requirements.size, mem->offset,
+		     static_cast<int>(result));
+	}
+}
+
+// GDS sources: texture-type objects keep device content in an image layout, so their
+// bytes have no established raw form for a GDS copy.
+static bool GdsSourceIsTextureType(GpuMemoryObjectType type)
+{
+	return type == GpuMemoryObjectType::Texture || type == GpuMemoryObjectType::RenderTexture ||
+	       type == GpuMemoryObjectType::StorageTexture || type == GpuMemoryObjectType::DepthStencilBuffer ||
+	       type == GpuMemoryObjectType::VideoOutBuffer;
+}
+
+GpuMemoryGdsSource GpuMemory::AcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size)
+{
+	EXIT_IF(ctx == nullptr || buffer == nullptr);
+	GpuMemoryGdsSource source;
+	SubmissionId       recording;
+	if (size == 0 || vaddr > UINT64_MAX - size || !buffer->GetSubmissionId(&recording))
+	{
+		return source;
+	}
+
+	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard    lock(m_mutex);
+	Vector<Destructor> destructors;
+	source.status     = GpuMemoryGdsSourceStatus::GuestBytesCurrent;
+	const int heap_id = GetHeapId(vaddr, size);
+	int       device_object  = -1;
+	int       pending_owners = 0;
+	bool      decided        = false;
+	if (heap_id >= 0)
+	{
+		for (const auto& found: FindBlocks(heap_id, &vaddr, &size, 1))
+		{
+			auto& object = m_heaps[heap_id].objects[found.object_id];
+			// Objects without unwritten GPU writes hold guest bytes or a copy of them.
+			if (object.free || m_pending_write_back.count({heap_id, found.object_id}) == 0)
+			{
+				continue;
+			}
+			const auto type = object.info.object.type;
+			if (GdsSourceIsTextureType(type))
+			{
+				source.status = GpuMemoryGdsSourceStatus::Unsupported;
+				source.writer = type;
+				decided       = true;
+				break;
+			}
+			bool recording_queue_owner = false;
+			for (const auto& use: object.info.submission_uses.Dependencies())
+			{
+				if (m_deferred_deletions.AreDependenciesComplete({use}))
+				{
+					continue;
+				}
+				if (!(use.queue == recording.queue))
+				{
+					source.status     = GpuMemoryGdsSourceStatus::SubmissionCompletionRequired;
+					source.dependency = use;
+					source.writer     = type;
+					decided           = true;
+					break;
+				}
+				recording_queue_owner = true;
+			}
+			if (decided)
+			{
+				break;
+			}
+			if (!recording_queue_owner)
+			{
+				// Every writer has completed: publish its content before the guest bytes are read.
+				WriteBackObjectLocked(ctx, heap_id, found.object_id, &destructors);
+				continue;
+			}
+			pending_owners++;
+			source.writer = type;
+			if (type == GpuMemoryObjectType::StorageBuffer && object.block.vaddr_num == 1 && !object.info.read_only &&
+			    object.info.object.obj != nullptr && object.block.vaddr[0] <= vaddr &&
+			    vaddr + size <= object.block.vaddr[0] + object.block.size[0])
+			{
+				device_object = found.object_id;
+			}
+		}
+	}
+	if (!decided && pending_owners == 1 && device_object >= 0)
+	{
+		auto&       object  = m_heaps[heap_id].objects[device_object];
+		const auto* storage = static_cast<const StorageVulkanBuffer*>(object.info.object.obj);
+		if (storage->buffer != nullptr && storage->guest_addr == object.block.vaddr[0])
+		{
+			// The recorded use keeps this backing alive until the copy's submission completes.
+			RecordUse(&object.info, recording);
+			object.info.use_last_frame = GpuMemoryAliasLookupUseFrame(m_current_frame, object.info.use_last_frame);
+			source.status              = GpuMemoryGdsSourceStatus::DeviceBuffer;
+			source.buffer              = storage;
+			source.offset              = vaddr - storage->guest_addr;
+			decided                    = true;
+		}
+	}
+	if (!decided && pending_owners > 0)
+	{
+		source.status = GpuMemoryGdsSourceStatus::ProcessorWriteBackRequired;
+	}
+	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
+	return source;
+}
+
+void GpuMemory::DeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task)
+{
+	const size_t count = submissions.size();
+	if (count == 0 || m_deferred_deletions.Enqueue(std::move(submissions), std::move(task)) != GpuDeferredDeletionResult::Success)
+	{
+		EXIT("deferred release rejected: submissions=%zu\n", count);
+	}
+}
+
+GpuMemoryGdsSource GpuMemoryAcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	return g_gpu_memory->AcquireGdsSource(ctx, buffer, vaddr, size);
+}
+
+void GpuMemoryDeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	g_gpu_memory->DeferUntilSubmissionsComplete(std::move(submissions), std::move(task));
 }
 
 } // namespace Kyty::Libs::Graphics

@@ -18,6 +18,11 @@ using namespace LaneFlow;
 using Type    = ShaderInstructionType;
 using Operand = ShaderOperandType;
 
+// A mask that may lack any launched lane, down to whole quads.
+constexpr uint8_t kPartial = kNotFull | kMissesQuad;
+// Extent of the undefined entry VCC, and of each per-instruction fact not reached by the walk.
+constexpr uint8_t kUnknownExtent = kExtent;
+
 bool Plain(const ShaderOperand& operand)
 {
 	return !operand.dpp && !operand.absolute && !operand.negate && !operand.clamp;
@@ -107,6 +112,18 @@ void CollectWrites(const ShaderInstruction& inst, std::bitset<kWords>* written)
 		for (unsigned word = 0; word < count; ++word) { written->set(first + word); }
 	}
 	if (IsCompare(inst.type) || (IsScalarAlu(inst.type) && WritesScc(inst.type))) { written->set(kSccWord); }
+}
+
+// Buffer, image and GDS counter writes. A Vulkan helper's write to them has no effect; LDS and scratch are
+// invocation storage in a pixel program, which a helper does write.
+bool WritesDeviceMemory(const ShaderInstruction& inst)
+{
+	if (inst.type == Type::DsAppend || inst.type == Type::DsConsume) { return inst.format == ShaderInstructionFormat::VdstGds; }
+	for (const char* prefix: {"BufferStore", "BufferAtomic", "TBufferStore", "ImageStore", "ImageAtomic", "Global"})
+	{
+		if (StartsWith(inst.type, prefix)) { return true; }
+	}
+	return false;
 }
 
 bool IsAddtid(Type type)
@@ -265,7 +282,7 @@ bool HasPrivatePixelAddtidSpills(const ShaderCode& code)
 class Flow
 {
 public:
-	ShaderFragmentMaskFlow Run(const ShaderCode& code);
+	ShaderFragmentMaskFlow Run(const ShaderCode& code, bool wave32);
 
 private:
 	bool Fail(const ShaderInstruction& inst, const char* reason)
@@ -275,6 +292,8 @@ private:
 		m_result.reason     = reason;
 		return false;
 	}
+	[[nodiscard]] ShaderOperand Vcc() const;
+	[[nodiscard]] bool          IsMaskOp(Type type, Type b64, Type b32) const { return type == b64 || (m_wave32 && type == b32); }
 	[[nodiscard]] uint8_t Taint(const ShaderOperand& operand) const;
 	[[nodiscard]] uint8_t SourceTaint(const ShaderInstruction& inst) const;
 	bool                  CheckSources(const ShaderInstruction& inst, bool* propagates);
@@ -293,6 +312,8 @@ private:
 	[[nodiscard]] bool    IsUniformMaskIn(const std::bitset<kWords>& masks, const ShaderOperand& operand) const;
 	void                  SetUniformMask(const ShaderOperand& dst, bool uniform);
 	bool                  Step(const ShaderInstruction& inst);
+	[[nodiscard]] bool    IsAnyLaneTest(const ShaderInstruction& inst) const;
+	void                  AnyLaneTest(const ShaderInstruction& inst);
 	[[nodiscard]] bool    IsScalarSpill(const ShaderInstruction& inst) const;
 	bool                  ScalarSpill(const ShaderInstruction& inst);
 	bool                  Branch(const ShaderInstruction& inst);
@@ -306,6 +327,9 @@ private:
 	void                  MarkAcceptedExecWrites(const ShaderCode& code);
 	bool                  ExecWide() const { return (m_state.scalar[kExecLoWord] & kWide) != 0u; }
 	[[nodiscard]] uint8_t WideResult(const ShaderInstruction& inst) const;
+	[[nodiscard]] uint8_t ExtentResult(const ShaderInstruction& inst) const;
+	void                  RecordFacts(uint32_t index, const ShaderInstruction& inst);
+	void                  PublishFacts();
 	bool                  InertDeadTail(uint32_t pc) const;
 
 	ShaderFragmentMaskFlow        m_result;
@@ -316,11 +340,29 @@ private:
 	bool                          m_changed = false; // a back edge changed a loop-head state during this walk
 	bool                          m_lane_preserving = false; // the write being defined keeps every inactive lane's bit
 	bool                          m_addtid_spills = false;
+	bool                          m_wave32        = false; // VCC is its low word (the program's lane masks are narrowed)
+	// SCC holds "some lane of a mask is set", written by the last SCC writer with no join since.
+	bool                          m_scc_any_lane         = false;
+	bool                          m_scc_any_lane_uniform = false;
 	// Taint of every word a static spill wrote to a (VGPR, lane) slot; it only grows across walks.
 	std::map<std::pair<int, int>, uint8_t> m_spills;
+	// Per instruction, from the walk in progress: the extent of EXEC before it, and the taint of a
+	// V_CNDMASK_B32 condition (all extent bits where the walk did not reach it).
+	std::vector<uint8_t>          m_exec_extent;
+	std::vector<uint8_t>          m_condition;
 	const ShaderCode*             m_code    = nullptr;
 	uint32_t                      m_index   = 0; // instruction being stepped
+	uint32_t                      m_launch_exec_end = 0; // ShaderLaunchExecEnd of m_code
 };
+
+// The VCC a branch or VCCZ tests: a wave32 uses only its low word.
+ShaderOperand Flow::Vcc() const
+{
+	ShaderOperand vcc {};
+	vcc.type = Operand::VccLo;
+	vcc.size = m_wave32 ? 1 : 2;
+	return vcc;
+}
 
 uint8_t Flow::Taint(const ShaderOperand& operand) const
 {
@@ -361,7 +403,9 @@ bool Flow::CheckSources(const ShaderInstruction& inst, bool* propagates)
 	{
 		if (Taint(inst.mimg_address[address]) != kClean) { return Fail(inst, "mask used as an image address"); }
 	}
-	for (int source = 0; source < inst.src_num; ++source)
+	// A count of the launch EXEC is a number; whether its lane positions hold is the admission's question.
+	const int first = ShaderCountsLaunchExec(*m_code, m_index, m_launch_exec_end) ? 1 : 0;
+	for (int source = first; source < inst.src_num; ++source)
 	{
 		const auto& operand = inst.src[source];
 		if (operand.type == Operand::ExecZ || operand.type == Operand::VccZ)
@@ -444,28 +488,31 @@ static bool SameScalar(const ShaderOperand& a, const ShaderOperand& b)
 bool Flow::PreservesLanesOutsideRegion(const ShaderInstruction& inst) const
 {
 	if (inst.src_num != 2 || inst.dst.type == Operand::ExecLo) { return false; }
-	if (inst.type == Type::SAndB64)
+	if (IsMaskOp(inst.type, Type::SAndB64, Type::SAndB32))
 	{
 		return (SameScalar(inst.dst, inst.src[0]) && OneOutsideRegion(inst.src[1])) ||
 		       (SameScalar(inst.dst, inst.src[1]) && OneOutsideRegion(inst.src[0]));
 	}
-	if (inst.type != Type::SOrB64 && inst.type != Type::SAndn2B64 && inst.type != Type::SXorB64) { return false; }
+	if (!IsMaskOp(inst.type, Type::SOrB64, Type::SOrB32) && !IsMaskOp(inst.type, Type::SAndn2B64, Type::SAndn2B32) &&
+	    !IsMaskOp(inst.type, Type::SXorB64, Type::SXorB32))
+	{
+		return false;
+	}
 	return SameScalar(inst.dst, inst.src[0]) && ZeroOutsideRegion(inst.src[1]);
 }
 
-// Evaluated before the write: whether the 64-bit result has every outside lane's bit set.
+// Evaluated before the write: whether the lane-mask result has every outside lane's bit set.
 bool Flow::ResultOneOutsideRegion(const ShaderInstruction& inst) const
 {
 	if (m_regions.empty() || inst.dst.type == Operand::ExecLo || ShaderInstructionWritesExec(inst)) { return false; }
-	switch (inst.type)
-	{
-		case Type::SOrn2B64: return inst.src_num == 2 && (OneOutsideRegion(inst.src[0]) || ZeroOutsideRegion(inst.src[1]));
-		case Type::SOrB64: return inst.src_num == 2 && (OneOutsideRegion(inst.src[0]) || OneOutsideRegion(inst.src[1]));
-		case Type::SAndB64: return inst.src_num == 2 && OneOutsideRegion(inst.src[0]) && OneOutsideRegion(inst.src[1]);
-		case Type::SNotB64: return inst.src_num == 1 && ZeroOutsideRegion(inst.src[0]);
-		case Type::SMovB64: return inst.src_num == 1 && OneOutsideRegion(inst.src[0]);
-		default: return false;
-	}
+	const Type type = inst.type;
+	const bool two  = inst.src_num == 2;
+	if (IsMaskOp(type, Type::SOrn2B64, Type::SOrn2B32)) { return two && (OneOutsideRegion(inst.src[0]) || ZeroOutsideRegion(inst.src[1])); }
+	if (IsMaskOp(type, Type::SOrB64, Type::SOrB32)) { return two && (OneOutsideRegion(inst.src[0]) || OneOutsideRegion(inst.src[1])); }
+	if (IsMaskOp(type, Type::SAndB64, Type::SAndB32)) { return two && OneOutsideRegion(inst.src[0]) && OneOutsideRegion(inst.src[1]); }
+	if (IsMaskOp(type, Type::SNotB64, Type::SNotB32)) { return inst.src_num == 1 && ZeroOutsideRegion(inst.src[0]); }
+	if (IsMaskOp(type, Type::SMovB64, Type::SMovB32)) { return inst.src_num == 1 && OneOutsideRegion(inst.src[0]); }
+	return false;
 }
 
 void Flow::MarkOneOutsideRegion(const ShaderOperand& dst)
@@ -502,18 +549,18 @@ void Flow::TrackRegionSubset(const ShaderInstruction& inst, bool exec_subset_bef
 	};
 	const bool writes_exec = ShaderInstructionWritesExec(inst);
 	if (StartsWith(inst.type, "VCmp") && !writes_exec && exec_subset_before) { mark(inst.dst); }
-	if (inst.type == Type::SMovB64 && inst.src[0].type == Operand::ExecLo && inst.dst.type != Operand::ExecLo && exec_subset_before)
-	{
-		mark(inst.dst);
-	}
+	const bool move       = IsMaskOp(inst.type, Type::SMovB64, Type::SMovB32);
+	const bool and_saveexec = IsMaskOp(inst.type, Type::SAndSaveexecB64, Type::SAndSaveexecB32);
+	if (move && inst.src[0].type == Operand::ExecLo && inst.dst.type != Operand::ExecLo && exec_subset_before) { mark(inst.dst); }
 	if (!writes_exec) { return; }
-	if (inst.type == Type::SAndSaveexecB64 && exec_subset_before) { mark(inst.dst); }
+	if (and_saveexec && exec_subset_before) { mark(inst.dst); }
+	const bool to_exec = inst.dst.type == Operand::ExecLo;
 	bool subset = false;
 	if (WritesExecOnly(inst.type)) { subset = exec_subset_before; }
-	if (inst.type == Type::SMovB64 && inst.dst.type == Operand::ExecLo) { subset = subset_of(inst.src[0]); }
-	if (inst.type == Type::SAndB64 && inst.dst.type == Operand::ExecLo) { subset = subset_of(inst.src[0]) || subset_of(inst.src[1]); }
-	if (inst.type == Type::SAndSaveexecB64) { subset = exec_subset_before || subset_of(inst.src[0]); }
-	if (inst.type == Type::SAndn2B64 && inst.dst.type == Operand::ExecLo) { subset = subset_of(inst.src[0]); }
+	if (move && to_exec) { subset = subset_of(inst.src[0]); }
+	if (IsMaskOp(inst.type, Type::SAndB64, Type::SAndB32) && to_exec) { subset = subset_of(inst.src[0]) || subset_of(inst.src[1]); }
+	if (and_saveexec) { subset = exec_subset_before || subset_of(inst.src[0]); }
+	if (IsMaskOp(inst.type, Type::SAndn2B64, Type::SAndn2B32) && to_exec) { subset = subset_of(inst.src[0]); }
 	region.exec_subset = subset;
 }
 
@@ -532,7 +579,7 @@ bool Flow::Define(const ShaderInstruction& inst, const ShaderOperand& dst, uint8
 		if ((taint & kMask) == 0u) { return Fail(inst, "EXEC assigned a numeric value"); }
 		if ((taint & kDiverged) != 0u) { return Fail(inst, "EXEC assigned a divergent scalar"); }
 		if ((taint & kMixed) != 0u) { return Fail(inst, "EXEC assigned a mask pair partly overwritten by a number"); }
-		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (taint & kWide));
+		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (taint & (kWide | kExtent)));
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 		return true; // EXEC is one bit per lane by construction; it is never region state
 	}
@@ -542,7 +589,7 @@ bool Flow::Define(const ShaderInstruction& inst, const ShaderOperand& dst, uint8
 		m_state.uniform_mask.reset(first + word);
 	}
 	MarkWritten(first, count);
-	if (dst.type == Operand::VccLo || dst.type == Operand::VccHi) { m_state.vcc_uniform = false; }
+	if (dst.type == Operand::VccLo || (dst.type == Operand::VccHi && !m_wave32)) { m_state.vcc_uniform = false; }
 	return true;
 }
 
@@ -589,7 +636,7 @@ void Flow::SetUniformMask(const ShaderOperand& dst, bool uniform)
 	unsigned count = 0;
 	if (!ScalarRange(dst, &first, &count)) { return; }
 	for (unsigned word = 0; word < count; ++word) { m_state.uniform_mask.set(first + word, uniform); }
-	if (dst.type == Operand::VccLo) { m_state.vcc_uniform = uniform; } // wave32 compares define VCC_LO only
+	if (dst.type == Operand::VccLo || (dst.type == Operand::VccHi && !m_wave32)) { m_state.vcc_uniform = IsUniformMask(Vcc()); }
 }
 
 // Compare of uniform sources, a copy of such a mask, EXEC narrowed by one (nonzero exactly when the compare holds),
@@ -651,6 +698,48 @@ uint8_t Flow::WideResult(const ShaderInstruction& inst) const
 	if (StartsWith(type, "SAnd")) { return (any_mask && all_wide) ? kWide : kClean; }
 	if (AnyPrefix(type, {"SOrn2", "SNand", "SNor", "SXnor", "SNot"})) { return kWide; }
 	return (any_wide || (nonzero_constant && StartsWith(type, "S") && !IsSelect(type) && !StartsWith(type, "SMov"))) ? kWide : kClean;
+}
+
+// Extent of the mask an instruction produces against the launched quads. Only a copy keeps a full mask
+// (every launched lane), and S_WQM makes one from a mask that meets every launched quad, as the entry EXEC
+// does. Anything else may lose lanes; the complements and nonzero constants may also add lanes the host
+// subgroup does not hold.
+uint8_t Flow::ExtentResult(const ShaderInstruction& inst) const
+{
+	const Type type   = inst.type;
+	const auto extent = [&](int source) { return static_cast<uint8_t>(Taint(inst.src[source]) & kExtent); };
+	if ((type == Type::SMovB64 || type == Type::SMovB32) && inst.src_num == 1)
+	{
+		if (!IsConstant(inst.src[0])) { return extent(0); }
+		return inst.src[0].constant.u == 0u ? kPartial : kExtent;
+	}
+	if (StartsWith(type, "SWqm") && inst.src_num == 1)
+	{
+		const uint8_t source = extent(0);
+		return static_cast<uint8_t>((source & kOuter) | ((source & kMissesQuad) != 0u ? kPartial : kClean));
+	}
+	if (StartsWith(type, "VCmp") || ShaderNativePackedResult(inst))
+	{
+		return static_cast<uint8_t>((m_state.scalar[kExecLoWord] & kOuter) | kPartial);
+	}
+	bool any_mask = false, any_outer = false, all_outer = true, nonzero_constant = false;
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		if ((Taint(inst.src[source]) & kMask) != 0u)
+		{
+			const bool outer = (extent(source) & kOuter) != 0u;
+			any_mask         = true;
+			any_outer        = any_outer || outer;
+			all_outer        = all_outer && outer;
+		} else if (IsConstant(inst.src[source]) && inst.src[source].constant.u != 0u)
+		{
+			nonzero_constant = true;
+		}
+	}
+	if (StartsWith(type, "SAndn2")) { return static_cast<uint8_t>((inst.src_num > 0 ? extent(0) & kOuter : kOuter) | kPartial); }
+	if (StartsWith(type, "SAnd")) { return static_cast<uint8_t>(((any_mask && all_outer) ? kOuter : kClean) | kPartial); }
+	if (AnyPrefix(type, {"SOrn2", "SNand", "SNor", "SXnor", "SNot"})) { return kExtent; }
+	return static_cast<uint8_t>(((any_outer || nonzero_constant) ? kOuter : kClean) | kPartial);
 }
 
 // Code that runs when no lane survives and produces nothing: optionally EXEC = 0, a null
@@ -741,16 +830,22 @@ bool Flow::Branch(const ShaderInstruction& inst)
 		case Type::SCbranchVccz:
 		case Type::SCbranchVccnz:
 		{
-			ShaderOperand vcc {};
-			vcc.type = Operand::VccLo;
-			vcc.size = 2;
+			const auto vcc = Vcc();
 			if ((Taint(vcc) & kMixed) != 0u) { return Fail(inst, "VCC branch on a mask pair partly overwritten by a number"); }
-			divergent = !m_state.vcc_uniform;
+			divergent = !IsUniformMask(vcc);
 			break;
 		}
 		case Type::SCbranchScc0:
 		case Type::SCbranchScc1:
 		{
+			if (m_scc_any_lane)
+			{
+				// The question S_CBRANCH_VCCZ asks of VCC: a host subgroup answers it for its own lanes. Only
+				// the VCC/EXEC forms make a loop lane divergent (FindLoops), so a back edge stays refused.
+				if (target <= inst.pc) { return Fail(inst, "loop branch on an any-lane test"); }
+				divergent = !m_scc_any_lane_uniform;
+				break;
+			}
 			const uint8_t scc = m_state.scalar[kSccWord];
 			// "No lane survives" (SCC of a narrow mask) may skip to a tail that does nothing.
 			const bool survivors_only = (scc & kMask) != 0u && (scc & (kDiverged | kMixed | kWide)) == 0u;
@@ -791,7 +886,11 @@ bool Flow::Branch(const ShaderInstruction& inst)
 // stay: the next walk starts from them again until no back edge changes anything.
 void Flow::EnterJoin(uint32_t pc)
 {
-	if (const auto entry = m_entry.find(pc); entry != m_entry.end()) { m_state.Merge(entry->second); }
+	if (const auto entry = m_entry.find(pc); entry != m_entry.end())
+	{
+		m_state.Merge(entry->second);
+		m_scc_any_lane = false;
+	}
 	for (auto region = m_regions.begin(); region != m_regions.end();)
 	{
 		if (region->end_pc != pc)
@@ -837,9 +936,43 @@ bool Flow::ScalarSpill(const ShaderInstruction& inst)
 	return Define(inst, inst.dst, slot != m_spills.end() ? slot->second : kClean);
 }
 
+// S_CMP_LG_U64 / S_CMP_EQ_U64 of a lane mask against zero: whether any lane's bit is set. The pair must be
+// lane bits only; a word that is also a number or divergent does not qualify. Helper bits under WQM may count,
+// as they do for VCCZ: the packed host mask gathers every quad member's bit the guest compare produced.
+bool Flow::IsAnyLaneTest(const ShaderInstruction& inst) const
+{
+	if ((inst.type != Type::SCmpLgU64 && inst.type != Type::SCmpEqU64) || inst.src_num != 2) { return false; }
+	const auto zero = [](const ShaderOperand& operand)
+	{ return Plain(operand) && operand.type == Operand::IntegerInlineConstant && operand.constant.i == 0; };
+	const ShaderOperand* mask = zero(inst.src[1]) ? &inst.src[0] : (zero(inst.src[0]) ? &inst.src[1] : nullptr);
+	unsigned first = 0;
+	unsigned count = 0;
+	if (mask == nullptr || !Plain(*mask) || !ScalarRange(*mask, &first, &count) || count != 2u) { return false; }
+	const auto lane_bits = [](uint8_t taint) { return (taint & kMask) != 0u && (taint & ~(kMask | kWide | kExtent)) == 0u; };
+	return lane_bits(m_state.scalar[first]) && lane_bits(m_state.scalar[first + 1u]);
+}
+
+void Flow::AnyLaneTest(const ShaderInstruction& inst)
+{
+	const auto& mask = IsConstant(inst.src[0]) ? inst.src[1] : inst.src[0];
+	m_state.scalar[kSccWord] = kMask; // every other SCC reader still refuses it
+	MarkWritten(kSccWord, 1u);
+	m_scc_any_lane         = true;
+	m_scc_any_lane_uniform = IsUniformMask(mask);
+}
+
 bool Flow::Step(const ShaderInstruction& inst)
 {
-	if (WritesMemory(inst.type) && !(m_addtid_spills && IsAddtid(inst.type)))
+	if (IsAnyLaneTest(inst))
+	{
+		AnyLaneTest(inst);
+		return true;
+	}
+	if (IsCompare(inst.type) || (IsScalarAlu(inst.type) && WritesScc(inst.type))) { m_scc_any_lane = false; }
+	// Under the launch EXEC no helper lane is in EXEC, as no Vulkan helper's device-memory write takes effect,
+	// so such a write observes the same lanes on both.
+	const bool launch_write = m_index < m_launch_exec_end && WritesDeviceMemory(inst);
+	if (WritesMemory(inst.type) && !(m_addtid_spills && IsAddtid(inst.type)) && !launch_write)
 	{
 		return Fail(inst, "memory write: helper lanes would be observable");
 	}
@@ -869,13 +1002,19 @@ bool Flow::Step(const ShaderInstruction& inst)
 	const bool empty_mask = (inst.type == Type::SMovB64 || inst.type == Type::SMovB32) && inst.src_num == 1 &&
 	                        inst.src[0].type == Operand::IntegerInlineConstant && inst.src[0].constant.i == 0;
 	if (empty_mask && inst.dst.type == Operand::ExecLo) { produced |= kMask; }
-	if ((produced & kMask) != 0u) { produced = static_cast<uint8_t>((produced & ~kWide) | WideResult(inst)); }
+	if ((produced & kMask) != 0u) { produced = static_cast<uint8_t>((produced & ~kWide) | WideResult(inst) | ExtentResult(inst)); }
+	const uint8_t exec_extent = m_state.scalar[kExecLoWord] & kExtent;
 	if (WritesExecOnly(inst.type))
 	{
 		// EXEC &= compare: it narrows, so it stays wide only if it already was.
-		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (ExecWide() ? kWide : kClean));
+		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (ExecWide() ? kWide : kClean) | (exec_extent & kOuter) | kPartial);
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 		return true;
+	}
+	// S_*_SAVEEXEC: the destination is a copy of the old EXEC.
+	if (ShaderInstructionTypeChangesExec(inst.type) && inst.dst.type != Operand::ExecLo)
+	{
+		produced = static_cast<uint8_t>((produced & ~kExtent) | exec_extent);
 	}
 	const bool exec_subset_before = !m_regions.empty() && m_regions.back().exec_subset;
 	const bool one_outside_after  = ResultOneOutsideRegion(inst);
@@ -891,7 +1030,8 @@ bool Flow::Step(const ShaderInstruction& inst)
 		// S_*_SAVEEXEC: the destination took the old EXEC; EXEC is now the combination.
 		const bool narrowing = StartsWith(inst.type, "SAnd") && !StartsWith(inst.type, "SAndn");
 		const bool wide = narrowing ? (ExecWide() && (Taint(inst.src[0]) & kWide) != 0u) : true;
-		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (wide ? kWide : kClean));
+		const bool outer = narrowing ? ((exec_extent & kOuter) != 0u && (Taint(inst.src[0]) & kOuter) != 0u) : true;
+		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (wide ? kWide : kClean) | (outer ? kOuter : kClean) | kPartial);
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 	}
 	TrackUniformMask(inst, uniform_sources);
@@ -915,22 +1055,52 @@ void Flow::MarkAcceptedExecWrites(const ShaderCode& code)
 	}
 }
 
+// The state a walk steps an instruction with already joins every path into it, so the facts of the
+// walk that reaches the fixpoint hold for the program.
+void Flow::RecordFacts(uint32_t index, const ShaderInstruction& inst)
+{
+	m_exec_extent[index] = static_cast<uint8_t>(m_state.scalar[kExecLoWord] & kExtent);
+	m_condition[index]   = inst.type == Type::VCndmaskB32 && inst.src_num == 3 ? Taint(inst.src[2]) : kUnknownExtent;
+}
+
+void Flow::PublishFacts()
+{
+	const size_t size = m_exec_extent.size();
+	m_result.exec_in_quads.assign(size, false);
+	m_result.exec_full.assign(size, false);
+	m_result.live_condition.assign(size, false);
+	for (size_t index = 0; index < size; ++index)
+	{
+		const uint8_t condition = m_condition[index];
+		m_result.exec_in_quads[index]  = (m_exec_extent[index] & kOuter) == 0u;
+		m_result.exec_full[index]      = m_exec_extent[index] == kClean;
+		m_result.live_condition[index] = (condition & kMask) != 0u && (condition & (kWide | kOuter | kMixed | kDiverged)) == 0u;
+	}
+}
+
 // One pass over the program in address order from the entry state, merging the states that
 // arrive at branch targets. Forward edges are complete within a pass; back edges feed the next.
 bool Flow::Walk()
 {
 	m_state   = {};
 	m_changed = false;
+	m_scc_any_lane = false;
 	m_regions.clear();
-	// EXEC, VCC and SCC enter undefined or lane dependent: treat them as masks.
+	// EXEC, VCC and SCC enter undefined or lane dependent: treat them as masks. The entry EXEC holds
+	// the covered lanes, at least one of each launched quad; nothing is known of the entry VCC.
 	for (unsigned word : {kVccLoWord, kVccLoWord + 1u, kExecLoWord, kExecLoWord + 1u, kSccWord}) { m_state.scalar[word] = kMask; }
+	for (unsigned word : {kVccLoWord, kVccLoWord + 1u}) { m_state.scalar[word] |= kUnknownExtent; }
+	for (unsigned word : {kExecLoWord, kExecLoWord + 1u}) { m_state.scalar[word] |= kNotFull; }
 	const auto& instructions = m_code->GetInstructions();
+	m_exec_extent.assign(instructions.Size(), kUnknownExtent);
+	m_condition.assign(instructions.Size(), kUnknownExtent);
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		const auto& inst = instructions.At(index);
 		EnterJoin(inst.pc);
 		if (!m_state.reachable) { continue; }
 		m_index = index;
+		RecordFacts(index, inst);
 		if (!Step(inst)) { return false; }
 	}
 	if (!m_regions.empty())
@@ -941,9 +1111,11 @@ bool Flow::Walk()
 	return true;
 }
 
-ShaderFragmentMaskFlow Flow::Run(const ShaderCode& code)
+ShaderFragmentMaskFlow Flow::Run(const ShaderCode& code, bool wave32)
 {
 	m_code                   = &code;
+	m_wave32                 = wave32;
+	m_launch_exec_end        = ShaderLaunchExecEnd(code);
 	const auto& instructions = code.GetInstructions();
 	if (code.GetType() != ShaderType::Pixel || instructions.IsEmpty() ||
 	    instructions.At(instructions.Size() - 1u).type != Type::SEndpgm)
@@ -977,6 +1149,7 @@ ShaderFragmentMaskFlow Flow::Fixpoint()
 		{
 			m_result.lane_local = true;
 			MarkAcceptedExecWrites(*m_code);
+			PublishFacts();
 			return m_result;
 		}
 	}
@@ -1001,10 +1174,14 @@ bool Flow::RefineLoopExemptions(bool admitted)
 
 } // namespace
 
-ShaderFragmentMaskFlow ShaderAnalyzeFragmentMaskFlow(const ShaderCode& code)
+ShaderFragmentMaskFlow ShaderAnalyzeFragmentMaskFlow(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	Flow flow;
-	return flow.Run(code);
+	if (guest_wave_size != 32u) { return flow.Run(code, false); }
+	const auto narrowed = ShaderWave32LaneMaskProgram(code);
+	auto       result   = flow.Run(narrowed, true);
+	result.guest_wave_size = 32u;
+	return result;
 }
 
 } // namespace Kyty::Libs::Graphics

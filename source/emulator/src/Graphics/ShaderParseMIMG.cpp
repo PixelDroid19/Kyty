@@ -46,7 +46,8 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	EXIT_NOT_IMPLEMENTED(r128 == 1);
 	EXIT_NOT_IMPLEMENTED(tff == 1);
 	EXIT_NOT_IMPLEMENTED(lwe == 1);
-	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && opcode == 0x11u));
+	// GLC on an atomic selects the pre-op return (RDNA2 8.1.10); load and store cache policy is not admitted.
+	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && (opcode == 0x0fu || opcode == 0x11u)));
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(unrm == 1);
 	// EXIT_NOT_IMPLEMENTED(dmask != 0xf && dmask != 0x7);
@@ -56,7 +57,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	// for them (its explicit SSAMP=0 restriction is for BVH). Admit the zero
 	// encoding only, without inventing a sampler read or erasing unknown bits.
 	const bool samplerless = opcode == 0x00u || opcode == 0x01u || opcode == 0x08u || opcode == 0x09u || opcode == 0x0eu ||
-	                         opcode == 0x11u;
+	                         opcode == 0x0fu || opcode == 0x11u;
 	if (samplerless && ssamp != 0u)
 	{
 		EXIT("unsupported samplerless MIMG SSAMP: opcode=0x%02" PRIx32 " ssamp=0x%02" PRIx32 " pc=0x%08" PRIx32
@@ -95,13 +96,16 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		{
 			EXIT_NOT_IMPLEMENTED(dmask == 0);
 			const bool mip = opcode == 0x01u;
-			EXIT_NOT_IMPLEMENTED(mip && dim != 1u && dim != 2u && dim != 5u);
+			EXIT_NOT_IMPLEMENTED(mip && dim != 1u && dim != 2u && dim != 4u && dim != 5u);
+			// RDNA2 ISA table 42: load_mip addresses are 2D (x, y, mip), 1D array (x, slice, mip),
+			// 3D and 2D array (x, y, z or slice, mip).
+			const bool four_addresses = mip && dim != 1u && dim != 4u;
 			inst.type        = ShaderInstructionType::ImageLoad;
 			inst.mimg_explicit_lod = mip;
-			inst.src[0].size = mip && dim != 1u ? 4 : 3;
+			inst.src[0].size = four_addresses ? 4 : 3;
 			inst.src[1].size = 8;
 			inst.src_num     = 2;
-			inst.format      = mip && dim != 1u ? ShaderInstructionFormat::VdataVaddr4StDmask
+			inst.format      = four_addresses ? ShaderInstructionFormat::VdataVaddr4StDmask
 			                                     : ShaderInstructionFormat::VdataVaddr3StDmask;
 			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
 			inst.dst.size    = 0;
@@ -158,11 +162,10 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			}
 			break;
 		}
-		case 0x0F: KYTY_NI("image_atomic_swap"); break;
-		case 0x10: KYTY_NI("image_atomic_cmpswap"); break;
+		case 0x0f:
 		case 0x11:
 			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask != 1u || nsa != 0u || (buffer[1] & 0x80000000u) != 0);
-			inst.type                  = ShaderInstructionType::ImageAtomicAdd;
+			inst.type                  = opcode == 0x0fu ? ShaderInstructionType::ImageAtomicSwap : ShaderInstructionType::ImageAtomicAdd;
 			inst.format                = ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1;
 			inst.dst.size              = 1;
 			inst.src[0].size           = 2;
@@ -171,8 +174,9 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			inst.src_num               = 3;
 			inst.mimg_dmask            = 1;
 			inst.mimg_return_old_value = glc != 0;
-			EXIT_NOT_IMPLEMENTED(!ShaderImageAtomicAddSupported(inst));
+			EXIT_NOT_IMPLEMENTED(!ShaderImageAtomicSupported(inst));
 			break;
+		case 0x10: KYTY_NI("image_atomic_cmpswap"); break;
 		case 0x12: KYTY_NI("image_atomic_sub"); break;
 		case 0x13: KYTY_NI("image_atomic_rsub"); break;
 		case 0x14: KYTY_NI("image_atomic_smin"); break;
@@ -298,6 +302,17 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 				inst.src[1].size = 8;
 				inst.src[2].size = 4;
 				inst.mimg_dmask  = static_cast<uint8_t>(dmask);
+				if (dim == 4u)
+				{
+					// RDNA2 ISA table 43: a 1D-array sample_l addresses (x, slice, lod). Every
+					// enabled-component set packs into consecutive VGPRs.
+					if (dmask != 0u)
+					{
+						inst.format   = ShaderInstructionFormat::VdataVaddr3StSsMimgDmask;
+						inst.dst.size = MimgDmaskComponents(dmask);
+					}
+					break;
+				}
 			switch (dmask)
 			{
 					case 0x1:

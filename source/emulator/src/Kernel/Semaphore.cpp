@@ -1,5 +1,4 @@
 #include "Emulator/Kernel/Semaphore.h"
-#include "Emulator/Kernel/Pthread.h"
 
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/String.h"
@@ -8,11 +7,14 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Kernel/Errors.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
 
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <unordered_map>
 
@@ -59,11 +61,26 @@ private:
 		Deleted
 	};
 
+	class WaitCallGuard
+	{
+	public:
+		explicit WaitCallGuard(KernelSemaPrivate* object): m_object(object) { m_object->m_active_wait_calls++; }
+		~WaitCallGuard()
+		{
+			m_object->m_active_wait_calls--;
+			m_object->m_cond_var.SignalAll();
+		}
+
+	private:
+		KernelSemaPrivate* m_object;
+	};
+
 	Core::Mutex   m_mutex;
 	Core::CondVar m_cond_var;
 	String        m_name;
 	Status        m_status = Status::Set;
 	Vector<int>   m_waiting_threads;
+	int           m_active_wait_calls = 0;
 	// bool          m_fifo_order;
 	int m_count;
 	int m_init_count;
@@ -81,7 +98,8 @@ static bool sema_trace_enabled()
 
 static uint64_t sema_trace_focus_caller()
 {
-	static const uint64_t caller = []() {
+	static const uint64_t caller = []()
+	{
 		const char* value = std::getenv("KYTY_SEMA_TRACE_CALLER");
 		return (value != nullptr ? std::strtoull(value, nullptr, 0) : 0ull);
 	}();
@@ -94,7 +112,8 @@ static uint64_t sema_trace_focus_caller()
 // subsequent operation for one named guest semaphore.
 static const char* sema_trace_name_filter()
 {
-	static const char* name = []() {
+	static const char* name = []()
+	{
 		const char* value = std::getenv("KYTY_SEMA_TRACE_NAME");
 		return (value != nullptr && value[0] != '\0' ? value : nullptr);
 	}();
@@ -103,8 +122,7 @@ static const char* sema_trace_name_filter()
 
 static std::atomic<KernelSema> g_sema_trace_focus {nullptr};
 
-static void sema_trace(const char* operation, KernelSema sem, const KernelSemaPrivate* object, int value, int result,
-	                   uint64_t caller)
+static void sema_trace(const char* operation, KernelSema sem, const KernelSemaPrivate* object, int value, int result, uint64_t caller)
 {
 	if (!sema_trace_enabled())
 	{
@@ -140,9 +158,9 @@ static void sema_trace(const char* operation, KernelSema sem, const KernelSemaPr
 		return;
 	}
 
-	KYTY_LOG_DEBUG( "SEMA_TRACE %s n=%u handle=%p name=%s value=%d result=%d caller=0x%016llx\n", operation, index,
-	             reinterpret_cast<void*>(sem), (object != nullptr ? object->GetName().C_Str() : "<null>"), value, result,
-	             static_cast<unsigned long long>(caller));
+	KYTY_LOG_DEBUG("SEMA_TRACE %s n=%u handle=%p name=%s value=%d result=%d caller=0x%016llx\n", operation, index,
+	               reinterpret_cast<void*>(sem), (object != nullptr ? object->GetName().C_Str() : "<null>"), value, result,
+	               static_cast<unsigned long long>(caller));
 }
 
 KernelSemaPrivate::~KernelSemaPrivate()
@@ -155,6 +173,10 @@ void KernelSemaPrivate::Delete()
 	Core::LockGuard lock(m_mutex);
 	m_status = Status::Deleted;
 	m_cond_var.SignalAll();
+	while (m_active_wait_calls > 0)
+	{
+		m_cond_var.Wait(&m_mutex);
+	}
 }
 
 KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_waiting_threads)
@@ -171,11 +193,9 @@ KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_wait
 		return Result::Deleted;
 	}
 
-	while (m_status != Status::Set)
+	while (m_status == Status::Canceled)
 	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
+		m_cond_var.Wait(&m_mutex);
 		if (m_status == Status::Deleted)
 		{
 			return Result::Deleted;
@@ -195,9 +215,11 @@ KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_wait
 
 	while (!m_waiting_threads.IsEmpty())
 	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
+		m_cond_var.Wait(&m_mutex);
+		if (m_status == Status::Deleted)
+		{
+			return Result::Deleted;
+		}
 	}
 
 	if (m_status == Status::Deleted)
@@ -206,6 +228,7 @@ KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_wait
 	}
 
 	m_status = Status::Set;
+	m_cond_var.SignalAll();
 
 	return Result::Ok;
 }
@@ -219,11 +242,9 @@ KernelSemaPrivate::Result KernelSemaPrivate::Signal(int signal_count)
 		return Result::Deleted;
 	}
 
-	while (m_status != Status::Set)
+	while (m_status == Status::Canceled)
 	{
-		m_mutex.Unlock();
-		Core::Thread::SleepMicro(10);
-		m_mutex.Lock();
+		m_cond_var.Wait(&m_mutex);
 		if (m_status == Status::Deleted)
 		{
 			return Result::Deleted;
@@ -245,15 +266,11 @@ KernelSemaPrivate::Result KernelSemaPrivate::Signal(int signal_count)
 KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_micros)
 {
 	Core::LockGuard lock(m_mutex);
+	WaitCallGuard   active_call(this);
 
 	if (need_count < 1 || need_count > m_max_count)
 	{
 		return Result::InvalCount;
-	}
-
-	if (m_status == Status::Deleted)
-	{
-		return Result::Deleted;
 	}
 
 	uint32_t micros     = 0;
@@ -267,6 +284,40 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 	uint32_t    elapsed = 0;
 	Core::Timer t;
 	t.Start();
+	const auto count_available = [this, need_count] { return m_count >= need_count; };
+	if (m_status == Status::Deleted)
+	{
+		return Result::Deleted;
+	}
+
+	while (m_status == Status::Canceled && !count_available())
+	{
+		if (elapsed >= micros && !infinitely)
+		{
+			if (ptr_micros != nullptr)
+			{
+				*ptr_micros = 0;
+			}
+			return Result::TimedOut;
+		}
+
+		if (infinitely)
+		{
+			m_cond_var.Wait(&m_mutex);
+		} else
+		{
+			m_cond_var.WaitFor(&m_mutex, micros - elapsed);
+		}
+		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
+		if (m_status == Status::Deleted)
+		{
+			if (ptr_micros != nullptr)
+			{
+				*ptr_micros = (elapsed >= micros ? 0 : micros - elapsed);
+			}
+			return Result::Deleted;
+		}
+	}
 
 	int id = Core::Thread::GetThreadIdUnique();
 
@@ -289,6 +340,7 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 		}
 
 		m_waiting_threads.Remove(id);
+		m_cond_var.SignalAll();
 
 		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
 
@@ -323,8 +375,34 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 
 namespace {
 
-Core::Mutex                                                    g_sema_registry_mutex;
+Core::Mutex                                                        g_sema_registry_mutex;
 std::unordered_map<KernelSema, std::shared_ptr<KernelSemaPrivate>> g_live_semas;
+std::uintptr_t                                                     g_next_sema_identity = 1;
+
+// Semaphore handles are even pointer-sized tokens, distinct from event flags.
+// Identity exhaustion is fatal rather than wrapping and making a stale handle live again.
+constexpr std::uintptr_t kMaxSemaIdentity = std::numeric_limits<std::uintptr_t>::max() >> 1u;
+
+KernelSema RegisterSema(const std::shared_ptr<KernelSemaPrivate>& object)
+{
+	Core::LockGuard lock(g_sema_registry_mutex);
+	if (g_next_sema_identity > kMaxSemaIdentity)
+	{
+		EXIT("Semaphore token identity space exhausted\n");
+		std::abort();
+	}
+
+	const std::uintptr_t token_value = g_next_sema_identity++ << 1u;
+	const auto           handle      = reinterpret_cast<KernelSema>(token_value);
+	const auto [it, inserted]        = g_live_semas.emplace(handle, object);
+	(void)it;
+	if (!inserted)
+	{
+		EXIT("Semaphore token identity was reused\n");
+		std::abort();
+	}
+	return handle;
+}
 
 std::shared_ptr<KernelSemaPrivate> AcquireSema(KernelSema sem)
 {
@@ -342,9 +420,7 @@ std::shared_ptr<KernelSemaPrivate> AcquireSema(KernelSema sem)
 
 int KYTY_SYSV_ABI KernelCreateSema(KernelSema* sem, const char* name, uint32_t attr, int init, int max, void* opt)
 {
-	if (sem == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	if (name == nullptr || init < 0 || init > max || opt != nullptr)
+	if (sem == nullptr || name == nullptr || init < 0 || init > max || opt != nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
@@ -358,14 +434,10 @@ int KYTY_SYSV_ABI KernelCreateSema(KernelSema* sem, const char* name, uint32_t a
 		default: fifo = false; break;
 	}
 
-	auto object = std::make_shared<KernelSemaPrivate>(String::FromUtf8(name), fifo, init, max);
-	*sem        = object.get();
-	{
-		Core::LockGuard lock(g_sema_registry_mutex);
-		g_live_semas.emplace(*sem, std::move(object));
-	}
+	auto object       = std::make_shared<KernelSemaPrivate>(String::FromUtf8(name), fifo, init, max);
+	*sem              = RegisterSema(object);
 	const auto caller = reinterpret_cast<uint64_t>(__builtin_return_address(0));
-	sema_trace("create", *sem, AcquireSema(*sem).get(), init, max, caller);
+	sema_trace("create", *sem, object.get(), init, max, caller);
 
 	KYTY_LOG_DEBUG("\t Semaphore create: %s, %d, %d\n", name, init, max);
 

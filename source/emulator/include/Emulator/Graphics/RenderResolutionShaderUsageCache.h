@@ -11,6 +11,9 @@
 namespace Kyty::Libs::Graphics {
 
 class ShaderNativeWaveVerdict;
+struct ShaderImmutablePixelAnalysis;
+struct ShaderScalarFlow;
+class ShaderCodeResourceMemo;
 
 struct RenderResolutionShaderUsageKey
 {
@@ -29,6 +32,11 @@ struct RenderResolutionShaderAnalysis
 	std::shared_ptr<const ShaderCode> code;
 	// Per-program native-wave verdict, shared by every draw of this program.
 	std::shared_ptr<const ShaderNativeWaveVerdict> native_wave;
+	std::shared_ptr<const ShaderImmutablePixelAnalysis> pixel_analysis;
+	// Immutable SGPR provenance for the cached code; descriptor values stay per draw.
+	std::shared_ptr<const ShaderScalarFlow> scalar_flow;
+	// Code-only resource analyses of this program, shared by its draws.
+	std::shared_ptr<const ShaderCodeResourceMemo> resource_memo;
 };
 
 struct RenderResolutionShaderUsageResult
@@ -38,6 +46,9 @@ struct RenderResolutionShaderUsageResult
 	bool                            hit     = false;
 	bool                            evicted = false;
 	std::shared_ptr<const ShaderNativeWaveVerdict> native_wave;
+	std::shared_ptr<const ShaderImmutablePixelAnalysis> pixel_analysis;
+	std::shared_ptr<const ShaderScalarFlow> scalar_flow;
+	std::shared_ptr<const ShaderCodeResourceMemo> resource_memo;
 };
 
 class RenderResolutionShaderUsageCache final

@@ -236,21 +236,33 @@ struct ThreadPrivate
 	{
 	}
 #endif
+	~ThreadPrivate()
+	{
+#ifdef KYTY_DEBUG_LOCKS
+		if (started)
+		{
+			if (auto* graph = g_wait_for_graph.load(); graph != nullptr)
+			{
+				graph->Delete(unique_id);
+			}
+		}
+#endif
+	}
+
+	void Release()
+	{
+		if (references.fetch_sub(1, std::memory_order_acq_rel) == 1)
+		{
+			delete this;
+		}
+	}
 
 	static void Run(ThreadPrivate* t)
 	{
 		t->unique_id = Thread::GetThreadIdUnique();
 		t->started   = true;
 		t->func(t->arg);
-		if (t->auto_delete)
-		{
-#ifdef KYTY_DEBUG_LOCKS
-			if (g_wait_for_graph != nullptr)
-			{
-				g_wait_for_graph.load()->Delete(t->unique_id);
-			}
-#endif
-		}
+		t->Release();
 	}
 
 	static int SdlThreadRun(void* data)
@@ -265,6 +277,9 @@ struct ThreadPrivate
 	std::atomic_bool auto_delete = false;
 	std::atomic_bool started     = false;
 	int              unique_id   = 0;
+	// One reference belongs to the wrapper and one to the native callback.
+	// This must be initialized before the native thread member starts it.
+	std::atomic<uint32_t> references {2};
 #ifdef KYTY_SDL_THREADS
 	SDL_Thread* sdl;
 #else
@@ -517,6 +532,16 @@ void WaitForGraph::Delete(R r)
 
 Thread::Thread(thread_func_t func, void* arg): m_thread(new ThreadPrivate(func, arg))
 {
+#ifdef KYTY_SDL_THREADS
+	if (m_thread->sdl == nullptr)
+	{
+		const char* error = SDL_GetError();
+		m_thread->Release();
+		m_thread->Release();
+		m_thread = nullptr;
+		EXIT("SDL_CreateThread failed: %s\n", error != nullptr ? error : "unknown error");
+	}
+#endif
 	while (!m_thread->started)
 	{
 		Core::Thread::SleepMicro(1000);
@@ -526,18 +551,8 @@ Thread::Thread(thread_func_t func, void* arg): m_thread(new ThreadPrivate(func, 
 Thread::~Thread()
 {
 	EXIT_IF(!m_thread->finished && !m_thread->auto_delete);
-
-	if (m_thread->finished)
-	{
-#ifdef KYTY_DEBUG_LOCKS
-		if (g_wait_for_graph != nullptr)
-		{
-			g_wait_for_graph.load()->Delete(m_thread->unique_id);
-		}
-#endif
-	}
-
-	Delete(m_thread);
+	m_thread->Release();
+	m_thread = nullptr;
 }
 
 void Thread::Join()

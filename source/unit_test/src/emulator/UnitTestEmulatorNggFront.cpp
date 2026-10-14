@@ -1,11 +1,14 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/GraphicsGeState.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
 #include "Emulator/Graphics/ShaderNggFront.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "NggPassthroughFixture.h"
+#include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -185,6 +188,25 @@ Words SdwaFloatCompareBody(uint32_t src1_modifiers)
 	Sopp(body, 6, 0); // uniform VCC branch to the following export
 	Exp(body, 12, 15, true, 13, 13, 13, 13);
 	Sopp(body, 1);
+	return body;
+}
+
+Words VccBranchWithOneUniformWordBody(bool varying_high_word)
+{
+	const Words base = SdwaFloatCompareBody(0u);
+	Words body(base.begin(), base.begin() + 5); // retain both scalar sources, the uniform VGPR and its comparison
+	Words preserve_low;
+	Sop1(preserve_low, 3, 40u, 106u); // save the low word of the full uniform comparison
+	body.insert(body.end(), preserve_low.begin(), preserve_low.end());
+	if (varying_high_word)
+	{
+		const auto varying_high = VopcSdwaF32(0x04, false, 107u, 5u, true, Inline(0), false);
+		body.insert(body.end(), varying_high.begin(), varying_high.end()); // VCC_HI now varies by vertex
+	}
+	Words restore_low;
+	Sop1(restore_low, 3, 106u, 40u); // restore only VCC_LO from its uniform copy
+	body.insert(body.end(), restore_low.begin(), restore_low.end());
+	body.insert(body.end(), base.begin() + 5, base.end()); // keep the original branch and terminal export after the VCC writes
 	return body;
 }
 
@@ -515,6 +537,24 @@ TEST(EmulatorNggFront, ProvesAFusedFrontWithScalarLoadsUniformBranchesAndLaneSel
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorNggFront, TheInstructionBoundAppliesToThePrologueNotToTheBody)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Words body;
+		for (uint32_t i = 0; i < ShaderNggPassthroughInstructionLimit; ++i) { Vop1(body, 1, 13, Inline(0)); } // v_mov_b32 v13, 0
+		Append(body, FetchBody());
+		const auto code = Parse(PrologueThenBody(body));
+		Check(code.GetInstructions().Size() > ShaderNggPassthroughInstructionLimit, "the program exceeds the bound");
+		for (uint32_t width: {32u, 64u}) { Check(ShaderProveNggFrontLaneLocal(code, width).lane_local, "a long body after a short prologue is proved"); }
+		Words padded(ShaderNggPassthroughInstructionLimit, 0xbf800000u); // s_nop 0
+		Append(padded, PrologueThenBody(FetchBody()));
+		const auto late = ShaderAnalyzeNggPassthroughPrologue(Parse(padded), {64, 3, 2});
+		Check(!late.prologue_proven && late.rejection == ShaderNggPassthroughRejection::InstructionLimit, "a prologue past the bound is refused");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorNggFront, AScalarPairCopyRetainsTheSavedVertexExecMask)
 {
 	ASSERT_EXIT(([] {
@@ -768,6 +808,29 @@ TEST(EmulatorNggFront, AUniformCompareUnderPartialExecCannotSteerAUniformBranch)
 		const auto front = ShaderProveNggFrontLaneLocal(partial, 64u);
 		Check(!front.lane_local && front.reason.ContainsStr("not wave-uniform"),
 		      "restoring EXEC does not make a VCC mask uniform when inactive lanes were not compared");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggFront, AUniformLowVccCopyCannotHideAVaryingHighWordFromTheBranch)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto uniform_pair = Parse(PrologueThenBody(VccBranchWithOneUniformWordBody(false)));
+		for (uint32_t width: {32u, 64u})
+		{
+			const auto admitted = ShaderProveNggFrontLaneLocal(uniform_pair, width);
+			Check(admitted.lane_local,
+			      admitted.reason.IsEmpty() ? "a full-pair uniform VCC branch remains admitted" : admitted.reason.c_str());
+		}
+
+		const auto low_only = Parse(PrologueThenBody(VccBranchWithOneUniformWordBody(true)));
+		for (uint32_t width: {32u, 64u})
+		{
+			const auto refused = ShaderProveNggFrontLaneLocal(low_only, width);
+			Check(!refused.lane_local && refused.reason.ContainsStr("not wave-uniform"),
+			      "VCC_HI remains varying after a one-word VCC_LO copy");
+		}
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -1110,6 +1173,199 @@ TEST(EmulatorNggFront, GeneratedModuleLaunchesEveryLiveLaneOfTheSubgroup)
 		const auto ballot = source.FindIndex("%native_initial_ballot");
 		const auto info   = source.FindIndex("OpStore %s3 %ngg_wave_info");
 		Check(ballot != Core::STRING8_INVALID_INDEX && ballot < info, "s3 is derived after the live-lane ballot");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+namespace {
+
+constexpr uint32_t kVccReg = 106u;
+
+// s24 = 72 and v12 = s24 in every lane, v13 = 0; then `under` runs under the lanes where v5 != 1, EXEC is restored
+// from s[40:41], `after_restore` runs, and v13 is exported.
+Words PartialExecBody(const Words& under, const Words& after_restore)
+{
+	Words body;
+	body.push_back(0xb0000000u | (24u << 16u) | 72u); // s_movk_i32 s24, 72
+	Vop1(body, 5, 12, 24u);                            // v_cvt_f32_i32 v12, s24
+	Vop1(body, 1, 13, Inline(0));                      // v_mov_b32 v13, 0
+	Sop1(body, 4, 40, kExecLoReg);                     // s_mov_b64 s[40:41], exec
+	Append(body, Vopc(0xd5, Inline(1), 5u));           // v_cmpx_ne_u32 1, v5
+	Append(body, under);
+	Sop1(body, 4, kExecLoReg, 40);                     // s_mov_b64 exec, s[40:41]
+	Append(body, after_restore);
+	Exp(body, 12, 15, true, 13, 13, 13, 13);           // exp pos0 v13 done
+	Sopp(body, 1);                                     // s_endpgm
+	return body;
+}
+
+ShaderNggFrontProof ProvePartialExec(const Words& under, const Words& after_restore = {})
+{
+	return ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(PartialExecBody(under, after_restore))), 64u);
+}
+
+class ScopedShaderValidation final: public Config::ConfigSource
+{
+public:
+	ScopedShaderValidation(): m_previous(Config::ShaderValidationEnabled()) { Config::Load(*this); }
+	~ScopedShaderValidation() override
+	{
+		m_enabled = m_previous;
+		Config::Load(*this);
+	}
+	bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+	int64_t GetInteger(const Core::String&) const override { return 0; }
+	bool GetBool(const Core::String&) const override { return m_enabled; }
+	Core::String GetString(const Core::String&) const override { return {}; }
+
+private:
+	bool m_previous;
+	bool m_enabled = true;
+};
+
+// v15 = s24 under the partial EXEC (so uniform for its lanes only), s25 = readfirstlane v15, s26 = s25 * 2.
+Words ReadUniformUnderPartialExec()
+{
+	Words under;
+	Vop1(under, 5, 15, 24u);              // v_cvt_f32_i32 v15, s24
+	Vop1(under, 2, 25, 256u + 15u);       // v_readfirstlane_b32 s25, v15
+	Sop2(under, 0x26, 26, 25, Inline(2)); // s_mul_i32 s26, s25, 2
+	return under;
+}
+
+} // namespace
+
+TEST(EmulatorNggFront, AReadfirstlaneUnderPartialExecHoldsForTheLanesOfThatExecOnly)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		auto inside = ReadUniformUnderPartialExec();
+		Vop2(inside, 3, 13, 26u, 13u); // v_add_f32 v13, s26, v13 under the same EXEC
+		const auto accepted = ProvePartialExec(inside);
+		if (!accepted.lane_local) { std::fprintf(stderr, "refused: %s\n", accepted.reason.c_str()); }
+		Check(accepted.lane_local, "every subgroup lane of EXEC reads the value its EXEC lanes share");
+
+		Words outside;
+		Vop2(outside, 3, 13, 26u, 13u); // the same add after EXEC is restored
+		const auto restored = ProvePartialExec(ReadUniformUnderPartialExec(), outside);
+		Check(!restored.lane_local && restored.reason.ContainsStr("outside the EXEC"), "lanes outside EXEC may read another value");
+
+		auto branch = ReadUniformUnderPartialExec();
+		Append(branch, Sopc(6, 26, Inline(0))); // s_cmp_eq_u32 s26, 0
+		Sopp(branch, 4, 0);                     // s_cbranch_scc0 to the next instruction
+		const auto steered = ProvePartialExec(branch);
+		Check(!steered.lane_local && steered.reason.ContainsStr("SCC branch"), "a subgroup may branch where its wave does not");
+
+		Words varying;
+		Vop1(varying, 1, 15, 256u + 5u);        // v_mov_b32 v15, v5: differs between the lanes of EXEC
+		Vop1(varying, 2, 25, 256u + 15u);       // v_readfirstlane_b32 s25, v15
+		const auto exchange = ProvePartialExec(varying);
+		Check(!exchange.lane_local && exchange.reason.ContainsStr("lane exchange"), "a varying VGPR is a lane exchange");
+
+		Words other_half;
+		Vop1(other_half, 5, 15, 24u);                     // v15 uniform for the lanes where v5 != 1
+		Sop2(other_half, 0x15, kExecLoReg, 40, kExecLoReg); // s_andn2_b64 exec, s[40:41], exec: the lanes where v5 == 1
+		Vop1(other_half, 2, 25, 256u + 15u);              // v_readfirstlane_b32 s25, v15
+		const auto flipped = ProvePartialExec(other_half);
+		Check(!flipped.lane_local && flipped.reason.ContainsStr("lane exchange"), "the other half of the split never held v15");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggFront, ACompareMaskSplitsExecIntoHalvesThatCoverIt)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		for (const uint32_t saveexec: {0x24u, 0x37u}) // s_and_saveexec_b64 (then first), s_andn1_saveexec_b64 (else first)
+		{
+			Words body;
+			Append(body, Vopc(0xc5, Inline(1), 5u));             // v_cmp_ne_u32 vcc, 1, v5
+			Sop1(body, saveexec, 40, kVccReg);                   // s[40:41] = EXEC; EXEC = vcc & EXEC (or ~vcc & EXEC)
+			Vop1(body, 1, 13, Inline(0));                        // v_mov_b32 v13, 0
+			Sop2(body, 0x15, kExecLoReg, 40, kExecLoReg);        // s_andn2_b64 exec, s[40:41], exec: the other half
+			Vop1(body, 1, 13, 256u + 5u);                        // v_mov_b32 v13, v5
+			Sop1(body, 4, kExecLoReg, 40);                       // s_mov_b64 exec, s[40:41]
+			Exp(body, 12, 15, true, 13, 13, 13, 13);
+			Sopp(body, 1);
+			const auto front = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(body)), 64u);
+			if (!front.lane_local) { std::fprintf(stderr, "refused: %s\n", front.reason.c_str()); }
+			Check(front.lane_local, "the two halves of one compare define v13 for every lane");
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggFront, AUniformCompareUnderPartialExecSteersAVccBranchForTheLanesOfThatExec)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto branch_over = [](const Words& arm, const Words& after_join, uint32_t compare_vgpr) {
+			Words under;
+			Append(under, Vopc(0xc5, 24u, compare_vgpr));       // v_cmp_ne_u32 vcc, s24, v<compare_vgpr>
+			Sopp(under, 6, static_cast<uint32_t>(arm.size()));  // s_cbranch_vccz over the arm
+			Append(under, arm);
+			Append(under, after_join);
+			return ProvePartialExec(under);
+		};
+		Words arm;
+		Vop1(arm, 1, 13, 256u + 5u); // v_mov_b32 v13, v5
+		const auto uniform = branch_over(arm, {}, 12u);
+		if (!uniform.lane_local) { std::fprintf(stderr, "refused: %s\n", uniform.reason.c_str()); }
+		Check(uniform.lane_local, "every lane of EXEC holds the same compare bit");
+
+		const auto varying = branch_over(arm, {}, 5u);
+		Check(!varying.lane_local && varying.reason.ContainsStr("not wave-uniform"), "a per-lane compare is still refused");
+
+		Words scalar_arm;
+		scalar_arm.push_back(0xb0000000u | (26u << 16u) | 7u); // s_movk_i32 s26, 7
+		Words read_scalar;
+		Vop1(read_scalar, 1, 13, 26u);                          // v_mov_b32 v13, s26
+		const auto skipped = branch_over(scalar_arm, read_scalar, 12u);
+		Check(!skipped.lane_local && skipped.reason.ContainsStr("launch-dependent scalar"), "a subgroup without EXEC lanes may skip the arm");
+
+		Words vector_arm;
+		Vop1(vector_arm, 1, 14, Inline(0));                     // v_mov_b32 v14, 0
+		Words read_vector;
+		Vop1(read_vector, 1, 13, 256u + 14u);                   // v_mov_b32 v13, v14
+		const auto one_edge = branch_over(vector_arm, read_vector, 12u);
+		Check(!one_edge.lane_local && one_edge.reason.ContainsStr("before it is defined"), "the lanes of EXEC take either edge");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggFront, AScopedReadfirstlaneAndAPartialExecVccBranchEmitPackedCode)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		ScopedShaderValidation validation;
+		Check(Config::ShaderValidationEnabled(), "validation is on");
+		auto under = ReadUniformUnderPartialExec();
+		Vop2(under, 3, 13, 26u, 13u);              // v_add_f32 v13, s26, v13
+		Append(under, Vopc(0xc5, 24u, 12u));       // v_cmp_ne_u32 vcc, s24, v12
+		Sopp(under, 6, 1);                         // s_cbranch_vccz over one word
+		Vop1(under, 1, 13, 256u + 5u);             // v_mov_b32 v13, v5
+		const auto code = Parse(PrologueThenBody(PartialExecBody(under, {})));
+		ShaderVertexInputInfo input {};
+		input.gs_prolog       = true;
+		input.position1_usage = ShaderVertexPosition1Usage::RenderTargetLayer;
+		input.native_wave     = Generic(code, 64u);
+		const auto stages = Stages(kNggPassthroughStages);
+		const ShaderNggFrontVerdict verdict;
+		Check(!ShaderApplyNggFrontProof(&input.native_wave, code, &stages, verdict) &&
+		          input.native_wave.proof == ShaderNativeWaveProof::LaneLocal,
+		      "the body is lane-local");
+		const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+		// The read takes the first EXEC lane of the packed mask; the branch decides on both words of the packed VCC,
+		// since the compare holds only EXEC lanes and they may all sit in the high word.
+		Check(source.FindIndex("OpGroupNonUniformBroadcast %uint %uint_3 %t0_") != Core::STRING8_INVALID_INDEX, "first EXEC lane read");
+		Check(source.FindIndex("OpLoad %uint %vcc_hi") != Core::STRING8_INVALID_INDEX, "the VCC branch reads the high word");
+		Kyty::Vector<uint32_t> binary;
+		String8                error;
+		if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+		{
+			std::fprintf(stderr, "%s\n", error.c_str());
+			std::_Exit(3);
+		}
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }

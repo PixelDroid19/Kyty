@@ -61,10 +61,7 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 		case 0x02: inst.type = ShaderInstructionType::SAddI32; break;
 		case 0x03: inst.type = ShaderInstructionType::SSubI32; break;
 		case 0x04: inst.type = ShaderInstructionType::SAddcU32; break;
-		case 0x05: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_subb_u32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x05: inst.type = ShaderInstructionType::SSubbU32; break;
 		case 0x06: inst.type = ShaderInstructionType::SMinI32; break;
 		case 0x07: inst.type = ShaderInstructionType::SMinU32; break;
 		case 0x08: inst.type = ShaderInstructionType::SMaxI32; break;
@@ -156,9 +153,11 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.src[0].size = 2;
 			break;
 		case 0x22: inst.type = ShaderInstructionType::SAshrI32; break;
-		case 0x23: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_ashr_i64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x23:
+			inst.type        = ShaderInstructionType::SAshrI64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc1;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
 			break;
 		case 0x24: inst.type = ShaderInstructionType::SBfmB32; break;
 		case 0x25:
@@ -175,9 +174,11 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.dst.size    = 2;
 			inst.src[0].size = 2;
 			break;
-		case 0x2A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bfe_i64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x2A:
+			inst.type        = ShaderInstructionType::SBfeI64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc1;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
 			break;
 		case 0x2B: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_g_fork treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;

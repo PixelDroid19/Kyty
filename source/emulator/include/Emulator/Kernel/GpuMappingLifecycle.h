@@ -5,6 +5,7 @@
 
 #include "Emulator/Common.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 
@@ -32,23 +33,37 @@ enum class KernelGpuMappingBacking : uint8_t
 
 using KernelGpuMappingCompletion      = bool (*)(void*);
 using KernelGpuMappingRegisterRange   = void (*)(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingBacking backing);
-using KernelGpuMappingInvalidateRange = bool (*)(void* context, uint64_t vaddr, uint64_t size);
+struct KernelGpuMappingRange
+{
+	uint64_t vaddr = 0;
+	uint64_t size  = 0;
+};
+// Must invalidate the complete batch or return false without changing any range.
+using KernelGpuMappingInvalidateRanges = bool (*)(void* context, const KernelGpuMappingRange* ranges, size_t range_count);
 using KernelGpuMappingReleaseRange    = bool (*)(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion,
+                                                 void* completion_data);
+// Runs `completion` (Kernel's protection change) with GPU submissions
+// quiesced; only when it returns true are the GPU's copies of the range
+// dropped, before submissions resume. Returns the completion's result.
+using KernelGpuMappingProtectRange    = bool (*)(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion,
                                                  void* completion_data);
 
 struct GpuMappingLifecycleCallbacks
 {
 	void*                           context          = nullptr;
 	KernelGpuMappingRegisterRange   register_range   = nullptr;
-	KernelGpuMappingInvalidateRange invalidate_range = nullptr;
+	KernelGpuMappingInvalidateRanges invalidate_ranges = nullptr;
 	KernelGpuMappingReleaseRange    release_range    = nullptr;
+	KernelGpuMappingProtectRange    protect_range    = nullptr;
 };
 
 // A complete callback bundle is installed once and remains process-lifetime.
-// Partial or replacement bundles are rejected. RegisterRange returns false
-// before installation, so Kernel can reject a GPU-visible map before mutating
-// guest memory. Callback invocation is outside the port lock, so adapters may
-// re-enter Kernel without deadlocking the registry.
+// Partial or replacement bundles are rejected. RegisterRange and ProtectRange
+// return false before installation without running anything, so Kernel can
+// reject a GPU-visible map or protection change before mutating guest memory.
+// Callback invocation is outside the port lock, so adapters may re-enter
+// Kernel without deadlocking the registry. InvalidateRanges validates every
+// descriptor before dispatching one all-or-nothing callback.
 class GpuMappingLifecyclePort
 {
 public:
@@ -56,8 +71,10 @@ public:
 	[[nodiscard]] bool IsInstalled() const;
 
 	[[nodiscard]] bool RegisterRange(uint64_t vaddr, uint64_t size, KernelGpuMappingBacking backing);
+	[[nodiscard]] bool InvalidateRanges(const KernelGpuMappingRange* ranges, size_t range_count);
 	[[nodiscard]] bool InvalidateRange(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool ReleaseRange(uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion, void* completion_data);
+	[[nodiscard]] bool ProtectRange(uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion, void* completion_data);
 
 private:
 	mutable std::mutex           m_mutex;

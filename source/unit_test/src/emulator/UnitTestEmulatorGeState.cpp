@@ -1,8 +1,16 @@
 #include "Kyty/UnitTest.h"
+#include "Kyty/Core/Subsystems.h"
 
+#include "Emulator/Config.h"
+#include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsGeState.h"
+#include "Emulator/Graphics/GpuSubmissionCoordinator.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Pm4.h"
+
+#include "../../../emulator/src/Graphics/GraphicsRunInternal.h"
+
+#include <cstdlib>
 
 UT_BEGIN(EmulatorGeState);
 
@@ -20,6 +28,114 @@ static void ExpectRaw(const GraphicsGeRawRegister& raw, uint32_t value, bool wri
 	EXPECT_EQ(raw.value, value);
 	EXPECT_EQ(raw.written, written);
 	EXPECT_EQ(raw.known, known);
+}
+
+namespace {
+
+constexpr uint32_t kPacketBeforeCanary = 0x1a2b3c4du;
+constexpr uint32_t kPacketAfterCanary  = 0x5e6f7081u;
+
+GraphicsRunType3DispatchResult DispatchRegisterPacket(CommandProcessor& cp, const uint32_t* stream, uint32_t available_dw)
+{
+	if (stream == nullptr || available_dw == 0u) { return {}; }
+
+	const uint32_t cmd_id = stream[0];
+	const uint32_t op     = (cmd_id >> 8u) & 0xffu;
+	return GraphicsRunDispatchType3Packet(&cp, cmd_id, stream + 1u, available_dw - 1u, available_dw, g_cp_op_func[op]);
+}
+
+using RegisterPacketProbe = bool (*)(CommandProcessor&);
+
+[[noreturn]] void RunRegisterPacketProbe(RegisterPacketProbe probe)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	graphics_init_jmp_tables();
+
+	GpuSubmissionCoordinator coordinator;
+	CommandProcessor         cp(&coordinator, GraphicContext::QUEUE_GFX);
+	std::_Exit(probe(cp) ? 0 : 1);
+}
+
+bool DirectGeControlOneRegisterPacket(CommandProcessor& cp)
+{
+	constexpr uint32_t value = 0x00020403u;
+	uint32_t packet[]        = {kPacketBeforeCanary, KYTY_PM4(3, Pm4::IT_SET_UCONFIG_REG, 0u), Pm4::GE_CNTL, value,
+	                     kPacketAfterCanary};
+	const auto result        = DispatchRegisterPacket(cp, packet + 1u, 3u);
+	const auto& raw          = cp.GetUcfg()->GetGeControlRaw();
+	const auto& control      = cp.GetUcfg()->GetGeControl();
+	return result.status == GraphicsRunType3DispatchStatus::Ready && result.packet_body_dw == 2u && result.consumed_dw == 2u &&
+	       packet[0] == kPacketBeforeCanary && packet[4] == kPacketAfterCanary && raw.value == value && raw.written && raw.known &&
+	       control.primitive_group_size == 3u && control.vertex_group_size == 258u;
+}
+
+bool DirectGsRsrc3OneRegisterPacket(CommandProcessor& cp)
+{
+	constexpr uint32_t value = 0xa5a55a5au;
+	uint32_t packet[]        = {kPacketBeforeCanary, KYTY_PM4(3, Pm4::IT_SET_SH_REG, 0u), Pm4::SPI_SHADER_PGM_RSRC3_GS, value,
+	                     kPacketAfterCanary};
+	const auto result        = DispatchRegisterPacket(cp, packet + 1u, 3u);
+	const auto& raw          = cp.GetShCtx()->GetGsRsrc3Raw();
+	return result.status == GraphicsRunType3DispatchStatus::Ready && result.packet_body_dw == 2u && result.consumed_dw == 2u &&
+	       packet[0] == kPacketBeforeCanary && packet[4] == kPacketAfterCanary && raw.value == value && raw.written && raw.known;
+}
+
+bool DirectGsProgramTwoRegisterPacket(CommandProcessor& cp)
+{
+	constexpr uint32_t lo = 0x01020304u;
+	constexpr uint32_t hi = 0xab000056u;
+	uint32_t packet[]     = {kPacketBeforeCanary, KYTY_PM4(4, Pm4::IT_SET_SH_REG, 0u), Pm4::SPI_SHADER_PGM_LO_GS, lo, hi,
+	                  kPacketAfterCanary};
+	const auto result     = DispatchRegisterPacket(cp, packet + 1u, 4u);
+	return result.status == GraphicsRunType3DispatchStatus::Ready && result.packet_body_dw == 3u && result.consumed_dw == 3u &&
+	       packet[0] == kPacketBeforeCanary && packet[5] == kPacketAfterCanary && cp.GetShCtx()->GetGsBackBase() == 0x560102030400ull;
+}
+
+bool DirectPsRsrc4OneRegisterPacket(CommandProcessor& cp)
+{
+	constexpr uint32_t value = 0xc0ffee04u;
+	uint32_t packet[]        = {kPacketBeforeCanary, KYTY_PM4(3, Pm4::IT_SET_SH_REG, 0u), Pm4::SPI_SHADER_PGM_RSRC4_PS, value,
+	                     kPacketAfterCanary};
+	const auto result        = DispatchRegisterPacket(cp, packet + 1u, 3u);
+	return result.status == GraphicsRunType3DispatchStatus::Ready && result.packet_body_dw == 2u && result.consumed_dw == 2u &&
+	       packet[0] == kPacketBeforeCanary && packet[4] == kPacketAfterCanary && cp.GetShCtx()->GetPs().ps_regs.rsrc4 == value;
+}
+
+bool TruncatedRegisterPacketIsRejected(CommandProcessor& cp)
+{
+	uint32_t packet[] = {kPacketBeforeCanary, KYTY_PM4(4, Pm4::IT_SET_SH_REG, 0u), Pm4::SPI_SHADER_PGM_RSRC3_GS, 0x12345678u,
+	                     kPacketAfterCanary};
+	const auto result = DispatchRegisterPacket(cp, packet + 1u, 3u);
+	return result.status == GraphicsRunType3DispatchStatus::InvalidEnvelope && result.consumed_dw == 0u &&
+	       packet[0] == kPacketBeforeCanary && packet[4] == kPacketAfterCanary && !cp.GetShCtx()->GetGsRsrc3Raw().written;
+}
+
+} // namespace
+
+TEST(EmulatorGeState, DirectOneRegisterUconfigPacketUpdatesGeControl)
+{
+	ASSERT_EXIT(RunRegisterPacketProbe(DirectGeControlOneRegisterPacket), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGeState, DirectOneRegisterShaderPacketUpdatesGsRsrc3)
+{
+	ASSERT_EXIT(RunRegisterPacketProbe(DirectGsRsrc3OneRegisterPacket), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGeState, DirectTwoRegisterShaderPacketUpdatesGsProgramBase)
+{
+	ASSERT_EXIT(RunRegisterPacketProbe(DirectGsProgramTwoRegisterPacket), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGeState, DirectOneRegisterPsRsrc4PacketUpdatesRegister)
+{
+	ASSERT_EXIT(RunRegisterPacketProbe(DirectPsRsrc4OneRegisterPacket), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGeState, TruncatedDirectRegisterPacketIsRejectedWithoutStateChange)
+{
+	ASSERT_EXIT(RunRegisterPacketProbe(TruncatedRegisterPacketIsRejected), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorGeState, StageShapeAndGuestWidthAreIndependent)

@@ -2,6 +2,7 @@
 
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 
+#include <algorithm>
 #include <array>
 #include <utility>
 
@@ -852,11 +853,13 @@ ShaderNggPassthroughProof Analyzer::Run(const ShaderCode& code)
 		Fail(Reject::UnsupportedStage, "proof requires explicit non-embedded vertex IR");
 		return std::move(result);
 	}
-	if (result.instruction_count > ShaderNggPassthroughInstructionLimit)
+	// A prologue proof stops at the prologue's end, so the bound applies to the prologue only.
+	if (!prologue_only_ && result.instruction_count > ShaderNggPassthroughInstructionLimit)
 	{
 		Fail(Reject::InstructionLimit, "complete program exceeds the 1024-instruction proof bound");
 		return std::move(result);
 	}
+	const uint32_t analyzed = std::min(result.instruction_count, ShaderNggPassthroughInstructionLimit);
 	if (code.GetContinuationPc() != UINT32_MAX || !code.GetDebugPrintfs().IsEmpty())
 	{
 		step.pc = code.GetContinuationPc();
@@ -871,9 +874,9 @@ ShaderNggPassthroughProof Analyzer::Run(const ShaderCode& code)
 	vector[0] = {result.primitive_mask, result.primitive_mask, 0, 0};
 	vector[5] = {result.vertex_mask, 0, result.vertex_mask, 0};
 	vector[8] = {result.vertex_mask, 0, 0, result.vertex_mask};
-	result.steps.reserve(result.instruction_count);
-	result.retained_instruction_indices.reserve(result.instruction_count);
-	for (uint32_t i = 0; i < result.instruction_count; ++i)
+	result.steps.reserve(analyzed);
+	result.retained_instruction_indices.reserve(analyzed);
+	for (uint32_t i = 0; i < analyzed; ++i)
 	{
 		const auto& inst = code.GetInstructions().At(i);
 		step = {};
@@ -905,6 +908,11 @@ ShaderNggPassthroughProof Analyzer::Run(const ShaderCode& code)
 			FinishPrologue();
 			return std::move(result);
 		}
+	}
+	if (prologue_only_ && analyzed < result.instruction_count)
+	{
+		Fail(Reject::InstructionLimit, "prologue exceeds the 1024-instruction proof bound");
+		return std::move(result);
 	}
 	if (prologue_only_)
 	{

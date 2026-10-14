@@ -8,6 +8,7 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Sys/SysVirtual.h"
+#include "Kyty/Sys/SysWriteLease.h"
 
 #include "cpuinfo.h"
 
@@ -30,6 +31,8 @@
 #include <mach/mach_vm.h>
 #else
 #include <linux/falloc.h>
+#include <linux/udmabuf.h>
+#include <sys/ioctl.h>
 #include <sys/syscall.h>
 #endif
 
@@ -68,13 +71,16 @@ static std::map<uintptr_t, ProtectionRange>* g_protects = nullptr;
 
 struct GuestMappingRange
 {
-	uintptr_t end = 0;
+	uintptr_t end      = 0;
+	uint64_t  identity = 0;
 };
 
 // This is deliberately independent from protection metadata. Host mprotect()
 // can be used by internal runtime code, but it must never turn an arbitrary
 // host mapping into a guest buffer accepted by HLE entry points.
 static std::map<uintptr_t, GuestMappingRange>* g_guest_mappings = nullptr;
+// Next mapping identity. Zero is never issued, and identities are never reused.
+static uint64_t g_next_guest_mapping_identity = 1;
 
 struct SharedBacking
 {
@@ -153,6 +159,35 @@ static VirtualMemory::Mode get_protection_flag(int mode)
 		case PROT_EXEC | PROT_WRITE | PROT_READ: return VirtualMemory::Mode::ExecuteReadWrite; // NOLINT
 		default: return VirtualMemory::Mode::NoAccess;
 	}
+}
+
+static bool lease_protect(uint64_t address, uint64_t size, uint32_t token) noexcept
+{
+	return mprotect(reinterpret_cast<void*>(static_cast<uintptr_t>(address)), size, static_cast<int>(token)) == 0;
+}
+
+static uint32_t lease_remove_write(uint32_t guest_token) noexcept
+{
+	int target = static_cast<int>(guest_token);
+	if ((target & PROT_WRITE) == 0)
+	{
+		return guest_token;
+	}
+	target &= ~PROT_WRITE;
+	if ((target & (PROT_READ | PROT_EXEC)) == 0)
+	{
+		target |= PROT_READ;
+	}
+	return static_cast<uint32_t>(target);
+}
+
+static constexpr SysWriteLeaseNative kLeaseNative {&lease_protect, &lease_remove_write};
+
+// Never destroyed: mappings can still change while static objects are torn down.
+static SysWriteLeases& write_leases()
+{
+	static auto* leases = new SysWriteLeases;
+	return *leases;
 }
 
 static uintptr_t align_up(uintptr_t addr, uint64_t alignment)
@@ -295,9 +330,33 @@ static void split_guest_mapping_range_locked(uintptr_t address)
 		return;
 	}
 
-	const GuestMappingRange right {it->second.end};
-	it->second.end = address;
+	// Both halves stay the same mapping instance.
+	const GuestMappingRange right = it->second;
+	it->second.end                = address;
 	g_guest_mappings->emplace(address, right);
+}
+
+// A reused identity could let a snapshot of a released mapping match its
+// replacement, so exhausting the 64-bit space is fatal instead of wrapping.
+static uint64_t take_guest_mapping_identity_locked()
+{
+	if (g_next_guest_mapping_identity == 0)
+	{
+		EXIT("guest mapping identities exhausted\n");
+	}
+	return g_next_guest_mapping_identity++;
+}
+
+// The guest mapping containing `address`, or end() when the byte is not guest owned.
+static std::map<uintptr_t, GuestMappingRange>::const_iterator find_guest_mapping_locked(uintptr_t address)
+{
+	std::map<uintptr_t, GuestMappingRange>::const_iterator it = g_guest_mappings->upper_bound(address);
+	if (it == g_guest_mappings->cbegin())
+	{
+		return g_guest_mappings->cend();
+	}
+	--it;
+	return address < it->second.end ? it : g_guest_mappings->cend();
 }
 
 static bool range_is_guest_owned_locked(uintptr_t address, uint64_t size)
@@ -340,7 +399,7 @@ static bool assign_guest_mapping_range_locked(uintptr_t address, uint64_t size)
 	{
 		it = g_guest_mappings->erase(it);
 	}
-	g_guest_mappings->emplace(address, GuestMappingRange {end});
+	g_guest_mappings->emplace(address, GuestMappingRange {end, take_guest_mapping_identity_locked()});
 	return true;
 }
 
@@ -451,6 +510,78 @@ static void track_alloc(uintptr_t ret_addr, uint64_t size, int protect)
 	pthread_mutex_unlock(&g_virtual_mutex);
 }
 
+#ifndef KYTY_FIXED_NOREPLACE
+static bool reserve_mapping_span(uintptr_t address, uint64_t size)
+{
+	if (address == 0 || size == 0 || size > std::numeric_limits<size_t>::max() || size > UINTPTR_MAX ||
+	    address > UINTPTR_MAX - static_cast<uintptr_t>(size))
+	{
+		return false;
+	}
+
+#ifdef __APPLE__
+	mach_vm_address_t reservation = address;
+	const kern_return_t result =
+	    mach_vm_allocate(mach_task_self(), &reservation, static_cast<mach_vm_size_t>(size), VM_FLAGS_FIXED);
+	if (result != KERN_SUCCESS)
+	{
+		return false;
+	}
+	if (reservation != address)
+	{
+		(void)mach_vm_deallocate(mach_task_self(), reservation, static_cast<mach_vm_size_t>(size));
+		return false;
+	}
+	return true;
+#else
+	// A hint may be relocated, so accept it only when the entire requested span
+	// was reserved at its exact address. This is the no-replace operation.
+	void* reservation = mmap(reinterpret_cast<void*>(address), static_cast<size_t>(size), PROT_NONE, MAP_PRIVATE | MAP_ANON, -1,
+	                         0);
+	if (reservation == MAP_FAILED)
+	{
+		return false;
+	}
+	if (reinterpret_cast<uintptr_t>(reservation) != address)
+	{
+		(void)munmap(reservation, static_cast<size_t>(size));
+		return false;
+	}
+	return true;
+#endif
+}
+
+static void release_mapping_reservation(uintptr_t address, uint64_t size)
+{
+#ifdef __APPLE__
+	(void)mach_vm_deallocate(mach_task_self(), address, static_cast<mach_vm_size_t>(size));
+#else
+	(void)munmap(reinterpret_cast<void*>(address), static_cast<size_t>(size));
+#endif
+}
+
+static void* map_reserved_span(uintptr_t address, uint64_t size, int protect, int flags, int descriptor, off_t offset)
+{
+	if (!reserve_mapping_span(address, size))
+	{
+		return MAP_FAILED;
+	}
+	// MAP_FIXED replaces only the reservation acquired by this operation.
+	// NOLINTNEXTLINE
+	void* ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED | flags, descriptor, offset);
+	if (ptr != MAP_FAILED && reinterpret_cast<uintptr_t>(ptr) == address)
+	{
+		return ptr;
+	}
+	if (ptr != MAP_FAILED)
+	{
+		munmap(ptr, size);
+	}
+	release_mapping_reservation(address, size);
+	return MAP_FAILED;
+}
+#endif // KYTY_FIXED_NOREPLACE
+
 static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, uint64_t alignment)
 {
 	if (alignment == 0)
@@ -508,13 +639,7 @@ static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, 
 		// NOLINTNEXTLINE
 		void* ptr = mmap(reinterpret_cast<void*>(a), size, protect, MAP_FIXED_NOREPLACE | flags_base, -1, 0);
 #else
-		// NOLINTNEXTLINE
-		void* ptr = mmap(reinterpret_cast<void*>(a), size, protect, MAP_FIXED | flags_base, -1, 0);
-		if (ptr != MAP_FAILED && reinterpret_cast<uintptr_t>(ptr) != a)
-		{
-			munmap(ptr, size);
-			ptr = MAP_FAILED;
-		}
+		void* ptr = map_reserved_span(a, size, protect, flags_base, -1, 0);
 #endif
 		if (ptr != MAP_FAILED)
 		{
@@ -739,57 +864,6 @@ static MappedRangeState get_mapped_range_state(void* ptr, size_t length, uintptr
 	return MappedRangeState::Available;
 }
 
-static bool reserve_shared_mapping(uintptr_t address, uint64_t size)
-{
-	mach_vm_address_t reservation = address;
-	return mach_vm_allocate(mach_task_self(), &reservation, size, VM_FLAGS_FIXED) == KERN_SUCCESS && reservation == address;
-}
-
-static void release_shared_mapping_reservation(uintptr_t address, uint64_t size)
-{
-	(void)mach_vm_deallocate(mach_task_self(), address, size);
-}
-
-[[maybe_unused]] static bool is_mmaped(void* ptr, size_t length)
-{
-	uintptr_t occupied_end = 0;
-	return get_mapped_range_state(ptr, length, &occupied_end) != MappedRangeState::Available;
-}
-
-#else
-
-[[maybe_unused]] static bool is_mmaped(void* ptr, size_t length)
-{
-	FILE* file = fopen("/proc/self/maps", "r");
-	char  line[1024];
-	bool  ret  = false;
-	auto  addr = reinterpret_cast<uintptr_t>(ptr);
-
-	[[maybe_unused]] int result = 0;
-
-	while (feof(file) == 0)
-	{
-		if (fgets(line, 1024, file) == nullptr)
-		{
-			break;
-		}
-		uint64_t start = 0;
-		uint64_t end   = 0;
-		// NOLINTNEXTLINE(cert-err34-c)
-		if (sscanf(line, "%" SCNx64 "-%" SCNx64, &start, &end) != 2)
-		{
-			continue;
-		}
-		if (addr >= start && addr + length <= end)
-		{
-			ret = true;
-			break;
-		}
-	}
-	result = fclose(file);
-	return ret;
-}
-
 #endif
 
 void* sys_virtual_create_shared_backing(uint64_t size)
@@ -812,12 +886,14 @@ void* sys_virtual_create_shared_backing(uint64_t size)
 	}
 #else
 #ifdef SYS_memfd_create
-	static constexpr unsigned int kMemfdCloseOnExec = 0x0001u;
-	static constexpr unsigned int kMemfdExecutable  = 0x0010u;
-	fd = static_cast<int>(syscall(SYS_memfd_create, "kyty-direct-memory", kMemfdCloseOnExec | kMemfdExecutable));
+	static constexpr unsigned int kMemfdCloseOnExec    = 0x0001u;
+	static constexpr unsigned int kMemfdAllowSealing   = 0x0002u;
+	static constexpr unsigned int kMemfdExecutable     = 0x0010u;
+	fd = static_cast<int>(
+	    syscall(SYS_memfd_create, "kyty-direct-memory", kMemfdCloseOnExec | kMemfdAllowSealing | kMemfdExecutable));
 	if (fd < 0 && errno == EINVAL)
 	{
-		fd = static_cast<int>(syscall(SYS_memfd_create, "kyty-direct-memory", kMemfdCloseOnExec));
+		fd = static_cast<int>(syscall(SYS_memfd_create, "kyty-direct-memory", kMemfdCloseOnExec | kMemfdAllowSealing));
 	}
 #endif
 #endif
@@ -837,6 +913,11 @@ void* sys_virtual_create_shared_backing(uint64_t size)
 		close(fd);
 		return nullptr;
 	}
+#if defined(__linux__)
+	// The backing never shrinks; dma-buf export requires that seal. A host that
+	// refuses it only loses dma-buf export.
+	(void)::fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK);
+#endif
 
 	auto* backing = new SharedBacking;
 	backing->fd    = fd;
@@ -898,6 +979,46 @@ bool sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_of
 	return ::fallocate(shared->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, static_cast<off_t>(start),
 	                   static_cast<off_t>(end - start)) == 0;
 #endif
+}
+
+int sys_virtual_export_shared_backing_dma_buf(void* backing, uint64_t backing_offset, uint64_t size)
+{
+#if defined(__linux__)
+	const auto*    shared    = static_cast<const SharedBacking*>(backing);
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (shared == nullptr || shared->fd < 0 || size == 0 || page_size == 0 || backing_offset % page_size != 0 ||
+	    size % page_size != 0 || backing_offset > shared->size || size > shared->size - backing_offset)
+	{
+		return -1;
+	}
+	static const int device = ::open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
+	if (device < 0)
+	{
+		return -1;
+	}
+	udmabuf_create create {};
+	create.memfd  = static_cast<uint32_t>(shared->fd);
+	create.flags  = UDMABUF_FLAGS_CLOEXEC;
+	create.offset = backing_offset;
+	create.size   = size;
+	const int saved_errno = errno;
+	const int dma_buf     = ::ioctl(device, UDMABUF_CREATE, &create);
+	errno                 = saved_errno;
+	return dma_buf;
+#else
+	(void)backing;
+	(void)backing_offset;
+	(void)size;
+	return -1;
+#endif
+}
+
+void sys_virtual_close_dma_buf(int dma_buf)
+{
+	if (dma_buf >= 0)
+	{
+		::close(dma_buf);
+	}
 }
 
 bool sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset, uint64_t* next)
@@ -981,53 +1102,30 @@ static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t
 		ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED_NOREPLACE | MAP_SHARED, backing->fd,
 		           static_cast<off_t>(backing_offset));
 #else
+		ptr = map_reserved_span(address, size, protect, MAP_SHARED, backing->fd, static_cast<off_t>(backing_offset));
 #ifdef __APPLE__
-		if (!reserve_shared_mapping(address, size))
+		if (ptr == MAP_FAILED)
 		{
-		uintptr_t occupied_end = 0;
-		const auto range_state = get_mapped_range_state(reinterpret_cast<void*>(address), size, &occupied_end);
-		if (range_state == MappedRangeState::QueryFailed)
-		{
-			return MAP_FAILED;
-		}
-		if (range_state == MappedRangeState::Occupied)
-		{
-			uintptr_t next_address = 0;
-			if (!try_align_up(occupied_end, alignment, &next_address) || next_address <= address || next_address > last_address)
+			uintptr_t occupied_end = 0;
+			const auto range_state =
+			    get_mapped_range_state(reinterpret_cast<void*>(address), static_cast<size_t>(size), &occupied_end);
+			if (range_state == MappedRangeState::QueryFailed)
 			{
-				break;
+				return MAP_FAILED;
 			}
-			address = next_address;
-			continue;
-		}
-			if (alignment > last_address - address)
+			if (range_state == MappedRangeState::Occupied)
 			{
-				break;
+				uintptr_t next_address = 0;
+				if (!try_align_up(occupied_end, alignment, &next_address) || next_address <= address || next_address > last_address)
+				{
+					break;
+				}
+				address = next_address;
+				continue;
 			}
-			address += alignment;
-			continue;
 		}
-		// NOLINTNEXTLINE
-		ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED | MAP_SHARED, backing->fd,
-		           static_cast<off_t>(backing_offset));
-		if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != address)
-		{
-			if (ptr != MAP_FAILED)
-			{
-				munmap(ptr, size);
-			}
-			release_shared_mapping_reservation(address, size);
-			ptr = MAP_FAILED;
-		}
-#else
-		if (!is_mmaped(reinterpret_cast<void*>(address), size))
-		{
-			// NOLINTNEXTLINE
-			ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED | MAP_SHARED, backing->fd,
-			           static_cast<off_t>(backing_offset));
-		}
-#endif
-#endif
+#endif // __APPLE__
+#endif // KYTY_FIXED_NOREPLACE
 		if (ptr != MAP_FAILED)
 		{
 			if (reinterpret_cast<uintptr_t>(ptr) == address)
@@ -1107,33 +1205,7 @@ bool sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t back
 	ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED_NOREPLACE | MAP_SHARED, shared->fd,
 	           static_cast<off_t>(backing_offset));
 #else
-#ifdef __APPLE__
-	// macOS has no MAP_FIXED_NOREPLACE. Reserve the exact interval first so the
-	// MAP_FIXED call replaces only a reservation created by this process, never
-	// an unrelated host mapping (including a Rosetta reservation).
-	if (reserve_shared_mapping(addr, size))
-	{
-		// NOLINTNEXTLINE
-		ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_SHARED, shared->fd,
-		           static_cast<off_t>(backing_offset));
-		if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != addr)
-		{
-			if (ptr != MAP_FAILED)
-			{
-				munmap(ptr, size);
-			}
-			release_shared_mapping_reservation(addr, size);
-			ptr = MAP_FAILED;
-		}
-	}
-#else
-	if (!is_mmaped(reinterpret_cast<void*>(addr), size))
-	{
-		// NOLINTNEXTLINE
-		ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_SHARED, shared->fd,
-		           static_cast<off_t>(backing_offset));
-	}
-#endif
+	ptr = map_reserved_span(addr, size, protect, MAP_SHARED, shared->fd, static_cast<off_t>(backing_offset));
 #endif
 
 	if (ptr == MAP_FAILED)
@@ -1197,10 +1269,14 @@ bool sys_virtual_map_shared_fixed_replacing_owned_reservation(void* backing, uin
 	// The caller has proved that this interval belongs to its reservation.
 	// MAP_FIXED replaces only the requested pages in one kernel operation, so
 	// the untouched prefix and suffix never become available to another thread.
+	std::vector<SysWriteLeaseRun> leases;
+	write_leases().BeginUnmap(addr, end, &leases);
 	// NOLINTNEXTLINE
 	void* ptr = mmap(reinterpret_cast<void*>(addr), size, get_protection_flag(mode), MAP_FIXED | MAP_SHARED, shared->fd,
 	                 static_cast<off_t>(backing_offset));
-	if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != addr)
+	const bool mapped = ptr != MAP_FAILED && reinterpret_cast<uintptr_t>(ptr) == addr;
+	write_leases().EndUnmap(addr, end, leases, mapped);
+	if (!mapped)
 	{
 		pthread_mutex_unlock(&g_virtual_mutex);
 		return false;
@@ -1274,17 +1350,8 @@ bool sys_virtual_alloc_fixed(uint64_t address, uint64_t size, VirtualMemory::Mod
 #ifdef KYTY_FIXED_NOREPLACE
 	// NOLINTNEXTLINE
 	void* ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANON, -1, 0);
-#elif defined(__APPLE__)
-	// macOS ignores a plain address hint (only MAP_FIXED honours a specific
-	// address) and has no MAP_FIXED_NOREPLACE. The PS5 guest address space is
-	// managed by Kyty, so the requested address is free on the host; MAP_FIXED
-	// there is safe. The return value is validated against `addr` below.
-	void* ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
 #else
-	// NOLINTNEXTLINE
-	void* ptr = (is_mmaped(reinterpret_cast<void*>(addr), size)
-	                 ? MAP_FAILED
-	                 : mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0));
+	void* ptr = map_reserved_span(addr, size, protect, MAP_PRIVATE | MAP_ANON, -1, 0);
 #endif
 
 	auto ret_addr = reinterpret_cast<uintptr_t>(ptr);
@@ -1343,9 +1410,13 @@ bool sys_virtual_alloc_fixed_replacing_owned_reservation(uint64_t address, uint6
 	}
 
 	const int protect = get_protection_flag(mode);
+	std::vector<SysWriteLeaseRun> leases;
+	write_leases().BeginUnmap(addr, end, &leases);
 	// NOLINTNEXTLINE
 	void* ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
-	if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != addr)
+	const bool mapped = ptr != MAP_FAILED && reinterpret_cast<uintptr_t>(ptr) == addr;
+	write_leases().EndUnmap(addr, end, leases, mapped);
+	if (!mapped)
 	{
 		pthread_mutex_unlock(&g_virtual_mutex);
 		return false;
@@ -1390,8 +1461,16 @@ bool sys_virtual_free_range(uint64_t address, uint64_t size)
 	--allocation;
 	const uintptr_t owner     = allocation->first;
 	const uintptr_t owner_end = owner + allocation->second;
-	if (addr < owner || end > owner_end || !range_is_guest_owned_locked(addr, size) ||
-	    munmap(reinterpret_cast<void*>(addr), size) != 0)
+	if (addr < owner || end > owner_end || !range_is_guest_owned_locked(addr, size))
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	std::vector<SysWriteLeaseRun> leases;
+	write_leases().BeginUnmap(addr, end, &leases);
+	const bool unmapped = munmap(reinterpret_cast<void*>(addr), size) == 0;
+	write_leases().EndUnmap(addr, end, leases, unmapped);
+	if (!unmapped)
 	{
 		pthread_mutex_unlock(&g_virtual_mutex);
 		return false;
@@ -1448,7 +1527,11 @@ bool sys_virtual_free(uint64_t address)
 		return false;
 	}
 
-	if (munmap(reinterpret_cast<void*>(addr), size) == 0)
+	std::vector<SysWriteLeaseRun> leases;
+	write_leases().BeginUnmap(addr, addr + size, &leases);
+	const bool unmapped = munmap(reinterpret_cast<void*>(addr), size) == 0;
+	write_leases().EndUnmap(addr, addr + size, leases, unmapped);
+	if (unmapped)
 	{
 		uintptr_t page_start = 0;
 		uintptr_t page_end   = 0;
@@ -1466,6 +1549,27 @@ bool sys_virtual_free(uint64_t address)
 
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return false;
+}
+
+// Spans of host pages [page_start, page_end): runs with a recorded guest
+// protection, and untracked host runs between them.
+static void collect_protection_spans_locked(uintptr_t page_start, uintptr_t page_end, std::vector<SysProtectionSpan>* spans)
+{
+	const uint64_t page_size = sys_virtual_get_page_size();
+	for (uintptr_t page = page_start; page < page_end;)
+	{
+		if (const auto* protection = find_protection_range(page); protection != nullptr)
+		{
+			const uintptr_t run_end = std::min(protection->end_page, page_end);
+			spans->push_back({page * page_size, run_end * page_size, static_cast<uint32_t>(protection->protect), true});
+			page = run_end;
+			continue;
+		}
+		const auto      next    = g_protects->upper_bound(page);
+		const uintptr_t run_end = next == g_protects->end() ? page_end : std::min(next->first, page_end);
+		spans->push_back({page * page_size, run_end * page_size, 0, false});
+		page = run_end;
+	}
 }
 
 static bool protect_range_locked(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode,
@@ -1501,17 +1605,25 @@ static bool protect_range_locked(uint64_t address, uint64_t size, VirtualMemory:
 		}
 	}
 	const uint64_t page_size = sys_virtual_get_page_size();
-	if (mprotect(reinterpret_cast<void*>(page_start * page_size), (page_end - page_start) * page_size, get_protection_flag(mode)) == 0)
+	const int      protect   = get_protection_flag(mode);
+	// Protect remains available to internal host users, including ranges that
+	// only partly belong to the guest. Pages with a recorded guest protection
+	// update it, and their leased pages are decided by their write-lease
+	// authority; other host pages only receive the native protection.
+	std::vector<SysProtectionSpan> spans;
+	collect_protection_spans_locked(page_start, page_end, &spans);
+	if (!write_leases().Protect(spans, static_cast<uint32_t>(protect), get_protection_flag(protect), kLeaseNative))
 	{
-		// Protect remains available to internal host users, but only a range
-		// already owned by the guest registry may update guest protection state.
-		if (guest_owned)
-		{
-			assign_protection_range(page_start, page_end, get_protection_flag(mode));
-		}
-		return true;
+		return false;
 	}
-	return false;
+	for (const auto& span: spans)
+	{
+		if (span.recorded)
+		{
+			assign_protection_range(span.address / page_size, span.end / page_size, protect);
+		}
+	}
+	return true;
 }
 
 bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode)
@@ -1580,9 +1692,13 @@ bool sys_virtual_decommit_guest_range(uint64_t address, uint64_t size)
 #else
 	constexpr int kDecommitFlags = MAP_FIXED | MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;
 #endif
+	std::vector<SysWriteLeaseRun> leases;
+	write_leases().BeginUnmap(addr, end, &leases);
 	// NOLINTNEXTLINE
 	void* ptr = mmap(reinterpret_cast<void*>(addr), size, PROT_NONE, kDecommitFlags, -1, 0);
-	if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != addr)
+	const bool replaced = ptr != MAP_FAILED && reinterpret_cast<uintptr_t>(ptr) == addr;
+	write_leases().EndUnmap(addr, end, leases, replaced);
+	if (!replaced)
 	{
 		return fail();
 	}
@@ -1710,9 +1826,210 @@ bool sys_virtual_copy_to_guest(uint64_t destination, const void* source, uint64_
 	return true;
 }
 
+// Records one segment per mapping instance, clipped to [address, address + size).
+// Fails when a byte is not guest owned or the segment budget is exceeded.
+static bool capture_guest_mapping_identity_snapshot_locked(uintptr_t address, uint64_t size,
+	                                                       VirtualMemory::GuestMappingIdentitySnapshot* snapshot)
+{
+	const uintptr_t end     = address + static_cast<uintptr_t>(size);
+	snapshot->address       = address;
+	snapshot->size          = size;
+	snapshot->segment_count = 0;
+	for (uintptr_t cursor = address; cursor < end;)
+	{
+		const auto mapping = find_guest_mapping_locked(cursor);
+		if (mapping == g_guest_mappings->cend())
+		{
+			return false;
+		}
+		const uintptr_t next = std::min(mapping->second.end, end);
+		auto*           last = snapshot->segment_count == 0 ? nullptr : &snapshot->segments[snapshot->segment_count - 1u];
+		if (last != nullptr && last->identity == mapping->second.identity)
+		{
+			last->size += next - cursor;
+		} else
+		{
+			if (snapshot->segment_count == VirtualMemory::GuestMappingIdentitySnapshot::kMaxSegments)
+			{
+				return false;
+			}
+			snapshot->segments[snapshot->segment_count++] = {cursor, next - cursor, mapping->second.identity};
+		}
+		cursor = next;
+	}
+	return true;
+}
+
+// Every byte of every segment still belongs to the mapping instance captured for it.
+static bool guest_mapping_identity_snapshot_matches_locked(const VirtualMemory::GuestMappingIdentitySnapshot& snapshot)
+{
+	for (uint32_t i = 0; i < snapshot.segment_count; ++i)
+	{
+		const auto&     segment = snapshot.segments[i];
+		const uintptr_t end     = static_cast<uintptr_t>(segment.address + segment.size);
+		for (auto cursor = static_cast<uintptr_t>(segment.address); cursor < end;)
+		{
+			const auto mapping = find_guest_mapping_locked(cursor);
+			if (mapping == g_guest_mappings->cend() || mapping->second.identity != segment.identity)
+			{
+				return false;
+			}
+			cursor = std::min(mapping->second.end, end);
+		}
+	}
+	return true;
+}
+
+bool sys_virtual_protect_guest_if_mapping_matches(uint64_t address, uint64_t size, VirtualMemory::Mode mode,
+                                                  uint64_t mapping_identity, VirtualMemory::Mode* old_mode)
+{
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (mapping_identity == 0 || address == 0 || size == 0 || page_size == 0 || address > UINTPTR_MAX ||
+	    size > UINTPTR_MAX - address || address % page_size != 0 || size % page_size != 0 ||
+	    static_cast<uint32_t>(mode) > static_cast<uint32_t>(VirtualMemory::Mode::ExecuteReadWrite))
+	{
+		return false;
+	}
+
+	VirtualMemory::GuestMappingIdentitySnapshot snapshot {};
+	snapshot.address       = address;
+	snapshot.size          = size;
+	snapshot.segment_count = 1;
+	snapshot.segments[0]   = {address, size, mapping_identity};
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool matches = guest_mapping_identity_snapshot_matches_locked(snapshot);
+	const bool result  = matches && protect_range_locked(address, size, mode, old_mode, true);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return result;
+}
+
+// Metadata only: ownership and identity, never protection. Write access is
+// checked by the conditional copy that uses the snapshot.
+bool sys_virtual_capture_guest_mapping_snapshot(uint64_t address, uint64_t size, VirtualMemory::GuestMappingSnapshot* snapshot)
+{
+	if (snapshot == nullptr || size == 0 || address > UINTPTR_MAX - size)
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool captured = capture_guest_mapping_identity_snapshot_locked(static_cast<uintptr_t>(address), size, snapshot);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return captured;
+}
+
+bool sys_virtual_capture_guest_mapping_identity_snapshot(uint64_t address, uint64_t size,
+	                                                     VirtualMemory::GuestMappingIdentitySnapshot* snapshot)
+{
+	if (snapshot == nullptr || size == 0 || address > UINTPTR_MAX - size)
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool captured = capture_guest_mapping_identity_snapshot_locked(static_cast<uintptr_t>(address), size, snapshot);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return captured;
+}
+
+bool sys_virtual_guest_mapping_identity_matches(const VirtualMemory::GuestMappingIdentitySnapshot& identity)
+{
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool matches = guest_mapping_identity_snapshot_matches_locked(identity);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return matches;
+}
+
+bool sys_virtual_copy_to_guest_if_mapping_matches(const VirtualMemory::GuestMappingSnapshot& snapshot, const void* source)
+{
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (source == nullptr || snapshot.size > std::numeric_limits<size_t>::max() ||
+	    !get_host_page_range(static_cast<uintptr_t>(snapshot.address), snapshot.size, &page_start, &page_end))
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	if (!guest_mapping_identity_snapshot_matches_locked(snapshot) ||
+	    !range_has_protection_locked(page_start, page_end, PROT_WRITE))
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(snapshot.address)), source, static_cast<size_t>(snapshot.size));
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
+bool sys_virtual_visit_writable_guest_transaction(const VirtualMemory::WritableGuestTransactionRange* ranges,
+	                                               uint32_t count, int32_t capture_identity_range_index,
+	                                               VirtualMemory::WritableGuestTransactionVisitor visitor,
+	                                               void* context)
+{
+	if (ranges == nullptr || count == 0 || count > VirtualMemory::kMaxWritableGuestTransactionRanges || visitor == nullptr ||
+	    capture_identity_range_index < -1 || capture_identity_range_index >= static_cast<int32_t>(count))
+	{
+		return false;
+	}
+
+	VirtualMemory::GuestMappingIdentitySnapshot captured_identity {};
+	bool                                      valid = true;
+	pthread_mutex_lock(&g_virtual_mutex);
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		const auto& range = ranges[i];
+		if (range.size == 0 || range.address > UINTPTR_MAX || range.size > UINTPTR_MAX - range.address)
+		{
+			valid = false;
+			break;
+		}
+
+		uintptr_t page_start = 0;
+		uintptr_t page_end   = 0;
+		if (!get_host_page_range(static_cast<uintptr_t>(range.address), range.size, &page_start, &page_end) ||
+		    !range_is_guest_owned_locked(static_cast<uintptr_t>(range.address), range.size) ||
+		    !range_has_protection_locked(page_start, page_end, PROT_WRITE))
+		{
+			valid = false;
+			break;
+		}
+
+		VirtualMemory::GuestMappingIdentitySnapshot current_identity {};
+		if (!capture_guest_mapping_identity_snapshot_locked(static_cast<uintptr_t>(range.address), range.size,
+		                                                    &current_identity))
+		{
+			valid = false;
+			break;
+		}
+
+		if (range.expected_mapping != nullptr &&
+		    (range.expected_mapping->address != range.address || range.expected_mapping->size != range.size ||
+		     !guest_mapping_identity_snapshot_matches_locked(*range.expected_mapping)))
+		{
+			valid = false;
+			break;
+		}
+
+		if (static_cast<int32_t>(i) == capture_identity_range_index)
+		{
+			captured_identity = current_identity;
+		}
+	}
+
+	if (valid)
+	{
+		visitor(capture_identity_range_index == -1 ? nullptr : &captured_identity, context);
+	}
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return valid;
+}
+
 VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint64_t address, uint64_t size,
                                                                            VirtualMemory::CapturedProtectionVisitor visitor,
-                                                                           void*                                    context) noexcept
+                                                                           void* context,
+                                                                           const VirtualMemory::WriteLeaseAuthority* authority) noexcept
 {
 	using Status = VirtualMemory::ProtectionChangeStatus;
 	VirtualMemory::ProtectionChangeResult result {};
@@ -1749,12 +2066,7 @@ VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint6
 			pthread_mutex_unlock(&g_virtual_mutex);
 			return result;
 		}
-		int target = protection->protect & ~PROT_WRITE;
-		if ((target & (PROT_READ | PROT_EXEC)) == 0)
-		{
-			target |= PROT_READ;
-		}
-		runs.push_back({page, run_end, protection->protect, target});
+		runs.push_back({page, run_end, protection->protect, static_cast<int>(lease_remove_write(static_cast<uint32_t>(protection->protect)))});
 		page = run_end;
 	}
 
@@ -1792,16 +2104,42 @@ VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint6
 		result.applied_runs++;
 		result.applied_bytes += run_size;
 	}
+	// The guest protection stays recorded; the lease remembers who removed write.
 	for (const auto& run: runs)
 	{
-		assign_protection_range(run.begin, run.end, run.target);
+		write_leases().Add(run.begin * page_size, run.end * page_size, static_cast<uint32_t>(run.original), authority);
 	}
 	result.status = Status::Success;
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return result;
 }
 
-bool sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+struct GuestProtectionRun
+{
+	uintptr_t begin   = 0;
+	uintptr_t end     = 0;
+	int       protect = PROT_NONE;
+};
+
+// The recorded guest protection of host pages [page_start, page_end); false when a page is unmapped.
+static bool collect_guest_protection_locked(uintptr_t page_start, uintptr_t page_end, std::vector<GuestProtectionRun>* runs)
+{
+	for (uintptr_t page = page_start; page < page_end;)
+	{
+		const auto* protection = find_protection_range(page);
+		if (protection == nullptr)
+		{
+			return false;
+		}
+		const uintptr_t run_end = std::min(protection->end_page, page_end);
+		runs->push_back({page, run_end, protection->protect});
+		page = run_end;
+	}
+	return true;
+}
+
+bool sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t /*restore_token*/,
+                                              const VirtualMemory::WriteLeaseAuthority* authority) noexcept
 {
 	uintptr_t page_start = 0;
 	uintptr_t page_end = 0;
@@ -1809,29 +2147,42 @@ bool sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, u
 	{
 		return false;
 	}
-	const int original = static_cast<int>(restore_token);
-	if ((original & PROT_WRITE) == 0)
-	{
-		return false;
-	}
-	int target = original & ~PROT_WRITE;
-	if ((target & (PROT_READ | PROT_EXEC)) == 0)
-	{
-		target |= PROT_READ;
-	}
 	const uint64_t page_size = sys_virtual_get_page_size();
+	std::vector<GuestProtectionRun> runs;
 	pthread_mutex_lock(&g_virtual_mutex);
-	if (mprotect(reinterpret_cast<void*>(page_start * page_size), (page_end - page_start) * page_size, target) != 0)
+	if (!collect_guest_protection_locked(page_start, page_end, &runs))
 	{
 		pthread_mutex_unlock(&g_virtual_mutex);
 		return false;
 	}
-	assign_protection_range(page_start, page_end, target);
+	bool applied = true;
+	for (const auto& run: runs)
+	{
+		applied = applied && lease_protect(run.begin * page_size, (run.end - run.begin) * page_size,
+		                                   lease_remove_write(static_cast<uint32_t>(run.protect)));
+	}
+	if (!applied)
+	{
+		// The caller claimed these pages writable; return all of them to it.
+		for (const auto& run: runs)
+		{
+			if (!lease_protect(run.begin * page_size, (run.end - run.begin) * page_size, static_cast<uint32_t>(run.protect)))
+			{
+				EXIT("write removal rollback failed: address=0x%016" PRIxPTR "\n", run.begin * page_size);
+			}
+		}
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	for (const auto& run: runs)
+	{
+		write_leases().Add(run.begin * page_size, run.end * page_size, static_cast<uint32_t>(run.protect), authority);
+	}
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return true;
 }
 
-bool sys_virtual_restore_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+bool sys_virtual_restore_protection(uint64_t address, uint64_t size, uint32_t /*restore_token*/) noexcept
 {
 	uintptr_t page_start = 0;
 	uintptr_t page_end = 0;
@@ -1839,17 +2190,25 @@ bool sys_virtual_restore_protection(uint64_t address, uint64_t size, uint32_t re
 	{
 		return false;
 	}
-	const int protection = static_cast<int>(restore_token);
 	const uint64_t page_size = sys_virtual_get_page_size();
+	std::vector<GuestProtectionRun> runs;
 	pthread_mutex_lock(&g_virtual_mutex);
-	if (mprotect(reinterpret_cast<void*>(page_start * page_size), (page_end - page_start) * page_size, protection) != 0)
+	bool restored = collect_guest_protection_locked(page_start, page_end, &runs);
+	for (const auto& run: runs)
 	{
-		pthread_mutex_unlock(&g_virtual_mutex);
-		return false;
+		restored = lease_protect(run.begin * page_size, (run.end - run.begin) * page_size, static_cast<uint32_t>(run.protect)) &&
+		           restored;
 	}
-	assign_protection_range(page_start, page_end, protection);
 	pthread_mutex_unlock(&g_virtual_mutex);
-	return true;
+	return restored;
+}
+
+bool sys_virtual_release_write_leases(const VirtualMemory::WriteLeaseAuthority* authority) noexcept
+{
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool released = write_leases().Release(authority, kLeaseNative);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return released;
 }
 
 bool sys_virtual_restore_protection_signal_safe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept

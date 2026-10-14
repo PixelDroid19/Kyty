@@ -161,6 +161,7 @@ struct AgentPadOverlay
 	{
 		uint64_t target_present = 0;
 		uint32_t button         = 0;
+		uint32_t press_samples  = kAgentPadTapPressSamples;
 	};
 
 	enum class TapPhase: uint8_t
@@ -178,6 +179,7 @@ struct AgentPadOverlay
 	TapPhase    tap_phase                                       = TapPhase::None;
 	uint32_t    tap_button                                      = 0;
 	uint32_t    tap_press_samples                               = 0;
+	uint32_t    tap_press_sample_limit                          = kAgentPadTapPressSamples;
 	uint64_t    read_state_samples                               = 0;
 	uint64_t    read_samples                                     = 0;
 	uint64_t    delivered_taps                                   = 0;
@@ -577,7 +579,7 @@ static void AgentPadApplyToButtonsAndAxes(bool advance_tap, uint32_t* buttons, u
 				{
 					++g_agent_pad.delivered_taps;
 				}
-				if (g_agent_pad.tap_press_samples >= kAgentPadTapPressSamples)
+				if (g_agent_pad.tap_press_samples >= g_agent_pad.tap_press_sample_limit)
 				{
 					g_agent_pad.tap_phase = AgentPadOverlay::TapPhase::ReleaseAfterPress;
 				}
@@ -589,6 +591,8 @@ static void AgentPadApplyToButtonsAndAxes(bool advance_tap, uint32_t* buttons, u
 			{
 				g_agent_pad.tap_phase  = AgentPadOverlay::TapPhase::None;
 				g_agent_pad.tap_button = 0;
+				g_agent_pad.tap_press_samples      = 0;
+				g_agent_pad.tap_press_sample_limit = kAgentPadTapPressSamples;
 			}
 			break;
 		case AgentPadOverlay::TapPhase::None: break;
@@ -821,9 +825,9 @@ void AgentPadSetAxis(Axis axis, uint8_t value)
 	}
 }
 
-bool AgentPadScheduleTap(uint32_t button)
+bool AgentPadScheduleTap(uint32_t button, uint32_t press_samples)
 {
-	if (button == 0)
+	if (button == 0 || press_samples < kAgentPadTapPressSamplesMin || press_samples > kAgentPadTapPressSamplesMax)
 	{
 		return false;
 	}
@@ -838,14 +842,16 @@ bool AgentPadScheduleTap(uint32_t button)
 	g_agent_pad.tap_button        = button;
 	g_agent_pad.tap_phase         = AgentPadOverlay::TapPhase::ReleaseBeforePress;
 	g_agent_pad.tap_press_samples = 0;
+	g_agent_pad.tap_press_sample_limit = press_samples;
 	return true;
 }
 
 AgentPadScheduleResult AgentPadScheduleTaps(uint32_t button, uint64_t at_present, uint32_t repeat,
-                                             uint64_t present_delta)
+                                             uint64_t present_delta, uint32_t press_samples)
 {
 	if (button == 0 || at_present == 0 || repeat == 0 || repeat > kAgentPadScheduledTapMax ||
-	    (repeat > 1 && present_delta == 0))
+	    (repeat > 1 && present_delta == 0) || press_samples < kAgentPadTapPressSamplesMin ||
+	    press_samples > kAgentPadTapPressSamplesMax)
 	{
 		return AgentPadScheduleResult::Invalid;
 	}
@@ -897,7 +903,7 @@ AgentPadScheduleResult AgentPadScheduleTaps(uint32_t button, uint64_t at_present
 			g_agent_pad.scheduled_taps[insert] = g_agent_pad.scheduled_taps[insert - 1];
 			--insert;
 		}
-		g_agent_pad.scheduled_taps[insert] = {targets[i], button};
+		g_agent_pad.scheduled_taps[insert] = {targets[i], button, press_samples};
 		++g_agent_pad.scheduled_tap_count;
 	}
 	return AgentPadScheduleResult::Scheduled;
@@ -942,6 +948,7 @@ AgentPadPresentResult AgentPadOnPresent(uint64_t present)
 		g_agent_pad.tap_button        = scheduled.button;
 		g_agent_pad.tap_phase         = AgentPadOverlay::TapPhase::ReleaseBeforePress;
 		g_agent_pad.tap_press_samples = 0;
+		g_agent_pad.tap_press_sample_limit = scheduled.press_samples;
 		++result.started;
 		if (result.started_target_present == 0)
 		{
@@ -980,6 +987,7 @@ void AgentPadClear()
 	g_agent_pad.tap_phase         = AgentPadOverlay::TapPhase::None;
 	g_agent_pad.tap_button        = 0;
 	g_agent_pad.tap_press_samples = 0;
+	g_agent_pad.tap_press_sample_limit = kAgentPadTapPressSamples;
 	g_agent_pad.scheduled_tap_count = 0;
 	for (int i = 0; i < static_cast<int>(Axis::AxisMax); ++i)
 	{
@@ -1017,10 +1025,10 @@ void AgentPadGetReadStats(AgentPadReadStats* out)
 	out->tap_pending        = g_agent_pad.tap_phase != AgentPadOverlay::TapPhase::None;
 }
 
-void AgentPadApplyReadStateSample(uint32_t* buttons)
+void AgentPadApplyReadStateSample(uint32_t* buttons, bool advance_tap)
 {
 	uint8_t unused = 0;
-	AgentPadApplyToButtonsAndAxes(true, buttons, &unused, &unused, &unused, &unused, &unused, &unused);
+	AgentPadApplyToButtonsAndAxes(advance_tap, buttons, &unused, &unused, &unused, &unused, &unused, &unused);
 }
 
 void ControllerSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
@@ -1644,6 +1652,9 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	PadScriptState scripted {};
 	(void)g_pad_script.Sample(&scripted);
 	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };
+	// A pressed trigger button always carries its analog value; scripted L2/R2 are fully pressed.
+	const auto script_trigger = [&scripted](uint32_t button, uint8_t value) -> uint8_t
+	{ return (scripted.buttons & button) != 0 ? 255u : value; };
 
 	const uint64_t now_ts = Kernel::KernelGetProcessTime();
 
@@ -1660,8 +1671,8 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	data->right_stick_y          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightY))) != 0
 	                                    ? script_axis(scripted.right_y)
 	                                    : state.axes[static_cast<int>(Axis::RightY)];
-	data->analog_buttons_l2      = state.axes[static_cast<int>(Axis::TriggerLeft)];
-	data->analog_buttons_r2      = state.axes[static_cast<int>(Axis::TriggerRight)];
+	data->analog_buttons_l2      = script_trigger(PAD_BUTTON_L2, state.axes[static_cast<int>(Axis::TriggerLeft)]);
+	data->analog_buttons_r2      = script_trigger(PAD_BUTTON_R2, state.axes[static_cast<int>(Axis::TriggerRight)]);
 	AgentPadApplyToButtonsAndAxes(true, &data->buttons, &data->left_stick_x, &data->left_stick_y, &data->right_stick_x,
 	                              &data->right_stick_y, &data->analog_buttons_l2, &data->analog_buttons_r2);
 	data->orientation_x          = 0.0f;
@@ -1712,6 +1723,9 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 	PadScriptState scripted {};
 	const bool script_active = g_pad_script.Sample(&scripted);
 	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };
+	// A pressed trigger button always carries its analog value; scripted L2/R2 are fully pressed.
+	const auto script_trigger = [&scripted](uint32_t button, uint8_t value) -> uint8_t
+	{ return (scripted.buttons & button) != 0 ? 255u : value; };
 
 	for (int i = 0; i < ret_num; i++)
 	{
@@ -1729,8 +1743,8 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 		data[i].right_stick_y          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightY))) != 0
 		                                    ? script_axis(scripted.right_y)
 		                                    : states[i].axes[static_cast<int>(Axis::RightY)];
-		data[i].analog_buttons_l2      = states[i].axes[static_cast<int>(Axis::TriggerLeft)];
-		data[i].analog_buttons_r2      = states[i].axes[static_cast<int>(Axis::TriggerRight)];
+		data[i].analog_buttons_l2      = script_trigger(PAD_BUTTON_L2, states[i].axes[static_cast<int>(Axis::TriggerLeft)]);
+		data[i].analog_buttons_r2      = script_trigger(PAD_BUTTON_R2, states[i].axes[static_cast<int>(Axis::TriggerRight)]);
 		// Advance the tap FSM at most once per PadRead call (first sample only) so a
 		// large num cannot collapse release/press/release into one HLE invocation.
 		AgentPadApplyToButtonsAndAxes(i == 0, &data[i].buttons, &data[i].left_stick_x, &data[i].left_stick_y, &data[i].right_stick_x,

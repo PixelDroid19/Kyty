@@ -3,6 +3,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/RenderResolutionAlias.h"
+#include "Emulator/Graphics/RenderResolutionPlanner.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VideoOutFlipLifecycleGate.h"
 #include "Emulator/Graphics/VideoOutFlipQueueAdmissionGate.h"
@@ -397,6 +398,110 @@ TEST(EmulatorVideoOutResolution, AllowsEmptyDepthOnlyWhenCallerAuthorizesIt)
 	const GpuMemoryOverlapSnapshot empty;
 	EXPECT_TRUE(RenderResolutionAliasAllowsSnapshot(empty, GpuMemoryObjectType::DepthStencilBuffer, true));
 	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(empty, GpuMemoryObjectType::DepthStencilBuffer, false));
+}
+
+TEST(EmulatorVideoOutResolution, AllowsExactBufferAndTextureViewsOfARenderTarget)
+{
+	const auto created = Snapshot({Exact(GpuMemoryObjectType::RenderTexture), Exact(GpuMemoryObjectType::StorageBuffer),
+	                               Exact(GpuMemoryObjectType::Texture)});
+	const auto pending = Snapshot({Exact(GpuMemoryObjectType::StorageBuffer), Exact(GpuMemoryObjectType::Texture)});
+
+	EXPECT_TRUE(RenderResolutionAliasAllowsSnapshot(created, GpuMemoryObjectType::RenderTexture, false));
+	EXPECT_TRUE(RenderResolutionAliasAllowsSnapshot(pending, GpuMemoryObjectType::RenderTexture, true));
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(pending, GpuMemoryObjectType::RenderTexture, false));
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(pending, GpuMemoryObjectType::DepthStencilBuffer, true));
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(Snapshot({Exact(GpuMemoryObjectType::VideoOutBuffer), Exact(GpuMemoryObjectType::Texture)}),
+	                                                 GpuMemoryObjectType::VideoOutBuffer, false));
+}
+
+TEST(EmulatorVideoOutResolution, RejectsRenderTargetViewsThatAreNotOneExactPeerPerType)
+{
+	const auto partial  = Snapshot({{GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains, 1, false}});
+	const auto repeated = Snapshot({Exact(GpuMemoryObjectType::Texture, 2)});
+	const auto storage  = Snapshot({Exact(GpuMemoryObjectType::StorageTexture)});
+
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(partial, GpuMemoryObjectType::RenderTexture, true));
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(repeated, GpuMemoryObjectType::RenderTexture, true));
+	EXPECT_FALSE(RenderResolutionAliasAllowsSnapshot(storage, GpuMemoryObjectType::RenderTexture, true));
+}
+
+TEST(EmulatorVideoOutResolution, DepthTargetAcceptsStorageViewsOfItsPlanesOnly)
+{
+	const auto planes = Snapshot({Exact(GpuMemoryObjectType::DepthStencilBuffer),
+	                              {GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses, 2, false}});
+	const auto sampled = Snapshot({Exact(GpuMemoryObjectType::Texture)});
+	const auto partial = Snapshot({{GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains, 1, false}});
+	auto       truncated = Snapshot({Exact(GpuMemoryObjectType::StorageBuffer)});
+	truncated.truncated  = true;
+
+	EXPECT_TRUE(RenderResolutionAliasAllowsDepthTargetSnapshot(planes));
+	EXPECT_TRUE(RenderResolutionAliasAllowsDepthTargetSnapshot(GpuMemoryOverlapSnapshot {}));
+	EXPECT_FALSE(RenderResolutionAliasAllowsDepthTargetSnapshot(sampled));
+	EXPECT_FALSE(RenderResolutionAliasAllowsDepthTargetSnapshot(partial));
+	EXPECT_FALSE(RenderResolutionAliasAllowsDepthTargetSnapshot(truncated));
+}
+
+TEST(EmulatorVideoOutResolution, NewRenderTargetCohortScalesOnlyWhenEveryMemberAgrees)
+{
+	const ResolutionExtent             guest {3840, 2160};
+	const ResolutionExtent             host {1280, 720};
+	const RenderResolutionCohortMember agreed[] = {{guest, host, false}, {guest, host, false}};
+	const RenderResolutionCohortMember split[]  = {{guest, host, false}, {guest, guest, false}};
+
+	const auto scaled = EvaluateRenderTargetCohort(agreed, 2);
+	EXPECT_EQ(scaled.classification, ResolutionClassification::Scaled);
+	EXPECT_EQ(scaled.host_extent, host);
+
+	const auto native = EvaluateRenderTargetCohort(split, 2);
+	EXPECT_EQ(native.classification, ResolutionClassification::Native);
+	EXPECT_EQ(native.reason, RenderResolutionPlanReason::AttachmentNotScalable);
+	EXPECT_EQ(native.host_extent, guest);
+	EXPECT_EQ(native.blocking_attachment_index, 1u);
+}
+
+TEST(EmulatorVideoOutResolution, CommittedRenderTargetFixesTheCohortExtent)
+{
+	const ResolutionExtent             guest {3840, 2160};
+	const ResolutionExtent             host {1280, 720};
+	const RenderResolutionCohortMember follow[]      = {{guest, host, false}, {guest, host, true}};
+	const RenderResolutionCohortMember unscalable[]  = {{guest, guest, false}, {guest, host, true}};
+	const RenderResolutionCohortMember stay_native[] = {{guest, host, false}, {guest, guest, true}};
+	const RenderResolutionCohortMember conflict[]    = {{guest, host, true}, {guest, ResolutionExtent {1920, 1080}, true}};
+
+	const auto scaled = EvaluateRenderTargetCohort(follow, 2);
+	EXPECT_EQ(scaled.classification, ResolutionClassification::Scaled);
+	EXPECT_EQ(scaled.host_extent, host);
+
+	const auto blocked = EvaluateRenderTargetCohort(unscalable, 2);
+	EXPECT_EQ(blocked.classification, ResolutionClassification::Unsupported);
+	EXPECT_EQ(blocked.reason, RenderResolutionPlanReason::AttachmentNotScalable);
+	EXPECT_EQ(blocked.blocking_attachment_index, 0u);
+
+	const auto native = EvaluateRenderTargetCohort(stay_native, 2);
+	EXPECT_EQ(native.classification, ResolutionClassification::Native);
+	EXPECT_EQ(native.reason, RenderResolutionPlanReason::HostExtentCommitted);
+
+	const auto refused = EvaluateRenderTargetCohort(conflict, 2);
+	EXPECT_EQ(refused.classification, ResolutionClassification::Unsupported);
+	EXPECT_EQ(refused.reason, RenderResolutionPlanReason::MismatchedHostExtent);
+}
+
+TEST(EmulatorVideoOutResolution, MixedGuestExtentsKeepTheCohortNative)
+{
+	const ResolutionExtent             guest {3840, 2160};
+	const ResolutionExtent             other {1920, 1080};
+	const ResolutionExtent             host {1280, 720};
+	const RenderResolutionCohortMember fresh[]     = {{guest, host, false}, {other, other, false}};
+	const RenderResolutionCohortMember committed[] = {{guest, host, true}, {other, other, false}};
+
+	const auto native = EvaluateRenderTargetCohort(fresh, 2);
+	EXPECT_EQ(native.classification, ResolutionClassification::Native);
+	EXPECT_EQ(native.reason, RenderResolutionPlanReason::MismatchedGuestExtent);
+
+	const auto refused = EvaluateRenderTargetCohort(committed, 2);
+	EXPECT_EQ(refused.classification, ResolutionClassification::Unsupported);
+	EXPECT_EQ(refused.reason, RenderResolutionPlanReason::MismatchedGuestExtent);
+	EXPECT_EQ(EvaluateRenderTargetCohort(nullptr, 0).reason, RenderResolutionPlanReason::InvalidInput);
 }
 
 UT_END();

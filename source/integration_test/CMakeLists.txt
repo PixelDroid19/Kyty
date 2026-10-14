@@ -61,6 +61,46 @@ add_kyty_bringup_case(EmptyModeRejected empty_mode_rejected 125)
 add_kyty_bringup_case(EmptyFeaturesRejected empty_features_rejected 125)
 add_kyty_bringup_case(EmptyBurstLimitRejected empty_burst_limit_rejected 125)
 
+add_executable(kyty_gds_transfer_integration
+	src/GdsTransferIntegration.cpp
+)
+target_link_libraries(kyty_gds_transfer_integration PRIVATE core emulator vulkan-1)
+target_include_directories(kyty_gds_transfer_integration PRIVATE
+	"${CMAKE_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+add_test(NAME KytyGraphicsIntegration.GdsTransfers
+	COMMAND $<TARGET_FILE:kyty_gds_transfer_integration>)
+set_tests_properties(KytyGraphicsIntegration.GdsTransfers PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 90
+	SKIP_RETURN_CODE 77
+)
+
+add_test(NAME KytyGraphicsIntegration.GdsProductionAppend
+	COMMAND $<TARGET_FILE:kyty_gds_transfer_integration> --append)
+set_tests_properties(KytyGraphicsIntegration.GdsProductionAppend PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 90
+	SKIP_RETURN_CODE 77
+)
+
+add_executable(kyty_texture_one_dimensional_array_integration
+	src/TextureOneDimensionalArrayIntegration.cpp
+)
+target_link_libraries(kyty_texture_one_dimensional_array_integration PRIVATE core emulator vulkan-1)
+target_include_directories(kyty_texture_one_dimensional_array_integration PRIVATE
+	"${CMAKE_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+add_test(NAME KytyTextureIntegration.OneDimensionalArray
+	COMMAND $<TARGET_FILE:kyty_texture_one_dimensional_array_integration>)
+set_tests_properties(KytyTextureIntegration.OneDimensionalArray PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 90
+	SKIP_RETURN_CODE 77
+)
+
 # --- Domain validation architecture (pure validators, four outcome classes) ---
 
 add_executable(kyty_domain_validation_integration
@@ -110,6 +150,22 @@ add_executable(kyty_shader_compute_integration
 	src/shader_compute/VulkanProgramBaseProbe.cpp
 	src/shader_compute/VulkanWaveProbe.cpp
 )
+
+add_executable(kyty_shader_gds_exec_integration
+	src/shader_compute/ShaderGdsExecIntegration.cpp
+)
+target_link_libraries(kyty_shader_gds_exec_integration PRIVATE core emulator vulkan-1)
+target_include_directories(kyty_shader_gds_exec_integration PRIVATE
+	"${CMAKE_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+add_test(NAME KytyShaderComputeIntegration.GdsExec
+	COMMAND $<TARGET_FILE:kyty_shader_gds_exec_integration>)
+set_tests_properties(KytyShaderComputeIntegration.GdsExec PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 90
+	SKIP_RETURN_CODE 77
+)
 target_link_libraries(kyty_shader_compute_integration PRIVATE core emulator vulkan-1)
 target_include_directories(kyty_shader_compute_integration PRIVATE
 	"${CMAKE_SOURCE_DIR}/include"
@@ -153,6 +209,23 @@ set_tests_properties(KytyShaderComputeIntegration.PairedWave64 PROPERTIES
 	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 90
 	SKIP_RETURN_CODE 77
+)
+
+# External operand endpoint for the integer instruction oracle (scripts/kyty_hardware_oracle.py).
+# Deliberately not a CTest case: it needs a Vulkan 1.4 device with paired-wave capability and
+# exits 77 when that is absent. Run it through the oracle CLI.
+add_executable(kyty_shader_arithmetic_oracle
+	src/shader_compute/ShaderArithmeticOracle.cpp
+	src/shader_compute/ShaderWaveProbeSource.cpp
+	src/shader_compute/VulkanComputeProbe.cpp
+	src/shader_compute/VulkanComputeProbeDevice.cpp
+	src/shader_compute/VulkanProgramBaseProbe.cpp
+	src/shader_compute/VulkanWaveProbe.cpp
+)
+target_link_libraries(kyty_shader_arithmetic_oracle PRIVATE core emulator vulkan-1)
+target_include_directories(kyty_shader_arithmetic_oracle PRIVATE
+	"${CMAKE_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/emulator/include"
 )
 
 add_executable(kyty_graphics_diagnostics_integration
@@ -267,6 +340,36 @@ add_test(
 set_tests_properties(KytyGraphicsDiagnosticsIntegration.HostNanRasterBaseline PROPERTIES
 	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 120
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.DualSourceBlendRaster
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --dual-source-blend-raster-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.DualSourceBlendRaster PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+	SKIP_RETURN_CODE 77
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.Uint16MrtWriteback
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --uint16-mrt-writeback-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.Uint16MrtWriteback PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+	SKIP_RETURN_CODE 77
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.ParameterExecWriteback
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --parameter-exec-writeback-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.ParameterExecWriteback PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+	SKIP_RETURN_CODE 77
 )
 
 add_executable(kyty_libc_wide_integration
@@ -748,7 +851,10 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_kernel_memory_integration
 	kyty_graphics_diagnostics_integration
 	kyty_shader_compute_integration
+	kyty_shader_gds_exec_integration
 	kyty_shader_wave64_integration
+	kyty_texture_one_dimensional_array_integration
+	kyty_gds_transfer_integration
 	kyty_libc_wide_integration
 	kyty_libc_time_integration
 	kyty_libc_locale_integration

@@ -950,7 +950,7 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 	{
 		// Guest snprintf: truncate into sn_s when sn_n is smaller than the
 		// full formatted result. Do not EXIT — real libc truncates and returns
-		// the would-be length (idx). Observed Astro after accessibility setup.
+		// the would-be length (idx). Observed after accessibility setup.
 		if (sn_s != nullptr && sn_n > 0)
 		{
 			const char*  src  = buffer.GetDataConst();

@@ -49,6 +49,8 @@ std::atomic<uint64_t> g_wait_reg_mem_producer_not_found {0};
 std::atomic<uint64_t> g_wait_reg_mem_suspended {0};
 std::atomic<uint64_t> g_wait_flip_done {0};
 std::atomic<uint64_t> g_wait_flip_done_ns {0};
+std::atomic<uint64_t> g_render_pass_begins {0};
+std::atomic<uint64_t> g_render_pass_continuations {0};
 std::atomic<uint64_t> g_wait_flip_done_max_ns {0};
 std::atomic<uint64_t> g_in_flight_current {0};
 std::atomic<uint64_t> g_in_flight_max {0};
@@ -291,6 +293,8 @@ struct PerformanceBaseline
 	uint64_t wait_reg_mem_suspended          = 0;
 	uint64_t wait_flip_done    = 0;
 	uint64_t wait_flip_done_ns = 0;
+	uint64_t render_pass_begins        = 0;
+	uint64_t render_pass_continuations = 0;
 };
 
 std::mutex          g_performance_mutex;
@@ -673,6 +677,8 @@ void DebugStatsInit()
 	g_wait_reg_mem_suspended.store(0, std::memory_order_relaxed);
 	g_wait_flip_done.store(0, std::memory_order_relaxed);
 	g_wait_flip_done_ns.store(0, std::memory_order_relaxed);
+	g_render_pass_begins.store(0, std::memory_order_relaxed);
+	g_render_pass_continuations.store(0, std::memory_order_relaxed);
 	g_wait_flip_done_max_ns.store(0, std::memory_order_relaxed);
 	g_in_flight_current.store(0, std::memory_order_relaxed);
 	g_in_flight_max.store(0, std::memory_order_relaxed);
@@ -906,6 +912,16 @@ void DebugStatsRecordFlip(double fps, double frame_time_ms)
 void DebugStatsRecordBufferFlush()
 {
 	g_buffer_flushes.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DebugStatsRecordRenderPassBegin()
+{
+	g_render_pass_begins.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DebugStatsRecordRenderPassContinuation()
+{
+	g_render_pass_continuations.fetch_add(1, std::memory_order_relaxed);
 }
 
 void DebugStatsRecordCommandBuffer()
@@ -1453,6 +1469,8 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	const uint64_t wait_reg_mem_suspended          = g_wait_reg_mem_suspended.load(std::memory_order_relaxed);
 	const uint64_t wait_flip_done    = g_wait_flip_done.load(std::memory_order_relaxed);
 	const uint64_t wait_flip_done_ns = g_wait_flip_done_ns.load(std::memory_order_relaxed);
+	const uint64_t render_pass_begins        = g_render_pass_begins.load(std::memory_order_relaxed);
+	const uint64_t render_pass_continuations = g_render_pass_continuations.load(std::memory_order_relaxed);
 
 	std::lock_guard<std::mutex> lock(g_performance_mutex);
 	if (g_performance_baseline.time_ms == 0)
@@ -1504,6 +1522,8 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	snapshot.wait_reg_mem_suspended = wait_reg_mem_suspended - g_performance_baseline.wait_reg_mem_suspended;
 	snapshot.wait_flip_done    = wait_flip_done - g_performance_baseline.wait_flip_done;
 	snapshot.wait_flip_done_ns = wait_flip_done_ns - g_performance_baseline.wait_flip_done_ns;
+	snapshot.render_pass_begins        = render_pass_begins - g_performance_baseline.render_pass_begins;
+	snapshot.render_pass_continuations = render_pass_continuations - g_performance_baseline.render_pass_continuations;
 	snapshot.wait_flip_done_max_ns =
 	    reset ? g_wait_flip_done_max_ns.exchange(0, std::memory_order_relaxed) : g_wait_flip_done_max_ns.load(std::memory_order_relaxed);
 	snapshot.in_flight_current = g_in_flight_current.load(std::memory_order_relaxed);
@@ -1735,7 +1755,9 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 		                          wait_reg_mem_producer_not_found,
 		                          wait_reg_mem_suspended,
 		                          wait_flip_done,
-		                          wait_flip_done_ns};
+		                          wait_flip_done_ns,
+		                          render_pass_begins,
+		                          render_pass_continuations};
 	}
 	return snapshot;
 }

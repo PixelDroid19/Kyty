@@ -124,6 +124,7 @@ def build_playable_environment(
         capture_directory=capture_directory,
         optional_values=(
             "KYTY_RENDER_RESOLUTION_MODE",
+            "KYTY_RENDER_RESOLUTION_SCOPE",
             "KYTY_RENDER_RESOLUTION_WIDTH",
             "KYTY_RENDER_RESOLUTION_HEIGHT",
             "KYTY_PRESENTATION_FILTER",

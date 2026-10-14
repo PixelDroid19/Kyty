@@ -173,6 +173,7 @@ KYTY_SYSV_ABI double c_floor(double x);
 KYTY_SYSV_ABI double c_round(double x);
 KYTY_SYSV_ABI double c_sqrt(double x);
 KYTY_SYSV_ABI double c_fabs(double x);
+KYTY_SYSV_ABI double c_hypot(double x, double y);
 KYTY_SYSV_ABI double c_modf(double x, double* ip);
 KYTY_SYSV_ABI double c_ldexp(double x, int e);
 KYTY_SYSV_ABI double c_frexp(double x, int* e);

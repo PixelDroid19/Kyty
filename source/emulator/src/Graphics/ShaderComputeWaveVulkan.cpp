@@ -175,11 +175,14 @@ ShaderSubgroupModuleCheck ShaderCheckSubgroupModule(const uint32_t* words, size_
 ShaderComputeWaveCapabilities ShaderComputeWaveVulkanBuildCapabilities(const ShaderComputeWaveVulkanState& state) noexcept
 {
 	ShaderComputeWaveCapabilities capabilities {};
-	const bool extension_v2_enabled = state.extension_advertised && state.extension_revision >= 2 && state.extension_enabled;
-	capabilities.size_control_enabled = extension_v2_enabled && state.size_control_feature_supported && state.size_control_feature_enabled;
+	// Size control is core since Vulkan 1.3; extension advertisement and revision
+	// are diagnostics only. Admission needs queried support, enabled features and
+	// a genuinely queried size range.
+	const bool range_valid = SubgroupSizeRangeValid(state);
+	capabilities.size_control_enabled = range_valid && state.size_control_feature_supported && state.size_control_feature_enabled;
 	capabilities.full_subgroups_enabled =
-	    extension_v2_enabled && state.full_subgroups_feature_supported && state.full_subgroups_feature_enabled;
-	capabilities.compute_required_size_supported = extension_v2_enabled && state.compute_required_size_supported;
+	    range_valid && state.full_subgroups_feature_supported && state.full_subgroups_feature_enabled;
+	capabilities.compute_required_size_supported = range_valid && state.compute_required_size_supported;
 	capabilities.compute_ballot_shuffle_supported = state.compute_ballot_shuffle_supported;
 	capabilities.min_subgroup_size = state.min_subgroup_size;
 	capabilities.max_subgroup_size = state.max_subgroup_size;
@@ -302,12 +305,70 @@ bool ShaderWave32FragmentNativeLaneExchangeSupported(uint32_t subgroup_stages, u
 bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	const ShaderComputeWaveLayout& layout, const ShaderComputeWaveCapabilities& capabilities,
 	VkPipelineShaderStageCreateInfo* stage,
-	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT* required) noexcept
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT* required, bool require_size, uint32_t spirv_version) noexcept
 {
-	if (stage == nullptr || required == nullptr || stage->stage != VK_SHADER_STAGE_COMPUTE_BIT ||
-	    layout.strategy != ShaderComputeWaveStrategy::Paired64On32 || layout.guest_wave_size != kGuestWaveSize ||
-	    layout.native_subgroup_size != kNativeSubgroupSize || layout.banks != 2 || layout.waves == 0 ||
-	    !capabilities.size_control_enabled || !capabilities.full_subgroups_enabled ||
+	if (stage == nullptr || required == nullptr || stage->stage != VK_SHADER_STAGE_COMPUTE_BIT)
+	{
+		return false;
+	}
+
+	if (layout.strategy == ShaderComputeWaveStrategy::Native)
+	{
+		if (layout.guest_wave_size != kNativeSubgroupSize ||
+		    (layout.native_subgroup_size != 0u && layout.native_subgroup_size != kNativeSubgroupSize) || layout.banks != 1u ||
+		    layout.waves != 0u || (spirv_version < 0x00010600u && !capabilities.full_subgroups_enabled) ||
+		    (require_size && (!capabilities.size_control_enabled || !capabilities.compute_required_size_supported ||
+		                     capabilities.min_subgroup_size > kNativeSubgroupSize ||
+		                     capabilities.max_subgroup_size < kNativeSubgroupSize)))
+		{
+			return false;
+		}
+
+		uint32_t physical_local[3] {};
+		uint64_t max_workgroup_invocations = 0u;
+		uint64_t shared_bytes = 0u;
+		if (!ShaderNativeWave32PhysicalLocal(layout.guest_local, physical_local) ||
+		    !MultiplyU64(kNativeSubgroupSize, capabilities.max_subgroups, &max_workgroup_invocations) ||
+		    !MultiplyU64(layout.lds_dwords, sizeof(uint32_t), &shared_bytes))
+		{
+			return false;
+		}
+		for (uint32_t axis = 0; axis < 3u; ++axis)
+		{
+			if (layout.physical_local[axis] != physical_local[axis] || physical_local[axis] > capabilities.max_local_size[axis])
+			{
+				return false;
+			}
+		}
+		const uint64_t local_invocations = physical_local[0];
+		if (local_invocations > capabilities.max_invocations || local_invocations > max_workgroup_invocations ||
+		    shared_bytes > capabilities.max_shared_bytes)
+		{
+			return false;
+		}
+
+		for (const auto* node = static_cast<const VkBaseInStructure*>(stage->pNext); node != nullptr; node = node->pNext)
+		{
+			if (node->sType == VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT) { return false; }
+		}
+		if (require_size)
+		{
+			required->sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT;
+			required->pNext = const_cast<void*>(stage->pNext);
+			required->requiredSubgroupSize = kNativeSubgroupSize;
+			stage->pNext = required;
+		}
+		// Full subgroups give every reconstructed guest index exactly one lane.
+		// They do not prescribe the host LocalInvocationId ordering.
+		stage->flags &= ~(VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT |
+		                  VK_PIPELINE_SHADER_STAGE_CREATE_ALLOW_VARYING_SUBGROUP_SIZE_BIT_EXT);
+		if (spirv_version < 0x00010600u) { stage->flags |= VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT; }
+		return true;
+	}
+
+	if (!require_size || layout.strategy != ShaderComputeWaveStrategy::Paired64On32 ||
+	    layout.guest_wave_size != kGuestWaveSize || layout.native_subgroup_size != kNativeSubgroupSize || layout.banks != 2 ||
+	    layout.waves == 0 || !capabilities.size_control_enabled || !capabilities.full_subgroups_enabled ||
 	    !capabilities.compute_required_size_supported || !capabilities.compute_ballot_shuffle_supported ||
 	    capabilities.min_subgroup_size > kNativeSubgroupSize || capabilities.max_subgroup_size < kNativeSubgroupSize)
 	{

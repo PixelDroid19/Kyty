@@ -1,5 +1,3 @@
-#include "PthreadInternal.h"
-
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
@@ -10,6 +8,8 @@
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Log.h"
 #include "Emulator/PresentationStats.h"
+
+#include "PthreadInternal.h"
 
 #include <atomic>
 #include <cinttypes>
@@ -124,13 +124,13 @@ struct SlotTraceBlockedWaiter
 	std::atomic<uint32_t> live {0};
 };
 
-static constexpr uint32_t         kSlotTraceWaiterSlots = 8;
-static SlotTraceBlockedWaiter     g_slot_trace_waiters[kSlotTraceWaiterSlots];
-static std::atomic<uint64_t>      g_slot_trace_tracked_cond {0};
-static std::atomic<uint32_t>      g_slot_trace_sig_for_tracked {0};
-static std::atomic<uint32_t>      g_slot_trace_wait_for_tracked {0};
-static std::atomic<uint32_t>      g_slot_trace_sig_after_stall {0};
-static std::atomic<uint64_t>      g_slot_trace_stall_present {0};
+static constexpr uint32_t     kSlotTraceWaiterSlots = 8;
+static SlotTraceBlockedWaiter g_slot_trace_waiters[kSlotTraceWaiterSlots];
+static std::atomic<uint64_t>  g_slot_trace_tracked_cond {0};
+static std::atomic<uint32_t>  g_slot_trace_sig_for_tracked {0};
+static std::atomic<uint32_t>  g_slot_trace_wait_for_tracked {0};
+static std::atomic<uint32_t>  g_slot_trace_sig_after_stall {0};
+static std::atomic<uint64_t>  g_slot_trace_stall_present {0};
 
 struct SlotTraceSigCount
 {
@@ -139,8 +139,8 @@ struct SlotTraceSigCount
 	std::atomic<uint32_t> count {0};
 	std::atomic<uint32_t> after_stall {0};
 };
-static constexpr uint32_t    kSlotTraceSigSlots = 16;
-static SlotTraceSigCount     g_slot_trace_sigs[kSlotTraceSigSlots];
+static constexpr uint32_t kSlotTraceSigSlots = 16;
+static SlotTraceSigCount  g_slot_trace_sigs[kSlotTraceSigSlots];
 
 static bool slot_trace_env()
 {
@@ -316,13 +316,13 @@ bool PthreadGetCondWaitDiagnostics(PthreadCondWaitDiagnostics* out)
 		{
 			break;
 		}
-		auto& waiter         = out->blocked[out->blocked_count++];
-		waiter.cond          = g_slot_trace_waiters[i].cond.load();
-		waiter.mutex         = g_slot_trace_waiters[i].mutex.load();
-		waiter.return_addr   = g_slot_trace_waiters[i].ret.load();
-		waiter.cond_handle   = g_slot_trace_waiters[i].cond_h.load();
-		waiter.mutex_handle  = g_slot_trace_waiters[i].mutex_h.load();
-		waiter.signal_count  = slot_trace_signal_count(waiter.cond);
+		auto& waiter                   = out->blocked[out->blocked_count++];
+		waiter.cond                    = g_slot_trace_waiters[i].cond.load();
+		waiter.mutex                   = g_slot_trace_waiters[i].mutex.load();
+		waiter.return_addr             = g_slot_trace_waiters[i].ret.load();
+		waiter.cond_handle             = g_slot_trace_waiters[i].cond_h.load();
+		waiter.mutex_handle            = g_slot_trace_waiters[i].mutex_h.load();
+		waiter.signal_count            = slot_trace_signal_count(waiter.cond);
 		waiter.last_signal_return_addr = slot_trace_last_signal_return_addr(waiter.cond);
 	}
 	return true;
@@ -363,21 +363,19 @@ void SlotTraceDumpBlockedCondWaiters()
 	{
 		return;
 	}
-	KYTY_LOG_DEBUG( "COND_BLOCKED tracked=0x%016" PRIx64 " wait_reg=%u sig_total_trk=%u sig_after_stall=%u\n",
-	             g_slot_trace_tracked_cond.load(), g_slot_trace_wait_for_tracked.load(), g_slot_trace_sig_for_tracked.load(),
-	             g_slot_trace_sig_after_stall.load());
+	KYTY_LOG_DEBUG("COND_BLOCKED tracked=0x%016" PRIx64 " wait_reg=%u sig_total_trk=%u sig_after_stall=%u\n",
+	               g_slot_trace_tracked_cond.load(), g_slot_trace_wait_for_tracked.load(), g_slot_trace_sig_for_tracked.load(),
+	               g_slot_trace_sig_after_stall.load());
 	for (uint32_t i = 0; i < kSlotTraceWaiterSlots; i++)
 	{
 		if (g_slot_trace_waiters[i].live.load() == 0)
 		{
 			continue;
 		}
-		KYTY_LOG_DEBUG(
-		             "COND_BLOCKED[%u] cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64 " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64
-		             " ret=0x%016" PRIx64 "\n",
-		             i, g_slot_trace_waiters[i].cond.load(), g_slot_trace_waiters[i].cond_h.load(),
-		             g_slot_trace_waiters[i].mutex.load(), g_slot_trace_waiters[i].mutex_h.load(),
-		             g_slot_trace_waiters[i].ret.load());
+		KYTY_LOG_DEBUG("COND_BLOCKED[%u] cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64 " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64
+		               " ret=0x%016" PRIx64 "\n",
+		               i, g_slot_trace_waiters[i].cond.load(), g_slot_trace_waiters[i].cond_h.load(), g_slot_trace_waiters[i].mutex.load(),
+		               g_slot_trace_waiters[i].mutex_h.load(), g_slot_trace_waiters[i].ret.load());
 	}
 	for (uint32_t i = 0; i < kSlotTraceSigSlots; i++)
 	{
@@ -386,9 +384,9 @@ void SlotTraceDumpBlockedCondWaiters()
 		{
 			continue;
 		}
-		KYTY_LOG_DEBUG( "COND_SIGCNT cond=0x%016" PRIx64 " total=%u after_stall=%u last_ret=0x%016" PRIx64 "\n", c,
-		             g_slot_trace_sigs[i].count.load(), g_slot_trace_sigs[i].after_stall.load(),
-		             g_slot_trace_sigs[i].last_return_addr.load(std::memory_order_relaxed));
+		KYTY_LOG_DEBUG("COND_SIGCNT cond=0x%016" PRIx64 " total=%u after_stall=%u last_ret=0x%016" PRIx64 "\n", c,
+		               g_slot_trace_sigs[i].count.load(), g_slot_trace_sigs[i].after_stall.load(),
+		               g_slot_trace_sigs[i].last_return_addr.load(std::memory_order_relaxed));
 	}
 }
 
@@ -446,12 +444,11 @@ static void slot_trace_cond_event(const char* kind, PthreadCond* guest_cond, Pth
 		}
 	}
 
-	KYTY_LOG_DEBUG(
-	             "COND_TRACE %s n=%u present=%llu ms_p=%llu ret=0x%016" PRIx64 " cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64
-	             " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64 " tracked=0x%016" PRIx64 " sig_trk=%u sig_stall=%u\n",
-	             kind, seq, static_cast<unsigned long long>(stats.present), static_cast<unsigned long long>(stats.ms_since_present), ret,
-	             cond_addr, cond_h, mutex_addr, mutex_h, g_slot_trace_tracked_cond.load(), g_slot_trace_sig_for_tracked.load(),
-	             g_slot_trace_sig_after_stall.load());
+	KYTY_LOG_DEBUG("COND_TRACE %s n=%u present=%llu ms_p=%llu ret=0x%016" PRIx64 " cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64
+	               " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64 " tracked=0x%016" PRIx64 " sig_trk=%u sig_stall=%u\n",
+	               kind, seq, static_cast<unsigned long long>(stats.present), static_cast<unsigned long long>(stats.ms_since_present), ret,
+	               cond_addr, cond_h, mutex_addr, mutex_h, g_slot_trace_tracked_cond.load(), g_slot_trace_sig_for_tracked.load(),
+	               g_slot_trace_sig_after_stall.load());
 }
 
 int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
@@ -475,7 +472,10 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (*cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (*cond == nullptr)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+	}
 
 	int result = pthread_cond_broadcast(&(*cond)->p);
 
@@ -497,18 +497,21 @@ int KYTY_SYSV_ABI PthreadCondDestroy(PthreadCond* cond)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (*cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (*cond == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	int result = pthread_cond_destroy(&(*cond)->p);
 
 	KYTY_LOG_DEBUG("\tcond destroy: %s, %d\n", (*cond)->name.C_Str(), result);
 
-	delete *cond;
-	*cond = nullptr;
-
 	switch (result)
 	{
-		case 0: return OK;
+		case 0:
+			delete *cond;
+			*cond = nullptr;
+			return OK;
 		case EINVAL: return KERNEL_ERROR_EINVAL;
 		case EBUSY: return KERNEL_ERROR_EBUSY;
 		default: return KERNEL_ERROR_EINVAL;
@@ -555,7 +558,10 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 {
 	PRINT_NAME();
 
-	if (cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (cond == nullptr)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+	}
 
 	if (cond == nullptr)
 	{
@@ -571,7 +577,10 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 	EXIT_IF(pthread_static_objects == nullptr);
 	cond = static_cast<PthreadCond*>(pthread_static_objects->CreateObject(cond, PthreadStaticObject::Type::Cond));
 
-	if (*cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (*cond == nullptr)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+	}
 
 	int result = pthread_cond_signal(&(*cond)->p);
 
@@ -593,7 +602,10 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (*cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (*cond == nullptr)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+	}
 
 	int result = 0;
 
@@ -723,8 +735,8 @@ int KYTY_SYSV_ABI PthreadCondTimedwaitAbsolute(PthreadCond* cond, PthreadMutex* 
 namespace {
 
 constexpr int kPthreadOnceUninitialized = 0;
-constexpr int kPthreadOnceInProgress      = 1;
-constexpr int kPthreadOnceDone            = 2;
+constexpr int kPthreadOnceInProgress    = 1;
+constexpr int kPthreadOnceDone          = 2;
 
 Core::Mutex g_pthread_once_mutex;
 
@@ -786,7 +798,7 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 
 	EXIT_IF(pthread_static_objects == nullptr);
 
-	const auto   ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
+	const auto     ret_addr   = reinterpret_cast<uint64_t>(__builtin_return_address(0));
 	const uint64_t cond_addr  = reinterpret_cast<uint64_t>(cond);
 	const uint64_t mutex_addr = reinterpret_cast<uint64_t>(mutex);
 
@@ -798,13 +810,19 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (*cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (*mutex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (*cond == nullptr)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+	}
+	if (*mutex == nullptr)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+	}
 
 	// Peek handles only after CreateObject resolved static sentinels, and only
 	// under KYTY_SLOT_TRACE — early guest BSS reads crashed boot diagnostics.
-	uint64_t cond_h  = 0;
-	uint64_t mutex_h = 0;
+	uint64_t cond_h      = 0;
+	uint64_t mutex_h     = 0;
 	int      waiter_slot = -1;
 	if (slot_trace_env())
 	{

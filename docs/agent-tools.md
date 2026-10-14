@@ -215,7 +215,9 @@ Controller automation is explicitly diagnostic input:
 
 ```text
 kyty_agent pad tap cross
+kyty_agent pad tap cross --press-samples 1
 kyty_agent pad tap cross --at-present 8000 --repeat 2 --present-delta 40
+kyty_agent pad tap cross --at-present 8000 --press-samples 1
 kyty_agent pad hold right --delta 120 --timeout-ms 10000
 kyty_agent pad axis left_x 255
 kyty_agent pad clear
@@ -225,10 +227,15 @@ kyty_agent pad clear
 targets) before its response is returned; closing or losing that request socket
 does not cancel it. `at-present` is an absolute future presentation count,
 `repeat` defaults to one, and a repeated tap requires a positive
-`--present-delta`. The presentation path starts the existing
-release → press → release FSM immediately after it records the exact target
-present. The press is held for two advancing guest samples, while
-`delivered_taps` advances on the first sampled press.
+`--present-delta`. Both immediate and scheduled taps accept one or two press
+samples through the CLI `--press-samples` flag or the agent `press_samples`
+argument. The default remains two advancing guest press samples; requesting one
+narrowly reduces only that press phase. The presentation path starts the
+existing release → press → release FSM immediately after it records the exact
+target present. Only advancing guest samples consume the requested press count,
+and `delivered_taps` advances on the first sampled press. The `help` response
+advertises this option through
+`capabilities.configurable_tap_press_samples`.
 If a target is missed, its button is held, or the prior FSM is still pending,
 that target is cancelled rather than delayed; `status.pad` exposes
 `scheduled_taps`, `next_target_present`, and `cancelled_scheduled_taps`.

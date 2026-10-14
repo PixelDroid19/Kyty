@@ -528,7 +528,7 @@ int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResul
 }
 
 // sceSaveDataTransferringMount — NID WAzWTZm1H+I / RjMlsR8EXrw (SaveData_native).
-// Observed Astro after PlayGo on thread 10: (mount*, result*). Creates host dir
+// Observed after PlayGo: (mount*, result*). Creates host dir
 // and mounts at /savedata0 when missing so first-boot transfer continues.
 struct SaveDataTransferringMountParam
 {

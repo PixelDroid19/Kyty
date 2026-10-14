@@ -1028,7 +1028,8 @@ void graphics_init_jmp_tables()
 	}
 	g_hw_sh_func[Pm4::SPI_SHADER_PGM_RSRC4_PS] = [](KYTY_HW_SH_PARSER_ARGS)
 	{
-		if (!Config::IsNextGen() || ((cmd_id >> 16u) & 0x3fffu) != 1u || dw < 2u) { return 0u; }
+		const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
+		if (!Config::IsNextGen() || count != 1u || count > dw) { return 0u; }
 		cp->GetShCtx()->SetPsRsrc4(buffer[0]);
 		return 1u;
 	};
@@ -1047,7 +1048,7 @@ void graphics_init_jmp_tables()
 		g_hw_sh_func[reg] = [](KYTY_HW_SH_PARSER_ARGS)
 		{
 			const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
-			EXIT_IF(count + 1u > dw);
+			EXIT_IF(count == 0u || count > dw);
 			const bool decoded = GraphicsDecodeGeShaderRegisters(cp->GetShCtx(), cmd_offset, buffer, count);
 			EXIT_IF(!decoded);
 			return count;
@@ -1082,7 +1083,7 @@ void graphics_init_jmp_tables()
 		g_hw_uc_func[reg] = [](KYTY_HW_UC_PARSER_ARGS)
 		{
 			const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
-			EXIT_IF(count + 1u > dw);
+			EXIT_IF(count == 0u || count > dw);
 			const bool decoded = GraphicsDecodeGeUserConfigRegisters(cp->GetUcfg(), cmd_offset, buffer, count);
 			EXIT_IF(!decoded);
 			return count;

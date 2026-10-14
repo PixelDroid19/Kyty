@@ -169,6 +169,48 @@ Words VInterpP1(uint32_t destination, uint32_t source, uint32_t attribute, uint3
 	return {0xc8000000u | (destination << 18u) | (attribute << 10u) | (channel << 8u) | source};
 }
 
+Words UniformVccLowCompare()
+{
+	// SDWA VOPC compares two scalar operands and writes the architectural VCC pair.
+	// Both source selectors are SGPRs; the default DWORD selects preserve the inputs.
+	return {0x7c000000u | (0xc5u << 17u) | (1u << 9u) | 249u,
+	        20u | (6u << 16u) | (1u << 23u) | (6u << 24u) | (1u << 31u)};
+}
+
+std::vector<Words> VccBranchWithOneVaryingWord(bool varying_high_word)
+{
+	std::vector<Words> slots;
+	slots.push_back(UniformVccLowCompare());
+	Words save_low;
+	Sop1(save_low, 3, 30, kVccLo); // preserve the low comparison mask in s30
+	slots.push_back(save_low);
+	if (varying_high_word)
+	{
+		// gfx1030 VOPC SDWA: v_cmp_ne_u32 vcc_hi, 0, v0.
+		slots.push_back({0x7d8a00f9u, 0x0686eb80u});
+	}
+	Words restore_low;
+	Sop1(restore_low, 3, kVccLo, 30); // only VCC_LO is copied from a uniform mask
+	slots.push_back(restore_low);
+	Words branch;
+	Sopp(branch, 7, 1); // skip the scalar write when the VCC branch is taken
+	slots.push_back(branch);
+	Words scalar_write;
+	Sop1(scalar_write, 3, 20, Inline(1));
+	slots.push_back(scalar_write);
+	Words scalar_read;
+	Vop1(scalar_read, 1, 3, 20); // read after the join is safe only if the full VCC branch is uniform
+	slots.push_back(scalar_read);
+	Words zero;
+	Vop1(zero, 1, 2, Inline(0));
+	slots.push_back(zero);
+	slots.push_back(Mrt0Export(2, 2, 2, 2));
+	Words end;
+	Sopp(end, 1);
+	slots.push_back(end);
+	return slots;
+}
+
 struct AddtidOp
 {
 	Words words;
@@ -447,7 +489,7 @@ TEST(EmulatorFragmentMaskFlow, ProvesStableWqmAddtidPlanesForBothNativeWaveSizes
 		Check(export_inst.src_num == 4 && export_inst.src[0].register_id == 20 && export_inst.src[1].register_id == 21 &&
 		          export_inst.src[2].register_id == 22 && export_inst.src[3].register_id == 22,
 		      "the ADD_TID reloads feed the exported MRT0 components");
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(flow.lane_local && flow.reason == nullptr, "paired private slots preserve lane-local masks");
 		for (uint32_t width: {32u, 64u})
 		{
@@ -474,7 +516,7 @@ TEST(EmulatorFragmentMaskFlow, RequiresEnoughDeclaredPixelLdsForTheAddtidSpan)
 			const auto code = ParseAddtidPixel(AddtidMutation::None, test.extra_dwords);
 			Check(code.GetPixelExtraLdsDwords() == test.extra_dwords && code.GetPixelParameterSgpr() == 30,
 			      "the fixture carries the declared PS LDS metadata");
-			const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+			const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 			Check(flow.lane_local == test.admitted, "the full three-plane span must fit its declared allocation");
 			for (uint32_t width: {32u, 64u})
 			{
@@ -498,7 +540,7 @@ TEST(EmulatorFragmentMaskFlow, AcceptsAlignedM0OffsetInsideTheDeclaredPixelLds)
 	ASSERT_EXIT(([] {
 		Initialize();
 		const auto code = ParseAddtidPixel(AddtidMutation::AlignedM0Offset);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(flow.lane_local && flow.reason == nullptr,
 		      "aligned nonzero M0 keeps all three wave64 spill planes inside the declared allocation");
 		for (uint32_t width: {32u, 64u})
@@ -519,12 +561,12 @@ TEST(EmulatorFragmentMaskFlow, RestoresThePixelParameterM0BeforeInterpolation)
 		Check(restored.GetPixelParameterSgpr() == 30, "the fixture identifies the implicit pixel LDS parameter");
 		Check(Find(restored, ShaderInstructionType::VInterpP1F32) < Find(restored, ShaderInstructionType::Exp),
 		      "the interpolation follows the ADD_TID spill and restore");
-		const auto accepted = ShaderAnalyzeFragmentMaskFlow(restored);
+		const auto accepted = ShaderAnalyzeFragmentMaskFlow(restored, 64u);
 		Check(accepted.lane_local && accepted.reason == nullptr,
 		      "VInterp observes the restored parameter M0 after the private spill");
 
 		const auto clobbered = ParseAddtidPixel(AddtidVinterpProgram(false));
-		const auto rejected = ShaderAnalyzeFragmentMaskFlow(clobbered);
+		const auto rejected = ShaderAnalyzeFragmentMaskFlow(clobbered, 64u);
 		Check(!rejected.lane_local, "numeric M0 overlapping the private spill is refused before VInterp");
 		ExpectNativeRefusal(clobbered, "VInterp with scratch M0 has an explicit native-wave refusal");
 		std::_Exit(0);
@@ -538,7 +580,7 @@ TEST(EmulatorFragmentMaskFlow, EmitsAndValidatesADeclaredPixelAddtidSpill)
 		ScopedShaderValidation validation;
 		Check(Config::ShaderValidationEnabled(), "SPIR-V validation is explicitly enabled at the toolchain boundary");
 		const auto code = ParseAddtidPixel(AddtidEmitterProgram());
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(flow.lane_local && flow.reason == nullptr, "the emitter fixture proves stable private spill slots");
 		ShaderPixelInputInfo input {};
 		input.native_wave = ShaderAnalyzeNativeWave(code, 64u);
@@ -579,7 +621,7 @@ TEST(EmulatorFragmentMaskFlow, RejectsAddtidPatternsWithoutAnExactPrivateSlotPro
 		for (const auto& test: cases)
 		{
 			const auto code = ParseAddtidPixel(test.mutation);
-			const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+			const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 			Check(!flow.lane_local, test.reason);
 			ExpectNativeRefusal(code, test.reason);
 		}
@@ -592,7 +634,7 @@ TEST(EmulatorFragmentMaskFlow, RefusesNumericMaskBeforeTheValueCanBeSpilledThrou
 	ASSERT_EXIT(([] {
 		Initialize();
 		const auto code = ParseAddtidPixel(AddtidMutation::ScalarMaskAsNumber);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(!flow.lane_local && Contains(flow.reason, "mask observed as a number"),
 		      "a mask cannot become a numeric VGPR value before the LDS spill");
 		ExpectNativeRefusal(code, "a numeric mask value is never native-wave lane local");
@@ -605,7 +647,7 @@ TEST(EmulatorFragmentMaskFlow, AdmitsTheWqmBracketedUniformSelectAsLaneLocal)
 	ASSERT_EXIT(([] {
 		Initialize();
 		const auto code = ParsePixel(Baseline());
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(flow.lane_local && flow.reason == nullptr, "every mask observation is a lane bit or mask algebra");
 		const auto wqm     = Find(code, ShaderInstructionType::SWqmB64);
 		uint32_t closed = 0;
@@ -627,7 +669,7 @@ TEST(EmulatorFragmentMaskFlow, ANumericObservationOfTheMaskIsRefused)
 		auto slots = Baseline();
 		Sop2(slots[kWait], 0, 0, kExecLo, Inline(1)); // s_add_u32 s0, exec_lo, 1: the lane set as a number
 		const auto code = ParsePixel(slots);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(!flow.lane_local && Contains(flow.reason, "mask observed as a number"), "refused as a numeric use");
 		ExpectNotLaneLocal(code, "a numeric mask observation is never lane local");
 		std::_Exit(0);
@@ -663,11 +705,11 @@ TEST(EmulatorFragmentMaskFlow, AMaskSpilledThroughAVgprLaneStaysAMask)
 {
 	ASSERT_EXIT(([] {
 		Initialize();
-		const auto spilled = ShaderAnalyzeFragmentMaskFlow(ParsePixel(SpilledSaveSlots(false)));
+		const auto spilled = ShaderAnalyzeFragmentMaskFlow(ParsePixel(SpilledSaveSlots(false)), 64u);
 		if (!spilled.lane_local) { std::fprintf(stderr, "refused: %s\n", spilled.reason); }
 		Check(spilled.lane_local && spilled.reason == nullptr, "a static spill moves the saved EXEC like a scalar copy");
 
-		const auto observed = ShaderAnalyzeFragmentMaskFlow(ParsePixel(SpilledSaveSlots(true)));
+		const auto observed = ShaderAnalyzeFragmentMaskFlow(ParsePixel(SpilledSaveSlots(true)), 64u);
 		Check(!observed.lane_local && Contains(observed.reason, "mask observed as a number"),
 		      "the read-back word is still a mask");
 		std::_Exit(0);
@@ -681,7 +723,7 @@ TEST(EmulatorFragmentMaskFlow, ASelectUnderAMaskDerivedSccIsRefused)
 		auto slots = Baseline();
 		slots[kCompare].clear(); // SCC still holds the S_WQM_B64 result: exec != 0
 		const auto code = ParsePixel(slots);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(!flow.lane_local && Contains(flow.reason, "SCC derived from a mask"), "refused as a lane-dependent choice");
 		ExpectNotLaneLocal(code, "a select under a mask-derived SCC is never lane local");
 		std::_Exit(0);
@@ -696,7 +738,7 @@ TEST(EmulatorFragmentMaskFlow, ANumericValueCannotBecomeTheExecutionMask)
 		slots[kRestore].clear();
 		Sop1(slots[kRestore], 3, kExecLo, 20); // s_mov_b32 exec_lo, s20
 		const auto code = ParsePixel(slots);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(!flow.lane_local && Contains(flow.reason, "EXEC assigned a numeric value"), "refused as a numeric EXEC");
 		ExpectNotLaneLocal(code, "a numeric EXEC is never lane local");
 		std::_Exit(0);
@@ -720,7 +762,7 @@ TEST(EmulatorFragmentMaskFlow, AdmitsAHalfMaskPairThatScalarAluCarriesButNothing
 		auto slots = MixedPairCarried();
 		slots[kBlend].clear();
 		const auto code = ParsePixel(slots);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(flow.lane_local && flow.reason == nullptr, "an unobserved half-mask pair is not a mask observation");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
@@ -731,20 +773,20 @@ TEST(EmulatorFragmentMaskFlow, AHalfMaskPairCarriedByScalarAluIsStillRefusedWher
 	ASSERT_EXIT(([] {
 		Initialize();
 		const auto lane_bit = ParsePixel(MixedPairCarried()); // v_cndmask reads the carried pair as lane bits
-		const auto by_lane  = ShaderAnalyzeFragmentMaskFlow(lane_bit);
+		const auto by_lane  = ShaderAnalyzeFragmentMaskFlow(lane_bit, 64u);
 		Check(!by_lane.lane_local && Contains(by_lane.reason, "mask pair partly overwritten by a number"), "a vector read refuses");
 		ExpectNotLaneLocal(lane_bit, "a lane read of a half-mask pair is never lane local");
 		auto slots = MixedPairCarried();
 		slots[kBlend].clear();
 		Sop1(slots[kBlend], 4, kExecLo, kVccLo); // s_mov_b64 exec, vcc
 		const auto exec    = ParsePixel(slots);
-		const auto by_exec = ShaderAnalyzeFragmentMaskFlow(exec);
+		const auto by_exec = ShaderAnalyzeFragmentMaskFlow(exec, 64u);
 		Check(!by_exec.lane_local && Contains(by_exec.reason, "partly overwritten by a number"), "EXEC from it refuses");
 		slots = MixedPairCarried();
 		slots[kBlend].clear();
 		Sop2(slots[kBlend], 11, 20, Inline(1), Inline(0)); // s_cselect_b64 s[20:21], 1, 0: SCC came from the pair
 		const auto select    = ParsePixel(slots);
-		const auto by_select = ShaderAnalyzeFragmentMaskFlow(select);
+		const auto by_select = ShaderAnalyzeFragmentMaskFlow(select, 64u);
 		Check(!by_select.lane_local && Contains(by_select.reason, "SCC derived from a mask"), "its SCC selects nothing");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
@@ -758,7 +800,7 @@ TEST(EmulatorFragmentMaskFlow, ADescriptorReusedAsTheSaveAreaIsAMaskOnlyAfterThe
 		auto slots = Baseline();
 		std::swap(slots[kLoad], slots[kSave]);
 		const auto code = ParsePixel(slots);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(!flow.lane_local && Contains(flow.reason, "mask"), "a mask used as a descriptor is refused");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
@@ -771,7 +813,7 @@ TEST(EmulatorFragmentMaskFlow, AWrapperWithoutItsRestoreStaysOutsideAnyClosedReg
 		auto slots = Baseline();
 		slots[kRestore].clear();
 		const auto code = ParsePixel(slots);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(!flow.lane_local && Contains(flow.reason, "helper lanes"), "exporting while still widened is refused");
 		ExpectNotLaneLocal(code, "an unrestored EXEC widening is never lane local");
 		std::_Exit(0);
@@ -785,7 +827,7 @@ TEST(EmulatorFragmentMaskFlow, AClobberedSaveAreaOrAnExportInsideBreaksTheWrappe
 		auto clobbered = Baseline();
 		Sop1(clobbered[kWait], 3, 12, 20); // s_mov_b32 s12, s20 after the widening
 		const auto clobbered_code = ParsePixel(clobbered);
-		const auto clobbered_flow = ShaderAnalyzeFragmentMaskFlow(clobbered_code);
+		const auto clobbered_flow = ShaderAnalyzeFragmentMaskFlow(clobbered_code, 64u);
 		Check(!clobbered_flow.lane_local && Contains(clobbered_flow.reason, "partly overwritten"),
 		      "a save area half replaced by a number is not a mask");
 		ExpectNotLaneLocal(clobbered_code, "an unverified restore is never lane local");
@@ -793,7 +835,7 @@ TEST(EmulatorFragmentMaskFlow, AClobberedSaveAreaOrAnExportInsideBreaksTheWrappe
 		auto exported = Baseline();
 		std::swap(exported[kExport], exported[kRestore]); // export while helper lanes are still active
 		const auto exported_code = ParsePixel(exported);
-		const auto exported_flow = ShaderAnalyzeFragmentMaskFlow(exported_code);
+		const auto exported_flow = ShaderAnalyzeFragmentMaskFlow(exported_code, 64u);
 		Check(!exported_flow.lane_local && Contains(exported_flow.reason, "helper lanes"),
 		      "an export while EXEC includes helper lanes is refused");
 		std::_Exit(0);
@@ -810,7 +852,7 @@ TEST(EmulatorFragmentMaskFlow, AMemoryWriteMakesHelperLanesObservable)
 		store.type = ShaderInstructionType::BufferStoreDword;
 		store.pc   = code.GetInstructions().At(Find(code, ShaderInstructionType::Exp)).pc;
 		code.GetInstructions().InsertAt(Find(code, ShaderInstructionType::Exp), store);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(!flow.lane_local && Contains(flow.reason, "memory write"), "a memory write is refused");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
@@ -843,7 +885,7 @@ TEST(EmulatorFragmentMaskFlow, AdmitsDivergentBlocksWhoseScalarsAreNotReadAfterT
 	ASSERT_EXIT(([] {
 		Initialize();
 		const auto program = ParsePixel(DivergentProgram({}));
-		const auto flow    = ShaderAnalyzeFragmentMaskFlow(program);
+		const auto flow    = ShaderAnalyzeFragmentMaskFlow(program, 64u);
 		Check(flow.lane_local, "a scalar used only inside its divergent block is lane local");
 		Check(flow.closed_exec_write[Find(program, ShaderInstructionType::SAndSaveexecB64)], "narrowing by a lane bit is accounted for");
 		for (uint32_t width: {32u, 64u})
@@ -862,7 +904,7 @@ TEST(EmulatorFragmentMaskFlow, AdmitsDivergentBlocksWhoseScalarsAreNotReadAfterT
 		reload.insert(reload.end(), {0xf4200508u, 0xfa000004u});
 		Sopp(reload, 12, 0xc07f);
 		Vop1(reload, 1, 3, 20);
-		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(DivergentProgram(reload))).lane_local, "a redefined scalar is clean again");
+		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(DivergentProgram(reload)), 64u).lane_local, "a redefined scalar is clean again");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -873,14 +915,14 @@ TEST(EmulatorFragmentMaskFlow, ADivergentBlocksScalarCannotBeReadByAVectorAfterT
 		Initialize();
 		Words leak;
 		Vop1(leak, 1, 3, 20); // v_mov_b32 v3, s20: skipped lanes still hold the old s20 on the host
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(ParsePixel(DivergentProgram(leak)));
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(ParsePixel(DivergentProgram(leak)), 64u);
 		Check(!flow.lane_local && Contains(flow.reason, "divergent control flow"), "the divergent scalar is refused");
 		ExpectNotLaneLocal(ParsePixel(DivergentProgram(leak)), "a divergent scalar read after the join is never lane local");
 		// Carried through scalar ALU it is still divergent, and a scalar load address is a sink too.
 		Words carried;
 		Sop2(carried, 0, 21, 20, Inline(1));                         // s_add_u32 s21, s20, 1
 		carried.insert(carried.end(), {0xf4200508u | (22u << 6u), 21u << 25u});       // s_buffer_load_dword s22, s[16:19], s21
-		const auto by_address = ShaderAnalyzeFragmentMaskFlow(ParsePixel(DivergentProgram(carried)));
+		const auto by_address = ShaderAnalyzeFragmentMaskFlow(ParsePixel(DivergentProgram(carried)), 64u);
 		Check(!by_address.lane_local && Contains(by_address.reason, "divergent control flow"), "divergence survives scalar ALU");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
@@ -902,7 +944,7 @@ TEST(EmulatorFragmentMaskFlow, UniformBranchesNeedNoDivergenceRuleAndMaskedSccIs
 		Vop1(uniform[0], 1, 2, Inline(0));
 		uniform[0].insert(uniform[0].end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
 		Sopp(uniform[0], 1);
-		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(uniform)).lane_local, "a uniform branch needs no divergence rule");
+		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(uniform), 64u).lane_local, "a uniform branch needs no divergence rule");
 
 		// The same branch on the SCC an S_WQM_B64 left behind depends on the lane set.
 		std::vector<Words> masked(1);
@@ -914,9 +956,125 @@ TEST(EmulatorFragmentMaskFlow, UniformBranchesNeedNoDivergenceRuleAndMaskedSccIs
 		Vop1(masked[0], 1, 2, Inline(0));
 		masked[0].insert(masked[0].end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
 		Sopp(masked[0], 1);
-		const auto by_scc = ShaderAnalyzeFragmentMaskFlow(ParsePixel(masked));
+		const auto by_scc = ShaderAnalyzeFragmentMaskFlow(ParsePixel(masked), 64u);
 		Check(!by_scc.lane_local && Contains(by_scc.reason, "SCC branch"), "a branch on a mask-derived SCC is refused");
 
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentMaskFlow, VccBranchRequiresUniformityOfTheWholePair)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto full_pair = ParsePixel(VccBranchWithOneVaryingWord(false));
+		const auto uniform = ShaderAnalyzeFragmentMaskFlow(full_pair, 64u);
+		Check(uniform.lane_local, "a full-pair uniform compare still supports a uniform VCC branch");
+
+		const auto low_only = ParsePixel(VccBranchWithOneVaryingWord(true));
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(low_only, 64u);
+		Check(!flow.lane_local && Contains(flow.reason, "divergent control flow"),
+		      "a uniform VCC_LO copy cannot promote a varying VCC_HI word at the join");
+		Check(ShaderAnalyzeNativeWave(low_only, 64u).proof != ShaderNativeWaveProof::LaneLocal,
+		      "wave64 admission sees the varying word in the VCC branch pair");
+		// A wave32 VCCZ reflects VCC_LO only, so the varying VCC_HI is an ordinary SGPR there.
+		Check(ShaderAnalyzeFragmentMaskFlow(low_only, 32u).lane_local, "wave32 branches on the uniform VCC_LO");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+// A wave32 ignores the upper half of VCC (RDNA2 ISA 2.1, 3.x): a compare into VCC leaves VCC_HI, which the
+// program uses as an ordinary SGPR across it. A wave64 compare overwrites VCC_HI with lane bits.
+std::vector<Words> NumberInVccHiAcrossCompare()
+{
+	std::vector<Words> slots;
+	Words number;
+	Sop1(number, 3, kVccLo + 1u, 20); // s_mov_b32 vcc_hi, s20
+	slots.push_back(number);
+	slots.push_back({0x7c000000u | (194u << 17u) | Inline(3)}); // v_cmp_eq_u32 vcc, 3, v0
+	Words read;
+	Vop1(read, 1, 3, kVccLo + 1u); // v_mov_b32 v3, vcc_hi
+	slots.push_back(read);
+	Words blend;
+	Vop2(blend, 1, 0, kVgpr + 0, 1); // v_cndmask_b32 v0, v0, v1, vcc
+	slots.push_back(blend);
+	slots.push_back(Mrt0Export(0, 3, 0, 3));
+	Words end;
+	Sopp(end, 1);
+	slots.push_back(end);
+	return slots;
+}
+
+TEST(EmulatorFragmentMaskFlow, Wave32CompareKeepsTheNumberInVccHi)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto code   = ParsePixel(NumberInVccHiAcrossCompare());
+		const auto wave32 = ShaderAnalyzeFragmentMaskFlow(code, 32u);
+		Check(wave32.lane_local && wave32.reason == nullptr, "wave32: VCC_HI is still the number after the compare");
+		const auto wave64 = ShaderAnalyzeFragmentMaskFlow(code, 64u);
+		Check(!wave64.lane_local && Contains(wave64.reason, "mask observed as a number"), "wave64: the compare wrote VCC_HI");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+// "Does any lane hold the condition": a per-lane compare into VCC, S_CMP_LG_U64 VCC, 0 and an SCC branch
+// over a block that every lane of the wave runs when one does. `consumer` follows the compare; `wqm` runs the
+// compare with the helper lanes of each quad enabled and restores EXEC before the export.
+std::vector<Words> AnyLaneProgram(const Words& consumer, bool wqm = false)
+{
+	std::vector<Words> slots(1);
+	auto& words = slots[0];
+	if (wqm)
+	{
+		Sop1(words, 4, 6, kExecLo);                              // s_mov_b64 s[6:7], exec
+		Sop1(words, 10, kExecLo, kExecLo);                       // s_wqm_b64 exec, exec
+	}
+	Append(words, Vopc(0xc5, Inline(0), 0u));                    // v_cmp_ne_u32 vcc, 0, v0 (per lane)
+	Append(words, Sopc(0x13, kVccLo, Inline(0)));                // s_cmp_lg_u64 vcc, 0
+	Append(words, consumer);
+	if (wqm) { Sop1(words, 4, kExecLo, 6); }                     // s_mov_b64 exec, s[6:7]
+	Vop1(words, 1, 2, Inline(0));                                // v_mov_b32 v2, 0
+	words.insert(words.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
+	Sopp(words, 1);
+	return slots;
+}
+
+TEST(EmulatorFragmentMaskFlow, AnAnyLaneTestBranchesLikeTheVccBranch)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Words skip;
+		Sopp(skip, 4, 3);                                            // s_cbranch_scc0 over the next three dwords
+		skip.insert(skip.end(), {0xf4200508u, 0xfa000004u});         // s_buffer_load_dword s20, s[16:19], 4
+		Vop1(skip, 1, 1, Inline(1));                                 // v_mov_b32 v1, 1
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(skip)), 64u);
+		Check(flow.lane_local, "a forward branch on an any-lane test opens a divergent region");
+		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(skip, true)), 64u).lane_local,
+		      "helper bits under WQM may answer the test, as they do for VCCZ");
+
+		Words leak = skip;
+		Vop1(leak, 1, 3, 20);                                        // join: v_mov_b32 v3, s20
+		const auto leaked = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(leak)), 64u);
+		Check(!leaked.lane_local && Contains(leaked.reason, "divergent control flow"), "its region's scalars diverge at the join");
+
+		Words select;
+		Sop2(select, 10, 20, Inline(1), Inline(0));                  // s_cselect_b32 s20, 1, 0
+		const auto selected = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(select)), 64u);
+		Check(!selected.lane_local && Contains(selected.reason, "SCC derived from a mask"), "any other SCC reader is refused");
+
+		Words loop;
+		Sopp(loop, 4, 0xfffdu);                                      // s_cbranch_scc0 back to the vector compare
+		const auto looped = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(loop)), 64u);
+		Check(!looped.lane_local && Contains(looped.reason, "loop branch on an any-lane test"), "a back edge is refused");
+
+		Words overwritten;
+		Append(overwritten, Sopc(6, 20, Inline(0)));                 // s_cmp_eq_u32 s20, 0 replaces the test
+		Sop1(overwritten, 4, 4, kVccLo);                             // s_mov_b64 s[4:5], vcc
+		Sop2(overwritten, 15, 4, 4, Inline(1));                      // s_and_b64 s[4:5], s[4:5], 1: SCC is a mask again
+		Append(overwritten, skip);
+		const auto replaced = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(overwritten)), 64u);
+		Check(!replaced.lane_local && Contains(replaced.reason, "SCC branch"), "only the last SCC writer counts");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -978,7 +1136,7 @@ Words ScalarLoadOfS20()
 
 ShaderFragmentMaskFlow FlowOf(const Words& words)
 {
-	return ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(words)));
+	return ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(words)), 64u);
 }
 
 TEST(EmulatorFragmentMaskFlow, AdmitsALoopWhoseLanesLeaveByNarrowingTheMask)
@@ -990,7 +1148,7 @@ TEST(EmulatorFragmentMaskFlow, AdmitsALoopWhoseLanesLeaveByNarrowingTheMask)
 		for (const auto& words: {LoopProgram(body, {}), BottomTestedLoop(body, {})})
 		{
 			const auto code = ParsePixel(AsSlots(words));
-			const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+			const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 			Check(flow.lane_local && flow.reason == nullptr, "narrowing EXEC inside a loop is mask algebra");
 			Check(flow.closed_exec_write[Find(code, ShaderInstructionType::VCmpxNeU32)], "the narrowing compare is accounted for");
 			for (uint32_t width: {32u, 64u})
@@ -1054,7 +1212,7 @@ TEST(EmulatorFragmentMaskFlow, AdmitsThePlainWqmBracketWhenTheWholeProgramPassAl
 		words.insert(words.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
 		Sopp(words, 1);
 		const auto code = ParsePixel(AsSlots(words));
-		Check(ShaderAnalyzeFragmentMaskFlow(code).lane_local, "the bracket is a closed widen/restore of the entry mask");
+		Check(ShaderAnalyzeFragmentMaskFlow(code, 64u).lane_local, "the bracket is a closed widen/restore of the entry mask");
 		for (uint32_t width: {32u, 64u})
 		{
 			const auto wave = ShaderAnalyzeNativeWave(code, width);
@@ -1068,7 +1226,7 @@ TEST(EmulatorFragmentMaskFlow, AdmitsThePlainWqmBracketWhenTheWholeProgramPassAl
 		open_bracket.insert(open_bracket.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
 		Sopp(open_bracket, 1);
 		const auto open = ParsePixel(AsSlots(open_bracket));
-		Check(!ShaderAnalyzeFragmentMaskFlow(open).lane_local, "an export under the widened mask is refused");
+		Check(!ShaderAnalyzeFragmentMaskFlow(open, 64u).lane_local, "an export under the widened mask is refused");
 		ExpectNotLaneLocal(open, "and so is the stage");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
@@ -1141,7 +1299,7 @@ TEST(EmulatorFragmentMaskFlow, ALoopOnAMaskDerivedSccIsRefusedButADerivativeFetc
 			const auto mov = Find(inside, ShaderInstructionType::VMovB32);
 			sample.pc = inside.GetInstructions().At(mov).pc - 1u;
 			inside.GetInstructions().InsertAt(mov, sample);
-			const auto derivative = ShaderAnalyzeFragmentMaskFlow(inside);
+			const auto derivative = ShaderAnalyzeFragmentMaskFlow(inside, 64u);
 			Check(derivative.lane_local, "implicit derivatives inside a divergent loop see their whole quad");
 		}
 		std::_Exit(0);
@@ -1190,7 +1348,7 @@ TEST(EmulatorFragmentMaskFlow, AdmitsTheDiscardPatternWithWideningAnInertTailAnd
 	ASSERT_EXIT(([] {
 		Initialize();
 		const auto code = ParsePixel(AsSlots(DiscardProgram(true, true, false)));
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(flow.lane_local, "kill, early-out and re-widening are lane local");
 		for (uint32_t width: {32u, 64u})
 		{
@@ -1234,7 +1392,7 @@ TEST(EmulatorFragmentMaskFlow, AdmitsTheNullTargetKillPassWithItsInertTail)
 		Check(Find(code, ShaderInstructionType::Exp) < code.GetInstructions().Size(), "the program has its exports");
 		Check(code.GetInstructions().At(Find(code, ShaderInstructionType::Exp)).format == ShaderInstructionFormat::NullVmDone,
 		      "the valid-mask export decodes as the dedicated null target");
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 		Check(flow.lane_local, "survivors exported as EXEC and an empty-mask tail are lane local");
 		for (uint32_t width: {32u, 64u})
 		{
@@ -1242,7 +1400,7 @@ TEST(EmulatorFragmentMaskFlow, AdmitsTheNullTargetKillPassWithItsInertTail)
 			Check(wave.refusal_reason == nullptr && wave.proof == ShaderNativeWaveProof::LaneLocal, "pixel stage is lane local");
 		}
 		// A tail that exports colour is not inert: skipping to it changes what the wave writes.
-		const auto exporting = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(NullTargetKillProgram(true))));
+		const auto exporting = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(NullTargetKillProgram(true))), 64u);
 		Check(!exporting.lane_local && Contains(exporting.reason, "SCC branch on a mask"), "a tail with a colour export is observable");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
@@ -1254,7 +1412,7 @@ TEST(EmulatorFragmentMaskFlow, TheDiscardPatternNeedsItsInertTailItsNarrowingAnd
 		Initialize();
 		const auto refused = [](const Words& words, const char* reason, const char* why) {
 			const auto code = ParsePixel(AsSlots(words));
-			const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+			const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
 			Check(!flow.lane_local && Contains(flow.reason, reason), why);
 			ExpectNotLaneLocal(code, why);
 		};
@@ -1295,10 +1453,10 @@ TEST(EmulatorFragmentMaskFlow, AKillInsideADivergentBlockKeepsEveryOtherLanesLiv
 		Initialize();
 		// The host skips the block for a subgroup with no lane in it, the guest runs it for the wave; ANDN2 with a
 		// compare evaluated inside clears no bit outside, so the live mask is the same per lane either way.
-		const auto kept = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(DivergentKillProgram(0x15))));
+		const auto kept = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(DivergentKillProgram(0x15))), 64u);
 		Check(kept.lane_local, "a kill confined to the block's lanes");
 		// AND with the same compare clears every lane outside the block when the block runs: a diverged mask.
-		const auto cleared = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(DivergentKillProgram(0x0f))));
+		const auto cleared = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(DivergentKillProgram(0x0f))), 64u);
 		Check(!cleared.lane_local, "a mask the block may clear outside its lanes is diverged after the join");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
@@ -1315,10 +1473,10 @@ TEST(EmulatorFragmentMaskFlow, DerivativeFetchesAreAdmittedInsideQuadUniformBloc
 		sample.pc = inside.GetInstructions().At(Find(inside, ShaderInstructionType::VMovB32)).pc + 1u;
 		inside.GetInstructions().InsertAt(Find(inside, ShaderInstructionType::VMovB32), sample);
 		// The EXEC branch around the block is emitted quad-uniform, so the fetch sees its whole quad.
-		Check(ShaderAnalyzeFragmentMaskFlow(inside).lane_local, "implicit derivatives inside a quad-uniform block");
+		Check(ShaderAnalyzeFragmentMaskFlow(inside, 64u).lane_local, "implicit derivatives inside a quad-uniform block");
 		sample.pc = outside.GetInstructions().At(Find(outside, ShaderInstructionType::Exp)).pc + 1u;
 		outside.GetInstructions().InsertAt(Find(outside, ShaderInstructionType::Exp), sample);
-		Check(ShaderAnalyzeFragmentMaskFlow(outside).lane_local, "the same fetch outside any divergent block is fine");
+		Check(ShaderAnalyzeFragmentMaskFlow(outside, 64u).lane_local, "the same fetch outside any divergent block is fine");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -1357,3 +1515,4 @@ TEST(EmulatorFragmentMaskFlow, PixelExecBranchesTakeTheVoteOfARealFragmentOfTheQ
 }
 
 UT_END();
+

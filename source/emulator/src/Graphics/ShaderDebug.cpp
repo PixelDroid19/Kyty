@@ -8,6 +8,7 @@
 #include "Emulator/Log.h"
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>
 
 #ifdef KYTY_EMU_ENABLED
@@ -16,14 +17,42 @@ KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>
 
 namespace Kyty::Libs::Graphics {
 
+// Named once: shader analyses classify every instruction of every draw by name.
 std::string_view ShaderInstructionTypeName(ShaderInstructionType type)
 {
-	return magic_enum::enum_name(type);
+	static const auto kNames = []
+	{
+		std::array<std::string_view, static_cast<size_t>(ShaderInstructionType::ZMax) + 1> table {};
+		for (size_t i = 0; i < table.size(); ++i)
+		{
+			table[i] = magic_enum::enum_name(static_cast<ShaderInstructionType>(i));
+		}
+		return table;
+	}();
+	const auto index = static_cast<size_t>(type);
+	return index < kNames.size() ? kNames[index] : std::string_view {};
 }
 
 bool ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix)
 {
 	return ShaderInstructionTypeName(type).substr(0, prefix.size()) == prefix;
+}
+
+// Classified once by name: shader analyses ask for every instruction of every draw.
+bool ShaderInstructionIsVectorBufferAccess(ShaderInstructionType type)
+{
+	static const auto kVectorBuffer = []
+	{
+		std::array<bool, static_cast<size_t>(ShaderInstructionType::ZMax) + 1> table {};
+		for (size_t i = 0; i < table.size(); ++i)
+		{
+			const auto candidate = static_cast<ShaderInstructionType>(i);
+			table[i] = ShaderInstructionTypeStartsWith(candidate, "Buffer") || ShaderInstructionTypeStartsWith(candidate, "TBuffer");
+		}
+		return table;
+	}();
+	const auto index = static_cast<size_t>(type);
+	return index < kVectorBuffer.size() && kVectorBuffer[index];
 }
 
 static String8 operand_to_str(ShaderOperand op)

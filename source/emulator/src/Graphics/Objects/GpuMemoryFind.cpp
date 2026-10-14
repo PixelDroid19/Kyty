@@ -49,8 +49,10 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 	Vector<GpuMemoryObject> ret;
 
 	int heap_id = GetHeapId(vaddr[0], size[0]);
-
-	if (heap_id < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: heap_id < 0 condition ignored (continuing)\n"); }
+	if (heap_id < 0)
+	{
+		return ret;
+	}
 
 	auto& heap = m_heaps[heap_id];
 
@@ -90,6 +92,100 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 	}
 
 	return ret;
+}
+
+Vector<GpuMemoryObject> GpuMemory::FindEqualObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission)
+{
+	Core::LockGuard lock(m_mutex);
+
+	Vector<GpuMemoryObject> ret;
+
+	const int heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return ret;
+	}
+	auto& heap = m_heaps[heap_id];
+	for (int obj_id: heap.objects_map1->FindAll(vaddr))
+	{
+		auto& h = heap.objects[obj_id];
+		EXIT_IF(h.free);
+		if (h.info.object.type != type ||
+		    GpuMemoryClassifyRangeSets(h.block.vaddr, h.block.size, h.block.vaddr_num, &vaddr, &size, 1, false) != OverlapType::Equals)
+		{
+			continue;
+		}
+		RecordUse(&h.info, submission);
+		h.info.use_last_frame = GpuMemoryAliasLookupUseFrame(m_current_frame, h.info.use_last_frame);
+		ret.Add(h.info.object);
+	}
+	return ret;
+}
+
+Vector<GpuMemoryObject> GpuMemory::FindObjectsWithRange(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type,
+                                                        const SubmissionId& submission)
+{
+	Core::LockGuard lock(m_mutex);
+
+	Vector<GpuMemoryObject> ret;
+
+	const int heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return ret;
+	}
+	auto& heap = m_heaps[heap_id];
+	for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1, false))
+	{
+		auto& h = heap.objects[block.object_id];
+		EXIT_IF(h.free);
+		bool range_equal = false;
+		for (int i = 0; i < h.block.vaddr_num; ++i)
+		{
+			range_equal = range_equal || (h.block.vaddr[i] == vaddr && h.block.size[i] == size);
+		}
+		if (h.info.object.type != type || !range_equal)
+		{
+			continue;
+		}
+		RecordUse(&h.info, submission);
+		h.info.use_last_frame = GpuMemoryAliasLookupUseFrame(m_current_frame, h.info.use_last_frame);
+		ret.Add(h.info.object);
+	}
+	return ret;
+}
+
+bool GpuMemory::DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out)
+{
+	EXIT_IF(obj == nullptr || out == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+
+	const int heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return false;
+	}
+	auto& heap = m_heaps[heap_id];
+	for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1))
+	{
+		const auto& h = heap.objects[block.object_id];
+		EXIT_IF(h.free);
+		if (h.info.object.obj != obj)
+		{
+			continue;
+		}
+		if (h.block.vaddr_num != 1)
+		{
+			return false;
+		}
+		out->type  = h.info.object.type;
+		out->vaddr = h.block.vaddr[0];
+		out->size  = h.block.size[0];
+		std::memcpy(out->params, h.info.params, sizeof(out->params));
+		return true;
+	}
+	return false;
 }
 
 bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out)
@@ -184,6 +280,7 @@ bool GpuMemory::QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRan
 		entry.dependencies_complete = m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies());
 		entry.check_hash            = info.check_hash;
 		entry.dirty_registered      = info.dirty_registered;
+		entry.depth_meta_bound      = info.depth_meta_bound;
 		    return true;
 	    });
 	out->truncated = !complete;

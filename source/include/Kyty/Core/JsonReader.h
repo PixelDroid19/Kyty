@@ -49,7 +49,9 @@ public:
 	[[nodiscard]] bool            IsBool() const { return m_type == JsonBool; }
 	[[nodiscard]] String          ToString() const { return m_value_string; }
 	[[nodiscard]] double          ToFloat() const { return m_value_double; }
-	[[nodiscard]] int64_t         ToInt() const { return m_value_int; }
+	[[nodiscard]] int64_t         ToInt() const;
+	// Returns false without changing value unless this is a representable JSON number; fractions truncate toward zero.
+	[[nodiscard]] bool            TryToInt(int64_t* value) const;
 	[[nodiscard]] int64_t         ToBool() const { return static_cast<int64_t>(m_value_bool); }
 	[[nodiscard]] const ListType& ToArray() const { return m_list; }
 
@@ -60,18 +62,19 @@ public:
 private:
 	Json() = default;
 
-	const char32_t* parse_value(const char32_t* value);
-	const char32_t* parse_array(const char32_t* value);
-	const char32_t* parse_object(const char32_t* value);
+	const char32_t* parse_value(const char32_t* value, uint32_t depth);
+	const char32_t* parse_array(const char32_t* value, uint32_t depth);
+	const char32_t* parse_object(const char32_t* value, uint32_t depth);
 	const char32_t* parse_string(const char32_t* str);
 	const char32_t* parse_number(const char32_t* value);
 
 	ListType m_list;
 	JsonType m_type = JsonNULL;
 	String   m_value_string;
-	int64_t  m_value_int    = 0;
-	double   m_value_double = 0.0;
-	bool     m_value_bool   = false;
+	int64_t  m_value_int       = 0;
+	double   m_value_double    = 0.0;
+	bool     m_value_bool      = false;
+	bool     m_value_int_valid = false;
 	String   m_name;
 };
 

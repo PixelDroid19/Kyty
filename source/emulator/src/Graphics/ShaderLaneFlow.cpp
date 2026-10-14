@@ -64,7 +64,7 @@ bool IsScalarAlu(Type type)
 
 bool ReadsSccImplicitly(Type type)
 {
-	return StartsWith(type, "SCselect") || StartsWith(type, "SCmov") || type == Type::SAddcU32;
+	return StartsWith(type, "SCselect") || StartsWith(type, "SCmov") || type == Type::SAddcU32 || type == Type::SSubbU32;
 }
 
 bool WritesScc(Type type)

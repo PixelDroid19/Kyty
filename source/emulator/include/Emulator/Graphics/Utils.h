@@ -570,8 +570,8 @@ struct DepthAttachmentLoadOps
 };
 
 // Guest HTILE/register clears map to attachment loadOp CLEAR. No invented color CLEAR0.
-// When not clearing, LOAD OPTIMAL preserves prior DS contents. Depth-only CLEAR uses
-// UNDEFINED init, so stencil cannot LOAD in that pass (DONT_CARE unless stencil clears).
+// When not clearing, LOAD OPTIMAL preserves prior DS contents. A depth-only CLEAR of a
+// combined image keeps OPTIMAL and LOADs stencil, which the guest clear leaves intact.
 // Stencil-only CLEAR keeps OPTIMAL because depth still LOADs prior contents.
 // First GPU-owned use (tracked UNDEFINED) has no prior contents: the depth object
 // never uploads guest bytes. LOAD then samples undefined host pixels (often ~1).
@@ -593,14 +593,15 @@ struct DepthAttachmentLoadOps
 	} else if (stencil_clear)
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	} else if (clear_depth)
+	} else if (first_use)
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	} else
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_LOAD;
 	}
-	ops.initial_layout = clear_depth ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	const bool loads_any = ops.depth_load == VK_ATTACHMENT_LOAD_OP_LOAD || ops.stencil_load == VK_ATTACHMENT_LOAD_OP_LOAD;
+	ops.initial_layout   = loads_any ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
 	return ops;
 }
 
@@ -709,12 +710,14 @@ struct ColorAttachmentLoadOps
 }
 
 // A uniform compute fill stores one 16-byte word quad per invocation. Over a color image whose texel
-// repeats exactly within that quad the fill is independent of tiling, so an image clear reproduces the
-// guest memory contents. Returns false for formats without an evidenced packing or a non-repeating quad.
+// repeats exactly within that quad, or is that quad, the fill is independent of tiling, so an image clear
+// reproduces the guest memory contents. Returns false for formats without an evidenced packing or a
+// non-repeating quad.
 [[nodiscard]] inline uint32_t GuestUniformFillTexelBytes(VkFormat format)
 {
 	switch (format)
 	{
+		case VK_FORMAT_R32G32B32A32_SFLOAT: return 16u;
 		case VK_FORMAT_R16G16B16A16_SFLOAT: return 8u;
 		case VK_FORMAT_R8G8B8A8_UNORM:
 		case VK_FORMAT_R8G8B8A8_SRGB:
@@ -728,10 +731,18 @@ struct ColorAttachmentLoadOps
 [[nodiscard]] inline bool DecodeGuestUniformFillTexel(const std::array<uint32_t, 4>& words, VkFormat format, VkClearColorValue* clear)
 {
 	const uint32_t texel   = GuestUniformFillTexelBytes(format);
-	const bool     repeats = texel == 8u ? (words[0] == words[2] && words[1] == words[3])
-	                                     : (texel == 4u && words[0] == words[1] && words[0] == words[2] && words[0] == words[3]);
+	const bool     repeats = texel == 16u || (texel == 8u ? (words[0] == words[2] && words[1] == words[3])
+	                                                      : (texel == 4u && words[0] == words[1] && words[0] == words[2] && words[0] == words[3]));
 	if (clear == nullptr || !repeats) { return false; }
-	*clear = DecodeGuestColorClearWords(words[0], words[1], format);
+	if (texel == 16u)
+	{
+		// Each 32-bit channel is stored in order, red at the lowest address.
+		*clear = {};
+		for (uint32_t channel = 0; channel < 4u; ++channel) { std::memcpy(&clear->float32[channel], &words[channel], sizeof(float)); }
+	} else
+	{
+		*clear = DecodeGuestColorClearWords(words[0], words[1], format);
+	}
 	// vkCmdClearColorImage encodes sRGB images from linear input: decode the stored bytes first.
 	if (format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_SRGB)
 	{
@@ -829,9 +840,15 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer,
                        const Vector<VkBufferImageCopy>& regions, uint64_t src_layout);
 void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
+// Copy the raw 32-bit texels of a single-sample, single-layer image into another of the same extent through a
+// transient buffer, one of them D32 depth and the other R32 or B10G11R11 color. Returns false for any other pair.
+// A depth destination keeps every word only on a device with unrestricted depth (VUID-VkCopyBufferToImageInfo2-pRegions-07931).
+[[nodiscard]] bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter);
 // Blit the whole source into [0, dst_extent) of dst_image, which ends in TRANSFER_DST_OPTIMAL (its prior contents are discarded).
 void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_image, VkExtent2D dst_extent, VkFilter filter);
+// Resample every layer of a single-sample color image into another of the same format and layer count at any extent.
+void UtilBlitImageToImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, VkFilter filter, uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
                    uint64_t dst_layout);
 void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,

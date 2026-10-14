@@ -28,6 +28,19 @@ constexpr uint32_t kGuestDeviceAddressEntryDwords = 8;
 constexpr uint32_t kGuestDeviceAddressNullBytes   = 256;
 constexpr uint32_t kGuestDeviceAddressPageBytes   = 4096;
 
+struct GuestDeviceAddressTable
+{
+	uint64_t address     = 0;
+	uint32_t entry_count = 0;
+};
+
+enum class GuestDeviceAddressPrepareResult: uint8_t
+{
+	Ready,
+	PendingReader,
+	Failed,
+};
+
 // A load of `bytes` at `offset` into a chunk matches only when it starts in
 // the guest `size` and ends inside the imported `span`. An access that would
 // walk off the allocation misses, instead of faulting the device.
@@ -52,7 +65,7 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 
 // Must run with GPU submissions quiesced: destroys imports of the range and
-// every table retired since the last quiesced release.
+// every table still retained in the retirement list.
 void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 
 // Writes back GPU results held in Kyty storage-buffer objects over every
@@ -77,8 +90,18 @@ void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
                                                        uint64_t vaddr, uint64_t size);
 
 // Imports all registered ranges not imported yet and returns the translation
-// table. Fails when the device cannot import guest memory.
+// table. This legacy synchronous helper is for quiesced unit-test setup; runtime
+// GPU readers must use GuestDeviceAddressPrepareForRead to track their lifetime.
 [[nodiscard]] bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uint32_t* entry_count);
+
+// Prepares the translation table for a command buffer that will read through
+// it. If a tracked snapshot refresh or table rebuild must wait for an earlier
+// reader, returns that reader without publishing a table. The caller must wait
+// outside recording locks and acknowledge the exact completed ID.
+[[nodiscard]] GuestDeviceAddressPrepareResult GuestDeviceAddressPrepareForRead(GraphicContext* ctx, SubmissionId reader,
+	                                                                          GuestDeviceAddressTable* table,
+	                                                                          SubmissionId* dependency);
+[[nodiscard]] bool GuestDeviceAddressAcknowledgeReader(SubmissionId completed);
 
 } // namespace Kyty::Libs::Graphics
 

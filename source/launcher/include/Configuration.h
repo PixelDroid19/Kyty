@@ -3,6 +3,8 @@
 
 #include "Common.h"
 
+#include <algorithm>
+
 #include <QByteArray>
 #include <QChar>
 #include <QMetaEnum>
@@ -111,12 +113,42 @@ public:
 	};
 	Q_ENUM(RenderResolutionMode)
 
+	enum class RenderResolutionScope
+	{
+		Display,
+		RenderTargets
+	};
+	Q_ENUM(RenderResolutionScope)
+
 	enum class PresentationFilter
 	{
 		Linear,
-		Nearest
+		Nearest,
+		Fsr
 	};
 	Q_ENUM(PresentationFilter)
+
+	// Guest keeps each sampler's own ratio; a level raises linear-filtered samplers to it.
+	enum class TextureAnisotropy
+	{
+		Guest,
+		X2,
+		X4,
+		X8,
+		X16
+	};
+	Q_ENUM(TextureAnisotropy)
+
+	// Dialog shortcuts that fill the graphics fields; not stored.
+	enum class GraphicsPreset
+	{
+		Custom,
+		Native,
+		Quality,
+		Balanced,
+		Performance
+	};
+	Q_ENUM(GraphicsPreset)
 
 	Configuration() = default;
 
@@ -132,10 +164,13 @@ public:
 	Resolution screen_resolution = Resolution::R1280X720;
 
 	// Render resolution (docs/render-resolution.md)
-	RenderResolutionMode render_resolution_mode   = RenderResolutionMode::Fixed;
-	int                  render_resolution_width  = 1280;
-	int                  render_resolution_height = 720;
-	PresentationFilter   presentation_filter      = PresentationFilter::Linear;
+	RenderResolutionMode  render_resolution_mode     = RenderResolutionMode::Fixed;
+	RenderResolutionScope render_resolution_scope    = RenderResolutionScope::Display;
+	int                   render_resolution_width    = 1280;
+	int                   render_resolution_height   = 720;
+	PresentationFilter    presentation_filter        = PresentationFilter::Linear;
+	int                   presentation_fsr_sharpness = 90;
+	TextureAnisotropy     texture_anisotropy         = TextureAnisotropy::Guest;
 
 	// Platform / validation
 	bool                   neo                         = true;
@@ -167,9 +202,12 @@ public:
 		s->setValue("screen_width", screen_width);
 		s->setValue("screen_height", screen_height);
 		KYTY_CFG_SET(render_resolution_mode);
+		KYTY_CFG_SET(render_resolution_scope);
 		s->setValue("render_resolution_width", render_resolution_width);
 		s->setValue("render_resolution_height", render_resolution_height);
 		KYTY_CFG_SET(presentation_filter);
+		s->setValue("presentation_fsr_sharpness", presentation_fsr_sharpness);
+		KYTY_CFG_SET(texture_anisotropy);
 		KYTY_CFG_SET(neo);
 		KYTY_CFG_SET(vulkan_validation_enabled);
 		KYTY_CFG_SET(shader_validation_enabled);
@@ -222,6 +260,10 @@ public:
 		{
 			KYTY_CFG_GET(render_resolution_mode);
 		}
+		if (s->contains("render_resolution_scope"))
+		{
+			KYTY_CFG_GET(render_resolution_scope);
+		}
 		if (s->contains("render_resolution_width"))
 		{
 			render_resolution_width = s->value("render_resolution_width").toInt();
@@ -233,6 +275,14 @@ public:
 		if (s->contains("presentation_filter"))
 		{
 			KYTY_CFG_GET(presentation_filter);
+		}
+		if (s->contains("presentation_fsr_sharpness"))
+		{
+			presentation_fsr_sharpness = std::clamp(s->value("presentation_fsr_sharpness").toInt(), 0, 100);
+		}
+		if (s->contains("texture_anisotropy"))
+		{
+			KYTY_CFG_GET(texture_anisotropy);
 		}
 		KYTY_CFG_GET(neo);
 		KYTY_CFG_GET(vulkan_validation_enabled);

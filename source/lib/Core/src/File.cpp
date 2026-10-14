@@ -8,6 +8,8 @@
 #include "Kyty/Sys/SysSwapByteOrder.h"
 #include "Kyty/Sys/SysTimer.h"
 
+#include "FileInternal.h"
+
 #include "SDL_rwops.h"
 #include "SDL_stdinc.h"
 
@@ -861,8 +863,14 @@ String File::ReadWholeString()
 	{
 		case Encoding::Utf16BE:
 		{
-			uint64_t size = Size() / 2;
-			EXIT_IF((size >> 32u) != 0);
+			const uint64_t file_size = Size();
+			const uint64_t size      = file_size / 2;
+			const bool     can_read  = FileInternal::CanReadWholeStringBuffer(file_size, 2u);
+			EXIT_IF(!can_read);
+			if (!can_read)
+			{
+				return {};
+			}
 			Vector<char16_t> buf(size + 1, false);
 			Read(buf.GetData(), size * 2);
 			buf[size] = 0;
@@ -875,8 +883,14 @@ String File::ReadWholeString()
 		}
 		case Encoding::Utf16LE:
 		{
-			uint64_t size = Size() / 2;
-			EXIT_IF((size >> 32u) != 0);
+			const uint64_t file_size = Size();
+			const uint64_t size      = file_size / 2;
+			const bool     can_read  = FileInternal::CanReadWholeStringBuffer(file_size, 2u);
+			EXIT_IF(!can_read);
+			if (!can_read)
+			{
+				return {};
+			}
 			Vector<char16_t> buf(size + 1, false);
 			Read(buf.GetData(), size * 2);
 			buf[size] = 0;
@@ -885,8 +899,14 @@ String File::ReadWholeString()
 		}
 		case Encoding::Utf32BE:
 		{
-			uint64_t size = Size() / 4;
-			EXIT_IF((size >> 32u) != 0);
+			const uint64_t file_size = Size();
+			const uint64_t size      = file_size / 4;
+			const bool     can_read  = FileInternal::CanReadWholeStringBuffer(file_size, 4u);
+			EXIT_IF(!can_read);
+			if (!can_read)
+			{
+				return {};
+			}
 			Vector<char32_t> buf(size + 1, false);
 			Read(buf.GetData(), size * 4);
 			buf[size] = 0;
@@ -899,8 +919,14 @@ String File::ReadWholeString()
 		}
 		case Encoding::Utf32LE:
 		{
-			uint64_t size = Size() / 4;
-			EXIT_IF((size >> 32u) != 0);
+			const uint64_t file_size = Size();
+			const uint64_t size      = file_size / 4;
+			const bool     can_read  = FileInternal::CanReadWholeStringBuffer(file_size, 4u);
+			EXIT_IF(!can_read);
+			if (!can_read)
+			{
+				return {};
+			}
 			Vector<char32_t> buf(size + 1, false);
 			Read(buf.GetData(), size * 4);
 			buf[size] = 0;
@@ -911,8 +937,13 @@ String File::ReadWholeString()
 		case Encoding::Unknown:
 		default:
 		{
-			uint64_t size = Size();
-			EXIT_IF((size >> 32u) != 0);
+			const uint64_t size     = Size();
+			const bool     can_read = FileInternal::CanReadWholeStringBuffer(size, 1u);
+			EXIT_IF(!can_read);
+			if (!can_read)
+			{
+				return {};
+			}
 			Vector<char> buf(size + 1, false);
 			Read(buf.GetData(), size);
 			buf[size] = 0;
@@ -1221,22 +1252,31 @@ struct CopyT
 	DateTime src_last_access_time, src_last_write_time;
 };
 
-static void sync(const Vector<SyncDirectories::CopyT>& list)
+static bool sync(const Vector<SyncDirectories::CopyT>& list)
 {
 	for (const auto& f: list)
 	{
-		File::CreateDirectories(f.dst.DirectoryWithoutFilename());
-		File::CopyFile(f.src, f.dst); // @suppress("Invalid arguments") // @suppress("Function cannot be resolved")
+		const String directory = f.dst.DirectoryWithoutFilename();
+		if (!directory.IsEmpty() && !File::CreateDirectories(directory))
+		{
+			return false;
+		}
+		if (!File::CopyFile(f.src, f.dst)) // @suppress("Invalid arguments") // @suppress("Function cannot be resolved")
+		{
+			return false;
+		}
 		File::RemoveReadonly(f.dst);
 		File::SetLastAccessAndWriteTimeUTC(f.dst, f.src_last_access_time, f.src_last_write_time);
 
 		// printf("%s: %s\n", str, f.dst.C_Str());
 	}
+
+	return true;
 }
 
 } // namespace SyncDirectories
 
-void File::SyncDirectories(const String& src_dir, const String& dst_dir, bool del_dst)
+bool File::SyncDirectories(const String& src_dir, const String& dst_dir, bool del_dst)
 {
 	auto src_list = FindFiles(src_dir);
 	auto dst_list = FindFiles(dst_dir);
@@ -1303,7 +1343,10 @@ void File::SyncDirectories(const String& src_dir, const String& dst_dir, bool de
 
 			if (del)
 			{
-				DeleteFile(dst.path_with_name); // @suppress("Invalid arguments")
+				if (!DeleteFile(dst.path_with_name)) // @suppress("Invalid arguments")
+				{
+					return false;
+				}
 
 				del_cnt++;
 				// printf("del: %s\n", dst.path_with_name.C_Str());
@@ -1317,8 +1360,7 @@ void File::SyncDirectories(const String& src_dir, const String& dst_dir, bool de
 		       dst_dir.C_Str());
 	}
 
-	SyncDirectories::sync(new_list);
-	SyncDirectories::sync(upd_list);
+	return SyncDirectories::sync(new_list) && SyncDirectories::sync(upd_list);
 }
 
 } // namespace Kyty::Core

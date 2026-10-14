@@ -1300,6 +1300,7 @@ static int HostErrnoToNet(int host_errno)
 		case EADDRNOTAVAIL: return NET_ERROR_EADDRNOTAVAIL;
 		case ENETDOWN: return NET_ERROR_ENETDOWN;
 		case ENETUNREACH: return NET_ERROR_ENETUNREACH;
+		case EHOSTUNREACH: return NET_ERROR_EHOSTUNREACH;
 		case ECONNABORTED: return NET_ERROR_ECONNABORTED;
 		case ECONNRESET: return NET_ERROR_ECONNRESET;
 		case ENOBUFS: return NET_ERROR_ENOBUFS;
@@ -3910,6 +3911,8 @@ int KYTY_SYSV_ABI NetCtlGetInfo(int code, NetCtlInfo* info)
 	uint64_t   output_size = 0;
 	switch (code)
 	{
+		// DEVICE: the wired device (0).
+		case 1: output.device = 0; output_size = sizeof(output.device); break;
 		case 2:
 			memset(output.ether_addr.data, 0, sizeof(output.ether_addr.data));
 			output_size = sizeof(output.ether_addr);

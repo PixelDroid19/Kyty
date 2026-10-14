@@ -70,6 +70,7 @@ namespace Kyty::Libs::Graphics {
 }
 
 struct PresentationEncodeStage;
+struct PresentationFsrStage;
 
 struct VulkanSwapchain
 {
@@ -84,6 +85,8 @@ struct VulkanSwapchain
 	uint32_t       current_index              = 0;
 	// sRGB encoding stage for linear-light present sources; owned by PresentationScaler.
 	PresentationEncodeStage* encode_stage = nullptr;
+	// FSR 1.0 passes of the Fsr presentation filter; owned by PresentationScaler.
+	PresentationFsrStage* fsr_stage = nullptr;
 };
 
 struct VulkanCommandPool
@@ -187,6 +190,8 @@ struct GraphicContext
 	// Guest memory is importable as device-addressable buffers (host pointer
 	// import, buffer device address and 64-bit shader integers).
 	bool guest_device_address_supported = false;
+	// Device-addressable buffers can also import dma-buf descriptors.
+	bool guest_dma_buf_import_supported = false;
 	ShaderComputeWaveVulkanState compute_wave_vulkan_state {};
 
 	// VK_EXT_sample_locations is optional at device discovery time. A draw that
@@ -338,6 +343,8 @@ struct DepthStencilVulkanImage: public VulkanImage
 	bool                       compressed                   = false;
 	bool                       sample_locations_compatible = false;
 	VulkanSampleLocationState last_sample_locations;
+	// Guest base of the 8-bit stencil plane this image holds, 0 without one.
+	uint64_t stencil_vaddr = 0;
 };
 
 struct TextureVulkanImage: public VulkanImage

@@ -177,17 +177,21 @@ LabelFenceReleaseStatus LabelFenceRegistry::ReleaseAllocation(uint64_t addr, uin
 	return LabelFenceReleaseStatus::Released;
 }
 
-void LabelFenceRegistry::Snapshot(Vector<uint64_t>* begin, Vector<uint64_t>* end) const
+void LabelFenceRegistry::Snapshot(uint64_t addr, uint64_t bytes, Vector<uint64_t>* begin, Vector<uint64_t>* end) const
 {
 	EXIT_IF(begin == nullptr);
 	EXIT_IF(end == nullptr);
+	EXIT_IF(bytes > UINT64_MAX - addr);
 
 	begin->Clear();
 	end->Clear();
-	for (int i = 0; i < static_cast<int>(m_begin.Size()); i++)
+	for (uint32_t i = 0; i < m_begin.Size(); i++)
 	{
-		begin->Add(m_begin.At(i));
-		end->Add(m_end.At(i));
+		if (m_begin.At(i) < addr + bytes && addr < m_end.At(i))
+		{
+			begin->Add(m_begin.At(i));
+			end->Add(m_end.At(i));
+		}
 	}
 }
 
@@ -213,13 +217,19 @@ void LabelFenceRegistry::Complete(uint64_t addr, uint64_t bytes)
 	EXIT("Completion of unregistered label destination\n");
 }
 
-void LabelFenceRegistry::SnapshotExcluded(uint64_t acquired_version, Vector<uint64_t>* begin, Vector<uint64_t>* end) const
+void LabelFenceRegistry::SnapshotExcluded(uint64_t addr, uint64_t bytes, uint64_t acquired_version, Vector<uint64_t>* begin,
+                                          Vector<uint64_t>* end) const
 {
 	EXIT_IF(begin == nullptr || end == nullptr);
+	EXIT_IF(bytes > UINT64_MAX - addr);
 	begin->Clear();
 	end->Clear();
 	for (uint32_t i = 0; i < m_begin.Size(); ++i)
 	{
+		if (m_begin.At(i) >= addr + bytes || addr >= m_end.At(i))
+		{
+			continue;
+		}
 		if (m_pending.At(i) != 0 || m_completed_version.At(i) > acquired_version)
 		{
 			begin->Add(m_begin.At(i));
@@ -266,7 +276,7 @@ void LabelStoragePublication::Upload(const LabelFenceRegistry& registry, void* g
 	m_cpu_conflict = false;
 	Vector<uint64_t> begin;
 	Vector<uint64_t> end;
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(base, size, &begin, &end);
 	for (uint32_t i = 0; i < begin.Size(); ++i)
 	{
 		const auto first = std::max(base, begin.At(i));
@@ -315,10 +325,10 @@ GpuWritebackResult LabelStoragePublication::Copy(const LabelFenceRegistry& regis
 	Vector<uint64_t> end;
 	// Bulk page copies always retain the holes. Eligible words are published
 	// separately by CAS, making a concurrent CPU store authoritative as well.
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(base, size, &begin, &end);
 	auto result = page_cache->CopyChangedPages(guest_dst, gpu_src, size, begin.GetData(), end.GetData(),
 	                                           static_cast<int>(begin.Size()), notify_write, notify_opaque);
-	registry.SnapshotExcluded(m_version, &begin, &end);
+	registry.SnapshotExcluded(base, size, m_version, &begin, &end);
 	if (m_cpu_conflict) { return result; }
 	for (auto& fence: m_fences)
 	{
@@ -904,7 +914,7 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label)
 
 	label->cp = buffer->GetParent();
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	if (vk_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_buffer == nullptr condition ignored (continuing)\n"); }
 

@@ -14,10 +14,9 @@ list(FILTER unit_test_src EXCLUDE REGEX "/UnitTestDisabled\\.cpp$")
 # fc_script (which also defines main) can link unit_test without a clash.
 list(FILTER unit_test_src EXCLUDE REGEX "/UnitTestMain\\.cpp$")
 
-# DevTools tests are listed explicitly (no recursive glob expansion for new
-# modules). They exercise the process-isolated supervisor and its transport,
-# which only exist when KYTY_BUILD_DEVTOOLS is enabled; the tooling-off build
-# must not link the empty kyty_devtools_core archive.
+# Supervisor tests are listed explicitly (no recursive glob expansion for new
+# modules). The supervisor only exists when KYTY_BUILD_DEVTOOLS is enabled;
+# kyty_devtools_core is a separate runtime library that is always built.
 if(KYTY_BUILD_DEVTOOLS)
 	list(APPEND unit_test_src
 		"${CMAKE_CURRENT_SOURCE_DIR}/src/devtools/UnitTestDevToolsEventRing.cpp"
@@ -51,8 +50,8 @@ endif()
 add_library(unit_test STATIC ${unit_test_src})
 
 target_link_libraries(unit_test core)
+target_link_libraries(unit_test easy_profiler)
 if(KYTY_BUILD_DEVTOOLS)
-	target_link_libraries(unit_test kyty_devtools_core)
 	target_compile_definitions(unit_test PRIVATE KYTY_HAVE_DEVTOOLS_TESTS=1)
 endif()
 target_link_libraries(unit_test math)

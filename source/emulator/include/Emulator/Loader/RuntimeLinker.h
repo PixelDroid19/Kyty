@@ -297,6 +297,11 @@ private:
 	static void CreateSymbolDatabase(Program* program);
 	static void Relocate(Program* program);
 	static void DeleteProgram(Program* program);
+	static void RegisterProgramEhFrame(Program* program);
+	static void UnregisterProgramEhFrame(Program* program);
+	[[nodiscard]] static bool ValidateSymbolTableMetadata(const DynamicInfo& info);
+	[[nodiscard]] static bool ValidateDynamicStringReferences(const Elf64* elf, const DynamicInfo& info);
+	[[nodiscard]] static bool IsSymbolTableIndexValid(const DynamicInfo& info, uint32_t index);
 	static void SetupTlsHandler(Program* program);
 	static const void* FindProgramByAddrForPort(uint64_t vaddr);
 	static uint64_t GetProcessParametersForPort();

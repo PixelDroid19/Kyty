@@ -116,7 +116,12 @@ void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5)
 				{
 					if (b.num_records != r.NumRecords()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: b.num_records != r.NumRecords() condition ignored (continuing)\n"); }
 					b.addr = base;
-					if (b.attr_num >= ShaderVertexInputBuffer::ATTR_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: b.attr_num >= ShaderVertexInputBuffer::ATTR_MAX condition ignored (continuing)\n"); }
+					// The fixed attribute table is a decoder limit; refusing keeps the count honest.
+					if (b.attr_num >= ShaderVertexInputBuffer::ATTR_MAX)
+					{
+						EXIT("unsupported vertex input layout: buffer %d merges more than %d attributes\n", bi,
+						     ShaderVertexInputBuffer::ATTR_MAX);
+					}
 					b.attr_indices[b.attr_num++] = ri;
 					merged                       = true;
 					break;
@@ -126,7 +131,10 @@ void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5)
 
 		if (!merged)
 		{
-			if (info->buffers_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->buffers_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
+			if (info->buffers_num >= ShaderVertexInputInfo::RES_MAX)
+			{
+				EXIT("unsupported vertex input layout: more than %d vertex buffers\n", ShaderVertexInputInfo::RES_MAX);
+			}
 			int bi                            = info->buffers_num++;
 			info->buffers[bi].addr            = (ps5 ? r.Base48() : r.Base44());
 			info->buffers[bi].stride          = r.Stride();
@@ -219,7 +227,10 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 			if (inst.src[1].type != ShaderOperandType::Sgpr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[1].type != ShaderOperandType::Sgpr condition ignored (continuing)\n"); }
 			if (inst.src[2].type != ShaderOperandType::IntegerInlineConstant || inst.src[2].constant.i != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[2].type != ShaderOperandType::IntegerInlineConstant || inst.src[2].constant.i != 0 condition ignored (continuing)\n"); }
 
-			if (info->resources_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->resources_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
+			if (info->resources_num >= ShaderVertexInputInfo::RES_MAX)
+			{
+				EXIT("unsupported vertex input layout: more than %d vertex resources\n", ShaderVertexInputInfo::RES_MAX);
+			}
 
 			int t = inst.src[1].register_id;
 			EXIT_IF(t < 0 || t + 3 >= kSgprs);
@@ -262,7 +273,11 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 			max_semantic = input_semantics[i].semantic + 1u;
 		}
 	}
-	if (max_semantic > static_cast<uint32_t>(ShaderVertexInputInfo::RES_MAX)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: max_semantic > static_cast<uint32_t>(ShaderVertexInputInfo::RES_MAX) condition ignored (continuing)\n"); }
+	if (max_semantic > static_cast<uint32_t>(ShaderVertexInputInfo::RES_MAX))
+	{
+		EXIT("unsupported vertex input layout: semantic %u exceeds the %d-entry fetch table\n", max_semantic - 1u,
+		     ShaderVertexInputInfo::RES_MAX);
+	}
 	for (uint32_t i = 0; i < max_semantic; i++)
 	{
 		info->fetch_attrib_data[i] = attrib[i];
@@ -284,12 +299,11 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 			KYTY_LOG_DEBUG("reg = %u, size = %u, va[%u] = 0x%08" PRIx32 "\n", reg, size, i, attrib[in.semantic]);
 		}
 
-		size_t   index       = attrib[in.semantic] & 0x1fu;
-		uint32_t format      = (attrib[in.semantic] >> 5u) & 0x1ffu;
-		uint32_t offset      = (attrib[in.semantic] >> 14u) & 0xfffu;
-		uint32_t fetch_index = (attrib[in.semantic] >> 26u) & 0x1u;
+		const auto     decoded = ShaderDecodeGen5VertexAttrib(attrib[in.semantic]);
+		const size_t   index   = decoded.slot;
+		const uint32_t offset  = decoded.offset;
 
-		if (fetch_index != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fetch_index != 0 condition ignored (continuing)\n"); }
+		if (decoded.instance) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fetch_index != 0 condition ignored (continuing)\n"); }
 
 		if (index >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
 
@@ -301,14 +315,17 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 			if (vertex_attr_log < 32u)
 			{
 				KYTY_LOG_DEBUG(
-				             "KYTY_VERTEX_ATTR semantic=%u raw=0x%08" PRIx32 " index=%zu format=0x%03" PRIx32 " offset=0x%03" PRIx32
+				             "KYTY_VERTEX_ATTR semantic=%u raw=0x%08" PRIx32 " index=%zu format=%u components=%u offset=0x%03" PRIx32
 				             " attrib=%p buffer=%p sharp=%p words=%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 "\n",
-				             in.semantic, attrib[in.semantic], index, format, offset, static_cast<const void*>(attrib),
+				             in.semantic, attrib[in.semantic], index, decoded.format, decoded.components, offset, static_cast<const void*>(attrib),
 				             static_cast<const void*>(buffer), static_cast<const void*>(sharp), sharp[0], sharp[1], sharp[2], sharp[3]);
 			}
 		}
 
-		if (info->resources_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->resources_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
+		if (info->resources_num >= ShaderVertexInputInfo::RES_MAX)
+		{
+			EXIT("unsupported vertex input layout: more than %d fetched attributes\n", ShaderVertexInputInfo::RES_MAX);
+		}
 
 		auto& r           = info->resources[info->resources_num];
 		auto& rd          = info->resources_dst[info->resources_num];
@@ -318,38 +335,18 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 		r.fields[1]       = sharp[1];
 		r.fields[2]       = sharp[2];
 		r.fields[3]       = sharp[3];
-		if (format != 0)
+		rd.registers_num = static_cast<int>(size);
+		if (decoded.format != 0)
 		{
-			const auto     input_format    = VulkanResolveGen5VertexAttribInputFormat(static_cast<uint16_t>(format));
-			const uint32_t component_count = input_format.component_count;
-			if (input_format.format == VK_FORMAT_UNDEFINED || component_count == 0)
+			const auto input_format = VulkanResolveGen5VertexInputFormat(decoded.format);
+			if (input_format.format == VK_FORMAT_UNDEFINED)
 			{
-				// Keep the V# format/DST_SEL. Overwriting with unified 0 makes
-				// VulkanBuildVertexInputLayout reject a live RGB32F stream.
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-				               "WARNING: unknown vertex attrib format 0x%x; keeping buffer format\n", format);
-			} else
-			{
-				if (size == 0 || size > 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size == 0 || size > 4 condition ignored (continuing)\n"); }
-				uint32_t swizzle = DstSel(4, 0, 0, 1);
-				switch (component_count)
-				{
-					case 2: swizzle = DstSel(4, 5, 0, 1); break;
-					case 3: swizzle = DstSel(4, 5, 6, 1); break;
-					case 4: swizzle = DstSel(4, 5, 6, 7); break;
-					default: break;
-				}
-				r.fields[3] = (r.fields[3] & ~((0x7fu << 12u) | 0xfffu)) |
-				              (static_cast<uint32_t>(input_format.unified_format) << 12u) | swizzle;
+				EXIT("unsupported vertex attribute format %u (%u components)\n", decoded.format, decoded.components);
 			}
-			// The semantic controls the shader input width; the backing format
-			// controls storage and descriptor swizzles. Either may have more
-			// components: shaders can ignore stored components or consume the
-			// descriptor's default channels.
-			rd.registers_num = static_cast<int>(size);
-		} else
-		{
-			rd.registers_num = static_cast<int>(size);
+			// The semantic controls the shader input width; the override sets
+			// storage format and DST_SEL. Either may have more components.
+			r.fields[3] = (r.fields[3] & ~((0x7fu << 12u) | 0xfffu)) | (static_cast<uint32_t>(decoded.format) << 12u) |
+			              ShaderGen5VertexAttribDstSel(decoded.components);
 		}
 		if (offset != 0)
 		{
@@ -368,20 +365,16 @@ bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, in
 {
 	EXIT_IF(info == nullptr);
 
-	if (info->buffers_num < 0 || info->buffers_num >= ShaderStorageResources::BUFFERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->buffers_num < 0 || info->buffers_num >= ShaderStorageResources::BUFFERS_MAX condition ignored (continuing)\n"); }
-
 	int  index    = info->buffers_num;
 	bool extended = (extended_buffer != nullptr);
 
 	// With Gen5 32-user-SGPR windows, slots 16..31 are direct user SGPRs (not
 	// necessarily a separate EUD pointer). Only require extended when an
-	// extended_buffer is supplied.
-	if (extended)
+	// extended_buffer is supplied. A start outside the source window would read
+	// past user_sgpr or before the EUD snapshot, so it is refused.
+	if (extended ? start_index < 16 : (start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX))
 	{
-		if (start_index < 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 16 condition ignored (continuing)\n"); }
-	} else
-	{
-		if (start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
+		EXIT("shader storage descriptor outside its source window: register=%d extended=%d\n", start_index, extended ? 1 : 0);
 	}
 
 	ShaderBufferResource resource;
@@ -396,6 +389,13 @@ bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, in
 	    (resource.Base48() == 0 && resource.NumRecords() == 0))
 	{
 		return false;
+	}
+
+	// Null descriptors above are not stored, so capacity is checked only for a real write.
+	if (index < 0 || index >= ShaderStorageResources::BUFFERS_MAX)
+	{
+		EXIT("shader storage resource capacity exceeded: count=%d capacity=%d register=%d slot=%d\n", index,
+		     ShaderStorageResources::BUFFERS_MAX, start_index, slot);
 	}
 
 	info->start_register[index] = start_index;

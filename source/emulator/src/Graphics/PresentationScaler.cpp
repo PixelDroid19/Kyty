@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
+#include "Emulator/Graphics/PresentationFsr.h"
 #include "Emulator/Graphics/Utils.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -22,6 +23,8 @@ namespace {
 	{
 		case Config::PresentationFilter::Nearest: return VK_FILTER_NEAREST;
 		case Config::PresentationFilter::Linear: return VK_FILTER_LINEAR;
+		// FSR only upscales; a source larger than the swapchain is reduced with the linear filter.
+		case Config::PresentationFilter::Fsr: return VK_FILTER_LINEAR;
 	}
 	*status = PresentationScaleStatus::UnsupportedFilter;
 	return VK_FILTER_NEAREST;
@@ -102,7 +105,7 @@ PresentationEncodeStage* EnsureEncodeStage(GraphicContext* context, VulkanSwapch
 void BlitThroughEncodeStage(CommandBuffer* command_buffer, VulkanImage* source, VulkanSwapchain* swapchain, PresentationEncodeStage* stage,
                             VkFilter filter)
 {
-	auto* cmd = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	auto* cmd = command_buffer->RecordOutsideRenderPass();
 	// The previous present may still be copying out of the stage on this queue: order that read before this write.
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
 	UtilBlitImageTo(command_buffer, source, stage->image.image, swapchain->swapchain_extent, filter);
@@ -197,6 +200,16 @@ PresentationScaleStatus PresentationScalerBlitFinalImage(CommandBuffer* command_
 		return PresentationScaleStatus::UnsupportedDestinationFormat;
 	}
 
+	if (Config::GetPresentationFilter() == Config::PresentationFilter::Fsr &&
+	    PresentationFsrApplies(source->extent, destination->swapchain_extent))
+	{
+		// The passes encode and decode sRGB themselves, so no encode stage is needed.
+		return PresentationFsrRecord(command_buffer, context, source, destination->swapchain_images[destination->current_index],
+		                             destination->swapchain_extent, destination->swapchain_format,
+		                             Config::GetPresentationFsrSharpness(), &destination->fsr_stage)
+		           ? PresentationScaleStatus::Success
+		           : PresentationScaleStatus::UnsupportedFilter;
+	}
 	if (!PresentationNeedsEncodeStage(source->format, destination->swapchain_format))
 	{
 		UtilBlitImage(command_buffer, source, destination, filter);

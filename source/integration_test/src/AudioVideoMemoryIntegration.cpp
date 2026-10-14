@@ -1,3 +1,5 @@
+#include "Kyty/Core/VirtualMemory.h"
+
 #include "Emulator/VideoFrameMemory.h"
 
 #include <cstddef>
@@ -10,15 +12,17 @@ namespace {
 
 struct CallbackLog
 {
-	uint32_t register_count   = 0;
-	uint32_t unregister_count = 0;
-	uint32_t write_count      = 0;
-	uint64_t register_base    = 0;
-	size_t   register_size    = 0;
-	uint32_t register_pitch   = 0;
-	uint64_t unregister_base  = 0;
-	uint64_t write_base       = 0;
-	uint64_t write_size       = 0;
+	uint32_t register_count         = 0;
+	uint32_t unregister_count       = 0;
+	uint32_t write_count            = 0;
+	uint64_t register_base          = 0;
+	size_t   register_size          = 0;
+	uint32_t register_pitch         = 0;
+	uint64_t register_identity_base = 0;
+	uint64_t register_identity_size = 0;
+	uint64_t unregister_base        = 0;
+	uint64_t write_base             = 0;
+	uint64_t write_size             = 0;
 };
 
 CallbackLog g_log {};
@@ -32,12 +36,23 @@ bool Check(bool condition, const char* message)
 	return condition;
 }
 
-void RecordLinearFrame(uint64_t base, size_t size, uint32_t pitch)
+bool RecordLinearFrame(uint64_t base, size_t size, uint32_t pitch, const Kyty::Core::VirtualMemory::GuestMappingIdentitySnapshot& identity)
 {
 	g_log.register_count++;
-	g_log.register_base  = base;
-	g_log.register_size  = size;
-	g_log.register_pitch = pitch;
+	g_log.register_base          = base;
+	g_log.register_size          = size;
+	g_log.register_pitch         = pitch;
+	g_log.register_identity_base = identity.address;
+	g_log.register_identity_size = identity.size;
+	return true;
+}
+
+void RegisterTestFrame(uint64_t base, size_t size, uint32_t pitch)
+{
+	Kyty::Core::VirtualMemory::GuestMappingIdentitySnapshot identity {};
+	identity.address = base;
+	identity.size    = size;
+	(void)VideoFrameMemory::RegisterLinearFrame(base, size, pitch, identity);
 }
 
 void RecordUnregisterFrame(uint64_t base)
@@ -55,18 +70,18 @@ void RecordHostWrite(uint64_t base, uint64_t size)
 
 bool CallbackContract()
 {
-	constexpr uint64_t frame_base = 0x0000'0000'0010'0000ull;
-	constexpr size_t   frame_size = 0x3000u;
+	constexpr uint64_t frame_base  = 0x0000'0000'0010'0000ull;
+	constexpr size_t   frame_size  = 0x3000u;
 	constexpr uint32_t frame_pitch = 1920u;
-	constexpr uint64_t write_base = frame_base + 0x80u;
-	constexpr uint64_t write_size = 512u;
+	constexpr uint64_t write_base  = frame_base + 0x80u;
+	constexpr uint64_t write_size  = 512u;
 
 	if (!Check(VideoFrameMemory::InstallCallbacks({}), "could not establish no-op callbacks"))
 	{
 		return false;
 	}
 
-	VideoFrameMemory::RegisterLinearFrame(frame_base, frame_size, frame_pitch);
+	RegisterTestFrame(frame_base, frame_size, frame_pitch);
 	VideoFrameMemory::UnregisterFrame(frame_base);
 	VideoFrameMemory::NotifyHostWrite(write_base, write_size);
 	if (!Check(g_log.register_count == 0 && g_log.unregister_count == 0 && g_log.write_count == 0,
@@ -80,7 +95,7 @@ bool CallbackContract()
 	{
 		return false;
 	}
-	VideoFrameMemory::RegisterLinearFrame(frame_base, frame_size, frame_pitch);
+	RegisterTestFrame(frame_base, frame_size, frame_pitch);
 	if (!Check(g_log.register_count == 0, "rejected partial callback installation changed dispatch"))
 	{
 		return false;
@@ -92,17 +107,17 @@ bool CallbackContract()
 		return false;
 	}
 
-	VideoFrameMemory::RegisterLinearFrame(frame_base, frame_size, frame_pitch);
+	RegisterTestFrame(frame_base, frame_size, frame_pitch);
 	VideoFrameMemory::UnregisterFrame(frame_base);
 	VideoFrameMemory::NotifyHostWrite(write_base, write_size);
 	if (!Check(g_log.register_count == 1 && g_log.register_base == frame_base && g_log.register_size == frame_size &&
-	               g_log.register_pitch == frame_pitch,
+	               g_log.register_pitch == frame_pitch && g_log.register_identity_base == frame_base &&
+	               g_log.register_identity_size == frame_size,
 	           "linear-frame callback did not receive its exact range"))
 	{
 		return false;
 	}
-	if (!Check(g_log.unregister_count == 1 && g_log.unregister_base == frame_base,
-	           "unregister callback did not receive its exact base"))
+	if (!Check(g_log.unregister_count == 1 && g_log.unregister_base == frame_base, "unregister callback did not receive its exact base"))
 	{
 		return false;
 	}
@@ -116,7 +131,7 @@ bool CallbackContract()
 	{
 		return false;
 	}
-	VideoFrameMemory::RegisterLinearFrame(frame_base, frame_size, frame_pitch);
+	RegisterTestFrame(frame_base, frame_size, frame_pitch);
 	VideoFrameMemory::UnregisterFrame(frame_base);
 	VideoFrameMemory::NotifyHostWrite(write_base, write_size);
 	return Check(g_log.register_count == 1 && g_log.unregister_count == 1 && g_log.write_count == 1,

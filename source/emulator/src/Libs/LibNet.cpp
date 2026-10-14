@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <iterator>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -575,6 +576,7 @@ struct Http2Options
 	void*    ssl_callback_arg {};
 	void*    redirect_callback {};
 	void*    redirect_callback_arg {};
+	int      cookie_box_id {};
 };
 
 struct Http2Context
@@ -673,9 +675,12 @@ struct Http2Registry
 	int                          next_context_id  = 1;
 	int                          next_template_id = 1;
 	int                          next_request_id  = 1;
+	int                          next_cookie_box_id = 1;
 	std::map<int, Http2Context>  contexts;
 	std::map<int, Http2Template> templates;
 	std::map<int, Http2Request>  requests;
+	// Created cookie boxes; no cookie is stored, since no request reaches a server.
+	std::set<int>                cookie_boxes;
 };
 
 Http2Registry g_http2_registry;
@@ -830,6 +835,36 @@ static int KYTY_SYSV_ABI Http2SetAuthEnabled(int id, int enabled)
 	}
 
 	options->auth_enabled = enabled != 0;
+	return 0;
+}
+
+// Titles create one box and attach it to their templates. The argument they pass is
+// a constant (0x80000), not the id of their libhttp2 context; nothing here reads it.
+static int KYTY_SYSV_ABI Http2CreateCookieBox(uint64_t arg)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t arg = 0x%016" PRIx64 "\n", arg);
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	const int       cookie_box_id = g_http2_registry.next_cookie_box_id++;
+	g_http2_registry.cookie_boxes.insert(cookie_box_id);
+	return cookie_box_id;
+}
+
+static int KYTY_SYSV_ABI Http2SetCookieBox(int id, int cookie_box_id)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t id            = %d\n", id);
+	KYTY_LOG_DEBUG("\t cookie_box_id = %d\n", cookie_box_id);
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto*           options = FindOptions(id);
+	if (options == nullptr || g_http2_registry.cookie_boxes.count(cookie_box_id) == 0)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+
+	options->cookie_box_id = cookie_box_id;
 	return 0;
 }
 
@@ -1258,6 +1293,8 @@ LIB_DEFINE(InitNet_1_Http2)
 	LIB_FUNC("FSAFOzi0FpM", LibHttp2::Http2SetRequestContentLength);
 	LIB_FUNC("jjFahkBPCYs", LibHttp2::Http2SetAuthEnabled);
 	LIB_FUNC("5VlQSzXW-SQ", LibHttp2::Http2CookieFlush);
+	LIB_FUNC("N4UfjvWJsMw", LibHttp2::Http2CreateCookieBox);
+	LIB_FUNC("jrVHsKCXA0g", LibHttp2::Http2SetCookieBox);
 	LIB_FUNC("b9AvoIaOuHI", LibHttp2::Http2SetAutoRedirect);
 	LIB_FUNC("uRosf8GQbHQ", LibHttp2::Http2SetInflateGzipEnabled);
 	LIB_FUNC("B37SruheQ5Y", LibHttp2::Http2SslDisableOption);

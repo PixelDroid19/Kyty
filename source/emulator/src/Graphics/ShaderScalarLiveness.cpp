@@ -1,5 +1,7 @@
 #include "Emulator/Graphics/ShaderScalarLiveness.h"
 
+#include "ShaderNativeWaveInternal.h"
+
 #include <algorithm>
 #include <array>
 #include <memory>
@@ -30,6 +32,17 @@ void AddRange(const ShaderOperand& operand, Sgprs* set)
 	}
 }
 
+// A wave32 lane mask is one SGPR: a compare or carry-out names an SGPR pair
+// but writes only its low dword.
+void AddDefinition(ShaderOperand operand, bool wave32_mask, Sgprs* set)
+{
+	if (wave32_mask && operand.size == 2)
+	{
+		operand.size = 1;
+	}
+	AddRange(operand, set);
+}
+
 bool IsBranch(ShaderInstructionType type)
 {
 	switch (type)
@@ -57,7 +70,7 @@ struct ScalarFlow
 };
 
 // Operand-derived SGPR uses/defs and successors; false when unresolvable.
-bool BuildScalarFlow(const ShaderCode& code, ScalarFlow* flow)
+bool BuildScalarFlow(const ShaderCode& code, uint32_t guest_wave_size, ScalarFlow* flow)
 {
 	const auto&    instructions = code.GetInstructions();
 	const uint32_t count        = instructions.Size();
@@ -89,8 +102,9 @@ bool BuildScalarFlow(const ShaderCode& code, ScalarFlow* flow)
 		{
 			AddRange(inst.mimg_address[a], &uses[i]);
 		}
-		AddRange(inst.dst, &defs[i]);
-		AddRange(inst.dst2, &defs[i]);
+		const bool wave32_mask = guest_wave_size == 32u && ShaderNativePackedResult(inst);
+		AddDefinition(inst.dst, wave32_mask, &defs[i]);
+		AddDefinition(inst.dst2, wave32_mask, &defs[i]);
 		if (inst.type == ShaderInstructionType::SEndpgm)
 		{
 			continue;
@@ -120,7 +134,7 @@ bool BuildScalarFlow(const ShaderCode& code, ScalarFlow* flow)
 	return true;
 }
 
-Sgprs ComputeSgprsLiveAtEntry(const ShaderCode& code)
+Sgprs ComputeSgprsLiveAtEntry(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	const uint32_t count = code.GetInstructions().Size();
 	Sgprs          all;
@@ -130,7 +144,7 @@ Sgprs ComputeSgprsLiveAtEntry(const ShaderCode& code)
 	{
 		return {};
 	}
-	if (!BuildScalarFlow(code, &flow))
+	if (!BuildScalarFlow(code, guest_wave_size, &flow))
 	{
 		return all;
 	}
@@ -191,13 +205,13 @@ void ApplyCopies(const ShaderInstruction& inst, const Sgprs& defs, const Sources
 
 // Must-analysis over the decoded CFG: an SGPR has a source only when every
 // path reaching the instruction leaves the same entry value in it.
-std::vector<Sources> ComputeSgprEntrySources(const ShaderCode& code)
+std::vector<Sources> ComputeSgprEntrySources(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	const uint32_t count = code.GetInstructions().Size();
 	Sources        unknown {};
 	unknown.fill(kShaderSgprNoEntrySource);
 	ScalarFlow flow;
-	if (count == 0 || !BuildScalarFlow(code, &flow))
+	if (count == 0 || !BuildScalarFlow(code, guest_wave_size, &flow))
 	{
 		return std::vector<Sources>(count, unknown);
 	}
@@ -275,8 +289,9 @@ std::vector<Sgprs> HoldingOwnEntryValue(const std::vector<Sources>& sources)
 // fields are visited without materializing the signature: once to hash, and
 // once more to compare against a stored candidate.
 template <typename Visitor>
-void VisitFlowSignature(const ShaderCode& code, Visitor&& visit)
+void VisitFlowSignature(const ShaderCode& code, uint32_t guest_wave_size, Visitor&& visit)
 {
+	visit(static_cast<int64_t>(guest_wave_size));
 	const auto operand = [&visit](const ShaderOperand& op)
 	{
 		visit(static_cast<int64_t>(op.type));
@@ -303,13 +318,13 @@ void VisitFlowSignature(const ShaderCode& code, Visitor&& visit)
 	}
 }
 
-uint64_t FlowSignatureHash(const ShaderCode& code)
+uint64_t FlowSignatureHash(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	XXH3_state_t state;
 	XXH3_64bits_reset(&state);
 	std::array<int64_t, 64> pending {};
 	size_t                  count = 0;
-	VisitFlowSignature(code,
+	VisitFlowSignature(code, guest_wave_size,
 	                   [&](int64_t value)
 	                   {
 		                   pending[count++] = value;
@@ -323,19 +338,19 @@ uint64_t FlowSignatureHash(const ShaderCode& code)
 	return XXH3_64bits_digest(&state);
 }
 
-std::vector<int64_t> FlowSignature(const ShaderCode& code)
+std::vector<int64_t> FlowSignature(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	std::vector<int64_t> signature;
 	signature.reserve(static_cast<size_t>(code.GetInstructions().Size()) * 12u);
-	VisitFlowSignature(code, [&signature](int64_t value) { signature.push_back(value); });
+	VisitFlowSignature(code, guest_wave_size, [&signature](int64_t value) { signature.push_back(value); });
 	return signature;
 }
 
-bool FlowSignatureEquals(const ShaderCode& code, const std::vector<int64_t>& signature)
+bool FlowSignatureEquals(const ShaderCode& code, uint32_t guest_wave_size, const std::vector<int64_t>& signature)
 {
 	size_t index = 0;
 	bool   equal = true;
-	VisitFlowSignature(code,
+	VisitFlowSignature(code, guest_wave_size,
 	                   [&](int64_t value)
 	                   {
 		                   equal = equal && index < signature.size() && signature[index] == value;
@@ -351,33 +366,33 @@ struct FlowSummary
 };
 
 // The CP thread analyzes the same programs every draw; keep the results.
-std::shared_ptr<const ShaderScalarFlow> SummaryOf(const ShaderCode& code)
+std::shared_ptr<const ShaderScalarFlow> SummaryOf(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	constexpr size_t kMaxPrograms = 4096;
 	static std::mutex                                     mutex;
 	static std::unordered_multimap<uint64_t, FlowSummary> summaries;
-	const uint64_t                                        key = FlowSignatureHash(code);
+	const uint64_t                                        key = FlowSignatureHash(code, guest_wave_size);
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		const auto [first, last] = summaries.equal_range(key);
 		for (auto it = first; it != last; ++it)
 		{
-			if (FlowSignatureEquals(code, it->second.signature))
+			if (FlowSignatureEquals(code, guest_wave_size, it->second.signature))
 			{
 				return it->second.flow;
 			}
 		}
 	}
-	auto entry_sources = ComputeSgprEntrySources(code);
+	auto entry_sources = ComputeSgprEntrySources(code, guest_wave_size);
 	auto holding       = HoldingOwnEntryValue(entry_sources);
 	auto flow          = std::make_shared<ShaderScalarFlow>(
-        ShaderScalarFlow {ComputeSgprsLiveAtEntry(code), std::move(entry_sources), std::move(holding)});
+        ShaderScalarFlow {ComputeSgprsLiveAtEntry(code, guest_wave_size), std::move(entry_sources), std::move(holding)});
 	std::lock_guard<std::mutex> lock(mutex);
 	if (summaries.size() >= kMaxPrograms)
 	{
 		summaries.clear();
 	}
-	summaries.emplace(key, FlowSummary {FlowSignature(code), flow});
+	summaries.emplace(key, FlowSummary {FlowSignature(code, guest_wave_size), flow});
 	return flow;
 }
 
@@ -385,22 +400,22 @@ std::shared_ptr<const ShaderScalarFlow> SummaryOf(const ShaderCode& code)
 
 Sgprs ShaderSgprsLiveAtEntry(const ShaderCode& code)
 {
-	return SummaryOf(code)->live_at_entry;
+	return SummaryOf(code, 64u)->live_at_entry;
 }
 
 std::vector<Sgprs> ShaderSgprsHoldingEntryValue(const ShaderCode& code)
 {
-	return SummaryOf(code)->holding_entry_value;
+	return SummaryOf(code, 64u)->holding_entry_value;
 }
 
 std::vector<ShaderSgprEntrySources> ShaderSgprEntrySourcesAt(const ShaderCode& code)
 {
-	return SummaryOf(code)->entry_sources;
+	return SummaryOf(code, 64u)->entry_sources;
 }
 
-std::shared_ptr<const ShaderScalarFlow> ShaderScalarFlowOf(const ShaderCode& code)
+std::shared_ptr<const ShaderScalarFlow> ShaderScalarFlowOf(const ShaderCode& code, uint32_t guest_wave_size)
 {
-	return SummaryOf(code);
+	return SummaryOf(code, guest_wave_size == 32u ? 32u : 64u);
 }
 
 } // namespace Kyty::Libs::Graphics

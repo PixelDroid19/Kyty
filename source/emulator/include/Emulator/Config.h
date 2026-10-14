@@ -53,10 +53,31 @@ enum class RenderResolutionMode
 	Fixed
 };
 
+// Which guest render targets a Fixed render resolution may scale. Display
+// covers the display buffers and their depth; RenderTargets also covers
+// offscreen color targets at the guest display extent.
+enum class RenderResolutionScope
+{
+	Display,
+	RenderTargets
+};
+
 enum class PresentationFilter
 {
 	Linear,
-	Nearest
+	Nearest,
+	Fsr
+};
+
+// Host texture filtering override. Guest keeps each sampler's own anisotropy;
+// a level raises linear-minified samplers to at least that ratio.
+enum class TextureAnisotropy
+{
+	Guest,
+	X2,
+	X4,
+	X8,
+	X16
 };
 
 void Load(const ConfigSource& cfg);
@@ -75,9 +96,12 @@ bool     IsInitialized();
 uint32_t GetScreenWidth();
 uint32_t GetScreenHeight();
 RenderResolutionMode GetRenderResolutionMode();
+RenderResolutionScope GetRenderResolutionScope();
 uint32_t GetRenderResolutionWidth();
 uint32_t GetRenderResolutionHeight();
 PresentationFilter GetPresentationFilter();
+uint32_t GetPresentationFsrSharpness();
+TextureAnisotropy GetTextureAnisotropy();
 bool     IsNeo();
 bool     IsNextGen();
 bool     VulkanValidationEnabled();

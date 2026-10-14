@@ -9,6 +9,2489 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: title screen save cards (2026-10-14, open)
+
+- Observed (Intel A770, strict, `generic` route, 390 s, no error): the title
+  screen shows the warp background, the logo and the top save card with its
+  "NEW GAME" pill. The two lower save cards stay black and a faint second
+  logo remains. Reference imagery of the same screen shows three lit cards
+  and no second logo.
+- Localized: the tiled light classification dispatch (120x68 groups) writes
+  an empty light list for every tile. Its output was read through the
+  current-guest-bytes path and is a fact. An offline evaluation of its inputs
+  passes 0 of 8,040 tiles; the angle term is the failing predicate because
+  the half-resolution normal buffer read back as a constant flat normal.
+  That readback is not reliable (next item), so constant normals are an
+  unverified cause.
+- Diagnostic caveat: the debug image dump (`UtilDumpVulkanImageRgba8Png`)
+  reads back through its own utility command buffer and does not submit the
+  recording in progress, and the per-frame bound-image dump is overwritten
+  by the last bind of the frame. State read this way shows an earlier point
+  of the frame, not the bind being studied. Use `docs/graphics-captures.md`
+  or a readback at a submission boundary when in-frame order matters.
+- Observed only through the debug image dump (not in-frame ordered, so
+  not exclusions): the temporal antialiasing output and its history image
+  are already black on the lower cards, and so is the HDR scene target
+  except near the ring.
+- Excluded:
+  - The stencil plane read by the lighting passes, as cause of the black
+    cards and the second logo. The guest clears the plane (2048x1280, 8-bit)
+    with the uniform fill kernel each frame. Its stencil writes on that depth
+    target use ALWAYS, REPLACE_TEST 128 and write mask 0x80; a capped probe
+    of every depth state on the target over 200 s saw no other writing
+    state. Four lighting dispatches sample it; the half-resolution normal
+    encoder and the light classifier do not read it at all, so the empty
+    light lists do not depend on it. With d72457e5 (fill clears
+    the host stencil, confirmed on every frame) and 55cd634d (the 8_UINT
+    sample binds the device stencil, confirmed by the sample bind catalog),
+    the screen is unchanged on Intel.
+  - Ordering between the dispatches: memory barriers separate them in the
+    command stream.
+  - Translation of the classifier's control flow switch, `ds_append`,
+    `vcc_hi` and `v_mbcnt` (checked against the ISA).
+  - A render-target/storage alias of the normal buffer: its writer and all
+    four readers bind the same exact storage view, with no older alias.
+  - The G-buffer pass: MRT export translation (compressed, MRT0-4), per-MRT
+    write masks (0xf, blending off) and depth-stencil state (LEQUAL with
+    write) are correct. Its stencil state is the ALWAYS / REPLACE_TEST 128 /
+    mask 0x80 state above; an earlier note of EQUAL, REPLACE, reference 4 is
+    not supported by the register probe.
+  - An earlier exclusion that read a 1x1x1 indirect dispatch as "counter 0"
+    was flawed: it used stale indirect arguments (fixed below).
+- Changes made while localizing (none changes this screen visibly):
+  - c8e3537c: an exact storage texture lookup returns the view with the
+    newest storage write among all views of that range, instead of the first
+    listed one; a recycled range can hold views in several formats.
+  - 6d1b178d: dispatch-indirect arguments are read only after any GPU writer
+    in the recording or on another queue has published them.
+  - 55565820: a depth-only clear of a D32S8 target loads stencil instead of
+    discarding it (depth and stencil load operations are independent).
+  - 18d6e5be: HTILE clears done by the generic uniform fill kernel are
+    published in recording order, and the clear word `0xfffffff0` (ZMask 0,
+    maximum Z 1.0 in both HTILE layouts, SMem 3 with stencil tiling) is
+    translated to a depth clear when DB_DEPTH_CLEAR is 1.0. On this screen
+    the G-buffer depth clear (D32S8) is now consumed at the next bind; D16
+    and D32 targets translate as well.
+- Verified on the final tree: robot platformer (Intel, 390 s) same state, no
+  error. Racing title (Intel, 125 s twice and 200 s): no error, in-race
+  present rate 38-40, inside the 34-45 range of the 13-14 October runs; a
+  temporary counter showed it never takes the dispatch-indirect path. 2D
+  action title (AMD, 120 s): no error, gameplay without trails or white-out,
+  29-30 presents/s. Fishing title (AMD, 200 s): no error, reaches frame 3,093
+  against 2,008 for the earlier baseline in the same time, 5-8 presents/s
+  against 4-6. Watercolour platformer (AMD, 90 s): same captures and rates
+  (72.5 and 38.5). Unit tests: 2,419 pass. Table and boundary gates pass.
+  `kyty_playable_regression.py` reports `honest_skip_no_guest_root` here (no
+  local profile or guest root); it must run without `python3 -I` because it
+  imports a sibling module.
+- Robot platformer on AMD (390 s, no error) on d72457e5..5236078d: 3.3-4.2
+  presents/s on the title screen, then about 0.4 once the next scene loads,
+  as on 13 October; it reaches frame 888 at the seventh capture against 865
+  before, and the last captures show the tunnel instead of black. The
+  racing, 2D action, fishing and watercolour titles show no regression on
+  that range (in-race 34-43 on Intel; 28-29, 5-7 and 68/43 presents/s on
+  AMD).
+- Open defects found here:
+  - A guest compute fill of the stencil part of HTILE is not applied to the
+    host stencil plane: `DepthMetaComputeFillTranslatable`
+    (`GraphicsRenderAttachments.cpp:500`) only translates depth. This title
+    clears the stencil plane itself and its HTILE word marks stencil
+    expanded (SMem 3), so no SMem-cleared word has been observed yet.
+    Direction: translate SMem-cleared words to a stencil clear when the
+    stencil clear register agrees.
+  - `FindDepthStencil` (`GraphicsRenderDescriptor.cpp:1535`) asks for the
+    first object only, so a recycled range with depth views in two formats
+    can bind the stale one, as storage textures did before c8e3537c.
+    Direction: pick the most recently written view.
+  - `CommandProcessor::DrawIndexIndirect` (`GraphicsRun.cpp:2115`) waits only
+    for device-address write-backs before its CPU read of the arguments, so
+    a draw whose arguments an earlier dispatch of the same recording wrote
+    can use stale counts. Direction: the same admission as 6d1b178d.
+  - Exact storage views are not separated by image type; a 2D/3D filter was
+    tried and dropped because no failure needs it.
+
+## Font library: guest outline rasterization (2026-10-14)
+
+- Observed: on the robot platformer's title screen the "NEW GAME" pill drew
+  its text as solid squares.
+- Cause: glyph rendering filled every glyph box with full coverage and
+  reported synthetic metrics.
+- Change (8630816f): fonts opened from guest memory decode their TrueType
+  or CFF outlines with the public-domain `stb_truetype` header. Metrics,
+  horizontal layout and coverage come from the face; missing glyphs,
+  unsupported surfaces and unreadable fonts return the library error codes.
+- Verified: Intel robot platformer title screen shows "NEW GAME 1" and
+  "NEW GAME 2" as text. Unit tests: 2,419 pass.
+- Open: system font sets are opened by type and carry no guest bytes, so
+  their handles have no face. Their glyph queries report NO_SUPPORT_GLYPH and
+  `FontGetHorizontalLayout` returns placeholder values (`LibFont.cpp:491`).
+  `FontGetVerticalLayout` (`LibFont.cpp:519`) is synthetic for every font.
+  Real values need the system font set's face, which would come from a
+  user-provided font directory (never committed).
+
+## Robot platformer: vertex attribute format words (2026-10-14)
+
+- Observed: the flat blue streak shapes over the warp tunnel (open item of
+  the entry below) come from additive particle draws whose pixel program
+  receives NaN in every interpolant. A temporary NaN-count probe in the
+  pixel program showed NaN in all 2.8 million fragments of one draw; the
+  NaN came from the vertex program's exported parameters, which all derive
+  from a normalized attribute.
+- Cause: the vertex attribute control word carries a format override in
+  bits 5..13, laid out as `(buffer data format << 2) | (components - 1)`.
+  The guest's own fetch code decodes it that way (`s_bfe_u32` of bits 5..6
+  for the component count, 7..13 for the format, then a DST_SEL table
+  X001/XY01/XYZ1/XYZW). Kyty matched the whole 9-bit field against a
+  partial table plus a raw-format-id fallback, and kept the V# format for
+  anything else. The normal (`0x10b`, 16_16_16_16_SNORM, 4 components) was
+  therefore fetched as 32_32_32_FLOAT. `0xcb` (2_10_10_10_UNORM) and
+  `0x117` (16_16_16_16_UINT) were also silently replaced.
+- Change (4ea75ee0): decode format and component count separately, take
+  the DST_SEL from the component count, and refuse an override whose format
+  has no vertex input mapping (the "keep the V# format" path and the raw-id
+  fallback are removed). The Gen5 vertex format table now lists every float,
+  normalized and unsigned format of the ISA format table that has a
+  mandatory Vulkan vertex-buffer equivalent. Signed-integer and scaled
+  formats stay unmapped until the input path models them.
+- Verified (Intel A770, strict, `generic` route, 330 s, no error): the warp
+  tunnel shows thin lit streaks with no flat shapes; the studio logo, title
+  logo and the ship are visible. Distinct override fields seen in that run:
+  `0x05d 0x0cb 0x0e3 0x101 0x10b 0x117 0x11f 0x12a 0x137`. Racing title
+  (Intel, 125 s), fishing title (AMD, 200 s) and watercolour platformer
+  (AMD, 90 s): no error, same states as the baselines; all three use only
+  field 0 (the V# format), so the decode change does not touch them. Unit
+  tests: 2,419 pass. Table and boundary gates pass.
+- Open: an override with fewer components than its format (for example
+  `0x10a`, four-component storage read as XYZ1) is refused by the vertex
+  input layout when the shader reads four registers; not seen in a live run.
+
+## Robot platformer: exposure fill and DCC metadata clears (2026-10-14)
+
+- Observed: after `TUNNEL_ENABLE` the Intel intro showed only the UI over a
+  black scene, with stale publisher text and a smeared logo. Bound-image
+  readbacks at present 1400 showed the 3D scene rendered correctly into its
+  2432x1368 RGBA16F targets (space backdrop, streaks, the console-shaped
+  ship). So the black came from the final composite, not from skipped
+  geometry.
+- Cause 1, exposure: the composite pixel program multiplies the tonemapped
+  scene by an exposure read from a 1x1 RGBA32F storage image. The guest
+  resets the exposure state each frame with the uniform compute fill kernel,
+  `(1, -1, 0.5, 0.18)`. The fill decoder refused RGBA32F, so the sampled
+  texture stayed zero and the exposure pass wrote zero. Fixed in 582c6662: a
+  16-byte texel is the fill quad itself.
+- Cause 2, UI layer: the UI target (3840x2160 RGBA16F, DCC on) has its
+  metadata filled with key `0x40` (color 0, alpha 1, per the Mesa
+  `ac_descriptors.h` keys) before the UI draws. Kyty ignored metadata fills,
+  so the UI accumulated earlier frames. The composite uses the UI alpha as
+  scene transmittance, so the accumulated UI also hid the scene.
+- Cause 3, lighting: the lighting target's metadata is filled with `0x00` and
+  four lighting compute passes then write the target as a storage image
+  before its first render-target bind. Consuming the clear at that bind
+  erased the lighting and left the ship as a black silhouette.
+- Change (fabd1ecb, contract in `docs/graphics-compute-uniform-color-fill.md`):
+  - A metadata fill with a clear key is a pending clear.
+  - The first access consumes it before the access happens: a render target
+    with that DCC base, or a shader image, read or written, whose T# enables
+    compression with that metadata base.
+  - It is applied only to single-level, single-slice, single-sample surfaces
+    whose fill holds one key per 256 bytes of texels.
+- Verified (Intel A770, strict, `generic` route, 330 s, no error, 1,482
+  frames): the captures show the publisher text, the studio logo over the warp
+  tunnel, the title logo and the lit ship. A diagnostic run of the same
+  tree applied seven metadata clears in present 1400. Racing title (Intel,
+  125 s), fishing title and watercolour platformer (AMD, 200 s and 90 s): no
+  error, and the same states as the 1d692f53 baselines. The fishing title
+  keeps its in-game rate (about 150 frames per 26-30 s capture interval in
+  both runs). Unit tests: 2,418 pass, 12 skipped, 0 failures. Table and
+  boundary gates pass.
+- Open, found while verifying:
+  - Flat blue streak shapes cover the scene (fixed: see "Robot platformer:
+    vertex attribute format words"). They are drawn by instanced
+    particle draws (48 vertices x 150 and x 300 instances) into the 1920x1080
+    effect layer and the 960x540 half-resolution layer, and composited by the
+    pass that writes the scene before TAA. The shapes exist with and without
+    the metadata clears; only their color changes.
+  - Some frames show a black top-left quadrant in the half-resolution layer
+    (960x540 written into a 1920x1080 surface).
+  - The skip prompt's text is drawn as filled squares.
+  - Not modelled: the pipe-dependent padding of the metadata plane, mip
+    chains, arrays, MSAA, reversed component swaps, and register-key clears
+    read through the texture unit.
+
+## Robot platformer: Gen5 dispatch TUNNEL_ENABLE (2026-10-13)
+
+- Observed: with the 64-entry table, a 600 s Intel run passed the title
+  screen and loaded the intro level. It stopped at 461 s on
+  `compute dispatch admission rejected: mode=0x0000a041
+  reason=unsupported_dispatch_mode` (`GraphicsRenderDraw.cpp`). The
+  initiator is COMPUTE_SHADER_EN, ORDER_MODE and CS_W32_EN plus bit 13.
+- Contract:
+  - The GFX10.3 register header (`gc_10_3_0_sh_mask.h`, Linux amdgpu) names
+    bit 13 of COMPUTE_DISPATCH_INITIATOR `TUNNEL_ENABLE`.
+  - A Mesa Vulkan driver sets it on every GFX10+ dispatch and says the
+    vendor's own driver does too. The kernel driver honours it only on
+    high-priority compute queues; elsewhere it is a no-op. It asks the
+    scheduler to prioritise the dispatch's waves and does not change
+    groups, lanes or results.
+- Change: `ShaderComputeDispatchExecutionMode` clears `TUNNEL_ENABLE` on
+  Gen5 before the dispatch plan, the lane order and the input info see the
+  mode. Every other unknown bit stays refused. Gen4 is unchanged.
+- Verified:
+  - Intel robot platformer: 723 s with no error, 1,989 frames. The intro
+    level starts (`Level has started: intro_next`). The captures show the
+    title menu (logo and buttons) over a black scene, with the publisher
+    logo text still drawn under it; the intro level is dark. That is the
+    next problem.
+  - The guest logs `JsParticle heap memory is full!` from the intro level
+    on (32 lines). Not investigated.
+  - Intel racing title: 14.9k / 19.4k / 24.9k / 25.7k frames, no error
+    (previous run 25.6k).
+  - Unit tests: the 154 compute-wave and dispatch tests pass.
+
+## Robot platformer: 64-entry shader texture table (2026-10-13)
+
+- Observed: after the storage-image alias fix, the Intel run stopped at
+  253 s on `shader texture resource capacity exceeded`
+  (`ShaderGetTextureBuffer`, `Shader.cpp:2181`). The table held 32 entries.
+  The stopping pixel program reads 43 distinct non-empty 8-dword image
+  descriptors. 40 of them are in the extended user data, each read by a
+  constant-offset `s_load_dwordx8`; the program has no dynamic descriptor
+  loads. So the guest really binds more than 32 images in one stage.
+- Host limits: `maxPerStageDescriptorSampledImages` is 33,554,432 on the
+  Intel A770 (ANV) and 8,388,606 on the AMD Raphael iGPU (RADV). The table
+  size is a host bookkeeping cap, not a Vulkan limit.
+- Change (`Shader.h`): `ShaderTextureResources::RES_MAX` is 64. The
+  storage-image write-only and seed-skip masks, which hold one bit per table
+  entry, become `uint64_t` (`Shader.cpp`, `GraphicsRenderDraw.cpp`,
+  `GraphicsRenderBind.cpp`, `GraphicsRenderInternal.h`). The descriptor-cache
+  arrays and the metadata push-constant bound follow `RES_MAX`.
+- Verified:
+  - Intel robot platformer: past the stop, 300 s with no error, 1,287
+    frames at 2.9-7.2 fps. The captures still show the dark loading screen.
+  - Intel racing title: 15.3k / 18.1k / 24.5k / 25.6k frames, at or above
+    the previous run.
+  - AMD (RADV): racing title 9.9k frames, unchanged; watercolour platformer
+    3.4k and 3.9k frames.
+  - AMD fishing title, same tree and route, 200 s. Steady rate is frames per
+    30 s over the last three capture intervals:
+
+    | Table size | Perf counters | Final frame | Steady rate |
+    | --- | --- | --- | --- |
+    | 32 | on | 2,860 | 188-207 |
+    | 64 | on | 2,304 (slow load) | 192-196 |
+    | 64 | off | 2,792 / 2,814 / 2,858 | 136-225 |
+
+    The two sizes overlap. Runs on earlier binaries reached 3,058-3,106
+    frames at 206-238 frames per 30 s. That gap is not attributed:
+    - The storage-image alias change only replaces an EXIT that this title
+      never reached.
+    - Foreign processes loaded the host during some of the later runs
+      (load average 4-12).
+    - A repeat on HEAD under a load average of 12 gave 141-152 frames per
+      30 s, so it does not separate the two causes.
+    - The HEAD run before it stalled at frame 3 at boot. That is the known
+      intermittent boot stall, which also reproduces on older binaries.
+  - Unit tests: 2,413 pass. The one failure is the known intermittent
+    `StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
+    timeout (see the 2026-10-11 entry); it passes alone 3/3.
+- Open: per-draw structures grow with the table (`ShaderPixelInputInfo`
+  6,392 bytes, `ShaderVertexInputInfo` 8,984 bytes), and `BindDescriptors`
+  zero-initializes and scans the full arrays rather than the bound counts.
+  No cost was measured above noise.
+
+## Robot platformer: storage image over a sampled and a buffer view (2026-10-13)
+
+- Observed: after the pixel append fix, the Intel run stopped at 228 s on
+  `!create_all_the_same`. The new object is a 128x128 R32 StorageTexture
+  (64 KiB). Its range equals two live objects:
+  - a sampled Texture with the same format, pitch, extent, tile and swizzle,
+    created with its guest upload skipped;
+  - a StorageBuffer of 4,096 16-byte records, uploaded from guest memory,
+    with a write-back, not in use.
+  The single-parent path already links each of these relations
+  (`GpuMemoryAllowsTextureStorageAlias`). The multi-parent path had no rule
+  for mixed parent types, so it reached the EXIT.
+- Change (`GpuMemoryCreate.cpp`): `multi_storage_texture_alias` replaces only
+  that EXIT. It links the new image when every parent independently passes
+  `GpuMemoryAllowsTextureStorageAlias` and has published its content to
+  guest memory: no texture materialized from a device image, and no buffer
+  with an unfinished writable write-back. The image seeds from guest bytes.
+  No earlier branch changes, so titles that did not reach the EXIT keep
+  their path.
+- Verified:
+  - Intel robot platformer, twice: past the overlap, 1,277 frames at
+    3.4-10.9 fps. It stops at 253 s on the 32-entry texture table: the
+    shader declares more read-only texture slots. The 64-entry table entry
+    above takes it past that stop.
+  - Unit tests: 2,414 pass.
+- Open (coherence, not verified):
+  - Storage images have no write-back
+    (`StorageTexture.h:53`).
+  - A buffer write-back does not invalidate a StorageTexture parent
+    (`GpuMemory.h:775`).
+  - So the image's writes do not reach the sampled view (which holds no guest
+    bytes) or the buffer view. The other direction works: a buffer
+    write-back changes guest bytes, and the image's hash check reloads them.
+  - Suggested direction: publish storage-image writes to linked views, by
+    copy or write-back. Judge it with a scored capture of a scene that uses
+    this range.
+
+## Robot platformer: pixel GDS append under the launch EXEC (2026-10-13)
+
+- Observed: the same linked-list pixel program allocates its node slot as
+  `v_mbcnt_hi v7, exec_hi, 0` / `s_mov m0, s20` / `ds_append v6 gds` /
+  `v_mbcnt_lo v0, exec_lo, v7`, before any EXEC write or branch. The
+  program starts with `exp null vm done` and has no `s_wqm`. The native
+  wave proof refused it twice: MBCNT observes EXEC as a number, and a
+  memory write runs while helper lanes are live in the host invocation.
+- Contract:
+  - RDNA2 ISA: EXEC is the wave's valid mask until the program writes it,
+    and `exp ... vm` sends EXEC as the valid mask.
+  - DS_APPEND adds `count_bits(EXEC)` at `M0.base + offset` and returns the
+    pre-op value to every valid lane.
+  - V_MBCNT_HI is a plain source move in Wave32, so MBCNT over EXEC is the
+    exclusive prefix of valid lanes at both widths.
+  - Vulkan: helper invocations have no effect on stores and atomics, and
+    their atomic results are undefined.
+- Change:
+  - `ShaderLaunchExecEnd` marks the first EXEC write or control-flow
+    boundary. `ShaderCountsLaunchExec` accepts only MBCNT_LO/HI over
+    EXEC_LO/EXEC_HI before it.
+  - The partial-wave admission and the fragment mask flow accept those
+    MBCNTs and GDS append/consume (and device memory writes) before that
+    point. LDS and scratch writes stay refused.
+  - Pixel emission builds a valid-pixel ballot (`exec_lane_lo` and not a
+    helper). MBCNT counts it. One valid lane updates the counter by its bit
+    count, and the pre-op value is shuffled to every valid lane.
+  - The GDS pointer SGPR is the M0 source at the GDS instructions, not the
+    last M0 write in the program (here M0 is later reloaded for
+    interpolation).
+- Verified:
+  - The dumped program proves `FragmentPartialWave` at both widths.
+  - Unit tests: admission at both widths; refusal after a branch and for a
+    non-EXEC mask; SPIR-V with one counter atomic, no elect or broadcast,
+    and validated by the toolchain.
+  - Strict AMD (RADV) runs, no error:
+
+    | Title | Frames |
+    | --- | --- |
+    | racing title | 5.6k / 7.5k / 9.3k / 9.9k |
+    | watercolour platformer | 4.1k at 60 s |
+    | fishing title | 2.0k, then 3.1k on a repeat, at 180 s (the first run loaded slower; same steady rate) |
+  - Intel robot platformer: 1,160 frames at 1.8-7.9 fps, past the
+    linked-list program. It stops at 228 s on `!create_all_the_same`: a
+    64 KiB StorageTexture whose range equals a sampled Texture and a
+    StorageBuffer. That is the next stop.
+
+## Robot platformer: image atomic swap with a GLC return (2026-10-13)
+
+- Observed: after the Wave32 OR reductions, the Intel run stopped at
+  `ShaderParseMIMG.cpp:49`. The parser admitted GLC only on
+  IMAGE_ATOMIC_ADD (0x11). The stopping program is a per-pixel linked list:
+  `image_atomic_swap v9, v[0:1], s[0:7] glc` exchanges a new node index into
+  a 2D R32_UINT head image, and the node is written through buffer stores.
+- Contract:
+  - RDNA2 ISA: IMAGE_ATOMIC_SWAP (opcode 15) is `tmp = MEM; MEM = DATA;
+    RETURN = tmp`.
+  - GLC on an atomic selects the pre-op return (ISA 8.1.10).
+  - Load and store cache policy (GLC on non-atomics) is still refused.
+- Change:
+  - `ImageAtomicSwap` is a new instruction type. It shares the parse,
+    admission (`ShaderImageAtomicSupported`), storage-usage and emission
+    paths of IMAGE_ATOMIC_ADD through `ShaderIsImageAtomic`.
+  - `Recompile_ImageAtomic` emits `OpAtomicExchange` or `OpAtomicIAdd` on
+    one R32 texel, in compute and pixel stages.
+- Verified: unit tests cover both opcodes with and without GLC, and the
+  sampler-operand refusal for both.
+
+## Robot platformer: Wave32 whole-wave OR reductions (2026-10-13)
+
+- Observed: once the Wave32 lane masks were narrowed, the Intel pixel
+  program stopped at pc 0x166c with `fragment row DPP source participation is
+  unproven`. The construct is the Wave32 form of the wave64 worldmap
+  reduction:
+  - `s_mov_b32 s32, exec_lo` ... `s_orn2_saveexec_b32 vcc_lo, s32`;
+  - `v_cndmask_b32 v23, 0, v23, s33`, with `s33 = s32 & s64`;
+  - four `v_or_b32` with `row_shr:1/2/4/8`;
+  - `s_mov_b32 exec_lo, vcc_lo`, an unrelated `v_rsq_f32`, then
+    `v_readlane` of lanes 15 and 31 and `s_or_b32`.
+- Contract:
+  - RDNA2 ISA: V_READLANE_B32 takes `lane % 32` in a wave32 and ignores EXEC.
+  - The upper halves of EXEC and VCC are ignored in a wave32.
+  - Row DPP stays within a 16-lane row in both widths.
+- Change:
+  - The neutral-region proof (`ShaderFragmentNeutralRegionEnd`) takes the
+    guest wave size. For Wave32 it accepts the B32 save, ORN2_SAVEEXEC,
+    AND and restore forms on single SGPRs. It runs on the narrowed program,
+    and the select is classified with its encoded pair condition.
+  - Every other region user (tier, partial-wave reads, emitter) still asks
+    for the Wave64 form only. In a Wave64 program a B32 entry widens only
+    EXEC_LO, so it never forms a region.
+  - The reduction proof uses the guest lane count, refuses a constant lane
+    at or above it, and follows the B32 mask algebra for the residual
+    (stale-lane) obligation.
+  - The mask flow result records the guest width it was proven for.
+  - `FragmentPartialWave` is no longer limited to Wave64. Host selection
+    already limits it to host subgroups no wider than the guest wave, so a
+    host invocation id is the guest lane.
+  - At both widths, instructions that name no network register, keep EXEC,
+    and are neither branches nor labels may now sit between the restore and
+    the reads.
+- Verified:
+  - The dumped program now proves `FragmentPartialWave`, with one reduction
+    whose reads cover lanes `0xffff` and `0xffff0000`.
+  - Unit tests: 2,412 pass. New cases:
+    - the Wave32 sequence and its SPIR-V emission;
+    - refusal at Wave64;
+    - refusal for lane 32;
+    - stale lanes after a B32 WQM;
+    - independent versus observing instructions before the reads (Wave64).
+  - Strict AMD (RADV) runs, no error:
+
+    | Title | Frames |
+    | --- | --- |
+    | racing title | 7.6k / 9.4k / 11.2k / 12.0k |
+    | watercolour platformer | 4.1k at 60 s |
+    | fishing title | 3.1k at 180 s |
+- Robot platformer, cold SPIR-V caches:
+  - AMD: 303 s without error, 941 frames at 3.3-5.3 fps, still on the
+    publisher logo. The previous run loaded at about 0.4 fps.
+  - Intel (Arc, no concurrent GPU job): 1,190 frames at 3.5-8.3 fps. It
+    passes the logo into a dark loading transition, then stops at 251 s on
+    `ShaderParseMIMG.cpp:49`: `glc == 1` on a MIMG opcode other than 0x11.
+    That is the next stop.
+
+## Robot platformer: wave32 lane masks are one dword (2026-10-13)
+
+- Observed: after the SDWA fix, the same Intel pixel program (guest wave32)
+  was refused at pc 0xf48 with `reason=mask observed as a number`:
+  - 0xf30 writes a number into `vcc_hi` (`s_bfe_u32`).
+  - 0xf40 runs `v_cmp_eq_u32 vcc, 3, vcc_hi`.
+  - 0xf48 and 0xf5c read `vcc_hi` back as that number.
+  The mask flow had marked both VCC words as lane bits at 0xf40.
+- Contract (RDNA2 ISA 2.1: "the upper half of EXEC and VCC are ignored for
+  wave32 waves"; 3.x: "when used by a wave32, the upper 32 bits of VCC are
+  unused and only the lower 32 bits contribute to VCCZ"):
+  - In a wave32 program, every VALU lane mask is one dword: compare and
+    carry-out destinations, carry-in and the `v_cndmask` condition.
+  - The upper SGPR of the encoded pair is neither written nor read, so it
+    may hold a number across the instruction.
+  - The guest relies on this, as shown above.
+- Implementation:
+  - `ShaderWave32LaneMasks` narrows those operands; `S_BFM_B64` shares the
+    compare format and is excluded.
+  - `ShaderAnalyzeFragmentMaskFlow` takes the guest wave size. At 32 it
+    walks the narrowed program, branches on VCC_LO only, and accepts the B32
+    mask algebra (AND, OR, ANDN2, XOR, ORN2, NOT, MOV, AND_SAVEEXEC) wherever
+    the region rules accepted the B64 forms.
+  - Wave64 behaviour is unchanged.
+  - The emitter already kept the upper word in wave32: `ResolveMaskAccesses`
+    stores only the low ballot word and drops the high-word clear.
+- Next stop: the same program now clears the mask flow and stops at
+  pc 0x166c with `fragment row DPP source participation is unproven`. This
+  is a wave32 whole-wave OR reduction:
+  - `s_orn2_saveexec_b32`, then a `v_cndmask` seed;
+  - four row-DPP `v_or_b32`;
+  - `v_readlane` 15 and 31, then `s_or_b32`.
+  The partial-wave reduction proof (`ShaderFragmentLaneReduction.cpp`)
+  covers only wave64: `S_ORN2_SAVEEXEC_B64`, 64 lanes and B64 mask algebra.
+  Extending it to wave32 (lane sets 0-15 and 16-31) is the direction. The
+  DPP precondition stays: a host shuffle from an inactive or absent lane is
+  undefined.
+- Verified:
+  - The mask flow proof was checked offline on the dumped program.
+  - Unit tests: 2,410 pass. A new case runs the same program at both widths:
+    wave32 keeps the number in VCC_HI, wave64 refuses it. The
+    whole-pair VCC branch case now states the wave32 result.
+  - A temporary per-program check (env-gated, removed) showed that no pixel
+    program of the racing title, the watercolour platformer or the fishing
+    title runs as wave32. Their analysis is unchanged.
+  - Strict regressions on AMD (RADV, warm), no error:
+    - racing title: 5.6k / 7.4k / 9.3k / 10.2k;
+    - watercolour platformer: 3.6k at 60 s;
+    - fishing title: 3.1k at 180 s.
+  - On Intel the three titles ran without new errors, under a concurrent
+    host GPU job on the same device, so their frame rates are not
+    comparable:
+    - One racing title run hit the open intermittent depth-reference
+      refusal recorded below.
+    - One stopped in `String::Size` before the first frame, and did not
+      reproduce on two reruns.
+
+## Robot platformer: SDWA low destination selects (2026-10-13)
+
+- Observed: the Intel stop at pc 0x157c of a 1920x1080 pixel program is
+  `v_cvt_i32_f32` in SDWA form with control dword 0x0006140d
+  (`dst_sel=WORD_0`, `dst_unused=PRESERVE`). The lowering preconditions
+  refused every destination select other than DWORD.
+- Contract (RDNA2 ISA, SDWA table 88; the LLVM AMDGPU modifier syntax gives
+  the same ranges):
+  - `DST_SEL` 0-3 select a byte, 4 bits [15:0], 5 bits [31:16], 6 the dword.
+  - `DST_UNUSED` 0 pads the other bits with zeros, 1 sign-extends the
+    field, 2 keeps the prior bits, 3 is reserved.
+  - Neither source says where the result sits for `WORD_1`/`BYTE_1-3`
+    (shifted into the field or taken from the matching bits). Only one
+    secondary implementation shifts it, which is a lead only.
+- Implementation:
+  - `ShaderSdwaLowDestinationSupported` admits `BYTE_0` and `WORD_0` with
+    `DST_UNUSED` 0-2.
+  - It applies to VOP1 and VOP2 with a plain single-VGPR destination, no
+    clamp or output modifier, and no MAC or dot forms.
+  - The per-lane emitter (`EmitSdwaLowDestinationInstruction`) runs the
+    ordinary instruction as a whole-dword write, then merges its low field
+    into the prior value (pad, sign-extend or preserve). An inactive lane
+    keeps the prior value.
+  - Paired and native compute-wave banks still refuse these selects, and so
+    do shifted selects, reserved `DST_UNUSED`, clamp and output modifiers.
+- Verified: a unit test pins the admitted and refused control words. A
+  strict Intel run of the robot platformer passed pc 0x157c and stopped at
+  the wave32 VCC case above.
+- Defect found, not fixed: the host-visible compute scratch pool
+  (`TransientBufferPool::Scratch`, `GraphicsRenderCommandBuffer.cpp:1090`) frees
+  entries only in `Free()`. A command buffer that detiles many large
+  resources fills its 16 MiB, and the detile then falls back to the CPU with
+  `ResourceUnavailable`. A per-submit reset or a size-aware reuse that keeps
+  the two-buffer detile rule is the direction.
+
+## Robot platformer: raw texels between aliased depth and colour views (2026-10-13)
+
+- Observed: one 960x540 range (1024x640x4 bytes, 64 KiB blocks) is
+  time-shared every frame by a B10G11R11 render target (mode 27), a
+  10_11_11 storage view (mode 27), an R32F storage view (mode 24, one level)
+  and a D32 depth target with no HTILE. A bounded diagnostic showed the depth
+  bound read-only (`LEQUAL`, depth writes off, no clear) and the R32F
+  storage view as its producer: image-store analysis marks it fully
+  overwritten. The previous code had no relation for depth over storage, so
+  the read-only depth started undefined and hit the read-only clear refusal.
+- Contract:
+  - The 4-byte depth (mode 24) and render-target (mode 27) layouts address
+    texels alike. A unit test pins this.
+  - A depth target over an equal-range render target or matching storage
+    view, and a storage view over such a depth target, copy the raw 32-bit
+    words of the newest writer (`create_texel_bits_seed`), then retire it.
+  - Matching means:
+    - one sample, one layer, one level;
+    - an equal extent;
+    - a pitch equal to the depth's 64 KiB-aligned width;
+    - R32F or B10G11R11 colour;
+    - no HTILE;
+    - host extent equal to guest.
+  - Any later write to another overlapping view refuses the seed.
+- Copy (`UtilCopyTexelBits`): image to buffer to image, with no conversion.
+  Its staging is a device-local per-command-buffer pool
+  (`AllocateTransientCopyBuffer`). The host-visible compute scratch pool did
+  not work for it: on Intel, two detile entries (8.3 MB and 6.6 MB, other
+  usage masks) already held 14.9 of its 16 MiB, so the 2 MB copy was
+  refused at about 140-150 s.
+- Limit: Intel Arc (DG2) does not expose `VK_EXT_depth_range_unrestricted`,
+  so a depth upload outside [0,1] is outside VUID-07931 there. RADV exposes
+  it.
+- Excluded:
+  - Clamping the words into a depth image destroys the bit pattern the
+    colour views read back, so it was rejected.
+  - The nondeterministic `!create_all_the_same` at another range in the same
+    title (78 s, Intel) is the documented transient-pool class. This seed
+    path did not run there.
+- Next stop (Intel, reproduced twice at 178-189 s, 1920x1080 pixel stage):
+  - `native_admission{... pc=0x157c reason=invalid instruction before native
+    wave analysis}`.
+  - The instruction is `v_cvt_i32_f32` in SDWA form (control dword
+    0x0006140d: `dst_sel=WORD_0`, `dst_unused=PRESERVE`, `src0_sel=DWORD`),
+    a 16-bit partial write that keeps the high half of the VGPR.
+  - The parser kept the destination select and the lowering preconditions
+    refused it (fail closed); the per-lane merge is in "SDWA low destination
+    selects" above.
+- Verified:
+  - The robot platformer on AMD (RADV, `Fixed` + RenderTargets) ran 600 s
+    and then 300 s, both status 1 with no error. It is still loading the
+    worldmap at about 0.4 fps, with black captures.
+  - On Intel it ran 178-189 s, until the SDWA stop above.
+  - Regressions (strict, no errors):
+
+    | GPU | Title | This change | Baseline |
+    | --- | --- | --- | --- |
+    | Intel A770 | racing title | 16.0k / 20.6k / 26.1k / 27.5k frames at 30 / 60 / 90 / 120 s | 15.4k / 20.1k / 25.7k / 27.0k |
+    | Intel A770 | watercolour platformer | 10.7k at 60 s | about 10.5k |
+    | Intel A770 | fishing title | 5.6k at 180 s | about 5.5k |
+    | AMD (warm cache) | racing title | 6.3k / 8.4k / 10.3k / 11.2k | 5.7k / 7.5k / 9.4k / 10.3k |
+    | AMD (warm cache) | watercolour platformer | 4.1k at 60 s | about 4.1k |
+    | AMD (warm cache) | fishing title | 3.1k at 180 s | about 3.0k |
+
+    The first AMD pass ran right after a host reboot. It was 25-35% lower
+    from the first window on, and recovered on rerun.
+  - Unit tests: 344 graphics-state and detile tests. Gate scripts:
+    boundaries, graphics tables.
+
+## Robot platformer: whole-wave OR reductions as partial waves (2026-10-13)
+
+- Fix: the worldmap pixel shader's whole-wave OR reduction is admitted with
+  a new proof, `FragmentPartialWave`. A Wave64 pixel program on a host
+  subgroup of any width is a partially populated guest wave. When its only
+  whole-wave observations are proven OR reductions and reads that stay
+  inside launched quads, the proof holds at every host width. It therefore
+  needs no `requiredSubgroupSize` for the fragment stage, which the Intel
+  Arc host cannot provide.
+  - Reduction contract (`ShaderFragmentLaneReduction.cpp`): a proven neutral
+    region with a `v_cndmask` seed whose condition holds only lanes of the
+    entry EXEC (no helper, no lane outside the launched quads). Its steps are
+    row-shift DPP ORs with full row and bank masks, `v_permlanex16` and
+    plain ORs. The reads are static `v_readlane` after the EXEC restore,
+    before the first export or indirect jump.
+  - Lowering: each read is one `OpGroupNonUniformBitwiseOr` over the seeds of
+    its guest lane set (lane 31 reads lanes 0-31; lane 63 reads 32-63),
+    followed by a quad-uniform broadcast. The network steps are not emitted.
+  - Network liveness: after the reads, every path must overwrite the network
+    registers before any other read. An overwrite under a non-full EXEC
+    leaves the register "residual", stale only in launched lanes outside the
+    restored mask. A residual register may be read only while EXEC stays
+    inside that mask (tracked through mask algebra, joined monotonically
+    across loops), and never through DPP, readlane/writelane/permlane, DS or
+    a non-lane-local image read.
+  - The fragment mask flow now records, per instruction, whether EXEC holds
+    only lanes of the launched quads, all of them, and which `v_cndmask`
+    conditions are live-only.
+- Excluded, from a temporary diagnostic in the analysis: requiring a full
+  EXEC for the overwrite. The worldmap shader kills the network registers
+  under the discard mask (`s_andn2 ... vcc` then `s_wqm`), so that rule
+  refused it on both of its paths.
+- Excluded: exact-state deduplication in the liveness walk. A loop head in
+  the same shader produced more than 16 distinct states; the walk now joins
+  states monotonically.
+- Current frontier on both hosts: a wave64 vertex program, refused with
+  `ngg_front_refusal{... reason=complete program exceeds the 1024-instruction
+  proof bound}`. Neither Intel nor RADV can pin the vertex stage to 64 lanes.
+- Verified:
+  - The robot platformer passes the worldmap pixel stop and stops at the
+    vertex bound on Intel Arc A770 (172 s) and on AMD RADV (272 s, fixed
+    render-target resolution), strict runs.
+  - Regressions, one strict run each on both hosts (status 1, no error): the
+    racing title is in a race, the watercolour platformer is in the intro
+    and the fishing title is docked in gameplay. The capture frame counts
+    match the previous runs.
+    - The first Intel run of the racing title after a host reboot (cold disk
+      cache and a fresh SPIR-V cache) was still loading at 90 s. A warm rerun
+      matched the previous runs frame for frame.
+  - Unit tests: 980 tests across the shader, fragment, compute, NGG, packet,
+    state and detile suites. New admission cases cover the proof, refusal
+    of observed network values and of row-masked steps, stale lanes under
+    WQM, and SPIR-V emission validated with `spirv-val`. Gate script:
+    boundaries (strict).
+
+## Robot platformer: worldmap admission chain (2026-10-13)
+
+- Four general fixes move the robot platformer from its early stops to the
+  worldmap level load on both hosts:
+  - **Tiled storage writers composed into linear views.** A linear storage
+    view over memory last written through single-level 2D storage images in
+    the 64 KB R_X layout is composed from those images, as it already was from
+    tiled render targets. The newest complete writer of each range wins.
+  - **Loop exits that break through an arm.** The CFG structurizer accepts a
+    loop exit that enters an arm placed between the header and the latch when
+    every path of the arm stays under the header, leaves only to the merge and
+    shares no block with another exit or with what follows the merge
+    (`ShaderControlFlowGraph.cpp:IsBreakArm`). Only graphs refused before are
+    affected.
+  - **Wave32 lane masks in scalar flow.** A wave32 `V_CMP`/carry-out writes only
+    the low SGPR of its pair. The scalar flow read every program as wave64, so
+    a compare into `s[13:14]` hid that `s14` still held its entry value. A
+    compute shader's extended user data load through `s[14:15]` then lost its
+    descriptor mapping (emitter refusal on `S_LOAD_DWORDX4` at 0x1740). The flow
+    now keys on the guest wave size. Compute resource analysis passes the
+    dispatch plan's size; the other stages keep the conservative wave64
+    reading.
+  - **Any-lane mask tests.** `S_CMP_LG_U64`/`S_CMP_EQ_U64 mask, 0` followed by a
+    forward SCC branch asks what `S_CBRANCH_VCCZ` asks. The fragment mask flow
+    opens a divergent region for it instead of refusing the compare as a
+    numeric observation. The summary is cleared by any other SCC writer or a
+    join. Every other SCC reader and back edges stay refused. Masks that may
+    hold helper bits under WQM qualify, as they do for VCCZ.
+- Current frontier on both hosts: a 1920x1080 worldmap pixel shader (wave64,
+  3 colour targets, depth write, blend) is refused by native wave admission.
+  It is now classified `FragmentNeutral32` (it was `ExactSubgroup` before the
+  any-lane fix). The refusal is participation: "fragment row DPP source
+  participation is unproven" at the first of four `V_OR_B32` row-shift steps
+  (`row_shr` 1/2/4/8, `bound_ctrl` 0), in a whole-wave OR reduction.
+  - The reduction is: `s_orn2_saveexec` region,
+    `v_cndmask 0, x, live&exec`, the row scan, `v_permlanex16`, then
+    `v_readlane` 31 and 63 after the restore and `s_or` of the two halves.
+  - The same shader also has three `v_readfirstlane` waterfall loops, refused
+    with "target quad is not proven to retain a participating real member".
+  - Helpers relay partial ORs through the scan, so neutral initial values do
+    not make a non-participating helper's shuffle source defined. This
+    refusal is correct and must not be relaxed.
+  - A whole-wave reduction proof is a viable direction: lower the readlanes
+    as subgroup OR reductions of the initializer, valid at every host width.
+    It needs the initializer's condition proven narrow, the scan registers
+    dead after the region, and EXEC after the region proven within the
+    region's entry EXEC.
+- Intel-specific gate: the Arc A770 lists only COMPUTE, TASK and MESH in
+  `requiredSubgroupSizeStages`, and fragment subgroups vary from 8 to 32.
+  `FragmentNeutral32` therefore has no legal mapping on Intel
+  (`host=unavailable mapping=0`) even with the participation proof. Intel
+  needs a proof valid at every width, or the fragment wave transport (the
+  compute stage can pin 32). AMD (RADV) can pin fragment 64 and reports
+  `mapping=1`.
+- Scoping experiment (temporary, uncommitted bypass of the participation
+  refusals): AMD then stops at a vertex program with
+  `ngg_front_refusal{... reason=complete program exceeds the 1024-instruction
+  proof bound}`. RADV cannot pin the vertex stage to 64 either.
+- Open gap: the pixel and vertex resource analyses still read scalar flow as
+  wave64 (conservative, not a correctness defect).
+- Verified:
+  - Intel Arc A770, strict runs with a fresh SPIR-V cache:
+    - the racing title (125 s) is in a race;
+    - the watercolour platformer (90 s) is in the intro;
+    - the fishing title (200 s) is docked in gameplay.
+    - All three end with status 1 and no error.
+    - The same three runs on AMD (RADV, fixed render-target resolution):
+      racing, intro and docked gameplay, each with status 1 and no error.
+  - The robot platformer reaches the worldmap level load and stops at the
+    pixel shader above, on Intel (160 s) and on AMD (267 s). AMD stopped at
+    about 61 s before.
+  - Unit suites: 596 shader, fragment, compute and NGG tests, including new
+    break-arm, wave32 mask and any-lane cases. Gate script: boundaries
+    (strict).
+
+## Runtime-built typed buffer descriptors (2026-10-12)
+
+- Cause of the AMD fishing-title device loss at about 182 s: one pixel
+  shader builds a V# from `s_getpc` (base = program address + a constant
+  offset, 64 records, a format word written by the shader) and reads it with
+  `TBUFFER_LOAD_FORMAT_X ... idxen` (32_FLOAT). The Gen5 MTBUF lowering used
+  the V#'s first dword, the low half of a code address, as the index into the
+  storage-buffer descriptor array. RADV computes that descriptor address
+  modulo 2^32, so the fetch lands on an arbitrary page in the descriptor
+  window. When the page is unmapped, the kernel reports an `SQC (data)`
+  fault. Guest addresses differ between runs, which explains why the loss is
+  intermittent. The fault page and the set bases logged for the faulting
+  pipeline give an index that matches a 256-aligned code base.
+- Contract: a vector buffer load whose V# no discovered resource describes
+  holds a guest base. That means no bound storage-buffer register and no
+  mapped descriptor `S_LOAD` whose destination reaches this consumer. Such a
+  load is read through guest device addressing
+  (`ShaderVectorBufferUsesRuntimeDescriptor`). The MUBUF paths already did
+  this; the five Gen5 MTBUF recompilers now do too, outside the vertex stage.
+  The supported typed formats are unconverted 32-bit floats, so the dwords
+  are read as stored. The instruction's format sizes the element for the
+  range check ("the MTBUF derives the data format from the instruction").
+  Pixel and compute shaders with such a load request the device-address
+  table.
+- Limit: vertex-stage MTBUF loads keep the stream resolver, which owns the
+  fetched stream V#s. A vertex shader that builds a typed V# from `s_getpc`
+  is still clamped to zero by that resolver.
+- Excluded on the way:
+  - The vertex shader of the faulting pipeline indexes the descriptor array
+    only through metadata blocks 0 and 1. Its layout was stable for a whole
+    200 s run.
+  - The pixel shader's metadata blocks were always slots.
+  - Transient V# uniform uploads: each entry is its own buffer, keyed by
+    unique id plus range.
+  - Buffer-object use after free, the guest device-address table and its
+    imports, and image and sampler indices were all excluded. The fault also
+    reproduced with serialized submits and RADV shader sync.
+- Verified:
+  - AMD Raphael (RADV), strict 200 s fishing-title runs:
+    - A run with the final binary reached gameplay (mayor dialogue in the
+      town) with no device loss, at 7.2-7.4 fps in the hold windows.
+    - Two earlier runs with the same fix plus layout logging also kept the
+      device; their fps (3.4-7.1) is not representative.
+    - Before the fix, most baseline runs lost the device at 180-183 s. No
+      baseline fps exists for the hold windows, so the AMD fps is a first
+      measurement and not a comparison.
+  - Intel Arc A770: a strict 200 s run reaches gameplay with no error, at
+    10.3-10.9 fps in the hold windows. A baseline run on the same route
+    measured 9.3-12.5 fps, so the difference is within the window spread.
+    Draws that use this pixel shader now pay a guest write-back before the
+    table is read. On Intel, this load used to read through an arbitrary
+    descriptor, so capture differences in those draws are corrections.
+  - Intel strict sweep (`Fixed` + RenderTargets): the watercolour
+    platformer, the gothic action platformer, the ninja platformer, the
+    isometric roguelike, the pixel exploration title, the artillery title,
+    the roguelite action platformer and the racing title ended with status 1
+    and the same capture counts as the previous binary, with coherent last
+    captures. The racing title's window 4 ran at 96 fps against 84 fps
+    before, which is within the spread between windows. The robot
+    platformer still produces no capture on Intel, as before.
+  - AMD strict sweep (`Fixed` + RenderTargets): the same eight titles ended
+    with status 1 and the same capture counts. The racing title ran at
+    24.5 fps against about 24 before. The robot platformer still stops at
+    about 61 s on `!create_all_the_same`, as before.
+  - Unit suites: 997 shader and graphics tests, including two new getpc
+    typed-load cases. Gate scripts: boundaries, graphics tables.
+
+## Command-processor costs after render pass continuation (2026-10-12)
+
+Intel Arc A770, `Fixed` 1280x720 + RenderTargets, the Unity fishing title in
+gameplay (about 1,160 draws per frame, 11.6 fps). A line-level CPU profile of
+the command-processor thread over 15 s puts 6.7% on the span scan of
+`GpuMemoryMaterializationCache::InvalidateRange` and 4.7% on the probe loop of
+`GpuDirtyPageTracker::FindPage`. No other source line takes more than 2%.
+
+- Excluded: long probe chains in the dirty-page table. Diagnostic counters
+  on the same route measured 79-90 k live pages and 75-79 k tombstones in the
+  262,144-slot table, with an average of 1.3 probe steps per lookup and 2.6-3.3
+  per miss. The cost is volume instead. Each `Rearm` performs about 400 page
+  lookups, and `GpuMemory::Update` re-arms every bound object once per guest
+  command batch, which gets a new submit id. The title submits about 78
+  batches per frame.
+- Inconclusive, not merged: a memo of recently invalidated clean ranges in
+  `InvalidateRange`. The fps windows were 11.9 / 11.5 / 10.9 against
+  11.2-11.6 before, and the phase counters were unchanged. The spread between
+  windows of one binary (about 9%) exceeds the largest gain the change could
+  give (about 6%). A repeat must compare the line share, not fps.
+- Excluded for the beat 'em up: emulator-inserted dispatches. Its roughly 300
+  dispatches per frame all come from guest `DISPATCH_DIRECT` and
+  `DISPATCH_INDIRECT` packets.
+- The remaining cost is spread across per-draw binding with no single item
+  above about 8%. Reaching 60 fps on this title needs a cheaper contract for
+  revalidating resources per guest batch, not another local optimization.
+
+## Render pass continuation across draws (2026-10-12)
+
+- Contract: a draw continues the render pass instance that the previous draw
+  left open when its framebuffer and render pass are the same, and when
+  beginning a new instance would neither clear, discard nor transition an
+  attachment. Those conditions are: every attachment uses `LOAD`, its tracked
+  layout equals the framebuffer's initial layout, there is no depth or stencil
+  clear, and there are no custom sample locations. Skipping the begin
+  therefore skips no barrier or load operation.
+- How the pass is closed:
+  - `CommandBuffer` owns the open instance. Every other recording path
+    obtains its handle through `RecordOutsideRenderPass`, which ends the
+    instance first and emits the attachment-write to shader/attachment-read
+    dependency that used to follow every draw.
+  - Sampled-image and storage-image barriers take the `CommandBuffer`, so a
+    draw that samples a live attachment closes the instance before its
+    layout transition.
+  - Bindings, dynamic state and query scopes use `RecordState`, and draws use
+    `RecordInsideRenderPass`.
+  - `End()` closes the open instance.
+- Cause found: the Unity fishing title records about 1,160 draws per frame, and
+  each one began and ended its own render pass followed by a full memory
+  barrier. Of 1.5 M passes in a census, 86% followed a pass on the same
+  framebuffer with `LOAD` everywhere. GPU time was a fixed cost per draw:
+  `rcs` busy measured 49% at both 1280x720 and 640x360.
+- Verified on Intel Arc A770 (Xe KMD), `Fixed` 1280x720 + RenderTargets:
+  - Unity fishing title, perf windows 5-7:
+    - fps: 11.0 / 10.3 / 8.9 before, 11.4 / 11.2 / 11.6 after;
+    - fence wait per draw: 17.7 / 18.1 / 20.5 µs before, 15.4 / 15.2 /
+      15.1 µs after;
+    - `rcs` busy over a 15 s sample in window 5: 29.2% after. The 49.3%
+      before was sampled on the preceding build of the same branch, not on
+      the immediate parent.
+  - Window 5 counted 30,292 render pass begins and 316,174 continuations. The
+    title is now bound by the command processor's CPU time.
+  - Vulkan validation layer, with four errors filtered that also reproduce at
+    the same point on the previous binary or come from pipeline creation:
+    - `VUID-vkCmdDraw*-imageLayout-00344`: a draw samples its own color
+      attachment;
+    - `VUID-vkCmdDraw*-None-09600`: a depth layout mismatch at submit;
+    - `VUID-RuntimeSpirv-OpEntryPoint-08743`.
+    With those filtered, a 150 s run of the fishing title and a 115 s run of
+    the racing title report no error. Because the emulator exits at the first
+    validation error, a second pair of 150 s fishing-title runs logged every
+    error to a file without exiting and without a filter:
+    - before: 503 k draws, 6,374 `imageLayout-00344` (12.7 per 1,000 draws),
+      5,900 `None-09600` (11.7), 20 `OpEntryPoint-08743`;
+    - after: 579 k draws, 5,344 (9.2), 6,424 (11.1), 26;
+    - no other VUID in either run. The continuation adds no layout error.
+  - Strict sweep:
+    - Status 1 with captures matching the previous binary: the watercolour
+      platformer, the gothic action platformer, the ninja platformer, the
+      pixel exploration title, the artillery title, the roguelite action
+      platformer and the racing title.
+    - The isometric roguelike stopped once with status 139: a guest-thread
+      write to address 0x40 inside a host copy. This matches the signature of
+      the intermittent null upload-buffer copy recorded below, but was not
+      symbolized. Its rerun reached status 1 with matching captures.
+    - The robot platformer is unchanged (no capture, as before).
+- AMD Raphael (RADV):
+  - The racing title's window 4 went from 20.0 fps (611 draws/f) to
+    24.0 fps (572 draws/f).
+  - The fishing title stops at 182-183 s with `VK_ERROR_DEVICE_LOST` on both
+    the previous and the new binary.
+- Graphics diagnostics (16 integration tests) pass, as do the focused unit
+  suites (615 tests).
+- Open defects:
+  - AMD fishing-title device loss, reproducible at about 182 s. Fixed by
+    "Runtime-built typed buffer descriptors" above.
+    - The kernel reports a gfxhub page fault from `fc_script` on ring 24,
+      client `SQC (data)` (a scalar data read) with permission faults,
+      followed by a timeout on the `gfx_0.0.0` ring. RADV marks the graphics
+      context "innocent", so the faulting submission is the emulator's own
+      work on the other ring.
+    - Direction: map the faulting address against the guest mappings and
+      identify the last submission on that ring.
+  - The beat 'em up title runs at 11.1-14.2 fps on Intel and 9.4-11.6 fps on
+    AMD, with about 300 compute dispatches per frame, one per draw. It is not
+    render-pass bound.
+  - The fishing title's CP thread spends 7% in `GpuMemory::ResetHash` and 7% in
+    `GpuDirtyPageTracker::Rearm` (through `BeginRead`), per draw.
+
+## Depth-only compute HTILE clears (2026-10-12)
+
+- Contract: the proven zero-word `ComputeMetadataFill` HTILE event (see the
+  graphics handoff, "Compute HTILE fill restores coherent geometry") now
+  becomes a Vulkan depth `CLEAR` for a depth-only target too. Whether the
+  target has a stencil plane comes from the guest registers
+  (`ResolveEffectiveStencilFormat`), not from the host format. A combined
+  target still qualifies only as D32S8 with a guest stencil-zero clear in the
+  same first use; other combined formats stay refused.
+- Cause found: the racing title clears its 2048x1024 D16 shadow atlas each
+  frame with this event. It was discarded, so the atlas kept earlier depth and
+  reverse-Z `GEQUAL` rejected the new casters; the cars' shadows smeared over
+  the track. The handoff records the viewport, in-shader bias and hardware
+  depth-bias exclusions.
+- Verified on Intel Arc A770, `Fixed` 1280x720 + RenderTargets, one strict
+  run per title: the watercolour platformer, the gothic action platformer, the
+  ninja platformer, the isometric roguelike, the pixel exploration title, the
+  artillery title, the roguelite action platformer, the robot platformer and
+  the Unity fishing title keep status 1; the racing title keeps status 1 on
+  Intel and on AMD Raphael (RADV). Race captures show correct car shadows. The
+  graphics diagnostics integration (17) and the graphics-state unit tests pass.
+  Each title's last captures match its previous RenderTargets sweep, apart
+  from scene timing and the artillery title's random map.
+- Performance: unchanged. Two same-session strict runs at the harness
+  default resolution, before and after the change, sampled the race every
+  4 s while a user GPU workload was running: 25.6-52.5 fps before and
+  25.9-55.6 fps after. A perf window at a fixed time offset measured 29.0 fps
+  on Intel and 20.0 fps on AMD against 83-89 and 40.4 fps earlier, because a
+  slower menu load moved that window to the race start, where the whole field
+  is on screen (`draws/f` 575 against 132). That window does not compare runs
+  whose load times differ.
+- Repeat on the build with runtime typed descriptors: one 125 s strict
+  racing-title run per host (`Fixed` + RenderTargets, a capture every 4 s,
+  29 captures each). Every race capture on Intel (10) and on AMD (8) shows the
+  car's shadow attached under the car. The wing and wheel shapes are stable
+  between speeds and frames, and no smear trails behind the car. The edges
+  show only ordinary shadow-map stepping. In the sweep on that build, the
+  fixed perf window measured 96 fps on Intel and 24.5 fps on AMD, back at
+  or above the levels before this change.
+- Open defect found while excluding the viewport: `ResolveViewportDepth`
+  (`GraphicsState.cpp`, the overload taking ZMIN/ZMAX) clamps the endpoints of
+  the Vulkan depth range. That remaps depth linearly instead of clamping it:
+  with range [0, 1] and ZMIN 0.5, depth 0.75 becomes 0.875 instead of 0.75.
+  It is exact only when ZMIN/ZMAX contain the range, which holds for every
+  target traced so far. Direction: keep the viewport range unclamped and
+  apply ZMIN/ZMAX as a depth clamp range (depth clamp with a custom range
+  where the device supports it; otherwise refuse narrower ranges).
+
+## Render-target demotion under the RenderTargets scope (2026-10-12)
+
+- Contract: scaling a color target is speculative. The first use that needs
+  guest texels demotes it: its range is recorded, so it never scales again,
+  and the scaled image is resampled into a guest-extent image that replaces
+  it. `docs/render-resolution.md` lists the demoting uses and the remaining
+  refusals. Depth is not demoted.
+- Pieces:
+  - a bounded demotion set (`RenderResolutionDemotion.cpp`, 256 ranges, then
+    saturated: every range counts as demoted);
+  - a scaled color candidate must also support blit source and destination
+    for its format;
+  - `GpuMemoryCreate.cpp` treats a render texture requested at the same range
+    with only another host extent as create-from-objects plus retire, and the
+    render-texture create path blits every layer (linear when the format
+    filters linearly);
+  - the render-target cohort demotes its committed scaled color members and
+    keeps new members native instead of returning an unsupported plan;
+  - the texture binding path demotes a scaled render texture selected for a
+    storage view or for a stage whose sampling is refused, unless it is a
+    color attachment of the same pass.
+- Cross-queue ordering: the resample is recorded into the command buffer of
+  the consumer, before its use, so it inherits the ordering the guest already
+  gives that consumer's direct read.
+- Measured with a temporary counter (removed) on Intel Arc A770 and AMD
+  Raphael (RADV), `Fixed` 1280x720 + RenderTargets:
+  - the watercolour platformer demotes four 0x870000-byte ranges, once each,
+    at the binding path, and runs to the end of its 90 s route; captures match
+    the `Display` scope run of the same scene. Intel 174 and 138 fps, AMD 53,
+    64 and 54 fps.
+  - the racing title demotes two ranges, once each, at the cohort and drives:
+    Intel 83.3 and 89.1 fps in the drive window (two runs), AMD 32.6 fps.
+    Captures show the same defective car shadow quads as `Native`.
+  - the beat 'em up demotes nothing. AMD: 12.0, 11.6, 10.2 and 12.5, 10.8,
+    10.2 fps against 13.0, 11.7 and 10.0 for a build of `5e6a9216` in the
+    same session; p50 frame times match (77, 80-82 and 94-96 ms). Every color
+    format RADV exposes as an attachment supports blit in both directions, so
+    the new capability requirement does not change which targets scale there.
+- `Fixed` + RenderTargets on Intel keeps status 1 for the watercolour
+  platformer, the gothic action platformer, the ninja platformer, the
+  isometric roguelike, the pixel exploration title, the artillery title, the
+  roguelite action platformer, the racing title and the robot platformer.
+  On AMD the same set keeps status 1 except the robot platformer; the racing
+  title drives at 40.4 fps there.
+- Open, found while verifying: the robot platformer on AMD stops at about
+  78 s with `!create_all_the_same` (`GpuMemoryCreate.cpp:2186`): a 960-wide
+  StorageTexture at 0x53bcf0000 crosses and contains eleven storage-buffer,
+  storage-texture and render-texture parents. It stops the same way with a
+  build of `5e6a9216` under `Fixed` + RenderTargets and with this change at
+  `Native`, so it predates the change and does not depend on the scope.
+  Direction: classify which parents the dispatch overwrites and which it
+  reads, from a bounded dump of the parents' guest ranges and formats.
+- Not done: depth demotion, and making RenderTargets the default (that needs
+  full sweeps on both hosts and repeated runs of the roguelite action
+  platformer on AMD).
+
+## Offscreen render-target scaling, opt-in (2026-10-12)
+
+- `RenderResolutionScope = RenderTargets` (`KYTY_RENDER_RESOLUTION_SCOPE`)
+  extends `Fixed` from the display cohort to offscreen render textures and
+  their depth when they match the registered display extent. `Display` stays
+  the default. `docs/render-resolution.md` has the cohort, alias and read
+  rules.
+- Cause it targets. On AMD the beat 'em up draws about 320 sprites per frame
+  into two 3840x2160 render textures and about 31 into a third with depth.
+  Every consumer samples them with normalized coordinates. Limiting those
+  draws to one quadrant in a removed diagnostic raised it from 4.1 to 8-11
+  fps and cut GPU busy from 82% to 48%, so fill dominates.
+- Alias evidence, from code reading:
+  - GPU-owned render textures and depth targets never load from or write back
+    to guest memory.
+  - Storage-buffer and texture views of the same range are linked without a
+    copy, and a storage buffer updates only from guest bytes.
+  - So one exact buffer or texture view cannot observe or change the scaled
+    texels. Depth accepts storage views of its planes for the same reason.
+  - Anything else keeps the target native.
+- Measured on AMD Raphael (RADV) at the beat 'em up gameplay windows, `Fixed`
+  1280x720, with a build of the tree at `29047d27`:
+  - RenderTargets: 13.4, 11.8 and 10.2 fps at 300, 335 and 364 draws per
+    frame, 260 s, status 1.
+  - Display: 6.9, 4.0 and 3.7 fps at 243, 316 and 321 draws per frame.
+  - Captures stay healthy, with no seams or offsets.
+- On Intel Arc A770 the beat 'em up is CPU-bound and stays flat under
+  RenderTargets: 13.9, 12.5 and 10.9 fps against 14.2, 12.7 and 11.6 at
+  `Native`. Its captures are correct.
+- Refusals at this commit, on both hosts; both are resolved by the demotion
+  entry below:
+  - The watercolour platformer stopped at a compute storage access to a scaled
+    render texture (`GraphicsRenderBind.cpp`, "storage access to a
+    resolution-scaled image").
+  - The racing title stopped at a cohort that pairs a committed scaled color
+    target with a committed native depth ("mismatched_host_extent",
+    `attachment_index=1`). A bounded diagnostic showed the depth is
+    HTILE-compressed, so it was never a scaling candidate.
+- `Fixed` + RenderTargets keeps status 1:
+  - on Intel: the gothic action platformer, the ninja platformer, the
+    isometric roguelike, the pixel exploration title, the artillery title,
+    the roguelite action platformer, the robot platformer and the Unity
+    fishing title;
+  - on AMD: the isometric roguelike and the roguelite action platformer
+    (three of three runs).
+  - The other frontier titles were not run under this scope on AMD.
+- Regression evidence for this change and the descriptor-cache bound below.
+  Builds of the uncommitted tree, whose content matches `ba2288f3` and
+  `29047d27`, keep status 1:
+  - `Fixed` + `Display` on Intel for the watercolour platformer, the gothic
+    action platformer, the ninja platformer, the isometric roguelike, the
+    pixel exploration title, the artillery title, the roguelite action
+    platformer, the racing title, the robot platformer and the Unity fishing
+    title;
+  - `Fixed` + `Display` on AMD for the racing title, the roguelite action
+    platformer, the watercolour platformer, the isometric roguelike and the
+    beat 'em up;
+  - `Native` on both hosts for the same sets.
+  - The mechanical-fist platformer still stops at the unresolved `Agc` import
+    it hit before these changes.
+  - Intel A/B at `Native` is neutral. The baseline was a dirty tree at
+    `a45f6a70` carrying the indexed-lookup change:
+    - racing title: 84.3, 90.1 and 85.9 fps against 90.7 and 87.6;
+    - Unity fishing title: 10.5, 9.8 and 10.5 against 10.6, 9.5 and 10.6.
+- The sweep wrapper used for frontier runs sets
+  `KYTY_RENDER_RESOLUTION_MODE=Native`, while `scripts/run_guest.lua` defaults
+  to `Fixed`. Earlier frontier numbers measured `Native` unless they name
+  `Fixed`.
+- Open, found while verifying:
+  - The beat 'em up draws large white quads over a forest scene at native
+    extent on AMD. They already appear in a dirty-tree build at `a45f6a70`,
+    which predates these changes.
+  - The roguelite action platformer on AMD stopped at about 93 s with
+    "indirect register packet references invalid guest storage: class=0x13
+    address=0x0000002000000001 count=7" (`GraphicsRun.cpp:1263`). It happened
+    in two of three runs at `Native` with the RenderTargets scope set, before
+    `29047d27` made the scope inert at `Native`. That earlier code recorded
+    extra submission uses for its extent lookups.
+    - Without the scope it passed six of six runs, and under `Fixed` +
+      RenderTargets it passed three of three. The cause is not established.
+    - The identical value in both failures points to a deterministic parse of
+      stale or misaligned command words.
+    - Next step: dump the packet window around the offset in a bounded
+      diagnostic.
+
+## Bounded descriptor-set cache (2026-10-12)
+
+- Cause. Descriptor sets were freed only with a resource they reference.
+  Under render-target scaling the beat 'em up ran fast enough to grow the
+  cache to 261,632 sets in 512 pools. The trigger was compute sets binding
+  two long-lived storage buffers in many combinations, about 13.7k resources
+  in all. Then:
+  - `vkCreateDescriptorPool` returned `VK_ERROR_OUT_OF_HOST_MEMORY`;
+  - the failure was ignored;
+  - RADV read offset 0xb4 of the null pool in `radv_AllocateDescriptorSets`
+    and exited with status 139.
+  This also explains the 0xb4 fault in the earlier quadrant experiment.
+- Fix:
+  - Each set records the submissions that used it.
+  - Past 65,536 live sets, the 8,192 least recently used tracked sets leave
+    the cache. They are freed through the deferred deletion queue once those
+    submissions complete.
+  - A failed pool creation now stops with its `VkResult`.
+- Verified with a removed diagnostic. The run went 260 s with status 1 and 40
+  trims. Every candidate set was tracked, pools settled at 129 instead of
+  512, and peak RSS fell from 11.4 GB to 9.3 GB.
+
+## FSR 1.0 presentation upscaling (2026-10-12)
+
+- `PresentationFilter = Fsr` upscales the final image to the swapchain with
+  AMD FidelityFX Super Resolution 1.0 (EASU, then RCAS). The headers are
+  vendored unmodified under `source/3rdparty/fidelityfx_fsr1` (MIT).
+  `PresentationFsrSharpness` (0 to 100, default 90) sets the RCAS strength.
+  `docs/render-resolution.md` describes the pipeline and its limits.
+- The passes run only when the final image fits inside the swapchain and is
+  smaller on at least one axis. Otherwise the linear blit runs.
+- Verified on Intel with a 1920x1080 window, `Fixed` 1280x720, and a bounded
+  dump of the stage images in a temporary diagnostic that has been removed.
+  The beat 'em up was upscaled from 1280x720 to 1920x1080, sharper than
+  bilinear. Its mean channels matched a bilinear upscale within 0.004, so
+  there is no transfer-function shift. At 1:1 the racing title differed from
+  its re-encoded source by an MAE of 0.0044, which is the RCAS sharpening
+  alone. The passes add work at 1:1 for no added detail, so equal extents
+  skip them. The FSR cost against `Linear` at the same window size has not
+  been measured.
+- Not a performance fix on its own. `Fixed` with the default `Display` scope
+  scales only the display attachment cohort; see the opt-in render-target scope
+  above. On AMD the beat 'em up stayed flat: 7.1, 4.1 and 3.6 fps under
+  `Fixed` against 6.9, 4.1 and 3.8 at `Native`, GPU about 80% busy. Its
+  3840x2160 offscreen passes keep their guest size. That title opens VideoOut
+  and sets 3840x2160 buffer attributes without querying the resolution or
+  output status, so the reported display mode cannot lower it.
+- Temporal upscalers (FSR 2+, FSR 4, XeSS) and frame generation are not
+  offered. They need the renderer's motion vectors, depth and jitter. The
+  FidelityFX SDK requirements are listed in `docs/render-resolution.md`.
+
+## Indexed physical mapping lookup (2026-10-12)
+
+- In beat 'em up combat on the AMD host, `PhysicalMemory::Find(vaddr)` took
+  27% of the command-processor thread. It is reached through
+  `KernelQueryMappedRange` and `KernelQueryMemoryProtection` from the
+  GPU-memory hash and descriptor paths. Each call scanned all views (about
+  26,700) and then all protection blocks (about 26,700).
+- Views do not overlap: each holds its host pages until `CompleteUnmap`
+  removes it. The lookup now takes the last view that starts at or below the
+  address from the existing address index, including views pending unmap as
+  before.
+- Protection blocks also do not overlap, and every helper that changes them
+  keeps them in address order. `Map` now inserts its block in order, and the
+  lookup is a binary search.
+- Equivalence: a temporary build computed the old and the new answer on every
+  call. The beat 'em up on AMD (1,048,576 calls into combat), the Unity
+  fishing title on Intel (720,896 calls) and the racing title on Intel showed
+  zero mismatches.
+- Measured against the previous build (`a45f6a70`) on the same routes:
+
+  | Host | Title, window | Before | After |
+  | --- | --- | --- | --- |
+  | Intel | beat 'em up, combat perf-7/8/9 | 12.2 / 10.2 / 9.6 fps | 14.2 / 12.7 / 11.6 fps |
+  | Intel | Unity fishing title, perf-4..7 | 6.9 / 10.2 / 10.1 / 9.6 fps | 10.4 / 10.5 / 9.5 / 8.3 fps |
+  | AMD | beat 'em up, combat perf-7/8/9 | 6.6 / 3.9 / 3.8 fps | 6.9 / 4.1 / 3.8 fps |
+
+  - The Intel beat 'em up p50 fell from 80-103 ms to 72-87 ms at the same
+    draw counts.
+  - The Unity fishing title keeps only about 620 views, so its result is
+    within run-to-run variance.
+  - On AMD the command-processor thread fell from 30% to 25% CPU, while the
+    GPU's gfx engine rose from 77% to 83% busy. That scene is GPU-bound, so its
+    frame rate did not move.
+  - The racing-title pair landed on different scenes (142 and 360 draws per
+    frame) and is not used.
+- Intel frontier sweep with this change: the atmospheric platformer, the
+  gothic action platformer, the ninja platformer, the roguelike dungeon
+  crawler, the pixel exploration title, the artillery title, the robot
+  platformer and the 2D title that dereferences guest pointers all reach their
+  time limits as before.
+- Open, not caused by this change: the mechanical-fist platformer often ends
+  with a host access violation in `PthreadStaticObjects::CreateObject`
+  (`Kernel/PthreadObjects.cpp:21`, reached from `PthreadMutexLock` and
+  `PthreadMutexUnlock`). The guest passes the mutex address `0x58`, a member of
+  a null object, and the static-initializer check reads it. Previous build:
+  2 of 2 runs. This build: 2 of 3 runs; the third stopped at the known Gen5
+  volume-layout refusal. This is likely the open object-lifetime race recorded
+  for that title. Direction: find which guest object is null when the lock is
+  taken, starting with the thread that took it.
+
+## Shared physical device-address windows (2026-10-12)
+
+- On the AMD host the beat 'em up never left its loading screen within its
+  260 s route (2.0-3.5 fps, 3-4 draws per frame). Every submit paid RADV's
+  validation of each imported memory object, and the title keeps about 6,000
+  small direct-memory ranges, each imported on its own.
+- A temporary discard census on that host (not committed) counted 55-70
+  direct-memory allocations per second through the whole run, about 0.6 per
+  submit. Windows that are dropped and rebuilt whenever an allocation reuses
+  their pages would therefore thrash on this host.
+- Change:
+  - Physical ranges read direct memory through shared windows. A window is
+    an aligned power-of-two interval of whole 2 MiB blocks, at most 64 MiB,
+    imported once and used by every range whose pages it holds; windows are
+    disjoint. A range adds table entries, not imports.
+  - Kernel records each window's pinned interval
+    (`KernelMapPinnedPhysicalWindow`, `KernelExportPinnedPhysicalWindowDmaBuf`,
+    `KernelUnpinPhysicalWindow`). Every backing discard (allocation, release
+    and the two unmap paths) now zeroes pinned intervals in place and
+    punches only the rest. A punched page under a dma-buf or host-pointer
+    pin kept serving the device while the CPU faulted in a fresh one.
+  - `KernelExportPhysicalDmaBuf` is removed; graphics resolves the backing
+    offset with `KernelResolvePhysical`.
+- Tests:
+  - New: direct memory released and allocated again under a window that a
+    neighbouring range keeps imported reads zero on the CPU, and the device
+    reads what the CPU then writes. With the in-place zeroing disabled the
+    device read the previous owner's marker on RADV.
+  - The test device now enables dma-buf import where the device offers it,
+    as the runtime device does. Before, every physical device-address test
+    failed on RADV (the device refuses shared host pointers); all 14 pass
+    on both hosts. Full unit suite on Intel: 2,380 pass, 12 skipped. One
+    audio rack test timed out once under the full suite and passed 3 of 3
+    runs alone.
+- Measured on the same routes, `KYTY_RUN_PERF=1`, base binary first or
+  alternated, peak cgroup memory:
+
+  | Host | Title | Window | Base (fps) | Windows (fps) | Peak MB base / windows |
+  | --- | --- | --- | --- | --- | --- |
+  | Radeon 610M, RADV | Beat 'em up | perf-2..5 | 2.7, 9.1, 5.2, 2.2 | 12.1, 11.5, 6.9, 9.3 | 5,026 / 5,152 |
+  | Radeon 610M, RADV | Beat 'em up | perf-7..9 | 2.1, 2.2, 2.0 (loading) | 5.0, 3.8, 3.7 (in game) | |
+  | Radeon 610M, RADV | Racing title race | perf-4 | 42.4 | 40.9 | 1,994 / 2,110 |
+  | Arc A770, xe | Racing title race | perf-4 | 87.3 | 86.8 | 1,999 / 2,206 |
+  | Arc A770, xe | Beat 'em up combat | perf-7..9 | 12.5, 10.8, 9.9 | 12.3, 10.5, 9.6 | 6,331 / 6,294 |
+  | Arc A770, xe | Unity fishing title | perf-4..7 | 8.5, 10.6, 10.2, 9.5 / 8.1, 9.0, 9.6, 8.7 | 6.7, 8.4, 10.4, 9.3 | 4,031-4,914 / 4,126 |
+
+  - The beat 'em up on AMD now leaves its loading screen and reaches the
+    first in-game scene and dialogue at 230-314 draws per frame; the base
+    binary stays on the loading screen at 4 draws per frame. The captures
+    are correct.
+  - The fishing title's windows run was one window behind the base run
+    (its perf-5 has the draw count of the base perf-4), so its per-window
+    rows are not paired.
+- The Unity fishing title's frame-3 boot stall is not caused by this change,
+  and is not specific to the excluded index-buffer change below: in 16
+  interleaved 45 s boots per binary it stalled once with the windows and
+  once with the base binary. A further 200 s windows run also stalled there.
+  Open; it now has a base-binary reproduction.
+- Frontier with the change:
+  - AMD: the 2D title that dereferences guest pointers, the atmospheric
+    platformer and the roguelike dungeon crawler reach the time limit.
+  - Intel: the atmospheric platformer, the gothic action platformer, the
+    ninja platformer, the roguelike dungeon crawler, the pixel exploration
+    title, the artillery title and the robot platformer reach the time
+    limit, with peaks of 2,783, 3,383, 1,195, 5,751, 1,323, 1,946 and
+    3,544 MB. The mechanical-fist platformer stops at its known strict
+    volume-layout refusal.
+- Remaining on AMD: the beat 'em up's in-game scene runs at 3.7-5 fps.
+  Not profiled yet.
+
+## Native wave32 compute in whole host subgroups (2026-10-12)
+
+- On the AMD host the robot platformer reached its PS logo level (102
+  presents, agent phase `interactive`). The strict run then stopped at about
+  60 s with `native-wave compute coordinate layout unsupported or
+  inconsistent`.
+- A bounded diagnostic named the dispatch: a wave32 compute program that reads
+  wave state (`native_wave_sensitive`), with a 1x1x1 thread group, no LDS and
+  no thread limits.
+- The native route rebuilt each guest lane index as host subgroup id x 32 +
+  subgroup lane. Full host subgroups need a host X that is a multiple of 32, so
+  the route refused every guest group whose X was not. A group of fewer than
+  32 lanes is one partial guest wave: the lanes past the group never launch on
+  the hardware.
+- Change: the host workgroup is now `(ceil(N / 32) x 32, 1, 1)` for a guest
+  group of N lanes (`ShaderNativeWave32PhysicalLocal`). Guest coordinates are
+  still rebuilt from the linear, X-first lane index. Lanes at or past N start
+  with EXEC clear, which is the same rule as for lanes past the dispatch
+  thread limits; the thread-limit test ANDs with it. `LocalSize` and
+  `gl_WorkGroupSize` use the physical shape. The dispatch plan, the SPIR-V
+  validator and the Vulkan subgroup attach all check the same shape.
+  Translator version 131.
+- Tests: the dispatch plan maps a 1x1x1 wave32 group to (32,1,1) and a 16x8
+  group to (128,1,1). The Vulkan attach admits the padded shape and still
+  refuses a host X that is not a multiple of 32.
+- Verification. Unit suite: 2,380 pass. Boundary and table gates pass.
+  Intel frontier sweep, one run each:
+  - The atmospheric platformer, the gothic action platformer, the ninja
+    platformer, the roguelike dungeon crawler, the pixel exploration title, the
+    artillery title and the robot platformer reach the time limit, with peaks of
+    2,845, 3,361, 1,424, 5,792, 1,291, 1,950 and 3,541 MB.
+  - The mechanical-fist platformer stops at an unresolved graphics import. The
+    same stop appears on runs of earlier binaries, alternating with its known
+    stops.
+  - The racing title races at 86.9 fps in a different scene (147 draws per
+    frame, against 123 in the earlier baseline). It is a single unpaired
+    run, so it is not a speed comparison. The Unity fishing title runs at
+    8.6-11.0 fps, and the beat 'em up at 9.4-10.3 fps. Both are within their
+    earlier ranges.
+  On AMD:
+  - The racing title races at 39.1 fps.
+  - The 2D title that dereferences guest pointers, the atmospheric platformer
+    and the roguelike dungeon crawler reach the time limit.
+  - The beat 'em up runs at 2.2-3.0 fps against an earlier 2.4-3.4. This is
+    the known per-submit import cost.
+- Result on AMD: the strict run passes the former stop. It now stops at about
+  60 s on `!create_all_the_same`. A 960-wide StorageTexture at
+  0x53bcf0000 overlaps 11 live objects of a 26 MB transient pool: two
+  CPU-uploaded StorageBuffers, two 1920x1080 RenderTextures (Crosses), a
+  2432-wide StorageTexture, a 2432x1368 RenderTexture (Contains), and a
+  640-wide StorageTexture (IsContainedWithin). This is open. The pool reuses
+  the same memory across passes, so it needs an aliasing policy for transient
+  GPU-owned memory, not another relation special case.
+- On Intel the same title stops presenting at about 26 s, before this
+  dispatch. The command processor spends about 99% of its time inside the
+  Intel Vulkan driver creating a compute pipeline from
+  `GraphicsRenderDispatchDirect`, measured with the perf-event stack sampler.
+  The process stays alive, which is why the frontier sweep counts it as
+  reaching the time limit.
+  - A bounded capture of each compute pipeline creation names the cause. It is
+    not a hang. Two paired wave64 programs (16x16 groups) translate to block
+    dispatcher modules of 321,491 and 346,836 words: 925 blocks and 353
+    function variables. The Intel driver compiles the first in 32.2 s, and the
+    second does not finish inside the 60 s window.
+  - Smaller modules show the same superlinear cost: 104,131 words take 2.8 s
+    and 126,719 take 3.6 s.
+  - This is the compile-capacity limit recorded under the paired dispatcher
+    entries below. Optimizer passes, native structuring, broadcasts and
+    Workgroup materialization are already excluded there as sufficient fixes,
+    so they were not repeated.
+  - The emitted code re-derives the lane EXEC bit for every VALU write in both
+    banks (about 12 operations per guest operation). That is a size lead, not
+    a proven fix for the interference-graph peak.
+
+## Physical device-address imports in whole blocks (2026-10-11)
+
+- The racing title's physical ranges imported a chunk for every newly resident
+  run. Guest writes reach those pages one or two at a time, so one 2 MiB range
+  held 364 chunks for 455 imported pages. The title kept about 4,200 imports
+  over only 241 GPU-visible physical views. On the AMD host each submit then
+  cost about 4.6 ms, and the race issues 16 submits per frame (see the next
+  section).
+- A physical range now imports every 2 MiB block, counted from the range base
+  and clipped to the range, that holds a resident page. Neighbouring blocks
+  share a chunk up to the existing 64 MiB chunk bound.
+  - Pages the import itself populates belong to the imported block, so
+    preparation does not chase residency it created (the self-induced growth
+    recorded on 2026-09-29).
+  - A block with no resident page is not pinned.
+  - The pages belong to the same live allocation, which is discarded only at
+    allocation and release, so the GPU and the CPU keep seeing the same pages.
+  - Flexible (snapshot) ranges are unchanged.
+- Focused test
+  `EmulatorGuestDeviceAddress.PhysicalImportCoversResidentBlock` covers:
+  - Two separate writes in one block give one entry.
+  - Repeated preparation adds nothing and leaves the untouched block
+    unpopulated.
+  - A write in the second block adds one entry.
+
+  It fails without the change (two entries).
+- Measured on the same routes, alternated runs, `KYTY_RUN_PERF=1`:
+
+  | Host | Title | Window | Before (fps) | After (fps) |
+  | --- | --- | --- | --- | --- |
+  | Radeon 610M, RADV | Racing title race | perf-4 | 13.4, 15.4 | 40.0, 29.2 |
+  | Radeon 610M, RADV | Beat 'em up loading | perf-3..4 | 6.0, 7.2 | 7.0, 5.7 |
+  | Arc A770, xe | Racing title race | perf-4 | 99.3 | 102.6 |
+  | Arc A770, xe | Unity fishing title gameplay | perf-4..7 | 10.6, 9.9, 9.8, 10.0 | 8.7, 8.8, 9.4, 10.7 |
+  | Arc A770, xe | Beat 'em up combat | perf-7..9 | 10.4, 9.6, 8.7 / 10.9, 9.6, 8.5 | 9.7, 8.0, 7.2 / 10.9, 9.3, 8.4 |
+
+  Notes on the table:
+  - In the second AMD racing run the route went faster. Its perf-4 is a
+    heavier race scene (270 draws per frame, against 170), and the race ended
+    on "time over" within the run. Its captures are correct.
+  - The beat 'em up's ranges are small and were already imported whole, so
+    it does not change on either host. Its first Intel pair differed by
+    10-17% with higher fence waits; the reversed second pair is equal.
+  - The first Intel racing pair reached different scenes: 41.5 fps at 210
+    draws per frame with the change, against 96.0 fps at 123 without. The
+    base binary never reached the heavier scene, so a regression in heavier
+    race scenes is not excluded on Intel.
+  - From about 00:55 UTC another application loaded the host. That covers
+    every Intel row, which widens their error bars. The AMD racing pairs ran
+    before it.
+- Peak run memory (cgroup `memory.peak`):
+  - AMD beat 'em up: 3,161 to 3,530 MB.
+  - Intel beat 'em up: 5,894-5,927 to 5,902-6,166 MB. The run limit is
+    `MemoryHigh=7G`.
+  - Intel racing title: the same within noise (1,929-2,321 against
+    2,131-2,618 MB).
+- The 2D title that dereferences guest pointers runs on both hosts with no
+  import failure: 102-111 fps on Intel and 28 fps on AMD.
+- Not verified: audio. From about 00:55 UTC another application was playing
+  audio on the host. After that the audio probe measured decaying or no
+  signal for every binary, including the base binary and one built without
+  the two AJM commits. That excludes this change and those commits, but leaves
+  audio unchecked for these runs.
+- Frontier sweep with the change on Intel, one 90 s run each (150 s for the
+  robot platformer), with peak memory:
+  - The atmospheric platformer, the gothic action platformer, the ninja
+    platformer, the roguelike dungeon crawler, the pixel exploration title,
+    the artillery title and the robot platformer all reach the
+    time limit.
+  - Peaks: 2,514, 3,079, 1,164, 5,916, 1,320, 2,011 and 3,542 MB. On the base
+    binary the roguelike dungeon crawler peaks at 6,176 MB.
+  - The mechanical-fist platformer stops at 26-32 s with either binary:
+    - Base (2 of 2): a strict volume-layout refusal at 32 s.
+    - With the change: 2 of 3 runs crash in `PthreadMutexLock` on a guest
+      mutex pointer of 0x58 at 27-28 s, and the third run is a strict import
+      refusal. The crash is the open weak-pointer race recorded for that
+      title (about 26 s). No device-address frame is on its stack.
+- The Unity fishing title on AMD with the change: 24 fps in the menu window,
+  then the same device loss at about 85 s. The failing submit is on the
+  utility queue, whose context the kernel reports as innocent, and RADV
+  creates one kernel context per queue. The faulting work is therefore on
+  another of the emulator's queues.
+- Remaining on AMD: the live count of GPU views (next section). The beat
+  'em up holds about 6,000 small ranges, each one import.
+
+## Guest device-address imports and per-submit cost on RADV (2026-10-11)
+
+Open performance defect on AMD. Fragmentation within a range is fixed in the
+previous section; the count of live ranges stays open.
+
+- Host: Radeon 610M integrated GPU, amdgpu kernel driver, RADV
+  (`VK_DRIVER_FILES` pointing at the RADV ICD). Strict runs, scripted routes.
+- Measured frame rates on this host:
+  - The racing title's race: 15.4 fps.
+  - The beat 'em up: stays on its loading screen at 1.4-2 fps for the whole
+    window.
+  - The Unity fishing title: loses the device at gameplay load, about 88 s
+    into the hold route (see the defect below).
+- Temporary submit timers (not committed) around `vkQueueSubmit` in
+  `CommandBuffer::Execute`
+  (`source/emulator/src/Graphics/GraphicsRenderCommandBuffer.cpp`), on the
+  beat 'em up:
+  - The cost of one submit grows linearly with the number of live imported
+    device memory objects: 0.34 ms at 879 imports, 5.78 ms at 6,895.
+  - After about 90 s there had been 7,661 graphics submits and 12,819
+    utility-queue submits, totalling 20 s and 29 s inside `vkQueueSubmit`.
+  - The cost follows the import count. About 20 driver-allocated memory
+    objects were live throughout, so their share was not measured. This is
+    consistent with RADV passing every imported buffer object to the kernel
+    on each submit when buffer device address is enabled.
+- The imports are guest device-address chunks
+  (`source/emulator/src/Graphics/GuestDeviceAddress.cpp`), one per resident
+  run of a GPU-mapped guest range. Censuses at the same moment, roughly 90 s
+  into the run:
+  - Device-address registry: 6,168 live ranges and 6,365 chunks. Releases
+    work: no range is overwritten or left overlapping, and every unmap or
+    physical release removes its chunks.
+  - Kernel: 12,458 live GPU-visible views (2.85 GB) and 7,642 direct-memory
+    allocation blocks (3.26 GB). Of those blocks, only 5 are 64 MiB or larger.
+    1.99 GB of the physical backing is populated.
+  - The live set is therefore the title's own and keeps growing while it
+    loads. On Intel it reaches about 12,000 imports at 150 s. The xe driver
+    does not show the per-submit cost, but the count is not bounded there
+    either.
+- Exclusions:
+  - Merging a new run with adjacent chunks of the same range does not help.
+    Of 14,078 new runs, 13,784 were isolated physical runs and every sampled
+    one was a whole fresh range (no chunk yet, offset 0).
+  - Importing per allocation block does not bound the count: 7,642 blocks.
+  - Merging exactly contiguous physical runs would save about 14%: 1,798 of
+    12,800 imports touch the end of an earlier one.
+- What would bound it: importing the physical backing in fixed windows.
+  12,800 imports fall into 794 windows of 2 MiB, or 29 of 64 MiB. Two
+  constraints stand in the way:
+  - Every allocation, and every release with no remaining view, punches the
+    backing (`DiscardSharedBackingRange`, `source/emulator/src/Kernel/Memory.cpp`
+    in `AllocateUnlocked` and the release paths). A window that pinned those
+    pages keeps the old ones, so the GPU would read stale data.
+  - A window also pins and populates its unallocated gap pages.
+
+  A window design has to invalidate on every discard, or zero pages in place
+  inside pinned windows, and it needs its own lifetime rules for tables and
+  publications.
+- Discard census for the beat 'em up (2026-10-12): a temporary counter on
+  the four `DiscardSharedBackingRange` sites (allocation, release with no
+  view, and the two unmap paths), one strict 260 s run on the combat route.
+  The guest's allocation pattern does not depend on the host GPU; this run
+  was on the Intel host.
+  - Loading (first 157 s): 28,220 allocation discards, 12,081 MB in total.
+    The release and unmap sites together fired 14 times (77 MB).
+  - Combat windows perf-7..9 (83 s): 91 allocation discards (36 MB), about
+    one per second. The release and unmap sites did not fire.
+  - So in combat on Intel the direct-memory layout is stable. Loading
+    churns, and the AMD host spends its whole run loading (see "Shared
+    physical device-address windows"), so windows dropped on every
+    overlapping discard would thrash there. The implemented design zeroes
+    pinned pages in place instead.
+- Open defect: on the AMD host the Unity fishing title raises a GPU
+  page-permission fault at gameplay load, about 88 s in. The fault is in the
+  shader caches (SQC/TCP), at a different address each run, and the device is
+  lost. The binary from before this session's changes does the same. Next
+  step: take a native capture of the last submit before the fault and check
+  its device-address table and resource descriptors against live imports.
+
+## Range-query cache invalidation through compact spans (2026-10-11)
+
+- A stack sampler on the Unity fishing title's gameplay (Intel A770, scripted
+  hold route, 15 s window) put 6.9% of command-processor samples in
+  `GpuMemory::CreateBlock` and 6.3% in `QueryOverlapsLocked`.
+  - Every object creation and deletion calls `InvalidateRange` on the
+    range-query caches. Each call walked all 4,096 slots of the overlap
+    snapshot cache, about 1.4 MB of entries, to test one key per slot.
+- `GpuMemoryRangeQueryCache` and `GpuMemoryAdaptiveRangeQueryCache` now keep
+  a compact `[begin, end)` span per slot, as the materialization cache
+  already does. An invalidation reads a full entry only where its span
+  overlaps. The full-key overlap test and the lookup rules are unchanged.
+- The same sampler afterwards: `CreateBlock` 1.0%, `QueryOverlapsLocked` 2.0%.
+- Frame rate on the same routes, `KYTY_RUN_PERF=1`:
+
+  | Title | Windows | Before (fps) | After (fps) |
+  | --- | --- | --- | --- |
+  | Unity fishing title (A/B binaries, alternated) | perf-5..7 | 9.6, 9.6, 9.5 | 9.1, 8.4, 10.4 |
+  | Racing title race | perf-4 | 88.3 | 87.8 |
+  | Beat 'em up | perf-4 | 11.9 | 12.5 |
+
+  The racing and beat 'em up "before" values are the last recorded windows,
+  not alternated runs. The change is within run-to-run noise in frame rate.
+  Captures are correct.
+- Why less command-processor work does not raise the frame rate: over a 20 s
+  gameplay window the command-processor thread used 68% of one core and the
+  render engine was busy 44% (`drm-cycles-rcs`). Neither is saturated. The
+  title is bound by serialization between them: about 80 submits per frame,
+  fence waits 19-23% and `WAIT_REG_MEM` 11-15% of the window.
+- `EmulatorAudio.StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
+  times out (10 s) in about one of four runs of the `EmulatorAudio.*` suite.
+  It does so with and without this change, and it passes when run alone.
+  The cause is not investigated.
+
+## Table-loaded comparison samplers paired by instruction (2026-10-11)
+
+- A sampler sharp read from a descriptor table through `S_LOAD` is registered
+  twice: once as static metadata (slot 2, regular operation) and once as a
+  dynamic sampler whose slot is its dword offset in the table. The image
+  instruction resolves to the dynamic sampler. Its slot matches no texture
+  slot, so `ShaderSamplerDepthComparisonEligible` refused comparison. Pure
+  depth-reference samples then took the manual filter-then-compare path.
+- The eligibility check now uses the parse's instruction pairing
+  (`sampler_indices_mask`) first. A sampler qualifies only when every image it
+  is paired with is a normalized, pure depth-reference 2D view. The slot match
+  and the all-descriptors fallback still apply to samplers with no pairing.
+  The same answer drives the translator's Dref lowering and the bound
+  `VkSampler` compare state, so the two stay consistent. Translator identity
+  advances to 130.
+- An env-gated, temporary check computed the old and new answers on every
+  call during strict runs (Intel A770):
+  - The racing title: every mismatch was its two shadow receivers' sampler
+    (dynamic slot 4) moving to the comparison path. All 8 receiver modules now
+    lower to `OpImageSampleDrefExplicitLod`, with no manual path left, on a
+    clean build.
+  - The Unity fishing title: about 112,000 mismatches in 4.2 million calls, all
+    one shape. One sampler compares a depth-reference image and also filters a
+    regular image. The old slot match enabled comparison on that shared
+    `VkSampler`, and sampling a regular image through a comparison sampler has
+    no defined result in Vulkan. The new check keeps the non-comparison
+    sampler. Captures on the same route differ from the previous HEAD only in
+    animated regions.
+  - The beat 'em up: 0 mismatches.
+- Strict runs on the checked build reached their bounds: the Unity fishing
+  title 202 s, the beat 'em up 162 s, the racing title 126 s. Twelve
+  interleaved 110 s racing runs with and without the change all reached the
+  rolling start. Across the earlier runs the change hung once in 10 runs at
+  race load (frame ~17620), against 0 in 8 without it, which does not separate
+  the two. It is recorded as an open intermittent on that route.
+- Frame counts at 110 s average 23,012 with the change and 22,993 without; load
+  time dominates that window, so this shows no measurable difference, not a
+  race frame rate.
+- 2,379 unit tests pass, including a pairing contract for a table-loaded
+  depth-reference sampler.
+- Open in the racing title: a distance-centred dark disc and curved bands on
+  the road around the camera, and stepped shadow edges. Both appear identically
+  with and without this change, so it does not fix the visible shadow defect.
+  Excluded for them:
+  - Caster depth bias: front and back enabled with offset -4 and scale -40
+    (slope -2.5 after the `/16` scale shared by three independent
+    implementations), 16-bit unorm DB format (`NEG_NUM_DB_BITS` -16).
+  - Atlas layout: two 1024x1024 cascades in a 2048x1024 D16 target, with
+    viewports and scissors matching it.
+  - A per-frame copy of the shadow map: it is bound directly as depth, so it
+    has no measured frame-time cost.
+  - Later exclusions (frame mismatch of the cascade matrices, bias magnitude,
+    depth clip versus clamp, cross-submit hazards, a second host image for
+    the atlas) are recorded with their measurements in the graphics handoff.
+    The disc is the receiver's cascade-0 region holding real road depth with
+    a shortfall between about 32 D16 units and 1/256.
+- Next step: read back one receiver's reference and texel inside the
+  cascade-0 region in a disc frame, and compare its interpolated world
+  position with the caster vertex of the same road triangle.
+
+## Dynamic scalar-load spans memoized per program (2026-10-11)
+
+- `ShaderDynamicSLoadScalarSpan` scanned the whole program for every storage
+  buffer reached through a dynamic descriptor load, on every draw. Its result
+  depends only on the program and the mapping's load PC, last consumer PC,
+  destination register and dword count.
+- The per-program `ShaderCodeResourceMemo` now keeps that result. The caller
+  folds it in with the same maximum the scan used, so required bytes and the
+  dynamic-offset flag are unchanged.
+- Verified on the racing title's moving race (Intel A770):
+  - An env-gated, temporary equality check compared the memoized and the
+    direct result on 7.4 million calls with no mismatch.
+  - The function left the command-processor thread's top samples (1.5%
+    before).
+  - Three 200 s strict runs: two held to the bound. One ended at 183 s on
+    the open depth-reference refusal below, which is outside the storage
+    path this change touches.
+- 2,378 unit tests pass.
+- Open, intermittent (1 of 4 runs on this tree, 0 of 7 earlier): a
+  comparison sample of a 1x1 16-bit unorm depth image at an address that a
+  60x33 render target in use overlaps stops the run with
+  `unsupported depth-reference image binding ... materialize=depth-unsupported`
+  (`GraphicsRenderBind.cpp`, `ResolveDepthReferenceImageView`). The overlapping
+  object's dependencies were not complete when it was bound, so ordering
+  against the producing submit is the first lead.
+
+## Instruction type names resolved once (2026-10-11)
+
+- Per-draw shader analyses classify instructions by name prefix
+  (`ShaderInstructionTypeStartsWith`), mostly from `ShaderGetInputInfoPS`
+  through `ShaderScalarLoadNeedsGuestAddress`, and from
+  `ShaderHasUnboundBufferLoad`. Each call resolved the enum name through the
+  generic enum reflection.
+- `ShaderInstructionTypeName` now reads a table built once over the enum
+  range. Names and prefix results are unchanged.
+- Measured on the racing title's moving race (Intel A770, task-clock samples
+  of the command-processor thread over 20 s):
+  - `ShaderInstructionTypeStartsWith` fell from 4.5% to 0.7% of samples.
+  - The thread's share of process samples fell from 87.3% to 82.9%.
+  - Frame rate stayed within the route's scene variation (28-42 fps at
+    405-619 draws per frame).
+- 2,378 unit tests pass.
+- The remaining per-draw shader analysis on that thread is about 6%:
+  `ShaderParseUsage2` 2.4%, `ShaderCollectDynamicScalarResources` 1.7% and
+  `ShaderDynamicSLoadScalarSpan` 1.5%. It depends on the program and not on
+  the draw, so it is the next memoization target.
+
+## Materialization range scans per draw: excluded (2026-10-11)
+
+- On the Unity fishing title's command-processor thread, `GpuMemory::ResetHash`
+  took 4.8-6.2% of samples. It is called once per draw for each render-target
+  attachment, and its cost is the scan of the 2,048 materialization spans.
+- Tried: skip the scan when the range lies inside a recently scanned range
+  and no entry was stored since that scan (invalidation only removes
+  entries, so the skip is exact).
+- Result: `ResetHash` still took 5.5% of samples. Every draw stores at least
+  one materialization between two invalidations of the same attachment, so
+  the skip never fired. Discarded.
+- The next work on this site needs a span index that answers overlap without
+  visiting every slot.
+- Tried on 2026-10-12, together, and measured as one change:
+  - visit only the slots stored in the current epoch, with swap-remove on
+    invalidation;
+  - classify `SLoad` instruction types from a table built once, instead of a
+    mnemonic prefix compare per instruction and draw.
+- Result on Intel, unchanged route, perf-5..7: 10.5, 10.5 and 10.3 fps
+  against 10.6, 10.3 and 10.8 fps. Within run noise. Reverted.
+  - The `ResetHash` share was not profiled again, so this does not show that
+    the scan cost went away. The cache is near full during gameplay, so
+    visiting live slots still visits most of them.
+- A frame-pointer profile of the same window put `GraphicsRenderDrawIndex`
+  at 73% of on-CPU time on the command-processor thread:
+
+  | Path | Inclusive |
+  | --- | --- |
+  | `BindDescriptors` | 32% |
+  | `GpuMemory::CreateObject` | 21% |
+  | `ShaderGetInputInfoPS` | 10.6% |
+  | `CaptureTransientSnapshotBuffer` | 10% |
+  | `GpuDirtyPageTracker::BeginRead`, almost all in `Rearm` | 6.8% |
+
+  - In steady state `Rearm` walks every page of an already armed range, one
+    table lookup and one failed compare-exchange per page.
+- The window averages about 63 µs per draw at about 1,160 draws per frame,
+  plus about 21 ms per frame of fence waits that an on-CPU sampler does not
+  see. 60 fps would need about 14 µs per draw. That calls for reusing
+  per-draw binding work across draws, not for trimming single leaves.
+
+## Index buffer objects through the mapping: excluded (2026-10-11)
+
+- A fence-wait backtrace counter over the Unity fishing title's 200 s route
+  (Intel A770) attributed the waits as follows:
+
+  | Source | Share of waits |
+  | --- | --- |
+  | `UtilFillImage` texture creates from `PrepareTextures` | 32% |
+  | `WAIT_REG_MEM` completing the current producer submission | 28% |
+  | Device-address draw retry (`RetryGuestDeviceAddressDraw` in `DrawIndex`) | 19% |
+  | Index buffer object create/update (`UtilCopyBuffer`) | 14% |
+
+- Tried: index buffer objects in host-visible coherent memory, written
+  through the mapping, the same contract as the vertex buffer objects.
+  - Fence waits fell from 43.6 to 33.6 per frame, and fence time from 21.7
+    to 15.8 ms per frame.
+  - Frame rate was neutral: perf-5 ran at 10.7 fps with 1,158 draws per
+    frame, as before.
+  - The title's boot stalled at frame 3 in 4 of 16 runs, against 0 of
+    about 25 runs before the change and 0 of 12 runs after reverting it.
+    In the stall, the command-processor thread was runnable inside the
+    driver's graphics pipeline creation (`CreatePipelineInternal`), and
+    every other thread waited.
+- Reverted, root cause unknown. The waited utility copy changes the timing
+  around pipeline creation; that path needs its own investigation before
+  index uploads drop the fence again.
+- The Unity fishing title's frame time is per-draw binding work at about
+  1,160 draws per frame: resource binding 40-44%, texture descriptors 18%,
+  state setup 16-18%. Removing fence waits alone does not move it.
+
+## AJM batch input budget (2026-10-11)
+
+- After the resample-marker fix, the beat 'em up's strict combat run ended
+  at 307-329 s with "batch exceeds the host write-range capacity".
+- An opt-in capture showed what happened before the failure:
+  - The first refused batch held 36 jobs, 8 of them ATRAC9 decodes of short
+    effects (1,792 input bytes, 12,288 output bytes, stereo), so 65-77
+    superframes of 128 bytes each.
+  - The host refused any batch start that decoded more than 64 ATRAC9
+    superframes in total, returning `AJM_ERROR_OUT_OF_RESOURCES`.
+  - The guest kept appending to the same batch and retried. The start
+    failed 75 times, the batch grew to 872 jobs, and it then crossed the
+    write-range capacity.
+- The 64-superframe count had no guest evidence behind it. The direct
+  decode preflight now bounds the ATRAC9 input admitted by one batch start
+  by the same 1 MiB input bound as the largest single direct job.
+- Test: one start of 72 one-superframe decodes is admitted, and each result
+  reports its superframe consumed.
+- Result: the next strict run reached the 320 s bound with no AJM refusal
+  and no error. Combat windows perf-7..9 ran at 11.8, 10.2 and 9.2 fps,
+  which is neutral.
+- Open defect: when `AjmBatchStart` fails, the jobs of that batch stay
+  queued under its address (`source/emulator/src/AudioAjm.cpp`, batch jobs
+  are erased only on a successful start). A guest that appends to the same
+  batch after a refusal therefore accumulates jobs until a capacity check
+  fails. Direction: capture the guest's retry contract and decide whether a
+  refused start must consume or keep its jobs.
+
+## AJM combined resample markers (2026-10-11)
+
+- The beat 'em up's strict combat run ended at `SetResampleParametersEx`.
+  An opt-in capture at the rejection recorded:
+  - ATRAC9, instance flags `0x1002`.
+  - Ratio one, zero increment, flags three.
+  - The fresh initialize-then-clear window: no prior profile or decode.
+  - A finite gapless stream of 3,072 frames with 256 priming frames.
+- Flags three sets both previously evidenced bits:
+  - Bit zero: the reset marker of a fresh stream.
+  - Bit one: the end marker on a finite stream's last calls, from the
+    current ratio.
+- On a stream whose first call is also its last, the cleared stream's
+  current ratio is the neutral one. Flags three is therefore admitted only
+  for the neutral profile inside the reset window. `GetResampleInfo` accepts
+  the stored value.
+- Flags are admission qualifiers only; resampled output does not depend on
+  them.
+- The former `UnknownFlag3` refusal scenario asserted exactly this observed
+  sequence and was removed. A positive gapless case and two refusals
+  replace it: flags three at a non-unity ratio, and flags three after a
+  profile closed the window.
+- Result: the next strict run passed the marker and reached 307 s, with
+  non-zero output RMS. It then stopped at the AJM batch write-range
+  capacity, which is the next item.
+
+## Vertex buffer objects without a staging fence (2026-10-11)
+
+- Beat 'em up combat baseline (Intel A770, 260 s route, windows perf-7..9):
+  8.0, 7.4 and 6.6 fps, p50 122-142 ms, 257-350 draws and 262-343 submits
+  per frame. Fence waits took 10.6 s of a 26 s window.
+- A fence-wait backtrace counter attributed 71% of all waits to
+  `UtilCopyBuffer` inside the vertex buffer object's update.
+  - Every create or update allocated a staging buffer, then submitted a
+    one-shot utility-queue copy and waited for its fence.
+  - It ran on two paths: from `BindVertexBuffers` when the title binds
+    vertex data that a compute dispatch wrote as a storage buffer, and from
+    the storage write-back at end-of-pipe, which refreshes the linked vertex
+    objects.
+- Excluded on the same route:
+  - `WAIT_REG_MEM` totalled 30 ms per window; its waits take the
+    consolidated barrier path.
+  - The guest device-address storage write-back fired 24 times in a full run.
+  - The guest device-address snapshot-reader wait fired three times.
+- Vertex buffer objects now use the transient snapshots' host-visible,
+  coherent memory, and update writes guest bytes through the mapping.
+  - Coherent host writes are visible to every later submission, which is
+    the ordering the waited copy provided.
+  - In-flight readers were unsynchronized before as well.
+  - On the A770 both kinds resolve to the same system-memory type.
+- Measured on the same routes:
+
+  | Title | Windows | Before (fps) | After (fps) | Notes |
+  | --- | --- | --- | --- | --- |
+  | Beat 'em up combat | perf-7 | 8.0 | 12.0 | Submits fell from 262 to 5 per frame; upload time from 7.8 s to 0.08 s per window |
+  | Unity fishing title | perf-5..7 | 10.7, 9.6, 10.1 | 10.7, 10.3, 10.6 | |
+  | Racing title | perf-5/6 | 43.0, 42.6 | 36.5, 36.5 | See below |
+
+  - The racing title's windows did not land on the same scene (381-413 versus
+    468-479 draws per frame). Its draw-processor cost per draw fell from
+    47.2 to 45.9 µs, and it keeps only 4 to 5 vertex buffer objects alive.
+- Remaining waits in beat 'em up combat:
+  - About 1,500 fence waits per window still take 6.8 s.
+  - The next site is the full quiesce on guest direct-memory release:
+    `release_direct_memory` → `GraphicsInvalidateGpuMappingRanges` →
+    `RunQuiesced`.
+- The index buffer object keeps the same staging copy and fence. The Unity
+  fishing title creates about 1,600 index buffer objects per window.
+- Open defects:
+  - `AudioAjm.cpp:271` rejects `SetResampleParametersEx` and ends the beat
+    'em up's strict run in combat (2 of 4 runs, at 248 and 269 s). The faster
+    combat makes it more likely to reach that point.
+  - Beat 'em up combat shows a flat lilac parallelogram above the companion,
+    probably a bubble or prompt drawn without its content.
+
+## Racing title race-window correction (2026-10-11)
+
+- The racing title's "race window" figures above (70 to 88 fps) were
+  measured with the car stationary on the grid. The route pressed R2 only
+  after the race clock ran out. A scripted R2 also set only the digital bit,
+  and the title reads the analog trigger.
+- With scripted triggers reporting full travel and acceleration from the
+  race start, the moving race measured 43.0 and 42.6 fps (p50 21-22 ms,
+  381-413 draws per frame). The time-over flyby that follows measured
+  33.8 fps at 538 draws per frame.
+- These are the baselines for the racing title from now on. The grid
+  figures remain valid only as A/B pairs measured on the same scene.
+- The beat 'em up's 11-12 fps window is its intro card (6-7 draws per frame),
+  not combat. Its gameplay has not been measured yet.
+- Moving captures show small grey squares around the car, likely particles.
+  This is not yet investigated.
+
+## Atomic container reference counts (2026-10-11)
+
+- In the Unity fishing title's gameplay profile, mutex lock, trylock and
+  unlock were 10.8% of the command-processor thread. Most callers were
+  `Core::Vector::Add`, `String8` construction and container copies.
+- `RefCounter`, the base of every `SimpleArray`, took a `Core::Mutex`
+  around each reference-count read or change. Each array also heap-allocated
+  that mutex when it was constructed.
+- The count is now one `std::atomic`.
+  - Copy-on-write copies before it drops its reference. The old order
+    released first and copied afterwards, which could read a freed array if
+    another owner released at the same time.
+  - The lock never protected the array contents, so concurrent mutation of
+    one container was not synchronized before either.
+- `ShaderInstructionLoweringPreconditions`, which runs for every instruction
+  of every NGG front proof, built an allocated mnemonic string per
+  instruction. It now uses the shared MUBUF/MTBUF table and non-allocating
+  prefix tests.
+- The two changes were measured together. Same route, gameplay windows 5-7:
+  - The title went from 8.2-9.4 to 9.6-10.7 fps (p50 104-114 to 93-99 ms),
+    and the capture is correct.
+  - The racing title's race window rose from 82.9 to 88.3 fps.
+  - The beat 'em up rose from 11.1 to 11.9 fps.
+  - Both captures are correct.
+  - The full unit suite passes (2377 tests).
+
+## Vertex snapshots from the first fetched record (2026-10-11)
+
+- The Unity fishing title copied about 48 GB of guest memory per 26 s
+  gameplay window, almost all of it command-buffer vertex snapshots. A
+  temporary per-site counter over 10 s showed:
+  - 36.5k fresh vertex captures, 14.0 GB in total.
+  - 11.3k of them (10.0 GB) reused the base address of an earlier snapshot
+    in the same command buffer, with a larger size. The guest declares a
+    vertex range that grows from draw to draw over one shared buffer, so
+    each capture copied again from record 0.
+  - No capture repeated an earlier base and size with changed contents.
+  - Only 373 captures (0.3 GB) fit inside an earlier snapshot. Reusing a
+    contained view with an explicit offset would recover about 2% of the
+    bytes on this title; it was not implemented.
+  - The declared range always equalled the captured size, so capturing the
+    whole declared range would not help either.
+  - No index scan reached the restart value.
+- Every vertex binding steps per vertex, and the draw's vertex offset and
+  binding offset are unchanged. A draw can therefore fetch only records
+  `[first, last]` of its index (or linear vertex) range.
+  - The snapshot now copies only from the first fetched record. Bytes are
+    placed at their own offsets in a buffer of the same size, so the
+    shader sees the same addresses.
+  - The bytes before the first record hold no guest data. The entry records
+    where its snapshot begins.
+  - Exact reuse requires an earlier snapshot that begins at or before the
+    request, and compares only the requested range inside the same
+    dirty-page transaction.
+  - Index, storage and depth/stencil-copy captures still start at byte 0.
+- Same route, gameplay windows 5-7:
+  - Uploaded bytes fell from 47.5-49.2 GB to 10.5-11.9 GB per window.
+  - Snapshot upload time fell from 2.8 s to 1.0 s per window.
+  - The title measured 8.2-9.4 fps (p50 104-114 ms), against 8.4-8.7
+    before. The capture is correct.
+- Controls, with correct captures: the racing title's race window measured
+  82.9 fps and the beat 'em up 11.1 fps.
+- Open defect, made wider by this change:
+  - In `GraphicsRenderDraw.cpp`, the indexed draw computes the vertex range
+    from live guest index memory (`ResolveIndexedVertexRecords`, line 1640).
+    It captures the index snapshot later (line 1767), outside that read.
+  - If the guest rewrites indices in between, the draw uses indices whose
+    range was never scanned. Records above the scanned maximum already read
+    the zeroed tail. Records below the scanned minimum now read stale bytes
+    from a recycled entry.
+  - Suggested direction: capture the index snapshot first, and derive the
+    range from the captured bytes.
+- Open defect, unchanged: in `ShaderComputeWaveAnalysis.cpp` (line 1197),
+  the native lowering admission tests the prefix `Tbuffer`. The mnemonic is
+  `TBuffer`, so MTBUF instructions are never classified as memory there.
+  Fixing it changes which programs are admitted. It needs its own focused
+  test and a strict run.
+
+## Per-draw scan costs (2026-10-11)
+
+- Two per-draw scans on the command-processor thread were removed from the
+  Unity fishing title's profile.
+  - `ShaderVectorBufferDescriptor` classified every instruction of the
+    program as MUBUF or MTBUF by comparing its type name, on every draw.
+    The classification is now a table built once from the same names.
+    Name comparison fell from 5.1% to 2.2% of the thread; the remainder
+    comes from other callers.
+  - `ResolveIndexedVertexRecords` found the index range in a loop that
+    switched on the index width per element. It now runs one loop per width,
+    which the compiler vectorizes. The function left the profile (5.7%
+    before).
+- Same route, gameplay windows 5-7: the title went from 8.0-8.1 to 8.4-8.7
+  fps (p50 121 to 112 ms), and the capture is correct.
+- Controls, both within run-to-run noise and with correct captures:
+  - The racing title's race window measured 81.0 fps.
+  - The beat 'em up measured 11.2 fps.
+
+## Descriptor-set reverse index (2026-10-11)
+
+- `DescriptorCache::FreeDescriptor` scanned every cached set, each several
+  KB of resource ids, whenever an image or buffer was destroyed. On the
+  Unity fishing title, the image variant was 7.1% of the command-processor
+  thread, and nearly all of another thread's samples went there as well.
+- The cache now indexes live sets by the unique id of every image and
+  buffer they reference. Images and buffers share one id counter.
+  - A release looks up candidates, applies the same per-variant reference
+    rule as before, and frees the sets in index order.
+  - Insertion, release and reset keep the index in sync.
+- Same route, gameplay windows 5-7: the title went from 7.2-7.3 to 8.0-8.1
+  fps (p50 121 ms, p95 132-146 ms), and the capture is correct.
+- Controls:
+  - The racing title's race window rose from 79.6 to 83.1 fps.
+  - The beat 'em up held at 11.5 fps.
+- Open defect, not changed:
+  - In `GraphicsRenderDescriptor.cpp`, the image release rule
+    (`FreeDescriptor(VulkanImage*)`) does not test
+    `textures2d_sampled_depth_id`.
+  - A set that references a destroyed image only through a depth-sampled
+    slot therefore stays cached until reset.
+  - Unique ids are never reused, so the set cannot be matched again. It
+    only keeps its pool slot.
+  - Suggested direction: include the depth-sampled ids in the rule after
+    checking that a depth sample view owns no other lifetime.
+
+## Transient tail clearing (2026-10-11)
+
+- When a command-buffer transient entry is larger than the bytes it
+  receives, `Commit` zeroes the rest so reads past the logical size see
+  zero. It cleared the whole tail on every commit. On the Unity fishing
+  title, that `memset` was about 4% of the command-processor thread
+  (`CaptureTransientSnapshotBuffer` from vertex binding).
+- Each entry now records where its possibly non-zero bytes end. A new
+  entry counts as non-zero to its full size. Uploads and capture attempts,
+  including refused ones, raise the mark before they write. `Commit` clears
+  only `[size, mark)` and then lowers the mark to `size`. Only host uploads
+  and captures write these read-only entries, so every byte past the
+  logical size still reads as zero.
+- Same route, gameplay windows 5-7: the `memset` samples fell from 601 to
+  259, and the title went from 6.6-7.2 to 7.2-7.3 fps (p50 128 ms).
+
+## Range-filtered label fence snapshots (2026-10-11)
+
+- A sampler that records the user stack showed where the mutex samples on
+  the command-processor thread of the Unity fishing title came from. About
+  13% of that thread was `LabelFenceRegistry::Snapshot`, called by every
+  label-aware upload. Each call copied the whole registry, where entries
+  stay until unmap, into `Vector`s whose `Add` takes a lock per element.
+- `Upload` and `Copy` use only destinations that overlap the object, and
+  `MemcpySkipAbsoluteRanges` already drops holes outside the copied range.
+  `Snapshot` and `SnapshotExcluded` now take that range and return only
+  the overlapping entries, so the result does not change.
+- Same route, gameplay windows 5-7, with the shader memo in place and the
+  lap timers compiled in: 6.1-6.2 to 7.3-7.6 fps.
+- Clean build with both changes, against the materialization-span run:
+  - The Unity fishing title went from 5.5-5.8 to 6.6-7.2 fps, and p50 frame
+    time from 169 to 131 ms. The capture shows the same scene.
+  - The racing title's race window went from 69.8 to 79.6 fps, with p95
+    falling from 58 to 44 ms.
+  - The beat 'em up's late window went from 11.3 to 11.6 fps.
+  - The command-processor thread is still the limit, at about 81% CPU while
+    the render engine is about 30% busy.
+- Open items:
+  - The registry size was not measured.
+  - `Register`, `Complete` and `NeedsUpload` remain linear scans.
+- Next costs on the same thread, ranked:
+  - `memcpy` in `GpuMemory::CaptureSnapshotReadOnlyBuffer`, from the
+    display and depth-only resolution cohorts, plus `memset` in
+    `CommandBuffer::CaptureTransientSnapshotBuffer`, from
+    `BindVertexBuffers` and `MaterializeRenderColorInfo`: about 18%
+    together. The stripped libc reports these routines under the wrong
+    symbol.
+  - `DescriptorCache::FreeDescriptor`: 5.8%.
+  - Indexed vertex-record scans: 5.7%.
+  - Dirty-tracker rearm: 4.9%.
+  - `ShaderInstructionTypeStartsWith`, a name-string compare from the
+    assembled buffer-descriptor scan: 4.8%.
+  - `GpuMemory::ResetHash`: 4.2%.
+
+## Per-program shader resource analyses (2026-10-11)
+
+- Lap timers in `ShaderParseUsage2` on the Unity fishing title (gameplay,
+  about 7,000 pixel-shader parses per second) put about 1.1 s per 10 s
+  in storage-use, direct-image and sampler-operation scans and 0.7 s in
+  the consumer scans of dynamic scalar loads. These results depend only on
+  the program code and a start register. The entry values come from the
+  code's own cached scalar flow.
+- The pixel-shader analysis cache entry now owns a `ShaderCodeResourceMemo`
+  next to the code and scalar flow. It holds those results per start
+  register, plus the consumer analysis of every whole-descriptor S_LOAD
+  computed once per program. Descriptor words, EUD spans and table reads
+  stay per draw. Vertex, compute and fold-capture callers pass no memo and
+  analyze directly.
+- With the lap timers compiled in, the scans fell from 368/412/309 ms to
+  9/101/37 ms per interval, and the dynamic scalar-load lap fell from 720 ms
+  to 165 ms. Gameplay fps went from 5.5-5.8 to 6.0-6.3. The S_LOAD part
+  alone gave no measurable fps change, because the label snapshot below was
+  the larger cost on the same thread.
+
+## Materialization range invalidation (2026-10-11)
+
+- A user-space IP sampler on the command-processor thread of the Unity
+  fishing title (gameplay, 15 s) put 8.6% of its samples in
+  `GpuMemory::ResetHash`. Each draw resets the hash of its attachments, and
+  every reset walked all 2,048 materialization cache entries, about 450 KB
+  of full keys, to drop the overlapping ones (about 7 us per call).
+- The cache now keeps one compact `[begin, end)` span per slot that covers
+  all of the key's ranges. Invalidation scans those 32 KB and checks the full
+  key only where a span overlaps, so the result is the same exact per-range
+  check. The existing cache tests cover disjoint, multi-range and adjacent
+  keys.
+- Measured on the same route, gameplay windows 5-7: p50 frame time 185-187 ms
+  to 169 ms, 5.0-5.3 to 5.5-5.8 fps. The gameplay capture is unchanged. The
+  racing title (69.8 fps race window) and the beat 'em up (11.3 fps late
+  window) show no regression.
+- The same profile ranks the next costs: per-draw shader resource analysis
+  in `ShaderParseUsage2` (about 21% in storage-use, SGPR-liveness and
+  dynamic scalar-load scans that depend only on program code), mutexes
+  (about 12%), dirty-tracker rearm (3.3%), indexed vertex-record scans
+  (3.2%) and label fence snapshots (3.1%).
+
+## Dirty-tracker identities revoked by unmap (2026-10-11)
+
+- In gameplay on the Unity fishing title (held-cross route), every
+  `stable_buffer_create` fell back (1,359 of 1,359 per 26 s window) and
+  content hashing read about 48 GB per window, all of it through the hash
+  fallback. A temporary build counted registration refusals by reason: all
+  were the page identity budget, with the table at 131,072 identities and
+  only 104-135 live ranges. No range was marked fallback after registering.
+- Classifying the table: 102,960 identities were retired pages whose token
+  an unmap had already revoked, 11,984-15,022 were retired with a live
+  token, and 13,092-16,225 were referenced. Those revoked identities had
+  retired with a live token and were unmapped afterwards.
+- A revoked token restores nothing. A late fault over such an identity
+  fails the captured-writable check and is reported untracked, which is the
+  same result as having no slot. `UnregisterRange` already frees untokened
+  pages at once on that basis. Admission now frees retired, unreferenced
+  identities with a revoked token when the budget would otherwise refuse
+  a registration. A publisher-side counter gates the sweep, so a refusal
+  with nothing revoked costs no scan. The sweep runs on the registration
+  thread under the registration mutex and frees each slot through the
+  existing identity-writer and restorer fence. Retired identities with a
+  live token keep their late-fault evidence, and the budget is unchanged.
+- Measured on the same route, gameplay windows 5-7: fallback hashing went
+  to zero, all hashing fell from about 48 GB to 5.3 GB per window,
+  `stable_buffer_create` captured 1,345 of 1,345, and the frame rate went
+  from 4.7-5.0 to 5.0-5.3 fps. Gameplay captures are unchanged. The racing
+  title (68.4 vs 70.3 fps in the race window) and the beat 'em up (10.4 vs
+  10.7 fps) are unchanged within run noise.
+- Open: the Unity fishing title is still bound by per-draw resource binding
+  (41% of the window), state setup (24%) and about 31 GB of uploads in
+  430,000 calls per window. Retired identities with a live token still count
+  against the budget. The run audio probe measured silence on the racing
+  title and only a few seconds of signal on the Unity fishing title, in the
+  baseline and the change runs alike; this was not investigated here.
+
+## Physical view index and residency sweeps (2026-10-11)
+
+- On the beat 'em up, guest device-address preparation took about 15% of the
+  run, about 40% of command-processor time. Each change in physical
+  population starts a residency sweep, about 13 per second. A sweep took
+  about 12 ms: 0.6 ms collecting about 10,000 unimported spans, 10 ms finding
+  the unpopulated ones and 1.6 ms importing the roughly 1,000 newly populated
+  pages.
+- Inside the 10 ms: 4.8 ms of SEEK_DATA queries (one per span, about 0.48 us
+  each), 1.4 ms of view lookups, and 3.5 ms re-sorting the index of 26,000
+  guest views. The guest maps and unmaps views every frame, so the index was
+  stale at every sweep.
+- The index now stays sorted through every insertion and removal. Equal
+  addresses keep insertion order, as the stable rebuild did. A temporary
+  build compared the incremental index with a full stable rebuild at 1,000
+  sweeps and found zero mismatches.
+- Measured on the same route: the beat 'em up's late window went from
+  10.4 fps (p50 101 ms) to 10.7 fps (p50 91 ms), and residency fell from 14%
+  to 11%. The racing title is unchanged. The Unity fishing title was
+  measured in gameplay (held-cross route) only with this change built, at
+  about 4.7-5.0 fps; there is no before/after pair for it.
+- Open: the remaining sweep cost is one SEEK_DATA per unpopulated span. That
+  title is latency-bound: guest, command processor and GPU each use about a
+  third of the frame, one after another. Rendering at a fixed 1280x720
+  extent gave the same frame rate and the same GPU engine occupancy.
+
+## Per-draw vertex-stream reader scan (2026-10-11)
+
+- Timers around each part of the draw state setup on the racing title
+  (discrete device, race scene) put about 65 us of every draw into one
+  check: whether a vertex-stream SSBO keeps a reader after the generator
+  rewrites format loads into fetches. Each draw repeated the full symbolic
+  fetch detection over the linked program and named every instruction
+  through its enum string. That was about 36% of the command-processor
+  thread.
+- The detection depends only on the immutable program code and the two
+  fetch-table registers. It now runs once per cached vertex program and
+  register pair, and keeps each fetch candidate with its attribute semantic.
+  Each draw resolves only those semantics against its own input resources,
+  so the verdict stays per draw.
+- Equivalence: a temporary build computed both verdicts on every draw:
+  376,832 draws on the racing title, 114,688 on the Unity fishing title
+  (its autosave notice, before gameplay) and 16,384 on the beat 'em up, with
+  zero mismatches.
+- Measured on the same route against two baseline runs: the race window
+  rose from 45-46 to 70 fps (p95 frame time 91-101 ms to 60 ms), and the
+  three earlier windows rose 27-60%. Captures of the race scene are
+  unchanged.
+- Remaining per-draw costs from the same timers: pixel input info and probe
+  validation (25-40 us per draw on the racing title) and guest device-address
+  read preparation, which costs about 1.4 ms per draw on the beat 'em up and
+  is its dominant cost.
+
+## Guest physical memory on host-pointer-restricted drivers (2026-10-11)
+
+- The integrated RADV device stopped every title that dereferences guest
+  pointers: importing the shared direct-memory alias returned
+  `VK_ERROR_INVALID_EXTERNAL_HANDLE`. A standalone probe on the same host
+  shows that the amdgpu driver imports only private anonymous host pointers
+  (shared anonymous, shared memfd and private memfd mappings are refused),
+  while the discrete device accepts all four. Guest physical memory is a
+  shared memfd, so the capability check at device creation was not enough.
+- At the first physical import, one shared scratch page decides the import
+  path for the device lifetime. If the device refuses the host pointer,
+  physical ranges are exported from the backing as dma-bufs through
+  `/dev/udmabuf` and imported with `VK_EXT_external_memory_dma_buf`. The
+  backing memfd is now sealed against shrinking, which udmabuf requires;
+  punch-hole discards are unaffected. Devices that accept the host pointer
+  keep the previous path unchanged.
+- The probe verified GPU writes visible through the CPU mapping and CPU writes
+  read by the GPU on both devices. udmabuf needs read-write access to
+  `/dev/udmabuf` (a seat ACL on the reference host) and limits one export to
+  `size_limit_mb` (64 MiB by default, equal to the import chunk bound). When
+  neither path works, the run reports it once and still stops on the existing
+  strict refusal.
+- Verified on the integrated device: the roguelike, the watercolour
+  platformer, the beat 'em up, the Unity fishing title, the zoo title, the
+  insect platformer, the pixel-art well title, the racing title, the dream
+  platformer, the fighting title and the 2D ninja title run their bounded
+  routes with captures. The tower-defence title loses the device on a GPUVM
+  read fault from scalar loads (`SQC`, permission fault) after about 100 s;
+  open. The discrete device keeps its reference results on the roguelike,
+  the watercolour platformer, the ninja title and the tower-defence title.
+
+## ATRAC9 decoder checkpoint (2026-10-11)
+
+- ATRAC9 superframes decode through the bundled LibAtrac9 instead of FFmpeg.
+  FFmpeg's decoder rejects valid superframes whose baseline-relative scale
+  factors wrap past 31; two titles stopped on that strict AJM rejection, and
+  both now reach gameplay with audio. Inputs are copied into a zero-padded
+  buffer, frame consumption is bounded by the superframe, and a failed frame
+  restarts the stream.
+- `SetGaplessDecode` with reset one is admitted on an ATRAC9 instance that
+  already decoded: it restarts the priming trim and the finite output limit.
+  A title reconfigures decoded instances that way, always with no pending PCM
+  in the observed run. Reset zero after a decode, an unlimited total, prior
+  skipped frames and the same reset on Opus instances are still refused.
+
+## Contract-closure checkpoint (2026-10-10)
+
+These are working-tree results at translator129, not a compatibility claim or
+validation of every later edit. The latest focused audio checkpoint ran 101
+cases: 100 passed and the no-FFmpeg admission case skipped because this host
+has the backend. The full CPU suite ran 2,357 cases: 2,352 passed, with five
+documented platform/environment skips and no failures. Strict emulator
+boundaries and all 13 graphics-table provenance checks passed. The Vulkan
+validation layer was confirmed at instance and device creation in the suite,
+with no matching validation errors. Temporary, default-off investigation
+instrumentation remains in this build; it is not a final clean-build result.
+An earlier scalar native integration passed 81 numerical cases, including 12
+signed 64-bit bitfield cases, on the available Intel device. AMD, NVIDIA,
+Windows, the pinned Nix environment and live CI were not exercised.
+
+- The optional raw shader dump now owns the same immutable words used by the
+  parser, has a bounded registered extent and excludes unsupported fused or
+  truncated forms. The exact four-byte extent and adjacent-byte canary fixture
+  passes; no fresh guest-memory read is used to produce the raw dump.
+- A missing-heap optional alias query returns an empty result before indexing
+  the heap container. Its public query fixture passes. This does not admit
+  resource creation from unregistered memory or qualify every alias consumer.
+- Two native reader-lifetime fixtures first reproduced a tracked snapshot
+  changing after recording or becoming refreshable while a queued reader was
+  pending. Both establish a nonempty table and a successful initial device
+  load; the pending fixture uses an enabled timeline semaphore. Reader-aware
+  preparation now defers changed snapshots, retains the latest reader per
+  queue, and acknowledges exact submission completion after publication.
+  Draw and dispatch retries wait outside recording locks and prepare against
+  the current command buffer. A further native fixture reproduced unbounded
+  retired-table growth while a reader remained pending. Retired snapshots now
+  have a 32-table cap; a full reader-bearing set defers preparation rather than
+  invalidating its contents. The 12-case address suite passes. A second guard
+  at the actual refresh point handles dirty writes after the initial preflight;
+  that exact interleaving lacks a
+  deterministic fixture. Independent source review found no supported reader
+  lifetime defect. Native fixtures do not yet exercise production command-
+  processor rotation and retry; fresh guest regression remains pending. Clean
+  reader-bearing preparations scan tracked chunks twice, an unmeasured cost.
+  No workload corruption or performance cause has been demonstrated.
+- Direct ATRAC9 initialization, decoding and reset retain per-instance decoder
+  state and stage guest writes behind mapping-identity validation. The positive
+  synthetic fixture has independently decoded, nonzero PCM. Reset retention
+  and the result counter remain bounded implementation qualifications; no
+  broader guest decoder contract or real-title audio acceptance is claimed.
+  The live decoder budget includes committed and staged replacements before
+  opening another decoder. Full-budget rejection and raw batch-queue error
+  clearing pass their atomic-publication fixtures.
+- Direct mono/stereo Opus split decoding now retains decoder state, snapshots
+  descriptor arrays, validates complete length-prefixed packet records, admits
+  whole packet records, scatters actual PCM bytes and
+  publishes results behind mapping-identity validation. Synthetic numerical,
+  reset, partial-progress, descriptor-lifetime and malformed-input cases pass.
+  A private trace ties the queued job to its result argument. Static analysis
+  subsequently establishes that the factory publishes the same live state
+  object to both the submission registry and the consumer's owner field. The
+  submission loop passes that object to the enqueue path. The unrelated outer
+  readiness callback receives a different object and is not result evidence.
+  The cumulative counter's frame units remain an implementation qualification,
+  not demonstrated hardware equivalence.
+  A fresh strict guest run still stopped after an autosave
+  notice, before a confirmed menu. A bounded debugger capture identifies the
+  first rejected operation as `SetGaplessDecode` in the queued-job pre-scan,
+  before any initialization or decode in that six-operation batch. The batch
+  also requests `SetResampleParametersEx` and `GetResampleInfo`; captured rate
+  arguments are one, zero increment and zero flags. The same-object consumer
+  reads a float at the resample result's offset eight and a signed count at
+  offset twelve, clamping negative counts to zero before sample accounting.
+  These accesses establish a result prefix, not the full output extent or the
+  semantics of other rate profiles. The admitted initial gapless profile now
+  removes priming frames once and caps the finite decoded output across calls.
+  Neutral resampling requires explicit configuration, and its info query stages
+  only the known 16-byte prefix behind the same mapping-identity checks. Clear
+  and initialization reset both qualifications. Numerical split-call trimming,
+  exact-prefix/tail preservation and unsupported-profile atomicity cases pass.
+  The updated focused audio suites ran 105 cases: 104 passed and the no-backend
+  admission case skipped on this FFmpeg-enabled host. A fresh strict run then
+  reached a visually inspected new-game menu. One consumed input edge progressed
+  to another strict `SetResampleParametersEx` rejection. An entry-point capture
+  shows ratio one and zero increment with flag bit zero set, on another newly
+  initialized and cleared Opus instance. The guest's producer sets this bit at
+  initialization and clears it after successful submission. The neutral profile
+  now admits that marker only in the fresh initialize-then-clear window, with no
+  prior resample configuration or decode. Configuration or decode consumes the
+  window; later clears cannot reopen it without another initialization. Positive
+  numerical cases cover both flag values, and unsupported sequences preserve
+  output canaries. The focused audio suites ran 106 cases: 105 passed and the
+  no-backend admission case skipped on this FFmpeg-enabled host. Broader flag,
+  rate-change and reset semantics remain unqualified. A fresh strict run reached
+  the same new-game menu and progressed after input beyond the former marker
+  rejection. During the following video-opening sequence it rejected an Opus
+  input that did not parse as complete U16LE packet records. Capturing the input
+  boundary and descriptor contents is the next audio frontier; gameplay and
+  audible-output acceptance remain open.
+  A later transaction-confirmed observation records a zero-input-consumption,
+  zero-output result followed by reuse of the same input address with a changed
+  head and preserved overlapping tail. This excludes a claim that the earlier
+  planned cursor alone proves guest consumption; the native writer and result
+  consumer remain unobserved. Opus split decoding now drains retained PCM first,
+  admits a complete packet even when only part of its decoded PCM fits, and
+  retains at most one packet's permitted tail. Preflight simulates pending
+  frames and gapless state in job order, including Initialize and Clear; runtime
+  checks its result against that plan. The cumulative counter still counts
+  delivered per-channel frames. Numerical cases cover exact PCM across partial
+  output and an input-free drain, scatter boundaries, priming and finite output
+  limits, and same-batch Clear ordering. Independent clean-build validation ran
+  106 focused audio cases: 105 passed and the no-backend admission case skipped.
+  Strict emulator boundaries and all 13 graphics-table checks passed. One fresh
+  strict run animated the opening for six minutes and consumed one input edge;
+  a repeat on the same binary again rejected an incomplete length-prefixed
+  packet stream before input. The partial-PCM defect is covered, but the
+  intermittent guest input-boundary failure is not closed. Counter equivalence,
+  audible output and gameplay remain unverified. The existing decoder-state
+  mutation before guest-write commit also remains a transaction qualification.
+  A later bounded observation localizes a failing input's lifetime: the complete
+  enqueue-time snapshot contains one valid length-prefixed packet, but the same
+  descriptor ranges contain a changed head at batch-start preflight. The output
+  and result ranges are separate from that input. The instance still has pending
+  PCM and remains below its finite output limit, excluding completion at that
+  limit for this occurrence. Static consumer dataflow independently shows that
+  result offset eight advances a bounded input cursor in bytes, and offset
+  sixteen participates in cumulative output accounting. The ordinary native
+  producer appends at the ring tail; a separate transition path can reset the
+  cursor without clearing occupancy. Neither path has been observed writing the
+  changed interval yet. A subsequent bounded ring observation found unchanged
+  input through successful submissions, with cursor advances matching committed
+  consumed bytes. In a later failing sequence, the first batch-start rejection
+  was an ordinary invalid-parameter return while the input still contained a
+  complete packet. Repeated failed starts retained queued jobs; later enqueues
+  hit the resource limit, and a retained job then failed packet validation after
+  its input storage was reused. A focused follow-up identified that first return
+  as exhaustion of the host transaction's 16-range limit when adding the batch
+  error range. The prior ranges passed extent, non-overlap and mapping-snapshot
+  validation. This demonstrates an internal batch-capacity defect; it does not
+  establish the failed-batch disposal contract or justify taking a payload
+  snapshot earlier. The transaction now accepts up to 1,024 ranges under one
+  mapping lock, while AJM independently bounds a complete batch to 546 plans:
+  32 jobs with at most 16 output descriptors and one result each, plus the batch
+  error and identifier. Per-range byte and mapping-segment limits are unchanged.
+  Stable leases cover both whole-batch preflight and publication; ranges are
+  never committed in chunks. The old capacity reproduced failures in a
+  1,024-range transaction fixture and an 18-range audio batch. With the repair,
+  163 focused cases ran: 159 passed and four backend/platform cases skipped.
+  The late read-only-range fixtures preserve all earlier output canaries, and
+  successful audio publication matches independently decoded PCM. A further
+  focused run passes the maximum 546-plan audio batch and verifies that retrying
+  the same queued batch after a late read-only identifier failure preserves
+  decoder progress and produces the expected PCM, counters and canaries. Strict
+  emulator boundaries and all 13 graphics-table checks passed. Independent
+  source review found no material capacity defect. A fresh strict run on the
+  clean repaired build reached a later unsupported `SetResampleParametersEx`
+  request. A bounded follow-up captures ratio one, zero increment and flag two
+  on an already configured decoder near its finite output limit, with pending
+  PCM still present. Static native caller dataflow derives flag two from a
+  source-record bit, permits an empty-input decode when it is set, and prevents
+  fetching a new source block at that boundary. A bounded opt-in experiment
+  preserves pending decoder PCM across this neutral-rate marker. Two finite
+  streams then publish partial output across successive batches, consume an
+  additional complete record where needed, and reach their configured output
+  limits with no pending decoder PCM. Separate resample-info counts remain
+  zero. The marker therefore does not prove that source input is empty, and
+  decoder-held PCM must not be conflated with resampler-held samples. A repeat
+  captures the next rejected setter before publication: a constant ratio of
+  approximately 0.91565, zero increment and zero flags on a freshly cleared
+  stereo Opus instance. The experiment's setter budget was not exhausted.
+  Native producer dataflow budgets source frames as the ceiling of requested
+  output frames times the larger of the current and target ratios. It therefore
+  supports source-step ratio direction, rather than treating the request as
+  neutral. Stateful non-unit resampling and its source/output accounting remain
+  unimplemented. The experiment and its temporary test modes have been retired;
+  the restored source and rebuilt executables match the clean capacity repair.
+  The experiment is not a production admission or native-equivalence claim;
+  consumer completion, input lifetime, audio output, and shared-title acceptance
+  remain open. Executable validation is Linux-only.
+  Unsupported-operation failures now reach the existing operation-specific
+  diagnostic instead of an earlier generic unimplemented assertion.
+- AudioOut2 currently snapshots a non-main port's PCM but omits it during
+  context submission, leaving that PCM unconsumed. This is an identified host
+  routing gap, not yet a verified explanation of a particular title's audio.
+  Object type and attribute contracts, spatial mixing, rate alignment and
+  consumption require native evidence before this route can be admitted.
+  Object routing does not establish streaming append semantics. A bounded native
+  argument capture now records an eight-channel float main port at 48 kHz with
+  a 512-frame grain. Its attribute list contains the PCM pointer and eight
+  float gains; the current one-entry admission rejects this two-entry list.
+  Mono object ports also receive PCM, gain and four-byte attributes numbered
+  five or eight. Their routing and metadata semantics remain unqualified.
+  Two fresh strict shared-audio runs on the clean capacity repair stop in
+  `SetGaplessDecode`. One request is now captured at both enqueue and rejection:
+  initialized ATRAC9, instance flags 0x401, reset one, finite total 488448,
+  priming 256 and zero prior-skipped frames. The Opus-only admission rejects it
+  before parsing the trimming fields. A private codec-independent candidate is
+  prepared but has not been applied, compiled or behaviorally validated. The
+  second title's debugger stopped at a guest memory fault before audio; that
+  stop does not establish a fatal emulator fault or its gapless profile.
+- Direct pixel-resource and geometry-state packets now interpret the supplied
+  count as values only, consistently with the outer parser. Focused packet
+  cases pass. Pixel export analysis recognizes a wave32 EXEC-low clear before
+  a null final color export and invalidates depth coverage proof on EXEC
+  restoration. Waterfall analysis accounts for EXEC-high writes and distinguishes
+  relative-source from relative-destination moves. Wide scalar buffer loads
+  include the signed immediate offset with modular address arithmetic. Focused
+  numerical/analysis regressions reproduced the affected behavior before the
+  fixes and pass afterward. None establishes the cause of the menu glyph fault.
+
+The remaining menu glyph investigation has a narrower verified frontier. The
+affected draw samples a single-channel atlas whose entire CPU upload backing
+contains `0xcd`; a valid live shader probe independently samples alpha
+`205/255`. This explains solid glyph rectangles for that occurrence. A complete
+retained tracked-write history has no overlapping DMA or immediate-write entry,
+and the recorded owner is a CPU-upload texture. These observations do not cover
+untracked native CPU stores or every possible GPU-only alias. A bounded hardware
+access watch now links a verified native `0xcd` fill to a
+CPU layout/scatter routine: its source load touches the watched filled range,
+and its destination base matches the subsequently bound single-channel atlas.
+The decoded load/store sequence confirms that sampled source-to-writer path,
+not a complete whole-atlas write history. The earlier indirect content-preparation
+method now resolves to an internal command-stream producer. Its live source is
+a separate, entirely zero-filled scratch buffer; the observed receiver state
+selects the stream path. A separate CPU-descriptor update is gated off in that
+entry snapshot. The stream consumer, completed upload and latest texture owner
+remain unresolved; the return probe did not complete, so no whole-update result
+is inferred. HLE-only memory traces cannot exclude native guest writers because
+exported guest symbols may take precedence. An earlier image-copy diagnostic
+lacked transfer-source usage
+and is excluded from evidence. One observed black transition remains intermittent.
+A fresh strict run retained the colored menu through multiple no-input captures
+and reached another visible panel after a bounded input hold. The glyph blocks
+persisted in both states. This does not establish that the black transition is
+fixed or that every input route is qualified. A later bounded command probe
+observed the filled-source access but no command-producer entry. Its
+thread-restricted breakpoint was removed during shutdown, and the capture
+gate did not open. A process-wide follow-up accepted the producer on that
+same thread, but its child-method entry probe did not fire. Neither run
+demonstrates premature guest-thread exit or completed command publication;
+the actual indirect parent call and its return need observation.
+A further guarded probe confirms the parent call's register-derived target and
+arms its thunk entry, but neither the thunk nor the child entry is observed
+before bounded teardown. The later filled-source access still reads unchanged
+bytes. No command-publication witness or qualifying capture is present, and
+the debugger's client exit cannot qualify the unknown inferior termination.
+Repeating an unobserved entry probe is not evidence of a guest-thread failure;
+the next experiment must observe the call's actual next instruction directly.
+
+One strict performance investigation stalled after two presents, with no
+menu capture and no reported strict-breaker event. Its snapshots show completed
+initial graphics work and no pending device-address preparation. A repeat
+with temporary traces disabled advanced to an in-world scene, including one
+unreadable dialogue panel, without a captured main menu. Neither run sent
+runner input; effective physical or keyboard input was not observed. This
+single pair does not establish that tracing caused the stall. A fresh
+shader-performance-configured run reached a visually inspected menu
+after an explicit bounded hold on the initial confirmation screen. Its stable
+20.035-second window produced 96 presents (4.792 per second), below the required
+threshold. It compiled no shaders or pipelines in that window. Draw state setup
+and resource binding remained substantial CPU stages; their nested counters
+cannot establish exclusive costs. The earlier below-threshold menu sample used
+a different dirty binary and shader setting, so the small rate difference is not
+a controlled improvement result. A separate host-sampling attempt stopped at two
+presents before any menu or input. The profiler reports conflicting signal/timer
+configuration, so its timing attribution is not accepted as a menu measurement.
+Its samples nevertheless identify event-flag waits and condition-variable
+broadcasts as a bounded investigation lead. A focused idle-waiter reproduction
+confirmed that broadcasts after wait returns let unmatched waiters wake each
+other without a guest state change. Rebuilding both source versions for the
+same isolated fixture measured 537.518 ms of aggregate process CPU in a 250 ms
+window before the change and 0.123 ms afterward. Wait returns now notify only
+when cancellation drains the last sleeping waiter; call completion notifies
+only when deletion drains the last active call. Explicit Set and cancellation
+and deletion state-change broadcasts remain intact. The lifetime suite passed
+eight cases with one unavailable native-busy fixture skip. This proves the
+isolated wake-storm correction, not a menu-rate improvement or the cause of
+every startup stall. A subsequent strict, visually reviewed menu window recorded
+121 presents in 20.034 seconds (6.040 per second), still below the threshold.
+The reset-bounded counters recorded 128,656 draws, 5.382 seconds of state setup
+and 8.077 seconds of resource binding. Binding includes 2.888 seconds of storage
+preparation and 2.670 seconds of texture preparation; these nested measurements
+must not be added to their parent. The different binaries and independent runs
+do not isolate the cause of the rate difference. Completed multi-workload
+acceptance remains open.
+
 ## Mission
 
 Kyty is an experimental PlayStation 4 and PlayStation 5 emulator. This fork is
@@ -252,9 +2735,720 @@ When switching private fixtures (or adding a second root):
 - Commit messages: host/build behavior only (e.g. `build: upgrade vendored SDL2
   to 2.32.10`), never private title names.
 
-## Current verified frontier
+## Current status and verified frontier
 
+### Dirty-page lookup and admission during a camp transition (2026-10-09)
+
+Observed on a Ryzen 5 7600 and Arc A770 with Mesa 26.2.3, native render
+resolution, silent console output, shader optimization disabled and shader
+validation enabled. Ten saved captures from the 303-second strict baseline
+showed no camp or dialogue; the final image was almost black with a small gold
+sliver. The reference feature revision reached the camp conversation in a
+separate strict run.
+
+Debugger samples of the lookup-only candidate before adding the admission
+budget found all 262,144 page-table slots occupied, including roughly 100,000
+retired protection tokens. The page lookup can scan every slot for a missing
+host-write address. Retiring a page does not imply its token can be discarded.
+
+The correction retains exact page-presence bits per block and checks at most
+eight speculative page and block probes for normal-thread small writes. A
+positive or inconclusive block lookup restarts the exact page lookup. Identity
+publication excludes block-slot reuse during the negative check; the signal
+fault path keeps its original exact lookup and does not acquire this gate.
+
+Registration now shares the existing 131,072-page budget across active and
+retired identities. It checks the complete cover before changing references
+or reactivating retired protection. Refusal leaves late-fault evidence intact;
+Objects with readable mapped guest data continue through the existing
+content-hash update path on later submissions. No table capacity was increased,
+retirement token discarded, wait skipped or workload condition added.
+
+Validation: 114 focused tracker, lookup and VM cases ran (111 passed, three
+host-platform skips); seven label-publication cases passed. The boundary and
+13-table provenance gates passed, as did 77 playable-harness tests. The
+standalone playable guest gate was not run; the native checkpoint below uses
+scripted diagnostic input and does not establish gameplay or audio support.
+
+Native A/B: no saved baseline capture showed camp or dialogue at the
+303-second stop. The same baseline plus this selected change reached it in two
+cold-cache runs, by sampled times of 223 and 163 seconds. The first retained
+that dialogue for at least 82 seconds; the repeat advanced to a visible HUD
+and characters and remained live until the 307-second stop. Both runs ended
+without a fatal or memory-guard stop (312 and 307 seconds). A fresh reference
+feature control also reached the camp/HUD and remained live for 304 seconds.
+Camera positions differed after the scripted route; this proves the camp
+checkpoint, not equivalent rendering or complete playable behavior.
+
+A shared-path roguelike control and candidate each ran for 183 seconds. Both
+reached the house interior with character/HUD and healthy final capture
+metrics. Both retained storage-frontier errors and early capture warnings;
+no fatal, guard stop or WAIT_REG_MEM suspension was recorded. The comparison
+does not establish complete controls, audio or visual correctness.
+
+Limits: tombstones retain probe history, so admission does not guarantee an
+empty slot or a short exact lookup under arbitrary churn. Retired identities
+remain counted even after a later unmap invalidates their protection token;
+new registrations can therefore use hashing until identities are safely
+reused. (Since 2026-10-11 admission frees revoked identities; see "Dirty-tracker
+identities revoked by unmap".) This preserves lifetime evidence at a capacity and performance cost.
+Long-session performance, other GPUs, complete gameplay and audio remain
+unverified. Dark camp captures also receive a low-entropy heuristic verdict,
+including the reference capture; scene recognition requires visual inspection.
+
+### Contract-closure validation checkpoint at translator127 (2026-10-09)
+
+On retry 2, the focused CPU suite passed 278/278 and selected native integrations
+passed 37/37; the Vulkan validation scan found no matching identifiers. Native
+PARAM validation covers 30 nonzero-mask pair cases and two EXEC controls, with
+the enabled-component results proven. Repeated partial-vertex retention,
+compressed PARAM exports and VSKIP remain unqualified.
+
+The full CPU suite completed on retry 4 in 55.84 seconds: 2,317 cases across
+147 suites, with 2,313 passed, four skipped and zero failed. The skips were
+three OS-owned virtual-memory cases and
+`EmulatorKernelLifetimes.FailedPthreadDestroyPreservesNativeObject`, which is
+unavailable on this host. The fresh `LastTest` evidence was 526,062 bytes
+(SHA-256 `a317373c...e6b364`); the validation scan found no VUID and the
+foreign-monitor count was 0. All eight source, table, shader and archive gates
+exited 0 on retry 4. The pinned Nix environment was unavailable; validation
+used the host build.
+
+Earlier attempts are historical: full CPU retry 2 stopped at
+`VertexExportsDeclareParametersUsedByTheShader` because `exp_control=0xff` was
+unknown; the same default was present in PARAM7/8, which that run did not reach.
+Setting it to zero made the exact three-test filter pass 3/3 on retry 3, but the
+full retry 3 was interrupted when an external guest run began.
+
+No guest execution result is included in this checkpoint. It establishes no
+menu, gameplay, 20 FPS performance or cross-vendor result.
+
+**Historical finding — guest device-address snapshot refresh and in-flight readers.** Static source inspection showed
+`SnapshotGuest` copies refreshed guest bytes into `chunk.copy` in place, and tracked chunks pass the same allocation
+to host-pointer import (`GuestDeviceAddress.cpp:183-199, 429-504, 961-973`). `CommandBuffer::Execute` submits work
+and returns before fence completion; command-buffer rotation can begin recording another slot while earlier
+submitted work remains pending (`GraphicsRenderCommandBuffer.cpp:1562-1613; GraphicsRun.cpp:537-582`). The
+write-back dependency path waits for pending storage write-backs, not for every asynchronous device-address reader
+(`GraphicsRun.cpp:2779-2795; GuestDeviceAddress.cpp:843-852`). Range invalidation and release are explicitly
+quiesced operations, while `GuestDeviceAddressPrepare` refresh has no corresponding reader-fence wait
+(`GuestDeviceAddress.cpp:761-813, 961-973`). Escalation found no visible reader-completion guarantee for this refresh;
+host coherency does not establish device execution completion. If refresh overlaps a reader, a host/device data gap is
+possible, but the guest trigger is unknown and no runtime cause has been proven. No runtime overlap or corruption has
+been observed. The reader-aware repair and its focused native validation are
+recorded in the current checkpoint above. Real workload causality remains
+unknown; page-granular refresh remains on hold.
+
+### Historical contract-closure validation checkpoint at translator126 (2026-10-09)
+
+This was a frozen validation checkpoint for shader translator 126 and geometry translator 86. The available default
+and integration targets build successfully. No guest was launched with this checkpoint, so it establishes no guest
+frontier, menu, performance, compatibility or cross-vendor result. A later translator change requires a new checkpoint
+and fresh validation.
+
+The broader acceptance target remains a visibly verified main menu held above 20 FPS. Earlier pre-126 measurements
+recorded 5.33 FPS (median 185 ms, p95 201 ms) for the older binary and 3.79 FPS (median 259 ms, p95 358 ms) for a
+combined candidate. Those runs did not meet the target and do not describe translator126. A prior run of the remaining
+action workload also failed to reach a menu; its guest-memory import observation is historical and was not repeated
+with translator126.
+
+The focused CPU filter passed 277/277 tests. The full CPU suite passed 2,312 of 2,316 tests, with four skips and no
+failures; the skips were three host virtual-memory cases unavailable on this host and one native pthread-destroy
+preservation case. Selected native integration passed 36/36 tests. The native `ParameterExecWriteback` fixture passed
+its full-EXEC and zero-EXEC cases. A five-case native UINT16 writeback matrix passed for R16, RG16 and RGBA16 formats,
+including partial component masks, mixed MRT attachments and the bypass case. These fixtures ran on the available
+Intel Vulkan device and do not establish guest output or behavior on other GPUs. All eight source, table, shader and
+archive gates exited successfully. The Vulkan validation error scan returned no matching identifiers.
+The pinned Nix environment was unavailable; validation used the configured host build.
+
+At translator126, the validated PARAM EXEC fixture used the full mask; its partial-mask path still wrote a whole
+vector and remained under repair.
+
+The retained scalar-flow analysis with immutable program owners builds and passes the focused and full CPU suites;
+no performance comparison exists. Remaining holds include DCC plane profile, ownership and completion; indexed
+vertex, texture and sampler bounds and lifetime; AudioOut2 and append semantics; the independent one-byte
+`SW_64KB_R_X` offset oracle; NGG and fragment transport; ShaderDumpGuestProgram extent and lifetime; conditional
+command-buffer branch semantics; and Windows physical-memory proof. AMD/NVIDIA GPU execution, other OS execution,
+the pinned Nix environment and live CI remain unverified. The zero-fill AJM fake-success path now produces a strict
+unsupported-run refusal without publishing output, result or batch state; the real compressed decoder is still
+unimplemented.
+
+No title route, performance acceptance or remaining open contract is closed by this checkpoint.
+
+### Interop integration and single-precision MODE contracts (2026-10-09)
+
+Historical integration snapshot at translator 122; the translator126 validation checkpoint above supersedes its
+build and test status. The runtime observations in this section are not results for translator126.
+
+This branch integrates the published fronts branch at `a54f6c7c` into the interop branch (`1605d37a`) with a
+three-way merge from their common base `b208fb3e`. Both sides are kept: the bounded SRC1 translation, partial-export
+refusals, memory, loader, libc, network, VideoOut and compute-coordinate repairs of the interop branch, and the
+published queue-depth, `vcc_hi`, gradient, waterfall, export-flow, tiling, descriptor-bound, view-identity and
+write-observation work. The guest descriptor snapshot keeps the published vector form and reads through the scoped
+descriptor reader, so exact resource-fold capture still sees every descriptor-table read. Translator versions 103
+and 120 both described emitters that this tree no longer produces; the merged emitter is version 121 and the MODE
+changes below are version 122. The geometry translator stays at 86.
+
+**CLAMP, OMOD and IEEE mode (f32 and f16).** Kyty dropped the VOP3 `CLAMP` bit in IEEE mode. The ISA text is
+ambiguous here: section 6.2 mentions `CLAMP` in the same paragraph that ends "output modifiers are ignored if the
+IEEE mode bit is set", while section 3.5 lets only `DX10_CLAMP` choose the clamped NaN result. The decision rests on
+two independent sources that agree IEEE mode keeps the clamp: published RDNA2 hardware measurements of
+`v_mul`/`v_add` with `clamp` saturate in both IEEE modes, and an LLVM 23 compile for gfx1030 folds a `[0, 1]` clamp
+into the `clamp` bit of a kernel whose descriptor sets `ieee_mode 1`. The f32 and half emitters now apply `CLAMP` in every mode; this supersedes the translator-34 entry
+below for `CLAMP` only. `OMOD` now follows the ISA: it is ignored in IEEE mode and whenever single-precision output
+denormals are enabled (`FP_DENORM` bit 5). When applied, it steps the exponent on the bit pattern: zero and
+denormal results become +0, `mul:2`/`mul:4` saturate to infinity, a `div:2` result that leaves the normal range
+becomes +0, and infinities and NaNs pass unchanged. A host `OpFMul` had kept -0 and denormals and ignored both mode
+conditions. Open divergence: the ISA flushes -0 to +0, but the same published measurements return -0 for `div:2`
+of the smallest negative normal. As for the min/max case below, Kyty keeps the ISA result and the published
+contract outranks the single secondary source until RDNA2 hardware confirms either.
+
+**V_MIN/V_MAX/MIN3/MAX3/MED3_F32.** The emitters follow the ISA 12.7/12.12 pseudo-code: in IEEE mode a signaling
+NaN is returned quieted (first operand first); otherwise a NaN first operand returns the second operand and a NaN
+second operand returns the first; the minimum of signed zeros is -0 and the maximum +0; MED3 returns MIN3 when any
+operand is NaN. Previously signaling NaNs passed unquieted in IEEE mode, signed zeros used the host's unspecified
+choice, and MIN3/MAX3/MED3 used host `FMin`/`FMax` NaN handling. Open divergence: with two NaN operands the ISA
+returns the second operand, but the published hardware rows of the same secondary project return the first. Kyty
+keeps the ISA order (a published contract outranks a single secondary source); the payload choice needs a
+measurement on RDNA2 hardware.
+
+Compute programs use their recorded launch controls; unknown compute controls keep the previous defaults (no
+DX10 clamp, no IEEE, f32 output denormals flushed). The MODE word already enters every stage's shader identity.
+Half-precision clamps keep their existing admission: with f16 output denormals enabled they are refused outside
+IEEE mode but admitted in IEEE mode. A half clamp is exact, so the IEEE case applies it; the asymmetry is recorded,
+not resolved, and no workload in the sweep reached either case.
+
+Verification: `EmulatorShaderArithmetic.FloatModeClampOutputModifierAndMinMaxContracts` emits and validates
+production modules for each mode and evaluates them with the CPU contract evaluator; a compute variant runs the
+same cases on compute modules with recorded launch controls. It failed on the previous
+emitters (the IEEE clamp returned NaN for DX10 clamp) and passes after the change. Two earlier assertions that
+encoded the old behaviour were updated with the evidence above: the half conversion clamp in the same suite and
+the IEEE clamp-source check in the graphics diagnostics integration. The SDWA `mul:4` and min/max selection packet
+tests now check the new emission. No GPU execution of these exact cases exists on AMD hardware.
+
+**Host context requests.** `HostContextTrampoline` now publishes `completed` with a single-byte store issued after
+the saved context is copied back and after RSP has left the request-owned stack; the raising thread no longer
+reads the request after queuing it. A real-signal regression (`OverlappingContextRequestsCompleteAndReclaim`)
+delivers 800 overlapping requests from two raisers to two guest threads, checks every handler call, both targets'
+resumed execution and the final reclamation. It passes 3 of 3 runs on the fix. The old ordering also passed 50 runs, all with `MALLOC_PERTURB_` (25 also with
+the opt-in context trace, which produced no output in the test host), so the use-after-free window itself is not
+reproduced; the test is a completion,
+reclaim and liveness regression. Still open: a request queued to a thread that exits before taking the signal is
+never completed, so its 1 MiB stack is retained for the process lifetime (`LibKernel.cpp`, `KernelRaiseException`).
+This repair is not linked to the fishing adventure's startup freeze.
+
+**Diagnostic bounds.** The opt-in material trace and the rejected vertex-layout logger now bound their traversals
+to the fixed attribute, resource and sampler arrays while printing the decoded counts unchanged. The vertex input
+decoder refused nothing and wrote past those arrays when a layout merged more than 16 attributes into one buffer,
+used more than 16 buffers or resources, or named a semantic beyond the 16-entry fetch table; each case is now an
+explicit refusal. A fetch-table index above 15 only reads guest memory and keeps its warning.
+
+**New refusal evidence.** A critical transient-pool refusal now also reports the refused usage's used and free
+entries, used four-byte and four-byte-zero entries, snapshots and duplicate payloads. The D16 depth-reference refusal
+now names each containing render target's format, extent, samples, layers, mips and content stamp, and every
+overlapping object's content origin, sequence, submission, update times, in-use, dependency and write-back state.
+
+**Runtime observations (Intel Arc A770, Mesa 26.2.4, strict, Native, Silent).**
+
+| Run | Workload | Result |
+| --- | --- | --- |
+| d1900, d1901 | Robot dungeon workload, wait deadline 15 s and sync-wait tracking | 202 s each, advancing; zero suspended waits and zero producer-not-found; stall not reproduced |
+| d1902 | Mechanical-fist platformer | 27 s, guest locks null+0x58 from the compressor preset path (startup race reproduced) |
+| d1903 | Mechanical-fist platformer, debugger attached | Passes the race; stops at 30 s on the unresolved `sceAgcCbBranch` import |
+| d1904 | Arcade racing workload | 162 s, race reached, no D16 refusal; frame-time profile matches the previous sweep |
+| d1905 | Isometric roguelike, allocator error-edge probe | 165 s, probe armed, zero error edges, zero null faults |
+| d1906 | Fishing adventure, sync-wait tracking | 162 s, advancing; startup freeze not reproduced |
+| d1907 | Pixel cave platformer | Excluded: a long blocking agent request starved the observer, which stopped the run at 105 s |
+| d1908 | Pixel cave platformer, route ends at 120 s, agent holds | Cave scene reached; held Square and Cross were each read by the guest in 90 samples; character unchanged |
+
+`sceAgcCbBranch` exists only in held local work whose compare semantics are unproven, so the mechanical-fist
+platformer cannot reach its earlier storage-capacity refusal on the published contracts; the capacity front stays
+unmeasured on this tree. The pixel cave platformer's earlier "wake up" endpoint did not reproduce on this tree:
+both the shortened route (d1908) and the unchanged sweep route (d1919) reach the cave. Its earlier cause is not
+established, and that endpoint is not evidence of lost input.
+
+**Final sweep (d1910-d1922, one executable for every route, SHA-256
+`2bdf2ccdb2e8750bbb43d1f9b16247ff0410d54809899d628a5d819cab1f048f`).** The final source differs from that executable
+only in the `div:2` underflow sign above and in tests. No route stopped on a fatal error except the
+mechanical-fist platformer, and no event-ring drops occurred. Final captures were reviewed visually against the
+previous sweep's endpoints. All observer `gameplay_accepted` values are false; scene and action acceptance needs
+the playable gate's checkpoints.
+
+| Workload | Seconds | Final scene |
+| --- | --- | --- |
+| Fishing adventure | 163 | Boat, sailing tutorial and HUD |
+| Perspective puzzle | 292 | Lit room with desk; transient loading stall, then healthy watches to the end |
+| Sword platformer sequel | 162 | Cave, character and HUD |
+| Isometric roguelike | 163 | Initial area, character and HUD; no null row copy |
+| Watercolor platformer | 162 | Pale figure on a nearly white image, as before; acceptance needs a same-scene reference |
+| Penitent platformer | 161 | Cavern, character and HUD |
+| Prison roguelike | 162 | Initial area, item tooltip and HUD |
+| Camp brawler | 202 | Black throughout (see below) |
+| Sandbox | 203 | Seeded ready-to-play setup with complete text |
+| Pixel cave platformer | 161 | Cave with ladders and character |
+| Robot dungeon workload | 203 | Tutorial scene with HUD and movement prompt; healthy watches; earlier present stall not reproduced |
+| Arcade racing workload | 165 | Race with HUD; no D16 refusal |
+| Mechanical-fist platformer | 58 | Passes the startup race; refuses the one-byte `SW_64KB_R_X` 400x5x5 volume |
+
+The camp brawler stays black and issues about 3% of its earlier draws while presenting normally. A build of the
+merge result without this entry's changes reproduces the same black endpoint (d1923), so the cause precedes this
+change set. Inference, not tested: the earlier endpoint came from the local candidate with the held audio context
+bundle, which this tree does not contain, so the missing context admission is the leading candidate. A Console
+printf run that shows whether the AudioOut2 context calls are refused would decide it. The mechanical-fist
+platformer's one-byte volume equation is also held local work, so it remains a refusal here.
+
+The strict playable gate on the isometric roguelike install with the final source fails as measured: input is
+delivered (three taps, six guest read-state samples), but `no_runtime_failure` reports the first error
+`gfx_storage_frontier`, no local baseline exists, and no reviewed scene/action checkpoint fixture exists. No
+gameplay acceptance is claimed.
+
+### Classic runtime and input boundaries (2026-10-08)
+
+This slice completes observed parser/runtime failures and the native compute
+wave-width gap. It does not establish new title compatibility.
+
+- Failed or busy mutex destruction retains the guest object and handle.
+  Condition waits save and restore the guest recursion depth around the single
+  native lock, including timeout returns. A depth-two signaling flow and a
+  depth-two timeout exercise the public APIs; this is historical BSD/POSIX
+  compatibility evidence, not a new console measurement.
+- Resolved integer conversions preserve the classic base-0/base-2 `0b` token
+  boundary and use 64-bit guest LP64 results independently of host `long`.
+  Linux/glibc scanf forwarding explicitly uses the retained C99 entry point,
+  avoiding the host's C23 `%i` binary-prefix extension. Other scanf host ABI
+  paths, Annex K sized strings and non-glibc C23 behavior remain unqualified.
+- ELF input reads check physical file extent, seek/read status and exact byte
+  count. Program/section tables and dynamic termination are bounded. RELA and
+  image-relative JMPREL are checked against a declared loadable memory extent;
+  OS relocation offsets are checked against the separate dynlibdata buffer.
+  Empty tables retain valid end-boundary pointers. SELF containers may omit
+  declared section payloads. Export preflight refuses ranges larger than its
+  32-bit write interface before creating output, and omitted SELF sections
+  cannot be saved as a complete ordinary ELF. Failed input cleanup is reusable;
+  repeated dynamic segments retain the prior last-entry behavior without leaking
+  superseded buffers. Eager dynamic, dynlibdata and section-name buffers share
+  a 64 MiB aggregate host resource budget, checked before allocation with
+  replacement accounting. This is an implementation policy, not an ELF ABI
+  limit; modules exceeding it are refused. Adjacent-segment relocation tables
+  are refused; symbol/string/hash/PLTGOT bounds are outside this slice.
+- Native Gen5 wave32 compute derives sensitivity from guest wave-state uses,
+  then selects exact width 32 from the queried default or enabled compute
+  subgroup-size control. Local dimensions, invocation count, shared memory
+  and subgroup-count limits are checked. Full subgroups and X divisible by 32
+  are required for sensitive native programs. The actual SPIR-V 1.6 module
+  supplies that guarantee; older modules need the enabled full-subgroup feature
+  and stage flag. Guest coordinates are reconstructed from subgroup ID and
+  lane, including dispatch thread-limit masks; Vulkan does not prescribe their
+  equality to LocalInvocationId. Partial native workgroups remain unsupported.
+  The paired wave64 path keeps its separate requirements. Sensitivity and
+  required width enter cache identity; translator version 103 invalidates older
+  coordinate emission. These conditions follow the published
+  [subgroup index](https://docs.vulkan.org/refpages/latest/refpages/source/SubgroupLocalInvocationId.html)
+  and [full subgroup](https://docs.vulkan.org/spec/latest/chapters/shaders.html#shaders-full-subgroups)
+  contracts.
+- Output options initialize exactly 64 bytes with byte 2 set to `0xff`.
+  Validation checks handle, reserved arguments, mode, then option words; word 3
+  is caller controlled. ConfigureOutput consumes the full five-argument ABI.
+  Full-range option copies hold the guest VM mapping lock and validate ownership,
+  permissions and overflow. Invalid non-null pointers return INVALID_ADDRESS
+  as a host-safety decision; that return has not been measured on the console.
+  The default cadence is supported; high refresh is reported unavailable and
+  configuration refuses it until the presentation clock implements it.
+  Console observations disagree on selector 18's error (`0x80290016` versus
+  `0x8029001e`); current unknown-selector classification follows the latter
+  observation and is not established across firmware revisions.
+- POSIX host-unreachable socket failures retain the corresponding guest error.
+- Conditional LDS exchange opcodes no longer execute as ordinary additions.
+  Both widths refuse before lowering. Opcode availability is documented, but
+  exact older-target operational semantics and pair atomicity remain unproved.
+
+The owned Linux Release build passes with parallelism limited to two. The
+focused runtime/parser/graphics suite passes 209 tests; five direct integration
+binaries and 22 loader/table CTests pass. Native wave32 execution on an Intel Arc
+host produces two distinct full-wave ballot masks. A production-emitter fixture
+with local shape 32x2 verifies seeded X/Y coordinates and initial EXEC masks
+`0xffffffff`/`0x00000000` for a Y thread limit of one. Paired-wave fixtures remain
+green. Sparse metadata-budget cases fail with the preceding loader object, and
+the invalid-options-pointer case faults with the preceding video object; both
+pass with the corrected objects. A process-local host-connect failure probe
+verifies the public socket error path. Emulator-boundary and table-provenance
+gates pass.
+The emitter-precondition fixture now gives its synthetic end instruction a
+forward PC and checks CFG validity: its previous backward PC returned a
+nonempty rejection token before exercising the intended emitter. All ten
+precondition cases pass after this test-only correction.
+The complete suite through the script host passes 2,122 tests with eight skips:
+three Windows/macOS mapping cases and five media-fixture cases were not exercised.
+The development supervisor's live lifecycle cases run and pass through this
+host entry point. Nix is unavailable on this host; the existing development
+definition is retained and no dependency is introduced by this slice.
+
+A strict 31.6-second roguelike replay delivers three taps and records six guest
+read-state samples, but retains the prior `gfx_storage_frontier` failure. Its
+playable regression gate fails; the scene/action checkpoints remain unproved.
+A second strict run holds the streaming title's menu for 17 seconds with no
+runtime error. Its scored menu capture was labelled `hot_corruption` by the
+native heuristic. That raw label is a palette false positive: the
+maintainer-supplied expected menu reference shows the same warm yellow, orange
+and red palette, and the composition is visually consistent with it. The menu
+comparison establishes neither gameplay acceptance nor a performance improvement,
+and it does not qualify the whole title's rendering.
+
+No AMD, NVIDIA, Windows or macOS execution has been performed for this slice.
+The direct GPU mask fixture currently requires the paired probe's enabled
+size-control path; no-node default-width behavior has modeled coverage only.
+The coordinate fixture observes initial EXEC and thread-limit masking; later
+guest EXEC writes and possible reactivation of initially inactive lanes remain
+unqualified.
+
+Secondary blend outputs have bounded translation and offscreen host coverage; a
+consumed guest pass is still needed to qualify compatibility.
+Sampled-parent freshness and depth reuse need producer/owner/content evidence;
+indexed tables need a nonzero consumed index, extent, stride and generation;
+compression metadata needs its plane, encoding and completed first write.
+PCM/ATRAC9 append needs observed cursor, starvation, lifetime and completion
+transitions. None of those behaviors is inferred from another implementation.
+
+### Bounded secondary blend translation (2026-10-08)
+
+Admission (all required): Gen5 pixel program, stage enabled and not embedded;
+effective blend0 uses an SRC1 factor (0x0f..0x12) after the paired SRC_ALPHA
+override rule; one active physical color destination; the only color exports are
+MRT0 and MRT1, each non-null export to both targets has EN=0xF, and each target
+uses one packing. Full (32_ABGR, mode 9) and COMPR (FP16_ABGR, mode 4) are both
+admitted when the modes match. Operations are ADD, SUBTRACT or REVERSE_SUBTRACT.
+Standard component order is required. Union enable masks alone are insufficient,
+because partial writes can leave secondary components undefined.
+
+Resolution uses the parsed program and the materialized draw state before the
+shader, module and pipeline keys, on both indexed and auto draw paths. MRT1 is
+emitted as Location 0 Index 1; the primary output remains Location 0. The DSB1
+identity word is added only to the dual variant, so ordinary identities and
+decorations are unchanged. Location admission counts one destination, while
+combined-output resource accounting keeps both declared Output variables.
+
+Host admission queries enabled dualSrcBlend, maxFragmentDualSrcAttachments and
+COLOR_ATTACHMENT_BLEND_BIT of the actual optimal format. There are no vendor or
+title branches, no new DB_SHADER_CONTROL selector and no EXP lowerer changes.
+Other unqualified SRC1 states retain strict refusal. Ordinary non-SRC1 draws
+retain their existing admission rules. No secondary values are synthesized.
+
+Verification on this host: red tests reproduced the missing secondary decoration,
+the missing cache distinction and the unsafe partial and split enables before the
+fixes. A fresh Linux Release build passed. The 68 focused contract tests passed.
+The script host run reported 2137 tests, 2129 passing, 8 skipped (three platform
+memory cases and five media-fixture cases) and no failures. The compute, wave64,
+host and memory integrations passed, as did the graphics default and NaN baseline.
+24 loader, table and raster CTests passed. The strict architecture gate and the
+13-table provenance gate passed.
+
+The offscreen Vulkan integration runs encoded guest FP32 and FP16 programs
+through the parser, the production resolver, ShaderRecompilePS, SPIR-V
+validation and a real pipeline. On an Intel Arc A770 (DG2) with Mesa 26.2.4
+vulkan-intel on Linux 7.2.9, the interior pixel is RGBA(128,191,191,255) and the
+untouched corners are (0,255,0,0) for both variants. A disabled real feature and
+a nonblendable integer format are both refused. Readback uses a color-to-transfer
+layout transition, a transfer-to-host visibility barrier, an exact fence and a
+non-coherent invalidate. This proves the bounded host translation only, not a
+consumed SRC1 pass in a game.
+
+Strict runtime evidence: a 32.9-second roguelike replay delivered 3 taps and 6
+guest read-state samples, and it keeps the gfx_storage_frontier and the failed
+playable gate. Two streaming runs of about 17 seconds each had no runtime error;
+the first final frame was a loading scene and is not comparable with a menu
+reference. The repeated menu shows the expected composition and warm palette. Its
+native `hot_corruption` label is a palette false positive for this menu. The
+reference qualifies the observed menu appearance only; gameplay, performance
+and a consumed SRC1 pass remain unverified.
+
+Not performed: AMD or NVIDIA physical execution, Windows and macOS runs, and
+Vulkan VUID or synchronization-layer validation. The validation layer and Nix
+are unavailable on this host; the existing development definition is retained and
+no dependencies were introduced. Indexed tables need a consumed nonzero index,
+extent, stride and generation. DCC needs the guest layout, the full metadata plane
+and the writer completion. APPEND needs flags, cursor, lifetime, starvation and a
+callback oracle. These were investigated and not activated.
+
+### Shared runtime and resource contracts (2026-10-08, bounded validation)
+
+This change set starts from committed feature HEAD `b208fb3e` in a separate
+checkout. The source checkout's uncommitted work was not imported or changed.
+The results below describe shared contracts; they do not establish additional
+title support or supersede the earlier gameplay reports.
+
+- **Sampler audio.** Standard PCM8/16/24/32 and float blocks render through the
+  existing NGS2 lifecycle, with source-rate conversion, pitch, gain, queue reset,
+  repeat/end handling and bounded callback dispatch. Mixing accumulates before
+  one final clamp. A bounded ATRAC9 decoder uses the existing FFmpeg dependency.
+  The owned compressed fixture is silent: non-silent quality, skip placement and
+  block seams remain unverified. VAG/HEVAG playback is not added. Audio/video URI
+  replacement callbacks are exercised with an owned media file; this does not
+  establish general guest-VFS-backed decoding. See `docs/AUDIO.md`.
+- **Dirty memory.** Sparse, bounded range metadata admits more than 512 disjoint
+  ranges. Write-watch leases retain guest permission authority across protect,
+  unmap, aliases and concurrent restorers. Signal handling performs no lazy
+  tracker initialization and never waits on a permission fence. Normal writers
+  wait for permission publication; range queries are serialized with registration.
+  Read and execute faults are not claimed as writes on the verified Linux path.
+  Process-wide fault state remains alive until process termination.
+- **Layered sampled images.** Type-12 descriptors retain the one-dimensional
+  coordinate and array slice through classification, bank counts, Vulkan views
+  and image emission. The GPU fixture covers 12 load/sample cases, including
+  mip level, base slice and wrap/edge/border addressing. Production guest upload
+  is qualified only for linear uncompressed, single-level data; the host fixture's
+  mip chain does not prove a general guest mip-upload contract.
+- **Shared GDS transfers.** Command DMA and shader access use one backing store,
+  with checked windows, recorded transfer barriers, bounded publication and labels
+  ordered after completion. The production append fixture seeds a counter with
+  41, adds 16 active lanes, publishes 57 and preserves the neighbouring word.
+  GPU-produced source bytes replace stale CPU bytes in the transfer fixture.
+  Eight malformed/protected/unmapped cases refuse strictly. Raw image sources,
+  exclusive queue-family migration and discard semantics remain unqualified.
+- **Structured shader flow.** Canonical block, edge, dominator and loop analysis
+  replaces three local loop decisions for the non-banked emitter. Nested loops,
+  shared continues and terminating/discard tails validate; unresolved targets,
+  irreducible or unsupported multi-level control flow refuse. Analysis budgets
+  are explicit. Existing wave-bank, EXEC and lane analyses remain separate.
+- **Exact replay and diagnostics.** Schema-v3 resource-fold capture records the
+  owned evaluator inputs, five caller-provided output seeds and ordered guest
+  reads. Other prepopulated bind state is unrepresentable. Eight fresh private
+  captures replayed byte-equal, including a pixel-stage layout offset and slot;
+  these eight captures contained no descriptor-table reads. Synthetic contracts
+  cover missing, reordered, unused and failed reads. Operation records are
+  default-off and bounded; an owned producer-to-file-to-Python flow preserves its
+  dependency edge and external input. This is not synchronization evidence.
+
+**Validation environment:** Linux x86_64, GCC 16.2.1, Vulkan 1.4.363, Intel Arc
+A770 (DG2), Mesa Xe driver version 109060100. A dedicated Release build used at
+most two compilation jobs. All affected Linux executable targets built. Windows and macOS were not
+compiled. Focused C++
+validation passed 887 cases with three expected host/platform skips; the Python
+tool suites passed 115 cases, and nine wrapper/real replay CLI cases passed.
+Nine production-path integration executions passed, including GDS append, the
+layered-image fixture, graphics diagnostics, compute, kernel memory and audio.
+The paired logical-wave fixture also executed on the GPU. Architecture and all
+13 graphics-table provenance gates passed.
+
+The integer endpoint runs the production ISA parser, emitter and Vulkan path.
+Five operations matched an independent host integer reference over 460 edge and
+seeded pairs; a further 1024-pair run used all 64 admitted dispatches, and an
+external 67-pair input completed. The physical subgroup was 32 and the logical
+wave 64. This is Vulkan execution evidence, not a native AMD comparison. AMD
+hardware/HIP and Nix were unavailable; the exact dependency declaration was
+source-checked but neither entered nor evaluated.
+
+**Strict guest limits:** a 33-second scripted opening route delivered all three
+input edges and produced a scored, visually inspected opening image. It retained
+the baseline's first `gfx_storage_frontier`; both baseline and changed runs failed
+the gameplay gate because no scene/action checkpoint was reached. A separate
+roughly 18-second startup held presentation with no runtime error; its captures
+showed branding/loading and a flat transitional image, not gameplay. No cross-run
+performance improvement or additional compatibility claim follows from these runs.
+
+CPU-demand publication still lacks a measured steady-state bottleneck. Indexed
+sampled tables still lack a consumed runtime-key pattern, extent, stride and
+generation contract. Raw compression metadata still lacks its plane, encoding,
+ownership and first-write completion contract. These remain investigation items;
+no guessed fallback or metadata write was introduced.
+
+### Portable resource completion (2026-10-08)
+
+The follow-up removes host capability assumptions and closes a deferred write
+lifetime defect. Admission depends on queried and successfully enabled Vulkan
+features, memory type bits and mapping ownership, without vendor selection.
+The implementation source is recorded at `ae228c7746527f3f6eeba0332efda0d8a5f57363`.
+Validation compiled the identical source before those commits were recorded;
+the private run metadata therefore reports `f2795437` with pending changes.
+
+- **Core subgroup features.** The window device and compute probe query and
+  enable subgroup size control through one Vulkan 1.3 feature aggregate. The
+  existing Vulkan 1.4 floor makes the older extension name and revision
+  diagnostic only. Enabled state is published after device creation succeeds.
+  Exact subgroup width, full subgroup, stage and operation requirements remain
+  enforced. A compiled comparison of the previous and current capability
+  helpers refuses and then admits the same core-enabled, extension-absent
+  paired request. Modeled admission also covers ranges containing 32 and a
+  64-only native request; it is not execution evidence on those hosts.
+- **Probe cache maintenance.** The integration compute probe prefers compatible
+  coherent host-visible memory and can use compatible noncoherent memory. It
+  maps the entire dedicated allocation, flushes the output seed once and each
+  metadata write before submission, and invalidates output after the host
+  barrier and successful fence wait. Failed cache maintenance refuses the
+  submission or read. A native-call model compiled the actual probe and checked
+  separate host/device views, repeated submissions, incompatible type bits and
+  flush, wait and invalidate failures. Available hardware exposes only coherent
+  host-visible types; actual noncoherent hardware remains untested. This change
+  does not add noncoherent support to production resource pools.
+- **Allocation refusals.** The production allocator refuses an unsatisfied
+  memory-type request before modifying allocation state or calling the native
+  allocator. Buffer creation, allocation and binding errors stop before an
+  invalid resource can be used. A native-call model linked the production
+  implementations and verified rejected requests, successful type selection,
+  cleanup and the strict native error paths. Requested production memory flags
+  remain requirements; they are not silently relaxed.
+- **Deferred guest ownership.** A bounded snapshot records the mapping
+  instances covering a GDS destination. Mapping replacement, commit and
+  decommit issue fresh identities; splits and protection changes retain them.
+  Publication checks all identities and current guest write access in the same
+  VM transaction as the copy, so a partial mismatch copies nothing. Capture
+  requires ownership only: a read-only destination that becomes writable before
+  completion still receives its bytes. A GPU fixture using the previous
+  callback accepted an unmap/remap before completion; the current fixture
+  strictly refuses it. Normal, armed and read-only-at-record publications and
+  their neighbouring bytes pass. The existing tracker lease and write-generation
+  update remain unchanged. Unregistered end-of-pipe destinations still receive
+  nothing, while unsafe registered destinations refuse.
+
+**Validation:** a dedicated Linux Release build of all affected executables
+passed with two compilation jobs. Focused validation passed 1079 cases with
+three expected host/platform skips. Nine sequential production-path integration
+executions passed, including nine GDS refusal scenarios, append, layered images,
+compute, graphics diagnostics, memory and audio. The logical-wave fixture passed
+on the GPU, and five integer operations again matched the host reference over
+460 edge and seeded pairs. Architecture and all 13 table provenance gates pass.
+The available device is an Intel Arc A770, Mesa 26.2.4 with Xe. AMD and NVIDIA
+hardware, Windows and macOS execution remain untested. No dependency was added
+by this follow-up.
+
+**Strict guest recheck:** the approximately 32-second opening route again
+delivered three input edges, advanced presentation and stopped without a host
+crash, while retaining the baseline's first `gfx_storage_frontier`. Its scored
+capture was darker than the preceding run. A bounded repeat retained four
+non-stripey detailed opening images (entropy 3.73–3.89, 504–572 quantized colours),
+including the earlier subtitle, before a flat final image. This excludes a
+persistent loss of opening detail in that repeat; the brightness variance and
+later flat output remain unlocalized. Both gameplay gates fail for the known
+resource frontier and absent scene/action checkpoint. These observations do not
+establish complete visual equivalence, additional title support or a performance
+improvement.
+
+A separate 17-second startup run had no last-error event and advanced 7518
+presents during a 15-second watch. Its captures showed branding and then a
+visually inspected detailed introductory scene; no input/action gameplay
+checkpoint was exercised. In the subsequent 15028 ms performance interval,
+497 writebacks transferred 6115328 bytes in 15430055 ns. Unlike the earlier
+loading-only interval, this one has steady publication activity, but it still
+does not establish a CPU-demand publication bottleneck or an A/B speedup.
+
+The focused commands are `cmake --build <owned-build> --parallel 2`,
+`<owned-build>/kyty_unit_test --gtest_filter='CoreVirtualMemory.*:EmulatorComputeWave*.*:EmulatorNativeWave*.*'`,
+`<owned-build>/integration_test/kyty_gds_transfer_integration`, its `--append`
+mode, `kyty_shader_compute_integration`, `kyty_shader_wave64_integration`,
+`check_emulator_boundaries.py --strict source`, and
+`check_graphics_tables.py source/emulator/src/Graphics/Tables/manifest.sha256`.
+Private guest routes, native captures and call-model artifacts stay outside Git.
+
+Runtime-indexed sampled tables, raw compression metadata publication and
+CPU-demand publication remain subject to the evidence limits in the preceding
+section. Exclusive GDS queue-family migration also requires a proven ordering
+contract; changing resource sharing alone would not establish synchronization.
+
+### Flexible snapshot lifetime and standard math (2026-10-08)
+
+A production device-address-table fixture reproduced stale data after a
+GPU-visible flexible owner changed from CPU read-only to writable: a Vulkan
+load retained the previous marker instead of the new CPU-written marker. A
+second fixture reproduced the same defect through a CPU-only writable interval
+followed by restored GPU read access. Existing residency and cross-page load
+controls passed. The double-precision standard distance-function export was
+also absent from the real symbol database.
+
+The bounded fix makes a non-writable interval within one previously GPU-visible
+flexible owner writable through a lifecycle completion while GPU admission is
+closed and submissions are drained. Successful completion updates guest rights
+and protection records under the owner lock, then invalidates only its
+device-address imports before admission reopens. Ordinary GPU objects and
+VideoOut registrations retain their lifetime. Writable snapshot runs end where
+CPU write eligibility changes, so a read-only neighbour does not prevent ongoing
+write tracking. Retired address tables are destroyed at quiesced invalidation
+or release; the current table remains available until its next rebuild.
+
+Deferred writable protection also retains the original mapping identity. The
+completion validates every page of the requested interval under the same VM
+transaction that changes rights, without the deferred-copy size budget. Two
+executed race fixtures first demonstrated that a completed unmap and same-address
+replacement could receive an old owner's protection change. Both now refuse
+with ENOENT, preserving the replacement's bytes and rights and performing no
+snapshot invalidation. A pending unmap instead returns EBUSY without mutation.
+
+The POSIX fixed-allocation path without native no-replace support now reserves
+the exact free interval before committing its mapping. A frozen production
+backend with native no-replace disabled reproduced a partial-overlap allocation
+that replaced live bytes, rights and identity. The corrected backend refuses
+that overlap and preserves all three. Private and shared mappings use the same
+reservation operation; the Apple native reservation does not request overwrite.
+
+The missing double export delegates to the standard host operation through the
+existing C calling convention. Its symbol-database fixture checks a finite
+5-12-13 result, large and small scaling, positive zero, infinity and NaN.
+
+**Verification status:** the original stale-marker and missing-export failures
+and both replacement races were executed before their fixes. The final eight
+affected Linux targets build with two jobs. The focused contract suite passes
+170 cases with three existing platform-specific omissions. All six actual
+Vulkan device-address fixtures pass, including repeated permission cycles,
+partial ranges, ongoing CPU writes and refused pending-unmap protection. The
+forced no-replace-absent backend passes its five collision and identity cases.
+Its full VM suite also passes 40 cases with the same three omissions. Six
+sequential kernel, GDS copy/append, compute, graphics and host integrations exit
+successfully. The strict emulator-boundary check and all 13 graphics-table
+provenance checks pass. The GDS integration's armed-destination case remains
+unexercised there; the device-address fixtures install the real write-fault
+route and exercise tracked CPU writes. Independent reviews found no remaining
+blocker in the permission transaction or native reservation. Retired-table
+reclamation has no measured host-memory improvement. Windows and macOS behavior
+and AMD/NVIDIA hardware have not been executed in this audit.
+
+The precommit Linux snapshot is based on `565287d7`, with the changes in this
+entry present and reported as dirty. Execution used Linux 7.2.9-arch1-1,
+GCC 16.2.1, an Intel Arc A770 (DG2), Mesa 26.2.4 with Xe KMD, two-job builds,
+silent guest output and strict masks of zero. The Nix runtime was unavailable;
+the existing host build environment was retained. A bounded roguelike route
+still reports `gfx_storage_frontier` and fails
+the gameplay gate because scene/action evidence is absent. Three input edges
+were consumed; its detailed opening capture passes the offline material-health
+gate, with entropy 3.9678 and 459 quantized colours. This does not establish
+scene equivalence or gameplay. A separate 17-second startup run reaches a
+visually inspected detailed title menu, advances 9098 presents during a
+15-second watch and records no last-error event. Its menu capture passes the
+offline material-health check (entropy 6.8164, 628 colours); the native heuristic
+still warns about hot-colour regions. No matched visual reference or gameplay
+action was exercised. Its 15026 ms steady interval has zero writebacks, which
+does not establish a publication speedup or a CPU-demand bottleneck.
+
+Focused validation uses:
+
+```text
+cmake --build <owned-build> --parallel 2 --target kyty_unit_test fc_script kyty_agent kyty_kernel_memory_integration kyty_gds_transfer_integration kyty_shader_compute_integration kyty_graphics_diagnostics_integration kyty_host_platform_integration
+<owned-build>/kyty_unit_test --gtest_filter='CoreVirtualMemory.*:EmulatorGuestDeviceAddress.*:EmulatorKernelMemory.*:EmulatorGraphicsDirtyTracking.*:EmulatorGpuMemoryFault.*:EmulatorGuestMemory.*:EmulatorModuleLoad.Libc*'
+<owned-build>/integration_test/kyty_kernel_memory_integration
+<owned-build>/integration_test/kyty_gds_transfer_integration
+<owned-build>/integration_test/kyty_gds_transfer_integration --append
+<owned-build>/integration_test/kyty_shader_compute_integration
+<owned-build>/integration_test/kyty_graphics_diagnostics_integration
+<owned-build>/integration_test/kyty_host_platform_integration
+python3 scripts/check_emulator_boundaries.py --strict source
+python3 scripts/check_graphics_tables.py source/emulator/src/Graphics/Tables/manifest.sha256
+python3 scripts/kyty_capture.py score <private-capture>
+```
+
+The strict gameplay gate uses `scripts/kyty_playable_regression.py`; private
+guest arguments, scripted routes and native-backend proof artifacts stay
+outside Git.
+
+**Limits:** the permission transaction covers a writable request contained in
+one flexible owner with a retained GPU cleanup obligation. A request spanning
+multiple owners still follows the generic path in `KernelMprotect` in
+`source/emulator/src/Kernel/Memory.cpp:3259` and can retain an immutable flexible
+import. Extending it requires an interval-wide owner and permission transaction.
+Physical aliases, broader GPU permission transitions and NoAccess snapshot
+semantics are unchanged. Unknown audio timestamp, null-drain and mastering
+contracts and conflicting zero-count save-memory rules remain unimplemented.
+The existing evidence limits for indexed resources, compression metadata and
+CPU-demand publication continue to apply.
 ### Publication selection and held contracts (2026-10-09)
+
+Historical publication-selection snapshot at translator 120. The translator126 checkpoint above supersedes this
+section's build and test counts; its held-contract notes are updated below where later evidence changed their status.
 
 The selected source revision is `b7456c71da384bcfbc484990a5363c121a8fdd29`, with translator version 120.
 It contains the reviewed mutex, video-decoder, scalar/EUD, image-gradient, export-flow, pixel-LDS, memory-observation,
@@ -279,16 +3473,19 @@ Independent review holds these contracts from publication:
   `AudioOut2Set3DLatency` returns success without storing or applying latency. The absence of current object-port
   rendering does not prove that global latency has no effect. The queue-depth correction's local tests do not
   establish a safe independent subset of the startup path.
-- **Non-indexed indirect draw:** the parser drops the vertex/instance patch offsets, and the argument record is
-  copied without a mapped-range or address-overflow guard. The API, HLE export, parser, dispatcher, renderer and
-  associated tests remain local together.
+- **Non-indexed indirect draw:** the earlier local candidate that omitted the vertex/instance patch offsets is
+  absent from the translator126 target. The current indexed-indirect path validates and copies its complete
+  20-byte argument span through checked guest-memory access. This bounds the indexed record only; non-indexed
+  offset semantics and behavior remain unimplemented and unverified.
 - **Conditional command-buffer branch:** `GraphicsCbBranch` treats comparison function zero as unconditional and
   ignores the compare and not-taken operands. The mapping is inferred from a different packet contract; no independent
   call trace, guest disassembly or behavioral contract verifies it.
 - **One-byte `SW_64KB_R_X` detile:** the round-trip input and reference use the same production offset helper.
   An independent offset oracle is still required, including block transitions and slice behavior.
-- **Unsigned 16-bit exports and new attachment formats:** synthetic SPIR-V checks do not establish native writeback.
-  The unsigned output interface/emitter and new single/two-channel unsigned attachment mappings remain local.
+- **Unsigned 16-bit exports and new attachment formats:** the earlier source audit had only synthetic SPIR-V evidence.
+  At translator126, a five-case native raster/readback matrix now validates production translation and writeback for
+  R16, RG16 and RGBA16, including partial component masks, mixed MRT attachments and a bypass case on the available
+  Intel Vulkan device. This closes those bounded fixture cases only; guest execution and other GPUs remain untested.
 
 The adjacent-mapping indirect-register snapshot change retains a separate range check followed by a host copy.
 It bounds register count and validates the complete allocated span, but does not prove atomicity against a concurrent
@@ -382,18 +3579,17 @@ selected published source; none is a gameplay or visual acceptance.
   conversion clamps to 0xffff (signed: to [-0x8000, 0x7fff]). Two independent compiler contracts agree, so the
   range-proof guard that only admitted provably in-range sources is replaced by `UMin` / `SClamp` for any source.
   The signed emitter also stopped selecting a `uint` into a `float` destination, which produced invalid SPIR-V.
-- **UINT16 color exports (local candidate; held).** `SPI_SHADER_COL_FORMAT` UINT16_ABGR (7) into a UINT color buffer locally declares a
+- **UINT16 color exports (historically held local candidate).** `SPI_SHADER_COL_FORMAT` UINT16_ABGR (7) into a UINT color buffer locally declares a
   `v4uint` fragment output and stores the raw 16-bit components of each export dword (`OpBitFieldUExtract`), keeping
   disabled components. FP16 (mode 4) exports into UINT buffers keep the established float interface; the sandbox
   regression recorded above came from keying on the buffer number type alone. `R16G16_UINT` (format 5, type 4) is a
-  local render-target format. This more selective emitter still lacks the verified native writeback contract
-  required by the withdrawal below; the emitter and new unsigned attachment mappings are excluded from publication.
-- **`sceAgcDcbDrawIndirect` (NID 1q1titRBL6o; local candidate; held).** Emits `IT_DRAW_INDIRECT` with the non-indexed patch offsets. The
-  command processor reads the 16-byte argument record from the base set by `SetBaseIndirectArgs` and draws through
-  the auto-index path with the start vertex added to `GE_INDX_OFFSET` and the start instance as `firstInstance`. Like
-  the indexed form, the patch offsets (user-SGPR writes of the start values) are not applied; a start vertex above
-  `INT32_MAX` is refused. The argument copy also lacks a mapped-range and address-overflow guard. These incomplete
-  semantics prevent publication of the API, parser, dispatcher and renderer path.
+  local render-target format. **Status update at translator126:** the five-case native UINT16 matrix described above
+  now passes exact readback on the available Intel Vulkan device. This supersedes the earlier absence of native
+  writeback evidence for those formats, but does not establish guest-route or cross-vendor acceptance.
+- **Non-indexed indirect draw (historical local candidate; absent from translator126 target).** The earlier candidate
+  emitted `IT_DRAW_INDIRECT` and used a 16-byte argument record, but did not apply the vertex/instance patch offsets
+  or validate the complete guest span. That candidate is not present in this target. The indexed path now checks its
+  20-byte argument span before copying; this does not implement or establish the non-indexed contract.
 - **SGPR104 and SGPR105.** The RDNA2 scalar operand range is 0..105; the parser stopped at 103, and the shared lowering
   preconditions and compute-wave analyses used the same limit, so a pixel shader reading `s104` was refused as an
   invalid instruction before native wave analysis. The limits follow the ISA; the NGG passthrough proof, which keeps
@@ -538,6 +3734,9 @@ frontier is not revalidated. No further repeat sweep or speculative render chang
 
 ### Open source-audit findings (2026-10-08)
 
+Update 2026-10-09: the context-request ordering and both trace traversals below are repaired; see the interop
+integration entry above. The original finding is kept for its evidence.
+
 Source audit found a separate Linux context-request lifetime defect in `LibKernel.cpp`,
 `HostContextTrampoline` / `ReclaimCompletedHostContextRequests`: `completed` is published before the trampoline's
 last request reads and before it leaves the request-owned stack. A raise to another thread may reclaim both at
@@ -619,6 +3818,14 @@ experiment. Its precise hardware behavior for this mismatched pairing remains
 unresolved; restoring execution is not evidence of correct integer writes.
 Unsigned color-interface support needs a verified export/attachment contract
 and an end-to-end native writeback comparison before reintroduction.
+
+**Status update at translator126:** a five-case native UINT16 matrix now
+validates exact production writeback for R16, RG16 and RGBA16 integer-export
+cases, including partial component masks, mixed MRT attachments and bypass on
+the available Intel Vulkan device. This resolves the earlier lack of native
+writeback evidence for those tested combinations only. The FP16-export to
+UINT16-attachment pairing observed above remains unresolved, as do guest-route
+and cross-vendor acceptance.
 
 The preceding candidate passed all 24 export tests and 1,959 full-suite tests
 with eight optional/environment skips, yet failed native validation. Those
@@ -1266,53 +4473,64 @@ earlier builds and identifying their actual output-producing draws is the
 current visual investigation; neither defect has a confirmed connection to
 this array refusal.
 
-Separate existing interface limits remain: integer color targets can
-still enter floating-point output declarations in `ShaderSpirvGenerator.cpp`.
-The existing floating-point MRT emitters also terminate an inactive invocation
-at nonterminal exports, preventing a later EXEC restore from reaching another
-export. The next direction is a focused continuation fixture and a final
-valid-mask ownership proof. These paths remain outside the published changes and have no established
-connection to the deferred menu defect.
+**Audit-closure update at translator126 (2026-10-09).** The following statuses
+supersede specific observations recorded on 2026-10-07:
 
-A separate diagnostic defect was found in `ShaderDumpGuestProgram`
-(`Shader.cpp:782`): its raw-byte extent uses the final instruction PC plus
-eight without clamping to the registered shader range, and parsing and raw
-dumping do not share a lifetime lock. A four-byte final instruction can cause
-adjacent readable bytes to be included, while a mapping replacement can pair
-a listing with different bytes. This remains unfixed. The next direction is
-a mapped-range-clamped snapshot with widened extent arithmetic and one
-lifetime owner; use a bounded decoded listing for the current investigation.
+- The tested nonterminal pixel color exports now skip inactive stores and
+  rejoin later shader code. Terminal exports retain their discard behavior.
+  This does not establish parameter-export enable-mask semantics.
+- The packed-mip image-store path and GDS append/consume operations now gate
+  their side effects by EXEC. Focused packed-mip coverage and the selected
+  native GDS integration pass; unrelated or unmodeled forms remain excluded.
+- The whole-pair VCC propagation risk is fixed: one-word writes do not promote
+  a varying two-word mask to uniform. Focused positive and negative proof cases
+  pass.
+- The native `ParameterExecWriteback` fixture passes its full-EXEC and
+  zero-EXEC variants. This establishes only EXEC behavior for its full-enable
+  mask; partial full-precision PARAM masks, accumulation, compressed PARAM and
+  VSKIP remain unqualified or refused. Pixel color-export masks are a separate
+  contract.
+- The current working tree bounds the optional vertex-layout logger's walks
+  over attribute, buffer and resource arrays to their 16-entry capacities.
+  That source change is not in HEAD at this checkpoint and has no separate
+  logger-specific runtime validation.
+- The `ShaderDumpGuestProgram` extent and mapping-lifetime finding remains
+  open. Its raw-byte extent still needs a mapped-range clamp and one lifetime
+  owner.
 
-Separate existing side-effect risks remain outside this admission change:
-`ShaderSpirvImage.cpp:4196` emits a packed-mip image store without an EXEC
-branch, and `ShaderSpirvBuffer.cpp:2370` and `:2403` emit GDS append/consume
-atomics without checking EXEC. An instruction reached by an inactive guest
-lane can therefore perform an external memory operation. The next direction
-is a validated emitted-module fixture with inactive EXEC and a guard that
-dominates each operation. No connection to the current native refusal is
-established; these families must retain strict admission exclusions.
+The following observations retain their original 2026-10-07 date. Integer
+color output evidence is now limited to the translator126 five-case UINT16
+native matrix described above; other integer formats remain unqualified. The
+inactive nonterminal pixel-export finding is superseded for the tested forms,
+with no established connection to the deferred menu defect.
 
-An adjacent pre-existing risk remains in `DefineUniformMask`: marking a
-one-word VCC-low write uniform can set the whole VCC flag even if VCC-high is
-still varying. `ShaderFragmentMaskFlow::SetUniformMask` has the same promotion
-and also needs the complete-pair invariant. The triggering sequence is a
-varying comparison followed by a
-uniform low-word mask copy and a wave64 VCC branch. The next direction is a
-width-specific pair invariant and a focused negative case; the new two-word
-intersection rule does not relax one-word propagation.
+The `ShaderDumpGuestProgram` diagnostic finding was recorded at
+`Shader.cpp:782`: its raw-byte extent used the final instruction PC plus eight
+without clamping to the registered shader range, and parsing and raw dumping
+did not share a lifetime lock. A four-byte final instruction could include
+adjacent readable bytes, while a mapping replacement could pair a listing
+with different bytes. The extent and lifetime snapshot remain open; use a
+bounded decoded listing until they are repaired.
 
-The parameter-export emitter in `ShaderSpirvVector.cpp` also stores its output
-and updates its optional UV probe without an EXEC guard. A parameter export
-reached with inactive lanes can therefore perform side effects. That existing
-path needs an active-lane contract check and correction; no connection to the
-observed interface artifacts has been established.
+The 2026-10-07 side-effect observation named a packed-mip image store and GDS
+append/consume operations that lacked EXEC guards. Those findings are
+superseded by the EXEC-gated implementations and test evidence above. Other
+shader memory operations still require their own proof and admission.
 
-The optional vertex-layout failure logger in `GraphicsRenderPipeline.cpp:449`
-and `:459` iterates the rejected raw buffer/resource counts. Counts above the
-16-entry capacities can make the diagnostic itself read outside those arrays;
-the validator has already rejected them. Bound those logging loops while
-retaining the original counts in the report. The current two-resource,
-two-buffer refusal does not trigger this adjacent diagnostic defect.
+The 2026-10-07 VCC observation described whole-pair uniform promotion after a
+one-word write. That behavior is superseded by the complete-pair rule above;
+unsupported mask forms remain subject to strict refusal.
+
+The 2026-10-07 parameter-export observation described unguarded writes and an
+optional UV probe. The translator126 fixture establishes EXEC behavior only
+for its full-enable-mask case. Parameter component-enable behavior remains an
+open contract question, and no claim is made about partial-mask accumulation.
+
+The 2026-10-07 vertex-layout logger observation described raw-count walks past
+fixed arrays after validation refused the layout. The current working tree
+caps those walks at 16 attributes, buffers and resources while retaining the
+original counts in the report. This change is not in HEAD at the translator126
+checkpoint and still needs independent logger-specific validation.
 
 ### Implicit sampling preserves volume coordinates (2026-10-07)
 
@@ -1506,9 +4724,9 @@ Scope: same strict configuration on the reference host (Intel Arc A770, Mesa `xe
 command-processor thread and the DRM `fdinfo` engine counters for the device. A pixel-art title whose vertex front is
 bindless (V#s loaded from tables at runtime offsets) and whose only compute shader is the SDK's 16-byte buffer fill
 went from 41 ms to 22 ms per frame (24 to 45 fps) on its start screen. Regression set (runs d586-d602, 90 s each,
-previous run in parentheses): Blasphemous 2 107 fps (98), Dreaming Sarah 248 (251), Let's Build a Zoo 239 (220),
-Formula Retro Racing 229 in the race (181), The Messenger 594 (378), Dead Cells 201 (112), ANIMAL WELL 37 in its
-new-game route (23), Worms 59 (59), JoJo 220 (203), Hades 59 (49), the .NET beat 'em up 11 (11). DREDGE ran clean once
+previous run in parentheses): the gothic action platformer 107 fps (98), the Construct title 248 (251), the zoo builder 239 (220),
+the racing title 229 in the race (181), the ninja platformer 594 (378), the 2D action title 201 (112), the cave exploration title 37 in its
+new-game route (23), the artillery title 59 (59), the anime fighting title 220 (203), the isometric roguelike 59 (49), the .NET beat 'em up 11 (11). The fishing title ran clean once
 (66 fps, was 52) and twice stopped at 12-14 s on its known stale extended-user-data V# (the same words as runs d221,
 d466 and d571).
 
@@ -1689,7 +4907,7 @@ Investigated and left open:
 
 Third round (same day):
 
-- **Published fills skipped write-backs that still had work (regression from the first round).** Dead Cells' gameplay
+- **Published fills skipped write-backs that still had work (regression from the first round).** The 2D action title's gameplay
   smeared sprites horizontally (trails behind the character) and, some seconds later, turned the whole scene white;
   only the HUD survived. It happened in most runs since the device-side publication of uniform fills, and in some
   runs never, depending on how submissions overlapped. Bisection: publishing the fill's bytes into the guest view
@@ -1716,7 +4934,7 @@ Third round (same day):
   walks only flexible ranges and ranges holding tracked snapshots instead of all ranges and chunks. Over 180 s the
   preparation total went from 32.7 s to 7.1 s (maximum 123 to 59 ms).
 
-- **Hades reaches gameplay.** Three independent defects stood between its title and the House of Hades:
+- **The isometric roguelike reaches gameplay.** Three independent defects stood between its title and its hub:
   - *Branch-heavy shader compile never finished.* After cross, the command processor sampled 70% of the process in
     `ArmReachesBeforeJoin`: a 2,299-instruction pixel shader with 254 branches. Selection-join queries were repeated
     for every label and branch during emission, located instructions by scanning the program, and ordered a join's
@@ -1730,18 +4948,18 @@ Third round (same day):
     atlases (CPU-written) stayed empty, so each label showed only its plate. The tile-9 host detiler matches the
     GFX10 SW_64KB_S pattern for 1, 2, 4, 8 and 16-byte elements, so any such uncompressed format now uploads when no
     live surface covers it.
-  Hades now shows its menus and walks in the House at about 10 fps (open: performance, and a crash at 8-11 s in
+  The isometric roguelike now shows its menus and walks in its hub at about 10 fps (open: performance, and a crash at 8-11 s in
   some runs where its GPU allocator returns a null block and a row copy writes to 0x40; its direct-memory allocate
   and map calls do not fail in those runs).
 
-- **Linear mip chains.** JoJo's characters showed shredded textures: almost every material is a linear (tile 0)
+- **Linear mip chains.** The anime fighting title's characters showed shredded textures: almost every material is a linear (tile 0)
   BC1/BC3 texture with a full mip chain, and the linear fallback laid levels out from level 0 with halved pitches.
   GFX10 linear mip chains (addrlib `HwlComputeSurfaceInfoLinear`) store the levels from the smallest one to level 0,
   each with its element pitch aligned to 256 bytes, element sizes halving on their own (4x4 blocks for BC). The
   fallback now computes that layout and each mip upload uses its own pitch; the rule reproduces all 2,135
   multi-level entries of the SDK-generated linear RGBA8 table (offsets, sizes, padded pitch and total).
 
-- **SDK pattern fill.** Hades clears its 1920x1152 targets every frame with the SDK pattern-fill kernel
+- **SDK pattern fill.** The isometric roguelike clears its 1920x1152 targets every frame with the SDK pattern-fill kernel
   (`buffer_store_format_x` of `values[i % period]` for `i` below a count, 32-bit UINT records). It was never
   recognized, so the clear reached the storage buffer but not the render-target images: rooms with strong lighting
   showed saturated green, smeared columns and stale silhouettes. The uniform-fill proof now matches that kernel's
@@ -1750,7 +4968,7 @@ Third round (same day):
   time 11.8 s to 0.8 s over 120 s). A first attempt never matched: the proof rejected programs with indirect labels,
   which every conditional branch records for its fall-through, so its measured cost was not the fill's.
 - **Device-address scans over writable storage only.** Before a draw or dispatch that reads guest addresses, GPU
-  memory looked for storage buffers with pending GPU writes by walking every live storage buffer, twice; JoJo keeps
+  memory looked for storage buffers with pending GPU writes by walking every live storage buffer, twice; the anime fighting title keeps
   about 4,000 alive and the ordered-set walk was the top host hotspot of its cutscene. The scans now walk the
   in-use, writable subset.
 - **Partially released direct mappings keep their live part.** The .NET beat 'em up's runtime shrinks a buffer by
@@ -1771,7 +4989,7 @@ Third round (same day):
 - **Write-back and overlap scans use indexes.** Completed-submission write-backs walked every object of every heap
   (12,546 heaps, ~16,000 objects, on every completion); they now visit an index of in-use writable objects (18 on
   average). Overlap queries walked every heap; the heap span index now lists every heap covering a span. Loading
-  frames went from 18-23 to 30-36 fps on that title and Dead Cells' walk route from 47-63 to 86 fps.
+  frames went from 18-23 to 30-36 fps on that title and the 2D action title's walk route from 47-63 to 86 fps.
 - **Unsigned-only shaders read the unsigned descriptor banks.** The .NET beat 'em up's logo video was a uniform
   green screen: its Theora planes are written by a dispatch as R8_UINT storage images and sampled by a shader that
   samples only unsigned textures, which bound the float banks and read zero (BT.709 of zero planes is (0, 77, 0)).
@@ -1813,12 +5031,12 @@ Third round (same day):
 
 Investigated and left open:
 
-- JoJo's in-engine cutscenes run at about 5 fps. The guest spends most of its time spinning on GPU labels
+- The anime fighting title's in-engine cutscenes run at about 5 fps. The guest spends most of its time spinning on GPU labels
   (`while (*label != 1)` after an ACB submission, and two similar loops), so the frame rate is the round trip of its
   compute work. Each of its ~20 dispatches per frame completes with a write-back of a 15 MB storage buffer of which
   about 53 KB changed; the page comparison reads all 15 MB (3 ms per dispatch, 27% of the time). Skipping it is not
   correct (the CPU may read the results); the planned fix copies GPU-written pages on demand. The dirty-page tracker
-  also accepts only 512 ranges, so most of JoJo's buffers fall back to full hashes (250 GB hashed in 2 minutes).
+  also accepts only 512 ranges, so most of the anime fighting title's buffers fall back to full hashes (250 GB hashed in 2 minutes).
 - The .NET beat 'em up now reaches gameplay with correct sprites, text and HUD glyphs, but runs at 7-25 fps under
   the harness (two CPU cores, shader validation). Remaining host costs: every upload still waits on its own
   util-queue fence (about 11 s of fence waits per minute), the device-address residency rescan after population
@@ -1830,7 +5048,7 @@ Investigated and left open:
   util-queue submission with a fence wait (`UtilFillImage`/`UtilFillBuffer`): 92,541 waits in 180 s, about 23 ms of
   every 48 ms frame. Next: record uploads into the consuming command buffer. Its host footprint (4.5 GB of guest
   memory plus 4 GB of emulator heap) also exceeds the harness cgroup's 7 GiB `memory.high`, which throttles it.
-- Dead Cells sometimes stops after about a minute of gameplay on a G-buffer pixel shader that needs fragment wave
+- The 2D action title sometimes stops after about a minute of gameplay on a G-buffer pixel shader that needs fragment wave
   transport (a derivative fetch inside a lane-divergent loop at pc 0x114, 642x362, four targets); seen in runs d472,
   d721 and d729, so it predates this round.
 
@@ -2005,10 +5223,10 @@ Third round (same day), mostly runtime-library correctness found by Unreal Engin
   loaded module bases, so a freeze names the waiting code without a debugger. Only a contended mutex lock is
   recorded, so the uncontended path stays a single trylock.
 
-Regression set after these repairs (run d406-d417, 90 s each, same host): GRIS 119 fps (104 before), Blasphemous 2
-85 (70), Dreaming Sarah 195 (89), Let's Build a Zoo 202 (83), The Messenger 320 (269), Dead Cells 94 (82), JoJo 87
-(54), ANIMAL WELL 22 (20), Formula Retro Racing back to its 3D views at about 110-120 fps in the race. A longer
-Blasphemous 2 run reaches gameplay; its intro frames vary with load timing between runs.
+Regression set after these repairs (run d406-d417, 90 s each, same host): the watercolour platformer 119 fps (104 before), the gothic action platformer
+85 (70), the Construct title 195 (89), the zoo builder 202 (83), the ninja platformer 320 (269), the 2D action title 94 (82), the anime fighting title 87
+(54), the cave exploration title 22 (20), the racing title back to its 3D views at about 110-120 fps in the race. A longer
+run of the gothic action platformer reaches gameplay; its intro frames vary with load timing between runs.
 
 Open blockers (one root cause each, none investigated past the point stated):
 
@@ -2123,7 +5341,9 @@ gates pass):
   print the backing image and every overlapping parent with its parameters; the paired-wave compute refusal and the
   pixel transport refusal share `ShaderDumpGuestProgram` (`KYTY_TRANSPORT_DUMP`).
 
-Why the screen is still black (evidence, not yet a proven sole cause): the skipped-draw report names a geometry
+Superseded on 2026-10-14 (see "Robot platformer: exposure fill and DCC metadata clears"): the black screen was the
+composite multiplying the scene by a zero exposure, under an accumulated UI layer; the skipped merged ES/GS
+programs are particle emitters. Earlier reading, kept for the record: the skipped-draw report names a geometry
 state the renderer does not model: GE stages `0x00002030` (merged ES/GS), ES and GS-back programs bound, legacy GS
 zero, `max_vert=0x48`, `out_prim=2`, `ge_ngg=0x46`, `max_out=0xd8`, primitive/vertex group sizes 3 and 0x18
 (`ShouldSkipUnsupportedGeShader` models only the `0x02002000` passthrough). The decoded GS-back program (540
@@ -4355,7 +7575,7 @@ median analysis time changes from 103.025 to 9.278 microseconds. A separate
 its median changes from 142.952 to 72.728 microseconds. These measure this CPU
 analysis alone and do not establish an equivalent frame-rate improvement.
 
-`ninja -C _build_linux_astro_play_s1 -j2 fc_script` succeeds. Strict source
+`ninja -C _build_linux_<slug> -j2 fc_script` succeeds. Strict source
 boundaries and the graphics-table manifest pass. A fresh strict Silent/Native
 run under read-only debugger probes preserves the same first pixel-emitter
 failure at PC 0xfec. A 58.031-second warm window contains 229 presents with a
@@ -7599,7 +10819,8 @@ global NaN rewrite. The fused vertex stage reported `dx10_clamp=1` and
 floating `CLAMP` output modifier: ordinary unclamped `V_ADD`/`V_MUL`/`V_FMA`
 still propagate NaN. Kyty now carries the effective VS/GS/PS mode into shader
 identity and emits the mode-correct post-operation clamp (`NaN -> +0` only for
-DX10 clamp, preserve NaN otherwise, and ignore output modifiers in IEEE mode).
+DX10 clamp, preserve NaN otherwise, and ignore output modifiers in IEEE mode). Superseded 2026-10-09 for `CLAMP`:
+IEEE mode ignores `OMOD` only; see the interop integration entry.
 Translator version 34 prevents cache aliasing with earlier modules. Focused
 SPIR-V integration validates the DX10, non-DX10, unclamped, and IEEE variants;
 this is a general ISA correction, not a compatibility claim. The exact shader

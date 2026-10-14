@@ -2,6 +2,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderComputeWaveSdwa.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Log.h"
 
@@ -153,6 +154,52 @@ TEST(EmulatorComputeWaveSdwa, LowersSelectsAndFoldedModifiersOfCompareThroughThe
 	for (const uint32_t ctrl: {0x06808e81u, 0x00808e81u, 0x06968e81u, 0x06a68e81u, 0x16868e81u, 0x26868e81u, 0x06868e0eu /*s14 vs s14*/})
 	{
 		ExpectFirstUnsupportedPc({kCmpEqSdwaW0, ctrl, kUnsupportedSentinel, kEnd}, 0x8u, "VInterpP1F32");
+	}
+}
+// The whole-dword lowering preconditions always refuse a partial destination select; the per-lane emitter
+// admits exactly the selects it merges.
+static bool LowDestinationRowHolds(uint32_t word0, uint32_t ctrl, bool merged)
+{
+	InitializeConfig();
+	const uint32_t words[] = {word0, ctrl, kEnd};
+	ShaderCode     code;
+	code.SetType(ShaderType::Pixel);
+	if (!ShaderTryParseBounded(words, sizeof(words), &code))
+	{
+		return false;
+	}
+	const auto& inst = code.GetInstructions().At(0);
+	return ShaderSdwaLowDestinationSupported(inst) == merged && ShaderInstructionPerLaneLoweringPreconditions(inst) == merged &&
+	       !ShaderInstructionLoweringPreconditions(inst);
+}
+
+TEST(EmulatorComputeWaveSdwa, MergesOnlyLowDestinationSelectsPerLane)
+{
+	// v_cvt_i32_f32_sdwa v13, v13 (VOP1 0x08) with src0_sel=DWORD; the observed control 0x0006140d is
+	// dst_sel=WORD_0, dst_u=PRESERVE. Each row flips the destination fields or adds clamp/omod.
+	static constexpr uint32_t kCvtSdwaW0 = 0x7e1a10f9u;
+	static constexpr uint32_t kMacSdwaW0 = 0x3e1a1af9u; // v_mac_f32_sdwa v13, v13, v13 (VOP2 0x1f)
+	struct Row
+	{
+		uint32_t word0;
+		uint32_t ctrl;
+		bool     merged;
+	};
+	const Row rows[] = {
+	    {kCvtSdwaW0, 0x0006140du, true},  // WORD_0, PRESERVE
+	    {kCvtSdwaW0, 0x0006040du, true},  // WORD_0, PAD
+	    {kCvtSdwaW0, 0x00060c0du, true},  // WORD_0, SEXT
+	    {kCvtSdwaW0, 0x0006100du, true},  // BYTE_0, PRESERVE
+	    {kCvtSdwaW0, 0x0006150du, false}, // WORD_1: the ISA names only the bits it affects
+	    {kCvtSdwaW0, 0x0006110du, false}, // BYTE_1
+	    {kCvtSdwaW0, 0x00061c0du, false}, // dst_u reserved
+	    {kCvtSdwaW0, 0x0006340du, false}, // clamp
+	    {kCvtSdwaW0, 0x0006540du, false}, // omod
+	    {kMacSdwaW0, 0x0606140du, false}, // reads its destination
+	};
+	for (const auto& row: rows)
+	{
+		ASSERT_EXIT({ std::_Exit(LowDestinationRowHolds(row.word0, row.ctrl, row.merged) ? 0 : 3); }, ::testing::ExitedWithCode(0), "");
 	}
 }
 UT_END();

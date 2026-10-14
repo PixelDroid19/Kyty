@@ -277,7 +277,7 @@ TEST(EmulatorNp, ResolvesAndOwnsStandaloneUniversalDataProperties)
 	EXPECT_LT(NpUniversalDataSystem::EventPropertyObjectSetString(properties, "state", "stale"), 0);
 }
 
-// Astro after PlayGo: ObjectSetArray with null value allocates array via value_ptr.
+// Observed after PlayGo: ObjectSetArray with null value allocates array via value_ptr.
 TEST(EmulatorNp, ObjectSetArrayAllocatesWhenValueNull)
 {
 	using namespace NpUniversalDataSystem;

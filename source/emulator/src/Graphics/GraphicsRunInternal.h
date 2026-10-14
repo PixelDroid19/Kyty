@@ -30,13 +30,13 @@
 
 #define KYTY_HW_CTX_PARSER_ARGS                                                                                                            \
 	[[maybe_unused]] CommandProcessor *cp, uint32_t cmd_id, [[maybe_unused]] uint32_t cmd_offset, const uint32_t *buffer,                  \
-	    [[maybe_unused]] uint32_t dw
+	    [[maybe_unused]] uint32_t dw, [[maybe_unused]] uint32_t available_dw
 #define KYTY_HW_UC_PARSER_ARGS                                                                                                             \
 	[[maybe_unused]] CommandProcessor *cp, uint32_t cmd_id, [[maybe_unused]] uint32_t cmd_offset, const uint32_t *buffer,                  \
-	    [[maybe_unused]] uint32_t dw
+	    [[maybe_unused]] uint32_t dw, [[maybe_unused]] uint32_t available_dw
 #define KYTY_HW_SH_PARSER_ARGS                                                                                                             \
 	[[maybe_unused]] CommandProcessor *cp, uint32_t cmd_id, [[maybe_unused]] uint32_t cmd_offset, const uint32_t *buffer,                  \
-	    [[maybe_unused]] uint32_t dw
+	    [[maybe_unused]] uint32_t dw, [[maybe_unused]] uint32_t available_dw
 #define KYTY_HW_CTX_INDIRECT_ARGS CommandProcessor *cp, [[maybe_unused]] uint32_t cmd_offset, uint32_t value
 #define KYTY_HW_UC_INDIRECT_ARGS  CommandProcessor *cp, [[maybe_unused]] uint32_t cmd_offset, uint32_t value
 #define KYTY_HW_SH_INDIRECT_ARGS  CommandProcessor *cp, [[maybe_unused]] uint32_t cmd_offset, uint32_t value
@@ -47,7 +47,7 @@
 
 #define KYTY_CP_OP_PARSER_ARGS                                                                                                             \
 	[[maybe_unused]] CommandProcessor *cp, [[maybe_unused]] uint32_t cmd_id, [[maybe_unused]] const uint32_t *buffer,                      \
-	    [[maybe_unused]] uint32_t dw, [[maybe_unused]] uint32_t num_dw
+	    [[maybe_unused]] uint32_t dw, [[maybe_unused]] uint32_t available_dw, [[maybe_unused]] uint32_t num_dw
 #define KYTY_CP_OP_PARSER(f) uint32_t f(KYTY_CP_OP_PARSER_ARGS)
 
 namespace Kyty::Libs::Graphics {
@@ -59,6 +59,27 @@ using cp_op_parser_func_t    = uint32_t (*)(KYTY_CP_OP_PARSER_ARGS);
 using hw_ctx_indirect_func_t = void (*)(KYTY_HW_CTX_INDIRECT_ARGS);
 using hw_uc_indirect_func_t  = void (*)(KYTY_HW_UC_INDIRECT_ARGS);
 using hw_sh_indirect_func_t  = void (*)(KYTY_HW_SH_INDIRECT_ARGS);
+
+enum class GraphicsRunType3DispatchStatus : uint8_t
+{
+	Ready,
+	InvalidEnvelope,
+	MissingHandler,
+	OverConsumed,
+};
+
+struct GraphicsRunType3DispatchResult
+{
+	GraphicsRunType3DispatchStatus status         = GraphicsRunType3DispatchStatus::InvalidEnvelope;
+	uint32_t                       packet_body_dw = 0;
+	uint32_t                       consumed_dw    = 0;
+};
+
+[[nodiscard]] GraphicsRunType3DispatchResult GraphicsRunDispatchType3Packet(CommandProcessor* cp, uint32_t cmd_id, const uint32_t* body,
+                                                                            uint32_t available_body_dw, uint32_t num_dw,
+                                                                            cp_op_parser_func_t handler);
+[[nodiscard]] bool GraphicsRunType3PacketAt(const uint32_t* stream, uint32_t available_dw, uint32_t offset, uint32_t expected_header);
+[[nodiscard]] bool GraphicsRunIndirectArgumentAddress(uint64_t base, uint32_t offset, uint64_t size, uint64_t* address);
 
 // Jump tables populated once by graphics_init_jmp_tables_*(). The per-domain
 // parser units register their functions here at startup.
@@ -266,6 +287,12 @@ public:
 	void RunLock() { m_run_mutex.Lock(); }
 	void RunUnlock() { m_run_mutex.Unlock(); }
 
+	// Diagnostic deadline only: this processor's queue and the pending-producer
+	// search for a suspended wait as it stands when the deadline expires.
+	[[nodiscard]] int QueueIndex() const { return m_queue; }
+	[[nodiscard]] GpuSubmissionResult FindSuspendedWaitProducer(const void* address, uint32_t size_bytes, uint64_t reference,
+	                                                           uint64_t mask, SubmissionDependency* dependency);
+
 	HW::Context*    GetCtx() { return &m_ctx; }
 	HW::UserConfig* GetUcfg() { return &m_ucfg; }
 	HW::Shader*     GetShCtx() { return &m_sh_ctx; }
@@ -291,6 +318,8 @@ public:
 	void QueueQueuedGraphicsInterrupt();
 	void WriteBack();
 	void WaitDeviceAddressWriteBacks();
+	// Copies guest bytes the processor reads at record time once no GPU writer owns newer content.
+	[[nodiscard]] bool ReadCurrentGuestBytes(uint64_t vaddr, void* dst, uint64_t size);
 	void MemoryBarrier();
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
 	void DepthStencilBarrier(uint64_t vaddr, uint64_t size);
@@ -307,8 +336,17 @@ public:
 	void                           PopMarker() {}
 
 	void PrefetchL2(void* addr, uint32_t size) {}
-	void ClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value);
-	void ReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size);
+	void ClearGds(uint64_t dw_offset, uint64_t dw_count, uint32_t clear_value);
+	void WriteGds(uint64_t dw_offset, uint64_t src_vaddr, uint64_t dw_count);
+	void CopyGds(uint64_t src_dw_offset, uint64_t dst_dw_offset, uint64_t dw_count);
+	void ReadGds(uint32_t* dst, uint64_t dw_offset, uint64_t dw_count);
+	// Integration seam: the open recording, so a fixture can record a production GPU writer ahead
+	// of a packet. Not for runtime use.
+	[[nodiscard]] CommandBuffer* RecordingBufferForTesting()
+	{
+		Core::LockGuard lock(m_mutex);
+		return m_current_buffer >= 0 ? m_buffer[m_current_buffer] : nullptr;
+	}
 
 	void ResetDeCe();
 	void WaitCe();

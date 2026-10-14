@@ -24,6 +24,7 @@
 #include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
+#include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/StorageBuffer.h"
 #include "Emulator/Graphics/Shader.h"
@@ -38,9 +39,11 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Tile.h"
+#include "Emulator/Graphics/PresentationFsr.h"
 #include "Emulator/Graphics/PresentationScaler.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
@@ -62,6 +65,8 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iterator>
+#include <vector>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -69,6 +74,213 @@
 UT_BEGIN(EmulatorGraphicsState);
 
 using namespace Libs::Graphics;
+
+namespace {
+
+// Guest pixel exports are encoded like the shader export tests: literal producers, then EXP words.
+constexpr std::array<int, 4>      kDualRegisters = {17, 61, 173, 239};
+constexpr std::array<uint32_t, 4> kDualValues    = {0x3c003800u, 0x44004000u, 0x40a00537u, 0x3f800000u};
+constexpr uint32_t                kDualSourceWord = 0xefad3d11u;
+constexpr uint32_t                kDualEndpgm     = 0xbf810000u;
+
+struct GuestExport
+{
+	uint32_t target;
+	uint8_t  enable;
+	bool     packed;
+};
+
+uint32_t GuestExportWord(const GuestExport& exp)
+{
+	const uint32_t control = exp.target == 0u ? (exp.packed ? 7u : 3u) : (exp.packed ? 4u : 0u);
+	return 0xf8000000u | (exp.target << 4u) | exp.enable | ((control & 1u) << 12u) | ((control & 2u) << 10u) | ((control & 4u) << 8u);
+}
+
+// Parses the guest program with the production parser, then summarizes its color exports.
+ShaderPixelColorExports SummarizeGuestExports(const std::vector<GuestExport>& exports, bool* parsed)
+{
+	std::vector<uint32_t> words;
+	for (unsigned source = 0; source < 4; ++source)
+	{
+		words.push_back(0x7e0002ffu | (static_cast<uint32_t>(kDualRegisters[source]) << 17u)); // v_mov_b32 vN, literal
+		words.push_back(kDualValues[source]);
+	}
+	for (const auto& exp: exports)
+	{
+		words.push_back(GuestExportWord(exp));
+		words.push_back(kDualSourceWord);
+	}
+	words.push_back(kDualEndpgm);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	*parsed = ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &code);
+	return ShaderSummarizePixelColorExports(code);
+}
+
+// Eligible blend0: SRC1_COLOR source, ONE_MINUS_SRC1_COLOR destination, ADD, separate alpha off.
+HW::BlendControl DualSourceBlend()
+{
+	HW::BlendControl blend;
+	blend.enable          = true;
+	blend.color_srcblend  = 0x0f;
+	blend.color_destblend = 0x10;
+	blend.color_comb_fcn  = 0;
+	return blend;
+}
+
+struct DualSourceFixture
+{
+	HW::BlendControl         blend            = DualSourceBlend();
+	bool                     blend_bypass     = false;
+	bool                     slot0_active     = true;
+	uint32_t                 targets_num      = 1;
+	bool                     program_admitted = true;
+	bool                     null_only        = false;
+	std::vector<GuestExport> exports          = {{0u, 15, false}, {1u, 15, false}};
+	uint8_t                  output_mode[8]   = {9, 9, 0, 0, 0, 0, 0, 0};
+	uint8_t                  output_order[8]  = {};
+	bool                     host_enabled     = true;
+	uint32_t                 host_max         = 1;
+	bool                     blendable        = true;
+};
+
+State::DualSourceBlendDecision DecideDualSource(const DualSourceFixture& fixture)
+{
+	// The parser and the next-gen Gen5 summary depend on the configuration, so set it per case.
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	bool parsed = false;
+	const auto exports = SummarizeGuestExports(fixture.exports, &parsed);
+	EXPECT_TRUE(parsed);
+	State::DualSourceBlendInputs in;
+	in.blend0                           = fixture.blend;
+	in.blend_bypass0                    = fixture.blend_bypass;
+	in.slot0_active                     = fixture.slot0_active;
+	in.targets_num                      = fixture.targets_num;
+	in.program_admitted                 = fixture.program_admitted;
+	in.null_exports_only                = fixture.null_only;
+	in.exports                          = &exports;
+	in.output_mode                      = fixture.output_mode;
+	in.output_order                     = fixture.output_order;
+	in.host_dual_source_enabled         = fixture.host_enabled;
+	in.host_max_dual_source_attachments = fixture.host_max;
+	in.target0_blendable                = fixture.blendable;
+	return State::ResolveDualSourceBlend(in);
+}
+
+struct DualSourceCase
+{
+	const char*                      name;
+	void                             (*mutate)(DualSourceFixture&);
+	State::DualSourceBlendDecision expected;
+};
+
+} // namespace
+
+TEST(EmulatorGraphicsState, ResolvesDualSourceBlendFromParsedGuestExports)
+{
+	const DualSourceCase cases[] = {
+	    {"eligible full pair", [](DualSourceFixture&) {}, State::DualSourceBlendDecision::Eligible},
+	    {"eligible packed pair with mode 4",
+	     [](DualSourceFixture& f) {
+		     f.exports     = {{0u, 15, true}, {1u, 15, true}};
+		     f.output_mode[0] = 4;
+		     f.output_mode[1] = 4;
+	     },
+	     State::DualSourceBlendDecision::Eligible},
+	    {"partial enable EN5 on both targets leaves secondary components undefined",
+	     [](DualSourceFixture& f) { f.exports = {{0u, 5, false}, {1u, 5, false}}; }, State::DualSourceBlendDecision::Exports},
+	    {"MRT1 partial EN7 with full MRT0",
+	     [](DualSourceFixture& f) { f.exports = {{0u, 15, false}, {1u, 7, false}}; }, State::DualSourceBlendDecision::Exports},
+	    {"MRT1 union EN15 split across two full exports",
+	     [](DualSourceFixture& f) { f.exports = {{0u, 15, false}, {1u, 7, false}, {1u, 8, false}}; },
+	     State::DualSourceBlendDecision::Exports},
+	    {"eligible reverse subtract",
+	     [](DualSourceFixture& f) { f.blend.color_comb_fcn = 4; }, State::DualSourceBlendDecision::Eligible},
+	    {"separate alpha consumes SRC1 when color does not",
+	     [](DualSourceFixture& f) {
+		     f.blend.color_srcblend  = 0x01;
+		     f.blend.color_destblend = 0x05;
+		     f.blend.separate_alpha_blend = true;
+		     f.blend.alpha_srcblend       = 0x0f;
+		     f.blend.alpha_destblend      = 0x10;
+	     },
+	     State::DualSourceBlendDecision::Eligible},
+	    {"separate alpha factors ignored without separate alpha",
+	     [](DualSourceFixture& f) {
+		     f.blend.color_srcblend  = 0x01;
+		     f.blend.color_destblend = 0x05;
+		     f.blend.alpha_srcblend  = 0x0f;
+		     f.blend.alpha_destblend = 0x10;
+	     },
+	     State::DualSourceBlendDecision::NotConsumed},
+	    {"BothSrcAlpha pair overrides the SRC1 destination",
+	     [](DualSourceFixture& f) { f.blend.color_srcblend = 0x0b; }, State::DualSourceBlendDecision::NotConsumed},
+	    {"BothInverseSrcAlpha pair overrides the SRC1 source",
+	     [](DualSourceFixture& f) { f.blend.color_srcblend = 0x0c; f.blend.color_destblend = 0x0f; },
+	     State::DualSourceBlendDecision::NotConsumed},
+	    {"no SRC1 factor", [](DualSourceFixture& f) { f.blend.color_srcblend = 0x01; f.blend.color_destblend = 0x05; },
+	     State::DualSourceBlendDecision::NotConsumed},
+	    {"blend disabled", [](DualSourceFixture& f) { f.blend.enable = false; }, State::DualSourceBlendDecision::NotConsumed},
+	    {"blend bypass", [](DualSourceFixture& f) { f.blend_bypass = true; }, State::DualSourceBlendDecision::NotConsumed},
+	    {"MIN operation", [](DualSourceFixture& f) { f.blend.color_comb_fcn = 2; }, State::DualSourceBlendDecision::Operation},
+	    {"MAX operation", [](DualSourceFixture& f) { f.blend.color_comb_fcn = 3; }, State::DualSourceBlendDecision::Operation},
+	    {"separate alpha MAX operation",
+	     [](DualSourceFixture& f) {
+		     f.blend.separate_alpha_blend = true;
+		     f.blend.alpha_comb_fcn       = 3;
+	     },
+	     State::DualSourceBlendDecision::Operation},
+	    {"two physical targets", [](DualSourceFixture& f) { f.targets_num = 2; }, State::DualSourceBlendDecision::Targets},
+	    {"slot 0 inactive", [](DualSourceFixture& f) { f.slot0_active = false; }, State::DualSourceBlendDecision::Targets},
+	    {"MRT1 export missing", [](DualSourceFixture& f) { f.exports = {{0u, 15, false}}; }, State::DualSourceBlendDecision::Exports},
+	    {"MRT2 exported",
+	     [](DualSourceFixture& f) { f.exports.push_back({2u, 15, false}); }, State::DualSourceBlendDecision::Exports},
+	    {"EN mismatch between MRT0 and MRT1", [](DualSourceFixture& f) { f.exports = {{0u, 15, false}, {1u, 3, false}}; },
+	     State::DualSourceBlendDecision::Exports},
+	    {"mixed packing on MRT0",
+	     [](DualSourceFixture& f) { f.exports = {{0u, 15, false}, {0u, 15, true}, {1u, 15, false}}; },
+	     State::DualSourceBlendDecision::Exports},
+	    {"null exports only",
+	     [](DualSourceFixture& f) {
+		     f.exports   = {{0u, 0, true}};
+		     f.null_only = true;
+	     },
+	     State::DualSourceBlendDecision::Exports},
+	    {"program not admitted (not Gen5 or embedded)", [](DualSourceFixture& f) { f.program_admitted = false; },
+	     State::DualSourceBlendDecision::Exports},
+	    {"MRT1 mode differs from MRT0", [](DualSourceFixture& f) { f.output_mode[1] = 4; }, State::DualSourceBlendDecision::Modes},
+	    {"packed export with full mode",
+	     [](DualSourceFixture& f) {
+		     f.exports = {{0u, 15, true}, {1u, 15, true}};
+	     },
+	     State::DualSourceBlendDecision::Modes},
+	    {"declared MRT2 mode", [](DualSourceFixture& f) { f.output_mode[2] = 9; }, State::DualSourceBlendDecision::Modes},
+	    {"component order on MRT1", [](DualSourceFixture& f) { f.output_order[1] = 1; },
+	     State::DualSourceBlendDecision::ComponentOrder},
+	    {"host dual-source feature disabled", [](DualSourceFixture& f) { f.host_enabled = false; },
+	     State::DualSourceBlendDecision::HostCapability},
+	    {"host attachment limit zero", [](DualSourceFixture& f) { f.host_max = 0; }, State::DualSourceBlendDecision::HostCapability},
+	    {"target format not blendable", [](DualSourceFixture& f) { f.blendable = false; },
+	     State::DualSourceBlendDecision::HostCapability},
+	    {"guest refusal precedes host refusal",
+	     [](DualSourceFixture& f) {
+		     f.blend.color_comb_fcn = 2;
+		     f.host_enabled         = false;
+	     },
+	     State::DualSourceBlendDecision::Operation},
+	};
+	for (const auto& test: cases)
+	{
+		DualSourceFixture fixture;
+		test.mutate(fixture);
+		EXPECT_EQ(DecideDualSource(fixture), test.expected) << test.name;
+	}
+}
+
 using namespace GraphicsRetirementHelpers;
 
 TEST(EmulatorGraphicsState, AgcAsyncQueueHandlesKeepSeparateOrderedSlots)
@@ -1230,12 +1442,123 @@ static void CheckBoundedMappedShaderSnapshots()
 	ShaderMapUserData(UINT64_MAX - 3u, {});
 }
 
+static void CheckBoundedShaderDumpSnapshot(const char* dump_dir)
+{
+	SetSubmitFaultTestEnvironment("KYTY_TRANSPORT_DUMP", dump_dir);
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	ShaderInit();
+
+	const uint64_t page_size = Core::VirtualMemory::GetPageSize();
+	const uint64_t address   = Core::VirtualMemory::Alloc(0, page_size, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	constexpr uint32_t end_program = 0xbf810000u;
+	const std::array<uint32_t, 2> original_words {end_program, 0x11223344u};
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(address, original_words.data(), sizeof(original_words)));
+	ShaderMappedData mapped {};
+	mapped.code_size_bytes = sizeof(uint32_t);
+	ShaderMapUserData(address, mapped);
+
+	HW::PixelShaderInfo regs {};
+	regs.ps_regs.data_addr = address;
+	regs.ps_regs.chksum   = 1u;
+	HW::ShaderRegisters shader_regs {};
+	auto                parsed = ShaderParsePS(&regs, &shader_regs);
+	ASSERT_EQ(parsed.GetInstructions().Size(), 1u);
+	EXPECT_EQ(parsed.GetInstructions().At(0).type, ShaderInstructionType::SEndpgm);
+	ASSERT_NE(parsed.GetGuestSourceSnapshot(), nullptr);
+	EXPECT_EQ(parsed.GetGuestSourceSnapshotStatus(), ShaderGuestSourceSnapshotStatus::Captured);
+	ASSERT_EQ(parsed.GetGuestSourceSnapshot()->size(), 1u);
+	EXPECT_EQ(parsed.GetGuestSourceSnapshot()->front(), end_program);
+
+	const uint32_t replacement = 0xbf800000u;
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(address, &replacement, sizeof(replacement)));
+	mapped.code_size_bytes = sizeof(original_words);
+	ShaderMapUserData(address, mapped);
+	(void)ShaderDumpGuestProgram(dump_dir, "ps", regs.ps_regs.chksum, address, parsed);
+
+	ShaderCode unknown_source;
+	ShaderInstruction maximum_pc {};
+	maximum_pc.type = ShaderInstructionType::SEndpgm;
+	maximum_pc.pc   = UINT32_MAX;
+	unknown_source.GetInstructions().Add(maximum_pc);
+	EXPECT_EQ(unknown_source.GetGuestSourceSnapshotStatus(), ShaderGuestSourceSnapshotStatus::Unavailable);
+	(void)ShaderDumpGuestProgram(dump_dir, "cs", 3u, address, unknown_source);
+	EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(dump_dir) / "cs_0000000000000003.bin"));
+
+	const uint32_t oversized_bytes = kShaderProgramSnapshotBytesMax + sizeof(uint32_t);
+	const uint64_t oversized_allocation = ((oversized_bytes + page_size - 1u) / page_size) * page_size;
+	const uint64_t oversized_address =
+	    Core::VirtualMemory::Alloc(0, oversized_allocation, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(oversized_address, 0u);
+	std::vector<uint32_t> oversized_words(oversized_bytes / sizeof(uint32_t), 0u);
+	oversized_words[0] = end_program;
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(oversized_address, oversized_words.data(), oversized_bytes));
+	mapped.code_size_bytes = oversized_bytes;
+	ShaderMapUserData(oversized_address, mapped);
+	HW::ComputeShaderInfo oversized_regs {};
+	oversized_regs.cs_regs.data_addr = oversized_address;
+	oversized_regs.cs_regs.chksum   = 2u;
+	const auto oversized_code = ShaderParseCS(&oversized_regs, &shader_regs);
+	ASSERT_EQ(oversized_code.GetInstructions().Size(), 1u);
+	EXPECT_EQ(oversized_code.GetGuestSourceSnapshotStatus(), ShaderGuestSourceSnapshotStatus::Truncated);
+	(void)ShaderDumpGuestProgram(dump_dir, "cs", oversized_regs.cs_regs.chksum, oversized_address, oversized_code);
+	EXPECT_FALSE(std::filesystem::exists(std::filesystem::path(dump_dir) / "cs_0000000000000002.bin"));
+
+	SetSubmitFaultTestEnvironment("KYTY_TRANSPORT_DUMP", "");
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(address, &end_program, sizeof(end_program)));
+	mapped.code_size_bytes = sizeof(end_program);
+	ShaderMapUserData(address, mapped);
+	const auto disabled_dump_code = ShaderParsePS(&regs, &shader_regs);
+	EXPECT_EQ(disabled_dump_code.GetGuestSourceSnapshotStatus(), ShaderGuestSourceSnapshotStatus::Unavailable);
+	EXPECT_EQ(disabled_dump_code.GetGuestSourceSnapshot(), nullptr);
+
+	ShaderMapUserData(address, {});
+	ShaderMapUserData(oversized_address, {});
+	EXPECT_TRUE(Core::VirtualMemory::Free(address));
+	EXPECT_TRUE(Core::VirtualMemory::Free(oversized_address));
+
+	const auto raw_path = std::filesystem::path(dump_dir) / "ps_0000000000000001.bin";
+	std::ifstream raw_file(raw_path, std::ios::binary);
+	ASSERT_TRUE(raw_file.is_open());
+	const std::string dumped_bytes((std::istreambuf_iterator<char>(raw_file)), std::istreambuf_iterator<char>());
+	constexpr uint32_t expected_word = 0xbf810000u;
+	EXPECT_EQ(dumped_bytes.size(), sizeof(expected_word));
+	EXPECT_EQ(dumped_bytes, std::string(reinterpret_cast<const char*>(&expected_word), sizeof(expected_word)));
+}
+
+static void RunBoundedShaderDumpSnapshot()
+{
+	ScopedTestDirectory dump_directory("shader-dump-snapshot");
+	ASSERT_FALSE(dump_directory.Path().empty());
+	const auto dump_path = dump_directory.Path().string();
+	CheckBoundedShaderDumpSnapshot(dump_path.c_str());
+	std::error_code error;
+	std::filesystem::remove_all(dump_directory.Path(), error);
+	EXPECT_FALSE(error);
+}
+
 TEST(EmulatorGraphicsState, SkippedShaderSnapshotsRespectMetadataBoundsAndReadableLifetime)
 {
 	ScopedSubmitFaultDeathTestStyle death_test_style;
 	ASSERT_EXIT(
 	    {
 		    CheckBoundedMappedShaderSnapshots();
+		    std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, RegisteredShaderDumpUsesBoundedImmutableSource)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	ASSERT_EXIT(
+	    {
+		    RunBoundedShaderDumpSnapshot();
 		    std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
 	    },
 	    ::testing::ExitedWithCode(0), "");
@@ -2972,6 +3295,28 @@ TEST(EmulatorGraphicsState, MixedRawRenderSourcesRequireCompleteOlderCoverage)
 	                                                             destination_bytes - 8u));
 }
 
+TEST(EmulatorGraphicsState, RawStorageSourceUsesTiledSingleLevelLayout)
+{
+	constexpr uint64_t base = 0x200000u;
+	constexpr uint64_t destination_address = base + 0x300000u;
+	constexpr uint64_t destination_bytes = 960u * 540u * 8u;
+	const StorageTextureObject tiled(0u, 0u, 71u, 2432u, 1368u, 2432u, 0u, 1u, 27u, false, DstSel(4, 5, 6, 7));
+	StorageTextureRawRenderSource source {};
+	ASSERT_TRUE(StorageTextureDescribeRawStorageSource(tiled.params, base, 0x1a20000u, &source));
+	EXPECT_EQ(source.bytes_per_pixel, 8u);
+	EXPECT_EQ(source.pitch, 2432u);
+	EXPECT_TRUE(StorageTextureRawRenderSourceCovers(source, destination_address, destination_bytes));
+	EXPECT_FALSE(StorageTextureDescribeRawStorageSource(tiled.params, base, 0x1a10000u, &source));
+	const StorageTextureObject depth_tiled(0u, 0u, 71u, 2432u, 1368u, 2432u, 0u, 1u, 24u, false, DstSel(4, 5, 6, 7));
+	EXPECT_FALSE(StorageTextureDescribeRawStorageSource(depth_tiled.params, base, 0x1a20000u, &source));
+	const StorageTextureObject mipped(0u, 0u, 71u, 2432u, 1368u, 2432u, 0u, 2u, 27u, false, DstSel(4, 5, 6, 7));
+	EXPECT_FALSE(StorageTextureDescribeRawStorageSource(mipped.params, base, 0x1a20000u, &source));
+	// The store emitter applies this selector in the shader, so the image keeps
+	// guest byte order.
+	const StorageTextureObject swizzled(0u, 0u, 71u, 2432u, 1368u, 2432u, 0u, 1u, 27u, false, DstSel(6, 5, 4, 7));
+	EXPECT_TRUE(StorageTextureDescribeRawStorageSource(swizzled.params, base, 0x1a20000u, &source));
+}
+
 TEST(EmulatorGraphicsState, StorageTextureBackingSupportsSamplingAfterComputeWrites)
 {
 	const auto usage = StorageTextureGetImageUsage();
@@ -3236,6 +3581,21 @@ TEST(EmulatorGraphicsState, PresentationEncodesLinearLightBeforeAUnormSwapchain)
 	EXPECT_EQ(PresentationSrgbTwin(VK_FORMAT_B8G8R8A8_UNORM), VK_FORMAT_B8G8R8A8_SRGB);
 	EXPECT_EQ(PresentationSrgbTwin(VK_FORMAT_R8G8B8A8_UNORM), VK_FORMAT_R8G8B8A8_SRGB);
 	EXPECT_EQ(PresentationSrgbTwin(VK_FORMAT_A2B10G10R10_UNORM_PACK32), VK_FORMAT_UNDEFINED);
+}
+
+TEST(EmulatorGraphicsState, RunsFsrOnlyForPresentationUpscales)
+{
+	EXPECT_TRUE(PresentationFsrApplies({1280, 720}, {1920, 1080}));
+	EXPECT_TRUE(PresentationFsrApplies({1920, 800}, {1920, 1080}));
+	// Equal extents gain nothing from an upscaler, and a larger source on either axis is a downscale.
+	EXPECT_FALSE(PresentationFsrApplies({1920, 1080}, {1920, 1080}));
+	EXPECT_FALSE(PresentationFsrApplies({3840, 2160}, {1920, 1080}));
+	EXPECT_FALSE(PresentationFsrApplies({2560, 720}, {1920, 1080}));
+	EXPECT_FALSE(PresentationFsrApplies({0, 720}, {1920, 1080}));
+	// Sharpness percent maps to RCAS stops: 100 is the sharpest (0 stops), 0 the softest (2 stops).
+	EXPECT_FLOAT_EQ(PresentationFsrSharpnessStops(100), 0.0f);
+	EXPECT_FLOAT_EQ(PresentationFsrSharpnessStops(50), 1.0f);
+	EXPECT_FLOAT_EQ(PresentationFsrSharpnessStops(0), 2.0f);
 }
 
 TEST(EmulatorGraphicsState, KeepsColorExportsLogicalForPhysicalAttachmentOrder)
@@ -4497,11 +4857,11 @@ TEST(EmulatorGraphicsState, SeparatesHtileMetaClearFromRegisterDepthClear)
 TEST(EmulatorGraphicsState, DepthAttachmentLoadOpsClearWhenGuestDepthClear)
 {
 	using namespace Kyty::Libs::Graphics;
-	// HTILE/register clear → loadOp CLEAR + UNDEFINED.
+	// HTILE/register depth clear → depth CLEAR; the combined image keeps its stencil.
 	auto ds = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, true, false);
 	EXPECT_EQ(ds.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
-	EXPECT_EQ(ds.stencil_load, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
-	EXPECT_EQ(ds.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+	EXPECT_EQ(ds.stencil_load, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(ds.initial_layout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
 	auto both = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, true, true);
 	EXPECT_EQ(both.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
@@ -4566,7 +4926,7 @@ TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 	EXPECT_NE(symbols.Find(query), nullptr);
 }
 
-// Gen5 ACB/DCB sizing helpers and Trinity query contracts used by Astro boot.
+// Gen5 ACB/DCB sizing helpers and Trinity query contracts used at boot.
 TEST(EmulatorGraphicsState, Gen5AgcSizeHelpersAndTrinityMode)
 {
 	if (!Config::IsInitialized())
@@ -4591,7 +4951,7 @@ TEST(EmulatorGraphicsState, Gen5AgcSizeHelpersAndTrinityMode)
 	EXPECT_NE(GraphicsWriteDataPatchSetAddressOrOffset(bad_cmd, 0), OK);
 }
 
-// Missing Gen5 AGC / AgcDriver exports that blocked Astro after Ampr/VideoOut.
+// Missing Gen5 AGC / AgcDriver exports that blocked a title after Ampr/VideoOut.
 TEST(EmulatorGraphicsState, ResolvesGen5AgcAndDriverExports)
 {
 	if (!Config::IsInitialized())
@@ -4741,7 +5101,7 @@ TEST(EmulatorGraphicsState, ClassifiesConstantStorageResourcesAsReadOnly)
 	EXPECT_FALSE(ShaderStorageUsageIsReadOnly(ShaderStorageUsage::Unknown));
 }
 
-// Guest malloc/new → host heap; small V# bases land here (Dreaming Sarah).
+// Guest malloc/new → host heap; small V# bases land here (seen on a Construct title).
 TEST(EmulatorGraphicsState, ClassifiesHostGuestMallocRangesForLazyGpuHeaps)
 {
 	EXPECT_FALSE(GpuMemoryIsHostGuestMallocRange(0, 0x40));
@@ -5955,6 +6315,77 @@ TEST(EmulatorGraphicsState, ReclaimsSingleSurfaceForDepthStencilReuse)
 	                                                       GpuMemoryObjectType::Texture));
 }
 
+TEST(EmulatorGraphicsState, SeedsDepthOnlyFromTheRenderTargetItReinterprets)
+{
+	const DepthStencilBufferObject depth(VK_FORMAT_D32_SFLOAT, 960, 540, false, true, true, 0, 0);
+	const RenderTextureObject      packed(RenderTextureFormat::B10G11R11Ufloat, 960, 540, true, true, 1024, false);
+	const RenderTextureObject      single(RenderTextureFormat::R32Sfloat, 960, 540, true, true, 1024, false);
+	EXPECT_TRUE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, packed.params, true));
+	EXPECT_TRUE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, single.params, true));
+	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, packed.params, false));
+
+	const DepthStencilBufferObject htile(VK_FORMAT_D32_SFLOAT, 960, 540, true, true, true, 0x1000, 0x1000);
+	const DepthStencilBufferObject stencil(VK_FORMAT_D32_SFLOAT_S8_UINT, 960, 540, false, true, true, 0, 0);
+	const DepthStencilBufferObject scaled(VK_FORMAT_D32_SFLOAT, 960, 540, 1920, 1080, false, true, true, 0, 0);
+	const DepthStencilBufferObject multisampled(VK_FORMAT_D32_SFLOAT, 960, 540, false, true, true, 0, 0, 4);
+	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(htile.params, packed.params, true));
+	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(stencil.params, packed.params, true));
+	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(scaled.params, packed.params, true));
+	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(multisampled.params, packed.params, true));
+
+	const RenderTextureObject half(RenderTextureFormat::R16Sfloat, 960, 540, true, true, 1024, false);
+	const RenderTextureObject wide(RenderTextureFormat::B10G11R11Ufloat, 960, 540, true, true, 1152, false);
+	const RenderTextureObject sampled(RenderTextureFormat::B10G11R11Ufloat, 960, 540, true, true, 1024, false, 4);
+	const RenderTextureObject layered(RenderTextureFormat::B10G11R11Ufloat, 960, 540, true, true, 1024, false, 1, 2);
+	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, half.params, true));
+	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, wide.params, true));
+	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, sampled.params, true));
+	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, layered.params, true));
+}
+
+TEST(EmulatorGraphicsState, SharesTexelsOnlyBetweenDepthAndMatchingStorage)
+{
+	const DepthStencilBufferObject depth(VK_FORMAT_D32_SFLOAT, 960, 540, false, true, true, 0, 0);
+	const StorageTextureObject     packed(0, 0, 36, 960, 540, 1024, 0, 1, 27, true, 940);
+	const StorageTextureObject     single(0, 0, 22, 960, 540, 1024, 0, 1, 27, true, 940);
+	const StorageTextureObject     depth_layout(0, 0, 22, 960, 540, 1024, 0, 1, 24, true, 940);
+	EXPECT_TRUE(StorageTextureSharesDepthTexels(packed.params, depth.params, true));
+	EXPECT_TRUE(StorageTextureSharesDepthTexels(single.params, depth.params, true));
+	EXPECT_TRUE(StorageTextureSharesDepthTexels(depth_layout.params, depth.params, true));
+	EXPECT_FALSE(StorageTextureSharesDepthTexels(packed.params, depth.params, false));
+
+	const DepthStencilBufferObject htile(VK_FORMAT_D32_SFLOAT, 960, 540, true, true, true, 0x1000, 0x1000);
+	const DepthStencilBufferObject scaled(VK_FORMAT_D32_SFLOAT, 960, 540, 1920, 1080, false, true, true, 0, 0);
+	EXPECT_FALSE(StorageTextureSharesDepthTexels(packed.params, htile.params, true));
+	EXPECT_FALSE(StorageTextureSharesDepthTexels(packed.params, scaled.params, true));
+
+	const StorageTextureObject linear(0, 0, 36, 960, 540, 1024, 0, 1, 0, true, 940);
+	const StorageTextureObject mipped(0, 0, 36, 960, 540, 1024, 0, 2, 27, true, 940);
+	const StorageTextureObject wide(0, 0, 36, 960, 540, 1152, 0, 1, 27, true, 940);
+	const StorageTextureObject smaller(0, 0, 36, 480, 270, 512, 0, 1, 27, true, 940);
+	const StorageTextureObject eight_bit(0, 0, 56, 960, 540, 1024, 0, 1, 27, true, 940);
+	EXPECT_FALSE(StorageTextureSharesDepthTexels(linear.params, depth.params, true));
+	EXPECT_FALSE(StorageTextureSharesDepthTexels(mipped.params, depth.params, true));
+	EXPECT_FALSE(StorageTextureSharesDepthTexels(wide.params, depth.params, true));
+	EXPECT_FALSE(StorageTextureSharesDepthTexels(smaller.params, depth.params, true));
+	EXPECT_FALSE(StorageTextureSharesDepthTexels(eight_bit.params, depth.params, true));
+}
+
+TEST(EmulatorGraphicsState, ReclaimsDepthStencilRedeclaredAtTheSameBase)
+{
+	constexpr uint64_t base = 0x527430000ull;
+	EXPECT_TRUE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base,
+	                                                     GpuMemoryObjectType::DepthStencilBuffer, base));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base + 0x10000u,
+	                                                      GpuMemoryObjectType::DepthStencilBuffer, base));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::RenderTexture, base,
+	                                                      GpuMemoryObjectType::DepthStencilBuffer, base));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base,
+	                                                      GpuMemoryObjectType::Texture, base));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, 0u,
+	                                                      GpuMemoryObjectType::DepthStencilBuffer, 0u));
+}
+
 TEST(EmulatorGraphicsState, LinksPendingStorageBeforeDepthStencilReuse)
 {
 	// Type/relation policy accepts every observed StorageBuffer↔DepthStencil form.
@@ -6495,7 +6926,7 @@ TEST(EmulatorGraphicsState, LabelFenceRegistryPreservesUniqueHolesAfterTransient
 
 	Vector<uint64_t> hole_begin;
 	Vector<uint64_t> hole_end;
-	registry.Snapshot(&hole_begin, &hole_end);
+	registry.Snapshot(reinterpret_cast<uint64_t>(dst), sizeof(dst), &hole_begin, &hole_end);
 	ASSERT_EQ(hole_begin.Size(), 1u);
 	ASSERT_EQ(hole_end.Size(), 1u);
 
@@ -6526,7 +6957,7 @@ TEST(EmulatorGraphicsState, LabelFenceRegistryUnmapRemovesHolesBeforeAddressReus
 
 	Vector<uint64_t> begin;
 	Vector<uint64_t> end;
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(allocation, sizeof(storage), &begin, &end);
 	MemcpySkipAbsoluteRanges(storage, source, sizeof(storage), begin.GetData(), end.GetData(), static_cast<int>(begin.Size()));
 	for (int i = 0; i < 64; i++)
 	{
@@ -6540,7 +6971,7 @@ TEST(EmulatorGraphicsState, LabelFenceRegistryUnmapRemovesHolesBeforeAddressReus
 	EXPECT_EQ(registry.Size(), 0u);
 
 	std::memset(storage, 0xa5, sizeof(storage));
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(allocation, sizeof(storage), &begin, &end);
 	MemcpySkipAbsoluteRanges(storage, source, sizeof(storage), begin.GetData(), end.GetData(), static_cast<int>(begin.Size()));
 	EXPECT_EQ(std::memcmp(storage, source, sizeof(storage)), 0);
 
@@ -6550,11 +6981,13 @@ TEST(EmulatorGraphicsState, LabelFenceRegistryUnmapRemovesHolesBeforeAddressReus
 	EXPECT_EQ(registry.ReleaseAllocation(allocation, 0u), LabelFenceReleaseStatus::InvalidArgument);
 	EXPECT_EQ(registry.ReleaseAllocation(UINT64_MAX - 3u, 8u), LabelFenceReleaseStatus::InvalidArgument);
 
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(allocation, sizeof(storage), &begin, &end);
 	ASSERT_EQ(begin.Size(), 1u);
 	ASSERT_EQ(end.Size(), 1u);
 	EXPECT_EQ(begin.At(0), allocation + 8u);
 	EXPECT_EQ(end.At(0), allocation + 12u);
+	registry.Snapshot(allocation + 12u, sizeof(storage) - 12u, &begin, &end);
+	EXPECT_EQ(begin.Size(), 0u);
 }
 
 TEST(EmulatorGraphicsState, LabelFenceGdsStoreProtectsEveryWrittenDword)
@@ -6577,7 +7010,7 @@ TEST(EmulatorGraphicsState, LabelFenceGdsStoreProtectsEveryWrittenDword)
 
 	Vector<uint64_t> begin;
 	Vector<uint64_t> end;
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(base, sizeof(dst), &begin, &end);
 	MemcpySkipAbsoluteRanges(dst, src, sizeof(dst), begin.GetData(), end.GetData(), static_cast<int>(begin.Size()));
 
 	for (int i = 0; i < 32; i++)
@@ -7045,6 +7478,39 @@ TEST(EmulatorGraphicsState, PreservesOnlyPureDepthReferenceHostSampler)
 	EXPECT_EQ(ResolveSamplerBindingOperation(ImageSampleOperation::DepthReference, false), ImageSampleOperation::Regular);
 }
 
+TEST(EmulatorGraphicsState, PairsTableLoadedDepthReferenceSamplerByInstruction)
+{
+	using namespace Kyty::Libs::Graphics::State;
+
+	// A color image and a depth image, each sampled with its own sampler; the
+	// depth sampler was loaded through a descriptor table, so its slot pairs
+	// with no image.
+	ShaderTextureResources textures {};
+	textures.textures_num             = 2;
+	textures.desc[0].usage            = ShaderTextureUsage::ReadOnly;
+	textures.desc[0].sample_operation = ImageSampleOperation::Regular;
+	textures.desc[0].slot             = 0;
+	textures.desc[0].sampler_indices_mask = 0x1u;
+	textures.desc[1].usage            = ShaderTextureUsage::ReadOnly;
+	textures.desc[1].sample_operation = ImageSampleOperation::DepthReference;
+	textures.desc[1].slot             = 2;
+	textures.desc[1].sampled_shape    = ShaderGen5SampledTextureShape::TwoDimensional;
+	textures.desc[1].sampled_shape_from_instruction = true;
+	textures.desc[1].sampler_indices_mask = 0x2u;
+	ShaderSamplerResources samplers {};
+	samplers.samplers_num     = 2;
+	samplers.operations[0]    = ImageSampleOperation::Regular;
+	samplers.operations[1]    = ImageSampleOperation::DepthReference;
+	samplers.slots[1]         = 4;
+	samplers.dynamic_sload[1] = true;
+
+	EXPECT_TRUE(ShaderSamplerDepthComparisonEligible(textures, samplers, 1));
+
+	// The same sampler also filtering the color image keeps the regular path.
+	textures.desc[0].sampler_indices_mask = 0x3u;
+	EXPECT_FALSE(ShaderSamplerDepthComparisonEligible(textures, samplers, 1));
+}
+
 TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5DepthSamples)
 {
 	const auto accepts = [](uint32_t format = 7u, uint32_t type = 9u, uint32_t depth = 0u, uint32_t base_array = 0u,
@@ -7244,6 +7710,25 @@ TEST(EmulatorGraphicsState, ResolvesSamplerLodRangeFromSSharpFixedPoint)
 	EXPECT_FLOAT_EQ(minus_one.min_lod, 0.0f);
 	EXPECT_FLOAT_EQ(minus_one.max_lod, 1.0f);
 	EXPECT_NEAR(minus_one.lod_bias, -1.0f / 256.0f, 1.0e-6f);
+}
+
+TEST(EmulatorGraphicsState, ResolvesSamplerAnisotropyFromSSharpAndHostLevel)
+{
+	using namespace Kyty::Libs::Graphics::State;
+	const auto guest = ResolveSamplerAnisotropy(3u, 3u, 3u, 1.0f);
+	EXPECT_TRUE(guest.enabled);
+	EXPECT_FLOAT_EQ(guest.max_ratio, 8.0f);
+	EXPECT_FALSE(ResolveSamplerAnisotropy(1u, 1u, 4u, 1.0f).enabled);
+	EXPECT_FLOAT_EQ(ResolveSamplerAnisotropy(2u, 0u, 7u, 1.0f).max_ratio, 1.0f);
+
+	const auto raised = ResolveSamplerAnisotropy(1u, 1u, 0u, 16.0f);
+	EXPECT_TRUE(raised.enabled);
+	EXPECT_FLOAT_EQ(raised.max_ratio, 16.0f);
+	EXPECT_FLOAT_EQ(ResolveSamplerAnisotropy(3u, 3u, 4u, 4.0f).max_ratio, 16.0f);
+	const auto point = ResolveSamplerAnisotropy(0u, 0u, 0u, 16.0f);
+	EXPECT_FALSE(point.enabled);
+	EXPECT_FLOAT_EQ(point.max_ratio, 1.0f);
+	EXPECT_FLOAT_EQ(ResolveSamplerAnisotropy(2u, 2u, 1u, 16.0f).max_ratio, 2.0f);
 }
 
 // GraphicsInit must publish API version and feature-flag words into the guest
@@ -7533,6 +8018,123 @@ TEST(EmulatorGraphicsState, AVolumeDimensionDoesNotMakeAFlatDescriptorAVolume)
 		EXPECT_EQ(bind.textures2D.textures3d_sampled_num, volume ? 1 : 0);
 		EXPECT_EQ(bind.textures2D.textures2d_sampled_num, volume ? 0 : 1);
 	}
+}
+
+TEST(EmulatorGraphicsState, RecognizesOneDimensionalArrayTextureSharpAsTextureDescriptor)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// SizeFlag clear selects an 8-dword T#. Type nibble 12 (1D array) is an image
+	// descriptor, as the 2D array (13) already is.
+	HW::UserSgprInfo user_sgpr {};
+	user_sgpr.value[3] = 12u << 28u;
+	EXPECT_TRUE(Gen5SharpUseTextureDescriptor(false, 0, 16, user_sgpr, nullptr));
+	user_sgpr.value[3] = 13u << 28u;
+	EXPECT_TRUE(Gen5SharpUseTextureDescriptor(false, 0, 16, user_sgpr, nullptr));
+}
+
+TEST(EmulatorGraphicsState, ClassifiesOneDimensionalArrayDynamicDescriptorByInstructionShape)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// MIMG DIM 4 (1D array) supplies (x, slice). T# type 12 (1D array) must select
+	// the array descriptor bank, as type 13 does.
+	ShaderInstruction texture_load {};
+	texture_load.pc                = 0x8;
+	texture_load.type              = ShaderInstructionType::SLoadDwordx8;
+	texture_load.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 8};
+	texture_load.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	texture_load.src[1].type       = ShaderOperandType::IntegerInlineConstant;
+	texture_load.src[1].constant.u = 128u;
+	texture_load.src_num           = 2;
+
+	ShaderInstruction image_load {};
+	image_load.pc             = 0x10;
+	image_load.type           = ShaderInstructionType::ImageLoad;
+	image_load.format         = ShaderInstructionFormat::VdataVaddr3StDmask;
+	image_load.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	image_load.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 8, .size = 2};
+	image_load.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 8};
+	image_load.src_num        = 2;
+	image_load.mimg_dimension = 4;
+	image_load.mimg_dmask     = 15;
+
+	ShaderInstruction end {};
+	end.pc   = 0x18;
+	end.type = ShaderInstructionType::SEndpgm;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(texture_load);
+	code.GetInstructions().Add(image_load);
+	code.GetInstructions().Add(end);
+
+	alignas(16) uint32_t eud[64] = {};
+	eud[33]                      = 22u << 20u;
+	eud[35]                      = 12u << 28u;
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 16; ++i)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	const uint64_t eud_ptr =
+	    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(eud_ptr, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, sizeof(eud)));
+	user_sgpr.value[0] = static_cast<uint32_t>(eud_ptr);
+	user_sgpr.value[1] = static_cast<uint32_t>(eud_ptr >> 32u);
+
+	uint16_t direct_offsets[6];
+	for (auto& offset: direct_offsets)
+	{
+		offset = 0xffffu;
+	}
+	direct_offsets[5] = 0;
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 6;
+	user_data.eud_size_dw            = 48;
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
+	EXPECT_TRUE(Core::VirtualMemory::Free(eud_ptr));
+
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	const auto& descriptor = bind.textures2D.desc[0];
+	EXPECT_EQ(descriptor.texture.Type(), 12u);
+	EXPECT_EQ(ShaderResolvedSampledTextureShape(descriptor), ShaderGen5SampledTextureShape::TwoDimensionalArray);
+	EXPECT_EQ(ShaderGen5HostSampledTextureType(descriptor.texture.Type(), ShaderResolvedSampledTextureShape(descriptor)), 13u);
+}
+
+TEST(EmulatorGraphicsState, MovesSampledBankCountWhenInstructionShapeResolves)
+{
+	// A read-only descriptor is counted in the bank of the shape it was registered with. An
+	// instruction shape that differs moves the count, so bank sizes follow the emitted shape.
+	ShaderTextureResources textures {};
+	textures.textures_num                = 1;
+	textures.desc[0].usage               = ShaderTextureUsage::ReadOnly;
+	textures.desc[0].sampled_shape       = ShaderGen5SampledTextureShape::TwoDimensionalArray;
+	textures.textures2d_array_sampled_num = 1;
+
+	ShaderSetSampledTextureInstructionShape(&textures, 0, ShaderGen5SampledTextureShape::TwoDimensional);
+	EXPECT_EQ(textures.textures2d_array_sampled_num, 0);
+	EXPECT_EQ(textures.textures2d_sampled_num, 1);
+	EXPECT_TRUE(textures.desc[0].sampled_shape_from_instruction);
+
+	ShaderSetSampledTextureInstructionShape(&textures, 0, ShaderGen5SampledTextureShape::TwoDimensionalArray);
+	EXPECT_EQ(textures.textures2d_array_sampled_num, 1);
+	EXPECT_EQ(textures.textures2d_sampled_num, 0);
+	EXPECT_EQ(ShaderResolvedSampledTextureShape(textures.desc[0]), ShaderGen5SampledTextureShape::TwoDimensionalArray);
 }
 
 TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBindings)

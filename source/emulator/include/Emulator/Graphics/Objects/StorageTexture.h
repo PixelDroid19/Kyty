@@ -56,6 +56,11 @@ public:
 };
 
 [[nodiscard]] bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
+// A single-level 2D Gen5 storage view with a 32-bit texel and a 32-bit depth target without HTILE or stencil, bound
+// over the same range, address the same texels: the depth (mode 24) and render-target (mode 27) layouts of a 4-byte
+// texel are one layout, so either view reads the raw bytes the other last held. Storage images are never
+// resolution-scaled, so the depth must not be either.
+[[nodiscard]] bool StorageTextureSharesDepthTexels(const uint64_t* storage, const uint64_t* depth, bool next_gen);
 // A storage view that re-describes memory of another view with a different
 // format, or the exact range with a different extent: a recycled allocation
 // whose texels mean nothing in the other layout.
@@ -123,6 +128,13 @@ struct StorageTextureRawRenderSource
 
 [[nodiscard]] bool StorageTextureDescribeRawRenderSource(const uint64_t* render_params, uint64_t address,
 	                                                       uint64_t size, StorageTextureRawRenderSource* source);
+// A single-level 2D storage image in the 64 KB R_X layout holds its guest bytes
+// in the same block order as a tiled render target.
+[[nodiscard]] bool StorageTextureDescribeRawStorageSource(const uint64_t* storage_params, uint64_t address,
+	                                                        uint64_t size, StorageTextureRawRenderSource* source);
+// The source image can be copied raw into the composite: an unscaled single
+// sample, level and layer image of the source's texel size.
+[[nodiscard]] bool StorageTextureRawRenderSourceImageMatches(const StorageTextureRawRenderSource& source);
 [[nodiscard]] bool StorageTextureRawRenderSourceCovers(const StorageTextureRawRenderSource& source,
 	                                                    uint64_t address, uint64_t size);
 [[nodiscard]] bool StorageTextureCanCompositeRawRenderDestination(const uint64_t* storage_params,

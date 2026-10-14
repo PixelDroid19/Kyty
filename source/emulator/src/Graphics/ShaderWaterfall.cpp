@@ -61,7 +61,7 @@ bool Writes(const ShaderInstruction& inst, unsigned word)
 // V_CMPX and S_*_SAVEEXEC replace EXEC without naming it as their destination.
 bool WritesExec(const ShaderInstruction& inst)
 {
-	return Writes(inst, kExecLoWord) || WritesExecOnly(inst.type) ||
+	return Writes(inst, kExecLoWord) || Writes(inst, kExecLoWord + 1u) || WritesExecOnly(inst.type) ||
 	       ShaderInstructionTypeName(inst.type).find("Saveexec") != std::string_view::npos;
 }
 

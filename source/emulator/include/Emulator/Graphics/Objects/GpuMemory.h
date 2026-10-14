@@ -3,7 +3,9 @@
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/Vector.h"
+#include "Kyty/Core/VirtualMemory.h"
 
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -77,6 +79,18 @@ enum class GpuMemoryObjectType : uint64_t
 	const bool buffer_type = type == GpuMemoryObjectType::StorageBuffer || type == GpuMemoryObjectType::VertexBuffer ||
 	                         type == GpuMemoryObjectType::IndexBuffer;
 	return buffer_type && !owns_device_content && !depth_meta_bound;
+}
+
+// Frame retirement ages objects in presented frames, so a phase that records
+// many submissions between two presents (a loading screen) ages nothing while
+// it creates buffers. Once this many bytes of buffers were created since the
+// last retirement pass, creation retires buffers that own no device content and
+// whose recorded submissions have all completed.
+constexpr uint64_t kGpuMemoryBufferPressureRetireBytes = 256u * 1024u * 1024u;
+
+[[nodiscard]] inline bool GpuMemoryBufferPressureRetirementDue(uint64_t buffer_bytes_since_last_pass)
+{
+	return buffer_bytes_since_last_pass >= kGpuMemoryBufferPressureRetireBytes;
 }
 
 enum class GpuMemoryScenario
@@ -156,6 +170,7 @@ struct GpuMemoryRangeProvenanceEntry
 	bool                   dependencies_complete = false;
 	bool                   check_hash             = false;
 	bool                   dirty_registered       = false;
+	bool                   depth_meta_bound       = false;
 };
 
 struct GpuMemoryRangeProvenance
@@ -625,6 +640,17 @@ inline bool GpuMemoryAllowsDepthStencilReclaimSurface(GpuMemoryObjectType existi
 	                   relation == GpuMemoryOverlapType::IsContainedWithin || relation == GpuMemoryOverlapType::Equals);
 }
 
+// A depth target declared at the depth-plane base of an older depth target replaces
+// it (the guest re-describes that allocation, for example at another extent). Depth
+// images publish no guest bytes, and reclaimed objects are destroyed only after their
+// queued uses complete, so no in-flight image is discarded and no content is invented.
+inline bool GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType existing_type, uint64_t existing_depth_base,
+                                                     GpuMemoryObjectType incoming_type, uint64_t incoming_depth_base)
+{
+	return existing_type == GpuMemoryObjectType::DepthStencilBuffer && incoming_type == GpuMemoryObjectType::DepthStencilBuffer &&
+	       existing_depth_base != 0u && existing_depth_base == incoming_depth_base;
+}
+
 // A writable storage view with pending GPU work cannot be reclaimed while a
 // later command buffer is still being recorded. Keep the depth view linked;
 // the storage completion callback publishes the guest bytes and invalidates
@@ -1082,9 +1108,41 @@ struct GpuMemoryStorageWriteIdentity
 // completed submission then writes back without reading the GPU copy.
 [[nodiscard]] bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
                                                       const GpuWritebackPageCache::UniformWords* uniform_words);
+// Source of a memory->GDS transfer recorded at the current position of `buffer`.
+// A range owns device content while an object over it has GPU writes not yet
+// written back; only then are the guest bytes stale.
+enum class GpuMemoryGdsSourceStatus : uint8_t
+{
+	// No GPU writer owns the range: the guest bytes are the source.
+	GuestBytesCurrent,
+	// One writable storage buffer, written only on the recording queue, holds the
+	// range; earlier commands on that queue precede the copy in submission order.
+	DeviceBuffer,
+	// The recording owns the range in another form: submit and wait, then retry.
+	ProcessorWriteBackRequired,
+	// Another queue's incomplete submission owns the range: wait for it, then retry.
+	SubmissionCompletionRequired,
+	// A texture-type writer owns the range; no byte conversion is established.
+	Unsupported,
+};
+struct GpuMemoryGdsSource
+{
+	GpuMemoryGdsSourceStatus status = GpuMemoryGdsSourceStatus::Unsupported;
+	// DeviceBuffer: the backing, kept alive by a use recorded for the recording submission.
+	const VulkanBuffer* buffer = nullptr;
+	uint64_t            offset = 0;
+	// SubmissionCompletionRequired: the submission to wait for.
+	SubmissionId dependency;
+	// The owning object's type for a refused or flushed range.
+	GpuMemoryObjectType writer = GpuMemoryObjectType::Invalid;
+};
+[[nodiscard]] GpuMemoryGdsSource GpuMemoryAcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
+// Runs `task` when every submission is published, after its labels have fired.
+// A discarded recording's task runs once a later submission on its queue completes.
+void GpuMemoryDeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task);
 // Exception handling accepts only a page fault caused by an armed tracker
 // protection. Known host/HLE writers use the explicit range notification.
-bool GpuMemoryCheckAccessViolation(uint64_t vaddr);
+bool GpuMemoryCheckAccessViolation(uint64_t vaddr, Core::VirtualMemory::ExceptionHandler::AccessViolationType access);
 bool GpuMemoryNotifyHostWrite(uint64_t vaddr, uint64_t size);
 bool GpuMemoryWatcherEnabled();
 
@@ -1101,8 +1159,25 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer,
                                                           bool exact, bool only_first);
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                                                           GpuMemoryObjectType type, bool exact, bool only_first);
+// Every object of the type whose range is exactly [vaddr, vaddr + size), recording the buffer's submission on each:
+// a recycled range can hold several views of one type, each in its own format.
+Vector<GpuMemoryObject> GpuMemoryFindEqualObjectsForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type);
+// Every object of the type with one of its ranges exactly [vaddr, vaddr + size), such as a
+// depth-stencil object by its stencil plane, recording the buffer's submission on each.
+Vector<GpuMemoryObject> GpuMemoryFindObjectsWithRangeForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type);
 bool                    GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 bool                    GpuMemoryQueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
+
+struct GpuMemoryObjectDescription
+{
+	GpuMemoryObjectType type                         = GpuMemoryObjectType::Invalid;
+	uint64_t            vaddr                        = 0;
+	uint64_t            size                         = 0;
+	uint64_t            params[GpuObject::PARAMS_MAX] = {};
+};
+// Describes the single-range object `obj` among the objects overlapping
+// [vaddr, vaddr + size): its own guest range and its creation parameters.
+bool GpuMemoryDescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
 // Validates a bounded allocated range and classifies its cached GPU overlaps.
 // Capture/compare additionally require dirty-page tracking and reject a read
 // if a CPU/HLE writer changes the range during that transaction.

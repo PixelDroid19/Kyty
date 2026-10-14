@@ -1,6 +1,7 @@
 #include "ShaderSpirvInternal.h"
 
 #include "ShaderSpirvEmitters.h"
+#include "ShaderNativeWaveInternal.h"
 #include "ShaderSpirvLds.h"
 #include "ShaderSpirvTemplates.h"
 #include "ShaderStorageAnalysis.h"
@@ -11,6 +12,7 @@
 #include "Emulator/Graphics/ShaderComputeWaveLds.h"
 #include "Emulator/Graphics/ShaderComputeWaveResourceAnalysis.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
@@ -508,14 +510,14 @@ static bool emit_gen5_raw_buffer_load(Spirv* spirv, const ShaderInstruction& ins
 	return true;
 }
 
-// True when the instruction's V# register range is one of the bound storage
-// buffers; any other V# is built at run time (for example from s_getpc).
-static bool buffer_resource_is_bound(const Spirv* spirv, const ShaderOperand& resource)
+// True when no discovered resource describes the instruction's V#; such a V#
+// is built at run time (for example from s_getpc) and holds a guest base.
+static bool buffer_descriptor_is_runtime(const Spirv* spirv, const ShaderInstruction& inst)
 {
 	const auto* bind = spirv->GetBindInfo();
 	const auto* vertex = spirv->GetVsInputInfo();
 	const int user_data_base = vertex != nullptr && vertex->gs_prolog ? 8 : 0;
-	return bind != nullptr && ShaderStorageBufferResourceIsBound(*bind, resource, user_data_base);
+	return bind != nullptr && ShaderVectorBufferUsesRuntimeDescriptor(*bind, inst, user_data_base);
 }
 
 // Address of a MUBUF access through a V# that no binding describes: the
@@ -625,18 +627,19 @@ static bool emit_guest_store_words(const ShaderInstruction& inst, const String8&
 	return true;
 }
 
-// MUBUF load through a V# that no binding describes, read through guest
-// device addressing; out-of-range accesses read zero.
+// Buffer load of `dwords` unconverted dwords through a V# that no binding
+// describes, read through guest device addressing; an access of
+// `access_bytes` out of range reads zero.
 static bool emit_guest_buffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t dwords,
-                                   String8* dst_source)
+                                   uint32_t access_bytes, String8* dst_source)
 {
-	if (!spirv->UsesGuestDeviceAddress() || dwords == 0 || dwords > 4u)
+	if (!spirv->UsesGuestDeviceAddress() || dwords == 0 || dwords > 4u || access_bytes < dwords * 4u)
 	{
 		return false;
 	}
 	const auto tag = String8::FromPrintf("gbl_%d", instruction_index);
 	String8    source;
-	if (!emit_guest_buffer_access_begin(spirv, inst, tag, spirv->GetConstantUint(dwords * 4u), &source) ||
+	if (!emit_guest_buffer_access_begin(spirv, inst, tag, spirv->GetConstantUint(access_bytes), &source) ||
 	    !spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", static_cast<int>(dwords), tag + "_g", &source) ||
 	    !emit_guest_store_words(inst, tag + "_g", dwords, &source) || !emit_guest_buffer_access_end(spirv, inst, tag, dwords, &source))
 	{
@@ -1356,9 +1359,9 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
-		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 1, dst_source);
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 1, 4u, dst_source);
 	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -1448,9 +1451,9 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx2_Vdata2VaddrSvSoffsIdxen)
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
-		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 2, dst_source);
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 2, 8u, dst_source);
 	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -1515,9 +1518,9 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx4_Vdata4VaddrSvSoffsIdxen)
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
-		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 4, dst_source);
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 4, 16u, dst_source);
 	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -1581,9 +1584,9 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx3_Vdata3VaddrSvSoffsIdxen)
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
-		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 3, dst_source);
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 3, 12u, dst_source);
 	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
@@ -1650,7 +1653,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 1u, dst_source);
 	}
@@ -1722,7 +1725,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXy_Vdata2VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 2u, dst_source);
 	}
@@ -1741,7 +1744,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 3u, dst_source);
 	}
@@ -1759,7 +1762,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
-	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && buffer_descriptor_is_runtime(spirv, inst) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 4u, dst_source);
 	}
@@ -2367,70 +2370,143 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 	return false;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
+static bool EmitOrdinaryNativeGdsAppend(const ShaderInstruction& inst, uint32_t index, Spirv* spirv, String8* dst_source)
+{
+	const auto* bind_info = spirv == nullptr ? nullptr : spirv->GetBindInfo();
+	if (spirv == nullptr || dst_source == nullptr || bind_info == nullptr || bind_info->gds_pointers.pointers_num <= 0 ||
+	    bind_info->gds_pointers.binding_index < 0 || !spirv->NativeComputeWaveLayoutIsValid() ||
+	    (inst.type != ShaderInstructionType::DsAppend && inst.type != ShaderInstructionType::DsConsume) ||
+	    inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1)
+	{
+		return false;
+	}
+
+	const auto destination = operand_variable_to_str(inst.dst);
+	if (destination.type != SpirvType::Float || destination.value.IsEmpty())
+	{
+		return false;
+	}
+
+	const auto zero           = spirv->GetConstantUint(0u);
+	const auto device_scope   = spirv->GetConstantUint(1u);
+	const auto subgroup_scope = spirv->GetConstantUint(3u);
+	if (zero.IsEmpty() || device_scope.IsEmpty() || subgroup_scope.IsEmpty() || zero == "unknown_uint_constant" ||
+	    device_scope == "unknown_uint_constant" || subgroup_scope == "unknown_uint_constant")
+	{
+		return false;
+	}
+
+	const auto tag    = String8::FromPrintf("gds_exec_%u", index);
+	const auto atomic = inst.type == ShaderInstructionType::DsAppend ? "OpAtomicIAdd" : "OpAtomicISub";
+	const auto id     = [](const String8& name) { return String8::FromPrintf("%%%s", name.c_str()); };
+	String8    source;
+	// EXEC is wave-uniform here; count both words to obtain the wave's single counter delta.
+	source += String8::FromPrintf("%%%s_lo = OpLoad %%uint %%packed_exec_lo\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_hi = OpLoad %%uint %%packed_exec_hi\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_count_lo = OpBitCount %%uint %%%s_lo\n", tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("%%%s_count_hi = OpBitCount %%uint %%%s_hi\n", tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("%%%s_count = OpIAdd %%uint %%%s_count_lo %%%s_count_hi\n", tag.c_str(), tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("%%%s_elected = OpGroupNonUniformElect %%bool %%%s\n", tag.c_str(), subgroup_scope.c_str());
+	source += String8::FromPrintf("%%%s_has_active = OpINotEqual %%bool %%%s_count %s\n", tag.c_str(), tag.c_str(), id(zero).c_str());
+	source +=
+	    String8::FromPrintf("%%%s_do_atomic = OpLogicalAnd %%bool %%%s_elected %%%s_has_active\n", tag.c_str(), tag.c_str(), tag.c_str());
+	// Keep pointer construction and the RMW inside the elected, nonempty arm so empty EXEC has no GDS access.
+	source += String8::FromPrintf("               OpSelectionMerge %%%s_atomic_merge None\n"
+	                              "               OpBranchConditional %%%s_do_atomic %%%s_atomic_do %%%s_atomic_skip\n"
+	                              "%%%s_atomic_do = OpLabel\n",
+	                              tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+	source += spirv->EmitGdsCounterPointer(inst.ds_offset, tag);
+	source += String8::FromPrintf("%%%s_old_leader = %s %%uint %%%s_ptr %%%s %%%s %%%s_count\n", tag.c_str(), atomic, tag.c_str(),
+	                              device_scope.c_str(), zero.c_str(), tag.c_str());
+	source += String8::FromPrintf("               OpBranch %%%s_atomic_merge\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_atomic_skip = OpLabel\n", tag.c_str());
+	source += String8::FromPrintf("               OpBranch %%%s_atomic_merge\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_atomic_merge = OpLabel\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_old = OpPhi %%uint %%%s_old_leader %%%s_atomic_do %%%s %%%s_atomic_skip\n", tag.c_str(),
+	                              tag.c_str(), tag.c_str(), zero.c_str(), tag.c_str());
+	// Reconverge before broadcasting the old counter, then preserve inactive destination VGPRs.
+	source += String8::FromPrintf("%%%s_broadcast = OpGroupNonUniformBroadcastFirst %%uint %%%s %%%s_old\n", tag.c_str(),
+	                              subgroup_scope.c_str(), tag.c_str());
+	source += "               OpMemoryBarrier %uint_1 %uint_72\n";
+	source += String8::FromPrintf("%%%s_exec_lane = OpLoad %%uint %%exec_lane_lo\n", tag.c_str());
+	source += String8::FromPrintf("%%%s_active = OpINotEqual %%bool %%%s_exec_lane %s\n", tag.c_str(), tag.c_str(), id(zero).c_str());
+	source += String8::FromPrintf("%%%s_previous = OpLoad %%float %%%s\n", tag.c_str(), destination.value.c_str());
+	source += String8::FromPrintf("%%%s_previous_bits = OpBitcast %%uint %%%s_previous\n", tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("%%%s_selected = OpSelect %%uint %%%s_active %%%s_broadcast %%%s_previous_bits\n", tag.c_str(),
+	                              tag.c_str(), tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("%%%s_result = OpBitcast %%float %%%s_selected\n", tag.c_str(), tag.c_str());
+	source += String8::FromPrintf("               OpStore %%%s %%%s_result\n", destination.value.c_str(), tag.c_str());
+	*dst_source += source;
+	return true;
+}
+
+// A pixel ds_append/ds_consume under the launch EXEC of a partially populated wave: the subgroup's valid
+// pixels are the wave's active lanes, so one of them updates the counter by their count and every valid
+// pixel receives its previous value. A helper's atomic has no effect, so the leader is a valid pixel.
+static bool EmitFragmentGdsAppend(const ShaderCode& code, const ShaderInstruction& inst, uint32_t index, Spirv* spirv,
+                                  String8* dst_source)
+{
+	const auto* bind_info = spirv->GetBindInfo();
+	if (dst_source == nullptr || bind_info == nullptr || bind_info->gds_pointers.binding_index < 0 ||
+	    !spirv->UsesFragmentPartialWave() || index >= ShaderLaunchExecEnd(code) || inst.dst.type != ShaderOperandType::Vgpr ||
+	    inst.dst.size != 1)
+	{
+		return false;
+	}
+	const auto destination = operand_variable_to_str(inst.dst);
+	if (destination.type != SpirvType::Float || destination.value.IsEmpty()) { return false; }
+
+	const auto tag = String8::FromPrintf("gds_pixel_%u", index);
+	// The leader's lane is the same in every invocation, so the shuffle reads one value.
+	static const char* text = R"(
+%<t>_count = OpGroupNonUniformBallotBitCount %uint %uint_3 Reduce %<t>_ballot
+%<t>_leader = OpGroupNonUniformBallotFindLSB %uint %uint_3 %<t>_ballot
+%<t>_lane = OpLoad %uint %gl_SubgroupInvocationID
+%<t>_is_leader = OpIEqual %bool %<t>_lane %<t>_leader
+%<t>_do_atomic = OpLogicalAnd %bool %<t>_is_leader %<t>_ballot_valid
+OpSelectionMerge %<t>_atomic_merge None
+OpBranchConditional %<t>_do_atomic %<t>_atomic_do %<t>_atomic_skip
+%<t>_atomic_do = OpLabel
+<pointer>
+%<t>_old_leader = <atomic> %uint %<t>_ptr %uint_1 %uint_0 %<t>_count
+OpBranch %<t>_atomic_merge
+%<t>_atomic_skip = OpLabel
+OpBranch %<t>_atomic_merge
+%<t>_atomic_merge = OpLabel
+%<t>_old = OpPhi %uint %<t>_old_leader %<t>_atomic_do %uint_0 %<t>_atomic_skip
+%<t>_broadcast = OpGroupNonUniformShuffle %uint %uint_3 %<t>_old %<t>_leader
+%<t>_previous = OpLoad %float %<dst>
+%<t>_previous_bits = OpBitcast %uint %<t>_previous
+%<t>_selected = OpSelect %uint %<t>_ballot_valid %<t>_broadcast %<t>_previous_bits
+%<t>_result = OpBitcast %float %<t>_selected
+OpStore %<dst> %<t>_result
+)";
+	*dst_source += spirv->NativeValidPixelBallot(tag + "_ballot") +
+	               String8(text)
+	                   .ReplaceStr("<pointer>", spirv->EmitGdsCounterPointer(inst.ds_offset, tag))
+	                   .ReplaceStr("<atomic>", inst.type == ShaderInstructionType::DsAppend ? "OpAtomicIAdd" : "OpAtomicISub")
+	                   .ReplaceStr("<dst>", destination.value)
+	                   .ReplaceStr("<t>", tag);
+	return true;
+}
+
+static bool EmitGdsAppend(const ShaderCode& code, uint32_t index, Spirv* spirv, String8* dst_source)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (bind_info == nullptr || bind_info->gds_pointers.pointers_num <= 0) { return false; }
+	return code.GetType() == ShaderType::Pixel ? EmitFragmentGdsAppend(code, inst, index, spirv, dst_source)
+	                                           : EmitOrdinaryNativeGdsAppend(inst, index, spirv, dst_source);
+}
 
-	if (bind_info != nullptr && bind_info->gds_pointers.pointers_num > 0)
-	{
-		String8 index_str = String8::FromPrintf("%u", index);
-
-		if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-
-		auto dst_value = operand_variable_to_str(inst.dst);
-
-		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-		// TODO() check VSKIP
-		// TODO() check EXEC
-
-		static const char* text = R"(
-        %t198_<index> = OpAtomicIAdd %uint %gds_counter_<index>_ptr %uint_1 %uint_0 %uint_1
-        %t199_<index> = OpBitcast %float %t198_<index>
-               OpStore %<dst> %t199_<index>
-               OpMemoryBarrier %uint_1 %uint_72
-)";
-		*dst_source += spirv->EmitGdsCounterPointer(inst.ds_offset, "gds_counter_" + index_str);
-		*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<index>", index_str);
-
-		return true;
-	}
-
-	return false;
+KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
+{
+	return EmitGdsAppend(code, index, spirv, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds)
 {
-	const auto& inst      = code.GetInstructions().At(index);
-	const auto* bind_info = spirv->GetBindInfo();
-
-	if (bind_info != nullptr && bind_info->gds_pointers.pointers_num > 0)
-	{
-		String8 index_str = String8::FromPrintf("%u", index);
-
-		if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-
-		auto dst_value = operand_variable_to_str(inst.dst);
-
-		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-		// TODO() check VSKIP
-		// TODO() check EXEC
-
-		static const char* text = R"(
-        %t198_<index> = OpAtomicISub %uint %gds_counter_<index>_ptr %uint_1 %uint_0 %uint_1
-        %t199_<index> = OpBitcast %float %t198_<index>
-               OpStore %<dst> %t199_<index>
-               OpMemoryBarrier %uint_1 %uint_72
-)";
-		*dst_source += spirv->EmitGdsCounterPointer(inst.ds_offset, "gds_counter_" + index_str);
-		*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<index>", index_str);
-
-		return true;
-	}
-
-	return false;
+	return EmitGdsAppend(code, index, spirv, dst_source);
 }
 
 namespace {
@@ -3430,14 +3506,26 @@ String8 Spirv::WrapVertexScalarBufferProbe(const ShaderInstruction& inst, uint32
 	return before + original + after;
 }
 
-static String8 SBufferOffsetDefinition(Spirv* spirv, const ShaderOperand& offset, uint32_t index)
+static String8 SBufferOffsetDefinition(Spirv* spirv, const ShaderOperand& offset, uint32_t index, int32_t immediate)
 {
 	if (operand_is_constant(offset))
 	{
 		return String8::FromPrintf("        %%t102_%u = OpBitcast %%int %%%s", index, spirv->GetConstant(offset).c_str());
 	}
-	return String8::FromPrintf("        %%t102_raw_%u = OpLoad %%uint %%%s\n        %%t102_%u = OpBitcast %%int %%t102_raw_%u", index,
-	                           operand_variable_to_str(offset).value.c_str(), index, index);
+
+	const auto raw = String8::FromPrintf("%%t102_raw_%u", index);
+	String8    definition = String8::FromPrintf("        %s = OpLoad %%uint %%%s\n", raw.c_str(), operand_variable_to_str(offset).value.c_str());
+	if (immediate != 0)
+	{
+		const auto adjusted = String8::FromPrintf("%%t102_imm_%u", index);
+		definition += String8::FromPrintf("        %s = OpIAdd %%uint %s %%%s\n", adjusted.c_str(), raw.c_str(),
+		                                  spirv->GetConstantUint(static_cast<uint32_t>(immediate)).c_str());
+		definition += String8::FromPrintf("        %%t102_%u = OpBitcast %%int %s", index, adjusted.c_str());
+		return definition;
+	}
+
+	definition += String8::FromPrintf("        %%t102_%u = OpBitcast %%int %s", index, raw.c_str());
+	return definition;
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
@@ -3486,7 +3574,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
 			text = text.ReplaceStr(String8::FromPrintf("<p%d>", i), dst_value[i].value);
 		}
 
-		*dst_source += text.ReplaceStr("<offset_def>", SBufferOffsetDefinition(spirv, inst.src[1], index))
+		*dst_source += text.ReplaceStr("<offset_def>", SBufferOffsetDefinition(spirv, inst.src[1], index, inst.smem_imm_offset))
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 		                   .ReplaceStr("<offset>", offset)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value);
@@ -3543,7 +3631,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 			text = text.ReplaceStr(String8::FromPrintf("<p%d>", i), dst_value[i].value);
 		}
 
-		*dst_source += text.ReplaceStr("<offset_def>", SBufferOffsetDefinition(spirv, inst.src[1], index))
+		*dst_source += text.ReplaceStr("<offset_def>", SBufferOffsetDefinition(spirv, inst.src[1], index, inst.smem_imm_offset))
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 		                   .ReplaceStr("<offset>", offset)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value);
@@ -3916,10 +4004,31 @@ static bool TBufferFloatLoadSupported(const ShaderInstruction& inst, uint8_t com
 	}
 }
 
+// Gen5 typed load through a V# that no binding describes. The supported
+// formats are unconverted 32-bit floats, so the element dwords are read as
+// stored; the instruction's format sizes the element for the range check.
+// Vertex stages keep the stream resolver, which owns the fetched stream V#s.
+static bool tbuffer_load_uses_guest_address(const Spirv* spirv, const ShaderInstruction& inst)
+{
+	return Config::IsNextGen() && spirv->GetVsInputInfo() == nullptr && buffer_descriptor_is_runtime(spirv, inst) &&
+	       spirv->UsesGuestDeviceAddress();
+}
+
+static bool emit_guest_tbuffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t components,
+                                    String8* dst_source)
+{
+	const uint32_t element_bytes = std::max(ShaderGen5TextureBytesPerElement(inst.mtbuf_format), components * 4u);
+	return emit_guest_buffer_load(spirv, inst, instruction_index, components, element_bytes, dst_source);
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatX_Vdata1VaddrSvSoffsIdxenFloat1)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!TBufferFloatLoadSupported(inst, 1)) { return false; }
+	if (tbuffer_load_uses_guest_address(spirv, inst))
+	{
+		return emit_guest_tbuffer_load(spirv, inst, static_cast<int>(index), 1u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -3979,6 +4088,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxenFloa
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!TBufferFloatLoadSupported(inst, 4)) { return false; }
+	if (tbuffer_load_uses_guest_address(spirv, inst))
+	{
+		return emit_guest_tbuffer_load(spirv, inst, static_cast<int>(index), 4u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -4044,6 +4157,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXy_Vdata2VaddrSvSoffsIdxenFloat2
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!TBufferFloatLoadSupported(inst, 2)) { return false; }
+	if (tbuffer_load_uses_guest_address(spirv, inst))
+	{
+		return emit_guest_tbuffer_load(spirv, inst, static_cast<int>(index), 2u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
 	{
@@ -4093,8 +4210,13 @@ OpStore %temp_int_5 %int_64
 KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxenFloat3)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!TBufferFloatLoadSupported(inst, 3)) { return false; }
+	if (tbuffer_load_uses_guest_address(spirv, inst))
+	{
+		return emit_guest_tbuffer_load(spirv, inst, static_cast<int>(index), 3u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
-	if (!TBufferFloatLoadSupported(inst, 3) || bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
+	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
 	{
 		return false;
 	}
@@ -4105,6 +4227,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4Vaddr2SvSoffsOffenIdx
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!TBufferFloatLoadSupported(inst, 4)) { return false; }
+	if (tbuffer_load_uses_guest_address(spirv, inst))
+	{
+		return emit_guest_tbuffer_load(spirv, inst, static_cast<int>(index), 4u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)

@@ -1,5 +1,6 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Graphics/ColorDccClear.h"
 #include "Emulator/Graphics/ComputeColorFill.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Utils.h"
@@ -367,8 +368,68 @@ TEST(EmulatorComputeColorFill, UniformFillTexelsDecodeOnlyWhenTheQuadRepeatsOneT
 	ASSERT_TRUE(DecodeGuestUniformFillTexel({0x80808080u, 0x80808080u, 0x80808080u, 0x80808080u}, VK_FORMAT_R8G8B8A8_SRGB, &clear));
 	EXPECT_NEAR(clear.float32[0], 0.2158605f, 1e-5f);
 	EXPECT_FLOAT_EQ(clear.float32[3], 128.0f / 255.0f);
+	// One RGBA32F texel is the whole quad, red first: (1, -1, 0.5, 0.18).
+	ASSERT_TRUE(DecodeGuestUniformFillTexel({0x3f800000u, 0xbf800000u, 0x3f000000u, 0x3e3851ecu}, VK_FORMAT_R32G32B32A32_SFLOAT, &clear));
+	EXPECT_FLOAT_EQ(clear.float32[0], 1.0f);
+	EXPECT_FLOAT_EQ(clear.float32[1], -1.0f);
+	EXPECT_FLOAT_EQ(clear.float32[2], 0.5f);
+	EXPECT_FLOAT_EQ(clear.float32[3], 0.18f);
+	EXPECT_FALSE(DecodeGuestUniformFillTexel({0x7fc00000u, 0u, 0u, 0u}, VK_FORMAT_R32G32B32A32_SFLOAT, &clear));
 	// Formats without an evidenced packing are not cleared.
 	EXPECT_FALSE(DecodeGuestUniformFillTexel({0u, 0u, 0u, 0u}, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &clear));
+}
+
+TEST(EmulatorComputeColorFill, DccMetadataFillsNameOnlyTheClearKeys)
+{
+	ColorDccClearCode code {};
+	ASSERT_TRUE(ColorDccClearCodeFromFill({0x40404040u, 0x40404040u, 0x40404040u, 0x40404040u}, &code));
+	EXPECT_EQ(code, ColorDccClearCode::Alpha);
+	ASSERT_TRUE(ColorDccClearCodeFromFill({0u, 0u, 0u, 0u}, &code));
+	EXPECT_EQ(code, ColorDccClearCode::Zero);
+	ASSERT_TRUE(ColorDccClearCodeFromFill({0x20202020u, 0x20202020u, 0x20202020u, 0x20202020u}, &code));
+	EXPECT_EQ(code, ColorDccClearCode::Register);
+	// The uncompressed key, a single-color key and mixed bytes are not clears.
+	EXPECT_FALSE(ColorDccClearCodeFromFill({0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}, &code));
+	EXPECT_FALSE(ColorDccClearCodeFromFill({0x10101010u, 0x10101010u, 0x10101010u, 0x10101010u}, &code));
+	EXPECT_FALSE(ColorDccClearCodeFromFill({0x40404000u, 0x40404040u, 0x40404040u, 0x40404040u}, &code));
+	EXPECT_FALSE(ColorDccClearCodeFromFill({0x40404040u, 0x40404040u, 0x40404040u, 0u}, &code));
+}
+
+TEST(EmulatorComputeColorFill, DccClearKeysDecodeAlphaOnlyWhereItIsTheMostSignificantChannel)
+{
+	std::array<float, 4> rgba {};
+	ASSERT_TRUE(ColorDccClearValue(ColorDccClearCode::Alpha, ColorDccAlphaOnMsb(0u), 4u, &rgba));
+	EXPECT_EQ(rgba, (std::array<float, 4> {0.0f, 0.0f, 0.0f, 1.0f}));
+	ASSERT_TRUE(ColorDccClearValue(ColorDccClearCode::Color, ColorDccAlphaOnMsb(1u), 4u, &rgba));
+	EXPECT_EQ(rgba, (std::array<float, 4> {1.0f, 1.0f, 1.0f, 0.0f}));
+	// Reversed swaps move alpha out of the most significant channel.
+	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Alpha, ColorDccAlphaOnMsb(2u), 4u, &rgba));
+	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Alpha, ColorDccAlphaOnMsb(3u), 4u, &rgba));
+	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Color, true, 1u, &rgba));
+	// Uniform keys hold for any channel order; the register key needs the clear words.
+	ASSERT_TRUE(ColorDccClearValue(ColorDccClearCode::All, false, 1u, &rgba));
+	EXPECT_EQ(rgba, (std::array<float, 4> {1.0f, 1.0f, 1.0f, 1.0f}));
+	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Register, true, 4u, &rgba));
+}
+
+TEST(EmulatorComputeColorFill, DccFillCoversASurfaceOnlyFromItsBaseWithEveryKey)
+{
+	// 3840x2160 RGBA16F holds 259200 keys; the observed allocation is 294912 bytes.
+	EXPECT_TRUE(ColorDccFillCoversSurface(0x40000u, 294912u, 0x40000u, 3840u, 2160u, 8u));
+	EXPECT_TRUE(ColorDccFillCoversSurface(0x40000u, 259200u, 0x40000u, 3840u, 2160u, 8u));
+	EXPECT_FALSE(ColorDccFillCoversSurface(0x40000u, 259199u, 0x40000u, 3840u, 2160u, 8u));
+	EXPECT_FALSE(ColorDccFillCoversSurface(0x40000u, 294912u, 0x41000u, 3840u, 2160u, 8u));
+	EXPECT_FALSE(ColorDccFillCoversSurface(0u, 294912u, 0u, 3840u, 2160u, 8u));
+}
+
+TEST(EmulatorComputeColorFill, PendingFillsAreFoundByTheirStartAddress)
+{
+	ComputeColorFillEvents events;
+	ASSERT_TRUE(events.Publish(FillIdentity(0x30000u), Submission(8, 4), {0x40404040u, 0x40404040u, 0x40404040u, 0x40404040u}));
+	const auto* event = events.FindAt(0x30000u);
+	ASSERT_NE(event, nullptr);
+	EXPECT_EQ(event->words[0], 0x40404040u);
+	EXPECT_EQ(events.FindAt(0x30100u), nullptr);
 }
 
 UT_END();

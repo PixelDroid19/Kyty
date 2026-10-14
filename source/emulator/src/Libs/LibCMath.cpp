@@ -111,6 +111,10 @@ KYTY_SYSV_ABI double c_fabs(double x)
 {
 	return ::fabs(x);
 }
+KYTY_SYSV_ABI double c_hypot(double x, double y)
+{
+	return ::hypot(x, y);
+}
 KYTY_SYSV_ABI double c_modf(double x, double* ip)
 {
 	return ::modf(x, ip);
@@ -134,7 +138,7 @@ KYTY_SYSV_ABI float c_powf(float x, float y)
 	return ::powf(x, y);
 }
 // Gen5 libc_v1 __isnanf — NID lA94ZgT+vMM. Float in xmm0; non-zero if NaN.
-// Observed Astro after pthread_self: call site loads float via vmovss then tests eax.
+// Observed after pthread_self: call site loads float via vmovss then tests eax.
 KYTY_SYSV_ABI int c_isnanf(float x)
 {
 	return std::isnan(x) ? 1 : 0;
@@ -148,7 +152,7 @@ KYTY_SYSV_ABI int c_isinff(float x)
 {
 	return std::isinf(x) ? 1 : 0;
 }
-// Gen5 libc_v1 isfinite(double) — NID dhK16CKwhQg. Dreaming Sarah Construct
+// Gen5 libc_v1 isfinite(double) — NID dhK16CKwhQg. A Construct title's
 // number parser after strtod: store double, call, test %eax; non-zero keeps value.
 // xmm0 = value; return non-zero when finite.
 KYTY_SYSV_ABI int c_isfinite(double x)
@@ -189,7 +193,7 @@ KYTY_SYSV_ABI int c_fpclassifyd(double x)
 	EXIT_IF(category != FP_ZERO);
 	return 0x10;
 }
-// Gen5 libc_v1 sinf — NID Q4rRL34CEeE (Astro after usleep).
+// Gen5 libc_v1 sinf — NID Q4rRL34CEeE (observed after usleep).
 KYTY_SYSV_ABI float c_sinf(float x)
 {
 	return ::sinf(x);
@@ -198,7 +202,7 @@ KYTY_SYSV_ABI float c_cosf(float x)
 {
 	return ::cosf(x);
 }
-// Gen5 libc_v1 tanf — NID ZE6RNL+eLbk (Astro after Posix pthread_detach; float in xmm0).
+// Gen5 libc_v1 tanf — NID ZE6RNL+eLbk (observed after Posix pthread_detach; float in xmm0).
 KYTY_SYSV_ABI float c_tanf(float x)
 {
 	return ::tanf(x);

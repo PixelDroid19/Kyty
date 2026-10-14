@@ -9,9 +9,12 @@
 #include "Emulator/PresentationStats.h"
 #include "Emulator/VideoFrameMemory.h"
 #include "Emulator/Libs/Errno.h"
+#include "Emulator/Libs/KernelException.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/PosixSemaphore.h"
 #include "Emulator/Loader/SymbolDatabase.h"
+#include "Emulator/Loader/GuestCall.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Log.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
@@ -152,7 +155,8 @@ void EnsureFileSystemSubsystem()
 bool     g_host_write_made_writable = false;
 uint32_t g_host_write_prepare_count = 0;
 
-void IgnoreLinearFrame(uint64_t /*base*/, size_t /*size*/, uint32_t /*row_pitch_bytes*/) {}
+bool IgnoreLinearFrame(uint64_t /*base*/, size_t /*size*/, uint32_t /*row_pitch_bytes*/,
+	                   const Kyty::Core::VirtualMemory::GuestMappingIdentitySnapshot&) { return true; }
 
 void IgnoreUnregisterFrame(uint64_t /*base*/) {}
 
@@ -275,6 +279,122 @@ TEST(EmulatorKernelProcess, DeleteSemaphoreWakesBlockedWaiter)
 	EXPECT_EQ(Kernel::Semaphore::KernelSignalSema(sem, 1), LibKernel::KERNEL_ERROR_ESRCH);
 	EXPECT_EQ(Kernel::Semaphore::KernelDeleteSema(sem), LibKernel::KERNEL_ERROR_ESRCH);
 }
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+namespace {
+
+std::atomic<uint32_t> g_context_handler_calls {0};
+
+// Guest signal-30 handler: PS5Util's collector handshake receives (signum, ucontext, 0).
+int KYTY_SYSV_ABI CountContextHandler(int signum, void* context, void* /*unused*/)
+{
+	if (signum == 30 && context != nullptr)
+	{
+		g_context_handler_calls.fetch_add(1, std::memory_order_acq_rel);
+	}
+	return 0;
+}
+
+} // namespace
+
+// Two raisers deliver overlapping context requests to two spinning targets. Every raise
+// reclaims the requests whose trampolines published completion, so a completion published
+// while a trampoline still runs on its request-owned stack frees live memory. The targets
+// must keep running afterwards and every earlier request must be reclaimed by the last raise.
+TEST(EmulatorKernelProcess, OverlappingContextRequestsCompleteAndReclaim)
+{
+	EnsureKernelProcessSubsystems();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+	Loader::SymbolResolve query {};
+	query.library              = U"libkernel";
+	query.library_version      = 1;
+	query.module               = U"libkernel";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Func;
+	query.name                 = U"WkwEd3N7w0Y";
+	const auto* install = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(install, nullptr);
+	using InstallFunc = int(KYTY_SYSV_ABI*)(int, void*);
+	const int installed = reinterpret_cast<InstallFunc>(install->vaddr)(30, reinterpret_cast<void*>(&CountContextHandler));
+	ASSERT_TRUE(installed == OK || installed == LibKernel::KERNEL_ERROR_EAGAIN);
+
+	// Kernel threads enter their entry through the guest runtime port; run it on the real guest stack.
+	struct ScopedGuestThreadEntry
+	{
+		ScopedGuestThreadEntry() { Emulator::GuestRuntimePort::Install({nullptr, nullptr, nullptr, Loader::GuestCall::InvokeOnStack}); }
+		~ScopedGuestThreadEntry() { Emulator::GuestRuntimePort::Install({}); }
+	} guest_thread_entry;
+
+	std::atomic_bool release = false;
+	Kernel::Pthread  targets[2] = {nullptr, nullptr};
+	for (auto& target: targets)
+	{
+		ASSERT_EQ(Kernel::PthreadCreate(&target, nullptr, HoldPthreadUntilReleased, &release, "context-target"), OK);
+		ASSERT_NE(target, nullptr);
+	}
+
+	constexpr uint32_t kRaisesPerTarget = 400;
+	g_context_handler_calls.store(0, std::memory_order_release);
+	std::atomic<uint32_t> failures {0};
+	std::atomic<int>      first_error {OK};
+	auto raiser = [&](Kernel::Pthread target)
+	{
+		for (uint32_t i = 0; i < kRaisesPerTarget; ++i)
+		{
+			const uint32_t before = g_context_handler_calls.load(std::memory_order_acquire);
+			const int      raised = LibKernel::KernelRaiseException(target, 30);
+			if (raised != OK)
+			{
+				first_error.store(raised, std::memory_order_relaxed);
+				failures.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+			while (g_context_handler_calls.load(std::memory_order_acquire) == before)
+			{
+				if (std::chrono::steady_clock::now() > deadline)
+				{
+					failures.fetch_add(1, std::memory_order_relaxed);
+					return;
+				}
+				std::this_thread::yield();
+			}
+		}
+	};
+	std::thread first(raiser, targets[0]);
+	std::thread second(raiser, targets[1]);
+	first.join();
+	second.join();
+	EXPECT_EQ(failures.load(), 0u) << "installed=" << installed << " first raise error=" << first_error.load();
+	EXPECT_EQ(g_context_handler_calls.load(), 2u * kRaisesPerTarget);
+
+	// Both targets still run their loop after every context restoration.
+	release.store(true, std::memory_order_release);
+	for (auto& target: targets)
+	{
+		EXPECT_EQ(Kernel::PthreadJoin(target, nullptr), OK);
+	}
+
+	// A final raise reclaims everything that completed before it; only itself may remain.
+	std::atomic_bool last_release = false;
+	Kernel::Pthread  last         = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&last, nullptr, HoldPthreadUntilReleased, &last_release, "context-last"), OK);
+	const uint32_t before = g_context_handler_calls.load(std::memory_order_acquire);
+	ASSERT_EQ(LibKernel::KernelRaiseException(last, 30), OK);
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (g_context_handler_calls.load(std::memory_order_acquire) == before && std::chrono::steady_clock::now() < deadline)
+	{
+		std::this_thread::yield();
+	}
+	EXPECT_EQ(g_context_handler_calls.load(), before + 1u);
+	EXPECT_LE(LibKernel::KernelHostContextRequestsPending(), 1u);
+	last_release.store(true, std::memory_order_release);
+	EXPECT_EQ(Kernel::PthreadJoin(last, nullptr), OK);
+}
+#endif
 
 TEST(EmulatorKernelProcess, PthreadPriorityRoundTripsGuestValue)
 {
@@ -1101,7 +1221,7 @@ TEST(EmulatorKernelProcess, PackageFontFallbackScoresWeightAndFamily)
 	EXPECT_EQ(ScorePackageFontFallback(U"FuturaStd-Bold.otf", U"FuturaStd-Bold.otf"), 100000);
 }
 
-// Incomplete Astro dumps store object defs as .odxb while the guest opens .odx.
+// Some packages store object defs as .odxb while the guest opens .odx.
 TEST(EmulatorKernelProcess, HostExtensionAliasMapsOdxToOdxb)
 {
 	EnsureKernelProcessSubsystems();
@@ -1147,7 +1267,7 @@ TEST(EmulatorKernelProcess, OpenLinuxFileReportsTimestampsByDescriptor)
 	Core::File::DeleteFile(path);
 }
 
-// Astro path builders open /app0/prein/... while package files live under /app0/data/prein/...
+// Guest path builders open /app0/<tree>/... while package files live under /app0/data/<tree>/...
 TEST(EmulatorKernelProcess, HostApp0DataSegmentMapsPreinUnderData)
 {
 	EnsureKernelProcessSubsystems();

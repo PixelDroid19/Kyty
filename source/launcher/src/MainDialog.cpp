@@ -100,6 +100,7 @@ public:
 	void Update();
 	void FindInterpreter();
 	void Run();
+	void CompleteRun();
 
 	[[nodiscard]] const QString& GetInterpreter() const { return m_interpreter; }
 
@@ -154,19 +155,48 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog)
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 	connect(&m_process, &QProcess::finished, this,
-	        [=](int /*exitCode*/, QProcess::ExitStatus /*exitStatus*/)
+	        [=](int exit_code, QProcess::ExitStatus exit_status)
 	        {
-		        m_running_item->SetRunning(false);
-		        Update();
+		        const bool interpreter_process = m_process.program() == m_interpreter;
+		        CompleteRun();
+
+		        if (interpreter_process && exit_status == QProcess::CrashExit)
+		        {
+			        QMessageBox::critical(m_main_dialog, tr("Error"), tr("The emulator process crashed"));
+		        } else if (interpreter_process && exit_code != 0)
+		        {
+			        QMessageBox::critical(m_main_dialog, tr("Error"), tr("The emulator exited with code %1").arg(exit_code));
+		        }
 	        });
 #else
 	connect(&m_process, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
-	        [=](int /*exitCode*/, QProcess::ExitStatus /*exitStatus*/)
+	        [=](int exit_code, QProcess::ExitStatus exit_status)
 	        {
-		        m_running_item->SetRunning(false);
-		        Update();
+		        const bool interpreter_process = m_process.program() == m_interpreter;
+		        CompleteRun();
+
+		        if (interpreter_process && exit_status == QProcess::CrashExit)
+		        {
+			        QMessageBox::critical(m_main_dialog, tr("Error"), tr("The emulator process crashed"));
+		        } else if (interpreter_process && exit_code != 0)
+		        {
+			        QMessageBox::critical(m_main_dialog, tr("Error"), tr("The emulator exited with code %1").arg(exit_code));
+		        }
 	        });
 #endif
+	connect(&m_process, &QProcess::errorOccurred, this,
+	        [=](QProcess::ProcessError error)
+	        {
+		        if (error != QProcess::FailedToStart)
+		        {
+			        return;
+		        }
+
+		        const auto program     = m_process.program();
+		        const auto error_text = m_process.errorString();
+		        CompleteRun();
+		        QMessageBox::critical(m_main_dialog, tr("Error"), tr("Can't start process: ") + program + QLatin1Char('\n') + error_text);
+	        });
 
 	// connect(main_dialog, &MainDialog::Quit, [=]() { m_process.Detach(); });
 
@@ -276,6 +306,8 @@ void MainDialogPrivate::FindInterpreter()
 	Update();
 }
 
+static QString LuaStringLiteral(const QString& value);
+
 static bool CreateLuaScript(Kyty::Configuration* info, const QString& file_name)
 {
 	QFile file(file_name);
@@ -286,47 +318,50 @@ static bool CreateLuaScript(Kyty::Configuration* info, const QString& file_name)
 		s << "local cfg = {\n";
 		s << "\t ScreenWidth = " << info->screen_width << ";\n";
 		s << "\t ScreenHeight = " << info->screen_height << ";\n";
-		s << "\t RenderResolutionMode = '" << EnumToText(info->render_resolution_mode) << "';\n";
+		s << "\t RenderResolutionMode = " << LuaStringLiteral(EnumToText(info->render_resolution_mode)) << ";\n";
+		s << "\t RenderResolutionScope = " << LuaStringLiteral(EnumToText(info->render_resolution_scope)) << ";\n";
 		s << "\t RenderResolutionWidth = " << info->render_resolution_width << ";\n";
 		s << "\t RenderResolutionHeight = " << info->render_resolution_height << ";\n";
-		s << "\t PresentationFilter = '" << EnumToText(info->presentation_filter) << "';\n";
+		s << "\t PresentationFilter = " << LuaStringLiteral(EnumToText(info->presentation_filter)) << ";\n";
+		s << "\t PresentationFsrSharpness = " << info->presentation_fsr_sharpness << ";\n";
+		s << "\t TextureAnisotropy = " << LuaStringLiteral(EnumToText(info->texture_anisotropy)) << ";\n";
 		s << "\t Neo = " << (info->neo ? "true" : "false") << ";\n";
 		s << "\t VulkanValidationEnabled = " << (info->vulkan_validation_enabled ? "true" : "false") << ";\n";
 		s << "\t ShaderValidationEnabled = " << (info->shader_validation_enabled ? "true" : "false") << ";\n";
-		s << "\t ShaderOptimizationType = '" << EnumToText(info->shader_optimization_type) << "';\n";
-		s << "\t ShaderLogDirection = '" << EnumToText(info->shader_log_direction) << "';\n";
-		s << "\t ShaderLogFolder = '" << info->shader_log_folder << "';\n";
+		s << "\t ShaderOptimizationType = " << LuaStringLiteral(EnumToText(info->shader_optimization_type)) << ";\n";
+		s << "\t ShaderLogDirection = " << LuaStringLiteral(EnumToText(info->shader_log_direction)) << ";\n";
+		s << "\t ShaderLogFolder = " << LuaStringLiteral(info->shader_log_folder) << ";\n";
 		s << "\t CommandBufferDumpEnabled = " << (info->command_buffer_dump_enabled ? "true" : "false") << ";\n";
-		s << "\t CommandBufferDumpFolder = '" << info->command_buffer_dump_folder << "';\n";
-		s << "\t PrintfDirection = '" << EnumToText(info->printf_direction) << "';\n";
-		s << "\t PrintfLevel = '" << EnumToText(info->printf_level) << "';\n";
-		s << "\t PrintfOutputFile = '" << info->printf_output_file << "';\n";
-		s << "\t PrintfOutputFolder = '" << info->printf_output_folder << "';\n";
-		s << "\t ProfilerDirection = '" << EnumToText(info->profiler_direction) << "';\n";
-		s << "\t ProfilerOutputFile = '" << info->profiler_output_file << "';\n";
+		s << "\t CommandBufferDumpFolder = " << LuaStringLiteral(info->command_buffer_dump_folder) << ";\n";
+		s << "\t PrintfDirection = " << LuaStringLiteral(EnumToText(info->printf_direction)) << ";\n";
+		s << "\t PrintfLevel = " << LuaStringLiteral(EnumToText(info->printf_level)) << ";\n";
+		s << "\t PrintfOutputFile = " << LuaStringLiteral(info->printf_output_file) << ";\n";
+		s << "\t PrintfOutputFolder = " << LuaStringLiteral(info->printf_output_folder) << ";\n";
+		s << "\t ProfilerDirection = " << LuaStringLiteral(EnumToText(info->profiler_direction)) << ";\n";
+		s << "\t ProfilerOutputFile = " << LuaStringLiteral(info->profiler_output_file) << ";\n";
 		s << "\t SpirvDebugPrintfEnabled = " << (info->spirv_debug_printf_enabled ? "true" : "false") << ";\n";
 		s << "\t PipelineDumpEnabled = " << (info->pipeline_dump_enabled ? "true" : "false") << ";\n";
-		s << "\t PipelineDumpFolder = '" << info->pipeline_dump_folder << "';\n";
+		s << "\t PipelineDumpFolder = " << LuaStringLiteral(info->pipeline_dump_folder) << ";\n";
 		s << "}\n";
 
 		s << KYTY_INIT << "(cfg);\n";
-		s << KYTY_MOUNT << "('" << info->basedir << "', '/app0');\n";
+		s << KYTY_MOUNT << "(" << LuaStringLiteral(info->basedir) << ", '/app0');\n";
 
 		// Param file: detect .json vs .sfo
 		if (!info->param_file.isEmpty())
 		{
 			if (info->param_file.endsWith(".json", Qt::CaseInsensitive))
 			{
-				s << KYTY_LOAD_PARAM_JSON << "('" << info->param_file << "');\n";
+				s << KYTY_LOAD_PARAM_JSON << "(" << LuaStringLiteral(info->param_file) << ");\n";
 			} else
 			{
-				s << KYTY_LOAD_PARAM_SFO << "('" << info->param_file << "');\n";
+				s << KYTY_LOAD_PARAM_SFO << "(" << LuaStringLiteral(info->param_file) << ");\n";
 			}
 		}
 
 		for (const auto& elf: info->elfs_selected)
 		{
-			s << KYTY_LOAD_ELF << "('/app0/" << elf << "');\n";
+			s << KYTY_LOAD_ELF << "(" << LuaStringLiteral(QStringLiteral("/app0/") + elf) << ");\n";
 		}
 
 		//		for (const auto& lib: info->libs_selected)
@@ -344,6 +379,58 @@ static bool CreateLuaScript(Kyty::Configuration* info, const QString& file_name)
 	return false;
 }
 
+static QString LuaStringLiteral(const QString& value)
+{
+	QString result;
+	result.reserve(value.size() + 2);
+	result += QLatin1Char('"');
+
+	for (const QChar character: value)
+	{
+		const ushort code = character.unicode();
+		switch (code)
+		{
+			case '\\': result += QStringLiteral("\\\\"); break;
+			case '"': result += QStringLiteral("\\\""); break;
+			case '\n': result += QStringLiteral("\\n"); break;
+			case '\r': result += QStringLiteral("\\r"); break;
+			case '\t': result += QStringLiteral("\\t"); break;
+			case '\b': result += QStringLiteral("\\b"); break;
+			case '\f': result += QStringLiteral("\\f"); break;
+			default:
+				if (code < 0x20u || code == 0x7fu)
+				{
+					result += QLatin1Char('\\');
+					result += QString::number(code).rightJustified(3, QLatin1Char('0'));
+				} else
+				{
+					result += character;
+				}
+				break;
+		}
+	}
+
+	result += QLatin1Char('"');
+	return result;
+}
+
+static QString ShellQuote(const QString& value)
+{
+	QString result = QStringLiteral("'");
+	for (const QChar character: value)
+	{
+		if (character == QLatin1Char('\''))
+		{
+			result += QStringLiteral("'\\''");
+		} else
+		{
+			result += character;
+		}
+	}
+	result += QLatin1Char('\'');
+	return result;
+}
+
 #if !defined(_WIN32)
 static bool CreateBashScript(const QString& interpreter, const QString& lua_file_name, const QString& file_name)
 {
@@ -353,9 +440,11 @@ static bool CreateBashScript(const QString& interpreter, const QString& lua_file
 		QTextStream s(&file);
 
 		s << "#!/bin/bash\n";
-		s << interpreter << " " << lua_file_name << "\n";
+		s << ShellQuote(interpreter) << " " << ShellQuote(lua_file_name) << "\n";
+		s << "emulator_exit=$?\n";
 		s << "echo Press any key...\n";
 		s << "read -n1\n";
+		s << "exit \"$emulator_exit\"\n";
 
 		file.close();
 
@@ -408,11 +497,11 @@ void MainDialog::RunInterpreter(QProcess* process, Kyty::Configuration* info, [[
 	if (con_emu)
 	{
 		process->setProgram(XTERM);
-		process->setArguments({"-e", "bash", "-c", bash_file_name});
+		process->setArguments({"-e", "bash", bash_file_name});
 	} else
 	{
 		process->setProgram(GNOME);
-		process->setArguments({"--", "bash", "-c", bash_file_name});
+		process->setArguments({"--wait", "--", "bash", bash_file_name});
 	}
 #endif
 #else
@@ -481,12 +570,37 @@ void MainDialogPrivate::ReadSettings(QSettings* s)
 
 void MainDialogPrivate::Run()
 {
-	m_running_item = m_ui->widget->GetSelectedItem();
+	auto* selected_item = m_ui->widget->GetSelectedItem();
+	if (selected_item == nullptr)
+	{
+		Update();
+		return;
+	}
+
+	m_running_item = selected_item;
 
 	m_running_item->SetRunning(true);
 
 	m_main_dialog->RunInterpreter(&m_process, m_running_item->GetInfo(), m_ui->radioButton_ConEmu->isChecked());
 
+	if (m_process.state() == QProcess::NotRunning)
+	{
+		CompleteRun();
+	} else
+	{
+		Update();
+	}
+}
+
+void MainDialogPrivate::CompleteRun()
+{
+	if (m_running_item == nullptr)
+	{
+		return;
+	}
+
+	m_running_item->SetRunning(false);
+	m_running_item = nullptr;
 	Update();
 }
 

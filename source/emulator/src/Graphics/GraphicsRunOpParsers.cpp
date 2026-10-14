@@ -3,6 +3,7 @@
 #include "Kyty/Core/BringUp.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -20,13 +21,26 @@
 
 namespace Kyty::Libs::Graphics {
 
+static void RequirePacketBody(uint32_t cmd_id, uint32_t body_dw, uint32_t required_dw)
+{
+	if (body_dw < required_dw)
+	{
+		EXIT("short PM4 packet body: cmd_id=0x%08" PRIx32 " required_dw=%" PRIu32 " body_dw=%" PRIu32 "\n", cmd_id,
+		     required_dw, body_dw);
+	}
+}
+
 KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xC0055800 && cmd_id != 0xc0061050) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0055800 && cmd_id != 0xc0061050 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xC0055800 && cmd_id != 0xc0061050)
+	{
+		EXIT("unsupported ACQUIRE_MEM header: 0x%08" PRIx32 "\n", cmd_id);
+	}
 
 	bool custom = (cmd_id == 0xc0061050);
+	RequirePacketBody(cmd_id, dw, custom ? 7u : 6u);
 
 	uint32_t                  cache_action = buffer[0] & 0x7fffffffu;
 	uint64_t                  size_lo      = buffer[1];
@@ -211,9 +225,11 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_direct)
 	const bool standard = (cmd_id == KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0));
 	const bool custom   = (cmd_id == KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_DISPATCH_DIRECT));
 
-	if (!standard && !custom) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !standard && !custom condition ignored (continuing)\n"); }
-	if (standard && dw < 5) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: standard && dw < 5 condition ignored (continuing)\n"); }
-	if (custom && dw < 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: custom && dw < 6 condition ignored (continuing)\n"); }
+	if (!standard && !custom)
+	{
+		EXIT("unsupported DISPATCH_DIRECT header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, standard ? 4u : 5u);
 
 	uint32_t thread_group_x = buffer[0];
 	uint32_t thread_group_y = buffer[1];
@@ -229,22 +245,103 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_reset)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xC0001024) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0001024 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xC0001024)
+	{
+		EXIT("unsupported DISPATCH_RESET header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 1u);
 
 	cp->Reset();
 
 	return 1;
 }
 
+// DMA_DATA with a GDS endpoint. Selector decoding (0/3 memory, 1 GDS, 2 immediate source) is the
+// established one. Every other GDS combination, span, count or memory endpoint is refused
+// strictly; GDS work is never skipped.
+static uint32_t DmaDataWithGds(CommandProcessor* cp, const GraphicsHardwareDmaData& packet, bool destination_is_memory,
+                               bool destination_is_gds, bool source_is_memory, bool source_is_gds, bool source_is_immediate)
+{
+	const auto refuse = [&packet](const char* reason)
+	{
+		EXIT("DMA_DATA with a GDS endpoint refused (%s): src_sel=%u dst_sel=%u src=0x%016" PRIx64 " dst=0x%016" PRIx64
+		     " bytes=%" PRIu32 "\n",
+		     reason, static_cast<uint32_t>(packet.source), static_cast<uint32_t>(packet.destination), packet.source_address,
+		     packet.destination_address, packet.byte_count);
+	};
+	if (packet.byte_count == 0 || (packet.byte_count & 3u) != 0)
+	{
+		refuse("byte count");
+		return 6;
+	}
+	const uint64_t dw_count = packet.byte_count / 4u;
+
+	if (destination_is_gds)
+	{
+		if (!GraphicsGdsByteRangeValid(packet.destination_address, packet.byte_count))
+		{
+			refuse("GDS destination span");
+			return 6;
+		}
+		const uint64_t dst_dw_offset = packet.destination_address / 4u;
+		if (source_is_immediate)
+		{
+			cp->ClearGds(dst_dw_offset, dw_count, static_cast<uint32_t>(packet.source_address));
+			return 6;
+		}
+		if (source_is_gds)
+		{
+			if (!GraphicsGdsByteRangeValid(packet.source_address, packet.byte_count))
+			{
+				refuse("GDS source span");
+				return 6;
+			}
+			// A same-buffer copy needs disjoint spans; overlap has no established contract.
+			if (GraphicsGdsDwordRangesOverlap(packet.source_address / 4u, dst_dw_offset, dw_count))
+			{
+				refuse("overlapping GDS spans");
+				return 6;
+			}
+			cp->CopyGds(packet.source_address / 4u, dst_dw_offset, dw_count);
+			return 6;
+		}
+		if (!source_is_memory || (packet.source_address & 3u) != 0u ||
+		    GpuMemoryValidateAllocatedRange(packet.source_address, packet.byte_count) != GpuMemoryRangeValidationStatus::Valid)
+		{
+			refuse("memory source");
+			return 6;
+		}
+		cp->WriteGds(dst_dw_offset, packet.source_address, dw_count);
+		return 6;
+	}
+
+	if (!destination_is_memory || !GraphicsGdsByteRangeValid(packet.source_address, packet.byte_count))
+	{
+		refuse("GDS source to memory");
+		return 6;
+	}
+	if ((packet.destination_address & 3u) != 0u ||
+	    GpuMemoryValidateAllocatedRange(packet.destination_address, packet.byte_count) != GpuMemoryRangeValidationStatus::Valid)
+	{
+		refuse("memory destination");
+		return 6;
+	}
+	// The destination is written when this recording's submission is published, under a host-write lease.
+	cp->ReadGds(reinterpret_cast<uint32_t*>(packet.destination_address), packet.source_address / 4u, dw_count);
+	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaData, packet.destination_address, packet.byte_count, 0u, 0u, 0u);
+	return 6;
+}
+
+
 KYTY_CP_OP_PARSER(cp_op_dma_data)
 {
 	KYTY_PROFILER_FUNCTION();
 
+	RequirePacketBody(cmd_id, dw, 6u);
 	GraphicsHardwareDmaData packet {};
 	if (!GraphicsDecodeHardwareDmaData(cmd_id, buffer, dw, &packet))
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: malformed DMA_DATA packet ignored\n");
-		return 6;
+		EXIT("unsupported DMA_DATA header or body: cmd_id=0x%08" PRIx32 " body_dw=%" PRIu32 "\n", cmd_id, dw);
 	}
 
 	// Reference-clock prefetch packets use a fixed destination register rather
@@ -255,46 +352,24 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		return 6;
 	}
 
-	if (packet.byte_count == 0 || (packet.byte_count & 3u) != 0)
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA byte count ignored\n");
-		return 6;
-	}
-
 	const bool destination_is_memory = packet.destination == 0u || packet.destination == 3u;
 	const bool destination_is_gds    = packet.destination == 1u;
 	const bool source_is_memory      = packet.source == 0u || packet.source == 3u;
 	const bool source_is_gds         = packet.source == 1u;
 	const bool source_is_immediate   = packet.source == 2u;
-	if ((!destination_is_memory && !destination_is_gds) || (!source_is_memory && !source_is_gds && !source_is_immediate))
+	if (destination_is_gds || source_is_gds)
+	{
+		return DmaDataWithGds(cp, packet, destination_is_memory, destination_is_gds, source_is_memory, source_is_gds, source_is_immediate);
+	}
+
+	if (packet.byte_count == 0 || (packet.byte_count & 3u) != 0)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA byte count ignored\n");
+		return 6;
+	}
+	if (!destination_is_memory || (!source_is_memory && !source_is_immediate))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported DMA_DATA selector ignored\n");
-		return 6;
-	}
-
-	constexpr uint64_t kGdsSizeBytes   = 0x3000u * sizeof(uint32_t);
-	auto               valid_gds_range = [&](uint64_t offset)
-	{ return (offset & 3u) == 0u && offset <= kGdsSizeBytes && packet.byte_count <= kGdsSizeBytes - offset; };
-	if (destination_is_gds && !valid_gds_range(packet.destination_address))
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA GDS destination ignored\n");
-		return 6;
-	}
-	if (source_is_gds && !valid_gds_range(packet.source_address))
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA GDS source ignored\n");
-		return 6;
-	}
-
-	if (destination_is_gds)
-	{
-		if (source_is_immediate)
-		{
-			cp->ClearGds(packet.destination_address / 4u, packet.byte_count / 4u, static_cast<uint32_t>(packet.source_address));
-		} else
-		{
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: DMA_DATA copy into GDS is not supported\n");
-		}
 		return 6;
 	}
 
@@ -313,15 +388,6 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		{
 			memcpy(dst + offset, &value, sizeof(value));
 		}
-	} else if (source_is_gds)
-	{
-		if ((packet.destination_address & 3u) != 0u)
-		{
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unaligned DMA_DATA GDS read destination ignored\n");
-			return 6;
-		}
-		cp->ReadGds(reinterpret_cast<uint32_t*>(packet.destination_address), static_cast<uint32_t>(packet.source_address / 4u),
-		            packet.byte_count / 4u);
 	} else
 	{
 		if (GpuMemoryValidateAllocatedRange(packet.source_address, packet.byte_count) != GpuMemoryRangeValidationStatus::Valid)
@@ -346,7 +412,11 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(cp == nullptr);
-	if (cmd_id != KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA) condition ignored (continuing)\n"); }
+	if (cmd_id != KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA))
+	{
+		EXIT("unsupported custom DMA_DATA header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 7u);
 
 	const uint32_t byte_count = buffer[2];
 	const uint64_t dst        = buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u);
@@ -389,10 +459,10 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 
 	const uint32_t packet_len = KYTY_PM4_LEN(cmd_id);
 
-	if (KYTY_PM4_R(cmd_id) == Pm4::R_DRAW_INDEX)
+	if ((cmd_id & ~1u) == KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX))
 	{
-		if (packet_len != 7) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: packet_len != 7 condition ignored (continuing)\n"); }
-		if (dw < 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 6 condition ignored (continuing)\n"); }
+		if (packet_len != 7) { EXIT("invalid DRAW_INDEX packet length: cmd_id=0x%08" PRIx32 "\n", cmd_id); }
+		RequirePacketBody(cmd_id, dw, 6u);
 
 		uint32_t index_count = buffer[0];
 		auto*    index_addr  = reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
@@ -406,6 +476,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 
 	if (cmd_id == KYTY_PM4(6, Pm4::IT_DRAW_INDEX_2, 0u))
 	{
+		RequirePacketBody(cmd_id, dw, 5u);
 		uint32_t index_count = buffer[0];
 		auto*    index_addr  = reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 
@@ -414,27 +485,40 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 
 		cp->DrawIndex(index_count, index_addr, 0, 1);
 
-		if (!(dw >= 7)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(dw >= 7) condition ignored (continuing)\n"); }
-
-		if (buffer[5] == 0xc0001000)
+		if (available_dw == 5u)
 		{
+			return 5;
+		}
+		const uint32_t lookahead_header = buffer[5];
+		if (lookahead_header == 0xc0001000u)
+		{
+			if (!GraphicsRunType3PacketAt(buffer, available_dw, 5u, 0xc0001000u))
+			{
+				EXIT("truncated DRAW_INDEX_2 follow-up packet: header=0x%08" PRIx32 " available_dw=%" PRIu32 "\n",
+				     lookahead_header, available_dw);
+			}
 			if (buffer[6] != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[6] != 0 condition ignored (continuing)\n"); }
 
 			return 7;
 		}
 
-		if (buffer[5] == 0xc0021000)
+		if (lookahead_header == 0xc0021000u)
 		{
+			if (!GraphicsRunType3PacketAt(buffer, available_dw, 5u, 0xc0021000u))
+			{
+				EXIT("truncated DRAW_INDEX_2 follow-up packet: header=0x%08" PRIx32 " available_dw=%" PRIu32 "\n",
+				     lookahead_header, available_dw);
+			}
 			if (buffer[6] != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[6] != 0 condition ignored (continuing)\n"); }
 
 			return 9;
 		}
 
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid draw_index (continuing)\n");
+		return 5;
 	}
 
-	if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
-	return 0;
+	EXIT("unsupported DRAW_INDEX_2 header: 0x%08" PRIx32 "\n", cmd_id);
+	return dw;
 }
 
 // IT_DRAW_INDEX_OFFSET_2 (0x35): draw from IT_INDEX_BASE + index_offset.
@@ -442,7 +526,15 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 KYTY_CP_OP_PARSER(cp_op_draw_index_offset)
 {
 	KYTY_PROFILER_FUNCTION();
-	if ((cmd_id & ~1u) != 0xc0033500) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (cmd_id & ~1u) != 0xc0033500 condition ignored (continuing)\n"); }
+	if ((cmd_id & ~1u) != KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u))
+	{
+		EXIT("unsupported DRAW_INDEX_OFFSET_2 header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 4u);
+	if (dw != 4u)
+	{
+		EXIT("invalid DRAW_INDEX_OFFSET_2 body size: cmd_id=0x%08" PRIx32 " body_dw=%" PRIu32 "\n", cmd_id, dw);
+	}
 	if (buffer[0] != buffer[2]) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[0] != buffer[2] condition ignored (continuing)\n"); }
 	if ((buffer[3] & ~0xE0000001u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (buffer[3] & ~0xE0000001u) != 0 condition ignored (continuing)\n"); }
 	cp->DrawIndexOffset(buffer[1], buffer[0], buffer[3] & 0xE0000001u);
@@ -453,10 +545,14 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_auto)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xC0051010 && cmd_id != 0xc0012d00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0051010 && cmd_id != 0xc0012d00 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xC0051010 && cmd_id != 0xc0012d00)
+	{
+		EXIT("unsupported DRAW_INDEX_AUTO header: 0x%08" PRIx32 "\n", cmd_id);
+	}
 
 	if (cmd_id == 0xC0051010)
 	{
+		RequirePacketBody(cmd_id, dw, 6u);
 		uint32_t index_count    = buffer[0];
 		uint64_t draw_modifier = static_cast<uint64_t>(buffer[1]) | (static_cast<uint64_t>(buffer[2]) << 32u);
 
@@ -467,6 +563,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_auto)
 
 	if (cmd_id == 0xc0012d00)
 	{
+		RequirePacketBody(cmd_id, dw, 2u);
 		uint32_t index_count = buffer[0];
 		uint32_t flags       = buffer[1];
 
@@ -479,14 +576,15 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_auto)
 		return 2;
 	}
 
-	return 1;
+	return dw;
 }
 
 KYTY_CP_OP_PARSER(cp_op_draw_reset)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
-	if (cmd_id != 0xc0001014) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0001014 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xc0001014) { EXIT("unsupported DRAW_RESET header: 0x%08" PRIx32 "\n", cmd_id); }
 
 	cp->Reset();
 
@@ -499,8 +597,13 @@ KYTY_CP_OP_PARSER(cp_op_draw_reset)
 KYTY_CP_OP_PARSER(cp_op_set_base)
 {
 	KYTY_PROFILER_FUNCTION();
+	if ((cmd_id & ~3u) != KYTY_PM4(4, Pm4::IT_SET_BASE, 0u))
+	{
+		EXIT("unsupported SET_BASE header: 0x%08" PRIx32 "\n", cmd_id);
+	}
 
-	if (dw < 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 3 condition ignored (continuing)\n"); }
+	RequirePacketBody(cmd_id, dw, 3u);
+	if (dw != 3u) { EXIT("invalid SET_BASE body size: cmd_id=0x%08" PRIx32 " body_dw=%" PRIu32 "\n", cmd_id, dw); }
 	if (buffer[0] != 1u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[0] != 1u condition ignored (continuing)\n"); }
 
 	const uint32_t base_index = (cmd_id >> 1u) & 0x1u;
@@ -517,7 +620,7 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_indirect)
 
 	if (Config::IsNextGen() && cmd_id == KYTY_PM4(4, Pm4::IT_DISPATCH_INDIRECT, 0u))
 	{
-		EXIT_IF(dw < 4u);
+		RequirePacketBody(cmd_id, dw, 3u);
 		const uint64_t address = static_cast<uint64_t>(buffer[0]) | (static_cast<uint64_t>(buffer[1]) << 32u);
 		cp->DispatchIndirectAbsolute(address, buffer[2]);
 		return 3;
@@ -526,7 +629,7 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_indirect)
 	{
 		EXIT("unsupported dispatch-indirect header: 0x%08" PRIx32 "\n", cmd_id);
 	}
-	EXIT_IF(dw < 3u);
+	RequirePacketBody(cmd_id, dw, 2u);
 	cp->DispatchIndirect(buffer[0], buffer[1]);
 
 	return 2;
@@ -536,8 +639,12 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_indirect)
 KYTY_CP_OP_PARSER(cp_op_draw_index_indirect)
 {
 	KYTY_PROFILER_FUNCTION();
+	if (cmd_id != KYTY_PM4(5, Pm4::IT_DRAW_INDEX_INDIRECT, 0u))
+	{
+		EXIT("unsupported DRAW_INDEX_INDIRECT header: 0x%08" PRIx32 "\n", cmd_id);
+	}
 
-	if (dw < 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 4 condition ignored (continuing)\n"); }
+	RequirePacketBody(cmd_id, dw, 4u);
 	cp->DrawIndexIndirect(buffer[0], buffer[3]);
 
 	return 4;
@@ -547,8 +654,9 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_indirect)
 KYTY_CP_OP_PARSER(cp_op_clear_state)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
-	if (cmd_id != 0xc0001200) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0001200 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xc0001200) { EXIT("unsupported CLEAR_STATE header: 0x%08" PRIx32 "\n", cmd_id); }
 	if ((buffer[0] & ~0xfu) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (buffer[0] & ~0xfu) != 0 condition ignored (continuing)\n"); }
 
 	// This packet executes inside CommandProcessor::Run. Calling Reset here
@@ -564,10 +672,14 @@ KYTY_CP_OP_PARSER(cp_op_context_state)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_IF(dw < 3);
+	RequirePacketBody(cmd_id, dw, 1u);
 	const auto operation = buffer[0];
 	const uint32_t packet_dw = operation == 2 ? 3 : 5;
-	EXIT_IF(operation > 3 || dw < packet_dw || cmd_id != KYTY_PM4(packet_dw, Pm4::IT_NOP, Pm4::R_CONTEXT_STATE));
+	if (operation > 3 || dw < packet_dw - 1u || cmd_id != KYTY_PM4(packet_dw, Pm4::IT_NOP, Pm4::R_CONTEXT_STATE))
+	{
+		EXIT("invalid CONTEXT_STATE packet: cmd_id=0x%08" PRIx32 " operation=%" PRIu32 " body_dw=%" PRIu32 "\n", cmd_id,
+		     operation, dw);
+	}
 	for (uint32_t i = 1; i < packet_dw - 1; i++)
 	{
 		EXIT_IF(buffer[i] != 0);
@@ -580,7 +692,8 @@ KYTY_CP_OP_PARSER(cp_op_dump_const_ram)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xC0038300) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0038300 condition ignored (continuing)\n"); }
+	RequirePacketBody(cmd_id, dw, 4u);
+	if (cmd_id != 0xC0038300) { EXIT("unsupported DUMP_CONST_RAM header: 0x%08" PRIx32 "\n", cmd_id); }
 
 	auto  offset = buffer[0];
 	auto  dw_num = buffer[1];
@@ -600,6 +713,7 @@ KYTY_CP_OP_PARSER(cp_op_event_write)
 	KYTY_PROFILER_FUNCTION();
 
 	const uint32_t packet_dw = KYTY_PM4_LEN(cmd_id);
+	RequirePacketBody(cmd_id, dw, 1u);
 	if (((cmd_id >> 8u) & 0xffu) != Pm4::IT_EVENT_WRITE || (packet_dw != 2u && packet_dw != 4u))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: malformed EVENT_WRITE packet (continuing)\n");
@@ -624,7 +738,8 @@ KYTY_CP_OP_PARSER(cp_op_event_write_eop)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xC0044700) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0044700 condition ignored (continuing)\n"); }
+	RequirePacketBody(cmd_id, dw, 5u);
+	if (cmd_id != 0xC0044700) { EXIT("unsupported EVENT_WRITE_EOP header: 0x%08" PRIx32 "\n", cmd_id); }
 
 	uint32_t cache_policy       = (buffer[0] >> 25u) & 0x3u;
 	uint32_t event_write_dest   = ((buffer[0] >> 23u) & 0x10u) | ((buffer[2] >> 16u) & 0x01u);
@@ -647,7 +762,8 @@ KYTY_CP_OP_PARSER(cp_op_event_write_eos)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xC0034802) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0034802 condition ignored (continuing)\n"); }
+	RequirePacketBody(cmd_id, dw, 4u);
+	if (cmd_id != 0xC0034802) { EXIT("unsupported EVENT_WRITE_EOS header: 0x%08" PRIx32 "\n", cmd_id); }
 
 	uint32_t cache_policy       = (buffer[0] >> 25u) & 0x3u;
 	uint32_t event_write_dest   = 0;
@@ -670,7 +786,8 @@ KYTY_CP_OP_PARSER(cp_op_flip)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xc004105c) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc004105c condition ignored (continuing)\n"); }
+	RequirePacketBody(cmd_id, dw, 5u);
+	if (cmd_id != 0xc004105c) { EXIT("unsupported FLIP header: 0x%08" PRIx32 "\n", cmd_id); }
 
 	CommandProcessor::FlipInfo f;
 
@@ -688,8 +805,9 @@ KYTY_CP_OP_PARSER(cp_op_flip)
 KYTY_CP_OP_PARSER(cp_op_increment_ce_counter)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
-	if (cmd_id != 0xC0008400) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0008400 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xC0008400) { EXIT("unsupported INCREMENT_CE_COUNTER header: 0x%08" PRIx32 "\n", cmd_id); }
 	if (buffer[0] != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[0] != 1 condition ignored (continuing)\n"); }
 
 	cp->IncremenetCe();
@@ -700,8 +818,9 @@ KYTY_CP_OP_PARSER(cp_op_increment_ce_counter)
 KYTY_CP_OP_PARSER(cp_op_increment_de_counter)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
-	if (cmd_id != 0xC0008500) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0008500 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xC0008500) { EXIT("unsupported INCREMENT_DE_COUNTER header: 0x%08" PRIx32 "\n", cmd_id); }
 	if (buffer[0] != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[0] != 0 condition ignored (continuing)\n"); }
 
 	cp->IncremenetDe();
@@ -712,8 +831,9 @@ KYTY_CP_OP_PARSER(cp_op_increment_de_counter)
 KYTY_CP_OP_PARSER(cp_op_index_type)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
-	if (cmd_id != 0xC0002A00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0002A00 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xC0002A00) { EXIT("unsupported INDEX_TYPE header: 0x%08" PRIx32 "\n", cmd_id); }
 
 	cp->SetIndexType(buffer[0]);
 
@@ -726,8 +846,9 @@ KYTY_CP_OP_PARSER(cp_op_index_type)
 KYTY_CP_OP_PARSER(cp_op_index_base)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 2u);
 
-	if (cmd_id != 0xc0012600) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0012600 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xc0012600) { EXIT("unsupported INDEX_BASE header: 0x%08" PRIx32 "\n", cmd_id); }
 
 	const auto index_base_addr = buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u);
 	cp->SetIndexBaseAddress(index_base_addr);
@@ -739,8 +860,9 @@ KYTY_CP_OP_PARSER(cp_op_index_base)
 KYTY_CP_OP_PARSER(cp_op_index_buffer_size)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
-	if (cmd_id != 0xc0001300) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0001300 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xc0001300) { EXIT("unsupported INDEX_BUFFER_SIZE header: 0x%08" PRIx32 "\n", cmd_id); }
 
 	cp->SetIndexBufferSize(buffer[0]);
 
@@ -751,7 +873,11 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_IF(KYTY_PM4_LEN(cmd_id) != 4u);
+	if (KYTY_PM4_LEN(cmd_id) != 4u)
+	{
+		EXIT("invalid INDIRECT_BUFFER header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 3u);
 	if ((buffer[2] & (1u << 23u)) == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: INDIRECT_BUFFER without VALID (continuing)\n"); }
 
 	auto*    indirect_buffer = reinterpret_cast<uint32_t*>(buffer[0] | (static_cast<uint64_t>(buffer[1] & 0xffffu) << 32u));
@@ -766,7 +892,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer)
 
 	// A chained buffer replaces the rest of the current one.
 	const bool chain = (buffer[2] & (1u << 20u)) != 0u;
-	return chain ? dw - 1u : 3u;
+	return chain ? available_dw : 3u;
 }
 
 KYTY_CP_OP_PARSER(cp_op_indirect_buffer_end)
@@ -774,19 +900,23 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer_end)
 	KYTY_PROFILER_FUNCTION();
 
 	if (((cmd_id >> 8u) & 0xffu) != Pm4::IT_INDIRECT_BUFFER_END) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ((cmd_id >> 8u) & 0xffu) != Pm4::IT_INDIRECT_BUFFER_END condition ignored (continuing)\n"); }
-	if (dw < 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 1 condition ignored (continuing)\n"); }
+	RequirePacketBody(cmd_id, dw, 1u);
 
 	// PAL names opcode 0x17 as IT_INDIRECT_BUFFER_END. It terminates the
 	// current IB; any following dwords belong to the parent stream or padding,
 	// not to this nested Run invocation.
-	return dw - 1u;
+	return available_dw;
 }
 
 KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xc0021048) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0021048 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xc0021048)
+	{
+		EXIT("unsupported indirect context-register header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 3u);
 
 	auto*    indirect_buffer   = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 	uint32_t indirect_num_regs = buffer[0];
@@ -853,7 +983,11 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xc0021044) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0021044 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xc0021044)
+	{
+		EXIT("unsupported indirect shader-register header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 3u);
 
 	auto*    indirect_buffer   = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 	uint32_t indirect_num_regs = buffer[0];
@@ -911,7 +1045,11 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xc002104c) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc002104c condition ignored (continuing)\n"); }
+	if (cmd_id != 0xc002104c)
+	{
+		EXIT("unsupported indirect UCONFIG-register header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 3u);
 
 	auto*    indirect_buffer   = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 	uint32_t indirect_num_regs = buffer[0];
@@ -969,6 +1107,7 @@ KYTY_CP_OP_PARSER(cp_op_marker)
 {
 	KYTY_PROFILER_FUNCTION();
 
+	RequirePacketBody(cmd_id, dw, 1u);
 	// EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0001000);
 
 	uint32_t id     = buffer[0] & 0xfffu;
@@ -977,7 +1116,10 @@ KYTY_CP_OP_PARSER(cp_op_marker)
 
 	switch (id)
 	{
-		case 0x0: cp->SetEmbeddedDataMarker(buffer + 1, len_dw, align); break;
+		case 0x0:
+			RequirePacketBody(cmd_id, dw, len_dw + 1u);
+			cp->SetEmbeddedDataMarker(buffer + 1, len_dw, align);
+			break;
 		case 0x4: cp->SetUserDataMarker(HW::UserSgprType::Vsharp); break;
 		case 0xd: cp->SetUserDataMarker(HW::UserSgprType::Region); break;
 		case 0x777:
@@ -987,6 +1129,7 @@ KYTY_CP_OP_PARSER(cp_op_marker)
 		}
 		case 0x778:
 		{
+			RequirePacketBody(cmd_id, dw, 4u);
 			auto*    addr  = reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 			uint32_t value = buffer[3];
 			cp->Flip(addr, value);
@@ -994,6 +1137,7 @@ KYTY_CP_OP_PARSER(cp_op_marker)
 		}
 		case 0x781:
 		{
+			RequirePacketBody(cmd_id, dw, 6u);
 			auto*    addr           = reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 			uint32_t value          = buffer[3];
 			uint32_t eop_event_type = buffer[4];
@@ -1010,6 +1154,7 @@ KYTY_CP_OP_PARSER(cp_op_marker)
 KYTY_CP_OP_PARSER(cp_op_nop)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
 	auto r = KYTY_PM4_R(cmd_id);
 
@@ -1017,7 +1162,7 @@ KYTY_CP_OP_PARSER(cp_op_nop)
 	{
 		if ((buffer[0] & 0xffff0000u) == 0x68750000u)
 		{
-			return cp_op_marker(cp, cmd_id, buffer, dw, num_dw);
+			return cp_op_marker(cp, cmd_id, buffer, dw, available_dw, num_dw);
 		}
 
 		// GraphicsCbNop emits a complete Type3 NOP whose body has no side
@@ -1030,16 +1175,15 @@ KYTY_CP_OP_PARSER(cp_op_nop)
 
 	if (hw_ctx != nullptr && cp_op == nullptr)
 	{
-		return hw_ctx(cp, cmd_id, 0, buffer, dw);
+		return hw_ctx(cp, cmd_id, 0, buffer, dw, available_dw);
 	}
 
 	if (hw_ctx == nullptr && cp_op != nullptr)
 	{
-		return cp_op(cp, cmd_id, buffer, dw, num_dw);
+		return cp_op(cp, cmd_id, buffer, dw, available_dw, num_dw);
 	}
 
-	KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown custom code (continuing)\n");
-
+	EXIT("unsupported custom Type-3 NOP code: cmd_id=0x%08" PRIx32 "\n", cmd_id);
 	return 0;
 }
 
@@ -1047,7 +1191,11 @@ KYTY_CP_OP_PARSER(cp_op_num_instances)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xc0002f00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0002f00 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xc0002f00)
+	{
+		EXIT("unsupported NUM_INSTANCES header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 1u);
 
 	cp->SetNumInstances(buffer[0]);
 
@@ -1062,11 +1210,13 @@ KYTY_CP_OP_PARSER(cp_op_num_instances)
 KYTY_CP_OP_PARSER(cp_op_set_predication)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
 	const uint32_t operation  = (buffer[0] >> 16u) & 0x7u;
 	const bool     draw_early = ((buffer[0] >> 12u) & 0x1u) != 0u;
 	if (operation != 0u && !draw_early)
 	{
+		RequirePacketBody(cmd_id, dw, 3u);
 		EXIT("SET_PREDICATION operation %u is not implemented: condition=%u wait=%u address=0x%08x%08x\n", operation,
 		     (buffer[0] >> 8u) & 0x1u, (buffer[0] >> 12u) & 0x1u, buffer[2], buffer[1]);
 	}
@@ -1089,16 +1239,20 @@ KYTY_CP_OP_PARSER(cp_op_pop_marker)
 KYTY_CP_OP_PARSER(cp_op_push_marker)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
-	auto dw_num = (cmd_id >> 16u) & 0x3fffu;
-
-	const char* str = reinterpret_cast<const char*>(buffer);
-
-	KYTY_LOG_DEBUG("Push marker: %s\n", str);
+	const size_t body_bytes = static_cast<size_t>(dw) * sizeof(uint32_t);
+	const char*  str        = reinterpret_cast<const char*>(buffer);
+	const auto*  terminator = static_cast<const char*>(memchr(str, '\0', body_bytes));
+	if (terminator == nullptr)
+	{
+		EXIT("unterminated push marker text: cmd_id=0x%08" PRIx32 " body_dw=%" PRIu32 "\n", cmd_id, dw);
+	}
+	KYTY_LOG_DEBUG("Push marker: %.*s\n", static_cast<int>(terminator - str), str);
 
 	cp->PushMarker(str);
 
-	return dw_num + 1;
+	return dw;
 }
 
 KYTY_CP_OP_PARSER(cp_op_release_mem)
@@ -1106,15 +1260,23 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 	KYTY_PROFILER_FUNCTION();
 
 	// 0xC0051060 = 7-DW custom envelope; 0xC0061060 = 8-DW with interrupt_ctx_id.
-	if (cmd_id != 0xC0054902 && cmd_id != 0xc0051060 && cmd_id != 0xc0061060) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0054902 && cmd_id != 0xc0051060 && cmd_id != 0xc0061060 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xC0054902 && cmd_id != 0xc0051060 && cmd_id != 0xc0061060)
+	{
+		EXIT("unsupported RELEASE_MEM header: 0x%08" PRIx32 "\n", cmd_id);
+	}
 
 	bool custom = (cmd_id == 0xc0051060 || cmd_id == 0xc0061060);
+	RequirePacketBody(cmd_id, dw, cmd_id == 0xc0061060 ? 7u : 6u);
 
 	if (custom && buffer[0] == KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE))
 	{
 		// Observed Gen5 flip stream can contain a lone R_RELEASE_MEM marker
 		// before the real WaitFlipDone packet. The marker has no payload; do
 		// not consume the following Type3 header as ReleaseMem data.
+		if (!GraphicsRunType3PacketAt(buffer, available_dw, 0u, KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE)))
+		{
+			EXIT("truncated ReleaseMem/WaitFlipDone split packet: available_dw=%" PRIu32 "\n", available_dw);
+		}
 		return 0;
 	}
 
@@ -1271,44 +1433,55 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 KYTY_CP_OP_PARSER(cp_op_one_reg_write)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
 	if (((cmd_id >> 8u) & 0xffu) != Pm4::IT_ONE_REG_WRITE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ((cmd_id >> 8u) & 0xffu) != Pm4::IT_ONE_REG_WRITE condition ignored (continuing)\n"); }
-	if (dw < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 2 condition ignored (continuing)\n"); }
-
 	return 1;
 }
 
 KYTY_CP_OP_PARSER(cp_op_get_lod_stats)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 1u);
 
-	if (((cmd_id >> 8u) & 0xffu) != Pm4::IT_GET_LOD_STATS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ((cmd_id >> 8u) & 0xffu) != Pm4::IT_GET_LOD_STATS condition ignored (continuing)\n"); }
-	if (dw < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 2 condition ignored (continuing)\n"); }
-
+	if (((cmd_id >> 8u) & 0xffu) != Pm4::IT_GET_LOD_STATS)
+	{
+		EXIT("unsupported GET_LOD_STATS header: 0x%08" PRIx32 "\n", cmd_id);
+	}
 	// This query packet has no guest-visible producer in the current renderer.
 	// Consume its payload so following PM4 packets remain aligned.
 	KYTY_LOG_LIMIT(Log::Level::Warn, 1, "WARNING: ignoring unsupported IT_GET_LOD_STATS\n");
-	return 1;
+	return dw;
 }
 
 KYTY_CP_OP_PARSER(cp_op_set_context_reg)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 2u);
 
 	auto cmd_offset = buffer[0];
 
-	if (cmd_offset >= Pm4::CX_NUM) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset >= Pm4::CX_NUM condition ignored (continuing)\n"); }
+	if (cmd_offset >= Pm4::CX_NUM)
+	{
+		EXIT("context-register offset out of range: 0x%08" PRIx32 "\n", cmd_offset);
+	}
 
 	auto pfunc = g_hw_ctx_func[cmd_offset];
 
 	if (pfunc == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown register write (continuing)\n");
+		EXIT("unsupported context-register write: cmd_id=0x%08" PRIx32 " offset=0x%08" PRIx32 "\n", cmd_id, cmd_offset);
 	}
 
-	auto s = pfunc(cp, cmd_id, cmd_offset, buffer + 1, dw);
-
-	EXIT_IF(s == 0);
+	const uint32_t register_dw           = dw - 1u;
+	const uint32_t available_register_dw = available_dw - 1u;
+	auto           s                     = pfunc(cp, cmd_id, cmd_offset, buffer + 1, register_dw, available_register_dw);
+	if (s == 0u || s > available_register_dw)
+	{
+		EXIT("context-register parser returned invalid count: cmd_id=0x%08" PRIx32 " offset=0x%08" PRIx32
+		     " consumed_dw=%" PRIu32 " available_dw=%" PRIu32 "\n",
+		     cmd_id, cmd_offset, s, available_register_dw);
+	}
 
 	return s + 1;
 }
@@ -1316,49 +1489,75 @@ KYTY_CP_OP_PARSER(cp_op_set_context_reg)
 KYTY_CP_OP_PARSER(cp_op_set_shader_reg)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 2u);
 
 	auto cmd_offset = buffer[0];
 
-	if (cmd_offset >= Pm4::SH_NUM) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset >= Pm4::SH_NUM condition ignored (continuing)\n"); }
+	if (cmd_offset >= Pm4::SH_NUM)
+	{
+		EXIT("shader-register offset out of range: 0x%08" PRIx32 "\n", cmd_offset);
+	}
 
 	auto pfunc = g_hw_sh_func[cmd_offset];
 
 	if (pfunc == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown register write (continuing)\n");
+		EXIT("unsupported shader-register write: cmd_id=0x%08" PRIx32 " offset=0x%08" PRIx32 "\n", cmd_id, cmd_offset);
 	}
 
-	auto s = pfunc(cp, cmd_id, cmd_offset, buffer + 1, dw);
-	EXIT_IF(s == 0);
+	const uint32_t register_dw           = dw - 1u;
+	const uint32_t available_register_dw = available_dw - 1u;
+	auto           s                     = pfunc(cp, cmd_id, cmd_offset, buffer + 1, register_dw, available_register_dw);
+	if (s == 0u || s > available_register_dw)
+	{
+		EXIT("shader-register parser returned invalid count: cmd_id=0x%08" PRIx32 " offset=0x%08" PRIx32
+		     " consumed_dw=%" PRIu32 " available_dw=%" PRIu32 "\n",
+		     cmd_id, cmd_offset, s, available_register_dw);
+	}
 	return s + 1;
 }
 
 KYTY_CP_OP_PARSER(cp_op_set_uconfig_reg)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 2u);
 
 	auto cmd_offset = buffer[0] & 0xEFFFFFFFu; // ignore neo bit
 
-	if (cmd_offset >= Pm4::UC_NUM) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset >= Pm4::UC_NUM condition ignored (continuing)\n"); }
+	if (cmd_offset >= Pm4::UC_NUM)
+	{
+		EXIT("uconfig-register offset out of range: 0x%08" PRIx32 "\n", cmd_offset);
+	}
 
 	auto pfunc = g_hw_uc_func[cmd_offset];
 
 	if (pfunc == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown register write (continuing)\n");
+		EXIT("unsupported uconfig-register write: cmd_id=0x%08" PRIx32 " offset=0x%08" PRIx32 "\n", cmd_id, cmd_offset);
 	}
 
-	auto s = pfunc(cp, cmd_id, cmd_offset, buffer + 1, dw);
-	EXIT_IF(s == 0);
+	const uint32_t register_dw           = dw - 1u;
+	const uint32_t available_register_dw = available_dw - 1u;
+	auto           s                     = pfunc(cp, cmd_id, cmd_offset, buffer + 1, register_dw, available_register_dw);
+	if (s == 0u || s > available_register_dw)
+	{
+		EXIT("uconfig-register parser returned invalid count: cmd_id=0x%08" PRIx32 " offset=0x%08" PRIx32
+		     " consumed_dw=%" PRIu32 " available_dw=%" PRIu32 "\n",
+		     cmd_id, cmd_offset, s, available_register_dw);
+	}
 	return s + 1;
 }
 
 KYTY_CP_OP_PARSER(cp_op_set_uconfig_reg_index)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 2u);
 
 	uint32_t index_type = 0;
-	if (!Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(cmd_id, buffer, dw, &index_type)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(cmd_id, buffer, dw, &index_type) condition ignored (continuing)\n"); }
+	if (!Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(cmd_id, buffer, dw, &index_type))
+	{
+		EXIT("invalid indexed UCONFIG packet: cmd_id=0x%08" PRIx32 " body_dw=%" PRIu32 "\n", cmd_id, dw);
+	}
 
 	cp->SetIndexType(index_type);
 	return 2;
@@ -1368,7 +1567,11 @@ KYTY_CP_OP_PARSER(cp_op_wait_flip_done)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xc0051018) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0051018 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xc0051018)
+	{
+		EXIT("unsupported WAIT_FLIP_DONE header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 6u);
 
 	auto video_out_handle     = buffer[0];
 	auto display_buffer_index = buffer[1];
@@ -1381,6 +1584,23 @@ KYTY_CP_OP_PARSER(cp_op_wait_flip_done)
 KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_32)
 {
 	KYTY_PROFILER_FUNCTION();
+	uint32_t expected_body_dw = 0;
+	if (cmd_id == 0xc0051028u)
+	{
+		expected_body_dw = 6u;
+	} else if (cmd_id == 0xc00c1028u)
+	{
+		expected_body_dw = 13u;
+	} else
+	{
+		EXIT("unsupported WaitRegMem32 header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, expected_body_dw);
+	if (dw != expected_body_dw)
+	{
+		EXIT("invalid WaitRegMem32 body size: cmd_id=0x%08" PRIx32 " body_dw=%" PRIu32 " expected_dw=%" PRIu32 "\n", cmd_id, dw,
+		     expected_body_dw);
+	}
 
 	auto*    addr = reinterpret_cast<uint32_t*>(buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u));
 	uint32_t mask = buffer[2];
@@ -1395,15 +1615,12 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_32)
 		func = buffer[4] & 0x7u;
 		poll = buffer[5];
 		used = 6;
-	} else if (cmd_id == 0xc00c1028u)
+	} else
 	{
 		func = buffer[3];
 		ref  = buffer[4];
 		poll = 10;
 		used = 13;
-	} else
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown WaitRegMem32 packet (continuing)\n");
 	}
 
 	cp->WaitRegMem32(func, addr, ref, mask, poll);
@@ -1415,7 +1632,11 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_64)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xc0071058) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0071058 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xc0071058)
+	{
+		EXIT("unsupported WAIT_MEM_64 header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 8u);
 
 	auto* addr = reinterpret_cast<uint64_t*>(buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u));
 	auto  mask = buffer[2] | (static_cast<uint64_t>(buffer[3]) << 32u);
@@ -1450,7 +1671,11 @@ KYTY_CP_OP_PARSER(cp_op_wait_on_ce_counter)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xC0008600) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0008600 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xC0008600)
+	{
+		EXIT("unsupported WAIT_ON_CE_COUNTER header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 1u);
 	if (buffer[0] != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[0] != 1 condition ignored (continuing)\n"); }
 
 	cp->WaitCe();
@@ -1462,7 +1687,11 @@ KYTY_CP_OP_PARSER(cp_op_wait_on_de_counter_diff)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xC0008800) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0008800 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xC0008800)
+	{
+		EXIT("unsupported WAIT_ON_DE_COUNTER_DIFF header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 1u);
 
 	cp->WaitDeDiff(buffer[0]);
 
@@ -1473,7 +1702,11 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xC0053C00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0053C00 condition ignored (continuing)\n"); }
+	if (cmd_id != 0xC0053C00)
+	{
+		EXIT("unsupported WAIT_REG_MEM header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	RequirePacketBody(cmd_id, dw, 6u);
 
 	auto  func = buffer[0] & 0x7u;
 	bool  me   = (buffer[0] & 0x100u) == 0;
@@ -1496,6 +1729,7 @@ KYTY_CP_OP_PARSER(cp_op_write_const_ram)
 	KYTY_PROFILER_FUNCTION();
 
 	auto dw_num = (cmd_id >> 16u) & 0x3fffu;
+	RequirePacketBody(cmd_id, dw, 1u + dw_num);
 	auto offset = buffer[0];
 
 	if (dw_num >= 0x3000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_num >= 0x3000 condition ignored (continuing)\n"); }
@@ -1510,10 +1744,14 @@ KYTY_CP_OP_PARSER(cp_op_write_const_ram)
 KYTY_CP_OP_PARSER(cp_op_write_data)
 {
 	KYTY_PROFILER_FUNCTION();
+	RequirePacketBody(cmd_id, dw, 3u);
 
 	auto op = (cmd_id >> 8u) & 0xffu;
 
-	if (op != Pm4::IT_WRITE_DATA && op != Pm4::IT_NOP) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op != Pm4::IT_WRITE_DATA && op != Pm4::IT_NOP condition ignored (continuing)\n"); }
+	if (op != Pm4::IT_WRITE_DATA && op != Pm4::IT_NOP)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op != Pm4::IT_WRITE_DATA && op != Pm4::IT_NOP condition ignored (continuing)\n");
+	}
 
 	bool custom = (op == Pm4::IT_NOP);
 
@@ -1522,8 +1760,14 @@ KYTY_CP_OP_PARSER(cp_op_write_data)
 	auto  write_control = buffer[0];
 	auto* dst           = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 
-	const uint32_t  write_body_dwords  = 1u + dw_num;
-	const uint32_t  next_packet_dwords = (dw > 1u + write_body_dwords) ? (dw - 1u - write_body_dwords) : 0u;
+	const uint32_t write_body_dwords = 1u + dw_num;
+	RequirePacketBody(cmd_id, dw, write_body_dwords);
+	if (available_dw < write_body_dwords)
+	{
+		EXIT("truncated WRITE_DATA packet body: cmd_id=0x%08" PRIx32 " required_dw=%" PRIu32 " available_dw=%" PRIu32 "\n", cmd_id,
+		     write_body_dwords, available_dw);
+	}
+	const uint32_t  next_packet_dwords = available_dw - write_body_dwords;
 	const uint32_t* next_packet        = buffer + write_body_dwords;
 	const bool      matching_wait_mem64 =
 	    custom && GraphicsWriteDataPrecedesMatchingWaitMem64(buffer, write_body_dwords, next_packet, next_packet_dwords);
@@ -1532,7 +1776,6 @@ KYTY_CP_OP_PARSER(cp_op_write_data)
 
 	return 1 + dw_num;
 }
-
 
 } // namespace Kyty::Libs::Graphics
 

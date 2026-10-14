@@ -11,6 +11,11 @@ namespace Kyty::Libs::LibKernel {
 // pthread.  PS5Util uses signal 30 for its thread-context handshake.
 int KYTY_SYSV_ABI KernelRaiseException(::Kyty::Kernel::Pthread thread, int signum);
 
+// Number of context requests not yet reclaimed. A request is reclaimed by a later
+// raise once its trampoline has published completion; read-only, for diagnostics
+// and tests. Hosts without the context bridge report zero.
+size_t KernelHostContextRequestsPending();
+
 } // namespace Kyty::Libs::LibKernel
 
 #endif // KYTY_EMU_ENABLED

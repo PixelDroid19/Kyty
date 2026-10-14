@@ -29,6 +29,8 @@ file(GLOB hle_domain_src CONFIGURE_DEPENDS
 	src/AudioAvPlayer.cpp
 	src/AudioHost.cpp
 	src/AudioNgs2.cpp
+	src/AudioNgs2Reverb.cpp
+	src/AudioNgs2Sampler.cpp
 	src/Dialog.cpp
 	src/Controller.cpp
 )
@@ -234,12 +236,14 @@ target_include_directories(kyty_hle PUBLIC
 )
 target_link_libraries(kyty_hle PUBLIC core math sys kyty_runtime_core kyty_kernel kyty_loader kyty_graphics
 	kyty_host kyty_diagnostics kyty_audio_video_backend kyty_audio_pcm)
+# Header-only outline rasterizer for the font library.
+target_include_directories(kyty_hle PRIVATE "${CMAKE_SOURCE_DIR}/3rdparty/imgui")
 
 target_include_directories(kyty_audio_video_backend PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
 	"${CMAKE_SOURCE_DIR}/include"
 )
-target_link_libraries(kyty_audio_video_backend PUBLIC core)
+target_link_libraries(kyty_audio_video_backend PUBLIC core PRIVATE libatrac9)
 
 if(MSVC OR MINGW)
 	target_link_libraries(emulator PRIVATE psapi)

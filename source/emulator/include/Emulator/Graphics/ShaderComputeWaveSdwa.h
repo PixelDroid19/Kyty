@@ -33,6 +33,15 @@ namespace Kyty::Libs::Graphics {
 // because the operand tuple already carries the decoded sources.
 [[nodiscard]] bool ShaderComputeWaveSdwaVop2IdentitySupported(const ShaderInstruction& instruction);
 
+// A VOP1/VOP2 SDWA instruction whose 32-bit result writes only the low byte or word of one VGPR
+// (dst_sel BYTE_0 or WORD_0) and pads, sign-extends or preserves the other bits (dst_u 0-2; ISA
+// table 88). No clamp or output modifier, and no opcode that also reads its destination. Shifted
+// selects (BYTE_1-3, WORD_1) stay refused: the ISA names only the bits they affect.
+[[nodiscard]] bool ShaderSdwaLowDestinationSupported(const ShaderInstruction& instruction);
+// The same instruction with a whole-dword destination: what the per-lane emitter computes before it
+// merges the selected bits into the destination.
+[[nodiscard]] ShaderInstruction ShaderSdwaWholeDestination(const ShaderInstruction& instruction);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

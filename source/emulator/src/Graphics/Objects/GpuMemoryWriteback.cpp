@@ -59,6 +59,7 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 
 	const uint32_t retire_batch_limit    = GpuMemoryRetirementBatchLimit(m_transient_creates_since_retirement);
 	m_transient_creates_since_retirement = 0;
+	m_buffer_bytes_since_retirement      = 0;
 	uint32_t retired                     = 0;
 	// Resume after the last examined slot so every object is reached across
 	// passes. Cursors are positions, not identities; normalize after heap removal.
@@ -127,6 +128,36 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 	if (!destructors.IsEmpty())
 	{
 		ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
+	}
+}
+
+void GpuMemory::RetireBuffersUnderPressureLocked(Vector<Destructor>* destructors)
+{
+	EXIT_IF(destructors == nullptr);
+
+	m_buffer_bytes_since_retirement = 0;
+	for (uint32_t heap_index = 0; heap_index < m_heaps.Size(); heap_index++)
+	{
+		auto& heap = m_heaps[heap_index];
+		for (uint32_t object_index = 0; object_index < heap.objects.Size(); object_index++)
+		{
+			const auto& h = heap.objects[object_index];
+			if (h.free || h.scenario != GpuMemoryScenario::Common)
+			{
+				continue;
+			}
+			const auto& object              = h.info;
+			const auto& dependencies        = object.submission_uses.Dependencies();
+			const bool  owns_device_content = object.in_use && !object.read_only;
+			// A buffer no submission has used yet may be about to be recorded.
+			if (dependencies.empty() ||
+			    !GpuMemoryCanRetireLinkedBufferMember(object.object.type, owns_device_content, object.depth_meta_bound) ||
+			    !m_deferred_deletions.AreDependenciesComplete(dependencies))
+			{
+				continue;
+			}
+			destructors->Add(Free(static_cast<int>(heap_index), static_cast<int>(object_index)));
+		}
 	}
 }
 

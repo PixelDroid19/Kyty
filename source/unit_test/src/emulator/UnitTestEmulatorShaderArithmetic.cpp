@@ -3,6 +3,8 @@
 #include "Emulator/Config.h"
 #include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderNggFrontBody.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
@@ -14,6 +16,7 @@
 #include <cinttypes>
 #include <limits>
 #include <set>
+#include <string_view>
 
 #if defined(_WIN32)
 #include <io.h>
@@ -65,17 +68,23 @@ std::vector<uint32_t> Binary(uint32_t opcode, bool e64)
 	return {(opcode << 25u) | (16u << 17u) | (1u << 9u) | 256u, kEnd};
 }
 
+uint32_t Sop2Word(uint32_t opcode, uint32_t destination, uint32_t source0, uint32_t source1)
+{
+	return 0x80000000u | (opcode << 23u) | (destination << 16u) | (source1 << 8u) | source0;
+}
+
 std::vector<uint32_t> Ternary(uint32_t opcode, uint32_t op_sel = 0u, uint32_t destination = 16u)
 {
 	return {(0x35u << 26u) | (opcode << 16u) | (op_sel << 11u) | destination,
 	        256u | (257u << 9u) | (258u << 18u), kEnd};
 }
 
-ShaderCode Parse(const std::vector<uint32_t>& words, ShaderType stage = ShaderType::Pixel)
+ShaderCode Parse(const std::vector<uint32_t>& words, ShaderType stage = ShaderType::Pixel, uint32_t instruction_count = 2u)
 {
 	ShaderCode code;
 	code.SetType(stage);
-	if (!ShaderTryParseBounded(words.data(), words.size() * sizeof(uint32_t), &code) || code.GetInstructions().Size() != 2u)
+	if (!ShaderTryParseBounded(words.data(), words.size() * sizeof(uint32_t), &code) ||
+	    code.GetInstructions().Size() != instruction_count)
 	{
 		Fail("production parser rejected synthetic arithmetic");
 	}
@@ -167,6 +176,253 @@ uint32_t Evaluate(const Program& program, uint32_t a, uint32_t b = 0u, uint32_t 
 	                    {"%exec_lo", exec != 0u ? UINT32_MAX : 0u}, {"%exec_hi", 0u},
 	                    {"%exec_lane_lo", exec}, {"%exec_lane_hi", 0u}, {"%scc", 0u}},
 	                   destination);
+}
+
+uint32_t EvaluateScalar(const Program& program, uint32_t s0, uint32_t s1, uint32_t s2, uint32_t s3, uint32_t scc_in,
+	                       const char* destination, uint32_t* scc_out)
+{
+	return program.Run({{"%s0", s0}, {"%s1", s1}, {"%s2", s2}, {"%s3", s3}, {"%scc", scc_in},
+	                    {"%exec_lo", UINT32_MAX}, {"%exec_hi", 0u}, {"%exec_lane_lo", 1u}, {"%exec_lane_hi", 0u}},
+	                   destination, scc_out);
+}
+
+uint32_t ArithmeticRight32(uint32_t value, uint32_t shift)
+{
+	if (shift == 0u) { return value; }
+	const uint32_t sign_extension = (value & 0x80000000u) != 0u ? UINT32_MAX << (32u - shift) : 0u;
+	return (value >> shift) | sign_extension;
+}
+
+std::array<uint32_t, 2> ArithmeticRight64Words(uint32_t low, uint32_t high, uint32_t shift)
+{
+	shift &= 63u;
+	if (shift == 0u) { return {low, high}; }
+	if (shift < 32u)
+	{
+		return {(low >> shift) | (high << (32u - shift)), ArithmeticRight32(high, shift)};
+	}
+	return {ArithmeticRight32(high, shift - 32u), ArithmeticRight32(high, 31u)};
+}
+
+std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32_t control)
+{
+	const uint32_t offset = control & 0x3fu;
+	const uint32_t width  = (control >> 16u) & 0x7fu;
+	const uint32_t count  = std::min(width, 64u - offset);
+	if (count == 0u)
+	{
+		return {0u, 0u};
+	}
+
+	const uint64_t source = (static_cast<uint64_t>(high) << 32u) | low;
+	const uint64_t mask   = count == 64u ? UINT64_MAX : ((uint64_t {1} << count) - 1u);
+	uint64_t       result = (source >> offset) & mask;
+	if ((result & (uint64_t {1} << (count - 1u))) != 0u)
+	{
+		result |= ~mask;
+	}
+	return {static_cast<uint32_t>(result), static_cast<uint32_t>(result >> 32u)};
+}
+
+[[noreturn]] void RunScalarBfe64Contracts()
+{
+	Initialize();
+	const auto  code        = Parse({Sop2Word(0x2au, 4u, 0u, 2u), kEnd});
+	const auto& instruction = code.GetInstructions().At(0);
+	if (instruction.type != ShaderInstructionType::SBfeI64 || instruction.format != ShaderInstructionFormat::Sdst2Ssrc02Ssrc1 ||
+	    instruction.src_num != 2 || instruction.dst.size != 2 || instruction.src[0].size != 2 || instruction.src[1].size != 1)
+	{
+		Fail("S_BFE_I64 parser pair contract differs");
+	}
+	if (!ShaderInstructionLoweringPreconditions(instruction))
+	{
+		Fail("aligned S_BFE_I64 operands must pass lowering preconditions");
+	}
+
+	const auto source = Emit(code, 0xc0u, false, false, true);
+	if (source.FindIndex("OpCapability Int64") != Core::STRING8_INVALID_INDEX ||
+	    source.FindIndex("OpTypeInt 64") != Core::STRING8_INVALID_INDEX)
+	{
+		Fail("S_BFE_I64 instruction module must not require SPIR-V Int64");
+	}
+	const Program program(source.c_str());
+	const auto    check_result =
+	    [&](uint32_t low, uint32_t high, uint32_t offset, uint32_t width, const char* low_name, const char* high_name, const char* label)
+	{
+		const uint32_t control      = offset | (width << 16u);
+		const auto     expected     = SignedBfe64Reference(low, high, control);
+		const uint32_t expected_scc = (expected[0] | expected[1]) != 0u ? 1u : 0u;
+		uint32_t       low_scc      = UINT32_MAX;
+		uint32_t       high_scc     = UINT32_MAX;
+		Equal(EvaluateScalar(program, low, high, control, 0u, 1u, low_name, &low_scc), expected[0], label);
+		Equal(EvaluateScalar(program, low, high, control, 0u, 1u, high_name, &high_scc), expected[1], label);
+		Equal(low_scc, expected_scc, label);
+		Equal(high_scc, expected_scc, label);
+	};
+
+	// The offset/width cross product covers zero width and extraction fields that
+	// cross each dword boundary, including the 63/64/65-bit overrun edges.
+	constexpr std::array<std::array<uint32_t, 2>, 5> sources {{
+	    {{0x89abcdefu, 0x01234567u}},
+	    {{0x76543210u, 0xfedcba98u}},
+	    {{0u, 0x80000001u}},
+	    {{0x80000001u, 0u}},
+	    {{0u, 0u}},
+	}};
+	for (const auto& words: sources)
+	{
+		for (uint32_t offset = 0; offset < 64u; ++offset)
+		{
+			for (uint32_t width = 0; width < 128u; ++width)
+			{
+				check_result(words[0], words[1], offset, width, "%s4", "%s5", "S_BFE_I64 offset/width");
+			}
+		}
+	}
+	check_result(0u, 1u, 0u, 64u, "%s4", "%s5", "S_BFE_I64 SCC observes nonzero high-only result");
+
+	// Both source pairs are loaded before either aliased destination word is stored.
+	for (const uint32_t destination: {0u, 2u})
+	{
+		const auto alias_code        = Parse({Sop2Word(0x2au, destination, 0u, 2u), kEnd});
+		const auto alias_instruction = alias_code.GetInstructions().At(0);
+		if (!ShaderInstructionLoweringPreconditions(alias_instruction))
+		{
+			Fail("even aliased S_BFE_I64 pairs must pass lowering preconditions");
+		}
+		const Program  alias_program(Emit(alias_code, 0xc0u, false, false, true).c_str());
+		const auto     low_name     = Core::String8::FromPrintf("%%s%u", destination);
+		const auto     high_name    = Core::String8::FromPrintf("%%s%u", destination + 1u);
+		const auto     expected     = SignedBfe64Reference(0x80000001u, 0x80000000u, (17u << 16u) | 57u);
+		const uint32_t expected_scc = (expected[0] | expected[1]) != 0u ? 1u : 0u;
+		uint32_t       low_scc      = UINT32_MAX;
+		uint32_t       high_scc     = UINT32_MAX;
+		Equal(EvaluateScalar(alias_program, 0x80000001u, 0x80000000u, (17u << 16u) | 57u, 0u, 1u, low_name.c_str(), &low_scc), expected[0],
+		      "S_BFE_I64 source/destination alias low");
+		Equal(EvaluateScalar(alias_program, 0x80000001u, 0x80000000u, (17u << 16u) | 57u, 0u, 1u, high_name.c_str(), &high_scc),
+		      expected[1], "S_BFE_I64 source/destination alias high");
+		Equal(low_scc, expected_scc, "S_BFE_I64 source/destination alias SCC");
+		Equal(high_scc, expected_scc, "S_BFE_I64 source/destination alias SCC");
+	}
+
+	const auto odd_destination = Parse({Sop2Word(0x2au, 1u, 0u, 2u), kEnd});
+	if (ShaderInstructionLoweringPreconditions(odd_destination.GetInstructions().At(0)))
+	{
+		Fail("S_BFE_I64 odd destination pair must remain rejected");
+	}
+	const auto odd_source = Parse({Sop2Word(0x2au, 4u, 1u, 2u), kEnd});
+	if (ShaderInstructionLoweringPreconditions(odd_source.GetInstructions().At(0)))
+	{
+		Fail("S_BFE_I64 odd source pair must remain rejected");
+	}
+	std::_Exit(0);
+}
+
+[[noreturn]] void RunScalarSop2Contracts()
+{
+	Initialize();
+
+	const auto check_subb = [](uint32_t destination, uint32_t source0, uint32_t source1, uint32_t old_scc,
+	                           uint32_t expected_result, uint32_t expected_scc, const char* label) {
+		auto code = Parse({Sop2Word(0x05u, destination, 0u, 1u), kEnd});
+		const auto& instruction = code.GetInstructions().At(0);
+		if (instruction.type != ShaderInstructionType::SSubbU32 || instruction.format != ShaderInstructionFormat::SVdstSVsrc0SVsrc1 ||
+		    instruction.src_num != 2 || instruction.dst.size != 1 || instruction.src[0].size != 1 || instruction.src[1].size != 1)
+		{
+			Fail("S_SUBB_U32 parser contract differs");
+		}
+		const Program program(Emit(code, 0xc0u, false, false, true).c_str());
+		uint32_t actual_scc = UINT32_MAX;
+		const uint32_t actual = EvaluateScalar(program, source0, source1, 0u, 0u, old_scc,
+		                                      Core::String8::FromPrintf("%%s%u", destination).GetDataConst(), &actual_scc);
+		Equal(actual, expected_result, label);
+		Equal(actual_scc, expected_scc, label);
+	};
+	check_subb(3u, 5u, 3u, 0u, 2u, 0u, "S_SUBB_U32 no borrow");
+	check_subb(3u, 2u, 3u, 0u, UINT32_MAX, 1u, "S_SUBB_U32 source borrow");
+	check_subb(3u, 5u, 5u, 1u, UINT32_MAX, 1u, "S_SUBB_U32 equal sources with borrow-in");
+	check_subb(3u, UINT32_MAX, UINT32_MAX, 1u, UINT32_MAX, 1u,
+	           "S_SUBB_U32 UINT32_MAX plus borrow-in does not wrap the borrow test");
+	{
+		auto code = Parse({Sop2Word(0x05u, 0u, 0u, 1u), kEnd});
+		const Program program(Emit(code, 0xc0u, false, false, true).c_str());
+		uint32_t actual_scc = 0;
+		Equal(EvaluateScalar(program, 0u, 0u, 0u, 0u, 1u, "%s0", &actual_scc), UINT32_MAX,
+		      "S_SUBB_U32 exact source/destination alias");
+		Equal(actual_scc, 1u, "S_SUBB_U32 exact alias SCC");
+	}
+	{
+		auto code = Parse({Sop2Word(0x05u, 1u, 0u, 1u), kEnd});
+		const Program program(Emit(code, 0xc0u, false, false, true).c_str());
+		uint32_t actual_scc = 0;
+		Equal(EvaluateScalar(program, 7u, 5u, 0u, 0u, 0u, "%s1", &actual_scc), 2u,
+		      "S_SUBB_U32 source1/destination alias");
+		Equal(actual_scc, 0u, "S_SUBB_U32 source1/destination alias SCC");
+	}
+
+	constexpr std::array<uint32_t, 6> shifts {0u, 1u, 31u, 32u, 33u, 63u};
+	constexpr std::array<uint32_t, 2> high_words {0x01234567u, 0x81234567u};
+	for (const uint32_t high: high_words)
+	{
+		constexpr uint32_t low = 0x89abcdefu;
+		for (const uint32_t shift: shifts)
+		{
+			const uint32_t shift_word = 0xffffffc0u | shift;
+			const auto expected = ArithmeticRight64Words(low, high, shift_word);
+			const uint32_t expected_scc = (expected[0] | expected[1]) != 0u ? 1u : 0u;
+			for (const uint32_t destination: {0u, 2u})
+			{
+				auto code = Parse({Sop2Word(0x23u, destination, 0u, 2u), kEnd});
+				const auto& instruction = code.GetInstructions().At(0);
+				if (instruction.type != ShaderInstructionType::SAshrI64 || instruction.format != ShaderInstructionFormat::Sdst2Ssrc02Ssrc1 ||
+				    instruction.dst.size != 2 || instruction.src[0].size != 2 || instruction.src[1].size != 1)
+				{
+					Fail("S_ASHR_I64 parser pair contract differs");
+				}
+				if (!ShaderInstructionLoweringPreconditions(instruction)) { Fail("aligned S_ASHR_I64 operands must pass lowering preconditions"); }
+				const Program program(Emit(code, 0xc0u, false, false, true).c_str());
+				uint32_t low_scc = UINT32_MAX;
+				uint32_t high_scc = UINT32_MAX;
+				const auto low_name = Core::String8::FromPrintf("%%s%u", destination);
+				const auto high_name = Core::String8::FromPrintf("%%s%u", destination + 1u);
+				Equal(EvaluateScalar(program, low, high, shift_word, 0u, 1u, low_name.c_str(), &low_scc), expected[0],
+				      "S_ASHR_I64 low word");
+				Equal(EvaluateScalar(program, low, high, shift_word, 0u, 1u, high_name.c_str(), &high_scc), expected[1],
+				      "S_ASHR_I64 high word");
+				Equal(low_scc, expected_scc, "S_ASHR_I64 SCC from low-word probe");
+				Equal(high_scc, expected_scc, "S_ASHR_I64 SCC from high-word probe");
+			}
+		}
+	}
+	{
+		auto odd_pair = Parse({Sop2Word(0x23u, 1u, 0u, 2u), kEnd});
+		if (ShaderInstructionLoweringPreconditions(odd_pair.GetInstructions().At(0)))
+		{
+			Fail("S_ASHR_I64 odd SGPR destination pair must remain rejected");
+		}
+	}
+	std::_Exit(0);
+}
+
+[[noreturn]] void RunNggFrontRefusalContracts()
+{
+	Initialize();
+	const auto subb = Parse({Sop2Word(0x05u, 3u, 0u, 1u), kEnd}, ShaderType::Vertex);
+	const auto subb_proof = ShaderProveNggFrontBodyLaneLocal(subb, 0u, {});
+	if (subb_proof.lane_local || subb_proof.refused_pc != 0u || subb_proof.reason == nullptr ||
+	    std::string_view(subb_proof.reason) != "S_SUBB_U32 borrow-in is not modeled by the NGG front proof")
+	{
+		Fail("NGG front body must explicitly refuse S_SUBB_U32");
+	}
+
+	const auto ashr = Parse({Sop2Word(0x23u, 3u, 0u, 2u), kEnd}, ShaderType::Vertex);
+	const auto ashr_proof = ShaderProveNggFrontBodyLaneLocal(ashr, 0u, {});
+	if (ashr_proof.lane_local || ashr_proof.refused_pc != 0u || ashr_proof.reason == nullptr ||
+	    std::string_view(ashr_proof.reason) != "S_ASHR_I64 pair shifts are not modeled by the NGG front proof")
+	{
+		Fail("NGG front body must explicitly refuse S_ASHR_I64");
+	}
+	std::_Exit(0);
 }
 
 [[noreturn]] void RunCanonicalModules(ShaderType stage = ShaderType::Pixel)
@@ -304,7 +560,8 @@ uint32_t Evaluate(const Program& program, uint32_t a, uint32_t b = 0u, uint32_t 
 	const Program nan_preserved(Emit(clamp_code, 0x40u, false, false).c_str());
 	Equal(Evaluate(nan_preserved, 0x7fc02000u), 0x7e01u, "non-DX10 clamp preserves NaN");
 	const Program ieee_clamp(Emit(clamp_code, 0x40u, true, true).c_str());
-	Equal(Evaluate(ieee_clamp, Bits(-2.0f)), 0xc000u, "IEEE mode disables float clamp");
+	Equal(Evaluate(ieee_clamp, Bits(-2.0f)), 0u, "IEEE mode keeps the clamp modifier");
+	Equal(Evaluate(ieee_clamp, 0x7fc00000u), 0u, "IEEE mode clamp follows DX10_CLAMP for NaN");
 	const Program widened(Emit(Parse(Unary(0x0b, true), stage)).c_str());
 	for (uint32_t half: {0u, 0x8000u, 1u, 0x3ffu, 0x400u, 0x3c00u, 0x7bffu, 0x7c00u, 0xfc00u})
 	{
@@ -680,8 +937,188 @@ void CaptureRejectionStdout()
 	std::_Exit(0);
 }
 
+
+// VOP3 form of a VOP2 float opcode with the CLAMP bit and the OMOD field (ISA 6.2).
+std::vector<uint32_t> ModifiedBinary(uint32_t opcode, bool clamp, uint32_t omod)
+{
+	return {(0x35u << 26u) | ((opcode + 0x100u) << 16u) | (clamp ? 0x8000u : 0u) | 16u,
+	        256u | (257u << 9u) | (omod << 27u), kEnd};
+}
+
+ShaderType g_float_mode_stage = ShaderType::Pixel;
+
+Program FloatModeProgram(const std::vector<uint32_t>& words, uint8_t float_mode, bool ieee, bool dx10)
+{
+	return Program(Emit(Parse(words, g_float_mode_stage), float_mode, ieee, dx10, true).c_str());
+}
+
+void IsNan(uint32_t actual, const char* label)
+{
+	if ((actual & 0x7fffffffu) <= 0x7f800000u) { Fail(std::string(label) + ": expected a NaN, got " + std::to_string(actual)); }
+}
+
+// Single-precision MODE contracts from the RDNA2 ISA (3.5 CLAMP/IEEE, 6.2 output
+// modifiers, 12.7/12.12 min/max selection). Literal inputs: v0, v1, v2.
+// Pixel programs take the initial RSRC1 controls; compute programs their recorded launch controls.
+[[noreturn]] void RunFloatModeContracts(ShaderType stage = ShaderType::Pixel)
+{
+	Initialize();
+	g_float_mode_stage = stage;
+	constexpr uint32_t kAdd = 3u, kMul = 8u, kMin = 15u, kMax = 16u;
+	constexpr uint32_t kMin3 = 0x151u, kMax3 = 0x154u, kMed3 = 0x157u;
+	constexpr uint32_t kOne = 0x3f800000u, kTwo = 0x40000000u, kThree = 0x40400000u, kHalf = 0x3f000000u;
+	constexpr uint32_t kOneAndHalf = 0x3fc00000u, kMinusThree = 0xc0400000u, kNegZero = 0x80000000u;
+	constexpr uint32_t kQuietNan = 0x7fc00000u, kSignalingNan = 0x7f800001u, kQuietedSignaling = 0x7fc00001u;
+	constexpr uint32_t kInf = 0x7f800000u;
+
+	// CLAMP saturates in every IEEE mode; DX10_CLAMP alone decides the NaN result.
+	{
+		const auto words = ModifiedBinary(kAdd, true, 0u);
+		const Program ieee_dx10 = FloatModeProgram(words, 0xc0u, true, true);
+		Equal(Evaluate(ieee_dx10, kQuietNan, 0u), 0u, "IEEE clamp: NaN becomes +0 with DX10_CLAMP");
+		Equal(Evaluate(ieee_dx10, kOneAndHalf, 0u), kOne, "IEEE clamp saturates above one");
+		Equal(Evaluate(ieee_dx10, 0xbf800000u, 0u), 0u, "IEEE clamp saturates below zero");
+		const Program ieee_pass = FloatModeProgram(words, 0xc0u, true, false);
+		IsNan(Evaluate(ieee_pass, kQuietNan, 0u), "IEEE clamp without DX10_CLAMP passes NaN");
+		Equal(Evaluate(ieee_pass, kOneAndHalf, 0u), kOne, "IEEE clamp without DX10_CLAMP saturates");
+		const Program plain_dx10 = FloatModeProgram(words, 0xc0u, false, true);
+		Equal(Evaluate(plain_dx10, kQuietNan, 0u), 0u, "clamp: NaN becomes +0 with DX10_CLAMP");
+	}
+
+	// OMOD applies only outside IEEE mode and only when f32 output denormals are flushed.
+	{
+		const auto mul2 = ModifiedBinary(kMul, false, 1u);
+		const Program scale = FloatModeProgram(mul2, 0xc0u, false, true);
+		Equal(Evaluate(scale, kOneAndHalf, kOne), kThree, "mul:2 doubles");
+		Equal(Evaluate(scale, kNegZero, kOne), 0u, "mul:2 flushes -0 to +0");
+		Equal(Evaluate(scale, 0x00400000u, kOne), 0u, "mul:2 flushes a denormal result");
+		Equal(Evaluate(scale, 0x7f000000u, kOne), kInf, "mul:2 saturates to +infinity");
+		Equal(Evaluate(scale, 0xff000000u, kOne), 0xff800000u, "mul:2 saturates to -infinity");
+		Equal(Evaluate(scale, kInf, kOne), kInf, "mul:2 keeps infinity");
+		IsNan(Evaluate(scale, kQuietNan, kOne), "mul:2 keeps NaN");
+		const Program quad = FloatModeProgram(ModifiedBinary(kMul, false, 2u), 0xc0u, false, true);
+		Equal(Evaluate(quad, kOne, kOne), 0x40800000u, "mul:4 quadruples");
+		Equal(Evaluate(quad, 0x7e800000u, kOne), kInf, "mul:4 saturates to infinity");
+		Equal(Evaluate(quad, 0x7e7fffffu, kOne), 0x7f7fffffu, "mul:4 reaches the largest finite value");
+		const Program halve = FloatModeProgram(ModifiedBinary(kMul, false, 3u), 0xc0u, false, true);
+		Equal(Evaluate(halve, kOne, kOne), kHalf, "div:2 halves");
+		Equal(Evaluate(halve, 0x01000000u, kOne), 0x00800000u, "div:2 reaches the smallest normal");
+		Equal(Evaluate(halve, 0x00800000u, kOne), 0u, "div:2 of the smallest normal flushes to +0");
+		Equal(Evaluate(halve, 0x80800000u, kOne), 0u, "div:2 underflow of a negative result flushes to +0");
+		Equal(Evaluate(FloatModeProgram(mul2, 0xc0u, true, true), kOneAndHalf, kOne), kOneAndHalf, "IEEE mode ignores OMOD");
+		Equal(Evaluate(FloatModeProgram(mul2, 0xf0u, false, true), kOneAndHalf, kOne), kOneAndHalf,
+		      "enabled f32 output denormals ignore OMOD");
+		Equal(Evaluate(FloatModeProgram(mul2, 0xe0u, false, true), kOneAndHalf, kOne), kOneAndHalf,
+		      "allowed output denormals ignore OMOD even when inputs flush");
+		Equal(Evaluate(FloatModeProgram(mul2, 0xd0u, false, true), kOneAndHalf, kOne), kThree,
+		      "flushed output denormals apply OMOD even when inputs are kept");
+	}
+
+	// V_MIN/V_MAX: NaN operand selection, signaling NaN quieting in IEEE mode, signed zeros.
+	for (const bool ieee: {false, true})
+	{
+		const Program minimum = FloatModeProgram(ModifiedBinary(kMin, false, 0u), 0xc0u, ieee, true);
+		const Program maximum = FloatModeProgram(ModifiedBinary(kMax, false, 0u), 0xc0u, ieee, true);
+		const uint32_t signaling_first  = ieee ? kQuietedSignaling : kOne;
+		Equal(Evaluate(minimum, kSignalingNan, kOne), signaling_first, "min: signaling NaN first operand");
+		Equal(Evaluate(minimum, kOne, kSignalingNan), signaling_first, "min: signaling NaN second operand");
+		Equal(Evaluate(maximum, kSignalingNan, kOne), signaling_first, "max: signaling NaN first operand");
+		Equal(Evaluate(maximum, kOne, kSignalingNan), signaling_first, "max: signaling NaN second operand");
+		Equal(Evaluate(minimum, 0x7fc12345u, kOne), kOne, "min: quiet NaN yields the other operand");
+		Equal(Evaluate(maximum, kOne, 0x7fc12345u), kOne, "max: quiet NaN yields the other operand");
+		Equal(Evaluate(minimum, 0x7fc12345u, 0xffd54321u), 0xffd54321u, "min: two quiet NaNs yield the second");
+		Equal(Evaluate(maximum, 0xffd54321u, 0x7fc12345u), 0x7fc12345u, "max: two quiet NaNs yield the second");
+		Equal(Evaluate(minimum, 0x7fc12345u, kSignalingNan), ieee ? kQuietedSignaling : kSignalingNan,
+		      "min: a signaling NaN is quieted ahead of a quiet NaN");
+		Equal(Evaluate(minimum, 0xff812345u, kSignalingNan), ieee ? 0xffc12345u : kSignalingNan,
+		      "min: the first signaling NaN is quieted");
+		Equal(Evaluate(minimum, 0u, kNegZero), kNegZero, "min of signed zeros is -0");
+		Equal(Evaluate(minimum, kNegZero, 0u), kNegZero, "min of signed zeros is -0 (reversed)");
+		Equal(Evaluate(maximum, kNegZero, 0u), 0u, "max of signed zeros is +0");
+		Equal(Evaluate(maximum, 0u, kNegZero), 0u, "max of signed zeros is +0 (reversed)");
+		Equal(Evaluate(minimum, kOne, kTwo), kOne, "ordered min");
+		Equal(Evaluate(maximum, kOne, kTwo), kTwo, "ordered max");
+
+		const Program min3 = FloatModeProgram(Ternary(kMin3), 0xc0u, ieee, true);
+		const Program max3 = FloatModeProgram(Ternary(kMax3), 0xc0u, ieee, true);
+		const Program med3 = FloatModeProgram(Ternary(kMed3), 0xc0u, ieee, true);
+		Equal(Evaluate(min3, kOne, kTwo, kThree), kOne, "min3 ordered");
+		Equal(Evaluate(max3, kOne, kTwo, kThree), kThree, "max3 ordered");
+		Equal(Evaluate(med3, kOne, kTwo, kThree), kTwo, "med3 ordered");
+		Equal(Evaluate(med3, kThree, kOne, kTwo), kTwo, "med3 maximum first");
+		Equal(Evaluate(med3, kOne, kThree, kTwo), kTwo, "med3 maximum second");
+		Equal(Evaluate(med3, 0u, 0u, kNegZero), 0u, "med3 of zeros");
+		Equal(Evaluate(min3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : kNegZero, "min3 with a signaling NaN");
+		Equal(Evaluate(max3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : 0u, "max3 with a signaling NaN");
+		Equal(Evaluate(med3, 0u, kNegZero, kSignalingNan), ieee ? kQuietedSignaling : kNegZero, "med3 with a NaN takes min3");
+		Equal(Evaluate(med3, kOne, kSignalingNan, kMinusThree), kMinusThree, "med3: quieted NaN then a number");
+		Equal(Evaluate(med3, kOne, kMinusThree, kSignalingNan), ieee ? kQuietedSignaling : kMinusThree,
+		      "med3: signaling NaN last");
+	}
+	std::_Exit(0);
+}
+
+[[noreturn]] void RunFloatToIntegerConversionContracts(ShaderType stage = ShaderType::Pixel)
+{
+	Initialize();
+	const Program to_unsigned(Emit(Parse(Unary(0x07u, false), stage), 0xc0u, false, false, true).c_str());
+	const Program to_signed(Emit(Parse(Unary(0x08u, false), stage), 0xc0u, false, false, true).c_str());
+
+	// RDNA2 V_CVT_*32_F32 truncates toward zero, saturates infinities and
+	// finite overflow, and returns zero for NaN. Boundary inputs stay inside
+	// the defined domain of SPIR-V's conversion instructions.
+	Equal(Evaluate(to_unsigned, Bits(1.9f)), 1u, "unsigned conversion truncates positive values");
+	Equal(Evaluate(to_unsigned, Bits(-1.9f)), 0u, "unsigned conversion clamps negative values");
+	Equal(Evaluate(to_unsigned, 0x80000000u), 0u, "unsigned conversion maps negative zero to zero");
+	Equal(Evaluate(to_unsigned, 0xff800000u), 0u, "unsigned conversion clamps negative infinity");
+	Equal(Evaluate(to_unsigned, 0x7f800000u), 0xffffffffu, "unsigned conversion saturates positive infinity");
+	Equal(Evaluate(to_unsigned, 0x7fc00000u), 0u, "unsigned conversion maps quiet NaN to zero");
+	Equal(Evaluate(to_unsigned, 0x7f800001u), 0u, "unsigned conversion maps signaling NaN to zero");
+	Equal(Evaluate(to_unsigned, 0x4f7fffffu), 0xffffff00u, "unsigned conversion preserves the largest in-range f32");
+	Equal(Evaluate(to_unsigned, 0x4f800000u), 0xffffffffu, "unsigned conversion saturates at 2^32");
+	Equal(Evaluate(to_unsigned, 0x7f800000u, 0u, 0u, 0xdeadbeefu, 0u), 0xdeadbeefu, "inactive unsigned conversion retains the destination");
+
+	Equal(Evaluate(to_signed, Bits(1.9f)), 1u, "signed conversion truncates positive values");
+	Equal(Evaluate(to_signed, Bits(-1.9f)), 0xffffffffu, "signed conversion truncates negative values");
+	Equal(Evaluate(to_signed, 0xcf000000u), 0x80000000u, "signed conversion preserves -2^31");
+	Equal(Evaluate(to_signed, 0xcf000001u), 0x80000000u, "signed conversion saturates below -2^31");
+	Equal(Evaluate(to_signed, 0x4effffffu), 0x7fffff80u, "signed conversion preserves the largest in-range f32");
+	Equal(Evaluate(to_signed, 0x4f000000u), 0x7fffffffu, "signed conversion saturates at 2^31");
+	Equal(Evaluate(to_signed, 0xff800000u), 0x80000000u, "signed conversion saturates negative infinity");
+	Equal(Evaluate(to_signed, 0x7f800000u), 0x7fffffffu, "signed conversion saturates positive infinity");
+	Equal(Evaluate(to_signed, 0x7fc00000u), 0u, "signed conversion maps quiet NaN to zero");
+	Equal(Evaluate(to_signed, 0x7f800001u), 0u, "signed conversion maps signaling NaN to zero");
+	Equal(Evaluate(to_signed, 0x7f800000u, 0u, 0u, 0xdeadbeefu, 0u), 0xdeadbeefu, "inactive signed conversion retains the destination");
+	std::_Exit(0);
+}
+
 } // namespace
 
+TEST(EmulatorShaderArithmetic, FloatModeClampOutputModifierAndMinMaxContracts) { ASSERT_EXIT(RunFloatModeContracts(), ::testing::ExitedWithCode(0), ""); }
+TEST(EmulatorShaderArithmetic, ScalarSubBorrowAndSigned64ShiftContracts)
+{
+	ASSERT_EXIT(RunScalarSop2Contracts(), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, SignedScalarBfe64ClampsSignExtendsAndReportsFullPairScc)
+{
+	ASSERT_EXIT(RunScalarBfe64Contracts(), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, NggFrontBodyRefusesNewScalarPairOperations)
+{
+	ASSERT_EXIT(RunNggFrontRefusalContracts(), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, ComputeFloatModeClampOutputModifierAndMinMaxContracts)
+{
+	ASSERT_EXIT(RunFloatModeContracts(ShaderType::Compute), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, FloatToIntegerConversionsSaturateWithoutUndefinedSpirvConversions)
+{
+	ASSERT_EXIT(RunFloatToIntegerConversionContracts(), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, ComputeFloatToIntegerConversionsSaturateWithoutUndefinedSpirvConversions)
+{
+	ASSERT_EXIT(RunFloatToIntegerConversionContracts(ShaderType::Compute), ::testing::ExitedWithCode(0), "");
+}
 TEST(EmulatorShaderArithmetic, CanonicalFp16EncodingsAssembleAndValidate) { ASSERT_EXIT(RunCanonicalModules(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, Fp16NarrowingValuesRoundingAndExec) { ASSERT_EXIT(RunNarrowing(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, Fp16UnaryAndConversionValues) { ASSERT_EXIT(RunHalfValues(), ::testing::ExitedWithCode(0), ""); }

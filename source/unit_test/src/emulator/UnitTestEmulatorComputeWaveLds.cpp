@@ -59,6 +59,28 @@ TEST(EmulatorComputeWaveLds, ParsesAtomicReturnDestinationAndFullOffset)
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorComputeWaveLds, ConditionalExchangeNeverLowersToAddition)
+{
+	// These opcode tables name conditional exchanges, not adds. Refuse them
+	// until their target-generation semantics and return widths are implemented.
+	for (const bool next_gen: {false, true})
+	{
+		for (const uint32_t opcode: {0x7eu, 0xfdu})
+		{
+			const uint32_t words[] = {0xd8000000u | (opcode << 18u) | 0x0112u, 0x04000302u, 0xbf810000u};
+			EXPECT_DEATH(
+			    {
+				    InitializeConfig();
+				    Config::SetNextGen(next_gen);
+				    ShaderCode code;
+				    code.SetType(ShaderType::Compute);
+				    (void)ShaderTryParseBounded(words, sizeof(words), &code);
+			    },
+			    "");
+		}
+	}
+}
+
 TEST(EmulatorComputeWaveLds, PreservesControlsBeforeLegacyAliasLowering)
 {
 	// A write2/GDS must remain distinguishable from the legacy write32 alias.

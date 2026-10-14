@@ -10,44 +10,31 @@ namespace Kyty::Libs::Graphics {
 
 // Branch / loop emission only. Multi-join ownership lives in ShaderSpirvScJoin.*
 
-static bool instruction_is_conditional_branch(const ShaderInstruction& inst)
+// Only the structured path reaches these emitters, after GenerateSource built
+// the guest CFG and refused every graph it cannot structure.
+static const ShaderControlFlowGraph& control_flow(const Spirv* spirv)
 {
-	switch (inst.type)
-	{
-		case ShaderInstructionType::SCbranchExecz:
-		case ShaderInstructionType::SCbranchExecnz:
-		case ShaderInstructionType::SCbranchScc0:
-		case ShaderInstructionType::SCbranchScc1:
-		case ShaderInstructionType::SCbranchVccz:
-		case ShaderInstructionType::SCbranchVccnz: return true;
-		default: return false;
-	}
+	const auto& cfg = spirv->GetControlFlow();
+	EXIT_IF(cfg.blocks.empty());
+	return cfg;
 }
 
-// A forward conditional branch inside a do-while loop (closed by a conditional
-// back edge) that targets the instruction right after that back edge is a
-// break: the loop merge block falls through to the same guest instruction.
-// Returns the back edge PC of the innermost such loop, or 0.
-static uint32_t find_conditional_loop_break(const ShaderCode& code, const ShaderInstruction& inst)
+// A forward conditional branch to the merge of its innermost do-while loop
+// (closed by a conditional back edge) is a break: the merge block falls through
+// to the instruction after that back edge. Returns the back edge PC, or 0.
+static uint32_t find_conditional_loop_break(const ShaderControlFlowGraph& cfg, const ShaderInstruction& inst)
 {
-	const auto exit     = ShaderLabel(inst);
-	uint32_t   backedge = 0;
-	uint32_t   header   = 0;
-	for (const auto& candidate: code.GetInstructions())
+	const uint32_t index = cfg.InnermostLoopAt(inst.pc);
+	if (index == kShaderCfgNone)
 	{
-		if (!instruction_is_conditional_branch(candidate))
-		{
-			continue;
-		}
-		const auto loop = ShaderLabel(candidate);
-		if (loop.GetDst() < candidate.pc && loop.GetDst() <= inst.pc && inst.pc < candidate.pc &&
-		    exit.GetDst() == candidate.pc + 4u && (backedge == 0 || loop.GetDst() > header))
-		{
-			backedge = candidate.pc;
-			header   = loop.GetDst();
-		}
+		return 0;
 	}
-	return backedge;
+	const auto& loop = cfg.loops[index];
+	if (!loop.conditional_latch || loop.merge == kShaderCfgNone || cfg.blocks[loop.merge].pc != ShaderLabel(inst).GetDst())
+	{
+		return 0;
+	}
+	return cfg.blocks[loop.latch].last_pc;
 }
 
 static bool instruction_changes_control_flow(const ShaderInstruction& inst)
@@ -81,64 +68,43 @@ static bool loop_exit_is_in_header_block(const ShaderCode& code, const ShaderLab
 	return true;
 }
 
-static String8 find_backward_loop_merge(const ShaderCode& code, const ShaderLabel& backedge)
+// Structured merge of the loop closed by a backward SBranch, named after the
+// first conditional branch that exits to it. Empty when the loop has no merge
+// after its latch or no conditional branch leads there.
+static String8 find_backward_loop_merge(const ShaderControlFlowGraph& cfg, const ShaderCode& code, const ShaderLabel& backedge)
 {
-	String8 merge;
-
-	for (const auto& inst: code.GetInstructions())
+	const uint32_t index = cfg.InnermostLoopAt(backedge.GetSrc());
+	if (index == kShaderCfgNone)
 	{
-		if (inst.pc < backedge.GetDst() || inst.pc >= backedge.GetSrc() || !instruction_is_conditional_branch(inst))
-		{
-			continue;
-		}
-
-		const auto exit = ShaderLabel(inst);
-		if (exit.GetDst() <= backedge.GetSrc())
-		{
-			continue;
-		}
-
-		if (!loop_exit_is_in_header_block(code, backedge, inst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !loop_exit_is_in_header_block(code, backedge, inst) condition ignored (continuing)\n"); }
-
-		if (merge.Size() == 0)
-		{
-			merge = exit.ToString();
-			continue;
-		}
-
-		if (merge != exit.ToString()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: merge != exit.ToString() condition ignored (continuing)\n"); }
+		return {};
 	}
-
-	return merge;
+	const auto& loop = cfg.loops[index];
+	if (cfg.blocks[loop.header].pc != backedge.GetDst() || loop.merge == kShaderCfgNone || loop.merge_branch_pc == kShaderCfgNone)
+	{
+		return {};
+	}
+	const auto& exit = code.GetInstructions().At(cfg.blocks[cfg.BlockAt(loop.merge_branch_pc)].last);
+	if (!loop_exit_is_in_header_block(code, backedge, exit)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !loop_exit_is_in_header_block(code, backedge, inst) condition ignored (continuing)\n"); }
+	return ShaderLabel(exit).ToString();
 }
 
-static uint32_t find_backward_loop_for_exit(const ShaderCode& code, const ShaderLabel& exit)
+// The loop closed by a backward SBranch outside the interval form whose
+// structured merge is this exit. Returns its latch PC, or 0.
+static uint32_t find_backward_loop_for_exit(const ShaderControlFlowGraph& cfg, const ShaderCode& code, const ShaderLabel& exit)
 {
-	uint32_t owner = 0;
-
-	for (const auto& inst: code.GetInstructions())
+	for (uint32_t index = cfg.InnermostLoopAt(exit.GetSrc()); index != kShaderCfgNone; index = cfg.loops[index].parent)
 	{
-		if (inst.type != ShaderInstructionType::SBranch)
+		const auto& loop  = cfg.loops[index];
+		const auto& latch = code.GetInstructions().At(cfg.blocks[loop.latch].last);
+		if (latch.type != ShaderInstructionType::SBranch || loop.merge_branch_pc != exit.GetSrc() ||
+		    cfg.blocks[loop.merge].pc != exit.GetDst())
 		{
 			continue;
 		}
-
-		const auto backedge = ShaderLabel(inst);
-		SpirvSBranchLoop loop;
-		if (ScJoinFindSBranchLoop(code, backedge.GetDst(), &loop))
-		{
-			continue;
-		}
-		if (backedge.GetDst() >= backedge.GetSrc() || find_backward_loop_merge(code, backedge) != exit.ToString())
-		{
-			continue;
-		}
-
-		if (owner != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: owner != 0 condition ignored (continuing)\n"); }
-		owner = backedge.GetSrc();
+		SpirvSBranchLoop interval;
+		return ScJoinFindSBranchLoop(code, cfg.blocks[loop.header].pc, &interval) ? 0 : latch.pc;
 	}
-
-	return owner;
+	return 0;
 }
 
 static String8 selection_merge_name(const ShaderCode& code, uint32_t source_pc, const String8& guest_merge)
@@ -189,7 +155,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 			return true;
 		}
 		String8 continue_label = String8::FromPrintf("loop_continue_%04" PRIx32, inst.pc);
-		String8 merge_label    = find_backward_loop_merge(code, branch);
+		String8 merge_label    = find_backward_loop_merge(control_flow(spirv), code, branch);
 		const bool has_exit    = merge_label.Size() != 0;
 		if (!has_exit)
 		{
@@ -363,7 +329,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	}
 	SpirvSBranchLoop exit_loop;
 	const bool structured_loop_exit = ScJoinFindSBranchLoopExit(code, inst, &exit_loop);
-	const uint32_t loop_backedge = structured_loop_exit ? 0 : find_backward_loop_for_exit(code, label);
+	const uint32_t loop_backedge = structured_loop_exit ? 0 : find_backward_loop_for_exit(control_flow(spirv), code, label);
 
 	// Promote a forward conditional to if/else only for a true diamond: the
 	// block before the taken target is an unconditional branch to a join that
@@ -562,7 +528,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		label_str = exit_loop.MergeName();
 	}
 	const uint32_t loop_break = (!structured_loop_exit && loop_backedge == 0 && !discard && label.GetDst() > inst.pc)
-	                                ? find_conditional_loop_break(code, inst)
+	                                ? find_conditional_loop_break(control_flow(spirv), inst)
 	                                : 0;
 	if (loop_break != 0)
 	{

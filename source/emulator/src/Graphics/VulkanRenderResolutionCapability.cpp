@@ -124,6 +124,7 @@ VulkanRenderResolutionCapabilityStatus NormalizeVulkanResolutionAttachmentReques
 	         VK_FORMAT_FEATURE_TRANSFER_SRC_BIT, &normalized_usage, &required_features);
 	AddUsage((request.usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0, ResolutionImageUsage::TransferDestination,
 	         VK_FORMAT_FEATURE_TRANSFER_DST_BIT, &normalized_usage, &required_features);
+	required_features |= static_cast<uint64_t>(request.format_features);
 
 	normalized->capability_request = {
 	    request.extent,

@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,8 @@ std::atomic<bool> g_stop {false};
 Core::Thread*     g_thread = nullptr;
 Kyty::Agent::LocalTransport::Listener g_listener {};
 std::atomic<bool> g_client_busy {false};
+std::mutex g_client_connection_mutex;
+Kyty::Agent::LocalTransport::Connection* g_client_connection = nullptr;
 
 void HandleScheduledPadPresent(uint64_t present)
 {
@@ -90,7 +93,7 @@ std::string HelpResult()
 	              "{\"tool\":\"trace_rt_lifetime_arm\"},"
 	              "{\"tool\":\"pad_down\",\"args\":{\"button\":\"cross\"}},"
 	              "{\"tool\":\"pad_up\",\"args\":{\"button\":\"cross\"}},"
-	              "{\"tool\":\"pad_tap\",\"args\":{\"button\":\"cross\",\"at_present\":8000,\"repeat\":2,\"present_delta\":40}},"
+	              "{\"tool\":\"pad_tap\",\"args\":{\"button\":\"cross\",\"press_samples\":1,\"at_present\":8000,\"repeat\":2,\"present_delta\":40}},"
 	              "{\"tool\":\"pad_axis\",\"args\":{\"axis\":\"left_x\",\"value\":128}},"
 	              "{\"tool\":\"pad_clear\"},"
 	              "{\"tool\":\"wait_present\",\"args\":{\"min\":1,\"delta\":20,\"timeout_ms\":15000}},"
@@ -103,7 +106,7 @@ std::string HelpResult()
 	              "],"
 	              "\"capabilities\":{\"transport\":\"local_only\",\"bounded_responses\":true,\"debug_snapshot\":true,"
 	              "\"event_sequence_filter\":true,\"event_code_filter\":true,\"controller_input\":true,"
-	              "\"scheduled_present_taps\":true,\"explicit_rt_lifetime_arm\":true,"
+	              "\"scheduled_present_taps\":true,\"configurable_tap_press_samples\":true,\"explicit_rt_lifetime_arm\":true,"
 	              "\"live_execution_control\":false,\"guest_memory_access\":false,\"host_path_access\":false,"
 	              "\"host_command_execution\":false}"
 	              "}",
@@ -348,6 +351,8 @@ std::string PerformanceResult(bool reset)
 	out += ',';
 	out += "\"wait_reg_mem_satisfied\":" + std::to_string(stats.wait_reg_mem_satisfied);
 	out += ",\"wait_reg_mem_current_producer\":" + std::to_string(stats.wait_reg_mem_current_producer);
+	out += ",\"render_pass_begins\":" + std::to_string(stats.render_pass_begins);
+	out += ",\"render_pass_continuations\":" + std::to_string(stats.render_pass_continuations);
 	out += ",\"wait_reg_mem_queued_producer\":" + std::to_string(stats.wait_reg_mem_queued_producer);
 	out += ",\"wait_reg_mem_producer_mismatch\":" + std::to_string(stats.wait_reg_mem_producer_mismatch);
 	out += ",\"wait_reg_mem_producer_not_found\":" + std::to_string(stats.wait_reg_mem_producer_not_found);
@@ -833,10 +838,14 @@ std::string HandleTraceRtLifetimeArm(const Request& req)
 std::string HandlePadButton(const Request& req)
 {
 	static constexpr const char* button_only_keys[] = {"button"};
-	static constexpr const char* scheduled_keys[]   = {"button", "at_present", "repeat", "present_delta"};
+	static constexpr const char* immediate_tap_keys[] = {"button", "press_samples"};
+	static constexpr const char* scheduled_keys[]     = {"button", "at_present", "repeat", "present_delta", "press_samples"};
 	const bool scheduled_request = req.kind == Tool::PadTap && ArgsHasKey(req.args_json, "at_present");
-	if (!ArgsHaveOnlyKeys(req.args_json, scheduled_request ? scheduled_keys : button_only_keys,
-	                      scheduled_request ? std::size(scheduled_keys) : std::size(button_only_keys)))
+	const bool valid_keys = req.kind == Tool::PadTap
+	                            ? ArgsHaveOnlyKeys(req.args_json, scheduled_request ? scheduled_keys : immediate_tap_keys,
+	                                               scheduled_request ? std::size(scheduled_keys) : std::size(immediate_tap_keys))
+	                            : ArgsHaveOnlyKeys(req.args_json, button_only_keys, std::size(button_only_keys));
+	if (!valid_keys)
 	{
 		return FormatErr(req.id, "invalid_args", "pad request contains an unknown or duplicate argument");
 	}
@@ -849,6 +858,15 @@ std::string HandlePadButton(const Request& req)
 	if (!Libs::Controller::AgentPadButtonFromName(button_name.c_str(), &button))
 	{
 		return FormatErr(req.id, "pad_unknown_button", "unknown button name");
+	}
+	const bool has_press_samples = req.kind == Tool::PadTap && ArgsHasKey(req.args_json, "press_samples");
+	uint32_t    press_samples     = Libs::Controller::kAgentPadTapPressSamples;
+	if (has_press_samples &&
+	    (!ArgsGetU32(req.args_json, "press_samples", &press_samples) ||
+	     press_samples < Libs::Controller::kAgentPadTapPressSamplesMin ||
+	     press_samples > Libs::Controller::kAgentPadTapPressSamplesMax))
+	{
+		return FormatErr(req.id, "invalid_args", "press_samples must be an unsigned integer from 1 through 2");
 	}
 	if (req.kind != Tool::PadTap)
 	{
@@ -866,7 +884,7 @@ std::string HandlePadButton(const Request& req)
 		{
 			return FormatErr(req.id, "invalid_args", "repeat and present_delta require at_present");
 		}
-		if (!Libs::Controller::AgentPadScheduleTap(button))
+		if (!Libs::Controller::AgentPadScheduleTap(button, press_samples))
 		{
 			return FormatErr(req.id, "tap_pending", "a tap is already pending or the button is held");
 		}
@@ -895,7 +913,8 @@ std::string HandlePadButton(const Request& req)
 		return FormatErr(req.id, "invalid_args", "present_delta must be positive when repeat is greater than one");
 	}
 
-	const auto schedule_result = Libs::Controller::AgentPadScheduleTaps(button, at_present, repeat, present_delta);
+	const auto schedule_result =
+	    Libs::Controller::AgentPadScheduleTaps(button, at_present, repeat, present_delta, press_samples);
 	if (schedule_result == Libs::Controller::AgentPadScheduleResult::Invalid)
 	{
 		return FormatErr(req.id, "invalid_args", "scheduled present targets overflow or are invalid");
@@ -1257,6 +1276,10 @@ void HandleClient(Kyty::Agent::LocalTransport::Connection* connection)
 		Kyty::Agent::LocalTransport::Close(connection);
 		return;
 	}
+	{
+		std::lock_guard<std::mutex> lock(g_client_connection_mutex);
+		g_client_connection = connection;
+	}
 
 	while (!g_stop.load())
 	{
@@ -1276,7 +1299,14 @@ void HandleClient(Kyty::Agent::LocalTransport::Connection* connection)
 		}
 	}
 
-	Kyty::Agent::LocalTransport::Close(connection);
+	{
+		std::lock_guard<std::mutex> lock(g_client_connection_mutex);
+		if (g_client_connection == connection)
+		{
+			g_client_connection = nullptr;
+		}
+		Kyty::Agent::LocalTransport::Close(connection);
+	}
 	g_client_busy.store(false);
 }
 
@@ -1390,6 +1420,13 @@ void Stop()
 	Libs::Graphics::WindowSetPresentCallback(nullptr);
 	g_stop.store(true);
 	Kyty::Agent::LocalTransport::Interrupt(&g_listener);
+	{
+		std::lock_guard<std::mutex> lock(g_client_connection_mutex);
+		if (g_client_connection != nullptr)
+		{
+			Kyty::Agent::LocalTransport::Interrupt(g_client_connection);
+		}
+	}
 	if (g_thread != nullptr)
 	{
 		g_thread->Join();

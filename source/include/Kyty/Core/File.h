@@ -142,7 +142,7 @@ public:
 	static bool             CopyFile(const String& src, const String& dst);
 	static bool             MoveFile(const String& src, const String& dst);
 	static void             RemoveReadonly(const String& name);
-	static void             SyncDirectories(const String& src_dir, const String& dst_dir, bool del_dst = true);
+	[[nodiscard]] static bool SyncDirectories(const String& src_dir, const String& dst_dir, bool del_dst = true);
 
 	static void   SetAssetsDir(const String& dir);
 	static String GetAssetsDir();

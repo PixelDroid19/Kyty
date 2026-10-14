@@ -1,6 +1,7 @@
 #include "LibCInternal.h"
 
 #include "Kyty/Core/DbgAssert.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/Memalign.h"
@@ -42,6 +43,11 @@ static bool register_allocation(void* ptr, HostAllocationRecord record)
 	std::lock_guard lock(g_allocations_mutex);
 	const bool inserted = g_allocations.emplace(ptr, record).second;
 	g_allocations_count.store(g_allocations.size(), std::memory_order_release);
+	// The guest owns these bytes, so HLE calls that receive them must accept them.
+	if (inserted && record.size != 0)
+	{
+		Core::VirtualMemory::LendHostAllocation(reinterpret_cast<uint64_t>(ptr), record.size);
+	}
 	return inserted;
 }
 
@@ -62,6 +68,10 @@ static bool claim_allocation(void* ptr, HostAllocationRecord* record)
 	*record = it->second;
 	g_allocations.erase(it);
 	g_allocations_count.store(g_allocations.size(), std::memory_order_release);
+	if (record->size != 0)
+	{
+		Core::VirtualMemory::ReclaimHostAllocation(reinterpret_cast<uint64_t>(ptr));
+	}
 	return true;
 }
 

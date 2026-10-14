@@ -25,13 +25,19 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 	inst.src[0].constant.i = imm;
 	inst.src_num           = 1;
 
-	auto set_compare = [&inst](ShaderInstructionType type)
+	auto set_compare = [&inst, imm](ShaderInstructionType type, bool unsigned_immediate)
 	{
 		inst.src[1] = inst.src[0];
-		inst.src[0] = inst.dst;
-		inst.dst    = {};
-		inst.type   = type;
-		inst.format = ShaderInstructionFormat::Ssrc0Ssrc1;
+		if (unsigned_immediate)
+		{
+			// CMPK compares use a zero-extended SIMM16 for U32 and a sign-extended
+			// SIMM16 for I32 (RDNA2 ISA, SOPK comparison semantics).
+			inst.src[1].constant.i = static_cast<uint16_t>(imm);
+		}
+		inst.src[0]  = inst.dst;
+		inst.dst     = {};
+		inst.type    = type;
+		inst.format  = ShaderInstructionFormat::Ssrc0Ssrc1;
 		inst.src_num = 2;
 	};
 
@@ -47,18 +53,18 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 			inst.src[1]  = inst.dst;
 			inst.src_num = 2;
 			break;
-		case 0x03: set_compare(ShaderInstructionType::SCmpEqI32); break;
-		case 0x04: set_compare(ShaderInstructionType::SCmpLgI32); break;
-		case 0x05: set_compare(ShaderInstructionType::SCmpGtI32); break;
-		case 0x06: set_compare(ShaderInstructionType::SCmpGeI32); break;
-		case 0x07: set_compare(ShaderInstructionType::SCmpLtI32); break;
-		case 0x08: set_compare(ShaderInstructionType::SCmpLeI32); break;
-		case 0x09: set_compare(ShaderInstructionType::SCmpEqU32); break;
-		case 0x0A: set_compare(ShaderInstructionType::SCmpLgU32); break;
-		case 0x0B: set_compare(ShaderInstructionType::SCmpGtU32); break;
-		case 0x0C: set_compare(ShaderInstructionType::SCmpGeU32); break;
-		case 0x0D: set_compare(ShaderInstructionType::SCmpLtU32); break;
-		case 0x0E: set_compare(ShaderInstructionType::SCmpLeU32); break;
+		case 0x03: set_compare(ShaderInstructionType::SCmpEqI32, false); break;
+		case 0x04: set_compare(ShaderInstructionType::SCmpLgI32, false); break;
+		case 0x05: set_compare(ShaderInstructionType::SCmpGtI32, false); break;
+		case 0x06: set_compare(ShaderInstructionType::SCmpGeI32, false); break;
+		case 0x07: set_compare(ShaderInstructionType::SCmpLtI32, false); break;
+		case 0x08: set_compare(ShaderInstructionType::SCmpLeI32, false); break;
+		case 0x09: set_compare(ShaderInstructionType::SCmpEqU32, true); break;
+		case 0x0A: set_compare(ShaderInstructionType::SCmpLgU32, true); break;
+		case 0x0B: set_compare(ShaderInstructionType::SCmpGtU32, true); break;
+		case 0x0C: set_compare(ShaderInstructionType::SCmpGeU32, true); break;
+		case 0x0D: set_compare(ShaderInstructionType::SCmpLtU32, true); break;
+		case 0x0E: set_compare(ShaderInstructionType::SCmpLeU32, true); break;
 		case 0x0F:
 			// RDNA2 ISA: tmp = D.i32; D.i32 += signext(SIMM16); SCC = (tmp[31] == SIMM16[15] &&
 			// tmp[31] != D.i32[31]). That is s_add_i32 D, D, imm with its signed-overflow SCC.

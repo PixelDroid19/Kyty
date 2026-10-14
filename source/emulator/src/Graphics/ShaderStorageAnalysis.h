@@ -8,7 +8,12 @@
 
 #include "ShaderDebugInternal.h"
 
+#include <bitset>
 #include <cstdint>
+#include <map>
+#include <mutex>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace Kyty::Libs::Graphics {
@@ -27,6 +32,66 @@ struct ShaderSamplerOperationEvidence
 };
 
 [[nodiscard]] ShaderSamplerOperationEvidence AnalyzeShaderSamplerOperationEvidence(const ShaderCode& code, int start_register);
+
+struct ShaderDynamicSLoadUse
+{
+	ShaderDynamicSLoadResourceKind kind              = ShaderDynamicSLoadResourceKind::StorageBuffer;
+	ShaderStorageUsage             storage_usage     = ShaderStorageUsage::ReadOnly;
+	ShaderTextureUsage             texture_usage     = ShaderTextureUsage::Unknown;
+	State::ImageSampleOperation sampler_operation = State::ImageSampleOperation::Regular;
+	ShaderGen5SampledTextureShape sampled_shape = ShaderGen5SampledTextureShape::TwoDimensional;
+	uint32_t                    last_consumer_pc   = 0;
+	bool                        raw_vmem_oob_guarded = false;
+	bool                        sampled_shape_known = false;
+	bool                        found              = false;
+	bool                        valid              = true;
+};
+
+// Scalar bytes read through one dynamic S_LOAD mapping, as computed by
+// ShaderDynamicSLoadScalarSpan from a zero byte count.
+struct ShaderDynamicSLoadSpan
+{
+	uint64_t required_bytes = 0;
+	bool     exact          = false;
+};
+
+// Results of the resource analyses that depend only on the program code and one
+// start register. Each memo belongs to one immutable code object and is shared
+// by every draw of that program; a null memo analyzes the code directly. Entry
+// values passed to DirectImageUse must come from this code's own scalar flow.
+class ShaderCodeResourceMemo
+{
+public:
+	[[nodiscard]] ShaderStorageUseEvidence       StorageUse(const ShaderCode& code, int start_register) const;
+	[[nodiscard]] ShaderDirectImageUse           DirectImageUse(const ShaderCode& code, int start_register,
+	                                                            const std::vector<std::bitset<106>>* entry_values) const;
+	[[nodiscard]] ShaderSamplerOperationEvidence SamplerOperation(const ShaderCode& code, int start_register) const;
+	// Consumers of every whole-descriptor S_LOAD up to the first branch, indexed
+	// by instruction; other entries keep the default value.
+	[[nodiscard]] const std::vector<ShaderDynamicSLoadUse>& DescriptorSLoadUses(const ShaderCode& code) const;
+	[[nodiscard]] ShaderDynamicSLoadSpan DynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping) const;
+
+private:
+	mutable std::mutex                                              m_mutex;
+	mutable std::unordered_map<int, ShaderStorageUseEvidence>       m_storage_use;
+	mutable std::unordered_map<int, ShaderDirectImageUse>           m_direct_image_use;
+	mutable std::unordered_map<int, ShaderDirectImageUse>           m_entry_image_use;
+	mutable std::unordered_map<int, ShaderSamplerOperationEvidence> m_sampler_operation;
+	mutable std::vector<ShaderDynamicSLoadUse>                      m_descriptor_sload_uses;
+	mutable bool                                                    m_descriptor_sload_uses_ready = false;
+	// Keyed by load PC, last consumer PC, destination register and dword count.
+	mutable std::map<std::tuple<uint32_t, uint32_t, int, int>, ShaderDynamicSLoadSpan> m_dynamic_sload_spans;
+};
+
+[[nodiscard]] ShaderStorageUseEvidence       AnalyzeShaderStorageUse(const ShaderCode& code, int start_register,
+                                                                     const ShaderCodeResourceMemo* memo);
+[[nodiscard]] ShaderDirectImageUse           AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register,
+                                                                         const std::vector<std::bitset<106>>* entry_values,
+                                                                         const ShaderCodeResourceMemo* memo);
+[[nodiscard]] ShaderSamplerOperationEvidence AnalyzeShaderSamplerOperationEvidence(const ShaderCode& code, int start_register,
+                                                                                   const ShaderCodeResourceMemo* memo);
+[[nodiscard]] ShaderDynamicSLoadSpan AnalyzeShaderDynamicSLoadSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping,
+                                                                  const ShaderCodeResourceMemo* memo);
 
 void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, int start_index, int slot, ShaderTextureUsage usage,
                             const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer);
@@ -50,17 +115,46 @@ bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, co
 void ShaderAccumulateScalarBufferLoadSpan(const ShaderInstruction& inst, uint64_t* required_bytes, bool* dynamic_offset);
 void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                          ShaderParsedUsage* info, const uint32_t* extended_buffer, uint16_t eud_size_dw,
-                                         int user_data_register_base);
+                                         int user_data_register_base, const ShaderScalarFlow& scalar_flow,
+                                         const ShaderCodeResourceMemo* memo);
 void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
-                                             int user_sgpr_num, int user_data_register_base);
+                                             int user_sgpr_num, int user_data_register_base, const ShaderScalarFlow& scalar_flow);
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
-                                        ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base);
+                                        ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base,
+                                        const ShaderScalarFlow& scalar_flow);
+// Source of guest descriptor-table words for ShaderSnapshotGuestDescriptorTable.
+// Without an active scope the production read is Core::VirtualMemory::CopyFromGuest.
+class ShaderGuestDescriptorReader
+{
+public:
+	ShaderGuestDescriptorReader()                                              = default;
+	ShaderGuestDescriptorReader(const ShaderGuestDescriptorReader&)            = delete;
+	ShaderGuestDescriptorReader& operator=(const ShaderGuestDescriptorReader&) = delete;
+	virtual ~ShaderGuestDescriptorReader()                                     = default;
+
+	// Fills exactly `dwords` words; false means the read was refused.
+	[[nodiscard]] virtual bool Read(uint64_t guest_address, uint32_t dwords, uint32_t* words) = 0;
+};
+
+// Installs a reader for the current thread only and restores the previous one on destruction.
+class ScopedShaderGuestDescriptorReader
+{
+public:
+	explicit ScopedShaderGuestDescriptorReader(ShaderGuestDescriptorReader* reader);
+	ScopedShaderGuestDescriptorReader(const ScopedShaderGuestDescriptorReader&)            = delete;
+	ScopedShaderGuestDescriptorReader& operator=(const ScopedShaderGuestDescriptorReader&) = delete;
+	~ScopedShaderGuestDescriptorReader();
+
+private:
+	ShaderGuestDescriptorReader* m_previous;
+};
+
 // Copies a descriptor table from guest memory, retrying until two reads agree.
 bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords, std::vector<uint32_t>* snapshot);
 bool ShaderIsDynamicScalarStorageConsumer(const ShaderBindResources& bind, const ShaderInstruction& inst);
 bool ShaderStorageResourceHasDynamicSLoad(const ShaderBindResources& bind, int storage_index);
 void ShaderPruneUnusedMetadataStorage(const ShaderCode& code, ShaderStorageResources* resources, int user_sgpr_num,
-                                      int user_data_register_base);
+                                      int user_data_register_base, const ShaderCodeResourceMemo* memo);
 
 // Vertex input decode helpers, shared by the usage-parse paths.
 const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code);

@@ -7,6 +7,10 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+namespace Kyty::Libs::Graphics {
+struct ShaderPixelColorExports;
+} // namespace Kyty::Libs::Graphics
+
 namespace Kyty::Libs::Graphics::State {
 
 struct ScissorRect
@@ -203,6 +207,10 @@ struct ColorTargetLayout
 // CB_TARGET_MASK admits a render-target channel and CB_SHADER_MASK admits the
 // corresponding pixel-shader export. Vulkan must receive their intersection.
 [[nodiscard]] uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32_t target_index);
+// Only suppress an absent export when its summary came from a parsed program.
+[[nodiscard]] uint8_t ResolveColorWriteAgainstExport(uint8_t channel_mask, uint8_t export_enable, bool summary_available);
+// UINT16 compressed exports only write channels selected by EXP.EN.
+[[nodiscard]] uint8_t ResolveColorWriteAgainstUint16Export(uint8_t channel_mask, uint8_t export_enable);
 // DB_DEPTH_CONTROL can suppress color on a depth pass (Z-only update) or allow
 // color on a depth fail. A later untextured draw that shares the previous
 // mesh and depth would otherwise replace the textured color.
@@ -210,8 +218,40 @@ struct ColorTargetLayout
                                                     bool enable_color_on_depth_fail);
 // A no-export pixel shader can still be required for depth/stencil, discard, or explicit memory effects.
 // The latter are verified from decoded shader code before disabling the stage.
-[[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader,
-                                            const HW::DepthControl& depth);
+[[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, const HW::DepthControl& depth);
+
+// Dual-source (SRC1) admission for blend0 with its guest decision reasons. Guest state is checked
+// before host capability, so each refusal names the first failing input.
+enum class DualSourceBlendDecision : uint8_t
+{
+	NotConsumed,
+	Eligible,
+	Operation,
+	Targets,
+	Exports,
+	Modes,
+	ComponentOrder,
+	HostCapability,
+};
+
+struct DualSourceBlendInputs
+{
+	HW::BlendControl                                     blend0;
+	bool                                                 blend_bypass0    = false;
+	bool                                                 slot0_active     = false; // configured, active, defined format
+	uint32_t                                             targets_num      = 0;
+	bool                                                 program_admitted = false; // Gen5, stage enabled, not embedded
+	bool                                                 null_exports_only = false;
+	const Kyty::Libs::Graphics::ShaderPixelColorExports* exports          = nullptr;
+	const uint8_t*                                       output_mode      = nullptr; // eight guest modes
+	const uint8_t*                                       output_order     = nullptr; // eight COMP_SWAP orders
+	bool                                                 host_dual_source_enabled         = false;
+	uint32_t                                             host_max_dual_source_attachments = 0;
+	// Plain flag so the resolver stays pure. The caller computes it only after the other host inputs pass.
+	bool target0_blendable = false;
+};
+
+[[nodiscard]] DualSourceBlendDecision ResolveDualSourceBlend(const DualSourceBlendInputs& in);
 
 // A sampled surface may reuse a render target or storage texture when
 // FindRenderTexture / FindStorageTexture found a live object (Equals, non-exact
@@ -350,6 +390,18 @@ struct SamplerLodRange
 
 [[nodiscard]] SamplerLodRange ResolveSamplerLodRange(uint16_t min_lod_u48, uint16_t max_lod_u48, uint16_t lod_bias_bits,
                                                      uint8_t mip_filter);
+
+// S# XY_MAG/MIN_FILTER 2 and 3 select anisotropic point and linear filtering;
+// MAX_ANISO_RATIO 0..4 is 1x..16x. A host level above 1 raises samplers whose
+// minification is linear (1 or 3) to at least that ratio.
+struct SamplerAnisotropy
+{
+	bool  enabled   = false;
+	float max_ratio = 1.0f;
+};
+
+[[nodiscard]] SamplerAnisotropy ResolveSamplerAnisotropy(uint8_t mag_filter, uint8_t min_filter, uint8_t max_aniso_ratio,
+                                                         float host_min_ratio);
 
 } // namespace Kyty::Libs::Graphics::State
 

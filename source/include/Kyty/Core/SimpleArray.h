@@ -30,7 +30,7 @@ template <typename T, typename R>
 using IsNotTriviallyCopyable = typename std::enable_if<!std::is_trivially_copyable<T>::value, R>::type;
 
 template <typename T>
-class SimpleArray: public RefCounter<Mutex>
+class SimpleArray: public RefCounter
 {
 public:
 	using ValueType       = T;

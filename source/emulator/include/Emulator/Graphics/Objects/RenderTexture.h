@@ -31,6 +31,8 @@ enum class RenderTextureFormat : uint64_t
 	R16G16B16A16Sfloat,
 	A2B10G10R10Unorm,
 	R32G32B32A32Sfloat,
+	R16Uint,
+	R16G16Uint,
 };
 
 struct RenderTextureFormatInfo
@@ -54,6 +56,8 @@ struct RenderTextureArrayView
                                                  RenderTextureArrayView* view);
 [[nodiscard]] bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
 [[nodiscard]] bool RenderTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t* incoming);
+// The same guest target, layers included, requested at another host extent.
+[[nodiscard]] bool RenderTextureChangesHostExtent(const uint64_t* existing, const uint64_t* incoming);
 
 [[nodiscard]] RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order);
 [[nodiscard]] uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format);
@@ -77,9 +81,14 @@ public:
 	static constexpr int PARAM_WRITE_BACK = 6;
 	static constexpr int PARAM_SAMPLES    = 7;
 	static constexpr int PARAM_ARRAY_LAYERS = 8;
+	// Vulkan storage extent; equals the guest extent unless the render
+	// resolution scales this target. Zero selects the guest extent.
+	static constexpr int PARAM_HOST_WIDTH  = 9;
+	static constexpr int PARAM_HOST_HEIGHT = 10;
 
 	explicit RenderTextureObject(RenderTextureFormat pixel_format, uint32_t width, uint32_t height, bool tiled, bool neo, uint32_t pitch,
-	                             bool write_back, uint32_t sample_count = 1, uint32_t array_layers = 1)
+	                             bool write_back, uint32_t sample_count = 1, uint32_t array_layers = 1, uint32_t host_width = 0,
+	                             uint32_t host_height = 0)
 	{
 		params[PARAM_FORMAT]     = static_cast<uint64_t>(pixel_format);
 		params[PARAM_WIDTH]      = width;
@@ -90,6 +99,8 @@ public:
 		params[PARAM_WRITE_BACK] = write_back ? 1 : 0;
 		params[PARAM_SAMPLES]    = sample_count;
 		params[PARAM_ARRAY_LAYERS] = array_layers;
+		params[PARAM_HOST_WIDTH]   = host_width == 0 ? width : host_width;
+		params[PARAM_HOST_HEIGHT]  = host_height == 0 ? height : host_height;
 		check_hash               = RenderTextureMayCpuUploadOnUpdate(tiled, write_back);
 		type                     = Graphics::GpuMemoryObjectType::RenderTexture;
 	}

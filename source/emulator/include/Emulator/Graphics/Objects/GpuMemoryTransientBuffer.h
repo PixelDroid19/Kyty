@@ -68,9 +68,11 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 	       size <= max_bytes - total_bytes;
 }
 
-[[nodiscard]] constexpr uint64_t GpuMemoryTransientBufferTailBytes(uint64_t capacity, uint64_t logical_size)
+// Bytes between the logical end of a transient entry and the end of what earlier
+// writes may have left non-zero; those must be cleared before the entry is bound.
+[[nodiscard]] constexpr uint64_t GpuMemoryTransientBufferTailBytes(uint64_t nonzero_end, uint64_t logical_size)
 {
-	return logical_size <= capacity ? capacity - logical_size : 0u;
+	return logical_size <= nonzero_end ? nonzero_end - logical_size : 0u;
 }
 
 } // namespace Kyty::Libs::Graphics

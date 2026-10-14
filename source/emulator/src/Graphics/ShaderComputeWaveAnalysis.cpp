@@ -167,6 +167,45 @@ bool IsScalarPairCopyInstruction(const ShaderInstruction& instruction)
 	       (IsScalarPairVariable(instruction.src[0]) || IsIntegerInlineConstantPair(instruction.src[0]));
 }
 
+bool IsScalarBfeI64Control(const ShaderOperand& operand)
+{
+	if (IsOrdinarySgpr(operand) || IsIntegerOrLiteralConstant(operand) ||
+	    (operand.type == ShaderOperandType::FloatInlineConstant && operand.size == 0 && ComputeWaveOperandIsPlain(operand)))
+	{
+		return true;
+	}
+	if (operand.size != 1 || operand.register_id != 0 || !ComputeWaveOperandIsPlain(operand))
+	{
+		return false;
+	}
+	switch (operand.type)
+	{
+		case ShaderOperandType::VccLo:
+		case ShaderOperandType::VccHi:
+		case ShaderOperandType::ExecLo:
+		case ShaderOperandType::ExecHi:
+		case ShaderOperandType::M0:
+		case ShaderOperandType::Scc: return true;
+		default: return false;
+	}
+}
+
+bool IsScalarBfeI64Instruction(const ShaderInstruction& instruction)
+{
+	const auto scalar_pair = [](const ShaderOperand& operand)
+	{
+		return operand.type == ShaderOperandType::Sgpr && operand.size == 2 && (operand.register_id % 2 == 0) &&
+		       ComputeWaveOperandIsPlain(operand) && ComputeWaveRegisterRangeIsValid(operand.register_id, operand.size, kMaxSgpr);
+	};
+	if (instruction.type != ShaderInstructionType::SBfeI64 ||
+	    !IsExactTupleBase(instruction, ShaderInstructionFormat::Sdst2Ssrc02Ssrc1, 2) || !scalar_pair(instruction.dst) ||
+	    !scalar_pair(instruction.src[0]) || !IsScalarBfeI64Control(instruction.src[1]))
+	{
+		return false;
+	}
+	return IsUnusedDestination(instruction.src[2]) && IsUnusedDestination(instruction.src[3]);
+}
+
 bool IsWholeQuadMaskInstruction(const ShaderInstruction& instruction)
 {
 	return IsExactTupleBase(instruction, ShaderInstructionFormat::Sdst2Ssrc02, 1) && IsScalarPairVariable(instruction.dst) &&
@@ -614,6 +653,8 @@ String8 ComputeWaveUnsupportedReason(const ShaderInstruction& instruction)
 			return "SLshlB32 in paired compute-wave requires VccHi, one ordinary SGPR, and a plain 0..31 inline shift amount";
 		case ShaderInstructionType::SBfmB64:
 			return "SBfmB64 requires a two-word scalar destination and two plain scalar-word sources";
+		case ShaderInstructionType::SBfeI64:
+			return "SBfeI64 requires an even in-range SGPR destination/source pair and a plain scalar control operand";
 		case ShaderInstructionType::SInstPrefetch:
 			return "SInstPrefetch requires SOPP opcode 0x20 and an exact defined 1-to-3-line hint immediate";
 		case ShaderInstructionType::SMovB64:
@@ -702,8 +743,7 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 	{
 		if (!operand_valid(instruction.mimg_address[address])) { return false; }
 	}
-	const auto name = Core::EnumName8(instruction.type);
-	if ((name.StartsWith("Buffer") || name.StartsWith("TBuffer")) && (instruction.buffer_flags & ~0x0au) != 0u)
+	if (ShaderInstructionIsVectorBufferAccess(instruction.type) && (instruction.buffer_flags & ~0x0au) != 0u)
 	{
 		// SLC/DLC are cache hints (ISA tables 96/98). LDS changes the destination, TFE adds a
 		// status result, and unknown/reserved bits cannot mean an ordinary access.
@@ -712,7 +752,7 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 	if (instruction.vop_sdwa)
 	{
 		const uint32_t control = instruction.vop_sdwa_ctrl;
-		const bool compare = name.StartsWith("VCmp");
+		const bool compare = ShaderInstructionTypeStartsWith(instruction.type, "VCmp");
 		if (instruction.src_num < 1 || instruction.src_num > 3 || instruction.vop3_op_sel != 0u || instruction.vop3_omod != 0u ||
 		    ((control >> 16u) & 7u) == 7u || (control & (1u << 22u)) != 0u ||
 		    instruction.src[0].swizzle != ((control >> 16u) & 7u) ||
@@ -784,7 +824,7 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 			}
 		}
 	}
-	if (!name.IsEmpty() && name.At(0) == 'S')
+	if (ShaderInstructionTypeStartsWith(instruction.type, "S"))
 	{
 		// Scalar 64-bit data needs even SGPR pairs (ISA 3.6.3). Do not apply
 		// this to VALU mask destinations, whose SDST can name an odd SGPR.
@@ -801,6 +841,15 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 		}
 	}
 	return true;
+}
+
+bool ShaderInstructionPerLaneLoweringPreconditions(const ShaderInstruction& instruction)
+{
+	if (ShaderSdwaLowDestinationSupported(instruction))
+	{
+		return ShaderInstructionLoweringPreconditions(ShaderSdwaWholeDestination(instruction));
+	}
+	return ShaderInstructionLoweringPreconditions(instruction);
 }
 
 bool ShaderComputeWaveTypeIsExecCompare(ShaderInstructionType type)
@@ -956,6 +1005,9 @@ ShaderComputeWaveInstructionKind ClassifySpecificComputeWaveInstruction(const Sh
 		case ShaderInstructionType::SBfmB64:
 			return IsScalarBitfieldMaskInstruction(instruction) ? ShaderComputeWaveInstructionKind::ScalarMask
 			                                               : ShaderComputeWaveInstructionKind::Unsupported;
+		case ShaderInstructionType::SBfeI64:
+			return IsScalarBfeI64Instruction(instruction) ? ShaderComputeWaveInstructionKind::ScalarGeneric
+			                                              : ShaderComputeWaveInstructionKind::Unsupported;
 		case ShaderInstructionType::SMovB32:
 			return IsScalarCopyInstruction(instruction) ? ShaderComputeWaveInstructionKind::ScalarCopy
 			                                            : ShaderComputeWaveInstructionKind::Unsupported;
@@ -1081,6 +1133,10 @@ bool ShaderComputeWaveGenericLdsSupported(const ShaderInstruction& instruction)
 bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instruction)
 {
 	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
+	if (instruction.type == ShaderInstructionType::SBfeI64)
+	{
+		return IsScalarBfeI64Instruction(instruction);
+	}
 	if (instruction.type == ShaderInstructionType::SWqmB64)
 	{
 		return IsWholeQuadMaskInstruction(instruction);
@@ -1144,7 +1200,7 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 	if ((instruction.type == ShaderInstructionType::VAddI32 || instruction.type == ShaderInstructionType::VSubI32) &&
 	    instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1) { return false; }
 	if (ShaderComputeWaveSdwaSignedConvertSupported(instruction)) { return true; }
-	if (instruction.type == ShaderInstructionType::ImageAtomicAdd) { return ShaderImageAtomicAddSupported(instruction); }
+	if (ShaderIsImageAtomic(instruction.type)) { return ShaderImageAtomicSupported(instruction); }
 	const auto name   = Core::EnumName8(instruction.type);
 	const bool memory = name.StartsWith("Buffer") || name.StartsWith("Tbuffer") || name.StartsWith("Image");
 	if (memory)
@@ -1344,10 +1400,10 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 				return atomic;
 			}
 		}
-		if (instruction.type == ShaderInstructionType::ImageAtomicAdd &&
+		if (ShaderIsImageAtomic(instruction.type) &&
 		    !ShaderImageAtomicResourceSupported(code, index, input.bind))
 		{
-			return {false, instruction.pc, "image atomic addition requires a resolved 2D R32_UINT storage image"};
+			return {false, instruction.pc, "image atomic requires a resolved 2D R32_UINT storage image"};
 		}
 		if (kind == ShaderComputeWaveInstructionKind::Unsupported)
 		{

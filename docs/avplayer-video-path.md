@@ -89,6 +89,25 @@ same playback interval. Compare their presentation numbers and scene motion in
 order. This distinguishes a real stale-buffer or timestamp regression from an
 intentional bright frame in the source artwork.
 
+## Unqualified decoder output contracts
+
+The current elementary decoder and Videodec2 buffer sizing produce 8-bit NV12.
+Conversion of a higher-bit-depth decoded frame to NV12 does not preserve a
+10-bit guest surface contract. Low-aligned 10-bit samples, byte versus component
+pitch, coded versus visible height, and HDR metadata require separate output
+qualification; codec profile negotiation alone does not establish HDR output.
+
+The guest Videodec2 flush route currently drains the host decoder to end of
+stream. Continuing input then resets the host decoder. A per-frame guest flush
+could require output retrieval while retaining reference pictures instead;
+that equivalence is not established. Before changing the route, capture a
+continuing reference-dependent stream and its decode/flush output order. Keep
+per-frame retrieval, reset and end-of-stream drain distinct in that experiment.
+
+High-refresh VideoOut configuration remains unsupported. Its default display
+status clock and close-time flip drainage do not qualify a different refresh
+mode or the numeric HDR status contract.
+
 ## Scalar buffers sourced from executable images
 
 Some shaders read small constant tables located in loader-owned executable

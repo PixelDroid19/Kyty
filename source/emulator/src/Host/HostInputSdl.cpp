@@ -367,6 +367,35 @@ bool HostInput::IsF1Key(int key_code)
 	return key_code == SDLK_F1;
 }
 
+bool HostInput::IsTextEntryToggleKey(int key_code)
+{
+	return key_code == SDLK_F2;
+}
+
+uint16_t HostInput::KeyboardHidUsage(int scan_code)
+{
+	// SDL scancodes are the USB HID keyboard usages (usage page 0x07).
+	return (scan_code >= SDL_SCANCODE_A && scan_code <= SDL_SCANCODE_RGUI) ? static_cast<uint16_t>(scan_code) : 0;
+}
+
+uint16_t HostInput::KeyboardTextCharacter(int key_code, uint16_t modifiers)
+{
+	// The SDL keycode of a printable key is the code point its unshifted position types
+	// under the host layout; keypad and function keys carry the scancode mask instead.
+	if (key_code < 0x20 || key_code == SDLK_DELETE || key_code > 0xffff || (modifiers & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) != 0)
+	{
+		return 0;
+	}
+	const bool shift  = (modifiers & KMOD_SHIFT) != 0;
+	const bool upper  = shift != ((modifiers & KMOD_CAPS) != 0);
+	const bool letter = (key_code >= 'a' && key_code <= 'z') || (key_code >= 0xe0 && key_code <= 0xfe && key_code != 0xf7);
+	if (letter)
+	{
+		return static_cast<uint16_t>(upper ? key_code - 0x20 : key_code);
+	}
+	return shift ? 0 : static_cast<uint16_t>(key_code);
+}
+
 bool HostInput::HasAltModifier(uint16_t modifiers)
 {
 	return (modifiers & KMOD_ALT) != 0;

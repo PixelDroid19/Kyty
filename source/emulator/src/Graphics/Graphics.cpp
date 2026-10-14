@@ -39,7 +39,9 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <new>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -59,8 +61,17 @@ struct GpuMappingReleaseTransaction
 
 struct GpuMappingInvalidationTransaction
 {
-	uint64_t vaddr = 0;
-	uint64_t size  = 0;
+	const Kernel::Memory::KernelGpuMappingRange* ranges      = nullptr;
+	const VideoOut::VideoOutBufferRange*         video_ranges = nullptr;
+	size_t                                       range_count  = 0;
+};
+
+struct GpuMappingProtectionTransaction
+{
+	uint64_t                         vaddr           = 0;
+	uint64_t                         size            = 0;
+	Kernel::Memory::KernelGpuMappingCompletion completion = nullptr;
+	void*                            completion_data = nullptr;
 };
 
 void GraphicsRegisterGpuMappingRange(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingBacking backing)
@@ -83,7 +94,9 @@ bool GraphicsCompleteGpuMappingRelease(void* data)
 		    auto* transaction = static_cast<GpuMappingReleaseTransaction*>(action_data);
 		    GpuMemoryFreeMappedRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
 		    GuestDeviceAddressReleaseRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
-		    return transaction->completion(transaction->completion_data);
+		    if (!transaction->completion(transaction->completion_data)) { return false; }
+		    GuestTextureLayoutInvalidateRange(transaction->vaddr, transaction->size);
+		    return true;
 	    },
 	    transaction);
 }
@@ -94,27 +107,48 @@ bool GraphicsCompleteGpuMappingInvalidation(void* data)
 
 	auto* transaction = static_cast<GpuMappingInvalidationTransaction*>(data);
 	return VideoOut::VideoOutRunBufferUnmapTransaction(
-	    transaction->vaddr, transaction->size,
+	    transaction->video_ranges, transaction->range_count,
 	    [](void* action_data)
 	    {
 		    EXIT_IF(action_data == nullptr);
 		    auto* transaction = static_cast<GpuMappingInvalidationTransaction*>(action_data);
-		    GpuMemoryInvalidateMappedRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
-		    GuestDeviceAddressInvalidateRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+		    for (size_t i = 0; i < transaction->range_count; ++i)
+		    {
+			    const auto& range = transaction->ranges[i];
+			    GpuMemoryInvalidateMappedRangeQuiesced(WindowGetGraphicContext(), range.vaddr, range.size);
+			    // Physical allocation release keeps the CPU view but retires the
+			    // backing from GPU address publication so it cannot be reimported.
+			    GuestDeviceAddressReleaseRangeQuiesced(WindowGetGraphicContext(), range.vaddr, range.size);
+			    GuestTextureLayoutInvalidateRange(range.vaddr, range.size);
+		    }
 		    return true;
 	    },
 	    transaction);
 }
 
-bool GraphicsInvalidateGpuMappingRange(void* context, uint64_t vaddr, uint64_t size)
+bool GraphicsInvalidateGpuMappingRanges(void* context, const Kernel::Memory::KernelGpuMappingRange* ranges, size_t range_count)
 {
 	(void)context;
-	if (vaddr == 0 || size == 0 || vaddr > std::numeric_limits<uint64_t>::max() - size)
+	if (ranges == nullptr || range_count == 0)
 	{
 		return false;
 	}
+	for (size_t i = 0; i < range_count; ++i)
+	{
+		if (ranges[i].vaddr == 0 || ranges[i].size == 0 || ranges[i].vaddr > std::numeric_limits<uint64_t>::max() - ranges[i].size)
+		{
+			return false;
+		}
+	}
+	auto video_ranges = std::unique_ptr<VideoOut::VideoOutBufferRange[]>(
+	    new (std::nothrow) VideoOut::VideoOutBufferRange[range_count]);
+	if (video_ranges == nullptr) { return false; }
+	for (size_t i = 0; i < range_count; ++i)
+	{
+		video_ranges[i] = {ranges[i].vaddr, ranges[i].size};
+	}
 
-	GpuMappingInvalidationTransaction transaction {vaddr, size};
+	GpuMappingInvalidationTransaction transaction {ranges, video_ranges.get(), range_count};
 	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingInvalidation, &transaction);
 }
 
@@ -129,6 +163,35 @@ bool GraphicsReleaseGpuMappingRange(void* context, uint64_t vaddr, uint64_t size
 
 	GpuMappingReleaseTransaction transaction {vaddr, size, completion, completion_data};
 	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingRelease, &transaction);
+}
+
+// The guest mapping and every ordinary GPU object over it stay; only the
+// device-address copies taken under the old rights go, once Kernel has applied
+// the new ones and before any submission can read them again.
+bool GraphicsCompleteGpuMappingProtection(void* data)
+{
+	EXIT_IF(data == nullptr);
+
+	auto* transaction = static_cast<GpuMappingProtectionTransaction*>(data);
+	if (!transaction->completion(transaction->completion_data))
+	{
+		return false;
+	}
+	GuestDeviceAddressInvalidateRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+	return true;
+}
+
+bool GraphicsProtectGpuMappingRange(void* context, uint64_t vaddr, uint64_t size,
+	                                Kernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
+{
+	(void)context;
+	if (vaddr == 0 || size == 0 || vaddr > std::numeric_limits<uint64_t>::max() - size || completion == nullptr)
+	{
+		return false;
+	}
+
+	GpuMappingProtectionTransaction transaction {vaddr, size, completion, completion_data};
+	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingProtection, &transaction);
 }
 
 bool GraphicsQueryPresentationStats(void* context, Kyty::Emulator::PresentationStats::Snapshot* out)
@@ -191,8 +254,9 @@ void GraphicsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 	const Kernel::Memory::GpuMappingLifecycleCallbacks gpu_mapping_lifecycle_callbacks {
 	    nullptr,
 	    GraphicsRegisterGpuMappingRange,
-	    GraphicsInvalidateGpuMappingRange,
+	    GraphicsInvalidateGpuMappingRanges,
 	    GraphicsReleaseGpuMappingRange,
+	    GraphicsProtectGpuMappingRange,
 	};
 	EXIT_IF(!Kernel::Memory::GetGpuMappingLifecyclePort().Install(gpu_mapping_lifecycle_callbacks));
 	const Kyty::Emulator::GuestMemory::Callbacks guest_memory_callbacks {GraphicsQueryMappedRange, GraphicsQueryProtection};
@@ -202,7 +266,8 @@ void GraphicsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 	    GuestTextureLayoutUnregister,
 	    [](uint64_t base, uint64_t size) { (void)GpuMemoryNotifyHostWrite(base, size); },
 	    [](uint64_t base, uint64_t size) { return GpuDirtyPageTracker::Instance().BeginHostWrite(base, size); },
-	    [](uint64_t token) { GpuDirtyPageTracker::Instance().EndHostWrite(token); }};
+	    [](uint64_t token) { GpuDirtyPageTracker::Instance().EndHostWrite(token); },
+	    GuestTextureLayoutPruneStale};
 	EXIT_IF(!Kyty::Emulator::VideoFrameMemory::InstallCallbacks(video_frame_memory_callbacks));
 	const Kyty::Emulator::PresentationStats::Callbacks presentation_stats_callbacks {nullptr, GraphicsQueryPresentationStats};
 	EXIT_IF(!Kyty::Emulator::PresentationStats::GetPort().Install(presentation_stats_callbacks));

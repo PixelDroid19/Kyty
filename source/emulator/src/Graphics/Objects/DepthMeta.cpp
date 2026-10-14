@@ -21,6 +21,13 @@ uint64_t                                    g_next_sequence = 1u;
 uint32_t                                    g_consumed_next  = 0u;
 uint32_t                                    g_consumed_count = 0u;
 
+DepthMetaPatternKind ClassifyUniformWord(uint32_t word)
+{
+	return word == 0u            ? DepthMetaPatternKind::UniformZero
+	       : word == 0xfffffff0u ? DepthMetaPatternKind::RecognizedClear
+	                             : DepthMetaPatternKind::UniformOther;
+}
+
 bool ObserveStorageWriteWithSource(uint64_t address, const void* data, uint64_t size, DepthMetaClearSource source)
 {
 	DepthMetaPatternSnapshot pattern {};
@@ -102,9 +109,7 @@ bool DepthMetaInspectPattern(const void* data, uint64_t size, DepthMetaPatternSn
 			return true;
 		}
 	}
-	out->kind = first == 0u          ? DepthMetaPatternKind::UniformZero
-	            : first == 0xfffffff0u ? DepthMetaPatternKind::RecognizedClear
-	                                   : DepthMetaPatternKind::UniformOther;
+	out->kind = ClassifyUniformWord(first);
 	return true;
 }
 
@@ -170,7 +175,7 @@ bool DepthMetaPublishComputeFill(const DepthMetaStorageIdentity& identity, uint3
 	event.backing_generation = identity.backing_generation;
 	event.producer_submit    = identity.producer_or_consumer_submit;
 	event.source             = DepthMetaClearSource::ComputeMetadataFill;
-	event.pattern.kind       = fill_word == 0u ? DepthMetaPatternKind::UniformZero : DepthMetaPatternKind::UniformOther;
+	event.pattern.kind       = ClassifyUniformWord(fill_word);
 	event.pattern.first_word = fill_word;
 	event.pattern.word_count = identity.size / sizeof(uint32_t);
 	RetainPendingBounded(event);

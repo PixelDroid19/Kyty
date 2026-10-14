@@ -692,8 +692,7 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	if (inst.dst.clamp)
 	{
 		// Clamp of half results is exact. Handle NaN in bits according to
-		// DX10_CLAMP; IEEE disables this output modifier, as for f32.
-		if (!mode.ieee)
+		// DX10_CLAMP. IEEE mode ignores OMOD but not CLAMP, as for f32.
 		{
 			// F32 conversion destinations need a distinct float clamp contract.
 			if (operation == Operation::ToFloat) { return reject("unsupported-widening-clamp"); }
@@ -710,9 +709,6 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 )";
 			text = text.ReplaceStr("<nan_result>", mode.dx10_clamp ? "uint_0" : "fh_result_<index>");
 			text += Store(inst, index, "fh_clamped_<index>");
-		} else
-		{
-			text += Store(inst, index, "fh_result_<index>");
 		}
 	} else
 	{

@@ -41,6 +41,8 @@
 
 namespace Kyty::Libs::Graphics {
 
+struct StorageTextureRawRenderSource;
+
 constexpr int VADDR_BLOCKS_MAX = GPU_MEMORY_RANGE_SET_MAX;
 
 enum class DebugStatsGpuMemoryLinkedTopology: uint8_t;
@@ -326,8 +328,11 @@ public:
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
+	Vector<GpuMemoryObject> FindEqualObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission);
+	Vector<GpuMemoryObject> FindObjectsWithRange(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission);
 	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 	bool                    QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
+	bool                    DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
 	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size);
 	bool                    CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns,
 	                                                      uint64_t* copy_ns);
@@ -342,6 +347,8 @@ public:
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
+	[[nodiscard]] GpuMemoryGdsSource AcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
+	void DeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task);
 
 	// Sync: CPU -> GPU
 	void Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
@@ -472,6 +479,9 @@ private:
 	[[nodiscard]] Destructor Free(int heap_id, int object_id);
 	void RequireDetachable(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors, const char* operation,
 	                       GpuMemoryObjectType incoming_type = GpuMemoryObjectType::Invalid);
+	// Retires buffers that own no device content and whose submissions have
+	// completed, without a frame age (GpuMemoryBufferPressureRetirementDue).
+	void RetireBuffersUnderPressureLocked(Vector<Destructor>* destructors);
 	void WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors,
 	                           const SubmissionId* publishing_submission = nullptr);
 	void RecordUse(ObjectInfo* object, SubmissionId submission);
@@ -516,6 +526,16 @@ private:
 	                                     const uint64_t* vaddr, const uint64_t* size, int vaddr_num) const;
 	bool create_maybe_deleted(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
 	bool create_all_the_same(const Vector<OverlappedBlock>& others, int heap_id);
+	// The parent a new depth target or storage view takes its raw texels from: of the Equals parents it reinterprets
+	// (DepthStencilBufferCanSeedFromRenderTexture, StorageTextureSharesDepthTexels), the one the device wrote last,
+	// after every writable use or upload of each other overlapping parent, none of them pending a write-back.
+	// -1 when none qualifies.
+	[[nodiscard]] int create_texel_bits_seed(const Vector<OverlappedBlock>& others, const GpuObject& info, int heap_id) const;
+	// Raw composite sources: a tiled render target or storage image whose blocks
+	// a linear storage image reinterprets, and the time its device content was
+	// last written (0 when the device never wrote it).
+	[[nodiscard]] static bool create_describe_raw_source(const Object& parent, uint64_t neo, StorageTextureRawRenderSource* source);
+	[[nodiscard]] static uint64_t create_raw_source_write_time(const ObjectInfo& owner);
 
 	[[nodiscard]] String create_dbg_exit(const String& msg, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
 	                                     const Vector<OverlappedBlock>& others, GpuMemoryObjectType type);
@@ -559,6 +579,7 @@ private:
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;
 	uint32_t m_transient_creates_since_retirement = 0;
+	uint64_t m_buffer_bytes_since_retirement      = 0;
 	uint32_t m_retirement_heap_cursor            = 0;
 	uint32_t m_retirement_object_cursor          = 0;
 

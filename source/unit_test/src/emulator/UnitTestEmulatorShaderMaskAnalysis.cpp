@@ -3,6 +3,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "Emulator/Log.h"
 
 #include "../../../emulator/src/Graphics/ShaderMaskAnalysis.h"
@@ -45,6 +46,26 @@ TEST(EmulatorShaderMaskAnalysis, AcceptsFullPairVcmpProducer)
 
 	ASSERT_EQ(code.GetInstructions().Size(), 3u);
 	EXPECT_TRUE(ShaderReverseBorrowMaskHasProvenance(code, 1u));
+}
+
+TEST(EmulatorShaderMaskAnalysis, Wave32CompareDefinesOnlyTheLowMaskSgpr)
+{
+	constexpr uint32_t v_cmp_lt_u32_s13 = (0xd4u << 24u) | (0xc1u << 16u) | 13u;
+	constexpr uint32_t s_mov_b32_s20_s14 = (0x17du << 23u) | (20u << 16u) | (0x03u << 8u) | 14u;
+	const uint32_t     shader[]          = {v_cmp_lt_u32_s13, kCmpSources, s_mov_b32_s20_s14, kEndpgm};
+	const auto         code              = ParseShader(shader);
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	ASSERT_EQ(code.GetInstructions().At(0).dst.size, 2);
+
+	const auto wave32 = ShaderScalarFlowOf(code, 32u);
+	const auto wave64 = ShaderScalarFlowOf(code, 64u);
+
+	EXPECT_TRUE(wave32->holding_entry_value[1].test(14));
+	EXPECT_FALSE(wave32->holding_entry_value[1].test(13));
+	EXPECT_EQ(wave32->entry_sources[2][20], 14);
+	EXPECT_TRUE(wave32->live_at_entry.test(14));
+	EXPECT_FALSE(wave64->holding_entry_value[1].test(14));
+	EXPECT_FALSE(wave64->live_at_entry.test(14));
 }
 
 TEST(EmulatorShaderMaskAnalysis, RejectsRawScalarPairMove)

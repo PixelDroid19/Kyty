@@ -34,6 +34,21 @@ constexpr uint32_t kLdsDwordBytes      = 4u;
 
 } // namespace
 
+bool ShaderNativeWave32PhysicalLocal(const uint32_t (&guest_local)[3], uint32_t (&physical_local)[3]) noexcept
+{
+	uint32_t local_xy    = 0;
+	uint32_t invocations = 0;
+	if (guest_local[0] == 0u || guest_local[1] == 0u || guest_local[2] == 0u || !MultiplyU32(guest_local[0], guest_local[1], &local_xy) ||
+	    !MultiplyU32(local_xy, guest_local[2], &invocations) || invocations > std::numeric_limits<uint32_t>::max() - (kNativeSubgroupSize - 1u))
+	{
+		return false;
+	}
+	physical_local[0] = (invocations + kNativeSubgroupSize - 1u) / kNativeSubgroupSize * kNativeSubgroupSize;
+	physical_local[1] = 1u;
+	physical_local[2] = 1u;
+	return true;
+}
+
 ShaderComputeWaveLayoutStatus ShaderBuildPairedComputeWaveLayout(const ShaderComputeWaveRequest&      request,
                                                                  const ShaderComputeWaveCapabilities& capabilities,
                                                                  ShaderComputeWaveLayout*             layout)
