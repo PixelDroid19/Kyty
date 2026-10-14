@@ -1493,14 +1493,33 @@ Vector<RenderTextureVulkanImage*> FindRenderTexture(CommandBuffer* buffer, uint6
 	return ret;
 }
 
-Vector<StorageTextureVulkanImage*> FindStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact)
+StorageTextureVulkanImage* FindLatestStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size)
+{
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(buffer == nullptr);
+
+	// Guest memory is untyped: views of a recycled range in other formats keep the texels of their own last
+	// write, and only the view of the latest storage write holds the bytes the guest wrote there.
+	StorageTextureVulkanImage* latest = nullptr;
+	for (const auto& obj: GpuMemoryFindEqualObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::StorageTexture))
+	{
+		auto* image = static_cast<StorageTextureVulkanImage*>(obj.obj);
+		if (latest == nullptr || image->storage_write_stamp > latest->storage_write_stamp)
+		{
+			latest = image;
+		}
+	}
+	return latest;
+}
+
+Vector<StorageTextureVulkanImage*> FindOverlappingStorageTextures(CommandBuffer* buffer, uint64_t vaddr, uint64_t size)
 {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer == nullptr);
 
 	Vector<StorageTextureVulkanImage*> ret;
 
-	auto objects = GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::StorageTexture, exact, false);
+	auto objects = GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::StorageTexture, false, false);
 
 	for (const auto& obj: objects)
 	{

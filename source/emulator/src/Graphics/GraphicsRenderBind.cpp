@@ -3749,14 +3749,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			bool storage_texture = false;
 				if (!render_texture && gen5)
 				{
-					auto stex = FindStorageTexture(buffer, addr, size.size, true);
-					const bool st_exact = !stex.IsEmpty();
+					Vector<StorageTextureVulkanImage*> stex;
+					auto* latest_stex = FindLatestStorageTexture(buffer, addr, size.size);
+					const bool st_exact = latest_stex != nullptr;
+					if (st_exact)
+					{
+						stex.Add(latest_stex);
+					}
 					// A storage write needs the exact backing range because its array
 					// view can expose layers absent from a smaller overlapping image.
 					// Sampled descriptors may still reuse a containing GPU-owned image.
-					if (stex.IsEmpty() && !textures.desc[i].textures2d_without_sampler)
+					if (!st_exact && !textures.desc[i].textures2d_without_sampler)
 					{
-						stex = FindStorageTexture(buffer, addr, size.size, false);
+						stex = FindOverlappingStorageTextures(buffer, addr, size.size);
 				}
 				if (!stex.IsEmpty())
 				{
@@ -4034,7 +4039,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				if (gen5 && (tile == 27u || tile == 9u))
 				{
 					const auto r_cover = FindRenderTexture(buffer, addr, size.size, false);
-					const auto s_cover = FindStorageTexture(buffer, addr, size.size, false);
+					const auto s_cover = FindOverlappingStorageTextures(buffer, addr, size.size);
 					live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
 				}
 				const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
@@ -4051,30 +4056,22 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// an older storage image must not replace a newer guest upload.
 				if (gen5 && tex != nullptr && levels == 1u && !arrayed_2d && !three_dimensional && Gen5BlockCompressedBlockBytes(fmt) != 0u)
 				{
-					const auto stex = FindStorageTexture(buffer, addr, size.size, true);
-					for (int ci = 0; ci < static_cast<int>(stex.Size()); ci++)
+					auto*      source       = FindLatestStorageTexture(buffer, addr, size.size);
+					const auto source_shape = source != nullptr ? source->GetGuestExtent() : VkExtent2D {};
+					uint32_t   copy_width   = 0;
+					uint32_t   copy_height  = 0;
+					if (source != nullptr && source->storage_write_stamp > tex->content_stamp &&
+					    Gen5BlockCompressedStorageCopyExtent(fmt, width, height, source->format, source_shape.width, source_shape.height,
+					                                         &copy_width, &copy_height))
 					{
-						auto*      source       = stex.At(ci);
-						const auto source_shape = source->GetGuestExtent();
-						uint32_t   copy_width   = 0;
-						uint32_t   copy_height  = 0;
-						if (!Gen5BlockCompressedStorageCopyExtent(fmt, width, height, source->format, source_shape.width, source_shape.height,
-						                                          &copy_width, &copy_height))
-						{
-							continue;
-						}
-						if (source->storage_write_stamp > tex->content_stamp)
-						{
-							Vector<ImageImageCopy> regions(1);
-							regions[0]           = {};
-							regions[0].src_image = source;
-							regions[0].width     = copy_width;
-							regions[0].height    = copy_height;
-							UtilImageToImage(buffer, regions, tex, static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
-							tex->content_stamp = VulkanImageNextStamp();
-							materialize        = "st-block-copy";
-						}
-						break;
+						Vector<ImageImageCopy> regions(1);
+						regions[0]           = {};
+						regions[0].src_image = source;
+						regions[0].width     = copy_width;
+						regions[0].height    = copy_height;
+						UtilImageToImage(buffer, regions, tex, static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+						tex->content_stamp = VulkanImageNextStamp();
+						materialize        = "st-block-copy";
 					}
 				}
 			}

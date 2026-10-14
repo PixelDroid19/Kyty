@@ -1693,7 +1693,9 @@ struct ColorDccImage
 	bool     single_surface    = false; // one level, one slice
 };
 void ConsumeImageColorDccClear(CommandBuffer* buffer, const ColorDccImage& image);
-Vector<StorageTextureVulkanImage*> FindStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
+// The view of exactly this range that holds its latest storage write, or nullptr.
+StorageTextureVulkanImage*         FindLatestStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
+Vector<StorageTextureVulkanImage*> FindOverlappingStorageTextures(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 Vector<DepthStencilVulkanImage*>   FindDepthStencil(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 
 // --- Attachments ---
