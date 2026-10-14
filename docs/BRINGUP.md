@@ -29,13 +29,16 @@ fail on the current HEAD before acting on them.
   by the last bind of the frame. State read this way shows an earlier point
   of the frame, not the bind being studied. Use `docs/graphics-captures.md`
   or a readback at a submission boundary when in-frame order matters.
+- Observed only through the debug image dump (not in-frame ordered, so
+  not exclusions): the temporal antialiasing output and its history image
+  are already black on the lower cards, and so is the HDR scene target
+  except near the ring.
+- Not excluded: the stencil plane that gates the lighting pass. It was
+  discarded on depth-only clears before 55565820, and a compute fill of its
+  HTILE stencil fields is still not applied (open defect below).
 - Excluded:
-  - Temporal antialiasing: the black is already in the pass output and in
-    the history image before it.
-  - Composite: the HDR scene target is already black on the lower cards,
-    except near the ring.
-  - Stencil source of the lighting pass, and ordering between dispatches
-    (memory barriers separate them).
+  - Ordering between the dispatches: memory barriers separate them in the
+    command stream.
   - Translation of the classifier's control flow switch, `ds_append`,
     `vcc_hi` and `v_mbcnt` (checked against the ISA).
   - A render-target/storage alias of the normal buffer: its writer and all

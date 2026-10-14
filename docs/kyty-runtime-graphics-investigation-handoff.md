@@ -328,13 +328,14 @@ against the same correct gameplay capture.
 
 - Robot-platformer title screen save cards (2026-10-14, open). The two lower
   save cards render black because the tiled light classifier writes an
-  empty list for every tile. Excluded so far: temporal antialiasing, the
-  composite, the lighting stencil source, dispatch ordering, the classifier's
-  control-flow, append and lane-count translation, a render-target/storage
-  alias of its normal input, and the G-buffer exports, write masks and
-  depth-stencil state. The debug image dump does not submit the recording in
-  progress, so states read through it are from earlier in the frame; the
-  constant normal input is therefore unverified. Details, fixes found on the
+  empty list for every tile. Excluded so far: dispatch ordering, the
+  classifier's control-flow, append and lane-count translation, a
+  render-target/storage alias of its normal input, and the G-buffer exports,
+  write masks and depth-stencil state. The debug image dump does not submit
+  the recording in progress, so states read through it are from earlier in
+  the frame: the constant normal input and the black temporal
+  antialiasing and HDR images are unverified, not exclusions. The lighting
+  stencil plane is not excluded. Details, fixes found on the
   way and open defects: "Robot platformer: title screen save cards" in
   `docs/BRINGUP.md`.
 - Racing-title shadows (2026-10-11, partly open). The two shadow-receiver
