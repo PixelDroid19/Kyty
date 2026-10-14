@@ -3994,7 +3994,7 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 // A vector buffer load whose V# no discovered resource describes reads
 // through a descriptor built at run time.
 static bool ShaderHasRuntimeDescriptorLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_register_base,
-                                           const char* type_prefix)
+                                           std::string_view type_prefix)
 {
 	const auto& instructions = code.GetInstructions();
 	return std::any_of(instructions.begin(), instructions.end(),

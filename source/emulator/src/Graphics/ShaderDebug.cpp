@@ -33,9 +33,24 @@ std::string_view ShaderInstructionTypeName(ShaderInstructionType type)
 	return index < kNames.size() ? kNames[index] : std::string_view {};
 }
 
+// Compared in place: analyses ask per instruction of every draw, and most names
+// differ from the prefix at the first character, so a library compare call
+// costs more than the comparison itself.
 bool ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix)
 {
-	return ShaderInstructionTypeName(type).substr(0, prefix.size()) == prefix;
+	const auto name = ShaderInstructionTypeName(type);
+	if (name.size() < prefix.size())
+	{
+		return false;
+	}
+	for (size_t i = 0; i < prefix.size(); ++i)
+	{
+		if (name[i] != prefix[i])
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 // Classified once by name: shader analyses ask for every instruction of every draw.
