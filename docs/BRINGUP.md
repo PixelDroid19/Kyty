@@ -59,8 +59,25 @@ fail on the current HEAD before acting on them.
   first 50000 draws (loading screens) to 6.0% over 1.8 million, with almost no
   new matches over the last 500000 (gameplay), so the memo would only add a
   compare.
+- Transient snapshot index: each snapshot capture walked every transient entry
+  of the command buffer for an earlier snapshot of the same range and usage
+  (4.6% of the racing thread). Entries holding a valid snapshot are now kept in
+  a map by range and usage, updated where a snapshot is stored or overwritten;
+  reuse still requires a byte match with guest memory. The capture drops to
+  1.5%. Racing title 43.2 us per draw in one window (45.0 before). Fishing title
+  at the dock, 1157-1163 draws per frame: 52.6-54.4 us per draw against
+  65.3-67.9 with the previous commit and 78.6-82.7 before this section, about
+  15 FPS against 11; the dock capture renders correctly.
+- Excluded for the racing title: `ResetHash` self time is the inlined
+  materialization-cache `InvalidateRange` scan (the only loop before
+  `GetHeapId` in its disassembly). Scanning only live slots raised its share
+  from 5.9% to 8.0% (the cache fills within a submission, and the list adds an
+  indirection). Remembering recently scanned clean ranges, already excluded
+  for the fishing title above, left it at 6.9%: a store overlapping the
+  attachment, most likely the attachment's own materialization, clears the memo
+  every draw. A spatial index of the spans is the remaining direction.
 - Remaining ranked costs on the racing title after these changes: `ResetHash`
-  5.9%, `CaptureTransientSnapshotBuffer` 4.6%, `steady_clock::now` 4.1% (debug
+  5.9-8.0%, `steady_clock::now` 3.6-4.1% (debug
   statistics timers, about a hundred per draw), instruction-prefix scans still
   3.1% (per-draw shader scans in `ShaderGetInputInfoPS` and the compute path,
   which reparses per dispatch), `mem_alloc` 2.9%, `ShaderParseUsage2` 2.7%,
