@@ -709,12 +709,14 @@ struct ColorAttachmentLoadOps
 }
 
 // A uniform compute fill stores one 16-byte word quad per invocation. Over a color image whose texel
-// repeats exactly within that quad the fill is independent of tiling, so an image clear reproduces the
-// guest memory contents. Returns false for formats without an evidenced packing or a non-repeating quad.
+// repeats exactly within that quad, or is that quad, the fill is independent of tiling, so an image clear
+// reproduces the guest memory contents. Returns false for formats without an evidenced packing or a
+// non-repeating quad.
 [[nodiscard]] inline uint32_t GuestUniformFillTexelBytes(VkFormat format)
 {
 	switch (format)
 	{
+		case VK_FORMAT_R32G32B32A32_SFLOAT: return 16u;
 		case VK_FORMAT_R16G16B16A16_SFLOAT: return 8u;
 		case VK_FORMAT_R8G8B8A8_UNORM:
 		case VK_FORMAT_R8G8B8A8_SRGB:
@@ -728,10 +730,18 @@ struct ColorAttachmentLoadOps
 [[nodiscard]] inline bool DecodeGuestUniformFillTexel(const std::array<uint32_t, 4>& words, VkFormat format, VkClearColorValue* clear)
 {
 	const uint32_t texel   = GuestUniformFillTexelBytes(format);
-	const bool     repeats = texel == 8u ? (words[0] == words[2] && words[1] == words[3])
-	                                     : (texel == 4u && words[0] == words[1] && words[0] == words[2] && words[0] == words[3]);
+	const bool     repeats = texel == 16u || (texel == 8u ? (words[0] == words[2] && words[1] == words[3])
+	                                                      : (texel == 4u && words[0] == words[1] && words[0] == words[2] && words[0] == words[3]));
 	if (clear == nullptr || !repeats) { return false; }
-	*clear = DecodeGuestColorClearWords(words[0], words[1], format);
+	if (texel == 16u)
+	{
+		// Each 32-bit channel is stored in order, red at the lowest address.
+		*clear = {};
+		for (uint32_t channel = 0; channel < 4u; ++channel) { std::memcpy(&clear->float32[channel], &words[channel], sizeof(float)); }
+	} else
+	{
+		*clear = DecodeGuestColorClearWords(words[0], words[1], format);
+	}
 	// vkCmdClearColorImage encodes sRGB images from linear input: decode the stored bytes first.
 	if (format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_SRGB)
 	{

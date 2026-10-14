@@ -24,8 +24,9 @@ The original compute dispatch always executes. Afterwards:
   range equals the buffer range. Partial (containing or crossing) aliases and
   other object types fail closed. Each alias must be single-sample, cover the
   complete range, and use a format whose texel repeats exactly within each
-  16-byte word quad: RGBA16F (two texels per quad) or RGBA8/BGRA8 UNORM/sRGB
-  and R32F (four texels per quad). Because every texel of every level and layer
+  16-byte word quad: RGBA32F (the quad is one texel, red at the lowest
+  address), RGBA16F (two texels per quad) or RGBA8/BGRA8 UNORM/sRGB and R32F
+  (four texels per quad). Because every texel of every level and layer
   holds the same value, the clear is independent of tiling. sRGB images are
   cleared with the decoded linear value so the stored bytes match the guest
   write. The clear is ordered in the same recording and the image's defined
@@ -46,7 +47,11 @@ Evidence: a 2D title resets its lighting accumulation target (RGBA16F) and
 several RGBA8 targets every frame with this kernel (fill values `(0,0,0,1)`,
 `0`, `0xffffffff` and `0xff008080`). With load-on-rebind and no propagation the
 targets accumulated prior frames (saturated yellow light, then an olive haze);
-with propagation the frames match the earlier clear-on-rebind captures.
+with propagation the frames match the earlier clear-on-rebind captures. The
+robot platformer resets a 1x1 RGBA32F exposure-state texture with this kernel
+(`(1, -1, 0.5, 0.18)`); without the RGBA32F alias the texture stayed zero, the
+exposure pass wrote zero and the final composite multiplied the whole 3D scene
+by it, leaving only the UI visible.
 
 This is not general buffer/image coherence or support for other clear kernels,
 compressed formats, partial fills or arbitrary alias topologies.

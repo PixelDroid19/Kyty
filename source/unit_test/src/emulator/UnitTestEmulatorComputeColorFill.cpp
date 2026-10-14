@@ -367,6 +367,13 @@ TEST(EmulatorComputeColorFill, UniformFillTexelsDecodeOnlyWhenTheQuadRepeatsOneT
 	ASSERT_TRUE(DecodeGuestUniformFillTexel({0x80808080u, 0x80808080u, 0x80808080u, 0x80808080u}, VK_FORMAT_R8G8B8A8_SRGB, &clear));
 	EXPECT_NEAR(clear.float32[0], 0.2158605f, 1e-5f);
 	EXPECT_FLOAT_EQ(clear.float32[3], 128.0f / 255.0f);
+	// One RGBA32F texel is the whole quad, red first: (1, -1, 0.5, 0.18).
+	ASSERT_TRUE(DecodeGuestUniformFillTexel({0x3f800000u, 0xbf800000u, 0x3f000000u, 0x3e3851ecu}, VK_FORMAT_R32G32B32A32_SFLOAT, &clear));
+	EXPECT_FLOAT_EQ(clear.float32[0], 1.0f);
+	EXPECT_FLOAT_EQ(clear.float32[1], -1.0f);
+	EXPECT_FLOAT_EQ(clear.float32[2], 0.5f);
+	EXPECT_FLOAT_EQ(clear.float32[3], 0.18f);
+	EXPECT_FALSE(DecodeGuestUniformFillTexel({0x7fc00000u, 0u, 0u, 0u}, VK_FORMAT_R32G32B32A32_SFLOAT, &clear));
 	// Formats without an evidenced packing are not cleared.
 	EXPECT_FALSE(DecodeGuestUniformFillTexel({0u, 0u, 0u, 0u}, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &clear));
 }
