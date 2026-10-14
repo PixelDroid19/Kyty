@@ -9,6 +9,63 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Command-processor per-draw costs: armed ranges and descriptor reuse (2026-10-14)
+
+- Method: the same scripted route does not reach the same scene in the same
+  frame. Over the same 12 s window of the racing title the draws per frame were
+  419, 363 and 779 in three runs, so frame rates of single windows are not
+  comparable. The figures below are command-processor time per draw from two
+  agent perf snapshots around a stack-sampler window (Intel, release build,
+  strict run, render-target scope, the racing route at 150 s).
+- Racing title, us per draw:
+
+  | Build | Command processor | Object creation | Texture descriptors | Descriptor finalize |
+  | --- | --- | --- | --- | --- |
+  | Before | 55.9 | 5.73 | 7.28 | 5.83 |
+  | Prefix compare, cached switches, armed proof | 45.3 | 1.89 | 3.12 | 6.86 |
+  | Plus descriptor reuse (two runs) | 49.7 / 45.0 | 2.11 / 2.03 | 3.59 / 3.58 | 4.56 / 5.00 |
+
+- Armed proof: dirty-page `Rearm` walked every page of a bound range on every
+  bind (8.3% of the thread). A registered range whose pages were all armed now
+  records the total change count of its blocks and returns early while it is
+  unchanged. Writes and fallbacks already advance the block count; authority
+  changes (unmap, protect) now advance it before and after the page update.
+  Unit tests: a proven range is protected again after a write, and an unmapped
+  range is recaptured after a second rearm; both fail with the proof compare
+  removed.
+- Prefix compare and cached switches: instruction-name prefix tests compared
+  through library calls for every instruction of every draw, and opt-in dump
+  switches read the environment per draw. Both disappear from the profile.
+- Descriptor reuse: with the cheaper bind path the driver's descriptor-set
+  allocate and free calls rose to 5.3% and 3.0% of the thread. A released set
+  whose recorded submissions all completed is now kept for the next set of the
+  same layout (at most 8192); the caller rewrites every binding. A set released
+  with a resource while one of its submissions is pending returns to its pool
+  as before. The driver free call leaves the profile; allocation drops to 1.2%.
+- Fishing title at the dock, same route, the last windows: before 82.7 / 78.6 /
+  95.3 us per draw at 1067-1203 draws per frame and 111.6 us at 845; after
+  67.9 / 65.3 / 81.2 us at 1099-1207 and 101.8 / 103.2 us at 837-844 (about
+  11.6 against 10.6 FPS in the last window). The new build reached the dock
+  sooner. Captures render the boat, water and HUD correctly.
+- Open: one racing run of an earlier descriptor-reuse build, which also reused
+  sets released with a resource whatever their pending submissions, stopped
+  presenting after 78 s (55.9 FPS until then) with every thread idle, no error
+  and no kernel GPU reset. Three later runs of that build and one of the final
+  build did not reproduce it. Cause unknown; the final build only reuses sets
+  whose submissions completed.
+- Excluded: memoizing per-draw input analysis by a key of the draw's shader
+  and register inputs. A counting diagnostic on the fishing route found the
+  cumulative share of draws matching a recent key falling from 77% over the
+  first 50000 draws (loading screens) to 6.0% over 1.8 million, with almost no
+  new matches over the last 500000 (gameplay), so the memo would only add a
+  compare.
+- Remaining ranked costs on the racing title after these changes: `ResetHash`
+  5.9%, `CaptureTransientSnapshotBuffer` 4.6%, `steady_clock::now` 4.1% (debug
+  statistics timers, about a hundred per draw), instruction-prefix scans still
+  3.1% (per-draw shader scans in `ShaderGetInputInfoPS` and the compute path,
+  which reparses per dispatch), `mem_alloc` 2.9%, `ShaderParseUsage2` 2.7%,
+  `ShaderCollectDynamicScalarResources` 2.3%.
+
 ## Fishing title: command-processor CPU costs (2026-10-14, partly fixed)
 
 - Context: on Intel the fishing title runs its dock scenes (the scripted
@@ -58,10 +115,8 @@ fail on the current HEAD before acting on them.
   `CanSnapshotReadOnlyBuffer` and `CaptureSnapshotReadOnlyBuffer`
   (`GpuMemoryFind.cpp:371` and `:413`) spends most of its time sorting long
   overlap lists from 1 MiB page buckets that hold many small objects; measure the
-  overlap count per query before choosing an index. Descriptor sets are
-  allocated and freed one by one from `VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT`
-  pools (`GraphicsRenderDescriptor.cpp:279` and `:337`); recycling freed sets
-  per layout would remove the driver calls. The fence-hole registry is
+  overlap count per query before choosing an index. Descriptor-set recycling is
+  now done (see the per-draw section below). The fence-hole registry is
   unsorted (`Objects/Label.cpp:113-252`); a sorted index with the longest hole
   length bounds each overlap query.
 - Fixed in part: write-back waits. A `WAIT_REG_MEM` on a label that the
@@ -91,8 +146,9 @@ fail on the current HEAD before acting on them.
   correctly (no gain there, its waits are device-address write-backs); the
   racing title 41.3 / 40.6 FPS against 41.3 / 38.7; the fishing dock captures
   match by index. Unrelated and pre-existing: some fishing-title launches never
-  present a first frame (same symptom on three earlier builds, 2026-10-12 and
-  2026-10-13).
+  present a first frame. The build before the rule failed in 2 of 12 launches
+  and presented in 5 of 5 short boot checks; three earlier builds showed the
+  same symptom (2026-10-12 and 2026-10-13). Cause unknown.
 
 ## Static pointer-table resource plans: no measured gain (2026-10-14, excluded)
 
