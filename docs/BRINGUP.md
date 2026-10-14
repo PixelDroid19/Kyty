@@ -9,6 +9,104 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: title screen save cards (2026-10-14, open)
+
+- Observed (Intel A770, strict, `generic` route, 390 s, no error): the title
+  screen shows the warp background, the logo and the top save card with its
+  "NEW GAME" pill. The two lower save cards stay black and a faint second
+  logo remains. Reference imagery of the same screen shows three lit cards
+  and no second logo.
+- Localized: the tiled light classification dispatch (120x68 groups) writes
+  an empty light list for every tile. Its output was read through the
+  current-guest-bytes path and is a fact. An offline evaluation of its inputs
+  passes 0 of 8,040 tiles; the angle term is the failing predicate because
+  the half-resolution normal buffer read back as a constant flat normal.
+  That readback is not reliable (next item), so constant normals are an
+  unverified cause.
+- Diagnostic caveat: the debug image dump (`UtilDumpVulkanImageRgba8Png`)
+  reads back through its own utility command buffer and does not submit the
+  recording in progress, and the per-frame bound-image dump is overwritten
+  by the last bind of the frame. State read this way shows an earlier point
+  of the frame, not the bind being studied. Use `docs/graphics-captures.md`
+  or a readback at a submission boundary when in-frame order matters.
+- Excluded:
+  - Temporal antialiasing: the black is already in the pass output and in
+    the history image before it.
+  - Composite: the HDR scene target is already black on the lower cards,
+    except near the ring.
+  - Stencil source of the lighting pass, and ordering between dispatches
+    (memory barriers separate them).
+  - Translation of the classifier's control flow switch, `ds_append`,
+    `vcc_hi` and `v_mbcnt` (checked against the ISA).
+  - A render-target/storage alias of the normal buffer: its writer and all
+    four readers bind the same exact storage view, with no older alias.
+  - The G-buffer pass: MRT export translation (compressed, MRT0-4), per-MRT
+    write masks (0xf, blending off) and depth-stencil state (LEQUAL with
+    write; stencil EQUAL, REPLACE, reference 4) are correct.
+  - An earlier exclusion that read a 1x1x1 indirect dispatch as "counter 0"
+    was flawed: it used stale indirect arguments (fixed below).
+- Changes made while localizing (none changes this screen visibly):
+  - c8e3537c: an exact storage texture lookup returns the view with the
+    newest storage write among all views of that range, instead of the first
+    listed one; a recycled range can hold views in several formats.
+  - 6d1b178d: dispatch-indirect arguments are read only after any GPU writer
+    in the recording or on another queue has published them.
+  - 55565820: a depth-only clear of a D32S8 target loads stencil instead of
+    discarding it (depth and stencil load operations are independent).
+  - 18d6e5be: HTILE clears done by the generic uniform fill kernel are
+    published in recording order, and the clear word `0xfffffff0` (ZMask 0,
+    maximum Z 1.0 in both HTILE layouts, SMem 3 with stencil tiling) is
+    translated to a depth clear when DB_DEPTH_CLEAR is 1.0. On this screen
+    the G-buffer depth clear (D32S8) is now consumed at the next bind; D16
+    and D32 targets translate as well.
+- Verified on the final tree: robot platformer (Intel, 390 s) same state, no
+  error. Racing title (Intel, 125 s twice and 200 s): no error, in-race
+  present rate 38-40, inside the 34-45 range of the 13-14 October runs; a
+  temporary counter showed it never takes the dispatch-indirect path. 2D
+  action title (AMD, 120 s): no error, gameplay without trails or white-out,
+  29-30 presents/s. Fishing title (AMD, 200 s): no error, reaches frame 3,093
+  against 2,008 for the earlier baseline in the same time, 5-8 presents/s
+  against 4-6. Watercolour platformer (AMD, 90 s): same captures and rates
+  (72.5 and 38.5). Unit tests: 2,419 pass. Table and boundary gates pass.
+  `kyty_playable_regression.py` reports `honest_skip_no_guest_root` here (no
+  local profile or guest root); it must run without `python3 -I` because it
+  imports a sibling module.
+- Open defects found here:
+  - A guest compute fill of the stencil part of HTILE is not applied to the
+    host stencil plane: `DepthMetaComputeFillTranslatable`
+    (`GraphicsRenderAttachments.cpp:500`) only translates depth. Direction:
+    translate SMem-cleared words to a stencil clear when the stencil clear
+    register agrees.
+  - `FindDepthStencil` (`GraphicsRenderDescriptor.cpp:1535`) asks for the
+    first object only, so a recycled range with depth views in two formats
+    can bind the stale one, as storage textures did before c8e3537c.
+    Direction: pick the most recently written view.
+  - `CommandProcessor::DrawIndexIndirect` (`GraphicsRun.cpp:2115`) waits only
+    for device-address write-backs before its CPU read of the arguments, so
+    a draw whose arguments an earlier dispatch of the same recording wrote
+    can use stale counts. Direction: the same admission as 6d1b178d.
+  - Exact storage views are not separated by image type; a 2D/3D filter was
+    tried and dropped because no failure needs it.
+
+## Font library: guest outline rasterization (2026-10-14)
+
+- Observed: on the robot platformer's title screen the "NEW GAME" pill drew
+  its text as solid squares.
+- Cause: glyph rendering filled every glyph box with full coverage and
+  reported synthetic metrics.
+- Change (8630816f): fonts opened from guest memory decode their TrueType
+  or CFF outlines with the public-domain `stb_truetype` header. Metrics,
+  horizontal layout and coverage come from the face; missing glyphs,
+  unsupported surfaces and unreadable fonts return the library error codes.
+- Verified: Intel robot platformer title screen shows "NEW GAME 1" and
+  "NEW GAME 2" as text. Unit tests: 2,419 pass.
+- Open: system font sets are opened by type and carry no guest bytes, so
+  their handles have no face. Their glyph queries report NO_SUPPORT_GLYPH and
+  `FontGetHorizontalLayout` returns placeholder values (`LibFont.cpp:491`).
+  `FontGetVerticalLayout` (`LibFont.cpp:519`) is synthetic for every font.
+  Real values need the system font set's face, which would come from a
+  user-provided font directory (never committed).
+
 ## Robot platformer: vertex attribute format words (2026-10-14)
 
 - Observed: the flat blue streak shapes over the warp tunnel (open item of
