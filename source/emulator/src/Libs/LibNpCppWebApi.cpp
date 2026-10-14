@@ -23,7 +23,7 @@ static KYTY_SYSV_ABI void* NpCppWebApiIntrusivePtrArrow(const void* self)
 	return *static_cast<void* const*>(self);
 }
 
-// NID Y295ygEccqk — first NpCppWebApi import on Astro boot after Http2Init.
+// NID Y295ygEccqk — first NpCppWebApi import observed at boot after Http2Init.
 // Observed SysV args: rdi = "/app0/param.sfx" (or this-pointer), rsi = 0x24,
 // rdx = 0x12. Guest continues without consuming the return value before the
 // next subobject constructor, so treat as a no-op setup and return rdi for

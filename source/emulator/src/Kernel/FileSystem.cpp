@@ -2360,8 +2360,7 @@ String PreferHostExtensionAlias(const String& requested_host_path)
 		return requested_host_path;
 	}
 	const String lower = requested_host_path.ToLower();
-	// Astro FIXED dumps ship object defs as .odxb while guest requests .odx
-	// (ObjectDefinition.cpp: "odx not found [prein/effects/odx/....odx]").
+	// Some packages ship object definitions as .odxb while the guest requests .odx.
 	if (lower.EndsWith(U".odx"))
 	{
 		const String alias = requested_host_path + U"b";

@@ -1231,6 +1231,18 @@ static bool PlanRawRenderSourceWindow(const StorageTextureRawRenderSource& sourc
 	return !window->regions.IsEmpty();
 }
 
+bool StorageTextureRawRenderSourceImageMatches(const StorageTextureRawRenderSource& source)
+{
+	const VkFormat expected = source.bytes_per_pixel == 2u ? VK_FORMAT_R8G8_UNORM :
+	                          source.bytes_per_pixel == 4u ? VK_FORMAT_R8G8B8A8_UNORM :
+	                          source.bytes_per_pixel == 8u ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_UNDEFINED;
+	return source.image != nullptr && source.image->image != VK_NULL_HANDLE && source.image->format == expected &&
+	       source.image->samples == VK_SAMPLE_COUNT_1_BIT && source.image->array_layers == 1u && source.image->mip_levels == 1u &&
+	       source.image->extent.width == source.width && source.image->extent.height == source.height &&
+	       source.image->guest_extent.width == source.width && source.image->guest_extent.height == source.height &&
+	       (source.image->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0u;
+}
+
 bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer* command_buffer,
                                              const Vector<StorageTextureRawRenderSource>& sources,
                                              VulkanImage* destination, uint64_t address, uint64_t size)
@@ -1262,15 +1274,7 @@ bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer*
 	{
 		const uint64_t bytes = static_cast<uint64_t>(source.width) * source.height * source.bytes_per_pixel;
 		const int64_t delta = static_cast<int64_t>(source.guest_address) - static_cast<int64_t>(address);
-		const VkFormat expected = source.bytes_per_pixel == 2u ? VK_FORMAT_R8G8_UNORM :
-		                          source.bytes_per_pixel == 4u ? VK_FORMAT_R8G8B8A8_UNORM :
-		                          source.bytes_per_pixel == 8u ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_UNDEFINED;
-		if (source.image == nullptr || source.image->image == VK_NULL_HANDLE || source.image->format != expected ||
-		    source.image->samples != VK_SAMPLE_COUNT_1_BIT || source.image->array_layers != 1u || source.image->mip_levels != 1u ||
-		    source.image->extent.width != source.width || source.image->extent.height != source.height ||
-		    source.image->guest_extent.width != source.width || source.image->guest_extent.height != source.height ||
-		    (source.image->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
-		    bytes == 0u || bytes > INT32_MAX || (bytes & 3u) != 0u || bytes > properties.limits.maxStorageBufferRange ||
+		if (!StorageTextureRawRenderSourceImageMatches(source) || bytes == 0u || bytes > INT32_MAX || (bytes & 3u) != 0u || bytes > properties.limits.maxStorageBufferRange ||
 		    source.guest_size > INT32_MAX || source.guest_address > INT64_MAX || delta < INT32_MIN || delta > INT32_MAX ||
 		    (source.guest_address & 65535u) != 0u || source.pitch == 0u ||
 		    source.pitch % TileGet64KBBlockWidth(source.bytes_per_pixel) != 0u ||

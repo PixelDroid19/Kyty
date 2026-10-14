@@ -149,7 +149,7 @@ void* KYTY_SYSV_ABI LibcMspaceCalloc(void* msp, size_t nelem, size_t size)
 //   +0x00 u16 size=0x28, u16 version=1  (stored as u32 0x00010028)
 //   +0x04 u32 reserved
 //   +0x08 size_t maxSystemSize
-//   +0x10 size_t currentSystemSize   // Astro Onion pre-check: need <= this
+//   +0x10 size_t currentSystemSize   // guest Onion pre-check: need <= this
 //   +0x18 size_t maxInuseSize
 //   +0x20 size_t currentInuseSize
 // Stack frame places the block at rbp-0x48 with the canary at rbp-0x20, so only

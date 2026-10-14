@@ -34,9 +34,8 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	uint32_t src0_abs  = (sdwa ? (buffer[1] >> 21u) & 0x1u : 0u);
 	uint32_t s0        = (sdwa ? (buffer[1] >> 23u) & 0x1u : 1u);
 
-	// Destination partial writes (dst_sel != DWORD) need a read-modify-write
-	// of the target VGPR; not wired yet. Source SEL 0-6 is supported.
-	if (dst_sel != 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_sel != 6 condition ignored (continuing)\n"); }
+	// Destination selects stay in vop_sdwa_ctrl: the per-lane emitter merges a low byte/word
+	// (ShaderSdwaLowDestinationSupported) and the lowering preconditions refuse the others.
 	if (sdwa && dst_sel == 6 && dst_u != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sdwa && dst_sel == 6 && dst_u != 0 condition ignored (continuing)\n"); }
 	if (src0_sel > 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sel > 6 condition ignored (continuing)\n"); }
 

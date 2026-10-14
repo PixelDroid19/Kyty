@@ -143,7 +143,7 @@ struct UserServiceGamePresets
 	uint32_t audio_language;
 };
 
-// sceUserServiceGetGamePresets — NID -sD02mFDBh4. Observed Astro after PlayGo finished.
+// sceUserServiceGetGamePresets — NID -sD02mFDBh4. Observed after PlayGo finished.
 static KYTY_SYSV_ABI int UserServiceGetGamePresets(int user_id, UserServiceGamePresets* presets)
 {
 	PRINT_NAME();
@@ -299,7 +299,7 @@ LIB_DEFINE(InitUserService_1)
 	LIB_FUNC("yH17Q6NWtVg", UserService::UserServiceGetEvent);
 	LIB_FUNC("fPhymKNvK-A", UserService::UserServiceGetLoginUserIdList);
 	LIB_FUNC("1xxcMiGu2fo", UserService::UserServiceGetUserName);
-	// Gen5 privacy Ws1 entry used on Astro after font setup; it carries the
+	// Gen5 privacy Ws1 entry used after font setup; it carries the
 	// UserServicePlatformPrivacyWs1 library identity, so it registers there.
 	LibUserServicePlatformPrivacyWs1::InitUserService_1_PlatformPrivacyWs1(s);
 	LIB_FUNC("-sD02mFDBh4", UserService::UserServiceGetGamePresets);

@@ -504,7 +504,7 @@ static bool StorageSeedInputsAreDisjoint(const ShaderBindResources& bind, const 
 	return true;
 }
 
-uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen, uint32_t groups_x,
+uint64_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen, uint32_t groups_x,
                                           uint32_t groups_y, uint32_t groups_z)
 {
 	if (!next_gen || input_info.storage_image_write_only_mask == 0u ||
@@ -517,11 +517,11 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 	}
 
 	const uint64_t global_z = static_cast<uint64_t>(groups_z) * input_info.threads_num[2];
-	uint32_t       result   = 0u;
+	uint64_t       result   = 0u;
 	for (int i = 0; i < input_info.bind.textures2D.textures_num; ++i)
 	{
 		const auto& descriptor = input_info.bind.textures2D.desc[i];
-		if ((input_info.storage_image_write_only_mask & (1u << static_cast<uint32_t>(i))) == 0u ||
+		if ((input_info.storage_image_write_only_mask & (uint64_t {1} << static_cast<uint32_t>(i))) == 0u ||
 		    !descriptor.textures2d_without_sampler)
 		{
 			continue;
@@ -567,7 +567,7 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 		}
 		if (global_x <= UINT32_MAX && global_y <= UINT32_MAX && global_x >= width && global_y >= height && global_z >= depth)
 		{
-			result |= 1u << static_cast<uint32_t>(i);
+			result |= uint64_t {1} << static_cast<uint32_t>(i);
 		}
 	}
 	if (result != 0u)
@@ -576,7 +576,7 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 		static std::atomic_uint32_t logged {0};
 		if (dump && logged.fetch_add(1, std::memory_order_relaxed) < 32u)
 		{
-			KYTY_LOG_DEBUG("KYTY_STORAGE_SEED_SKIP mask=0x%08" PRIx32 "\n", result);
+			KYTY_LOG_DEBUG("KYTY_STORAGE_SEED_SKIP mask=0x%016" PRIx64 "\n", result);
 		}
 	}
 	return result;
@@ -2817,6 +2817,49 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	DebugStatsRecordDrawCommandEmission(DrawStageElapsedNs(command_emission_start));
 }
 
+// The single writable storage object exactly covering a metadata fill
+// destination, live and produced no later than this submission.
+static const GpuMemoryRangeProvenanceEntry* FindDepthMetaFillStorage(uint64_t submit_id, uint64_t address, uint64_t size,
+                                                                     GpuMemoryRangeProvenance* provenance)
+{
+	if (size == 0u || !GpuMemoryQueryRangeProvenance(address, size, provenance) || provenance->truncated)
+	{
+		return nullptr;
+	}
+	const GpuMemoryRangeProvenanceEntry* storage = nullptr;
+	for (uint32_t i = 0; i < provenance->entry_count; ++i)
+	{
+		const auto& entry = provenance->entries[i];
+		if (entry.type != GpuMemoryObjectType::StorageBuffer || entry.relation != GpuMemoryOverlapType::Equals || entry.read_only)
+		{
+			continue;
+		}
+		if (storage != nullptr)
+		{
+			return nullptr;
+		}
+		storage = &entry;
+	}
+	if (storage == nullptr || !storage->in_use || !storage->write_back_capable || storage->logical_generation == 0u ||
+	    storage->backing_generation == 0u || storage->submit_id > submit_id)
+	{
+		return nullptr;
+	}
+	return storage;
+}
+
+static bool PublishDepthMetaFillWord(uint64_t submit_id, uint64_t address, uint64_t size, const GpuMemoryRangeProvenanceEntry& storage,
+                                     uint32_t word)
+{
+	DepthMetaStorageIdentity identity {};
+	identity.address                     = address;
+	identity.size                        = size;
+	identity.logical_generation          = storage.logical_generation;
+	identity.backing_generation          = storage.backing_generation;
+	identity.producer_or_consumer_submit = submit_id;
+	return DepthMetaPublishComputeFill(identity, word);
+}
+
 static bool TryPublishComputeDepthMetaFill(uint64_t submit_id, const ShaderComputeInputInfo& input, uint32_t thread_group_x,
                                            uint32_t thread_group_y, uint32_t thread_group_z)
 {
@@ -2898,38 +2941,24 @@ static bool TryPublishComputeDepthMetaFill(uint64_t submit_id, const ShaderCompu
 
 	const uint64_t destination_size = ShaderBufferByteSize(destination.Stride(), destination.NumRecords());
 	GpuMemoryRangeProvenance provenance {};
-	if (destination_size == 0u || !GpuMemoryQueryRangeProvenance(destination.Base48(), destination_size, &provenance) ||
-	    provenance.truncated)
-	{
-		return false;
-	}
-	const GpuMemoryRangeProvenanceEntry* storage = nullptr;
-	for (uint32_t i = 0; i < provenance.entry_count; ++i)
-	{
-		const auto& entry = provenance.entries[i];
-		if (entry.type != GpuMemoryObjectType::StorageBuffer || entry.relation != GpuMemoryOverlapType::Equals || entry.read_only)
-		{
-			continue;
-		}
-		if (storage != nullptr)
-		{
-			return false;
-		}
-		storage = &entry;
-	}
-	if (storage == nullptr || !storage->in_use || !storage->write_back_capable || storage->logical_generation == 0u ||
-	    storage->backing_generation == 0u || storage->submit_id > submit_id)
-	{
-		return false;
-	}
+	const auto* storage = FindDepthMetaFillStorage(submit_id, destination.Base48(), destination_size, &provenance);
+	return storage != nullptr && PublishDepthMetaFillWord(submit_id, destination.Base48(), destination_size, *storage, source_word);
+}
 
-	DepthMetaStorageIdentity identity {};
-	identity.address                     = destination.Base48();
-	identity.size                        = destination_size;
-	identity.logical_generation          = storage->logical_generation;
-	identity.backing_generation          = storage->backing_generation;
-	identity.producer_or_consumer_submit = submit_id;
-	return DepthMetaPublishComputeFill(identity, source_word);
+// The generic uniform fill kernel also resets HTILE. A fill of storage bound as
+// a depth target's metadata publishes the same event as the dedicated metadata
+// kernel, so the next bind of that target sees the clear in recording order.
+static bool PublishUniformDepthMetaFill(uint64_t submit_id, const ComputeUniformBufferFill& fill)
+{
+	const auto& words = fill.words;
+	if (words[1] != words[0] || words[2] != words[0] || words[3] != words[0])
+	{
+		return false;
+	}
+	GpuMemoryRangeProvenance provenance {};
+	const auto* storage = FindDepthMetaFillStorage(submit_id, fill.address, fill.size, &provenance);
+	return storage != nullptr && storage->depth_meta_bound &&
+	       PublishDepthMetaFillWord(submit_id, fill.address, fill.size, *storage, words[0]);
 }
 
 static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x, uint32_t thread_group_y,
@@ -2955,7 +2984,7 @@ static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint
 
 	ShaderComputeWavePreflightRequest request {};
 	request.is_next_gen           = Config::IsNextGen();
-	request.dispatch_mode         = mode;
+	request.dispatch_mode         = ShaderComputeDispatchExecutionMode(mode, request.is_next_gen);
 	request.raw_dispatch_count[0] = thread_group_x;
 	request.raw_dispatch_count[1] = thread_group_y;
 	request.raw_dispatch_count[2] = thread_group_z;
@@ -2967,7 +2996,8 @@ static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint
 	// These are the ordinary GFX10.3 group-count modes. Unknown scheduling or
 	// partial controls never inherit a verified guest lane order.
 	request.lane_order =
-	    request.is_next_gen && (mode == 0x01u || mode == 0x41u) ? ShaderGuestLaneOrder::LinearXFirst : ShaderGuestLaneOrder::Unverified;
+	    request.is_next_gen && (request.dispatch_mode == 0x01u || request.dispatch_mode == 0x41u) ? ShaderGuestLaneOrder::LinearXFirst
+	                                                                                           : ShaderGuestLaneOrder::Unverified;
 	const auto                    capabilities = ShaderComputeWaveVulkanBuildCapabilities(graphic_context->compute_wave_vulkan_state);
 	const auto preflight = ShaderBuildComputeWaveDispatchPlan(request, capabilities, plan);
 	if (preflight.status == ShaderComputeWavePreflightStatus::NoWork)
@@ -3161,7 +3191,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	const uint32_t storage_seed_skip_mask =
+	const uint64_t storage_seed_skip_mask =
 	    ShaderComputeStorageSeedSkipMask(input_info, Config::IsNextGen(), thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
 	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr,
@@ -3174,7 +3204,8 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	GraphicsOperationTraceDispatch(input_info.bind);
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
 	// The buffer write always executes. A proven full uniform fill additionally updates its exact
-	// color-image aliases in this recording; partial thread groups would leave the range uncovered.
+	// color-image aliases and stencil planes in this recording; partial thread groups would leave
+	// the range uncovered.
 	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
 	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
 	ComputeUniformBufferFill fill;
@@ -3182,6 +3213,9 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	    ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill))
 	{
 		(void)PropagateComputeUniformColorFill(buffer, fill);
+		(void)PropagateComputeUniformStencilFill(buffer, fill);
+		(void)PublishComputeColorDccClear(buffer, fill);
+		(void)PublishUniformDepthMetaFill(submit_id, fill);
 		(void)PublishComputeUniformFillToGuestAddress(buffer, fill);
 	}
 	DebugStatsRecordDispatch();

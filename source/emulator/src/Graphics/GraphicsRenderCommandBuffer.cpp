@@ -250,7 +250,8 @@ bool NativeWaveInputSensitive(const ShaderNativeWaveInfo& wave)
 	{
 		case ShaderNativeWaveProof::ExactSubgroup:
 		case ShaderNativeWaveProof::QuadLocal:
-		case ShaderNativeWaveProof::FragmentNeutral32: return true;
+		case ShaderNativeWaveProof::FragmentNeutral32:
+		case ShaderNativeWaveProof::FragmentPartialWave: return true;
 		case ShaderNativeWaveProof::Unclassified:
 		case ShaderNativeWaveProof::LaneLocal: return false;
 	}
@@ -1085,7 +1086,8 @@ public:
 		return false;
 	}
 
-	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage)
+	// A device-local scratch is never mapped: only commands recorded in this buffer read and write it.
+	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage, bool device_local)
 	{
 		if (ctx == nullptr || size == 0u || usage == 0u)
 		{
@@ -1120,11 +1122,15 @@ public:
 		entry->usage                  = usage;
 		entry->scratch                = true;
 		entry->buffer.usage           = usage;
-		entry->buffer.memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) |
-		                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+		entry->buffer.memory.property = device_local ? static_cast<uint32_t>(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+		                                             : static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) |
+		                                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 		VulkanCreateBuffer(ctx, size, &entry->buffer);
-		VulkanMapMemory(ctx, &entry->buffer.memory, &entry->mapped);
-		if (entry->mapped == nullptr)
+		if (!device_local)
+		{
+			VulkanMapMemory(ctx, &entry->buffer.memory, &entry->mapped);
+		}
+		if (!device_local && entry->mapped == nullptr)
 		{
 			VulkanDeleteBuffer(ctx, &entry->buffer);
 			delete entry;
@@ -1148,9 +1154,12 @@ public:
 		EXIT_IF(ctx == nullptr);
 		for (auto* entry: m_entries)
 		{
-			EXIT_IF(entry == nullptr || entry->mapped == nullptr);
-			VulkanUnmapMemory(ctx, &entry->buffer.memory);
-			entry->mapped = nullptr;
+			EXIT_IF(entry == nullptr || (entry->mapped == nullptr && !entry->scratch));
+			if (entry->mapped != nullptr)
+			{
+				VulkanUnmapMemory(ctx, &entry->buffer.memory);
+				entry->mapped = nullptr;
+			}
 			VulkanDeleteBuffer(ctx, &entry->buffer);
 			delete entry;
 		}
@@ -1376,6 +1385,12 @@ void CommandBuffer::Free()
 		delete m_transient_scratch_buffers;
 		m_transient_scratch_buffers = nullptr;
 	}
+	if (m_transient_copy_buffers != nullptr)
+	{
+		m_transient_copy_buffers->Destroy(g_render_ctx->GetGraphicCtx());
+		delete m_transient_copy_buffers;
+		m_transient_copy_buffers = nullptr;
+	}
 
 	m_pool->busy[m_index] = false;
 	MarkCommandBufferResetting();
@@ -1480,6 +1495,10 @@ void CommandBuffer::Begin()
 	{
 		m_transient_scratch_buffers->Reset();
 	}
+	if (m_transient_copy_buffers != nullptr)
+	{
+		m_transient_copy_buffers->Reset();
+	}
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -1549,7 +1568,18 @@ VulkanBuffer* CommandBuffer::AllocateTransientScratchBuffer(uint64_t size, uint3
 	{
 		m_transient_scratch_buffers = new TransientBufferPool;
 	}
-	return m_transient_scratch_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage);
+	return m_transient_scratch_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, false);
+}
+
+VulkanBuffer* CommandBuffer::AllocateTransientCopyBuffer(uint64_t size)
+{
+	EXIT_IF(IsInvalid());
+	if (m_transient_copy_buffers == nullptr)
+	{
+		m_transient_copy_buffers = new TransientBufferPool;
+	}
+	return m_transient_copy_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size,
+	                                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
 }
 
 void CommandBuffer::End()

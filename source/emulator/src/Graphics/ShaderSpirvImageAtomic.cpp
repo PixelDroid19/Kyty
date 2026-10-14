@@ -7,12 +7,14 @@
 
 namespace Kyty::Libs::Graphics {
 
-KYTY_RECOMPILER_FUNC(Recompile_ImageAtomicAdd)
+// IMAGE_ATOMIC_ADD and IMAGE_ATOMIC_SWAP on one R32 texel; GLC returns the pre-op value (RDNA2 8.1.10).
+KYTY_RECOMPILER_FUNC(Recompile_ImageAtomic)
 {
 	const auto& instruction = code.GetInstructions().At(index);
 	const auto* bind = spirv->GetBindInfo();
-	if (!Config::IsNextGen() || code.GetType() != ShaderType::Compute || !ShaderImageAtomicAddSupported(instruction) ||
-	    bind == nullptr || !ShaderImageAtomicResourceSupported(code, index, *bind)) { return false; }
+	const bool  stage = code.GetType() == ShaderType::Compute || code.GetType() == ShaderType::Pixel;
+	if (!Config::IsNextGen() || !stage || !ShaderImageAtomicSupported(instruction) || bind == nullptr ||
+	    !ShaderImageAtomicResourceSupported(code, index, *bind)) { return false; }
 	const int descriptor = ResolveStorageTextureArrayIndex(code, index, *bind, 0);
 	if (descriptor < 0) { return false; }
 	const auto binding = spirv->GetConstantUint(static_cast<uint32_t>(descriptor));
@@ -54,11 +56,13 @@ OpBranchConditional %image_atomic_enabled_<index> %image_atomic_update_<index> %
 %image_atomic_value_f_<index> = OpLoad %float %<value>
 %image_atomic_value_<index> = OpBitcast %uint %image_atomic_value_f_<index>
 %image_atomic_texel_<index> = OpImageTexelPointer %_ptr_Image_uint %image_atomic_resource_<index> %image_atomic_coord_<index> %uint_0
-%image_atomic_old_<index> = OpAtomicIAdd %uint %image_atomic_texel_<index> %uint_1 %uint_0 %image_atomic_value_<index>
+%image_atomic_old_<index> = <atomic> %uint %image_atomic_texel_<index> %uint_1 %uint_0 %image_atomic_value_<index>
 <store>OpBranch %image_atomic_merge_<index>
 %image_atomic_merge_<index> = OpLabel
 )";
+	const char* atomic = instruction.type == ShaderInstructionType::ImageAtomicSwap ? "OpAtomicExchange" : "OpAtomicIAdd";
 	*dst_source += String8(text).ReplaceStr("<store>", store)
+	                          .ReplaceStr("<atomic>", atomic)
 	                          .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                          .ReplaceStr("<binding>", binding)
 	                          .ReplaceStr("<x>", x.value)

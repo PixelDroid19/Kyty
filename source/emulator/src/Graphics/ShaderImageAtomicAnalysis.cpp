@@ -15,9 +15,14 @@ bool PlainRegister(const ShaderOperand& operand, ShaderOperandType type, int cou
 
 } // namespace
 
-bool ShaderImageAtomicAddSupported(const ShaderInstruction& instruction)
+bool ShaderIsImageAtomic(ShaderInstructionType type)
 {
-	return instruction.type == ShaderInstructionType::ImageAtomicAdd &&
+	return type == ShaderInstructionType::ImageAtomicAdd || type == ShaderInstructionType::ImageAtomicSwap;
+}
+
+bool ShaderImageAtomicSupported(const ShaderInstruction& instruction)
+{
+	return ShaderIsImageAtomic(instruction.type) &&
 	       instruction.format == ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1 && instruction.src_num == 3 &&
 	       instruction.mimg_dimension == 1u && instruction.mimg_dmask == 1u && instruction.mimg_address_num == 0 &&
 	       !instruction.mimg_explicit_lod && PlainRegister(instruction.dst, ShaderOperandType::Vgpr, 1, 256) &&

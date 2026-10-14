@@ -9,6 +9,749 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: title screen save cards (2026-10-14, open)
+
+- Observed (Intel A770, strict, `generic` route, 390 s, no error): the title
+  screen shows the warp background, the logo and the top save card with its
+  "NEW GAME" pill. The two lower save cards stay black and a faint second
+  logo remains. Reference imagery of the same screen shows three lit cards
+  and no second logo.
+- Localized: the tiled light classification dispatch (120x68 groups) writes
+  an empty light list for every tile. Its output was read through the
+  current-guest-bytes path and is a fact. An offline evaluation of its inputs
+  passes 0 of 8,040 tiles; the angle term is the failing predicate because
+  the half-resolution normal buffer read back as a constant flat normal.
+  That readback is not reliable (next item), so constant normals are an
+  unverified cause.
+- Diagnostic caveat: the debug image dump (`UtilDumpVulkanImageRgba8Png`)
+  reads back through its own utility command buffer and does not submit the
+  recording in progress, and the per-frame bound-image dump is overwritten
+  by the last bind of the frame. State read this way shows an earlier point
+  of the frame, not the bind being studied. Use `docs/graphics-captures.md`
+  or a readback at a submission boundary when in-frame order matters.
+- Observed only through the debug image dump (not in-frame ordered, so
+  not exclusions): the temporal antialiasing output and its history image
+  are already black on the lower cards, and so is the HDR scene target
+  except near the ring.
+- Excluded:
+  - The stencil plane read by the lighting passes, as cause of the black
+    cards and the second logo. The guest clears the plane (2048x1280, 8-bit)
+    with the uniform fill kernel each frame. Its stencil writes on that depth
+    target use ALWAYS, REPLACE_TEST 128 and write mask 0x80; a capped probe
+    of every depth state on the target over 200 s saw no other writing
+    state. Four lighting dispatches sample it; the half-resolution normal
+    encoder and the light classifier do not read it at all, so the empty
+    light lists do not depend on it. With d72457e5 (fill clears
+    the host stencil, confirmed on every frame) and 55cd634d (the 8_UINT
+    sample binds the device stencil, confirmed by the sample bind catalog),
+    the screen is unchanged on Intel.
+  - Ordering between the dispatches: memory barriers separate them in the
+    command stream.
+  - Translation of the classifier's control flow switch, `ds_append`,
+    `vcc_hi` and `v_mbcnt` (checked against the ISA).
+  - A render-target/storage alias of the normal buffer: its writer and all
+    four readers bind the same exact storage view, with no older alias.
+  - The G-buffer pass: MRT export translation (compressed, MRT0-4), per-MRT
+    write masks (0xf, blending off) and depth-stencil state (LEQUAL with
+    write) are correct. Its stencil state is the ALWAYS / REPLACE_TEST 128 /
+    mask 0x80 state above; an earlier note of EQUAL, REPLACE, reference 4 is
+    not supported by the register probe.
+  - An earlier exclusion that read a 1x1x1 indirect dispatch as "counter 0"
+    was flawed: it used stale indirect arguments (fixed below).
+- Changes made while localizing (none changes this screen visibly):
+  - c8e3537c: an exact storage texture lookup returns the view with the
+    newest storage write among all views of that range, instead of the first
+    listed one; a recycled range can hold views in several formats.
+  - 6d1b178d: dispatch-indirect arguments are read only after any GPU writer
+    in the recording or on another queue has published them.
+  - 55565820: a depth-only clear of a D32S8 target loads stencil instead of
+    discarding it (depth and stencil load operations are independent).
+  - 18d6e5be: HTILE clears done by the generic uniform fill kernel are
+    published in recording order, and the clear word `0xfffffff0` (ZMask 0,
+    maximum Z 1.0 in both HTILE layouts, SMem 3 with stencil tiling) is
+    translated to a depth clear when DB_DEPTH_CLEAR is 1.0. On this screen
+    the G-buffer depth clear (D32S8) is now consumed at the next bind; D16
+    and D32 targets translate as well.
+- Verified on the final tree: robot platformer (Intel, 390 s) same state, no
+  error. Racing title (Intel, 125 s twice and 200 s): no error, in-race
+  present rate 38-40, inside the 34-45 range of the 13-14 October runs; a
+  temporary counter showed it never takes the dispatch-indirect path. 2D
+  action title (AMD, 120 s): no error, gameplay without trails or white-out,
+  29-30 presents/s. Fishing title (AMD, 200 s): no error, reaches frame 3,093
+  against 2,008 for the earlier baseline in the same time, 5-8 presents/s
+  against 4-6. Watercolour platformer (AMD, 90 s): same captures and rates
+  (72.5 and 38.5). Unit tests: 2,419 pass. Table and boundary gates pass.
+  `kyty_playable_regression.py` reports `honest_skip_no_guest_root` here (no
+  local profile or guest root); it must run without `python3 -I` because it
+  imports a sibling module.
+- Robot platformer on AMD (390 s, no error) on d72457e5..5236078d: 3.3-4.2
+  presents/s on the title screen, then about 0.4 once the next scene loads,
+  as on 13 October; it reaches frame 888 at the seventh capture against 865
+  before, and the last captures show the tunnel instead of black. The
+  racing, 2D action, fishing and watercolour titles show no regression on
+  that range (in-race 34-43 on Intel; 28-29, 5-7 and 68/43 presents/s on
+  AMD).
+- Open defects found here:
+  - A guest compute fill of the stencil part of HTILE is not applied to the
+    host stencil plane: `DepthMetaComputeFillTranslatable`
+    (`GraphicsRenderAttachments.cpp:500`) only translates depth. This title
+    clears the stencil plane itself and its HTILE word marks stencil
+    expanded (SMem 3), so no SMem-cleared word has been observed yet.
+    Direction: translate SMem-cleared words to a stencil clear when the
+    stencil clear register agrees.
+  - `FindDepthStencil` (`GraphicsRenderDescriptor.cpp:1535`) asks for the
+    first object only, so a recycled range with depth views in two formats
+    can bind the stale one, as storage textures did before c8e3537c.
+    Direction: pick the most recently written view.
+  - `CommandProcessor::DrawIndexIndirect` (`GraphicsRun.cpp:2115`) waits only
+    for device-address write-backs before its CPU read of the arguments, so
+    a draw whose arguments an earlier dispatch of the same recording wrote
+    can use stale counts. Direction: the same admission as 6d1b178d.
+  - Exact storage views are not separated by image type; a 2D/3D filter was
+    tried and dropped because no failure needs it.
+
+## Font library: guest outline rasterization (2026-10-14)
+
+- Observed: on the robot platformer's title screen the "NEW GAME" pill drew
+  its text as solid squares.
+- Cause: glyph rendering filled every glyph box with full coverage and
+  reported synthetic metrics.
+- Change (8630816f): fonts opened from guest memory decode their TrueType
+  or CFF outlines with the public-domain `stb_truetype` header. Metrics,
+  horizontal layout and coverage come from the face; missing glyphs,
+  unsupported surfaces and unreadable fonts return the library error codes.
+- Verified: Intel robot platformer title screen shows "NEW GAME 1" and
+  "NEW GAME 2" as text. Unit tests: 2,419 pass.
+- Open: system font sets are opened by type and carry no guest bytes, so
+  their handles have no face. Their glyph queries report NO_SUPPORT_GLYPH and
+  `FontGetHorizontalLayout` returns placeholder values (`LibFont.cpp:491`).
+  `FontGetVerticalLayout` (`LibFont.cpp:519`) is synthetic for every font.
+  Real values need the system font set's face, which would come from a
+  user-provided font directory (never committed).
+
+## Robot platformer: vertex attribute format words (2026-10-14)
+
+- Observed: the flat blue streak shapes over the warp tunnel (open item of
+  the entry below) come from additive particle draws whose pixel program
+  receives NaN in every interpolant. A temporary NaN-count probe in the
+  pixel program showed NaN in all 2.8 million fragments of one draw; the
+  NaN came from the vertex program's exported parameters, which all derive
+  from a normalized attribute.
+- Cause: the vertex attribute control word carries a format override in
+  bits 5..13, laid out as `(buffer data format << 2) | (components - 1)`.
+  The guest's own fetch code decodes it that way (`s_bfe_u32` of bits 5..6
+  for the component count, 7..13 for the format, then a DST_SEL table
+  X001/XY01/XYZ1/XYZW). Kyty matched the whole 9-bit field against a
+  partial table plus a raw-format-id fallback, and kept the V# format for
+  anything else. The normal (`0x10b`, 16_16_16_16_SNORM, 4 components) was
+  therefore fetched as 32_32_32_FLOAT. `0xcb` (2_10_10_10_UNORM) and
+  `0x117` (16_16_16_16_UINT) were also silently replaced.
+- Change (4ea75ee0): decode format and component count separately, take
+  the DST_SEL from the component count, and refuse an override whose format
+  has no vertex input mapping (the "keep the V# format" path and the raw-id
+  fallback are removed). The Gen5 vertex format table now lists every float,
+  normalized and unsigned format of the ISA format table that has a
+  mandatory Vulkan vertex-buffer equivalent. Signed-integer and scaled
+  formats stay unmapped until the input path models them.
+- Verified (Intel A770, strict, `generic` route, 330 s, no error): the warp
+  tunnel shows thin lit streaks with no flat shapes; the studio logo, title
+  logo and the ship are visible. Distinct override fields seen in that run:
+  `0x05d 0x0cb 0x0e3 0x101 0x10b 0x117 0x11f 0x12a 0x137`. Racing title
+  (Intel, 125 s), fishing title (AMD, 200 s) and watercolour platformer
+  (AMD, 90 s): no error, same states as the baselines; all three use only
+  field 0 (the V# format), so the decode change does not touch them. Unit
+  tests: 2,419 pass. Table and boundary gates pass.
+- Open: an override with fewer components than its format (for example
+  `0x10a`, four-component storage read as XYZ1) is refused by the vertex
+  input layout when the shader reads four registers; not seen in a live run.
+
+## Robot platformer: exposure fill and DCC metadata clears (2026-10-14)
+
+- Observed: after `TUNNEL_ENABLE` the Intel intro showed only the UI over a
+  black scene, with stale publisher text and a smeared logo. Bound-image
+  readbacks at present 1400 showed the 3D scene rendered correctly into its
+  2432x1368 RGBA16F targets (space backdrop, streaks, the console-shaped
+  ship). So the black came from the final composite, not from skipped
+  geometry.
+- Cause 1, exposure: the composite pixel program multiplies the tonemapped
+  scene by an exposure read from a 1x1 RGBA32F storage image. The guest
+  resets the exposure state each frame with the uniform compute fill kernel,
+  `(1, -1, 0.5, 0.18)`. The fill decoder refused RGBA32F, so the sampled
+  texture stayed zero and the exposure pass wrote zero. Fixed in 582c6662: a
+  16-byte texel is the fill quad itself.
+- Cause 2, UI layer: the UI target (3840x2160 RGBA16F, DCC on) has its
+  metadata filled with key `0x40` (color 0, alpha 1, per the Mesa
+  `ac_descriptors.h` keys) before the UI draws. Kyty ignored metadata fills,
+  so the UI accumulated earlier frames. The composite uses the UI alpha as
+  scene transmittance, so the accumulated UI also hid the scene.
+- Cause 3, lighting: the lighting target's metadata is filled with `0x00` and
+  four lighting compute passes then write the target as a storage image
+  before its first render-target bind. Consuming the clear at that bind
+  erased the lighting and left the ship as a black silhouette.
+- Change (fabd1ecb, contract in `docs/graphics-compute-uniform-color-fill.md`):
+  - A metadata fill with a clear key is a pending clear.
+  - The first access consumes it before the access happens: a render target
+    with that DCC base, or a shader image, read or written, whose T# enables
+    compression with that metadata base.
+  - It is applied only to single-level, single-slice, single-sample surfaces
+    whose fill holds one key per 256 bytes of texels.
+- Verified (Intel A770, strict, `generic` route, 330 s, no error, 1,482
+  frames): the captures show the publisher text, the studio logo over the warp
+  tunnel, the title logo and the lit ship. A diagnostic run of the same
+  tree applied seven metadata clears in present 1400. Racing title (Intel,
+  125 s), fishing title and watercolour platformer (AMD, 200 s and 90 s): no
+  error, and the same states as the 1d692f53 baselines. The fishing title
+  keeps its in-game rate (about 150 frames per 26-30 s capture interval in
+  both runs). Unit tests: 2,418 pass, 12 skipped, 0 failures. Table and
+  boundary gates pass.
+- Open, found while verifying:
+  - Flat blue streak shapes cover the scene (fixed: see "Robot platformer:
+    vertex attribute format words"). They are drawn by instanced
+    particle draws (48 vertices x 150 and x 300 instances) into the 1920x1080
+    effect layer and the 960x540 half-resolution layer, and composited by the
+    pass that writes the scene before TAA. The shapes exist with and without
+    the metadata clears; only their color changes.
+  - Some frames show a black top-left quadrant in the half-resolution layer
+    (960x540 written into a 1920x1080 surface).
+  - The skip prompt's text is drawn as filled squares.
+  - Not modelled: the pipe-dependent padding of the metadata plane, mip
+    chains, arrays, MSAA, reversed component swaps, and register-key clears
+    read through the texture unit.
+
+## Robot platformer: Gen5 dispatch TUNNEL_ENABLE (2026-10-13)
+
+- Observed: with the 64-entry table, a 600 s Intel run passed the title
+  screen and loaded the intro level. It stopped at 461 s on
+  `compute dispatch admission rejected: mode=0x0000a041
+  reason=unsupported_dispatch_mode` (`GraphicsRenderDraw.cpp`). The
+  initiator is COMPUTE_SHADER_EN, ORDER_MODE and CS_W32_EN plus bit 13.
+- Contract:
+  - The GFX10.3 register header (`gc_10_3_0_sh_mask.h`, Linux amdgpu) names
+    bit 13 of COMPUTE_DISPATCH_INITIATOR `TUNNEL_ENABLE`.
+  - A Mesa Vulkan driver sets it on every GFX10+ dispatch and says the
+    vendor's own driver does too. The kernel driver honours it only on
+    high-priority compute queues; elsewhere it is a no-op. It asks the
+    scheduler to prioritise the dispatch's waves and does not change
+    groups, lanes or results.
+- Change: `ShaderComputeDispatchExecutionMode` clears `TUNNEL_ENABLE` on
+  Gen5 before the dispatch plan, the lane order and the input info see the
+  mode. Every other unknown bit stays refused. Gen4 is unchanged.
+- Verified:
+  - Intel robot platformer: 723 s with no error, 1,989 frames. The intro
+    level starts (`Level has started: intro_next`). The captures show the
+    title menu (logo and buttons) over a black scene, with the publisher
+    logo text still drawn under it; the intro level is dark. That is the
+    next problem.
+  - The guest logs `JsParticle heap memory is full!` from the intro level
+    on (32 lines). Not investigated.
+  - Intel racing title: 14.9k / 19.4k / 24.9k / 25.7k frames, no error
+    (previous run 25.6k).
+  - Unit tests: the 154 compute-wave and dispatch tests pass.
+
+## Robot platformer: 64-entry shader texture table (2026-10-13)
+
+- Observed: after the storage-image alias fix, the Intel run stopped at
+  253 s on `shader texture resource capacity exceeded`
+  (`ShaderGetTextureBuffer`, `Shader.cpp:2181`). The table held 32 entries.
+  The stopping pixel program reads 43 distinct non-empty 8-dword image
+  descriptors. 40 of them are in the extended user data, each read by a
+  constant-offset `s_load_dwordx8`; the program has no dynamic descriptor
+  loads. So the guest really binds more than 32 images in one stage.
+- Host limits: `maxPerStageDescriptorSampledImages` is 33,554,432 on the
+  Intel A770 (ANV) and 8,388,606 on the AMD Raphael iGPU (RADV). The table
+  size is a host bookkeeping cap, not a Vulkan limit.
+- Change (`Shader.h`): `ShaderTextureResources::RES_MAX` is 64. The
+  storage-image write-only and seed-skip masks, which hold one bit per table
+  entry, become `uint64_t` (`Shader.cpp`, `GraphicsRenderDraw.cpp`,
+  `GraphicsRenderBind.cpp`, `GraphicsRenderInternal.h`). The descriptor-cache
+  arrays and the metadata push-constant bound follow `RES_MAX`.
+- Verified:
+  - Intel robot platformer: past the stop, 300 s with no error, 1,287
+    frames at 2.9-7.2 fps. The captures still show the dark loading screen.
+  - Intel racing title: 15.3k / 18.1k / 24.5k / 25.6k frames, at or above
+    the previous run.
+  - AMD (RADV): racing title 9.9k frames, unchanged; watercolour platformer
+    3.4k and 3.9k frames.
+  - AMD fishing title, same tree and route, 200 s. Steady rate is frames per
+    30 s over the last three capture intervals:
+
+    | Table size | Perf counters | Final frame | Steady rate |
+    | --- | --- | --- | --- |
+    | 32 | on | 2,860 | 188-207 |
+    | 64 | on | 2,304 (slow load) | 192-196 |
+    | 64 | off | 2,792 / 2,814 / 2,858 | 136-225 |
+
+    The two sizes overlap. Runs on earlier binaries reached 3,058-3,106
+    frames at 206-238 frames per 30 s. That gap is not attributed:
+    - The storage-image alias change only replaces an EXIT that this title
+      never reached.
+    - Foreign processes loaded the host during some of the later runs
+      (load average 4-12).
+    - A repeat on HEAD under a load average of 12 gave 141-152 frames per
+      30 s, so it does not separate the two causes.
+    - The HEAD run before it stalled at frame 3 at boot. That is the known
+      intermittent boot stall, which also reproduces on older binaries.
+  - Unit tests: 2,413 pass. The one failure is the known intermittent
+    `StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
+    timeout (see the 2026-10-11 entry); it passes alone 3/3.
+- Open: per-draw structures grow with the table (`ShaderPixelInputInfo`
+  6,392 bytes, `ShaderVertexInputInfo` 8,984 bytes), and `BindDescriptors`
+  zero-initializes and scans the full arrays rather than the bound counts.
+  No cost was measured above noise.
+
+## Robot platformer: storage image over a sampled and a buffer view (2026-10-13)
+
+- Observed: after the pixel append fix, the Intel run stopped at 228 s on
+  `!create_all_the_same`. The new object is a 128x128 R32 StorageTexture
+  (64 KiB). Its range equals two live objects:
+  - a sampled Texture with the same format, pitch, extent, tile and swizzle,
+    created with its guest upload skipped;
+  - a StorageBuffer of 4,096 16-byte records, uploaded from guest memory,
+    with a write-back, not in use.
+  The single-parent path already links each of these relations
+  (`GpuMemoryAllowsTextureStorageAlias`). The multi-parent path had no rule
+  for mixed parent types, so it reached the EXIT.
+- Change (`GpuMemoryCreate.cpp`): `multi_storage_texture_alias` replaces only
+  that EXIT. It links the new image when every parent independently passes
+  `GpuMemoryAllowsTextureStorageAlias` and has published its content to
+  guest memory: no texture materialized from a device image, and no buffer
+  with an unfinished writable write-back. The image seeds from guest bytes.
+  No earlier branch changes, so titles that did not reach the EXIT keep
+  their path.
+- Verified:
+  - Intel robot platformer, twice: past the overlap, 1,277 frames at
+    3.4-10.9 fps. It stops at 253 s on the 32-entry texture table: the
+    shader declares more read-only texture slots. The 64-entry table entry
+    above takes it past that stop.
+  - Unit tests: 2,414 pass.
+- Open (coherence, not verified):
+  - Storage images have no write-back
+    (`StorageTexture.h:53`).
+  - A buffer write-back does not invalidate a StorageTexture parent
+    (`GpuMemory.h:775`).
+  - So the image's writes do not reach the sampled view (which holds no guest
+    bytes) or the buffer view. The other direction works: a buffer
+    write-back changes guest bytes, and the image's hash check reloads them.
+  - Suggested direction: publish storage-image writes to linked views, by
+    copy or write-back. Judge it with a scored capture of a scene that uses
+    this range.
+
+## Robot platformer: pixel GDS append under the launch EXEC (2026-10-13)
+
+- Observed: the same linked-list pixel program allocates its node slot as
+  `v_mbcnt_hi v7, exec_hi, 0` / `s_mov m0, s20` / `ds_append v6 gds` /
+  `v_mbcnt_lo v0, exec_lo, v7`, before any EXEC write or branch. The
+  program starts with `exp null vm done` and has no `s_wqm`. The native
+  wave proof refused it twice: MBCNT observes EXEC as a number, and a
+  memory write runs while helper lanes are live in the host invocation.
+- Contract:
+  - RDNA2 ISA: EXEC is the wave's valid mask until the program writes it,
+    and `exp ... vm` sends EXEC as the valid mask.
+  - DS_APPEND adds `count_bits(EXEC)` at `M0.base + offset` and returns the
+    pre-op value to every valid lane.
+  - V_MBCNT_HI is a plain source move in Wave32, so MBCNT over EXEC is the
+    exclusive prefix of valid lanes at both widths.
+  - Vulkan: helper invocations have no effect on stores and atomics, and
+    their atomic results are undefined.
+- Change:
+  - `ShaderLaunchExecEnd` marks the first EXEC write or control-flow
+    boundary. `ShaderCountsLaunchExec` accepts only MBCNT_LO/HI over
+    EXEC_LO/EXEC_HI before it.
+  - The partial-wave admission and the fragment mask flow accept those
+    MBCNTs and GDS append/consume (and device memory writes) before that
+    point. LDS and scratch writes stay refused.
+  - Pixel emission builds a valid-pixel ballot (`exec_lane_lo` and not a
+    helper). MBCNT counts it. One valid lane updates the counter by its bit
+    count, and the pre-op value is shuffled to every valid lane.
+  - The GDS pointer SGPR is the M0 source at the GDS instructions, not the
+    last M0 write in the program (here M0 is later reloaded for
+    interpolation).
+- Verified:
+  - The dumped program proves `FragmentPartialWave` at both widths.
+  - Unit tests: admission at both widths; refusal after a branch and for a
+    non-EXEC mask; SPIR-V with one counter atomic, no elect or broadcast,
+    and validated by the toolchain.
+  - Strict AMD (RADV) runs, no error:
+
+    | Title | Frames |
+    | --- | --- |
+    | racing title | 5.6k / 7.5k / 9.3k / 9.9k |
+    | watercolour platformer | 4.1k at 60 s |
+    | fishing title | 2.0k, then 3.1k on a repeat, at 180 s (the first run loaded slower; same steady rate) |
+  - Intel robot platformer: 1,160 frames at 1.8-7.9 fps, past the
+    linked-list program. It stops at 228 s on `!create_all_the_same`: a
+    64 KiB StorageTexture whose range equals a sampled Texture and a
+    StorageBuffer. That is the next stop.
+
+## Robot platformer: image atomic swap with a GLC return (2026-10-13)
+
+- Observed: after the Wave32 OR reductions, the Intel run stopped at
+  `ShaderParseMIMG.cpp:49`. The parser admitted GLC only on
+  IMAGE_ATOMIC_ADD (0x11). The stopping program is a per-pixel linked list:
+  `image_atomic_swap v9, v[0:1], s[0:7] glc` exchanges a new node index into
+  a 2D R32_UINT head image, and the node is written through buffer stores.
+- Contract:
+  - RDNA2 ISA: IMAGE_ATOMIC_SWAP (opcode 15) is `tmp = MEM; MEM = DATA;
+    RETURN = tmp`.
+  - GLC on an atomic selects the pre-op return (ISA 8.1.10).
+  - Load and store cache policy (GLC on non-atomics) is still refused.
+- Change:
+  - `ImageAtomicSwap` is a new instruction type. It shares the parse,
+    admission (`ShaderImageAtomicSupported`), storage-usage and emission
+    paths of IMAGE_ATOMIC_ADD through `ShaderIsImageAtomic`.
+  - `Recompile_ImageAtomic` emits `OpAtomicExchange` or `OpAtomicIAdd` on
+    one R32 texel, in compute and pixel stages.
+- Verified: unit tests cover both opcodes with and without GLC, and the
+  sampler-operand refusal for both.
+
+## Robot platformer: Wave32 whole-wave OR reductions (2026-10-13)
+
+- Observed: once the Wave32 lane masks were narrowed, the Intel pixel
+  program stopped at pc 0x166c with `fragment row DPP source participation is
+  unproven`. The construct is the Wave32 form of the wave64 worldmap
+  reduction:
+  - `s_mov_b32 s32, exec_lo` ... `s_orn2_saveexec_b32 vcc_lo, s32`;
+  - `v_cndmask_b32 v23, 0, v23, s33`, with `s33 = s32 & s64`;
+  - four `v_or_b32` with `row_shr:1/2/4/8`;
+  - `s_mov_b32 exec_lo, vcc_lo`, an unrelated `v_rsq_f32`, then
+    `v_readlane` of lanes 15 and 31 and `s_or_b32`.
+- Contract:
+  - RDNA2 ISA: V_READLANE_B32 takes `lane % 32` in a wave32 and ignores EXEC.
+  - The upper halves of EXEC and VCC are ignored in a wave32.
+  - Row DPP stays within a 16-lane row in both widths.
+- Change:
+  - The neutral-region proof (`ShaderFragmentNeutralRegionEnd`) takes the
+    guest wave size. For Wave32 it accepts the B32 save, ORN2_SAVEEXEC,
+    AND and restore forms on single SGPRs. It runs on the narrowed program,
+    and the select is classified with its encoded pair condition.
+  - Every other region user (tier, partial-wave reads, emitter) still asks
+    for the Wave64 form only. In a Wave64 program a B32 entry widens only
+    EXEC_LO, so it never forms a region.
+  - The reduction proof uses the guest lane count, refuses a constant lane
+    at or above it, and follows the B32 mask algebra for the residual
+    (stale-lane) obligation.
+  - The mask flow result records the guest width it was proven for.
+  - `FragmentPartialWave` is no longer limited to Wave64. Host selection
+    already limits it to host subgroups no wider than the guest wave, so a
+    host invocation id is the guest lane.
+  - At both widths, instructions that name no network register, keep EXEC,
+    and are neither branches nor labels may now sit between the restore and
+    the reads.
+- Verified:
+  - The dumped program now proves `FragmentPartialWave`, with one reduction
+    whose reads cover lanes `0xffff` and `0xffff0000`.
+  - Unit tests: 2,412 pass. New cases:
+    - the Wave32 sequence and its SPIR-V emission;
+    - refusal at Wave64;
+    - refusal for lane 32;
+    - stale lanes after a B32 WQM;
+    - independent versus observing instructions before the reads (Wave64).
+  - Strict AMD (RADV) runs, no error:
+
+    | Title | Frames |
+    | --- | --- |
+    | racing title | 7.6k / 9.4k / 11.2k / 12.0k |
+    | watercolour platformer | 4.1k at 60 s |
+    | fishing title | 3.1k at 180 s |
+- Robot platformer, cold SPIR-V caches:
+  - AMD: 303 s without error, 941 frames at 3.3-5.3 fps, still on the
+    publisher logo. The previous run loaded at about 0.4 fps.
+  - Intel (Arc, no concurrent GPU job): 1,190 frames at 3.5-8.3 fps. It
+    passes the logo into a dark loading transition, then stops at 251 s on
+    `ShaderParseMIMG.cpp:49`: `glc == 1` on a MIMG opcode other than 0x11.
+    That is the next stop.
+
+## Robot platformer: wave32 lane masks are one dword (2026-10-13)
+
+- Observed: after the SDWA fix, the same Intel pixel program (guest wave32)
+  was refused at pc 0xf48 with `reason=mask observed as a number`:
+  - 0xf30 writes a number into `vcc_hi` (`s_bfe_u32`).
+  - 0xf40 runs `v_cmp_eq_u32 vcc, 3, vcc_hi`.
+  - 0xf48 and 0xf5c read `vcc_hi` back as that number.
+  The mask flow had marked both VCC words as lane bits at 0xf40.
+- Contract (RDNA2 ISA 2.1: "the upper half of EXEC and VCC are ignored for
+  wave32 waves"; 3.x: "when used by a wave32, the upper 32 bits of VCC are
+  unused and only the lower 32 bits contribute to VCCZ"):
+  - In a wave32 program, every VALU lane mask is one dword: compare and
+    carry-out destinations, carry-in and the `v_cndmask` condition.
+  - The upper SGPR of the encoded pair is neither written nor read, so it
+    may hold a number across the instruction.
+  - The guest relies on this, as shown above.
+- Implementation:
+  - `ShaderWave32LaneMasks` narrows those operands; `S_BFM_B64` shares the
+    compare format and is excluded.
+  - `ShaderAnalyzeFragmentMaskFlow` takes the guest wave size. At 32 it
+    walks the narrowed program, branches on VCC_LO only, and accepts the B32
+    mask algebra (AND, OR, ANDN2, XOR, ORN2, NOT, MOV, AND_SAVEEXEC) wherever
+    the region rules accepted the B64 forms.
+  - Wave64 behaviour is unchanged.
+  - The emitter already kept the upper word in wave32: `ResolveMaskAccesses`
+    stores only the low ballot word and drops the high-word clear.
+- Next stop: the same program now clears the mask flow and stops at
+  pc 0x166c with `fragment row DPP source participation is unproven`. This
+  is a wave32 whole-wave OR reduction:
+  - `s_orn2_saveexec_b32`, then a `v_cndmask` seed;
+  - four row-DPP `v_or_b32`;
+  - `v_readlane` 15 and 31, then `s_or_b32`.
+  The partial-wave reduction proof (`ShaderFragmentLaneReduction.cpp`)
+  covers only wave64: `S_ORN2_SAVEEXEC_B64`, 64 lanes and B64 mask algebra.
+  Extending it to wave32 (lane sets 0-15 and 16-31) is the direction. The
+  DPP precondition stays: a host shuffle from an inactive or absent lane is
+  undefined.
+- Verified:
+  - The mask flow proof was checked offline on the dumped program.
+  - Unit tests: 2,410 pass. A new case runs the same program at both widths:
+    wave32 keeps the number in VCC_HI, wave64 refuses it. The
+    whole-pair VCC branch case now states the wave32 result.
+  - A temporary per-program check (env-gated, removed) showed that no pixel
+    program of the racing title, the watercolour platformer or the fishing
+    title runs as wave32. Their analysis is unchanged.
+  - Strict regressions on AMD (RADV, warm), no error:
+    - racing title: 5.6k / 7.4k / 9.3k / 10.2k;
+    - watercolour platformer: 3.6k at 60 s;
+    - fishing title: 3.1k at 180 s.
+  - On Intel the three titles ran without new errors, under a concurrent
+    host GPU job on the same device, so their frame rates are not
+    comparable:
+    - One racing title run hit the open intermittent depth-reference
+      refusal recorded below.
+    - One stopped in `String::Size` before the first frame, and did not
+      reproduce on two reruns.
+
+## Robot platformer: SDWA low destination selects (2026-10-13)
+
+- Observed: the Intel stop at pc 0x157c of a 1920x1080 pixel program is
+  `v_cvt_i32_f32` in SDWA form with control dword 0x0006140d
+  (`dst_sel=WORD_0`, `dst_unused=PRESERVE`). The lowering preconditions
+  refused every destination select other than DWORD.
+- Contract (RDNA2 ISA, SDWA table 88; the LLVM AMDGPU modifier syntax gives
+  the same ranges):
+  - `DST_SEL` 0-3 select a byte, 4 bits [15:0], 5 bits [31:16], 6 the dword.
+  - `DST_UNUSED` 0 pads the other bits with zeros, 1 sign-extends the
+    field, 2 keeps the prior bits, 3 is reserved.
+  - Neither source says where the result sits for `WORD_1`/`BYTE_1-3`
+    (shifted into the field or taken from the matching bits). Only one
+    secondary implementation shifts it, which is a lead only.
+- Implementation:
+  - `ShaderSdwaLowDestinationSupported` admits `BYTE_0` and `WORD_0` with
+    `DST_UNUSED` 0-2.
+  - It applies to VOP1 and VOP2 with a plain single-VGPR destination, no
+    clamp or output modifier, and no MAC or dot forms.
+  - The per-lane emitter (`EmitSdwaLowDestinationInstruction`) runs the
+    ordinary instruction as a whole-dword write, then merges its low field
+    into the prior value (pad, sign-extend or preserve). An inactive lane
+    keeps the prior value.
+  - Paired and native compute-wave banks still refuse these selects, and so
+    do shifted selects, reserved `DST_UNUSED`, clamp and output modifiers.
+- Verified: a unit test pins the admitted and refused control words. A
+  strict Intel run of the robot platformer passed pc 0x157c and stopped at
+  the wave32 VCC case above.
+- Defect found, not fixed: the host-visible compute scratch pool
+  (`TransientBufferPool::Scratch`, `GraphicsRenderCommandBuffer.cpp:1090`) frees
+  entries only in `Free()`. A command buffer that detiles many large
+  resources fills its 16 MiB, and the detile then falls back to the CPU with
+  `ResourceUnavailable`. A per-submit reset or a size-aware reuse that keeps
+  the two-buffer detile rule is the direction.
+
+## Robot platformer: raw texels between aliased depth and colour views (2026-10-13)
+
+- Observed: one 960x540 range (1024x640x4 bytes, 64 KiB blocks) is
+  time-shared every frame by a B10G11R11 render target (mode 27), a
+  10_11_11 storage view (mode 27), an R32F storage view (mode 24, one level)
+  and a D32 depth target with no HTILE. A bounded diagnostic showed the depth
+  bound read-only (`LEQUAL`, depth writes off, no clear) and the R32F
+  storage view as its producer: image-store analysis marks it fully
+  overwritten. The previous code had no relation for depth over storage, so
+  the read-only depth started undefined and hit the read-only clear refusal.
+- Contract:
+  - The 4-byte depth (mode 24) and render-target (mode 27) layouts address
+    texels alike. A unit test pins this.
+  - A depth target over an equal-range render target or matching storage
+    view, and a storage view over such a depth target, copy the raw 32-bit
+    words of the newest writer (`create_texel_bits_seed`), then retire it.
+  - Matching means:
+    - one sample, one layer, one level;
+    - an equal extent;
+    - a pitch equal to the depth's 64 KiB-aligned width;
+    - R32F or B10G11R11 colour;
+    - no HTILE;
+    - host extent equal to guest.
+  - Any later write to another overlapping view refuses the seed.
+- Copy (`UtilCopyTexelBits`): image to buffer to image, with no conversion.
+  Its staging is a device-local per-command-buffer pool
+  (`AllocateTransientCopyBuffer`). The host-visible compute scratch pool did
+  not work for it: on Intel, two detile entries (8.3 MB and 6.6 MB, other
+  usage masks) already held 14.9 of its 16 MiB, so the 2 MB copy was
+  refused at about 140-150 s.
+- Limit: Intel Arc (DG2) does not expose `VK_EXT_depth_range_unrestricted`,
+  so a depth upload outside [0,1] is outside VUID-07931 there. RADV exposes
+  it.
+- Excluded:
+  - Clamping the words into a depth image destroys the bit pattern the
+    colour views read back, so it was rejected.
+  - The nondeterministic `!create_all_the_same` at another range in the same
+    title (78 s, Intel) is the documented transient-pool class. This seed
+    path did not run there.
+- Next stop (Intel, reproduced twice at 178-189 s, 1920x1080 pixel stage):
+  - `native_admission{... pc=0x157c reason=invalid instruction before native
+    wave analysis}`.
+  - The instruction is `v_cvt_i32_f32` in SDWA form (control dword
+    0x0006140d: `dst_sel=WORD_0`, `dst_unused=PRESERVE`, `src0_sel=DWORD`),
+    a 16-bit partial write that keeps the high half of the VGPR.
+  - The parser kept the destination select and the lowering preconditions
+    refused it (fail closed); the per-lane merge is in "SDWA low destination
+    selects" above.
+- Verified:
+  - The robot platformer on AMD (RADV, `Fixed` + RenderTargets) ran 600 s
+    and then 300 s, both status 1 with no error. It is still loading the
+    worldmap at about 0.4 fps, with black captures.
+  - On Intel it ran 178-189 s, until the SDWA stop above.
+  - Regressions (strict, no errors):
+
+    | GPU | Title | This change | Baseline |
+    | --- | --- | --- | --- |
+    | Intel A770 | racing title | 16.0k / 20.6k / 26.1k / 27.5k frames at 30 / 60 / 90 / 120 s | 15.4k / 20.1k / 25.7k / 27.0k |
+    | Intel A770 | watercolour platformer | 10.7k at 60 s | about 10.5k |
+    | Intel A770 | fishing title | 5.6k at 180 s | about 5.5k |
+    | AMD (warm cache) | racing title | 6.3k / 8.4k / 10.3k / 11.2k | 5.7k / 7.5k / 9.4k / 10.3k |
+    | AMD (warm cache) | watercolour platformer | 4.1k at 60 s | about 4.1k |
+    | AMD (warm cache) | fishing title | 3.1k at 180 s | about 3.0k |
+
+    The first AMD pass ran right after a host reboot. It was 25-35% lower
+    from the first window on, and recovered on rerun.
+  - Unit tests: 344 graphics-state and detile tests. Gate scripts:
+    boundaries, graphics tables.
+
+## Robot platformer: whole-wave OR reductions as partial waves (2026-10-13)
+
+- Fix: the worldmap pixel shader's whole-wave OR reduction is admitted with
+  a new proof, `FragmentPartialWave`. A Wave64 pixel program on a host
+  subgroup of any width is a partially populated guest wave. When its only
+  whole-wave observations are proven OR reductions and reads that stay
+  inside launched quads, the proof holds at every host width. It therefore
+  needs no `requiredSubgroupSize` for the fragment stage, which the Intel
+  Arc host cannot provide.
+  - Reduction contract (`ShaderFragmentLaneReduction.cpp`): a proven neutral
+    region with a `v_cndmask` seed whose condition holds only lanes of the
+    entry EXEC (no helper, no lane outside the launched quads). Its steps are
+    row-shift DPP ORs with full row and bank masks, `v_permlanex16` and
+    plain ORs. The reads are static `v_readlane` after the EXEC restore,
+    before the first export or indirect jump.
+  - Lowering: each read is one `OpGroupNonUniformBitwiseOr` over the seeds of
+    its guest lane set (lane 31 reads lanes 0-31; lane 63 reads 32-63),
+    followed by a quad-uniform broadcast. The network steps are not emitted.
+  - Network liveness: after the reads, every path must overwrite the network
+    registers before any other read. An overwrite under a non-full EXEC
+    leaves the register "residual", stale only in launched lanes outside the
+    restored mask. A residual register may be read only while EXEC stays
+    inside that mask (tracked through mask algebra, joined monotonically
+    across loops), and never through DPP, readlane/writelane/permlane, DS or
+    a non-lane-local image read.
+  - The fragment mask flow now records, per instruction, whether EXEC holds
+    only lanes of the launched quads, all of them, and which `v_cndmask`
+    conditions are live-only.
+- Excluded, from a temporary diagnostic in the analysis: requiring a full
+  EXEC for the overwrite. The worldmap shader kills the network registers
+  under the discard mask (`s_andn2 ... vcc` then `s_wqm`), so that rule
+  refused it on both of its paths.
+- Excluded: exact-state deduplication in the liveness walk. A loop head in
+  the same shader produced more than 16 distinct states; the walk now joins
+  states monotonically.
+- Current frontier on both hosts: a wave64 vertex program, refused with
+  `ngg_front_refusal{... reason=complete program exceeds the 1024-instruction
+  proof bound}`. Neither Intel nor RADV can pin the vertex stage to 64 lanes.
+- Verified:
+  - The robot platformer passes the worldmap pixel stop and stops at the
+    vertex bound on Intel Arc A770 (172 s) and on AMD RADV (272 s, fixed
+    render-target resolution), strict runs.
+  - Regressions, one strict run each on both hosts (status 1, no error): the
+    racing title is in a race, the watercolour platformer is in the intro
+    and the fishing title is docked in gameplay. The capture frame counts
+    match the previous runs.
+    - The first Intel run of the racing title after a host reboot (cold disk
+      cache and a fresh SPIR-V cache) was still loading at 90 s. A warm rerun
+      matched the previous runs frame for frame.
+  - Unit tests: 980 tests across the shader, fragment, compute, NGG, packet,
+    state and detile suites. New admission cases cover the proof, refusal
+    of observed network values and of row-masked steps, stale lanes under
+    WQM, and SPIR-V emission validated with `spirv-val`. Gate script:
+    boundaries (strict).
+
+## Robot platformer: worldmap admission chain (2026-10-13)
+
+- Four general fixes move the robot platformer from its early stops to the
+  worldmap level load on both hosts:
+  - **Tiled storage writers composed into linear views.** A linear storage
+    view over memory last written through single-level 2D storage images in
+    the 64 KB R_X layout is composed from those images, as it already was from
+    tiled render targets. The newest complete writer of each range wins.
+  - **Loop exits that break through an arm.** The CFG structurizer accepts a
+    loop exit that enters an arm placed between the header and the latch when
+    every path of the arm stays under the header, leaves only to the merge and
+    shares no block with another exit or with what follows the merge
+    (`ShaderControlFlowGraph.cpp:IsBreakArm`). Only graphs refused before are
+    affected.
+  - **Wave32 lane masks in scalar flow.** A wave32 `V_CMP`/carry-out writes only
+    the low SGPR of its pair. The scalar flow read every program as wave64, so
+    a compare into `s[13:14]` hid that `s14` still held its entry value. A
+    compute shader's extended user data load through `s[14:15]` then lost its
+    descriptor mapping (emitter refusal on `S_LOAD_DWORDX4` at 0x1740). The flow
+    now keys on the guest wave size. Compute resource analysis passes the
+    dispatch plan's size; the other stages keep the conservative wave64
+    reading.
+  - **Any-lane mask tests.** `S_CMP_LG_U64`/`S_CMP_EQ_U64 mask, 0` followed by a
+    forward SCC branch asks what `S_CBRANCH_VCCZ` asks. The fragment mask flow
+    opens a divergent region for it instead of refusing the compare as a
+    numeric observation. The summary is cleared by any other SCC writer or a
+    join. Every other SCC reader and back edges stay refused. Masks that may
+    hold helper bits under WQM qualify, as they do for VCCZ.
+- Current frontier on both hosts: a 1920x1080 worldmap pixel shader (wave64,
+  3 colour targets, depth write, blend) is refused by native wave admission.
+  It is now classified `FragmentNeutral32` (it was `ExactSubgroup` before the
+  any-lane fix). The refusal is participation: "fragment row DPP source
+  participation is unproven" at the first of four `V_OR_B32` row-shift steps
+  (`row_shr` 1/2/4/8, `bound_ctrl` 0), in a whole-wave OR reduction.
+  - The reduction is: `s_orn2_saveexec` region,
+    `v_cndmask 0, x, live&exec`, the row scan, `v_permlanex16`, then
+    `v_readlane` 31 and 63 after the restore and `s_or` of the two halves.
+  - The same shader also has three `v_readfirstlane` waterfall loops, refused
+    with "target quad is not proven to retain a participating real member".
+  - Helpers relay partial ORs through the scan, so neutral initial values do
+    not make a non-participating helper's shuffle source defined. This
+    refusal is correct and must not be relaxed.
+  - A whole-wave reduction proof is a viable direction: lower the readlanes
+    as subgroup OR reductions of the initializer, valid at every host width.
+    It needs the initializer's condition proven narrow, the scan registers
+    dead after the region, and EXEC after the region proven within the
+    region's entry EXEC.
+- Intel-specific gate: the Arc A770 lists only COMPUTE, TASK and MESH in
+  `requiredSubgroupSizeStages`, and fragment subgroups vary from 8 to 32.
+  `FragmentNeutral32` therefore has no legal mapping on Intel
+  (`host=unavailable mapping=0`) even with the participation proof. Intel
+  needs a proof valid at every width, or the fragment wave transport (the
+  compute stage can pin 32). AMD (RADV) can pin fragment 64 and reports
+  `mapping=1`.
+- Scoping experiment (temporary, uncommitted bypass of the participation
+  refusals): AMD then stops at a vertex program with
+  `ngg_front_refusal{... reason=complete program exceeds the 1024-instruction
+  proof bound}`. RADV cannot pin the vertex stage to 64 either.
+- Open gap: the pixel and vertex resource analyses still read scalar flow as
+  wave64 (conservative, not a correctness defect).
+- Verified:
+  - Intel Arc A770, strict runs with a fresh SPIR-V cache:
+    - the racing title (125 s) is in a race;
+    - the watercolour platformer (90 s) is in the intro;
+    - the fishing title (200 s) is docked in gameplay.
+    - All three end with status 1 and no error.
+    - The same three runs on AMD (RADV, fixed render-target resolution):
+      racing, intro and docked gameplay, each with status 1 and no error.
+  - The robot platformer reaches the worldmap level load and stops at the
+    pixel shader above, on Intel (160 s) and on AMD (267 s). AMD stopped at
+    about 61 s before.
+  - Unit suites: 596 shader, fragment, compute and NGG tests, including new
+    break-arm, wave32 mask and any-lane cases. Gate script: boundaries
+    (strict).
+
 ## Static resource-plan integration validation (2026-10-12)
 
 - Integrated the six committed changes through `412e8c4d` with the static
@@ -2909,6 +3652,72 @@ The adjacent-mapping indirect-register snapshot change retains a separate range 
 It bounds register count and validates the complete allocated span, but does not prove atomicity against a concurrent
 guest free/remap. Submission-time guest ownership remains an unresolved condition; this is not a lifetime-race fix.
 
+### Loading regression under expanded dirty-page admission (2026-10-09, unresolved)
+
+A fresh strict run of the selected published source above reached the beat 'em
+up's camp cinematic at about 184 seconds. The maintainer confirmed manually
+closing that run at about 200 seconds; exit zero was not an unexplained guest
+termination. A bounded scripted route and one observed agent tap were used.
+This establishes that cinematic checkpoint, not combat, audible audio,
+sustained playability or native-like performance.
+
+Two immutable binaries from a separate dirty integration candidate continued
+presenting the loading glyph in bounded runs of about 284 and 304 seconds,
+without a recorded fatal error. Those binaries include uncommitted changes;
+the observation cannot be attributed to the candidate's committed HEAD alone.
+The second run used debugger profiling. All runs used Native resolution,
+Silent logging, shader validation, no shader optimization, isolated cold shader
+caches, and the same private route and Intel Vulkan driver. These settings and
+debugger pauses are not a normal-performance benchmark.
+
+A paired, read-only debugger probe sampled dirty-page metadata using each
+binary's own type layout. It persisted aggregate counts, not guest bytes:
+
+| Approximately 75-second diagnostic sample | Published source | Dirty integration candidate |
+| --- | ---: | ---: |
+| Page-table capacity | 262,144 | 262,144 |
+| Occupied slots | 123,195 | 262,144 |
+| Empty slots | 138,949 | 0 |
+| Pages with active references | 87,519 | 161,538 |
+| Token-valid retired pages without references | 35,676 | 100,606 |
+
+The integration candidate already had no empty slots at the 35-second sample.
+At the owned stop its loading thread was in `FindPage`, reached through
+`VisitWritePages`, `NotifyWrite` and `c_memcpy` for a 16-byte write. The actual
+binary's lookup loop was inspected separately. `GpuDirtyPageTracker::FindPage`
+(`source/emulator/src/Graphics/GpuDirtyPageTracker.cpp:113` in the selected
+source) stops on an empty key or a match, otherwise scans the full table.
+Consequently every absent-page lookup costs 262,144 probes when no empty key
+remains. The expanded candidate permits many more registered ranges while
+retaining that fixed page-table capacity. The published source's smaller range
+admission was full at 512 entries at its owned stop. Restoring that cap would
+not establish a correct scalability repair.
+
+Table saturation and lookup activity were observed on the loading path. The
+sampled call's hit/miss, cost and frequency remain unmeasured; its causal
+contribution to the branch difference is still a hypothesis. Loading
+allocation/release counters continued to advance. A later-window sample recorded
+256 distinct direct memory releases, all returning zero, with a maximum duration below 380 ms.
+Seeing the same release caller in two stack samples therefore did not establish
+one permanently blocked release or an infinite GPU wait.
+
+Do not erase token-bearing retired slots merely because their reference count
+is zero: unregistration attempts to restore ordinary permissions, and
+`UnregisterRetainsLateWritableFaultEvidence` requires a later write fault to
+remain handled after a successful restore. Failed or uncertain restores must
+retain the corresponding authority and fault evidence. A repair must bound
+absent-page lookup cost while preserving late-fault evidence, mapping identity, authority fencing and denied-protection
+behavior. Reclamation inside a VM authority callback must not wait on the
+publisher count held by that callback. Next acceptance requires a deterministic
+saturated-table reproducer with a bounded lookup-cost contract and checks for
+active, re-registered and retired pages, denied-write/unmap transitions, failed
+restores and changed authority. Any early reclamation proposal also needs a
+deterministic pending-fault test paused after page lookup and before restorer
+announcement. A controlled A/B must establish the repair's loading effect, followed by a strict run reaching and holding the cinematic
+checkpoint and continuing beyond it without a fatal error. Native captures and
+real action-response evidence remain required before any gameplay claim. No
+runtime repair was made by this investigation.
+
 ### Mechanical-fist platformer startup frontier (2026-10-08, not gameplay)
 
 These runs used the full local candidate, including changes held from publication. They used Silent logging,
@@ -4076,9 +4885,9 @@ Scope: same strict configuration on the reference host (Intel Arc A770, Mesa `xe
 command-processor thread and the DRM `fdinfo` engine counters for the device. A pixel-art title whose vertex front is
 bindless (V#s loaded from tables at runtime offsets) and whose only compute shader is the SDK's 16-byte buffer fill
 went from 41 ms to 22 ms per frame (24 to 45 fps) on its start screen. Regression set (runs d586-d602, 90 s each,
-previous run in parentheses): Blasphemous 2 107 fps (98), Dreaming Sarah 248 (251), Let's Build a Zoo 239 (220),
-Formula Retro Racing 229 in the race (181), The Messenger 594 (378), Dead Cells 201 (112), ANIMAL WELL 37 in its
-new-game route (23), Worms 59 (59), JoJo 220 (203), Hades 59 (49), the .NET beat 'em up 11 (11). DREDGE ran clean once
+previous run in parentheses): the gothic action platformer 107 fps (98), the Construct title 248 (251), the zoo builder 239 (220),
+the racing title 229 in the race (181), the ninja platformer 594 (378), the 2D action title 201 (112), the cave exploration title 37 in its
+new-game route (23), the artillery title 59 (59), the anime fighting title 220 (203), the isometric roguelike 59 (49), the .NET beat 'em up 11 (11). The fishing title ran clean once
 (66 fps, was 52) and twice stopped at 12-14 s on its known stale extended-user-data V# (the same words as runs d221,
 d466 and d571).
 
@@ -4259,7 +5068,7 @@ Investigated and left open:
 
 Third round (same day):
 
-- **Published fills skipped write-backs that still had work (regression from the first round).** Dead Cells' gameplay
+- **Published fills skipped write-backs that still had work (regression from the first round).** The 2D action title's gameplay
   smeared sprites horizontally (trails behind the character) and, some seconds later, turned the whole scene white;
   only the HUD survived. It happened in most runs since the device-side publication of uniform fills, and in some
   runs never, depending on how submissions overlapped. Bisection: publishing the fill's bytes into the guest view
@@ -4286,7 +5095,7 @@ Third round (same day):
   walks only flexible ranges and ranges holding tracked snapshots instead of all ranges and chunks. Over 180 s the
   preparation total went from 32.7 s to 7.1 s (maximum 123 to 59 ms).
 
-- **Hades reaches gameplay.** Three independent defects stood between its title and the House of Hades:
+- **The isometric roguelike reaches gameplay.** Three independent defects stood between its title and its hub:
   - *Branch-heavy shader compile never finished.* After cross, the command processor sampled 70% of the process in
     `ArmReachesBeforeJoin`: a 2,299-instruction pixel shader with 254 branches. Selection-join queries were repeated
     for every label and branch during emission, located instructions by scanning the program, and ordered a join's
@@ -4300,18 +5109,18 @@ Third round (same day):
     atlases (CPU-written) stayed empty, so each label showed only its plate. The tile-9 host detiler matches the
     GFX10 SW_64KB_S pattern for 1, 2, 4, 8 and 16-byte elements, so any such uncompressed format now uploads when no
     live surface covers it.
-  Hades now shows its menus and walks in the House at about 10 fps (open: performance, and a crash at 8-11 s in
+  The isometric roguelike now shows its menus and walks in its hub at about 10 fps (open: performance, and a crash at 8-11 s in
   some runs where its GPU allocator returns a null block and a row copy writes to 0x40; its direct-memory allocate
   and map calls do not fail in those runs).
 
-- **Linear mip chains.** JoJo's characters showed shredded textures: almost every material is a linear (tile 0)
+- **Linear mip chains.** The anime fighting title's characters showed shredded textures: almost every material is a linear (tile 0)
   BC1/BC3 texture with a full mip chain, and the linear fallback laid levels out from level 0 with halved pitches.
   GFX10 linear mip chains (addrlib `HwlComputeSurfaceInfoLinear`) store the levels from the smallest one to level 0,
   each with its element pitch aligned to 256 bytes, element sizes halving on their own (4x4 blocks for BC). The
   fallback now computes that layout and each mip upload uses its own pitch; the rule reproduces all 2,135
   multi-level entries of the SDK-generated linear RGBA8 table (offsets, sizes, padded pitch and total).
 
-- **SDK pattern fill.** Hades clears its 1920x1152 targets every frame with the SDK pattern-fill kernel
+- **SDK pattern fill.** The isometric roguelike clears its 1920x1152 targets every frame with the SDK pattern-fill kernel
   (`buffer_store_format_x` of `values[i % period]` for `i` below a count, 32-bit UINT records). It was never
   recognized, so the clear reached the storage buffer but not the render-target images: rooms with strong lighting
   showed saturated green, smeared columns and stale silhouettes. The uniform-fill proof now matches that kernel's
@@ -4320,7 +5129,7 @@ Third round (same day):
   time 11.8 s to 0.8 s over 120 s). A first attempt never matched: the proof rejected programs with indirect labels,
   which every conditional branch records for its fall-through, so its measured cost was not the fill's.
 - **Device-address scans over writable storage only.** Before a draw or dispatch that reads guest addresses, GPU
-  memory looked for storage buffers with pending GPU writes by walking every live storage buffer, twice; JoJo keeps
+  memory looked for storage buffers with pending GPU writes by walking every live storage buffer, twice; the anime fighting title keeps
   about 4,000 alive and the ordered-set walk was the top host hotspot of its cutscene. The scans now walk the
   in-use, writable subset.
 - **Partially released direct mappings keep their live part.** The .NET beat 'em up's runtime shrinks a buffer by
@@ -4341,7 +5150,7 @@ Third round (same day):
 - **Write-back and overlap scans use indexes.** Completed-submission write-backs walked every object of every heap
   (12,546 heaps, ~16,000 objects, on every completion); they now visit an index of in-use writable objects (18 on
   average). Overlap queries walked every heap; the heap span index now lists every heap covering a span. Loading
-  frames went from 18-23 to 30-36 fps on that title and Dead Cells' walk route from 47-63 to 86 fps.
+  frames went from 18-23 to 30-36 fps on that title and the 2D action title's walk route from 47-63 to 86 fps.
 - **Unsigned-only shaders read the unsigned descriptor banks.** The .NET beat 'em up's logo video was a uniform
   green screen: its Theora planes are written by a dispatch as R8_UINT storage images and sampled by a shader that
   samples only unsigned textures, which bound the float banks and read zero (BT.709 of zero planes is (0, 77, 0)).
@@ -4383,12 +5192,12 @@ Third round (same day):
 
 Investigated and left open:
 
-- JoJo's in-engine cutscenes run at about 5 fps. The guest spends most of its time spinning on GPU labels
+- The anime fighting title's in-engine cutscenes run at about 5 fps. The guest spends most of its time spinning on GPU labels
   (`while (*label != 1)` after an ACB submission, and two similar loops), so the frame rate is the round trip of its
   compute work. Each of its ~20 dispatches per frame completes with a write-back of a 15 MB storage buffer of which
   about 53 KB changed; the page comparison reads all 15 MB (3 ms per dispatch, 27% of the time). Skipping it is not
   correct (the CPU may read the results); the planned fix copies GPU-written pages on demand. The dirty-page tracker
-  also accepts only 512 ranges, so most of JoJo's buffers fall back to full hashes (250 GB hashed in 2 minutes).
+  also accepts only 512 ranges, so most of the anime fighting title's buffers fall back to full hashes (250 GB hashed in 2 minutes).
 - The .NET beat 'em up now reaches gameplay with correct sprites, text and HUD glyphs, but runs at 7-25 fps under
   the harness (two CPU cores, shader validation). Remaining host costs: every upload still waits on its own
   util-queue fence (about 11 s of fence waits per minute), the device-address residency rescan after population
@@ -4400,7 +5209,7 @@ Investigated and left open:
   util-queue submission with a fence wait (`UtilFillImage`/`UtilFillBuffer`): 92,541 waits in 180 s, about 23 ms of
   every 48 ms frame. Next: record uploads into the consuming command buffer. Its host footprint (4.5 GB of guest
   memory plus 4 GB of emulator heap) also exceeds the harness cgroup's 7 GiB `memory.high`, which throttles it.
-- Dead Cells sometimes stops after about a minute of gameplay on a G-buffer pixel shader that needs fragment wave
+- The 2D action title sometimes stops after about a minute of gameplay on a G-buffer pixel shader that needs fragment wave
   transport (a derivative fetch inside a lane-divergent loop at pc 0x114, 642x362, four targets); seen in runs d472,
   d721 and d729, so it predates this round.
 
@@ -4575,10 +5384,10 @@ Third round (same day), mostly runtime-library correctness found by Unreal Engin
   loaded module bases, so a freeze names the waiting code without a debugger. Only a contended mutex lock is
   recorded, so the uncontended path stays a single trylock.
 
-Regression set after these repairs (run d406-d417, 90 s each, same host): GRIS 119 fps (104 before), Blasphemous 2
-85 (70), Dreaming Sarah 195 (89), Let's Build a Zoo 202 (83), The Messenger 320 (269), Dead Cells 94 (82), JoJo 87
-(54), ANIMAL WELL 22 (20), Formula Retro Racing back to its 3D views at about 110-120 fps in the race. A longer
-Blasphemous 2 run reaches gameplay; its intro frames vary with load timing between runs.
+Regression set after these repairs (run d406-d417, 90 s each, same host): the watercolour platformer 119 fps (104 before), the gothic action platformer
+85 (70), the Construct title 195 (89), the zoo builder 202 (83), the ninja platformer 320 (269), the 2D action title 94 (82), the anime fighting title 87
+(54), the cave exploration title 22 (20), the racing title back to its 3D views at about 110-120 fps in the race. A longer
+run of the gothic action platformer reaches gameplay; its intro frames vary with load timing between runs.
 
 Open blockers (one root cause each, none investigated past the point stated):
 
@@ -4693,7 +5502,9 @@ gates pass):
   print the backing image and every overlapping parent with its parameters; the paired-wave compute refusal and the
   pixel transport refusal share `ShaderDumpGuestProgram` (`KYTY_TRANSPORT_DUMP`).
 
-Why the screen is still black (evidence, not yet a proven sole cause): the skipped-draw report names a geometry
+Superseded on 2026-10-14 (see "Robot platformer: exposure fill and DCC metadata clears"): the black screen was the
+composite multiplying the scene by a zero exposure, under an accumulated UI layer; the skipped merged ES/GS
+programs are particle emitters. Earlier reading, kept for the record: the skipped-draw report names a geometry
 state the renderer does not model: GE stages `0x00002030` (merged ES/GS), ES and GS-back programs bound, legacy GS
 zero, `max_vert=0x48`, `out_prim=2`, `ge_ngg=0x46`, `max_out=0xd8`, primitive/vertex group sizes 3 and 0x18
 (`ShouldSkipUnsupportedGeShader` models only the `0x02002000` passthrough). The decoded GS-back program (540
@@ -6925,7 +7736,7 @@ median analysis time changes from 103.025 to 9.278 microseconds. A separate
 its median changes from 142.952 to 72.728 microseconds. These measure this CPU
 analysis alone and do not establish an equivalent frame-rate improvement.
 
-`ninja -C _build_linux_astro_play_s1 -j2 fc_script` succeeds. Strict source
+`ninja -C _build_linux_<slug> -j2 fc_script` succeeds. Strict source
 boundaries and the graphics-table manifest pass. A fresh strict Silent/Native
 run under read-only debugger probes preserves the same first pixel-emitter
 failure at PC 0xfec. A 58.031-second warm window contains 229 presents with a

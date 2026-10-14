@@ -236,6 +236,8 @@ target_include_directories(kyty_hle PUBLIC
 )
 target_link_libraries(kyty_hle PUBLIC core math sys kyty_runtime_core kyty_kernel kyty_loader kyty_graphics
 	kyty_host kyty_diagnostics kyty_audio_video_backend kyty_audio_pcm)
+# Header-only outline rasterizer for the font library.
+target_include_directories(kyty_hle PRIVATE "${CMAKE_SOURCE_DIR}/3rdparty/imgui")
 
 target_include_directories(kyty_audio_video_backend PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"

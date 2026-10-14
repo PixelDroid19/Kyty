@@ -41,6 +41,8 @@
 
 namespace Kyty::Libs::Graphics {
 
+struct StorageTextureRawRenderSource;
+
 constexpr int VADDR_BLOCKS_MAX = GPU_MEMORY_RANGE_SET_MAX;
 
 enum class DebugStatsGpuMemoryLinkedTopology: uint8_t;
@@ -326,6 +328,8 @@ public:
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
+	Vector<GpuMemoryObject> FindEqualObjects(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission);
+	Vector<GpuMemoryObject> FindObjectsWithRange(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission);
 	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 	bool                    QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
 	bool                    DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
@@ -522,6 +526,16 @@ private:
 	                                     const uint64_t* vaddr, const uint64_t* size, int vaddr_num) const;
 	bool create_maybe_deleted(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
 	bool create_all_the_same(const Vector<OverlappedBlock>& others, int heap_id);
+	// The parent a new depth target or storage view takes its raw texels from: of the Equals parents it reinterprets
+	// (DepthStencilBufferCanSeedFromRenderTexture, StorageTextureSharesDepthTexels), the one the device wrote last,
+	// after every writable use or upload of each other overlapping parent, none of them pending a write-back.
+	// -1 when none qualifies.
+	[[nodiscard]] int create_texel_bits_seed(const Vector<OverlappedBlock>& others, const GpuObject& info, int heap_id) const;
+	// Raw composite sources: a tiled render target or storage image whose blocks
+	// a linear storage image reinterprets, and the time its device content was
+	// last written (0 when the device never wrote it).
+	[[nodiscard]] static bool create_describe_raw_source(const Object& parent, uint64_t neo, StorageTextureRawRenderSource* source);
+	[[nodiscard]] static uint64_t create_raw_source_write_time(const ObjectInfo& owner);
 
 	[[nodiscard]] String create_dbg_exit(const String& msg, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
 	                                     const Vector<OverlappedBlock>& others, GpuMemoryObjectType type);

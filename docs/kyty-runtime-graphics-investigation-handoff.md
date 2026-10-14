@@ -326,6 +326,27 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Racing title attract scene looks dark (2026-10-14, not a defect). The
+  intro behind the title credits is a night track: lit windows, a dusk sky
+  and brown asphalt, while in-race daytime tracks look correct. The
+  publisher's own trailer of a night track shows the same palette; the mean
+  asphalt colour of a strict Intel capture (96, 80, 63) and of that footage
+  (98, 84, 52) agree within a few percent. Do not chase it as a lighting or
+  exposure bug without a reference of the same scene that differs.
+- Robot-platformer title screen save cards (2026-10-14, open). The two lower
+  save cards render black because the tiled light classifier writes an
+  empty list for every tile. Excluded so far: dispatch ordering, the
+  classifier's control-flow, append and lane-count translation, a
+  render-target/storage alias of its normal input, and the G-buffer exports,
+  write masks and depth-stencil state. The debug image dump does not submit
+  the recording in progress, so states read through it are from earlier in
+  the frame: the constant normal input and the black temporal
+  antialiasing and HDR images are unverified, not exclusions. The lighting
+  stencil plane is excluded: with d72457e5 and 55cd634d the lighting reads
+  the device stencil, cleared each frame and written by the G-buffer, and
+  the screen does not change. Details, fixes found on the
+  way and open defects: "Robot platformer: title screen save cards" in
+  `docs/BRINGUP.md`.
 - Racing-title shadows (2026-10-11, partly open). The two shadow-receiver
   pixel shaders take one `image_sample_c_lz` against a 2048x1024 D16 atlas
   (two 1024x1024 cascades chosen from squared camera distance) with a GEQUAL

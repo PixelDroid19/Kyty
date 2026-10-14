@@ -581,7 +581,8 @@ private:
 		return offender == kShaderCfgNone || Reject(ShaderCfgReject::MultiLevelContinue, LatchPc(offender));
 	}
 
-	bool ComputeReach(uint32_t header, Reach* reach)
+	// A sink block is reached but not walked past.
+	bool ComputeReach(uint32_t header, Reach* reach, uint32_t sink = kShaderCfgNone)
 	{
 		const auto& blocks = m_cfg.blocks;
 		reach->bits.assign((blocks.size() + 63) / 64, 0);
@@ -594,6 +595,10 @@ private:
 			if (!Spend(1, blocks[block].pc))
 			{
 				return false;
+			}
+			if (block == sink)
+			{
+				continue;
 			}
 			reach->escapes = reach->escapes || !m_cfg.Dominates(header, block);
 			for (uint32_t succ: blocks[block].succ)
@@ -800,6 +805,58 @@ private:
 		return Reject(ShaderCfgReject::MultiLevelBreak, FirstExitTo(exits, loop.merge)->pc);
 	}
 
+	static bool HasBit(const Reach& reach, uint32_t block) { return (reach.bits[block / 64] & (uint64_t {1} << (block % 64))) != 0; }
+
+	// The arm region is placed between the header and the latch, avoids what
+	// follows the merge and shares no block with another exit's region.
+	[[nodiscard]] bool ArmStaysApart(const ShaderCfgLoop& loop, const Reach& region, const Reach& onward,
+	                                 const std::vector<Reach>& reaches, const Reach& merge) const
+	{
+		const auto& blocks = m_cfg.blocks;
+		for (uint32_t block = 0; block < blocks.size(); block++)
+		{
+			if (block == merge.target || !HasBit(region, block))
+			{
+				continue;
+			}
+			if (blocks[block].pc <= blocks[loop.header].pc || blocks[block].last_pc >= blocks[loop.latch].pc || HasBit(onward, block))
+			{
+				return false;
+			}
+			for (const auto& other: reaches)
+			{
+				if (&other != &merge && other.target != region.target && HasBit(other, block))
+				{
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	// An exit into an arm inside the loop's PC range whose every path stays
+	// under the header and leaves only to the merge: the arm belongs to the
+	// loop construct and its transfers to the merge are breaks.
+	bool IsBreakArm(const ShaderCfgLoop& loop, const std::vector<Reach>& reaches, const Reach& exit, const Reach* merge, bool* arm)
+	{
+		*arm = false;
+		if (merge == nullptr || loop.conditional_latch)
+		{
+			return true;
+		}
+		Reach region;
+		Reach onward;
+		region.target = exit.target;
+		onward.target = merge->target;
+		if (!ComputeReach(loop.header, &region, merge->target) || !ComputeReach(loop.header, &onward, loop.header))
+		{
+			return false;
+		}
+		*arm = !region.escapes && HasBit(region, merge->target) && !HasBit(region, loop.header) &&
+		       ArmStaysApart(loop, region, onward, reaches, *merge);
+		return true;
+	}
+
 	bool CheckLoopExits(uint32_t l)
 	{
 		auto&                 loop = m_cfg.loops[l];
@@ -817,7 +874,16 @@ private:
 		const Reach* merge = ChooseMerge(loop, reaches);
 		for (const auto& other: reaches)
 		{
+			bool arm = false;
 			if (&other == merge || LeavesMergeAlone(other, merge))
+			{
+				continue;
+			}
+			if (!IsBreakArm(loop, reaches, other, merge, &arm))
+			{
+				return false;
+			}
+			if (arm)
 			{
 				continue;
 			}

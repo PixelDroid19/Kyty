@@ -343,6 +343,8 @@ struct DepthStencilVulkanImage: public VulkanImage
 	bool                       compressed                   = false;
 	bool                       sample_locations_compatible = false;
 	VulkanSampleLocationState last_sample_locations;
+	// Guest base of the 8-bit stencil plane this image holds, 0 without one.
+	uint64_t stencil_vaddr = 0;
 };
 
 struct TextureVulkanImage: public VulkanImage

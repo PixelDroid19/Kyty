@@ -358,6 +358,28 @@ ShaderCode LoopWithSharedDiscardTail()
 	});
 }
 
+// Blocks: 0 [00] 1 [04] 2 [08] 3 [0c 10] 4 [14] 5 [18] 6 [1c 20] 7 [24 28]
+// 8 [2c]. The loop {2, 5, 6} headed at 08 exits at 08 into the arm 3..4,
+// which runs its own do-while and branches to 24, and at 18 to 24. The arm
+// lies before the latch and meets nothing past 24: 24 is the merge.
+ShaderCode LoopWithBreakArm()
+{
+	return Program({
+	    {0x00, Op::Nop},
+	    {0x04, Op::Nop},
+	    {0x08, Op::Scc1, 0x18},
+	    {0x0c, Op::Nop},
+	    {0x10, Op::Scc0, 0x0c},
+	    {0x14, Op::Branch, 0x24},
+	    {0x18, Op::Scc0, 0x24},
+	    {0x1c, Op::Nop},
+	    {0x20, Op::Branch, 0x08},
+	    {0x24, Op::Nop},
+	    {0x28, Op::Scc0, 0x04},
+	    {0x2c, Op::End},
+	});
+}
+
 // depth do-while loops nested around one body: headers at 04.., then latches
 // innermost first. Loop i holds 2 * (depth - i) blocks.
 ShaderCode DeepLoopNest(uint32_t depth)
@@ -525,6 +547,18 @@ TEST(EmulatorShaderControlFlowGraph, SelectsTheMergeThatOtherExitsLeaveAlone)
 	ExpectGraphRefused(MultiLevelBreak(), ShaderCfgReject::MultiLevelBreak, 0x0c);
 }
 
+TEST(EmulatorShaderControlFlowGraph, AcceptsArmsThatBreakToTheMerge)
+{
+	const auto cfg = ShaderBuildControlFlowGraph(LoopWithBreakArm());
+
+	ASSERT_TRUE(cfg.Structurable());
+	ASSERT_EQ(cfg.loops.size(), 3u);
+	EXPECT_EQ(cfg.loops[1].header, 2u);
+	EXPECT_EQ(cfg.loops[1].blocks, (std::vector<uint32_t> {2u, 5u, 6u}));
+	EXPECT_EQ(cfg.loops[1].merge, 7u);
+	EXPECT_EQ(cfg.loops[1].merge_branch_pc, 0x18u);
+}
+
 TEST(EmulatorShaderControlFlowGraph, TreatsConditionalDiscardArmsAsTerminating)
 {
 	const auto code = LoopWithSharedDiscardTail();
@@ -610,6 +644,11 @@ TEST(EmulatorShaderControlFlowGraph, EmitsValidLoopWithExitToTerminatingTail)
 
 	EXPECT_NE(source.FindIndex("OpLoopMerge %label_0018_0008 %loop_continue_0014 None"), Core::STRING8_INVALID_INDEX);
 	ExpectValidModule(source);
+}
+
+TEST(EmulatorShaderControlFlowGraph, EmitsValidLoopWithBreakArm)
+{
+	ExpectValidModule(EmitCompute(LoopWithBreakArm()));
 }
 
 TEST(EmulatorShaderControlFlowGraph, RefusesMultiLevelBreakTranslation)

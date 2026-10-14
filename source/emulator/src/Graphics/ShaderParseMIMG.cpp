@@ -46,7 +46,8 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	EXIT_NOT_IMPLEMENTED(r128 == 1);
 	EXIT_NOT_IMPLEMENTED(tff == 1);
 	EXIT_NOT_IMPLEMENTED(lwe == 1);
-	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && opcode == 0x11u));
+	// GLC on an atomic selects the pre-op return (RDNA2 8.1.10); load and store cache policy is not admitted.
+	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && (opcode == 0x0fu || opcode == 0x11u)));
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(unrm == 1);
 	// EXIT_NOT_IMPLEMENTED(dmask != 0xf && dmask != 0x7);
@@ -56,7 +57,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	// for them (its explicit SSAMP=0 restriction is for BVH). Admit the zero
 	// encoding only, without inventing a sampler read or erasing unknown bits.
 	const bool samplerless = opcode == 0x00u || opcode == 0x01u || opcode == 0x08u || opcode == 0x09u || opcode == 0x0eu ||
-	                         opcode == 0x11u;
+	                         opcode == 0x0fu || opcode == 0x11u;
 	if (samplerless && ssamp != 0u)
 	{
 		EXIT("unsupported samplerless MIMG SSAMP: opcode=0x%02" PRIx32 " ssamp=0x%02" PRIx32 " pc=0x%08" PRIx32
@@ -161,11 +162,10 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			}
 			break;
 		}
-		case 0x0F: KYTY_NI("image_atomic_swap"); break;
-		case 0x10: KYTY_NI("image_atomic_cmpswap"); break;
+		case 0x0f:
 		case 0x11:
 			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask != 1u || nsa != 0u || (buffer[1] & 0x80000000u) != 0);
-			inst.type                  = ShaderInstructionType::ImageAtomicAdd;
+			inst.type                  = opcode == 0x0fu ? ShaderInstructionType::ImageAtomicSwap : ShaderInstructionType::ImageAtomicAdd;
 			inst.format                = ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1;
 			inst.dst.size              = 1;
 			inst.src[0].size           = 2;
@@ -174,8 +174,9 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			inst.src_num               = 3;
 			inst.mimg_dmask            = 1;
 			inst.mimg_return_old_value = glc != 0;
-			EXIT_NOT_IMPLEMENTED(!ShaderImageAtomicAddSupported(inst));
+			EXIT_NOT_IMPLEMENTED(!ShaderImageAtomicSupported(inst));
 			break;
+		case 0x10: KYTY_NI("image_atomic_cmpswap"); break;
 		case 0x12: KYTY_NI("image_atomic_sub"); break;
 		case 0x13: KYTY_NI("image_atomic_rsub"); break;
 		case 0x14: KYTY_NI("image_atomic_smin"); break;

@@ -3214,7 +3214,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
                             VulkanImage** images_sampled_3d, int* images_sampled_3d_view, VulkanImage** images_sampled_uint,
                             int* images_sampled_uint_view, VulkanImage** images_sampled_array_uint,
                             int* images_sampled_array_uint_view, VulkanImage** images_sampled_3d_uint,
-                            int* images_sampled_3d_uint_view, int* images_storage_view, uint32_t storage_seed_skip_mask,
+                            int* images_sampled_3d_uint_view, int* images_storage_view, uint64_t storage_seed_skip_mask,
                             uint32_t** sgprs, DrawMaterialTraceSession* material_trace, const VulkanImage* stencil_attached_depth,
                             bool scaled_sampling_refused, const RenderColorInfo* pass_color)
 {
@@ -3566,12 +3566,25 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		VulkanImage* tex            = nullptr;
 		bool         render_texture = false;
 		bool         depth_texture  = false;
+		bool         stencil_texture = false;
 		const char*  materialize    = "unresolved";
 		char         depth_refusal[192] = "";
 		// A live storage image read through another format of its texel size.
 		VkFormat     reinterpret_format = VK_FORMAT_UNDEFINED;
 
-		if (check_depth_texture)
+		// An 8-bit unsigned read of a live depth target's stencil plane reads the
+		// stencil the device wrote; guest memory holds only the plane's last upload.
+		if (gen5 && check_depth_texture && fmt == 5u && !arrayed_2d && !three_dimensional)
+		{
+			tex = FindStencilPlane(buffer, addr, size.size, width, height);
+			if (tex != nullptr)
+			{
+				depth_texture   = true;
+				stencil_texture = true;
+				materialize     = "stencil-plane";
+			}
+		}
+		if (check_depth_texture && !stencil_texture)
 		{
 			auto dtex     = FindDepthStencil(buffer, addr, size.size, true);
 			const bool depth_exact = !dtex.IsEmpty();
@@ -3749,14 +3762,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			bool storage_texture = false;
 				if (!render_texture && gen5)
 				{
-					auto stex = FindStorageTexture(buffer, addr, size.size, true);
-					const bool st_exact = !stex.IsEmpty();
+					Vector<StorageTextureVulkanImage*> stex;
+					auto* latest_stex = FindLatestStorageTexture(buffer, addr, size.size);
+					const bool st_exact = latest_stex != nullptr;
+					if (st_exact)
+					{
+						stex.Add(latest_stex);
+					}
 					// A storage write needs the exact backing range because its array
 					// view can expose layers absent from a smaller overlapping image.
 					// Sampled descriptors may still reuse a containing GPU-owned image.
-					if (stex.IsEmpty() && !textures.desc[i].textures2d_without_sampler)
+					if (!st_exact && !textures.desc[i].textures2d_without_sampler)
 					{
-						stex = FindStorageTexture(buffer, addr, size.size, false);
+						stex = FindOverlappingStorageTextures(buffer, addr, size.size);
 				}
 				if (!stex.IsEmpty())
 				{
@@ -4011,7 +4029,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 				StorageTextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
 				                                         r.Type(), depth, base_array,
-				                                         (storage_seed_skip_mask & (1u << static_cast<uint32_t>(i))) != 0);
+				                                         (storage_seed_skip_mask & (uint64_t {1} << static_cast<uint32_t>(i))) != 0);
 				tex = static_cast<StorageTextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 				if (tex != nullptr)
@@ -4034,7 +4052,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				if (gen5 && (tile == 27u || tile == 9u))
 				{
 					const auto r_cover = FindRenderTexture(buffer, addr, size.size, false);
-					const auto s_cover = FindStorageTexture(buffer, addr, size.size, false);
+					const auto s_cover = FindOverlappingStorageTextures(buffer, addr, size.size);
 					live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
 				}
 				const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
@@ -4051,35 +4069,40 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// an older storage image must not replace a newer guest upload.
 				if (gen5 && tex != nullptr && levels == 1u && !arrayed_2d && !three_dimensional && Gen5BlockCompressedBlockBytes(fmt) != 0u)
 				{
-					const auto stex = FindStorageTexture(buffer, addr, size.size, true);
-					for (int ci = 0; ci < static_cast<int>(stex.Size()); ci++)
+					auto*      source       = FindLatestStorageTexture(buffer, addr, size.size);
+					const auto source_shape = source != nullptr ? source->GetGuestExtent() : VkExtent2D {};
+					uint32_t   copy_width   = 0;
+					uint32_t   copy_height  = 0;
+					if (source != nullptr && source->storage_write_stamp > tex->content_stamp &&
+					    Gen5BlockCompressedStorageCopyExtent(fmt, width, height, source->format, source_shape.width, source_shape.height,
+					                                         &copy_width, &copy_height))
 					{
-						auto*      source       = stex.At(ci);
-						const auto source_shape = source->GetGuestExtent();
-						uint32_t   copy_width   = 0;
-						uint32_t   copy_height  = 0;
-						if (!Gen5BlockCompressedStorageCopyExtent(fmt, width, height, source->format, source_shape.width, source_shape.height,
-						                                          &copy_width, &copy_height))
-						{
-							continue;
-						}
-						if (source->storage_write_stamp > tex->content_stamp)
-						{
-							Vector<ImageImageCopy> regions(1);
-							regions[0]           = {};
-							regions[0].src_image = source;
-							regions[0].width     = copy_width;
-							regions[0].height    = copy_height;
-							UtilImageToImage(buffer, regions, tex, static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
-							tex->content_stamp = VulkanImageNextStamp();
-							materialize        = "st-block-copy";
-						}
-						break;
+						Vector<ImageImageCopy> regions(1);
+						regions[0]           = {};
+						regions[0].src_image = source;
+						regions[0].width     = copy_width;
+						regions[0].height    = copy_height;
+						UtilImageToImage(buffer, regions, tex, static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+						tex->content_stamp = VulkanImageNextStamp();
+						materialize        = "st-block-copy";
 					}
 				}
 			}
 		}
 
+		if (gen5 && tex != nullptr && r.MetaCompress())
+		{
+			ColorDccImage image {};
+			image.address           = addr;
+			image.size              = size.size;
+			image.dcc_addr          = r.MetaAddr() << 8u;
+			image.width             = static_cast<uint32_t>(width);
+			image.height            = static_cast<uint32_t>(height);
+			image.bytes_per_element = ShaderGen5TextureBytesPerElement(fmt);
+			image.alpha_on_msb      = r.DccAlphaPos();
+			image.single_surface    = levels == 1u && !arrayed_2d && !three_dimensional;
+			ConsumeImageColorDccClear(buffer, image);
+		}
 		if (tex == nullptr)
 		{
 			if (std::strcmp(materialize, "unresolved") == 0)
@@ -4280,7 +4303,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			         ? VulkanImage::VIEW_3D
 			         : (depth_texture ? (arrayed_2d ? VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY : VulkanImage::VIEW_DEPTH_TEXTURE)
 			                          : (arrayed_2d ? VulkanImage::VIEW_ARRAY : VulkanImage::VIEW_DEFAULT)));
-			if (depth_texture && tex == stencil_attached_depth)
+			if (stencil_texture)
+			{
+				if (tex == stencil_attached_depth)
+				{
+					EXIT("stencil plane 0x%012" PRIx64 " sampled while the draw writes it\n", static_cast<uint64_t>(addr));
+				}
+				sampled_views[*sampled_index] = VulkanImage::VIEW_STENCIL_TEXTURE;
+			} else if (depth_texture && tex == stencil_attached_depth)
 			{
 				sampled_views[*sampled_index] |= VulkanImage::VIEW_STENCIL_ATTACHED_DEPTH;
 			}
@@ -4586,8 +4616,8 @@ static void PrepareDirectSgprs(const ShaderDirectSgprsResources& direct_sgprs, u
 	}
 }
 
-static uint32_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const ShaderBindResources& bind,
-                                                    VulkanBuffer* const* uploaded_buffers, uint32_t mask,
+static uint64_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const ShaderBindResources& bind,
+                                                    VulkanBuffer* const* uploaded_buffers, uint64_t mask,
                                                     const ShaderStorageImageTileCoverage* coverage)
 {
 	if (coverage == nullptr)
@@ -4601,7 +4631,7 @@ static uint32_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const
 	}
 	for (int i = 0; i < bind.textures2D.textures_num; ++i)
 	{
-		const uint32_t bit = 1u << static_cast<uint32_t>(i);
+		const uint64_t bit = uint64_t {1} << static_cast<uint32_t>(i);
 		if ((mask & bit) == 0u || coverage[i].origin_byte_offset < 0)
 		{
 			continue;
@@ -4682,7 +4712,7 @@ static void RequireScaledImageReads(ScaledImageReadAccess access, const ShaderSa
 
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
-                     uint32_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
+                     uint64_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
                      const VulkanImage* stencil_attached_depth, const ShaderStorageImageTileCoverage* storage_seed_coverage,
                      const GuestDeviceAddressTable* device_address_table, ScaledImageReadAccess scaled_image_reads,
                      const RenderColorInfo* pass_color)

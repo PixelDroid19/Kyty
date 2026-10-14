@@ -318,6 +318,8 @@ public:
 	void QueueQueuedGraphicsInterrupt();
 	void WriteBack();
 	void WaitDeviceAddressWriteBacks();
+	// Copies guest bytes the processor reads at record time once no GPU writer owns newer content.
+	[[nodiscard]] bool ReadCurrentGuestBytes(uint64_t vaddr, void* dst, uint64_t size);
 	void MemoryBarrier();
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
 	void DepthStencilBarrier(uint64_t vaddr, uint64_t size);

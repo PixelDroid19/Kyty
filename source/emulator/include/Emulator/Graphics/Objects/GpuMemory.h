@@ -170,6 +170,7 @@ struct GpuMemoryRangeProvenanceEntry
 	bool                   dependencies_complete = false;
 	bool                   check_hash             = false;
 	bool                   dirty_registered       = false;
+	bool                   depth_meta_bound       = false;
 };
 
 struct GpuMemoryRangeProvenance
@@ -1158,6 +1159,12 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer,
                                                           bool exact, bool only_first);
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                                                           GpuMemoryObjectType type, bool exact, bool only_first);
+// Every object of the type whose range is exactly [vaddr, vaddr + size), recording the buffer's submission on each:
+// a recycled range can hold several views of one type, each in its own format.
+Vector<GpuMemoryObject> GpuMemoryFindEqualObjectsForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type);
+// Every object of the type with one of its ranges exactly [vaddr, vaddr + size), such as a
+// depth-stencil object by its stencil plane, recording the buffer's submission on each.
+Vector<GpuMemoryObject> GpuMemoryFindObjectsWithRangeForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type);
 bool                    GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 bool                    GpuMemoryQueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
 

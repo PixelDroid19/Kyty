@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 
 #include "ShaderControlFlowGraph.h"
@@ -141,6 +142,9 @@ public:
 	[[nodiscard]] String8 NativeExecRefresh(const String8& tag) const;
 	[[nodiscard]] String8 NativeQuadUniform(const String8& value, const String8& type, const String8& result) const;
 	[[nodiscard]] String8 NativeMaskBallot(const String8& predicate, const String8& result) const;
+	// Pixel: ballot of the wave's valid pixels under the launch EXEC, the non-helper invocations with EXEC set.
+	// `result` is the v4uint ballot and `result`_valid this invocation's membership.
+	[[nodiscard]] String8 NativeValidPixelBallot(const String8& result) const;
 	[[nodiscard]] String8 ResolveMaskAccesses(const ShaderInstruction& instruction, uint32_t index, const String8& source) const;
 	[[nodiscard]] bool EmitNativeMaskBit(const ShaderOperand& mask, const String8& result, String8* output) const;
 	// A guest Wave64 pixel program admitted as a partially populated wave on a
@@ -148,6 +152,11 @@ public:
 	// READLANE over the ghost half) run only inside proven neutral regions or
 	// against proven-neutral sources.
 	[[nodiscard]] bool UsesFragmentWaveTier() const;
+	// A pixel program admitted as FragmentPartialWave: each host subgroup is a partially populated guest wave.
+	[[nodiscard]] bool UsesFragmentPartialWave() const;
+	// The whole-wave OR reductions of a pixel program admitted as FragmentPartialWave; empty otherwise.
+	// Their network steps are not emitted and each read lowers to one subgroup reduction of the seed.
+	[[nodiscard]] const ShaderFragmentLaneReductions& FragmentLaneReductions() const;
 	[[nodiscard]] bool UsesFragmentCompute() const { return m_fragment_compute_info != nullptr; }
 	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.
 	// Compute lowers it onto the shared %lds array; other stages carry it in
@@ -175,6 +184,10 @@ public:
 	[[nodiscard]] bool EmitComputeWaveAluInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveBufferLoadInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveGenericInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
+	                                                     uint32_t index, String8* output);
+	// Emits a per-lane instruction whose SDWA destination selects only its VGPR's low byte or word
+	// (ShaderSdwaLowDestinationSupported): the whole-dword result, then the merge into the prior bits.
+	[[nodiscard]] bool EmitSdwaLowDestinationInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
 	                                                     uint32_t index, String8* output);
 	[[nodiscard]] String8 EmitMetadataLoad(int row, int field, const String8& id) const;
 	// Writes the metadata of each assembled V# the instruction consumes into its
@@ -511,6 +524,8 @@ private:
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
 	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
 	mutable int                   m_native_wave_tier = -1;
+	mutable bool                  m_lane_reductions_ready = false;
+	mutable ShaderFragmentLaneReductions m_lane_reductions;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;

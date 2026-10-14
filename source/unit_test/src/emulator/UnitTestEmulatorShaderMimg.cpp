@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 
 #if defined(_WIN32)
 #include <io.h>
@@ -2130,11 +2131,16 @@ TEST(EmulatorShaderMimg, PreservesAtomicDataSourceWithoutSamplerOperand)
 	ASSERT_EXIT(
 	    ([] {
 		    InitMimgParser();
-		    for (uint32_t glc: {0u, 1u})
+		    // IMAGE_ATOMIC_SWAP (0x0f) and IMAGE_ATOMIC_ADD (0x11), each without and with the GLC return.
+		    const std::array<std::pair<uint32_t, ShaderInstructionType>, 2> atomics {
+		        {{0x0fu, ShaderInstructionType::ImageAtomicSwap}, {0x11u, ShaderInstructionType::ImageAtomicAdd}}};
+		    for (uint32_t form = 0; form < 4u; form++)
 		    {
-			    const auto code = ParseMimgTailInstruction(0x11u, 0u, 0u, 1u, ShaderType::Compute, glc << 13u);
+			    const auto [opcode, type] = atomics[form / 2u];
+			    const uint32_t glc        = form % 2u;
+			    const auto code = ParseMimgTailInstruction(opcode, 0u, 0u, 1u, ShaderType::Compute, glc << 13u);
 			    const auto& inst = code.GetInstructions().At(0);
-			    RequireMimgTail(inst.type == ShaderInstructionType::ImageAtomicAdd && inst.src_num == 3 &&
+			    RequireMimgTail(inst.type == type && inst.src_num == 3 &&
 			                   inst.src[1] == TileSgpr(32, 8) && inst.src[2] == TileVgpr(8) && EmptyMimgOperand(inst.src[3]) &&
 			                   inst.mimg_return_old_value == (glc != 0u), "atomic's third source is real VGPR data, not SSAMP");
 			    RequireMimgTail(ShaderInstructionLoweringPreconditions(inst), "atomic data source passes the unchanged validator");
@@ -2146,11 +2152,11 @@ TEST(EmulatorShaderMimg, PreservesAtomicDataSourceWithoutSamplerOperand)
 
 TEST(EmulatorShaderMimg, RejectsUnprovenNonzeroSsampOnSamplerlessOpcodes)
 {
-	for (uint32_t opcode: {0x00u, 0x01u, 0x08u, 0x09u, 0x0eu, 0x11u})
+	for (uint32_t opcode: {0x00u, 0x01u, 0x08u, 0x09u, 0x0eu, 0x0fu, 0x11u})
 	{
 		for (uint32_t ssamp: {1u, 2u, 4u, 8u, 16u, 31u})
 		{
-			const uint32_t dmask = opcode == 0x11u ? 1u : 0xfu;
+			const uint32_t dmask = opcode == 0x0fu || opcode == 0x11u ? 1u : 0xfu;
 			const auto diagnostic = Core::String8::FromPrintf(
 			    "unsupported samplerless MIMG SSAMP: opcode=0x%02x ssamp=0x%02x pc=0x00000000 "
 			    "word0=0x%08x word1=0x%08x; only SSAMP=0 is admitted",

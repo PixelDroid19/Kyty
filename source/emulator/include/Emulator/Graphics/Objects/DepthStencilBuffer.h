@@ -55,11 +55,17 @@ public:
 	//	bool Reuse(const uint64_t* other) const override;
 
 	[[nodiscard]] create_func_t              GetCreateFunc() const override;
-	[[nodiscard]] create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; };
+	[[nodiscard]] create_from_objects_func_t GetCreateFromObjectsFunc() const override;
 	[[nodiscard]] write_back_func_t          GetWriteBackFunc() const override { return nullptr; };
 	[[nodiscard]] delete_func_t              GetDeleteFunc() const override;
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
+
+// A Gen5 32-bit depth target without HTILE or stencil, bound over the range of a single-sample, single-layer
+// render target with a 32-bit texel, reads the raw bytes that target rendered. The 4-byte render-target
+// (mode 27) and depth (mode 24) layouts share the 64 KiB block grid and the within-block equation, so at an
+// equal extent and a render pitch equal to the depth's block-aligned width each texel keeps its (x, y).
+[[nodiscard]] bool DepthStencilBufferCanSeedFromRenderTexture(const uint64_t* depth, const uint64_t* render, bool next_gen);
 
 } // namespace Kyty::Libs::Graphics
 

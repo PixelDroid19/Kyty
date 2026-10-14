@@ -5,8 +5,8 @@
 
 namespace Kyty::Libs::LibC {
 
-// Minimal MSVC/Orbis-style locale::_Locimp layout used by Dreaming Sarah's
-// ctype facet lookup (use_facet path at guest 0x900134a80):
+// Minimal MSVC/Orbis-style locale::_Locimp layout used by a Construct title's
+// ctype facet lookup (use_facet path):
 //   +0x00 vtable
 //   +0x10 facet**
 //   +0x18 facet count (lookup requires count > id)

@@ -217,6 +217,67 @@ void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uin
 	                 static_cast<VkImageLayout>(dst_layout));
 }
 
+static bool IsTexelBitsColorFormat(VkFormat format)
+{
+	return format == VK_FORMAT_R32_SFLOAT || format == VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+}
+
+static VkImageAspectFlags TexelBitsAspect(const VulkanImage* image)
+{
+	return image->format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+}
+
+bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout)
+{
+	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_image == nullptr || src_image->image == nullptr || dst_image->image == nullptr);
+	const bool to_depth   = dst_image->format == VK_FORMAT_D32_SFLOAT && IsTexelBitsColorFormat(src_image->format);
+	const bool from_depth = src_image->format == VK_FORMAT_D32_SFLOAT && IsTexelBitsColorFormat(dst_image->format);
+	if ((!to_depth && !from_depth) || src_image->layout == VK_IMAGE_LAYOUT_UNDEFINED || src_image->samples != VK_SAMPLE_COUNT_1_BIT ||
+	    dst_image->samples != VK_SAMPLE_COUNT_1_BIT || src_image->array_layers != 1u || dst_image->array_layers != 1u ||
+	    src_image->extent.width != dst_image->extent.width || src_image->extent.height != dst_image->extent.height ||
+	    (src_image->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u || (dst_image->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
+	{
+		return false;
+	}
+	const uint64_t bytes   = static_cast<uint64_t>(src_image->extent.width) * src_image->extent.height * 4u;
+	auto*          scratch = buffer->AllocateTransientCopyBuffer(bytes);
+	if (scratch == nullptr || scratch->buffer == nullptr)
+	{
+		return false;
+	}
+
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
+	// The command buffer reuses one bounded scratch allocation: finish earlier uses before this copy writes it.
+	VkMemoryBarrier scratch_barrier {};
+	scratch_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	scratch_barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+	scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u,
+	                     nullptr, 0u, nullptr);
+
+	const VkImageLayout src_layout = src_image->layout;
+	VkBufferImageCopy   region {};
+	region.imageSubresource.aspectMask = TexelBitsAspect(src_image);
+	region.imageSubresource.layerCount = 1u;
+	region.imageExtent                 = {src_image->extent.width, src_image->extent.height, 1u};
+	set_image_layout(vk_buffer, src_image, 0, 1, region.imageSubresource.aspectMask, src_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scratch->buffer, 1u, &region);
+	set_image_layout(vk_buffer, src_image, 0, 1, region.imageSubresource.aspectMask, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_layout);
+
+	scratch_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &scratch_barrier, 0u, nullptr,
+	                     0u, nullptr);
+
+	region.imageSubresource.aspectMask = TexelBitsAspect(dst_image);
+	set_image_layout(vk_buffer, dst_image, 0, 1, region.imageSubresource.aspectMask, UtilGetImageUploadSourceLayout(dst_image),
+	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	vkCmdCopyBufferToImage(vk_buffer, scratch->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
+	set_image_layout(vk_buffer, dst_image, 0, 1, region.imageSubresource.aspectMask, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	                 static_cast<VkImageLayout>(dst_layout));
+	return true;
+}
+
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout,
                        uint32_t src_array_layer)
 {

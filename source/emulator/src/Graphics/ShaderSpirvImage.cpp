@@ -804,7 +804,7 @@ ShaderStorageImagePlan ShaderPlanStorageImages(const ShaderCode& code, const Sha
 	{
 		return reject("invalid writable descriptor count");
 	}
-	const bool atomic_alias = code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd});
+	const bool atomic_alias = code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
 	int writable_count = 0;
 	int first_float = -1;
 	int first_uint = -1;
@@ -864,7 +864,7 @@ ShaderStorageImagePlan ShaderPlanStorageImages(const ShaderCode& code, const Sha
 	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
 		const auto& inst = code.GetInstructions().At(index);
-		if (inst.type == ShaderInstructionType::ImageAtomicAdd && (has_volume || !ShaderImageAtomicResourceSupported(code, index, *bind)))
+		if (ShaderIsImageAtomic(inst.type) && (has_volume || !ShaderImageAtomicResourceSupported(code, index, *bind)))
 		{
 			return reject("image atomic requires a proven 2D R32_UINT writable descriptor", -1, 0u, inst.pc);
 		}
@@ -943,7 +943,7 @@ static bool ResolveStorageImageStoreNumericType(const ShaderCode& code, uint32_t
 		if (descriptor < 0) { return false; }
 		*uint_values = VulkanGen5ImageNumericType(bind.textures2D.desc[descriptor].texture.Format()) ==
 		               GuestImageNumericType::UnsignedInteger;
-		*uint_alias = *uint_values && code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd});
+		*uint_alias = *uint_values && code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
 	}
 	return true;
 }
@@ -965,6 +965,7 @@ bool IsImageInstruction(const ShaderInstruction& inst)
 		case ShaderInstructionType::ImageSampleCd:
 		case ShaderInstructionType::ImageStore:
 		case ShaderInstructionType::ImageAtomicAdd:
+		case ShaderInstructionType::ImageAtomicSwap:
 		case ShaderInstructionType::ImageStoreMip: return true;
 		default: return false;
 	}
@@ -992,7 +993,7 @@ bool IsSampledImageInstruction(const ShaderInstruction& inst)
 bool IsStorageImageInstruction(const ShaderInstruction& inst)
 {
 	return inst.type == ShaderInstructionType::ImageStore || inst.type == ShaderInstructionType::ImageStoreMip ||
-	       inst.type == ShaderInstructionType::ImageAtomicAdd;
+	       ShaderIsImageAtomic(inst.type);
 }
 
 String8 GuardImageDestinationStores(const String8& source, const ShaderInstruction& inst, uint32_t index)
@@ -3926,7 +3927,7 @@ static bool EmitStorageImageResinfo(const ShaderCode& code, uint32_t index, int 
 	// a single-mip 2D resource has the same dimensions as that view here.
 	if (!Config::IsNextGen() || texture.Type() != 9u || texture.BaseLevel() != 0u || texture.LastLevel() != 0u ||
 	    texture.MaxMip() != 0u || inst.mimg_dimension != 1u || inst.mimg_dmask == 0u || (inst.mimg_dmask & ~3u) != 0u ||
-	    !ImageResinfoHasZeroLod(code, index) || code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd})) { return false; }
+	    !ImageResinfoHasZeroLod(code, index) || code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap})) { return false; }
 	for (int resource = 0; resource < bind.textures2D.textures_num; ++resource)
 	{
 		const auto& candidate = bind.textures2D.desc[resource];

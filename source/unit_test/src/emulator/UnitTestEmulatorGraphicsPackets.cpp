@@ -1663,15 +1663,9 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).format, VK_FORMAT_UNDEFINED);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).component_count, 0u);
 
-	// Attrib words store either a 9-bit encoded id (0x12a) or the unified
-	// guest format (74/64/29). Both must resolve; 74/64 are the live stride-48
-	// position/UV ids.
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(0x12a).format, VK_FORMAT_R32G32B32_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(74).format, VK_FORMAT_R32G32B32_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(74).component_count, 3u);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(64).format, VK_FORMAT_R32G32_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(29).format, VK_FORMAT_R16G16_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(0).format, VK_FORMAT_UNDEFINED);
+	// Gen5 format 50 is 2_10_10_10_UNORM: R in the low 10 bits, 2-bit A on top.
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).format, VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).component_count, 4u);
 
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(14, 7).format, VK_FORMAT_R32G32B32A32_SFLOAT);
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(13, 7).component_count, 3u);
@@ -1681,13 +1675,39 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_TRUE(ShaderIsGen5SingleComponent32BitBufferFormat(22));
 }
 
+TEST(EmulatorGraphicsPackets, DecodesGen5VertexAttribControlWord)
+{
+	// Format override field is (data_format << 2) | (components - 1).
+	const uint32_t normal = (0x018u << 14u) | (0x10bu << 5u) | 3u;
+	const auto     decoded = ShaderDecodeGen5VertexAttrib(normal);
+	EXPECT_EQ(decoded.slot, 3u);
+	EXPECT_EQ(decoded.format, 66u);
+	EXPECT_EQ(decoded.components, 4u);
+	EXPECT_EQ(decoded.offset, 0x018u);
+	EXPECT_FALSE(decoded.instance);
+
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x12au << 5u).format, 74u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x12au << 5u).components, 3u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x101u << 5u).format, 64u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x101u << 5u).components, 2u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x05du << 5u).format, 23u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x0cbu << 5u).format, 50u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x10au << 5u).components, 3u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0u).format, 0u);
+	EXPECT_TRUE(ShaderDecodeGen5VertexAttrib(1u << 26u).instance);
+
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(1u), DstSel(4, 0, 0, 1));
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(2u), DstSel(4, 5, 0, 1));
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(3u), DstSel(4, 5, 6, 1));
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(4u), DstSel(4, 5, 6, 7));
+}
+
 TEST(EmulatorGraphicsPackets, ResolvesNormalized16BitVertexFormat)
 {
 	const auto format = VulkanResolveGen5VertexInputFormat(66u);
 	EXPECT_EQ(format.format, VK_FORMAT_R16G16B16A16_SNORM);
 	EXPECT_EQ(format.component_count, 4u);
 	EXPECT_EQ(format.numeric_class, VulkanVertexInputNumericClass::Float);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(66u).format, format.format);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0u).format, VK_FORMAT_UNDEFINED);
 }
 
@@ -2252,7 +2272,7 @@ TEST(EmulatorGraphicsPackets, EncodesWriteDataCachePolicy2ControlWord)
 	EXPECT_EQ(cmd[5], 0x22222222u);
 }
 
-// DrawIndexAuto accepts modifier 0x80000000 (Astro post-compute) as well as
+// DrawIndexAuto accepts modifier 0x80000000 (observed after compute) as well as
 // the historical 0x40000000 default.
 TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoModifier80000000)
 {
@@ -2449,7 +2469,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDispatchIndirect)
 	EXPECT_EQ(cmd[2], (1u & 0xa038u) | 0x41u);
 }
 
-// sceAgcDcbDrawIndexIndirect with modifier 0x80000000 (Astro after DrawIndexAuto).
+// sceAgcDcbDrawIndexIndirect with modifier 0x80000000 (observed after DrawIndexAuto).
 TEST(EmulatorGraphicsPackets, EncodesDcbDrawIndexIndirectModifier80000000)
 {
 	struct AlignasCommandBuffer
@@ -2487,7 +2507,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDrawIndexIndirectModifier80000000)
 	EXPECT_EQ(cmd[4], 2u);
 }
 
-// Placeholder address 0 is reserved then patched before submit (Astro path).
+// Placeholder address 0 is reserved then patched before submit (observed guest path).
 TEST(EmulatorGraphicsPackets, EncodesWriteDataZeroAddressThenPatches)
 {
 	struct AlignasCommandBuffer
@@ -3812,7 +3832,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbResetQueueAsClearState)
 	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u));
 	EXPECT_EQ(cmd[1], 0u);
 
-	// Astro-style non-0x3ff op with non-zero state selector.
+	// Guest-observed non-0x3ff op with non-zero state selector.
 	uint32_t* cmd2 = Gen5::GraphicsDcbResetQueue(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x001u, 0x5u);
 	ASSERT_NE(cmd2, nullptr);
 	EXPECT_EQ(cmd2[0], KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u));
@@ -8721,7 +8741,7 @@ TEST(EmulatorGraphicsPackets, EncodesGen4DrawIndexOffset)
 	EXPECT_EQ(command[8], 0u);
 }
 
-// Captured UI batch (Dreaming Sarah title logo): IndexBase holds 0,1,2,1,2,3 for a
+// Captured UI batch (a Construct title's logo): IndexBase holds 0,1,2,1,2,3 for a
 // 4-vert quad. NID B+aG9DUnTKA must emit Offset (not Auto) so those indices apply.
 TEST(EmulatorGraphicsPackets, DrawIndexOffsetEncodesUiQuadIndexCount)
 {

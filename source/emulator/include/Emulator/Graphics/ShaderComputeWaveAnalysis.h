@@ -68,6 +68,9 @@ struct ShaderComputeWaveAnalysisResult
 // Strategy-independent rejection of malformed register spans and controls that
 // these lowerings cannot represent. Must precede both native and generic choice.
 [[nodiscard]] bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction);
+// The same preconditions for the per-lane emitter, which also merges a low SDWA destination
+// select into its VGPR (ShaderSdwaLowDestinationSupported). Banked and proof paths keep the strict form.
+[[nodiscard]] bool ShaderInstructionPerLaneLoweringPreconditions(const ShaderInstruction& instruction);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,
                                                                              const ShaderComputeInputInfo& host,
@@ -86,6 +89,11 @@ struct ShaderComputeWaveAnalysisResult
 // A closed, side-effect-free region may initialize uncaptured lanes itself.
 // Only its proven full-EXEC entry may bypass the ordinary allocation clamp.
 [[nodiscard]] bool ShaderFragmentNeutralRegionSupported(const ShaderCode& code, uint32_t index);
+// The same proof, also giving the index of the EXEC restore that closes the region. The initializer is the
+// instruction after `index`; every instruction between it and the restore is a bitwise or permutation step
+// that reads only registers the region wrote. A guest Wave32 program (`guest_wave_size` 32) uses the B32 mask
+// forms on single SGPRs and must have its VALU lane masks narrowed by ShaderWave32LaneMasks.
+[[nodiscard]] bool ShaderFragmentNeutralRegionEnd(const ShaderCode& code, uint32_t guest_wave_size, uint32_t index, uint32_t* end);
 // Reads that ignore EXEC or fetch inactive lanes can observe lanes absent from
 // a partial captured wave. Each needs a source that a proven neutral region
 // initialized in every lane; otherwise the program is rejected with its PC.

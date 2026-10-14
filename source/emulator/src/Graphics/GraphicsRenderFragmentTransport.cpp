@@ -129,7 +129,8 @@ FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, co
 	// pipeline gate reads the actual checked binary version, including cache hits.
 	const auto mapping = ShaderSelectNativeSubgroup(context->compute_wave_vulkan_state, VK_SHADER_STAGE_FRAGMENT_BIT,
 	                                                context->subgroup_size, native.guest_wave_size,
-	                                                native.proof == ShaderNativeWaveProof::LaneLocal || native.proof == ShaderNativeWaveProof::QuadLocal,
+	                                                native.proof == ShaderNativeWaveProof::LaneLocal || native.proof == ShaderNativeWaveProof::QuadLocal ||
+	                                                    native.proof == ShaderNativeWaveProof::FragmentPartialWave,
 	                                                native.proof == ShaderNativeWaveProof::FragmentNeutral32, true);
 	// Width and participation are different obligations. A neutral value proof
 	// does not make an unavailable/helper-only physical shuffle source defined.

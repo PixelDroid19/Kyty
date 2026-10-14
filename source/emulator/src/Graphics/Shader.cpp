@@ -20,6 +20,7 @@
 #include "Emulator/Graphics/ShaderComputeWaveControlFlowAnalysis.h"
 #include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "Emulator/Graphics/ShaderComputeWaveNativeEquivalence.h"
+#include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
 #include "Emulator/Graphics/ShaderFragmentMaskFlow.h"
 #include "Emulator/Graphics/ShaderNggFront.h"
 #include "ShaderNativeWaveInternal.h"
@@ -415,6 +416,29 @@ bool ShaderInstructionIsControlFlowBoundary(const ShaderInstruction& inst)
 	}
 }
 
+uint32_t ShaderLaunchExecEnd(const ShaderCode& code)
+{
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (ShaderInstructionWritesExec(inst) || ShaderInstructionIsControlFlowBoundary(inst)) { return index; }
+	}
+	return instructions.Size();
+}
+
+bool ShaderCountsLaunchExec(const ShaderCode& code, uint32_t index, uint32_t launch_exec_end)
+{
+	if (index >= launch_exec_end || index >= code.GetInstructions().Size()) { return false; }
+	const auto& inst = code.GetInstructions().At(index);
+	const auto  half = inst.type == ShaderInstructionType::VMbcntLoU32B32   ? ShaderOperandType::ExecLo
+	                   : inst.type == ShaderInstructionType::VMbcntHiU32B32 ? ShaderOperandType::ExecHi
+	                                                                        : ShaderOperandType::Unknown;
+	const auto& mask = inst.src[0];
+	return half != ShaderOperandType::Unknown && inst.src_num == 2 && mask.type == half && mask.size == 1 && !mask.negate &&
+	       !mask.absolute && mask.multiplier == 1.0f;
+}
+
 static bool ShaderOperandWritesVccWord(const ShaderOperand& dst, ShaderOperandType word)
 {
 	if (word == ShaderOperandType::VccLo)
@@ -683,6 +707,40 @@ bool ShaderNativePackedResult(const ShaderInstruction& inst)
 	       inst.format == ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair;
 }
 
+ShaderInstruction ShaderWave32LaneMasks(const ShaderInstruction& inst)
+{
+	auto narrowed = inst;
+	// S_BFM_B64 shares the compare format but writes 64 bits of data.
+	if (!ShaderInstructionTypeStartsWith(inst.type, "V")) { return narrowed; }
+	const auto narrow = [](ShaderOperand* operand)
+	{
+		if (operand->size == 2 && (operand->type == ShaderOperandType::Sgpr || operand->type == ShaderOperandType::VccLo))
+		{
+			operand->size = 1;
+		}
+	};
+	switch (inst.format)
+	{
+		case ShaderInstructionFormat::SmaskVsrc0Vsrc1: narrow(&narrowed.dst); break;
+		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1:
+		case ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair: narrow(&narrowed.dst2); break;
+		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2:
+			narrow(&narrowed.dst2);
+			narrow(&narrowed.src[2]);
+			break;
+		case ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2: narrow(&narrowed.src[2]); break;
+		default: break;
+	}
+	return narrowed;
+}
+
+ShaderCode ShaderWave32LaneMaskProgram(const ShaderCode& code)
+{
+	auto narrowed = code;
+	for (auto& inst: narrowed.GetInstructions()) { inst = ShaderWave32LaneMasks(inst); }
+	return narrowed;
+}
+
 bool ShaderUsesNativeWaveState(const ShaderCode& code)
 {
 	for (const auto& inst: code.GetInstructions())
@@ -884,6 +942,101 @@ static bool ShaderFragmentQuadMayLoseMember(const ShaderInstruction& inst)
 	       inst.type == ShaderInstructionType::SSwappcB64;
 }
 
+static bool ShaderIsDirectBranch(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::SBranch || type == ShaderInstructionType::SCbranchScc0 ||
+	       type == ShaderInstructionType::SCbranchScc1 || type == ShaderInstructionType::SCbranchVccz ||
+	       type == ShaderInstructionType::SCbranchVccnz || type == ShaderInstructionType::SCbranchExecz ||
+	       type == ShaderInstructionType::SCbranchExecnz;
+}
+
+// The first instruction that may run after a quad lost a member: the first loss, or the head of a loop
+// whose body holds one, since the next iteration runs the head again.
+static uint32_t ShaderFragmentFirstQuadLoss(const ShaderCode& code)
+{
+	const auto&           instructions = code.GetInstructions();
+	std::vector<uint32_t> losses;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		if (ShaderFragmentQuadMayLoseMember(instructions.At(index))) { losses.push_back(index); }
+	}
+	uint32_t first = losses.empty() ? instructions.Size() : losses.front();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (!ShaderIsDirectBranch(inst.type) || inst.src_num < 1 || inst.src[0].constant.i >= 0) { continue; }
+		const int64_t target_pc = static_cast<int64_t>(inst.pc) + 4 + inst.src[0].constant.i;
+		uint32_t      head      = index;
+		while (head > 0 && static_cast<int64_t>(instructions.At(head).pc) > target_pc) { --head; }
+		const bool holds_loss = std::any_of(losses.begin(), losses.end(), [&](uint32_t loss) { return loss >= head && loss <= index; });
+		if (holds_loss) { first = std::min(first, head); }
+	}
+	return first;
+}
+
+// Whether a lane-local Wave64 or Wave32 pixel program runs as a partially populated guest wave. Which pixels share a
+// wave is the rasterizer's choice, so a host subgroup of any width holding whole quads is such a wave, as long
+// as nothing observes a lane by its position:
+//  - an OR reduction proven by ShaderFindFragmentLaneReductions folds only lanes that hold their seed, so a
+//    lane outside the subgroup is an absent guest lane that seeds zero;
+//  - quad DPP and a READFIRSTLANE over an EXEC inside the launched quads see only lanes that exist, while no
+//    quad has lost a member yet;
+//  - scalar spills keep their own storage;
+//  - under the launch EXEC (ShaderLaunchExecEnd) a GDS append/consume and an MBCNT of that EXEC see only the
+//    wave's valid pixels, which the subgroup's non-helper invocations are, at their own lanes;
+//  - everything else that names a lane (row DPP, PERMLANE, other READLANE/WRITELANE, MBCNT, append/consume)
+//    is refused.
+static bool ShaderFragmentRunsAsPartialWave(const ShaderCode& code, const ShaderFragmentMaskFlow& masks)
+{
+	const auto& instructions = code.GetInstructions();
+	if (!masks.lane_local || masks.exec_in_quads.size() != instructions.Size()) { return false; }
+	const auto     reductions = ShaderFindFragmentLaneReductions(code, masks);
+	const uint32_t loss       = ShaderFragmentFirstQuadLoss(code);
+	const uint32_t launch     = ShaderLaunchExecEnd(code);
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		if (reductions.IsStep(index)) { continue; }
+		const auto& inst  = instructions.At(index);
+		const bool  whole = index < loss;
+		uint64_t    lanes = 0;
+		int         reg   = 0;
+		int         lane  = 0;
+		switch (inst.type)
+		{
+			case ShaderInstructionType::VReadlaneB32:
+				if (reductions.ReadAt(index, &lanes) != nullptr ? !whole
+				                                                : !IsStaticScalarSpillRead(inst, &reg, &lane) ||
+				                                                      !HasLiveScalarSpill(code, index, reg, lane))
+				{
+					return false;
+				}
+				break;
+			case ShaderInstructionType::VWritelaneB32:
+				if (!IsStaticScalarSpillWrite(inst, &reg, &lane) || !IsScalarSpillStore(code, index, reg, lane)) { return false; }
+				break;
+			case ShaderInstructionType::VReadfirstlaneB32:
+				if (!ShaderReadfirstlaneCanUseUniformCopy(code, index) && (!whole || !masks.exec_in_quads[index])) { return false; }
+				break;
+			case ShaderInstructionType::VMbcntLoU32B32:
+			case ShaderInstructionType::VMbcntHiU32B32:
+				if (!ShaderCountsLaunchExec(code, index, launch)) { return false; }
+				break;
+			case ShaderInstructionType::DsAppend:
+			case ShaderInstructionType::DsConsume:
+				if (index >= launch || inst.format != ShaderInstructionFormat::VdstGds) { return false; }
+				break;
+			case ShaderInstructionType::VPermlane16B32:
+			case ShaderInstructionType::VPermlanex16B32: return false;
+			default: break;
+		}
+		for (int source = 0; source < inst.src_num; ++source)
+		{
+			if (inst.src[source].dpp && (inst.src[source].dpp_ctrl > 0xffu || !whole)) { return false; }
+		}
+	}
+	return true;
+}
+
 ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	ShaderNativeWaveInfo info;
@@ -895,7 +1048,7 @@ ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t gu
 	}
 	for (const auto& inst: code.GetInstructions())
 	{
-		if (!ShaderInstructionLoweringPreconditions(inst))
+		if (!ShaderInstructionPerLaneLoweringPreconditions(inst))
 		{
 			info.refusal_pc = inst.pc;
 			info.refusal_reason = "invalid instruction before native wave analysis";
@@ -924,7 +1077,7 @@ ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t gu
 	// proof runs on every program: besides rescuing what the monotone one refuses, it is what
 	// accounts for EXEC writes (a WQM widening and its restore) that the monotone one cannot.
 	const bool monotone_masks = ShaderMasksStayLaneLocal(code, regions, &mask_pc);
-	const auto mask_flow      = ShaderAnalyzeFragmentMaskFlow(code);
+	const auto mask_flow      = ShaderAnalyzeFragmentMaskFlow(code, guest_wave_size);
 	// ADDTID uses a per-invocation spill array in the pixel emitter. Mask
 	// monotonicity alone cannot establish the stores, reads and lane ownership.
 	const bool addtid = code.HasAnyOf({ShaderInstructionType::DsWriteAddtidB32, ShaderInstructionType::DsReadAddtidB32});
@@ -1019,6 +1172,13 @@ ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t gu
 		}
 		if (refusal != nullptr)
 		{
+			// The exact-participation proof failed; a program free of lane positions still runs as a
+			// partially populated wave. Otherwise the first participation refusal names the obstacle.
+			if (!writes_exec_outside_region && ShaderFragmentRunsAsPartialWave(code, mask_flow))
+			{
+				info.proof = ShaderNativeWaveProof::FragmentPartialWave;
+				return info;
+			}
 			info.refusal_pc = inst.pc;
 			info.refusal_reason = refusal;
 			return info;
@@ -2170,22 +2330,25 @@ static void ShaderGetGdsPointer(ShaderGdsResources* info, bool* direct_sgprs, in
 // via m0, which the driver feeds from an SGPR holding the descriptor. Return
 // that SGPR when the instruction stream shows both the GDS use and the m0
 // feed, -1 otherwise.
+// The SGPR that M0 was copied from when each GDS instruction runs, in program order; -1 unless every GDS
+// instruction sees the same one. A later M0 write (an interpolation base, say) does not name the counter.
 static int ShaderGdsPointerSourceSgpr(const ShaderCode& code)
 {
-	bool uses_gds = false;
-	int  source   = -1;
+	int gds_source = -1;
+	int m0_source  = -1;
 	for (const auto& inst: code.GetInstructions())
 	{
 		if (inst.format == ShaderInstructionFormat::VdstGds)
 		{
-			uses_gds = true;
+			if (m0_source < 0 || (gds_source >= 0 && gds_source != m0_source)) { return -1; }
+			gds_source = m0_source;
 		}
-		if (inst.dst.type == ShaderOperandType::M0 && inst.src_num > 0 && inst.src[0].type == ShaderOperandType::Sgpr)
+		if (inst.dst.type == ShaderOperandType::M0)
 		{
-			source = inst.src[0].register_id;
+			m0_source = inst.src_num > 0 && inst.src[0].type == ShaderOperandType::Sgpr ? inst.src[0].register_id : -1;
 		}
 	}
-	return uses_gds ? source : -1;
+	return gds_source;
 }
 
 // A direct-resource slot is ambiguous in driver metadata when it can name the
@@ -2452,7 +2615,7 @@ bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
 	                      ShaderInstructionType::DsSubU32, ShaderInstructionType::DsXorB32, ShaderInstructionType::DsWriteB32,
 	                      ShaderInstructionType::DsWrite2B32, ShaderInstructionType::DsWrite2St64B32,
 	                      ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
-	                      ShaderInstructionType::ImageAtomicAdd});
+	                      ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
 
 	return prevents;
 }
@@ -4090,7 +4253,10 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		}
 		const auto user_sgpr_num =
 		    ShaderResolveGen5UserSgprCount(regs->cs_regs.user_sgpr, regs->cs_user_sgpr.count, data.user_data->eud_size_dw);
-		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code, 0, false);
+		// The dispatch plan fixed the guest wave size; lane masks follow it.
+		const auto scalar_flow = ShaderScalarFlowOf(code, info->wave_layout.guest_wave_size);
+		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code, 0, false,
+		                  nullptr, scalar_flow.get());
 		if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->wave_layout.guest_wave_size == 32u)
 		{
 			info->native_wave_sensitive = ShaderUsesNativeWaveState(code);
@@ -4202,7 +4368,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			{
 				info->storage_image_tile_coverage[i] = coverage;
 				descriptor.storage_image_write_only = true;
-				info->storage_image_write_only_mask |= 1u << static_cast<uint32_t>(i);
+				info->storage_image_write_only_mask |= uint64_t {1} << static_cast<uint32_t>(i);
 				continue;
 			}
 			if (descriptor.dynamic_sload)
@@ -4213,7 +4379,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			if (image_use.writes && !image_use.reads)
 			{
 				descriptor.storage_image_write_only = true;
-				info->storage_image_write_only_mask |= 1u << static_cast<uint32_t>(i);
+				info->storage_image_write_only_mask |= uint64_t {1} << static_cast<uint32_t>(i);
 			}
 		}
 		info->empty_gate = AnalyzeShaderComputeEmptyGate(code, info->bind);

@@ -1,6 +1,7 @@
 #include "Kyty/Core/MagicEnum.h"
 #include "ShaderSpirvInternal.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderComputeWaveSdwa.h"
 
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
@@ -244,6 +245,60 @@ uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
 	return descriptor_set;
 }
 
+bool Spirv::EmitSdwaLowDestinationInstruction(const RecompilerFunc* func, const ShaderInstruction& instruction, uint32_t index,
+                                              String8* output)
+{
+	if (output == nullptr || func == nullptr || func->type != instruction.type || func->format != instruction.format ||
+	    !ShaderSdwaLowDestinationSupported(instruction))
+	{
+		return false;
+	}
+	String8 whole;
+	if (!func->func(static_cast<int>(index), m_code, &whole, this, func->param, func->scc_check))
+	{
+		return false;
+	}
+	// ISA table 88: DST_SEL BYTE_0/WORD_0 takes the result's low bits; DST_U pads the rest with zeros (0),
+	// sign-extends the field (1) or keeps the prior bits (2). An inactive lane keeps its prior value.
+	const uint32_t control = instruction.vop_sdwa_ctrl;
+	const uint32_t width   = ((control >> 8u) & 7u) == 0u ? 8u : 16u;
+	const uint32_t field   = (1u << width) - 1u;
+	const uint32_t dst_u   = (control >> 11u) & 3u;
+	const int      vgpr    = instruction.dst.register_id;
+
+	String8 merged;
+	if (dst_u == 0u)
+	{
+		merged = String8::FromPrintf("%%sdwa_merged_%u = OpBitwiseAnd %%uint %%sdwa_new_bits_%u %%%s\n", index, index,
+		                             GetConstantUint(field).c_str());
+	} else if (dst_u == 1u)
+	{
+		merged = String8::FromPrintf("%%sdwa_merged_%u = OpBitFieldSExtract %%uint %%sdwa_new_bits_%u %%%s %%%s\n", index, index,
+		                             GetConstantUint(0u).c_str(), GetConstantUint(width).c_str());
+	} else
+	{
+		merged = String8::FromPrintf("%%sdwa_kept_%u = OpBitwiseAnd %%uint %%sdwa_old_bits_%u %%%s\n"
+		                             "%%sdwa_field_%u = OpBitwiseAnd %%uint %%sdwa_new_bits_%u %%%s\n"
+		                             "%%sdwa_merged_%u = OpBitwiseOr %%uint %%sdwa_kept_%u %%sdwa_field_%u\n",
+		                             index, index, GetConstantUint(~field).c_str(), index, index, GetConstantUint(field).c_str(), index,
+		                             index, index);
+	}
+	*output += String8::FromPrintf("%%sdwa_old_%u = OpLoad %%float %%v%d\n", index, vgpr);
+	*output += whole;
+	*output += String8::FromPrintf("%%sdwa_new_%u = OpLoad %%float %%v%d\n"
+	                               "%%sdwa_new_bits_%u = OpBitcast %%uint %%sdwa_new_%u\n"
+	                               "%%sdwa_old_bits_%u = OpBitcast %%uint %%sdwa_old_%u\n",
+	                               index, vgpr, index, index, index, index);
+	*output += merged;
+	*output += String8::FromPrintf("%%sdwa_exec_%u = OpLoad %%uint %%exec_lo\n"
+	                               "%%sdwa_active_%u = OpINotEqual %%bool %%sdwa_exec_%u %%uint_0\n"
+	                               "%%sdwa_value_%u = OpSelect %%uint %%sdwa_active_%u %%sdwa_merged_%u %%sdwa_old_bits_%u\n"
+	                               "%%sdwa_store_%u = OpBitcast %%float %%sdwa_value_%u\n"
+	                               "OpStore %%v%d %%sdwa_store_%u\n",
+	                               index, index, index, index, index, index, index, index, index, vgpr, index);
+	return true;
+}
+
 void Spirv::GenerateSource()
 {
 	m_source.Clear();
@@ -252,7 +307,9 @@ void Spirv::GenerateSource()
 	// format malformed operands through the debug instruction printer here.
 	for (const auto& inst: m_code.GetInstructions())
 	{
-		if (!ShaderInstructionLoweringPreconditions(inst))
+		const bool represented =
+		    UsesComputeWaveBanks() ? ShaderInstructionLoweringPreconditions(inst) : ShaderInstructionPerLaneLoweringPreconditions(inst);
+		if (!represented)
 		{
 			EXIT("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64 " pc=0x%08" PRIx32
 			     " reason=lowering-preconditions src_num=%d mimg_address_num=%d sopp=0x%02x raw=0x%08" PRIx32 "\n",
@@ -541,8 +598,11 @@ void Spirv::WriteHeader()
 	    UsesNativeComputeWave() || UsesFragmentWaveTier())
 	{
 		capabilities.Add("OpCapability GroupNonUniform");
+		// A pixel append reads its leader's counter value with a shuffle.
+		const bool pixel_append = GetHostShaderType() == ShaderType::Pixel &&
+		                          m_code.HasAnyOf({ShaderInstructionType::DsAppend, ShaderInstructionType::DsConsume});
 		if ((spirv_uses_dpp(m_code) && GetHostShaderType() != ShaderType::Pixel) || spirv_uses_dpp_row(m_code) ||
-		    spirv_uses_lane_exchange(m_code) || UsesComputeWaveBanks() || UsesFragmentWaveTier())
+		    spirv_uses_lane_exchange(m_code) || UsesComputeWaveBanks() || UsesFragmentWaveTier() || pixel_append)
 		{
 			capabilities.Add("OpCapability GroupNonUniformShuffle");
 		}
@@ -651,7 +711,7 @@ void Spirv::WriteHeader()
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
 			vars.Add("%textures2D_L");
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd})) { vars.Add("%textures2D_LU"); }
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap})) { vars.Add("%textures2D_LU"); }
 		}
 		if (m_bind->samplers.samplers_num > 0)
 		{
@@ -1165,7 +1225,7 @@ void Spirv::WriteAnnotations()
 			m_source += String8(textures_annotations_l)
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_storage_index));
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap}))
 			{
 				m_source += String8(textures_annotations_l).ReplaceStr("textures2D_L", "textures2D_LU")
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
@@ -1563,7 +1623,7 @@ static const char* textures_loaded_types = R"(
 		}
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
-			const bool has_atomics = m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd});
+			const bool has_atomics = m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
 			const bool shared_atomic_type = has_atomics && uint_storage && std::strcmp(image_format, "R32ui") == 0 &&
 			                                std::strcmp(storage_arrayed, "0") == 0;
 			if (shared_atomic_type)
@@ -1751,7 +1811,7 @@ void Spirv::WriteGlobalVariables()
 		{
 			vars.Add(String8::FromPrintf("%%textures2D_L = OpVariable %%_ptr_UniformConstant__arr_ImageL_uint_%d UniformConstant",
 			                             m_bind->textures2D.textures2d_storage_num));
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap}))
 			{
 				vars.Add(String8::FromPrintf("%%textures2D_LU = OpVariable %%_ptr_UniformConstant__arr_ImageLU_uint_%d UniformConstant",
 				                             m_bind->textures2D.textures2d_storage_num));
@@ -2738,6 +2798,11 @@ void Spirv::WriteInstructions()
 		{
 			WriteLabel(index);
 		}
+		if (FragmentLaneReductions().IsStep(static_cast<uint32_t>(index)))
+		{
+			m_source += String8::FromPrintf("; reduction step: %s\n", ShaderCode::DbgInstructionToStr(inst).c_str());
+			continue;
+		}
 
 		String8 dst = MaterializeAssembledDescriptors(inst);
 		String8 dst_debug;
@@ -2749,6 +2814,11 @@ void Spirv::WriteInstructions()
 		const auto wave_kind = UsesFragmentCompute() ? ShaderClassifyFragmentWaveInstruction(inst, *m_ps_input_info)
 		                      : UsesComputeWaveBanks() ? ShaderClassifyComputeWaveInstruction(inst)
 		                                             : ShaderComputeWaveInstructionKind::Unsupported;
+		const bool low_destination = ShaderSdwaLowDestinationSupported(inst);
+		if (low_destination && (UsesComputeWaveBanks() || wave_kind != ShaderComputeWaveInstructionKind::Unsupported))
+		{
+			EXIT("SDWA low destination select outside the per-lane emitter: pc=0x%08" PRIx32 "\n", inst.pc);
+		}
 		if (wave_kind == ShaderComputeWaveInstructionKind::PixelInterpolation || wave_kind == ShaderComputeWaveInstructionKind::PixelExport)
 		{
 			ok = EmitFragmentInstruction(inst, static_cast<uint32_t>(index), &dst);
@@ -2810,7 +2880,8 @@ void Spirv::WriteInstructions()
 			EXIT_IF(func->type != inst.type);
 			EXIT_IF(func->format != inst.format);
 			if (UsesFragmentCompute() && inst.type == ShaderInstructionType::SEndpgm) { dst += FragmentEpilog(); }
-			ok = func->func(index, m_code, &dst, this, func->param, func->scc_check);
+			ok = low_destination ? EmitSdwaLowDestinationInstruction(func, inst, static_cast<uint32_t>(index), &dst)
+			                     : func->func(index, m_code, &dst, this, func->param, func->scc_check);
 		}
 
 		if (!ok)
@@ -3217,6 +3288,15 @@ void Spirv::FindConstants()
 					AddConstantUint(inst.src[source].dpp_ctrl & 15u);
 				}
 			}
+		}
+	}
+	for (const auto& reduction: FragmentLaneReductions().reductions)
+	{
+		// Each read selects the seeds of its guest lanes by a two-word lane set.
+		for (const auto& read: reduction.reads)
+		{
+			AddConstantUint(static_cast<uint32_t>(read.lanes));
+			AddConstantUint(static_cast<uint32_t>(read.lanes >> 32u));
 		}
 	}
 	if (!UsesFragmentWaveTier() && spirv_uses_dpp_row(m_code))

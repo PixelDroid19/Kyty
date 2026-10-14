@@ -843,6 +843,15 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 	return true;
 }
 
+bool ShaderInstructionPerLaneLoweringPreconditions(const ShaderInstruction& instruction)
+{
+	if (ShaderSdwaLowDestinationSupported(instruction))
+	{
+		return ShaderInstructionLoweringPreconditions(ShaderSdwaWholeDestination(instruction));
+	}
+	return ShaderInstructionLoweringPreconditions(instruction);
+}
+
 bool ShaderComputeWaveTypeIsExecCompare(ShaderInstructionType type)
 {
 	switch (type)
@@ -1191,7 +1200,7 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 	if ((instruction.type == ShaderInstructionType::VAddI32 || instruction.type == ShaderInstructionType::VSubI32) &&
 	    instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1) { return false; }
 	if (ShaderComputeWaveSdwaSignedConvertSupported(instruction)) { return true; }
-	if (instruction.type == ShaderInstructionType::ImageAtomicAdd) { return ShaderImageAtomicAddSupported(instruction); }
+	if (ShaderIsImageAtomic(instruction.type)) { return ShaderImageAtomicSupported(instruction); }
 	const auto name   = Core::EnumName8(instruction.type);
 	const bool memory = name.StartsWith("Buffer") || name.StartsWith("Tbuffer") || name.StartsWith("Image");
 	if (memory)
@@ -1391,10 +1400,10 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 				return atomic;
 			}
 		}
-		if (instruction.type == ShaderInstructionType::ImageAtomicAdd &&
+		if (ShaderIsImageAtomic(instruction.type) &&
 		    !ShaderImageAtomicResourceSupported(code, index, input.bind))
 		{
-			return {false, instruction.pc, "image atomic addition requires a resolved 2D R32_UINT storage image"};
+			return {false, instruction.pc, "image atomic requires a resolved 2D R32_UINT storage image"};
 		}
 		if (kind == ShaderComputeWaveInstructionKind::Unsupported)
 		{

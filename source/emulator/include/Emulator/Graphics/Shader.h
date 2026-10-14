@@ -594,6 +594,7 @@ enum class ShaderInstructionType : uint32_t
 	ImageSampleO,
 	SSubbU32,
 	SAshrI64,
+	ImageAtomicSwap,
 
 	ZMax
 };
@@ -1218,6 +1219,42 @@ struct ShaderId
 constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w = 0)
 {
 	return x | (y << 3u) | (z << 6u) | (w << 9u);
+}
+
+// Gen5 vertex attribute control word, decoded the way guest fetch code does:
+// bits 0..4 V# slot, 5..6 component count - 1, 7..13 buffer data format
+// (0 keeps the V# format and DST_SEL), 14..25 byte offset, 26 instance index.
+struct ShaderGen5VertexAttrib
+{
+	uint32_t slot       = 0;
+	uint32_t components = 0;
+	uint8_t  format     = 0;
+	uint32_t offset     = 0;
+	bool     instance   = false;
+};
+
+constexpr ShaderGen5VertexAttrib ShaderDecodeGen5VertexAttrib(uint32_t word)
+{
+	ShaderGen5VertexAttrib attrib;
+	attrib.slot       = word & 0x1fu;
+	attrib.components = ((word >> 5u) & 0x3u) + 1u;
+	attrib.format     = static_cast<uint8_t>((word >> 7u) & 0x7fu);
+	attrib.offset     = (word >> 14u) & 0xfffu;
+	attrib.instance   = ((word >> 26u) & 0x1u) != 0;
+	return attrib;
+}
+
+// DST_SEL the guest writes for a format override: present components are
+// identity, missing Y/Z read 0 and missing W reads 1.
+constexpr uint32_t ShaderGen5VertexAttribDstSel(uint32_t components)
+{
+	switch (components)
+	{
+		case 1: return DstSel(4, 0, 0, 1);
+		case 2: return DstSel(4, 5, 0, 1);
+		case 3: return DstSel(4, 5, 6, 1);
+		default: return DstSel(4, 5, 6, 7);
+	}
 }
 
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
@@ -1914,8 +1951,8 @@ struct ShaderTextureResources
 {
 	// This table combines sampled and storage images. The host descriptor
 	// classes have separate limits, checked when constructing their layouts.
-	static constexpr int RES_MAX = 32;
-	static_assert(RES_MAX <= 32, "storage-image write-only masks use one uint32_t bit per logical resource");
+	static constexpr int RES_MAX = 64;
+	static_assert(RES_MAX <= 64, "storage-image write-only masks use one uint64_t bit per logical resource");
 	// A virtual sampled-texture descriptor carries a local index and the
 	// SPIR-V image shape of its target descriptor array. Vulkan descriptor
 	// arrays are statically typed, so 2D, 2D-array and 3D images cannot share
@@ -2037,7 +2074,9 @@ struct ShaderBindResources
 	                                                       int user_data_register_base);
 [[nodiscard]] int ShaderFindImageStorageTextureDescriptor(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind,
                                                          int user_data_register_base);
-[[nodiscard]] bool ShaderImageAtomicAddSupported(const ShaderInstruction& instruction);
+// IMAGE_ATOMIC_ADD and IMAGE_ATOMIC_SWAP: 32-bit read-modify-writes of one storage image texel.
+[[nodiscard]] bool ShaderIsImageAtomic(ShaderInstructionType type);
+[[nodiscard]] bool ShaderImageAtomicSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind);
 [[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);
 [[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
@@ -2083,6 +2122,9 @@ enum class ShaderNativeWaveProof : uint32_t
 	QuadLocal,
 	ExactSubgroup,
 	FragmentNeutral32,
+	// A Wave64 or Wave32 pixel program whose only whole-wave observations are proven OR reductions and reads that
+	// stay inside launched quads, run as a partially populated guest wave on a host subgroup of any width.
+	FragmentPartialWave,
 };
 
 struct ShaderNativeWaveInfo
@@ -2315,7 +2357,7 @@ struct ShaderComputeInputInfo
 	bool                group_id[3]        = {false, false, false};
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;
-	uint32_t            storage_image_write_only_mask = 0;
+	uint64_t            storage_image_write_only_mask = 0;
 	ShaderStorageImageTileCoverage storage_image_tile_coverage[ShaderTextureResources::RES_MAX] {};
 	ShaderComputeEmptyGate empty_gate;
 	ShaderComputeMetaFillEvidence meta_fill;
@@ -2323,7 +2365,7 @@ struct ShaderComputeInputInfo
 	ShaderBindResources bind;
 };
 
-[[nodiscard]] uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen,
+[[nodiscard]] uint64_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen,
                                                        uint32_t groups_x, uint32_t groups_y, uint32_t groups_z);
 
 [[nodiscard]] constexpr uint32_t ShaderComputeLdsDwords(uint16_t granulated_lds_size)

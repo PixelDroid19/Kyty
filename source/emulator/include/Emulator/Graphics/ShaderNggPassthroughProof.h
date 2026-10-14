@@ -138,8 +138,9 @@ struct ShaderNggPassthroughProof
 	ShaderNggScalarDependencies wave_dependent_scalars;
 	std::bitset<256> required_initial_vgprs;
 	ShaderNggScalarDependencies scalar_dependencies;
-	// Both vectors are bounded by ShaderNggPassthroughInstructionLimit. On a
-	// refusal they describe only a diagnostic prefix and MUST NOT be consumed.
+	// Both vectors are bounded by ShaderNggPassthroughInstructionLimit (the whole
+	// program, or in prologue mode the prologue). On a refusal they describe only a
+	// diagnostic prefix and MUST NOT be consumed.
 	std::vector<ShaderNggPassthroughStep> steps;
 	std::vector<uint32_t> retained_instruction_indices;
 };

@@ -11,10 +11,23 @@ namespace Kyty::Libs::Graphics {
 // analysis, so that both classify EXEC/VCC words and packed results identically.
 [[nodiscard]] bool ShaderNativeMaskOperand(const ShaderOperand& operand);
 [[nodiscard]] bool ShaderNativePackedResult(const ShaderInstruction& inst);
+// A wave32 ignores the upper halves of EXEC and VCC (RDNA2 ISA 2.1, 3.x), so a VALU lane mask
+// (compare or carry-out destination, carry-in or V_CNDMASK condition) is one dword: the upper
+// SGPR of the pair is neither written nor read. Returns the instruction with each such SGPR/VCC
+// pair narrowed to its low word; an EXEC destination keeps its pair.
+[[nodiscard]] ShaderInstruction ShaderWave32LaneMasks(const ShaderInstruction& inst);
+// The program with ShaderWave32LaneMasks applied to every instruction.
+[[nodiscard]] ShaderCode ShaderWave32LaneMaskProgram(const ShaderCode& code);
 [[nodiscard]] bool ShaderInstructionTypeChangesExec(ShaderInstructionType type);
 [[nodiscard]] bool ShaderInstructionWritesExec(const ShaderInstruction& inst);
 // Branches, program transfers and S_ENDPGM.
 [[nodiscard]] bool ShaderInstructionIsControlFlowBoundary(const ShaderInstruction& inst);
+// Index of the first EXEC write or control-flow boundary. Every instruction before it runs once, under
+// the launch EXEC: the valid mask of the wave's pixels (RDNA2 ISA 3.x; an export with VM sends EXEC as it).
+[[nodiscard]] uint32_t ShaderLaunchExecEnd(const ShaderCode& code);
+// V_MBCNT_{LO,HI}_U32_B32 at `index` whose mask is its own half of the launch EXEC, so with S1 it counts the
+// valid pixels below the lane.
+[[nodiscard]] bool ShaderCountsLaunchExec(const ShaderCode& code, uint32_t index, uint32_t launch_exec_end);
 
 } // namespace Kyty::Libs::Graphics
 

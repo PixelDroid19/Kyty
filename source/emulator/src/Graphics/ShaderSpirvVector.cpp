@@ -4,6 +4,7 @@
 #include "ShaderSpirvF16.h"
 #include "ShaderSpirvTemplates.h"
 #include "ShaderMaskAnalysis.h"
+#include "ShaderNativeWaveInternal.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
@@ -3272,8 +3273,9 @@ KYTY_RECOMPILER_FUNC(Recompile_VCubeMaF32_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
-static bool RecompileNativeMbcnt(const ShaderInstruction& inst, uint32_t index, bool low_half, Spirv* spirv, String8* dst_source)
+static bool RecompileNativeMbcnt(const ShaderCode& code, uint32_t index, bool low_half, Spirv* spirv, String8* dst_source)
 {
+	const auto& inst = code.GetInstructions().At(index);
 	EXIT_IF(spirv == nullptr || dst_source == nullptr);
 	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || !operand_is_variable(inst.dst) || inst.dst.clamp ||
 	    inst.dst.multiplier != 1.0f)
@@ -3290,7 +3292,16 @@ static bool RecompileNativeMbcnt(const ShaderInstruction& inst, uint32_t index, 
 	const String8 index_str = String8::FromPrintf("%u", index);
 	String8       mask_load;
 	String8       accumulator_load;
-	if (!operand_load_uint(spirv, inst.src[0], "mbcnt_mask_<index>", index_str, &mask_load) ||
+	// A count of the launch EXEC in a partially populated wave counts its valid pixels; helpers hold EXEC
+	// bits in the numeric word only as members of the launched quads.
+	const bool launch_count = code.GetType() == ShaderType::Pixel && spirv->UsesFragmentPartialWave() &&
+	                          ShaderCountsLaunchExec(code, index, ShaderLaunchExecEnd(code));
+	if (launch_count)
+	{
+		mask_load = spirv->NativeValidPixelBallot("mbcnt_valid_<index>") +
+		            String8::FromPrintf("%%mbcnt_mask_<index> = OpCompositeExtract %%uint %%mbcnt_valid_<index> %d\n", low_half ? 0 : 1);
+	}
+	if ((!launch_count && !operand_load_uint(spirv, inst.src[0], "mbcnt_mask_<index>", index_str, &mask_load)) ||
 	    !operand_load_uint(spirv, inst.src[1], "mbcnt_acc_<index>", index_str, &accumulator_load))
 	{
 		return false;
@@ -3333,24 +3344,22 @@ static bool RecompileNativeMbcnt(const ShaderInstruction& inst, uint32_t index, 
 
 KYTY_RECOMPILER_FUNC(Recompile_VMbcntHiU32B32_SVdstSVsrc0SVsrc1)
 {
-	const auto& inst = code.GetInstructions().At(index);
 	// Numeric counting uses the same logical-lane contract in both stages.
 	if (code.GetType() != ShaderType::Pixel && code.GetType() != ShaderType::Compute)
 	{
 		return false;
 	}
-	return RecompileNativeMbcnt(inst, index, false, spirv, dst_source);
+	return RecompileNativeMbcnt(code, index, false, spirv, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMbcntLoU32B32_SVdstSVsrc0SVsrc1)
 {
-	const auto& inst = code.GetInstructions().At(index);
 	// Numeric counting uses the same logical-lane contract in both stages.
 	if (code.GetType() != ShaderType::Pixel && code.GetType() != ShaderType::Compute)
 	{
 		return false;
 	}
-	return RecompileNativeMbcnt(inst, index, true, spirv, dst_source);
+	return RecompileNativeMbcnt(code, index, true, spirv, dst_source);
 }
 
 /* XXX: Bfrev, Not */
@@ -3489,6 +3498,42 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
 	return true;
 }
 
+// A V_READLANE_B32 of a proven whole-wave OR reduction: the OR of the seed over the invocations whose
+// guest lane is in `lanes`. The seed register still holds the seed, since the network steps were not
+// emitted. Lanes the subgroup does not hold contribute nothing, as absent guest lanes seed zero; the
+// quad transfer gives helpers, which a general collective may leave undefined, their quad's result.
+static bool RecompileLaneReductionRead(uint32_t index, const ShaderFragmentLaneReduction& reduction, uint64_t lanes,
+                                       const String8& dst, String8* dst_source, Spirv* spirv)
+{
+	ShaderOperand seed;
+	seed.type        = ShaderOperandType::Vgpr;
+	seed.register_id = reduction.seed;
+	seed.size        = 1;
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8       load_seed;
+	if (!operand_load_uint(spirv, seed, "lr_seed_<index>", index_str, &load_seed)) { return false; }
+	static const char* text = R"(
+        <load_seed>
+        %lr_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
+        %lr_upper_<index> = OpUGreaterThanEqual %bool %lr_lane_<index> %uint_32
+        %lr_word_<index> = OpSelect %uint %lr_upper_<index> %<high> %<low>
+        %lr_shift_<index> = OpBitwiseAnd %uint %lr_lane_<index> %uint_31
+        %lr_shifted_<index> = OpShiftRightLogical %uint %lr_word_<index> %lr_shift_<index>
+        %lr_bit_<index> = OpBitwiseAnd %uint %lr_shifted_<index> %uint_1
+        %lr_member_<index> = OpINotEqual %bool %lr_bit_<index> %uint_0
+        %lr_part_<index> = OpSelect %uint %lr_member_<index> %lr_seed_<index> %uint_0
+        %lr_raw_<index> = OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %lr_part_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load_seed>", load_seed)
+	                   .ReplaceStr("<low>", spirv->GetConstantUint(static_cast<uint32_t>(lanes)))
+	                   .ReplaceStr("<high>", spirv->GetConstantUint(static_cast<uint32_t>(lanes >> 32u)))
+	                   .ReplaceStr("<index>", index_str);
+	*dst_source += spirv->NativeQuadUniform(String8("lr_raw_") + index_str, "uint", String8("lr_") + index_str);
+	*dst_source += String8::FromPrintf("OpStore %%%s %%lr_%u\n", dst.c_str(), index);
+	return true;
+}
+
 // v_readlane_b32 ignores EXEC and reads the requested physical wave lane.
 KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 {
@@ -3500,6 +3545,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
+
+	uint64_t reduction_lanes = 0;
+	if (const auto* reduction = spirv->FragmentLaneReductions().ReadAt(index, &reduction_lanes); reduction != nullptr)
+	{
+		return RecompileLaneReductionRead(index, *reduction, reduction_lanes, dst_value.value, dst_source, spirv);
+	}
 
 	int spill_register = 0;
 	int spill_lane     = 0;

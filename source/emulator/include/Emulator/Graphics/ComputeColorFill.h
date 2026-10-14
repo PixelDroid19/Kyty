@@ -75,6 +75,15 @@ public:
 		*slot = {identity, producer, words, m_next_sequence++, cpu_observation};
 		return true;
 	}
+	// The pending event whose range starts at address, if any.
+	[[nodiscard]] const ComputeColorFillEvent* FindAt(uint64_t address) const
+	{
+		for (const auto& event: m_events)
+		{
+			if (event.sequence != 0 && event.identity.address == address) { return &event; }
+		}
+		return nullptr;
+	}
 	[[nodiscard]] bool Consume(const ComputeColorFillIdentity& identity, SubmissionId consumer, ComputeColorFillEvent* out)
 	{
 		if (out != nullptr) { *out = {}; }
