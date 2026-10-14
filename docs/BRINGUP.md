@@ -9,6 +9,42 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: vertex attribute format words (2026-10-14)
+
+- Observed: the flat blue streak shapes over the warp tunnel (open item of
+  the entry below) come from additive particle draws whose pixel program
+  receives NaN in every interpolant. A temporary NaN-count probe in the
+  pixel program showed NaN in all 2.8 million fragments of one draw; the
+  NaN came from the vertex program's exported parameters, which all derive
+  from a normalized attribute.
+- Cause: the vertex attribute control word carries a format override in
+  bits 5..13, laid out as `(buffer data format << 2) | (components - 1)`.
+  The guest's own fetch code decodes it that way (`s_bfe_u32` of bits 5..6
+  for the component count, 7..13 for the format, then a DST_SEL table
+  X001/XY01/XYZ1/XYZW). Kyty matched the whole 9-bit field against a
+  partial table plus a raw-format-id fallback, and kept the V# format for
+  anything else. The normal (`0x10b`, 16_16_16_16_SNORM, 4 components) was
+  therefore fetched as 32_32_32_FLOAT. `0xcb` (2_10_10_10_UNORM) and
+  `0x117` (16_16_16_16_UINT) were also silently replaced.
+- Change (4ea75ee0): decode format and component count separately, take
+  the DST_SEL from the component count, and refuse an override whose format
+  has no vertex input mapping (the "keep the V# format" path and the raw-id
+  fallback are removed). The Gen5 vertex format table now lists every float,
+  normalized and unsigned format of the ISA format table that has a
+  mandatory Vulkan vertex-buffer equivalent. Signed-integer and scaled
+  formats stay unmapped until the input path models them.
+- Verified (Intel A770, strict, `generic` route, 330 s, no error): the warp
+  tunnel shows thin lit streaks with no flat shapes; the studio logo, title
+  logo and the ship are visible. Distinct override fields seen in that run:
+  `0x05d 0x0cb 0x0e3 0x101 0x10b 0x117 0x11f 0x12a 0x137`. Racing title
+  (Intel, 125 s), fishing title (AMD, 200 s) and watercolour platformer
+  (AMD, 90 s): no error, same states as the baselines; all three use only
+  field 0 (the V# format), so the decode change does not touch them. Unit
+  tests: 2,419 pass. Table and boundary gates pass.
+- Open: an override with fewer components than its format (for example
+  `0x10a`, four-component storage read as XYZ1) is refused by the vertex
+  input layout when the shader reads four registers; not seen in a live run.
+
 ## Robot platformer: exposure fill and DCC metadata clears (2026-10-14)
 
 - Observed: after `TUNNEL_ENABLE` the Intel intro showed only the UI over a
@@ -49,7 +85,8 @@ fail on the current HEAD before acting on them.
   both runs). Unit tests: 2,418 pass, 12 skipped, 0 failures. Table and
   boundary gates pass.
 - Open, found while verifying:
-  - Flat blue streak shapes cover the scene. They are drawn by instanced
+  - Flat blue streak shapes cover the scene (fixed: see "Robot platformer:
+    vertex attribute format words"). They are drawn by instanced
     particle draws (48 vertices x 150 and x 300 instances) into the 1920x1080
     effect layer and the 960x540 half-resolution layer, and composited by the
     pass that writes the scene before TAA. The shapes exist with and without
