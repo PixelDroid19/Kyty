@@ -1483,10 +1483,11 @@ static KYTY_SYSV_ABI void* CxxVtableNull(void* /*self*/)
 	return nullptr;
 }
 
-// ctype facet method at vtable+0x40 with esi=0x20; return non-zero in al.
-static KYTY_SYSV_ABI int CxxCtypeFacetQuery(void* /*self*/, int /*mask*/)
+// ctype<char>::do_widen(char) at vtable+0x40: the guest widens the fill
+// character and std::endl's '\n' through it. Narrow-to-narrow is the identity.
+static KYTY_SYSV_ABI char CxxCtypeWiden(void* /*self*/, char character)
 {
-	return 1;
+	return character;
 }
 
 static void* g_locimp_vtable[16] = {
@@ -1510,7 +1511,7 @@ static void* g_ctype_vtable[16] = {
     reinterpret_cast<void*>(&CxxVtableNoop),      // +0x28
     reinterpret_cast<void*>(&CxxVtableNoop),      // +0x30
     reinterpret_cast<void*>(&CxxVtableNoop),      // +0x38
-    reinterpret_cast<void*>(&CxxCtypeFacetQuery), // +0x40
+    reinterpret_cast<void*>(&CxxCtypeWiden),      // +0x40
 };
 
 static CxxCtypeFacetLayout g_ctype_facet {g_ctype_vtable, 0, g_c_locale_ctype.data() + 1};
