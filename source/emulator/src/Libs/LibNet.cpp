@@ -15,6 +15,7 @@
 #include <cstring>
 #include <algorithm>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <set>
 #include <mutex>
@@ -122,6 +123,48 @@ static int KYTY_SYSV_ABI NetShutdown(int socket, int how)
 	return NET_CALL(Net::NetShutdown(socket, how));
 }
 
+static int KYTY_SYSV_ABI NetSocketAbort(int socket, int flags)
+{
+	return NET_CALL(Net::NetSocketAbort(socket, flags));
+}
+
+static int KYTY_SYSV_ABI NetConnect(int socket, const void* addr, int len)
+{
+	return NET_CALL(Net::NetConnect(socket, addr, len));
+}
+
+// Transfer results are int byte counts, so one call moves at most INT_MAX bytes;
+// errors are the negative net error codes.
+static uint64_t NetTransferLength(uint64_t len)
+{
+	return std::min<uint64_t>(len, static_cast<uint64_t>(std::numeric_limits<int>::max()));
+}
+
+static int NetTransferResult(int64_t result)
+{
+	const int value = static_cast<int>(result);
+	if (value < 0)
+	{
+		*GetNetErrorAddr() = value;
+	}
+	return value;
+}
+
+static int KYTY_SYSV_ABI NetSend(int socket, const void* buf, uint64_t len, int flags)
+{
+	return NetTransferResult(Net::NetSend(socket, buf, NetTransferLength(len), flags));
+}
+
+static int KYTY_SYSV_ABI NetSendto(int socket, const void* buf, uint64_t len, int flags, const void* addr, uint32_t addr_len)
+{
+	return NetTransferResult(Net::NetSendto(socket, buf, NetTransferLength(len), flags, addr, addr_len));
+}
+
+static int KYTY_SYSV_ABI NetRecv(int socket, void* buf, uint64_t len, int flags)
+{
+	return NetTransferResult(Net::NetRecv(socket, buf, NetTransferLength(len), flags));
+}
+
 LIB_DEFINE(InitNet_1_Net)
 {
 	LIB_FUNC("Nlev7Lg8k3A", LibNet::NetInit);
@@ -135,6 +178,12 @@ LIB_DEFINE(InitNet_1_Net)
 	LIB_FUNC("kOj1HiAGE54", Net::NetListen);
 	LIB_FUNC("PIWqhn9oSxc", Net::NetAccept);
 	LIB_FUNC("TSM6whtekok", LibNet::NetShutdown);
+	LIB_FUNC("zJGf8xjFnQE", LibNet::NetSocketAbort);
+	LIB_FUNC("OXXX4mUk3uk", LibNet::NetConnect);
+	LIB_FUNC("beRjXBn-z+o", LibNet::NetSend);
+	LIB_FUNC("gvD1greCu0A", LibNet::NetSendto);
+	LIB_FUNC("9wO9XrMsNhc", LibNet::NetRecv);
+	LIB_FUNC("9vA2aW+CHuA", Net::NetInetNtop);
 	LIB_FUNC("2mKX2Spso7I", Net::NetSetsockopt);
 	LIB_FUNC("xphrZusl78E", Net::NetGetsockopt);
 	LIB_FUNC("9T2pDF2Ryqg", Net::NetHtonl);

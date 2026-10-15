@@ -1925,6 +1925,31 @@ int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len)
 	return NET_ERROR_ENFILE;
 }
 
+// Aborts the operations blocked on a socket. Only flags 0 is implemented: the
+// preservation flags keep an abort pending for the next call. Operations on a
+// non-blocking socket return at once, so they are never blocked.
+int KYTY_SYSV_ABI NetSocketAbort(int id, int flags)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t id = %d flags = %d\n", id, flags);
+	const auto state = FindSocketState(id);
+	if (state == nullptr)
+	{
+		return NET_ERROR_EBADF;
+	}
+	EXIT_NOT_IMPLEMENTED(flags != 0);
+#if KYTY_NET_HOST_POSIX
+	std::lock_guard lock(state->mutex);
+	if (state->operations == 0 || state->host_fd < 0)
+	{
+		return NET_ERROR_ENOTBLK;
+	}
+	const int host_flags = ::fcntl(state->host_fd, F_GETFL);
+	EXIT_NOT_IMPLEMENTED(host_flags < 0 || (host_flags & O_NONBLOCK) == 0);
+#endif
+	return NET_ERROR_ENOTBLK;
+}
+
 int KYTY_SYSV_ABI NetShutdown(int id, int how)
 {
 	PRINT_NAME();

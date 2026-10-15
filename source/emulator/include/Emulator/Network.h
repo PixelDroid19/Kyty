@@ -39,6 +39,7 @@ int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len);
 int KYTY_SYSV_ABI NetListen(int id, int backlog);
 int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len);
 int KYTY_SYSV_ABI NetShutdown(int id, int how);
+int KYTY_SYSV_ABI NetSocketAbort(int id, int flags);
 int64_t KYTY_SYSV_ABI NetSend(int id, const void* buf, uint64_t len, int flags);
 int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags, const void* addr, uint32_t addr_len);
 int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags);
