@@ -59,7 +59,9 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 	                                                                    uint64_t total_bytes, uint64_t size,
 	                                                                    GpuMemoryTransientBufferAllocationClass allocation_class)
 {
-	constexpr uint32_t MaxEntriesPerUsage = 512u;
+	// Bytes bound the pool; the entry ceiling only bounds Vulkan objects. Ring
+	// constants arrive as thousands of sub-KiB views per command buffer.
+	constexpr uint32_t MaxEntriesPerUsage = 4096u;
 	constexpr uint32_t MaxEntries         = MaxEntriesPerUsage * 3u;
 	const uint64_t max_bytes = allocation_class == GpuMemoryTransientBufferAllocationClass::Snapshot
 	                               ? kGpuMemoryTransientBufferPoolMaxBytes - kGpuMemoryTransientBufferCriticalReserveBytes

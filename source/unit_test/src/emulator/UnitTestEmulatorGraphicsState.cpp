@@ -3486,11 +3486,11 @@ TEST(EmulatorGraphicsState, VertexAndIndexBuffersDeclareReadOnlyGpuUse)
 
 TEST(EmulatorGraphicsState, TransientBufferPoolReservesCapacityPerUsage)
 {
-	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 512u, 0u, 0x80u,
+	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(4095u, 4096u, 0u, 0x80u,
 	                                                    GpuMemoryTransientBufferAllocationClass::Snapshot));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(512u, 512u, 0u, 0x80u,
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(4096u, 4096u, 0u, 0x80u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 1536u, 0u, 0x80u,
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 12288u, 0u, 0x80u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
 	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 15u * 1024u * 1024u, 0x80u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
