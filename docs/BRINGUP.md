@@ -48,9 +48,34 @@ fail on the current HEAD before acting on them.
   the server was starting (DIAG trace during "Launching Server"). The
   `KernelPoll` "every fd ready" answer was not involved.
 - Verified live (Intel Arc A770): the server starts and its sockets exchange
-  datagrams over the loopback. World generation runs past the
-  former `std::cout` fault (4 of 10 progress dots in more than 3 minutes,
-  window closed by hand).
+  datagrams over the loopback. World generation runs past the former
+  `std::cout` fault and completes. With the NetCtl override below, survivor
+  select and day one of the world are reached about 3 minutes after boot,
+  with the player character moving (input from a person and from the agent
+  pad).
+- Harness memory limit, not the title: the run harness capped the cgroup at
+  `memory.high` 7G with no swap, and the title keeps about 7.2 GB of guest
+  shared memory. Generation then sat in `__mem_cgroup_handle_over_high`
+  (full memory pressure about 27%), with presents stalled for up to 48 s.
+  With 12G/13G the pressure is zero and generation takes about a minute.
+  Heavy titles need `KYTY_RUN_MEMORY_HIGH`/`KYTY_RUN_MEMORY_MAX` above the
+  default.
+- Draw cost in the world (day one, 20 s windows, about 850 draws per frame):
+  - Before 40c887ad: 128 us per draw, 8.2 fps. The command-buffer
+    transient pool filled at 15.7 MB, all of its 1,970 entries in use, with
+    vertex snapshots of up to 120 KB. Refused index ranges became GpuMemory
+    objects whose `UtilCopyBuffer` upload waits on its own fence: 94 fence
+    waits and 97 submits per frame.
+  - With a 64 MiB pool (40c887ad): no refusals for lack of space, peak
+    31.4 MB per pool, 5 fence waits and 8 submits per frame, 89 us per draw,
+    9.9 fps. Anonymous memory did not grow (1.33 against 1.44 GB).
+  - Same build, other titles. Racing route: 45-48 us per draw against
+    47-48. Fishing route: about 15 fps in both, four boots of 45 s pass.
+    That fishing title still fills 64 MiB, with vertex snapshots of 2.4 MB.
+    Beat 'em up route: captures identical to the previous run.
+  - Still open in this title: 39 ms per frame of fence waits (5 waits),
+    18 storage write-backs per frame (`CopyChangedPages` is the hottest
+    on-CPU leaf), and 2.7 fps at dusk.
 - Open:
   - **NetCtl state.** `sceNetCtlGetState` reports Disconnected, while
     `sceNetCtlGetInfo` (IP address) returns 127.0.0.1. With Disconnected the
@@ -59,12 +84,9 @@ fail on the current HEAD before acting on them.
     A NetCtl change still needs a contract source for the state that goes with
     an assigned address, an audit of the unknown-code exits in
     `NetCtlGetInfo`, and a regression run of the other NetCtl titles.
-  - **World generation speed:** about 1 fps during generation. Not profiled
-    yet. Two observations are candidates, not causes:
-    - three guest threads spin on `gettimeofday`, about 13k calls/s with
-      nanosleep;
-    - non-blocking `recvfrom` polling runs into hundreds of thousands of
-      EAGAINs.
+  - **World generation speed:** the 1 fps runs were the harness memory limit
+    above. Three guest threads still spin on `gettimeofday` with nanosleep;
+    they cost CPU but did not block generation.
   - `std::cin` (imported) and the 104-byte versioned `cout`/`cerr`/`clog`
     objects are still zero-filled. Their layout is a different ABI without
     evidence yet.
@@ -11152,7 +11174,7 @@ Resolved later: each idle read-only buffer member now retires on its own (see
 
 The current host-only follow-up routes safe read-only buffer snapshots up to
 512 KiB through the command-buffer-owned transient pool instead of creating a
-persistent alias. The pool remains capped at 16 MiB, reserves 1 MiB for
+persistent alias. The pool was then capped at 16 MiB (64 MiB since 40c887ad), reserves 1 MiB for
 mandatory UBO/scratch uploads, clears the unused tail of reused slabs, and keys
 storage/UBO descriptors by both backing identity and logical range. Writable,
 surface-connected, unallocated, oversized, and truncated overlap states retain
