@@ -9,6 +9,56 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Read-only snapshots over written-back writable buffers (2026-10-15, excluded)
+
+- Question: in the sandbox title's world, about half of the draw-time
+  read-only buffer snapshots (`GpuMemory::CaptureSnapshotReadOnlyBuffer`) are
+  refused. Is the refusal a broken contract, and does it cost frame time?
+- Observation on HEAD (Intel, in world, 40 s window): 9.1 fps, 2,554 draws per
+  present (36.6 us per draw), 3.2M probes, 46% accepted, validation 0.44 us
+  per probe. A temporary, uncommitted per-reason counter showed:
+  - every refusal comes from an overlap group that is not read-only;
+  - a 1-in-16 sample of those found the writable object always quiescent
+    (write-back capable, `in_use=0`);
+  - zero truncated or overflowing groups, zero non-buffer groups, zero
+    unstable copies.
+  The overlap entry tests `read_only`, which `GpuMemoryMergeReadOnlyUse` leaves
+  false after the write-back cleared `in_use`.
+- Change tried: count a quiescent write-back-capable object as current guest
+  memory, and invalidate the overlap-snapshot cache whenever an object enters
+  or leaves the pending write-back index. A unit test covered the
+  transitions.
+- Result: a regression, so it was not committed.
+  - In world: 1.4 fps instead of 9.1.
+  - 20% of probes accepted, at 47 us of validation each.
+  - 173,779 live StorageBuffers (165k newly linked, 139k with truncated link
+    traversal). On HEAD there are 21.
+  - The mechanism was not isolated. The cache invalidation on every in-use
+    change turns each refusal into a full overlap query. Accepted snapshots
+    also change when the writable buffer's write-back runs. Retrying the idea
+    needs a design that keeps the cached snapshot static and evaluates the
+    write-back state at validation time, measured on the same route.
+- Storage binding is not the frame-time lever there. In the HEAD window:
+  - storage descriptors 2.2 s and transient validation 1.4 s;
+  - command processor 36.5 s;
+  - pipeline setup 9.2 s, of which 6.1 s is first-visit SPIR-V compilation;
+  - resource binding 8.9 s;
+  - fence waits 8.8 s;
+  - state setup 4.9 s.
+- Also excluded with temporary counters:
+  - page-granular write-back overwriting CPU-written bytes: 96k pages checked,
+    0 CPU-written bytes, 0 overwrites;
+  - snapshot copy instability: 0 unstable copies in 4.58M.
+- Earlier "unstable" counts were `Capture` returning false, mostly this
+  overlap refusal, not a racing CPU writer.
+- Object retirement (`GpuMemory::FrameDone`, 120-frame age, one pass every 30
+  frames, 4,096 slot visits): on HEAD the in-world population stays flat.
+  - 21 StorageBuffers, 979 index buffers, 774 vertex buffers.
+  - 994 creates against 1,382 frees in 40 s.
+  - No object-count trigger is needed for this title. The 85k-173k live
+    StorageBuffers seen earlier came only from the build above and from
+    diagnostic builds.
+
 ## Save data directory search patterns (2026-10-15)
 
 - Symptom: the sandbox title never listed a saved world. Every boot showed the
