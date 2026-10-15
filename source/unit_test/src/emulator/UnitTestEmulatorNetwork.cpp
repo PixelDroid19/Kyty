@@ -322,7 +322,7 @@ TEST(EmulatorNetwork, NetCtlNatInfoAndScalarOutputsUseGuestMemory)
 	EXPECT_EQ(nat_info->nat_type, 3);
 	EXPECT_EQ(nat_info->mapped_addr, 0x7f000001u);
 	ASSERT_EQ(get_state(state), 0);
-	EXPECT_EQ(*state, 0);
+	EXPECT_EQ(*state, 3);
 	ASSERT_EQ(register_callback(nullptr, nullptr, cid), 0);
 	EXPECT_EQ(*cid, 1);
 

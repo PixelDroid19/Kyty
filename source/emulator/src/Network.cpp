@@ -4470,7 +4470,9 @@ int KYTY_SYSV_ABI NetCtlGetState(int* state)
 {
 	PRINT_NAME();
 
-	const int staged = 0; // Disconnected
+	// The emulated network is local only: the loopback address GetInfo reports
+	// is assigned, so the state is IP-obtained (3), not Disconnected (0).
+	const int staged = 3;
 	return Net::CopyGuestOutput(state, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged));
 }
 
@@ -4500,8 +4502,8 @@ int KYTY_SYSV_ABI NetCtlGetInfo(int code, NetCtlInfo* info)
 			memset(output.ether_addr.data, 0, sizeof(output.ether_addr.data));
 			output_size = sizeof(output.ether_addr);
 			break;
-		// LINK: the cable or radio link, consistent with the disconnected NetCtl state.
-		case 4: output.link = 0; output_size = sizeof(output.link); break;
+		// LINK: connected (1), consistent with the IP-obtained NetCtl state.
+		case 4: output.link = 1; output_size = sizeof(output.link); break;
 		case 11: output.ip_config = 0; output_size = sizeof(output.ip_config); break;
 		case 14:
 			memcpy(output.ip_address, "127.0.0.1", sizeof("127.0.0.1"));
