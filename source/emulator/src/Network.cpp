@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cinttypes>
 #include <condition_variable>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -957,7 +958,6 @@ constexpr size_t   kSocketIoChunkSize  = 64u * 1024u;
 // ever partly filled.
 constexpr uint64_t kMaxUdpReceive      = 65'535;
 constexpr int      kMaxEpollEvents     = 1024;
-constexpr int      kMaxSocketInfoSize  = 64 * 1024;
 
 static int RegisterSocketState(SocketStatePtr state)
 {
@@ -3481,67 +3481,140 @@ int KYTY_SYSV_ABI NetResolverStartAton(int rid, const void* addr, char* hostname
 #endif
 }
 
-int KYTY_SYSV_ABI NetGetSockInfo(int socket_id, void* info, int info_size, int flags)
+// sceNetGetSockInfo record. A title polls `state` at 0x44 for its P2P socket
+// (type 6 at 0x28) after bind, and steps through results 160 bytes apart.
+struct GuestSockInfo
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t socket    = %d\n", socket_id);
-	KYTY_LOG_DEBUG("\t info      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
-	KYTY_LOG_DEBUG("\t info_size = %d\n", info_size);
-	KYTY_LOG_DEBUG("\t flags     = %d\n", flags);
+	char     name[32];
+	int32_t  pid;
+	int32_t  s;
+	int8_t   socket_type;
+	int8_t   policy;
+	int8_t   priority;
+	int8_t   reserved8;
+	int32_t  recv_queue_length;
+	int32_t  send_queue_length;
+	uint32_t local_adr;  // network byte order
+	uint32_t remote_adr; // network byte order
+	uint16_t local_port; // network byte order, like the ports below
+	uint16_t remote_port;
+	uint16_t local_vport;
+	uint16_t remote_vport;
+	int32_t  state;
+	int32_t  flags;
+	int32_t  counters[21]; // bandwidth, buffer-size and drop statistics, not tracked
+};
+static_assert(sizeof(GuestSockInfo) == 160);
+static_assert(offsetof(GuestSockInfo, s) == 0x24 && offsetof(GuestSockInfo, socket_type) == 0x28);
+static_assert(offsetof(GuestSockInfo, local_vport) == 0x40 && offsetof(GuestSockInfo, state) == 0x44);
 
-	if (info == nullptr || info_size <= 0)
-	{
-		return NET_ERROR_EINVAL;
-	}
-	if (info_size > kMaxSocketInfoSize)
-	{
-		return NET_ERROR_EMSGSIZE;
-	}
-
-	const auto state = FindSocketState(socket_id);
-	if (state == nullptr)
-	{
-		return NET_ERROR_EBADF;
-	}
-	HostArray<uint8_t> output;
-	const int prepare_result = PrepareGuestOutput(info, static_cast<uint64_t>(info_size), &output);
-	if (prepare_result != OK)
-	{
-		return prepare_result;
-	}
-	std::memset(output.Data(), 0, output.Size());
-
-	(void)flags;
+constexpr int32_t  kSockInfoStateOpened      = 2;
+constexpr int32_t  kSockInfoStateEstablished = 6;
+constexpr int32_t  kSockInfoFlagSelf         = 0x1;
+constexpr int32_t  kSockInfoFlagNonblock     = 0x200000;
+constexpr uint32_t kGuestONonblock           = 0x0004;
 
 #if KYTY_NET_HOST_POSIX
-	// Report the locally-bound address, mirroring getsockname semantics. The
-	// caller decides which fields matter, so fill what the host exposes.
-	sockaddr_storage host_addr {};
-	socklen_t        host_len = sizeof(host_addr);
+static void FillSockInfoAddresses(const SocketStatePtr& state, GuestSockInfo* info)
+{
 	int host_fd = -1;
 	if (!BeginSocketOperation(state, &host_fd))
 	{
-		return NET_ERROR_EBADF;
+		return;
 	}
-	const int getsockname_result = ::getsockname(host_fd, reinterpret_cast<sockaddr*>(&host_addr), &host_len);
-	EndSocketOperation(state);
-	if (getsockname_result == 0)
+	sockaddr_storage local {};
+	socklen_t        local_len = sizeof(local);
+	sockaddr_storage peer {};
+	socklen_t        peer_len  = sizeof(peer);
+	int              pending   = 0;
+	const bool       has_local = ::getsockname(host_fd, reinterpret_cast<sockaddr*>(&local), &local_len) == 0;
+	const bool       has_peer  = ::getpeername(host_fd, reinterpret_cast<sockaddr*>(&peer), &peer_len) == 0;
+	if (::ioctl(host_fd, FIONREAD, &pending) == 0)
 	{
-		const auto* in = reinterpret_cast<const sockaddr_in*>(&host_addr);
-		if (in->sin_family == AF_INET && info_size >= 8)
-		{
-			auto* bytes = output.Data();
-			bytes[0]    = 16;
-			bytes[1]    = 2;
-			const uint16_t port = ntohs(in->sin_port);
-			bytes[2] = static_cast<uint8_t>((port >> 8u) & 0xffu);
-			bytes[3] = static_cast<uint8_t>(port & 0xffu);
-			std::memcpy(bytes + 4, &in->sin_addr, 4);
-		}
+		info->recv_queue_length = pending;
 	}
+	EndSocketOperation(state);
+
+	GuestSockaddr address {};
+	if (state->p2p && state->bound)
+	{
+		std::memcpy(&info->local_adr, state->local.addr, 4);
+		info->local_port  = htons(state->local.port);
+		info->local_vport = htons(state->local.vport);
+	} else if (has_local && HostToGuestSockaddr(local, &address) && address.family == kGuestAfInet)
+	{
+		std::memcpy(&info->local_adr, address.addr, 4);
+		info->local_port = htons(address.port);
+	}
+	if (!has_peer || !HostToGuestSockaddr(peer, &address) || address.family != kGuestAfInet)
+	{
+		return;
+	}
+	const GuestSockaddr remote = state->p2p ? P2pPeerAddress(address) : address;
+	std::memcpy(&info->remote_adr, remote.addr, 4);
+	info->remote_port  = htons(remote.port);
+	info->remote_vport = htons(remote.vport);
+	info->state        = kSockInfoStateEstablished;
+}
 #endif
 
-	return CopyGuestOutput(info, output.Data(), output.Size());
+static GuestSockInfo MakeSockInfo(int id, const SocketStatePtr& state)
+{
+	GuestSockInfo info {};
+	info.s           = id;
+	info.socket_type = static_cast<int8_t>(state->p2p ? 6 : state->datagram ? 2 : 1);
+	info.state       = kSockInfoStateOpened;
+	info.flags       = kSockInfoFlagSelf | ((state->status_flags & kGuestONonblock) != 0 ? kSockInfoFlagNonblock : 0);
+#if KYTY_NET_HOST_POSIX
+	FillSockInfoAddresses(state, &info);
+#endif
+	return info;
+}
+
+// Fills one record for socket `socket_id`, or up to `count` records for all
+// sockets when `socket_id` is negative, and returns how many it wrote. A
+// negative id with no buffer returns the number of open sockets.
+int KYTY_SYSV_ABI NetGetSockInfo(int socket_id, void* info, int count, int flags)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t socket = %d count = %d flags = %d\n", socket_id, count, flags);
+	(void)flags;
+
+	std::vector<std::pair<int, SocketStatePtr>> sockets;
+	if (socket_id >= 0)
+	{
+		const auto state = FindSocketState(socket_id);
+		if (state == nullptr)
+		{
+			return NET_ERROR_EBADF;
+		}
+		sockets.emplace_back(socket_id, state);
+	} else
+	{
+		std::lock_guard lock(g_sockets_mutex);
+		sockets.assign(g_sockets.begin(), g_sockets.end());
+	}
+	std::sort(sockets.begin(), sockets.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+	if (info == nullptr)
+	{
+		return socket_id < 0 ? static_cast<int>(sockets.size()) : NET_ERROR_EINVAL;
+	}
+	if (count <= 0)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	const size_t written = std::min(sockets.size(), static_cast<size_t>(count));
+	for (size_t index = 0; index < written; ++index)
+	{
+		const GuestSockInfo record = MakeSockInfo(sockets[index].first, sockets[index].second);
+		auto*               output = static_cast<uint8_t*>(info) + index * sizeof(GuestSockInfo);
+		const int copy_result = CopyGuestOutput(output, reinterpret_cast<const uint8_t*>(&record), sizeof(record));
+		if (copy_result != OK)
+		{
+			return copy_result;
+		}
+	}
+	return static_cast<int>(written);
 }
 
 } // namespace Net

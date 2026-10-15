@@ -598,7 +598,6 @@ TEST(EmulatorNetwork, NetRejectsOversizedStagingBeforeGuestAccess)
 	EXPECT_EQ(NetSendto(socket_id, invalid_guest, 65'508, 0, guest_bytes, 8), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
 	// A receive buffer longer than any datagram is valid; only its range is checked.
 	EXPECT_EQ(NetRecv(socket_id, invalid_output, 65'508, 0), Kyty::Libs::Network::NET_ERROR_EFAULT);
-	EXPECT_EQ(NetGetSockInfo(socket_id, invalid_output, 65'537, 0), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
 	EXPECT_EQ(NetEpollWait(1, invalid_output, 1025, 0), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
 
 	EXPECT_EQ(NetSocketClose(socket_id), 0);
@@ -812,6 +811,48 @@ TEST(EmulatorNetwork, NetP2pDatagramVirtualPorts)
 	EXPECT_EQ(NetSocketClose(duplicate), 0);
 	EXPECT_EQ(NetSocketClose(sockets[1]), 0);
 	EXPECT_EQ(NetSocketClose(udp), 0);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+#endif
+}
+
+// A title waits for its bound P2P socket to report state 2 (opened) in the
+// 160-byte record, matching on the socket id at 0x24 and type 6 at 0x28.
+TEST(EmulatorNetwork, NetGetSockInfoReportsBoundP2pSocket)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX
+	GTEST_SKIP() << "host socket integration is Linux-specific";
+#else
+	using namespace Libs::Network::Net;
+
+	const uint64_t guest_storage = AllocateGuestPage();
+	ASSERT_NE(guest_storage, 0u);
+	auto* const guest_bytes = reinterpret_cast<uint8_t*>(guest_storage);
+	auto* const records     = guest_bytes + 64;
+
+	const int socket = NetSocket("network-sockinfo", 2, 6, 0);
+	ASSERT_GT(socket, 0);
+	StoreGuestP2pSockaddr(guest_bytes, 3658, 10999);
+	ASSERT_EQ(NetBind(socket, guest_bytes, 16), 0);
+
+	ASSERT_EQ(NetGetSockInfo(socket, records, 8, 0), 1);
+	int32_t id = 0;
+	int32_t state = 0;
+	std::memcpy(&id, records + 0x24, sizeof(id));
+	std::memcpy(&state, records + 0x44, sizeof(state));
+	EXPECT_EQ(id, socket);
+	EXPECT_EQ(records[0x28], 6u);
+	EXPECT_EQ(state, 2);
+	// Ports are in network byte order: local_port at 0x3c, local_vport at 0x40.
+	EXPECT_EQ(LoadGuestSockaddrPort(records + 0x3c - 2), 3658u);
+	EXPECT_EQ(LoadGuestSockaddrPort(records + 0x40 - 2), 10999u);
+
+	const int all = NetGetSockInfo(-1, nullptr, 0, 0);
+	EXPECT_GE(all, 1);
+	EXPECT_EQ(NetGetSockInfo(-1, records, 1, 0), 1);
+	EXPECT_EQ(NetGetSockInfo(socket, nullptr, 1, 0), Kyty::Libs::Network::NET_ERROR_EINVAL);
+
+	EXPECT_EQ(NetSocketClose(socket), 0);
+	EXPECT_EQ(NetGetSockInfo(socket, records, 1, 0), Kyty::Libs::Network::NET_ERROR_EBADF);
 	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
 #endif
 }

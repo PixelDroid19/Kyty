@@ -85,7 +85,7 @@ int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id);
 int KYTY_SYSV_ABI NetEpollControl(int epoll_id, int operation, int socket_id, const void* event);
 int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int timeout_ms);
 
-int KYTY_SYSV_ABI NetGetSockInfo(int socket_id, void* info, int info_size, int flags);
+int KYTY_SYSV_ABI NetGetSockInfo(int socket_id, void* info, int count, int flags);
 
 } // namespace Net
 
