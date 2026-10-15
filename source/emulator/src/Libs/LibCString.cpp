@@ -180,6 +180,48 @@ KYTY_SYSV_ABI int c_wcstombs_s(size_t* pConvertedChars, char* dst, size_t dstSiz
 	}
 	return -1;
 }
+// The "C" locale is single-byte: one byte is one 16-bit guest wide unit. A
+// wide unit above 0xff has no multibyte form, which ISO C reports as -1.
+KYTY_SYSV_ABI size_t c_wcstombs(char* dst, const uint16_t* src, size_t max_bytes)
+{
+	EXIT_IF(src == nullptr);
+	size_t count = 0;
+	for (; dst == nullptr || count < max_bytes; count++)
+	{
+		const uint16_t ch = src[count];
+		if (ch > 0xff)
+		{
+			return static_cast<size_t>(-1);
+		}
+		if (dst != nullptr)
+		{
+			dst[count] = static_cast<char>(ch);
+		}
+		if (ch == 0)
+		{
+			break;
+		}
+	}
+	return count;
+}
+KYTY_SYSV_ABI size_t c_mbstowcs(uint16_t* dst, const char* src, size_t max_units)
+{
+	EXIT_IF(src == nullptr);
+	size_t count = 0;
+	for (; dst == nullptr || count < max_units; count++)
+	{
+		const auto ch = static_cast<uint8_t>(src[count]);
+		if (dst != nullptr)
+		{
+			dst[count] = ch;
+		}
+		if (ch == 0)
+		{
+			break;
+		}
+	}
+	return count;
+}
 KYTY_SYSV_ABI int c_Mbtowcx(uint16_t* dst, const char* src, size_t count, std::mbstate_t* /*state*/, const void* /*cvtvec*/)
 {
 	if (src == nullptr)

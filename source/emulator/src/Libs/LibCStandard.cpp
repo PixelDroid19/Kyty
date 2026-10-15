@@ -119,6 +119,12 @@ KYTY_SYSV_ABI div_t c_div(int numerator, int denominator)
 	return std::div(numerator, denominator);
 }
 
+// ldiv_t is two longs returned together in RAX:RDX, the same as the host ABI.
+KYTY_SYSV_ABI ldiv_t c_ldiv(long numerator, long denominator)
+{
+	return std::ldiv(numerator, denominator);
+}
+
 KYTY_SYSV_ABI double c_exp2(double x)
 {
 	return std::exp2(x);
