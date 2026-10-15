@@ -918,6 +918,7 @@ struct GuestSockaddr
 	uint8_t  addr[16] {}; // IPv4 uses the first four bytes
 	uint32_t flowinfo = 0;
 	uint32_t scope_id = 0;
+	uint16_t vport    = 0; // P2P datagram sockets: virtual port, bytes 8-9 in network order
 };
 
 constexpr uint8_t  kGuestAfInet       = 2;
@@ -932,6 +933,7 @@ struct SocketState
 	bool                    closing    = false;
 	uint32_t                operations = 0;
 	bool                    datagram   = false;
+	bool                    p2p        = false; // SOCK_DGRAM_P2P: IPv4 UDP whose addresses carry a virtual port
 	bool                    bound      = false;
 	uint32_t                status_flags = 0;
 	GuestSockaddr           local;
@@ -1169,7 +1171,7 @@ static int CopyGuestOutput(void* output, const uint8_t* source, size_t length)
 	return Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(output), source, length) ? OK : NET_ERROR_EFAULT;
 }
 
-static bool ReadGuestSockaddr(const void* addr, uint32_t len, GuestSockaddr* out)
+static bool ReadGuestSockaddr(const void* addr, uint32_t len, GuestSockaddr* out, bool with_vport = false)
 {
 	uint8_t bytes[kGuestSockaddrIn6] {};
 	if (addr == nullptr || out == nullptr || len < 8 || !IsGuestReadableRange(addr, 2) ||
@@ -1189,6 +1191,12 @@ static bool ReadGuestSockaddr(const void* addr, uint32_t len, GuestSockaddr* out
 	if (out->family == kGuestAfInet)
 	{
 		std::memcpy(out->addr, bytes + 4, 4);
+		uint8_t vport[2] {};
+		if (with_vport && len >= 10u && IsGuestReadableRange(static_cast<const uint8_t*>(addr) + 8, 2) &&
+		    Core::VirtualMemory::CopyFromGuest(vport, reinterpret_cast<uint64_t>(addr) + 8u, 2))
+		{
+			out->vport = static_cast<uint16_t>((static_cast<uint16_t>(vport[0]) << 8u) | vport[1]);
+		}
 	} else
 	{
 		std::memcpy(&out->flowinfo, bytes + 4, 4);
@@ -1219,6 +1227,8 @@ static bool WriteGuestSockaddr(void* addr, void* len, uint32_t max_len, const Gu
 	} else
 	{
 		std::memcpy(out + 4, in.addr, 4);
+		out[8] = static_cast<uint8_t>((in.vport >> 8u) & 0xffu);
+		out[9] = static_cast<uint8_t>(in.vport & 0xffu);
 	}
 	const uint32_t write_len = std::min(max_len, size);
 	return IsGuestOutputRange(addr, write_len) && Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(addr), out, write_len) &&
@@ -1419,11 +1429,22 @@ static void CancelSocketWatches(int id)
 }
 
 static bool TranslateGuestSocketParams(int family, int type, int protocol, int* host_family, int* host_type,
-                                       int* host_protocol)
+                                       int* host_protocol, bool* p2p)
 {
-	if (host_family == nullptr || host_type == nullptr || host_protocol == nullptr)
+	if (host_family == nullptr || host_type == nullptr || host_protocol == nullptr || p2p == nullptr)
 	{
 		return false;
+	}
+
+	// SOCK_DGRAM_P2P (6) is an IPv4 UDP socket whose addresses also carry a
+	// virtual port (sin_vport). Stream P2P (10) stays unsupported.
+	*p2p = (type & 0xf) == 6;
+	if (*p2p)
+	{
+		*host_family   = AF_INET;
+		*host_type     = SOCK_DGRAM;
+		*host_protocol = IPPROTO_UDP;
+		return family == 2 && protocol == 0;
 	}
 
 	switch (family)
@@ -1480,6 +1501,82 @@ static socklen_t GuestToHostSockaddr(const GuestSockaddr& guest, sockaddr_storag
 	return sizeof(sockaddr_in);
 }
 
+// P2P datagram sockets have their own address space: an endpoint is named by
+// its P2P port and virtual port, which never collide with UDP ports. Each one
+// is carried by an ephemeral host UDP port, and this table maps between the
+// two for the endpoints of this process. Peers on other hosts are not routed.
+struct P2pEndpoint
+{
+	uint16_t host_port = 0; // zero while the host bind is in flight
+	int      id        = -1;
+};
+
+static std::mutex                                g_p2p_mutex;
+static std::unordered_map<uint32_t, P2pEndpoint> g_p2p_endpoints;  // P2P port << 16 | vport
+static std::unordered_map<uint16_t, uint32_t>    g_p2p_host_ports; // host port -> endpoint key
+
+static uint32_t P2pKey(const GuestSockaddr& addr)
+{
+	return (static_cast<uint32_t>(addr.port) << 16u) | addr.vport;
+}
+
+static bool ReserveP2pEndpoint(const GuestSockaddr& addr, int id)
+{
+	std::lock_guard lock(g_p2p_mutex);
+	return g_p2p_endpoints.emplace(P2pKey(addr), P2pEndpoint {0, id}).second;
+}
+
+static void PublishP2pEndpoint(const GuestSockaddr& addr, uint16_t host_port)
+{
+	std::lock_guard lock(g_p2p_mutex);
+	const uint32_t key                = P2pKey(addr);
+	g_p2p_endpoints[key].host_port    = host_port;
+	g_p2p_host_ports[host_port]       = key;
+}
+
+static void ReleaseP2pEndpoint(const GuestSockaddr& addr, int id)
+{
+	std::lock_guard lock(g_p2p_mutex);
+	const auto      it = g_p2p_endpoints.find(P2pKey(addr));
+	if (it == g_p2p_endpoints.end() || it->second.id != id)
+	{
+		return;
+	}
+	g_p2p_host_ports.erase(it->second.host_port);
+	g_p2p_endpoints.erase(it);
+}
+
+// The host destination of a P2P address: the same host address, at the host
+// port that carries the named endpoint.
+static int ResolveP2pDestination(const GuestSockaddr& guest, GuestSockaddr* host)
+{
+	std::lock_guard lock(g_p2p_mutex);
+	const auto      it = g_p2p_endpoints.find(P2pKey(guest));
+	if (it == g_p2p_endpoints.end() || it->second.host_port == 0)
+	{
+		return NET_ERROR_EHOSTUNREACH;
+	}
+	*host       = guest;
+	host->port  = it->second.host_port;
+	host->vport = 0;
+	return OK;
+}
+
+// The P2P address of a host peer; a sender that is no P2P endpoint keeps its
+// host port and reports virtual port zero.
+static GuestSockaddr P2pPeerAddress(const GuestSockaddr& host_peer)
+{
+	GuestSockaddr   peer = host_peer;
+	std::lock_guard lock(g_p2p_mutex);
+	const auto      it = g_p2p_host_ports.find(host_peer.port);
+	if (it != g_p2p_host_ports.end())
+	{
+		peer.port  = static_cast<uint16_t>(it->second >> 16u);
+		peer.vport = static_cast<uint16_t>(it->second & 0xffffu);
+	}
+	return peer;
+}
+
 static bool HostToGuestSockaddr(const sockaddr_storage& host, GuestSockaddr* out)
 {
 	*out = {};
@@ -1516,11 +1613,13 @@ int KYTY_SYSV_ABI NetSocket(const char* name, int family, int type, int protocol
 	int host_family   = 0;
 	int host_type     = 0;
 	int host_protocol = 0;
-	if (!TranslateGuestSocketParams(family, type, protocol, &host_family, &host_type, &host_protocol))
+	bool p2p           = false;
+	if (!TranslateGuestSocketParams(family, type, protocol, &host_family, &host_type, &host_protocol, &p2p))
 	{
 		return NET_ERROR_EINVAL;
 	}
 	state->datagram = (host_type == SOCK_DGRAM);
+	state->p2p      = p2p;
 	state->host_fd = ::socket(host_family, host_type, host_protocol);
 	if (state->host_fd < 0)
 	{
@@ -1566,6 +1665,17 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 		}
 		state = it->second;
 		g_sockets.erase(it);
+	}
+	GuestSockaddr p2p_local {};
+	bool          p2p_bound = false;
+	{
+		std::lock_guard lock(state->mutex);
+		p2p_bound = state->p2p && state->bound;
+		p2p_local = state->local;
+	}
+	if (p2p_bound)
+	{
+		ReleaseP2pEndpoint(p2p_local, id);
 	}
 
 #if KYTY_NET_HOST_POSIX
@@ -1722,6 +1832,52 @@ void NetSocketUnwatch(int id, bool write, uint64_t owner)
 #endif
 }
 
+#if KYTY_NET_HOST_POSIX
+// Binds the host socket and, when asked, reports the host port it got.
+static int BindHostSocket(const SocketStatePtr& state, const GuestSockaddr& addr, uint16_t* host_port)
+{
+	sockaddr_storage host_addr {};
+	const socklen_t  host_addr_len = GuestToHostSockaddr(addr, &host_addr);
+	int host_fd = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	int result = ::bind(host_fd, reinterpret_cast<sockaddr*>(&host_addr), host_addr_len) == 0 ? OK : HostErrnoToNet(errno);
+	if (result == OK && host_port != nullptr)
+	{
+		sockaddr_in bound {};
+		socklen_t   bound_len = sizeof(bound);
+		result     = ::getsockname(host_fd, reinterpret_cast<sockaddr*>(&bound), &bound_len) == 0 ? OK : HostErrnoToNet(errno);
+		*host_port = ntohs(bound.sin_port);
+	}
+	EndSocketOperation(state);
+	return result;
+}
+
+// A P2P endpoint owns its (P2P port, virtual port) pair and rides on an
+// ephemeral host port of the requested host address.
+static int BindP2pSocket(int id, const SocketStatePtr& state, const GuestSockaddr& addr)
+{
+	if (!ReserveP2pEndpoint(addr, id))
+	{
+		return NET_ERROR_EADDRINUSE;
+	}
+	GuestSockaddr host_addr = addr;
+	host_addr.port          = 0;
+	host_addr.vport         = 0;
+	uint16_t  host_port     = 0;
+	const int result        = BindHostSocket(state, host_addr, &host_port);
+	if (result != OK)
+	{
+		ReleaseP2pEndpoint(addr, id);
+		return result;
+	}
+	PublishP2pEndpoint(addr, host_port);
+	return OK;
+}
+#endif
+
 int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 {
 	PRINT_NAME();
@@ -1732,36 +1888,34 @@ int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 		return NET_ERROR_EBADF;
 	}
 	GuestSockaddr guest_addr {};
-	if (len < 0 || !ReadGuestSockaddr(addr, static_cast<uint32_t>(len), &guest_addr))
+	if (len < 0 || !ReadGuestSockaddr(addr, static_cast<uint32_t>(len), &guest_addr, state->p2p))
 	{
 		return NET_ERROR_EINVAL;
 	}
 
 #if KYTY_NET_HOST_POSIX
-	sockaddr_storage host_addr {};
-	const socklen_t  host_addr_len = GuestToHostSockaddr(guest_addr, &host_addr);
-	int host_fd = -1;
-	if (!BeginSocketOperation(state, &host_fd))
+	const int bind_result = state->p2p ? BindP2pSocket(id, state, guest_addr) : BindHostSocket(state, guest_addr, nullptr);
+	if (bind_result != OK)
 	{
-		return NET_ERROR_EBADF;
-	}
-	const int bind_result = ::bind(host_fd, reinterpret_cast<sockaddr*>(&host_addr), host_addr_len);
-	const int bind_errno  = errno;
-	EndSocketOperation(state);
-	if (bind_result != 0)
-	{
-		return HostErrnoToNet(bind_errno);
+		return bind_result;
 	}
 	#endif
 
-	std::lock_guard lock(state->mutex);
-	if (state->closing)
 	{
-		return NET_ERROR_EBADF;
+		std::lock_guard lock(state->mutex);
+		if (!state->closing)
+		{
+			state->bound = true;
+			state->local = guest_addr;
+			return OK;
+		}
 	}
-	state->bound = true;
-	state->local = guest_addr;
-	return OK;
+	// The socket closed during the bind, so its close saw no endpoint to release.
+	if (state->p2p)
+	{
+		ReleaseP2pEndpoint(guest_addr, id);
+	}
+	return NET_ERROR_EBADF;
 }
 
 int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
@@ -1774,13 +1928,22 @@ int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
 		return NET_ERROR_EBADF;
 	}
 	GuestSockaddr guest_addr {};
-	if (len < 0 || !ReadGuestSockaddr(addr, static_cast<uint32_t>(len), &guest_addr))
+	if (len < 0 || !ReadGuestSockaddr(addr, static_cast<uint32_t>(len), &guest_addr, state->p2p))
 	{
 		return NET_ERROR_EINVAL;
 	}
 #if KYTY_NET_HOST_POSIX
+	GuestSockaddr destination = guest_addr;
+	if (state->p2p)
+	{
+		const int route = ResolveP2pDestination(guest_addr, &destination);
+		if (route != OK)
+		{
+			return route;
+		}
+	}
 	sockaddr_storage host_addr {};
-	const socklen_t  host_addr_len = GuestToHostSockaddr(guest_addr, &host_addr);
+	const socklen_t  host_addr_len = GuestToHostSockaddr(destination, &host_addr);
 	int host_fd = -1;
 	if (!BeginSocketOperation(state, &host_fd))
 	{
@@ -2039,7 +2202,7 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		return NET_ERROR_EBADF;
 	}
 	GuestSockaddr guest_addr {};
-	if (!ReadGuestSockaddr(addr, addr_len, &guest_addr))
+	if (!ReadGuestSockaddr(addr, addr_len, &guest_addr, state->p2p))
 	{
 		return NET_ERROR_EINVAL;
 	}
@@ -2057,8 +2220,17 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		return NET_ERROR_EFAULT;
 	}
 #if KYTY_NET_HOST_POSIX
+	GuestSockaddr destination = guest_addr;
+	if (state->p2p)
+	{
+		const int route = ResolveP2pDestination(guest_addr, &destination);
+		if (route != OK)
+		{
+			return route;
+		}
+	}
 	sockaddr_storage host_addr {};
-	const socklen_t  host_addr_len = GuestToHostSockaddr(guest_addr, &host_addr);
+	const socklen_t  host_addr_len = GuestToHostSockaddr(destination, &host_addr);
 	if (len == 0)
 	{
 		int host_fd = -1;
@@ -2243,7 +2415,7 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 	{
 		return NET_ERROR_EAFNOSUPPORT;
 	}
-	return WriteGuestSockaddr(addr, addr_len, max_addr_len, peer) ? received : NET_ERROR_EFAULT;
+	return WriteGuestSockaddr(addr, addr_len, max_addr_len, state->p2p ? P2pPeerAddress(peer) : peer) ? received : NET_ERROR_EFAULT;
 #else
 	(void)flags;
 	(void)write_peer;
@@ -2303,7 +2475,8 @@ int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len)
 	const int getsockname_result = ::getsockname(host_fd, reinterpret_cast<sockaddr*>(&host_addr), &host_len);
 	EndSocketOperation(state);
 	GuestSockaddr local {};
-	if (getsockname_result == 0 && HostToGuestSockaddr(host_addr, &local))
+	// A P2P socket reports its P2P address, not the host port that carries it.
+	if (!state->p2p && getsockname_result == 0 && HostToGuestSockaddr(host_addr, &local))
 	{
 		return WriteGuestSockaddr(addr, len, max_len, local) ? OK : NET_ERROR_EFAULT;
 	}
@@ -2357,7 +2530,7 @@ int KYTY_SYSV_ABI NetGetpeername(int id, void* addr, uint32_t* len)
 	{
 		return NET_ERROR_EAFNOSUPPORT;
 	}
-	return WriteGuestSockaddr(addr, len, max_len, peer) ? OK : NET_ERROR_EFAULT;
+	return WriteGuestSockaddr(addr, len, max_len, state->p2p ? P2pPeerAddress(peer) : peer) ? OK : NET_ERROR_EFAULT;
 #else
 	return NET_ERROR_EOPNOTSUPP;
 #endif

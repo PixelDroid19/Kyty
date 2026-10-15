@@ -80,6 +80,21 @@ uint16_t LoadGuestSockaddrPort(const uint8_t* address)
 	return static_cast<uint16_t>((static_cast<uint16_t>(address[2]) << 8u) | address[3]);
 }
 
+// A P2P datagram address carries its virtual port in bytes 8-9, in network order.
+void StoreGuestP2pSockaddr(uint8_t* address, uint16_t port, uint16_t vport)
+{
+	ASSERT_NE(address, nullptr);
+	std::memset(address, 0, 16);
+	StoreGuestSockaddr(address, port);
+	address[8] = static_cast<uint8_t>(vport >> 8u);
+	address[9] = static_cast<uint8_t>(vport & 0xffu);
+}
+
+uint16_t LoadGuestSockaddrVport(const uint8_t* address)
+{
+	return static_cast<uint16_t>((static_cast<uint16_t>(address[8]) << 8u) | address[9]);
+}
+
 bool WaitForFlag(const std::atomic<bool>& flag, std::chrono::milliseconds timeout)
 {
 	const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -734,6 +749,71 @@ TEST(EmulatorNetwork, NetInetPtonWritesNetworkOrder)
 	EXPECT_EQ(NetInetPton(2, text, address), 0);
 	EXPECT_EQ(NetInetPton(1, text, address), Kyty::Libs::Network::NET_ERROR_EAFNOSUPPORT);
 	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+}
+
+TEST(EmulatorNetwork, NetP2pDatagramVirtualPorts)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX
+	GTEST_SKIP() << "host socket integration is Linux-specific";
+#else
+	using namespace Libs::Network::Net;
+
+	const uint64_t guest_storage = AllocateGuestPage();
+	ASSERT_NE(guest_storage, 0u);
+	auto* const guest_bytes = reinterpret_cast<uint8_t*>(guest_storage);
+	auto* const name        = guest_bytes + 32;
+	auto* const name_len    = reinterpret_cast<uint32_t*>(guest_bytes + 48);
+
+	// A UDP socket and a P2P virtual port with the same number do not collide.
+	StoreGuestSockaddr(guest_bytes, 0);
+	const int udp = NetSocket("network-udp", 2, 2, 0);
+	ASSERT_GT(udp, 0);
+	ASSERT_EQ(NetBind(udp, guest_bytes, 8), 0);
+	*name_len = 8;
+	ASSERT_EQ(NetGetsockname(udp, name, reinterpret_cast<int*>(name_len)), 0);
+	const uint16_t udp_port = LoadGuestSockaddrPort(name);
+
+	// Two sockets share one P2P port and are told apart by their virtual ports.
+	constexpr uint16_t kP2pPort = 3658;
+	const uint16_t     vports[2] {udp_port, static_cast<uint16_t>(udp_port + 1u)};
+	int                sockets[2] {};
+	for (int index = 0; index < 2; ++index)
+	{
+		sockets[index] = NetSocket("network-p2p", 2, 6, 0);
+		ASSERT_GT(sockets[index], 0);
+		StoreGuestP2pSockaddr(guest_bytes, kP2pPort, vports[index]);
+		ASSERT_EQ(NetBind(sockets[index], guest_bytes, 16), 0);
+	}
+	const int duplicate = NetSocket("network-p2p-duplicate", 2, 6, 0);
+	ASSERT_GT(duplicate, 0);
+	StoreGuestP2pSockaddr(guest_bytes, kP2pPort, vports[0]);
+	EXPECT_EQ(NetBind(duplicate, guest_bytes, 16), Kyty::Libs::Network::NET_ERROR_EADDRINUSE);
+
+	*name_len = 16;
+	ASSERT_EQ(NetGetsockname(sockets[0], name, reinterpret_cast<int*>(name_len)), 0);
+	EXPECT_EQ(LoadGuestSockaddrPort(name), kP2pPort);
+	EXPECT_EQ(LoadGuestSockaddrVport(name), vports[0]);
+
+	constexpr char packet[] = "p2p";
+	std::memcpy(guest_bytes + 64, packet, sizeof(packet));
+	StoreGuestP2pSockaddr(guest_bytes, kP2pPort, vports[0]);
+	ASSERT_EQ(NetSendto(sockets[1], guest_bytes + 64, sizeof(packet), 0, guest_bytes, 16), static_cast<int64_t>(sizeof(packet)));
+	*name_len = 16;
+	ASSERT_EQ(NetRecvfrom(sockets[0], guest_bytes + 96, sizeof(packet), 0, name, name_len), static_cast<int64_t>(sizeof(packet)));
+	EXPECT_EQ(std::memcmp(guest_bytes + 96, packet, sizeof(packet)), 0);
+	EXPECT_EQ(LoadGuestSockaddrPort(name), kP2pPort);
+	EXPECT_EQ(LoadGuestSockaddrVport(name), vports[1]);
+
+	// Closing an endpoint frees its virtual port and makes it unreachable.
+	EXPECT_EQ(NetSocketClose(sockets[0]), 0);
+	EXPECT_EQ(NetSendto(sockets[1], guest_bytes + 64, sizeof(packet), 0, guest_bytes, 16), Kyty::Libs::Network::NET_ERROR_EHOSTUNREACH);
+	EXPECT_EQ(NetBind(duplicate, guest_bytes, 16), 0);
+
+	EXPECT_EQ(NetSocketClose(duplicate), 0);
+	EXPECT_EQ(NetSocketClose(sockets[1]), 0);
+	EXPECT_EQ(NetSocketClose(udp), 0);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+#endif
 }
 
 TEST(EmulatorNetwork, NetEpollDestroyCancelsWaiterBeforeRecreate)
