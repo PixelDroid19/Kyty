@@ -37,15 +37,15 @@ bool FillSingleLevelSlice(uint32_t format, uint32_t width, uint32_t height, uint
 	return true;
 }
 
-bool FillStandard4KBMipSlice(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels,
-                             Gen5TextureMipLayout* mip_layout, TileSizeAlign* tiled_slice, uint32_t* host_pitch,
-                             uint64_t* linear_slice_size)
+bool FillMipSlice(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,
+                  Gen5TextureMipLayout* mip_layout, TileSizeAlign* tiled_slice, uint32_t* host_pitch, uint64_t* linear_slice_size)
 {
 	if (mip_layout == nullptr || tiled_slice == nullptr || host_pitch == nullptr || linear_slice_size == nullptr)
 	{
 		return false;
 	}
-	if (!Gen5GetStandard4KBTextureMipLayout(format, width, height, pitch, levels, mip_layout))
+	const auto get_layout = (tile == 5u ? Gen5GetStandard4KBTextureMipLayout : Gen5GetStandard64KBTextureMipLayout);
+	if (!get_layout(format, width, height, pitch, levels, mip_layout))
 	{
 		return false;
 	}
@@ -88,6 +88,16 @@ bool DetileOneLayer(uint8_t* output_layer, const uint8_t* input_layer, const Gen
 		TileConvertStandard256BToLinear(output_layer, input_layer, layout.width, layout.height, layout.guest_pitch,
 		                                layout.bytes_per_element);
 		return true;
+	}
+	if (layout.tile == 9u && layout.has_mip_layout)
+	{
+		return Gen5DetileStandard64KBTextureMipChain(output_layer, layout.linear_slice_size, input_layer, layout.tiled_slice.size,
+		                                             layout.mip_layout);
+	}
+	if (layout.tile == 27u && layout.has_mip_layout)
+	{
+		return Gen5DetileRenderTarget64KBTextureMipChain(output_layer, layout.linear_slice_size, input_layer,
+		                                                 layout.tiled_slice.size, layout.mip_layout);
 	}
 	if (layout.tile == 9u && layout.host_pitch == layout.width)
 	{
@@ -141,8 +151,9 @@ bool Gen5GetTextureArrayLayout(uint32_t format, uint32_t width, uint32_t height,
 		return false;
 	}
 
-	// Multi-mip arrays are only implemented for Standard4KB (including BC).
-	if (levels > 1u && !standard_4kb)
+	// Multi-mip arrays use the Standard4KB (including BC) and thin 64 KiB chains.
+	const bool mip_chain = standard_4kb || (levels > 1u && (standard_64kb || render_target_64kb));
+	if (levels > 1u && !mip_chain)
 	{
 		return false;
 	}
@@ -156,9 +167,9 @@ bool Gen5GetTextureArrayLayout(uint32_t format, uint32_t width, uint32_t height,
 	// Use the shared element-aware layout even for one level. Block-compressed
 	// arrays otherwise treat texel dimensions as compressed-block dimensions,
 	// making their staging/detile range sixteen times too large.
-	if (standard_4kb)
+	if (mip_chain)
 	{
-		if (!FillStandard4KBMipSlice(format, width, height, pitch, levels, &mip_layout, &tiled_slice, &host_pitch, &linear_slice_size))
+		if (!FillMipSlice(format, width, height, pitch, levels, tile, &mip_layout, &tiled_slice, &host_pitch, &linear_slice_size))
 		{
 			return false;
 		}

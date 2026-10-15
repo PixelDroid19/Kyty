@@ -499,8 +499,11 @@ bool Gen5DetileStandard4KBTextureMipChain(void* dst, uint64_t dst_size, const vo
 	return true;
 }
 
-bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
-                                             const Gen5TextureMipLayout& layout)
+// GFX10 places thin 64 KiB mip chains and tails by block size and element
+// size alone, so the standard and render-target swizzles share one chain and
+// differ only in the in-block element order.
+static bool detile_64kb_mip_chain(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
+                                  const Gen5TextureMipLayout& layout, TileDetileLayout swizzle)
 {
 	const uint32_t block_width = TileGet64KBBlockWidth(layout.bytes_per_element);
 	if (dst == nullptr || src == nullptr || block_width == 0u || layout.levels == 0u || layout.levels > 16u ||
@@ -526,7 +529,7 @@ bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const v
 		TileDetileRequest request {};
 		request.src = input + entry.tiled_offset;
 		request.src_bytes = entry.tiled_size;
-		request.layout = TileDetileLayout::Standard64KB;
+		request.layout = swizzle;
 		request.bytes_per_element = layout.bytes_per_element;
 		request.pitch_elems = entry.tiled_pitch;
 		request.width = entry.element_width;
@@ -560,6 +563,18 @@ bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const v
 		}
 	}
 	return true;
+}
+
+bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
+                                             const Gen5TextureMipLayout& layout)
+{
+	return detile_64kb_mip_chain(dst, dst_size, src, src_size, layout, TileDetileLayout::Standard64KB);
+}
+
+bool Gen5DetileRenderTarget64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
+                                                 const Gen5TextureMipLayout& layout)
+{
+	return detile_64kb_mip_chain(dst, dst_size, src, src_size, layout, TileDetileLayout::Sw64kRx);
 }
 
 bool Gen5GetDepth64KBTextureMipLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch,

@@ -1490,8 +1490,60 @@ TEST(EmulatorTileDetile, RejectsMultiMipArrayOnTilesWithoutMipLayouts)
 {
 	Gen5TextureArrayLayout layout {};
 	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 1u, 2u, &layout));
-	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 9u, 2u, &layout));
-	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 27u, 2u, &layout));
+}
+
+// A 128x128 RGBA16F render-target cube with a full chain: GFX10 keeps level 0
+// in two 128x64 blocks after the shared tail block, and levels 1..7 sit in the
+// tail at the element origins the thin 64 KiB tail assigns them.
+TEST(EmulatorTileDetile, DetilesRenderTarget64KBCubeMipChain)
+{
+	constexpr uint32_t k_format = 71u;
+	constexpr uint32_t k_bpe    = 8u;
+	constexpr uint32_t k_levels = 8u;
+	constexpr uint32_t k_layers = 6u;
+
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(k_format, 128u, 128u, 128u, k_levels, 27u, k_layers, &layout));
+	ASSERT_TRUE(layout.has_mip_layout);
+	const auto& mips = layout.mip_layout;
+	EXPECT_EQ(layout.tiled_slice.size, 3u * 65536u);
+	EXPECT_EQ(layout.tiled_size, 6u * 3u * 65536u);
+	EXPECT_EQ(mips.first_tail_level, 1u);
+	EXPECT_EQ(mips.level[0].tiled_offset, 65536u);
+	EXPECT_EQ(mips.level[1].tail_x, 64u);
+	EXPECT_EQ(mips.level[1].tail_y, 0u);
+	EXPECT_EQ(mips.level[2].tail_x, 0u);
+	EXPECT_EQ(mips.level[2].tail_y, 32u);
+
+	std::vector<uint8_t> tiled(static_cast<size_t>(layout.tiled_size), 0u);
+	std::vector<uint8_t> expected(static_cast<size_t>(layout.linear_size), 0u);
+	for (uint32_t layer = 0; layer < k_layers; ++layer)
+	{
+		for (uint32_t level = 0; level < k_levels; ++level)
+		{
+			const auto& entry = mips.level[level];
+			for (uint32_t y = 0; y < entry.element_height; ++y)
+			{
+				for (uint32_t x = 0; x < entry.element_width; ++x)
+				{
+					const uint64_t value  = (static_cast<uint64_t>(layer) << 48u) | (static_cast<uint64_t>(level) << 32u) |
+					                       (static_cast<uint64_t>(y) << 16u) | x;
+					const uint64_t within = TileGetSw64kRxOffset(entry.tail_x + x, entry.tail_y + y, entry.tiled_pitch, k_bpe);
+					const uint64_t tiled_offset =
+					    static_cast<uint64_t>(layer) * layout.tiled_slice.size + entry.tiled_offset + within;
+					const uint64_t linear_offset = static_cast<uint64_t>(layer) * layout.linear_slice_size + entry.linear_offset +
+					                               (static_cast<uint64_t>(y) * entry.element_width + x) * k_bpe;
+					ASSERT_LE(tiled_offset + k_bpe, tiled.size());
+					ASSERT_LE(linear_offset + k_bpe, expected.size());
+					std::memcpy(tiled.data() + tiled_offset, &value, k_bpe);
+					std::memcpy(expected.data() + linear_offset, &value, k_bpe);
+				}
+			}
+		}
+	}
+	std::vector<uint8_t> actual(expected.size(), 0u);
+	ASSERT_TRUE(Gen5DetileTextureArray(actual.data(), actual.size(), tiled.data(), tiled.size(), layout));
+	EXPECT_EQ(actual, expected);
 }
 
 TEST(EmulatorTileDetile, RejectsUnrepresentableStandard256BArrayByteCounts)

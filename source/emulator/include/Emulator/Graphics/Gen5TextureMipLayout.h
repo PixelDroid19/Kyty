@@ -76,6 +76,10 @@ struct Gen5TextureMipLayout
 [[nodiscard]] bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src,
                                                           uint64_t src_size, const Gen5TextureMipLayout& layout);
 
+// Tile mode 27 (render target) shares the standard 64 KiB chain layout.
+[[nodiscard]] bool Gen5DetileRenderTarget64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src,
+                                                              uint64_t src_size, const Gen5TextureMipLayout& layout);
+
 // GFX10 256-byte swizzle modes (tile mode 1) have no mip tail: each level is
 // padded to whole 256-byte blocks and the chain is stored from the smallest
 // level up, so level 0 ends the allocation.
