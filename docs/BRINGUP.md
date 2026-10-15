@@ -9,6 +9,22 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Save data directory search patterns (2026-10-15)
+
+- Symptom: the sandbox title never listed a saved world. Every boot showed the
+  first-run flow, and the PLAY screen listed no worlds.
+- Evidence: the guest searches its save directories with the patterns
+  `<prefix>%@P%` and `<prefix>%@O%` (strings in the executable). The
+  search compared the pattern with each directory name literally, so nothing
+  matched. Two independent secondary implementations agree that `%` matches any
+  run of characters (including none) and `_` exactly one.
+- Change: `SaveDataDirectoryNameMatches` in `SaveDataPaths` implements those
+  two wildcards (other characters literal, case-sensitive) and the directory
+  search uses it.
+- Test: `EmulatorSaveData.MatchesDirectorySearchPatterns`.
+- Verified live: with a saved world the title skips the first-run flow, the
+  PLAY screen lists the world and it loads in about 60 s.
+
 ## Guest thread-pointer loads without the TLS handler lock (2026-10-15)
 
 - Symptom: the sandbox title took 60-110 s from its "ready to play" screen to
@@ -42,11 +58,14 @@ fail on the current HEAD before acting on them.
 - Regression runs (same routes and environments as the 2026-10-15 baselines):
   - Racing title (200 s, render-target scope): the route started the race one
     checkpoint earlier and ended in TIME OVER; 22.8-28.8 FPS against
-    21.0-27.8 FPS of an earlier run that took the same route branch.
+    21.0-27.8 FPS of an earlier run that took the same route branch. The
+    in-race window of the usual route branch was not covered.
   - Fishing title (240 s, RADV): open sea 7.6-9.0 FPS against 7.6-8.1, dock
     9.1-9.5 FPS; gameplay reached.
   - Beat 'em up (300 s): gameplay reached, 12.2-18.4 FPS against 10.7-12.1
-    (this route varies by about 5 FPS between runs of one binary).
+    (this route varies by about 5 FPS between runs of one binary). Reaching
+    gameplay later (after the intro cinematics) in the beat 'em up and fishing
+    runs also happens with four older binaries: route variance, not this change.
 - Leads not taken in this change (measure before acting): the module-relative
   `TlsGetAddr(module, offset)` path still takes the linker mutex and scans the
   programs; `mmap_in_guest_window` took 9-25% and
@@ -96,17 +115,41 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
     from `_Xtime_get_ticks` (microseconds of `CLOCK_REALTIME`), the host
     condition uses the same clock, and the result codes match the set the guest
     accepts.
+- Excluded (later the same day):
+  - The world generator and server-side placement. Saving the world from the
+    pause menu (driven live through `kyty_agent pad tap`) wrote a 724 KB
+    database log: stone, deepslate, dirt, grass, logs, ores, water and animals,
+    and a player record at the spawn standing on terrain. Reloading that world
+    (spawn already resolved) still shows only sky, so creation order is
+    excluded as well.
+  - The client simulation. With the coordinate HUD enabled the player is at
+    the spawn, walks and collides correctly; only the image stays empty.
+  - Stale constant data on the GPU side. A temporary bind-time probe compared
+    the vertex-stage constant buffers of the terrain draws with live guest
+    memory: they are copied from guest memory at bind time and hold exactly
+    what the guest wrote. No terrain constant changed after it was bound (the
+    only late changes were UI ring-buffer slots reused by the next frame).
+  - Camera-relative offsets. Every terrain world translation is a multiple of
+    16 while the player stands at x=74 (74 mod 16 = 10), so they cannot be
+    offsets from the player.
+  - Pad motion data. `PadRead`/`PadReadState` report an identity orientation
+    and resting gravity, so no NaN reaches a camera that folds motion in.
 - Observed (guest state, not the GPU path):
-  - The view-projection is a pure perspective (fovY 60, 16:9, near about
-    0.0125) with no rotation or translation, and stick input does not change it.
+  - The guest writes a view-projection that is a pure perspective (fovY 60,
+    16:9, near 0.025 for a 0..1 depth range) with no rotation or translation,
+    and stick input does not change it.
   - Every fill draw's world translation is a multiple of 16 and the drawn chunk
     set is a disc centred on the origin. Almost every fill draw is a 16x16 water
-    surface sheet; there are no lower subchunks (no seabed, no land).
-  - The level file's spawn is unresolved (`INT_MIN`) at 185 s and resolves to
-    (74, 32767, 134) by 215-240 s, but the drawn set stays centred on the
-    origin. Clouds move, so the client ticks.
-  - Next: find why the player stays at the default origin (integrated server,
-    world generator or player placement) from the guest side.
+    surface sheet at sea level; there are no lower subchunks.
+  - Two bind-time dumps 350 presents apart, with the player moved 8 blocks,
+    drew the same chunk set (three chunks added): the render camera stays at
+    the origin.
+  - The right stick does not turn the player: walking forward after holding it
+    still moves along +z. The title's first-person camera definition routes
+    look input through the camera and copies the player's yaw back from it, so
+    this is the same defect as the frozen render camera, not a pad defect.
+  - Next: find why the client camera entity never follows the local player
+    (the camera presets are read in full from their archive).
 - Defects found, not fixed:
   - Multi-level sampled views over a live one-level render target are rejected
     by `Gen5PickSampleSurfaceAliases` (rule `mip_levels >= sample_levels`) and
@@ -118,7 +161,9 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
   - The block atlas render target lacks the static block textures at level 0;
     only the animated strips are drawn into it.
   - The inventory character preview draws legs and torso on black with the head
-    detached; a dark streak crosses the sky in later captures.
+    detached; a dark streak crosses the sky in later captures. The pause-menu
+    dressing room draws the same character correctly, so the defect is limited
+    to the inventory preview.
 - `KYTY_PRINTF_DIRECTION=Console` logs every HLE call: 3.5 GB in 270 s at
   about 3 FPS, and the world is never reached. Not usable for this title.
 
