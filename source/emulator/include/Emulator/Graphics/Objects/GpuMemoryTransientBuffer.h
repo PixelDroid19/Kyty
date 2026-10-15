@@ -8,7 +8,10 @@
 namespace Kyty::Libs::Graphics {
 
 constexpr uint64_t kGpuMemoryMaxTransientReadOnlyBytes = 4u * 1024u * 1024u;
-constexpr uint64_t kGpuMemoryTransientBufferPoolMaxBytes = 16u * 1024u * 1024u;
+// Per command buffer. A 2D title streams about 31 MB of vertex and index
+// snapshots into one command buffer; a refused snapshot falls back to a
+// GpuMemory object whose upload waits on its own fence.
+constexpr uint64_t kGpuMemoryTransientBufferPoolMaxBytes = 64u * 1024u * 1024u;
 constexpr uint64_t kGpuMemoryTransientBufferCriticalReserveBytes = 1u * 1024u * 1024u;
 
 static_assert(kGpuMemoryTransientBufferCriticalReserveBytes < kGpuMemoryTransientBufferPoolMaxBytes);

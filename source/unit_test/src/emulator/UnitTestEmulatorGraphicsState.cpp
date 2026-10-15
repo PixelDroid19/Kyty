@@ -3492,11 +3492,12 @@ TEST(EmulatorGraphicsState, TransientBufferPoolReservesCapacityPerUsage)
 	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
 	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 12288u, 0u, 0x80u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 15u * 1024u * 1024u, 0x80u,
+	constexpr uint64_t snapshot_limit = kGpuMemoryTransientBufferPoolMaxBytes - kGpuMemoryTransientBufferCriticalReserveBytes;
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, snapshot_limit, 0x80u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
-	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 15u * 1024u * 1024u, 0x80u,
+	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, snapshot_limit, 0x80u,
 	                                                    GpuMemoryTransientBufferAllocationClass::Critical));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 16u * 1024u * 1024u, 0x80u,
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, kGpuMemoryTransientBufferPoolMaxBytes, 0x80u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Critical));
 	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 0u, 0u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Critical));
