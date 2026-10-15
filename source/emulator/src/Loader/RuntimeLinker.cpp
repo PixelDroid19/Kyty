@@ -1165,6 +1165,29 @@ static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_ind
 	return ri.value;
 }
 
+#if defined(__linux__) && defined(__x86_64__)
+// Guest thread pointer of the current host thread, read by the TlsCachedCall
+// stub. It lives in the executable's static TLS block, so its offset from the
+// host thread pointer is the same on every thread. The main program's static
+// TLS block of a thread is never freed or resized while the thread runs, so
+// the cached pointer stays valid.
+static thread_local uint64_t g_tls_guest_thread_pointer = 0;
+static int64_t               g_tls_guest_thread_pointer_offset = 0;
+
+static int64_t TlsGuestThreadPointerCacheOffset()
+{
+	uint64_t host_thread_pointer = 0;
+	asm volatile("mov %%fs:0, %0" : "=r"(host_thread_pointer));
+	return static_cast<int64_t>(reinterpret_cast<uint64_t>(&g_tls_guest_thread_pointer) - host_thread_pointer);
+}
+
+static void TlsCacheGuestThreadPointer(uint8_t* thread_pointer)
+{
+	EXIT_IF(TlsGuestThreadPointerCacheOffset() != g_tls_guest_thread_pointer_offset);
+	g_tls_guest_thread_pointer = reinterpret_cast<uint64_t>(thread_pointer);
+}
+#endif
+
 static KYTY_MS_ABI uint8_t* TlsMainGetAddr()
 {
 	EXIT_IF(g_tls_main_program == nullptr);
@@ -1174,7 +1197,11 @@ static KYTY_MS_ABI uint8_t* TlsMainGetAddr()
 		EXIT("xsave buffer is too small\n");
 	}
 
-	return RuntimeLinker::TlsGetAddr(g_tls_main_program) + g_tls_main_program->tls.static_offset;
+	auto* thread_pointer = RuntimeLinker::TlsGetAddr(g_tls_main_program) + g_tls_main_program->tls.static_offset;
+#if defined(__linux__) && defined(__x86_64__)
+	TlsCacheGuestThreadPointer(thread_pointer);
+#endif
+	return thread_pointer;
 }
 
 uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size)
@@ -3375,7 +3402,25 @@ void RuntimeLinker::SetupTlsHandler(Program* program)
 
 	g_tls_main_program = program;
 
-	auto* code = new (reinterpret_cast<void*>(program->tls.handler_vaddr)) Jit::SafeCall;
+	// Patched sites call handler_vaddr. On Linux x86-64 that is the cached fast
+	// path, which falls back to SafeCall only on a host thread's first access.
+	uint64_t safe_call_vaddr = program->tls.handler_vaddr;
+#if defined(__linux__) && defined(__x86_64__)
+	constexpr uint64_t safe_call_offset = 0x40;
+	static_assert(Jit::TlsCachedCall::GetSize() <= safe_call_offset);
+
+	g_tls_guest_thread_pointer_offset = TlsGuestThreadPointerCacheOffset();
+	EXIT_IF(g_tls_guest_thread_pointer_offset < std::numeric_limits<int32_t>::min() ||
+	        g_tls_guest_thread_pointer_offset > std::numeric_limits<int32_t>::max());
+
+	safe_call_vaddr = program->tls.handler_vaddr + safe_call_offset;
+	auto* cached    = new (reinterpret_cast<void*>(program->tls.handler_vaddr)) Jit::TlsCachedCall;
+	cached->SetCacheOffset(static_cast<int32_t>(g_tls_guest_thread_pointer_offset));
+	cached->SetMissHandler(reinterpret_cast<void*>(safe_call_vaddr));
+#endif
+	EXIT_IF(safe_call_vaddr + sizeof(Jit::SafeCall) > program->tls.handler_vaddr + Jit::SafeCall::GetSize());
+
+	auto* code = new (reinterpret_cast<void*>(safe_call_vaddr)) Jit::SafeCall;
 
 	memset(g_tls_reg_save_area, 0, XSAVE_BUFFER_SIZE);
 	std::memcpy(&g_tls_reg_save_area[XSAVE_BUFFER_SIZE], &XSAVE_CHK_GUARD, sizeof(XSAVE_CHK_GUARD));

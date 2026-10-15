@@ -190,6 +190,38 @@ struct SafeCall
 	};
 };
 
+// Fast path of the patched guest "mov rax, fs:[0]" sites. The host thread's
+// static TLS block caches its guest thread pointer at a fixed fs-relative
+// offset. A hit changes only rax (flags and the other registers are kept); a
+// miss jumps to the SafeCall slow path, which fills the cache.
+struct TlsCachedCall
+{
+	void SetCacheOffset(int32_t offset) { *reinterpret_cast<int32_t*>(&code[0x05]) = offset; }
+
+	void SetMissHandler(const void* handler)
+	{
+		auto func_addr = reinterpret_cast<int64_t>(handler);
+		auto rip_addr  = reinterpret_cast<int64_t>(&code[0x17]);
+		auto offset64  = func_addr - rip_addr;
+		auto offset32  = static_cast<uint32_t>(static_cast<uint64_t>(offset64) & 0xffffffffu);
+
+		*reinterpret_cast<uint32_t*>(&code[0x13]) = offset32;
+	}
+
+	static constexpr uint64_t GetSize() { return 0x17; }
+
+	uint8_t code[0x17] = {
+	    /*00*/ 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, // mov    rax,QWORD PTR fs:<offset>
+	    /*09*/ 0x51,                                                 // push   rcx
+	    /*0a*/ 0x48, 0x89, 0xc1,                                     // mov    rcx,rax
+	    /*0d*/ 0xe3, 0x02,                                           // jrcxz  11 <MISS>
+	    /*0f*/ 0x59,                                                 // pop    rcx
+	    /*10*/ 0xc3,                                                 // ret
+	    /*11*/ 0x59,                                                 // pop    rcx      /* MISS */
+	    /*12*/ 0xe9, 0x00, 0x00, 0x00, 0x00,                         // jmp    <miss handler>
+	};
+};
+
 #pragma pack()
 
 } // namespace Kyty::Loader::Jit

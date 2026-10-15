@@ -9,6 +9,10 @@
 #include <cstring>
 #include <vector>
 
+#if defined(__linux__) && defined(__x86_64__)
+#include <sys/mman.h>
+#endif
+
 #ifdef KYTY_EMU_ENABLED
 
 UT_BEGIN(EmulatorLoaderTls);
@@ -330,6 +334,84 @@ TEST(EmulatorLoaderTls, PrepareThreadTlsPreservesFreelistSentinelWords)
 	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + kFlOff), 0x00000001fffffffeULL);
 	EXPECT_EQ(*reinterpret_cast<uint64_t*>(tls.data() + kFlOff + 8), 0x00000003ffffffffULL);
 }
+
+#if defined(__linux__) && defined(__x86_64__)
+namespace {
+
+thread_local uint64_t g_test_guest_thread_pointer = 0;
+
+int64_t TestGuestThreadPointerCacheOffset()
+{
+	uint64_t host_thread_pointer = 0;
+	asm volatile("mov %%fs:0, %0" : "=r"(host_thread_pointer));
+	return static_cast<int64_t>(reinterpret_cast<uint64_t>(&g_test_guest_thread_pointer) - host_thread_pointer);
+}
+
+uint64_t TestTlsMissHandler()
+{
+	return 0x5afec411u;
+}
+
+struct TlsStubResult
+{
+	uint64_t rax   = 0;
+	uint64_t rcx   = 0;
+	uint8_t  carry = 0;
+};
+
+// Calls the stub like a patched guest site, with CF set and a known rcx.
+TlsStubResult CallTlsStub(const void* stub)
+{
+	TlsStubResult result;
+	result.rcx = 0x1234;
+	asm volatile("mov %%rsp, %%rbx\n\t"
+	             "lea -128(%%rsp), %%rsp\n\t"
+	             "and $-16, %%rsp\n\t"
+	             "stc\n\t"
+	             "call *%[stub]\n\t"
+	             "setc %[carry]\n\t"
+	             "mov %%rbx, %%rsp\n\t"
+	             : "=a"(result.rax), "+c"(result.rcx), [carry] "=q"(result.carry)
+	             : [stub] "r"(stub)
+	             : "rbx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5",
+	               "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
+	return result;
+}
+
+} // namespace
+
+TEST(EmulatorLoaderTls, CachedCallReturnsThreadPointerOrTakesMissPath)
+{
+	const int64_t offset = TestGuestThreadPointerCacheOffset();
+	ASSERT_GE(offset, static_cast<int64_t>(INT32_MIN));
+	ASSERT_LE(offset, static_cast<int64_t>(INT32_MAX));
+
+	void* page = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	ASSERT_NE(page, MAP_FAILED);
+	auto* bytes = static_cast<uint8_t*>(page);
+
+	// Miss target in the same page: movabs rax, <handler>; jmp rax.
+	const uint8_t trampoline[12] = {0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xe0};
+	std::memcpy(bytes + 0x40, trampoline, sizeof(trampoline));
+	const auto handler = reinterpret_cast<uint64_t>(&TestTlsMissHandler);
+	std::memcpy(bytes + 0x42, &handler, sizeof(handler));
+
+	auto* stub = new (bytes) Kyty::Loader::Jit::TlsCachedCall;
+	stub->SetCacheOffset(static_cast<int32_t>(offset));
+	stub->SetMissHandler(bytes + 0x40);
+
+	g_test_guest_thread_pointer = 0x7f00feedf00dULL;
+	const auto hit              = CallTlsStub(stub);
+	EXPECT_EQ(hit.rax, 0x7f00feedf00dULL);
+	EXPECT_EQ(hit.rcx, 0x1234u);
+	EXPECT_EQ(hit.carry, 1u);
+
+	g_test_guest_thread_pointer = 0;
+	EXPECT_EQ(CallTlsStub(stub).rax, 0x5afec411u);
+
+	munmap(page, 0x1000);
+}
+#endif
 
 UT_END();
 
