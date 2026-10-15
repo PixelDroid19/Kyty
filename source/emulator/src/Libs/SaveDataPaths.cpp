@@ -58,6 +58,44 @@ bool SaveDataDirectoryNameValid(const char* directory_name)
 	return true;
 }
 
+bool SaveDataDirectoryNameMatches(const char* directory_name, const char* pattern)
+{
+	if (directory_name == nullptr || pattern == nullptr)
+	{
+		return false;
+	}
+	// Greedy scan that backtracks to the last '%': it extends that run by one
+	// character whenever the rest of the pattern fails to match.
+	const char* name_resume    = nullptr;
+	const char* pattern_resume = nullptr;
+	while (*directory_name != '\0')
+	{
+		if (*pattern == '%')
+		{
+			pattern_resume = ++pattern;
+			name_resume    = directory_name;
+			continue;
+		}
+		if (*pattern == '_' || *pattern == *directory_name)
+		{
+			++pattern;
+			++directory_name;
+			continue;
+		}
+		if (pattern_resume == nullptr)
+		{
+			return false;
+		}
+		pattern        = pattern_resume;
+		directory_name = ++name_resume;
+	}
+	while (*pattern == '%')
+	{
+		++pattern;
+	}
+	return *pattern == '\0';
+}
+
 std::filesystem::path SaveDataBuildTitleRoot(const std::filesystem::path& save_data_root, const char* title_id)
 {
 	const auto normalized_title_id = SaveDataNormalizeTitleId(title_id);

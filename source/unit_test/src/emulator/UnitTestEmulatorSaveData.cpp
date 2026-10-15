@@ -50,6 +50,21 @@ TEST(EmulatorSaveData, RejectsSaveSlotPathTraversal)
 	EXPECT_FALSE(SaveDataDirectoryNameValid("windows\\slot"));
 }
 
+TEST(EmulatorSaveData, MatchesDirectorySearchPatterns)
+{
+	using Libs::SaveData::SaveDataDirectoryNameMatches;
+	EXPECT_TRUE(SaveDataDirectoryNameMatches("WorldAb-12@P1", "World%@P%"));
+	EXPECT_FALSE(SaveDataDirectoryNameMatches("WorldAb-12@O1", "World%@P%"));
+	EXPECT_TRUE(SaveDataDirectoryNameMatches("World@P", "World%@P%"));
+	EXPECT_TRUE(SaveDataDirectoryNameMatches("Wx@Py@P1", "W%@P_"));
+	EXPECT_FALSE(SaveDataDirectoryNameMatches("Wx@P12", "W%@P_"));
+	EXPECT_TRUE(SaveDataDirectoryNameMatches("slot-01", "slot-01"));
+	EXPECT_FALSE(SaveDataDirectoryNameMatches("slot-010", "slot-01"));
+	EXPECT_FALSE(SaveDataDirectoryNameMatches("Slot-01", "slot-01"));
+	EXPECT_TRUE(SaveDataDirectoryNameMatches("anything", "%"));
+	EXPECT_FALSE(SaveDataDirectoryNameMatches(nullptr, "%"));
+}
+
 namespace {
 
 class ScopedSaveDataMemoryDirectory final

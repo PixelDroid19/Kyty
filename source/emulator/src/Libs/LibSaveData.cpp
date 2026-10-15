@@ -419,7 +419,7 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, S
 	{
 		const auto name = entry->path().filename().u8string();
 		if (!entry->is_directory(error) || name.rfind("sce_", 0) == 0 || !SaveDataDirectoryNameValid(name.c_str()) ||
-		    (filter_active && name != filter))
+		    (filter_active && !SaveDataDirectoryNameMatches(name.c_str(), filter)))
 		{
 			continue;
 		}
