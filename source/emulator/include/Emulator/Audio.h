@@ -93,6 +93,20 @@ int KYTY_SYSV_ABI VoiceQoSInit(void* mem_block, uint32_t mem_size, int32_t app_t
 
 } // namespace VoiceQoS
 
+// Voice chat ports. The host has no voice capture or chat transport, so ports
+// are tracked for the guest but never carry data.
+namespace Voice {
+
+int KYTY_SYSV_ABI VoiceInit(const void* param, uint32_t version);
+int KYTY_SYSV_ABI VoiceStart(const void* param);
+int KYTY_SYSV_ABI VoiceCreatePort(uint32_t* port_id, const void* param);
+int KYTY_SYSV_ABI VoiceDeletePort(uint32_t port_id);
+int KYTY_SYSV_ABI VoiceConnectIPortToOPort(uint32_t input_port_id, uint32_t output_port_id);
+int KYTY_SYSV_ABI VoiceReadFromOPort(uint32_t output_port_id, void* data, uint32_t* size);
+int KYTY_SYSV_ABI VoiceGetPortInfo(uint32_t port_id, void* info);
+
+} // namespace Voice
+
 namespace Ajm {
 
 struct AjmBuffer

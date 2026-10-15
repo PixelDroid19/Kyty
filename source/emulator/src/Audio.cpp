@@ -1331,6 +1331,196 @@ int KYTY_SYSV_ABI VoiceQoSInit(void* mem_block, uint32_t mem_size, int32_t app_t
 
 } // namespace VoiceQoS
 
+namespace Voice {
+
+LIB_NAME("Voice", "Voice");
+
+namespace {
+
+// Port types of the published voice port parameter (leading int32).
+constexpr int32_t VOICE_PORT_IN_DEVICE  = 0;
+constexpr int32_t VOICE_PORT_IN_VOICE   = 2;
+constexpr int32_t VOICE_PORT_OUT_VOICE  = 4;
+constexpr int32_t VOICE_PORT_OUT_DEVICE = 5;
+constexpr int32_t VOICE_PORT_STATE_READY = 1;
+// Encoded voice travels in 20 ms frames.
+constexpr uint32_t VOICE_FRAME_MS = 20;
+
+// Leading fields of the voice port parameter: the voice-port union member
+// (bitrate) starts at +12, after threshold, mute flag and volume.
+struct VoicePortParam
+{
+	int32_t  port_type;
+	uint16_t threshold;
+	uint16_t mute;
+	float    volume;
+	int32_t  bitrate;
+};
+
+struct VoicePortInfo
+{
+	int32_t   port_type;
+	int32_t   state;
+	uint32_t* edge;
+	uint32_t  byte_count;
+	uint32_t  frame_size;
+	uint16_t  edge_count;
+	uint16_t  reserved;
+};
+
+static_assert(sizeof(VoicePortInfo) == 32);
+
+struct VoicePort
+{
+	int32_t  type;
+	uint32_t bitrate;
+};
+
+struct VoiceState
+{
+	std::mutex                             mutex;
+	bool                                   initialized = false;
+	uint32_t                               next_id     = 0;
+	std::unordered_map<uint32_t, VoicePort> ports;
+};
+
+VoiceState& GetVoiceState()
+{
+	static VoiceState state;
+	return state;
+}
+
+bool IsInputPort(int32_t type)
+{
+	return type >= VOICE_PORT_IN_DEVICE && type <= VOICE_PORT_IN_VOICE;
+}
+
+// Returns the port type; an unknown port or an uninitialized library is a
+// contract the guest is not expected to exercise.
+const VoicePort& RequirePort(const VoiceState& state, uint32_t port_id)
+{
+	EXIT_NOT_IMPLEMENTED(!state.initialized);
+	auto it = state.ports.find(port_id);
+	EXIT_NOT_IMPLEMENTED(it == state.ports.end());
+	return it->second;
+}
+
+bool IsVoicePort(int32_t type)
+{
+	return type == VOICE_PORT_IN_VOICE || type == VOICE_PORT_OUT_VOICE;
+}
+
+} // namespace
+
+int KYTY_SYSV_ABI VoiceInit(const void* param, uint32_t version)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t version = %" PRIu32 "\n", version);
+
+	EXIT_NOT_IMPLEMENTED(param == nullptr);
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	EXIT_NOT_IMPLEMENTED(state.initialized);
+	state.initialized = true;
+	return OK;
+}
+
+int KYTY_SYSV_ABI VoiceStart(const void* param)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(param == nullptr);
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	EXIT_NOT_IMPLEMENTED(!state.initialized);
+	return OK;
+}
+
+int KYTY_SYSV_ABI VoiceCreatePort(uint32_t* port_id, const void* param)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(port_id == nullptr || param == nullptr);
+
+	VoicePortParam port_param {};
+	std::memcpy(&port_param, param, sizeof(port_param));
+	const int32_t type = port_param.port_type;
+
+	KYTY_LOG_DEBUG("\t port_type = %" PRId32 "\n", type);
+
+	EXIT_NOT_IMPLEMENTED(type < VOICE_PORT_IN_DEVICE || type > VOICE_PORT_OUT_DEVICE);
+	EXIT_NOT_IMPLEMENTED(IsVoicePort(type) && port_param.bitrate <= 0);
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	EXIT_NOT_IMPLEMENTED(!state.initialized);
+	const uint32_t id = state.next_id++;
+	state.ports[id]   = VoicePort {type, IsVoicePort(type) ? static_cast<uint32_t>(port_param.bitrate) : 0u};
+	*port_id          = id;
+	return OK;
+}
+
+int KYTY_SYSV_ABI VoiceDeletePort(uint32_t port_id)
+{
+	PRINT_NAME();
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	RequirePort(state, port_id);
+	state.ports.erase(port_id);
+	return OK;
+}
+
+int KYTY_SYSV_ABI VoiceConnectIPortToOPort(uint32_t input_port_id, uint32_t output_port_id)
+{
+	PRINT_NAME();
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	EXIT_NOT_IMPLEMENTED(!IsInputPort(RequirePort(state, input_port_id).type));
+	EXIT_NOT_IMPLEMENTED(IsInputPort(RequirePort(state, output_port_id).type));
+	return OK;
+}
+
+// No voice is captured or received, so an output port never has data.
+int KYTY_SYSV_ABI VoiceReadFromOPort(uint32_t output_port_id, void* data, uint32_t* size)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(data == nullptr || size == nullptr);
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	EXIT_NOT_IMPLEMENTED(IsInputPort(RequirePort(state, output_port_id).type));
+	*size = 0;
+	return OK;
+}
+
+// A port is ready but never buffers data. A voice port reports the encoded
+// size of one frame at its bitrate.
+int KYTY_SYSV_ABI VoiceGetPortInfo(uint32_t port_id, void* info)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(info == nullptr);
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	const auto&      port = RequirePort(state, port_id);
+
+	VoicePortInfo result {};
+	result.port_type  = port.type;
+	result.state      = VOICE_PORT_STATE_READY;
+	result.frame_size = (port.bitrate * VOICE_FRAME_MS + 7999u) / 8000u;
+	std::memcpy(info, &result, sizeof(result));
+	return OK;
+}
+
+} // namespace Voice
+
 
 
 } // namespace Kyty::Libs::Audio

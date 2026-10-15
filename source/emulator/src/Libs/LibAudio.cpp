@@ -83,6 +83,25 @@ LIB_DEFINE(InitAudio_1_VoiceQoS)
 
 } // namespace LibVoiceQoS
 
+namespace LibVoice {
+
+LIB_VERSION("Voice", 1, "Voice", 1, 1);
+
+namespace Voice = Audio::Voice;
+
+LIB_DEFINE(InitAudio_1_Voice)
+{
+	LIB_FUNC("9TrhuGzberQ", Voice::VoiceInit);
+	LIB_FUNC("54phPH2LZls", Voice::VoiceStart);
+	LIB_FUNC("nXpje5yNpaE", Voice::VoiceCreatePort);
+	LIB_FUNC("b7kJI+nx2hg", Voice::VoiceDeletePort);
+	LIB_FUNC("oV9GAdJ23Gw", Voice::VoiceConnectIPortToOPort);
+	LIB_FUNC("cQ6DGsQEjV4", Voice::VoiceReadFromOPort);
+	LIB_FUNC("CrLqDwWLoXM", Voice::VoiceGetPortInfo);
+}
+
+} // namespace LibVoice
+
 namespace LibAjm {
 
 LIB_VERSION("Ajm", 1, "Ajm", 1, 1);
@@ -260,6 +279,7 @@ LIB_DEFINE(InitAudio_1)
 	LibAudioOut2::InitAudio_1_AudioOut2(s);
 	LibAudioIn::InitAudio_1_AudioIn(s);
 	LibVoiceQoS::InitAudio_1_VoiceQoS(s);
+	LibVoice::InitAudio_1_Voice(s);
 	LibAjm::InitAudio_1_Ajm(s);
 	LibAvPlayer::InitAudio_1_AvPlayer(s);
 	LibAudio3d::InitAudio_1_Audio3d(s);
