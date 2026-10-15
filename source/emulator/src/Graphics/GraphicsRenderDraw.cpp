@@ -1634,6 +1634,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	// Guest depth size 0 can materialize as 1x1 while color is full-screen; drop it
 	// before framebuffer/pipeline creation so Xe does not hang on illegal FB extent.
 	SanitizeRenderDepthAgainstColor(&color_info, &depth_info);
+	CollapseRenderColorLayersWithoutLayerExport(&color_info, ctx->GetShaderRegisters().m_paClVsOutCntl);
 	ps_input_info.dual_source_blend = ResolveDrawDualSourceBlend(ctx, sh_ctx->GetPs(), color_info, ps_input_info);
 	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
@@ -2593,6 +2594,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	// Guest depth size 0 can materialize as 1x1 while color is full-screen; drop it
 	// before framebuffer/pipeline creation so Xe does not hang on illegal FB extent.
 	SanitizeRenderDepthAgainstColor(&color_info, &depth_info);
+	CollapseRenderColorLayersWithoutLayerExport(&color_info, ctx->GetShaderRegisters().m_paClVsOutCntl);
 	ps_input_info.dual_source_blend = ResolveDrawDualSourceBlend(ctx, sh_ctx->GetPs(), color_info, ps_input_info);
 	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 

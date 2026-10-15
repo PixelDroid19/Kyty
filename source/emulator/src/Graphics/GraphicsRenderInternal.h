@@ -1657,6 +1657,7 @@ VkSampleCountFlagBits           decode_guest_sample_count(uint32_t encoded);
 VkSampleCountFlagBits           resolve_render_attachment_sample_count(const RenderColorInfo& color, const RenderDepthInfo& depth);
 VkExtent2D                      IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment);
 void                            SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* depth);
+void                            CollapseRenderColorLayersWithoutLayerExport(RenderColorInfo* color, uint32_t pa_cl_vs_out_cntl);
 void                            MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& vs_input,
                                                 const ShaderPixelInputInfo& ps_input, const HW::Context& hw, const HW::UserConfig& ucfg,
                                                 uint32_t index_count, uint32_t index_type_and_size, bool indexed, uint32_t flags = 0);

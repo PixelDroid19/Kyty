@@ -15,6 +15,7 @@
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
+#include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
@@ -166,6 +167,22 @@ void SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* de
 		depth->depth_clear_enable = false;
 		depth->stencil_clear_enable = false;
 		depth->stencil_test_enable  = false;
+	}
+}
+
+// Without PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX the rasterizer's render
+// target index is zero, so a draw writes only the first slice (SLICE_START) of
+// each color view, whatever its SLICE_MAX.
+void CollapseRenderColorLayersWithoutLayerExport(RenderColorInfo* color, uint32_t pa_cl_vs_out_cntl)
+{
+	EXIT_IF(color == nullptr);
+	if ((pa_cl_vs_out_cntl & (1u << Pm4::PA_CL_VS_OUT_CNTL_USE_VTX_RENDER_TARGET_INDX_SHIFT)) != 0u)
+	{
+		return;
+	}
+	for (auto& attachment: color->attachment)
+	{
+		attachment.layer_count = std::min(attachment.layer_count, 1u);
 	}
 }
 
