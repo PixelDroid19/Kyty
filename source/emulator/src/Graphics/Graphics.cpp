@@ -4873,6 +4873,51 @@ uint32_t KYTY_SYSV_ABI GraphicsCbJumpGetSize()
 	return 4u * sizeof(uint32_t);
 }
 
+// COND_INDIRECT_BUFFER for sceAgcCbBranch: mode and compare function, the 64-bit
+// compare address, mask and reference, then base, size and cache policy of the
+// buffer run when the compare passes and of the one run when it fails. The
+// argument order follows the published CommandBuffer::branch signature.
+uint32_t* KYTY_SYSV_ABI GraphicsCbBranch(CommandBuffer* buf, uint32_t mode, uint32_t function, const volatile uint64_t* compare_address,
+                                         uint64_t mask, uint64_t reference, uint32_t then_cache_policy, const void* then_target,
+                                         uint32_t then_size_dw, uint32_t else_cache_policy, const void* else_target, uint32_t else_size_dw)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr || mode > 3u || function > 7u || then_cache_policy > 3u || else_cache_policy > 3u || then_size_dw > 0xfffffu ||
+	    else_size_dw > 0xfffffu)
+	{
+		return nullptr;
+	}
+	auto* cmd = buf->AllocateDW(14);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	const auto compare = reinterpret_cast<uint64_t>(compare_address);
+	const auto then_ib = reinterpret_cast<uint64_t>(then_target);
+	const auto else_ib = reinterpret_cast<uint64_t>(else_target);
+	cmd[0]             = KYTY_PM4(14, Pm4::IT_INDIRECT_BUFFER, 0u);
+	cmd[1]             = mode | (function << 8u);
+	cmd[2]             = static_cast<uint32_t>(compare) & ~0x7u;
+	cmd[3]             = static_cast<uint32_t>(compare >> 32u);
+	cmd[4]             = static_cast<uint32_t>(mask);
+	cmd[5]             = static_cast<uint32_t>(mask >> 32u);
+	cmd[6]             = static_cast<uint32_t>(reference);
+	cmd[7]             = static_cast<uint32_t>(reference >> 32u);
+	cmd[8]             = static_cast<uint32_t>(then_ib) & ~0x3u;
+	cmd[9]             = static_cast<uint32_t>(then_ib >> 32u);
+	cmd[10]            = (then_target == nullptr ? 0u : then_size_dw) | (then_cache_policy << 28u);
+	cmd[11]            = static_cast<uint32_t>(else_ib) & ~0x3u;
+	cmd[12]            = static_cast<uint32_t>(else_ib >> 32u);
+	cmd[13]            = (else_target == nullptr ? 0u : else_size_dw) | (else_cache_policy << 28u);
+	return cmd;
+}
+
+uint32_t KYTY_SYSV_ABI GraphicsCbBranchGetSize()
+{
+	return 14u * sizeof(uint32_t);
+}
+
 // sceAgcSetPacketPredication: bit 0 of a packet header marks it predicated (1) or not.
 int KYTY_SYSV_ABI GraphicsSetPacketPredication(uint32_t* packet, uint32_t predication)
 {

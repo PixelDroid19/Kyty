@@ -1007,6 +1007,25 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	return;
 }
 
+// COND_INDIRECT_BUFFER reads its compare word when the CP reaches the packet.
+// A write still pending in a recorded or queued submission precedes the packet
+// in stream order, so it is published before the word is read.
+bool CommandProcessor::BranchCompare(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask)
+{
+	if (func == 0u)
+	{
+		return true;
+	}
+	SubmissionDependency dependency;
+	const auto           producer = m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 8, ref, mask, &dependency);
+	if (producer == GpuSubmissionResult::Success || producer == GpuSubmissionResult::ProducerValueMismatch)
+	{
+		BufferFlushForGpuWait();
+		g_gpu->WaitSubmission(dependency.producer);
+	}
+	return GraphicsWaitRegMemCompare(func, *addr, ref, mask);
+}
+
 bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords, const uint32_t* next_packet,
                                                 uint32_t next_packet_dwords)
 {

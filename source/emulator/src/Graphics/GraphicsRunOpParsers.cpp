@@ -869,10 +869,50 @@ KYTY_CP_OP_PARSER(cp_op_index_buffer_size)
 	return 1;
 }
 
+// COND_INDIRECT_BUFFER shares the opcode: mode (1 if-then, 2 if-then-else) and
+// compare function, 64-bit compare address, mask and reference, then base, size
+// and cache policy of the buffer run when the compare passes and when it fails.
+static uint32_t RunCondIndirectBuffer(CommandProcessor* cp, uint32_t cmd_id, const uint32_t* buffer, uint32_t dw)
+{
+	RequirePacketBody(cmd_id, dw, 13u);
+
+	const uint32_t mode     = buffer[0] & 0x3u;
+	const uint32_t function = (buffer[0] >> 8u) & 0x7u;
+	const auto*    compare  = reinterpret_cast<const uint64_t*>((buffer[1] & ~0x7u) | (static_cast<uint64_t>(buffer[2]) << 32u));
+	if ((mode != 1u && mode != 2u) || function > 6u || (compare == nullptr && function != 0u))
+	{
+		EXIT("unsupported COND_INDIRECT_BUFFER: mode=%" PRIu32 " function=%" PRIu32 " compare=%p\n", mode, function,
+		     static_cast<const void*>(compare));
+	}
+	const uint64_t mask      = buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u);
+	const uint64_t reference = buffer[5] | (static_cast<uint64_t>(buffer[6]) << 32u);
+	const bool     passed    = cp->BranchCompare(function, compare, reference, mask);
+	if (!passed && mode == 1u)
+	{
+		return 13u;
+	}
+
+	const uint32_t* target = buffer + (passed ? 7u : 10u);
+	auto*           ib     = reinterpret_cast<uint32_t*>((target[0] & ~0x3u) | (static_cast<uint64_t>(target[1]) << 32u));
+	const uint32_t  ib_dw  = target[2] & 0xfffffu;
+	if (ib == nullptr || ib_dw == 0u)
+	{
+		return 13u;
+	}
+
+	GraphicsDbgDumpDcb("ci", ib_dw, ib);
+	cp->Run(ib, ib_dw, ib);
+	return 13u;
+}
+
 KYTY_CP_OP_PARSER(cp_op_indirect_buffer)
 {
 	KYTY_PROFILER_FUNCTION();
 
+	if (KYTY_PM4_LEN(cmd_id) == 14u)
+	{
+		return RunCondIndirectBuffer(cp, cmd_id, buffer, dw);
+	}
 	if (KYTY_PM4_LEN(cmd_id) != 4u)
 	{
 		EXIT("invalid INDIRECT_BUFFER header: 0x%08" PRIx32 "\n", cmd_id);

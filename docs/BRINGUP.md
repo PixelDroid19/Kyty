@@ -9,6 +9,41 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Conditional command-buffer branch (2026-10-14)
+
+- The role-playing title and the mechanical-fist platformer stopped on the
+  unresolved `sceAgcCbBranch` import (`w1KFAHVqpaU`). The earlier held candidate
+  was a jump that ignored the compare and the not-taken target.
+- Contracts used:
+  - Argument order: the published `CommandBuffer::branch` signature (branch mode,
+    compare function, 64-bit compare address, mask and reference, then cache
+    policy, target and size of each buffer). Waits use the same
+    `CompareFunction` type.
+  - Packet: the published `COND_INDIRECT_BUFFER` layout (opcode 0x3F, 14 dwords;
+    mode 1 if-then, 2 if-then-else; functions 0-6 as `WAIT_REG_MEM`).
+- Change: `sceAgcCbBranch` and `sceAgcCbBranchGetSize` (56 bytes) build that
+  packet. The command processor tells it from `INDIRECT_BUFFER` by length,
+  evaluates the 64-bit compare and runs the selected buffer as a nested call.
+  Before reading the word, any write to it still pending in a recorded or queued
+  submission is published, so the compare observes stream order.
+- Live argument trace (temporary, removed), role-playing title, 55 calls: all use
+  mode 1, function 0, mask and reference 0, a 64 KiB-aligned then-target of
+  77-4129 dwords and a null else-target. This is the guest's command-buffer
+  segment chaining.
+- Result: that title now runs its whole window. The route reaches the initial
+  settings, title, New Game and traveler selection at 6-9 fps.
+- Open on that title:
+  - The deferred menu defect is unchanged: the title menu background is solid
+    magenta and the traveler-selection scene is black (see "Role-playing title
+    menu defect").
+  - The stick pans the selection scene and Circle returns to the title menu,
+    but Cross with the quill on a traveler does not select it, so gameplay is
+    not reached.
+  - Its frame time is dominated by GPU waits: about 126 s of fence waits and
+    108 s of `WAIT_REG_MEM` in a 231 s window.
+- The mechanical-fist platformer still faults first on its startup weak-pointer
+  race (27 s, guest mutex at 0x58), before any branch is built.
+
 ## Command-processor per-draw costs: armed ranges and descriptor reuse (2026-10-14)
 
 - Method: the same scripted route does not reach the same scene in the same
@@ -3703,9 +3738,6 @@ Independent review holds these contracts from publication:
   absent from the translator126 target. The current indexed-indirect path validates and copies its complete
   20-byte argument span through checked guest-memory access. This bounds the indexed record only; non-indexed
   offset semantics and behavior remain unimplemented and unverified.
-- **Conditional command-buffer branch:** `GraphicsCbBranch` treats comparison function zero as unconditional and
-  ignores the compare and not-taken operands. The mapping is inferred from a different packet contract; no independent
-  call trace, guest disassembly or behavioral contract verifies it.
 - **One-byte `SW_64KB_R_X` detile:** the round-trip input and reference use the same production offset helper.
   An independent offset oracle is still required, including block transitions and slice behavior.
 - **Unsigned 16-bit exports and new attachment formats:** the earlier source audit had only synthetic SPIR-V evidence.

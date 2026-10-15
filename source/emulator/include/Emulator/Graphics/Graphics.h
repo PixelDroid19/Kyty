@@ -294,6 +294,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t in
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances);
 uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32_t cache_policy, const void* target, uint32_t size_dw);
 uint32_t KYTY_SYSV_ABI  GraphicsCbJumpGetSize();
+uint32_t* KYTY_SYSV_ABI GraphicsCbBranch(CommandBuffer* buf, uint32_t mode, uint32_t function, const volatile uint64_t* compare_address,
+                                         uint64_t mask, uint64_t reference, uint32_t then_cache_policy, const void* then_target,
+                                         uint32_t then_size_dw, uint32_t else_cache_policy, const void* else_target, uint32_t else_size_dw);
+uint32_t KYTY_SYSV_ABI  GraphicsCbBranchGetSize();
 int KYTY_SYSV_ABI       GraphicsSetPacketPredication(uint32_t* packet, uint32_t predication);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetPredication(CommandBuffer* buf, uint32_t condition, uint32_t operation, uint32_t wait,
                                                   const volatile void* address);

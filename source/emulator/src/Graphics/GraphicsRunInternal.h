@@ -371,6 +371,7 @@ public:
 
 	void WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll);
 	void WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll);
+	[[nodiscard]] bool BranchCompare(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask);
 	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom, bool matching_wait_mem64);
 	[[nodiscard]] bool HasPendingDeferredWrite(const uint32_t* dst, uint32_t size_bytes) const;
 	void DeferWriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num);
