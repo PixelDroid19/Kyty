@@ -44,15 +44,31 @@ fail on the current HEAD before acting on them.
     `std::endl` and `basic_streambuf` constructor. The classic ctype facet's
     `do_widen` also returned 1 for every character; it now returns its
     argument.
+- **Local-only network contract (NetCtl).** `sceNetCtlGetState` reported
+  Disconnected (0) while `sceNetCtlGetInfo` returned the loopback address as
+  the assigned IP. With Disconnected the title never launches its LAN server
+  ("Network Connection Lost"). The emulated network is local only: the
+  loopback address is assigned, P2P datagrams are routed inside the process,
+  and nothing leaves the host. NetCtl now reports that state consistently:
+  IP-obtained (3) and `GetInfo(LINK)` connected (1). The address stays
+  127.0.0.1 because P2P routing is process-local. Verified with strict runs
+  on the current build: this title reaches day one (86 us per draw, 9.7 fps,
+  same as with the earlier diagnostic override). Other titles that import
+  `sceNetCtlGetState` or `GetInfo`: the sandbox title enters its world at the
+  same capture as before (two runs; a bounded HLE trace of the load showed a
+  handful of socket calls within 1 ms), the beat 'em up title reaches
+  gameplay, the racing route runs at 45-47 us per draw, and no
+  `NetCtlGetInfo` unknown-code exit appeared. The UE4 brawler title still
+  stops before its first frame on the unsupported volume layout refusal
+  (`400x5x5`, tile 27) that an older build already hit.
 - Excluded: `poll`, `recvmsg`, `sendmsg` and `recvfrom` were not called while
   the server was starting (DIAG trace during "Launching Server"). The
   `KernelPoll` "every fd ready" answer was not involved.
 - Verified live (Intel Arc A770): the server starts and its sockets exchange
   datagrams over the loopback. World generation runs past the former
-  `std::cout` fault and completes. With the NetCtl override below, survivor
-  select and day one of the world are reached about 3 minutes after boot,
-  with the player character moving (input from a person and from the agent
-  pad).
+  `std::cout` fault and completes. Survivor select and day one of the world
+  are reached about 3 minutes after boot in a strict run, with the player
+  character moving (input from a person and from the agent pad).
 - Harness memory limit, not the title: the run harness capped the cgroup at
   `memory.high` 7G with no swap, and the title keeps about 7.2 GB of guest
   shared memory. Generation then sat in `__mem_cgroup_handle_over_high`
@@ -77,13 +93,6 @@ fail on the current HEAD before acting on them.
     18 storage write-backs per frame (`CopyChangedPages` is the hottest
     on-CPU leaf), and 2.7 fps at dusk.
 - Open:
-  - **NetCtl state.** `sceNetCtlGetState` reports Disconnected, while
-    `sceNetCtlGetInfo` (IP address) returns 127.0.0.1. With Disconnected the
-    title never launches its LAN server. Every run past that point used a
-    local diagnostic override (state IP-obtained, link up), not a strict run.
-    A NetCtl change still needs a contract source for the state that goes with
-    an assigned address, an audit of the unknown-code exits in
-    `NetCtlGetInfo`, and a regression run of the other NetCtl titles.
   - **World generation speed:** the 1 fps runs were the harness memory limit
     above. Three guest threads still spin on `gettimeofday` with nanosleep;
     they cost CPU but did not block generation.
@@ -5688,8 +5697,8 @@ Third round (same day), mostly runtime-library correctness found by Unreal Engin
   reports log the guest caller, and `NpManager` has one export list.
 
 - **Smaller imports a UE4 title needs at boot.** VoiceQoS is registered under module version 1.1 (the import
-  never resolved under 0.0); `sceNetCtlGetInfo(LINK)` reports the link down, consistent with the disconnected
-  state; `sceAgcDcbSetPredication` writes the SET_PREDICATION packet, and the command processor accepts clearing
+  never resolved under 0.0); `sceNetCtlGetInfo(LINK)` reports the link state
+  consistent with `sceNetCtlGetState` (connected since the local-only network contract); `sceAgcDcbSetPredication` writes the SET_PREDICATION packet, and the command processor accepts clearing
   predication and stops on the query-dependent operations, which no title has issued yet.
 
 - **Clear-state scissors.** CLEAR_STATE and the context-state operations rebuilt the context with every scissor at
