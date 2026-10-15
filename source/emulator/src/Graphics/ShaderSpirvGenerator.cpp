@@ -245,11 +245,29 @@ uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
 	return descriptor_set;
 }
 
-bool Spirv::EmitSdwaLowDestinationInstruction(const RecompilerFunc* func, const ShaderInstruction& instruction, uint32_t index,
+namespace {
+struct SdwaSelect
+{
+	uint32_t width;
+	uint32_t offset;
+	uint32_t field;
+};
+
+// DST_SEL 0-3 = BYTE_0-3, 4-5 = WORD_0-1 (ISA table 88).
+SdwaSelect SdwaDestinationSelect(const ShaderInstruction& instruction)
+{
+	static constexpr uint32_t kOffset[] = {0u, 8u, 16u, 24u, 0u, 16u};
+	const uint32_t            dst_sel   = (instruction.vop_sdwa_ctrl >> 8u) & 7u;
+	const uint32_t            width     = dst_sel < 4u ? 8u : 16u;
+	return {width, kOffset[dst_sel], ((1u << width) - 1u) << kOffset[dst_sel]};
+}
+} // namespace
+
+bool Spirv::EmitSdwaPartialDestinationInstruction(const RecompilerFunc* func, const ShaderInstruction& instruction, uint32_t index,
                                               String8* output)
 {
 	if (output == nullptr || func == nullptr || func->type != instruction.type || func->format != instruction.format ||
-	    !ShaderSdwaLowDestinationSupported(instruction))
+	    !ShaderSdwaPartialDestinationSupported(instruction))
 	{
 		return false;
 	}
@@ -258,30 +276,32 @@ bool Spirv::EmitSdwaLowDestinationInstruction(const RecompilerFunc* func, const 
 	{
 		return false;
 	}
-	// ISA table 88: DST_SEL BYTE_0/WORD_0 takes the result's low bits; DST_U pads the rest with zeros (0),
-	// sign-extends the field (1) or keeps the prior bits (2). An inactive lane keeps its prior value.
-	const uint32_t control = instruction.vop_sdwa_ctrl;
-	const uint32_t width   = ((control >> 8u) & 7u) == 0u ? 8u : 16u;
-	const uint32_t field   = (1u << width) - 1u;
-	const uint32_t dst_u   = (control >> 11u) & 3u;
-	const int      vgpr    = instruction.dst.register_id;
+	// ISA table 88: DST_SEL places the result's low byte or word in its field; DST_U pads the other bits
+	// with zeros (0), sign-extends above the field and zeroes below it (1), or keeps the prior bits (2).
+	// An inactive lane keeps its prior value.
+	const auto     select = SdwaDestinationSelect(instruction);
+	const uint32_t width  = select.width;
+	const uint32_t offset = select.offset;
+	const uint32_t field  = select.field;
+	const uint32_t dst_u  = (instruction.vop_sdwa_ctrl >> 11u) & 3u;
+	const int      vgpr   = instruction.dst.register_id;
 
 	String8 merged;
-	if (dst_u == 0u)
+	if (dst_u == 1u)
 	{
-		merged = String8::FromPrintf("%%sdwa_merged_%u = OpBitwiseAnd %%uint %%sdwa_new_bits_%u %%%s\n", index, index,
-		                             GetConstantUint(field).c_str());
-	} else if (dst_u == 1u)
-	{
-		merged = String8::FromPrintf("%%sdwa_merged_%u = OpBitFieldSExtract %%uint %%sdwa_new_bits_%u %%%s %%%s\n", index, index,
-		                             GetConstantUint(0u).c_str(), GetConstantUint(width).c_str());
+		merged = String8::FromPrintf("%%sdwa_sext_%u = OpBitFieldSExtract %%uint %%sdwa_new_bits_%u %%%s %%%s\n"
+		                             "%%sdwa_merged_%u = OpShiftLeftLogical %%uint %%sdwa_sext_%u %%%s\n",
+		                             index, index, GetConstantUint(0u).c_str(), GetConstantUint(width).c_str(), index, index,
+		                             GetConstantUint(offset).c_str());
 	} else
 	{
-		merged = String8::FromPrintf("%%sdwa_kept_%u = OpBitwiseAnd %%uint %%sdwa_old_bits_%u %%%s\n"
-		                             "%%sdwa_field_%u = OpBitwiseAnd %%uint %%sdwa_new_bits_%u %%%s\n"
-		                             "%%sdwa_merged_%u = OpBitwiseOr %%uint %%sdwa_kept_%u %%sdwa_field_%u\n",
-		                             index, index, GetConstantUint(~field).c_str(), index, index, GetConstantUint(field).c_str(), index,
-		                             index, index);
+		merged = String8::FromPrintf("%%sdwa_shifted_%u = OpShiftLeftLogical %%uint %%sdwa_new_bits_%u %%%s\n"
+		                             "%%sdwa_field_%u = OpBitwiseAnd %%uint %%sdwa_shifted_%u %%%s\n",
+		                             index, index, GetConstantUint(offset).c_str(), index, index, GetConstantUint(field).c_str());
+		merged += dst_u == 0u ? String8::FromPrintf("%%sdwa_merged_%u = OpCopyObject %%uint %%sdwa_field_%u\n", index, index)
+		                      : String8::FromPrintf("%%sdwa_kept_%u = OpBitwiseAnd %%uint %%sdwa_old_bits_%u %%%s\n"
+		                                            "%%sdwa_merged_%u = OpBitwiseOr %%uint %%sdwa_kept_%u %%sdwa_field_%u\n",
+		                                            index, index, GetConstantUint(~field).c_str(), index, index, index);
 	}
 	*output += String8::FromPrintf("%%sdwa_old_%u = OpLoad %%float %%v%d\n", index, vgpr);
 	*output += whole;
@@ -2814,10 +2834,10 @@ void Spirv::WriteInstructions()
 		const auto wave_kind = UsesFragmentCompute() ? ShaderClassifyFragmentWaveInstruction(inst, *m_ps_input_info)
 		                      : UsesComputeWaveBanks() ? ShaderClassifyComputeWaveInstruction(inst)
 		                                             : ShaderComputeWaveInstructionKind::Unsupported;
-		const bool low_destination = ShaderSdwaLowDestinationSupported(inst);
+		const bool low_destination = ShaderSdwaPartialDestinationSupported(inst);
 		if (low_destination && (UsesComputeWaveBanks() || wave_kind != ShaderComputeWaveInstructionKind::Unsupported))
 		{
-			EXIT("SDWA low destination select outside the per-lane emitter: pc=0x%08" PRIx32 "\n", inst.pc);
+			EXIT("SDWA partial destination select outside the per-lane emitter: pc=0x%08" PRIx32 "\n", inst.pc);
 		}
 		if (wave_kind == ShaderComputeWaveInstructionKind::PixelInterpolation || wave_kind == ShaderComputeWaveInstructionKind::PixelExport)
 		{
@@ -2880,7 +2900,7 @@ void Spirv::WriteInstructions()
 			EXIT_IF(func->type != inst.type);
 			EXIT_IF(func->format != inst.format);
 			if (UsesFragmentCompute() && inst.type == ShaderInstructionType::SEndpgm) { dst += FragmentEpilog(); }
-			ok = low_destination ? EmitSdwaLowDestinationInstruction(func, inst, static_cast<uint32_t>(index), &dst)
+			ok = low_destination ? EmitSdwaPartialDestinationInstruction(func, inst, static_cast<uint32_t>(index), &dst)
 			                     : func->func(index, m_code, &dst, this, func->param, func->scc_check);
 		}
 
@@ -3133,6 +3153,15 @@ void Spirv::WriteFunctions()
 void Spirv::FindConstants()
 {
 	m_constants.Clear();
+	for (const auto& inst: m_code.GetInstructions())
+	{
+		if (!ShaderSdwaPartialDestinationSupported(inst)) { continue; }
+		const auto select = SdwaDestinationSelect(inst);
+		for (const uint32_t value: {0u, select.width, select.offset, select.field, ~select.field})
+		{
+			AddConstantUint(value);
+		}
+	}
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32})) { AddConstantUint(0xffffu); }
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkI16I32}))
 	{

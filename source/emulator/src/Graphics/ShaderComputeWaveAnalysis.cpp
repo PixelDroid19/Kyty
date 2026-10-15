@@ -845,7 +845,7 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 
 bool ShaderInstructionPerLaneLoweringPreconditions(const ShaderInstruction& instruction)
 {
-	if (ShaderSdwaLowDestinationSupported(instruction))
+	if (ShaderSdwaPartialDestinationSupported(instruction))
 	{
 		return ShaderInstructionLoweringPreconditions(ShaderSdwaWholeDestination(instruction));
 	}

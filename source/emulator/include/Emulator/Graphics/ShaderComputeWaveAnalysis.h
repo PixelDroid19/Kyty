@@ -69,7 +69,7 @@ struct ShaderComputeWaveAnalysisResult
 // these lowerings cannot represent. Must precede both native and generic choice.
 [[nodiscard]] bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction);
 // The same preconditions for the per-lane emitter, which also merges a low SDWA destination
-// select into its VGPR (ShaderSdwaLowDestinationSupported). Banked and proof paths keep the strict form.
+// select into its VGPR (ShaderSdwaPartialDestinationSupported). Banked and proof paths keep the strict form.
 [[nodiscard]] bool ShaderInstructionPerLaneLoweringPreconditions(const ShaderInstruction& instruction);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,
