@@ -121,6 +121,59 @@ TEST(EmulatorShaderScalarPack, PacksLowHalvesAndWritesVccHiAfterReadingAliasedSo
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorShaderScalarPack, DecodesHighHalfPacksAndAbsoluteDifferenceAsAlu)
+{
+	// SOP2 opcodes 0x33 S_PACK_LH_B32_B16, 0x34 S_PACK_HH_B32_B16 and 0x2C S_ABSDIFF_I32 with s17 = op(s9, s21).
+	const auto     sop2   = [](uint32_t opcode) { return 0x80000000u | (opcode << 23u) | (17u << 16u) | (21u << 8u) | 9u; };
+	const uint32_t shader[] = {sop2(0x33u), sop2(0x34u), sop2(0x2Cu), 0xbf810000u};
+
+	ASSERT_EXIT(
+	    {
+		    if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+		    Config::SetNextGen(true);
+		    Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    ShaderParse(shader, &code);
+		    const auto& insts = code.GetInstructions();
+		    if (insts.Size() != 4u || insts.At(0).type != ShaderInstructionType::SPackLhB32B16 ||
+		        insts.At(1).type != ShaderInstructionType::SPackHhB32B16 || insts.At(2).type != ShaderInstructionType::SAbsdiffI32)
+		    {
+			    std::_Exit(2);
+		    }
+
+		    ShaderComputeInputInfo input {};
+		    input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+		    const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+		    // LH keeps S0[15:0] and S1[31:16]; HH keeps S0[31:16] and S1[31:16].
+		    const bool lh = source.FindIndex("%pack_s0_shift_0 = OpShiftLeftLogical %uint %pack_s0_0 %uint_16") != Core::STRING8_INVALID_INDEX &&
+		                    source.FindIndex("%pack_s1_shift_0 = OpShiftRightLogical %uint %pack_s1_0 %uint_16") != Core::STRING8_INVALID_INDEX &&
+		                    source.FindIndex("OpStore %s17 %pack_result_0") != Core::STRING8_INVALID_INDEX;
+		    const bool hh = source.FindIndex("%pack_low_1 = OpShiftRightLogical %uint %pack_s0_1 %uint_16") != Core::STRING8_INVALID_INDEX &&
+		                    source.FindIndex("%pack_s1_shift_1 = OpShiftRightLogical %uint %pack_s1_1 %uint_16") != Core::STRING8_INVALID_INDEX &&
+		                    source.FindIndex("OpStore %s17 %pack_result_1") != Core::STRING8_INVALID_INDEX;
+		    const bool absdiff = source.FindIndex("%td_2 = OpISub %int %t0_2 %t1_2") != Core::STRING8_INVALID_INDEX &&
+		                         source.FindIndex("%t_2 = OpSelect %int %tneg_2 %tn_2 %td_2") != Core::STRING8_INVALID_INDEX &&
+		                         source.FindIndex("OpStore %scc %snz1_123_2") != Core::STRING8_INVALID_INDEX;
+		    if (!lh || !hh || !absdiff)
+		    {
+			    std::fprintf(stderr, "contracts: lh=%d hh=%d absdiff=%d\n", lh, hh, absdiff);
+			    std::_Exit(3);
+		    }
+
+		    Vector<uint32_t> binary;
+		    String8          error;
+		    if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+		    {
+			    std::fprintf(stderr, "%s\n", error.c_str());
+			    std::_Exit(4);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorShaderScalarPack, RejectsUnimplementedOperandModifiers)
 {
 	const uint32_t words[] = {0x80000000u | (0x32u << 23u) | (17u << 16u) | (9u << 8u) | 9u, 0xbf810000u};

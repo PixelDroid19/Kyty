@@ -595,6 +595,9 @@ enum class ShaderInstructionType : uint32_t
 	SSubbU32,
 	SAshrI64,
 	ImageAtomicSwap,
+	SPackLhB32B16,
+	SPackHhB32B16,
+	SAbsdiffI32,
 
 	ZMax
 };

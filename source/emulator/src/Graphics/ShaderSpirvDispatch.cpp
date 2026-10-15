@@ -326,6 +326,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SMaxU32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpExtInst %uint %GLSL_std_450 UMax %t0_<index> %t1_<index>"}, SccCheck::NonZero},
     {Recompile_S_XXX_I32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SAddI32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpIAdd %int %t0_<index> %t1_<index>"}, SccCheck::OverflowAdd},
     {Recompile_S_XXX_I32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SMulI32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpIMul %int %t0_<index> %t1_<index>"}, SccCheck::None},
+    {Recompile_S_XXX_I32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SAbsdiffI32,     ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%td_<index> = OpISub %int %t0_<index> %t1_<index>\n%tneg_<index> = OpSLessThan %bool %td_<index> %int_0\n%tn_<index> = OpSNegate %int %td_<index>\n%t_<index> = OpSelect %int %tneg_<index> %tn_<index> %td_<index>"}, SccCheck::NonZero},
     {Recompile_S_XXX_I32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SSubI32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpISub %int %t0_<index> %t1_<index>"}, SccCheck::OverflowSub},
     {Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SSubU32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%ts_<index> = OpISubBorrow %ResTypeU %t0_<index> %t1_<index>", "%t_<index> = OpCompositeExtract %uint %ts_<index> 0", "%carry_<index> = OpCompositeExtract %uint %ts_<index> 1"}, SccCheck::CarryOut},
     {Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SAddcU32,        ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%tscc_<index> = OpLoad %uint %scc", "%ts_<index> = OpFunctionCall %v2uint %addc %t0_<index> %t1_<index> %tscc_<index>", "%t_<index> = OpCompositeExtract %uint %ts_<index> 0", "%carry_<index> = OpCompositeExtract %uint %ts_<index> 1"}, SccCheck::CarryOut},
@@ -687,7 +688,9 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_SCmp_XXX_U32_Ssrc0Ssrc1,  ShaderInstructionType::SCmpLgU32,    ShaderInstructionFormat::Ssrc0Ssrc1,      {"OpINotEqual"}},
     {Recompile_SCmpEqLgU64, ShaderInstructionType::SCmpEqU64, ShaderInstructionFormat::Ssrc02Ssrc12, {""}},
     {Recompile_SCmpEqLgU64, ShaderInstructionType::SCmpLgU64, ShaderInstructionFormat::Ssrc02Ssrc12, {""}},
-    {Recompile_SPackLlB32B16, ShaderInstructionType::SPackLlB32B16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
+    {Recompile_SPackB32B16, ShaderInstructionType::SPackLlB32B16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
+    {Recompile_SPackB32B16, ShaderInstructionType::SPackLhB32B16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
+    {Recompile_SPackB32B16, ShaderInstructionType::SPackHhB32B16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_SBitset1B32, ShaderInstructionType::SBitset1B32, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_SGetpcB64, ShaderInstructionType::SGetpcB64, ShaderInstructionFormat::Sdst2, {""}},
 
