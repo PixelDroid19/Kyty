@@ -1024,24 +1024,16 @@ void Elf64::Open(const String& file_name)
 
 	uint64_t retained_eager_metadata_bytes = 0;
 
-	// SELF program loading is defined by its embedded ELF program headers and
-	// segment table. Some valid containers retain ELF section metadata whose
-	// payload is not stored in the file; sections are debug/link metadata and
-	// are not required for runtime segment loading.
-	if (m_self == nullptr && m_ehdr->e_shnum > 0)
+	// Program loading is defined by the program headers (and a SELF segment
+	// table). The section header table is optional for execution, and images
+	// extracted from a container can keep e_shoff/e_shnum while the table
+	// itself is not stored in the file; such a table is not loaded.
+	const uint64_t shdr_size     = static_cast<uint64_t>(sizeof(Elf64_Shdr)) * m_ehdr->e_shnum;
+	const bool     shdr_in_file  = m_ehdr->e_shoff <= std::numeric_limits<uint64_t>::max() - ehdr_pos &&
+	                               IsRangeWithin(ehdr_pos + m_ehdr->e_shoff, shdr_size, file_size);
+	if (m_self == nullptr && m_ehdr->e_shnum > 0 && shdr_in_file)
 	{
-		if (m_ehdr->e_shoff > std::numeric_limits<uint64_t>::max() - ehdr_pos)
-		{
-			Clear();
-			return;
-		}
 		const uint64_t shdr_offset = ehdr_pos + m_ehdr->e_shoff;
-		const uint64_t shdr_size   = static_cast<uint64_t>(sizeof(Elf64_Shdr)) * m_ehdr->e_shnum;
-		if (!IsRangeWithin(shdr_offset, shdr_size, file_size))
-		{
-			Clear();
-			return;
-		}
 		m_shdr = load_shdr_64(*m_f, shdr_offset, m_ehdr->e_shnum);
 		if (m_shdr == nullptr)
 		{
