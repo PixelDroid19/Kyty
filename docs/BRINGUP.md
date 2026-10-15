@@ -9,6 +9,77 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Survival title: hosting an offline world (2026-10-15, open)
+
+- Symptom: Host Game showed "Network Connection Lost". With the connection
+  check passed, it showed "Launching Server", then "Server Failed To Start",
+  and on retry "Networking Failed To Start". The title's offline mode is a
+  LAN-only server running in the same process; it reaches it through
+  `SOCK_DGRAM_P2P` sockets on the loopback.
+- Fixed, in order of discovery:
+  - `sceNetInetPton` left the address in host byte order, so the title's
+    self-addressed datagram went to the wrong host. It now follows the BSD
+    contract and returns 1, 0, or an error.
+  - P2P datagram sockets (type 6) carry a virtual port at bytes 8-9 of the
+    address. Two server sockets bind the same P2P port with different virtual
+    ports. Each now gets its own host UDP port, and a process-wide endpoint
+    table routes local sends.
+  - **Root cause of "Server Failed To Start": `sceNetGetSockInfo`.** A bounded
+    HLE trace showed the server threads calling only `sceNetGetSockInfo` in a
+    loop for about 2 s, then tearing the server down. The guest's loop expects
+    three things:
+    - the number of 160-byte records as the return value;
+    - the record whose socket id at 0x24 and type at 0x28 match;
+    - state 2 (opened) at 0x44.
+
+    Until then it calls `usleep(1000)`, up to 2000 times. The old
+    implementation returned 0 and a host sockaddr. With records and states
+    reported, the call succeeds once and the server starts.
+  - POSIX `sendmsg`/`recvmsg` were ENOSYS stubs; they are now implemented.
+    This was a defect, not this title's blocker (see the exclusions).
+  - World generation prints progress dots through `std::cout`. The exported
+    `std::cout`/`std::cerr` were zero-filled, and the guest's inlined inserter
+    faulted reading the basic_ios offset from a null vtable. Both are now
+    constructed with the layout taken from the guest's inlined inserter,
+    `std::endl` and `basic_streambuf` constructor. The classic ctype facet's
+    `do_widen` also returned 1 for every character; it now returns its
+    argument.
+- Excluded: `poll`, `recvmsg`, `sendmsg` and `recvfrom` were not called while
+  the server was starting (DIAG trace during "Launching Server"). The
+  `KernelPoll` "every fd ready" answer was not involved.
+- Verified live (Intel Arc A770): the server starts and its sockets exchange
+  datagrams over the loopback. World generation runs past the
+  former `std::cout` fault (4 of 10 progress dots in more than 3 minutes,
+  window closed by hand).
+- Open:
+  - **NetCtl state.** `sceNetCtlGetState` reports Disconnected, while
+    `sceNetCtlGetInfo` (IP address) returns 127.0.0.1. With Disconnected the
+    title never launches its LAN server. Every run past that point used a
+    local diagnostic override (state IP-obtained, link up), not a strict run.
+    A NetCtl change still needs a contract source for the state that goes with
+    an assigned address, an audit of the unknown-code exits in
+    `NetCtlGetInfo`, and a regression run of the other NetCtl titles.
+  - **World generation speed:** about 1 fps during generation. Not profiled
+    yet. Two observations are candidates, not causes:
+    - three guest threads spin on `gettimeofday`, about 13k calls/s with
+      nanosleep;
+    - non-blocking `recvfrom` polling runs into hundreds of thousands of
+      EAGAINs.
+  - `std::cin` (imported) and the 104-byte versioned `cout`/`cerr`/`clog`
+    objects are still zero-filled. Their layout is a different ABI without
+    evidence yet.
+  - These are rejected and may be defects:
+    - `SO_LINGER` with a 4-byte value (EINVAL);
+    - `IPPROTO_IP` option 2 on UDP (ENOPROTOOPT).
+
+    The title ignores both results.
+  - Imported but never called:
+    - `sceNetGetMemoryPoolStats`;
+    - `sceNetCtlGetResult`;
+    - `sceNetCtlUnregisterCallback`;
+    - three unnamed NIDs.
+  - P2P peers outside this process are not routed.
+
 ## Read-only snapshots over written-back writable buffers (2026-10-15, excluded)
 
 - Question: in the sandbox title's world, about half of the draw-time
