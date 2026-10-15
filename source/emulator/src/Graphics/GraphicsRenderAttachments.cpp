@@ -902,6 +902,8 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	r->htile_tile_swizzle   = z.htile_data_base_addr & htile_addr_mask;
 	r->width                = (ps5 ? depth_extent.width : z.width);
 	r->height               = (ps5 ? depth_extent.height : z.height);
+	r->slice_start          = z.depth_view.slice_start;
+	r->slice_max            = z.depth_view.slice_max;
 	r->depth_clear_enable   = rc.depth_clear_enable;
 	r->suppress_depth_write = rc.depth_clear_enable;
 	r->depth_clear_value    = hw.GetDepthClearValue();

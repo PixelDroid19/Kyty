@@ -237,7 +237,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	}
 	if (with_depth && framebuffer_layers > 1u)
 	{
-		EXIT("layered color attachments with a depth attachment are not supported: layers=%" PRIu32 "\n", framebuffer_layers);
+		EXIT("layered color attachments with a depth attachment are not supported: layers=%" PRIu32
+		     " color=%ux%u depth=%ux%u slices=%u..%u size=0x%" PRIx64 " htile=%u stencil=%u\n",
+		     framebuffer_layers, framebuffer_extent.width, framebuffer_extent.height, depth->width, depth->height,
+		     depth->slice_start, depth->slice_max, depth->depth_buffer_size, depth->htile ? 1u : 0u,
+		     depth->stencil_plane ? 1u : 0u);
 	}
 	framebuffer->color_count            = color_count;
 	framebuffer->attachment_count       = attachment_count + (with_depth ? 1u : 0u);

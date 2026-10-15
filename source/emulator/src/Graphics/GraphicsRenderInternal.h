@@ -782,6 +782,9 @@ struct RenderDepthInfo
 	VkSampleCountFlagBits       samples                  = VK_SAMPLE_COUNT_1_BIT;
 	uint32_t                    width                    = 0;
 	uint32_t                    height                   = 0;
+	// DB_DEPTH_VIEW slice range; the depth image itself holds one slice.
+	uint32_t                    slice_start              = 0;
+	uint32_t                    slice_max                = 0;
 	bool                        htile                    = false;
 	bool                        neo                      = false;
 	uint64_t                    depth_buffer_size        = 0;
