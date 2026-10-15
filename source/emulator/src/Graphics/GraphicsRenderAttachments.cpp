@@ -1127,6 +1127,14 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 				attachment.tile       = true;
 				attachment.write_back = false;
 				break;
+			case 0x0:
+				attachment.tile       = false;
+				attachment.write_back = false;
+				if (attachment.samples != VK_SAMPLE_COUNT_1_BIT)
+				{
+					EXIT("linear render target cannot be multisampled: samples=%u\n", static_cast<unsigned>(attachment.samples));
+				}
+				break;
 			default: EXIT("unsupported render-target tile mode: %u\n", rt.attrib3.tile_mode);
 		}
 
@@ -1136,13 +1144,14 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		const uint32_t rt_bpp = render_format.bytes_per_element;
 
 		// Element pitch: hardware PITCH when programmed, otherwise align width
-		// to the 64 KiB block width for this BPE (same rule as sample tile 27).
+		// to the 64 KiB block width for this BPE (same rule as sample tile 27),
+		// or to 256-byte rows for a linear target (same rule as sample tile 0).
 		if (rt.pitch.pitch_div8_minus1 != 0)
 		{
 			attachment.pitch = (rt.pitch.pitch_div8_minus1 + 1u) << 3u;
 		} else
 		{
-			attachment.pitch = TileAlign64KBPitch(attachment.width, rt_bpp);
+			attachment.pitch = attachment.tile ? TileAlign64KBPitch(attachment.width, rt_bpp) : TileAlignLinearPitch(attachment.width, rt_bpp);
 			if (attachment.pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment.pitch == 0u condition ignored (continuing)\n"); }
 		}
 

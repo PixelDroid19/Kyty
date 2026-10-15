@@ -50,13 +50,17 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t 
 void TileGetVideoOutSize(uint32_t width, uint32_t height, uint32_t pitch, bool tile, bool neo, TileSizeAlign* size);
 // Computes the allocation for a Gen5 color target. Mode 0x1b is the 64 KiB
 // rotated-X swizzle used by render targets; the result is padded to complete
-// swizzle blocks rather than treated as a linear byte span.
+// swizzle blocks rather than treated as a linear byte span. Mode 0 is linear:
+// pitch-sized rows.
 void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t tile_mode, uint32_t bytes_per_texel,
                              TileSizeAlign* size);
 // Width in elements of a 64 KiB swizzle block for an exact power-of-two BPE.
 // Returns zero for unsupported element sizes.
 [[nodiscard]] uint32_t TileGet64KBBlockWidth(uint32_t bytes_per_element);
 [[nodiscard]] uint32_t TileAlign64KBPitch(uint32_t width, uint32_t bytes_per_element);
+// Element pitch of a linear Gen5 surface: rows aligned to 256 bytes.
+// Returns zero for unsupported element sizes.
+[[nodiscard]] uint32_t TileAlignLinearPitch(uint32_t width, uint32_t bytes_per_element);
 // Byte offset of texel (x,y) inside a Gen5 kRenderTarget (tile mode 27) surface.
 // pitch_elems is the element pitch used for the block grid (0 → width).
 // Supported: 2-, 4-, and 8-byte elements.

@@ -874,9 +874,19 @@ void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, ui
 	size->size  = 0;
 	size->align = 0;
 
-	if (tile_mode != 0x1bu ||
+	if ((tile_mode != 0x1bu && tile_mode != 0u) ||
 	    (bytes_per_texel != 1u && bytes_per_texel != 2u && bytes_per_texel != 4u && bytes_per_texel != 8u && bytes_per_texel != 16u))
 	{
+		return;
+	}
+	if (tile_mode == 0u)
+	{
+		const uint64_t total = static_cast<uint64_t>(pitch != 0 ? pitch : width) * height * bytes_per_texel;
+		if (total <= UINT32_MAX)
+		{
+			size->size  = static_cast<uint32_t>(total);
+			size->align = 256u;
+		}
 		return;
 	}
 
@@ -1074,6 +1084,16 @@ uint32_t TileAlign64KBPitch(uint32_t width, uint32_t bytes_per_element)
 		return 0u;
 	}
 	return (width + block_width - 1u) & ~(block_width - 1u);
+}
+
+uint32_t TileAlignLinearPitch(uint32_t width, uint32_t bytes_per_element)
+{
+	if (width == 0u || bytes_per_element == 0u || bytes_per_element > 256u || (bytes_per_element & (bytes_per_element - 1u)) != 0u)
+	{
+		return 0u;
+	}
+	const uint32_t align = 256u / bytes_per_element;
+	return (width + align - 1u) & ~(align - 1u);
 }
 
 void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
