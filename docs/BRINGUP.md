@@ -9,6 +9,119 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Guest thread-pointer loads without the TLS handler lock (2026-10-15)
+
+- Symptom: the sandbox title took 60-110 s from its "ready to play" screen to
+  the first world frame (world on screen at 183-209 s on the seeded route).
+- Attribution: a guest-IP stack sampler over the world-creation threads put
+  42% of their samples at one address, the TLS handler page
+  (`handler_vaddr`, image base + aligned image size + the 0x1000 exception
+  handler page). Every guest `mov rax, fs:[0]` is patched by
+  `LoaderPatchTlsFsBaseLoads` into a call to that page, which held
+  `Jit::SafeCall`: a process-wide spinlock, a 2,688-byte XSAVE into a shared
+  buffer, a switch to a shared host stack, then `RuntimeLinker::TlsGetAddr`
+  with the linker mutex, the static-TLS mutex and a hash-map lookup by thread.
+  Worker threads of the title read their thread pointer that way many times
+  per job, so they serialized on that lock.
+- Change: the handler page now starts with `Jit::TlsCachedCall`. It reads the
+  guest thread pointer from a host `thread_local` slot through its
+  `fs`-relative offset, returns it when the slot is filled, and keeps flags and
+  every register but `rax`. An empty slot (the first load on a thread) jumps to
+  `SafeCall`, now at `handler_vaddr + 0x40`, whose `TlsMainGetAddr` fills the
+  slot. The slot never goes stale: the main TLS block of a thread is fixed for
+  its lifetime and static TLS is not resized while guest threads run. Linux
+  x86-64 only; other hosts keep `SafeCall` at the handler address.
+- Test: `EmulatorLoaderTls*.CachedCallReturnsThreadPointerOrTakesMissPath`
+  runs the stub in an executable page (hit returns the cached pointer with
+  `rcx` and the carry flag preserved; an empty slot takes the miss path).
+- A/B on the same seeded sandbox route (Intel A770, strict, 300 s): loading
+  screen at 132 s and world on screen at 145 s, against 183-209 s before;
+  the handler page no longer appears in the sampler. In-world rate is
+  unchanged (about 8.4 FPS); the world is now bound by Kyty's graphics thread
+  (SPIR-V optimization, allocation, descriptor cache, memory hashing).
+- Regression runs (same routes and environments as the 2026-10-15 baselines):
+  - Racing title (200 s, render-target scope): the route started the race one
+    checkpoint earlier and ended in TIME OVER; 22.8-28.8 FPS against
+    21.0-27.8 FPS of an earlier run that took the same route branch.
+  - Fishing title (240 s, RADV): open sea 7.6-9.0 FPS against 7.6-8.1, dock
+    9.1-9.5 FPS; gameplay reached.
+  - Beat 'em up (300 s): gameplay reached, 12.2-18.4 FPS against 10.7-12.1
+    (this route varies by about 5 FPS between runs of one binary).
+- Leads not taken in this change (measure before acting): the module-relative
+  `TlsGetAddr(module, offset)` path still takes the linker mutex and scans the
+  programs; `mmap_in_guest_window` took 9-25% and
+  `GpuDirtyPageTracker::VisitWritePages` 12% of the loading threads' samples.
+
+## Sandbox title: missing terrain in the world (2026-10-15, open)
+
+The world shows sky, clouds, HUD and an all-water view without land; the
+inventory screen works. Recorded so the excluded paths are not re-tested.
+
+- In-world frame structure (one presented frame, temporary draw list): G-buffer
+  and depth clear; 152 depth-only terrain draws; a rectangle-copy compute from
+  an R32F view of the depth target into the live depth plane; shadow cascades on
+  a 2048x2048 D32 target; light computes; deferred lighting and composite; a
+  depth prepass with writes and the G-buffer fill (152 draws); fog, water,
+  bloom, tonemap.
+- Excluded:
+  - The depth-plane rectangle copy. It runs every frame from boot. Dropping its
+    store (diagnostic only) left the world image identical.
+  - Terrain draws dropped on the CPU side. A histogram of every skip reason of
+    the indexed and auto paths over a 300 s run showed about 2,200
+    depth-writing draws per presented frame reaching command emission and no
+    draw taking a skip reason; `gda-not-ready` outcomes are retried waits.
+  - Stale sampling of depth or render targets, the fill depth content (fill
+    depth function forced to ALWAYS, terrain still missing) and the block atlas
+    content (atlas painted a solid colour, no such terrain appeared).
+  - The terrain vertex transform and vertex fetch. The fill VS computes
+    `Proj * (World * pos)` with position as 16_16_16_16_FLOAT at offset 0 and
+    valid guest bytes. An earlier note that clip W <= 0 hid the terrain is
+    retracted: the probed chunk was behind the camera by construction.
+  - The guest floating-point environment. The bundled libc default is FPUCW
+    0x037F and MXCSR 0x9FC0 (FTZ and DAZ); Kyty starts guest threads at the
+    host 0x1F80. Starting them with the guest default changed neither the world,
+    the camera nor timing. Not merged (no observed benefit); revisit with a
+    title-wide A/B since it is the guest contract.
+  - HLE libm: all 58 math registrations hash-match their names, and the title's
+    bundled libc exports take precedence over HLE anyway.
+  - World database I/O. A guest file trace on the world database showed every
+    open, write and close succeeding (manifest and `CURRENT` created and fully
+    written); the `ENOENT` stats are the normal fresh-database probe.
+  - Guest file system for pack data. A full trace (228,000 operations in
+    185 s) showed no failing application path that exists on the host
+    (case-insensitive), no failing read, and every file read to its size except
+    random-access fonts and streamed music.
+  - Condition-variable timed waits. The worker pool waits through
+    `std::condition_variable` over HLE `cnd_timedwait`/`cnd_wait`; deadlines come
+    from `_Xtime_get_ticks` (microseconds of `CLOCK_REALTIME`), the host
+    condition uses the same clock, and the result codes match the set the guest
+    accepts.
+- Observed (guest state, not the GPU path):
+  - The view-projection is a pure perspective (fovY 60, 16:9, near about
+    0.0125) with no rotation or translation, and stick input does not change it.
+  - Every fill draw's world translation is a multiple of 16 and the drawn chunk
+    set is a disc centred on the origin. Almost every fill draw is a 16x16 water
+    surface sheet; there are no lower subchunks (no seabed, no land).
+  - The level file's spawn is unresolved (`INT_MIN`) at 185 s and resolves to
+    (74, 32767, 134) by 215-240 s, but the drawn set stays centred on the
+    origin. Clouds move, so the client ticks.
+  - Next: find why the player stays at the default origin (integrated server,
+    world generator or player placement) from the guest side.
+- Defects found, not fixed:
+  - Multi-level sampled views over a live one-level render target are rejected
+    by `Gen5PickSampleSurfaceAliases` (rule `mip_levels >= sample_levels`) and
+    fall to the guest-skip-live-cover path, which `Texture.cpp:557` zero-fills.
+    Direction: give render targets their guest mip count.
+  - `CB_COLOR*_VIEW.MIP_LEVEL` is ignored for render targets (`RenderTexture`
+    has one level): 128x128 cubemaps with 7 levels drawn at mips 1-7 land on
+    level 0.
+  - The block atlas render target lacks the static block textures at level 0;
+    only the animated strips are drawn into it.
+  - The inventory character preview draws legs and torso on black with the head
+    detached; a dark streak crosses the sky in later captures.
+- `KYTY_PRINTF_DIRECTION=Console` logs every HLE call: 3.5 GB in 270 s at
+  about 3 FPS, and the world is never reached. Not usable for this title.
+
 ## Conditional command-buffer branch (2026-10-14)
 
 - The role-playing title and the mechanical-fist platformer stopped on the
