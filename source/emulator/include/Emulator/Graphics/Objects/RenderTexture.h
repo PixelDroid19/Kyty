@@ -49,8 +49,9 @@ struct RenderTextureArrayView
 	uint64_t full_backing_size = 0;
 };
 
-// A color-target view names one slice inside an allocation whose storage starts
-// at layer zero. Keep the storage extent and the selected view separate so
+// A color-target view names the slices SLICE_START..SLICE_MAX inside an allocation
+// whose storage starts at layer zero; the shader's layer index is relative to the
+// first one. Keep the storage extent and the selected view separate so
 // cache identity cannot collapse a layered image into a single-layer image.
 [[nodiscard]] bool ResolveRenderTextureArrayView(uint64_t bytes_per_layer, uint32_t base_layer, uint32_t last_layer,
                                                  RenderTextureArrayView* view);

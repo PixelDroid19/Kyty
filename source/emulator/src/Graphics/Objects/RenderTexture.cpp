@@ -26,7 +26,7 @@ bool ResolveRenderTextureArrayView(uint64_t bytes_per_layer, uint32_t base_layer
 		return false;
 	}
 	*view = {};
-	if (bytes_per_layer == 0 || last_layer != base_layer || last_layer == std::numeric_limits<uint32_t>::max())
+	if (bytes_per_layer == 0 || last_layer < base_layer || last_layer == std::numeric_limits<uint32_t>::max())
 	{
 		return false;
 	}
@@ -37,7 +37,7 @@ bool ResolveRenderTextureArrayView(uint64_t bytes_per_layer, uint32_t base_layer
 	}
 	view->image_layers      = image_layers;
 	view->base_layer        = base_layer;
-	view->layer_count       = 1u;
+	view->layer_count       = last_layer - base_layer + 1u;
 	view->full_backing_size = bytes_per_layer * image_layers;
 	return true;
 }

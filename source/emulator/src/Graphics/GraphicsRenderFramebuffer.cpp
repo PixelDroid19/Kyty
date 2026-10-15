@@ -163,6 +163,9 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	VkAttachmentDescription attachments[RenderColorInfo::TARGETS_MAX + 1]       = {};
 	VkAttachmentReference   color_attachment_refs[RenderColorInfo::TARGETS_MAX] = {};
 	VkImageView             views[RenderColorInfo::TARGETS_MAX + 1]             = {};
+	// A framebuffer renders every layer of each attachment view, so the active
+	// color views must agree on their layer count.
+	uint32_t framebuffer_layers = 0;
 	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
 		if (with_color && !RenderColorSlotActive(*color, slot))
@@ -180,10 +183,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 			EXIT("invalid color attachment layer range: base=%" PRIu32 " count=%" PRIu32 " image_layers=%" PRIu32 "\n",
 			     base_array_layer, layer_count, image->array_layers);
 		}
-		if (layer_count != 1u)
+		if (framebuffer_layers != 0u && layer_count != framebuffer_layers)
 		{
-			EXIT("multi-layer color attachment views are not supported\n");
+			EXIT("color attachments render different layer counts: %" PRIu32 " and %" PRIu32 "\n", framebuffer_layers, layer_count);
 		}
+		framebuffer_layers = layer_count;
 		framebuffer_extent = IntersectFramebufferAttachmentExtent(framebuffer_extent, image);
 		const auto attachment_format = with_color ? color_attachment->attachment_format : image->format;
 		const auto attachment_view   = with_color ? color_attachment->attachment_view : VulkanImage::VIEW_DEFAULT;
@@ -213,7 +217,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		{
 			VulkanImageViewDescriptor view_descriptor {};
 			view_descriptor.image            = image->image;
-			view_descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D;
+			view_descriptor.view_type        = layer_count > 1u ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
 			view_descriptor.format           = attachment_format;
 			view_descriptor.base_array_layer = base_array_layer;
 			view_descriptor.layer_count      = layer_count;
@@ -226,6 +230,14 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		framebuffer->color_load_op[slot]        = load_ops.load_op;
 		framebuffer->color_initial_layout[slot] = initial_layout;
 		attachment_count++;
+	}
+	if (framebuffer_layers == 0u)
+	{
+		framebuffer_layers = 1u;
+	}
+	if (with_depth && framebuffer_layers > 1u)
+	{
+		EXIT("layered color attachments with a depth attachment are not supported: layers=%" PRIu32 "\n", framebuffer_layers);
 	}
 	framebuffer->color_count            = color_count;
 	framebuffer->attachment_count       = attachment_count + (with_depth ? 1u : 0u);
@@ -302,7 +314,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	framebuffer->extent.height = framebuffer_extent.height;
 	framebuffer_info.width     = framebuffer->extent.width;
 	framebuffer_info.height    = framebuffer->extent.height;
-	framebuffer_info.layers = 1;
+	framebuffer_info.layers = framebuffer_layers;
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
 	if (framebuffer_info.layers > properties.limits.maxFramebufferLayers)

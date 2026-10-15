@@ -5253,7 +5253,12 @@ TEST(EmulatorGraphicsState, ResolvesLayeredRenderTargetBackingAndView)
 	EXPECT_EQ(view.layer_count, 1u);
 	EXPECT_EQ(view.full_backing_size, 0xa0000u);
 
-	EXPECT_FALSE(ResolveRenderTextureArrayView(0x20000u, 2u, 4u, &view));
+	ASSERT_TRUE(ResolveRenderTextureArrayView(0x20000u, 0u, 5u, &view));
+	EXPECT_EQ(view.image_layers, 6u);
+	EXPECT_EQ(view.base_layer, 0u);
+	EXPECT_EQ(view.layer_count, 6u);
+	EXPECT_EQ(view.full_backing_size, 0xc0000u);
+
 	EXPECT_FALSE(ResolveRenderTextureArrayView(0x20000u, 4u, 3u, &view));
 	EXPECT_FALSE(ResolveRenderTextureArrayView(UINT64_MAX, 0u, 1u, &view));
 
