@@ -1636,6 +1636,28 @@ VulkanBuffer* CommandBuffer::AllocateTransientCopyBuffer(uint64_t size)
 	                                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
 }
 
+void CommandBuffer::DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth)
+{
+	EXIT_IF(depth == nullptr || depth->storage_plane == nullptr);
+	if (std::find(m_depth_plane_store_backs.begin(), m_depth_plane_store_backs.end(), depth) == m_depth_plane_store_backs.end())
+	{
+		m_depth_plane_store_backs.push_back(depth);
+	}
+}
+
+void CommandBuffer::StoreBackDepthPlanes()
+{
+	for (auto* depth: m_depth_plane_store_backs)
+	{
+		if (!UtilCopyTexelBits(this, depth->storage_plane, depth, static_cast<uint64_t>(depth->layout)))
+		{
+			EXIT("depth storage plane store-back failed: extent=%ux%u format=%u\n", depth->extent.width, depth->extent.height,
+			     static_cast<uint32_t>(depth->format));
+		}
+	}
+	m_depth_plane_store_backs.clear();
+}
+
 void CommandBuffer::End()
 {
 	EXIT_IF(IsInvalid());

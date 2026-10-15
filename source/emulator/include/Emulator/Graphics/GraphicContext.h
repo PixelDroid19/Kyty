@@ -337,6 +337,8 @@ struct VideoOutVulkanImage: public VulkanImage
 	bool        neo         = false;
 };
 
+struct StorageTextureVulkanImage;
+
 struct DepthStencilVulkanImage: public VulkanImage
 {
 	DepthStencilVulkanImage(): VulkanImage(VulkanImageType::DepthStencil) {}
@@ -345,6 +347,10 @@ struct DepthStencilVulkanImage: public VulkanImage
 	VulkanSampleLocationState last_sample_locations;
 	// Guest base of the 8-bit stencil plane this image holds, 0 without one.
 	uint64_t stencil_vaddr = 0;
+	// R32F copy of the depth plane that storage views address (depth formats are not storage images), created on
+	// first use and destroyed with this image.
+	StorageTextureVulkanImage* storage_plane = nullptr;
+	VulkanMemory               storage_plane_memory;
 };
 
 struct TextureVulkanImage: public VulkanImage

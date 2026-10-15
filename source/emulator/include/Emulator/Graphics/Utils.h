@@ -841,7 +841,8 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
                        const Vector<VkBufferImageCopy>& regions, uint64_t src_layout);
 void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
 // Copy the raw 32-bit texels of a single-sample, single-layer image into another of the same extent through a
-// transient buffer, one of them D32 depth and the other R32 or B10G11R11 color. Returns false for any other pair.
+// transient buffer, one of them D32 depth (or the depth plane of D32S8, whose stencil it keeps) and the other R32 or
+// B10G11R11 color. Returns false for any other pair.
 // A depth destination keeps every word only on a device with unrestricted depth (VUID-VkCopyBufferToImageInfo2-pRegions-07931).
 [[nodiscard]] bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter);

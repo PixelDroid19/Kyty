@@ -10,6 +10,10 @@
 
 namespace Kyty::Libs::Graphics {
 
+struct GraphicContext;
+struct DepthStencilVulkanImage;
+struct StorageTextureVulkanImage;
+
 class DepthStencilBufferObject: public GpuObject
 {
 public:
@@ -66,6 +70,9 @@ public:
 // (mode 27) and depth (mode 24) layouts share the 64 KiB block grid and the within-block equation, so at an
 // equal extent and a render pitch equal to the depth's block-aligned width each texel keeps its (x, y).
 [[nodiscard]] bool DepthStencilBufferCanSeedFromRenderTexture(const uint64_t* depth, const uint64_t* render, bool next_gen);
+
+// The R32F image a storage view of this depth image's depth plane binds; see DepthStencilVulkanImage::storage_plane.
+[[nodiscard]] StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth);
 
 } // namespace Kyty::Libs::Graphics
 
