@@ -881,22 +881,6 @@ int KYTY_SYSV_ABI NetPoolDestroy(int memid)
 	return OK;
 }
 
-int KYTY_SYSV_ABI NetInetPton(int af, const char* src, void* dst)
-{
-	PRINT_NAME();
-
-	if (af != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (dst == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (strcmp(src, "127.0.0.1") != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	KYTY_LOG_DEBUG("\t src = %.16s\n", src);
-
-	*static_cast<uint32_t*>(dst) = 0x7f000001;
-
-	return OK;
-}
-
 int KYTY_SYSV_ABI NetEtherNtostr(const NetEtherAddr* n, char* str, size_t len)
 {
 	PRINT_NAME();
@@ -2558,6 +2542,50 @@ const char* KYTY_SYSV_ABI NetInetNtop(int af, const void* src, char* dst, int si
 	(void)af;
 	(void)size;
 	return nullptr;
+#endif
+}
+
+// Converts a text address to its binary form in network byte order. Like BSD
+// inet_pton it returns 1 on success and 0 when the text is no address of the family.
+int KYTY_SYSV_ABI NetInetPton(int af, const char* src, void* dst)
+{
+	PRINT_NAME();
+	if (af != kGuestAfInet && af != kGuestAfInet6)
+	{
+		return NET_ERROR_EAFNOSUPPORT;
+	}
+	// The longest address text, an IPv6 address with an embedded IPv4 one, is 45 characters.
+	char   text[64] {};
+	size_t length = 0;
+	for (; length + 1 < sizeof(text); ++length)
+	{
+		const auto* cursor = src + length;
+		if (src == nullptr || !IsGuestReadableRange(cursor, 1) ||
+		    !Core::VirtualMemory::CopyFromGuest(&text[length], reinterpret_cast<uint64_t>(cursor), 1))
+		{
+			return NET_ERROR_EFAULT;
+		}
+		if (text[length] == '\0')
+		{
+			break;
+		}
+	}
+	if (length + 1 == sizeof(text))
+	{
+		return 0;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	uint8_t   address[16] {};
+	const int host_af = af == kGuestAfInet ? AF_INET : AF_INET6;
+	if (::inet_pton(host_af, text, address) != 1)
+	{
+		return 0;
+	}
+	const int copy_result = CopyGuestOutput(dst, address, host_af == AF_INET ? 4u : 16u);
+	return copy_result == OK ? 1 : copy_result;
+#else
+	(void)dst;
+	return NET_ERROR_EAFNOSUPPORT;
 #endif
 }
 

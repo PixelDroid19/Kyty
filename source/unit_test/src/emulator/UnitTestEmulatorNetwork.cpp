@@ -711,6 +711,31 @@ TEST(EmulatorNetwork, NetLoopbackDatagramAndPeerLifecycle)
 #endif
 }
 
+TEST(EmulatorNetwork, NetInetPtonWritesNetworkOrder)
+{
+	using namespace Libs::Network::Net;
+
+	const uint64_t guest_storage = AllocateGuestPage();
+	ASSERT_NE(guest_storage, 0u);
+	auto* const text    = reinterpret_cast<char*>(guest_storage);
+	auto* const address = reinterpret_cast<uint8_t*>(guest_storage + 64);
+
+	std::strcpy(text, "127.0.0.1");
+	ASSERT_EQ(NetInetPton(2, text, address), 1);
+	const uint8_t loopback[4] {127, 0, 0, 1};
+	EXPECT_EQ(std::memcmp(address, loopback, sizeof(loopback)), 0);
+
+	std::strcpy(text, "::1");
+	ASSERT_EQ(NetInetPton(28, text, address), 1);
+	EXPECT_EQ(address[0], 0u);
+	EXPECT_EQ(address[15], 1u);
+
+	std::strcpy(text, "127.0.0");
+	EXPECT_EQ(NetInetPton(2, text, address), 0);
+	EXPECT_EQ(NetInetPton(1, text, address), Kyty::Libs::Network::NET_ERROR_EAFNOSUPPORT);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+}
+
 TEST(EmulatorNetwork, NetEpollDestroyCancelsWaiterBeforeRecreate)
 {
 #if !KYTY_NETWORK_TEST_HOST_EPOLL
