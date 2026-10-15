@@ -186,6 +186,7 @@ int KYTY_SYSV_ABI  NpDeleteRequest(int req_id);
 int KYTY_SYSV_ABI  NpCheckNpAvailability(int req_id, const char* user, void* result);
 int KYTY_SYSV_ABI  NpPollAsync(int req_id, int* result);
 int KYTY_SYSV_ABI  NpGetState(int user_id, uint32_t* state);
+int KYTY_SYSV_ABI  NpGetNpReachabilityState(int user_id, uint32_t* state);
 int KYTY_SYSV_ABI  NpHasSignedUp(int user_id, bool* has_signed_up);
 
 } // namespace NpManager

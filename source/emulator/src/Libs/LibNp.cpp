@@ -779,6 +779,7 @@ LIB_DEFINE(InitNpManager_1)
 	LIB_FUNC("2rsFmlGWleQ", Network::NpManager::NpCheckNpAvailability);
 	LIB_FUNC("uqcPJLWL08M", Network::NpManager::NpPollAsync);
 	LIB_FUNC("eQH7nWPcAgc", Network::NpManager::NpGetState);
+	LIB_FUNC("e-ZuhGEoeC4", Network::NpManager::NpGetNpReachabilityState);
 	LIB_FUNC("Oad3rvY-NJQ", Network::NpManager::NpHasSignedUp);
 }
 

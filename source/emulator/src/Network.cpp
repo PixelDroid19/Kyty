@@ -4164,6 +4164,23 @@ int KYTY_SYSV_ABI NpGetState(int user_id, uint32_t* state)
 	return OK;
 }
 
+// An offline runtime reports the NP service as unavailable.
+int KYTY_SYSV_ABI NpGetNpReachabilityState(int user_id, uint32_t* state)
+{
+	PRINT_NAME();
+
+	constexpr int np_error_invalid_argument = static_cast<int>(0x80550003u);
+	if (state == nullptr)
+	{
+		return np_error_invalid_argument;
+	}
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
+
+	*state = 0; // Unavailable
+
+	return OK;
+}
+
 int KYTY_SYSV_ABI NpHasSignedUp(int user_id, bool* has_signed_up)
 {
 	PRINT_NAME();
