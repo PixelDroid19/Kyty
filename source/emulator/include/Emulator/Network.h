@@ -44,6 +44,8 @@ int64_t KYTY_SYSV_ABI NetSend(int id, const void* buf, uint64_t len, int flags);
 int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags, const void* addr, uint32_t addr_len);
 int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags);
 int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, void* addr, uint32_t* addr_len);
+int64_t KYTY_SYSV_ABI NetSendmsg(int id, const void* msg, int flags);
+int64_t KYTY_SYSV_ABI NetRecvmsg(int id, void* msg, int flags);
 int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* value, int value_len);
 int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len);
 int KYTY_SYSV_ABI NetGetpeername(int id, void* addr, uint32_t* len);

@@ -1239,17 +1239,19 @@ static bool WriteGuestSockaddr(void* addr, void* len, uint32_t max_len, const Gu
 // Guest message flags carry the BSD values. Linux numbers several differently (BSD MSG_DONTWAIT 0x80 is MSG_EOR
 // there and BSD MSG_WAITALL 0x40 is MSG_DONTWAIT), so a non-blocking receive blocked and a waiting one did not.
 // Sends never raise SIGPIPE on the host: a closed peer reports EPIPE instead of ending the emulator.
+struct MessageFlagPair
+{
+	int guest;
+	int host;
+};
+
+static constexpr MessageFlagPair kMessageFlags[] = {{0x1, MSG_OOB},    {0x2, MSG_PEEK},    {0x4, MSG_DONTROUTE}, {0x8, MSG_EOR},
+                                                    {0x10, MSG_TRUNC}, {0x20, MSG_CTRUNC}, {0x40, MSG_WAITALL},  {0x80, MSG_DONTWAIT}};
+
 static int GuestToHostMessageFlags(int guest_flags, bool sending)
 {
-	struct FlagPair
-	{
-		int guest;
-		int host;
-	};
-	static constexpr FlagPair kFlags[] = {{0x1, MSG_OOB},    {0x2, MSG_PEEK},    {0x4, MSG_DONTROUTE}, {0x8, MSG_EOR},
-	                                      {0x10, MSG_TRUNC}, {0x20, MSG_CTRUNC}, {0x40, MSG_WAITALL},  {0x80, MSG_DONTWAIT}};
 	int host_flags = 0;
-	for (const auto& pair: kFlags)
+	for (const auto& pair: kMessageFlags)
 	{
 		if ((guest_flags & pair.guest) != 0)
 		{
@@ -1265,6 +1267,20 @@ static int GuestToHostMessageFlags(int guest_flags, bool sending)
 	(void)sending;
 #endif
 	return host_flags;
+}
+
+// Received message flags (MSG_TRUNC, MSG_CTRUNC, MSG_EOR, MSG_OOB) go back with their BSD values.
+static int HostToGuestMessageFlags(int host_flags)
+{
+	int guest_flags = 0;
+	for (const auto& pair: kMessageFlags)
+	{
+		if ((host_flags & pair.host) != 0)
+		{
+			guest_flags |= pair.guest;
+		}
+	}
+	return guest_flags;
 }
 #endif
 
@@ -2420,6 +2436,274 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 	(void)flags;
 	(void)write_peer;
 	(void)max_addr_len;
+	return NET_ERROR_EOPNOTSUPP;
+#endif
+}
+
+// Guest msghdr and iovec follow the BSD x86-64 layout.
+struct GuestMsghdr
+{
+	uint64_t name;
+	uint32_t name_len;
+	uint32_t pad0;
+	uint64_t iov;
+	int32_t  iov_len;
+	uint32_t pad1;
+	uint64_t control;
+	uint32_t control_len;
+	int32_t  flags;
+};
+static_assert(sizeof(GuestMsghdr) == 48);
+
+struct GuestIovec
+{
+	uint64_t base;
+	uint64_t length;
+};
+static_assert(sizeof(GuestIovec) == 16);
+
+constexpr int      kGuestIovMax              = 1024;
+constexpr uint64_t kGuestMsghdrNameLenOffset = 8;
+
+static int ReadGuestMsghdr(const void* msg, GuestMsghdr* header, std::vector<GuestIovec>* iovecs, uint64_t* total)
+{
+	if (!IsGuestReadableRange(msg, sizeof(GuestMsghdr)) ||
+	    !Core::VirtualMemory::CopyFromGuest(header, reinterpret_cast<uint64_t>(msg), sizeof(GuestMsghdr)))
+	{
+		return NET_ERROR_EFAULT;
+	}
+	if (header->iov_len < 0 || header->iov_len > kGuestIovMax)
+	{
+		return NET_ERROR_EMSGSIZE;
+	}
+	iovecs->resize(static_cast<size_t>(header->iov_len));
+	*total = 0;
+	if (iovecs->empty())
+	{
+		return OK;
+	}
+	const uint64_t table_size = iovecs->size() * sizeof(GuestIovec);
+	const auto*    table      = reinterpret_cast<const void*>(header->iov);
+	if (!IsGuestReadableRange(table, table_size) || !Core::VirtualMemory::CopyFromGuest(iovecs->data(), header->iov, table_size))
+	{
+		return NET_ERROR_EFAULT;
+	}
+	for (const auto& iovec: *iovecs)
+	{
+		if (iovec.length > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - *total)
+		{
+			return NET_ERROR_EINVAL;
+		}
+		*total += iovec.length;
+	}
+	return OK;
+}
+
+// Copies the first `length` bytes described by the guest iovecs into one host buffer.
+static int GatherGuestIovecs(const std::vector<GuestIovec>& iovecs, uint64_t length, HostArray<uint8_t>* payload)
+{
+	if (!payload->Allocate(static_cast<size_t>(length)))
+	{
+		return NET_ERROR_ENOMEM;
+	}
+	uint64_t offset = 0;
+	for (const auto& iovec: iovecs)
+	{
+		const uint64_t part = std::min(iovec.length, length - offset);
+		if (part == 0)
+		{
+			continue;
+		}
+		if (!IsGuestReadableRange(reinterpret_cast<const void*>(iovec.base), part) ||
+		    !Core::VirtualMemory::CopyFromGuest(payload->Data() + offset, iovec.base, part))
+		{
+			return NET_ERROR_EFAULT;
+		}
+		offset += part;
+	}
+	return OK;
+}
+
+static int ScatterGuestIovecs(const std::vector<GuestIovec>& iovecs, const uint8_t* data, uint64_t length)
+{
+	uint64_t offset = 0;
+	for (const auto& iovec: iovecs)
+	{
+		const uint64_t part = std::min(iovec.length, length - offset);
+		if (part == 0)
+		{
+			continue;
+		}
+		const int copy_result = CopyGuestOutput(reinterpret_cast<void*>(iovec.base), data + offset, static_cast<size_t>(part));
+		if (copy_result != OK)
+		{
+			return copy_result;
+		}
+		offset += part;
+	}
+	return OK;
+}
+
+static bool GuestIovecsWritable(const std::vector<GuestIovec>& iovecs)
+{
+	return std::all_of(iovecs.begin(), iovecs.end(), [](const GuestIovec& iovec)
+	                   { return iovec.length == 0 || IsGuestOutputRange(reinterpret_cast<void*>(iovec.base), iovec.length); });
+}
+
+// Ancillary data is not supported: a send that carries it fails, and a receive reports none.
+int64_t KYTY_SYSV_ABI NetSendmsg(int id, const void* msg, int flags)
+{
+	PRINT_NAME();
+	const auto state = FindSocketState(id);
+	if (state == nullptr)
+	{
+		return NET_ERROR_EBADF;
+	}
+	GuestMsghdr             header {};
+	std::vector<GuestIovec> iovecs;
+	uint64_t                total       = 0;
+	const int               read_result = ReadGuestMsghdr(msg, &header, &iovecs, &total);
+	if (read_result != OK)
+	{
+		return read_result;
+	}
+	if (header.control_len != 0)
+	{
+		return NET_ERROR_EOPNOTSUPP;
+	}
+	const bool datagram = SocketIsDatagram(state);
+	if (datagram && total > kMaxIpv4UdpPayload)
+	{
+		return NET_ERROR_EMSGSIZE;
+	}
+	GuestSockaddr guest_addr {};
+	const bool    has_name = header.name != 0;
+	if (has_name && !ReadGuestSockaddr(reinterpret_cast<const void*>(header.name), header.name_len, &guest_addr, state->p2p))
+	{
+		return NET_ERROR_EINVAL;
+	}
+	// A stream send may be partial; one call moves at most one I/O chunk.
+	HostArray<uint8_t> payload;
+	const int gather_result = GatherGuestIovecs(iovecs, datagram ? total : std::min<uint64_t>(total, kSocketIoChunkSize), &payload);
+	if (gather_result != OK)
+	{
+		return gather_result;
+	}
+#if KYTY_NET_HOST_POSIX
+	GuestSockaddr destination = guest_addr;
+	if (has_name && state->p2p)
+	{
+		const int route = ResolveP2pDestination(guest_addr, &destination);
+		if (route != OK)
+		{
+			return route;
+		}
+	}
+	sockaddr_storage host_addr {};
+	const socklen_t  host_addr_len = has_name ? GuestToHostSockaddr(destination, &host_addr) : 0;
+	int              host_fd       = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	const auto sent = ::sendto(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true),
+	                           has_name ? reinterpret_cast<const sockaddr*>(&host_addr) : nullptr, host_addr_len);
+	const int send_errno = errno;
+	EndSocketOperation(state);
+	return sent < 0 ? HostErrnoToNet(send_errno) : sent;
+#else
+	(void)flags;
+	return NET_ERROR_EOPNOTSUPP;
+#endif
+}
+
+int64_t KYTY_SYSV_ABI NetRecvmsg(int id, void* msg, int flags)
+{
+	PRINT_NAME();
+	const auto state = FindSocketState(id);
+	if (state == nullptr)
+	{
+		return NET_ERROR_EBADF;
+	}
+	GuestMsghdr             header {};
+	std::vector<GuestIovec> iovecs;
+	uint64_t                total       = 0;
+	const int               read_result = ReadGuestMsghdr(msg, &header, &iovecs, &total);
+	if (read_result != OK)
+	{
+		return read_result;
+	}
+	if (!IsGuestOutputRange(msg, sizeof(GuestMsghdr)) || !GuestIovecsWritable(iovecs))
+	{
+		return NET_ERROR_EFAULT;
+	}
+	const bool write_peer = header.name != 0 && header.name_len != 0;
+	if (write_peer && header.name_len < 8u)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	HostArray<uint8_t> payload;
+	if (!payload.Allocate(static_cast<size_t>(std::min<uint64_t>(total, SocketIsDatagram(state) ? kMaxUdpReceive : kSocketIoChunkSize))))
+	{
+		return NET_ERROR_ENOMEM;
+	}
+#if KYTY_NET_HOST_POSIX
+	sockaddr_storage host_addr {};
+	iovec            host_iov {payload.Data(), payload.Size()};
+	msghdr           host_msg {};
+	host_msg.msg_name    = write_peer ? &host_addr : nullptr;
+	host_msg.msg_namelen = write_peer ? sizeof(host_addr) : 0;
+	host_msg.msg_iov     = &host_iov;
+	host_msg.msg_iovlen  = 1;
+	int host_fd          = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	const auto received   = ::recvmsg(host_fd, &host_msg, GuestToHostMessageFlags(flags, false));
+	const int  recv_errno = errno;
+	EndSocketOperation(state);
+	if (received < 0)
+	{
+		return HostErrnoToNet(recv_errno);
+	}
+	const int scatter_result = ScatterGuestIovecs(iovecs, payload.Data(), std::min<uint64_t>(received, payload.Size()));
+	if (scatter_result != OK)
+	{
+		return scatter_result;
+	}
+	GuestSockaddr peer {};
+	auto*         name_len = reinterpret_cast<uint8_t*>(msg) + kGuestMsghdrNameLenOffset;
+	if (write_peer && host_msg.msg_namelen != 0)
+	{
+		if (!HostToGuestSockaddr(host_addr, &peer))
+		{
+			return NET_ERROR_EAFNOSUPPORT;
+		}
+		if (!WriteGuestSockaddr(reinterpret_cast<void*>(header.name), name_len, header.name_len, state->p2p ? P2pPeerAddress(peer) : peer))
+		{
+			return NET_ERROR_EFAULT;
+		}
+	} else
+	{
+		header.name_len = 0;
+		if (!Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(name_len), &header.name_len, sizeof(header.name_len)))
+		{
+			return NET_ERROR_EFAULT;
+		}
+	}
+	const uint32_t control_len = 0;
+	const int32_t  msg_flags   = HostToGuestMessageFlags(host_msg.msg_flags);
+	auto*          out         = reinterpret_cast<uint8_t*>(msg);
+	if (!Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(out + offsetof(GuestMsghdr, control_len)), &control_len, sizeof(control_len)) ||
+	    !Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(out + offsetof(GuestMsghdr, flags)), &msg_flags, sizeof(msg_flags)))
+	{
+		return NET_ERROR_EFAULT;
+	}
+	return received;
+#else
+	(void)flags;
+	(void)write_peer;
 	return NET_ERROR_EOPNOTSUPP;
 #endif
 }

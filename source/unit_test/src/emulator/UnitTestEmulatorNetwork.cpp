@@ -815,6 +815,99 @@ TEST(EmulatorNetwork, NetP2pDatagramVirtualPorts)
 #endif
 }
 
+// Guest msghdr (BSD x86-64): name, namelen, iov, iovlen, control, controllen, flags.
+struct GuestTestMsghdr
+{
+	uint64_t name;
+	uint32_t name_len;
+	uint32_t pad0;
+	uint64_t iov;
+	int32_t  iov_len;
+	uint32_t pad1;
+	uint64_t control;
+	uint32_t control_len;
+	int32_t  flags;
+};
+static_assert(sizeof(GuestTestMsghdr) == 48);
+
+TEST(EmulatorNetwork, NetMsgDatagramGathersAndScatters)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX
+	GTEST_SKIP() << "host socket integration is Linux-specific";
+#else
+	using namespace Libs::Network::Net;
+
+	const uint64_t guest_storage = AllocateGuestPage();
+	ASSERT_NE(guest_storage, 0u);
+	auto* const guest_bytes = reinterpret_cast<uint8_t*>(guest_storage);
+	auto* const address     = guest_bytes;
+	auto* const iovecs      = reinterpret_cast<uint64_t*>(guest_bytes + 64);
+	auto* const header      = reinterpret_cast<GuestTestMsghdr*>(guest_bytes + 128);
+	auto* const data        = guest_bytes + 256;
+
+	StoreGuestSockaddr(address, 0);
+	const int socket = NetSocket("network-msg", 2, 2, 0);
+	ASSERT_GT(socket, 0);
+	ASSERT_EQ(NetBind(socket, address, 8), 0);
+	auto* const name_len = reinterpret_cast<int*>(guest_bytes + 48);
+	*name_len            = 8;
+	ASSERT_EQ(NetGetsockname(socket, address, name_len), 0);
+	const uint16_t port = LoadGuestSockaddrPort(address);
+
+	// sendmsg gathers two iovecs into one datagram.
+	std::memcpy(data, "abcdef", 6);
+	iovecs[0] = reinterpret_cast<uint64_t>(data);
+	iovecs[1] = 2;
+	iovecs[2] = reinterpret_cast<uint64_t>(data + 2);
+	iovecs[3] = 4;
+	*header          = {};
+	header->name     = reinterpret_cast<uint64_t>(address);
+	header->name_len = 16;
+	header->iov      = reinterpret_cast<uint64_t>(iovecs);
+	header->iov_len  = 2;
+	ASSERT_EQ(NetSendmsg(socket, header, 0), 6);
+
+	// recvmsg scatters it across iovecs and reports the sender, no control data and no flags.
+	std::memset(data, 0, 16);
+	iovecs[0] = reinterpret_cast<uint64_t>(data);
+	iovecs[1] = 3;
+	iovecs[2] = reinterpret_cast<uint64_t>(data + 8);
+	iovecs[3] = 8;
+	std::memset(address, 0, 16);
+	header->name_len    = 16;
+	header->control_len = 4;
+	header->flags       = -1;
+	ASSERT_EQ(NetRecvmsg(socket, header, 0), 6);
+	EXPECT_EQ(std::memcmp(data, "abc", 3), 0);
+	EXPECT_EQ(std::memcmp(data + 8, "def", 3), 0);
+	EXPECT_EQ(header->name_len, 16u);
+	EXPECT_EQ(LoadGuestSockaddrPort(address), port);
+	EXPECT_EQ(header->control_len, 0u);
+	EXPECT_EQ(header->flags, 0);
+
+	// A datagram larger than the iovecs is truncated and flagged with the BSD MSG_TRUNC value.
+	header->control_len = 0;
+	header->iov_len     = 2;
+	iovecs[1]           = 2;
+	iovecs[3]           = 4;
+	StoreGuestSockaddr(address, port);
+	std::memcpy(data, "abcdef", 6);
+	iovecs[2] = reinterpret_cast<uint64_t>(data + 2);
+	ASSERT_EQ(NetSendmsg(socket, header, 0), 6);
+	header->iov_len = 1;
+	ASSERT_EQ(NetRecvmsg(socket, header, 0), 2);
+	EXPECT_EQ(header->flags, 0x10);
+
+	// Ancillary data cannot be sent.
+	header->control     = reinterpret_cast<uint64_t>(data + 64);
+	header->control_len = 16;
+	EXPECT_EQ(NetSendmsg(socket, header, 0), Kyty::Libs::Network::NET_ERROR_EOPNOTSUPP);
+
+	EXPECT_EQ(NetSocketClose(socket), 0);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+#endif
+}
+
 // A title waits for its bound P2P socket to report state 2 (opened) in the
 // 160-byte record, matching on the socket id at 0x24 and type 6 at 0x28.
 TEST(EmulatorNetwork, NetGetSockInfoReportsBoundP2pSocket)
