@@ -1562,16 +1562,6 @@ static CxxOstreamStorage g_versioned_cerr;
 static CxxOstreamStorage g_versioned_clog;
 static CxxOstreamStorage g_versioned_cout;
 
-struct alignas(8) CxxClassicOstreamStorage
-{
-	std::uint64_t words[12] {};
-};
-
-static_assert(sizeof(CxxClassicOstreamStorage) == 96);
-
-static CxxClassicOstreamStorage g_classic_cerr;
-static CxxClassicOstreamStorage g_classic_cout;
-
 // libc math constant imported by C++ locale initialization.
 static const double g_positive_infinity = INFINITY;
 static std::uint64_t g_locale_id_2   = 2;
@@ -1750,6 +1740,215 @@ constexpr std::uint32_t kCxxIosScientific = 0x800;
 constexpr std::uint32_t kCxxIosFixed      = 0x1000;
 constexpr std::uint32_t kCxxIosFloatMask  = kCxxIosScientific | kCxxIosFixed;
 constexpr std::uint32_t kCxxIosBoolAlpha  = 0x8000;
+
+// Classic standard output streams (_ZSt4cout, _ZSt4cerr). Guests inline the
+// stream inserters, so libc must export constructed objects. Layouts come from
+// the guest's inlined inserter, std::endl and basic_streambuf constructor:
+// streambuf area pointers are reached through the *_ref indirections, and the
+// basic_ios virtual base sits at the offset stored at ostream vptr[-3].
+struct alignas(8) CxxStreambufLayout
+{
+	void* const*  vtable;
+	char*         get_first;
+	char*         put_first;
+	char**        get_first_ref;
+	char**        put_first_ref;
+	char*         get_next;
+	char*         put_next;
+	char**        get_next_ref;
+	char**        put_next_ref;
+	std::int32_t  get_count;
+	std::int32_t  reserved_4c;
+	std::int32_t  put_count;
+	std::int32_t  reserved_54;
+	std::int32_t* get_count_ref;
+	std::int32_t* put_count_ref;
+};
+
+static_assert(offsetof(CxxStreambufLayout, put_next_ref) == 0x40);
+static_assert(offsetof(CxxStreambufLayout, put_count_ref) == 0x60);
+
+struct CxxClassicOstreamLayout;
+
+struct alignas(8) CxxBasicIosLayout
+{
+	void* const*             vtable;
+	std::uint64_t            reserved_08;
+	std::uint32_t            state;
+	std::uint32_t            exceptions;
+	std::uint32_t            flags;
+	std::int32_t             precision;
+	std::int32_t             width;
+	std::uint32_t            reserved_24;
+	std::uint64_t            reserved_28[2];
+	CxxLocaleLayout*         locale;
+	CxxStreambufLayout*      streambuf;
+	CxxClassicOstreamLayout* tie;
+	char                     fill;
+};
+
+static_assert(offsetof(CxxBasicIosLayout, state) == 0x10);
+static_assert(offsetof(CxxBasicIosLayout, flags) == 0x18);
+static_assert(offsetof(CxxBasicIosLayout, width) == 0x20);
+static_assert(offsetof(CxxBasicIosLayout, locale) == 0x38);
+static_assert(offsetof(CxxBasicIosLayout, streambuf) == 0x40);
+static_assert(offsetof(CxxBasicIosLayout, tie) == 0x48);
+static_assert(offsetof(CxxBasicIosLayout, fill) == 0x50);
+
+struct alignas(8) CxxClassicOstreamLayout
+{
+	void* const*      vtable;
+	CxxBasicIosLayout ios;
+};
+
+static_assert(sizeof(CxxClassicOstreamLayout) == 96);
+
+constexpr std::uint32_t kCxxIosSkipWs  = 0x01;
+constexpr std::uint32_t kCxxIosUnitBuf = 0x2000;
+constexpr std::int32_t  kCxxStreamEof  = -1;
+
+// Both streams write to the guest stdout sink, so they share one lock. The
+// guest pairs _Lock/_Unlock on the same thread around every insertion.
+static std::recursive_mutex g_standard_stream_mutex;
+
+static void CxxStandardStreamWrite(const char* data, std::int64_t size)
+{
+	while (size > 0)
+	{
+		const int chunk = static_cast<int>(std::min<std::int64_t>(size, std::numeric_limits<int>::max()));
+		GetPrintfStdFunc()("%.*s", chunk, data);
+		data += chunk;
+		size -= chunk;
+	}
+}
+
+static KYTY_SYSV_ABI void CxxStandardStreambufLock(CxxStreambufLayout* /*self*/)
+{
+	g_standard_stream_mutex.lock();
+}
+
+static KYTY_SYSV_ABI void CxxStandardStreambufUnlock(CxxStreambufLayout* /*self*/)
+{
+	g_standard_stream_mutex.unlock();
+}
+
+static KYTY_SYSV_ABI int CxxStandardStreambufOverflow(CxxStreambufLayout* /*self*/, int character)
+{
+	if (character == kCxxStreamEof)
+	{
+		return 0;
+	}
+	const char narrow = static_cast<char>(character);
+	CxxStandardStreamWrite(&narrow, 1);
+	return character;
+}
+
+static KYTY_SYSV_ABI std::int64_t CxxStandardStreambufPutN(CxxStreambufLayout* /*self*/, const char* data, std::int64_t size)
+{
+	if (data == nullptr || size <= 0)
+	{
+		return 0;
+	}
+	CxxStandardStreamWrite(data, size);
+	return size;
+}
+
+static KYTY_SYSV_ABI int CxxStandardStreambufEof(CxxStreambufLayout* /*self*/)
+{
+	return kCxxStreamEof;
+}
+
+static KYTY_SYSV_ABI std::int64_t CxxStandardStreambufNoCount(CxxStreambufLayout* /*self*/)
+{
+	return 0;
+}
+
+static KYTY_SYSV_ABI CxxStreambufLayout* CxxStandardStreambufSetBuffer(CxxStreambufLayout* self)
+{
+	return self;
+}
+
+static KYTY_SYSV_ABI int CxxStandardStreambufSync(CxxStreambufLayout* /*self*/)
+{
+	return 0;
+}
+
+static KYTY_SYSV_ABI void CxxStandardStreambufImbue(CxxStreambufLayout* /*self*/) {}
+
+// seekoff/seekpos return a pos_type through a hidden pointer whose layout is
+// not verified; output-only standard streams are not positioned by guests.
+static KYTY_SYSV_ABI void CxxStandardStreambufSeek(CxxStreambufLayout* /*self*/)
+{
+	KYTY_NOT_IMPLEMENTED;
+}
+
+// basic_streambuf<char> virtual order: dtor x2, _Lock, _Unlock, overflow,
+// pbackfail, showmanyc, underflow, uflow, xsgetn, xsputn, seekoff, seekpos,
+// setbuf, sync, imbue. Non-output slots keep the base-class defaults.
+static void* const g_standard_streambuf_vtable[16] = {
+    reinterpret_cast<void*>(&CxxVtableNoop),                  // +0x00
+    reinterpret_cast<void*>(&CxxVtableNoop),                  // +0x08
+    reinterpret_cast<void*>(&CxxStandardStreambufLock),       // +0x10
+    reinterpret_cast<void*>(&CxxStandardStreambufUnlock),     // +0x18
+    reinterpret_cast<void*>(&CxxStandardStreambufOverflow),   // +0x20
+    reinterpret_cast<void*>(&CxxStandardStreambufEof),        // +0x28
+    reinterpret_cast<void*>(&CxxStandardStreambufNoCount),    // +0x30
+    reinterpret_cast<void*>(&CxxStandardStreambufEof),        // +0x38
+    reinterpret_cast<void*>(&CxxStandardStreambufEof),        // +0x40
+    reinterpret_cast<void*>(&CxxStandardStreambufNoCount),    // +0x48
+    reinterpret_cast<void*>(&CxxStandardStreambufPutN),       // +0x50
+    reinterpret_cast<void*>(&CxxStandardStreambufSeek),       // +0x58
+    reinterpret_cast<void*>(&CxxStandardStreambufSeek),       // +0x60
+    reinterpret_cast<void*>(&CxxStandardStreambufSetBuffer),  // +0x68
+    reinterpret_cast<void*>(&CxxStandardStreambufSync),       // +0x70
+    reinterpret_cast<void*>(&CxxStandardStreambufImbue),      // +0x78
+};
+
+// ostream vtable: vbase offset, offset to top, type info, then the address
+// point with the destructors. ios_base keeps its own virtual destructors.
+static void* const g_classic_ostream_vtable[5] = {
+    reinterpret_cast<void*>(offsetof(CxxClassicOstreamLayout, ios)), nullptr, nullptr,
+    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* const g_classic_ios_vtable[4] = {
+    reinterpret_cast<void*>(-static_cast<std::intptr_t>(offsetof(CxxClassicOstreamLayout, ios))), nullptr,
+    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+
+// Unbuffered: every pointer is null, so guest inserters fall through to
+// overflow/xsputn. The *_ref slots must still point at the fields.
+static CxxStreambufLayout CxxStandardStreambuf(CxxStreambufLayout* self)
+{
+	CxxStreambufLayout streambuf {};
+	streambuf.vtable        = g_standard_streambuf_vtable;
+	streambuf.get_first_ref = &self->get_first;
+	streambuf.put_first_ref = &self->put_first;
+	streambuf.get_next_ref  = &self->get_next;
+	streambuf.put_next_ref  = &self->put_next;
+	streambuf.get_count_ref = &self->get_count;
+	streambuf.put_count_ref = &self->put_count;
+	return streambuf;
+}
+
+// basic_ios::init postconditions: goodbit, no exceptions, skipws|dec,
+// precision 6, width 0, fill ' '. cerr adds unitbuf and is tied to cout.
+static CxxClassicOstreamLayout CxxClassicOstream(CxxStreambufLayout* streambuf, std::uint32_t extra_flags,
+                                                 CxxClassicOstreamLayout* tie)
+{
+	CxxClassicOstreamLayout stream {};
+	stream.vtable        = g_classic_ostream_vtable + 3;
+	stream.ios.vtable    = g_classic_ios_vtable + 2;
+	stream.ios.flags     = kCxxIosSkipWs | kCxxIosDec | extra_flags;
+	stream.ios.precision = 6;
+	stream.ios.locale    = &g_sce_classic_locale;
+	stream.ios.streambuf = streambuf;
+	stream.ios.tie       = tie;
+	stream.ios.fill      = ' ';
+	return stream;
+}
+
+static CxxStreambufLayout      g_classic_cout_streambuf = CxxStandardStreambuf(&g_classic_cout_streambuf);
+static CxxStreambufLayout      g_classic_cerr_streambuf = CxxStandardStreambuf(&g_classic_cerr_streambuf);
+static CxxClassicOstreamLayout g_classic_cout           = CxxClassicOstream(&g_classic_cout_streambuf, 0, nullptr);
+static CxxClassicOstreamLayout g_classic_cerr = CxxClassicOstream(&g_classic_cerr_streambuf, kCxxIosUnitBuf, &g_classic_cout);
 
 struct CxxIstreamIterator
 {

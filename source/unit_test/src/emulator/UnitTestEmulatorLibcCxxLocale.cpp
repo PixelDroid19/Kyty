@@ -1805,4 +1805,62 @@ TEST(EmulatorLibcCxxLocale, StrerrorRResolvesAndCopiesIntoGuestBuffer)
 	EXPECT_EQ(strerror_r(Libs::Posix::POSIX_ENOENT, nullptr, sizeof(destination)), Libs::Posix::POSIX_EINVAL);
 }
 
+// Guests inline the stream inserters and reach every field of the imported
+// cout/cerr through raw offsets, so the exported objects must be constructed.
+TEST(EmulatorLibcCxxLocale, ClassicStandardStreamsAreConstructedForInlinedInserters)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	auto resolve_object = [&](const char16_t* nid) -> std::uintptr_t {
+		Loader::SymbolResolve query {};
+		query.name                 = nid;
+		query.library              = U"libc";
+		query.library_version      = 1;
+		query.module               = U"libc";
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = Loader::SymbolType::Object;
+		const auto* record         = symbols.Find(query);
+		return record == nullptr ? 0 : record->vaddr;
+	};
+	auto load = [](std::uintptr_t address) { return *reinterpret_cast<const std::uint64_t*>(address); };
+	auto load32 = [](std::uintptr_t address) { return *reinterpret_cast<const std::uint32_t*>(address); };
+	auto ios_of = [&](std::uintptr_t stream) {
+		const auto vtable = load(stream);
+		return stream + static_cast<std::int64_t>(load(vtable - 0x18));
+	};
+
+	const auto cout = resolve_object(u"5PfqUBaQf4g"); // _ZSt4cout
+	const auto cerr = resolve_object(u"TVfbf1sXt0A"); // _ZSt4cerr
+	ASSERT_NE(cout, 0u);
+	ASSERT_NE(cerr, 0u);
+
+	const auto cout_ios = ios_of(cout);
+	EXPECT_EQ(load32(cout_ios + 0x10), 0u);     // goodbit
+	EXPECT_EQ(load32(cout_ios + 0x14), 0u);     // no exceptions
+	EXPECT_EQ(load32(cout_ios + 0x18), 0x11u);  // skipws | dec
+	EXPECT_EQ(load32(cout_ios + 0x1c), 6u);     // precision
+	EXPECT_EQ(load32(cout_ios + 0x20), 0u);     // width
+	EXPECT_NE(load(load(cout_ios + 0x38)), 0u); // locale -> Locimp
+	EXPECT_EQ(load(cout_ios + 0x48), 0u);       // untied
+	EXPECT_EQ(*reinterpret_cast<const char*>(cout_ios + 0x50), ' ');
+
+	// An empty put area sends every character through the virtual overflow.
+	const auto streambuf = load(cout_ios + 0x40);
+	ASSERT_NE(streambuf, 0u);
+	EXPECT_EQ(load(load(streambuf + 0x40)), 0u);
+	const auto streambuf_vtable = load(streambuf);
+	const auto overflow_eof     = Loader::GuestCall::Invoke(load(streambuf_vtable + 0x20), streambuf, 0xffffffffu, 0);
+	EXPECT_EQ(static_cast<std::int32_t>(overflow_eof), 0);
+	EXPECT_EQ(static_cast<std::int32_t>(Loader::GuestCall::Invoke(load(streambuf_vtable + 0x70), streambuf, 0, 0)), 0);
+
+	const auto cerr_ios = ios_of(cerr);
+	EXPECT_NE(load32(cerr_ios + 0x18) & 0x2000u, 0u); // unitbuf
+	EXPECT_EQ(load(cerr_ios + 0x48), cout);
+	EXPECT_NE(load(cerr_ios + 0x40), streambuf);
+}
+
 UT_END();
