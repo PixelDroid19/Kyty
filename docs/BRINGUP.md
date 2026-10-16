@@ -9,6 +9,48 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Transient snapshot entry ceiling in dense passes (2026-10-16)
+
+- Sandbox title gameplay slowed from about 3 fps to about 1 fps within two minutes. Live GPU objects grew
+  from 2.9k to 78k, almost all new read-only `StorageBuffer` objects. Per-draw transient validation rose
+  from 9 to 51 us, and command processing from 112 to 170 us per draw.
+- A temporary census of each persistent fallback recorded the refusal reason and pool state. The new
+  objects were 272- and 320-byte ring constants. The command-buffer pool had refused them because the
+  storage usage had reached its 4,096-entry ceiling, while it held only 8.8 MB of its 63 MiB snapshot
+  budget. A pass of about 3,300 draws needs more views than that. Each refused view became a persistent
+  object. Frame-age retirement (120 frames, 4,096 visits every 30 frames) cannot drain those at 1--3 fps,
+  so every later overlap query walked a larger set.
+- Excluded:
+  - unstable copies (a guest writer racing the capture; 0 observed);
+  - unallocated ranges (0);
+  - overlap refusals (about 470 for these sizes, mostly views contained in a compute-written storage
+    buffer, correctly refused).
+- Change: the per-usage entry ceiling is now 16,384 (`kGpuMemoryTransientBufferMaxEntriesPerUsage`). The
+  total-entry ceiling stays at three usages' worth. The byte budget is unchanged. Vulkan memory is
+  already suballocated from pool blocks, so the ceiling only bounds `VkBuffer` objects. Entries persist
+  across resets of the same command buffer.
+- Verified (Intel, strict, warm shader cache, 300 s, same route), comparing the last two 26-second windows
+  before and after:
+
+  | Metric | Before | After |
+  | --- | --- | --- |
+  | Live objects | 33k, then 78k | 3.6k, then 4.0k |
+  | New storage objects | 29.5k, then 44.5k | 10, then 5 |
+  | Validation (us/draw) | 9.4, then 51 | 1.8, then 1.8 |
+  | Resource binding (us/draw) | 32, then 91 | 18, then 20 |
+  | Command processing (us/draw) | 112, then 170 | 89, then 87 |
+  | Draws per window | 227k, then 153k | 280k, then 286k |
+
+  Gameplay terrain renders as before. The remaining gameplay cost is shader work: 210--240 SPIR-V
+  compiles per window (about 9.5 s) even with a warm cache. Regression check: the racing title (200 s)
+  matches its previous run window for window (command processing 48--65 us/draw, at most 125 live
+  objects) and ends on its usual time-over screen.
+- Open defect, not fixed: small read-only persistent buffers still ratchet upward. The pressure trigger
+  `kGpuMemoryBufferPressureRetireBytes` (256 MiB, `GpuMemory.h`) never fires for tens of thousands of
+  sub-KiB objects. `GpuMemory::FrameDone` (`GpuMemoryWriteback.cpp`) ages by presented frames, so a slow
+  title retires almost nothing. Suggested direction: add an object-count trigger next to the byte
+  trigger. Any future pool refusal would show up here as a climbing `live_objects`.
+
 ## Service plugins identified by their declared module name (2026-10-16)
 
 - The preschool Unity title crashed about one second into module start with a guest read of address 4.

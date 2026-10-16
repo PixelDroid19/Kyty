@@ -13,6 +13,7 @@ constexpr uint64_t kGpuMemoryMaxTransientReadOnlyBytes = 4u * 1024u * 1024u;
 // GpuMemory object whose upload waits on its own fence.
 constexpr uint64_t kGpuMemoryTransientBufferPoolMaxBytes = 64u * 1024u * 1024u;
 constexpr uint64_t kGpuMemoryTransientBufferCriticalReserveBytes = 1u * 1024u * 1024u;
+constexpr uint32_t kGpuMemoryTransientBufferMaxEntriesPerUsage   = 16384u;
 
 static_assert(kGpuMemoryTransientBufferCriticalReserveBytes < kGpuMemoryTransientBufferPoolMaxBytes);
 static_assert(kGpuMemoryMaxTransientReadOnlyBytes <=
@@ -63,8 +64,10 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 	                                                                    GpuMemoryTransientBufferAllocationClass allocation_class)
 {
 	// Bytes bound the pool; the entry ceiling only bounds Vulkan objects. Ring
-	// constants arrive as thousands of sub-KiB views per command buffer.
-	constexpr uint32_t MaxEntriesPerUsage = 4096u;
+	// constants arrive as thousands of sub-KiB views per command buffer: a
+	// 3,300-draw pass filled 4,096 storage entries with 8.8 MB, a seventh of the
+	// byte budget, and every later view fell back to a persistent object.
+	constexpr uint32_t MaxEntriesPerUsage = kGpuMemoryTransientBufferMaxEntriesPerUsage;
 	constexpr uint32_t MaxEntries         = MaxEntriesPerUsage * 3u;
 	const uint64_t max_bytes = allocation_class == GpuMemoryTransientBufferAllocationClass::Snapshot
 	                               ? kGpuMemoryTransientBufferPoolMaxBytes - kGpuMemoryTransientBufferCriticalReserveBytes
