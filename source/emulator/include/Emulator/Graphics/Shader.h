@@ -2253,6 +2253,8 @@ struct ShaderVertexStreamAccessScan
 	// A MUBUF/MTBUF instruction that is never a fetch candidate always reads its stream.
 	bool                             unconditional_reader = false;
 	Vector<std::pair<uint32_t, int>> fetch_candidates;
+	// Attribute-table dwords (bit i = dword i) the program loads from fetch_attrib_reg.
+	uint32_t attrib_dwords_read = 0;
 };
 [[nodiscard]] ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& code, int fetch_attrib_reg,
                                                                           int fetch_buffer_reg);

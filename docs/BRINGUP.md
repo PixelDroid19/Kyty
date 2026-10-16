@@ -9,6 +9,43 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Vertex shader identity limited to attribute dwords the program loads (2026-10-16)
+
+- After the transient-entry fix below, sandbox title gameplay still compiled 210--300 SPIR-V modules
+  per 26-second window (about 10 s of compile time) with a warm cache, and the 512-entry graphics
+  pipeline cache evicted 500--600 pipelines per window. Translation misses kept arriving with zero
+  translation-cache evictions, so new shader keys were being created, not old ones lost.
+- A temporary log of every translation-miss key showed that the seven busiest vertex programs differed
+  only in raw attribute-table dwords (`fetch_attrib_data`), each taking hundreds of distinct values.
+  In every case, the varying dword was a hole in the program's input semantics: for example, semantics
+  0, 1, 3 and 5 declared, with dwords 2 and 4 varying. The guest disassembly of these programs loads
+  exactly the declared dwords from the attribute-table register (for example, `s_load_dwordx2` at 0,
+  `s_load_dword` at 12 and 20). The hole dwords hold unrelated memory that changes per draw. Kyty
+  copied every dword up to the highest semantic into the shader identity and into the SPIR-V constants,
+  so the same program was translated and compiled once per hole value.
+- Change: the cached vertex-stream scan of each program now records which attribute-table dwords its
+  scalar loads read (all dwords when an offset is not constant). Dwords the program never loads are
+  cleared before the identity is built. Loaded dwords and the decoded per-semantic resources are
+  unchanged, so code generation for every dword the program reads is unchanged.
+- Verified (Intel, strict, same warm cache, 300 s, same route), comparing the gameplay windows before
+  and after:
+
+  | Metric | Before | After |
+  | --- | --- | --- |
+  | SPIR-V compiles per window | 185--297 | 0--1 |
+  | Pipeline evictions per window | 494--596 | 0 |
+  | Command processing (us/draw) | 87--112 | 36--38 |
+  | Draws per window | 225k--286k | 630k--655k |
+  | Frame rate | 2.9--4.0 fps | 5.7--6.5 fps |
+
+  The world also appears sooner. The route's last input is at 139 s. Gameplay was first captured at
+  about 157 s after the change, against about 206 s before. Gameplay captures show the same textured
+  terrain, trees and HUD. Regression check: the racing title (200 s) matches its previous run window
+  for window (command processing 47--65 us/draw, at most 110 live objects, 0--2 compiles) and ends on
+  its usual time-over screen.
+- Note: the local warm SPIR-V cache had filled to its 64 MiB store limit, mostly with per-hole
+  variants. It should be regenerated after this change.
+
 ## Transient snapshot entry ceiling in dense passes (2026-10-16)
 
 - Sandbox title gameplay slowed from about 3 fps to about 1 fps within two minutes. Live GPU objects grew
@@ -41,8 +78,8 @@ fail on the current HEAD before acting on them.
   | Command processing (us/draw) | 112, then 170 | 89, then 87 |
   | Draws per window | 227k, then 153k | 280k, then 286k |
 
-  Gameplay terrain renders as before. The remaining gameplay cost is shader work: 210--240 SPIR-V
-  compiles per window (about 9.5 s) even with a warm cache. Regression check: the racing title (200 s)
+  Gameplay terrain renders as before. The remaining gameplay cost was shader work: 210--240 SPIR-V
+  compiles per window (about 9.5 s) even with a warm cache. The entry above resolves it. Regression check: the racing title (200 s)
   matches its previous run window for window (command processing 48--65 us/draw, at most 125 live
   objects) and ends on its usual time-over screen.
 - Open defect, not fixed: small read-only persistent buffers still ratchet upward. The pressure trigger

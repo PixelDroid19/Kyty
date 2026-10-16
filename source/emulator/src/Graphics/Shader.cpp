@@ -3728,10 +3728,11 @@ Kyty::Core::String8 ShaderVertexNggFrontRefusal(const ShaderVertexInputInfo& inf
 	                                                  : Kyty::Core::String8();
 }
 
-// Whether a vertex-stream SSBO of this draw has a reader left after the fetch rewrite. The
-// scan depends only on the immutable code and the fetch registers; the draw supplies the
-// input resources that decide which candidates become fetches.
-static bool VertexProgramStreamsRead(const ShaderVertexProgram& program, const ShaderVertexInputInfo& info)
+// The vertex-stream access scan depends only on the immutable code and the fetch
+// registers; the draw supplies the input resources that decide which candidates become
+// fetches.
+static std::shared_ptr<const ShaderVertexStreamAccessScan> VertexProgramStreamScan(const ShaderVertexProgram& program,
+                                                                                  const ShaderVertexInputInfo& info)
 {
 	std::shared_ptr<const ShaderVertexStreamAccessScan> scan;
 	{
@@ -3745,7 +3746,21 @@ static bool VertexProgramStreamsRead(const ShaderVertexProgram& program, const S
 		std::lock_guard<std::mutex> lock(program.stream_access_mutex);
 		program.stream_access = scan;
 	}
-	return ShaderVertexStreamStorageHasReader(*scan, info);
+	return scan;
+}
+
+// An attribute-table dword the program never loads is not guest-visible. A hole between
+// declared semantics holds unrelated memory that changes per draw; keeping it would split
+// the shader identity and recompile the same program for every value.
+static void ClearUnreadAttribData(ShaderVertexInputInfo* info, const ShaderVertexStreamAccessScan& scan)
+{
+	for (int i = 0; i < info->fetch_attrib_data_num; i++)
+	{
+		if ((scan.attrib_dwords_read & (1u << static_cast<uint32_t>(i))) == 0)
+		{
+			info->fetch_attrib_data[i] = 0;
+		}
+	}
 }
 
 void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
@@ -3923,9 +3938,15 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		ShaderParseAttrib(info, data.input_semantics, data.num_input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info, ps5);
 		// The generator compiles program->code for a Gen5 non-embedded stage
-		// (ShaderParseVS), so the stream readers are decided on that code.
-		const bool streams_read = !(ps5 && !regs->vs_embedded && info->program != nullptr) ||
-		                          VertexProgramStreamsRead(*info->program, *info);
+		// (ShaderParseVS), so the stream readers and attribute loads are decided on that code.
+		const auto stream_scan = (ps5 && !regs->vs_embedded && info->program != nullptr)
+		                             ? VertexProgramStreamScan(*info->program, *info)
+		                             : nullptr;
+		if (stream_scan != nullptr)
+		{
+			ClearUnreadAttribData(info, *stream_scan);
+		}
+		const bool streams_read = stream_scan == nullptr || ShaderVertexStreamStorageHasReader(*stream_scan, *info);
 		ShaderAppendVertexStreamStorage(info, streams_read);
 
 		constexpr uint32_t user_data_base = 8;
