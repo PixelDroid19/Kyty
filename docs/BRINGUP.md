@@ -51,13 +51,37 @@ fail on the current HEAD before acting on them.
     need about 64 more 512-set pools.
 - Excluded:
   - Deferring the release of in-flight sets: the counters showed none, so that change was dropped.
-- Open: the frame is still bound by command processing (about 34 us/draw) and GPU fence waits
-  (about 5 s per 26-second window). Temporary per-call-site counters put the longest waits, about
-  10 ms each and roughly one per frame, in indexed and auto-index draws that wait for an in-flight
-  submission before preparing the guest device-address table; synchronous buffer uploads add many
-  short waits.
-  The next profile entries are read-only snapshot comparison, `ResetHash`, timer reads, allocation,
-  and per-draw shader re-analysis.
+- Regression check after the eviction change (Intel, strict, built from the 88a1c297 tree, 240 s): the
+  fishing title docks and renders the harbor correctly. Its steady windows measured command processing
+  at 39.7--41.1 us/draw (47.9--49.6 in the previous run), resource binding at 17.4--18.2 (27.0--28.1),
+  and 19.6--19.9 fps (12.6--16.8).
+- Open: the sandbox frame is still bound by command processing (about 34 us/draw) and GPU fence waits
+  (about 5 s per 26-second window). Removing every fence wait would leave about 27 us/draw, so per-draw
+  CPU cost stays the larger lever. The next profile entries are read-only snapshot comparison,
+  `ResetHash`, timer reads, allocation, and per-draw shader re-analysis.
+- Fence-wait attribution in sandbox gameplay (temporary per-call-site counters):
+  - The longest waits come from indexed and auto-index draws whose shaders read guest memory through
+    device addresses. Before such a draw, `GuestDeviceAddressPendingWriteBack` finds a writable storage
+    buffer in a registered range with an incomplete use, waits for that submission, and writes the
+    buffer back to guest memory.
+  - The waited submissions belong to the compute ring (queue 8). The buffers are 48 B to 30 KiB, each
+    with one recorded use and a write count that grows by about one per dispatch. Waits of 1 ms or more
+    took a median of 2.1 ms (90th percentile 8.7 ms), three to four per frame. These per-wait details
+    were sampled during world loading; the aggregate counters kept the same rate of slow waits through
+    gameplay, but the waited objects were not sampled there.
+  - The compute ring already submits at the end of every ring run, so most of these waits are for
+    compute work that is submitted and still running.
+  - Excluded:
+    - Snapshot refresh of tracked flexible-memory chunks, and the retired-table budget: 0, 0 and 2
+      events against about 55,000 write-back waits. Only one 32 KiB chunk is tracked.
+    - Retries repeating draw preparation: 2 retries in 54,000 waits. Device-address preparation runs
+      before descriptor binding.
+    - Waiting on read-only uses: every waited buffer had pending writes and one recorded use.
+  - Direction, not yet taken: skipping the wait would need write-backs that become visible in guest
+    memory on the device timeline, ordered before every guest-visible compute signal (label events fire
+    mid-submission). Copying the whole storage object into the guest window is not equivalent, because
+    a dispatch may write only part of the object. Binding storage in physical ranges directly to the
+    imported window is the sound form, and it is a structural change.
 
 ## Vertex shader identity limited to attribute dwords the program loads (2026-10-16)
 
