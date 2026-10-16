@@ -34,6 +34,22 @@ fail on the current HEAD before acting on them.
   store read later) is gone: an unread private slot is unobservable.
 - The new rule accepts a superset of the old one (same checks, path-precise). Offline scan of the
   178 programs: 132 admitted before, 146 after, and no program lost.
+## Compares that overwrite their own scalar source (2026-10-16)
+
+- The same terrain shader then refused at `pc=0x2b30`: "scalar written under divergent control flow
+  is read after the join". A VCC branch on `V_CMP_NEQ_F32 s[8:9], 0, s9`, a compare of a scalar
+  number, was treated as lane divergent. The uniform-compare check read the taint of `s9` after
+  the instruction had already written its destination pair, so it saw a mask instead of a number.
+- Fix: the compare's uniformity is judged on its sources before its destination is written, like
+  the existing snapshot of uniform words for scalar mask algebra.
+- Offline scan after both fixes: 168 of 178 programs admitted, including every earlier one. Found,
+  not fixed: four banner forward shaders still refuse with "scalar written under divergent control
+  flow" (`pc` 0x330 to 0x3b0), and six volume-population pixel shaders write device memory under
+  helper lanes. Neither has appeared in a run yet, and neither is analysed. One lead for the first:
+  a divergent region counts every instruction between the branch and its target as written,
+  including blocks that leave by `S_BRANCH` past the join, so path-precise region writes may admit
+  more.
+
 ## Four-byte render-target micro tile (2026-10-16)
 
 - Observed (Intel, strict, `minecraft-enter` route): in sandbox-title gameplay, plants and leaves

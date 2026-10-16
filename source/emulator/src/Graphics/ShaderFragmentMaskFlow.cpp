@@ -441,7 +441,7 @@ private:
 	void                  TrackRegionSubset(const ShaderInstruction& inst, bool exec_subset_before);
 	void                  UpdateScc(const ShaderInstruction& inst, uint8_t source_taint);
 	bool                  UniformComparison(const ShaderInstruction& inst) const;
-	void                  TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources);
+	void                  TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources, bool uniform_comparison);
 	[[nodiscard]] bool    IsUniformMask(const ShaderOperand& operand) const;
 	[[nodiscard]] bool    IsUniformMaskIn(const std::bitset<kWords>& masks, const ShaderOperand& operand) const;
 	void                  SetUniformMask(const ShaderOperand& dst, bool uniform);
@@ -773,10 +773,11 @@ void Flow::SetUniformMask(const ShaderOperand& dst, bool uniform)
 
 // Compare of uniform sources, a copy of such a mask, EXEC narrowed by one (nonzero exactly when the compare holds),
 // or the AND/OR of two such masks: every active lane gets c1 && c2 (c1 || c2), the same bit. `sources` holds the
-// uniform words before the instruction wrote its destination, which may also be a source (S_AND VCC, VCC, ...).
-void Flow::TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources)
+// uniform words, and `uniform_comparison` the compare's verdict, before the instruction wrote its destination,
+// which may also be a source (S_AND VCC, VCC, ... or V_CMP s[8:9], 0, s9).
+void Flow::TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources, bool uniform_comparison)
 {
-	if (StartsWith(inst.type, "VCmp")) { SetUniformMask(inst.dst, UniformComparison(inst)); return; }
+	if (StartsWith(inst.type, "VCmp")) { SetUniformMask(inst.dst, uniform_comparison); return; }
 	const auto uniform = [&](const ShaderOperand& operand) { return IsUniformMaskIn(sources, operand); };
 	const bool copy     = (inst.type == Type::SMovB64 || inst.type == Type::SMovB32) && inst.src_num == 1 && uniform(inst.src[0]);
 	const bool narrowed = (inst.type == Type::SAndB64 || inst.type == Type::SAndB32) && inst.src_num == 2 &&
@@ -1154,7 +1155,8 @@ bool Flow::Step(const ShaderInstruction& inst)
 	const bool exec_subset_before = !m_regions.empty() && m_regions.back().exec_subset;
 	const bool one_outside_after  = ResultOneOutsideRegion(inst);
 	m_lane_preserving = PreservesLanesOutsideRegion(inst);
-	const auto uniform_sources = m_state.uniform_mask;
+	const auto uniform_sources    = m_state.uniform_mask;
+	const bool uniform_comparison = UniformComparison(inst);
 	const bool defined = Define(inst, inst.dst, produced) && Define(inst, inst.dst2, produced);
 	m_lane_preserving = false;
 	if (!defined) { return false; }
@@ -1169,7 +1171,7 @@ bool Flow::Step(const ShaderInstruction& inst)
 		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (wide ? kWide : kClean) | (outer ? kOuter : kClean) | kPartial);
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 	}
-	TrackUniformMask(inst, uniform_sources);
+	TrackUniformMask(inst, uniform_sources, uniform_comparison);
 	// SCC = "result is nonzero": it is as wide as the mask the instruction produced, not as the
 	// sources it read (ANDN2 of a narrow mask by a wide one is narrow).
 	const uint8_t scc_source = (produced & kMask) != 0u ? static_cast<uint8_t>((source_taint & ~kWide) | (produced & kWide)) : source_taint;

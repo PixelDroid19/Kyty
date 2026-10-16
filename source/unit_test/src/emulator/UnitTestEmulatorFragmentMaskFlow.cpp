@@ -1049,6 +1049,28 @@ TEST(EmulatorFragmentMaskFlow, VccBranchRequiresUniformityOfTheWholePair)
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
+// A compare of a scalar number whose destination pair overwrites that number decides the same way for every lane.
+TEST(EmulatorFragmentMaskFlow, ACompareOverwritingItsScalarSourceStaysUniform)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Words words;
+		words.insert(words.end(), {0xd4000000u | (0xc5u << 16u) | 20u, Inline(0) | (20u << 9u)}); // v_cmp_ne_u32 s[20:21], 0, s20
+		Sop1(words, 4, kVccLo, 20);                                                                // s_mov_b64 vcc, s[20:21]
+		Sopp(words, 6, 1);                                                                         // s_cbranch_vccz over one write
+		Sop1(words, 3, 22, Inline(1));                                                             // s_mov_b32 s22, 1
+		Vop1(words, 1, 3, 22);                                                                     // join: v_mov_b32 v3, s22
+		Vop1(words, 1, 2, Inline(0));
+		Append(words, Mrt0Export(2u, 3u, 2u, 3u));
+		Sopp(words, 1);
+		const auto code = ParsePixel({words});
+		Check(code.GetInstructions().At(0).dst.register_id == 20, "the compare writes the pair holding its source");
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
+		Check(flow.lane_local && flow.reason == nullptr, "the uniformity of a compare is judged on its sources before the write");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 // A wave32 ignores the upper half of VCC (RDNA2 ISA 2.1, 3.x): a compare into VCC leaves VCC_HI, which the
 // program uses as an ordinary SGPR across it. A wave64 compare overwrites VCC_HI with lane bits.
 std::vector<Words> NumberInVccHiAcrossCompare()
