@@ -4,10 +4,8 @@
 
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
-#include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
-#include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Profiler.h"
@@ -129,53 +127,15 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	return vk_obj;
 }
 
-bool DepthStencilBufferCanSeedFromRenderTexture(const uint64_t* depth, const uint64_t* render, bool next_gen)
-{
-	if (!next_gen || depth == nullptr || render == nullptr)
-	{
-		return false;
-	}
-	if (depth[DepthStencilBufferObject::PARAM_FORMAT] != VK_FORMAT_D32_SFLOAT || depth[DepthStencilBufferObject::PARAM_HTILE] != 0u ||
-	    depth[DepthStencilBufferObject::PARAM_SAMPLES] != 1u)
-	{
-		return false;
-	}
-	// Gen5 render targets are always tiled (mode 27); a GPU-owned one publishes no guest bytes.
-	const auto render_format = static_cast<RenderTextureFormat>(render[RenderTextureObject::PARAM_FORMAT]);
-	if ((render_format != RenderTextureFormat::R32Sfloat && render_format != RenderTextureFormat::B10G11R11Ufloat) ||
-	    render[RenderTextureObject::PARAM_TILED] == 0u || render[RenderTextureObject::PARAM_WRITE_BACK] != 0u ||
-	    render[RenderTextureObject::PARAM_SAMPLES] != 1u || render[RenderTextureObject::PARAM_ARRAY_LAYERS] != 1u)
-	{
-		return false;
-	}
-	const auto width  = depth[DepthStencilBufferObject::PARAM_GUEST_WIDTH];
-	const auto height = depth[DepthStencilBufferObject::PARAM_GUEST_HEIGHT];
-	return width != 0u && width <= UINT32_MAX && render[RenderTextureObject::PARAM_WIDTH] == width &&
-	       render[RenderTextureObject::PARAM_HEIGHT] == height &&
-	       render[RenderTextureObject::PARAM_PITCH] == TileAlign64KBPitch(static_cast<uint32_t>(width), 4u) &&
-	       render[RenderTextureObject::PARAM_HOST_WIDTH] == depth[DepthStencilBufferObject::PARAM_HOST_WIDTH] &&
-	       render[RenderTextureObject::PARAM_HOST_HEIGHT] == depth[DepthStencilBufferObject::PARAM_HOST_HEIGHT];
-}
-
-static VulkanImage* TexelBitsSource(const GpuMemoryObject& object)
-{
-	switch (object.type)
-	{
-		case GpuMemoryObjectType::RenderTexture: return static_cast<RenderTextureVulkanImage*>(object.obj);
-		case GpuMemoryObjectType::StorageTexture: return static_cast<StorageTextureVulkanImage*>(object.obj);
-		default: return nullptr;
-	}
-}
-
-// The depth image takes the texels of the render target or storage view whose bytes it reinterprets
-// (DepthStencilBufferCanSeedFromRenderTexture, StorageTextureSharesDepthTexels), instead of starting undefined.
+// The depth image takes the texels of the storage view whose bytes it reinterprets
+// (StorageTextureSharesDepthTexels), instead of starting undefined.
 static void* create_from_texel_bits_func(GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* params,
                                          GpuMemoryScenario /*scenario*/, const Vector<GpuMemoryObject>& objects, VulkanMemory* mem)
 {
 	KYTY_PROFILER_BLOCK("DepthStencilBufferObject::CreateFromObjects");
 
-	EXIT_IF(buffer == nullptr || objects.Size() != 1);
-	auto* source = TexelBitsSource(objects.At(0));
+	EXIT_IF(buffer == nullptr || objects.Size() != 1 || objects.At(0).type != GpuMemoryObjectType::StorageTexture);
+	auto* source = static_cast<StorageTextureVulkanImage*>(objects.At(0).obj);
 	EXIT_IF(source == nullptr || source->guest_size == 0u);
 
 	const uint64_t vaddr  = 0;

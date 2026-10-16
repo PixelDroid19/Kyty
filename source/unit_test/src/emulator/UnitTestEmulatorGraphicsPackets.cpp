@@ -3452,8 +3452,11 @@ TEST(EmulatorGraphicsPackets, Sw64kRx4bppWithinBlockIsBijective)
 	EXPECT_EQ(unique, k_block * k_block);
 	EXPECT_EQ(TileGetSw64kRxOffset(0, 0, k_block, 4), 0u);
 	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_block, 4), 4u);
-	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x8u);
-	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0xcu);
+	EXPECT_EQ(TileGetSw64kRxOffset(2, 0, k_block, 4), 0x8u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x10u);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0x14u);
+	EXPECT_EQ(TileGetSw64kRxOffset(4, 0, k_block, 4), 0x80u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 4, k_block, 4), 0x40u);
 }
 
 TEST(EmulatorGraphicsPackets, Sw64kRx2bppWithinBlockIsBijective)
@@ -3519,8 +3522,9 @@ TEST(EmulatorGraphicsPackets, Standard64KB32WithinBlockIsBijective)
 	EXPECT_EQ(TileGetStandard64KBOffset(0, 0, k_block, 4u), 0u);
 	EXPECT_EQ(TileGetStandard64KBOffset(1, 0, k_block, 4u), 4u);
 	EXPECT_EQ(TileGetStandard64KBOffset(0, 1, k_block, 4u), 0x10u);
-	// Distinct from kRenderTarget: (0,1) is 0x10 here, 0x8 for tile 27.
-	EXPECT_NE(TileGetStandard64KBOffset(0, 1, k_block, 4u), TileGetSw64kRxOffset(0, 1, k_block, 4));
+	// Distinct from kRenderTarget above the micro tile: (8,0) is 0x200 here, 0x100 for tile 27.
+	EXPECT_EQ(TileGetStandard64KBOffset(8, 0, k_block, 4u), 0x200u);
+	EXPECT_EQ(TileGetSw64kRxOffset(8, 0, k_block, 4), 0x100u);
 }
 
 TEST(EmulatorGraphicsPackets, Sw64kRx8bppWithinBlockIsBijective)

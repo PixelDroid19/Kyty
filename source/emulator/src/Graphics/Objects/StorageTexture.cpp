@@ -877,7 +877,7 @@ bool StorageTextureSharesDepthTexels(const uint64_t* storage, const uint64_t* de
 	const auto format = VulkanResolveGuestImageFormat(GuestImageUsage::Storage, static_cast<uint8_t>(packed >> 8u),
 	                                                  static_cast<uint8_t>(packed), static_cast<uint16_t>(packed >> 16u));
 	return (format == VK_FORMAT_R32_SFLOAT || format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) &&
-	       (tile == 24u || tile == 27u) && storage[StorageTextureObject::PARAM_LEVELS] == 1u &&
+	       tile == 24u && storage[StorageTextureObject::PARAM_LEVELS] == 1u &&
 	       storage[StorageTextureObject::PARAM_RESOURCE_TYPE] == 9u && storage[StorageTextureObject::PARAM_DEPTH] == 1u &&
 	       storage[StorageTextureObject::PARAM_BASE_ARRAY] == 0u &&
 	       storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] == ((width << 32u) | height) &&

@@ -65,12 +65,6 @@ public:
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
 
-// A Gen5 32-bit depth target without HTILE or stencil, bound over the range of a single-sample, single-layer
-// render target with a 32-bit texel, reads the raw bytes that target rendered. The 4-byte render-target
-// (mode 27) and depth (mode 24) layouts share the 64 KiB block grid and the within-block equation, so at an
-// equal extent and a render pitch equal to the depth's block-aligned width each texel keeps its (x, y).
-[[nodiscard]] bool DepthStencilBufferCanSeedFromRenderTexture(const uint64_t* depth, const uint64_t* render, bool next_gen);
-
 // The R32F image a storage view of this depth image's depth plane binds; see DepthStencilVulkanImage::storage_plane.
 [[nodiscard]] StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth);
 

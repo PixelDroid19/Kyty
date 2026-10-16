@@ -875,14 +875,9 @@ uint64_t GpuMemory::create_raw_source_write_time(const ObjectInfo& owner)
 	return owner.gpu_update_time > owner.cpu_update_time ? owner.gpu_update_time : 0u;
 }
 
-// A depth target over a render target or storage view, or a storage view over a depth target, that reinterprets
-// its 32-bit texels.
+// A depth target over a storage view, or a storage view over a depth target, that reinterprets its 32-bit texels.
 static bool CreateReadsTexelBits(const GpuObject& info, GpuMemoryObjectType parent_type, const uint64_t* parent_params)
 {
-	if (info.type == GpuMemoryObjectType::DepthStencilBuffer && parent_type == GpuMemoryObjectType::RenderTexture)
-	{
-		return DepthStencilBufferCanSeedFromRenderTexture(info.params, parent_params, Config::IsNextGen());
-	}
 	if (info.type == GpuMemoryObjectType::DepthStencilBuffer && parent_type == GpuMemoryObjectType::StorageTexture)
 	{
 		return StorageTextureSharesDepthTexels(parent_params, info.params, Config::IsNextGen());
@@ -2135,7 +2130,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				                               : -1;
 				if (seed_id >= 0)
 				{
-					// The depth target reinterprets the bytes one render target rendered: copy them from it alone,
+					// The depth target reinterprets the bytes one storage view last held: copy them from it alone,
 					// then retire every reclaimed parent.
 					Vector<OverlappedBlock> seed;
 					for (const auto& obj: others)

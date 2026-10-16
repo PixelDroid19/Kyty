@@ -9,6 +9,39 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Four-byte render-target micro tile (2026-10-16)
+
+- Observed (Intel, strict, `minecraft-enter` route): in sandbox-title gameplay, plants and leaves
+  showed red and green blocky patches, and grass block sides had stray blue dots.
+- The block atlas is a 2048x2048 four-level render target (tile mode 27, four bytes per texel). The
+  guest draws only level 0 on the GPU and samples the whole chain; levels 1 to 3 come from guest
+  CPU-written tiled bytes that the host detiles when it creates the target. A gated dump of every
+  level, compared with a box downsample of the host-rendered level 0, showed that each 8x8 micro
+  tile of levels 1 to 3 was permuted. Swapping x1 with y0 and x2 with y2 in the detile matched the
+  guest content. Mean absolute error per channel, before and after: level 1 8.12 to 4.93, level 2
+  10.21 to 2.98, level 3 25.12 to 0.45. Two dumps from separate runs agree. The level 1 residual
+  sits in regions where the guest filter or animated tiles differ; rows without them match exactly,
+  so the bits above the micro tile were already right.
+- Contract: inside a 64 KiB block, the four-byte `SW_64KB_R_X` layout orders the micro tile
+  `x0 x1 y0 y1 y2 x2` (offset bits 2 to 7). Bits 8 to 15 are unchanged. The previous equation used
+  the depth (`Z_X`) order `x0 y0 x1 y1 x2 y2`. Round trips through the host's own detile hid the
+  error, because the tests built their input with the same helper. The GPU detile shader and its
+  inverse for raw aliases take the same order; the checked-in SPIR-V is regenerated.
+- Consequence for depth and colour aliases: the four-byte render-target and depth layouts now
+  differ in the micro tile. The raw texel copy of 2026-10-13 copies host texels at equal (x, y), so
+  it is exact only between views in the same layout. A D32 depth target is therefore seeded only
+  from a mode 24 storage view (and the reverse); render targets and mode 27 storage views no longer
+  seed it. Defect found, not fixed: a depth target that reads a mode 27 target's bytes now starts
+  without them. Suggested direction: copy through the buffer stage with a compute pass that applies
+  the micro-tile permutation (`x' = x0 | y0<<1 | y2<<2`, `y' = x1 | y1<<1 | x2<<2` inside each 8x8
+  tile) instead of refusing.
+- Verified (Intel, strict, `minecraft-enter`, 300 s): the run opened a newly created world and
+  spawned by frame 3,457. Captures show grass sides, sea grass and sugar cane with correct textures
+  and no red or green blocks. At 285 s it stopped on a pixel shader that writes memory under a
+  64-lane wave (`fragment wave transport ... helper lanes would be observable`); that shader had
+  not appeared in earlier runs on the previous world and is recorded separately. Unit tests: 1,449
+  graphics tests, the graphics diagnostics integration test and the checked-in detile SPIR-V check.
+
 ## Unread vertex snapshot tails (2026-10-16)
 
 - In the fishing title's dock gameplay, transient capture cost 5.26 us per draw, but the copy itself
@@ -1661,8 +1694,11 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
   overwritten. The previous code had no relation for depth over storage, so
   the read-only depth started undefined and hit the read-only clear refusal.
 - Contract:
-  - The 4-byte depth (mode 24) and render-target (mode 27) layouts address
-    texels alike. A unit test pins this.
+  - The 4-byte depth (mode 24) and render-target (mode 27) layouts were
+    taken to address texels alike, pinned by a unit test that used the
+    production helpers. Disproved on 2026-10-16: the guest's mode 27 micro
+    tile differs (see "Four-byte render-target micro tile"); the seed now
+    admits mode 24 views only.
   - A depth target over an equal-range render target or matching storage
     view, and a storage view over such a depth target, copy the raw 32-bit
     words of the newest writer (`create_texel_bits_seed`), then retire it.
@@ -4666,8 +4702,9 @@ selected published source; none is a gameplay or visual acceptance.
   `x0 x1 x2 y1 y0 y2 x3 y4 | x3^y3 x4^y4 x6^y5 x5^y6 | y6 x6 y7 x7` inside a 256x256 block. The existing two- and
   eight-byte equations match the same published table exactly, which ties the new form to the same source. A
   round-trip test (400x260, pitch 512) constructs its input and reference with the production offset helper, so it
-  does not independently establish the one-byte equation. Publication requires an independent oracle. Open: the
-  four-byte micro-tile follows the depth (`Z_X`) order rather than this table, and the slice XOR of the published
+  does not independently establish the one-byte equation. Publication requires an independent oracle. The
+  four-byte micro tile no longer follows the depth (`Z_X`) order: guest-written atlas levels showed the
+  `x0 x1 y0 y1 y2 x2` order on 2026-10-16. Open: the slice XOR of the published
   pipe bits is not applied because volumes are detiled as independent thin slices.
   Oracle search (2026-10-16, still open): decoding the published 16-pipe 64 KiB tables shows the shipped two- and
   eight-byte equations equal `SW_64K_R_X` and the four-byte one equals `SW_64K_Z_X` exactly. For one byte the two

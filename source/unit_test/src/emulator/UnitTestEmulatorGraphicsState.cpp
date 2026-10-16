@@ -3253,10 +3253,10 @@ TEST(EmulatorGraphicsState, RawRenderStorageAliasPreservesGuestWordsAcrossFormat
 			seen_words[source_offset / 4u] = true;
 			const uint32_t offset = static_cast<uint32_t>(source_offset);
 			const auto bit = [offset](uint32_t index) { return (offset >> index) & 1u; };
-			const uint32_t source_x = bit(2u) | (bit(4u) << 1u) | (bit(6u) << 2u) |
+			const uint32_t source_x = bit(2u) | (bit(3u) << 1u) | (bit(7u) << 2u) |
 			                          ((bit(8u) ^ bit(12u)) << 3u) | (bit(13u) << 4u) |
 			                          ((bit(11u) ^ bit(14u)) << 5u) | (bit(15u) << 6u);
-			const uint32_t source_y = bit(3u) | (bit(5u) << 1u) | (bit(7u) << 2u) |
+			const uint32_t source_y = bit(4u) | (bit(5u) << 1u) | (bit(6u) << 2u) |
 			                          (bit(12u) << 3u) | ((bit(9u) ^ bit(13u)) << 4u) |
 			                          ((bit(10u) ^ bit(15u)) << 5u) | (bit(14u) << 6u);
 			ASSERT_EQ(TileGetSw64kRxOffset(source_x, source_y, 128u, 4u), source_offset);
@@ -6337,43 +6337,15 @@ TEST(EmulatorGraphicsState, ReclaimsSingleSurfaceForDepthStencilReuse)
 	                                                       GpuMemoryObjectType::Texture));
 }
 
-TEST(EmulatorGraphicsState, SeedsDepthOnlyFromTheRenderTargetItReinterprets)
-{
-	const DepthStencilBufferObject depth(VK_FORMAT_D32_SFLOAT, 960, 540, false, true, true, 0, 0);
-	const RenderTextureObject      packed(RenderTextureFormat::B10G11R11Ufloat, 960, 540, true, true, 1024, false);
-	const RenderTextureObject      single(RenderTextureFormat::R32Sfloat, 960, 540, true, true, 1024, false);
-	EXPECT_TRUE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, packed.params, true));
-	EXPECT_TRUE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, single.params, true));
-	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, packed.params, false));
-
-	const DepthStencilBufferObject htile(VK_FORMAT_D32_SFLOAT, 960, 540, true, true, true, 0x1000, 0x1000);
-	const DepthStencilBufferObject stencil(VK_FORMAT_D32_SFLOAT_S8_UINT, 960, 540, false, true, true, 0, 0);
-	const DepthStencilBufferObject scaled(VK_FORMAT_D32_SFLOAT, 960, 540, 1920, 1080, false, true, true, 0, 0);
-	const DepthStencilBufferObject multisampled(VK_FORMAT_D32_SFLOAT, 960, 540, false, true, true, 0, 0, 4);
-	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(htile.params, packed.params, true));
-	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(stencil.params, packed.params, true));
-	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(scaled.params, packed.params, true));
-	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(multisampled.params, packed.params, true));
-
-	const RenderTextureObject half(RenderTextureFormat::R16Sfloat, 960, 540, true, true, 1024, false);
-	const RenderTextureObject wide(RenderTextureFormat::B10G11R11Ufloat, 960, 540, true, true, 1152, false);
-	const RenderTextureObject sampled(RenderTextureFormat::B10G11R11Ufloat, 960, 540, true, true, 1024, false, 4);
-	const RenderTextureObject layered(RenderTextureFormat::B10G11R11Ufloat, 960, 540, true, true, 1024, false, 1, 2);
-	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, half.params, true));
-	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, wide.params, true));
-	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, sampled.params, true));
-	EXPECT_FALSE(DepthStencilBufferCanSeedFromRenderTexture(depth.params, layered.params, true));
-}
-
 TEST(EmulatorGraphicsState, SharesTexelsOnlyBetweenDepthAndMatchingStorage)
 {
 	const DepthStencilBufferObject depth(VK_FORMAT_D32_SFLOAT, 960, 540, false, true, true, 0, 0);
-	const StorageTextureObject     packed(0, 0, 36, 960, 540, 1024, 0, 1, 27, true, 940);
-	const StorageTextureObject     single(0, 0, 22, 960, 540, 1024, 0, 1, 27, true, 940);
-	const StorageTextureObject     depth_layout(0, 0, 22, 960, 540, 1024, 0, 1, 24, true, 940);
+	const StorageTextureObject     packed(0, 0, 36, 960, 540, 1024, 0, 1, 24, true, 940);
+	const StorageTextureObject     single(0, 0, 22, 960, 540, 1024, 0, 1, 24, true, 940);
+	const StorageTextureObject     render_layout(0, 0, 22, 960, 540, 1024, 0, 1, 27, true, 940);
 	EXPECT_TRUE(StorageTextureSharesDepthTexels(packed.params, depth.params, true));
 	EXPECT_TRUE(StorageTextureSharesDepthTexels(single.params, depth.params, true));
-	EXPECT_TRUE(StorageTextureSharesDepthTexels(depth_layout.params, depth.params, true));
+	EXPECT_FALSE(StorageTextureSharesDepthTexels(render_layout.params, depth.params, true));
 	EXPECT_FALSE(StorageTextureSharesDepthTexels(packed.params, depth.params, false));
 
 	const DepthStencilBufferObject htile(VK_FORMAT_D32_SFLOAT, 960, 540, true, true, true, 0x1000, 0x1000);
@@ -6382,10 +6354,10 @@ TEST(EmulatorGraphicsState, SharesTexelsOnlyBetweenDepthAndMatchingStorage)
 	EXPECT_FALSE(StorageTextureSharesDepthTexels(packed.params, scaled.params, true));
 
 	const StorageTextureObject linear(0, 0, 36, 960, 540, 1024, 0, 1, 0, true, 940);
-	const StorageTextureObject mipped(0, 0, 36, 960, 540, 1024, 0, 2, 27, true, 940);
-	const StorageTextureObject wide(0, 0, 36, 960, 540, 1152, 0, 1, 27, true, 940);
-	const StorageTextureObject smaller(0, 0, 36, 480, 270, 512, 0, 1, 27, true, 940);
-	const StorageTextureObject eight_bit(0, 0, 56, 960, 540, 1024, 0, 1, 27, true, 940);
+	const StorageTextureObject mipped(0, 0, 36, 960, 540, 1024, 0, 2, 24, true, 940);
+	const StorageTextureObject wide(0, 0, 36, 960, 540, 1152, 0, 1, 24, true, 940);
+	const StorageTextureObject smaller(0, 0, 36, 480, 270, 512, 0, 1, 24, true, 940);
+	const StorageTextureObject eight_bit(0, 0, 56, 960, 540, 1024, 0, 1, 24, true, 940);
 	EXPECT_FALSE(StorageTextureSharesDepthTexels(linear.params, depth.params, true));
 	EXPECT_FALSE(StorageTextureSharesDepthTexels(mipped.params, depth.params, true));
 	EXPECT_FALSE(StorageTextureSharesDepthTexels(wide.params, depth.params, true));

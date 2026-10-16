@@ -941,15 +941,16 @@ static uint32_t Sw64kRxWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_
 	}
 	if (bytes_per_element == 4u)
 	{
-		offset ^= (y << 3u) & 0x0008u;
-		offset ^= (y << 4u) & 0x0020u;
-		offset ^= (y << 5u) & 0x0f80u;
+		// The 8x8 micro tile orders x0 x1 y0 y1 y2 x2; the pipe and bank
+		// bits above it match the depth equation.
+		offset ^= (y << 4u) & 0x0070u;
+		offset ^= (y << 5u) & 0x0f00u;
 		offset ^= (y << 9u) & 0x1000u;
 		offset ^= (y << 8u) & 0x4000u;
 
-		offset ^= (x << 2u) & 0x0004u;
-		offset ^= (x << 3u) & 0x0010u;
-		offset ^= (x << 4u) & 0x0440u;
+		offset ^= (x << 2u) & 0x000cu;
+		offset ^= (x << 5u) & 0x0080u;
+		offset ^= (x << 4u) & 0x0400u;
 		offset ^= (x << 5u) & 0x0300u;
 		offset ^= (x << 6u) & 0x0800u;
 		offset ^= (x << 9u) & 0xa000u;
