@@ -4674,7 +4674,10 @@ constexpr uint32_t kSamplerPlayEvent      = 1;
 constexpr uint32_t kCallbackParamId       = 0x7u;
 constexpr uint32_t kCallbackFlagEnd       = 0x1u;
 constexpr uint32_t kCallbackFlagRepeat    = 0x2u;
-// The blocks flag a native call site passes for a one-shot waveform (reset).
+// Blocks flags: continue keeps the waveform open, append streams more data into
+// it, reset replaces it.
+constexpr uint32_t kBlocksFlagContinue    = 0x1u;
+constexpr uint32_t kBlocksFlagAppend      = 0x2u;
 constexpr uint32_t kBlocksFlagReset       = 0x4u;
 constexpr uint32_t kWaveformPcmI16        = 0x12u;
 constexpr uint32_t kWaveformPcmF32        = 0x18u;
@@ -5465,11 +5468,13 @@ TEST(EmulatorAudio, StandardSamplerRejectsUnsupportedContractsWithoutChangingVoi
 	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, valid), kSamplerInvalidControl);
 	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 48000), 0);
 
-	// Only the reset flag has a native caller; other flag values are refused.
-	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), 0, valid), kSamplerInvalidControl);
-	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), 0x1, valid), kSamplerInvalidControl);
-	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), 0x2, valid), kSamplerInvalidControl);
-	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset | 0x1, valid), kSamplerInvalidControl);
+	// Unknown flags, an append without a streaming block and reset with append are refused.
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), 0x10, valid), kSamplerInvalidControl);
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagAppend, valid), kSamplerInvalidControl);
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset | kBlocksFlagAppend, valid), kSamplerInvalidControl);
+	// An add without continue closes the waveform; a later add then needs reset.
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), 0, valid), 0);
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagContinue, valid), kSamplerInvalidControl);
 
 	// Blocks must be non-empty spans inside readable data.
 	SamplerBlock empty = valid;
@@ -8260,6 +8265,80 @@ TEST(EmulatorAudio, StandardSamplerPlaysGeneratedAtrac9Superframes)
 	uint64_t decoded = 0;
 	std::memcpy(&decoded, static_cast<const uint8_t*>(state_storage.Data()) + 0x10, sizeof(decoded));
 	EXPECT_EQ(decoded, static_cast<uint64_t>(kSamplerGrainFrames));
+}
+
+// A PCM block whose data covers only the start of its samples streams: the voice
+// waits silently at the end of the supplied data while the waveform is open, an
+// append continues it, and the closed waveform ends at its last sample.
+TEST(EmulatorAudio, StandardSamplerStreamsAppendedPcm)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 48000), 0);
+
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 8);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* pcm = static_cast<int16_t*>(pcm_storage.Data());
+	for (int16_t i = 0; i < 8; i++)
+	{
+		pcm[i] = static_cast<int16_t>((i + 1) * 1000);
+	}
+	SamplerBlock first {};
+	first.data_size   = sizeof(int16_t) * 4;
+	first.num_samples = 8;
+	ASSERT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagContinue, first), 0);
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	const auto* output = static_cast<const float*>(output_storage.Data());
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	for (uint32_t k = 0; k < 4; k++)
+	{
+		EXPECT_NEAR(output[2 * k], static_cast<float>(pcm[k]) / 32768.0f, 1e-5f);
+	}
+	EXPECT_EQ(output[2 * 4], 0.0f);
+
+	// The waiting voice still plays and points at the end of the supplied data.
+	GuestReadableBlock state_storage(56);
+	ASSERT_TRUE(state_storage.IsValid());
+	const auto* state = static_cast<const uint8_t*>(state_storage.Data());
+	ASSERT_EQ(Ngs2::Ngs2VoiceGetState(rig.voice, static_cast<Ngs2::Ngs2VoiceState*>(state_storage.Data()), 56), 0);
+	uint32_t    flags         = 0;
+	uint64_t    decoded       = 0;
+	uint64_t    decoded_bytes = 0;
+	const void* waveform_data = nullptr;
+	std::memcpy(&flags, state, sizeof(flags));
+	std::memcpy(&decoded, state + 0x18, sizeof(decoded));
+	std::memcpy(&decoded_bytes, state + 0x20, sizeof(decoded_bytes));
+	std::memcpy(&waveform_data, state + 0x30, sizeof(waveform_data));
+	EXPECT_EQ(flags, 0x3u);
+	EXPECT_EQ(decoded, 4u);
+	EXPECT_EQ(decoded_bytes, sizeof(int16_t) * 4);
+	EXPECT_EQ(waveform_data, static_cast<const void*>(pcm + 4));
+
+	// The append without continue supplies the rest and closes the waveform; the
+	// voice then stops after its last sample.
+	SamplerBlock rest {};
+	rest.data_offset = sizeof(int16_t) * 4;
+	rest.data_size   = sizeof(int16_t) * 4;
+	ASSERT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagAppend, rest), 0);
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagAppend, rest), kSamplerInvalidControl);
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	for (uint32_t k = 0; k < 4; k++)
+	{
+		EXPECT_NEAR(output[2 * k], static_cast<float>(pcm[4 + k]) / 32768.0f, 1e-5f);
+	}
+	EXPECT_EQ(output[2 * 4], 0.0f);
+	ASSERT_EQ(Ngs2::Ngs2VoiceGetState(rig.voice, static_cast<Ngs2::Ngs2VoiceState*>(state_storage.Data()), 56), 0);
+	std::memcpy(&flags, state, sizeof(flags));
+	EXPECT_EQ(flags, 0xbu);
 }
 
 TEST(EmulatorAudio, StandardSamplerPlaysAtrac9FixtureWhenProvided)

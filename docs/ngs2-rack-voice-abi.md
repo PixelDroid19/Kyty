@@ -117,13 +117,14 @@ verified against this title: voice handle at +8, block data at +0x20, block size
 at +0x28, repeat count at +0x2c. Kyty writes real values there, never invented
 ones, but those positions must not be treated as a confirmed native ABI. The
 GetState block is 48 bytes with decoded frames at +0x10 (confirmed by a guest
-read). Only the END flag (1) is confirmed; a registration with any other flag,
+read); a 56-byte request adds an error word after the voice state, which moves every
+later field by 8 bytes (decoded frames at +0x18, read by a streaming caller). Only the END flag (1) is confirmed; a registration with any other flag,
 including REPEAT, is refused, so no repeat callback is delivered.
 
 The blocks builder takes (param, next, data, blocks, count, flags) in SysV order,
-so count lands at +0x14 and flags at +0x10. Its native caller passes one block and
-flags 4, which Kyty treats as a waveform reset; no other flag value has a native
-caller yet.
+so count lands at +0x14 and flags at +0x10. One native caller passes one block and
+flags 4 (waveform reset); a streaming caller passes flags 1 for its first block
+and 3 (continue and append) for every later piece.
 
 ## Residual
 

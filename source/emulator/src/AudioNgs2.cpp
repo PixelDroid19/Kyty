@@ -249,6 +249,8 @@ struct Ngs2VoiceState
 	uint32_t state_flags;
 };
 
+// Sampler voice states, sized by the caller. The 48-byte block starts with a 4-byte voice state; the 56-byte block's
+// voice state adds an error code, which moves every later field by 8 bytes.
 struct Ngs2SamplerVoiceState
 {
 	Ngs2VoiceState voice_state;
@@ -261,6 +263,21 @@ struct Ngs2SamplerVoiceState
 	const void*    waveform_data;
 };
 static_assert(sizeof(Ngs2SamplerVoiceState) == 48);
+
+struct Ngs2SamplerVoiceStateWithError
+{
+	Ngs2VoiceState voice_state;
+	int32_t        error_code;
+	float          envelope_height;
+	float          peak_height;
+	uint32_t       reserved;
+	uint64_t       num_decoded_samples;
+	uint64_t       decoded_data_size;
+	uint64_t       user_data;
+	const void*    waveform_data;
+};
+static_assert(sizeof(Ngs2SamplerVoiceStateWithError) == 56);
+static_assert(offsetof(Ngs2SamplerVoiceStateWithError, num_decoded_samples) == 0x18);
 
 struct Ngs2WaveformFormat
 {
@@ -465,8 +482,11 @@ constexpr uint32_t kNgs2MasteringOutputId           = 0x30000005u;
 // Host bound on the render buffers of one SystemRender call; titles pass one or three.
 constexpr uint32_t kNgs2MaxRenderBuffers            = 8;
 constexpr uint32_t kNgs2VoiceCallbackFlagEnd        = 0x1u;
-// The only blocks flag seen at a native call site: one block added with 4, which
-// replaces the waveform (RESET). Other values are refused.
+// Blocks add flags. RESET replaces the queued waveform; CONTINUE keeps the
+// waveform open for later adds; APPEND extends the last streaming block with
+// more data. Other values (including SILENCE, 0x10) are refused.
+constexpr uint32_t kNgs2SamplerBlocksFlagContinue   = 0x1u;
+constexpr uint32_t kNgs2SamplerBlocksFlagAppend     = 0x2u;
 constexpr uint32_t kNgs2SamplerBlocksFlagReset      = 0x4u;
 constexpr uint32_t kNgs2MaxBlocksPerAdd             = 64;
 constexpr uint64_t kNgs2MaxBlockFrames              = 1ull << 22;
@@ -1765,11 +1785,23 @@ static bool Ngs2MakeSamplerSetup(const Ngs2WaveformFormat& format, Ngs2SamplerSe
 	return true;
 }
 
-// Float bytes a block occupies once queued: num_skip + num_samples frames.
-// Known from the block header alone, so budgets are checked before any read.
-static bool Ngs2SamplerBlockBytes(const Ngs2SamplerSetup& setup, const Ngs2WaveformBlock& entry, uint64_t* float_bytes)
+// Guest bytes of one PCM frame; 0 for coded waveforms.
+static uint32_t Ngs2PcmFrameBytes(const Ngs2SamplerSetup& setup)
 {
-	const uint64_t frames = static_cast<uint64_t>(entry.num_skip_samples) + entry.num_samples;
+	switch (setup.waveform_type)
+	{
+		case kNgs2WaveformTypePcmI16: return setup.channels * static_cast<uint32_t>(sizeof(int16_t));
+		case kNgs2WaveformTypePcmF32: return setup.channels * static_cast<uint32_t>(sizeof(float));
+		default: return 0;
+	}
+}
+
+// Float bytes a block occupies once queued: num_skip + num_samples frames, or
+// only the supplied frames of a streaming block. Known from the block header
+// alone, so budgets are checked before any read.
+static bool Ngs2SamplerBlockBytes(const Ngs2SamplerSetup& setup, const Ngs2WaveformBlock& entry, bool streaming, uint64_t* float_bytes)
+{
+	const uint64_t frames = streaming ? entry.data_size / Ngs2PcmFrameBytes(setup) : static_cast<uint64_t>(entry.num_skip_samples) + entry.num_samples;
 	if (entry.num_samples == 0 || frames > kNgs2MaxBlockFrames)
 	{
 		return false;
@@ -1920,7 +1952,35 @@ static bool Ngs2SamplerBlockFromGuest(const Ngs2SamplerSetup& setup, AudioVideoB
 	{
 		return decoder != nullptr && Ngs2DecodeAtrac9Block(decoder, setup, guest_data, entry, stream_packet_frames, block);
 	}
+	block->guest_frame_bytes = Ngs2PcmFrameBytes(setup);
 	return Ngs2ReadPcmBlock(setup, guest_data, entry, block);
+}
+
+// A PCM block of an open waveform whose data holds only the first part of its
+// samples: the guest streams the rest with appends. It plays once, from its
+// first frame, and its data is whole frames.
+static bool Ngs2IsStreamingBlock(const Ngs2SamplerSetup& setup, const Ngs2WaveformBlock& entry)
+{
+	const uint64_t frame_bytes = Ngs2PcmFrameBytes(setup);
+	return frame_bytes != 0 && entry.num_samples != 0 && entry.num_skip_samples == 0 && entry.num_repeats == 0 &&
+	       entry.data_size >= frame_bytes && entry.data_size % frame_bytes == 0 && entry.data_size / frame_bytes < entry.num_samples;
+}
+
+// Reads the supplied frames of a streaming block: data_size bytes of a
+// waveform of num_samples frames.
+static bool Ngs2StreamingBlockFromGuest(const Ngs2SamplerSetup& setup, const void* data, const Ngs2WaveformBlock& entry,
+                                        Ngs2Sampler::Block* block)
+{
+	Ngs2WaveformBlock supplied = entry;
+	supplied.num_samples       = static_cast<uint32_t>(entry.data_size / Ngs2PcmFrameBytes(setup));
+	uint64_t unused_packets    = 0;
+	if (!Ngs2SamplerBlockFromGuest(setup, nullptr, data, supplied, &unused_packets, block))
+	{
+		return false;
+	}
+	block->num_samples = entry.num_samples;
+	block->streaming   = true;
+	return true;
 }
 
 static int32_t Ngs2SetSamplerFormat(Ngs2VoiceRecord& voice, const Ngs2SamplerSetupParam& param)
@@ -1943,37 +2003,43 @@ static int32_t Ngs2SetSamplerFormat(Ngs2VoiceRecord& voice, const Ngs2SamplerSet
 	return OK;
 }
 
-// Blocks add with the reset flag: the given blocks replace the voice's waveform.
-// Budgets are checked from the block headers first; then every block is read
-// (and decoded, in order, through one new decoder stream) before the queue is
-// replaced, so a rejected add changes nothing.
-static int32_t Ngs2AddSamplerBlocks(Ngs2VoiceRecord& voice, const Ngs2SamplerBlocksParam& param)
+// True when bytes more float frames fit the voice's and the system's sample budgets. A reset add replaces
+// the voice's queue, so only the new blocks count for it.
+static bool Ngs2SampleBudgetFits(const Ngs2VoiceRecord& voice, uint64_t bytes, bool reset)
 {
-	const auto& setup = voice.sampler_setup;
-	if (!setup.configured || param.header.size != sizeof(param) || param.flags != kNgs2SamplerBlocksFlagReset || param.num_blocks == 0 ||
-	    param.num_blocks > kNgs2MaxBlocksPerAdd || param.data == nullptr || param.blocks == nullptr)
+	const uint64_t own = reset ? 0 : voice.sampler.QueuedSampleBytes();
+	if (bytes > kNgs2MaxVoiceSampleBytes - std::min(own, kNgs2MaxVoiceSampleBytes) ||
+	    Ngs2QueuedSampleBytes(*voice.system, &voice) + own + bytes > kNgs2MaxSystemSampleBytes)
 	{
-		return kNgs2InvalidControl;
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: NGS2 sampler waveform exceeds the host sample budget\n");
+		return false;
 	}
-	std::vector<Ngs2WaveformBlock> entries(param.num_blocks);
-	if (!Ngs2CopyFromGuest(entries.data(), param.blocks, entries.size() * sizeof(Ngs2WaveformBlock)))
+	return true;
+}
+
+// Queues new blocks, after the current ones or, with reset, in their place. A
+// PCM block of an open waveform may carry only the start of its data and stream
+// the rest. Budgets are checked from the block headers first; then every block
+// is read (and decoded, in order, through one new decoder stream) before the
+// queue changes, so a rejected add changes nothing.
+static int32_t Ngs2QueueSamplerBlocks(Ngs2VoiceRecord& voice, const void* data, const std::vector<Ngs2WaveformBlock>& entries, bool reset,
+                                      bool open)
+{
+	const auto&       setup = voice.sampler_setup;
+	std::vector<bool> streaming(entries.size());
+	uint64_t          bytes = 0;
+	for (size_t i = 0; i < entries.size(); i++)
 	{
-		return kNgs2InvalidControl;
-	}
-	uint64_t bytes = 0;
-	for (const auto& entry: entries)
-	{
+		streaming[i]         = open && Ngs2IsStreamingBlock(setup, entries[i]);
 		uint64_t block_bytes = 0;
-		if (!Ngs2SamplerBlockBytes(setup, entry, &block_bytes))
+		if (!Ngs2SamplerBlockBytes(setup, entries[i], streaming[i], &block_bytes))
 		{
 			return kNgs2InvalidControl;
 		}
 		bytes += block_bytes;
 	}
-	// The new blocks replace this voice's queue, so only they count for it.
-	if (bytes > kNgs2MaxVoiceSampleBytes || Ngs2QueuedSampleBytes(*voice.system, &voice) + bytes > kNgs2MaxSystemSampleBytes)
+	if (!Ngs2SampleBudgetFits(voice, bytes, reset))
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: NGS2 sampler waveform exceeds the host sample budget\n");
 		return kNgs2InvalidControl;
 	}
 	std::unique_ptr<AudioVideoBackend::ElementaryAudioDecoder> decoder;
@@ -1992,12 +2058,86 @@ static int32_t Ngs2AddSamplerBlocks(Ngs2VoiceRecord& voice, const Ngs2SamplerBlo
 	uint64_t                        stream_packet_frames = 0;
 	for (size_t i = 0; i < entries.size(); i++)
 	{
-		if (!Ngs2SamplerBlockFromGuest(setup, decoder.get(), param.data, entries[i], &stream_packet_frames, &blocks[i]))
+		const bool read = streaming[i] ? Ngs2StreamingBlockFromGuest(setup, data, entries[i], &blocks[i])
+		                               : Ngs2SamplerBlockFromGuest(setup, decoder.get(), data, entries[i], &stream_packet_frames, &blocks[i]);
+		if (!read)
 		{
 			return kNgs2InvalidControl;
 		}
 	}
-	return voice.sampler.ReplaceQueue(std::move(blocks)) ? OK : kNgs2InvalidControl;
+	const bool queued = reset ? voice.sampler.ReplaceQueue(std::move(blocks)) : voice.sampler.QueueBlocks(std::move(blocks));
+	return queued ? OK : kNgs2InvalidControl;
+}
+
+// Appends data pieces to the voice's streaming block. Each piece is whole
+// frames that continue the waveform; its sample counts are not read.
+static int32_t Ngs2AppendSamplerPieces(Ngs2VoiceRecord& voice, const void* data, const std::vector<Ngs2WaveformBlock>& entries)
+{
+	const auto&    setup       = voice.sampler_setup;
+	const uint64_t frame_bytes = Ngs2PcmFrameBytes(setup);
+	uint64_t       bytes       = 0;
+	for (const auto& entry: entries)
+	{
+		if (frame_bytes == 0 || entry.num_skip_samples != 0 || entry.num_repeats != 0 || entry.data_size % frame_bytes != 0 ||
+		    entry.data_size / frame_bytes > kNgs2MaxBlockFrames)
+		{
+			return kNgs2InvalidControl;
+		}
+		bytes += entry.data_size / frame_bytes * setup.channels * sizeof(float);
+	}
+	if (!Ngs2SampleBudgetFits(voice, bytes, false))
+	{
+		return kNgs2InvalidControl;
+	}
+	for (const auto& entry: entries)
+	{
+		if (entry.data_size == 0)
+		{
+			continue;
+		}
+		Ngs2WaveformBlock piece = entry;
+		piece.num_samples       = static_cast<uint32_t>(entry.data_size / frame_bytes);
+		Ngs2Sampler::Block block;
+		uint64_t           unused_packets = 0;
+		if (!Ngs2SamplerBlockFromGuest(setup, nullptr, data, piece, &unused_packets, &block) ||
+		    !voice.sampler.AppendPiece(std::move(block.frames), block.guest_data))
+		{
+			return kNgs2InvalidControl;
+		}
+	}
+	return OK;
+}
+
+// Blocks add. Without RESET the waveform must still be open, as left by the
+// previous add's CONTINUE (a setup opens it). The add's CONTINUE then decides
+// whether later adds are accepted.
+static int32_t Ngs2AddSamplerBlocks(Ngs2VoiceRecord& voice, const Ngs2SamplerBlocksParam& param)
+{
+	constexpr uint32_t kKnownFlags = kNgs2SamplerBlocksFlagContinue | kNgs2SamplerBlocksFlagAppend | kNgs2SamplerBlocksFlagReset;
+	const bool         reset       = (param.flags & kNgs2SamplerBlocksFlagReset) != 0;
+	const bool         append      = (param.flags & kNgs2SamplerBlocksFlagAppend) != 0;
+	const bool         open        = (param.flags & kNgs2SamplerBlocksFlagContinue) != 0;
+	if (!voice.sampler_setup.configured || param.header.size != sizeof(param) || (param.flags & ~kKnownFlags) != 0 || (reset && append) ||
+	    param.num_blocks == 0 || param.num_blocks > kNgs2MaxBlocksPerAdd || param.data == nullptr || param.blocks == nullptr)
+	{
+		return kNgs2InvalidControl;
+	}
+	if (!reset && !voice.sampler.Open())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: NGS2 sampler blocks added after the waveform was closed\n");
+		return kNgs2InvalidControl;
+	}
+	std::vector<Ngs2WaveformBlock> entries(param.num_blocks);
+	if (!Ngs2CopyFromGuest(entries.data(), param.blocks, entries.size() * sizeof(Ngs2WaveformBlock)))
+	{
+		return kNgs2InvalidControl;
+	}
+	const int32_t result = append ? Ngs2AppendSamplerPieces(voice, param.data, entries) : Ngs2QueueSamplerBlocks(voice, param.data, entries, reset, open);
+	if (result == OK)
+	{
+		voice.sampler.SetOpen(open);
+	}
+	return result;
 }
 
 static int32_t Ngs2SetSamplerPitch(Ngs2VoiceRecord& voice, const Ngs2SamplerPitchParam& param)
@@ -3481,25 +3621,52 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 	{
 		return kNgs2InvalidVoice;
 	}
-	if (state == nullptr || state_size != sizeof(Ngs2SamplerVoiceState) || !Ngs2IsGuestWritable(state, state_size))
+	if (state == nullptr || !Ngs2IsGuestWritable(state, state_size))
 	{
 		return kNgs2InvalidControl;
 	}
-	Ngs2SamplerVoiceState output {};
+	uint32_t  state_flags     = 0;
+	uint64_t  decoded_samples = 0;
+	uint64_t  decoded_bytes   = 0;
+	uint64_t  user_data       = 0;
+	uintptr_t waveform_data   = 0;
 	{
 		std::lock_guard lock(voice->system->state_mutex);
 		auto rack = voice->rack.lock();
-		if (rack == nullptr || (rack->type != Ngs2RackType::CustomSampler && rack->type != Ngs2RackType::Sampler))
+		const bool sampler        = rack != nullptr && rack->type == Ngs2RackType::Sampler;
+		const bool custom_sampler = rack != nullptr && rack->type == Ngs2RackType::CustomSampler;
+		const bool sized          = state_size == sizeof(Ngs2SamplerVoiceState) || (sampler && state_size == sizeof(Ngs2SamplerVoiceStateWithError));
+		if ((!sampler && !custom_sampler) || !sized)
 		{
 			return kNgs2InvalidControl;
 		}
-		output.voice_state.state_flags = Ngs2GetVoiceStateFlags(*voice.Get());
-		// num_decoded_samples sits at +0x10 in the 48-byte state the guest reads.
-		if (rack->type == Ngs2RackType::Sampler)
+		state_flags = Ngs2GetVoiceStateFlags(*voice.Get());
+		if (sampler)
 		{
-			output.num_decoded_samples = voice->sampler.DecodedFrames();
+			decoded_samples = voice->sampler.DecodedFrames();
+			decoded_bytes   = voice->sampler.DecodedBytes();
+			user_data       = voice->sampler.FrontUserData();
+			waveform_data   = voice->sampler.WaveformData();
 		}
 	}
+	// waveform_data is the guest address of the next frame to play, which a
+	// streaming guest compares with its own buffer to find the consumed data.
+	if (state_size == sizeof(Ngs2SamplerVoiceStateWithError))
+	{
+		Ngs2SamplerVoiceStateWithError output {};
+		output.voice_state.state_flags = state_flags;
+		output.num_decoded_samples     = decoded_samples;
+		output.decoded_data_size       = decoded_bytes;
+		output.user_data               = user_data;
+		output.waveform_data           = reinterpret_cast<const void*>(waveform_data);
+		return Ngs2CopyToGuest(state, &output, sizeof(output)) ? OK : kNgs2InvalidControl;
+	}
+	Ngs2SamplerVoiceState output {};
+	output.voice_state.state_flags = state_flags;
+	output.num_decoded_samples     = decoded_samples;
+	output.decoded_data_size       = decoded_bytes;
+	output.user_data               = user_data;
+	output.waveform_data           = reinterpret_cast<const void*>(waveform_data);
 	return Ngs2CopyToGuest(state, &output, sizeof(output)) ? OK : kNgs2InvalidControl;
 }
 

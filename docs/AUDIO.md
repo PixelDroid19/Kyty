@@ -80,10 +80,19 @@ captured streaming title; sizes are the values the guest writes:
   option plus the 0x30-byte common expansion, with `max_voices` at +0x50.
 - Formats: PCM_I16L (0x12) and PCM_F32L (0x18), 1 or 2 channels, 1 to 192000 Hz,
   `frame_offset` and `frame_margin` zero. Float samples must be finite.
-- Blocks flags: the native caller adds one block with flags 4 (reset). Only 4 is
-  accepted: the blocks replace the voice's waveform, cursor and phase. Flags 0,
-  1 (continue) and other bits have no native evidence and are refused. A voice
-  ends when its queue drains.
+- Blocks flags (CONTINUE 1, APPEND 2, RESET 4; reset and append together are
+  refused, as is any other bit). One native caller adds one block with flags 4:
+  the blocks replace the voice's waveform, cursor and phase. A streaming title
+  (live trace) adds one PCM block with flags 1 whose `num_samples` covers the
+  whole song while `data_size` holds only the first piece, then appends the next
+  pieces (about 8 KiB each) with flags 3. A PCM block with CONTINUE, a non-zero
+  sample count larger than its supplied frames, no skip and no repeat is a
+  streaming block: it holds only the supplied frames, appended pieces extend it,
+  and at most 64 unplayed pieces are kept. An add without CONTINUE closes the
+  waveform; an add without RESET needs an open waveform (setup and reset open
+  it). While the waveform is open, a voice that reaches the end of its supplied
+  data waits silently for the next piece; once closed, the voice ends when its
+  queue drains.
 - Blocks are copied (and decoded) at add time. Host budgets, checked from the
   block headers before any guest read or allocation: 64 blocks per add, 4M frames
   per block, 32 MiB of queued float frames per voice, and 128 MiB of queued float
@@ -122,12 +131,16 @@ captured streaming title; sizes are the values the guest writes:
   is refused as an invalid rack, before anything is marked closing. This is a
   host qualification: a locked destroy is not supported here, and no separate
   native error value is assumed.
-- The voice state reports `num_decoded_samples` at +0x10 of the 48-byte state.
+- The voice state is 48 bytes, or 56 bytes with an error word after the voice
+  state that moves every later field by 8 bytes (the streaming title passes 56
+  and reads +0x18 onward). It reports
+  `num_decoded_samples` at +0x10, the decoded guest bytes, the front block's user
+  data and the guest address of the next waveform frame.
 - Stop-immediate and kill clear the queue. Setup resets the voice to Empty with
   a unit port volume.
 
-Unresolved: the continue flag and any non-reset add, the meaning of the setup
-word at +0x20, and the block repeat callback.
+Unresolved: streaming of compressed waveforms, appends to a non-streaming
+block, the meaning of the setup word at +0x20, and the block repeat callback.
 
 ## NGS2 voice commands and port state
 
