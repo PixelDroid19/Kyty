@@ -20,9 +20,17 @@ fail on the current HEAD before acting on them.
   callback stored from offset 8.
 - The player passes that same descriptor at each of its four module load sites, so the descriptor
   belongs to the module, not to a path. Service plugins are now identified by the module name their ELF
-  declares (`DT_OS_MODULE_INFO`). Across every package plugin in the local library, the declared name
-  equals the file stem for all six covered plugins. Titles that already ran therefore get the same
-  arguments as before.
+  declares (`DT_OS_MODULE_INFO`). A scan of all 196 package modules in the local library
+  (`Media/Plugins`, `Media/Modules`, `sce_module`) compared the old file-name rule with the new
+  declared-name rule. They disagree only on this title's suffixed copy, so every other title gets the
+  same start arguments as before.
+- Open defect, predating this change and affecting all six plugins: the player's own descriptor carries
+  a real callback, but Kyty passes `callback = 0`. Kyty also starts package plugins before the player
+  does. When the player later calls `sceKernelLoadStartModule`, it gets the existing handle from the
+  `FindProgramByFile` early return in `KernelLoadStartModule` (`LibKernel.cpp`), so its descriptor never
+  reaches `module_start`. Suggested direction: defer `module_start` of package plugins to the guest's
+  load call, so the guest's own arguments are used. A null callback call on a network-service path
+  would point here.
 - Verified (Intel, 150 s, strict): the title passes module start and the menus, and reaches its first
   playable scene. Still open: in that scene, sprite edges show light-blue fringes and the characters look
   point-sampled at low resolution; the menu frames are clean.
