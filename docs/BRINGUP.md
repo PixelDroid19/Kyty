@@ -89,9 +89,53 @@ fail on the current HEAD before acting on them.
     47-48. Fishing route: about 15 fps in both, four boots of 45 s pass.
     That fishing title still fills 64 MiB, with vertex snapshots of 2.4 MB.
     Beat 'em up route: captures identical to the previous run.
-  - Still open in this title: 39 ms per frame of fence waits (5 waits),
-    18 storage write-backs per frame (`CopyChangedPages` is the hottest
-    on-CPU leaf), and 2.7 fps at dusk.
+- Fence waits in the world (fixed in e50014c6 and ddd43522):
+  - Attribution (temporary capped diagnostics, removed): about 99% of fence
+    time was the device-address draw retry
+    (`CommandProcessor::DrawIndex` → `RetryGuestDeviceAddressDraw` →
+    `Gpu::WaitSubmission`). The pending storage came from a 64x1x1 compute
+    fill with 16-byte records whose value is uniform per dispatch.
+  - Ceiling (diagnostic only): forcing device-side publication of every
+    uniform fill took 86 to 40 us per draw and 9.7 to 11.1 fps, so the
+    retry, not the draws, set the frame time.
+  - Root causes:
+    - `GpuMemory::QueryRangeProvenance` walked at most 64 candidates over
+      1 MiB buckets and reported `truncated` for the 3840x2160 render target,
+      which has two real overlaps. The uniform-fill identity then refused at
+      random. The query now reports the exact `FindBlocks` overlap set and is
+      truncated only above 16 entries.
+    - Display buffers (`VideoOutBuffer`) that equal the fill range were not
+      admitted as color-image aliases.
+    - Fills of a depth target's depth plane or stencil plane were never
+      admitted by `MarkStorageGuestPublished`, and the depth plane was never
+      propagated. The depth-stencil update function is a no-op and a tiled
+      display buffer upload returns early, so invalidating those parents
+      after a write-back had no content effect. Propagation is what gives
+      them correct content.
+  - Fix: exact provenance; display buffers join the uniform-fill image
+    aliases; a uniform depth fill (32-bit words, value in [0, 1], D32 depth
+    formats, address equal to the depth plane, image already initialized,
+    no sample-location state) clears the depth aspect on the device; depth
+    and stencil plane propagation stamps the device write time
+    (`GpuMemoryResetPlaneHash`); publication admits an equal color image or
+    a depth plane (not the HTILE plane) only when its device write is newer
+    than the guest write.
+  - Result (day one, Intel Arc A770, strict): 86 to 35.5 us per draw, fence
+    time 40 to 8.6 ms per frame, 9.7 to 11.8 fps (p50 86 ms). Captures are
+    equivalent to the previous build.
+  - Regression, same binary: the 2D action title's walk route renders
+    correctly (about 134 fps, 67 us per draw); the beat 'em up reaches combat
+    with correct captures (163-179 us per draw against 167-169); the sandbox
+    title enters its world with the HUD (29.6-35.4 against 31.7-38.0 us per
+    draw, terrain still missing as before); the racing route renders the
+    road correctly (44.8-52.1 against 45.0-47.0 us per draw); the fishing
+    dock is unchanged visually at 44 us per draw and about 17 fps.
+  - Still open in this title: a 1920x1080 zero fill contained in a texture
+    still refuses (about 8.6 ms per frame of fence waits remain). The frame
+    is not bound by the command processor: a sampler at day one shows the
+    processor thread about 33% busy and the main guest thread about 10%,
+    with three guest threads spinning on `gettimeofday`. The title renders
+    at 3840x2160; GPU time is the next measurement.
 - Open:
   - **World generation speed:** the 1 fps runs were the harness memory limit
     above. Three guest threads still spin on `gettimeofday` with nanosleep;
@@ -552,6 +596,10 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
   `GraphicsRun.cpp:2030`). Every retry comes from
   `GuestDeviceAddressPendingWriteBack`; the in-flight reader path of the
   snapshot refresh never fired (0 of 240,000 preparations).
+- Update (ddd43522): the depth-plane fill publication added for the survival
+  title covers the same pattern as the storage buffer below. After it, the
+  combat route still shows about 4 fence waits per frame and 350-466 storage
+  write-backs per frame; that write-back volume is now the open cost.
 - Pending objects, all produced and consumed on the graphics queue:
   - a 33,423,360-byte read-write storage buffer (16-byte stride, 2,088,960
     records) bound at index 0 of compute shader `0x5f385baf`; it crosses an
