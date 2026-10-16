@@ -4903,8 +4903,9 @@ selected published source; none is a gameplay or visual acceptance.
   writes, and GDS append/consume after the prefix, stay refused. The proof had a gap: an `S_*_SAVEEXEC` destination
   took its width from the explicit sources, so a saved WQM EXEC counted as helper-free. It now inherits EXEC's width.
   Unit tests refuse a store under WQM and after restoring a saved WQM EXEC. They admit a store after narrowing by the
-  launch EXEC; reverting the SAVEEXEC change fails the latter test. Offline, the title's refused shader and the sandbox title's new-world terrain
-  shader are now admitted as quad local. Verified: the next strict Intel run passes the shader and stops about 40 s in
+  launch EXEC; reverting the SAVEEXEC change fails the latter test. Offline, the title's refused shader is now
+  admitted as quad local. No saved program of the sandbox title's 285 s new-world stop exists, so that stop is still
+  untested. Verified: the next strict Intel run passes the shader and stops about 40 s in
   at `unsupported Gen5 image numeric type: format=27` (`ShaderSpirvImage.cpp`).
 - **SGPR104 and SGPR105.** The RDNA2 scalar operand range is 0..105; the parser stopped at 103, and the shared lowering
   preconditions and compute-wave analyses used the same limit, so a pixel shader reading `s104` was refused as an
