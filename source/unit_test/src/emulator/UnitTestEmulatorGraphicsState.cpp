@@ -6242,6 +6242,10 @@ TEST(EmulatorGraphicsState, AllowsIndexContainedInTextureSurface)
 	                                                   GpuMemoryObjectType::IndexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::IsContainedWithin,
 	                                                   GpuMemoryObjectType::IndexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
+	                                                   GpuMemoryObjectType::IndexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::IndexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
 	                                                    GpuMemoryObjectType::IndexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
