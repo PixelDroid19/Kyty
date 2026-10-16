@@ -128,7 +128,8 @@ fail on the current HEAD before acting on them.
     with correct captures (163-179 us per draw against 167-169); the sandbox
     title enters its world with the HUD (29.6-35.4 against 31.7-38.0 us per
     draw, terrain still missing as before); the racing route renders the
-    road correctly (44.8-52.1 against 45.0-47.0 us per draw); the fishing
+    road correctly (44.8 against 47.0 us per draw at about 480 draws per
+    frame); the fishing
     dock is unchanged visually at 44 us per draw and about 17 fps.
   - Still open in this title: a 1920x1080 zero fill contained in a texture
     still refuses (about 8.6 ms per frame of fence waits remain). The frame
@@ -596,10 +597,13 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
   `GraphicsRun.cpp:2030`). Every retry comes from
   `GuestDeviceAddressPendingWriteBack`; the in-flight reader path of the
   snapshot refresh never fired (0 of 240,000 preparations).
-- Update (ddd43522): the depth-plane fill publication added for the survival
-  title covers the same pattern as the storage buffer below. After it, the
-  combat route still shows about 4 fence waits per frame and 350-466 storage
-  write-backs per frame; that write-back volume is now the open cost.
+- Update (ddd43522): the survival title's uniform depth-plane fill
+  publication was not verified to apply here. The storage buffer below has
+  the size of a 3840x2176 32-bit plane, but its compute shader is not known
+  to write a uniform value. Combat route against the previous build: 4.0
+  against 4.9 fence waits per frame, 23-29 against 23-25 ms, and about 1.03
+  storage write-backs per draw in both (350-466 per frame). The write-back
+  volume is the open cost.
 - Pending objects, all produced and consumed on the graphics queue:
   - a 33,423,360-byte read-write storage buffer (16-byte stride, 2,088,960
     records) bound at index 0 of compute shader `0x5f385baf`; it crosses an
