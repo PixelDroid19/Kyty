@@ -1105,10 +1105,10 @@ bool Flow::Step(const ShaderInstruction& inst)
 		return true;
 	}
 	if (IsCompare(inst.type) || (IsScalarAlu(inst.type) && WritesScc(inst.type))) { m_scc_any_lane = false; }
-	// Under the launch EXEC no helper lane is in EXEC, as no Vulkan helper's device-memory write takes effect,
-	// so such a write observes the same lanes on both.
-	const bool launch_write = m_index < m_launch_exec_end && WritesDeviceMemory(inst);
-	if (WritesMemory(inst.type) && !(m_addtid_spills && IsAddtid(inst.type)) && !launch_write)
+	// While EXEC holds no helper lane (the launch EXEC, or a mask narrowed from it), no Vulkan helper's
+	// device-memory write is missing on the host either, so such a write observes the same lanes on both.
+	const bool live_write = !ExecWide() && WritesDeviceMemory(inst);
+	if (WritesMemory(inst.type) && !(m_addtid_spills && IsAddtid(inst.type)) && !live_write)
 	{
 		return Fail(inst, "memory write: helper lanes would be observable");
 	}
@@ -1147,10 +1147,10 @@ bool Flow::Step(const ShaderInstruction& inst)
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 		return true;
 	}
-	// S_*_SAVEEXEC: the destination is a copy of the old EXEC.
+	// S_*_SAVEEXEC: the destination is a copy of the old EXEC, helper lanes included.
 	if (ShaderInstructionTypeChangesExec(inst.type) && inst.dst.type != Operand::ExecLo)
 	{
-		produced = static_cast<uint8_t>((produced & ~kExtent) | exec_extent);
+		produced = static_cast<uint8_t>((produced & ~(kExtent | kWide)) | exec_extent | (ExecWide() ? kWide : kClean));
 	}
 	const bool exec_subset_before = !m_regions.empty() && m_regions.back().exec_subset;
 	const bool one_outside_after  = ResultOneOutsideRegion(inst);
@@ -1180,8 +1180,8 @@ bool Flow::Step(const ShaderInstruction& inst)
 }
 
 // Every EXEC write the walk accepted is pointwise mask algebra over existing lanes. The
-// widening ones are safe because an export is refused while EXEC may include helper
-// lanes (the kWide bit), so no closed-bracket shape has to be recognized.
+// widening ones are safe because an export or a memory write is refused while EXEC may
+// include helper lanes (the kWide bit), so no closed-bracket shape has to be recognized.
 void Flow::MarkAcceptedExecWrites(const ShaderCode& code)
 {
 	const auto& instructions = code.GetInstructions();

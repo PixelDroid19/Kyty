@@ -4894,6 +4894,18 @@ selected published source; none is a gameplay or visual acceptance.
   Verified: the next strict Intel run passes the parser and stops about 35 s in at the fragment wave transport
   refusal for a pixel shader whose memory writes would expose helper lanes (2688-wide draw), the same open
   contract as the sandbox title's new-world stop.
+- **Pixel memory writes under a helper-free EXEC (published 2026-10-16).** The refused pixel shader saves the launch
+  EXEC, enters WQM, removes discarded lanes from the saved copy with `s_andn2`, and before its only
+  `buffer_store_format_x` sets `exec = saved & exec`. The fragment mask flow admitted device-memory writes only before
+  the first EXEC write. The guest/host difference is helper lanes alone: a guest helper in EXEC writes, a Vulkan helper's
+  store has no effect. So a buffer, image or GDS-counter write is now admitted wherever the flow proves EXEC holds no
+  helper lane (the `kWide` bit an export already requires). That subsumes the launch-prefix rule. LDS and scratch
+  writes, and GDS append/consume after the prefix, stay refused. The proof had a gap: an `S_*_SAVEEXEC` destination
+  took its width from the explicit sources, so a saved WQM EXEC counted as helper-free. It now inherits EXEC's width.
+  Unit tests refuse a store under WQM and after restoring a saved WQM EXEC. They admit a store after narrowing by the
+  launch EXEC; reverting the SAVEEXEC change fails the latter test. Offline, the title's refused shader and the sandbox title's new-world terrain
+  shader are now admitted as quad local. Verified: the next strict Intel run passes the shader and stops about 40 s in
+  at `unsupported Gen5 image numeric type: format=27` (`ShaderSpirvImage.cpp`).
 - **SGPR104 and SGPR105.** The RDNA2 scalar operand range is 0..105; the parser stopped at 103, and the shared lowering
   preconditions and compute-wave analyses used the same limit, so a pixel shader reading `s104` was refused as an
   invalid instruction before native wave analysis. The limits follow the ISA; the NGG passthrough proof, which keeps

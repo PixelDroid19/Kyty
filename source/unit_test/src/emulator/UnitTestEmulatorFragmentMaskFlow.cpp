@@ -908,18 +908,27 @@ TEST(EmulatorFragmentMaskFlow, AClobberedSaveAreaOrAnExportInsideBreaksTheWrappe
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorFragmentMaskFlow, AMemoryWriteMakesHelperLanesObservable)
+void InsertBufferStore(ShaderCode* code, uint32_t index)
+{
+	ShaderInstruction store {};
+	store.type = ShaderInstructionType::BufferStoreDword;
+	store.pc   = code->GetInstructions().At(index).pc;
+	code->GetInstructions().InsertAt(index, store);
+}
+
+TEST(EmulatorFragmentMaskFlow, AMemoryWriteIsAdmittedOnlyWhileExecHoldsNoHelperLane)
 {
 	ASSERT_EXIT(([] {
 		Initialize();
-		auto code = ParsePixel(Baseline());
-		// A buffer store before the export: the guest performs it for live lanes only.
-		ShaderInstruction store {};
-		store.type = ShaderInstructionType::BufferStoreDword;
-		store.pc   = code.GetInstructions().At(Find(code, ShaderInstructionType::Exp)).pc;
-		code.GetInstructions().InsertAt(Find(code, ShaderInstructionType::Exp), store);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
-		Check(!flow.lane_local && Contains(flow.reason, "memory write"), "a memory write is refused");
+		// Under S_WQM the guest's helper lanes would write; the host's helpers cannot.
+		auto widened = ParsePixel(Baseline());
+		InsertBufferStore(&widened, Find(widened, ShaderInstructionType::VMovB32));
+		const auto widened_flow = ShaderAnalyzeFragmentMaskFlow(widened, 64u);
+		Check(!widened_flow.lane_local && Contains(widened_flow.reason, "memory write"), "a store under the WQM EXEC is refused");
+		// After the launch EXEC is restored, both write for the launched lanes only.
+		auto restored = ParsePixel(Baseline());
+		InsertBufferStore(&restored, Find(restored, ShaderInstructionType::Exp));
+		Check(ShaderAnalyzeFragmentMaskFlow(restored, 64u).lane_local, "a store under the restored launch EXEC is admitted");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -1578,6 +1587,43 @@ TEST(EmulatorFragmentMaskFlow, TheDiscardPatternNeedsItsInertTailItsNarrowingAnd
 		refused(DiscardProgram(false, true, false), "SCC branch on a mask", "an early-out to a tail that exports is not unobservable");
 		refused(DiscardProgram(true, false, false), "helper lanes", "exporting while widened");
 		refused(DiscardProgram(true, true, true), "SCC branch on a mask", "survivors that may include helpers do not prove an empty wave");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+// A store in a block entered by S_AND_SAVEEXEC from the WQM EXEC; `before_store` sets the store's EXEC and the
+// launch EXEC saved in s[4:5] is restored for the export.
+ShaderCode SaveexecStoreProgram(const Words& before_store)
+{
+	Words words;
+	Sop1(words, 4, 4, kExecLo);                  // s_mov_b64 s[4:5], exec (launch)
+	Append(words, Vopc(0xc5, Inline(0), 0u));    // v_cmp_ne_u32 vcc, 0, v0 (under the launch EXEC)
+	Sop1(words, 10, kExecLo, kExecLo);           // s_wqm_b64 exec, exec
+	Sop1(words, 0x24, 2, kVccLo);                // s_and_saveexec_b64 s[2:3], vcc: s[2:3] takes the WQM EXEC
+	Append(words, before_store);
+	Sop1(words, 4, kExecLo, 4);                  // s_mov_b64 exec, s[4:5]
+	Vop1(words, 1, 2, Inline(0));
+	words.insert(words.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
+	Sopp(words, 1);
+	auto code = ParsePixel(AsSlots(words));
+	InsertBufferStore(&code, Find(code, ShaderInstructionType::VMovB32) - 1u);
+	return code;
+}
+
+TEST(EmulatorFragmentMaskFlow, ASaveexecCopyOfTheWqmExecStillHoldsHelperLanes)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Check(ShaderAnalyzeFragmentMaskFlow(SaveexecStoreProgram({}), 64u).lane_local,
+		      "the WQM EXEC narrowed by a live compare holds no helper lane");
+		Words narrowed;
+		Sop2(narrowed, 0x0f, kExecLo, 4, kExecLo);   // s_and_b64 exec, s[4:5], exec
+		Check(ShaderAnalyzeFragmentMaskFlow(SaveexecStoreProgram(narrowed), 64u).lane_local,
+		      "the block's EXEC narrowed by the launch EXEC holds no helper lane");
+		Words rewidened;
+		Sop1(rewidened, 4, kExecLo, 2);              // s_mov_b64 exec, s[2:3]
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(SaveexecStoreProgram(rewidened), 64u);
+		Check(!flow.lane_local && Contains(flow.reason, "memory write"), "the saved WQM EXEC brings helper lanes back");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
