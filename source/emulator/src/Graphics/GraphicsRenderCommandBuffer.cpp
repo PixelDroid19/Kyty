@@ -971,6 +971,9 @@ public:
 			const uint64_t excluded_ns = *validation_ns > UINT64_MAX - *compare_ns ? UINT64_MAX : *validation_ns + *compare_ns;
 			*upload_ns = total_ns > excluded_ns ? total_ns - excluded_ns : 0u;
 		};
+		// Index fetches read guest bytes that idle writable storage already holds.
+		const auto admission = usage == VK_BUFFER_USAGE_INDEX_BUFFER_BIT ? GpuMemorySnapshotAdmission::IdleWritableStorage
+		                                                                  : GpuMemorySnapshotAdmission::ReadOnlyOverlaps;
 		Entry* previous = FindSnapshot(vaddr, size, usage, read_begin);
 		if (previous != nullptr)
 		{
@@ -978,7 +981,7 @@ public:
 			uint64_t reuse_validation_ns = 0u;
 			if (!GpuMemoryCompareSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
 			                                            static_cast<const uint8_t*>(previous->mapped) + read_begin, &matches,
-			                                            &reuse_validation_ns, compare_ns))
+			                                            &reuse_validation_ns, compare_ns, admission))
 			{
 				*validation_ns += reuse_validation_ns;
 				return nullptr;
@@ -998,7 +1001,7 @@ public:
 		if (entry == nullptr)
 		{
 			const auto preflight_start = std::chrono::steady_clock::now();
-			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin);
+			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin, admission);
 			*validation_ns += static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - preflight_start).count());
 			if (!eligible)
@@ -1020,7 +1023,7 @@ public:
 		entry->nonzero_end = std::max(entry->nonzero_end, size);
 		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
 		                                            static_cast<uint8_t*>(entry->mapped) + read_begin, &atomic_validation_ns,
-		                                            &copy_ns))
+		                                            &copy_ns, admission))
 		{
 			*validation_ns += atomic_validation_ns;
 			finish_upload_time();

@@ -9,6 +9,43 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Index snapshots over idle writable storage (2026-10-16)
+
+- In the sandbox title's gameplay, index binding cost 5.2 us of about 29 us of command processing per
+  draw outside fence waits. A temporary per-reason counter showed that 199,9xx of every 200,000
+  index binds refused the transient snapshot and created an `IndexBuffer` object instead, at 3.6 to
+  6.6 us each. Indexes averaged about 3 KB, over about 2,200 distinct addresses. Every refusal came
+  from a writable StorageBuffer overlap. For the same ranges, `GpuMemoryAcquireGdsSource` always
+  reported `GuestBytesCurrent`: no unpublished GPU write covered them.
+- Change: the snapshot API takes an admission (`GpuMemorySnapshotAdmission`). The index-buffer
+  capture asks for `IdleWritableStorage`. It also accepts writable StorageBuffer overlaps when no
+  overlapping StorageBuffer is still `in_use` with GPU writes. That state is read at validation time
+  from the object blocks, not from the cached overlap snapshot, and only after the read-only
+  classification alone has refused the range. Every other snapshot consumer keeps the strict
+  read-only admission.
+- Broad variant, excluded: the same idle rule applied to every snapshot consumer (vertex, read-only
+  storage views, storage-seed and gate captures). It reproduced the 2026-10-15 regression below.
+  - Gameplay ran at 1.67 fps.
+  - There were 114,036 live StorageBuffers (91,247 newly linked, 76,944 with truncated link
+    traversal).
+  - Transient validation took 14 s per 26 s window.
+
+  Evaluating the write-back state at validation time does not prevent that regression, so its
+  trigger lies in the non-index consumers.
+- Measured (Intel, strict, 240 s, same route, gameplay window), against 4175df97:
+  - index binding: 5.23 to 1.17 us/draw; no `IndexBuffer` objects are created;
+  - command processing: 42.0 to 35.8 and 36.7 us/draw, of which fence waits 13.1 to 8.7 and 9.8;
+  - frame rate: 5.57 to 6.66 and 6.54 fps; draws per window: 566k to 650k and 637k;
+  - storage objects: 45 live StorageBuffers.
+
+  A native capture 45 s after the spawn shows textured terrain, trees and the HUD; the one at 30 s
+  caught the sky-only frames while the first chunks appear.
+- Fishing title (Intel, strict, 240 s, dock route), which also covers 4175df97. Command processing
+  ran at 38.7 to 40.2 us/draw in steady windows, against 39.7 to 41.1 on 88a1c297. Index binding stayed
+  at 1.1 to 1.3 us/draw: its indexes were already snapshotted. The dock captures render as before.
+  The first attempt hit the known intermittent boot stall at frame 3, which also reproduced on
+  aa09403c that morning; the repeat ran clean.
+
 ## Materialization-cache clean ranges per draw (2026-10-16)
 
 - `GpuMemory::ResetHash` took 5.0 % self time of the sandbox title's command-processor thread in

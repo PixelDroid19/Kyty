@@ -1201,20 +1201,31 @@ struct GpuMemoryObjectDescription
 // Describes the single-range object `obj` among the objects overlapping
 // [vaddr, vaddr + size): its own guest range and its creation parameters.
 bool GpuMemoryDescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
+// Which overlapping GPU objects a read-only snapshot accepts. Read-only buffers
+// always qualify; IdleWritableStorage also accepts writable storage buffers none
+// of whose GPU writes is still unpublished, so the guest bytes are current.
+enum class GpuMemorySnapshotAdmission: uint8_t
+{
+	ReadOnlyOverlaps,
+	IdleWritableStorage,
+};
 // Validates a bounded allocated range and classifies its cached GPU overlaps.
 // Capture/compare additionally require dirty-page tracking and reject a read
 // if a CPU/HLE writer changes the range during that transaction.
-bool                    GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size);
+bool                    GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size,
+                                                            GpuMemorySnapshotAdmission admission = GpuMemorySnapshotAdmission::ReadOnlyOverlaps);
 bool                    GpuMemoryCaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst,
                                                                 uint64_t* validation_ns = nullptr,
-                                                                uint64_t* copy_ns       = nullptr);
+                                                                uint64_t* copy_ns       = nullptr,
+                                                                GpuMemorySnapshotAdmission admission = GpuMemorySnapshotAdmission::ReadOnlyOverlaps);
 // Validates the same immutable-snapshot contract and compares current guest
 // bytes with an existing command-buffer-owned snapshot. A successful call
 // reports eligibility separately from byte equality so changed content falls
 // through to a fresh capture. Concurrent CPU/HLE writes fail closed.
 bool                    GpuMemoryCompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot,
                                                                 bool* matches, uint64_t* validation_ns = nullptr,
-                                                                uint64_t* compare_ns = nullptr);
+                                                                uint64_t* compare_ns = nullptr,
+                                                                GpuMemorySnapshotAdmission admission = GpuMemorySnapshotAdmission::ReadOnlyOverlaps);
 
 inline bool GpuMemoryCanShareReadOnlyStorageViews(uint64_t existing_addr, uint64_t existing_size, bool existing_read_only,
                                                   uint64_t incoming_addr, uint64_t incoming_size, bool incoming_read_only)

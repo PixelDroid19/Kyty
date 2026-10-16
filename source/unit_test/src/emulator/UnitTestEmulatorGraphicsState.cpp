@@ -3383,7 +3383,7 @@ TEST(EmulatorGraphicsState, TiledSampleDetileUsesTheGuestFormatElementWidth)
 TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
 {
 	GpuMemoryOverlapSnapshot empty;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(empty));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(empty, false));
 
 	GpuMemoryOverlapSnapshot read_only_storage;
 	read_only_storage.total_count              = 2;
@@ -3392,27 +3392,32 @@ TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
 	read_only_storage.entries[0].relation      = GpuMemoryOverlapType::Crosses;
 	read_only_storage.entries[0].count         = 2;
 	read_only_storage.entries[0].all_read_only = true;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_storage));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_storage, false));
 
 	auto read_only_vertex            = read_only_storage;
 	read_only_vertex.entries[0].type = GpuMemoryObjectType::VertexBuffer;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_vertex));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_vertex, false));
 
 	auto read_only_index            = read_only_storage;
 	read_only_index.entries[0].type = GpuMemoryObjectType::IndexBuffer;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_index));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_index, false));
 
 	auto writable_storage                     = read_only_storage;
 	writable_storage.entries[0].all_read_only = false;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage, false));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage, true));
+
+	auto writable_vertex            = writable_storage;
+	writable_vertex.entries[0].type = GpuMemoryObjectType::VertexBuffer;
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_vertex, true));
 
 	auto surface            = read_only_storage;
 	surface.entries[0].type = GpuMemoryObjectType::RenderTexture;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface, false));
 
 	auto truncated      = read_only_storage;
 	truncated.truncated = true;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(truncated));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(truncated, false));
 }
 
 TEST(EmulatorGraphicsState, UsesTransientBuffersOnlyForBoundedSafeReadOnlyViews)
@@ -3478,6 +3483,8 @@ TEST(EmulatorGraphicsState, TransientSnapshotEligibilityTracksGpuObjectMutations
 	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size));
 	EXPECT_FALSE(GpuMemoryCaptureSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured));
 	EXPECT_FALSE(GpuMemoryCompareSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured, &snapshot_matches));
+	// Writable storage in use still holds GPU writes the guest bytes may not show.
+	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size, GpuMemorySnapshotAdmission::IdleWritableStorage));
 	GpuMemoryFree(&ctx, obj_addr, obj_size);
 
 	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, 0));

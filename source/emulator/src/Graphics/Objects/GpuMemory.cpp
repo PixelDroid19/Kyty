@@ -709,21 +709,23 @@ uint64_t GpuMemoryGetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
 	return g_gpu_memory->GetAllocatedRangePrefix(vaddr, maximum_size);
 }
 
-bool GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size)
+bool GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission)
 {
-	return g_gpu_memory != nullptr && g_gpu_memory->CanSnapshotReadOnlyBuffer(vaddr, size);
+	return g_gpu_memory != nullptr && g_gpu_memory->CanSnapshotReadOnlyBuffer(vaddr, size, admission);
 }
 
-bool GpuMemoryCaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns, uint64_t* copy_ns)
+bool GpuMemoryCaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns, uint64_t* copy_ns,
+                                            GpuMemorySnapshotAdmission admission)
 {
-	return g_gpu_memory != nullptr && g_gpu_memory->CaptureSnapshotReadOnlyBuffer(vaddr, size, dst, validation_ns, copy_ns);
+	return g_gpu_memory != nullptr &&
+	       g_gpu_memory->CaptureSnapshotReadOnlyBuffer(vaddr, size, dst, validation_ns, copy_ns, admission);
 }
 
 bool GpuMemoryCompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
-	                                        uint64_t* validation_ns, uint64_t* compare_ns)
+	                                        uint64_t* validation_ns, uint64_t* compare_ns, GpuMemorySnapshotAdmission admission)
 {
 	return g_gpu_memory != nullptr &&
-	       g_gpu_memory->CompareSnapshotReadOnlyBuffer(vaddr, size, snapshot, matches, validation_ns, compare_ns);
+	       g_gpu_memory->CompareSnapshotReadOnlyBuffer(vaddr, size, snapshot, matches, validation_ns, compare_ns, admission);
 }
 
 void GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size)

@@ -331,7 +331,7 @@ bool GpuMemory::QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size,
 	return true;
 }
 
-bool GpuMemory::CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size)
+bool GpuMemory::CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission)
 {
 	if (!GpuMemoryCanUseTransientReadOnlyBuffer(true, size, true, true) || vaddr > UINT64_MAX - (size - 1u))
 	{
@@ -344,15 +344,55 @@ bool GpuMemory::CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size)
 	{
 		return false;
 	}
-	if (const auto* cached = m_overlap_snapshot_cache.BorrowLookup(query); cached != nullptr)
-	{
-		return GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*cached);
-	}
-	GpuMemoryOverlapSnapshot overlaps {};
-	return QueryOverlapsLocked(&vaddr, &size, 1, query, &overlaps) && GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps);
+	return TransientReadOnlyOverlapsAllowedLocked(vaddr, size, query, admission);
 }
 
-bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns, uint64_t* copy_ns)
+// The overlap snapshot is cached by range; whether a writable storage object has
+// unpublished GPU writes changes with every binding, so it is checked only when
+// the read-only classification alone refuses the range.
+bool GpuMemory::TransientReadOnlyOverlapsAllowedLocked(uint64_t vaddr, uint64_t size, const GpuMemoryRangeQueryKey& query,
+                                                       GpuMemorySnapshotAdmission admission)
+{
+	GpuMemoryOverlapSnapshot        queried {};
+	const GpuMemoryOverlapSnapshot* overlaps = m_overlap_snapshot_cache.BorrowLookup(query);
+	if (overlaps == nullptr)
+	{
+		if (!QueryOverlapsLocked(&vaddr, &size, 1, query, &queried))
+		{
+			return false;
+		}
+		overlaps = &queried;
+	}
+	if (GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*overlaps, false))
+	{
+		return true;
+	}
+	return admission == GpuMemorySnapshotAdmission::IdleWritableStorage &&
+	       GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*overlaps, true) && !WritableStorageOverlapsLocked(vaddr, size);
+}
+
+bool GpuMemory::WritableStorageOverlapsLocked(uint64_t vaddr, uint64_t size)
+{
+	const int heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return true;
+	}
+	for (const auto& found: FindBlocks(heap_id, &vaddr, &size, 1))
+	{
+		const auto& object = m_heaps[heap_id].objects[found.object_id];
+		// Writable storage still in use holds GPU writes the guest bytes do not show yet.
+		if (!object.free && object.info.object.type == GpuMemoryObjectType::StorageBuffer && object.info.in_use &&
+		    !object.info.read_only)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns, uint64_t* copy_ns,
+                                              GpuMemorySnapshotAdmission admission)
 {
 	const auto validation_start = std::chrono::steady_clock::now();
 	const auto finish_validation = [&]()
@@ -381,21 +421,10 @@ bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, voi
 		finish_validation();
 		return false;
 	}
-	if (const auto* cached = m_overlap_snapshot_cache.BorrowLookup(query); cached != nullptr)
+	if (!TransientReadOnlyOverlapsAllowedLocked(vaddr, size, query, admission))
 	{
-		if (!GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*cached))
-		{
-			finish_validation();
-			return false;
-		}
-	} else
-	{
-		GpuMemoryOverlapSnapshot overlaps {};
-		if (!QueryOverlapsLocked(&vaddr, &size, 1, query, &overlaps) || !GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps))
-		{
-			finish_validation();
-			return false;
-		}
+		finish_validation();
+		return false;
 	}
 	finish_validation();
 	const auto copy_start = std::chrono::steady_clock::now();
@@ -415,7 +444,7 @@ bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, voi
 }
 
 bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
-	                                          uint64_t* validation_ns, uint64_t* compare_ns)
+	                                          uint64_t* validation_ns, uint64_t* compare_ns, GpuMemorySnapshotAdmission admission)
 {
 	const auto validation_start = std::chrono::steady_clock::now();
 	const auto finish_validation = [&]()
@@ -454,21 +483,10 @@ bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, con
 		finish_validation();
 		return false;
 	}
-	if (const auto* cached = m_overlap_snapshot_cache.BorrowLookup(query); cached != nullptr)
+	if (!TransientReadOnlyOverlapsAllowedLocked(vaddr, size, query, admission))
 	{
-		if (!GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*cached))
-		{
-			finish_validation();
-			return false;
-		}
-	} else
-	{
-		GpuMemoryOverlapSnapshot overlaps {};
-		if (!QueryOverlapsLocked(&vaddr, &size, 1, query, &overlaps) || !GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps))
-		{
-			finish_validation();
-			return false;
-		}
+		finish_validation();
+		return false;
 	}
 	finish_validation();
 	const auto compare_start = std::chrono::steady_clock::now();

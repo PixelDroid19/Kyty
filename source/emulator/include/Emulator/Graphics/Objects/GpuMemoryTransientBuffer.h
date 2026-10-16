@@ -30,7 +30,10 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 // buffer, not persistent GPU resources. Surface aliases, writable buffers,
 // oversized ranges, and incomplete overlap snapshots stay on the authoritative
 // GpuMemory path.
-[[nodiscard]] inline bool GpuMemoryOverlapsAllowTransientReadOnlyBuffer(const GpuMemoryOverlapSnapshot& overlaps)
+// A writable storage buffer holds the guest bytes while none of its GPU writes is
+// unpublished: `writable_storage_idle` states that for every such object over the range.
+[[nodiscard]] inline bool GpuMemoryOverlapsAllowTransientReadOnlyBuffer(const GpuMemoryOverlapSnapshot& overlaps,
+                                                                        bool writable_storage_idle)
 {
 	if (overlaps.truncated || overlaps.entry_count > GpuMemoryOverlapSnapshot::ENTRIES_MAX)
 	{
@@ -44,7 +47,9 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 		const bool  is_buffer =
 		    entry.type == GpuMemoryObjectType::StorageBuffer || entry.type == GpuMemoryObjectType::VertexBuffer ||
 		    entry.type == GpuMemoryObjectType::IndexBuffer;
-		if (!is_buffer || !entry.all_read_only || entry.count == 0u || classified_count > UINT32_MAX - entry.count)
+		const bool holds_guest_bytes =
+		    entry.all_read_only || (entry.type == GpuMemoryObjectType::StorageBuffer && writable_storage_idle);
+		if (!is_buffer || !holds_guest_bytes || entry.count == 0u || classified_count > UINT32_MAX - entry.count)
 		{
 			return false;
 		}

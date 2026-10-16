@@ -287,11 +287,12 @@ public:
 	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 	bool                    QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
 	bool                    DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
-	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size);
+	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission);
 	bool                    CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns,
-	                                                      uint64_t* copy_ns);
+	                                                      uint64_t* copy_ns, GpuMemorySnapshotAdmission admission);
 	bool                    CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
-	                                                      uint64_t* validation_ns, uint64_t* compare_ns);
+	                                                      uint64_t* validation_ns, uint64_t* compare_ns,
+	                                                      GpuMemorySnapshotAdmission admission);
 
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
@@ -467,6 +468,10 @@ private:
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer) const;
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
+	bool TransientReadOnlyOverlapsAllowedLocked(uint64_t vaddr, uint64_t size, const GpuMemoryRangeQueryKey& query,
+	                                            GpuMemorySnapshotAdmission admission);
+	// Whether a writable storage buffer whose GPU writes are not yet published covers part of the range.
+	[[nodiscard]] bool WritableStorageOverlapsLocked(uint64_t vaddr, uint64_t size);
 	bool QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
 	                         const GpuMemoryRangeQueryKey& query, GpuMemoryOverlapSnapshot* out);
 
