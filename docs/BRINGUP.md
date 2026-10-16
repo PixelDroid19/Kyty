@@ -9,6 +9,20 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Platformer pair: index range over a depth target (2026-10-16)
+
+- Observed (Intel, strict): both platformers stopped intermittently on
+  `unknown relation: DepthStencilBuffer - Crosses - IndexBuffer`, a small
+  index range (12 or 0x1e0 bytes) over memory still tracked by an active
+  depth target. The vertex rule already links the same Crosses form.
+- Changed: `GpuMemoryAllowsIndexContainedInSurface` links an index buffer
+  that crosses a depth target; Contains still refuses.
+- Verified: the insect platformer passed the former 73 s stop and reached
+  gameplay on Intel (200 s, 72-103 fps in play) and AMD (200 s, 26-30 fps
+  in play). The sequel reached gameplay on Intel (150 s, ~64 fps in play,
+  bounded diagnostics built in) and AMD (220 s, 23-25 fps). Menu text in both still
+  draws as solid glyph blocks (graphics handoff, open).
+
 ## Card title: streamed music and an offline service retry (2026-10-16)
 
 - Observed (Intel, strict, card title): music and most effects were silent or restarted

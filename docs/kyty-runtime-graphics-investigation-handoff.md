@@ -326,6 +326,21 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Sequel platformer menu glyphs (2026-10-16, open; GPU writers excluded).
+  The runtime 512x512 one-byte atlas keeps `0xcd` in every one of its
+  pages through gameplay (sampled every 32-64 binds, 90-150 s Intel runs).
+  `0xcd` is the engine's default fill for a new texture, so creation reaches
+  memory and every later update does not. Bounded temporary logs in the same
+  runs found no GPU writer of that atlas: the only `image_store` emitted in
+  the whole run targets a 1920x1080 four-byte image with identity DST_SEL;
+  only one compute dispatch binds any texture and none binds the atlas;
+  no compute storage buffer overlaps it; no colour target is placed on it;
+  no dispatch is skipped by the empty-store gate; and no DMA_DATA packet
+  (hardware or custom) is dropped. A store-selector fault would write the
+  atlas with wrong channels instead of leaving `0xcd`, so the DST_SEL lead
+  does not apply here. The first insect platformer has a different upload
+  (an R8 copy compute, see BRINGUP) with the same symptom. Next step: find
+  the guest update path that never writes, not another GPU writer probe.
 - Card title: a hand card turns white for a moment when it gains focus
   (2026-10-16, not a defect). Thirty captures 2 s apart while the route
   stepped the hand focus showed the newly focused card blank white, then
