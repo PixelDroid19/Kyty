@@ -9,6 +9,20 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Materialization-cache clean ranges per draw (2026-10-16)
+
+- `GpuMemory::ResetHash` took 5.0 % self time of the sandbox title's command-processor thread in
+  gameplay. Each draw invalidates its colour targets and its depth ranges (depth, stencil and HTILE)
+  in the materialization cache. A range invalidated before replays only the stores made since then;
+  any other range scans all 2,048 slots. The cache remembered 4 clean ranges in FIFO order, so a draw
+  with more than 4 attachment ranges cycled through them and each invalidation scanned every slot.
+- Fix: remember 16 clean ranges.
+- Measured (Intel, strict, 240 s, temporary counters): in gameplay, 98.7 % of invalidations replay
+  recent stores and 0.05 % overflow the 256-store log. `ResetHash` fell out of the profile's top
+  entries (below 1.2 %). Gameplay command processing went from 38.1 to 42.0 us/draw, with fence waits
+  from 8.3 to 13.1 us/draw: without the waits, about 29.8 to 28.9 us/draw. The scenes differ between
+  runs (619k against 566k draws per window), so the gain is within noise at window level.
+
 ## Descriptor-set recycling and deferred-release drain in dense gameplay (2026-10-16)
 
 - Sandbox title gameplay is bound by the command processor. About 4,300 draws per frame, the thread is
@@ -69,8 +83,9 @@ fail on the current HEAD before acting on them.
     took a median of 2.1 ms (90th percentile 8.7 ms), three to four per frame. These per-wait details
     were sampled during world loading; the aggregate counters kept the same rate of slow waits through
     gameplay, but the waited objects were not sampled there.
-  - The compute ring already submits at the end of every ring run, so most of these waits are for
-    compute work that is submitted and still running.
+  - By code reading, the compute ring already submits at the end of every ring run, so these waits are
+    probably for compute work that is submitted and still running. The dependency state at the wait
+    was not measured.
   - Excluded:
     - Snapshot refresh of tracked flexible-memory chunks, and the retired-table budget: 0, 0 and 2
       events against about 55,000 write-back waits. Only one 32 KiB chunk is tracked.

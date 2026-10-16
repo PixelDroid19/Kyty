@@ -287,7 +287,7 @@ private:
 	std::array<std::optional<Entry>, Capacity> m_entries {};
 	std::array<std::pair<uint64_t, uint64_t>, Capacity> m_spans {};
 	std::array<size_t, StoreLogSize>                    m_store_log {};
-	std::array<CleanRange, 4>                           m_clean_ranges {};
+	std::array<CleanRange, 16>                          m_clean_ranges {};
 	uint64_t                                            m_store_seq  = 0;
 	size_t                                              m_clean_next = 0;
 	uint64_t                                            m_epoch      = 1u;
