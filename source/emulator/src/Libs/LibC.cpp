@@ -671,35 +671,27 @@ static KYTY_SYSV_ABI const char* const* c_Getptimes()
 	return g_c_locale_times.data();
 }
 
-static const std::array<short, 384>& c_Getptoupper_table()
+// C-locale case tables: short[384] with the EOF entry before the byte-indexed
+// values. Only ASCII letters change case; every other byte maps to itself.
+using CaseTable = std::array<short, 384>;
+
+constexpr CaseTable MakeCaseTable(char first, char last, int delta)
 {
-	static const std::array<short, 384> table = [] {
-		std::array<short, 384> values {};
-		for (int c = -1; c < 256; c++)
-		{
-			values[c + 1] = (c >= 0) ? static_cast<short>(::toupper(c)) : 0;
-		}
-		return values;
-	}();
+	CaseTable table {};
+	for (int c = 0; c < 256; ++c)
+	{
+		const bool convert = c >= first && c <= last;
+		table[static_cast<std::size_t>(c) + 1] = static_cast<short>(convert ? c + delta : c);
+	}
 	return table;
 }
 
-static const std::array<short, 384>& c_Getptolower_table()
-{
-	static const std::array<short, 384> table = [] {
-		std::array<short, 384> values {};
-		for (int c = -1; c < 256; c++)
-		{
-			values[c + 1] = (c >= 0) ? static_cast<short>(::tolower(c)) : 0;
-		}
-		return values;
-	}();
-	return table;
-}
+constexpr CaseTable g_c_locale_toupper = MakeCaseTable('a', 'z', 'A' - 'a');
+constexpr CaseTable g_c_locale_tolower = MakeCaseTable('A', 'Z', 'a' - 'A');
 
 static KYTY_SYSV_ABI const short* c_Getptoupper()
 {
-	return c_Getptoupper_table().data() + 1;
+	return g_c_locale_toupper.data() + 1;
 }
 
 // Gen5 libc_v1 _Getptolower — NID 1uJgoVq3bQU. Same table contract as
@@ -709,7 +701,7 @@ static KYTY_SYSV_ABI const short* c_Getptoupper()
 // Returning a non-table pointer corrupted "data.js" and the project parse hit EOF.
 static KYTY_SYSV_ABI const short* c_Getptolower()
 {
-	return c_Getptolower_table().data() + 1;
+	return g_c_locale_tolower.data() + 1;
 }
 
 static KYTY_SYSV_ABI std::mbstate_t* c_Getpmbstate()
@@ -1483,11 +1475,60 @@ static KYTY_SYSV_ABI void* CxxVtableNull(void* /*self*/)
 	return nullptr;
 }
 
-// ctype<char>::do_widen(char) at vtable+0x40: the guest widens the fill
-// character and std::endl's '\n' through it. Narrow-to-narrow is the identity.
+// ctype<char> virtual slots, in the order of the guest runtime's vtable.
+// Regex class-name lookup compares names through do_tolower, so the case
+// slots must convert characters instead of returning the facet.
+static KYTY_SYSV_ABI char CxxCtypeToLower(const CxxCtypeFacetLayout* self, char character)
+{
+	return static_cast<char>(self->tolower_table[static_cast<unsigned char>(character)]);
+}
+
+static KYTY_SYSV_ABI const char* CxxCtypeToLowerRange(const CxxCtypeFacetLayout* self, char* first, const char* last)
+{
+	for (; first != last; ++first)
+	{
+		*first = CxxCtypeToLower(self, *first);
+	}
+	return last;
+}
+
+static KYTY_SYSV_ABI char CxxCtypeToUpper(const CxxCtypeFacetLayout* self, char character)
+{
+	return static_cast<char>(self->toupper_table[static_cast<unsigned char>(character)]);
+}
+
+static KYTY_SYSV_ABI const char* CxxCtypeToUpperRange(const CxxCtypeFacetLayout* self, char* first, const char* last)
+{
+	for (; first != last; ++first)
+	{
+		*first = CxxCtypeToUpper(self, *first);
+	}
+	return last;
+}
+
+// Narrow-to-narrow widening and narrowing are identities: the guest widens the
+// fill character and std::endl's '\n' through do_widen.
 static KYTY_SYSV_ABI char CxxCtypeWiden(void* /*self*/, char character)
 {
 	return character;
+}
+
+static KYTY_SYSV_ABI const char* CxxCtypeWidenRange(void* /*self*/, const char* first, const char* last, char* dest)
+{
+	std::memcpy(dest, first, static_cast<size_t>(last - first));
+	return last;
+}
+
+static KYTY_SYSV_ABI char CxxCtypeNarrow(void* /*self*/, char character, char /*fallback*/)
+{
+	return character;
+}
+
+static KYTY_SYSV_ABI const char* CxxCtypeNarrowRange(void* /*self*/, const char* first, const char* last, char /*fallback*/,
+                                                     char* dest)
+{
+	std::memcpy(dest, first, static_cast<size_t>(last - first));
+	return last;
 }
 
 static void* g_locimp_vtable[16] = {
@@ -1507,14 +1548,22 @@ static void* g_ctype_vtable[16] = {
     reinterpret_cast<void*>(&CxxVtableNoop),      // +0x08
     reinterpret_cast<void*>(&CxxVtableNoop),      // +0x10
     reinterpret_cast<void*>(&CxxVtableNoop),      // +0x18
-    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x20
-    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x28
-    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x30
-    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x38
-    reinterpret_cast<void*>(&CxxCtypeWiden),      // +0x40
+    reinterpret_cast<void*>(&CxxCtypeToLower),      // +0x20
+    reinterpret_cast<void*>(&CxxCtypeToLowerRange), // +0x28
+    reinterpret_cast<void*>(&CxxCtypeToUpper),      // +0x30
+    reinterpret_cast<void*>(&CxxCtypeToUpperRange), // +0x38
+    reinterpret_cast<void*>(&CxxCtypeWiden),        // +0x40
+    reinterpret_cast<void*>(&CxxCtypeWidenRange),   // +0x48
+    reinterpret_cast<void*>(&CxxCtypeNarrow),       // +0x50
+    reinterpret_cast<void*>(&CxxCtypeNarrowRange),  // +0x58
 };
 
-static CxxCtypeFacetLayout g_ctype_facet {g_ctype_vtable, 0, g_c_locale_ctype.data() + 1};
+static CxxCtypeFacetLayout g_ctype_facet {g_ctype_vtable,
+                                          0,
+                                          g_c_locale_ctype.data() + 1,
+                                          g_c_locale_tolower.data() + 1,
+                                          g_c_locale_toupper.data() + 1,
+                                          0};
 
 // Facet vector: index 0 unused; ctype at kCxxCtypeCharId (1).
 static void* g_classic_facets[kCxxLocimpFacetCount] = {nullptr, &g_ctype_facet};

@@ -456,7 +456,8 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
   - Camera definition I/O. An earlier guest file trace shows the resource
     pack's camera archive opened during world entry and read in full: header,
     table of seven entries and all 6,612 data bytes, which add up to the file
-    size. The behavior pack's preset archive is also read in full.
+    size. The behavior pack's preset archive is also read in full. (Reading was
+    correct; the parse rejected the data, see the fix below.)
 - Observed (guest state, not the GPU path):
   - The guest writes a view-projection that is a pure perspective (fovY 60,
     16:9, near 0.025 for a 0..1 depth range) with no rotation or translation,
@@ -476,8 +477,36 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
     60-degree vertical field of view, so it may come from a fallback path
     rather than from one of those camera entities (not proven: how the title
     combines the camera value with its options is unknown).
-  - Next: find why the client camera entity never follows the local player
-    (the camera presets are read in full from their archive).
+- Fixed (2026-10-16): the camera definitions were rejected by the classic
+  locale's `ctype<char>`.
+  - Hardware execute-breakpoint counters on the title's own log sites showed
+    "Failed to load any valid camera" and "Core camera settings ... missing"
+    once per camera file (7 of 7), although every file was found. A gdb Python
+    breakpoint on the definition loader's return dumped the parser error:
+    `"identifier" must contain a namespace and a name, separated by a colon`
+    for `minecraft:death_camera` and the other six.
+  - The camera schema validates the identifier with the regex `^\w+:\w+$`.
+    The title's `regex_traits::lookup_classname` compares one-letter class
+    names through `ctype<char>::do_tolower` (vtable +0x20). Kyty's classic
+    facet implemented that slot as a no-op returning the facet pointer, so
+    every comparison matched and `\w` resolved to the first one-letter entry,
+    `d` (digits). Every camera identifier failed, no camera entity existed, and
+    the client rendered from an identity view at the origin with the stick
+    ignored: the frozen camera and the missing terrain recorded above.
+  - Contract, from the vtable relocations and code of the bundled runtime
+    (identical 12-slot `ctype<char>` vtable in all 25 readable bundled
+    `libc.prx`): object 0x30 bytes with the classification table at +0x10, the
+    lowercase and uppercase tables at +0x18/+0x20 and a delete flag at +0x28;
+    slots +0x20/+0x28 `do_tolower` (char, range), +0x30/+0x38 `do_toupper`,
+    +0x40/+0x48 `do_widen`, +0x50/+0x58 `do_narrow`. The facet now carries the
+    C-locale case tables (shared with `_Getptolower`/`_Getptoupper`, now
+    constant data instead of host `tolower`/`toupper`) and implements all eight
+    slots.
+  - Verified (Intel, strict, 240 s): no camera error site is reached, the
+    title-screen panorama shows terrain, mobs and flowers for the first time,
+    and world entry advances to a strict stop on a wave64 pixel shader that needs
+    fragment wave transport (`mask observed as a number`), the same open
+    feature as the card title.
 - Defects found, not fixed:
   - Multi-level sampled views over a live one-level render target are rejected
     by `Gen5PickSampleSurfaceAliases` (rule `mip_levels >= sample_levels`) and
