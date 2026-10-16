@@ -577,16 +577,23 @@ bool GpuMemory::MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& i
 	// Device-address consumers then skip the in-order write-back, and an object
 	// rewritten every frame may not complete one for a long time. That is sound
 	// only when the write-back has nothing else to update: every overlapping
-	// object must be an exact image alias the device wrote after this object's
-	// last write (the fill's propagated clear or later rendering). Depth/HTILE,
-	// buffer and partial aliases keep the in-order write-back.
+	// object must be an exact color image, or a depth image whose depth or
+	// stencil plane is exactly this object, that the device wrote after this
+	// object's last write (the fill's propagated clear or later rendering).
+	// HTILE, buffer and partial aliases keep the in-order write-back.
+	const uint64_t vaddr = object.block.vaddr[0];
+	const uint64_t size  = object.block.size[0];
 	for (const auto& other: object.others)
 	{
 		const auto& alias = m_heaps[identity.heap_id].objects[other.object_id];
 		const auto  type  = alias.info.object.type;
-		if (alias.free || other.relation != OverlapType::Equals ||
-		    (type != GpuMemoryObjectType::RenderTexture && type != GpuMemoryObjectType::Texture) ||
-		    alias.info.device_write_time <= info.write_time)
+		const bool  depth_plane =
+		    type == GpuMemoryObjectType::DepthStencilBuffer && alias.info.params[DepthStencilBufferObject::PARAM_HTILE_ADDR] != vaddr &&
+		    GpuMemoryBlockSetHasRange(alias.block.vaddr, alias.block.size, alias.block.vaddr_num, vaddr, size);
+		const bool color_image = other.relation == OverlapType::Equals &&
+		                         (type == GpuMemoryObjectType::RenderTexture || type == GpuMemoryObjectType::VideoOutBuffer ||
+		                          type == GpuMemoryObjectType::Texture);
+		if (alias.free || (!color_image && !depth_plane) || alias.info.device_write_time <= info.write_time)
 		{
 			return false;
 		}

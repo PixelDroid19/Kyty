@@ -43,6 +43,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -84,9 +85,10 @@ static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, Com
 	for (uint32_t i = 0; i < provenance.entry_count; ++i)
 	{
 		const auto& entry = provenance.entries[i];
-		// Exact color-image aliases (render targets and sampled copies of the same bytes) receive the fill;
-		// any other or partial alias has no proven representation of it.
-		const bool image_alias = entry.type == GpuMemoryObjectType::RenderTexture || entry.type == GpuMemoryObjectType::Texture;
+		// Exact color-image aliases (render targets, display buffers and sampled copies of the same bytes)
+		// receive the fill; any other or partial alias has no proven representation of it.
+		const bool image_alias = entry.type == GpuMemoryObjectType::RenderTexture || entry.type == GpuMemoryObjectType::VideoOutBuffer ||
+		                         entry.type == GpuMemoryObjectType::Texture;
 		if (entry.type != GpuMemoryObjectType::StorageBuffer && !image_alias)
 		{
 			return false;
@@ -111,11 +113,15 @@ static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, Com
 	return true;
 }
 
-// Every exact color-image alias of the filled range: render targets and sampled texture copies.
+// Every exact color-image alias of the filled range: render targets, display buffers and sampled texture copies.
 static Vector<VulkanImage*> FindComputeColorFillImages(CommandBuffer* buffer, uint64_t address, uint64_t size)
 {
 	Vector<VulkanImage*> images;
 	for (auto* image: FindRenderTexture(buffer, address, size, true)) { images.Add(image); }
+	for (const auto& object: GpuMemoryFindObjectsForSubmission(buffer, address, size, GpuMemoryObjectType::VideoOutBuffer, true, false))
+	{
+		if (object.type == GpuMemoryObjectType::VideoOutBuffer) { images.Add(static_cast<VideoOutVulkanImage*>(object.obj)); }
+	}
 	for (const auto& object: GpuMemoryFindObjectsForSubmission(buffer, address, size, GpuMemoryObjectType::Texture, true, false))
 	{
 		if (object.type == GpuMemoryObjectType::Texture) { images.Add(static_cast<TextureVulkanImage*>(object.obj)); }
@@ -168,6 +174,7 @@ static bool ClearColorImageAliases(CommandBuffer* buffer, uint64_t address, uint
 		                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 	}
 	GpuMemoryResetHash(&address, &size, 1, GpuMemoryObjectType::RenderTexture);
+	GpuMemoryResetHash(&address, &size, 1, GpuMemoryObjectType::VideoOutBuffer);
 	GpuMemoryResetHash(&address, &size, 1, GpuMemoryObjectType::Texture);
 	return true;
 }
@@ -370,6 +377,43 @@ bool PropagateComputeUniformStencilFill(CommandBuffer* buffer, const ComputeUnif
 		TransitionDepthStencilImage(vk_buffer, image, restore_layout);
 		cleared = true;
 	}
+	if (cleared) { GpuMemoryResetPlaneHash(fill.address, fill.size, GpuMemoryObjectType::DepthStencilBuffer); }
+	return cleared;
+}
+
+bool PropagateComputeUniformDepthFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+{
+	// Every 32-bit texel of the plane receives the same float depth. A clear
+	// stores only values in [0, 1]; any other value keeps the guest-memory path.
+	float value = 0.0f;
+	std::memcpy(&value, fill.words.data(), sizeof(value));
+	const bool uniform_texels = std::all_of(fill.words.begin(), fill.words.end(), [&](uint32_t word) { return word == fill.words[0]; });
+	if (!uniform_texels || !(value >= 0.0f && value <= 1.0f) || !ComputeColorFillUsesGraphicsQueue(buffer))
+	{
+		return false;
+	}
+	bool cleared = false;
+	for (const auto& object:
+	     GpuMemoryFindObjectsWithRangeForSubmission(buffer, fill.address, fill.size, GpuMemoryObjectType::DepthStencilBuffer))
+	{
+		auto* image = static_cast<DepthStencilVulkanImage*>(object.obj);
+		// The same first-use and sample-location limits as the stencil plane.
+		if (image == nullptr || image->image == nullptr || image->depth_vaddr != fill.address ||
+		    (image->format != VK_FORMAT_D32_SFLOAT && image->format != VK_FORMAT_D32_SFLOAT_S8_UINT) ||
+		    image->layout == VK_IMAGE_LAYOUT_UNDEFINED || image->sample_locations_compatible)
+		{
+			continue;
+		}
+		auto       vk_buffer      = buffer->RecordOutsideRenderPass();
+		const auto restore_layout = image->layout;
+		TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		const VkClearDepthStencilValue clear {value, 0u};
+		const VkImageSubresourceRange  range {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, image->mip_levels, 0u, image->array_layers};
+		vkCmdClearDepthStencilImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
+		TransitionDepthStencilImage(vk_buffer, image, restore_layout);
+		cleared = true;
+	}
+	if (cleared) { GpuMemoryResetPlaneHash(fill.address, fill.size, GpuMemoryObjectType::DepthStencilBuffer); }
 	return cleared;
 }
 
@@ -1048,6 +1092,7 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 	if (r->vulkan_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->vulkan_buffer == nullptr condition ignored (continuing)\n"); }
 	const bool stencil_plane        = r->stencil_buffer_size > 0 && DepthFormatHasStencil(r->format);
+	r->vulkan_buffer->depth_vaddr   = r->depth_buffer_size > 0 ? r->depth_buffer_vaddr : 0u;
 	r->vulkan_buffer->stencil_vaddr = stencil_plane ? r->stencil_buffer_vaddr : 0u;
 	if (sample_locations_compatible && !r->vulkan_buffer->sample_locations_compatible)
 	{

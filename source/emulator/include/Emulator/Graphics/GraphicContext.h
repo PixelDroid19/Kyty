@@ -345,6 +345,8 @@ struct DepthStencilVulkanImage: public VulkanImage
 	bool                       compressed                   = false;
 	bool                       sample_locations_compatible = false;
 	VulkanSampleLocationState last_sample_locations;
+	// Guest base of the depth plane this image holds, 0 without one.
+	uint64_t depth_vaddr = 0;
 	// Guest base of the 8-bit stencil plane this image holds, 0 without one.
 	uint64_t stencil_vaddr = 0;
 	// R32F copy of the depth plane that storage views address (depth formats are not storage images), created on

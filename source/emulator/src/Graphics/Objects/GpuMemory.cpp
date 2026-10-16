@@ -875,6 +875,13 @@ void GpuMemoryResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_n
 	g_gpu_memory->ResetHash(vaddr, size, vaddr_num, type);
 }
 
+void GpuMemoryResetPlaneHash(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+
+	g_gpu_memory->ResetPlaneHash(vaddr, size, type);
+}
+
 void GpuMemoryDbgDump()
 {
 	EXIT_IF(g_gpu_memory == nullptr);

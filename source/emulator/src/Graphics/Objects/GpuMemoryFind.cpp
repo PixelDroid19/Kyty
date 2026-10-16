@@ -139,12 +139,7 @@ Vector<GpuMemoryObject> GpuMemory::FindObjectsWithRange(uint64_t vaddr, uint64_t
 	{
 		auto& h = heap.objects[block.object_id];
 		EXIT_IF(h.free);
-		bool range_equal = false;
-		for (int i = 0; i < h.block.vaddr_num; ++i)
-		{
-			range_equal = range_equal || (h.block.vaddr[i] == vaddr && h.block.size[i] == size);
-		}
-		if (h.info.object.type != type || !range_equal)
+		if (h.info.object.type != type || !GpuMemoryBlockSetHasRange(h.block.vaddr, h.block.size, h.block.vaddr_num, vaddr, size))
 		{
 			continue;
 		}
@@ -557,6 +552,34 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 				o.device_write_time = o.gpu_update_time;
 			}
 		}
+	}
+}
+
+void GpuMemory::ResetPlaneHash(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type)
+{
+	EXIT_IF(type == GpuMemoryObjectType::Invalid);
+	EXIT_IF(size == 0 || vaddr > UINT64_MAX - size);
+
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+
+	m_materialization_cache.InvalidateRange(vaddr, size);
+	const int heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return;
+	}
+	auto& heap = m_heaps[heap_id];
+	for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1, false))
+	{
+		auto& h = heap.objects[block.object_id];
+		EXIT_IF(h.free);
+		if (h.info.object.type != type || !GpuMemoryBlockSetHasRange(h.block.vaddr, h.block.size, h.block.vaddr_num, vaddr, size))
+		{
+			continue;
+		}
+		h.info.gpu_update_time   = GpuMemoryGetCurrentTime();
+		h.info.device_write_time = h.info.gpu_update_time;
 	}
 }
 

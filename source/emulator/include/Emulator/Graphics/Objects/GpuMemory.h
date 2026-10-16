@@ -185,6 +185,20 @@ struct GpuMemoryRangeProvenance
 	bool                          truncated   = false;
 };
 
+// One block of a multi-block object (a depth image's depth, stencil or HTILE plane) is exactly the range.
+[[nodiscard]] inline bool GpuMemoryBlockSetHasRange(const uint64_t* block_vaddr, const uint64_t* block_size, int block_num,
+                                                    uint64_t vaddr, uint64_t size)
+{
+	for (int i = 0; i < block_num; ++i)
+	{
+		if (block_vaddr[i] == vaddr && block_size[i] == size)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 // Non-exact FindObjects relations for sample→RT aliasing.
 // GpuMemoryClassifyRange(existing, query):
 //   IsContainedWithin = existing RT sits inside the sample query
@@ -1073,6 +1087,9 @@ void* GpuMemoryCreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuff
 void* GpuMemoryCreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
                             int vaddr_num, const GpuObject& info);
 void  GpuMemoryResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type);
+// The device wrote the whole plane [vaddr, vaddr + size) of every `type` object
+// that has exactly that block, as ResetHash does for a whole object.
+void  GpuMemoryResetPlaneHash(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type);
 void  GpuMemoryDbgDump();
 void  GpuMemoryFlush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 void  GpuMemoryFlushAll(GraphicContext* ctx);
