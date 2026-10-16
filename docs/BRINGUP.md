@@ -32,9 +32,17 @@ fail on the current HEAD before acting on them.
   subgroup), open. Roguelike control unchanged (4 captures, time limit).
   Unit test `SamplesThroughAllZeroDescriptorReturnZero` covers the parse,
   the emitted zero stores and a T# rewritten before the read.
-- The insect sequel reached gameplay (Act 1 start) on 2026-10-16 with the
-  same binary family; its `DepthStencilBuffer - Crosses - IndexBuffer` stop
-  did not recur in that 150 s run and stays open as intermittent.
+- Named-DMASK sample formats leave `mimg_dmask` unset; the zero read uses
+  the decoded destination size, which every MIMG format sets to the DMASK
+  component count.
+
+## Insect sequel: intermittent depth/index overlap (2026-10-16, open)
+
+- A 150 s Intel run reached gameplay (start of Act 1) without the earlier
+  `unknown relation: DepthStencilBuffer - Crosses - IndexBuffer` stop (a
+  12-byte index read inside a live 1920x1080 depth buffer). The stop is
+  intermittent; overlap diagnostics now print every parent range to show
+  which plane it crosses when it recurs.
 
 ## Alpha-only stores to one-channel storage images (2026-10-16)
 
@@ -52,10 +60,10 @@ fail on the current HEAD before acting on them.
   select still refuses, because one memory channel would have no source.
 - Verified on Intel (180 s, generic route): the title passes the copy and
   reaches its brightness calibration screen and runs to the limit. Its
-  text draws as solid glyph blocks, the same symptom as the open menu
-  glyph investigation of the same engine below (atlas backed by `0xcd`).
-  A wrong store mapping would write component 0 (zero) and hide the text
-  instead. This run does not establish which image the copy fills.
+  text draws as solid glyph blocks from the first capture (open visual
+  defect). The run does not establish which image the copy fills, nor
+  whether the blocks relate to the menu glyph investigation recorded
+  below.
 
 ## Physical ranges withdrawn while device addresses are prepared (2026-10-16)
 

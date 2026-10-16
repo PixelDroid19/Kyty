@@ -4162,7 +4162,8 @@ TEST(EmulatorGraphicsPackets, SamplesThroughAllZeroDescriptorReturnZero)
 	sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
 	sample.src_num        = 3;
 	sample.mimg_dimension = 1;
-	sample.mimg_dmask     = 0xf;
+	// As decoded: formats named after their DMASK leave mimg_dmask unset.
+	sample.mimg_dmask = 0;
 
 	ShaderInstruction end {};
 	end.type   = ShaderInstructionType::SEndpgm;
