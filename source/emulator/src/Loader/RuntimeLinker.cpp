@@ -421,6 +421,8 @@ static uint64_t g_next_tls_module_id = 1;
 
 // Native service plugins validate this descriptor before registering their ABI.
 // Passing a null argument makes their module_start entry dereference address zero.
+// Plugins are identified by the module name their ELF declares: a package may
+// ship the same image under another file name.
 struct NativeModuleStartParam
 {
 	uint32_t size;
@@ -430,21 +432,28 @@ struct NativeModuleStartParam
 
 static const NativeModuleStartParam g_native_module_start_param {0x10u, 0x200u, 0};
 
-bool LoaderModuleUsesNativeStartParam(const String& file_name)
+bool LoaderModuleUsesNativeStartParam(const String& module_name)
 {
-	const String name = file_name.FilenameWithoutDirectory();
-	return name.EqualNoCase(U"PSN.prx") || name.EqualNoCase(U"PSNCore.prx") || name.EqualNoCase(U"PSNCommon.prx") ||
-	       name.EqualNoCase(U"SaveData.prx") || name.EqualNoCase(U"Share.prx") || name.EqualNoCase(U"PS5EntitlementsPlugin.prx");
+	return module_name.EqualNoCase(U"PSN") || module_name.EqualNoCase(U"PSNCore") || module_name.EqualNoCase(U"PSNCommon") ||
+	       module_name.EqualNoCase(U"SaveData") || module_name.EqualNoCase(U"Share") ||
+	       module_name.EqualNoCase(U"PS5EntitlementsPlugin");
 }
 
 static bool NeedsNativeModuleStartParam(const Program* program)
 {
-	if (program == nullptr)
+	if (program == nullptr || program->dynamic_info == nullptr)
 	{
 		return false;
 	}
 
-	return LoaderModuleUsesNativeStartParam(program->file_name);
+	for (const auto& module: program->dynamic_info->export_modules)
+	{
+		if (LoaderModuleUsesNativeStartParam(module.name))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 static void NormalizeModuleStartArguments(const Program* program, size_t* args, const void** argp)

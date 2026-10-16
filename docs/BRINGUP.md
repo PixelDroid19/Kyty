@@ -9,6 +9,24 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Service plugins identified by their declared module name (2026-10-16)
+
+- The preschool Unity title crashed about one second into module start with a guest read of address 4.
+  Its package ships the same network-service plugin twice, byte-identical, once under a file name with
+  a " 1" suffix. Package discovery sorts that copy first, so it is the one kept. Kyty then called its
+  `module_start` with no arguments, because the native start descriptor was keyed by file name. The
+  plugin printed its "old version" error and then dereferenced the null descriptor. The guest's own
+  disassembly shows the check: argument size at least 0x10, `size == 0x10`, `version == 0x200`, and the
+  callback stored from offset 8.
+- The player passes that same descriptor at each of its four module load sites, so the descriptor
+  belongs to the module, not to a path. Service plugins are now identified by the module name their ELF
+  declares (`DT_OS_MODULE_INFO`). Across every package plugin in the local library, the declared name
+  equals the file stem for all six covered plugins. Titles that already ran therefore get the same
+  arguments as before.
+- Verified (Intel, 150 s, strict): the title passes module start and the menus, and reaches its first
+  playable scene. Still open: in that scene, sprite edges show light-blue fringes and the characters look
+  point-sampled at low resolution; the menu frames are clean.
+
 ## Image reads through an all-zero descriptor (2026-10-16)
 
 - The card title stopped before its first frame on `shader emitter missing:

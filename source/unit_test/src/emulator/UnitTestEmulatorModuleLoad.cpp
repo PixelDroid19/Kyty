@@ -1704,13 +1704,13 @@ TEST(EmulatorModuleLoad, BuildPlanRejectsExtensionOnlyAdjacentJunk)
 
 TEST(EmulatorModuleLoad, RecognizesNativeServiceModuleStartContract)
 {
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"/system/common/lib/PSN.prx"));
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSNCore.prx"));
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSNCommon.prx"));
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"SaveData.prx"));
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"Media/Plugins/Share.prx"));
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"Media/Plugins/PS5EntitlementsPlugin.prx"));
-	EXPECT_FALSE(LoaderModuleUsesNativeStartParam(U"Media/Plugins/UnrelatedPlugin.prx"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSN"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSNCore"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSNCommon"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"SaveData"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"Share"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PS5EntitlementsPlugin"));
+	EXPECT_FALSE(LoaderModuleUsesNativeStartParam(U"UnrelatedPlugin"));
 }
 
 TEST(EmulatorModuleLoad, ResolvePrefersLoadedModuleExportOverHleForSameIdentity)
