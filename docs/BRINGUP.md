@@ -4208,9 +4208,10 @@ selected published source; none is a gameplay or visual acceptance.
   Oracle search (2026-10-16, still open): decoding the published 16-pipe 64 KiB tables shows the shipped two- and
   eight-byte equations equal `SW_64K_R_X` and the four-byte one equals `SW_64K_Z_X` exactly. For one byte the two
   tables share bits 8..15 but differ in the micro-tile (`R_X`: `x0 x1 x2 y1 y0 y2 x3 y4`; `Z_X`:
-  `x0 y0 x1 y1 x2 y2 x3 y4`), so the table cannot choose the order the guest uses. The guest GPU-address library is
-  linked into the eboots, but no table in the published per-bit encoding (64-bit `x|y|z|s` masks, per-channel mask
-  arrays or per-bit records of 8 to 64 bits) occurs in them. The next oracle is the library's own code or a
+  `x0 y0 x1 y1 x2 y2 x3 y4`), so the table cannot choose the order the guest uses. The racing title's eboot lists the
+  guest GPU-address library among its linked libraries, but no table in the published per-bit encoding (64-bit
+  `x|y|z|s` masks, per-channel mask arrays or per-bit records of 8 to 64 bits) occurs in it; other eboots were not
+  searched. The next oracle is the library's own code or a
   guest-written one-byte target sampled back.
 - **Storage-image channel order.** A formatted store into a BGRA-ordered `R8G8B8A8_UINT` storage image wrote red and
   blue swapped. Only RGBA8 UNORM/SRGB storage images get a BGRA host view; the shader now applies the descriptor's
