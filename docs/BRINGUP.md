@@ -34,6 +34,11 @@ fail on the current HEAD before acting on them.
   store read later) is gone: an unread private slot is unobservable.
 - The new rule accepts a superset of the old one (same checks, path-precise). Offline scan of the
   178 programs: 132 admitted before, 146 after, and no program lost.
+- Run (Intel, strict, `minecraft-enter`, 300 s, with the compare fix below): the world loaded and
+  gameplay held with textured terrain; no shader refusal. That run reopened the earlier world, so
+  the refused shader's draw was not reproduced live; the offline proof on the shipped program is
+  the evidence for it. The run stopped at 285 s in the recipe-book search (see the IME entry).
+
 ## Compares that overwrite their own scalar source (2026-10-16)
 
 - The same terrain shader then refused at `pc=0x2b30`: "scalar written under divergent control flow
@@ -49,6 +54,16 @@ fail on the current HEAD before acting on them.
   a divergent region counts every instruction between the branch and its target as written,
   including blocks that leave by `S_BRANCH` past the join, so path-precise region writes may admit
   more.
+
+## IME panel text without an open panel (2026-10-16)
+
+- Observed (Intel, strict, sandbox title): opening the inventory's recipe-book search during
+  gameplay stopped the run with `can't resolve lazy PLT import: ieCNrVrzKd4[Ime_v1]`.
+- The NID is `sceImeSetText` (hash of the name). It replaces the text of the IME panel that
+  `sceImeOpen` starts and takes `(const char16_t* text, uint32_t length)`. Independent
+  implementations agree that it returns `0x80BC0002` (not opened) when no panel is open. Kyty
+  implements no `sceImeOpen` panel, and the title had made no unresolved `sceImeOpen` call before,
+  so no panel is open. `sceImeSetText` now returns that error.
 
 ## Four-byte render-target micro tile (2026-10-16)
 
