@@ -326,6 +326,14 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Card title: a hand card turns white for a moment when it gains focus
+  (2026-10-16, not a defect). Thirty captures 2 s apart while the route
+  stepped the hand focus showed the newly focused card blank white, then
+  with faded pips, then normal. The title's own UI definitions draw a
+  card-sized white rounded rectangle over a focused hand card and ease its
+  alpha from 1.5 to 0 in 0.2 s of real time; the card front and centre use
+  the same shader and tilt, and nothing else fades the front. Do not chase
+  it as a sampling, interpolation or blend bug.
 - Racing title attract scene looks dark (2026-10-14, not a defect). The
   intro behind the title credits is a night track: lit windows, a dusk sky
   and brown asphalt, while in-race daytime tracks look correct. The
