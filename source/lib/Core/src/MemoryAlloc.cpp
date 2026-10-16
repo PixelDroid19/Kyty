@@ -47,10 +47,9 @@ static SysCS*                                  g_mem_cs          = nullptr;
 static bool                                    g_mem_initialized = false;
 static sys_heap_id_t                           g_default_heap    = nullptr;
 static size_t                                  g_mem_max_size    = 0;
-static MemoryAllocDetail::ThreadDomainRegistry g_guest_thread_domains;
-// Per-thread guest classification cache in host TLS (see
-// mem_guest_thread_enter/leave). Kept as a plain thread_local bool so the
-// per-allocation fast path never scans the registry.
+// Per-thread guest classification in host TLS (see mem_guest_thread_enter/leave).
+// It holds no per-process slot, so the number of live guest threads is not
+// bounded here.
 static thread_local bool                       g_mem_guest_thread_active = false;
 // Bootstrap symbol loading can allocate one tiny object per guest export. The
 // debug tracker records a stack and a hashmap entry for each one, which is
@@ -347,16 +346,14 @@ void core_memory_init()
 
 void mem_guest_thread_enter()
 {
-	EXIT_IF(!g_guest_thread_domains.Add(mem_current_thread_token()));
-	// Cache the per-thread classification in host TLS (never guest-visible TLS)
-	// so the per-allocation fast path skips the registry scan entirely. The
-	// enter/leave calls always run on the thread whose state changes.
+	// Host TLS, never guest-visible TLS. The enter/leave calls always run on the
+	// thread whose state changes.
 	g_mem_guest_thread_active = true;
 }
 
 void mem_guest_thread_leave()
 {
-	EXIT_IF(!g_guest_thread_domains.Remove(mem_current_thread_token()));
+	EXIT_IF(!g_mem_guest_thread_active);
 	g_mem_guest_thread_active = false;
 }
 
@@ -364,7 +361,7 @@ bool mem_guest_thread_is_active()
 {
 	// Host TLS is out of reach of guest code, which can only replace its own
 	// guest TLS segment. A thread that never entered guest execution always
-	// returns false here, matching the empty-registry fast path.
+	// returns false here.
 	return g_mem_guest_thread_active;
 }
 
