@@ -423,8 +423,11 @@ private:
 	static constexpr uint32_t LIVE_SETS_MAX = 65536;
 	static constexpr uint32_t TRIM_SETS     = 8192;
 	// Released sets wait for reuse by the next set of their layout, up to this
-	// many in all; past it they return to their pool.
-	static constexpr uint32_t RECYCLED_SETS_MAX = 8192;
+	// many in all; past it they return to their pool. Pools never give memory
+	// back to the system, so a held set only reserves pool space, while a driver
+	// free and reallocation walks the pool's free list. The limit holds several
+	// trim batches so a trim does not overflow it.
+	static constexpr uint32_t RECYCLED_SETS_MAX = TRIM_SETS * 4;
 
 	int                  FindSet(const Set& s);
 	void                 IndexSet(int index);

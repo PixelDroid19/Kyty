@@ -9,6 +9,41 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Descriptor-set recycling and deferred-release drain in dense gameplay (2026-10-16)
+
+- Sandbox title gameplay is bound by the command processor. About 4,300 draws per frame, the thread is
+  about 62 % running and about 28 % in GPU fence waits (kernel wait-channel sampling). A user-space
+  profile of that thread put 18 % in the driver under `DescriptorCache::Allocate` and 11 % under
+  `DescriptorCache::Free`, plus 4 % self time in `GpuDeferredDeletionQueue::DrainReady`.
+- Temporary counters over 200,000 set requests showed:
+  - 54,000 recycled hits;
+  - 146,000 `vkAllocateDescriptorSets` calls;
+  - 78,000 `vkFreeDescriptorSets` calls, every one because the recycle list was full;
+  - no free of an untracked or in-flight set.
+
+  About 61,000 live sets sat near `LIVE_SETS_MAX`. Each `TrimSets` retires 8,192 sets at once, which
+  overflowed the 8,192-set recycle limit. The overflow went back to the driver, and the next sets of
+  the same layouts had to be allocated again from pools whose free lists had grown long.
+- Changes:
+  - The recycle limit is now four trim batches (`RECYCLED_SETS_MAX`, 32,768). Pools never give memory
+    back to the system, so holding a set only reserves pool space.
+  - The deferred-release queue pops from a `std::deque`. Popping each ready entry from the front of a
+    vector was quadratic when a trim enqueued 8,192 releases.
+- Verified (Intel, strict, warm cache, same route):
+  - Recycled hits rose to 53--85 % of set requests, and driver frees fell from 78,000 to 3,400--29,000
+    per 200,000 requests.
+  - Neither descriptor function nor `DrainReady` appears in the profile's top entries any more.
+  - In the comparable gameplay window, resource binding fell from 23.9 to 15.0 us/draw and command
+    processing from 52 to 40 us/draw, with 593k draws against 462k.
+  - Regression check: the racing title (200 s) ends on its usual time-over screen. Its race windows
+    improved too: resource binding fell from 20.5--20.9 to 16.0--16.5 us/draw, and command processing
+    from 47--49 to 43--45 us/draw.
+- Excluded:
+  - Deferring the release of in-flight sets: the counters showed none, so that change was dropped.
+- Open: the frame is still bound by command processing (about 40 us/draw) and GPU fence waits.
+  The next profile entries are read-only snapshot comparison, `ResetHash`, timer reads, allocation,
+  and per-draw shader re-analysis.
+
 ## Vertex shader identity limited to attribute dwords the program loads (2026-10-16)
 
 - After the transient-entry fix below, sandbox title gameplay still compiled 210--300 SPIR-V modules
