@@ -338,9 +338,20 @@ against the same correct gameplay capture.
   no dispatch is skipped by the empty-store gate; and no DMA_DATA packet
   (hardware or custom) is dropped. A store-selector fault would write the
   atlas with wrong channels instead of leaving `0xcd`, so the DST_SEL lead
-  does not apply here. The first insect platformer has a different upload
-  (an R8 copy compute, see BRINGUP) with the same symptom. Next step: find
-  the guest update path that never writes, not another GPU writer probe.
+  does not apply here. A later 150 s Intel run executed no DMA_DATA packet
+  of 64 KiB or more at all, so the engine does not move atlas data through
+  the command processor. The T# is not stale on the emulator side: pointer
+  tables are copied from guest memory on every draw
+  (`ShaderSnapshotGuestDescriptorTable`, `Shader.cpp`) and the per-program
+  resource memo holds analysis only, never descriptor values. The atlas
+  address stays the same for the whole run. The five graphics-library
+  imports the sequel resolves to nothing (UC register, indirect draw,
+  async-safe wait, NOP helpers) are not upload paths. The first insect
+  platformer binds a 512x512 one-byte atlas that is also entirely `0xcd`,
+  so one cause likely covers both. Its separate R8 copy compute (BRINGUP)
+  does not explain that atlas. Next step: follow the engine's CPU upload on
+  the guest side (the hardware-watch notes in BRINGUP), not another GPU
+  writer probe.
 - Card title: a hand card turns white for a moment when it gains focus
   (2026-10-16, not a defect). Thirty captures 2 s apart while the route
   stepped the hand focus showed the newly focused card blank white, then
