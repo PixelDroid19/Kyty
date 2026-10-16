@@ -2269,10 +2269,7 @@ static int32_t Ngs2SamplerRunCommand(Ngs2VoiceRecord& voice, const std::array<ui
 	Ngs2VoicePlayEvent event = Ngs2VoicePlayEvent::None;
 	if (Ngs2ReadEventCommand(command, &event))
 	{
-		if (event == Ngs2VoicePlayEvent::Play && !voice.sampler.HasBlocks())
-		{
-			return kNgs2InvalidControl;
-		}
+		// Play is accepted before any block: the voice plays silence until the guest queues its waveform.
 		if (Ngs2IsImmediateStop(event))
 		{
 			// An immediate stop drops the queued blocks as well.

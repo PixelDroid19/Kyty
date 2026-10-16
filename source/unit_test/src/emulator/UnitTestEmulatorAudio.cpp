@@ -5481,8 +5481,8 @@ TEST(EmulatorAudio, StandardSamplerRejectsUnsupportedContractsWithoutChangingVoi
 	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, overrun), kSamplerInvalidControl);
 	EXPECT_EQ(AddSamplerBlock(rig.voice, reinterpret_cast<const void*>(uintptr_t {1}), kBlocksFlagReset, valid), kSamplerInvalidControl);
 
-	// Play without queued samples fails.
-	EXPECT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), kSamplerInvalidControl);
+	// Play is accepted before any block is queued.
+	EXPECT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
 
 	// Rejected calls leave the queue unchanged: the one valid block plays exactly.
 	ASSERT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, valid), 0);

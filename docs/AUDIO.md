@@ -141,8 +141,9 @@ padding the guest leaves uninitialized. Two independent references agree on:
 | Port volume `6` | `0x100` (float) | linear gain of port 0 |
 | Port matrix `7` | `0x300` (integer) | refused: no matrix is implemented |
 
-Play on a sampler needs queued blocks; a pause keeps the cursor and a resume
-continues from it. A source voice and a submixer take the port volume.
+Play on a sampler is accepted before any block is queued (a streaming title
+starts its voices first); the voice is silent until a waveform arrives. A pause
+keeps the cursor and a resume continues from it. A source voice and a submixer take the port volume.
 
 `Ngs2VoiceGetPortInfo(voice, 0, info, 24)` writes `{i32 matrix_id, f32 volume,
 u32 num_delay_samples, u32 destination_input, uintptr destination}`: matrix -1,
