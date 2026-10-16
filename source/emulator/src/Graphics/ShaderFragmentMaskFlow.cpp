@@ -4,7 +4,9 @@
 #include "ShaderNativeWaveInternal.h"
 #include "ShaderSpirvInternal.h"
 
+#include <algorithm>
 #include <map>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -182,8 +184,14 @@ struct ScalarOrigin
 	uint32_t        number = 0;
 };
 
-// Track exact scalar moves only. Arithmetic and joins discard provenance; a
-// saved parameter M0 remains identifiable even after its entry SGPR is reused.
+bool SameOrigin(ScalarOrigin a, ScalarOrigin b)
+{
+	return a.kind == b.kind && (a.kind != ScalarOriginKind::Number || a.number == b.number);
+}
+
+// Track exact scalar moves only. Arithmetic discards provenance and a join keeps
+// what its paths agree on; a saved parameter M0 remains identifiable even after
+// its entry SGPR is reused.
 class PixelScalarOrigins
 {
 public:
@@ -194,7 +202,17 @@ public:
 			m_words[static_cast<unsigned>(parameter_sgpr)].kind = ScalarOriginKind::PixelParameter;
 		}
 	}
-	void Reset() { m_words = {}; }
+	bool Meet(const PixelScalarOrigins& other)
+	{
+		bool changed = false;
+		for (unsigned word = 0; word < kWords; ++word)
+		{
+			if (m_words[word].kind == ScalarOriginKind::Unknown || SameOrigin(m_words[word], other.m_words[word])) { continue; }
+			m_words[word] = {};
+			changed       = true;
+		}
+		return changed;
+	}
 	[[nodiscard]] ScalarOrigin M0() const { return m_words[kM0Word]; }
 
 	void Step(const ShaderInstruction& inst)
@@ -231,7 +249,11 @@ private:
 	std::array<ScalarOrigin, kWords> m_words {};
 };
 
-bool AddtidSlot(const ShaderInstruction& inst, ScalarOrigin m0, uint64_t reserved_bytes, std::map<uint32_t, bool>* pending)
+constexpr uint32_t kAddtidPlaneBytes = 64u * sizeof(uint32_t);
+
+// The byte base of an ADD_TID access: M0 is an exact aligned number and the whole
+// wave64 plane (one dword per TID) fits the reserved extra-LDS prefix.
+bool AddtidPlane(const ShaderInstruction& inst, ScalarOrigin m0, uint64_t reserved_bytes, uint32_t* base)
 {
 	if (m0.kind != ScalarOriginKind::Number || (m0.number & 3u) != 0u) { return false; }
 	const bool write = inst.type == Type::DsWriteAddtidB32;
@@ -239,77 +261,156 @@ bool AddtidSlot(const ShaderInstruction& inst, ScalarOrigin m0, uint64_t reserve
 	if (!PlainWord(data) || data.type != Operand::Vgpr || data.register_id < 0 || data.register_id >= kVgprs ||
 	    inst.src_num != (write ? 1 : 0) ||
 	    inst.format != (write ? ShaderInstructionFormat::VdataOffset : ShaderInstructionFormat::VdstOffset)) { return false; }
-	// A complete wave64 plane has one dword per TID. Disjoint planes guarantee
-	// that omitting TID in the invocation-private emitter cannot alias another lane.
-	constexpr uint32_t plane_bytes = 64u * sizeof(uint32_t);
-	const uint64_t base = static_cast<uint64_t>(m0.number) + inst.ds_offset;
-	if ((base & 3u) != 0u || base + plane_bytes > reserved_bytes) { return false; }
-	const auto slot = pending->find(static_cast<uint32_t>(base));
-	if (slot == pending->end())
+	const uint64_t start = static_cast<uint64_t>(m0.number) + inst.ds_offset;
+	if ((start & 3u) != 0u || start + kAddtidPlaneBytes > reserved_bytes) { return false; }
+	*base = static_cast<uint32_t>(start);
+	return true;
+}
+
+// Basic blocks of a program without indirect jumps: leaders are the entry, every
+// branch target and every instruction after a branch or S_ENDPGM.
+struct SpillBlock
+{
+	uint32_t              begin = 0;
+	uint32_t              end   = 0;
+	std::vector<uint32_t> successors;
+};
+
+bool BuildSpillBlocks(const ShaderCode& code, std::vector<SpillBlock>* blocks)
+{
+	const auto&                  instructions = code.GetInstructions();
+	const uint32_t               count        = instructions.Size();
+	std::map<uint32_t, uint32_t> index_of_pc;
+	for (uint32_t index = 0; index < count; ++index) { index_of_pc[instructions.At(index).pc] = index; }
+	std::map<uint32_t, uint32_t> targets; // branch index -> target index
+	std::set<uint32_t>           leaders {0u};
+	for (uint32_t index = 0; index < count; ++index)
 	{
-		if (!write) { return false; }
-		for (const auto& [other, unread]: *pending)
+		const auto& inst = instructions.At(index);
+		if (inst.type != Type::SBranch && !IsConditionalBranch(inst.type) && inst.type != Type::SEndpgm) { continue; }
+		leaders.insert(index + 1u);
+		if (inst.type == Type::SEndpgm) { continue; }
+		uint32_t   target = 0;
+		const auto found  = BranchTarget(inst, &target) ? index_of_pc.find(target) : index_of_pc.end();
+		if (found == index_of_pc.end()) { return false; }
+		targets[index] = found->second;
+		leaders.insert(found->second);
+	}
+	leaders.erase(count);
+	std::map<uint32_t, uint32_t> block_of;
+	for (const auto leader: leaders)
+	{
+		block_of[leader] = static_cast<uint32_t>(blocks->size());
+		blocks->push_back({leader, count, {}});
+		if (blocks->size() > 1u) { (*blocks)[blocks->size() - 2u].end = leader; }
+	}
+	for (auto& block: *blocks)
+	{
+		const auto& last = instructions.At(block.end - 1u);
+		if (targets.count(block.end - 1u) != 0u) { block.successors.push_back(block_of[targets[block.end - 1u]]); }
+		if (last.type != Type::SBranch && last.type != Type::SEndpgm && block.end < count)
 		{
-			(void)unread;
-			if (base < static_cast<uint64_t>(other) + plane_bytes && other < base + plane_bytes) { return false; }
+			block.successors.push_back(block_of[block.end]);
 		}
-		pending->emplace(static_cast<uint32_t>(base), true);
-	} else
-	{
-		slot->second = write;
 	}
 	return true;
 }
 
-// Prove a bounded compiler spill interval, not arbitrary pixel LDS. Every read
-// has a same-lane store under unchanged EXEC/M0, and no other LDS instruction
-// can observe its bytes. Subsequent interpolation must restore the original
-// launch parameter M0, outside the reserved extra-LDS prefix.
+// The scalar origins and the planes stored on every path to a program point.
+struct AddtidSpillState
+{
+	PixelScalarOrigins origins;
+	std::set<uint32_t> stored;
+};
+
+bool MergeSpillState(std::optional<AddtidSpillState>* entry, const AddtidSpillState& incoming)
+{
+	if (!entry->has_value())
+	{
+		*entry = incoming;
+		return true;
+	}
+	auto&      state   = **entry;
+	bool       changed = state.origins.Meet(incoming.origins);
+	const auto before  = state.stored.size();
+	for (auto plane = state.stored.begin(); plane != state.stored.end();)
+	{
+		plane = incoming.stored.count(*plane) != 0u ? std::next(plane) : state.stored.erase(plane);
+	}
+	return changed || state.stored.size() != before;
+}
+
+// Walk one block. With `planes`, also prove every access and every interpolation
+// and collect each accessed plane.
+bool StepSpillBlock(const ShaderCode& code, const SpillBlock& block, uint64_t reserved_bytes, AddtidSpillState* state,
+                    std::set<uint32_t>* planes)
+{
+	for (uint32_t index = block.begin; index < block.end; ++index)
+	{
+		const auto& inst = code.GetInstructions().At(index);
+		const auto  m0   = state->origins.M0();
+		if (planes != nullptr && StartsWith(inst.type, "VInterp") && m0.kind != ScalarOriginKind::PixelParameter) { return false; }
+		uint32_t   base  = 0;
+		const bool exact = IsAddtid(inst.type) && AddtidPlane(inst, m0, reserved_bytes, &base);
+		if (planes != nullptr && IsAddtid(inst.type))
+		{
+			const bool unstored = inst.type == Type::DsReadAddtidB32 && state->stored.count(base) == 0u;
+			if (!exact || unstored) { return false; }
+			planes->insert(base);
+		}
+		if (exact && inst.type == Type::DsWriteAddtidB32) { state->stored.insert(base); }
+		state->origins.Step(inst);
+	}
+	return true;
+}
+
+// Prove compiler spill slots, not arbitrary pixel LDS. Every ADD_TID access
+// addresses an exact M0 plane, planes are equal or disjoint, and no other LDS
+// instruction can observe their bytes, so the host's per-invocation array that
+// omits TID cannot alias another lane. A lane then only reads dwords it alone
+// stores, whatever EXEC, branches or loops lie between the store and the reload;
+// a lane that did not store reads undefined bytes from guest LDS and from the
+// private array alike. Each read must follow a store to its plane on every path,
+// and every interpolation must observe the original launch parameter M0.
 bool HasPrivatePixelAddtidSpills(const ShaderCode& code)
 {
 	const auto& instructions = code.GetInstructions();
-	uint32_t first = UINT32_MAX;
-	uint32_t last = 0;
-	std::set<uint32_t> joins;
+	bool        any_addtid   = false;
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		const auto& inst = instructions.At(index);
 		if ((StartsWith(inst.type, "Ds") && !IsAddtid(inst.type)) || inst.type == Type::SSetpcB64 ||
 		    inst.type == Type::SSwappcB64 ||
 		    (AnyPrefix(inst.type, {"Buffer", "TBuffer"}) && (inst.buffer_flags & 1u) != 0u)) { return false; }
-		if (inst.type == Type::SBranch || IsConditionalBranch(inst.type))
-		{
-			uint32_t target = 0;
-			if (!BranchTarget(inst, &target)) { return false; }
-			joins.insert(target);
-		}
-		if (!IsAddtid(inst.type)) { continue; }
-		if (first == UINT32_MAX) { first = index; }
-		last = index;
+		any_addtid = any_addtid || IsAddtid(inst.type);
 	}
-	if (first == UINT32_MAX || code.GetPixelExtraLdsDwords() == 0u) { return false; }
+	std::vector<SpillBlock> blocks;
+	if (!any_addtid || code.GetPixelExtraLdsDwords() == 0u || !BuildSpillBlocks(code, &blocks)) { return false; }
 	const uint64_t reserved_bytes = std::min(static_cast<uint64_t>(code.GetPixelExtraLdsDwords()) * sizeof(uint32_t),
 	                                         static_cast<uint64_t>(kDsAddtidSpillDwords) * sizeof(uint32_t));
-	PixelScalarOrigins origins(code.GetPixelParameterSgpr());
-	std::map<uint32_t, bool> pending;
-	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	std::vector<std::optional<AddtidSpillState>> entries(blocks.size());
+	entries[0] = AddtidSpillState {PixelScalarOrigins(code.GetPixelParameterSgpr()), {}};
+	std::vector<uint32_t> work {0u};
+	while (!work.empty())
 	{
-		const auto& inst = instructions.At(index);
-		const bool inside = index >= first && index <= last;
-		if (inside && (joins.count(inst.pc) != 0u || ShaderInstructionIsControlFlowBoundary(inst) ||
-		               ShaderInstructionWritesExec(inst) || inst.dst.type == Operand::M0 || inst.dst2.type == Operand::M0))
+		const auto block = work.back();
+		work.pop_back();
+		auto state = *entries[block];
+		StepSpillBlock(code, blocks[block], reserved_bytes, &state, nullptr);
+		for (const auto successor: blocks[block].successors)
 		{
-			return false;
+			if (MergeSpillState(&entries[successor], state)) { work.push_back(successor); }
 		}
-		if (joins.count(inst.pc) != 0u || ShaderInstructionIsControlFlowBoundary(inst)) { origins.Reset(); }
-		if (IsAddtid(inst.type) && !AddtidSlot(inst, origins.M0(), reserved_bytes, &pending)) { return false; }
-		if (index >= first && StartsWith(inst.type, "VInterp") && origins.M0().kind != ScalarOriginKind::PixelParameter)
-		{
-			return false;
-		}
-		origins.Step(inst);
 	}
-	return std::all_of(pending.begin(), pending.end(), [](const auto& slot) { return !slot.second; });
+	std::set<uint32_t> planes;
+	for (uint32_t block = 0; block < blocks.size(); ++block)
+	{
+		if (!entries[block].has_value()) { continue; } // statically unreachable
+		auto state = *entries[block];
+		if (!StepSpillBlock(code, blocks[block], reserved_bytes, &state, &planes)) { return false; }
+	}
+	return std::adjacent_find(planes.begin(), planes.end(),
+	                          [](uint32_t low, uint32_t high) { return high - low < kAddtidPlaneBytes; }) == planes.end();
 }
 
 class Flow

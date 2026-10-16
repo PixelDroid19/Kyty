@@ -230,7 +230,8 @@ enum class AddtidMutation
 	WidenExecBetweenStoreAndRead,
 	MixedDs,
 	BranchIntoInterval,
-	BranchTargetResetsM0,
+	BranchOverStores,
+	BranchSkipsM0,
 	Wave64PlaneOverlap,
 	NoWqmReadBeforeWrite,
 	ScalarMaskAsNumber,
@@ -318,6 +319,18 @@ std::vector<Words> AddtidProgram(AddtidMutation mutation)
 		operations.insert(operations.begin(), {branch, false});
 	}
 
+	if (mutation == AddtidMutation::BranchOverStores)
+	{
+		auto     first_store = operations.begin();
+		uint32_t store_words = 0;
+		while (first_store->words[0] >> 26u != 0x36u) { ++first_store; } // DS encoding
+		for (auto op = first_store; op != operations.end() && !op->read; ++op) { store_words += static_cast<uint32_t>(op->words.size()); }
+		Words branch;
+		Sopp(branch, 4, store_words); // s_cbranch_scc0 on a uniform compare: one path skips every store
+		first_store = operations.insert(first_store, {branch, false});
+		operations.insert(first_store, {Sopc(6, 16, Inline(0)), false}); // s_cmp_eq_u32 s16, 0
+	}
+
 	if (mutation == AddtidMutation::WidenExecBetweenStoreAndRead)
 	{
 		std::vector<Words> stores;
@@ -335,11 +348,11 @@ std::vector<Words> AddtidProgram(AddtidMutation mutation)
 		for (const auto& operation: operations) { encoded.push_back(operation.words); }
 		slots.insert(slots.begin() + kWait + 1u, encoded.begin(), encoded.end());
 	}
-	if (mutation == AddtidMutation::BranchTargetResetsM0)
+	if (mutation == AddtidMutation::BranchSkipsM0)
 	{
 		Words branch;
-		Sopp(branch, 2, 0); // branch to the next instruction, before the first ADD_TID access
-		slots.insert(slots.begin() + kM0 + 1u, branch);
+		Sopp(branch, 4, static_cast<uint32_t>(slots[kM0].size())); // s_cbranch_scc0 over M0=0: the paths disagree on M0
+		slots.insert(slots.begin() + kM0, {Sopc(6, 16, Inline(0)), branch});
 	}
 	return slots;
 }
@@ -428,6 +441,39 @@ std::vector<Words> AddtidEmitterProgram()
 	Words end;
 	Sopp(end, 1);
 	slots.push_back(end);
+	return slots;
+}
+
+// The shape a compiler emits under register pressure: the parameter M0 survives a
+// uniform join, is saved around a spill store, observed by an interpolation, and a
+// uniform loop runs before M0 is pointed at the slot again for the reload.
+std::vector<Words> AddtidSpillAcrossControlFlowProgram()
+{
+	std::vector<Words> slots;
+	Words              head;
+	Sop1(head, 3, kM0Reg, 30);              // s_mov_b32 m0, s30 (the pixel LDS parameter)
+	Sop1(head, 4, 12, kExecLo);             // s_mov_b64 s[12:13], exec
+	Sop1(head, 10, kExecLo, kExecLo);       // s_wqm_b64 exec, exec
+	Append(head, Sopc(6, 16, Inline(0)));   // s_cmp_eq_u32 s16, 0
+	Sopp(head, 4, 1);                       // s_cbranch_scc0 over one instruction: a uniform join
+	Vop1(head, 1, 11, Inline(1));           // v_mov_b32 v11, 1
+	Vop1(head, 1, 10, Inline(2));           // join: v_mov_b32 v10, 2
+	Sop1(head, 3, 0, kM0Reg);               // s_mov_b32 s0, m0
+	Sop1(head, 3, kM0Reg, Inline(0));       // s_mov_b32 m0, 0
+	Append(head, DsAddtidWrite(10u, 0u));
+	Sop1(head, 3, kM0Reg, 0);               // s_mov_b32 m0, s0
+	Append(head, VInterpP1(23u, 0u, 0u, 0u));
+	const size_t loop = head.size();
+	Sop2(head, 0, 21, 21, Inline(1));       // loop: s_add_u32 s21, s21, 1
+	Vop2(head, 3, 11, kVgpr + 11, 10);      // v_add_f32 v11, v11, v10
+	Append(head, Sopc(0x4, 21, 20));
+	Sopp(head, 5, static_cast<uint32_t>(loop - (head.size() + 1u)) & 0xffffu); // s_cbranch_scc1 loop
+	Sop1(head, 3, kM0Reg, Inline(0));       // s_mov_b32 m0, 0
+	Append(head, DsAddtidRead(20u, 0u));
+	Sop1(head, 4, kExecLo, 12);             // s_mov_b64 exec, s[12:13]
+	Append(head, Mrt0Export(20u, 23u, 11u, 11u));
+	Sopp(head, 1);
+	slots.push_back(head);
 	return slots;
 }
 
@@ -611,10 +657,10 @@ TEST(EmulatorFragmentMaskFlow, RejectsAddtidPatternsWithoutAnExactPrivateSlotPro
 			{AddtidMutation::UnalignedM0, "an unaligned M0 base is refused"},
 			{AddtidMutation::HighM0Address, "an aligned high M0 address outside the allocation is refused without wraparound"},
 			{AddtidMutation::ClobberedM0, "an M0 clobber inside the interval is refused"},
-		    {AddtidMutation::WidenExecBetweenStoreAndRead, "widening EXEC between the store and read is refused"},
 		    {AddtidMutation::MixedDs, "a mixed shared DS access is refused"},
 			{AddtidMutation::BranchIntoInterval, "a branch into the read half is refused"},
-			{AddtidMutation::BranchTargetResetsM0, "a branch target before the spill resets M0 provenance"},
+			{AddtidMutation::BranchOverStores, "a uniform branch over the stores leaves the reload without one"},
+			{AddtidMutation::BranchSkipsM0, "paths that disagree on M0 leave the spill base unknown"},
 			{AddtidMutation::Wave64PlaneOverlap, "planes 128 bytes apart still overlap for a wave64 spill"},
 		    {AddtidMutation::NoWqmReadBeforeWrite, "a no-WQM read before store is refused despite monotone masks"},
 		};
@@ -622,8 +668,28 @@ TEST(EmulatorFragmentMaskFlow, RejectsAddtidPatternsWithoutAnExactPrivateSlotPro
 		{
 			const auto code = ParseAddtidPixel(test.mutation);
 			const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
-			Check(!flow.lane_local, test.reason);
+			Check(!flow.lane_local && Contains(flow.reason, "memory write"), test.reason);
 			ExpectNativeRefusal(code, test.reason);
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentMaskFlow, ProvesAddtidSlotsAcrossJoinsLoopsAndWidenedExec)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto across = ParseAddtidPixel(AddtidSpillAcrossControlFlowProgram());
+		const auto flow   = ShaderAnalyzeFragmentMaskFlow(across, 64u);
+		Check(flow.lane_local && flow.reason == nullptr,
+		      "M0 provenance survives a join both paths agree on, and the reload follows its store across a loop");
+		// A lane outside the store's EXEC reads undefined bytes from guest LDS and from its private array alike.
+		const auto widened = ParseAddtidPixel(AddtidMutation::WidenExecBetweenStoreAndRead);
+		Check(ShaderAnalyzeFragmentMaskFlow(widened, 64u).lane_local, "a slot stays private to its lane under a wider EXEC");
+		for (uint32_t width: {32u, 64u})
+		{
+			Check(ShaderAnalyzeNativeWave(across, width).proof == ShaderNativeWaveProof::LaneLocal,
+			      "the spill across control flow is native-wave lane local");
 		}
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");

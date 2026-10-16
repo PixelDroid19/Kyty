@@ -9,6 +9,31 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Pixel ADD_TID spill slots across control flow (2026-10-16)
+
+- Observed (Intel, strict, `minecraft-enter`): in a newly created sandbox-title world, the run
+  stopped at 285 s with `fragment wave transport is required by the pixel stage ... reason=memory
+  write: helper lanes would be observable` at `pc=0xc78`, guest wave64, no 64-lane host subgroup.
+- Offline evidence: the title's shipped pixel programs were parsed and analysed one by one with the
+  production admission (178 programs longer than the stop pc). The stop is the forward terrain
+  pixel shader. At `0xc78` it spills one VGPR with `DS_WRITE_ADDTID_B32` (M0 = 0) and reloads it
+  about 2,000 instructions later. Between the store and the reload it has EXEC changes, joins, a
+  loop back edge, and an M0 save/restore around an interpolation. The previous proof accepted only
+  a spill interval with no join, no EXEC write and no M0 write. It also lost the launch-parameter
+  origin of M0 at every label, so the restore before `V_INTERP` could not be proved.
+- Contract: the host gives each invocation a private array and omits TID. That is exact when
+  every ADD_TID access has an exact aligned M0 base and the planes are equal or at least 256 bytes apart
+  inside the declared extra LDS. With no other LDS instruction, a lane then only reads dwords it
+  alone stores, whatever EXEC, branches or loops come between. A lane that did not store reads
+  undefined bytes both from guest LDS and from its private array. The proof is now a forward
+  dataflow over basic blocks: scalar origins keep what every path agrees on, and the planes stored
+  on every path are intersected at joins. Each reload needs a store to its plane on every path, and
+  each interpolation (anywhere in the program) must see the launch-parameter M0. Widening EXEC
+  between a store and its reload is therefore no longer refused. A branch over the stores, paths
+  that disagree on M0, aliasing planes and mixed DS accesses still are. The dead-store rule (every
+  store read later) is gone: an unread private slot is unobservable.
+- The new rule accepts a superset of the old one (same checks, path-precise). Offline scan of the
+  178 programs: 132 admitted before, 146 after, and no program lost.
 ## Four-byte render-target micro tile (2026-10-16)
 
 - Observed (Intel, strict, `minecraft-enter` route): in sandbox-title gameplay, plants and leaves
