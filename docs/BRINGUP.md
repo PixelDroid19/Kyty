@@ -331,6 +331,10 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
     offsets from the player.
   - Pad motion data. `PadRead`/`PadReadState` report an identity orientation
     and resting gravity, so no NaN reaches a camera that folds motion in.
+  - Camera definition I/O. An earlier guest file trace shows the resource
+    pack's camera archive opened during world entry and read in full: header,
+    table of seven entries and all 6,612 data bytes, which add up to the file
+    size. The behavior pack's preset archive is also read in full.
 - Observed (guest state, not the GPU path):
   - The guest writes a view-projection that is a pure perspective (fovY 60,
     16:9, near 0.025 for a 0..1 depth range) with no rotation or translation,
@@ -345,6 +349,11 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
     still moves along +z. The title's first-person camera definition routes
     look input through the camera and copies the player's yaw back from it, so
     this is the same defect as the frozen render camera, not a pad defect.
+  - Every camera entity in that archive declares a 66-degree field of view and
+    a 0.025 near plane. The guest's projection has the same near plane but a
+    60-degree vertical field of view, so it may come from a fallback path
+    rather than from one of those camera entities (not proven: how the title
+    combines the camera value with its options is unknown).
   - Next: find why the client camera entity never follows the local player
     (the camera presets are read in full from their archive).
 - Defects found, not fixed:
