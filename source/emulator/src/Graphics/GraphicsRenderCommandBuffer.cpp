@@ -925,7 +925,7 @@ public:
 		entry->snapshot_valid = false;
 		entry->nonzero_end    = std::max(entry->nonzero_end, size);
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
-		Commit(entry, size);
+		Commit(entry, size, true);
 		return &entry->buffer;
 	}
 
@@ -949,7 +949,7 @@ public:
 		return buffer;
 	}
 
-	VulkanBuffer* Capture(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage,
+	VulkanBuffer* Capture(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage, bool zero_tail,
 	                      uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns, bool* reused)
 	{
 		EXIT_IF(ctx == nullptr || validation_ns == nullptr || upload_ns == nullptr || compare_ns == nullptr || reused == nullptr);
@@ -989,6 +989,10 @@ public:
 			*validation_ns += reuse_validation_ns;
 			if (matches)
 			{
+				if (zero_tail)
+				{
+					ClearTail(previous, size);
+				}
 				previous->used = true;
 				UnindexFree(previous);
 				previous->buffer.descriptor_range = size;
@@ -1041,7 +1045,7 @@ public:
 		entry->snapshot_size  = size;
 		entry->snapshot_begin = read_begin;
 		m_snapshots[SnapshotKey {vaddr, size, usage}].push_back(entry);
-		Commit(entry, size);
+		Commit(entry, size, zero_tail);
 		finish_upload_time();
 		return &entry->buffer;
 	}
@@ -1333,18 +1337,27 @@ private:
 
 	// Bytes past the committed size read as zero; only the part of that tail
 	// an earlier write reached needs clearing.
-	void Commit(Entry* entry, uint64_t size)
+	// An unread tail keeps its stale bytes; nonzero_end still covers them.
+	void Commit(Entry* entry, uint64_t size, bool zero_tail)
 	{
 		EXIT_IF(entry == nullptr || entry->mapped == nullptr || size == 0u || size > entry->size || entry->nonzero_end > entry->size);
+		if (zero_tail)
+		{
+			ClearTail(entry, size);
+		}
+		entry->buffer.descriptor_range = size;
+		entry->used = true;
+		UnindexFree(entry);
+	}
+
+	void ClearTail(Entry* entry, uint64_t size)
+	{
 		const uint64_t tail_bytes = GpuMemoryTransientBufferTailBytes(entry->nonzero_end, size);
 		if (tail_bytes != 0u)
 		{
 			std::memset(static_cast<uint8_t*>(entry->mapped) + size, 0, static_cast<size_t>(tail_bytes));
 		}
-		entry->nonzero_end             = size;
-		entry->buffer.descriptor_range = size;
-		entry->used = true;
-		UnindexFree(entry);
+		entry->nonzero_end = size;
 	}
 
 	void IndexFree(Entry* entry)
@@ -1602,7 +1615,7 @@ VulkanBuffer* CommandBuffer::UploadTransientZeroCarrier(uint32_t usage)
 }
 
 VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage,
-	                                                         uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns,
+	                                                         bool zero_tail, uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns,
 	                                                         bool* reused)
 {
 	EXIT_IF(IsInvalid());
@@ -1610,8 +1623,8 @@ VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint
 	{
 		m_transient_buffers = new TransientBufferPool;
 	}
-	return m_transient_buffers->Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, read_begin, usage, validation_ns, upload_ns,
-	                                    compare_ns, reused);
+	return m_transient_buffers->Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, read_begin, usage, zero_tail, validation_ns,
+	                                    upload_ns, compare_ns, reused);
 }
 
 bool CommandBuffer::ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,

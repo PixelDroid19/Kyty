@@ -23,6 +23,8 @@ struct VulkanVertexInputFormat
 	uint8_t                       unified_format  = 0;
 	VkFormat                      format          = VK_FORMAT_UNDEFINED;
 	uint32_t                      component_count = 0;
+	// Bytes one attribute fetch reads from its record.
+	uint32_t                      element_bytes   = 0;
 	VulkanVertexInputNumericClass numeric_class   = VulkanVertexInputNumericClass::Float;
 };
 

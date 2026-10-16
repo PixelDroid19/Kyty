@@ -9,6 +9,44 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Unread vertex snapshot tails (2026-10-16)
+
+- In the fishing title's dock gameplay, transient capture cost 5.26 us per draw, but the copy itself
+  only 1.63 us. A temporary counter showed `Commit` taking about 1.2 us per capture. The tail clear
+  zeroed about 47 KB per capture against 8 KB copied. Over 300,000 captures, the vertex tails added
+  up to about 13.5 GB (about 97,000 vertex captures, about 139 KB each); index tails took about
+  35 MB and storage tails about 80 MB. `Acquire` hands a small capture the smallest free entry that
+  fits, so small vertex captures land in large entries whose mark sits high. The pool peaked at
+  63.0 MB in 402 entries, at its 64 MiB cap.
+- The clear exists for reads past the logical size (see "Transient tail clearing" below). Vertex
+  input reads record `r` at `r * stride + offset`, for the attribute's format size, and the draw
+  fetches only records `[first, records)`. When the draw's record range is known and fits the
+  declared records, and every attribute ends within its stride, nothing reads past
+  `records * stride`. Only about 0.8 % of vertex captures did not meet that condition, and their
+  tails were already zero.
+- Change: the vertex-input format table records the bytes one fetch reads, and
+  `VulkanVertexInputBindingFetchEnd` gives the end of a binding's attributes within a record.
+  `BindVertexBuffers` asks for a zero tail only when the record range is unknown or clamped, or an
+  attribute reaches past its stride. Without that request, `Commit` leaves the tail and its mark as
+  they are. A snapshot reused by a consumer that needs the zero tail clears it first. Uploads, zero
+  carriers, index and storage captures keep clearing.
+- Measured (Intel, strict, 240 s, dock route), against the same tree without the change:
+  - transient capture: 5.26 to 2.70 us/draw;
+  - command processing: 38.7 to 39.0 to 36.0 to 36.3 us/draw in steady windows;
+  - draws per window: about 610,000 to about 650,000.
+
+  The dock captures show the same scene. Live StorageBuffers ranged from 711 to 3,058, against 247
+  to 406 in the comparison run. Two runs of the unchanged tree with timing counters also ranged
+  from 357 to 2,316, so this count varies between runs and is not attributed to the change.
+- Sandbox title (Intel, strict, 300 s, same route), against the index-snapshot run above:
+  - transient capture: 1.54 to 1.43 and 1.45 us/draw;
+  - command processing: 35.8 and 36.7 to 33.4 and 33.6 us/draw;
+  - frame rate: 6.18 to 6.26 fps.
+
+  Captures 30 s and 45 s after the spawn show textured terrain, trees and the HUD. A dark
+  translucent patch drifts over the grass in late frames. It also appears at 97034ebc, before this
+  change, so it is not attributed to it.
+
 ## Index snapshots over idle writable storage (2026-10-16)
 
 - In the sandbox title's gameplay, index binding cost 5.2 us of about 29 us of command processing per

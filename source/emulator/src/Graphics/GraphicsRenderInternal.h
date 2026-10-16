@@ -1661,7 +1661,7 @@ void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image
 void FormatTextureList(const ShaderTextureResources& textures, char* buffer, size_t buffer_size);
 // Bytes before read_begin are never read through the returned buffer and are not captured.
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
-                                               VkBufferUsageFlags usage, uint64_t read_begin = 0);
+                                               VkBufferUsageFlags usage, uint64_t read_begin = 0, bool zero_tail = true);
 
 bool                            RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot);
 bool                            RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot);

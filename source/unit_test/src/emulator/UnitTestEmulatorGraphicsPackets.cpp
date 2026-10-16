@@ -1662,6 +1662,14 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(29).component_count, 2u);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).format, VK_FORMAT_UNDEFINED);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).component_count, 0u);
+	// Bytes one fetch reads decide whether a draw can reach past its last record.
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(1).element_bytes, 1u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(29).element_bytes, 4u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).element_bytes, 4u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(71).element_bytes, 8u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(74).element_bytes, 12u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(77).element_bytes, 16u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).element_bytes, 0u);
 
 	// Gen5 format 50 is 2_10_10_10_UNORM: R in the low 10 bits, 2-bit A on top.
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).format, VK_FORMAT_A2B10G10R10_UNORM_PACK32);

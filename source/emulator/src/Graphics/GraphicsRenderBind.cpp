@@ -2559,7 +2559,7 @@ static void EmitDrawMaterialTraceStorage(FILE* out, uint32_t ordinal, const char
 // vertex/storage/texture/sampler preparation and descriptor bind
 
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
-                                               VkBufferUsageFlags usage, uint64_t read_begin)
+                                               VkBufferUsageFlags usage, uint64_t read_begin, bool zero_tail)
 {
 	if (buffer == nullptr || !read_only || size == 0u || size > kGpuMemoryMaxTransientReadOnlyBytes || read_begin >= size)
 	{
@@ -2571,7 +2571,8 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 	uint64_t compare_ns    = 0u;
 	bool     reused        = false;
 	auto*    result =
-	    buffer->CaptureTransientSnapshotBuffer(addr, size, read_begin, usage, &validation_ns, &upload_ns, &compare_ns, &reused);
+	    buffer->CaptureTransientSnapshotBuffer(addr, size, read_begin, usage, zero_tail, &validation_ns, &upload_ns, &compare_ns,
+	                                           &reused);
 	DebugStatsRecordTransientBufferProbe(validation_ns, 0, upload_ns, result != nullptr, reused, compare_ns);
 	return result;
 }
@@ -2595,9 +2596,13 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 		// Every binding steps per vertex, so records below the draw's first are never fetched.
 		const uint64_t read_begin =
 		    buffer_info.stride != 0u && first_record < records ? static_cast<uint64_t>(buffer_info.stride) * first_record : 0u;
+		// Fetches past the captured records only exist when the draw range is unknown or
+		// clamped, or when an attribute reaches beyond its record.
+		const bool tail_fetched = required_records == 0 || required_records > available ||
+		                          VulkanVertexInputBindingFetchEnd(input, i) > buffer_info.stride;
 
-		auto* vertices =
-		    TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin);
+		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
+		                                                  tail_fetched);
 		if (vertices == nullptr)
 		{
 			vertices = static_cast<VulkanBuffer*>(
