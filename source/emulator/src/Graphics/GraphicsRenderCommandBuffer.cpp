@@ -2191,7 +2191,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		}
 		auto* image = static_cast<RenderTextureVulkanImage*>(color->attachment[slot].vulkan_buffer);
 		if (framebuffer->color_load_op[slot] == VK_ATTACHMENT_LOAD_OP_CLEAR &&
-		    extent.width == image->extent.width && extent.height == image->extent.height &&
+		    extent.width == image->extent.width && extent.height == image->extent.height && image->mip_levels == 1u &&
 		    color->attachment[slot].base_array_layer == 0u && color->attachment[slot].layer_count == 1u)
 		{
 			image->fully_defined_from_clear = true;

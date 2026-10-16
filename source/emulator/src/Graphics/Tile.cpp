@@ -2171,12 +2171,14 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 	bool pow2 = (IsPowerOfTwo(width) && IsPowerOfTwo(height) && IsPowerOfTwo(pitch));
 
 	EXIT_IF(levels == 0 || levels > 16);
-	if (tile == 9u && ShaderGen5TextureIsBlockCompressed(format))
+	// Render-target (27) chains share the 64 KiB block geometry and mip
+	// placement of the standard mode; only the in-block swizzle differs.
+	if ((tile == 9u && ShaderGen5TextureIsBlockCompressed(format)) || (tile == 0x1bu && levels > 1u))
 	{
 		Gen5TextureMipLayout mip_layout {};
 		if (!Gen5GetStandard64KBTextureMipLayout(format, width, height, pitch, levels, &mip_layout))
 		{
-			EXIT("unsupported Gen5 Standard64KB compressed layout: format=%u %ux%u pitch=%u levels=%u\n",
+			EXIT("unsupported Gen5 64 KiB mip layout: tile=%u format=%u %ux%u pitch=%u levels=%u\n", tile,
 			     format, width, height, pitch, levels);
 		}
 		if (total_size != nullptr) { *total_size = mip_layout.tiled; }

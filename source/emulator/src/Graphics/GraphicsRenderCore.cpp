@@ -126,11 +126,13 @@ VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorIn
 	return samples;
 }
 
-VkExtent2D IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment)
+VkExtent2D IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment, uint32_t mip_level)
 {
-	EXIT_IF(attachment == nullptr);
+	EXIT_IF(attachment == nullptr || mip_level >= 32u);
 	if (attachment->extent.width == 0 || attachment->extent.height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment->extent.width == 0 || attachment->extent.height == 0 condition ignored (continuing)\n"); }
-	return {std::min(current.width, attachment->extent.width), std::min(current.height, attachment->extent.height)};
+	const uint32_t width  = std::max(1u, attachment->extent.width >> mip_level);
+	const uint32_t height = std::max(1u, attachment->extent.height >> mip_level);
+	return {std::min(current.width, width), std::min(current.height, height)};
 }
 
 // Drop a depth/stencil surface that cannot form a legal framebuffer with the

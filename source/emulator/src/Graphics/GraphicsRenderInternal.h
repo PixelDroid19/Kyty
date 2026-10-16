@@ -529,6 +529,7 @@ private:
 		uint64_t           image_id[8]             = {};
 		uint32_t           base_array_layer[8]     = {};
 		uint32_t           layer_count[8]          = {};
+		uint32_t           mip_level[8]            = {};
 		VkFormat           color_format[8]         = {};
 		int                color_view[8]           = {};
 		uint64_t           depth_id                = 0;
@@ -858,6 +859,9 @@ struct RenderColorAttachmentInfo
 	uint32_t              image_layers            = 1;
 	uint32_t              base_array_layer         = 0;
 	uint32_t              layer_count              = 1;
+	// Levels of a mip-chained target and the one MIP_LEVEL renders.
+	uint32_t              mip_levels              = 1;
+	uint32_t              mip_level               = 0;
 	bool                  tile                    = false;
 	bool                  neo                     = false;
 	bool                  write_back              = false;
@@ -1655,7 +1659,8 @@ const RenderColorAttachmentInfo* RenderColorFirstConfiguredAttachment(const Rend
 VulkanImage*                    RenderColorFirstActiveImage(const RenderColorInfo& color);
 VkSampleCountFlagBits           decode_guest_sample_count(uint32_t encoded);
 VkSampleCountFlagBits           resolve_render_attachment_sample_count(const RenderColorInfo& color, const RenderDepthInfo& depth);
-VkExtent2D                      IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment);
+VkExtent2D                      IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment,
+                                                                     uint32_t mip_level = 0);
 void                            SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* depth);
 void                            CollapseRenderColorLayersWithoutLayerExport(RenderColorInfo* color, uint32_t pa_cl_vs_out_cntl);
 void                            MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& vs_input,

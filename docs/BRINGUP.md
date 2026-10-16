@@ -390,7 +390,7 @@ fail on the current HEAD before acting on them.
   programs; `mmap_in_guest_window` took 9-25% and
   `GpuDirtyPageTracker::VisitWritePages` 12% of the loading threads' samples.
 
-## Sandbox title: missing terrain in the world (2026-10-15, open)
+## Sandbox title: missing terrain in the world (2026-10-15, fixed 2026-10-16)
 
 The world shows sky, clouds, HUD and an all-water view without land; the
 inventory screen works. Recorded so the excluded paths are not re-tested.
@@ -529,17 +529,45 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
     `ASpillSlotCarriesTheWordLastSpilledOnEachPath` covers a reused slot, the
     loop-carried case and the divergent-region case.
   - Next observation: terrain blocks draw black (silhouettes only) at about
-    3 FPS; see the block atlas defect below.
+    3 FPS; fixed below.
+- Fixed (2026-10-16): the black terrain was the block atlas mip chain that the
+  CPU writes into guest memory and Kyty never loaded.
+  - Observed: before the first draw into the atlas, the guest bytes already
+    hold the whole four-level 2048x2048 chain. The 64 KiB occupancy follows the
+    reverse-order 64 KiB layout (level 3 at 0, level 2 at 0x40000, level 1 at
+    0x140000, level 0 at 0x540000 of a 0x1540000 chain). The color target
+    (`MAX_MIP` 3, drawn only at `MIP_LEVEL` 0, about 160 draws per frame) was
+    created as one empty level over the first 16 MiB and, being GPU owned and
+    tiled, never loads guest bytes; only the animated strips reached it.
+  - The sampled side had two gaps: `TileGetTextureSize2` sized a tile-27
+    multi-level texture as one level (the fallback that ignores `levels`), and
+    `Gen5PickSampleSurfaceAliases` rejected the one-level target for a
+    four-level view, so the sample fell to `guest-skip-live-cover`, which
+    zero-fills.
+  - Change: a tiled color target with `MAX_MIP` > 0 and one slice is the whole
+    64 KiB render-target chain (`Gen5GetRenderTarget64KBMipLayout`, from the
+    element size). Its image has every level, is created from the detiled guest
+    chain, and each pass renders the `MIP_LEVEL` view at that level's extent; the
+    whole image stays a color attachment between passes. Mip chains are never
+    resolution scaled. Tile-27 multi-level textures use the same chain layout
+    and detiler, so the sample and the target describe the same range and the
+    sample binds the target.
+  - Verified (Intel, strict, 240 s): the generated world draws fully textured
+    terrain (grass, dirt, leaves, birch, flowers) for the first time, at about
+    3 FPS. Unit test `RenderTarget64KBMipChainMatchesSampledChain` pins the
+    chain offsets observed in guest memory.
+  - Excluded on the way: binding the one-level target anyway (diagnostic only)
+    stayed black, since its level 0 lacked the static textures. A diagnostic
+    that only cleared the live-cover flag was not a test of the guest bytes:
+    the tile-27 upload policy still skipped the guest, so the sample stayed
+    zero; forcing the guest upload of the chain showed the textured terrain.
 - Defects found, not fixed:
-  - Multi-level sampled views over a live one-level render target are rejected
-    by `Gen5PickSampleSurfaceAliases` (rule `mip_levels >= sample_levels`) and
-    fall to the guest-skip-live-cover path, which `Texture.cpp:557` zero-fills.
-    Direction: give render targets their guest mip count.
-  - `CB_COLOR*_VIEW.MIP_LEVEL` is ignored for render targets (`RenderTexture`
-    has one level): 128x128 cubemaps with 7 levels drawn at mips 1-7 land on
-    level 0.
-  - The block atlas render target lacks the static block textures at level 0;
-    only the animated strips are drawn into it.
+  - Layered mip-chained targets (the 128x128 cubemaps, 6 or 18 slices, 8
+    levels, drawn at every level 0-7) keep one level per slice, so every
+    `MIP_LEVEL` lands on level 0.
+  - Tile-27 storage images with several levels now take the chain size, but
+    `StorageTexture.cpp` still detiles level 0 from the start of the range
+    instead of its chain offset.
   - The inventory character preview draws legs and torso on black with the head
     detached; a dark streak crosses the sky in later captures. The pause-menu
     dressing room draws the same character correctly, so the defect is limited

@@ -2087,6 +2087,29 @@ TEST(EmulatorTileDetile, Depth64KBR32MipChainSizeIncludesTail)
 	EXPECT_EQ(levels[2].offset, 0x10000u);
 }
 
+// A 2048x2048 four-level 32-bit render-target chain, as the guest writes it
+// before the first draw: smallest level first, level 0 last, no tail. The
+// sampled texture and the color target must describe the same range.
+TEST(EmulatorTileDetile, RenderTarget64KBMipChainMatchesSampledChain)
+{
+	TileSizeAlign  size {};
+	TileSizeOffset levels[4] {};
+	TileGetTextureSize2(56u, 2048u, 2048u, 2048u, 4u, 27u, &size, levels, nullptr);
+	EXPECT_EQ(size.size, 0x1540000u);
+	EXPECT_EQ(levels[3].offset, 0x0u);
+	EXPECT_EQ(levels[2].offset, 0x40000u);
+	EXPECT_EQ(levels[1].offset, 0x140000u);
+	EXPECT_EQ(levels[0].offset, 0x540000u);
+
+	Gen5TextureMipLayout target {};
+	ASSERT_TRUE(Gen5GetRenderTarget64KBMipLayout(4u, 2048u, 2048u, 2048u, 4u, &target));
+	EXPECT_EQ(target.tiled.size, size.size);
+	for (uint32_t level = 0; level < 4u; ++level)
+	{
+		EXPECT_EQ(target.level[level].tiled_offset, levels[level].offset);
+	}
+}
+
 TEST(EmulatorTileDetile, Depth64KBR32MipChainHasPhysicalTailAndFullBacking)
 {
 	Gen5TextureMipLayout layout {};

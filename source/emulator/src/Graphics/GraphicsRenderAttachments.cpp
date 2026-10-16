@@ -10,6 +10,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/ColorDccClear.h"
 #include "Emulator/Graphics/ComputeColorFill.h"
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsState.h"
@@ -1140,6 +1141,24 @@ DepthStencilAttachmentAccess ResolveDepthStencilAttachmentAccess(const RenderDep
 	return stencil_writes && has_stencil ? DepthStencilAttachmentAccess::DepthReadOnly : DepthStencilAttachmentAccess::ReadOnly;
 }
 
+// MAX_MIP and MIP_LEVEL select one level of a tiled chain that starts at the
+// target base; the attachment covers the whole chain. Layered chains keep
+// their single-level description.
+static void DescribeRenderColorMipChain(const HW::RenderTarget& rt, uint32_t bytes_per_element, RenderColorAttachmentInfo* attachment)
+{
+	const uint32_t       levels = rt.attrib2.num_mip_levels + 1u;
+	Gen5TextureMipLayout layout {};
+	if (!Gen5GetRenderTarget64KBMipLayout(bytes_per_element, attachment->width, attachment->height, attachment->pitch, levels, &layout) ||
+	    rt.view.current_mip_level >= levels)
+	{
+		EXIT("unsupported render-target mip chain: %ux%u pitch=%u bpe=%u levels=%u mip=%u\n", attachment->width, attachment->height,
+		     attachment->pitch, bytes_per_element, levels, rt.view.current_mip_level);
+	}
+	attachment->size       = layout.tiled.size;
+	attachment->mip_levels = levels;
+	attachment->mip_level  = rt.view.current_mip_level;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderTarget& rt, RenderColorInfo* r)
 {
@@ -1217,6 +1236,10 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		attachment.image_layers     = array_view.image_layers;
 		attachment.base_array_layer = array_view.base_layer;
 		attachment.layer_count      = array_view.layer_count;
+		if (attachment.tile && attachment.image_layers == 1u && rt.attrib2.num_mip_levels != 0u)
+		{
+			DescribeRenderColorMipChain(rt, rt_bpp, &attachment);
+		}
 		if (attachment.image_layers > 1u &&
 		    GpuMemoryValidateAllocatedRange(rt.base.addr, attachment.size) != GpuMemoryRangeValidationStatus::Valid)
 		{
@@ -1428,6 +1451,7 @@ static ResolutionExtent RenderTextureCandidateHostExtent(const RenderColorAttach
 	ResolutionResourceInfo resource;
 	resource.kind            = ResolutionResourceKind::ColorAttachment;
 	resource.sample_count    = static_cast<uint32_t>(attachment.samples);
+	resource.mip_levels      = attachment.mip_levels;
 	resource.cpu_transfer    = RenderTextureMayCpuUploadOnUpdate(attachment.tile, attachment.write_back);
 	resource.ambiguous_alias = !RenderResolutionAliasAllowsRanges(&attachment.base_addr, &attachment.size, 1,
 	                                                              GpuMemoryObjectType::RenderTexture, true);
@@ -1502,7 +1526,8 @@ RenderTextureVulkanImage* DemoteScaledRenderTexture(uint64_t submit_id, CommandB
 	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_PITCH]),
 	                           params[RenderTextureObject::PARAM_WRITE_BACK] != 0,
 	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_SAMPLES]),
-	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]));
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]), 0, 0,
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_MIP_LEVELS]));
 	auto* demoted = static_cast<RenderTextureVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, object.vaddr, object.size, native));
 	EXIT_IF(demoted == nullptr || demoted == image || demoted->IsResolutionScaled());
@@ -1550,7 +1575,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		RenderTextureObject vulkan_buffer_info(attachment.render_texture_format, attachment.width, attachment.height, attachment.tile,
 		                                      attachment.neo, attachment.pitch, attachment.write_back,
 		                                      static_cast<uint32_t>(attachment.samples), attachment.image_layers, host.width,
-		                                      host.height);
+		                                      host.height, attachment.mip_levels);
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, attachment.base_addr, attachment.size, vulkan_buffer_info));
 		if (buffer_vulkan == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_vulkan == nullptr condition ignored (continuing)\n"); }
