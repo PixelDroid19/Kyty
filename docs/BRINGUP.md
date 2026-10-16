@@ -4792,6 +4792,12 @@ selected published source; none is a gameplay or visual acceptance.
   `x|y|z|s` masks, per-channel mask arrays or per-bit records of 8 to 64 bits) occurs in it; other eboots were not
   searched. The next oracle is the library's own code or a
   guest-written one-byte target sampled back.
+  Guest-content oracle (2026-10-16, excluded as decisive): no GPU object overlaps the volume at bind, so its ten
+  64 KiB blocks hold guest CPU data. Nearly every byte is non-zero, with an eight-byte repeating pattern. Scoring
+  the mean neighbour difference of each candidate's detiled image (x/y) gives the held equation 37.5/11.3, linear
+  92/77 and the standard 64 KiB equation 71/36. With y bits 3..5 in order `y0 y1 y2` instead of `y1 y0 y2` the
+  score is 37.5/9.1. The data supports `x0 x1 x2` in bits 0..2 followed by y bits. It cannot place x3 and above
+  (the content repeats every eight texels) or y3 and above (height 5). The one-byte equation therefore stays held.
 - **Storage-image channel order.** A formatted store into a BGRA-ordered `R8G8B8A8_UINT` storage image wrote red and
   blue swapped. Only RGBA8 UNORM/SRGB storage images get a BGRA host view; the shader now applies the descriptor's
   destination select to stores (inverse permutation) whenever the host view cannot (`ShaderStorageImageSwizzleInShader`
