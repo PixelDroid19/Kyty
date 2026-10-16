@@ -4244,7 +4244,7 @@ the playable gate's checkpoints.
 | Pixel cave platformer | 161 | Cave with ladders and character |
 | Robot dungeon workload | 203 | Tutorial scene with HUD and movement prompt; healthy watches; earlier present stall not reproduced |
 | Arcade racing workload | 165 | Race with HUD; no D16 refusal |
-| Mechanical-fist platformer | 58 | Passes the startup race; refuses the one-byte `SW_64KB_R_X` 400x5x5 volume |
+| Mechanical-fist platformer | 58 | Passes the startup race; refuses the one-byte `SW_64KB_R_X` 400x5x5 volume (fixed later the same day; see below) |
 
 The camp brawler stays black and issues about 3% of its earlier draws while presenting normally. A build of the
 merge result without this entry's changes reproduces the same black endpoint (d1923), so the cause precedes this
@@ -4817,7 +4817,7 @@ These runs used the full local candidate, including changes held from publicatio
 the five-second cross route and a 180-second bound. The observations below do not establish the frontier of the
 selected published source; none is a gameplay or visual acceptance.
 
-- **One-byte 64 KiB render-target volumes (local candidate; held).** The title samples an R8 400x5x5 volume with tile mode 27 (`SW_64KB_R_X`).
+- **One-byte 64 KiB render-target volumes (published 2026-10-16).** The title samples an R8 400x5x5 volume with tile mode 27 (`SW_64KB_R_X`).
   The local `Sw64kRxWithinBlockOffset` candidate uses a one-byte equation inferred from a 16-pipe address pattern: bits 0..15 are
   `x0 x1 x2 y1 y0 y2 x3 y4 | x3^y3 x4^y4 x6^y5 x5^y6 | y6 x6 y7 x7` inside a 256x256 block. The existing two- and
   eight-byte equations match the same published table exactly, which ties the new form to the same source. A
@@ -4839,7 +4839,17 @@ selected published source; none is a gameplay or visual acceptance.
   the mean neighbour difference of each candidate's detiled image (x/y) gives the held equation 37.5/11.3, linear
   92/77 and the standard 64 KiB equation 71/36. With y bits 3..5 in order `y0 y1 y2` instead of `y1 y0 y2` the
   score is 37.5/9.1. The data supports `x0 x1 x2` in bits 0..2 followed by y bits. It cannot place x3 and above
-  (the content repeats every eight texels) or y3 and above (height 5). The one-byte equation therefore stays held.
+  (the content repeats every eight texels) or y3 and above (height 5). The one-byte equation therefore stayed held.
+  Volume oracle (2026-10-16, decisive for the slice XOR): a later dump of the volume holds 0xFF in every texel the
+  guest wrote, and other bytes elsewhere in its ten blocks. With the published pipe XOR of the slice
+  (`s0->bit 11, s1->bit 10, s2->bit 9, s3->bit 8`, the same XOR the depth layout already applies per layer) all
+  2000 in-bounds texels of each of the five slices land on 0xFF; without the XOR, or with the bit order reversed,
+  slices 1..4 read foreign bytes. The guest data does not decide between `y1 y0` and `y0 y1` in bits 3..4, so the
+  published table order is kept. `TileGetSw64kRxOffset` now accepts one-byte elements and a slice; single-level
+  `SW_64KB_R_X` arrays and volumes pass the layer as the slice (CPU detile; the GPU detile path refuses slices).
+  Verified: the mechanical-fist platformer passes the volume in a strict Intel run and next stops at the
+  unresolved `sceAgcDcbDrawIndirect` import. Open: multi-level `SW_64KB_R_X` mip chains are still detiled without
+  the slice XOR.
 - **Storage-image channel order.** A formatted store into a BGRA-ordered `R8G8B8A8_UINT` storage image wrote red and
   blue swapped. Only RGBA8 UNORM/SRGB storage images get a BGRA host view; the shader now applies the descriptor's
   destination select to stores (inverse permutation) whenever the host view cannot (`ShaderStorageImageSwizzleInShader`

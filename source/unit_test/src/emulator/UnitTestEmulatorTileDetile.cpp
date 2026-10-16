@@ -601,6 +601,36 @@ TEST(EmulatorTileDetile, Sw64kRx8bppProductionMatchesReference)
 	ExpectDetilePathsMatch(k_w, k_h, k_w, k_bpp, TileDetileLayout::Sw64kRx, size.size);
 }
 
+// One-byte SW_64K_R_X, 16 pipes: x0 x1 x2 y1 y0 y2 x3 y4 | x3^y3 x4^y4 x6^y5 x5^y6 | y6 x6 y7 x7 in a
+// 256x256 block, with slice bits Z0..Z3 XORed into offset bits 11..8.
+TEST(EmulatorTileDetile, Sw64kRx1bppFollowsPublishedPatternAndSlice)
+{
+	EXPECT_EQ(TileGetSw64kRxOffset(5u, 0u, 256u, 1u), 0x005u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 1u, 256u, 1u), 0x010u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 2u, 256u, 1u), 0x008u);
+	EXPECT_EQ(TileGetSw64kRxOffset(8u, 0u, 256u, 1u), 0x140u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 8u, 256u, 1u), 0x100u);
+	EXPECT_EQ(TileGetSw64kRxOffset(32u, 0u, 256u, 1u), 0x800u);
+	EXPECT_EQ(TileGetSw64kRxOffset(128u, 255u, 256u, 1u), 0xd000u ^ 0x0f00u ^ 0x00b8u);
+	EXPECT_EQ(TileGetSw64kRxOffset(256u, 0u, 512u, 1u), 0x10000u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 256u, 512u, 1u), 0x20000u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 0u, 256u, 1u, 1u), 0x800u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 0u, 256u, 1u, 2u), 0x400u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 0u, 256u, 1u, 4u), 0x200u);
+	EXPECT_EQ(TileGetSw64kRxOffset(8u, 0u, 256u, 4u, 8u), TileGetSw64kRxOffset(8u, 0u, 256u, 4u) ^ 0x100u);
+
+	constexpr uint32_t   k_width = 4u;
+	std::vector<uint8_t> tiled(65536u, 0u);
+	tiled[0x800u ^ 0x001u] = 0x11u; // (1, 0) of slice 1
+	tiled[0x800u ^ 0x010u] = 0x22u; // (0, 1) of slice 1
+	std::vector<uint8_t> linear(k_width * 2u, 0u);
+	auto request  = MakeRequest(linear.data(), tiled.data(), k_width, 2u, 256u, k_width, 1u, TileDetileLayout::Sw64kRx, 65536u);
+	request.slice = 1u;
+	ASSERT_TRUE(TileDetile(request));
+	EXPECT_EQ(linear[1], 0x11u);
+	EXPECT_EQ(linear[k_width], 0x22u);
+}
+
 TEST(EmulatorTileDetile, Standard64KB4bppProductionMatchesReference)
 {
 	constexpr uint32_t k_w   = 96u;
@@ -810,7 +840,7 @@ TEST(EmulatorTileDetile, Depth64KBArraySlicesApplyTheMatchedGfx10ZEquation)
 			std::vector<uint8_t> actual(slice_bytes, 0u);
 			auto request = MakeRequest(actual.data(), tiled.data(), width, height, width, width, bpe,
 			                           TileDetileLayout::Depth64KB, slice_bytes);
-			request.depth_layer = layers[index];
+			request.slice = layers[index];
 			ASSERT_TRUE(TileDetileIsSupported(request));
 			ASSERT_TRUE(TileDetile(request));
 			EXPECT_EQ(actual, expected) << "bpe=" << bpe << " layer=" << layers[index];
@@ -821,7 +851,7 @@ TEST(EmulatorTileDetile, Depth64KBArraySlicesApplyTheMatchedGfx10ZEquation)
 	}
 	uint8_t byte = 0u;
 	auto invalid = MakeRequest(&byte, &byte, 1u, 1u, 1u, 1u, 1u, TileDetileLayout::Standard4KB, 4096u);
-	invalid.depth_layer = 1u;
+	invalid.slice = 1u;
 	EXPECT_FALSE(TileDetileIsSupported(invalid));
 }
 

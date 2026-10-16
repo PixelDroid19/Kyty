@@ -72,7 +72,7 @@ bool DetileOneStandard4KBLayer(uint8_t* output_layer, const uint8_t* input_layer
 	return true;
 }
 
-bool DetileOneLayer(uint8_t* output_layer, const uint8_t* input_layer, const Gen5TextureArrayLayout& layout)
+bool DetileOneLayer(uint8_t* output_layer, const uint8_t* input_layer, const Gen5TextureArrayLayout& layout, uint32_t layer)
 {
 	if (layout.tile == 0u)
 	{
@@ -108,7 +108,7 @@ bool DetileOneLayer(uint8_t* output_layer, const uint8_t* input_layer, const Gen
 	if (layout.tile == 27u && layout.host_pitch == layout.width)
 	{
 		TileConvertSw64kRxToLinear(output_layer, input_layer, layout.width, layout.height, layout.guest_pitch,
-		                           layout.bytes_per_element);
+		                           layout.bytes_per_element, layer);
 		return true;
 	}
 	return false;
@@ -143,7 +143,7 @@ bool Gen5GetTextureArrayLayout(uint32_t format, uint32_t width, uint32_t height,
 	const bool standard_4kb       = tile == 5u;
 	const bool standard_64kb      = tile == 9u && TileGet64KBBlockWidth(bytes_per_element) != 0u &&
 	                                !ShaderGen5TextureIsBlockCompressed(format);
-	const bool render_target_64kb = tile == 27u && (bytes_per_element == 4u || bytes_per_element == 8u) &&
+	const bool render_target_64kb = tile == 27u && (bytes_per_element == 1u || bytes_per_element == 4u || bytes_per_element == 8u) &&
 	                                !ShaderGen5TextureIsBlockCompressed(format);
 
 	if (!linear && !standard_256b && !standard_4kb && !standard_64kb && !render_target_64kb)
@@ -245,7 +245,7 @@ bool Gen5DetileTextureArrayLayer(void* dst, uint64_t dst_size, const void* src, 
 		return false;
 	}
 	const auto* input_layer = static_cast<const uint8_t*>(src) + tiled_offset;
-	return DetileOneLayer(static_cast<uint8_t*>(dst), input_layer, layout);
+	return DetileOneLayer(static_cast<uint8_t*>(dst), input_layer, layout, layer);
 }
 
 bool Gen5DetileTextureArray(void* dst, uint64_t dst_size, const void* src, uint64_t src_size, const Gen5TextureArrayLayout& layout)
