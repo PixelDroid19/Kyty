@@ -650,6 +650,21 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_indirect)
 	return 4;
 }
 
+// Gen5 IT_DRAW_INDIRECT: header + 4 body dwords (offset, patch lo/hi, initiator).
+KYTY_CP_OP_PARSER(cp_op_draw_indirect)
+{
+	KYTY_PROFILER_FUNCTION();
+	if (cmd_id != KYTY_PM4(5, Pm4::IT_DRAW_INDIRECT, 0u))
+	{
+		EXIT("unsupported DRAW_INDIRECT header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+
+	RequirePacketBody(cmd_id, dw, 4u);
+	cp->DrawIndirect(buffer[0], buffer[3]);
+
+	return 4;
+}
+
 // Gen5 IT_CLEAR_STATE from GraphicsDcbResetQueue: header + 4-bit state body.
 KYTY_CP_OP_PARSER(cp_op_clear_state)
 {

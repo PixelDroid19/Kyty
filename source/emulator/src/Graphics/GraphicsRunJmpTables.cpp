@@ -1114,6 +1114,7 @@ void graphics_init_jmp_tables()
 	g_cp_op_func[Pm4::IT_SET_BASE]                = cp_op_set_base;
 	g_cp_op_func[Pm4::IT_DISPATCH_INDIRECT]       = cp_op_dispatch_indirect;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_INDIRECT]     = cp_op_draw_index_indirect;
+	g_cp_op_func[Pm4::IT_DRAW_INDIRECT]           = cp_op_draw_indirect;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_2]            = cp_op_draw_index;
 	g_cp_op_func[Pm4::IT_DRAW_INDEX_OFFSET_2]     = cp_op_draw_index_offset;
 	g_cp_op_func[Pm4::IT_INDEX_BASE]              = cp_op_index_base;

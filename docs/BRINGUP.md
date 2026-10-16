@@ -4848,7 +4848,7 @@ selected published source; none is a gameplay or visual acceptance.
   published table order is kept. `TileGetSw64kRxOffset` now accepts one-byte elements and a slice; single-level
   `SW_64KB_R_X` arrays and volumes pass the layer as the slice (CPU detile; the GPU detile path refuses slices).
   Verified: the mechanical-fist platformer passes the volume in a strict Intel run and next stops at the
-  unresolved `sceAgcDcbDrawIndirect` import. Open: multi-level `SW_64KB_R_X` mip chains are still detiled without
+  unresolved `sceAgcDcbDrawIndirect` import (implemented below). Open: multi-level `SW_64KB_R_X` mip chains are still detiled without
   the slice XOR.
 - **Storage-image channel order.** A formatted store into a BGRA-ordered `R8G8B8A8_UINT` storage image wrote red and
   blue swapped. Only RGBA8 UNORM/SRGB storage images get a BGRA host view; the shader now applies the descriptor's
@@ -4865,10 +4865,14 @@ selected published source; none is a gameplay or visual acceptance.
   local render-target format. **Status update at translator126:** the five-case native UINT16 matrix described above
   now passes exact readback on the available Intel Vulkan device. This supersedes the earlier absence of native
   writeback evidence for those formats, but does not establish guest-route or cross-vendor acceptance.
-- **Non-indexed indirect draw (historical local candidate; absent from translator126 target).** The earlier candidate
-  emitted `IT_DRAW_INDIRECT` and used a 16-byte argument record, but did not apply the vertex/instance patch offsets
-  or validate the complete guest span. That candidate is not present in this target. The indexed path now checks its
-  20-byte argument span before copying; this does not implement or establish the non-indexed contract.
+- **Non-indexed indirect draw (published 2026-10-16).** `sceAgcDcbDrawIndirect` (`1q1titRBL6o`) takes the same
+  operands as the indexed builder (command buffer, byte offset from the `SetBaseIndirectArgs` base, draw modifier)
+  and emits `IT_DRAW_INDIRECT` with the non-indexed patch offsets. The processor checks and copies the 16-byte
+  argument record (vertex count, instance count, start vertex, start instance) and issues an auto-index draw whose
+  first vertex adds the start vertex to `GE_INDX_OFFSET` and whose first instance is the start instance. Like the
+  indexed path, the patch offsets are not written to user SGPRs. Verified: the mechanical-fist platformer resolves the
+  import in a strict Intel run and stops about four seconds later at an unrelated storage-image overlap; no capture
+  was taken, so draw output is not yet verified.
 - **SGPR104 and SGPR105.** The RDNA2 scalar operand range is 0..105; the parser stopped at 103, and the shared lowering
   preconditions and compute-wave analyses used the same limit, so a pixel shader reading `s104` was refused as an
   invalid instruction before native wave analysis. The limits follow the ISA; the NGG passthrough proof, which keeps

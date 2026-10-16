@@ -2241,6 +2241,63 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 	});
 }
 
+void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
+{
+	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
+	// This precedes the CPU snapshot of indirect arguments; renderer preflight
+	// runs later and cannot provide freshness for this host-side read.
+	WaitDeviceAddressWriteBacks();
+	struct DrawIndirectArgs
+	{
+		uint32_t vertex_count_per_instance;
+		uint32_t instance_count;
+		uint32_t start_vertex_location;
+		uint32_t start_instance_location;
+	};
+
+	uint64_t         submit_id = 0;
+	DrawIndirectArgs args {};
+	{
+		Core::LockGuard lock(m_mutex);
+
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		EXIT_IF((initiator & ~0x20u) != 2u);
+
+		uint64_t args_address = 0;
+		if (!GraphicsRunIndirectArgumentAddress(m_draw_indirect_args_base_addr, data_offset, sizeof(args), &args_address) ||
+		    !GpuRangeMapped(args_address, sizeof(args)))
+		{
+			EXIT("DRAW_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
+			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
+		}
+		if (!Core::VirtualMemory::CopyFromGuest(&args, args_address, sizeof(args)))
+		{
+			EXIT("DRAW_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
+			     args_address, static_cast<uint64_t>(sizeof(args)));
+		}
+		if (args.vertex_count_per_instance == 0 || args.instance_count == 0)
+		{
+			return;
+		}
+		if (args.start_vertex_location > static_cast<uint32_t>(INT32_MAX))
+		{
+			EXIT("unsupported indirect draw start vertex: offset=0x%08" PRIx32 " start=%" PRIu32 "\n", data_offset,
+			     args.start_vertex_location);
+		}
+
+		m_num_instances = args.instance_count;
+		submit_id       = m_sumbit_id;
+	}
+	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		GraphicsRenderDrawIndexAuto(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, args.vertex_count_per_instance, 0,
+		                            args.instance_count, static_cast<int32_t>(args.start_vertex_location), args.start_instance_location,
+		                            pending);
+	});
+}
+
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
 {
 	const ScopedDebugStatsTimer dispatch_timer(DebugStatsRecordDispatchProcessor);
@@ -2392,7 +2449,7 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 		GraphicsRenderDrawIndexAuto(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, draw_modifier,
-		                            instance_count, pending);
+		                            instance_count, 0, 0, pending);
 	});
 }
 

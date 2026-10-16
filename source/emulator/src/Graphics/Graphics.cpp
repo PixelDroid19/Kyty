@@ -4548,6 +4548,36 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_
 	return cmd;
 }
 
+// sceAgcDcbDrawIndirect: IT_DRAW_INDIRECT from SetBaseIndirect args. The
+// non-indexed form patches no index-location register.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t data_offset = 0x%" PRIx32 "\n", data_offset_in_bytes);
+	KYTY_LOG_DEBUG("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	const auto patch_offsets = decode_indirect_modifier_patch_offsets(modifier, false);
+
+	cmd[0] = KYTY_PM4(5, Pm4::IT_DRAW_INDIRECT, 0u);
+	cmd[1] = data_offset_in_bytes;
+	cmd[2] = static_cast<uint32_t>(patch_offsets);
+	cmd[3] = static_cast<uint32_t>(patch_offsets >> 32u);
+	cmd[4] = decode_indirect_draw_initiator(modifier);
+	return cmd;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
                                              const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm)
 {

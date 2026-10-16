@@ -180,6 +180,7 @@ KYTY_CP_OP_PARSER(cp_op_dma_data);
 KYTY_CP_OP_PARSER(cp_op_draw_index);
 KYTY_CP_OP_PARSER(cp_op_draw_index_auto);
 KYTY_CP_OP_PARSER(cp_op_draw_index_indirect);
+KYTY_CP_OP_PARSER(cp_op_draw_indirect);
 KYTY_CP_OP_PARSER(cp_op_draw_index_offset);
 KYTY_CP_OP_PARSER(cp_op_draw_reset);
 KYTY_CP_OP_PARSER(cp_op_dump_const_ram);
@@ -305,6 +306,7 @@ public:
 	void DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type);
 	void DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags);
 	void DrawIndexIndirect(uint32_t data_offset, uint32_t initiator);
+	void DrawIndirect(uint32_t data_offset, uint32_t initiator);
 	void DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier);
 	void WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type, uint32_t cache_action,
 	                        uint32_t event_index, uint32_t event_write_source, void* dst_gpu_addr, uint32_t value,

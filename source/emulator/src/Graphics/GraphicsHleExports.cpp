@@ -164,6 +164,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("CtB+A9-VxO0", Gen5::GraphicsDcbDispatchIndirect);
 	LIB_FUNC("j3EtxFkSIhQ", Gen5::GraphicsAcbDispatchIndirect);
 	LIB_FUNC("t1vNu082-jM", Gen5::GraphicsDcbDrawIndexIndirect);
+	LIB_FUNC("1q1titRBL6o", Gen5::GraphicsDcbDrawIndirect);
 	LIB_FUNC("VmW0Tdpy420", Gen5::GraphicsDcbWaitRegMem);
 	LIB_FUNC("htn36gPnBk4", Gen5::GraphicsAcbWaitRegMem);
 	LIB_FUNC("1rZSWUv1IRc", Gen5::GraphicsDcbCopyData);

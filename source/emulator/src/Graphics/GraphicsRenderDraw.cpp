@@ -2386,8 +2386,8 @@ bool AutoDrawModifierSupported(uint64_t draw_modifier)
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
-	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count,
-	                             SubmissionId* pending_submission)
+	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count, int32_t vertex_offset_add,
+	                             uint32_t first_instance, SubmissionId* pending_submission)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -2472,8 +2472,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		if (!AutoDrawModifierSupported(draw_modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !AutoDrawModifierSupported(draw_modifier) condition ignored (continuing)\n"); }
 		if (ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000 condition ignored (continuing)\n"); }
 
-		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, UINT32_MAX, nullptr, instance_count, 0, 0,
-	                               pending_submission);
+		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, UINT32_MAX, nullptr, instance_count,
+		                               vertex_offset_add, first_instance, pending_submission);
 		return;
 	}
 
@@ -2616,8 +2616,9 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	// GE_INDX_OFFSET is the first vertex of an auto-index draw, as it is the base
 	// vertex of an indexed one; batches sharing one vertex buffer depend on it.
+	// An indirect draw adds its start vertex the same way.
 	int32_t resolved_first_vertex = 0;
-	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info, &resolved_first_vertex))
+	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info, &resolved_first_vertex, vertex_offset_add))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: auto-draw vertex offset is outside int32 range; draw skipped\n");
 		return;
@@ -2721,7 +2722,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                                               .index_size = 0,
 	                                               .vertex_offset = resolved_first_vertex,
 	                                               .instance_count = instance_count,
-	                                               .first_instance = 0,
+	                                               .first_instance = first_instance,
 	                                               .required_vertex_records = vertex_records,
 	                                               .vertex_input = &vs_input_info,
 	                                               .color = &color_info,
@@ -2789,13 +2790,13 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
-			vkCmdDraw(pass_buffer, primitive_plan.chunk_count, instance_count, first_vertex + i, 0);
+			vkCmdDraw(pass_buffer, primitive_plan.chunk_count, instance_count, first_vertex + i, first_instance);
 			DebugStatsRecordDraw();
 			host_draws++;
 		}
 	} else if (!clear_only)
 	{
-		vkCmdDraw(pass_buffer, primitive_plan.draw_count, instance_count, first_vertex, 0);
+		vkCmdDraw(pass_buffer, primitive_plan.draw_count, instance_count, first_vertex, first_instance);
 		DebugStatsRecordDraw();
 		host_draws++;
 	}
