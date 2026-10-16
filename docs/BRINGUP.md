@@ -54,8 +54,9 @@ fail on the current HEAD before acting on them.
   any other range scans all 2,048 slots. The cache remembered 4 clean ranges in FIFO order, so a draw
   with more than 4 attachment ranges cycled through them and each invalidation scanned every slot.
 - Fix: remember 16 clean ranges.
-- Measured (Intel, strict, 240 s, temporary counters): in gameplay, 98.7 % of invalidations replay
-  recent stores and 0.05 % overflow the 256-store log. `ResetHash` fell out of the profile's top
+- Measured (Intel, strict, 240 s, temporary counters): over the whole gameplay span, about 98.1 % of
+  invalidations replay recent stores and 1.9 % scan every slot (98.7 % replay over the last ~600k
+  invalidations); 0.05 % overflow the 256-store log. `ResetHash` fell out of the profile's top
   entries (below 1.2 %). Gameplay command processing went from 38.1 to 42.0 us/draw, with fence waits
   from 8.3 to 13.1 us/draw: without the waits, about 29.8 to 28.9 us/draw. The scenes differ between
   runs (619k against 566k draws per window), so the gain is within noise at window level.
