@@ -9,6 +9,28 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Uncompressed standard 64 KiB mip chains (2026-10-16)
+
+- Observed (Intel, strict, card title, `generic` route): cards, jokers, the deck and the blind chips
+  showed a mosaic of their sprite atlas, and the title-screen logo showed small copies of itself
+  among large displaced blocks. UI frames and text were correct.
+- Evidence: the sample-bind catalog shows every sprite atlas as format 56, tile 9
+  (`SW_64KB_S`), 8 levels (`last_level=7`), with non-power-of-two sizes such as 1420x3040 at pitch
+  1536. Level 0 as uploaded to the host image held the smaller levels at its top and the full-size
+  sprites shifted below. `TileGetTextureSize` sent tile-9 chains of uncompressed formats through
+  the precomputed-table lookup. The table has no tile-9 entries, so the fallback logged
+  `levels != 1` and sized one level at offset 0. The upload then detiled level 0 from the start of
+  the allocation, where the chain keeps its mip tail and smaller levels.
+- Change: a tile-9 texture with more than one level takes the standard 64 KiB mip layout for
+  its size and its upload, whatever the format. Before, only block-compressed formats did. GFX10
+  places thin 64 KiB levels by block size and element size alone. That layout already served the
+  block-compressed and render-target chains. Single-level uncompressed textures keep the one-level
+  path.
+- Verified (Intel, strict, card title, 60 s): the uploaded joker atlas level 0 is a regular grid
+  of 142x190 cards from the origin. The tutorial joker, the deck back, the blind chips and the
+  button glyphs render correctly. The racing (200 s) and fishing (240 s) strict runs bind no tile-9
+  texture with mips, reach their usual states, and render as before.
+
 ## Pixel ADD_TID spill slots across control flow (2026-10-16)
 
 - Observed (Intel, strict, `minecraft-enter`): in a newly created sandbox-title world, the run

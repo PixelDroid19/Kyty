@@ -411,15 +411,17 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		}
 		return;
 	}
-	const bool standard64_bc = tile == 9u && ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt));
+	// Standard 64 KiB chains place every level by block and element size; a
+	// single uncompressed level keeps the plain one-level detile below.
+	const bool standard64_chain = tile == 9u && (ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt)) || levels > 1u);
 	const bool target64_chain = fmt != 0u && tile == 27u && levels > 1u;
-	if ((fmt != 0u && (tile == 5u || tile == 1u) && levels > 1u) || ((standard64_bc || target64_chain) && !skip_guest))
+	if ((fmt != 0u && (tile == 5u || tile == 1u) && levels > 1u) || ((standard64_chain || target64_chain) && !skip_guest))
 	{
 		Gen5TextureMipLayout mip_layout {};
-		const auto get_layout   = standard64_bc || target64_chain ? Gen5GetStandard64KBTextureMipLayout
+		const auto get_layout   = standard64_chain || target64_chain ? Gen5GetStandard64KBTextureMipLayout
 		                          : tile == 1u                    ? Gen5GetStandard256BTextureMipLayout
 		                                                          : Gen5GetStandard4KBTextureMipLayout;
-		const auto detile_chain = standard64_bc    ? Gen5DetileStandard64KBTextureMipChain
+		const auto detile_chain = standard64_chain ? Gen5DetileStandard64KBTextureMipChain
 		                          : target64_chain ? Gen5DetileRenderTarget64KBTextureMipChain
 		                          : tile == 1u     ? Gen5DetileStandard256BTextureMipChain
 		                                           : Gen5DetileStandard4KBTextureMipChain;

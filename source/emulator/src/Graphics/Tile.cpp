@@ -2174,7 +2174,7 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 	EXIT_IF(levels == 0 || levels > 16);
 	// Render-target (27) chains share the 64 KiB block geometry and mip
 	// placement of the standard mode; only the in-block swizzle differs.
-	if ((tile == 9u && ShaderGen5TextureIsBlockCompressed(format)) || (tile == 0x1bu && levels > 1u))
+	if ((tile == 9u && (ShaderGen5TextureIsBlockCompressed(format) || levels > 1u)) || (tile == 0x1bu && levels > 1u))
 	{
 		Gen5TextureMipLayout mip_layout {};
 		if (!Gen5GetStandard64KBTextureMipLayout(format, width, height, pitch, levels, &mip_layout))
