@@ -32,7 +32,10 @@ fail on the current HEAD before acting on them.
   holds 348 live threads with no abort. Menus run at about 235 fps and an in-game hand at about
   100 fps. Unit tests: `CoreMemoryAlloc.*` and `EmulatorAudio.*` (121 pass).
 - Open: one hovered card rendered as a blank white card in one capture frame during the tutorial;
-  not yet investigated. No other NGS2 sampler title was re-run on this change.
+  not yet investigated.
+- Regression check (Intel, strict, 100 s, `generic` route): a pixel-art title whose sampler voices use
+  reset adds is audible in 92 of 97 one-second windows (52 of 95 in an earlier run) and reaches its
+  opening scene with no error.
 
 ## Uncompressed standard 64 KiB mip chains (2026-10-16)
 
