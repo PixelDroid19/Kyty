@@ -291,9 +291,10 @@ VulkanDescriptorSet* DescriptorCache::Allocate(Stage stage, const ShaderDescript
 	// same layout serves without a pool allocation.
 	if (const auto recycled = m_recycled_sets.find(layout); recycled != m_recycled_sets.end() && !recycled->second.empty())
 	{
-		auto* set = recycled->second.back();
+		const auto position = recycled->second.back();
+		auto*      set      = *position;
 		recycled->second.pop_back();
-		m_recycled_count--;
+		m_recycled_order.erase(position);
 		return set;
 	}
 
@@ -372,13 +373,28 @@ void DescriptorCache::Recycle(VulkanDescriptorSet* set)
 	EXIT_IF(set == nullptr);
 
 	Core::LockGuard lock(m_mutex);
-	if (m_recycled_count >= RECYCLED_SETS_MAX)
+	if (m_recycled_order.size() >= RECYCLED_SETS_MAX)
 	{
-		Free(set);
-		return;
+		FreeOldestRecycled();
 	}
-	m_recycled_sets[set->layout].push_back(set);
-	m_recycled_count++;
+	m_recycled_order.push_back(set);
+	m_recycled_sets[set->layout].push_back(std::prev(m_recycled_order.end()));
+}
+
+// The oldest released set is also the oldest of its layout, so it leads that
+// layout's positions.
+void DescriptorCache::FreeOldestRecycled()
+{
+	auto* oldest    = m_recycled_order.front();
+	auto  positions = m_recycled_sets.find(oldest->layout);
+	EXIT_IF(positions == m_recycled_sets.end() || positions->second.empty() || *positions->second.front() != oldest);
+	positions->second.pop_front();
+	if (positions->second.empty())
+	{
+		m_recycled_sets.erase(positions);
+	}
+	m_recycled_order.pop_front();
+	Free(oldest);
 }
 
 uint32_t DescriptorCache::CalcHash(const Set& s)
@@ -1369,16 +1385,12 @@ void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
 		delete set.set;
 		set.set = nullptr;
 	}
-	for (auto& [layout, sets]: m_recycled_sets)
+	for (auto* set: m_recycled_order)
 	{
-		(void)layout;
-		for (auto* set: sets)
-		{
-			delete set;
-		}
+		delete set;
 	}
+	m_recycled_order.clear();
 	m_recycled_sets.clear();
-	m_recycled_count = 0;
 	for (const auto& [key, layout]: m_descriptor_set_layouts)
 	{
 		(void)key;

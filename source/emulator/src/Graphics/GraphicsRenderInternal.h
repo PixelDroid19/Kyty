@@ -56,6 +56,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <iterator>
+#include <list>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -423,7 +426,7 @@ private:
 	static constexpr uint32_t LIVE_SETS_MAX = 65536;
 	static constexpr uint32_t TRIM_SETS     = 8192;
 	// Released sets wait for reuse by the next set of their layout, up to this
-	// many in all; past it they return to their pool. Pools never give memory
+	// many in all; past it the oldest returns to its pool. Pools never give memory
 	// back to the system, so a held set only reserves pool space, while a driver
 	// free and reallocation walks the pool's free list. The limit holds several
 	// trim batches so a trim does not overflow it.
@@ -435,6 +438,7 @@ private:
 	void                 ReleaseSet(int index);
 	void                 RecordSetUse(int index, CommandBuffer* buffer);
 	void                 TrimSets();
+	void                 FreeOldestRecycled();
 	template <typename References>
 	void FreeSetsReferencing(uint64_t unique_id, References references);
 
@@ -451,8 +455,12 @@ private:
 	std::unordered_map<uint64_t, std::unordered_set<int>> m_sets_by_resource;
 
 	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
-	std::unordered_map<VkDescriptorSetLayout, std::vector<VulkanDescriptorSet*>> m_recycled_sets;
-	uint32_t                                                               m_recycled_count = 0;
+	// Released sets, oldest first, and per layout the positions of its sets in
+	// that order. A layout's sets are taken newest first; a full list drops its
+	// oldest set so stale layouts cannot fill it.
+	using RecycledOrder = std::list<VulkanDescriptorSet*>;
+	RecycledOrder                                                               m_recycled_order;
+	std::unordered_map<VkDescriptorSetLayout, std::deque<RecycledOrder::iterator>> m_recycled_sets;
 };
 
 class SamplerCache

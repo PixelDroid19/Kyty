@@ -27,20 +27,35 @@ fail on the current HEAD before acting on them.
 - Changes:
   - The recycle limit is now four trim batches (`RECYCLED_SETS_MAX`, 32,768). Pools never give memory
     back to the system, so holding a set only reserves pool space.
+  - A full recycle list frees its oldest set, not the incoming one. With the incoming set freed, sets
+    of layouts no longer in use stayed in the list until it was full of them, and driver frees per
+    200,000 requests rose over the session from 3,400 to 29,000. Released sets are kept in release
+    order with per-layout positions, so a layout still takes its newest set and eviction is constant
+    time.
   - The deferred-release queue pops from a `std::deque`. Popping each ready entry from the front of a
     vector was quadratic when a trim enqueued 8,192 releases.
 - Verified (Intel, strict, warm cache, same route):
-  - Recycled hits rose to 53--85 % of set requests, and driver frees fell from 78,000 to 3,400--29,000
-    per 200,000 requests.
+  - With the larger limit alone, recycled hits rose to 53--85 % of set requests, and driver frees fell
+    from 78,000 to 3,400 per 200,000 requests at first, rising to 29,000 as stale layouts filled the
+    list. With oldest-first eviction, a 300 s run measured 53 % and then 98.5 % recycled hits,
+    2,400 and 4,100 frees per 200,000 requests, and 25,000--30,000 sets held, below the limit.
   - Neither descriptor function nor `DrainReady` appears in the profile's top entries any more.
   - In the comparable gameplay window, resource binding fell from 23.9 to 15.0 us/draw and command
     processing from 52 to 40 us/draw, with 593k draws against 462k.
   - Regression check: the racing title (200 s) ends on its usual time-over screen. Its race windows
     improved too: resource binding fell from 20.5--20.9 to 16.0--16.5 us/draw, and command processing
     from 47--49 to 43--45 us/draw.
+  - After the eviction change, the sandbox title's steady gameplay windows measured resource binding at
+    11.6--11.7 us/draw and command processing at 33.9--34.4 us/draw, with 690k--700k draws per window.
+  - Verified on Intel only. ANV ignores the pool `maxSets`; RADV enforces it, so the held sets there
+    need about 64 more 512-set pools.
 - Excluded:
   - Deferring the release of in-flight sets: the counters showed none, so that change was dropped.
-- Open: the frame is still bound by command processing (about 40 us/draw) and GPU fence waits.
+- Open: the frame is still bound by command processing (about 34 us/draw) and GPU fence waits
+  (about 5 s per 26-second window). Temporary per-call-site counters put the longest waits, about
+  10 ms each and roughly one per frame, in indexed and auto-index draws that wait for an in-flight
+  submission before preparing the guest device-address table; synchronous buffer uploads add many
+  short waits.
   The next profile entries are read-only snapshot comparison, `ResetHash`, timer reads, allocation,
   and per-draw shader re-analysis.
 
@@ -74,7 +89,8 @@ fail on the current HEAD before acting on them.
   | Frame rate | 2.9--4.0 fps | 5.7--6.5 fps |
 
   The world also appears sooner. The route's last input is at 139 s. Gameplay was first captured at
-  about 157 s after the change, against about 206 s before. Gameplay captures show the same textured
+  about 157 s after the change, against 208 s before; the earlier run still showed its loading screen
+  at 182 s. Captures are about 25 s apart, so the gain is 25--50 s. Gameplay captures show the same textured
   terrain, trees and HUD. Regression check: the racing title (200 s) matches its previous run window
   for window (command processing 47--65 us/draw, at most 110 live objects, 0--2 compiles) and ends on
   its usual time-over screen.
