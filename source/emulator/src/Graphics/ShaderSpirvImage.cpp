@@ -968,6 +968,7 @@ bool IsImageInstruction(const ShaderInstruction& inst)
 		case ShaderInstructionType::ImageSampleB:
 		case ShaderInstructionType::ImageSampleDrefLz:
 		case ShaderInstructionType::ImageSampleCd:
+		case ShaderInstructionType::ImageSampleD:
 		case ShaderInstructionType::ImageStore:
 		case ShaderInstructionType::ImageAtomicAdd:
 		case ShaderInstructionType::ImageAtomicSwap:
@@ -990,7 +991,8 @@ bool IsSampledImageInstruction(const ShaderInstruction& inst)
 		case ShaderInstructionType::ImageSampleO:
 		case ShaderInstructionType::ImageSampleB:
 		case ShaderInstructionType::ImageSampleDrefLz:
-		case ShaderInstructionType::ImageSampleCd: return true;
+		case ShaderInstructionType::ImageSampleCd:
+		case ShaderInstructionType::ImageSampleD: return true;
 		default: return false;
 	}
 }
@@ -3492,12 +3494,13 @@ OpStore %<dst> %sample_l_component_<index>_<component>
 	return true;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_ImageSampleCd_VdataVaddr6StSsMimgDmask)
+// Two-dimensional float sample with supplied slopes (x and y derivatives of
+// the coordinate) followed by x,y, as a per-invocation explicit gradient.
+static bool RecompileImageSampleGrad(KYTY_RECOMPILER_ARGS)
 {
 	const auto& inst = code.GetInstructions().At(index);
 	const auto* bind = spirv->GetBindInfo();
-	if (bind == nullptr || spirv->GetHostShaderType() != ShaderType::Pixel ||
-	    bind->samplers.samplers_num <= 0 || !ShaderImageSampleCdHasQuadUniformGradients(code, index))
+	if (bind == nullptr || bind->samplers.samplers_num <= 0)
 	{
 		return false;
 	}
@@ -3527,24 +3530,22 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleCd_VdataVaddr6StSsMimgDmask)
 	{
 		const auto value = mimg_address_to_str(inst, address);
 		if (value.type != SpirvType::Float) { return false; }
-		source += String8::FromPrintf("%%sample_cd_address_%s_%d = OpLoad %%float %%%s\n", index_string.c_str(), address,
+		source += String8::FromPrintf("%%sample_grad_address_%s_%d = OpLoad %%float %%%s\n", index_string.c_str(), address,
 		                              value.value.c_str());
 	}
-	// Quad-uniform supplied slopes make per-invocation Grad preserve the
-	// admitted coarse sample's per-quad LOD. Arbitrary CD gradients are refused.
 	source += String8(R"(
-%sample_cd_descriptor_raw_<index> = OpLoad %uint %<texture>
-%sample_cd_descriptor_<index> = OpBitwiseAnd %uint %sample_cd_descriptor_raw_<index> %uint_0x1fffffff
-%sample_cd_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %sample_cd_descriptor_<index>
-%sample_cd_image_<index> = OpLoad %ImageS %sample_cd_image_ptr_<index>
-%sample_cd_sampler_index_<index> = OpLoad %uint %<sampler>
-%sample_cd_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %sample_cd_sampler_index_<index>
-%sample_cd_sampler_<index> = OpLoad %Sampler %sample_cd_sampler_ptr_<index>
-%sample_cd_sampled_<index> = OpSampledImage %SampledImage %sample_cd_image_<index> %sample_cd_sampler_<index>
-%sample_cd_grad_x_<index> = OpCompositeConstruct %v2float %sample_cd_address_<index>_0 %sample_cd_address_<index>_1
-%sample_cd_grad_y_<index> = OpCompositeConstruct %v2float %sample_cd_address_<index>_2 %sample_cd_address_<index>_3
-%sample_cd_coordinate_<index> = OpCompositeConstruct %v2float %sample_cd_address_<index>_4 %sample_cd_address_<index>_5
-%sample_cd_value_<index> = OpImageSampleExplicitLod %v4float %sample_cd_sampled_<index> %sample_cd_coordinate_<index> Grad %sample_cd_grad_x_<index> %sample_cd_grad_y_<index>
+%sample_grad_descriptor_raw_<index> = OpLoad %uint %<texture>
+%sample_grad_descriptor_<index> = OpBitwiseAnd %uint %sample_grad_descriptor_raw_<index> %uint_0x1fffffff
+%sample_grad_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %sample_grad_descriptor_<index>
+%sample_grad_image_<index> = OpLoad %ImageS %sample_grad_image_ptr_<index>
+%sample_grad_sampler_index_<index> = OpLoad %uint %<sampler>
+%sample_grad_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %sample_grad_sampler_index_<index>
+%sample_grad_sampler_<index> = OpLoad %Sampler %sample_grad_sampler_ptr_<index>
+%sample_grad_sampled_<index> = OpSampledImage %SampledImage %sample_grad_image_<index> %sample_grad_sampler_<index>
+%sample_grad_grad_x_<index> = OpCompositeConstruct %v2float %sample_grad_address_<index>_0 %sample_grad_address_<index>_1
+%sample_grad_grad_y_<index> = OpCompositeConstruct %v2float %sample_grad_address_<index>_2 %sample_grad_address_<index>_3
+%sample_grad_coordinate_<index> = OpCompositeConstruct %v2float %sample_grad_address_<index>_4 %sample_grad_address_<index>_5
+%sample_grad_value_<index> = OpImageSampleExplicitLod %v4float %sample_grad_sampled_<index> %sample_grad_coordinate_<index> Grad %sample_grad_grad_x_<index> %sample_grad_grad_y_<index>
 )")
 	              .ReplaceStr("<index>", index_string)
 	              .ReplaceStr("<texture>", texture.value)
@@ -3558,8 +3559,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleCd_VdataVaddr6StSsMimgDmask)
 		const auto dst = operand_variable_to_str(inst.dst, destination++);
 		if (dst.type != SpirvType::Float) { return false; }
 		source += String8(R"(
-%sample_cd_component_<index>_<component> = OpCompositeExtract %float %sample_cd_value_<index> <component>
-OpStore %<dst> %sample_cd_component_<index>_<component>
+%sample_grad_component_<index>_<component> = OpCompositeExtract %float %sample_grad_value_<index> <component>
+OpStore %<dst> %sample_grad_component_<index>_<component>
 )")
 	              .ReplaceStr("<index>", index_string)
 	              .ReplaceStr("<component>", String8::FromPrintf("%u", component))
@@ -3568,6 +3569,24 @@ OpStore %<dst> %sample_cd_component_<index>_<component>
 	if (destination != inst.dst.size) { return false; }
 	*dst_source += source;
 	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_ImageSampleCd_VdataVaddr6StSsMimgDmask)
+{
+	// Quad-uniform supplied slopes make per-invocation Grad preserve the
+	// admitted coarse sample's per-quad LOD. Arbitrary CD gradients are refused.
+	if (spirv->GetHostShaderType() != ShaderType::Pixel || !ShaderImageSampleCdHasQuadUniformGradients(code, index))
+	{
+		return false;
+	}
+	return RecompileImageSampleGrad(index, code, dst_source, spirv, param, scc_check);
+}
+
+// SAMPLE_D derives each pixel's LOD from its own supplied slopes: the
+// per-invocation Grad contract, without the coarse sample's quad proof.
+KYTY_RECOMPILER_FUNC(Recompile_ImageSampleD_VdataVaddr6StSsMimgDmask)
+{
+	return RecompileImageSampleGrad(index, code, dst_source, spirv, param, scc_check);
 }
 
 static String8 EmitImageResinfoQuery(uint32_t index, SampledImageShape shape, const String8& descriptor_index,

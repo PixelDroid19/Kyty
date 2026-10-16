@@ -4886,6 +4886,14 @@ selected published source; none is a gameplay or visual acceptance.
   the half. Byte selects, partial destinations and SDWA on other half operations stay refused. The CPU SPIR-V
   evaluator checks the high-word and negated low-word forms. Verified: the next strict Intel run passes the shader
   and stops about 35 s in at the unparsed `image_sample_d` (MIMG opcode 0x22).
+- **Two-dimensional `image_sample_d` (published 2026-10-16).** SAMPLE_D supplies the four slopes of a 2D coordinate
+  before x,y (ISA VGPR usage table) and derives each pixel's LOD from its own slopes, so it is an explicit-gradient
+  sample per invocation. It shares the 2D float emitter of the coarse `image_sample_cd`; only the coarse form keeps
+  the pixel-stage, quad-uniform gradient proof. Other dimensions, NSA forms with one extra dword and A16/G16
+  controls stay refused at parse. Unit tests parse the opcode and validate the emitted module with unproven slopes.
+  Verified: the next strict Intel run passes the parser and stops about 35 s in at the fragment wave transport
+  refusal for a pixel shader whose memory writes would expose helper lanes (2688-wide draw), the same open
+  contract as the sandbox title's new-world stop.
 - **SGPR104 and SGPR105.** The RDNA2 scalar operand range is 0..105; the parser stopped at 103, and the shared lowering
   preconditions and compute-wave analyses used the same limit, so a pixel shader reading `s104` was refused as an
   invalid instruction before native wave analysis. The limits follow the ISA; the NGG passthrough proof, which keeps

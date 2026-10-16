@@ -4110,7 +4110,8 @@ bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type)
 		case ShaderInstructionType::ImageSampleO:
 		case ShaderInstructionType::ImageSampleB:
 		case ShaderInstructionType::ImageSampleDrefLz:
-		case ShaderInstructionType::ImageSampleCd: return true;
+		case ShaderInstructionType::ImageSampleCd:
+		case ShaderInstructionType::ImageSampleD: return true;
 		default: return false;
 	}
 }

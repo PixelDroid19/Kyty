@@ -108,6 +108,7 @@ bool IsLaneLocalImageRead(Type type)
 		case Type::ImageSampleLz:
 		case Type::ImageSampleLzO:
 		case Type::ImageSampleCd:
+		case Type::ImageSampleD:
 		case Type::ImageSampleDrefLz: return true;
 		default: return false;
 	}

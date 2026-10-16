@@ -138,6 +138,7 @@ enum class ShaderInstructionType : uint32_t
 	ImageSampleB,
 	ImageSampleDrefLz,
 	ImageSampleCd,
+	ImageSampleD,
 	ImageStore,
 	ImageStoreMip,
 	SAddcU32,

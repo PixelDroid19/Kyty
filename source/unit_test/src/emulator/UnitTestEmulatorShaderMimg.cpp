@@ -1555,11 +1555,11 @@ ShaderCode ParseMimgTailInstruction(uint32_t opcode, uint32_t ssamp = 0u, uint32
 ShaderCode ParseCdMimgInstruction(uint32_t nsa = 2u, uint32_t dmask = 0xau, uint32_t dimension = 1u,
                                   uint32_t flags = 0u, uint32_t word1_flags = 0u,
                                   ShaderType stage = ShaderType::Pixel, bool next_gen = true, uint32_t ssamp = 5u,
-                                  uint32_t vaddr = 30u)
+                                  uint32_t vaddr = 30u, uint32_t opcode = 0x68u)
 {
 	Config::SetNextGen(next_gen);
 	std::array<uint32_t, 6> words = {
-	    (0x3cu << 26u) | (0x68u << 18u) | (dmask << 8u) | (dimension << 3u) | (nsa << 1u) | flags,
+	    (0x3cu << 26u) | (opcode << 18u) | (dmask << 8u) | (dimension << 3u) | (nsa << 1u) | flags,
 	    (ssamp << 21u) | (8u << 16u) | (64u << 8u) | (vaddr & 0xffu) | word1_flags,
 	    32u | (31u << 8u) | (33u << 16u) | (7u << 24u),
 	    42u | (60u << 8u) | (61u << 16u) | (62u << 24u),
@@ -1819,6 +1819,23 @@ TEST(EmulatorShaderMimg, ParsesGen5SampleCdWithSequentialSixAddressSpan)
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorShaderMimg, ParsesGen5SampleDWithTheDerivativeAddressSpan)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    const auto code = ParseCdMimgInstruction(0u, 0xfu, 1u, 0u, 0u, ShaderType::Pixel, true, 5u, 30u, 0x22u);
+		    RequireMimgTail(code.GetInstructions().Size() == 2u, "sample and terminal instruction");
+		    const auto& sample = code.GetInstructions().At(0);
+		    RequireMimgTail(sample.type == ShaderInstructionType::ImageSampleD &&
+		                    sample.format == ShaderInstructionFormat::VdataVaddr6StSsMimgDmask && sample.dst.size == 4 &&
+		                    sample.src[0].register_id == 30 && sample.src[0].size == 6,
+		                    "2D SAMPLE_D reads four slopes then x,y from six sequential registers");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorShaderMimg, ParsesSampleCdUpperSsampBitWithinOrdinarySgprRange)
 {
 	ASSERT_EXIT(
@@ -1924,6 +1941,25 @@ TEST(EmulatorShaderMimg, RejectsSampleCdAddressTupleTooShortForTwoDimensionalGra
 	    ::testing::ExitedWithCode(kMimgRejectedExit), "");
 }
 
+// SAMPLE_D uses each pixel's own slopes, so it needs no quad-uniform gradient
+// proof: the same sample with unproven slopes emits a validated Grad sample.
+TEST(EmulatorShaderMimg, EmitsSampleDWithoutQuadUniformGradientProof)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    const auto code = ParseCdMimgInstruction(0u, 0xfu, 1u, 0u, 0u, ShaderType::Pixel, true, 5u, 30u, 0x22u);
+		    RequireMimgTail(!ShaderImageSampleCdHasQuadUniformGradients(code, 0u), "slopes from plain registers are unproven");
+		    const auto source = EmitValidatedMimgTailModule(code, false, true);
+		    RequireMimgTail(source.ContainsStr("%sample_grad_value_0 = OpImageSampleExplicitLod %v4float %sample_grad_sampled_0 "
+		                                       "%sample_grad_coordinate_0 Grad %sample_grad_grad_x_0 %sample_grad_grad_y_0"),
+		                    "SAMPLE_D emits a per-invocation explicit-gradient sample");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorShaderMimg, EmitsAndValidatesParsedCdWithOrderedGradientsAndPackedDmask)
 {
 	ASSERT_EXIT(
@@ -1947,45 +1983,45 @@ TEST(EmulatorShaderMimg, EmitsAndValidatesParsedCdWithOrderedGradientsAndPackedD
 		    const auto source = EmitValidatedMimgTailModule(code, false, true);
 		    const auto tag = Core::String8::FromPrintf("%u", sample_index);
 		    const auto expected_grad_x = Core::String8::FromPrintf(
-		        "%%sample_cd_grad_x_%s = OpCompositeConstruct %%v2float %%sample_cd_address_%s_0 %%sample_cd_address_%s_1",
+		        "%%sample_grad_grad_x_%s = OpCompositeConstruct %%v2float %%sample_grad_address_%s_0 %%sample_grad_address_%s_1",
 		        tag.c_str(), tag.c_str(), tag.c_str());
 		    const auto expected_grad_y = Core::String8::FromPrintf(
-		        "%%sample_cd_grad_y_%s = OpCompositeConstruct %%v2float %%sample_cd_address_%s_2 %%sample_cd_address_%s_3",
+		        "%%sample_grad_grad_y_%s = OpCompositeConstruct %%v2float %%sample_grad_address_%s_2 %%sample_grad_address_%s_3",
 		        tag.c_str(), tag.c_str(), tag.c_str());
 		    const auto expected_coordinates = Core::String8::FromPrintf(
-		        "%%sample_cd_coordinate_%s = OpCompositeConstruct %%v2float %%sample_cd_address_%s_4 %%sample_cd_address_%s_5",
+		        "%%sample_grad_coordinate_%s = OpCompositeConstruct %%v2float %%sample_grad_address_%s_4 %%sample_grad_address_%s_5",
 		        tag.c_str(), tag.c_str(), tag.c_str());
 		    const auto expected_sample = Core::String8::FromPrintf(
-		        "%%sample_cd_value_%s = OpImageSampleExplicitLod %%v4float %%sample_cd_sampled_%s %%sample_cd_coordinate_%s "
-		        "Grad %%sample_cd_grad_x_%s %%sample_cd_grad_y_%s",
+		        "%%sample_grad_value_%s = OpImageSampleExplicitLod %%v4float %%sample_grad_sampled_%s %%sample_grad_coordinate_%s "
+		        "Grad %%sample_grad_grad_x_%s %%sample_grad_grad_y_%s",
 		        tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
 		    RequireMimgTail(source.ContainsStr(expected_grad_x.c_str()) && source.ContainsStr(expected_grad_y.c_str()) &&
 		                    source.ContainsStr(expected_coordinates.c_str()) && source.ContainsStr(expected_sample.c_str()),
 		                    "validated SPIR-V source supplies dx/dh, dy/dh, dx/dv, dy/dv in the exact Grad vector order");
 		    for (int address = 0; address < 6; ++address)
 		    {
-			    const auto load = Core::String8::FromPrintf("%%sample_cd_address_%s_%d = OpLoad %%float %%v%d", tag.c_str(), address,
+			    const auto load = Core::String8::FromPrintf("%%sample_grad_address_%s_%d = OpLoad %%float %%v%d", tag.c_str(), address,
 			                                               expected_addresses[address]);
 			    RequireMimgTail(source.ContainsStr(load.c_str()), "Grad vectors load the exact parsed NSA VGPR operands");
 		    }
 		    const auto green_extract = Core::String8::FromPrintf(
-		        "%%sample_cd_component_%s_1 = OpCompositeExtract %%float %%sample_cd_value_%s 1", tag.c_str(), tag.c_str());
+		        "%%sample_grad_component_%s_1 = OpCompositeExtract %%float %%sample_grad_value_%s 1", tag.c_str(), tag.c_str());
 		    const auto alpha_extract = Core::String8::FromPrintf(
-		        "%%sample_cd_component_%s_3 = OpCompositeExtract %%float %%sample_cd_value_%s 3", tag.c_str(), tag.c_str());
+		        "%%sample_grad_component_%s_3 = OpCompositeExtract %%float %%sample_grad_value_%s 3", tag.c_str(), tag.c_str());
 		    const auto exec_active = Core::String8::FromPrintf(
 		        "%%image_exec_active_%s = OpINotEqual %%bool %%image_exec_value_%s %%uint_0", tag.c_str(), tag.c_str());
 		    const auto green_old = Core::String8::FromPrintf("%%image_exec_old_%s_0 = OpLoad %%float %%v64", tag.c_str());
 		    const auto alpha_old = Core::String8::FromPrintf("%%image_exec_old_%s_1 = OpLoad %%float %%v65", tag.c_str());
 		    const auto green_select = Core::String8::FromPrintf(
-		        "%%image_exec_value_%s_0 = OpSelect %%float %%image_exec_active_%s %%sample_cd_component_%s_1 %%image_exec_old_%s_0",
+		        "%%image_exec_value_%s_0 = OpSelect %%float %%image_exec_active_%s %%sample_grad_component_%s_1 %%image_exec_old_%s_0",
 		        tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
 		    const auto alpha_select = Core::String8::FromPrintf(
-		        "%%image_exec_value_%s_1 = OpSelect %%float %%image_exec_active_%s %%sample_cd_component_%s_3 %%image_exec_old_%s_1",
+		        "%%image_exec_value_%s_1 = OpSelect %%float %%image_exec_active_%s %%sample_grad_component_%s_3 %%image_exec_old_%s_1",
 		        tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
 		    const auto green_store = Core::String8::FromPrintf("OpStore %%v64 %%image_exec_value_%s_0", tag.c_str());
 		    const auto alpha_store = Core::String8::FromPrintf("OpStore %%v65 %%image_exec_value_%s_1", tag.c_str());
-		    const auto red_component = Core::String8::FromPrintf("%%sample_cd_component_%s_0", tag.c_str());
-		    const auto blue_component = Core::String8::FromPrintf("%%sample_cd_component_%s_2", tag.c_str());
+		    const auto red_component = Core::String8::FromPrintf("%%sample_grad_component_%s_0", tag.c_str());
+		    const auto blue_component = Core::String8::FromPrintf("%%sample_grad_component_%s_2", tag.c_str());
 		    RequireMimgTail(source.ContainsStr(green_extract.c_str()) && source.ContainsStr(alpha_extract.c_str()) &&
 		                    source.ContainsStr(exec_active.c_str()) && source.ContainsStr(green_old.c_str()) &&
 		                    source.ContainsStr(alpha_old.c_str()) && source.ContainsStr(green_select.c_str()) &&
