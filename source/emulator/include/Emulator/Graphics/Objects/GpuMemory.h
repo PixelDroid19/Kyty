@@ -363,6 +363,18 @@ inline bool GpuMemoryAllowsStorageTextureOverSampledTexture(GpuMemoryObjectType 
 	       incoming_type == GpuMemoryObjectType::StorageTexture;
 }
 
+// Read-only VertexBuffer inside or across an incoming StorageTexture of a
+// recycled allocation (captured: two 0xa0 buffers and a CPU-uploaded 1024x540
+// texture inside a new 1024x1024 storage image). The buffer only caches guest
+// bytes, so it is reclaimed as under an incoming Texture.
+inline bool GpuMemoryAllowsStorageTextureReclaimVertex(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                       bool existing_read_only, GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::VertexBuffer && existing_read_only &&
+	       incoming_type == GpuMemoryObjectType::StorageTexture &&
+	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin);
+}
+
 // Incoming StorageTexture fully inside a live RenderTexture allocation.
 // Captured worldmap load: a 240x135 fmt-64 storage view (0x43800) inside a
 // 2432x1368 R16G16B16A16 target. The guest reuses part of the target's tiled

@@ -6472,6 +6472,23 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	    GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses, GpuMemoryObjectType::Texture));
 }
 
+// Captured: two read-only 0xa0 VertexBuffers and a CPU-uploaded texture inside a new storage image.
+TEST(EmulatorGraphicsState, ReclaimsReadOnlyVertexBuffersUnderStorageTexture)
+{
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                       true, GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses, true,
+	                                                       GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                        false, GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains, true,
+	                                                        GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureReclaimVertex(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::IsContainedWithin, true,
+	                                                        GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureOverSampledTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::IsContainedWithin,
+	                                                            GpuMemoryObjectType::StorageTexture));
+}
+
 TEST(EmulatorGraphicsState, LinksExistingIndexViewsIntoIncomingTexture)
 {
 	EXPECT_TRUE(GpuMemoryAllowsTextureLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::IsContainedWithin,
