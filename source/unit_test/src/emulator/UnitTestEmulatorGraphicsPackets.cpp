@@ -4144,6 +4144,83 @@ TEST(EmulatorGraphicsPackets, ResolvesImplicitSampleShapeFromMixedDescriptorSet)
 	EXPECT_EQ(source.FindIndex("OpSampledImage %SampledImageA"), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, SamplesThroughAllZeroDescriptorReturnZero)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction sample {};
+	sample.type           = ShaderInstructionType::ImageSample;
+	sample.format         = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
+	sample.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	sample.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 3};
+	sample.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
+	sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	sample.src_num        = 3;
+	sample.mimg_dimension = 1;
+	sample.mimg_dmask     = 0xf;
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(sample);
+	code.GetInstructions().Add(end);
+
+	// Read-only image slot at s[0:7] and sampler at s[8:11], all user SGPRs zero.
+	uint16_t    direct_offsets[1] = {0xffffu};
+	ShaderSharp texture_sharp {};
+	texture_sharp.offset_dw = 0;
+	texture_sharp.size      = 0;
+	ShaderSharp sampler_sharp {};
+	sampler_sharp.offset_dw = 8;
+	sampler_sharp.size      = 1;
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset   = direct_offsets;
+	user_data.direct_resource_count    = 1;
+	user_data.sharp_resource_offset[0] = &texture_sharp;
+	user_data.sharp_resource_count[0]  = 1;
+	user_data.sharp_resource_offset[2] = &sampler_sharp;
+	user_data.sharp_resource_count[2]  = 1;
+	HW::UserSgprInfo user_sgpr {};
+	user_sgpr.count = 12;
+
+	ShaderPixelInputInfo input {};
+	ShaderParsedUsage    usage {};
+	ShaderParseUsage2(&user_data, &usage, &input.bind, user_sgpr, 12, &code, 0, false);
+	EXPECT_EQ(input.bind.textures2D.textures_num, 0);
+	ASSERT_EQ(input.bind.zero_image_resources.images_num, 1);
+	EXPECT_EQ(input.bind.zero_image_resources.start_register[0], 0);
+
+	ShaderCalcBindingIndices(&input.bind);
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_EQ(source.FindIndex("OpImageSample"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpSelect %float %image_exec_active_0 %float_0_000000 %image_exec_old_0_3"), Core::STRING8_INVALID_INDEX);
+
+	// A descriptor the shader rewrites before the read is not the zero user data.
+	ShaderInstruction write {};
+	write.type   = ShaderInstructionType::SMovB32;
+	write.format = ShaderInstructionFormat::SVdstSVsrc0;
+	write.dst    = {.type = ShaderOperandType::Sgpr, .register_id = 3, .size = 1};
+	write.src[0] = {.type = ShaderOperandType::IntegerInlineConstant, .size = 0};
+	write.src_num = 1;
+	ShaderCode written;
+	written.SetType(ShaderType::Pixel);
+	written.GetInstructions().Add(write);
+	written.GetInstructions().Add(sample);
+	written.GetInstructions().Add(end);
+	ShaderPixelInputInfo written_input {};
+	ShaderParsedUsage    written_usage {};
+	ShaderParseUsage2(&user_data, &written_usage, &written_input.bind, user_sgpr, 12, &written, 0, false);
+	EXPECT_EQ(written_input.bind.zero_image_resources.images_num, 0);
+}
+
 TEST(EmulatorGraphicsPackets, UnbiasesCubeDimCoordinatesBeforeArraySampling)
 {
 	if (!Config::IsInitialized())

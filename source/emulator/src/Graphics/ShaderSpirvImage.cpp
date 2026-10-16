@@ -1083,6 +1083,34 @@ String8 GuardImageDestinationStores(const String8& source, const ShaderInstructi
 	return String8((prefix + output).c_str());
 }
 
+// A read through an all-zero T# returns zero in every DMASK component. The
+// destination guard applies EXEC to these stores like to any image result.
+bool EmitZeroImageRead(const ShaderInstruction& inst, const Spirv* spirv, String8* dst_source)
+{
+	const auto zero = spirv->GetConstantFloat(0.0f);
+	if (zero.StartsWith("unknown_") || inst.dst.type != ShaderOperandType::Vgpr)
+	{
+		return false;
+	}
+	String8 source;
+	int     component = 0;
+	for (uint32_t mask = inst.mimg_dmask; mask != 0; mask >>= 1u)
+	{
+		if ((mask & 1u) == 0u)
+		{
+			continue;
+		}
+		const auto dst = operand_variable_to_str(inst.dst, component++);
+		if (dst.type != SpirvType::Float || dst.value.IsEmpty())
+		{
+			return false;
+		}
+		source += String8::FromPrintf("               OpStore %%%s %%%s\n", dst.value.c_str(), zero.c_str());
+	}
+	*dst_source += source;
+	return true;
+}
+
 static int ImageUserDataRegisterBase(const Spirv* spirv)
 {
 	const auto* vs_info = spirv->GetVsInputInfo();

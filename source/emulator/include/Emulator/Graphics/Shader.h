@@ -1856,6 +1856,16 @@ struct ShaderZeroSBufferResources
 	int buffers_num                 = 0;
 };
 
+// Image reads whose T# is an all-zero resource: the RDNA2 ISA defines such a
+// resource as unbound, returning zero in every component.
+struct ShaderZeroImageResources
+{
+	static constexpr int IMAGES_MAX = 16;
+
+	int start_register[IMAGES_MAX] = {0};
+	int images_num                 = 0;
+};
+
 [[nodiscard]] constexpr uint64_t ShaderBufferByteSize(uint32_t stride, uint32_t records)
 {
 	return stride == 0 ? static_cast<uint64_t>(records) : static_cast<uint64_t>(stride) * records;
@@ -1900,6 +1910,10 @@ struct ShaderBindResources;
 [[nodiscard]] bool ShaderHasGlobalMemoryLoad(const ShaderCode& code);
 [[nodiscard]] bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind,
                                               int user_data_register_base = 0);
+// Image reads that return one destination dword per DMASK component.
+[[nodiscard]] bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type);
+// The image read's T# is an all-zero resource recorded by the usage parse.
+[[nodiscard]] bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst);
 struct ShaderComputeEmptyGate
 {
 	int      storage_buffer_index = -1;
@@ -2076,6 +2090,7 @@ struct ShaderBindResources
 	ShaderStorageResources     storage_buffers;
 	ShaderZeroSBufferResources zero_sbuffer_resources;
 	ShaderTextureResources     textures2D;
+	ShaderZeroImageResources   zero_image_resources;
 	ShaderSamplerResources     samplers;
 	ShaderGdsResources         gds_pointers;
 	ShaderDirectSgprsResources direct_sgprs;

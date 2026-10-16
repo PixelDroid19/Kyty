@@ -2895,6 +2895,9 @@ void Spirv::WriteInstructions()
 				dst += String8::FromPrintf("OpControlBarrier %%%s %%%s %%%s\n", GetConstantUint(3u).c_str(), GetConstantUint(3u).c_str(),
 				                           GetConstantUint(0x108u).c_str());
 			}
+		} else if (m_bind != nullptr && ShaderImageReadsZeroResource(*m_bind, inst))
+		{
+			ok = EmitZeroImageRead(inst, this, &dst);
 		} else if (func != nullptr)
 		{
 			EXIT_IF(func->type != inst.type);

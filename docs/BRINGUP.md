@@ -9,6 +9,33 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Image reads through an all-zero descriptor (2026-10-16)
+
+- The card title stopped before its first frame on `shader emitter missing:
+  ... sampled=0/0/0 inst=ImageSample ... s[0:7], s[8:11]`. A resource-fold
+  capture of that pixel program shows its metadata declares a read-only
+  image slot at user data 0 and a sampler at 8, and all twelve user SGPRs
+  are zero at the draw. The type nibble of a zero T# is not an image, so
+  nothing was bound and the emitter had no image to sample.
+- Contract: the RDNA2 ISA states that a resource set to all zeros acts as an
+  unbound texture or buffer and returns (0, 0, 0, 0).
+- Change: the usage parse records a sample or load whose T# is still the
+  shader's entry user SGPRs and all eight dwords are zero
+  (`zero_image_resources`, part of the module key). The emitter stores zero
+  in each DMASK component of such a read; the image destination guard
+  applies EXEC as for any image result. Gather, resinfo, stores and atomics
+  through a zero T# keep refusing.
+- Verified on Intel: the card title passes the stop (120 s, generic route)
+  and stops at the next one, `fragment wave transport is required by the
+  pixel stage` (a wave64 pixel program writes a scalar under divergent
+  control flow and reads it after the join; the host has no native 64-lane
+  subgroup), open. Roguelike control unchanged (4 captures, time limit).
+  Unit test `SamplesThroughAllZeroDescriptorReturnZero` covers the parse,
+  the emitted zero stores and a T# rewritten before the read.
+- The insect sequel reached gameplay (Act 1 start) on 2026-10-16 with the
+  same binary family; its `DepthStencilBuffer - Crosses - IndexBuffer` stop
+  did not recur in that 150 s run and stays open as intermittent.
+
 ## Alpha-only stores to one-channel storage images (2026-10-16)
 
 - The insect platformer stopped at boot on `swizzle is not supported:

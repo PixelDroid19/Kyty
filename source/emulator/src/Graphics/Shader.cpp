@@ -2134,6 +2134,63 @@ static void AddZeroSBufferResource(ShaderZeroSBufferResources* resources, int st
 	resources->start_register[resources->buffers_num++] = start_register;
 }
 
+// The eight T# dwords an instruction reads are still the shader's entry user
+// SGPRs, and every one of them is zero.
+static bool ShaderImageResourceIsZeroUserData(const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
+                                              uint32_t index, const ShaderOperand& resource, const HW::UserSgprInfo& user_sgpr,
+                                              int user_sgpr_num, int user_data_register_base)
+{
+	constexpr int dwords        = 8;
+	const int     user_register = resource.register_id - user_data_register_base;
+	if (resource.size != dwords || index >= entry_values.size() || user_register < 0 || user_register + dwords > user_sgpr_num ||
+	    resource.register_id + dwords > kShaderScalarLivenessSgprs)
+	{
+		return false;
+	}
+	for (int dword = 0; dword < dwords; ++dword)
+	{
+		if (!entry_values[index].test(static_cast<size_t>(resource.register_id + dword)) || user_sgpr.value[user_register + dword] != 0)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// Records image reads through an all-zero T#. Such a resource binds nothing;
+// the emitter returns zero for it (RDNA2 ISA: an all-zero resource acts as an
+// unbound texture).
+static void CollectZeroImageResources(const ShaderCode& code, const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
+                                      const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, int user_data_register_base,
+                                      ShaderZeroImageResources* resources)
+{
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (!ShaderImageReadReturnsDmaskComponents(inst.type) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
+		    !ShaderImageResourceIsZeroUserData(entry_values, index, inst.src[1], user_sgpr, user_sgpr_num, user_data_register_base))
+		{
+			continue;
+		}
+		bool recorded = false;
+		for (int i = 0; i < resources->images_num; ++i)
+		{
+			recorded = recorded || resources->start_register[i] == inst.src[1].register_id;
+		}
+		if (recorded)
+		{
+			continue;
+		}
+		if (resources->images_num >= ShaderZeroImageResources::IMAGES_MAX)
+		{
+			EXIT("shader zero image capacity exceeded: count=%d capacity=%d register=%d\n", resources->images_num,
+			     ShaderZeroImageResources::IMAGES_MAX, inst.src[1].register_id);
+		}
+		resources->start_register[resources->images_num++] = inst.src[1].register_id;
+	}
+}
+
 // A read-only sampled descriptor is counted in the bank of the shape it was registered with. An
 // instruction shape moves that count, so the bank sizes always match the shape the emitter selects.
 void ShaderSetSampledTextureInstructionShape(ShaderTextureResources* textures, int index, ShaderGen5SampledTextureShape shape)
@@ -3573,6 +3630,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			bind->samplers.operations[i] = evidence.operation;
 		}
 		ShaderAssociateSampledTextureSamplers(*code, bind, user_data_register_base);
+		CollectZeroImageResources(*code, entry_values, user_sgpr, user_sgpr_num, user_data_register_base, &bind->zero_image_resources);
 	}
 
 	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
@@ -4017,6 +4075,39 @@ bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResource
 static bool ShaderHasUnboundTypedBufferLoad(const ShaderCode& code, const ShaderBindResources& bind)
 {
 	return ShaderHasRuntimeDescriptorLoad(code, bind, 0, "TBufferLoad");
+}
+
+bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::ImageLoad:
+		case ShaderInstructionType::ImageSample:
+		case ShaderInstructionType::ImageSampleL:
+		case ShaderInstructionType::ImageSampleLz:
+		case ShaderInstructionType::ImageSampleLzO:
+		case ShaderInstructionType::ImageSampleO:
+		case ShaderInstructionType::ImageSampleB:
+		case ShaderInstructionType::ImageSampleDrefLz:
+		case ShaderInstructionType::ImageSampleCd: return true;
+		default: return false;
+	}
+}
+
+bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst)
+{
+	if (!ShaderImageReadReturnsDmaskComponents(inst.type) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr)
+	{
+		return false;
+	}
+	for (int i = 0; i < bind.zero_image_resources.images_num; ++i)
+	{
+		if (bind.zero_image_resources.start_register[i] == inst.src[1].register_id)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
@@ -5220,6 +5311,12 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 	for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
 	{
 		ret->ids.Add(bind.zero_sbuffer_resources.start_register[i]);
+	}
+
+	ret->ids.Add(bind.zero_image_resources.images_num);
+	for (int i = 0; i < bind.zero_image_resources.images_num; ++i)
+	{
+		ret->ids.Add(bind.zero_image_resources.start_register[i]);
 	}
 
 	ret->ids.Add(bind.textures2D.textures_num);
