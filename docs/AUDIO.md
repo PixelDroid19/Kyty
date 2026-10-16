@@ -223,6 +223,17 @@ size and user data, when the create fails after the allocation, when the rack
 is destroyed, and for every remaining rack and the system itself when the
 system is destroyed (outside the system's state lock).
 
+## NGS2 waveform parsing
+
+`Ngs2ParseWaveformData` reads guest memory and `Ngs2ParseWaveformFile` reads a
+guest path at a byte offset; both fill the same waveform info. Accepted images
+are VAG and RIFF WAVE carrying ATRAC9 (tag 0xfffe) or uncompressed PCM: tag 1
+with 16-bit samples or tag 3 with 32-bit float samples, whose block align equals
+one frame. PCM reports one sample per audio unit and frame, and its sample count
+comes from the fact chunk when present, else from the data size. A file parse
+reports data and block offsets from the file start, so a title adds them to the
+offset of its own read. Other images are refused.
+
 ## NGS2 ATRAC9 path
 
 Waveform format 0x40 uses `ElementaryAudioDecoder` (in `AudioVideoBackend`), which

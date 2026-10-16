@@ -7,6 +7,7 @@
 #include "Emulator/AudioNgs2Sampler.h"
 #include "Emulator/AudioVideoBackend.h"
 #include "Emulator/GuestRuntimePort.h"
+#include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
@@ -20,6 +21,9 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -497,6 +501,23 @@ static bool Ngs2CopyFromGuest(void* destination, const void* source, size_t size
 	       Core::VirtualMemory::CopyFromGuestOrLent(destination, reinterpret_cast<uint64_t>(source), static_cast<uint64_t>(size));
 }
 
+// Copies a NUL-terminated guest string that fits in `capacity` bytes, terminator included.
+static bool Ngs2CopyFromGuestString(char* destination, const char* source, size_t capacity)
+{
+	for (size_t i = 0; i < capacity; i++)
+	{
+		if (!Ngs2CopyFromGuest(destination + i, source + i, 1))
+		{
+			return false;
+		}
+		if (destination[i] == '\0')
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool Ngs2CopyToGuest(void* destination, const void* source, size_t size)
 {
 	return destination != nullptr && source != nullptr && size != 0 &&
@@ -596,12 +617,15 @@ static uint32_t Ngs2ReadBe32(const uint8_t* p)
 	return (static_cast<uint32_t>(p[0]) << 24u) | (static_cast<uint32_t>(p[1]) << 16u) | (static_cast<uint32_t>(p[2]) << 8u) | p[3];
 }
 
+// Copies `size` bytes at `offset` of a waveform image; false when they cannot be read.
+using Ngs2WaveformReader = std::function<bool(size_t offset, void* destination, size_t size)>;
+
 // VAG: big-endian 0x30-byte header, then 16-byte ADPCM frames of 28 samples interleaved per channel.
 // The low flag bits of each frame mark loop start (4), repeat (2) and end (1).
-static bool Ngs2ParseVag(const void* data, size_t data_size, Ngs2WaveformInfo* info)
+static bool Ngs2ParseVag(const Ngs2WaveformReader& read, size_t data_size, Ngs2WaveformInfo* info)
 {
 	std::array<uint8_t, 0x30> header {};
-	if (data_size < header.size() || !Ngs2CopyFromGuest(header.data(), data, header.size()) || std::memcmp(header.data(), "VAGp", 4) != 0)
+	if (data_size < header.size() || !read(0, header.data(), header.size()) || std::memcmp(header.data(), "VAGp", 4) != 0)
 	{
 		return false;
 	}
@@ -622,7 +646,7 @@ static bool Ngs2ParseVag(const void* data, size_t data_size, Ngs2WaveformInfo* i
 	std::vector<uint8_t> frames(std::min<size_t>(info->data_size, data_size - header.size()) / 16u * 16u);
 	int64_t              loop_start = -1;
 	bool                 looped     = false;
-	if (!frames.empty() && Ngs2CopyFromGuest(frames.data(), static_cast<const uint8_t*>(data) + header.size(), frames.size()))
+	if (!frames.empty() && read(header.size(), frames.data(), frames.size()))
 	{
 		for (size_t frame = 0; frame < frames.size() / 16u; frame++)
 		{
@@ -647,74 +671,80 @@ static bool Ngs2ParseVag(const void* data, size_t data_size, Ngs2WaveformInfo* i
 	return true;
 }
 
-// RIFF WAVE with an ATRAC9 extensible format. Only the chunks before the data chunk are read, so a
+// The RIFF WAVE chunks a waveform needs. Only the chunks before the data chunk are read, so a
 // header-only buffer is enough.
-static bool Ngs2ParseRiffAtrac9(const void* data, size_t data_size, Ngs2WaveformInfo* info)
+struct Ngs2RiffChunks
 {
-	static constexpr uint8_t kAtrac9Guid[16] = {0xd2, 0x42, 0xe1, 0x47, 0xba, 0x36, 0x8d, 0x4d,
-	                                            0x88, 0xfc, 0x61, 0x65, 0x4f, 0x8c, 0x83, 0x6c};
-	const auto* bytes = static_cast<const uint8_t*>(data);
+	std::array<uint8_t, 0x34> fmt {};
+	uint32_t                  fmt_size = 0;
+	std::array<uint32_t, 2>   fact {};
+	std::array<uint8_t, 0x34> smpl {};
+	bool                      has_fmt  = false;
+	bool                      has_fact = false;
+	bool                      has_smpl = false;
+	bool                      has_data = false;
+};
+
+static bool Ngs2ReadRiffChunks(const Ngs2WaveformReader& read, size_t data_size, Ngs2RiffChunks* chunks, Ngs2WaveformInfo* info)
+{
 	std::array<uint8_t, 12> riff {};
-	if (data_size < riff.size() || !Ngs2CopyFromGuest(riff.data(), data, riff.size()) || std::memcmp(riff.data(), "RIFF", 4) != 0 ||
+	if (data_size < riff.size() || !read(0, riff.data(), riff.size()) || std::memcmp(riff.data(), "RIFF", 4) != 0 ||
 	    std::memcmp(&riff[8], "WAVE", 4) != 0)
 	{
 		return false;
 	}
-
-	std::array<uint8_t, 0x34> fmt {};
-	std::array<uint32_t, 2>   fact {};
-	std::array<uint8_t, 0x34> smpl {};
-	bool                      has_fmt = false;
-	bool                      has_fact = false;
-	bool                      has_smpl = false;
-	bool                      has_data = false;
-	for (size_t offset = riff.size(); !has_data && offset + 8u <= data_size;)
+	for (size_t offset = riff.size(); !chunks->has_data && offset + 8u <= data_size;)
 	{
 		std::array<uint8_t, 8> chunk {};
-		if (!Ngs2CopyFromGuest(chunk.data(), bytes + offset, chunk.size()))
+		if (!read(offset, chunk.data(), chunk.size()))
 		{
 			return false;
 		}
 		uint32_t size = 0;
 		std::memcpy(&size, &chunk[4], sizeof(size));
-		const size_t body = offset + 8u;
+		const size_t body      = offset + 8u;
 		const size_t available = data_size - body;
-		if (std::memcmp(chunk.data(), "fmt ", 4) == 0 && size >= fmt.size() && available >= fmt.size())
+		if (std::memcmp(chunk.data(), "fmt ", 4) == 0 && size >= 16u && available >= 16u)
 		{
-			has_fmt = Ngs2CopyFromGuest(fmt.data(), bytes + body, fmt.size());
+			// A plain PCM header has 16 bytes; the ATRAC9 extensible header fills all 0x34.
+			chunks->fmt_size = static_cast<uint32_t>(std::min<size_t>({size, available, chunks->fmt.size()}));
+			chunks->has_fmt  = read(body, chunks->fmt.data(), chunks->fmt_size);
 		} else if (std::memcmp(chunk.data(), "fact", 4) == 0 && size >= 8u && available >= 8u)
 		{
-			has_fact = Ngs2CopyFromGuest(fact.data(), bytes + body, sizeof(fact));
-		} else if (std::memcmp(chunk.data(), "smpl", 4) == 0 && size >= smpl.size() && available >= smpl.size())
+			chunks->has_fact = read(body, chunks->fact.data(), sizeof(chunks->fact));
+		} else if (std::memcmp(chunk.data(), "smpl", 4) == 0 && size >= chunks->smpl.size() && available >= chunks->smpl.size())
 		{
-			has_smpl = Ngs2CopyFromGuest(smpl.data(), bytes + body, smpl.size());
+			chunks->has_smpl = read(body, chunks->smpl.data(), chunks->smpl.size());
 		} else if (std::memcmp(chunk.data(), "data", 4) == 0)
 		{
 			info->data_offset = static_cast<uint32_t>(body);
 			info->data_size   = size;
-			has_data          = true;
+			chunks->has_data  = true;
 		}
 		offset = body + size + (size & 1u);
 	}
+	return chunks->has_fmt && chunks->has_data;
+}
 
-	uint16_t tag = 0;
-	uint16_t channels = 0;
-	uint16_t block_align = 0;
-	uint16_t superframe_samples = 0;
-	uint32_t sample_rate = 0;
-	if (has_fmt)
-	{
-		std::memcpy(&tag, &fmt[0x00], sizeof(tag));
-		std::memcpy(&channels, &fmt[0x02], sizeof(channels));
-		std::memcpy(&sample_rate, &fmt[0x04], sizeof(sample_rate));
-		std::memcpy(&block_align, &fmt[0x0c], sizeof(block_align));
-		std::memcpy(&superframe_samples, &fmt[0x12], sizeof(superframe_samples));
-	}
+// WAVE_FORMAT_EXTENSIBLE with the ATRAC9 subformat.
+static bool Ngs2SetRiffAtrac9(const Ngs2RiffChunks& chunks, Ngs2WaveformInfo* info)
+{
+	static constexpr uint8_t kAtrac9Guid[16] = {0xd2, 0x42, 0xe1, 0x47, 0xba, 0x36, 0x8d, 0x4d,
+	                                            0x88, 0xfc, 0x61, 0x65, 0x4f, 0x8c, 0x83, 0x6c};
+	const auto& fmt                = chunks.fmt;
+	uint16_t    channels           = 0;
+	uint16_t    block_align        = 0;
+	uint16_t    superframe_samples = 0;
+	uint32_t    sample_rate        = 0;
+	std::memcpy(&channels, &fmt[0x02], sizeof(channels));
+	std::memcpy(&sample_rate, &fmt[0x04], sizeof(sample_rate));
+	std::memcpy(&block_align, &fmt[0x0c], sizeof(block_align));
+	std::memcpy(&superframe_samples, &fmt[0x12], sizeof(superframe_samples));
 	// Config bytes: sync 0xfe, then an 11-bit frame size minus one and the log2 frames per superframe.
-	const uint8_t* config            = &fmt[0x2c];
-	const uint32_t frame_bytes       = ((static_cast<uint32_t>(config[2]) << 3u) | (config[3] >> 5u)) + 1u;
-	const uint32_t frames_per_super  = 1u << ((config[3] >> 3u) & 3u);
-	if (!has_fmt || !has_data || tag != 0xfffeu || std::memcmp(&fmt[0x18], kAtrac9Guid, sizeof(kAtrac9Guid)) != 0 || config[0] != 0xfeu ||
+	const uint8_t* config           = &fmt[0x2c];
+	const uint32_t frame_bytes      = ((static_cast<uint32_t>(config[2]) << 3u) | (config[3] >> 5u)) + 1u;
+	const uint32_t frames_per_super = 1u << ((config[3] >> 3u) & 3u);
+	if (chunks.fmt_size < fmt.size() || std::memcmp(&fmt[0x18], kAtrac9Guid, sizeof(kAtrac9Guid)) != 0 || config[0] != 0xfeu ||
 	    channels == 0 || superframe_samples == 0 || block_align != frame_bytes * frames_per_super ||
 	    superframe_samples % frames_per_super != 0)
 	{
@@ -730,18 +760,80 @@ static bool Ngs2ParseRiffAtrac9(const void* data, size_t data_size, Ngs2Waveform
 	info->audio_units_per_frame = frames_per_super;
 	info->audio_frame_size      = block_align;
 	info->audio_frame_samples   = superframe_samples;
-	info->num_samples           = has_fact ? fact[0] : info->data_size / block_align * superframe_samples;
-	info->delay_samples         = has_fact ? fact[1] : 0;
+	info->num_samples           = chunks.has_fact ? chunks.fact[0] : info->data_size / block_align * superframe_samples;
+	info->delay_samples         = chunks.has_fact ? chunks.fact[1] : 0;
+	return true;
+}
+
+// Uncompressed frames: format tag 1 (integer) or 3 (float), one sample per unit and per frame.
+// Only the sample formats the sampler plays are accepted: 16-bit integer and 32-bit float.
+static bool Ngs2SetRiffPcm(const Ngs2RiffChunks& chunks, uint16_t tag, Ngs2WaveformInfo* info)
+{
+	const auto& fmt         = chunks.fmt;
+	uint16_t    channels    = 0;
+	uint16_t    block_align = 0;
+	uint16_t    bits        = 0;
+	uint32_t    sample_rate = 0;
+	std::memcpy(&channels, &fmt[0x02], sizeof(channels));
+	std::memcpy(&sample_rate, &fmt[0x04], sizeof(sample_rate));
+	std::memcpy(&block_align, &fmt[0x0c], sizeof(block_align));
+	std::memcpy(&bits, &fmt[0x0e], sizeof(bits));
+	const uint32_t waveform_type = (tag == 1u && bits == 16u)   ? kNgs2WaveformTypePcmI16
+	                               : (tag == 3u && bits == 32u) ? kNgs2WaveformTypePcmF32
+	                                                            : 0u;
+	const uint32_t frame_bytes   = static_cast<uint32_t>(channels) * bits / 8u;
+	if (waveform_type == 0u || channels == 0 || block_align != frame_bytes)
+	{
+		return false;
+	}
+
+	info->format.waveform_type  = waveform_type;
+	info->format.channels       = channels;
+	info->format.sample_rate    = sample_rate;
+	info->audio_unit_size       = frame_bytes;
+	info->audio_unit_samples    = 1;
+	info->audio_units_per_frame = 1;
+	info->audio_frame_size      = frame_bytes;
+	info->audio_frame_samples   = 1;
+	info->num_samples           = chunks.has_fact ? chunks.fact[0] : info->data_size / frame_bytes;
+	return true;
+}
+
+// RIFF WAVE holding ATRAC9 or uncompressed PCM. Loop points come from a sampler chunk.
+static bool Ngs2ParseRiff(const Ngs2WaveformReader& read, size_t data_size, Ngs2WaveformInfo* info)
+{
+	Ngs2RiffChunks chunks;
+	if (!Ngs2ReadRiffChunks(read, data_size, &chunks, info))
+	{
+		return false;
+	}
+	uint16_t tag = 0;
+	std::memcpy(&tag, &chunks.fmt[0x00], sizeof(tag));
+	const bool parsed = tag == 0xfffeu ? Ngs2SetRiffAtrac9(chunks, info) : Ngs2SetRiffPcm(chunks, tag, info);
+	if (!parsed)
+	{
+		return false;
+	}
 
 	uint32_t loops = 0;
-	if (has_smpl)
+	if (chunks.has_smpl)
 	{
-		std::memcpy(&loops, &smpl[0x1c], sizeof(loops));
-		std::memcpy(&info->loop_begin, &smpl[0x2c], sizeof(info->loop_begin));
-		std::memcpy(&info->loop_end, &smpl[0x30], sizeof(info->loop_end));
+		std::memcpy(&loops, &chunks.smpl[0x1c], sizeof(loops));
+		std::memcpy(&info->loop_begin, &chunks.smpl[0x2c], sizeof(info->loop_begin));
+		std::memcpy(&info->loop_end, &chunks.smpl[0x30], sizeof(info->loop_end));
 	}
 	Ngs2SetWaveformBlocks(info, loops != 0);
 	return true;
+}
+
+static bool Ngs2ParseWaveform(const Ngs2WaveformReader& read, size_t data_size, Ngs2WaveformInfo* info)
+{
+	if (Ngs2ParseVag(read, data_size, info) || Ngs2ParseRiff(read, data_size, info))
+	{
+		return true;
+	}
+	KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported Ngs2 waveform data ignored\n");
+	return false;
 }
 
 static bool Ngs2CalculateRackWorkspaceSize(uint32_t max_voices, size_t* size_out)
@@ -3286,11 +3378,48 @@ int KYTY_SYSV_ABI Ngs2ParseWaveformData(const void* data, size_t data_size, Ngs2
 	{
 		return kNgs2InvalidOption;
 	}
+	const auto read = [data](size_t offset, void* destination, size_t size)
+	{ return Ngs2CopyFromGuest(destination, static_cast<const uint8_t*>(data) + offset, size); };
 	Ngs2WaveformInfo parsed {};
-	if (!Ngs2ParseVag(data, data_size, &parsed) && !Ngs2ParseRiffAtrac9(data, data_size, &parsed))
+	if (!Ngs2ParseWaveform(read, data_size, &parsed))
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported Ngs2 waveform data ignored\n");
 		return kNgs2InvalidOption;
+	}
+	return Ngs2WriteGuest(info, parsed) ? OK : kNgs2InvalidOut;
+}
+
+// The waveform starts `offset` bytes into the file; the returned offsets count from the file start.
+int KYTY_SYSV_ABI Ngs2ParseWaveformFile(const char* path, uint64_t offset, Ngs2WaveformInfo* info)
+{
+	PRINT_NAME();
+	std::array<char, 1024> guest_path {};
+	if (path == nullptr || info == nullptr || !Ngs2CopyFromGuestString(guest_path.data(), path, guest_path.size()))
+	{
+		return kNgs2InvalidOption;
+	}
+	const std::filesystem::path host(::Kyty::Kernel::FileSystem::GetRealFilename(String::FromUtf8(guest_path.data())).utf8_str().GetData());
+	std::ifstream file(host, std::ios::binary | std::ios::ate);
+	const auto    file_size = file ? static_cast<uint64_t>(file.tellg()) : 0u;
+	if (!file || offset > file_size)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: Ngs2 waveform file %s is unreadable at offset %" PRIu64 "\n", guest_path.data(), offset);
+		return kNgs2InvalidOption;
+	}
+	const auto read = [&file, offset](size_t at, void* destination, size_t size)
+	{
+		file.clear();
+		file.seekg(static_cast<std::streamoff>(offset + at));
+		return static_cast<bool>(file.read(static_cast<char*>(destination), static_cast<std::streamsize>(size)));
+	};
+	Ngs2WaveformInfo parsed {};
+	if (!Ngs2ParseWaveform(read, static_cast<size_t>(file_size - offset), &parsed) || offset + parsed.data_offset > UINT32_MAX)
+	{
+		return kNgs2InvalidOption;
+	}
+	parsed.data_offset += static_cast<uint32_t>(offset);
+	for (uint32_t i = 0; i < parsed.num_blocks; i++)
+	{
+		parsed.blocks[i].data_offset += offset;
 	}
 	return Ngs2WriteGuest(info, parsed) ? OK : kNgs2InvalidOut;
 }

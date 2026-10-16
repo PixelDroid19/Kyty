@@ -542,6 +542,7 @@ int KYTY_SYSV_ABI Ngs2SystemSetSampleRate(uintptr_t system_handle, uint32_t samp
 int KYTY_SYSV_ABI Ngs2PanInit(void* pan_param);
 // 3D geometry helpers (positional audio). Observed NIDs: ResetSource/Listener, CalcListener, Apply.
 int KYTY_SYSV_ABI Ngs2ParseWaveformData(const void* data, size_t data_size, Ngs2WaveformInfo* info);
+int KYTY_SYSV_ABI Ngs2ParseWaveformFile(const char* path, uint64_t offset, Ngs2WaveformInfo* info);
 int KYTY_SYSV_ABI Ngs2CalcWaveformBlock(const Ngs2WaveformInfo* info, uint32_t sample_pos, uint32_t num_samples,
                                         Ngs2WaveformBlock* block);
 int KYTY_SYSV_ABI Ngs2GeomResetSourceParam(void* out_source_param);

@@ -6208,6 +6208,60 @@ TEST(EmulatorAudio, Ngs2Atrac9ParseReportsSuperframeInfoFromRiffHeader)
 	EXPECT_EQ(words[0x44 / 4], 1u);
 }
 
+// A 16-byte PCM fmt and a LIST chunk ahead of the data, as common encoders write it.
+TEST(EmulatorAudio, Ngs2PcmParseReportsFrameInfoFromRiffHeader)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	std::vector<uint8_t> riff;
+	AppendBytes(&riff, "RIFF", 4);
+	AppendLe(&riff, 0, 4);
+	AppendBytes(&riff, "WAVE", 4);
+	AppendBytes(&riff, "fmt ", 4);
+	AppendLe(&riff, 16, 4);
+	AppendLe(&riff, 1, 2);
+	AppendLe(&riff, 2, 2);
+	AppendLe(&riff, 48000, 4);
+	AppendLe(&riff, 48000 * 4, 4);
+	AppendLe(&riff, 4, 2);
+	AppendLe(&riff, 16, 2);
+	AppendBytes(&riff, "LIST", 4);
+	AppendLe(&riff, 6, 4);
+	AppendBytes(&riff, "INFOab", 6);
+	AppendBytes(&riff, "data", 4);
+	AppendLe(&riff, 40, 4);
+	const auto data_offset = static_cast<uint32_t>(riff.size());
+	riff.resize(riff.size() + 40);
+
+	GuestReadableBlock data_storage(riff.size());
+	ASSERT_TRUE(data_storage.IsValid());
+	std::memcpy(data_storage.Data(), riff.data(), riff.size());
+	GuestReadableBlock info_storage(232);
+	ASSERT_TRUE(info_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2ParseWaveformData(data_storage.Data(), riff.size(), reinterpret_cast<Ngs2::Ngs2WaveformInfo*>(info_storage.Data())), 0);
+
+	// Ngs2WaveformInfo offsets: data 0x18/0x1c, num_samples 0x28, audio unit 0x2c..0x34,
+	// audio frame 0x38 and 0x3c, num_blocks 0x44, first block offset 0x48.
+	const auto* words = static_cast<const uint32_t*>(info_storage.Data());
+	EXPECT_EQ(words[0], 0x12u);
+	EXPECT_EQ(words[1], 2u);
+	EXPECT_EQ(words[2], 48000u);
+	EXPECT_EQ(words[0x18 / 4], data_offset);
+	EXPECT_EQ(words[0x1c / 4], 40u);
+	EXPECT_EQ(words[0x28 / 4], 10u);
+	EXPECT_EQ(words[0x2c / 4], 4u);
+	EXPECT_EQ(words[0x30 / 4], 1u);
+	EXPECT_EQ(words[0x34 / 4], 1u);
+	EXPECT_EQ(words[0x38 / 4], 4u);
+	EXPECT_EQ(words[0x3c / 4], 1u);
+	EXPECT_EQ(words[0x44 / 4], 1u);
+	EXPECT_EQ(words[0x48 / 4], data_offset);
+}
+
 TEST(EmulatorAudio, ElementaryAudioDecoderOpensOnlyWithAMatchingTwelveByteConfig)
 {
 	if (!AudioVideoBackend::Decoder::IsAvailable())
