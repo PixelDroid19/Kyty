@@ -71,7 +71,12 @@ static void StorageStoreComponentOrder(const ShaderCode& code, uint32_t instruct
 	}
 	for (uint32_t component = 0; component < 4; component++)
 	{
-		order[GetDstSel(swizzle, component) - 4u] = component;
+		// A component that selects a constant is not stored.
+		const uint32_t select = GetDstSel(swizzle, component);
+		if (select >= 4u)
+		{
+			order[select - 4u] = component;
+		}
 	}
 }
 

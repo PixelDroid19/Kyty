@@ -109,7 +109,8 @@ static uint32_t NormalizeStorageTextureSwizzle(uint64_t format, uint32_t swizzle
 		// image views must keep an identity component mapping.
 		return DstSel(4, 5, 6, 7);
 	}
-	if (ShaderStorageImageSwizzleInShader(swizzle, VulkanStorageHasRedBlueView(dfmt, nfmt, static_cast<uint16_t>(fmt))))
+	if (ShaderStorageImageSwizzleInShader(swizzle, VulkanStorageHasRedBlueView(dfmt, nfmt, static_cast<uint16_t>(fmt)),
+	                                      VulkanStorageHasSingleChannel(dfmt, nfmt, static_cast<uint16_t>(fmt))))
 	{
 		// The image-store emitter places each component in its selected channel.
 		return DstSel(4, 5, 6, 7);

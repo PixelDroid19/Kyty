@@ -1376,21 +1376,32 @@ inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 	return (swizzle >> (channel * 3u)) & 0x7u;
 }
 
-// Formatted image stores put shader component i in memory channel DST_SEL[i].
-// Storage views keep identity components and, for formats with a red/blue-exchanged
-// host format, BGRA selects that view; the image-store emitter applies any other
-// selection of four distinct channels.
-inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle, bool red_blue_view)
+// Formatted image stores put shader component i in memory channel DST_SEL[i]; a
+// component that selects a constant is not stored. Storage views keep identity
+// components and, for formats with a red/blue-exchanged host format, BGRA selects
+// that view; the image-store emitter applies any other selection of distinct
+// channels that covers the view: all four, or red alone on a single-channel view.
+inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle, bool red_blue_view, bool single_channel)
 {
-	uint32_t channels = 0;
+	uint32_t channels  = 0;
+	bool     constants = false;
 	for (uint32_t component = 0; component < 4; component++)
 	{
 		const uint32_t select = GetDstSel(swizzle, component);
+		if (select == 0u || select == 1u)
+		{
+			constants = true;
+			continue;
+		}
 		if (select < 4u || (channels & (1u << (select - 4u))) != 0u)
 		{
 			return false;
 		}
 		channels |= 1u << (select - 4u);
+	}
+	if (constants && !(single_channel && channels == 1u))
+	{
+		return false;
 	}
 	return swizzle != DstSel(4, 5, 6, 7) && !(red_blue_view && swizzle == DstSel(6, 5, 4, 7));
 }

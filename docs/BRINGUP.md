@@ -9,6 +9,27 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Alpha-only stores to one-channel storage images (2026-10-16)
+
+- The insect platformer stopped at boot on `swizzle is not supported:
+  format=1 swizzle=0x800` (`StorageTexture.cpp`). The descriptor is an R8
+  storage image with `DST_SEL = (0, 0, 0, R)`. The dispatch is a copy:
+  `image_load v[0:3]` from a sampled texture, then `image_store v[0:3]`
+  with `dmask 0xf` to the R8 image.
+- Under the existing contract (shader component i goes to memory channel
+  `DST_SEL[i]`), memory red receives component 3 and the constant selects
+  store nothing. The store emitter now skips constant selects, and the
+  descriptor gets an identity view when the stored components cover the
+  view: all four distinct channels, or red alone on a one-channel format
+  (`VulkanStorageHasSingleChannel`). A four-channel view with a constant
+  select still refuses, because one memory channel would have no source.
+- Verified on Intel (180 s, generic route): the title passes the copy and
+  reaches its brightness calibration screen and runs to the limit. Its
+  text draws as solid glyph blocks, the same symptom as the open menu
+  glyph investigation of the same engine below (atlas backed by `0xcd`).
+  A wrong store mapping would write component 0 (zero) and hide the text
+  instead. This run does not establish which image the copy fills.
+
 ## Physical ranges withdrawn while device addresses are prepared (2026-10-16)
 
 - A survey of the library on Intel (Arc A770, 120 s strict runs) stopped five

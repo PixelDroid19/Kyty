@@ -145,10 +145,12 @@ bool ShaderSamplerDepthComparisonEligible(const ShaderTextureResources& textures
 
 bool ShaderStorageTextureSwizzleInShader(const ShaderTextureResource& texture)
 {
-	const bool gen5 = Config::IsNextGen();
-	return ShaderStorageImageSwizzleInShader(texture.DstSelXYZW(),
-	                                         VulkanStorageHasRedBlueView(gen5 ? 0u : texture.Dfmt(), gen5 ? 0u : texture.Nfmt(),
-	                                                                     gen5 ? texture.Format() : 0u));
+	const bool     gen5 = Config::IsNextGen();
+	const uint8_t  dfmt = gen5 ? 0u : texture.Dfmt();
+	const uint8_t  nfmt = gen5 ? 0u : texture.Nfmt();
+	const uint16_t fmt  = gen5 ? texture.Format() : 0u;
+	return ShaderStorageImageSwizzleInShader(texture.DstSelXYZW(), VulkanStorageHasRedBlueView(dfmt, nfmt, fmt),
+	                                         VulkanStorageHasSingleChannel(dfmt, nfmt, fmt));
 }
 
 State::ImageSampleOperation ShaderTextureSampleOperation(const ShaderTextureResource& texture, State::ImageSampleOperation operation)

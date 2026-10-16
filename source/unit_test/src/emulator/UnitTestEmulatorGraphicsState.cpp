@@ -3137,6 +3137,14 @@ TEST(EmulatorGraphicsState, StorageTextureBackingIdentityNormalizesTypedStorageS
 	EXPECT_TRUE(rg8_video_guest.Equal(rg8_video_identity.params));
 	EXPECT_TRUE(r8_compute_identity.Equal(r8_compute_guest.params));
 	EXPECT_TRUE(r8_compute_guest.Equal(r8_compute_identity.params));
+
+	// An alpha-only view of a one-channel format stores its alpha component in red.
+	const StorageTextureObject r8_alpha_guest(0u, 0u, 1u, 64u, 64u, 64u, 0u, 1u, 9u, false, DstSel(0, 0, 0, 4));
+	EXPECT_TRUE(r8_alpha_guest.Equal(r8_compute_identity.params));
+	// Four channels with a constant alpha leave memory alpha unselected: no identity view.
+	const StorageTextureObject rgba_identity(10u, 0u, 0u, 64u, 64u, 64u, 0u, 1u, 8u, false, DstSel(4, 5, 6, 7));
+	const StorageTextureObject rgba_constant_alpha(10u, 0u, 0u, 64u, 64u, 64u, 0u, 1u, 8u, false, DstSel(4, 5, 6, 1));
+	EXPECT_FALSE(rgba_constant_alpha.Equal(rgba_identity.params));
 }
 
 TEST(EmulatorGraphicsState, StorageTextureBackingIdentityKeepsDistinctViewFamilies)
