@@ -4880,6 +4880,12 @@ selected published source; none is a gameplay or visual acceptance.
   texture as the single-parent rule does. It requires CPU-upload origin and no pending write-back for the texture,
   and applies only to mixed vertex-buffer and texture parents, which previously always stopped. Verified: the next
   strict Intel run passes the overlap and stops about 30 s in at a missing SDWA `v_cvt_f32_f16` emitter.
+- **SDWA half-to-float conversion (published 2026-10-16).** The half-precision emitter refused every SDWA form. The
+  widening conversion now admits SDWA with a DWORD destination and a WORD_0, WORD_1 or DWORD source select without
+  sign extension (ISA SDWA fields); the operand load already extracts the selected word, and SDWA NEG/ABS apply to
+  the half. Byte selects, partial destinations and SDWA on other half operations stay refused. The CPU SPIR-V
+  evaluator checks the high-word and negated low-word forms. Verified: the next strict Intel run passes the shader
+  and stops about 35 s in at the unparsed `image_sample_d` (MIMG opcode 0x22).
 - **SGPR104 and SGPR105.** The RDNA2 scalar operand range is 0..105; the parser stopped at 103, and the shared lowering
   preconditions and compute-wave analyses used the same limit, so a pixel shader reading `s104` was refused as an
   invalid instruction before native wave analysis. The limits follow the ISA; the NGG passthrough proof, which keeps

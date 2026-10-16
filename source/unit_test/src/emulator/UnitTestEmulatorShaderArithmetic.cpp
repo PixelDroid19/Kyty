@@ -627,6 +627,13 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	Equal(Evaluate(inline_inv_2pi, 0u), 0x3e230000u, "inline inverse two pi uses half precision");
 	const Program neg_abs(Emit(Parse(Unary(0x5b, true, 256u, 1u << 8u, 1u << 29u), stage)).c_str());
 	Equal(Evaluate(neg_abs, 0xbe00u), 0xc000u, "half abs then negate");
+	// SDWA v_cvt_f32_f16 with a DWORD destination: SRC0_SEL WORD_1 reads bits
+	// 31:16, WORD_0 bits 15:0, and SDWA NEG applies to the selected half.
+	const uint32_t sdwa_widen = (0x3fu << 25u) | (16u << 17u) | (0x0bu << 9u) | 249u;
+	const Program word1(Emit(Parse({sdwa_widen, (6u << 8u) | (5u << 16u), kEnd}, stage)).c_str());
+	Equal(Evaluate(word1, 0x3c005a5au), 0x3f800000u, "sdwa high-word widening");
+	const Program word0(Emit(Parse({sdwa_widen, (6u << 8u) | (4u << 16u) | (1u << 20u), kEnd}, stage)).c_str());
+	Equal(Evaluate(word0, 0x5a5a4000u), 0xc0000000u, "sdwa negated low-word widening");
 	for (uint32_t denorm = 0u; denorm < 4u; ++denorm)
 	{
 		const Program program(Emit(Parse(Binary(0x35u, false), stage), static_cast<uint8_t>(denorm << 6u)).c_str());
