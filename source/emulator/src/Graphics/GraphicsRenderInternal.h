@@ -1757,8 +1757,9 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
 
 // --- Bind ---
 // The draw fetches only records [first_record, required_records); zero required_records means every declared record.
+// records_exact says the GPU reads the same draw range the host resolved, so fetches cannot pass it.
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
-	                   uint32_t first_record, uint32_t required_records);
+	                   uint32_t first_record, uint32_t required_records, bool records_exact);
 // How a shader stage may read a resolution-scaled image. Normalized sampling
 // without texel offsets reads the same content at any host extent; integer
 // texel access, size queries and texel offsets address host texels.

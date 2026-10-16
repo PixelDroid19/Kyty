@@ -30,6 +30,12 @@ fail on the current HEAD before acting on them.
   attribute reaches past its stride. Without that request, `Commit` leaves the tail and its mark as
   they are. A snapshot reused by a consumer that needs the zero tail clears it first. Uploads, zero
   carriers, index and storage captures keep clearing.
+- An indexed draw's record range comes from scanning the guest indexes on the host. The GPU reads
+  the same values only when the indexes are bound from a snapshot; an `IndexBuffer` object can
+  hold GPU writes the scan did not see. The indexed draw therefore binds its indexes before its
+  vertex buffers, and skips vertex tails only when the indexes were snapshotted. The
+  depth/stencil copy path always keeps the clear. Linear draws use the packet's vertex count, and
+  indirect draws read their arguments after the pending write-backs, so their ranges are exact.
 - Measured (Intel, strict, 240 s, dock route), against the same tree without the change:
   - transient capture: 5.26 to 2.70 us/draw;
   - command processing: 38.7 to 39.0 to 36.0 to 36.3 us/draw in steady windows;
@@ -43,9 +49,12 @@ fail on the current HEAD before acting on them.
   - command processing: 35.8 and 36.7 to 33.4 and 33.6 us/draw;
   - frame rate: 6.18 to 6.26 fps.
 
-  Captures 30 s and 45 s after the spawn show textured terrain, trees and the HUD. A dark
-  translucent patch drifts over the grass in late frames. It also appears at 97034ebc, before this
-  change, so it is not attributed to it.
+  Captures 30 s and 45 s after the spawn show textured terrain, trees and the HUD. The dark patch
+  seen in late frames predates the change (see "Sandbox title: drifting dark patch on terrain").
+- Racing title (Intel, strict, 200 s, `formula-drive`), with the indexed-draw rule above: command
+  processing stayed at 43.3 to 45.2 us/draw in the race (42.7 to 44.8 before), and the street
+  captures render lanes and tyre marks as before. The run stopped at 197 s on the open,
+  intermittent depth-reference refusal recorded on 2026-10-11, outside the vertex path.
 
 ## Index snapshots over idle writable storage (2026-10-16)
 
@@ -306,6 +315,19 @@ fail on the current HEAD before acting on them.
 - Named-DMASK sample formats leave `mimg_dmask` unset; the zero read uses
   the decoded destination size, which every MIMG format sets to the DMASK
   component count.
+
+## Sandbox title: drifting dark patch on terrain (2026-10-16, open)
+
+- Observed (Intel, strict, `minecraft-enter` route, no input after the spawn): from about frame
+  10,600 on, a dark translucent quad lies on the grass in front of the player. It moves and grows
+  between captures (frames 10,692, 10,854 and 11,016). Earlier frames on the same route do not
+  show it.
+- It also appears in a run at 97034ebc (frame 11,400), before the index-snapshot and vertex-tail
+  changes, so it is not caused by them.
+- Not yet known whether this is a guest effect or a rendering error. Suggested direction: confirm
+  against reference footage of the same world type first. If it is an error, take a native capture
+  at the frame and use the operation trace to find the draw that writes the quad (likely a
+  translucent or shadow pass), then compare its inputs with a frame where the quad is absent.
 
 ## Insect sequel: intermittent depth/index overlap (2026-10-16, open)
 

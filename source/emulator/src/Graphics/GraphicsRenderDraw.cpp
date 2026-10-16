@@ -1689,8 +1689,24 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	SetDynamicParams(vk_buffer, pipeline);
 
+	// The vertex range was resolved from the guest indexes; only their snapshot is
+	// guaranteed to hold the same values when the GPU reads them.
+	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
+	const auto     index_buffer_binding_start = DrawStageClock::now();
+	VulkanBuffer*  indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+	const bool     indices_snapshotted = indices != nullptr;
+	if (indices == nullptr)
+	{
+		indices = static_cast<VulkanBuffer*>(
+		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
+	}
+	if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
+
+	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
+	DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start));
+
 	const auto     vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records);
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records, indices_snapshotted);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
@@ -1784,18 +1800,6 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	                &color_info);
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 
-	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
-	const auto     index_buffer_binding_start = DrawStageClock::now();
-	VulkanBuffer*  indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-	if (indices == nullptr)
-	{
-		indices = static_cast<VulkanBuffer*>(
-		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
-	}
-	if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
-
-	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
-	DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start));
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 	GraphicsOperationTraceIndexedDraw(index_addr_u64, index_size, index_type_and_size <= 1u, vs_input_info, ps_input_info,
 	                                  OperationTraceColorOutputs(color_info), OperationTraceDepthOf(depth_info));
@@ -1997,7 +2001,8 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, guest_vertex_input->bind,
 		                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, 0, nullptr, nullptr,
 		                device_address_table);
-		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input, 0, vertex_records);
+		// The copy does not track whether its indexes were snapshotted.
+		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input, 0, vertex_records, false);
 		if (index_buffer != nullptr)
 		{
 			vkCmdBindIndexBuffer(vk_buffer, index_buffer->buffer, 0, index_type);
@@ -2670,7 +2675,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	SetDynamicParams(vk_buffer, pipeline);
 
 	const auto     vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records);
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records, true);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,

@@ -2578,7 +2578,7 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 }
 
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
-	                   uint32_t first_record, uint32_t required_records)
+	                   uint32_t first_record, uint32_t required_records, bool records_exact)
 {
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 
@@ -2598,7 +2598,7 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 		    buffer_info.stride != 0u && first_record < records ? static_cast<uint64_t>(buffer_info.stride) * first_record : 0u;
 		// Fetches past the captured records only exist when the draw range is unknown or
 		// clamped, or when an attribute reaches beyond its record.
-		const bool tail_fetched = required_records == 0 || required_records > available ||
+		const bool tail_fetched = !records_exact || required_records == 0 || required_records > available ||
 		                          VulkanVertexInputBindingFetchEnd(input, i) > buffer_info.stride;
 
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
