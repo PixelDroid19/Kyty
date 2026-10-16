@@ -9,6 +9,41 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Physical ranges withdrawn while device addresses are prepared (2026-10-16)
+
+- A survey of the library on Intel (Arc A770, 120 s strict runs) stopped five
+  titles on `guest memory device addressing is unavailable for a shader that
+  dereferences guest pointers`: the dream platformer, the insect platformer,
+  its sequel, the gothic action platformer and the first-person puzzle title.
+  Each logged `guest import failed: ... has no direct memory` just before.
+  Three of them reached their time limit on 2026-10-10/11; the failure is
+  timing-dependent (one earlier insect-platformer run passed it).
+- A temporary trace in `PhysicalMemory::ResolvePhysical` (not committed)
+  showed the dream platformer's failing span covered exactly by one view with
+  `unmap_pending=1`, not released and with no release pending. The guest was
+  unmapping the range. Until the quiesced unmap transaction drops the range
+  from the device-address registry, a preparation on the command-processor
+  thread still saw its resident pages, the resolution refused the view and the
+  whole preparation failed.
+- Change: `KernelResolvePhysical` returns `KernelPhysicalResolution`.
+  `Withdrawing` means one view holds the span and is being unmapped, or its
+  physical range is released or pending release. The importer leaves such a
+  span unimported, as the release path already states that a released range
+  must not be imported again; its quiesced release removes the range. Any
+  other refusal still stops the run.
+- Verified on Intel, one 120 s run each with the generic or title routes: the
+  dream platformer (in gameplay), the gothic platformer (intro cinematic)
+  and the puzzle title run to the limit; the insect sequel reaches its
+  "Act 1" card and then stops on a new
+  `unknown relation: DepthStencilBuffer - Crosses - IndexBuffer` (a 12-byte
+  index read inside a live 1920x1080 depth buffer), open; the insect
+  platformer reaches its next refusal, the alpha-only R8 storage selector
+  (`format=1 swizzle=0x800`), open. The roguelike control run is unchanged
+  (4 captures, time limit).
+- The kernel-process test for `sendmsg`/`recvmsg` still expected `ENOSYS`
+  from before both calls were implemented; it now expects `EBADF` for an
+  invalid descriptor.
+
 ## Survival title: hosting an offline world (2026-10-15, open)
 
 - Symptom: Host Game showed "Network Connection Lost". With the connection

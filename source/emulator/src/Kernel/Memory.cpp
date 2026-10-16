@@ -261,7 +261,7 @@ public:
 	              uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool     Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 	uint64_t MapAlias(uint64_t vaddr, uint64_t size, uint64_t alignment);
-	bool     ResolvePhysical(uint64_t vaddr, uint64_t size, uint64_t* phys_addr);
+	KernelPhysicalResolution ResolvePhysical(uint64_t vaddr, uint64_t size, uint64_t* phys_addr);
 	uint64_t MapPinnedWindow(uint64_t phys_addr, uint64_t size, uint64_t alignment);
 	bool     ExportPinnedWindowDmaBuf(uint64_t phys_addr, uint64_t size, int* dma_buf);
 	void     UnpinWindow(uint64_t phys_addr, uint64_t size);
@@ -298,6 +298,9 @@ private:
 	// Backing offset of a live view of [vaddr, vaddr + size) whose physical
 	// range is neither released nor pending release.
 	[[nodiscard]] bool FindAliasablePhysicalUnlocked(uint64_t vaddr, uint64_t size, uint64_t* phys_addr);
+	// True when one view holds [vaddr, vaddr + size) and is being unmapped, or
+	// its physical range is released or pending release.
+	[[nodiscard]] bool IsWithdrawingViewUnlocked(uint64_t vaddr, uint64_t size) const;
 	// Records a device window over backing [phys_addr, phys_addr + size);
 	// false when the interval is invalid or overlaps a pinned window.
 	[[nodiscard]] bool PinWindowUnlocked(uint64_t phys_addr, uint64_t size);
@@ -1826,14 +1829,29 @@ uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size, uint64_t alignm
 	return VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr, size, VirtualMemory::Mode::ReadWrite, alignment);
 }
 
-bool PhysicalMemory::ResolvePhysical(uint64_t vaddr, uint64_t size, uint64_t* phys_addr)
+bool PhysicalMemory::IsWithdrawingViewUnlocked(uint64_t vaddr, uint64_t size) const
+{
+	return std::any_of(m_mapped.begin(), m_mapped.end(),
+	                   [this, vaddr, size](const MappedBlock& view)
+	                   {
+		                   const bool holds = vaddr >= view.map_vaddr && size <= view.map_size && vaddr - view.map_vaddr <= view.map_size - size;
+		                   return holds && (view.unmap_pending || view.physical_released ||
+		                                    IsDirectReleasePendingUnlocked(view.phys_addr + (vaddr - view.map_vaddr), size));
+	                   });
+}
+
+KernelPhysicalResolution PhysicalMemory::ResolvePhysical(uint64_t vaddr, uint64_t size, uint64_t* phys_addr)
 {
 	if (size == 0)
 	{
-		return false;
+		return KernelPhysicalResolution::Unresolved;
 	}
 	Core::LockGuard lock(m_mutex);
-	return FindAliasablePhysicalUnlocked(vaddr, size, phys_addr);
+	if (FindAliasablePhysicalUnlocked(vaddr, size, phys_addr))
+	{
+		return KernelPhysicalResolution::Resolved;
+	}
+	return IsWithdrawingViewUnlocked(vaddr, size) ? KernelPhysicalResolution::Withdrawing : KernelPhysicalResolution::Unresolved;
 }
 
 bool PhysicalMemory::PinWindowUnlocked(uint64_t phys_addr, uint64_t size)
@@ -3282,9 +3300,13 @@ uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size, uint64_t alignmen
 	return g_physical_memory->MapAlias(vaddr, size, alignment);
 }
 
-bool KernelResolvePhysical(uint64_t vaddr, uint64_t size, uint64_t* phys_addr)
+KernelPhysicalResolution KernelResolvePhysical(uint64_t vaddr, uint64_t size, uint64_t* phys_addr)
 {
-	return phys_addr != nullptr && g_physical_memory != nullptr && g_physical_memory->ResolvePhysical(vaddr, size, phys_addr);
+	if (phys_addr == nullptr || g_physical_memory == nullptr)
+	{
+		return KernelPhysicalResolution::Unresolved;
+	}
+	return g_physical_memory->ResolvePhysical(vaddr, size, phys_addr);
 }
 
 uint64_t KernelMapPinnedPhysicalWindow(uint64_t phys_addr, uint64_t size, uint64_t alignment)

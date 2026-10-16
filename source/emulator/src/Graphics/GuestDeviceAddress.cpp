@@ -894,8 +894,15 @@ bool ImportPhysicalSpan(GraphicContext* ctx, Registry* registry, uint64_t base, 
 	{
 		return true;
 	}
-	uint64_t offset = 0;
-	if (!Kernel::Memory::KernelResolvePhysical(span_address, span_size, &offset))
+	uint64_t   offset     = 0;
+	const auto resolution = Kernel::Memory::KernelResolvePhysical(span_address, span_size, &offset);
+	if (resolution == Kernel::Memory::KernelPhysicalResolution::Withdrawing)
+	{
+		// The guest unmaps or releases this range, so no later GPU work reads
+		// it; its quiesced release drops the range without importing it.
+		return true;
+	}
+	if (resolution != Kernel::Memory::KernelPhysicalResolution::Resolved)
 	{
 		std::fprintf(stderr, "guest import failed: base=0x%012" PRIx64 " size=0x%" PRIx64 " has no direct memory\n", span_address,
 		             span_size);
