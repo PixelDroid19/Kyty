@@ -980,18 +980,26 @@ String GpuMemory::create_dbg_parents(int heap_id, const Vector<OverlappedBlock>&
 		for (int i = 0; i < 10; i++) { text += String::FromPrintf(" %" PRIu64, values[i]); }
 		return text;
 	};
+	const auto ranges = [](const Block& block)
+	{
+		String text;
+		for (int i = 0; i < block.vaddr_num; i++)
+		{
+			text += String::FromPrintf(" [0x%016" PRIx64 ", +0x%" PRIx64 ")", block.vaddr[i], block.size[i]);
+		}
+		return text;
+	};
 	list.Add(String::FromPrintf("\t new params:%s", params(info.params).C_Str()));
 	for (const auto& d: others)
 	{
 		const auto& h = heap.objects[d.object_id];
 		list.Add(String::FromPrintf("\t parent id=%d type=%s rel=%s scenario=%s parents=%u read_only=%d in_use=%d origin=%s"
-		                            " cpu_time=%" PRIu64 " gpu_time=%" PRIu64 " write_time=%" PRIu64 " vaddr=0x%016" PRIx64
-		                            " size=0x%016" PRIx64 " params:%s",
+		                            " cpu_time=%" PRIu64 " gpu_time=%" PRIu64 " write_time=%" PRIu64 " ranges:%s params:%s",
 		                            d.object_id, Core::EnumName(h.info.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
 		                            Core::EnumName(h.scenario).C_Str(), static_cast<unsigned>(h.others.Size()), h.info.read_only ? 1 : 0,
 		                            h.info.in_use ? 1 : 0, Core::EnumName(h.info.content_origin).C_Str(),
 		                            static_cast<uint64_t>(h.info.cpu_update_time), static_cast<uint64_t>(h.info.gpu_update_time),
-		                            static_cast<uint64_t>(h.info.write_time), h.block.vaddr[0], h.block.size[0], params(h.info.params).C_Str()));
+		                            static_cast<uint64_t>(h.info.write_time), ranges(h.block).C_Str(), params(h.info.params).C_Str()));
 	}
 	return list.Concat(U'\n');
 }
