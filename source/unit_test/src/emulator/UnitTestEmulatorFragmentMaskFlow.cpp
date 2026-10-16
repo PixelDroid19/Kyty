@@ -1139,6 +1139,77 @@ ShaderFragmentMaskFlow FlowOf(const Words& words)
 	return ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(words)), 64u);
 }
 
+// A number spilled to lane 1 of v3, read back into s21 and used by a vector.
+Words NumberThroughSpillSlot()
+{
+	Words words = ScalarLoadOfS20();
+	LaneMove(words, 0x361, 3, 20, Inline(1));        // v_writelane_b32 v3, s20, 1
+	LaneMove(words, 0x360, 21, kVgpr + 3, Inline(1)); // v_readlane_b32 s21, v3, 1
+	Vop1(words, 1, 1, 21);                            // v_mov_b32 v1, s21
+	return words;
+}
+
+// The saved EXEC spilled to the same slot: a compiler reuses a slot once its word is dead.
+Words SavedExecThroughSpillSlot()
+{
+	Words words;
+	Sop1(words, 4, 12, kExecLo);                      // s_mov_b64 s[12:13], exec
+	LaneMove(words, 0x361, 3, 12, Inline(1));         // v_writelane_b32 v3, s12, 1
+	LaneMove(words, 0x361, 3, 13, Inline(2));         // v_writelane_b32 v3, s13, 2
+	LaneMove(words, 0x360, 40, kVgpr + 3, Inline(1)); // v_readlane_b32 s40, v3, 1
+	LaneMove(words, 0x360, 41, kVgpr + 3, Inline(2)); // v_readlane_b32 s41, v3, 2
+	Sop1(words, 4, kExecLo, 40);                      // s_mov_b64 exec, s[40:41]
+	return words;
+}
+
+TEST(EmulatorFragmentMaskFlow, ASpillSlotCarriesTheWordLastSpilledOnEachPath)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Words reused = NumberThroughSpillSlot();
+		Append(reused, SavedExecThroughSpillSlot());
+		Vop1(reused, 1, 2, Inline(0)); // v_mov_b32 v2, 0
+		reused.insert(reused.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
+		Sopp(reused, 1);
+		const auto later_mask = FlowOf(reused);
+		if (!later_mask.lane_local) { std::fprintf(stderr, "refused: %s\n", later_mask.reason); }
+		Check(later_mask.lane_local, "a mask spilled after the number was read does not reach that read");
+
+		// Through the back edge the mask reaches the read again.
+		Words carried;
+		LaneMove(carried, 0x360, 21, kVgpr + 3, Inline(1)); // v_readlane_b32 s21, v3, 1
+		Vop1(carried, 1, 1, 21);                             // v_mov_b32 v1, s21
+		Sop1(carried, 4, 12, kExecLo);                       // s_mov_b64 s[12:13], exec
+		LaneMove(carried, 0x361, 3, 12, Inline(1));          // v_writelane_b32 v3, s12, 1
+		Words looped = ScalarLoadOfS20();
+		LaneMove(looped, 0x361, 3, 20, Inline(1));           // v_writelane_b32 v3, s20, 1
+		Append(looped, LoopProgram(carried, {}));
+		const auto loop_carried = FlowOf(looped);
+		Check(!loop_carried.lane_local && Contains(loop_carried.reason, "mask observed as a number"),
+		      "a mask spilled later in a loop body reaches the read at the head");
+
+		// A slot written under divergent control flow differs between lanes after the join.
+		Words region = ScalarLoadOfS20();
+		LaneMove(region, 0x361, 3, 20, Inline(1));           // v_writelane_b32 v3, s20, 1
+		Append(region, Vopc(0xc5, Inline(0), 0u));           // v_cmp_ne_u32 vcc, 0, v0 (per lane)
+		Sop1(region, 0x24, 2, kVccLo);                       // s_and_saveexec_b64 s[2:3], vcc
+		Sopp(region, 8, 5);                                  // s_cbranch_execz over the next five dwords
+		region.insert(region.end(), {0xf4200508u | (22u << 6u), 0xfa000008u}); // s_buffer_load_dword s22, s[16:19], 8
+		Sopp(region, 12, 0xc07f);                            // s_waitcnt lgkmcnt(0)
+		LaneMove(region, 0x361, 3, 22, Inline(1));           // v_writelane_b32 v3, s22, 1
+		Sop1(region, 4, kExecLo, 2);                         // join: s_mov_b64 exec, s[2:3]
+		LaneMove(region, 0x360, 21, kVgpr + 3, Inline(1));   // v_readlane_b32 s21, v3, 1
+		Vop1(region, 1, 1, 21);                              // v_mov_b32 v1, s21
+		Vop1(region, 1, 2, Inline(0));                       // v_mov_b32 v2, 0
+		region.insert(region.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
+		Sopp(region, 1);
+		const auto divergent = FlowOf(region);
+		Check(!divergent.lane_local && Contains(divergent.reason, "divergent control flow"),
+		      "a slot spilled in a divergent block is refused after the join");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorFragmentMaskFlow, AdmitsALoopWhoseLanesLeaveByNarrowingTheMask)
 {
 	ASSERT_EXIT(([] {
@@ -1514,5 +1585,6 @@ TEST(EmulatorFragmentMaskFlow, PixelExecBranchesTakeTheVoteOfARealFragmentOfTheQ
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
-UT_END();
 
+
+UT_END();

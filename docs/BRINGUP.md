@@ -507,6 +507,29 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
     and world entry advances to a strict stop on a wave64 pixel shader that needs
     fragment wave transport (`mask observed as a number`), the same open
     feature as the card title.
+- Fixed (2026-10-16): that stop was a false refusal of the fragment mask flow,
+  not a need for the transport.
+  - A transport dump (`KYTY_TRANSPORT_DUMP`) of the refused wave64 pixel
+    program shows lane 13 of one VGPR used as two unrelated spill slots: a
+    number at pc 0x914, read back at 0x9e8 and used by `v_mul_f32` at 0x9f8,
+    then the saved EXEC high word at 0x1f14 (`s_and_saveexec_b64`). No back
+    edge leads from 0x1f14 to before 0x9e8.
+  - The flow kept one taint per (VGPR, lane) slot as a union over the whole
+    program, so the later mask reached the earlier read.
+  - Change: slot taint is part of the flow state on each path. A
+    `V_WRITELANE` (which ignores EXEC) replaces it, joins take the union, and
+    back edges carry it through the existing fixpoint. A slot written inside a
+    lane-divergent region or a divergent loop is marked divergent after the
+    join or exit, as a scalar word is; the old union never did that.
+  - Verified: the dumped program is lane local in the mask flow and the
+    wave64 admission proves it quad local, which needs no subgroup pinning.
+    Intel, strict, 240 s: the title reaches gameplay in the generated world
+    (HUD, hotbar, hand, mobs, sky and clouds) without a stop. Racing (200 s)
+    and painterly (150 s) controls unchanged. Unit test
+    `ASpillSlotCarriesTheWordLastSpilledOnEachPath` covers a reused slot, the
+    loop-carried case and the divergent-region case.
+  - Next observation: terrain blocks draw black (silhouettes only) at about
+    3 FPS; see the block atlas defect below.
 - Defects found, not fixed:
   - Multi-level sampled views over a live one-level render target are rejected
     by `Gen5PickSampleSurfaceAliases` (rule `mip_levels >= sample_levels`) and

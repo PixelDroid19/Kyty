@@ -48,11 +48,43 @@ bool IsConditionalBranch(Type type)
 	       type == Type::SCbranchExecz || type == Type::SCbranchExecnz;
 }
 
-// A branch region whose entry is lane divergent, with the scalar words written in it.
+// A static scalar spill slot: (VGPR, lane).
+using SpillSlot = std::pair<int, int>;
+
+// The lane flow state plus the taint of each spill slot on this path. V_WRITELANE ignores EXEC, so a spill
+// replaces its slot's taint; a compiler reuses a dead slot for an unrelated word.
+struct MaskFlowState: FlowState
+{
+	std::map<SpillSlot, uint8_t> spills;
+
+	bool Merge(const MaskFlowState& other);
+};
+
+bool MaskFlowState::Merge(const MaskFlowState& other)
+{
+	if (!other.reachable) { return false; }
+	if (!reachable)
+	{
+		*this = other;
+		return true;
+	}
+	bool changed = FlowState::Merge(other);
+	for (const auto& [slot, taint]: other.spills)
+	{
+		auto&         mine   = spills[slot];
+		const uint8_t merged = static_cast<uint8_t>(mine | taint);
+		changed              = changed || merged != mine;
+		mine                 = merged;
+	}
+	return changed;
+}
+
+// A branch region whose entry is lane divergent, with the scalar words and spill slots written in it.
 struct Region
 {
 	uint32_t            end_pc = 0;
 	std::bitset<kWords> written;
+	std::set<SpillSlot> written_slots;
 	// Mask words whose bit is zero for every lane outside the region (a subset of the EXEC it was entered with):
 	// compares evaluated and EXEC copies taken while EXEC was such a subset (VOPC clears inactive lanes).
 	std::bitset<kWords> zero_outside;
@@ -70,8 +102,9 @@ struct Loop
 	// A lane-divergent branch leaves the loop or repeats it, so lanes run different numbers of
 	// iterations and the host subgroup's count is not the guest wave's.
 	bool divergent = false;
-	// Every scalar word some instruction of the body may write.
+	// Every scalar word and spill slot some instruction of the body may write.
 	std::bitset<kWords> written;
+	std::set<SpillSlot> written_slots;
 	// Words whose every write in the body keeps the bit of each lane outside its region (D = D AND/OR/ANDN2 with a
 	// mask confined that way): a lane's bit then follows only its own iterations, so leaving the loop does not
 	// make the word divergent. Observed during a walk and confirmed by the next one.
@@ -322,7 +355,7 @@ private:
 	void                  FindLoops();
 	ShaderFragmentMaskFlow Fixpoint();
 	bool                  RefineLoopExemptions(bool admitted);
-	void                  LeaveLoops(FlowState* state, uint32_t from_pc, uint32_t to_pc) const;
+	void                  LeaveLoops(MaskFlowState* state, uint32_t from_pc, uint32_t to_pc) const;
 	bool                  HasInstructionAt(uint32_t pc) const;
 	void                  MarkAcceptedExecWrites(const ShaderCode& code);
 	bool                  ExecWide() const { return (m_state.scalar[kExecLoWord] & kWide) != 0u; }
@@ -333,8 +366,8 @@ private:
 	bool                  InertDeadTail(uint32_t pc) const;
 
 	ShaderFragmentMaskFlow        m_result;
-	FlowState                     m_state;
-	std::map<uint32_t, FlowState> m_entry;   // state arriving at each branch target, by pc; kept across walks
+	MaskFlowState                     m_state;
+	std::map<uint32_t, MaskFlowState> m_entry; // state arriving at each branch target, by pc; kept across walks
 	std::vector<Region>           m_regions; // open lane-divergent regions
 	std::vector<Loop>             m_loops;
 	bool                          m_changed = false; // a back edge changed a loop-head state during this walk
@@ -344,8 +377,6 @@ private:
 	// SCC holds "some lane of a mask is set", written by the last SCC writer with no join since.
 	bool                          m_scc_any_lane         = false;
 	bool                          m_scc_any_lane_uniform = false;
-	// Taint of every word a static spill wrote to a (VGPR, lane) slot; it only grows across walks.
-	std::map<std::pair<int, int>, uint8_t> m_spills;
 	// Per instruction, from the walk in progress: the extent of EXEC before it, and the taint of a
 	// V_CNDMASK_B32 condition (all extent bits where the walk did not reach it).
 	std::vector<uint8_t>          m_exec_extent;
@@ -778,7 +809,7 @@ bool Flow::HasInstructionAt(uint32_t pc) const
 // Control leaving a loop whose lanes ran different iteration counts: every scalar the body
 // writes holds, for a lane that stopped early, the value of an iteration the guest wave may
 // have run further. Lanes still running are unaffected, so nothing changes inside the loop.
-void Flow::LeaveLoops(FlowState* state, uint32_t from_pc, uint32_t to_pc) const
+void Flow::LeaveLoops(MaskFlowState* state, uint32_t from_pc, uint32_t to_pc) const
 {
 	for (const auto& loop: m_loops)
 	{
@@ -787,6 +818,7 @@ void Flow::LeaveLoops(FlowState* state, uint32_t from_pc, uint32_t to_pc) const
 		{
 			if (loop.written.test(word) && !loop.exempt.test(word)) { state->scalar[word] |= kDiverged; }
 		}
+		for (const auto& slot: loop.written_slots) { state->spills[slot] |= kDiverged; }
 	}
 }
 
@@ -810,6 +842,9 @@ void Flow::FindLoops()
 		{
 			if (!loop.Contains(inst.pc)) { continue; }
 			CollectWrites(inst, &loop.written);
+			int vgpr = 0;
+			int lane = 0;
+			if (IsStaticScalarSpillWrite(inst, &vgpr, &lane)) { loop.written_slots.insert({vgpr, lane}); }
 			uint32_t target = 0;
 			if (!IsLaneDependentBranch(inst.type) || !BranchTarget(inst, &target)) { continue; }
 			loop.divergent = loop.divergent || !loop.Contains(target) || target == loop.head_pc;
@@ -859,7 +894,7 @@ bool Flow::Branch(const ShaderInstruction& inst)
 	}
 	if (!HasInstructionAt(target)) { return Fail(inst, "branch target is not an instruction"); }
 	const bool backward = target <= inst.pc;
-	FlowState  outgoing = m_state;
+	MaskFlowState outgoing = m_state;
 	LeaveLoops(&outgoing, inst.pc, target);
 	const auto found = m_entry.find(target);
 	if (found == m_entry.end())
@@ -902,6 +937,7 @@ void Flow::EnterJoin(uint32_t pc)
 		{
 			if (region->written.test(word)) { m_state.scalar[word] |= kDiverged; }
 		}
+		for (const auto& slot: region->written_slots) { m_state.spills[slot] |= kDiverged; }
 		region = m_regions.erase(region);
 	}
 }
@@ -917,23 +953,21 @@ bool Flow::IsScalarSpill(const ShaderInstruction& inst) const
 	       (IsStaticScalarSpillRead(inst, &vgpr, &lane) && HasLiveScalarSpill(*m_code, m_index, vgpr, lane));
 }
 
-// The slot carries the taint of every word written to it: a spilled mask word is read back as a mask word. A
-// widened slot taint takes another walk so reads before a later write in a loop see it.
+// The slot carries the taint of the word last spilled to it on this path: a spilled mask word is read back as a
+// mask word. Like a scalar word, a slot written in a divergent region or loop differs between lanes after it.
 bool Flow::ScalarSpill(const ShaderInstruction& inst)
 {
 	int vgpr = 0;
 	int lane = 0;
 	if (IsStaticScalarSpillWrite(inst, &vgpr, &lane))
 	{
-		auto&         slot  = m_spills[{vgpr, lane}];
-		const uint8_t taint = static_cast<uint8_t>(slot | Taint(inst.src[0]));
-		m_changed           = m_changed || taint != slot;
-		slot                = taint;
+		m_state.spills[{vgpr, lane}] = Taint(inst.src[0]);
+		for (auto& region: m_regions) { region.written_slots.insert({vgpr, lane}); }
 		return true;
 	}
 	(void)IsStaticScalarSpillRead(inst, &vgpr, &lane);
-	const auto slot = m_spills.find({vgpr, lane});
-	return Define(inst, inst.dst, slot != m_spills.end() ? slot->second : kClean);
+	const auto slot = m_state.spills.find({vgpr, lane});
+	return Define(inst, inst.dst, slot != m_state.spills.end() ? slot->second : kClean);
 }
 
 // S_CMP_LG_U64 / S_CMP_EQ_U64 of a lane mask against zero: whether any lane's bit is set. The pair must be
@@ -1140,7 +1174,6 @@ ShaderFragmentMaskFlow Flow::Fixpoint()
 {
 	m_result = {};
 	m_entry.clear();
-	m_spills.clear();
 	for (auto& loop: m_loops) { loop.preserving_seen.reset(); }
 	for (uint32_t pass = 0; pass < kMaxPasses; ++pass)
 	{
