@@ -1076,7 +1076,7 @@ struct Ngs2VoiceRecord
 	Ngs2VoiceCallbackRegistration      callback;
 	Ngs2Sampler::Playback              sampler;
 	// Routing: port 0 feeds the patched voice at port_volume; a mastering voice writes its input to render buffer
-	// output_index, whose channel count must match output_channels once that is set. patch_handle is the destination
+	// output_index, whose channel count must fit output_channels once that is set. patch_handle is the destination
 	// as the guest named it.
 	std::weak_ptr<Ngs2VoiceRecord>     patch;
 	uintptr_t                          patch_handle    = 0;
@@ -2455,6 +2455,13 @@ static void Ngs2RouteBus(const Ngs2VoiceRecord& voice, const std::vector<double>
 	}
 }
 
+// A mastering voice writes its own channel count; a stereo voice may also feed the front pair of an 8-channel buffer,
+// whose other channels stay silent.
+static bool Ngs2MasteringFitsTarget(uint32_t output_channels, uint32_t target_channels)
+{
+	return output_channels == 0 || output_channels == target_channels || (output_channels == 2 && target_channels == 8);
+}
+
 // Writes the stereo bus into a render buffer: stereo as is, mono as the mean of both channels, and eight channels with
 // the bus on the front pair and silence elsewhere.
 static void Ngs2AddBusToTarget(const std::vector<double>& bus, Ngs2RenderTarget* target)
@@ -2614,7 +2621,7 @@ static int32_t Ngs2MixSystem(uintptr_t system_handle, const Ngs2RenderBufferInfo
 			continue;
 		}
 		auto& target = (*targets)[voice->output_index];
-		if (voice->output_channels != 0 && voice->output_channels != target.info.channels)
+		if (!Ngs2MasteringFitsTarget(voice->output_channels, target.info.channels))
 		{
 			return kNgs2InvalidBufferInfo;
 		}

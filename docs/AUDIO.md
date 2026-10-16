@@ -165,8 +165,10 @@ voices run in decreasing distance from the end of their route:
   silent input when nothing feeds it;
 - a playing mastering voice (setup `0x30000000`: 1, 2 or 8 channels; output
   `0x30000005`: render buffer index) adds it to its render buffer: stereo as is,
-  mono as the mean, eight channels on the front pair. A buffer whose channel
-  count differs from the setup refuses the render.
+  mono as the mean, eight channels on the front pair. A stereo mastering voice
+  may also write the front pair of an eight-channel buffer, whose other channels
+  stay silent; any other channel count that differs from the setup refuses the
+  render.
 
 Every render buffer is cleared, and a buffer shorter than one grain is refused
 before anything is written. A voice that is not patched reaches no output.
