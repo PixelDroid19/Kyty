@@ -231,42 +231,30 @@ bool GpuMemory::QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRan
 	{
 		return false;
 	}
-	auto& heap = m_heaps[heap_id];
-	// A draw-selected trace must stay cheap even when guest ranges have an
-	// unexpectedly dense alias topology. False-positive bucket candidates are
-	// bounded separately from the 16 returned real overlaps.
-	constexpr uint32_t kMaxPages      = 64;
-	constexpr uint32_t kMaxCandidates = 64;
-	const bool complete = heap.objects_map2->VisitCandidatesBounded(
-	    vaddr, size, kMaxPages, kMaxCandidates,
-	    [&](int object_id)
-	    {
-		    const auto& stored = heap.objects[object_id];
-		    if (stored.free)
-		    {
-			    return true;
-		    }
-		    const auto relation = GpuMemoryClassifyRangeSets(stored.block.vaddr, stored.block.size, stored.block.vaddr_num, &vaddr,
-			                                                   &size, 1, false);
-		    if (relation == OverlapType::None)
-		    {
-			    return true;
-		    }
-		    if (out->total_count != UINT32_MAX)
-		    {
-			    out->total_count++;
-		    }
-		    if (out->entry_count == GpuMemoryRangeProvenance::ENTRIES_MAX)
-		    {
-			    return false;
-		    }
+	const auto& heap = m_heaps[heap_id];
+	// The exact overlap set, as every other range query sees it. Only the
+	// returned entries are bounded; a bucket walk capped by candidates would
+	// report truncation for large surfaces whose edge buckets hold many
+	// unrelated small objects.
+	for (const auto& block: FindBlocks(heap_id, &vaddr, &size, 1, false))
+	{
+		if (out->total_count != UINT32_MAX)
+		{
+			out->total_count++;
+		}
+		if (out->entry_count == GpuMemoryRangeProvenance::ENTRIES_MAX)
+		{
+			out->truncated = true;
+			continue;
+		}
+		const auto& stored = heap.objects[block.object_id];
 		EXIT_IF(stored.free);
 		const auto& info  = stored.info;
 		auto&       entry = out->entries[out->entry_count++];
 		entry.type                  = info.object.type;
-		entry.relation              = relation;
+		entry.relation              = block.relation;
 		entry.heap_id               = heap_id;
-		entry.object_id             = object_id;
+		entry.object_id             = block.object_id;
 		entry.logical_generation    = info.logical_generation;
 		entry.backing_generation    = info.backing_generation;
 		entry.content_sequence      = info.content_sequence;
@@ -281,9 +269,7 @@ bool GpuMemory::QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRan
 		entry.check_hash            = info.check_hash;
 		entry.dirty_registered      = info.dirty_registered;
 		entry.depth_meta_bound      = info.depth_meta_bound;
-		    return true;
-	    });
-	out->truncated = !complete;
+	}
 	return true;
 }
 

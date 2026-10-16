@@ -205,53 +205,6 @@ public:
 		return ret;
 	}
 
-	// Diagnostic-only candidate walk. Both the address buckets and unique
-	// candidates are capped so an opt-in trace cannot enumerate an arbitrary
-	// alias graph or populate the shared overlap cache. Returning false means
-	// the caller must report a truncated point-in-time result.
-	template <typename Visitor>
-	[[nodiscard]] bool VisitCandidatesBounded(uint64_t vaddr, uint64_t size, uint32_t max_pages, uint32_t max_candidates,
-	                                          Visitor&& visitor) const
-	{
-		EXIT_IF(size == 0 || max_pages == 0 || max_candidates == 0);
-		const auto first_page = CalcPageId(vaddr);
-		const auto last_page  = CalcPageId(vaddr + size - 1);
-		EXIT_IF(last_page < first_page);
-
-		Vector<int> visited;
-		uint32_t    page_count = 0;
-		auto        page       = first_page;
-		for (;;)
-		{
-			if (page_count == max_pages)
-			{
-				return false;
-			}
-			page_count++;
-			for (int id: m_map.Get(page))
-			{
-				if (visited.Contains(id))
-				{
-					continue;
-				}
-				if (visited.Size() == max_candidates)
-				{
-					return false;
-				}
-				visited.Add(id);
-				if (!visitor(id))
-				{
-					return false;
-				}
-			}
-			if (page == last_page)
-			{
-				return true;
-			}
-			page++;
-		}
-	}
-
 	[[nodiscard]] bool IsEmpty() const
 	{
 		int num = 0;
@@ -324,6 +277,7 @@ public:
 	void* CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
 	                   int vaddr_num, const GpuObject& info);
 	void  ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type);
+	void  ResetPlaneHash(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type);
 	void  FrameDone(GraphicContext* ctx);
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,

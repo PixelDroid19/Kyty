@@ -468,21 +468,6 @@ void VerifyRenderTargetIndexAliasContract()
 	       "automatic writer history retains bounded relocatable events and queries the draw's eventual guest range");
 	GpuWriteHistoryConfigureForTesting(0u, 0u, false);
 
-	GpuMap2 bounded_index;
-	for (int id = 0; id < 18; ++id)
-	{
-		bounded_index.Insert(0x200000u, 0x1000u, id);
-	}
-	uint32_t bounded_visits = 0;
-	const bool bounded_complete = bounded_index.VisitCandidatesBounded(
-	    0x200000u, 0x1000u, 64u, 64u,
-	    [&bounded_visits](int /*id*/)
-	    {
-		    bounded_visits++;
-		    return bounded_visits <= GpuMemoryRangeProvenance::ENTRIES_MAX;
-	    });
-	Expect(!bounded_complete && bounded_visits == GpuMemoryRangeProvenance::ENTRIES_MAX + 1u,
-	       "provenance candidate traversal stops after observing one entry beyond its output capacity");
 	Expect(GpuMemoryCreationContentOrigin(GpuMemoryObjectType::VertexBuffer, false, false) ==
 	               GpuMemoryContentOrigin::CpuUpload &&
 	           GpuMemoryCreationContentOrigin(GpuMemoryObjectType::Texture, true, false) ==
