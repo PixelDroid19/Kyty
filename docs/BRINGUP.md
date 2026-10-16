@@ -131,6 +131,11 @@ fail on the current HEAD before acting on them.
     road correctly (44.8 against 47.0 us per draw at about 480 draws per
     frame); the fishing
     dock is unchanged visually at 44 us per draw and about 17 fps.
+  - AMD (integrated Radeon, same binary, strict): day one is reached and the
+    captures match the Intel ones. 31 us per draw, 2 fence waits for 3.3 ms
+    per frame, about 10 fps with a 98 ms median frame; the command processor
+    takes 30.5 ms of it while `gpu_busy_percent` averages 77% over 40 s, so
+    on this host the frame is bound by the GPU at 3840x2160.
   - Still open in this title: a 1920x1080 zero fill contained in a texture
     still refuses (about 8.6 ms per frame of fence waits remain). The frame
     is not bound by the command processor: a sampler at day one shows the
