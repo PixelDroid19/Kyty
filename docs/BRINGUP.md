@@ -9,6 +9,119 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Role-playing title: story start, three stops removed (2026-10-17)
+
+Route: the menus route until 70 s, then cross every 2 s. It starts a
+traveler's story at about 85 s. Intel Arc A770, strict, Silent.
+
+### 1. `SAMPLE_CD` slopes after a restored WQM copy (5e5d54a4)
+
+- Stop: `shader emitter missing ... inst=ImageSampleCd` at pc 0x3dc, 0x4a8 or
+  0x4fc, depending on which shader compiled first.
+- Shape, in four pixel shaders (ray-march passes, four `SAMPLE_CD` each):
+  - `S_WQM_B64`, then `S_MOV_B64 sX, exec` inside the plain WQM prefix.
+  - Each loop narrows EXEC (`V_CMPX`, `S_ANDN2_B64 exec`). After it,
+    `S_MOV_B64 exec, sX` restores the copy.
+  - The next loop's slopes are fixed quad broadcasts (DPP quad_perm
+    0x00/0x55/0xaa/0xff) subtracted after that restore.
+  - The fourth loop reuses slopes built after an earlier restore, untouched
+    across the narrowed loop in between.
+  - Sources include `V_ADD_F32`, `V_MUL_F32` and a `V_MAC_F32` whose
+    accumulator was written in the prefix.
+- The proof accepted only slopes built in the prefix. The `SAMPLE_CD` emitter
+  needs quad-uniform user gradients.
+- Contract implemented (`ShaderImageGradientProof.cpp`):
+  - One forward walk over the static CFG from the prefix boundary.
+  - Outside a whole-quad interval, a write clears both facts for its
+    registers. The facts are "uniform across the quad" and "fully written
+    while the quad was whole". EXEC may cover part of a quad there, and the
+    other lanes keep stale values.
+  - A whole-quad interval is the straight run after `S_MOV_B64 exec, sX`. It
+    requires all of:
+    - sX was copied from EXEC inside the WQM prefix;
+    - nothing overwrites sX between the copy and the restore;
+    - no edge returns from past the restore to it or before it;
+    - nothing enters the run except through the restore.
+  - Inside it, the prefix transfer runs again.
+  - `V_ADD_F32` and `V_MUL_F32` with plain sources count as full writes, like
+    `V_MAD_F32`.
+  - A copy taken before `S_WQM` (the live mask) never opens an interval.
+- Verified:
+  - A temporary diagnostic (removed) printed the verdict for every
+    `SAMPLE_CD` the title parsed. All 15 sites in 4 shaders were admitted:
+    `0ca445a8`, `51db2b69`, `bf209fbf` and `ee9c2b26`.
+  - An offline replay of the dumped programs agreed.
+  - Unit tests: `EmulatorImageGradientProof*` and `EmulatorShaderMimg*`, 64
+    tests (eight new). The shader and compute-wave suites passed (472 tests).
+- Not verified: the story draws themselves. Every capture so far is from the
+  first 80 s, and the title stops about 15 s after the story starts.
+
+### 2. Compute store into a D16 depth plane (fbc469af)
+
+- Stop: `storage image has no compatible Vulkan view`, with these values:
+  - backing D16 (`vk_format=124`), 2048×2048;
+  - descriptor format 7 (R16 UNORM), tile 24, 2D array with one layer.
+- Producer:
+  - A generic fill kernel: an 8×8 group storing a constant at
+    (x, y, layer).
+  - The depth was an exact match, and the stage was compute.
+- Vulkan has no storage depth image. The depth storage plane (7fe90864)
+  covered only D32 with an R32F copy.
+- Fix:
+  - The plane format follows the depth texel size: R32F for D32 and D32S8,
+    R16 UNORM for D16 and D16S8.
+  - `UtilCopyTexelBits` pairs a depth plane only with a colour format of the
+    same texel size, and sizes its staging by that texel.
+  - The depth-aspect buffer copy of D16 is 16 bits per texel, so the bits are
+    unchanged both ways.
+- Verified: the next strict run passed that dispatch.
+
+### 3. Growing a mipmapped storage array (8d31a270)
+
+- Stop: `unknown relation: StorageTexture - IsContainedWithin -
+  StorageTexture`. The array is 128×128, format 71, eight mips, tile 27,
+  type 13. A one-layer view at base 0 was followed by a two-layer view at
+  base 1, at the same address.
+- The growth copy (a34392d5) required one mip level.
+- Contract: each Gen5 slice holds its whole mip chain. This is
+  `Gen5GetTextureArrayLayout`'s tile-27 mip slice, and slice size
+  0x30000 = 1/2 of 0x60000.
+- Fix: when both descriptors name the same chain, the prefix layers are
+  copied at every level.
+- Verified:
+  - The next strict run grew the array to six layers.
+  - Unit test: `StorageTextureGrowthCopiesGpuOwnedArrayPrefix`, which covers
+    an equal and a shorter chain.
+
+### Open: a one-layer view inside the grown array
+
+- Stop, about 96 s in (`GpuMemoryCreate.cpp`, `unknown relation:
+  StorageTexture - Contains - StorageTexture`):
+  - The live backing has six layers. It was created for a view of slice 5
+    (`depth=6 base_array=5`, 0x120000 bytes).
+  - The new descriptor names slice 0 alone: `depth=1 base_array=0`,
+    `base_level=1`, 0x30000 bytes, at the same address.
+- Do not create a separate one-layer image, whether from guest bytes or from
+  a copy of layer 0. The backing and the view diverge on the next write.
+- Contract to implement: the descriptor is a view of the live backing, at
+  layer (slice offset + base_array) and level base_level. The view slots are
+  a fixed array today, so this needs a bounded (layer, level) view cache,
+  freed with the image.
+- Evidence still needed:
+  - which shader binds the view;
+  - whether it stores or only loads;
+  - whether the whole array is sampled afterwards.
+
+### Open: device loss on queue 9
+
+- `vkWaitForFences failed: result=-4 queue=9` at
+  `GraphicsRenderCommandBuffer.cpp:1974`.
+- Seen in 1 of 3 runs of this route: the run with shader logging, on a
+  build that carried inactive env-gated diagnostics.
+- The last shader compiled was an array image copy compute shader: an
+  `IMAGE_LOAD`/`IMAGE_STORE` whose layer is `s16 + s26`.
+- Not attributed.
+
 ## Role-playing title: wave64 resolve pass under paired transport (2026-10-17)
 
 The role-playing title ran its menus and the traveler selection at about
@@ -60,9 +173,12 @@ native-equivalence proof refused, so it ran under paired 64-on-32 transport.
   - A pair of draws (48 vertices × 10 instances): about 9.5 ms.
   - A full-screen triangle: about 7.9 ms.
   - A compute pass of 1152 groups: about 2.3 ms.
-- The `ImageSampleCd` stop listed in the main sweep below happens on main
-  only. Travel carries the per-pixel user-derivative emitter and passes that
-  load (verified in a 180 s run with shader logging).
+- Correction (same day): an earlier version of this entry said the
+  `ImageSampleCd` stop in the main sweep below happens on main only. That was
+  wrong. The 180 s run behind it stayed on the traveler selection. Once a
+  route starts a traveler's story (about 85 s in), travel stops at the same
+  `SAMPLE_CD` refusal. The faster title reaching it sooner is frontier
+  movement, not a regression; see the next entry.
 - Unit tests: `EmulatorComputeWaveNativeEquivalence` (16, two new). The
   shader suites passed (506 tests).
 - Regression check, Intel, strict, 22 titles: status and capture count match
