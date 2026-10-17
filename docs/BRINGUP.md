@@ -9,6 +9,58 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Platformer pair: intro cinematics were black (2026-10-17)
+
+Both Unity platformers showed black for their intro cinematics. HK's intro
+ends in a second video, and after the first one the screen stayed black.
+The contract, the guest evidence and the exclusion are in
+`docs/avplayer-video-path.md` ("Jump and loop contract").
+
+- **Cause, part 1: the jump while paused.** The guest prepares each video in
+  four steps:
+  1. play;
+  2. take one frame;
+  3. pause and jump to 0;
+  4. wait up to 10 s for the jump warning and a frame with a new timestamp.
+
+  `JumpToTime` only reset counters, and nothing was delivered while paused, so
+  every video timed out after six frames and was stopped.
+- **Cause, part 2: looping.** The guest enables looping and detects the end
+  through the loop's backward timestamp. The real decoder never looped, so
+  after the last frame the guest waited forever.
+- **Fix:**
+  - `Decoder::Seek` stops the decode worker, seeks the container, flushes the
+    codecs and the resampler, and drops frames that end before the target.
+    `EndOfStream()` stays false throughout.
+  - `JumpToTime` seeks while it holds the player's decoder lock exclusively,
+    restarts the media clock at the target, and opens a one-frame window
+    while paused.
+  - A looping real stream is rewound at its end.
+- **Verified (Intel, strict, clean binary):**
+  - Insect platformer, with a route that does not skip: video 1 plays all
+    906 frames (0–29.9 s) and video 2 plays to 38 s. The title then reaches
+    gameplay with the HUD.
+  - The sequel's 79.6 s intro plays to the end. The starting area then loads
+    in about 20 s and reaches gameplay.
+  - Normal play route: insect platformer 95–315 fps, sequel 76–294 fps
+    (capture method).
+  - Delivery is paced by the guest at the media rate: 33 ms per frame at
+    30 fps, 40 ms at 25 fps.
+  - `EmulatorAudio.*`: 121 tests pass, including the new seek test, with a
+    local synthetic clip in `KYTY_AVPLAYER_TEST_MEDIA`.
+- **Regression set.** Titles that import the jump or loop NIDs and ship video:
+  - Puzzle-platformer: 158–236 fps, no regression.
+  - Garden title: 74–295 fps, no regression.
+  - First-person puzzle title: stalls early, at frame 177 on a
+    `gfx_storage_frontier` refusal. Earlier runs stalled at frames 92, 332
+    and 134, so the stall predates this change.
+  - Brawler: stops at 61 s on a read at `0x58`, with the same crash signature
+    as 5 earlier runs since 2026-10-14. Pre-existing.
+  - Other importers ship no video files.
+- **Exclusion:** delivering the jump warning on the next guest call instead of
+  synchronously changed nothing.
+- **Not run:** AMD (the iGPU still needs a host reboot).
+
 ## Platformer pair: remaining device-address waits and boot time (2026-10-17)
 
 Measured on 9988930f (Intel, strict) after the two changes below. No code
@@ -219,6 +271,11 @@ change came out of it. These are the results and the exclusions.
   - The rerun on the same binary passed. Earlier runs of this title never
     hit it: the main18 Intel and AMD sweeps and the AMD platformer rerun,
     200 s each.
+  - A second occurrence, `Texture - Crosses - StorageTexture`: a 256 KiB
+    storage image at 22 s, in a run with console logging (2026-10-17). The
+    console output changed the timing. The same relation family appears at
+    a different time, which points to allocation placement rather than one
+    fixed scene.
   - Direction: decide from the guest's descriptors whether the storage image
     reinterprets the texture's bytes (seed from guest memory and link, as
     `GpuMemoryAllowsStorageTextureContainedInRenderTarget` does) or only
