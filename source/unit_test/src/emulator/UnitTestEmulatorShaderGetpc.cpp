@@ -5,8 +5,10 @@
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
+#include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
 #include "Emulator/Log.h"
 
 #include <array>
@@ -327,6 +329,58 @@ TEST(EmulatorShaderGetpc, BufferNamespaceClassificationMatchesLoweringAndIgnores
 	EXPECT_FALSE(ShaderStorageBufferResourceIsBound(bind, invalid));
 	const ShaderOperand negative {.type = ShaderOperandType::Sgpr, .register_id = -1, .size = 4};
 	EXPECT_FALSE(ShaderStorageBufferResourceIsBound(bind, negative));
+}
+
+// A bound V# register that S_GETPC redefines holds a guest base afterwards; the
+// binding's descriptor slot index is valid only while it holds user data.
+TEST(EmulatorShaderGetpc, RedefinedBoundDescriptorReadsRuntimeDescriptor)
+{
+	const ShaderOperand descriptor {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 4};
+	const auto scalar_load = [&](uint32_t pc, int dst)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = pc;
+		inst.type    = ShaderInstructionType::SBufferLoadDword;
+		inst.dst     = {.type = ShaderOperandType::Sgpr, .register_id = dst, .size = 1};
+		inst.src_num = 2;
+		inst.src[0]  = descriptor;
+		inst.src[1]  = {.type = ShaderOperandType::LiteralConstant, .size = 1};
+		return inst;
+	};
+	ShaderInstruction getpc {};
+	getpc.pc   = 8;
+	getpc.type = ShaderInstructionType::SGetpcB64;
+	getpc.dst  = {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 2};
+	ShaderInstruction vector_load {};
+	vector_load.pc      = 16;
+	vector_load.type    = ShaderInstructionType::BufferLoadDword;
+	vector_load.dst     = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	vector_load.src_num = 3;
+	vector_load.src[0]  = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	vector_load.src[1]  = descriptor;
+	ShaderInstruction end {};
+	end.pc   = 24;
+	end.type = ShaderInstructionType::SEndpgm;
+
+	ShaderCode code;
+	code.GetInstructions().Add(scalar_load(0, 20));
+	code.GetInstructions().Add(getpc);
+	code.GetInstructions().Add(scalar_load(12, 21));
+	code.GetInstructions().Add(vector_load);
+	code.GetInstructions().Add(end);
+
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num       = 1;
+	bind.storage_buffers.start_register[0] = 12;
+	ShaderCollectRedefinedBufferDescriptors(code, &bind, 0, *ShaderScalarFlowOf(code));
+
+	ASSERT_EQ(bind.redefined_descriptor_consumers.Size(), 2u);
+	EXPECT_EQ(bind.redefined_descriptor_consumers.At(0), 12u);
+	EXPECT_EQ(bind.redefined_descriptor_consumers.At(1), 16u);
+	const auto& instructions = code.GetInstructions();
+	EXPECT_FALSE(ShaderScalarBufferUsesRuntimeDescriptor(bind, instructions.At(0)));
+	EXPECT_TRUE(ShaderScalarBufferUsesRuntimeDescriptor(bind, instructions.At(2)));
+	EXPECT_TRUE(ShaderVectorBufferUsesRuntimeDescriptor(bind, instructions.At(3)));
 }
 
 static String8 VertexScalarProbeSource(bool enabled, uint32_t loads)

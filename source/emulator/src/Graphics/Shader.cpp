@@ -3697,6 +3697,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// After compaction, so the recorded resource indices stay final.
 	if (code != nullptr && !vertex_resource_types)
 	{
+		// Before assembly, whose resources reuse their consumer's register.
+		ShaderCollectRedefinedBufferDescriptors(*code, bind, user_data_register_base, *code_flow);
 		ShaderCollectAssembledBufferDescriptors(*code, bind, user_sgpr, user_sgpr_num, user_data_register_base, *code_flow);
 	}
 }
@@ -5391,6 +5393,12 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(record.consumer_pc);
 		ret->ids.Add(static_cast<uint32_t>(record.register_id));
 		ret->ids.Add(static_cast<uint32_t>(record.resource_index));
+	}
+
+	ret->ids.Add(bind.redefined_descriptor_consumers.Size());
+	for (const auto pc: bind.redefined_descriptor_consumers)
+	{
+		ret->ids.Add(pc);
 	}
 
 	ret->ids.Add(bind.zero_sbuffer_resources.buffers_num);
