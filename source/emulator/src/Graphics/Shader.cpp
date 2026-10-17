@@ -23,6 +23,7 @@
 #include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
 #include "Emulator/Graphics/ShaderFragmentMaskFlow.h"
 #include "Emulator/Graphics/ShaderNggFront.h"
+#include "ShaderLaneFlow.h"
 #include "ShaderNativeWaveInternal.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderProgramSnapshot.h"
@@ -527,6 +528,11 @@ static bool ShaderVccWordIsWaveUniform(const ShaderCode& code, ShaderOperandType
 		{
 			continue;
 		}
+		// A scalar memory load fills VCC with one word the whole wave shares.
+		if (LaneFlow::IsScalarLoad(definition.type))
+		{
+			return true;
+		}
 		// Only the scalar select chain observed in the material shader is admitted.
 		// Vector compares and unknown VCC writers remain lane-dependent.
 		if (definition.type != ShaderInstructionType::SCselectB32 || definition.src_num != 2 || definition.dst.size > 1)
@@ -548,6 +554,36 @@ static bool ShaderVccWordIsWaveUniform(const ShaderCode& code, ShaderOperandType
 	}
 
 	return false;
+}
+
+// An image load reads one texel per lane from its T# and its address VGPRs. DIM equals the T#
+// type (RDNA2 ISA MIMG DIM field) and fixes the coordinates read (table 42): 1D x; 2D x,y;
+// 3D/cube x,y,z or face; 1D array x,slice; 2D array x,y,slice; 2D MSAA x,y,fragment; 2D MSAA
+// array x,y,slice,fragment; then the level of a load_mip. When those words and the T# are
+// shared by the wave, every lane reads the same texel.
+static bool ShaderImageLoadIsWaveUniform(const ShaderCode& code, const ShaderInstruction& load, uint32_t load_index, uint32_t depth)
+{
+	static constexpr int kCoordinates[8] = {1, 2, 3, 3, 2, 3, 3, 4};
+	const int            addresses        = kCoordinates[load.mimg_dimension & 7u] + (load.mimg_explicit_lod ? 1 : 0);
+	if (load.src_num != 2 || load.src[0].type != ShaderOperandType::Vgpr || load.src[1].type != ShaderOperandType::Sgpr ||
+	    (load.mimg_address_num != 0 && load.mimg_address_num < addresses))
+	{
+		return false;
+	}
+	for (int address = 0; address < addresses; ++address)
+	{
+		ShaderOperand word = load.mimg_address_num != 0 ? load.mimg_address[address] : load.src[0];
+		if (load.mimg_address_num == 0)
+		{
+			word.register_id += address;
+			word.size = 1;
+		}
+		if (!ShaderOperandIsWaveUniform(code, word, load_index, depth + 1))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOperand& operand, uint32_t use_index,
@@ -583,7 +619,8 @@ static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOpera
 			continue;
 		}
 
-		if (!ShaderInstructionIsPureLaneAlu(definition))
+		const bool image_load = definition.type == ShaderInstructionType::ImageLoad;
+		if (!image_load && !ShaderInstructionIsPureLaneAlu(definition))
 		{
 			return false;
 		}
@@ -600,6 +637,10 @@ static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOpera
 			}
 		}
 
+		if (image_load)
+		{
+			return ShaderImageLoadIsWaveUniform(code, definition, static_cast<uint32_t>(index), depth);
+		}
 		for (int source = 0; source < definition.src_num; ++source)
 		{
 			if (!ShaderOperandIsWaveUniform(code, definition.src[source], static_cast<uint32_t>(index), depth + 1))

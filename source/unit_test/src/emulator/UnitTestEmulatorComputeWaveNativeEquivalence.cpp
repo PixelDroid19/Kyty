@@ -161,4 +161,30 @@ TEST(EmulatorComputeWaveNativeEquivalence, StillRejectsALoopExitedThroughExec)
 	ExpectNativeEquivalence({kExecFull, kMovV1Zero, kAddV1One, kCmpV1Below8, kBackExecz3, kEnd}, false, 0x10u, "not a forward region");
 }
 
+// READFIRSTLANE of a value every lane shares reads the same word from any lane. A 2D image load
+// reads x and y only (DIM matches the T# type), so the per-lane VGPR after them is not an input.
+static constexpr uint32_t kMovV2Zero      = 0x7e040280u; // v_mov_b32 v2, 0
+static constexpr uint32_t kMovV3Zero      = 0x7e060280u; // v_mov_b32 v3, 0
+static constexpr uint32_t kMovV3V0        = 0x7e060100u; // v_mov_b32 v3, v0 (v0 is a per-lane input)
+static constexpr uint32_t kMovV4V0        = 0x7e080100u; // v_mov_b32 v4, v0
+static constexpr uint32_t kImageLoad2d    = 0xf0000108u; // image_load v0, v[2:4], s[0:7] dmask:0x1 dim:2D
+static constexpr uint32_t kImageLoadAddr  = 0x00000002u;
+static constexpr uint32_t kBufferVccLo    = 0xf4201a88u; // s_buffer_load_dword vcc_lo, s[16:19], null
+static constexpr uint32_t kNullOffset     = 0xfa000000u;
+static constexpr uint32_t kWaitLgkm0      = 0xbf8cc07fu; // s_waitcnt lgkmcnt(0)
+static constexpr uint32_t kMulV0VccLo     = 0x1000006au; // v_mul_f32 v0, vcc_lo, v0
+static constexpr uint32_t kFirstlaneV0    = 0x7e000500u; // v_readfirstlane_b32 s0, v0
+
+TEST(EmulatorComputeWaveNativeEquivalence, AdmitsReadfirstlaneOfAUniformImageLoad)
+{
+	ExpectNativeEquivalence({kMovV2Zero, kMovV3Zero, kMovV4V0, kImageLoad2d, kImageLoadAddr, kBufferVccLo, kNullOffset, kWaitLgkm0,
+	                         kMulV0VccLo, kFirstlaneV0, kEnd},
+	                        true, 0, "");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsReadfirstlaneOfAPerLaneImageCoordinate)
+{
+	ExpectNativeEquivalence({kMovV2Zero, kMovV3V0, kImageLoad2d, kImageLoadAddr, kFirstlaneV0, kEnd}, false, 0x10u, "another lane");
+}
+
 UT_END();

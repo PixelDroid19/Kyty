@@ -234,7 +234,9 @@ struct DecodedInstruction
 	bool     has_target           = false;
 };
 
-ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, DecodedInstruction* out)
+// uniform_copy: a READFIRSTLANE whose source every active lane shares under the launch EXEC; each
+// lane then reads the word the guest's first active lane holds.
+ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, bool uniform_copy, DecodedInstruction* out)
 {
 	out->vector = IsVectorType(instruction.type);
 	const auto name = magic_enum::enum_name(instruction.type);
@@ -243,7 +245,7 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, Dec
 	out->writes_scc_data    = NameStartsWith(name, "SCmp") || instruction.type == ShaderInstructionType::SAbsI32 ||
 	                          instruction.type == ShaderInstructionType::SAbsdiffI32 ||
 	                          instruction.type == ShaderInstructionType::SSubbU32 || instruction.type == ShaderInstructionType::SAshrI64;
-	if (IsLaneCrossingType(instruction.type))
+	if (IsLaneCrossingType(instruction.type) && !uniform_copy)
 	{
 		return Failure(instruction.pc, "instruction reads another lane or a wave-wide count");
 	}
@@ -362,7 +364,10 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, Dec
 			continue;
 		}
 		out->defs |= units;
-		if (out->vector || saveexec)
+		if (uniform_copy)
+		{
+			out->data_defs |= units;
+		} else if (out->vector || saveexec)
 		{
 			// Vector results in scalar registers are compare/carry masks.
 			out->mask_defs |= units;
@@ -664,7 +669,9 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 	for (uint32_t index = 0; index < count; ++index)
 	{
 		const auto& instruction = instructions.At(index);
-		const auto  result      = Decode(instruction, &decoded[index]);
+		const bool  uniform_copy =
+		    instruction.type == ShaderInstructionType::VReadfirstlaneB32 && ShaderReadfirstlaneCanUseUniformCopy(code, index);
+		const auto  result      = Decode(instruction, uniform_copy, &decoded[index]);
 		if (!result.supported)
 		{
 			return result;

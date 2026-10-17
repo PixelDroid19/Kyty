@@ -14,7 +14,8 @@ namespace Kyty::Libs::Graphics {
 //
 // - no instruction that reads or writes another lane's data or a wave-wide
 //   count (lane reads/writes, MBCNT, WQM, DS append/consume, DPP, VCCZ/EXECZ
-//   operands, program-counter writes, messages);
+//   operands, program-counter writes, messages), except a READFIRSTLANE whose
+//   source is proven wave-uniform under the launch EXEC;
 // - every EXEC/VCC value used as a mask is consumed only per lane, and every
 //   scalar register that may hold a mask at a program point is never read there
 //   as uniform data (and vice versa); mask constants are only 0 or all ones;
