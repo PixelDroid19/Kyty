@@ -523,9 +523,18 @@ is attributed yet.
     - A published walkthrough places a Shell Shards cave to the right of the
       start. Its screenshot of the start room shows dark soft-edged corners
       too, but no hardware image of the cave was found.
-    - Next: dump the draws of a frame at the edge and a frame inside the
-      pocket, and check whether the black sprites' vertex alpha or colour
-      constant changes when the player enters.
+    - Excluded on Intel for this sequence, a cover mask stuck partway:
+      draws dumped one frame in 100 from the edge through the pocket (a
+      bounded diagnostic, not committed). Every sprite drawn with black
+      vertex colour carries alpha 255 in the guest's vertex data in every
+      sampled frame, and none has a partial alpha. The set of black sprites
+      changes in the frame where the pocket appears: other atlas sprites
+      enter and leave the view, as when the camera reaches a new area. The
+      guest asks for these opaque black silhouettes and the GPU draws them.
+    - Still open: whether the silhouettes' shapes are right. Their soft
+      edges come from the alpha of BC7 atlas textures. A wrong alpha decode
+      would widen them, but a decode fault would also change the shapes of
+      the lit sprites drawn from the same atlases, which look correct.
   - The maintainer's screenshot was taken on the AMD iGPU and was not kept
     by the session; the AMD-only reading rested on it. Its description
     (soft-edged black mass over a lit forest, player at the right edge)
