@@ -1651,6 +1651,13 @@ static void PreserveExpandedDccAttachment(CommandBuffer* buffer, const HW::Rende
 	RenderColorInfo color {};
 	EXIT_IF(!DescribeRenderColorSlotInfo(buffer, rt, &color));
 	const auto& attachment = color.attachment[0];
+	if (attachment.type == RenderColorType::DisplayBuffer)
+	{
+		// The host display image is rendered with expanded color as well; only
+		// its registered backing has to exist.
+		EXIT_IF(attachment.existing_video_image == nullptr);
+		return;
+	}
 	if (attachment.type != RenderColorType::RenderTexture)
 	{
 		EXIT("DCC decompression requires an existing render texture\n");
