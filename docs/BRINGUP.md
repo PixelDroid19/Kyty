@@ -9,33 +9,28 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
-## Racing title on AMD: intermittent geometry corruption (open, 2026-10-17)
+## Racing title on AMD: corruption from a degraded GPU, not from code (2026-10-17)
 
 - **Symptom (RADV, Radeon 610M, Mesa 26.2.4, strict 200 s route).** From the
-  track-select menu onward, triangles stretch into spikes across the screen,
-  walls and the sky show stripes, and the copyright text loses a span. The
-  race itself is reachable; captures report 16-50 fps, but frames this
-  corrupted are not evidence for the 20-30 fps target.
-- **Runs.** One clean set overnight (04:51 UTC, main source). Five corrupted
-  sets in the afternoon with identical harness configuration: the current
-  branch head, binaries saved before the write-back and timeline commits, the
-  branch with the three shader-codegen commits of 10-17 reverted, and a binary
-  built from main's exact source. Intel runs of the same binaries are clean.
-- **Excluded.**
-  - The storage write-back and queue-timeline commits (binary saved before
-    them is corrupted).
-  - The VALU select, SAMPLE_CD proof and wave64 READFIRSTLANE commits (revert
-    run is corrupted).
-  - All branch code after main (main-source control is corrupted).
-  - Driver, kernel and harness changes: no package or script change since the
-    clean run, and no amdgpu kernel message since 04:00 local.
-- **Conditions that differed.** Other host processes in the afternoon: a
-  second session's .NET game at ~110% CPU, and browser and chat clients
-  holding the AMD render node.
-- **Next.** The pattern (clean on Intel, timing-dependent on RADV) points at
-  a missing barrier or cache-visibility gap. Run Khronos synchronization
-  validation to the menu (the validation layer is not installed on this
-  host), then, if clean, test CPU/GPU races on imported guest memory.
+  first menu onward, full-screen backgrounds are missing and older frame
+  contents show through as stretched triangles and stripes; text loses spans.
+- **Runs.** One clean set at 04:51Z. Six corrupted sets in the afternoon with
+  identical harness configuration: the branch head, two binaries saved before
+  the write-back and timeline commits, the branch with the three
+  shader-codegen commits of 10-17 reverted, a binary built from main's exact
+  source, and the branch head with every submission followed by
+  `vkQueueWaitIdle`. Khronos synchronization validation reported no hazard.
+  Intel runs of the same binaries were clean.
+- **Cause.** The gfx ring timeouts at 05:35Z and 05:38Z (puzzle and
+  role-playing titles, recorded in the regression sweep below) came after the
+  clean set and left the GPU degraded; ring resets alone did not restore it.
+- **Verified.** A full GPU reset (`amdgpu_gpu_recover` in debugfs; the AMD
+  GPU drives no display here) restored it: the branch head then gave seven
+  clean captures through two races (in-race 38.6, 20.9, 40.1 and 17.7 fps)
+  with no kernel message.
+- **Rule.** After any `ring gfx.*timeout` in `journalctl -k`, reset the GPU
+  or reboot before reading another AMD result. The timeouts themselves are an
+  open emulator defect (see the puzzle and role-playing device-lost entry).
 
 ## Anime fighter: storage write-back on the label path (2026-10-17)
 
@@ -694,8 +689,8 @@ Open defects found by the sweep, none of them caused by the merge:
     clean.
   - The binary differed from the sweep build only by a diagnostic sink that
     is disabled without its environment variable, so the change is the host
-    state, not the code. It is not yet confirmed by a clean run after a
-    reboot.
+    state, not the code. Confirmed on 10-17: after a full GPU reset the
+    racing title rendered cleanly again with the same branch head.
   - Consequences for this sweep: the anime fighting title's AMD row was taken
     after the timeouts and must be repeated. So must the AMD runs behind the
     gothic platformer's `RADV_PERFTEST` exclusion. Its black screen itself
