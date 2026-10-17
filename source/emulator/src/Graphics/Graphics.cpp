@@ -1068,6 +1068,12 @@ struct CommandBuffer
 		const auto up_addr     = reinterpret_cast<uintptr_t>(cursor_up);
 		const auto down_addr   = reinterpret_cast<uintptr_t>(cursor_down);
 
+		// A buffer that has not received memory yet has all four pointers null:
+		// it holds zero dwords and its callback supplies the first block.
+		if ((bottom_addr | top_addr | up_addr | down_addr) == 0)
+		{
+			return true;
+		}
 		if (bottom_addr == 0 || (bottom_addr | top_addr | up_addr | down_addr) % alignof(uint32_t) != 0 || bottom_addr > up_addr ||
 		    up_addr > down_addr || down_addr > top_addr)
 		{
@@ -1091,8 +1097,8 @@ struct CommandBuffer
 		}
 		const auto up_addr      = reinterpret_cast<uintptr_t>(cursor_up);
 		const auto down_addr    = reinterpret_cast<uintptr_t>(cursor_down);
-		const auto available_dw = (down_addr - up_addr) / sizeof(uint32_t);
-		return static_cast<uint32_t>(available_dw) - reserved_dw;
+		const auto available_dw = static_cast<uint32_t>((down_addr - up_addr) / sizeof(uint32_t));
+		return available_dw > reserved_dw ? available_dw - reserved_dw : 0;
 	}
 
 	KYTY_SYSV_ABI bool ReserveDW(uint32_t num_dw)

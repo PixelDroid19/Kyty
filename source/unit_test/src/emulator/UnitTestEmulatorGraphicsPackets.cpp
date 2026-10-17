@@ -116,6 +116,9 @@ bool KYTY_SYSV_ABI TestCommandBufferRefill(Gen5::CommandBuffer* opaque, uint32_t
 	state->calls++;
 	EXPECT_EQ(need_dw, state->expected_need_dw);
 
+	// The callback hands over a whole new block.
+	dcb->bottom      = state->begin;
+	dcb->top         = state->end;
 	dcb->cursor_up   = state->begin;
 	dcb->cursor_down = state->end;
 	if (state->leave_invalid)
@@ -363,6 +366,32 @@ TEST(EmulatorGraphicsPackets, RejectsInvalidCommandBufferBeforeCallingRefillCall
 	                                     reinterpret_cast<void*>(0x12345678u), 0u),
 	          nullptr);
 	EXPECT_EQ(state.calls, 0u);
+}
+
+TEST(EmulatorGraphicsPackets, RefillsEmptyCommandBufferBeforeFirstPacket)
+{
+	InitCommandBufferTestRuntime();
+
+	// A buffer that never received memory has all four pointers null.
+	uint32_t                 storage[16] = {};
+	TestCommandBuffer        cb {};
+	CommandBufferRefillState state {storage, storage + 16, 5u, 0u, false};
+	cb.callback  = TestCommandBufferRefill;
+	cb.user_data = &state;
+
+	uint32_t* cmd = Gen5::GraphicsCbDispatch(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 2u, 3u, 4u, 0u);
+	ASSERT_EQ(cmd, storage);
+	EXPECT_EQ(state.calls, 1u);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0u));
+}
+
+TEST(EmulatorGraphicsPackets, RejectsEmptyCommandBufferWithoutRefillCallback)
+{
+	InitCommandBufferTestRuntime();
+
+	TestCommandBuffer cb {};
+	EXPECT_EQ(Gen5::GraphicsCbDispatch(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 2u, 3u, 4u, 0u), nullptr);
 }
 
 TEST(EmulatorGraphicsPackets, TreatsZeroPm4DwordAsSinglePadding)
