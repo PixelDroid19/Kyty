@@ -2553,11 +2553,15 @@ TEST(EmulatorAudio, AudioOut2PushRejectsContextRecreatedWhileBlocking)
 	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
 	const int32_t first_context = AudioOut2::HostStateTest::CreateContext();
 	ASSERT_GT(first_context, 0);
+	// A full queue blocks the push for one grain. The largest grain (4096
+	// frames, ~85 ms at 48 kHz) keeps it blocked well past the destroy below.
+	AudioOut2::HostStateTest::SetContextGrain(first_context, 4096);
 	AudioOut2::HostStateTest::FillContextQueue(first_context);
 
 	std::atomic<int> blocking_result {0};
 	std::thread blocker([&] { blocking_result.store(AudioOut2::AudioOut2ContextPush(first_context, 1)); });
-	std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	// Long enough for the push to start waiting, short against the grain.
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
 	ASSERT_EQ(AudioOut2::AudioOut2ContextDestroy(first_context), 0);
 	const int32_t replacement_context = AudioOut2::HostStateTest::CreateContext();

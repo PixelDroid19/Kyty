@@ -75,6 +75,7 @@ int CreateContext();
 void FailNextSubmit();
 int  GetContextSinkHandle(int context);
 void FillContextQueue(int context);
+void SetContextGrain(int context, uint32_t grain);
 }
 
 } // namespace AudioOut2

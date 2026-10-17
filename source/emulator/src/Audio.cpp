@@ -734,6 +734,16 @@ void FillContextQueue(int context)
 	ctx.queue_used = ctx.queue_depth != 0 ? ctx.queue_depth : kDefaultQueueDepth;
 }
 
+void SetContextGrain(int context, uint32_t grain)
+{
+	std::lock_guard lock(g_audio_out2_mutex);
+	if (context < 1 || context > kMaxContexts || !g_contexts[context - 1].used)
+	{
+		return;
+	}
+	g_contexts[context - 1].grain = grain;
+}
+
 } // namespace HostStateTest
 
 // sceAudioOut2ContextDestroy (NID on6ZH7Abo10)
