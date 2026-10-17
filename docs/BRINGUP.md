@@ -46,9 +46,14 @@ fail on the current HEAD before acting on them.
     (`draw_index_buffer_binding_ns` 0), 3 transient probes (all hits) and
     no device-address preparation.
   - The changed admission never ran before those stalls, so this frame-3
-    boot stall is an independent, intermittent defect of the current tree.
-    It also weakens the attribution in "Index buffer objects through the
-    mapping: excluded (2026-10-11)": that stall had the same signature.
+    boot stall is an independent, intermittent defect. It also weakens the
+    attribution in "Index buffer objects through the mapping: excluded
+    (2026-10-11)": that stall had the same signature.
+  - It predates both of today's graphics changes. The run history holds the
+    same stall on builds f91e7106 (2026-10-14) and 4175df97 (2026-10-16):
+    6 of 85 recorded runs of the fishing title.
+  - It is a hang, not a slow boot. In 200 s runs, status still read frame 3
+    and 2 presents 168-204 s after the last present.
   - Open defect: the stall is at frame 3 with every guest thread waiting,
     and `sync-waits` is disabled by default.
   - Direction: enable sync-wait tracking and take host stacks of the
@@ -3371,7 +3376,7 @@ previous section; the count of live ranges stays open.
   index uploads drop the fence again.
 - 2026-10-17: the same frame-3 boot stall occurred in 2 of 10 boots. Both
   stalled before any index buffer was bound (see "Index snapshots over
-  linked surfaces"), so the stall does not depend on the index upload path.
+  linked surfaces"), so the stall can occur without the index upload path.
 - The Unity fishing title's frame time is per-draw binding work at about
   1,160 draws per frame: resource binding 40-44%, texture descriptors 18%,
   state setup 16-18%. Removing fence waits alone does not move it.
