@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 UT_BEGIN(EmulatorImageGradientProof);
@@ -90,6 +91,18 @@ ShaderInstruction Subtract(int destination, int base, int offset, uint16_t contr
 	instruction.src[0].dpp_bound_ctrl     = true;
 	instruction.src[1]                    = Vgpr(offset);
 	instruction.src_num                   = 2;
+	return instruction;
+}
+
+ShaderInstruction Add(int destination, ShaderOperand source0, ShaderOperand source1)
+{
+	ShaderInstruction instruction {};
+	instruction.type    = ShaderInstructionType::VAddF32;
+	instruction.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	instruction.dst     = Vgpr(destination);
+	instruction.src[0]  = source0;
+	instruction.src[1]  = source1;
+	instruction.src_num = 2;
 	return instruction;
 }
 
@@ -203,6 +216,56 @@ Program NativeProducers()
 	return {Wqm(), v42, v7, Mac(42, Sgpr(79), Vgpr(16)), DppMove(20, 7), DppMove(24, 42, 0xffu),
 	        Subtract(30, 7, 20, 0x55u), Subtract(31, 7, 20, 0xaau), Subtract(32, 42, 24, 0x55u),
 	        Subtract(33, 42, 24, 0xaau)};
+}
+
+ShaderInstruction ExecPairMove(int pair, bool restore)
+{
+	ShaderInstruction instruction {};
+	instruction.type   = ShaderInstructionType::SMovB64;
+	instruction.format = ShaderInstructionFormat::Sdst2Ssrc02;
+	ShaderOperand exec {};
+	exec.type               = ShaderOperandType::ExecLo;
+	exec.size               = 2;
+	instruction.dst         = restore ? exec : Sgpr(pair, 2);
+	instruction.src[0]      = restore ? Sgpr(pair, 2) : exec;
+	instruction.src_num     = 1;
+	return instruction;
+}
+
+ShaderInstruction ExecNarrow()
+{
+	ShaderInstruction instruction {};
+	instruction.type = ShaderInstructionType::VCmpxLtU32;
+	return instruction;
+}
+
+ShaderInstruction ScalarWrite(int destination)
+{
+	ShaderInstruction instruction {};
+	instruction.type   = ShaderInstructionType::SMovB32;
+	instruction.format = ShaderInstructionFormat::SVdstSVsrc0;
+	instruction.dst    = Sgpr(destination);
+	return instruction;
+}
+
+// Slopes built after EXEC returns to the copy taken inside the WQM prefix (the shape of a ray-march pass that
+// narrows EXEC in one loop, restores it and derives the next loop's slopes).
+Program RestoredProducers()
+{
+	Program program {Wqm(), ExecPairMove(30, false), ExecNarrow(), ExecPairMove(30, true)};
+	const auto producers = Producers();
+	program.insert(program.end(), producers.begin() + 1, producers.end());
+	return program;
+}
+
+bool AdmittedBefore(const Program& program, const Program& tail, bool use_nsa = false)
+{
+	auto complete = program;
+	complete.push_back(Sample(use_nsa));
+	complete.insert(complete.end(), tail.begin(), tail.end());
+	complete.push_back(End());
+	auto code = Build(complete);
+	return ShaderImageSampleCdHasQuadUniformGradients(code, static_cast<uint32_t>(program.size()));
 }
 
 bool Admitted(const Program& program, bool use_nsa = false, bool high_vaddr = false)
@@ -337,6 +400,80 @@ TEST(EmulatorImageGradientProof, RejectsBranchBypassAndIndirectControlFlow)
 	loop_kill.push_back(ConditionalBranch(-branch_index * 4));
 	loop_kill.push_back(Move(30, Vgpr(7)));
 	EXPECT_FALSE(Admitted(loop_kill));
+}
+
+TEST(EmulatorImageGradientProof, AcceptsSlopesAfterRestoringTheWqmCopy)
+{
+	EXPECT_TRUE(Admitted(RestoredProducers()));
+	EXPECT_TRUE(Admitted(RestoredProducers(), true));
+}
+
+TEST(EmulatorImageGradientProof, AcceptsSlopeSourcesFromFullAdds)
+{
+	auto added = Producers();
+	added[1]   = Add(7, Sgpr(16), Vgpr(3));
+	EXPECT_TRUE(Admitted(added));
+
+	added[1].src[1].dpp      = true;
+	added[1].src[1].dpp_ctrl = 0x55u;
+	EXPECT_FALSE(Admitted(added));
+}
+
+TEST(EmulatorImageGradientProof, AcceptsSlopesCarriedAcrossANarrowedRegion)
+{
+	auto carried = RestoredProducers();
+	carried.push_back(ExecNarrow());
+	carried.push_back(ExecPairMove(30, true));
+	EXPECT_TRUE(Admitted(carried));
+
+	carried.insert(carried.end() - 1, Move(31, Vgpr(7))); // Written while EXEC may cover part of a quad.
+	EXPECT_FALSE(Admitted(carried));
+}
+
+TEST(EmulatorImageGradientProof, AcceptsAccumulatorWrittenBeforeTheNarrowing)
+{
+	Program accumulated {Wqm(), Move(7, Sgpr(20)), ExecPairMove(30, false), ExecNarrow(), ExecPairMove(30, true), Mac(7, Sgpr(16), Vgpr(3))};
+	const auto producers = Producers();
+	accumulated.insert(accumulated.end(), producers.begin() + 2, producers.end());
+	EXPECT_TRUE(Admitted(accumulated));
+
+	accumulated.insert(accumulated.begin() + 4, Move(7, Vgpr(3))); // Rewritten while EXEC may cover part of a quad.
+	EXPECT_FALSE(Admitted(accumulated));
+}
+
+TEST(EmulatorImageGradientProof, RejectsRestoreOfACopyTakenBeforeWqm)
+{
+	auto live_mask = RestoredProducers();
+	std::swap(live_mask[0], live_mask[1]);
+	EXPECT_FALSE(Admitted(live_mask));
+}
+
+TEST(EmulatorImageGradientProof, AcceptsCopyReuseThatNeverReachesTheRestore)
+{
+	EXPECT_TRUE(AdmittedBefore(RestoredProducers(), {ScalarWrite(31)}));
+}
+
+TEST(EmulatorImageGradientProof, RejectsRestoreOfAnOverwrittenCopy)
+{
+	auto overwritten = RestoredProducers();
+	overwritten.insert(overwritten.begin() + 3, ScalarWrite(31));
+	EXPECT_FALSE(Admitted(overwritten));
+
+	// The overwrite follows the sample, but a back edge runs the restore again.
+	const auto restored    = RestoredProducers();
+	const auto branch_from = static_cast<int>(restored.size()) + 2;
+	EXPECT_FALSE(AdmittedBefore(restored, {ScalarWrite(31), ConditionalBranch((3 - branch_from - 1) * 4)}));
+
+	auto narrowed_copy = RestoredProducers();
+	std::swap(narrowed_copy[1], narrowed_copy[2]); // EXEC is narrowed before it is copied.
+	EXPECT_FALSE(Admitted(narrowed_copy));
+}
+
+TEST(EmulatorImageGradientProof, RejectsBranchIntoTheRestoredInterval)
+{
+	auto entered = RestoredProducers();
+	entered.insert(entered.begin() + 3, ConditionalBranch(8)); // Skips the restore and the first slope source.
+	EXPECT_FALSE(Admitted(entered));
 }
 
 UT_END();
