@@ -65,6 +65,34 @@ fail on the current HEAD before acting on them.
     text) and the racing title (125 s, in race).
   - Full unit suite: 2445 pass. Both gate scripts pass.
 
+## Review findings recorded for later (2026-10-17)
+
+An automated review of the main-sync pull request raised these. Each was
+checked against the code; none is hit by a title in the current strict runs.
+
+- `NetSocketAbort` (`Network.cpp:2111`): an abort with flags 0 while another
+  thread is blocked in a blocking recv or accept stops on
+  `EXIT_NOT_IMPLEMENTED`. This is a deliberate refusal, not a fake success:
+  a real abort must wake the blocked host call and make it return the abort
+  error. Direction: wake it (for example `shutdown` of the host descriptor
+  or a self-pipe in the wait), map the result to the guest's abort error
+  from a trace, and keep the pending-abort flags refused until they are
+  evidenced.
+- NGS2 sampler append (`AudioNgs2.cpp:2097-2105`, `Ngs2AppendSamplerPieces`)
+  is not transactional. When a later piece of a multi-piece APPEND is
+  unreadable or reaches `kMaxStreamPieces`, the earlier pieces are already
+  appended when the call returns `kNgs2InvalidControl`, so a retry would
+  duplicate audio. Direction: decode every piece first and commit them with
+  one sampler call that checks the length and piece limits for the whole
+  set.
+- NGS2 stream budget (`AudioNgs2.cpp:2088`): `Ngs2SampleBudgetFits` counts
+  the frames already played in the front streaming block, because
+  `Playback::DropPlayedFrames` only runs inside `AppendPiece`, after the
+  check. A stream that reaches the per-voice cap could then stall even
+  though most of its frames were consumed. Direction: release the played
+  frames before the budget check. The card title's 330 s run stays far
+  below the cap.
+
 ## Platformer pair: open defects seen after the glyph fix (2026-10-17)
 
 Recorded so that each one starts from evidence, not from scratch. None of them
@@ -75,9 +103,10 @@ is attributed yet.
   - Symptom: walking right from the sequel's start area, a large opaque
     black shape covers half the screen. The shape has scalloped, terrain-like
     edges and a soft teal fog drawn over its lower part. The player walks
-    into it and disappears, which makes the area unplayable. A 200 s AMD run
-    of the insect platformer shows a similar black region to the right of the
-    player in its first area.
+    into it and disappears, which makes the area unplayable. The insect
+    platformer's first area also shows a large black region, but that area
+    legitimately has dark foreground silhouettes. Do not chase it without a
+    reference image of the same spot.
   - When it was found: the maintainer saw it on the current tree. It predates
     the glyph fix; earlier scripted routes never left the start area, so
     captures did not show it. The scripted platformer route walks right only
