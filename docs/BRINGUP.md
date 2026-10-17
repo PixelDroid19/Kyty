@@ -9,6 +9,34 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Racing title on AMD: intermittent geometry corruption (open, 2026-10-17)
+
+- **Symptom (RADV, Radeon 610M, Mesa 26.2.4, strict 200 s route).** From the
+  track-select menu onward, triangles stretch into spikes across the screen,
+  walls and the sky show stripes, and the copyright text loses a span. The
+  race itself is reachable; captures report 16-50 fps, but frames this
+  corrupted are not evidence for the 20-30 fps target.
+- **Runs.** One clean set overnight (04:51 UTC, main source). Five corrupted
+  sets in the afternoon with identical harness configuration: the current
+  branch head, binaries saved before the write-back and timeline commits, the
+  branch with the three shader-codegen commits of 10-17 reverted, and a binary
+  built from main's exact source. Intel runs of the same binaries are clean.
+- **Excluded.**
+  - The storage write-back and queue-timeline commits (binary saved before
+    them is corrupted).
+  - The VALU select, SAMPLE_CD proof and wave64 READFIRSTLANE commits (revert
+    run is corrupted).
+  - All branch code after main (main-source control is corrupted).
+  - Driver, kernel and harness changes: no package or script change since the
+    clean run, and no amdgpu kernel message since 04:00 local.
+- **Conditions that differed.** Other host processes in the afternoon: a
+  second session's .NET game at ~110% CPU, and browser and chat clients
+  holding the AMD render node.
+- **Next.** The pattern (clean on Intel, timing-dependent on RADV) points at
+  a missing barrier or cache-visibility gap. Run Khronos synchronization
+  validation to the menu (the validation layer is not installed on this
+  host), then, if clean, test CPU/GPU races on imported guest memory.
+
 ## Anime fighter: storage write-back on the label path (2026-10-17)
 
 - **Observation (Intel, native 3840x2160 output).** ~8.3 fps, frame p50
