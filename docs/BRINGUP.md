@@ -520,10 +520,33 @@ is attributed yet.
   overlapping is the title's own transition. No capture isolates it yet;
   capture the moment before attributing it.
 - **Slow loading screens and first boot (sequel).** First start and some
-  loading screens take much longer than later ones. Not measured yet. The
-  persistent SPIR-V cache and the Vulkan pipeline cache store (`PipelineCacheStore.cpp`) both exist, so the first step is to
-  separate translation and pipeline creation from guest file I/O, by
-  comparing a cold-cache boot with a warm-cache boot on the same binary.
+  loading screens take much longer than later ones.
+  - Two causes found and fixed on 2026-10-17: each intro cinematic waited
+    out a 10 s guest timeout (see "Platformer pair: intro cinematics were
+    black"), and the host-write lease of every AMPR read scanned the whole
+    dirty-page table twice (~1.5 s per boot).
+  - Measured, Intel, cold caches (every harness run starts with empty SPIR-V,
+    Mesa and pipeline caches), agent perf snapshot every 5 s:
+    - Pipeline misses cost about 1.9 s across the whole boot, in bursts of
+      0.1-0.5 s when a new scene starts. Shader translation is not the long
+      wait.
+    - From the new-game prompt: the prologue poem shows "Loading..." until
+      the load ends, then "Press any button to skip". A cave scene with
+      "Loading..." follows, then ~16 s of black, then the first area fades in
+      over ~10 s.
+    - During those ~16 s the guest presents ~360 fps at ~10 draws per frame
+      and the command processor is busy 1.7 s of every 5 s. No thread uses
+      more than 40% of a core; the guest threads sleep on futexes (no
+      blocked guest condition wait with `KYTY_SLOT_TRACE`, no agent event).
+      AMPR and kernel AIO complete synchronously in the submitting thread, so
+      I/O completion latency is excluded.
+    - The same ~15 s of black follows the unskipped intro video. The
+      published description of the opening has the cage fall into a pit
+      before the player wakes at the bottom, which fits a scripted black
+      stretch. Not verified against hardware timing.
+  - Next, if the black still feels long: time the same transition on
+    hardware or a reference recording, and check whether the guest waits on
+    an audio cue (an audio clock that runs slow would stretch it).
 - **AMD frame rate (both).** In play the insect platformer runs at 26-28 fps
   and the sequel at 14-26 fps on the integrated RDNA2 GPU. On Intel the
   insect platformer runs at 86 fps. Whether AMD is bound by the GPU or by the
