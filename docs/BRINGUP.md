@@ -9,6 +9,56 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Main regression sweep after the #18 merge (2026-10-17)
+
+Build: `main` at 71814344, strict runs, one title at a time, scripted input
+routes, 100-240 s each. Hosts: Intel Arc A770 (Xe KMD, Mesa) and the AMD
+Raphael iGPU (RADV, 2 CUs). Frame rates are frames between two native
+captures divided by the seconds between them, taken in the gameplay window;
+single `status` samples are instantaneous and swing widely (an earlier
+"86 fps" for the atmospheric platformer was such a sample; its gameplay
+window averages 59-61 fps on Intel and 30-31 on AMD on both builds).
+
+No title regressed against its previous strict run. Reached gameplay on
+Intel: card title, platformer pair, racing title, Unity fishing title, beat
+'em up, sandbox title, roguelite action platformer, watercolour platformer,
+isometric roguelike, gothic action platformer, dream platformer, zoo title,
+preschool Unity title, pixel exploration title, artillery title, roguelike
+dungeon crawler and tower-defence title. The ninja platformer's generic route
+stops at its title screen, the anime fighting title stays in its story intro
+and the role-playing title reaches the traveler selection, as before.
+
+Open defects found by the sweep, none of them caused by the merge:
+
+- Intermittent early stall (both hosts). Presents stop with no fatal error
+  and `phase=stalled`: the ninja platformer on Intel at frame 3812, the
+  gothic action platformer on AMD at frame 391. The rerun of each reached
+  its usual state (2 stalls in 45 runs). No live evidence yet: the harness
+  queried the agent only after exit. Next evidence: `threads`,
+  `sync-waits` and `events` taken while `phase=stalled`.
+- Gothic action platformer, AMD only: every capture is black for 240 s while
+  the title runs at 53-64 fps in `phase=interactive`; one capture shows a
+  single large grey triangle. Intel shows gameplay on the same route. First
+  AMD run of this title, so there is no AMD baseline. Next evidence: compare
+  the display-buffer format of the Intel and AMD captures, then the
+  fullscreen passes of one frame on both hosts.
+- Artillery title, AMD only: the terrain renders white and blue instead of
+  brown and green; both hosts hold 60 fps on the same static scene. Next
+  evidence: a per-draw dump (`KYTY_DUMP_DRAW`) of the terrain draw on both
+  hosts, comparing texture format and swizzle.
+- Puzzle title and role-playing title, AMD only: device lost
+  (`vkQueueSubmit` result -4) on queue 8. On Intel the puzzle title stalls at
+  boot frame 332 without a capture, as in all earlier runs.
+- Role-playing title: a route that starts a new game now gets past the title
+  and stops at a missing `ImageSampleCd` emitter (pixel stage) while loading.
+  Its title screen background is flat magenta on Intel; earlier captures of
+  that screen were dimmed by a loading overlay, so it is not known whether
+  this is new.
+- AMD routes: the input routes were timed on Intel, so on the slower AMD host
+  the preschool Unity title ends in its pause menu, the tower-defence title in
+  its name entry and the roguelike dungeon crawler in its dark first room.
+  Their AMD frame rates are menu or intro rates, not gameplay.
+
 ## Platformer pair: unreadable glyphs were dropped command-buffer packets (2026-10-17)
 
 - Observed (Intel and AMD, strict): menu and HUD text in both platformers drew
