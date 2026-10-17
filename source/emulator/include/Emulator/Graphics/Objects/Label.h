@@ -89,6 +89,12 @@ public:
 	[[nodiscard]] bool AdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
 	                                GpuWritebackPageCache* page_cache, GpuWritebackPageCache::NotifyWriteFunc notify_write,
 	                                void* notify_opaque, GpuWritebackResult* result);
+	// Write-back of an object whose last write a device copy already published to
+	// guest memory: only the snapshot and the write notification change. Declines
+	// like AdoptUniform.
+	[[nodiscard]] bool AdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+	                               GpuWritebackPageCache::NotifyWriteFunc notify_write, void* notify_opaque,
+	                               GpuWritebackResult* result);
 
 private:
 	struct FenceBaseline
@@ -125,11 +131,15 @@ void LabelCompleteSubmission(SubmissionId submission);
 void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
                         GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
 [[nodiscard]] bool LabelStorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication);
+// True when a registered label destination overlaps [addr, addr + size).
+[[nodiscard]] bool LabelRangeHasFence(uint64_t addr, uint64_t size);
 [[nodiscard]] GpuWritebackResult LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
                                                    GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
 [[nodiscard]] bool LabelWriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
                                               GpuWritebackPageCache* page_cache, LabelStoragePublication* publication,
                                               GpuWritebackResult* result);
+[[nodiscard]] bool LabelWriteBackAdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+                                             LabelStoragePublication* publication, GpuWritebackResult* result);
 // Called only after GPU submissions and host presentation have quiesced, while
 // the guest VA is still mapped and before it can be reused.
 void LabelReleaseMappedRange(uint64_t addr, uint64_t bytes);

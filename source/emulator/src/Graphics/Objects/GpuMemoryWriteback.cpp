@@ -218,14 +218,17 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	GpuWritebackResult writeback_result;
 	{
 		const auto writeback_start = std::chrono::steady_clock::now();
-		// A uniform result already published to guest memory on the device needs
-		// no read of the GPU copy (PublishComputeUniformFillToGuestAddress).
-		const bool published_uniform = o.object.type == GpuMemoryObjectType::StorageBuffer && o.guest_published_uniform &&
-		                               o.guest_published_write_uses != 0u && o.guest_published_write_uses == o.write_uses &&
-		                               block.vaddr_num == 1 &&
-		                               StorageBufferWriteBackPublishedUniform(o.object.obj, block.vaddr[0], block.size[0],
-		                                                                      o.guest_published_words, &writeback_result);
-		if (!published_uniform)
+		// A result already published to guest memory on the device is adopted,
+		// not copied again: a uniform one without reading the GPU copy
+		// (PublishComputeUniformFillToGuestAddress, PublishPendingStorageToGuestAddress).
+		const bool published = o.object.type == GpuMemoryObjectType::StorageBuffer && o.guest_published_write_uses != 0u &&
+		                       o.guest_published_write_uses == o.write_uses && block.vaddr_num == 1;
+		const bool adopted =
+		    published && (o.guest_published_uniform
+		                      ? StorageBufferWriteBackPublishedUniform(o.object.obj, block.vaddr[0], block.size[0], o.guest_published_words,
+		                                                               &writeback_result)
+		                      : StorageBufferWriteBackPublishedDevice(ctx, o.object.obj, block.vaddr[0], block.size[0], &writeback_result));
+		if (!adopted)
 		{
 			writeback_result = o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
 		}
@@ -482,7 +485,27 @@ std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(const GpuMemo
 	return found;
 }
 
-bool GpuMemory::PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency)
+// The whole object is the guest content of its range when no other object shares
+// its bytes, no label fence or depth metadata lies in it (their write-backs keep
+// byte-level exclusions and side effects), and the guest has not written the
+// range since the object was last synchronized with it.
+bool GpuMemory::StorageIsWholeGuestContent(const Object& object)
+{
+	const auto& info = object.info;
+	if (object.block.vaddr_num != 1 || !object.others.IsEmpty() || info.depth_meta_bound || !info.check_hash ||
+	    !info.dirty_registered)
+	{
+		return false;
+	}
+	const uint64_t vaddr   = object.block.vaddr[0];
+	const uint64_t size    = object.block.size[0];
+	const auto&    tracker = GpuDirtyPageTracker::Instance();
+	return tracker.Mode(vaddr, size) == GpuDirtyTrackingMode::PageFault &&
+	       !tracker.ChangedSince(vaddr, size, info.dirty_generation[0]) && !LabelRangeHasFence(vaddr, size);
+}
+
+bool GpuMemory::PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer,
+                                        std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
@@ -490,12 +513,28 @@ bool GpuMemory::PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQ
 	const auto&     heaps = m_heaps;
 	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
 	{
-		for (const auto& use: heaps[heap_id].objects[object_id].info.submission_uses.Dependencies())
+		const auto&  object = heaps[heap_id].objects[object_id];
+		SubmissionId pending;
+		bool         consumer_queue_only = true;
+		for (const auto& use: object.info.submission_uses.Dependencies())
 		{
 			if (m_deferred_deletions.AreDependenciesComplete({use})) { continue; }
-			*dependency = use;
+			pending             = pending.sequence == 0 ? use : pending;
+			consumer_queue_only = consumer_queue_only && use.queue == consumer;
+		}
+		if (pending.sequence == 0) { continue; }
+		if (publishable == nullptr || !consumer_queue_only || !StorageIsWholeGuestContent(object))
+		{
+			*dependency = pending;
 			return true;
 		}
+		GpuMemoryStoragePublication publication;
+		publication.identity   = {heap_id, object_id, object.info.logical_generation, object.info.write_uses,
+		                          static_cast<const VulkanBuffer*>(object.info.object.obj)};
+		publication.vaddr      = object.block.vaddr[0];
+		publication.size       = object.block.size[0];
+		publication.dependency = pending;
+		publishable->push_back(publication);
 	}
 	return false;
 }
@@ -557,7 +596,7 @@ bool GpuMemory::FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemor
 	return false;
 }
 
-bool GpuMemory::MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
+bool GpuMemory::MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
                                           const GpuWritebackPageCache::UniformWords* uniform_words)
 {
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
@@ -598,8 +637,9 @@ bool GpuMemory::MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& i
 			return false;
 		}
 	}
+	RecordUse(&info, publication);
 	info.guest_published_write_uses = identity.write_uses;
-	info.guest_published_queue       = queue.Value();
+	info.guest_published_queue       = publication.queue.Value();
 	info.guest_published_uniform     = uniform_words != nullptr;
 	info.guest_published_words       = uniform_words != nullptr ? *uniform_words : GpuWritebackPageCache::UniformWords {};
 	return true;

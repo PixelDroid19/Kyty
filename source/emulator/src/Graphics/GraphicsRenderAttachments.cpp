@@ -305,7 +305,33 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 	{
 		return false;
 	}
-	return GpuMemoryMarkStorageGuestPublished(identity, GpuQueueId(static_cast<uint32_t>(buffer->GetQueueIndex())), &fill.words);
+	SubmissionId publication;
+	EXIT_IF(!buffer->GetSubmissionId(&publication));
+	return GpuMemoryMarkStorageGuestPublished(identity, publication, &fill.words);
+}
+
+bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* dependency)
+{
+	EXIT_IF(buffer == nullptr || dependency == nullptr);
+	const GpuQueueId                         consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
+	std::vector<GpuMemoryStoragePublication> publishable;
+	if (GuestDeviceAddressPendingWriteBack(consumer, &publishable, dependency))
+	{
+		return true;
+	}
+	SubmissionId recording;
+	EXIT_IF(!buffer->GetSubmissionId(&recording));
+	for (const auto& publication: publishable)
+	{
+		if (!GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
+		                                         *publication.identity.buffer, publication.vaddr, publication.size) ||
+		    !GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))
+		{
+			*dependency = publication.dependency;
+			return true;
+		}
+	}
+	return false;
 }
 
 bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)

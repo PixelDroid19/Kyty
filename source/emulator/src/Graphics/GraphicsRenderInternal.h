@@ -1701,6 +1701,11 @@ struct ComputeUniformBufferFill
 // Copies the filled storage object into the guest device-address view in queue
 // order, so later device-address consumers on this queue need no CPU write-back.
 [[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// Before a device-address read on `buffer`'s queue: copies every pending storage
+// result written only on that queue into the guest device-address view in queue
+// order. Returns true with a dependency to wait for when a pending result does not
+// qualify or cannot be published.
+[[nodiscard]] bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* dependency);
 // Ordered compute fills of color-image aliases (docs/graphics-compute-uniform-color-fill.md).
 void               InvalidateComputeColorFills(const ShaderBindResources& bind);
 [[nodiscard]] bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);

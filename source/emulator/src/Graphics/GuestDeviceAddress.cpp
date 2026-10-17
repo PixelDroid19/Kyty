@@ -1206,10 +1206,11 @@ static std::shared_ptr<const GpuMemoryGuestRanges> RegisteredRangesSnapshot()
 	return registry.merged;
 }
 
-bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, SubmissionId* dependency)
+bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, std::vector<GpuMemoryStoragePublication>* publishable,
+                                        SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
-	return GpuMemoryPendingStorageWriteBack(*RegisteredRangesSnapshot(), consumer, dependency);
+	return GpuMemoryPendingStorageWriteBack(*RegisteredRangesSnapshot(), consumer, publishable, dependency);
 }
 
 void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer)

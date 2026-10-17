@@ -9,6 +9,93 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Same-queue storage published on the device before guest-address reads (2026-10-17)
+
+- **Symptom.** In the sequel's gameplay on Intel, about 46% of each 26 s
+  window was spent in CPU fence waits (12.0-12.2 s, 21.8k-22.5k waits).
+  Symbolized fence stacks (~80 s window) attributed them to:
+  - `RetryGuestDeviceAddressDraw` (`GraphicsRun.cpp`): 12.4k waits, 16.9 s.
+  - Synchronous create/update uploads through a temporary command buffer:
+    23k waits, 6.5 s.
+  - Present: 4.4k waits, 1.6 s.
+  
+  The GPU render engine was 42.9% busy (xe fdinfo cycles), so the frame is
+  bound by CPU waits, not by the GPU.
+- **Cause.** `PrepareGuestDeviceAddressForRead` refuses a draw while any
+  writable storage in the registered device-address ranges has an incomplete
+  use. The draw then waits for the CPU write-back. A census showed both the
+  producer and the consumer of every such storage on queue 8, so the guest
+  only needs device order, not a CPU round trip.
+- **Change.** `PublishPendingStorageToGuestAddress`
+  (`GraphicsRenderAttachments.cpp`) handles the case where every incomplete
+  use is on the consumer's queue and `StorageIsWholeGuestContent` holds:
+  - Conditions: one block, no linked objects, no depth metadata, hashed and
+    page-fault tracked, no guest write since the last sync, and no label
+    fence in the range.
+  - It records a buffer-to-import copy between barriers in the consumer's
+    command buffer and marks the object published by that submission.
+  - The submission becomes a use of the object (`RecordUse`), so release and
+    the completion write-back follow the copy.
+  - That later write-back adopts the device result (page snapshot and
+    write notification) without writing guest memory again
+    (`StorageBufferWriteBackPublishedDevice`), so a CPU store made after the
+    copy is not overwritten. The unit test
+    `EmulatorLabelPublication.DevicePublishedWriteBackKeepsLaterCpuStores`
+    covers this.
+  - The rest keeps the CPU wait: any other queue, aliases or depth metadata.
+- **Evidence (Intel, strict).** Frame rates use the main18 method: frames
+  between two native captures divided by the seconds between them.
+  - Sequel, A/B on one build. With the change: 67.6/76.8/71.5 fps. Without
+    it: 58.7/71.5/65.2 fps. main18: 54.8/58.5/50.9 fps.
+  - Sequel, perf snapshots per 26 s window. With the change: 15.1k/14.7k
+    waits, 11.5-12.0 s. Without it: 22.5k/21.8k waits, 12.0-12.2 s.
+  - Sequel, final build: 68.5-77.9 fps.
+  - Card title: 181-210 fps.
+  - Beat 'em up: 14-17 fps (main18 15-20).
+  - Fishing title: 21-22 fps (main18 16-23).
+  - Sandbox title: 49-79 fps, then 10 and 8 in the last windows. main18
+    shows the same late drop: 64-66, then 37.5, 2.0, 0.6 and 6.6.
+  - Insect platformer, first run: a strict stop at 182 s (see below).
+  - Insect platformer, rerun on the same binary: passed 200 s at 90.0/91.3
+    fps in play (main18: 62.9/53.4/50.7).
+- **Not tested.**
+  - AMD: the iGPU is wedged by gfx ring timeouts and needs a host reboot.
+  - `scripts/kyty_playable_regression.py` was not run. The emulator unit
+    suite (2245 passed, 9 skipped), `check_emulator_boundaries.py --strict`
+    and `check_graphics_tables.py` were run.
+- **Known inefficiency.** `PendingStorageWriteBack` does not skip a storage
+  that is already published at its current `write_uses`. The publishing
+  submission is itself an incomplete use on the same queue, so a later
+  device-address draw in the same command buffer can record the copy again.
+  This is redundant work, not a correctness problem.
+- **Excluded or left open.**
+  - The largest remaining refusal is a 32 KiB storage that is exactly the
+    HTILE block of a live depth target. A compute clear rewrites it every
+    frame. It is depth metadata, so its write-back keeps its side effects and
+    it still waits. Do not widen the gate to it without a depth-metadata
+    contract.
+  - A 49 KiB storage contained in a storage image also still waits.
+  - Which storages alias depends on where the guest allocator places them in
+    each run, so the hot set and the gain vary between runs.
+  - Next lever: the synchronous create/update uploads (6.5 s per 80 s).
+- **Open defect: `Texture - Contains - StorageTexture` (insect platformer,
+  1 of 2 runs).**
+  - Stop at `GpuMemoryCreate.cpp:1545`, 182 s into play.
+  - A new 256 KiB storage image (0x40000) lies inside a 2 MiB CPU-uploaded
+    Texture that is in use, not read-only, written by the GPU, and has 272
+    linked parents.
+  - `create_texel_bits_seed` only considers `Equals` relations, and no
+    single-parent rule covers `Contains` for this pair.
+  - Not attributed. The change does not touch this create path directly,
+    but it does change storage lifetimes and timing.
+  - The rerun on the same binary passed. Earlier runs of this title never
+    hit it: the main18 Intel and AMD sweeps and the AMD platformer rerun,
+    200 s each.
+  - Direction: decide from the guest's descriptors whether the storage image
+    reinterprets the texture's bytes (seed from guest memory and link, as
+    `GpuMemoryAllowsStorageTextureContainedInRenderTarget` does) or only
+    reuses freed memory (reclaim).
+
 ## Main regression sweep after the #18 merge (2026-10-17)
 
 Build: `main` at 71814344, strict runs, one title at a time, scripted input

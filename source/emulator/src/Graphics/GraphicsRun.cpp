@@ -2937,7 +2937,7 @@ void CommandProcessor::WaitDeviceAddressWriteBacks()
 	// publish its guest copy. Waiting must run without the recording mutex —
 	// completion of the pending submission can publish resources that need it.
 	SubmissionId pending;
-	for (uint32_t attempt = 0; GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(m_queue)), &pending);)
+	for (uint32_t attempt = 0; GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(m_queue)), nullptr, &pending);)
 	{
 		g_gpu->WaitSubmission(pending);
 		if (++attempt >= 64u)

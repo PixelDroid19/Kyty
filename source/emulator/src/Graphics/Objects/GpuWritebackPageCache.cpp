@@ -60,6 +60,30 @@ bool GpuWritebackPageCache::AdoptUniform(const UniformWords& words, uint64_t siz
 	return changed;
 }
 
+GpuWritebackResult GpuWritebackPageCache::AdoptChangedPages(uint64_t guest_va, const void* gpu_src, uint64_t size,
+                                                           NotifyWriteFunc notify_write, void* notify_opaque)
+{
+	EXIT_IF(gpu_src == nullptr || size == 0u || notify_write == nullptr);
+	EXIT_IF(m_snapshot.size() != size || m_page_size == 0u);
+	Materialize();
+
+	const auto*        gpu = static_cast<const uint8_t*>(gpu_src);
+	GpuWritebackResult result;
+	for (uint64_t offset = 0; offset < size; offset += m_page_size)
+	{
+		const uint64_t page_bytes = std::min(m_page_size, size - offset);
+		if (std::memcmp(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(page_bytes)) == 0)
+		{
+			continue;
+		}
+		notify_write(notify_opaque, guest_va + offset, page_bytes);
+		std::memcpy(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(page_bytes));
+		result.changed_pages++;
+	}
+	result.content_changed = result.changed_pages != 0u;
+	return result;
+}
+
 GpuWritebackResult GpuWritebackPageCache::CopyChangedPages(void* guest_dst, const void* gpu_src, uint64_t size,
                                                           const uint64_t* hole_begin, const uint64_t* hole_end, int hole_count,
                                                           NotifyWriteFunc notify_write, void* notify_opaque)
