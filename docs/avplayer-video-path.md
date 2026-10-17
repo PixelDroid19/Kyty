@@ -125,6 +125,11 @@ Open: `StartEx` with a non-zero start time sets the clock offset but does not
 seek the decoder. A title that uses it would see stream time shifted by that
 offset.
 
+Untested: a source opened through guest file-replacement callbacks. Its seek
+runs the guest read callbacks on the guest thread that calls the jump, or that
+triggers the loop rewind, while the player's decoder lock is held exclusively.
+Both verified titles open host paths.
+
 ## Unqualified decoder output contracts
 
 The current elementary decoder and Videodec2 buffer sizing produce 8-bit NV12.

@@ -59,7 +59,11 @@ The contract, the guest evidence and the exclusion are in
   - Other importers ship no video files.
 - **Exclusion:** delivering the jump warning on the next guest call instead of
   synchronously changed nothing.
-- **Not run:** AMD (the iGPU still needs a host reboot).
+- **Not run:** AMD (the iGPU still needs a host reboot);
+  `kyty_playable_regression.py` (gameplay checked from captures only). The
+  regression set came from a static scan for video files. A title that keeps
+  video in compressed bundles would not show up in it. That class is left to
+  the next main sweep.
 
 ## Platformer pair: remaining device-address waits and boot time (2026-10-17)
 
