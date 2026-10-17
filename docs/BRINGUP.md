@@ -83,10 +83,24 @@ fail on the current HEAD before acting on them.
     load at offset 0x20. The inner bound comes from offset 0 of a descriptor
     indexed by a push constant (set + index * 16 + 512). The inner body reads
     64-byte records.
-  - Hypothesis, not yet tested: a garbage or stale count makes the loop
-    effectively unbounded. Next step: dump that pixel shader's storage buffers
-    with `KYTY_DUMP_PS_ID` and `KYTY_DUMP_PS_BUFFER`, then compare the loop
-    counts on AMD and Intel.
+  - Excluded: an unbounded loop. Halting the shader engine with `umr`
+    (write `SQ_CMD` = 0x111, dump `-wa gfx_0.0.0`, resume with 0x11) while
+    the ring was stalled showed the pixel waves at different PCs with loop
+    counters of 3 (outer) and 1 (inner).
+  - Excluded: a CPU/GPU race. Waiting for the queue to go idle after every
+    submit still timed out.
+  - Observed: skipping that one pixel shader removes the timeout. Under
+    `RADV_DEBUG=hang` the same submission finishes after about 1.9 s, and the
+    run reaches its time limit. The fence log shows the ring timeout firing
+    2 s after the last fence progress, which is the default gfx lockup
+    timeout of the host kernel (7.2.9).
+  - Conclusion: one submission carrying that run of draws into a 1024x1024
+    target takes about as long as the kernel watchdog on a 2-CU iGPU. The
+    title's AMD history has mostly been device lost, so this is not a
+    regression. Open: why each of those draws costs hundreds of
+    milliseconds there, and whether long guest command buffers should be
+    split into several Vulkan submissions. As a host workaround,
+    `amdgpu.lockup_timeout` raises the watchdog.
 
 ## Anime fighter: storage write-back on the label path (2026-10-17)
 
