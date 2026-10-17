@@ -4907,6 +4907,11 @@ selected published source; none is a gameplay or visual acceptance.
   admitted as quad local. No saved program of the sandbox title's 285 s new-world stop exists, so that stop is still
   untested. Verified: the next strict Intel run passes the shader and stops about 40 s in
   at `unsupported Gen5 image numeric type: format=27` (`ShaderSpirvImage.cpp`).
+- **Sampled 16_16_UINT images (published 2026-10-16).** The same title samples a Gen5 format-27 texture. The
+  RDNA2 image-format table lists 27 as `16_16_UINT`, between `16_16_SSCALED` (26) and `16_16_SINT` (28). It is now a
+  four-byte unsigned-integer `R16G16_UINT` image in the Gen5 format table and in the element-size table. Storage
+  reinterpretation views are unchanged. Verified: the next strict Intel run passes it and stops about 52 s in at a
+  missing pixel-stage emitter for `s_load_dwordx4`.
 - **SGPR104 and SGPR105.** The RDNA2 scalar operand range is 0..105; the parser stopped at 103, and the shared lowering
   preconditions and compute-wave analyses used the same limit, so a pixel shader reading `s104` was refused as an
   invalid instruction before native wave analysis. The limits follow the ISA; the NGG passthrough proof, which keeps
