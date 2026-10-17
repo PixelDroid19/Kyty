@@ -9,6 +9,7 @@
 #include "ShaderStorageAnalysis.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/ShaderMetadataResourceIndex.h"
 #include "Emulator/Graphics/ShaderNggFront.h"
@@ -737,7 +738,7 @@ void Spirv::WriteHeader()
 		{
 			vars.Add("%samplers");
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			vars.Add("%gds");
 		}
@@ -1258,7 +1259,7 @@ void Spirv::WriteAnnotations()
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->samplers.binding_index));
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			m_source += String8(gds_annotations)
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
@@ -1679,7 +1680,7 @@ static const char* textures_loaded_types = R"(
 		{
 			m_source += String8(samplers_types).ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->samplers.samplers_num));
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			m_source += String8(gds_types);
 		}
@@ -1842,7 +1843,7 @@ void Spirv::WriteGlobalVariables()
 			vars.Add(String8::FromPrintf("%%samplers = OpVariable %%_ptr_UniformConstant__arr_Sampler_uint_%d UniformConstant",
 			                             m_bind->samplers.samplers_num));
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			vars.Add("%gds = OpVariable %_ptr_StorageBuffer_GDS StorageBuffer");
 		}
@@ -2912,6 +2913,9 @@ void Spirv::WriteInstructions()
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::WaveAppend)
 		{
 			ok = EmitComputeWaveAppend(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedGdsWrite)
+		{
+			ok = EmitComputeWaveGdsWrite(inst, static_cast<uint32_t>(index), &dst);
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedGenericCompare)
 		{
 			ok = EmitComputeWaveGenericCompare(func, inst, static_cast<uint32_t>(index), &dst);
@@ -3334,6 +3338,12 @@ void Spirv::FindConstants()
 			AddConstantUint(offset);
 		}
 	}
+	if (m_bind != nullptr && m_bind->gds_pointers.memory_used)
+	{
+		// GDS stores bound the address by M0[15:0] and by the host GDS window.
+		AddConstantUint(0xffffu);
+		AddConstantUint(static_cast<uint32_t>(kGraphicsGdsDwords));
+	}
 	if (UsesDsAddtid())
 	{
 		// M0[15:0] mask, word shift, per-bank lane delta, spill bound, LDS bound.
@@ -3737,9 +3747,10 @@ void Spirv::FindVariables()
 		AddVariable(ShaderOperandType::VccLo, 0, 2);
 	}
 
-	if (UsesDsAddtid())
+	if (UsesDsAddtid() || (m_bind != nullptr && m_bind->gds_pointers.memory_used))
 	{
-		// ds_*_addtid_b32 address with M0[15:0] without listing it as an operand.
+		// ds_*_addtid_b32 and GDS memory instructions address through M0
+		// without listing it as an operand.
 		AddVariable(ShaderOperandType::M0, 0, 1);
 	}
 

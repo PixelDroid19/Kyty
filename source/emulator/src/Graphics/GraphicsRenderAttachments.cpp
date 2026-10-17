@@ -225,7 +225,7 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	const auto& buffers = input.bind.storage_buffers;
 
 	if (!proof.valid || buffers.buffers_num != 1 || input.bind.textures2D.textures_num != 0 ||
-	    input.bind.samplers.samplers_num != 0 || input.bind.gds_pointers.pointers_num != 0 ||
+	    input.bind.samplers.samplers_num != 0 || ShaderGdsBufferBound(input.bind.gds_pointers) ||
 	    proof.workgroup_shift > 10u || proof.workgroup_register != input.workgroup_register ||
 	    input.threads_num[0] != (1u << proof.workgroup_shift) || input.threads_num[1] != 1u || input.threads_num[2] != 1u ||
 	    !input.group_id[0] || input.group_id[1] || input.group_id[2] || input.thread_ids_num != 1 ||

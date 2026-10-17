@@ -702,7 +702,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	int        sampled_descriptor_num = sampled_total;
 	int        textures2d_storage_num = bind.textures2D.textures2d_storage_num;
 	int        samplers_num           = bind.samplers.samplers_num;
-	int        gds_buffers_num        = bind.gds_pointers.pointers_num;
+	int        gds_buffers_num        = ShaderGdsBufferBound(bind.gds_pointers) ? 1 : 0;
 	const bool vsharp_uniform_buffer  = bind.vsharp_uniform_buffer;
 
 	EXIT_IF(storage_buffers_num < 0 || storage_buffers_num > BUFFERS_MAX);

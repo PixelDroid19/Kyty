@@ -133,13 +133,14 @@ TEST(EmulatorComputeWaveLds, AdmitsAnyLdsAddressWithoutAnAddressProof)
 
 TEST(EmulatorComputeWaveLds, LegacyTuplePredicateStaysExactForTheBankedEmitter)
 {
-	struct Case { uint32_t control; uint32_t registers; ShaderInstructionType type; bool banked; };
+	using Kind = ShaderComputeWaveInstructionKind;
+	struct Case { uint32_t control; uint32_t registers; ShaderInstructionType type; bool banked; Kind kind; };
 	const Case cases[] = {
-	    {0xd8d80000u, 0x04000001u, ShaderInstructionType::DsReadB32, true},   // ds_read_b32 v4, v1
-	    {0xd8340000u, 0x00000101u, ShaderInstructionType::DsWriteB32, true},  // ds_write_b32 v1, v1
-	    {0xd8360000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false}, // GDS
-	    {0xd8350000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false}, // reserved control
-	    {0xd8780000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false}, // legacy write8 alias
+	    {0xd8d80000u, 0x04000001u, ShaderInstructionType::DsReadB32, true, Kind::BankedGenericLds},   // ds_read_b32 v4, v1
+	    {0xd8340000u, 0x00000101u, ShaderInstructionType::DsWriteB32, true, Kind::BankedGenericLds},  // ds_write_b32 v1, v1
+	    {0xd8360000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false, Kind::BankedGdsWrite},   // GDS store, never LDS
+	    {0xd8350000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false, Kind::Unsupported},      // reserved control
+	    {0xd8780000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false, Kind::Unsupported},      // legacy write8 alias
 	};
 	for (const auto& test: cases)
 	{
@@ -154,9 +155,7 @@ TEST(EmulatorComputeWaveLds, LegacyTuplePredicateStaysExactForTheBankedEmitter)
 			    const bool  banked      = ShaderComputeWaveLdsInstructionSupported(instruction);
 			    const bool generic = ShaderComputeWaveGenericLdsSupported(instruction);
 			    const auto kind = ShaderClassifyComputeWaveInstruction(instruction);
-			    std::_Exit(banked == test.banked && generic == test.banked &&
-			               kind == (test.banked ? ShaderComputeWaveInstructionKind::BankedGenericLds
-			                                   : ShaderComputeWaveInstructionKind::Unsupported) ? 0 : 3);
+			    std::_Exit(banked == test.banked && generic == test.banked && kind == test.kind ? 0 : 3);
 		    },
 		    ::testing::ExitedWithCode(0), "");
 	}

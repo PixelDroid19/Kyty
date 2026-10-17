@@ -2874,7 +2874,7 @@ static bool TryPublishComputeDepthMetaFill(uint64_t submit_id, const ShaderCompu
 	const auto& evidence = input.meta_fill;
 	const auto& buffers  = input.bind.storage_buffers;
 	if (!evidence.valid || buffers.buffers_num != 3 || input.bind.textures2D.textures_num != 0 ||
-	    input.bind.samplers.samplers_num != 0 || input.bind.gds_pointers.pointers_num != 0 ||
+	    input.bind.samplers.samplers_num != 0 || ShaderGdsBufferBound(input.bind.gds_pointers) ||
 	    evidence.workgroup_register != input.workgroup_register || evidence.workgroup_shift != 6u ||
 	    input.threads_num[0] != 64u || input.threads_num[1] != 1u || input.threads_num[2] != 1u ||
 	    !input.group_id[0] || input.group_id[1] || input.group_id[2] || input.thread_ids_num != 1 ||

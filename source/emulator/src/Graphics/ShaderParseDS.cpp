@@ -195,6 +195,10 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			break;
 		case 0x0D:
 			DecodeDsWrite(&inst, addr, data0, DsSingleOffset(offset0, offset1), 1);
+			if (gds != 0)
+			{
+				inst.format = ShaderInstructionFormat::VaddrVdataOffsetGds;
+			}
 			break;
 		case 0x0E: DecodeDsWrite2(&inst, ShaderInstructionType::DsWrite2B32, addr, data0, data1, offset0, offset1); break;
 		case 0x0F: DecodeDsWrite2(&inst, ShaderInstructionType::DsWrite2St64B32, addr, data0, data1, offset0, offset1); break;

@@ -306,6 +306,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1: return "VdstSdst2Vsrc0Vsrc1"; break;
 		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2: return "VdstSdst2Vsrc0Vsrc1Ssrc2A2"; break;
 		case ShaderInstructionFormat::VdstGds: return "VdstGds"; break;
+		case ShaderInstructionFormat::VaddrVdataOffsetGds: return "VaddrVdataOffsetGds"; break;
 		case ShaderInstructionFormat::VdataOffset: return "VdataOffset"; break;
 		case ShaderInstructionFormat::VdstOffset: return "VdstOffset"; break;
 		case ShaderInstructionFormat::Vdst2VaddrOffset01: return "Vdst2VaddrOffset01"; break;

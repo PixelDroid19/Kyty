@@ -45,6 +45,8 @@ enum class ShaderComputeWaveInstructionKind
 	WaveCount,
 	// ds_append/ds_consume on GDS: one per-wave counter update, broadcast.
 	WaveAppend,
+	// ds_write_b32 on GDS: per-lane store at M0.base + ADDR + offset.
+	BankedGdsWrite,
 	// ds_write_addtid_b32/ds_read_addtid_b32: per-lane LDS slot addressed by
 	// M0[15:0] + offset + TID*4; the emitter walks both banks itself because
 	// the flat lane index differs per bank.

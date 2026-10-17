@@ -4845,6 +4845,9 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.gds_pointers.pointers_num > 0)
 		{
 			PrepareGdsPointers(bind.gds_pointers, &sgprs_ptr);
+		}
+		if (ShaderGdsBufferBound(bind.gds_pointers))
+		{
 			gds_buffer      = g_render_ctx->GetGdsBuffer()->GetBuffer(g_render_ctx->GetGraphicCtx(), buffer);
 			need_descriptor = true;
 		}

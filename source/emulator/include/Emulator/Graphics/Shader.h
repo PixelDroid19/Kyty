@@ -880,6 +880,8 @@ enum Format : uint64_t
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
+	// ds_write_b32 with GDS=1: the store addresses GDS through M0, not LDS.
+	VaddrVdataOffsetGds                 = FormatDefine({S0, S1, Gds}),
 	VaddrOffset                         = FormatDefine({S0}),
 	// ds_*_addtid_b32: no ADDR field; S0 carries DATA0 for the write.
 	VdataOffset                         = FormatDefine({S0, DsOff}),
@@ -2042,7 +2044,15 @@ struct ShaderGdsResources
 	bool              extended[POINTERS_MAX]       = {};
 	int               pointers_num                 = 0;
 	int               binding_index                = 0;
+	// The program reads or writes GDS memory through a constant M0, so the
+	// buffer is bound even when no SGPR carries a GDS pointer.
+	bool              memory_used                  = false;
 };
+
+[[nodiscard]] inline bool ShaderGdsBufferBound(const ShaderGdsResources& gds)
+{
+	return gds.pointers_num > 0 || gds.memory_used;
+}
 
 struct ShaderDirectSgprsResources
 {

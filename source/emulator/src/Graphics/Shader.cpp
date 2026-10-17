@@ -2410,6 +2410,20 @@ static int ShaderGdsPointerSourceSgpr(const ShaderCode& code)
 	return gds_source;
 }
 
+// GDS memory instructions address the buffer through M0 and need it bound
+// whether or not an SGPR carries a GDS pointer.
+static bool ShaderUsesGdsMemory(const ShaderCode& code)
+{
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.format == ShaderInstructionFormat::VaddrVdataOffsetGds)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 // A direct-resource slot is ambiguous in driver metadata when it can name the
 // GDS ordered-append pointer instead of its declared kind. Classify by
 // observed use so genuine descriptors keep their binding.
@@ -2542,9 +2556,12 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 		bind->push_constant_size += bind->samplers.samplers_num * 16;
 	}
 
-	if (bind->gds_pointers.pointers_num > 0)
+	if (ShaderGdsBufferBound(bind->gds_pointers))
 	{
 		bind->gds_pointers.binding_index = binding_index++;
+	}
+	if (bind->gds_pointers.pointers_num > 0)
+	{
 		bind->push_constant_size += (((bind->gds_pointers.pointers_num - 1) / 4) + 1) * 16;
 	}
 
@@ -3476,6 +3493,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 		}
 	}
+
+	bind->gds_pointers.memory_used = code != nullptr && ShaderUsesGdsMemory(*code);
 
 	// Ordered-append GDS fallback: the descriptor slot is not always declared
 	// in direct_resource_offset, so bind the observed m0 source when the
@@ -5437,6 +5456,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 	}
 
 	ret->ids.Add(bind.gds_pointers.pointers_num);
+	ret->ids.Add(static_cast<uint32_t>(bind.gds_pointers.memory_used));
 
 	for (int i = 0; i < bind.gds_pointers.pointers_num; i++)
 	{

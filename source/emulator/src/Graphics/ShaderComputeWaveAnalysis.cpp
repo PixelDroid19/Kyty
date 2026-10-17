@@ -911,6 +911,10 @@ ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const Shad
 	{
 		return ShaderComputeWaveInstructionKind::WaveAppend;
 	}
+	if (ShaderComputeWaveGdsWriteSupported(instruction))
+	{
+		return ShaderComputeWaveInstructionKind::BankedGdsWrite;
+	}
 	if (instruction.type == ShaderInstructionType::DsWriteAddtidB32 &&
 	    instruction.format == ShaderInstructionFormat::VdataOffset && instruction.src_num == 1 &&
 	    instruction.src[0].type == ShaderOperandType::Vgpr && instruction.src[0].size == 1 && !instruction.src[0].dpp &&
