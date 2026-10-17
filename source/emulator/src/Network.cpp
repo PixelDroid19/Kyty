@@ -4761,7 +4761,11 @@ int KYTY_SYSV_ABI NpGetNpReachabilityState(int user_id, uint32_t* state)
 	}
 	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 
-	*state = 0; // Unavailable
+	const uint32_t unavailable = 0;
+	if (!Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(state), &unavailable, sizeof(unavailable)))
+	{
+		return np_error_invalid_argument;
+	}
 
 	return OK;
 }

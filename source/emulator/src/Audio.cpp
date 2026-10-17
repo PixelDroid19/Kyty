@@ -1456,7 +1456,7 @@ int KYTY_SYSV_ABI VoiceCreatePort(uint32_t* port_id, const void* param)
 	EXIT_NOT_IMPLEMENTED(port_id == nullptr || param == nullptr);
 
 	VoicePortParam port_param {};
-	std::memcpy(&port_param, param, sizeof(port_param));
+	EXIT_NOT_IMPLEMENTED(!Core::VirtualMemory::CopyFromGuestOrLent(&port_param, reinterpret_cast<uint64_t>(param), sizeof(port_param)));
 	const int32_t type = port_param.port_type;
 
 	KYTY_LOG_DEBUG("\t port_type = %" PRId32 "\n", type);
@@ -1467,9 +1467,10 @@ int KYTY_SYSV_ABI VoiceCreatePort(uint32_t* port_id, const void* param)
 	auto&            state = GetVoiceState();
 	std::scoped_lock lock(state.mutex);
 	EXIT_NOT_IMPLEMENTED(!state.initialized);
-	const uint32_t id = state.next_id++;
-	state.ports[id]   = VoicePort {type, IsVoicePort(type) ? static_cast<uint32_t>(port_param.bitrate) : 0u};
-	*port_id          = id;
+	const uint32_t id = state.next_id;
+	EXIT_NOT_IMPLEMENTED(!Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(port_id), &id, sizeof(id)));
+	state.next_id++;
+	state.ports[id] = VoicePort {type, IsVoicePort(type) ? static_cast<uint32_t>(port_param.bitrate) : 0u};
 	return OK;
 }
 
@@ -1505,7 +1506,8 @@ int KYTY_SYSV_ABI VoiceReadFromOPort(uint32_t output_port_id, void* data, uint32
 	auto&            state = GetVoiceState();
 	std::scoped_lock lock(state.mutex);
 	EXIT_NOT_IMPLEMENTED(IsInputPort(RequirePort(state, output_port_id).type));
-	*size = 0;
+	const uint32_t read_size = 0;
+	EXIT_NOT_IMPLEMENTED(!Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(size), &read_size, sizeof(read_size)));
 	return OK;
 }
 
@@ -1525,7 +1527,7 @@ int KYTY_SYSV_ABI VoiceGetPortInfo(uint32_t port_id, void* info)
 	result.port_type  = port.type;
 	result.state      = VOICE_PORT_STATE_READY;
 	result.frame_size = (port.bitrate * VOICE_FRAME_MS + 7999u) / 8000u;
-	std::memcpy(info, &result, sizeof(result));
+	EXIT_NOT_IMPLEMENTED(!Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(info), &result, sizeof(result)));
 	return OK;
 }
 
