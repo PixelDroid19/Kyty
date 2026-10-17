@@ -661,6 +661,9 @@ public:
 		m_has_submission = true;
 	}
 	[[nodiscard]] int GetQueueIndex() const { return m_queue; }
+	// Queue timeline the GPU signals with value when this execution completes;
+	// false for an execution without a submission identity.
+	[[nodiscard]] bool GetTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value) const;
 	[[nodiscard]] bool GetSubmissionId(SubmissionId* submission) const
 	{
 		if (!m_has_submission || submission == nullptr)
@@ -728,6 +731,7 @@ private:
 	CommandProcessor*  m_parent  = nullptr;
 	SubmissionId       m_submission;
 	bool               m_has_submission = false;
+	uint64_t           m_timeline_value = 0;
 	TransientBufferPool* m_transient_buffers = nullptr;
 	TransientBufferPool* m_transient_scratch_buffers = nullptr;
 	TransientBufferPool* m_transient_copy_buffers    = nullptr;

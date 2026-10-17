@@ -106,6 +106,10 @@ struct VulkanQueueInfo
 	uint32_t     family   = static_cast<uint32_t>(-1);
 	uint32_t     index    = static_cast<uint32_t>(-1);
 	VkQueue      vk_queue = nullptr;
+	// Signaled by every command-processor submission with a value that rises in
+	// submission order (guarded by mutex), so rings wait for completion.
+	VkSemaphore timeline       = nullptr;
+	uint64_t    timeline_value = 0;
 };
 
 struct GpuDetileContext;

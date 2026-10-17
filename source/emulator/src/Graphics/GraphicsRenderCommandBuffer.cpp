@@ -1748,6 +1748,54 @@ void CommandBuffer::MarkRecentDrawsFenceCompleted() const
 	}
 }
 
+// Signals of one submission: the caller's binary semaphore and, for a
+// command-processor submission, the queue timeline its ring waits on.
+struct SubmitSignals
+{
+	VkSemaphore                   semaphores[2] {};
+	uint64_t                      values[2] {};
+	VkTimelineSemaphoreSubmitInfo timeline {};
+};
+
+// Call with the queue lock held: timeline values rise in submission order.
+static void AttachSubmitSignals(VulkanQueueInfo* queue, VkSemaphore binary, bool timeline, SubmitSignals* signals,
+                                VkSubmitInfo* submit_info, uint64_t* timeline_value)
+{
+	uint32_t count  = 0;
+	*timeline_value = 0;
+	if (binary != nullptr)
+	{
+		signals->semaphores[count++] = binary;
+	}
+	if (timeline)
+	{
+		*timeline_value                             = ++queue->timeline_value;
+		signals->semaphores[count]                  = queue->timeline;
+		signals->values[count++]                    = *timeline_value;
+		signals->timeline.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+		signals->timeline.signalSemaphoreValueCount = count;
+		signals->timeline.pSignalSemaphoreValues    = signals->values;
+		submit_info->pNext                          = &signals->timeline;
+	}
+	submit_info->signalSemaphoreCount = count;
+	submit_info->pSignalSemaphores    = count != 0 ? signals->semaphores : nullptr;
+}
+
+bool CommandBuffer::GetTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value) const
+{
+	EXIT_IF(device == nullptr || semaphore == nullptr || value == nullptr);
+	EXIT_IF(m_queue < 0 || m_queue >= GraphicContext::QUEUES_NUM);
+	if (m_timeline_value == 0)
+	{
+		return false;
+	}
+	const auto* ctx = g_render_ctx->GetGraphicCtx();
+	*device         = ctx->device;
+	*semaphore      = ctx->queues[m_queue].timeline;
+	*value          = m_timeline_value;
+	return true;
+}
+
 void CommandBuffer::Execute()
 {
 	EXIT_IF(IsInvalid());
@@ -1768,8 +1816,9 @@ void CommandBuffer::Execute()
 
 	EXIT_IF(m_queue < 0 || m_queue >= GraphicContext::QUEUES_NUM);
 
-	const auto& queue    = g_render_ctx->GetGraphicCtx()->queues[m_queue];
-	auto*       trail    = VulkanSubmitFaultTraceTrail();
+	auto&         queue    = g_render_ctx->GetGraphicCtx()->queues[m_queue];
+	auto*         trail    = VulkanSubmitFaultTraceTrail();
+	SubmitSignals signals;
 	const auto  sequence = m_has_submission ? m_submission.sequence : 0u;
 	VulkanSubmitAttempt attempt {};
 	VulkanSubmitAttempt observed {};
@@ -1783,6 +1832,7 @@ void CommandBuffer::Execute()
 	    {
 		    EXIT_IF(queue.mutex == nullptr);
 		    Core::LockGuard queue_lock(*queue.mutex);
+		    AttachSubmitSignals(&queue, nullptr, m_has_submission, &signals, &submit_info, &m_timeline_value);
 		    MarkRecentDrawsSubmitCalled();
 		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
 		                                    &observed);
@@ -1817,13 +1867,14 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 	submit_info.pWaitDstStageMask    = nullptr;
 	submit_info.commandBufferCount   = 1;
 	submit_info.pCommandBuffers      = &buffer;
-	submit_info.signalSemaphoreCount = 1;
-	submit_info.pSignalSemaphores    = &signal_semaphore;
+	submit_info.signalSemaphoreCount = 0;
+	submit_info.pSignalSemaphores    = nullptr;
 
 	EXIT_IF(m_queue < 0 || m_queue >= GraphicContext::QUEUES_NUM);
 
-	const auto& queue    = g_render_ctx->GetGraphicCtx()->queues[m_queue];
-	auto*       trail    = VulkanSubmitFaultTraceTrail();
+	auto&         queue    = g_render_ctx->GetGraphicCtx()->queues[m_queue];
+	auto*         trail    = VulkanSubmitFaultTraceTrail();
+	SubmitSignals signals;
 	const auto  sequence = m_has_submission ? m_submission.sequence : 0u;
 	VulkanSubmitAttempt attempt {};
 	VulkanSubmitAttempt observed {};
@@ -1837,6 +1888,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 	    {
 		    EXIT_IF(queue.mutex == nullptr);
 		    Core::LockGuard queue_lock(*queue.mutex);
+		    AttachSubmitSignals(&queue, signal_semaphore, m_has_submission, &signals, &submit_info, &m_timeline_value);
 		    MarkRecentDrawsSubmitCalled();
 		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
 		                                    &observed);

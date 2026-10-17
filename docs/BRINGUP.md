@@ -44,10 +44,28 @@ fail on the current HEAD before acting on them.
   | + parallel compare | 83 ms | 11.6 | 1.4 GB | 1.26 ms |
 
   Captures are visually unchanged.
+- **Completion polling.** The compute and graphics rings noticed a finished
+  submission only on their next 1 ms condition-variable timeout, so every
+  label round trip paid up to 1 ms of idle latency. A 100 us poll (experiment,
+  not kept) moved p50 from 83 to 64 ms, which confirmed the cost.
+- **Change 3.** Every queue owns a timeline semaphore; each command-processor
+  submission signals the next value in submission order. A ring with pending
+  work arms a per-ring waiter thread on the oldest submission's value; the
+  thread blocks in `vkWaitSemaphores` and wakes the ring as soon as the GPU
+  finishes. Completion is still pumped by the ring itself, under its own
+  locks, and the 1 ms timeout stays as the backstop.
+
+  | Build | Frame p50 | Frame p99 | fps |
+  | --- | --- | --- | --- |
+  | parallel compare | 83 ms | 108 ms | 11.6 |
+  | + timeline wake | 66 ms | 88 ms | 15.3 |
+
+  Sandbox (terrain, 6-7.5 fps in world), racing (7 captures) and the puzzle
+  title (cold-compile window) show the same states and captures as before.
+  Verified on Intel only; RADV is untested.
 - **Open.** The compare reads 31 MB per call and is now close to memory
-  bandwidth. The remaining ~2 ms per guest round trip (about 26 per frame) lies
-  outside write-back. Removing the compare needs knowledge of which pages the
-  dispatch wrote.
+  bandwidth. Removing the compare needs knowledge of which pages the dispatch
+  wrote.
 
 ## First-person puzzle title: cold shader compiles, not a GPU stall (2026-10-17)
 
