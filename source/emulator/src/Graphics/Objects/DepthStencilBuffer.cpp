@@ -147,6 +147,18 @@ static void* create_from_texel_bits_func(GraphicContext* ctx, CommandBuffer* buf
 	return vk_obj;
 }
 
+VkFormat DepthStencilBufferStoragePlaneFormat(VkFormat depth_format)
+{
+	switch (depth_format)
+	{
+		case VK_FORMAT_D32_SFLOAT:
+		case VK_FORMAT_D32_SFLOAT_S8_UINT: return VK_FORMAT_R32_SFLOAT;
+		case VK_FORMAT_D16_UNORM:
+		case VK_FORMAT_D16_UNORM_S8_UINT: return VK_FORMAT_R16_UNORM;
+		default: return VK_FORMAT_UNDEFINED;
+	}
+}
+
 StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
 {
 	EXIT_IF(ctx == nullptr || depth == nullptr);
@@ -159,7 +171,7 @@ StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx
 
 	auto* plane = new StorageTextureVulkanImage;
 	plane->SetNativeExtent(depth->extent.width, depth->extent.height);
-	plane->format       = VK_FORMAT_R32_SFLOAT;
+	plane->format       = DepthStencilBufferStoragePlaneFormat(depth->format);
 	plane->image        = nullptr;
 	plane->layout       = VK_IMAGE_LAYOUT_UNDEFINED;
 	plane->array_layers = 1u;

@@ -3213,17 +3213,19 @@ static ShaderSampledImageViewKind ResolveBoundSampledImageView(const VulkanImage
 	return arrayed ? ShaderSampledImageViewKind::Depth2DArray : ShaderSampledImageViewKind::Depth2D;
 }
 
-// A storage view of a whole single-sample depth plane at its guest extent: one 32-bit float layer at level 0.
+// A storage view of a whole single-sample depth plane at its guest extent: one layer at level 0 whose format
+// holds the depth texel bits unchanged (R32F over 32-bit float depth, R16 UNORM over 16-bit depth).
 static bool DepthPlaneStorageViewMatches(const VulkanImage* depth, uint32_t fmt, uint32_t width, uint32_t height, uint32_t levels,
                                          uint32_t base_level, uint32_t layers, uint32_t base_array, bool three_dimensional)
 {
-	if ((depth->format != VK_FORMAT_D32_SFLOAT && depth->format != VK_FORMAT_D32_SFLOAT_S8_UINT) || depth->samples != VK_SAMPLE_COUNT_1_BIT ||
-	    depth->IsResolutionScaled() || !depth->MatchesGuestExtent(width, height))
+	const VkFormat plane_format = DepthStencilBufferStoragePlaneFormat(depth->format);
+	if (plane_format == VK_FORMAT_UNDEFINED || depth->samples != VK_SAMPLE_COUNT_1_BIT || depth->IsResolutionScaled() ||
+	    !depth->MatchesGuestExtent(width, height))
 	{
 		return false;
 	}
 	return !three_dimensional && levels == 1u && base_level == 0u && layers == 1u && base_array == 0u &&
-	       VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0u, 0u, static_cast<uint16_t>(fmt)) == VK_FORMAT_R32_SFLOAT;
+	       VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0u, 0u, static_cast<uint16_t>(fmt)) == plane_format;
 }
 
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
@@ -3651,7 +3653,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					}
 				}
 				tex = dtex.At(static_cast<int>(alias_index));
-				// Vulkan has no storage depth image: a dispatch addresses the depth plane through the image's R32F
+				// Vulkan has no storage depth image: a dispatch addresses the depth plane through the image's colour
 				// copy, seeded here and stored back once the dispatch is recorded, so the stencil plane is untouched.
 				if (depth_exact && compute_stage && textures.desc[i].textures2d_without_sampler &&
 				    DepthPlaneStorageViewMatches(tex, fmt, width, height, levels, base_level, view_layers, base_array, three_dimensional))

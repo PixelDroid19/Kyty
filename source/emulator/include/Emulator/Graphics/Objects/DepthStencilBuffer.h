@@ -6,6 +6,8 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 
+#include <vulkan/vulkan_core.h>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -65,7 +67,10 @@ public:
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
 
-// The R32F image a storage view of this depth image's depth plane binds; see DepthStencilVulkanImage::storage_plane.
+// The colour format holding a depth plane's texel bits (R32F for 32-bit depth, R16 UNORM for 16-bit), or
+// VK_FORMAT_UNDEFINED when the plane has no storage copy.
+[[nodiscard]] VkFormat DepthStencilBufferStoragePlaneFormat(VkFormat depth_format);
+// The colour image a storage view of this depth image's depth plane binds; see DepthStencilVulkanImage::storage_plane.
 [[nodiscard]] StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth);
 
 } // namespace Kyty::Libs::Graphics

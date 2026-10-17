@@ -702,7 +702,7 @@ public:
 	// Device-local staging for an image-to-image copy through a buffer, kept apart from the scratch above so
 	// compute scratch cannot exhaust its budget. The same ordering and lifetime rules apply.
 	VulkanBuffer* AllocateTransientCopyBuffer(uint64_t size);
-	// A dispatch binds a storage view of a depth plane through the depth image's R32F copy of it
+	// A dispatch binds a storage view of a depth plane through the depth image's colour copy of it
 	// (DepthStencilVulkanImage::storage_plane); the copy returns to the depth plane once the dispatch is recorded.
 	void DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth);
 	void StoreBackDepthPlanes();
