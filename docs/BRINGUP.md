@@ -46,9 +46,11 @@ Open defects found by the sweep, none of them caused by the merge:
   a fullscreen pass with one collapsed vertex. The translated SPIR-V of every
   shader is identical on both hosts except for baked guest-address
   constants, so the difference is in how the host runs the same module.
-  Excluded: `RADV_PERFTEST=gewave32` and `gewave32,pswave32,cswave32` keep
-  the screen black (stages whose subgroup size Kyty pins to the guest wave
-  are not affected by that variable). The geometry shader synthesizes the
+  `RADV_PERFTEST=gewave32` and `gewave32,pswave32,cswave32` kept the screen
+  black (stages whose subgroup size Kyty pins to the guest wave are not
+  affected by that variable), but those runs came after the gfx ring timeouts
+  described below, so this exclusion is void until it is repeated on a
+  freshly booted host. The geometry shader synthesizes the
   guest NGG wave info (`s3`) and `exec` from the host subgroup ballot; next
   evidence: the fullscreen vertex shader's per-lane `gl_VertexIndex`,
   `gl_SubgroupInvocationID` and output position on AMD for one draw.
@@ -59,6 +61,29 @@ Open defects found by the sweep, none of them caused by the merge:
 - Puzzle title and role-playing title, AMD only: device lost
   (`vkQueueSubmit` result -4) on queue 8. On Intel the puzzle title stalls at
   boot frame 332 without a capture, as in all earlier runs.
+- **AMD runs after a gfx ring timeout are invalid until the host reboots.**
+  - What happened: the kernel log shows six `ring gfx_0.0.0 timeout` events,
+    each followed by a ring reset and "device wedged, but no recovery needed".
+    Five came from the puzzle title's run (05:35Z) and one from the
+    role-playing title's run (05:38Z), the two device-lost runs above.
+  - What followed: every later AMD run rendered wrongly while the title kept
+    running. The card title, clean at 45-51 fps before the timeouts, gave
+    only black captures at about 78 fps. The atmospheric sequel, which
+    reached its start room cleanly before the timeouts, drew its intro, title
+    card glyphs and first room as stretched, tilted polygons in two
+    consecutive runs. Intel runs of the same binary in the same hour were
+    clean.
+  - The binary differed from the sweep build only by a diagnostic sink that
+    is disabled without its environment variable, so the change is the host
+    state, not the code. It is not yet confirmed by a clean run after a
+    reboot.
+  - Consequences for this sweep: the anime fighting title's AMD row was taken
+    after the timeouts and must be repeated. So must the AMD runs behind the
+    gothic platformer's `RADV_PERFTEST` exclusion. Its black screen itself
+    predates the timeouts (05:16Z run).
+  - Rule: before reading an AMD result, check
+    `journalctl -k | grep 'ring gfx.*timeout'` since the last boot. Run titles
+    that lose the device last in an AMD sweep, or alone.
 - Role-playing title: a route that starts a new game now gets past the title
   and stops at a missing `ImageSampleCd` emitter (pixel stage) while loading.
   Its title screen background is flat magenta on Intel; earlier captures of
@@ -183,6 +208,28 @@ is attributed yet.
     `KYTY_DUMP_DRAW=all` and `KYTY_DUMP_DRAW_FRAME=<n>-<n>` to find the mask
     draw: its blend state, its vertex colour source, and whether its inputs
     change across frames.
+  - 2026-10-17, Intel, what was measured:
+    - No draw is skipped in the dark scene: the events ring had
+      `dropped=0` and no `draw_skipped`.
+    - Frame structure from the draw dump: the game first renders the far
+      layers into a 640x360 target and blurs it in ping-pong passes. It then
+      draws that target onto the 1920x1080 scene as an opaque, depth-tested
+      10x10-unit plane mesh (121 vertices, 600 indices). The sprites follow,
+      sorted far to near.
+    - The plane draw, its texture and its 16-byte constant (all zero) are the
+      same in the bright start room and in the dark room. The 640x360
+      targets hold the blurred far layers in both rooms.
+    - The dark framing reached by walking right is a small side cave. The
+      camera follows the player into it, and the frames stay static while
+      the player stands against its far wall. This alone is not shown to be
+      wrong.
+  - The maintainer's screenshot is different: a soft-edged black mass over a
+    lit forest, with the player at the right edge. It was taken on the AMD
+    iGPU before the ring timeouts recorded above, and it is not yet
+    reproduced on Intel. Next: reproduce it on AMD after a reboot, compare
+    the black-with-alpha shadow sprites (vertex colour (0,0,0,199..251), BC7
+    atlas) with the same draws on Intel, and match them by index count and
+    texture.
 - **Overlapping text (both platformers).** The maintainer reports that some
   texts sometimes draw over each other. The sequel's opening credits fade
   names in and out over gameplay, so first check whether two fading strings
