@@ -42,10 +42,10 @@ Open defects found by the sweep, none of them caused by the merge:
   AMD run of this title, so there is no AMD baseline. Next evidence: compare
   the display-buffer format of the Intel and AMD captures, then the
   fullscreen passes of one frame on both hosts.
-- Artillery title, AMD only: the terrain renders white and blue instead of
-  brown and green; both hosts hold 60 fps on the same static scene. Next
-  evidence: a per-draw dump (`KYTY_DUMP_DRAW`) of the terrain draw on both
-  hosts, comparing texture format and swizzle.
+- Excluded: the artillery title's white and blue terrain on AMD is a
+  randomly generated arctic map (falling snow, different team names), not a
+  colour error; the Intel run drew a stone map. Compare like for like before
+  treating a terrain difference as a defect.
 - Puzzle title and role-playing title, AMD only: device lost
   (`vkQueueSubmit` result -4) on queue 8. On Intel the puzzle title stalls at
   boot frame 332 without a capture, as in all earlier runs.
