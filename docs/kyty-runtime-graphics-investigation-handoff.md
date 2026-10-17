@@ -326,7 +326,14 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
-- Sequel platformer menu glyphs (2026-10-16, open; GPU writers excluded).
+- Sequel platformer menu glyphs (2026-10-16; FIXED 2026-10-17). The root
+  cause was in the command buffer: copies replayed into a fresh, all-null
+  Agc command buffer were dropped because `IsValid` refused it before its
+  refill callback could run. The fix and the two stops it unmasked (GDS
+  `ds_write_b32`, DCC decompress on a display buffer) are in BRINGUP,
+  "Platformer pair: unreadable glyphs were dropped command-buffer packets".
+  The exclusions below still hold. The "Next step" at the end of this entry
+  is superseded.
   The runtime 512x512 one-byte atlas keeps `0xcd` in every one of its
   pages through gameplay (sampled every 32-64 binds, 90-150 s Intel runs).
   `0xcd` is the engine's default fill for a new texture, so creation reaches

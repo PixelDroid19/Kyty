@@ -9,6 +9,106 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Platformer pair: unreadable glyphs were dropped command-buffer packets (2026-10-17)
+
+- Observed (Intel and AMD, strict): menu and HUD text in both platformers drew
+  as solid blocks. The runtime glyph atlases (one 512x512 and several 256x256
+  one-byte textures) kept the engine's `0xcd` creation fill through gameplay.
+- Root cause: the engine's texture upload path was traced on the guest side
+  (insect platformer, function breakpoints counted with a bounded script).
+  It ran 353 times with no error branch, and every upload reached its copy
+  dispatch recorder. The command processor still executed only one copy
+  dispatch, and no dispatch bound an atlas. The engine replays those copies
+  into a fresh Agc command buffer whose four pointers (bottom, top, cursor
+  up, cursor down) are all null and whose out-of-space callback is set. The
+  guest callback handles a null bottom by handing over the first block.
+  `CommandBuffer::IsValid` rejected the all-null buffer, so `ReserveDW`
+  never called the callback, and `sceAgcCbDispatch` and its siblings
+  returned null. Every packet written to a fresh buffer was dropped without
+  any error.
+- Correction: the earlier conclusion of an "upload never submitted /
+  downstream DCB splice" was wrong. The old per-thread tracker compared
+  HLE-side addresses with the command processor's copy of the buffer.
+- Changed (`Graphics.cpp`): an all-null buffer is valid with zero capacity,
+  so the first reservation calls the callback. `GetAvailableSizeDW` clamps
+  the reserved tail instead of wrapping. Tests
+  `RefillsEmptyCommandBufferBeforeFirstPacket` and
+  `RejectsEmptyCommandBufferWithoutRefillCallback` cover the contract.
+- Unblocked by the fix: two strict stops that the dropped packets had hidden.
+  1. The sequel's startup compute kernel (`1,1,1` and `5,1,1` groups) runs
+     `ds_write_b32` with the GDS bit set. M0 is `s_bfm(2,14)`, that is base
+     0 and size 48 KiB (RDNA2 ISA §3.7 and §10.4.3: address = M0.base + ADDR
+     + offset; an out-of-range or misaligned GDS access is a memory
+     violation, §3.11). The parser had decoded it as an LDS store, so the
+     paired-wave path refused it. It now has its own format,
+     `VaddrVdataOffsetGds`. The GDS buffer is bound whenever a program uses
+     GDS memory through a constant M0 (`ShaderGdsBufferBound`). The
+     paired-wave emitter stores per lane only when the lane is active, both
+     ADDR and ADDR + offset are below M0.size, the byte address is dword
+     aligned, and the index is inside the host GDS window
+     (`kGraphicsGdsDwords`). The native path refuses the instruction rather
+     than lowering it to LDS. Tests: `PairedGdsWriteStoresOnlyInsideM0AndTheHostWindow`
+     and `NativeGdsWriteIsRefusedNotLoweredToLds`.
+  2. At about 133 s the sequel stopped on `DCC decompression requires an
+     existing render texture`. A colour DCC decompress (CB mode 6, op 0xcc)
+     now reached a display buffer; before the fix that packet had been
+     dropped. The host display image holds expanded colour exactly like a
+     host render texture, so the decompress keeps its pixels. It only checks
+     that the display image is registered.
+- Verified (strict, bounded runs):
+  - Insect platformer on Intel, 150 s: readable menus, HUD in play, 86 fps.
+  - Insect platformer on AMD, 200 s: 26-28 fps in play.
+  - Sequel on Intel, 150 s: readable title menu and calibration screens,
+    reaches gameplay.
+  - Sequel on AMD, 200 s: readable text and HUD in play, 14-26 fps.
+  - Regression on Intel: the fishing title (150 s, dock with HUD and tutorial
+    text) and the racing title (125 s, in race).
+  - Full unit suite: 2445 pass. Both gate scripts pass.
+
+## Platformer pair: open defects seen after the glyph fix (2026-10-17)
+
+Recorded so that each one starts from evidence, not from scratch. None of them
+is attributed yet.
+
+- **Black region that does not fade (sequel, also likely the insect
+  platformer).**
+  - Symptom: walking right from the sequel's start area, a large opaque
+    black shape covers half the screen. The shape has scalloped, terrain-like
+    edges and a soft teal fog drawn over its lower part. The player walks
+    into it and disappears, which makes the area unplayable. A 200 s AMD run
+    of the insect platformer shows a similar black region to the right of the
+    player in its first area.
+  - When it was found: the maintainer saw it on the current tree. It predates
+    the glyph fix; earlier scripted routes never left the start area, so
+    captures did not show it. The scripted platformer route walks right only
+    from about 130 to 132 s, then back left. To reach the region, walk
+    right longer.
+  - Hypothesis, not verified: both engines cover hidden or adjacent rooms
+    with black mask sprites whose alpha the game fades to zero when the
+    player enters. A mask that stays opaque points at the fade never reaching
+    the GPU: stale vertex colour, or a stale per-renderer colour constant.
+    The alternative is a missed draw that should cut the mask out.
+  - Next evidence: during the scene, query `kyty_agent events` while the
+    process is live for `draw_skipped`. The harness only queries after exit,
+    which returns `endpoint_not_live`. Then dump the draws of one frame with
+    `KYTY_DUMP_DRAW=all` and `KYTY_DUMP_DRAW_FRAME=<n>-<n>` to find the mask
+    draw: its blend state, its vertex colour source, and whether its inputs
+    change across frames.
+- **Overlapping text (both platformers).** The maintainer reports that some
+  texts sometimes draw over each other. The sequel's opening credits fade
+  names in and out over gameplay, so first check whether two fading strings
+  overlapping is the title's own transition. No capture isolates it yet;
+  capture the moment before attributing it.
+- **Slow loading screens and first boot (sequel).** First start and some
+  loading screens take much longer than later ones. Not measured yet. The
+  persistent SPIR-V cache and the Vulkan pipeline cache store (`PipelineCacheStore.cpp`) both exist, so the first step is to
+  separate translation and pipeline creation from guest file I/O, by
+  comparing a cold-cache boot with a warm-cache boot on the same binary.
+- **AMD frame rate (both).** In play the insect platformer runs at 26-28 fps
+  and the sequel at 14-26 fps on the integrated RDNA2 GPU. On Intel the
+  insect platformer runs at 86 fps. Whether AMD is bound by the GPU or by the
+  command processor CPU is not measured yet.
+
 ## Platformer pair: index range over a depth target (2026-10-16)
 
 - Observed (Intel, strict): both platformers stopped intermittently on
