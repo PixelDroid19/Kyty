@@ -9,6 +9,92 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Anime fighter: storage write-back on the label path (2026-10-17)
+
+- **Observation (Intel, native 3840x2160 output).** ~8.3 fps, frame p50
+  118 ms. Two guest threads spin at 93% CPU on single loops. The GPU is idle
+  ~75% of the time, and rendering at fixed 1080p gives the same 8.4 fps, so the
+  title is not pixel-bound. Per 10 s: ~2,000 dispatches, and each writes back
+  one ~15.7 MB storage buffer (about 22 per frame).
+- **Mechanism.** The end-of-pipe label the guest waits on is written only
+  after the completion write-back. Each write-back cost three things:
+  - a page compare of 15.7 MB against the write-back snapshot (1.84 ms);
+  - a full XXH3 hash of the range (0.46 ms);
+  - another full hash at the next use, because the write-back's own write
+    notifications advanced the dirty generation and nothing re-baselined it
+    (`hash_tracked_unchanged` = 1,871 of 1,871).
+
+  That came to 58.9 GB hashed and 3.45 s of write-back per 10 s, serialized
+  with the guest's waits.
+- **Changes.**
+  1. After a write-back with changed content, a tracked range re-baselines
+     its dirty generation, as `Update` already does after an unchanged compare.
+     The range is not hashed: a later guest write compares against the unknown
+     (zero) hash and uploads its changed pages. Page generations stay stale,
+     so label-fence holes are still uploaded.
+  2. Ranges of 256 pages or more compare their pages on up to three helper
+     threads. The copy and its write notifications stay on the calling thread,
+     in page order.
+- **Measured (same 10 s window at 55 s).**
+
+  | Build | Frame p50 | fps | Hashed per 10 s | Write-back per call |
+  | --- | --- | --- | --- | --- |
+  | before | 118 ms | 8.3 | 58.9 GB | 1.84 ms |
+  | + generation baseline | 100 ms | 9.9 | 1.2 GB | 1.84 ms |
+  | + parallel compare | 83 ms | 11.6 | 1.4 GB | 1.26 ms |
+
+  Captures are visually unchanged.
+- **Open.** The compare reads 31 MB per call and is now close to memory
+  bandwidth. The remaining ~2 ms per guest round trip (about 26 per frame) lies
+  outside write-back. Removing the compare needs knowledge of which pages the
+  dispatch wrote.
+
+## First-person puzzle title: cold shader compiles, not a GPU stall (2026-10-17)
+
+The 10-17 regression set recorded this title as stalling early on a
+`gfx_storage_frontier` refusal. That attribution was wrong.
+
+- **Observation.** In the 120 s sweep window the command-processor thread runs
+  at ~93% CPU translating and compiling shaders; presents pause while it does.
+  The same binary given 300 s reaches the first lit room and holds it
+  (8 captures, ~58 fps once compiled). The sweep harness starts every run with
+  empty SPIR-V, driver and pipeline caches, so this is the worst-case first
+  boot; the on-disk caches remove it on later boots.
+- **Compile cost in one 35 s stall window** (opt-in toolchain timing,
+  Intel): translator source generation ~5.9 s, `spirv-opt` ~11 s,
+  driver pipeline creation ~8 s. Two pixel shaders of 3.7 MB of SPIR-V text
+  dominate.
+- **Why it grew.** The native pixel mask emulation transfers every ballot
+  through the quad (`NativeQuadUniform`, 11 quad broadcasts per ballot instead
+  of 4), and every VALU result with software EXEC was stored inside its own
+  selection construct. Thousands of tiny selections made `spirv-opt` and the
+  driver slow.
+- **Change.** Inactive lanes keep their VALU result through `OpSelect` instead
+  of a branch (`ShaderSpirvVector.cpp`, translator version 134). The large
+  shaders (3.7 MB of text, ~490 ballots, 6,582 quad broadcasts each) drop
+  from ~2,230 to 585 blocks and from ~1,000 to 185 selections; `spirv-opt`
+  time per compile halves.
+- **Exclusions.**
+  - Compiling with `spirv-opt` disabled moves the same cost into the driver;
+    no net gain.
+  - Removing ballots whose readers only take their own lane bit could remove
+    at most ~40% of them; not pursued yet, because it changes mask semantics in
+    every pixel shader.
+- **Verified (Intel, strict, 22-title sweep, cold caches):** 20 titles match
+  the previous baseline in status, captures and frame rate; captures of the
+  sequel, the underworld title, the fishing title and the anime fighter are
+  visually unchanged. The role-playing title stops at the open storage-view
+  refusal recorded in the next section. The puzzle title shows its first frame inside
+  120 s (none before) but does not reach the room: the regression is reduced,
+  not closed.
+- **Allocator lock (measured, not yet a fix on its own).** In optimized builds
+  every host allocation still took the tracker's global recursive lock, which
+  only the debug tracker needs. Without it, one cold 120 s run of the puzzle
+  title spent 97 ms per graphics pipeline miss instead of 112 ms and finished
+  254 misses instead of 230.
+- **Open:** first-boot time is still bounded by single-threaded compilation
+  on the command-processor thread.
+
 ## Role-playing title: story start, three stops removed (2026-10-17)
 
 Route: the menus route until 70 s, then cross every 2 s. It starts a
