@@ -9,6 +9,70 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Platformer pair: remaining device-address waits and boot time (2026-10-17)
+
+Measured on 9988930f (Intel, strict) after the two changes below. No code
+change came out of it. These are the results and the exclusions.
+
+- **Device-address draw waits are one storage class.** After the index
+  change, the sequel's dominant CPU wait is still the device-address draw
+  retry: `CommandProcessor::WaitSubmission` from `DrawIndex`, 11.6k waits and
+  8.6 s in a ~100 s window (symbolized fence stacks). Present waits were
+  2.4 s and texture fills 19 ms.
+  - A refusal census (opt-in counter in
+    `GpuMemory::PendingStorageWriteBack`, one 200 s play run) recorded 20,000
+    refusals, all on one 32 KiB storage buffer crossing a depth target on the
+    graphics queue:
+    - 14,457: the only failing condition was the overlap link (`others`
+      non-empty).
+    - 5,542: the overlap link, and the storage was also bound as that
+      target's HTILE (`depth_meta_bound`).
+  - Caveat: the counter fires on the first non-publishable object and
+    returns. Other pending storage behind it was never counted, so publishing
+    this object alone is not proven to unblock the draw.
+  - Decision: left waiting. Device publication skips the completion
+    write-back, and HTILE clears are recognized from the bytes at write-back
+    (`DepthMetaMarkClear`). Both adopt paths refuse `depth_meta_addr`
+    deliberately. Moving that recognition touches every title with depth
+    (the racing title's HTILE clear fix included), for at most ~9% of CP
+    time on titles already at 86-127 fps.
+  - Open question: in the first class, the storage crosses a depth target
+    but is not bound as its metadata. Either it is the same HTILE range and
+    the binding missed it, or it is a different range. If it is the same
+    range, write-back and flush never signal clears for it.
+    - The binding sites are `GpuMemoryCreate.cpp` near 2712 (binds only
+      when the depth target exists at storage creation) and near 2125
+      (binds only under `multi_depth_stencil_reclaim`).
+    - Direction: add the storage address and the parent's
+      `PARAM_HTILE_ADDR`/`PARAM_HTILE_SIZE` to the census key, and iterate
+      past the first blocker.
+- **Boot and loading are not emulator-bound on Intel.**
+  - Timeline (sequel, cold caches, 120 s run with captures every 600
+    frames): title menu at ~21 s after fixed-length splash screens.
+    New-game loading screens last 3 s and 7 s. Act title card at ~100 s,
+    after the route's first-boot settings screens.
+  - Per-thread CPU every 5 s over the same run: no thread above 45% of a
+    core during boot or loading.
+  - Shader work in the first 25 s window: 40 SPIR-V compiles in 0.67 s,
+    78 pipeline creates in 0.18 s, pipeline misses 0.9 s in all. The insect
+    platformer is the same: 37 compiles in 0.66 s.
+  - File reads go through the AMPR command path (`Ampr::ExecuteRead`).
+    Timing counters over one run:
+    - Boot: 2,554 reads of 1.6 GB in ~16 s. Time inside `ExecuteRead` was
+      1.9 s: host-write lease begin and end 1.1 s
+      (`GpuDirtyPageTracker::BeginHostWrite`/`EndHostWrite`, two page walks
+      per read), open and path resolution 0.4 s, the read itself 0.38 s
+      (page cache).
+    - New-game load: ~700 reads of 400 MB, 0.33 s in all.
+  - Known inefficiency, not fixed: the host-write lease walks every page of
+    the destination twice, ~0.7 ms per MB. At most ~1 s of boot.
+  - Not verified: the slow loading the maintainer reported was seen on the
+    AMD iGPU (14-26 fps in play). If the guest's loading work is
+    frame-paced, it scales with frame time there. The iGPU needs a host
+    reboot before any AMD evidence (see the regression sweep below).
+  - Probe patches (local only): `diag-gdacensus-20261017.patch`,
+    `diag-amprio-20261017.patch`.
+
 ## Index snapshots over linked surfaces (2026-10-17)
 
 - **Symptom.** After the device publication below, the sequel's next fence
