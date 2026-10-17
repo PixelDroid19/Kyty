@@ -2916,6 +2916,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2)
 	// TODO() check DX10_CLAMP
 	// TODO() check IEEE
 
+	// An inactive lane keeps its value through a select, not a branch: one
+	// selection construct per VALU instruction swamps the optimizer and driver.
 	static const char* text = R"(
               <load0>
               <load1>
@@ -2927,14 +2929,13 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2)
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %t_<index>
               <multiply>
               <clamp>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))
@@ -2994,14 +2995,13 @@ KYTY_RECOMPILER_FUNC(Recompile_VDot2cF32F16_VdstVsrc0Vsrc1Vsrc2)
         %t_<index> = OpFAdd %float %sum_<index> %t2_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %t_<index>
               <multiply>
               <clamp>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst>", dst_value.value)
@@ -3064,12 +3064,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VDot4cI32I8_VdstVsrc0Vsrc1Vsrc2)
         %tf_<index> = OpBitcast %float %t_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %tf_<index>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst>", dst_value.value)
@@ -4280,14 +4279,13 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1)
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %t_<index>
               <multiply>
               <clamp>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))
@@ -4348,14 +4346,13 @@ KYTY_RECOMPILER_FUNC(Recompile_VLdexpF32_SVdstSVsrc0SVsrc1)
         %t_<index> = OpExtInst %float %GLSL_std_450 Ldexp %t0_<index> %t1_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %t_<index>
               <multiply>
               <clamp>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))
@@ -4401,14 +4398,13 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_SVdstSVsrc0)
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %t_<index>
               <multiply>
               <clamp>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))
