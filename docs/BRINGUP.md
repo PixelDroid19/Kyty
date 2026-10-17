@@ -4912,6 +4912,21 @@ selected published source; none is a gameplay or visual acceptance.
   four-byte unsigned-integer `R16G16_UINT` image in the Gen5 format table and in the element-size table. Storage
   reinterpretation views are unchanged. Verified: the next strict Intel run passes it and stops about 52 s in at a
   missing pixel-stage emitter for `s_load_dwordx4`.
+- **Open: descriptors spilled to VGPR lanes (recorded 2026-10-16).** The same title's next stop, about 52 s in, is
+  `shader emitter missing ... SLoadDwordx4 s[32:35], s[28:29], 896` at pc 0x4 of a pixel shader. The shader is under
+  heavy SGPR pressure and spills its descriptors with static-lane `v_writelane` into one VGPR: the V# from EUD+896
+  (lanes 17-20), the V# from EUD+848 (lanes 14-16, 21), and an S# from EUD+720 (lanes 0-3), with more later.
+  It reloads them with `v_readlane` into other quads (`s[96:99]`, `s[16:19]`, `s[88:91]`, `s[92:95]`) and uses them
+  as V# and S#. `ShaderFindDynamicSLoadUse` (`ShaderResources.cpp`) drops the EUD+896 mapping, because the spill is a
+  read that is neither a consumer nor a clobber, so `recompile_sload_from_extended` finds no row.
+  - Excluded: simply ignoring the spill. A storage row's word 0 is the host binding index (`UpdateAddress48(i)` in
+    `PrepareStorageBuffers`), and a sampler or texture row's word 0 is a host index too. The reloaded copy has no
+    resource record at its register, so it would take the pixel guest-address path
+    (`PixelScalarBufferUsesGuestAddress`) and read guest memory at that index.
+  - Direction: carry descriptor provenance through static-lane spill slots, from the `v_writelane` of each word to a
+    `v_readlane` reassembling all words in order with the slot not rewritten in between. Each reload consumer then gets
+    a dynamic record for the same resource, so the runtime word 0 selects the binding as for the original register.
+    T# halves assembled from two loads plus reloads in the same shader need their own evidence.
 - **SGPR104 and SGPR105.** The RDNA2 scalar operand range is 0..105; the parser stopped at 103, and the shared lowering
   preconditions and compute-wave analyses used the same limit, so a pixel shader reading `s104` was refused as an
   invalid instruction before native wave analysis. The limits follow the ISA; the NGG passthrough proof, which keeps
