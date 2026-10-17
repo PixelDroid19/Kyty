@@ -510,20 +510,29 @@ is attributed yet.
   - 2026-10-17, Intel, walking right with a capture every 3 s: the player
     passes the cage and reaches the start room's right edge. There, a
     soft-edged black corner covers the top right of the lit forest, and the
-    player walks into it and leaves the view. After a room transition, a
-    small cave room is drawn centred on screen and framed in black, with
-    fireflies over the black. A published walkthrough places a Shell Shards
-    cave to the right of the start. Its screenshot of the start room shows
-    the same dark soft-edged corners, which fits the room-border framing both
-    titles use. No hardware image of the cave itself was found, so this is
-    consistent, not proven.
-  - The maintainer's screenshot is different: a soft-edged black mass over a
-    lit forest, with the player at the right edge. It was taken on the AMD
-    iGPU before the ring timeouts recorded above, and it is not yet
-    reproduced on Intel. Next: reproduce it on AMD after a reboot, compare
-    the black-with-alpha shadow sprites (vertex colour (0,0,0,199..251), BC7
-    atlas) with the same draws on Intel, and match them by index count and
-    texture.
+    player walks into it and leaves the view. This edge frame matches the
+    maintainer's description (black mass over the lit forest, player at the
+    right edge). About 3 s later a small cave pocket is drawn centred on
+    screen and framed in black, with fireflies over the black.
+    - No scene load separates the two: the 3 s perf windows around them have
+      no SPIR-V compile, no pipeline miss, allocations under 35 MB and no
+      frame-rate dip. The camera moved within one scene, so the black around
+      the pocket is not shown to be a room border. A cover mask that should
+      fade when the player enters (black sprites with alpha 199-251, above)
+      remains the live lead.
+    - A published walkthrough places a Shell Shards cave to the right of the
+      start. Its screenshot of the start room shows dark soft-edged corners
+      too, but no hardware image of the cave was found.
+    - Next: dump the draws of a frame at the edge and a frame inside the
+      pocket, and check whether the black sprites' vertex alpha or colour
+      constant changes when the player enters.
+  - The maintainer's screenshot was taken on the AMD iGPU and was not kept
+    by the session; the AMD-only reading rested on it. Its description
+    (soft-edged black mass over a lit forest, player at the right edge)
+    matches the Intel edge frame above. It was taken before the AMD ring
+    timeouts recorded above. After an AMD reboot, compare the black-with-alpha
+    sprites (vertex colour (0,0,0,199..251), BC7 atlas) on both hosts, matched
+    by index count and texture.
 - **Overlapping text (both platformers).** The maintainer reports that some
   texts sometimes draw over each other. The sequel's opening credits fade
   names in and out over gameplay, so first check whether two fading strings
