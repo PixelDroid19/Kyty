@@ -39,9 +39,19 @@ Open defects found by the sweep, none of them caused by the merge:
 - Gothic action platformer, AMD only: every capture is black for 240 s while
   the title runs at 53-64 fps in `phase=interactive`; one capture shows a
   single large grey triangle. Intel shows gameplay on the same route. First
-  AMD run of this title, so there is no AMD baseline. Next evidence: compare
-  the display-buffer format of the Intel and AMD captures, then the
-  fullscreen passes of one frame on both hosts.
+  AMD run of this title, so there is no AMD baseline. Evidence so far:
+  both hosts present `B8G8R8A8_SRGB` 1920x1080 and the AMD frames are RGB
+  zero, so readback is not the cause. The grey triangle is a flat white
+  triangle with one vertex at the screen centre and two at the right corners,
+  a fullscreen pass with one collapsed vertex. The translated SPIR-V of every
+  shader is identical on both hosts except for baked guest-address
+  constants, so the difference is in how the host runs the same module.
+  Excluded: `RADV_PERFTEST=gewave32` and `gewave32,pswave32,cswave32` keep
+  the screen black (stages whose subgroup size Kyty pins to the guest wave
+  are not affected by that variable). The geometry shader synthesizes the
+  guest NGG wave info (`s3`) and `exec` from the host subgroup ballot; next
+  evidence: the fullscreen vertex shader's per-lane `gl_VertexIndex`,
+  `gl_SubgroupInvocationID` and output position on AMD for one draw.
 - Excluded: the artillery title's white and blue terrain on AMD is a
   randomly generated arctic map (falling snow, different team names), not a
   colour error; the Intel run drew a stone map. Compare like for like before
