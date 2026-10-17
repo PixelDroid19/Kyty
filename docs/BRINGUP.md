@@ -9,10 +9,97 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Role-playing title: wave64 resolve pass under paired transport (2026-10-17)
+
+The role-playing title ran its menus and the traveler selection at about
+9 fps on Intel Arc A770. The cause was one compute pass that the
+native-equivalence proof refused, so it ran under paired 64-on-32 transport.
+
+- Symptom, measured on the traveler selection:
+  - The GPU was busy: Intel GT idle residency was 4–16 ms per second.
+  - The command-processor thread spent 66% of its samples in
+    `drm_syncobj` waits.
+  - The perf snapshot showed 15 of 20 s in fence waits, with 122 draws and
+    30 dispatches per frame.
+  - The title is GPU-bound, not CPU-bound.
+- Excluded tool: Mesa `INTEL_MEASURE=draw` crashed the process (SIGSEGV)
+  as soon as measuring began and wrote no data. This held for three start
+  frames (700, 560 and 30). Do not use it with this renderer.
+- Measurement with a temporary diagnostic (removed):
+  - It wrote a bottom-of-pipe timestamp after each draw and dispatch for 3 s
+    and summed the deltas between completions per shader.
+  - One compute pass took 2055 ms of the 3026 ms window: 28 dispatches of
+    129600 groups × 64 lanes, which is one lane per 3840×2160 pixel.
+    That is 73 ms per dispatch.
+- Cause:
+  - The pass is a wave64 program. Native equivalence refused it at a
+    `V_READFIRSTLANE_B32` with "reads another lane", so it ran under paired
+    transport.
+  - Under paired transport, each invocation carries two guest lanes and every
+    register lives in a Function variable inside a switch-dispatched loop.
+  - The value read is an image load at the constant coordinate (0, 0),
+    multiplied by a word that `S_BUFFER_LOAD` placed in VCC_LO. Every lane
+    holds the same value.
+- Fix (f985041d):
+  - The wave-uniform proof covers two more cases:
+    - an image load whose DIM coordinates and T# are shared by the wave;
+    - VCC filled by a scalar memory load.
+  - Contract for the image load: the RDNA2 ISA sets MIMG DIM to "bits [3:1]
+    of the resource type", and table 42 fixes the coordinates each DIM reads.
+    A 2D load reads x and y only.
+  - Native equivalence admits a READFIRSTLANE whose source is proven uniform
+    under the launch EXEC, and classifies its destination as data.
+- Result:
+  - The pass runs one lane per invocation at 1.65 ms per dispatch.
+  - The same 3 s GPU window completed 89 frames instead of 28, about 30 fps
+    instead of 9.
+  - The traveler selection image is unchanged.
+  - In 120 s the title now reaches frame 1309; before, it reached 520.
+- Open, not yet attributed: the remaining GPU costs per frame at the traveler
+  selection on Intel.
+  - A pair of draws (48 vertices × 10 instances): about 9.5 ms.
+  - A full-screen triangle: about 7.9 ms.
+  - A compute pass of 1152 groups: about 2.3 ms.
+- The `ImageSampleCd` stop listed in the main sweep below happens on main
+  only. Travel carries the per-pixel user-derivative emitter and passes that
+  load (verified in a 180 s run with shader logging).
+- Unit tests: `EmulatorComputeWaveNativeEquivalence` (16, two new). The
+  shader suites passed (506 tests).
+- Regression check, Intel, strict, 22 titles: status and capture count match
+  the 1d9c60d7 sweep for every title except one. The penitent platformer
+  crashed once (below); two reruns on the same binary reached 9 captures
+  each.
+- Gameplay fps from capture intervals: the sequel measured 67–68 in the sweep
+  and 71–91 in a rerun (78–80 before); the insect platformer 76–78 and 79–88
+  (92 before). The rerun is within the range these titles show from run to
+  run, and both proofs only turn a lane search into a copy or admit the native
+  path, so the drop is treated as variance, not as a regression.
+
+## Open: WAIT_REG_MEM poll address 1 crashes the command processor (2026-10-17)
+
+- Seen once in 11 strict Intel runs of the penitent platformer (new-game
+  route), about 60 s in. The two runs after it on the same binary were clean.
+- The CP thread faulted reading address `0x1` in
+  `CommandProcessor::WaitRegMem32`
+  (`source/emulator/src/Graphics/GraphicsRun.cpp`, first dereference of
+  `*addr`). It was reached from `cp_op_wait_reg_mem_32` for a 7-dword
+  `R_WAIT_MEM_32` packet (header `0xc0051028`).
+- Neither emulator encoder can produce that address: both clear the low two
+  bits (`GraphicsDcbWaitRegMem` and `GraphicsAgcWaitRegMemPatchAddress`). The
+  packet was either encoded by the guest itself or read before the guest
+  finished writing it.
+- The existing guard only catches `nullptr`. Skipping the wait would hide the
+  producer; the manual's rule ("prefer producers over symptoms") applies.
+- Suggested direction: when the address is not a mapped guest page, stop with
+  the packet dwords, the submission id and the command-buffer offset instead
+  of faulting. Then use that context to find the producer: guest encoding, or
+  a CP read that runs ahead of the guest write.
+
 ## Platformer pair: intro cinematics were black (2026-10-17)
 
-Both Unity platformers showed black for their intro cinematics. HK's intro
-ends in a second video, and after the first one the screen stayed black.
+Both Unity platformers showed black for their intro cinematics. The insect
+platformer's intro ends in a second video, and after the first one the screen
+stayed black.
 The contract, the guest evidence and the exclusion are in
 `docs/avplayer-video-path.md` ("Jump and loop contract").
 
