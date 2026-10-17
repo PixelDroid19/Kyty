@@ -507,6 +507,16 @@ is attributed yet.
       camera follows the player into it, and the frames stay static while
       the player stands against its far wall. This alone is not shown to be
       wrong.
+  - 2026-10-17, Intel, walking right with a capture every 3 s: the player
+    passes the cage and reaches the start room's right edge. There, a
+    soft-edged black corner covers the top right of the lit forest, and the
+    player walks into it and leaves the view. After a room transition, a
+    small cave room is drawn centred on screen and framed in black, with
+    fireflies over the black. A published walkthrough places a Shell Shards
+    cave to the right of the start. Its screenshot of the start room shows
+    the same dark soft-edged corners, which fits the room-border framing both
+    titles use. No hardware image of the cave itself was found, so this is
+    consistent, not proven.
   - The maintainer's screenshot is different: a soft-edged black mass over a
     lit forest, with the player at the right edge. It was taken on the AMD
     iGPU before the ring timeouts recorded above, and it is not yet
@@ -535,8 +545,10 @@ is attributed yet.
       "Loading..." follows, then ~16 s of black, then the first area fades in
       over ~10 s.
     - During those ~16 s the guest presents ~360 fps at ~10 draws per frame
-      and the command processor is busy 1.7 s of every 5 s. No thread uses
-      more than 40% of a core; the guest threads sleep on futexes (no
+      and the command processor is busy 1.7 s of every 5 s. Per-thread CPU
+      sampled inside the black (104-114 s): the busiest thread is the command
+      processor at 36% of a core and no other thread passes 10%. The guest
+      threads sleep on futexes (no
       blocked guest condition wait with `KYTY_SLOT_TRACE`, no agent event).
       AMPR and kernel AIO complete synchronously in the submitting thread, so
       I/O completion latency is excluded.
