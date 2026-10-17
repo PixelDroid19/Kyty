@@ -216,9 +216,12 @@ private:
 	// Range records are ordinary heap metadata, used only under the
 	// registration mutex. Each registration needs at least one page entry.
 	static constexpr size_t kMaxRanges = kMaxPages;
-	// Keep tiny writes on the hash lookup path. Larger spans scan the fixed
-	// table once, including sparse spans extending over unmapped guest memory.
-	static constexpr size_t kDirectWritePages = 64u;
+	// Keep tiny writes on the hash lookup path. Spans up to kDirectWriteBlocks
+	// blocks look up one block summary per kBlockPages pages; one lookup costs
+	// about what a full-table scan costs per 2,000 slots. Larger spans scan the
+	// fixed table once, including sparse spans over unmapped guest memory.
+	static constexpr size_t kDirectWritePages  = 64u;
+	static constexpr size_t kDirectWriteBlocks = 2048u;
 
 	[[nodiscard]] uintptr_t         PageStart(uintptr_t address) const noexcept;
 	[[nodiscard]] uintptr_t         PageEnd(uintptr_t page) const noexcept;
@@ -226,6 +229,7 @@ private:
 	[[nodiscard]] PageEntry*        FindPage(uintptr_t page) noexcept;
 	[[nodiscard]] const PageEntry*  FindPage(uintptr_t page) const noexcept;
 	[[nodiscard]] PageEntry*         FindWritePage(uintptr_t page) noexcept;
+	[[nodiscard]] uint64_t           BlockWritePageMask(uintptr_t page) noexcept;
 	[[nodiscard]] PageEntry*        FindOrCreatePage(uintptr_t page) noexcept;
 	[[nodiscard]] bool               HasPageCapacity(uintptr_t first, uintptr_t last) const noexcept;
 	[[nodiscard]] bool               AdmitPages(uintptr_t first, uintptr_t last) noexcept;

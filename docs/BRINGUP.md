@@ -120,8 +120,16 @@ change came out of it. These are the results and the exclusions.
       per read), open and path resolution 0.4 s, the read itself 0.38 s
       (page cache).
     - New-game load: ~700 reads of 400 MB, 0.33 s in all.
-  - Known inefficiency, not fixed: the host-write lease walks every page of
-    the destination twice, ~0.7 ms per MB. At most ~1 s of boot.
+  - Fixed, the host-write lease cost. Every span over 64 pages scanned the
+    whole 262,144-slot dirty-page table, once in `BeginHostWrite` and once in
+    `EndHostWrite` (~0.2 ms each), whatever the read size. Spans up to 2,048
+    blocks now read one 64-page block summary (`page_mask`) per block and
+    look up only the pages it lists. A block whose lookup passes the probe
+    limit falls back to per-page lookups for that block. Larger spans keep the
+    single table scan. Sequel boot, 120 s, same route, ~3,370 reads of
+    2 GB: lease 703 -> 4 ms, release 771 -> 0 ms. Regression at 200 s: the
+    sequel 81-82 fps in play, the insect platformer 102-105, the fishing
+    dock 21-22, the card title correct; all reach the same state as before.
   - Not verified: the slow loading the maintainer reported was seen on the
     AMD iGPU (14-26 fps in play). If the guest's loading work is
     frame-paced, it scales with frame time there. The iGPU needs a host
