@@ -3174,6 +3174,12 @@ TEST(EmulatorGraphicsState, StorageTextureGrowthCopiesGpuOwnedArrayPrefix)
 	EXPECT_TRUE(StorageTextureCanCopyGrowingBacking(first.params, reads_guest.params));
 	EXPECT_FALSE(StorageTextureCanCopyGrowingBacking(first.params, gap.params));
 	EXPECT_FALSE(StorageTextureCanCopyGrowingBacking(second.params, first.params));
+
+	const StorageTextureObject mips_first(0u, 0u, 71u, 128u, 128u, 128u, 0u, 8u, 27u, true, DstSel(4, 5, 6, 7), 13u, 1u, 0u, false);
+	const StorageTextureObject mips_second(0u, 0u, 71u, 128u, 128u, 128u, 0u, 8u, 27u, true, DstSel(4, 5, 6, 7), 13u, 2u, 1u, false);
+	const StorageTextureObject fewer_mips(0u, 0u, 71u, 128u, 128u, 128u, 0u, 7u, 27u, true, DstSel(4, 5, 6, 7), 13u, 2u, 1u, false);
+	EXPECT_TRUE(StorageTextureCanCopyGrowingBacking(mips_first.params, mips_second.params));
+	EXPECT_FALSE(StorageTextureCanCopyGrowingBacking(mips_first.params, fewer_mips.params));
 }
 
 TEST(EmulatorGraphicsState, RenderTargetStorageAliasCopiesOnlyMatchingGuestBlocks)

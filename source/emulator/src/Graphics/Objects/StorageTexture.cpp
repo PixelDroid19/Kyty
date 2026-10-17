@@ -734,19 +734,24 @@ static void* create_from_objects_func(GraphicContext* ctx, CommandBuffer* buffer
 	EXIT_IF(destination == nullptr || destination->format != source->format);
 
 	const auto prefix_layers = static_cast<uint32_t>(source->guest_size / layout.tiled_slice.size);
-	EXIT_IF(prefix_layers == 0u || prefix_layers >= layout.layers);
+	EXIT_IF(prefix_layers == 0u || prefix_layers >= layout.layers || source->mip_levels != destination->mip_levels);
 
-	Vector<ImageImageCopy> regions(1);
-	regions[0].src_image   = source;
-	regions[0].src_level   = 0;
-	regions[0].dst_level   = 0;
-	regions[0].width       = layout.width;
-	regions[0].height      = layout.height;
-	regions[0].src_x       = 0;
-	regions[0].src_y       = 0;
-	regions[0].dst_x       = 0;
-	regions[0].dst_y       = 0;
-	regions[0].layer_count = prefix_layers;
+	// Each guest slice holds its whole mip chain, so the prefix layers carry every level.
+	Vector<ImageImageCopy> regions(source->mip_levels);
+	for (uint32_t level = 0; level < source->mip_levels; ++level)
+	{
+		auto& region       = regions[level];
+		region.src_image   = source;
+		region.src_level   = level;
+		region.dst_level   = level;
+		region.width       = std::max(layout.width >> level, 1u);
+		region.height      = std::max(layout.height >> level, 1u);
+		region.src_x       = 0;
+		region.src_y       = 0;
+		region.dst_x       = 0;
+		region.dst_y       = 0;
+		region.layer_count = prefix_layers;
+	}
 	UtilImageToImage(buffer, regions, destination, static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
 	return destination;
 }
@@ -894,10 +899,6 @@ bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_
 	const auto incoming_type = incoming[StorageTextureObject::PARAM_RESOURCE_TYPE];
 	const bool arrayed_2d    = incoming_type == 11u || incoming_type == 13u;
 	if (!arrayed_2d || existing_type != incoming_type)
-	{
-		return false;
-	}
-	if ((incoming[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu) != 1u)
 	{
 		return false;
 	}
