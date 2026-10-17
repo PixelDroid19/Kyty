@@ -5330,6 +5330,10 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 
 static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 {
+	// The SPIR-V interface bakes in the push block offset and descriptor set;
+	// a pixel stage takes both from the vertex stage it pairs with.
+	ret->ids.Add(bind.push_constant_offset);
+	ret->ids.Add(bind.descriptor_set_slot);
 	ret->ids.Add(static_cast<uint32_t>(bind.device_address_used));
 	if (bind.device_address_used)
 	{
