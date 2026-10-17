@@ -63,11 +63,10 @@ fail on the current HEAD before acting on them.
   - `scripts/kyty_playable_regression.py` was not run. The emulator unit
     suite (2245 passed, 9 skipped), `check_emulator_boundaries.py --strict`
     and `check_graphics_tables.py` were run.
-- **Known inefficiency.** `PendingStorageWriteBack` does not skip a storage
-  that is already published at its current `write_uses`. The publishing
-  submission is itself an incomplete use on the same queue, so a later
-  device-address draw in the same command buffer can record the copy again.
-  This is redundant work, not a correctness problem.
+- **No repeated copies.** `CollectWritableStorage` skips a storage that is
+  already published on the consumer queue at its current `write_uses`. A
+  later device-address draw in the same command buffer therefore neither
+  copies again nor waits for the publishing submission.
 - **Excluded or left open.**
   - The largest remaining refusal is a 32 KiB storage that is exactly the
     HTILE block of a live depth target. A compute clear rewrites it every
