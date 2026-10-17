@@ -10,63 +10,6 @@ namespace Kyty::Core {
 
 namespace MemoryAllocDetail {
 
-class ThreadDomainRegistry
-{
-public:
-	// Keep the registry allocation-free and bounded, while covering the large
-	// concurrent worker pools created by modern game engines.
-	static constexpr size_t capacity = 256;
-
-	bool Add(uint64_t thread_token)
-	{
-		if (thread_token == 0)
-		{
-			return false;
-		}
-		if (Contains(thread_token))
-		{
-			return true;
-		}
-		for (auto& slot: m_slots)
-		{
-			uint64_t empty = 0;
-			if (slot.compare_exchange_strong(empty, thread_token, std::memory_order_acq_rel))
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-	bool Remove(uint64_t thread_token)
-	{
-		for (auto& slot: m_slots)
-		{
-			uint64_t expected = thread_token;
-			if (slot.compare_exchange_strong(expected, 0, std::memory_order_acq_rel))
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-	[[nodiscard]] bool Contains(uint64_t thread_token) const
-	{
-		for (const auto& slot: m_slots)
-		{
-			if (slot.load(std::memory_order_acquire) == thread_token)
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-private:
-	std::atomic<uint64_t> m_slots[capacity] {};
-};
-
 // Tracks recursive allocator entry with the complete native thread token. The
 // state is allocation-free so the memory tracker can identify its own metadata
 // allocations without consulting C++ TLS or indexing a collision-prone table.

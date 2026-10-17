@@ -51,6 +51,8 @@ constexpr uint32_t IME_EVENT_KEYCODE_DOWN   = 0x101;
 constexpr uint32_t IME_EVENT_KEYCODE_UP     = 0x102;
 constexpr uint32_t IME_EVENT_KEYCODE_REPEAT = 0x103;
 
+constexpr int IME_ERROR_NOT_OPENED = static_cast<int>(0x80BC0002u);
+
 // Opaque handle of the one keyboard; titles pass it back to sceImeKeyboardGetInfo.
 constexpr uint32_t IME_KEYBOARD_RESOURCE_ID = 1;
 
@@ -133,6 +135,17 @@ static int KYTY_SYSV_ABI ImeKeyboardSetMode(int user_id, uint32_t mode)
 	return OK;
 }
 
+// sceImeSetText — NID ieCNrVrzKd4 (text, length)
+// Replaces the text of the panel that sceImeOpen starts. No such panel is implemented, so none is
+// ever open and the call reports that, as the library does without an open panel.
+static int KYTY_SYSV_ABI ImeSetText(const char16_t* text, uint32_t length)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t text   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(text));
+	KYTY_LOG_DEBUG("\t length = %" PRIu32 "\n", length);
+	return IME_ERROR_NOT_OPENED;
+}
+
 // sceImeUpdate — NID -4GCfYdNF1s
 // Runs on the title's thread; delivers the queued keyboard events to the keyboard handler.
 static int KYTY_SYSV_ABI ImeUpdate(void* handler)
@@ -175,6 +188,7 @@ LIB_DEFINE(InitIme_1)
 	LIB_FUNC("dKadqZFgKKQ", Ime::ImeKeyboardGetResourceId);
 	LIB_FUNC("VkqLPArfFdc", Ime::ImeKeyboardGetInfo);
 	LIB_FUNC("ua+13Hk9kKs", Ime::ImeKeyboardSetMode);
+	LIB_FUNC("ieCNrVrzKd4", Ime::ImeSetText);
 	LIB_FUNC("-4GCfYdNF1s", Ime::ImeUpdate);
 }
 

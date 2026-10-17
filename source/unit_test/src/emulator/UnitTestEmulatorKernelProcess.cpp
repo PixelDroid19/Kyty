@@ -907,7 +907,7 @@ TEST(EmulatorKernelProcess, RtldThreadAtexitCounterRoundTrip)
 	EXPECT_EQ(decrement(nullptr), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
-TEST(EmulatorKernelProcess, UnsupportedPosixMessageApisReturnEnosys)
+TEST(EmulatorKernelProcess, PosixMessageApisRejectInvalidDescriptors)
 {
 	EnsureKernelProcessSubsystems();
 
@@ -925,9 +925,9 @@ TEST(EmulatorKernelProcess, UnsupportedPosixMessageApisReturnEnosys)
 	auto* recvmsg_fn    = reinterpret_cast<recvmsg_fn_t>(static_cast<uintptr_t>(recvmsg_record->vaddr));
 
 	EXPECT_EQ(sendmsg_fn(-1, nullptr, 0), -1);
-	EXPECT_EQ(*Posix::GetErrorAddr(), Posix::POSIX_ENOSYS);
+	EXPECT_EQ(*Posix::GetErrorAddr(), Posix::POSIX_EBADF);
 	EXPECT_EQ(recvmsg_fn(-1, nullptr, 0), -1);
-	EXPECT_EQ(*Posix::GetErrorAddr(), Posix::POSIX_ENOSYS);
+	EXPECT_EQ(*Posix::GetErrorAddr(), Posix::POSIX_EBADF);
 }
 
 TEST(EmulatorKernelProcess, ReplacingEventRunsEachDeleteCallbackExactlyOnce)

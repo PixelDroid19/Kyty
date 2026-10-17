@@ -39,30 +39,52 @@ inline std::string NormalizeGuest(std::string path)
 	return result;
 }
 
+// Resolves `relative` below `root`, which must already be canonical, so only
+// the components of `relative` touch the host filesystem. Each existing
+// symlink is resolved; a dangling one is refused because the filename could
+// still escape on a later O_CREAT. From the first missing component the rest
+// is appended verbatim. The result may lie outside `root`; callers check
+// containment.
+inline std::filesystem::path CanonicalBelow(const std::filesystem::path& root, const std::filesystem::path& relative)
+{
+	if (root.empty() || relative.has_root_path()) { return {}; }
+	auto result   = root;
+	bool existing = true;
+	for (const auto& component: relative)
+	{
+		if (component.empty() || component == ".") { continue; }
+		if (component == "..")
+		{
+			// `result` is canonical while every component exists, so its
+			// lexical parent is its physical parent.
+			result   = result.parent_path();
+			existing = true;
+			continue;
+		}
+		result /= component;
+		if (!existing) { continue; }
+		std::error_code error;
+		const auto      status = std::filesystem::symlink_status(result, error);
+		if (error == std::errc::no_such_file_or_directory)
+		{
+			existing = false;
+			continue;
+		}
+		if (error) { return {}; }
+		if (!std::filesystem::is_symlink(status)) { continue; }
+		result = std::filesystem::canonical(result, error);
+		if (error) { return {}; }
+	}
+	return result;
+}
+
 inline std::filesystem::path Canonical(const std::filesystem::path& path)
 {
 	if (path.empty()) { return {}; }
-	// weakly_canonical alone leaves a dangling symlink unresolved. Such a
-	// filename can still escape on a later O_CREAT, so reject it explicitly.
-	std::filesystem::path prefix;
-	for (const auto& component: path)
-	{
-		prefix /= component;
-		std::error_code error;
-		const auto status = std::filesystem::symlink_status(prefix, error);
-		if (error == std::errc::no_such_file_or_directory) { break; }
-		if (error) { return {}; }
-		if (std::filesystem::is_symlink(status))
-		{
-			(void)std::filesystem::canonical(prefix, error);
-			if (error) { return {}; }
-		}
-	}
 	std::error_code error;
-	auto result = std::filesystem::weakly_canonical(path, error);
-	if (error || !result.is_absolute()) { return {}; }
-	if (result != result.root_path() && result.filename().empty()) { result = result.parent_path(); }
-	return result;
+	const auto      absolute = std::filesystem::absolute(path, error);
+	if (error) { return {}; }
+	return CanonicalBelow(absolute.root_path(), absolute.relative_path());
 }
 
 inline bool Contains(const std::filesystem::path& root, const std::filesystem::path& candidate)
@@ -71,14 +93,24 @@ inline bool Contains(const std::filesystem::path& root, const std::filesystem::p
 	return std::mismatch(root.begin(), root.end(), candidate.begin(), candidate.end()).first == root.end();
 }
 
-inline std::string ResolveContained(const std::string& root, const std::string& relative)
+// `canonical_root` must come from Canonical().
+inline std::string ResolveContained(const std::filesystem::path& canonical_root, const std::string& relative)
 {
 	const auto suffix = std::filesystem::u8path(relative);
 	if (suffix.has_root_path() || relative.find('\0') != std::string::npos) { return {}; }
-	const auto base = Canonical(std::filesystem::u8path(root));
-	if (base.empty()) { return {}; }
-	const auto candidate = Canonical(base / suffix);
-	return Contains(base, candidate) ? candidate.u8string() : std::string();
+	const auto candidate = CanonicalBelow(canonical_root, suffix);
+	return Contains(canonical_root, candidate) ? candidate.u8string() : std::string();
+}
+
+// Canonical form of a host path. When it lies lexically below one of the
+// canonical `roots`, only the components below that root are resolved.
+inline std::filesystem::path CanonicalFrom(const std::vector<std::filesystem::path>& roots, const std::filesystem::path& path)
+{
+	for (const auto& root: roots)
+	{
+		if (Contains(root, path)) { return CanonicalBelow(root, path.lexically_relative(root)); }
+	}
+	return Canonical(path);
 }
 
 inline bool EqualsIgnoringAsciiCase(const std::string& a, const std::string& b)
@@ -131,11 +163,6 @@ inline std::string MatchCaseInsensitive(const std::string& root, const std::stri
 		result += (result.empty() ? "" : "/") + name;
 	}
 	return result;
-}
-
-inline bool Allows(const std::string& root, const std::string& candidate)
-{
-	return Contains(Canonical(std::filesystem::u8path(root)), Canonical(std::filesystem::u8path(candidate)));
 }
 
 } // namespace Kyty::Kernel::FileSystem::Path

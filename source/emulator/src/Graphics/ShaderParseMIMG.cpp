@@ -294,7 +294,6 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			}
 			break;
 		case 0x21: KYTY_NI("image_sample_cl"); break;
-		case 0x22: KYTY_NI("image_sample_d"); break;
 		case 0x23: KYTY_NI("image_sample_d_cl"); break;
 			case 0x24:
 				inst.type        = ShaderInstructionType::ImageSampleL;
@@ -536,12 +535,14 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x5E: KYTY_NI("image_gather4_c_b_cl_o"); break;
 		case 0x5F: KYTY_NI("image_gather4_c_lz_o"); break;
 		case 0x60: KYTY_NI("image_get_lod"); break;
+		case 0x22:
 		case 0x68:
-			// Two-dimensional coarse samples supply four slopes followed by x,y.
-			// Other dimensions and unmodeled address/data controls stay refused.
+			// Two-dimensional samples with user derivatives (per pixel for SAMPLE_D,
+			// coarse for SAMPLE_CD) supply four slopes followed by x,y. Other
+			// dimensions and unmodeled address/data controls stay refused.
 			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask == 0u || nsa == 1u ||
 			                     (buffer[0] & 0xc0u) != 0u || (buffer[1] & 0xfc000000u) != 0u);
-			inst.type        = ShaderInstructionType::ImageSampleCd;
+			inst.type        = opcode == 0x22u ? ShaderInstructionType::ImageSampleD : ShaderInstructionType::ImageSampleCd;
 			inst.format      = ShaderInstructionFormat::VdataVaddr6StSsMimgDmask;
 			inst.src[0].size = nsa == 0u ? 6 : 1;
 			inst.src[1].size = 8;

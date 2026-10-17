@@ -1299,6 +1299,15 @@ void PutZeroSBuffers(CanonicalText& out, const ShaderZeroSBufferResources& z)
 	}
 }
 
+void PutZeroImages(CanonicalText& out, const ShaderZeroImageResources& z)
+{
+	out.Put("bind.zero_image.images_num", z.images_num);
+	for (int i = 0; i < ShaderZeroImageResources::IMAGES_MAX; ++i)
+	{
+		out.Put("bind.zero_image.start_register" + std::to_string(i), z.start_register[i]);
+	}
+}
+
 void PutTextures(CanonicalText& out, const ShaderTextureResources& t)
 {
 	out.Put("bind.textures2D.textures_num", t.textures_num);
@@ -1622,6 +1631,7 @@ std::string ShaderResourceFoldCanonicalOutput(const ShaderParsedUsage& usage, co
 	PutStorage(out, bind.storage_buffers);
 	PutZeroSBuffers(out, bind.zero_sbuffer_resources);
 	PutTextures(out, bind.textures2D);
+	PutZeroImages(out, bind.zero_image_resources);
 	PutSamplers(out, bind.samplers);
 	PutGdsDirectExtended(out, bind);
 	PutDynamicAndAssembled(out, bind);

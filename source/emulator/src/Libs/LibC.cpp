@@ -73,6 +73,7 @@
 extern "C" {
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
 int __isoc99_vsscanf(const char* s, const char* format, __gnuc_va_list args) __THROW;
+int __isoc99_vfscanf(FILE* stream, const char* format, __gnuc_va_list args);
 #endif
 [[noreturn]] void         __cxa_throw(void* thrown_exception, const std::type_info* tinfo, void (*dest)(void*));
 void*                     __cxa_begin_catch(void* exception_object);
@@ -670,35 +671,27 @@ static KYTY_SYSV_ABI const char* const* c_Getptimes()
 	return g_c_locale_times.data();
 }
 
-static const std::array<short, 384>& c_Getptoupper_table()
+// C-locale case tables: short[384] with the EOF entry before the byte-indexed
+// values. Only ASCII letters change case; every other byte maps to itself.
+using CaseTable = std::array<short, 384>;
+
+constexpr CaseTable MakeCaseTable(char first, char last, int delta)
 {
-	static const std::array<short, 384> table = [] {
-		std::array<short, 384> values {};
-		for (int c = -1; c < 256; c++)
-		{
-			values[c + 1] = (c >= 0) ? static_cast<short>(::toupper(c)) : 0;
-		}
-		return values;
-	}();
+	CaseTable table {};
+	for (int c = 0; c < 256; ++c)
+	{
+		const bool convert = c >= first && c <= last;
+		table[static_cast<std::size_t>(c) + 1] = static_cast<short>(convert ? c + delta : c);
+	}
 	return table;
 }
 
-static const std::array<short, 384>& c_Getptolower_table()
-{
-	static const std::array<short, 384> table = [] {
-		std::array<short, 384> values {};
-		for (int c = -1; c < 256; c++)
-		{
-			values[c + 1] = (c >= 0) ? static_cast<short>(::tolower(c)) : 0;
-		}
-		return values;
-	}();
-	return table;
-}
+constexpr CaseTable g_c_locale_toupper = MakeCaseTable('a', 'z', 'A' - 'a');
+constexpr CaseTable g_c_locale_tolower = MakeCaseTable('A', 'Z', 'a' - 'A');
 
 static KYTY_SYSV_ABI const short* c_Getptoupper()
 {
-	return c_Getptoupper_table().data() + 1;
+	return g_c_locale_toupper.data() + 1;
 }
 
 // Gen5 libc_v1 _Getptolower — NID 1uJgoVq3bQU. Same table contract as
@@ -708,7 +701,7 @@ static KYTY_SYSV_ABI const short* c_Getptoupper()
 // Returning a non-table pointer corrupted "data.js" and the project parse hit EOF.
 static KYTY_SYSV_ABI const short* c_Getptolower()
 {
-	return c_Getptolower_table().data() + 1;
+	return g_c_locale_tolower.data() + 1;
 }
 
 static KYTY_SYSV_ABI std::mbstate_t* c_Getpmbstate()
@@ -835,6 +828,22 @@ static KYTY_SYSV_ABI int c_sscanf(VA_ARGS)
 	const char* s   = VaArg_ptr<const char>(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
 	return c_vsscanf_classic(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+}
+static KYTY_SYSV_ABI int c_fscanf(VA_ARGS)
+{
+	VA_CONTEXT(ctx);
+	FILE*       f   = VaArg_ptr<FILE>(&ctx.va_list);
+	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
+	const Kernel::FileSystem::StreamOperation operation(f);
+	if (!operation.IsValid() || fmt == nullptr)
+	{
+		return EOF;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+	return __isoc99_vfscanf(f, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+#else
+	return ::vfscanf(f, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+#endif
 }
 // Gen5 sscanf_s — NID 24m4Z4bUaoY. Annex K requires rsize after %s/%c/%[ destinations;
 // integer formats match sscanf. Forward identically for now; refine if a title
@@ -1466,10 +1475,60 @@ static KYTY_SYSV_ABI void* CxxVtableNull(void* /*self*/)
 	return nullptr;
 }
 
-// ctype facet method at vtable+0x40 with esi=0x20; return non-zero in al.
-static KYTY_SYSV_ABI int CxxCtypeFacetQuery(void* /*self*/, int /*mask*/)
+// ctype<char> virtual slots, in the order of the guest runtime's vtable.
+// Regex class-name lookup compares names through do_tolower, so the case
+// slots must convert characters instead of returning the facet.
+static KYTY_SYSV_ABI char CxxCtypeToLower(const CxxCtypeFacetLayout* self, char character)
 {
-	return 1;
+	return static_cast<char>(self->tolower_table[static_cast<unsigned char>(character)]);
+}
+
+static KYTY_SYSV_ABI const char* CxxCtypeToLowerRange(const CxxCtypeFacetLayout* self, char* first, const char* last)
+{
+	for (; first != last; ++first)
+	{
+		*first = CxxCtypeToLower(self, *first);
+	}
+	return last;
+}
+
+static KYTY_SYSV_ABI char CxxCtypeToUpper(const CxxCtypeFacetLayout* self, char character)
+{
+	return static_cast<char>(self->toupper_table[static_cast<unsigned char>(character)]);
+}
+
+static KYTY_SYSV_ABI const char* CxxCtypeToUpperRange(const CxxCtypeFacetLayout* self, char* first, const char* last)
+{
+	for (; first != last; ++first)
+	{
+		*first = CxxCtypeToUpper(self, *first);
+	}
+	return last;
+}
+
+// Narrow-to-narrow widening and narrowing are identities: the guest widens the
+// fill character and std::endl's '\n' through do_widen.
+static KYTY_SYSV_ABI char CxxCtypeWiden(void* /*self*/, char character)
+{
+	return character;
+}
+
+static KYTY_SYSV_ABI const char* CxxCtypeWidenRange(void* /*self*/, const char* first, const char* last, char* dest)
+{
+	std::memcpy(dest, first, static_cast<size_t>(last - first));
+	return last;
+}
+
+static KYTY_SYSV_ABI char CxxCtypeNarrow(void* /*self*/, char character, char /*fallback*/)
+{
+	return character;
+}
+
+static KYTY_SYSV_ABI const char* CxxCtypeNarrowRange(void* /*self*/, const char* first, const char* last, char /*fallback*/,
+                                                     char* dest)
+{
+	std::memcpy(dest, first, static_cast<size_t>(last - first));
+	return last;
 }
 
 static void* g_locimp_vtable[16] = {
@@ -1489,14 +1548,22 @@ static void* g_ctype_vtable[16] = {
     reinterpret_cast<void*>(&CxxVtableNoop),      // +0x08
     reinterpret_cast<void*>(&CxxVtableNoop),      // +0x10
     reinterpret_cast<void*>(&CxxVtableNoop),      // +0x18
-    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x20
-    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x28
-    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x30
-    reinterpret_cast<void*>(&CxxVtableNoop),      // +0x38
-    reinterpret_cast<void*>(&CxxCtypeFacetQuery), // +0x40
+    reinterpret_cast<void*>(&CxxCtypeToLower),      // +0x20
+    reinterpret_cast<void*>(&CxxCtypeToLowerRange), // +0x28
+    reinterpret_cast<void*>(&CxxCtypeToUpper),      // +0x30
+    reinterpret_cast<void*>(&CxxCtypeToUpperRange), // +0x38
+    reinterpret_cast<void*>(&CxxCtypeWiden),        // +0x40
+    reinterpret_cast<void*>(&CxxCtypeWidenRange),   // +0x48
+    reinterpret_cast<void*>(&CxxCtypeNarrow),       // +0x50
+    reinterpret_cast<void*>(&CxxCtypeNarrowRange),  // +0x58
 };
 
-static CxxCtypeFacetLayout g_ctype_facet {g_ctype_vtable, 0, g_c_locale_ctype.data() + 1};
+static CxxCtypeFacetLayout g_ctype_facet {g_ctype_vtable,
+                                          0,
+                                          g_c_locale_ctype.data() + 1,
+                                          g_c_locale_tolower.data() + 1,
+                                          g_c_locale_toupper.data() + 1,
+                                          0};
 
 // Facet vector: index 0 unused; ctype at kCxxCtypeCharId (1).
 static void* g_classic_facets[kCxxLocimpFacetCount] = {nullptr, &g_ctype_facet};
@@ -1543,16 +1610,6 @@ static_assert(sizeof(CxxOstreamStorage) == 104);
 static CxxOstreamStorage g_versioned_cerr;
 static CxxOstreamStorage g_versioned_clog;
 static CxxOstreamStorage g_versioned_cout;
-
-struct alignas(8) CxxClassicOstreamStorage
-{
-	std::uint64_t words[12] {};
-};
-
-static_assert(sizeof(CxxClassicOstreamStorage) == 96);
-
-static CxxClassicOstreamStorage g_classic_cerr;
-static CxxClassicOstreamStorage g_classic_cout;
 
 // libc math constant imported by C++ locale initialization.
 static const double g_positive_infinity = INFINITY;
@@ -1640,6 +1697,7 @@ static void* g_system_error_vtable[8]       = KYTY_CXX_NOOP_VTBL;
 static void* g_future_error_vtable[8]       = KYTY_CXX_NOOP_VTBL;
 static void* g_ios_base_vtable[8]           = KYTY_CXX_NOOP_VTBL;
 static void* g_ios_failure_vtable[8]        = KYTY_CXX_NOOP_VTBL;
+static void* g_overflow_error_vtable[8]     = KYTY_CXX_NOOP_VTBL;
 // std::codecvt<char, char, mbstate_t> virtual dispatch. Keep it distinct from
 // other facets: it is ABI-compatible storage, but its behavior must not be
 // conflated with ctype before a guest conversion call provides evidence.
@@ -1731,6 +1789,215 @@ constexpr std::uint32_t kCxxIosScientific = 0x800;
 constexpr std::uint32_t kCxxIosFixed      = 0x1000;
 constexpr std::uint32_t kCxxIosFloatMask  = kCxxIosScientific | kCxxIosFixed;
 constexpr std::uint32_t kCxxIosBoolAlpha  = 0x8000;
+
+// Classic standard output streams (_ZSt4cout, _ZSt4cerr). Guests inline the
+// stream inserters, so libc must export constructed objects. Layouts come from
+// the guest's inlined inserter, std::endl and basic_streambuf constructor:
+// streambuf area pointers are reached through the *_ref indirections, and the
+// basic_ios virtual base sits at the offset stored at ostream vptr[-3].
+struct alignas(8) CxxStreambufLayout
+{
+	void* const*  vtable;
+	char*         get_first;
+	char*         put_first;
+	char**        get_first_ref;
+	char**        put_first_ref;
+	char*         get_next;
+	char*         put_next;
+	char**        get_next_ref;
+	char**        put_next_ref;
+	std::int32_t  get_count;
+	std::int32_t  reserved_4c;
+	std::int32_t  put_count;
+	std::int32_t  reserved_54;
+	std::int32_t* get_count_ref;
+	std::int32_t* put_count_ref;
+};
+
+static_assert(offsetof(CxxStreambufLayout, put_next_ref) == 0x40);
+static_assert(offsetof(CxxStreambufLayout, put_count_ref) == 0x60);
+
+struct CxxClassicOstreamLayout;
+
+struct alignas(8) CxxBasicIosLayout
+{
+	void* const*             vtable;
+	std::uint64_t            reserved_08;
+	std::uint32_t            state;
+	std::uint32_t            exceptions;
+	std::uint32_t            flags;
+	std::int32_t             precision;
+	std::int32_t             width;
+	std::uint32_t            reserved_24;
+	std::uint64_t            reserved_28[2];
+	CxxLocaleLayout*         locale;
+	CxxStreambufLayout*      streambuf;
+	CxxClassicOstreamLayout* tie;
+	char                     fill;
+};
+
+static_assert(offsetof(CxxBasicIosLayout, state) == 0x10);
+static_assert(offsetof(CxxBasicIosLayout, flags) == 0x18);
+static_assert(offsetof(CxxBasicIosLayout, width) == 0x20);
+static_assert(offsetof(CxxBasicIosLayout, locale) == 0x38);
+static_assert(offsetof(CxxBasicIosLayout, streambuf) == 0x40);
+static_assert(offsetof(CxxBasicIosLayout, tie) == 0x48);
+static_assert(offsetof(CxxBasicIosLayout, fill) == 0x50);
+
+struct alignas(8) CxxClassicOstreamLayout
+{
+	void* const*      vtable;
+	CxxBasicIosLayout ios;
+};
+
+static_assert(sizeof(CxxClassicOstreamLayout) == 96);
+
+constexpr std::uint32_t kCxxIosSkipWs  = 0x01;
+constexpr std::uint32_t kCxxIosUnitBuf = 0x2000;
+constexpr std::int32_t  kCxxStreamEof  = -1;
+
+// Both streams write to the guest stdout sink, so they share one lock. The
+// guest pairs _Lock/_Unlock on the same thread around every insertion.
+static std::recursive_mutex g_standard_stream_mutex;
+
+static void CxxStandardStreamWrite(const char* data, std::int64_t size)
+{
+	while (size > 0)
+	{
+		const int chunk = static_cast<int>(std::min<std::int64_t>(size, std::numeric_limits<int>::max()));
+		GetPrintfStdFunc()("%.*s", chunk, data);
+		data += chunk;
+		size -= chunk;
+	}
+}
+
+static KYTY_SYSV_ABI void CxxStandardStreambufLock(CxxStreambufLayout* /*self*/)
+{
+	g_standard_stream_mutex.lock();
+}
+
+static KYTY_SYSV_ABI void CxxStandardStreambufUnlock(CxxStreambufLayout* /*self*/)
+{
+	g_standard_stream_mutex.unlock();
+}
+
+static KYTY_SYSV_ABI int CxxStandardStreambufOverflow(CxxStreambufLayout* /*self*/, int character)
+{
+	if (character == kCxxStreamEof)
+	{
+		return 0;
+	}
+	const char narrow = static_cast<char>(character);
+	CxxStandardStreamWrite(&narrow, 1);
+	return character;
+}
+
+static KYTY_SYSV_ABI std::int64_t CxxStandardStreambufPutN(CxxStreambufLayout* /*self*/, const char* data, std::int64_t size)
+{
+	if (data == nullptr || size <= 0)
+	{
+		return 0;
+	}
+	CxxStandardStreamWrite(data, size);
+	return size;
+}
+
+static KYTY_SYSV_ABI int CxxStandardStreambufEof(CxxStreambufLayout* /*self*/)
+{
+	return kCxxStreamEof;
+}
+
+static KYTY_SYSV_ABI std::int64_t CxxStandardStreambufNoCount(CxxStreambufLayout* /*self*/)
+{
+	return 0;
+}
+
+static KYTY_SYSV_ABI CxxStreambufLayout* CxxStandardStreambufSetBuffer(CxxStreambufLayout* self)
+{
+	return self;
+}
+
+static KYTY_SYSV_ABI int CxxStandardStreambufSync(CxxStreambufLayout* /*self*/)
+{
+	return 0;
+}
+
+static KYTY_SYSV_ABI void CxxStandardStreambufImbue(CxxStreambufLayout* /*self*/) {}
+
+// seekoff/seekpos return a pos_type through a hidden pointer whose layout is
+// not verified; output-only standard streams are not positioned by guests.
+static KYTY_SYSV_ABI void CxxStandardStreambufSeek(CxxStreambufLayout* /*self*/)
+{
+	KYTY_NOT_IMPLEMENTED;
+}
+
+// basic_streambuf<char> virtual order: dtor x2, _Lock, _Unlock, overflow,
+// pbackfail, showmanyc, underflow, uflow, xsgetn, xsputn, seekoff, seekpos,
+// setbuf, sync, imbue. Non-output slots keep the base-class defaults.
+static void* const g_standard_streambuf_vtable[16] = {
+    reinterpret_cast<void*>(&CxxVtableNoop),                  // +0x00
+    reinterpret_cast<void*>(&CxxVtableNoop),                  // +0x08
+    reinterpret_cast<void*>(&CxxStandardStreambufLock),       // +0x10
+    reinterpret_cast<void*>(&CxxStandardStreambufUnlock),     // +0x18
+    reinterpret_cast<void*>(&CxxStandardStreambufOverflow),   // +0x20
+    reinterpret_cast<void*>(&CxxStandardStreambufEof),        // +0x28
+    reinterpret_cast<void*>(&CxxStandardStreambufNoCount),    // +0x30
+    reinterpret_cast<void*>(&CxxStandardStreambufEof),        // +0x38
+    reinterpret_cast<void*>(&CxxStandardStreambufEof),        // +0x40
+    reinterpret_cast<void*>(&CxxStandardStreambufNoCount),    // +0x48
+    reinterpret_cast<void*>(&CxxStandardStreambufPutN),       // +0x50
+    reinterpret_cast<void*>(&CxxStandardStreambufSeek),       // +0x58
+    reinterpret_cast<void*>(&CxxStandardStreambufSeek),       // +0x60
+    reinterpret_cast<void*>(&CxxStandardStreambufSetBuffer),  // +0x68
+    reinterpret_cast<void*>(&CxxStandardStreambufSync),       // +0x70
+    reinterpret_cast<void*>(&CxxStandardStreambufImbue),      // +0x78
+};
+
+// ostream vtable: vbase offset, offset to top, type info, then the address
+// point with the destructors. ios_base keeps its own virtual destructors.
+static void* const g_classic_ostream_vtable[5] = {
+    reinterpret_cast<void*>(offsetof(CxxClassicOstreamLayout, ios)), nullptr, nullptr,
+    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+static void* const g_classic_ios_vtable[4] = {
+    reinterpret_cast<void*>(-static_cast<std::intptr_t>(offsetof(CxxClassicOstreamLayout, ios))), nullptr,
+    reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+
+// Unbuffered: every pointer is null, so guest inserters fall through to
+// overflow/xsputn. The *_ref slots must still point at the fields.
+static CxxStreambufLayout CxxStandardStreambuf(CxxStreambufLayout* self)
+{
+	CxxStreambufLayout streambuf {};
+	streambuf.vtable        = g_standard_streambuf_vtable;
+	streambuf.get_first_ref = &self->get_first;
+	streambuf.put_first_ref = &self->put_first;
+	streambuf.get_next_ref  = &self->get_next;
+	streambuf.put_next_ref  = &self->put_next;
+	streambuf.get_count_ref = &self->get_count;
+	streambuf.put_count_ref = &self->put_count;
+	return streambuf;
+}
+
+// basic_ios::init postconditions: goodbit, no exceptions, skipws|dec,
+// precision 6, width 0, fill ' '. cerr adds unitbuf and is tied to cout.
+static CxxClassicOstreamLayout CxxClassicOstream(CxxStreambufLayout* streambuf, std::uint32_t extra_flags,
+                                                 CxxClassicOstreamLayout* tie)
+{
+	CxxClassicOstreamLayout stream {};
+	stream.vtable        = g_classic_ostream_vtable + 3;
+	stream.ios.vtable    = g_classic_ios_vtable + 2;
+	stream.ios.flags     = kCxxIosSkipWs | kCxxIosDec | extra_flags;
+	stream.ios.precision = 6;
+	stream.ios.locale    = &g_sce_classic_locale;
+	stream.ios.streambuf = streambuf;
+	stream.ios.tie       = tie;
+	stream.ios.fill      = ' ';
+	return stream;
+}
+
+static CxxStreambufLayout      g_classic_cout_streambuf = CxxStandardStreambuf(&g_classic_cout_streambuf);
+static CxxStreambufLayout      g_classic_cerr_streambuf = CxxStandardStreambuf(&g_classic_cerr_streambuf);
+static CxxClassicOstreamLayout g_classic_cout           = CxxClassicOstream(&g_classic_cout_streambuf, 0, nullptr);
+static CxxClassicOstreamLayout g_classic_cerr = CxxClassicOstream(&g_classic_cerr_streambuf, kCxxIosUnitBuf, &g_classic_cout);
 
 struct CxxIstreamIterator
 {
@@ -3033,6 +3300,12 @@ static KYTY_SYSV_ABI void c_Xinvalid_argument(const char* msg)
 {
 	ThrowLogicError(&g_typeinfo_invalid_argument, msg);
 }
+// range_error is a runtime_error, but its thrown object has the same
+// vptr-and-message shape as the logic errors above.
+static KYTY_SYSV_ABI void c_Xrange_error(const char* msg)
+{
+	ThrowLogicError(&g_typeinfo_range_error, msg);
+}
 
 // Dinkumware wctrans_t values: 1 folds to lower case, 2 to upper case. The
 // guest runs in the "C" locale, which maps only the ASCII letters.
@@ -3094,6 +3367,91 @@ static KYTY_SYSV_ABI void c_locale_InitTemporaryInfo(void* /*self*/, const char*
 static KYTY_SYSV_ABI void c_locale_DestroyTemporaryInfo(void* /*self*/) {}
 
 static KYTY_SYSV_ABI void c_locale_RegisterFacet(void* /*self*/) {}
+
+// locale::_Locimp facet vectors follow the guest runtime: both operations run
+// under the locale lock and take facet references through the facet vtable
+// (+0x10 incref, +0x18 decref returning the facet to delete, +0x08 deleting
+// destructor).
+static std::mutex g_locimp_mutex;
+
+static void LocimpIncref(void* facet)
+{
+	const auto* vtable = *static_cast<std::uint64_t* const*>(facet);
+	Loader::GuestCall::Invoke(vtable[2], reinterpret_cast<std::uint64_t>(facet), 0, 0);
+}
+
+static void LocimpRelease(void* facet)
+{
+	const auto* vtable  = *static_cast<std::uint64_t* const*>(facet);
+	const auto  doomed  = Loader::GuestCall::Invoke(vtable[3], reinterpret_cast<std::uint64_t>(facet), 0, 0);
+	if (doomed == 0)
+	{
+		return;
+	}
+	const auto* doomed_vtable = *reinterpret_cast<std::uint64_t* const*>(doomed);
+	Loader::GuestCall::Invoke(doomed_vtable[1], doomed, 0, 0);
+}
+
+// locale::_Locimp::_Locimp(const _Locimp&): a new implementation with one
+// reference that shares every facet of the source.
+static KYTY_SYSV_ABI void c_locimp_copy_ctor(CxxLocimpLayout* self, const CxxLocimpLayout* right)
+{
+	EXIT_IF(self == nullptr || right == nullptr);
+	const std::uint32_t references = 1;
+	self->vtable                   = g_locimp_vtable;
+	std::memcpy(&self->reserved_08, &references, sizeof(references));
+	self->facet_vec   = nullptr;
+	self->facet_count = right->facet_count;
+	self->reserved_20 = right->reserved_20;
+	self->flag_24     = right->flag_24;
+	self->name        = right->name;
+
+	std::scoped_lock lock(g_locimp_mutex);
+	if (self->facet_count == 0)
+	{
+		return;
+	}
+	self->facet_vec = static_cast<void**>(c_malloc(self->facet_count * sizeof(void*)));
+	if (self->facet_vec == nullptr)
+	{
+		c_Xbad_alloc();
+	}
+	for (std::uint64_t i = self->facet_count; i > 0; i--)
+	{
+		self->facet_vec[i - 1] = right->facet_vec[i - 1];
+		if (self->facet_vec[i - 1] != nullptr)
+		{
+			LocimpIncref(self->facet_vec[i - 1]);
+		}
+	}
+}
+
+// locale::_Locimp::_Addfac(facet*, size_t): install a facet at its id. The
+// vector grows to at least 40 slots, new slots are empty, and a replaced facet
+// loses the reference the implementation held.
+static KYTY_SYSV_ABI void c_locimp_addfac(CxxLocimpLayout* self, void* facet, std::uint64_t id)
+{
+	EXIT_IF(self == nullptr || facet == nullptr);
+	std::scoped_lock lock(g_locimp_mutex);
+	if (self->facet_count <= id)
+	{
+		const std::uint64_t count = std::max<std::uint64_t>(id + 1, 40);
+		auto*               vec   = static_cast<void**>(c_realloc(self->facet_vec, count * sizeof(void*)));
+		if (vec == nullptr)
+		{
+			c_Xbad_alloc();
+		}
+		std::fill(vec + self->facet_count, vec + count, nullptr);
+		self->facet_vec   = vec;
+		self->facet_count = count;
+	}
+	LocimpIncref(facet);
+	if (self->facet_vec[id] != nullptr)
+	{
+		LocimpRelease(self->facet_vec[id]);
+	}
+	self->facet_vec[id] = facet;
+}
 
 static KYTY_SYSV_ABI void c_cxa_pure_virtual()
 {
@@ -4194,6 +4552,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("6f5f-qx4ucA", LibC::c_wcscpy_s);
 	LIB_FUNC("Ye20uNnlglA", LibC::c_abs);
 	LIB_FUNC("2gbcltk3swE", LibC::c_div);
+	LIB_FUNC("gfP0im5Z3g0", LibC::c_ldiv);
 	LIB_FUNC("dnaeGXbjP6E", LibC::c_exp2);
 	LIB_FUNC("1t1-JoZ0sZQ", LibC::c_sinhf);
 	LIB_FUNC("RCQAffkEh9A", LibC::c_coshf);
@@ -4279,6 +4638,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("oAidKrxuUv0", LibC::g_domain_error_vtable);
 	LIB_OBJECT("udTM6Nxx-Ng", LibC::g_logic_error_vtable);
 	LIB_OBJECT("n+aUKkC-3sI", LibC::g_out_of_range_vtable);
+	LIB_OBJECT("Azw9C8cy7FY", LibC::g_overflow_error_vtable);
 	LIB_OBJECT("-L+-8F0+gBc", LibC::g_runtime_error_vtable);
 	LIB_OBJECT("keXoyW-rV-0", LibC::g_invalid_argument_vtable);
 	LIB_OBJECT("cqvea9uWpvQ", LibC::g_length_error_vtable);
@@ -4326,12 +4686,16 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("QJ5xVfKkni0", LibC::c_wmemcmp16);
 	// Captured Gen5 locale setup: no args, returns a Locimp-like object.
 	LIB_FUNC("9rMML086SEE", LibC::c_locale_CreateClassicLocimp);
+	LIB_FUNC("WViwxtEKxHk", LibC::c_locimp_copy_ctor);
+	LIB_FUNC("uuga3RipCKQ", LibC::c_locimp_addfac);
 	// std::locale::classic() returns the process-wide classic locale object.
 	LIB_FUNC("Uq5K8tl8I9U", LibC::c_locale_classic);
 	LIB_FUNC("QxqK-IdpumU", LibC::c_Getpmbstate);
 	LIB_FUNC("zS94yyJRSUs", LibC::c_Getpwcstate);
 	LIB_FUNC("U52BlHBvYvE", LibC::c_Getmbcurmax);
 	LIB_FUNC("sZLrjx-yEx4", LibC::c_wcstombs_s);
+	LIB_FUNC("v7S7LhP2OJc", LibC::c_wcstombs);
+	LIB_FUNC("VUzjXknPPBs", LibC::c_mbstowcs);
 	LIB_FUNC("-9SIhUr4Iuo", LibC::c_Mbtowcx);
 	LIB_FUNC("stv1S3BKfgw", LibC::c_Wctombx);
 	LIB_OBJECT("2wz4rthdiy8", &LibC::g_dummy_obj_17);
@@ -4550,6 +4914,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("AHxyhN96dy4", LibC::c_ferror);
 	LIB_FUNC("Fm-dmyywH9Q", LibC::c_fileno);
 	LIB_FUNC("aZK8lNei-Qw", LibC::c_fputc);
+	LIB_FUNC("tLB5+4TEOK0", LibC::c_fputc); // putc
+	LIB_FUNC("St9nbxSoezk", LibC::c_clearerr);
 	LIB_FUNC("MZO7FXyAPU8", LibC::c_remove);
 
 	// printf / scanf family
@@ -4570,6 +4936,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("8Q60JLJ6Rv4", LibC::c_getc);
 	LIB_FUNC("pNtJdE3x49E", LibC::c_wcscmp);
 	LIB_FUNC("1Pk0qZQGeWo", LibC::c_sscanf);
+	LIB_FUNC("npLpPTaSuHg", LibC::c_fscanf);
 	LIB_FUNC("24m4Z4bUaoY", LibC::c_sscanf_s);
 	LIB_FUNC("jbz9I9vkqkk", LibC::c_vsprintf);
 	LIB_FUNC("rWSuTWY2JN0", LibC::c_vsnprintf_s);
@@ -4612,6 +4979,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("vYWK2Pz8vGE", LibC::c_Fiopen);
 	LIB_FUNC("MOBxtefPZUg", LibC::c_std_exception_dtor);
 	LIB_FUNC("oe9tS0VztYk", LibC::c_std_runtime_error_dtor);
+	LIB_FUNC("XilOsTdCZuM", LibC::c_std_runtime_error_dtor); // overflow_error::~overflow_error
 	LIB_FUNC("V23qt24VPVs", LibC::c_iostream_category);
 	LIB_FUNC("eT2UsmTewbU", LibC::c_Xbad_alloc);
 	LIB_FUNC("MELi-cKqWq0", LibC::c_Xbad_function_call);
@@ -4630,12 +4998,15 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Av3zjWi64Kw", LibC::Time::c_strftime);
 	LIB_FUNC("XbVXpf5WF28", LibC::Time::c_wcsftime);
 	LIB_FUNC("jT3xiGpA3B4", LibC::Time::c_asctime);
+	LIB_FUNC("0uAUs3hYuG4", LibC::Time::c_ctime);
 
 	// math (double)
 	LIB_FUNC("H8ya2H00jbI", LibC::c_sin);
 	LIB_FUNC("2WE3BTYVwKM", LibC::c_cos);
 	LIB_FUNC("T7uyNqP7vQA", LibC::c_tan);
 	LIB_FUNC("JM4EBvWT9rc", LibC::c_tanh);
+	LIB_FUNC("ZjtRqSMJwdw", LibC::c_sinh);
+	LIB_FUNC("m7iLTaO9RMs", LibC::c_cosh);
 	LIB_FUNC("7Ly52zaL44Q", LibC::c_asin);
 	LIB_FUNC("JBcgYuW8lPU", LibC::c_acos);
 	LIB_FUNC("OXmauLdQ8kY", LibC::c_atan);
@@ -4728,6 +5099,7 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 __cxa_dynamic_cast — guest Construct ConditionOrAction→Action.
 	LIB_FUNC("hMAe+TWS9mQ", LibC::cxa_dynamic_cast);
 	LIB_FUNC("ozMAr28BwSY", LibC::c_Xout_of_range);
+	LIB_FUNC("Pu0Ecyk-7FU", LibC::c_Xrange_error);
 	LIB_FUNC("tQIo+GIPklo", LibC::c_Xlength_error);
 
 	// setjmp / longjmp (bound directly to host — no C++ wrapper)

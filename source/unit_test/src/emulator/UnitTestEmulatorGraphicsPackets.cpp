@@ -116,6 +116,9 @@ bool KYTY_SYSV_ABI TestCommandBufferRefill(Gen5::CommandBuffer* opaque, uint32_t
 	state->calls++;
 	EXPECT_EQ(need_dw, state->expected_need_dw);
 
+	// The callback hands over a whole new block.
+	dcb->bottom      = state->begin;
+	dcb->top         = state->end;
 	dcb->cursor_up   = state->begin;
 	dcb->cursor_down = state->end;
 	if (state->leave_invalid)
@@ -363,6 +366,32 @@ TEST(EmulatorGraphicsPackets, RejectsInvalidCommandBufferBeforeCallingRefillCall
 	                                     reinterpret_cast<void*>(0x12345678u), 0u),
 	          nullptr);
 	EXPECT_EQ(state.calls, 0u);
+}
+
+TEST(EmulatorGraphicsPackets, RefillsEmptyCommandBufferBeforeFirstPacket)
+{
+	InitCommandBufferTestRuntime();
+
+	// A buffer that never received memory has all four pointers null.
+	uint32_t                 storage[16] = {};
+	TestCommandBuffer        cb {};
+	CommandBufferRefillState state {storage, storage + 16, 5u, 0u, false};
+	cb.callback  = TestCommandBufferRefill;
+	cb.user_data = &state;
+
+	uint32_t* cmd = Gen5::GraphicsCbDispatch(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 2u, 3u, 4u, 0u);
+	ASSERT_EQ(cmd, storage);
+	EXPECT_EQ(state.calls, 1u);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0u));
+}
+
+TEST(EmulatorGraphicsPackets, RejectsEmptyCommandBufferWithoutRefillCallback)
+{
+	InitCommandBufferTestRuntime();
+
+	TestCommandBuffer cb {};
+	EXPECT_EQ(Gen5::GraphicsCbDispatch(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 2u, 3u, 4u, 0u), nullptr);
 }
 
 TEST(EmulatorGraphicsPackets, TreatsZeroPm4DwordAsSinglePadding)
@@ -1662,6 +1691,14 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(29).component_count, 2u);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).format, VK_FORMAT_UNDEFINED);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).component_count, 0u);
+	// Bytes one fetch reads decide whether a draw can reach past its last record.
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(1).element_bytes, 1u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(29).element_bytes, 4u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).element_bytes, 4u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(71).element_bytes, 8u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(74).element_bytes, 12u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(77).element_bytes, 16u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).element_bytes, 0u);
 
 	// Gen5 format 50 is 2_10_10_10_UNORM: R in the low 10 bits, 2-bit A on top.
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).format, VK_FORMAT_A2B10G10R10_UNORM_PACK32);
@@ -3444,8 +3481,11 @@ TEST(EmulatorGraphicsPackets, Sw64kRx4bppWithinBlockIsBijective)
 	EXPECT_EQ(unique, k_block * k_block);
 	EXPECT_EQ(TileGetSw64kRxOffset(0, 0, k_block, 4), 0u);
 	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_block, 4), 4u);
-	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x8u);
-	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0xcu);
+	EXPECT_EQ(TileGetSw64kRxOffset(2, 0, k_block, 4), 0x8u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x10u);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0x14u);
+	EXPECT_EQ(TileGetSw64kRxOffset(4, 0, k_block, 4), 0x80u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 4, k_block, 4), 0x40u);
 }
 
 TEST(EmulatorGraphicsPackets, Sw64kRx2bppWithinBlockIsBijective)
@@ -3511,8 +3551,9 @@ TEST(EmulatorGraphicsPackets, Standard64KB32WithinBlockIsBijective)
 	EXPECT_EQ(TileGetStandard64KBOffset(0, 0, k_block, 4u), 0u);
 	EXPECT_EQ(TileGetStandard64KBOffset(1, 0, k_block, 4u), 4u);
 	EXPECT_EQ(TileGetStandard64KBOffset(0, 1, k_block, 4u), 0x10u);
-	// Distinct from kRenderTarget: (0,1) is 0x10 here, 0x8 for tile 27.
-	EXPECT_NE(TileGetStandard64KBOffset(0, 1, k_block, 4u), TileGetSw64kRxOffset(0, 1, k_block, 4));
+	// Distinct from kRenderTarget above the micro tile: (8,0) is 0x200 here, 0x100 for tile 27.
+	EXPECT_EQ(TileGetStandard64KBOffset(8, 0, k_block, 4u), 0x200u);
+	EXPECT_EQ(TileGetSw64kRxOffset(8, 0, k_block, 4), 0x100u);
 }
 
 TEST(EmulatorGraphicsPackets, Sw64kRx8bppWithinBlockIsBijective)
@@ -4142,6 +4183,84 @@ TEST(EmulatorGraphicsPackets, ResolvesImplicitSampleShapeFromMixedDescriptorSet)
 	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpSampledImage %SampledImage3D"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("OpSampledImage %SampledImageA"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, SamplesThroughAllZeroDescriptorReturnZero)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction sample {};
+	sample.type           = ShaderInstructionType::ImageSample;
+	sample.format         = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
+	sample.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	sample.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 3};
+	sample.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
+	sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	sample.src_num        = 3;
+	sample.mimg_dimension = 1;
+	// As decoded: formats named after their DMASK leave mimg_dmask unset.
+	sample.mimg_dmask = 0;
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(sample);
+	code.GetInstructions().Add(end);
+
+	// Read-only image slot at s[0:7] and sampler at s[8:11], all user SGPRs zero.
+	uint16_t    direct_offsets[1] = {0xffffu};
+	ShaderSharp texture_sharp {};
+	texture_sharp.offset_dw = 0;
+	texture_sharp.size      = 0;
+	ShaderSharp sampler_sharp {};
+	sampler_sharp.offset_dw = 8;
+	sampler_sharp.size      = 1;
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset   = direct_offsets;
+	user_data.direct_resource_count    = 1;
+	user_data.sharp_resource_offset[0] = &texture_sharp;
+	user_data.sharp_resource_count[0]  = 1;
+	user_data.sharp_resource_offset[2] = &sampler_sharp;
+	user_data.sharp_resource_count[2]  = 1;
+	HW::UserSgprInfo user_sgpr {};
+	user_sgpr.count = 12;
+
+	ShaderPixelInputInfo input {};
+	ShaderParsedUsage    usage {};
+	ShaderParseUsage2(&user_data, &usage, &input.bind, user_sgpr, 12, &code, 0, false);
+	EXPECT_EQ(input.bind.textures2D.textures_num, 0);
+	ASSERT_EQ(input.bind.zero_image_resources.images_num, 1);
+	EXPECT_EQ(input.bind.zero_image_resources.start_register[0], 0);
+
+	ShaderCalcBindingIndices(&input.bind);
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_EQ(source.FindIndex("OpImageSample"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpSelect %float %image_exec_active_0 %float_0_000000 %image_exec_old_0_3"), Core::STRING8_INVALID_INDEX);
+
+	// A descriptor the shader rewrites before the read is not the zero user data.
+	ShaderInstruction write {};
+	write.type   = ShaderInstructionType::SMovB32;
+	write.format = ShaderInstructionFormat::SVdstSVsrc0;
+	write.dst    = {.type = ShaderOperandType::Sgpr, .register_id = 3, .size = 1};
+	write.src[0] = {.type = ShaderOperandType::IntegerInlineConstant, .size = 0};
+	write.src_num = 1;
+	ShaderCode written;
+	written.SetType(ShaderType::Pixel);
+	written.GetInstructions().Add(write);
+	written.GetInstructions().Add(sample);
+	written.GetInstructions().Add(end);
+	ShaderPixelInputInfo written_input {};
+	ShaderParsedUsage    written_usage {};
+	ShaderParseUsage2(&user_data, &written_usage, &written_input.bind, user_sgpr, 12, &written, 0, false);
+	EXPECT_EQ(written_input.bind.zero_image_resources.images_num, 0);
 }
 
 TEST(EmulatorGraphicsPackets, UnbiasesCubeDimCoordinatesBeforeArraySampling)

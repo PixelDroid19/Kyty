@@ -897,8 +897,11 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	// ordered before everything recorded after it, and it is published when the
 	// batch's fence completes either way. A full barrier keeps its memory
 	// effects visible without splitting the submission.
+	const auto effects = static_cast<uint8_t>(dependency.effects);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, effects,
+	                                                    producer_is_current_submission && (effects & 2u) != 0u &&
+	                                                        GpuMemoryPendingStorageHasAliases()))
 	{
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
@@ -977,8 +980,11 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	// ordered before everything recorded after it, and it is published when the
 	// batch's fence completes either way. A full barrier keeps its memory
 	// effects visible without splitting the submission.
+	const auto effects = static_cast<uint8_t>(dependency.effects);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, effects,
+	                                                    producer_is_current_submission && (effects & 2u) != 0u &&
+	                                                        GpuMemoryPendingStorageHasAliases()))
 	{
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
@@ -999,6 +1005,25 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	TraceWait("wait64_suspended", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 	RequestSuspendedWait(addr, sizeof(uint64_t), func, ref, mask);
 	return;
+}
+
+// COND_INDIRECT_BUFFER reads its compare word when the CP reaches the packet.
+// A write still pending in a recorded or queued submission precedes the packet
+// in stream order, so it is published before the word is read.
+bool CommandProcessor::BranchCompare(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask)
+{
+	if (func == 0u)
+	{
+		return true;
+	}
+	SubmissionDependency dependency;
+	const auto           producer = m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 8, ref, mask, &dependency);
+	if (producer == GpuSubmissionResult::Success || producer == GpuSubmissionResult::ProducerValueMismatch)
+	{
+		BufferFlushForGpuWait();
+		g_gpu->WaitSubmission(dependency.producer);
+	}
+	return GraphicsWaitRegMemCompare(func, *addr, ref, mask);
 }
 
 bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords, const uint32_t* next_packet,
@@ -1374,7 +1399,7 @@ static void WaitForSuspendedRuns(CommandProcessor* cp, CommandProcessor::Suspend
 			     suspended->mask, suspended->function, suspended->size, cp->QueueIndex(), static_cast<int>(producer),
 			     dependency.producer.queue.Value(), dependency.producer.sequence);
 		}
-		if (std::getenv("KYTY_WAIT_TRACE") != nullptr)
+		if (static const char* env = std::getenv("KYTY_WAIT_TRACE"); env != nullptr)
 		{
 			const auto& suspended = first != nullptr ? *first : *second;
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
@@ -2005,7 +2030,7 @@ void CommandProcessor::SetIndirectArgsBaseAddress(uint32_t base_index, uint64_t 
 		default: if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); } break;
 	}
 
-	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Debug, 64, "KYTY_DUMP_INDIRECT set_base index=%u addr=0x%012" PRIx64 "\n", base_index, address);
 	}
@@ -2053,7 +2078,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 		submit_id = m_sumbit_id;
 		index_type_and_size = m_index_type_and_size;
 		instance_count = m_num_instances;
-		if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env != nullptr)
 		{
 			static uint32_t logs = 0;
 			if (logs < 48u)
@@ -2156,7 +2181,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		}
 		if (args.index_count_per_instance == 0 || args.instance_count == 0)
 		{
-			if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+			if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 			{
 				static uint32_t logs = 0;
 				if (logs < 64u)
@@ -2185,7 +2210,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		                                                                                     : args.index_count_per_instance;
 		index_addr = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(args.start_index_location) * index_bytes);
 
-		if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 		{
 			const int32_t base_vertex_location = static_cast<int32_t>(args.base_vertex_location);
 			static uint32_t logs = 0;
@@ -2213,6 +2238,63 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
 		                        index_addr, 0, 1, instance_count, vertex_offset, first_instance, pending);
+	});
+}
+
+void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
+{
+	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
+	// This precedes the CPU snapshot of indirect arguments; renderer preflight
+	// runs later and cannot provide freshness for this host-side read.
+	WaitDeviceAddressWriteBacks();
+	struct DrawIndirectArgs
+	{
+		uint32_t vertex_count_per_instance;
+		uint32_t instance_count;
+		uint32_t start_vertex_location;
+		uint32_t start_instance_location;
+	};
+
+	uint64_t         submit_id = 0;
+	DrawIndirectArgs args {};
+	{
+		Core::LockGuard lock(m_mutex);
+
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		EXIT_IF((initiator & ~0x20u) != 2u);
+
+		uint64_t args_address = 0;
+		if (!GraphicsRunIndirectArgumentAddress(m_draw_indirect_args_base_addr, data_offset, sizeof(args), &args_address) ||
+		    !GpuRangeMapped(args_address, sizeof(args)))
+		{
+			EXIT("DRAW_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
+			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
+		}
+		if (!Core::VirtualMemory::CopyFromGuest(&args, args_address, sizeof(args)))
+		{
+			EXIT("DRAW_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
+			     args_address, static_cast<uint64_t>(sizeof(args)));
+		}
+		if (args.vertex_count_per_instance == 0 || args.instance_count == 0)
+		{
+			return;
+		}
+		if (args.start_vertex_location > static_cast<uint32_t>(INT32_MAX))
+		{
+			EXIT("unsupported indirect draw start vertex: offset=0x%08" PRIx32 " start=%" PRIu32 "\n", data_offset,
+			     args.start_vertex_location);
+		}
+
+		m_num_instances = args.instance_count;
+		submit_id       = m_sumbit_id;
+	}
+	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		GraphicsRenderDrawIndexAuto(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, args.vertex_count_per_instance, 0,
+		                            args.instance_count, static_cast<int32_t>(args.start_vertex_location), args.start_instance_location,
+		                            pending);
 	});
 }
 
@@ -2291,7 +2373,7 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 		if (args.thread_group_x == 0 || args.thread_group_y == 0 || args.thread_group_z == 0)
 		{
-			if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+			if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 			{
 				static uint32_t logs = 0;
 				if (logs < 64u)
@@ -2304,7 +2386,7 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 			return;
 		}
 
-		if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 		{
 			static uint32_t logs = 0;
 			if (logs < 64u)
@@ -2329,7 +2411,7 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 		submit_id = m_sumbit_id;
 		instance_count = m_num_instances;
 
-		if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env != nullptr)
 		{
 			static uint32_t auto_logs = 0;
 			if (auto_logs < 48u)
@@ -2367,7 +2449,7 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 		GraphicsRenderDrawIndexAuto(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, draw_modifier,
-		                            instance_count, pending);
+		                            instance_count, 0, 0, pending);
 	});
 }
 

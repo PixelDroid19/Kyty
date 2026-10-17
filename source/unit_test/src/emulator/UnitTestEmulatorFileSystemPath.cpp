@@ -55,6 +55,10 @@ public:
 		std::filesystem::create_directories(path.parent_path());
 		std::ofstream(path) << "x";
 	}
+	void AddSymlink(const std::string& relative, const std::filesystem::path& target) const
+	{
+		std::filesystem::create_directory_symlink(target, m_root / relative);
+	}
 	[[nodiscard]] std::string Root() const { return m_root.u8string(); }
 
 private:
@@ -94,6 +98,26 @@ TEST(EmulatorFileSystemPath, PrefersTheExactEntryAndRefusesAmbiguousOnes)
 	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "DATA.bin"), "DATA.bin");
 	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "Data.bin"), "Data.bin");
 	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "twin/a"), "twin/a");
+}
+
+TEST(EmulatorFileSystemPath, ResolvesBelowTheRootWithoutEscapingThroughSymlinks)
+{
+	using namespace Kernel::FileSystem::Path;
+	const TemporaryTree tree("kyty-ut-path-contained");
+	const TemporaryTree outside("kyty-ut-path-outside");
+	tree.AddFile("data/asset.bin");
+	tree.AddSymlink("inner", "data");
+	tree.AddSymlink("escape", outside.Root());
+	tree.AddSymlink("dangling", tree.Root() + "/missing-target");
+	const auto root = Canonical(tree.Root());
+	EXPECT_EQ(ResolveContained(root, "inner/asset.bin"), (root / "data/asset.bin").u8string());
+	EXPECT_EQ(ResolveContained(root, "data/new/file.bin"), (root / "data/new/file.bin").u8string());
+	EXPECT_EQ(ResolveContained(root, "data/"), (root / "data").u8string());
+	EXPECT_TRUE(ResolveContained(root, "escape/file.bin").empty());
+	EXPECT_TRUE(ResolveContained(root, "dangling").empty());
+	EXPECT_TRUE(ResolveContained(root, "data/../../outside").empty());
+	EXPECT_EQ(CanonicalFrom({root}, root / "inner/asset.bin"), root / "data/asset.bin");
+	EXPECT_EQ(CanonicalFrom({root}, root / "escape"), Canonical(outside.Root()));
 }
 
 UT_END();

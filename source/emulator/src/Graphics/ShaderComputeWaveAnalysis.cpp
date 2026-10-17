@@ -845,7 +845,7 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 
 bool ShaderInstructionPerLaneLoweringPreconditions(const ShaderInstruction& instruction)
 {
-	if (ShaderSdwaLowDestinationSupported(instruction))
+	if (ShaderSdwaPartialDestinationSupported(instruction))
 	{
 		return ShaderInstructionLoweringPreconditions(ShaderSdwaWholeDestination(instruction));
 	}
@@ -910,6 +910,10 @@ ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const Shad
 	if ((instruction.type == ShaderInstructionType::DsAppend || instruction.type == ShaderInstructionType::DsConsume) && vgpr_result)
 	{
 		return ShaderComputeWaveInstructionKind::WaveAppend;
+	}
+	if (ShaderComputeWaveGdsWriteSupported(instruction))
+	{
+		return ShaderComputeWaveInstructionKind::BankedGdsWrite;
 	}
 	if (instruction.type == ShaderInstructionType::DsWriteAddtidB32 &&
 	    instruction.format == ShaderInstructionFormat::VdataOffset && instruction.src_num == 1 &&

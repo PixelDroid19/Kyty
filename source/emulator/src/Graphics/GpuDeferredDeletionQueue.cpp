@@ -185,7 +185,7 @@ void GpuDeferredDeletionQueue::DrainReady()
 				return;
 			}
 			task = std::move(m_entries.front().task);
-			m_entries.erase(m_entries.begin());
+			m_entries.pop_front();
 		}
 		task();
 	}

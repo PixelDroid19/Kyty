@@ -287,6 +287,16 @@ VulkanDescriptorSet* DescriptorCache::Allocate(Stage stage, const ShaderDescript
 	{
 		return nullptr;
 	}
+	// The caller writes every binding of the layout, so a released set of the
+	// same layout serves without a pool allocation.
+	if (const auto recycled = m_recycled_sets.find(layout); recycled != m_recycled_sets.end() && !recycled->second.empty())
+	{
+		const auto position = recycled->second.back();
+		auto*      set      = *position;
+		recycled->second.pop_back();
+		m_recycled_order.erase(position);
+		return set;
+	}
 
 	auto* ret = new VulkanDescriptorSet;
 
@@ -356,6 +366,35 @@ void DescriptorCache::Free(VulkanDescriptorSet* set)
 	}
 
 	delete set;
+}
+
+void DescriptorCache::Recycle(VulkanDescriptorSet* set)
+{
+	EXIT_IF(set == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+	if (m_recycled_order.size() >= RECYCLED_SETS_MAX)
+	{
+		FreeOldestRecycled();
+	}
+	m_recycled_order.push_back(set);
+	m_recycled_sets[set->layout].push_back(std::prev(m_recycled_order.end()));
+}
+
+// The oldest released set is also the oldest of its layout, so it leads that
+// layout's positions.
+void DescriptorCache::FreeOldestRecycled()
+{
+	auto* oldest    = m_recycled_order.front();
+	auto  positions = m_recycled_sets.find(oldest->layout);
+	EXIT_IF(positions == m_recycled_sets.end() || positions->second.empty() || *positions->second.front() != oldest);
+	positions->second.pop_front();
+	if (positions->second.empty())
+	{
+		m_recycled_sets.erase(positions);
+	}
+	m_recycled_order.pop_front();
+	Free(oldest);
 }
 
 uint32_t DescriptorCache::CalcHash(const Set& s)
@@ -663,7 +702,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	int        sampled_descriptor_num = sampled_total;
 	int        textures2d_storage_num = bind.textures2D.textures2d_storage_num;
 	int        samplers_num           = bind.samplers.samplers_num;
-	int        gds_buffers_num        = bind.gds_pointers.pointers_num;
+	int        gds_buffers_num        = ShaderGdsBufferBound(bind.gds_pointers) ? 1 : 0;
 	const bool vsharp_uniform_buffer  = bind.vsharp_uniform_buffer;
 
 	EXIT_IF(storage_buffers_num < 0 || storage_buffers_num > BUFFERS_MAX);
@@ -1163,7 +1202,7 @@ void DescriptorCache::IndexSet(int index)
 	CollectResourceIds(m_sets.At(index), &ids);
 	for (const auto id: ids)
 	{
-		m_sets_by_resource[id].push_back(index);
+		m_sets_by_resource[id].insert(index);
 	}
 }
 
@@ -1178,7 +1217,7 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 		auto it = m_sets_by_resource.find(id);
 		EXIT_IF(it == m_sets_by_resource.end());
 		auto& indices = it->second;
-		indices.erase(std::remove(indices.begin(), indices.end(), index), indices.end());
+		indices.erase(index);
 		if (indices.empty())
 		{
 			m_sets_by_resource.erase(it);
@@ -1199,9 +1238,19 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 	return released;
 }
 
+// A resource can be deleted while a submission that bound one of its sets is
+// still pending; only a set with every recorded use complete may be rewritten.
 void DescriptorCache::ReleaseSet(int index)
 {
-	Free(UnindexSet(index));
+	const auto& set      = m_sets.At(index);
+	const bool  complete = !set.untracked_use && GpuMemorySubmissionsComplete(set.uses.Dependencies());
+	auto*       released = UnindexSet(index);
+	if (complete)
+	{
+		Recycle(released);
+		return;
+	}
+	Free(released);
 }
 
 void DescriptorCache::RecordSetUse(int index, CommandBuffer* buffer)
@@ -1255,7 +1304,7 @@ void DescriptorCache::TrimSets()
 	for (auto& entry: retired)
 	{
 		auto* set = entry.set;
-		GpuMemoryDeferUntilSubmissionsComplete(std::move(entry.submissions), [this, set]() { Free(set); });
+		GpuMemoryDeferUntilSubmissionsComplete(std::move(entry.submissions), [this, set]() { Recycle(set); });
 	}
 }
 
@@ -1269,7 +1318,7 @@ void DescriptorCache::FreeSetsReferencing(uint64_t unique_id, References referen
 	{
 		return;
 	}
-	std::vector<int> candidates = it->second;
+	std::vector<int> candidates(it->second.begin(), it->second.end());
 	std::sort(candidates.begin(), candidates.end());
 	for (const int index: candidates)
 	{
@@ -1336,6 +1385,12 @@ void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
 		delete set.set;
 		set.set = nullptr;
 	}
+	for (auto* set: m_recycled_order)
+	{
+		delete set;
+	}
+	m_recycled_order.clear();
+	m_recycled_sets.clear();
 	for (const auto& [key, layout]: m_descriptor_set_layouts)
 	{
 		(void)key;

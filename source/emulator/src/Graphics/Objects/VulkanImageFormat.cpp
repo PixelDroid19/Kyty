@@ -48,6 +48,7 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
     Gen5ImageFormat {20, VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {22, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {23, VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16_UNORM, GuestImageNumericType::FloatingPoint},
+    Gen5ImageFormat {27, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {29, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_SFLOAT,
                      GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {36, VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
@@ -199,6 +200,26 @@ bool VulkanStorageHasRedBlueView(uint8_t dfmt, uint8_t nfmt, uint16_t fmt)
 {
 	const VkFormat storage = VulkanResolveGuestImageFormat(GuestImageUsage::Storage, dfmt, nfmt, fmt);
 	return storage == VK_FORMAT_R8G8B8A8_UNORM || storage == VK_FORMAT_R8G8B8A8_SRGB;
+}
+
+bool VulkanStorageHasSingleChannel(uint8_t dfmt, uint8_t nfmt, uint16_t fmt)
+{
+	switch (VulkanResolveGuestImageFormat(GuestImageUsage::Storage, dfmt, nfmt, fmt))
+	{
+		case VK_FORMAT_R8_UNORM:
+		case VK_FORMAT_R8_SNORM:
+		case VK_FORMAT_R8_UINT:
+		case VK_FORMAT_R8_SINT:
+		case VK_FORMAT_R16_UNORM:
+		case VK_FORMAT_R16_SNORM:
+		case VK_FORMAT_R16_UINT:
+		case VK_FORMAT_R16_SINT:
+		case VK_FORMAT_R16_SFLOAT:
+		case VK_FORMAT_R32_UINT:
+		case VK_FORMAT_R32_SINT:
+		case VK_FORMAT_R32_SFLOAT: return true;
+		default: return false;
+	}
 }
 
 bool VulkanGen5SampleFormatMatchesEffective(uint16_t fmt, bool use_srgb, VkFormat format)

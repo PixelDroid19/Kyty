@@ -230,7 +230,8 @@ enum class AddtidMutation
 	WidenExecBetweenStoreAndRead,
 	MixedDs,
 	BranchIntoInterval,
-	BranchTargetResetsM0,
+	BranchOverStores,
+	BranchSkipsM0,
 	Wave64PlaneOverlap,
 	NoWqmReadBeforeWrite,
 	ScalarMaskAsNumber,
@@ -318,6 +319,18 @@ std::vector<Words> AddtidProgram(AddtidMutation mutation)
 		operations.insert(operations.begin(), {branch, false});
 	}
 
+	if (mutation == AddtidMutation::BranchOverStores)
+	{
+		auto     first_store = operations.begin();
+		uint32_t store_words = 0;
+		while (first_store->words[0] >> 26u != 0x36u) { ++first_store; } // DS encoding
+		for (auto op = first_store; op != operations.end() && !op->read; ++op) { store_words += static_cast<uint32_t>(op->words.size()); }
+		Words branch;
+		Sopp(branch, 4, store_words); // s_cbranch_scc0 on a uniform compare: one path skips every store
+		first_store = operations.insert(first_store, {branch, false});
+		operations.insert(first_store, {Sopc(6, 16, Inline(0)), false}); // s_cmp_eq_u32 s16, 0
+	}
+
 	if (mutation == AddtidMutation::WidenExecBetweenStoreAndRead)
 	{
 		std::vector<Words> stores;
@@ -335,11 +348,11 @@ std::vector<Words> AddtidProgram(AddtidMutation mutation)
 		for (const auto& operation: operations) { encoded.push_back(operation.words); }
 		slots.insert(slots.begin() + kWait + 1u, encoded.begin(), encoded.end());
 	}
-	if (mutation == AddtidMutation::BranchTargetResetsM0)
+	if (mutation == AddtidMutation::BranchSkipsM0)
 	{
 		Words branch;
-		Sopp(branch, 2, 0); // branch to the next instruction, before the first ADD_TID access
-		slots.insert(slots.begin() + kM0 + 1u, branch);
+		Sopp(branch, 4, static_cast<uint32_t>(slots[kM0].size())); // s_cbranch_scc0 over M0=0: the paths disagree on M0
+		slots.insert(slots.begin() + kM0, {Sopc(6, 16, Inline(0)), branch});
 	}
 	return slots;
 }
@@ -428,6 +441,39 @@ std::vector<Words> AddtidEmitterProgram()
 	Words end;
 	Sopp(end, 1);
 	slots.push_back(end);
+	return slots;
+}
+
+// The shape a compiler emits under register pressure: the parameter M0 survives a
+// uniform join, is saved around a spill store, observed by an interpolation, and a
+// uniform loop runs before M0 is pointed at the slot again for the reload.
+std::vector<Words> AddtidSpillAcrossControlFlowProgram()
+{
+	std::vector<Words> slots;
+	Words              head;
+	Sop1(head, 3, kM0Reg, 30);              // s_mov_b32 m0, s30 (the pixel LDS parameter)
+	Sop1(head, 4, 12, kExecLo);             // s_mov_b64 s[12:13], exec
+	Sop1(head, 10, kExecLo, kExecLo);       // s_wqm_b64 exec, exec
+	Append(head, Sopc(6, 16, Inline(0)));   // s_cmp_eq_u32 s16, 0
+	Sopp(head, 4, 1);                       // s_cbranch_scc0 over one instruction: a uniform join
+	Vop1(head, 1, 11, Inline(1));           // v_mov_b32 v11, 1
+	Vop1(head, 1, 10, Inline(2));           // join: v_mov_b32 v10, 2
+	Sop1(head, 3, 0, kM0Reg);               // s_mov_b32 s0, m0
+	Sop1(head, 3, kM0Reg, Inline(0));       // s_mov_b32 m0, 0
+	Append(head, DsAddtidWrite(10u, 0u));
+	Sop1(head, 3, kM0Reg, 0);               // s_mov_b32 m0, s0
+	Append(head, VInterpP1(23u, 0u, 0u, 0u));
+	const size_t loop = head.size();
+	Sop2(head, 0, 21, 21, Inline(1));       // loop: s_add_u32 s21, s21, 1
+	Vop2(head, 3, 11, kVgpr + 11, 10);      // v_add_f32 v11, v11, v10
+	Append(head, Sopc(0x4, 21, 20));
+	Sopp(head, 5, static_cast<uint32_t>(loop - (head.size() + 1u)) & 0xffffu); // s_cbranch_scc1 loop
+	Sop1(head, 3, kM0Reg, Inline(0));       // s_mov_b32 m0, 0
+	Append(head, DsAddtidRead(20u, 0u));
+	Sop1(head, 4, kExecLo, 12);             // s_mov_b64 exec, s[12:13]
+	Append(head, Mrt0Export(20u, 23u, 11u, 11u));
+	Sopp(head, 1);
+	slots.push_back(head);
 	return slots;
 }
 
@@ -611,10 +657,10 @@ TEST(EmulatorFragmentMaskFlow, RejectsAddtidPatternsWithoutAnExactPrivateSlotPro
 			{AddtidMutation::UnalignedM0, "an unaligned M0 base is refused"},
 			{AddtidMutation::HighM0Address, "an aligned high M0 address outside the allocation is refused without wraparound"},
 			{AddtidMutation::ClobberedM0, "an M0 clobber inside the interval is refused"},
-		    {AddtidMutation::WidenExecBetweenStoreAndRead, "widening EXEC between the store and read is refused"},
 		    {AddtidMutation::MixedDs, "a mixed shared DS access is refused"},
 			{AddtidMutation::BranchIntoInterval, "a branch into the read half is refused"},
-			{AddtidMutation::BranchTargetResetsM0, "a branch target before the spill resets M0 provenance"},
+			{AddtidMutation::BranchOverStores, "a uniform branch over the stores leaves the reload without one"},
+			{AddtidMutation::BranchSkipsM0, "paths that disagree on M0 leave the spill base unknown"},
 			{AddtidMutation::Wave64PlaneOverlap, "planes 128 bytes apart still overlap for a wave64 spill"},
 		    {AddtidMutation::NoWqmReadBeforeWrite, "a no-WQM read before store is refused despite monotone masks"},
 		};
@@ -622,8 +668,28 @@ TEST(EmulatorFragmentMaskFlow, RejectsAddtidPatternsWithoutAnExactPrivateSlotPro
 		{
 			const auto code = ParseAddtidPixel(test.mutation);
 			const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
-			Check(!flow.lane_local, test.reason);
+			Check(!flow.lane_local && Contains(flow.reason, "memory write"), test.reason);
 			ExpectNativeRefusal(code, test.reason);
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentMaskFlow, ProvesAddtidSlotsAcrossJoinsLoopsAndWidenedExec)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto across = ParseAddtidPixel(AddtidSpillAcrossControlFlowProgram());
+		const auto flow   = ShaderAnalyzeFragmentMaskFlow(across, 64u);
+		Check(flow.lane_local && flow.reason == nullptr,
+		      "M0 provenance survives a join both paths agree on, and the reload follows its store across a loop");
+		// A lane outside the store's EXEC reads undefined bytes from guest LDS and from its private array alike.
+		const auto widened = ParseAddtidPixel(AddtidMutation::WidenExecBetweenStoreAndRead);
+		Check(ShaderAnalyzeFragmentMaskFlow(widened, 64u).lane_local, "a slot stays private to its lane under a wider EXEC");
+		for (uint32_t width: {32u, 64u})
+		{
+			Check(ShaderAnalyzeNativeWave(across, width).proof == ShaderNativeWaveProof::LaneLocal,
+			      "the spill across control flow is native-wave lane local");
 		}
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
@@ -842,18 +908,27 @@ TEST(EmulatorFragmentMaskFlow, AClobberedSaveAreaOrAnExportInsideBreaksTheWrappe
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorFragmentMaskFlow, AMemoryWriteMakesHelperLanesObservable)
+void InsertBufferStore(ShaderCode* code, uint32_t index)
+{
+	ShaderInstruction store {};
+	store.type = ShaderInstructionType::BufferStoreDword;
+	store.pc   = code->GetInstructions().At(index).pc;
+	code->GetInstructions().InsertAt(index, store);
+}
+
+TEST(EmulatorFragmentMaskFlow, AMemoryWriteIsAdmittedOnlyWhileExecHoldsNoHelperLane)
 {
 	ASSERT_EXIT(([] {
 		Initialize();
-		auto code = ParsePixel(Baseline());
-		// A buffer store before the export: the guest performs it for live lanes only.
-		ShaderInstruction store {};
-		store.type = ShaderInstructionType::BufferStoreDword;
-		store.pc   = code.GetInstructions().At(Find(code, ShaderInstructionType::Exp)).pc;
-		code.GetInstructions().InsertAt(Find(code, ShaderInstructionType::Exp), store);
-		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
-		Check(!flow.lane_local && Contains(flow.reason, "memory write"), "a memory write is refused");
+		// Under S_WQM the guest's helper lanes would write; the host's helpers cannot.
+		auto widened = ParsePixel(Baseline());
+		InsertBufferStore(&widened, Find(widened, ShaderInstructionType::VMovB32));
+		const auto widened_flow = ShaderAnalyzeFragmentMaskFlow(widened, 64u);
+		Check(!widened_flow.lane_local && Contains(widened_flow.reason, "memory write"), "a store under the WQM EXEC is refused");
+		// After the launch EXEC is restored, both write for the launched lanes only.
+		auto restored = ParsePixel(Baseline());
+		InsertBufferStore(&restored, Find(restored, ShaderInstructionType::Exp));
+		Check(ShaderAnalyzeFragmentMaskFlow(restored, 64u).lane_local, "a store under the restored launch EXEC is admitted");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -979,6 +1054,28 @@ TEST(EmulatorFragmentMaskFlow, VccBranchRequiresUniformityOfTheWholePair)
 		      "wave64 admission sees the varying word in the VCC branch pair");
 		// A wave32 VCCZ reflects VCC_LO only, so the varying VCC_HI is an ordinary SGPR there.
 		Check(ShaderAnalyzeFragmentMaskFlow(low_only, 32u).lane_local, "wave32 branches on the uniform VCC_LO");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+// A compare of a scalar number whose destination pair overwrites that number decides the same way for every lane.
+TEST(EmulatorFragmentMaskFlow, ACompareOverwritingItsScalarSourceStaysUniform)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Words words;
+		words.insert(words.end(), {0xd4000000u | (0xc5u << 16u) | 20u, Inline(0) | (20u << 9u)}); // v_cmp_ne_u32 s[20:21], 0, s20
+		Sop1(words, 4, kVccLo, 20);                                                                // s_mov_b64 vcc, s[20:21]
+		Sopp(words, 6, 1);                                                                         // s_cbranch_vccz over one write
+		Sop1(words, 3, 22, Inline(1));                                                             // s_mov_b32 s22, 1
+		Vop1(words, 1, 3, 22);                                                                     // join: v_mov_b32 v3, s22
+		Vop1(words, 1, 2, Inline(0));
+		Append(words, Mrt0Export(2u, 3u, 2u, 3u));
+		Sopp(words, 1);
+		const auto code = ParsePixel({words});
+		Check(code.GetInstructions().At(0).dst.register_id == 20, "the compare writes the pair holding its source");
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code, 64u);
+		Check(flow.lane_local && flow.reason == nullptr, "the uniformity of a compare is judged on its sources before the write");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -1137,6 +1234,77 @@ Words ScalarLoadOfS20()
 ShaderFragmentMaskFlow FlowOf(const Words& words)
 {
 	return ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(words)), 64u);
+}
+
+// A number spilled to lane 1 of v3, read back into s21 and used by a vector.
+Words NumberThroughSpillSlot()
+{
+	Words words = ScalarLoadOfS20();
+	LaneMove(words, 0x361, 3, 20, Inline(1));        // v_writelane_b32 v3, s20, 1
+	LaneMove(words, 0x360, 21, kVgpr + 3, Inline(1)); // v_readlane_b32 s21, v3, 1
+	Vop1(words, 1, 1, 21);                            // v_mov_b32 v1, s21
+	return words;
+}
+
+// The saved EXEC spilled to the same slot: a compiler reuses a slot once its word is dead.
+Words SavedExecThroughSpillSlot()
+{
+	Words words;
+	Sop1(words, 4, 12, kExecLo);                      // s_mov_b64 s[12:13], exec
+	LaneMove(words, 0x361, 3, 12, Inline(1));         // v_writelane_b32 v3, s12, 1
+	LaneMove(words, 0x361, 3, 13, Inline(2));         // v_writelane_b32 v3, s13, 2
+	LaneMove(words, 0x360, 40, kVgpr + 3, Inline(1)); // v_readlane_b32 s40, v3, 1
+	LaneMove(words, 0x360, 41, kVgpr + 3, Inline(2)); // v_readlane_b32 s41, v3, 2
+	Sop1(words, 4, kExecLo, 40);                      // s_mov_b64 exec, s[40:41]
+	return words;
+}
+
+TEST(EmulatorFragmentMaskFlow, ASpillSlotCarriesTheWordLastSpilledOnEachPath)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Words reused = NumberThroughSpillSlot();
+		Append(reused, SavedExecThroughSpillSlot());
+		Vop1(reused, 1, 2, Inline(0)); // v_mov_b32 v2, 0
+		reused.insert(reused.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
+		Sopp(reused, 1);
+		const auto later_mask = FlowOf(reused);
+		if (!later_mask.lane_local) { std::fprintf(stderr, "refused: %s\n", later_mask.reason); }
+		Check(later_mask.lane_local, "a mask spilled after the number was read does not reach that read");
+
+		// Through the back edge the mask reaches the read again.
+		Words carried;
+		LaneMove(carried, 0x360, 21, kVgpr + 3, Inline(1)); // v_readlane_b32 s21, v3, 1
+		Vop1(carried, 1, 1, 21);                             // v_mov_b32 v1, s21
+		Sop1(carried, 4, 12, kExecLo);                       // s_mov_b64 s[12:13], exec
+		LaneMove(carried, 0x361, 3, 12, Inline(1));          // v_writelane_b32 v3, s12, 1
+		Words looped = ScalarLoadOfS20();
+		LaneMove(looped, 0x361, 3, 20, Inline(1));           // v_writelane_b32 v3, s20, 1
+		Append(looped, LoopProgram(carried, {}));
+		const auto loop_carried = FlowOf(looped);
+		Check(!loop_carried.lane_local && Contains(loop_carried.reason, "mask observed as a number"),
+		      "a mask spilled later in a loop body reaches the read at the head");
+
+		// A slot written under divergent control flow differs between lanes after the join.
+		Words region = ScalarLoadOfS20();
+		LaneMove(region, 0x361, 3, 20, Inline(1));           // v_writelane_b32 v3, s20, 1
+		Append(region, Vopc(0xc5, Inline(0), 0u));           // v_cmp_ne_u32 vcc, 0, v0 (per lane)
+		Sop1(region, 0x24, 2, kVccLo);                       // s_and_saveexec_b64 s[2:3], vcc
+		Sopp(region, 8, 5);                                  // s_cbranch_execz over the next five dwords
+		region.insert(region.end(), {0xf4200508u | (22u << 6u), 0xfa000008u}); // s_buffer_load_dword s22, s[16:19], 8
+		Sopp(region, 12, 0xc07f);                            // s_waitcnt lgkmcnt(0)
+		LaneMove(region, 0x361, 3, 22, Inline(1));           // v_writelane_b32 v3, s22, 1
+		Sop1(region, 4, kExecLo, 2);                         // join: s_mov_b64 exec, s[2:3]
+		LaneMove(region, 0x360, 21, kVgpr + 3, Inline(1));   // v_readlane_b32 s21, v3, 1
+		Vop1(region, 1, 1, 21);                              // v_mov_b32 v1, s21
+		Vop1(region, 1, 2, Inline(0));                       // v_mov_b32 v2, 0
+		region.insert(region.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
+		Sopp(region, 1);
+		const auto divergent = FlowOf(region);
+		Check(!divergent.lane_local && Contains(divergent.reason, "divergent control flow"),
+		      "a slot spilled in a divergent block is refused after the join");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorFragmentMaskFlow, AdmitsALoopWhoseLanesLeaveByNarrowingTheMask)
@@ -1423,6 +1591,43 @@ TEST(EmulatorFragmentMaskFlow, TheDiscardPatternNeedsItsInertTailItsNarrowingAnd
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
+// A store in a block entered by S_AND_SAVEEXEC from the WQM EXEC; `before_store` sets the store's EXEC and the
+// launch EXEC saved in s[4:5] is restored for the export.
+ShaderCode SaveexecStoreProgram(const Words& before_store)
+{
+	Words words;
+	Sop1(words, 4, 4, kExecLo);                  // s_mov_b64 s[4:5], exec (launch)
+	Append(words, Vopc(0xc5, Inline(0), 0u));    // v_cmp_ne_u32 vcc, 0, v0 (under the launch EXEC)
+	Sop1(words, 10, kExecLo, kExecLo);           // s_wqm_b64 exec, exec
+	Sop1(words, 0x24, 2, kVccLo);                // s_and_saveexec_b64 s[2:3], vcc: s[2:3] takes the WQM EXEC
+	Append(words, before_store);
+	Sop1(words, 4, kExecLo, 4);                  // s_mov_b64 exec, s[4:5]
+	Vop1(words, 1, 2, Inline(0));
+	words.insert(words.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
+	Sopp(words, 1);
+	auto code = ParsePixel(AsSlots(words));
+	InsertBufferStore(&code, Find(code, ShaderInstructionType::VMovB32) - 1u);
+	return code;
+}
+
+TEST(EmulatorFragmentMaskFlow, ASaveexecCopyOfTheWqmExecStillHoldsHelperLanes)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Check(ShaderAnalyzeFragmentMaskFlow(SaveexecStoreProgram({}), 64u).lane_local,
+		      "the WQM EXEC narrowed by a live compare holds no helper lane");
+		Words narrowed;
+		Sop2(narrowed, 0x0f, kExecLo, 4, kExecLo);   // s_and_b64 exec, s[4:5], exec
+		Check(ShaderAnalyzeFragmentMaskFlow(SaveexecStoreProgram(narrowed), 64u).lane_local,
+		      "the block's EXEC narrowed by the launch EXEC holds no helper lane");
+		Words rewidened;
+		Sop1(rewidened, 4, kExecLo, 2);              // s_mov_b64 exec, s[2:3]
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(SaveexecStoreProgram(rewidened), 64u);
+		Check(!flow.lane_local && Contains(flow.reason, "memory write"), "the saved WQM EXEC brings helper lanes back");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 // A kill inside a divergent block: lanes selected by a per-lane compare test a second condition and drop out of
 // the live mask, ending in the inert tail once none survives. `kill_op` is the SOP2 opcode combining the live mask
 // with that compare: S_ANDN2_B64 (0x15) clears only lanes inside the block, S_AND_B64 (0x0f) clears every other lane.
@@ -1514,5 +1719,6 @@ TEST(EmulatorFragmentMaskFlow, PixelExecBranchesTakeTheVoteOfARealFragmentOfTheQ
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
-UT_END();
 
+
+UT_END();

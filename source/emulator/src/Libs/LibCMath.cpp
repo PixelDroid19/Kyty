@@ -27,6 +27,14 @@ KYTY_SYSV_ABI double c_tanh(double x)
 {
 	return std::tanh(x);
 }
+KYTY_SYSV_ABI double c_sinh(double x)
+{
+	return std::sinh(x);
+}
+KYTY_SYSV_ABI double c_cosh(double x)
+{
+	return std::cosh(x);
+}
 KYTY_SYSV_ABI double c_asin(double x)
 {
 	return ::asin(x);

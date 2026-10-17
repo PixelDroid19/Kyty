@@ -80,10 +80,19 @@ captured streaming title; sizes are the values the guest writes:
   option plus the 0x30-byte common expansion, with `max_voices` at +0x50.
 - Formats: PCM_I16L (0x12) and PCM_F32L (0x18), 1 or 2 channels, 1 to 192000 Hz,
   `frame_offset` and `frame_margin` zero. Float samples must be finite.
-- Blocks flags: the native caller adds one block with flags 4 (reset). Only 4 is
-  accepted: the blocks replace the voice's waveform, cursor and phase. Flags 0,
-  1 (continue) and other bits have no native evidence and are refused. A voice
-  ends when its queue drains.
+- Blocks flags (CONTINUE 1, APPEND 2, RESET 4; reset and append together are
+  refused, as is any other bit). One native caller adds one block with flags 4:
+  the blocks replace the voice's waveform, cursor and phase. A streaming title
+  (live trace) adds one PCM block with flags 1 whose `num_samples` covers the
+  whole song while `data_size` holds only the first piece, then appends the next
+  pieces (about 8 KiB each) with flags 3. A PCM block with CONTINUE, a non-zero
+  sample count larger than its supplied frames, no skip and no repeat is a
+  streaming block: it holds only the supplied frames, appended pieces extend it,
+  and at most 64 unplayed pieces are kept. An add without CONTINUE closes the
+  waveform; an add without RESET needs an open waveform (setup and reset open
+  it). While the waveform is open, a voice that reaches the end of its supplied
+  data waits silently for the next piece; once closed, the voice ends when its
+  queue drains.
 - Blocks are copied (and decoded) at add time. Host budgets, checked from the
   block headers before any guest read or allocation: 64 blocks per add, 4M frames
   per block, 32 MiB of queued float frames per voice, and 128 MiB of queued float
@@ -122,12 +131,16 @@ captured streaming title; sizes are the values the guest writes:
   is refused as an invalid rack, before anything is marked closing. This is a
   host qualification: a locked destroy is not supported here, and no separate
   native error value is assumed.
-- The voice state reports `num_decoded_samples` at +0x10 of the 48-byte state.
+- The voice state is 48 bytes, or 56 bytes with an error word after the voice
+  state that moves every later field by 8 bytes (the streaming title passes 56
+  and reads +0x18 onward). It reports
+  `num_decoded_samples` at +0x10, the decoded guest bytes, the front block's user
+  data and the guest address of the next waveform frame.
 - Stop-immediate and kill clear the queue. Setup resets the voice to Empty with
   a unit port volume.
 
-Unresolved: the continue flag and any non-reset add, the meaning of the setup
-word at +0x20, and the block repeat callback.
+Unresolved: streaming of compressed waveforms, appends to a non-streaming
+block, the meaning of the setup word at +0x20, and the block repeat callback.
 
 ## NGS2 voice commands and port state
 
@@ -141,8 +154,9 @@ padding the guest leaves uninitialized. Two independent references agree on:
 | Port volume `6` | `0x100` (float) | linear gain of port 0 |
 | Port matrix `7` | `0x300` (integer) | refused: no matrix is implemented |
 
-Play on a sampler needs queued blocks; a pause keeps the cursor and a resume
-continues from it. A source voice and a submixer take the port volume.
+Play on a sampler is accepted before any block is queued (a streaming title
+starts its voices first); the voice is silent until a waveform arrives. A pause
+keeps the cursor and a resume continues from it. A source voice and a submixer take the port volume.
 
 `Ngs2VoiceGetPortInfo(voice, 0, info, 24)` writes `{i32 matrix_id, f32 volume,
 u32 num_delay_samples, u32 destination_input, uintptr destination}`: matrix -1,
@@ -165,8 +179,10 @@ voices run in decreasing distance from the end of their route:
   silent input when nothing feeds it;
 - a playing mastering voice (setup `0x30000000`: 1, 2 or 8 channels; output
   `0x30000005`: render buffer index) adds it to its render buffer: stereo as is,
-  mono as the mean, eight channels on the front pair. A buffer whose channel
-  count differs from the setup refuses the render.
+  mono as the mean, eight channels on the front pair. A stereo mastering voice
+  may also write the front pair of an eight-channel buffer, whose other channels
+  stay silent; any other channel count that differs from the setup refuses the
+  render.
 
 Every render buffer is cleared, and a buffer shorter than one grain is refused
 before anything is written. A voice that is not patched reaches no output.
@@ -222,6 +238,17 @@ an invalid buffer address. The free handler gets the buffer back, with the same
 size and user data, when the create fails after the allocation, when the rack
 is destroyed, and for every remaining rack and the system itself when the
 system is destroyed (outside the system's state lock).
+
+## NGS2 waveform parsing
+
+`Ngs2ParseWaveformData` reads guest memory and `Ngs2ParseWaveformFile` reads a
+guest path at a byte offset; both fill the same waveform info. Accepted images
+are VAG and RIFF WAVE carrying ATRAC9 (tag 0xfffe) or uncompressed PCM: tag 1
+with 16-bit samples or tag 3 with 32-bit float samples, whose block align equals
+one frame. PCM reports one sample per audio unit and frame, and its sample count
+comes from the fact chunk when present, else from the data size. A file parse
+reports data and block offsets from the file start, so a title adds them to the
+offset of its own read. Other images are refused.
 
 ## NGS2 ATRAC9 path
 

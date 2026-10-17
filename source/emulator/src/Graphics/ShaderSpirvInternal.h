@@ -181,13 +181,14 @@ public:
 	[[nodiscard]] bool EmitComputeWaveDppInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWavePermutation(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveLdsInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveGdsWrite(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveAluInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveBufferLoadInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveGenericInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
 	                                                     uint32_t index, String8* output);
-	// Emits a per-lane instruction whose SDWA destination selects only its VGPR's low byte or word
-	// (ShaderSdwaLowDestinationSupported): the whole-dword result, then the merge into the prior bits.
-	[[nodiscard]] bool EmitSdwaLowDestinationInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
+	// Emits a per-lane instruction whose SDWA destination selects one byte or word of its VGPR
+	// (ShaderSdwaPartialDestinationSupported): the whole-dword result, then the merge into the prior bits.
+	[[nodiscard]] bool EmitSdwaPartialDestinationInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
 	                                                     uint32_t index, String8* output);
 	[[nodiscard]] String8 EmitMetadataLoad(int row, int field, const String8& id) const;
 	// Writes the metadata of each assembled V# the instruction consumes into its
@@ -579,6 +580,7 @@ bool IsSampledImageInstruction(const ShaderInstruction& inst);
 bool IsStorageImageInstruction(const ShaderInstruction& inst);
 bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst);
 String8 GuardImageDestinationStores(const String8& source, const ShaderInstruction& inst, uint32_t index);
+bool EmitZeroImageRead(const ShaderInstruction& inst, const Spirv* spirv, String8* dst_source);
 bool IsStaticScalarSpillWrite(const ShaderInstruction& inst, int* register_id, int* lane);
 bool IsStaticScalarSpillRead(const ShaderInstruction& inst, int* register_id, int* lane);
 String8 ScalarSpillSlotName(int register_id, int lane);

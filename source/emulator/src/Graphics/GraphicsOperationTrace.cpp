@@ -156,7 +156,7 @@ void AddBindResources(RecordBuilder* builder, const ShaderBindResources& bind)
 	{
 		builder->Mark(OperationTraceIncomplete::StorageImageExtentUnknown);
 	}
-	if (bind.gds_pointers.pointers_num > 0)
+	if (ShaderGdsBufferBound(bind.gds_pointers))
 	{
 		builder->Mark(OperationTraceIncomplete::GdsPointersNotSpanned);
 	}

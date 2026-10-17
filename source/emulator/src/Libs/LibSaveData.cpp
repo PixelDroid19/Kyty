@@ -17,6 +17,7 @@
 #include "Emulator/Libs/SaveDataPaths.h"
 #include "Emulator/Loader/SystemContent.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -26,6 +27,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string_view>
 #include <unordered_set>
@@ -417,7 +419,7 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, S
 	{
 		const auto name = entry->path().filename().u8string();
 		if (!entry->is_directory(error) || name.rfind("sce_", 0) == 0 || !SaveDataDirectoryNameValid(name.c_str()) ||
-		    (filter_active && name != filter))
+		    (filter_active && !SaveDataDirectoryNameMatches(name.c_str(), filter)))
 		{
 			continue;
 		}
@@ -645,18 +647,30 @@ static bool SaveDataParamFieldOf(uint32_t param_type, SaveDataParamField* field)
 	}
 }
 
-// The parameters live with the save directory, so a later mount reads what an
-// earlier one set. The file holds the guest SaveDataParam layout.
-static int SaveDataParamFile(const SaveDataMountPoint* mount_point, std::filesystem::path* file)
+// Resolves a file in the mounted directory's sce_sys folder.
+static int SaveDataMountFile(const SaveDataMountPoint* mount_point, const char32_t* name, std::filesystem::path* file)
 {
 	std::lock_guard lock(g_mount_mutex);
 	if (!g_mount_coordinator.Find(mount_point->data).has_value())
 	{
 		return SAVE_DATA_ERROR_NOT_MOUNTED;
 	}
-	const String guest = String::FromUtf8(mount_point->data) + U"/sce_sys/param.kyty";
+	const String guest = String::FromUtf8(mount_point->data) + U"/sce_sys/" + name;
 	*file              = std::filesystem::path(Kernel::FileSystem::GetRealFilename(guest).utf8_str().GetData());
 	return OK;
+}
+
+// The parameters live with the save directory, so a later mount reads what an
+// earlier one set. The file holds the guest SaveDataParam layout.
+static int SaveDataParamFile(const SaveDataMountPoint* mount_point, std::filesystem::path* file)
+{
+	return SaveDataMountFile(mount_point, U"param.kyty", file);
+}
+
+// The icon is stored as the image bytes the guest provided.
+static int SaveDataIconFile(const SaveDataMountPoint* mount_point, std::filesystem::path* file)
+{
+	return SaveDataMountFile(mount_point, U"icon0.png", file);
 }
 
 static SaveDataParam LoadSaveDataParam(const std::filesystem::path& file)
@@ -921,15 +935,69 @@ int KYTY_SYSV_ABI SaveDataCommit(const SaveDataCommitParam* commit_param)
 	return OK;
 }
 
+static int StoreSaveDataIcon(const SaveDataMountPoint* mount_point, const char* data, size_t size)
+{
+	std::filesystem::path file;
+	if (const int result = SaveDataIconFile(mount_point, &file); result != OK)
+	{
+		return result;
+	}
+	std::error_code ec;
+	std::filesystem::create_directories(file.parent_path(), ec);
+	std::ofstream stream(file, std::ios::binary | std::ios::trunc);
+	stream.write(data, static_cast<std::streamsize>(size));
+	return !ec && stream.good() ? OK : SAVE_DATA_ERROR_INTERNAL;
+}
+
 int KYTY_SYSV_ABI SaveDataSaveIcon(const SaveDataMountPoint* mount_point, const SaveDataIcon* icon)
 {
-	if (mount_point == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (icon == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	PRINT_NAME();
+	if (mount_point == nullptr || icon == nullptr || icon->buf == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	return StoreSaveDataIcon(mount_point, static_cast<const char*>(icon->buf), std::min(icon->buf_size, icon->data_size));
+}
 
-	KYTY_LOG_DEBUG("\t buf       = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(icon->buf));
-	KYTY_LOG_DEBUG("\t buf_size  = %" PRIu64 "\n", icon->buf_size);
-	KYTY_LOG_DEBUG("\t data_size = %" PRIu64 "\n", icon->data_size);
+int KYTY_SYSV_ABI SaveDataSaveIconByPath(const SaveDataMountPoint* mount_point, const char* path)
+{
+	PRINT_NAME();
+	if (mount_point == nullptr || path == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	KYTY_LOG_DEBUG("\t path = %s\n", path);
+	const auto    source = std::filesystem::path(Kernel::FileSystem::GetRealFilename(String::FromUtf8(path)).utf8_str().GetData());
+	std::ifstream stream(source, std::ios::binary);
+	if (!stream)
+	{
+		return SAVE_DATA_ERROR_NOT_FOUND;
+	}
+	const std::vector<char> data((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+	return StoreSaveDataIcon(mount_point, data.data(), data.size());
+}
 
+// data_size reports the stored size even when the guest buffer is shorter.
+int KYTY_SYSV_ABI SaveDataLoadIcon(const SaveDataMountPoint* mount_point, SaveDataIcon* icon)
+{
+	PRINT_NAME();
+	if (mount_point == nullptr || icon == nullptr || icon->buf == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	std::filesystem::path file;
+	if (const int result = SaveDataIconFile(mount_point, &file); result != OK)
+	{
+		return result;
+	}
+	std::ifstream stream(file, std::ios::binary);
+	if (!stream)
+	{
+		return SAVE_DATA_ERROR_NOT_FOUND;
+	}
+	const std::vector<char> data((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+	icon->data_size = data.size();
+	std::memcpy(icon->buf, data.data(), std::min(icon->buf_size, data.size()));
 	return OK;
 }
 
@@ -1205,6 +1273,8 @@ void RegisterSaveDataFunctions(::Kyty::Hle::HleSymbolRegistry* symbols, const Li
 	RegisterLibraryFunction(symbols, identity, "j8xKtiFj0SY", SaveDataGetEventResult, U"SaveData::SaveDataGetEventResult");
 	RegisterLibraryFunction(symbols, identity, "ie7qhZ4X0Cc", SaveDataCommit, U"SaveData::SaveDataCommit");
 	RegisterLibraryFunction(symbols, identity, "c88Yy54Mx0w", SaveDataSaveIcon, U"SaveData::SaveDataSaveIcon");
+	RegisterLibraryFunction(symbols, identity, "Z7z6HXWORJY", SaveDataSaveIconByPath, U"SaveData::SaveDataSaveIconByPath");
+	RegisterLibraryFunction(symbols, identity, "cGjO3wM3V28", SaveDataLoadIcon, U"SaveData::SaveDataLoadIcon");
 	RegisterLibraryFunction(symbols, identity, "oQySEUfgXRA", SaveDataSetupSaveDataMemory2, U"SaveData::SaveDataSetupSaveDataMemory2");
 	RegisterLibraryFunction(symbols, identity, "QwOO7vegnV8", SaveDataGetSaveDataMemory2, U"SaveData::SaveDataGetSaveDataMemory2");
 	RegisterLibraryFunction(symbols, identity, "cduy9v4YmT4", SaveDataSetSaveDataMemory2, U"SaveData::SaveDataSetSaveDataMemory2");
@@ -1228,6 +1298,9 @@ void RegisterNativeSaveDataFunctions(::Kyty::Hle::HleSymbolRegistry* symbols)
 	RegisterLibraryFunction(symbols, SAVE_DATA_NATIVE, "sDCBrmc61XU", SaveData::SaveDataPrepare, U"SaveData::SaveDataPrepare");
 	RegisterLibraryFunction(symbols, SAVE_DATA_NATIVE, "uW4vfTwMQVo", SaveData::SaveDataUmount2, U"SaveData::SaveDataUmount2");
 	RegisterLibraryFunction(symbols, SAVE_DATA_NATIVE, "X4MYzukPc3g", SaveData::SaveDataDirNameSearch,
+	                        U"SaveData::SaveDataDirNameSearch");
+	// sceSaveDataDirNameSearch2 takes the same condition and result layout.
+	RegisterLibraryFunction(symbols, SAVE_DATA_NATIVE, "PHnuI4LhuRk", SaveData::SaveDataDirNameSearch,
 	                        U"SaveData::SaveDataDirNameSearch");
 }
 

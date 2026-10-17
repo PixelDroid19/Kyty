@@ -138,6 +138,7 @@ enum class ShaderInstructionType : uint32_t
 	ImageSampleB,
 	ImageSampleDrefLz,
 	ImageSampleCd,
+	ImageSampleD,
 	ImageStore,
 	ImageStoreMip,
 	SAddcU32,
@@ -595,6 +596,9 @@ enum class ShaderInstructionType : uint32_t
 	SSubbU32,
 	SAshrI64,
 	ImageAtomicSwap,
+	SPackLhB32B16,
+	SPackHhB32B16,
+	SAbsdiffI32,
 
 	ZMax
 };
@@ -876,6 +880,8 @@ enum Format : uint64_t
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
+	// ds_write_b32 with GDS=1: the store addresses GDS through M0, not LDS.
+	VaddrVdataOffsetGds                 = FormatDefine({S0, S1, Gds}),
 	VaddrOffset                         = FormatDefine({S0}),
 	// ds_*_addtid_b32: no ADDR field; S0 carries DATA0 for the write.
 	VdataOffset                         = FormatDefine({S0, DsOff}),
@@ -1373,21 +1379,32 @@ inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 	return (swizzle >> (channel * 3u)) & 0x7u;
 }
 
-// Formatted image stores put shader component i in memory channel DST_SEL[i].
-// Storage views keep identity components and, for formats with a red/blue-exchanged
-// host format, BGRA selects that view; the image-store emitter applies any other
-// selection of four distinct channels.
-inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle, bool red_blue_view)
+// Formatted image stores put shader component i in memory channel DST_SEL[i]; a
+// component that selects a constant is not stored. Storage views keep identity
+// components and, for formats with a red/blue-exchanged host format, BGRA selects
+// that view; the image-store emitter applies any other selection of distinct
+// channels that covers the view: all four, or red alone on a single-channel view.
+inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle, bool red_blue_view, bool single_channel)
 {
-	uint32_t channels = 0;
+	uint32_t channels  = 0;
+	bool     constants = false;
 	for (uint32_t component = 0; component < 4; component++)
 	{
 		const uint32_t select = GetDstSel(swizzle, component);
+		if (select == 0u || select == 1u)
+		{
+			constants = true;
+			continue;
+		}
 		if (select < 4u || (channels & (1u << (select - 4u))) != 0u)
 		{
 			return false;
 		}
 		channels |= 1u << (select - 4u);
+	}
+	if (constants && !(single_channel && channels == 1u))
+	{
+		return false;
 	}
 	return swizzle != DstSel(4, 5, 6, 7) && !(red_blue_view && swizzle == DstSel(6, 5, 4, 7));
 }
@@ -1842,6 +1859,16 @@ struct ShaderZeroSBufferResources
 	int buffers_num                 = 0;
 };
 
+// Image reads whose T# is an all-zero resource: the RDNA2 ISA defines such a
+// resource as unbound, returning zero in every component.
+struct ShaderZeroImageResources
+{
+	static constexpr int IMAGES_MAX = 16;
+
+	int start_register[IMAGES_MAX] = {0};
+	int images_num                 = 0;
+};
+
 [[nodiscard]] constexpr uint64_t ShaderBufferByteSize(uint32_t stride, uint32_t records)
 {
 	return stride == 0 ? static_cast<uint64_t>(records) : static_cast<uint64_t>(stride) * records;
@@ -1886,6 +1913,10 @@ struct ShaderBindResources;
 [[nodiscard]] bool ShaderHasGlobalMemoryLoad(const ShaderCode& code);
 [[nodiscard]] bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind,
                                               int user_data_register_base = 0);
+// Image reads that return one destination dword per DMASK component.
+[[nodiscard]] bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type);
+// The image read's T# is an all-zero resource recorded by the usage parse.
+[[nodiscard]] bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst);
 struct ShaderComputeEmptyGate
 {
 	int      storage_buffer_index = -1;
@@ -2013,7 +2044,15 @@ struct ShaderGdsResources
 	bool              extended[POINTERS_MAX]       = {};
 	int               pointers_num                 = 0;
 	int               binding_index                = 0;
+	// The program reads or writes GDS memory through a constant M0, so the
+	// buffer is bound even when no SGPR carries a GDS pointer.
+	bool              memory_used                  = false;
 };
+
+[[nodiscard]] inline bool ShaderGdsBufferBound(const ShaderGdsResources& gds)
+{
+	return gds.pointers_num > 0 || gds.memory_used;
+}
 
 struct ShaderDirectSgprsResources
 {
@@ -2062,6 +2101,7 @@ struct ShaderBindResources
 	ShaderStorageResources     storage_buffers;
 	ShaderZeroSBufferResources zero_sbuffer_resources;
 	ShaderTextureResources     textures2D;
+	ShaderZeroImageResources   zero_image_resources;
 	ShaderSamplerResources     samplers;
 	ShaderGdsResources         gds_pointers;
 	ShaderDirectSgprsResources direct_sgprs;
@@ -2224,6 +2264,8 @@ struct ShaderVertexStreamAccessScan
 	// A MUBUF/MTBUF instruction that is never a fetch candidate always reads its stream.
 	bool                             unconditional_reader = false;
 	Vector<std::pair<uint32_t, int>> fetch_candidates;
+	// Attribute-table dwords (bit i = dword i) the program loads from fetch_attrib_reg.
+	uint32_t attrib_dwords_read = 0;
 };
 [[nodiscard]] ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& code, int fetch_attrib_reg,
                                                                           int fetch_buffer_reg);

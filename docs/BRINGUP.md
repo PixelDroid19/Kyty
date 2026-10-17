@@ -9,6 +9,1385 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Platformer pair: unreadable glyphs were dropped command-buffer packets (2026-10-17)
+
+- Observed (Intel and AMD, strict): menu and HUD text in both platformers drew
+  as solid blocks. The runtime glyph atlases (one 512x512 and several 256x256
+  one-byte textures) kept the engine's `0xcd` creation fill through gameplay.
+- Root cause: the engine's texture upload path was traced on the guest side
+  (insect platformer, function breakpoints counted with a bounded script).
+  It ran 353 times with no error branch, and every upload reached its copy
+  dispatch recorder. The command processor still executed only one copy
+  dispatch, and no dispatch bound an atlas. The engine replays those copies
+  into a fresh Agc command buffer whose four pointers (bottom, top, cursor
+  up, cursor down) are all null and whose out-of-space callback is set. The
+  guest callback handles a null bottom by handing over the first block.
+  `CommandBuffer::IsValid` rejected the all-null buffer, so `ReserveDW`
+  never called the callback, and `sceAgcCbDispatch` and its siblings
+  returned null. Every packet written to a fresh buffer was dropped without
+  any error.
+- Correction: the earlier conclusion of an "upload never submitted /
+  downstream DCB splice" was wrong. The old per-thread tracker compared
+  HLE-side addresses with the command processor's copy of the buffer.
+- Changed (`Graphics.cpp`): an all-null buffer is valid with zero capacity,
+  so the first reservation calls the callback. `GetAvailableSizeDW` clamps
+  the reserved tail instead of wrapping. Tests
+  `RefillsEmptyCommandBufferBeforeFirstPacket` and
+  `RejectsEmptyCommandBufferWithoutRefillCallback` cover the contract.
+- Unblocked by the fix: two strict stops that the dropped packets had hidden.
+  1. The sequel's startup compute kernel (`1,1,1` and `5,1,1` groups) runs
+     `ds_write_b32` with the GDS bit set. M0 is `s_bfm(2,14)`, that is base
+     0 and size 48 KiB (RDNA2 ISA §3.7 and §10.4.3: address = M0.base + ADDR
+     + offset; an out-of-range or misaligned GDS access is a memory
+     violation, §3.11). The parser had decoded it as an LDS store, so the
+     paired-wave path refused it. It now has its own format,
+     `VaddrVdataOffsetGds`. The GDS buffer is bound whenever a program uses
+     GDS memory through a constant M0 (`ShaderGdsBufferBound`). The
+     paired-wave emitter stores per lane only when the lane is active, both
+     ADDR and ADDR + offset are below M0.size, the byte address is dword
+     aligned, and the index is inside the host GDS window
+     (`kGraphicsGdsDwords`). The native path refuses the instruction rather
+     than lowering it to LDS. Tests: `PairedGdsWriteStoresOnlyInsideM0AndTheHostWindow`
+     and `NativeGdsWriteIsRefusedNotLoweredToLds`.
+  2. At about 133 s the sequel stopped on `DCC decompression requires an
+     existing render texture`. A colour DCC decompress (CB mode 6, op 0xcc)
+     now reached a display buffer; before the fix that packet had been
+     dropped. The host display image holds expanded colour exactly like a
+     host render texture, so the decompress keeps its pixels. It only checks
+     that the display image is registered.
+- Verified (strict, bounded runs):
+  - Insect platformer on Intel, 150 s: readable menus, HUD in play, 86 fps.
+  - Insect platformer on AMD, 200 s: 26-28 fps in play.
+  - Sequel on Intel, 150 s: readable title menu and calibration screens,
+    reaches gameplay.
+  - Sequel on AMD, 200 s: readable text and HUD in play, 14-26 fps.
+  - Regression on Intel: the fishing title (150 s, dock with HUD and tutorial
+    text) and the racing title (125 s, in race).
+  - Full unit suite: 2445 pass. Both gate scripts pass.
+
+## Review findings recorded for later (2026-10-17)
+
+An automated review of the main-sync pull request raised these. Each was
+checked against the code; none is hit by a title in the current strict runs.
+
+- `NetSocketAbort` (`Network.cpp:2111`): an abort with flags 0 while another
+  thread is blocked in a blocking recv or accept stops on
+  `EXIT_NOT_IMPLEMENTED`. This is a deliberate refusal, not a fake success:
+  a real abort must wake the blocked host call and make it return the abort
+  error. Direction: wake it (for example `shutdown` of the host descriptor
+  or a self-pipe in the wait), map the result to the guest's abort error
+  from a trace, and keep the pending-abort flags refused until they are
+  evidenced.
+- NGS2 sampler append (`AudioNgs2.cpp:2097-2105`, `Ngs2AppendSamplerPieces`)
+  is not transactional. When a later piece of a multi-piece APPEND is
+  unreadable or reaches `kMaxStreamPieces`, the earlier pieces are already
+  appended when the call returns `kNgs2InvalidControl`, so a retry would
+  duplicate audio. Direction: decode every piece first and commit them with
+  one sampler call that checks the length and piece limits for the whole
+  set.
+- NGS2 stream budget (`AudioNgs2.cpp:2088`): `Ngs2SampleBudgetFits` counts
+  the frames already played in the front streaming block, because
+  `Playback::DropPlayedFrames` only runs inside `AppendPiece`, after the
+  check. A stream that reaches the per-voice cap could then stall even
+  though most of its frames were consumed. Direction: release the played
+  frames before the budget check. The card title's 330 s run stays far
+  below the cap.
+
+## Platformer pair: open defects seen after the glyph fix (2026-10-17)
+
+Recorded so that each one starts from evidence, not from scratch. None of them
+is attributed yet.
+
+- **Black region that does not fade (sequel, also likely the insect
+  platformer).**
+  - Symptom: walking right from the sequel's start area, a large opaque
+    black shape covers half the screen. The shape has scalloped, terrain-like
+    edges and a soft teal fog drawn over its lower part. The player walks
+    into it and disappears, which makes the area unplayable. The insect
+    platformer's first area also shows a large black region, but that area
+    legitimately has dark foreground silhouettes. Do not chase it without a
+    reference image of the same spot.
+  - When it was found: the maintainer saw it on the current tree. It predates
+    the glyph fix; earlier scripted routes never left the start area, so
+    captures did not show it. The scripted platformer route walks right only
+    from about 130 to 132 s, then back left. To reach the region, walk
+    right longer.
+  - Hypothesis, not verified: both engines cover hidden or adjacent rooms
+    with black mask sprites whose alpha the game fades to zero when the
+    player enters. A mask that stays opaque points at the fade never reaching
+    the GPU: stale vertex colour, or a stale per-renderer colour constant.
+    The alternative is a missed draw that should cut the mask out.
+  - Next evidence: during the scene, query `kyty_agent events` while the
+    process is live for `draw_skipped`. The harness only queries after exit,
+    which returns `endpoint_not_live`. Then dump the draws of one frame with
+    `KYTY_DUMP_DRAW=all` and `KYTY_DUMP_DRAW_FRAME=<n>-<n>` to find the mask
+    draw: its blend state, its vertex colour source, and whether its inputs
+    change across frames.
+- **Overlapping text (both platformers).** The maintainer reports that some
+  texts sometimes draw over each other. The sequel's opening credits fade
+  names in and out over gameplay, so first check whether two fading strings
+  overlapping is the title's own transition. No capture isolates it yet;
+  capture the moment before attributing it.
+- **Slow loading screens and first boot (sequel).** First start and some
+  loading screens take much longer than later ones. Not measured yet. The
+  persistent SPIR-V cache and the Vulkan pipeline cache store (`PipelineCacheStore.cpp`) both exist, so the first step is to
+  separate translation and pipeline creation from guest file I/O, by
+  comparing a cold-cache boot with a warm-cache boot on the same binary.
+- **AMD frame rate (both).** In play the insect platformer runs at 26-28 fps
+  and the sequel at 14-26 fps on the integrated RDNA2 GPU. On Intel the
+  insect platformer runs at 86 fps. Whether AMD is bound by the GPU or by the
+  command processor CPU is not measured yet.
+
+## Platformer pair: index range over a depth target (2026-10-16)
+
+- Observed (Intel, strict): both platformers stopped intermittently on
+  `unknown relation: DepthStencilBuffer - Crosses - IndexBuffer`, a small
+  index range (12 or 0x1e0 bytes) over memory still tracked by an active
+  depth target. The vertex rule already links the same Crosses form.
+- Changed: `GpuMemoryAllowsIndexContainedInSurface` links an index buffer
+  that crosses a depth target; Contains still refuses.
+- Verified: the insect platformer passed the former 73 s stop and reached
+  gameplay on Intel (200 s, 72-103 fps in play) and AMD (200 s, 26-30 fps
+  in play). The sequel reached gameplay on Intel (150 s, ~64 fps in play,
+  bounded diagnostics built in) and AMD (220 s, 23-25 fps). Menu text in both still
+  draws as solid glyph blocks (graphics handoff, open).
+
+## Card title: streamed music and an offline service retry (2026-10-16)
+
+- Observed (Intel, strict, card title): music and most effects were silent or restarted
+  constantly. The audio stream thread was recreated about 1225 times in 40 s. Long runs stopped
+  after about four minutes on a full guest thread registry.
+- Evidence (live trace of the NGS2 calls): each music voice adds one PCM block with blocks flags
+  1 (continue), a sample count covering the whole song and `data_size` 16384, then appends pieces
+  of 7.7-8.9 KiB with flags 3 (continue and append). It plays the voice before the first add and
+  reads the 56-byte voice state. Kyty refused flags 1 and 3, refused play on an empty voice and
+  refused a stereo mastering voice rendering into an eight-channel buffer.
+- Change: PCM sampler blocks stream (see `docs/AUDIO.md`, NGS2 sampler voices), play is accepted
+  before any block, a stereo mastering voice writes the front pair of an eight-channel buffer, and
+  GetState takes the 56-byte layout.
+- Evidence (thread leak): the title's network module retries its service init once per second
+  while the network state is offline. Each call builds a new activity manager whose event-queue
+  thread waits on a condition forever; the old manager is dropped. One blocked guest thread per
+  second is guest behavior when offline. Kyty's 256-entry guest thread registry aborted when full,
+  although the host thread-local flag already marks guest threads; the registry is removed.
+- Verified (Intel, strict, card title, 330 s, in-emulator RMS tap): the mixed output is audible in
+  328 of 329 one-second windows, the stream thread is created 14 times in 90 s, and the run
+  holds 348 live threads with no abort. Menus run at about 235 fps and an in-game hand at about
+  100 fps. Unit tests: `CoreMemoryAlloc.*` and `EmulatorAudio.*` (121 pass).
+- The white hovered card seen in one capture is the title's own focus flash (see the graphics
+  handoff, Evidence and exclusions), not a rendering defect.
+- Regression check (Intel, strict, 100 s, `generic` route): a pixel-art title that imports NGS2 is
+  audible in 92 of 97 one-second windows (52 of 95 in an earlier run) and reaches its
+  opening scene with no error.
+
+## Uncompressed standard 64 KiB mip chains (2026-10-16)
+
+- Observed (Intel, strict, card title, `generic` route): cards, jokers, the deck and the blind chips
+  showed a mosaic of their sprite atlas, and the title-screen logo showed small copies of itself
+  among large displaced blocks. UI frames and text were correct.
+- Evidence: the sample-bind catalog shows every sprite atlas as format 56, tile 9
+  (`SW_64KB_S`), 8 levels (`last_level=7`), with non-power-of-two sizes such as 1420x3040 at pitch
+  1536. Level 0 as uploaded to the host image held the smaller levels at its top and the full-size
+  sprites shifted below. `TileGetTextureSize` sent tile-9 chains of uncompressed formats through
+  the precomputed-table lookup. The table has no tile-9 entries, so the fallback logged
+  `levels != 1` and sized one level at offset 0. The upload then detiled level 0 from the start of
+  the allocation, where the chain keeps its mip tail and smaller levels.
+- Change: a tile-9 texture with more than one level takes the standard 64 KiB mip layout for
+  its size and its upload, whatever the format. Before, only block-compressed formats did. GFX10
+  places thin 64 KiB levels by block size and element size alone. That layout already served the
+  block-compressed and render-target chains. Single-level uncompressed textures keep the one-level
+  path.
+- Verified (Intel, strict, card title, 60 s): the uploaded joker atlas level 0 is a regular grid
+  of 142x190 cards from the origin. The tutorial joker, the deck back, the blind chips and the
+  button glyphs render correctly. The racing (200 s) and fishing (240 s) strict runs bind no tile-9
+  texture with mips, reach their usual states, and render as before.
+
+## Pixel ADD_TID spill slots across control flow (2026-10-16)
+
+- Observed (Intel, strict, `minecraft-enter`): in a newly created sandbox-title world, the run
+  stopped at 285 s with `fragment wave transport is required by the pixel stage ... reason=memory
+  write: helper lanes would be observable` at `pc=0xc78`, guest wave64, no 64-lane host subgroup.
+- Offline evidence: the title's shipped pixel programs were parsed and analysed one by one with the
+  production admission (178 programs longer than the stop pc). The stop is the forward terrain
+  pixel shader. At `0xc78` it spills one VGPR with `DS_WRITE_ADDTID_B32` (M0 = 0) and reloads it
+  about 2,000 instructions later. Between the store and the reload it has EXEC changes, joins, a
+  loop back edge, and an M0 save/restore around an interpolation. The previous proof accepted only
+  a spill interval with no join, no EXEC write and no M0 write. It also lost the launch-parameter
+  origin of M0 at every label, so the restore before `V_INTERP` could not be proved.
+- Contract: the host gives each invocation a private array and omits TID. That is exact when
+  every ADD_TID access has an exact aligned M0 base and the planes are equal or at least 256 bytes apart
+  inside the declared extra LDS. With no other LDS instruction, a lane then only reads dwords it
+  alone stores, whatever EXEC, branches or loops come between. A lane that did not store reads
+  undefined bytes both from guest LDS and from its private array. The proof is now a forward
+  dataflow over basic blocks: scalar origins keep what every path agrees on, and the planes stored
+  on every path are intersected at joins. Each reload needs a store to its plane on every path, and
+  each interpolation (anywhere in the program) must see the launch-parameter M0. Widening EXEC
+  between a store and its reload is therefore no longer refused. A branch over the stores, paths
+  that disagree on M0, aliasing planes and mixed DS accesses still are. The dead-store rule (every
+  store read later) is gone: an unread private slot is unobservable.
+- The new rule accepts a superset of the old one (same checks, path-precise). Offline scan of the
+  178 programs: 132 admitted before, 146 after, and no program lost.
+- Run (Intel, strict, `minecraft-enter`, 300 s, with the compare fix below): the world loaded and
+  gameplay held with textured terrain; no shader refusal. That run reopened the earlier world, so
+  the refused shader's draw was not reproduced live; the offline proof on the shipped program is
+  the evidence for it. The run stopped at 285 s in the recipe-book search (see the IME entry).
+
+## Compares that overwrite their own scalar source (2026-10-16)
+
+- The same terrain shader then refused at `pc=0x2b30`: "scalar written under divergent control flow
+  is read after the join". A VCC branch on `V_CMP_NEQ_F32 s[8:9], 0, s9`, a compare of a scalar
+  number, was treated as lane divergent. The uniform-compare check read the taint of `s9` after
+  the instruction had already written its destination pair, so it saw a mask instead of a number.
+- Fix: the compare's uniformity is judged on its sources before its destination is written, like
+  the existing snapshot of uniform words for scalar mask algebra.
+- Offline scan after both fixes: 168 of 178 programs admitted, including every earlier one. Found,
+  not fixed: four banner forward shaders still refuse with "scalar written under divergent control
+  flow" (`pc` 0x330 to 0x3b0), and six volume-population pixel shaders write device memory under
+  helper lanes. Neither has appeared in a run yet, and neither is analysed. One lead for the first:
+  a divergent region counts every instruction between the branch and its target as written,
+  including blocks that leave by `S_BRANCH` past the join, so path-precise region writes may admit
+  more.
+
+## IME panel text without an open panel (2026-10-16)
+
+- Observed (Intel, strict, sandbox title): opening the inventory's recipe-book search during
+  gameplay stopped the run with `can't resolve lazy PLT import: ieCNrVrzKd4[Ime_v1]`.
+- The NID is `sceImeSetText` (hash of the name). It replaces the text of the IME panel that
+  `sceImeOpen` starts and takes `(const char16_t* text, uint32_t length)`. Independent
+  implementations agree that it returns `0x80BC0002` (not opened) when no panel is open. Kyty
+  implements no `sceImeOpen` panel, and the title had made no unresolved `sceImeOpen` call before,
+  so no panel is open. `sceImeSetText` now returns that error.
+
+## Four-byte render-target micro tile (2026-10-16)
+
+- Observed (Intel, strict, `minecraft-enter` route): in sandbox-title gameplay, plants and leaves
+  showed red and green blocky patches, and grass block sides had stray blue dots.
+- The block atlas is a 2048x2048 four-level render target (tile mode 27, four bytes per texel). The
+  guest draws only level 0 on the GPU and samples the whole chain; levels 1 to 3 come from guest
+  CPU-written tiled bytes that the host detiles when it creates the target. A gated dump of every
+  level, compared with a box downsample of the host-rendered level 0, showed that each 8x8 micro
+  tile of levels 1 to 3 was permuted. Swapping x1 with y0 and x2 with y2 in the detile matched the
+  guest content. Mean absolute error per channel, before and after: level 1 8.12 to 4.93, level 2
+  10.21 to 2.98, level 3 25.12 to 0.45. Two dumps from separate runs agree. The level 1 residual
+  sits in regions where the guest filter or animated tiles differ; rows without them match exactly,
+  so the bits above the micro tile were already right.
+- Contract: inside a 64 KiB block, the four-byte `SW_64KB_R_X` layout orders the micro tile
+  `x0 x1 y0 y1 y2 x2` (offset bits 2 to 7). Bits 8 to 15 are unchanged. The previous equation used
+  the depth (`Z_X`) order `x0 y0 x1 y1 x2 y2`. Round trips through the host's own detile hid the
+  error, because the tests built their input with the same helper. The GPU detile shader and its
+  inverse for raw aliases take the same order; the checked-in SPIR-V is regenerated.
+- Consequence for depth and colour aliases: the four-byte render-target and depth layouts now
+  differ in the micro tile. The raw texel copy of 2026-10-13 copies host texels at equal (x, y), so
+  it is exact only between views in the same layout. A D32 depth target is therefore seeded only
+  from a mode 24 storage view (and the reverse); render targets and mode 27 storage views no longer
+  seed it. Defect found, not fixed: a depth target that reads a mode 27 target's bytes now starts
+  without them. Suggested direction: copy through the buffer stage with a compute pass that applies
+  the micro-tile permutation (`x' = x0 | y0<<1 | y2<<2`, `y' = x1 | y1<<1 | x2<<2` inside each 8x8
+  tile) instead of refusing.
+- Verified (Intel, strict, `minecraft-enter`, 300 s): the run opened a newly created world and
+  spawned by frame 3,457. Captures show grass sides, sea grass and sugar cane with correct textures
+  and no red or green blocks. At 285 s it stopped on a pixel shader that writes memory under a
+  64-lane wave (`fragment wave transport ... helper lanes would be observable`); that shader had
+  not appeared in earlier runs on the previous world and is recorded separately. Unit tests: 1,449
+  graphics tests, the graphics diagnostics integration test and the checked-in detile SPIR-V check.
+
+## Unread vertex snapshot tails (2026-10-16)
+
+- In the fishing title's dock gameplay, transient capture cost 5.26 us per draw, but the copy itself
+  only 1.63 us. A temporary counter showed `Commit` taking about 1.2 us per capture. The tail clear
+  zeroed about 47 KB per capture against 8 KB copied. Over 300,000 captures, the vertex tails added
+  up to about 13.5 GB (about 97,000 vertex captures, about 139 KB each); index tails took about
+  35 MB and storage tails about 80 MB. `Acquire` hands a small capture the smallest free entry that
+  fits, so small vertex captures land in large entries whose mark sits high. The pool peaked at
+  63.0 MB in 402 entries, at its 64 MiB cap.
+- The clear exists for reads past the logical size (see "Transient tail clearing" below). Vertex
+  input reads record `r` at `r * stride + offset`, for the attribute's format size, and the draw
+  fetches only records `[first, records)`. When the draw's record range is known and fits the
+  declared records, and every attribute ends within its stride, nothing reads past
+  `records * stride`. Only about 0.8 % of vertex captures did not meet that condition, and their
+  tails were already zero.
+- Change: the vertex-input format table records the bytes one fetch reads, and
+  `VulkanVertexInputBindingFetchEnd` gives the end of a binding's attributes within a record.
+  `BindVertexBuffers` asks for a zero tail only when the record range is unknown or clamped, or an
+  attribute reaches past its stride. Without that request, `Commit` leaves the tail and its mark as
+  they are. A snapshot reused by a consumer that needs the zero tail clears it first. Uploads, zero
+  carriers, index and storage captures keep clearing.
+- An indexed draw's record range comes from scanning the guest indexes on the host. The GPU reads
+  the same values only when the indexes are bound from a snapshot; an `IndexBuffer` object can
+  hold GPU writes the scan did not see. The indexed draw therefore binds its indexes before its
+  vertex buffers, and skips vertex tails only when the indexes were snapshotted. The
+  depth/stencil copy path always keeps the clear. Linear draws use the packet's vertex count, and
+  indirect draws read their arguments after the pending write-backs, so their ranges are exact.
+- Measured (Intel, strict, 240 s, dock route), against the same tree without the change:
+  - transient capture: 5.26 to 2.70 us/draw;
+  - command processing: 38.7 to 39.0 to 36.0 to 36.3 us/draw in steady windows;
+  - draws per window: about 610,000 to about 650,000.
+
+  The dock captures show the same scene. Live StorageBuffers ranged from 711 to 3,058, against 247
+  to 406 in the comparison run. Two runs of the unchanged tree with timing counters also ranged
+  from 357 to 2,316, so this count varies between runs and is not attributed to the change.
+- Sandbox title (Intel, strict, 300 s, same route), against the index-snapshot run above:
+  - transient capture: 1.54 to 1.43 and 1.45 us/draw;
+  - command processing: 35.8 and 36.7 to 33.4 and 33.6 us/draw;
+  - frame rate: 6.18 to 6.26 fps.
+
+  Captures 30 s and 45 s after the spawn show textured terrain, trees and the HUD. The dark patch
+  seen in late frames predates the change (see "Sandbox title: drifting dark patch on terrain").
+- Racing title (Intel, strict, 200 s, `formula-drive`), with the indexed-draw rule above: command
+  processing stayed at 43.3 to 45.2 us/draw in the race (42.7 to 44.8 before), and the street
+  captures render lanes and tyre marks as before. The run stopped at 197 s on the open,
+  intermittent depth-reference refusal recorded on 2026-10-11, outside the vertex path.
+
+## Index snapshots over idle writable storage (2026-10-16)
+
+- In the sandbox title's gameplay, index binding cost 5.2 us of about 29 us of command processing per
+  draw outside fence waits. A temporary per-reason counter showed that 199,9xx of every 200,000
+  index binds refused the transient snapshot and created an `IndexBuffer` object instead, at 3.6 to
+  6.6 us each. Indexes averaged about 3 KB, over about 2,200 distinct addresses. Every refusal came
+  from a writable StorageBuffer overlap. For the same ranges, `GpuMemoryAcquireGdsSource` always
+  reported `GuestBytesCurrent`: no unpublished GPU write covered them.
+- Change: the snapshot API takes an admission (`GpuMemorySnapshotAdmission`). The index-buffer
+  capture asks for `IdleWritableStorage`. It also accepts writable StorageBuffer overlaps when no
+  overlapping StorageBuffer is still `in_use` with GPU writes. That state is read at validation time
+  from the object blocks, not from the cached overlap snapshot, and only after the read-only
+  classification alone has refused the range. Every other snapshot consumer keeps the strict
+  read-only admission.
+- Broad variant, excluded: the same idle rule applied to every snapshot consumer (vertex, read-only
+  storage views, storage-seed and gate captures). It reproduced the 2026-10-15 regression below.
+  - Gameplay ran at 1.67 fps.
+  - There were 114,036 live StorageBuffers (91,247 newly linked, 76,944 with truncated link
+    traversal).
+  - Transient validation took 14 s per 26 s window.
+
+  Evaluating the write-back state at validation time does not prevent that regression, so its
+  trigger lies in the non-index consumers.
+- Measured (Intel, strict, 240 s, same route, gameplay window), against 4175df97:
+  - index binding: 5.23 to 1.17 us/draw; no `IndexBuffer` objects are created;
+  - command processing: 42.0 to 35.8 and 36.7 us/draw, of which fence waits 13.1 to 8.7 and 9.8;
+  - frame rate: 5.57 to 6.66 and 6.54 fps; draws per window: 566k to 650k and 637k;
+  - storage objects: 45 live StorageBuffers.
+
+  A native capture 45 s after the spawn shows textured terrain, trees and the HUD; the one at 30 s
+  caught the sky-only frames while the first chunks appear.
+- Fishing title (Intel, strict, 240 s, dock route), which also covers 4175df97. Command processing
+  ran at 38.7 to 40.2 us/draw in steady windows, against 39.7 to 41.1 on 88a1c297. Index binding stayed
+  at 1.1 to 1.3 us/draw: its indexes were already snapshotted. The dock captures render as before.
+  The first attempt hit the known intermittent boot stall at frame 3, which also reproduced on
+  aa09403c that morning; the repeat ran clean.
+
+## Materialization-cache clean ranges per draw (2026-10-16)
+
+- `GpuMemory::ResetHash` took 5.0 % self time of the sandbox title's command-processor thread in
+  gameplay. Each draw invalidates its colour targets and its depth ranges (depth, stencil and HTILE)
+  in the materialization cache. A range invalidated before replays only the stores made since then;
+  any other range scans all 2,048 slots. The cache remembered 4 clean ranges in FIFO order, so a draw
+  with more than 4 attachment ranges cycled through them and each invalidation scanned every slot.
+- Fix: remember 16 clean ranges.
+- Measured (Intel, strict, 240 s, temporary counters): over the whole gameplay span, about 98.1 % of
+  invalidations replay recent stores and 1.9 % scan every slot (98.7 % replay over the last ~600k
+  invalidations); 0.05 % overflow the 256-store log. `ResetHash` fell out of the profile's top
+  entries (below 1.2 %). Gameplay command processing went from 38.1 to 42.0 us/draw, with fence waits
+  from 8.3 to 13.1 us/draw: without the waits, about 29.8 to 28.9 us/draw. The scenes differ between
+  runs (619k against 566k draws per window), so the gain is within noise at window level.
+
+## Descriptor-set recycling and deferred-release drain in dense gameplay (2026-10-16)
+
+- Sandbox title gameplay is bound by the command processor. About 4,300 draws per frame, the thread is
+  about 62 % running and about 28 % in GPU fence waits (kernel wait-channel sampling). A user-space
+  profile of that thread put 18 % in the driver under `DescriptorCache::Allocate` and 11 % under
+  `DescriptorCache::Free`, plus 4 % self time in `GpuDeferredDeletionQueue::DrainReady`.
+- Temporary counters over 200,000 set requests showed:
+  - 54,000 recycled hits;
+  - 146,000 `vkAllocateDescriptorSets` calls;
+  - 78,000 `vkFreeDescriptorSets` calls, every one because the recycle list was full;
+  - no free of an untracked or in-flight set.
+
+  About 61,000 live sets sat near `LIVE_SETS_MAX`. Each `TrimSets` retires 8,192 sets at once, which
+  overflowed the 8,192-set recycle limit. The overflow went back to the driver, and the next sets of
+  the same layouts had to be allocated again from pools whose free lists had grown long.
+- Changes:
+  - The recycle limit is now four trim batches (`RECYCLED_SETS_MAX`, 32,768). Pools never give memory
+    back to the system, so holding a set only reserves pool space.
+  - A full recycle list frees its oldest set, not the incoming one. With the incoming set freed, sets
+    of layouts no longer in use stayed in the list until it was full of them, and driver frees per
+    200,000 requests rose over the session from 3,400 to 29,000. Released sets are kept in release
+    order with per-layout positions, so a layout still takes its newest set and eviction is constant
+    time.
+  - The deferred-release queue pops from a `std::deque`. Popping each ready entry from the front of a
+    vector was quadratic when a trim enqueued 8,192 releases.
+- Verified (Intel, strict, warm cache, same route):
+  - With the larger limit alone, recycled hits rose to 53--85 % of set requests, and driver frees fell
+    from 78,000 to 3,400 per 200,000 requests at first, rising to 29,000 as stale layouts filled the
+    list. With oldest-first eviction, a 300 s run measured 53 % and then 98.5 % recycled hits,
+    2,400 and 4,100 frees per 200,000 requests, and 25,000--30,000 sets held, below the limit.
+  - Neither descriptor function nor `DrainReady` appears in the profile's top entries any more.
+  - In the comparable gameplay window, resource binding fell from 23.9 to 15.0 us/draw and command
+    processing from 52 to 40 us/draw, with 593k draws against 462k.
+  - Regression check: the racing title (200 s) ends on its usual time-over screen. Its race windows
+    improved too: resource binding fell from 20.5--20.9 to 16.0--16.5 us/draw, and command processing
+    from 47--49 to 43--45 us/draw.
+  - After the eviction change, the sandbox title's steady gameplay windows measured resource binding at
+    11.6--11.7 us/draw and command processing at 33.9--34.4 us/draw, with 690k--700k draws per window.
+  - Verified on Intel only. ANV ignores the pool `maxSets`; RADV enforces it, so the held sets there
+    need about 64 more 512-set pools.
+- Excluded:
+  - Deferring the release of in-flight sets: the counters showed none, so that change was dropped.
+- Regression check after the eviction change (Intel, strict, built from the 88a1c297 tree, 240 s): the
+  fishing title docks and renders the harbor correctly. Its steady windows measured command processing
+  at 39.7--41.1 us/draw (47.9--49.6 in the previous run), resource binding at 17.4--18.2 (27.0--28.1),
+  and 19.6--19.9 fps (12.6--16.8).
+- Open: the sandbox frame is still bound by command processing (about 34 us/draw) and GPU fence waits
+  (about 5 s per 26-second window). Removing every fence wait would leave about 27 us/draw, so per-draw
+  CPU cost stays the larger lever. The next profile entries are read-only snapshot comparison,
+  `ResetHash`, timer reads, allocation, and per-draw shader re-analysis.
+- Fence-wait attribution in sandbox gameplay (temporary per-call-site counters):
+  - The longest waits come from indexed and auto-index draws whose shaders read guest memory through
+    device addresses. Before such a draw, `GuestDeviceAddressPendingWriteBack` finds a writable storage
+    buffer in a registered range with an incomplete use, waits for that submission, and writes the
+    buffer back to guest memory.
+  - The waited submissions belong to the compute ring (queue 8). The buffers are 48 B to 30 KiB, each
+    with one recorded use and a write count that grows by about one per dispatch. Waits of 1 ms or more
+    took a median of 2.1 ms (90th percentile 8.7 ms), three to four per frame. These per-wait details
+    were sampled during world loading; the aggregate counters kept the same rate of slow waits through
+    gameplay, but the waited objects were not sampled there.
+  - By code reading, the compute ring already submits at the end of every ring run, so these waits are
+    probably for compute work that is submitted and still running. The dependency state at the wait
+    was not measured.
+  - Excluded:
+    - Snapshot refresh of tracked flexible-memory chunks, and the retired-table budget: 0, 0 and 2
+      events against about 55,000 write-back waits. Only one 32 KiB chunk is tracked.
+    - Retries repeating draw preparation: 2 retries in 54,000 waits. Device-address preparation runs
+      before descriptor binding.
+    - Waiting on read-only uses: every waited buffer had pending writes and one recorded use.
+  - Direction, not yet taken: skipping the wait would need write-backs that become visible in guest
+    memory on the device timeline, ordered before every guest-visible compute signal (label events fire
+    mid-submission). Copying the whole storage object into the guest window is not equivalent, because
+    a dispatch may write only part of the object. Binding storage in physical ranges directly to the
+    imported window is the sound form, and it is a structural change.
+
+## Vertex shader identity limited to attribute dwords the program loads (2026-10-16)
+
+- After the transient-entry fix below, sandbox title gameplay still compiled 210--300 SPIR-V modules
+  per 26-second window (about 10 s of compile time) with a warm cache, and the 512-entry graphics
+  pipeline cache evicted 500--600 pipelines per window. Translation misses kept arriving with zero
+  translation-cache evictions, so new shader keys were being created, not old ones lost.
+- A temporary log of every translation-miss key showed that the seven busiest vertex programs differed
+  only in raw attribute-table dwords (`fetch_attrib_data`), each taking hundreds of distinct values.
+  In every case, the varying dword was a hole in the program's input semantics: for example, semantics
+  0, 1, 3 and 5 declared, with dwords 2 and 4 varying. The guest disassembly of these programs loads
+  exactly the declared dwords from the attribute-table register (for example, `s_load_dwordx2` at 0,
+  `s_load_dword` at 12 and 20). The hole dwords hold unrelated memory that changes per draw. Kyty
+  copied every dword up to the highest semantic into the shader identity and into the SPIR-V constants,
+  so the same program was translated and compiled once per hole value.
+- Change: the cached vertex-stream scan of each program now records which attribute-table dwords its
+  scalar loads read (all dwords when an offset is not constant). Dwords the program never loads are
+  cleared before the identity is built. Loaded dwords and the decoded per-semantic resources are
+  unchanged, so code generation for every dword the program reads is unchanged.
+- Verified (Intel, strict, same warm cache, 300 s, same route), comparing the gameplay windows before
+  and after:
+
+  | Metric | Before | After |
+  | --- | --- | --- |
+  | SPIR-V compiles per window | 185--297 | 0--1 |
+  | Pipeline evictions per window | 494--596 | 0 |
+  | Command processing (us/draw) | 87--112 | 36--38 |
+  | Draws per window | 225k--286k | 630k--655k |
+  | Frame rate | 2.9--4.0 fps | 5.7--6.5 fps |
+
+  The world also appears sooner. The route's last input is at 139 s. Gameplay was first captured at
+  about 157 s after the change, against 208 s before; the earlier run still showed its loading screen
+  at 182 s. Captures are about 25 s apart, so the gain is 25--50 s. Gameplay captures show the same textured
+  terrain, trees and HUD. Regression check: the racing title (200 s) matches its previous run window
+  for window (command processing 47--65 us/draw, at most 110 live objects, 0--2 compiles) and ends on
+  its usual time-over screen.
+- Note: the local warm SPIR-V cache had filled to its 64 MiB store limit, mostly with per-hole
+  variants. It should be regenerated after this change.
+
+## Transient snapshot entry ceiling in dense passes (2026-10-16)
+
+- Sandbox title gameplay slowed from about 3 fps to about 1 fps within two minutes. Live GPU objects grew
+  from 2.9k to 78k, almost all new read-only `StorageBuffer` objects. Per-draw transient validation rose
+  from 9 to 51 us, and command processing from 112 to 170 us per draw.
+- A temporary census of each persistent fallback recorded the refusal reason and pool state. The new
+  objects were 272- and 320-byte ring constants. The command-buffer pool had refused them because the
+  storage usage had reached its 4,096-entry ceiling, while it held only 8.8 MB of its 63 MiB snapshot
+  budget. A pass of about 3,300 draws needs more views than that. Each refused view became a persistent
+  object. Frame-age retirement (120 frames, 4,096 visits every 30 frames) cannot drain those at 1--3 fps,
+  so every later overlap query walked a larger set.
+- Excluded:
+  - unstable copies (a guest writer racing the capture; 0 observed);
+  - unallocated ranges (0);
+  - overlap refusals (about 470 for these sizes, mostly views contained in a compute-written storage
+    buffer, correctly refused).
+- Change: the per-usage entry ceiling is now 16,384 (`kGpuMemoryTransientBufferMaxEntriesPerUsage`). The
+  total-entry ceiling stays at three usages' worth. The byte budget is unchanged. Vulkan memory is
+  already suballocated from pool blocks, so the ceiling only bounds `VkBuffer` objects. Entries persist
+  across resets of the same command buffer.
+- Verified (Intel, strict, warm shader cache, 300 s, same route), comparing the last two 26-second windows
+  before and after:
+
+  | Metric | Before | After |
+  | --- | --- | --- |
+  | Live objects | 33k, then 78k | 3.6k, then 4.0k |
+  | New storage objects | 29.5k, then 44.5k | 10, then 5 |
+  | Validation (us/draw) | 9.4, then 51 | 1.8, then 1.8 |
+  | Resource binding (us/draw) | 32, then 91 | 18, then 20 |
+  | Command processing (us/draw) | 112, then 170 | 89, then 87 |
+  | Draws per window | 227k, then 153k | 280k, then 286k |
+
+  Gameplay terrain renders as before. The remaining gameplay cost was shader work: 210--240 SPIR-V
+  compiles per window (about 9.5 s) even with a warm cache. The entry above resolves it. Regression check: the racing title (200 s)
+  matches its previous run window for window (command processing 48--65 us/draw, at most 125 live
+  objects) and ends on its usual time-over screen.
+- Open defect, not fixed: small read-only persistent buffers still ratchet upward. The pressure trigger
+  `kGpuMemoryBufferPressureRetireBytes` (256 MiB, `GpuMemory.h`) never fires for tens of thousands of
+  sub-KiB objects. `GpuMemory::FrameDone` (`GpuMemoryWriteback.cpp`) ages by presented frames, so a slow
+  title retires almost nothing. Suggested direction: add an object-count trigger next to the byte
+  trigger. Any future pool refusal would show up here as a climbing `live_objects`.
+
+## Service plugins identified by their declared module name (2026-10-16)
+
+- The preschool Unity title crashed about one second into module start with a guest read of address 4.
+  Its package ships the same network-service plugin twice, byte-identical, once under a file name with
+  a " 1" suffix. Package discovery sorts that copy first, so it is the one kept. Kyty then called its
+  `module_start` with no arguments, because the native start descriptor was keyed by file name. The
+  plugin printed its "old version" error and then dereferenced the null descriptor. The guest's own
+  disassembly shows the check: argument size at least 0x10, `size == 0x10`, `version == 0x200`, and the
+  callback stored from offset 8.
+- The player passes that same descriptor at each of its four module load sites, so the descriptor
+  belongs to the module, not to a path. Service plugins are now identified by the module name their ELF
+  declares (`DT_OS_MODULE_INFO`). A scan of all 196 package modules in the local library
+  (`Media/Plugins`, `Media/Modules`, `sce_module`) compared the old file-name rule with the new
+  declared-name rule. They disagree only on this title's suffixed copy, so every other title gets the
+  same start arguments as before.
+- Open defect, predating this change and affecting all six plugins: the player's own descriptor carries
+  a real callback, but Kyty passes `callback = 0`. Kyty also starts package plugins before the player
+  does. When the player later calls `sceKernelLoadStartModule`, it gets the existing handle from the
+  `FindProgramByFile` early return in `KernelLoadStartModule` (`LibKernel.cpp`), so its descriptor never
+  reaches `module_start`. Suggested direction: defer `module_start` of package plugins to the guest's
+  load call, so the guest's own arguments are used. A null callback call on a network-service path
+  would point here.
+- Verified (Intel, 150 s, strict): the title passes module start and the menus, and reaches its first
+  playable scene. Still open: in that scene, sprite edges show light-blue fringes and the characters look
+  point-sampled at low resolution; the menu frames are clean.
+
+## Image reads through an all-zero descriptor (2026-10-16)
+
+- The card title stopped before its first frame on `shader emitter missing:
+  ... sampled=0/0/0 inst=ImageSample ... s[0:7], s[8:11]`. A resource-fold
+  capture of that pixel program shows its metadata declares a read-only
+  image slot at user data 0 and a sampler at 8, and all twelve user SGPRs
+  are zero at the draw. The type nibble of a zero T# is not an image, so
+  nothing was bound and the emitter had no image to sample.
+- Contract: the RDNA2 ISA states that a resource set to all zeros acts as an
+  unbound texture or buffer and returns (0, 0, 0, 0).
+- Change: the usage parse records a sample or load whose T# is still the
+  shader's entry user SGPRs and all eight dwords are zero
+  (`zero_image_resources`, part of the module key). The emitter stores zero
+  in each DMASK component of such a read; the image destination guard
+  applies EXEC as for any image result. Gather, resinfo, stores and atomics
+  through a zero T# keep refusing.
+- Verified on Intel: the card title passes the stop (120 s, generic route)
+  and stops at the next one, `fragment wave transport is required by the
+  pixel stage` (a wave64 pixel program writes a scalar under divergent
+  control flow and reads it after the join; the host has no native 64-lane
+  subgroup), open. Roguelike control unchanged (4 captures, time limit).
+  Unit test `SamplesThroughAllZeroDescriptorReturnZero` covers the parse,
+  the emitted zero stores and a T# rewritten before the read.
+- Named-DMASK sample formats leave `mimg_dmask` unset; the zero read uses
+  the decoded destination size, which every MIMG format sets to the DMASK
+  component count.
+
+## Sandbox title: drifting dark patch on terrain (2026-10-16, open)
+
+- Observed (Intel, strict, `minecraft-enter` route, no input after the spawn): from about frame
+  10,600 on, a dark translucent quad lies on the grass in front of the player. It moves and grows
+  between captures (frames 10,692, 10,854 and 11,016). Earlier frames on the same route do not
+  show it.
+- It also appears in a run at 97034ebc (frame 11,400), before the index-snapshot and vertex-tail
+  changes, so it is not caused by them.
+- Not yet known whether this is a guest effect or a rendering error. Suggested direction: confirm
+  against reference footage of the same world type first. If it is an error, take a native capture
+  at the frame and use the operation trace to find the draw that writes the quad (likely a
+  translucent or shadow pass), then compare its inputs with a frame where the quad is absent.
+
+## Insect sequel: intermittent depth/index overlap (2026-10-16, open)
+
+- A 150 s Intel run reached gameplay (start of Act 1) without the earlier
+  `unknown relation: DepthStencilBuffer - Crosses - IndexBuffer` stop (a
+  12-byte index read inside a live 1920x1080 depth buffer). The stop is
+  intermittent; overlap diagnostics now print every parent range to show
+  which plane it crosses when it recurs.
+
+## Alpha-only stores to one-channel storage images (2026-10-16)
+
+- The insect platformer stopped at boot on `swizzle is not supported:
+  format=1 swizzle=0x800` (`StorageTexture.cpp`). The descriptor is an R8
+  storage image with `DST_SEL = (0, 0, 0, R)`. The dispatch is a copy:
+  `image_load v[0:3]` from a sampled texture, then `image_store v[0:3]`
+  with `dmask 0xf` to the R8 image.
+- Under the existing contract (shader component i goes to memory channel
+  `DST_SEL[i]`), memory red receives component 3 and the constant selects
+  store nothing. The store emitter now skips constant selects, and the
+  descriptor gets an identity view when the stored components cover the
+  view: all four distinct channels, or red alone on a one-channel format
+  (`VulkanStorageHasSingleChannel`). A four-channel view with a constant
+  select still refuses, because one memory channel would have no source.
+- Verified on Intel (180 s, generic route): the title passes the copy and
+  reaches its brightness calibration screen and runs to the limit. Its
+  text draws as solid glyph blocks from the first capture (open visual
+  defect). The run does not establish which image the copy fills, nor
+  whether the blocks relate to the menu glyph investigation recorded
+  below.
+
+## Physical ranges withdrawn while device addresses are prepared (2026-10-16)
+
+- A survey of the library on Intel (Arc A770, 120 s strict runs) stopped five
+  titles on `guest memory device addressing is unavailable for a shader that
+  dereferences guest pointers`: the dream platformer, the insect platformer,
+  its sequel, the gothic action platformer and the first-person puzzle title.
+  Each logged `guest import failed: ... has no direct memory` just before.
+  Three of them reached their time limit on 2026-10-10/11; the failure is
+  timing-dependent (one earlier insect-platformer run passed it).
+- A temporary trace in `PhysicalMemory::ResolvePhysical` (not committed)
+  showed the dream platformer's failing span covered exactly by one view with
+  `unmap_pending=1`, not released and with no release pending. The guest was
+  unmapping the range. Until the quiesced unmap transaction drops the range
+  from the device-address registry, a preparation on the command-processor
+  thread still saw its resident pages, the resolution refused the view and the
+  whole preparation failed.
+- Change: `KernelResolvePhysical` returns `KernelPhysicalResolution`.
+  `Withdrawing` means one view holds the span and is being unmapped, or its
+  physical range is released or pending release. The importer leaves such a
+  span unimported, as the release path already states that a released range
+  must not be imported again; its quiesced release removes the range. Any
+  other refusal still stops the run.
+- Verified on Intel, one 120 s run each with the generic or title routes: the
+  dream platformer (in gameplay), the gothic platformer (intro cinematic)
+  and the puzzle title run to the limit; the insect sequel reaches its
+  "Act 1" card and then stops on a new
+  `unknown relation: DepthStencilBuffer - Crosses - IndexBuffer` (a 12-byte
+  index read inside a live 1920x1080 depth buffer), open; the insect
+  platformer reaches its next refusal, the alpha-only R8 storage selector
+  (`format=1 swizzle=0x800`), open. The roguelike control run is unchanged
+  (4 captures, time limit).
+- The kernel-process test for `sendmsg`/`recvmsg` still expected `ENOSYS`
+  from before both calls were implemented; it now expects `EBADF` for an
+  invalid descriptor.
+
+## Survival title: hosting an offline world (2026-10-15, open)
+
+- Symptom: Host Game showed "Network Connection Lost". With the connection
+  check passed, it showed "Launching Server", then "Server Failed To Start",
+  and on retry "Networking Failed To Start". The title's offline mode is a
+  LAN-only server running in the same process; it reaches it through
+  `SOCK_DGRAM_P2P` sockets on the loopback.
+- Fixed, in order of discovery:
+  - `sceNetInetPton` left the address in host byte order, so the title's
+    self-addressed datagram went to the wrong host. It now follows the BSD
+    contract and returns 1, 0, or an error.
+  - P2P datagram sockets (type 6) carry a virtual port at bytes 8-9 of the
+    address. Two server sockets bind the same P2P port with different virtual
+    ports. Each now gets its own host UDP port, and a process-wide endpoint
+    table routes local sends.
+  - **Root cause of "Server Failed To Start": `sceNetGetSockInfo`.** A bounded
+    HLE trace showed the server threads calling only `sceNetGetSockInfo` in a
+    loop for about 2 s, then tearing the server down. The guest's loop expects
+    three things:
+    - the number of 160-byte records as the return value;
+    - the record whose socket id at 0x24 and type at 0x28 match;
+    - state 2 (opened) at 0x44.
+
+    Until then it calls `usleep(1000)`, up to 2000 times. The old
+    implementation returned 0 and a host sockaddr. With records and states
+    reported, the call succeeds once and the server starts.
+  - POSIX `sendmsg`/`recvmsg` were ENOSYS stubs; they are now implemented.
+    This was a defect, not this title's blocker (see the exclusions).
+  - World generation prints progress dots through `std::cout`. The exported
+    `std::cout`/`std::cerr` were zero-filled, and the guest's inlined inserter
+    faulted reading the basic_ios offset from a null vtable. Both are now
+    constructed with the layout taken from the guest's inlined inserter,
+    `std::endl` and `basic_streambuf` constructor. The classic ctype facet's
+    `do_widen` also returned 1 for every character; it now returns its
+    argument.
+- **Local-only network contract (NetCtl).** `sceNetCtlGetState` reported
+  Disconnected (0) while `sceNetCtlGetInfo` returned the loopback address as
+  the assigned IP. With Disconnected the title never launches its LAN server
+  ("Network Connection Lost"). The emulated network is local only: the
+  loopback address is assigned, P2P datagrams are routed inside the process,
+  and nothing leaves the host. NetCtl now reports that state consistently:
+  IP-obtained (3) and `GetInfo(LINK)` connected (1). The address stays
+  127.0.0.1 because P2P routing is process-local. Verified with strict runs
+  on the current build: this title reaches day one (86 us per draw, 9.7 fps,
+  same as with the earlier diagnostic override). Other titles that import
+  `sceNetCtlGetState` or `GetInfo`: the sandbox title enters its world at the
+  same capture as before (two runs; a bounded HLE trace of the load showed a
+  handful of socket calls within 1 ms), the beat 'em up title reaches
+  gameplay, the racing route runs at 45-47 us per draw, and no
+  `NetCtlGetInfo` unknown-code exit appeared. The UE4 brawler title still
+  stops before its first frame on the unsupported volume layout refusal
+  (`400x5x5`, tile 27) that an older build already hit.
+- Excluded: `poll`, `recvmsg`, `sendmsg` and `recvfrom` were not called while
+  the server was starting (DIAG trace during "Launching Server"). The
+  `KernelPoll` "every fd ready" answer was not involved.
+- Verified live (Intel Arc A770): the server starts and its sockets exchange
+  datagrams over the loopback. World generation runs past the former
+  `std::cout` fault and completes. Survivor select and day one of the world
+  are reached about 3 minutes after boot in a strict run, with the player
+  character moving (input from a person and from the agent pad).
+- Harness memory limit, not the title: the run harness capped the cgroup at
+  `memory.high` 7G with no swap, and the title keeps about 7.2 GB of guest
+  shared memory. Generation then sat in `__mem_cgroup_handle_over_high`
+  (full memory pressure about 27%), with presents stalled for up to 48 s.
+  With 12G/13G the pressure is zero and generation takes about a minute.
+  Heavy titles need `KYTY_RUN_MEMORY_HIGH`/`KYTY_RUN_MEMORY_MAX` above the
+  default.
+- Draw cost in the world (day one, 20 s windows, about 850 draws per frame):
+  - Before 40c887ad: 128 us per draw, 8.2 fps. The command-buffer
+    transient pool filled at 15.7 MB, all of its 1,970 entries in use, with
+    vertex snapshots of up to 120 KB. Refused index ranges became GpuMemory
+    objects whose `UtilCopyBuffer` upload waits on its own fence: 94 fence
+    waits and 97 submits per frame.
+  - With a 64 MiB pool (40c887ad): no refusals for lack of space, peak
+    31.4 MB per pool, 5 fence waits and 8 submits per frame, 89 us per draw,
+    9.9 fps. Anonymous memory did not grow (1.33 against 1.44 GB).
+  - Same build, other titles. Racing route: 45-48 us per draw against
+    47-48. Fishing route: about 15 fps in both, four boots of 45 s pass.
+    That fishing title still fills 64 MiB, with vertex snapshots of 2.4 MB.
+    Beat 'em up route: captures identical to the previous run.
+- Fence waits in the world (fixed in e50014c6 and ddd43522):
+  - Attribution (temporary capped diagnostics, removed): about 99% of fence
+    time was the device-address draw retry
+    (`CommandProcessor::DrawIndex` → `RetryGuestDeviceAddressDraw` →
+    `Gpu::WaitSubmission`). The pending storage came from a 64x1x1 compute
+    fill with 16-byte records whose value is uniform per dispatch.
+  - Ceiling (diagnostic only): forcing device-side publication of every
+    uniform fill took 86 to 40 us per draw and 9.7 to 11.1 fps, so the
+    retry, not the draws, set the frame time.
+  - Root causes:
+    - `GpuMemory::QueryRangeProvenance` walked at most 64 candidates over
+      1 MiB buckets and reported `truncated` for the 3840x2160 render target,
+      which has two real overlaps. The uniform-fill identity then refused at
+      random. The query now reports the exact `FindBlocks` overlap set and is
+      truncated only above 16 entries.
+    - Display buffers (`VideoOutBuffer`) that equal the fill range were not
+      admitted as color-image aliases.
+    - Fills of a depth target's depth plane or stencil plane were never
+      admitted by `MarkStorageGuestPublished`, and the depth plane was never
+      propagated. The depth-stencil update function is a no-op and a tiled
+      display buffer upload returns early, so invalidating those parents
+      after a write-back had no content effect. Propagation is what gives
+      them correct content.
+  - Fix: exact provenance; display buffers join the uniform-fill image
+    aliases; a uniform depth fill (32-bit words, value in [0, 1], D32 depth
+    formats, address equal to the depth plane, image already initialized,
+    no sample-location state) clears the depth aspect on the device; depth
+    and stencil plane propagation stamps the device write time
+    (`GpuMemoryResetPlaneHash`); publication admits an equal color image or
+    a depth plane (not the HTILE plane) only when its device write is newer
+    than the guest write.
+  - Result (day one, Intel Arc A770, strict): 86 to 35.5 us per draw, fence
+    time 40 to 8.6 ms per frame, 9.7 to 11.8 fps (p50 86 ms). Captures are
+    equivalent to the previous build.
+  - Regression, same binary: the 2D action title's walk route renders
+    correctly (about 134 fps, 67 us per draw); the beat 'em up reaches combat
+    with correct captures (163-179 us per draw against 167-169); the sandbox
+    title enters its world with the HUD (29.6-35.4 against 31.7-38.0 us per
+    draw, terrain still missing as before); the racing route renders the
+    road correctly (44.8 against 47.0 us per draw at about 480 draws per
+    frame); the fishing
+    dock is unchanged visually at 44 us per draw and about 17 fps.
+  - AMD (integrated Radeon, same binary, strict): day one is reached and the
+    captures match the Intel ones. 31 us per draw, 2 fence waits for 3.3 ms
+    per frame, about 10 fps with a 98 ms median frame; the command processor
+    takes 30.5 ms of it while `gpu_busy_percent` averages 77% over 40 s, so
+    on this host the frame is bound by the GPU at 3840x2160.
+  - Still open in this title: a 1920x1080 zero fill contained in a texture
+    still refuses (about 8.6 ms per frame of fence waits remain). The frame
+    is not bound by the command processor: a sampler at day one shows the
+    processor thread about 33% busy and the main guest thread about 10%,
+    with three guest threads spinning on `gettimeofday`. The title renders
+    at 3840x2160; GPU time is the next measurement.
+- Open:
+  - **World generation speed:** the 1 fps runs were the harness memory limit
+    above. Three guest threads still spin on `gettimeofday` with nanosleep;
+    they cost CPU but did not block generation.
+  - `std::cin` (imported) and the 104-byte versioned `cout`/`cerr`/`clog`
+    objects are still zero-filled. Their layout is a different ABI without
+    evidence yet.
+  - These are rejected and may be defects:
+    - `SO_LINGER` with a 4-byte value (EINVAL);
+    - `IPPROTO_IP` option 2 on UDP (ENOPROTOOPT).
+
+    The title ignores both results.
+  - Imported but never called:
+    - `sceNetGetMemoryPoolStats`;
+    - `sceNetCtlGetResult`;
+    - `sceNetCtlUnregisterCallback`;
+    - three unnamed NIDs.
+  - P2P peers outside this process are not routed.
+
+## Read-only snapshots over written-back writable buffers (2026-10-15, excluded)
+
+- Question: in the sandbox title's world, about half of the draw-time
+  read-only buffer snapshots (`GpuMemory::CaptureSnapshotReadOnlyBuffer`) are
+  refused. Is the refusal a broken contract, and does it cost frame time?
+- Observation on HEAD (Intel, in world, 40 s window): 9.1 fps, 2,554 draws per
+  present (36.6 us per draw), 3.2M probes, 46% accepted, validation 0.44 us
+  per probe. A temporary, uncommitted per-reason counter showed:
+  - every refusal comes from an overlap group that is not read-only;
+  - a 1-in-16 sample of those found the writable object always quiescent
+    (write-back capable, `in_use=0`);
+  - zero truncated or overflowing groups, zero non-buffer groups, zero
+    unstable copies.
+  The overlap entry tests `read_only`, which `GpuMemoryMergeReadOnlyUse` leaves
+  false after the write-back cleared `in_use`.
+- Change tried: count a quiescent write-back-capable object as current guest
+  memory, and invalidate the overlap-snapshot cache whenever an object enters
+  or leaves the pending write-back index. A unit test covered the
+  transitions.
+- Result: a regression, so it was not committed.
+  - In world: 1.4 fps instead of 9.1.
+  - 20% of probes accepted, at 47 us of validation each.
+  - 173,779 live StorageBuffers (165k newly linked, 139k with truncated link
+    traversal). On HEAD there are 21.
+  - The mechanism was not isolated. The cache invalidation on every in-use
+    change turns each refusal into a full overlap query. Accepted snapshots
+    also change when the writable buffer's write-back runs. Retrying the idea
+    needs a design that keeps the cached snapshot static and evaluates the
+    write-back state at validation time, measured on the same route.
+- Storage binding is not the frame-time lever there. In the HEAD window:
+  - storage descriptors 2.2 s and transient validation 1.4 s;
+  - command processor 36.5 s;
+  - pipeline setup 9.2 s, of which 6.1 s is first-visit SPIR-V compilation;
+  - resource binding 8.9 s;
+  - fence waits 8.8 s;
+  - state setup 4.9 s.
+- Also excluded with temporary counters:
+  - page-granular write-back overwriting CPU-written bytes: 96k pages checked,
+    0 CPU-written bytes, 0 overwrites;
+  - snapshot copy instability: 0 unstable copies in 4.58M.
+- Earlier "unstable" counts were `Capture` returning false, mostly this
+  overlap refusal, not a racing CPU writer.
+- Object retirement (`GpuMemory::FrameDone`, 120-frame age, one pass every 30
+  frames, 4,096 slot visits): on HEAD the in-world population stays flat.
+  - 21 StorageBuffers, 979 index buffers, 774 vertex buffers.
+  - 994 creates against 1,382 frees in 40 s.
+  - No object-count trigger is needed for this title. The 85k-173k live
+    StorageBuffers seen earlier came only from the build above and from
+    diagnostic builds.
+
+## Save data directory search patterns (2026-10-15)
+
+- Symptom: the sandbox title never listed a saved world. Every boot showed the
+  first-run flow, and the PLAY screen listed no worlds.
+- Evidence: the guest searches its save directories with the patterns
+  `<prefix>%@P%` and `<prefix>%@O%` (strings in the executable). The
+  search compared the pattern with each directory name literally, so nothing
+  matched. Two independent secondary implementations agree that `%` matches any
+  run of characters (including none) and `_` exactly one.
+- Change: `SaveDataDirectoryNameMatches` in `SaveDataPaths` implements those
+  two wildcards (other characters literal, case-sensitive) and the directory
+  search uses it.
+- Test: `EmulatorSaveData.MatchesDirectorySearchPatterns`.
+- Verified live: with a saved world the title skips the first-run flow, the
+  PLAY screen lists the world and it loads in about 60 s.
+
+## Guest thread-pointer loads without the TLS handler lock (2026-10-15)
+
+- Symptom: the sandbox title took 60-110 s from its "ready to play" screen to
+  the first world frame (world on screen at 183-209 s on the seeded route).
+- Attribution: a guest-IP stack sampler over the world-creation threads put
+  42% of their samples at one address, the TLS handler page
+  (`handler_vaddr`, image base + aligned image size + the 0x1000 exception
+  handler page). Every guest `mov rax, fs:[0]` is patched by
+  `LoaderPatchTlsFsBaseLoads` into a call to that page, which held
+  `Jit::SafeCall`: a process-wide spinlock, a 2,688-byte XSAVE into a shared
+  buffer, a switch to a shared host stack, then `RuntimeLinker::TlsGetAddr`
+  with the linker mutex, the static-TLS mutex and a hash-map lookup by thread.
+  Worker threads of the title read their thread pointer that way many times
+  per job, so they serialized on that lock.
+- Change: the handler page now starts with `Jit::TlsCachedCall`. It reads the
+  guest thread pointer from a host `thread_local` slot through its
+  `fs`-relative offset, returns it when the slot is filled, and keeps flags and
+  every register but `rax`. An empty slot (the first load on a thread) jumps to
+  `SafeCall`, now at `handler_vaddr + 0x40`, whose `TlsMainGetAddr` fills the
+  slot. The slot never goes stale: the main TLS block of a thread is fixed for
+  its lifetime and static TLS is not resized while guest threads run. Linux
+  x86-64 only; other hosts keep `SafeCall` at the handler address.
+- Test: `EmulatorLoaderTls*.CachedCallReturnsThreadPointerOrTakesMissPath`
+  runs the stub in an executable page (hit returns the cached pointer with
+  `rcx` and the carry flag preserved; an empty slot takes the miss path).
+- A/B on the same seeded sandbox route (Intel A770, strict, 300 s): loading
+  screen at 132 s and world on screen at 145 s, against 183-209 s before;
+  the handler page no longer appears in the sampler. In-world rate is
+  unchanged (about 8.4 FPS); the world is now bound by Kyty's graphics thread
+  (SPIR-V optimization, allocation, descriptor cache, memory hashing).
+- Regression runs (same routes and environments as the 2026-10-15 baselines):
+  - Racing title (200 s, render-target scope): the route started the race one
+    checkpoint earlier and ended in TIME OVER; 22.8-28.8 FPS against
+    21.0-27.8 FPS of an earlier run that took the same route branch. The
+    in-race window of the usual route branch was not covered.
+  - Fishing title (240 s, RADV): open sea 7.6-9.0 FPS against 7.6-8.1, dock
+    9.1-9.5 FPS; gameplay reached.
+  - Beat 'em up (300 s): gameplay reached, 12.2-18.4 FPS against 10.7-12.1
+    (this route varies by about 5 FPS between runs of one binary). Reaching
+    gameplay later (after the intro cinematics) in the beat 'em up and fishing
+    runs also happens with four older binaries: route variance, not this change.
+- Leads not taken in this change (measure before acting): the module-relative
+  `TlsGetAddr(module, offset)` path still takes the linker mutex and scans the
+  programs; `mmap_in_guest_window` took 9-25% and
+  `GpuDirtyPageTracker::VisitWritePages` 12% of the loading threads' samples.
+
+## Sandbox title: missing terrain in the world (2026-10-15, fixed 2026-10-16)
+
+The world shows sky, clouds, HUD and an all-water view without land; the
+inventory screen works. Recorded so the excluded paths are not re-tested.
+
+- In-world frame structure (one presented frame, temporary draw list): G-buffer
+  and depth clear; 152 depth-only terrain draws; a rectangle-copy compute from
+  an R32F view of the depth target into the live depth plane; shadow cascades on
+  a 2048x2048 D32 target; light computes; deferred lighting and composite; a
+  depth prepass with writes and the G-buffer fill (152 draws); fog, water,
+  bloom, tonemap.
+- Excluded:
+  - The depth-plane rectangle copy. It runs every frame from boot. Dropping its
+    store (diagnostic only) left the world image identical.
+  - Terrain draws dropped on the CPU side. A histogram of every skip reason of
+    the indexed and auto paths over a 300 s run showed about 2,200
+    depth-writing draws per presented frame reaching command emission and no
+    draw taking a skip reason; `gda-not-ready` outcomes are retried waits.
+  - Stale sampling of depth or render targets, the fill depth content (fill
+    depth function forced to ALWAYS, terrain still missing) and the block atlas
+    content (atlas painted a solid colour, no such terrain appeared).
+  - The terrain vertex transform and vertex fetch. The fill VS computes
+    `Proj * (World * pos)` with position as 16_16_16_16_FLOAT at offset 0 and
+    valid guest bytes. An earlier note that clip W <= 0 hid the terrain is
+    retracted: the probed chunk was behind the camera by construction.
+  - The guest floating-point environment. The bundled libc default is FPUCW
+    0x037F and MXCSR 0x9FC0 (FTZ and DAZ); Kyty starts guest threads at the
+    host 0x1F80. Starting them with the guest default changed neither the world,
+    the camera nor timing. Not merged (no observed benefit); revisit with a
+    title-wide A/B since it is the guest contract.
+  - HLE libm: all 58 math registrations hash-match their names, and the title's
+    bundled libc exports take precedence over HLE anyway.
+  - World database I/O. A guest file trace on the world database showed every
+    open, write and close succeeding (manifest and `CURRENT` created and fully
+    written); the `ENOENT` stats are the normal fresh-database probe.
+  - Guest file system for pack data. A full trace (228,000 operations in
+    185 s) showed no failing application path that exists on the host
+    (case-insensitive), no failing read, and every file read to its size except
+    random-access fonts and streamed music.
+  - Condition-variable timed waits. The worker pool waits through
+    `std::condition_variable` over HLE `cnd_timedwait`/`cnd_wait`; deadlines come
+    from `_Xtime_get_ticks` (microseconds of `CLOCK_REALTIME`), the host
+    condition uses the same clock, and the result codes match the set the guest
+    accepts.
+- Excluded (later the same day):
+  - The world generator and server-side placement. Saving the world from the
+    pause menu (driven live through `kyty_agent pad tap`) wrote a 724 KB
+    database log: stone, deepslate, dirt, grass, logs, ores, water and animals,
+    and a player record at the spawn standing on terrain. Reloading that world
+    (spawn already resolved) still shows only sky, so creation order is
+    excluded as well.
+  - The client simulation. With the coordinate HUD enabled the player is at
+    the spawn, walks and collides correctly; only the image stays empty.
+  - Stale constant data on the GPU side. A temporary bind-time probe compared
+    the vertex-stage constant buffers of the terrain draws with live guest
+    memory: they are copied from guest memory at bind time and hold exactly
+    what the guest wrote. No terrain constant changed after it was bound (the
+    only late changes were UI ring-buffer slots reused by the next frame).
+  - Camera-relative offsets. Every terrain world translation is a multiple of
+    16 while the player stands at x=74 (74 mod 16 = 10), so they cannot be
+    offsets from the player.
+  - Pad motion data. `PadRead`/`PadReadState` report an identity orientation
+    and resting gravity, so no NaN reaches a camera that folds motion in.
+  - Camera definition I/O. An earlier guest file trace shows the resource
+    pack's camera archive opened during world entry and read in full: header,
+    table of seven entries and all 6,612 data bytes, which add up to the file
+    size. The behavior pack's preset archive is also read in full. (Reading was
+    correct; the parse rejected the data, see the fix below.)
+- Observed (guest state, not the GPU path):
+  - The guest writes a view-projection that is a pure perspective (fovY 60,
+    16:9, near 0.025 for a 0..1 depth range) with no rotation or translation,
+    and stick input does not change it.
+  - Every fill draw's world translation is a multiple of 16 and the drawn chunk
+    set is a disc centred on the origin. Almost every fill draw is a 16x16 water
+    surface sheet at sea level; there are no lower subchunks.
+  - Two bind-time dumps 350 presents apart, with the player moved 8 blocks,
+    drew the same chunk set (three chunks added): the render camera stays at
+    the origin.
+  - The right stick does not turn the player: walking forward after holding it
+    still moves along +z. The title's first-person camera definition routes
+    look input through the camera and copies the player's yaw back from it, so
+    this is the same defect as the frozen render camera, not a pad defect.
+  - Every camera entity in that archive declares a 66-degree field of view and
+    a 0.025 near plane. The guest's projection has the same near plane but a
+    60-degree vertical field of view, so it may come from a fallback path
+    rather than from one of those camera entities (not proven: how the title
+    combines the camera value with its options is unknown).
+- Fixed (2026-10-16): the camera definitions were rejected by the classic
+  locale's `ctype<char>`.
+  - Hardware execute-breakpoint counters on the title's own log sites showed
+    "Failed to load any valid camera" and "Core camera settings ... missing"
+    once per camera file (7 of 7), although every file was found. A gdb Python
+    breakpoint on the definition loader's return dumped the parser error:
+    `"identifier" must contain a namespace and a name, separated by a colon`
+    for `minecraft:death_camera` and the other six.
+  - The camera schema validates the identifier with the regex `^\w+:\w+$`.
+    The title's `regex_traits::lookup_classname` compares one-letter class
+    names through `ctype<char>::do_tolower` (vtable +0x20). Kyty's classic
+    facet implemented that slot as a no-op returning the facet pointer, so
+    every comparison matched and `\w` resolved to the first one-letter entry,
+    `d` (digits). Every camera identifier failed, no camera entity existed, and
+    the client rendered from an identity view at the origin with the stick
+    ignored: the frozen camera and the missing terrain recorded above.
+  - Contract, from the vtable relocations and code of the bundled runtime
+    (identical 12-slot `ctype<char>` vtable in all 25 readable bundled
+    `libc.prx`): object 0x30 bytes with the classification table at +0x10, the
+    lowercase and uppercase tables at +0x18/+0x20 and a delete flag at +0x28;
+    slots +0x20/+0x28 `do_tolower` (char, range), +0x30/+0x38 `do_toupper`,
+    +0x40/+0x48 `do_widen`, +0x50/+0x58 `do_narrow`. The facet now carries the
+    C-locale case tables (shared with `_Getptolower`/`_Getptoupper`, now
+    constant data instead of host `tolower`/`toupper`) and implements all eight
+    slots.
+  - Verified (Intel, strict, 240 s): no camera error site is reached, the
+    title-screen panorama shows terrain, mobs and flowers for the first time,
+    and world entry advances to a strict stop on a wave64 pixel shader that needs
+    fragment wave transport (`mask observed as a number`), the same open
+    feature as the card title.
+- Fixed (2026-10-16): that stop was a false refusal of the fragment mask flow,
+  not a need for the transport.
+  - A transport dump (`KYTY_TRANSPORT_DUMP`) of the refused wave64 pixel
+    program shows lane 13 of one VGPR used as two unrelated spill slots: a
+    number at pc 0x914, read back at 0x9e8 and used by `v_mul_f32` at 0x9f8,
+    then the saved EXEC high word at 0x1f14 (`s_and_saveexec_b64`). No back
+    edge leads from 0x1f14 to before 0x9e8.
+  - The flow kept one taint per (VGPR, lane) slot as a union over the whole
+    program, so the later mask reached the earlier read.
+  - Change: slot taint is part of the flow state on each path. A
+    `V_WRITELANE` (which ignores EXEC) replaces it, joins take the union, and
+    back edges carry it through the existing fixpoint. A slot written inside a
+    lane-divergent region or a divergent loop is marked divergent after the
+    join or exit, as a scalar word is; the old union never did that.
+  - Verified: the dumped program is lane local in the mask flow and the
+    wave64 admission proves it quad local, which needs no subgroup pinning.
+    Intel, strict, 240 s: the title reaches gameplay in the generated world
+    (HUD, hotbar, hand, mobs, sky and clouds) without a stop. Racing (200 s)
+    and painterly (150 s) controls unchanged. Unit test
+    `ASpillSlotCarriesTheWordLastSpilledOnEachPath` covers a reused slot, the
+    loop-carried case and the divergent-region case.
+  - Next observation: terrain blocks draw black (silhouettes only) at about
+    3 FPS; fixed below.
+- Fixed (2026-10-16): the black terrain was the block atlas mip chain that the
+  CPU writes into guest memory and Kyty never loaded.
+  - Observed: before the first draw into the atlas, the guest bytes already
+    hold the whole four-level 2048x2048 chain. The 64 KiB occupancy follows the
+    reverse-order 64 KiB layout (level 3 at 0, level 2 at 0x40000, level 1 at
+    0x140000, level 0 at 0x540000 of a 0x1540000 chain). The color target
+    (`MAX_MIP` 3, drawn only at `MIP_LEVEL` 0, about 160 draws per frame) was
+    created as one empty level over the first 16 MiB and, being GPU owned and
+    tiled, never loads guest bytes; only the animated strips reached it.
+  - The sampled side had two gaps: `TileGetTextureSize2` sized a tile-27
+    multi-level texture as one level (the fallback that ignores `levels`), and
+    `Gen5PickSampleSurfaceAliases` rejected the one-level target for a
+    four-level view, so the sample fell to `guest-skip-live-cover`, which
+    zero-fills.
+  - Change: a tiled color target with `MAX_MIP` > 0 and one slice is the whole
+    64 KiB render-target chain (`Gen5GetRenderTarget64KBMipLayout`, from the
+    element size). Its image has every level, is created from the detiled guest
+    chain, and each pass renders the `MIP_LEVEL` view at that level's extent; the
+    whole image stays a color attachment between passes. Mip chains are never
+    resolution scaled. Tile-27 multi-level textures use the same chain layout
+    and detiler, so the sample and the target describe the same range and the
+    sample binds the target.
+  - Verified (Intel, strict, 240 s): the generated world draws fully textured
+    terrain (grass, dirt, leaves, birch, flowers) for the first time, at about
+    3 FPS. Unit test `RenderTarget64KBMipChainMatchesSampledChain` pins the
+    chain offsets observed in guest memory.
+  - Excluded on the way: binding the one-level target anyway (diagnostic only)
+    stayed black, since its level 0 lacked the static textures. A diagnostic
+    that only cleared the live-cover flag was not a test of the guest bytes:
+    the tile-27 upload policy still skipped the guest, so the sample stayed
+    zero; forcing the guest upload of the chain showed the textured terrain.
+- Defects found, not fixed:
+  - Layered mip-chained targets (the 128x128 cubemaps, 6 or 18 slices, 8
+    levels, drawn at every level 0-7) keep one level per slice, so every
+    `MIP_LEVEL` lands on level 0.
+  - Tile-27 storage images with several levels now take the chain size, but
+    `StorageTexture.cpp` still detiles level 0 from the start of the range
+    instead of its chain offset.
+  - The inventory character preview draws legs and torso on black with the head
+    detached; a dark streak crosses the sky in later captures. The pause-menu
+    dressing room draws the same character correctly, so the defect is limited
+    to the inventory preview.
+- `KYTY_PRINTF_DIRECTION=Console` logs every HLE call: 3.5 GB in 270 s at
+  about 3 FPS, and the world is never reached. Not usable for this title.
+
+## Conditional command-buffer branch (2026-10-14)
+
+- The role-playing title and the mechanical-fist platformer stopped on the
+  unresolved `sceAgcCbBranch` import (`w1KFAHVqpaU`). The earlier held candidate
+  was a jump that ignored the compare and the not-taken target.
+- Contracts used:
+  - Argument order: the published `CommandBuffer::branch` signature (branch mode,
+    compare function, 64-bit compare address, mask and reference, then cache
+    policy, target and size of each buffer). Waits use the same
+    `CompareFunction` type.
+  - Packet: the published `COND_INDIRECT_BUFFER` layout (opcode 0x3F, 14 dwords;
+    mode 1 if-then, 2 if-then-else; functions 0-6 as `WAIT_REG_MEM`).
+- Change: `sceAgcCbBranch` and `sceAgcCbBranchGetSize` (56 bytes) build that
+  packet. The command processor tells it from `INDIRECT_BUFFER` by length,
+  evaluates the 64-bit compare and runs the selected buffer as a nested call.
+  Before reading the word, any write to it still pending in a recorded or queued
+  submission is published, so the compare observes stream order.
+- Live argument trace (temporary, removed), role-playing title, 55 calls: all use
+  mode 1, function 0, mask and reference 0, a 64 KiB-aligned then-target of
+  77-4129 dwords and a null else-target. This is the guest's command-buffer
+  segment chaining.
+- Result: that title now runs its whole window. The route reaches the initial
+  settings, title, New Game and traveler selection at 6-9 fps.
+- Open on that title:
+  - The deferred menu defect is unchanged: the title menu background is solid
+    magenta and the traveler-selection scene is black (see "Role-playing title
+    menu defect").
+  - The stick pans the selection scene and Circle returns to the title menu,
+    but Cross with the quill on a traveler does not select it, so gameplay is
+    not reached.
+  - Its frame time is dominated by GPU waits: about 126 s of fence waits and
+    108 s of `WAIT_REG_MEM` in a 231 s window.
+- The mechanical-fist platformer still faults first on its startup weak-pointer
+  race (27 s, guest mutex at 0x58), before any branch is built.
+
+## Command-processor per-draw costs: armed ranges and descriptor reuse (2026-10-14)
+
+- Method: the same scripted route does not reach the same scene in the same
+  frame. Over the same 12 s window of the racing title the draws per frame were
+  419, 363 and 779 in three runs, so frame rates of single windows are not
+  comparable. The figures below are command-processor time per draw from two
+  agent perf snapshots around a stack-sampler window (Intel, release build,
+  strict run, render-target scope, the racing route at 150 s).
+- Racing title, us per draw:
+
+  | Build | Command processor | Object creation | Texture descriptors | Descriptor finalize |
+  | --- | --- | --- | --- | --- |
+  | Before | 55.9 | 5.73 | 7.28 | 5.83 |
+  | Prefix compare, cached switches, armed proof | 45.3 | 1.89 | 3.12 | 6.86 |
+  | Plus descriptor reuse (two runs) | 49.7 / 45.0 | 2.11 / 2.03 | 3.59 / 3.58 | 4.56 / 5.00 |
+
+- Armed proof: dirty-page `Rearm` walked every page of a bound range on every
+  bind (8.3% of the thread). A registered range whose pages were all armed now
+  records the total change count of its blocks and returns early while it is
+  unchanged. Writes and fallbacks already advance the block count; authority
+  changes (unmap, protect) now advance it before and after the page update.
+  Unit tests: a proven range is protected again after a write, and an unmapped
+  range is recaptured after a second rearm; both fail with the proof compare
+  removed.
+- Prefix compare and cached switches: instruction-name prefix tests compared
+  through library calls for every instruction of every draw, and opt-in dump
+  switches read the environment per draw. Both disappear from the profile.
+- Descriptor reuse: with the cheaper bind path the driver's descriptor-set
+  allocate and free calls rose to 5.3% and 3.0% of the thread. A released set
+  whose recorded submissions all completed is now kept for the next set of the
+  same layout (at most 8192); the caller rewrites every binding. A set released
+  with a resource while one of its submissions is pending returns to its pool
+  as before. The driver free call leaves the profile; allocation drops to 1.2%.
+- Fishing title at the dock, same route, the last windows: before 82.7 / 78.6 /
+  95.3 us per draw at 1067-1203 draws per frame and 111.6 us at 845; after
+  67.9 / 65.3 / 81.2 us at 1099-1207 and 101.8 / 103.2 us at 837-844 (about
+  11.6 against 10.6 FPS in the last window). The new build reached the dock
+  sooner. Captures render the boat, water and HUD correctly.
+- Open: one racing run of an earlier descriptor-reuse build, which also reused
+  sets released with a resource whatever their pending submissions, stopped
+  presenting after 78 s (55.9 FPS until then) with every thread idle, no error
+  and no kernel GPU reset. Three later runs of that build and one of the final
+  build did not reproduce it. Cause unknown; the final build only reuses sets
+  whose submissions completed.
+- Excluded: memoizing per-draw input analysis by a key of the draw's shader
+  and register inputs. A counting diagnostic on the fishing route found the
+  cumulative share of draws matching a recent key falling from 77% over the
+  first 50000 draws (loading screens) to 6.0% over 1.8 million, with almost no
+  new matches over the last 500000 (gameplay), so the memo would only add a
+  compare.
+- Transient snapshot index: each snapshot capture walked every transient entry
+  of the command buffer for an earlier snapshot of the same range and usage
+  (4.6% of the racing thread). Entries holding a valid snapshot are now kept in
+  a map by range and usage, updated where a snapshot is stored or overwritten;
+  reuse still requires a byte match with guest memory. The capture drops to
+  1.5%. Racing title 43.2 us per draw in one window (45.0 before). Fishing title
+  at the dock, 1157-1163 draws per frame: 52.6-54.4 us per draw against
+  65.3-67.9 with the previous commit and 78.6-82.7 before this section, about
+  15 FPS against 11; the dock capture renders correctly.
+- Regression runs on `6caf6261`, scripted routes: the fishing title on AMD
+  holds the dock at 9.1-9.2 FPS (7.3-7.7 FPS recorded before), 69-72 us per draw
+  at 1161-1163 draws per frame, and its dock capture matches the Intel one; the
+  robot platformer on Intel reaches the studio logo and the loading phase at
+  the same frame counts as `2696e271` (1120 against 1091 and 1118 presents in
+  200 s). Its black rectangle over the nebula fade-in is pre-existing (the
+  `2696e271` capture at frame 928 shows it). One 4.5 s gap between presents in
+  its loading phase made the agent report `stalled` once; presents resumed.
+- Excluded for the racing title: `ResetHash` self time is the inlined
+  materialization-cache `InvalidateRange` scan (the only loop before
+  `GetHeapId` in its disassembly). Scanning only live slots showed no gain in
+  one window of a different scene (its share 8.0% against 5.9%, at 550 against
+  780 draws per frame, so the shares are not comparable; cache occupancy was not
+  measured). Remembering recently scanned clean ranges, already excluded
+  for the fishing title above, left it at 6.9%: a store overlapping the
+  attachment, most likely the attachment's own materialization, clears the memo
+  every draw. A spatial index of the spans is the remaining direction.
+- Remaining ranked costs on the racing title after these changes: `ResetHash`
+  5.9-8.0%, `steady_clock::now` 3.6-4.1% (debug
+  statistics timers, about a hundred per draw), instruction-prefix scans still
+  3.1% (per-draw shader scans in `ShaderGetInputInfoPS` and the compute path,
+  which reparses per dispatch), `mem_alloc` 2.9%, `ShaderParseUsage2` 2.7%,
+  `ShaderCollectDynamicScalarResources` 2.3%.
+
+## Fishing title: command-processor CPU costs (2026-10-14, partly fixed)
+
+- Context: on Intel the fishing title runs its dock scenes (the scripted
+  route ends at the dock dialogue and the undock prompt) at 10-11 FPS with host CPU and GPU
+  both far from saturated. The emulated command processor is one thread per
+  guest queue, as on hardware, and that thread is the limit: about 100 ms of
+  command-processor time per presented frame with a stack sampler attached.
+- Flat profile of that thread at the dock (release build, strict run, the
+  scripted route): `GpuMemory::FindBlocks` 9.3%, `DescriptorCache::UnindexSet`
+  8.9%, driver descriptor-set allocation 6% plus 1.3% free,
+  `GpuMemoryClassifyRangeSets` 3.7%, `ResetHash` 3.6%,
+  `LabelFenceRegistry::Snapshot` 3% (`LabelStoragePublication::Upload`, one
+  linear pass over every registered fence hole per storage upload), dirty-page
+  `Rearm` 2.9%.
+- Fixed: the per-resource index of live descriptor sets held a vector per
+  resource and removed a set with a linear erase, so a frequently bound image
+  or buffer made every unindex O(sets referencing it). The index is now a hash
+  set per resource; `FreeSetsReferencing` still frees in ascending index order.
+  `UnindexSet` disappears from the line profile. ABBA on Intel, 200 s per run,
+  the last four capture intervals: baseline 11.0 / 9.3 FPS, change 11.25 /
+  11.25 FPS. Regression runs with the change, scripted routes, the last four
+  captures checked by index: the racing title on Intel 38-42 FPS racing; the
+  beat 'em up on Intel renders its intro, dialogue and walking scenes correctly
+  (its route desynchronized between runs, so its frame rates are not
+  comparable); the 2D action title on AMD reaches gameplay with no HTILE trails;
+  the fishing title on AMD 7.3-7.7 FPS at the dock dialogue, which the slower
+  host reaches later (5.0-7.3 FPS there before the change). No fatal stop.
+  `scripts/kyty_playable_regression.py` cannot run on this host (no private
+  profile or guest root).
+- Excluded: remembering up to eight recently scanned clean ranges in the
+  materialization cache so that a repeated `InvalidateRange` returns before its
+  2048-span scan. ABBA on Intel against the fix above: 11.73 / 11.97 FPS with it
+  and 11.83 / 11.67 FPS without it. The scan is not on the critical path at this
+  frame rate.
+- Ten-second agent window after the fix (Intel, at the dock): 11.3 FPS, 82.5 ms of
+  command-processor time per frame, that thread at 73% of one core (3% of it in
+  the kernel), 1157 draws per frame (about 71 us each). Of the 82.5 ms, 15.7 ms
+  are fence waits (32.6 per frame) and 11.1 ms `WAIT_REG_MEM` (212 per frame):
+  a third of the frame is the command processor waiting for the GPU, which is
+  why neither the host CPU nor the GPU shows high utilization. Resource binding
+  takes 39 ms (texture descriptors 17 ms), object lookups 19.7 ms for 6768
+  calls (nearly all cached or fast reuse, not object churn), and uploads move
+  47 MB per frame; the slowest creates are 8.3 MB textures re-uploaded on fast
+  reuse at 15-20 ms each. On AMD the same thread is 60% busy, 19% of it in the
+  kernel.
+- Remaining ranked costs and directions, not yet changed: `FindBlocks` from
+  `CanSnapshotReadOnlyBuffer` and `CaptureSnapshotReadOnlyBuffer`
+  (`GpuMemoryFind.cpp:371` and `:413`) spends most of its time sorting long
+  overlap lists from 1 MiB page buckets that hold many small objects; measure the
+  overlap count per query before choosing an index. Descriptor-set recycling is
+  now done (see the per-draw section below). The fence-hole registry is
+  unsorted (`Objects/Label.cpp:113-252`); a sorted index with the longest hole
+  length bounds each overlap query.
+- Fixed in part: write-back waits. A `WAIT_REG_MEM` on a label that the
+  current submission writes was consolidated into one barrier only for a plain
+  label store; a store whose `RELEASE_MEM` also writes back caches (about five
+  per frame, ~2 ms each) still submitted and waited. Ceiling, a diagnostic build
+  that consolidated every current-producer wait regardless of effects: 11.3 to
+  13.1 FPS, `WAIT_REG_MEM` 11.1 to 0.03 ms and fence waits 15.7 to 7.1 ms per
+  frame, the dock captures unchanged. Producer effects over that run: 284672
+  plain stores, 20328 store plus write-back, no notification. A second
+  diagnostic snapshotted the pending writable storage ranges at each forced
+  write-back consolidation and counted later object lookups in the same batch
+  over them: only depth-stencil objects (in a quarter of the consolidations);
+  no texture, vertex, index or render target. Guest-memory readers (memory
+  reads, GDS transfers, device-address views) already wait for pending storage
+  themselves, so the synchronous wait only protects GPU objects that alias the
+  storage, which the write-back refreshes or invalidates. The rule now
+  consolidates a store plus write-back when no pending writable storage has an
+  alias (`GraphicsWaitRegMemCanConsolidateCurrentProducer`,
+  `GpuMemoryPendingStorageHasAliases`); aliased cases and notifications stay
+  synchronous. Window with the rule: `WAIT_REG_MEM` 1.6 ms and fence waits
+  13.5 ms per frame; the last capture intervals 10.8 / 12.7 / 11.7 / 12.3 and
+  11.7 / 13.2 FPS against 10.5 / 11.8 / 10.9 / 11.8 and 10.7 / 12.1 / 11.5 /
+  10.7 FPS for the previous build, a gain of about 0.7 FPS that one ten-second
+  window (11.0 FPS, slower uploads) did not show. Regression with the rule:
+  the beat 'em up reaches gameplay in a 300 s run and renders its combat scenes
+  correctly (no gain there, its waits are device-address write-backs); the
+  racing title 41.3 / 40.6 FPS against 41.3 / 38.7; the fishing dock captures
+  match by index. Unrelated and pre-existing: some fishing-title launches never
+  present a first frame. The build before the rule failed in 2 of 12 launches
+  and presented in 5 of 5 short boot checks; three earlier builds showed the
+  same symptom (2026-10-12 and 2026-10-13). Cause unknown.
+
+## Static pointer-table resource plans: no measured gain (2026-10-14, excluded)
+
+- Change under test: `travel/static-resource-plans` (memoized pointer-table
+  resource plans, `6f5c0e90`) merged with this branch at `4c54c61d`; baseline is
+  the same tree without the plans. Release builds, strict runs, the same
+  scripted route, the same warmed SPIR-V cache, fixed 1280x720 RenderTargets.
+  The plans build passes 2425 unit tests (2419 plus its six plan tests).
+- Fishing title, the same scripted dock route, Intel Arc A770, ABBA order over three
+  processes per variant (200 s each, the last four capture intervals): the
+  baseline averaged 10.20 / 10.57 / 10.50 FPS (10.42) and the plans 8.70 /
+  10.47 / 10.00 FPS (9.72). Without the lowest plans run, 10.5 versus 10.2.
+  AMD, one pair at the same route: 6.2 versus 7.0 FPS, inside the run-to-run
+  spread. The racing title pair desynchronized its route (different scenes) and
+  is not comparable.
+- Conclusion: no measurable frame-rate benefit on either host; this agrees with
+  the earlier pilot, whose own state-setup timers did not decrease. The branch
+  is kept unmerged. Revisit only with a counter that shows plan invocations on
+  a CP-bound workload.
+
+## Beat 'em up: device-address write-back waits (2026-10-14, open, measured)
+
+- Workload: the beat 'em up, strict release build, Intel Arc A770, scripted
+  combat route, perf-snapshot window at 150 s. 17.8 FPS (56 ms per frame):
+  command processor 44.7 ms, fence waits 5.2 per frame for 16.3 ms, GPU busy
+  about 55%. The processor and the GPU take turns instead of overlapping.
+- Attribution (temporary capped diagnostics, removed): in combat almost all
+  fence time is the device-address draw retry
+  (`RetryGuestDeviceAddressDraw` → `Gpu::WaitSubmission`,
+  `GraphicsRun.cpp:2030`). Every retry comes from
+  `GuestDeviceAddressPendingWriteBack`; the in-flight reader path of the
+  snapshot refresh never fired (0 of 240,000 preparations).
+- Update (ddd43522): the survival title's uniform depth-plane fill
+  publication was not verified to apply here. The storage buffer below has
+  the size of a 3840x2176 32-bit plane, but its compute shader is not known
+  to write a uniform value. Combat route against the previous build: 4.0
+  against 4.9 fence waits per frame, 23-29 against 23-25 ms, and about 1.03
+  storage write-backs per draw in both (350-466 per frame). The write-back
+  volume is the open cost.
+- Pending objects, all produced and consumed on the graphics queue:
+  - a 33,423,360-byte read-write storage buffer (16-byte stride, 2,088,960
+    records) bound at index 0 of compute shader `0x5f385baf`; it crosses an
+    older depth target. In combat it causes about 60% of the waits at about
+    16 ms each;
+  - 144-byte storage buffers aliased by an equal vertex buffer and contained
+    in larger storage buffers, all older than the write. They dominate before
+    combat and wait about once per frame.
+- Ceiling experiment (diagnostic only, never a candidate): skipping every
+  pending object in `GpuMemory::CollectWritableStorage` raised the window to
+  23.2 FPS, but every capture was black, so the device-address readers do
+  consume this GPU-written content. Skipping only objects of 16 MiB or more
+  gave 17.8 FPS: the 144-byte objects then absorb the whole queue backlog, as
+  in the sandbox title's exclusion below. Any fix must remove every
+  write-back wait of a frame to change its frame time.
+- Direction: publish pending storage results into the device-address view in
+  queue order on the device (as `GuestDeviceAddressRecordPublication` does for
+  uniform fills), without exempting the object from the ordinary write-back
+  that its aliases rely on. Any CPU-side read of a published range, such as
+  an alias reload or a hash, must wait for the publishing submission. The
+  write-back side effects that other consumers depend on (alias invalidation,
+  depth metadata) are what regressed the 2D action title when an exemption
+  replaced them.
+
 ## Robot platformer: title screen save cards (2026-10-14, open)
 
 - Observed (Intel A770, strict, `generic` route, 390 s, no error): the title
@@ -564,8 +1943,11 @@ fail on the current HEAD before acting on them.
   overwritten. The previous code had no relation for depth over storage, so
   the read-only depth started undefined and hit the read-only clear refusal.
 - Contract:
-  - The 4-byte depth (mode 24) and render-target (mode 27) layouts address
-    texels alike. A unit test pins this.
+  - The 4-byte depth (mode 24) and render-target (mode 27) layouts were
+    taken to address texels alike, pinned by a unit test that used the
+    production helpers. Disproved on 2026-10-16: the guest's mode 27 micro
+    tile differs (see "Four-byte render-target micro tile"); the seed now
+    admits mode 24 views only.
   - A depth target over an equal-range render target or matching storage
     view, and a storage view over such a depth target, copy the raw 32-bit
     words of the newest writer (`create_texel_bits_seed`), then retire it.
@@ -1837,7 +3219,11 @@ previous section; the count of live ranges stays open.
 - Open defects:
   - `AudioAjm.cpp:271` rejects `SetResampleParametersEx` and ends the beat
     'em up's strict run in combat (2 of 4 runs, at 248 and 269 s). The faster
-    combat makes it more likely to reach that point.
+    combat makes it more likely to reach that point. Still open on
+    2026-10-14 (1 of 3 runs, near frame 706): the refusal is the profile
+    admission `IsAjmResampleProfileAdmitted` (`AudioAjm.cpp:2580-2583`).
+    Direction: capture the refused job's ratio, increment and flags at that
+    point and extend the admission only from that evidence.
   - Beat 'em up combat shows a flat lilac parallelogram above the companion,
     probably a bubble or prompt drawn without its content.
 
@@ -2987,7 +4373,7 @@ the playable gate's checkpoints.
 | Pixel cave platformer | 161 | Cave with ladders and character |
 | Robot dungeon workload | 203 | Tutorial scene with HUD and movement prompt; healthy watches; earlier present stall not reproduced |
 | Arcade racing workload | 165 | Race with HUD; no D16 refusal |
-| Mechanical-fist platformer | 58 | Passes the startup race; refuses the one-byte `SW_64KB_R_X` 400x5x5 volume |
+| Mechanical-fist platformer | 58 | Passes the startup race; refuses the one-byte `SW_64KB_R_X` 400x5x5 volume (fixed later the same day; see below) |
 
 The camp brawler stays black and issues about 3% of its earlier draws while presenting normally. A build of the
 merge result without this entry's changes reproduces the same black endpoint (d1923), so the cause precedes this
@@ -3477,9 +4863,6 @@ Independent review holds these contracts from publication:
   absent from the translator126 target. The current indexed-indirect path validates and copies its complete
   20-byte argument span through checked guest-memory access. This bounds the indexed record only; non-indexed
   offset semantics and behavior remain unimplemented and unverified.
-- **Conditional command-buffer branch:** `GraphicsCbBranch` treats comparison function zero as unconditional and
-  ignores the compare and not-taken operands. The mapping is inferred from a different packet contract; no independent
-  call trace, guest disassembly or behavioral contract verifies it.
 - **One-byte `SW_64KB_R_X` detile:** the round-trip input and reference use the same production offset helper.
   An independent offset oracle is still required, including block transitions and slice behavior.
 - **Unsigned 16-bit exports and new attachment formats:** the earlier source audit had only synthetic SPIR-V evidence.
@@ -3563,14 +4946,39 @@ These runs used the full local candidate, including changes held from publicatio
 the five-second cross route and a 180-second bound. The observations below do not establish the frontier of the
 selected published source; none is a gameplay or visual acceptance.
 
-- **One-byte 64 KiB render-target volumes (local candidate; held).** The title samples an R8 400x5x5 volume with tile mode 27 (`SW_64KB_R_X`).
+- **One-byte 64 KiB render-target volumes (published 2026-10-16).** The title samples an R8 400x5x5 volume with tile mode 27 (`SW_64KB_R_X`).
   The local `Sw64kRxWithinBlockOffset` candidate uses a one-byte equation inferred from a 16-pipe address pattern: bits 0..15 are
   `x0 x1 x2 y1 y0 y2 x3 y4 | x3^y3 x4^y4 x6^y5 x5^y6 | y6 x6 y7 x7` inside a 256x256 block. The existing two- and
   eight-byte equations match the same published table exactly, which ties the new form to the same source. A
   round-trip test (400x260, pitch 512) constructs its input and reference with the production offset helper, so it
-  does not independently establish the one-byte equation. Publication requires an independent oracle. Open: the
-  four-byte micro-tile follows the depth (`Z_X`) order rather than this table, and the slice XOR of the published
+  does not independently establish the one-byte equation. Publication requires an independent oracle. The
+  four-byte micro tile no longer follows the depth (`Z_X`) order: guest-written atlas levels showed the
+  `x0 x1 y0 y1 y2 x2` order on 2026-10-16. Open: the slice XOR of the published
   pipe bits is not applied because volumes are detiled as independent thin slices.
+  Oracle search (2026-10-16, still open): decoding the published 16-pipe 64 KiB tables shows the shipped two- and
+  eight-byte equations equal `SW_64K_R_X` and the four-byte one equals `SW_64K_Z_X` exactly. For one byte the two
+  tables share bits 8..15 but differ in the micro-tile (`R_X`: `x0 x1 x2 y1 y0 y2 x3 y4`; `Z_X`:
+  `x0 y0 x1 y1 x2 y2 x3 y4`), so the table cannot choose the order the guest uses. The racing title's eboot lists the
+  guest GPU-address library among its linked libraries, but no table in the published per-bit encoding (64-bit
+  `x|y|z|s` masks, per-channel mask arrays or per-bit records of 8 to 64 bits) occurs in it; other eboots were not
+  searched. The next oracle is the library's own code or a
+  guest-written one-byte target sampled back.
+  Guest-content oracle (2026-10-16, excluded as decisive): no GPU object overlaps the volume at bind, so its ten
+  64 KiB blocks hold guest CPU data. Nearly every byte is non-zero, with an eight-byte repeating pattern. Scoring
+  the mean neighbour difference of each candidate's detiled image (x/y) gives the held equation 37.5/11.3, linear
+  92/77 and the standard 64 KiB equation 71/36. With y bits 3..5 in order `y0 y1 y2` instead of `y1 y0 y2` the
+  score is 37.5/9.1. The data supports `x0 x1 x2` in bits 0..2 followed by y bits. It cannot place x3 and above
+  (the content repeats every eight texels) or y3 and above (height 5). The one-byte equation therefore stayed held.
+  Volume oracle (2026-10-16, decisive for the slice XOR): a later dump of the volume holds 0xFF in every texel the
+  guest wrote, and other bytes elsewhere in its ten blocks. With the published pipe XOR of the slice
+  (`s0->bit 11, s1->bit 10, s2->bit 9, s3->bit 8`, the same XOR the depth layout already applies per layer) all
+  2000 in-bounds texels of each of the five slices land on 0xFF; without the XOR, or with the bit order reversed,
+  slices 1..4 read foreign bytes. The guest data does not decide between `y1 y0` and `y0 y1` in bits 3..4, so the
+  published table order is kept. `TileGetSw64kRxOffset` now accepts one-byte elements and a slice; single-level
+  `SW_64KB_R_X` arrays and volumes pass the layer as the slice (CPU detile; the GPU detile path refuses slices).
+  Verified: the mechanical-fist platformer passes the volume in a strict Intel run and next stops at the
+  unresolved `sceAgcDcbDrawIndirect` import (implemented below). Open: multi-level `SW_64KB_R_X` mip chains are still detiled without
+  the slice XOR.
 - **Storage-image channel order.** A formatted store into a BGRA-ordered `R8G8B8A8_UINT` storage image wrote red and
   blue swapped. Only RGBA8 UNORM/SRGB storage images get a BGRA host view; the shader now applies the descriptor's
   destination select to stores (inverse permutation) whenever the host view cannot (`ShaderStorageImageSwizzleInShader`
@@ -3586,10 +4994,68 @@ selected published source; none is a gameplay or visual acceptance.
   local render-target format. **Status update at translator126:** the five-case native UINT16 matrix described above
   now passes exact readback on the available Intel Vulkan device. This supersedes the earlier absence of native
   writeback evidence for those formats, but does not establish guest-route or cross-vendor acceptance.
-- **Non-indexed indirect draw (historical local candidate; absent from translator126 target).** The earlier candidate
-  emitted `IT_DRAW_INDIRECT` and used a 16-byte argument record, but did not apply the vertex/instance patch offsets
-  or validate the complete guest span. That candidate is not present in this target. The indexed path now checks its
-  20-byte argument span before copying; this does not implement or establish the non-indexed contract.
+- **Non-indexed indirect draw (published 2026-10-16).** `sceAgcDcbDrawIndirect` (`1q1titRBL6o`) takes the same
+  operands as the indexed builder (command buffer, byte offset from the `SetBaseIndirectArgs` base, draw modifier)
+  and emits `IT_DRAW_INDIRECT` with the non-indexed patch offsets. The processor checks and copies the 16-byte
+  argument record (vertex count, instance count, start vertex, start instance) and issues an auto-index draw whose
+  first vertex adds the start vertex to `GE_INDX_OFFSET` and whose first instance is the start instance. Like the
+  indexed path, the patch offsets are not written to user SGPRs. Verified: the mechanical-fist platformer resolves the
+  import in a strict Intel run and stops about four seconds later at an unrelated storage-image overlap; no capture
+  was taken, so draw output is not yet verified.
+- **Storage image over recycled guest-byte caches (published 2026-10-16).** The same title creates a 1024x1024
+  two-byte storage image over a 2 MiB range that still holds a CPU-uploaded linear 1024x540 texture and two read-only
+  0xa0 vertex buffers. Mixed parent types stopped at `!create_all_the_same`. Each parent only caches guest bytes, so
+  the new multi-parent rule reclaims the read-only vertex buffers (as under an incoming texture) and links the sampled
+  texture as the single-parent rule does. It requires CPU-upload origin and no pending write-back for the texture,
+  and applies only to mixed vertex-buffer and texture parents, which previously always stopped. Verified: the next
+  strict Intel run passes the overlap and stops about 30 s in at a missing SDWA `v_cvt_f32_f16` emitter.
+- **SDWA half-to-float conversion (published 2026-10-16).** The half-precision emitter refused every SDWA form. The
+  widening conversion now admits SDWA with a DWORD destination and a WORD_0, WORD_1 or DWORD source select without
+  sign extension (ISA SDWA fields); the operand load already extracts the selected word, and SDWA NEG/ABS apply to
+  the half. Byte selects, partial destinations and SDWA on other half operations stay refused. The CPU SPIR-V
+  evaluator checks the high-word and negated low-word forms. Verified: the next strict Intel run passes the shader
+  and stops about 35 s in at the unparsed `image_sample_d` (MIMG opcode 0x22).
+- **Two-dimensional `image_sample_d` (published 2026-10-16).** SAMPLE_D supplies the four slopes of a 2D coordinate
+  before x,y (ISA VGPR usage table) and derives each pixel's LOD from its own slopes, so it is an explicit-gradient
+  sample per invocation. It shares the 2D float emitter of the coarse `image_sample_cd`; only the coarse form keeps
+  the pixel-stage, quad-uniform gradient proof. Other dimensions, NSA forms with one extra dword and A16/G16
+  controls stay refused at parse. Unit tests parse the opcode and validate the emitted module with unproven slopes.
+  Verified: the next strict Intel run passes the parser and stops about 35 s in at the fragment wave transport
+  refusal for a pixel shader whose memory writes would expose helper lanes (2688-wide draw), the same open
+  contract as the sandbox title's new-world stop.
+- **Pixel memory writes under a helper-free EXEC (published 2026-10-16).** The refused pixel shader saves the launch
+  EXEC, enters WQM, removes discarded lanes from the saved copy with `s_andn2`, and before its only
+  `buffer_store_format_x` sets `exec = saved & exec`. The fragment mask flow admitted device-memory writes only before
+  the first EXEC write. The guest/host difference is helper lanes alone: a guest helper in EXEC writes, a Vulkan helper's
+  store has no effect. So a buffer, image or GDS-counter write is now admitted wherever the flow proves EXEC holds no
+  helper lane (the `kWide` bit an export already requires). That subsumes the launch-prefix rule. LDS and scratch
+  writes, and GDS append/consume after the prefix, stay refused. The proof had a gap: an `S_*_SAVEEXEC` destination
+  took its width from the explicit sources, so a saved WQM EXEC counted as helper-free. It now inherits EXEC's width.
+  Unit tests refuse a store under WQM and after restoring a saved WQM EXEC. They admit a store after narrowing by the
+  launch EXEC; reverting the SAVEEXEC change fails the latter test. Offline, the title's refused shader is now
+  admitted as quad local. No saved program of the sandbox title's 285 s new-world stop exists, so that stop is still
+  untested. Verified: the next strict Intel run passes the shader and stops about 40 s in
+  at `unsupported Gen5 image numeric type: format=27` (`ShaderSpirvImage.cpp`).
+- **Sampled 16_16_UINT images (published 2026-10-16).** The same title samples a Gen5 format-27 texture. The
+  RDNA2 image-format table lists 27 as `16_16_UINT`, between `16_16_SSCALED` (26) and `16_16_SINT` (28). It is now a
+  four-byte unsigned-integer `R16G16_UINT` image in the Gen5 format table and in the element-size table. Storage
+  reinterpretation views are unchanged. Verified: the next strict Intel run passes it and stops about 52 s in at a
+  missing pixel-stage emitter for `s_load_dwordx4`.
+- **Open: descriptors spilled to VGPR lanes (recorded 2026-10-16).** The same title's next stop, about 52 s in, is
+  `shader emitter missing ... SLoadDwordx4 s[32:35], s[28:29], 896` at pc 0x4 of a pixel shader. The shader is under
+  heavy SGPR pressure and spills its descriptors with static-lane `v_writelane` into one VGPR: the V# from EUD+896
+  (lanes 17-20), the V# from EUD+848 (lanes 14-16, 21), and an S# from EUD+720 (lanes 0-3), with more later.
+  It reloads them with `v_readlane` into other quads (`s[96:99]`, `s[16:19]`, `s[88:91]`, `s[92:95]`) and uses them
+  as V# and S#. `ShaderFindDynamicSLoadUse` (`ShaderResources.cpp`) drops the EUD+896 mapping, because the spill is a
+  read that is neither a consumer nor a clobber, so `recompile_sload_from_extended` finds no row.
+  - Excluded: simply ignoring the spill. A storage row's word 0 is the host binding index (`UpdateAddress48(i)` in
+    `PrepareStorageBuffers`), and a sampler or texture row's word 0 is a host index too. The reloaded copy has no
+    resource record at its register, so it would take the pixel guest-address path
+    (`PixelScalarBufferUsesGuestAddress`) and read guest memory at that index.
+  - Direction: carry descriptor provenance through static-lane spill slots, from the `v_writelane` of each word to a
+    `v_readlane` reassembling all words in order with the slot not rewritten in between. Each reload consumer then gets
+    a dynamic record for the same resource, so the runtime word 0 selects the binding as for the original register.
+    T# halves assembled from two loads plus reloads in the same shader need their own evidence.
 - **SGPR104 and SGPR105.** The RDNA2 scalar operand range is 0..105; the parser stopped at 103, and the shared lowering
   preconditions and compute-wave analyses used the same limit, so a pixel shader reading `s104` was refused as an
   invalid instruction before native wave analysis. The limits follow the ISA; the NGG passthrough proof, which keeps
@@ -5129,8 +6595,8 @@ Third round (same day), mostly runtime-library correctness found by Unreal Engin
   reports log the guest caller, and `NpManager` has one export list.
 
 - **Smaller imports a UE4 title needs at boot.** VoiceQoS is registered under module version 1.1 (the import
-  never resolved under 0.0); `sceNetCtlGetInfo(LINK)` reports the link down, consistent with the disconnected
-  state; `sceAgcDcbSetPredication` writes the SET_PREDICATION packet, and the command processor accepts clearing
+  never resolved under 0.0); `sceNetCtlGetInfo(LINK)` reports the link state
+  consistent with `sceNetCtlGetState` (connected since the local-only network contract); `sceAgcDcbSetPredication` writes the SET_PREDICATION packet, and the command processor accepts clearing
   predication and stops on the query-dependent operations, which no title has issued yet.
 
 - **Clear-state scissors.** CLEAR_STATE and the context-state operations rebuilt the context with every scissor at
@@ -10615,7 +12081,7 @@ Resolved later: each idle read-only buffer member now retires on its own (see
 
 The current host-only follow-up routes safe read-only buffer snapshots up to
 512 KiB through the command-buffer-owned transient pool instead of creating a
-persistent alias. The pool remains capped at 16 MiB, reserves 1 MiB for
+persistent alias. The pool was then capped at 16 MiB (64 MiB since 40c887ad), reserves 1 MiB for
 mandatory UBO/scratch uploads, clears the unused tail of reused slabs, and keys
 storage/UBO descriptors by both backing identity and logical range. Writable,
 surface-connected, unallocated, oversized, and truncated overlap states retain

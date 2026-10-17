@@ -689,7 +689,8 @@ public:
 	// One zero dword shared by every empty descriptor of this recording.
 	VulkanBuffer* UploadTransientZeroCarrier(uint32_t usage);
 	// Captures guest bytes [vaddr + read_begin, vaddr + size) at the same offsets of a buffer of size bytes.
-	VulkanBuffer* CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage,
+	// zero_tail keeps the bytes past size zero for consumers that can read beyond it.
+	VulkanBuffer* CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage, bool zero_tail,
 	                                             uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns, bool* reused);
 	// Reads at most 16 bytes from the immutable guest snapshot already uploaded for this command buffer.
 	// This never rereads guest memory; the buffer must still belong to the current recording.
@@ -701,6 +702,10 @@ public:
 	// Device-local staging for an image-to-image copy through a buffer, kept apart from the scratch above so
 	// compute scratch cannot exhaust its budget. The same ordering and lifetime rules apply.
 	VulkanBuffer* AllocateTransientCopyBuffer(uint64_t size);
+	// A dispatch binds a storage view of a depth plane through the depth image's R32F copy of it
+	// (DepthStencilVulkanImage::storage_plane); the copy returns to the depth plane once the dispatch is recorded.
+	void DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth);
+	void StoreBackDepthPlanes();
 
 private:
 	friend class PipelineCache;
@@ -732,6 +737,7 @@ private:
 	mutable bool                 m_recording = false;
 	bool                         m_resetting = false;
 	std::optional<OpenRenderPass> m_open_render_pass;
+	std::vector<DepthStencilVulkanImage*> m_depth_plane_store_backs;
 
 	bool               m_has_guest_context = false;
 	uint64_t           m_guest_submit = 0;
@@ -754,8 +760,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
                              SubmissionId* pending_submission);
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
-	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count,
-	                             SubmissionId* pending_submission);
+	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count, int32_t vertex_offset_add,
+	                             uint32_t first_instance, SubmissionId* pending_submission);
 void GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr);
 void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value);

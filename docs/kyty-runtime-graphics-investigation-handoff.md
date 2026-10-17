@@ -326,6 +326,47 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Sequel platformer menu glyphs (2026-10-16; FIXED 2026-10-17). The root
+  cause was in the command buffer: copies replayed into a fresh, all-null
+  Agc command buffer were dropped because `IsValid` refused it before its
+  refill callback could run. The fix and the two stops it unmasked (GDS
+  `ds_write_b32`, DCC decompress on a display buffer) are in BRINGUP,
+  "Platformer pair: unreadable glyphs were dropped command-buffer packets".
+  The exclusions below still hold. The "Next step" at the end of this entry
+  is superseded.
+  The runtime 512x512 one-byte atlas keeps `0xcd` in every one of its
+  pages through gameplay (sampled every 32-64 binds, 90-150 s Intel runs).
+  `0xcd` is the engine's default fill for a new texture, so creation reaches
+  memory and every later update does not. Bounded temporary logs in the same
+  runs found no GPU writer of that atlas: the only `image_store` emitted in
+  the whole run targets a 1920x1080 four-byte image with identity DST_SEL;
+  only one compute dispatch binds any texture and none binds the atlas;
+  no compute storage buffer overlaps it; no colour target is placed on it;
+  no dispatch is skipped by the empty-store gate; and no DMA_DATA packet
+  (hardware or custom) is dropped. A store-selector fault would write the
+  atlas with wrong channels instead of leaving `0xcd`, so the DST_SEL lead
+  does not apply here. A later 150 s Intel run executed no DMA_DATA packet
+  of 64 KiB or more at all, so the engine does not move atlas data through
+  the command processor. The T# is not stale on the emulator side: pointer
+  tables are copied from guest memory on every draw
+  (`ShaderSnapshotGuestDescriptorTable`, `Shader.cpp`) and the per-program
+  resource memo holds analysis only, never descriptor values. The atlas
+  address stays the same for the whole run. The five graphics-library
+  imports the sequel resolves to nothing (UC register, indirect draw,
+  async-safe wait, NOP helpers) are not upload paths. The first insect
+  platformer binds a 512x512 one-byte atlas that is also entirely `0xcd`,
+  so one cause likely covers both. Its separate R8 copy compute (BRINGUP)
+  does not explain that atlas. Next step: follow the engine's CPU upload on
+  the guest side (the hardware-watch notes in BRINGUP), not another GPU
+  writer probe.
+- Card title: a hand card turns white for a moment when it gains focus
+  (2026-10-16, not a defect). Thirty captures 2 s apart while the route
+  stepped the hand focus showed the newly focused card blank white, then
+  with faded pips, then normal. The title's own UI definitions draw a
+  card-sized white rounded rectangle over a focused hand card and ease its
+  alpha from 1.5 to 0 in 0.2 s of real time; the card front and centre use
+  the same shader and tilt, and nothing else fades the front. Do not chase
+  it as a sampling, interpolation or blend bug.
 - Racing title attract scene looks dark (2026-10-14, not a defect). The
   intro behind the title credits is a night track: lit windows, a dusk sky
   and brown asphalt, while in-race daytime tracks look correct. The

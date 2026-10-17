@@ -517,6 +517,28 @@ GpuDirtyPageTracker::BlockEntry* GpuDirtyPageTracker::BlockOf(const PageEntry* p
 	return block < kBlockTableSize ? &m_blocks[block] : nullptr;
 }
 
+// Total change count of the blocks spanning pages [first, last]. Counts only
+// grow, so an equal total means none of them changed. False when a page has no
+// block.
+bool GpuDirtyPageTracker::BlockChangesOf(uintptr_t first, uintptr_t last, uint64_t* changes) const noexcept
+{
+	*changes                    = 0;
+	const uintptr_t last_index  = last / m_page_size;
+	for (uintptr_t index = first / m_page_size - (first / m_page_size) % kBlockPages;; index += kBlockPages)
+	{
+		const auto* block = FindBlock(index * m_page_size);
+		if (block == nullptr)
+		{
+			return false;
+		}
+		*changes += block->changes.load(std::memory_order_acquire);
+		if (last_index - index < kBlockPages)
+		{
+			return true;
+		}
+	}
+}
+
 GpuDirtyPageTracker::RangeEvidence GpuDirtyPageTracker::SegmentEvidence(uintptr_t first_index, uintptr_t last_index) const noexcept
 {
 	RangeEvidence evidence;
@@ -1029,6 +1051,20 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 		// its protection page.
 		return false;
 	}
+	// A registered range proven armed is not walked page by page again until
+	// one of its blocks changes.
+	const auto record        = m_ranges.find(RangeKey {address, end});
+	uint64_t   block_changes = 0;
+	const bool provable      = record != m_ranges.end() && BlockChangesOf(first, last, &block_changes);
+	if (provable && record->second.armed_proven && record->second.armed_block_changes == block_changes)
+	{
+		return true;
+	}
+	if (record != m_ranges.end())
+	{
+		record->second.armed_proven = false;
+	}
+	bool all_armed = provable;
 	auto finalize_arming = [this](uintptr_t page, PageEntry* entry) noexcept
 	{
 		for (;;)
@@ -1233,6 +1269,7 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 		        expected, static_cast<uint32_t>(needs_capture ? GpuDirtyProtectionState::Capturing : GpuDirtyProtectionState::Arming),
 		                                                     std::memory_order_acq_rel, std::memory_order_acquire))
 		{
+			all_armed = all_armed && expected == static_cast<uint32_t>(GpuDirtyProtectionState::Armed);
 			if (page == last || page > last - m_page_size)
 			{
 				break;
@@ -1240,6 +1277,7 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 			page += m_page_size;
 			continue;
 		}
+		all_armed = false;
 
 		if (needs_capture)
 		{
@@ -1379,6 +1417,11 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 			break;
 		}
 		page = run_last + m_page_size;
+	}
+	if (all_armed)
+	{
+		record->second.armed_block_changes = block_changes;
+		record->second.armed_proven        = true;
 	}
 	return true;
 }
@@ -1927,9 +1970,20 @@ void GpuDirtyPageTracker::PublishAuthorityChange(const Core::VirtualMemory::Writ
 	const bool      unmap = change.kind == Core::VirtualMemory::WriteLeaseChangeKind::Unmap;
 	const uintptr_t first = PageStart(change.address);
 	const uintptr_t last  = PageStart(change.address + change.size - 1u);
+	// A block changes before and after its pages do: a rearm reading either old
+	// total ran before the change, and no proof taken between them survives it.
+	auto revoke_armed_proofs = [this](PageEntry* entry) noexcept
+	{
+		if (BlockEntry* block = entry != nullptr ? BlockOf(entry) : nullptr; block != nullptr)
+		{
+			block->changes.fetch_add(1, std::memory_order_acq_rel);
+		}
+	};
 	for (uintptr_t page = first;; page += m_page_size)
 	{
-		if (PageEntry* entry = FindPage(page); entry != nullptr && unmap)
+		PageEntry* entry = FindPage(page);
+		revoke_armed_proofs(entry);
+		if (entry != nullptr && unmap)
 		{
 			entry->original_mode_valid.store(0, std::memory_order_release);
 			if (entry->refs.load(std::memory_order_acquire) == 0u)
@@ -1950,6 +2004,7 @@ void GpuDirtyPageTracker::PublishAuthorityChange(const Core::VirtualMemory::Writ
 			entry->original_mode.store(static_cast<uint32_t>(change.mode), std::memory_order_relaxed);
 			entry->original_token.store(change.guest_token, std::memory_order_release);
 		}
+		revoke_armed_proofs(entry);
 		if (page == last || page > last - m_page_size)
 		{
 			break;

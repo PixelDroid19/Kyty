@@ -9,6 +9,7 @@
 #include "ShaderStorageAnalysis.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/ShaderMetadataResourceIndex.h"
 #include "Emulator/Graphics/ShaderNggFront.h"
@@ -245,11 +246,29 @@ uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
 	return descriptor_set;
 }
 
-bool Spirv::EmitSdwaLowDestinationInstruction(const RecompilerFunc* func, const ShaderInstruction& instruction, uint32_t index,
+namespace {
+struct SdwaSelect
+{
+	uint32_t width;
+	uint32_t offset;
+	uint32_t field;
+};
+
+// DST_SEL 0-3 = BYTE_0-3, 4-5 = WORD_0-1 (ISA table 88).
+SdwaSelect SdwaDestinationSelect(const ShaderInstruction& instruction)
+{
+	static constexpr uint32_t kOffset[] = {0u, 8u, 16u, 24u, 0u, 16u};
+	const uint32_t            dst_sel   = (instruction.vop_sdwa_ctrl >> 8u) & 7u;
+	const uint32_t            width     = dst_sel < 4u ? 8u : 16u;
+	return {width, kOffset[dst_sel], ((1u << width) - 1u) << kOffset[dst_sel]};
+}
+} // namespace
+
+bool Spirv::EmitSdwaPartialDestinationInstruction(const RecompilerFunc* func, const ShaderInstruction& instruction, uint32_t index,
                                               String8* output)
 {
 	if (output == nullptr || func == nullptr || func->type != instruction.type || func->format != instruction.format ||
-	    !ShaderSdwaLowDestinationSupported(instruction))
+	    !ShaderSdwaPartialDestinationSupported(instruction))
 	{
 		return false;
 	}
@@ -258,30 +277,32 @@ bool Spirv::EmitSdwaLowDestinationInstruction(const RecompilerFunc* func, const 
 	{
 		return false;
 	}
-	// ISA table 88: DST_SEL BYTE_0/WORD_0 takes the result's low bits; DST_U pads the rest with zeros (0),
-	// sign-extends the field (1) or keeps the prior bits (2). An inactive lane keeps its prior value.
-	const uint32_t control = instruction.vop_sdwa_ctrl;
-	const uint32_t width   = ((control >> 8u) & 7u) == 0u ? 8u : 16u;
-	const uint32_t field   = (1u << width) - 1u;
-	const uint32_t dst_u   = (control >> 11u) & 3u;
-	const int      vgpr    = instruction.dst.register_id;
+	// ISA table 88: DST_SEL places the result's low byte or word in its field; DST_U pads the other bits
+	// with zeros (0), sign-extends above the field and zeroes below it (1), or keeps the prior bits (2).
+	// An inactive lane keeps its prior value.
+	const auto     select = SdwaDestinationSelect(instruction);
+	const uint32_t width  = select.width;
+	const uint32_t offset = select.offset;
+	const uint32_t field  = select.field;
+	const uint32_t dst_u  = (instruction.vop_sdwa_ctrl >> 11u) & 3u;
+	const int      vgpr   = instruction.dst.register_id;
 
 	String8 merged;
-	if (dst_u == 0u)
+	if (dst_u == 1u)
 	{
-		merged = String8::FromPrintf("%%sdwa_merged_%u = OpBitwiseAnd %%uint %%sdwa_new_bits_%u %%%s\n", index, index,
-		                             GetConstantUint(field).c_str());
-	} else if (dst_u == 1u)
-	{
-		merged = String8::FromPrintf("%%sdwa_merged_%u = OpBitFieldSExtract %%uint %%sdwa_new_bits_%u %%%s %%%s\n", index, index,
-		                             GetConstantUint(0u).c_str(), GetConstantUint(width).c_str());
+		merged = String8::FromPrintf("%%sdwa_sext_%u = OpBitFieldSExtract %%uint %%sdwa_new_bits_%u %%%s %%%s\n"
+		                             "%%sdwa_merged_%u = OpShiftLeftLogical %%uint %%sdwa_sext_%u %%%s\n",
+		                             index, index, GetConstantUint(0u).c_str(), GetConstantUint(width).c_str(), index, index,
+		                             GetConstantUint(offset).c_str());
 	} else
 	{
-		merged = String8::FromPrintf("%%sdwa_kept_%u = OpBitwiseAnd %%uint %%sdwa_old_bits_%u %%%s\n"
-		                             "%%sdwa_field_%u = OpBitwiseAnd %%uint %%sdwa_new_bits_%u %%%s\n"
-		                             "%%sdwa_merged_%u = OpBitwiseOr %%uint %%sdwa_kept_%u %%sdwa_field_%u\n",
-		                             index, index, GetConstantUint(~field).c_str(), index, index, GetConstantUint(field).c_str(), index,
-		                             index, index);
+		merged = String8::FromPrintf("%%sdwa_shifted_%u = OpShiftLeftLogical %%uint %%sdwa_new_bits_%u %%%s\n"
+		                             "%%sdwa_field_%u = OpBitwiseAnd %%uint %%sdwa_shifted_%u %%%s\n",
+		                             index, index, GetConstantUint(offset).c_str(), index, index, GetConstantUint(field).c_str());
+		merged += dst_u == 0u ? String8::FromPrintf("%%sdwa_merged_%u = OpCopyObject %%uint %%sdwa_field_%u\n", index, index)
+		                      : String8::FromPrintf("%%sdwa_kept_%u = OpBitwiseAnd %%uint %%sdwa_old_bits_%u %%%s\n"
+		                                            "%%sdwa_merged_%u = OpBitwiseOr %%uint %%sdwa_kept_%u %%sdwa_field_%u\n",
+		                                            index, index, GetConstantUint(~field).c_str(), index, index, index);
 	}
 	*output += String8::FromPrintf("%%sdwa_old_%u = OpLoad %%float %%v%d\n", index, vgpr);
 	*output += whole;
@@ -717,7 +738,7 @@ void Spirv::WriteHeader()
 		{
 			vars.Add("%samplers");
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			vars.Add("%gds");
 		}
@@ -1238,7 +1259,7 @@ void Spirv::WriteAnnotations()
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->samplers.binding_index));
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			m_source += String8(gds_annotations)
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
@@ -1659,7 +1680,7 @@ static const char* textures_loaded_types = R"(
 		{
 			m_source += String8(samplers_types).ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->samplers.samplers_num));
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			m_source += String8(gds_types);
 		}
@@ -1822,7 +1843,7 @@ void Spirv::WriteGlobalVariables()
 			vars.Add(String8::FromPrintf("%%samplers = OpVariable %%_ptr_UniformConstant__arr_Sampler_uint_%d UniformConstant",
 			                             m_bind->samplers.samplers_num));
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			vars.Add("%gds = OpVariable %_ptr_StorageBuffer_GDS StorageBuffer");
 		}
@@ -2644,11 +2665,53 @@ Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const Sha
 	return load_instructions;
 }
 
+static int AttribTableLoadDwords(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::SLoadDword: return 1;
+		case ShaderInstructionType::SLoadDwordx2: return 2;
+		case ShaderInstructionType::SLoadDwordx4: return 4;
+		case ShaderInstructionType::SLoadDwordx8: return 8;
+		case ShaderInstructionType::SLoadDwordx16: return 16;
+		default: return 0;
+	}
+}
+
+// Dwords of the attribute table that scalar loads of the fused-front attribute register
+// read. A load with a non-constant offset may reach any dword.
+static uint32_t AttribTableDwordsRead(const ShaderCode& code, int fetch_attrib_reg)
+{
+	constexpr int kGsFrontUserDataBase = 8;
+	constexpr int kDwords              = ShaderVertexInputInfo::RES_MAX;
+	static_assert(kDwords <= 32);
+	uint32_t read = 0;
+	for (const auto& inst: code.GetInstructions())
+	{
+		const int count = AttribTableLoadDwords(inst.type);
+		if (count == 0 || inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].register_id != fetch_attrib_reg + kGsFrontUserDataBase)
+		{
+			continue;
+		}
+		if (!operand_is_constant(inst.src[1]) || inst.src[1].constant.i < 0)
+		{
+			return ~0u;
+		}
+		const int first = inst.src[1].constant.i / 4;
+		for (int i = first; i < first + count && i < kDwords; i++)
+		{
+			read |= 1u << static_cast<uint32_t>(i);
+		}
+	}
+	return read;
+}
+
 ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& code, int fetch_attrib_reg, int fetch_buffer_reg)
 {
 	ShaderVertexStreamAccessScan scan;
-	scan.fetch_attrib_reg = fetch_attrib_reg;
-	scan.fetch_buffer_reg = fetch_buffer_reg;
+	scan.fetch_attrib_reg   = fetch_attrib_reg;
+	scan.fetch_buffer_reg   = fetch_buffer_reg;
+	scan.attrib_dwords_read = AttribTableDwordsRead(code, fetch_attrib_reg);
 	for (const auto& [inst, semantic]: DetectVertexFetchSemantics(code, fetch_attrib_reg, fetch_buffer_reg))
 	{
 		scan.fetch_candidates.Add(std::pair<uint32_t, int> {inst.pc, semantic});
@@ -2814,10 +2877,10 @@ void Spirv::WriteInstructions()
 		const auto wave_kind = UsesFragmentCompute() ? ShaderClassifyFragmentWaveInstruction(inst, *m_ps_input_info)
 		                      : UsesComputeWaveBanks() ? ShaderClassifyComputeWaveInstruction(inst)
 		                                             : ShaderComputeWaveInstructionKind::Unsupported;
-		const bool low_destination = ShaderSdwaLowDestinationSupported(inst);
+		const bool low_destination = ShaderSdwaPartialDestinationSupported(inst);
 		if (low_destination && (UsesComputeWaveBanks() || wave_kind != ShaderComputeWaveInstructionKind::Unsupported))
 		{
-			EXIT("SDWA low destination select outside the per-lane emitter: pc=0x%08" PRIx32 "\n", inst.pc);
+			EXIT("SDWA partial destination select outside the per-lane emitter: pc=0x%08" PRIx32 "\n", inst.pc);
 		}
 		if (wave_kind == ShaderComputeWaveInstructionKind::PixelInterpolation || wave_kind == ShaderComputeWaveInstructionKind::PixelExport)
 		{
@@ -2850,6 +2913,9 @@ void Spirv::WriteInstructions()
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::WaveAppend)
 		{
 			ok = EmitComputeWaveAppend(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedGdsWrite)
+		{
+			ok = EmitComputeWaveGdsWrite(inst, static_cast<uint32_t>(index), &dst);
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedGenericCompare)
 		{
 			ok = EmitComputeWaveGenericCompare(func, inst, static_cast<uint32_t>(index), &dst);
@@ -2875,12 +2941,15 @@ void Spirv::WriteInstructions()
 				dst += String8::FromPrintf("OpControlBarrier %%%s %%%s %%%s\n", GetConstantUint(3u).c_str(), GetConstantUint(3u).c_str(),
 				                           GetConstantUint(0x108u).c_str());
 			}
+		} else if (m_bind != nullptr && ShaderImageReadsZeroResource(*m_bind, inst))
+		{
+			ok = EmitZeroImageRead(inst, this, &dst);
 		} else if (func != nullptr)
 		{
 			EXIT_IF(func->type != inst.type);
 			EXIT_IF(func->format != inst.format);
 			if (UsesFragmentCompute() && inst.type == ShaderInstructionType::SEndpgm) { dst += FragmentEpilog(); }
-			ok = low_destination ? EmitSdwaLowDestinationInstruction(func, inst, static_cast<uint32_t>(index), &dst)
+			ok = low_destination ? EmitSdwaPartialDestinationInstruction(func, inst, static_cast<uint32_t>(index), &dst)
 			                     : func->func(index, m_code, &dst, this, func->param, func->scc_check);
 		}
 
@@ -3133,6 +3202,15 @@ void Spirv::WriteFunctions()
 void Spirv::FindConstants()
 {
 	m_constants.Clear();
+	for (const auto& inst: m_code.GetInstructions())
+	{
+		if (!ShaderSdwaPartialDestinationSupported(inst)) { continue; }
+		const auto select = SdwaDestinationSelect(inst);
+		for (const uint32_t value: {0u, select.width, select.offset, select.field, ~select.field})
+		{
+			AddConstantUint(value);
+		}
+	}
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32})) { AddConstantUint(0xffffu); }
 	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkI16I32}))
 	{
@@ -3259,6 +3337,12 @@ void Spirv::FindConstants()
 		{
 			AddConstantUint(offset);
 		}
+	}
+	if (m_bind != nullptr && m_bind->gds_pointers.memory_used)
+	{
+		// GDS stores bound the address by M0[15:0] and by the host GDS window.
+		AddConstantUint(0xffffu);
+		AddConstantUint(static_cast<uint32_t>(kGraphicsGdsDwords));
 	}
 	if (UsesDsAddtid())
 	{
@@ -3663,9 +3747,10 @@ void Spirv::FindVariables()
 		AddVariable(ShaderOperandType::VccLo, 0, 2);
 	}
 
-	if (UsesDsAddtid())
+	if (UsesDsAddtid() || (m_bind != nullptr && m_bind->gds_pointers.memory_used))
 	{
-		// ds_*_addtid_b32 address with M0[15:0] without listing it as an operand.
+		// ds_*_addtid_b32 and GDS memory instructions address through M0
+		// without listing it as an operand.
 		AddVariable(ShaderOperandType::M0, 0, 1);
 	}
 

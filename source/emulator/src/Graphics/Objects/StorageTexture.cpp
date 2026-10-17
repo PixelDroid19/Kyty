@@ -109,7 +109,8 @@ static uint32_t NormalizeStorageTextureSwizzle(uint64_t format, uint32_t swizzle
 		// image views must keep an identity component mapping.
 		return DstSel(4, 5, 6, 7);
 	}
-	if (ShaderStorageImageSwizzleInShader(swizzle, VulkanStorageHasRedBlueView(dfmt, nfmt, static_cast<uint16_t>(fmt))))
+	if (ShaderStorageImageSwizzleInShader(swizzle, VulkanStorageHasRedBlueView(dfmt, nfmt, static_cast<uint16_t>(fmt)),
+	                                      VulkanStorageHasSingleChannel(dfmt, nfmt, static_cast<uint16_t>(fmt))))
 	{
 		// The image-store emitter places each component in its selected channel.
 		return DstSel(4, 5, 6, 7);
@@ -876,7 +877,7 @@ bool StorageTextureSharesDepthTexels(const uint64_t* storage, const uint64_t* de
 	const auto format = VulkanResolveGuestImageFormat(GuestImageUsage::Storage, static_cast<uint8_t>(packed >> 8u),
 	                                                  static_cast<uint8_t>(packed), static_cast<uint16_t>(packed >> 16u));
 	return (format == VK_FORMAT_R32_SFLOAT || format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) &&
-	       (tile == 24u || tile == 27u) && storage[StorageTextureObject::PARAM_LEVELS] == 1u &&
+	       tile == 24u && storage[StorageTextureObject::PARAM_LEVELS] == 1u &&
 	       storage[StorageTextureObject::PARAM_RESOURCE_TYPE] == 9u && storage[StorageTextureObject::PARAM_DEPTH] == 1u &&
 	       storage[StorageTextureObject::PARAM_BASE_ARRAY] == 0u &&
 	       storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] == ((width << 32u) | height) &&

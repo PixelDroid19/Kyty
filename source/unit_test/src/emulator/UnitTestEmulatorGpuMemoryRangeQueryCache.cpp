@@ -232,6 +232,34 @@ TEST(EmulatorGpuMemoryRangeQueryCache, MaterializationRangeInvalidationChecksEve
 	EXPECT_FALSE(cache.Lookup(key, &value));
 }
 
+TEST(EmulatorGpuMemoryRangeQueryCache, MaterializationRepeatedRangeInvalidationRemovesLaterStores)
+{
+	GpuMemoryMaterializationCache<int, 8> cache;
+
+	const uint64_t inside[]  = {0x200000u};
+	const uint64_t outside[] = {0x900000u};
+	const uint64_t size[]    = {0x1000u};
+	cache.InvalidateRange(0x200000u, 0x1000u);
+
+	int value = 0;
+	for (uint64_t i = 1; i <= 300u; ++i)
+	{
+		const uint64_t params[] = {i};
+		const auto key = GpuMemoryMaterializationKey::Create(1u, 1u, 1u, inside, size, 1, 5u, params, 1, true, true);
+		const auto kept = GpuMemoryMaterializationKey::Create(1u, 1u, 1u, outside, size, 1, 6u, params, 1, true, true);
+		cache.Store(key, 1);
+		cache.Store(kept, 2);
+		if (i == 1u || i == 300u)
+		{
+			// The first repeat replays the store log; 600 stores overflow it.
+			cache.InvalidateRange(0x200000u, 0x1000u);
+			EXPECT_FALSE(cache.Lookup(key, &value));
+			ASSERT_TRUE(cache.Lookup(kept, &value));
+			EXPECT_EQ(value, 2);
+		}
+	}
+}
+
 TEST(EmulatorGpuMemoryRangeQueryCache, MaterializationCacheRejectsIncompleteKeys)
 {
 	GpuMemoryMaterializationCache<int, 8> cache;

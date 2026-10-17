@@ -45,6 +45,8 @@ enum class ShaderComputeWaveInstructionKind
 	WaveCount,
 	// ds_append/ds_consume on GDS: one per-wave counter update, broadcast.
 	WaveAppend,
+	// ds_write_b32 on GDS: per-lane store at M0.base + ADDR + offset.
+	BankedGdsWrite,
 	// ds_write_addtid_b32/ds_read_addtid_b32: per-lane LDS slot addressed by
 	// M0[15:0] + offset + TID*4; the emitter walks both banks itself because
 	// the flat lane index differs per bank.
@@ -69,7 +71,7 @@ struct ShaderComputeWaveAnalysisResult
 // these lowerings cannot represent. Must precede both native and generic choice.
 [[nodiscard]] bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction);
 // The same preconditions for the per-lane emitter, which also merges a low SDWA destination
-// select into its VGPR (ShaderSdwaLowDestinationSupported). Banked and proof paths keep the strict form.
+// select into its VGPR (ShaderSdwaPartialDestinationSupported). Banked and proof paths keep the strict form.
 [[nodiscard]] bool ShaderInstructionPerLaneLoweringPreconditions(const ShaderInstruction& instruction);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,

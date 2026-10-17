@@ -23,6 +23,7 @@
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -54,9 +55,25 @@ static std::atomic_uint8_t g_standard_descriptors {kStandardDescriptorMask};
 // into a host-side sandbox directory so that mkdir/open(O_CREAT)/write succeed
 // without touching the real filesystem root.
 
-static Core::Mutex g_sandbox_mutex;
-static String      g_sandbox_root; // trailing slash included
-static bool        g_sandbox_initialized = false;
+static Core::Mutex           g_sandbox_mutex;
+static String                g_sandbox_root; // trailing slash included
+static std::filesystem::path g_sandbox_canonical_root;
+static bool                  g_sandbox_initialized = false;
+
+// The canonical form of an existing host root directory, or empty. A root that
+// does not exist yet is not cached because it may later be created as a symlink.
+static std::filesystem::path CanonicalExistingRoot(const String& dir)
+{
+	auto            root = Path::Canonical(std::filesystem::u8path(dir.C_Str()));
+	std::error_code error;
+	return std::filesystem::is_directory(root, error) ? root : std::filesystem::path();
+}
+
+static std::filesystem::path CanonicalRoot(std::filesystem::path* cached, const String& dir)
+{
+	if (cached->empty()) { *cached = CanonicalExistingRoot(dir); }
+	return cached->empty() ? Path::Canonical(std::filesystem::u8path(dir.C_Str())) : *cached;
+}
 
 static String GetSandboxRoot()
 {
@@ -78,6 +95,13 @@ static String GetSandboxRoot()
 		}
 	}
 	return g_sandbox_root;
+}
+
+static std::filesystem::path GetCanonicalSandboxRoot()
+{
+	const auto      root = GetSandboxRoot();
+	Core::LockGuard lock(g_sandbox_mutex);
+	return CanonicalRoot(&g_sandbox_canonical_root, root);
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +164,7 @@ static bool CreateDirectoryRecursive(const String& dir_path)
 // Map an unmapped guest path into the sandbox. guest_path must start with '/'.
 static String MapToSandbox(const String& guest_path)
 {
-	return String::FromUtf8(Path::ResolveContained(GetSandboxRoot().C_Str(), guest_path.RemoveFirst(1).C_Str()).c_str());
+	return String::FromUtf8(Path::ResolveContained(GetCanonicalSandboxRoot(), guest_path.RemoveFirst(1).C_Str()).c_str());
 }
 
 // The guest runtime uses the POSIX entropy devices during Unity and libc
@@ -167,6 +191,8 @@ public:
 	{
 		String dir;
 		String point;
+		// Filled on first use, see CanonicalRoot().
+		std::filesystem::path canonical_dir;
 	};
 
 	MountPoints() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } }
@@ -182,6 +208,8 @@ public:
 	[[nodiscard]] bool IsHostFilenameAllowed(const String& filename);
 
 private:
+	[[nodiscard]] std::vector<std::filesystem::path> CanonicalRoots();
+
 	Vector<MountPair> m_mount_pairs;
 	Core::Mutex       m_mutex;
 };
@@ -863,23 +891,35 @@ void MountPoints::Umount(const String& folder_or_point)
 	}
 }
 
+// The host filesystem is touched outside m_mutex: guest loader threads resolve
+// paths concurrently, and every component lookup on a slow host filesystem
+// would otherwise serialize all of them.
 String MountPoints::GetRealFilename(const String& mounted_file_name)
 {
-	Core::LockGuard lock(m_mutex);
-
 	const auto normalized = Path::NormalizeGuest(mounted_file_name.C_Str());
 	if (normalized.empty()) { return {}; }
 	const auto guest = String::FromUtf8(normalized.c_str());
-	for (const auto& pair: m_mount_pairs)
-	{
-		const bool at_root = guest.FixDirectorySlash() == pair.point;
-		if (!at_root && !guest.StartsWith(pair.point)) { continue; }
-		const auto suffix = at_root ? String() : guest.RemoveFirst(pair.point.Size());
-		const auto relative = Path::MatchCaseInsensitive(pair.dir.C_Str(), suffix.C_Str());
-		return String::FromUtf8(Path::ResolveContained(pair.dir.C_Str(), relative).c_str());
-	}
 
-	return MapToSandbox(guest);
+	String                suffix;
+	std::filesystem::path root;
+	bool                  mounted = false;
+	{
+		Core::LockGuard lock(m_mutex);
+		for (auto& pair: m_mount_pairs)
+		{
+			const bool at_root = guest.FixDirectorySlash() == pair.point;
+			if (!at_root && !guest.StartsWith(pair.point)) { continue; }
+			suffix  = at_root ? String() : guest.RemoveFirst(pair.point.Size());
+			root    = CanonicalRoot(&pair.canonical_dir, pair.dir);
+			mounted = true;
+			break;
+		}
+	}
+	if (!mounted) { return MapToSandbox(guest); }
+	if (root.empty()) { return {}; }
+
+	const auto relative = Path::MatchCaseInsensitive(root.u8string(), suffix.C_Str());
+	return String::FromUtf8(Path::ResolveContained(root, relative).c_str());
 }
 
 String MountPoints::GetRealDirectory(const String& mounted_directory)
@@ -888,15 +928,27 @@ String MountPoints::GetRealDirectory(const String& mounted_directory)
 	return resolved.IsEmpty() ? String() : resolved.FixDirectorySlash();
 }
 
+std::vector<std::filesystem::path> MountPoints::CanonicalRoots()
+{
+	std::vector<std::filesystem::path> roots;
+	{
+		Core::LockGuard lock(m_mutex);
+		roots.reserve(m_mount_pairs.Size() + 1);
+		for (auto& pair: m_mount_pairs)
+		{
+			roots.push_back(CanonicalRoot(&pair.canonical_dir, pair.dir));
+		}
+	}
+	roots.push_back(GetCanonicalSandboxRoot());
+	return roots;
+}
+
 bool MountPoints::IsHostFilenameAllowed(const String& filename)
 {
 	if (filename.IsEmpty()) { return false; }
-	Core::LockGuard lock(m_mutex);
-	for (const auto& pair: m_mount_pairs)
-	{
-		if (Path::Allows(pair.dir.C_Str(), filename.C_Str())) { return true; }
-	}
-	return Path::Allows(GetSandboxRoot().C_Str(), filename.C_Str());
+	const auto roots     = CanonicalRoots();
+	const auto canonical = Path::CanonicalFrom(roots, std::filesystem::u8path(filename.C_Str()));
+	return std::any_of(roots.begin(), roots.end(), [&](const auto& root) { return Path::Contains(root, canonical); });
 }
 
 void FileSystemSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
@@ -1728,9 +1780,10 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 
 	KYTY_LOG_DEBUG("\t KernelStat: %s\n", path);
 
-	String path_s         = String::FromUtf8(path);
-	auto   real_file_name = ResolveGuestDeviceFilename(path_s, ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s)));
-	auto   real_directory = g_mount_points->GetRealDirectory(path_s);
+	String     path_s         = String::FromUtf8(path);
+	const auto mapped         = g_mount_points->GetRealFilename(path_s);
+	auto       real_file_name = ResolveGuestDeviceFilename(path_s, ResolveExistingHostFile(path_s, mapped));
+	auto       real_directory = mapped.IsEmpty() ? String() : mapped.FixDirectorySlash();
 
 	bool is_dir  = Core::File::IsDirectoryExisting(real_file_name) || Core::File::IsDirectoryExisting(real_directory);
 	bool is_file = Core::File::IsFileExisting(real_file_name);

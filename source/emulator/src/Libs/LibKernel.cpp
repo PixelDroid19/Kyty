@@ -1589,24 +1589,26 @@ static int64_t KYTY_SYSV_ABI PosixRecvfrom(int socket, void* buffer, uint64_t le
 	return result;
 }
 
-static int KYTY_SYSV_ABI PosixSendmsg(int socket, const void* message, int flags)
+static int64_t KYTY_SYSV_ABI PosixSendmsg(int socket, const void* message, int flags)
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t socket  = %d\n", socket);
-	KYTY_LOG_DEBUG("\t message = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(message));
-	KYTY_LOG_DEBUG("\t flags   = %d\n", flags);
-	*Posix::GetErrorAddr() = Posix::POSIX_ENOSYS;
-	return -1;
+	const auto result = Network::Net::NetSendmsg(socket, message, flags);
+	if (result < 0)
+	{
+		*Posix::GetErrorAddr() = Network::NetToPosix(static_cast<int>(result));
+		return -1;
+	}
+	return result;
 }
 
 static int64_t KYTY_SYSV_ABI PosixRecvmsg(int socket, void* message, int flags)
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t socket  = %d\n", socket);
-	KYTY_LOG_DEBUG("\t message = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(message));
-	KYTY_LOG_DEBUG("\t flags   = %d\n", flags);
-	*Posix::GetErrorAddr() = Posix::POSIX_ENOSYS;
-	return -1;
+	const auto result = Network::Net::NetRecvmsg(socket, message, flags);
+	if (result < 0)
+	{
+		*Posix::GetErrorAddr() = Network::NetToPosix(static_cast<int>(result));
+		return -1;
+	}
+	return result;
 }
 
 static int KYTY_SYSV_ABI PosixSelect(int nfds, void* readfds, void* writefds, void* exceptfds, void* timeout)

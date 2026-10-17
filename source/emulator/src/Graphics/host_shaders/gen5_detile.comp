@@ -53,14 +53,13 @@ uint sw64k_rx_within(uint x, uint y, uint bpe)
 	uint offset = 0u;
 	if (bpe == 4u)
 	{
-		offset ^= (y << 3u) & 0x0008u;
-		offset ^= (y << 4u) & 0x0020u;
-		offset ^= (y << 5u) & 0x0f80u;
+		offset ^= (y << 4u) & 0x0070u;
+		offset ^= (y << 5u) & 0x0f00u;
 		offset ^= (y << 9u) & 0x1000u;
 		offset ^= (y << 8u) & 0x4000u;
-		offset ^= (x << 2u) & 0x0004u;
-		offset ^= (x << 3u) & 0x0010u;
-		offset ^= (x << 4u) & 0x0440u;
+		offset ^= (x << 2u) & 0x000cu;
+		offset ^= (x << 5u) & 0x0080u;
+		offset ^= (x << 4u) & 0x0400u;
 		offset ^= (x << 5u) & 0x0300u;
 		offset ^= (x << 6u) & 0x0800u;
 		offset ^= (x << 9u) & 0xa000u;
@@ -103,10 +102,10 @@ uvec2 sw64k_rx_coords_4(uint offset)
 	uint x4 = (offset >> 13u) & 1u;
 	uint x6 = (offset >> 15u) & 1u;
 	uint y6 = (offset >> 14u) & 1u;
-	uint x = ((offset >> 2u) & 1u) | (((offset >> 4u) & 1u) << 1u) | (((offset >> 6u) & 1u) << 2u) |
+	uint x = ((offset >> 2u) & 1u) | (((offset >> 3u) & 1u) << 1u) | (((offset >> 7u) & 1u) << 2u) |
 	         ((((offset >> 8u) & 1u) ^ y3) << 3u) | (x4 << 4u) |
 	         (((((offset >> 11u) & 1u) ^ y6)) << 5u) | (x6 << 6u);
-	uint y = ((offset >> 3u) & 1u) | (((offset >> 5u) & 1u) << 1u) | (((offset >> 7u) & 1u) << 2u) |
+	uint y = ((offset >> 4u) & 1u) | (((offset >> 5u) & 1u) << 1u) | (((offset >> 6u) & 1u) << 2u) |
 	         (y3 << 3u) | ((((offset >> 9u) & 1u) ^ x4) << 4u) |
 	         ((((offset >> 10u) & 1u) ^ x6) << 5u) | (y6 << 6u);
 	return uvec2(x, y);

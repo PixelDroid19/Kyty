@@ -138,7 +138,7 @@ uint32_t LayoutKind(TileDetileLayout layout)
 
 bool GpuLayoutSupported(const TileDetileRequest& request)
 {
-	if (!TileDetileIsSupported(request) || request.depth_layer != 0u || request.src_bytes == 0u ||
+	if (!TileDetileIsSupported(request) || request.slice != 0u || request.src_bytes == 0u ||
 	    request.src_bytes > k_max_shader_byte_range ||
 	    (request.src_bytes % 4u) != 0u || (request.bytes_per_element % 4u) != 0u)
 	{

@@ -39,8 +39,8 @@ constexpr uint8_t kNotFull    = 64;  // may lack a lane of a launched quad
 constexpr uint8_t kMissesQuad = 128; // may lack every lane of some launched quad (implies kNotFull)
 constexpr uint8_t kExtent     = kOuter | kNotFull | kMissesQuad;
 
-[[nodiscard]] bool StartsWith(ShaderInstructionType type, const char* prefix);
-[[nodiscard]] bool AnyPrefix(ShaderInstructionType type, std::initializer_list<const char*> prefixes);
+[[nodiscard]] bool StartsWith(ShaderInstructionType type, std::string_view prefix);
+[[nodiscard]] bool AnyPrefix(ShaderInstructionType type, std::initializer_list<std::string_view> prefixes);
 // Scalar word range of an operand; false when the operand is not a scalar register.
 [[nodiscard]] bool ScalarRange(const ShaderOperand& op, unsigned* first, unsigned* count);
 [[nodiscard]] bool IsConstant(const ShaderOperand& op);

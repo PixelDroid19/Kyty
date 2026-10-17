@@ -205,53 +205,6 @@ public:
 		return ret;
 	}
 
-	// Diagnostic-only candidate walk. Both the address buckets and unique
-	// candidates are capped so an opt-in trace cannot enumerate an arbitrary
-	// alias graph or populate the shared overlap cache. Returning false means
-	// the caller must report a truncated point-in-time result.
-	template <typename Visitor>
-	[[nodiscard]] bool VisitCandidatesBounded(uint64_t vaddr, uint64_t size, uint32_t max_pages, uint32_t max_candidates,
-	                                          Visitor&& visitor) const
-	{
-		EXIT_IF(size == 0 || max_pages == 0 || max_candidates == 0);
-		const auto first_page = CalcPageId(vaddr);
-		const auto last_page  = CalcPageId(vaddr + size - 1);
-		EXIT_IF(last_page < first_page);
-
-		Vector<int> visited;
-		uint32_t    page_count = 0;
-		auto        page       = first_page;
-		for (;;)
-		{
-			if (page_count == max_pages)
-			{
-				return false;
-			}
-			page_count++;
-			for (int id: m_map.Get(page))
-			{
-				if (visited.Contains(id))
-				{
-					continue;
-				}
-				if (visited.Size() == max_candidates)
-				{
-					return false;
-				}
-				visited.Add(id);
-				if (!visitor(id))
-				{
-					return false;
-				}
-			}
-			if (page == last_page)
-			{
-				return true;
-			}
-			page++;
-		}
-	}
-
 	[[nodiscard]] bool IsEmpty() const
 	{
 		int num = 0;
@@ -324,6 +277,7 @@ public:
 	void* CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
 	                   int vaddr_num, const GpuObject& info);
 	void  ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type);
+	void  ResetPlaneHash(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type);
 	void  FrameDone(GraphicContext* ctx);
 
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
@@ -333,22 +287,25 @@ public:
 	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 	bool                    QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
 	bool                    DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
-	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size);
+	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission);
 	bool                    CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns,
-	                                                      uint64_t* copy_ns);
+	                                                      uint64_t* copy_ns, GpuMemorySnapshotAdmission admission);
 	bool                    CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
-	                                                      uint64_t* validation_ns, uint64_t* compare_ns);
+	                                                      uint64_t* validation_ns, uint64_t* compare_ns,
+	                                                      GpuMemorySnapshotAdmission admission);
 
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 	void WriteBackAllCompleted(GraphicContext* ctx);
 	void               WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer);
 	[[nodiscard]] bool PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency);
+	[[nodiscard]] bool PendingStorageHasAliases();
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
 	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
 	[[nodiscard]] GpuMemoryGdsSource AcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 	void DeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task);
+	[[nodiscard]] bool SubmissionsComplete(const std::vector<SubmissionId>& submissions) const;
 
 	// Sync: CPU -> GPU
 	void Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
@@ -511,6 +468,10 @@ private:
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer) const;
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
+	bool TransientReadOnlyOverlapsAllowedLocked(uint64_t vaddr, uint64_t size, const GpuMemoryRangeQueryKey& query,
+	                                            GpuMemorySnapshotAdmission admission);
+	// Whether a writable storage buffer whose GPU writes are not yet published covers part of the range.
+	[[nodiscard]] bool WritableStorageOverlapsLocked(uint64_t vaddr, uint64_t size);
 	bool QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
 	                         const GpuMemoryRangeQueryKey& query, GpuMemoryOverlapSnapshot* out);
 
@@ -527,7 +488,7 @@ private:
 	bool create_maybe_deleted(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
 	bool create_all_the_same(const Vector<OverlappedBlock>& others, int heap_id);
 	// The parent a new depth target or storage view takes its raw texels from: of the Equals parents it reinterprets
-	// (DepthStencilBufferCanSeedFromRenderTexture, StorageTextureSharesDepthTexels), the one the device wrote last,
+	// (StorageTextureSharesDepthTexels), the one the device wrote last,
 	// after every writable use or upload of each other overlapping parent, none of them pending a write-back.
 	// -1 when none qualifies.
 	[[nodiscard]] int create_texel_bits_seed(const Vector<OverlappedBlock>& others, const GpuObject& info, int heap_id) const;

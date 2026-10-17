@@ -32,6 +32,13 @@ namespace Kyty::Libs::Graphics {
 
 // FramebufferCache + SamplerCache::GetSampler
 
+// A pass renders one subresource of a layered or mip-chained image, but the
+// image tracks one layout for all of them: keep the whole image an attachment.
+static VkImageLayout ColorAttachmentInitialLayout(const VulkanImage& image, const ColorAttachmentLoadOps& load_ops)
+{
+	return image.array_layers > 1u || image.mip_levels > 1u ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : load_ops.initial_layout;
+}
+
 static void DestroyCachedFramebuffer(GraphicContext* context, VulkanFramebuffer* framebuffer)
 {
 	EXIT_IF(context == nullptr || framebuffer == nullptr);
@@ -121,13 +128,13 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 			const auto  load_ops   = ResolveColorAttachmentLoadOps(image->layout, attachment.cmask_fast_clear_enable,
 			                                                      attachment.clear_word0, attachment.clear_word1,
 			                                                      attachment.attachment_format);
-			const auto initial_layout = image->array_layers > 1u ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : load_ops.initial_layout;
+			const auto initial_layout = ColorAttachmentInitialLayout(*image, load_ops);
 			same_colors         = (f.image_id[slot] == image->memory.unique_id) && (f.color_load_op[slot] == load_ops.load_op) &&
 			              (f.color_format[slot] == attachment.attachment_format) &&
 			              (f.color_view[slot] == attachment.attachment_view) &&
 			              (f.color_initial_layout[slot] == initial_layout) &&
 			              (f.base_array_layer[slot] == attachment.base_array_layer) &&
-			              (f.layer_count[slot] == attachment.layer_count);
+			              (f.layer_count[slot] == attachment.layer_count) && (f.mip_level[slot] == attachment.mip_level);
 		}
 		if (f.framebuffer != nullptr && same_colors && f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) &&
 		    f.depth_clear_enable == depth->depth_clear_enable && f.stencil_clear_enable == depth->stencil_clear_enable &&
@@ -163,6 +170,9 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	VkAttachmentDescription attachments[RenderColorInfo::TARGETS_MAX + 1]       = {};
 	VkAttachmentReference   color_attachment_refs[RenderColorInfo::TARGETS_MAX] = {};
 	VkImageView             views[RenderColorInfo::TARGETS_MAX + 1]             = {};
+	// A framebuffer renders every layer of each attachment view, so the active
+	// color views must agree on their layer count.
+	uint32_t framebuffer_layers = 0;
 	for (uint32_t slot = 0; slot < color_count; slot++)
 	{
 		if (with_color && !RenderColorSlotActive(*color, slot))
@@ -175,22 +185,28 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		if (image->samples != attachment_samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: image->samples != attachment_samples condition ignored (continuing)\n"); }
 		const uint32_t base_array_layer = with_color ? color_attachment->base_array_layer : 0u;
 		const uint32_t layer_count      = with_color ? color_attachment->layer_count : 1u;
+		const uint32_t mip_level        = with_color ? color_attachment->mip_level : 0u;
+		if (mip_level >= image->mip_levels)
+		{
+			EXIT("invalid color attachment mip level: level=%" PRIu32 " image_levels=%" PRIu32 "\n", mip_level, image->mip_levels);
+		}
 		if (layer_count == 0u || base_array_layer >= image->array_layers || layer_count > image->array_layers - base_array_layer)
 		{
 			EXIT("invalid color attachment layer range: base=%" PRIu32 " count=%" PRIu32 " image_layers=%" PRIu32 "\n",
 			     base_array_layer, layer_count, image->array_layers);
 		}
-		if (layer_count != 1u)
+		if (framebuffer_layers != 0u && layer_count != framebuffer_layers)
 		{
-			EXIT("multi-layer color attachment views are not supported\n");
+			EXIT("color attachments render different layer counts: %" PRIu32 " and %" PRIu32 "\n", framebuffer_layers, layer_count);
 		}
-		framebuffer_extent = IntersectFramebufferAttachmentExtent(framebuffer_extent, image);
+		framebuffer_layers = layer_count;
+		framebuffer_extent = IntersectFramebufferAttachmentExtent(framebuffer_extent, image, mip_level);
 		const auto attachment_format = with_color ? color_attachment->attachment_format : image->format;
 		const auto attachment_view   = with_color ? color_attachment->attachment_view : VulkanImage::VIEW_DEFAULT;
 		const auto load_ops       = ResolveColorAttachmentLoadOps(image->layout, with_color ? color_attachment->cmask_fast_clear_enable : false,
 		                                                          with_color ? color_attachment->clear_word0 : 0u,
 		                                                          with_color ? color_attachment->clear_word1 : 0u, attachment_format);
-		const auto initial_layout = image->array_layers > 1u ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : load_ops.initial_layout;
+		const auto initial_layout = ColorAttachmentInitialLayout(*image, load_ops);
 		attachments[attachment_count].flags   = 0;
 		attachments[attachment_count].format  = attachment_format;
 		attachments[attachment_count].samples = image->samples;
@@ -201,7 +217,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		attachments[attachment_count].initialLayout         = initial_layout;
 		attachments[attachment_count].finalLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		color_attachment_refs[slot]                         = {attachment_count, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-		if (base_array_layer == 0u && layer_count == 1u)
+		if (base_array_layer == 0u && layer_count == 1u && mip_level == 0u)
 		{
 			if (attachment_view < 0 || attachment_view >= VulkanImage::VIEW_MAX || image->image_view[attachment_view] == nullptr)
 			{
@@ -213,8 +229,9 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		{
 			VulkanImageViewDescriptor view_descriptor {};
 			view_descriptor.image            = image->image;
-			view_descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D;
+			view_descriptor.view_type        = layer_count > 1u ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
 			view_descriptor.format           = attachment_format;
+			view_descriptor.base_mip_level   = mip_level;
 			view_descriptor.base_array_layer = base_array_layer;
 			view_descriptor.layer_count      = layer_count;
 			if (!VulkanCreateDeviceImageView(gctx->device, view_descriptor, &framebuffer->owned_color_view[slot]))
@@ -226,6 +243,18 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		framebuffer->color_load_op[slot]        = load_ops.load_op;
 		framebuffer->color_initial_layout[slot] = initial_layout;
 		attachment_count++;
+	}
+	if (framebuffer_layers == 0u)
+	{
+		framebuffer_layers = 1u;
+	}
+	if (with_depth && framebuffer_layers > 1u)
+	{
+		EXIT("layered color attachments with a depth attachment are not supported: layers=%" PRIu32
+		     " color=%ux%u depth=%ux%u slices=%u..%u size=0x%" PRIx64 " htile=%u stencil=%u\n",
+		     framebuffer_layers, framebuffer_extent.width, framebuffer_extent.height, depth->width, depth->height,
+		     depth->slice_start, depth->slice_max, depth->depth_buffer_size, depth->htile ? 1u : 0u,
+		     depth->stencil_plane ? 1u : 0u);
 	}
 	framebuffer->color_count            = color_count;
 	framebuffer->attachment_count       = attachment_count + (with_depth ? 1u : 0u);
@@ -302,7 +331,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	framebuffer->extent.height = framebuffer_extent.height;
 	framebuffer_info.width     = framebuffer->extent.width;
 	framebuffer_info.height    = framebuffer->extent.height;
-	framebuffer_info.layers = 1;
+	framebuffer_info.layers = framebuffer_layers;
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
 	if (framebuffer_info.layers > properties.limits.maxFramebufferLayers)
@@ -327,6 +356,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 			fnew.image_id[slot]         = color->attachment[slot].vulkan_buffer->memory.unique_id;
 			fnew.base_array_layer[slot] = color->attachment[slot].base_array_layer;
 			fnew.layer_count[slot]      = color->attachment[slot].layer_count;
+			fnew.mip_level[slot]        = color->attachment[slot].mip_level;
 			fnew.color_format[slot]     = color->attachment[slot].attachment_format;
 			fnew.color_view[slot]       = color->attachment[slot].attachment_view;
 		}

@@ -38,6 +38,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -901,9 +902,11 @@ class TransientBufferPool
 		uint64_t     snapshot_size  = 0;
 		// Snapshot bytes start here; the bytes before it hold no guest data.
 		uint64_t     snapshot_begin = 0;
-		bool         zero_carrier   = false;
 		// Bytes at or past this offset are known to be zero.
 		uint64_t     nonzero_end    = 0;
+		// Position in the free index while the entry is unused.
+		std::multimap<uint64_t, Entry*>::iterator free_position;
+		bool                                      free_indexed = false;
 	};
 
 public:
@@ -918,10 +921,11 @@ public:
 		}
 
 		const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+		UnindexSnapshot(entry);
 		entry->snapshot_valid = false;
 		entry->nonzero_end    = std::max(entry->nonzero_end, size);
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
-		Commit(entry, size);
+		Commit(entry, size, true);
 		return &entry->buffer;
 	}
 
@@ -931,12 +935,9 @@ public:
 	VulkanBuffer* ZeroCarrier(GraphicContext* ctx, uint32_t usage)
 	{
 		EXIT_IF(ctx == nullptr || usage == 0u);
-		for (auto* entry: m_entries)
+		if (const auto carrier = m_zero_carriers.find(usage); carrier != m_zero_carriers.end())
 		{
-			if (entry->used && entry->zero_carrier && entry->usage == usage)
-			{
-				return &entry->buffer;
-			}
+			return &carrier->second->buffer;
 		}
 		static constexpr uint32_t kZero = 0;
 		auto* buffer = Upload(ctx, &kZero, sizeof(kZero), usage, GpuMemoryTransientBufferAllocationClass::Critical);
@@ -944,18 +945,11 @@ public:
 		{
 			return nullptr;
 		}
-		for (auto* entry: m_entries)
-		{
-			if (&entry->buffer == buffer)
-			{
-				entry->zero_carrier = true;
-				break;
-			}
-		}
+		m_zero_carriers.emplace(usage, m_by_buffer.at(buffer));
 		return buffer;
 	}
 
-	VulkanBuffer* Capture(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage,
+	VulkanBuffer* Capture(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage, bool zero_tail,
 	                      uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns, bool* reused)
 	{
 		EXIT_IF(ctx == nullptr || validation_ns == nullptr || upload_ns == nullptr || compare_ns == nullptr || reused == nullptr);
@@ -977,24 +971,17 @@ public:
 			const uint64_t excluded_ns = *validation_ns > UINT64_MAX - *compare_ns ? UINT64_MAX : *validation_ns + *compare_ns;
 			*upload_ns = total_ns > excluded_ns ? total_ns - excluded_ns : 0u;
 		};
-		Entry*     previous      = nullptr;
-		for (auto it = m_entries.rbegin(); it != m_entries.rend(); ++it)
-		{
-			auto* candidate = *it;
-			if (!candidate->scratch && candidate->snapshot_valid && candidate->usage == usage &&
-			    candidate->snapshot_vaddr == vaddr && candidate->snapshot_size == size && candidate->snapshot_begin <= read_begin)
-			{
-				previous = candidate;
-				break;
-			}
-		}
+		// Index fetches read guest bytes that idle writable storage already holds.
+		const auto admission = usage == VK_BUFFER_USAGE_INDEX_BUFFER_BIT ? GpuMemorySnapshotAdmission::IdleWritableStorage
+		                                                                  : GpuMemorySnapshotAdmission::ReadOnlyOverlaps;
+		Entry* previous = FindSnapshot(vaddr, size, usage, read_begin);
 		if (previous != nullptr)
 		{
 			bool     matches             = false;
 			uint64_t reuse_validation_ns = 0u;
 			if (!GpuMemoryCompareSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
 			                                            static_cast<const uint8_t*>(previous->mapped) + read_begin, &matches,
-			                                            &reuse_validation_ns, compare_ns))
+			                                            &reuse_validation_ns, compare_ns, admission))
 			{
 				*validation_ns += reuse_validation_ns;
 				return nullptr;
@@ -1002,7 +989,12 @@ public:
 			*validation_ns += reuse_validation_ns;
 			if (matches)
 			{
+				if (zero_tail)
+				{
+					ClearTail(previous, size);
+				}
 				previous->used = true;
+				UnindexFree(previous);
 				previous->buffer.descriptor_range = size;
 				*reused                           = true;
 				return &previous->buffer;
@@ -1013,7 +1005,7 @@ public:
 		if (entry == nullptr)
 		{
 			const auto preflight_start = std::chrono::steady_clock::now();
-			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin);
+			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin, admission);
 			*validation_ns += static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - preflight_start).count());
 			if (!eligible)
@@ -1035,7 +1027,7 @@ public:
 		entry->nonzero_end = std::max(entry->nonzero_end, size);
 		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
 		                                            static_cast<uint8_t*>(entry->mapped) + read_begin, &atomic_validation_ns,
-		                                            &copy_ns))
+		                                            &copy_ns, admission))
 		{
 			*validation_ns += atomic_validation_ns;
 			finish_upload_time();
@@ -1047,11 +1039,13 @@ public:
 		}
 		*validation_ns += atomic_validation_ns;
 		DebugStatsRecordUpload(size - read_begin, copy_ns);
+		UnindexSnapshot(entry);
 		entry->snapshot_valid = true;
 		entry->snapshot_vaddr = vaddr;
 		entry->snapshot_size  = size;
 		entry->snapshot_begin = read_begin;
-		Commit(entry, size);
+		m_snapshots[SnapshotKey {vaddr, size, usage}].push_back(entry);
+		Commit(entry, size, zero_tail);
 		finish_upload_time();
 		return &entry->buffer;
 	}
@@ -1063,27 +1057,22 @@ public:
 			return false;
 		}
 
-		for (const auto* entry: m_entries)
+		const auto found = m_by_buffer.find(storage_buffer);
+		if (found == m_by_buffer.end())
 		{
-			if (entry == nullptr || &entry->buffer != storage_buffer)
-			{
-				continue;
-			}
-
-			if (!entry->used || entry->scratch || !entry->snapshot_valid || entry->mapped == nullptr ||
-			    entry->snapshot_vaddr != expected_vaddr || offset < entry->snapshot_begin || entry->snapshot_size == 0u ||
-			    entry->snapshot_size > entry->size ||
-			    offset > entry->snapshot_size || size > entry->snapshot_size - offset || offset > storage_buffer->descriptor_range ||
-			    size > storage_buffer->descriptor_range - offset || offset > entry->size || size > entry->size - offset)
-			{
-				return false;
-			}
-
-			std::memcpy(dst, static_cast<const uint8_t*>(entry->mapped) + offset, static_cast<size_t>(size));
-			return true;
+			return false;
+		}
+		const auto* entry = found->second;
+		if (!entry->used || !entry->snapshot_valid || entry->mapped == nullptr || entry->snapshot_vaddr != expected_vaddr ||
+		    offset < entry->snapshot_begin || entry->snapshot_size == 0u || entry->snapshot_size > entry->size ||
+		    offset > entry->snapshot_size || size > entry->snapshot_size - offset || offset > storage_buffer->descriptor_range ||
+		    size > storage_buffer->descriptor_range - offset || offset > entry->size || size > entry->size - offset)
+		{
+			return false;
 		}
 
-		return false;
+		std::memcpy(dst, static_cast<const uint8_t*>(entry->mapped) + offset, static_cast<size_t>(size));
+		return true;
 	}
 
 	// A device-local scratch is never mapped: only commands recorded in this buffer read and write it.
@@ -1143,9 +1132,11 @@ public:
 
 	void Reset()
 	{
+		m_zero_carriers.clear();
 		for (auto* entry: m_entries)
 		{
 			entry->used = false;
+			IndexFree(entry);
 		}
 	}
 
@@ -1164,10 +1155,73 @@ public:
 			delete entry;
 		}
 		m_entries.clear();
+		m_snapshots.clear();
+		m_free.clear();
+		m_usage_entries.clear();
+		m_zero_carriers.clear();
+		m_by_buffer.clear();
 		m_total_bytes = 0;
 	}
 
 private:
+	struct SnapshotKey
+	{
+		uint64_t vaddr = 0;
+		uint64_t size  = 0;
+		uint32_t usage = 0;
+
+		bool operator==(const SnapshotKey& other) const
+		{
+			return vaddr == other.vaddr && size == other.size && usage == other.usage;
+		}
+	};
+	struct SnapshotKeyHash
+	{
+		size_t operator()(const SnapshotKey& key) const
+		{
+			uint64_t hash = key.vaddr * 0x9e3779b97f4a7c15ull;
+			hash ^= key.size + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u);
+			hash ^= key.usage + 0x9e3779b97f4a7c15ull + (hash << 6u) + (hash >> 2u);
+			return static_cast<size_t>(hash);
+		}
+	};
+
+	// Latest committed entry first: the one most likely to still match guest memory.
+	Entry* FindSnapshot(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin) const
+	{
+		const auto it = m_snapshots.find(SnapshotKey {vaddr, size, usage});
+		if (it == m_snapshots.end())
+		{
+			return nullptr;
+		}
+		for (auto entry = it->second.rbegin(); entry != it->second.rend(); ++entry)
+		{
+			if ((*entry)->snapshot_begin <= read_begin)
+			{
+				return *entry;
+			}
+		}
+		return nullptr;
+	}
+
+	void UnindexSnapshot(Entry* entry)
+	{
+		if (!entry->snapshot_valid)
+		{
+			return;
+		}
+		const auto it = m_snapshots.find(SnapshotKey {entry->snapshot_vaddr, entry->snapshot_size, entry->usage});
+		EXIT_IF(it == m_snapshots.end());
+		auto&      entries = it->second;
+		const auto indexed = std::find(entries.begin(), entries.end(), entry);
+		EXIT_IF(indexed == entries.end());
+		entries.erase(indexed);
+		if (entries.empty())
+		{
+			m_snapshots.erase(it);
+		}
+	}
+
 	Entry* Acquire(GraphicContext* ctx, uint64_t size, uint32_t usage, GpuMemoryTransientBufferAllocationClass allocation_class,
 	               bool allow_create, bool* created)
 	{
@@ -1175,40 +1229,15 @@ private:
 		{
 			*created = false;
 		}
-		Entry*   entry              = nullptr;
-		Entry*   larger_unused      = nullptr;
-		uint32_t usage_entries      = 0;
-		for (auto* candidate: m_entries)
+		// Prefer exact size; fall back to the smallest free entry that fits.
+		// Descriptor writes use an explicit range (not the full VkBuffer size),
+		// so a larger free slab is valid and distinct sizes do not fragment the
+		// entry ceiling.
+		Entry* entry = nullptr;
+		if (const auto free = m_free.find(usage); free != m_free.end())
 		{
-			if (candidate->scratch)
-			{
-				continue;
-			}
-			if (candidate->usage == usage)
-			{
-				usage_entries++;
-			}
-			if (candidate->used || candidate->usage != usage || candidate->size < size)
-			{
-				continue;
-			}
-			// Prefer exact size; fall back to the smallest free entry that fits.
-			// Descriptor writes use an explicit range (not the full VkBuffer size),
-			// so a larger free slab is valid. V# spill UBOs can otherwise fail
-			// when many distinct sizes fragment MaxEntriesPerUsage=512.
-			if (candidate->size == size)
-			{
-				entry = candidate;
-				break;
-			}
-			if (larger_unused == nullptr || candidate->size < larger_unused->size)
-			{
-				larger_unused = candidate;
-			}
-		}
-		if (entry == nullptr)
-		{
-			entry = larger_unused;
+			const auto fit = free->second.lower_bound(size);
+			entry          = fit != free->second.end() ? fit->second : nullptr;
 		}
 
 		if (entry == nullptr)
@@ -1217,6 +1246,7 @@ private:
 			{
 				return nullptr;
 			}
+			const uint32_t usage_entries = m_usage_entries[usage];
 			if (!GpuMemoryTransientBufferPoolCanAllocate(usage_entries, static_cast<uint32_t>(m_entries.size()), m_total_bytes, size,
 			                                                   allocation_class))
 			{
@@ -1239,13 +1269,15 @@ private:
 			VulkanMapMemory(ctx, &entry->buffer.memory, &entry->mapped);
 			EXIT_IF(entry->mapped == nullptr);
 			m_entries.push_back(entry);
+			m_by_buffer.emplace(&entry->buffer, entry);
+			m_usage_entries[usage]++;
+			IndexFree(entry);
 			m_total_bytes += size;
 			if (created != nullptr)
 			{
 				*created = true;
 			}
 		}
-		entry->zero_carrier = false;
 		return entry;
 	}
 
@@ -1293,6 +1325,9 @@ private:
 		EXIT_IF(ctx == nullptr || entry == nullptr || entry->used || m_entries.empty() || m_entries.back() != entry ||
 		        m_total_bytes < entry->size);
 		m_entries.pop_back();
+		UnindexFree(entry);
+		m_by_buffer.erase(&entry->buffer);
+		m_usage_entries[entry->usage]--;
 		m_total_bytes -= entry->size;
 		VulkanUnmapMemory(ctx, &entry->buffer.memory);
 		entry->mapped = nullptr;
@@ -1302,20 +1337,58 @@ private:
 
 	// Bytes past the committed size read as zero; only the part of that tail
 	// an earlier write reached needs clearing.
-	static void Commit(Entry* entry, uint64_t size)
+	// An unread tail keeps its stale bytes; nonzero_end still covers them.
+	void Commit(Entry* entry, uint64_t size, bool zero_tail)
 	{
 		EXIT_IF(entry == nullptr || entry->mapped == nullptr || size == 0u || size > entry->size || entry->nonzero_end > entry->size);
+		if (zero_tail)
+		{
+			ClearTail(entry, size);
+		}
+		entry->buffer.descriptor_range = size;
+		entry->used = true;
+		UnindexFree(entry);
+	}
+
+	void ClearTail(Entry* entry, uint64_t size)
+	{
 		const uint64_t tail_bytes = GpuMemoryTransientBufferTailBytes(entry->nonzero_end, size);
 		if (tail_bytes != 0u)
 		{
 			std::memset(static_cast<uint8_t*>(entry->mapped) + size, 0, static_cast<size_t>(tail_bytes));
 		}
-		entry->nonzero_end             = size;
-		entry->buffer.descriptor_range = size;
-		entry->used = true;
+		entry->nonzero_end = size;
+	}
+
+	void IndexFree(Entry* entry)
+	{
+		if (entry->scratch || entry->free_indexed)
+		{
+			return;
+		}
+		entry->free_position = m_free[entry->usage].emplace(entry->size, entry);
+		entry->free_indexed  = true;
+	}
+
+	void UnindexFree(Entry* entry)
+	{
+		if (!entry->free_indexed)
+		{
+			return;
+		}
+		m_free[entry->usage].erase(entry->free_position);
+		entry->free_indexed = false;
 	}
 
 	std::vector<Entry*> m_entries;
+	// Entries holding a valid snapshot, by the guest range and usage they hold.
+	std::unordered_map<SnapshotKey, std::vector<Entry*>, SnapshotKeyHash> m_snapshots;
+	// Unused snapshot and upload entries, by usage and size.
+	std::unordered_map<uint32_t, std::multimap<uint64_t, Entry*>> m_free;
+	std::unordered_map<uint32_t, uint32_t>                        m_usage_entries;
+	// The zero carrier each usage holds until the next Reset.
+	std::unordered_map<uint32_t, Entry*>              m_zero_carriers;
+	std::unordered_map<const VulkanBuffer*, Entry*>   m_by_buffer;
 	uint64_t            m_total_bytes = 0;
 };
 
@@ -1542,7 +1615,7 @@ VulkanBuffer* CommandBuffer::UploadTransientZeroCarrier(uint32_t usage)
 }
 
 VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage,
-	                                                         uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns,
+	                                                         bool zero_tail, uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns,
 	                                                         bool* reused)
 {
 	EXIT_IF(IsInvalid());
@@ -1550,8 +1623,8 @@ VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint
 	{
 		m_transient_buffers = new TransientBufferPool;
 	}
-	return m_transient_buffers->Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, read_begin, usage, validation_ns, upload_ns,
-	                                    compare_ns, reused);
+	return m_transient_buffers->Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, read_begin, usage, zero_tail, validation_ns,
+	                                    upload_ns, compare_ns, reused);
 }
 
 bool CommandBuffer::ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
@@ -1580,6 +1653,28 @@ VulkanBuffer* CommandBuffer::AllocateTransientCopyBuffer(uint64_t size)
 	}
 	return m_transient_copy_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size,
 	                                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+}
+
+void CommandBuffer::DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth)
+{
+	EXIT_IF(depth == nullptr || depth->storage_plane == nullptr);
+	if (std::find(m_depth_plane_store_backs.begin(), m_depth_plane_store_backs.end(), depth) == m_depth_plane_store_backs.end())
+	{
+		m_depth_plane_store_backs.push_back(depth);
+	}
+}
+
+void CommandBuffer::StoreBackDepthPlanes()
+{
+	for (auto* depth: m_depth_plane_store_backs)
+	{
+		if (!UtilCopyTexelBits(this, depth->storage_plane, depth, static_cast<uint64_t>(depth->layout)))
+		{
+			EXIT("depth storage plane store-back failed: extent=%ux%u format=%u\n", depth->extent.width, depth->extent.height,
+			     static_cast<uint32_t>(depth->format));
+		}
+	}
+	m_depth_plane_store_backs.clear();
 }
 
 void CommandBuffer::End()
@@ -2112,7 +2207,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		}
 		auto* image = static_cast<RenderTextureVulkanImage*>(color->attachment[slot].vulkan_buffer);
 		if (framebuffer->color_load_op[slot] == VK_ATTACHMENT_LOAD_OP_CLEAR &&
-		    extent.width == image->extent.width && extent.height == image->extent.height &&
+		    extent.width == image->extent.width && extent.height == image->extent.height && image->mip_levels == 1u &&
 		    color->attachment[slot].base_array_layer == 0u && color->attachment[slot].layer_count == 1u)
 		{
 			image->fully_defined_from_clear = true;

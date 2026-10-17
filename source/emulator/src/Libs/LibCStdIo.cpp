@@ -130,6 +130,15 @@ KYTY_SYSV_ABI int c_fputc(int ch, FILE* f)
 	return operation.IsValid() ? ::fputc(ch, f) : EOF;
 }
 
+KYTY_SYSV_ABI void c_clearerr(FILE* f)
+{
+	const Kernel::FileSystem::StreamOperation operation(f);
+	if (operation.IsValid())
+	{
+		::clearerr(f);
+	}
+}
+
 KYTY_SYSV_ABI int c_fputs(const char* s, FILE* f)
 {
 	if (s == nullptr) { errno = EINVAL; return EOF; }

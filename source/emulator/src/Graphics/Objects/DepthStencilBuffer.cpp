@@ -4,12 +4,13 @@
 
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
-#include "Emulator/Graphics/Objects/RenderTexture.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
-#include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Profiler.h"
+
+#include <mutex>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -126,53 +127,15 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	return vk_obj;
 }
 
-bool DepthStencilBufferCanSeedFromRenderTexture(const uint64_t* depth, const uint64_t* render, bool next_gen)
-{
-	if (!next_gen || depth == nullptr || render == nullptr)
-	{
-		return false;
-	}
-	if (depth[DepthStencilBufferObject::PARAM_FORMAT] != VK_FORMAT_D32_SFLOAT || depth[DepthStencilBufferObject::PARAM_HTILE] != 0u ||
-	    depth[DepthStencilBufferObject::PARAM_SAMPLES] != 1u)
-	{
-		return false;
-	}
-	// Gen5 render targets are always tiled (mode 27); a GPU-owned one publishes no guest bytes.
-	const auto render_format = static_cast<RenderTextureFormat>(render[RenderTextureObject::PARAM_FORMAT]);
-	if ((render_format != RenderTextureFormat::R32Sfloat && render_format != RenderTextureFormat::B10G11R11Ufloat) ||
-	    render[RenderTextureObject::PARAM_TILED] == 0u || render[RenderTextureObject::PARAM_WRITE_BACK] != 0u ||
-	    render[RenderTextureObject::PARAM_SAMPLES] != 1u || render[RenderTextureObject::PARAM_ARRAY_LAYERS] != 1u)
-	{
-		return false;
-	}
-	const auto width  = depth[DepthStencilBufferObject::PARAM_GUEST_WIDTH];
-	const auto height = depth[DepthStencilBufferObject::PARAM_GUEST_HEIGHT];
-	return width != 0u && width <= UINT32_MAX && render[RenderTextureObject::PARAM_WIDTH] == width &&
-	       render[RenderTextureObject::PARAM_HEIGHT] == height &&
-	       render[RenderTextureObject::PARAM_PITCH] == TileAlign64KBPitch(static_cast<uint32_t>(width), 4u) &&
-	       render[RenderTextureObject::PARAM_HOST_WIDTH] == depth[DepthStencilBufferObject::PARAM_HOST_WIDTH] &&
-	       render[RenderTextureObject::PARAM_HOST_HEIGHT] == depth[DepthStencilBufferObject::PARAM_HOST_HEIGHT];
-}
-
-static VulkanImage* TexelBitsSource(const GpuMemoryObject& object)
-{
-	switch (object.type)
-	{
-		case GpuMemoryObjectType::RenderTexture: return static_cast<RenderTextureVulkanImage*>(object.obj);
-		case GpuMemoryObjectType::StorageTexture: return static_cast<StorageTextureVulkanImage*>(object.obj);
-		default: return nullptr;
-	}
-}
-
-// The depth image takes the texels of the render target or storage view whose bytes it reinterprets
-// (DepthStencilBufferCanSeedFromRenderTexture, StorageTextureSharesDepthTexels), instead of starting undefined.
+// The depth image takes the texels of the storage view whose bytes it reinterprets
+// (StorageTextureSharesDepthTexels), instead of starting undefined.
 static void* create_from_texel_bits_func(GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* params,
                                          GpuMemoryScenario /*scenario*/, const Vector<GpuMemoryObject>& objects, VulkanMemory* mem)
 {
 	KYTY_PROFILER_BLOCK("DepthStencilBufferObject::CreateFromObjects");
 
-	EXIT_IF(buffer == nullptr || objects.Size() != 1);
-	auto* source = TexelBitsSource(objects.At(0));
+	EXIT_IF(buffer == nullptr || objects.Size() != 1 || objects.At(0).type != GpuMemoryObjectType::StorageTexture);
+	auto* source = static_cast<StorageTextureVulkanImage*>(objects.At(0).obj);
 	EXIT_IF(source == nullptr || source->guest_size == 0u);
 
 	const uint64_t vaddr  = 0;
@@ -182,6 +145,70 @@ static void* create_from_texel_bits_func(GraphicContext* ctx, CommandBuffer* buf
 		EXIT("texel bits to depth copy failed: extent=%ux%u\n", source->extent.width, source->extent.height);
 	}
 	return vk_obj;
+}
+
+StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+{
+	EXIT_IF(ctx == nullptr || depth == nullptr);
+	static std::mutex          create_mutex;
+	std::lock_guard<std::mutex> lock(create_mutex);
+	if (depth->storage_plane != nullptr)
+	{
+		return depth->storage_plane;
+	}
+
+	auto* plane = new StorageTextureVulkanImage;
+	plane->SetNativeExtent(depth->extent.width, depth->extent.height);
+	plane->format       = VK_FORMAT_R32_SFLOAT;
+	plane->image        = nullptr;
+	plane->layout       = VK_IMAGE_LAYOUT_UNDEFINED;
+	plane->array_layers = 1u;
+	plane->guest_size   = depth->guest_size;
+	for (auto& view: plane->image_view)
+	{
+		view = nullptr;
+	}
+
+	VulkanImageDescriptor image_descriptor {};
+	image_descriptor.extent = {depth->extent.width, depth->extent.height, 1u};
+	image_descriptor.format = plane->format;
+	image_descriptor.usage  = StorageTextureGetImageUsage();
+	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), plane, &depth->storage_plane_memory))
+	{
+		EXIT("depth storage plane image creation failed: extent=%ux%u\n", depth->extent.width, depth->extent.height);
+	}
+
+	VulkanImageViewDescriptor view_descriptor {};
+	view_descriptor.image  = plane->image;
+	view_descriptor.format = plane->format;
+	EXIT_IF(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &plane->image_view[VulkanImage::VIEW_DEFAULT]));
+	view_descriptor.view_type   = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+	view_descriptor.layer_count = 1u;
+	EXIT_IF(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &plane->image_view[VulkanImage::VIEW_STORAGE_ARRAY]));
+
+	depth->storage_plane = plane;
+	return plane;
+}
+
+static void DeleteStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+{
+	auto* plane = depth->storage_plane;
+	if (plane == nullptr)
+	{
+		return;
+	}
+	for (auto& view: plane->image_view)
+	{
+		if (view != nullptr)
+		{
+			vkDestroyImageView(ctx->device, view, nullptr);
+			view = nullptr;
+		}
+	}
+	vkDestroyImage(ctx->device, plane->image, nullptr);
+	VulkanFree(ctx, &depth->storage_plane_memory);
+	delete plane;
+	depth->storage_plane = nullptr;
 }
 
 static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
@@ -194,6 +221,7 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 
 	DeleteFramebuffer(vk_obj);
+	DeleteStoragePlane(ctx, vk_obj);
 
 	for (auto& view: vk_obj->image_view)
 	{

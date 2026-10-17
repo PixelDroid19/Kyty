@@ -9,14 +9,14 @@ namespace Kyty::Libs::Graphics::LaneFlow {
 using Type    = ShaderInstructionType;
 using Operand = ShaderOperandType;
 
-bool StartsWith(Type type, const char* prefix)
+bool StartsWith(Type type, std::string_view prefix)
 {
 	return ShaderInstructionTypeStartsWith(type, prefix);
 }
 
-bool AnyPrefix(Type type, std::initializer_list<const char*> prefixes)
+bool AnyPrefix(Type type, std::initializer_list<std::string_view> prefixes)
 {
-	for (const char* prefix: prefixes)
+	for (const auto prefix: prefixes)
 	{
 		if (StartsWith(type, prefix)) { return true; }
 	}
@@ -108,6 +108,7 @@ bool IsLaneLocalImageRead(Type type)
 		case Type::ImageSampleLz:
 		case Type::ImageSampleLzO:
 		case Type::ImageSampleCd:
+		case Type::ImageSampleD:
 		case Type::ImageSampleDrefLz: return true;
 		default: return false;
 	}

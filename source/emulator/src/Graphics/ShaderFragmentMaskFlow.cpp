@@ -4,7 +4,9 @@
 #include "ShaderNativeWaveInternal.h"
 #include "ShaderSpirvInternal.h"
 
+#include <algorithm>
 #include <map>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -48,11 +50,43 @@ bool IsConditionalBranch(Type type)
 	       type == Type::SCbranchExecz || type == Type::SCbranchExecnz;
 }
 
-// A branch region whose entry is lane divergent, with the scalar words written in it.
+// A static scalar spill slot: (VGPR, lane).
+using SpillSlot = std::pair<int, int>;
+
+// The lane flow state plus the taint of each spill slot on this path. V_WRITELANE ignores EXEC, so a spill
+// replaces its slot's taint; a compiler reuses a dead slot for an unrelated word.
+struct MaskFlowState: FlowState
+{
+	std::map<SpillSlot, uint8_t> spills;
+
+	bool Merge(const MaskFlowState& other);
+};
+
+bool MaskFlowState::Merge(const MaskFlowState& other)
+{
+	if (!other.reachable) { return false; }
+	if (!reachable)
+	{
+		*this = other;
+		return true;
+	}
+	bool changed = FlowState::Merge(other);
+	for (const auto& [slot, taint]: other.spills)
+	{
+		auto&         mine   = spills[slot];
+		const uint8_t merged = static_cast<uint8_t>(mine | taint);
+		changed              = changed || merged != mine;
+		mine                 = merged;
+	}
+	return changed;
+}
+
+// A branch region whose entry is lane divergent, with the scalar words and spill slots written in it.
 struct Region
 {
 	uint32_t            end_pc = 0;
 	std::bitset<kWords> written;
+	std::set<SpillSlot> written_slots;
 	// Mask words whose bit is zero for every lane outside the region (a subset of the EXEC it was entered with):
 	// compares evaluated and EXEC copies taken while EXEC was such a subset (VOPC clears inactive lanes).
 	std::bitset<kWords> zero_outside;
@@ -70,8 +104,9 @@ struct Loop
 	// A lane-divergent branch leaves the loop or repeats it, so lanes run different numbers of
 	// iterations and the host subgroup's count is not the guest wave's.
 	bool divergent = false;
-	// Every scalar word some instruction of the body may write.
+	// Every scalar word and spill slot some instruction of the body may write.
 	std::bitset<kWords> written;
+	std::set<SpillSlot> written_slots;
 	// Words whose every write in the body keeps the bit of each lane outside its region (D = D AND/OR/ANDN2 with a
 	// mask confined that way): a lane's bit then follows only its own iterations, so leaving the loop does not
 	// make the word divergent. Observed during a walk and confirmed by the next one.
@@ -149,8 +184,14 @@ struct ScalarOrigin
 	uint32_t        number = 0;
 };
 
-// Track exact scalar moves only. Arithmetic and joins discard provenance; a
-// saved parameter M0 remains identifiable even after its entry SGPR is reused.
+bool SameOrigin(ScalarOrigin a, ScalarOrigin b)
+{
+	return a.kind == b.kind && (a.kind != ScalarOriginKind::Number || a.number == b.number);
+}
+
+// Track exact scalar moves only. Arithmetic discards provenance and a join keeps
+// what its paths agree on; a saved parameter M0 remains identifiable even after
+// its entry SGPR is reused.
 class PixelScalarOrigins
 {
 public:
@@ -161,7 +202,17 @@ public:
 			m_words[static_cast<unsigned>(parameter_sgpr)].kind = ScalarOriginKind::PixelParameter;
 		}
 	}
-	void Reset() { m_words = {}; }
+	bool Meet(const PixelScalarOrigins& other)
+	{
+		bool changed = false;
+		for (unsigned word = 0; word < kWords; ++word)
+		{
+			if (m_words[word].kind == ScalarOriginKind::Unknown || SameOrigin(m_words[word], other.m_words[word])) { continue; }
+			m_words[word] = {};
+			changed       = true;
+		}
+		return changed;
+	}
 	[[nodiscard]] ScalarOrigin M0() const { return m_words[kM0Word]; }
 
 	void Step(const ShaderInstruction& inst)
@@ -198,7 +249,11 @@ private:
 	std::array<ScalarOrigin, kWords> m_words {};
 };
 
-bool AddtidSlot(const ShaderInstruction& inst, ScalarOrigin m0, uint64_t reserved_bytes, std::map<uint32_t, bool>* pending)
+constexpr uint32_t kAddtidPlaneBytes = 64u * sizeof(uint32_t);
+
+// The byte base of an ADD_TID access: M0 is an exact aligned number and the whole
+// wave64 plane (one dword per TID) fits the reserved extra-LDS prefix.
+bool AddtidPlane(const ShaderInstruction& inst, ScalarOrigin m0, uint64_t reserved_bytes, uint32_t* base)
 {
 	if (m0.kind != ScalarOriginKind::Number || (m0.number & 3u) != 0u) { return false; }
 	const bool write = inst.type == Type::DsWriteAddtidB32;
@@ -206,77 +261,156 @@ bool AddtidSlot(const ShaderInstruction& inst, ScalarOrigin m0, uint64_t reserve
 	if (!PlainWord(data) || data.type != Operand::Vgpr || data.register_id < 0 || data.register_id >= kVgprs ||
 	    inst.src_num != (write ? 1 : 0) ||
 	    inst.format != (write ? ShaderInstructionFormat::VdataOffset : ShaderInstructionFormat::VdstOffset)) { return false; }
-	// A complete wave64 plane has one dword per TID. Disjoint planes guarantee
-	// that omitting TID in the invocation-private emitter cannot alias another lane.
-	constexpr uint32_t plane_bytes = 64u * sizeof(uint32_t);
-	const uint64_t base = static_cast<uint64_t>(m0.number) + inst.ds_offset;
-	if ((base & 3u) != 0u || base + plane_bytes > reserved_bytes) { return false; }
-	const auto slot = pending->find(static_cast<uint32_t>(base));
-	if (slot == pending->end())
+	const uint64_t start = static_cast<uint64_t>(m0.number) + inst.ds_offset;
+	if ((start & 3u) != 0u || start + kAddtidPlaneBytes > reserved_bytes) { return false; }
+	*base = static_cast<uint32_t>(start);
+	return true;
+}
+
+// Basic blocks of a program without indirect jumps: leaders are the entry, every
+// branch target and every instruction after a branch or S_ENDPGM.
+struct SpillBlock
+{
+	uint32_t              begin = 0;
+	uint32_t              end   = 0;
+	std::vector<uint32_t> successors;
+};
+
+bool BuildSpillBlocks(const ShaderCode& code, std::vector<SpillBlock>* blocks)
+{
+	const auto&                  instructions = code.GetInstructions();
+	const uint32_t               count        = instructions.Size();
+	std::map<uint32_t, uint32_t> index_of_pc;
+	for (uint32_t index = 0; index < count; ++index) { index_of_pc[instructions.At(index).pc] = index; }
+	std::map<uint32_t, uint32_t> targets; // branch index -> target index
+	std::set<uint32_t>           leaders {0u};
+	for (uint32_t index = 0; index < count; ++index)
 	{
-		if (!write) { return false; }
-		for (const auto& [other, unread]: *pending)
+		const auto& inst = instructions.At(index);
+		if (inst.type != Type::SBranch && !IsConditionalBranch(inst.type) && inst.type != Type::SEndpgm) { continue; }
+		leaders.insert(index + 1u);
+		if (inst.type == Type::SEndpgm) { continue; }
+		uint32_t   target = 0;
+		const auto found  = BranchTarget(inst, &target) ? index_of_pc.find(target) : index_of_pc.end();
+		if (found == index_of_pc.end()) { return false; }
+		targets[index] = found->second;
+		leaders.insert(found->second);
+	}
+	leaders.erase(count);
+	std::map<uint32_t, uint32_t> block_of;
+	for (const auto leader: leaders)
+	{
+		block_of[leader] = static_cast<uint32_t>(blocks->size());
+		blocks->push_back({leader, count, {}});
+		if (blocks->size() > 1u) { (*blocks)[blocks->size() - 2u].end = leader; }
+	}
+	for (auto& block: *blocks)
+	{
+		const auto& last = instructions.At(block.end - 1u);
+		if (targets.count(block.end - 1u) != 0u) { block.successors.push_back(block_of[targets[block.end - 1u]]); }
+		if (last.type != Type::SBranch && last.type != Type::SEndpgm && block.end < count)
 		{
-			(void)unread;
-			if (base < static_cast<uint64_t>(other) + plane_bytes && other < base + plane_bytes) { return false; }
+			block.successors.push_back(block_of[block.end]);
 		}
-		pending->emplace(static_cast<uint32_t>(base), true);
-	} else
-	{
-		slot->second = write;
 	}
 	return true;
 }
 
-// Prove a bounded compiler spill interval, not arbitrary pixel LDS. Every read
-// has a same-lane store under unchanged EXEC/M0, and no other LDS instruction
-// can observe its bytes. Subsequent interpolation must restore the original
-// launch parameter M0, outside the reserved extra-LDS prefix.
+// The scalar origins and the planes stored on every path to a program point.
+struct AddtidSpillState
+{
+	PixelScalarOrigins origins;
+	std::set<uint32_t> stored;
+};
+
+bool MergeSpillState(std::optional<AddtidSpillState>* entry, const AddtidSpillState& incoming)
+{
+	if (!entry->has_value())
+	{
+		*entry = incoming;
+		return true;
+	}
+	auto&      state   = **entry;
+	bool       changed = state.origins.Meet(incoming.origins);
+	const auto before  = state.stored.size();
+	for (auto plane = state.stored.begin(); plane != state.stored.end();)
+	{
+		plane = incoming.stored.count(*plane) != 0u ? std::next(plane) : state.stored.erase(plane);
+	}
+	return changed || state.stored.size() != before;
+}
+
+// Walk one block. With `planes`, also prove every access and every interpolation
+// and collect each accessed plane.
+bool StepSpillBlock(const ShaderCode& code, const SpillBlock& block, uint64_t reserved_bytes, AddtidSpillState* state,
+                    std::set<uint32_t>* planes)
+{
+	for (uint32_t index = block.begin; index < block.end; ++index)
+	{
+		const auto& inst = code.GetInstructions().At(index);
+		const auto  m0   = state->origins.M0();
+		if (planes != nullptr && StartsWith(inst.type, "VInterp") && m0.kind != ScalarOriginKind::PixelParameter) { return false; }
+		uint32_t   base  = 0;
+		const bool exact = IsAddtid(inst.type) && AddtidPlane(inst, m0, reserved_bytes, &base);
+		if (planes != nullptr && IsAddtid(inst.type))
+		{
+			const bool unstored = inst.type == Type::DsReadAddtidB32 && state->stored.count(base) == 0u;
+			if (!exact || unstored) { return false; }
+			planes->insert(base);
+		}
+		if (exact && inst.type == Type::DsWriteAddtidB32) { state->stored.insert(base); }
+		state->origins.Step(inst);
+	}
+	return true;
+}
+
+// Prove compiler spill slots, not arbitrary pixel LDS. Every ADD_TID access
+// addresses an exact M0 plane, planes are equal or disjoint, and no other LDS
+// instruction can observe their bytes, so the host's per-invocation array that
+// omits TID cannot alias another lane. A lane then only reads dwords it alone
+// stores, whatever EXEC, branches or loops lie between the store and the reload;
+// a lane that did not store reads undefined bytes from guest LDS and from the
+// private array alike. Each read must follow a store to its plane on every path,
+// and every interpolation must observe the original launch parameter M0.
 bool HasPrivatePixelAddtidSpills(const ShaderCode& code)
 {
 	const auto& instructions = code.GetInstructions();
-	uint32_t first = UINT32_MAX;
-	uint32_t last = 0;
-	std::set<uint32_t> joins;
+	bool        any_addtid   = false;
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		const auto& inst = instructions.At(index);
 		if ((StartsWith(inst.type, "Ds") && !IsAddtid(inst.type)) || inst.type == Type::SSetpcB64 ||
 		    inst.type == Type::SSwappcB64 ||
 		    (AnyPrefix(inst.type, {"Buffer", "TBuffer"}) && (inst.buffer_flags & 1u) != 0u)) { return false; }
-		if (inst.type == Type::SBranch || IsConditionalBranch(inst.type))
-		{
-			uint32_t target = 0;
-			if (!BranchTarget(inst, &target)) { return false; }
-			joins.insert(target);
-		}
-		if (!IsAddtid(inst.type)) { continue; }
-		if (first == UINT32_MAX) { first = index; }
-		last = index;
+		any_addtid = any_addtid || IsAddtid(inst.type);
 	}
-	if (first == UINT32_MAX || code.GetPixelExtraLdsDwords() == 0u) { return false; }
+	std::vector<SpillBlock> blocks;
+	if (!any_addtid || code.GetPixelExtraLdsDwords() == 0u || !BuildSpillBlocks(code, &blocks)) { return false; }
 	const uint64_t reserved_bytes = std::min(static_cast<uint64_t>(code.GetPixelExtraLdsDwords()) * sizeof(uint32_t),
 	                                         static_cast<uint64_t>(kDsAddtidSpillDwords) * sizeof(uint32_t));
-	PixelScalarOrigins origins(code.GetPixelParameterSgpr());
-	std::map<uint32_t, bool> pending;
-	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	std::vector<std::optional<AddtidSpillState>> entries(blocks.size());
+	entries[0] = AddtidSpillState {PixelScalarOrigins(code.GetPixelParameterSgpr()), {}};
+	std::vector<uint32_t> work {0u};
+	while (!work.empty())
 	{
-		const auto& inst = instructions.At(index);
-		const bool inside = index >= first && index <= last;
-		if (inside && (joins.count(inst.pc) != 0u || ShaderInstructionIsControlFlowBoundary(inst) ||
-		               ShaderInstructionWritesExec(inst) || inst.dst.type == Operand::M0 || inst.dst2.type == Operand::M0))
+		const auto block = work.back();
+		work.pop_back();
+		auto state = *entries[block];
+		StepSpillBlock(code, blocks[block], reserved_bytes, &state, nullptr);
+		for (const auto successor: blocks[block].successors)
 		{
-			return false;
+			if (MergeSpillState(&entries[successor], state)) { work.push_back(successor); }
 		}
-		if (joins.count(inst.pc) != 0u || ShaderInstructionIsControlFlowBoundary(inst)) { origins.Reset(); }
-		if (IsAddtid(inst.type) && !AddtidSlot(inst, origins.M0(), reserved_bytes, &pending)) { return false; }
-		if (index >= first && StartsWith(inst.type, "VInterp") && origins.M0().kind != ScalarOriginKind::PixelParameter)
-		{
-			return false;
-		}
-		origins.Step(inst);
 	}
-	return std::all_of(pending.begin(), pending.end(), [](const auto& slot) { return !slot.second; });
+	std::set<uint32_t> planes;
+	for (uint32_t block = 0; block < blocks.size(); ++block)
+	{
+		if (!entries[block].has_value()) { continue; } // statically unreachable
+		auto state = *entries[block];
+		if (!StepSpillBlock(code, blocks[block], reserved_bytes, &state, &planes)) { return false; }
+	}
+	return std::adjacent_find(planes.begin(), planes.end(),
+	                          [](uint32_t low, uint32_t high) { return high - low < kAddtidPlaneBytes; }) == planes.end();
 }
 
 class Flow
@@ -307,7 +441,7 @@ private:
 	void                  TrackRegionSubset(const ShaderInstruction& inst, bool exec_subset_before);
 	void                  UpdateScc(const ShaderInstruction& inst, uint8_t source_taint);
 	bool                  UniformComparison(const ShaderInstruction& inst) const;
-	void                  TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources);
+	void                  TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources, bool uniform_comparison);
 	[[nodiscard]] bool    IsUniformMask(const ShaderOperand& operand) const;
 	[[nodiscard]] bool    IsUniformMaskIn(const std::bitset<kWords>& masks, const ShaderOperand& operand) const;
 	void                  SetUniformMask(const ShaderOperand& dst, bool uniform);
@@ -322,7 +456,7 @@ private:
 	void                  FindLoops();
 	ShaderFragmentMaskFlow Fixpoint();
 	bool                  RefineLoopExemptions(bool admitted);
-	void                  LeaveLoops(FlowState* state, uint32_t from_pc, uint32_t to_pc) const;
+	void                  LeaveLoops(MaskFlowState* state, uint32_t from_pc, uint32_t to_pc) const;
 	bool                  HasInstructionAt(uint32_t pc) const;
 	void                  MarkAcceptedExecWrites(const ShaderCode& code);
 	bool                  ExecWide() const { return (m_state.scalar[kExecLoWord] & kWide) != 0u; }
@@ -333,8 +467,8 @@ private:
 	bool                  InertDeadTail(uint32_t pc) const;
 
 	ShaderFragmentMaskFlow        m_result;
-	FlowState                     m_state;
-	std::map<uint32_t, FlowState> m_entry;   // state arriving at each branch target, by pc; kept across walks
+	MaskFlowState                     m_state;
+	std::map<uint32_t, MaskFlowState> m_entry; // state arriving at each branch target, by pc; kept across walks
 	std::vector<Region>           m_regions; // open lane-divergent regions
 	std::vector<Loop>             m_loops;
 	bool                          m_changed = false; // a back edge changed a loop-head state during this walk
@@ -344,8 +478,6 @@ private:
 	// SCC holds "some lane of a mask is set", written by the last SCC writer with no join since.
 	bool                          m_scc_any_lane         = false;
 	bool                          m_scc_any_lane_uniform = false;
-	// Taint of every word a static spill wrote to a (VGPR, lane) slot; it only grows across walks.
-	std::map<std::pair<int, int>, uint8_t> m_spills;
 	// Per instruction, from the walk in progress: the extent of EXEC before it, and the taint of a
 	// V_CNDMASK_B32 condition (all extent bits where the walk did not reach it).
 	std::vector<uint8_t>          m_exec_extent;
@@ -641,10 +773,11 @@ void Flow::SetUniformMask(const ShaderOperand& dst, bool uniform)
 
 // Compare of uniform sources, a copy of such a mask, EXEC narrowed by one (nonzero exactly when the compare holds),
 // or the AND/OR of two such masks: every active lane gets c1 && c2 (c1 || c2), the same bit. `sources` holds the
-// uniform words before the instruction wrote its destination, which may also be a source (S_AND VCC, VCC, ...).
-void Flow::TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources)
+// uniform words, and `uniform_comparison` the compare's verdict, before the instruction wrote its destination,
+// which may also be a source (S_AND VCC, VCC, ... or V_CMP s[8:9], 0, s9).
+void Flow::TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources, bool uniform_comparison)
 {
-	if (StartsWith(inst.type, "VCmp")) { SetUniformMask(inst.dst, UniformComparison(inst)); return; }
+	if (StartsWith(inst.type, "VCmp")) { SetUniformMask(inst.dst, uniform_comparison); return; }
 	const auto uniform = [&](const ShaderOperand& operand) { return IsUniformMaskIn(sources, operand); };
 	const bool copy     = (inst.type == Type::SMovB64 || inst.type == Type::SMovB32) && inst.src_num == 1 && uniform(inst.src[0]);
 	const bool narrowed = (inst.type == Type::SAndB64 || inst.type == Type::SAndB32) && inst.src_num == 2 &&
@@ -778,7 +911,7 @@ bool Flow::HasInstructionAt(uint32_t pc) const
 // Control leaving a loop whose lanes ran different iteration counts: every scalar the body
 // writes holds, for a lane that stopped early, the value of an iteration the guest wave may
 // have run further. Lanes still running are unaffected, so nothing changes inside the loop.
-void Flow::LeaveLoops(FlowState* state, uint32_t from_pc, uint32_t to_pc) const
+void Flow::LeaveLoops(MaskFlowState* state, uint32_t from_pc, uint32_t to_pc) const
 {
 	for (const auto& loop: m_loops)
 	{
@@ -787,6 +920,7 @@ void Flow::LeaveLoops(FlowState* state, uint32_t from_pc, uint32_t to_pc) const
 		{
 			if (loop.written.test(word) && !loop.exempt.test(word)) { state->scalar[word] |= kDiverged; }
 		}
+		for (const auto& slot: loop.written_slots) { state->spills[slot] |= kDiverged; }
 	}
 }
 
@@ -810,6 +944,9 @@ void Flow::FindLoops()
 		{
 			if (!loop.Contains(inst.pc)) { continue; }
 			CollectWrites(inst, &loop.written);
+			int vgpr = 0;
+			int lane = 0;
+			if (IsStaticScalarSpillWrite(inst, &vgpr, &lane)) { loop.written_slots.insert({vgpr, lane}); }
 			uint32_t target = 0;
 			if (!IsLaneDependentBranch(inst.type) || !BranchTarget(inst, &target)) { continue; }
 			loop.divergent = loop.divergent || !loop.Contains(target) || target == loop.head_pc;
@@ -859,7 +996,7 @@ bool Flow::Branch(const ShaderInstruction& inst)
 	}
 	if (!HasInstructionAt(target)) { return Fail(inst, "branch target is not an instruction"); }
 	const bool backward = target <= inst.pc;
-	FlowState  outgoing = m_state;
+	MaskFlowState outgoing = m_state;
 	LeaveLoops(&outgoing, inst.pc, target);
 	const auto found = m_entry.find(target);
 	if (found == m_entry.end())
@@ -902,6 +1039,7 @@ void Flow::EnterJoin(uint32_t pc)
 		{
 			if (region->written.test(word)) { m_state.scalar[word] |= kDiverged; }
 		}
+		for (const auto& slot: region->written_slots) { m_state.spills[slot] |= kDiverged; }
 		region = m_regions.erase(region);
 	}
 }
@@ -917,23 +1055,21 @@ bool Flow::IsScalarSpill(const ShaderInstruction& inst) const
 	       (IsStaticScalarSpillRead(inst, &vgpr, &lane) && HasLiveScalarSpill(*m_code, m_index, vgpr, lane));
 }
 
-// The slot carries the taint of every word written to it: a spilled mask word is read back as a mask word. A
-// widened slot taint takes another walk so reads before a later write in a loop see it.
+// The slot carries the taint of the word last spilled to it on this path: a spilled mask word is read back as a
+// mask word. Like a scalar word, a slot written in a divergent region or loop differs between lanes after it.
 bool Flow::ScalarSpill(const ShaderInstruction& inst)
 {
 	int vgpr = 0;
 	int lane = 0;
 	if (IsStaticScalarSpillWrite(inst, &vgpr, &lane))
 	{
-		auto&         slot  = m_spills[{vgpr, lane}];
-		const uint8_t taint = static_cast<uint8_t>(slot | Taint(inst.src[0]));
-		m_changed           = m_changed || taint != slot;
-		slot                = taint;
+		m_state.spills[{vgpr, lane}] = Taint(inst.src[0]);
+		for (auto& region: m_regions) { region.written_slots.insert({vgpr, lane}); }
 		return true;
 	}
 	(void)IsStaticScalarSpillRead(inst, &vgpr, &lane);
-	const auto slot = m_spills.find({vgpr, lane});
-	return Define(inst, inst.dst, slot != m_spills.end() ? slot->second : kClean);
+	const auto slot = m_state.spills.find({vgpr, lane});
+	return Define(inst, inst.dst, slot != m_state.spills.end() ? slot->second : kClean);
 }
 
 // S_CMP_LG_U64 / S_CMP_EQ_U64 of a lane mask against zero: whether any lane's bit is set. The pair must be
@@ -969,10 +1105,10 @@ bool Flow::Step(const ShaderInstruction& inst)
 		return true;
 	}
 	if (IsCompare(inst.type) || (IsScalarAlu(inst.type) && WritesScc(inst.type))) { m_scc_any_lane = false; }
-	// Under the launch EXEC no helper lane is in EXEC, as no Vulkan helper's device-memory write takes effect,
-	// so such a write observes the same lanes on both.
-	const bool launch_write = m_index < m_launch_exec_end && WritesDeviceMemory(inst);
-	if (WritesMemory(inst.type) && !(m_addtid_spills && IsAddtid(inst.type)) && !launch_write)
+	// While EXEC holds no helper lane (the launch EXEC, or a mask narrowed from it), no Vulkan helper's
+	// device-memory write is missing on the host either, so such a write observes the same lanes on both.
+	const bool live_write = !ExecWide() && WritesDeviceMemory(inst);
+	if (WritesMemory(inst.type) && !(m_addtid_spills && IsAddtid(inst.type)) && !live_write)
 	{
 		return Fail(inst, "memory write: helper lanes would be observable");
 	}
@@ -1011,15 +1147,16 @@ bool Flow::Step(const ShaderInstruction& inst)
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 		return true;
 	}
-	// S_*_SAVEEXEC: the destination is a copy of the old EXEC.
+	// S_*_SAVEEXEC: the destination is a copy of the old EXEC, helper lanes included.
 	if (ShaderInstructionTypeChangesExec(inst.type) && inst.dst.type != Operand::ExecLo)
 	{
-		produced = static_cast<uint8_t>((produced & ~kExtent) | exec_extent);
+		produced = static_cast<uint8_t>((produced & ~(kExtent | kWide)) | exec_extent | (ExecWide() ? kWide : kClean));
 	}
 	const bool exec_subset_before = !m_regions.empty() && m_regions.back().exec_subset;
 	const bool one_outside_after  = ResultOneOutsideRegion(inst);
 	m_lane_preserving = PreservesLanesOutsideRegion(inst);
-	const auto uniform_sources = m_state.uniform_mask;
+	const auto uniform_sources    = m_state.uniform_mask;
+	const bool uniform_comparison = UniformComparison(inst);
 	const bool defined = Define(inst, inst.dst, produced) && Define(inst, inst.dst2, produced);
 	m_lane_preserving = false;
 	if (!defined) { return false; }
@@ -1034,7 +1171,7 @@ bool Flow::Step(const ShaderInstruction& inst)
 		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (wide ? kWide : kClean) | (outer ? kOuter : kClean) | kPartial);
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 	}
-	TrackUniformMask(inst, uniform_sources);
+	TrackUniformMask(inst, uniform_sources, uniform_comparison);
 	// SCC = "result is nonzero": it is as wide as the mask the instruction produced, not as the
 	// sources it read (ANDN2 of a narrow mask by a wide one is narrow).
 	const uint8_t scc_source = (produced & kMask) != 0u ? static_cast<uint8_t>((source_taint & ~kWide) | (produced & kWide)) : source_taint;
@@ -1043,8 +1180,8 @@ bool Flow::Step(const ShaderInstruction& inst)
 }
 
 // Every EXEC write the walk accepted is pointwise mask algebra over existing lanes. The
-// widening ones are safe because an export is refused while EXEC may include helper
-// lanes (the kWide bit), so no closed-bracket shape has to be recognized.
+// widening ones are safe because an export or a memory write is refused while EXEC may
+// include helper lanes (the kWide bit), so no closed-bracket shape has to be recognized.
 void Flow::MarkAcceptedExecWrites(const ShaderCode& code)
 {
 	const auto& instructions = code.GetInstructions();
@@ -1140,7 +1277,6 @@ ShaderFragmentMaskFlow Flow::Fixpoint()
 {
 	m_result = {};
 	m_entry.clear();
-	m_spills.clear();
 	for (auto& loop: m_loops) { loop.preserving_seen.reset(); }
 	for (uint32_t pass = 0; pass < kMaxPasses; ++pass)
 	{

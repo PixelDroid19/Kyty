@@ -513,6 +513,36 @@ TEST(EmulatorGraphicsDirtyTracking, FaultAndRearmAdvanceGeneration)
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
+// A rearm that finds the whole range armed lets later rearms skip the page walk,
+// until a write to any of its pages makes that page writable again.
+TEST(EmulatorGraphicsDirtyTracking, ProvenArmedRangeIsProtectedAgainAfterAWrite)
+{
+	Mapping mapping(2);
+	ASSERT_NE(mapping.address, 0u);
+	FakeProtection      protection {mapping.address, GetPageSize(), std::vector<Mode>(2, Mode::ReadWrite)};
+	GpuDirtyPageTracker tracker(protection.Ops());
+	protection.tracker = &tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	protection.calls.clear();
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	EXPECT_TRUE(protection.calls.empty());
+
+	const uintptr_t written = mapping.address + GetPageSize();
+	ASSERT_TRUE(tracker.HandleWriteFault(written));
+	protection.calls.clear();
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	ASSERT_EQ(protection.calls.size(), 1u);
+	EXPECT_EQ(protection.calls[0].address, written);
+	EXPECT_EQ(protection.calls[0].size, GetPageSize());
+
+	const uint64_t before = tracker.SnapshotGeneration(mapping.address, mapping.size);
+	EXPECT_TRUE(tracker.HandleWriteFault(written));
+	EXPECT_TRUE(tracker.ChangedSince(mapping.address, mapping.size, before));
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
 TEST(EmulatorGraphicsDirtyTracking, TombstoneProbeFindsExistingArmedPageBeforeReuse)
 {
 	Mapping mapping(2);
@@ -1503,6 +1533,8 @@ TEST(EmulatorGraphicsDirtyTracking, UnmapRevokesArmedTokensAndRemapIsRecaptured)
 	ASSERT_NE(address, 0u);
 	GpuDirtyPageTracker tracker;
 	ASSERT_TRUE(tracker.RegisterRange(address, page_size));
+	ASSERT_TRUE(tracker.Rearm(address, page_size));
+	// The second rearm finds the range armed and proves it; the unmap must revoke that proof.
 	ASSERT_TRUE(tracker.Rearm(address, page_size));
 
 	ASSERT_TRUE(Free(address));

@@ -4,6 +4,7 @@
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <vector>
@@ -72,7 +73,7 @@ private:
 
 	mutable std::mutex          m_mutex;
 	std::vector<CompletedQueue> m_completed;
-	std::vector<Entry>          m_entries;
+	std::deque<Entry>           m_entries;
 	bool                        m_draining = false;
 };
 

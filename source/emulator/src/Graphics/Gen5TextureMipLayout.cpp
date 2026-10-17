@@ -125,8 +125,9 @@ constexpr MipTailLocation k_depth_64kb_mip_tail[2][12] = {
 	                         : MipTailLocation {0u, block_height / divisor};
 }
 
-[[nodiscard]] bool get_standard_texture_mip_layout(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch,
-                                                    uint32_t levels, uint32_t block_bytes, Gen5TextureMipLayout* layout)
+[[nodiscard]] bool get_standard_mip_layout(uint32_t bytes_per_element, uint32_t texels_per_element, uint32_t width,
+                                            uint32_t height, uint32_t pitch, uint32_t levels, uint32_t block_bytes,
+                                            Gen5TextureMipLayout* layout)
 {
 	if (layout == nullptr)
 	{
@@ -139,7 +140,6 @@ constexpr MipTailLocation k_depth_64kb_mip_tail[2][12] = {
 		return false;
 	}
 
-	const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(format);
 	uint32_t       block_width       = 0;
 	uint32_t       block_height      = 0;
 	uint32_t       bytes_log2        = 0;
@@ -152,7 +152,6 @@ constexpr MipTailLocation k_depth_64kb_mip_tail[2][12] = {
 	block_width *= block_scale;
 	block_height *= block_scale;
 
-	const uint32_t texels_per_element = (ShaderGen5TextureIsBlockCompressed(format) ? 4u : 1u);
 	uint32_t       base_element_width = 0;
 	uint32_t       base_element_height = 0;
 	uint32_t       base_element_pitch = 0;
@@ -281,6 +280,14 @@ constexpr MipTailLocation k_depth_64kb_mip_tail[2][12] = {
 	return true;
 }
 
+[[nodiscard]] bool get_standard_texture_mip_layout(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch,
+                                                    uint32_t levels, uint32_t block_bytes, Gen5TextureMipLayout* layout)
+{
+	const uint32_t texels_per_element = (ShaderGen5TextureIsBlockCompressed(format) ? 4u : 1u);
+	return get_standard_mip_layout(ShaderGen5TextureBytesPerElement(format), texels_per_element, width, height, pitch, levels,
+	                               block_bytes, layout);
+}
+
 } // namespace
 
 bool Gen5GetStandard4KBTextureMipLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch,
@@ -293,6 +300,12 @@ bool Gen5GetStandard64KBTextureMipLayout(uint32_t format, uint32_t width, uint32
                                           uint32_t levels, Gen5TextureMipLayout* layout)
 {
 	return get_standard_texture_mip_layout(format, width, height, pitch, levels, 65536u, layout);
+}
+
+bool Gen5GetRenderTarget64KBMipLayout(uint32_t bytes_per_element, uint32_t width, uint32_t height, uint32_t pitch,
+                                      uint32_t levels, Gen5TextureMipLayout* layout)
+{
+	return get_standard_mip_layout(bytes_per_element, 1u, width, height, pitch, levels, 65536u, layout);
 }
 
 bool Gen5GetStandard256BTextureMipLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch,
@@ -499,8 +512,11 @@ bool Gen5DetileStandard4KBTextureMipChain(void* dst, uint64_t dst_size, const vo
 	return true;
 }
 
-bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
-                                             const Gen5TextureMipLayout& layout)
+// GFX10 places thin 64 KiB mip chains and tails by block size and element
+// size alone, so the standard and render-target swizzles share one chain and
+// differ only in the in-block element order.
+static bool detile_64kb_mip_chain(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
+                                  const Gen5TextureMipLayout& layout, TileDetileLayout swizzle)
 {
 	const uint32_t block_width = TileGet64KBBlockWidth(layout.bytes_per_element);
 	if (dst == nullptr || src == nullptr || block_width == 0u || layout.levels == 0u || layout.levels > 16u ||
@@ -526,7 +542,7 @@ bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const v
 		TileDetileRequest request {};
 		request.src = input + entry.tiled_offset;
 		request.src_bytes = entry.tiled_size;
-		request.layout = TileDetileLayout::Standard64KB;
+		request.layout = swizzle;
 		request.bytes_per_element = layout.bytes_per_element;
 		request.pitch_elems = entry.tiled_pitch;
 		request.width = entry.element_width;
@@ -560,6 +576,18 @@ bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const v
 		}
 	}
 	return true;
+}
+
+bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
+                                             const Gen5TextureMipLayout& layout)
+{
+	return detile_64kb_mip_chain(dst, dst_size, src, src_size, layout, TileDetileLayout::Standard64KB);
+}
+
+bool Gen5DetileRenderTarget64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
+                                                 const Gen5TextureMipLayout& layout)
+{
+	return detile_64kb_mip_chain(dst, dst_size, src, src_size, layout, TileDetileLayout::Sw64kRx);
 }
 
 bool Gen5GetDepth64KBTextureMipLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch,

@@ -241,6 +241,7 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, Dec
 	// V_CMPX writes only EXEC; the decoder's VCC destination is a placeholder.
 	const bool exec_compare = out->vector && NameStartsWith(name, "VCmpx");
 	out->writes_scc_data    = NameStartsWith(name, "SCmp") || instruction.type == ShaderInstructionType::SAbsI32 ||
+	                          instruction.type == ShaderInstructionType::SAbsdiffI32 ||
 	                          instruction.type == ShaderInstructionType::SSubbU32 || instruction.type == ShaderInstructionType::SAshrI64;
 	if (IsLaneCrossingType(instruction.type))
 	{

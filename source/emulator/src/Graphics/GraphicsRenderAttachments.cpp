@@ -10,6 +10,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/ColorDccClear.h"
 #include "Emulator/Graphics/ComputeColorFill.h"
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsState.h"
@@ -43,6 +44,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -84,9 +86,10 @@ static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, Com
 	for (uint32_t i = 0; i < provenance.entry_count; ++i)
 	{
 		const auto& entry = provenance.entries[i];
-		// Exact color-image aliases (render targets and sampled copies of the same bytes) receive the fill;
-		// any other or partial alias has no proven representation of it.
-		const bool image_alias = entry.type == GpuMemoryObjectType::RenderTexture || entry.type == GpuMemoryObjectType::Texture;
+		// Exact color-image aliases (render targets, display buffers and sampled copies of the same bytes)
+		// receive the fill; any other or partial alias has no proven representation of it.
+		const bool image_alias = entry.type == GpuMemoryObjectType::RenderTexture || entry.type == GpuMemoryObjectType::VideoOutBuffer ||
+		                         entry.type == GpuMemoryObjectType::Texture;
 		if (entry.type != GpuMemoryObjectType::StorageBuffer && !image_alias)
 		{
 			return false;
@@ -111,11 +114,15 @@ static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, Com
 	return true;
 }
 
-// Every exact color-image alias of the filled range: render targets and sampled texture copies.
+// Every exact color-image alias of the filled range: render targets, display buffers and sampled texture copies.
 static Vector<VulkanImage*> FindComputeColorFillImages(CommandBuffer* buffer, uint64_t address, uint64_t size)
 {
 	Vector<VulkanImage*> images;
 	for (auto* image: FindRenderTexture(buffer, address, size, true)) { images.Add(image); }
+	for (const auto& object: GpuMemoryFindObjectsForSubmission(buffer, address, size, GpuMemoryObjectType::VideoOutBuffer, true, false))
+	{
+		if (object.type == GpuMemoryObjectType::VideoOutBuffer) { images.Add(static_cast<VideoOutVulkanImage*>(object.obj)); }
+	}
 	for (const auto& object: GpuMemoryFindObjectsForSubmission(buffer, address, size, GpuMemoryObjectType::Texture, true, false))
 	{
 		if (object.type == GpuMemoryObjectType::Texture) { images.Add(static_cast<TextureVulkanImage*>(object.obj)); }
@@ -168,6 +175,7 @@ static bool ClearColorImageAliases(CommandBuffer* buffer, uint64_t address, uint
 		                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 	}
 	GpuMemoryResetHash(&address, &size, 1, GpuMemoryObjectType::RenderTexture);
+	GpuMemoryResetHash(&address, &size, 1, GpuMemoryObjectType::VideoOutBuffer);
 	GpuMemoryResetHash(&address, &size, 1, GpuMemoryObjectType::Texture);
 	return true;
 }
@@ -217,7 +225,7 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	const auto& buffers = input.bind.storage_buffers;
 
 	if (!proof.valid || buffers.buffers_num != 1 || input.bind.textures2D.textures_num != 0 ||
-	    input.bind.samplers.samplers_num != 0 || input.bind.gds_pointers.pointers_num != 0 ||
+	    input.bind.samplers.samplers_num != 0 || ShaderGdsBufferBound(input.bind.gds_pointers) ||
 	    proof.workgroup_shift > 10u || proof.workgroup_register != input.workgroup_register ||
 	    input.threads_num[0] != (1u << proof.workgroup_shift) || input.threads_num[1] != 1u || input.threads_num[2] != 1u ||
 	    !input.group_id[0] || input.group_id[1] || input.group_id[2] || input.thread_ids_num != 1 ||
@@ -370,6 +378,43 @@ bool PropagateComputeUniformStencilFill(CommandBuffer* buffer, const ComputeUnif
 		TransitionDepthStencilImage(vk_buffer, image, restore_layout);
 		cleared = true;
 	}
+	if (cleared) { GpuMemoryResetPlaneHash(fill.address, fill.size, GpuMemoryObjectType::DepthStencilBuffer); }
+	return cleared;
+}
+
+bool PropagateComputeUniformDepthFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+{
+	// Every 32-bit texel of the plane receives the same float depth. A clear
+	// stores only values in [0, 1]; any other value keeps the guest-memory path.
+	float value = 0.0f;
+	std::memcpy(&value, fill.words.data(), sizeof(value));
+	const bool uniform_texels = std::all_of(fill.words.begin(), fill.words.end(), [&](uint32_t word) { return word == fill.words[0]; });
+	if (!uniform_texels || !(value >= 0.0f && value <= 1.0f) || !ComputeColorFillUsesGraphicsQueue(buffer))
+	{
+		return false;
+	}
+	bool cleared = false;
+	for (const auto& object:
+	     GpuMemoryFindObjectsWithRangeForSubmission(buffer, fill.address, fill.size, GpuMemoryObjectType::DepthStencilBuffer))
+	{
+		auto* image = static_cast<DepthStencilVulkanImage*>(object.obj);
+		// The same first-use and sample-location limits as the stencil plane.
+		if (image == nullptr || image->image == nullptr || image->depth_vaddr != fill.address ||
+		    (image->format != VK_FORMAT_D32_SFLOAT && image->format != VK_FORMAT_D32_SFLOAT_S8_UINT) ||
+		    image->layout == VK_IMAGE_LAYOUT_UNDEFINED || image->sample_locations_compatible)
+		{
+			continue;
+		}
+		auto       vk_buffer      = buffer->RecordOutsideRenderPass();
+		const auto restore_layout = image->layout;
+		TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		const VkClearDepthStencilValue clear {value, 0u};
+		const VkImageSubresourceRange  range {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, image->mip_levels, 0u, image->array_layers};
+		vkCmdClearDepthStencilImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
+		TransitionDepthStencilImage(vk_buffer, image, restore_layout);
+		cleared = true;
+	}
+	if (cleared) { GpuMemoryResetPlaneHash(fill.address, fill.size, GpuMemoryObjectType::DepthStencilBuffer); }
 	return cleared;
 }
 
@@ -902,6 +947,8 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	r->htile_tile_swizzle   = z.htile_data_base_addr & htile_addr_mask;
 	r->width                = (ps5 ? depth_extent.width : z.width);
 	r->height               = (ps5 ? depth_extent.height : z.height);
+	r->slice_start          = z.depth_view.slice_start;
+	r->slice_max            = z.depth_view.slice_max;
 	r->depth_clear_enable   = rc.depth_clear_enable;
 	r->suppress_depth_write = rc.depth_clear_enable;
 	r->depth_clear_value    = hw.GetDepthClearValue();
@@ -1046,6 +1093,7 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 	if (r->vulkan_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->vulkan_buffer == nullptr condition ignored (continuing)\n"); }
 	const bool stencil_plane        = r->stencil_buffer_size > 0 && DepthFormatHasStencil(r->format);
+	r->vulkan_buffer->depth_vaddr   = r->depth_buffer_size > 0 ? r->depth_buffer_vaddr : 0u;
 	r->vulkan_buffer->stencil_vaddr = stencil_plane ? r->stencil_buffer_vaddr : 0u;
 	if (sample_locations_compatible && !r->vulkan_buffer->sample_locations_compatible)
 	{
@@ -1093,6 +1141,24 @@ DepthStencilAttachmentAccess ResolveDepthStencilAttachmentAccess(const RenderDep
 	return stencil_writes && has_stencil ? DepthStencilAttachmentAccess::DepthReadOnly : DepthStencilAttachmentAccess::ReadOnly;
 }
 
+// MAX_MIP and MIP_LEVEL select one level of a tiled chain that starts at the
+// target base; the attachment covers the whole chain. Layered chains keep
+// their single-level description.
+static void DescribeRenderColorMipChain(const HW::RenderTarget& rt, uint32_t bytes_per_element, RenderColorAttachmentInfo* attachment)
+{
+	const uint32_t       levels = rt.attrib2.num_mip_levels + 1u;
+	Gen5TextureMipLayout layout {};
+	if (!Gen5GetRenderTarget64KBMipLayout(bytes_per_element, attachment->width, attachment->height, attachment->pitch, levels, &layout) ||
+	    rt.view.current_mip_level >= levels)
+	{
+		EXIT("unsupported render-target mip chain: %ux%u pitch=%u bpe=%u levels=%u mip=%u\n", attachment->width, attachment->height,
+		     attachment->pitch, bytes_per_element, levels, rt.view.current_mip_level);
+	}
+	attachment->size       = layout.tiled.size;
+	attachment->mip_levels = levels;
+	attachment->mip_level  = rt.view.current_mip_level;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderTarget& rt, RenderColorInfo* r)
 {
@@ -1127,6 +1193,14 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 				attachment.tile       = true;
 				attachment.write_back = false;
 				break;
+			case 0x0:
+				attachment.tile       = false;
+				attachment.write_back = false;
+				if (attachment.samples != VK_SAMPLE_COUNT_1_BIT)
+				{
+					EXIT("linear render target cannot be multisampled: samples=%u\n", static_cast<unsigned>(attachment.samples));
+				}
+				break;
 			default: EXIT("unsupported render-target tile mode: %u\n", rt.attrib3.tile_mode);
 		}
 
@@ -1136,13 +1210,14 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		const uint32_t rt_bpp = render_format.bytes_per_element;
 
 		// Element pitch: hardware PITCH when programmed, otherwise align width
-		// to the 64 KiB block width for this BPE (same rule as sample tile 27).
+		// to the 64 KiB block width for this BPE (same rule as sample tile 27),
+		// or to 256-byte rows for a linear target (same rule as sample tile 0).
 		if (rt.pitch.pitch_div8_minus1 != 0)
 		{
 			attachment.pitch = (rt.pitch.pitch_div8_minus1 + 1u) << 3u;
 		} else
 		{
-			attachment.pitch = TileAlign64KBPitch(attachment.width, rt_bpp);
+			attachment.pitch = attachment.tile ? TileAlign64KBPitch(attachment.width, rt_bpp) : TileAlignLinearPitch(attachment.width, rt_bpp);
 			if (attachment.pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment.pitch == 0u condition ignored (continuing)\n"); }
 		}
 
@@ -1161,6 +1236,10 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		attachment.image_layers     = array_view.image_layers;
 		attachment.base_array_layer = array_view.base_layer;
 		attachment.layer_count      = array_view.layer_count;
+		if (attachment.tile && attachment.image_layers == 1u && rt.attrib2.num_mip_levels != 0u)
+		{
+			DescribeRenderColorMipChain(rt, rt_bpp, &attachment);
+		}
 		if (attachment.image_layers > 1u &&
 		    GpuMemoryValidateAllocatedRange(rt.base.addr, attachment.size) != GpuMemoryRangeValidationStatus::Valid)
 		{
@@ -1372,6 +1451,7 @@ static ResolutionExtent RenderTextureCandidateHostExtent(const RenderColorAttach
 	ResolutionResourceInfo resource;
 	resource.kind            = ResolutionResourceKind::ColorAttachment;
 	resource.sample_count    = static_cast<uint32_t>(attachment.samples);
+	resource.mip_levels      = attachment.mip_levels;
 	resource.cpu_transfer    = RenderTextureMayCpuUploadOnUpdate(attachment.tile, attachment.write_back);
 	resource.ambiguous_alias = !RenderResolutionAliasAllowsRanges(&attachment.base_addr, &attachment.size, 1,
 	                                                              GpuMemoryObjectType::RenderTexture, true);
@@ -1446,7 +1526,8 @@ RenderTextureVulkanImage* DemoteScaledRenderTexture(uint64_t submit_id, CommandB
 	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_PITCH]),
 	                           params[RenderTextureObject::PARAM_WRITE_BACK] != 0,
 	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_SAMPLES]),
-	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]));
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]), 0, 0,
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_MIP_LEVELS]));
 	auto* demoted = static_cast<RenderTextureVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, object.vaddr, object.size, native));
 	EXIT_IF(demoted == nullptr || demoted == image || demoted->IsResolutionScaled());
@@ -1494,7 +1575,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		RenderTextureObject vulkan_buffer_info(attachment.render_texture_format, attachment.width, attachment.height, attachment.tile,
 		                                      attachment.neo, attachment.pitch, attachment.write_back,
 		                                      static_cast<uint32_t>(attachment.samples), attachment.image_layers, host.width,
-		                                      host.height);
+		                                      host.height, attachment.mip_levels);
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, attachment.base_addr, attachment.size, vulkan_buffer_info));
 		if (buffer_vulkan == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_vulkan == nullptr condition ignored (continuing)\n"); }
@@ -1570,6 +1651,13 @@ static void PreserveExpandedDccAttachment(CommandBuffer* buffer, const HW::Rende
 	RenderColorInfo color {};
 	EXIT_IF(!DescribeRenderColorSlotInfo(buffer, rt, &color));
 	const auto& attachment = color.attachment[0];
+	if (attachment.type == RenderColorType::DisplayBuffer)
+	{
+		// The host display image is rendered with expanded color as well; only
+		// its registered backing has to exist.
+		EXIT_IF(attachment.existing_video_image == nullptr);
+		return;
+	}
 	if (attachment.type != RenderColorType::RenderTexture)
 	{
 		EXIT("DCC decompression requires an existing render texture\n");
@@ -1638,7 +1726,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	// stream has a chance to continue.
 	if (source_rt.base.addr == 0 || destination_rt.base.addr == 0)
 	{
-		if (std::getenv("KYTY_DUMP_COLOR_RESOLVE") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_COLOR_RESOLVE"); env != nullptr)
 		{
 			static uint32_t skipped_logs = 0;
 			if (skipped_logs < 32u)
@@ -1655,7 +1743,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	}
 	if (!DescribeRenderColorSlotInfo(buffer, source_rt, &source)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !DescribeRenderColorSlotInfo(buffer, source_rt, &source) condition ignored (continuing)\n"); }
 	if (!DescribeRenderColorSlotInfo(buffer, destination_rt, &destination)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !DescribeRenderColorSlotInfo(buffer, destination_rt, &destination) condition ignored (continuing)\n"); }
-	if (std::getenv("KYTY_DUMP_COLOR_RESOLVE") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_COLOR_RESOLVE"); env != nullptr)
 	{
 		static uint32_t describe_logs = 0;
 		if (describe_logs < 32u)
@@ -1681,7 +1769,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	auto* src = source.attachment[0].vulkan_buffer;
 	auto* dst = destination.attachment[0].vulkan_buffer;
 	if (src == nullptr || dst == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr || dst == nullptr condition ignored (continuing)\n"); }
-	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env != nullptr)
 	{
 		static uint32_t logs = 0;
 		if (logs < 32u)

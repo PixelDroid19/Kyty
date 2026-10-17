@@ -875,14 +875,9 @@ uint64_t GpuMemory::create_raw_source_write_time(const ObjectInfo& owner)
 	return owner.gpu_update_time > owner.cpu_update_time ? owner.gpu_update_time : 0u;
 }
 
-// A depth target over a render target or storage view, or a storage view over a depth target, that reinterprets
-// its 32-bit texels.
+// A depth target over a storage view, or a storage view over a depth target, that reinterprets its 32-bit texels.
 static bool CreateReadsTexelBits(const GpuObject& info, GpuMemoryObjectType parent_type, const uint64_t* parent_params)
 {
-	if (info.type == GpuMemoryObjectType::DepthStencilBuffer && parent_type == GpuMemoryObjectType::RenderTexture)
-	{
-		return DepthStencilBufferCanSeedFromRenderTexture(info.params, parent_params, Config::IsNextGen());
-	}
 	if (info.type == GpuMemoryObjectType::DepthStencilBuffer && parent_type == GpuMemoryObjectType::StorageTexture)
 	{
 		return StorageTextureSharesDepthTexels(parent_params, info.params, Config::IsNextGen());
@@ -980,18 +975,26 @@ String GpuMemory::create_dbg_parents(int heap_id, const Vector<OverlappedBlock>&
 		for (int i = 0; i < 10; i++) { text += String::FromPrintf(" %" PRIu64, values[i]); }
 		return text;
 	};
+	const auto ranges = [](const Block& block)
+	{
+		String text;
+		for (int i = 0; i < block.vaddr_num; i++)
+		{
+			text += String::FromPrintf(" [0x%016" PRIx64 ", +0x%" PRIx64 ")", block.vaddr[i], block.size[i]);
+		}
+		return text;
+	};
 	list.Add(String::FromPrintf("\t new params:%s", params(info.params).C_Str()));
 	for (const auto& d: others)
 	{
 		const auto& h = heap.objects[d.object_id];
 		list.Add(String::FromPrintf("\t parent id=%d type=%s rel=%s scenario=%s parents=%u read_only=%d in_use=%d origin=%s"
-		                            " cpu_time=%" PRIu64 " gpu_time=%" PRIu64 " write_time=%" PRIu64 " vaddr=0x%016" PRIx64
-		                            " size=0x%016" PRIx64 " params:%s",
+		                            " cpu_time=%" PRIu64 " gpu_time=%" PRIu64 " write_time=%" PRIu64 " ranges:%s params:%s",
 		                            d.object_id, Core::EnumName(h.info.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
 		                            Core::EnumName(h.scenario).C_Str(), static_cast<unsigned>(h.others.Size()), h.info.read_only ? 1 : 0,
 		                            h.info.in_use ? 1 : 0, Core::EnumName(h.info.content_origin).C_Str(),
 		                            static_cast<uint64_t>(h.info.cpu_update_time), static_cast<uint64_t>(h.info.gpu_update_time),
-		                            static_cast<uint64_t>(h.info.write_time), h.block.vaddr[0], h.block.size[0], params(h.info.params).C_Str()));
+		                            static_cast<uint64_t>(h.info.write_time), ranges(h.block).C_Str(), params(h.info.params).C_Str()));
 	}
 	return list.Concat(U'\n');
 }
@@ -2073,6 +2076,38 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
+			// StorageTexture over a recycled allocation that only guest-byte caches
+			// describe: CPU-uploaded sampled textures inside it (linked, as for a single
+			// parent) and read-only VertexBuffers (reclaimed). Guest memory holds the
+			// current bytes of every parent, so the image seeds from it.
+			Vector<int> storage_reclaim_vertex_ids;
+			bool        multi_storage_texture_over_caches = info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
+			for (const auto& obj: others)
+			{
+				if (!multi_storage_texture_over_caches)
+				{
+					break;
+				}
+				const auto& h = heap.objects[obj.object_id];
+				EXIT_IF(h.free);
+				const auto& o = h.info;
+				if (GpuMemoryAllowsStorageTextureReclaimVertex(o.object.type, obj.relation, o.read_only, info.type))
+				{
+					storage_reclaim_vertex_ids.Add(obj.object_id);
+					continue;
+				}
+				multi_storage_texture_over_caches =
+				    GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type) &&
+				    o.content_origin == GpuMemoryContentOrigin::CpuUpload &&
+				    !GpuMemoryHasPendingWritableWriteBack(o.in_use, o.read_only, o.write_back_func != nullptr,
+				                                          m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies()));
+			}
+			// Parents of one kind already take the uniform path below.
+			if (storage_reclaim_vertex_ids.IsEmpty() || storage_reclaim_vertex_ids.Size() == others.Size())
+			{
+				multi_storage_texture_over_caches = false;
+			}
+
 			if (multi_depth_stencil_reclaim)
 			{
 				const uint64_t htile_addr = info.params[DepthStencilBufferObject::PARAM_HTILE_ADDR];
@@ -2127,7 +2162,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				                               : -1;
 				if (seed_id >= 0)
 				{
-					// The depth target reinterprets the bytes one render target rendered: copy them from it alone,
+					// The depth target reinterprets the bytes one storage view last held: copy them from it alone,
 					// then retire every reclaimed parent.
 					Vector<OverlappedBlock> seed;
 					for (const auto& obj: others)
@@ -2286,6 +2321,29 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			} else if (multi_storage_texture_alias)
 			{
 				overlap = true;
+			} else if (multi_storage_texture_over_caches)
+			{
+				// Drop reclaimed VBs from the link set; free them after create.
+				Vector<OverlappedBlock> keep;
+				for (const auto& obj: others)
+				{
+					bool reclaim = false;
+					for (int id: storage_reclaim_vertex_ids)
+					{
+						if (id == obj.object_id)
+						{
+							reclaim = true;
+							break;
+						}
+					}
+					if (!reclaim)
+					{
+						keep.Add(obj);
+					}
+				}
+				selective_reclaim_ids = storage_reclaim_vertex_ids;
+				others                = keep;
+				overlap               = true;
 			} else
 			{
 				if (!create_all_the_same(others, heap_id))

@@ -33,9 +33,24 @@ std::string_view ShaderInstructionTypeName(ShaderInstructionType type)
 	return index < kNames.size() ? kNames[index] : std::string_view {};
 }
 
+// Compared in place: analyses ask per instruction of every draw, and most names
+// differ from the prefix at the first character, so a library compare call
+// costs more than the comparison itself.
 bool ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix)
 {
-	return ShaderInstructionTypeName(type).substr(0, prefix.size()) == prefix;
+	const auto name = ShaderInstructionTypeName(type);
+	if (name.size() < prefix.size())
+	{
+		return false;
+	}
+	for (size_t i = 0; i < prefix.size(); ++i)
+	{
+		if (name[i] != prefix[i])
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 // Classified once by name: shader analyses ask for every instruction of every draw.
@@ -291,6 +306,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1: return "VdstSdst2Vsrc0Vsrc1"; break;
 		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2: return "VdstSdst2Vsrc0Vsrc1Ssrc2A2"; break;
 		case ShaderInstructionFormat::VdstGds: return "VdstGds"; break;
+		case ShaderInstructionFormat::VaddrVdataOffsetGds: return "VaddrVdataOffsetGds"; break;
 		case ShaderInstructionFormat::VdataOffset: return "VdataOffset"; break;
 		case ShaderInstructionFormat::VdstOffset: return "VdstOffset"; break;
 		case ShaderInstructionFormat::Vdst2VaddrOffset01: return "Vdst2VaddrOffset01"; break;

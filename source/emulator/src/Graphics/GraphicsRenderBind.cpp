@@ -23,6 +23,7 @@
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
+#include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
@@ -2558,7 +2559,7 @@ static void EmitDrawMaterialTraceStorage(FILE* out, uint32_t ordinal, const char
 // vertex/storage/texture/sampler preparation and descriptor bind
 
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
-                                               VkBufferUsageFlags usage, uint64_t read_begin)
+                                               VkBufferUsageFlags usage, uint64_t read_begin, bool zero_tail)
 {
 	if (buffer == nullptr || !read_only || size == 0u || size > kGpuMemoryMaxTransientReadOnlyBytes || read_begin >= size)
 	{
@@ -2570,13 +2571,14 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 	uint64_t compare_ns    = 0u;
 	bool     reused        = false;
 	auto*    result =
-	    buffer->CaptureTransientSnapshotBuffer(addr, size, read_begin, usage, &validation_ns, &upload_ns, &compare_ns, &reused);
+	    buffer->CaptureTransientSnapshotBuffer(addr, size, read_begin, usage, zero_tail, &validation_ns, &upload_ns, &compare_ns,
+	                                           &reused);
 	DebugStatsRecordTransientBufferProbe(validation_ns, 0, upload_ns, result != nullptr, reused, compare_ns);
 	return result;
 }
 
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
-	                   uint32_t first_record, uint32_t required_records)
+	                   uint32_t first_record, uint32_t required_records, bool records_exact)
 {
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 
@@ -2594,9 +2596,13 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 		// Every binding steps per vertex, so records below the draw's first are never fetched.
 		const uint64_t read_begin =
 		    buffer_info.stride != 0u && first_record < records ? static_cast<uint64_t>(buffer_info.stride) * first_record : 0u;
+		// Fetches past the captured records only exist when the draw range is unknown or
+		// clamped, or when an attribute reaches beyond its record.
+		const bool tail_fetched = !records_exact || required_records == 0 || required_records > available ||
+		                          VulkanVertexInputBindingFetchEnd(input, i) > buffer_info.stride;
 
-		auto* vertices =
-		    TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin);
+		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
+		                                                  tail_fetched);
 		if (vertices == nullptr)
 		{
 			vertices = static_cast<VulkanBuffer*>(
@@ -3207,6 +3213,19 @@ static ShaderSampledImageViewKind ResolveBoundSampledImageView(const VulkanImage
 	return arrayed ? ShaderSampledImageViewKind::Depth2DArray : ShaderSampledImageViewKind::Depth2D;
 }
 
+// A storage view of a whole single-sample depth plane at its guest extent: one 32-bit float layer at level 0.
+static bool DepthPlaneStorageViewMatches(const VulkanImage* depth, uint32_t fmt, uint32_t width, uint32_t height, uint32_t levels,
+                                         uint32_t base_level, uint32_t layers, uint32_t base_array, bool three_dimensional)
+{
+	if ((depth->format != VK_FORMAT_D32_SFLOAT && depth->format != VK_FORMAT_D32_SFLOAT_S8_UINT) || depth->samples != VK_SAMPLE_COUNT_1_BIT ||
+	    depth->IsResolutionScaled() || !depth->MatchesGuestExtent(width, height))
+	{
+		return false;
+	}
+	return !three_dimensional && levels == 1u && base_level == 0u && layers == 1u && base_array == 0u &&
+	       VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0u, 0u, static_cast<uint16_t>(fmt)) == VK_FORMAT_R32_SFLOAT;
+}
+
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
                             const ShaderSamplerResources& samplers, VulkanImage** images_sampled, VulkanImage** images_storage,
                             int* images_sampled_view, VulkanImage** images_sampled_depth, int* images_sampled_depth_view,
@@ -3216,7 +3235,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
                             int* images_sampled_array_uint_view, VulkanImage** images_sampled_3d_uint,
                             int* images_sampled_3d_uint_view, int* images_storage_view, uint64_t storage_seed_skip_mask,
                             uint32_t** sgprs, DrawMaterialTraceSession* material_trace, const VulkanImage* stencil_attached_depth,
-                            bool scaled_sampling_refused, const RenderColorInfo* pass_color)
+                            bool scaled_sampling_refused, const RenderColorInfo* pass_color, bool compute_stage)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -3632,6 +3651,23 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					}
 				}
 				tex = dtex.At(static_cast<int>(alias_index));
+				// Vulkan has no storage depth image: a dispatch addresses the depth plane through the image's R32F
+				// copy, seeded here and stored back once the dispatch is recorded, so the stencil plane is untouched.
+				if (depth_exact && compute_stage && textures.desc[i].textures2d_without_sampler &&
+				    DepthPlaneStorageViewMatches(tex, fmt, width, height, levels, base_level, view_layers, base_array, three_dimensional))
+				{
+					auto* depth_image = static_cast<DepthStencilVulkanImage*>(tex);
+					auto* plane       = DepthStencilBufferGetStoragePlane(g_render_ctx->GetGraphicCtx(), depth_image);
+					if (!UtilCopyTexelBits(buffer, depth_image, plane, static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL)))
+					{
+						EXIT("depth storage plane seed failed: extent=%ux%u format=%u layout=%u\n", depth_image->extent.width,
+						     depth_image->extent.height, static_cast<uint32_t>(depth_image->format),
+						     static_cast<uint32_t>(depth_image->layout));
+					}
+					buffer->DeferDepthPlaneStoreBack(depth_image);
+					tex         = plane;
+					materialize = "depth-storage-plane";
+				}
 			}
 		}
 		// A depth-tiled view with no depth buffer behind it can still read a
@@ -4786,7 +4822,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			                textures3d_sampled_view, textures2d_sampled_uint, textures2d_sampled_uint_view,
 			                textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures3d_sampled_uint,
 			                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr, &trace_session,
-			                stencil_attached_depth, ScaledSamplingRefused(scaled_image_reads, bind.samplers), pass_color);
+			                stencil_attached_depth, ScaledSamplingRefused(scaled_image_reads, bind.samplers), pass_color,
+			                stage == DescriptorCache::Stage::Compute);
 			if (Config::GetRenderResolutionScope() == Config::RenderResolutionScope::RenderTargets)
 			{
 				RequireScaledImageReads(scaled_image_reads, bind.samplers, stage,
@@ -4808,6 +4845,9 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.gds_pointers.pointers_num > 0)
 		{
 			PrepareGdsPointers(bind.gds_pointers, &sgprs_ptr);
+		}
+		if (ShaderGdsBufferBound(bind.gds_pointers))
+		{
 			gds_buffer      = g_render_ctx->GetGdsBuffer()->GetBuffer(g_render_ctx->GetGraphicCtx(), buffer);
 			need_descriptor = true;
 		}

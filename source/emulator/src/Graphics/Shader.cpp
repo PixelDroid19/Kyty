@@ -145,10 +145,12 @@ bool ShaderSamplerDepthComparisonEligible(const ShaderTextureResources& textures
 
 bool ShaderStorageTextureSwizzleInShader(const ShaderTextureResource& texture)
 {
-	const bool gen5 = Config::IsNextGen();
-	return ShaderStorageImageSwizzleInShader(texture.DstSelXYZW(),
-	                                         VulkanStorageHasRedBlueView(gen5 ? 0u : texture.Dfmt(), gen5 ? 0u : texture.Nfmt(),
-	                                                                     gen5 ? texture.Format() : 0u));
+	const bool     gen5 = Config::IsNextGen();
+	const uint8_t  dfmt = gen5 ? 0u : texture.Dfmt();
+	const uint8_t  nfmt = gen5 ? 0u : texture.Nfmt();
+	const uint16_t fmt  = gen5 ? texture.Format() : 0u;
+	return ShaderStorageImageSwizzleInShader(texture.DstSelXYZW(), VulkanStorageHasRedBlueView(dfmt, nfmt, fmt),
+	                                         VulkanStorageHasSingleChannel(dfmt, nfmt, fmt));
 }
 
 State::ImageSampleOperation ShaderTextureSampleOperation(const ShaderTextureResource& texture, State::ImageSampleOperation operation)
@@ -2132,6 +2134,63 @@ static void AddZeroSBufferResource(ShaderZeroSBufferResources* resources, int st
 	resources->start_register[resources->buffers_num++] = start_register;
 }
 
+// The eight T# dwords an instruction reads are still the shader's entry user
+// SGPRs, and every one of them is zero.
+static bool ShaderImageResourceIsZeroUserData(const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
+                                              uint32_t index, const ShaderOperand& resource, const HW::UserSgprInfo& user_sgpr,
+                                              int user_sgpr_num, int user_data_register_base)
+{
+	constexpr int dwords        = 8;
+	const int     user_register = resource.register_id - user_data_register_base;
+	if (resource.size != dwords || index >= entry_values.size() || user_register < 0 || user_register + dwords > user_sgpr_num ||
+	    resource.register_id + dwords > kShaderScalarLivenessSgprs)
+	{
+		return false;
+	}
+	for (int dword = 0; dword < dwords; ++dword)
+	{
+		if (!entry_values[index].test(static_cast<size_t>(resource.register_id + dword)) || user_sgpr.value[user_register + dword] != 0)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// Records image reads through an all-zero T#. Such a resource binds nothing;
+// the emitter returns zero for it (RDNA2 ISA: an all-zero resource acts as an
+// unbound texture).
+static void CollectZeroImageResources(const ShaderCode& code, const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
+                                      const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, int user_data_register_base,
+                                      ShaderZeroImageResources* resources)
+{
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (!ShaderImageReadReturnsDmaskComponents(inst.type) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
+		    !ShaderImageResourceIsZeroUserData(entry_values, index, inst.src[1], user_sgpr, user_sgpr_num, user_data_register_base))
+		{
+			continue;
+		}
+		bool recorded = false;
+		for (int i = 0; i < resources->images_num; ++i)
+		{
+			recorded = recorded || resources->start_register[i] == inst.src[1].register_id;
+		}
+		if (recorded)
+		{
+			continue;
+		}
+		if (resources->images_num >= ShaderZeroImageResources::IMAGES_MAX)
+		{
+			EXIT("shader zero image capacity exceeded: count=%d capacity=%d register=%d\n", resources->images_num,
+			     ShaderZeroImageResources::IMAGES_MAX, inst.src[1].register_id);
+		}
+		resources->start_register[resources->images_num++] = inst.src[1].register_id;
+	}
+}
+
 // A read-only sampled descriptor is counted in the bank of the shape it was registered with. An
 // instruction shape moves that count, so the bank sizes always match the shape the emitter selects.
 void ShaderSetSampledTextureInstructionShape(ShaderTextureResources* textures, int index, ShaderGen5SampledTextureShape shape)
@@ -2351,6 +2410,20 @@ static int ShaderGdsPointerSourceSgpr(const ShaderCode& code)
 	return gds_source;
 }
 
+// GDS memory instructions address the buffer through M0 and need it bound
+// whether or not an SGPR carries a GDS pointer.
+static bool ShaderUsesGdsMemory(const ShaderCode& code)
+{
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.format == ShaderInstructionFormat::VaddrVdataOffsetGds)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 // A direct-resource slot is ambiguous in driver metadata when it can name the
 // GDS ordered-append pointer instead of its declared kind. Classify by
 // observed use so genuine descriptors keep their binding.
@@ -2483,9 +2556,12 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 		bind->push_constant_size += bind->samplers.samplers_num * 16;
 	}
 
-	if (bind->gds_pointers.pointers_num > 0)
+	if (ShaderGdsBufferBound(bind->gds_pointers))
 	{
 		bind->gds_pointers.binding_index = binding_index++;
+	}
+	if (bind->gds_pointers.pointers_num > 0)
+	{
 		bind->push_constant_size += (((bind->gds_pointers.pointers_num - 1) / 4) + 1) * 16;
 	}
 
@@ -3418,6 +3494,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		}
 	}
 
+	bind->gds_pointers.memory_used = code != nullptr && ShaderUsesGdsMemory(*code);
+
 	// Ordered-append GDS fallback: the descriptor slot is not always declared
 	// in direct_resource_offset, so bind the observed m0 source when the
 	// metadata did not already provide a pointer. Runs before direct-SGPR
@@ -3571,6 +3649,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			bind->samplers.operations[i] = evidence.operation;
 		}
 		ShaderAssociateSampledTextureSamplers(*code, bind, user_data_register_base);
+		CollectZeroImageResources(*code, entry_values, user_sgpr, user_sgpr_num, user_data_register_base, &bind->zero_image_resources);
 	}
 
 	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
@@ -3668,10 +3747,11 @@ Kyty::Core::String8 ShaderVertexNggFrontRefusal(const ShaderVertexInputInfo& inf
 	                                                  : Kyty::Core::String8();
 }
 
-// Whether a vertex-stream SSBO of this draw has a reader left after the fetch rewrite. The
-// scan depends only on the immutable code and the fetch registers; the draw supplies the
-// input resources that decide which candidates become fetches.
-static bool VertexProgramStreamsRead(const ShaderVertexProgram& program, const ShaderVertexInputInfo& info)
+// The vertex-stream access scan depends only on the immutable code and the fetch
+// registers; the draw supplies the input resources that decide which candidates become
+// fetches.
+static std::shared_ptr<const ShaderVertexStreamAccessScan> VertexProgramStreamScan(const ShaderVertexProgram& program,
+                                                                                  const ShaderVertexInputInfo& info)
 {
 	std::shared_ptr<const ShaderVertexStreamAccessScan> scan;
 	{
@@ -3685,7 +3765,21 @@ static bool VertexProgramStreamsRead(const ShaderVertexProgram& program, const S
 		std::lock_guard<std::mutex> lock(program.stream_access_mutex);
 		program.stream_access = scan;
 	}
-	return ShaderVertexStreamStorageHasReader(*scan, info);
+	return scan;
+}
+
+// An attribute-table dword the program never loads is not guest-visible. A hole between
+// declared semantics holds unrelated memory that changes per draw; keeping it would split
+// the shader identity and recompile the same program for every value.
+static void ClearUnreadAttribData(ShaderVertexInputInfo* info, const ShaderVertexStreamAccessScan& scan)
+{
+	for (int i = 0; i < info->fetch_attrib_data_num; i++)
+	{
+		if ((scan.attrib_dwords_read & (1u << static_cast<uint32_t>(i))) == 0)
+		{
+			info->fetch_attrib_data[i] = 0;
+		}
+	}
 }
 
 void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
@@ -3863,9 +3957,15 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		ShaderParseAttrib(info, data.input_semantics, data.num_input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info, ps5);
 		// The generator compiles program->code for a Gen5 non-embedded stage
-		// (ShaderParseVS), so the stream readers are decided on that code.
-		const bool streams_read = !(ps5 && !regs->vs_embedded && info->program != nullptr) ||
-		                          VertexProgramStreamsRead(*info->program, *info);
+		// (ShaderParseVS), so the stream readers and attribute loads are decided on that code.
+		const auto stream_scan = (ps5 && !regs->vs_embedded && info->program != nullptr)
+		                             ? VertexProgramStreamScan(*info->program, *info)
+		                             : nullptr;
+		if (stream_scan != nullptr)
+		{
+			ClearUnreadAttribData(info, *stream_scan);
+		}
+		const bool streams_read = stream_scan == nullptr || ShaderVertexStreamStorageHasReader(*stream_scan, *info);
 		ShaderAppendVertexStreamStorage(info, streams_read);
 
 		constexpr uint32_t user_data_base = 8;
@@ -3994,7 +4094,7 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 // A vector buffer load whose V# no discovered resource describes reads
 // through a descriptor built at run time.
 static bool ShaderHasRuntimeDescriptorLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_register_base,
-                                           const char* type_prefix)
+                                           std::string_view type_prefix)
 {
 	const auto& instructions = code.GetInstructions();
 	return std::any_of(instructions.begin(), instructions.end(),
@@ -4015,6 +4115,40 @@ bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResource
 static bool ShaderHasUnboundTypedBufferLoad(const ShaderCode& code, const ShaderBindResources& bind)
 {
 	return ShaderHasRuntimeDescriptorLoad(code, bind, 0, "TBufferLoad");
+}
+
+bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::ImageLoad:
+		case ShaderInstructionType::ImageSample:
+		case ShaderInstructionType::ImageSampleL:
+		case ShaderInstructionType::ImageSampleLz:
+		case ShaderInstructionType::ImageSampleLzO:
+		case ShaderInstructionType::ImageSampleO:
+		case ShaderInstructionType::ImageSampleB:
+		case ShaderInstructionType::ImageSampleDrefLz:
+		case ShaderInstructionType::ImageSampleCd:
+		case ShaderInstructionType::ImageSampleD: return true;
+		default: return false;
+	}
+}
+
+bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst)
+{
+	if (!ShaderImageReadReturnsDmaskComponents(inst.type) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr)
+	{
+		return false;
+	}
+	for (int i = 0; i < bind.zero_image_resources.images_num; ++i)
+	{
+		if (bind.zero_image_resources.start_register[i] == inst.src[1].register_id)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
@@ -5220,6 +5354,12 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(bind.zero_sbuffer_resources.start_register[i]);
 	}
 
+	ret->ids.Add(bind.zero_image_resources.images_num);
+	for (int i = 0; i < bind.zero_image_resources.images_num; ++i)
+	{
+		ret->ids.Add(bind.zero_image_resources.start_register[i]);
+	}
+
 	ret->ids.Add(bind.textures2D.textures_num);
 
 	for (int i = 0; i < bind.textures2D.textures_num; i++)
@@ -5316,6 +5456,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 	}
 
 	ret->ids.Add(bind.gds_pointers.pointers_num);
+	ret->ids.Add(static_cast<uint32_t>(bind.gds_pointers.memory_used));
 
 	for (int i = 0; i < bind.gds_pointers.pointers_num; i++)
 	{

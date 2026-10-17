@@ -28,38 +28,6 @@ TEST(CoreMemoryAlloc, RecursionStateUsesTheCompleteThreadToken)
 	state.Leave(second_token);
 }
 
-TEST(CoreMemoryAlloc, GuestDomainUsesCompleteThreadTokens)
-{
-	Core::MemoryAllocDetail::ThreadDomainRegistry registry;
-	constexpr uint64_t                            first_token  = 0x000000010000001eu;
-	constexpr uint64_t                            second_token = 0x000000020000001eu;
-
-	EXPECT_TRUE(registry.Add(first_token));
-	EXPECT_TRUE(registry.Add(second_token));
-	EXPECT_TRUE(registry.Contains(first_token));
-	EXPECT_TRUE(registry.Contains(second_token));
-	EXPECT_TRUE(registry.Remove(first_token));
-	EXPECT_FALSE(registry.Contains(first_token));
-	EXPECT_TRUE(registry.Contains(second_token));
-}
-
-TEST(CoreMemoryAlloc, GuestDomainSupportsConcurrentWorkerPool)
-{
-	Core::MemoryAllocDetail::ThreadDomainRegistry registry;
-
-	for (uint64_t token = 1; token <= Core::MemoryAllocDetail::ThreadDomainRegistry::capacity; ++token)
-	{
-		EXPECT_TRUE(registry.Add(token));
-		EXPECT_TRUE(registry.Contains(token));
-	}
-	EXPECT_FALSE(registry.Add(Core::MemoryAllocDetail::ThreadDomainRegistry::capacity + 1));
-
-	for (uint64_t token = 1; token <= Core::MemoryAllocDetail::ThreadDomainRegistry::capacity; ++token)
-	{
-		EXPECT_TRUE(registry.Remove(token));
-	}
-}
-
 TEST(CoreMemoryAlloc, ReallocatesUntrackedSystemBlocks)
 {
 	Core::mem_tracker_disable();

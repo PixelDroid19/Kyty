@@ -250,7 +250,7 @@ bool ShaderInstructionReadsImageResource(ShaderInstructionType type)
 	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
 	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleO ||
 	       type == ShaderInstructionType::ImageSampleB || type == ShaderInstructionType::ImageSampleDrefLz ||
-	       type == ShaderInstructionType::ImageSampleCd;
+	       type == ShaderInstructionType::ImageSampleCd || type == ShaderInstructionType::ImageSampleD;
 }
 
 bool ShaderInstructionWritesImageResource(ShaderInstructionType type)
@@ -265,7 +265,7 @@ bool ShaderInstructionUsesImageSampler(ShaderInstructionType type)
 	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
 	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleO ||
 	       type == ShaderInstructionType::ImageSampleB || type == ShaderInstructionType::ImageSampleDrefLz ||
-	       type == ShaderInstructionType::ImageSampleCd;
+	       type == ShaderInstructionType::ImageSampleCd || type == ShaderInstructionType::ImageSampleD;
 }
 
 State::ImageSampleOperation ShaderInstructionSamplerOperation(ShaderInstructionType type)

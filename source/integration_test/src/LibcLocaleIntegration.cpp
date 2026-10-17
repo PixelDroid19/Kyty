@@ -78,6 +78,25 @@ int main()
 	    static_cast<const Libs::LibC::CxxCtypeFacetLayout*>(locale->ptr->facet_vec[Libs::LibC::kCxxCtypeCharId]);
 	Expect(facet->table == table, "the C API and C++ facet must share one classification table");
 
+	const auto* tolower_record = FindLibcSymbol(symbols, "1uJgoVq3bQU", Loader::SymbolType::Func);
+	const auto* toupper_record = FindLibcSymbol(symbols, "rcQCUr0EaRU", Loader::SymbolType::Func);
+	Expect(tolower_record != nullptr && toupper_record != nullptr, "the case tables must resolve");
+	using GetCaseTableFn = const short*(KYTY_SYSV_ABI*)();
+	Expect(facet->tolower_table == reinterpret_cast<GetCaseTableFn>(tolower_record->vaddr)(),
+	       "the C API and C++ facet must share one lowercase table");
+	Expect(facet->toupper_table == reinterpret_cast<GetCaseTableFn>(toupper_record->vaddr)(),
+	       "the C API and C++ facet must share one uppercase table");
+
+	using CaseCharFn  = char(KYTY_SYSV_ABI*)(const Libs::LibC::CxxCtypeFacetLayout*, char);
+	using CaseRangeFn = const char*(KYTY_SYSV_ABI*)(const Libs::LibC::CxxCtypeFacetLayout*, char*, const char*);
+	auto** ctype_vtable = facet->vtable;
+	Expect(reinterpret_cast<CaseCharFn>(ctype_vtable[4])(facet, 'W') == 'w', "ctype do_tolower must convert letters");
+	Expect(reinterpret_cast<CaseCharFn>(ctype_vtable[4])(facet, '_') == '_', "ctype do_tolower must keep other bytes");
+	Expect(reinterpret_cast<CaseCharFn>(ctype_vtable[6])(facet, 'd') == 'D', "ctype do_toupper must convert letters");
+	char word[] = "Alnum";
+	Expect(reinterpret_cast<CaseRangeFn>(ctype_vtable[5])(facet, word, word + 5) == word + 5 && std::strcmp(word, "alnum") == 0,
+	       "ctype do_tolower must convert a range in place");
+
 	using GetptimesFn = const char* const*(KYTY_SYSV_ABI*)();
 	const auto getptimes = reinterpret_cast<GetptimesFn>(getptimes_record->vaddr);
 	const auto* times     = getptimes();

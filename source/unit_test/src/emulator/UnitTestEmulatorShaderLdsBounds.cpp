@@ -108,6 +108,7 @@ struct State
 {
 	std::vector<uint32_t> lds {0x12345678u, 0x87654321u, 0xfedcba98u, 0x80000010u};
 	std::vector<uint32_t> spill;
+	std::vector<uint32_t> gds;
 	std::unordered_map<std::string, uint32_t> registers;
 	std::unordered_map<std::string, uint32_t> inputs;
 	unsigned accesses = 0;
@@ -151,17 +152,15 @@ std::vector<Tokens> Tokenize(const std::string& text)
 // Execute the production lane body, not a copy of the intended bounds formula.
 // Unknown operations, undefined SSA values and even an evaluated OOB pointer
 // fail this checker. The surrounding prolog/dispatcher is validated separately.
-void Execute(const String8& source, const std::string& bank, State* state, bool addtid = false)
+void ExecuteBody(const std::string& full, const std::string& begin_marker, const std::string& end_label, const std::string& bank,
+                 State* state)
 {
-	const std::string full(source.c_str());
-	const std::string tag = "0" + bank;
-	const auto begin = full.find(addtid ? "%addtid_exec_" + tag + (bank.empty() ? " =" : "_word =") : "%lds_exec_" + tag + " =");
-	const std::string end_label = (addtid ? "%addtid_merge_" : "%lds_exec_merge_") + tag + " = OpLabel";
+	const auto begin = full.find(begin_marker);
 	const auto end = full.find(end_label, begin);
 	if (begin == std::string::npos || end == std::string::npos) { Fail("missing LDS lane body"); }
 	auto lines = Tokenize(full.substr(begin, end + end_label.size() - begin));
 	auto values = state->inputs;
-	struct Pointer { bool spill; uint32_t index; };
+	struct Pointer { std::vector<uint32_t>* memory; uint32_t index; };
 	std::unordered_map<std::string, Pointer> pointers;
 	std::unordered_map<std::string, size_t> labels;
 	for (const auto& line: Tokenize(full))
@@ -180,14 +179,14 @@ void Execute(const String8& source, const std::string& bank, State* state, bool 
 	{
 		if (pointers.count(pointer) == 0) { return state->registers.at(pointer); }
 		const auto& p = pointers.at(pointer);
-		return (p.spill ? state->spill : state->lds).at(p.index);
+		return p.memory->at(p.index);
 	};
 	const auto store = [&](const std::string& pointer, uint32_t value)
 	{
 		if (pointers.count(pointer) != 0)
 		{
 			const auto& p = pointers.at(pointer);
-			(p.spill ? state->spill : state->lds).at(p.index) = value;
+			p.memory->at(p.index) = value;
 		}
 		else { state->registers[pointer] = value; }
 	};
@@ -221,12 +220,12 @@ void Execute(const String8& source, const std::string& bank, State* state, bool 
 		}
 		if (op == "OpAccessChain")
 		{
-			const bool spill = t[4] == "%lds_addtid";
-			if ((!spill && t[4] != "%lds") || values.at(t[5]) >= (spill ? state->spill : state->lds).size())
-			{
-				Fail("evaluated OOB LDS/spill pointer");
-			}
-			pointers[t[0]] = {spill, values.at(t[5])};
+			// GDS is a block whose member 0 is the dword array.
+			const bool gds = t[4] == "%gds" && t.size() == 7 && t[5] == "%int_0";
+			auto* memory = gds ? &state->gds : (t[4] == "%lds_addtid" ? &state->spill : (t[4] == "%lds" ? &state->lds : nullptr));
+			const auto& index = t[gds ? 6 : 5];
+			if (memory == nullptr || values.at(index) >= memory->size()) { Fail("evaluated OOB LDS/spill/GDS pointer"); }
+			pointers[t[0]] = {memory, values.at(index)};
 			++state->accesses;
 			continue;
 		}
@@ -266,6 +265,13 @@ void Execute(const String8& source, const std::string& bank, State* state, bool 
 		else { Fail("unsupported lane operation: " + op); }
 		values[t[0]] = result;
 	}
+}
+
+void Execute(const String8& source, const std::string& bank, State* state, bool addtid = false)
+{
+	const std::string tag = "0" + bank;
+	ExecuteBody(source.c_str(), addtid ? "%addtid_exec_" + tag + (bank.empty() ? " =" : "_word =") : "%lds_exec_" + tag + " =",
+	            (addtid ? "%addtid_merge_" : "%lds_exec_merge_") + tag + " = OpLabel", bank, state);
 }
 
 State MakeState(uint32_t address, bool active, const std::string& bank)
@@ -782,6 +788,73 @@ void RunRejectedDs(uint32_t control, ShaderInstructionType expected, bool paired
 	std::_Exit(source.IsEmpty() ? 3 : 0);
 }
 
+// ds_write_b32 with GDS=1 stores at M0.base + ADDR + offset (RDNA2 ISA 3.7,
+// 10.4.3). ADDR + offset at or beyond M0.size, a misaligned address and one
+// outside the host GDS window fault on hardware and must not touch the buffer.
+void RunGdsWrite()
+{
+	Initialize();
+	struct Case { uint32_t m0; uint32_t address; bool active; int word; };
+	// offset 4 is added to every address below; word -1 means dropped.
+	const Case cases[] = {
+	    {0x0000c000u, 4u, true, 2},           // base 0, full 48 KiB window
+	    {0x01000040u, 0u, true, 0x41},        // nonzero base
+	    {0x01000040u, 0x38u, true, 0x4f},     // last dword inside M0.size
+	    {0x01000040u, 0x3cu, true, -1},       // ADDR + offset reaches M0.size
+	    {0x0000c000u, 0xfffffffcu, true, -1}, // ADDR alone beyond M0.size
+	    {0x0000c000u, 2u, true, -1},          // misaligned
+	    {0xbffc0010u, 0u, true, -1},          // beyond the host GDS window
+	    {0x0000c000u, 4u, false, -1},         // inactive lane
+	};
+	const uint32_t words[] = {0xd8360004u, 0x00000100u, 0xbf810000u};
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	if (!ShaderTryParseBounded(words, sizeof(words), &code)) { std::_Exit(2); }
+	CheckTerminator(code, 8);
+	const auto& inst = code.GetInstructions().At(0);
+	Check(inst.type == ShaderInstructionType::DsWriteB32 && inst.format == ShaderInstructionFormat::VaddrVdataOffsetGds &&
+	      inst.ds_offset == 4u && !ShaderLdsMemoryInstructionSupported(inst) && ShaderComputeWaveGdsWriteSupported(inst));
+	Check(ShaderClassifyComputeWaveInstruction(inst) == ShaderComputeWaveInstructionKind::BankedGdsWrite);
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 64;
+	input.threads_num[1] = input.threads_num[2] = 1;
+	input.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0};
+	Check(ShaderAnalyzeComputeWaveCode(code, input).supported);
+	input.bind.gds_pointers.memory_used = true;
+	ShaderCalcBindingIndices(&input.bind);
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	Vector<uint32_t> binary;
+	String8 error;
+	g_fixture_case = error.c_str();
+	if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty()) { Fail(std::string("GDS module: ") + error.c_str()); }
+	for (const auto& test: cases)
+	{
+		for (const std::string bank: {"low", "high"})
+		{
+			State state;
+			state.gds.assign(0x3000u, 0u);
+			state.registers["%exec_lo"] = 0;
+			state.registers["%m0"] = test.m0;
+			for (const std::string other: {"low", "high"})
+			{
+				const std::string stem = "%wave_lds_" + other + "_0";
+				const bool lane = other == bank && test.active;
+				state.inputs[stem + "_address"] = test.address;
+				state.inputs[stem + "_data"] = 0x5a000000u + (other == "low" ? 1u : 2u);
+				state.inputs[stem + "_exec"] = lane ? 1u : 0u;
+			}
+			g_fixture_case = String8::FromPrintf("m0=0x%08x address=0x%08x active=%u bank=%s", test.m0, test.address,
+			                                     static_cast<unsigned>(test.active), bank.c_str()).c_str();
+			ExecuteBody(source.c_str(), "%wave_gds_m0_0 =", "%wave_lds_high_0_gds_merge = OpLabel", "", &state);
+			auto expected = std::vector<uint32_t>(0x3000u, 0u);
+			if (test.word >= 0) { expected[static_cast<size_t>(test.word)] = 0x5a000000u + (bank == "low" ? 1u : 2u); }
+			Check(state.accesses == (test.word >= 0 ? 1u : 0u));
+			Check(state.gds == expected);
+		}
+	}
+	std::_Exit(0);
+}
+
 // ds_ordered_count (DS opcode 0x3f) is GDS-only and its VDST/counter contract is
 // not evidenced. It must be refused at its own PC, never lowered to a barrier
 // that leaves VDST and the ordered counter unchanged.
@@ -1118,8 +1191,7 @@ TEST(EmulatorShaderLdsBounds, NativeAndPairedRejectInvalidTuplesBeforeOperandDis
 TEST(EmulatorShaderLdsBounds, NativeAndPairedDsRejectGdsReservedAndLossyAliases)
 {
 	struct Case { uint32_t control; ShaderInstructionType type; const char* name; };
-	const Case cases[] = {{0xd8360000u, ShaderInstructionType::DsWriteB32, "DsWriteB32"},
-	                      {0xd8350000u, ShaderInstructionType::DsWriteB32, "DsWriteB32"},
+	const Case cases[] = {{0xd8350000u, ShaderInstructionType::DsWriteB32, "DsWriteB32"},
 	                      {0xd8780000u, ShaderInstructionType::DsWriteB32, "DsWriteB32"},
 	                      {0xd80c0000u, ShaderInstructionType::DsIncU32, "DsIncU32"},
 	                      {0xd8100000u, ShaderInstructionType::DsDecU32, "DsDecU32"}};
@@ -1133,6 +1205,17 @@ TEST(EmulatorShaderLdsBounds, NativeAndPairedDsRejectGdsReservedAndLossyAliases)
 			EXPECT_EXIT(RunRejectedDs(test.control, test.type, paired), ::testing::ExitedWithCode(kRejectedExit), reason);
 		}
 	}
+}
+
+TEST(EmulatorShaderLdsBounds, NativeGdsWriteIsRefusedNotLoweredToLds)
+{
+	EXPECT_EXIT(RunRejectedDs(0xd8360000u, ShaderInstructionType::DsWriteB32, false), ::testing::ExitedWithCode(kRejectedExit),
+	            EmitterRejection(ShaderInstructionType::DsWriteB32));
+}
+
+TEST(EmulatorShaderLdsBounds, PairedGdsWriteStoresOnlyInsideM0AndTheHostWindow)
+{
+	EXPECT_EXIT(RunGdsWrite(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorShaderLdsBounds, OrderedCountDsIsRefusedNotLoweredToBarrier)

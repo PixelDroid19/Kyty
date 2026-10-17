@@ -601,6 +601,36 @@ TEST(EmulatorTileDetile, Sw64kRx8bppProductionMatchesReference)
 	ExpectDetilePathsMatch(k_w, k_h, k_w, k_bpp, TileDetileLayout::Sw64kRx, size.size);
 }
 
+// One-byte SW_64K_R_X, 16 pipes: x0 x1 x2 y1 y0 y2 x3 y4 | x3^y3 x4^y4 x6^y5 x5^y6 | y6 x6 y7 x7 in a
+// 256x256 block, with slice bits Z0..Z3 XORed into offset bits 11..8.
+TEST(EmulatorTileDetile, Sw64kRx1bppFollowsPublishedPatternAndSlice)
+{
+	EXPECT_EQ(TileGetSw64kRxOffset(5u, 0u, 256u, 1u), 0x005u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 1u, 256u, 1u), 0x010u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 2u, 256u, 1u), 0x008u);
+	EXPECT_EQ(TileGetSw64kRxOffset(8u, 0u, 256u, 1u), 0x140u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 8u, 256u, 1u), 0x100u);
+	EXPECT_EQ(TileGetSw64kRxOffset(32u, 0u, 256u, 1u), 0x800u);
+	EXPECT_EQ(TileGetSw64kRxOffset(128u, 255u, 256u, 1u), 0xd000u ^ 0x0f00u ^ 0x00b8u);
+	EXPECT_EQ(TileGetSw64kRxOffset(256u, 0u, 512u, 1u), 0x10000u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 256u, 512u, 1u), 0x20000u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 0u, 256u, 1u, 1u), 0x800u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 0u, 256u, 1u, 2u), 0x400u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0u, 0u, 256u, 1u, 4u), 0x200u);
+	EXPECT_EQ(TileGetSw64kRxOffset(8u, 0u, 256u, 4u, 8u), TileGetSw64kRxOffset(8u, 0u, 256u, 4u) ^ 0x100u);
+
+	constexpr uint32_t   k_width = 4u;
+	std::vector<uint8_t> tiled(65536u, 0u);
+	tiled[0x800u ^ 0x001u] = 0x11u; // (1, 0) of slice 1
+	tiled[0x800u ^ 0x010u] = 0x22u; // (0, 1) of slice 1
+	std::vector<uint8_t> linear(k_width * 2u, 0u);
+	auto request  = MakeRequest(linear.data(), tiled.data(), k_width, 2u, 256u, k_width, 1u, TileDetileLayout::Sw64kRx, 65536u);
+	request.slice = 1u;
+	ASSERT_TRUE(TileDetile(request));
+	EXPECT_EQ(linear[1], 0x11u);
+	EXPECT_EQ(linear[k_width], 0x22u);
+}
+
 TEST(EmulatorTileDetile, Standard64KB4bppProductionMatchesReference)
 {
 	constexpr uint32_t k_w   = 96u;
@@ -810,7 +840,7 @@ TEST(EmulatorTileDetile, Depth64KBArraySlicesApplyTheMatchedGfx10ZEquation)
 			std::vector<uint8_t> actual(slice_bytes, 0u);
 			auto request = MakeRequest(actual.data(), tiled.data(), width, height, width, width, bpe,
 			                           TileDetileLayout::Depth64KB, slice_bytes);
-			request.depth_layer = layers[index];
+			request.slice = layers[index];
 			ASSERT_TRUE(TileDetileIsSupported(request));
 			ASSERT_TRUE(TileDetile(request));
 			EXPECT_EQ(actual, expected) << "bpe=" << bpe << " layer=" << layers[index];
@@ -821,7 +851,7 @@ TEST(EmulatorTileDetile, Depth64KBArraySlicesApplyTheMatchedGfx10ZEquation)
 	}
 	uint8_t byte = 0u;
 	auto invalid = MakeRequest(&byte, &byte, 1u, 1u, 1u, 1u, 1u, TileDetileLayout::Standard4KB, 4096u);
-	invalid.depth_layer = 1u;
+	invalid.slice = 1u;
 	EXPECT_FALSE(TileDetileIsSupported(invalid));
 }
 
@@ -1490,8 +1520,60 @@ TEST(EmulatorTileDetile, RejectsMultiMipArrayOnTilesWithoutMipLayouts)
 {
 	Gen5TextureArrayLayout layout {};
 	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 1u, 2u, &layout));
-	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 9u, 2u, &layout));
-	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 27u, 2u, &layout));
+}
+
+// A 128x128 RGBA16F render-target cube with a full chain: GFX10 keeps level 0
+// in two 128x64 blocks after the shared tail block, and levels 1..7 sit in the
+// tail at the element origins the thin 64 KiB tail assigns them.
+TEST(EmulatorTileDetile, DetilesRenderTarget64KBCubeMipChain)
+{
+	constexpr uint32_t k_format = 71u;
+	constexpr uint32_t k_bpe    = 8u;
+	constexpr uint32_t k_levels = 8u;
+	constexpr uint32_t k_layers = 6u;
+
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(k_format, 128u, 128u, 128u, k_levels, 27u, k_layers, &layout));
+	ASSERT_TRUE(layout.has_mip_layout);
+	const auto& mips = layout.mip_layout;
+	EXPECT_EQ(layout.tiled_slice.size, 3u * 65536u);
+	EXPECT_EQ(layout.tiled_size, 6u * 3u * 65536u);
+	EXPECT_EQ(mips.first_tail_level, 1u);
+	EXPECT_EQ(mips.level[0].tiled_offset, 65536u);
+	EXPECT_EQ(mips.level[1].tail_x, 64u);
+	EXPECT_EQ(mips.level[1].tail_y, 0u);
+	EXPECT_EQ(mips.level[2].tail_x, 0u);
+	EXPECT_EQ(mips.level[2].tail_y, 32u);
+
+	std::vector<uint8_t> tiled(static_cast<size_t>(layout.tiled_size), 0u);
+	std::vector<uint8_t> expected(static_cast<size_t>(layout.linear_size), 0u);
+	for (uint32_t layer = 0; layer < k_layers; ++layer)
+	{
+		for (uint32_t level = 0; level < k_levels; ++level)
+		{
+			const auto& entry = mips.level[level];
+			for (uint32_t y = 0; y < entry.element_height; ++y)
+			{
+				for (uint32_t x = 0; x < entry.element_width; ++x)
+				{
+					const uint64_t value  = (static_cast<uint64_t>(layer) << 48u) | (static_cast<uint64_t>(level) << 32u) |
+					                       (static_cast<uint64_t>(y) << 16u) | x;
+					const uint64_t within = TileGetSw64kRxOffset(entry.tail_x + x, entry.tail_y + y, entry.tiled_pitch, k_bpe);
+					const uint64_t tiled_offset =
+					    static_cast<uint64_t>(layer) * layout.tiled_slice.size + entry.tiled_offset + within;
+					const uint64_t linear_offset = static_cast<uint64_t>(layer) * layout.linear_slice_size + entry.linear_offset +
+					                               (static_cast<uint64_t>(y) * entry.element_width + x) * k_bpe;
+					ASSERT_LE(tiled_offset + k_bpe, tiled.size());
+					ASSERT_LE(linear_offset + k_bpe, expected.size());
+					std::memcpy(tiled.data() + tiled_offset, &value, k_bpe);
+					std::memcpy(expected.data() + linear_offset, &value, k_bpe);
+				}
+			}
+		}
+	}
+	std::vector<uint8_t> actual(expected.size(), 0u);
+	ASSERT_TRUE(Gen5DetileTextureArray(actual.data(), actual.size(), tiled.data(), tiled.size(), layout));
+	EXPECT_EQ(actual, expected);
 }
 
 TEST(EmulatorTileDetile, RejectsUnrepresentableStandard256BArrayByteCounts)
@@ -2035,6 +2117,29 @@ TEST(EmulatorTileDetile, Depth64KBR32MipChainSizeIncludesTail)
 	EXPECT_EQ(levels[2].offset, 0x10000u);
 }
 
+// A 2048x2048 four-level 32-bit render-target chain, as the guest writes it
+// before the first draw: smallest level first, level 0 last, no tail. The
+// sampled texture and the color target must describe the same range.
+TEST(EmulatorTileDetile, RenderTarget64KBMipChainMatchesSampledChain)
+{
+	TileSizeAlign  size {};
+	TileSizeOffset levels[4] {};
+	TileGetTextureSize2(56u, 2048u, 2048u, 2048u, 4u, 27u, &size, levels, nullptr);
+	EXPECT_EQ(size.size, 0x1540000u);
+	EXPECT_EQ(levels[3].offset, 0x0u);
+	EXPECT_EQ(levels[2].offset, 0x40000u);
+	EXPECT_EQ(levels[1].offset, 0x140000u);
+	EXPECT_EQ(levels[0].offset, 0x540000u);
+
+	Gen5TextureMipLayout target {};
+	ASSERT_TRUE(Gen5GetRenderTarget64KBMipLayout(4u, 2048u, 2048u, 2048u, 4u, &target));
+	EXPECT_EQ(target.tiled.size, size.size);
+	for (uint32_t level = 0; level < 4u; ++level)
+	{
+		EXPECT_EQ(target.level[level].tiled_offset, levels[level].offset);
+	}
+}
+
 TEST(EmulatorTileDetile, Depth64KBR32MipChainHasPhysicalTailAndFullBacking)
 {
 	Gen5TextureMipLayout layout {};
@@ -2325,19 +2430,22 @@ TEST(EmulatorTileDetile, ClassifiesDetiledCubeFaceContentAfterUploadPath)
 	EXPECT_FALSE(Gen5ClassifyDetiledCubeFace(linear.data(), linear.size(), layout, 0u, 56u, 8u, &planted));
 }
 
-TEST(EmulatorTileDetile, FourByteRenderTargetAndDepthLayoutsAddressTexelsAlike)
+TEST(EmulatorTileDetile, FourByteRenderTargetAndDepthLayoutsDifferOnlyInTheMicroTile)
 {
-	// A depth target over a 32-bit render target's range reads the same texel at each (x, y): the mode 27 and
-	// mode 24 4-byte layouts agree on the block grid and within every 128x128 block.
+	// The mode 27 and mode 24 4-byte layouts share the block grid and the bits above each 8x8 micro tile; inside
+	// it the render target orders x0 x1 y0 y1 y2 x2 and the depth x0 y0 x1 y1 x2 y2.
 	constexpr uint32_t k_pitch  = 384u;
 	constexpr uint32_t k_height = 300u;
 	for (uint32_t y = 0; y < k_height; ++y)
 	{
 		for (uint32_t x = 0; x < k_pitch; ++x)
 		{
-			ASSERT_EQ(TileGetSw64kRxOffset(x, y, k_pitch, 4u), TileGetDepth64KBOffset(x, y, k_pitch, 4u)) << x << "," << y;
+			ASSERT_EQ(TileGetSw64kRxOffset(x, y, k_pitch, 4u) & ~0xffull, TileGetDepth64KBOffset(x, y, k_pitch, 4u) & ~0xffull)
+			    << x << "," << y;
 		}
 	}
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_pitch, 4u), 0x10u);
+	EXPECT_EQ(TileGetDepth64KBOffset(0, 1, k_pitch, 4u), 0x8u);
 }
 
 UT_END();

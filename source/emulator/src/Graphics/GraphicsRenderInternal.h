@@ -56,8 +56,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <iterator>
+#include <list>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -339,6 +343,8 @@ public:
 
 	VulkanDescriptorSet* Allocate(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                 Free(VulkanDescriptorSet* set);
+	// Keeps a set whose submissions all completed for the next set of its layout.
+	void                 Recycle(VulkanDescriptorSet* set);
 
 	// The set is recorded as used by `buffer`'s submission; an untracked use
 	// keeps the set until a resource it references is deleted.
@@ -419,6 +425,12 @@ private:
 	// sets leave the cache and are freed once their submissions complete.
 	static constexpr uint32_t LIVE_SETS_MAX = 65536;
 	static constexpr uint32_t TRIM_SETS     = 8192;
+	// Released sets wait for reuse by the next set of their layout, up to this
+	// many in all; past it the oldest returns to its pool. Pools never give memory
+	// back to the system, so a held set only reserves pool space, while a driver
+	// free and reallocation walks the pool's free list. The limit holds several
+	// trim batches so a trim does not overflow it.
+	static constexpr uint32_t RECYCLED_SETS_MAX = TRIM_SETS * 4;
 
 	int                  FindSet(const Set& s);
 	void                 IndexSet(int index);
@@ -426,6 +438,7 @@ private:
 	void                 ReleaseSet(int index);
 	void                 RecordSetUse(int index, CommandBuffer* buffer);
 	void                 TrimSets();
+	void                 FreeOldestRecycled();
 	template <typename References>
 	void FreeSetsReferencing(uint64_t unique_id, References references);
 
@@ -439,9 +452,15 @@ private:
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
 	// Live set indices by the unique id of each image or buffer they reference.
-	std::unordered_map<uint64_t, std::vector<int>> m_sets_by_resource;
+	std::unordered_map<uint64_t, std::unordered_set<int>> m_sets_by_resource;
 
 	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
+	// Released sets, oldest first, and per layout the positions of its sets in
+	// that order. A layout's sets are taken newest first; a full list drops its
+	// oldest set so stale layouts cannot fill it.
+	using RecycledOrder = std::list<VulkanDescriptorSet*>;
+	RecycledOrder                                                               m_recycled_order;
+	std::unordered_map<VkDescriptorSetLayout, std::deque<RecycledOrder::iterator>> m_recycled_sets;
 };
 
 class SamplerCache
@@ -521,6 +540,7 @@ private:
 		uint64_t           image_id[8]             = {};
 		uint32_t           base_array_layer[8]     = {};
 		uint32_t           layer_count[8]          = {};
+		uint32_t           mip_level[8]            = {};
 		VkFormat           color_format[8]         = {};
 		int                color_view[8]           = {};
 		uint64_t           depth_id                = 0;
@@ -774,6 +794,9 @@ struct RenderDepthInfo
 	VkSampleCountFlagBits       samples                  = VK_SAMPLE_COUNT_1_BIT;
 	uint32_t                    width                    = 0;
 	uint32_t                    height                   = 0;
+	// DB_DEPTH_VIEW slice range; the depth image itself holds one slice.
+	uint32_t                    slice_start              = 0;
+	uint32_t                    slice_max                = 0;
 	bool                        htile                    = false;
 	bool                        neo                      = false;
 	uint64_t                    depth_buffer_size        = 0;
@@ -847,6 +870,9 @@ struct RenderColorAttachmentInfo
 	uint32_t              image_layers            = 1;
 	uint32_t              base_array_layer         = 0;
 	uint32_t              layer_count              = 1;
+	// Levels of a mip-chained target and the one MIP_LEVEL renders.
+	uint32_t              mip_levels              = 1;
+	uint32_t              mip_level               = 0;
 	bool                  tile                    = false;
 	bool                  neo                     = false;
 	bool                  write_back              = false;
@@ -1635,7 +1661,7 @@ void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image
 void FormatTextureList(const ShaderTextureResources& textures, char* buffer, size_t buffer_size);
 // Bytes before read_begin are never read through the returned buffer and are not captured.
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
-                                               VkBufferUsageFlags usage, uint64_t read_begin = 0);
+                                               VkBufferUsageFlags usage, uint64_t read_begin = 0, bool zero_tail = true);
 
 bool                            RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot);
 bool                            RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot);
@@ -1644,8 +1670,10 @@ const RenderColorAttachmentInfo* RenderColorFirstConfiguredAttachment(const Rend
 VulkanImage*                    RenderColorFirstActiveImage(const RenderColorInfo& color);
 VkSampleCountFlagBits           decode_guest_sample_count(uint32_t encoded);
 VkSampleCountFlagBits           resolve_render_attachment_sample_count(const RenderColorInfo& color, const RenderDepthInfo& depth);
-VkExtent2D                      IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment);
+VkExtent2D                      IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment,
+                                                                     uint32_t mip_level = 0);
 void                            SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* depth);
+void                            CollapseRenderColorLayersWithoutLayerExport(RenderColorInfo* color, uint32_t pa_cl_vs_out_cntl);
 void                            MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& vs_input,
                                                 const ShaderPixelInputInfo& ps_input, const HW::Context& hw, const HW::UserConfig& ucfg,
                                                 uint32_t index_count, uint32_t index_type_and_size, bool indexed, uint32_t flags = 0);
@@ -1679,6 +1707,9 @@ void               InvalidateComputeColorFills(const ShaderBindResources& bind);
 // A proven uniform fill of a live depth image's whole stencil plane clears its
 // host stencil aspect in recording order.
 [[nodiscard]] bool PropagateComputeUniformStencilFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// A proven uniform fill of a live 32-bit float depth image's whole depth plane
+// with a value in [0, 1] clears its host depth aspect in recording order.
+[[nodiscard]] bool PropagateComputeUniformDepthFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 // A proven uniform fill of a DCC metadata range with a clear key is held until
 // a render target or shader image with that metadata base consumes it.
 [[nodiscard]] bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
@@ -1726,8 +1757,9 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
 
 // --- Bind ---
 // The draw fetches only records [first_record, required_records); zero required_records means every declared record.
+// records_exact says the GPU reads the same draw range the host resolved, so fetches cannot pass it.
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
-	                   uint32_t first_record, uint32_t required_records);
+	                   uint32_t first_record, uint32_t required_records, bool records_exact);
 // How a shader stage may read a resolution-scaled image. Normalized sampling
 // without texel offsets reads the same content at any host extent; integer
 // texel access, size queries and texel offsets address host texels.

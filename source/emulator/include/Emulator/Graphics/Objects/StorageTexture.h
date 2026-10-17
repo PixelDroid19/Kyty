@@ -56,10 +56,11 @@ public:
 };
 
 [[nodiscard]] bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
-// A single-level 2D Gen5 storage view with a 32-bit texel and a 32-bit depth target without HTILE or stencil, bound
-// over the same range, address the same texels: the depth (mode 24) and render-target (mode 27) layouts of a 4-byte
-// texel are one layout, so either view reads the raw bytes the other last held. Storage images are never
-// resolution-scaled, so the depth must not be either.
+// A single-level 2D Gen5 storage view in the depth layout (mode 24) with a 32-bit texel and a 32-bit depth target
+// without HTILE or stencil, bound over the same range, address the same texels, so either view reads the raw bytes
+// the other last held. The 4-byte render-target layout (mode 27) orders the 8x8 micro tile differently, so a mode 27
+// view does not share texels with a depth target. Storage images are never resolution-scaled, so the depth must not
+// be either.
 [[nodiscard]] bool StorageTextureSharesDepthTexels(const uint64_t* storage, const uint64_t* depth, bool next_gen);
 // A storage view that re-describes memory of another view with a different
 // format, or the exact range with a different extent: a recycled allocation

@@ -841,7 +841,8 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
                        const Vector<VkBufferImageCopy>& regions, uint64_t src_layout);
 void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
 // Copy the raw 32-bit texels of a single-sample, single-layer image into another of the same extent through a
-// transient buffer, one of them D32 depth and the other R32 or B10G11R11 color. Returns false for any other pair.
+// transient buffer, one of them D32 depth (or the depth plane of D32S8, whose stencil it keeps) and the other R32 or
+// B10G11R11 color. Returns false for any other pair.
 // A depth destination keeps every word only on a device with unrestricted depth (VUID-VkCopyBufferToImageInfo2-pRegions-07931).
 [[nodiscard]] bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter);
@@ -941,13 +942,21 @@ enum class LabelForceCompleteKind : uint8_t
 	return completion_callback_issued;
 }
 
-[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool current_submission, uint8_t producer_effects)
+[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool current_submission, uint8_t producer_effects,
+                                                                           bool pending_storage_has_aliases)
 {
-	// Only a plain label store can rely on same-queue GPU ordering until one
-	// end-of-batch fence publishes it. Write-back and notification callbacks
-	// have host-visible effects that must stay synchronous at their wait packet.
+	// A label store relies on same-queue GPU ordering until one end-of-batch
+	// fence publishes it. A write-back may join it only when no pending storage
+	// write has a GPU alias: guest-side readers (memory reads, device-address
+	// views) already wait for pending storage themselves, while aliases are
+	// refreshed only by the write-back. Notification callbacks stay synchronous.
 	constexpr uint8_t guest_store = 1u;
-	return current_submission && producer_effects == guest_store;
+	constexpr uint8_t write_back  = 2u;
+	if (!current_submission)
+	{
+		return false;
+	}
+	return producer_effects == guest_store || (producer_effects == (guest_store | write_back) && !pending_storage_has_aliases);
 }
 
 // Completion callbacks a command-processor batch can record.

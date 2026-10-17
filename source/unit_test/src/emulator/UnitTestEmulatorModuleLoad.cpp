@@ -849,16 +849,27 @@ TEST(EmulatorModuleLoad, ElfRejectsProgramHeaderTablesOutsideFile)
 	EXPECT_FALSE(overflowed.IsValid());
 }
 
-TEST(EmulatorModuleLoad, ElfRejectsTruncatedSectionHeaderTable)
+TEST(EmulatorModuleLoad, ElfLoadsWithoutSectionHeaderTableOutsideTheFile)
 {
 	const TempPackageRoot temp(U"/tmp/kyty_elf_shdr_bounds_test/");
 	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
 
-	auto image      = MakeRawElfHeader();
-	auto ehdr       = MakeElfHeader();
-	ehdr.e_shoff    = sizeof(Elf64_Ehdr);
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_vaddr = 0x1000;
+	load.header.p_memsz = 0x100;
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes         = MakeDynamicBytes({MakeDyn(DT_NULL, 0)});
+
+	// Extracted executables keep e_shoff/e_shnum while the table is not stored.
+	auto image = MakeRawElf({load, dynamic});
+	Elf64_Ehdr ehdr {};
+	std::memcpy(&ehdr, image.data(), sizeof(ehdr));
+	ehdr.e_shoff     = image.size() * 4u;
 	ehdr.e_shentsize = sizeof(Elf64_Shdr);
-	ehdr.e_shnum    = 1;
+	ehdr.e_shnum     = 55;
 	std::memcpy(image.data(), &ehdr, sizeof(ehdr));
 
 	const auto path = temp.root + U"truncated.bin";
@@ -866,7 +877,8 @@ TEST(EmulatorModuleLoad, ElfRejectsTruncatedSectionHeaderTable)
 
 	Elf64 elf;
 	elf.Open(path);
-	EXPECT_FALSE(elf.IsValid());
+	EXPECT_TRUE(elf.IsValid());
+	EXPECT_EQ(elf.GetShdr(), nullptr);
 }
 
 TEST(EmulatorModuleLoad, ElfRejectsDynamicTableWithoutTerminator)
@@ -1692,13 +1704,13 @@ TEST(EmulatorModuleLoad, BuildPlanRejectsExtensionOnlyAdjacentJunk)
 
 TEST(EmulatorModuleLoad, RecognizesNativeServiceModuleStartContract)
 {
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"/system/common/lib/PSN.prx"));
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSNCore.prx"));
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSNCommon.prx"));
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"SaveData.prx"));
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"Media/Plugins/Share.prx"));
-	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"Media/Plugins/PS5EntitlementsPlugin.prx"));
-	EXPECT_FALSE(LoaderModuleUsesNativeStartParam(U"Media/Plugins/UnrelatedPlugin.prx"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSN"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSNCore"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSNCommon"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"SaveData"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"Share"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PS5EntitlementsPlugin"));
+	EXPECT_FALSE(LoaderModuleUsesNativeStartParam(U"UnrelatedPlugin"));
 }
 
 TEST(EmulatorModuleLoad, ResolvePrefersLoadedModuleExportOverHleForSameIdentity)

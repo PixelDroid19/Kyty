@@ -27,6 +27,10 @@ struct VulkanVertexInputLayout
 // regular and fixed-function expansion pipelines.
 [[nodiscard]] bool VulkanBuildVertexInputLayout(const ShaderVertexInputInfo& input, VulkanVertexInputLayout* layout);
 
+// Bytes past a record's start that the binding's attributes fetch; UINT64_MAX
+// when an attribute cannot be resolved.
+[[nodiscard]] uint64_t VulkanVertexInputBindingFetchEnd(const ShaderVertexInputInfo& input, int buffer_index);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

@@ -15,7 +15,7 @@ class GpuMemoryMaterializationKey final
 {
 public:
 	static constexpr int MaxRanges = 3;
-	static constexpr int MaxParams = 11;
+	static constexpr int MaxParams = 12;
 
 	[[nodiscard]] static GpuMemoryMaterializationKey Create(uint64_t guest_submit, uint32_t host_queue, uint64_t host_sequence,
 	                                                       const uint64_t* address, const uint64_t* size, int range_count,
@@ -198,6 +198,8 @@ public:
 		const size_t slot = static_cast<size_t>(key.Hash()) & (Capacity - 1u);
 		m_entries[slot]   = Entry {m_epoch, key, value};
 		m_spans[slot]     = key.Span();
+		m_store_log[static_cast<size_t>(m_store_seq % StoreLogSize)] = slot;
+		++m_store_seq;
 	}
 
 	void Invalidate()
@@ -220,28 +222,75 @@ public:
 		{
 			return;
 		}
-		// Recording invalidates attachments every draw; scan the compact spans
-		// and read a full entry only where its span overlaps.
-		const uint64_t end = size > std::numeric_limits<uint64_t>::max() - address ? std::numeric_limits<uint64_t>::max() : address + size;
+		// Recording invalidates the same attachment ranges every draw. After a
+		// range has been invalidated no live entry overlaps it, so repeating
+		// it only needs the slots stored since; other ranges scan every span.
+		const uint64_t end   = size > std::numeric_limits<uint64_t>::max() - address ? std::numeric_limits<uint64_t>::max() : address + size;
+		auto*          clean = FindCleanRange(address, end);
+		if (clean != nullptr && m_store_seq - clean->store_seq <= StoreLogSize)
+		{
+			for (uint64_t seq = clean->store_seq; seq < m_store_seq; ++seq)
+			{
+				InvalidateSlot(m_store_log[static_cast<size_t>(seq % StoreLogSize)], address, size, end);
+			}
+			clean->store_seq = m_store_seq;
+			return;
+		}
 		for (size_t slot = 0; slot < Capacity; ++slot)
 		{
-			if (m_spans[slot].second <= address || m_spans[slot].first >= end)
-			{
-				continue;
-			}
-			auto& entry = m_entries[slot];
-			if (entry.has_value() && entry->epoch == m_epoch && entry->key.Overlaps(address, size))
-			{
-				entry.reset();
-				m_spans[slot] = {0u, 0u};
-			}
+			InvalidateSlot(slot, address, size, end);
 		}
+		if (clean == nullptr)
+		{
+			clean = &m_clean_ranges[m_clean_next];
+			m_clean_next = (m_clean_next + 1u) % m_clean_ranges.size();
+		}
+		*clean = CleanRange {address, end, m_store_seq};
 	}
 
 private:
+	static constexpr uint64_t StoreLogSize = 256u;
+
+	struct CleanRange
+	{
+		uint64_t address   = 0;
+		uint64_t end       = 0;
+		uint64_t store_seq = 0;
+	};
+
+	[[nodiscard]] CleanRange* FindCleanRange(uint64_t address, uint64_t end)
+	{
+		for (auto& range: m_clean_ranges)
+		{
+			if (range.end != 0u && range.address == address && range.end == end)
+			{
+				return &range;
+			}
+		}
+		return nullptr;
+	}
+
+	void InvalidateSlot(size_t slot, uint64_t address, uint64_t size, uint64_t end)
+	{
+		if (m_spans[slot].second <= address || m_spans[slot].first >= end)
+		{
+			return;
+		}
+		auto& entry = m_entries[slot];
+		if (entry.has_value() && entry->epoch == m_epoch && entry->key.Overlaps(address, size))
+		{
+			entry.reset();
+			m_spans[slot] = {0u, 0u};
+		}
+	}
+
 	std::array<std::optional<Entry>, Capacity> m_entries {};
 	std::array<std::pair<uint64_t, uint64_t>, Capacity> m_spans {};
-	uint64_t                                   m_epoch = 1u;
+	std::array<size_t, StoreLogSize>                    m_store_log {};
+	std::array<CleanRange, 16>                          m_clean_ranges {};
+	uint64_t                                            m_store_seq  = 0;
+	size_t                                              m_clean_next = 0;
+	uint64_t                                            m_epoch      = 1u;
 };
 
 } // namespace Kyty::Libs::Graphics
