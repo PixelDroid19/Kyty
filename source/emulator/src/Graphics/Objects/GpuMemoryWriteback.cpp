@@ -243,6 +243,24 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 		SyncWriteBackIndexes(heap_id, object_id);
 		return;
 	}
+	// The copy's own write notifications advanced the range's generation. The
+	// guest bytes now hold this object's content, so re-baseline the generation
+	// as Update does after an unchanged compare; otherwise the next use hashes
+	// the whole range only to find it unchanged. Page generations stay stale so
+	// label-fence holes are still uploaded.
+	bool generation_baseline[VADDR_BLOCKS_MAX] = {};
+	if (recompute_self && o.check_hash && o.dirty_registered)
+	{
+		for (int vi = 0; vi < block.vaddr_num; vi++)
+		{
+			const auto read = GpuDirtyPageTracker::Instance().BeginRead(block.vaddr[vi], block.size[vi]);
+			if (read.tracked)
+			{
+				o.dirty_generation[vi]  = read.generation;
+				generation_baseline[vi] = true;
+			}
+		}
+	}
 	const uint64_t content_sequence = NextContentSequence();
 	o.cpu_update_time               = GpuMemoryGetCurrentTime();
 	o.content_origin                = GpuMemoryContentOrigin::GpuWriteBack;
@@ -315,8 +333,11 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	{
 		for (int vi = 0; vi < block.vaddr_num; vi++)
 		{
+			// A range re-baselined by generation is not hashed: the next Update
+			// compares a written range against the unknown (zero) hash, which
+			// uploads its changed pages, and skips an unwritten one.
 			uint64_t new_hash = 0;
-			if (o.check_hash)
+			if (o.check_hash && !generation_baseline[vi])
 			{
 				new_hash = GpuMemoryCalcHash(o.object.type, reinterpret_cast<const uint8_t*>(block.vaddr[vi]), block.size[vi]);
 			}
