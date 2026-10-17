@@ -6931,6 +6931,47 @@ TEST(EmulatorGraphicsState, GpuWritebackPageCacheCopiesOnlyChangedPagesAndPreser
 	EXPECT_EQ(notifications.calls, 0u);
 }
 
+TEST(EmulatorGraphicsState, GpuWritebackPageCacheFindsChangedPagesAcrossLargeRanges)
+{
+	using namespace Kyty::Libs::Graphics;
+	constexpr uint64_t PageSize = 4096u;
+	constexpr uint64_t Size     = PageSize * 1100u + 100u;
+	std::vector<uint8_t> guest(Size);
+	std::vector<uint8_t> gpu(Size);
+	for (uint64_t i = 0; i < Size; ++i)
+	{
+		guest[i] = static_cast<uint8_t>(i * 7u);
+		gpu[i]   = guest[i];
+	}
+
+	GpuWritebackPageCache cache(PageSize);
+	cache.Reset(gpu.data(), Size);
+
+	const std::vector<uint64_t> pages = {0u, 63u, 64u, 255u, 256u, 777u, 1100u};
+	for (const auto page: pages)
+	{
+		gpu[page * PageSize + 17u] ^= 0xffu;
+	}
+
+	std::vector<uint64_t> notified;
+	const auto            notify = [](void* opaque, uint64_t address, uint64_t /*size*/)
+	{ static_cast<std::vector<uint64_t>*>(opaque)->push_back(address); };
+
+	const auto result = cache.CopyChangedPages(guest.data(), gpu.data(), Size, nullptr, nullptr, 0, notify, &notified);
+	EXPECT_EQ(result.changed_pages, pages.size());
+	EXPECT_EQ(result.copied_bytes, PageSize * (pages.size() - 1u) + 100u);
+	ASSERT_EQ(notified.size(), pages.size());
+	for (size_t i = 0; i < pages.size(); i++)
+	{
+		EXPECT_EQ(notified[i], reinterpret_cast<uint64_t>(guest.data()) + pages[i] * PageSize);
+	}
+	EXPECT_EQ(guest, gpu);
+
+	notified.clear();
+	EXPECT_FALSE(cache.CopyChangedPages(guest.data(), gpu.data(), Size, nullptr, nullptr, 0, notify, &notified).content_changed);
+	EXPECT_TRUE(notified.empty());
+}
+
 // OnlyFlip → ActiveDeleted must be force-completed with Active after BufferFlush.
 // Skipping ActiveDeleted left VideoOutSubmitFlip on vkGetEventStatus (empty Flip
 // queue; guest ThreadFlag bit 0x1 And+ClearBits soft-lock around present 2400).
