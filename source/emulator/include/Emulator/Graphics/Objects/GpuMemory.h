@@ -1236,12 +1236,13 @@ struct GpuMemoryObjectDescription
 // [vaddr, vaddr + size): its own guest range and its creation parameters.
 bool GpuMemoryDescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
 // Which overlapping GPU objects a read-only snapshot accepts. Read-only buffers
-// always qualify; IdleWritableStorage also accepts writable storage buffers none
-// of whose GPU writes is still unpublished, so the guest bytes are current.
+// always qualify. IndexView also accepts writable storage buffers none of whose
+// GPU writes is still unpublished, so the guest bytes are current, and the
+// surfaces an IndexBuffer object is linked under.
 enum class GpuMemorySnapshotAdmission: uint8_t
 {
 	ReadOnlyOverlaps,
-	IdleWritableStorage,
+	IndexView,
 };
 // Validates a bounded allocated range and classifies its cached GPU overlaps.
 // Capture/compare additionally require dirty-page tracking and reject a read

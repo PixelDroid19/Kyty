@@ -971,8 +971,9 @@ public:
 			const uint64_t excluded_ns = *validation_ns > UINT64_MAX - *compare_ns ? UINT64_MAX : *validation_ns + *compare_ns;
 			*upload_ns = total_ns > excluded_ns ? total_ns - excluded_ns : 0u;
 		};
-		// Index fetches read guest bytes that idle writable storage already holds.
-		const auto admission = usage == VK_BUFFER_USAGE_INDEX_BUFFER_BIT ? GpuMemorySnapshotAdmission::IdleWritableStorage
+		// Index fetches read guest bytes that idle writable storage already holds,
+		// as do the IndexBuffer objects linked under a surface.
+		const auto admission = usage == VK_BUFFER_USAGE_INDEX_BUFFER_BIT ? GpuMemorySnapshotAdmission::IndexView
 		                                                                  : GpuMemorySnapshotAdmission::ReadOnlyOverlaps;
 		Entry* previous = FindSnapshot(vaddr, size, usage, read_begin);
 		if (previous != nullptr)

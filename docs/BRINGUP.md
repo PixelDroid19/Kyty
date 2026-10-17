@@ -9,6 +9,66 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Index snapshots over linked surfaces (2026-10-17)
+
+- **Symptom.** After the device publication below, the sequel's next fence
+  cost was the synchronous index upload. `update_func` → `UtilCopyBuffer`
+  on the utility queue showed 23k waits and 6.5 s per ~80 s of play
+  (symbolized fence stacks; `GraphicsRenderDrawIndex` →
+  `GpuMemoryCreateObject` → IndexBuffer `create_func`).
+- **Cause.** An indexed draw first tries a per-command-buffer snapshot of
+  the index bytes (`TryUploadTransientReadOnlyBuffer`). The snapshot
+  accepted only buffer overlaps. A refusal census (opt-in counter, one
+  150 s run) showed that nearly every refused index range, all ≤ 4 KiB,
+  lay inside a live surface:
+  - Texture Contains: 36.7k.
+  - RenderTexture Contains: 12.1k.
+  - StorageTexture Contains: 2.5k.
+  - Mixes of these with read-only buffers make up the rest.
+  
+  The refused range then became an IndexBuffer object, uploaded and waited
+  on every time its guest bytes changed.
+- **Why the snapshot is equivalent.** The create path links an IndexBuffer
+  under these surfaces (`GpuMemoryAllowsIndexContainedInSurface`) and
+  uploads it from guest memory. It is never seeded from the surface: render
+  alias materialization applies only to incoming storage images, and the
+  index object has no create-from-objects function. The snapshot copies
+  the same guest bytes at the same bind point.
+- **Change.** The index admission (renamed `IdleWritableStorage` →
+  `IndexView`) also accepts the surfaces that rule links, with the same
+  relations; a depth target qualifies only when crossed. Buffers keep their
+  rules: read-only, or idle writable storage. Vertex and storage snapshots
+  are unchanged.
+- **Boot stall check (fishing title, 10 boots of 45 s on this build).**
+  - 8 of 10 boots were clean.
+  - The other 2 stopped at frame 3 with 2 presents. The `stall-diagnostics`
+    counters showed 1 draw, 1 dispatch, no index binding
+    (`draw_index_buffer_binding_ns` 0), 3 transient probes (all hits) and
+    no device-address preparation.
+  - The changed admission never ran before those stalls, so this frame-3
+    boot stall is an independent, intermittent defect of the current tree.
+    It also weakens the attribution in "Index buffer objects through the
+    mapping: excluded (2026-10-11)": that stall had the same signature.
+  - Open defect: the stall is at frame 3 with every guest thread waiting,
+    and `sync-waits` is disabled by default.
+  - Direction: enable sync-wait tracking and take host stacks of the
+    command-processor thread at the stall. The 2026-10-11 record saw it
+    runnable inside the driver's graphics pipeline creation.
+- **Evidence (Intel, strict, one run each, capture-method fps).** Every run
+  ended in status 1 with no error, and the final captures show intact
+  geometry.
+  - Sequel, gameplay windows: 85.6/90.2 fps, against 73.0/77.9/73.2 on the
+    previous build.
+  - Sequel, perf snapshots: 8.1k-9.0k fence waits and 8.8-9.6 s per 26 s
+    window, against 15k and 11.5-12.0 s.
+  - Insect platformer: 115-127 fps in play, against 90-91.
+  - Card title: 183-234 fps.
+  - Fishing title: 21-22 fps, unchanged.
+  - Beat 'em up: 14-17 fps, unchanged.
+  - Sandbox title: same timeline as the previous build, about 12k frames,
+    then the same late drop that main18 shows.
+  - Emulator unit suite: 2245 passed, 9 skipped.
+
 ## Same-queue storage published on the device before guest-address reads (2026-10-17)
 
 - **Symptom.** In the sequel's gameplay on Intel, about 46% of each 26 s
@@ -3309,6 +3369,9 @@ previous section; the count of live ranges stays open.
 - Reverted, root cause unknown. The waited utility copy changes the timing
   around pipeline creation; that path needs its own investigation before
   index uploads drop the fence again.
+- 2026-10-17: the same frame-3 boot stall occurred in 2 of 10 boots. Both
+  stalled before any index buffer was bound (see "Index snapshots over
+  linked surfaces"), so the stall does not depend on the index upload path.
 - The Unity fishing title's frame time is per-draw binding work at about
   1,160 draws per frame: resource binding 40-44%, texture descriptors 18%,
   state setup 16-18%. Removing fence waits alone does not move it.
