@@ -375,8 +375,13 @@ TEST(EmulatorComputeColorFill, UniformFillTexelsDecodeOnlyWhenTheQuadRepeatsOneT
 	EXPECT_FLOAT_EQ(clear.float32[2], 0.5f);
 	EXPECT_FLOAT_EQ(clear.float32[3], 0.18f);
 	EXPECT_FALSE(DecodeGuestUniformFillTexel({0x7fc00000u, 0u, 0u, 0u}, VK_FORMAT_R32G32B32A32_SFLOAT, &clear));
-	// Formats without an evidenced packing are not cleared.
-	EXPECT_FALSE(DecodeGuestUniformFillTexel({0u, 0u, 0u, 0u}, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &clear));
+	// Formats without an evidenced packing are cleared only by an all-zero fill.
+	EXPECT_FALSE(DecodeGuestUniformFillTexel({0x3c003c00u, 0x3c003c00u, 0x3c003c00u, 0x3c003c00u}, VK_FORMAT_R16G16_SFLOAT, &clear));
+	clear.float32[0] = 1.0f;
+	ASSERT_TRUE(DecodeGuestUniformFillTexel({0u, 0u, 0u, 0u}, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &clear));
+	EXPECT_EQ(clear.uint32[0], 0u);
+	EXPECT_EQ(clear.uint32[3], 0u);
+	EXPECT_FALSE(DecodeGuestUniformFillTexel({0u, 0u, 0u, 0u}, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, &clear));
 }
 
 TEST(EmulatorComputeColorFill, DccMetadataFillsNameOnlyTheClearKeys)

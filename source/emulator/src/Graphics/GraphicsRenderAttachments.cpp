@@ -72,8 +72,19 @@ static bool ComputeColorFillUsesGraphicsQueue(CommandBuffer* buffer)
 	return recording.vk_queue != nullptr && recording.vk_queue == graphics.vk_queue && recording.family == graphics.family;
 }
 
+// Which images sharing bytes with a filled range a resolved fill tolerates.
+enum class ComputeFillAliases
+{
+	// DCC metadata: any image other than an exact color alias refuses the clear.
+	ExactOnly,
+	// Uniform color fill: images that only partly share the bytes (transient
+	// pool aliases) are left as they are. The dispatch already wrote the fill to
+	// the storage buffer, so none of them held the guest bytes before either.
+	SkipPartial,
+};
+
 static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, ComputeColorFillIdentity* identity,
-                                           bool require_bound)
+                                           bool require_bound, ComputeFillAliases aliases)
 {
 	*identity = {address, size};
 	GpuMemoryRangeProvenance provenance {};
@@ -87,9 +98,15 @@ static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, Com
 	{
 		const auto& entry = provenance.entries[i];
 		// Exact color-image aliases (render targets, display buffers and sampled copies of the same bytes)
-		// receive the fill; any other or partial alias has no proven representation of it.
+		// receive the fill; any other alias has no proven representation of it and refuses it, unless
+		// the mode skips partial aliases.
 		const bool image_alias = entry.type == GpuMemoryObjectType::RenderTexture || entry.type == GpuMemoryObjectType::VideoOutBuffer ||
 		                         entry.type == GpuMemoryObjectType::Texture;
+		if (aliases == ComputeFillAliases::SkipPartial && entry.relation != GpuMemoryOverlapType::Equals &&
+		    (image_alias || entry.type == GpuMemoryObjectType::StorageTexture || entry.type == GpuMemoryObjectType::DepthStencilBuffer))
+		{
+			continue;
+		}
 		if (entry.type != GpuMemoryObjectType::StorageBuffer && !image_alias)
 		{
 			return false;
@@ -339,7 +356,7 @@ bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUnifor
 	if (!ComputeColorFillUsesGraphicsQueue(buffer)) { return false; }
 	const auto& words = fill.words;
 	ComputeColorFillIdentity identity {};
-	if (!ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true)) { return false; }
+	if (!ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true, ComputeFillAliases::SkipPartial)) { return false; }
 	g_compute_color_fills.DiscardOverlaps(identity.address, identity.size);
 	const auto images = FindComputeColorFillImages(buffer, identity.address, identity.size);
 	if (!images.IsEmpty()) { return ApplyComputeColorFillImages(buffer, identity, words, images); }
@@ -473,7 +490,8 @@ bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBuff
 	ComputeColorFillIdentity identity {};
 	SubmissionId submission;
 	if (!ColorDccClearCodeFromFill(fill.words, &code) || !ComputeColorFillUsesGraphicsQueue(buffer) ||
-	    !ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true) || !buffer->GetSubmissionId(&submission))
+	    !ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true, ComputeFillAliases::ExactOnly) ||
+	    !buffer->GetSubmissionId(&submission))
 	{
 		return false;
 	}
@@ -493,7 +511,8 @@ static bool TakeColorDccClear(CommandBuffer* buffer, uint64_t dcc_address, uint3
 	const uint64_t size    = pending->identity.size;
 	ComputeColorFillIdentity identity {};
 	SubmissionId submission;
-	if (!ResolveComputeColorFillIdentity(address, size, &identity, false) || !buffer->GetSubmissionId(&submission))
+	if (!ResolveComputeColorFillIdentity(address, size, &identity, false, ComputeFillAliases::ExactOnly) ||
+	    !buffer->GetSubmissionId(&submission))
 	{
 		g_color_dcc_clears.DiscardOverlaps(address, size);
 		return false;
@@ -577,7 +596,8 @@ static void ConsumeComputeColorFill(CommandBuffer* buffer, uint64_t address, uin
 	if (g_compute_color_fills.Empty()) { return; }
 	ComputeColorFillIdentity identity {};
 	SubmissionId submission;
-	if (!ResolveComputeColorFillIdentity(address, size, &identity, false) || !buffer->GetSubmissionId(&submission))
+	if (!ResolveComputeColorFillIdentity(address, size, &identity, false, ComputeFillAliases::SkipPartial) ||
+	    !buffer->GetSubmissionId(&submission))
 	{
 		g_compute_color_fills.DiscardOverlaps(address, size);
 		return;
