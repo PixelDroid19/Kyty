@@ -27,6 +27,9 @@ constexpr int kM0        = 108;
 constexpr int kScc       = 109;
 constexpr int kUnits     = 110;
 
+// LDS bytes one workgroup can address (RDNA2 ISA 10.1).
+constexpr uint64_t kLdsBytesMax = 64u * 1024u;
+
 using UnitSet = std::bitset<kUnits>;
 
 // Per-unit value class at a program point.
@@ -151,6 +154,27 @@ bool IsVectorMaskConsumer(ShaderInstructionType type)
 	       type == ShaderInstructionType::VSubrevCoCiU32;
 }
 
+// Instructions that read M0 without naming it (RDNA2 ISA 6.4, 10.4, 12.x): the
+// ADD_TID LDS base, relative VGPR moves, interpolation, messages, GDS and
+// buffer loads into LDS.
+bool ReadsM0Implicitly(const ShaderInstruction& instruction)
+{
+	const auto name = magic_enum::enum_name(instruction.type);
+	if (NameStartsWith(name, "VMovrel") || NameStartsWith(name, "VInterp") || NameStartsWith(name, "SSendmsg"))
+	{
+		return true;
+	}
+	if (instruction.type == ShaderInstructionType::DsWriteAddtidB32 || instruction.type == ShaderInstructionType::DsReadAddtidB32)
+	{
+		return true;
+	}
+	if (instruction.format == ShaderInstructionFormat::VdstGds || instruction.format == ShaderInstructionFormat::VaddrVdataOffsetGds)
+	{
+		return true;
+	}
+	return (NameStartsWith(name, "Buffer") || NameStartsWith(name, "TBuffer")) && (instruction.buffer_flags & 1u) != 0u;
+}
+
 // Scalar memory side effects are not gated by EXEC.
 bool HasScalarSideEffect(const ShaderInstruction& instruction)
 {
@@ -233,6 +257,23 @@ struct DecodedInstruction
 	uint32_t target               = 0;
 	bool     has_target           = false;
 };
+
+// Destinations (SCC included) of a scalar instruction whose only effect is to write them; empty
+// otherwise. S_MOVREL* is excluded because its indirect register is not among the decoded units.
+UnitSet PureScalarDefs(const ShaderInstruction& instruction, const DecodedInstruction& decoded)
+{
+	if (decoded.vector || decoded.has_target || HasScalarSideEffect(instruction) || ShaderInstructionWritesExec(instruction) ||
+	    NameStartsWith(magic_enum::enum_name(instruction.type), "SMovrel"))
+	{
+		return {};
+	}
+	UnitSet defs = decoded.defs;
+	if (defs.any() || decoded.writes_scc_data)
+	{
+		defs.set(kScc);
+	}
+	return defs;
+}
 
 // uniform_copy: a READFIRSTLANE whose source every active lane shares under the launch EXEC; each
 // lane then reads the word the guest's first active lane holds.
@@ -328,6 +369,11 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, boo
 	{
 		out->uses.set(kScc);
 		out->data_uses.set(kScc);
+	}
+	if (ReadsM0Implicitly(instruction))
+	{
+		out->uses.set(kM0);
+		out->data_uses.set(kM0);
 	}
 	if (instruction.type == ShaderInstructionType::SCbranchVccz || instruction.type == ShaderInstructionType::SCbranchVccnz)
 	{
@@ -706,6 +752,17 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 		successors[index].push_back(index + 1);
 	}
 
+	// ADD_TID addresses LDS by the lane's index in its wave. One host invocation per guest lane keeps
+	// that index, but the two halves of a guest wave are no longer in lockstep, so each lane may only
+	// address dwords no other lane of its wave can reach.
+	const auto addtid = std::find_if(first, last, [](const ShaderInstruction& instruction) {
+		return instruction.type == ShaderInstructionType::DsWriteAddtidB32 || instruction.type == ShaderInstructionType::DsReadAddtidB32;
+	});
+	if (addtid != last && !ShaderAddtidAccessesArePrivatePlanes(code, -1, kLdsBytesMax))
+	{
+		return Failure(addtid->pc, "ADD_TID LDS access is not a lane-private plane");
+	}
+
 	// Forward mask/data classification. Entry SGPRs, VCC and M0 are data.
 	std::vector<UnitState> in(count);
 	for (int unit = 0; unit < kUnits; ++unit)
@@ -808,7 +865,13 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 		}
 	}
 
-	// Backward scalar liveness.
+	// Backward strong scalar liveness: an instruction that only writes scalar destinations keeps its
+	// operands live only while one of them is, so a save/restore of a value nothing reads stays dead.
+	std::vector<UnitSet> pure_defs(count);
+	for (uint32_t index = 0; index < count; ++index)
+	{
+		pure_defs[index] = PureScalarDefs(instructions.At(index), decoded[index]);
+	}
 	std::vector<UnitSet> live_in(count);
 	changed = true;
 	while (changed)
@@ -826,7 +889,8 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 			{
 				kills.set(kScc);
 			}
-			const auto updated = decoded[index].uses | (out & ~kills);
+			const bool dead     = pure_defs[index].any() && (out & pure_defs[index]).none();
+			const auto updated  = (dead ? UnitSet {} : decoded[index].uses) | (out & ~kills);
 			if (updated != live_in[index])
 			{
 				live_in[index] = updated;
@@ -879,10 +943,6 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 			{
 				written.set(kScc);
 			}
-		}
-		if (written.test(kM0))
-		{
-			return Failure(instruction.pc, "M0 is written inside a lane-conditional region");
 		}
 		if ((written & live_in[static_cast<size_t>(target)]).any())
 		{

@@ -81,6 +81,45 @@ TEST(EmulatorComputeWaveNativeEquivalence, AdmitsScalarWriteDeadAtJoin)
 	ExpectNativeEquivalence({kCmpNeVcc, kSaveexecVcc, kExeczSkip1, kMovS20Seven, kRestoreExec, kEnd}, true, 0, "");
 }
 
+// ADD_TID spill slots: LDS[M0[15:0] + offset + TID*4].
+static constexpr uint32_t kSaveM0       = 0xbe88037cu; // s_mov_b32 s8, m0
+static constexpr uint32_t kM0Zero       = 0xb07c0000u; // s_movk_i32 m0, 0
+static constexpr uint32_t kRestoreM0    = 0xbefc0308u; // s_mov_b32 m0, s8
+static constexpr uint32_t kAddtidWrite  = 0xdac00000u; // ds_write_addtid_b32 v1
+static constexpr uint32_t kAddtidWrite4 = 0xdac00004u; // ds_write_addtid_b32 v1 offset:4
+static constexpr uint32_t kAddtidData1  = 0x00000100u;
+static constexpr uint32_t kAddtidRead   = 0xdac40000u; // ds_read_addtid_b32 v2
+static constexpr uint32_t kAddtidDst2   = 0x02000000u;
+static constexpr uint32_t kExeczSkip7   = 0xbf880007u; // s_cbranch_execz +7 dwords
+
+TEST(EmulatorComputeWaveNativeEquivalence, AdmitsAddtidSpillWithM0DeadAtJoin)
+{
+	ExpectNativeEquivalence({kCmpNeVcc, kSaveexecVcc, kExeczSkip7, kSaveM0, kM0Zero, kAddtidWrite, kAddtidData1, kAddtidRead, kAddtidDst2,
+	                         kRestoreM0, kRestoreExec, kEnd},
+	                        true, 0, "");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, AdmitsM0SavedAndRestoredAfterJoin)
+{
+	// After the join M0 only flows into a save/restore pair around an ADD_TID access that uses its own M0.
+	ExpectNativeEquivalence({kCmpNeVcc, kSaveexecVcc, kExeczSkip1, kM0Zero, kRestoreExec, kSaveM0, kM0Zero, kAddtidWrite, kAddtidData1,
+	                         kAddtidRead, kAddtidDst2, kRestoreM0, kEnd},
+	                        true, 0, "");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsM0WriteLiveAtJoin)
+{
+	ExpectNativeEquivalence({kM0Zero, kAddtidWrite, kAddtidData1, kCmpNeVcc, kSaveexecVcc, kExeczSkip1, kM0Zero, kRestoreExec, kAddtidRead,
+	                         kAddtidDst2, kEnd},
+	                        false, 0x14u, "live at its join");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsAddtidPlanesReachingAnotherLane)
+{
+	ExpectNativeEquivalence({kM0Zero, kAddtidWrite, kAddtidData1, kAddtidWrite4, kAddtidData1, kAddtidRead, kAddtidDst2, kEnd}, false, 0x4u,
+	                        "lane-private plane");
+}
+
 TEST(EmulatorComputeWaveNativeEquivalence, RejectsMaskReadAsData)
 {
 	ExpectNativeEquivalence({kCmpNeVcc, kMovV1VccLo, kEnd}, false, 0x4u, "read as uniform data");
