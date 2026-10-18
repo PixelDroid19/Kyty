@@ -362,6 +362,10 @@ DepthStencilAttachmentAccess ResolveDrawDepthStencilAccess(CommandBuffer* buffer
 	{
 		EXIT("same-draw depth sampling conflicts with attachment writes or missing store-op-none support\n");
 	}
+	if (access != DepthStencilAttachmentAccess::Writable)
+	{
+		InitializeReadOnlyDepthFirstUse(buffer, depth);
+	}
 	return access;
 }
 

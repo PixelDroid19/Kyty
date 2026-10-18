@@ -444,6 +444,27 @@ bool PropagateComputeUniformDepthFill(CommandBuffer* buffer, const ComputeUnifor
 	return cleared;
 }
 
+void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth)
+{
+	auto* image = depth.vulkan_buffer;
+	if (image == nullptr || image->image == nullptr || image->layout != VK_IMAGE_LAYOUT_UNDEFINED)
+	{
+		return;
+	}
+	// Custom sample locations would have to accompany every layout transition.
+	if (image->sample_locations_compatible)
+	{
+		EXIT("read-only first use of a depth image with custom sample locations\n");
+	}
+	// The same contents a writable first use gets from its CLEAR load op.
+	auto vk_buffer = buffer->RecordOutsideRenderPass();
+	TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	const VkClearDepthStencilValue clear {depth.depth_clear_value, depth.stencil_clear_value};
+	const VkImageSubresourceRange  range {DepthFormatAspectMask(image->format), 0u, image->mip_levels, 0u, image->array_layers};
+	vkCmdClearDepthStencilImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
+	TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+}
+
 bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
 {
 	// Any other fill of the metadata, including the uncompressed key, ends a pending clear.

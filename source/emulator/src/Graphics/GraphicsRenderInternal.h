@@ -1715,6 +1715,9 @@ void               InvalidateComputeColorFills(const ShaderBindResources& bind);
 // A proven uniform fill of a live 32-bit float depth image's whole depth plane
 // with a value in [0, 1] clears its host depth aspect in recording order.
 [[nodiscard]] bool PropagateComputeUniformDepthFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// A pass that samples its depth attachment cannot CLEAR it, so a first use of the
+// image there receives the first-use clear contents before the pass begins.
+void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth);
 // A proven uniform fill of a DCC metadata range with a clear key is held until
 // a render target or shader image with that metadata base consumes it.
 [[nodiscard]] bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
