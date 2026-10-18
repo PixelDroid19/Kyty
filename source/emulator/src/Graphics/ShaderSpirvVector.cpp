@@ -4220,8 +4220,8 @@ static bool EmitMovreldDynamic(int index, int base, const String8& src_load, con
 	for (const auto reg: candidates)
 	{
 		stores += String8::FromPrintf("%%rel_old_%d_%d = OpLoad %%float %%v%d\n"
-		                              "%%rel_eq_%d_%d = OpIEqual %%bool %%rel_m0_%d %%uint_%d\n"
-		                              "%%rel_gate_%d_%d = OpLogicalAnd %%bool %%rel_eq_%d_%d %%rel_execb_%d\n"
+		                              "%%rel_deq_%d_%d = OpIEqual %%bool %%rel_m0_%d %%uint_%d\n"
+		                              "%%rel_gate_%d_%d = OpLogicalAnd %%bool %%rel_deq_%d_%d %%rel_execb_%d\n"
 		                              "%%rel_out_%d_%d = OpSelect %%float %%rel_gate_%d_%d %s %%rel_old_%d_%d\n"
 		                              "OpStore %%v%d %%rel_out_%d_%d\n",
 		                              index, reg, reg, index, reg, index, reg - base, index, reg, index, reg, index, index, reg,

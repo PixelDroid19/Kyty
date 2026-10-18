@@ -6419,6 +6419,34 @@ TEST(EmulatorGraphicsPackets, NarrowsDynamicMovrelsToBoundedM0Values)
 	EXPECT_NE(joined_source.FindIndex("%rel_v_4_10 = OpLoad %float %v10"), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, EmitsVop1MovrelsdWithDynamicM0)
+{
+	// v_movrelsd_b32 v7, v5 with a runtime m0 reads through the source chain
+	// and writes through the gated stores; both cover the same registers.
+	const uint32_t shader[] = {0xbefc0300u, (0x3fu << 25u) | (7u << 17u) | (0x44u << 9u) | 261u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+	ASSERT_EQ(code.GetInstructions().At(1).type, ShaderInstructionType::VMovrelsdB32);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	// v7 is a candidate of both sides; each id is defined once.
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	const auto first  = source.FindIndex("%rel_eq_1_7 = ");
+	ASSERT_NE(first, Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.Mid(first + 1).FindIndex("%rel_eq_1_7 = "), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompilePS(code, &input).IsEmpty());
+}
+
 TEST(EmulatorGraphicsPackets, ParsesVop1MovrelsdAndMovreld)
 {
 	// Relative moves keep their base registers in the IR; M0 resolution happens
