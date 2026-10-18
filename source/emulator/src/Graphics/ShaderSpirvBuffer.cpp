@@ -3178,9 +3178,8 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
                                       String8* dst_source)
 {
 	const uint32_t alignment = components == 1u ? 1u : (components == 2u ? 2u : 4u);
-	if (!spirv->UsesGuestDeviceAddress() || components == 0u || components > 16u || inst.smem_flags != 0u ||
-	    inst.smem_imm_offset != 0 || inst.src_num != 2 || inst.src[0].type != ShaderOperandType::Sgpr ||
-	    inst.src[0].size != 4 || inst.src[0].register_id < 0 || inst.src[0].register_id > 100 ||
+	if (!spirv->UsesGuestDeviceAddress() || components == 0u || components > 16u || inst.smem_flags != 0u || inst.src_num != 2 ||
+	    inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].size != 4 || inst.src[0].register_id < 0 || inst.src[0].register_id > 100 ||
 	    (inst.src[0].register_id % 4) != 0 || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != components ||
 	    inst.dst.register_id < 0 || inst.dst.register_id + components > 106u || (inst.dst.register_id % alignment) != 0u ||
 	    inst.src[1].dpp || inst.src[1].absolute || inst.src[1].negate || inst.src[1].swizzle != 6u)
@@ -3189,7 +3188,10 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
 	}
 	const auto tag = String8::FromPrintf("gsb_%u", index);
 	String8 source;
-	if (!operand_load_uint(spirv, inst.src[1], tag + "_offset", tag, &source)) { return false; }
+	// The byte offset is SOFFSET + OFFSET (RDNA2 ISA, SMEM).
+	if (!operand_load_uint(spirv, inst.src[1], tag + "_soffset", tag, &source)) { return false; }
+	source += String8::FromPrintf("\n%%%s_offset = OpIAdd %%uint %%%s_soffset %%%s\n", tag.c_str(), tag.c_str(),
+	                              spirv->GetConstantUint(static_cast<uint32_t>(inst.smem_imm_offset)).c_str());
 	source += GuestScalarBufferAddress(spirv, inst, tag, tag + "_offset");
 	for (uint32_t word = 0; word < components; ++word)
 	{
