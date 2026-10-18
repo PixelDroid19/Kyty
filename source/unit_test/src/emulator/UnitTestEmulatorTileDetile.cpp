@@ -1996,6 +1996,37 @@ TEST(EmulatorTileDetile, DepthOnlyD16ShadowPassKeepsWritableAttachment)
 	EXPECT_TRUE(depth.depth_test_enable);
 }
 
+TEST(EmulatorTileDetile, UndersizedDepthBoundsColorOnlyWhenUsed)
+{
+	// Census: full-screen composite into 1920x1080 color with a 960x540 D32 surface
+	// still bound, depth test/write off and stencil enabled without a stencil plane.
+	RenderTextureVulkanImage color_image;
+	color_image.SetNativeExtent(1920u, 1080u);
+	DepthStencilVulkanImage depth_image;
+	depth_image.SetNativeExtent(960u, 540u);
+
+	RenderColorInfo color {};
+	color.targets_num                 = 1;
+	color.attachment[0].type          = RenderColorType::RenderTexture;
+	color.attachment[0].vulkan_buffer = &color_image;
+
+	RenderDepthInfo inert {};
+	inert.format              = VK_FORMAT_D32_SFLOAT;
+	inert.vulkan_buffer       = &depth_image;
+	inert.stencil_test_enable = true;
+	SanitizeRenderDepthAgainstColor(&color, &inert);
+	EXPECT_EQ(inert.format, VK_FORMAT_UNDEFINED);
+	EXPECT_EQ(inert.vulkan_buffer, nullptr);
+
+	RenderDepthInfo tested {};
+	tested.format            = VK_FORMAT_D32_SFLOAT;
+	tested.vulkan_buffer     = &depth_image;
+	tested.depth_test_enable = true;
+	SanitizeRenderDepthAgainstColor(&color, &tested);
+	EXPECT_EQ(tested.format, VK_FORMAT_D32_SFLOAT);
+	EXPECT_EQ(tested.vulkan_buffer, &depth_image);
+}
+
 TEST(EmulatorTileDetile, DrawMaterialTraceDecodesFloat2Uv)
 {
 	const uint64_t guest_address =

@@ -135,8 +135,19 @@ VkExtent2D IntersectFramebufferAttachmentExtent(VkExtent2D current, const Vulkan
 	return {std::min(current.width, width), std::min(current.height, height)};
 }
 
-// Drop a depth/stencil surface that cannot form a legal framebuffer with the
-// active color targets (guest depth size 0 → 1x1 while color is full-screen).
+// The DB only touches its surface when the draw tests, writes or clears depth or
+// stencil; an untouched surface does not bound the rasterized area.
+static bool RenderDepthIsInert(const RenderDepthInfo& depth)
+{
+	const bool stencil_used = depth.stencil_plane && (depth.stencil_test_enable || depth.stencil_clear_enable);
+	return !depth.depth_test_enable && !depth.depth_write_enable && !depth.depth_bounds_test_enable && !depth.depth_clear_enable &&
+	       !stencil_used;
+}
+
+// Drop a depth/stencil surface smaller than the active color targets when it
+// cannot form a legal framebuffer (guest depth size 0 → 1x1 while color is
+// full-screen) or the draw leaves it inert: Vulkan clamps the framebuffer to the
+// smallest attachment, which would clip color writes the guest DB never bounds.
 // Clears format so CreatePipeline does not enable depth test without a DS attachment.
 void SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* depth)
 {
@@ -157,7 +168,7 @@ void SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* de
 	const auto dh = depth->vulkan_buffer->extent.height;
 	const auto cw = color_img->extent.width;
 	const auto ch = color_img->extent.height;
-	if ((dw < cw || dh < ch) && (dw <= 1u || dh <= 1u))
+	if ((dw < cw || dh < ch) && (dw <= 1u || dh <= 1u || RenderDepthIsInert(*depth)))
 	{
 		KYTY_LOG_DEBUG(
 		             "KYTY_GRAPHICS: sanitizing undersized depth %ux%u against color %ux%u (disabling depth attachment)\n", dw, dh, cw,
