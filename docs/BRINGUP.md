@@ -138,6 +138,49 @@ fail on the current HEAD before acting on them.
   ES+GS launch, shared LDS and primitive emission are not implemented.
   Whether either defect explains the black lit geometry is not yet
   verified.
+- **Black ship: exclusions and new evidence (2026-10-18, open).** The ship
+  is a black silhouette in the tunnel shot and lit only at its base in the
+  title menu. Intel A770, strict, HEAD 50775391, warm caches.
+  - Not a regression: a 10-14 run on dff7b38b shows the same partial
+    lighting in the menu and the same silhouette in the tunnel. The "lit
+    ship" of the 10-14 entry below is that partial state.
+  - BVH results excluded: a diagnostic build that forced every
+    `image_bvh_intersect_ray` to return a miss, captured every 6 s, still
+    shows the silhouette (tunnel, presents 1418 and 1451) and the black upper
+    part (menu, presents 1284-1382). An unverified change to the triangle
+    vertex order of node types 2 and 3 was withdrawn: it has one secondary
+    source, and no capture differed.
+  - DCC clear contract holds: a trace of presents 1270-1460 shows nine
+    metadata clears published per frame and the 1920x1080 RGBA16F lighting
+    target taking its clear at its first shader-image access, before the
+    lighting writes. Its render-target bind does not erase it.
+  - Skipped geometry-shader draws hit the G-buffer: in presents 1280-1300,
+    about 79 draws per frame are skipped as `unsupported_ge_state`. About 42
+    of them target the four-target MRT with its own depth surface (24 + 12
+    with `max_vert_out` 4, 6 + 6 with 10); the rest target two single-target
+    passes. Whether these draws write the ship's G-buffer texels is not
+    verified. Direction: run merged ES+GS programs as one workgroup with
+    shared LDS and collect their exports. The renderer has no mesh-shader
+    path today.
+  - Defect found, not fixed: a compute `S_BUFFER_LOAD` whose V# is built at
+    run time reads the bound-buffer array with the V# base dword as its
+    index. The guest-address path exists only for pixel shaders
+    (`PixelScalarBufferUsesGuestAddress`, `ShaderSpirvBuffer.cpp:3207`), and
+    the compute device-address predicate (`ShaderUsesGuestDeviceAddress`,
+    `Shader.cpp:4401`) ignores these loads. Trigger: all nine kernels that
+    contain `image_bvh_intersect_ray` build a V# over an instance's bottom
+    level (`s[8:9] = s[28:29] << 3`, `s11 = 0x16204`) inside the instance
+    walk and read it with three `S_BUFFER_LOAD`s. The walk is reached only
+    after a box hit. Direction: use the scalar flow's entry sources to tell
+    an entry-value copy of a bound V# (which holds the slot index) from a
+    computed V#, and read only the computed one through the device address.
+    A copy such as `s[16:19] <- s[10:13]` must keep the slot path.
+  - Cold compile: the heaviest tiled-lighting kernel (466,347 SPIR-V words)
+    took 356 s to compile offline on Intel: about 390,000 instructions,
+    22,000 spills and 1,400 live registers at peak. Any change to the BVH
+    emission makes every first boot pay this compile again. At HEAD,
+    three runs stalled near present 1384 for more than 76 s; the counters
+    point to a compile in progress, but no stack confirms it.
 - **Pre-existing, unrelated failure.** Unit test
   `EmulatorGraphicsPackets.CompressedMrtExportReadsPackedHalfFromUintShadow`
   also fails on clean 486b7d0d.
