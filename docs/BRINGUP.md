@@ -103,9 +103,10 @@ fail on the current HEAD before acting on them.
     rule.
   - Verified (Intel, frames 1248-1252): the fill is applied (`color=1`), the
     target's dump is clean, and the flyby capture shows single silhouettes
-    instead of smeared copies. Regression: Intel formula (frame 55,378 at
-    200 s, above every earlier run), DREDGE 22-23 fps, Minecraft in world,
-    GRIS; AMD DREDGE 11.5-12 fps (one of three AMD runs hit the known boot
+    instead of smeared copies. Regression: Intel racing title (frame 55,378
+    at 200 s, above every earlier run), fishing title 22-23 fps, sandbox
+    title in its world, watercolour platformer; AMD fishing title 11.5-12 fps
+    (one of three AMD runs hit the known boot
     stall before the first present).
   - Still refused: a 0x30000 fill whose range is also contained in a
     read-only storage buffer, a 0x10000 fill whose exact alias is a storage
@@ -290,8 +291,10 @@ fail on the current HEAD before acting on them.
   each run is a fixed 16-byte copy. Host benchmark (2048x1024): 1.9-2.5 to
   12-28 GB/s across element sizes. Unit test
   `Standard4KBEveryElementSizeMatchesReference` (1, 2, 8 and 16 bytes,
-  partial tail run). The detile frames no longer appear in the processor
-  profile; the robot platformer and fishing title render as before.
+  partial tail run). In one profiled window after the change no detile
+  frame appeared on the processor thread; that window may not have held a
+  streaming burst, so the in-game share is not yet measured. The robot
+  platformer and fishing title render as before.
 - **Excluded: exec-merge elision in the paired emitter (measured offline).**
   The hot paired program keeps 32 guest VGPRs live at its peak, so 64
   values per invocation against about 32 that SIMD32 holds in 128
@@ -306,8 +309,8 @@ fail on the current HEAD before acting on them.
   draws.** The indirect arguments are already read through the range-exact
   current-bytes path, so the wait looked redundant. Without it, draw
   processor time rose from 86 to 179 ms per frame and command-processor
-  time from 145 to 280 ms in the same frame window: each indirect draw then
-  settles its own write-backs. Kept.
+  time from 145 to 280 ms in the same frame window (one run; submissions per
+  frame barely moved, so the cause is not isolated). Kept.
 - **Open leads, by measured size.**
   - The 8160-group compute program (16 ms).
   - The two paired programs above (29 ms together).
