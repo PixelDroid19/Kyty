@@ -340,10 +340,29 @@ fail on the current HEAD before acting on them.
   tests. They now test the shared, allocation-free name table
   (`ShaderInstructionTypeName`), built from the same enum range, so results
   are unchanged; compute-wave and shader suites (332 tests) pass.
-  - Robot platformer: intro 12.7-13.5 fps against 11.3-11.7 in the three
-    previous warm runs; frame 735 at 93 s against 631-687. Steady state
+  - Robot platformer (one run): intro 12.7-13.5 fps against 11.3-11.7 in
+    the three previous warm runs; frame 735 at 93 s against 631-687. Steady state
     unchanged (5.9-6.4 fps), where this analysis does not appear in the
     profile.
+- **Pipeline cache persistence (fixed).** Every pipeline creation marks the
+  driver cache dirty, including cache hits, and each 30 s checkpoint rewrote
+  the whole blob. Each robot platformer run wrote the same 35,428,999-byte
+  blob three times in its first minute (106 MB of the 128 MiB session
+  budget); the fourth checkpoint hit the budget, so pipelines first created
+  later in the run were never saved and every run compiled them again. The
+  store now keeps the size and XXH3 digest of the blob the file holds (as
+  loaded or written) and skips a checkpoint whose blob matches, without
+  charging the budget.
+  - First run: three writes of growing blobs, none refused; the file grew
+    from 35.4 to 38.2 MB.
+  - Next two runs, one write each and no refusal: frame 850-855 at 94-98 s
+    and 1,167-1,196 at 155-159 s, against 631-687 at 93-96 s and about
+    1,150 at 175 s before, so about 20 s less to the measured scene. Steady
+    state unchanged (5.5-6.2 fps, 106-122 ms command processor per frame).
+  - Command-processor samples taken right after the measured frame vary
+    between runs from 4% to 83% inside the Intel driver; a focused sample
+    of the same window found 9.5%, so single windows of that kind are not
+    evidence for or against a change.
 - **Open leads, by measured size.**
   - The 8160-group compute program (16 ms).
   - The two paired programs above (29 ms together).
