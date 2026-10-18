@@ -114,6 +114,12 @@ TEST(EmulatorComputeWaveNativeEquivalence, RejectsM0WriteLiveAtJoin)
 	                        false, 0x14u, "live at its join");
 }
 
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsGdsWrite)
+{
+	// ds_write_b32 v0, v1 gds
+	ExpectNativeEquivalence({kM0Zero, 0xd8360000u, 0x00000100u, kEnd}, false, 0x4u, "GDS access");
+}
+
 TEST(EmulatorComputeWaveNativeEquivalence, RejectsAddtidPlanesReachingAnotherLane)
 {
 	ExpectNativeEquivalence({kM0Zero, kAddtidWrite, kAddtidData1, kAddtidWrite4, kAddtidData1, kAddtidRead, kAddtidDst2, kEnd}, false, 0x4u,

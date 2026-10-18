@@ -290,6 +290,12 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, boo
 	{
 		return Failure(instruction.pc, "instruction reads another lane or a wave-wide count");
 	}
+	// GDS is shared by every wave, so the order in which lanes reach it is
+	// observable, and only the paired emitter lowers it.
+	if (instruction.format == ShaderInstructionFormat::VdstGds || instruction.format == ShaderInstructionFormat::VaddrVdataOffsetGds)
+	{
+		return Failure(instruction.pc, "GDS access depends on wave lane order");
+	}
 	if (instruction.type >= ShaderInstructionType::SAndSaveexecB32 && instruction.type <= ShaderInstructionType::SOrn1SaveexecB32)
 	{
 		return Failure(instruction.pc, "32-bit SAVEEXEC changes only the lower half of a wave64 mask");
