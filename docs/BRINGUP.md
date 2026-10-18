@@ -302,6 +302,12 @@ fail on the current HEAD before acting on them.
 - **Excluded: per-program cache of the paired admission classification.**
   The ratio of time per dispatch to time per draw stayed at 1.69 with and
   without it, so the per-dispatch classification is not a measurable cost.
+- **Excluded: dropping the queue-wide device-address wait before indirect
+  draws.** The indirect arguments are already read through the range-exact
+  current-bytes path, so the wait looked redundant. Without it, draw
+  processor time rose from 86 to 179 ms per frame and command-processor
+  time from 145 to 280 ms in the same frame window: each indirect draw then
+  settles its own write-backs. Kept.
 - **Open leads, by measured size.**
   - The 8160-group compute program (16 ms).
   - The two paired programs above (29 ms together).
