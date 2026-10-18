@@ -9,6 +9,84 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: worldmap stall and dark top-left quadrant (2026-10-17)
+
+- **Route (Intel Arc A770, Mesa ANV, strict).** Logo, title, "Continue",
+  worldmap load. Through 486b7d0d presents stopped at about frame 823.
+- **Stall 1: one cold compute compile.** `sudo gdb` on the command-processor
+  thread showed it inside the driver's `vkCreateComputePipelines` for one
+  paired-transport module (3 MB of SPIR-V). Offline, the module took 188 s to
+  compile, with 11474:36425 SIMD32 spills. A 300 s run never finished it, so
+  the driver never cached it. The guest program is a 5,458-instruction
+  64x1x1 compute shader. Its only paired reasons were ADD_TID LDS spills and
+  an M0 save/restore. (Correction: an earlier entry concluded the stall was
+  not a compile.)
+  - Fix: the native-equivalence proof
+    (`ShaderComputeWaveNativeEquivalence.cpp`) now models M0 as an implicit
+    input of the instructions that read it. ADD_TID spill slots are
+    lane-private planes, not refusals. Scalar liveness is strong: a pure
+    scalar op keeps its sources live only if its result is live, so the dead
+    M0 copies no longer count as scalar state live at a join. The program
+    runs natively; the run passes the old stop. Unit tests cover the three
+    rules.
+  - The classifier programs (`ds_append` with `mbcnt` slot order) stay
+    paired, because their slot order is guest-visible.
+- **Stop 2: scalar buffer load with an immediate offset.** The next stop was
+  `s_buffer_load_dwordx4 s[4:7], s[0:3], vcc_hi` with an immediate offset of
+  64. `EmitGuestScalarBufferLoad` refused any non-zero immediate. The RDNA2
+  ISA defines the SMEM byte offset as SOFFSET + OFFSET, and the emitter now
+  adds both. In wave32, VCC_HI is an ordinary SGPR source.
+- **Stop 3: a freeze at frames 975-1010 is the harness memory guard, not the
+  emulator.** Every worldmap run peaked at 7.2 GB against the 7 GB
+  `MemoryHigh` of the run cgroup (`journalctl --user` "Consumed" lines). gdb
+  showed the command processor throttled inside a large vector copy at about
+  2 MB/s. With `KYTY_RUN_MEMORY_HIGH=16G` and `KYTY_RUN_MEMORY_MAX=18G` the
+  title reaches the title menu and the next level load, with a cgroup peak of
+  13.2 GB at about 420 s. This title needs a run cap of at least 600 s to
+  reach gameplay.
+- **Dark top-left quadrant on the logo and title scenes.** A composite draw
+  blends a half-resolution layer over the scene as
+  `dst = src.rgb + dst * src.a`, so the layer's alpha is transmittance. There
+  were two defects:
+  - **(1) Inert undersized depth clipped colour.** The draw binds a
+    1920x1080 colour target with a 960x540 D32 depth target. It does not
+    test, write or clear depth, and it enables stencil with no stencil
+    plane. Vulkan sizes the framebuffer to the smallest attachment, so colour
+    writes outside 960x540 were dropped. The guest DB does not bound
+    rasterization when it leaves its surface untouched.
+    `SanitizeRenderDepthAgainstColor` (`GraphicsRenderCore.cpp`) now detaches
+    an undersized depth target when the draw leaves it inert, as it already
+    did for 1x1 depth. A depth target the draw tests or writes is kept. Unit
+    test `UndersizedDepthBoundsColorOnlyWhenUsed`.
+  - **(2) The layer's DCC clear was dropped.** With fix (1) alone the whole
+    scene went black, which isolated the second defect. The half-resolution
+    layer is cleared by a compute fill of its DCC keys with 0x40404040,
+    which encodes rgba (0, 0, 0, 1). `PublishComputeColorDccClear` returned
+    without publishing because `BeginRead` reported `tracked=0`. The dirty
+    page tracker had refused the layer's range: 131,068 of 131,072 pages
+    were admitted by 32 s, held by 93 render-target and texture ranges. The
+    layer then held its undefined alpha 0 (pixel readback, not thumbnails)
+    and the composite darkened the scene.
+  - **Fix for (2).** `GpuDirtyPageTracker::kPageTableSize` grows from 2^18 to
+    2^20 slots (an admission budget of 524,288 pages, about 59 MB of fixed
+    metadata). This title peaks at about 205,000 pages on the title scene.
+  - **Verified with both fixes**, Intel, 16G guard, 420 s: the clear is
+    published and consumed at the render-target bind; the layer's alpha
+    mean is 1.0; the logo and title scenes render whole through frame 1181;
+    the frame rate is unchanged (about 5 FPS there).
+- **Defect found, not fixed.** A colour DCC clear refused by the tracker is
+  still dropped silently: `PublishComputeColorDccClear`
+  (`GraphicsRenderAttachments.cpp:480-481`) returns false when
+  `observation.tracked` is false, and the dispatch path
+  (`GraphicsRenderDraw.cpp:3231`) discards the result. Correctness therefore
+  still depends on tracker capacity. Direction: register the range on demand,
+  or report the refusal as a strict error instead of dropping it. Two more
+  DCC fills were dropped in the same run before the fix; whether they cause
+  the dark ship and garbled blocks of the title menu is not yet verified.
+- **Pre-existing, unrelated failure.** Unit test
+  `EmulatorGraphicsPackets.CompressedMrtExportReadsPackedHalfFromUintShadow`
+  also fails on clean 486b7d0d.
+
 ## Racing title on AMD: corruption from a degraded GPU, not from code (2026-10-17)
 
 - **Symptom (RADV, Radeon 610M, Mesa 26.2.4, strict 200 s route).** From the
@@ -2329,10 +2407,11 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
     first object only, so a recycled range with depth views in two formats
     can bind the stale one, as storage textures did before c8e3537c.
     Direction: pick the most recently written view.
-  - `CommandProcessor::DrawIndexIndirect` (`GraphicsRun.cpp:2115`) waits only
-    for device-address write-backs before its CPU read of the arguments, so
-    a draw whose arguments an earlier dispatch of the same recording wrote
-    can use stale counts. Direction: the same admission as 6d1b178d.
+  - Fixed 2026-10-17: `CommandProcessor::DrawIndexIndirect` and `DrawIndirect`
+    waited only for device-address write-backs before their CPU read of the
+    arguments, so a draw whose arguments an earlier dispatch of the same
+    recording wrote could use stale counts. They now read the arguments
+    through the same current-bytes path as 6d1b178d.
   - Exact storage views are not separated by image type; a 2D/3D filter was
     tried and dropped because no failure needs it.
 
