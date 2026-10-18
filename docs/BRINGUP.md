@@ -325,11 +325,25 @@ fail on the current HEAD before acting on them.
   - Robot platformer run: no `directory_iterator` frame in the profile;
     frame 905 at 116 s and 1,235 at 177 s against 848 at 114 s and
     1,167-1,210 at 175 s in the two previous warm runs, which is within
-    run-to-run spread. The two loading plateaus (about 20 s each, near
-    frames 130 and 900) remain, so they are not set by these lookups.
-    Steady state unchanged: 5.8-6.3 fps, 120 ms command processor per frame.
+    run-to-run spread. Steady state unchanged: 5.8-6.3 fps, 120 ms command
+    processor per frame.
+  - The apparent 20 s plateaus near frames 130 and 900 in these run logs
+    are a sampling artifact: the agent status file repeats unchanged (same
+    frame, fps and 70-90 ms since the last present), so presents continue.
   - Savedata path: the card title writes its four save files and holds
     227-245 fps (earlier runs 209-247).
+- **Paired compute admission by mnemonic (fixed).** During the intro
+  (frames 130-900) the command-processor thread spent about 70% of its
+  samples in `ShaderGetInputInfoCS`: every dispatch re-runs the paired
+  admission, and its generic scalar, vector and compare classifiers built an
+  allocated `String8` mnemonic per instruction for prefix and substring
+  tests. They now test the shared, allocation-free name table
+  (`ShaderInstructionTypeName`), built from the same enum range, so results
+  are unchanged; compute-wave and shader suites (332 tests) pass.
+  - Robot platformer: intro 12.7-13.5 fps against 11.3-11.7 in the three
+    previous warm runs; frame 735 at 93 s against 631-687. Steady state
+    unchanged (5.9-6.4 fps), where this analysis does not appear in the
+    profile.
 - **Open leads, by measured size.**
   - The 8160-group compute program (16 ms).
   - The two paired programs above (29 ms together).
