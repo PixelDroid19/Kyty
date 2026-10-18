@@ -1297,6 +1297,10 @@ struct ShaderVertexProgramKey
 struct ShaderVertexProgram
 {
 	ShaderVertexProgramKey key;
+	// Guest bytes copied from front_addr and continuation_addr; a mapping that
+	// overlaps either range retires the program.
+	uint32_t               front_bytes = 0;
+	uint32_t               back_bytes  = 0;
 	ShaderCode             front_code;
 	ShaderCode             code;
 	// EUD scans use the front stream even when the linked program adds a continuation.
@@ -1334,8 +1338,45 @@ static std::mutex                g_vs_isa_cache_mutex;
 static uint64_t                  g_vs_isa_cache_bytes = 0;
 static uint64_t                  g_vs_program_generation = 1;
 
+static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program);
+
+static bool ShaderRangesOverlap(uint64_t a, uint64_t a_size, uint64_t b, uint64_t b_size)
+{
+	return a_size != 0u && b_size != 0u && a < b + b_size && b < a + a_size;
+}
+
+// Caller holds the exclusive lifetime lock. Retires the programs and vertex
+// offset results that read guest code in [addr, addr + size).
+static void ShaderInvalidateVertexProgramRangeLocked(uint64_t addr, uint64_t size)
+{
+	std::scoped_lock cache_lock(g_vs_isa_cache_mutex, g_vertex_offset_sgpr_mutex);
+	if (g_vs_isa_cache != nullptr)
+	{
+		for (auto entry = g_vs_isa_cache->begin(); entry != g_vs_isa_cache->end();)
+		{
+			const auto& program = *entry->second;
+			if (ShaderRangesOverlap(program.key.front_addr, program.front_bytes, addr, size) ||
+			    ShaderRangesOverlap(program.key.continuation_addr, program.back_bytes, addr, size))
+			{
+				g_vs_isa_cache_bytes -= ShaderVertexProgramCacheCost(program);
+				entry = g_vs_isa_cache->erase(entry);
+			} else
+			{
+				++entry;
+			}
+		}
+	}
+	if (g_vertex_offset_sgpr_map != nullptr)
+	{
+		for (auto entry = g_vertex_offset_sgpr_map->begin(); entry != g_vertex_offset_sgpr_map->end();)
+		{
+			entry = ShaderRangesOverlap(entry->first, 1u, addr, size) ? g_vertex_offset_sgpr_map->erase(entry) : std::next(entry);
+		}
+	}
+}
+
 // Caller holds the exclusive lifetime lock. Lock order is lifetime -> map/cache;
-// no cache holder may acquire lifetime. Both code owners and debug state use it.
+// no cache holder may acquire lifetime. Debug state changes every program.
 static void ShaderInvalidateVertexProgramsLocked()
 {
 	EXIT_IF(g_vs_program_generation == UINT64_MAX);
@@ -1501,7 +1542,10 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
 			++continuation;
 		}
 	}
-	ShaderInvalidateVertexProgramsLocked();
+	// Programs that read the previous or the new owned range are stale; a
+	// size-less mapping still owns the code that starts at its address.
+	ShaderInvalidateVertexProgramRangeLocked(addr, std::max<uint64_t>(previous_size, 1u));
+	ShaderInvalidateVertexProgramRangeLocked(addr, std::max<uint64_t>(data.code_size_bytes, 1u));
 	g_shader_map->insert_or_assign(addr, data);
 }
 
@@ -1531,7 +1575,7 @@ bool ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_add
 		return false;
 	}
 	g_shader_continuations->insert_or_assign(front_code_addr, back_code_addr);
-	ShaderInvalidateVertexProgramsLocked();
+	ShaderInvalidateVertexProgramRangeLocked(front_code_addr, 1u);
 	return true;
 }
 
@@ -1967,8 +2011,8 @@ static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program)
 }
 
 // Caller retains the shared lifetime lock through resource-metadata consumption.
-// This cache observes MapUserData/RegisterContinuation/debug generations; direct
-// in-place guest code writes without a new mapping are NOT observed on a hit.
+// This cache observes MapUserData ranges, RegisterContinuation fronts and debug
+// generations; in-place guest code writes without a new mapping are NOT observed on a hit.
 static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(const HW::VertexShaderInfo& regs,
                                                                               const ShaderMappedData& data, bool gs_front)
 {
@@ -1984,7 +2028,8 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		}
 	}
 	auto program = std::make_shared<ShaderVertexProgram>();
-	program->key = key;
+	program->key         = key;
+	program->front_bytes = data.code_size_bytes;
 	program->front_code.SetType(ShaderType::Vertex);
 	program->front_code.SetHash0(static_cast<uint32_t>(key.checksum >> 32u));
 	program->front_code.SetCrc32(static_cast<uint32_t>(key.checksum));
@@ -2010,7 +2055,8 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		{
 			EXIT("vertex continuation has no bounded mapped range: address=0x%016" PRIx64 "\n", key.continuation_addr);
 		}
-		back_words = ShaderCopyProgramWords(key.continuation_addr, back_data.code_size_bytes);
+		back_words          = ShaderCopyProgramWords(key.continuation_addr, back_data.code_size_bytes);
+		program->back_bytes = back_data.code_size_bytes;
 		ShaderCode back;
 		back.SetType(ShaderType::Vertex);
 		ShaderParse(back_words.data(), back_data.code_size_bytes, &back);

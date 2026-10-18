@@ -377,6 +377,25 @@ TEST(EmulatorVertexProgram, SameContentRemapReacquiresOwnerButPreservesStableIde
 	ASSERT_EXIT({ probe(); std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorVertexProgram, OnlyOverlappingMappingsRetireCachedProgram)
+{
+	const auto probe = []
+	{
+		Initialize();
+		MappedProgram front({0xbe802000u});
+		MappedProgram back({0x7e020280u, 0xbf810000u});
+		ASSERT_TRUE(ShaderRegisterContinuation(front.address, back.address));
+		Draw draw(front.address, back.address);
+		const auto cached = draw.Acquire();
+		MappedProgram unrelated({0xbf810000u});
+		EXPECT_EQ(cached.program.get(), draw.Acquire().program.get());
+		back.Replace({0x7e020280u, 0xbf810000u});
+		ASSERT_TRUE(ShaderRegisterContinuation(front.address, back.address));
+		EXPECT_NE(cached.program.get(), draw.Acquire().program.get());
+	};
+	ASSERT_EXIT({ probe(); std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorVertexProgram, ReleasedGuestStorageCannotChangeAcquiredEmission)
 {
 	const auto probe = []
