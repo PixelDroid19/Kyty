@@ -3148,29 +3148,29 @@ static String8 GuestScalarBufferAddress(Spirv* spirv, const ShaderInstruction& i
 	    .ReplaceStr("<stride_mask>", spirv->GetConstantUint(0x3fffu));
 }
 
-static bool EmitGuestScalarBufferWord(Spirv* spirv, const String8& tag, uint32_t word, String8* source)
+// Loads every word with one translation (EmitGuestLoad resolves a page
+// crossing separately); a word at or past the descriptor's byte extent reads 0.
+static bool EmitGuestScalarBufferWords(Spirv* spirv, const String8& tag, uint32_t components, String8* source)
 {
-	const auto part = tag + String8::FromPrintf("_%u", word);
 	*source += String8(R"(
+%<t>_address = OpIAdd %ulong %<t>_base %<t>_offset64
+%<t>_lo = OpUConvert %uint %<t>_address
+%<t>_shift = OpShiftRightLogical %ulong %<t>_address %uint_32
+%<t>_hi = OpUConvert %uint %<t>_shift
+)").ReplaceStr("<t>", tag);
+	if (!spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", static_cast<int>(components), tag + "_load", source)) { return false; }
+	for (uint32_t word = 0; word < components; ++word)
+	{
+		*source += String8(R"(
 %<p>_offset = OpIAdd %ulong %<t>_offset64 %gda_u64_<byte>
 %<p>_inside = OpULessThan %bool %<p>_offset %<t>_bytes
-OpSelectionMerge %<p>_merge None
-OpBranchConditional %<p>_inside %<p>_read %<p>_oob
-%<p>_read = OpLabel
-%<p>_address = OpIAdd %ulong %<t>_base %<p>_offset
-%<p>_lo = OpUConvert %uint %<p>_address
-%<p>_shift = OpShiftRightLogical %ulong %<p>_address %uint_32
-%<p>_hi = OpUConvert %uint %<p>_shift
+%<p>_value = OpSelect %uint %<p>_inside %<t>_load_d<word> %uint_0
 )")
-	    .ReplaceStr("<p>", part).ReplaceStr("<t>", tag).ReplaceStr("<byte>", String8::FromPrintf("%u", word * 4u));
-	if (!spirv->EmitGuestLoad(part + "_lo", part + "_hi", 1, part + "_load", source)) { return false; }
-	*source += String8(R"(
-OpBranch %<p>_merge
-%<p>_oob = OpLabel
-OpBranch %<p>_merge
-%<p>_merge = OpLabel
-%<p>_value = OpPhi %uint %<p>_load_d0 %<p>_read %uint_0 %<p>_oob
-)").ReplaceStr("<p>", part);
+		               .ReplaceStr("<p>", tag + String8::FromPrintf("_%u", word))
+		               .ReplaceStr("<t>", tag)
+		               .ReplaceStr("<byte>", String8::FromPrintf("%u", word * 4u))
+		               .ReplaceStr("<word>", String8::FromPrintf("%u", word));
+	}
 	return true;
 }
 
@@ -3193,10 +3193,7 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
 	source += String8::FromPrintf("\n%%%s_offset = OpIAdd %%uint %%%s_soffset %%%s\n", tag.c_str(), tag.c_str(),
 	                              spirv->GetConstantUint(static_cast<uint32_t>(inst.smem_imm_offset)).c_str());
 	source += GuestScalarBufferAddress(spirv, inst, tag, tag + "_offset");
-	for (uint32_t word = 0; word < components; ++word)
-	{
-		if (!EmitGuestScalarBufferWord(spirv, tag, word, &source)) { return false; }
-	}
+	if (!EmitGuestScalarBufferWords(spirv, tag, components, &source)) { return false; }
 	// Load every word before committing results: SDST may overlap SBASE/SOFFSET.
 	for (uint32_t word = 0; word < components; ++word)
 	{
