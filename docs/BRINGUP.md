@@ -281,6 +281,27 @@ fail on the current HEAD before acting on them.
     Seen before on 10-16.
   - Cartoon title: `GraphicsRun.cpp:1372` indirect register packet at
     address 0x100000001. Seen in the sandbox title on 10-16.
+- **Standard 4 KB detile (fixed).** During streaming bursts the command
+  processor spent about 13% of its self time detiling SW_4K_S textures: a
+  full address computation and a library `memcpy` per 16-byte run. The
+  offset of (x, y) is offset(x, 0) + offset(0, y), because the block index
+  is linear in each axis and the in-block swizzle puts X and Y bits in
+  disjoint positions. Column offsets are now computed once per copy and
+  each run is a fixed 16-byte copy. Host benchmark (2048x1024): 1.9-2.5 to
+  12-28 GB/s across element sizes. Unit test
+  `Standard4KBEveryElementSizeMatchesReference` (1, 2, 8 and 16 bytes,
+  partial tail run). The detile frames no longer appear in the processor
+  profile; the robot platformer and fishing title render as before.
+- **Excluded: exec-merge elision in the paired emitter (measured offline).**
+  The hot paired program keeps 32 guest VGPRs live at its peak, so 64
+  values per invocation against about 32 that SIMD32 holds in 128
+  registers; the spills are inherent to the paired layout. Removing every
+  merge that a sound liveness rule allows (222 of 509 vector writes)
+  changed the compiler estimate from 8.14M to 7.15M cycles and spills from
+  2370 to 2173. Not pursued.
+- **Excluded: per-program cache of the paired admission classification.**
+  The ratio of time per dispatch to time per draw stayed at 1.69 with and
+  without it, so the per-dispatch classification is not a measurable cost.
 - **Open leads, by measured size.**
   - The 8160-group compute program (16 ms).
   - The two paired programs above (29 ms together).
