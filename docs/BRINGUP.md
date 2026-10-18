@@ -311,6 +311,25 @@ fail on the current HEAD before acting on them.
   processor time rose from 86 to 179 ms per frame and command-processor
   time from 145 to 280 ms in the same frame window (one run; submissions per
   frame barely moved, so the cause is not isolated). Kept.
+- **Case-insensitive path lookups (fixed).** A guest path that does not
+  exist verbatim made `GetRealFilename` scan the parent host directory for
+  an entry equal ignoring case. The robot platformer probes absent files in
+  package directories of up to 24,500 entries, and a loader thread was the
+  most sampled thread in four profiles (`directory_iterator` frames). Each
+  directory's case-folded index is now reused while its write time is
+  unchanged; a directory written within the last two seconds is not cached,
+  and the cache holds at most 2^18 names. Exact-entry and ambiguity rules are
+  unchanged. Unit test `ReusedDirectoryIndexFollowsDirectoryChanges`.
+  - Offline, one lookup of an absent name in the 24,500-entry directory:
+    15.6 ms to 0.74 ms (50 calls on the title's host copy).
+  - Robot platformer run: no `directory_iterator` frame in the profile;
+    frame 905 at 116 s and 1,235 at 177 s against 848 at 114 s and
+    1,167-1,210 at 175 s in the two previous warm runs, which is within
+    run-to-run spread. The two loading plateaus (about 20 s each, near
+    frames 130 and 900) remain, so they are not set by these lookups.
+    Steady state unchanged: 5.8-6.3 fps, 120 ms command processor per frame.
+  - Savedata path: the card title writes its four save files and holds
+    227-245 fps (earlier runs 209-247).
 - **Open leads, by measured size.**
   - The 8160-group compute program (16 ms).
   - The two paired programs above (29 ms together).

@@ -2,6 +2,7 @@
 
 #include "Emulator/Kernel/FileSystemPath.h"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -98,6 +99,26 @@ TEST(EmulatorFileSystemPath, PrefersTheExactEntryAndRefusesAmbiguousOnes)
 	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "DATA.bin"), "DATA.bin");
 	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "Data.bin"), "Data.bin");
 	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "twin/a"), "twin/a");
+}
+
+TEST(EmulatorFileSystemPath, ReusedDirectoryIndexFollowsDirectoryChanges)
+{
+	using namespace Kernel::FileSystem::Path;
+	const TemporaryTree tree("kyty-ut-path-case-index");
+	const auto          root = std::filesystem::u8path(tree.Root());
+	const auto          age  = std::chrono::hours(1);
+	tree.AddFile("Pack/Asset.bin");
+	std::filesystem::last_write_time(root / "Pack", std::filesystem::file_time_type::clock::now() - age);
+	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "pack/ASSET.BIN"), "Pack/Asset.bin");
+	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "pack/Other.bin"), "Pack/Other.bin");
+
+	tree.AddFile("Pack/other.BIN");
+	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "pack/Other.bin"), "Pack/other.BIN");
+
+	tree.AddFile("Pack/ASSET.bin");
+	std::filesystem::last_write_time(root / "Pack", std::filesystem::file_time_type::clock::now() - 2 * age);
+	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "pack/asset.BIN"), "Pack/asset.BIN");
+	EXPECT_EQ(MatchCaseInsensitive(tree.Root(), "pack/other.bin"), "Pack/other.BIN");
 }
 
 TEST(EmulatorFileSystemPath, ResolvesBelowTheRootWithoutEscapingThroughSymlinks)
