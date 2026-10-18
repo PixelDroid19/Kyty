@@ -83,6 +83,60 @@ fail on the current HEAD before acting on them.
   or report the refusal as a strict error instead of dropping it. Two more
   DCC fills were dropped in the same run before the fix; whether they cause
   the dark ship and garbled blocks of the title menu is not yet verified.
+- **Trails behind moving geometry on the title flyby and menu (fixed
+  2026-10-18).** Every frame the guest zeroes a 1920x1080 RGBA8 target
+  (0x870000 bytes) with a uniform compute fill. `PropagateComputeUniformColorFill`
+  refused it at `ResolveComputeColorFillIdentity`: besides the exact storage
+  buffer and the exact render target, eleven render-target and storage-image
+  objects of the transient pool partly share (cross or contain) the range,
+  and any non-exact image alias refused the whole fill. The host image kept
+  every earlier frame; its bound-sample dump showed stacked streaks. Seven
+  other per-frame fills (R8G8, R16 and RGBA16F targets) were refused the same
+  way or because their format had no decoded packing.
+  - Fix: a uniform color fill now skips partial image aliases (render
+    target, texture, display buffer, storage image, depth) and clears every
+    exact alias. The dispatch has already written the storage buffer, so
+    the skipped aliases did not hold the guest bytes before either. DCC
+    metadata clears keep the exact-only rule. An all-zero fill decodes for
+    every uncompressed color format. Unit test
+    `UniformFillTexelsDecodeOnlyWhenTheQuadRepeatsOneTexel` covers the zero
+    rule.
+  - Verified (Intel, frames 1248-1252): the fill is applied (`color=1`), the
+    target's dump is clean, and the flyby capture shows single silhouettes
+    instead of smeared copies. Regression: Intel formula (frame 55,378 at
+    200 s, above every earlier run), DREDGE 22-23 fps, Minecraft in world,
+    GRIS; AMD DREDGE 11.5-12 fps (one of three AMD runs hit the known boot
+    stall before the first present).
+  - Still refused: a 0x30000 fill whose range is also contained in a
+    read-only storage buffer, a 0x10000 fill whose exact alias is a storage
+    image (not in `FindComputeColorFillImages`), and a 0xffffffff fill of an
+    R16 target (no evidenced packing). The albedo and normal G-buffers also
+    hold stacked copies of the logo; no fill or DCC clear targets them in
+    the observed frames, so whether the guest relies on depth or stencil to
+    ignore them is not verified.
+- **Cold compile of a paired light-list builder (open).** After the native
+  M0 proof, the flyby froze again on one cold Intel compile of a 16x16
+  paired compute module: about 300 s (299,725 ms measured). The program is a
+  waterfall loop over `s_ff1`, `v_readlane` and `v_writelane` with quad_perm
+  DPP operands, which the native proof refuses ("operand is not
+  representable per lane"), so it must stay paired. A warm-up run that
+  stopped after the compile finished stored it in the Mesa cache; later runs
+  pass the flyby. Excluded knobs, offline with the same SPIR-V:
+  `VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT` 288 s, no required subgroup
+  size 297 s, `spirv-opt -O` more than 300 s. Open defect: the first boot on
+  a new host or driver pays minutes per heavy paired module. Direction:
+  compile known modules in the background before first use, or extend the
+  native proof to quad_perm DPP with a host-lane = guest-lane mapping.
+- **Black ship and logo; skipped geometry-shader draws (open).** In the
+  title scene the ship and the 3D logo reach the albedo and normal
+  G-buffers intact but leave the lighting pass black, while forward and
+  emissive background layers render. Separately, by frame 1340 about 10,000
+  draws are skipped as `unsupported_ge_state`: NGG ES+GS programs with
+  `max_vert_out` 4, 10 and 72 and triangle-strip output, which
+  `ShouldSkipUnsupportedGeShader` (`GraphicsRenderDraw.cpp`) refuses. Merged
+  ES+GS launch, shared LDS and primitive emission are not implemented.
+  Whether either defect explains the black lit geometry is not yet
+  verified.
 - **Pre-existing, unrelated failure.** Unit test
   `EmulatorGraphicsPackets.CompressedMrtExportReadsPackedHalfFromUintShadow`
   also fails on clean 486b7d0d.
