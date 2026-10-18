@@ -56,6 +56,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <tuple>
 #include <shared_mutex>
 #include <unordered_map>
 #include <utility>
@@ -4371,6 +4372,91 @@ static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBin
 	return false;
 }
 
+namespace {
+
+// Code-only analyses of one compute program, shared by every dispatch of it.
+// Descriptor values and dispatch registers stay per dispatch.
+struct ComputeProgramAnalysis
+{
+	std::shared_ptr<const ShaderCode>             code;
+	std::shared_ptr<const ShaderScalarFlow>       scalar_flow;
+	std::shared_ptr<const ShaderCodeResourceMemo> resource_memo;
+	mutable std::once_flag                        native_equivalence_once;
+	mutable ShaderComputeWaveAnalysisResult       native_equivalence;
+
+	[[nodiscard]] const ShaderComputeWaveAnalysisResult& NativeEquivalence() const
+	{
+		std::call_once(native_equivalence_once, [this] { native_equivalence = ShaderAnalyzeComputeWaveNativeEquivalence(*code); });
+		return native_equivalence;
+	}
+};
+
+class ComputeProgramAnalysisCache
+{
+public:
+	explicit ComputeProgramAnalysisCache(size_t max_entries): m_max_entries(max_entries) {}
+
+	[[nodiscard]] std::shared_ptr<const ComputeProgramAnalysis> GetOrAnalyze(const HW::CsStageRegisters& regs, uint32_t guest_wave_size)
+	{
+		const Key                   key {regs.data_addr, regs.chksum, guest_wave_size};
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (auto found = m_entries.find(key); found != m_entries.end())
+		{
+			found->second.last_use = ++m_use_seq;
+			return found->second.analysis;
+		}
+		if (m_entries.size() >= m_max_entries)
+		{
+			auto oldest = m_entries.begin();
+			for (auto it = m_entries.begin(); it != m_entries.end(); ++it)
+			{
+				if (it->second.last_use < oldest->second.last_use)
+				{
+					oldest = it;
+				}
+			}
+			m_entries.erase(oldest);
+		}
+		auto code = std::make_shared<ShaderCode>();
+		code->SetType(ShaderType::Compute);
+		{
+			DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
+			ShaderParseMapped(regs.data_addr, code.get(), ShaderContinuationMode::None, true);
+		}
+		auto analysis           = std::make_shared<ComputeProgramAnalysis>();
+		analysis->scalar_flow   = ShaderScalarFlowOf(*code, guest_wave_size);
+		analysis->resource_memo = std::make_shared<ShaderCodeResourceMemo>();
+		analysis->code          = std::move(code);
+		m_entries.emplace(key, Entry {analysis, ++m_use_seq});
+		return analysis;
+	}
+
+private:
+	using Key = std::tuple<uint64_t, uint64_t, uint32_t>;
+	struct KeyHash
+	{
+		size_t operator()(const Key& key) const
+		{
+			const uint64_t words[3] = {std::get<0>(key), std::get<1>(key), std::get<2>(key)};
+			return static_cast<size_t>(XXH3_64bits(words, sizeof(words)));
+		}
+	};
+	struct Entry
+	{
+		std::shared_ptr<const ComputeProgramAnalysis> analysis;
+		uint64_t                                      last_use = 0;
+	};
+
+	size_t                                   m_max_entries;
+	uint64_t                                 m_use_seq = 0;
+	std::mutex                               m_mutex;
+	std::unordered_map<Key, Entry, KeyHash> m_entries;
+};
+
+} // namespace
+
+static ComputeProgramAnalysisCache g_compute_program_analysis_cache(512);
+
 void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* /*sh*/, uint32_t dispatch_mode,
                           ShaderComputeInputInfo* info)
 {
@@ -4421,18 +4507,14 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		ShaderMappedData data;
 		(void)ShaderGetMappedData(regs->cs_regs.data_addr, &data);
 		if (data.user_data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.user_data == nullptr condition ignored (continuing)\n"); }
-		ShaderCode code;
-		code.SetType(ShaderType::Compute);
-		{
-			DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
-			ShaderParseMapped(regs->cs_regs.data_addr, &code, ShaderContinuationMode::None, true);
-		}
+		// The dispatch plan fixed the guest wave size; lane masks follow it.
+		const auto        program = g_compute_program_analysis_cache.GetOrAnalyze(regs->cs_regs, info->wave_layout.guest_wave_size);
+		const ShaderCode& code    = *program->code;
+		const auto*       memo    = program->resource_memo.get();
 		const auto user_sgpr_num =
 		    ShaderResolveGen5UserSgprCount(regs->cs_regs.user_sgpr, regs->cs_user_sgpr.count, data.user_data->eud_size_dw);
-		// The dispatch plan fixed the guest wave size; lane masks follow it.
-		const auto scalar_flow = ShaderScalarFlowOf(code, info->wave_layout.guest_wave_size);
 		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code, 0, false,
-		                  nullptr, scalar_flow.get());
+		                  nullptr, program->scalar_flow.get(), nullptr, memo);
 		if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->wave_layout.guest_wave_size == 32u)
 		{
 			info->native_wave_sensitive = ShaderUsesNativeWaveState(code);
@@ -4442,7 +4524,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		// This is still before shader-cache, pipeline and descriptor preparation.
 		if (info->native_equivalence_required)
 		{
-			const auto native = ShaderAnalyzeComputeWaveNativeEquivalence(code);
+			const auto& native = program->NativeEquivalence();
 			if (!native.supported)
 			{
 				EXIT("wave64 dispatch has no paired layout and is not wave-width independent: mode=0x%08" PRIx32
@@ -4454,8 +4536,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		{
 			// A program proven wave-width independent runs one guest lane per
 			// invocation: half the code of paired banks, over the same workgroup.
-			const auto native = info->native_equivalent_valid ? ShaderAnalyzeComputeWaveNativeEquivalence(code)
-			                                                  : ShaderComputeWaveAnalysisResult {};
+			const auto native = info->native_equivalent_valid ? program->NativeEquivalence() : ShaderComputeWaveAnalysisResult {};
 			const auto admission = native.supported ? ShaderComputeWaveAnalysisResult {true, 0, {}}
 			                                        : ShaderAnalyzeComputeWaveCode(code, *info);
 			if (native.supported)
@@ -4551,7 +4632,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			{
 				continue;
 			}
-			const auto image_use = AnalyzeShaderDirectImageUse(code, descriptor.start_register);
+			const auto image_use = AnalyzeShaderDirectImageUse(code, descriptor.start_register, nullptr, memo);
 			if (image_use.writes && !image_use.reads)
 			{
 				descriptor.storage_image_write_only = true;
