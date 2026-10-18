@@ -2259,6 +2259,23 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		uint32_t start_instance_location;
 	};
 
+	DrawIndexedIndirectArgs args {};
+	uint64_t                args_address = 0;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (!GraphicsRunIndirectArgumentAddress(m_draw_indirect_args_base_addr, data_offset, sizeof(args), &args_address) ||
+		    !GpuRangeMapped(args_address, sizeof(args)))
+		{
+			EXIT("DRAW_INDEX_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
+			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
+		}
+	}
+	// The arguments can be written by an earlier dispatch of this recording.
+	if (!ReadCurrentGuestBytes(args_address, &args, sizeof(args)))
+	{
+		EXIT("DRAW_INDEX_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
+		     args_address, static_cast<uint64_t>(sizeof(args)));
+	}
 	{
 		Core::LockGuard lock(m_mutex);
 
@@ -2266,19 +2283,6 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		if (m_index_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_index_base_addr == 0 condition ignored (continuing)\n"); }
 		if ((initiator & ~0x20u) != 2u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (initiator & ~0x20u) != 2u condition ignored (continuing)\n"); }
 
-		DrawIndexedIndirectArgs args {};
-		uint64_t                args_address = 0;
-		if (!GraphicsRunIndirectArgumentAddress(m_draw_indirect_args_base_addr, data_offset, sizeof(args), &args_address) ||
-		    !GpuRangeMapped(args_address, sizeof(args)))
-		{
-			EXIT("DRAW_INDEX_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
-			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
-		}
-		if (!Core::VirtualMemory::CopyFromGuest(&args, args_address, sizeof(args)))
-		{
-			EXIT("DRAW_INDEX_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
-			     args_address, static_cast<uint64_t>(sizeof(args)));
-		}
 		if (args.index_count_per_instance == 0 || args.instance_count == 0)
 		{
 			if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
@@ -2357,24 +2361,28 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
 
 	uint64_t         submit_id = 0;
 	DrawIndirectArgs args {};
+	uint64_t         args_address = 0;
 	{
 		Core::LockGuard lock(m_mutex);
-
-		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-		EXIT_IF((initiator & ~0x20u) != 2u);
-
-		uint64_t args_address = 0;
 		if (!GraphicsRunIndirectArgumentAddress(m_draw_indirect_args_base_addr, data_offset, sizeof(args), &args_address) ||
 		    !GpuRangeMapped(args_address, sizeof(args)))
 		{
 			EXIT("DRAW_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
 			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
 		}
-		if (!Core::VirtualMemory::CopyFromGuest(&args, args_address, sizeof(args)))
-		{
-			EXIT("DRAW_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
-			     args_address, static_cast<uint64_t>(sizeof(args)));
-		}
+	}
+	// The arguments can be written by an earlier dispatch of this recording.
+	if (!ReadCurrentGuestBytes(args_address, &args, sizeof(args)))
+	{
+		EXIT("DRAW_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
+		     args_address, static_cast<uint64_t>(sizeof(args)));
+	}
+	{
+		Core::LockGuard lock(m_mutex);
+
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		EXIT_IF((initiator & ~0x20u) != 2u);
+
 		if (args.vertex_count_per_instance == 0 || args.instance_count == 0)
 		{
 			return;
