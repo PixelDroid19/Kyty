@@ -141,6 +141,108 @@ fail on the current HEAD before acting on them.
   `EmulatorGraphicsPackets.CompressedMrtExportReadsPackedHalfFromUintShadow`
   also fails on clean 486b7d0d.
 
+## Robot platformer: intro frame cost on Intel (2026-10-18)
+
+- **State (Intel Arc A770, Mesa ANV, strict, intro flyby, frames
+  1150-1400).** About 5.3-6.6 fps between measurement windows of one build,
+  with the GPU about 84% busy. Per frame: about 28 fence waits (57-66 ms),
+  38 submissions and 120-140 ms of command-processor time. The frame is
+  GPU-bound, and fps moves within that noise. Changes are therefore judged
+  by GPU time per program in a same-frame A/B, using pipeline timestamps
+  around frame 1150 (temporary diagnostic).
+- **GPU time per program before this fix (frame 1150, 242 dispatches,
+  116.8 ms).**
+
+  | Program | ms | Notes |
+  | --- | --- | --- |
+  | Pixel shader A (2 draws) | 21.6 | 57 runtime-M0 `v_movrels` |
+  | Pixel shader B (26 draws) | 18.3 | 51 runtime-M0 `v_movrels` |
+  | Compute, 8160 groups | 16.2 | no device-address access |
+  | Compute, 32400 groups, 269 instructions | 15.7 | paired wave64 |
+  | Compute, 131072 groups, 249 instructions | 13.5 | paired wave64 |
+
+- **Fix: runtime-M0 relative moves select over the reachable registers
+  only.**
+  - **Problem.** VGPRs are separate SPIR-V variables. `v_movrels`,
+    `v_movreld` and `v_movrelsd` with a runtime M0 were lowered to a
+    compare/select (or gated store) over every VGPR the program names at or
+    above the base: about 50 candidates per move in shaders A and B. The
+    chains doubled the Intel instruction count and kept every named VGPR
+    live at every move.
+  - **What M0 actually holds.** Both shaders read 5-float records from a
+    VGPR table. M0 is either `s_bfe_u32` of a 3-bit field times 5, or
+    `vcc_lo` times 5 on the path where `s_cmp_lt_u32 vcc_lo, 7` held.
+  - **The analysis.** The emitter (`ShaderSpirvVector.cpp`) now derives the
+    values M0 can hold by walking back along the unique-predecessor chain:
+    fallthrough, or a label with exactly one forward branch and no
+    fallthrough. Indirect labels only mark conditional fallthroughs, so
+    they are not joins; `s_setpc` and `s_swappc` stop the walk.
+  - It evaluates these definitions: `s_mov_b32`; `s_bfe_u32` up to 5 bits;
+    `s_and_b32` with a mask below 32; and `s_mul_i32`, `s_add`, `s_lshl` or
+    `s_lshr` by a literal. It also uses an SCC branch whose preceding
+    `s_cmp_lt/le/gt/ge_u32` bounds the register by a literal on that edge.
+  - Sets are capped at 32 values. The chain keeps only candidates at those
+    offsets; other offsets still read zero, and an unknown definition or a
+    join keeps the full chain. Translator version 137. Unit test
+    `NarrowsDynamicMovrelsToBoundedM0Values` covers the bit-field set, the
+    compare guard and a join.
+  - **Offline Intel compile (`INTEL_DEBUG=fs`).** Both "after" figures also
+    include fa13ff72's single guest load per `s_buffer_load`.
+
+    | Shader | Before | After |
+    | --- | --- | --- |
+    | A | 11,027 instructions, 66:220 spills:fills, 109k estimated cycles | 4,842 instructions, no spills, 64k cycles |
+    | B | 207k cycles, 82:213 spills | 123k cycles, no spills |
+
+  - **Same-frame A/B (frame 1150, same 242 dispatches).**
+    - Shader A: 21.6 to 11.0 ms (5.5 ms per draw).
+    - Shader B: 18.3 to 9.0 ms.
+    - Frame GPU time: 116.8 to 96.2 ms (-18%).
+    - Fps windows of the fixed build: 6.1-6.6.
+    - The logo and flyby captures render as before.
+  - **Regression.** Intel formula (25-89 fps across the route, within
+    earlier runs), DREDGE 23.5-24 fps, Minecraft in world with textures,
+    GRIS 248-423 fps; AMD DREDGE 11.4-11.6 fps, with no ring timeout.
+- **Defect fixed on the way.** A runtime-M0 `v_movrelsd` defined
+  `%rel_eq_<index>_<reg>` twice when a register was a candidate of both its
+  source chain and its gated stores, which is invalid SPIR-V. The store side
+  now uses its own ids. Unit test `EmitsVop1MovrelsdWithDynamicM0`.
+- **Paired compute programs: native-proof refusals (not fixed).** A
+  temporary trace of `ShaderAnalyzeComputeWaveNativeEquivalence` maps the
+  two hot paired programs:
+  - **269 instructions:** pc 0x1b4 refuses a `v_mov_b32` with a quad_perm
+    DPP source ("operand is not representable per lane").
+  - **249 instructions:** pc 0x35c refuses an `s_cbranch_vccz` ("a scalar
+    value written inside a lane-conditional region is live at its join").
+  - Other refusals in the same run: quad_perm DPP moves in the 16x16
+    light-list programs, `v_mbcnt_hi` (lane counts), and `v_readfirstlane`
+    into `vcc_hi`.
+  - Making these native needs a host-lane = guest-lane mapping (as in the
+    native wave32 prolog) and converged quads for DPP. That relies on host
+    reconvergence guarantees, which are not established for the wave64
+    native path. Recorded as a lead, not attempted.
+- **Excluded for the fence waits (measured, not committed).**
+  - Allowing storage publication when every non-storage alias is an older
+    render-target, texture or depth copy removed the draw-time
+    device-address wait. The same wait then reappeared in `WaitRegMem32`
+    (1,871 ms over 128 waits), so total fence time did not change. The
+    remaining blockers are an HTILE alias and an exact texture alias.
+  - Also excluded: memoising device-address lookups per program (compile
+    blow-up), a device-local copy of the lookup table (no change), and a
+    fixed 720p render-target scope (no gain, since the cost is not
+    render-target pixel work).
+  - Not usable here: `INTEL_MEASURE` crashes the run, and TOP_OF_PIPE
+    timestamps were unreliable for per-pipeline cost.
+- **Open leads, by measured size.**
+  - The 8160-group compute program (16 ms).
+  - The two paired programs above (29 ms together).
+  - Shaders A and B (20 ms together) still run SIMD8 with 19
+    device-address lookup loops.
+  - `WriteBack` → `BufferWait` full drains on the processor thread: 128 per
+    32 frames, 573 ms.
+  - Directory iteration in `Path::MatchCaseInsensitive` on the file thread
+    during loads.
+
 ## Racing title on AMD: corruption from a degraded GPU, not from code (2026-10-17)
 
 - **Symptom (RADV, Radeon 610M, Mesa 26.2.4, strict 200 s route).** From the
