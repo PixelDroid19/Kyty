@@ -69,6 +69,9 @@ public:
 // The same over a render target: a different texel size, or the exact range
 // with a different extent.
 [[nodiscard]] bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool exact_range);
+// The same over a Gen5 depth target: a storage view outside the depth layout (mode 24)
+// orders the texels differently, so it never reads what the depth target wrote.
+[[nodiscard]] bool StorageTextureRedescribesDepthTarget(const uint64_t* storage, bool next_gen);
 // A 2D single-layer image with several levels is one mipmapped backing: each level is written through
 // its own single-level view (the descriptor's BASE_LEVEL picks it) and the whole chain is sampled
 // through another. Depth-tiled R32 chains established this contract; Gen5 colour chains in the

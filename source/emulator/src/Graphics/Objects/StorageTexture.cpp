@@ -863,6 +863,11 @@ bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_
 	                        render[RenderTextureObject::PARAM_HEIGHT] != (storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu)));
 }
 
+bool StorageTextureRedescribesDepthTarget(const uint64_t* storage, bool next_gen)
+{
+	return next_gen && storage != nullptr && storage[StorageTextureObject::PARAM_TILE] != 24u;
+}
+
 bool StorageTextureSharesDepthTexels(const uint64_t* storage, const uint64_t* depth, bool next_gen)
 {
 	if (!next_gen || storage == nullptr || depth == nullptr)
