@@ -152,16 +152,25 @@ fail on the current HEAD before acting on them.
     source, and no capture differed.
   - DCC clear contract holds: a trace of presents 1270-1460 shows nine
     metadata clears published per frame and the 1920x1080 RGBA16F lighting
-    target taking its clear at its first shader-image access, before the
-    lighting writes. Its render-target bind does not erase it.
-  - Skipped geometry-shader draws hit the G-buffer: in presents 1280-1300,
-    about 79 draws per frame are skipped as `unsupported_ge_state`. About 42
-    of them target the four-target MRT with its own depth surface (24 + 12
-    with `max_vert_out` 4, 6 + 6 with 10); the rest target two single-target
-    passes. Whether these draws write the ship's G-buffer texels is not
-    verified. Direction: run merged ES+GS programs as one workgroup with
-    shared LDS and collect their exports. The renderer has no mesh-shader
-    path today.
+    target taking its clear at its first shader-image access. Its
+    render-target bind does not erase it.
+  - Skipped geometry-shader draws, per frame in presents 1280-1300 (about 79
+    in total, all `CB_TARGET_MASK` 0xf or 0x7, so each writes only RT0):
+    36 to target 0x53aa00000 with depth 0x53a500000 (24 with
+    `max_vert_out` 4, 6 + 6 with 10); 29 + 1 + 1 to target 0x514080000 RGB
+    with depth 0x513560000 (`max_vert_out` 4, 72 and 0); 12 to target
+    0x5367f0000 with depth 0x513560000 (`max_vert_out` 4). These are
+    single-target quad and strip expansions, which look like sprites or
+    particles rather than ship geometry, and the entry above found the ship
+    intact in the albedo and normal G-buffers. They are a real omission,
+    not an explanation of the ship. Direction for the omission: run merged
+    ES+GS programs as one workgroup with shared LDS and collect their
+    exports; the renderer has no mesh-shader path today.
+  - Remaining lead for the ship: the G-buffer is intact, ray results do not
+    matter, and the lighting output is black above a lit band at the base.
+    That points at per-tile lighting inputs (the paired light-list builder
+    above, or tile and material classification). A readback of the tile
+    light-list buffer in a menu frame would discriminate.
   - Defect found, not fixed: a compute `S_BUFFER_LOAD` whose V# is built at
     run time reads the bound-buffer array with the V# base dword as its
     index. The guest-address path exists only for pixel shaders
@@ -170,16 +179,19 @@ fail on the current HEAD before acting on them.
     `Shader.cpp:4401`) ignores these loads. Trigger: all nine kernels that
     contain `image_bvh_intersect_ray` build a V# over an instance's bottom
     level (`s[8:9] = s[28:29] << 3`, `s11 = 0x16204`) inside the instance
-    walk and read it with three `S_BUFFER_LOAD`s. The walk is reached only
-    after a box hit. Direction: use the scalar flow's entry sources to tell
+    walk and read it with three `S_BUFFER_LOAD`s. In one kernel's ISA the
+    walk starts at node 37 (an fp32 box) and enters the instance branch only
+    for a leaf popped from a box result, so the forced-miss run never
+    reached these loads. Direction: use the scalar flow's entry sources to tell
     an entry-value copy of a bound V# (which holds the slot index) from a
     computed V#, and read only the computed one through the device address.
     A copy such as `s[16:19] <- s[10:13]` must keep the slot path.
   - Cold compile: the heaviest tiled-lighting kernel (466,347 SPIR-V words)
     took 356 s to compile offline on Intel: about 390,000 instructions,
     22,000 spills and 1,400 live registers at peak. Any change to the BVH
-    emission makes every first boot pay this compile again. At HEAD,
-    three runs stalled near present 1384 for more than 76 s; the counters
+    emission makes every first boot pay this compile again. Three runs of
+    HEAD plus read-only diagnostics stalled near present 1384 for more than
+    76 s; the counters
     point to a compile in progress, but no stack confirms it.
 - **Pre-existing, unrelated failure.** Unit test
   `EmulatorGraphicsPackets.CompressedMrtExportReadsPackedHalfFromUintShadow`
