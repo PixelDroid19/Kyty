@@ -136,9 +136,9 @@ fail on the current HEAD before acting on them.
   `max_vert_out` 4, 10 and 72 and triangle-strip output, which
   `ShouldSkipUnsupportedGeShader` (`GraphicsRenderDraw.cpp`) refuses. Merged
   ES+GS launch, shared LDS and primitive emission are not implemented.
-  Whether either defect explains the black lit geometry is not yet
-  verified.
-- **Black ship: exclusions and new evidence (2026-10-18, open).** The ship
+  The black lit geometry had another cause, fixed in the next entry; the
+  skipped draws remain open.
+- **Black ship: exclusions and fix (2026-10-18, fixed).** The ship
   is a black silhouette in the tunnel shot and lit only at its base in the
   title menu. Intel A770, strict, HEAD 50775391, warm caches.
   - Not a regression: a 10-14 run on dff7b38b shows the same partial
@@ -166,11 +166,32 @@ fail on the current HEAD before acting on them.
     not an explanation of the ship. Direction for the omission: run merged
     ES+GS programs as one workgroup with shared LDS and collect their
     exports; the renderer has no mesh-shader path today.
-  - Remaining lead for the ship: the G-buffer is intact, ray results do not
-    matter, and the lighting output is black above a lit band at the base.
-    That points at per-tile lighting inputs (the paired light-list builder
-    above, or tile and material classification). A readback of the tile
-    light-list buffer in a menu frame would discriminate.
+  - Tile classification excluded: a readback of the per-tile lists that the
+    two lighting kernels consume (presents 1270-1346; each entry packs the
+    16-pixel tile column in its high half and the row in its low half) holds
+    about 1,430-1,570 of the 8,160 tiles per frame, and an overlay on the
+    tunnel capture shows that they cover the black ship and logo. The kernels
+    ran on those tiles and wrote black.
+  - Cause and fix: both lighting kernels sample a two-layer RGBA16F array
+    (10240x320). A dispatch earlier in each frame writes its layer 0 through
+    a one-layer storage image at the same address. The sampled view needs
+    two layers, so the alias picker rejects that image and the array is
+    uploaded from guest memory, which holds stale bytes because storage
+    images are not written back. A second defect hid the write:
+    `storage_write_stamp` was set only when a storage image was created,
+    not when a later bind found the existing image, so a newer write was
+    never visible to the copy rules. Now every writable storage bind stamps
+    its image, and a sampled 2D array upload copies its leading layers from
+    the newest same-format storage image that starts at the array's address
+    and was written after the upload (`CopyNewerStoragePrefixLayers`,
+    `GraphicsRenderBind.cpp`). The block-compressed upload copy uses the same
+    stamp.
+  - Verified (Intel A770, strict, warm caches, no diagnostics): menu
+    present 1212 and tunnel presents 1277-1371 show a lit, metallic ship
+    and a lit logo where the earlier runs showed a silhouette; fps in the
+    flyby is unchanged (about 5.6-6). The existing stall near present 1384
+    is unchanged. Racing title, 200 s: same attract-mode screens and fps
+    range as the run before the change.
   - Defect found, not fixed: a compute `S_BUFFER_LOAD` whose V# is built at
     run time reads the bound-buffer array with the V# base dword as its
     index. The guest-address path exists only for pixel shaders
@@ -193,6 +214,17 @@ fail on the current HEAD before acting on them.
     HEAD plus read-only diagnostics stalled near present 1384 for more than
     76 s; the counters
     point to a compile in progress, but no stack confirms it.
+- **Defect found, not fixed: layered depth targets.** In the same frames a
+  lighting kernel samples a 16-layer D32 array (1536x1536, shadow cascades)
+  whose cascades the guest renders as single-slice depth views at one base
+  (`DB_DEPTH_VIEW` slices 0..0 and 1..1). `DescribeRenderDepthInfo` reads
+  `slice_start` and `slice_max`, but the depth backing is one layer, so both
+  slices render into host layer 0, and the sampled array view over a
+  one-layer image clamps every cascade to layer 0. A layered color target
+  with a depth attachment still exits in `GraphicsRenderFramebuffer.cpp`.
+  Not the black-ship cause: the kernel that does not sample this array
+  also wrote black. Direction: give depth targets the color path's array
+  model (`ResolveRenderTextureArrayView`, growing backing).
 - **Pre-existing, unrelated failure.** Unit test
   `EmulatorGraphicsPackets.CompressedMrtExportReadsPackedHalfFromUintShadow`
   also fails on clean 486b7d0d.
