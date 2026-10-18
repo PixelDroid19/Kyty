@@ -145,7 +145,9 @@ fail on the current HEAD before acting on them.
 
 - **State (Intel Arc A770, Mesa ANV, strict, intro flyby, frames
   1150-1400).** About 5.3-6.6 fps between measurement windows of one build,
-  with the GPU about 84% busy. Per frame: about 28 fence waits (57-66 ms),
+  with the render engine about 50% busy for the emulator process (DRM
+  fdinfo engine cycles; whole-GPU residency read 84% and is not a
+  per-process figure). Per frame: about 28 fence waits (57-66 ms),
   38 submissions and 120-140 ms of command-processor time. Fps moves
   within that noise, so changes are judged by GPU time per program in a same-frame A/B, using pipeline timestamps
   around frame 1150 (temporary diagnostic).
@@ -236,6 +238,49 @@ fail on the current HEAD before acting on them.
     render-target pixel work).
   - Not usable here: `INTEL_MEASURE` crashes the run, and TOP_OF_PIPE
     timestamps were unreliable for per-pipeline cost.
+- **Steady state after the intro (measured 10-18, not fixed).** Interval
+  206-210 ms: command processor 160 ms, fence waits about 90 ms, GPU
+  timestamp total 96 ms, of which the three paired compute programs take
+  about 45 ms.
+  - Draw-time device-address waits: about 15 ms each, about 6.4 s per 20 s.
+    The storage written on the same queue is not published on the device
+    because aliases block it: stale pool entries (old render targets,
+    storage textures the device never wrote) and the newer render target
+    or depth image.
+  - Skipping the three paired programs (temporary, unsafe) cut the interval
+    from 206 to 142 ms, but the skip also removed their publication waits
+    and the base window held a streaming burst, so 64 ms is an upper bound,
+    not the GPU share.
+  - Publishing past those aliases (temporary, unsafe) cut the interval from
+    211 to 175 ms, but `WAIT_REG_MEM` time rose from 4 to 47 ms: the guest
+    then waits for GPU completion instead. Excluded as a standalone fix.
+  - Frame time is CPU recording plus GPU execution serialised by the
+    guest's own waits, so GPU time of the paired programs is on the
+    critical path. A rigorous alias design (retire superseded pool
+    aliases) is open.
+  - Also excluded: removing the dispatch drain (the wait moved to
+    `WAIT_REG_MEM`, interval 187 to 190 ms) and flushing every 8 draws or
+    dispatches (206 to 226 ms).
+- **Vertex program cache (fixed, 92ac44db).** Every user-data mapping
+  dropped all cached vertex programs; about 600 recompiles per run. Programs
+  now record the guest ranges they were built from and only overlapping
+  mappings retire them: under 100 per run. Unit test
+  `OnlyOverlappingMappingsRetireCachedProgram`. Intel sweep: 22 of 22
+  titles reach their documented state (reruns below).
+- **GDS on the native compute path (fixed, 116ca7a0).** An earlier change
+  let a wave with `ds_write_b32` to GDS pass the native-equivalence proof;
+  the native emitter has no GDS lowering and the void platformer stopped.
+  The proof now refuses GDS access. Unit test `RejectsGdsWrite`.
+- **Intermittent stops seen during the sweep (passed on rerun).**
+  - Insect platformer sequel: `GpuMemoryCreate.cpp:1548`, "unknown
+    relation StorageTexture Crosses StorageTexture" for two identical 64 KB
+    tile-9 storage textures 4 KB apart. New; open. Direction: define the
+    relation for same-shape storage textures that cross (evict or copy the
+    older one) instead of refusing.
+  - Racing title: `GraphicsRenderBind.cpp:4193` depth-reference binding.
+    Seen before on 10-16.
+  - Cartoon title: `GraphicsRun.cpp:1372` indirect register packet at
+    address 0x100000001. Seen in the sandbox title on 10-16.
 - **Open leads, by measured size.**
   - The 8160-group compute program (16 ms).
   - The two paired programs above (29 ms together).
