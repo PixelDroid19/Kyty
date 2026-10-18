@@ -146,9 +146,8 @@ fail on the current HEAD before acting on them.
 - **State (Intel Arc A770, Mesa ANV, strict, intro flyby, frames
   1150-1400).** About 5.3-6.6 fps between measurement windows of one build,
   with the GPU about 84% busy. Per frame: about 28 fence waits (57-66 ms),
-  38 submissions and 120-140 ms of command-processor time. The frame is
-  GPU-bound, and fps moves within that noise. Changes are therefore judged
-  by GPU time per program in a same-frame A/B, using pipeline timestamps
+  38 submissions and 120-140 ms of command-processor time. Fps moves
+  within that noise, so changes are judged by GPU time per program in a same-frame A/B, using pipeline timestamps
   around frame 1150 (temporary diagnostic).
 - **GPU time per program before this fix (frame 1150, 242 dispatches,
   116.8 ms).**
@@ -198,11 +197,15 @@ fail on the current HEAD before acting on them.
     - Shader A: 21.6 to 11.0 ms (5.5 ms per draw).
     - Shader B: 18.3 to 9.0 ms.
     - Frame GPU time: 116.8 to 96.2 ms (-18%).
-    - Fps windows of the fixed build: 6.1-6.6.
+    - Fps windows of the fixed build: 6.1-6.6, still within the noise
+      above. A 20 ms drop in GPU time did not move fps, so shader time no
+      longer sets the frame rate here; command-processor time and fence
+      waits are the larger measured costs.
     - The logo and flyby captures render as before.
-  - **Regression.** Intel formula (25-89 fps across the route, within
-    earlier runs), DREDGE 23.5-24 fps, Minecraft in world with textures,
-    GRIS 248-423 fps; AMD DREDGE 11.4-11.6 fps, with no ring timeout.
+  - **Regression.** Intel: racing title 25-89 fps across the route
+    (within earlier runs), fishing title 23.5-24 fps, sandbox title in its
+    world with textures, watercolour platformer 248-423 fps. AMD: fishing
+    title 11.4-11.6 fps, with no ring timeout.
 - **Defect fixed on the way.** A runtime-M0 `v_movrelsd` defined
   `%rel_eq_<index>_<reg>` twice when a register was a candidate of both its
   source chain and its gated stores, which is invalid SPIR-V. The store side
