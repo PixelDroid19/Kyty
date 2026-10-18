@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <limits>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -301,20 +302,35 @@ void DetileWorkgroupRange(uint8_t* dst, const uint8_t* src, uint32_t y0, uint32_
 // separate from the generic workgroup dispatch so texture uploads retain the
 // established memcpy specialization while the compute-style path remains
 // available for cross-checking the common layout dispatcher.
+// The SW_4K_S offset of (x, y) is offset(x, 0) + offset(0, y): the block index
+// is linear in the block column and row, and the in-block swizzle places X and
+// Y bits in disjoint positions. Column offsets are computed once per call.
 void DetileStandard4KBContiguousRange(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t height, uint32_t pitch,
                                       uint32_t dst_pitch, uint32_t bytes_per_element)
 {
+	constexpr size_t kRunBytes  = 16u;
+	const uint32_t   run_elems  = TileGetStandard4KBContiguousElements(0u, bytes_per_element);
+	const uint32_t   full_runs  = width / run_elems;
+	const size_t     tail_bytes = static_cast<size_t>(width % run_elems) * bytes_per_element;
+	EXIT_IF(static_cast<size_t>(run_elems) * bytes_per_element != kRunBytes);
+
+	std::vector<uint64_t> columns;
+	columns.reserve(full_runs + 1u);
+	for (uint32_t x = 0; x < width; x += run_elems)
+	{
+		columns.push_back(TileGetStandard4KBOffset(x, 0u, pitch, bytes_per_element));
+	}
 	for (uint32_t y = 0; y < height; ++y)
 	{
-		for (uint32_t x = 0; x < width;)
+		const uint8_t* row_src = src + TileGetStandard4KBOffset(0u, y, pitch, bytes_per_element);
+		uint8_t*       row_dst = dst + static_cast<uint64_t>(y) * dst_pitch * bytes_per_element;
+		for (uint32_t run = 0; run < full_runs; ++run)
 		{
-			const uint32_t available = TileGetStandard4KBContiguousElements(x, bytes_per_element);
-			const uint32_t remaining = width - x;
-			const uint32_t run       = available < remaining ? available : remaining;
-			const uint64_t tiled     = TileGetStandard4KBOffset(x, y, pitch, bytes_per_element);
-			const uint64_t linear    = (static_cast<uint64_t>(y) * dst_pitch + x) * bytes_per_element;
-			std::memcpy(dst + linear, src + tiled, static_cast<size_t>(run) * bytes_per_element);
-			x += run;
+			std::memcpy(row_dst + run * kRunBytes, row_src + columns[run], kRunBytes);
+		}
+		if (tail_bytes != 0u)
+		{
+			std::memcpy(row_dst + full_runs * kRunBytes, row_src + columns[full_runs], tail_bytes);
 		}
 	}
 }

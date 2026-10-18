@@ -658,6 +658,30 @@ TEST(EmulatorTileDetile, Standard4KB4bppProductionMatchesReference)
 	ExpectDetilePathsMatch(k_w, k_h, pitch, k_bpp, TileDetileLayout::Standard4KB, tiled);
 }
 
+TEST(EmulatorTileDetile, Standard4KBEveryElementSizeMatchesReference)
+{
+	constexpr uint32_t k_w   = 37u;
+	constexpr uint32_t k_h   = 21u;
+	constexpr uint32_t pitch = 128u;
+	for (uint32_t bpp: {1u, 2u, 8u, 16u})
+	{
+		const uint32_t block_w = bpp <= 2u ? 64u : (bpp <= 8u ? 32u : 16u);
+		const uint32_t block_h = bpp == 1u ? 64u : (bpp <= 4u ? 32u : 16u);
+		const uint64_t tiled_bytes = static_cast<uint64_t>(pitch / block_w) * ((k_h + block_h - 1u) / block_h) * 4096u;
+		std::vector<uint8_t> linear(static_cast<size_t>(k_w) * k_h * bpp);
+		for (size_t i = 0; i < linear.size(); ++i)
+		{
+			linear[i] = static_cast<uint8_t>((i * 17u + 31u) & 0xffu);
+		}
+		std::vector<uint8_t> tiled(static_cast<size_t>(tiled_bytes), 0u);
+		FillTiledFromLinear(&tiled, linear, k_w, k_h, pitch, bpp, TileDetileLayout::Standard4KB);
+		std::vector<uint8_t> production(linear.size(), 0xBBu);
+		ASSERT_TRUE(TileDetile(MakeRequest(production.data(), tiled.data(), k_w, k_h, pitch, k_w, bpp, TileDetileLayout::Standard4KB,
+		                                   tiled_bytes)));
+		EXPECT_EQ(production, linear) << "bpp=" << bpp;
+	}
+}
+
 TEST(EmulatorTileDetile, Standard4KBContiguousProductionPreservesDestinationPitch)
 {
 	constexpr uint32_t k_width     = 40u;
