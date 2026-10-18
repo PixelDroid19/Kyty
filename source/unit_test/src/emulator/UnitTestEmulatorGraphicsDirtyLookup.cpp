@@ -23,7 +23,7 @@ using Kyty::Libs::Graphics::GpuDirtyPageTracker;
 
 namespace {
 
-constexpr size_t    kPageTableMask       = (1u << 18u) - 1u;
+constexpr size_t    kPageTableMask       = (1u << 20u) - 1u;
 constexpr size_t    kBlockTableMask      = (1u << 17u) - 1u;
 constexpr size_t    kCollisionCandidates = 1u << 24u;
 constexpr uintptr_t kSyntheticBase       = static_cast<uintptr_t>(0x10000000000ull);

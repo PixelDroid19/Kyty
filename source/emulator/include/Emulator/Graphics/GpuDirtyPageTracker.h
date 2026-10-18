@@ -198,11 +198,13 @@ private:
 		Denied
 	};
 
-	// Fixed, bounded page metadata with 262,144 slots. Active and retired
-	// identities share a 131,072-page admission budget. Tombstones retain probe
-	// history; the normal-write hint bounds conclusive missing-page lookups.
-	// Each range has the same page bound (512 MiB on a 4 KiB host).
-	static constexpr size_t kPageTableSize = 1u << 18u;
+	// Fixed, bounded page metadata with 1,048,576 slots. Active and retired
+	// identities share a 524,288-page admission budget; a title's render
+	// targets alone can hold more than 800 MiB, and a refused range loses its
+	// write proof. Tombstones retain probe history; the normal-write hint
+	// bounds conclusive missing-page lookups.
+	// Each range has the same page bound (2 GiB on a 4 KiB host).
+	static constexpr size_t kPageTableSize = 1u << 20u;
 	static constexpr size_t kMaxPages      = kPageTableSize / 2u;
 	// Summaries of kBlockPages consecutive pages answer queries over fully
 	// covered blocks; edge pages are always checked individually.
