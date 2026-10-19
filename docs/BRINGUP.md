@@ -213,7 +213,22 @@ fail on the current HEAD before acting on them.
     emission makes every first boot pay this compile again. Three runs of
     HEAD plus read-only diagnostics stalled near present 1384 for more than
     76 s; the counters
-    point to a compile in progress, but no stack confirms it.
+    point to a compile in progress.
+  - Stall confirmed as that compile (2026-10-19, HEAD f311b0ee, warm Mesa
+    and SPIR-V caches): during the stall the command-processor thread spent
+    100% of an 8 s user-space sample inside `libvulkan_intel`, under
+    `PipelineCache::CreatePipeline` called from
+    `GraphicsRenderDispatchDirect`; guest threads were blocked, and the
+    submit, fence and pipeline counters did not move across two agent
+    snapshots 23 s apart. The Mesa cache directory is far below its size
+    limit, so the pipeline is not evicted: no bounded run has lasted long
+    enough to finish and store it. The module is a wave64 kernel run as
+    paired 32-lane halves: each half of every VALU instruction becomes about
+    15 SPIR-V instructions (exec-bit test, load, store, select), so 3,282
+    guest instructions become about 465,000 SPIR-V words. Direction:
+    shrink the paired-wave emission or extend the native-width proof so the
+    module stops pairing; a single run longer than about 9 minutes would
+    store the pipeline in the Mesa cache but does not fix a cold first boot.
 - **Defect found, not fixed: layered depth targets.** In the same frames a
   lighting kernel samples a 16-layer D32 array (1536x1536, shadow cascades)
   whose cascades the guest renders as single-slice depth views at one base
@@ -265,8 +280,10 @@ fail on the current HEAD before acting on them.
     pattern.
   - Not established: after present ~1227 the menu fades to one drifting
     card and the intro flyby follows, while reference imagery shows a
-    settled menu with the logo and three cards. The runs send no input, so
-    this may be the guest's idle flow; it was not verified.
+    settled menu with the logo and three cards. The runs use a scripted route
+    that presses cross every 3 s from the first guest pad poll; whether the
+    guest consumes it at this screen was not verified (the agent's pad
+    counters count only agent input), so this may be guest flow.
   - Excluded first: the half-resolution layer at 0x53aa00000 (its DCC clear
     is published and consumed every frame); the target at 0x532830000 (a 1x1
     texture plus one fill); transient snapshots of the debris vertex data
