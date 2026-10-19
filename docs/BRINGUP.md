@@ -33,7 +33,7 @@ fail on the current HEAD before acting on them.
     | Segment (33 MB fill) | GPU time |
     | --- | --- |
     | Dispatch into the storage object | 2.4 ms |
-    | Barrier after it (write flush) | 0.8 ms |
+    | Alias lookup and the barrier before the clear (likely the write flush) | 0.8 ms |
     | Clear of the 3840x2160 alias image | 0.17 ms |
     | Publication copy to the guest range | 3.2 ms |
 
@@ -69,12 +69,15 @@ fail on the current HEAD before acting on them.
   - `check_emulator_boundaries.py --strict` and `check_graphics_tables.py`
     pass.
   - A strict regression sweep of seven titles ended without a stop or an
-    error. Every title kept its segment fps; the void platformer's late
-    segments rose from about 92 to 122 fps.
+    error. The void platformer's late segments rose from about 92 to
+    122 fps. The traveller role-playing title's last two segments read
+    28 ms median in the sweep against 24 ms before. A 120 s rerun gave
+    24 ms with the same draws per segment and the same µs per draw, so
+    that difference was noise. The other titles kept their segment fps.
   - The open-world fishing title had one 354 ms gameplay frame on cold
     caches, with no pipeline miss or compile. A warm-cache repeat with
     compaction active had no slow gameplay frame other than the harness
-    captures. This matches the open submit stall above.
+    captures. This matches the open submit stall in the next section.
 
 ## Descriptor churn and frame hitches on Intel (2026-10-19)
 
