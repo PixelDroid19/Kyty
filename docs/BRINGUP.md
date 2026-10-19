@@ -5970,6 +5970,10 @@ platformer cannot reach its earlier storage-capacity refusal on the published co
 unmeasured on this tree. The pixel cave platformer's earlier "wake up" endpoint did not reproduce on this tree:
 both the shortened route (d1908) and the unchanged sweep route (d1919) reach the cave. Its earlier cause is not
 established, and that endpoint is not evidence of lost input.
+On 2026-10-19 the Cross-only route stopped at the prompt in five of five 100 s runs at 775a1959; on earlier trees
+it stopped in about half of the runs and passed in the others. The prompt's glyph is Circle: a route that confirms
+the title and file select with Cross and then taps Circle passed the prompt in its one run and reached the jump tutorial. The
+Cross-only route depended on an untested path past the prompt, so it is a route defect.
 
 **Final sweep (d1910-d1922, one executable for every route, SHA-256
 `2bdf2ccdb2e8750bbb43d1f9b16247ff0410d54809899d628a5d819cab1f048f`).** The final source differs from that executable
