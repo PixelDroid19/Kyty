@@ -225,6 +225,45 @@ fail on the current HEAD before acting on them.
   Not the black-ship cause: the kernel that does not sample this array
   also wrote black. Direction: give depth targets the color path's array
   model (`ResolveRenderTextureArrayView`, growing backing).
+- **Ghost copies in the title menu (2026-10-19, fixed).** From present
+  about 1205 the memory cards leave a trail of copies down the right side,
+  the 3D logo letters repeat below themselves, and a black blob covers the
+  bottom left. Intel A770, strict, warm caches, HEAD cd81ab00.
+  - Cause: the guest clears the 1920x1080 main depth target each frame with
+    a compute fill of its HTILE (word 0xfffffff0, depth 1.0). The first pass
+    that binds that depth target in the frame renders into a 1024x1024
+    color target (two draws). That pass consumed the clear as a
+    render-pass load-op clear, which covers only its 1024x1024 render area.
+    Depth at x >= 1024 and y >= 1024 kept earlier frames' contents, and the
+    deferred lighting shaded them. Evidence: the ghosts end at exactly
+    x = 683 of 1280 (1024 native) in presents 1207, 1209, 1215 and 1340;
+    skipping only the two 1024x1024 draws moves the clear to a full-size
+    pass and removes the ghosts; skipping every main-target draw does not,
+    because the lighting still shades the stale depth.
+  - Fix: a consumed HTILE meta clear now clears the depth plane of the whole
+    image outside the render pass (`ClearDepthMetaWholeImage`,
+    `GraphicsRenderAttachments.cpp`). A first use also clears stencil, as
+    its CLEAR load op would. Register clears (`DB_RENDER_CONTROL`) stay
+    bounded by the pass. Images with custom sample locations keep the
+    in-pass clear, since their layout transitions would need the sample
+    locations.
+  - Verified (Intel A770, strict, warm caches, no diagnostics): presents
+    1207-1240 show one copy of each card and no repeated letters, and
+    present 1340-1344 has no blob; frames reached in 175 s and the fps
+    samples are within the run-to-run range. Racing title, 200 s: gameplay
+    with shadows, same fps range as the 10-17 runs.
+  - Excluded first: the half-resolution layer at 0x53aa00000 (its DCC clear
+    is published and consumed every frame); the target at 0x532830000 (a 1x1
+    texture plus one fill); transient snapshots of the debris vertex data
+    (an A/B with large transient uploads disabled shows the same ghosts);
+    the vertex transforms of the debris program (the matrix dump holds
+    legitimate tunnel debris); indirect draws (none in the menu). The
+    earlier observation "the depth clear is consumed once per frame" was
+    true but checked consumption, not the area it covered.
+  - Open lead, unverified: `cp_op_draw_index_indirect` and
+    `cp_op_draw_indirect` (`GraphicsRunOpParsers.cpp:639`, `:654`) pass
+    only body dwords 0 and 3; dwords 1-2 are not consumed. No title has
+    been seen to depend on them.
 - **Pre-existing, unrelated failure.** Unit test
   `EmulatorGraphicsPackets.CompressedMrtExportReadsPackedHalfFromUintShadow`
   also fails on clean 486b7d0d.
