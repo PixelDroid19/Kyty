@@ -30,6 +30,7 @@ UT_LINK(EmulatorGraphicsState);
 UT_LINK(EmulatorGraphicsResources);
 UT_LINK(EmulatorGeState);
 UT_LINK(EmulatorComputeModes);
+UT_LINK(EmulatorComputePipelinePrecompile);
 UT_LINK(EmulatorNativeWaveAdmission);
 UT_LINK(EmulatorNativeWaveSnapshot);
 UT_LINK(EmulatorVertexProgram);
