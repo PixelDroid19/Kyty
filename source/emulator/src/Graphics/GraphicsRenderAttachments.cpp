@@ -1137,6 +1137,31 @@ static void RequireCommittedDepthExtent(CommandBuffer* buffer, const RenderDepth
 	}
 }
 
+// An HTILE clear covers the whole surface, while an attachment clear covers
+// only the render area of the pass that consumes it, which can be smaller than
+// the depth image. Clear the depth plane of the whole image instead; the
+// stencil plane keeps its contents or takes the pass's register clear.
+static bool ClearDepthMetaWholeImage(CommandBuffer* buffer, const RenderDepthInfo& depth)
+{
+	auto* image = depth.vulkan_buffer;
+	// Custom sample locations would have to accompany every layout transition.
+	if (image == nullptr || image->image == nullptr || image->sample_locations_compatible)
+	{
+		return false;
+	}
+	// A first use defines every plane, as its CLEAR load op would.
+	const bool first_use      = image->layout == VK_IMAGE_LAYOUT_UNDEFINED;
+	const auto restore_layout = first_use ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : image->layout;
+	const auto aspects        = first_use ? DepthFormatAspectMask(image->format) : VkImageAspectFlags {VK_IMAGE_ASPECT_DEPTH_BIT};
+	auto*      vk_buffer      = buffer->RecordOutsideRenderPass();
+	TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	const VkClearDepthStencilValue clear {depth.depth_clear_value, depth.stencil_clear_value};
+	const VkImageSubresourceRange  range {aspects, 0u, image->mip_levels, 0u, image->array_layers};
+	vkCmdClearDepthStencilImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
+	TransitionDepthStencilImage(vk_buffer, image, restore_layout);
+	return true;
+}
+
 void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* r, uint32_t host_width,
                                        uint32_t host_height,
                                        const VulkanSampleLocationState* sample_locations)
@@ -1169,7 +1194,7 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	}
 
 	DepthMetaClearEvent meta_clear_event {};
-	if (r->htile && ConsumeDepthMetaClear(submit_id, *r, &meta_clear_event))
+	if (r->htile && ConsumeDepthMetaClear(submit_id, *r, &meta_clear_event) && !ClearDepthMetaWholeImage(buffer, *r))
 	{
 		const auto clear_actions = State::ResolveDepthClearActions(r->depth_clear_enable, true);
 		r->depth_clear_enable    = clear_actions.vulkan_clear;
