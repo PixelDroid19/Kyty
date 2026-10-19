@@ -13,6 +13,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/ComputePipelinePrecompile.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/DiagnosticDump.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -907,31 +908,14 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	return pipeline;
 }
 
+// The Vulkan inputs of one compute pipeline, decided on the dispatching thread.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* input_info, const Vector<uint32_t>& cs_shader,
-                                              const PipelineStaticParameters* static_params, PipelineDynamicParameters* dynamic_params)
+static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInputInfo* input_info, const Vector<uint32_t>& cs_shader)
 {
-	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(static_params == nullptr);
-	EXIT_IF(dynamic_params == nullptr);
-
-	auto* pipeline           = new VulkanPipeline;
-	pipeline->static_params  = static_params;
-	pipeline->dynamic_params = dynamic_params;
-
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 
 	EXIT_IF(gctx == nullptr);
 
-	VkShaderModule comp_shader_module = nullptr;
-
-	VkShaderModuleCreateInfo create_info {};
-
-	create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-	create_info.pNext    = nullptr;
-	create_info.flags    = 0;
-	create_info.codeSize = static_cast<size_t>(cs_shader.Size()) * 4;
-	create_info.pCode    = cs_shader.GetDataConst();
 	const auto subgroup_check = ShaderCheckSubgroupModule(cs_shader.GetDataConst(), cs_shader.Size(),
 	                                                       VK_SHADER_STAGE_COMPUTE_BIT, gctx->subgroup_stages,
 	                                                       gctx->subgroup_operations, gctx->compute_wave_vulkan_state,
@@ -941,18 +925,10 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 		EXIT("subgroup-module admission stage=compute word=%zu required_ops=0x%x reason=%s\n",
 		     subgroup_check.word, subgroup_check.required_operations, subgroup_check.reason);
 	}
-	vkCreateShaderModule(gctx->device, &create_info, nullptr, &comp_shader_module);
-
-	if (comp_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: comp_shader_module == nullptr condition ignored (continuing)\n"); }
 
 	VkPipelineShaderStageCreateInfo comp_shader_stage_info {};
-	comp_shader_stage_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	comp_shader_stage_info.pNext               = nullptr;
-	comp_shader_stage_info.flags               = 0;
-	comp_shader_stage_info.stage               = VK_SHADER_STAGE_COMPUTE_BIT;
-	comp_shader_stage_info.module              = comp_shader_module;
-	comp_shader_stage_info.pName               = "main";
-	comp_shader_stage_info.pSpecializationInfo = nullptr;
+	comp_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	comp_shader_stage_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
 	if (input_info->native_wave_sensitive)
 	{
@@ -994,53 +970,142 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 		}
 	}
 
-	VkDescriptorSetLayout set_layouts[1]  = {};
-	uint32_t              set_layouts_num = 0;
+	const auto&                bind                 = input_info->bind;
+	const ShaderBindResources* descriptor_stages[] = {&bind};
+	ValidatePipelineDescriptorLimits(gctx, descriptor_stages, 1, false);
 
-	VkPushConstantRange push_constant_info[1];
-	uint32_t            push_constant_info_num = 0;
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
 
-	CreateLayout(set_layouts, &set_layouts_num, push_constant_info, &push_constant_info_num,
-	             input_info->bind, /*additional_params->cs_bind,*/
-	             VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute);
+	ComputePipelineRecipe recipe;
+	recipe.vendor_id              = properties.vendorID;
+	recipe.device_id              = properties.deviceID;
+	recipe.stage_flags            = comp_shader_stage_info.flags;
+	recipe.required_subgroup_size = comp_shader_stage_info.pNext == &required_subgroup_size ? required_subgroup_size.requiredSubgroupSize : 0u;
+	if (bind.push_constant_size != 0 && !bind.vsharp_uniform_buffer)
+	{
+		recipe.push_constant_offset = bind.push_constant_offset;
+		recipe.push_constant_size   = bind.push_constant_size;
+	}
+	recipe.has_set_layout = ShaderBindRequiresDescriptorSet(bind);
+	EXIT_IF(recipe.has_set_layout && bind.push_constant_size == 0);
+	EXIT_IF(recipe.has_set_layout && bind.descriptor_set_slot != 0);
+	EXIT_IF(recipe.has_set_layout && !ShaderBuildDescriptorLayoutPlan(bind, &recipe.plan));
+	recipe.spirv.assign(cs_shader.GetDataConst(), cs_shader.GetDataConst() + cs_shader.Size());
+	return recipe;
+}
+
+// Creates the pipeline a recipe describes. Any thread may call it: it uses only
+// the device, the shared pipeline cache and the locked descriptor-layout cache.
+static VkResult CreateComputePipelineFromRecipe(GraphicContext* gctx, const ComputePipelineRecipe& recipe, VkPipelineLayout* layout,
+                                                VkPipeline* pipeline)
+{
+	VkShaderModuleCreateInfo create_info {};
+	create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	create_info.codeSize = recipe.spirv.size() * sizeof(uint32_t);
+	create_info.pCode    = recipe.spirv.data();
+
+	VkShaderModule comp_shader_module = VK_NULL_HANDLE;
+	VkResult       result             = vkCreateShaderModule(gctx->device, &create_info, nullptr, &comp_shader_module);
+	if (result != VK_SUCCESS)
+	{
+		return result;
+	}
+
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
+	VkPipelineShaderStageCreateInfo                        comp_shader_stage_info {};
+	comp_shader_stage_info.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	comp_shader_stage_info.flags  = recipe.stage_flags;
+	comp_shader_stage_info.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+	comp_shader_stage_info.module = comp_shader_module;
+	comp_shader_stage_info.pName  = "main";
+	if (recipe.required_subgroup_size != 0u)
+	{
+		required_subgroup_size.sType                = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT;
+		required_subgroup_size.requiredSubgroupSize = recipe.required_subgroup_size;
+		comp_shader_stage_info.pNext                = &required_subgroup_size;
+	}
+
+	VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+	if (recipe.has_set_layout)
+	{
+		set_layout = g_render_ctx->GetDescriptorCache()->GetDescriptorSetLayout(DescriptorCache::Stage::Compute, recipe.plan);
+	}
+	const VkPushConstantRange push_constant_info {VK_SHADER_STAGE_COMPUTE_BIT, recipe.push_constant_offset, recipe.push_constant_size};
 
 	VkPipelineLayoutCreateInfo pipeline_layout_info {};
 	pipeline_layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipeline_layout_info.pNext                  = nullptr;
-	pipeline_layout_info.flags                  = 0;
-	pipeline_layout_info.setLayoutCount         = set_layouts_num;
-	pipeline_layout_info.pSetLayouts            = (set_layouts_num > 0 ? set_layouts : nullptr);
-	pipeline_layout_info.pushConstantRangeCount = push_constant_info_num;
-	pipeline_layout_info.pPushConstantRanges    = push_constant_info_num > 0 ? push_constant_info : nullptr;
+	pipeline_layout_info.setLayoutCount         = recipe.has_set_layout ? 1u : 0u;
+	pipeline_layout_info.pSetLayouts            = recipe.has_set_layout ? &set_layout : nullptr;
+	pipeline_layout_info.pushConstantRangeCount = recipe.push_constant_size != 0u ? 1u : 0u;
+	pipeline_layout_info.pPushConstantRanges    = recipe.push_constant_size != 0u ? &push_constant_info : nullptr;
+
+	result = recipe.has_set_layout && set_layout == VK_NULL_HANDLE ? VK_ERROR_INITIALIZATION_FAILED
+	                                                               : vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, layout);
+	if (result == VK_SUCCESS)
+	{
+		VkComputePipelineCreateInfo info {};
+		info.sType             = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		info.stage             = comp_shader_stage_info;
+		info.layout            = *layout;
+		info.basePipelineIndex = -1;
+		result                 = vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, pipeline);
+	}
+	vkDestroyShaderModule(gctx->device, comp_shader_module, nullptr);
+	return result;
+}
+
+// Background compile of a recipe recorded in an earlier session; the driver
+// caches keep the result for the dispatch that needs it.
+static bool PrecompileComputePipeline(const ComputePipelineRecipe& recipe)
+{
+	auto*            gctx     = g_render_ctx->GetGraphicCtx();
+	VkPipelineLayout layout   = VK_NULL_HANDLE;
+	VkPipeline       pipeline = VK_NULL_HANDLE;
+	const auto       result   = CreateComputePipelineFromRecipe(gctx, recipe, &layout, &pipeline);
+	if (pipeline != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline(gctx->device, pipeline, nullptr);
+	}
+	if (layout != VK_NULL_HANDLE)
+	{
+		vkDestroyPipelineLayout(gctx->device, layout, nullptr);
+	}
+	return result == VK_SUCCESS;
+}
+
+static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* input_info, const Vector<uint32_t>& cs_shader,
+                                              const PipelineStaticParameters* static_params, PipelineDynamicParameters* dynamic_params)
+{
+	EXIT_IF(g_render_ctx == nullptr);
+	EXIT_IF(static_params == nullptr);
+	EXIT_IF(dynamic_params == nullptr);
+
+	auto* pipeline           = new VulkanPipeline;
+	pipeline->static_params  = static_params;
+	pipeline->dynamic_params = dynamic_params;
+
+	auto* gctx = g_render_ctx->GetGraphicCtx();
+
+	EXIT_IF(gctx == nullptr);
+
+	const auto recipe = BuildComputePipelineRecipe(input_info, cs_shader);
+	ComputePipelinePrecompileStart(ComputePipelinePrecompileDirectory(), recipe.vendor_id, recipe.device_id, PrecompileComputePipeline);
+	ComputePipelinePrecompileClaim(recipe);
 
 	EXIT_IF(pipeline->pipeline_layout != nullptr);
-
-	const ShaderBindResources* descriptor_stages[] = {&input_info->bind};
-	ValidatePipelineDescriptorLimits(gctx, descriptor_stages, 1, false);
-	const auto layout_result = vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
-	if (layout_result != VK_SUCCESS || pipeline->pipeline_layout == VK_NULL_HANDLE)
-	{
-		EXIT("compute pipeline layout creation failed: VkResult=%d\n", static_cast<int>(layout_result));
-	}
-
-	VkComputePipelineCreateInfo info {};
-	info.sType              = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-	info.pNext              = nullptr;
-	info.flags              = 0;
-	info.stage              = comp_shader_stage_info;
-	info.layout             = pipeline->pipeline_layout;
-	info.basePipelineHandle = nullptr;
-	info.basePipelineIndex  = -1;
-
 	EXIT_IF(pipeline->pipeline != nullptr);
 
-	const auto vk_create_start = std::chrono::steady_clock::now();
-	const VkResult create_result =
-	    vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, &pipeline->pipeline);
-	const auto vk_create_ns =
+	const auto     vk_create_start = std::chrono::steady_clock::now();
+	const VkResult create_result   = CreateComputePipelineFromRecipe(gctx, recipe, &pipeline->pipeline_layout, &pipeline->pipeline);
+	const auto     vk_create_ns =
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vk_create_start).count();
 	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(vk_create_ns));
 
+	if (pipeline->pipeline_layout == VK_NULL_HANDLE)
+	{
+		EXIT("compute pipeline layout creation failed: VkResult=%d\n", static_cast<int>(create_result));
+	}
 	if (pipeline->pipeline == nullptr || create_result != VK_SUCCESS)
 	{
 		if (const char* dump_dir = std::getenv("KYTY_PIPELINE_FAIL_DUMP"))
@@ -1056,8 +1121,6 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 		EXIT("vkCreateComputePipelines failed: result=%d pipeline=%p\n", static_cast<int>(create_result),
 		     static_cast<void*>(pipeline->pipeline));
 	}
-
-	vkDestroyShaderModule(gctx->device, comp_shader_module, nullptr);
 
 	return pipeline;
 }

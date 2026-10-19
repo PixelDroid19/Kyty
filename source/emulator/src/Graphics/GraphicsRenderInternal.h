@@ -340,6 +340,7 @@ public:
 	KYTY_CLASS_NO_COPY(DescriptorCache);
 
 	VkDescriptorSetLayout GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind);
+	VkDescriptorSetLayout GetDescriptorSetLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 
 	VulkanDescriptorSet* Allocate(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                 Free(VulkanDescriptorSet* set);

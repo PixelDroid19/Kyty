@@ -389,6 +389,13 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t vk_compute_pipeline_create_count   = 0;
 	uint64_t vk_compute_pipeline_create_ns      = 0;
 	uint64_t vk_compute_pipeline_create_max_ns  = 0;
+	uint64_t compute_precompile_count           = 0;
+	uint64_t compute_precompile_ns              = 0;
+	uint64_t compute_precompile_max_ns          = 0;
+	uint64_t compute_precompile_failed          = 0;
+	uint64_t compute_precompile_wait_count      = 0;
+	uint64_t compute_precompile_wait_ns         = 0;
+	uint64_t compute_precompile_wait_max_ns     = 0;
 	uint64_t shader_translation_cache_hits      = 0;
 	uint64_t shader_translation_cache_misses    = 0;
 	uint64_t shader_translation_cache_evictions = 0;
@@ -480,6 +487,9 @@ void DebugStatsRecordShaderIrParse(DebugStatsShaderParseKind kind, uint64_t elap
 void DebugStatsRecordSpirvSource(uint64_t elapsed_ns);
 void DebugStatsRecordSpirvCompile(uint64_t elapsed_ns);
 void DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind kind, uint64_t elapsed_ns);
+// A background compute pipeline compile, and a dispatch that waited for one.
+void DebugStatsRecordComputePrecompile(bool created, uint64_t elapsed_ns);
+void DebugStatsRecordComputePrecompileWait(uint64_t elapsed_ns);
 void DebugStatsRecordShaderTranslationCache(bool hit, bool evicted);
 void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCreateOutcome outcome, uint64_t elapsed_ns,
 	                                 const DebugStatsGpuMemorySlowCreateRecord* detail = nullptr,

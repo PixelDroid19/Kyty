@@ -1414,6 +1414,11 @@ VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const
 {
 	ShaderDescriptorLayoutPlan plan {};
 	EXIT_IF(!ShaderBuildDescriptorLayoutPlan(bind, &plan));
+	return GetDescriptorSetLayout(stage, plan);
+}
+
+VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan)
+{
 	Core::LockGuard lock(m_mutex);
 	return GetOrCreateLayout(stage, plan);
 }

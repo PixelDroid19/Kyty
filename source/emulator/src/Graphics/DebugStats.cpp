@@ -153,6 +153,9 @@ TimedMetric           g_spirv_source;
 TimedMetric           g_spirv_compile;
 TimedMetric           g_vk_graphics_pipeline_create;
 TimedMetric           g_vk_compute_pipeline_create;
+TimedMetric           g_compute_precompile;
+std::atomic<uint64_t> g_compute_precompile_failed {0};
+TimedMetric           g_compute_precompile_wait;
 std::atomic<uint64_t> g_shader_translation_cache_hits {0};
 std::atomic<uint64_t> g_shader_translation_cache_misses {0};
 std::atomic<uint64_t> g_shader_translation_cache_evictions {0};
@@ -761,6 +764,9 @@ void DebugStatsInit()
 	ResetTimed(&g_spirv_compile);
 	ResetTimed(&g_vk_graphics_pipeline_create);
 	ResetTimed(&g_vk_compute_pipeline_create);
+	ResetTimed(&g_compute_precompile);
+	g_compute_precompile_failed.store(0, std::memory_order_relaxed);
+	ResetTimed(&g_compute_precompile_wait);
 	g_shader_translation_cache_hits.store(0, std::memory_order_relaxed);
 	g_shader_translation_cache_misses.store(0, std::memory_order_relaxed);
 	g_shader_translation_cache_evictions.store(0, std::memory_order_relaxed);
@@ -1222,6 +1228,20 @@ void DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind kind, uint64_t elap
 	RecordTimed(kind == DebugStatsPipelineKind::Graphics ? &g_vk_graphics_pipeline_create : &g_vk_compute_pipeline_create, elapsed_ns);
 }
 
+void DebugStatsRecordComputePrecompile(bool created, uint64_t elapsed_ns)
+{
+	RecordTimed(&g_compute_precompile, elapsed_ns);
+	if (!created)
+	{
+		g_compute_precompile_failed.fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+void DebugStatsRecordComputePrecompileWait(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_compute_precompile_wait, elapsed_ns);
+}
+
 void DebugStatsRecordShaderTranslationCache(bool hit, bool evicted)
 {
 	(hit ? g_shader_translation_cache_hits : g_shader_translation_cache_misses).fetch_add(1, std::memory_order_relaxed);
@@ -1666,6 +1686,11 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	           &snapshot.vk_graphics_pipeline_create_max_ns);
 	take_timed(g_vk_compute_pipeline_create, &snapshot.vk_compute_pipeline_create_count, &snapshot.vk_compute_pipeline_create_ns,
 	           &snapshot.vk_compute_pipeline_create_max_ns);
+	take_timed(g_compute_precompile, &snapshot.compute_precompile_count, &snapshot.compute_precompile_ns,
+	           &snapshot.compute_precompile_max_ns);
+	snapshot.compute_precompile_failed = take_window(g_compute_precompile_failed);
+	take_timed(g_compute_precompile_wait, &snapshot.compute_precompile_wait_count, &snapshot.compute_precompile_wait_ns,
+	           &snapshot.compute_precompile_wait_max_ns);
 	snapshot.shader_translation_cache_hits      = take_window(g_shader_translation_cache_hits);
 	snapshot.shader_translation_cache_misses    = take_window(g_shader_translation_cache_misses);
 	snapshot.shader_translation_cache_evictions = take_window(g_shader_translation_cache_evictions);

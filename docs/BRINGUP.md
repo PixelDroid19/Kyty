@@ -266,6 +266,28 @@ fail on the current HEAD before acting on them.
     need all 64 lanes, and the 4-wave workgroup rules out workgroup
     barriers for a cross-subgroup exchange. Remaining direction: compile
     known modules in the background before first use.
+  - Background compile of known compute pipelines (2026-10-19, Intel A770,
+    Mesa 26.2.5, strict). Every compute pipeline creation records a recipe
+    (SPIR-V, stage flags, required subgroup size, push range, descriptor
+    layout plan, vendor and device) under
+    `<spirv cache>/compute-pipelines/<title>-<version>/`, written before the
+    blocking compile so a run that stalls in a compile still records it;
+    the store is bounded at 2,048 recipes and 256 MiB. At the first compute
+    pipeline of the next boot two workers compile the recipes of this
+    device, largest first, through the shared `VkPipelineCache`; the
+    dispatching thread waits for a recipe a worker is already compiling and
+    never skips a dispatch. Agent `perf-snapshot` reports
+    `compute_precompile_*`. Measured with a cold Mesa cache and the same
+    SPIR-V cache, 200-280 s runs: without recipes the title was still on
+    its first frame at 195 s (18 pipelines, 121 s of compile on the CP
+    thread); with recipes, 5 pipelines (182 s) compiled in the background,
+    one CP wait of 30 s, frame 33 at 155 s and frame 631 at 196 s. Racing
+    title, first boot (records one recipe) and second boot (compiles it in
+    the background, cold Mesa): fps 41-90 and 25-81, as in earlier runs.
+    Not verified: the stall kernel has no recipe yet (no run has reached it
+    with this change) and on its first encounter a background compile can
+    only shorten the stall, not remove it; a normal exit while a worker is
+    inside the driver was not exercised (every run ended at its time cap).
   - Defect found, not fixed: `GpuMemoryCreate.cpp:2371` refuses a storage
     image (0x870000 bytes) whose range crosses two 1920x1080 render targets
     when the image is not proven write-only. Any kernel whose coverage
