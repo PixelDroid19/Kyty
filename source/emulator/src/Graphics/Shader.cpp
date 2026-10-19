@@ -4663,10 +4663,16 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->thread_ids_num >= 2;
 			const bool paired_xy_thread_ids =
 			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32 && info->thread_ids_num >= 2;
-			const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register,
-			                                                             info->threads_num, native_xy_thread_ids,
-			                                                             info->group_id[0] && info->group_id[1],
-			                                                             paired_xy_thread_ids);
+			auto coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register, info->threads_num,
+			                                                       native_xy_thread_ids, info->group_id[0] && info->group_id[1],
+			                                                       paired_xy_thread_ids);
+			// The paired proofs model the lanes of one 64-thread guest wave, which a
+			// native-equivalent wave64 layout keeps unchanged.
+			if (coverage.width == 0 && native_xy_thread_ids && info->wave_layout.guest_wave_size == 64u)
+			{
+				coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register, info->threads_num, false,
+				                                                 info->group_id[0] && info->group_id[1], true);
+			}
 			if (coverage.width != 0)
 			{
 				info->storage_image_tile_coverage[i] = coverage;
