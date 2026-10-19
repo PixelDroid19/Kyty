@@ -3394,7 +3394,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			if (r.MetaCompress() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MetaCompress() != false condition ignored (continuing)\n"); }
 			if (r.DccAlphaPos() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.DccAlphaPos() != false condition ignored (continuing)\n"); }
 			if (r.DccColorTransf() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.DccColorTransf() != false condition ignored (continuing)\n"); }
-			if (std::getenv("KYTY_SAMPLE_BIND_METADATA_LOG") != nullptr)
+			if (static const bool metadata_log = std::getenv("KYTY_SAMPLE_BIND_METADATA_LOG") != nullptr; metadata_log)
 			{
 				static std::atomic_uint metadata_log_count {0};
 				const unsigned ordinal = metadata_log_count.fetch_add(1, std::memory_order_relaxed);
@@ -4254,7 +4254,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				     static_cast<uint32_t>(r.Depth()), static_cast<uint32_t>(r.BaseArray5()), depth_refusal, parent_state);
 			}
 		}
-		if (const char* dump_texture_bind = std::getenv("KYTY_DUMP_TEXTURE_BIND"); dump_texture_bind != nullptr)
+		if (static const char* dump_texture_bind = std::getenv("KYTY_DUMP_TEXTURE_BIND"); dump_texture_bind != nullptr)
 		{
 			uint32_t selected_width  = 0;
 			uint32_t selected_height = 0;
