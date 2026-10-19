@@ -255,10 +255,17 @@ fail on the current HEAD before acting on them.
     -O` made the 29 s kernel take more than 200 s; replacing the block
     dispatcher with structured control flow shrank a module to 113,000 words
     but it still took 36 s, with about 1,285 live registers at SIMD32. The
-    cost follows register pressure, not module size. Remaining directions:
-    keep each paired half's register file in an array indexed by bank
-    instead of separate variables, or compile known modules in the
-    background before first use.
+    cost follows register pressure, not module size: a 16x16 kernel with
+    about 73 guest VGPRs holds two lanes per host invocation, far beyond
+    the register file of a SIMD32 thread. Folding the register variables
+    into one Function array with an index the compiler cannot fold also
+    failed: 30 s became 43 s (966 live registers, more spills and scratch
+    traffic), and more than 280 s once helper functions were inlined so
+    that every register moved into the array. The shared stack (lanes 0-59
+    of one VGPR, indexed by an SGPR) and the `s_ff1`-selected lane reads
+    need all 64 lanes, and the 4-wave workgroup rules out workgroup
+    barriers for a cross-subgroup exchange. Remaining direction: compile
+    known modules in the background before first use.
   - Defect found, not fixed: `GpuMemoryCreate.cpp:2371` refuses a storage
     image (0x870000 bytes) whose range crosses two 1920x1080 render targets
     when the image is not proven write-only. Any kernel whose coverage
