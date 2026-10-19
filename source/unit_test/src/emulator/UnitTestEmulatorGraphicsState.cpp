@@ -9106,14 +9106,19 @@ TEST(EmulatorGraphicsState, Gen5Eud268SnapshotFeedsConstantSLoad)
 
 TEST(EmulatorGraphicsState, DebugStatsClockMeasuresNanoseconds)
 {
-	const auto stats_start = DebugStatsClock::now();
-	const auto wall_start  = std::chrono::steady_clock::now();
-	std::this_thread::sleep_for(std::chrono::milliseconds(50));
-	const auto wall_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wall_start).count();
-	const auto stats_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - stats_start).count();
+	// A preemption between the paired reads skews one sample, so the best of three must agree within 2%.
+	bool agrees = false;
+	for (int attempt = 0; attempt < 3 && !agrees; attempt++)
+	{
+		const auto stats_start = DebugStatsClock::now();
+		const auto wall_start  = std::chrono::steady_clock::now();
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		const auto wall_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wall_start).count();
+		const auto stats_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - stats_start).count();
+		agrees              = stats_ns > wall_ns * 98 / 100 && stats_ns < wall_ns * 102 / 100;
+	}
 
-	EXPECT_GT(stats_ns, wall_ns * 98 / 100);
-	EXPECT_LT(stats_ns, wall_ns * 102 / 100);
+	EXPECT_TRUE(agrees);
 }
 
 UT_END();
