@@ -67,7 +67,10 @@ fail on the current HEAD before acting on them.
       waiting on the GPU.
     - Kernel proactive compaction (`vm.compaction_proactiveness=20`) runs
       every 32 s. One pass migrated 5966 pages inside the same 0.5 s window
-      as a 39 ms submit.
+      as a 39 ms submit, while three other passes in that run caused no
+      slow submit. In another run the slow-submit bursts were 31.8 s and
+      64.7 s apart, one and two compaction periods. The trigger is likely,
+      not proven.
     - Guest physical windows are imported as host pointers. Xe implements
       those as userptrs that it must revalidate after their pages move.
     - Importing the windows as dma-bufs (`udmabuf`, pinned pages; temporary
@@ -80,8 +83,9 @@ fail on the current HEAD before acting on them.
         measured;
       - or the host setting `vm.compaction_proactiveness=0`, which is the
         host owner's choice.
-    - Owned snapshots of flexible memory are host-pointer imports too and
-      can see the same revalidation.
+    - Owned snapshots of flexible memory are host-pointer imports too.
+      They stayed host pointers in the dma-buf run, which had no slow
+      submit, so whether they stall is untested.
   - **Excluded: uploads waiting behind graphics work.**
     - Small synchronous uploads (`UtilFillImage` and `UtilCopyBuffer` in
       `Utils.cpp`) took up to 176 ms.
