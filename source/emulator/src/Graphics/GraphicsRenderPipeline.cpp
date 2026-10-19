@@ -1323,7 +1323,8 @@ void PipelineCache::SaveDriverCacheIfDue()
 	{
 		return;
 	}
-	if (m_driver_cache_write_budget_exhausted)
+	// A clean cache is never due, so its per-lookup call skips the clock read.
+	if (m_driver_cache_write_budget_exhausted || !m_driver_cache_dirty)
 	{
 		return;
 	}

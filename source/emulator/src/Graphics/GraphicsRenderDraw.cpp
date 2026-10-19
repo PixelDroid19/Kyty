@@ -57,7 +57,7 @@ namespace Kyty::Libs::Graphics {
 
 namespace {
 
-using DrawStageClock = std::chrono::steady_clock;
+using DrawStageClock = DebugStatsClock;
 
 uint64_t DrawStageElapsedNs(DrawStageClock::time_point start)
 {

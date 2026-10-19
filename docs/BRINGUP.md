@@ -182,6 +182,15 @@ fail on the current HEAD before acting on them.
     per segment. Single runs; the gain is about 3%. A seven-title sweep
     on a0cf04b2 reached the same states as the previous sweep, with fps
     within run-to-run noise.
+  - Fix: a disabled easy_profiler block still reads the clock twice for
+    its frame counter (`[vdso]` and `profiler::Block` in the CP profile).
+    Profiler blocks are now opened only when the configuration selects a
+    profiler output. The draw and binding stage timers and the driver
+    pipeline-cache save check use `DebugStatsClock`, and a clean pipeline
+    cache skips its clock read. A unit test checks that blocks are
+    recorded only when enabled. Fishing title, warm caches: 28.5-29.4 to
+    27.2-28.1 µs per draw, CP time per flip 33-34.6 to 31.6-32.7 ms;
+    single runs.
 - **Frame hitches (fishing title, gameplay, steady segments).**
   - **One frame of about 120 ms per 30 s segment is the harness's native
     capture.** Its flip sequence equals the capture's frame number in every

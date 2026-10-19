@@ -65,7 +65,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-using BindingStageClock = std::chrono::steady_clock;
+using BindingStageClock = DebugStatsClock;
 
 static uint64_t BindingStageElapsedNs(BindingStageClock::time_point start)
 {

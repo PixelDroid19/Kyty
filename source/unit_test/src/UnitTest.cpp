@@ -111,6 +111,7 @@ UT_LINK(EmulatorKernelGuestRuntime);
 UT_LINK(EmulatorLoaderModuleStart);
 UT_LINK(EmulatorLoaderUnwind);
 UT_LINK(EmulatorLog);
+UT_LINK(EmulatorProfiling);
 UT_LINK(EmulatorModuleDiscovery);
 UT_LINK(EmulatorShaderMimg);
 UT_LINK(EmulatorPackedMipNative);
