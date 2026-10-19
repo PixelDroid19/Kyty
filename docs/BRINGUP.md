@@ -241,10 +241,17 @@ fail on the current HEAD before acting on them.
     - Entering gameplay from the load (fishing title, warm caches, a0cf04b2)
       takes one frame of 0.1-0.9 s, different in each of four runs. In the
       0.9 s frame there was no pipeline miss and no SPIR-V compile, no
-      wait above 50 ms, and no command-processor run above 42 ms, so the
-      guest delivered the frame late. A run with a 100 ms poll of thread
-      states saw no thread blocked in file reads (the game files sit on a
-      FUSE NTFS mount), but that run had no long frame. The cause is open.
+      wait above 50 ms, and no command-processor run above 42 ms. The delay
+      is therefore upstream of the command processor: guest work, or a
+      guest thread inside a runtime call or the host kernel. Two runs with
+      a 100 ms poll of per-thread CPU and read calls (reads through the
+      FUSE NTFS mount that holds the game files appear only in `rchar`)
+      had no gameplay frame over 166 ms apart from frames next to the
+      harness capture. The cause is open.
+    - On cold caches, which the harness uses unless a run overrides them,
+      entering gameplay compiles 16 pipelines in one 464 ms frame. The
+      SPIR-V cache key includes the shader translator version, so every
+      translator version change makes existing caches cold again.
 - **Audio after the SDL 3 migration.** The playback stream is named after
   the executable instead of "SDL Application". A per-application mute that
   the session's audio policy had stored for that name silenced the
