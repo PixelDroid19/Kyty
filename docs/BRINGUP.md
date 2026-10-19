@@ -52,6 +52,33 @@ fail on the current HEAD before acting on them.
   the same pool when its guest address repeats did not move the miss rate
   (40-50%). The guest rotates its constant-buffer addresses, so the keys
   differ anyway. Reverted.
+- **Per-draw shader resource scans (fishing title, gameplay).**
+  - In a 30 s user-space stack sample of the CP thread, scans of the shader
+    instruction list on every draw took about 20%. The largest single cost
+    was the EUD descriptor scan in the pixel path, about 5% with its
+    classifiers. It walked every instruction, and walked back from every
+    image consumer to its block start.
+  - Excluded: memoizing the whole resource parse. A temporary counter over
+    20,000-call windows saw about 55 programs but 12,000-14,000 distinct
+    inputs (user SGPR values plus EUD table words). Even an ideal cache
+    would hit at most about a third of calls.
+  - Fix (a11c3ce9): the per-program resource memo records the code-only
+    candidates once. These are the whole-descriptor S_LOADs at a constant
+    offset, and the two S_LOAD_DWORDX4 halves of each split T#. Each draw
+    applies only the pointer, entry-value and EUD span checks to them.
+  - Equivalence: a temporary dual evaluation compared the old and new
+    scans call by call. Results: fishing title 700,000 calls, role-playing
+    title 80,000, puzzle title 32,000, robot platformer 40,000, unit suite.
+    No mismatches. None of these titles reached a split T#, so new
+    contract tests cover that path; a mutation check confirmed they fail
+    without it.
+  - Result: the scan dropped from about 3.6% to 0.3% of CP self time.
+    Gameplay µs per draw went from 32.4-34.5 to 31.2-33.3, and p50 from
+    42-43 ms to 41 ms. These are single runs with the sampler attached,
+    within run-to-run noise.
+  - Still per draw: runtime-descriptor checks in the pixel path (about
+    2.5%), redefined and assembled buffer descriptors (about 1.5%), and
+    vertex-path scans without a memo.
 - **Frame hitches (fishing title, gameplay, steady segments).**
   - **One frame of about 120 ms per 30 s segment is the harness's native
     capture.** Its flip sequence equals the capture's frame number in every
