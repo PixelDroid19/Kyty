@@ -217,7 +217,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 
 	GpuWritebackResult writeback_result;
 	{
-		const auto writeback_start = std::chrono::steady_clock::now();
+		const auto writeback_start = DebugStatsClock::now();
 		// A result already published to guest memory on the device is adopted,
 		// not copied again: a uniform one without reading the GPU copy
 		// (PublishComputeUniformFillToGuestAddress, PublishPendingStorageToGuestAddress).
@@ -233,7 +233,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 			writeback_result = o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
 		}
 		const auto writeback_elapsed =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - writeback_start).count();
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - writeback_start).count();
 		DebugStatsRecordGpuMemoryWriteBack(GpuMemoryStatsTypeIndex(o.object.type), writeback_result.copied_bytes,
 		                                   static_cast<uint64_t>(writeback_elapsed));
 	}

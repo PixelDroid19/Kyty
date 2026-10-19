@@ -211,9 +211,9 @@ void GpuMemory::VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vec
 	// global GpuMemory mutex across that work.
 	m_mutex.Unlock();
 	VulkanMemory new_memory {};
-	const auto   create_start = std::chrono::steady_clock::now();
+	const auto   create_start = DebugStatsClock::now();
 	void* const  new_object   = create_func(ctx, params, vaddr, size, vaddr_num, &new_memory);
-	const auto   create_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
+	const auto   create_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - create_start).count();
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc, static_cast<uint64_t>(create_ns));
 	m_mutex.Lock();
 
@@ -481,7 +481,7 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			VersionBacking(ctx, heap_id, obj_id, destructors, stable_buffer_source_ready ? upload_vaddr : nullptr);
 		} else if (mutation == GpuMemoryMutationAction::UpdateInPlace)
 		{
-			const auto update_start = std::chrono::steady_clock::now();
+			const auto update_start = DebugStatsClock::now();
 			// Pages whose generation did not move still hold the bytes uploaded
 			// last time; every GPU write to them was written back with a write
 			// notification, which advances their generation.
@@ -492,8 +492,7 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 				o.update_func(ctx, o.params, o.object.obj, stable_buffer_source_ready ? upload_vaddr : h.block.vaddr, h.block.size,
 				              h.block.vaddr_num);
 			}
-			const auto update_ns =
-			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - update_start).count();
+			const auto update_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - update_start).count();
 			DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::UpdateFunc, static_cast<uint64_t>(update_ns));
 		}
 
@@ -1090,17 +1089,16 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		requested_bytes = size[vi] > UINT64_MAX - requested_bytes ? UINT64_MAX : requested_bytes + size[vi];
 	}
 	DebugStatsGpuMemoryCreateTrace create_stats(GpuMemoryStatsTypeIndex(info.type), requested_bytes, static_cast<uint32_t>(vaddr_num));
-	const auto                     backing_lock_start = std::chrono::steady_clock::now();
+	const auto                     backing_lock_start = DebugStatsClock::now();
 	Core::LockGuard                backing_lock(m_backing_mutation_mutex);
-	const auto                     backing_lock_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - backing_lock_start).count();
+	const auto backing_lock_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - backing_lock_start).count();
 	create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::BackingLockWait, static_cast<uint64_t>(backing_lock_ns));
-	const auto      registry_lock_start = std::chrono::steady_clock::now();
+	const auto      registry_lock_start = DebugStatsClock::now();
 	Core::LockGuard lock(m_mutex);
 	const auto      registry_lock_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - registry_lock_start).count();
+	    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - registry_lock_start).count();
 	create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::RegistryLockWait, static_cast<uint64_t>(registry_lock_ns));
-	const auto classification_start = std::chrono::steady_clock::now();
+	const auto classification_start = DebugStatsClock::now();
 	bool       classification_done  = false;
 	const auto finish_classification =
 	    [&](uint32_t candidates = 0, uint32_t relation_mask = 0, uint32_t reclaimed = 0, bool from_objects = false)
@@ -1109,8 +1107,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		{
 			return;
 		}
-		const auto elapsed =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - classification_start).count();
+		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - classification_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::Classification, static_cast<uint64_t>(elapsed));
 		create_stats.SetClassification(candidates, relation_mask, reclaimed, from_objects);
 		classification_done = true;
@@ -2530,8 +2527,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	if (create_tracked)
 	{
 		auto&      tracker              = GpuDirtyPageTracker::Instance();
-		const auto dirty_track_start    = std::chrono::steady_clock::now();
-		const auto dirty_register_start = std::chrono::steady_clock::now();
+		const auto dirty_track_start    = DebugStatsClock::now();
+		const auto dirty_register_start = DebugStatsClock::now();
 		for (int vi = 0; create_tracked && vi < vaddr_num; vi++)
 		{
 			// The stable staging block already registered and observed vi 0.
@@ -2544,9 +2541,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			create_dirty_owned[vi] = create_tracked;
 		}
 		const auto dirty_register_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_register_start).count();
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - dirty_register_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyRegister, static_cast<uint64_t>(dirty_register_ns));
-		const auto dirty_prepare_start = std::chrono::steady_clock::now();
+		const auto dirty_prepare_start = DebugStatsClock::now();
 		if (stable_create_ready)
 		{
 			create_dirty_read[0] = stable_create_read;
@@ -2561,7 +2558,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			create_tracked        = create_dirty_read[vi].tracked;
 		}
 		const auto dirty_prepare_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_prepare_start).count();
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - dirty_prepare_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyPrepare, static_cast<uint64_t>(dirty_prepare_ns));
 		if (!create_tracked)
 		{
@@ -2575,8 +2572,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 		}
-		dirty_track_pre_ns = static_cast<uint64_t>(
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_track_start).count());
+		dirty_track_pre_ns =
+		    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - dirty_track_start).count());
 	}
 
 	for (int vi = 0; vi < vaddr_num; vi++)
@@ -2615,10 +2612,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		}
 		auto create_func = info.GetCreateFromObjectsFunc();
 		EXIT_IF(create_func == nullptr);
-		const auto create_start = std::chrono::steady_clock::now();
+		const auto create_start = DebugStatsClock::now();
 		o.object.obj            = create_func(ctx, buffer, o.params, scenario, objects, &o.mem);
-		const auto create_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
+		const auto create_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - create_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc, static_cast<uint64_t>(create_ns));
 		// Texture CreateFromObjects may leave layout UNDEFINED when no
 		// format+extent surface parent is usable. Fall back to guest upload so
@@ -2630,21 +2626,19 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				auto update = info.GetUpdateFunc();
 				EXIT_IF(update == nullptr);
-				const auto update_start = std::chrono::steady_clock::now();
+				const auto update_start = DebugStatsClock::now();
 				update(ctx, o.params, o.object.obj, vaddr, size, vaddr_num);
 				create_from_objects_fell_back_to_cpu = true;
-				const auto update_ns =
-				    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - update_start).count();
+				const auto update_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - update_start).count();
 				create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::UpdateFunc, static_cast<uint64_t>(update_ns));
 			}
 		}
 	} else
 	{
 		EXIT_IF(o.create_func == nullptr);
-		const auto create_start = std::chrono::steady_clock::now();
+		const auto create_start = DebugStatsClock::now();
 		o.object.obj            = o.create_func(ctx, o.params, create_vaddr, size, vaddr_num, &o.mem);
-		const auto create_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
+		const auto create_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - create_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc, static_cast<uint64_t>(create_ns));
 	}
 	std::sort(render_alias_sources.begin(), render_alias_sources.end());
@@ -2787,7 +2781,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	if (info.check_hash)
 	{
-		const auto dirty_publish_start = std::chrono::steady_clock::now();
+		const auto dirty_publish_start = DebugStatsClock::now();
 		if (create_tracked)
 		{
 			// Publish the pre-create observations. A later BeginRead would hide writes made during create.
@@ -2799,7 +2793,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			}
 		}
 		const auto dirty_publish_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_publish_start).count();
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - dirty_publish_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyTrack, dirty_track_pre_ns + static_cast<uint64_t>(dirty_publish_ns));
 	}
 

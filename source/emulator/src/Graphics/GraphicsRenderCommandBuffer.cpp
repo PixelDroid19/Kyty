@@ -963,11 +963,11 @@ public:
 			return nullptr;
 		}
 
-		const auto capture_start = std::chrono::steady_clock::now();
+		const auto capture_start      = DebugStatsClock::now();
 		const auto finish_upload_time = [&]()
 		{
-			const auto total_ns = static_cast<uint64_t>(
-			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - capture_start).count());
+			const auto total_ns =
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - capture_start).count());
 			const uint64_t excluded_ns = *validation_ns > UINT64_MAX - *compare_ns ? UINT64_MAX : *validation_ns + *compare_ns;
 			*upload_ns = total_ns > excluded_ns ? total_ns - excluded_ns : 0u;
 		};
@@ -1005,10 +1005,10 @@ public:
 		auto*      entry = Acquire(ctx, size, usage, GpuMemoryTransientBufferAllocationClass::Snapshot, false, nullptr);
 		if (entry == nullptr)
 		{
-			const auto preflight_start = std::chrono::steady_clock::now();
+			const auto preflight_start = DebugStatsClock::now();
 			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin, admission);
 			*validation_ns += static_cast<uint64_t>(
-			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - preflight_start).count());
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - preflight_start).count());
 			if (!eligible)
 			{
 				finish_upload_time();
@@ -1982,7 +1982,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 	{
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
-		const auto wait_start = std::chrono::steady_clock::now();
+		const auto wait_start  = DebugStatsClock::now();
 		const auto wait_result = VulkanCallAndPublishOnSuccess(
 		    [&]
 		    { return vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, 10000000000ULL); },
@@ -2017,7 +2017,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 			    }
 			    m_execute = false;
 		    });
-		const auto wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
+		const auto wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - wait_start).count();
 		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
 		if (wait_result != VK_SUCCESS)
 		{

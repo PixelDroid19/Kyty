@@ -859,11 +859,10 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	EXIT_IF(pipeline->pipeline != nullptr);
 
-	const auto vk_create_start = std::chrono::steady_clock::now();
+	const auto     vk_create_start = DebugStatsClock::now();
 	const VkResult create_result =
 	    vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
-	const auto vk_create_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vk_create_start).count();
+	const auto vk_create_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - vk_create_start).count();
 	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(vk_create_ns));
 
 	if (pipeline->pipeline == nullptr || create_result != VK_SUCCESS)
@@ -1096,10 +1095,9 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 	EXIT_IF(pipeline->pipeline_layout != nullptr);
 	EXIT_IF(pipeline->pipeline != nullptr);
 
-	const auto     vk_create_start = std::chrono::steady_clock::now();
+	const auto     vk_create_start = DebugStatsClock::now();
 	const VkResult create_result   = CreateComputePipelineFromRecipe(gctx, recipe, &pipeline->pipeline_layout, &pipeline->pipeline);
-	const auto     vk_create_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vk_create_start).count();
+	const auto     vk_create_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - vk_create_start).count();
 	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(vk_create_ns));
 
 	if (pipeline->pipeline_layout == VK_NULL_HANDLE)
@@ -1346,7 +1344,7 @@ void PipelineCache::SaveDriverCacheIfDue()
 	const size_t budget           = PipelineCacheStoreSessionWriteBudgetBytes();
 	const size_t remaining_budget = m_driver_cache_bytes_attempted < budget ? budget - m_driver_cache_bytes_attempted : 0u;
 	size_t       attempted_size   = 0;
-	const auto   save_start       = std::chrono::steady_clock::now();
+	const auto   save_start       = DebugStatsClock::now();
 	const auto   save_result      = PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, remaining_budget, &attempted_size);
 	if (save_result == PipelineCacheStoreSaveResult::Unchanged)
 	{
@@ -1355,8 +1353,8 @@ void PipelineCache::SaveDriverCacheIfDue()
 		m_driver_cache_dirty          = false;
 		return;
 	}
-	const auto   save_elapsed_ns =
-	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - save_start).count());
+	const auto save_elapsed_ns =
+	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - save_start).count());
 	DebugStatsPipelineCacheCheckpointOutcome checkpoint_outcome = DebugStatsPipelineCacheCheckpointOutcome::Failed;
 	if (save_result == PipelineCacheStoreSaveResult::Written)
 	{
@@ -1604,9 +1602,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	// mode here disables valid scanout and render-target draws on other modes.
 	p.dynamic_params->color_write_enable = true;
 
-	const auto lookup_start = std::chrono::steady_clock::now();
+	const auto lookup_start = DebugStatsClock::now();
 	auto*      found        = Find(p);
-	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - lookup_start).count();
+	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - lookup_start).count();
 	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Graphics, found != nullptr, static_cast<uint64_t>(lookup_ns));
 
 	if (found != nullptr)
@@ -1619,7 +1617,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		return found->pipeline;
 	}
 
-	const auto miss_start = std::chrono::steady_clock::now();
+	const auto miss_start = DebugStatsClock::now();
 	for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
 	{
 		if (!RenderColorSlotActive(*color, rt))
@@ -1753,7 +1751,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 
 	m_driver_cache_dirty = true;
 	SaveDriverCacheIfDue();
-	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - miss_start).count();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(miss_ns));
 	return m_pipelines[static_cast<int>(slot)].pipeline;
 }
@@ -1784,9 +1782,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 	p.dynamic_params->vk_dynamic_state_stencil_write_mask   = true;
 	p.dynamic_params->color_write_enable                    = true;
 
-	const auto lookup_start = std::chrono::steady_clock::now();
+	const auto lookup_start = DebugStatsClock::now();
 	auto*      found        = Find(p);
-	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - lookup_start).count();
+	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - lookup_start).count();
 	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, found != nullptr, static_cast<uint64_t>(lookup_ns));
 
 	if (found != nullptr)
@@ -1799,7 +1797,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 		return found->pipeline;
 	}
 
-	const auto miss_start = std::chrono::steady_clock::now();
+	const auto miss_start = DebugStatsClock::now();
 
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
@@ -1837,7 +1835,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	m_driver_cache_dirty = true;
 	SaveDriverCacheIfDue();
-	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - miss_start).count();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));
 	return m_pipelines[static_cast<int>(slot)].pipeline;
 }

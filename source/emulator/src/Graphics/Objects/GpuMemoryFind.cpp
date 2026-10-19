@@ -395,13 +395,13 @@ bool GpuMemory::WritableStorageOverlapsLocked(uint64_t vaddr, uint64_t size)
 bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns, uint64_t* copy_ns,
                                               GpuMemorySnapshotAdmission admission)
 {
-	const auto validation_start = std::chrono::steady_clock::now();
+	const auto validation_start  = DebugStatsClock::now();
 	const auto finish_validation = [&]()
 	{
 		if (validation_ns != nullptr)
 		{
 			*validation_ns = static_cast<uint64_t>(
-			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - validation_start).count());
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - validation_start).count());
 		}
 	};
 	if (copy_ns != nullptr)
@@ -428,7 +428,7 @@ bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, voi
 		return false;
 	}
 	finish_validation();
-	const auto copy_start = std::chrono::steady_clock::now();
+	const auto copy_start = DebugStatsClock::now();
 	// A copy that a second pass reads back unchanged is a consistent snapshot
 	// unless a store restored a byte's old value in between: every byte held
 	// its value from the end of the copy to the start of the check. This costs
@@ -438,8 +438,7 @@ bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, voi
 	const bool stable_copy = std::memcmp(dst, reinterpret_cast<const void*>(vaddr), static_cast<size_t>(size)) == 0;
 	if (copy_ns != nullptr)
 	{
-		*copy_ns = static_cast<uint64_t>(
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - copy_start).count());
+		*copy_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - copy_start).count());
 	}
 	return stable_copy;
 }
@@ -447,13 +446,13 @@ bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, voi
 bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
 	                                          uint64_t* validation_ns, uint64_t* compare_ns, GpuMemorySnapshotAdmission admission)
 {
-	const auto validation_start = std::chrono::steady_clock::now();
+	const auto validation_start  = DebugStatsClock::now();
 	const auto finish_validation = [&]()
 	{
 		if (validation_ns != nullptr)
 		{
 			*validation_ns = static_cast<uint64_t>(
-			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - validation_start).count());
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - validation_start).count());
 		}
 	};
 	if (matches == nullptr)
@@ -490,7 +489,7 @@ bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, con
 		return false;
 	}
 	finish_validation();
-	const auto compare_start = std::chrono::steady_clock::now();
+	const auto compare_start = DebugStatsClock::now();
 	// No page protection: a CPU store racing this comparison can make it match
 	// a state memory never held at one instant, the same race the console GPU
 	// has when the guest writes a buffer a pending draw reads. Guests order
@@ -498,8 +497,8 @@ bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, con
 	*matches = std::memcmp(reinterpret_cast<const void*>(vaddr), snapshot, static_cast<size_t>(size)) == 0;
 	if (compare_ns != nullptr)
 	{
-		*compare_ns = static_cast<uint64_t>(
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compare_start).count());
+		*compare_ns =
+		    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - compare_start).count());
 	}
 	return true;
 }

@@ -335,10 +335,9 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource
 
 	mem->unique_id = ++seq;
 
-	const auto allocate_start = std::chrono::steady_clock::now();
+	const auto allocate_start = DebugStatsClock::now();
 	auto       result         = vkAllocateMemory(ctx->device, &alloc_info, nullptr, &mem->memory);
-	const auto allocate_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - allocate_start).count();
+	const auto allocate_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - allocate_start).count();
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanAllocate, static_cast<uint64_t>(allocate_ns),
 	                                                mem->requirements.size);
 
@@ -426,9 +425,9 @@ void VulkanBindImageMemory(GraphicContext* ctx, VulkanImage* image, VulkanMemory
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(image == nullptr);
 
-	const auto bind_start = std::chrono::steady_clock::now();
+	const auto bind_start = DebugStatsClock::now();
 	vkBindImageMemory(ctx->device, image->image, mem->memory, mem->offset);
-	const auto bind_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - bind_start).count();
+	const auto bind_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - bind_start).count();
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanBind, static_cast<uint64_t>(bind_ns));
 }
 
@@ -440,9 +439,9 @@ void VulkanBindBufferMemory(GraphicContext* ctx, VulkanBuffer* buffer, VulkanMem
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(buffer == nullptr);
 
-	const auto bind_start = std::chrono::steady_clock::now();
+	const auto bind_start = DebugStatsClock::now();
 	const auto result     = vkBindBufferMemory(ctx->device, buffer->buffer, mem->memory, mem->offset);
-	const auto bind_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - bind_start).count();
+	const auto bind_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - bind_start).count();
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanBind, static_cast<uint64_t>(bind_ns));
 
 	if (result != VK_SUCCESS)

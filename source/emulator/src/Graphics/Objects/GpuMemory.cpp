@@ -172,9 +172,9 @@ uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_
 			}
 		}
 	}
-	const auto start   = std::chrono::steady_clock::now();
+	const auto start   = DebugStatsClock::now();
 	const auto result  = XXH3_64bits(buf, size);
-	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - start).count();
 	DebugStatsRecordGpuMemoryHash(GpuMemoryStatsTypeIndex(type), size, static_cast<uint64_t>(elapsed));
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::Hash, static_cast<uint64_t>(elapsed), size);
 	return result;

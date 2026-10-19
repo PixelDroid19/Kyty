@@ -638,10 +638,10 @@ void CommandProcessor::WaitUntilPublishedUnlessReentrant(SubmissionId submission
 	{
 		return;
 	}
-	const auto started = std::chrono::steady_clock::now();
+	const auto started = DebugStatsClock::now();
 	TraceWait("publication_begin", m_queue, 0, 0, 0, 0, submission.sequence);
 	require_publication_success(m_publication_gate.WaitUntilPublished(submission), "WaitUntilPublished", m_queue, submission);
-	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count();
+	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - started).count();
 	TraceWait("publication_end", m_queue, 0, 0, 0, 0, submission.sequence, static_cast<uint64_t>(elapsed));
 }
 

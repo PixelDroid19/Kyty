@@ -7,7 +7,11 @@
 //#error "KYTY_PLATFORM != KYTY_PLATFORM_LINUX"
 #else
 
+#include <cpuid.h>
+#include <cstdio>
+#include <cstring>
 #include <ctime>
+#include <x86intrin.h>
 
 namespace Kyty {
 
@@ -142,6 +146,36 @@ inline void sys_query_performance_counter(uint64_t* counter)
 	};
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	*counter = now.tv_sec * 1000000000LL + now.tv_nsec;
+}
+
+// Reads the processor's time-stamp counter.
+inline uint64_t sys_read_cycle_counter()
+{
+	return __rdtsc();
+}
+
+// True when the time-stamp counter ticks at a constant rate in every power state
+// and the kernel keeps it as its clock source, which it does only while the
+// counter stays synchronized across processors.
+inline bool sys_cycle_counter_invariant()
+{
+	unsigned int eax = 0;
+	unsigned int ebx = 0;
+	unsigned int ecx = 0;
+	unsigned int edx = 0;
+	if (__get_cpuid(0x80000007u, &eax, &ebx, &ecx, &edx) == 0 || (edx & (1u << 8u)) == 0)
+	{
+		return false;
+	}
+	FILE* f = fopen("/sys/devices/system/clocksource/clocksource0/current_clocksource", "r");
+	if (f == nullptr)
+	{
+		return false;
+	}
+	char       source[16] = {};
+	const bool read       = fgets(source, sizeof(source), f) != nullptr;
+	fclose(f);
+	return read && strcmp(source, "tsc\n") == 0;
 }
 
 } // namespace Kyty
