@@ -76,13 +76,14 @@ fail on the current HEAD before acting on them.
     - Importing the windows as dma-bufs (`udmabuf`, pinned pages; temporary
       diagnostic switch) removed every submit over 10 ms in one 200 s run.
       That run's steady p50 frame time was 46-47 ms, against 42-45 ms with
-      host pointers. Whether the import mode causes that difference is not
-      verified.
-    - Not fixed. Directions:
-      - a pinned import where the host allows it, once its frame cost is
-        measured;
-      - or the host setting `vm.compaction_proactiveness=0`, which is the
-        host owner's choice.
+      host pointers. A second dma-buf run confirmed the cost: steady p50
+      46-48 ms (about 21.3 fps) and 33.6-35.9 µs per draw, against 43 ms
+      (about 23.5 fps) and 32.5-33.5 µs per draw in two host-pointer runs
+      on the same warm caches. Pinned imports trade the rare stall for
+      about 9% fps on every frame, so they are excluded as the default.
+    - Not fixed. Direction: the host setting
+      `vm.compaction_proactiveness=0`, which is the host owner's choice.
+      An A/B with it is still needed to prove the trigger.
     - Owned snapshots of flexible memory are host-pointer imports too.
       They stayed host pointers in the dma-buf run, which had no slow
       submit, so whether they stall is untested.
