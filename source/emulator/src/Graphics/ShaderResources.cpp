@@ -1583,6 +1583,61 @@ void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindR
 	}
 }
 
+// A V# register a bound descriptor names: the start register of a storage
+// buffer (or, for scalar loads, of a proven-empty buffer).
+static bool ShaderBufferRegisterNamesBinding(const ShaderBindResources& bind, const ShaderInstruction& inst,
+                                             int user_data_register_base)
+{
+	if (ShaderInstructionIsScalarBufferLoad(inst))
+	{
+		const int reg = inst.src[0].register_id;
+		for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
+		{
+			if (bind.zero_sbuffer_resources.start_register[i] == reg) { return true; }
+		}
+		for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+		{
+			if (bind.storage_buffers.start_register[i] == reg) { return true; }
+		}
+		return false;
+	}
+	return ShaderStorageBufferResourceIsBound(bind, inst.src[1], user_data_register_base);
+}
+
+void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
+                                             const ShaderScalarFlow& scalar_flow)
+{
+	EXIT_IF(bind == nullptr);
+	const auto& holding      = scalar_flow.holding_entry_value;
+	const auto& instructions = code.GetInstructions();
+	// An unresolved CFG reports no entry value anywhere and proves nothing.
+	if (holding.empty() || holding.front().none())
+	{
+		return;
+	}
+	for (uint32_t index = 0; index < instructions.Size() && index < holding.size(); ++index)
+	{
+		const auto& inst   = instructions.At(index);
+		const bool  scalar = ShaderInstructionIsScalarBufferLoad(inst) && inst.src_num >= 1 &&
+		                    inst.src[0].type == ShaderOperandType::Sgpr && inst.src[0].size == 4;
+		const auto* vector = ShaderVectorBufferDescriptor(inst);
+		if ((!scalar && vector == nullptr) || ShaderIsDynamicScalarStorageConsumer(*bind, inst) ||
+		    ShaderIsDynamicVectorStorageConsumer(*bind, inst))
+		{
+			continue;
+		}
+		// The binding replaces the base dword with the descriptor slot; only a
+		// base still holding it addresses the bound buffer.
+		const int base = scalar ? inst.src[0].register_id : vector->register_id;
+		if (base < 0 || base >= kShaderScalarLivenessSgprs || holding[index].test(static_cast<size_t>(base)) ||
+		    !ShaderBufferRegisterNamesBinding(*bind, inst, user_data_register_base))
+		{
+			continue;
+		}
+		bind->redefined_descriptor_consumers.Add(inst.pc);
+	}
+}
+
 bool ShaderIsDynamicScalarStorageConsumer(const ShaderBindResources& bind, const ShaderInstruction& inst)
 {
 	if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr ||
@@ -1609,6 +1664,10 @@ bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, co
 	    inst.src[0].size != 4 || ShaderIsDynamicScalarStorageConsumer(bind, inst))
 	{
 		return false;
+	}
+	if (ShaderBufferConsumerRedefinesDescriptor(bind, inst))
+	{
+		return true;
 	}
 	const int reg = inst.src[0].register_id;
 	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)

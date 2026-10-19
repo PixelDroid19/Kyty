@@ -151,6 +151,22 @@ bool StorageBufferWriteBackPublishedUniform(void* obj, uint64_t vaddr, uint64_t 
 	return LabelWriteBackAdoptUniform(vaddr, size, words, &vk_obj->writeback_cache, &vk_obj->label_publication, result);
 }
 
+bool StorageBufferWriteBackPublishedDevice(GraphicContext* ctx, void* obj, uint64_t vaddr, uint64_t size, GpuWritebackResult* result)
+{
+	auto* vk_obj = static_cast<StorageVulkanBuffer*>(obj);
+	EXIT_IF(ctx == nullptr || vk_obj == nullptr || result == nullptr);
+	// Depth metadata clears are recognized from the written bytes.
+	if (vk_obj->depth_meta_addr != 0 || vk_obj->guest_addr != vaddr || vk_obj->guest_size != size)
+	{
+		return false;
+	}
+	void* data = nullptr;
+	VulkanMapMemory(ctx, &vk_obj->memory, &data);
+	const bool adopted = LabelWriteBackAdoptDevice(vaddr, data, size, &vk_obj->writeback_cache, &vk_obj->label_publication, result);
+	VulkanUnmapMemory(ctx, &vk_obj->memory);
+	return adopted;
+}
+
 bool StorageBufferGpuObject::Equal(const uint64_t* other) const
 {
 	// GpuMemory calls Equal only after type and guest byte ranges match.

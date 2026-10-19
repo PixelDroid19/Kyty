@@ -23,6 +23,7 @@
 #include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
 #include "Emulator/Graphics/ShaderFragmentMaskFlow.h"
 #include "Emulator/Graphics/ShaderNggFront.h"
+#include "ShaderLaneFlow.h"
 #include "ShaderNativeWaveInternal.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderProgramSnapshot.h"
@@ -55,6 +56,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <tuple>
 #include <shared_mutex>
 #include <unordered_map>
 #include <utility>
@@ -527,6 +529,11 @@ static bool ShaderVccWordIsWaveUniform(const ShaderCode& code, ShaderOperandType
 		{
 			continue;
 		}
+		// A scalar memory load fills VCC with one word the whole wave shares.
+		if (LaneFlow::IsScalarLoad(definition.type))
+		{
+			return true;
+		}
 		// Only the scalar select chain observed in the material shader is admitted.
 		// Vector compares and unknown VCC writers remain lane-dependent.
 		if (definition.type != ShaderInstructionType::SCselectB32 || definition.src_num != 2 || definition.dst.size > 1)
@@ -548,6 +555,36 @@ static bool ShaderVccWordIsWaveUniform(const ShaderCode& code, ShaderOperandType
 	}
 
 	return false;
+}
+
+// An image load reads one texel per lane from its T# and its address VGPRs. DIM equals the T#
+// type (RDNA2 ISA MIMG DIM field) and fixes the coordinates read (table 42): 1D x; 2D x,y;
+// 3D/cube x,y,z or face; 1D array x,slice; 2D array x,y,slice; 2D MSAA x,y,fragment; 2D MSAA
+// array x,y,slice,fragment; then the level of a load_mip. When those words and the T# are
+// shared by the wave, every lane reads the same texel.
+static bool ShaderImageLoadIsWaveUniform(const ShaderCode& code, const ShaderInstruction& load, uint32_t load_index, uint32_t depth)
+{
+	static constexpr int kCoordinates[8] = {1, 2, 3, 3, 2, 3, 3, 4};
+	const int            addresses        = kCoordinates[load.mimg_dimension & 7u] + (load.mimg_explicit_lod ? 1 : 0);
+	if (load.src_num != 2 || load.src[0].type != ShaderOperandType::Vgpr || load.src[1].type != ShaderOperandType::Sgpr ||
+	    (load.mimg_address_num != 0 && load.mimg_address_num < addresses))
+	{
+		return false;
+	}
+	for (int address = 0; address < addresses; ++address)
+	{
+		ShaderOperand word = load.mimg_address_num != 0 ? load.mimg_address[address] : load.src[0];
+		if (load.mimg_address_num == 0)
+		{
+			word.register_id += address;
+			word.size = 1;
+		}
+		if (!ShaderOperandIsWaveUniform(code, word, load_index, depth + 1))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOperand& operand, uint32_t use_index,
@@ -583,7 +620,8 @@ static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOpera
 			continue;
 		}
 
-		if (!ShaderInstructionIsPureLaneAlu(definition))
+		const bool image_load = definition.type == ShaderInstructionType::ImageLoad;
+		if (!image_load && !ShaderInstructionIsPureLaneAlu(definition))
 		{
 			return false;
 		}
@@ -600,6 +638,10 @@ static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOpera
 			}
 		}
 
+		if (image_load)
+		{
+			return ShaderImageLoadIsWaveUniform(code, definition, static_cast<uint32_t>(index), depth);
+		}
 		for (int source = 0; source < definition.src_num; ++source)
 		{
 			if (!ShaderOperandIsWaveUniform(code, definition.src[source], static_cast<uint32_t>(index), depth + 1))
@@ -1255,6 +1297,10 @@ struct ShaderVertexProgramKey
 struct ShaderVertexProgram
 {
 	ShaderVertexProgramKey key;
+	// Guest bytes copied from front_addr and continuation_addr; a mapping that
+	// overlaps either range retires the program.
+	uint32_t               front_bytes = 0;
+	uint32_t               back_bytes  = 0;
 	ShaderCode             front_code;
 	ShaderCode             code;
 	// EUD scans use the front stream even when the linked program adds a continuation.
@@ -1292,8 +1338,45 @@ static std::mutex                g_vs_isa_cache_mutex;
 static uint64_t                  g_vs_isa_cache_bytes = 0;
 static uint64_t                  g_vs_program_generation = 1;
 
+static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program);
+
+static bool ShaderRangesOverlap(uint64_t a, uint64_t a_size, uint64_t b, uint64_t b_size)
+{
+	return a_size != 0u && b_size != 0u && a < b + b_size && b < a + a_size;
+}
+
+// Caller holds the exclusive lifetime lock. Retires the programs and vertex
+// offset results that read guest code in [addr, addr + size).
+static void ShaderInvalidateVertexProgramRangeLocked(uint64_t addr, uint64_t size)
+{
+	std::scoped_lock cache_lock(g_vs_isa_cache_mutex, g_vertex_offset_sgpr_mutex);
+	if (g_vs_isa_cache != nullptr)
+	{
+		for (auto entry = g_vs_isa_cache->begin(); entry != g_vs_isa_cache->end();)
+		{
+			const auto& program = *entry->second;
+			if (ShaderRangesOverlap(program.key.front_addr, program.front_bytes, addr, size) ||
+			    ShaderRangesOverlap(program.key.continuation_addr, program.back_bytes, addr, size))
+			{
+				g_vs_isa_cache_bytes -= ShaderVertexProgramCacheCost(program);
+				entry = g_vs_isa_cache->erase(entry);
+			} else
+			{
+				++entry;
+			}
+		}
+	}
+	if (g_vertex_offset_sgpr_map != nullptr)
+	{
+		for (auto entry = g_vertex_offset_sgpr_map->begin(); entry != g_vertex_offset_sgpr_map->end();)
+		{
+			entry = ShaderRangesOverlap(entry->first, 1u, addr, size) ? g_vertex_offset_sgpr_map->erase(entry) : std::next(entry);
+		}
+	}
+}
+
 // Caller holds the exclusive lifetime lock. Lock order is lifetime -> map/cache;
-// no cache holder may acquire lifetime. Both code owners and debug state use it.
+// no cache holder may acquire lifetime. Debug state changes every program.
 static void ShaderInvalidateVertexProgramsLocked()
 {
 	EXIT_IF(g_vs_program_generation == UINT64_MAX);
@@ -1459,7 +1542,10 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
 			++continuation;
 		}
 	}
-	ShaderInvalidateVertexProgramsLocked();
+	// Programs that read the previous or the new owned range are stale; a
+	// size-less mapping still owns the code that starts at its address.
+	ShaderInvalidateVertexProgramRangeLocked(addr, std::max<uint64_t>(previous_size, 1u));
+	ShaderInvalidateVertexProgramRangeLocked(addr, std::max<uint64_t>(data.code_size_bytes, 1u));
 	g_shader_map->insert_or_assign(addr, data);
 }
 
@@ -1489,7 +1575,7 @@ bool ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_add
 		return false;
 	}
 	g_shader_continuations->insert_or_assign(front_code_addr, back_code_addr);
-	ShaderInvalidateVertexProgramsLocked();
+	ShaderInvalidateVertexProgramRangeLocked(front_code_addr, 1u);
 	return true;
 }
 
@@ -1925,8 +2011,8 @@ static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program)
 }
 
 // Caller retains the shared lifetime lock through resource-metadata consumption.
-// This cache observes MapUserData/RegisterContinuation/debug generations; direct
-// in-place guest code writes without a new mapping are NOT observed on a hit.
+// This cache observes MapUserData ranges, RegisterContinuation fronts and debug
+// generations; in-place guest code writes without a new mapping are NOT observed on a hit.
 static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(const HW::VertexShaderInfo& regs,
                                                                               const ShaderMappedData& data, bool gs_front)
 {
@@ -1942,7 +2028,8 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		}
 	}
 	auto program = std::make_shared<ShaderVertexProgram>();
-	program->key = key;
+	program->key         = key;
+	program->front_bytes = data.code_size_bytes;
 	program->front_code.SetType(ShaderType::Vertex);
 	program->front_code.SetHash0(static_cast<uint32_t>(key.checksum >> 32u));
 	program->front_code.SetCrc32(static_cast<uint32_t>(key.checksum));
@@ -1968,7 +2055,8 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		{
 			EXIT("vertex continuation has no bounded mapped range: address=0x%016" PRIx64 "\n", key.continuation_addr);
 		}
-		back_words = ShaderCopyProgramWords(key.continuation_addr, back_data.code_size_bytes);
+		back_words          = ShaderCopyProgramWords(key.continuation_addr, back_data.code_size_bytes);
+		program->back_bytes = back_data.code_size_bytes;
 		ShaderCode back;
 		back.SetType(ShaderType::Vertex);
 		ShaderParse(back_words.data(), back_data.code_size_bytes, &back);
@@ -3656,6 +3744,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// After compaction, so the recorded resource indices stay final.
 	if (code != nullptr && !vertex_resource_types)
 	{
+		// Before assembly, whose resources reuse their consumer's register.
+		ShaderCollectRedefinedBufferDescriptors(*code, bind, user_data_register_base, *code_flow);
 		ShaderCollectAssembledBufferDescriptors(*code, bind, user_sgpr, user_sgpr_num, user_data_register_base, *code_flow);
 	}
 }
@@ -4328,6 +4418,91 @@ static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBin
 	return false;
 }
 
+namespace {
+
+// Code-only analyses of one compute program, shared by every dispatch of it.
+// Descriptor values and dispatch registers stay per dispatch.
+struct ComputeProgramAnalysis
+{
+	std::shared_ptr<const ShaderCode>             code;
+	std::shared_ptr<const ShaderScalarFlow>       scalar_flow;
+	std::shared_ptr<const ShaderCodeResourceMemo> resource_memo;
+	mutable std::once_flag                        native_equivalence_once;
+	mutable ShaderComputeWaveAnalysisResult       native_equivalence;
+
+	[[nodiscard]] const ShaderComputeWaveAnalysisResult& NativeEquivalence() const
+	{
+		std::call_once(native_equivalence_once, [this] { native_equivalence = ShaderAnalyzeComputeWaveNativeEquivalence(*code); });
+		return native_equivalence;
+	}
+};
+
+class ComputeProgramAnalysisCache
+{
+public:
+	explicit ComputeProgramAnalysisCache(size_t max_entries): m_max_entries(max_entries) {}
+
+	[[nodiscard]] std::shared_ptr<const ComputeProgramAnalysis> GetOrAnalyze(const HW::CsStageRegisters& regs, uint32_t guest_wave_size)
+	{
+		const Key                   key {regs.data_addr, regs.chksum, guest_wave_size};
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (auto found = m_entries.find(key); found != m_entries.end())
+		{
+			found->second.last_use = ++m_use_seq;
+			return found->second.analysis;
+		}
+		if (m_entries.size() >= m_max_entries)
+		{
+			auto oldest = m_entries.begin();
+			for (auto it = m_entries.begin(); it != m_entries.end(); ++it)
+			{
+				if (it->second.last_use < oldest->second.last_use)
+				{
+					oldest = it;
+				}
+			}
+			m_entries.erase(oldest);
+		}
+		auto code = std::make_shared<ShaderCode>();
+		code->SetType(ShaderType::Compute);
+		{
+			DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
+			ShaderParseMapped(regs.data_addr, code.get(), ShaderContinuationMode::None, true);
+		}
+		auto analysis           = std::make_shared<ComputeProgramAnalysis>();
+		analysis->scalar_flow   = ShaderScalarFlowOf(*code, guest_wave_size);
+		analysis->resource_memo = std::make_shared<ShaderCodeResourceMemo>();
+		analysis->code          = std::move(code);
+		m_entries.emplace(key, Entry {analysis, ++m_use_seq});
+		return analysis;
+	}
+
+private:
+	using Key = std::tuple<uint64_t, uint64_t, uint32_t>;
+	struct KeyHash
+	{
+		size_t operator()(const Key& key) const
+		{
+			const uint64_t words[3] = {std::get<0>(key), std::get<1>(key), std::get<2>(key)};
+			return static_cast<size_t>(XXH3_64bits(words, sizeof(words)));
+		}
+	};
+	struct Entry
+	{
+		std::shared_ptr<const ComputeProgramAnalysis> analysis;
+		uint64_t                                      last_use = 0;
+	};
+
+	size_t                                   m_max_entries;
+	uint64_t                                 m_use_seq = 0;
+	std::mutex                               m_mutex;
+	std::unordered_map<Key, Entry, KeyHash> m_entries;
+};
+
+} // namespace
+
+static ComputeProgramAnalysisCache g_compute_program_analysis_cache(512);
+
 void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* /*sh*/, uint32_t dispatch_mode,
                           ShaderComputeInputInfo* info)
 {
@@ -4378,18 +4553,14 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		ShaderMappedData data;
 		(void)ShaderGetMappedData(regs->cs_regs.data_addr, &data);
 		if (data.user_data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.user_data == nullptr condition ignored (continuing)\n"); }
-		ShaderCode code;
-		code.SetType(ShaderType::Compute);
-		{
-			DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
-			ShaderParseMapped(regs->cs_regs.data_addr, &code, ShaderContinuationMode::None, true);
-		}
+		// The dispatch plan fixed the guest wave size; lane masks follow it.
+		const auto        program = g_compute_program_analysis_cache.GetOrAnalyze(regs->cs_regs, info->wave_layout.guest_wave_size);
+		const ShaderCode& code    = *program->code;
+		const auto*       memo    = program->resource_memo.get();
 		const auto user_sgpr_num =
 		    ShaderResolveGen5UserSgprCount(regs->cs_regs.user_sgpr, regs->cs_user_sgpr.count, data.user_data->eud_size_dw);
-		// The dispatch plan fixed the guest wave size; lane masks follow it.
-		const auto scalar_flow = ShaderScalarFlowOf(code, info->wave_layout.guest_wave_size);
 		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code, 0, false,
-		                  nullptr, scalar_flow.get());
+		                  nullptr, program->scalar_flow.get(), nullptr, memo);
 		if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->wave_layout.guest_wave_size == 32u)
 		{
 			info->native_wave_sensitive = ShaderUsesNativeWaveState(code);
@@ -4399,7 +4570,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		// This is still before shader-cache, pipeline and descriptor preparation.
 		if (info->native_equivalence_required)
 		{
-			const auto native = ShaderAnalyzeComputeWaveNativeEquivalence(code);
+			const auto& native = program->NativeEquivalence();
 			if (!native.supported)
 			{
 				EXIT("wave64 dispatch has no paired layout and is not wave-width independent: mode=0x%08" PRIx32
@@ -4411,8 +4582,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		{
 			// A program proven wave-width independent runs one guest lane per
 			// invocation: half the code of paired banks, over the same workgroup.
-			const auto native = info->native_equivalent_valid ? ShaderAnalyzeComputeWaveNativeEquivalence(code)
-			                                                  : ShaderComputeWaveAnalysisResult {};
+			const auto native = info->native_equivalent_valid ? program->NativeEquivalence() : ShaderComputeWaveAnalysisResult {};
 			const auto admission = native.supported ? ShaderComputeWaveAnalysisResult {true, 0, {}}
 			                                        : ShaderAnalyzeComputeWaveCode(code, *info);
 			if (native.supported)
@@ -4508,7 +4678,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			{
 				continue;
 			}
-			const auto image_use = AnalyzeShaderDirectImageUse(code, descriptor.start_register);
+			const auto image_use = AnalyzeShaderDirectImageUse(code, descriptor.start_register, nullptr, memo);
 			if (image_use.writes && !image_use.reads)
 			{
 				descriptor.storage_image_write_only = true;
@@ -5289,6 +5459,10 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 
 static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 {
+	// The SPIR-V interface bakes in the push block offset and descriptor set;
+	// a pixel stage takes both from the vertex stage it pairs with.
+	ret->ids.Add(bind.push_constant_offset);
+	ret->ids.Add(bind.descriptor_set_slot);
 	ret->ids.Add(static_cast<uint32_t>(bind.device_address_used));
 	if (bind.device_address_used)
 	{
@@ -5346,6 +5520,12 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(record.consumer_pc);
 		ret->ids.Add(static_cast<uint32_t>(record.register_id));
 		ret->ids.Add(static_cast<uint32_t>(record.resource_index));
+	}
+
+	ret->ids.Add(bind.redefined_descriptor_consumers.Size());
+	for (const auto pc: bind.redefined_descriptor_consumers)
+	{
+		ret->ids.Add(pc);
 	}
 
 	ret->ids.Add(bind.zero_sbuffer_resources.buffers_num);

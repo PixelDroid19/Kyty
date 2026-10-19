@@ -55,6 +55,26 @@ TEST(EmulatorLabelPublication, CompletedLabelCanBeReusedByLaterUploadedStorageIn
 	EXPECT_FALSE(buffer.Copy(registry).content_changed);
 }
 
+TEST(EmulatorLabelPublication, DevicePublishedWriteBackKeepsLaterCpuStores)
+{
+	LabelFenceRegistry registry;
+	Buffer buffer;
+	buffer.Upload(registry);
+	// The device wrote word 0 and copied the object into guest memory; the CPU
+	// then stored word 1, in the same page, before the write-back.
+	buffer.gpu[0]   = 7;
+	buffer.guest[0] = 7;
+	buffer.guest[1] = 9;
+	GpuWritebackResult result;
+	ASSERT_TRUE(buffer.publication.AdoptDevice(buffer.Address(), buffer.gpu.data(), sizeof(buffer.guest), &buffer.cache, IgnoreWrite,
+	                                           nullptr, &result));
+	EXPECT_TRUE(result.content_changed);
+	EXPECT_EQ(buffer.guest[1], 9u);
+	// The snapshot holds the adopted bytes, so an unchanged GPU copy writes nothing back.
+	EXPECT_FALSE(buffer.Copy(registry).content_changed);
+	EXPECT_EQ(buffer.guest[1], 9u);
+}
+
 TEST(EmulatorLabelPublication, OlderBackingRemainsExcludedAfterNewerBackingPublishes)
 {
 	LabelFenceRegistry registry;

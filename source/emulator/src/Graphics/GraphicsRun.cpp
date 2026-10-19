@@ -751,6 +751,90 @@ bool CommandProcessor::PumpCompletedSubmissions()
 	return pending;
 }
 
+bool CommandProcessor::OldestSubmittedTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value)
+{
+	Core::LockGuard lock(m_mutex);
+	uint32_t        slot = 0;
+	SubmissionId    oldest;
+	if (m_submission_slots.GetOldestSubmitted(&slot, &oldest) != GpuSubmissionResult::Success)
+	{
+		return false;
+	}
+	EXIT_IF(slot >= static_cast<uint32_t>(VK_BUFFERS_NUM) || m_buffer[slot] == nullptr);
+	return m_buffer[slot]->GetTimeline(device, semaphore, value);
+}
+
+bool SubmissionTimelineWaiter::Arm(VkDevice device, VkSemaphore semaphore, uint64_t value)
+{
+	EXIT_IF(device == nullptr || semaphore == nullptr || value == 0);
+	Core::LockGuard lock(m_mutex);
+	if (value <= m_fired && semaphore == m_semaphore)
+	{
+		return false;
+	}
+	if (semaphore != m_semaphore)
+	{
+		m_fired = 0;
+	}
+	m_device    = device;
+	m_semaphore = semaphore;
+	m_target    = value;
+	if (!m_started)
+	{
+		m_started = true;
+		Core::Thread t(ThreadRun, this);
+		t.Detach();
+	}
+	m_cond_var.Signal();
+	return true;
+}
+
+void SubmissionTimelineWaiter::ThreadRun(void* data)
+{
+	// Bounds one wait so a re-armed target is picked up even if the old one
+	// never signals.
+	constexpr uint64_t kWaitSliceNs = 100'000'000;
+
+	auto* waiter = static_cast<SubmissionTimelineWaiter*>(data);
+	EXIT_IF(waiter == nullptr);
+
+	waiter->m_mutex.Lock();
+	for (;;)
+	{
+		while (waiter->m_target <= waiter->m_fired)
+		{
+			waiter->m_cond_var.Wait(&waiter->m_mutex);
+		}
+		VkDevice    device    = waiter->m_device;
+		VkSemaphore semaphore = waiter->m_semaphore;
+		uint64_t    target    = waiter->m_target;
+		waiter->m_mutex.Unlock();
+
+		VkSemaphoreWaitInfo wait_info {};
+		wait_info.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		wait_info.semaphoreCount = 1;
+		wait_info.pSemaphores    = &semaphore;
+		wait_info.pValues        = &target;
+		const VkResult result    = vkWaitSemaphores(device, &wait_info, kWaitSliceNs);
+		if (result != VK_SUCCESS && result != VK_TIMEOUT)
+		{
+			EXIT("vkWaitSemaphores (queue timeline) failed: result=%d\n", static_cast<int>(result));
+		}
+
+		waiter->m_mutex.Lock();
+		if (result != VK_SUCCESS || semaphore != waiter->m_semaphore)
+		{
+			continue;
+		}
+		waiter->m_fired = std::max(waiter->m_fired, target);
+		waiter->m_mutex.Unlock();
+		waiter->m_ring_mutex->Lock();
+		waiter->m_ring_cond_var->Signal();
+		waiter->m_ring_mutex->Unlock();
+		waiter->m_mutex.Lock();
+	}
+}
+
 void CommandProcessor::SubmitAndWait()
 {
 	{
@@ -1437,12 +1521,20 @@ GraphicsRing::CmdBatch GraphicsRing::GetCmdBatch()
 			// not idle until its last submission retired.
 			m_mutex.Unlock();
 			m_cp->RunLock();
-			const bool pending = m_cp->PumpCompletedSubmissions();
+			const bool  pending  = m_cp->PumpCompletedSubmissions();
+			VkDevice    device   = nullptr;
+			VkSemaphore timeline = nullptr;
+			uint64_t    value    = 0;
+			const bool  armable  = pending && m_cp->OldestSubmittedTimeline(&device, &timeline, &value);
 			m_cp->RunUnlock();
 			m_mutex.Lock();
 			m_async_completion_pending = pending;
 			if (m_cmd_batches.Size() == 0 && pending)
 			{
+				if (armable)
+				{
+					(void)m_timeline_waiter.Arm(device, timeline, value);
+				}
 				(void)m_cond_var.WaitFor(&m_mutex, 1000u);
 			}
 			continue;
@@ -1621,12 +1713,20 @@ void ComputeRing::ThreadRun(void* data)
 				// idle until its last submission retired.
 				ring->m_mutex.Unlock();
 				cp->RunLock();
-				const bool pending = cp->PumpCompletedSubmissions();
+				const bool  pending  = cp->PumpCompletedSubmissions();
+				VkDevice    device   = nullptr;
+				VkSemaphore timeline = nullptr;
+				uint64_t    value    = 0;
+				const bool  armable  = pending && cp->OldestSubmittedTimeline(&device, &timeline, &value);
 				cp->RunUnlock();
 				ring->m_mutex.Lock();
 				ring->m_completion_pending = pending;
 				if (pending && !(ring->m_active && ring->m_run_offset_dw > 0))
 				{
+					if (armable)
+					{
+						(void)ring->m_timeline_waiter.Arm(device, timeline, value);
+					}
 					(void)ring->m_cond_var.WaitFor(&ring->m_mutex, 1000u);
 				}
 				continue;
@@ -2159,6 +2259,23 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		uint32_t start_instance_location;
 	};
 
+	DrawIndexedIndirectArgs args {};
+	uint64_t                args_address = 0;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (!GraphicsRunIndirectArgumentAddress(m_draw_indirect_args_base_addr, data_offset, sizeof(args), &args_address) ||
+		    !GpuRangeMapped(args_address, sizeof(args)))
+		{
+			EXIT("DRAW_INDEX_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
+			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
+		}
+	}
+	// The arguments can be written by an earlier dispatch of this recording.
+	if (!ReadCurrentGuestBytes(args_address, &args, sizeof(args)))
+	{
+		EXIT("DRAW_INDEX_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
+		     args_address, static_cast<uint64_t>(sizeof(args)));
+	}
 	{
 		Core::LockGuard lock(m_mutex);
 
@@ -2166,19 +2283,6 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		if (m_index_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_index_base_addr == 0 condition ignored (continuing)\n"); }
 		if ((initiator & ~0x20u) != 2u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (initiator & ~0x20u) != 2u condition ignored (continuing)\n"); }
 
-		DrawIndexedIndirectArgs args {};
-		uint64_t                args_address = 0;
-		if (!GraphicsRunIndirectArgumentAddress(m_draw_indirect_args_base_addr, data_offset, sizeof(args), &args_address) ||
-		    !GpuRangeMapped(args_address, sizeof(args)))
-		{
-			EXIT("DRAW_INDEX_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
-			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
-		}
-		if (!Core::VirtualMemory::CopyFromGuest(&args, args_address, sizeof(args)))
-		{
-			EXIT("DRAW_INDEX_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
-			     args_address, static_cast<uint64_t>(sizeof(args)));
-		}
 		if (args.index_count_per_instance == 0 || args.instance_count == 0)
 		{
 			if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
@@ -2257,24 +2361,28 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
 
 	uint64_t         submit_id = 0;
 	DrawIndirectArgs args {};
+	uint64_t         args_address = 0;
 	{
 		Core::LockGuard lock(m_mutex);
-
-		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-		EXIT_IF((initiator & ~0x20u) != 2u);
-
-		uint64_t args_address = 0;
 		if (!GraphicsRunIndirectArgumentAddress(m_draw_indirect_args_base_addr, data_offset, sizeof(args), &args_address) ||
 		    !GpuRangeMapped(args_address, sizeof(args)))
 		{
 			EXIT("DRAW_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
 			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
 		}
-		if (!Core::VirtualMemory::CopyFromGuest(&args, args_address, sizeof(args)))
-		{
-			EXIT("DRAW_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
-			     args_address, static_cast<uint64_t>(sizeof(args)));
-		}
+	}
+	// The arguments can be written by an earlier dispatch of this recording.
+	if (!ReadCurrentGuestBytes(args_address, &args, sizeof(args)))
+	{
+		EXIT("DRAW_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
+		     args_address, static_cast<uint64_t>(sizeof(args)));
+	}
+	{
+		Core::LockGuard lock(m_mutex);
+
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		EXIT_IF((initiator & ~0x20u) != 2u);
+
 		if (args.vertex_count_per_instance == 0 || args.instance_count == 0)
 		{
 			return;
@@ -2937,7 +3045,7 @@ void CommandProcessor::WaitDeviceAddressWriteBacks()
 	// publish its guest copy. Waiting must run without the recording mutex —
 	// completion of the pending submission can publish resources that need it.
 	SubmissionId pending;
-	for (uint32_t attempt = 0; GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(m_queue)), &pending);)
+	for (uint32_t attempt = 0; GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(m_queue)), nullptr, &pending);)
 	{
 		g_gpu->WaitSubmission(pending);
 		if (++attempt >= 64u)

@@ -90,6 +90,10 @@ public:
 	// indication. EndOfStream() remains the authoritative completion query.
 	bool TryReadVideoFrame(VideoFrame* frame);
 	bool TryReadAudioFrame(AudioFrame* frame);
+	// Repositions decoding at time_ms: queued frames are discarded and the next
+	// frames start at the requested position. EndOfStream() stays false while
+	// the decoder is repositioned. A failed seek ends the stream.
+	bool Seek(uint64_t time_ms);
 	void Close();
 
 private:

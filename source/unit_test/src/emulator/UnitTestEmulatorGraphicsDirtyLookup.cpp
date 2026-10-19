@@ -23,7 +23,7 @@ using Kyty::Libs::Graphics::GpuDirtyPageTracker;
 
 namespace {
 
-constexpr size_t    kPageTableMask       = (1u << 18u) - 1u;
+constexpr size_t    kPageTableMask       = (1u << 20u) - 1u;
 constexpr size_t    kBlockTableMask      = (1u << 17u) - 1u;
 constexpr size_t    kCollisionCandidates = 1u << 24u;
 constexpr uintptr_t kSyntheticBase       = static_cast<uintptr_t>(0x10000000000ull);
@@ -304,6 +304,48 @@ TEST(EmulatorGraphicsDirtyLookup, DeepBlockCollisionsDoNotHideTrackedPage)
 	const uint64_t after_target_write = tracker.SnapshotGeneration(target, page_size);
 	EXPECT_FALSE(tracker.NotifyWrite(target + page_size, page_size));
 	EXPECT_FALSE(tracker.ChangedSince(target, page_size, after_target_write));
+}
+
+TEST(EmulatorGraphicsDirtyLookup, MultiBlockWriteMarksEveryTrackedPageInsideTheSpan)
+{
+	const size_t page_size = GetPageSize();
+	ASSERT_TRUE(page_size != 0u);
+	const uintptr_t                        target = SyntheticPage(page_size, 5u);
+	std::array<uintptr_t, kCollisionCount> page_collisions {};
+	std::array<uintptr_t, kCollisionCount> block_collisions {};
+	ASSERT_TRUE(FindCollidingPages(target, page_size, page_collisions));
+	ASSERT_TRUE(FindCollidingBlockPages(target, page_size, page_collisions, block_collisions));
+
+	GpuDirtyPageTracker tracker;
+	for (const uintptr_t page: page_collisions)
+	{
+		ASSERT_TRUE(tracker.RegisterRange(page, page_size));
+	}
+	for (const uintptr_t page: block_collisions)
+	{
+		ASSERT_TRUE(tracker.RegisterRange(page, page_size));
+	}
+	const std::array<uintptr_t, 3> inside  = {target, target + page_size * 70u, target + page_size * 130u};
+	const uintptr_t                outside = target + page_size * 300u;
+	for (const uintptr_t page: inside)
+	{
+		ASSERT_TRUE(tracker.RegisterRange(page, page_size));
+	}
+	ASSERT_TRUE(tracker.RegisterRange(outside, page_size));
+
+	std::array<uint64_t, 3> snapshots {};
+	for (size_t i = 0; i < inside.size(); ++i)
+	{
+		snapshots[i] = tracker.SnapshotGeneration(inside[i], page_size);
+	}
+	const uint64_t outside_snapshot = tracker.SnapshotGeneration(outside, page_size);
+
+	ASSERT_TRUE(tracker.NotifyWrite(target - page_size * 3u, page_size * 200u));
+	for (size_t i = 0; i < inside.size(); ++i)
+	{
+		EXPECT_TRUE(tracker.ChangedSince(inside[i], page_size, snapshots[i]));
+	}
+	EXPECT_FALSE(tracker.ChangedSince(outside, page_size, outside_snapshot));
 }
 
 TEST(EmulatorGraphicsDirtyLookup, FullBlockTableMissDoesNotAliasTrackedNeighbor)

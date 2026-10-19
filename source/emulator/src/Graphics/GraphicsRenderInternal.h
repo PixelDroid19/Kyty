@@ -1701,6 +1701,11 @@ struct ComputeUniformBufferFill
 // Copies the filled storage object into the guest device-address view in queue
 // order, so later device-address consumers on this queue need no CPU write-back.
 [[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// Before a device-address read on `buffer`'s queue: copies every pending storage
+// result written only on that queue into the guest device-address view in queue
+// order. Returns true with a dependency to wait for when a pending result does not
+// qualify or cannot be published.
+[[nodiscard]] bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* dependency);
 // Ordered compute fills of color-image aliases (docs/graphics-compute-uniform-color-fill.md).
 void               InvalidateComputeColorFills(const ShaderBindResources& bind);
 [[nodiscard]] bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
@@ -1710,6 +1715,9 @@ void               InvalidateComputeColorFills(const ShaderBindResources& bind);
 // A proven uniform fill of a live 32-bit float depth image's whole depth plane
 // with a value in [0, 1] clears its host depth aspect in recording order.
 [[nodiscard]] bool PropagateComputeUniformDepthFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// A pass that samples its depth attachment cannot CLEAR it, so a first use of the
+// image there receives the first-use clear contents before the pass begins.
+void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth);
 // A proven uniform fill of a DCC metadata range with a clear key is held until
 // a render target or shader image with that metadata base consumes it.
 [[nodiscard]] bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);

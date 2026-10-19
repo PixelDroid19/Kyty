@@ -957,10 +957,11 @@ void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRa
 	g_gpu_memory->WriteBackStorageRanges(ctx, ranges, consumer);
 }
 
-bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency)
+bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer,
+                                      std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
-	return g_gpu_memory->PendingStorageWriteBack(ranges, consumer, dependency);
+	return g_gpu_memory->PendingStorageWriteBack(ranges, consumer, publishable, dependency);
 }
 
 bool GpuMemoryPendingStorageHasAliases()
@@ -974,10 +975,10 @@ bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryS
 	return g_gpu_memory != nullptr && identity != nullptr && g_gpu_memory->FindExactWritableStorage(vaddr, size, identity);
 }
 
-bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
+bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
                                         const GpuWritebackPageCache::UniformWords* uniform_words)
 {
-	return g_gpu_memory != nullptr && g_gpu_memory->MarkStorageGuestPublished(identity, queue, uniform_words);
+	return g_gpu_memory != nullptr && g_gpu_memory->MarkStorageGuestPublished(identity, publication, uniform_words);
 }
 
 bool GpuMemoryCheckAccessViolation(uint64_t vaddr, Core::VirtualMemory::ExceptionHandler::AccessViolationType access)

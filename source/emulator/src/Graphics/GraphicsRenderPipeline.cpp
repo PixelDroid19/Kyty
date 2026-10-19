@@ -1285,6 +1285,13 @@ void PipelineCache::SaveDriverCacheIfDue()
 	size_t       attempted_size   = 0;
 	const auto   save_start       = std::chrono::steady_clock::now();
 	const auto   save_result      = PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, remaining_budget, &attempted_size);
+	if (save_result == PipelineCacheStoreSaveResult::Unchanged)
+	{
+		m_driver_cache_attempted_once = true;
+		m_last_driver_cache_attempt   = now;
+		m_driver_cache_dirty          = false;
+		return;
+	}
 	const auto   save_elapsed_ns =
 	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - save_start).count());
 	DebugStatsPipelineCacheCheckpointOutcome checkpoint_outcome = DebugStatsPipelineCacheCheckpointOutcome::Failed;

@@ -1121,9 +1121,6 @@ using GpuMemoryGuestRanges = std::vector<std::pair<uint64_t, uint64_t>>;
 // those whose writes are already published to the guest device-address view in
 // the consumer's queue order.
 void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer);
-// Reports one incomplete submission use of a writable StorageBuffer overlapping
-// any of the ranges, with the same publication exemption.
-[[nodiscard]] bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency);
 // True when a writable StorageBuffer with an incomplete submission use shares
 // guest bytes with another GPU object. Its write-back refreshes or invalidates
 // those aliases, so a wait that publishes it must stay synchronous.
@@ -1138,14 +1135,33 @@ struct GpuMemoryStorageWriteIdentity
 	const VulkanBuffer* buffer             = nullptr;
 };
 [[nodiscard]] bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
-// The caller recorded on `queue`, after the object's last write, a device copy of
-// its whole content into the guest device-address view. Device-address consumers
-// on that queue then read the result in GPU order and skip the CPU write-back; the
-// completed submission still writes it back. Fails when the object was replaced or
+// A pending StorageBuffer result that is, as a whole object, the guest content of
+// its range: only the consumer's queue has incomplete uses, no other object shares
+// its bytes, no label fence or depth metadata lies in it, and the guest has not
+// written the range since the object was last synchronized with it.
+struct GpuMemoryStoragePublication
+{
+	GpuMemoryStorageWriteIdentity identity;
+	uint64_t                      vaddr = 0;
+	uint64_t                      size  = 0;
+	SubmissionId                  dependency;
+};
+// Reports one incomplete submission use of a writable StorageBuffer overlapping
+// any of the ranges, with the same publication exemption. With `publishable`,
+// results that qualify for publication in the consumer's queue order are listed
+// there instead of being reported.
+[[nodiscard]] bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer,
+                                                    std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
+// The caller recorded in `publication`, after the object's last write, a device
+// copy of its whole content into the guest device-address view. Device-address
+// consumers on that queue then read the result in GPU order and skip the CPU
+// write-back. `publication` becomes a use of the object, so its completed
+// write-back, which adopts the published content without writing guest memory,
+// and its release both follow the copy. Fails when the object was replaced or
 // written again since the identity was taken.
 // `uniform_words`, when known, is the content repeated over the whole object; the
 // completed submission then writes back without reading the GPU copy.
-[[nodiscard]] bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
+[[nodiscard]] bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
                                                       const GpuWritebackPageCache::UniformWords* uniform_words);
 // Source of a memory->GDS transfer recorded at the current position of `buffer`.
 // A range owns device content while an object over it has GPU writes not yet
@@ -1220,12 +1236,13 @@ struct GpuMemoryObjectDescription
 // [vaddr, vaddr + size): its own guest range and its creation parameters.
 bool GpuMemoryDescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
 // Which overlapping GPU objects a read-only snapshot accepts. Read-only buffers
-// always qualify; IdleWritableStorage also accepts writable storage buffers none
-// of whose GPU writes is still unpublished, so the guest bytes are current.
+// always qualify. IndexView also accepts writable storage buffers none of whose
+// GPU writes is still unpublished, so the guest bytes are current, and the
+// surfaces an IndexBuffer object is linked under.
 enum class GpuMemorySnapshotAdmission: uint8_t
 {
 	ReadOnlyOverlaps,
-	IdleWritableStorage,
+	IndexView,
 };
 // Validates a bounded allocated range and classifies its cached GPU overlaps.
 // Capture/compare additionally require dirty-page tracking and reject a read

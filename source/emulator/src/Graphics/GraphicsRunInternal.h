@@ -278,6 +278,9 @@ public:
 	void               BufferWait();
 	// True while a submitted command buffer has not completed yet.
 	[[nodiscard]] bool PumpCompletedSubmissions();
+	// Queue timeline semaphore and the value it reaches when the oldest
+	// submitted command buffer completes; false when none is pending.
+	[[nodiscard]] bool OldestSubmittedTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value);
 	void               SubmitAndWait();
 	void               WaitSubmission(SubmissionId submission);
 	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
@@ -484,6 +487,39 @@ private:
 	}
 };
 
+// Wakes a ring when the GPU completes its oldest pending submission, which
+// signals its queue timeline (CommandBuffer::Execute). Otherwise the ring sees
+// a completion only when its bounded wait expires, and a guest spinning on an
+// end-of-pipe label loses up to that bound per submission.
+class SubmissionTimelineWaiter
+{
+public:
+	SubmissionTimelineWaiter(Core::Mutex* ring_mutex, Core::CondVar* ring_cond_var)
+	    : m_ring_mutex(ring_mutex), m_ring_cond_var(ring_cond_var)
+	{
+	}
+	~SubmissionTimelineWaiter() { KYTY_NOT_IMPLEMENTED; }
+
+	KYTY_CLASS_NO_COPY(SubmissionTimelineWaiter);
+
+	// Called with the ring mutex held. False when the value already fired but
+	// its fence was not yet visible: the ring keeps its bounded wait then.
+	bool Arm(VkDevice device, VkSemaphore semaphore, uint64_t value);
+
+private:
+	static void ThreadRun(void* data);
+
+	Core::Mutex    m_mutex;
+	Core::CondVar  m_cond_var;
+	Core::Mutex*   m_ring_mutex    = nullptr;
+	Core::CondVar* m_ring_cond_var = nullptr;
+	VkDevice       m_device        = nullptr;
+	VkSemaphore    m_semaphore     = nullptr;
+	uint64_t       m_target        = 0;
+	uint64_t       m_fired         = 0;
+	bool           m_started       = false;
+};
+
 class GraphicsRing
 {
 public:
@@ -570,6 +606,7 @@ private:
 	bool                 m_async_completion_pending = false;
 	Core::CondVar        m_cond_var;
 	Core::CondVar        m_idle_cond_var;
+	SubmissionTimelineWaiter m_timeline_waiter {&m_mutex, &m_cond_var};
 	Core::List<CmdBatch> m_cmd_batches;
 	bool                 m_done = true;
 	bool                 m_idle = true;
@@ -618,6 +655,7 @@ private:
 	Core::Mutex   m_mutex;
 	Core::CondVar m_cond_var;
 	Core::CondVar m_idle_cond_var;
+	SubmissionTimelineWaiter m_timeline_waiter {&m_mutex, &m_cond_var};
 	bool          m_done = true;
 	bool          m_idle = true;
 	// Submitted work whose completions (end-of-pipe labels, interrupts) the

@@ -3213,17 +3213,73 @@ static ShaderSampledImageViewKind ResolveBoundSampledImageView(const VulkanImage
 	return arrayed ? ShaderSampledImageViewKind::Depth2DArray : ShaderSampledImageViewKind::Depth2D;
 }
 
-// A storage view of a whole single-sample depth plane at its guest extent: one 32-bit float layer at level 0.
+// A storage view of a whole single-sample depth plane at its guest extent: one layer at level 0 whose format
+// holds the depth texel bits unchanged (R32F over 32-bit float depth, R16 UNORM over 16-bit depth).
 static bool DepthPlaneStorageViewMatches(const VulkanImage* depth, uint32_t fmt, uint32_t width, uint32_t height, uint32_t levels,
                                          uint32_t base_level, uint32_t layers, uint32_t base_array, bool three_dimensional)
 {
-	if ((depth->format != VK_FORMAT_D32_SFLOAT && depth->format != VK_FORMAT_D32_SFLOAT_S8_UINT) || depth->samples != VK_SAMPLE_COUNT_1_BIT ||
-	    depth->IsResolutionScaled() || !depth->MatchesGuestExtent(width, height))
+	const VkFormat plane_format = DepthStencilBufferStoragePlaneFormat(depth->format);
+	if (plane_format == VK_FORMAT_UNDEFINED || depth->samples != VK_SAMPLE_COUNT_1_BIT || depth->IsResolutionScaled() ||
+	    !depth->MatchesGuestExtent(width, height))
 	{
 		return false;
 	}
 	return !three_dimensional && levels == 1u && base_level == 0u && layers == 1u && base_array == 0u &&
-	       VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0u, 0u, static_cast<uint16_t>(fmt)) == VK_FORMAT_R32_SFLOAT;
+	       VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0u, 0u, static_cast<uint16_t>(fmt)) == plane_format;
+}
+
+// A dispatch can write the leading layers of a sampled array through a
+// storage image with fewer layers. Storage images are not written back, so the
+// guest upload of the array holds stale bytes for those layers; copy them from
+// the newest such image written after the upload. Each guest slice holds its
+// whole mip chain, so the prefix layers carry every level.
+static bool CopyNewerStoragePrefixLayers(CommandBuffer* buffer, VulkanImage* tex, uint64_t addr, uint32_t fmt, uint32_t width,
+                                         uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile, uint32_t layers)
+{
+	Gen5TextureArrayLayout layout {};
+	if (tex == nullptr || layers < 2u || tex->array_layers != layers || tex->mip_levels < levels ||
+	    !Gen5GetTextureArrayLayout(fmt, width, height, pitch, levels, tile, layers, &layout) || layout.tiled_slice.size == 0u)
+	{
+		return false;
+	}
+	StorageTextureVulkanImage* source = nullptr;
+	for (auto* candidate: FindOverlappingStorageTextures(buffer, addr, layout.tiled_size))
+	{
+		if (candidate->guest_vaddr != addr || candidate->format != tex->format || !candidate->MatchesGuestExtent(width, height) ||
+		    candidate->mip_levels < levels || candidate->guest_size == 0u || candidate->guest_size >= layout.tiled_size ||
+		    candidate->guest_size % layout.tiled_slice.size != 0u || candidate->storage_write_stamp <= tex->content_stamp)
+		{
+			continue;
+		}
+		if (source == nullptr || candidate->storage_write_stamp > source->storage_write_stamp)
+		{
+			source = candidate;
+		}
+	}
+	if (source == nullptr)
+	{
+		return false;
+	}
+	const auto prefix_layers = static_cast<uint32_t>(source->guest_size / layout.tiled_slice.size);
+	if (prefix_layers > source->array_layers)
+	{
+		return false;
+	}
+	Vector<ImageImageCopy> regions(levels);
+	for (uint32_t level = 0; level < levels; ++level)
+	{
+		auto& region       = regions[level];
+		region             = {};
+		region.src_image   = source;
+		region.src_level   = level;
+		region.dst_level   = level;
+		region.width       = std::max(width >> level, 1u);
+		region.height      = std::max(height >> level, 1u);
+		region.layer_count = prefix_layers;
+	}
+	UtilImageToImage(buffer, regions, tex, static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+	tex->content_stamp = VulkanImageNextStamp();
+	return true;
 }
 
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
@@ -3651,7 +3707,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					}
 				}
 				tex = dtex.At(static_cast<int>(alias_index));
-				// Vulkan has no storage depth image: a dispatch addresses the depth plane through the image's R32F
+				// Vulkan has no storage depth image: a dispatch addresses the depth plane through the image's colour
 				// copy, seeded here and stored back once the dispatch is recorded, so the stencil plane is untouched.
 				if (depth_exact && compute_stage && textures.desc[i].textures2d_without_sampler &&
 				    DepthPlaneStorageViewMatches(tex, fmt, width, height, levels, base_level, view_layers, base_array, three_dimensional))
@@ -4068,10 +4124,6 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				                                         (storage_seed_skip_mask & (uint64_t {1} << static_cast<uint32_t>(i))) != 0);
 				tex = static_cast<StorageTextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
-				if (tex != nullptr)
-				{
-					tex->storage_write_stamp = VulkanImageNextStamp();
-				}
 				materialize = "storage-create";
 			} else
 			{
@@ -4122,6 +4174,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						tex->content_stamp = VulkanImageNextStamp();
 						materialize        = "st-block-copy";
 					}
+				}
+				if (gen5 && arrayed_2d && base_array == 0u &&
+				    CopyNewerStoragePrefixLayers(buffer, tex, addr, fmt, width, height, pitch, levels, tile, depth))
+				{
+					materialize = "st-prefix-copy";
 				}
 			}
 		}
@@ -4273,6 +4330,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (textures.desc[i].textures2d_without_sampler)
 		{
 			images_storage[index_storage] = tex;
+			if (tex != nullptr && textures.desc[i].usage != ShaderTextureUsage::ReadOnly)
+			{
+				tex->storage_write_stamp = VulkanImageNextStamp();
+			}
 			if (!VulkanResolveStorageImageView(tex, three_dimensional, arrayed_2d, &images_storage_view[index_storage],
 			                                   base_level))
 			{

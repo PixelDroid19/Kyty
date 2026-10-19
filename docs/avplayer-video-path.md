@@ -89,6 +89,47 @@ same playback interval. Compare their presentation numbers and scene motion in
 order. This distinguishes a real stale-buffer or timestamp regression from an
 intentional bright frame in the source artwork.
 
+## Jump and loop contract
+
+`sceAvPlayerJumpToTime` repositions the decoder at the requested time, then
+reports `0x806A00A3` through warning event `0x20`. When the jump succeeds, the
+player publishes its landing frame through `GetVideoData`/`GetVideoDataEx`,
+even if the guest holds it paused. The first delivered frame, or a `Resume`,
+`Start`, `StartEx` or `Stop`, closes that one-frame window. A failed seek
+returns `OPERATION_FAILED` and emits no warning. With looping enabled, a real
+stream that reaches its end is repositioned to zero. The guest sees the loop as
+a frame timestamp that goes backwards.
+
+Evidence (Unity platformer pair, 2026-10-17):
+
+- Both intro cinematics stayed black. Each player sent six frames, and then the
+  guest called `Pause` and `JumpToTime(0)`. About 600 empty polls per second
+  followed, and exactly 10 s later the guest called `Stop`.
+- The guest's prepare routine stores the timestamp of its last frame. It calls
+  the jump, then loops on a 1 ms sleep. It leaves the loop only when the event
+  callback has stored `0x806A00A3` and a newly pulled frame carries a different
+  timestamp. While the routine runs, it accepts any timestamp, including one
+  lower than before.
+- The same guest sets looping and counts a backwards timestamp as the loop
+  point. Without a real loop, it waited forever on the last frame. That showed
+  as a black screen after the first cinematic.
+- An independent implementation reaches the same paused-seek frame window.
+- Fixed by `Decoder::Seek` and the jump window above. Result: both cinematics
+  play from the first frame to the last, at the media rate, and the titles
+  reach gameplay.
+
+Exclusion: delivering the jump warning later, on the next guest player call,
+changed nothing. The warning was never the missing part.
+
+Open: `StartEx` with a non-zero start time sets the clock offset but does not
+seek the decoder. A title that uses it would see stream time shifted by that
+offset.
+
+Untested: a source opened through guest file-replacement callbacks. Its seek
+runs the guest read callbacks on the guest thread that calls the jump, or that
+triggers the loop rewind, while the player's decoder lock is held exclusively.
+Both verified titles open host paths.
+
 ## Unqualified decoder output contracts
 
 The current elementary decoder and Videodec2 buffer sizing produce 8-bit NV12.

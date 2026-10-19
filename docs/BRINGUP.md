@@ -9,6 +9,1300 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Robot platformer: worldmap stall and dark top-left quadrant (2026-10-17)
+
+- **Route (Intel Arc A770, Mesa ANV, strict).** Logo, title, "Continue",
+  worldmap load. Through 486b7d0d presents stopped at about frame 823.
+- **Stall 1: one cold compute compile.** `sudo gdb` on the command-processor
+  thread showed it inside the driver's `vkCreateComputePipelines` for one
+  paired-transport module (3 MB of SPIR-V). Offline, the module took 188 s to
+  compile, with 11474:36425 SIMD32 spills. A 300 s run never finished it, so
+  the driver never cached it. The guest program is a 5,458-instruction
+  64x1x1 compute shader. Its only paired reasons were ADD_TID LDS spills and
+  an M0 save/restore. (Correction: an earlier entry concluded the stall was
+  not a compile.)
+  - Fix: the native-equivalence proof
+    (`ShaderComputeWaveNativeEquivalence.cpp`) now models M0 as an implicit
+    input of the instructions that read it. ADD_TID spill slots are
+    lane-private planes, not refusals. Scalar liveness is strong: a pure
+    scalar op keeps its sources live only if its result is live, so the dead
+    M0 copies no longer count as scalar state live at a join. The program
+    runs natively; the run passes the old stop. Unit tests cover the three
+    rules.
+  - The classifier programs (`ds_append` with `mbcnt` slot order) stay
+    paired, because their slot order is guest-visible.
+- **Stop 2: scalar buffer load with an immediate offset.** The next stop was
+  `s_buffer_load_dwordx4 s[4:7], s[0:3], vcc_hi` with an immediate offset of
+  64. `EmitGuestScalarBufferLoad` refused any non-zero immediate. The RDNA2
+  ISA defines the SMEM byte offset as SOFFSET + OFFSET, and the emitter now
+  adds both. In wave32, VCC_HI is an ordinary SGPR source.
+- **Stop 3: a freeze at frames 975-1010 is the harness memory guard, not the
+  emulator.** Every worldmap run peaked at 7.2 GB against the 7 GB
+  `MemoryHigh` of the run cgroup (`journalctl --user` "Consumed" lines). gdb
+  showed the command processor throttled inside a large vector copy at about
+  2 MB/s. With `KYTY_RUN_MEMORY_HIGH=16G` and `KYTY_RUN_MEMORY_MAX=18G` the
+  title reaches the title menu and the next level load, with a cgroup peak of
+  13.2 GB at about 420 s. This title needs a run cap of at least 600 s to
+  reach gameplay.
+- **Dark top-left quadrant on the logo and title scenes.** A composite draw
+  blends a half-resolution layer over the scene as
+  `dst = src.rgb + dst * src.a`, so the layer's alpha is transmittance. There
+  were two defects:
+  - **(1) Inert undersized depth clipped colour.** The draw binds a
+    1920x1080 colour target with a 960x540 D32 depth target. It does not
+    test, write or clear depth, and it enables stencil with no stencil
+    plane. Vulkan sizes the framebuffer to the smallest attachment, so colour
+    writes outside 960x540 were dropped. The guest DB does not bound
+    rasterization when it leaves its surface untouched.
+    `SanitizeRenderDepthAgainstColor` (`GraphicsRenderCore.cpp`) now detaches
+    an undersized depth target when the draw leaves it inert, as it already
+    did for 1x1 depth. A depth target the draw tests or writes is kept. Unit
+    test `UndersizedDepthBoundsColorOnlyWhenUsed`.
+  - **(2) The layer's DCC clear was dropped.** With fix (1) alone the whole
+    scene went black, which isolated the second defect. The half-resolution
+    layer is cleared by a compute fill of its DCC keys with 0x40404040,
+    which encodes rgba (0, 0, 0, 1). `PublishComputeColorDccClear` returned
+    without publishing because `BeginRead` reported `tracked=0`. The dirty
+    page tracker had refused the layer's range: 131,068 of 131,072 pages
+    were admitted by 32 s, held by 93 render-target and texture ranges. The
+    layer then held its undefined alpha 0 (pixel readback, not thumbnails)
+    and the composite darkened the scene.
+  - **Fix for (2).** `GpuDirtyPageTracker::kPageTableSize` grows from 2^18 to
+    2^20 slots (an admission budget of 524,288 pages, about 59 MB of fixed
+    metadata). This title peaks at about 205,000 pages on the title scene.
+  - **Verified with both fixes**, Intel, 16G guard, 420 s: the clear is
+    published and consumed at the render-target bind; the layer's alpha
+    mean is 1.0; the logo and title scenes render whole through frame 1181;
+    the frame rate is unchanged (about 5 FPS there).
+- **Defect found, not fixed.** A colour DCC clear refused by the tracker is
+  still dropped silently: `PublishComputeColorDccClear`
+  (`GraphicsRenderAttachments.cpp:480-481`) returns false when
+  `observation.tracked` is false, and the dispatch path
+  (`GraphicsRenderDraw.cpp:3231`) discards the result. Correctness therefore
+  still depends on tracker capacity. Direction: register the range on demand,
+  or report the refusal as a strict error instead of dropping it. Two more
+  DCC fills were dropped in the same run before the fix; whether they cause
+  the dark ship and garbled blocks of the title menu is not yet verified.
+- **Trails behind moving geometry on the title flyby and menu (fixed
+  2026-10-18).** Every frame the guest zeroes a 1920x1080 RGBA8 target
+  (0x870000 bytes) with a uniform compute fill. `PropagateComputeUniformColorFill`
+  refused it at `ResolveComputeColorFillIdentity`: besides the exact storage
+  buffer and the exact render target, eleven render-target and storage-image
+  objects of the transient pool partly share (cross or contain) the range,
+  and any non-exact image alias refused the whole fill. The host image kept
+  every earlier frame; its bound-sample dump showed stacked streaks. Seven
+  other per-frame fills (R8G8, R16 and RGBA16F targets) were refused the same
+  way or because their format had no decoded packing.
+  - Fix: a uniform color fill now skips partial image aliases (render
+    target, texture, display buffer, storage image, depth) and clears every
+    exact alias. The dispatch has already written the storage buffer, so
+    the skipped aliases did not hold the guest bytes before either. DCC
+    metadata clears keep the exact-only rule. An all-zero fill decodes for
+    every uncompressed color format. Unit test
+    `UniformFillTexelsDecodeOnlyWhenTheQuadRepeatsOneTexel` covers the zero
+    rule.
+  - Verified (Intel, frames 1248-1252): the fill is applied (`color=1`), the
+    target's dump is clean, and the flyby capture shows single silhouettes
+    instead of smeared copies. Regression: Intel racing title (frame 55,378
+    at 200 s, above every earlier run), fishing title 22-23 fps, sandbox
+    title in its world, watercolour platformer; AMD fishing title 11.5-12 fps
+    (one of three AMD runs hit the known boot
+    stall before the first present).
+  - Still refused: a 0x30000 fill whose range is also contained in a
+    read-only storage buffer, a 0x10000 fill whose exact alias is a storage
+    image (not in `FindComputeColorFillImages`), and a 0xffffffff fill of an
+    R16 target (no evidenced packing). The albedo and normal G-buffers also
+    hold stacked copies of the logo; no fill or DCC clear targets them in
+    the observed frames, so whether the guest relies on depth or stencil to
+    ignore them is not verified.
+- **Cold compile of a paired light-list builder (open).** After the native
+  M0 proof, the flyby froze again on one cold Intel compile of a 16x16
+  paired compute module: about 300 s (299,725 ms measured). The program is a
+  waterfall loop over `s_ff1`, `v_readlane` and `v_writelane` with quad_perm
+  DPP operands, which the native proof refuses ("operand is not
+  representable per lane"), so it must stay paired. A warm-up run that
+  stopped after the compile finished stored it in the Mesa cache; later runs
+  pass the flyby. Excluded knobs, offline with the same SPIR-V:
+  `VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT` 288 s, no required subgroup
+  size 297 s, `spirv-opt -O` more than 300 s. Open defect: the first boot on
+  a new host or driver pays minutes per heavy paired module. Direction:
+  compile known modules in the background before first use, or extend the
+  native proof to quad_perm DPP with a host-lane = guest-lane mapping.
+- **Black ship and logo; skipped geometry-shader draws (open).** In the
+  title scene the ship and the 3D logo reach the albedo and normal
+  G-buffers intact but leave the lighting pass black, while forward and
+  emissive background layers render. Separately, by frame 1340 about 10,000
+  draws are skipped as `unsupported_ge_state`: NGG ES+GS programs with
+  `max_vert_out` 4, 10 and 72 and triangle-strip output, which
+  `ShouldSkipUnsupportedGeShader` (`GraphicsRenderDraw.cpp`) refuses. Merged
+  ES+GS launch, shared LDS and primitive emission are not implemented.
+  The black lit geometry had another cause, fixed in the next entry; the
+  skipped draws remain open.
+- **Black ship: exclusions and fix (2026-10-18, fixed).** The ship
+  is a black silhouette in the tunnel shot and lit only at its base in the
+  title menu. Intel A770, strict, HEAD 50775391, warm caches.
+  - Not a regression: a 10-14 run on dff7b38b shows the same partial
+    lighting in the menu and the same silhouette in the tunnel. The "lit
+    ship" of the 10-14 entry below is that partial state.
+  - BVH results excluded: a diagnostic build that forced every
+    `image_bvh_intersect_ray` to return a miss, captured every 6 s, still
+    shows the silhouette (tunnel, presents 1418 and 1451) and the black upper
+    part (menu, presents 1284-1382). An unverified change to the triangle
+    vertex order of node types 2 and 3 was withdrawn: it has one secondary
+    source, and no capture differed.
+  - DCC clear contract holds: a trace of presents 1270-1460 shows nine
+    metadata clears published per frame and the 1920x1080 RGBA16F lighting
+    target taking its clear at its first shader-image access. Its
+    render-target bind does not erase it.
+  - Skipped geometry-shader draws, per frame in presents 1280-1300 (about 79
+    in total, all `CB_TARGET_MASK` 0xf or 0x7, so each writes only RT0):
+    36 to target 0x53aa00000 with depth 0x53a500000 (24 with
+    `max_vert_out` 4, 6 + 6 with 10); 29 + 1 + 1 to target 0x514080000 RGB
+    with depth 0x513560000 (`max_vert_out` 4, 72 and 0); 12 to target
+    0x5367f0000 with depth 0x513560000 (`max_vert_out` 4). These are
+    single-target quad and strip expansions, which look like sprites or
+    particles rather than ship geometry, and the entry above found the ship
+    intact in the albedo and normal G-buffers. They are a real omission,
+    not an explanation of the ship. Direction for the omission: run merged
+    ES+GS programs as one workgroup with shared LDS and collect their
+    exports; the renderer has no mesh-shader path today.
+  - Tile classification excluded: a readback of the per-tile lists that the
+    two lighting kernels consume (presents 1270-1346; each entry packs the
+    16-pixel tile column in its high half and the row in its low half) holds
+    about 1,430-1,570 of the 8,160 tiles per frame, and an overlay on the
+    tunnel capture shows that they cover the black ship and logo. The kernels
+    ran on those tiles and wrote black.
+  - Cause and fix: both lighting kernels sample a two-layer RGBA16F array
+    (10240x320). A dispatch earlier in each frame writes its layer 0 through
+    a one-layer storage image at the same address. The sampled view needs
+    two layers, so the alias picker rejects that image and the array is
+    uploaded from guest memory, which holds stale bytes because storage
+    images are not written back. A second defect hid the write:
+    `storage_write_stamp` was set only when a storage image was created,
+    not when a later bind found the existing image, so a newer write was
+    never visible to the copy rules. Now every writable storage bind stamps
+    its image, and a sampled 2D array upload copies its leading layers from
+    the newest same-format storage image that starts at the array's address
+    and was written after the upload (`CopyNewerStoragePrefixLayers`,
+    `GraphicsRenderBind.cpp`). The block-compressed upload copy uses the same
+    stamp.
+  - Verified (Intel A770, strict, warm caches, no diagnostics): menu
+    present 1212 and tunnel presents 1277-1371 show a lit, metallic ship
+    and a lit logo where the earlier runs showed a silhouette; fps in the
+    flyby is unchanged (about 5.6-6). The existing stall near present 1384
+    is unchanged. Racing title, 200 s: same attract-mode screens and fps
+    range as the run before the change.
+  - Defect found, not fixed: a compute `S_BUFFER_LOAD` whose V# is built at
+    run time reads the bound-buffer array with the V# base dword as its
+    index. The guest-address path exists only for pixel shaders
+    (`PixelScalarBufferUsesGuestAddress`, `ShaderSpirvBuffer.cpp:3207`), and
+    the compute device-address predicate (`ShaderUsesGuestDeviceAddress`,
+    `Shader.cpp:4401`) ignores these loads. Trigger: all nine kernels that
+    contain `image_bvh_intersect_ray` build a V# over an instance's bottom
+    level (`s[8:9] = s[28:29] << 3`, `s11 = 0x16204`) inside the instance
+    walk and read it with three `S_BUFFER_LOAD`s. In one kernel's ISA the
+    walk starts at node 37 (an fp32 box) and enters the instance branch only
+    for a leaf popped from a box result, so the forced-miss run never
+    reached these loads. Direction: use the scalar flow's entry sources to tell
+    an entry-value copy of a bound V# (which holds the slot index) from a
+    computed V#, and read only the computed one through the device address.
+    A copy such as `s[16:19] <- s[10:13]` must keep the slot path.
+  - Cold compile: the heaviest tiled-lighting kernel (466,347 SPIR-V words)
+    took 356 s to compile offline on Intel: about 390,000 instructions,
+    22,000 spills and 1,400 live registers at peak. Any change to the BVH
+    emission makes every first boot pay this compile again. Three runs of
+    HEAD plus read-only diagnostics stalled near present 1384 for more than
+    76 s; the counters
+    point to a compile in progress.
+  - Stall confirmed as that compile (2026-10-19, HEAD f311b0ee, warm Mesa
+    and SPIR-V caches): during the stall the command-processor thread spent
+    100% of an 8 s user-space sample inside `libvulkan_intel`, under
+    `PipelineCache::CreatePipeline` called from
+    `GraphicsRenderDispatchDirect`; guest threads were blocked, and the
+    submit, fence and pipeline counters did not move across two agent
+    snapshots 23 s apart. The Mesa cache directory is far below its size
+    limit, so the pipeline is not evicted: no bounded run has lasted long
+    enough to finish and store it. The module is a wave64 kernel run as
+    paired 32-lane halves: each half of every VALU instruction becomes about
+    15 SPIR-V instructions (exec-bit test, load, store, select), so 3,282
+    guest instructions become about 465,000 SPIR-V words. Direction:
+    shrink the paired-wave emission or extend the native-width proof so the
+    module stops pairing; a single run longer than about 9 minutes would
+    store the pipeline in the Mesa cache but does not fix a cold first boot.
+- **Defect found, not fixed: layered depth targets.** In the same frames a
+  lighting kernel samples a 16-layer D32 array (1536x1536, shadow cascades)
+  whose cascades the guest renders as single-slice depth views at one base
+  (`DB_DEPTH_VIEW` slices 0..0 and 1..1). `DescribeRenderDepthInfo` reads
+  `slice_start` and `slice_max`, but the depth backing is one layer, so both
+  slices render into host layer 0, and the sampled array view over a
+  one-layer image clamps every cascade to layer 0. A layered color target
+  with a depth attachment still exits in `GraphicsRenderFramebuffer.cpp`.
+  Not the black-ship cause: the kernel that does not sample this array
+  also wrote black. Direction: give depth targets the color path's array
+  model (`ResolveRenderTextureArrayView`, growing backing).
+- **Ghost copies in the title menu (2026-10-19, fixed).** From present
+  about 1205 the memory cards leave a trail of copies down the right side,
+  the 3D logo letters repeat below themselves, and a black blob covers the
+  bottom left. Intel A770, strict, warm caches, HEAD cd81ab00.
+  - Cause: the guest clears the 1920x1080 main depth target each frame with
+    a compute fill of its HTILE (word 0xfffffff0, depth 1.0). The first pass
+    that binds that depth target in the frame renders into a 1024x1024
+    color target (two draws). That pass consumed the clear as a
+    render-pass load-op clear, which covers only its 1024x1024 render area.
+    Depth at x >= 1024 and y >= 1024 kept earlier frames' contents, and the
+    deferred lighting shaded them. Evidence: the ghosts end at exactly
+    x = 683 of 1280 (1024 native) in presents 1207, 1209, 1215 and 1340;
+    skipping only the two 1024x1024 draws moves the clear to a full-size
+    pass and removes the ghosts; skipping every main-target draw does not,
+    because the lighting still shades the stale depth.
+  - Fix: a consumed HTILE meta clear now clears the depth plane of the whole
+    image outside the render pass (`ClearDepthMetaWholeImage`,
+    `GraphicsRenderAttachments.cpp`). A first use also clears stencil, as
+    its CLEAR load op would. Register clears (`DB_RENDER_CONTROL`) stay
+    bounded by the pass. Images with custom sample locations keep the
+    in-pass clear, since their layout transitions would need the sample
+    locations.
+  - Verified (Intel A770, strict, warm caches, no diagnostics): presents
+    1207-1240 show one copy of each card and no repeated letters, and
+    present 1340-1344 has no blob; frames reached in 175 s and the fps
+    samples are within the run-to-run range. Racing title, 200 s: gameplay
+    with shadows, same fps range as the 10-17 runs.
+    `check_emulator_boundaries.py`, `check_graphics_tables.py` and the 296
+    `EmulatorGraphicsState` unit tests pass.
+  - Defect found, not fixed: the same coverage hole remains for stencil. A
+    zero HTILE word on a D32S8 target also marks stencil cleared over the
+    whole surface, but after first use the helper clears only the depth
+    aspect (`GraphicsRenderAttachments.cpp:1155`) and the pass's stencil
+    load-op clear covers only its render area. Trigger: a zero-word HTILE
+    fill consumed by a pass smaller than the D32S8 target, with a stencil
+    register clear of 0. No title has been seen to hit it. Direction: pass
+    the consumed event to the helper and add the stencil aspect for that
+    pattern.
+  - Not established: after present ~1227 the menu fades to one drifting
+    card and the intro flyby follows, while reference imagery shows a
+    settled menu with the logo and three cards. The runs use a scripted route
+    that presses cross every 3 s from the first guest pad poll; whether the
+    guest consumes it at this screen was not verified (the agent's pad
+    counters count only agent input), so this may be guest flow.
+  - Excluded first: the half-resolution layer at 0x53aa00000 (its DCC clear
+    is published and consumed every frame); the target at 0x532830000 (a 1x1
+    texture plus one fill); transient snapshots of the debris vertex data
+    (an A/B with large transient uploads disabled shows the same ghosts);
+    the vertex transforms of the debris program (the matrix dump holds
+    legitimate tunnel debris); indirect draws (none in the menu). The
+    earlier observation "the depth clear is consumed once per frame" was
+    true but checked consumption, not the area it covered.
+  - Open lead, unverified: `cp_op_draw_index_indirect` and
+    `cp_op_draw_indirect` (`GraphicsRunOpParsers.cpp:639`, `:654`) pass
+    only body dwords 0 and 3; dwords 1-2 are not consumed. No title has
+    been seen to depend on them.
+- **Pre-existing, unrelated failure.** Unit test
+  `EmulatorGraphicsPackets.CompressedMrtExportReadsPackedHalfFromUintShadow`
+  also fails on clean 486b7d0d.
+
+## Robot platformer: intro frame cost on Intel (2026-10-18)
+
+- **State (Intel Arc A770, Mesa ANV, strict, intro flyby, frames
+  1150-1400).** About 5.3-6.6 fps between measurement windows of one build,
+  with the render engine about 50% busy for the emulator process (DRM
+  fdinfo engine cycles; whole-GPU residency read 84% and is not a
+  per-process figure). Per frame: about 28 fence waits (57-66 ms),
+  38 submissions and 120-140 ms of command-processor time. Fps moves
+  within that noise, so changes are judged by GPU time per program in a same-frame A/B, using pipeline timestamps
+  around frame 1150 (temporary diagnostic).
+- **GPU time per program before this fix (frame 1150, 242 dispatches,
+  116.8 ms).**
+
+  | Program | ms | Notes |
+  | --- | --- | --- |
+  | Pixel shader A (2 draws) | 21.6 | 57 runtime-M0 `v_movrels` |
+  | Pixel shader B (26 draws) | 18.3 | 51 runtime-M0 `v_movrels` |
+  | Compute, 8160 groups | 16.2 | no device-address access |
+  | Compute, 32400 groups, 269 instructions | 15.7 | paired wave64 |
+  | Compute, 131072 groups, 249 instructions | 13.5 | paired wave64 |
+
+- **Fix: runtime-M0 relative moves select over the reachable registers
+  only.**
+  - **Problem.** VGPRs are separate SPIR-V variables. `v_movrels`,
+    `v_movreld` and `v_movrelsd` with a runtime M0 were lowered to a
+    compare/select (or gated store) over every VGPR the program names at or
+    above the base: about 50 candidates per move in shaders A and B. The
+    chains doubled the Intel instruction count and kept every named VGPR
+    live at every move.
+  - **What M0 actually holds.** Both shaders read 5-float records from a
+    VGPR table. M0 is either `s_bfe_u32` of a 3-bit field times 5, or
+    `vcc_lo` times 5 on the path where `s_cmp_lt_u32 vcc_lo, 7` held.
+  - **The analysis.** The emitter (`ShaderSpirvVector.cpp`) now derives the
+    values M0 can hold by walking back along the unique-predecessor chain:
+    fallthrough, or a label with exactly one forward branch and no
+    fallthrough. Indirect labels only mark conditional fallthroughs, so
+    they are not joins; `s_setpc` and `s_swappc` stop the walk.
+  - It evaluates these definitions: `s_mov_b32`; `s_bfe_u32` up to 5 bits;
+    `s_and_b32` with a mask below 32; and `s_mul_i32`, `s_add`, `s_lshl` or
+    `s_lshr` by a literal. It also uses an SCC branch whose preceding
+    `s_cmp_lt/le/gt/ge_u32` bounds the register by a literal on that edge.
+  - Sets are capped at 32 values. The chain keeps only candidates at those
+    offsets; other offsets still read zero, and an unknown definition or a
+    join keeps the full chain. Translator version 137. Unit test
+    `NarrowsDynamicMovrelsToBoundedM0Values` covers the bit-field set, the
+    compare guard and a join.
+  - **Offline Intel compile (`INTEL_DEBUG=fs`).** Both "after" figures also
+    include fa13ff72's single guest load per `s_buffer_load`.
+
+    | Shader | Before | After |
+    | --- | --- | --- |
+    | A | 11,027 instructions, 66:220 spills:fills, 109k estimated cycles | 4,842 instructions, no spills, 64k cycles |
+    | B | 207k cycles, 82:213 spills | 123k cycles, no spills |
+
+  - **Same-frame A/B (frame 1150, same 242 dispatches).**
+    - Shader A: 21.6 to 11.0 ms (5.5 ms per draw).
+    - Shader B: 18.3 to 9.0 ms.
+    - Frame GPU time: 116.8 to 96.2 ms (-18%).
+    - Fps windows of the fixed build: 6.1-6.6, still within the noise
+      above. A 20 ms drop in GPU time did not move fps, so shader time no
+      longer sets the frame rate here; command-processor time and fence
+      waits are the larger measured costs.
+    - The logo and flyby captures render as before.
+  - **Regression.** Intel: racing title 25-89 fps across the route
+    (within earlier runs), fishing title 23.5-24 fps, sandbox title in its
+    world with textures, watercolour platformer 248-423 fps. AMD: fishing
+    title 11.4-11.6 fps, with no ring timeout.
+- **Defect fixed on the way.** A runtime-M0 `v_movrelsd` defined
+  `%rel_eq_<index>_<reg>` twice when a register was a candidate of both its
+  source chain and its gated stores, which is invalid SPIR-V. The store side
+  now uses its own ids. Unit test `EmitsVop1MovrelsdWithDynamicM0`.
+- **Paired compute programs: native-proof refusals (not fixed).** A
+  temporary trace of `ShaderAnalyzeComputeWaveNativeEquivalence` maps the
+  two hot paired programs:
+  - **269 instructions:** pc 0x1b4 refuses a `v_mov_b32` with a quad_perm
+    DPP source ("operand is not representable per lane").
+  - **249 instructions:** pc 0x35c refuses an `s_cbranch_vccz` ("a scalar
+    value written inside a lane-conditional region is live at its join").
+  - Other refusals in the same run: quad_perm DPP moves in the 16x16
+    light-list programs, `v_mbcnt_hi` (lane counts), and `v_readfirstlane`
+    into `vcc_hi`.
+  - Making these native needs a host-lane = guest-lane mapping (as in the
+    native wave32 prolog) and converged quads for DPP. That relies on host
+    reconvergence guarantees, which are not established for the wave64
+    native path. Recorded as a lead, not attempted.
+- **Excluded for the fence waits (measured, not committed).**
+  - Allowing storage publication when every non-storage alias is an older
+    render-target, texture or depth copy removed the draw-time
+    device-address wait. The same wait then reappeared in `WaitRegMem32`
+    (1,871 ms over 128 waits), so total fence time did not change. The
+    remaining blockers are an HTILE alias and an exact texture alias.
+  - Also excluded: memoising device-address lookups per program (compile
+    blow-up), a device-local copy of the lookup table (no change), and a
+    fixed 720p render-target scope (no gain, since the cost is not
+    render-target pixel work).
+  - Not usable here: `INTEL_MEASURE` crashes the run, and TOP_OF_PIPE
+    timestamps were unreliable for per-pipeline cost.
+- **Steady state after the intro (measured 10-18, not fixed).** Interval
+  206-210 ms: command processor 160 ms, fence waits about 90 ms, GPU
+  timestamp total 96 ms, of which the three paired compute programs take
+  about 45 ms.
+  - Draw-time device-address waits: about 15 ms each, about 6.4 s per 20 s.
+    The storage written on the same queue is not published on the device
+    because aliases block it: stale pool entries (old render targets,
+    storage textures the device never wrote) and the newer render target
+    or depth image.
+  - Skipping the three paired programs (temporary, unsafe) cut the interval
+    from 206 to 142 ms, but the skip also removed their publication waits
+    and the base window held a streaming burst, so 64 ms is an upper bound,
+    not the GPU share.
+  - Publishing past those aliases (temporary, unsafe) cut the interval from
+    211 to 175 ms, but `WAIT_REG_MEM` time rose from 4 to 47 ms: the guest
+    then waits for GPU completion instead. Excluded as a standalone fix.
+  - Frame time is CPU recording plus GPU execution serialised by the
+    guest's own waits, so GPU time of the paired programs is on the
+    critical path. A rigorous alias design (retire superseded pool
+    aliases) is open.
+  - Also excluded: removing the dispatch drain (the wait moved to
+    `WAIT_REG_MEM`, interval 187 to 190 ms) and flushing every 8 draws or
+    dispatches (206 to 226 ms).
+- **Vertex program cache (fixed, 92ac44db).** Every user-data mapping
+  dropped all cached vertex programs; about 600 recompiles per run. Programs
+  now record the guest ranges they were built from and only overlapping
+  mappings retire them: under 100 per run. Unit test
+  `OnlyOverlappingMappingsRetireCachedProgram`. Intel sweep: 22 of 22
+  titles reach their documented state (reruns below).
+- **GDS on the native compute path (fixed, 116ca7a0).** An earlier change
+  let a wave with `ds_write_b32` to GDS pass the native-equivalence proof;
+  the native emitter has no GDS lowering and the void platformer stopped.
+  The proof now refuses GDS access. Unit test `RejectsGdsWrite`.
+- **Intermittent stops seen during the sweep (passed on rerun).**
+  - Insect platformer sequel: `GpuMemoryCreate.cpp:1548`, "unknown
+    relation StorageTexture Crosses StorageTexture" for two identical 64 KB
+    tile-9 storage textures 4 KB apart. New; open. Direction: define the
+    relation for same-shape storage textures that cross (evict or copy the
+    older one) instead of refusing.
+  - Racing title: `GraphicsRenderBind.cpp:4193` depth-reference binding.
+    Seen before on 10-16.
+  - Cartoon title: `GraphicsRun.cpp:1372` indirect register packet at
+    address 0x100000001. Seen in the sandbox title on 10-16.
+- **Standard 4 KB detile (fixed).** During streaming bursts the command
+  processor spent about 13% of its self time detiling SW_4K_S textures: a
+  full address computation and a library `memcpy` per 16-byte run. The
+  offset of (x, y) is offset(x, 0) + offset(0, y), because the block index
+  is linear in each axis and the in-block swizzle puts X and Y bits in
+  disjoint positions. Column offsets are now computed once per copy and
+  each run is a fixed 16-byte copy. Host benchmark (2048x1024): 1.9-2.5 to
+  12-28 GB/s across element sizes. Unit test
+  `Standard4KBEveryElementSizeMatchesReference` (1, 2, 8 and 16 bytes,
+  partial tail run). In one profiled window after the change no detile
+  frame appeared on the processor thread; that window may not have held a
+  streaming burst, so the in-game share is not yet measured. The robot
+  platformer and fishing title render as before.
+- **Excluded: exec-merge elision in the paired emitter (measured offline).**
+  The hot paired program keeps 32 guest VGPRs live at its peak, so 64
+  values per invocation against about 32 that SIMD32 holds in 128
+  registers; the spills are inherent to the paired layout. Removing every
+  merge that a sound liveness rule allows (222 of 509 vector writes)
+  changed the compiler estimate from 8.14M to 7.15M cycles and spills from
+  2370 to 2173. Not pursued.
+- **Excluded: per-program cache of the paired admission classification.**
+  The ratio of time per dispatch to time per draw stayed at 1.69 with and
+  without it, so the per-dispatch classification is not a measurable cost.
+- **Excluded: dropping the queue-wide device-address wait before indirect
+  draws.** The indirect arguments are already read through the range-exact
+  current-bytes path, so the wait looked redundant. Without it, draw
+  processor time rose from 86 to 179 ms per frame and command-processor
+  time from 145 to 280 ms in the same frame window (one run; submissions per
+  frame barely moved, so the cause is not isolated). Kept.
+- **Case-insensitive path lookups (fixed).** A guest path that does not
+  exist verbatim made `GetRealFilename` scan the parent host directory for
+  an entry equal ignoring case. The robot platformer probes absent files in
+  package directories of up to 24,500 entries, and a loader thread was the
+  most sampled thread in four profiles (`directory_iterator` frames). Each
+  directory's case-folded index is now reused while its write time is
+  unchanged; a directory written within the last two seconds is not cached,
+  and the cache holds at most 2^18 names. Exact-entry and ambiguity rules are
+  unchanged. Unit test `ReusedDirectoryIndexFollowsDirectoryChanges`.
+  - Offline, one lookup of an absent name in the 24,500-entry directory:
+    15.6 ms to 0.74 ms (50 calls on the title's host copy).
+  - Robot platformer run: no `directory_iterator` frame in the profile;
+    frame 905 at 116 s and 1,235 at 177 s against 848 at 114 s and
+    1,167-1,210 at 175 s in the two previous warm runs, which is within
+    run-to-run spread. Steady state unchanged: 5.8-6.3 fps, 120 ms command
+    processor per frame.
+  - The apparent 20 s plateaus near frames 130 and 900 in these run logs
+    are a sampling artifact: the agent status file repeats unchanged (same
+    frame, fps and 70-90 ms since the last present), so presents continue.
+  - Savedata path: the card title writes its four save files and holds
+    227-245 fps (earlier runs 209-247).
+- **Paired compute admission by mnemonic (fixed).** During the intro
+  (frames 130-900) the command-processor thread spent about 70% of its
+  samples in `ShaderGetInputInfoCS`: every dispatch re-runs the paired
+  admission, and its generic scalar, vector and compare classifiers built an
+  allocated `String8` mnemonic per instruction for prefix and substring
+  tests. They now test the shared, allocation-free name table
+  (`ShaderInstructionTypeName`), built from the same enum range, so results
+  are unchanged; compute-wave and shader suites (332 tests) pass.
+  - Robot platformer (one run): intro 12.7-13.5 fps against 11.3-11.7 in
+    the three previous warm runs; frame 735 at 93 s against 631-687. Steady state
+    unchanged (5.9-6.4 fps), where this analysis does not appear in the
+    profile.
+- **Pipeline cache persistence (fixed).** Every pipeline creation marks the
+  driver cache dirty, including cache hits, and each 30 s checkpoint rewrote
+  the whole blob. Each robot platformer run wrote the same 35,428,999-byte
+  blob three times in its first minute (106 MB of the 128 MiB session
+  budget); the fourth checkpoint hit the budget, so pipelines first created
+  later in the run were never saved and every run compiled them again. The
+  store now keeps the size and XXH3 digest of the blob the file holds (as
+  loaded or written) and skips a checkpoint whose blob matches, without
+  charging the budget.
+  - First run: three writes of growing blobs, none refused; the file grew
+    from 35.4 to 38.2 MB.
+  - Next two runs, one write each and no refusal: frame 850-855 at 94-98 s
+    and 1,167-1,196 at 155-159 s, against 631-687 at 93-96 s and about
+    1,150 at 175 s before, so about 20 s less to the measured scene. Steady
+    state unchanged (5.5-6.2 fps, 106-122 ms command processor per frame).
+  - Command-processor samples taken right after the measured frame vary
+    between runs from 4% to 83% inside the Intel driver; a focused sample
+    of the same window found 9.5%, so single windows of that kind are not
+    evidence for or against a change.
+- **Open leads, by measured size.**
+  - The 8160-group compute program (16 ms).
+  - The two paired programs above (29 ms together).
+  - Shaders A and B (20 ms together) still run SIMD8 with 19
+    device-address lookup loops.
+  - `WriteBack` → `BufferWait` full drains on the processor thread: 128 per
+    32 frames, 573 ms.
+  - Directory iteration in `Path::MatchCaseInsensitive` on the file thread
+    during loads.
+
+## Racing title on AMD: corruption from a degraded GPU, not from code (2026-10-17)
+
+- **Symptom (RADV, Radeon 610M, Mesa 26.2.4, strict 200 s route).** From the
+  first menu onward, full-screen backgrounds are missing and older frame
+  contents show through as stretched triangles and stripes; text loses spans.
+- **Runs.** One clean set at 04:51Z. Six corrupted sets in the afternoon with
+  identical harness configuration: the branch head, two binaries saved before
+  the write-back and timeline commits, the branch with the three
+  shader-codegen commits of 10-17 reverted, a binary built from main's exact
+  source, and the branch head with every submission followed by
+  `vkQueueWaitIdle`. Khronos synchronization validation reported no hazard.
+  Intel runs of the same binaries were clean.
+- **Cause.** The gfx ring timeouts at 05:35Z and 05:38Z (puzzle and
+  role-playing titles, recorded in the regression sweep below) came after the
+  clean set and left the GPU degraded; ring resets alone did not restore it.
+- **Verified.** A full GPU reset (`amdgpu_gpu_recover` in debugfs; the AMD
+  GPU drives no display here) restored it: the branch head then gave seven
+  clean captures through two races (in-race 38.6, 20.9, 40.1 and 17.7 fps)
+  with no kernel message.
+- **Rule.** After any `ring gfx.*timeout` in `journalctl -k`, reset the GPU
+  or reboot before reading another AMD result. The timeouts themselves are an
+  open emulator defect (see the puzzle and role-playing device-lost entry).
+
+## Puzzle title on AMD: two causes of the gfx ring timeout (2026-10-17)
+
+- **Symptom (RADV, Radeon 610M, Mesa 26.2.4).** A few seconds into the
+  intro, the run ends with `VK_ERROR_DEVICE_LOST`, and `journalctl -k` shows
+  `ring gfx_0.0.0 timeout` followed by a page fault. Intel runs of the same
+  binary do not fault. The RADV hang report (`RADV_DEBUG=hang`) names the
+  pixel shader of the faulting draw.
+- **Cause 1: a redefined V# register read through its descriptor slot.**
+  - The guest pixel shader loads its descriptors from a bound user-data
+    V#, then overwrites the same SGPR quad with an `s_getpc`-based address
+    and issues more buffer loads through it.
+  - The translator mapped every buffer instruction that names a bound
+    descriptor's start register to that binding, so those later loads indexed
+    the descriptor array with a value read from guest memory. The index had no
+    bound, and the access fell outside the set.
+  - Fix: the scalar flow already records, per instruction, which SGPRs still
+    hold their entry value. A buffer instruction whose V# register names a
+    bound descriptor but no longer holds its user-data value now reads through
+    the runtime V# (scalar loads through the guest-address path, bounded by
+    stride times records). Only resolved control flow is analyzed, and the
+    consumer list is part of the shader id.
+  - Offline check: with shader logs from the same route before and after,
+    only the faulting pixel shader changed. Its redefined loads became
+    guest-address loads bounded at 176 bytes.
+- **Cause 2: a pixel module reused with another stage's push block offset.**
+  - The pixel stage's push block starts after the vertex stage's block, and
+    its descriptor set slot depends on whether the vertex stage uses
+    descriptors. Both values are baked into the SPIR-V, but neither was part of
+    the pixel shader's id.
+  - In the RADV dump, the vertex block was 128 bytes and the reused pixel
+    module read its block at offset 112. Its first descriptor word was
+    therefore the vertex block's last row (0x100000), and the GPU faulted at
+    0x02203000.
+  - Fix: the bind ids now hash `push_constant_offset` and
+    `descriptor_set_slot`, so the pixel module is rebuilt for each pairing.
+- **Verified.**
+  - AMD: two 120 s strict runs of the puzzle title had no fault, no ring
+    timeout and no device lost (1.95 and 9.7 fps). Captures show the intro
+    text.
+  - Unit test: `EmulatorShaderGetpc.RedefinedBoundDescriptorReadsRuntimeDescriptor`.
+  - Intel strict sweep with both fixes: the racing title gave 7 captures
+    (46-81 fps in race), the sandbox title 9 captures with the textured world,
+    the puzzle title 1 capture (8.1 fps, cold compile as before), and the
+    anime fighter 4 captures (16.6 fps).
+- **Open: the role-playing title still times out on AMD.**
+  - The gfx ring times out about 1:45 into the run, with no page fault.
+  - In the RADV hang report, the hanging draw is a 48-index `DRAW_INDEX_2`.
+    Its fragment shader has nested loops. The outer bound comes from a storage
+    load at offset 0x20. The inner bound comes from offset 0 of a descriptor
+    indexed by a push constant (set + index * 16 + 512). The inner body reads
+    64-byte records.
+  - Excluded: an unbounded loop. Halting the shader engine with `umr`
+    (write `SQ_CMD` = 0x111, dump `-wa gfx_0.0.0`, resume with 0x11) while
+    the ring was stalled showed the pixel waves at different PCs with loop
+    counters of 3 (outer) and 1 (inner).
+  - Excluded: a CPU/GPU race. Waiting for the queue to go idle after every
+    submit still timed out.
+  - Observed: skipping that one pixel shader removes the timeout. Under
+    `RADV_DEBUG=hang` the same submission finishes after about 1.9 s, and the
+    run reaches its time limit. The fence log shows the ring timeout firing
+    2 s after the last fence progress, which is the default gfx lockup
+    timeout of the host kernel (7.2.9).
+  - Conclusion: one submission carrying that run of draws into a 1024x1024
+    target takes about as long as the kernel watchdog on a 2-CU iGPU. The
+    title's AMD history has mostly been device lost, so this is not a
+    regression. Open: why each of those draws costs hundreds of
+    milliseconds there, and whether long guest command buffers should be
+    split into several Vulkan submissions. As a host workaround,
+    `amdgpu.lockup_timeout` raises the watchdog.
+
+## Anime fighter: storage write-back on the label path (2026-10-17)
+
+- **Observation (Intel, native 3840x2160 output).** ~8.3 fps, frame p50
+  118 ms. Two guest threads spin at 93% CPU on single loops. The GPU is idle
+  ~75% of the time, and rendering at fixed 1080p gives the same 8.4 fps, so the
+  title is not pixel-bound. Per 10 s: ~2,000 dispatches, and each writes back
+  one ~15.7 MB storage buffer (about 22 per frame).
+- **Mechanism.** The end-of-pipe label the guest waits on is written only
+  after the completion write-back. Each write-back cost three things:
+  - a page compare of 15.7 MB against the write-back snapshot (1.84 ms);
+  - a full XXH3 hash of the range (0.46 ms);
+  - another full hash at the next use, because the write-back's own write
+    notifications advanced the dirty generation and nothing re-baselined it
+    (`hash_tracked_unchanged` = 1,871 of 1,871).
+
+  That came to 58.9 GB hashed and 3.45 s of write-back per 10 s, serialized
+  with the guest's waits.
+- **Changes.**
+  1. After a write-back with changed content, a tracked range re-baselines
+     its dirty generation, as `Update` already does after an unchanged compare.
+     The range is not hashed: a later guest write compares against the unknown
+     (zero) hash and uploads its changed pages. Page generations stay stale,
+     so label-fence holes are still uploaded.
+  2. Ranges of 256 pages or more compare their pages on up to three helper
+     threads. The copy and its write notifications stay on the calling thread,
+     in page order.
+- **Measured (same 10 s window at 55 s).**
+
+  | Build | Frame p50 | fps | Hashed per 10 s | Write-back per call |
+  | --- | --- | --- | --- | --- |
+  | before | 118 ms | 8.3 | 58.9 GB | 1.84 ms |
+  | + generation baseline | 100 ms | 9.9 | 1.2 GB | 1.84 ms |
+  | + parallel compare | 83 ms | 11.6 | 1.4 GB | 1.26 ms |
+
+  Captures are visually unchanged.
+- **Completion polling.** The compute and graphics rings noticed a finished
+  submission only on their next 1 ms condition-variable timeout, so every
+  label round trip paid up to 1 ms of idle latency. A 100 us poll (experiment,
+  not kept) moved p50 from 83 to 64 ms, which confirmed the cost.
+- **Change 3.** Every queue owns a timeline semaphore; each command-processor
+  submission signals the next value in submission order. A ring with pending
+  work arms a per-ring waiter thread on the oldest submission's value; the
+  thread blocks in `vkWaitSemaphores` and wakes the ring as soon as the GPU
+  finishes. Completion is still pumped by the ring itself, under its own
+  locks, and the 1 ms timeout stays as the backstop.
+
+  | Build | Frame p50 | Frame p99 | fps |
+  | --- | --- | --- | --- |
+  | parallel compare | 83 ms | 108 ms | 11.6 |
+  | + timeline wake | 66 ms | 88 ms | 15.3 |
+
+  Sandbox (terrain, 6-7.5 fps in world), racing (7 captures) and the puzzle
+  title (cold-compile window) show the same states and captures as before.
+  Verified on Intel only; RADV is untested.
+- **Open.** The compare reads 31 MB per call and is now close to memory
+  bandwidth. Removing the compare needs knowledge of which pages the dispatch
+  wrote.
+
+## First-person puzzle title: cold shader compiles, not a GPU stall (2026-10-17)
+
+The 10-17 regression set recorded this title as stalling early on a
+`gfx_storage_frontier` refusal. That attribution was wrong.
+
+- **Observation.** In the 120 s sweep window the command-processor thread runs
+  at ~93% CPU translating and compiling shaders; presents pause while it does.
+  The same binary given 300 s reaches the first lit room and holds it
+  (8 captures, ~58 fps once compiled). The sweep harness starts every run with
+  empty SPIR-V, driver and pipeline caches, so this is the worst-case first
+  boot; the on-disk caches remove it on later boots.
+- **Compile cost in one 35 s stall window** (opt-in toolchain timing,
+  Intel): translator source generation ~5.9 s, `spirv-opt` ~11 s,
+  driver pipeline creation ~8 s. Two pixel shaders of 3.7 MB of SPIR-V text
+  dominate.
+- **Why it grew.** The native pixel mask emulation transfers every ballot
+  through the quad (`NativeQuadUniform`, 11 quad broadcasts per ballot instead
+  of 4), and every VALU result with software EXEC was stored inside its own
+  selection construct. Thousands of tiny selections made `spirv-opt` and the
+  driver slow.
+- **Change.** Inactive lanes keep their VALU result through `OpSelect` instead
+  of a branch (`ShaderSpirvVector.cpp`, translator version 134). The large
+  shaders (3.7 MB of text, ~490 ballots, 6,582 quad broadcasts each) drop
+  from ~2,230 to 585 blocks and from ~1,000 to 185 selections; `spirv-opt`
+  time per compile halves.
+- **Exclusions.**
+  - Compiling with `spirv-opt` disabled moves the same cost into the driver;
+    no net gain.
+  - Removing ballots whose readers only take their own lane bit could remove
+    at most ~40% of them; not pursued yet, because it changes mask semantics in
+    every pixel shader.
+- **Verified (Intel, strict, 22-title sweep, cold caches):** 20 titles match
+  the previous baseline in status, captures and frame rate; captures of the
+  sequel, the underworld title, the fishing title and the anime fighter are
+  visually unchanged. The role-playing title stops at the open storage-view
+  refusal recorded in the next section. The puzzle title shows its first frame inside
+  120 s (none before) but does not reach the room: the regression is reduced,
+  not closed.
+- **Allocator lock (measured, not yet a fix on its own).** In optimized builds
+  every host allocation still took the tracker's global recursive lock, which
+  only the debug tracker needs. Without it, one cold 120 s run of the puzzle
+  title spent 97 ms per graphics pipeline miss instead of 112 ms and finished
+  254 misses instead of 230.
+- **Open:** first-boot time is still bounded by single-threaded compilation
+  on the command-processor thread.
+
+## Role-playing title: story start, three stops removed (2026-10-17)
+
+Route: the menus route until 70 s, then cross every 2 s. It starts a
+traveler's story at about 85 s. Intel Arc A770, strict, Silent.
+
+### 1. `SAMPLE_CD` slopes after a restored WQM copy (5e5d54a4)
+
+- Stop: `shader emitter missing ... inst=ImageSampleCd` at pc 0x3dc, 0x4a8 or
+  0x4fc, depending on which shader compiled first.
+- Shape, in four pixel shaders (ray-march passes, four `SAMPLE_CD` each):
+  - `S_WQM_B64`, then `S_MOV_B64 sX, exec` inside the plain WQM prefix.
+  - Each loop narrows EXEC (`V_CMPX`, `S_ANDN2_B64 exec`). After it,
+    `S_MOV_B64 exec, sX` restores the copy.
+  - The next loop's slopes are fixed quad broadcasts (DPP quad_perm
+    0x00/0x55/0xaa/0xff) subtracted after that restore.
+  - The fourth loop reuses slopes built after an earlier restore, untouched
+    across the narrowed loop in between.
+  - Sources include `V_ADD_F32`, `V_MUL_F32` and a `V_MAC_F32` whose
+    accumulator was written in the prefix.
+- The proof accepted only slopes built in the prefix. The `SAMPLE_CD` emitter
+  needs quad-uniform user gradients.
+- Contract implemented (`ShaderImageGradientProof.cpp`):
+  - One forward walk over the static CFG from the prefix boundary.
+  - Outside a whole-quad interval, a write clears both facts for its
+    registers. The facts are "uniform across the quad" and "fully written
+    while the quad was whole". EXEC may cover part of a quad there, and the
+    other lanes keep stale values.
+  - A whole-quad interval is the straight run after `S_MOV_B64 exec, sX`. It
+    requires all of:
+    - sX was copied from EXEC inside the WQM prefix;
+    - nothing overwrites sX between the copy and the restore;
+    - no edge returns from past the restore to it or before it;
+    - nothing enters the run except through the restore.
+  - Inside it, the prefix transfer runs again.
+  - `V_ADD_F32` and `V_MUL_F32` with plain sources count as full writes, like
+    `V_MAD_F32`.
+  - A copy taken before `S_WQM` (the live mask) never opens an interval.
+- Verified:
+  - A temporary diagnostic (removed) printed the verdict for every
+    `SAMPLE_CD` the title parsed. All 15 sites in 4 shaders were admitted:
+    `0ca445a8`, `51db2b69`, `bf209fbf` and `ee9c2b26`.
+  - An offline replay of the dumped programs agreed.
+  - Unit tests: `EmulatorImageGradientProof*` and `EmulatorShaderMimg*`, 64
+    tests (eight new). The shader and compute-wave suites passed (472 tests).
+- Not verified: the story draws themselves. Every capture so far is from the
+  first 80 s, and the title stops about 15 s after the story starts.
+
+### 2. Compute store into a D16 depth plane (fbc469af)
+
+- Stop: `storage image has no compatible Vulkan view`, with these values:
+  - backing D16 (`vk_format=124`), 2048×2048;
+  - descriptor format 7 (R16 UNORM), tile 24, 2D array with one layer.
+- Producer:
+  - A generic fill kernel: an 8×8 group storing a constant at
+    (x, y, layer).
+  - The depth was an exact match, and the stage was compute.
+- Vulkan has no storage depth image. The depth storage plane (7fe90864)
+  covered only D32 with an R32F copy.
+- Fix:
+  - The plane format follows the depth texel size: R32F for D32 and D32S8,
+    R16 UNORM for D16 and D16S8.
+  - `UtilCopyTexelBits` pairs a depth plane only with a colour format of the
+    same texel size, and sizes its staging by that texel.
+  - The depth-aspect buffer copy of D16 is 16 bits per texel, so the bits are
+    unchanged both ways.
+- Verified: the next strict run passed that dispatch.
+
+### 3. Growing a mipmapped storage array (8d31a270)
+
+- Stop: `unknown relation: StorageTexture - IsContainedWithin -
+  StorageTexture`. The array is 128×128, format 71, eight mips, tile 27,
+  type 13. A one-layer view at base 0 was followed by a two-layer view at
+  base 1, at the same address.
+- The growth copy (a34392d5) required one mip level.
+- Contract: each Gen5 slice holds its whole mip chain. This is
+  `Gen5GetTextureArrayLayout`'s tile-27 mip slice, and slice size
+  0x30000 = 1/2 of 0x60000.
+- Fix: when both descriptors name the same chain, the prefix layers are
+  copied at every level.
+- Verified:
+  - The next strict run grew the array to six layers.
+  - Unit test: `StorageTextureGrowthCopiesGpuOwnedArrayPrefix`, which covers
+    an equal and a shorter chain.
+
+### Open: a one-layer view inside the grown array
+
+- Stop, about 96 s in (`GpuMemoryCreate.cpp`, `unknown relation:
+  StorageTexture - Contains - StorageTexture`):
+  - The live backing has six layers. It was created for a view of slice 5
+    (`depth=6 base_array=5`, 0x120000 bytes).
+  - The new descriptor names slice 0 alone: `depth=1 base_array=0`,
+    `base_level=1`, 0x30000 bytes, at the same address.
+- Do not create a separate one-layer image, whether from guest bytes or from
+  a copy of layer 0. The backing and the view diverge on the next write.
+- Contract to implement: the descriptor is a view of the live backing, at
+  layer (slice offset + base_array) and level base_level. The view slots are
+  a fixed array today, so this needs a bounded (layer, level) view cache,
+  freed with the image.
+- Evidence still needed:
+  - which shader binds the view;
+  - whether it stores or only loads;
+  - whether the whole array is sampled afterwards.
+
+### Open: device loss on queue 9
+
+- `vkWaitForFences failed: result=-4 queue=9` at
+  `GraphicsRenderCommandBuffer.cpp:1974`.
+- Seen in 1 of 3 runs of this route: the run with shader logging, on a
+  build that carried inactive env-gated diagnostics.
+- The last shader compiled was an array image copy compute shader: an
+  `IMAGE_LOAD`/`IMAGE_STORE` whose layer is `s16 + s26`.
+- Not attributed.
+
+## Role-playing title: wave64 resolve pass under paired transport (2026-10-17)
+
+The role-playing title ran its menus and the traveler selection at about
+9 fps on Intel Arc A770. The cause was one compute pass that the
+native-equivalence proof refused, so it ran under paired 64-on-32 transport.
+
+- Symptom, measured on the traveler selection:
+  - The GPU was busy: Intel GT idle residency was 4–16 ms per second.
+  - The command-processor thread spent 66% of its samples in
+    `drm_syncobj` waits.
+  - The perf snapshot showed 15 of 20 s in fence waits, with 122 draws and
+    30 dispatches per frame.
+  - The title is GPU-bound, not CPU-bound.
+- Excluded tool: Mesa `INTEL_MEASURE=draw` crashed the process (SIGSEGV)
+  as soon as measuring began and wrote no data. This held for three start
+  frames (700, 560 and 30). Do not use it with this renderer.
+- Measurement with a temporary diagnostic (removed):
+  - It wrote a bottom-of-pipe timestamp after each draw and dispatch for 3 s
+    and summed the deltas between completions per shader.
+  - One compute pass took 2055 ms of the 3026 ms window: 28 dispatches of
+    129600 groups × 64 lanes, which is one lane per 3840×2160 pixel.
+    That is 73 ms per dispatch.
+- Cause:
+  - The pass is a wave64 program. Native equivalence refused it at a
+    `V_READFIRSTLANE_B32` with "reads another lane", so it ran under paired
+    transport.
+  - Under paired transport, each invocation carries two guest lanes and every
+    register lives in a Function variable inside a switch-dispatched loop.
+  - The value read is an image load at the constant coordinate (0, 0),
+    multiplied by a word that `S_BUFFER_LOAD` placed in VCC_LO. Every lane
+    holds the same value.
+- Fix (f985041d):
+  - The wave-uniform proof covers two more cases:
+    - an image load whose DIM coordinates and T# are shared by the wave;
+    - VCC filled by a scalar memory load.
+  - Contract for the image load: the RDNA2 ISA sets MIMG DIM to "bits [3:1]
+    of the resource type", and table 42 fixes the coordinates each DIM reads.
+    A 2D load reads x and y only.
+  - Native equivalence admits a READFIRSTLANE whose source is proven uniform
+    under the launch EXEC, and classifies its destination as data.
+- Result:
+  - The pass runs one lane per invocation at 1.65 ms per dispatch.
+  - The same 3 s GPU window completed 89 frames instead of 28, about 30 fps
+    instead of 9.
+  - The traveler selection image is unchanged.
+  - In 120 s the title now reaches frame 1309; before, it reached 520.
+- Open, not yet attributed: the remaining GPU costs per frame at the traveler
+  selection on Intel.
+  - A pair of draws (48 vertices × 10 instances): about 9.5 ms.
+  - A full-screen triangle: about 7.9 ms.
+  - A compute pass of 1152 groups: about 2.3 ms.
+- Correction (same day): an earlier version of this entry said the
+  `ImageSampleCd` stop in the main sweep below happens on main only. That was
+  wrong. The 180 s run behind it stayed on the traveler selection. Once a
+  route starts a traveler's story (about 85 s in), travel stops at the same
+  `SAMPLE_CD` refusal. The faster title reaching it sooner is frontier
+  movement, not a regression; see the next entry.
+- Unit tests: `EmulatorComputeWaveNativeEquivalence` (16, two new). The
+  shader suites passed (506 tests).
+- Regression check, Intel, strict, 22 titles: status and capture count match
+  the 1d9c60d7 sweep for every title except one. The penitent platformer
+  crashed once (below); two reruns on the same binary reached 9 captures
+  each.
+- Gameplay fps from capture intervals: the sequel measured 67–68 in the sweep
+  and 71–91 in a rerun (78–80 before); the insect platformer 76–78 and 79–88
+  (92 before). The rerun is within the range these titles show from run to
+  run, and both proofs only turn a lane search into a copy or admit the native
+  path, so the drop is treated as variance, not as a regression.
+
+## Open: WAIT_REG_MEM poll address 1 crashes the command processor (2026-10-17)
+
+- Seen once in 11 strict Intel runs of the penitent platformer (new-game
+  route), about 60 s in. The two runs after it on the same binary were clean.
+- The CP thread faulted reading address `0x1` in
+  `CommandProcessor::WaitRegMem32`
+  (`source/emulator/src/Graphics/GraphicsRun.cpp`, first dereference of
+  `*addr`). It was reached from `cp_op_wait_reg_mem_32` for a 7-dword
+  `R_WAIT_MEM_32` packet (header `0xc0051028`).
+- Neither emulator encoder can produce that address: both clear the low two
+  bits (`GraphicsDcbWaitRegMem` and `GraphicsAgcWaitRegMemPatchAddress`). The
+  packet was either encoded by the guest itself or read before the guest
+  finished writing it.
+- The existing guard only catches `nullptr`. Skipping the wait would hide the
+  producer; the manual's rule ("prefer producers over symptoms") applies.
+- Suggested direction: when the address is not a mapped guest page, stop with
+  the packet dwords, the submission id and the command-buffer offset instead
+  of faulting. Then use that context to find the producer: guest encoding, or
+  a CP read that runs ahead of the guest write.
+
+## Platformer pair: intro cinematics were black (2026-10-17)
+
+Both Unity platformers showed black for their intro cinematics. The insect
+platformer's intro ends in a second video, and after the first one the screen
+stayed black.
+The contract, the guest evidence and the exclusion are in
+`docs/avplayer-video-path.md` ("Jump and loop contract").
+
+- **Cause, part 1: the jump while paused.** The guest prepares each video in
+  four steps:
+  1. play;
+  2. take one frame;
+  3. pause and jump to 0;
+  4. wait up to 10 s for the jump warning and a frame with a new timestamp.
+
+  `JumpToTime` only reset counters, and nothing was delivered while paused, so
+  every video timed out after six frames and was stopped.
+- **Cause, part 2: looping.** The guest enables looping and detects the end
+  through the loop's backward timestamp. The real decoder never looped, so
+  after the last frame the guest waited forever.
+- **Fix:**
+  - `Decoder::Seek` stops the decode worker, seeks the container, flushes the
+    codecs and the resampler, and drops frames that end before the target.
+    `EndOfStream()` stays false throughout.
+  - `JumpToTime` seeks while it holds the player's decoder lock exclusively,
+    restarts the media clock at the target, and opens a one-frame window
+    while paused.
+  - A looping real stream is rewound at its end.
+- **Verified (Intel, strict, clean binary):**
+  - Insect platformer, with a route that does not skip: video 1 plays all
+    906 frames (0–29.9 s) and video 2 plays to 38 s. The title then reaches
+    gameplay with the HUD.
+  - The sequel's 79.6 s intro plays to the end. The starting area then loads
+    in about 20 s and reaches gameplay.
+  - Normal play route: insect platformer 95–315 fps, sequel 76–294 fps
+    (capture method).
+  - Delivery is paced by the guest at the media rate: 33 ms per frame at
+    30 fps, 40 ms at 25 fps.
+  - `EmulatorAudio.*`: 121 tests pass, including the new seek test, with a
+    local synthetic clip in `KYTY_AVPLAYER_TEST_MEDIA`.
+- **Regression set.** Titles that import the jump or loop NIDs and ship video:
+  - Puzzle-platformer: 158–236 fps, no regression.
+  - Garden title: 74–295 fps, no regression.
+  - First-person puzzle title: stalls early, at frame 177 on a
+    `gfx_storage_frontier` refusal. Earlier runs stalled at frames 92, 332
+    and 134, so the stall predates this change.
+  - Brawler: stops at 61 s on a read at `0x58`, with the same crash signature
+    as 5 earlier runs since 2026-10-14. Pre-existing.
+  - Other importers ship no video files.
+- **Exclusion:** delivering the jump warning on the next guest call instead of
+  synchronously changed nothing.
+- **Not run:** AMD (the iGPU still needs a host reboot);
+  `kyty_playable_regression.py` (gameplay checked from captures only). The
+  regression set came from a static scan for video files. A title that keeps
+  video in compressed bundles would not show up in it. That class is left to
+  the next main sweep.
+
+## Platformer pair: remaining device-address waits and boot time (2026-10-17)
+
+Measured on 9988930f (Intel, strict) after the two changes below. No code
+change came out of it. These are the results and the exclusions.
+
+- **Device-address draw waits are one storage class.** After the index
+  change, the sequel's dominant CPU wait is still the device-address draw
+  retry: `CommandProcessor::WaitSubmission` from `DrawIndex`, 11.6k waits and
+  8.6 s in a ~100 s window (symbolized fence stacks). Present waits were
+  2.4 s and texture fills 19 ms.
+  - A refusal census (opt-in counter in
+    `GpuMemory::PendingStorageWriteBack`, one 200 s play run) recorded 20,000
+    refusals, all on one 32 KiB storage buffer crossing a depth target on the
+    graphics queue:
+    - 14,457: the only failing condition was the overlap link (`others`
+      non-empty).
+    - 5,542: the overlap link, and the storage was also bound as that
+      target's HTILE (`depth_meta_bound`).
+  - Caveat: the counter fires on the first non-publishable object and
+    returns. Other pending storage behind it was never counted, so publishing
+    this object alone is not proven to unblock the draw.
+  - Decision: left waiting. Device publication skips the completion
+    write-back, and HTILE clears are recognized from the bytes at write-back
+    (`DepthMetaMarkClear`). Both adopt paths refuse `depth_meta_addr`
+    deliberately. Moving that recognition touches every title with depth
+    (the racing title's HTILE clear fix included), for at most ~9% of CP
+    time on titles already at 86-127 fps.
+  - Open question: in the first class, the storage crosses a depth target
+    but is not bound as its metadata. Either it is the same HTILE range and
+    the binding missed it, or it is a different range. If it is the same
+    range, write-back and flush never signal clears for it.
+    - The binding sites are `GpuMemoryCreate.cpp` near 2712 (binds only
+      when the depth target exists at storage creation) and near 2125
+      (binds only under `multi_depth_stencil_reclaim`).
+    - Direction: add the storage address and the parent's
+      `PARAM_HTILE_ADDR`/`PARAM_HTILE_SIZE` to the census key, and iterate
+      past the first blocker.
+- **Boot and loading are not emulator-bound on Intel.**
+  - Timeline (sequel, cold caches, 120 s run with captures every 600
+    frames): title menu at ~21 s after fixed-length splash screens.
+    New-game loading screens last 3 s and 7 s. Act title card at ~100 s,
+    after the route's first-boot settings screens.
+  - Per-thread CPU every 5 s over the same run: no thread above 45% of a
+    core during boot or loading.
+  - Shader work in the first 25 s window: 40 SPIR-V compiles in 0.67 s,
+    78 pipeline creates in 0.18 s, pipeline misses 0.9 s in all. The insect
+    platformer is the same: 37 compiles in 0.66 s.
+  - File reads go through the AMPR command path (`Ampr::ExecuteRead`).
+    Timing counters over one run:
+    - Boot: 2,554 reads of 1.6 GB in ~16 s. Time inside `ExecuteRead` was
+      1.9 s: host-write lease begin and end 1.1 s
+      (`GpuDirtyPageTracker::BeginHostWrite`/`EndHostWrite`, two page walks
+      per read), open and path resolution 0.4 s, the read itself 0.38 s
+      (page cache).
+    - New-game load: ~700 reads of 400 MB, 0.33 s in all.
+  - Fixed, the host-write lease cost. Every span over 64 pages scanned the
+    whole 262,144-slot dirty-page table, once in `BeginHostWrite` and once in
+    `EndHostWrite` (~0.2 ms each), whatever the read size. Spans up to 2,048
+    blocks now read one 64-page block summary (`page_mask`) per block and
+    look up only the pages it lists. A block whose lookup passes the probe
+    limit falls back to per-page lookups for that block. Larger spans keep the
+    single table scan. Sequel boot, 120 s, same route, ~3,370 reads of
+    2 GB: lease 703 -> 4 ms, release 771 -> 0 ms. Regression at 200 s: the
+    sequel 81-82 fps in play, the insect platformer 102-105, the fishing
+    dock 21-22, the card title correct; all reach the same state as before.
+  - Not verified: the slow loading the maintainer reported was seen on the
+    AMD iGPU (14-26 fps in play). If the guest's loading work is
+    frame-paced, it scales with frame time there. The iGPU needs a host
+    reboot before any AMD evidence (see the regression sweep below).
+  - Probe patches (local only): `diag-gdacensus-20261017.patch`,
+    `diag-amprio-20261017.patch`.
+
+## Index snapshots over linked surfaces (2026-10-17)
+
+- **Symptom.** After the device publication below, the sequel's next fence
+  cost was the synchronous index upload. `update_func` → `UtilCopyBuffer`
+  on the utility queue showed 23k waits and 6.5 s per ~80 s of play
+  (symbolized fence stacks; `GraphicsRenderDrawIndex` →
+  `GpuMemoryCreateObject` → IndexBuffer `create_func`).
+- **Cause.** An indexed draw first tries a per-command-buffer snapshot of
+  the index bytes (`TryUploadTransientReadOnlyBuffer`). The snapshot
+  accepted only buffer overlaps. A refusal census (opt-in counter, one
+  150 s run) showed that nearly every refused index range, all ≤ 4 KiB,
+  lay inside a live surface:
+  - Texture Contains: 36.7k.
+  - RenderTexture Contains: 12.1k.
+  - StorageTexture Contains: 2.5k.
+  - Mixes of these with read-only buffers make up the rest.
+  
+  The refused range then became an IndexBuffer object, uploaded and waited
+  on every time its guest bytes changed.
+- **Why the snapshot is equivalent.** The create path links an IndexBuffer
+  under these surfaces (`GpuMemoryAllowsIndexContainedInSurface`) and
+  uploads it from guest memory. It is never seeded from the surface: render
+  alias materialization applies only to incoming storage images, and the
+  index object has no create-from-objects function. The snapshot copies
+  the same guest bytes at the same bind point.
+- **Change.** The index admission (renamed `IdleWritableStorage` →
+  `IndexView`) also accepts the surfaces that rule links, with the same
+  relations; a depth target qualifies only when crossed. Buffers keep their
+  rules: read-only, or idle writable storage. Vertex and storage snapshots
+  are unchanged.
+- **Boot stall check (fishing title, 10 boots of 45 s on this build).**
+  - 8 of 10 boots were clean.
+  - The other 2 stopped at frame 3 with 2 presents. The `stall-diagnostics`
+    counters showed 1 draw, 1 dispatch, no index binding
+    (`draw_index_buffer_binding_ns` 0), 3 transient probes (all hits) and
+    no device-address preparation.
+  - The changed admission never ran before those stalls, so this frame-3
+    boot stall is an independent, intermittent defect. It also weakens the
+    attribution in "Index buffer objects through the mapping: excluded
+    (2026-10-11)": that stall had the same signature.
+  - It predates both of today's graphics changes. The run history holds the
+    same stall on builds f91e7106 (2026-10-14) and 4175df97 (2026-10-16):
+    6 of 85 recorded runs of the fishing title.
+  - It is a hang, not a slow boot. In 200 s runs, status still read frame 3
+    and 2 presents 168-204 s after the last present.
+  - Open defect: the stall is at frame 3 with every guest thread waiting,
+    and `sync-waits` is disabled by default.
+  - Direction: enable sync-wait tracking and take host stacks of the
+    command-processor thread at the stall. The 2026-10-11 record saw it
+    runnable inside the driver's graphics pipeline creation.
+- **Evidence (Intel, strict, one run each, capture-method fps).** Every run
+  ended in status 1 with no error, and the final captures show intact
+  geometry.
+  - Sequel, gameplay windows: 85.6/90.2 fps, against 73.0/77.9/73.2 on the
+    previous build.
+  - Sequel, perf snapshots: 8.1k-9.0k fence waits and 8.8-9.6 s per 26 s
+    window, against 15k and 11.5-12.0 s.
+  - Insect platformer: 115-127 fps in play, against 90-91.
+  - Card title: 183-234 fps.
+  - Fishing title: 21-22 fps, unchanged.
+  - Beat 'em up: 14-17 fps, unchanged.
+  - Sandbox title: same timeline as the previous build, about 12k frames,
+    then the same late drop that main18 shows.
+  - Emulator unit suite: 2245 passed, 9 skipped.
+
+## Same-queue storage published on the device before guest-address reads (2026-10-17)
+
+- **Symptom.** In the sequel's gameplay on Intel, about 46% of each 26 s
+  window was spent in CPU fence waits (12.0-12.2 s, 21.8k-22.5k waits).
+  Symbolized fence stacks (~80 s window) attributed them to:
+  - `RetryGuestDeviceAddressDraw` (`GraphicsRun.cpp`): 12.4k waits, 16.9 s.
+  - Synchronous create/update uploads through a temporary command buffer:
+    23k waits, 6.5 s.
+  - Present: 4.4k waits, 1.6 s.
+  
+  The GPU render engine was 42.9% busy (xe fdinfo cycles), so the frame is
+  bound by CPU waits, not by the GPU.
+- **Cause.** `PrepareGuestDeviceAddressForRead` refuses a draw while any
+  writable storage in the registered device-address ranges has an incomplete
+  use. The draw then waits for the CPU write-back. A census showed both the
+  producer and the consumer of every such storage on queue 8, so the guest
+  only needs device order, not a CPU round trip.
+- **Change.** `PublishPendingStorageToGuestAddress`
+  (`GraphicsRenderAttachments.cpp`) handles the case where every incomplete
+  use is on the consumer's queue and `StorageIsWholeGuestContent` holds:
+  - Conditions: one block, no linked objects, no depth metadata, hashed and
+    page-fault tracked, no guest write since the last sync, and no label
+    fence in the range.
+  - It records a buffer-to-import copy between barriers in the consumer's
+    command buffer and marks the object published by that submission.
+  - The submission becomes a use of the object (`RecordUse`), so release and
+    the completion write-back follow the copy.
+  - That later write-back adopts the device result (page snapshot and
+    write notification) without writing guest memory again
+    (`StorageBufferWriteBackPublishedDevice`), so a CPU store made after the
+    copy is not overwritten. The unit test
+    `EmulatorLabelPublication.DevicePublishedWriteBackKeepsLaterCpuStores`
+    covers this.
+  - The rest keeps the CPU wait: any other queue, aliases or depth metadata.
+- **Evidence (Intel, strict).** Frame rates use the main18 method: frames
+  between two native captures divided by the seconds between them.
+  - Sequel, A/B on one build. With the change: 67.6/76.8/71.5 fps. Without
+    it: 58.7/71.5/65.2 fps. main18: 54.8/58.5/50.9 fps.
+  - Sequel, perf snapshots per 26 s window. With the change: 15.1k/14.7k
+    waits, 11.5-12.0 s. Without it: 22.5k/21.8k waits, 12.0-12.2 s.
+  - Sequel, final build: 68.5-77.9 fps.
+  - Card title: 181-210 fps.
+  - Beat 'em up: 14-17 fps (main18 15-20).
+  - Fishing title: 21-22 fps (main18 16-23).
+  - Sandbox title: 49-79 fps, then 10 and 8 in the last windows. main18
+    shows the same late drop: 64-66, then 37.5, 2.0, 0.6 and 6.6.
+  - Insect platformer, first run: a strict stop at 182 s (see below).
+  - Insect platformer, rerun on the same binary: passed 200 s at 90.0/91.3
+    fps in play (main18: 62.9/53.4/50.7).
+- **Not tested.**
+  - AMD: the iGPU is wedged by gfx ring timeouts and needs a host reboot.
+  - `scripts/kyty_playable_regression.py` was not run. The emulator unit
+    suite (2245 passed, 9 skipped), `check_emulator_boundaries.py --strict`
+    and `check_graphics_tables.py` were run.
+- **No repeated copies.** `CollectWritableStorage` skips a storage that is
+  already published on the consumer queue at its current `write_uses`. A
+  later device-address draw in the same command buffer therefore neither
+  copies again nor waits for the publishing submission.
+- **Excluded or left open.**
+  - The largest remaining refusal is a 32 KiB storage that is exactly the
+    HTILE block of a live depth target. A compute clear rewrites it every
+    frame. It is depth metadata, so its write-back keeps its side effects and
+    it still waits. Do not widen the gate to it without a depth-metadata
+    contract.
+  - A 49 KiB storage contained in a storage image also still waits.
+  - Which storages alias depends on where the guest allocator places them in
+    each run, so the hot set and the gain vary between runs.
+  - Next lever: the synchronous create/update uploads (6.5 s per 80 s).
+- **Open defect: `Texture - Contains - StorageTexture` (insect platformer,
+  1 of 2 runs).**
+  - Stop at `GpuMemoryCreate.cpp:1545`, 182 s into play.
+  - A new 256 KiB storage image (0x40000) lies inside a 2 MiB CPU-uploaded
+    Texture that is in use, not read-only, written by the GPU, and has 272
+    linked parents.
+  - `create_texel_bits_seed` only considers `Equals` relations, and no
+    single-parent rule covers `Contains` for this pair.
+  - Not attributed. The change does not touch this create path directly,
+    but it does change storage lifetimes and timing.
+  - The rerun on the same binary passed. Earlier runs of this title never
+    hit it: the main18 Intel and AMD sweeps and the AMD platformer rerun,
+    200 s each.
+  - A second occurrence, `Texture - Crosses - StorageTexture`: a 256 KiB
+    storage image at 22 s, in a run with console logging (2026-10-17). The
+    console output changed the timing. The same relation family appears at
+    a different time, which points to allocation placement rather than one
+    fixed scene.
+  - Direction: decide from the guest's descriptors whether the storage image
+    reinterprets the texture's bytes (seed from guest memory and link, as
+    `GpuMemoryAllowsStorageTextureContainedInRenderTarget` does) or only
+    reuses freed memory (reclaim).
+
+## Main regression sweep after the #18 merge (2026-10-17)
+
+Build: `main` at 71814344, strict runs, one title at a time, scripted input
+routes, 100-240 s each. Hosts: Intel Arc A770 (Xe KMD, Mesa) and the AMD
+Raphael iGPU (RADV, 2 CUs). Frame rates are frames between two native
+captures divided by the seconds between them, taken in the gameplay window;
+single `status` samples are instantaneous and swing widely (an earlier
+"86 fps" for the atmospheric platformer was such a sample; its gameplay
+window averages 59-61 fps on Intel and 30-31 on AMD on both builds).
+
+No title regressed against its previous strict run. Reached gameplay on
+Intel: card title, platformer pair, racing title, Unity fishing title, beat
+'em up, sandbox title, roguelite action platformer, watercolour platformer,
+isometric roguelike, gothic action platformer, dream platformer, zoo title,
+preschool Unity title, pixel exploration title, artillery title, roguelike
+dungeon crawler and tower-defence title. The ninja platformer's generic route
+stops at its title screen, the anime fighting title stays in its story intro
+and the role-playing title reaches the traveler selection, as before.
+
+Open defects found by the sweep, none of them caused by the merge:
+
+- Intermittent early stall (both hosts). Presents stop with no fatal error
+  and `phase=stalled`: the ninja platformer on Intel at frame 3812, the
+  gothic action platformer on AMD at frame 391. The rerun of each reached
+  its usual state (2 stalls in 45 runs). No live evidence yet: the harness
+  queried the agent only after exit. Next evidence: `threads`,
+  `sync-waits` and `events` taken while `phase=stalled`.
+- Gothic action platformer, AMD only: every capture is black for 240 s while
+  the title runs at 53-64 fps in `phase=interactive`; one capture shows a
+  single large grey triangle. Intel shows gameplay on the same route. First
+  AMD run of this title, so there is no AMD baseline. Evidence so far:
+  both hosts present `B8G8R8A8_SRGB` 1920x1080 and the AMD frames are RGB
+  zero, so readback is not the cause. The grey triangle is a flat white
+  triangle with one vertex at the screen centre and two at the right corners,
+  a fullscreen pass with one collapsed vertex. The translated SPIR-V of every
+  shader is identical on both hosts except for baked guest-address
+  constants, so the difference is in how the host runs the same module.
+  `RADV_PERFTEST=gewave32` and `gewave32,pswave32,cswave32` kept the screen
+  black (stages whose subgroup size Kyty pins to the guest wave are not
+  affected by that variable), but those runs came after the gfx ring timeouts
+  described below, so this exclusion is void until it is repeated on a
+  freshly booted host. The geometry shader synthesizes the
+  guest NGG wave info (`s3`) and `exec` from the host subgroup ballot; next
+  evidence: the fullscreen vertex shader's per-lane `gl_VertexIndex`,
+  `gl_SubgroupInvocationID` and output position on AMD for one draw.
+- Excluded: the artillery title's white and blue terrain on AMD is a
+  randomly generated arctic map (falling snow, different team names), not a
+  colour error; the Intel run drew a stone map. Compare like for like before
+  treating a terrain difference as a defect.
+- Puzzle title and role-playing title, AMD only: device lost
+  (`vkQueueSubmit` result -4) on queue 8. On Intel the puzzle title stalls at
+  boot frame 332 without a capture, as in all earlier runs.
+  Update 2026-10-17: the puzzle title's two causes are fixed; the
+  role-playing title's timeout is still open (see "Puzzle title on AMD: two
+  causes of the gfx ring timeout" at the top of this manual).
+- **AMD runs after a gfx ring timeout are invalid until the host reboots.**
+  - What happened: the kernel log shows six `ring gfx_0.0.0 timeout` events,
+    each followed by a ring reset and "device wedged, but no recovery needed".
+    Five came from the puzzle title's run (05:35Z) and one from the
+    role-playing title's run (05:38Z), the two device-lost runs above.
+  - What followed: every later AMD run rendered wrongly while the title kept
+    running. The card title, clean at 45-51 fps before the timeouts, gave
+    only black captures at about 78 fps. The atmospheric sequel, which
+    reached its start room cleanly before the timeouts, drew its intro, title
+    card glyphs and first room as stretched, tilted polygons in two
+    consecutive runs. Intel runs of the same binary in the same hour were
+    clean.
+  - The binary differed from the sweep build only by a diagnostic sink that
+    is disabled without its environment variable, so the change is the host
+    state, not the code. Confirmed on 10-17: after a full GPU reset the
+    racing title rendered cleanly again with the same branch head.
+  - Consequences for this sweep: the anime fighting title's AMD row was taken
+    after the timeouts and must be repeated. So must the AMD runs behind the
+    gothic platformer's `RADV_PERFTEST` exclusion. Its black screen itself
+    predates the timeouts (05:16Z run).
+  - Rule: before reading an AMD result, check
+    `journalctl -k | grep 'ring gfx.*timeout'` since the last boot. Run titles
+    that lose the device last in an AMD sweep, or alone.
+- Role-playing title: a route that starts a new game now gets past the title
+  and stops at a missing `ImageSampleCd` emitter (pixel stage) while loading.
+  Its title screen background is flat magenta on Intel; earlier captures of
+  that screen were dimmed by a loading overlay, so it is not known whether
+  this is new.
+- AMD routes: the input routes were timed on Intel, so on the slower AMD host
+  the preschool Unity title ends in its pause menu, the tower-defence title in
+  its name entry and the roguelike dungeon crawler in its dark first room.
+  Their AMD frame rates are menu or intro rates, not gameplay.
+
 ## Platformer pair: unreadable glyphs were dropped command-buffer packets (2026-10-17)
 
 - Observed (Intel and AMD, strict): menu and HUD text in both platformers drew
@@ -123,16 +1417,91 @@ is attributed yet.
     `KYTY_DUMP_DRAW=all` and `KYTY_DUMP_DRAW_FRAME=<n>-<n>` to find the mask
     draw: its blend state, its vertex colour source, and whether its inputs
     change across frames.
+  - 2026-10-17, Intel, what was measured:
+    - No draw is skipped in the dark scene: the events ring had
+      `dropped=0` and no `draw_skipped`.
+    - Frame structure from the draw dump: the game first renders the far
+      layers into a 640x360 target and blurs it in ping-pong passes. It then
+      draws that target onto the 1920x1080 scene as an opaque, depth-tested
+      10x10-unit plane mesh (121 vertices, 600 indices). The sprites follow,
+      sorted far to near.
+    - The plane draw, its texture and its 16-byte constant (all zero) are the
+      same in the bright start room and in the dark room. The 640x360
+      targets hold the blurred far layers in both rooms.
+    - The dark framing reached by walking right is a small side cave. The
+      camera follows the player into it, and the frames stay static while
+      the player stands against its far wall. This alone is not shown to be
+      wrong.
+  - 2026-10-17, Intel, walking right with a capture every 3 s: the player
+    passes the cage and reaches the start room's right edge. There, a
+    soft-edged black corner covers the top right of the lit forest, and the
+    player walks into it and leaves the view. This edge frame matches the
+    maintainer's description (black mass over the lit forest, player at the
+    right edge). About 3 s later a small cave pocket is drawn centred on
+    screen and framed in black, with fireflies over the black.
+    - No scene load separates the two: the 3 s perf windows around them have
+      no SPIR-V compile, no pipeline miss, allocations under 35 MB and no
+      frame-rate dip. The camera moved within one scene, so the black around
+      the pocket is not shown to be a room border. A cover mask that should
+      fade when the player enters (black sprites with alpha 199-251, above)
+      remains the live lead.
+    - A published walkthrough places a Shell Shards cave to the right of the
+      start. Its screenshot of the start room shows dark soft-edged corners
+      too, but no hardware image of the cave was found.
+    - Excluded on Intel for this sequence, a cover mask stuck partway:
+      draws dumped one frame in 100 from the edge through the pocket (a
+      bounded diagnostic, not committed). Every sprite drawn with black
+      vertex colour carries alpha 255 in the guest's vertex data in every
+      sampled frame, and none has a partial alpha. The set of black sprites
+      changes in the frame where the pocket appears: other atlas sprites
+      enter and leave the view, as when the camera reaches a new area. The
+      guest asks for these opaque black silhouettes and the GPU draws them.
+    - Still open: whether the silhouettes' shapes are right. Their soft
+      edges come from the alpha of BC7 atlas textures. A wrong alpha decode
+      would widen them, but a decode fault would also change the shapes of
+      the lit sprites drawn from the same atlases, which look correct.
+  - The maintainer's screenshot was taken on the AMD iGPU and was not kept
+    by the session; the AMD-only reading rested on it. Its description
+    (soft-edged black mass over a lit forest, player at the right edge)
+    matches the Intel edge frame above. It was taken before the AMD ring
+    timeouts recorded above. After an AMD reboot, compare the black-with-alpha
+    sprites (vertex colour (0,0,0,199..251), BC7 atlas) on both hosts, matched
+    by index count and texture.
 - **Overlapping text (both platformers).** The maintainer reports that some
   texts sometimes draw over each other. The sequel's opening credits fade
   names in and out over gameplay, so first check whether two fading strings
   overlapping is the title's own transition. No capture isolates it yet;
   capture the moment before attributing it.
 - **Slow loading screens and first boot (sequel).** First start and some
-  loading screens take much longer than later ones. Not measured yet. The
-  persistent SPIR-V cache and the Vulkan pipeline cache store (`PipelineCacheStore.cpp`) both exist, so the first step is to
-  separate translation and pipeline creation from guest file I/O, by
-  comparing a cold-cache boot with a warm-cache boot on the same binary.
+  loading screens take much longer than later ones.
+  - Two causes found and fixed on 2026-10-17: each intro cinematic waited
+    out a 10 s guest timeout (see "Platformer pair: intro cinematics were
+    black"), and the host-write lease of every AMPR read scanned the whole
+    dirty-page table twice (~1.5 s per boot).
+  - Measured, Intel, cold caches (every harness run starts with empty SPIR-V,
+    Mesa and pipeline caches), agent perf snapshot every 5 s:
+    - Pipeline misses cost about 1.9 s across the whole boot, in bursts of
+      0.1-0.5 s when a new scene starts. Shader translation is not the long
+      wait.
+    - From the new-game prompt: the prologue poem shows "Loading..." until
+      the load ends, then "Press any button to skip". A cave scene with
+      "Loading..." follows, then ~16 s of black, then the first area fades in
+      over ~10 s.
+    - During those ~16 s the guest presents ~360 fps at ~10 draws per frame
+      and the command processor is busy 1.7 s of every 5 s. Per-thread CPU
+      sampled inside the black (104-114 s): the busiest thread is the command
+      processor at 36% of a core and no other thread passes 10%. The guest
+      threads sleep on futexes (no
+      blocked guest condition wait with `KYTY_SLOT_TRACE`, no agent event).
+      AMPR and kernel AIO complete synchronously in the submitting thread, so
+      I/O completion latency is excluded.
+    - The same ~15 s of black follows the unskipped intro video. The
+      published description of the opening has the cage fall into a pit
+      before the player wakes at the bottom, which fits a scripted black
+      stretch. Not verified against hardware timing.
+  - Next, if the black still feels long: time the same transition on
+    hardware or a reference recording, and check whether the guest waits on
+    an audio cue (an audio clock that runs slow would stretch it).
 - **AMD frame rate (both).** In play the insect platformer runs at 26-28 fps
   and the sequel at 14-26 fps on the integrated RDNA2 GPU. On Intel the
   insect platformer runs at 86 fps. Whether AMD is bound by the GPU or by the
@@ -1482,10 +2851,11 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
     first object only, so a recycled range with depth views in two formats
     can bind the stale one, as storage textures did before c8e3537c.
     Direction: pick the most recently written view.
-  - `CommandProcessor::DrawIndexIndirect` (`GraphicsRun.cpp:2115`) waits only
-    for device-address write-backs before its CPU read of the arguments, so
-    a draw whose arguments an earlier dispatch of the same recording wrote
-    can use stale counts. Direction: the same admission as 6d1b178d.
+  - Fixed 2026-10-17: `CommandProcessor::DrawIndexIndirect` and `DrawIndirect`
+    waited only for device-address write-backs before their CPU read of the
+    arguments, so a draw whose arguments an earlier dispatch of the same
+    recording wrote could use stale counts. They now read the arguments
+    through the same current-bytes path as 6d1b178d.
   - Exact storage views are not separated by image type; a 2D/3D filter was
     tried and dropped because no failure needs it.
 
@@ -3116,6 +4486,9 @@ previous section; the count of live ranges stays open.
 - Reverted, root cause unknown. The waited utility copy changes the timing
   around pipeline creation; that path needs its own investigation before
   index uploads drop the fence again.
+- 2026-10-17: the same frame-3 boot stall occurred in 2 of 10 boots. Both
+  stalled before any index buffer was bound (see "Index snapshots over
+  linked surfaces"), so the stall can occur without the index upload path.
 - The Unity fishing title's frame time is per-draw binding work at about
   1,160 draws per frame: resource binding 40-44%, texture descriptors 18%,
   state setup 16-18%. Removing fence waits alone does not move it.

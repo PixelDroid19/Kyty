@@ -14,14 +14,18 @@ namespace Kyty::Libs::Graphics {
 //
 // - no instruction that reads or writes another lane's data or a wave-wide
 //   count (lane reads/writes, MBCNT, WQM, DS append/consume, DPP, VCCZ/EXECZ
-//   operands, program-counter writes, messages);
+//   operands, program-counter writes, messages), except a READFIRSTLANE whose
+//   source is proven wave-uniform under the launch EXEC;
 // - every EXEC/VCC value used as a mask is consumed only per lane, and every
 //   scalar register that may hold a mask at a program point is never read there
 //   as uniform data (and vice versa); mask constants are only 0 or all ones;
 // - SCC is never read after a mask operation could have produced it;
-// - for every EXEC/VCC-conditional forward branch, no scalar register or SCC
-//   written inside the skippable region is live at the branch target, and the
-//   region writes no M0 and performs no scalar memory side effect.
+// - every ADD_TID LDS access addresses a lane-private plane (no lane of the
+//   wave can reach another lane's dword);
+// - for every EXEC/VCC-conditional forward branch, no scalar register, M0 or
+//   SCC written inside the skippable region is live at the branch target (M0
+//   liveness includes the instructions that read it implicitly), and the
+//   region performs no scalar memory side effect.
 //
 // The last rule is what makes a host subgroup that skips a region (because
 // all of its own lanes are inactive) indistinguishable from the guest wave

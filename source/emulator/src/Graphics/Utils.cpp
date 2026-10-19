@@ -217,14 +217,34 @@ void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uin
 	                 static_cast<VkImageLayout>(dst_layout));
 }
 
-static bool IsTexelBitsColorFormat(VkFormat format)
+// Bytes per texel of the colour formats whose bits UtilCopyTexelBits moves, 0 for any other format.
+static uint32_t TexelBitsColorBytes(VkFormat format)
 {
-	return format == VK_FORMAT_R32_SFLOAT || format == VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+	switch (format)
+	{
+		case VK_FORMAT_R32_SFLOAT:
+		case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return 4u;
+		case VK_FORMAT_R16_UNORM: return 2u;
+		default: return 0u;
+	}
+}
+
+// Bytes per texel of a depth plane copied to or from a buffer (the depth aspect alone), 0 for any other format.
+static uint32_t TexelBitsDepthBytes(VkFormat format)
+{
+	switch (format)
+	{
+		case VK_FORMAT_D32_SFLOAT:
+		case VK_FORMAT_D32_SFLOAT_S8_UINT: return 4u;
+		case VK_FORMAT_D16_UNORM:
+		case VK_FORMAT_D16_UNORM_S8_UINT: return 2u;
+		default: return 0u;
+	}
 }
 
 static bool IsTexelBitsDepthFormat(VkFormat format)
 {
-	return format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+	return TexelBitsDepthBytes(format) != 0u;
 }
 
 // The copied plane: the depth words of a depth image, the colour texels otherwise.
@@ -242,8 +262,9 @@ static VkImageAspectFlags TexelBitsLayoutAspect(const VulkanImage* image)
 bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout)
 {
 	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_image == nullptr || src_image->image == nullptr || dst_image->image == nullptr);
-	const bool to_depth   = IsTexelBitsDepthFormat(dst_image->format) && IsTexelBitsColorFormat(src_image->format);
-	const bool from_depth = IsTexelBitsDepthFormat(src_image->format) && IsTexelBitsColorFormat(dst_image->format);
+	const uint32_t texel_bytes = TexelBitsColorBytes(IsTexelBitsDepthFormat(src_image->format) ? dst_image->format : src_image->format);
+	const bool     to_depth    = texel_bytes != 0u && TexelBitsDepthBytes(dst_image->format) == texel_bytes;
+	const bool     from_depth  = texel_bytes != 0u && TexelBitsDepthBytes(src_image->format) == texel_bytes;
 	if ((!to_depth && !from_depth) || src_image->layout == VK_IMAGE_LAYOUT_UNDEFINED || src_image->samples != VK_SAMPLE_COUNT_1_BIT ||
 	    dst_image->samples != VK_SAMPLE_COUNT_1_BIT || src_image->array_layers != 1u || dst_image->array_layers != 1u ||
 	    src_image->extent.width != dst_image->extent.width || src_image->extent.height != dst_image->extent.height ||
@@ -251,7 +272,7 @@ bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImag
 	{
 		return false;
 	}
-	const uint64_t bytes   = static_cast<uint64_t>(src_image->extent.width) * src_image->extent.height * 4u;
+	const uint64_t bytes   = static_cast<uint64_t>(src_image->extent.width) * src_image->extent.height * texel_bytes;
 	auto*          scratch = buffer->AllocateTransientCopyBuffer(bytes);
 	if (scratch == nullptr || scratch->buffer == nullptr)
 	{

@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 
 #include <cstdint>
+#include <vector>
 
 struct VkCommandBuffer_T;
 
@@ -14,6 +15,7 @@ namespace Kyty::Libs::Graphics {
 
 struct GraphicContext;
 struct VulkanBuffer;
+struct GpuMemoryStoragePublication;
 
 // Guest GPU-visible mappings imported as host-pointer device memory, so a
 // shader can dereference a computed guest address. Guest and host virtual
@@ -76,7 +78,10 @@ void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
 
 // The caller holds the render recording lock through the later write-back.
 // Wait for a returned dependency only after releasing recording locks, then retry.
-[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, SubmissionId* dependency);
+// With `publishable`, results the caller can publish in the consumer's queue order
+// (GuestDeviceAddressRecordPublication) are listed there instead of reported.
+[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, std::vector<GpuMemoryStoragePublication>* publishable,
+                                                      SubmissionId* dependency);
 
 // Records into `cmd`, after the GPU work already recorded there, a copy of
 // `source` (whose first byte is guest address `vaddr`, `size` bytes) into the

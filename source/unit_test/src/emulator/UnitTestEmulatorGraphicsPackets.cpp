@@ -6351,6 +6351,102 @@ TEST(EmulatorGraphicsPackets, EmitsVop1MovrelsWithDynamicM0)
 	EXPECT_FALSE(ShaderRecompilePS(code, &input).IsEmpty());
 }
 
+TEST(EmulatorGraphicsPackets, NarrowsDynamicMovrelsToBoundedM0Values)
+{
+	// m0 = bfe(s0, 0, 2) * 5 can only be 0, 5, 10 or 15, so the select chain
+	// keeps v4 and v9 and drops the named registers no such offset reaches.
+	const uint32_t shader[] = {
+	    0x80000000u | (0x27u << 23u) | (1u << 16u) | (255u << 8u), 0x00020000u, // s_bfe_u32 s1, s0, 0x20000
+	    0x80000000u | (0x26u << 23u) | (1u << 16u) | (133u << 8u) | 1u,          // s_mul_i32 s1, s1, 5
+	    0xbefc0301u,                                                             // s_mov_b32 m0, s1
+	    (0x3fu << 25u) | (9u << 17u) | (0x01u << 9u) | 266u,                     // v_mov_b32 v9, v10
+	    (0x3fu << 25u) | (5u << 17u) | (0x43u << 9u) | 260u,                     // v_movrels_b32 v5, v4
+	    0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+	ASSERT_EQ(code.GetInstructions().At(4).type, ShaderInstructionType::VMovrelsB32);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	const auto source           = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("%rel_v_4_4 = OpLoad %float %v4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%rel_v_4_9 = OpLoad %float %v9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%rel_v_4_5 "), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%rel_v_4_10 "), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompilePS(code, &input).IsEmpty());
+
+	// On the fallthrough of s_cbranch_scc0 after s_cmp_lt_u32 s1, 3, the
+	// unknown s1 is below 3: v7 (offset 3) is dropped.
+	const uint32_t guarded[] = {
+	    0xbf0a8301u,                                         // s_cmp_lt_u32 s1, 3
+	    0xbf840003u,                                         // s_cbranch_scc0 -> s_endpgm
+	    0xbefc0301u,                                         // s_mov_b32 m0, s1
+	    (0x3fu << 25u) | (6u << 17u) | (0x01u << 9u) | 263u, // v_mov_b32 v6, v7
+	    (0x3fu << 25u) | (5u << 17u) | (0x43u << 9u) | 260u, // v_movrels_b32 v5, v4
+	    0xbf810000u};
+	ShaderCode guarded_code;
+	guarded_code.SetType(ShaderType::Pixel);
+	ShaderParse(guarded, &guarded_code);
+	ASSERT_EQ(guarded_code.GetInstructions().At(4).type, ShaderInstructionType::VMovrelsB32);
+	const auto guarded_source = SpirvGenerateSource(guarded_code, nullptr, &input, nullptr);
+	EXPECT_NE(guarded_source.FindIndex("%rel_v_4_6 = OpLoad %float %v6"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(guarded_source.FindIndex("%rel_v_4_7 "), Core::STRING8_INVALID_INDEX);
+
+	// M0's source joins a branch and a fallthrough: every candidate stays.
+	const uint32_t joined[] = {
+	    0xbf840001u,                                          // s_cbranch_scc0 -> s_mov_b32 m0, s1
+	    0xbe810382u,                                          // s_mov_b32 s1, 2
+	    0xbefc0301u,                                          // s_mov_b32 m0, s1
+	    (0x3fu << 25u) | (9u << 17u) | (0x01u << 9u) | 266u,  // v_mov_b32 v9, v10
+	    (0x3fu << 25u) | (5u << 17u) | (0x43u << 9u) | 260u,  // v_movrels_b32 v5, v4
+	    0xbf810000u};
+	ShaderCode joined_code;
+	joined_code.SetType(ShaderType::Pixel);
+	ShaderParse(joined, &joined_code);
+	ASSERT_EQ(joined_code.GetInstructions().At(4).type, ShaderInstructionType::VMovrelsB32);
+	const auto joined_source = SpirvGenerateSource(joined_code, nullptr, &input, nullptr);
+	EXPECT_NE(joined_source.FindIndex("%rel_v_4_5 = OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(joined_source.FindIndex("%rel_v_4_10 = OpLoad %float %v10"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, EmitsVop1MovrelsdWithDynamicM0)
+{
+	// v_movrelsd_b32 v7, v5 with a runtime m0 reads through the source chain
+	// and writes through the gated stores; both cover the same registers.
+	const uint32_t shader[] = {0xbefc0300u, (0x3fu << 25u) | (7u << 17u) | (0x44u << 9u) | 261u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+	ASSERT_EQ(code.GetInstructions().At(1).type, ShaderInstructionType::VMovrelsdB32);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	// v7 is a candidate of both sides; each id is defined once.
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	const auto first  = source.FindIndex("%rel_eq_1_7 = ");
+	ASSERT_NE(first, Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.Mid(first + 1).FindIndex("%rel_eq_1_7 = "), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompilePS(code, &input).IsEmpty());
+}
+
 TEST(EmulatorGraphicsPackets, ParsesVop1MovrelsdAndMovreld)
 {
 	// Relative moves keep their base registers in the IR; M0 resolution happens
@@ -6935,7 +7031,12 @@ TEST(EmulatorGraphicsPackets, CompressedMrtExportReadsPackedHalfFromUintShadow)
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(tapped_source.FindIndex("OpStore %fs_tap_0 %fs_tap_signed_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(tapped_source.FindIndex("%fs_tap_out_0_2 = OpLoad"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v28"), Core::STRING8_INVALID_INDEX);
+	// The write of v28 reads its old and new value for the EXEC select; the
+	// export must add no further read.
+	const auto v28_keep = sparse_source.FindIndex("OpLoad %float %v28");
+	const auto v28_new  = v28_keep == Core::STRING8_INVALID_INDEX ? v28_keep : sparse_source.FindIndex("OpLoad %float %v28", v28_keep + 1u);
+	ASSERT_NE(v28_new, Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v28", v28_new + 1u), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v29"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v30"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(sparse_source.FindIndex("OpStore %fs_tap_1 %float_0_000000"), Core::STRING8_INVALID_INDEX);

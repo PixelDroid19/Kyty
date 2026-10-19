@@ -364,15 +364,9 @@ bool StepSpillBlock(const ShaderCode& code, const SpillBlock& block, uint64_t re
 	return true;
 }
 
-// Prove compiler spill slots, not arbitrary pixel LDS. Every ADD_TID access
-// addresses an exact M0 plane, planes are equal or disjoint, and no other LDS
-// instruction can observe their bytes, so the host's per-invocation array that
-// omits TID cannot alias another lane. A lane then only reads dwords it alone
-// stores, whatever EXEC, branches or loops lie between the store and the reload;
-// a lane that did not store reads undefined bytes from guest LDS and from the
-// private array alike. Each read must follow a store to its plane on every path,
-// and every interpolation must observe the original launch parameter M0.
-bool HasPrivatePixelAddtidSpills(const ShaderCode& code)
+} // namespace
+
+bool ShaderAddtidAccessesArePrivatePlanes(const ShaderCode& code, int parameter_sgpr, uint64_t reserved_bytes)
 {
 	const auto& instructions = code.GetInstructions();
 	bool        any_addtid   = false;
@@ -385,11 +379,9 @@ bool HasPrivatePixelAddtidSpills(const ShaderCode& code)
 		any_addtid = any_addtid || IsAddtid(inst.type);
 	}
 	std::vector<SpillBlock> blocks;
-	if (!any_addtid || code.GetPixelExtraLdsDwords() == 0u || !BuildSpillBlocks(code, &blocks)) { return false; }
-	const uint64_t reserved_bytes = std::min(static_cast<uint64_t>(code.GetPixelExtraLdsDwords()) * sizeof(uint32_t),
-	                                         static_cast<uint64_t>(kDsAddtidSpillDwords) * sizeof(uint32_t));
+	if (!any_addtid || !BuildSpillBlocks(code, &blocks)) { return false; }
 	std::vector<std::optional<AddtidSpillState>> entries(blocks.size());
-	entries[0] = AddtidSpillState {PixelScalarOrigins(code.GetPixelParameterSgpr()), {}};
+	entries[0] = AddtidSpillState {PixelScalarOrigins(parameter_sgpr), {}};
 	std::vector<uint32_t> work {0u};
 	while (!work.empty())
 	{
@@ -411,6 +403,20 @@ bool HasPrivatePixelAddtidSpills(const ShaderCode& code)
 	}
 	return std::adjacent_find(planes.begin(), planes.end(),
 	                          [](uint32_t low, uint32_t high) { return high - low < kAddtidPlaneBytes; }) == planes.end();
+}
+
+namespace {
+
+// The pixel emitter's per-invocation array holds the reserved extra-LDS prefix.
+bool HasPrivatePixelAddtidSpills(const ShaderCode& code)
+{
+	if (code.GetPixelExtraLdsDwords() == 0u)
+	{
+		return false;
+	}
+	const uint64_t reserved_bytes = std::min(static_cast<uint64_t>(code.GetPixelExtraLdsDwords()) * sizeof(uint32_t),
+	                                         static_cast<uint64_t>(kDsAddtidSpillDwords) * sizeof(uint32_t));
+	return ShaderAddtidAccessesArePrivatePlanes(code, code.GetPixelParameterSgpr(), reserved_bytes);
 }
 
 class Flow

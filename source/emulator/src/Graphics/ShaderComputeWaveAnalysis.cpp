@@ -11,6 +11,7 @@
 
 #include "ShaderStorageAnalysis.h"
 
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -25,6 +26,18 @@ constexpr int kMaxSgpr                  = 105; // RDNA2 SGPR0..SGPR105
 constexpr int kMaxVgpr                  = 255;
 constexpr int kMinIntegerInlineConstant = -16;
 constexpr int kMaxIntegerInlineConstant = 64;
+
+// Mnemonic tests on the shared name table: the classifiers below run for every
+// instruction of every dispatch, so they must not allocate.
+bool NameStartsWith(std::string_view name, std::string_view prefix)
+{
+	return name.substr(0, prefix.size()) == prefix;
+}
+
+bool NameContains(std::string_view name, std::string_view part)
+{
+	return name.find(part) != std::string_view::npos;
+}
 
 bool ComputeWaveOperandIsPlain(const ShaderOperand& operand)
 {
@@ -400,8 +413,8 @@ uint8_t ComputeWaveInstructionEudBaseReadMask(const ShaderInstruction& instructi
 	}
 	// Scalar loads through the extended pointer resolve through the native
 	// per-PC EUD mapping; the emitter fails closed when a PC is unmapped.
-	const auto name        = Core::EnumName8(instruction.type);
-	const bool mapped_load = ShaderPairedEudStorageLoadSupported(instruction, bind) || name.StartsWith("SLoad");
+	const bool mapped_load =
+	    ShaderPairedEudStorageLoadSupported(instruction, bind) || ShaderInstructionTypeStartsWith(instruction.type, "SLoad");
 	uint8_t read_mask       = 0;
 	for (int source = 0; source < instruction.src_num; ++source)
 	{
@@ -536,10 +549,10 @@ ShaderComputeWaveAnalysisResult AnalyzeExtendedBaseLifetime(const ShaderCode& co
 	{
 		const auto& instruction = instructions.At(index);
 		const auto& state = states[index];
-		const auto name = Core::EnumName8(instruction.type);
 		const bool mapped_load = instruction.src_num > 0 &&
 		                         ComputeWaveOperandSgprPairMask(instruction.src[0], pair_start) != 0u &&
-		                         (ShaderPairedEudStorageLoadSupported(instruction, bind) || name.StartsWith("SLoad"));
+		                         (ShaderPairedEudStorageLoadSupported(instruction, bind) ||
+		                          ShaderInstructionTypeStartsWith(instruction.type, "SLoad"));
 		if (ComputeWaveInstructionHasInvalidSgprSource(instruction))
 		{
 			return {false, instruction.pc, "paired extended pointer base has an invalid SGPR source"};
@@ -1085,19 +1098,19 @@ bool ShaderComputeWaveGenericCompareSupported(const ShaderInstruction& instructi
 {
 	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
 	if (instruction.type == ShaderInstructionType::VCmpClassF32) { return ShaderFloatClassComparisonSupported(instruction); }
-	const auto name = Core::EnumName8(instruction.type);
+	const auto name = ShaderInstructionTypeName(instruction.type);
 	// SDWA compares carry the same undefined fields as the vector forms: source
 	// selects 7 and reserved bits 22 and 30 are refused, not lowered as defined values.
 	const uint32_t sdwa_ctrl           = instruction.vop_sdwa_ctrl;
 	const bool     sdwa_fields_defined = !instruction.vop_sdwa || (((sdwa_ctrl >> 16u) & 7u) != 7u && ((sdwa_ctrl >> 24u) & 7u) != 7u &&
 	                                                           (sdwa_ctrl & ((1u << 22u) | (1u << 30u))) == 0u);
-	if (!name.StartsWith("VCmp") || instruction.src_num != 2 || !sdwa_fields_defined ||
+	if (!NameStartsWith(name, "VCmp") || instruction.src_num != 2 || !sdwa_fields_defined ||
 	    (instruction.vop_sdwa && (instruction.vop_sdwa_ctrl & ((1u << 19u) | (1u << 27u))) != 0u) ||
 	    !(instruction.dst2.type == ShaderOperandType::Unknown || instruction.dst2.type == ShaderOperandType::Null))
 	{
 		return false;
 	}
-	const bool exec_compare = name.StartsWith("VCmpx");
+	const bool exec_compare = NameStartsWith(name, "VCmpx");
 	const auto& dst         = instruction.dst;
 	// v_cmpx's decoded VCC destination is a placeholder; EXEC is the target.
 	if (!exec_compare && !((dst.type == ShaderOperandType::VccLo && dst.size == 2) ||
@@ -1145,11 +1158,11 @@ bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instructio
 	{
 		return IsWholeQuadMaskInstruction(instruction);
 	}
-	const auto name = Core::EnumName8(instruction.type);
+	const auto name = ShaderInstructionTypeName(instruction.type);
 	// Saveexec variants are included: their native lowering updates the two
 	// architectural EXEC words, which paired mode keeps uniform per wave.
-	if (name.IsEmpty() || name.At(0) != 'S' || name.StartsWith("SCbranch") ||
-	    name.ContainsStr("Store") || name.ContainsStr("Atomic") || name.ContainsStr("Setpc") || name.ContainsStr("Swappc"))
+	if (!NameStartsWith(name, "S") || NameStartsWith(name, "SCbranch") || NameContains(name, "Store") ||
+	    NameContains(name, "Atomic") || NameContains(name, "Setpc") || NameContains(name, "Swappc"))
 	{
 		return false;
 	}
@@ -1205,8 +1218,8 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 	    instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1) { return false; }
 	if (ShaderComputeWaveSdwaSignedConvertSupported(instruction)) { return true; }
 	if (ShaderIsImageAtomic(instruction.type)) { return ShaderImageAtomicSupported(instruction); }
-	const auto name   = Core::EnumName8(instruction.type);
-	const bool memory = name.StartsWith("Buffer") || name.StartsWith("Tbuffer") || name.StartsWith("Image");
+	const auto name   = ShaderInstructionTypeName(instruction.type);
+	const bool memory = NameStartsWith(name, "Buffer") || NameStartsWith(name, "Tbuffer") || NameStartsWith(name, "Image");
 	if (memory)
 	{
 		// Per-lane vector memory: VGPR data/addresses, uniform SGPR descriptors.
@@ -1215,11 +1228,11 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 		// lowerings model none of them, so these decoder-preserved flags must be
 		// clear. SLC and DLC are cache hints, not reserved encodings.
 		constexpr uint8_t kMubufFlagsWithoutLowering = (1u << 0u) | (1u << 2u) | (1u << 7u);
-		if (name.StartsWith("Buffer") && (instruction.buffer_flags & kMubufFlagsWithoutLowering) != 0u)
+		if (NameStartsWith(name, "Buffer") && (instruction.buffer_flags & kMubufFlagsWithoutLowering) != 0u)
 		{
 			return false;
 		}
-		if (name.ContainsStr("Atomic") || instruction.src_num < 0 || instruction.src_num > 4 || instruction.mimg_address_num < 0 ||
+		if (NameContains(name, "Atomic") || instruction.src_num < 0 || instruction.src_num > 4 || instruction.mimg_address_num < 0 ||
 		    instruction.mimg_address_num > 13 ||
 		    !(instruction.dst.type == ShaderOperandType::Vgpr || instruction.dst.type == ShaderOperandType::Unknown) ||
 		    !(instruction.dst2.type == ShaderOperandType::Unknown || instruction.dst2.type == ShaderOperandType::Null))
@@ -1261,10 +1274,9 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 	                                     (((sdwa_ctrl >> 16u) & 7u) != 7u && (sdwa_ctrl & (1u << 22u)) == 0u &&
 	                                      (sdwa_second_source ? (((sdwa_ctrl >> 24u) & 7u) != 7u && (sdwa_ctrl & (1u << 30u)) == 0u)
 	                                                          : (sdwa_ctrl >> 24u) == 0u));
-	if (name.IsEmpty() || name.At(0) != 'V' || !sdwa_representable || !sdwa_fields_defined || name.ContainsStr("Lane") ||
-	    name.ContainsStr("lane") ||
-	    name.ContainsStr("Mbcnt") || name.ContainsStr("Movrel") || name.ContainsStr("Interp") || name.ContainsStr("Cmp") ||
-	    name.ContainsStr("Cndmask") || name.ContainsStr("Permlane"))
+	if (!NameStartsWith(name, "V") || !sdwa_representable || !sdwa_fields_defined || NameContains(name, "Lane") ||
+	    NameContains(name, "lane") || NameContains(name, "Mbcnt") || NameContains(name, "Movrel") || NameContains(name, "Interp") ||
+	    NameContains(name, "Cmp") || NameContains(name, "Cndmask") || NameContains(name, "Permlane"))
 	{
 		return false;
 	}

@@ -106,6 +106,10 @@ struct VulkanQueueInfo
 	uint32_t     family   = static_cast<uint32_t>(-1);
 	uint32_t     index    = static_cast<uint32_t>(-1);
 	VkQueue      vk_queue = nullptr;
+	// Signaled by every command-processor submission with a value that rises in
+	// submission order (guarded by mutex), so rings wait for completion.
+	VkSemaphore timeline       = nullptr;
+	uint64_t    timeline_value = 0;
 };
 
 struct GpuDetileContext;
@@ -349,7 +353,7 @@ struct DepthStencilVulkanImage: public VulkanImage
 	uint64_t depth_vaddr = 0;
 	// Guest base of the 8-bit stencil plane this image holds, 0 without one.
 	uint64_t stencil_vaddr = 0;
-	// R32F copy of the depth plane that storage views address (depth formats are not storage images), created on
+	// Colour copy of the depth plane that storage views address (depth formats are not storage images), created on
 	// first use and destroyed with this image.
 	StorageTextureVulkanImage* storage_plane = nullptr;
 	VulkanMemory               storage_plane_memory;

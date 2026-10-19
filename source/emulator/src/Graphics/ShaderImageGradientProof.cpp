@@ -1,5 +1,6 @@
 #include "Emulator/Graphics/ShaderImageGradientProof.h"
 
+#include "ShaderLaneFlow.h"
 #include "ShaderNativeWaveInternal.h"
 
 #include <array>
@@ -323,6 +324,14 @@ bool FullyDefinesVectorDestination(const ShaderInstruction& instruction, const B
 		return source0_defined && FullVectorSource(instruction.src[1]);
 	}
 
+	for (const auto type: {Type::VAddF32, Type::VMulF32})
+	{
+		if (instruction.type == type && IsCanonicalVectorAlu(instruction, type, 2))
+		{
+			return FullVectorSource(instruction.src[0]) && FullVectorSource(instruction.src[1]);
+		}
+	}
+
 	const bool mad = instruction.type == Type::VMadF32 && instruction.format == ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2 &&
 	                 instruction.src_num == 3;
 	const bool mac = instruction.type == Type::VMacF32 && instruction.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1 &&
@@ -391,7 +400,7 @@ bool PrefixTransfer(const ShaderInstruction& instruction, Bits* uniform, Bits* w
 }
 
 bool PlainWideningPrefix(const ShaderCode& code, uint32_t target_index, uint32_t* boundary_index, Bits* uniform_at_boundary,
-	                     uint32_t* wqm_index)
+	                     Bits* written_at_boundary, uint32_t* wqm_index)
 {
 	const auto& instructions = code.GetInstructions();
 	Bits        uniform;
@@ -419,6 +428,7 @@ bool PlainWideningPrefix(const ShaderCode& code, uint32_t target_index, uint32_t
 		{
 			*boundary_index      = index;
 			*uniform_at_boundary = uniform;
+			*written_at_boundary = written_in_wqm;
 			return true;
 		}
 		if (!PrefixTransfer(instruction, &uniform, &written_in_wqm)) { return false; }
@@ -427,6 +437,7 @@ bool PlainWideningPrefix(const ShaderCode& code, uint32_t target_index, uint32_t
 	if (!saw_wqm) { return false; }
 	*boundary_index      = target_index;
 	*uniform_at_boundary = uniform;
+	*written_at_boundary = written_in_wqm;
 	return true;
 }
 
@@ -483,44 +494,134 @@ bool NoExternalEdgeIntoPrefix(const StaticControlFlow& flow, uint32_t boundary_i
 	return true;
 }
 
-bool ClearGradientWrites(const ShaderInstruction& instruction, const std::array<unsigned, 4>& gradients, Bits* state)
+// Plain S_MOV_B64 between EXEC and an SGPR pair: a copy reads EXEC, a restore writes it.
+bool ExecPairMove(const ShaderInstruction& instruction, bool restore, unsigned* pair)
+{
+	if (instruction.type != Type::SMovB64 || instruction.format != ShaderInstructionFormat::Sdst2Ssrc02 || instruction.src_num != 1 ||
+	    !PlainInstructionMetadata(instruction) || !PlainUnusedSources(instruction, 1))
+	{
+		return false;
+	}
+	const auto& exec = restore ? instruction.dst : instruction.src[0];
+	const auto& sgpr = restore ? instruction.src[0] : instruction.dst;
+	if (!PlainRegister(exec, Operand::ExecLo, 2) || !PlainRegister(sgpr, Operand::Sgpr, 2) ||
+	    static_cast<unsigned>(sgpr.register_id) + 2u > LaneFlow::kSgprWords)
+	{
+		return false;
+	}
+	*pair = static_cast<unsigned>(sgpr.register_id);
+	return true;
+}
+
+// Scalar loads, saveexec, compares, carry-outs and lane reads all name their SGPR destination in dst or dst2.
+bool WritesScalarPair(const ShaderInstruction& instruction, unsigned pair)
+{
+	for (const auto* destination: {&instruction.dst, &instruction.dst2})
+	{
+		if (destination->type != Operand::Sgpr) { continue; }
+		unsigned first = 0;
+		unsigned count = 0;
+		if (!LaneFlow::ScalarRange(*destination, &first, &count) || (first < pair + 2u && pair < first + count)) { return true; }
+	}
+	return false;
+}
+
+// After the first boundary EXEC may narrow. "S_MOV_B64 exec, sX", where sX was copied from EXEC inside the plain
+// WQM prefix, makes every live quad whole again. The copy runs once (the prefix check keeps every edge out of it),
+// nothing between it and the restore may overwrite sX, and no edge may return from past the restore to it or before
+// it, so a later write to sX never reaches the restore. The restore must also be the only way into the straight
+// interval it opens. Marks the instructions of every such interval.
+std::vector<bool> WholeQuadIntervals(const ShaderCode& code, const StaticControlFlow& flow, uint32_t wqm_index, uint32_t first_boundary)
+{
+	const auto&       instructions = code.GetInstructions();
+	std::vector<bool> whole(instructions.Size(), false);
+	for (uint32_t restore = first_boundary; restore < instructions.Size(); ++restore)
+	{
+		unsigned pair = 0;
+		if (!ExecPairMove(instructions.At(restore), true, &pair)) { continue; }
+
+		uint32_t copy = kNoInstruction;
+		for (uint32_t index = wqm_index + 1u; index < first_boundary; ++index)
+		{
+			unsigned copied = 0;
+			if (ExecPairMove(instructions.At(index), false, &copied) && copied == pair) { copy = index; }
+		}
+		if (copy == kNoInstruction) { continue; }
+		bool intact = true;
+		for (uint32_t index = copy + 1u; index < restore && intact; ++index)
+		{
+			intact = !WritesScalarPair(instructions.At(index), pair);
+		}
+
+		uint32_t end = restore + 1u;
+		while (end < instructions.Size() && !IsBranch(instructions.At(end).type) && !ShaderInstructionWritesExec(instructions.At(end)))
+		{
+			++end;
+		}
+		for (uint32_t source = 0; source < flow.successors.size() && intact; ++source)
+		{
+			for (const auto target: flow.successors[source])
+			{
+				const bool returns = source > restore && target <= restore;
+				const bool enters  = target > restore && target < end && source + 1u != target;
+				if (returns || enters) { intact = false; }
+			}
+		}
+		if (!intact) { continue; }
+		for (uint32_t index = restore + 1u; index < end; ++index) { whole[index] = true; }
+	}
+	return whole;
+}
+
+bool ClearVgprWrites(const ShaderInstruction& instruction, Bits* state)
 {
 	std::array<RegisterRange, 2> writes {};
 	unsigned write_count = 0;
 	if (!CollectVgprWrites(instruction, &writes, &write_count)) { return false; }
 	for (unsigned write = 0; write < write_count; ++write)
 	{
-		const unsigned end = writes[write].first + writes[write].count;
-		for (unsigned gradient = 0; gradient < gradients.size(); ++gradient)
-		{
-			if (gradients[gradient] >= writes[write].first && gradients[gradient] < end) { state->reset(gradient); }
-		}
+		for (unsigned reg = writes[write].first; reg < writes[write].first + writes[write].count; ++reg) { state->reset(reg); }
 	}
 	return true;
 }
 
-bool QuadUniformAtSample(const ShaderCode& code, const StaticControlFlow& flow, uint32_t boundary_index, uint32_t sample_index,
-	                     const std::array<unsigned, 4>& gradients, const Bits& uniform_before_boundary)
+struct GradientFlowState
+{
+	Bits uniform;
+	Bits written_in_wqm;
+};
+
+// Forward walk from the prefix boundary. Outside a restored interval EXEC may cover part of a quad, so a write
+// clears both facts for its registers (they keep stale helper lanes); only an instruction run with whole quads
+// proves a new value. Registers nothing writes keep what the prefix or an earlier interval proved.
+bool QuadUniformAtSample(const ShaderCode& code, const StaticControlFlow& flow, const std::vector<bool>& whole, uint32_t boundary_index,
+	                     uint32_t sample_index, const std::array<unsigned, 4>& gradients, const GradientFlowState& at_boundary)
 {
 	if (boundary_index > sample_index || !NoExternalEdgeIntoPrefix(flow, boundary_index)) { return false; }
 
-	const auto& instructions = code.GetInstructions();
-	std::vector<Bits> states(instructions.Size());
-	std::vector<bool> reachable(instructions.Size(), false);
-	std::vector<uint32_t> worklist;
-	states[boundary_index].reset();
-	for (unsigned gradient = 0; gradient < gradients.size(); ++gradient)
-	{
-		if (uniform_before_boundary[gradients[gradient]]) { states[boundary_index].set(gradient); }
-	}
+	const auto&                    instructions = code.GetInstructions();
+	std::vector<GradientFlowState> states(instructions.Size());
+	std::vector<bool>              reachable(instructions.Size(), false);
+	std::vector<uint32_t>          worklist;
+	states[boundary_index]    = at_boundary;
 	reachable[boundary_index] = true;
 	worklist.push_back(boundary_index);
 
 	for (size_t cursor = 0; cursor < worklist.size(); ++cursor)
 	{
-		const uint32_t source = worklist[cursor];
-		Bits           outgoing = states[source];
-		if (!ClearGradientWrites(instructions.At(source), gradients, &outgoing)) { return false; }
+		const uint32_t    source   = worklist[cursor];
+		GradientFlowState outgoing = states[source];
+		if (whole[source])
+		{
+			if (!PrefixTransfer(instructions.At(source), &outgoing.uniform, &outgoing.written_in_wqm)) { return false; }
+		} else
+		{
+			if (!ClearVgprWrites(instructions.At(source), &outgoing.uniform) ||
+			    !ClearVgprWrites(instructions.At(source), &outgoing.written_in_wqm))
+			{
+				return false;
+			}
+		}
 		for (const auto target: flow.successors[source])
 		{
 			if (target < boundary_index) { return false; }
@@ -531,8 +632,9 @@ bool QuadUniformAtSample(const ShaderCode& code, const StaticControlFlow& flow, 
 				worklist.push_back(target);
 				continue;
 			}
-			const Bits merged = states[target] & outgoing;
-			if (merged != states[target])
+			const GradientFlowState merged {states[target].uniform & outgoing.uniform,
+			                                states[target].written_in_wqm & outgoing.written_in_wqm};
+			if (merged.uniform != states[target].uniform || merged.written_in_wqm != states[target].written_in_wqm)
 			{
 				states[target] = merged;
 				worklist.push_back(target);
@@ -541,9 +643,9 @@ bool QuadUniformAtSample(const ShaderCode& code, const StaticControlFlow& flow, 
 	}
 
 	if (!reachable[sample_index]) { return false; }
-	for (unsigned gradient = 0; gradient < gradients.size(); ++gradient)
+	for (const auto gradient: gradients)
 	{
-		if (!states[sample_index].test(gradient)) { return false; }
+		if (!states[sample_index].uniform.test(gradient)) { return false; }
 	}
 	return true;
 }
@@ -558,16 +660,16 @@ bool ShaderImageSampleCdHasQuadUniformGradients(const ShaderCode& code, uint32_t
 	StaticControlFlow flow;
 	if (!BuildStaticControlFlow(code, &flow)) { return false; }
 
-	Bits      uniform_at_boundary;
-	uint32_t  boundary_index = kNoInstruction;
-	uint32_t  wqm_index      = kNoInstruction;
-	if (!PlainWideningPrefix(code, instruction_index, &boundary_index, &uniform_at_boundary, &wqm_index) ||
-	    boundary_index == kNoInstruction || wqm_index == kNoInstruction ||
-	    !NoExternalEdgeIntoPrefix(flow, boundary_index))
+	GradientFlowState at_boundary;
+	uint32_t          boundary_index = kNoInstruction;
+	uint32_t          wqm_index      = kNoInstruction;
+	if (!PlainWideningPrefix(code, instruction_index, &boundary_index, &at_boundary.uniform, &at_boundary.written_in_wqm, &wqm_index) ||
+	    boundary_index == kNoInstruction || wqm_index == kNoInstruction)
 	{
 		return false;
 	}
-	return QuadUniformAtSample(code, flow, boundary_index, instruction_index, gradients, uniform_at_boundary);
+	const auto whole = WholeQuadIntervals(code, flow, wqm_index, boundary_index);
+	return QuadUniformAtSample(code, flow, whole, boundary_index, instruction_index, gradients, at_boundary);
 }
 
 } // namespace Kyty::Libs::Graphics

@@ -303,42 +303,40 @@ GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindWritePage(uintptr_t pag
 		}
 	}
 
-	// Normal-thread lookups try admission once and never join a pending
-	// identity writer. Contention retains the ordinary exact lookup. The
-	// signal handler uses FindPage directly and never takes this gate.
-	uint32_t state = m_identity_gate.load(std::memory_order_acquire);
+	// Release admission before a notification can wait on a page transition.
+	// Restart a positive lookup: an identity writer may now reuse any slot.
+	const uint64_t bit = uint64_t {1} << ((page / m_page_size) % kBlockPages);
+	return (BlockWritePageMask(page) & bit) != 0u ? FindPage(page) : nullptr;
+}
+
+// Pages of the block holding `page` that have an identity, read under one
+// publisher admission. Normal-thread lookups try admission once and never join
+// a pending identity writer; contention or a deep block collision is
+// inconclusive and reports every page of the block.
+uint64_t GpuDirtyPageTracker::BlockWritePageMask(uintptr_t page) noexcept
+{
+	constexpr uint64_t kAllPages = ~uint64_t {0};
+	uint32_t           state     = m_identity_gate.load(std::memory_order_acquire);
 	if ((state & kIdentityWriterPending) != 0u || (state & kIdentityPublisherCountMask) == kIdentityPublisherCountMask ||
 	    !m_identity_gate.compare_exchange_strong(state, state + 1u, std::memory_order_acq_rel, std::memory_order_acquire))
 	{
-		return FindPage(page);
+		return kAllPages;
 	}
-	const auto may_contain_page = [this, page]() noexcept
+	const uintptr_t key   = BlockKey(page);
+	const size_t    start = GpuDirtyPageTableIndex(key << 12u, kBlockTableSize - 1u);
+	uint64_t        mask  = kAllPages;
+	for (size_t i = 0; i < kLookupProbeLimit; ++i)
 	{
-		const uintptr_t key   = BlockKey(page);
-		const size_t    start = GpuDirtyPageTableIndex(key << 12u, kBlockTableSize - 1u);
-		const uint64_t  bit   = uint64_t {1} << ((page / m_page_size) % kBlockPages);
-		for (size_t i = 0; i < kLookupProbeLimit; ++i)
+		const auto&     block   = m_blocks[(start + i) & (kBlockTableSize - 1u)];
+		const uintptr_t current = block.key.load(std::memory_order_acquire);
+		if (current == key || current == 0)
 		{
-			const auto&     block   = m_blocks[(start + i) & (kBlockTableSize - 1u)];
-			const uintptr_t current = block.key.load(std::memory_order_acquire);
-			if (current == key)
-			{
-				return (block.page_mask.load(std::memory_order_acquire) & bit) != 0u;
-			}
-			if (current == 0)
-			{
-				return false;
-			}
+			mask = current == key ? block.page_mask.load(std::memory_order_acquire) : 0u;
+			break;
 		}
-		// A deep block collision is inconclusive. Never turn a short page
-		// miss into a full secondary-table scan, or skip a hidden identity.
-		return true;
-	};
-	const bool exists = may_contain_page();
+	}
 	ReleasePublisher();
-	// Release admission before a notification can wait on a page transition.
-	// Restart a positive lookup: an identity writer may now reuse any slot.
-	return exists ? FindPage(page) : nullptr;
+	return mask;
 }
 
 void GpuDirtyPageTracker::ReactivateRetiredPage(PageEntry* entry) noexcept
@@ -637,6 +635,29 @@ void GpuDirtyPageTracker::VisitWritePages(uintptr_t first, uintptr_t last, const
 				visitor(entry, page);
 			}
 			if (page == last) { break; }
+		}
+		return;
+	}
+	const uintptr_t block_bytes = m_page_size * kBlockPages;
+	const uintptr_t first_block = first - first % block_bytes;
+	const uintptr_t last_block  = last - last % block_bytes;
+	if ((last_block - first_block) / block_bytes < kDirectWriteBlocks)
+	{
+		for (uintptr_t block = first_block;; block += block_bytes)
+		{
+			for (uint64_t mask = BlockWritePageMask(block); mask != 0u; mask &= mask - 1u)
+			{
+				const uintptr_t page  = block + static_cast<uintptr_t>(__builtin_ctzll(mask)) * m_page_size;
+				auto*           entry = page >= first && page <= last ? FindPage(page) : nullptr;
+				if (entry != nullptr)
+				{
+					visitor(entry, page);
+				}
+			}
+			if (block == last_block)
+			{
+				break;
+			}
 		}
 		return;
 	}

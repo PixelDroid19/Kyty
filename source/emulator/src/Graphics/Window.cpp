@@ -2134,6 +2134,9 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features_12.subgroupBroadcastDynamicId = supported_12.subgroupBroadcastDynamicId;
 	device_features_12.samplerMirrorClampToEdge = sampler_features.mirror_clamp_to_edge;
 	device_features_12.bufferDeviceAddress = guest_device_address ? VK_TRUE : VK_FALSE;
+	// Core since Vulkan 1.2 and mandatory there.
+	EXIT_IF(supported_12.timelineSemaphore == VK_FALSE);
+	device_features_12.timelineSemaphore = VK_TRUE;
 	if (guest_device_address)
 	{
 		device_features.shaderInt64 = VK_TRUE;
@@ -2594,6 +2597,22 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 	{
 		EXIT_IF(lock_indices[id] >= ctx->queue_mutex_count);
 		ctx->queues[id].mutex = &ctx->queue_mutexes[lock_indices[id]];
+	}
+
+	VkSemaphoreTypeCreateInfo timeline_type {};
+	timeline_type.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+	timeline_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+	timeline_type.initialValue  = 0;
+	VkSemaphoreCreateInfo timeline_info {};
+	timeline_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	timeline_info.pNext = &timeline_type;
+	for (auto& queue: ctx->queues)
+	{
+		const auto result = vkCreateSemaphore(ctx->device, &timeline_info, nullptr, &queue.timeline);
+		if (result != VK_SUCCESS)
+		{
+			EXIT("vkCreateSemaphore (queue timeline) failed: result=%d\n", static_cast<int>(result));
+		}
 	}
 }
 

@@ -298,10 +298,11 @@ public:
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 	void WriteBackAllCompleted(GraphicContext* ctx);
 	void               WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer);
-	[[nodiscard]] bool PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency);
+	[[nodiscard]] bool PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer,
+	                                           std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
 	[[nodiscard]] bool PendingStorageHasAliases();
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
-	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
+	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
 	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
 	[[nodiscard]] GpuMemoryGdsSource AcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 	void DeferUntilSubmissionsComplete(std::vector<SubmissionId> submissions, std::function<void()> task);
@@ -466,6 +467,7 @@ private:
 	// whose writes are not published to the guest device-address view on `consumer`.
 	// The ranges are sorted by address and disjoint.
 	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer) const;
+	[[nodiscard]] static bool StorageIsWholeGuestContent(const Object& object);
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
 	bool TransientReadOnlyOverlapsAllowedLocked(uint64_t vaddr, uint64_t size, const GpuMemoryRangeQueryKey& query,

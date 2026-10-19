@@ -2742,6 +2742,45 @@ TEST(EmulatorAudio, BoundsDecodeAheadWhenVideoConsumerIsPaused)
 	EXPECT_LT(video.timestamp_ms, 1000u);
 }
 
+TEST(EmulatorAudio, SeekRepositionsDecodingAndRestartsAfterEndOfStream)
+{
+	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");
+	if (media_path == nullptr || media_path[0] == '\0' || !::Kyty::Emulator::AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP();
+	}
+
+	std::string error;
+	auto decoder = ::Kyty::Emulator::AudioVideoBackend::Decoder::Open(media_path, &error);
+	ASSERT_NE(decoder, nullptr) << error;
+	const auto& stream = decoder->GetStreamInfo();
+	ASSERT_TRUE(stream.has_video);
+	ASSERT_GT(stream.video_frame_rate, 0.0);
+	const auto frame_ms = static_cast<uint64_t>(1000.0 / stream.video_frame_rate + 0.5);
+
+	::Kyty::Emulator::AudioVideoBackend::VideoFrame video;
+	uint64_t last_timestamp = 0;
+	while (decoder->ReadVideoFrame(&video))
+	{
+		last_timestamp = video.timestamp_ms;
+	}
+	ASSERT_TRUE(decoder->EndOfStream());
+	ASSERT_GT(last_timestamp, 2 * frame_ms);
+
+	// Rewinding a finished stream restarts it at the first frame.
+	ASSERT_TRUE(decoder->Seek(0));
+	EXPECT_FALSE(decoder->EndOfStream());
+	ASSERT_TRUE(decoder->ReadVideoFrame(&video));
+	EXPECT_LE(video.timestamp_ms, 1u);
+
+	// A seek into the stream lands on the frame that covers the target, not on the preceding key frame.
+	const uint64_t target = last_timestamp / 2;
+	ASSERT_TRUE(decoder->Seek(target));
+	ASSERT_TRUE(decoder->ReadVideoFrame(&video));
+	EXPECT_GT(video.timestamp_ms + frame_ms, target);
+	EXPECT_LE(video.timestamp_ms, target + frame_ms);
+}
+
 TEST(EmulatorAudio, AvPlayerUsesConfiguredMediaBackend)
 {
 	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");

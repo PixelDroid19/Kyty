@@ -28,11 +28,15 @@ bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const S
 	return false;
 }
 
-bool ShaderVectorBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst,
-                                             int user_data_register_base)
+bool ShaderBufferConsumerRedefinesDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst)
 {
-	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
-	    ShaderStorageBufferResourceIsBound(bind, inst.src[1], user_data_register_base))
+	const auto& consumers = bind.redefined_descriptor_consumers;
+	return std::find(consumers.begin(), consumers.end(), inst.pc) != consumers.end();
+}
+
+bool ShaderIsDynamicVectorStorageConsumer(const ShaderBindResources& bind, const ShaderInstruction& inst)
+{
+	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr)
 	{
 		return false;
 	}
@@ -43,10 +47,21 @@ bool ShaderVectorBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, co
 		    record.destination_register == inst.src[1].register_id && inst.pc > record.instruction_pc &&
 		    inst.pc <= record.last_consumer_pc)
 		{
-			return false;
+			return true;
 		}
 	}
-	return true;
+	return false;
+}
+
+bool ShaderVectorBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst,
+                                             int user_data_register_base)
+{
+	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || ShaderIsDynamicVectorStorageConsumer(bind, inst))
+	{
+		return false;
+	}
+	return ShaderBufferConsumerRedefinesDescriptor(bind, inst) ||
+	       !ShaderStorageBufferResourceIsBound(bind, inst.src[1], user_data_register_base);
 }
 
 bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format)

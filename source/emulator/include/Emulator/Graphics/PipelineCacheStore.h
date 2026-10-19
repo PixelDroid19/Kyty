@@ -75,6 +75,8 @@ struct PipelineCacheHeaderV1
 enum class PipelineCacheStoreSaveResult
 {
 	Written,
+	// The blob equals the one the file already holds; nothing was written.
+	Unchanged,
 	BudgetExceeded,
 	Failed
 };

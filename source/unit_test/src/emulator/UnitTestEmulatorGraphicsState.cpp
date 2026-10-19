@@ -3174,6 +3174,12 @@ TEST(EmulatorGraphicsState, StorageTextureGrowthCopiesGpuOwnedArrayPrefix)
 	EXPECT_TRUE(StorageTextureCanCopyGrowingBacking(first.params, reads_guest.params));
 	EXPECT_FALSE(StorageTextureCanCopyGrowingBacking(first.params, gap.params));
 	EXPECT_FALSE(StorageTextureCanCopyGrowingBacking(second.params, first.params));
+
+	const StorageTextureObject mips_first(0u, 0u, 71u, 128u, 128u, 128u, 0u, 8u, 27u, true, DstSel(4, 5, 6, 7), 13u, 1u, 0u, false);
+	const StorageTextureObject mips_second(0u, 0u, 71u, 128u, 128u, 128u, 0u, 8u, 27u, true, DstSel(4, 5, 6, 7), 13u, 2u, 1u, false);
+	const StorageTextureObject fewer_mips(0u, 0u, 71u, 128u, 128u, 128u, 0u, 7u, 27u, true, DstSel(4, 5, 6, 7), 13u, 2u, 1u, false);
+	EXPECT_TRUE(StorageTextureCanCopyGrowingBacking(mips_first.params, mips_second.params));
+	EXPECT_FALSE(StorageTextureCanCopyGrowingBacking(mips_first.params, fewer_mips.params));
 }
 
 TEST(EmulatorGraphicsState, RenderTargetStorageAliasCopiesOnlyMatchingGuestBlocks)
@@ -3383,7 +3389,7 @@ TEST(EmulatorGraphicsState, TiledSampleDetileUsesTheGuestFormatElementWidth)
 TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
 {
 	GpuMemoryOverlapSnapshot empty;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(empty, false));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(empty, false, false));
 
 	GpuMemoryOverlapSnapshot read_only_storage;
 	read_only_storage.total_count              = 2;
@@ -3392,32 +3398,45 @@ TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
 	read_only_storage.entries[0].relation      = GpuMemoryOverlapType::Crosses;
 	read_only_storage.entries[0].count         = 2;
 	read_only_storage.entries[0].all_read_only = true;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_storage, false));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_storage, false, false));
 
 	auto read_only_vertex            = read_only_storage;
 	read_only_vertex.entries[0].type = GpuMemoryObjectType::VertexBuffer;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_vertex, false));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_vertex, false, false));
 
 	auto read_only_index            = read_only_storage;
 	read_only_index.entries[0].type = GpuMemoryObjectType::IndexBuffer;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_index, false));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_index, false, false));
 
 	auto writable_storage                     = read_only_storage;
 	writable_storage.entries[0].all_read_only = false;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage, false));
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage, true));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage, false, false));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage, true, false));
 
 	auto writable_vertex            = writable_storage;
 	writable_vertex.entries[0].type = GpuMemoryObjectType::VertexBuffer;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_vertex, true));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_vertex, true, false));
 
-	auto surface            = read_only_storage;
-	surface.entries[0].type = GpuMemoryObjectType::RenderTexture;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface, false));
+	auto surface                     = read_only_storage;
+	surface.entries[0].type          = GpuMemoryObjectType::RenderTexture;
+	surface.entries[0].relation      = GpuMemoryOverlapType::Contains;
+	surface.entries[0].all_read_only = false;
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface, false, false));
+	// An index view reads the guest bytes the linked IndexBuffer object would upload.
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface, false, true));
+
+	auto depth_inside            = surface;
+	depth_inside.entries[0].type = GpuMemoryObjectType::DepthStencilBuffer;
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(depth_inside, false, true));
+	depth_inside.entries[0].relation = GpuMemoryOverlapType::Crosses;
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(depth_inside, false, true));
+
+	auto writable_vertex_index = writable_vertex;
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_vertex_index, true, true));
 
 	auto truncated      = read_only_storage;
 	truncated.truncated = true;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(truncated, false));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(truncated, false, false));
 }
 
 TEST(EmulatorGraphicsState, UsesTransientBuffersOnlyForBoundedSafeReadOnlyViews)
@@ -3484,7 +3503,7 @@ TEST(EmulatorGraphicsState, TransientSnapshotEligibilityTracksGpuObjectMutations
 	EXPECT_FALSE(GpuMemoryCaptureSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured));
 	EXPECT_FALSE(GpuMemoryCompareSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured, &snapshot_matches));
 	// Writable storage in use still holds GPU writes the guest bytes may not show.
-	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size, GpuMemorySnapshotAdmission::IdleWritableStorage));
+	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size, GpuMemorySnapshotAdmission::IndexView));
 	GpuMemoryFree(&ctx, obj_addr, obj_size);
 
 	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, 0));
@@ -6910,6 +6929,47 @@ TEST(EmulatorGraphicsState, GpuWritebackPageCacheCopiesOnlyChangedPagesAndPreser
 	EXPECT_EQ(second.changed_pages, 0u);
 	EXPECT_EQ(second.copied_bytes, 0u);
 	EXPECT_EQ(notifications.calls, 0u);
+}
+
+TEST(EmulatorGraphicsState, GpuWritebackPageCacheFindsChangedPagesAcrossLargeRanges)
+{
+	using namespace Kyty::Libs::Graphics;
+	constexpr uint64_t PageSize = 4096u;
+	constexpr uint64_t Size     = PageSize * 1100u + 100u;
+	std::vector<uint8_t> guest(Size);
+	std::vector<uint8_t> gpu(Size);
+	for (uint64_t i = 0; i < Size; ++i)
+	{
+		guest[i] = static_cast<uint8_t>(i * 7u);
+		gpu[i]   = guest[i];
+	}
+
+	GpuWritebackPageCache cache(PageSize);
+	cache.Reset(gpu.data(), Size);
+
+	const std::vector<uint64_t> pages = {0u, 63u, 64u, 255u, 256u, 777u, 1100u};
+	for (const auto page: pages)
+	{
+		gpu[page * PageSize + 17u] ^= 0xffu;
+	}
+
+	std::vector<uint64_t> notified;
+	const auto            notify = [](void* opaque, uint64_t address, uint64_t /*size*/)
+	{ static_cast<std::vector<uint64_t>*>(opaque)->push_back(address); };
+
+	const auto result = cache.CopyChangedPages(guest.data(), gpu.data(), Size, nullptr, nullptr, 0, notify, &notified);
+	EXPECT_EQ(result.changed_pages, pages.size());
+	EXPECT_EQ(result.copied_bytes, PageSize * (pages.size() - 1u) + 100u);
+	ASSERT_EQ(notified.size(), pages.size());
+	for (size_t i = 0; i < pages.size(); i++)
+	{
+		EXPECT_EQ(notified[i], reinterpret_cast<uint64_t>(guest.data()) + pages[i] * PageSize);
+	}
+	EXPECT_EQ(guest, gpu);
+
+	notified.clear();
+	EXPECT_FALSE(cache.CopyChangedPages(guest.data(), gpu.data(), Size, nullptr, nullptr, 0, notify, &notified).content_changed);
+	EXPECT_TRUE(notified.empty());
 }
 
 // OnlyFlip → ActiveDeleted must be force-completed with Active after BufferFlush.

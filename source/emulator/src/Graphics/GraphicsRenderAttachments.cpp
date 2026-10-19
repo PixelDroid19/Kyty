@@ -72,8 +72,19 @@ static bool ComputeColorFillUsesGraphicsQueue(CommandBuffer* buffer)
 	return recording.vk_queue != nullptr && recording.vk_queue == graphics.vk_queue && recording.family == graphics.family;
 }
 
+// Which images sharing bytes with a filled range a resolved fill tolerates.
+enum class ComputeFillAliases
+{
+	// DCC metadata: any image other than an exact color alias refuses the clear.
+	ExactOnly,
+	// Uniform color fill: images that only partly share the bytes (transient
+	// pool aliases) are left as they are. The dispatch already wrote the fill to
+	// the storage buffer, so none of them held the guest bytes before either.
+	SkipPartial,
+};
+
 static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, ComputeColorFillIdentity* identity,
-                                           bool require_bound)
+                                           bool require_bound, ComputeFillAliases aliases)
 {
 	*identity = {address, size};
 	GpuMemoryRangeProvenance provenance {};
@@ -87,9 +98,15 @@ static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, Com
 	{
 		const auto& entry = provenance.entries[i];
 		// Exact color-image aliases (render targets, display buffers and sampled copies of the same bytes)
-		// receive the fill; any other or partial alias has no proven representation of it.
+		// receive the fill; any other alias has no proven representation of it and refuses it, unless
+		// the mode skips partial aliases.
 		const bool image_alias = entry.type == GpuMemoryObjectType::RenderTexture || entry.type == GpuMemoryObjectType::VideoOutBuffer ||
 		                         entry.type == GpuMemoryObjectType::Texture;
+		if (aliases == ComputeFillAliases::SkipPartial && entry.relation != GpuMemoryOverlapType::Equals &&
+		    (image_alias || entry.type == GpuMemoryObjectType::StorageTexture || entry.type == GpuMemoryObjectType::DepthStencilBuffer))
+		{
+			continue;
+		}
 		if (entry.type != GpuMemoryObjectType::StorageBuffer && !image_alias)
 		{
 			return false;
@@ -305,7 +322,33 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 	{
 		return false;
 	}
-	return GpuMemoryMarkStorageGuestPublished(identity, GpuQueueId(static_cast<uint32_t>(buffer->GetQueueIndex())), &fill.words);
+	SubmissionId publication;
+	EXIT_IF(!buffer->GetSubmissionId(&publication));
+	return GpuMemoryMarkStorageGuestPublished(identity, publication, &fill.words);
+}
+
+bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* dependency)
+{
+	EXIT_IF(buffer == nullptr || dependency == nullptr);
+	const GpuQueueId                         consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
+	std::vector<GpuMemoryStoragePublication> publishable;
+	if (GuestDeviceAddressPendingWriteBack(consumer, &publishable, dependency))
+	{
+		return true;
+	}
+	SubmissionId recording;
+	EXIT_IF(!buffer->GetSubmissionId(&recording));
+	for (const auto& publication: publishable)
+	{
+		if (!GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
+		                                         *publication.identity.buffer, publication.vaddr, publication.size) ||
+		    !GpuMemoryMarkStorageGuestPublished(publication.identity, recording, nullptr))
+		{
+			*dependency = publication.dependency;
+			return true;
+		}
+	}
+	return false;
 }
 
 bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
@@ -313,7 +356,7 @@ bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUnifor
 	if (!ComputeColorFillUsesGraphicsQueue(buffer)) { return false; }
 	const auto& words = fill.words;
 	ComputeColorFillIdentity identity {};
-	if (!ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true)) { return false; }
+	if (!ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true, ComputeFillAliases::SkipPartial)) { return false; }
 	g_compute_color_fills.DiscardOverlaps(identity.address, identity.size);
 	const auto images = FindComputeColorFillImages(buffer, identity.address, identity.size);
 	if (!images.IsEmpty()) { return ApplyComputeColorFillImages(buffer, identity, words, images); }
@@ -418,6 +461,27 @@ bool PropagateComputeUniformDepthFill(CommandBuffer* buffer, const ComputeUnifor
 	return cleared;
 }
 
+void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth)
+{
+	auto* image = depth.vulkan_buffer;
+	if (image == nullptr || image->image == nullptr || image->layout != VK_IMAGE_LAYOUT_UNDEFINED)
+	{
+		return;
+	}
+	// Custom sample locations would have to accompany every layout transition.
+	if (image->sample_locations_compatible)
+	{
+		EXIT("read-only first use of a depth image with custom sample locations\n");
+	}
+	// The same contents a writable first use gets from its CLEAR load op.
+	auto vk_buffer = buffer->RecordOutsideRenderPass();
+	TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	const VkClearDepthStencilValue clear {depth.depth_clear_value, depth.stencil_clear_value};
+	const VkImageSubresourceRange  range {DepthFormatAspectMask(image->format), 0u, image->mip_levels, 0u, image->array_layers};
+	vkCmdClearDepthStencilImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
+	TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+}
+
 bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
 {
 	// Any other fill of the metadata, including the uncompressed key, ends a pending clear.
@@ -426,7 +490,8 @@ bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBuff
 	ComputeColorFillIdentity identity {};
 	SubmissionId submission;
 	if (!ColorDccClearCodeFromFill(fill.words, &code) || !ComputeColorFillUsesGraphicsQueue(buffer) ||
-	    !ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true) || !buffer->GetSubmissionId(&submission))
+	    !ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true, ComputeFillAliases::ExactOnly) ||
+	    !buffer->GetSubmissionId(&submission))
 	{
 		return false;
 	}
@@ -446,7 +511,8 @@ static bool TakeColorDccClear(CommandBuffer* buffer, uint64_t dcc_address, uint3
 	const uint64_t size    = pending->identity.size;
 	ComputeColorFillIdentity identity {};
 	SubmissionId submission;
-	if (!ResolveComputeColorFillIdentity(address, size, &identity, false) || !buffer->GetSubmissionId(&submission))
+	if (!ResolveComputeColorFillIdentity(address, size, &identity, false, ComputeFillAliases::ExactOnly) ||
+	    !buffer->GetSubmissionId(&submission))
 	{
 		g_color_dcc_clears.DiscardOverlaps(address, size);
 		return false;
@@ -530,7 +596,8 @@ static void ConsumeComputeColorFill(CommandBuffer* buffer, uint64_t address, uin
 	if (g_compute_color_fills.Empty()) { return; }
 	ComputeColorFillIdentity identity {};
 	SubmissionId submission;
-	if (!ResolveComputeColorFillIdentity(address, size, &identity, false) || !buffer->GetSubmissionId(&submission))
+	if (!ResolveComputeColorFillIdentity(address, size, &identity, false, ComputeFillAliases::SkipPartial) ||
+	    !buffer->GetSubmissionId(&submission))
 	{
 		g_compute_color_fills.DiscardOverlaps(address, size);
 		return;
@@ -1070,6 +1137,31 @@ static void RequireCommittedDepthExtent(CommandBuffer* buffer, const RenderDepth
 	}
 }
 
+// An HTILE clear covers the whole surface, while an attachment clear covers
+// only the render area of the pass that consumes it, which can be smaller than
+// the depth image. Clear the depth plane of the whole image instead; the
+// stencil plane keeps its contents or takes the pass's register clear.
+static bool ClearDepthMetaWholeImage(CommandBuffer* buffer, const RenderDepthInfo& depth)
+{
+	auto* image = depth.vulkan_buffer;
+	// Custom sample locations would have to accompany every layout transition.
+	if (image == nullptr || image->image == nullptr || image->sample_locations_compatible)
+	{
+		return false;
+	}
+	// A first use defines every plane, as its CLEAR load op would.
+	const bool first_use      = image->layout == VK_IMAGE_LAYOUT_UNDEFINED;
+	const auto restore_layout = first_use ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : image->layout;
+	const auto aspects        = first_use ? DepthFormatAspectMask(image->format) : VkImageAspectFlags {VK_IMAGE_ASPECT_DEPTH_BIT};
+	auto*      vk_buffer      = buffer->RecordOutsideRenderPass();
+	TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	const VkClearDepthStencilValue clear {depth.depth_clear_value, depth.stencil_clear_value};
+	const VkImageSubresourceRange  range {aspects, 0u, image->mip_levels, 0u, image->array_layers};
+	vkCmdClearDepthStencilImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
+	TransitionDepthStencilImage(vk_buffer, image, restore_layout);
+	return true;
+}
+
 void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* r, uint32_t host_width,
                                        uint32_t host_height,
                                        const VulkanSampleLocationState* sample_locations)
@@ -1102,7 +1194,7 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	}
 
 	DepthMetaClearEvent meta_clear_event {};
-	if (r->htile && ConsumeDepthMetaClear(submit_id, *r, &meta_clear_event))
+	if (r->htile && ConsumeDepthMetaClear(submit_id, *r, &meta_clear_event) && !ClearDepthMetaWholeImage(buffer, *r))
 	{
 		const auto clear_actions = State::ResolveDepthClearActions(r->depth_clear_enable, true);
 		r->depth_clear_enable    = clear_actions.vulkan_clear;

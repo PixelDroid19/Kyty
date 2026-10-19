@@ -2916,6 +2916,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2)
 	// TODO() check DX10_CLAMP
 	// TODO() check IEEE
 
+	// An inactive lane keeps its value through a select, not a branch: one
+	// selection construct per VALU instruction swamps the optimizer and driver.
 	static const char* text = R"(
               <load0>
               <load1>
@@ -2927,14 +2929,13 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2)
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %t_<index>
               <multiply>
               <clamp>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))
@@ -2994,14 +2995,13 @@ KYTY_RECOMPILER_FUNC(Recompile_VDot2cF32F16_VdstVsrc0Vsrc1Vsrc2)
         %t_<index> = OpFAdd %float %sum_<index> %t2_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %t_<index>
               <multiply>
               <clamp>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst>", dst_value.value)
@@ -3064,12 +3064,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VDot4cI32I8_VdstVsrc0Vsrc1Vsrc2)
         %tf_<index> = OpBitcast %float %t_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %tf_<index>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst>", dst_value.value)
@@ -3833,6 +3832,270 @@ bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0)
 	return false;
 }
 
+// Scalar dword units a value-set walk can track: s0..s105, vcc_lo, vcc_hi, m0.
+constexpr int kMovrelUnitVccLo = 106;
+constexpr int kMovrelUnitVccHi = 107;
+constexpr int kMovrelUnitM0    = 108;
+// Bound on the M0 values one relative access may resolve to.
+constexpr uint32_t kMovrelValueSetMax = 32;
+
+static bool MovrelOperandWritesUnit(const ShaderOperand& op, int unit)
+{
+	const int size = op.size > 0 ? op.size : 1;
+	switch (op.type)
+	{
+		case ShaderOperandType::Sgpr: return unit >= op.register_id && unit < op.register_id + size;
+		case ShaderOperandType::VccLo: return unit == kMovrelUnitVccLo || (unit == kMovrelUnitVccHi && size >= 2);
+		case ShaderOperandType::VccHi: return unit == kMovrelUnitVccHi;
+		case ShaderOperandType::M0: return unit == kMovrelUnitM0;
+		default: return false;
+	}
+}
+
+static int MovrelOperandUnit(const ShaderOperand& op)
+{
+	if (op.size > 1 || op.negate || op.absolute || op.dpp)
+	{
+		return -1;
+	}
+	switch (op.type)
+	{
+		case ShaderOperandType::Sgpr: return op.register_id >= 0 && op.register_id < kMovrelUnitVccLo ? op.register_id : -1;
+		case ShaderOperandType::VccLo: return kMovrelUnitVccLo;
+		case ShaderOperandType::VccHi: return kMovrelUnitVccHi;
+		case ShaderOperandType::M0: return kMovrelUnitM0;
+		default: return -1;
+	}
+}
+
+static bool MovrelOperandIsLiteral(const ShaderOperand& op)
+{
+	return (op.type == ShaderOperandType::LiteralConstant || op.type == ShaderOperandType::IntegerInlineConstant) && !op.negate &&
+	       !op.absolute && !op.dpp && op.multiplier == 1.0f;
+}
+
+// Indirect labels only mark the fallthrough of a conditional branch, so the
+// label list alone names the instructions control can jump to.
+static bool MovrelIsBranchTarget(const ShaderCode& code, uint32_t pc)
+{
+	return code.GetLabels().Contains(pc, [](auto label, auto target) { return !label.IsDisabled() && label.GetDst() == target; });
+}
+
+// The instruction that runs immediately before |index| on every path: the
+// fallthrough predecessor, or the only forward branch into a label that cannot
+// be reached by falling through.
+static bool MovrelUniquePredecessor(const ShaderCode& code, uint32_t index, uint32_t* prev)
+{
+	const auto& insts = code.GetInstructions();
+	const auto  pc    = insts.At(index).pc;
+	uint32_t    jumps = 0;
+	uint32_t    from  = 0;
+	for (const auto& label: code.GetLabels())
+	{
+		if (!label.IsDisabled() && label.GetDst() == pc)
+		{
+			jumps++;
+			from = label.GetSrc();
+		}
+	}
+	if (index == 0u)
+	{
+		return false;
+	}
+	const auto fallthrough_type = insts.At(index - 1).type;
+	const bool fallthrough      = fallthrough_type != ShaderInstructionType::SBranch && fallthrough_type != ShaderInstructionType::SEndpgm;
+	if (jumps == 0u)
+	{
+		*prev = index - 1;
+		return fallthrough;
+	}
+	if (jumps != 1u || fallthrough || from >= pc)
+	{
+		return false;
+	}
+	for (uint32_t i = index; i-- > 0u;)
+	{
+		if (insts.At(i).pc == from)
+		{
+			*prev = i;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool MovrelUnitValueSet(const ShaderCode& code, uint32_t index, int unit, int depth, Vector<uint32_t>* values);
+
+// Values |unit| can hold on the edge from the SCC branch at |branch| to
+// |next| when the compare right before the branch bounds it by a literal:
+// s_cmp_lt/le_u32 hold on the SCC=1 edge, s_cmp_ge/gt_u32 fail on the SCC=0 edge.
+static bool MovrelGuardValueSet(const ShaderCode& code, uint32_t branch, uint32_t next, int unit, Vector<uint32_t>* values)
+{
+	const auto& insts = code.GetInstructions();
+	const auto  type  = insts.At(branch).type;
+	if ((type != ShaderInstructionType::SCbranchScc0 && type != ShaderInstructionType::SCbranchScc1) || branch == 0u ||
+	    MovrelIsBranchTarget(code, insts.At(branch).pc))
+	{
+		return false;
+	}
+	const auto& cmp = insts.At(branch - 1);
+	if (cmp.src_num != 2 || MovrelOperandUnit(cmp.src[0]) != unit || !MovrelOperandIsLiteral(cmp.src[1]) ||
+	    cmp.src[1].constant.u >= kMovrelValueSetMax)
+	{
+		return false;
+	}
+	const bool     scc   = (type == ShaderInstructionType::SCbranchScc1) == (next != branch + 1);
+	const uint32_t limit = cmp.src[1].constant.u;
+	uint32_t       below = 0;
+	if ((cmp.type == ShaderInstructionType::SCmpLtU32 && scc) || (cmp.type == ShaderInstructionType::SCmpGeU32 && !scc))
+	{
+		below = limit;
+	} else if ((cmp.type == ShaderInstructionType::SCmpLeU32 && scc) || (cmp.type == ShaderInstructionType::SCmpGtU32 && !scc))
+	{
+		below = limit + 1u;
+	}
+	if (below == 0u)
+	{
+		return false;
+	}
+	for (uint32_t v = 0; v < below; v++)
+	{
+		values->Add(v);
+	}
+	return true;
+}
+
+static bool MovrelOperandValueSet(const ShaderCode& code, uint32_t index, const ShaderOperand& op, int depth, Vector<uint32_t>* values)
+{
+	if (MovrelOperandIsLiteral(op))
+	{
+		values->Add(op.constant.u);
+		return true;
+	}
+	const int unit = MovrelOperandUnit(op);
+	return unit >= 0 && MovrelUnitValueSet(code, index, unit, depth, values);
+}
+
+static void MovrelAddValue(Vector<uint32_t>* values, uint32_t value)
+{
+	if (!values->Contains(value))
+	{
+		values->Add(value);
+	}
+}
+
+// Values a scalar definition can produce, over-approximated from literal
+// operands: moves, bit-field and mask extracts, and shifts, adds or
+// multiplies by a literal. Any other definition is unknown.
+static bool MovrelDefinitionValueSet(const ShaderCode& code, uint32_t index, int depth, Vector<uint32_t>* values)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.dst.size > 1)
+	{
+		return false;
+	}
+	if (inst.type == ShaderInstructionType::SMovB32 && inst.src_num == 1)
+	{
+		return MovrelOperandValueSet(code, index, inst.src[0], depth, values);
+	}
+	if (inst.src_num != 2)
+	{
+		return false;
+	}
+	const bool lit0 = MovrelOperandIsLiteral(inst.src[0]);
+	const bool lit1 = MovrelOperandIsLiteral(inst.src[1]);
+	if (inst.type == ShaderInstructionType::SBfeU32 && lit1)
+	{
+		const uint32_t width = (inst.src[1].constant.u >> 16u) & 0x7fu;
+		if ((1u << std::min(width, 31u)) > kMovrelValueSetMax)
+		{
+			return false;
+		}
+		for (uint32_t v = 0; v < (1u << width); v++)
+		{
+			values->Add(v);
+		}
+		return true;
+	}
+	if (inst.type == ShaderInstructionType::SAndB32 && (lit0 || lit1))
+	{
+		const uint32_t mask = (lit0 ? inst.src[0] : inst.src[1]).constant.u;
+		if (mask >= kMovrelValueSetMax)
+		{
+			return false;
+		}
+		for (uint32_t v = 0; v <= mask; v++)
+		{
+			MovrelAddValue(values, v & mask);
+		}
+		return true;
+	}
+	const bool commutative = inst.type == ShaderInstructionType::SMulI32 || inst.type == ShaderInstructionType::SAddU32 ||
+	                         inst.type == ShaderInstructionType::SAddI32;
+	const bool shift       = inst.type == ShaderInstructionType::SLshlB32 || inst.type == ShaderInstructionType::SLshrB32;
+	if (!(commutative && (lit0 || lit1)) && !(shift && lit1))
+	{
+		return false;
+	}
+	const uint32_t   k = (lit1 ? inst.src[1] : inst.src[0]).constant.u;
+	Vector<uint32_t> inputs;
+	if (!MovrelOperandValueSet(code, index, lit1 ? inst.src[0] : inst.src[1], depth, &inputs))
+	{
+		return false;
+	}
+	for (const auto v: inputs)
+	{
+		switch (inst.type)
+		{
+			case ShaderInstructionType::SMulI32: MovrelAddValue(values, v * k); break;
+			case ShaderInstructionType::SLshlB32: MovrelAddValue(values, v << (k & 31u)); break;
+			case ShaderInstructionType::SLshrB32: MovrelAddValue(values, v >> (k & 31u)); break;
+			default: MovrelAddValue(values, v + k); break;
+		}
+	}
+	return true;
+}
+
+// Values |unit| can hold on entry to |index|, found from its reaching
+// definition, or a compare guarding it, along the unique-predecessor chain.
+static bool MovrelUnitValueSet(const ShaderCode& code, uint32_t index, int unit, int depth, Vector<uint32_t>* values)
+{
+	if (depth > 8)
+	{
+		return false;
+	}
+	uint32_t i    = index;
+	uint32_t next = index;
+	for (; MovrelUniquePredecessor(code, next, &i); next = i)
+	{
+		if (MovrelGuardValueSet(code, i, next, unit, values))
+		{
+			return true;
+		}
+		const auto& inst = code.GetInstructions().At(i);
+		if (inst.type == ShaderInstructionType::SSwappcB64 || inst.type == ShaderInstructionType::SSetpcB64)
+		{
+			return false;
+		}
+		if (MovrelOperandWritesUnit(inst.dst2, unit))
+		{
+			return false;
+		}
+		if (!MovrelOperandWritesUnit(inst.dst, unit))
+		{
+			continue;
+		}
+		Vector<uint32_t> found;
+		if (!MovrelDefinitionValueSet(code, i, depth + 1, &found) || found.Size() > kMovrelValueSetMax)
+		{
+			return false;
+		}
+		*values = found;
+		return true;
+	}
+	return false;
+}
+
 // Every VGPR index statically named by the program at or above |base|. A
 // relative access can only observe registers that some instruction names —
 // on hardware an index landing outside them reads undefined register-file
@@ -3891,14 +4154,35 @@ static Vector<int> MovrelCandidateRegisters(const ShaderCode& code, int base)
 	return regs;
 }
 
-// dst = VGPR[base + offset] lowered to a select chain over every named candidate. |offset_load| defines
-// %rel_m0_<index>: M0, or the lane's own index for a lowered waterfall loop.
-static bool EmitMovrelsDynamic(int index, const ShaderOperand& dst, int base, const String8& offset_load, const ShaderCode& code,
+// Named VGPRs a runtime-M0 relative access at |index| can reach from |base|:
+// every candidate, narrowed to the M0 values the reaching definition allows.
+static Vector<int> MovrelReachableRegisters(const ShaderCode& code, uint32_t index, int base)
+{
+	auto             regs = MovrelCandidateRegisters(code, base);
+	Vector<uint32_t> offsets;
+	if (!MovrelUnitValueSet(code, index, kMovrelUnitM0, 0, &offsets))
+	{
+		return regs;
+	}
+	Vector<int> reachable;
+	for (const auto reg: regs)
+	{
+		if (offsets.Contains(static_cast<uint32_t>(reg - base)))
+		{
+			reachable.Add(reg);
+		}
+	}
+	return reachable;
+}
+
+// dst = VGPR[base + offset] lowered to a select chain over |candidates|; any other offset reads zero.
+// |offset_load| defines %rel_m0_<index>: M0, or the lane's own index for a lowered waterfall loop.
+static bool EmitMovrelsDynamic(int index, const ShaderOperand& dst, int base, const String8& offset_load, const Vector<int>& candidates,
                                String8* dst_source, Spirv* spirv)
 {
 	String8 acc   = "%" + spirv->GetConstantFloat(0.0f);
 	String8 chain;
-	for (const auto reg: MovrelCandidateRegisters(code, base))
+	for (const auto reg: candidates)
 	{
 		chain += String8::FromPrintf("%%rel_eq_%d_%d = OpIEqual %%bool %%rel_m0_%d %%uint_%d\n"
 		                             "%%rel_v_%d_%d = OpLoad %%float %%v%d\n"
@@ -3906,10 +4190,6 @@ static bool EmitMovrelsDynamic(int index, const ShaderOperand& dst, int base, co
 		                             index, reg, index, reg - base, index, reg, reg, index, reg, index, reg, index, reg,
 		                             acc.c_str());
 		acc = String8::FromPrintf("%%rel_acc_%d_%d", index, reg);
-	}
-	if (acc.StartsWith("%float"))
-	{
-		return false;
 	}
 	auto dst_value = operand_variable_to_str(dst);
 	if (dst_value.type != SpirvType::Float)
@@ -3928,27 +4208,24 @@ static bool EmitMovrelsDynamic(int index, const ShaderOperand& dst, int base, co
 	return true;
 }
 
-// VGPR[base + m0] = src lowered to a conditional store per named candidate.
+// VGPR[base + m0] = src lowered to a conditional store per candidate; any
+// other offset names no register, so the write is unobservable.
 // |src_load| holds the operand fetch block (or the movrelsd select chain) and
 // |src_id| the float id it produces; it may reference the m0 load emitted
 // first, so the source is evaluated once before the gated stores.
-static bool EmitMovreldDynamic(int index, int base, const String8& src_load, const String8& src_id, const ShaderCode& code,
+static bool EmitMovreldDynamic(int index, int base, const String8& src_load, const String8& src_id, const Vector<int>& candidates,
                                String8* dst_source)
 {
 	String8 stores;
-	for (const auto reg: MovrelCandidateRegisters(code, base))
+	for (const auto reg: candidates)
 	{
 		stores += String8::FromPrintf("%%rel_old_%d_%d = OpLoad %%float %%v%d\n"
-		                              "%%rel_eq_%d_%d = OpIEqual %%bool %%rel_m0_%d %%uint_%d\n"
-		                              "%%rel_gate_%d_%d = OpLogicalAnd %%bool %%rel_eq_%d_%d %%rel_execb_%d\n"
+		                              "%%rel_deq_%d_%d = OpIEqual %%bool %%rel_m0_%d %%uint_%d\n"
+		                              "%%rel_gate_%d_%d = OpLogicalAnd %%bool %%rel_deq_%d_%d %%rel_execb_%d\n"
 		                              "%%rel_out_%d_%d = OpSelect %%float %%rel_gate_%d_%d %s %%rel_old_%d_%d\n"
 		                              "OpStore %%v%d %%rel_out_%d_%d\n",
 		                              index, reg, reg, index, reg, index, reg - base, index, reg, index, reg, index, index, reg,
 		                              index, reg, src_id.c_str(), index, reg, reg, index, reg);
-	}
-	if (stores.IsEmpty())
-	{
-		return false;
 	}
 	*dst_source += String8::FromPrintf("%%rel_m0_%d = OpLoad %%uint %%m0\n"
 	                                   "%%rel_exec_%d = OpLoad %%uint %%exec_lo\n"
@@ -4035,7 +4312,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovrelsB32_SVdstSVsrc0)
 		const auto offset_load = String8::FromPrintf("%%rel_lane_%u = OpLoad %%float %%v%d\n"
 		                                             "%%rel_m0_%u = OpBitcast %%uint %%rel_lane_%u\n",
 		                                             index, inst.src[1].register_id, index, index);
-		return EmitMovrelsDynamic(static_cast<int>(index), inst.dst, inst.src[0].register_id, offset_load, code, dst_source, spirv);
+		return EmitMovrelsDynamic(static_cast<int>(index), inst.dst, inst.src[0].register_id, offset_load,
+		                          MovrelCandidateRegisters(code, inst.src[0].register_id), dst_source, spirv);
 	}
 	if (MovrelProvenLiteralM0(code, index, &m0))
 	{
@@ -4055,7 +4333,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovrelsB32_SVdstSVsrc0)
 		return false;
 	}
 	return EmitMovrelsDynamic(static_cast<int>(index), inst.dst, inst.src[0].register_id,
-	                          String8::FromPrintf("%%rel_m0_%u = OpLoad %%uint %%m0\n", index), code, dst_source, spirv);
+	                          String8::FromPrintf("%%rel_m0_%u = OpLoad %%uint %%m0\n", index),
+	                          MovrelReachableRegisters(code, index, inst.src[0].register_id), dst_source, spirv);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMovreldB32_SVdstSVsrc0)
@@ -4089,7 +4368,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovreldB32_SVdstSVsrc0)
 	{
 		return false;
 	}
-	return EmitMovreldDynamic(index, inst.dst.register_id, src_load, "%rel_src_" + index_str, code, dst_source);
+	return EmitMovreldDynamic(index, inst.dst.register_id, src_load, "%rel_src_" + index_str,
+	                          MovrelReachableRegisters(code, index, inst.dst.register_id), dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMovrelsdB32_SVdstSVsrc0)
@@ -4131,7 +4411,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovrelsdB32_SVdstSVsrc0)
 	const int src_base = inst.src[0].register_id;
 	String8   acc      = "%" + spirv->GetConstantFloat(0.0f);
 	String8   chain;
-	for (const auto reg: MovrelCandidateRegisters(code, src_base))
+	for (const auto reg: MovrelReachableRegisters(code, index, src_base))
 	{
 		chain += String8::FromPrintf("%%rel_eq_%d_%d = OpIEqual %%bool %%rel_m0_%d %%uint_%d\n"
 		                             "%%rel_v_%d_%d = OpLoad %%float %%v%d\n"
@@ -4140,13 +4420,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovrelsdB32_SVdstSVsrc0)
 		                             acc.c_str());
 		acc = String8::FromPrintf("%%rel_acc_%d_%d", index, reg);
 	}
-	if (acc.StartsWith("%float"))
-	{
-		return false;
-	}
 	// EmitMovreldDynamic emits the m0 load first, so the select chain can
 	// consume %rel_m0_<index> directly.
-	return EmitMovreldDynamic(index, inst.dst.register_id, chain, acc, code, dst_source);
+	return EmitMovreldDynamic(index, inst.dst.register_id, chain, acc, MovrelReachableRegisters(code, index, inst.dst.register_id),
+	                          dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMovB32_SVdstSVsrc0)
@@ -4280,14 +4557,13 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1)
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %t_<index>
               <multiply>
               <clamp>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))
@@ -4348,14 +4624,13 @@ KYTY_RECOMPILER_FUNC(Recompile_VLdexpF32_SVdstSVsrc0SVsrc1)
         %t_<index> = OpExtInst %float %GLSL_std_450 Ldexp %t0_<index> %t1_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %t_<index>
               <multiply>
               <clamp>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))
@@ -4401,14 +4676,13 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_SVdstSVsrc0)
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-               OpSelectionMerge %tl2_<index> None
-               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
-         %tl1_<index> = OpLabel
+        %exec_keep_<index> = OpLoad %float %<dst>
                OpStore %<dst> %t_<index>
               <multiply>
               <clamp>
-               OpBranch %tl2_<index>
-         %tl2_<index> = OpLabel
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))

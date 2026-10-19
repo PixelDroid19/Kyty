@@ -84,6 +84,8 @@ struct Decoder::State
 
 	uint64_t next_video_timestamp = 0;
 	uint64_t next_audio_timestamp = 0;
+	// Frames that end at or before this position precede the last seek target.
+	uint64_t seek_floor_ms = 0;
 
 	std::thread worker;
 	bool stop_requested = false;
@@ -471,6 +473,17 @@ static bool ConvertVideo(Decoder::State* state)
 		}
 		source = state->transferred_video_frame;
 	}
+	const uint64_t timestamp_ms = TimestampMilliseconds(source->best_effort_timestamp,
+	                                                    state->format->streams[state->video_stream]->time_base,
+	                                                    state->next_video_timestamp);
+	state->next_video_timestamp = timestamp_ms +
+	                              (state->info.video_frame_rate > 0.0
+	                                   ? static_cast<uint64_t>(1000.0 / state->info.video_frame_rate + 0.5)
+	                                   : 0);
+	if (state->next_video_timestamp <= state->seek_floor_ms)
+	{
+		return true;
+	}
 	VideoFrame  frame;
 	const char* copy_error = nullptr;
 	if (!CopyNv12Picture(source, static_cast<uint32_t>(state->info.video_width), static_cast<uint32_t>(state->info.video_height),
@@ -479,14 +492,7 @@ static bool ConvertVideo(Decoder::State* state)
 		SetError(state, Status::DecodeFailed, copy_error);
 		return false;
 	}
-	frame.timestamp_ms = TimestampMilliseconds(source->best_effort_timestamp,
-	                                            state->format->streams[state->video_stream]->time_base,
-	                                            state->next_video_timestamp);
-	state->next_video_timestamp = frame.timestamp_ms +
-	                              (state->info.video_frame_rate > 0.0
-	                                   ? static_cast<uint64_t>(1000.0 / state->info.video_frame_rate + 0.5)
-
-                                   : 0);
+	frame.timestamp_ms = timestamp_ms;
 	{
 		std::unique_lock<std::mutex> lock(state->mutex);
 		if (state->stop_requested)
@@ -544,7 +550,7 @@ static bool ConvertAudio(Decoder::State* state)
 	frame.data.resize(static_cast<size_t>(converted) * kOutputChannels);
 	state->next_audio_timestamp = frame.timestamp_ms +
 	                              static_cast<uint64_t>(static_cast<double>(converted) * 1000.0 / kOutputSampleRate + 0.5);
-	if (!frame.data.empty())
+	if (!frame.data.empty() && state->next_audio_timestamp > state->seek_floor_ms)
 	{
 		{
 			std::lock_guard<std::mutex> lock(state->mutex);
@@ -713,10 +719,48 @@ static void DecodeLoop(Decoder::State* state)
 		}
 	}
 	{
+		// A stop requested by Seek() is a pause in decoding, not the end of the stream.
 		std::lock_guard<std::mutex> lock(state->mutex);
-		state->decode_done = true;
+		state->decode_done = state->decode_done || !state->stop_requested;
 	}
 	state->condition.notify_all();
+}
+
+static bool RepositionInput(Decoder::State* state, uint64_t time_ms)
+{
+	if (time_ms > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() / 1000))
+	{
+		SetError(state, Status::DecodeFailed, "seek position overflow");
+		return false;
+	}
+	const int64_t target = av_rescale(static_cast<int64_t>(time_ms), AV_TIME_BASE, 1000);
+	const int     result = avformat_seek_file(state->format, -1, std::numeric_limits<int64_t>::min(), target, target, 0);
+	if (result < 0)
+	{
+		SetFfmpegError(state, Status::DecodeFailed, result, "seek media input");
+		return false;
+	}
+	if (state->video != nullptr)
+	{
+		avcodec_flush_buffers(state->video);
+	}
+	if (state->audio != nullptr)
+	{
+		avcodec_flush_buffers(state->audio);
+	}
+	if (state->resampler != nullptr && swr_init(state->resampler) < 0)
+	{
+		SetError(state, Status::DecodeFailed, "reset audio resampler");
+		return false;
+	}
+	state->demux_eof            = false;
+	state->video_eof            = state->video == nullptr;
+	state->audio_eof            = state->audio == nullptr;
+	state->flushed              = false;
+	state->next_video_timestamp = time_ms;
+	state->next_audio_timestamp = time_ms;
+	state->seek_floor_ms        = time_ms;
+	return true;
 }
 
 #endif
@@ -1085,6 +1129,49 @@ bool Decoder::TryReadAudioFrame(AudioFrame* frame)
 		state_->audio_queue.pop_front();
 	}
 	state_->condition.notify_all();
+	return true;
+#endif
+}
+
+bool Decoder::Seek(uint64_t time_ms)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)time_ms;
+	return false;
+#else
+	State* state = state_.get();
+	{
+		std::lock_guard<std::mutex> lock(state->mutex);
+		if (state->status != Status::Ok)
+		{
+			return false;
+		}
+		state->stop_requested = true;
+		state->decode_done    = false;
+	}
+	state->condition.notify_all();
+	if (state->worker.joinable())
+	{
+		state->worker.join();
+	}
+	{
+		std::lock_guard<std::mutex> lock(state->mutex);
+		state->video_queue.clear();
+		state->audio_queue.clear();
+		if (state->status != Status::Ok)
+		{
+			return false;
+		}
+	}
+	if (!RepositionInput(state, time_ms))
+	{
+		return false;
+	}
+	{
+		std::lock_guard<std::mutex> lock(state->mutex);
+		state->stop_requested = false;
+	}
+	state->worker = std::thread(DecodeLoop, state);
 	return true;
 #endif
 }

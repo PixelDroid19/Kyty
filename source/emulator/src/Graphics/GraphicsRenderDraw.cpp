@@ -362,6 +362,10 @@ DepthStencilAttachmentAccess ResolveDrawDepthStencilAccess(CommandBuffer* buffer
 	{
 		EXIT("same-draw depth sampling conflicts with attachment writes or missing store-op-none support\n");
 	}
+	if (access != DepthStencilAttachmentAccess::Writable)
+	{
+		InitializeReadOnlyDepthFirstUse(buffer, depth);
+	}
 	return access;
 }
 
@@ -1356,12 +1360,12 @@ static GuestDeviceAddressReadPreparation PrepareGuestDeviceAddressForRead(
 		return GuestDeviceAddressReadPreparation::Ready;
 	}
 
-	const GpuQueueId consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
-	if (GuestDeviceAddressPendingWriteBack(consumer, pending_submission))
+	if (PublishPendingStorageToGuestAddress(buffer, pending_submission))
 	{
 		return GuestDeviceAddressReadPreparation::PendingWriteBack;
 	}
 
+	const GpuQueueId consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
 	// Keep write-back before table preparation, but outside the GDA registry
 	// lock. The draw and both descriptor stages share this one publication.
 	GuestDeviceAddressWriteBack(g_render_ctx->GetGraphicCtx(), consumer);

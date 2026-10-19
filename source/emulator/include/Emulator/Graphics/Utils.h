@@ -730,10 +730,18 @@ struct ColorAttachmentLoadOps
 
 [[nodiscard]] inline bool DecodeGuestUniformFillTexel(const std::array<uint32_t, 4>& words, VkFormat format, VkClearColorValue* clear)
 {
+	if (clear == nullptr) { return false; }
+	// All-zero bits decode to zero in every channel of every uncompressed color format.
+	const bool zero_fill = words[0] == 0u && words[1] == 0u && words[2] == 0u && words[3] == 0u;
+	if (zero_fill && format >= VK_FORMAT_R4G4_UNORM_PACK8 && format <= VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)
+	{
+		*clear = {};
+		return true;
+	}
 	const uint32_t texel   = GuestUniformFillTexelBytes(format);
 	const bool     repeats = texel == 16u || (texel == 8u ? (words[0] == words[2] && words[1] == words[3])
 	                                                      : (texel == 4u && words[0] == words[1] && words[0] == words[2] && words[0] == words[3]));
-	if (clear == nullptr || !repeats) { return false; }
+	if (!repeats) { return false; }
 	if (texel == 16u)
 	{
 		// Each 32-bit channel is stored in order, red at the lowest address.

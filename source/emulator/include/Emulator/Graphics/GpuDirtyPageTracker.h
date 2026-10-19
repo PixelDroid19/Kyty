@@ -198,11 +198,13 @@ private:
 		Denied
 	};
 
-	// Fixed, bounded page metadata with 262,144 slots. Active and retired
-	// identities share a 131,072-page admission budget. Tombstones retain probe
-	// history; the normal-write hint bounds conclusive missing-page lookups.
-	// Each range has the same page bound (512 MiB on a 4 KiB host).
-	static constexpr size_t kPageTableSize = 1u << 18u;
+	// Fixed, bounded page metadata with 1,048,576 slots. Active and retired
+	// identities share a 524,288-page admission budget; a title's render
+	// targets alone can hold more than 800 MiB, and a refused range loses its
+	// write proof. Tombstones retain probe history; the normal-write hint
+	// bounds conclusive missing-page lookups.
+	// Each range has the same page bound (2 GiB on a 4 KiB host).
+	static constexpr size_t kPageTableSize = 1u << 20u;
 	static constexpr size_t kMaxPages      = kPageTableSize / 2u;
 	// Summaries of kBlockPages consecutive pages answer queries over fully
 	// covered blocks; edge pages are always checked individually.
@@ -216,9 +218,12 @@ private:
 	// Range records are ordinary heap metadata, used only under the
 	// registration mutex. Each registration needs at least one page entry.
 	static constexpr size_t kMaxRanges = kMaxPages;
-	// Keep tiny writes on the hash lookup path. Larger spans scan the fixed
-	// table once, including sparse spans extending over unmapped guest memory.
-	static constexpr size_t kDirectWritePages = 64u;
+	// Keep tiny writes on the hash lookup path. Spans up to kDirectWriteBlocks
+	// blocks look up one block summary per kBlockPages pages; one lookup costs
+	// about what a full-table scan costs per 2,000 slots. Larger spans scan the
+	// fixed table once, including sparse spans over unmapped guest memory.
+	static constexpr size_t kDirectWritePages  = 64u;
+	static constexpr size_t kDirectWriteBlocks = 2048u;
 
 	[[nodiscard]] uintptr_t         PageStart(uintptr_t address) const noexcept;
 	[[nodiscard]] uintptr_t         PageEnd(uintptr_t page) const noexcept;
@@ -226,6 +231,7 @@ private:
 	[[nodiscard]] PageEntry*        FindPage(uintptr_t page) noexcept;
 	[[nodiscard]] const PageEntry*  FindPage(uintptr_t page) const noexcept;
 	[[nodiscard]] PageEntry*         FindWritePage(uintptr_t page) noexcept;
+	[[nodiscard]] uint64_t           BlockWritePageMask(uintptr_t page) noexcept;
 	[[nodiscard]] PageEntry*        FindOrCreatePage(uintptr_t page) noexcept;
 	[[nodiscard]] bool               HasPageCapacity(uintptr_t first, uintptr_t last) const noexcept;
 	[[nodiscard]] bool               AdmitPages(uintptr_t first, uintptr_t last) noexcept;

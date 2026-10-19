@@ -85,6 +85,9 @@ public:
 	void StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
 	                   GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
 	[[nodiscard]] bool StorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication);
+	[[nodiscard]] bool RangeHasFence(uint64_t addr, uint64_t size);
+	[[nodiscard]] bool WriteBackAdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+	                                        LabelStoragePublication* publication, GpuWritebackResult* result);
 	void   ReleaseMappedRange(uint64_t addr, uint64_t bytes);
 
 private:
@@ -426,6 +429,20 @@ bool LabelStoragePublication::AdoptUniform(uint64_t guest_addr, uint64_t size, c
 	return true;
 }
 
+bool LabelStoragePublication::AdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+                                          GpuWritebackPageCache::NotifyWriteFunc notify_write, void* notify_opaque,
+                                          GpuWritebackResult* result)
+{
+	EXIT_IF(gpu_src == nullptr || page_cache == nullptr || notify_write == nullptr || result == nullptr || size == 0 ||
+	        guest_addr > UINT64_MAX - size);
+	if (!m_fences.empty() || m_cpu_conflict)
+	{
+		return false;
+	}
+	*result = page_cache->AdoptChangedPages(guest_addr, gpu_src, size, notify_write, notify_opaque);
+	return true;
+}
+
 void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 {
 	static const bool eop_trace = (std::getenv("KYTY_EOP_TRACE") != nullptr);
@@ -706,6 +723,15 @@ bool LabelManager::WriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, con
 	return publication->AdoptUniform(guest_addr, size, words, page_cache, notify_write, nullptr, result);
 }
 
+bool LabelManager::WriteBackAdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+                                        LabelStoragePublication* publication, GpuWritebackResult* result)
+{
+	EXIT_IF(publication == nullptr);
+	Core::LockGuard lock(m_mutex);
+	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { (void)GpuMemoryNotifyHostWrite(address, bytes); };
+	return publication->AdoptDevice(guest_addr, gpu_src, size, page_cache, notify_write, nullptr, result);
+}
+
 void LabelManager::StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
                                   GpuWritebackPageCache* page_cache, LabelStoragePublication* publication)
 {
@@ -718,6 +744,15 @@ bool LabelManager::StorageNeedsUpload(uint64_t addr, uint64_t size, const LabelS
 {
 	Core::LockGuard lock(m_mutex);
 	return publication.NeedsUpload(m_fence_holes, addr, size);
+}
+
+bool LabelManager::RangeHasFence(uint64_t addr, uint64_t size)
+{
+	Core::LockGuard  lock(m_mutex);
+	Vector<uint64_t> begin;
+	Vector<uint64_t> end;
+	m_fence_holes.Snapshot(addr, size, &begin, &end);
+	return !begin.IsEmpty();
 }
 
 void LabelManager::ReleaseMappedRange(uint64_t addr, uint64_t bytes)
@@ -990,6 +1025,13 @@ bool LabelWriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWri
 	return g_label_manager->WriteBackAdoptUniform(guest_addr, size, words, page_cache, publication, result);
 }
 
+bool LabelWriteBackAdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+                               LabelStoragePublication* publication, GpuWritebackResult* result)
+{
+	EXIT_IF(g_label_manager == nullptr);
+	return g_label_manager->WriteBackAdoptDevice(guest_addr, gpu_src, size, page_cache, publication, result);
+}
+
 void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
                         GpuWritebackPageCache* page_cache, LabelStoragePublication* publication)
 {
@@ -1001,6 +1043,12 @@ bool LabelStorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePub
 {
 	EXIT_IF(g_label_manager == nullptr);
 	return g_label_manager->StorageNeedsUpload(addr, size, publication);
+}
+
+bool LabelRangeHasFence(uint64_t addr, uint64_t size)
+{
+	EXIT_IF(g_label_manager == nullptr);
+	return g_label_manager->RangeHasFence(addr, size);
 }
 
 void LabelReleaseMappedRange(uint64_t addr, uint64_t bytes)
