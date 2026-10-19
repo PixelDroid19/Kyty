@@ -134,6 +134,12 @@ fail on the current HEAD before acting on them.
     - Not fixed. Direction: the host setting
       `vm.compaction_proactiveness=0`, which is the host owner's choice.
       An A/B with it is still needed to prove the trigger.
+    - Two later 200 s runs on a quiet host (93765196) had no slow frame in
+      gameplay apart from the capture frame. A 4 Hz poll of `/proc/vmstat`
+      over the second run saw no compaction and no page migration at all
+      (`compact_*`, `pgmigrate_success` unchanged). The stalls therefore
+      need a fragmented host; a stall-free run without compaction is
+      consistent with the trigger but does not prove it.
     - Owned snapshots of flexible memory are host-pointer imports too.
       They stayed host pointers in the dma-buf run, which had no slow
       submit, so whether they stall is untested.
