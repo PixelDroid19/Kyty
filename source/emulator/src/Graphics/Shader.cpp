@@ -5502,207 +5502,221 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 //	return ShaderUpdateBindInfo(code, &input_info->bind);
 //}
 
-static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
+// Collects one shader identity in a reserved local buffer; the identity vector
+// then takes every word in one copy instead of a copy-on-write check per word.
+class ShaderIdWriter
+{
+public:
+	ShaderIdWriter() { m_words.reserve(512); }
+
+	void Add(uint32_t word) { m_words.push_back(word); }
+	void Finish(ShaderId* id) const { id->ids.Add(m_words.data(), static_cast<uint32_t>(m_words.size())); }
+
+private:
+	std::vector<uint32_t> m_words;
+};
+
+static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bind)
 {
 	// The SPIR-V interface bakes in the push block offset and descriptor set;
 	// a pixel stage takes both from the vertex stage it pairs with.
-	ret->ids.Add(bind.push_constant_offset);
-	ret->ids.Add(bind.descriptor_set_slot);
-	ret->ids.Add(static_cast<uint32_t>(bind.device_address_used));
+	ids->Add(bind.push_constant_offset);
+	ids->Add(bind.descriptor_set_slot);
+	ids->Add(static_cast<uint32_t>(bind.device_address_used));
 	if (bind.device_address_used)
 	{
-		ret->ids.Add(bind.device_address_offset_dw);
+		ids->Add(bind.device_address_offset_dw);
 	}
-	ret->ids.Add(static_cast<uint32_t>(bind.thread_limits_used));
+	ids->Add(static_cast<uint32_t>(bind.thread_limits_used));
 	if (bind.thread_limits_used)
 	{
-		ret->ids.Add(bind.thread_limits_offset_dw);
+		ids->Add(bind.thread_limits_offset_dw);
 	}
-	ret->ids.Add(static_cast<uint32_t>(bind.program_base_used));
+	ids->Add(static_cast<uint32_t>(bind.program_base_used));
 	if (bind.program_base_used)
 	{
-		ret->ids.Add(bind.program_base_offset_dw);
+		ids->Add(bind.program_base_offset_dw);
 	}
-	ret->ids.Add(bind.storage_buffers.buffers_num);
+	ids->Add(bind.storage_buffers.buffers_num);
 
 	for (int i = 0; i < bind.storage_buffers.buffers_num; i++)
 	{
 		// const auto& r = bind.storage_buffers.buffers[i];
 
-		// ret->ids.Add(static_cast<uint32_t>(r.SwizzleEnabled()));
-		// ret->ids.Add(r.DstSelX());
-		// ret->ids.Add(r.DstSelY());
-		// ret->ids.Add(r.DstSelZ());
-		// ret->ids.Add(r.DstSelW());
-		// ret->ids.Add(r.Nfmt());
-		// ret->ids.Add(r.Dfmt());
-		// ret->ids.Add(static_cast<uint32_t>(r.AddTid()));
-		ret->ids.Add(bind.storage_buffers.slots[i]);
-		ret->ids.Add(bind.storage_buffers.start_register[i]);
-		ret->ids.Add(static_cast<uint32_t>(bind.storage_buffers.extended[i]));
-		ret->ids.Add(static_cast<uint32_t>(bind.storage_buffers.usages[i]));
-		ret->ids.Add(static_cast<uint32_t>(bind.storage_buffers.dynamic_sload[i]));
+		// ids->Add(static_cast<uint32_t>(r.SwizzleEnabled()));
+		// ids->Add(r.DstSelX());
+		// ids->Add(r.DstSelY());
+		// ids->Add(r.DstSelZ());
+		// ids->Add(r.DstSelW());
+		// ids->Add(r.Nfmt());
+		// ids->Add(r.Dfmt());
+		// ids->Add(static_cast<uint32_t>(r.AddTid()));
+		ids->Add(bind.storage_buffers.slots[i]);
+		ids->Add(bind.storage_buffers.start_register[i]);
+		ids->Add(static_cast<uint32_t>(bind.storage_buffers.extended[i]));
+		ids->Add(static_cast<uint32_t>(bind.storage_buffers.usages[i]));
+		ids->Add(static_cast<uint32_t>(bind.storage_buffers.dynamic_sload[i]));
 	}
 
-	ret->ids.Add(bind.dynamic_sloads.records.Size());
+	ids->Add(bind.dynamic_sloads.records.Size());
 	for (uint32_t mapping = 0; mapping < bind.dynamic_sloads.records.Size(); ++mapping)
 	{
 		const auto& record = bind.dynamic_sloads.records.At(mapping);
-		ret->ids.Add(static_cast<uint32_t>(record.kind));
-		ret->ids.Add(record.resource_index);
-		ret->ids.Add(record.destination_register);
-		ret->ids.Add(record.instruction_pc);
-		ret->ids.Add(static_cast<uint32_t>(record.offset_dw));
-		ret->ids.Add(static_cast<uint32_t>(record.dword_count));
-		ret->ids.Add(static_cast<uint32_t>(record.resource_field_offset));
-		ret->ids.Add(record.last_consumer_pc);
-		ret->ids.Add(static_cast<uint32_t>(record.raw_vmem_oob_guarded));
+		ids->Add(static_cast<uint32_t>(record.kind));
+		ids->Add(record.resource_index);
+		ids->Add(record.destination_register);
+		ids->Add(record.instruction_pc);
+		ids->Add(static_cast<uint32_t>(record.offset_dw));
+		ids->Add(static_cast<uint32_t>(record.dword_count));
+		ids->Add(static_cast<uint32_t>(record.resource_field_offset));
+		ids->Add(record.last_consumer_pc);
+		ids->Add(static_cast<uint32_t>(record.raw_vmem_oob_guarded));
 	}
 
-	ret->ids.Add(bind.assembled_descriptors.Size());
+	ids->Add(bind.assembled_descriptors.Size());
 	for (const auto& record: bind.assembled_descriptors)
 	{
-		ret->ids.Add(record.consumer_pc);
-		ret->ids.Add(static_cast<uint32_t>(record.register_id));
-		ret->ids.Add(static_cast<uint32_t>(record.resource_index));
+		ids->Add(record.consumer_pc);
+		ids->Add(static_cast<uint32_t>(record.register_id));
+		ids->Add(static_cast<uint32_t>(record.resource_index));
 	}
 
-	ret->ids.Add(bind.redefined_descriptor_consumers.Size());
+	ids->Add(bind.redefined_descriptor_consumers.Size());
 	for (const auto pc: bind.redefined_descriptor_consumers)
 	{
-		ret->ids.Add(pc);
+		ids->Add(pc);
 	}
 
-	ret->ids.Add(bind.zero_sbuffer_resources.buffers_num);
+	ids->Add(bind.zero_sbuffer_resources.buffers_num);
 	for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
 	{
-		ret->ids.Add(bind.zero_sbuffer_resources.start_register[i]);
+		ids->Add(bind.zero_sbuffer_resources.start_register[i]);
 	}
 
-	ret->ids.Add(bind.zero_image_resources.images_num);
+	ids->Add(bind.zero_image_resources.images_num);
 	for (int i = 0; i < bind.zero_image_resources.images_num; ++i)
 	{
-		ret->ids.Add(bind.zero_image_resources.start_register[i]);
+		ids->Add(bind.zero_image_resources.start_register[i]);
 	}
 
-	ret->ids.Add(bind.textures2D.textures_num);
+	ids->Add(bind.textures2D.textures_num);
 
 	for (int i = 0; i < bind.textures2D.textures_num; i++)
 	{
 		const auto& r = bind.textures2D.desc[i].texture;
-		// ret->ids.Add(r.MinLod());
-		// ret->ids.Add(r.Dfmt());
-		// ret->ids.Add(r.Nfmt());
-		// ret->ids.Add(r.Width());
-		// ret->ids.Add(r.Height());
-		// ret->ids.Add(r.PerfMod());
-		// ret->ids.Add(static_cast<uint32_t>(r.Interlaced()));
-		// ret->ids.Add(r.DstSelX());
-		// ret->ids.Add(r.DstSelY());
-		// ret->ids.Add(r.DstSelZ());
-		// ret->ids.Add(r.DstSelW());
-		// ret->ids.Add(r.BaseLevel());
-		// ret->ids.Add(r.LastLevel());
-		// ret->ids.Add(r.TilingIdx());
-		// ret->ids.Add(static_cast<uint32_t>(r.Pow2Pad()));
+		// ids->Add(r.MinLod());
+		// ids->Add(r.Dfmt());
+		// ids->Add(r.Nfmt());
+		// ids->Add(r.Width());
+		// ids->Add(r.Height());
+		// ids->Add(r.PerfMod());
+		// ids->Add(static_cast<uint32_t>(r.Interlaced()));
+		// ids->Add(r.DstSelX());
+		// ids->Add(r.DstSelY());
+		// ids->Add(r.DstSelZ());
+		// ids->Add(r.DstSelW());
+		// ids->Add(r.BaseLevel());
+		// ids->Add(r.LastLevel());
+		// ids->Add(r.TilingIdx());
+		// ids->Add(static_cast<uint32_t>(r.Pow2Pad()));
 		// Image type and format determine the SPIR-V image declaration. They
 		// must participate in the module key so a pipeline cannot reuse a
 		// shader specialized for a differently shaped or integer texture.
-		ret->ids.Add(r.Type());
-		ret->ids.Add(r.Format());
+		ids->Add(r.Type());
+		ids->Add(r.Format());
 		// Storage resinfo admission depends on the resource's mip view.
 		// A module admitted for one mip must not bypass that check on reuse.
 		const bool storage = bind.textures2D.desc[i].usage == ShaderTextureUsage::ReadWrite;
-		ret->ids.Add(storage ? r.BaseLevel() : 0u);
-		ret->ids.Add(storage ? r.LastLevel() : 0u);
-		ret->ids.Add(storage ? r.MaxMip() : 0u);
+		ids->Add(storage ? r.BaseLevel() : 0u);
+		ids->Add(storage ? r.LastLevel() : 0u);
+		ids->Add(storage ? r.MaxMip() : 0u);
 		// Image stores apply a channel selection the storage view cannot express.
-		ret->ids.Add(storage && ShaderStorageTextureSwizzleInShader(r) ? r.DstSelXYZW() : 0u);
-		// ret->ids.Add(r.Depth());
-		// ret->ids.Add(r.Pitch());
-		// ret->ids.Add(r.BaseArray());
-		// ret->ids.Add(r.LastArray());
-		// ret->ids.Add(r.MinLodWarn());
-		// ret->ids.Add(r.CounterBankId());
-		// ret->ids.Add(static_cast<uint32_t>(r.LodHdwCntEn()));
-		ret->ids.Add(bind.textures2D.desc[i].slot);
-		ret->ids.Add(bind.textures2D.desc[i].start_register);
-		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].extended));
-		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].dynamic_sload));
-		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].usage));
-		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].textures2d_without_sampler));
-		ret->ids.Add(static_cast<uint32_t>(ShaderResolvedSampledTextureShape(bind.textures2D.desc[i])));
-		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].sample_operation));
+		ids->Add(storage && ShaderStorageTextureSwizzleInShader(r) ? r.DstSelXYZW() : 0u);
+		// ids->Add(r.Depth());
+		// ids->Add(r.Pitch());
+		// ids->Add(r.BaseArray());
+		// ids->Add(r.LastArray());
+		// ids->Add(r.MinLodWarn());
+		// ids->Add(r.CounterBankId());
+		// ids->Add(static_cast<uint32_t>(r.LodHdwCntEn()));
+		ids->Add(bind.textures2D.desc[i].slot);
+		ids->Add(bind.textures2D.desc[i].start_register);
+		ids->Add(static_cast<uint32_t>(bind.textures2D.desc[i].extended));
+		ids->Add(static_cast<uint32_t>(bind.textures2D.desc[i].dynamic_sload));
+		ids->Add(static_cast<uint32_t>(bind.textures2D.desc[i].usage));
+		ids->Add(static_cast<uint32_t>(bind.textures2D.desc[i].textures2d_without_sampler));
+		ids->Add(static_cast<uint32_t>(ShaderResolvedSampledTextureShape(bind.textures2D.desc[i])));
+		ids->Add(static_cast<uint32_t>(bind.textures2D.desc[i].sample_operation));
 	}
 
-	ret->ids.Add(bind.samplers.samplers_num);
+	ids->Add(bind.samplers.samplers_num);
 
 	for (int i = 0; i < bind.samplers.samplers_num; i++)
 	{
 		const auto& r = bind.samplers.samplers[i];
 
-		// ret->ids.Add(r.ClampX());
-		// ret->ids.Add(r.ClampY());
-		// ret->ids.Add(r.ClampZ());
-		// ret->ids.Add(r.MaxAnisoRatio());
-		// ret->ids.Add(r.DepthCompareFunc());
-		// ret->ids.Add(static_cast<uint32_t>(r.ForceUnormCoords()));
-		// ret->ids.Add(r.AnisoThreshold());
-		// ret->ids.Add(static_cast<uint32_t>(r.McCoordTrunc()));
-		// ret->ids.Add(static_cast<uint32_t>(r.ForceDegamma()));
-		// ret->ids.Add(r.AnisoBias());
-		// ret->ids.Add(static_cast<uint32_t>(r.TruncCoord()));
-		// ret->ids.Add(static_cast<uint32_t>(r.DisableCubeWrap()));
-		// ret->ids.Add(r.FilterMode());
-		// ret->ids.Add(r.MinLod());
-		// ret->ids.Add(r.MaxLod());
-		// ret->ids.Add(r.PerfMip());
-		// ret->ids.Add(r.PerfZ());
-		// ret->ids.Add(r.LodBias());
-		// ret->ids.Add(r.LodBiasSec());
-		// ret->ids.Add(r.XyMagFilter());
-		// ret->ids.Add(r.XyMinFilter());
-		// ret->ids.Add(r.ZFilter());
-		// ret->ids.Add(r.MipFilter());
-		// ret->ids.Add(r.BorderColorPtr());
-		// ret->ids.Add(r.BorderColorType());
-		ret->ids.Add(r.DepthCompareFunc());
-		ret->ids.Add(static_cast<uint32_t>(r.ForceUnormCoords()));
+		// ids->Add(r.ClampX());
+		// ids->Add(r.ClampY());
+		// ids->Add(r.ClampZ());
+		// ids->Add(r.MaxAnisoRatio());
+		// ids->Add(r.DepthCompareFunc());
+		// ids->Add(static_cast<uint32_t>(r.ForceUnormCoords()));
+		// ids->Add(r.AnisoThreshold());
+		// ids->Add(static_cast<uint32_t>(r.McCoordTrunc()));
+		// ids->Add(static_cast<uint32_t>(r.ForceDegamma()));
+		// ids->Add(r.AnisoBias());
+		// ids->Add(static_cast<uint32_t>(r.TruncCoord()));
+		// ids->Add(static_cast<uint32_t>(r.DisableCubeWrap()));
+		// ids->Add(r.FilterMode());
+		// ids->Add(r.MinLod());
+		// ids->Add(r.MaxLod());
+		// ids->Add(r.PerfMip());
+		// ids->Add(r.PerfZ());
+		// ids->Add(r.LodBias());
+		// ids->Add(r.LodBiasSec());
+		// ids->Add(r.XyMagFilter());
+		// ids->Add(r.XyMinFilter());
+		// ids->Add(r.ZFilter());
+		// ids->Add(r.MipFilter());
+		// ids->Add(r.BorderColorPtr());
+		// ids->Add(r.BorderColorType());
+		ids->Add(r.DepthCompareFunc());
+		ids->Add(static_cast<uint32_t>(r.ForceUnormCoords()));
 		// Manual comparison filtering specializes the base-level footprint.
-		ret->ids.Add(r.MinLod());
-		ret->ids.Add(r.FilterMode());
-		ret->ids.Add(r.XyMagFilter());
-		ret->ids.Add(r.XyMinFilter());
-		ret->ids.Add(bind.samplers.slots[i]);
-		ret->ids.Add(bind.samplers.start_register[i]);
-		ret->ids.Add(static_cast<uint32_t>(bind.samplers.extended[i]));
-		ret->ids.Add(static_cast<uint32_t>(bind.samplers.dynamic_sload[i]));
-		ret->ids.Add(static_cast<uint32_t>(bind.samplers.operations[i]));
+		ids->Add(r.MinLod());
+		ids->Add(r.FilterMode());
+		ids->Add(r.XyMagFilter());
+		ids->Add(r.XyMinFilter());
+		ids->Add(bind.samplers.slots[i]);
+		ids->Add(bind.samplers.start_register[i]);
+		ids->Add(static_cast<uint32_t>(bind.samplers.extended[i]));
+		ids->Add(static_cast<uint32_t>(bind.samplers.dynamic_sload[i]));
+		ids->Add(static_cast<uint32_t>(bind.samplers.operations[i]));
 	}
 
-	ret->ids.Add(bind.gds_pointers.pointers_num);
-	ret->ids.Add(static_cast<uint32_t>(bind.gds_pointers.memory_used));
+	ids->Add(bind.gds_pointers.pointers_num);
+	ids->Add(static_cast<uint32_t>(bind.gds_pointers.memory_used));
 
 	for (int i = 0; i < bind.gds_pointers.pointers_num; i++)
 	{
 		// const auto& r = bind.gds_pointers.pointers[i];
 
-		ret->ids.Add(bind.gds_pointers.slots[i]);
-		ret->ids.Add(bind.gds_pointers.start_register[i]);
-		ret->ids.Add(static_cast<uint32_t>(bind.gds_pointers.extended[i]));
+		ids->Add(bind.gds_pointers.slots[i]);
+		ids->Add(bind.gds_pointers.start_register[i]);
+		ids->Add(static_cast<uint32_t>(bind.gds_pointers.extended[i]));
 	}
 
-	ret->ids.Add(bind.direct_sgprs.sgprs_num);
+	ids->Add(bind.direct_sgprs.sgprs_num);
 
 	for (int i = 0; i < bind.direct_sgprs.sgprs_num; i++)
 	{
-		ret->ids.Add(bind.direct_sgprs.start_register[i]);
-		ret->ids.Add(static_cast<uint32_t>(bind.direct_sgprs.absolute_register[i]));
+		ids->Add(bind.direct_sgprs.start_register[i]);
+		ids->Add(static_cast<uint32_t>(bind.direct_sgprs.absolute_register[i]));
 	}
 
-	ret->ids.Add(static_cast<uint32_t>(bind.extended.used));
-	ret->ids.Add(bind.extended.slot);
-	ret->ids.Add(bind.extended.start_register);
+	ids->Add(static_cast<uint32_t>(bind.extended.used));
+	ids->Add(bind.extended.slot);
+	ids->Add(bind.extended.start_register);
 }
 
 ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInputInfo* input_info)
@@ -5718,7 +5732,7 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 		return ret;
 	}
 
-	ret.ids.Expand(64);
+	ShaderIdWriter ids;
 
 	bool gs_instead_of_vs =
 	    (regs->vs_regs.data_addr == 0 && regs->gs_regs.data_addr == 0 && regs->es_regs.data_addr != 0 && regs->gs_regs.chksum != 0);
@@ -5739,8 +5753,8 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 			ShaderRequireVertexProgram(regs, input_info);
 			ret.hash0 = input_info->program->code.GetHash0();
 			ret.crc32 = input_info->program->code.GetCrc32();
-			ret.ids.Add(0x4c565031u); // LVP1: exact copied front/back content and frozen debug commands.
-			for (uint32_t word: input_info->program->fingerprint) { ret.ids.Add(word); }
+			ids.Add(0x4c565031u); // LVP1: exact copied front/back content and frozen debug commands.
+			for (uint32_t word: input_info->program->fingerprint) { ids.Add(word); }
 		}
 	} else
 	{
@@ -5754,32 +5768,32 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 
 		ret.hash0 = header->hash0;
 		ret.crc32 = header->crc32;
-		ret.ids.Add(header->length);
+		ids.Add(header->length);
 	}
 
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_external));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_embedded));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_inline));
-	ret.ids.Add(static_cast<uint32_t>(input_info->gs_prolog));
-	ret.ids.Add(static_cast<uint32_t>(input_info->position1_usage));
-	ret.ids.Add(0x4e574d31u); // NWM1: architectural width and native mapping proof.
-	ret.ids.Add(input_info->native_wave.guest_wave_size);
-	ret.ids.Add(static_cast<uint32_t>(input_info->native_wave.proof));
-	ret.ids.Add(input_info->required_subgroup_size);
-	ret.ids.Add(input_info->native_wave.refusal_reason != nullptr ? 1u : 0u);
-	ret.ids.Add(input_info->float_mode);
-	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_reg));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_buffer_reg));
-	ret.ids.Add(input_info->resources_num);
-	ret.ids.Add(input_info->export_count);
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_data_num));
+	ids.Add(static_cast<uint32_t>(input_info->fetch_external));
+	ids.Add(static_cast<uint32_t>(input_info->fetch_embedded));
+	ids.Add(static_cast<uint32_t>(input_info->fetch_inline));
+	ids.Add(static_cast<uint32_t>(input_info->gs_prolog));
+	ids.Add(static_cast<uint32_t>(input_info->position1_usage));
+	ids.Add(0x4e574d31u); // NWM1: architectural width and native mapping proof.
+	ids.Add(input_info->native_wave.guest_wave_size);
+	ids.Add(static_cast<uint32_t>(input_info->native_wave.proof));
+	ids.Add(input_info->required_subgroup_size);
+	ids.Add(input_info->native_wave.refusal_reason != nullptr ? 1u : 0u);
+	ids.Add(input_info->float_mode);
+	ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
+	ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
+	ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_reg));
+	ids.Add(static_cast<uint32_t>(input_info->fetch_buffer_reg));
+	ids.Add(input_info->resources_num);
+	ids.Add(input_info->export_count);
+	ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_data_num));
 	for (int i = 0; i < input_info->fetch_attrib_data_num; i++)
 	{
-		ret.ids.Add(input_info->fetch_attrib_data[i]);
+		ids.Add(input_info->fetch_attrib_data[i]);
 	}
 
 	for (int i = 0; i < input_info->resources_num; i++)
@@ -5787,54 +5801,55 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 		const auto& r  = input_info->resources[i];
 		const auto& rd = input_info->resources_dst[i];
 
-		ret.ids.Add(rd.register_start);
-		ret.ids.Add(rd.registers_num);
-		ret.ids.Add(static_cast<uint32_t>(rd.semantic));
-		ret.ids.Add(r.Stride());
-		ret.ids.Add(static_cast<uint32_t>(r.SwizzleEnabled()));
-		ret.ids.Add(r.DstSelX());
-		ret.ids.Add(r.DstSelY());
-		ret.ids.Add(r.DstSelZ());
-		ret.ids.Add(r.DstSelW());
+		ids.Add(rd.register_start);
+		ids.Add(rd.registers_num);
+		ids.Add(static_cast<uint32_t>(rd.semantic));
+		ids.Add(r.Stride());
+		ids.Add(static_cast<uint32_t>(r.SwizzleEnabled()));
+		ids.Add(r.DstSelX());
+		ids.Add(r.DstSelY());
+		ids.Add(r.DstSelZ());
+		ids.Add(r.DstSelW());
 		if (gen5)
 		{
-			ret.ids.Add(r.Format());
-			ret.ids.Add(r.OutOfBounds());
+			ids.Add(r.Format());
+			ids.Add(r.OutOfBounds());
 		} else
 		{
-			ret.ids.Add(r.Nfmt());
-			ret.ids.Add(r.Dfmt());
+			ids.Add(r.Nfmt());
+			ids.Add(r.Dfmt());
 		}
-		ret.ids.Add(static_cast<uint32_t>(r.AddTid()));
+		ids.Add(static_cast<uint32_t>(r.AddTid()));
 	}
 
-	ret.ids.Add(input_info->buffers_num);
+	ids.Add(input_info->buffers_num);
 
 	for (int i = 0; i < input_info->buffers_num; i++)
 	{
 		const auto& r = input_info->buffers[i];
-		ret.ids.Add(r.attr_num);
-		ret.ids.Add(r.stride);
+		ids.Add(r.attr_num);
+		ids.Add(r.stride);
 		for (int j = 0; j < r.attr_num; j++)
 		{
-			ret.ids.Add(r.attr_indices[j]);
-			ret.ids.Add(r.attr_offsets[j]);
+			ids.Add(r.attr_indices[j]);
+			ids.Add(r.attr_offsets[j]);
 		}
 	}
 
-	ShaderGetBindIds(&ret, input_info->bind);
+	ShaderGetBindIds(&ids, input_info->bind);
 	if (input_info->clip_probe.draw_scoped && input_info->clip_probe.enabled)
 	{
 		const uint32_t descriptor_set = input_info->clip_probe_descriptor_set;
 		const uint64_t diagnostic_identity = VertexClipProbeDiagnosticIdentity(descriptor_set);
 		EXIT_IF(descriptor_set == kVertexClipProbeInvalidDescriptorSet || descriptor_set > 2u || diagnostic_identity == 0 ||
 		        input_info->clip_probe.diagnostic_identity != diagnostic_identity);
-		ret.ids.Add(0x56435031u); // VCP1
-		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity));
-		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity >> 32u));
-		ret.ids.Add(descriptor_set);
+		ids.Add(0x56435031u); // VCP1
+		ids.Add(static_cast<uint32_t>(diagnostic_identity));
+		ids.Add(static_cast<uint32_t>(diagnostic_identity >> 32u));
+		ids.Add(descriptor_set);
 	}
 
+	ids.Finish(&ret);
 	return ret;
 }
 
@@ -5855,15 +5870,15 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 		return ret;
 	}
 
-	ret.ids.Expand(64);
+	ShaderIdWriter ids;
 
 	if (Config::IsNextGen())
 	{
 		ret.hash0 = (regs->ps_regs.chksum >> 32u) & 0xffffffffu;
 		ret.crc32 = regs->ps_regs.chksum & 0xffffffffu;
-		ret.ids.Add(0x504c4431u); // PLD1: reserved pixel LDS and implicit parameter scalar.
-		ret.ids.Add(static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u);
-		ret.ids.Add(regs->ps_regs.rsrc2.user_sgpr);
+		ids.Add(0x504c4431u); // PLD1: reserved pixel LDS and implicit parameter scalar.
+		ids.Add(static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u);
+		ids.Add(regs->ps_regs.rsrc2.user_sgpr);
 	} else
 	{
 		const auto* src = reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr);
@@ -5877,66 +5892,66 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 		ret.hash0 = header->hash0;
 		ret.crc32 = header->crc32;
 
-		ret.ids.Add(header->length);
+		ids.Add(header->length);
 	}
 
-	ret.ids.Add(input_info->input_num);
-	ret.ids.Add(input_info->system_input_enable);
-	ret.ids.Add(input_info->system_input_address);
+	ids.Add(input_info->input_num);
+	ids.Add(input_info->system_input_enable);
+	ids.Add(input_info->system_input_address);
 	if (input_info->FrontFaceEnabled())
 	{
-		ret.ids.Add(0x46464931u); // FFI1: explicit front-face system input.
-		ret.ids.Add(static_cast<uint32_t>(input_info->front_face_all_bits));
+		ids.Add(0x46464931u); // FFI1: explicit front-face system input.
+		ids.Add(static_cast<uint32_t>(input_info->front_face_all_bits));
 	}
 	if (input_info->custom_interpolation.Enabled())
 	{
-		ret.ids.Add(0x43504932u); // CPI2: raw inputs and qualified parameter aliases through geometry.
-		ret.ids.Add(input_info->custom_interpolation.inputs);
-		ret.ids.Add(input_info->custom_interpolation.per_vertex_inputs);
-		ret.ids.Add(input_info->custom_interpolation.aliased_parameter_inputs);
+		ids.Add(0x43504932u); // CPI2: raw inputs and qualified parameter aliases through geometry.
+		ids.Add(input_info->custom_interpolation.inputs);
+		ids.Add(input_info->custom_interpolation.per_vertex_inputs);
+		ids.Add(input_info->custom_interpolation.aliased_parameter_inputs);
 	}
-	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pos_xy));
-	ret.ids.Add(input_info->host_to_guest_scale.x_guest_numerator);
-	ret.ids.Add(input_info->host_to_guest_scale.x_host_denominator);
-	ret.ids.Add(input_info->host_to_guest_scale.y_guest_numerator);
-	ret.ids.Add(input_info->host_to_guest_scale.y_host_denominator);
-	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pixel_kill_enable));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ps_early_z));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ps_execute_on_noop));
-	ret.ids.Add(0x4e574d31u); // NWM1: distinct from the selected physical size.
-	ret.ids.Add(input_info->native_wave.guest_wave_size);
-	ret.ids.Add(static_cast<uint32_t>(input_info->native_wave.proof));
-	ret.ids.Add(input_info->required_subgroup_size);
-	ret.ids.Add(input_info->native_wave.refusal_reason != nullptr ? 1u : 0u);
-	ret.ids.Add(input_info->float_mode);
-	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
+	ids.Add(static_cast<uint32_t>(input_info->ps_pos_xy));
+	ids.Add(input_info->host_to_guest_scale.x_guest_numerator);
+	ids.Add(input_info->host_to_guest_scale.x_host_denominator);
+	ids.Add(input_info->host_to_guest_scale.y_guest_numerator);
+	ids.Add(input_info->host_to_guest_scale.y_host_denominator);
+	ids.Add(static_cast<uint32_t>(input_info->ps_pixel_kill_enable));
+	ids.Add(static_cast<uint32_t>(input_info->ps_early_z));
+	ids.Add(static_cast<uint32_t>(input_info->ps_execute_on_noop));
+	ids.Add(0x4e574d31u); // NWM1: distinct from the selected physical size.
+	ids.Add(input_info->native_wave.guest_wave_size);
+	ids.Add(static_cast<uint32_t>(input_info->native_wave.proof));
+	ids.Add(input_info->required_subgroup_size);
+	ids.Add(input_info->native_wave.refusal_reason != nullptr ? 1u : 0u);
+	ids.Add(input_info->float_mode);
+	ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
+	ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
 
 	// The export declarations, component order and channel type are part of the
 	// generated SPIR-V interface. They must distinguish pipelines that use the
 	// same guest shader with different render-target formats or COMP_SWAP values.
 	for (int i = 0; i < 8; i++)
 	{
-		ret.ids.Add(input_info->target_output_mode[i]);
-		ret.ids.Add(input_info->target_output_order[i]);
-		ret.ids.Add(input_info->target_output_number[i]);
+		ids.Add(input_info->target_output_mode[i]);
+		ids.Add(input_info->target_output_order[i]);
+		ids.Add(input_info->target_output_number[i]);
 	}
 	if (input_info->dual_source_blend)
 	{
-		ret.ids.Add(0x44534231u); // DSB1: MRT1 is emitted as Location 0 Index 1.
+		ids.Add(0x44534231u); // DSB1: MRT1 is emitted as Location 0 Index 1.
 	}
 
 	for (uint32_t i = 0; i < 32u; i++)
 	{
-		ret.ids.Add(input_info->interpolator_settings[i]);
+		ids.Add(input_info->interpolator_settings[i]);
 	}
 
-	ShaderGetBindIds(&ret, input_info->bind);
+	ShaderGetBindIds(&ids, input_info->bind);
 	if (input_info->fragment_tap.draw_scoped && input_info->fragment_tap.enabled)
 	{
-		ret.ids.Add(0x46535444u); // FSTD: fragment tap selected draw variant.
+		ids.Add(0x46535444u); // FSTD: fragment tap selected draw variant.
 	}
 	if (input_info->input0_probe.draw_scoped && input_info->input0_probe.enabled)
 	{
@@ -5954,22 +5969,23 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 		                                         : VertexClipProbeDiagnosticIdentity(descriptor_set);
 		EXIT_IF(descriptor_set == kVertexClipProbeInvalidDescriptorSet || descriptor_set > 2u || diagnostic_identity == 0 ||
 		        input_info->input0_probe.diagnostic_identity != diagnostic_identity);
-		ret.ids.Add(sample_result ? 0x50535031u : (mrt_result ? 0x504d5231u : 0x50493031u)); // PSP1 / PMR1 / PI01.
-		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity));
-		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity >> 32u));
-		ret.ids.Add(descriptor_set);
+		ids.Add(sample_result ? 0x50535031u : (mrt_result ? 0x504d5231u : 0x50493031u)); // PSP1 / PMR1 / PI01.
+		ids.Add(static_cast<uint32_t>(diagnostic_identity));
+		ids.Add(static_cast<uint32_t>(diagnostic_identity >> 32u));
+		ids.Add(descriptor_set);
 		if (sample_result)
 		{
-			ret.ids.Add(input_info->input0_probe.sample_ordinal);
-			ret.ids.Add(input_info->input0_probe.sparse_subgroup ? 1u : 0u);
+			ids.Add(input_info->input0_probe.sample_ordinal);
+			ids.Add(input_info->input0_probe.sparse_subgroup ? 1u : 0u);
 		}
 		if (mrt_result)
 		{
-			ret.ids.Add(input_info->input0_probe.mrt_target);
-			ret.ids.Add(input_info->input0_probe.export_ordinal);
+			ids.Add(input_info->input0_probe.mrt_target);
+			ids.Add(input_info->input0_probe.export_ordinal);
 		}
 	}
 
+	ids.Finish(&ret);
 	return ret;
 }
 
@@ -6140,7 +6156,7 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 	if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr condition ignored (continuing)\n"); }
 
 	ShaderId ret;
-	ret.ids.Expand(64);
+	ShaderIdWriter ids;
 
 	if (Config::IsNextGen())
 	{
@@ -6155,36 +6171,37 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 		ret.hash0 = header->hash0;
 		ret.crc32 = header->crc32;
 
-		ret.ids.Add(header->length);
+		ids.Add(header->length);
 	}
 
-	ret.ids.Add(input_info->float_mode);
-	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp_mode_known));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
-	ret.ids.Add(input_info->workgroup_register);
-	ret.ids.Add(input_info->thread_ids_num);
-	ret.ids.Add(input_info->lds_dwords);
-	ret.ids.Add(static_cast<uint32_t>(input_info->wave_layout.strategy));
-	ret.ids.Add(input_info->wave_layout.guest_wave_size);
-	ret.ids.Add(input_info->wave_layout.native_subgroup_size);
-	ret.ids.Add(input_info->wave_layout.banks);
-	ret.ids.Add(input_info->wave_layout.waves);
-	ret.ids.Add(static_cast<uint32_t>(input_info->native_wave_sensitive));
-	ret.ids.Add(input_info->required_subgroup_size);
+	ids.Add(input_info->float_mode);
+	ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
+	ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
+	ids.Add(static_cast<uint32_t>(input_info->fp_mode_known));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
+	ids.Add(input_info->workgroup_register);
+	ids.Add(input_info->thread_ids_num);
+	ids.Add(input_info->lds_dwords);
+	ids.Add(static_cast<uint32_t>(input_info->wave_layout.strategy));
+	ids.Add(input_info->wave_layout.guest_wave_size);
+	ids.Add(input_info->wave_layout.native_subgroup_size);
+	ids.Add(input_info->wave_layout.banks);
+	ids.Add(input_info->wave_layout.waves);
+	ids.Add(static_cast<uint32_t>(input_info->native_wave_sensitive));
+	ids.Add(input_info->required_subgroup_size);
 
 	for (int i = 0; i < 3; i++)
 	{
-		ret.ids.Add(input_info->threads_num[i]);
-		ret.ids.Add(static_cast<uint32_t>(input_info->group_id[i]));
-		ret.ids.Add(input_info->wave_layout.guest_local[i]);
-		ret.ids.Add(input_info->wave_layout.physical_local[i]);
+		ids.Add(input_info->threads_num[i]);
+		ids.Add(static_cast<uint32_t>(input_info->group_id[i]));
+		ids.Add(input_info->wave_layout.guest_local[i]);
+		ids.Add(input_info->wave_layout.physical_local[i]);
 	}
 
-	ShaderGetBindIds(&ret, input_info->bind);
+	ShaderGetBindIds(&ids, input_info->bind);
 
+	ids.Finish(&ret);
 	return ret;
 }
 
