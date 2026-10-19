@@ -2471,6 +2471,10 @@ struct ShaderImmutablePixelAnalysis
 	bool prevents_noop_pixel_elision = false;
 	bool has_getpc = false;
 	bool has_global_memory_load = false;
+	// Buffer, typed buffer and scalar loads, in instruction order: the only
+	// instructions whose per-draw descriptor checks can require the guest
+	// device address table.
+	std::vector<uint32_t> descriptor_load_indices;
 };
 
 [[nodiscard]] ShaderPixelColorExports ShaderSummarizePixelColorExports(const ShaderCode& code);

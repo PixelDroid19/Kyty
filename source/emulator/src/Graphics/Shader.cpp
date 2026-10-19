@@ -4207,6 +4207,31 @@ static bool ShaderHasUnboundTypedBufferLoad(const ShaderCode& code, const Shader
 	return ShaderHasRuntimeDescriptorLoad(code, bind, 0, ShaderInstructionIsTypedBufferLoad);
 }
 
+static std::vector<uint32_t> ShaderFindDescriptorLoadIndices(const ShaderCode& code)
+{
+	std::vector<uint32_t> indices;
+	const auto&           instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (ShaderInstructionIsBufferLoad(inst.type) || ShaderInstructionIsTypedBufferLoad(inst.type) ||
+		    ShaderInstructionIsScalarBufferLoad(inst) || ShaderInstructionIsScalarMemoryLoad(inst.type))
+		{
+			indices.push_back(index);
+		}
+	}
+	return indices;
+}
+
+// A pixel-stage load that reads through a runtime descriptor or a guest
+// pointer that no discovered resource resolves.
+static bool ShaderPixelLoadNeedsGuestAddress(const ShaderInstruction& inst, const ShaderBindResources& bind)
+{
+	const bool vector_load = ShaderInstructionIsBufferLoad(inst.type) || ShaderInstructionIsTypedBufferLoad(inst.type);
+	return (vector_load && ShaderVectorBufferUsesRuntimeDescriptor(bind, inst, 0)) ||
+	       ShaderScalarBufferUsesRuntimeDescriptor(bind, inst) || ShaderScalarLoadNeedsGuestAddress(inst, bind);
+}
+
 bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type)
 {
 	switch (type)
@@ -4336,6 +4361,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 			    pixel_analysis->prevents_noop_pixel_elision = ShaderPreventsNoopPixelElision(*code);
 			    pixel_analysis->has_getpc                   = code->HasAnyOf({ShaderInstructionType::SGetpcB64});
 			    pixel_analysis->has_global_memory_load      = ShaderHasGlobalMemoryLoad(*code);
+			    pixel_analysis->descriptor_load_indices     = ShaderFindDescriptorLoadIndices(*code);
 			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code,
 			                                           std::make_shared<ShaderNativeWaveVerdict>(),
 			                                           std::move(pixel_analysis), std::move(scalar_flow),
@@ -4364,11 +4390,11 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->bind.program_base_used = analysis.pixel_analysis->has_getpc;
 		ps_info->bind.program_base = ps_info->bind.program_base_used ? regs->ps_regs.data_addr : 0u;
 		const auto& instructions = analysis.code->GetInstructions();
+		const auto& loads        = analysis.pixel_analysis->descriptor_load_indices;
 		ps_info->bind.device_address_used =
-		    analysis.pixel_analysis->has_global_memory_load || ShaderHasUnboundBufferLoad(*analysis.code, ps_info->bind) ||
-		    ShaderHasUnboundTypedBufferLoad(*analysis.code, ps_info->bind) ||
-		    std::any_of(instructions.begin(), instructions.end(), [&bind = ps_info->bind](const auto& inst) {
-			    return ShaderScalarBufferUsesRuntimeDescriptor(bind, inst) || ShaderScalarLoadNeedsGuestAddress(inst, bind);
+		    analysis.pixel_analysis->has_global_memory_load ||
+		    std::any_of(loads.begin(), loads.end(), [&instructions, &bind = ps_info->bind](uint32_t index) {
+			    return ShaderPixelLoadNeedsGuestAddress(instructions.At(index), bind);
 		    });
 	} else
 	{
