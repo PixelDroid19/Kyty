@@ -126,8 +126,9 @@ fail on the current HEAD before acting on them.
   `VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT` 288 s, no required subgroup
   size 297 s, `spirv-opt -O` more than 300 s. Open defect: the first boot on
   a new host or driver pays minutes per heavy paired module. Direction:
-  compile known modules in the background before first use, or extend the
-  native proof to quad_perm DPP with a host-lane = guest-lane mapping.
+  compile known modules in the background before first use. The native
+  proof now admits quad_perm DPP (entry below), but this module also uses
+  `v_readlane`/`v_writelane` and stays paired.
 - **Black ship and logo; skipped geometry-shader draws (open).** In the
   title scene the ship and the 3D logo reach the albedo and normal
   G-buffers intact but leave the lighting pass black, while forward and
@@ -229,6 +230,49 @@ fail on the current HEAD before acting on them.
     shrink the paired-wave emission or extend the native-width proof so the
     module stops pairing; a single run longer than about 9 minutes would
     store the pipeline in the Mesa cache but does not fix a cold first boot.
+  - Native proof extended to quad DPP (2026-10-19, Intel A770, Mesa
+    26.2.5, strict, warm caches). The native-equivalence proof now admits a
+    full-mask `quad_perm` with FI=0 and BOUND_CTRL=1 as a per-quad read and
+    takes the native layout only for a workgroup of whole quads. Two
+    post-processing kernels of the logo and tunnel leave the paired layout.
+    Their storage images lost tile coverage at first (the native analyzers
+    do not prove them), and the logo stopped in `create_all_the_same`. The
+    paired coverage proof models guest lanes of one 64-thread workgroup, so
+    it now also covers native-equivalent wave64 layouts. Verified by A/B in
+    one binary with the admission switched off, captures every 26 s: the
+    logo is identical; the tunnel warp at presents 1268 and 1261 shows the
+    same scene with no new artifact; the run with the change reached present
+    1388 in 155 s against 1261 without it. Racing title, 200 s: gameplay
+    reached, fps 25-78, as in earlier runs.
+  - Native layout excluded for the stall kernel and the four heavy lighting
+    kernels: all of them use indexed `v_readlane`/`v_writelane` (the lighting
+    kernels first `v_readfirstlane` a value loaded from LDS), which a
+    32-lane host subgroup cannot hold for a 64-lane guest wave. Offline
+    Intel compile times of the four lighting kernels: 29, 36, 38 and 96 s;
+    they compile during boot and come from the Mesa cache afterwards. The
+    stall kernel (about 436,700 words) did not finish within 285 s offline.
+  - Excluded compile reductions, offline with the same SPIR-V: `spirv-opt
+    -O` made the 29 s kernel take more than 200 s; replacing the block
+    dispatcher with structured control flow shrank a module to 113,000 words
+    but it still took 36 s, with about 1,285 live registers at SIMD32. The
+    cost follows register pressure, not module size. Remaining directions:
+    keep each paired half's register file in an array indexed by bank
+    instead of separate variables, or compile known modules in the
+    background before first use.
+  - Defect found, not fixed: `GpuMemoryCreate.cpp:2371` refuses a storage
+    image (0x870000 bytes) whose range crosses two 1920x1080 render targets
+    when the image is not proven write-only. Any kernel whose coverage
+    proof fails reaches this refusal. Direction: split or alias the storage
+    image per overlapped target instead of refusing.
+  - Caveat for experiments: diagnostic environment switches that change
+    code generation are not part of the SPIR-V cache key; use a separate
+    `KYTY_SPIRV_CACHE` directory for each variant.
+- **Defect found, not fixed: unit test hang in CI.**
+  `EmulatorGraphicsDirtyTracking.SlotAndMappingChangesWaitForAFaultInFlight`
+  (`UnitTestEmulatorGraphicsDirtyTracking.cpp:1728`) hung once in the
+  DevTools ON job and passed on rerun; it passes 200 of 200 local runs.
+  Direction: bound the wait in the test and report which side never
+  signalled.
 - **Defect found, not fixed: layered depth targets.** In the same frames a
   lighting kernel samples a 16-layer D32 array (1536x1536, shadow cascades)
   whose cascades the guest renders as single-slice depth views at one base
