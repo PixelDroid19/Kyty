@@ -9,6 +9,103 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Descriptor churn and frame hitches on Intel (2026-10-19)
+
+- **Hosts and method.** Intel Arc A770, Mesa ANV 26.2.5, Xe kernel driver,
+  strict runs of 150-200 s with agent perf snapshots every 30 s. Compare
+  µs per draw per segment. Do not compare fps across segments with
+  different content.
+- **Descriptor churn (racing title, gameplay).**
+  - About 40% of descriptor-set lookups miss, and the cache sits at its
+    65536 live-set cap.
+  - A miss usually differs from a cached set in one storage-buffer slot,
+    or in the vertex-sharp uniform spill.
+  - That spill is bound in about 35% of calls and nearly always misses,
+    because it is uploaded into a new transient buffer on every draw.
+  - About 30% of misses re-create a set the cap had evicted.
+  - Cost per miss before the fix:
+
+    | Step | Cost |
+    | --- | --- |
+    | Index the set | 1.4 µs |
+    | Unindex an evicted set | 1.7 µs |
+    | Trim batch | about 18 ms (about 1.2 µs per call, amortized) |
+    | `vkUpdateDescriptorSets` | 0.37 µs |
+    | Allocate | 0.25 µs |
+
+- **Fix (d3206e17): positional reverse index.**
+  - Each set records its position in every resource's reverse-index list,
+    so unindexing swap-removes its entries in constant time.
+  - Descriptor finalize per draw dropped from 5.6-7.0 µs to 4.0-4.7 µs in
+    comparable racing segments.
+  - Index and unindex left the top of the CP profile.
+  - A 200 s fishing-title run with an invariant check on every index and
+    unindex (temporary diagnostic) found no inconsistency.
+  - The card title ran at 302-318 fps in two 150 s runs. These are single
+    runs, not an attributed gain.
+- **Earlier CP changes on this branch.**
+  - Label holes in an ordered map, scanned from the first candidate (06d216af).
+  - Table-driven instruction classifiers (d6a2cb42).
+  - Together they removed about 11% of CP self time. In the heavy racing
+    segment that is only about 1% of µs per draw.
+- **Excluded: transient-pool affinity.** Reusing a transient snapshot from
+  the same pool when its guest address repeats did not move the miss rate
+  (40-50%). The guest rotates its constant-buffer addresses, so the keys
+  differ anyway. Reverted.
+- **Frame hitches (fishing title, gameplay, steady segments).**
+  - **One frame of about 120 ms per 30 s segment is the harness's native
+    capture.** Its flip sequence equals the capture's frame number in every
+    segment of two runs. It is not a runtime hitch. Do not count
+    `frame_time_max_us` or `frames_over_100ms` in a segment that holds a
+    capture.
+  - **`vkQueueSubmit` sometimes takes 10-124 ms.**
+    - Seen on the graphics and the utility queue alike, a few times per
+      200 s run.
+    - The queue mutex wait is 0. Thread CPU time equals wall time, and all
+      of it is system time (`getrusage`).
+    - The submit therefore spins in the kernel's exec path; it is not
+      waiting on the GPU.
+    - Kernel proactive compaction (`vm.compaction_proactiveness=20`) runs
+      every 32 s. One pass migrated 5966 pages inside the same 0.5 s window
+      as a 39 ms submit.
+    - Guest physical windows are imported as host pointers. Xe implements
+      those as userptrs that it must revalidate after their pages move.
+    - Importing the windows as dma-bufs (`udmabuf`, pinned pages; temporary
+      diagnostic switch) removed every submit over 10 ms in one 200 s run.
+      That run's steady p50 frame time was 46-47 ms, against 42-45 ms with
+      host pointers. Whether the import mode causes that difference is not
+      verified.
+    - Not fixed. Directions:
+      - a pinned import where the host allows it, once its frame cost is
+        measured;
+      - or the host setting `vm.compaction_proactiveness=0`, which is the
+        host owner's choice.
+    - Owned snapshots of flexible memory are host-pointer imports too and
+      can see the same revalidation.
+  - **Excluded: uploads waiting behind graphics work.**
+    - Small synchronous uploads (`UtilFillImage` and `UtilCopyBuffer` in
+      `Utils.cpp`) took up to 176 ms.
+    - The A770 family exposes one graphics queue, so the graphics, utility
+      and present roles share one `VkQueue`.
+    - The time was not the fence wait (0.1-3.7 ms). It was the submit
+      described above.
+  - **Still open.**
+    - Pipeline misses of 50-180 ms with cold caches.
+    - A run on warm caches still compiled 75 SPIR-V modules during
+      loading. The route diverged in that run, so unstable cache keys are
+      not established.
+    - Area transitions take one 0.4-1.0 s frame.
+- **Audio after the SDL 3 migration.** The playback stream is named after
+  the executable instead of "SDL Application". A per-application mute that
+  the session's audio policy had stored for that name silenced the
+  harness's RMS tap. The SDL disk driver showed the emulator's output was
+  audible. This is host state, not a code defect.
+- **Defect seen once.** `DevToolsLifecycle.LiveStallCapturesOnceAndContinues`
+  (`source/unit_test/src/devtools/UnitTestDevToolsLifecycle.cpp`) ran for
+  more than 20 minutes at full CPU in one full-suite run, then passed in
+  750 ms on the rerun. Direction: give the stall wait a bounded deadline
+  and find the missed wake.
+
 ## Robot platformer: worldmap stall and dark top-left quadrant (2026-10-17)
 
 - **Route (Intel Arc A770, Mesa ANV, strict).** Logo, title, "Continue",
