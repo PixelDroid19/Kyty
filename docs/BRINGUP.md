@@ -89,6 +89,17 @@ fail on the current HEAD before acting on them.
   - Still per draw: redefined and assembled buffer descriptors (about
     1.5%), the EUD span scan (about 0.7%), and vertex-path scans without a
     memo.
+  - Fix (93765196): texture binding read two diagnostic environment
+    switches per bound texture; they are now read once per process.
+    Environment reads were about 1.5% of CP time in total; the remaining
+    ones are switches that tests set at runtime.
+  - Excluded: caching the shared-backing population query that guest
+    address preparation issues once per draw (one `fstat`, about 0.7%).
+    It is the check that detects newly populated physical pages, so a
+    cached value would miss them.
+  - Always-on CP stage timers (`DebugStatsScopedTimer`, clock reads) cost
+    about 6% of CP time. They feed the `kyty_agent` performance `_ns`
+    fields, so making them opt-in is a contract change and is not done.
 - **Frame hitches (fishing title, gameplay, steady segments).**
   - **One frame of about 120 ms per 30 s segment is the harness's native
     capture.** Its flip sequence equals the capture's frame number in every
@@ -97,7 +108,9 @@ fail on the current HEAD before acting on them.
     capture.
   - **`vkQueueSubmit` sometimes takes 10-124 ms.**
     - Seen on the graphics and the utility queue alike, a few times per
-      200 s run.
+      200 s run. A later 200 s run at 93765196 had none in its four
+      gameplay segments: apart from the capture frame, no frame exceeded
+      67 ms (p50 40 ms, p99 43-52 ms).
     - The queue mutex wait is 0. Thread CPU time equals wall time, and all
       of it is system time (`getrusage`).
     - The submit therefore spins in the kernel's exec path; it is not
