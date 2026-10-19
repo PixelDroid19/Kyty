@@ -5576,9 +5576,11 @@ When switching private fixtures (or adding a second root):
 - **One high-impact dep at a time** (SDL first). Rebuild `fc_script`, focused
   tests, then the primary strict fixture.
 - Hold Vulkan headers and other ABI-sensitive pins unless MoltenVK/runtime is
-  revalidated. Prefer SDL2 over SDL3 for this tree.
-- Commit messages: host/build behavior only (e.g. `build: upgrade vendored SDL2
-  to 2.32.10`), never private title names.
+  revalidated. The host layer uses the vendored static SDL 3.4 (SDL2 was
+  removed); SDL environment variables use the SDL3 names (`SDL_AUDIO_DRIVER`,
+  `SDL_AUDIO_DISK_OUTPUT_FILE`, `SDL_VIDEO_DRIVER`).
+- Commit messages: host/build behavior only (e.g. `build(host): migrate the
+  host layer from SDL2 to SDL 3.4`), never private title names.
 
 ## Current status and verified frontier
 

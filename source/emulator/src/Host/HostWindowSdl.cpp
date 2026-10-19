@@ -4,12 +4,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
-#include "SDL.h"
-#include "SDL_error.h"
-#include "SDL_hints.h"
-#include "SDL_stdinc.h"
-#include "SDL_surface.h"
-#include "SDL_video.h"
+#include <SDL3/SDL.h>
 
 #include <chrono>
 #include <climits>
@@ -20,23 +15,8 @@ namespace Kyty::Emulator::Host {
 namespace {
 
 constexpr const char* kWindowCaption = "Game";
-constexpr uint32_t    kWindowFlags = static_cast<uint32_t>(SDL_WINDOW_HIDDEN) | static_cast<uint32_t>(SDL_WINDOW_VULKAN);
-constexpr int         kWindowPositionCentered = SDL_WINDOWPOS_CENTERED; // NOLINT(hicpp-signed-bitwise)
-constexpr uint64_t    kCursorHideDelayMilliseconds = 2000;
-
-void PreferNativeWaylandSession()
-{
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	const char* selected = SDL_GetHint(SDL_HINT_VIDEODRIVER);
-	const char* session  = SDL_getenv("XDG_SESSION_TYPE");
-	const char* display  = SDL_getenv("WAYLAND_DISPLAY");
-	if ((selected == nullptr || selected[0] == '\0') && session != nullptr && SDL_strcasecmp(session, "wayland") == 0 &&
-	    display != nullptr && display[0] != '\0')
-	{
-		SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
-	}
-#endif
-}
+constexpr SDL_WindowFlags kWindowFlags = SDL_WINDOW_HIDDEN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
+constexpr uint64_t        kCursorHideDelayMilliseconds = 2000;
 
 [[nodiscard]] uint64_t SteadyMilliseconds()
 {
@@ -51,7 +31,7 @@ HostWindow::HostWindow(void* native_window, uint32_t initialized_subsystems): m_
 	auto* window = static_cast<SDL_Window*>(m_window);
 	EXIT_IF(window == nullptr);
 
-	const uint32_t flags = SDL_GetWindowFlags(window);
+	const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
 	m_fullscreen         = (flags & SDL_WINDOW_FULLSCREEN) != 0u;
 	m_minimized          = (flags & SDL_WINDOW_MINIMIZED) != 0u;
 	m_focused            = (flags & SDL_WINDOW_INPUT_FOCUS) != 0u;
@@ -75,20 +55,18 @@ HostWindow* HostWindow::Create(uint32_t width, uint32_t height)
 {
 	EXIT_IF(width == 0 || height == 0 || width > static_cast<uint32_t>(INT_MAX) || height > static_cast<uint32_t>(INT_MAX));
 
-	PreferNativeWaylandSession();
-	constexpr uint32_t requested_subsystems = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
-	const uint32_t     previously_initialized = SDL_WasInit(requested_subsystems);
+	constexpr SDL_InitFlags requested_subsystems  = SDL_INIT_VIDEO | SDL_INIT_GAMEPAD;
+	const SDL_InitFlags     previously_initialized = SDL_WasInit(requested_subsystems);
 
-	if (SDL_InitSubSystem(requested_subsystems) < 0)
+	if (!SDL_InitSubSystem(requested_subsystems))
 	{
 		EXIT("%s\n", SDL_GetError());
 	}
-	const uint32_t initialized_subsystems = SDL_WasInit(requested_subsystems) & ~previously_initialized;
+	const SDL_InitFlags initialized_subsystems = SDL_WasInit(requested_subsystems) & ~previously_initialized;
 
 	KYTY_LOG_DEBUG("WindowCreate(): width = %d, height = %d\n", static_cast<int>(width), static_cast<int>(height));
 
-	auto* window = SDL_CreateWindow(kWindowCaption, kWindowPositionCentered, kWindowPositionCentered, static_cast<int>(width),
-	                                static_cast<int>(height), kWindowFlags);
+	auto* window = SDL_CreateWindow(kWindowCaption, static_cast<int>(width), static_cast<int>(height), kWindowFlags);
 	if (window == nullptr)
 	{
 		if (initialized_subsystems != 0)
@@ -98,7 +76,7 @@ HostWindow* HostWindow::Create(uint32_t width, uint32_t height)
 		EXIT("%s\n", SDL_GetError());
 	}
 
-	SDL_SetWindowResizable(window, SDL_TRUE);
+	SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 	return new HostWindow(window, initialized_subsystems);
 }
 
@@ -170,7 +148,13 @@ void HostWindow::SetCursorVisible(bool visible)
 		return;
 	}
 
-	SDL_ShowCursor(visible ? SDL_ENABLE : SDL_DISABLE);
+	if (visible)
+	{
+		SDL_ShowCursor();
+	} else
+	{
+		SDL_HideCursor();
+	}
 	m_cursor_visible = visible;
 }
 
@@ -206,9 +190,9 @@ bool HostWindow::ToggleFullscreen()
 		return false;
 	}
 
-	const bool     target = !m_fullscreen;
-	const uint32_t flags  = target ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u;
-	if (SDL_SetWindowFullscreen(static_cast<SDL_Window*>(m_window), flags) != 0)
+	const bool target = !m_fullscreen;
+	// Without an exclusive display mode set, SDL uses borderless desktop fullscreen.
+	if (!SDL_SetWindowFullscreen(static_cast<SDL_Window*>(m_window), target))
 	{
 		KYTY_LOG_WARN("Kyty window fullscreen toggle failed: %s\n", SDL_GetError());
 		return false;

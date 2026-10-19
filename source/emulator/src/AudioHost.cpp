@@ -6,13 +6,13 @@
 #include "Emulator/Host/Clock.h"
 #include "Emulator/Log.h"
 
-#include "SDL.h"
+#include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <climits>
 #include <condition_variable>
 #include <cstdio>
-#include <cstring>
+#include <string>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -20,32 +20,6 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Audio {
-
-namespace {
-
-int InitializeSdlAudio()
-{
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	if (SDL_getenv("SDL_AUDIODRIVER") == nullptr)
-	{
-		for (int i = 0; i < SDL_GetNumAudioDrivers(); i++)
-		{
-			if (std::strcmp(SDL_GetAudioDriver(i), "pipewire") == 0)
-			{
-				if (SDL_AudioInit("pipewire") == 0)
-				{
-					return 0;
-				}
-				SDL_AudioQuit();
-				break;
-			}
-		}
-	}
-#endif
-	return SDL_InitSubSystem(SDL_INIT_AUDIO);
-}
-
-} // namespace
 
 class HostAudio::Impl
 {
@@ -59,14 +33,13 @@ public:
 		Format               format             = Format::Unknown;
 		int                  channels_num       = 0;
 		int                  volume[8]          = {};
-		SDL_AudioDeviceID    device_id          = 0;
-		SDL_AudioStream*     conversion_stream  = nullptr;
+		// Bound to its own playback device, which converts to the device format.
+		SDL_AudioStream*     stream             = nullptr;
 		AudioPcmFormat       pcm_format         = AudioPcmFormat::Signed16;
 		bool                 queue_error_logged = false;
 		uint64_t             next_deadline      = 0;
 		uint64_t             period_remainder   = 0;
 		std::vector<uint8_t> volume_buffer;
-		std::vector<uint8_t> device_buffer;
 	};
 
 	struct PortIn
@@ -93,14 +66,9 @@ public:
 	static void CloseOutputPort(PortOut* port)
 	{
 		EXIT_IF(port == nullptr);
-		if (port->conversion_stream != nullptr)
+		if (port->stream != nullptr)
 		{
-			SDL_FreeAudioStream(port->conversion_stream);
-		}
-		if (port->device_id != 0)
-		{
-			SDL_ClearQueuedAudio(port->device_id);
-			SDL_CloseAudioDevice(port->device_id);
+			SDL_DestroyAudioStream(port->stream);
 		}
 		*port = PortOut {};
 	}
@@ -115,7 +83,7 @@ public:
 
 std::shared_ptr<HostAudio> HostAudio::Create(std::string* error)
 {
-	if (InitializeSdlAudio() < 0)
+	if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
 	{
 		if (error != nullptr)
 		{
@@ -188,38 +156,26 @@ HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t f
 
 		if (type == 0 || type == 1)
 		{
-			SDL_AudioSpec desired {};
-			SDL_AudioSpec obtained {};
-			port.pcm_format  = (format == Format::Signed16bitMono || format == Format::Signed16bitStereo ||
-			                    format == Format::Signed16bit8Ch || format == Format::Signed16bit8ChStd)
-			                       ? AudioPcmFormat::Signed16
-			                       : AudioPcmFormat::Float32;
-			desired.freq     = static_cast<int>(freq);
-			desired.format   = port.pcm_format == AudioPcmFormat::Signed16 ? AUDIO_S16SYS : AUDIO_F32SYS;
-			desired.channels = static_cast<uint8_t>(port.channels_num);
-			desired.samples  = static_cast<uint16_t>(samples_num);
-			desired.callback = nullptr;
-			constexpr int allowed_changes =
-			    SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
-			port.device_id = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, allowed_changes);
-			if (port.device_id == 0 || obtained.format != desired.format)
+			port.pcm_format = (format == Format::Signed16bitMono || format == Format::Signed16bitStereo ||
+			                   format == Format::Signed16bit8Ch || format == Format::Signed16bit8ChStd)
+			                      ? AudioPcmFormat::Signed16
+			                      : AudioPcmFormat::Float32;
+			SDL_AudioSpec spec {};
+			spec.format   = port.pcm_format == AudioPcmFormat::Signed16 ? SDL_AUDIO_S16 : SDL_AUDIO_F32;
+			spec.channels = port.channels_num;
+			spec.freq     = static_cast<int>(freq);
+			SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, std::to_string(samples_num).c_str());
+			port.stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+			if (port.stream == nullptr)
 			{
 				Impl::CloseOutputPort(&port);
 				return Id::Invalid();
 			}
-			if (obtained.freq != desired.freq || obtained.channels != desired.channels)
+			if (!m_impl->host_paused && !SDL_ResumeAudioStreamDevice(port.stream))
 			{
-				port.conversion_stream =
-				    SDL_NewAudioStream(desired.format, desired.channels, desired.freq, obtained.format, obtained.channels, obtained.freq);
-				if (port.conversion_stream == nullptr)
-				{
-					Impl::CloseOutputPort(&port);
-					return Id::Invalid();
-				}
-				KYTY_LOG_DEBUG( "Kyty audio conversion: %d Hz/%u ch/0x%x -> %d Hz/%u ch/0x%x\n", desired.freq, desired.channels,
-				             desired.format, obtained.freq, obtained.channels, obtained.format);
+				Impl::CloseOutputPort(&port);
+				return Id::Invalid();
 			}
-			SDL_PauseAudioDevice(port.device_id, m_impl->host_paused ? 1 : 0);
 		}
 		return Id::Create(id);
 	}
@@ -305,9 +261,12 @@ void HostAudio::SetHostPaused(bool paused)
 	m_impl->host_paused = paused;
 	for (auto& port: m_impl->out_ports)
 	{
-		if (port.device_id != 0)
+		if (port.stream != nullptr && paused)
 		{
-			SDL_PauseAudioDevice(port.device_id, paused ? 1 : 0);
+			SDL_PauseAudioStreamDevice(port.stream);
+		} else if (port.stream != nullptr)
+		{
+			SDL_ResumeAudioStreamDevice(port.stream);
 		}
 		if (port.used)
 		{
@@ -360,7 +319,7 @@ bool HostAudio::AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_
 		    Kyty::Emulator::HostClock::NextPeriodicIntervalMicroseconds(port.samples_num, port.freq, &port.period_remainder);
 		wake_deadline = std::max(wake_deadline, port.next_deadline);
 
-		if (params[i].data == nullptr || port.device_id == 0)
+		if (params[i].data == nullptr || port.stream == nullptr)
 		{
 			continue;
 		}
@@ -371,40 +330,8 @@ bool HostAudio::AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_
 			return false;
 		}
 
-		const void* queue_data = port.volume_buffer.data();
-		size_t      queue_size = port.volume_buffer.size();
-		bool        queue_ok   = true;
-		if (port.conversion_stream != nullptr)
-		{
-			if (SDL_AudioStreamPut(port.conversion_stream, queue_data, static_cast<int>(queue_size)) != 0)
-			{
-				queue_ok = false;
-			}
-			const int available = queue_ok ? SDL_AudioStreamAvailable(port.conversion_stream) : -1;
-			if (available < 0)
-			{
-				queue_ok = false;
-			} else if (available == 0)
-			{
-				continue;
-			} else
-			{
-				port.device_buffer.resize(static_cast<size_t>(available));
-				const int converted = SDL_AudioStreamGet(port.conversion_stream, port.device_buffer.data(), available);
-				if (converted < 0)
-				{
-					queue_ok = false;
-				} else
-				{
-					queue_data = port.device_buffer.data();
-					queue_size = static_cast<size_t>(converted);
-				}
-			}
-		}
-		if (queue_ok && queue_size != 0 && SDL_QueueAudio(port.device_id, queue_data, static_cast<uint32_t>(queue_size)) != 0)
-		{
-			queue_ok = false;
-		}
+		const bool queue_ok =
+		    SDL_PutAudioStreamData(port.stream, port.volume_buffer.data(), static_cast<int>(port.volume_buffer.size()));
 		if (!queue_ok && !port.queue_error_logged)
 		{
 			KYTY_LOG_ERROR("Kyty audio output failed: %s\n", SDL_GetError());

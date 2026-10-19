@@ -1,7 +1,7 @@
 #include "Emulator/Host/CaptureImageCodec.h"
 #include "Emulator/Host/Png.h"
 
-#include "SDL_surface.h"
+#include <SDL3/SDL_surface.h>
 
 #include <algorithm>
 #include <climits>
@@ -89,25 +89,20 @@ float HostCaptureImageHalfToFloat(uint16_t h)
 	return value;
 }
 
-void HostCaptureImagePixelMasks(HostCaptureImagePixelFormat format, uint32_t* r_mask, uint32_t* g_mask, uint32_t* b_mask,
-	                             uint32_t* a_mask)
+SDL_PixelFormat HostCaptureImageSdlFormat(HostCaptureImagePixelFormat format)
 {
-	*r_mask = format == HostCaptureImagePixelFormat::Bgra8 ? 0x00FF0000u : 0x000000FFu;
-	*g_mask = 0x0000FF00u;
-	*b_mask = format == HostCaptureImagePixelFormat::Bgra8 ? 0x000000FFu : 0x00FF0000u;
-	*a_mask = 0xFF000000u;
+	return format == HostCaptureImagePixelFormat::Bgra8 ? SDL_PIXELFORMAT_BGRA32 : SDL_PIXELFORMAT_RGBA32;
 }
 
 bool HostCaptureImageSaveSdlSurfacePng(SDL_Surface* surface, HostCaptureImagePixelFormat format, const std::filesystem::path& path)
 {
-	if (surface == nullptr || surface->format == nullptr || surface->w <= 0 || surface->h <= 0 || surface->pitch <= 0 ||
-	    surface->format->BytesPerPixel != 4)
+	if (surface == nullptr || surface->w <= 0 || surface->h <= 0 || surface->pitch <= 0 || SDL_BYTESPERPIXEL(surface->format) != 4)
 	{
 		return false;
 	}
 
 	const bool must_lock = SDL_MUSTLOCK(surface);
-	if (must_lock && SDL_LockSurface(surface) != 0)
+	if (must_lock && !SDL_LockSurface(surface))
 	{
 		return false;
 	}
@@ -234,15 +229,10 @@ HostCaptureImageCodecResult HostCaptureImageCodecWritePng(const HostCaptureImage
 		return result;
 	}
 
-	uint32_t r_mask = 0;
-	uint32_t g_mask = 0;
-	uint32_t b_mask = 0;
-	uint32_t a_mask = 0;
-	HostCaptureImagePixelMasks(source.format, &r_mask, &g_mask, &b_mask, &a_mask);
+	const SDL_PixelFormat sdl_format = HostCaptureImageSdlFormat(source.format);
 
-	auto* surface = SDL_CreateRGBSurfaceFrom(const_cast<uint8_t*>(source.pixels), static_cast<int>(source.extent.width),
-	                                         static_cast<int>(source.extent.height), 32, static_cast<int>(source.row_pitch_bytes), r_mask,
-	                                         g_mask, b_mask, a_mask);
+	auto* surface = SDL_CreateSurfaceFrom(static_cast<int>(source.extent.width), static_cast<int>(source.extent.height), sdl_format,
+	                                      const_cast<uint8_t*>(source.pixels), static_cast<int>(source.row_pitch_bytes));
 	if (surface == nullptr)
 	{
 		result.error = HostCaptureImageCodecError::CreateSurface;
@@ -255,9 +245,8 @@ HostCaptureImageCodecResult HostCaptureImageCodecWritePng(const HostCaptureImage
 	const auto   scaled_extent = HostCaptureImageCodecScaleToMaxEdge(source.extent, max_edge);
 	if (scaled_extent.width != source.extent.width || scaled_extent.height != source.extent.height)
 	{
-		scaled = SDL_CreateRGBSurface(0, static_cast<int>(scaled_extent.width), static_cast<int>(scaled_extent.height), 32, r_mask, g_mask,
-		                              b_mask, a_mask);
-		if (scaled != nullptr && SDL_BlitScaled(surface, nullptr, scaled, nullptr) == 0)
+		scaled = SDL_CreateSurface(static_cast<int>(scaled_extent.width), static_cast<int>(scaled_extent.height), sdl_format);
+		if (scaled != nullptr && SDL_BlitSurfaceScaled(surface, nullptr, scaled, nullptr, SDL_SCALEMODE_NEAREST))
 		{
 			save_surface        = scaled;
 			result.output_extent = scaled_extent;
@@ -265,7 +254,7 @@ HostCaptureImageCodecResult HostCaptureImageCodecWritePng(const HostCaptureImage
 		{
 			if (scaled != nullptr)
 			{
-				SDL_FreeSurface(scaled);
+				SDL_DestroySurface(scaled);
 				scaled = nullptr;
 			}
 			result.downscale_fallback = true;
@@ -275,9 +264,9 @@ HostCaptureImageCodecResult HostCaptureImageCodecWritePng(const HostCaptureImage
 	const bool saved = HostCaptureImageSaveSdlSurfacePng(save_surface, source.format, path);
 	if (scaled != nullptr)
 	{
-		SDL_FreeSurface(scaled);
+		SDL_DestroySurface(scaled);
 	}
-	SDL_FreeSurface(surface);
+	SDL_DestroySurface(surface);
 	if (!saved)
 	{
 		result.error = HostCaptureImageCodecError::SaveImage;

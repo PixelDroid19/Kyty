@@ -10,11 +10,11 @@ endif()
 add_library(core STATIC ${core_src})
 #add_library(core STATIC $<TARGET_OBJECTS:core_obj>)
 
-target_link_libraries(core sys math SDL2-static sqlite lzma zstd miniz)
+target_link_libraries(core sys math SDL3-static sqlite lzma zstd miniz)
 
 get_property(inc_headers TARGET core PROPERTY INCLUDE_DIRECTORIES)
 list(APPEND inc_headers 
-	${CMAKE_SOURCE_DIR}/3rdparty/sdl2/sdl2/include 	
+	${CMAKE_SOURCE_DIR}/3rdparty/sdl3/sdl3/include 	
 	${CMAKE_SOURCE_DIR}/3rdparty/sqlite/include
 	${CMAKE_SOURCE_DIR}/3rdparty/lzma/include
 	${CMAKE_SOURCE_DIR}/3rdparty/zstd/lib

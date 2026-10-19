@@ -7,8 +7,6 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Vector.h"
 
-struct SDL_RWops;
-
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #ifdef CreateDirectory
 #undef CreateDirectory
@@ -148,8 +146,6 @@ public:
 	static String GetAssetsDir();
 	static void   SetAssetsSubDir(const String& dir);
 	static String GetAssetsSubDir();
-
-	SDL_RWops* CreateSdlRWops();
 
 	KYTY_CLASS_NO_COPY(File);
 

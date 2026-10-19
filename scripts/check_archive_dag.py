@@ -75,7 +75,7 @@ DOMAIN_SOURCE_GLOBS = {
 }
 
 # Objects compiled from outside source/emulator (third-party backends).
-FOREIGN_OBJECT_ALLOWLIST = {"imgui_impl_sdl2.cpp.o": "kyty_host"}
+FOREIGN_OBJECT_ALLOWLIST = {"imgui_impl_sdl3.cpp.o": "kyty_host"}
 
 
 def archive_path(build_dir: pathlib.Path, archive: str) -> pathlib.Path:
@@ -177,7 +177,7 @@ def check_ownership(build_dir: pathlib.Path, source_dir: pathlib.Path) -> list:
             diagnostics.append(f"{name} owns unexpected object {member}")
         for source in expected[name]:
             expected_member = source + ".o"
-            if expected_member == "imgui_impl_sdl2.cpp.o":
+            if expected_member == "imgui_impl_sdl3.cpp.o":
                 continue
             if expected_member not in members:
                 diagnostics.append(f"{name} is missing object {expected_member}")

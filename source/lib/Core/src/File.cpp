@@ -10,9 +10,6 @@
 
 #include "FileInternal.h"
 
-#include "SDL_rwops.h"
-#include "SDL_stdinc.h"
-
 #include <cerrno>
 
 // IWYU pragma: no_include <fileapi.h>
@@ -645,78 +642,6 @@ String File::Read(const String& name, Encoding e)
 	return str;
 }
 
-static Sint64 myseekfunc(SDL_RWops* context, Sint64 offset, int whence)
-{
-	File* f = static_cast<File*>(context->hidden.unknown.data1);
-
-	switch (whence)
-	{
-		case RW_SEEK_SET:
-			if (offset < 0)
-			{
-				return -1;
-			}
-			f->Seek(offset);
-			return static_cast<Sint64>(f->Tell());
-			break;
-		case RW_SEEK_CUR:
-			f->Seek(f->Tell() + offset);
-			return static_cast<Sint64>(f->Tell());
-			break;
-		case RW_SEEK_END:
-			f->Seek(f->Size() + offset);
-			return static_cast<Sint64>(f->Tell());
-			break;
-		default: break;
-	}
-
-	return -1;
-}
-
-static size_t myreadfunc(SDL_RWops* context, void* ptr, size_t size, size_t maxnum)
-{
-	File* f = static_cast<File*>(context->hidden.unknown.data1);
-
-	uint32_t bytes = 0;
-
-	size_t sm = size * maxnum;
-
-	EXIT_IF(sizeof(size_t) > 4 && (uint64_t(sm) >> 32u) > 0);
-
-	auto sm2 = static_cast<uint32_t>(sm);
-
-	f->Read(ptr, sm2, &bytes);
-
-	return bytes / size;
-}
-
-static size_t mywritefunc(SDL_RWops* context, const void* ptr, size_t size, size_t num)
-{
-	File* f = static_cast<File*>(context->hidden.unknown.data1);
-
-	uint32_t bytes = 0;
-
-	size_t sm = size * num;
-
-	EXIT_IF(sizeof(size_t) > 4 && (uint64_t(sm) >> 32u) > 0);
-
-	auto sm2 = static_cast<uint32_t>(sm);
-
-	f->Write(ptr, sm2, &bytes);
-
-	return bytes / size;
-}
-
-static int myclosefunc(SDL_RWops* context)
-{
-	File* f = static_cast<File*>(context->hidden.unknown.data1);
-
-	f->Close();
-
-	SDL_FreeRW(context);
-	return 0;
-}
-
 void File::SetAssetsDir(const String& dir)
 {
 	*g_assets_dir = dir.ReplaceChar(U'\\', U'/');
@@ -808,23 +733,6 @@ void File::DetectEncoding()
 	}
 
 	Seek(pos);
-}
-
-SDL_RWops* File::CreateSdlRWops()
-{
-	SDL_RWops* c = SDL_AllocRW();
-
-	EXIT_IF(c == nullptr);
-
-	c->seek  = myseekfunc;
-	c->read  = myreadfunc;
-	c->write = mywritefunc;
-	c->close = myclosefunc;
-	c->type  = 0;
-
-	c->hidden.unknown.data1 = this;
-
-	return c;
 }
 
 ByteBuffer File::ReadWholeBuffer()

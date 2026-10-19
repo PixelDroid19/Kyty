@@ -65,7 +65,7 @@ ocultar entradas no soportadas.
 
 ## Contratos de runtime host
 
-La arquitectura SDL2 de Kyty incorpora ventana redimensionable, fullscreen de
+La arquitectura SDL3 de Kyty incorpora ventana redimensionable, fullscreen de
 escritorio, hotkeys, cursor, eventos de foco/minimizado, hotplug/remap de
 mandos, conversión al dispositivo de audio, cola acotada, pausa host y
 directorios de usuario portables.
@@ -75,8 +75,6 @@ publicador atómico común; no usa un directorio temporal global.
 
 No se portaron:
 
-- una migración completa a SDL3, porque Kyty mantiene un backend SDL2 funcional
-  y el cambio no es necesario para esos contratos;
 - ATRAC9/AT9, porque exige un decoder y un contrato ABI verificables, no un
   stub que produzca éxito silencioso;
 - precargas de plugins, stubs HLE generales o excepciones por título;
