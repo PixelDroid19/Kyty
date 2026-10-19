@@ -7031,7 +7031,12 @@ TEST(EmulatorGraphicsPackets, CompressedMrtExportReadsPackedHalfFromUintShadow)
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(tapped_source.FindIndex("OpStore %fs_tap_0 %fs_tap_signed_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(tapped_source.FindIndex("%fs_tap_out_0_2 = OpLoad"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v28"), Core::STRING8_INVALID_INDEX);
+	// The write of v28 reads its old and new value for the EXEC select; the
+	// export must add no further read.
+	const auto v28_keep = sparse_source.FindIndex("OpLoad %float %v28");
+	const auto v28_new  = v28_keep == Core::STRING8_INVALID_INDEX ? v28_keep : sparse_source.FindIndex("OpLoad %float %v28", v28_keep + 1u);
+	ASSERT_NE(v28_new, Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v28", v28_new + 1u), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v29"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v30"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(sparse_source.FindIndex("OpStore %fs_tap_1 %float_0_000000"), Core::STRING8_INVALID_INDEX);
