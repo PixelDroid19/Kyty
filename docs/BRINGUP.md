@@ -238,6 +238,13 @@ fail on the current HEAD before acting on them.
       loading. The route diverged in that run, so unstable cache keys are
       not established.
     - Area transitions take one 0.4-1.0 s frame.
+    - Entering gameplay from the load (fishing title, warm caches, a0cf04b2)
+      takes one frame of 0.1-0.9 s, different in each of four runs. In the
+      0.9 s frame there was no pipeline miss and no SPIR-V compile, no
+      wait above 50 ms, and no command-processor run above 42 ms, so the
+      guest delivered the frame late. A run with a 100 ms poll of thread
+      states saw no thread blocked in file reads (the game files sit on a
+      FUSE NTFS mount), but that run had no long frame. The cause is open.
 - **Audio after the SDL 3 migration.** The playback stream is named after
   the executable instead of "SDL Application". A per-application mute that
   the session's audio policy had stored for that name silenced the
