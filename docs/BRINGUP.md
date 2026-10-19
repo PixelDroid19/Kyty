@@ -170,6 +170,18 @@ fail on the current HEAD before acting on them.
   - Always-on CP stage timers (`DebugStatsScopedTimer`, clock reads) cost
     about 6% of CP time. They feed the `kyty_agent` performance `_ns`
     fields, so making them opt-in is a contract change and is not done.
+  - Fix (a0cf04b2): the elapsed-time statistics read `DebugStatsClock`
+    instead of `steady_clock`. It reads the time-stamp counter (6.8 ns
+    against 17.5 ns per read on the A770 host) and scales it to
+    nanoseconds with a rate calibrated once against `steady_clock`. The
+    `_ns` fields keep their unit. Hosts without an invariant counter, or
+    whose kernel clock source is not the counter, keep `steady_clock`.
+    A unit test checks the clock against `steady_clock` over 50 ms.
+    Fishing title, warm caches, gameplay segments: p50 frame 38-39 ms to
+    37 ms, 28.7-29.7 to 27.7-28.5 µs per draw, 670-693 to 695-716 flips
+    per segment. Single runs; the gain is about 3%. A seven-title sweep
+    on a0cf04b2 reached the same states as the previous sweep, with fps
+    within run-to-run noise.
 - **Frame hitches (fishing title, gameplay, steady segments).**
   - **One frame of about 120 ms per 30 s segment is the harness's native
     capture.** Its flip sequence equals the capture's frame number in every
@@ -236,6 +248,12 @@ fail on the current HEAD before acting on them.
   more than 20 minutes at full CPU in one full-suite run, then passed in
   750 ms on the rerun. Direction: give the stall wait a bounded deadline
   and find the missed wake.
+- **Defect seen once.**
+  `EmulatorAudio.StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
+  (`source/unit_test/src/emulator/UnitTestEmulatorAudio.cpp:8715`) hit its
+  10 s barrier timeout in one full-suite run. It passed 5 of 5 alone and
+  in the 115-test audio suite. Direction: check whether the render thread
+  can miss the end callback under a loaded host.
 
 ## Robot platformer: worldmap stall and dark top-left quadrant (2026-10-17)
 
