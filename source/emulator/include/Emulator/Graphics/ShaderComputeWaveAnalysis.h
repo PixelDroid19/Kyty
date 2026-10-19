@@ -64,6 +64,8 @@ struct ShaderComputeWaveAnalysisResult
 	bool                supported      = false;
 	uint32_t            unsupported_pc = 0;
 	Kyty::Core::String8 reason;
+	// A supported native-equivalent program reads quad neighbours through DPP.
+	bool reads_quad_lanes = false;
 };
 
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const ShaderInstruction& instruction);

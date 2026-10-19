@@ -4503,6 +4503,14 @@ private:
 
 static ComputeProgramAnalysisCache g_compute_program_analysis_cache(512);
 
+// A quad DPP read needs whole guest quads in the workgroup: a trailing partial
+// quad would shuffle from host lanes that do not exist.
+static bool NativeEquivalenceFitsWorkgroup(const ShaderComputeWaveAnalysisResult& native, const ShaderComputeInputInfo& info)
+{
+	const uint64_t invocations = static_cast<uint64_t>(info.threads_num[0]) * info.threads_num[1] * info.threads_num[2];
+	return native.supported && (!native.reads_quad_lanes || invocations % 4u == 0u);
+}
+
 void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* /*sh*/, uint32_t dispatch_mode,
                           ShaderComputeInputInfo* info)
 {
@@ -4578,14 +4586,19 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 				     dispatch_mode, info->threads_num[0], info->threads_num[1], info->threads_num[2], native.unsupported_pc,
 				     native.reason.c_str());
 			}
+			if (!NativeEquivalenceFitsWorkgroup(native, *info))
+			{
+				EXIT("wave64 dispatch reads DPP quads across a partial quad: local=%ux%ux%u\n", info->threads_num[0],
+				     info->threads_num[1], info->threads_num[2]);
+			}
 		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
 		{
 			// A program proven wave-width independent runs one guest lane per
 			// invocation: half the code of paired banks, over the same workgroup.
 			const auto native = info->native_equivalent_valid ? program->NativeEquivalence() : ShaderComputeWaveAnalysisResult {};
-			const auto admission = native.supported ? ShaderComputeWaveAnalysisResult {true, 0, {}}
-			                                        : ShaderAnalyzeComputeWaveCode(code, *info);
-			if (native.supported)
+			const bool native_fits = NativeEquivalenceFitsWorkgroup(native, *info);
+			const auto admission = native_fits ? ShaderComputeWaveAnalysisResult {true, 0, {}} : ShaderAnalyzeComputeWaveCode(code, *info);
+			if (native_fits)
 			{
 				info->wave_layout = info->native_equivalent_layout;
 			} else if (!admission.supported)

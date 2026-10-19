@@ -231,6 +231,16 @@ OperandUnits CollectUnits(const ShaderOperand& operand, UnitSet* units)
 	}
 }
 
+// Full-mask quad_perm with FI=0 and BOUND_CTRL=1 (RDNA2 ISA 6.2.2): each lane reads a lane of its
+// own quad, or 0 when that lane is inactive. A guest quad is four consecutive local invocations, and
+// the per-lane emitter shuffles within the host quad holding them.
+bool OperandIsQuadPermute(const ShaderOperand& operand)
+{
+	return operand.type == ShaderOperandType::Vgpr && operand.swizzle == 6u && operand.dpp_ctrl <= 0xffu &&
+	       operand.dpp_row_mask == 0xfu && operand.dpp_bank_mask == 0xfu && !operand.dpp_fetch_inactive && operand.dpp_bound_ctrl &&
+	       operand.dpp_unmodeled_bits == 0u;
+}
+
 bool OperandIsMaskConstant(const ShaderOperand& operand)
 {
 	return operand.type == ShaderOperandType::IntegerInlineConstant && (operand.constant.i == 0 || operand.constant.i == -1);
@@ -254,6 +264,7 @@ struct DecodedInstruction
 	bool     writes_scc_from_mask = false;
 	bool     writes_scc_data      = false;
 	bool     vector               = false;
+	bool     reads_quad           = false;
 	uint32_t target               = 0;
 	bool     has_target           = false;
 };
@@ -313,9 +324,17 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, boo
 
 	auto use_operand = [&](const ShaderOperand& operand, int source) -> bool
 	{
-		if (operand.dpp || operand.type == ShaderOperandType::VccZ || operand.type == ShaderOperandType::ExecZ)
+		if (operand.type == ShaderOperandType::VccZ || operand.type == ShaderOperandType::ExecZ)
 		{
 			return false;
+		}
+		if (operand.dpp)
+		{
+			if (!out->vector || source != 0 || !OperandIsQuadPermute(operand))
+			{
+				return false;
+			}
+			out->reads_quad = true;
 		}
 		UnitSet    units;
 		const auto kind = CollectUnits(operand, &units);
@@ -955,7 +974,9 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 			return Failure(instruction.pc, "a scalar value written inside a lane-conditional region is live at its join");
 		}
 	}
-	return {true, 0, {}};
+	ShaderComputeWaveAnalysisResult result {true, 0, {}};
+	result.reads_quad_lanes = std::any_of(decoded.begin(), decoded.end(), [](const auto& entry) { return entry.reads_quad; });
+	return result;
 }
 
 } // namespace Kyty::Libs::Graphics
