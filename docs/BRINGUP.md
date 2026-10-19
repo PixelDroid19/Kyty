@@ -284,10 +284,18 @@ fail on the current HEAD before acting on them.
     one CP wait of 30 s, frame 33 at 155 s and frame 631 at 196 s. Racing
     title, first boot (records one recipe) and second boot (compiles it in
     the background, cold Mesa): fps 41-90 and 25-81, as in earlier runs.
-    Not verified: the stall kernel has no recipe yet (no run has reached it
-    with this change) and on its first encounter a background compile can
-    only shorten the stall, not remove it; a normal exit while a worker is
-    inside the driver was not exercised (every run ended at its time cap).
+    Stall kernel with its recipe recorded, warm Mesa cache for every other
+    module, two 275-360 s runs: the worker starts it at boot, the dispatch
+    thread reaches it after 170-240 s and waits in the claim (95% of its
+    samples in futex while the worker spends 214 s of CPU inside the Intel
+    compiler); neither run reached the end of the compile. The same module
+    and layout compile offline in 496 s (355,084 instructions, 1,368 live
+    registers, 20,081 spills, 43,882 fills). The background compile
+    therefore removes only the part of that time that elapses before the
+    first dispatch; the module enters the Mesa cache only after a session
+    that lasts until the compile finishes. Open: cut the register pressure
+    of the paired layout for this kernel. Not verified: a normal exit while
+    a worker is inside the driver (every run ended at its time cap).
   - Defect found, not fixed: `GpuMemoryCreate.cpp:2371` refuses a storage
     image (0x870000 bytes) whose range crosses two 1920x1080 render targets
     when the image is not proven write-only. Any kernel whose coverage
