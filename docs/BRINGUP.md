@@ -76,9 +76,19 @@ fail on the current HEAD before acting on them.
     Gameplay µs per draw went from 32.4-34.5 to 31.2-33.3, and p50 from
     42-43 ms to 41 ms. These are single runs with the sampler attached,
     within run-to-run noise.
-  - Still per draw: runtime-descriptor checks in the pixel path (about
-    2.5%), redefined and assembled buffer descriptors (about 1.5%), and
-    vertex-path scans without a memo.
+  - Fix (c10b9cb4): the pixel path's device-address decision scanned every
+    instruction three times per draw (about 2.5% of CP time). The immutable
+    pixel analysis now lists the buffer, typed buffer and scalar loads, and
+    each draw evaluates the same predicates on them only. A temporary
+    old/new comparison over 4.85 million fishing-title draws found no
+    mismatch; 3,027 of those draws needed the table.
+  - Racing title after both fixes: 28.0-29.6 µs per draw in the late
+    segments, against 30.6-32.4 in an earlier run of the same day. Single
+    runs whose route phases differ, so this is indicative only. Captures
+    show correct rendering.
+  - Still per draw: redefined and assembled buffer descriptors (about
+    1.5%), the EUD span scan (about 0.7%), and vertex-path scans without a
+    memo.
 - **Frame hitches (fishing title, gameplay, steady segments).**
   - **One frame of about 120 ms per 30 s segment is the harness's native
     capture.** Its flip sequence equals the capture's frame number in every
