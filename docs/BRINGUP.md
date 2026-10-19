@@ -277,7 +277,10 @@ fail on the current HEAD before acting on them.
     device, largest first, through the shared `VkPipelineCache`; the
     dispatching thread waits for a recipe a worker is already compiling and
     never skips a dispatch. Agent `perf-snapshot` reports
-    `compute_precompile_*`. Measured with a cold Mesa cache and the same
+    `compute_precompile_*`; the counters count finished compiles and
+    waits, while `compute_precompile_running` and
+    `compute_precompile_waiting_ns` show a compile or a wait in progress
+    (verified during the stall: running 1, waiting 28, 43 and 59 s). Measured with a cold Mesa cache and the same
     SPIR-V cache, 200-280 s runs: without recipes the title was still on
     its first frame at 195 s (18 pipelines, 121 s of compile on the CP
     thread); with recipes, 5 pipelines (182 s) compiled in the background,
@@ -294,8 +297,10 @@ fail on the current HEAD before acting on them.
     therefore removes only the part of that time that elapses before the
     first dispatch; the module enters the Mesa cache only after a session
     that lasts until the compile finishes. Open: cut the register pressure
-    of the paired layout for this kernel. Not verified: a normal exit while
-    a worker is inside the driver (every run ended at its time cap).
+    of the paired layout for this kernel. Exit at the time cap (SIGTERM) with
+    a worker inside the driver and the dispatch thread waiting: two runs
+    exited normally, one was killed 2 s after SIGTERM (cause not
+    determined).
   - Defect found, not fixed: `GpuMemoryCreate.cpp:2371` refuses a storage
     image (0x870000 bytes) whose range crosses two 1920x1080 render targets
     when the image is not proven write-only. Any kernel whose coverage

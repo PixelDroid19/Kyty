@@ -156,6 +156,10 @@ TimedMetric           g_vk_compute_pipeline_create;
 TimedMetric           g_compute_precompile;
 std::atomic<uint64_t> g_compute_precompile_failed {0};
 TimedMetric           g_compute_precompile_wait;
+std::atomic<uint64_t> g_compute_precompile_running {0};
+std::mutex            g_compute_precompile_wait_mutex;
+uint64_t              g_compute_precompile_waiters = 0;
+std::chrono::steady_clock::time_point g_compute_precompile_wait_since;
 std::atomic<uint64_t> g_shader_translation_cache_hits {0};
 std::atomic<uint64_t> g_shader_translation_cache_misses {0};
 std::atomic<uint64_t> g_shader_translation_cache_evictions {0};
@@ -1228,8 +1232,14 @@ void DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind kind, uint64_t elap
 	RecordTimed(kind == DebugStatsPipelineKind::Graphics ? &g_vk_graphics_pipeline_create : &g_vk_compute_pipeline_create, elapsed_ns);
 }
 
-void DebugStatsRecordComputePrecompile(bool created, uint64_t elapsed_ns)
+void DebugStatsBeginComputePrecompile()
 {
+	g_compute_precompile_running.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DebugStatsEndComputePrecompile(bool created, uint64_t elapsed_ns)
+{
+	g_compute_precompile_running.fetch_sub(1, std::memory_order_relaxed);
 	RecordTimed(&g_compute_precompile, elapsed_ns);
 	if (!created)
 	{
@@ -1237,8 +1247,21 @@ void DebugStatsRecordComputePrecompile(bool created, uint64_t elapsed_ns)
 	}
 }
 
-void DebugStatsRecordComputePrecompileWait(uint64_t elapsed_ns)
+void DebugStatsBeginComputePrecompileWait()
 {
+	std::lock_guard lock(g_compute_precompile_wait_mutex);
+	if (g_compute_precompile_waiters++ == 0)
+	{
+		g_compute_precompile_wait_since = std::chrono::steady_clock::now();
+	}
+}
+
+void DebugStatsEndComputePrecompileWait(uint64_t elapsed_ns)
+{
+	{
+		std::lock_guard lock(g_compute_precompile_wait_mutex);
+		g_compute_precompile_waiters--;
+	}
 	RecordTimed(&g_compute_precompile_wait, elapsed_ns);
 }
 
@@ -1691,6 +1714,15 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	snapshot.compute_precompile_failed = take_window(g_compute_precompile_failed);
 	take_timed(g_compute_precompile_wait, &snapshot.compute_precompile_wait_count, &snapshot.compute_precompile_wait_ns,
 	           &snapshot.compute_precompile_wait_max_ns);
+	snapshot.compute_precompile_running = g_compute_precompile_running.load(std::memory_order_relaxed);
+	{
+		std::lock_guard lock(g_compute_precompile_wait_mutex);
+		if (g_compute_precompile_waiters != 0)
+		{
+			snapshot.compute_precompile_waiting_ns = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_compute_precompile_wait_since).count());
+		}
+	}
 	snapshot.shader_translation_cache_hits      = take_window(g_shader_translation_cache_hits);
 	snapshot.shader_translation_cache_misses    = take_window(g_shader_translation_cache_misses);
 	snapshot.shader_translation_cache_evictions = take_window(g_shader_translation_cache_evictions);

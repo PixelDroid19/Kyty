@@ -219,6 +219,7 @@ std::string PerformanceResult(bool reset)
 	              "\"compute_precompile_count\":%llu,\"compute_precompile_ns\":%llu,\"compute_precompile_max_ns\":%llu,"
 	              "\"compute_precompile_failed\":%llu,\"compute_precompile_wait_count\":%llu,"
 	              "\"compute_precompile_wait_ns\":%llu,\"compute_precompile_wait_max_ns\":%llu,"
+	              "\"compute_precompile_running\":%llu,\"compute_precompile_waiting_ns\":%llu,"
 	              "\"shader_translation_cache_hits\":%llu,\"shader_translation_cache_misses\":%llu,"
 	              "\"shader_translation_cache_evictions\":%llu,"
 	              "\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f,",
@@ -293,6 +294,8 @@ std::string PerformanceResult(bool reset)
 	              static_cast<unsigned long long>(stats.compute_precompile_wait_count),
 	              static_cast<unsigned long long>(stats.compute_precompile_wait_ns),
 	              static_cast<unsigned long long>(stats.compute_precompile_wait_max_ns),
+	              static_cast<unsigned long long>(stats.compute_precompile_running),
+	              static_cast<unsigned long long>(stats.compute_precompile_waiting_ns),
 	              static_cast<unsigned long long>(stats.shader_translation_cache_hits),
 	              static_cast<unsigned long long>(stats.shader_translation_cache_misses),
 	              static_cast<unsigned long long>(stats.shader_translation_cache_evictions),

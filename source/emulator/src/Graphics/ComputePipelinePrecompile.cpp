@@ -147,10 +147,11 @@ void Precompile(const QueuedRecipe& queued)
 	if (ReadRecipeFile(queued.path, queued.size, &recipe) && recipe.vendor_id == service.vendor_id &&
 	    recipe.device_id == service.device_id && ComputePipelineRecipeHash(recipe) == queued.hash)
 	{
+		DebugStatsBeginComputePrecompile();
 		const auto start = std::chrono::steady_clock::now();
 		const bool ok    = service.create(recipe);
 		const auto ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-		DebugStatsRecordComputePrecompile(ok, static_cast<uint64_t>(ns));
+		DebugStatsEndComputePrecompile(ok, static_cast<uint64_t>(ns));
 	}
 	{
 		std::lock_guard lock(service.mutex);
@@ -337,10 +338,11 @@ void ComputePipelinePrecompileClaim(const ComputePipelineRecipe& recipe)
 		{
 			if (entry->second == EntryState::Running)
 			{
+				DebugStatsBeginComputePrecompileWait();
 				const auto start = std::chrono::steady_clock::now();
 				service.done.wait(lock, [&] { return service.entries[hash] == EntryState::Done; });
 				const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-				DebugStatsRecordComputePrecompileWait(static_cast<uint64_t>(ns));
+				DebugStatsEndComputePrecompileWait(static_cast<uint64_t>(ns));
 			}
 			return;
 		}
