@@ -4160,7 +4160,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 // descriptor mapping resolves reads plain data at a runtime address.
 static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, const ShaderBindResources& bind)
 {
-	if (!ShaderInstructionTypeStartsWith(inst.type, "SLoad") || inst.src_num < 1 ||
+	if (!ShaderInstructionIsScalarMemoryLoad(inst.type) || inst.src_num < 1 ||
 	    (inst.src[0].type != ShaderOperandType::Sgpr && inst.src[0].type != ShaderOperandType::VccLo))
 	{
 		return false;
@@ -4184,27 +4184,27 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 // A vector buffer load whose V# no discovered resource describes reads
 // through a descriptor built at run time.
 static bool ShaderHasRuntimeDescriptorLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_register_base,
-                                           std::string_view type_prefix)
+                                           bool (*is_load)(ShaderInstructionType))
 {
 	const auto& instructions = code.GetInstructions();
 	return std::any_of(instructions.begin(), instructions.end(),
 	                   [&](const auto& inst)
 	                   {
-		                   return ShaderInstructionTypeStartsWith(inst.type, type_prefix) &&
+		                   return is_load(inst.type) &&
 		                          ShaderVectorBufferUsesRuntimeDescriptor(bind, inst, user_data_register_base);
 	                   });
 }
 
 bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_register_base)
 {
-	return ShaderHasRuntimeDescriptorLoad(code, bind, user_data_register_base, "BufferLoad");
+	return ShaderHasRuntimeDescriptorLoad(code, bind, user_data_register_base, ShaderInstructionIsBufferLoad);
 }
 
 // Typed loads count outside the vertex stage only: there the stream resolver
 // owns the fetched stream V#s, whose base is a guest address by design.
 static bool ShaderHasUnboundTypedBufferLoad(const ShaderCode& code, const ShaderBindResources& bind)
 {
-	return ShaderHasRuntimeDescriptorLoad(code, bind, 0, "TBufferLoad");
+	return ShaderHasRuntimeDescriptorLoad(code, bind, 0, ShaderInstructionIsTypedBufferLoad);
 }
 
 bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type)

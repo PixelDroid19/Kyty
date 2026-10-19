@@ -414,7 +414,7 @@ uint8_t ComputeWaveInstructionEudBaseReadMask(const ShaderInstruction& instructi
 	// Scalar loads through the extended pointer resolve through the native
 	// per-PC EUD mapping; the emitter fails closed when a PC is unmapped.
 	const bool mapped_load =
-	    ShaderPairedEudStorageLoadSupported(instruction, bind) || ShaderInstructionTypeStartsWith(instruction.type, "SLoad");
+	    ShaderPairedEudStorageLoadSupported(instruction, bind) || ShaderInstructionIsScalarMemoryLoad(instruction.type);
 	uint8_t read_mask       = 0;
 	for (int source = 0; source < instruction.src_num; ++source)
 	{
@@ -552,7 +552,7 @@ ShaderComputeWaveAnalysisResult AnalyzeExtendedBaseLifetime(const ShaderCode& co
 		const bool mapped_load = instruction.src_num > 0 &&
 		                         ComputeWaveOperandSgprPairMask(instruction.src[0], pair_start) != 0u &&
 		                         (ShaderPairedEudStorageLoadSupported(instruction, bind) ||
-		                          ShaderInstructionTypeStartsWith(instruction.type, "SLoad"));
+		                          ShaderInstructionIsScalarMemoryLoad(instruction.type));
 		if (ComputeWaveInstructionHasInvalidSgprSource(instruction))
 		{
 			return {false, instruction.pc, "paired extended pointer base has an invalid SGPR source"};

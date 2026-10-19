@@ -610,6 +610,11 @@ enum class ShaderInstructionType : uint32_t
 [[nodiscard]] bool             ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix);
 // MUBUF or MTBUF instruction type (mnemonic "Buffer*" or "TBuffer*"), from a table built once.
 [[nodiscard]] bool             ShaderInstructionIsVectorBufferAccess(ShaderInstructionType type);
+// The classifiers below are tables built once from the mnemonic prefixes
+// "BufferLoad", "TBufferLoad" and "SLoad".
+[[nodiscard]] bool             ShaderInstructionIsBufferLoad(ShaderInstructionType type);
+[[nodiscard]] bool             ShaderInstructionIsTypedBufferLoad(ShaderInstructionType type);
+[[nodiscard]] bool             ShaderInstructionIsScalarMemoryLoad(ShaderInstructionType type);
 
 namespace ShaderInstructionFormat {
 

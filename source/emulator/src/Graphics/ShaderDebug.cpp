@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <initializer_list>
 #include <cinttypes>
 
 #ifdef KYTY_EMU_ENABLED
@@ -53,21 +54,49 @@ bool ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_vie
 	return true;
 }
 
+using ShaderInstructionTypeTable = std::array<bool, static_cast<size_t>(ShaderInstructionType::ZMax) + 1>;
+
+static ShaderInstructionTypeTable ShaderInstructionTypeTableOf(std::initializer_list<std::string_view> prefixes)
+{
+	ShaderInstructionTypeTable table {};
+	for (size_t i = 0; i < table.size(); ++i)
+	{
+		const auto candidate = static_cast<ShaderInstructionType>(i);
+		table[i] = std::any_of(prefixes.begin(), prefixes.end(),
+		                       [candidate](std::string_view prefix) { return ShaderInstructionTypeStartsWith(candidate, prefix); });
+	}
+	return table;
+}
+
+static bool ShaderInstructionTypeIn(const ShaderInstructionTypeTable& table, ShaderInstructionType type)
+{
+	const auto index = static_cast<size_t>(type);
+	return index < table.size() && table[index];
+}
+
 // Classified once by name: shader analyses ask for every instruction of every draw.
 bool ShaderInstructionIsVectorBufferAccess(ShaderInstructionType type)
 {
-	static const auto kVectorBuffer = []
-	{
-		std::array<bool, static_cast<size_t>(ShaderInstructionType::ZMax) + 1> table {};
-		for (size_t i = 0; i < table.size(); ++i)
-		{
-			const auto candidate = static_cast<ShaderInstructionType>(i);
-			table[i] = ShaderInstructionTypeStartsWith(candidate, "Buffer") || ShaderInstructionTypeStartsWith(candidate, "TBuffer");
-		}
-		return table;
-	}();
-	const auto index = static_cast<size_t>(type);
-	return index < kVectorBuffer.size() && kVectorBuffer[index];
+	static const auto kTable = ShaderInstructionTypeTableOf({"Buffer", "TBuffer"});
+	return ShaderInstructionTypeIn(kTable, type);
+}
+
+bool ShaderInstructionIsBufferLoad(ShaderInstructionType type)
+{
+	static const auto kTable = ShaderInstructionTypeTableOf({"BufferLoad"});
+	return ShaderInstructionTypeIn(kTable, type);
+}
+
+bool ShaderInstructionIsTypedBufferLoad(ShaderInstructionType type)
+{
+	static const auto kTable = ShaderInstructionTypeTableOf({"TBufferLoad"});
+	return ShaderInstructionTypeIn(kTable, type);
+}
+
+bool ShaderInstructionIsScalarMemoryLoad(ShaderInstructionType type)
+{
+	static const auto kTable = ShaderInstructionTypeTableOf({"SLoad"});
+	return ShaderInstructionTypeIn(kTable, type);
 }
 
 static String8 operand_to_str(ShaderOperand op)
