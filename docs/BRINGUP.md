@@ -59,15 +59,28 @@ fail on the current HEAD before acting on them.
     - The card title, the racing title, the roguelike, the watercolour
       platformer and the pixel exploration title ended without a stop. Their
       segment fps match earlier sweeps.
-    - The traveller role-playing title kept its known status-65 end.
-    - The void platformer stopped once at `GpuMemoryCreate.cpp:1545`
-      (`DepthStencilBuffer - Crosses - DepthStencilBuffer`). The rerun ran
-      200 s clean. This is the intermittent allocation-overlap family
-      recorded below.
+    - The traveller role-playing title stopped at frame 1194 on the open
+      one-layer view (`StorageTexture - Contains - StorageTexture`, see
+      "Open: a one-layer view inside the grown array"). The sweep before
+      this change stopped there too, at frame 550.
+    - The void platformer stopped once at `GpuMemoryCreate.cpp:1545` on a
+      relation not recorded before:
+      `DepthStencilBuffer - Crosses - DepthStencilBuffer`. A new 960x540
+      depth target at 0x6ab80000 (0x140000 bytes) crosses a live one at
+      0x6a610000 (0x140000 bytes). Both carry a 0x10000 metadata range at
+      0x10b40000. The rerun ran 200 s clean. It is open, not attributed,
+      and looks like allocation placement, like the other overlap stops.
     - The fishing title exited by itself once, about 80 s into play, with
       exit status 0 and no error. A second run hit the known frame-3 boot
       stall. A third ran 200 s clean at 26-29 fps. The clean exit is not
       attributed and stays open until it repeats.
+    - The last capture of each title was compared by eye with the same
+      route in the sweep before the change. No new speckles, wrong mips or
+      edge artefacts were seen. The racing, fishing and void platformer
+      captures show other scenes than their baselines, because their
+      routes ended at different points.
+  - Not tested: AMD (wave64 lane layout differs), and further present
+    frames of this title beyond the one dumped and the harness captures.
 - **Open, recorded for later.** `get_stencil_op`
   (`source/emulator/src/Graphics/GraphicsRenderDescriptor.cpp:1472`) maps
   every op that needs a value to the one Vulkan reference.
