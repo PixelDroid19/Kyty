@@ -8,6 +8,8 @@
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 #include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 
+#include <map>
+#include <utility>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -58,14 +60,23 @@ public:
 	[[nodiscard]] bool NeedsUpload(uint64_t addr, uint64_t bytes, uint64_t acquired_version) const;
 	[[nodiscard]] uint64_t Version() const { return m_version; }
 
-	[[nodiscard]] uint32_t Size() const { return m_begin.Size(); }
+	[[nodiscard]] uint32_t Size() const { return static_cast<uint32_t>(m_holes.size()); }
 
 private:
-	Vector<uint64_t> m_begin;
-	Vector<uint64_t> m_end;
-	Vector<uint64_t> m_completed_version;
-	Vector<uint64_t> m_pending;
-	uint64_t m_version = 0;
+	struct Hole
+	{
+		uint64_t completed_version = 0;
+		uint64_t pending           = 0;
+	};
+	using Holes = std::map<std::pair<uint64_t, uint64_t>, Hole>;
+
+	// First hole that can overlap [addr, ...): none starting earlier spans to addr.
+	[[nodiscard]] Holes::const_iterator FirstCandidate(uint64_t addr) const;
+
+	// Keyed by [begin, end), so overlap queries visit only nearby holes.
+	Holes    m_holes;
+	uint64_t m_max_bytes = 0;
+	uint64_t m_version   = 0;
 };
 
 // Per-backing ownership acquired by a real guest->GPU upload. Excluded GPU

@@ -120,22 +120,16 @@ LabelFenceRegistrationStatus LabelFenceRegistry::Register(uint64_t addr, uint64_
 		return LabelFenceRegistrationStatus::InvalidArgument;
 	}
 
-	const uint64_t end = addr + bytes;
-	for (int i = 0; i < static_cast<int>(m_begin.Size()); i++)
-	{
-		if (m_begin.At(i) == addr && m_end.At(i) == end)
-		{
-			EXIT_IF(m_pending.At(i) == UINT64_MAX);
-			m_pending[i]++;
-			return LabelFenceRegistrationStatus::AlreadyRegistered;
-		}
-	}
+	const auto [hole, inserted] = m_holes.try_emplace({addr, addr + bytes});
+	EXIT_IF(hole->second.pending == UINT64_MAX);
+	hole->second.pending++;
+	m_max_bytes = std::max(m_max_bytes, bytes);
+	return inserted ? LabelFenceRegistrationStatus::Inserted : LabelFenceRegistrationStatus::AlreadyRegistered;
+}
 
-	m_begin.Add(addr);
-	m_end.Add(end);
-	m_completed_version.Add(0);
-	m_pending.Add(1);
-	return LabelFenceRegistrationStatus::Inserted;
+LabelFenceRegistry::Holes::const_iterator LabelFenceRegistry::FirstCandidate(uint64_t addr) const
+{
+	return m_holes.lower_bound({addr > m_max_bytes ? addr - m_max_bytes : 0u, 0u});
 }
 
 LabelFenceReleaseStatus LabelFenceRegistry::ReleaseAllocation(uint64_t addr, uint64_t bytes)
@@ -145,13 +139,14 @@ LabelFenceReleaseStatus LabelFenceRegistry::ReleaseAllocation(uint64_t addr, uin
 		return LabelFenceReleaseStatus::InvalidArgument;
 	}
 
-	const uint64_t end      = addr + bytes;
+	const uint64_t end   = addr + bytes;
+	const auto     first = FirstCandidate(addr);
+	auto           last  = first;
 	bool           released = false;
-	for (int i = 0; i < static_cast<int>(m_begin.Size()); i++)
+	for (; last != m_holes.end() && last->first.first < end; ++last)
 	{
-		const uint64_t hole_begin = m_begin.At(i);
-		const uint64_t hole_end   = m_end.At(i);
-		if (hole_begin >= end || addr >= hole_end)
+		const auto [hole_begin, hole_end] = last->first;
+		if (addr >= hole_end)
 		{
 			continue;
 		}
@@ -167,14 +162,24 @@ LabelFenceReleaseStatus LabelFenceRegistry::ReleaseAllocation(uint64_t addr, uin
 		return LabelFenceReleaseStatus::NotFound;
 	}
 
-	for (int i = static_cast<int>(m_begin.Size()) - 1; i >= 0; i--)
+	bool widest_released = false;
+	for (auto it = first; it != last;)
 	{
-		if (m_begin.At(i) >= addr && m_end.At(i) <= end)
+		const auto [hole_begin, hole_end] = it->first;
+		if (hole_begin < addr || hole_end > end)
 		{
-			m_begin.RemoveAt(i);
-			m_end.RemoveAt(i);
-			m_completed_version.RemoveAt(i);
-			m_pending.RemoveAt(i);
+			++it;
+			continue;
+		}
+		widest_released = widest_released || hole_end - hole_begin == m_max_bytes;
+		it              = m_holes.erase(it);
+	}
+	if (widest_released)
+	{
+		m_max_bytes = 0;
+		for (const auto& [range, hole]: m_holes)
+		{
+			m_max_bytes = std::max(m_max_bytes, range.second - range.first);
 		}
 	}
 	return LabelFenceReleaseStatus::Released;
@@ -188,12 +193,12 @@ void LabelFenceRegistry::Snapshot(uint64_t addr, uint64_t bytes, Vector<uint64_t
 
 	begin->Clear();
 	end->Clear();
-	for (uint32_t i = 0; i < m_begin.Size(); i++)
+	for (auto it = FirstCandidate(addr); it != m_holes.end() && it->first.first < addr + bytes; ++it)
 	{
-		if (m_begin.At(i) < addr + bytes && addr < m_end.At(i))
+		if (addr < it->first.second)
 		{
-			begin->Add(m_begin.At(i));
-			end->Add(m_end.At(i));
+			begin->Add(it->first.first);
+			end->Add(it->first.second);
 		}
 	}
 }
@@ -207,17 +212,14 @@ void LabelManager::RegisterFenceHole(uint64_t addr, uint64_t bytes)
 void LabelFenceRegistry::Complete(uint64_t addr, uint64_t bytes)
 {
 	EXIT_IF(bytes == 0 || bytes > UINT64_MAX - addr);
-	for (uint32_t i = 0; i < m_begin.Size(); ++i)
+	const auto hole = m_holes.find({addr, addr + bytes});
+	if (hole == m_holes.end())
 	{
-		if (m_begin.At(i) == addr && m_end.At(i) == addr + bytes)
-		{
-			EXIT_IF(m_pending.At(i) == 0 || m_version == UINT64_MAX);
-			m_pending[i]--;
-			m_completed_version[i] = ++m_version;
-			return;
-		}
+		EXIT("Completion of unregistered label destination\n");
 	}
-	EXIT("Completion of unregistered label destination\n");
+	EXIT_IF(hole->second.pending == 0 || m_version == UINT64_MAX);
+	hole->second.pending--;
+	hole->second.completed_version = ++m_version;
 }
 
 void LabelFenceRegistry::SnapshotExcluded(uint64_t addr, uint64_t bytes, uint64_t acquired_version, Vector<uint64_t>* begin,
@@ -227,16 +229,16 @@ void LabelFenceRegistry::SnapshotExcluded(uint64_t addr, uint64_t bytes, uint64_
 	EXIT_IF(bytes > UINT64_MAX - addr);
 	begin->Clear();
 	end->Clear();
-	for (uint32_t i = 0; i < m_begin.Size(); ++i)
+	for (auto it = FirstCandidate(addr); it != m_holes.end() && it->first.first < addr + bytes; ++it)
 	{
-		if (m_begin.At(i) >= addr + bytes || addr >= m_end.At(i))
+		if (addr >= it->first.second)
 		{
 			continue;
 		}
-		if (m_pending.At(i) != 0 || m_completed_version.At(i) > acquired_version)
+		if (it->second.pending != 0 || it->second.completed_version > acquired_version)
 		{
-			begin->Add(m_begin.At(i));
-			end->Add(m_end.At(i));
+			begin->Add(it->first.first);
+			end->Add(it->first.second);
 		}
 	}
 }
@@ -244,9 +246,9 @@ void LabelFenceRegistry::SnapshotExcluded(uint64_t addr, uint64_t bytes, uint64_
 bool LabelFenceRegistry::NeedsUpload(uint64_t addr, uint64_t bytes, uint64_t acquired_version) const
 {
 	EXIT_IF(bytes == 0 || bytes > UINT64_MAX - addr);
-	for (uint32_t i = 0; i < m_begin.Size(); ++i)
+	for (auto it = FirstCandidate(addr); it != m_holes.end() && it->first.first < addr + bytes; ++it)
 	{
-		if (m_begin.At(i) < addr + bytes && addr < m_end.At(i) && m_completed_version.At(i) > acquired_version)
+		if (addr < it->first.second && it->second.completed_version > acquired_version)
 		{
 			return true;
 		}
