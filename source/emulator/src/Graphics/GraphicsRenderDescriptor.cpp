@@ -1198,11 +1198,14 @@ void DescriptorCache::CollectResourceIds(const Set& s, std::vector<uint64_t>* id
 
 void DescriptorCache::IndexSet(int index)
 {
-	std::vector<uint64_t> ids;
-	CollectResourceIds(m_sets.At(index), &ids);
-	for (const auto id: ids)
+	CollectResourceIds(m_sets.At(index), &m_resource_ids);
+	auto& set = m_sets[index];
+	set.resources.clear();
+	for (const auto id: m_resource_ids)
 	{
-		m_sets_by_resource[id].insert(index);
+		auto& references = m_sets_by_resource[id];
+		set.resources.push_back({id, static_cast<uint32_t>(references.size())});
+		references.push_back({index, static_cast<uint32_t>(set.resources.size() - 1u)});
 	}
 }
 
@@ -1210,19 +1213,21 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 {
 	auto& set = m_sets[index];
 	EXIT_IF(set.set == nullptr);
-	std::vector<uint64_t> ids;
-	CollectResourceIds(set, &ids);
-	for (const auto id: ids)
+	for (const auto& resource: set.resources)
 	{
-		auto it = m_sets_by_resource.find(id);
-		EXIT_IF(it == m_sets_by_resource.end());
-		auto& indices = it->second;
-		indices.erase(index);
-		if (indices.empty())
+		auto it = m_sets_by_resource.find(resource.unique_id);
+		EXIT_IF(it == m_sets_by_resource.end() || resource.position >= it->second.size());
+		auto&      references = it->second;
+		const auto moved      = references.back();
+		references[resource.position] = moved;
+		m_sets[moved.set].resources[moved.slot].position = resource.position;
+		references.pop_back();
+		if (references.empty())
 		{
 			m_sets_by_resource.erase(it);
 		}
 	}
+	set.resources.clear();
 	auto* released    = set.set;
 	set.set           = nullptr;
 	set.next_free_set = m_first_free_set;
@@ -1318,7 +1323,12 @@ void DescriptorCache::FreeSetsReferencing(uint64_t unique_id, References referen
 	{
 		return;
 	}
-	std::vector<int> candidates(it->second.begin(), it->second.end());
+	std::vector<int> candidates;
+	candidates.reserve(it->second.size());
+	for (const auto& reference: it->second)
+	{
+		candidates.push_back(reference.set);
+	}
 	std::sort(candidates.begin(), candidates.end());
 	for (const int index: candidates)
 	{

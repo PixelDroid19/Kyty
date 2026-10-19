@@ -61,7 +61,6 @@
 #include <list>
 #include <map>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -365,6 +364,16 @@ public:
 	void                 DeleteAllForTesting(GraphicContext* ctx);
 
 private:
+	struct ResourceSlot
+	{
+		uint64_t unique_id = 0;
+		uint32_t position  = 0;
+	};
+	struct SetReference
+	{
+		int      set  = -1;
+		uint32_t slot = 0;
+	};
 	struct Set
 	{
 		VulkanDescriptorSet* set                                           = nullptr;
@@ -407,6 +416,9 @@ private:
 		GpuSubmissionHighWater uses;
 		bool                   untracked_use = false;
 		uint64_t               last_use      = 0;
+		// Each referenced resource with this set's position in that resource's
+		// reverse-index list, so unindexing removes the set in constant time.
+		std::vector<ResourceSlot> resources;
 	};
 
 	struct Pool
@@ -452,8 +464,10 @@ private:
 	uint64_t     m_use_clock       = 0;
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
-	// Live set indices by the unique id of each image or buffer they reference.
-	std::unordered_map<uint64_t, std::unordered_set<int>> m_sets_by_resource;
+	// Live sets by the unique id of each image or buffer they reference.
+	std::unordered_map<uint64_t, std::vector<SetReference>> m_sets_by_resource;
+	// IndexSet scratch, kept to avoid an allocation per created set.
+	std::vector<uint64_t>                                   m_resource_ids;
 
 	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
 	// Released sets, oldest first, and per layout the positions of its sets in
