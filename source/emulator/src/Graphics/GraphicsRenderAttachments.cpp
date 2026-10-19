@@ -316,9 +316,18 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 	// The fill rewrites every byte of the bound range, so the whole storage
 	// object is the guest result; a wider object could hold older pending writes.
 	GpuMemoryStorageWriteIdentity identity {};
-	if (buffer == nullptr || !GpuMemoryFindExactWritableStorage(fill.address, fill.size, &identity) ||
-	    !GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
-	                                         *identity.buffer, fill.address, fill.size))
+	if (buffer == nullptr || !GpuMemoryFindExactWritableStorage(fill.address, fill.size, &identity))
+	{
+		return false;
+	}
+	// One repeated word is written in place; copying the storage object would
+	// also read the whole range back.
+	auto*       ctx      = g_render_ctx->GetGraphicCtx();
+	auto*       cmd      = buffer->RecordOutsideRenderPass();
+	const auto& words    = fill.words;
+	const bool  one_word = std::all_of(words.begin(), words.end(), [&](uint32_t word) { return word == words[0]; });
+	if (!(one_word && GuestDeviceAddressRecordFill(ctx, cmd, words[0], fill.address, fill.size)) &&
+	    !GuestDeviceAddressRecordPublication(ctx, cmd, *identity.buffer, fill.address, fill.size))
 	{
 		return false;
 	}

@@ -94,6 +94,11 @@ void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
 [[nodiscard]] bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source,
                                                        uint64_t vaddr, uint64_t size);
 
+// Records, with the same ordering and range rules as GuestDeviceAddressRecordPublication,
+// `word` repeated over the imported view of `size` bytes at guest address `vaddr`.
+// Fails without recording when a piece of the range is not 4-byte aligned.
+[[nodiscard]] bool GuestDeviceAddressRecordFill(GraphicContext* ctx, VkCommandBuffer_T* cmd, uint32_t word, uint64_t vaddr, uint64_t size);
+
 // Imports all registered ranges not imported yet and returns the translation
 // table. This legacy synchronous helper is for quiesced unit-test setup; runtime
 // GPU readers must use GuestDeviceAddressPrepareForRead to track their lifetime.

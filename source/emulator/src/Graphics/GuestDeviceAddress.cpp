@@ -1219,23 +1219,19 @@ void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer)
 	GpuMemoryWriteBackStorageRanges(ctx, *RegisteredRangesSnapshot(), consumer);
 }
 
-bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source, uint64_t vaddr,
-                                         uint64_t size)
+struct PublicationPiece
 {
-	if (ctx == nullptr || cmd == nullptr || source.buffer == nullptr || size == 0 || vaddr > UINT64_MAX - size ||
-	    !ctx->guest_device_address_supported)
-	{
-		return false;
-	}
-	struct Piece
-	{
-		VkBuffer     target = nullptr;
-		VkBufferCopy copy {};
-	};
-	std::vector<Piece>          pieces;
-	auto&                       registry = GetRegistry();
-	std::lock_guard<std::mutex> lock(registry.mutex);
-	const uint64_t              end = vaddr + size;
+	VkBuffer     target        = nullptr;
+	VkDeviceSize source_offset = 0;
+	VkDeviceSize target_offset = 0;
+	VkDeviceSize size          = 0;
+};
+
+// Splits the guest range over the physical chunks that alias it. Fails when
+// any byte lies outside such a chunk.
+static bool ResolvePublicationPiecesLocked(const Registry& registry, uint64_t vaddr, uint64_t size, std::vector<PublicationPiece>* pieces)
+{
+	const uint64_t end = vaddr + size;
 	for (uint64_t cursor = vaddr; cursor < end;)
 	{
 		auto range = registry.ranges.upper_bound(cursor);
@@ -1258,27 +1254,88 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 			return false;
 		}
 		const uint64_t piece_end = std::min(end, found->guest + found->size);
-		pieces.push_back({found->buffer, {cursor - vaddr, found->buffer_offset + (cursor - found->guest), piece_end - cursor}});
+		pieces->push_back({found->buffer, cursor - vaddr, found->buffer_offset + (cursor - found->guest), piece_end - cursor});
 		cursor = piece_end;
 	}
-	// Earlier device-address reads of the range and the producer's writes
-	// complete first; every later command observes the copy.
+	return true;
+}
+
+// Earlier device-address reads of the range and the producer's writes
+// complete before the transfer.
+static void RecordPublicationBarrierBefore(VkCommandBuffer_T* cmd)
+{
 	VkMemoryBarrier before {};
 	before.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
 	before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0,
 	                     nullptr);
-	for (const auto& piece: pieces)
-	{
-		vkCmdCopyBuffer(cmd, source.buffer, piece.target, 1, &piece.copy);
-	}
+}
+
+// Every later command observes the transfer.
+static void RecordPublicationBarrierAfter(VkCommandBuffer_T* cmd)
+{
 	VkMemoryBarrier after {};
 	after.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
 	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
 	                     &after, 0, nullptr, 0, nullptr);
+}
+
+bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source, uint64_t vaddr,
+                                         uint64_t size)
+{
+	if (ctx == nullptr || cmd == nullptr || source.buffer == nullptr || size == 0 || vaddr > UINT64_MAX - size ||
+	    !ctx->guest_device_address_supported)
+	{
+		return false;
+	}
+	std::vector<PublicationPiece> pieces;
+	auto&                         registry = GetRegistry();
+	std::lock_guard<std::mutex>   lock(registry.mutex);
+	if (!ResolvePublicationPiecesLocked(registry, vaddr, size, &pieces))
+	{
+		return false;
+	}
+	RecordPublicationBarrierBefore(cmd);
+	for (const auto& piece: pieces)
+	{
+		const VkBufferCopy copy {piece.source_offset, piece.target_offset, piece.size};
+		vkCmdCopyBuffer(cmd, source.buffer, piece.target, 1, &copy);
+	}
+	RecordPublicationBarrierAfter(cmd);
+	return true;
+}
+
+bool GuestDeviceAddressRecordFill(GraphicContext* ctx, VkCommandBuffer_T* cmd, uint32_t word, uint64_t vaddr, uint64_t size)
+{
+	if (ctx == nullptr || cmd == nullptr || size == 0 || vaddr > UINT64_MAX - size || !ctx->guest_device_address_supported)
+	{
+		return false;
+	}
+	std::vector<PublicationPiece> pieces;
+	auto&                         registry = GetRegistry();
+	std::lock_guard<std::mutex>   lock(registry.mutex);
+	if (!ResolvePublicationPiecesLocked(registry, vaddr, size, &pieces))
+	{
+		return false;
+	}
+	// vkCmdFillBuffer writes whole 4-byte words at 4-byte offsets; each piece
+	// must also keep the word's phase from the start of the range.
+	for (const auto& piece: pieces)
+	{
+		if ((piece.source_offset % 4u) != 0u || (piece.target_offset % 4u) != 0u || (piece.size % 4u) != 0u)
+		{
+			return false;
+		}
+	}
+	RecordPublicationBarrierBefore(cmd);
+	for (const auto& piece: pieces)
+	{
+		vkCmdFillBuffer(cmd, piece.target, piece.target_offset, piece.size, word);
+	}
+	RecordPublicationBarrierAfter(cmd);
 	return true;
 }
 
