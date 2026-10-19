@@ -252,6 +252,21 @@ fail on the current HEAD before acting on them.
     present 1340-1344 has no blob; frames reached in 175 s and the fps
     samples are within the run-to-run range. Racing title, 200 s: gameplay
     with shadows, same fps range as the 10-17 runs.
+    `check_emulator_boundaries.py`, `check_graphics_tables.py` and the 296
+    `EmulatorGraphicsState` unit tests pass.
+  - Defect found, not fixed: the same coverage hole remains for stencil. A
+    zero HTILE word on a D32S8 target also marks stencil cleared over the
+    whole surface, but after first use the helper clears only the depth
+    aspect (`GraphicsRenderAttachments.cpp:1155`) and the pass's stencil
+    load-op clear covers only its render area. Trigger: a zero-word HTILE
+    fill consumed by a pass smaller than the D32S8 target, with a stencil
+    register clear of 0. No title has been seen to hit it. Direction: pass
+    the consumed event to the helper and add the stencil aspect for that
+    pattern.
+  - Not established: after present ~1227 the menu fades to one drifting
+    card and the intro flyby follows, while reference imagery shows a
+    settled menu with the logo and three cards. The runs send no input, so
+    this may be the guest's idle flow; it was not verified.
   - Excluded first: the half-resolution layer at 0x53aa00000 (its DCC clear
     is published and consumed every frame); the target at 0x532830000 (a 1x1
     texture plus one fill); transient snapshots of the debris vertex data
