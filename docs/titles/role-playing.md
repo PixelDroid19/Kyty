@@ -4,6 +4,82 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: merged geometry stage fills the grading volume (2026-10-20)
+
+Intel A770, strict runs of the traveler-selection route on 0d25769e plus the
+changes below, with temporary diagnostics (removed).
+
+- **Result.** The traveler-selection map, black before (mean 39/32/26),
+  is lit (mean 96/81/23) in a 100 s strict run at about 40 fps. A 120 s run
+  of the build without diagnostics shows the same map (97/82/24). It exits
+  cleanly, but its last capture (about 110 s, in the story start after the
+  selection) is black, and the agent reports no present for 6.9 s at exit.
+  The colour balance has not been checked against a reference image.
+- **Merged ES+GS draws run as a compute pass.** A draw whose stages are
+  ES plus a merged NGG GS runs the linked program as one compute workgroup
+  per guest subgroup. A prologue stands in for the geometry engine: it sets
+  the vertex and primitive counts in `s3`, the corner slots in `v0`/`v1`,
+  and the primitive, vertex and instance ids. The program's exports and its
+  `GS_ALLOC_REQ` go to a transient device buffer. A host vertex stage then
+  draws that buffer as triangles. Unallocated, null and out-of-range
+  primitives collapse to the origin, and `pos1.z` supplies the layer when
+  `USE_VTX_RENDER_TARGET_INDX` is set. The compute stage has no
+  vertex-input stage, so the ES reads its streams through the buffer
+  descriptors it loads, at guest device addresses.
+  - The front half's user SGPRs (0d25769e). The HLE fuse of the two halves
+    copied the back half's `RSRC2_GS` (user SGPR count 0); the front's
+    register declares 8. The constant buffer at `s[8:11]` was then not bound.
+  - A readback of the output buffer for group 0 of the 32-instance draw:
+    header 0x2006 (6 vertices, 2 primitives), primitives (0,1,2) and
+    (3,4,5), positions at the quad corners (+-1), layer 0, UV in `param0`.
+- **Volume colour targets.** Both layered draws target 3D surfaces
+  (`CB_COLOR_ATTRIB3.RESOURCE_TYPE` 2): a 64x64x64 16_16_16_16 target and a
+  32x32x32 2_10_10_10 target, tile mode 27. `SLICE_MAX` equals the depth
+  (one past the last slice). The texture path already reads a tile-27 volume
+  slice by slice with the array layout, so only the host image type changes:
+  a 3D image (one mip, one sample, guest size) with 2D-array-compatible
+  views. Each slice is attached as a 2D view, and sampling uses a 3D view.
+- **Writer pixel shader: uniform select of EXEC.** The 32x32x32 writer
+  stopped with "fragment wave transport is required" (proof ExactSubgroup,
+  no host Wave64 on Intel). The mask flow treated `s_cselect_b64 vcc, exec,
+  0` on a compare of a uniform scalar as divergent, so a scalar written on
+  one arm of `s_cbranch_vccz` counted as divergent after the join. Such a
+  select gives every active lane the SCC bit, as `s_and` of EXEC with a
+  uniform mask does. It is now uniform when SCC is clean and EXEC still holds
+  a lane of every launched quad (no `kOuter`/`kMissesQuad`). Each host
+  subgroup then holds an active lane and decides as the guest wave does.
+  Under a lane-narrowed EXEC it stays refused, and a unit test checks that.
+  The program is now LaneLocal.
+- **If/else merge when both arms end in `S_BRANCH`.** The same program then
+  failed SPIR-V validation ("branches to the selection construct, but not to
+  the selection header"). At 0x3338 the fallthrough arm jumps into the taken
+  arm's tail (0x3458), whose own `S_BRANCH` leaves for the outer join
+  (0x35ac). The merge was taken from the taken arm's branch because that arm
+  ended in `S_BRANCH`, which placed it outside the enclosing construct. The
+  merge is now the landing of whichever arm jumps into the other, and the
+  fallthrough arm comes first. A unit test reproduces the validator error
+  without the fix.
+- **Not this defect: the well platformer's d0354e07 stop.** That program
+  fails validation with the same message, but its cause is different. A
+  uniform `s_cbranch_scc0` at 0x38 targets 0x98. Its fallthrough masks EXEC
+  and then `s_cbranch_execz` skips to 0xe0, past 0x98. `FindReconvergence`
+  rule 1 (`ShaderSpirvScJoin.cpp:540`, "fallthrough reaches taken") merges
+  the uniform branch at 0x98. The fallthrough can bypass 0x98, so the real
+  post-dominator is 0xe0, and 0x98 is shared by two regions that are not
+  nested. The stop has appeared at 77-122 s on the new-game route since
+  f7aad0aa and never in the runs of 2026-10-19 and earlier. The suspect
+  range is 10611591..f7aad0aa. It is not fixed. Two directions: drop an
+  `s_cbranch_execz` whose skipped range has only EXEC-guarded effects and
+  whose scalar definitions are dead at the target (here `vcc` is dead after
+  0xe0); or require post-dominance in rule 1 and restructure.
+- **Open.**
+  - The hull/domain fusion path of these programs is not exercised.
+  - The register window defect: fetch reads `s4..s7` regardless of the
+    user SGPR count, while the descriptor binding follows the count
+    (`Shader.cpp` input info vs `Gen5SharpNeedsEud`). With the front-half
+    fix both agree for this program; the rule itself is unresolved.
+  - The story scenes have not been re-checked with the filled table.
+
 ## Role-playing title: story exposure and colour grading (2026-10-20)
 
 Intel A770, strict runs of the story route on 7ec32b45..50adfe84 plus
