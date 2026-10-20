@@ -830,6 +830,8 @@ struct ImageImageCopy
 	uint32_t     src_array_layer = 0;
 	uint32_t     dst_array_layer = 0;
 	uint32_t     layer_count     = 1;
+	// Volume copy depth; layer_count is one for a 3D image.
+	uint32_t     depth           = 1;
 };
 
 // Intersect a requested copy with the real host mip extents and validate its

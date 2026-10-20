@@ -722,6 +722,7 @@ static void* create_from_objects_func(GraphicContext* ctx, CommandBuffer* buffer
 
 	const auto prefix_layers = static_cast<uint32_t>(source->guest_size / layout.tiled_slice.size);
 	EXIT_IF(prefix_layers == 0u || prefix_layers >= layout.layers || source->mip_levels != destination->mip_levels);
+	const bool volume = params[StorageTextureObject::PARAM_RESOURCE_TYPE] == 10u;
 
 	// Each guest slice holds its whole mip chain, so the prefix layers carry every level.
 	Vector<ImageImageCopy> regions(source->mip_levels);
@@ -737,7 +738,8 @@ static void* create_from_objects_func(GraphicContext* ctx, CommandBuffer* buffer
 		region.src_y       = 0;
 		region.dst_x       = 0;
 		region.dst_y       = 0;
-		region.layer_count = prefix_layers;
+		region.layer_count = volume ? 1u : prefix_layers;
+		region.depth       = volume ? std::max(prefix_layers >> level, 1u) : 1u;
 	}
 	UtilImageToImage(buffer, regions, destination, static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
 	return destination;
@@ -902,7 +904,8 @@ bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_
 	const auto existing_type = existing[StorageTextureObject::PARAM_RESOURCE_TYPE];
 	const auto incoming_type = incoming[StorageTextureObject::PARAM_RESOURCE_TYPE];
 	const bool arrayed_2d    = incoming_type == 11u || incoming_type == 13u;
-	if (!arrayed_2d || existing_type != incoming_type)
+	const bool volume        = incoming_type == 10u;
+	if ((!arrayed_2d && !volume) || existing_type != incoming_type)
 	{
 		return false;
 	}
@@ -910,7 +913,12 @@ bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_
 	const auto existing_depth = existing[StorageTextureObject::PARAM_DEPTH];
 	const auto incoming_depth = incoming[StorageTextureObject::PARAM_DEPTH];
 	const auto incoming_base  = incoming[StorageTextureObject::PARAM_BASE_ARRAY];
-	if (existing_depth == 0u || incoming_depth <= existing_depth || incoming_base > existing_depth)
+	if (existing_depth == 0u || incoming_depth <= existing_depth ||
+	    (volume ? incoming_base != 0u : incoming_base > existing_depth))
+	{
+		return false;
+	}
+	if (volume && incoming[StorageTextureObject::PARAM_LEVELS] != 1u)
 	{
 		return false;
 	}
