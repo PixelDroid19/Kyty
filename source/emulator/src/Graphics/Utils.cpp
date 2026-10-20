@@ -722,7 +722,9 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 
 	vkGetBufferMemoryRequirements(gctx->device, buffer->buffer, &buffer->memory.requirements);
 
-	if (!VulkanAllocate(gctx, &buffer->memory))
+	const auto resource = (buffer->usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0 ? VulkanMemoryResource::DeviceAddress
+	                                                                                      : VulkanMemoryResource::Linear;
+	if (!VulkanAllocate(gctx, &buffer->memory, resource))
 	{
 		vkDestroyBuffer(gctx->device, buffer->buffer, nullptr);
 		buffer->buffer = nullptr;

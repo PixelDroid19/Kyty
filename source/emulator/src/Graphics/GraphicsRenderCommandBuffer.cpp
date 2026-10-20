@@ -1465,6 +1465,12 @@ void CommandBuffer::Free()
 		delete m_transient_copy_buffers;
 		m_transient_copy_buffers = nullptr;
 	}
+	if (m_transient_device_buffers != nullptr)
+	{
+		m_transient_device_buffers->Destroy(g_render_ctx->GetGraphicCtx());
+		delete m_transient_device_buffers;
+		m_transient_device_buffers = nullptr;
+	}
 
 	m_pool->busy[m_index] = false;
 	MarkCommandBufferResetting();
@@ -1573,6 +1579,10 @@ void CommandBuffer::Begin()
 	{
 		m_transient_copy_buffers->Reset();
 	}
+	if (m_transient_device_buffers != nullptr)
+	{
+		m_transient_device_buffers->Reset();
+	}
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -1654,6 +1664,16 @@ VulkanBuffer* CommandBuffer::AllocateTransientCopyBuffer(uint64_t size)
 	}
 	return m_transient_copy_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size,
 	                                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+}
+
+VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage)
+{
+	EXIT_IF(IsInvalid());
+	if (m_transient_device_buffers == nullptr)
+	{
+		m_transient_device_buffers = new TransientBufferPool;
+	}
+	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true);
 }
 
 void CommandBuffer::DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth)

@@ -1351,11 +1351,13 @@ inline bool GpuMemoryCanShareReadOnlyStorageViews(uint64_t existing_addr, uint64
 }
 
 // Resources sharing a pooled block must not mix linear and optimal tiling
-// (bufferImageGranularity), so each kind has its own blocks.
+// (bufferImageGranularity), so each kind has its own blocks. DeviceAddress
+// buffers are linear and need memory allocated with device addressing.
 enum class VulkanMemoryResource
 {
 	Linear,
 	Optimal,
+	DeviceAddress,
 };
 
 bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource resource = VulkanMemoryResource::Linear);

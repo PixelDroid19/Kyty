@@ -201,8 +201,12 @@ bool PoolAllocate(GraphicContext* ctx, VulkanMemory* mem, uint32_t type, VkMemor
 	block->device   = ctx->device;
 	block->type     = type;
 	block->resource = resource;
+	VkMemoryAllocateFlagsInfo flags {};
+	flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+	flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
 	VkMemoryAllocateInfo alloc_info {};
 	alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	alloc_info.pNext           = resource == VulkanMemoryResource::DeviceAddress ? &flags : nullptr;
 	alloc_info.allocationSize  = kPoolBlockBytes;
 	alloc_info.memoryTypeIndex = type;
 	if (vkAllocateMemory(ctx->device, &alloc_info, nullptr, &block->memory) != VK_SUCCESS)
@@ -327,9 +331,12 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource
 		return true;
 	}
 
+	VkMemoryAllocateFlagsInfo flags {};
+	flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+	flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
 	VkMemoryAllocateInfo alloc_info {};
 	alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	alloc_info.pNext           = nullptr;
+	alloc_info.pNext           = resource == VulkanMemoryResource::DeviceAddress ? &flags : nullptr;
 	alloc_info.allocationSize  = mem->requirements.size;
 	alloc_info.memoryTypeIndex = index;
 
