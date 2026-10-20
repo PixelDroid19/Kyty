@@ -431,7 +431,7 @@ checked against the code; none is hit by a title in the current strict runs.
 
 ## Pixel ADD_TID spill slots across control flow (2026-10-16)
 
-- Observed (Intel, strict, `minecraft-enter`): in a newly created sandbox-title world, the run
+- Observed (Intel, strict, world-entry): in a newly created sandbox-title world, the run
   stopped at 285 s with `fragment wave transport is required by the pixel stage ... reason=memory
   write: helper lanes would be observable` at `pc=0xc78`, guest wave64, no 64-lane host subgroup.
 - Offline evidence: the title's shipped pixel programs were parsed and analysed one by one with the
@@ -454,7 +454,7 @@ checked against the code; none is hit by a title in the current strict runs.
   store read later) is gone: an unread private slot is unobservable.
 - The new rule accepts a superset of the old one (same checks, path-precise). Offline scan of the
   178 programs: 132 admitted before, 146 after, and no program lost.
-- Run (Intel, strict, `minecraft-enter`, 300 s, with the compare fix below): the world loaded and
+- Run (Intel, strict, world-entry, 300 s, with the compare fix below): the world loaded and
   gameplay held with textured terrain; no shader refusal. That run reopened the earlier world, so
   the refused shader's draw was not reproduced live; the offline proof on the shipped program is
   the evidence for it. The run stopped at 285 s in the recipe-book search (see the IME entry).
@@ -487,7 +487,7 @@ checked against the code; none is hit by a title in the current strict runs.
 
 ## Four-byte render-target micro tile (2026-10-16)
 
-- Observed (Intel, strict, `minecraft-enter` route): in sandbox-title gameplay, plants and leaves
+- Observed (Intel, strict, world-entry route): in sandbox-title gameplay, plants and leaves
   showed red and green blocky patches, and grass block sides had stray blue dots.
 - The block atlas is a 2048x2048 four-level render target (tile mode 27, four bytes per texel). The
   guest draws only level 0 on the GPU and samples the whole chain; levels 1 to 3 come from guest
@@ -511,7 +511,7 @@ checked against the code; none is hit by a title in the current strict runs.
   without them. Suggested direction: copy through the buffer stage with a compute pass that applies
   the micro-tile permutation (`x' = x0 | y0<<1 | y2<<2`, `y' = x1 | y1<<1 | x2<<2` inside each 8x8
   tile) instead of refusing.
-- Verified (Intel, strict, `minecraft-enter`, 300 s): the run opened a newly created world and
+- Verified (Intel, strict, world-entry, 300 s): the run opened a newly created world and
   spawned by frame 3,457. Captures show grass sides, sea grass and sugar cane with correct textures
   and no red or green blocks. At 285 s it stopped on a pixel shader that writes memory under a
   64-lane wave (`fragment wave transport ... helper lanes would be observable`); that shader had

@@ -6,7 +6,7 @@ record. Titles are named descriptively only (`AGENTS.md`).
 
 ## Sandbox title: drifting dark patch on terrain (2026-10-16, open)
 
-- Observed (Intel, strict, `minecraft-enter` route, no input after the spawn): from about frame
+- Observed (Intel, strict, world-entry route, no input after the spawn): from about frame
   10,600 on, a dark translucent quad lies on the grass in front of the player. It moves and grows
   between captures (frames 10,692, 10,854 and 11,016). Earlier frames on the same route do not
   show it.
@@ -111,7 +111,7 @@ inventory screen works. Recorded so the excluded paths are not re-tested.
     once per camera file (7 of 7), although every file was found. A gdb Python
     breakpoint on the definition loader's return dumped the parser error:
     `"identifier" must contain a namespace and a name, separated by a colon`
-    for `minecraft:death_camera` and the other six.
+    for the namespaced death-camera identifier and the other six.
   - The camera schema validates the identifier with the regex `^\w+:\w+$`.
     The title's `regex_traits::lookup_classname` compares one-letter class
     names through `ctype<char>::do_tolower` (vtable +0x20). Kyty's classic
