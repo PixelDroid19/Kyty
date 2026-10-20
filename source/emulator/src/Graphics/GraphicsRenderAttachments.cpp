@@ -584,12 +584,25 @@ static uint32_t ColorDccClearChannels(VkFormat format)
 {
 	switch (format)
 	{
-		case VK_FORMAT_R16G16B16A16_SFLOAT:
+		case VK_FORMAT_R8_UNORM: return 1u;
+		case VK_FORMAT_R8G8_UNORM: return 2u;
+		case VK_FORMAT_R16_UNORM: return 1u;
+		case VK_FORMAT_R16G16_UNORM: return 2u;
+		case VK_FORMAT_R16G16B16A16_UNORM: return 4u;
+		case VK_FORMAT_R16_SFLOAT: return 1u;
+		case VK_FORMAT_R16G16_SFLOAT: return 2u;
+		case VK_FORMAT_R16G16B16A16_SFLOAT: return 4u;
+		case VK_FORMAT_R32_SFLOAT: return 1u;
+		case VK_FORMAT_R32G32_SFLOAT: return 2u;
+		case VK_FORMAT_R32G32B32A32_SFLOAT: return 4u;
+		case VK_FORMAT_R5G6B5_UNORM_PACK16:
+		case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
+		case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+		case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
 		case VK_FORMAT_R8G8B8A8_UNORM:
 		case VK_FORMAT_R8G8B8A8_SRGB:
 		case VK_FORMAT_B8G8R8A8_UNORM:
 		case VK_FORMAT_B8G8R8A8_SRGB: return 4u;
-		case VK_FORMAT_R32_SFLOAT: return 1u;
 		default: return 0u;
 	}
 }
