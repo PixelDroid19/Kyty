@@ -2218,7 +2218,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// storage image over a set of CPU-uploaded read-only StorageBuffers
 			// links them here (captured: several small buffers inside a new
 			// 0x100000 volume). Guest memory already holds the current bytes.
-			if (storage_links_cache && !storage_links_materialized && !storage_links_render_target)
+			if ((storage_links_cache && !storage_links_materialized && !storage_links_render_target) ||
+			    (storage_links_render_target && !storage_links_materialized))
 			{
 				if (!storage_reclaim_vertex_ids.IsEmpty())
 				{
