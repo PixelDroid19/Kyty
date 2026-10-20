@@ -4,6 +4,39 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: storage, DCC and UI format gaps (2026-10-20)
+
+Intel A770, strict 180-230 s runs of the traveler route with scripted movement.
+
+- **Uniform fills over partial views.** A per-frame clear had an exact
+  writable storage buffer plus partial and read-only views of the same bytes.
+  The colour-fill identity check rejected the whole clear for those views, so
+  the previous frame remained visible (character trails, a menu left over the
+  scene). `ComputeFillAliases::SkipPartial` now skips partial storage views;
+  the DCC path keeps exact-only. Bounded diagnostics counted 48 refusals in
+  180 s before the change and none after.
+- **Two-byte raw records.** A raw descriptor with guest stride 2 and format
+  R16 describes 16-bit records. The byte-based raw address equation supports
+  it; admission only accepted dword strides and stride 1. The strict run no
+  longer emits the raw stride-2 storage frontier.
+- **DCC clear formats.** The clear key is format-independent, but the decode
+  table knew four host formats. R8/RG8 masks, R16/RG16, R32/RG32,
+  RGBA16F/32F and the packed 16/32-bit formats could not materialise a pending
+  clear, leaving black sprites and blank UI panels. The camp capture now shows
+  the character sprites and dialogue text in colour.
+- **Storage image over cache buffers.** A new storage image spanning several
+  small CPU-uploaded read-only StorageBuffers had no multi-parent relation and
+  creation exited at 159 s (`unknown relation: StorageBuffer -
+  IsContainedWithin - StorageTexture`). The parents are now linked to the new
+  view, which seeds from guest memory; read-only vertex parents are reclaimed
+  under the existing policy. The 180 s strict run completes.
+- **Still open.** Some dialogue decorations render as flat brown blocks, and
+  one capture showed horizontal striping/tearing. A separate run reached the
+  Vulkan validation layer and stopped on a fragment input at Location 1 that
+  the vertex stage does not declare; the device-lost path itself was not
+  reproduced with the fault trace enabled (no fault report). These need
+  separate evidence.
+
 ## Role-playing title: per-frame fills refused by partial buffer views (2026-10-20)
 
 Intel A770, strict 180 s runs of the traveler route with scripted movement.
