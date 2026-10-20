@@ -2574,6 +2574,11 @@ struct ShaderPixelInputInfo
 	{
 		return (system_input_enable & system_input_address & (1u << 12u)) != 0;
 	}
+	// ANCILLARY_ENA: bits 16..26 of the VGPR hold the render-target array index.
+	[[nodiscard]] bool AncillaryEnabled() const
+	{
+		return (system_input_enable & system_input_address & (1u << 13u)) != 0;
+	}
 };
 
 [[nodiscard]] ShaderFragmentTapConfig ShaderResolveFragmentTapConfig(uint64_t code_id, bool indexed, uint32_t guest_count);

@@ -502,6 +502,7 @@ private:
 	void WriteCustomPixelProlog();
 	void WritePixelPositionProlog();
 	void WritePixelFrontFaceProlog();
+	void WritePixelAncillaryProlog();
 	void WriteInstructions();
 	void WriteMainEpilog();
 	void WriteFunctions();

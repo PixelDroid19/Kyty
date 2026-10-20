@@ -7627,6 +7627,35 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
 	EXPECT_NE(source.FindIndex("OpStore %v3 %pixel_pos_guest9"), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, PixelAncillaryCarriesTheLayerInBits16To26OfItsAddressSlot)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+
+	// PERSP_CENTER and ANCILLARY: v[0:1] barycentrics, v2 ancillary.
+	ShaderPixelInputInfo input {};
+	input.system_input_enable         = 0x2002u;
+	input.system_input_address        = 0x2002u;
+	input.required_subgroup_size      = 32;
+	input.native_wave.guest_wave_size = 32;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpDecorate %gl_LayerIn BuiltIn Layer"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%ancillary_value = OpShiftLeftLogical %uint %ancillary_layer_index %uint_16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %ancillary_register"), Core::STRING8_INVALID_INDEX);
+	ScopedShaderValidation validation;
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+}
+
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
 // at VS PC 0x264. Same ParamN path as 0x20+N; real ShaderParse entry (not a re-impl).
 TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)

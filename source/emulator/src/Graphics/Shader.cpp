@@ -6087,6 +6087,10 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 		ids.Add(0x46464931u); // FFI1: explicit front-face system input.
 		ids.Add(static_cast<uint32_t>(input_info->front_face_all_bits));
 	}
+	if (input_info->AncillaryEnabled())
+	{
+		ids.Add(0x414e4331u); // ANC1: render-target array index in the ancillary VGPR.
+	}
 	if (input_info->custom_interpolation.Enabled())
 	{
 		ids.Add(0x43504932u); // CPI2: raw inputs and qualified parameter aliases through geometry.

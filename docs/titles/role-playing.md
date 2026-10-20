@@ -4,6 +4,34 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: the grading volume lost its blue axis (2026-10-20)
+
+Intel A770, strict 300 s runs of the traveler-selection route.
+
+- **Symptom.** With the volume filled, every scene had almost no blue: the
+  traveler map averaged 96/81/23, the ship deck 17/31/11, and the night sky
+  rendered green.
+- **Cause.** The 32x32x32 writer derives blue from the render-target array
+  index: `v_bfe_u32 v3, v2, 16, 11` on the PS input VGPR that
+  `SPI_PS_INPUT_ENA.ANCILLARY_ENA` (bit 13) assigns, then scales it by 1/31.
+  No prolog filled that VGPR, and the unsupported input mask was only
+  logged. Every slice was therefore written with blue 0.
+- **Change.** A pixel shader with the ancillary input reads the fragment
+  `Layer` (flat, Geometry capability). It stores `(layer & 0x7ff) << 16` in
+  the address-assigned VGPR. The sample-index field (bits 8..11) and a
+  layer through the interpolation geometry stage are not provided. Both
+  combinations stop the pipeline instead of reading zero. A unit test
+  checks the slot and the bit position and validates the SPIR-V. The bit
+  layout comes from the guest's own extract; two independent
+  implementations agree on it. The translator version moves to 140, which
+  also invalidates translations cached before the control-flow and
+  mask-flow changes above.
+- **Result.** The ship deck averages 33/18/30 and the temple scene shows
+  grey stone, a pale blue sky and orange torches. The colours have not been
+  checked against a reference image.
+- **Open.** The maintainer reports flicker in the story scenes: elements
+  smear for about a second, and some are not drawn. Not yet localized.
+
 ## Role-playing title: merged geometry stage fills the grading volume (2026-10-20)
 
 Intel A770, strict runs of the traveler-selection route on 0d25769e plus the

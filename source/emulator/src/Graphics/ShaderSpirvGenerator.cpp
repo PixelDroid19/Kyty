@@ -613,6 +613,10 @@ void Spirv::WriteHeader()
 		capabilities.Add("OpCapability ShaderLayer");
 		vars.Add("%gl_Layer");
 	}
+	if (m_ps_input_info != nullptr && m_ps_input_info->AncillaryEnabled())
+	{
+		capabilities.Add("OpCapability Geometry");
+	}
 	if (UsesVertexClipDistance0Export()) { capabilities.Add("OpCapability ClipDistance"); }
 
 	if (Config::SpirvDebugPrintfEnabled())
@@ -787,6 +791,7 @@ void Spirv::WriteHeader()
 				}
 				WriteCustomPixelInterface(&vars);
 				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("%gl_FrontFacing"); }
+				if (m_ps_input_info->AncillaryEnabled()) { vars.Add("%gl_LayerIn"); }
 				if (m_ps_input_info->ps_position || UsesPixelMrtProbe())
 				{
 					vars.Add("%gl_FragCoord");
@@ -1074,6 +1079,11 @@ void Spirv::WriteAnnotations()
 				}
 				WriteCustomPixelAnnotations(&vars);
 				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("OpDecorate %gl_FrontFacing BuiltIn FrontFacing"); }
+				if (m_ps_input_info->AncillaryEnabled())
+				{
+					vars.Add("OpDecorate %gl_LayerIn BuiltIn Layer");
+					vars.Add("OpDecorate %gl_LayerIn Flat");
+				}
 				if (m_ps_input_info->ps_position || UsesPixelMrtProbe())
 				{
 					vars.Add("OpDecorate %gl_FragCoord BuiltIn FragCoord");
@@ -1889,6 +1899,7 @@ void Spirv::WriteGlobalVariables()
 				}
 				WriteCustomPixelVariables(&vars);
 				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("%gl_FrontFacing = OpVariable %_ptr_Input_bool Input"); }
+				if (m_ps_input_info->AncillaryEnabled()) { vars.Add("%gl_LayerIn = OpVariable %_ptr_Input_int Input"); }
 				if (m_ps_input_info->ps_position || UsesPixelMrtProbe())
 				{
 					vars.Add("%gl_FragCoord = OpVariable %_ptr_Input_v4float Input");
@@ -2127,6 +2138,7 @@ void Spirv::WriteLocalVariables()
 		WritePixelPositionProlog();
 		WriteCustomPixelProlog();
 		WritePixelFrontFaceProlog();
+		WritePixelAncillaryProlog();
 	}
 
 	if (m_code.GetType() == ShaderType::Compute)
@@ -3754,6 +3766,11 @@ void Spirv::FindConstants()
 		AddConstantUint(m_ps_input_info->front_face_all_bits ? 1u : 0x3f800000u);
 		AddConstantUint(m_ps_input_info->front_face_all_bits ? 0u : 0xbf800000u);
 	}
+	if (m_ps_input_info != nullptr && m_ps_input_info->AncillaryEnabled())
+	{
+		AddConstantUint(0x7ffu);
+		AddConstantUint(16u);
+	}
 	if (m_ps_input_info != nullptr)
 	{
 		for (uint32_t target = 0; target < 8u; ++target)
@@ -3886,6 +3903,10 @@ void Spirv::FindVariables()
 		if (m_ps_input_info->FrontFaceEnabled())
 		{
 			AddVariable(ShaderOperandType::Vgpr, ShaderPixelSystemInputRegister(*m_ps_input_info, 12u), 1);
+		}
+		if (m_ps_input_info->AncillaryEnabled())
+		{
+			AddVariable(ShaderOperandType::Vgpr, ShaderPixelSystemInputRegister(*m_ps_input_info, 13u), 1);
 		}
 		if (m_ps_input_info->custom_interpolation.Enabled())
 		{

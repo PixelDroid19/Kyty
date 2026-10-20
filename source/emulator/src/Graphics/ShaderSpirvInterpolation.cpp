@@ -98,6 +98,23 @@ void Spirv::WritePixelFrontFaceProlog()
 	    "OpStore %%v%u %%front_face_register\n", front.c_str(), back.c_str(), reg);
 }
 
+void Spirv::WritePixelAncillaryProlog()
+{
+	if (m_ps_input_info == nullptr || !m_ps_input_info->AncillaryEnabled()) { return; }
+	const auto reg = ShaderPixelSystemInputRegister(*m_ps_input_info, 13u);
+	const auto mask = GetConstantUint(0x7ffu);
+	const auto shift = GetConstantUint(16u);
+	// The render-target array index fills bits 16..26; the sample index and
+	// the remaining fields read zero (single-sample shading).
+	m_source += String8::FromPrintf(
+	    "%%ancillary_layer = OpLoad %%int %%gl_LayerIn\n"
+	    "%%ancillary_layer_bits = OpBitcast %%uint %%ancillary_layer\n"
+	    "%%ancillary_layer_index = OpBitwiseAnd %%uint %%ancillary_layer_bits %%%s\n"
+	    "%%ancillary_value = OpShiftLeftLogical %%uint %%ancillary_layer_index %%%s\n"
+	    "%%ancillary_register = OpBitcast %%float %%ancillary_value\n"
+	    "OpStore %%v%u %%ancillary_register\n", mask.c_str(), shift.c_str(), reg);
+}
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

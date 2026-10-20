@@ -1650,6 +1650,14 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		vkGetPhysicalDeviceFeatures(gctx->physical_device, &features);
 		EXIT_IF(features.shaderClipDistance != VK_TRUE);
 	}
+	if (ps_input_info->AncillaryEnabled())
+	{
+		// The fragment Layer input needs the Geometry capability. The sample
+		// index field and a layer through the interpolation geometry stage are
+		// not provided.
+		EXIT_IF(!gctx->geometry_shader_supported);
+		EXIT_IF(p.static_params->sample_shading_enable || ps_input_info->custom_interpolation.Enabled());
+	}
 	if (ps_input_info->custom_interpolation.Enabled())
 	{
 		EXIT_IF(!gctx->geometry_shader_supported);
