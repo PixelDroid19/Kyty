@@ -2101,8 +2101,9 @@ static bool IsDiscardInstruction(const Vector<ShaderInstruction>& code, uint32_t
 		     prev_inst.format == ShaderInstructionFormat::SVdstSVsrc0 &&
 		     prev_inst.dst.type == ShaderOperandType::ExecLo && prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
 		     prev_inst.src[0].constant.i == 0);
-		return (inst.type == ShaderInstructionType::Exp && ShaderIsNullMrtDoneFormat(inst.format) && exec_zeroed &&
-		        next_inst.type == ShaderInstructionType::SEndpgm);
+		// The NULL target carries only the valid mask, like a null MRT export.
+		const bool null_export = ShaderIsNullMrtDoneFormat(inst.format) || inst.format == ShaderInstructionFormat::NullVmDone;
+		return (inst.type == ShaderInstructionType::Exp && null_export && exec_zeroed && next_inst.type == ShaderInstructionType::SEndpgm);
 	}
 	return false;
 }

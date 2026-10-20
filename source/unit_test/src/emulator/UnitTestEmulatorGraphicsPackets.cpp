@@ -9237,6 +9237,118 @@ TEST(EmulatorGraphicsPackets, EmptyDiamondArmBranchesToItsDeclaredSyntheticMerge
 	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
 }
 
+// Captured dithered depth-only shader: an EXECZ skip region holds an SCC0
+// branch to the NULL-target discard tail placed after the region's join. The
+// tail is a terminating arm, not a selection merge crossing the outer join.
+TEST(EmulatorGraphicsPackets, NullTargetDiscardTailInsideSkipRegionIsTerminatingArm)
+{
+	ASSERT_EXIT(
+	    {
+		    InitCommandBufferTestRuntime();
+		    Config::SetNextGen(true);
+		    class ValidationConfig final: public Config::ConfigSource
+		    {
+		    public:
+		    	bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+		    	int64_t GetInteger(const Core::String&) const override { return 0; }
+		    	bool GetBool(const Core::String&) const override { return true; }
+		    	Core::String GetString(const Core::String&) const override { return {}; }
+		    } validation;
+		    Config::Load(validation);
+		    ShaderCode code;
+		    code.SetType(ShaderType::Pixel);
+		    const auto branch = [&code](ShaderInstructionType type, uint32_t pc, uint32_t target)
+		    {
+		    	ShaderInstruction inst {};
+		    	inst.pc = pc;
+		    	inst.type = type;
+		    	inst.format = ShaderInstructionFormat::Label;
+		    	inst.src_num = 1;
+		    	inst.src[0].type = ShaderOperandType::LiteralConstant;
+		    	inst.src[0].constant.i = static_cast<int32_t>(target) - static_cast<int32_t>(pc) - 4;
+		    	code.GetInstructions().Add(inst);
+		    	code.GetLabels().Add(ShaderLabel(inst));
+		    };
+		    branch(ShaderInstructionType::SCbranchExecz, 0, 16);
+		    ShaderInstruction compare {};
+		    compare.pc = 8;
+		    compare.type = ShaderInstructionType::SCmpEqU32;
+		    compare.format = ShaderInstructionFormat::Ssrc0Ssrc1;
+		    compare.src_num = 2;
+		    compare.src[0].type = ShaderOperandType::Sgpr;
+		    compare.src[0].size = 1;
+		    compare.src[1].type = ShaderOperandType::IntegerInlineConstant;
+		    ShaderInstruction move {};
+		    move.type = ShaderInstructionType::VMovB32;
+		    move.format = ShaderInstructionFormat::SVdstSVsrc0;
+		    move.dst.type = ShaderOperandType::Vgpr;
+		    move.dst.size = 1;
+		    move.src_num = 1;
+		    move.src[0].type = ShaderOperandType::FloatInlineConstant;
+		    move.src[0].constant.f = 0.25f;
+		    move.pc = 4;
+		    code.GetInstructions().Add(move);
+		    code.GetInstructions().Add(compare);
+		    // Its fallthrough is the skip region's join, as in the captured program.
+		    branch(ShaderInstructionType::SCbranchScc0, 12, 32);
+		    move.pc = 16;
+		    code.GetInstructions().Add(move);
+		    ShaderInstruction color {};
+		    color.pc = 20;
+		    color.type = ShaderInstructionType::Exp;
+		    color.format = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone;
+		    color.src_num = 4;
+		    color.exp_control = 3;
+		    for (uint32_t component = 0; component < 4; ++component)
+		    {
+		    	color.src[component].type = ShaderOperandType::Vgpr;
+		    	color.src[component].size = 1;
+		    }
+		    code.GetInstructions().Add(color);
+		    ShaderInstruction end {};
+		    end.pc = 28;
+		    end.type = ShaderInstructionType::SEndpgm;
+		    end.format = ShaderInstructionFormat::Empty;
+		    code.GetInstructions().Add(end);
+		    ShaderInstruction clear_exec {};
+		    clear_exec.pc = 32;
+		    clear_exec.type = ShaderInstructionType::SMovB64;
+		    clear_exec.format = ShaderInstructionFormat::Sdst2Ssrc02;
+		    clear_exec.dst.type = ShaderOperandType::ExecLo;
+		    clear_exec.dst.size = 2;
+		    clear_exec.src_num = 1;
+		    clear_exec.src[0].type = ShaderOperandType::IntegerInlineConstant;
+		    clear_exec.src[0].size = 2;
+		    code.GetInstructions().Add(clear_exec);
+		    ShaderInstruction null_export {};
+		    null_export.pc = 36;
+		    null_export.type = ShaderInstructionType::Exp;
+		    null_export.format = ShaderInstructionFormat::NullVmDone;
+		    code.GetInstructions().Add(null_export);
+		    end.pc = 44;
+		    code.GetInstructions().Add(end);
+		    if (!code.ReadBlock(32).is_discard)
+		    {
+		    	std::_Exit(2);
+		    }
+		    ShaderPixelInputInfo input {};
+		    input.required_subgroup_size = 32;
+		    input.native_wave.guest_wave_size = 32;
+		    input.ps_pixel_kill_enable = true;
+		    input.target_output_mode[0] = 4;
+		    const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+		    Vector<uint32_t> binary;
+		    String8 error;
+		    if (!ShaderToolchain::Run(source, &binary, &error))
+		    {
+		    	std::fprintf(stderr, "%.512s\n", error.c_str());
+		    	std::_Exit(4);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorGraphicsPackets, SharedDiscardTailsDoNotAcquireReconvergenceMerges)
 {
 	InitCommandBufferTestRuntime();
