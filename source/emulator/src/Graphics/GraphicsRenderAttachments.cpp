@@ -56,6 +56,8 @@ namespace Kyty::Libs::Graphics {
 static ComputeColorFillEvents g_compute_color_fills;
 // Pending DCC metadata clears, keyed by the metadata range the guest filled.
 static ComputeColorFillEvents g_color_dcc_clears;
+
+
 static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, VkImageLayout new_layout, VkAccessFlags dst_access,
                                  VkPipelineStageFlags dst_stage);
 
@@ -110,6 +112,16 @@ static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, Com
 		if (entry.type != GpuMemoryObjectType::StorageBuffer && !image_alias)
 		{
 			return false;
+		}
+		// A partial buffer or read-only view of the filled bytes does not own
+		// the range; the writable exact storage is the representation that
+		// receives the fill. Refusing the whole fill on one of those aliases
+		// left every frame's clear unpublished and the previous image visible
+		// (moving-object trails).
+		if (aliases == ComputeFillAliases::SkipPartial && entry.type == GpuMemoryObjectType::StorageBuffer &&
+		    entry.relation != GpuMemoryOverlapType::Equals)
+		{
+			continue;
 		}
 		if (image_alias && entry.relation != GpuMemoryOverlapType::Equals)
 		{
