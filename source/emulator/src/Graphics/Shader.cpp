@@ -1676,7 +1676,7 @@ static void ShaderAppendContinuation(ShaderCode* code, const ShaderCode& back, u
 		inst.format                  = ShaderInstructionFormat::Label;
 		inst.src_num                 = 1;
 		inst.src[0]                  = {};
-		inst.src[0].type             = ShaderOperandType::IntegerInlineConstant;
+		inst.src[0].type             = ShaderOperandType::LiteralConstant;
 		inst.src[0].size             = 0;
 		inst.src[0].constant.i       = static_cast<int32_t>(rel);
 		inst.dst                     = {};
