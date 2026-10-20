@@ -3998,7 +3998,8 @@ static bool TBufferFloatLoadSupported(const ShaderInstruction& inst, uint8_t com
 	switch (components)
 	{
 		case 1: return inst.mtbuf_format == (inst.mtbuf_format_is_gen5 ? 22u : 0x74u);
-		case 2: return inst.mtbuf_format == (inst.mtbuf_format_is_gen5 ? 64u : 0x7bu);
+		case 2: return inst.mtbuf_format_is_gen5 ? (inst.mtbuf_format == 64u || inst.mtbuf_format == 74u || inst.mtbuf_format == 77u)
+		                                         : inst.mtbuf_format == 0x7bu;
 		case 3: return inst.mtbuf_format_is_gen5 && (inst.mtbuf_format == 74u || inst.mtbuf_format == 77u);
 		case 4: return inst.mtbuf_format == (inst.mtbuf_format_is_gen5 ? 77u : 0x7eu);
 		default: return false;

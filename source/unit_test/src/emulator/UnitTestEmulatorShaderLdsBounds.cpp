@@ -521,6 +521,7 @@ void RunParserMetadata()
 		struct Format { uint32_t opcode; uint8_t gen5; uint8_t legacy; uint8_t components; ShaderInstructionType type; };
 		const Format formats[] = {{0, 22, 0x74, 1, ShaderInstructionType::TBufferLoadFormatX},
 		                          {1, 64, 0x7b, 2, ShaderInstructionType::TBufferLoadFormatXy},
+		                          {1, 77, 0x7b, 2, ShaderInstructionType::TBufferLoadFormatXy},
 		                          {3, 77, 0x7e, 4, ShaderInstructionType::TBufferLoadFormatXyzw}};
 		for (const auto& format: formats)
 		{
@@ -1073,9 +1074,10 @@ TEST(EmulatorShaderLdsBounds, NativeAndPairedSdwaRejectUnrepresentedControls)
 
 TEST(EmulatorShaderLdsBounds, NativeMtbufPreservesHintsAndRejectsTfeAndD16Aliases)
 {
-	// Four native emitter tuples: X, XY, XYZW, XYZW with OFFEN+IDXEN.
-	// RDNA2 table 96 puts DLC at bit15 and the high opcode bit at bit53.
-	for (uint32_t control: {0xe8b02000u, 0xea012000u, 0xea6b2000u, 0xea6b3000u})
+	// Native emitter tuples: X, XY, XY over an RGBA32F element, XYZW, XYZW
+	// with OFFEN+IDXEN. RDNA2 table 96 puts DLC at bit15 and the high opcode
+	// bit at bit53.
+	for (uint32_t control: {0xe8b02000u, 0xea012000u, 0xea692000u, 0xea6b2000u, 0xea6b3000u})
 	{
 		const auto expected = ((control >> 16u) & 7u) == 0 ? ShaderInstructionType::TBufferLoadFormatX
 		                      : (((control >> 16u) & 7u) == 1 ? ShaderInstructionType::TBufferLoadFormatXy
@@ -1117,8 +1119,9 @@ TEST(EmulatorShaderLdsBounds, MtbufRejectsEveryUnimplementedOpcodeAndFormatCompo
 			const uint32_t expected = next_gen ? gen5[opcode] : legacy[opcode];
 			for (uint32_t format: {0u, 22u, 64u, 74u, 77u, 0x74u, 0x7bu, 0x7eu})
 			{
-				// Gen5 XYZ also reads the first three components of an RGBA32F element.
-				if (format == expected || (next_gen && opcode == 2u && format == 77u)) { continue; }
+				// Gen5 XY and XYZ also read the leading components of a wider float element.
+				const bool leading = next_gen && ((opcode == 1u && (format == 74u || format == 77u)) || (opcode == 2u && format == 77u));
+				if (format == expected || leading) { continue; }
 				EXPECT_EXIT(RunRejectedMtbuf(opcode, format, next_gen), ::testing::ExitedWithCode(kRejectedExit), MtbufRejection(opcode, true));
 			}
 		}

@@ -39,8 +39,10 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 	// 0x16, split as dfmt=6/nfmt=1. Both feed the same Float1 IR contract.
 	const uint32_t encoded_format = (nfmt << 4u) | dfmt;
 	const bool float1_format = (!next_gen && dfmt == 4u && nfmt == 7u) || (next_gen && encoded_format == 22u);
-	const bool float2_format = (!next_gen && dfmt == 11u && nfmt == 7u) || (next_gen && encoded_format == 64u);
-	// XYZ returns the first three components of an RGB32F or RGBA32F element.
+	// XY and XYZ return the leading components of a wider 32-bit float element
+	// (RDNA2 ISA 8.1.4: the instruction's format defines the element).
+	const bool float2_format = (!next_gen && dfmt == 11u && nfmt == 7u) ||
+	                           (next_gen && (encoded_format == 64u || encoded_format == 74u || encoded_format == 77u));
 	const bool float3_format = next_gen && (encoded_format == 74u || encoded_format == 77u);
 	const bool float4_format = (!next_gen && dfmt == 14u && nfmt == 7u) || (next_gen && encoded_format == 77u);
 	if ((opcode == 0u && !float1_format) || (opcode == 1u && !float2_format) || (opcode == 2u && !float3_format) ||
