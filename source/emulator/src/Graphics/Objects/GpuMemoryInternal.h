@@ -286,6 +286,7 @@ public:
 	Vector<GpuMemoryObject> FindObjectsWithRange(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type, const SubmissionId& submission);
 	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 	bool                    QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
+	void                    LinkDepthMetaStorage(uint64_t depth_vaddr, uint64_t depth_size, uint64_t htile_addr, uint64_t htile_size);
 	bool                    DescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out);
 	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission);
 	bool                    CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns,

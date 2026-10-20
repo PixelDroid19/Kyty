@@ -2960,6 +2960,35 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	return o.object.obj;
 }
 
+void GpuMemory::LinkDepthMetaStorage(uint64_t depth_vaddr, uint64_t depth_size, uint64_t htile_addr, uint64_t htile_size)
+{
+	if (depth_size == 0 || htile_addr == 0 || htile_size == 0 || htile_addr > UINT64_MAX - (htile_size - 1u))
+	{
+		return;
+	}
+	Core::LockGuard lock(m_mutex);
+	const int       heap_id = GetHeapId(htile_addr, htile_size);
+	if (heap_id < 0 || heap_id == GetHeapId(depth_vaddr, depth_size))
+	{
+		return;
+	}
+	auto& heap = m_heaps[heap_id];
+	for (const auto& block: FindBlocks(heap_id, &htile_addr, &htile_size, 1, false))
+	{
+		auto& object = heap.objects[block.object_id];
+		if (object.info.object.type != GpuMemoryObjectType::StorageBuffer || object.block.vaddr_num != 1 ||
+		    !DepthMetaMatchesStorageRange(object.block.vaddr[0], object.block.size[0], htile_addr, htile_size))
+		{
+			continue;
+		}
+		auto* storage = static_cast<StorageVulkanBuffer*>(object.info.object.obj);
+		EXIT_IF(storage == nullptr);
+		storage->depth_meta_addr     = htile_addr;
+		storage->depth_meta_size     = htile_size;
+		object.info.depth_meta_bound = true;
+	}
+}
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

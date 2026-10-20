@@ -3029,7 +3029,9 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 			                               !storage_buffers.raw_smem_dynamic_offset[i] && storage_buffers.raw_smem_required_bytes[i] != 0;
 			trace.requested_size =
 			    exact_static_smem ? std::min(declared_size, storage_buffers.raw_smem_required_bytes[i]) : declared_size;
-			trace.allocated_prefix = GpuMemoryGetAllocatedRangePrefix(addr, trace.requested_size);
+			// The guest maps GPU memory in small contiguous pieces, so a buffer may
+			// continue into the next registration.
+			trace.allocated_prefix = GpuMemoryGetMappedRangePrefix(addr, trace.requested_size);
 			const uint64_t requested_size = trace.requested_size;
 			const uint64_t materialized_size = trace.allocated_prefix;
 

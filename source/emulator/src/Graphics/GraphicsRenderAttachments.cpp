@@ -671,8 +671,8 @@ static bool ResolveDepthMetaStorageIdentity(uint64_t submit_id, const RenderDept
 // 0xfffffff0 has a maximum Z of 1.0 in both layouts: [1, 1] without stencil
 // tiling, and base 1.0 with SMem 3 (expanded) with it, so the stencil plane
 // keeps its contents and the pass loads it. A zero word encodes [0, 0] and,
-// with stencil tiling, SMem 0 (cleared), so a combined D32S8 target qualifies
-// only when the guest clears stencil to zero in the same use.
+// with stencil tiling, SMem 0: the stencil of the tile reads DB_STENCIL_CLEAR
+// whatever the draw's clear bits say, so the fill clears both planes.
 static bool DepthMetaComputeFillTranslatable(const RenderDepthInfo& depth, const DepthMetaClearEvent& pending)
 {
 	if (pending.pattern.kind == DepthMetaPatternKind::RecognizedClear)
@@ -687,11 +687,14 @@ static bool DepthMetaComputeFillTranslatable(const RenderDepthInfo& depth, const
 	{
 		return false;
 	}
-	if (!depth.stencil_plane)
-	{
-		return true;
-	}
-	return depth.format == VK_FORMAT_D32_SFLOAT_S8_UINT && depth.stencil_clear_enable && depth.stencil_clear_value == 0u;
+	return !depth.htile_stencil || depth.format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
+
+// A zero HTILE word over a target whose stencil is tiled in HTILE clears the
+// stencil plane too.
+static bool DepthMetaClearCoversStencil(const RenderDepthInfo& depth, const DepthMetaClearEvent& event)
+{
+	return depth.htile_stencil && event.pattern.kind == DepthMetaPatternKind::UniformZero;
 }
 
 static bool ConsumeDepthMetaClear(uint64_t submit_id, const RenderDepthInfo& depth, DepthMetaClearEvent* event)
@@ -1040,6 +1043,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	r->stencil_clear_enable = rc.stencil_clear_enable;
 	r->stencil_clear_value  = hw.GetStencilClearValue();
 	r->stencil_plane        = effective_stencil != 0;
+	r->htile_stencil        = r->stencil_plane && !z.stencil_info.tile_stencil_disable;
 	// EXIT_NOT_IMPLEMENTED(r->stencil_clear_enable);
 
 	r->stencil_test_enable = dc.stencil_enable;
@@ -1054,6 +1058,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 		r->stencil_test_enable  = false;
 		r->stencil_clear_enable = false;
 		r->stencil_plane        = false;
+		r->htile_stencil        = false;
 		r->width                = 0;
 		r->height               = 0;
 	}
@@ -1148,9 +1153,9 @@ static void RequireCommittedDepthExtent(CommandBuffer* buffer, const RenderDepth
 
 // An HTILE clear covers the whole surface, while an attachment clear covers
 // only the render area of the pass that consumes it, which can be smaller than
-// the depth image. Clear the depth plane of the whole image instead; the
-// stencil plane keeps its contents or takes the pass's register clear.
-static bool ClearDepthMetaWholeImage(CommandBuffer* buffer, const RenderDepthInfo& depth)
+// the depth image. Clear the whole image instead: the depth plane, and the
+// stencil plane when the HTILE word clears it too.
+static bool ClearDepthMetaWholeImage(CommandBuffer* buffer, const RenderDepthInfo& depth, bool clear_stencil)
 {
 	auto* image = depth.vulkan_buffer;
 	// Custom sample locations would have to accompany every layout transition.
@@ -1161,7 +1166,7 @@ static bool ClearDepthMetaWholeImage(CommandBuffer* buffer, const RenderDepthInf
 	// A first use defines every plane, as its CLEAR load op would.
 	const bool first_use      = image->layout == VK_IMAGE_LAYOUT_UNDEFINED;
 	const auto restore_layout = first_use ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : image->layout;
-	const auto aspects        = first_use ? DepthFormatAspectMask(image->format) : VkImageAspectFlags {VK_IMAGE_ASPECT_DEPTH_BIT};
+	const auto aspects        = (first_use || clear_stencil) ? DepthFormatAspectMask(image->format) : VkImageAspectFlags {VK_IMAGE_ASPECT_DEPTH_BIT};
 	auto*      vk_buffer      = buffer->RecordOutsideRenderPass();
 	TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 	const VkClearDepthStencilValue clear {depth.depth_clear_value, depth.stencil_clear_value};
@@ -1202,12 +1207,18 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		if (!r->vulkan_buffer->sample_locations_compatible) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !r->vulkan_buffer->sample_locations_compatible condition ignored (continuing)\n"); }
 	}
 
+	if (r->htile && r->vaddr_num > 0)
+	{
+		GpuMemoryLinkDepthMetaStorage(r->vaddr[0], r->size[0], r->htile_buffer_vaddr, r->htile_buffer_size);
+	}
 	DepthMetaClearEvent meta_clear_event {};
-	if (r->htile && ConsumeDepthMetaClear(submit_id, *r, &meta_clear_event) && !ClearDepthMetaWholeImage(buffer, *r))
+	if (r->htile && ConsumeDepthMetaClear(submit_id, *r, &meta_clear_event) &&
+	    !ClearDepthMetaWholeImage(buffer, *r, DepthMetaClearCoversStencil(*r, meta_clear_event)))
 	{
 		const auto clear_actions = State::ResolveDepthClearActions(r->depth_clear_enable, true);
 		r->depth_clear_enable    = clear_actions.vulkan_clear;
 		r->suppress_depth_write  = clear_actions.suppress_depth_write;
+		r->stencil_clear_enable  = r->stencil_clear_enable || DepthMetaClearCoversStencil(*r, meta_clear_event);
 	}
 	if (r->update_compression_state)
 	{

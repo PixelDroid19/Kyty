@@ -484,8 +484,9 @@ inline bool GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType existing_type, 
 // SB/RT IsContainedWithin (surface sits inside the new VB range) and
 // SB/RT Crosses — link all surface directions rather than EXIT.
 // A later scene-load capture has a large VB crossing active depth and stencil
-// planes plus a co-located SB/RT pair. Link only the observed DS Crosses form;
-// reclaiming the active depth target would discard guest GPU state.
+// planes plus a co-located SB/RT pair, and a recycled range has a small VB
+// inside an active depth target. Link both observed DS forms; reclaiming the
+// active depth target would discard guest GPU state.
 inline bool GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                     GpuMemoryObjectType incoming_type)
 {
@@ -495,7 +496,7 @@ inline bool GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType existing
 	}
 	if (existing_type == GpuMemoryObjectType::DepthStencilBuffer)
 	{
-		return relation == GpuMemoryOverlapType::Crosses;
+		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::Contains;
 	}
 	if (existing_type != GpuMemoryObjectType::StorageBuffer && existing_type != GpuMemoryObjectType::RenderTexture &&
 	    existing_type != GpuMemoryObjectType::Texture && existing_type != GpuMemoryObjectType::StorageTexture)
@@ -1273,6 +1274,9 @@ Vector<GpuMemoryObject> GpuMemoryFindEqualObjectsForSubmission(CommandBuffer* bu
 Vector<GpuMemoryObject> GpuMemoryFindObjectsWithRangeForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type);
 bool                    GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
 bool                    GpuMemoryQueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
+// Marks the storage buffer exactly covering a depth target's HTILE as its metadata when the HTILE sits in another
+// guest mapping than the depth plane, where object creation, which searches one mapping, cannot link the two.
+void                    GpuMemoryLinkDepthMetaStorage(uint64_t depth_vaddr, uint64_t depth_size, uint64_t htile_addr, uint64_t htile_size);
 
 struct GpuMemoryObjectDescription
 {

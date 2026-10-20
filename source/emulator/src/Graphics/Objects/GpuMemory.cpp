@@ -879,6 +879,14 @@ bool GpuMemoryQueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRange
 	return g_gpu_memory != nullptr && g_gpu_memory->QueryRangeProvenance(vaddr, size, out);
 }
 
+void GpuMemoryLinkDepthMetaStorage(uint64_t depth_vaddr, uint64_t depth_size, uint64_t htile_addr, uint64_t htile_size)
+{
+	if (g_gpu_memory != nullptr)
+	{
+		g_gpu_memory->LinkDepthMetaStorage(depth_vaddr, depth_size, htile_addr, htile_size);
+	}
+}
+
 bool GpuMemoryDescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out)
 {
 	if (out == nullptr || obj == nullptr || size == 0)

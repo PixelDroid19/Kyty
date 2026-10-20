@@ -835,6 +835,7 @@ struct RenderDepthInfo
 	bool                        stencil_clear_enable     = false;
 	uint8_t                     stencil_clear_value      = 0;
 	bool                        stencil_plane            = false;
+	bool                        htile_stencil            = false;
 	bool                        stencil_test_enable      = false;
 	bool                        sampled                  = false;
 	bool                        update_compression_state = false;
