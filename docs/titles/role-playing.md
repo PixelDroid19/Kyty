@@ -4,6 +4,34 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: Standard256B UI images ignore the descriptor pitch (2026-10-20)
+
+Intel A770, strict 180 s movement runs on 1d8bc4e5 plus the change below,
+with temporary diagnostics (removed).
+
+- **Symptom.** The dialogue box showed brown and red blocks over its frame
+  and name plate, and speech bubbles over characters were blank.
+- **Localization.** A pixel-shader census from presented frame 1900 found
+  the UI draws: alpha-blended nine-slice quads sampling single-level BC1/BC3
+  images in tile mode 1 (`SW_256B_S`): 156x72 with descriptor pitch 192 (BC3)
+  or 256 (BC1), and 84x84 with pitch 128. These pitches equal the width
+  aligned to a 4 KB block, not to a 256-byte block.
+- **Evidence.** Raw guest bytes of four 156x72 images were dumped and
+  detiled offline. With 10 block columns per row (width aligned to the
+  256-byte block) every image decodes to coherent ornaments; with the
+  12 columns implied by pitch 192 the ornaments break into 16-pixel bands.
+  In all four images every byte beyond the width-derived footprint is zero.
+- **Fix.** Single-level, non-array tile-1 images took the linear row-pitch
+  rule (word4 pitch). They now use the canonical tiled pitch, like tile 5
+  and tile-1 arrays and mip chains; word4 pitch applies to linear images
+  only.
+- **Result.** The 180 s run completes; the dialogue capture (frame 2266)
+  shows an intact frame, name plate and advance marker. Bubble icons over
+  characters still need a capture in which they are on screen.
+- **Excluded.** Tile-5 BC mip chains: 32 dumped 128x128 chains (BC1, BC3,
+  BC4, BC5) decode coherently at every level, including the tail. Component
+  swizzles of the sampled UI and sprite formats match their formats.
+
 ## Role-playing title: render-target storage aliases and a clean movement run (2026-10-20)
 
 Intel A770, strict 180 s movement runs on the synced tree.

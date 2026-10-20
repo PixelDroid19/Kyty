@@ -3504,11 +3504,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		{
 			pitch = TileAlign64KBPitch(width, ShaderGen5TextureBytesPerElement(r.Format()));
 			if (pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch == 0u condition ignored (continuing)\n"); }
-		} else if (!three_dimensional && (tile == 5u || (tile == 1u && (arrayed_2d || r.MaxMip() != 0u))))
+		} else if (!three_dimensional && (tile == 5u || tile == 1u))
 		{
-			// Standard4KB resources and Standard256B arrays and mip chains use a
-			// canonical tiled pitch. Array word4 holds the last slice, not a row
-			// pitch; the linear row rule must not expand the tiled allocation.
+			// Standard4KB and Standard256B resources use a canonical tiled pitch.
+			// The word4 row pitch applies to linear resources only: a 156-wide
+			// BC3 Standard256B image declares pitch 192 yet stores 10 block
+			// columns, and array word4 holds the last slice, not a row pitch.
 			pitch = width;
 		} else
 		{
