@@ -4,6 +4,73 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: story exposure and colour grading (2026-10-20)
+
+Intel A770, strict runs of the story route on 7ec32b45..50adfe84 plus
+temporary diagnostics (removed).
+
+- **Symptom.** Story scenes are dark and tinted. Every scene pixel has one
+  channel at zero and the other two equal: (0, v, v) on the ship, (v, 0, v)
+  in the night town. The HUD keeps its colours.
+- **Exposure inputs (fixed, 7ec32b45).** The exposure histogram pass (pixel
+  shader writing a 16x2 RGBA32F target) has `SPI_PS_INPUT_ENA` 0x220:
+  linear centre and `POS_Y_FLOAT` only. Its row test reads `v2`. The native
+  prolog filled `v2`/`v3` only when both X and Y were enabled, so `v2` was
+  an uninitialised variable. A dump of the 16x2 target and the three 1x1
+  exposure targets read the same constants every frame (1.414, 1.414,
+  0.236, 0.707). Two more pixel shaders had position masks 0x102 and 0x202.
+  Now each enabled position field 8-11 stores its `gl_FragCoord` component
+  (x and y scaled to guest pixels) into its own register. After the fix
+  the histogram row holds per-bin values and the exposure value changes
+  from frame to frame (0.0073, 0.0066, 0.0071 at presents 4001 and 4501).
+  The brightness of the presented frame did not change: the exposure was
+  wrong, but it is not the cause of the dark tinted image.
+- **Colour grading volume (open, cause localized).** The last scene pass
+  before the display copy encodes colour with a log curve (scale 1/14,
+  offset 0.6107) and samples a 32x32x32 volume at `x * 31/32 + 1/64`.
+  - The only 32x32x32 volume bound in these runs is a format 50
+    (2_10_10_10) mode-27 volume. It is uploaded once, at present 2, from
+    guest memory that is all zero, and never again.
+  - No RenderTexture, StorageTexture or StorageBuffer is created over its
+    range, and no draw has a colour target at its base, so no tracked GPU
+    write ever fills it.
+  - Every run reports skipped draws with reason `unsupported_ge_state`
+    (more than 1,000 by 47 s). The first, at 18.7 s: stages 0x2030, ES and
+    merged GS back, NGG, `max_vert_out` 3, triangle-strip output. The
+    renderer does not run merged ES+GS programs (see the robot platformer's
+    skipped geometry-shader draws).
+  - Hypothesis, not yet proven: the volume is written by a layered ES+GS
+    draw (one primitive per slice) that the renderer skips. Not yet shown:
+    that the tonemap pass binds this volume, and that a skipped draw
+    targets its address. A zero volume alone would give a near-black
+    image, so the tint needs that check too.
+  - Next: record the skipped draw's colour target and layer setup, then
+    implement merged ES+GS execution.
+- **Stops removed (not seen again after the fix).**
+  - b3fa459b: a 16x1020 RGBA16F mode-27 storage view of 0x100000 bytes
+    over an idle 0x90000 StorageBuffer whose writes were already written
+    back stopped on `StorageBuffer - IsContainedWithin - StorageTexture`.
+    Such a buffer holds the guest bytes, so the storage image seeds from
+    guest memory and links to it.
+  - 50adfe84: a 512x512 BC3 texture (tile 9) over a 512x512 D16 target at
+    the same address and size stopped on `DepthStencilBuffer - Equals -
+    Texture`. The texture uploads guest bytes and links to the depth
+    object. Open: the texture object is 0x80000 bytes. The standard 64 KiB
+    layout of a one-level 512x512 BC3 texture is 0x40000, and the reason
+    for the difference is unknown.
+- **Other open items in these runs.**
+  - `!create_all_the_same` at 0x2109b90000 (size 0x120000), 127 s, one run.
+  - Device lost (`vkWaitSemaphores` result -4), 103 s, one run of six.
+  - A guest write to address 0 (status 139, rip in guest code) at 138 s,
+    one run.
+- **Regression sweep.** The eight-title sweep on the same build reached the
+  same states as the previous sweep. One run of the well platformer
+  stopped at 77 s: a pixel shader (crc d0354e07) failed SPIR-V validation
+  ("branches to the selection construct, but not to the selection
+  header"). Four more runs, one with an empty SPIR-V cache, did not reach
+  that shader. Not attributed. The change only touches the pixel prolog,
+  not control flow.
+
 ## Role-playing title: world vertex inputs read the wrong data (2026-10-20)
 
 - **Symptom.** At story start the world drew as large stretched triangles

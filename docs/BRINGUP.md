@@ -18,6 +18,7 @@ Record a new finding in the file of the title that exposed it; a finding that
 spans titles goes in `docs/bringup/cross-title.md`.
 
 - [Role-playing title](titles/role-playing.md)
+  - Role-playing title: story exposure and colour grading (2026-10-20)
   - Role-playing title: world vertex inputs read the wrong data (2026-10-20)
   - Role-playing title: the environment cube read its cleared storage alias (2026-10-20)
   - Role-playing title: mipmapped storage arrays and cube chains (2026-10-19)
