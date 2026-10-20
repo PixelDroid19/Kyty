@@ -2182,6 +2182,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			bool        multi_storage_texture_over_caches = info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
 			bool        storage_links_render_target       = false;
 			bool        storage_links_materialized        = false;
+			bool        storage_links_cache               = false;
 			for (const auto& obj: others)
 			{
 				if (!multi_storage_texture_over_caches)
@@ -2203,6 +2204,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 				if (GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type))
 				{
+					storage_links_cache = true;
 					continue;
 				}
 				if (GpuMemoryAllowsStorageTextureOverMaterializedTexture(o.object.type, obj.relation, o.content_origin, info.type))
@@ -2212,10 +2214,28 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 				multi_storage_texture_over_caches = links_cpu_texture(h, obj);
 			}
-			// The uniform path below has no relation for these parents, so uniform
-			// cache sets link here too (captured: four small CPU-uploaded read-only
-			// StorageBuffers inside a new 0x100000 storage image).
-			if ((storage_links_materialized && !storage_links_render_target) ||
+			// The uniform path below has no relation for these parents, so a
+			// storage image over a set of CPU-uploaded read-only StorageBuffers
+			// links them here (captured: several small buffers inside a new
+			// 0x100000 volume). Guest memory already holds the current bytes.
+			if (storage_links_cache && !storage_links_materialized && !storage_links_render_target)
+			{
+				if (!storage_reclaim_vertex_ids.IsEmpty())
+				{
+					Vector<OverlappedBlock> keep;
+					for (const auto& obj: others)
+					{
+						if (!std::any_of(storage_reclaim_vertex_ids.begin(), storage_reclaim_vertex_ids.end(),
+						                 [&obj](int id) { return id == obj.object_id; }))
+						{
+							keep.Add(obj);
+						}
+					}
+					selective_reclaim_ids = storage_reclaim_vertex_ids;
+					others                = keep;
+				}
+				overlap = true;
+			} else if ((storage_links_materialized && !storage_links_render_target) ||
 			    storage_reclaim_vertex_ids.Size() == others.Size())
 			{
 				multi_storage_texture_over_caches = false;
