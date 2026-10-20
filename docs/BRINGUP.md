@@ -9,6 +9,460 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Role-playing title: world vertex inputs read the wrong data (2026-10-20)
+
+- **Symptom.** At story start the world drew as large stretched triangles
+  over a dark red frame. The normals target held position-like gradients and
+  the frame ran at about 9 fps.
+- **Evidence (strict Intel runs, temporary diagnostics removed).**
+  - The world vertex program reads six streams with `BUFFER_LOAD_FORMAT`.
+    Position and an instance row come through V#s it loads from the
+    attribute buffer table, with the format and DST_SEL taken from the
+    attribute table at run time. Tangent frames (format 57, R8G8B8A8_SNORM,
+    stride 4, two per vertex) and two UV sets (format 29) come through
+    user-data V#s, at computed indices (`2*v+1`, `2*v`, `s1*v+k`).
+  - A CPU read of the guest data at the draw (index buffer, position stream,
+    instance row, per-draw constants) found every index in range
+    (max 1298 of 1299 records), finite positions and an orthogonal world
+    matrix. The guest data was sane.
+  - The translated program read every one of the six loads from the same
+    vertex attribute (`%attr0`, the position stream): the fetch detector
+    typed any format load as an attribute fetch and only logged when its
+    operands did not match the pattern. Register roles also survived later
+    writes, so a load whose index register had been overwritten still
+    counted as indexed by the vertex id.
+- **Contract implemented.**
+  - A format load is an attribute fetch only when its index is the
+    vertex/instance select (`v_cndmask v8, v5`), its V# was loaded from the
+    buffer table at an attribute-derived offset, and its SOFFSET comes from
+    the attribute table. Any other format load stays a buffer load through
+    the live V# path. A register loses its role when any instruction writes
+    it (`DetectVertexFetchSemantics`).
+  - Gen5 `BUFFER_LOAD_FORMAT_*` decodes the element in the format of its
+    V# (RDNA2 ISA table 31: data format and DST_SEL come from the resource;
+    table 47: the format list). Each channel is converted to its number
+    type (UNORM, SNORM with a -1 clamp, USCALED/SSCALED, UINT/SINT, FLOAT16,
+    11- and 10-bit floats), then DST_SEL is applied: SEL_0 gives 0, SEL_1
+    gives 1 (integer 1 for UINT/SINT formats, 1.0 otherwise), a channel the
+    format lacks reads 0. Out-of-range elements read 0 (SEL_1 still 1).
+    `ShaderGen5BufferFormat` holds the table; the SPIR-V helpers are in
+    `ShaderSpirvBufferFormat.cpp`, used by bound and runtime-address loads.
+  - Packed formats name channels from the high bits, so X is the low field:
+    format 36 (10_11_11) matches the B10G11R11 image format and 50
+    (2_10_10_10) matches A2B10G10R10 (`VulkanImageFormat.cpp`). Formats
+    43-49 follow the same convention; no title has been seen using them.
+  - The integer value of SEL_1 on UINT/SINT formats follows the ISA's
+    integer-return rule; no live trace has confirmed it.
+  - `MTBUF` and the legacy (Gen4) typed helpers are unchanged: their format
+    numbers are dfmt/nfmt pairs (36 = 32_UINT, 39 = 32_FLOAT), not this
+    table.
+- **Unit tests.** `Gen5BufferFormatsCoverIsaTableAndAgreeWithVertexInput`,
+  `FormatLoadsDecodeDescriptorFormatOnBothPaths`,
+  `OnlyAttributeTableFormatLoadsAreVertexFetches`.
+- **Instance streams (the cause of the stretched triangles).** With the
+  loads above decoded, a per-shader dump of the normals target still showed
+  stretched triangles from two world vertex programs.
+  - Bit 26 of a Gen5 vertex attribute word selects the instance index; the
+    program itself picks `v8` (instance id) or `v5` (vertex id) with a
+    `v_cndmask` on that bit. A temporary attribute log (removed) showed
+    dozens of world programs with instance rows (format 77, four
+    components) and an opaque depth prepass with a one-component instance
+    attribute.
+  - `ShaderParseAttrib` ignored the bit and the Vulkan layout stepped every
+    binding per vertex, so instance matrix rows came from per-vertex
+    records.
+  - Contract: an attribute with the bit set is an instance stream. Streams
+    of different rates never share a binding, the binding steps per
+    instance, and it fetches records `[0, first_instance + instance_count)`
+    with no vertex offset. Vertex-record limits ignore instance streams, and
+    the vertex shader identity includes the rate.
+  - Unit test: `InstanceAttributeStepsInItsOwnBinding`.
+- **Result.** The next strict run's normals target at frame 4600 showed the
+  temple, stairs and sprites with no stretched triangles, and the story
+  scene runs at about 15 fps (from 9). The frame is still dark: open, see
+  below and "the environment cube read its cleared storage alias".
+- **Open: intermittent stops in the story load window (frames 1300-2600).**
+  Each one appears in some strict runs and not in others with the same
+  binary and input route. They are more frequent in runs slowed by
+  per-draw diagnostics.
+  - `unstable or unreadable Gen5 EUD snapshot: dwords=16`
+    (`Shader.cpp`, the snapshot loop in the resource parse) at frame 2530:
+    two reads of the EUD table differed twice, or the read failed. The
+    message now names which (`unstable` or `unreadable`) and gives the table
+    address and pointer register.
+  - `shader emitter missing` for `s_load_dwordx4 s[32:35], s[28:29], 320`
+    at pc 4 of pixel shader crc `513ca09c` (`ShaderSpirvGenerator.cpp`,
+    the emitter-missing exit) at frame 2196: `recompile_sload_from_extended`
+    found no mapping for EUD dwords 80-83.
+  - A sampler bound with words `e2000005 e1000005 e1000005 e0000005`
+    (`GraphicsRenderPipeline.cpp`, the sampler-mode exit) at frame 1331.
+    These words do not look like an S#.
+  - Suggested direction: all three read a descriptor table that the guest
+    may be rewriting. Check whether the command processor reads a table
+    after the guest has been told that the draw which used it has
+    completed (label or EOP ordering) before relaxing any check.
+
+## Role-playing title: the environment cube read its cleared storage alias (2026-10-20)
+
+- **Symptom.** The story scene's reflection cube was constant: the tile-9
+  cube the scene samples held one value in every texel, and the GGX
+  prefilter wrote `(0, 10000, 0, 0)`. `10000` is `1/max(x, 1e-4)` with
+  `x = 0`, the filter's response to an all-zero source.
+- **Capture chain (strict Intel runs, temporary diagnostics removed).**
+  - A compute pass clears two 128x128 format-71 cubes (tile 27, eight
+    levels, six slices) through storage views to `(0, 10000, 0, 0)`.
+  - A pixel shader copies a 32x32 guest cube into level 0 of each face of
+    the first cube (alpha 1, mean about 0.13). A second one generates
+    levels 1-7 from the same cube with LZ sampling. A third adds a constant
+    pass. A fourth prefilters into the second cube (`ImageSampleL`, lod > 0).
+  - A compute pass copies the second cube from tile 27 to tile 9, and the
+    scene samples the tile-9 cube.
+- **Evidence.**
+  - Every capture, mip and filter draw targets the final six-slice target at
+    the right slice and level (excluded: the capture draw missing face 0;
+    the mip draws targeting a retired prefix image).
+  - The mip and filter shaders sampled the storage image the clear wrote,
+    not the target the draws had filled. So level 1 read back the clear
+    value and the filter read zero.
+  - The cube's range also held a stale 708x295 render target (format 44,
+    size 0x120000) with the same address and size. `GpuMemory::FindFast`
+    returns only the first exact object, so the exact render-target lookup
+    returned that stale target alone. The alias picker rejected it, and the
+    bind fell through to the storage image.
+- **Contract implemented.** An exact render-target lookup returns every
+  exact alias of the range (`FindRenderTexture` uses
+  `GpuMemoryFindEqualObjectsForSubmission`, as `FindLatestStorageTexture`
+  already did), and callers choose among them. DCC decompression, which
+  needs one backing, now takes the single alias that matches the guest
+  extent and format and stops when none or several match.
+- **Layered mip-chained targets.** The cube is a six-slice target whose
+  slices each hold a whole mip chain.
+  - The slice pitch is the chain size (`DescribeRenderColorMipChain` returns
+    it to `ResolveRenderTextureArrayView`), not the level-0 size.
+  - Mip-chained targets may have several slices. The guest fill detiles
+    each slice's chain on its own, and copying a target into a grown one
+    copies every level both images hold.
+  - Unit test: `RenderTarget64KBChainIsTheArraySlicePitch`.
+- **Result.** In the dumps taken after the copy pass, level 0 of face 0 of
+  the filtered cube and of the tile-9 copy match: mean `0.135 / 0.138 /
+  0.155`, alpha 1, no `10000`. The final story frame did not change: dark
+  teal silhouettes, the same mean as before. The dark scene therefore has
+  another cause and stays open.
+- **Open: a stale boot render target blocks a recycled range.** The 708x295
+  target is the first object the title creates (id 1). It stays linked
+  after the guest reuses its range for a tile-9 texture and the cube.
+  - Twice on 2026-10-20 the one-slice cube storage view stopped on
+    `!create_all_the_same` (`GpuMemoryCreate.cpp:2507`). The parents were
+    that target (Equals, last device write at counter 866479) and a
+    0x160000 tile-9 texture created later (Contains, origin Unknown, write
+    time 2426327).
+  - The texture skipped its guest upload because the stale target counted
+    as a live cover (`GraphicsRenderBind.cpp`, `live_cover`). It therefore
+    holds neither guest bytes nor the target's content.
+  - Write-back invalidation does not reach the target: storage images are
+    not written back, and GPU-owned targets are skipped there.
+  - Suggested direction: when a device write through a linked view covers
+    a render target's whole range, mark the target stale. A stale target
+    should count neither as a live cover nor as a creation parent. This
+    changes render-target lifetime for every title and needs its own sweep.
+- **Open: intermittent device loss.** Five of twelve story runs on
+  2026-10-20 lost the device (`vkQueueSubmit`, `vkWaitForFences` or
+  `vkWaitSemaphores` result -4; the kernel driver logs a job timeout). Two
+  of them were at 105-115 s, before the cube chain ever runs, and three at
+  221-227 s. Four runs held the whole 300 s. The losses occur with and
+  without the lookup change, so the cube chain is not their cause.
+
+## Role-playing title: mipmapped storage arrays and cube chains (2026-10-19)
+
+- **Symptom.** At story start the traveller role-playing title stopped on
+  `unknown relation: StorageTexture - Contains - StorageTexture`, then, once
+  that passed, on `Unsupported Gen5 2D-array layout: format=179 32x32
+  levels=6 tile=1 layers=6 type=11`.
+- **Evidence (strict Intel runs, temporary diagnostic removed).**
+  - The live backing is a 128x128 format-71 array: eight levels, tile 27,
+    six slices of 0x30000 bytes (a cube).
+  - Compute passes at frames 1116 and 3433 store into it through one-slice
+    descriptors: `base_level` 1..7 for each `base_array` 0..5, then sample
+    the whole cube. This is per-face mip generation.
+  - Array storage images were created with one host level, and the
+    descriptor window was the fixed `VIEW_STORAGE_ARRAY` slot. A one-slice,
+    level-1 descriptor had no matching view.
+- **Contract implemented.**
+  - Gen5 arrays and cubes on tiles 5, 9 and 27 get a storage backing with the
+    whole chain (`StorageTextureUsesMipBacking`). Upload covers every level
+    both the layout and the image hold.
+  - A storage descriptor of a live array is a view of it: its slice window
+    (`StorageTextureGetArrayViewRanges`) at its base level, one level. The
+    view comes from a bounded per-image cache freed with the image
+    (`StorageTextureResolveArrayStorageView`,
+    `VulkanGetOrCreateCachedImageView`).
+  - A smaller descriptor at the base of a live array with the same format,
+    pitch, extent, chain, tile and swizzle reuses that array
+    (`StorageTextureCanReuseLargerBacking`) instead of creating a second
+    image.
+  - Standard256B (tile 1) chains in arrays and cubes: every slice stores its
+    whole chain, smallest level first, with no tail; BC formats included
+    (`Gen5GetTextureArrayLayout`, `Gen5DetileStandard256BTextureMipChain`).
+- **Unit tests.** `StorageTextureArrayDescriptorsAreViewsOfTheLiveArray`,
+  `StorageTextureArrayStorageViewSelectsDescriptorWindowAndLevel`,
+  `Standard256BMipChainArrayStoresOneChainPerSlice`.
+- **Next stop: a layered target across two guest mappings.** A 32x32
+  RGBA16F cube target (tile 27, six levels, six slices of 0x10000) stopped
+  at `layered render-target backing is not fully allocated` while drawing
+  slice 5. The registered heap at its base covered 0x50000 of 0x60000; the
+  next 0x10000 was a separate, adjacent registration.
+  - A temporary mapping log (removed) recorded 14417 GPU mapping
+    registrations in 240 s and no release: 11793 of them are 64 KiB, and
+    13590 adjacent pairs abut exactly. The guest maps GPU memory in small
+    contiguous pieces, so one resource may span several.
+  - Fix: the layered-target check asks whether adjacent registrations cover
+    the whole backing (`GpuMemoryGetMappedRangePrefix`), not whether one
+    heap does. Unit test: `GpuMemoryMappedPrefixSpansAdjacentAllocations`.
+  - Found, not fixed: `GpuMemory::GetHeapId` (`GpuMemory.cpp:308`) files an
+    object that spans mappings under its first heap only. Overlap queries
+    rooted in a later heap do not see it, so a view at base+0x50000 of that
+    cube would not link to it. A design that coalesces adjacent mappings
+    needs a split-on-unmap path; no release was observed to exercise one.
+- **Storage image inside a CPU-uploaded storage buffer.** The 128x128
+  eight-level view at the base of a recycled range stopped on
+  `!create_all_the_same` (also seen on 2026-10-18, before this work). Its
+  parents: a live 708x295 target (Contains), a read-only CPU-uploaded
+  0x1fa400 storage buffer (Contains) and read-only vertex buffers (inside
+  and crossing). The storage buffer had no rule. It only caches guest bytes,
+  so it is linked like a sampled texture
+  (`GpuMemoryAllowsStorageTextureOverStorageCache`), alone or with the
+  other parents.
+- **Image read through a buffer-typed T# (inexact contract).** Stops at
+  random frames on `shader emitter missing ... ImageSample* ... tex_index=-1`
+  blocked about half of the strict runs, with a different shader each time.
+  - Evidence. For one stop the T# user SGPRs held `00000600 00fff000
+    06f00000 00000000` twice: two sampler descriptors (word 1 is MAX_LOD
+    0xfff), whose dword 3 type nibble is 0, a buffer encoding.
+  - A temporary packet ring (removed) recorded the gfx packets and the
+    SH-indirect pairs before the stop. The pixel shader bind did not change
+    before the failing draw. Both SH-indirect blocks were applied pair for
+    pair (6 and 12 entries, as their headers state). No other pixel-shader
+    update appeared in the window. The submit snapshot already captures
+    those blocks. So the guest itself left user data from another layout
+    under an unchanged pixel shader.
+  - The ISA defines only an all-zero resource as unbound. A descriptor of
+    buffer type under an image instruction is undefined there. Two
+    independent implementations bind a null image for a T# whose address is
+    0, whose format is invalid, or whose base level is out of range. Neither
+    checks the type nibble, so they only suggest that an unusable T# reads
+    as unbound.
+  - Contract: an image read whose T# is still the entry user data and holds
+    no image descriptor reads zero, like an all-zero T#: every dword zero, or
+    a type nibble of 0-7. A T# of image type that fails to resolve still
+    stops. A T# loaded from memory is covered too; see "Descriptors loaded
+    from memory that bind nothing" below.
+  - The shader identity already carries the zero-image set, so a later draw
+    of the same shader with a real image compiles its own variant.
+  - Each non-zero application raises a bounded `image_read_non_image` agent
+    event (crc, register, words 0 and 3), so a wrong application stays
+    visible.
+  - Unit test: the type cases in `SamplesThroughUnboundDescriptorReturnZero`.
+- **Export to a target the CB does not write.** A second intermittent stop
+  was `shader emitter missing ... Exp ... mrt_color0 ... compr` on the
+  UINT16_ABGR export of the copy into an R16_UINT target.
+  - The failing compile had `CB_TARGET_MASK` and `CB_SHADER_MASK` both 0.
+    MRT0 carried SPI_SHADER_COL_FORMAT 7 (UINT16_ABGR) and a leftover FLOAT
+    number type in CB_COLOR0_INFO. The good compiles of the same shader had
+    mask 0xf and a UINT target.
+  - The CB writes a target only through the channels both masks enable, and
+    the draw already masks the attachment write the same way
+    (`ResolveColorWriteMask`). `ShaderGetInputInfoPS` now gives every other
+    target export mode Zero, so the shader drops an export the hardware
+    discards. No visible result changes; the stop is gone.
+- **Dropped indirect register pairs are visible.** CX, SH and UC indirect
+  blocks drop pairs outside their bank. That drop was a debug log, never
+  seen in Silent runs. It is now a bounded `indirect_register_dropped` agent
+  event.
+- **Cube storage view over other recycled ranges.** About one strict run in
+  ten stopped at story entry while the same one-slice storage view of the
+  128x128 cube (params `4653056 128 ... 4012 13`, varying base level and
+  slice) was created over a recycled range.
+  - 8 of 133 runs stopped on `!create_all_the_same`, 6 on `unknown relation:
+    Texture - Contains - StorageTexture` with one CPU-uploaded 0x1e0000
+    texture as the only parent.
+  - Parent mixes captured since (`create_dbg_parents`, now with each
+    parent's device write time): the CPU-uploaded storage buffer (Contains)
+    with 707x294 and 708x295 targets (Equals) and a CPU-uploaded texture
+    (Equals) plus 66 vertex buffers; the storage buffer with two targets
+    (Contains) and a texture materialized from one of them (Contains); a
+    CPU-uploaded texture (Contains) with an earlier storage view of the
+    first slice (IsContainedWithin, a cube growing from one face to two).
+  - Contract: a CPU-uploaded texture caches guest bytes like the storage
+    buffer, so a storage view inside it or equal to it is linked
+    (`GpuMemoryAllowsStorageTextureInsideCpuTexture`, Contains or Equals).
+    The link applies only while the texture holds no device write since its
+    last upload (`device_write_time < gpu_update_time`, both stamped from
+    the same strictly increasing counter) and has no pending write-back;
+    otherwise the GPU bytes win and the view is not linked. The same rule
+    is used in the single-parent path, the multi-parent path and the
+    storage-growth path, so all three accept the same mixes.
+  - A storage view inside a texture materialized from a target is linked
+    for Contains as well as Equals
+    (`GpuMemoryAllowsStorageTextureOverMaterializedTexture`): the
+    materialized texture already follows its target's GPU bytes.
+  - Unit test: the Equals and alias-materialization cases in
+    `ReclaimsReadOnlyVertexBuffersUnderStorageTexture`.
+  - Result: three 270 s story runs after the change reached the story
+    without the stop. One clean run proves little at a one-in-ten rate; the
+    route is repeated in the sweep below.
+
+## Role-playing title: selection screen, story entry and stop fixes (2026-10-19/20)
+
+Each fix below came from a strict Intel run of the role-playing title on the
+traveller-selection route. Temporary diagnostics are removed.
+
+- **NULL-target discard tail.** A dithered fade shader produced SPIR-V that
+  failed validation when the menu opened. Its exit block is `exec = 0`,
+  `exp null vm done`, `s_endpgm`, and `IsDiscardInstruction` only recognized
+  the null-MRT form of that tail. The branch into it therefore was not
+  emitted as a terminating arm. The NULL target carries only the valid mask,
+  so it is now the same tail. Unit test (fails before the change, with
+  validation on): `NullTargetDiscardTailInsideSkipRegionIsTerminatingArm`.
+- **Stencil reference.** `get_stencil_op` returned the op value
+  (STENCILOPVAL) as the Vulkan reference for ADD/SUB clamp and wrap and for
+  INVERT. Vulkan's increment, decrement and invert ops never read the
+  reference, so that value replaced the compare value (STENCILTESTVAL) for
+  the whole face. These ops no longer claim the reference. Open
+  (pre-existing): ONES replaces with 0xff, and REPLACE_OP with an op value
+  other than the test value, still displace the compare value; Vulkan has
+  one reference per face. In this title the ops that use the reference
+  appear only with compare ALWAYS.
+- **Sampler W address mode (CLAMP_Z).** A sampler with `clamp=0,0,4` (W
+  mode ClampHalfBorder, which has no host mode) stopped the run at frame
+  1086 while it sampled a 2D-array view. The W mode wraps the R coordinate
+  of 3D views only; 2D views have none, and array and cube views select a
+  layer or face without it. The sampler key now records whether any paired
+  view is 3D (`BindSamplerUsesRCoordinate`), and the W mode is resolved only
+  then. The next run passed frame 1086. Unit test:
+  `SamplerZClampAppliesOnlyToVolumeViews`. The coordinate-lowering stop now
+  prints the four sampler words.
+- **Pixel-shader stage elision.** An opaque depth prepass (target mask 0,
+  shader mask 0, no kill, no Z export) inherited a pixel shader from an
+  earlier 1024x1024 pass, and that shader samples the depth target the
+  prepass writes. It stopped on `same-draw depth sampling conflicts with
+  attachment writes`. All 40 prepass draws of a later run had that
+  inherited shader. A shader with no unmasked color target, no depth,
+  stencil or mask export, no kill, no memory effect and no alpha-to-mask is
+  not observable; depth and stencil tests run without it. So
+  `PixelShaderStageRequired` no longer counts depth/stencil enable or an
+  export format alone. `DB_ALPHA_TO_MASK` is now decoded, because
+  alpha-to-coverage of the MRT0 export does need the shader. The next run
+  held 232 s with no stop. Unit test:
+  `RequiresPixelShaderOnlyForObservableFragmentWork`. The depth-conflict
+  stop now names the sampling stage, slot, operation and address.
+- **HTILE clear of a combined depth/stencil target.** The selection map draw
+  (depth GEQUAL, no depth write) passed no fragment (`any_passed=0` from an
+  occlusion query on the draw). The guest clears the 4K D32S8 HTILE with the
+  generic uniform-fill kernel (word 0). That clear was not applied, for
+  three reasons:
+  - The HTILE storage buffer was cut at the end of its first mapping
+    (`655360` bytes requested, `589824` mapped in one registration). Storage
+    buffers now use `GpuMemoryGetMappedRangePrefix`, like layered targets.
+  - The HTILE sits in another guest mapping than the depth plane, and object
+    creation searches one mapping, so the buffer was never marked as the
+    target's metadata. `GpuMemoryLinkDepthMetaStorage` marks the storage
+    buffer that exactly covers the HTILE when the depth target is
+    materialized.
+  - A zero HTILE word with stencil tiled in HTILE (no
+    `TILE_STENCIL_DISABLE`) means depth = `DB_DEPTH_CLEAR` and stencil =
+    `DB_STENCIL_CLEAR` (SMem 0). The translation required the draw to clear
+    stencil to zero as well and otherwise dropped the fill. It now clears
+    both planes of the whole image whatever the draw's clear bits say.
+  - Result: `any_passed=1`, the clear is published and consumed. The route
+    moved past the map before a capture of it was taken.
+  - Also seen there: a small vertex buffer inside the active depth target of
+    a recycled range stopped on `DepthStencilBuffer - Contains -
+    VertexBuffer`. It is linked like the Crosses form
+    (`GpuMemoryAllowsVertexContainedInSurface`).
+- **Descriptors loaded from memory that bind nothing.** An intermittent stop
+  on `unallocated gpu object range` (frames 1084-1096, before the map
+  draw) came from a T# that a shader loads from extended user data with an
+  S_LOAD, where those words held a buffer descriptor: read as a T#, its base
+  became a garbage address.
+  - The unbound-T# contract above now covers loaded descriptors. A
+    read-only T# of buffer type loaded by an S_LOAD reads zero for the reads
+    up to its last consumer, and an S# load whose every consumer reads such
+    a T# binds nothing either.
+  - Those S_LOADs write zero to their destination SGPRs instead of reading
+    guest memory (`ShaderZeroDescriptorLoads`). The first version dropped
+    the load and stopped on `shader emitter missing ... SLoadDwordx8`.
+  - The zero-image set holds 32 entries (from 16), and the zero-load set two
+    per image: a shader stopped on `shader zero descriptor load capacity
+    exceeded: count=16`.
+  - The shader identity includes the load sites, so a draw whose table holds
+    a real image compiles its own variant. The stop did not recur in five
+    later runs.
+- **Gen5 64 KiB block-compressed arrays.** A one-layer tile-9 BC array view
+  (`format=177 128x128 levels=8 tile=9 layers=1`) stopped on `Unsupported
+  Gen5 2D-array layout`. `Gen5GetTextureArrayLayout` excluded BC formats
+  from the 64 KiB chain; the 2D path already lays tile-9 BC chains out that
+  way, so arrays now do too. Unit test:
+  `Standard64KBBcArraySliceMatchesTwoDimensionalChain`.
+- **Storage growth and cache sets on recycled ranges.**
+  - A one-slice cube view growing over its prefix may also overlap a live
+    render target it links (a view inside one, or a redescription of its
+    bytes that no render-alias copy applies to), CPU-uploaded caches,
+    a texture materialized from that target, and read-only vertex buffers.
+    The growth path accepts those parents with the same rules as a storage
+    image over caches. The prefix image may link only parents of the new
+    view.
+  - Four small CPU-uploaded read-only storage buffers inside a new 0x100000
+    storage image stopped on `unknown relation: StorageBuffer -
+    IsContainedWithin - StorageTexture`: a set made only of caches was
+    excluded from the cache rule when all parents had the same relation. It
+    is now linked like any other cache set.
+- **DCC clears through constant and loaded fills.** See
+  `docs/graphics-compute-uniform-color-fill.md`. Unit tests:
+  `ComputeUniformBufferFillRecognizesConstantStore`,
+  `ComputeUniformBufferFillRecognizesLoadedStore`.
+- **Diagnostics.** `shader emitter missing` now prints the shader crc.
+- **Open.** A sampler with `clamp=7,7,7` and unnormalized coordinates
+  (words `ffffffff 00000000 00000000 00000000` in one run) stopped twice at
+  `unsupported sampler coordinate lowering`. The words do not look like an
+  S#; it belongs with the descriptor-table stops listed under "world vertex
+  inputs".
+
+## Regression sweep for the 2026-10-19/20 role-playing changes (2026-10-20)
+
+- **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict bounded runs with the
+  scripted routes, one instance at a time, temporary diagnostics removed.
+- **Eight-title set.**
+  - All eight ran their whole window without a fatal stop: the card game
+    (150 s), the bug platformer (200 s), the racing title (200 s), the
+    fishing title (200 s), the roguelike platformer (120 s), the watercolor
+    platformer (120 s), the well platformer (100 s) and the preschool title
+    (90 s).
+  - Final captures render as in the previous sweep; the differences are
+    route positions.
+  - A repeat of the racing title exited cleanly (status 0, no error) after
+    107 s while racing. The fishing title showed the same silent exit once
+    before these changes. The cause is not known.
+  - The racing route reaches the race at about 104 s, as in the
+    2026-10-19 09:22 run. One earlier run reached it sooner by another menu
+    path.
+- **Role-playing title.** Twelve story runs on 2026-10-20, across builds
+  with and without the alias lookup change:
+  - Four held 300 s and reached the ship scene; the one on the final tree
+    ran it at about 16 fps.
+  - Five lost the device.
+  - One stopped on the stale boot target (see "the environment cube read
+    its cleared storage alias").
+  - One stopped on `unsupported sampler coordinate lowering`
+    (`GraphicsRenderPipeline.cpp`) for an S# with mirror-clamp modes
+    (`clamp=6,7,6 mirror_clamp_enabled=1`, words `5e6f15be 00000032
+    0000000d 08700f00`). Open: that lowering is not implemented.
+  - One crashed inside a temporary dump that read a retired image.
+- **Gates.** `check_emulator_boundaries.py source --strict` and the
+  graphics-table, boundary-fixture and detile-SPIR-V ctest gates pass. The
+  focused graphics unit suites pass (896 tests).
+  `kyty_playable_regression.py` cannot run on this host: it has no private
+  profile or guest root.
+
 ## Preschool Unity title: sky-blue speckles on every outline (2026-10-19)
 
 - **Symptom.** In gameplay, outlines, grass blades and text strokes showed
@@ -1246,30 +1700,18 @@ traveler's story at about 85 s. Intel Arc A770, strict, Silent.
   `Gen5GetTextureArrayLayout`'s tile-27 mip slice, and slice size
   0x30000 = 1/2 of 0x60000.
 - Fix: when both descriptors name the same chain, the prefix layers are
-  copied at every level.
+  copied at every level the two images hold. Correction (2026-10-19): array
+  storage images were created with one host level until the change below, so
+  for arrays this copied level 0 only.
 - Verified:
   - The next strict run grew the array to six layers.
   - Unit test: `StorageTextureGrowthCopiesGpuOwnedArrayPrefix`, which covers
     an equal and a shorter chain.
 
-### Open: a one-layer view inside the grown array
+### Resolved: a one-layer view inside the grown array
 
-- Stop, about 96 s in (`GpuMemoryCreate.cpp`, `unknown relation:
-  StorageTexture - Contains - StorageTexture`):
-  - The live backing has six layers. It was created for a view of slice 5
-    (`depth=6 base_array=5`, 0x120000 bytes).
-  - The new descriptor names slice 0 alone: `depth=1 base_array=0`,
-    `base_level=1`, 0x30000 bytes, at the same address.
-- Do not create a separate one-layer image, whether from guest bytes or from
-  a copy of layer 0. The backing and the view diverge on the next write.
-- Contract to implement: the descriptor is a view of the live backing, at
-  layer (slice offset + base_array) and level base_level. The view slots are
-  a fixed array today, so this needs a bounded (layer, level) view cache,
-  freed with the image.
-- Evidence still needed:
-  - which shader binds the view;
-  - whether it stores or only loads;
-  - whether the whole array is sampled afterwards.
+- Fixed on 2026-10-19; see "Role-playing title: mipmapped storage arrays and
+  cube chains" at the top of this manual.
 
 ### Open: device loss on queue 9
 
@@ -2401,7 +2843,7 @@ is attributed yet.
   pixel stage` (a wave64 pixel program writes a scalar under divergent
   control flow and reads it after the join; the host has no native 64-lane
   subgroup), open. Roguelike control unchanged (4 captures, time limit).
-  Unit test `SamplesThroughAllZeroDescriptorReturnZero` covers the parse,
+  Unit test `SamplesThroughUnboundDescriptorReturnZero` covers the parse,
   the emitted zero stores and a T# rewritten before the read.
 - Named-DMASK sample formats leave `mimg_dmask` unset; the zero read uses
   the decoded destination size, which every MIMG format sets to the DMASK
