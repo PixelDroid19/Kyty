@@ -4,6 +4,26 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: render-target storage aliases and a clean movement run (2026-10-20)
+
+Intel A770, strict 180 s movement runs on the synced tree.
+
+- **Storage view inside a render target.** A new storage view contained in a
+  live render target, with a sampled texture over the same allocation, had no
+  multi-parent relation and creation exited at 122 s. Link the parents and keep
+  the render target live, matching the single-parent policy.
+- **3D image readback.** Image-to-buffer readback now copies the physical depth
+  of a 3D image instead of one slice, so volume diagnostics can address the
+  whole backing.
+- **Result.** The 180 s run completes and the last capture (frame 2631, camp)
+  shows coloured characters, the expected shadows and no visible trail or
+  stripe. The dialogue box was not on screen in that capture, so the earlier
+  flat-brown decorations are not re-verified.
+- **Open.** Device lost with validation remains blocked by the fragment-input
+  Location 1 VUID; without validation the movement run no longer loses the
+  device and produces no fault report. The grading volume was not dumped: a
+  frame-boundary readback hook did not fire before the run ended.
+
 ## Role-playing title: 3D storage growth and the remaining UI defects (2026-10-20)
 
 Intel A770, strict 180 s movement runs.
