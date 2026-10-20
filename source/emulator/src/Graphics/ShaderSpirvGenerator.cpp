@@ -2444,6 +2444,41 @@ void Spirv::WriteLocalVariables()
 	m_source += "\n";
 }
 
+// Pixel exports depend on the color-format state of every target (mode:number:order per MRT).
+String8 Spirv::ExportBindingSummary(const ShaderInstruction& inst) const
+{
+	if (m_ps_input_info == nullptr || inst.type != ShaderInstructionType::Exp)
+	{
+		return {};
+	}
+	String8 summary = " targets=";
+	for (uint32_t target = 0; target < 8u; ++target)
+	{
+		summary += String8::FromPrintf("%s%u:%u:%u", target == 0u ? "" : ",", m_ps_input_info->target_output_mode[target],
+		                               m_ps_input_info->target_output_number[target], m_ps_input_info->target_output_order[target]);
+	}
+	return summary;
+}
+
+String8 Spirv::ImageBindingSummary(const ShaderInstruction& inst) const
+{
+	if (m_bind == nullptr || !IsImageInstruction(inst))
+	{
+		return {};
+	}
+	const int base    = m_vs_input_info != nullptr && m_vs_input_info->gs_prolog ? 8 : 0;
+	String8   summary = String8::FromPrintf(" tex_index=%d sampler_index=%d sloads=%u tex=", ShaderFindImageSampledTextureDescriptor(inst, *m_bind, base),
+	                                        ShaderFindImageSamplerDescriptor(inst, *m_bind, base), m_bind->dynamic_sloads.records.Size());
+	for (int i = 0; i < m_bind->textures2D.textures_num; ++i)
+	{
+		const auto& desc = m_bind->textures2D.desc[i];
+		summary += String8::FromPrintf("%ss%d%s:u%u:sh%u:t%u%s", i == 0 ? "" : ",", desc.start_register, desc.extended ? "e" : "",
+		                               static_cast<unsigned>(desc.usage), static_cast<unsigned>(ShaderResolvedSampledTextureShape(desc)),
+		                               static_cast<unsigned>(desc.texture.Type()), desc.dynamic_sload ? ":dyn" : "");
+	}
+	return summary;
+}
+
 String8 Spirv::EmitMetadataLoad(int row, int field, const String8&id) const
 {
 	uint32_t value = 0;
@@ -2994,9 +3029,10 @@ void Spirv::WriteInstructions()
 				inst_text = inst_dump.c_str();
 			}
 			EXIT("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64 " pc=0x%08" PRIx32
-			     " sampled=%d/%d/%d inst=%s sopp=0x%02x raw=0x%08" PRIx32 "\n",
+			     " sampled=%d/%d/%d inst=%s sopp=0x%02x raw=0x%08" PRIx32 " crc=%08" PRIx32 "%s\n",
 			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<uint64_t>(inst.format), inst.pc,
-			     sampled_2d, sampled_array, sampled_3d, inst_text, static_cast<unsigned>(inst.sopp_opcode), inst.raw_word);
+			     sampled_2d, sampled_array, sampled_3d, inst_text, static_cast<unsigned>(inst.sopp_opcode), inst.raw_word,
+			     m_code.GetCrc32(), (ImageBindingSummary(inst) + ExportBindingSummary(inst)).c_str());
 		}
 		if (IsImageInstruction(inst) && !UsesComputeWaveBanks())
 		{

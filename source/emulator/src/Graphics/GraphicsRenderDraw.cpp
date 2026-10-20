@@ -314,11 +314,13 @@ bool DispatchTextureExtentMatches(const ShaderComputeInputInfo& input, const cha
 	return false;
 }
 
-bool ShaderSamplesDepthAttachment(CommandBuffer* buffer, const RenderDepthInfo& depth, const ShaderBindResources& bind)
+// Returns the read-only descriptor that samples the bound depth attachment, or nullptr.
+static const ShaderTextureDescriptor* FindSampledDepthAttachment(CommandBuffer* buffer, const RenderDepthInfo& depth,
+                                                                 const ShaderBindResources& bind)
 {
 	if (buffer == nullptr || depth.vulkan_buffer == nullptr)
 	{
-		return false;
+		return nullptr;
 	}
 	const bool gen5 = Config::IsNextGen();
 	for (int i = 0; i < bind.textures2D.textures_num; ++i)
@@ -343,24 +345,40 @@ bool ShaderSamplesDepthAttachment(CommandBuffer* buffer, const RenderDepthInfo& 
 		{
 			if (alias == depth.vulkan_buffer)
 			{
-				return true;
+				return &descriptor;
 			}
 		}
 	}
-	return false;
+	return nullptr;
 }
 
 DepthStencilAttachmentAccess ResolveDrawDepthStencilAccess(CommandBuffer* buffer, const RenderDepthInfo& depth,
 	                                                        const ShaderBindResources& vertex_bind,
-	                                                        const ShaderBindResources& pixel_bind)
+	                                                        const ShaderBindResources& pixel_bind, const HW::Shader& sh_ctx)
 {
-	const bool sampled_in_same_draw = ShaderSamplesDepthAttachment(buffer, depth, vertex_bind) ||
-	                                  ShaderSamplesDepthAttachment(buffer, depth, pixel_bind);
-	const auto access = ResolveDepthStencilAttachmentAccess(
-	    depth, sampled_in_same_draw, g_render_ctx->GetGraphicCtx()->load_store_op_none_supported);
+	const auto* sampled       = FindSampledDepthAttachment(buffer, depth, vertex_bind);
+	const bool  pixel_sampled = sampled == nullptr;
+	if (pixel_sampled)
+	{
+		sampled = FindSampledDepthAttachment(buffer, depth, pixel_bind);
+	}
+	const bool store_op_none = g_render_ctx->GetGraphicCtx()->load_store_op_none_supported;
+	const auto access        = ResolveDepthStencilAttachmentAccess(depth, sampled != nullptr, store_op_none);
 	if (access == DepthStencilAttachmentAccess::Unsupported)
 	{
-		EXIT("same-draw depth sampling conflicts with attachment writes or missing store-op-none support\n");
+		const auto& t = sampled->texture;
+		EXIT("same-draw depth sampling conflicts with attachment writes: depth{addr=0x%012" PRIx64 " size=0x%" PRIx64
+		     " %ux%u vk_format=%u slices=%u..%u clear=%d/%d write=%d suppress=%d test=%d stencil_test=%d} store_op_none=%d "
+		     "sampled{stage=%s slot=%d op=%u addr=0x%012" PRIx64 " fmt=%u %ux%u type=%u tile=%u levels=%u..%u array=%u depth=%u} "
+		     "vs=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n",
+		     depth.depth_buffer_vaddr, depth.depth_buffer_size, depth.width, depth.height, static_cast<uint32_t>(depth.format),
+		     depth.slice_start, depth.slice_max, depth.depth_clear_enable ? 1 : 0, depth.stencil_clear_enable ? 1 : 0,
+		     depth.depth_write_enable ? 1 : 0, depth.suppress_depth_write ? 1 : 0, depth.depth_test_enable ? 1 : 0,
+		     depth.stencil_test_enable ? 1 : 0, store_op_none ? 1 : 0, pixel_sampled ? "ps" : "vs", sampled->slot,
+		     static_cast<uint32_t>(sampled->sample_operation), t.Base40(), static_cast<uint32_t>(t.Format()),
+		     t.Width5() + 1u, t.Height5() + 1u, static_cast<uint32_t>(t.Type()), static_cast<uint32_t>(t.TileMode()),
+		     static_cast<uint32_t>(t.BaseLevel()), static_cast<uint32_t>(t.LastLevel()), static_cast<uint32_t>(t.BaseArray5()),
+		     static_cast<uint32_t>(t.Depth()), sh_ctx.GetVs().gs_regs.chksum, sh_ctx.GetPs().ps_regs.chksum);
 	}
 	if (access != DepthStencilAttachmentAccess::Writable)
 	{
@@ -1643,7 +1661,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
 	const auto pipeline_setup_start = DrawStageClock::now();
-	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind);
+	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind, *sh_ctx);
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access);
 	const VulkanImage* stencil_attached_depth =
 	    depth_access == DepthStencilAttachmentAccess::DepthReadOnly ? depth_info.vulkan_buffer : nullptr;
@@ -2611,7 +2629,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
 	const auto pipeline_setup_start = DrawStageClock::now();
-	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind);
+	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind, *sh_ctx);
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access);
 	const VulkanImage* stencil_attached_depth =
 	    depth_access == DepthStencilAttachmentAccess::DepthReadOnly ? depth_info.vulkan_buffer : nullptr;

@@ -171,6 +171,9 @@ public:
 	[[nodiscard]] String8 FragmentLocalVariables() const;
 	[[nodiscard]] String8 FragmentProlog() const;
 	[[nodiscard]] String8 FragmentEpilog() const;
+	// " tex=...": the resolved T#/S# indices and the bound textures of an image instruction, for a refusal report.
+	[[nodiscard]] String8 ImageBindingSummary(const ShaderInstruction& inst) const;
+	[[nodiscard]] String8 ExportBindingSummary(const ShaderInstruction& inst) const;
 	[[nodiscard]] bool EmitFragmentInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitFragmentInterpolation(const ShaderInstruction& instruction, ShaderWaveBank bank,
 	                                              const String8& tag, String8* output) const;

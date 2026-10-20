@@ -3356,7 +3356,9 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			eud_snapshot.resize(required_end_dw);
 			if (!ShaderSnapshotGuestDescriptorTable(eud_guest_address, required_end_dw, &eud_snapshot))
 			{
-				EXIT("unstable or unreadable Gen5 EUD snapshot: dwords=%u\n", static_cast<unsigned>(required_end_dw));
+				const bool readable = ShaderReadGuestDescriptorWords(eud_guest_address, required_end_dw, eud_snapshot.data());
+				EXIT("%s Gen5 EUD snapshot: dwords=%u address=0x%016" PRIx64 " pointer_reg=%d\n", readable ? "unstable" : "unreadable",
+				     static_cast<unsigned>(required_end_dw), eud_guest_address, bind->extended.start_register);
 			}
 			uint32_t expanded_end_dw = required_end_dw;
 			if (!ShaderGen5EudExpandEndDwordsForSharpImages(user_data, user_sgpr_num, eud_snapshot.data(), required_end_dw,

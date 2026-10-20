@@ -1003,12 +1003,14 @@ String GpuMemory::create_dbg_parents(int heap_id, const Vector<OverlappedBlock>&
 	{
 		const auto& h = heap.objects[d.object_id];
 		list.Add(String::FromPrintf("\t parent id=%d type=%s rel=%s scenario=%s parents=%u read_only=%d in_use=%d origin=%s"
-		                            " cpu_time=%" PRIu64 " gpu_time=%" PRIu64 " write_time=%" PRIu64 " ranges:%s params:%s",
+		                            " cpu_time=%" PRIu64 " gpu_time=%" PRIu64 " device_time=%" PRIu64 " write_time=%" PRIu64
+		                            " ranges:%s params:%s",
 		                            d.object_id, Core::EnumName(h.info.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
 		                            Core::EnumName(h.scenario).C_Str(), static_cast<unsigned>(h.others.Size()), h.info.read_only ? 1 : 0,
 		                            h.info.in_use ? 1 : 0, Core::EnumName(h.info.content_origin).C_Str(),
 		                            static_cast<uint64_t>(h.info.cpu_update_time), static_cast<uint64_t>(h.info.gpu_update_time),
-		                            static_cast<uint64_t>(h.info.write_time), ranges(h.block).C_Str(), params(h.info.params).C_Str()));
+		                            static_cast<uint64_t>(h.info.device_write_time), static_cast<uint64_t>(h.info.write_time),
+		                            ranges(h.block).C_Str(), params(h.info.params).C_Str()));
 	}
 	return list.Concat(U'\n');
 }
