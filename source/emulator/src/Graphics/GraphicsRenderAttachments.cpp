@@ -2171,7 +2171,7 @@ RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer, Rende
 	input.attachments                            = attachments;
 	input.attachment_count                       = attachment_count;
 	input.expected_count                         = attachment_count;
-	input.shader_usage.fragment_coordinates      = ps->ps_pos_xy;
+	input.shader_usage.fragment_coordinates      = ps->ps_position;
 	input.shader_usage.integer_image_coordinates = ps->integer_image_coordinates;
 	input.shader_usage.image_size_query          = ps->image_size_query;
 

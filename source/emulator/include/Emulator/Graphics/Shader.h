@@ -2528,7 +2528,7 @@ struct ShaderPixelInputInfo
 	uint8_t                target_output_order[8]    = {};
 	uint8_t                target_output_number[8]   = {};
 	RenderHostToGuestScale host_to_guest_scale;
-	bool                   ps_pos_xy                 = false;
+	bool                   ps_position               = false;
 	bool                   front_face_all_bits       = false;
 	bool                   integer_image_coordinates = false;
 	bool                   image_size_query          = false;

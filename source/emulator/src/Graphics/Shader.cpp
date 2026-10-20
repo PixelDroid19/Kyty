@@ -4409,7 +4409,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	ps_info->system_input_enable  = sh->ps_input_ena;
 	ps_info->system_input_address = sh->ps_input_addr;
 	ps_info->front_face_all_bits  = (sh->baryc_cntl & (1u << 24u)) != 0;
-	ps_info->ps_pos_xy            = ShaderPixelPositionEnabled(sh->ps_input_ena, sh->ps_input_addr);
+	ps_info->ps_position          = ShaderPixelPositionEnabled(sh->ps_input_ena, sh->ps_input_addr);
 	ps_info->ps_pixel_kill_enable = sh->db_shader_control.shader_kill_enable;
 	ps_info->ps_early_z           = (sh->db_shader_control.shader_z_behavior == 1);
 	ps_info->ps_execute_on_noop   = sh->db_shader_control.shader_execute_on_noop;
@@ -5140,7 +5140,7 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo* info)
 	KYTY_LOG_DEBUG("\t fp16_overflow_known = %s\n", info->fp16_overflow_known ? "true" : "false");
 
 	KYTY_LOG_DEBUG("\t input_num            = %u\n", info->input_num);
-	KYTY_LOG_DEBUG("\t ps_pos_xy            = %s\n", info->ps_pos_xy ? "true" : "false");
+	KYTY_LOG_DEBUG("\t ps_position          = %s\n", info->ps_position ? "true" : "false");
 	KYTY_LOG_DEBUG("\t ps_pixel_kill_enable = %s\n", info->ps_pixel_kill_enable ? "true" : "false");
 	KYTY_LOG_DEBUG("\t ps_early_z           = %s\n", info->ps_early_z ? "true" : "false");
 	KYTY_LOG_DEBUG("\t ps_execute_on_noop   = %s\n", info->ps_execute_on_noop ? "true" : "false");
@@ -6039,7 +6039,7 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 		ids.Add(input_info->custom_interpolation.per_vertex_inputs);
 		ids.Add(input_info->custom_interpolation.aliased_parameter_inputs);
 	}
-	ids.Add(static_cast<uint32_t>(input_info->ps_pos_xy));
+	ids.Add(static_cast<uint32_t>(input_info->ps_position));
 	ids.Add(input_info->host_to_guest_scale.x_guest_numerator);
 	ids.Add(input_info->host_to_guest_scale.x_host_denominator);
 	ids.Add(input_info->host_to_guest_scale.y_guest_numerator);

@@ -7567,15 +7567,38 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordKeepsNativeCoordinatesAtOneToOneScal
 	ShaderCode code;
 	code.SetType(ShaderType::Pixel);
 
+	// PERSP_CENTER, POS_X_FLOAT and POS_Y_FLOAT: v[0:1] barycentrics, v2 x, v3 y.
 	ShaderPixelInputInfo input {};
-	input.ps_pos_xy = true;
+	input.system_input_enable  = 0x302u;
+	input.system_input_address = 0x302u;
+	input.ps_position          = true;
 
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
-	EXPECT_NE(source.FindIndex("OpStore %v2 %FragCoord_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %v3 %FragCoord_y"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(source.FindIndex("%FragCoord_guest_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(source.FindIndex("%FragCoord_guest_y"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_ptr8 = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %pixel_pos8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v3 %pixel_pos9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%pixel_pos_guest"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, PixelFragCoordLoadsOnlyEnabledFieldIntoItsAddressSlot)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	// Captured: LINEAR_CENTER and POS_Y_FLOAT alone. The y coordinate is v2.
+	ShaderPixelInputInfo input {};
+	input.system_input_enable  = 0x220u;
+	input.system_input_address = 0x220u;
+	input.ps_position          = ShaderPixelPositionEnabled(input.system_input_enable, input.system_input_address);
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("%pixel_pos_ptr9 = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %pixel_pos9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%pixel_pos8"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
@@ -7586,7 +7609,9 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
 	code.SetType(ShaderType::Pixel);
 
 	ShaderPixelInputInfo input {};
-	input.ps_pos_xy                              = true;
+	input.system_input_enable                    = 0x302u;
+	input.system_input_address                   = 0x302u;
+	input.ps_position                            = true;
 	input.host_to_guest_scale.x_guest_numerator  = 3;
 	input.host_to_guest_scale.x_host_denominator = 1;
 	input.host_to_guest_scale.y_guest_numerator  = 2;
@@ -7594,12 +7619,12 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
 
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
-	EXPECT_NE(source.FindIndex("%FragCoord_scale_x = OpFDiv %float %float_3_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%FragCoord_guest_x = OpFMul %float %FragCoord_x %FragCoord_scale_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %v2 %FragCoord_guest_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%FragCoord_scale_y = OpFDiv %float %float_2_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%FragCoord_guest_y = OpFMul %float %FragCoord_y %FragCoord_scale_y"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %v3 %FragCoord_guest_y"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_scale8 = OpFDiv %float %float_3_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_guest8 = OpFMul %float %pixel_pos8 %pixel_pos_scale8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %pixel_pos_guest8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_scale9 = OpFDiv %float %float_2_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_guest9 = OpFMul %float %pixel_pos9 %pixel_pos_scale9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v3 %pixel_pos_guest9"), Core::STRING8_INVALID_INDEX);
 }
 
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf

@@ -4503,7 +4503,8 @@ TEST(EmulatorGraphicsState, AcceptsSupportedPixelInputLayouts)
 	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000000u, 0x00000000u));
 
 	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000022u, 0x00000022u));
-	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000120u, 0x00000120u));
+	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000220u, 0x00000220u));
+	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000100u, 0x00000100u));
 	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000020u, 0x00000002u));
 }
 
@@ -4511,6 +4512,8 @@ TEST(EmulatorGraphicsState, DetectsPixelPositionFromInputBits)
 {
 	EXPECT_FALSE(ShaderPixelPositionEnabled(0x00000020u, 0x00000020u));
 	EXPECT_TRUE(ShaderPixelPositionEnabled(0x00000320u, 0x00000320u));
+	EXPECT_TRUE(ShaderPixelPositionEnabled(0x00000220u, 0x00000220u));
+	EXPECT_FALSE(ShaderPixelPositionEnabled(0x00000220u, 0x00000020u));
 }
 
 TEST(EmulatorGraphicsState, DecodesBlendControl)

@@ -56,24 +56,30 @@ void Spirv::WriteCustomPixelProlog()
 			                                field, component, field, component, first + component, field, component);
 		}
 	}
+}
+
+void Spirv::WritePixelPositionProlog()
+{
+	if (m_ps_input_info == nullptr || !m_ps_input_info->ps_position) { return; }
+	// Each enabled POS_*_FLOAT field fills its own VGPR, placed by the address mask.
 	for (uint32_t field = 8u; field < 12u; ++field)
 	{
-		if ((m_ps_input_info->system_input_enable & (1u << field)) == 0) { continue; }
+		if ((m_ps_input_info->system_input_enable & m_ps_input_info->system_input_address & (1u << field)) == 0) { continue; }
 		const auto reg = ShaderPixelSystemInputRegister(*m_ps_input_info, field);
 		const auto component = field - 8u;
-		m_source += String8::FromPrintf("%%custom_pos_ptr%u = OpAccessChain %%_ptr_Input_float %%gl_FragCoord %%uint_%u\n"
-		                                "%%custom_pos%u = OpLoad %%float %%custom_pos_ptr%u\n", field, component, field, field);
+		m_source += String8::FromPrintf("%%pixel_pos_ptr%u = OpAccessChain %%_ptr_Input_float %%gl_FragCoord %%uint_%u\n"
+		                                "%%pixel_pos%u = OpLoad %%float %%pixel_pos_ptr%u\n", field, component, field, field);
 		const auto& scale = m_ps_input_info->host_to_guest_scale;
 		if (component >= 2u || scale.IsIdentity())
 		{
-			m_source += String8::FromPrintf("OpStore %%v%u %%custom_pos%u\n", reg, field);
+			m_source += String8::FromPrintf("OpStore %%v%u %%pixel_pos%u\n", reg, field);
 			continue;
 		}
 		const auto numerator = GetConstantFloat(static_cast<float>(component == 0 ? scale.x_guest_numerator : scale.y_guest_numerator));
 		const auto denominator = GetConstantFloat(static_cast<float>(component == 0 ? scale.x_host_denominator : scale.y_host_denominator));
-		m_source += String8::FromPrintf("%%custom_pos_scale%u = OpFDiv %%float %%%s %%%s\n"
-		                                "%%custom_pos_guest%u = OpFMul %%float %%custom_pos%u %%custom_pos_scale%u\n"
-		                                "OpStore %%v%u %%custom_pos_guest%u\n",
+		m_source += String8::FromPrintf("%%pixel_pos_scale%u = OpFDiv %%float %%%s %%%s\n"
+		                                "%%pixel_pos_guest%u = OpFMul %%float %%pixel_pos%u %%pixel_pos_scale%u\n"
+		                                "OpStore %%v%u %%pixel_pos_guest%u\n",
 		                                field, numerator.c_str(), denominator.c_str(), field, field, field, reg, field);
 	}
 }

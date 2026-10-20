@@ -495,6 +495,7 @@ private:
 	void WriteCustomPixelAnnotations(Core::StringList8* annotations) const;
 	void WriteCustomPixelVariables(Core::StringList8* variables) const;
 	void WriteCustomPixelProlog();
+	void WritePixelPositionProlog();
 	void WritePixelFrontFaceProlog();
 	void WriteInstructions();
 	void WriteMainEpilog();

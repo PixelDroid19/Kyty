@@ -781,9 +781,7 @@ void Spirv::WriteHeader()
 				}
 				WriteCustomPixelInterface(&vars);
 				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("%gl_FrontFacing"); }
-				if (m_ps_input_info->ps_pos_xy ||
-				    (m_ps_input_info->custom_interpolation.Enabled() && (m_ps_input_info->system_input_enable & 0xf00u) != 0) ||
-				    UsesPixelMrtProbe())
+				if (m_ps_input_info->ps_position || UsesPixelMrtProbe())
 				{
 					vars.Add("%gl_FragCoord");
 				}
@@ -1070,9 +1068,7 @@ void Spirv::WriteAnnotations()
 				}
 				WriteCustomPixelAnnotations(&vars);
 				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("OpDecorate %gl_FrontFacing BuiltIn FrontFacing"); }
-				if (m_ps_input_info->ps_pos_xy ||
-				    (m_ps_input_info->custom_interpolation.Enabled() && (m_ps_input_info->system_input_enable & 0xf00u) != 0) ||
-				    UsesPixelMrtProbe())
+				if (m_ps_input_info->ps_position || UsesPixelMrtProbe())
 				{
 					vars.Add("OpDecorate %gl_FragCoord BuiltIn FragCoord");
 				}
@@ -1887,9 +1883,7 @@ void Spirv::WriteGlobalVariables()
 				}
 				WriteCustomPixelVariables(&vars);
 				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("%gl_FrontFacing = OpVariable %_ptr_Input_bool Input"); }
-				if (m_ps_input_info->ps_pos_xy ||
-				    (m_ps_input_info->custom_interpolation.Enabled() && (m_ps_input_info->system_input_enable & 0xf00u) != 0) ||
-				    UsesPixelMrtProbe())
+				if (m_ps_input_info->ps_position || UsesPixelMrtProbe())
 				{
 					vars.Add("%gl_FragCoord = OpVariable %_ptr_Input_v4float Input");
 				}
@@ -2119,50 +2113,12 @@ void Spirv::WriteLocalVariables()
 		}
 	}
 
-	if (m_code.GetType() == ShaderType::Pixel && !UsesFragmentCompute())
-	{
-		if (m_ps_input_info != nullptr && m_ps_input_info->ps_pos_xy && !m_ps_input_info->custom_interpolation.Enabled())
-		{
-			static const char* native_text = R"(
-         %FragCoord_px = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0
-         %FragCoord_x = OpLoad %float %FragCoord_px
-               OpStore %v2 %FragCoord_x
-         %FragCoord_py = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_1
-         %FragCoord_y = OpLoad %float %FragCoord_py
-               OpStore %v3 %FragCoord_y
-)";
-			static const char* scaled_text = R"(
-         %FragCoord_px = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0
-         %FragCoord_x = OpLoad %float %FragCoord_px
-         %FragCoord_scale_x = OpFDiv %float %<x_numerator> %<x_denominator>
-         %FragCoord_guest_x = OpFMul %float %FragCoord_x %FragCoord_scale_x
-               OpStore %v2 %FragCoord_guest_x
-         %FragCoord_py = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_1
-         %FragCoord_y = OpLoad %float %FragCoord_py
-         %FragCoord_scale_y = OpFDiv %float %<y_numerator> %<y_denominator>
-         %FragCoord_guest_y = OpFMul %float %FragCoord_y %FragCoord_scale_y
-               OpStore %v3 %FragCoord_guest_y
-)";
-			const auto&        scale       = m_ps_input_info->host_to_guest_scale;
-			if (scale.IsIdentity())
-			{
-				m_source += native_text;
-			} else
-			{
-				m_source += String8(scaled_text)
-				                .ReplaceStr("<x_numerator>", GetConstantFloat(static_cast<float>(scale.x_guest_numerator)))
-				                .ReplaceStr("<x_denominator>", GetConstantFloat(static_cast<float>(scale.x_host_denominator)))
-				                .ReplaceStr("<y_numerator>", GetConstantFloat(static_cast<float>(scale.y_guest_numerator)))
-				                .ReplaceStr("<y_denominator>", GetConstantFloat(static_cast<float>(scale.y_host_denominator)));
-			}
-		}
-	}
-
 	if (UsesFragmentCompute())
 	{
 		m_source += FragmentProlog();
 	} else
 	{
+		WritePixelPositionProlog();
 		WriteCustomPixelProlog();
 		WritePixelFrontFaceProlog();
 	}
@@ -3894,17 +3850,20 @@ void Spirv::FindVariables()
 		}
 		if (m_ps_input_info->custom_interpolation.Enabled())
 		{
-			for (uint32_t field = 0; field < 12u; ++field)
+			for (uint32_t field = 0; field < 8u; ++field)
 			{
 				if ((m_ps_input_info->system_input_enable & (1u << field)) == 0) { continue; }
 				AddVariable(ShaderOperandType::Vgpr, ShaderPixelSystemInputRegister(*m_ps_input_info, field), field < 7u ? 2 : 1);
 			}
 		}
-		if (m_ps_input_info->ps_pos_xy)
+		if (m_ps_input_info->ps_position)
 		{
 			if (!m_ps_input_info->host_to_guest_scale.IsValid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_ps_input_info->host_to_guest_scale.IsValid() condition ignored (continuing)\n"); }
-			AddVariable(ShaderOperandType::Vgpr, 2, 1);
-			AddVariable(ShaderOperandType::Vgpr, 3, 1);
+			for (uint32_t field = 8u; field < 12u; ++field)
+			{
+				if ((m_ps_input_info->system_input_enable & m_ps_input_info->system_input_address & (1u << field)) == 0) { continue; }
+				AddVariable(ShaderOperandType::Vgpr, ShaderPixelSystemInputRegister(*m_ps_input_info, field), 1);
+			}
 		}
 	}
 
