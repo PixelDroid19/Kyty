@@ -298,21 +298,23 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		return true;
 	}
 
+	// The merge is where the arm that ends in S_BRANCH lands inside the other arm. Both arms may end in one;
+	// the fallthrough arm's jump into the taken arm is the diamond's join, the taken arm's may leave it.
+	const bool next_joins_dst = next_block.last.type == ShaderInstructionType::SBranch && label_next_block.GetDst() >= dst_block.pc &&
+	                            label_next_block.GetDst() <= dst_block.last.pc;
+	const bool dst_joins_next = dst_block.last.type == ShaderInstructionType::SBranch && label_dst_block.GetDst() >= next_block.pc &&
+	                            label_dst_block.GetDst() <= next_block.last.pc;
 	bool if_else = next_block.is_valid && !next_block.is_discard && dst_block.is_valid && !dst_block.is_discard &&
-	               ((next_block.last.type == ShaderInstructionType::SBranch && label_next_block.GetDst() >= dst_block.pc &&
-	                 label_next_block.GetDst() <= dst_block.last.pc) ||
-	                (dst_block.last.type == ShaderInstructionType::SBranch && label_dst_block.GetDst() >= next_block.pc &&
-	                 label_dst_block.GetDst() <= next_block.last.pc));
+	               (next_joins_dst || dst_joins_next);
+	const auto& merge_label = next_joins_dst ? label_next_block : label_dst_block;
 
-	String8 label_str = label.ToString();
-	String8 label_merge =
-	    if_else ? (dst_block.last.type == ShaderInstructionType::SBranch ? label_dst_block.ToString() : label_next_block.ToString()) : "";
+	String8 label_str   = label.ToString();
+	String8 label_merge = if_else ? merge_label.ToString() : "";
 	// Shared joins with more than two predecessors are switch reconvergence, not
 	// a two-sided diamond. Keep the simple forward-conditional shape instead.
 	if (if_else && label_merge.Size() != 0)
 	{
 		const auto& labels       = code.GetLabels();
-		const auto  merge_label  = (dst_block.last.type == ShaderInstructionType::SBranch ? label_dst_block : label_next_block);
 		int         join_sources = 0;
 		for (const auto& join_label: labels)
 		{

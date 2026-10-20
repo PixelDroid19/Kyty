@@ -9214,6 +9214,60 @@ TEST(EmulatorGraphicsPackets, StandaloneDiamondDeclaresItsSyntheticJoinAsSelecti
 	}
 }
 
+// Both arms of an inner diamond end in S_BRANCH: the fallthrough arm jumps into the taken arm's tail, which
+// then leaves for the outer join. The inner merge is the fallthrough arm's landing, not the outer join.
+TEST(EmulatorGraphicsPackets, DiamondWhoseArmsBothBranchMergesWhereTheFallthroughLands)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	auto make_nop = [](uint32_t pc)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = ShaderInstructionType::SInstPrefetch;
+		inst.format = ShaderInstructionFormat::Imm;
+		inst.src_num = 1;
+		inst.src[0].type = ShaderOperandType::LiteralConstant;
+		return inst;
+	};
+	auto make_branch = [](uint32_t pc, ShaderInstructionType type, uint32_t target)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = type;
+		inst.format = ShaderInstructionFormat::Label;
+		inst.src_num = 1;
+		inst.src[0].type = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.i = static_cast<int32_t>(target - pc - 4u);
+		return inst;
+	};
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	const auto outer     = make_branch(0x04, ShaderInstructionType::SCbranchScc0, 0x28);
+	const auto inner     = make_branch(0x0c, ShaderInstructionType::SCbranchScc0, 0x1c);
+	const auto into_tail = make_branch(0x18, ShaderInstructionType::SBranch, 0x24);
+	const auto to_outer  = make_branch(0x24, ShaderInstructionType::SBranch, 0x2c);
+	ShaderInstruction end {};
+	end.pc = 0x2c;
+	end.type = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	for (const auto& inst: {make_nop(0x00), outer, make_nop(0x08), inner, make_nop(0x10), make_nop(0x14), into_tail, make_nop(0x1c),
+	                        make_nop(0x20), to_outer, make_nop(0x28), end})
+	{
+		code.GetInstructions().Add(inst);
+	}
+	for (const auto& branch: {outer, inner, into_tail, to_outer}) { code.GetLabels().Add(ShaderLabel(branch)); }
+	ShaderPixelInputInfo pixel {};
+	pixel.required_subgroup_size = 32;
+	pixel.native_wave.guest_wave_size = 32;
+	const auto source = SpirvGenerateSource(code, nullptr, &pixel, nullptr);
+	EXPECT_EQ(source.FindIndex("OpSelectionMerge %label_002c_0024 None"), Core::STRING8_INVALID_INDEX);
+	ScopedShaderValidation validation;
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+}
+
 TEST(EmulatorGraphicsPackets, EmptyDiamondArmBranchesToItsDeclaredSyntheticMerge)
 {
 	InitCommandBufferTestRuntime();
