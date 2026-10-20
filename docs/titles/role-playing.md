@@ -4,6 +4,31 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: 3D storage growth and the remaining UI defects (2026-10-20)
+
+Intel A770, strict 180 s movement runs.
+
+- **3D growth copy.** `ImageImageCopy` now carries a volume depth; normalization
+  validates the mip depth and bounds, and the Vulkan copy uses `extent.depth`
+  with one array layer. Type-10 storage textures with one level are admitted
+  for depth growth and copy their prefix slices. The camp route does not grow a
+  volume (a bounded growth diagnostic never fired), so the path is built and
+  reviewed but not exercised by this title yet.
+- **Storage-cache link.** A new storage image over several CPU-uploaded
+  read-only StorageBuffers now links those parents instead of exiting with an
+  unknown relation. This was the 159 s failure in the earlier depth-clear run.
+- **Current result.** The 180 s strict movement run completes; the camp shows
+  coloured characters and readable dialogue text. The menu opens and closes
+  correctly.
+- **Open.** Decorative dialogue-box regions still render as flat brown blocks,
+  and one capture showed horizontal striping during a transition. The frame
+  2500 VideoOut dump was clean, so the striping is not in the remembered render
+  targets. The UI draw diagnostic reports small 1x1 descriptors for several
+  720p UI draws (formats 56/60, tile 5/27); whether those are intentional solid
+  quads or a descriptor fallback is not established. Performance on this run:
+  p50 50 ms, 463 SPIR-V compiles (18.5 s), 756 pipelines (33.0 s), fence wait
+  39.8 s.
+
 ## Role-playing title: storage, DCC and UI format gaps (2026-10-20)
 
 Intel A770, strict 180-230 s runs of the traveler route with scripted movement.
