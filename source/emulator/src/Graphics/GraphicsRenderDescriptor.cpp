@@ -1568,7 +1568,9 @@ Vector<RenderTextureVulkanImage*> FindRenderTexture(CommandBuffer* buffer, uint6
 
 	Vector<RenderTextureVulkanImage*> ret;
 
-	auto objects = GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::RenderTexture, exact, false);
+	// A recycled range can hold several exact aliases of other formats and extents; callers pick among all of them.
+	auto objects = exact ? GpuMemoryFindEqualObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::RenderTexture)
+	                     : GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::RenderTexture, false, false);
 
 	for (const auto& obj: objects)
 	{

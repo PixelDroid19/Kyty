@@ -1808,17 +1808,25 @@ static void PreserveExpandedDccAttachment(CommandBuffer* buffer, const HW::Rende
 	{
 		EXIT("DCC decompression requires an existing render texture\n");
 	}
-	const auto images = FindRenderTexture(buffer, attachment.base_addr, attachment.size, true);
-	if (images.Size() != 1u)
-	{
-		EXIT("DCC decompression has no unique expanded backing: size=%" PRIu64 " matches=%u\n",
-		     attachment.size, images.Size());
-	}
-	const auto* image = images[0];
 	const auto format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
-	if (image == nullptr || image->image == nullptr || image->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
-	    !image->MatchesGuestExtent(attachment.width, attachment.height) || image->format != format ||
-	    image->samples != VK_SAMPLE_COUNT_1_BIT || image->array_layers != 1u || image->mip_levels != 1u)
+	const auto images = FindRenderTexture(buffer, attachment.base_addr, attachment.size, true);
+	const RenderTextureVulkanImage* image = nullptr;
+	uint32_t matches = 0;
+	for (const auto* candidate: images)
+	{
+		if (candidate->MatchesGuestExtent(attachment.width, attachment.height) && candidate->format == format)
+		{
+			image = candidate;
+			matches++;
+		}
+	}
+	if (matches != 1u)
+	{
+		EXIT("DCC decompression has no unique expanded backing: size=%" PRIu64 " aliases=%u matches=%u\n",
+		     attachment.size, images.Size(), matches);
+	}
+	if (image->image == nullptr || image->layout == VK_IMAGE_LAYOUT_UNDEFINED || image->samples != VK_SAMPLE_COUNT_1_BIT ||
+	    image->array_layers != 1u || image->mip_levels != 1u)
 	{
 		EXIT("DCC decompression backing is not an initialized matching single-sample image\n");
 	}
