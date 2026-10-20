@@ -2716,7 +2716,7 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	{
 		bind->push_constant_size += (((bind->direct_sgprs.sgprs_num - 1) / 4) + 1) * 16;
 	}
-	// Device-address and thread-limit blocks precede the program base, which
+	// Device-address, thread-limit and geometry blocks precede the program base, which
 	// stays the final block.
 	bind->device_address_offset_dw = 0;
 	if (bind->device_address_used)
@@ -2729,6 +2729,12 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	{
 		bind->thread_limits_offset_dw = bind->push_constant_size / 4u;
 		bind->push_constant_size += 16u;
+	}
+	bind->geometry_offset_dw = 0;
+	if (bind->geometry_used)
+	{
+		bind->geometry_offset_dw = bind->push_constant_size / 4u;
+		bind->push_constant_size += 32u;
 	}
 	bind->program_base_offset_dw = 0;
 	if (bind->program_base_used)
@@ -5315,6 +5321,44 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 	return ret;
 }
 
+Vector<uint32_t> ShaderCompileGeometryPullVS(const ShaderVertexInputInfo& input_info)
+{
+	EXIT_IF(!input_info.geometry_pull);
+	ShaderGeometryComputeInfo geometry;
+	geometry.parameter_count = input_info.geometry_pull_parameters;
+	Vector<uint32_t> ret;
+	String8          err_msg;
+	if (!ShaderToolchain::Run(SpirvGenerateGeometryPullSource(geometry, input_info.geometry_pull_layer), &ret, &err_msg))
+	{
+		EXIT("geometry pull vertex shader translation failed: %s\n", err_msg.c_str());
+	}
+	return ret;
+}
+
+Vector<uint32_t> ShaderRecompileGeometryCS(const ShaderCode& code, const ShaderVertexInputInfo& input_info,
+                                           const ShaderGeometryComputeInfo& geometry)
+{
+	KYTY_PROFILER_FUNCTION(profiler::colors::CyanA700);
+
+	ShaderLogHelper log("gs");
+	log.DumpOriginalShader(code);
+	String8 source;
+	{
+		DebugStatsScopedTimer timer(DebugStatsRecordSpirvSource);
+		source = SpirvGenerateGeometryComputeSource(code, input_info, geometry);
+	}
+	log.DumpRecompiledShader(source);
+	Vector<uint32_t> ret;
+	String8          err_msg;
+	if (!ShaderToolchain::Run(source, &ret, &err_msg))
+	{
+		KYTY_LOG_WARN("WARNING: geometry compute SpirvRun failed: id=%016" PRIx64 " %s\n", ShaderCodeId(code), err_msg.c_str());
+		return {};
+	}
+	log.DumpOptimizedShader(ret);
+	return ret;
+}
+
 ShaderCode ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh)
 {
 	KYTY_PROFILER_FUNCTION(profiler::colors::Blue300);
@@ -5649,6 +5693,11 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 	{
 		ids->Add(bind.thread_limits_offset_dw);
 	}
+	// Only geometry compute modules carry this block; other identities stay unchanged.
+	if (bind.geometry_used)
+	{
+		ids->Add(bind.geometry_offset_dw);
+	}
 	ids->Add(static_cast<uint32_t>(bind.program_base_used));
 	if (bind.program_base_used)
 	{
@@ -5965,6 +6014,12 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 		}
 	}
 
+	if (input_info->geometry_pull)
+	{
+		ids.Add(0x47504c31u); // GPL1: geometry pass output pull.
+		ids.Add(input_info->geometry_pull_parameters);
+		ids.Add(static_cast<uint32_t>(input_info->geometry_pull_layer));
+	}
 	ShaderGetBindIds(&ids, input_info->bind);
 	if (input_info->clip_probe.draw_scoped && input_info->clip_probe.enabled)
 	{

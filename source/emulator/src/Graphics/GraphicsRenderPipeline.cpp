@@ -29,6 +29,7 @@
 #include "Emulator/Graphics/RenderResolutionTransform.h"
 #include "Emulator/Graphics/SampleLocations.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Utils.h"
@@ -1693,6 +1694,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	                                                           vs_input_info->clip_probe.diagnostic_identity),
 	                                    [&]
 	                                    {
+		                                    if (vs_input_info->geometry_pull)
+		                                    {
+			                                    return ShaderCompileGeometryPullVS(*vs_input_info);
+		                                    }
 		                                    auto vs_code = ShaderParseVS(&vs_regs, &sh_regs, vs_input_info);
 		                                    return ShaderRecompileVS(vs_code, vs_input_info);
 	                                    });
@@ -1823,6 +1828,76 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 
+	if (slot < m_pipelines.Size())
+	{
+		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
+		{
+			DebugStatsRecordPipelineEviction();
+			DeletePipelineInternal(slot);
+		}
+		m_pipelines[static_cast<int>(slot)] = p;
+	} else
+	{
+		EXIT_IF(slot != m_pipelines.Size());
+		m_pipelines.Add(p);
+	}
+	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
+	DumpPipeline("create", static_cast<int>(slot));
+
+	m_driver_cache_dirty = true;
+	SaveDriverCacheIfDue();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));
+	return m_pipelines[static_cast<int>(slot)].pipeline;
+}
+
+VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_buffer, const ShaderVertexInputInfo* input_info,
+                                                      const ShaderGeometryComputeInfo& geometry, const HW::VertexShaderInfo* vs_regs,
+                                                      const HW::ShaderRegisters* sh_regs)
+{
+	KYTY_PROFILER_BLOCK("PipelineCache::CreateGeometryPipeline", profiler::colors::RedA100);
+
+	EXIT_IF(recording_buffer == nullptr || input_info == nullptr || vs_regs == nullptr || sh_regs == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+
+	auto id = ShaderGetIdVS(vs_regs, input_info);
+	id.ids.Add(0x47454f31u); // GEO1: merged ES+GS compute pass.
+	id.ids.Add(static_cast<uint32_t>(geometry.topology));
+	id.ids.Add(geometry.primitives_per_group);
+	id.ids.Add(geometry.parameter_count);
+	id.ids.Add(geometry.lds_dwords);
+
+	Pipeline p {};
+	p.cs_shader_id   = id;
+	p.static_params  = new PipelineStaticParameters {};
+	p.dynamic_params = new PipelineDynamicParameters {};
+
+	auto* found = Find(p);
+	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, found != nullptr, 0u);
+	if (found != nullptr)
+	{
+		delete p.static_params;
+		delete p.dynamic_params;
+		AttachPipelineLease(recording_buffer, *found);
+		return found->pipeline;
+	}
+
+	const auto miss_start = DebugStatsClock::now();
+	const auto code       = ShaderParseVS(vs_regs, sh_regs, input_info);
+	const auto host       = SpirvGeometryComputeHostInfo(code, *input_info, geometry);
+
+	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
+	EXIT_IF(translation_cache == nullptr);
+	const auto translation =
+	    translation_cache->GetOrCompile(ShaderModuleKey::Create(id, ShaderModuleStage::Compute, Config::GetShaderOptimizationType(),
+	                                                            Config::IsNextGen(), Config::SpirvDebugPrintfEnabled()),
+	                                    [&] { return ShaderRecompileGeometryCS(code, *input_info, geometry); });
+	DebugStatsRecordShaderTranslationCache(translation.hit, translation.evicted);
+	EXIT_IF(translation.binary.IsEmpty());
+
+	const uint32_t slot = FindAvailableSlot();
+	p.pipeline          = CreatePipelineInternal(&host, translation.binary, p.static_params, p.dynamic_params);
 	if (slot < m_pipelines.Size())
 	{
 		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)

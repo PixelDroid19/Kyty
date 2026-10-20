@@ -165,6 +165,11 @@ public:
 	[[nodiscard]] bool UsesDsAddtidLds() const;
 	[[nodiscard]] ShaderType GetHostShaderType() const { return UsesFragmentCompute() ? ShaderType::Compute : m_code.GetType(); }
 	void SetFragmentComputeInfo(const ShaderFragmentComputeInfo* info) { m_fragment_compute_info = info; }
+	[[nodiscard]] bool UsesGeometryCompute() const { return m_geometry_compute_info != nullptr; }
+	void SetGeometryComputeInfo(const ShaderGeometryComputeInfo* info) { m_geometry_compute_info = info; }
+	[[nodiscard]] bool EmitGeometryProlog(String8* output) const;
+	[[nodiscard]] bool EmitGeometryExport(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitGeometryAlloc(uint32_t index, String8* output) const;
 	[[nodiscard]] String8 FragmentTransportAnnotations() const;
 	[[nodiscard]] String8 FragmentTransportTypes() const;
 	[[nodiscard]] String8 FragmentTransportVariables() const;
@@ -528,6 +533,7 @@ private:
 	const ShaderComputeInputInfo* m_cs_input_info = nullptr;
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
 	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
+	const ShaderGeometryComputeInfo* m_geometry_compute_info = nullptr;
 	mutable int                   m_native_wave_tier = -1;
 	mutable bool                  m_lane_reductions_ready = false;
 	mutable ShaderFragmentLaneReductions m_lane_reductions;

@@ -57,6 +57,11 @@ enum class ShaderComputeWaveInstructionKind
 	BankedDpp,
 	PixelInterpolation,
 	PixelExport,
+	// Merged ES+GS run as compute: an uncompressed position 0/1, parameter or
+	// primitive export, stored per lane into the geometry output buffer.
+	GeometryExport,
+	// S_SENDMSG GS_ALLOC_REQ: the M0 payload becomes the group header.
+	GeometryAlloc,
 };
 
 struct ShaderComputeWaveAnalysisResult
@@ -79,6 +84,10 @@ struct ShaderComputeWaveAnalysisResult
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,
                                                                              const ShaderComputeInputInfo& host,
                                                                              uint32_t                      parameter_register = UINT32_MAX);
+[[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyGeometryWaveInstruction(const ShaderInstruction& instruction);
+// Source of export component 0..3; a POS1 Z-only export carries Z in src[0].
+[[nodiscard]] const ShaderOperand& ShaderExportComponentSource(const ShaderInstruction& instruction, uint32_t component);
+[[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeGeometryWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input);
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyFragmentWaveInstruction(const ShaderInstruction&    instruction,
                                                                                      const ShaderPixelInputInfo& pixel);
 [[nodiscard]] bool ShaderFragmentInterpolationPairSupported(const ShaderCode& code, uint32_t index, const ShaderPixelInputInfo& pixel);

@@ -264,6 +264,11 @@ public:
 	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, const ShaderComputeInputInfo* input_info,
 	                               const HW::ComputeShaderInfo* cs_regs,
 	                               const HW::ShaderRegisters* sh_regs);
+	// Compute pass of a merged ES+GS draw; `input_info` is the fused front with
+	// the geometry push block and guest device addressing bound.
+	VulkanPipeline* CreateGeometryPipeline(CommandBuffer* recording_buffer, const ShaderVertexInputInfo* input_info,
+	                                       const ShaderGeometryComputeInfo& geometry, const HW::VertexShaderInfo* vs_regs,
+	                                       const HW::ShaderRegisters* sh_regs);
 	void            DeletePipeline(VulkanPipeline* pipeline);
 	void            DeletePipelines(VulkanFramebuffer* framebuffer);
 	void            DeleteAllPipelines();

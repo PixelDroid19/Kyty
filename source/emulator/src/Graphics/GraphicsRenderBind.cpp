@@ -4954,6 +4954,12 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			sgprs_ptr[3] = 0;
 			sgprs_ptr += 4;
 		}
+		if (bind.geometry_used)
+		{
+			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.geometry_offset_dw);
+			std::memcpy(sgprs_ptr, bind.geometry_block, sizeof(bind.geometry_block));
+			sgprs_ptr += 8;
+		}
 		if (bind.program_base_used)
 		{
 			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.program_base_offset_dw);

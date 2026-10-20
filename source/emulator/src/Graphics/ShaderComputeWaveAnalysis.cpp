@@ -1309,9 +1309,58 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 	return true;
 }
 
+ShaderComputeWaveInstructionKind ShaderClassifyGeometryWaveInstruction(const ShaderInstruction& instruction)
+{
+	if (instruction.type == ShaderInstructionType::SSendmsg)
+	{
+		// RDNA2 message 9 is GS_ALLOC_REQ; no other message has a geometry effect here.
+		const bool alloc = instruction.sopp_opcode == 16u && instruction.src_num == 1 &&
+		                   instruction.src[0].type == ShaderOperandType::LiteralConstant && instruction.src[0].constant.u == 9u;
+		return alloc ? ShaderComputeWaveInstructionKind::GeometryAlloc : ShaderComputeWaveInstructionKind::Unsupported;
+	}
+	if (instruction.type != ShaderInstructionType::Exp)
+	{
+		return ShaderClassifyComputeWaveInstruction(instruction);
+	}
+	const uint32_t target  = (instruction.raw_word >> 4u) & 0x3fu;
+	const uint32_t enable  = instruction.raw_word & 0xfu;
+	const bool     compr   = ((instruction.raw_word >> 10u) & 1u) != 0u;
+	const bool     vertex  = target == 12u || target == 13u || (target >= 32u && target <= 63u);
+	const bool     prim    = target == 20u && enable == 1u;
+	if (compr || enable == 0u || enable != instruction.exp_enable_mask || (!vertex && !prim))
+	{
+		return ShaderComputeWaveInstructionKind::Unsupported;
+	}
+	for (uint32_t component = 0; component < 4u; ++component)
+	{
+		if ((enable & (1u << component)) != 0u && !IsOrdinaryVgpr(ShaderExportComponentSource(instruction, component)))
+		{
+			return ShaderComputeWaveInstructionKind::Unsupported;
+		}
+	}
+	return ShaderComputeWaveInstructionKind::GeometryExport;
+}
+
+const ShaderOperand& ShaderExportComponentSource(const ShaderInstruction& instruction, uint32_t component)
+{
+	if (instruction.format == ShaderInstructionFormat::Pos1OffOffVsrc0Off && component == 2u)
+	{
+		return instruction.src[0];
+	}
+	return instruction.src[component & 3u];
+}
+
+enum class PairedWaveFlavor
+{
+	Compute,
+	Fragment,
+	Geometry
+};
+
 static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input,
                                                               const ShaderPixelInputInfo* pixel,
-                                                              uint32_t parameter_register = UINT32_MAX)
+                                                              uint32_t parameter_register = UINT32_MAX,
+                                                              PairedWaveFlavor flavor = PairedWaveFlavor::Compute)
 {
 	ShaderComputeWaveAnalysisResult result {};
 	const auto&                     instructions = code.GetInstructions();
@@ -1360,8 +1409,9 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 		{
 			return {false, instruction.pc, "fragment interpolation requires an unobserved pair with unchanged native barycentrics"};
 		}
-		auto kind = pixel == nullptr ? ShaderClassifyComputeWaveInstruction(instruction)
-		                            : ShaderClassifyFragmentWaveInstruction(instruction, *pixel);
+		auto kind = pixel != nullptr                      ? ShaderClassifyFragmentWaveInstruction(instruction, *pixel)
+		            : flavor == PairedWaveFlavor::Geometry ? ShaderClassifyGeometryWaveInstruction(instruction)
+		                                                   : ShaderClassifyComputeWaveInstruction(instruction);
 		if (kind == ShaderComputeWaveInstructionKind::Unsupported &&
 		    ShaderPairedEudStorageLoadSupported(instruction, input.bind))
 		{
@@ -1490,6 +1540,11 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input)
 {
 	return AnalyzePairedWaveCode(code, input, nullptr);
+}
+
+ShaderComputeWaveAnalysisResult ShaderAnalyzeGeometryWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input)
+{
+	return AnalyzePairedWaveCode(code, input, nullptr, UINT32_MAX, PairedWaveFlavor::Geometry);
 }
 
 ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,

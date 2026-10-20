@@ -2142,6 +2142,11 @@ struct ShaderBindResources
 	bool     thread_limits_used      = false;
 	uint32_t thread_limits_offset_dw = 0;
 	uint32_t thread_limits[3]        = {0, 0, 0};
+	// Geometry compute pass and the draw that reads its output: two runtime
+	// blocks (ShaderGeometryComputeInfo), per-draw data.
+	bool     geometry_used      = false;
+	uint32_t geometry_offset_dw = 0;
+	uint32_t geometry_block[8]  = {};
 	ShaderStorageResources     storage_buffers;
 	ShaderZeroSBufferResources zero_sbuffer_resources;
 	ShaderTextureResources     textures2D;
@@ -2289,6 +2294,12 @@ struct ShaderVertexInputInfo
 	// descriptor set is assigned by the renderer after both stages are known.
 	ShaderVertexClipProbeConfig clip_probe;
 	uint32_t                     clip_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+	// The host stage draws the output of a merged ES+GS geometry pass instead of
+	// running the guest program (SpirvGenerateGeometryPullSource). Its records carry
+	// geometry_pull_parameters parameters; geometry_pull_layer exports the layer.
+	bool     geometry_pull            = false;
+	bool     geometry_pull_layer      = false;
+	uint32_t geometry_pull_parameters = 0;
 };
 
 // Bind each merged vertex stream as a ReadOnly raw SSBO so untagged MUBUF
@@ -2780,8 +2791,14 @@ ShaderCode       ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::Shad
 	                                                         const ShaderPixelInputInfo& input_info,
 	                                                         const ShaderPixelInput0ProbeConfig& config);
 Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInputInfo* input_info);
+// Host vertex stage of a geometry pull draw (input_info.geometry_pull).
+Vector<uint32_t> ShaderCompileGeometryPullVS(const ShaderVertexInputInfo& input_info);
 Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInputInfo* input_info);
 Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeInputInfo* input_info);
+struct ShaderGeometryComputeInfo;
+// Compute pass running the linked merged ES+GS program `code` (SpirvGenerateGeometryComputeSource).
+Vector<uint32_t> ShaderRecompileGeometryCS(const ShaderCode& code, const ShaderVertexInputInfo& input_info,
+                                           const ShaderGeometryComputeInfo& geometry);
 bool             ShaderIsDisabled(uint64_t addr);
 bool             ShaderIsDisabled2(uint64_t addr, uint64_t chksum);
 void             ShaderDisable(uint64_t id);

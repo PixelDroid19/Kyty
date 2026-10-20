@@ -93,6 +93,11 @@ static int ResolveVertexParameterCount(const ShaderCode& code, const ShaderVerte
 	return count;
 }
 
+uint32_t SpirvResolveVertexParameterCount(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info)
+{
+	return static_cast<uint32_t>(ResolveVertexParameterCount(code, vs_input_info));
+}
+
 static bool ShaderInstructionClearsExecLoToZero(const ShaderInstruction& inst)
 {
 	const bool width_matches =
@@ -342,7 +347,8 @@ void Spirv::GenerateSource()
 	{
 		const auto analysis = UsesFragmentCompute() ? ShaderAnalyzeFragmentWaveCode(m_code, *m_ps_input_info, *m_cs_input_info,
 		                                                                              m_fragment_compute_info->user_sgpr_count)
-		                                           : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
+		                      : UsesGeometryCompute() ? ShaderAnalyzeGeometryWaveCode(m_code, *m_cs_input_info)
+		                                              : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
 		if (!analysis.supported)
 		{
 			EXIT("paired-wave instruction contract unsupported: pc=0x%08" PRIx32 " reason=%s\n",
@@ -2145,6 +2151,10 @@ void Spirv::WriteLocalVariables()
 				{
 					EXIT("paired-wave compute prolog contract unsupported\n");
 				}
+				if (UsesGeometryCompute() && !EmitGeometryProlog(&m_source))
+				{
+					EXIT("geometry compute prolog contract unsupported\n");
+				}
 			} else if (UsesNativeComputeWave())
 			{
 				if (!EmitNativeComputeWaveProlog(&m_source))
@@ -2828,7 +2838,8 @@ void Spirv::WriteInstructions()
 	{
 		const auto analysis = UsesFragmentCompute() ? ShaderAnalyzeFragmentWaveCode(m_code, *m_ps_input_info, *m_cs_input_info,
 		                                                                              m_fragment_compute_info->user_sgpr_count)
-		                                           : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
+		                      : UsesGeometryCompute() ? ShaderAnalyzeGeometryWaveCode(m_code, *m_cs_input_info)
+		                                              : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
 		if (!analysis.supported)
 		{
 			EXIT("paired-wave transformed instruction unsupported: pc=0x%08" PRIx32 " reason=%s\n",
@@ -2891,6 +2902,7 @@ void Spirv::WriteInstructions()
 		const auto* func = RecompFunc(inst.type, inst.format);
 
 		const auto wave_kind = UsesFragmentCompute() ? ShaderClassifyFragmentWaveInstruction(inst, *m_ps_input_info)
+		                      : UsesGeometryCompute() ? ShaderClassifyGeometryWaveInstruction(inst)
 		                      : UsesComputeWaveBanks() ? ShaderClassifyComputeWaveInstruction(inst)
 		                                             : ShaderComputeWaveInstructionKind::Unsupported;
 		const bool low_destination = ShaderSdwaPartialDestinationSupported(inst);
@@ -2901,6 +2913,12 @@ void Spirv::WriteInstructions()
 		if (wave_kind == ShaderComputeWaveInstructionKind::PixelInterpolation || wave_kind == ShaderComputeWaveInstructionKind::PixelExport)
 		{
 			ok = EmitFragmentInstruction(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::GeometryExport)
+		{
+			ok = EmitGeometryExport(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::GeometryAlloc)
+		{
+			ok = EmitGeometryAlloc(static_cast<uint32_t>(index), &dst);
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedVector || wave_kind == ShaderComputeWaveInstructionKind::WaveLane ||
 		    wave_kind == ShaderComputeWaveInstructionKind::BankedSdwaExtract)
 		{
@@ -3289,6 +3307,27 @@ void Spirv::FindConstants()
 		}
 	}
 	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog) { AddConstantUint(8u); }
+	if (UsesGeometryCompute() && m_bind != nullptr)
+	{
+		const auto& geometry = *m_geometry_compute_info;
+		for (uint32_t value: {0u, 1u, 2u, 3u, 8u, 16u, 32u, 1u << 28u, geometry.primitives_per_group, geometry.GroupDwords(),
+		                      geometry.RecordDwords(), ShaderGeometryComputeInfo::kVertexOffsetScale,
+		                      ShaderGeometryComputeInfo::kVertexOffsetScale * 3u, ShaderGeometryComputeInfo::kPrimitiveWordsOffset,
+		                      ShaderGeometryComputeInfo::kRecordsOffset})
+		{
+			AddConstantUint(value);
+		}
+		for (uint32_t slot = 0; slot < geometry.RecordDwords(); slot++)
+		{
+			AddConstantUint(slot);
+		}
+		for (int field = 0; field < 4; field++)
+		{
+			AddConstantInt(field);
+		}
+		AddConstantInt(static_cast<int>(m_bind->geometry_offset_dw / 4u));
+		AddConstantInt(static_cast<int>(m_bind->geometry_offset_dw / 4u + 1u));
+	}
 	if (UsesGuestDeviceAddress())
 	{
 		// Guest-pointer S_LOAD and GLOBAL lowering name their offsets, the
@@ -3874,6 +3913,11 @@ void Spirv::FindVariables()
 		{
 			AddVariable(ShaderOperandType::Sgpr, static_cast<int>(m_fragment_compute_info->user_sgpr_count), 1);
 		}
+	}
+	if (UsesGeometryCompute())
+	{
+		// The geometry prolog writes the ES-GS system VGPRs v0..v4.
+		AddVariable(ShaderOperandType::Vgpr, 0, 5);
 	}
 	if (m_cs_input_info != nullptr && !UsesFragmentCompute())
 	{
