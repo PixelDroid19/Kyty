@@ -2264,6 +2264,35 @@ static bool get_shader_register_address(const ShaderRegister* regs, uint32_t num
 	return *address != 0u;
 }
 
+// The geometry front half runs first in the merged wave and consumes the user
+// data, so the fused program takes the front's user SGPR count; the register
+// budgets must cover both halves.
+static bool merge_geometry_front_resources(ShaderRegister* fused_regs, uint32_t fused_reg_count, const Shader* front)
+{
+	constexpr uint32_t kRsrc1BudgetMask   = (Pm4::SPI_SHADER_PGM_RSRC1_GS_VGPRS_MASK << Pm4::SPI_SHADER_PGM_RSRC1_GS_VGPRS_SHIFT) |
+	                                      (Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_MASK << Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_SHIFT);
+	constexpr uint32_t kRsrc2UserSgprMask = (Pm4::SPI_SHADER_PGM_RSRC2_GS_USER_SGPR_MASK << Pm4::SPI_SHADER_PGM_RSRC2_GS_USER_SGPR_SHIFT) |
+	                                        (Pm4::SPI_SHADER_PGM_RSRC2_GS_USER_SGPR_MSB_MASK << Pm4::SPI_SHADER_PGM_RSRC2_GS_USER_SGPR_MSB_SHIFT);
+
+	const auto  front_reg_count = static_cast<uint32_t>(front->num_sh_registers);
+	const auto* front_rsrc1     = find_shader_register(front->sh_registers, front_reg_count, Pm4::SPI_SHADER_PGM_RSRC1_GS);
+	const auto* front_rsrc2     = find_shader_register(front->sh_registers, front_reg_count, Pm4::SPI_SHADER_PGM_RSRC2_GS);
+	auto*       rsrc1           = find_shader_register(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_RSRC1_GS);
+	auto*       rsrc2           = find_shader_register(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_RSRC2_GS);
+	if (front_rsrc1 == nullptr || front_rsrc2 == nullptr || rsrc1 == nullptr || rsrc2 == nullptr)
+	{
+		return false;
+	}
+
+	const uint32_t vgprs = std::max(rsrc1->value & Pm4::SPI_SHADER_PGM_RSRC1_GS_VGPRS_MASK,
+	                                front_rsrc1->value & Pm4::SPI_SHADER_PGM_RSRC1_GS_VGPRS_MASK);
+	const uint32_t sgprs = std::max(rsrc1->value & (Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_MASK << Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_SHIFT),
+	                                front_rsrc1->value & (Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_MASK << Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_SHIFT));
+	rsrc1->value         = (rsrc1->value & ~kRsrc1BudgetMask) | vgprs | sgprs;
+	rsrc2->value         = (rsrc2->value & ~kRsrc2UserSgprMask) | (front_rsrc2->value & kRsrc2UserSgprMask);
+	return true;
+}
+
 int KYTY_SYSV_ABI GraphicsUnknownGetFusedShaderSize(SizeAlign* dst, const Shader* front, const Shader* back)
 {
 	PRINT_NAME();
@@ -2343,6 +2372,10 @@ int KYTY_SYSV_ABI GraphicsUnknownFuseShaderHalves(Shader* fused_result, const Sh
 
 	if (front->type == kGsFront)
 	{
+		if (!merge_geometry_front_resources(fused_regs, fused_reg_count, front))
+		{
+			return kGraphics5ErrorInvalidShaderHalves;
+		}
 		for (uint32_t occurrence = 0; occurrence < 2; occurrence++)
 		{
 			auto*       dst = find_shader_register(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_CHKSUM_GS, occurrence);
