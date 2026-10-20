@@ -2134,6 +2134,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features_12.subgroupBroadcastDynamicId = supported_12.subgroupBroadcastDynamicId;
 	device_features_12.samplerMirrorClampToEdge = sampler_features.mirror_clamp_to_edge;
 	device_features_12.bufferDeviceAddress = guest_device_address ? VK_TRUE : VK_FALSE;
+	// Vertex stages export the render-target layer (ShaderLayer).
+	device_features_12.shaderOutputLayer = supported_12.shaderOutputLayer;
 	// Core since Vulkan 1.2 and mandatory there.
 	EXIT_IF(supported_12.timelineSemaphore == VK_FALSE);
 	device_features_12.timelineSemaphore = VK_TRUE;
