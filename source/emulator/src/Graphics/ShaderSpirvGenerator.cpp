@@ -1348,6 +1348,9 @@ void Spirv::WriteTypes()
  %function_tbuffer_load_store_format_x = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
 %function_tbuffer_load_store_format_xy = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
 %function_tbuffer_load_store_format_xyz = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
+%function_gen5_buffer_format_bytes = OpTypeFunction %uint %uint
+%function_gen5_buffer_element = OpTypeFunction %v4uint %v4uint %uint %uint
+%function_gen5_buffer_load_words = OpTypeFunction %v4uint %uint %uint %uint
           %function_sbuffer_load_dword = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_2 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_4 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
@@ -2564,8 +2567,30 @@ static Vector<std::pair<ShaderInstruction, int>> DetectVertexFetchSemantics(cons
 		Core::Array<SgprInfo, 108> sgprs;
 		Core::Array<VgprInfo, 256> vgprs;
 
+		// A register keeps its role only until another instruction writes it.
+		auto clear_dst = [&](const ShaderOperand& dst)
+		{
+			if (is_sgpr(dst))
+			{
+				for (int i = 0; i < std::max(dst.size, 1) && sgpr_reg(dst) + i < 108; i++)
+				{
+					sgprs[sgpr_reg(dst) + i] = {};
+				}
+			} else if (is_vgpr(dst))
+			{
+				for (int i = 0; i < std::max(dst.size, 1) && vgpr_reg(dst) + i < 256; i++)
+				{
+					vgprs[vgpr_reg(dst) + i] = {};
+				}
+			}
+		};
+
 		for (const auto& inst: block_code)
 		{
+			const auto prior_sgprs = sgprs;
+			const auto index_type  = is_vgpr(inst.src[0]) ? vgprs[vgpr_reg(inst.src[0])].type : Type::Unknown;
+			clear_dst(inst.dst);
+			clear_dst(inst.dst2);
 
 			switch (inst.type)
 			{
@@ -2574,10 +2599,9 @@ static Vector<std::pair<ShaderInstruction, int>> DetectVertexFetchSemantics(cons
 				case ShaderInstructionType::SLoadDwordx4:
 				case ShaderInstructionType::SLoadDwordx8:
 				case ShaderInstructionType::SLoadDwordx16:
-					if (is_sgpr(inst.src[0]) && sgpr_reg(inst.src[0]) == attrib_reg)
+					if (is_sgpr(inst.src[0]) && sgpr_reg(inst.src[0]) == attrib_reg && operand_is_constant(inst.src[1]) &&
+					    inst.src[1].constant.i >= 0)
 					{
-						if (!operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
-						if (inst.src[1].constant.i < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[1].constant.i < 0 condition ignored (continuing)\n"); }
 						int register_id = sgpr_reg(inst.dst);
 						int index       = inst.src[1].constant.i / 4;
 						for (int i = 0; i < inst.dst.size; i++)
@@ -2586,15 +2610,14 @@ static Vector<std::pair<ShaderInstruction, int>> DetectVertexFetchSemantics(cons
 							sgprs[register_id + i].attrib_id = i + index;
 						}
 					}
-					if (is_sgpr(inst.src[0]) && sgpr_reg(inst.src[0]) == buffer_reg)
+					if (is_sgpr(inst.src[0]) && sgpr_reg(inst.src[0]) == buffer_reg && is_sgpr(inst.src[1]) &&
+					    prior_sgprs[sgpr_reg(inst.src[1])].type == Type::Attrib)
 					{
-						if (operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
-						if (is_sgpr(inst.src[1]) && sgprs[sgpr_reg(inst.src[1])].type != Type::Attrib) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: is_sgpr(inst.src[1]) && sgprs[sgpr_reg(inst.src[1])].type != Type::Attrib condition ignored (continuing)\n"); }
 						int register_id = sgpr_reg(inst.dst);
 						for (int i = 0; i < inst.dst.size; i++)
 						{
 							sgprs[register_id + i].type      = Type::Buffer;
-							sgprs[register_id + i].attrib_id = sgprs[sgpr_reg(inst.src[1])].attrib_id;
+							sgprs[register_id + i].attrib_id = prior_sgprs[sgpr_reg(inst.src[1])].attrib_id;
 						}
 					}
 					break;
@@ -2609,9 +2632,9 @@ static Vector<std::pair<ShaderInstruction, int>> DetectVertexFetchSemantics(cons
 				case ShaderInstructionType::SBfeU32:
 				case ShaderInstructionType::SAndB32:
 				case ShaderInstructionType::SLshlB32:
-					if (is_sgpr(inst.src[0]) && sgprs[sgpr_reg(inst.src[0])].type == Type::Attrib && operand_is_constant(inst.src[1]))
+					if (is_sgpr(inst.src[0]) && prior_sgprs[sgpr_reg(inst.src[0])].type == Type::Attrib && operand_is_constant(inst.src[1]))
 					{
-						sgprs[sgpr_reg(inst.dst)] = sgprs[sgpr_reg(inst.src[0])];
+						sgprs[sgpr_reg(inst.dst)] = prior_sgprs[sgpr_reg(inst.src[0])];
 					}
 					break;
 
@@ -2619,14 +2642,16 @@ static Vector<std::pair<ShaderInstruction, int>> DetectVertexFetchSemantics(cons
 				case ShaderInstructionType::BufferLoadFormatXy:
 				case ShaderInstructionType::BufferLoadFormatXyz:
 				case ShaderInstructionType::BufferLoadFormatXyzw:
-				{
-					if (!(vgprs[vgpr_reg(inst.src[0])].type == Type::Index &&
-					                       sgprs[sgpr_reg(inst.src[1])].type == Type::Buffer &&
-					                       sgprs[sgpr_reg(inst.src[2])].type == Type::Attrib)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(vgprs[vgpr_reg(inst.src[0])].type == Type::Index && condition ignored (continuing)\n"); }
-
-					load_instructions.Add({inst, sgprs[sgpr_reg(inst.src[1])].attrib_id});
+					// Only a load indexed by the vertex or instance id, through a V# of the buffer
+					// table at an attribute's offset, is an attribute fetch. Any other format load
+					// (a user-data V#, a computed index) stays a buffer load.
+					if (index_type == Type::Index && is_sgpr(inst.src[1]) &&
+					    prior_sgprs[sgpr_reg(inst.src[1])].type == Type::Buffer && is_sgpr(inst.src[2]) &&
+					    prior_sgprs[sgpr_reg(inst.src[2])].type == Type::Attrib)
+					{
+						load_instructions.Add({inst, prior_sgprs[sgpr_reg(inst.src[1])].attrib_id});
+					}
 					break;
-				}
 				default: break;
 			}
 		}
@@ -3140,10 +3165,17 @@ void Spirv::WriteFunctions()
 	    ShaderInstructionType::BufferLoadDwordx4, ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
 	    ShaderInstructionType::BufferLoadFormatXyz, ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionType::TBufferLoadFormatX,
 	    ShaderInstructionType::TBufferLoadFormatXy, ShaderInstructionType::TBufferLoadFormatXyz, ShaderInstructionType::TBufferLoadFormatXyzw});
-	const bool needs_tbuffer_load_helpers = m_code.HasAnyOf({
-	    ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy, ShaderInstructionType::BufferLoadFormatXyz,
-	    ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionType::TBufferLoadFormatX, ShaderInstructionType::TBufferLoadFormatXy,
-	    ShaderInstructionType::TBufferLoadFormatXyz, ShaderInstructionType::TBufferLoadFormatXyzw});
+	// Gen5 BUFFER_LOAD_FORMAT decodes through the shared format functions;
+	// the format helpers serve typed TBUFFER loads and the legacy encoding.
+	const bool gen5_format_loads          = SpirvUsesGen5BufferFormatLoads(m_code);
+	const bool needs_tbuffer_load_helpers = m_code.HasAnyOf({ShaderInstructionType::TBufferLoadFormatX,
+	                                                         ShaderInstructionType::TBufferLoadFormatXy,
+	                                                         ShaderInstructionType::TBufferLoadFormatXyz,
+	                                                         ShaderInstructionType::TBufferLoadFormatXyzw}) ||
+	                                        (!gen5_format_loads &&
+	                                         m_code.HasAnyOf({ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
+	                                                          ShaderInstructionType::BufferLoadFormatXyz,
+	                                                          ShaderInstructionType::BufferLoadFormatXyzw}));
 	const bool needs_buffer_store_helpers = m_code.HasAnyOf({
 	    ShaderInstructionType::BufferStoreDword, ShaderInstructionType::BufferStoreDwordx2, ShaderInstructionType::BufferStoreDwordx3,
 	    ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX, ShaderInstructionType::BufferStoreFormatXy,
@@ -3158,6 +3190,11 @@ void Spirv::WriteFunctions()
 	if (has_storage_buffers && (needs_tbuffer_load_helpers || needs_tbuffer_store_helpers))
 	{
 		m_source += TBUFFER_FORMAT_SCALAR32;
+	}
+
+	if (gen5_format_loads && (has_storage_buffers || UsesGuestDeviceAddress()))
+	{
+		m_source += SpirvGen5BufferFormatFunctions(*this, has_storage_buffers);
 	}
 
 	if (has_storage_buffers && needs_buffer_load_helpers)
@@ -3266,8 +3303,8 @@ void Spirv::FindConstants()
 		AddConstantUint(0xffffu);
 		AddConstantUint(0xfffffffcu);
 		AddConstantUint(0xffffffffu);
-		// Typed loads through an unbound V#: element sizes and the decoded formats.
-		for (uint32_t value: {4u, 8u, 12u, 16u, 20u, 22u, 29u, 36u, 39u, 71u})
+		// Loads through an unbound V#: element sizes.
+		for (uint32_t value: {4u, 8u, 12u, 16u})
 		{
 			AddConstantUint(value);
 		}
@@ -3288,6 +3325,10 @@ void Spirv::FindConstants()
 				AddConstantUint(static_cast<uint32_t>(static_cast<int32_t>(inst.flat_offset)));
 			}
 		}
+	}
+	if (SpirvUsesGen5BufferFormatLoads(m_code))
+	{
+		SpirvAddGen5BufferFormatConstants(this);
 	}
 	AddConstantFloat(0.0f);
 	AddConstantFloat(0.5f);

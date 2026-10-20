@@ -592,6 +592,12 @@ bool UsesNativeLaneExchange(const ShaderCode& code);
 // M0-relative moves lower to a named register only when M0 is a proven literal
 // in the same basic block. Returns the literal through m0 on success.
 bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0);
+// Gen5 BUFFER_LOAD_FORMAT lowers through shared functions that decode the
+// V#'s format and apply its DST_SEL; `bound_buffers` adds the storage-buffer
+// element reader next to the decoder.
+bool    SpirvUsesGen5BufferFormatLoads(const ShaderCode& code);
+void    SpirvAddGen5BufferFormatConstants(Spirv* spirv);
+String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, bool bound_buffers);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
 const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFormat::Format format);

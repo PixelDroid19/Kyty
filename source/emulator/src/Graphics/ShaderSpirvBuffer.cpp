@@ -72,7 +72,7 @@ struct BufferAddressSetup
 static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& inst, int instruction_index,
                                       uint32_t component_byte_offset, uint32_t access_size_bytes,
                                       BufferAddressRangeCheck range_check, BufferAddressSetup* setup,
-                                      bool dynamic_packed_format_width = false)
+                                      bool dynamic_format_width = false)
 {
 	EXIT_IF(spirv == nullptr);
 	EXIT_IF(setup == nullptr);
@@ -200,28 +200,20 @@ static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& ins
 		if (bound_id != "unknown_uint_constant" && access_size_id != "unknown_uint_constant")
 		{
 			String8 access_size_value = access_size_id;
-			if (dynamic_packed_format_width && (access_size_bytes == 8u || access_size_bytes == 12u))
+			if (dynamic_format_width)
 			{
-				const uint32_t packed_format = access_size_bytes == 8u ? 29u : 71u;
-				const uint32_t packed_size   = access_size_bytes == 8u ? 4u : 8u;
-				const auto     packed_format_id = spirv->GetConstantInt(static_cast<int>(packed_format));
-				const auto     packed_size_id   = spirv->GetConstantUint(packed_size);
-				if (packed_format_id == "unknown_uint_constant" || packed_size_id == "unknown_uint_constant")
-				{
-					return false;
-				}
+				// BUFFER_LOAD_FORMAT reads one element of the V#'s format; a
+				// format that does not decode keeps the instruction's width.
 				access_size_setup = String8(R"(
 		%buf_addr_format_u_<tag> = OpShiftRightLogical %uint %buf_addr_desc3_<tag> %uint_12
 		%buf_addr_format_<tag> = OpBitwiseAnd %uint %buf_addr_format_u_<tag> %uint_127
-		%buf_addr_format_i_<tag> = OpBitcast %int %buf_addr_format_<tag>
-		%buf_addr_packed_<tag> = OpIEqual %bool %buf_addr_format_i_<tag> %<packed_format>
-		%buf_addr_access_size_<tag> = OpSelect %uint %buf_addr_packed_<tag> %<packed_size> %<unpacked_size>
+		%buf_addr_format_bytes_<tag> = OpFunctionCall %uint %gen5_buffer_format_bytes %buf_addr_format_<tag>
+		%buf_addr_format_known_<tag> = OpINotEqual %bool %buf_addr_format_bytes_<tag> %uint_0
+		%buf_addr_access_size_<tag> = OpSelect %uint %buf_addr_format_known_<tag> %buf_addr_format_bytes_<tag> %<instruction_size>
 )")
 				                        .ReplaceStr("<tag>", tag)
-				                        .ReplaceStr("<packed_format>", packed_format_id)
-				                        .ReplaceStr("<packed_size>", packed_size_id)
-				                        .ReplaceStr("<unpacked_size>", access_size_id);
-				access_size_value = String8::FromPrintf("buf_addr_access_size_%s", tag.c_str());
+				                        .ReplaceStr("<instruction_size>", access_size_id);
+				access_size_value     = String8::FromPrintf("buf_addr_access_size_%s", tag.c_str());
 				resolved_access_width = access_size_value;
 			}
 			const char* vsharp_ptr = bind_info->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint";
@@ -649,10 +641,10 @@ static bool emit_guest_buffer_load(Spirv* spirv, const ShaderInstruction& inst, 
 	return true;
 }
 
-// Typed MUBUF load through a V# that no binding describes, for the formats
-// the bound lowering decodes: 32-bit components (a single one only for the
-// scalar formats 20, 22, 36 and 39), R16G16_FLOAT (29) and R16G16B16A16_FLOAT
-// (71). Any other format reads zero, as the bound lowering leaves it unread.
+// BUFFER_LOAD_FORMAT through a V# that no binding describes: the element's
+// dwords through guest device addressing, decoded by the V#'s format with its
+// DST_SEL. Only the dwords the element covers are read; an out-of-range access
+// decodes a zero element.
 static bool emit_guest_typed_buffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t components,
                                          String8* dst_source)
 {
@@ -662,40 +654,71 @@ static bool emit_guest_typed_buffer_load(Spirv* spirv, const ShaderInstruction& 
 	}
 	const auto tag    = String8::FromPrintf("gtl_%d", instruction_index);
 	const auto t      = tag.c_str();
-	const auto zero   = spirv->GetConstantFloat(0.0f);
-	const auto words  = spirv->GetConstantUint(components * 4u);
+	const auto zero   = spirv->GetConstantUint(0u);
 	String8    source = String8(R"(%<t>_fd3 = OpLoad %uint %<desc3>
 %<t>_fmt_s = OpShiftRightLogical %uint %<t>_fd3 %uint_12
 %<t>_fmt = OpBitwiseAnd %uint %<t>_fmt_s %uint_127
-%<t>_h2 = OpIEqual %bool %<t>_fmt %<f29>
-%<t>_h4 = OpIEqual %bool %<t>_fmt %<f71>
-%<t>_size_h = OpSelect %uint %<t>_h4 %<s8> %<words>
-%<t>_size = OpSelect %uint %<t>_h2 %<s4> %<t>_size_h
+%<t>_bytes = OpFunctionCall %uint %gen5_buffer_format_bytes %<t>_fmt
+%<t>_known = OpINotEqual %bool %<t>_bytes %<zero>
+%<t>_size = OpSelect %uint %<t>_known %<t>_bytes %<words>
 )")
 	                        .ReplaceStr("<t>", tag)
 	                        .ReplaceStr("<desc3>", operand_variable_to_str(inst.src[1], 3).value)
-	                        .ReplaceStr("<f29>", spirv->GetConstantUint(29u))
-	                        .ReplaceStr("<f71>", spirv->GetConstantUint(71u))
-	                        .ReplaceStr("<s4>", spirv->GetConstantUint(4u))
-	                        .ReplaceStr("<s8>", spirv->GetConstantUint(8u))
-	                        .ReplaceStr("<words>", words);
+	                        .ReplaceStr("<zero>", zero)
+	                        .ReplaceStr("<words>", spirv->GetConstantUint(components * 4u));
 	if (!emit_guest_buffer_access_begin(spirv, inst, tag, tag + "_size", &source))
 	{
 		return false;
 	}
-	// Half formats unpack their dwords; 32-bit formats store them as read.
-	const uint32_t half_words = components <= 2u ? 1u : 2u;
-	source += String8::FromPrintf("OpSelectionMerge %%%s_fmerge None\n%%%s_half = OpLogicalOr %%bool %%%s_h2 %%%s_h4\n"
-	                              "OpBranchConditional %%%s_half %%%s_fhalf %%%s_f32\n%%%s_fhalf = OpLabel\n",
-	                              t, t, t, t, t, t, t, t);
-	if (!spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", static_cast<int>(half_words), tag + "_hw", &source))
+	// The covered dword count, at most four: an element of 32-bit channels is
+	// dword aligned.
+	source += String8(R"(%<t>_lead = OpBitwiseAnd %uint %<t>_lo %<three>
+%<t>_alo = OpBitwiseAnd %uint %<t>_lo %<align>
+%<t>_span = OpIAdd %uint %<t>_lead %<t>_size
+%<t>_span_up = OpIAdd %uint %<t>_span %<three>
+%<t>_count = OpShiftRightLogical %uint %<t>_span_up %<two>
+OpSelectionMerge %<t>_wmerge None
+OpSwitch %<t>_count %<t>_w4 1 %<t>_w1 2 %<t>_w2 3 %<t>_w3
+)")
+	              .ReplaceStr("<t>", tag)
+	              .ReplaceStr("<three>", spirv->GetConstantUint(3u))
+	              .ReplaceStr("<two>", spirv->GetConstantUint(2u))
+	              .ReplaceStr("<align>", spirv->GetConstantUint(0xfffffffcu));
+	String8 phi[4];
+	for (uint32_t dwords = 1; dwords <= 4; dwords++)
 	{
-		return false;
+		const auto prefix = String8::FromPrintf("%s_r%u", t, dwords);
+		source += String8::FromPrintf("%%%s_w%u = OpLabel\n", t, dwords);
+		if (!spirv->EmitGuestLoad(tag + "_alo", tag + "_hi", static_cast<int>(dwords), prefix, &source))
+		{
+			return false;
+		}
+		source += String8::FromPrintf("OpBranch %%%s_wend%u\n%%%s_wend%u = OpLabel\nOpBranch %%%s_wmerge\n", t, dwords, t, dwords, t);
+		for (uint32_t word = 0; word < 4; word++)
+		{
+			const auto value = word < dwords ? String8::FromPrintf("%%%s_d%u", prefix.c_str(), word) : "%" + zero;
+			phi[word] += String8::FromPrintf(" %s %%%s_wend%u", value.c_str(), t, dwords);
+		}
 	}
-	for (uint32_t word = 0; word < half_words; word++)
+	source += String8::FromPrintf("%%%s_wmerge = OpLabel\n", t);
+	for (uint32_t word = 0; word < 4; word++)
 	{
-		source += String8::FromPrintf("%%%s_hp%u = OpExtInst %%v2float %%GLSL_std_450 UnpackHalf2x16 %%%s_hw_d%u\n", t, word, t, word);
+		source += String8::FromPrintf("%%%s_raw%u = OpPhi %%uint%s\n", t, word, phi[word].c_str());
 	}
+	source += String8(R"(%<t>_raw = OpCompositeConstruct %v4uint %<t>_raw0 %<t>_raw1 %<t>_raw2 %<t>_raw3
+%<t>_words = OpFunctionCall %v4uint %gen5_buffer_align_words %<t>_raw %<zero> %<t>_lead
+OpBranch %<t>_then_end
+%<t>_then_end = OpLabel
+OpBranch %<t>_merge
+%<t>_oob = OpLabel
+%<t>_zero = OpCompositeConstruct %v4uint %<zero> %<zero> %<zero> %<zero>
+OpBranch %<t>_merge
+%<t>_merge = OpLabel
+%<t>_element = OpPhi %v4uint %<t>_words %<t>_then_end %<t>_zero %<t>_oob
+%<t>_value = OpFunctionCall %v4uint %gen5_buffer_format_decode %<t>_element %<t>_fmt %<t>_fd3
+)")
+	              .ReplaceStr("<t>", tag)
+	              .ReplaceStr("<zero>", zero);
 	for (uint32_t component = 0; component < components; component++)
 	{
 		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component));
@@ -703,44 +726,9 @@ static bool emit_guest_typed_buffer_load(Spirv* spirv, const ShaderInstruction& 
 		{
 			return false;
 		}
-		source += String8::FromPrintf("%%%s_hc%u = OpCompositeExtract %%float %%%s_hp%u %u\nOpStore %%%s %%%s_hc%u\n", t, component, t,
-		                              component / 2u, component % 2u, dst.value.c_str(), t, component);
-	}
-	source += String8::FromPrintf("OpBranch %%%s_fmerge\n%%%s_f32 = OpLabel\n", t, t);
-	if (components == 1u)
-	{
-		// Only the 32-bit scalar formats decode for a single component.
-		source += String8::FromPrintf(R"(%%%s_s20 = OpIEqual %%bool %%%s_fmt %%%s
-%%%s_s22 = OpIEqual %%bool %%%s_fmt %%%s
-%%%s_s36 = OpIEqual %%bool %%%s_fmt %%%s
-%%%s_s39 = OpIEqual %%bool %%%s_fmt %%%s
-%%%s_sa = OpLogicalOr %%bool %%%s_s20 %%%s_s22
-%%%s_sb = OpLogicalOr %%bool %%%s_s36 %%%s_s39
-%%%s_scalar = OpLogicalOr %%bool %%%s_sa %%%s_sb
-OpSelectionMerge %%%s_smerge None
-OpBranchConditional %%%s_scalar %%%s_sload %%%s_szero
-%%%s_sload = OpLabel
-)",
-		                              t, t, spirv->GetConstantUint(20u).c_str(), t, t, spirv->GetConstantUint(22u).c_str(), t, t,
-		                              spirv->GetConstantUint(36u).c_str(), t, t, spirv->GetConstantUint(39u).c_str(), t, t, t, t, t, t, t,
-		                              t, t, t, t, t, t, t, t);
-	}
-	if (!spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", static_cast<int>(components), tag + "_w", &source) ||
-	    !emit_guest_store_words(inst, tag + "_w", components, &source))
-	{
-		return false;
-	}
-	if (components == 1u)
-	{
-		const auto dst = operand_variable_to_str(inst.dst, 0);
-		source += String8::FromPrintf("OpBranch %%%s_smerge\n%%%s_szero = OpLabel\nOpStore %%%s %%%s\nOpBranch %%%s_smerge\n"
-		                              "%%%s_smerge = OpLabel\n",
-		                              t, t, dst.value.c_str(), zero.c_str(), t, t);
-	}
-	source += String8::FromPrintf("OpBranch %%%s_fmerge\n%%%s_fmerge = OpLabel\n", t, t);
-	if (!emit_guest_buffer_access_end(spirv, inst, tag, components, &source))
-	{
-		return false;
+		source += String8::FromPrintf("%%%s_c%u = OpCompositeExtract %%uint %%%s_value %u\n%%%s_f%u = OpBitcast %%float %%%s_c%u\n"
+		                              "OpStore %%%s %%%s_f%u\n",
+		                              t, component, t, component, t, component, t, component, dst.value.c_str(), t, component);
 	}
 	*dst_source += source;
 	return true;
@@ -1125,29 +1113,14 @@ static bool emit_gen5_tbuffer_load(Spirv* spirv, const ShaderInstruction& inst, 
 	return true;
 }
 
-static bool emit_gen5_mubuf_format_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index,
-	                                      const char* function_name, uint32_t components, String8* dst_source)
+// BUFFER_LOAD_FORMAT through a bound V#: the element's dwords, decoded by
+// the V#'s format with its DST_SEL. An out-of-range access decodes a zero
+// element, so DST_SEL still supplies its constant ones.
+static bool emit_gen5_mubuf_format_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t components,
+                                        String8* dst_source)
 {
 	EXIT_IF(spirv == nullptr);
 	EXIT_IF(dst_source == nullptr);
-
-	const auto zero_float_id = spirv->GetConstantFloat(0.0f);
-	if (zero_float_id == "unknown_float_constant")
-	{
-		return false;
-	}
-	String8 outputs;
-	String8 zero_outputs;
-	for (uint32_t component = 0; component < components; component++)
-	{
-		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component));
-		if (dst.type != SpirvType::Float)
-		{
-			return false;
-		}
-		outputs += String8::FromPrintf(" %%%s", dst.value.c_str());
-		zero_outputs += String8::FromPrintf("               OpStore %%%s %%%s\n", dst.value.c_str(), zero_float_id.c_str());
-	}
 
 	BufferAddressSetup address_setup;
 	if (!emit_buffer_address_setup(spirv, inst, instruction_index, 0, components * 4u, BufferAddressRangeCheck::None,
@@ -1156,44 +1129,61 @@ static bool emit_gen5_mubuf_format_load(Spirv* spirv, const ShaderInstruction& i
 		return false;
 	}
 	const auto tag = String8::FromPrintf("%u_0", instruction_index);
+	String8    stores;
+	for (uint32_t component = 0; component < components; component++)
+	{
+		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component));
+		if (dst.type != SpirvType::Float)
+		{
+			return false;
+		}
+		stores += String8::FromPrintf("%%gen5_mubuf_c%u_%s = OpCompositeExtract %%uint %%gen5_mubuf_value_%s %u\n"
+		                              "%%gen5_mubuf_f%u_%s = OpBitcast %%float %%gen5_mubuf_c%u_%s\nOpStore %%%s %%gen5_mubuf_f%u_%s\n",
+		                              component, tag.c_str(), tag.c_str(), component, component, tag.c_str(), component, tag.c_str(),
+		                              dst.value.c_str(), component, tag.c_str());
+	}
 
-	String8 body = String8(R"(
-<address_setup>
-        %gen5_mubuf_format_u_<tag> = OpShiftRightLogical %uint %buf_addr_desc3_<tag> %uint_12
-        %gen5_mubuf_format_m_<tag> = OpBitwiseAnd %uint %gen5_mubuf_format_u_<tag> %uint_127
-        %gen5_mubuf_format_i_<tag> = OpBitcast %int %gen5_mubuf_format_m_<tag>
-               OpStore %temp_int_5 %gen5_mubuf_format_i_<tag>
-%gen5_mubuf_load_<tag> = OpFunctionCall %void %<function><outputs> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
-)")
-	                   .ReplaceStr("<address_setup>", address_setup.source)
-	                   .ReplaceStr("<tag>", tag)
-	                   .ReplaceStr("<function>", function_name)
-	                   .ReplaceStr("<outputs>", outputs);
+	String8 read = R"(
+        %gen5_mubuf_index_<tag> = OpLoad %int %temp_int_1
+        %gen5_mubuf_offset_<tag> = OpLoad %int %temp_int_2
+        %gen5_mubuf_stride_<tag> = OpLoad %int %temp_int_3
+        %gen5_mubuf_buffer_i_<tag> = OpLoad %int %temp_int_4
+        %gen5_mubuf_record_<tag> = OpIMul %int %gen5_mubuf_index_<tag> %gen5_mubuf_stride_<tag>
+        %gen5_mubuf_address_i_<tag> = OpIAdd %int %gen5_mubuf_offset_<tag> %gen5_mubuf_record_<tag>
+        %gen5_mubuf_address_<tag> = OpBitcast %uint %gen5_mubuf_address_i_<tag>
+        %gen5_mubuf_buffer_<tag> = OpBitcast %uint %gen5_mubuf_buffer_i_<tag>
+        %gen5_mubuf_bytes_<tag> = OpFunctionCall %uint %gen5_buffer_format_bytes %gen5_mubuf_format_<tag>
+        %gen5_mubuf_words_<tag> = OpFunctionCall %v4uint %gen5_buffer_load_words %gen5_mubuf_buffer_<tag> %gen5_mubuf_address_<tag> %gen5_mubuf_bytes_<tag>
+)";
+	String8 element = "%gen5_mubuf_words_<tag>";
 	if (!address_setup.access_enabled.IsEmpty())
 	{
-		body = String8(R"(
-<address_setup>
+		read = R"(
                OpSelectionMerge %gen5_mubuf_load_merge_<tag> None
                OpBranchConditional <access_enabled> %gen5_mubuf_load_then_<tag> %gen5_mubuf_load_oob_<tag>
-        %gen5_mubuf_load_then_<tag> = OpLabel
-        %gen5_mubuf_format_u_<tag> = OpShiftRightLogical %uint %buf_addr_desc3_<tag> %uint_12
-        %gen5_mubuf_format_m_<tag> = OpBitwiseAnd %uint %gen5_mubuf_format_u_<tag> %uint_127
-        %gen5_mubuf_format_i_<tag> = OpBitcast %int %gen5_mubuf_format_m_<tag>
-               OpStore %temp_int_5 %gen5_mubuf_format_i_<tag>
-%gen5_mubuf_load_<tag> = OpFunctionCall %void %<function><outputs> %temp_int_1 %temp_int_2 %temp_int_3 %temp_int_4 %temp_int_5
+        %gen5_mubuf_load_then_<tag> = OpLabel)" +
+		       read + R"(
                OpBranch %gen5_mubuf_load_merge_<tag>
         %gen5_mubuf_load_oob_<tag> = OpLabel
-<zero_outputs>               OpBranch %gen5_mubuf_load_merge_<tag>
+        %gen5_mubuf_zero_<tag> = OpCompositeConstruct %v4uint %<zero> %<zero> %<zero> %<zero>
+               OpBranch %gen5_mubuf_load_merge_<tag>
         %gen5_mubuf_load_merge_<tag> = OpLabel
-)")
-		           .ReplaceStr("<address_setup>", address_setup.source)
-		           .ReplaceStr("<access_enabled>", address_setup.access_enabled)
-		           .ReplaceStr("<tag>", tag)
-		           .ReplaceStr("<function>", function_name)
-		           .ReplaceStr("<outputs>", outputs)
-		           .ReplaceStr("<zero_outputs>", zero_outputs);
+        %gen5_mubuf_element_<tag> = OpPhi %v4uint %gen5_mubuf_words_<tag> %gen5_mubuf_load_then_<tag> %gen5_mubuf_zero_<tag> %gen5_mubuf_load_oob_<tag>
+)";
+		element = "%gen5_mubuf_element_<tag>";
 	}
-	*dst_source += body;
+	*dst_source += (String8(R"(
+<address_setup>
+        %gen5_mubuf_format_u_<tag> = OpShiftRightLogical %uint %buf_addr_desc3_<tag> %uint_12
+        %gen5_mubuf_format_<tag> = OpBitwiseAnd %uint %gen5_mubuf_format_u_<tag> %uint_127
+)") + read + R"(
+        %gen5_mubuf_value_<tag> = OpFunctionCall %v4uint %gen5_buffer_format_decode <element> %gen5_mubuf_format_<tag> %buf_addr_desc3_<tag>
+)" + stores)
+	                   .ReplaceStr("<address_setup>", address_setup.source)
+	                   .ReplaceStr("<access_enabled>", address_setup.access_enabled)
+	                   .ReplaceStr("<element>", element)
+	                   .ReplaceStr("<zero>", spirv->GetConstantUint(0u))
+	                   .ReplaceStr("<tag>", tag);
 	return true;
 }
 
@@ -1663,7 +1653,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_x", 1, dst_source);
+			return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), 1, dst_source);
 		}
 
 		// EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.src[0]));
@@ -1734,7 +1724,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXy_Vdata2VaddrSvSoffsIdxen)
 	{
 		return false;
 	}
-	return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xy", 2, dst_source);
+	return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), 2, dst_source);
 }
 
 // buffer_load_format_xyz: Gen5 unified format 74 is R32G32B32_SFLOAT. The
@@ -1753,7 +1743,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxen)
 	{
 		return false;
 	}
-	return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyz", 3, dst_source);
+	return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), 3, dst_source);
 }
 
 // buffer_load_format_xyzw v[0:3], v4, s[0:3], 0, idxen — same addressing as
@@ -1772,7 +1762,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyzw", 4, dst_source);
+			return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), 4, dst_source);
 		}
 
 		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }

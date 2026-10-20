@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderBufferFormat.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderStorageImage.h"
 #include "Emulator/Graphics/Utils.h"
@@ -809,6 +810,67 @@ TEST(EmulatorGraphicsResources, RawRgb565AndHistoricalBc1HaveSeparateNamespaces)
 	EXPECT_TRUE(Gen5IsBc1PackageFormat(170u));
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 10u, 0u, 0u), VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(66u).format, VK_FORMAT_R16G16B16A16_SNORM);
+}
+
+// BUFFER_LOAD_FORMAT decodes exactly the buffer formats of RDNA2 ISA table 47,
+// and agrees with the vertex input table wherever both describe a format.
+TEST(EmulatorGraphicsResources, Gen5BufferFormatsCoverIsaTableAndAgreeWithVertexInput)
+{
+	uint32_t   count   = 0;
+	const auto formats = ShaderGen5BufferFormats(&count);
+	std::vector<uint32_t> listed;
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const auto& format = formats[i];
+		listed.push_back(format.format);
+		EXPECT_EQ(ShaderGen5BufferFormat(format.format), &format);
+		ASSERT_GE(format.channels, 1u);
+		ASSERT_LE(format.channels, 4u);
+		uint32_t next_bit = 0;
+		for (uint32_t c = 0; c < format.channels; c++)
+		{
+			const auto layout = format.layout[c];
+			EXPECT_EQ(layout.offset, next_bit) << format.format;
+			// A channel never straddles a dword.
+			EXPECT_EQ(layout.offset / 32u, (layout.offset + layout.bits - 1u) / 32u) << format.format;
+			next_bit = layout.offset + layout.bits;
+		}
+		EXPECT_EQ(next_bit, format.bytes * 8u) << format.format;
+
+		const auto vertex = VulkanResolveGen5VertexInputFormat(format.format);
+		if (vertex.format != VK_FORMAT_UNDEFINED)
+		{
+			EXPECT_EQ(vertex.component_count, format.channels) << format.format;
+			EXPECT_EQ(vertex.element_bytes, format.bytes) << format.format;
+		}
+	}
+	std::vector<uint32_t> isa;
+	for (uint32_t format = 1; format <= 77; format++)
+	{
+		const bool gap = (format >= 30 && format <= 35) || (format >= 37 && format <= 42) || format == 46 || format == 47;
+		if (!gap)
+		{
+			isa.push_back(format);
+		}
+	}
+	EXPECT_EQ(listed, isa);
+	EXPECT_EQ(ShaderGen5BufferFormat(0u), nullptr);
+	EXPECT_EQ(ShaderGen5BufferFormat(78u), nullptr);
+
+	// Packed formats keep X in the low bits, as their image formats do.
+	const auto* r11g11b10 = ShaderGen5BufferFormat(36u);
+	ASSERT_NE(r11g11b10, nullptr);
+	EXPECT_EQ(r11g11b10->layout[0].bits, 11u);
+	EXPECT_EQ(r11g11b10->layout[2].offset, 22u);
+	const auto* a2b10g10r10 = ShaderGen5BufferFormat(50u);
+	ASSERT_NE(a2b10g10r10, nullptr);
+	EXPECT_EQ(a2b10g10r10->layout[0].bits, 10u);
+	EXPECT_EQ(a2b10g10r10->layout[3].offset, 30u);
+	const auto* snorm8 = ShaderGen5BufferFormat(57u);
+	ASSERT_NE(snorm8, nullptr);
+	EXPECT_EQ(snorm8->number, ShaderBufferNumber::Snorm);
+	EXPECT_EQ(snorm8->channels, 4u);
+	EXPECT_EQ(snorm8->bytes, 4u);
 }
 
 TEST(EmulatorGraphicsResources, SampledComponentViewsAgreeAcrossUploadRenderAndStorageBackings)

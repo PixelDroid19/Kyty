@@ -5757,11 +5757,11 @@ TEST(EmulatorGraphicsPackets, Gen5LiveBufferAtomicUsesResolvedStorageSlot)
 	EXPECT_EQ(source.FindIndex("%buf_addr_hieq_0_0_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%buf_addr_access_final_0_0 = OpLogicalAnd %bool %buf_addr_access_enabled_0_0 %buf_addr_valid_c_0_0"),
 	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%buf_addr_access_size_1_0 = OpSelect %uint %buf_addr_packed_1_0 %uint_8 %uint_12"),
+	EXPECT_NE(source.FindIndex("%buf_addr_access_size_1_0 = OpSelect %uint %buf_addr_format_known_1_0 %buf_addr_format_bytes_1_0 %uint_12"),
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpBranchConditional %buf_addr_valid_c_1_0 %gen5_mubuf_load_then_1_0 %gen5_mubuf_load_oob_1_0"),
 	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%buf_addr_access_size_2_0 = OpSelect %uint %buf_addr_packed_2_0 %uint_4 %uint_8"),
+	EXPECT_NE(source.FindIndex("%buf_addr_access_size_2_0 = OpSelect %uint %buf_addr_format_known_2_0 %buf_addr_format_bytes_2_0 %uint_8"),
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_3_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_3_0_0 %uint_16"),
 	          Core::STRING8_INVALID_INDEX);
