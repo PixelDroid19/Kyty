@@ -28,24 +28,39 @@ temporary diagnostics (removed).
 - **Colour grading volume (open, cause localized).** The last scene pass
   before the display copy encodes colour with a log curve (scale 1/14,
   offset 0.6107) and samples a 32x32x32 volume at `x * 31/32 + 1/64`.
-  - The only 32x32x32 volume bound in these runs is a format 50
-    (2_10_10_10) mode-27 volume. It is uploaded once, at present 2, from
-    guest memory that is all zero, and never again.
+  - A bind trace (one run, 200 s) shows that this pass samples a format 50
+    (2_10_10_10) mode-27 32x32x32 volume. That volume is uploaded once, at
+    present 2, from guest memory that is all zero, and never again.
   - No RenderTexture, StorageTexture or StorageBuffer is created over its
-    range, and no draw has a colour target at its base, so no tracked GPU
-    write ever fills it.
+    range, and no emitted draw has a colour target at its base, so no
+    tracked GPU write ever fills it.
+  - The other 32x32x32 volume in these runs (format 71 RGBA16F, tile 9, a
+    CPU upload at present 336) is not a grading table. Its values are
+    signed (about -4 to +4), alpha is 0, and no channel rises along an
+    axis. The detiled data is smoother than the same bytes read as linear,
+    and equally smooth along x, y and z (mean neighbour difference 2.0,
+    2.2, 2.1 against 2.6, 4.3, 6.1). That supports the standard-volume
+    detile.
   - Every run reports skipped draws with reason `unsupported_ge_state`
-    (more than 1,000 by 47 s). The first, at 18.7 s: stages 0x2030, ES and
-    merged GS back, NGG, `max_vert_out` 3, triangle-strip output. The
-    renderer does not run merged ES+GS programs (see the robot platformer's
-    skipped geometry-shader draws).
-  - Hypothesis, not yet proven: the volume is written by a layered ES+GS
-    draw (one primitive per slice) that the renderer skips. Not yet shown:
-    that the tonemap pass binds this volume, and that a skipped draw
-    targets its address. A zero volume alone would give a near-black
-    image, so the tint needs that check too.
-  - Next: record the skipped draw's colour target and layer setup, then
-    implement merged ES+GS execution.
+    (more than 1,000 by 47 s), all from one program. The first is at
+    present 2, the present at which the volume is created. Its state:
+    stages 0x2030 (ES and merged GS back, NGG), `max_vert_out` 3,
+    triangle-strip output, and `PA_CL_VS_OUT_CNTL` 0x1240000, which sets
+    `USE_VTX_RENDER_TARGET_INDX`.
+  - A disassembly of the retained ES and GS programs shows a pass-through
+    geometry stage. The ES loads a position and a UV, and stores the
+    instance id plus a constant as the layer in LDS. The GS reads each
+    input triangle, emits it unchanged as a three-vertex strip, and
+    exports `prim`, `pos0`, the layer in `pos1.z` and the UV in `param0`.
+    One instanced draw thus writes one quad into each slice.
+  - The renderer does not run merged ES+GS programs (see the robot
+    platformer's skipped geometry-shader draws), so the table stays zero.
+    The skip report does not record the colour target, so the target
+    address of the skipped draw is inferred from its timing and layer
+    output, not observed. Why a zero table gives two equal channels
+    instead of a black image is not explained yet.
+  - Next: execute merged ES+GS programs, then check that the grading
+    table fills and the tint disappears.
 - **Stops removed (not seen again after the fix).**
   - b3fa459b: a 16x1020 RGBA16F mode-27 storage view of 0x100000 bytes
     over an idle 0x90000 StorageBuffer whose writes were already written
