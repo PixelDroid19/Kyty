@@ -1737,6 +1737,13 @@ struct ShaderComputeUniformBufferFillEvidence
 	uint32_t record_bytes               = 16;
 	int      count_register             = -1;
 	int      period_register            = -1;
+	// The constant form stores one inline or literal value with
+	// buffer_store_format_x at every invocation index; value_registers stay -1.
+	bool     value_is_constant          = false;
+	uint32_t constant_value             = 0;
+	// The loaded form stores the first word of the one-descriptor source at
+	// this SGPR, read with s_buffer_load_dword, the same way.
+	int      value_buffer_register      = -1;
 };
 
 // Structural evidence for one narrowly defined compute metadata-fill family.

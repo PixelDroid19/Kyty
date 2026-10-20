@@ -241,7 +241,8 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	const auto& proof = input.uniform_buffer_fill;
 	const auto& buffers = input.bind.storage_buffers;
 
-	if (!proof.valid || buffers.buffers_num != 1 || input.bind.textures2D.textures_num != 0 ||
+	const bool loaded_value = proof.value_buffer_register >= 0;
+	if (!proof.valid || buffers.buffers_num != (loaded_value ? 2 : 1) || input.bind.textures2D.textures_num != 0 ||
 	    input.bind.samplers.samplers_num != 0 || ShaderGdsBufferBound(input.bind.gds_pointers) ||
 	    proof.workgroup_shift > 10u || proof.workgroup_register != input.workgroup_register ||
 	    input.threads_num[0] != (1u << proof.workgroup_shift) || input.threads_num[1] != 1u || input.threads_num[2] != 1u ||
@@ -250,14 +251,36 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	{
 		return false;
 	}
-	const auto& destination = buffers.buffers[0];
-	if (buffers.start_register[0] != proof.destination_start_register || buffers.accesses[0] != ShaderStorageAccess::Typed ||
-	    (buffers.sources[0] != ShaderStorageBindingSource::DirectResource && buffers.sources[0] != ShaderStorageBindingSource::MetadataSharp) ||
-	    !buffers.code_available[0] || !buffers.exact_matches[0] || buffers.unbased_matches[0] || buffers.decoded_unknown[0] ||
-	    buffers.indirect_descriptor_use[0] || ShaderStorageUsageIsReadOnly(buffers.usages[0]) || destination.SwizzleEnabled() ||
-	    destination.IndexStride() != 0u || destination.AddTid())
+	const auto binding_is_exact = [&](int index, bool read_only)
+	{
+		const auto& sharp = buffers.buffers[index];
+		return (buffers.sources[index] == ShaderStorageBindingSource::DirectResource ||
+		        buffers.sources[index] == ShaderStorageBindingSource::MetadataSharp) &&
+		       buffers.code_available[index] && buffers.exact_matches[index] && !buffers.unbased_matches[index] &&
+		       !buffers.decoded_unknown[index] && !buffers.indirect_descriptor_use[index] &&
+		       ShaderStorageUsageIsReadOnly(buffers.usages[index]) == read_only && !sharp.SwizzleEnabled() &&
+		       sharp.IndexStride() == 0u && !sharp.AddTid();
+	};
+	const int   destination_index = buffers.start_register[0] == proof.destination_start_register ? 0 : 1;
+	const auto& destination       = buffers.buffers[destination_index];
+	if (destination_index >= buffers.buffers_num || buffers.start_register[destination_index] != proof.destination_start_register ||
+	    buffers.accesses[destination_index] != ShaderStorageAccess::Typed || !binding_is_exact(destination_index, false))
 	{
 		return false;
+	}
+	// The loaded value is read at record time from a source the CPU wrote; one
+	// with GPU writes behind it has no stable value here.
+	uint32_t loaded_word = 0;
+	if (loaded_value)
+	{
+		const int   source_index = 1 - destination_index;
+		const auto& source       = buffers.buffers[source_index];
+		if (buffers.start_register[source_index] != proof.value_buffer_register || !binding_is_exact(source_index, true) ||
+		    source.Base48() == 0u || ShaderBufferByteSize(source.Stride(), source.NumRecords()) < sizeof(loaded_word) ||
+		    !GpuMemoryCaptureSnapshotReadOnlyBuffer(source.Base48(), sizeof(loaded_word), &loaded_word))
+		{
+			return false;
+		}
 	}
 	// Each live scalar input is one unique user-data SGPR.
 	const auto user_sgpr = [&](int reg, uint32_t* value)
@@ -288,6 +311,17 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 		{
 			if (!user_sgpr(proof.value_registers[component], &words[component])) { return false; }
 		}
+	} else if (proof.value_is_constant || loaded_value)
+	{
+		// BUF_FMT_32_UINT, one record per invocation; the store writes X only.
+		// Whole 16-byte groups keep the fill a repeated word quad.
+		if (proof.record_bytes != 4u || destination.Stride() != 4u || destination.Format() != 20u ||
+		    (destination.DstSelXYZW() & 7u) != 4u || destination.NumRecords() == 0u || destination.NumRecords() % 4u != 0u ||
+		    invocations != destination.NumRecords())
+		{
+			return false;
+		}
+		words.fill(loaded_value ? loaded_word : proof.constant_value);
 	} else
 	{
 		// BUF_FMT_32_UINT. A period of 1 repeats the first value; the count must

@@ -140,6 +140,99 @@ ShaderCode UniformBufferFillCode(const UniformBufferFillPattern& pattern)
 	return code;
 }
 
+// v_lshl_add_u32 v0, s4, 6, v0; v_mov_b32 v1, <value>; buffer_store_format_x v1, v0, s[0:3], 0 idxen; s_endpgm
+ShaderCode ConstantBufferFillCode(uint32_t value)
+{
+	ShaderCode code {};
+	code.SetType(ShaderType::Compute);
+	uint32_t pc  = 0;
+	auto     add = [&code, &pc](ShaderInstruction instruction)
+	{
+		instruction.pc = pc;
+		pc += 4u;
+		code.GetInstructions().Add(instruction);
+	};
+
+	ShaderInstruction index {};
+	index.type    = ShaderInstructionType::VLshlAddU32;
+	index.format  = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+	index.dst     = UniformBufferFillVgpr(0);
+	index.src[0]  = UniformBufferFillSgpr(4);
+	index.src[1]  = UniformBufferFillInline(6u);
+	index.src[2]  = UniformBufferFillVgpr(0);
+	index.src_num = 3;
+	add(index);
+
+	ShaderInstruction move {};
+	move.type    = ShaderInstructionType::VMovB32;
+	move.format  = ShaderInstructionFormat::SVdstSVsrc0;
+	move.dst     = UniformBufferFillVgpr(1);
+	move.src[0]  = UniformBufferFillInline(value);
+	move.src_num = 1;
+	add(move);
+
+	ShaderInstruction store {};
+	store.type         = ShaderInstructionType::BufferStoreFormatX;
+	store.format       = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	store.dst          = UniformBufferFillVgpr(1);
+	store.src[0]       = UniformBufferFillVgpr(0);
+	store.src[1]       = UniformBufferFillSgpr(0, 4);
+	store.src[2]       = UniformBufferFillInline(0u);
+	store.src_num      = 3;
+	store.buffer_idxen = true;
+	add(store);
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	add(end);
+	return code;
+}
+
+// v_lshl_add_u32 v0, s8, 6, v0; s_buffer_load_dword vcc_lo, s[4:7], 0; s_waitcnt; v_mov_b32 v1, vcc_lo;
+// buffer_store_format_x v1, v0, s[0:3], 0 idxen; s_endpgm
+ShaderCode LoadedBufferFillCode()
+{
+	auto  code         = ConstantBufferFillCode(0u);
+	auto& instructions = code.GetInstructions();
+	instructions[0].src[0] = UniformBufferFillSgpr(8);
+
+	ShaderOperand vcc_lo {};
+	vcc_lo.type = ShaderOperandType::VccLo;
+	vcc_lo.size = 1;
+
+	ShaderInstruction load {};
+	load.type    = ShaderInstructionType::SBufferLoadDword;
+	load.format  = ShaderInstructionFormat::SdstSvSoffset;
+	load.dst     = vcc_lo;
+	load.src[0]  = UniformBufferFillSgpr(4, 4);
+	load.src[1]  = UniformBufferFillInline(0u);
+	load.src_num = 2;
+
+	ShaderInstruction wait {};
+	wait.type              = ShaderInstructionType::SWaitcnt;
+	wait.format            = ShaderInstructionFormat::Imm;
+	wait.src[0].type       = ShaderOperandType::LiteralConstant;
+	wait.src[0].constant.u = 0u;
+	wait.src_num           = 1;
+
+	auto move   = instructions[1];
+	move.src[0] = vcc_lo;
+	auto store  = instructions[2];
+	auto end    = instructions[3];
+
+	ShaderCode loaded {};
+	loaded.SetType(ShaderType::Compute);
+	uint32_t pc = 0;
+	for (auto instruction: {instructions[0], load, wait, move, store, end})
+	{
+		instruction.pc = pc;
+		pc += 4u;
+		loaded.GetInstructions().Add(instruction);
+	}
+	return loaded;
+}
+
 UniformBufferFillPattern UniformBufferFillTestPattern()
 {
 	return {
@@ -195,6 +288,63 @@ TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRecognizesRenamedRegister
 			EXPECT_EQ(evidence.value_registers[component], pattern.value_registers[component]);
 		}
 	}
+}
+
+TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRecognizesConstantStore)
+{
+	const auto evidence = AnalyzeShaderComputeUniformBufferFill(ConstantBufferFillCode(0u));
+	ASSERT_TRUE(evidence.valid);
+	EXPECT_TRUE(evidence.value_is_constant);
+	EXPECT_EQ(evidence.constant_value, 0u);
+	EXPECT_EQ(evidence.record_bytes, 4u);
+	EXPECT_EQ(evidence.destination_start_register, 0);
+	EXPECT_EQ(evidence.workgroup_register, 4);
+	EXPECT_EQ(evidence.workgroup_shift, 6u);
+
+	auto scalar_value = ConstantBufferFillCode(0u);
+	scalar_value.GetInstructions()[1].src[0] = UniformBufferFillSgpr(9);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(scalar_value).valid);
+
+	auto clobbered_index = ConstantBufferFillCode(0u);
+	clobbered_index.GetInstructions()[1].dst = UniformBufferFillVgpr(0);
+	clobbered_index.GetInstructions()[2].dst = UniformBufferFillVgpr(0);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(clobbered_index).valid);
+
+	auto vector_offset = ConstantBufferFillCode(0u);
+	vector_offset.GetInstructions()[2].buffer_offen = true;
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(vector_offset).valid);
+
+	auto workgroup_in_descriptor = ConstantBufferFillCode(0u);
+	workgroup_in_descriptor.GetInstructions()[0].src[0] = UniformBufferFillSgpr(2);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(workgroup_in_descriptor).valid);
+}
+
+TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRecognizesLoadedStore)
+{
+	const auto evidence = AnalyzeShaderComputeUniformBufferFill(LoadedBufferFillCode());
+	ASSERT_TRUE(evidence.valid);
+	EXPECT_FALSE(evidence.value_is_constant);
+	EXPECT_EQ(evidence.value_buffer_register, 4);
+	EXPECT_EQ(evidence.record_bytes, 4u);
+	EXPECT_EQ(evidence.destination_start_register, 0);
+	EXPECT_EQ(evidence.workgroup_register, 8);
+	EXPECT_EQ(evidence.workgroup_shift, 6u);
+
+	auto nonzero_offset = LoadedBufferFillCode();
+	nonzero_offset.GetInstructions()[1].src[1] = UniformBufferFillInline(4u);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(nonzero_offset).valid);
+
+	auto other_scalar = LoadedBufferFillCode();
+	other_scalar.GetInstructions()[3].src[0] = UniformBufferFillSgpr(9);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(other_scalar).valid);
+
+	auto source_is_destination = LoadedBufferFillCode();
+	source_is_destination.GetInstructions()[1].src[0] = UniformBufferFillSgpr(0, 4);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(source_is_destination).valid);
+
+	auto workgroup_in_source = LoadedBufferFillCode();
+	workgroup_in_source.GetInstructions()[0].src[0] = UniformBufferFillSgpr(5);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(workgroup_in_source).valid);
 }
 
 TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRejectsClobberedIndexAndNonScalarValues)
