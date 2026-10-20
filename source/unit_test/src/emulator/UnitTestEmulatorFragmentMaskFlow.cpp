@@ -1058,6 +1058,45 @@ TEST(EmulatorFragmentMaskFlow, VccBranchRequiresUniformityOfTheWholePair)
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
+// s_cselect_b64 vcc, exec, 0 on a compare of a scalar number, then s_cbranch_vccz over a scalar write that a
+// vector reads after the join; with `narrowed_exec` a lane compare narrows EXEC first and the read follows
+// its restore.
+std::vector<Words> SelectedExecBranch(bool narrowed_exec)
+{
+	std::vector<Words> slots(1);
+	auto& words = slots[0];
+	words.insert(words.end(), {0xf4200508u, 0xfa000004u}); // s_buffer_load_dword s20, s[16:19], 4
+	Sopp(words, 12, 0xc07f);                               // s_waitcnt lgkmcnt(0)
+	if (narrowed_exec)
+	{
+		Append(words, Vopc(4, Inline(0), 0));  // v_cmp_gt_f32 vcc, 0, v0
+		Sop1(words, 36, 4, kVccLo);            // s_and_saveexec_b64 s[4:5], vcc
+	}
+	Append(words, Sopc(6, 20, Inline(0)));     // s_cmp_eq_u32 s20, 0
+	Sop2(words, 11, kVccLo, kExecLo, Inline(0)); // s_cselect_b64 vcc, exec, 0
+	Sopp(words, 6, 1);                         // s_cbranch_vccz over the scalar write
+	Sop1(words, 3, 21, Inline(1));             // s_mov_b32 s21, 1
+	if (narrowed_exec) { Sop1(words, 4, kExecLo, 4); } // s_mov_b64 exec, s[4:5]
+	Vop1(words, 1, 3, 21);                     // v_mov_b32 v3, s21
+	Vop1(words, 1, 2, Inline(0));
+	Append(words, Mrt0Export(2, 2, 2, 2));
+	Sopp(words, 1);
+	return slots;
+}
+
+TEST(EmulatorFragmentMaskFlow, ExecSelectedOnAUniformSccIsUniformOnlyUnderTheEntryExec)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(SelectedExecBranch(false)), 64u).lane_local,
+		      "EXEC or nothing, chosen by a scalar compare, decides the same way for every host subgroup");
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(ParsePixel(SelectedExecBranch(true)), 64u);
+		Check(!flow.lane_local && Contains(flow.reason, "divergent control flow"),
+		      "under a lane-narrowed EXEC a host subgroup with no active lane decides alone");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 // A compare of a scalar number whose destination pair overwrites that number decides the same way for every lane.
 TEST(EmulatorFragmentMaskFlow, ACompareOverwritingItsScalarSourceStaysUniform)
 {

@@ -448,6 +448,7 @@ private:
 	void                  UpdateScc(const ShaderInstruction& inst, uint8_t source_taint);
 	bool                  UniformComparison(const ShaderInstruction& inst) const;
 	void                  TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources, bool uniform_comparison);
+	[[nodiscard]] bool    SelectsExecOnUniformScc(const ShaderInstruction& inst) const;
 	[[nodiscard]] bool    IsUniformMask(const ShaderOperand& operand) const;
 	[[nodiscard]] bool    IsUniformMaskIn(const std::bitset<kWords>& masks, const ShaderOperand& operand) const;
 	void                  SetUniformMask(const ShaderOperand& dst, bool uniform);
@@ -792,7 +793,20 @@ void Flow::TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWo
 	const bool combined = (inst.type == Type::SAndB64 || inst.type == Type::SAndB32 || inst.type == Type::SOrB64 ||
 	                       inst.type == Type::SOrB32) &&
 	                      inst.src_num == 2 && uniform(inst.src[0]) && uniform(inst.src[1]);
-	if (copy || narrowed || combined) { SetUniformMask(inst.dst, true); }
+	if (copy || narrowed || combined || SelectsExecOnUniformScc(inst)) { SetUniformMask(inst.dst, true); }
+}
+
+// S_CSELECT EXEC or 0 on a uniform SCC: every active lane gets SCC. A host subgroup answers a VCC test for its
+// own lanes, so EXEC must keep a lane of every launched quad, as the entry EXEC does; a subgroup with no active
+// lane would decide alone and its lanes would carry that path's scalars once EXEC is restored.
+bool Flow::SelectsExecOnUniformScc(const ShaderInstruction& inst) const
+{
+	if (!IsSelect(inst.type) || inst.src_num != 2 || inst.dst.type == Operand::ExecLo) { return false; }
+	if (m_state.scalar[kSccWord] != kClean || (m_state.scalar[kExecLoWord] & (kOuter | kMissesQuad)) != 0u) { return false; }
+	const auto zero = [](const ShaderOperand& operand) { return IsConstant(operand) && operand.constant.u == 0u; };
+	const auto& a   = inst.src[0];
+	const auto& b   = inst.src[1];
+	return (a.type == Operand::ExecLo && zero(b)) || (b.type == Operand::ExecLo && zero(a));
 }
 
 // A vector compare of constants and scalar numbers gives every lane the same bit.
