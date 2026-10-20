@@ -1493,12 +1493,29 @@ static bool get_stencil_op(VkStencilOp* f, uint32_t* ref, uint8_t op, uint8_t te
 			vk = VK_STENCIL_OP_REPLACE;
 			r  = testval;
 			break;                                                /* ReplaceTest    */
-		case 0x04: vk = VK_STENCIL_OP_REPLACE; break;             /* ReplaceOp      */
-		case 0x05: vk = VK_STENCIL_OP_INCREMENT_AND_CLAMP; break; /* AddClamp       */
-		case 0x06: vk = VK_STENCIL_OP_DECREMENT_AND_CLAMP; break; /* SubClamp       */
-		case 0x07: vk = VK_STENCIL_OP_INVERT; break;              /* Invert         */
-		case 0x08: vk = VK_STENCIL_OP_INCREMENT_AND_WRAP; break;  /* AddWrap        */
-		case 0x09: vk = VK_STENCIL_OP_DECREMENT_AND_WRAP; break;  /* SubWrap        */
+		case 0x04: vk = VK_STENCIL_OP_REPLACE; break; /* ReplaceOp      */
+		// Vulkan's increment, decrement and invert ops never read the reference,
+		// so they must not displace the compare value (STENCILTESTVAL).
+		case 0x05:
+			vk      = VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+			use_ref = false;
+			break; /* AddClamp       */
+		case 0x06:
+			vk      = VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+			use_ref = false;
+			break; /* SubClamp       */
+		case 0x07:
+			vk      = VK_STENCIL_OP_INVERT;
+			use_ref = false;
+			break; /* Invert         */
+		case 0x08:
+			vk      = VK_STENCIL_OP_INCREMENT_AND_WRAP;
+			use_ref = false;
+			break; /* AddWrap        */
+		case 0x09:
+			vk      = VK_STENCIL_OP_DECREMENT_AND_WRAP;
+			use_ref = false;
+			break; /* SubWrap        */
 		case 0x0a:                                                /* And            */
 		case 0x0b:                                                /* Or             */
 		case 0x0c:                                                /* Xor            */
