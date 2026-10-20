@@ -4,6 +4,41 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## EXECZ skip over a join shared with an outer branch (2026-10-20)
+
+- **Symptom.** The well platformer stopped at 77-122 s on the new-game
+  route: a pixel shader (crc d0354e07) failed SPIR-V validation ("branches
+  to the selection construct, but not to the selection header").
+- **Shape.** A uniform `s_cbranch_scc0` at 0x38 targets 0x98. Its
+  fallthrough masks EXEC, and `s_cbranch_execz` at 0x50 skips to 0xe0, past
+  0x98. Rule 1 of `FindReconvergence` merges the uniform branch at 0x98, but
+  the skip can bypass 0x98. Block 0x98 is shared by two regions that are
+  not nested, so no structured selection expresses the program.
+- **Fix.** A parse pass (`ShaderExecSkip.cpp`) removes an
+  `s_cbranch_execz` when three conditions hold:
+  - another branch, from outside the skipped range, lands inside it;
+  - every instruction in the range only has EXEC-masked effects, or
+    defines scalar words (no EXEC writes, no memory writes, no exports,
+    no `v_writelane`);
+  - none of those scalar words (including implicit SCC and VCC) is read
+    on any path from the target before being redefined.
+
+  Under these conditions, running the range with an empty EXEC leaves the
+  same state as the skip. Here the range writes only `vcc`, which is dead
+  after 0xe0. A nested skip, where nothing enters the range from outside,
+  is kept, so empty waves still skip their work. The parser's fallthrough
+  label for the removed branch is disabled with it. Translator version 141.
+- **Tests.** One unit test reproduces the validator error without the
+  pass and validates the SPIR-V with it. A second test keeps the skip when
+  the target reads a scalar the range defines. The compute-wave equivalence
+  and fragment mask-flow suites still pass (2480 tests).
+- **Verified.** Intel Arc A770, Mesa ANV 26.2.5, new-game route. Before
+  the fix the well platformer stopped at 85 s. A first version of the pass
+  (without the entered-from-outside condition) ran 181 s and reached
+  gameplay (frame 6827). The final version ran 101 s in the ten-title sweep
+  without a stop. All ten titles ended with status 1. A 180 s run of the
+  final version, past the 122 s stop seen before, is still pending.
+
 ## Descriptor churn and frame hitches on Intel (2026-10-19)
 
 - **Hosts and method.** Intel Arc A770, Mesa ANV 26.2.5, Xe kernel driver,

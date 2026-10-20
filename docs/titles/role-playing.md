@@ -95,11 +95,12 @@ changes below, with temporary diagnostics (removed).
   the uniform branch at 0x98. The fallthrough can bypass 0x98, so the real
   post-dominator is 0xe0, and 0x98 is shared by two regions that are not
   nested. The stop has appeared at 77-122 s on the new-game route since
-  f7aad0aa and never in the runs of 2026-10-19 and earlier. The suspect
-  range is 10611591..f7aad0aa. It is not fixed. Two directions: drop an
-  `s_cbranch_execz` whose skipped range has only EXEC-guarded effects and
-  whose scalar definitions are dead at the target (here `vcc` is dead after
-  0xe0); or require post-dominance in rule 1 and restructure.
+  f7aad0aa and never in the runs of 2026-10-19 and earlier. No commit in
+  10611591..f7aad0aa touches reconvergence or control flow, and the 0xe0
+  export is MRT0 (not the NULL target of d4029dc2), so the program is more
+  likely newly reached than newly broken. Fixed: see "EXECZ skip over a
+  join shared with an outer branch (2026-10-20)" in the cross-title
+  records.
 - **Open.**
   - The hull/domain fusion path of these programs is not exercised.
   - The register window defect: fetch reads `s4..s7` regardless of the

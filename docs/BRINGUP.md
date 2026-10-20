@@ -83,6 +83,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [Roguelike platformer](titles/roguelike-platformer.md)
   - A roguelike reaches gameplay (2026-10-07)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - EXECZ skip over a join shared with an outer branch (2026-10-20)
   - Descriptor churn and frame hitches on Intel (2026-10-19)
   - Open: WAIT_REG_MEM poll address 1 crashes the command processor (2026-10-17)
   - Index snapshots over linked surfaces (2026-10-17)

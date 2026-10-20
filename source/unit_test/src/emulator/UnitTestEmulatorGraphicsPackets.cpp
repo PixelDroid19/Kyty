@@ -28,6 +28,7 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
+#include "../../../emulator/src/Graphics/ShaderParseInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvScJoin.h"
@@ -9295,6 +9296,88 @@ TEST(EmulatorGraphicsPackets, DiamondWhoseArmsBothBranchMergesWhereTheFallthroug
 	Vector<uint32_t> binary;
 	String8          error;
 	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+}
+
+// A uniform branch targets a block that its fallthrough reaches only when an EXECZ skip over that block is not
+// taken: the two regions share the block without nesting. The skipped range only defines VCC, dead at the
+// skip target, so the skip goes away and the program is one selection.
+static ShaderCode SkipOverSharedBlock(bool target_reads_vcc)
+{
+	auto branch = [](uint32_t pc, ShaderInstructionType type, uint32_t target)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = type;
+		inst.format = ShaderInstructionFormat::Label;
+		inst.src_num = 1;
+		inst.src[0].type = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.i = static_cast<int32_t>(target - pc - 4u);
+		return inst;
+	};
+	auto move64 = [](uint32_t pc, ShaderOperand dst, ShaderOperand src)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = ShaderInstructionType::SMovB64;
+		inst.format = ShaderInstructionFormat::Sdst2Ssrc02;
+		inst.dst = dst;
+		inst.src[0] = src;
+		inst.src_num = 1;
+		return inst;
+	};
+	const ShaderOperand exec {.type = ShaderOperandType::ExecLo, .size = 2};
+	const ShaderOperand vcc {.type = ShaderOperandType::VccLo, .size = 2};
+	auto sgpr = [](int first) { return ShaderOperand {.type = ShaderOperandType::Sgpr, .register_id = first, .size = 2}; };
+	ShaderInstruction andn2 {};
+	andn2.pc = 0x08;
+	andn2.type = ShaderInstructionType::SAndn2B64;
+	andn2.format = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+	andn2.dst = exec;
+	andn2.src[0] = exec;
+	andn2.src[1] = vcc;
+	andn2.src_num = 2;
+	ShaderInstruction end {};
+	end.pc = 0x24;
+	end.type = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	const auto uniform = branch(0x04, ShaderInstructionType::SCbranchScc0, 0x18);
+	const auto skip    = branch(0x0c, ShaderInstructionType::SCbranchExecz, 0x1c);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	for (const auto& inst: {move64(0x00, sgpr(14), exec), uniform, andn2, skip, move64(0x10, vcc, sgpr(16)), move64(0x14, sgpr(4), sgpr(6)),
+	                        move64(0x18, vcc, sgpr(16)), move64(0x1c, exec, sgpr(14)),
+	                        move64(0x20, sgpr(2), target_reads_vcc ? vcc : sgpr(8)), end})
+	{
+		code.GetInstructions().Add(inst);
+	}
+	code.GetLabels().Add(ShaderLabel(uniform));
+	code.GetLabels().Add(ShaderLabel(skip));
+	return code;
+}
+
+TEST(EmulatorGraphicsPackets, ExeczSkipOverASharedBlockGoesAwayWhenItsDefinitionsAreDead)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	auto code = SkipOverSharedBlock(false);
+	ShaderRemoveNeutralExecSkips(&code);
+	for (const auto& inst: code.GetInstructions()) { EXPECT_NE(inst.type, ShaderInstructionType::SCbranchExecz); }
+	ShaderPixelInputInfo pixel {};
+	pixel.required_subgroup_size = 32;
+	pixel.native_wave.guest_wave_size = 32;
+	const auto source = SpirvGenerateSource(code, nullptr, &pixel, nullptr);
+	ScopedShaderValidation validation;
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+}
+
+TEST(EmulatorGraphicsPackets, ExeczSkipStaysWhenTheTargetReadsAScalarTheRangeDefines)
+{
+	auto code = SkipOverSharedBlock(true);
+	const auto count = code.GetInstructions().Size();
+	ShaderRemoveNeutralExecSkips(&code);
+	EXPECT_EQ(code.GetInstructions().Size(), count);
 }
 
 TEST(EmulatorGraphicsPackets, EmptyDiamondArmBranchesToItsDeclaredSyntheticMerge)

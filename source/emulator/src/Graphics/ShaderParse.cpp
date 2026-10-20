@@ -178,6 +178,7 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 	}
 
 	ShaderLowerWaterfallMoves(dst);
+	ShaderRemoveNeutralExecSkips(dst);
 	*parsed_words = static_cast<uint32_t>(ptr - src);
 	return true;
 }
