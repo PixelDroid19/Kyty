@@ -109,8 +109,8 @@ bool VulkanImageViewDescriptorsEqual(const VulkanImageViewDescriptor& a, const V
 	       a.base_array_layer == b.base_array_layer && a.layer_count == b.layer_count;
 }
 
-int VulkanGetOrCreateSampledImageView(VkDevice device, VulkanImage* image, const VulkanImageViewDescriptor& descriptor,
-                                     VulkanImageViewCreator create)
+int VulkanGetOrCreateCachedImageView(VkDevice device, VulkanImage* image, const VulkanImageViewDescriptor& descriptor,
+                                    VulkanImageViewCreator create)
 {
 	if (image == nullptr || create == nullptr || descriptor.image != image->image || (image->usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0u)
 	{
@@ -124,9 +124,9 @@ int VulkanGetOrCreateSampledImageView(VkDevice device, VulkanImage* image, const
 	{
 		return -1;
 	}
-	for (size_t i = 0; i < image->sampled_view_descriptors.size(); ++i)
+	for (size_t i = 0; i < image->cached_view_descriptors.size(); ++i)
 	{
-		if (VulkanImageViewDescriptorsEqual(image->sampled_view_descriptors[i], descriptor))
+		if (VulkanImageViewDescriptorsEqual(image->cached_view_descriptors[i], descriptor))
 		{
 			return VulkanImage::VIEW_MAX + static_cast<int>(i);
 		}
@@ -142,7 +142,7 @@ int VulkanGetOrCreateSampledImageView(VkDevice device, VulkanImage* image, const
 	}
 	const int index = static_cast<int>(image->image_view.size());
 	image->image_view.push_back(view);
-	image->sampled_view_descriptors.push_back(descriptor);
+	image->cached_view_descriptors.push_back(descriptor);
 	return index;
 }
 

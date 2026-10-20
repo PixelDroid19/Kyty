@@ -2276,6 +2276,24 @@ TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
 	EXPECT_TRUE(GpuMemoryFindObjects(obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
 }
 
+TEST(EmulatorGraphicsState, GpuMemoryMappedPrefixSpansAdjacentAllocations)
+{
+	EnsureGpuMemoryForTests();
+
+	// Three adjacent 64 KiB mappings, then a one-page gap before a fourth.
+	const uint64_t base = 0x0000005103000000ull;
+	GpuMemorySetAllocatedRange(base, 0x10000ull);
+	GpuMemorySetAllocatedRange(base + 0x10000ull, 0x10000ull);
+	GpuMemorySetAllocatedRange(base + 0x20000ull, 0x10000ull);
+	GpuMemorySetAllocatedRange(base + 0x34000ull, 0x10000ull);
+
+	EXPECT_EQ(GpuMemoryGetAllocatedRangePrefix(base, 0x30000ull), 0x10000ull);
+	EXPECT_EQ(GpuMemoryGetMappedRangePrefix(base, 0x30000ull), 0x30000ull);
+	EXPECT_EQ(GpuMemoryGetMappedRangePrefix(base + 0x8000ull, 0x20000ull), 0x20000ull);
+	EXPECT_EQ(GpuMemoryGetMappedRangePrefix(base, 0x40000ull), 0x30000ull);
+	EXPECT_EQ(GpuMemoryGetMappedRangePrefix(base + 0x30000ull, 0x1000ull), 0u);
+}
+
 TEST(EmulatorGraphicsState, GpuMemoryValidatesTheCompleteAllocatedGuestRangeReadOnly)
 {
 	EnsureGpuMemoryForTests();
@@ -5937,10 +5955,11 @@ TEST(EmulatorGraphicsState, StorageMipViewTargetsOneLevelWhileSamplingRetainsCha
 	EXPECT_EQ(selected, VulkanImage::VIEW_DEFAULT);
 }
 
-// A 2D single-layer image with several levels is one mipmapped backing whose levels are written
-// through single-level views and sampled through the whole chain. The contract was established for
+// A 2D image with several levels is one mipmapped backing whose levels are written through
+// single-level views and sampled through the whole chain. The contract was established for
 // depth-tiled R32 chains; Gen5 colour chains in the render-target (27) and Standard64KB (9) tilings
-// follow it. Every other layout keeps the single-level atlas.
+// follow it, and so do Gen5 colour arrays, whose slices each hold a whole chain. Every other layout
+// keeps the single-level atlas.
 TEST(EmulatorGraphicsState, StorageTextureUsesMipBackingForDepthAndGen5ColourChainsOnly)
 {
 	const uint32_t identity = DstSel(4, 5, 6, 7);
@@ -5954,17 +5973,84 @@ TEST(EmulatorGraphicsState, StorageTextureUsesMipBackingForDepthAndGen5ColourCha
 		EXPECT_TRUE(StorageTextureUsesMipBacking(colour.params, true)) << "tile " << tile;
 		EXPECT_FALSE(StorageTextureUsesMipBacking(colour.params, false)) << "Gen4 numbers these tilings differently: tile " << tile;
 	}
-	// One level, Gen4-only tile ids, arrays, volumes and non-zero base layers keep their current layout.
+	for (const uint32_t tile: {5u, 9u, 27u})
+	{
+		const StorageTextureObject arrayed(0u, 0u, 71u, 128u, 128u, 128u, 1u, 8u, tile, true, identity, 13u, 6u, 5u);
+		EXPECT_TRUE(StorageTextureUsesMipBacking(arrayed.params, true)) << "array, tile " << tile;
+		EXPECT_FALSE(StorageTextureUsesMipBacking(arrayed.params, false)) << "array on Gen4, tile " << tile;
+	}
+	// One level, Gen4-only tile ids, linear arrays, volumes and non-zero base layers keep their current layout.
 	const StorageTextureObject one_level(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 1u, 27u, true, identity, 9u, 1u);
 	const StorageTextureObject legacy_linear(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 8u, true, identity, 9u, 1u);
 	const StorageTextureObject legacy_tiled(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 13u, true, identity, 9u, 1u);
-	const StorageTextureObject arrayed(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 27u, true, identity, 13u, 4u);
+	const StorageTextureObject linear_array(0u, 0u, 71u, 128u, 128u, 128u, 0u, 8u, 0u, true, identity, 13u, 4u);
+	const StorageTextureObject one_level_array(0u, 0u, 71u, 128u, 128u, 128u, 0u, 1u, 27u, true, identity, 13u, 4u);
 	const StorageTextureObject volume(0u, 0u, 71u, 64u, 64u, 64u, 0u, 6u, 27u, true, identity, 10u, 8u);
 	const StorageTextureObject based(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 27u, true, identity, 9u, 1u, 2u);
-	for (const auto* params: {one_level.params, legacy_linear.params, legacy_tiled.params, arrayed.params, volume.params, based.params})
+	for (const auto* params: {one_level.params, legacy_linear.params, legacy_tiled.params, linear_array.params, one_level_array.params,
+	                          volume.params, based.params})
 	{
 		EXPECT_FALSE(StorageTextureUsesMipBacking(params, true));
 	}
+}
+
+// Captured: a six-slice, eight-level 128x128 array, then a descriptor at its address naming slice 0
+// alone at level 1. That descriptor is a view of the live array, and so is one naming another slice.
+TEST(EmulatorGraphicsState, StorageTextureArrayDescriptorsAreViewsOfTheLiveArray)
+{
+	const uint32_t identity = DstSel(4, 5, 6, 7);
+	const StorageTextureObject array(0u, 0u, 71u, 128u, 128u, 128u, 0u, 8u, 27u, true, identity, 13u, 6u, 5u);
+	const StorageTextureObject other_slice(0u, 0u, 71u, 128u, 128u, 128u, 2u, 8u, 27u, true, identity, 13u, 6u, 0u);
+	const StorageTextureObject first_slice(0u, 0u, 71u, 128u, 128u, 128u, 1u, 8u, 27u, true, identity, 13u, 1u, 0u);
+	EXPECT_TRUE(array.Equal(other_slice.params));
+	EXPECT_TRUE(StorageTextureCanReuseLargerBacking(array.params, first_slice.params));
+	EXPECT_FALSE(StorageTextureCanReuseLargerBacking(first_slice.params, array.params)) << "a larger array grows instead";
+
+	const StorageTextureObject shorter_chain(0u, 0u, 71u, 128u, 128u, 128u, 1u, 7u, 27u, true, identity, 13u, 1u, 0u);
+	const StorageTextureObject other_format(0u, 0u, 72u, 128u, 128u, 128u, 1u, 8u, 27u, true, identity, 13u, 1u, 0u);
+	const StorageTextureObject single(0u, 0u, 71u, 128u, 128u, 128u, 1u, 8u, 27u, true, identity, 9u, 1u, 0u);
+	for (const auto* params: {shorter_chain.params, other_format.params, single.params})
+	{
+		EXPECT_FALSE(StorageTextureCanReuseLargerBacking(array.params, params));
+	}
+}
+
+static uint32_t g_storage_array_views = 0u;
+
+static bool CreateStorageArrayTestView(VkDevice /*device*/, const VulkanImageViewDescriptor& /*descriptor*/, VkImageView* view)
+{
+	*view = reinterpret_cast<VkImageView>(static_cast<uintptr_t>(0x100u + ++g_storage_array_views));
+	return true;
+}
+
+TEST(EmulatorGraphicsState, StorageTextureArrayStorageViewSelectsDescriptorWindowAndLevel)
+{
+	StorageTextureVulkanImage image;
+	image.image        = reinterpret_cast<VkImage>(static_cast<uintptr_t>(0x10u));
+	image.format       = VK_FORMAT_R16G16B16A16_SFLOAT;
+	image.usage        = StorageTextureGetImageUsage();
+	image.mip_levels   = 8u;
+	image.array_layers = 6u;
+	g_storage_array_views = 0u;
+
+	const int slice0_level1 = StorageTextureResolveArrayStorageView(VK_NULL_HANDLE, &image, 1u, 0u, 1u, CreateStorageArrayTestView);
+	ASSERT_GE(slice0_level1, VulkanImage::VIEW_MAX);
+	const auto& view = image.cached_view_descriptors.back();
+	EXPECT_EQ(view.view_type, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
+	EXPECT_EQ(view.base_mip_level, 1u);
+	EXPECT_EQ(view.level_count, 1u);
+	EXPECT_EQ(view.base_array_layer, 0u);
+	EXPECT_EQ(view.layer_count, 1u);
+
+	const int slice5_level0 = StorageTextureResolveArrayStorageView(VK_NULL_HANDLE, &image, 6u, 5u, 0u, CreateStorageArrayTestView);
+	ASSERT_GE(slice5_level0, VulkanImage::VIEW_MAX);
+	EXPECT_NE(slice5_level0, slice0_level1);
+	EXPECT_EQ(image.cached_view_descriptors.back().base_array_layer, 5u);
+	EXPECT_EQ(StorageTextureResolveArrayStorageView(VK_NULL_HANDLE, &image, 1u, 0u, 1u, CreateStorageArrayTestView), slice0_level1);
+	EXPECT_EQ(g_storage_array_views, 2u);
+
+	EXPECT_EQ(StorageTextureResolveArrayStorageView(VK_NULL_HANDLE, &image, 1u, 0u, 8u, CreateStorageArrayTestView), -1) << "level";
+	EXPECT_EQ(StorageTextureResolveArrayStorageView(VK_NULL_HANDLE, &image, 7u, 0u, 0u, CreateStorageArrayTestView), -1) << "layers";
 }
 
 // A captured downsample chain addresses level 6 of a resource whose T# says MAX_MIP = 5: the store lands

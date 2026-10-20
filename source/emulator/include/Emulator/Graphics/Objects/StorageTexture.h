@@ -5,6 +5,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -56,6 +57,10 @@ public:
 };
 
 [[nodiscard]] bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
+// An array descriptor at the address of a live array of the same slice layout names some of its
+// leading slices (captured: one slice at level 1 of a six-slice, eight-level 128x128 array). It is a
+// view of that backing, never a separate image: the two would diverge on the next write.
+[[nodiscard]] bool StorageTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t* incoming);
 // A single-level 2D Gen5 storage view in the depth layout (mode 24) with a 32-bit texel and a 32-bit depth target
 // without HTILE or stencil, bound over the same range, address the same texels, so either view reads the raw bytes
 // the other last held. The 4-byte render-target layout (mode 27) orders the 8x8 micro tile differently, so a mode 27
@@ -157,6 +162,12 @@ struct StorageTextureArrayViewRange
 [[nodiscard]] bool StorageTextureGetArrayViewRanges(uint32_t depth, uint32_t base_array,
                                                     StorageTextureArrayViewRange* sampled,
                                                     StorageTextureArrayViewRange* storage);
+
+// The storage view of an array descriptor: its layer window at its base level, one level, cached on
+// the image. Returns the view index, or -1 when the window or level lies outside the image.
+[[nodiscard]] int StorageTextureResolveArrayStorageView(VkDevice device, StorageTextureVulkanImage* image, uint32_t depth,
+                                                        uint32_t base_array, uint32_t base_level,
+                                                        VulkanImageViewCreator create = VulkanCreateDeviceImageView);
 
 } // namespace Kyty::Libs::Graphics
 

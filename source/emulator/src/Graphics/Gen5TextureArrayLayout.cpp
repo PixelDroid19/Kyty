@@ -44,7 +44,9 @@ bool FillMipSlice(uint32_t format, uint32_t width, uint32_t height, uint32_t pit
 	{
 		return false;
 	}
-	const auto get_layout = (tile == 5u ? Gen5GetStandard4KBTextureMipLayout : Gen5GetStandard64KBTextureMipLayout);
+	const auto get_layout = (tile == 5u   ? Gen5GetStandard4KBTextureMipLayout
+	                         : tile == 1u ? Gen5GetStandard256BTextureMipLayout
+	                                      : Gen5GetStandard64KBTextureMipLayout);
 	if (!get_layout(format, width, height, pitch, levels, mip_layout))
 	{
 		return false;
@@ -82,6 +84,11 @@ bool DetileOneLayer(uint8_t* output_layer, const uint8_t* input_layer, const Gen
 	if (layout.tile == 5u)
 	{
 		return DetileOneStandard4KBLayer(output_layer, input_layer, layout);
+	}
+	if (layout.tile == 1u && layout.has_mip_layout)
+	{
+		return Gen5DetileStandard256BTextureMipChain(output_layer, layout.linear_slice_size, input_layer, layout.tiled_slice.size,
+		                                             layout.mip_layout);
 	}
 	if (layout.tile == 1u)
 	{
@@ -141,18 +148,23 @@ bool Gen5GetTextureArrayLayout(uint32_t format, uint32_t width, uint32_t height,
 	                                (bytes_per_element & (bytes_per_element - 1u)) == 0u &&
 	                                !ShaderGen5TextureIsBlockCompressed(format);
 	const bool standard_4kb       = tile == 5u;
-	const bool standard_64kb      = tile == 9u && TileGet64KBBlockWidth(bytes_per_element) != 0u &&
-	                                !ShaderGen5TextureIsBlockCompressed(format);
+	const bool block_compressed   = ShaderGen5TextureIsBlockCompressed(format);
+	const bool standard_64kb      = tile == 9u && TileGet64KBBlockWidth(bytes_per_element) != 0u;
 	const bool render_target_64kb = tile == 27u && (bytes_per_element == 1u || bytes_per_element == 4u || bytes_per_element == 8u) &&
 	                                !ShaderGen5TextureIsBlockCompressed(format);
+	// Gen5GetStandard256BTextureMipLayout validates the element size, block-compressed formats included.
+	const bool standard_256b_chain = tile == 1u && levels > 1u;
 
-	if (!linear && !standard_256b && !standard_4kb && !standard_64kb && !render_target_64kb)
+	if (!linear && !standard_256b && !standard_256b_chain && !standard_4kb && !standard_64kb && !render_target_64kb)
 	{
 		return false;
 	}
 
-	// Multi-mip arrays use the Standard4KB (including BC) and thin 64 KiB chains.
-	const bool mip_chain = standard_4kb || (levels > 1u && (standard_64kb || render_target_64kb));
+	// Multi-mip arrays use the Standard4KB (including BC) and thin 64 KiB chains, and the
+	// Standard256B chains (including BC), which have no mip tail. Every slice holds its whole chain.
+	// Standard64KB BC slices place their 4x4 blocks with the shared chain, as 2D BC textures do.
+	const bool mip_chain = standard_4kb || standard_256b_chain || (standard_64kb && block_compressed) ||
+	                       (levels > 1u && (standard_64kb || render_target_64kb));
 	if (levels > 1u && !mip_chain)
 	{
 		return false;

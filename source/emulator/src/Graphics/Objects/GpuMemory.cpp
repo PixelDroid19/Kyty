@@ -709,6 +709,25 @@ uint64_t GpuMemoryGetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
 	return g_gpu_memory->GetAllocatedRangePrefix(vaddr, maximum_size);
 }
 
+uint64_t GpuMemoryGetMappedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
+{
+	if (vaddr > UINT64_MAX - maximum_size)
+	{
+		return 0;
+	}
+	uint64_t covered = 0;
+	while (covered < maximum_size)
+	{
+		const uint64_t prefix = GpuMemoryGetAllocatedRangePrefix(vaddr + covered, maximum_size - covered);
+		if (prefix == 0)
+		{
+			break;
+		}
+		covered += prefix;
+	}
+	return covered;
+}
+
 bool GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission)
 {
 	return g_gpu_memory != nullptr && g_gpu_memory->CanSnapshotReadOnlyBuffer(vaddr, size, admission);

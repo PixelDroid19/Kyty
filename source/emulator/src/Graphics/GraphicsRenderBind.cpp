@@ -4343,8 +4343,15 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				tex->storage_write_stamp = VulkanImageNextStamp();
 			}
-			if (!VulkanResolveStorageImageView(tex, three_dimensional, arrayed_2d, &images_storage_view[index_storage],
-			                                   base_level))
+			const bool storage_array = arrayed_2d && tex != nullptr && tex->type == VulkanImageType::StorageTexture;
+			if (storage_array)
+			{
+				images_storage_view[index_storage] = StorageTextureResolveArrayStorageView(
+				    g_render_ctx->GetGraphicCtx()->device, static_cast<StorageTextureVulkanImage*>(tex), depth, base_array, base_level);
+			}
+			if (storage_array ? images_storage_view[index_storage] < 0
+			                  : !VulkanResolveStorageImageView(tex, three_dimensional, arrayed_2d, &images_storage_view[index_storage],
+			                                                   base_level))
 			{
 				EXIT("storage image has no compatible Vulkan view: backing{kind=%u vk_format=%u mips=%u layers=%u usage=0x%08x} "
 				     "descriptor{format=%u %ux%u levels=%u base_level=%u last_level=%u type=%u tile=%u 3d=%d array=%d "
@@ -4452,12 +4459,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					sampled_descriptor.format = reinterpret_format;
 					sampled_descriptor.usage  = VK_IMAGE_USAGE_SAMPLED_BIT;
 				}
-				const int sampled_view = VulkanGetOrCreateSampledImageView(g_render_ctx->GetGraphicCtx()->device, tex,
-				                                                          sampled_descriptor);
+				const int sampled_view = VulkanGetOrCreateCachedImageView(g_render_ctx->GetGraphicCtx()->device, tex,
+				                                                         sampled_descriptor);
 				if (sampled_view < 0)
 				{
 					EXIT("failed to create sampled alias view: format=%u swizzle=0x%03x cached_views=%zu\n", fmt,
-					     view_swizzle, tex->sampled_view_descriptors.size());
+					     view_swizzle, tex->cached_view_descriptors.size());
 				}
 				sampled_views[*sampled_index] = sampled_view;
 			}

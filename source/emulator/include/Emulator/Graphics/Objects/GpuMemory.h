@@ -1094,6 +1094,10 @@ void                                         GpuMemorySetAllocatedRange(uint64_t
 // Returns the contiguous allocation starting at vaddr, capped at maximum_size.
 // A zero result means no registered GPU allocation begins at vaddr.
 [[nodiscard]] uint64_t                       GpuMemoryGetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size);
+// Returns how much of [vaddr, vaddr + maximum_size) adjacent registered GPU
+// allocations cover without a gap. The guest maps GPU memory in many adjacent
+// pieces (mostly 64 KiB), and one resource may span several of them.
+[[nodiscard]] uint64_t                       GpuMemoryGetMappedRangePrefix(uint64_t vaddr, uint64_t maximum_size);
 void                                         GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 // Requires GraphicsRunWithQuiescedSubmissions to own the admission gate. The
 // guest VA must remain mapped until this call has written back and detached

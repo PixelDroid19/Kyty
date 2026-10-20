@@ -274,9 +274,11 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			               "ignored (continuing)\n");
 		}
 
+		// A slice holds its whole chain; the image carries as many of those levels as it has.
+		const uint32_t upload_levels = std::min(array_layout.levels, vk_obj->mip_levels);
 		std::vector<uint8_t> slice(static_cast<size_t>(array_layout.linear_slice_size));
 		uint32_t             layer_region_count = 0;
-		if (!Gen5FillTextureArrayLayerUploadRegions(array_layout, 0u, nullptr, 0u, &layer_region_count) ||
+		if (!Gen5FillTextureArrayLayerUploadRegionsForLevels(array_layout, 0u, upload_levels, nullptr, 0u, &layer_region_count) ||
 		    layer_region_count == 0u)
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
@@ -294,7 +296,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				               "WARNING: !Gen5DetileTextureArrayLayer(...) condition ignored (continuing)\n");
 			}
 			uint32_t filled = layer_region_count;
-			if (!Gen5FillTextureArrayLayerUploadRegions(array_layout, layer, upload_regions.data(), layer_region_count, &filled))
+			if (!Gen5FillTextureArrayLayerUploadRegionsForLevels(array_layout, layer, upload_levels, upload_regions.data(),
+			                                                     layer_region_count, &filled))
 			{
 				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
 				               "WARNING: !Gen5FillTextureArrayLayerUploadRegions(...) condition ignored (continuing)\n");
@@ -611,6 +614,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->guest_vaddr = *vaddr;
 	vk_obj->guest_size = *size;
 	vk_obj->mutable_format = mutable_format;
+	vk_obj->storage_components = components;
 
 	for (auto& view: vk_obj->image_view)
 	{
@@ -638,7 +642,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		               "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[view_index]) condition "
 		               "ignored (continuing)\n");
 	}
-	if (mip_backing)
+	if (mip_backing && !arrayed_2d)
 	{
 		view_descriptor.level_count    = 1u;
 		for (uint32_t level = 0u; level < host_levels; level++)
@@ -663,23 +667,6 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
 			               "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, "
 				               "&vk_obj->image_view[VulkanImage::VIEW_ARRAY]) condition ignored (continuing)\n");
-		}
-
-		if (arrayed_2d)
-		{
-			StorageTextureArrayViewRange sampled;
-			StorageTextureArrayViewRange storage;
-			EXIT_IF(!StorageTextureGetArrayViewRanges(static_cast<uint32_t>(depth), static_cast<uint32_t>(base_array), &sampled,
-			                                              &storage));
-			view_descriptor.base_array_layer = storage.base_array_layer;
-			view_descriptor.layer_count      = storage.layer_count;
-			if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor,
-			                                 &vk_obj->image_view[VulkanImage::VIEW_STORAGE_ARRAY]))
-			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-				               "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, "
-				               "&vk_obj->image_view[VulkanImage::VIEW_STORAGE_ARRAY]) condition ignored (continuing)\n");
-			}
 		}
 	}
 
@@ -794,13 +781,16 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 	const bool same_mip_backing   = StorageTextureUsesMipBacking(params, gen5) && StorageTextureUsesMipBacking(other, gen5) &&
 	                              (params[PARAM_LEVELS] & 0xffffffffu) == (other[PARAM_LEVELS] & 0xffffffffu);
 	const bool same_levels = params[PARAM_LEVELS] == other[PARAM_LEVELS] || same_mip_backing;
+	// So do descriptors that pick different layers of one array.
+	const bool arrayed    = params[PARAM_RESOURCE_TYPE] == 11u || params[PARAM_RESOURCE_TYPE] == 13u;
+	const bool same_layer = params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY] || arrayed;
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && same_levels &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
 	        NormalizeStorageTextureSwizzle(params[PARAM_FORMAT], params[PARAM_SWIZZLE]) ==
 	            NormalizeStorageTextureSwizzle(other[PARAM_FORMAT], other[PARAM_SWIZZLE]) &&
 	        params[PARAM_RESOURCE_TYPE] == other[PARAM_RESOURCE_TYPE] && params[PARAM_DEPTH] == other[PARAM_DEPTH] &&
-	        params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY] && params[PARAM_SKIP_SEED] == other[PARAM_SKIP_SEED]);
+	        same_layer && params[PARAM_SKIP_SEED] == other[PARAM_SKIP_SEED]);
 }
 
 bool StorageTextureUsesMipBacking(const uint64_t* params, bool gen5)
@@ -812,10 +802,19 @@ bool StorageTextureUsesMipBacking(const uint64_t* params, bool gen5)
 	const auto fmt    = static_cast<uint32_t>((params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu);
 	const auto tile   = params[StorageTextureObject::PARAM_TILE];
 	const auto levels = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
-	if (levels <= 1u || params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u || params[StorageTextureObject::PARAM_DEPTH] != 1u ||
-	    params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u)
+	const auto type   = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
+	const bool single = type == 9u && params[StorageTextureObject::PARAM_DEPTH] == 1u &&
+	                    params[StorageTextureObject::PARAM_BASE_ARRAY] == 0u;
+	const bool arrayed = type == 11u || type == 13u;
+	if (levels <= 1u || (!single && !arrayed))
 	{
 		return false;
+	}
+	if (arrayed)
+	{
+		// Each array slice holds its whole chain in the Standard4KB, Standard64KB and
+		// render-target tilings (Gen5GetTextureArrayLayout); a linear array has no chain layout.
+		return gen5 && (tile == 5u || tile == 9u || tile == 27u);
 	}
 	const bool depth_chain  = fmt == 22u && tile == 24u;
 	// Gen5 colour tilings: linear (0), Standard4KB (5), Standard64KB (9) and render target (27).
@@ -927,6 +926,61 @@ bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_
 	}
 	return NormalizeStorageTextureSwizzle(existing[StorageTextureObject::PARAM_FORMAT], existing[StorageTextureObject::PARAM_SWIZZLE]) ==
 	       NormalizeStorageTextureSwizzle(incoming[StorageTextureObject::PARAM_FORMAT], incoming[StorageTextureObject::PARAM_SWIZZLE]);
+}
+
+bool StorageTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t* incoming)
+{
+	if (existing == nullptr || incoming == nullptr)
+	{
+		return false;
+	}
+	const auto type = incoming[StorageTextureObject::PARAM_RESOURCE_TYPE];
+	if ((type != 11u && type != 13u) || existing[StorageTextureObject::PARAM_RESOURCE_TYPE] != type)
+	{
+		return false;
+	}
+	const auto existing_depth = existing[StorageTextureObject::PARAM_DEPTH];
+	const auto incoming_depth = incoming[StorageTextureObject::PARAM_DEPTH];
+	if (incoming_depth == 0u || incoming_depth > existing_depth ||
+	    incoming[StorageTextureObject::PARAM_BASE_ARRAY] >= incoming_depth)
+	{
+		return false;
+	}
+	// The same chain in every slice: base_level only selects a view.
+	if (existing[StorageTextureObject::PARAM_FORMAT] != incoming[StorageTextureObject::PARAM_FORMAT] ||
+	    existing[StorageTextureObject::PARAM_PITCH] != incoming[StorageTextureObject::PARAM_PITCH] ||
+	    existing[StorageTextureObject::PARAM_WIDTH_HEIGHT] != incoming[StorageTextureObject::PARAM_WIDTH_HEIGHT] ||
+	    (existing[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu) != (incoming[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu) ||
+	    existing[StorageTextureObject::PARAM_TILE] != incoming[StorageTextureObject::PARAM_TILE] ||
+	    existing[StorageTextureObject::PARAM_NEO] != incoming[StorageTextureObject::PARAM_NEO])
+	{
+		return false;
+	}
+	return NormalizeStorageTextureSwizzle(existing[StorageTextureObject::PARAM_FORMAT], existing[StorageTextureObject::PARAM_SWIZZLE]) ==
+	       NormalizeStorageTextureSwizzle(incoming[StorageTextureObject::PARAM_FORMAT], incoming[StorageTextureObject::PARAM_SWIZZLE]);
+}
+
+int StorageTextureResolveArrayStorageView(VkDevice device, StorageTextureVulkanImage* image, uint32_t depth, uint32_t base_array,
+                                          uint32_t base_level, VulkanImageViewCreator create)
+{
+	StorageTextureArrayViewRange sampled;
+	StorageTextureArrayViewRange storage;
+	if (image == nullptr || !StorageTextureGetArrayViewRanges(depth, base_array, &sampled, &storage) ||
+	    base_level >= image->mip_levels || storage.base_array_layer >= image->array_layers ||
+	    storage.layer_count > image->array_layers - storage.base_array_layer)
+	{
+		return -1;
+	}
+	VulkanImageViewDescriptor descriptor {};
+	descriptor.image            = image->image;
+	descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+	descriptor.format           = image->format;
+	descriptor.components       = image->storage_components;
+	descriptor.base_mip_level   = base_level;
+	descriptor.level_count      = 1u;
+	descriptor.base_array_layer = storage.base_array_layer;
+	descriptor.layer_count      = storage.layer_count;
+	return VulkanGetOrCreateCachedImageView(device, image, descriptor, create);
 }
 
 // A render-target alias copies texel bytes unchanged. Equal formats alias, and so

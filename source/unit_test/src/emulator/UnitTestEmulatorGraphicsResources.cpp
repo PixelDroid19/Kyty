@@ -900,13 +900,13 @@ TEST(EmulatorGraphicsResources, SimultaneousSampledViewsDoNotChangeStorageWriteV
 	ASSERT_TRUE(VulkanPlanSampledImageView(image, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
 	                                     0u, 1u, 0u, 1u, DstSel(5, 4, 0, 1), &swapped));
 	g_created_views = 0u;
-	const int first = VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, identity, CreateTestView);
-	const int second = VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, swapped, CreateTestView);
+	const int first = VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, identity, CreateTestView);
+	const int second = VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, swapped, CreateTestView);
 	ASSERT_GE(first, VulkanImage::VIEW_MAX);
 	ASSERT_GE(second, VulkanImage::VIEW_MAX);
 	EXPECT_NE(first, second);
 	EXPECT_NE(image.image_view[first], image.image_view[second]);
-	EXPECT_EQ(VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, identity, CreateTestView), first);
+	EXPECT_EQ(VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, identity, CreateTestView), first);
 	EXPECT_EQ(g_created_views, 2u);
 	int storage_index = -1;
 	ASSERT_TRUE(VulkanResolveStorageImageView(&image, false, false, &storage_index));
@@ -937,7 +937,7 @@ TEST(EmulatorGraphicsResources, SampledViewIdentityIncludesSubresourcesShapeForm
 	second = first;
 	second.format = VK_FORMAT_R8G8B8A8_UNORM;
 	EXPECT_FALSE(VulkanImageViewDescriptorsEqual(first, second));
-	EXPECT_EQ(VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, second, CreateTestView), -1);
+	EXPECT_EQ(VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, second, CreateTestView), -1);
 	EXPECT_FALSE(VulkanPlanSampledImageView(image, VK_IMAGE_VIEW_TYPE_3D, VK_IMAGE_ASPECT_COLOR_BIT,
 	                                      0u, 1u, 0u, 1u, DstSel(4, 5, 6, 7), &second));
 	EXPECT_FALSE(VulkanPlanSampledImageView(image, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -960,8 +960,8 @@ TEST(EmulatorGraphicsResources, SampledViewCreationFailureDoesNotPublishAnIndex)
 	VulkanImageViewDescriptor view {};
 	ASSERT_TRUE(VulkanPlanSampledImageView(image, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
 	                                     0u, 1u, 0u, 1u, DstSel(7, 6, 5, 4), &view));
-	EXPECT_EQ(VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, view, FailTestView), -1);
-	EXPECT_TRUE(image.sampled_view_descriptors.empty());
+	EXPECT_EQ(VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, view, FailTestView), -1);
+	EXPECT_TRUE(image.cached_view_descriptors.empty());
 	EXPECT_EQ(image.image_view.size(), static_cast<size_t>(VulkanImage::VIEW_MAX));
 }
 
@@ -978,12 +978,12 @@ TEST(EmulatorGraphicsResources, SampledViewCacheIsBoundedAndKeepsExistingIndices
 		ASSERT_TRUE(VulkanPlanSampledImageView(image, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
 		                                     0u, 1u, 0u, 1u, swizzle, &view));
 		if (i == 0u) { first = view; }
-		const int index = VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, view, CreateTestView);
+		const int index = VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, view, CreateTestView);
 		EXPECT_EQ(index, i < VulkanImage::VIEW_CACHE_LIMIT - VulkanImage::VIEW_MAX ?
 		                     VulkanImage::VIEW_MAX + static_cast<int>(i) : -1);
 	}
 	EXPECT_EQ(image.image_view.size(), static_cast<size_t>(VulkanImage::VIEW_CACHE_LIMIT));
-	EXPECT_EQ(VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, first, CreateTestView), VulkanImage::VIEW_MAX);
+	EXPECT_EQ(VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, first, CreateTestView), VulkanImage::VIEW_MAX);
 }
 
 TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinearBytes)

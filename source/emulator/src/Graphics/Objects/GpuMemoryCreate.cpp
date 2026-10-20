@@ -537,6 +537,7 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 	uint64_t               reusable_prefix_size = UINT64_MAX;
 	int                    reusable_rt_id      = -1;
 	uint64_t               reusable_rt_layers  = UINT64_MAX;
+	int                    reusable_st_id      = -1;
 	*covered_reuse                             = false;
 	*stale_reuse_id                            = -1;
 
@@ -581,6 +582,14 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 			reusable_rt_layers = o.params[RenderTextureObject::PARAM_ARRAY_LAYERS];
 		}
 
+		if (vaddr_num == 1 && h.block.vaddr_num == 1 && h.scenario == GpuMemoryScenario::Common &&
+		    o.object.type == GpuMemoryObjectType::StorageTexture && info.type == GpuMemoryObjectType::StorageTexture &&
+		    obj.relation == OverlapType::Contains && h.block.vaddr[0] == vaddr[0] &&
+		    StorageTextureCanReuseLargerBacking(o.params, info.params))
+		{
+			reusable_st_id = obj.object_id;
+		}
+
 		if (o.gpu_update_time > max_gpu_update_time)
 		{
 			max_gpu_update_time = o.gpu_update_time;
@@ -608,6 +617,12 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 	if (reusable_rt_id >= 0)
 	{
 		*id            = reusable_rt_id;
+		*covered_reuse = true;
+		return true;
+	}
+	if (reusable_st_id >= 0)
+	{
+		*id            = reusable_st_id;
 		*covered_reuse = true;
 		return true;
 	}

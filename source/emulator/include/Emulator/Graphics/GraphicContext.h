@@ -301,7 +301,7 @@ struct VulkanImage
 	VkExtent3D             physical_extent      = {};
 	VkImage                image                = nullptr;
 	std::vector<VkImageView> image_view = std::vector<VkImageView>(VIEW_MAX, nullptr);
-	std::vector<VulkanImageViewDescriptor> sampled_view_descriptors;
+	std::vector<VulkanImageViewDescriptor> cached_view_descriptors;
 	VkImageType           image_type           = VK_IMAGE_TYPE_2D;
 	VkImageUsageFlags      usage                = 0;
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -368,6 +368,8 @@ struct StorageTextureVulkanImage: public VulkanImage
 {
 	StorageTextureVulkanImage(): VulkanImage(VulkanImageType::StorageTexture) {}
 	uint64_t guest_vaddr = 0;
+	// Normalized identity mapping of every storage view of this image.
+	VkComponentMapping storage_components = {};
 };
 
 struct RenderTextureVulkanImage: public VulkanImage
