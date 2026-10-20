@@ -2969,6 +2969,9 @@ void Spirv::WriteInstructions()
 		} else if (m_bind != nullptr && ShaderImageReadsZeroResource(*m_bind, inst))
 		{
 			ok = EmitZeroImageRead(inst, this, &dst);
+		} else if (m_bind != nullptr && ShaderScalarLoadIsZero(*m_bind, inst))
+		{
+			ok = EmitZeroScalarLoad(inst, this, &dst);
 		} else if (func != nullptr)
 		{
 			EXIT_IF(func->type != inst.type);

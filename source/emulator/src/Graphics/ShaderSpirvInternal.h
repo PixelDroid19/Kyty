@@ -581,6 +581,7 @@ bool IsStorageImageInstruction(const ShaderInstruction& inst);
 bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst);
 String8 GuardImageDestinationStores(const String8& source, const ShaderInstruction& inst, uint32_t index);
 bool EmitZeroImageRead(const ShaderInstruction& inst, const Spirv* spirv, String8* dst_source);
+bool EmitZeroScalarLoad(const ShaderInstruction& inst, const Spirv* spirv, String8* dst_source);
 bool IsStaticScalarSpillWrite(const ShaderInstruction& inst, int* register_id, int* lane);
 bool IsStaticScalarSpillRead(const ShaderInstruction& inst, int* register_id, int* lane);
 String8 ScalarSpillSlotName(int register_id, int lane);

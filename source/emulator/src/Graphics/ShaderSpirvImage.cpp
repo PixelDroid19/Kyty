@@ -1109,6 +1109,29 @@ bool EmitZeroImageRead(const ShaderInstruction& inst, const Spirv* spirv, String
 	return true;
 }
 
+// A descriptor S_LOAD whose descriptor binds nothing (ShaderZeroDescriptorLoads):
+// its destinations feed only reads that return zero, so it writes zero.
+bool EmitZeroScalarLoad(const ShaderInstruction& inst, const Spirv* spirv, String8* dst_source)
+{
+	const auto zero = spirv->GetConstantUint(0u);
+	if (zero.StartsWith("unknown_") || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size <= 0)
+	{
+		return false;
+	}
+	String8 source;
+	for (int word = 0; word < inst.dst.size; ++word)
+	{
+		const auto dst = operand_variable_to_str(inst.dst, word);
+		if (dst.type != SpirvType::Uint || dst.value.IsEmpty())
+		{
+			return false;
+		}
+		source += String8::FromPrintf("               OpStore %%%s %%%s\n", dst.value.c_str(), zero.c_str());
+	}
+	*dst_source += source;
+	return true;
+}
+
 static int ImageUserDataRegisterBase(const Spirv* spirv)
 {
 	const auto* vs_info = spirv->GetVsInputInfo();

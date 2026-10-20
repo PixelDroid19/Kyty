@@ -3714,6 +3714,7 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 
 	// Resolve every source dword before emitting any loads. A missing static
 	// descriptor field must not silently read row zero or leave partial output.
+	// A dword of a descriptor that binds nothing is written zero ({-1, -1}).
 	std::array<std::array<int, 2>, 16> mapped_fields {};
 	for (int i = 0; i < dword_count; i++)
 	{
@@ -3723,6 +3724,12 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 		if (!mapped)
 		{
 			mapped = spirv->GetMappedIndex(offset + i, &buffer, &field);
+		}
+		if (!mapped && pc_mapped && ShaderScalarLoadWritesZero(*bind_info, inst.pc, inst.dst.register_id + i))
+		{
+			mapped = true;
+			buffer = -1;
+			field  = -1;
 		}
 		if (!mapped)
 		{
@@ -3734,6 +3741,11 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 	for (int i = 0; i < dword_count; i++)
 	{
 		const auto& mapping = mapped_fields[i];
+		if (mapping[0] < 0)
+		{
+			*dst_source += String8::FromPrintf("OpStore %%%s %%%s\n", dst_value[i].value.c_str(), spirv->GetConstantUint(0u).c_str());
+			continue;
+		}
 		const auto id = String8::FromPrintf("vsharp_%u_%d_value_%s", index, i, dst_value[i].value.c_str());
 		*dst_source += spirv->EmitMetadataLoad(mapping[0], mapping[1], id);
 		*dst_source += String8::FromPrintf("OpStore %%%s %%%s\n", dst_value[i].value.c_str(), id.c_str());

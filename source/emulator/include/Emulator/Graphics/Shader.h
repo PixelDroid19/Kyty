@@ -1870,12 +1870,32 @@ struct ShaderZeroSBufferResources
 
 // Image reads whose T# is an all-zero resource: the RDNA2 ISA defines such a
 // resource as unbound, returning zero in every component.
+// An image read through start_register returns zero. A user-data descriptor
+// covers the whole program; a descriptor S_LOAD (loaded) covers the reads in
+// (load_pc, last_pc].
 struct ShaderZeroImageResources
 {
-	static constexpr int IMAGES_MAX = 16;
+	static constexpr int IMAGES_MAX = 32;
 
-	int start_register[IMAGES_MAX] = {0};
-	int images_num                 = 0;
+	int      start_register[IMAGES_MAX] = {0};
+	bool     loaded[IMAGES_MAX]         = {false};
+	uint32_t load_pc[IMAGES_MAX]        = {0};
+	uint32_t last_pc[IMAGES_MAX]        = {0};
+	int      images_num                 = 0;
+};
+
+// Descriptor S_LOADs whose descriptor binds nothing (a T# of buffer type, or an
+// S# that only feeds reads of such a T#) write zero to the SGPRs
+// [first_register, first_register + dwords) at pc. Sized for a T# load and an
+// S# load per zero image.
+struct ShaderZeroDescriptorLoads
+{
+	static constexpr int LOADS_MAX = 2 * ShaderZeroImageResources::IMAGES_MAX;
+
+	uint32_t pc[LOADS_MAX]             = {0};
+	int      first_register[LOADS_MAX] = {0};
+	int      dwords[LOADS_MAX]         = {0};
+	int      loads_num                 = 0;
 };
 
 [[nodiscard]] constexpr uint64_t ShaderBufferByteSize(uint32_t stride, uint32_t records)
@@ -1929,6 +1949,11 @@ struct ShaderBindResources;
 [[nodiscard]] bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type);
 // The image read's T# is an all-zero resource recorded by the usage parse.
 [[nodiscard]] bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst);
+void ShaderAddZeroImageResource(ShaderZeroImageResources* resources, int register_id);
+void ShaderAddLoadedZeroImageResource(ShaderZeroImageResources* resources, int register_id, uint32_t load_pc, uint32_t last_pc);
+void ShaderAddZeroDescriptorLoad(ShaderZeroDescriptorLoads* loads, uint32_t pc, int first_register, int dwords);
+[[nodiscard]] bool ShaderScalarLoadWritesZero(const ShaderBindResources& bind, uint32_t pc, int register_id);
+[[nodiscard]] bool ShaderScalarLoadIsZero(const ShaderBindResources& bind, const ShaderInstruction& inst);
 struct ShaderComputeEmptyGate
 {
 	int      storage_buffer_index = -1;
@@ -2114,6 +2139,7 @@ struct ShaderBindResources
 	ShaderZeroSBufferResources zero_sbuffer_resources;
 	ShaderTextureResources     textures2D;
 	ShaderZeroImageResources   zero_image_resources;
+	ShaderZeroDescriptorLoads  zero_descriptor_loads;
 	ShaderSamplerResources     samplers;
 	ShaderGdsResources         gds_pointers;
 	ShaderDirectSgprsResources direct_sgprs;

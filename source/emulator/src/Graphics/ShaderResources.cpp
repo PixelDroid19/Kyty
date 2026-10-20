@@ -699,6 +699,14 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 	{
 		resource.fields[field] = extended_buffer[offset_dw + field];
 	}
+	// A loaded descriptor of buffer type binds no image; its reads return zero
+	// like a user-data one (see CollectZeroImageResources).
+	if (usage == ShaderTextureUsage::ReadOnly && !ShaderGen5TextureTypeIsImage(resource.Type()))
+	{
+		ShaderAddLoadedZeroImageResource(&bind->zero_image_resources, sload.dst.register_id, sload.pc, last_consumer_pc);
+		ShaderAddZeroDescriptorLoad(&bind->zero_descriptor_loads, sload.pc, sload.dst.register_id, 8);
+		return true;
+	}
 	operation = ShaderTextureSampleOperation(resource, operation);
 
 	sampled_shape_known = sampled_shape_known && ShaderGen5InstructionShapeAppliesToType(resource.Type(), sampled_shape);
@@ -1277,11 +1285,46 @@ const ShaderEudDescriptorLoads& ShaderCodeResourceMemo::EudDescriptorLoads(const
 	return m_eud_descriptor_loads;
 }
 
+enum class ShaderDescriptorLoadPass
+{
+	NonSampler,
+	Sampler,
+};
+
+static bool ShaderDescriptorLoadInPass(const ShaderDynamicSLoadUse& use, ShaderDescriptorLoadPass pass)
+{
+	return (use.kind == ShaderDynamicSLoadResourceKind::Sampler) == (pass == ShaderDescriptorLoadPass::Sampler);
+}
+
+// True when every image instruction that samples through the S# loaded by
+// sload, up to last_consumer_pc, reads a T# that binds nothing.
+static bool ShaderSamplerFeedsOnlyZeroImages(const ShaderCode& code, const ShaderBindResources& bind, const ShaderInstruction& sload,
+                                             uint32_t last_consumer_pc)
+{
+	bool consumed = false;
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.pc <= sload.pc || inst.pc > last_consumer_pc || !ShaderInstructionUsesImageSampler(inst.type) || inst.src_num < 3 ||
+		    inst.src[2].type != ShaderOperandType::Sgpr || inst.src[2].register_id != sload.dst.register_id)
+		{
+			continue;
+		}
+		if (!ShaderImageReadsZeroResource(bind, inst))
+		{
+			return false;
+		}
+		consumed = true;
+	}
+	return consumed;
+}
+
 // Registers the resource a descriptor S_LOAD materializes and its PC-keyed
-// mapping. table holds the loaded words at offset_dw.
-static bool ShaderAddDynamicScalarResource(ShaderBindResources* bind, ShaderParsedUsage* info, const ShaderInstruction& sload,
-                                           int offset_dw, const ShaderDynamicSLoadUse& use, const HW::UserSgprInfo& user_sgpr,
-                                           const uint32_t* table, uint32_t instruction_count)
+// mapping. table holds the loaded words at offset_dw. Samplers are added after
+// every T# (ShaderDescriptorLoadPass) so an S# that only feeds reads of a T#
+// that binds nothing binds nothing either.
+static bool ShaderAddDynamicScalarResource(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info,
+                                           const ShaderInstruction& sload, int offset_dw, const ShaderDynamicSLoadUse& use,
+                                           const HW::UserSgprInfo& user_sgpr, const uint32_t* table, uint32_t instruction_count)
 {
 	bool added_resource = false;
 	bool added_mapping = false;
@@ -1308,6 +1351,11 @@ static bool ShaderAddDynamicScalarResource(ShaderBindResources* bind, ShaderPars
 			}
 			break;
 		case ShaderDynamicSLoadResourceKind::Sampler:
+			if (ShaderSamplerFeedsOnlyZeroImages(code, *bind, sload, use.last_consumer_pc))
+			{
+				ShaderAddZeroDescriptorLoad(&bind->zero_descriptor_loads, sload.pc, sload.dst.register_id, 4);
+				return true;
+			}
 			added_mapping = ShaderAddDynamicSamplerResource(bind, sload, offset_dw, use.last_consumer_pc,
 			                                                 use.sampler_operation, user_sgpr,
 			                                                 table, instruction_count, &added_resource);
@@ -1342,6 +1390,7 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 	ShaderCollectSplitTextureResources(code, bind, info, extended_buffer, eud_size_dw, user_data_register_base, entry_values,
 	                                   loads.split_textures);
 
+	for (const auto pass: {ShaderDescriptorLoadPass::NonSampler, ShaderDescriptorLoadPass::Sampler})
 	for (const auto& candidate: loads.sloads)
 	{
 		const uint32_t index       = candidate.index;
@@ -1364,12 +1413,12 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 		}
 
 		const auto use = memo_uses != nullptr ? (*memo_uses)[index] : ShaderFindDynamicSLoadUse(code, index, sload, false);
-		if (!use.valid || !use.found)
+		if (!use.valid || !use.found || !ShaderDescriptorLoadInPass(use, pass))
 		{
 			continue;
 		}
 
-		if (!ShaderAddDynamicScalarResource(bind, info, sload, offset_dw, use, user_sgpr, extended_buffer, instruction_count))
+		if (!ShaderAddDynamicScalarResource(code, bind, info, sload, offset_dw, use, user_sgpr, extended_buffer, instruction_count))
 		{
 			EXIT("unable to materialize dynamic descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u "
 			     "storage=%d textures=%d samplers=%d mappings=%u eud_dw=%u\n",
@@ -1449,6 +1498,7 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 	}
 	const auto& entry_values = scalar_flow.holding_entry_value;
 	const uint32_t instruction_count = code.GetInstructions().Size();
+	for (const auto pass: {ShaderDescriptorLoadPass::NonSampler, ShaderDescriptorLoadPass::Sampler})
 	for (uint32_t index = 0; index < instruction_count && index < entry_values.size(); ++index)
 	{
 		const auto& sload       = code.GetInstructions().At(index);
@@ -1480,8 +1530,12 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 		}
 		for (const auto& block: blocks)
 		{
-			if (!ShaderAddDynamicScalarResource(bind, info, block.load, offset_dw + block.first_dword, block.use, user_sgpr, table.data(),
-			                                    instruction_count))
+			if (!ShaderDescriptorLoadInPass(block.use, pass))
+			{
+				continue;
+			}
+			if (!ShaderAddDynamicScalarResource(code, bind, info, block.load, offset_dw + block.first_dword, block.use, user_sgpr,
+			                                    table.data(), instruction_count))
 			{
 				EXIT("unable to materialize SRT pointer descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u textures=%d "
 				     "samplers=%d\n",

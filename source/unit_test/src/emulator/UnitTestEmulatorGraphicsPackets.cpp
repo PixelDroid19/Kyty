@@ -4224,7 +4224,7 @@ TEST(EmulatorGraphicsPackets, ResolvesImplicitSampleShapeFromMixedDescriptorSet)
 	EXPECT_EQ(source.FindIndex("OpSampledImage %SampledImageA"), Core::STRING8_INVALID_INDEX);
 }
 
-TEST(EmulatorGraphicsPackets, SamplesThroughAllZeroDescriptorReturnZero)
+TEST(EmulatorGraphicsPackets, SamplesThroughUnboundDescriptorReturnZero)
 {
 	if (!Config::IsInitialized())
 	{
@@ -4283,6 +4283,19 @@ TEST(EmulatorGraphicsPackets, SamplesThroughAllZeroDescriptorReturnZero)
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 	EXPECT_EQ(source.FindIndex("OpImageSample"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpSelect %float %image_exec_active_0 %float_0_000000 %image_exec_old_0_3"), Core::STRING8_INVALID_INDEX);
+
+	// A non-zero descriptor reads as unbound only while its type nibble is a buffer encoding.
+	for (const uint32_t type: {0u, 7u, 9u})
+	{
+		HW::UserSgprInfo typed_sgpr = user_sgpr;
+		typed_sgpr.value[0]         = 0x00000600u;
+		typed_sgpr.value[1]         = 0x00fff000u;
+		typed_sgpr.value[3]         = type << 28u;
+		ShaderPixelInputInfo typed_input {};
+		ShaderParsedUsage    typed_usage {};
+		ShaderParseUsage2(&user_data, &typed_usage, &typed_input.bind, typed_sgpr, 12, &code, 0, false);
+		EXPECT_EQ(typed_input.bind.zero_image_resources.images_num, type < 8u ? 1 : 0) << "type=" << type;
+	}
 
 	// A descriptor the shader rewrites before the read is not the zero user data.
 	ShaderInstruction write {};

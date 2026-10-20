@@ -38,6 +38,7 @@
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
@@ -2223,8 +2224,9 @@ static void AddZeroSBufferResource(ShaderZeroSBufferResources* resources, int st
 }
 
 // The eight T# dwords an instruction reads are still the shader's entry user
-// SGPRs, and every one of them is zero.
-static bool ShaderImageResourceIsZeroUserData(const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
+// SGPRs, and they hold no image descriptor: every dword is zero, or the dword 3
+// type nibble is a buffer encoding (0-7) instead of an image type.
+static bool ShaderImageResourceIsUnboundUserData(const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
                                               uint32_t index, const ShaderOperand& resource, const HW::UserSgprInfo& user_sgpr,
                                               int user_sgpr_num, int user_data_register_base)
 {
@@ -2235,19 +2237,46 @@ static bool ShaderImageResourceIsZeroUserData(const std::vector<std::bitset<kSha
 	{
 		return false;
 	}
+	bool all_zero = true;
 	for (int dword = 0; dword < dwords; ++dword)
 	{
-		if (!entry_values[index].test(static_cast<size_t>(resource.register_id + dword)) || user_sgpr.value[user_register + dword] != 0)
+		if (!entry_values[index].test(static_cast<size_t>(resource.register_id + dword)))
 		{
 			return false;
 		}
+		all_zero = all_zero && user_sgpr.value[user_register + dword] == 0;
 	}
-	return true;
+	const uint32_t word3 = user_sgpr.value[user_register + 3];
+	return all_zero || !ShaderGen5TextureTypeIsImage(static_cast<uint8_t>((word3 >> 28u) & 0xfu));
 }
 
-// Records image reads through an all-zero T#. Such a resource binds nothing;
-// the emitter returns zero for it (RDNA2 ISA: an all-zero resource acts as an
-// unbound texture).
+// Reports reads through a non-zero descriptor of buffer type, which the ISA does
+// not define as unbound; bounded so a title that binds one per draw stays quiet.
+static void ReportNonImageResourceRead(const ShaderCode& code, const ShaderOperand& resource, const HW::UserSgprInfo& user_sgpr,
+                                       int user_data_register_base)
+{
+	constexpr uint32_t           kMaxReports = 16u;
+	static std::atomic<uint32_t> reports {0};
+	const int                    user_register = resource.register_id - user_data_register_base;
+	bool                         all_zero      = true;
+	for (int dword = 0; dword < 8; ++dword)
+	{
+		all_zero = all_zero && user_sgpr.value[user_register + dword] == 0;
+	}
+	if (all_zero || reports.fetch_add(1u, std::memory_order_relaxed) >= kMaxReports)
+	{
+		return;
+	}
+	char message[Emulator::Agent::kAgentEventMessageMax] {};
+	std::snprintf(message, sizeof(message), "crc=%08x register=s%d word0=%08x word3=%08x", code.GetCrc32(), resource.register_id,
+	              user_sgpr.value[user_register], user_sgpr.value[user_register + 3]);
+	Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Warn, "image_read_non_image", message);
+}
+
+// Records image reads through a T# that holds no image descriptor. Such a
+// resource binds nothing; the emitter returns zero for it (RDNA2 ISA: an
+// all-zero resource acts as an unbound texture; a buffer-typed descriptor is
+// read the same way, an inexact contract recorded in docs/BRINGUP.md).
 static void CollectZeroImageResources(const ShaderCode& code, const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
                                       const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, int user_data_register_base,
                                       ShaderZeroImageResources* resources)
@@ -2257,26 +2286,55 @@ static void CollectZeroImageResources(const ShaderCode& code, const std::vector<
 	{
 		const auto& inst = instructions.At(index);
 		if (!ShaderImageReadReturnsDmaskComponents(inst.type) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
-		    !ShaderImageResourceIsZeroUserData(entry_values, index, inst.src[1], user_sgpr, user_sgpr_num, user_data_register_base))
+		    !ShaderImageResourceIsUnboundUserData(entry_values, index, inst.src[1], user_sgpr, user_sgpr_num, user_data_register_base))
 		{
 			continue;
 		}
 		bool recorded = false;
 		for (int i = 0; i < resources->images_num; ++i)
 		{
-			recorded = recorded || resources->start_register[i] == inst.src[1].register_id;
+			recorded = recorded || (resources->start_register[i] == inst.src[1].register_id && !resources->loaded[i]);
 		}
 		if (recorded)
 		{
 			continue;
 		}
-		if (resources->images_num >= ShaderZeroImageResources::IMAGES_MAX)
-		{
-			EXIT("shader zero image capacity exceeded: count=%d capacity=%d register=%d\n", resources->images_num,
-			     ShaderZeroImageResources::IMAGES_MAX, inst.src[1].register_id);
-		}
-		resources->start_register[resources->images_num++] = inst.src[1].register_id;
+		ReportNonImageResourceRead(code, inst.src[1], user_sgpr, user_data_register_base);
+		ShaderAddZeroImageResource(resources, inst.src[1].register_id);
 	}
+}
+
+static void AddZeroImageResource(ShaderZeroImageResources* resources, int register_id, bool loaded, uint32_t load_pc, uint32_t last_pc)
+{
+	EXIT_IF(resources == nullptr);
+	for (int i = 0; i < resources->images_num; ++i)
+	{
+		if (resources->start_register[i] == register_id && resources->loaded[i] == loaded && resources->load_pc[i] == load_pc &&
+		    resources->last_pc[i] == last_pc)
+		{
+			return;
+		}
+	}
+	if (resources->images_num >= ShaderZeroImageResources::IMAGES_MAX)
+	{
+		EXIT("shader zero image capacity exceeded: count=%d capacity=%d register=%d\n", resources->images_num,
+		     ShaderZeroImageResources::IMAGES_MAX, register_id);
+	}
+	resources->start_register[resources->images_num] = register_id;
+	resources->loaded[resources->images_num]         = loaded;
+	resources->load_pc[resources->images_num]        = load_pc;
+	resources->last_pc[resources->images_num]        = last_pc;
+	resources->images_num++;
+}
+
+void ShaderAddZeroImageResource(ShaderZeroImageResources* resources, int register_id)
+{
+	AddZeroImageResource(resources, register_id, false, 0u, 0u);
+}
+
+void ShaderAddLoadedZeroImageResource(ShaderZeroImageResources* resources, int register_id, uint32_t load_pc, uint32_t last_pc)
+{
+	AddZeroImageResource(resources, register_id, true, load_pc, last_pc);
 }
 
 // A read-only sampled descriptor is counted in the bank of the shape it was registered with. An
@@ -4176,7 +4234,7 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 			return false;
 		}
 	}
-	return true;
+	return inst.dst.type != ShaderOperandType::Sgpr || !ShaderScalarLoadWritesZero(bind, inst.pc, inst.dst.register_id);
 }
 
 // Instructions that dereference guest memory through a computed address: BVH
@@ -4256,14 +4314,66 @@ bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderI
 	{
 		return false;
 	}
-	for (int i = 0; i < bind.zero_image_resources.images_num; ++i)
+	const auto& zero = bind.zero_image_resources;
+	for (int i = 0; i < zero.images_num; ++i)
 	{
-		if (bind.zero_image_resources.start_register[i] == inst.src[1].register_id)
+		if (zero.start_register[i] == inst.src[1].register_id &&
+		    (!zero.loaded[i] || (inst.pc > zero.load_pc[i] && inst.pc <= zero.last_pc[i])))
 		{
 			return true;
 		}
 	}
 	return false;
+}
+
+void ShaderAddZeroDescriptorLoad(ShaderZeroDescriptorLoads* loads, uint32_t pc, int first_register, int dwords)
+{
+	EXIT_IF(loads == nullptr);
+	for (int i = 0; i < loads->loads_num; ++i)
+	{
+		if (loads->pc[i] == pc && loads->first_register[i] == first_register && loads->dwords[i] == dwords)
+		{
+			return;
+		}
+	}
+	if (loads->loads_num >= ShaderZeroDescriptorLoads::LOADS_MAX)
+	{
+		EXIT("shader zero descriptor load capacity exceeded: count=%d capacity=%d pc=0x%08" PRIx32 "\n", loads->loads_num,
+		     ShaderZeroDescriptorLoads::LOADS_MAX, pc);
+	}
+	loads->pc[loads->loads_num]             = pc;
+	loads->first_register[loads->loads_num] = first_register;
+	loads->dwords[loads->loads_num]         = dwords;
+	loads->loads_num++;
+}
+
+bool ShaderScalarLoadWritesZero(const ShaderBindResources& bind, uint32_t pc, int register_id)
+{
+	const auto& loads = bind.zero_descriptor_loads;
+	for (int i = 0; i < loads.loads_num; ++i)
+	{
+		if (loads.pc[i] == pc && register_id >= loads.first_register[i] && register_id < loads.first_register[i] + loads.dwords[i])
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool ShaderScalarLoadIsZero(const ShaderBindResources& bind, const ShaderInstruction& inst)
+{
+	if (!ShaderInstructionIsScalarMemoryLoad(inst.type) || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size <= 0)
+	{
+		return false;
+	}
+	for (int word = 0; word < inst.dst.size; ++word)
+	{
+		if (!ShaderScalarLoadWritesZero(bind, inst.pc, inst.dst.register_id + word))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
@@ -5597,6 +5707,17 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 	for (int i = 0; i < bind.zero_image_resources.images_num; ++i)
 	{
 		ids->Add(bind.zero_image_resources.start_register[i]);
+		ids->Add(bind.zero_image_resources.loaded[i] ? 1u : 0u);
+		ids->Add(bind.zero_image_resources.load_pc[i]);
+		ids->Add(bind.zero_image_resources.last_pc[i]);
+	}
+
+	ids->Add(bind.zero_descriptor_loads.loads_num);
+	for (int i = 0; i < bind.zero_descriptor_loads.loads_num; ++i)
+	{
+		ids->Add(bind.zero_descriptor_loads.pc[i]);
+		ids->Add(bind.zero_descriptor_loads.first_register[i]);
+		ids->Add(bind.zero_descriptor_loads.dwords[i]);
 	}
 
 	ids->Add(bind.textures2D.textures_num);
