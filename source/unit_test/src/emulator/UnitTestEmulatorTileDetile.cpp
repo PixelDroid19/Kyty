@@ -1621,6 +1621,28 @@ TEST(EmulatorTileDetile, DetilesRenderTarget64KBCubeMipChain)
 	EXPECT_EQ(actual, expected);
 }
 
+// A layered mip-chained color target and the array texture over the same
+// surface agree on the slice pitch: each slice holds its whole chain.
+TEST(EmulatorTileDetile, RenderTarget64KBChainIsTheArraySlicePitch)
+{
+	struct Case
+	{
+		uint32_t size;
+		uint32_t levels;
+		uint64_t slice;
+	};
+	for (const Case& c: {Case {32u, 6u, 0x10000u}, Case {128u, 8u, 0x30000u}})
+	{
+		Gen5TextureMipLayout chain {};
+		ASSERT_TRUE(Gen5GetRenderTarget64KBMipLayout(8u, c.size, c.size, c.size, c.levels, &chain));
+		Gen5TextureArrayLayout array {};
+		ASSERT_TRUE(Gen5GetTextureArrayLayout(71u, c.size, c.size, c.size, c.levels, 27u, 6u, &array));
+		EXPECT_EQ(chain.tiled.size, c.slice);
+		EXPECT_EQ(array.tiled_slice.size, c.slice);
+		EXPECT_EQ(array.tiled_size, 6u * c.slice);
+	}
+}
+
 TEST(EmulatorTileDetile, RejectsUnrepresentableStandard256BArrayByteCounts)
 {
 	Gen5TextureArrayLayout layout {};

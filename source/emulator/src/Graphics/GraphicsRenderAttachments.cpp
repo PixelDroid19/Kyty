@@ -1287,10 +1287,10 @@ DepthStencilAttachmentAccess ResolveDepthStencilAttachmentAccess(const RenderDep
 	return stencil_writes && has_stencil ? DepthStencilAttachmentAccess::DepthReadOnly : DepthStencilAttachmentAccess::ReadOnly;
 }
 
-// MAX_MIP and MIP_LEVEL select one level of a tiled chain that starts at the
-// target base; the attachment covers the whole chain. Layered chains keep
-// their single-level description.
-static void DescribeRenderColorMipChain(const HW::RenderTarget& rt, uint32_t bytes_per_element, RenderColorAttachmentInfo* attachment)
+// MAX_MIP and MIP_LEVEL select one level of a tiled chain. Every slice holds
+// its whole chain, so the chain size is the slice pitch of a layered target
+// (the pitch a sampled array view of the same surface uses).
+static uint64_t DescribeRenderColorMipChain(const HW::RenderTarget& rt, uint32_t bytes_per_element, RenderColorAttachmentInfo* attachment)
 {
 	const uint32_t       levels = rt.attrib2.num_mip_levels + 1u;
 	Gen5TextureMipLayout layout {};
@@ -1300,9 +1300,9 @@ static void DescribeRenderColorMipChain(const HW::RenderTarget& rt, uint32_t byt
 		EXIT("unsupported render-target mip chain: %ux%u pitch=%u bpe=%u levels=%u mip=%u\n", attachment->width, attachment->height,
 		     attachment->pitch, bytes_per_element, levels, rt.view.current_mip_level);
 	}
-	attachment->size       = layout.tiled.size;
 	attachment->mip_levels = levels;
 	attachment->mip_level  = rt.view.current_mip_level;
+	return layout.tiled.size;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1370,8 +1370,11 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		Graphics::TileSizeAlign size32 {};
 		Graphics::TileGetRenderTargetSize(attachment.width, attachment.height, attachment.pitch, rt.attrib3.tile_mode, rt_bpp, &size32);
 
+		const uint64_t slice_size = attachment.tile && rt.attrib2.num_mip_levels != 0u
+		                                ? DescribeRenderColorMipChain(rt, rt_bpp, &attachment)
+		                                : size32.size;
 		RenderTextureArrayView array_view {};
-		if (!ResolveRenderTextureArrayView(size32.size, rt.view.base_array_slice_index, rt.view.last_array_slice_index, &array_view))
+		if (!ResolveRenderTextureArrayView(slice_size, rt.view.base_array_slice_index, rt.view.last_array_slice_index, &array_view))
 		{
 			EXIT("invalid layered render-target layout: width=%" PRIu32 " height=%" PRIu32 " pitch=%" PRIu32
 			     " tile=%u layer=%" PRIu32 "..%" PRIu32 "\n",
@@ -1382,15 +1385,17 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		attachment.image_layers     = array_view.image_layers;
 		attachment.base_array_layer = array_view.base_layer;
 		attachment.layer_count      = array_view.layer_count;
-		if (attachment.tile && attachment.image_layers == 1u && rt.attrib2.num_mip_levels != 0u)
+		// A layered target reads and writes its whole backing; the guest may map it in adjacent pieces.
+		const uint64_t mapped = attachment.image_layers > 1u ? GpuMemoryGetMappedRangePrefix(rt.base.addr, attachment.size)
+		                                                     : attachment.size;
+		if (mapped != attachment.size)
 		{
-			DescribeRenderColorMipChain(rt, rt_bpp, &attachment);
-		}
-		if (attachment.image_layers > 1u &&
-		    GpuMemoryValidateAllocatedRange(rt.base.addr, attachment.size) != GpuMemoryRangeValidationStatus::Valid)
-		{
-			EXIT("layered render-target backing is not fully allocated: size=%" PRIu64 " layers=%" PRIu32 "\n", attachment.size,
-			     attachment.image_layers);
+			EXIT("layered render-target backing is not fully mapped: addr=0x%012" PRIx64 " size=%" PRIu64 " mapped=%" PRIu64
+			     " layers=%" PRIu32 " layer=%" PRIu32 "..%" PRIu32 " %" PRIu32 "x%" PRIu32 " pitch=%" PRIu32 " bpp=%" PRIu32
+			     " tile=%u mips=%" PRIu32 " mip=%" PRIu32 "\n",
+			     static_cast<uint64_t>(rt.base.addr), attachment.size, mapped, attachment.image_layers, rt.view.base_array_slice_index,
+			     rt.view.last_array_slice_index, attachment.width, attachment.height, attachment.pitch, rt_bpp, rt.attrib3.tile_mode,
+			     rt.attrib2.num_mip_levels + 1u, rt.view.current_mip_level);
 		}
 	} else
 	{
