@@ -1252,6 +1252,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	Vector<int> selective_reclaim_ids;
 	Vector<int> depth_stencil_reclaim_ids;
 	Vector<int> retire_after_copy_ids;
+	// Parents a new object copies from when it links others it does not copy.
+	Vector<OverlappedBlock> copy_sources;
 
 	GpuMemoryScenario scenario = GpuMemoryScenario::Common;
 
@@ -2065,6 +2067,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// Multi-parent RenderTexture: surface peers/parents (SB/RT/Texture)
 			// and partial VertexBuffers. Captured after Param5: SB Equals +
 			// SB Contains + RT Contains (and permutations).
+			// A layered target that grows past its previous slices (one slice per draw)
+			// copies them from that prefix target, which it retires.
+			int  render_growth_id          = -1;
 			bool multi_render_target_alias = (info.type == GpuMemoryObjectType::RenderTexture && !others.IsEmpty());
 			if (multi_render_target_alias)
 			{
@@ -2073,6 +2078,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					const auto& h = heap.objects[obj.object_id];
 					EXIT_IF(h.free);
 					const auto& o = h.info;
+					if (buffer != nullptr && render_growth_id < 0 && o.object.type == GpuMemoryObjectType::RenderTexture &&
+					    obj.relation == OverlapType::IsContainedWithin && h.block.vaddr_num == 1 && vaddr_num == 1 &&
+					    h.block.vaddr[0] == vaddr[0] && h.block.size[0] < size[0] &&
+					    std::all_of(h.others.begin(), h.others.end(), [&is_parent](const auto& link) { return is_parent(link.object_id); }) &&
+					    RenderTextureCanCopyGrowingBacking(o.params, info.params))
+					{
+						render_growth_id = obj.object_id;
+						continue;
+					}
 					if (!GpuMemoryAllowsRenderTargetSurfaceAlias(o.object.type, obj.relation, info.type))
 					{
 						multi_render_target_alias = false;
@@ -2264,6 +2278,17 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			           multi_render_target_alias)
 			{
 				overlap = true;
+				if (multi_render_target_alias && render_growth_id >= 0)
+				{
+					Vector<OverlappedBlock> keep;
+					for (const auto& obj: others)
+					{
+						(obj.object_id == render_growth_id ? copy_sources : keep).Add(obj);
+					}
+					create_from_objects = true;
+					retire_after_copy_ids.Add(render_growth_id);
+					others = keep;
+				}
 			} else if (multi_texture_reclaim)
 			{
 				delete_all = true;
@@ -2717,7 +2742,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	if (create_from_objects)
 	{
 		Vector<GpuMemoryObject> objects;
-		for (const auto& obj: others)
+		for (const auto& obj: copy_sources.IsEmpty() ? others : copy_sources)
 		{
 			auto& o2 = heap.objects[obj.object_id].info;
 			RecordUse(&o2, buffer);
