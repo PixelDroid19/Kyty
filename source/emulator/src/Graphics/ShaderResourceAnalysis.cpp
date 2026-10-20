@@ -77,15 +77,29 @@ bool ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format)
 	return format == 20 || format == 22;
 }
 
+static bool ShaderRawStorageSixteenBitFormat(uint32_t format)
+{
+	switch (format)
+	{
+		case 7u:  // R16_UNORM
+		case 8u:  // R16_SNORM
+		case 11u: // R16_UINT
+		case 13u: // R16_SFLOAT
+			return true;
+		default: return false;
+	}
+}
+
 bool ShaderRawStorageDescriptorSupported(const ShaderBufferResource& resource)
 {
 	// Raw BUFFER_* instructions use the descriptor stride as a byte count. The
-	// address equation operates on DWORDs, so a non-zero but byte-misaligned
-	// stride cannot describe a valid raw record. Stride 1 is the byte-addressed
-	// case: the guest indexes the buffer byte-wise and the shared equation
-	// (index * stride + offset) degenerates to index + offset, which the raw
-	// lowering handles.
-	return resource.Stride() != 0 && ((resource.Stride() & 3u) == 0u || resource.Stride() == 1u);
+	// address equation operates on bytes, so dword-aligned strides and the
+	// byte-addressed stride 1 case are valid. A two-byte stride is a 16-bit
+	// record, which the raw lowering can address for the R16 formats; wider
+	// formats would read across records.
+	return resource.Stride() != 0 &&
+	       ((resource.Stride() & 3u) == 0u || resource.Stride() == 1u ||
+	        (resource.Stride() == 2u && ShaderRawStorageSixteenBitFormat(resource.Format())));
 }
 
 bool ShaderGen5RawDescriptorAlwaysOutOfBounds(const ShaderBufferResource& resource)
