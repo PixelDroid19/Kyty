@@ -4,6 +4,30 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: per-frame fills refused by partial buffer views (2026-10-20)
+
+Intel A770, strict 180 s runs of the traveler route with scripted movement.
+
+- **Symptom.** The character left a trail for about a second while walking,
+  and an opened menu could remain over the scene after it closed.
+- **Cause.** Each frame's uniform colour fill was refused at
+  `ResolveComputeColorFillIdentity`. The filled range had an exact writable
+  storage buffer plus partial and read-only storage views of the same bytes.
+  The colour-fill path rejected the whole fill for those views, so the clear
+  was never published and the previous frame's image stayed in the target.
+  A temporary diagnostic counted 48 identity refusals in 180 s, all at the
+  same per-frame range.
+- **Change.** `ComputeFillAliases::SkipPartial` now skips partial storage
+  views as it already skipped partial image aliases. The exact writable
+  storage is still required; the DCC metadata path keeps the exact-only
+  rule. The diagnostic is removed.
+- **Result.** The same run reports no fill refusals and the walking capture
+  shows no character trail. The menu-close path was not reproduced by the
+  scripted route yet; the fix is general to the fill path.
+- **Open.** The maintainer still reports elements appearing and disappearing
+  in the story camp, and a stuck menu overlay after closing it. Re-test with
+  the fill fix before localizing those separately.
+
 ## Role-playing title: the grading volume lost its blue axis (2026-10-20)
 
 Intel A770, strict 300 s runs of the traveler-selection route.
