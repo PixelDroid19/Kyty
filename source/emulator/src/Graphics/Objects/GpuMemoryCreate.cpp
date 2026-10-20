@@ -1524,7 +1524,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// not a stricter contract than several, so share instead of failing
 				// (captured full-screen RenderTexture Crossing a stale Texture).
 				overlap = true;
-			} else if (GpuMemoryAllowsTextureLinkDepthMetadata(o.object.type, obj.relation, info.type))
+			} else if (GpuMemoryAllowsTextureLinkDepthMetadata(o.object.type, obj.relation, info.type) ||
+			           GpuMemoryAllowsTextureOverDepthRange(o.object.type, obj.relation, info.type))
 			{
 				// Same link as the mixed-parent form: the texture uploads guest bytes.
 				overlap = true;

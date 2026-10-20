@@ -640,6 +640,18 @@ inline bool GpuMemoryAllowsTextureLinkDepthMetadata(GpuMemoryObjectType existing
 	       incoming_type == GpuMemoryObjectType::Texture;
 }
 
+// Incoming sampled Texture over exactly the range of an existing depth surface
+// (captured: a 512x512 BC3 texture over a 512x512 D16 target). Depth-tiled reads
+// of a depth surface bind the depth image before any Texture is created, so this
+// is a colour view of a recycled range. Depth images publish no guest bytes:
+// the texture uploads guest memory, and the depth object stays linked.
+inline bool GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                 GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::DepthStencilBuffer && relation == GpuMemoryOverlapType::Equals &&
+	       incoming_type == GpuMemoryObjectType::Texture;
+}
+
 // VertexBuffer parent of an incoming Texture that should be reclaimed (delete).
 inline bool GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                 GpuMemoryObjectType incoming_type)
