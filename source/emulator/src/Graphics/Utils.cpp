@@ -336,7 +336,8 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 	region.imageSubresource.layerCount     = 1;
 
 	region.imageOffset = {0, 0, 0};
-	region.imageExtent = {src_image->extent.width, src_image->extent.height, 1};
+	region.imageExtent = {src_image->extent.width, src_image->extent.height,
+	                      src_image->image_type == VK_IMAGE_TYPE_3D ? src_image->physical_extent.depth : 1u};
 
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer, 1, &region);
 
