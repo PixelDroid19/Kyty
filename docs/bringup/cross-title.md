@@ -36,8 +36,9 @@ record. Titles are named descriptively only (`AGENTS.md`).
   the fix the well platformer stopped at 85 s. A first version of the pass
   (without the entered-from-outside condition) ran 181 s and reached
   gameplay (frame 6827). The final version ran 101 s in the ten-title sweep
-  without a stop. All ten titles ended with status 1. A 180 s run of the
-  final version, past the 122 s stop seen before, is still pending.
+  without a stop, and all ten titles ended with status 1. A 180 s run of the
+  final version passed the 122 s stop seen before and ended in gameplay
+  (frame 6837, about 40 fps).
 
 ## Descriptor churn and frame hitches on Intel (2026-10-19)
 
