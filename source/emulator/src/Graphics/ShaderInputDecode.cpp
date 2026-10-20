@@ -105,7 +105,8 @@ void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5)
 
 			uint64_t stride = b.stride;
 
-			if (stride == r.Stride())
+			// A binding steps at one rate, so instance and vertex attributes never share one.
+			if (stride == r.Stride() && b.instance == info->resources_dst[ri].instance)
 			{
 				uint64_t rbase   = (ps5 ? r.Base48() : r.Base44());
 				uint64_t base    = std::min(rbase, b.addr);
@@ -141,6 +142,7 @@ void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5)
 			info->buffers[bi].num_records     = r.NumRecords();
 			info->buffers[bi].attr_num        = 1;
 			info->buffers[bi].attr_indices[0] = ri;
+			info->buffers[bi].instance        = info->resources_dst[ri].instance;
 		}
 	}
 
@@ -240,6 +242,7 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 			rd.register_start = inst.dst.register_id;
 			rd.registers_num  = registers_num;
 			rd.semantic       = info->resources_num;
+			rd.instance       = false;
 			r.fields[0]       = temp_value[t + 0];
 			r.fields[1]       = temp_value[t + 1];
 			r.fields[2]       = temp_value[t + 2];
@@ -303,7 +306,6 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 		const size_t   index   = decoded.slot;
 		const uint32_t offset  = decoded.offset;
 
-		if (decoded.instance) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fetch_index != 0 condition ignored (continuing)\n"); }
 
 		if (index >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
 
@@ -331,6 +333,7 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 		auto& rd          = info->resources_dst[info->resources_num];
 		rd.register_start = static_cast<int>(reg);
 		rd.semantic       = static_cast<int>(in.semantic);
+		rd.instance       = decoded.instance;
 		r.fields[0]       = sharp[0];
 		r.fields[1]       = sharp[1];
 		r.fields[2]       = sharp[2];

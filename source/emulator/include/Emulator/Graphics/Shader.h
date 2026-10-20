@@ -1644,6 +1644,8 @@ struct ShaderVertexInputBuffer
 	// SSBO slot in bind.storage_buffers when this stream backs untagged MUBUF
 	// format-loads. -1 means the stream is Fetch-only.
 	int      storage_slot           = -1;
+	// The stream steps per instance instead of per vertex.
+	bool     instance               = false;
 };
 
 struct ShaderVertexDestination
@@ -1653,6 +1655,8 @@ struct ShaderVertexDestination
 	// Guest attribute-table semantic. This is not necessarily the dense Vulkan
 	// input location used by resources/resources_dst.
 	int semantic = -1;
+	// The attribute word selects the instance id as the fetch index.
+	bool instance = false;
 };
 
 enum class ShaderStorageUsage

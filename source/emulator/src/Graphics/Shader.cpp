@@ -5804,6 +5804,7 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 		ids.Add(rd.register_start);
 		ids.Add(rd.registers_num);
 		ids.Add(static_cast<uint32_t>(rd.semantic));
+		ids.Add(static_cast<uint32_t>(rd.instance));
 		ids.Add(r.Stride());
 		ids.Add(static_cast<uint32_t>(r.SwizzleEnabled()));
 		ids.Add(r.DstSelX());

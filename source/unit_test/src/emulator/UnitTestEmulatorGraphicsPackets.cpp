@@ -31,6 +31,7 @@
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvScJoin.h"
+#include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
 #include "../../../emulator/src/Graphics/GraphicsRunInternal.h"
 #include "../../../emulator/src/Graphics/GraphicsRunWaitPolicy.h"
 
@@ -1784,6 +1785,44 @@ TEST(EmulatorGraphicsPackets, BuildsPackedNormalized16BitVertexLayout)
 	}
 	input.resources[0].fields[3] = DstSel(4, 5, 6, 7);
 	EXPECT_FALSE(VulkanBuildVertexInputLayout(input, &layout));
+}
+
+// The attribute word's instance bit makes the fetch index the instance id, so the
+// attribute steps per instance and never shares a per-vertex binding of the same stream.
+TEST(EmulatorGraphicsPackets, InstanceAttributeStepsInItsOwnBinding)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+
+	const uint32_t buffer_table[4] = {0x00010000u, 16u << 16u, 64u, (56u << 12u) | DstSel(4, 5, 6, 7)};
+	const uint32_t attrib_table[2] = {(3u << 5u) | (56u << 7u), (1u << 26u) | (11u << 7u) | (4u << 14u)};
+	ShaderSemantic semantics[2] {};
+	semantics[0].semantic         = 0;
+	semantics[0].hardware_mapping = 0;
+	semantics[0].size_in_elements = 4;
+	semantics[1].semantic         = 1;
+	semantics[1].hardware_mapping = 4;
+	semantics[1].size_in_elements = 1;
+
+	ShaderVertexInputInfo input {};
+	ShaderParseAttrib(&input, semantics, 2, attrib_table, buffer_table);
+	ShaderDetectBuffers(&input, true);
+
+	ASSERT_EQ(input.resources_num, 2);
+	EXPECT_FALSE(input.resources_dst[0].instance);
+	EXPECT_TRUE(input.resources_dst[1].instance);
+	ASSERT_EQ(input.buffers_num, 2);
+	EXPECT_EQ(input.buffers[0].addr, 0x10000u);
+	EXPECT_EQ(input.buffers[1].addr, 0x10004u);
+
+	VulkanVertexInputLayout layout {};
+	ASSERT_TRUE(VulkanBuildVertexInputLayout(input, &layout));
+	EXPECT_EQ(layout.binding_count, 2u);
+	EXPECT_EQ(layout.bindings[0].inputRate, VK_VERTEX_INPUT_RATE_VERTEX);
+	EXPECT_EQ(layout.bindings[1].inputRate, VK_VERTEX_INPUT_RATE_INSTANCE);
+	EXPECT_EQ(layout.attributes[0].binding, 0u);
+	EXPECT_EQ(layout.attributes[1].binding, 1u);
+	EXPECT_EQ(layout.attributes[1].format, VK_FORMAT_R16_UINT);
 }
 
 TEST(EmulatorGraphicsPackets, BuildsFiveAttributeInterleavedMixedNumericVertexLayout)

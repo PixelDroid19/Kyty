@@ -2578,27 +2578,36 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 }
 
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
-	                   uint32_t first_record, uint32_t required_records, bool records_exact)
+	                   uint32_t first_record, uint32_t required_records, bool records_exact, uint32_t first_instance,
+	                   uint32_t instance_count)
 {
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 
 	const uint32_t stream_offset = ShaderVertexStreamRecordOffset(input);
+	// An instance range past 32 bits is unknown; the stream then keeps every declared record.
+	const uint64_t instance_end     = static_cast<uint64_t>(first_instance) + instance_count;
+	const uint32_t instance_records = instance_end > UINT32_MAX ? 0u : static_cast<uint32_t>(instance_end);
 	for (int i = 0; i < input.buffers_num; i++)
 	{
 		const auto& buffer_info = input.buffers[i];
+		const bool  instance    = buffer_info.instance;
 		// A base beyond the declared records cannot shift the stream; the fetch
-		// then reads from the buffer base as before.
-		const uint32_t shift     = stream_offset < buffer_info.num_records ? stream_offset : 0u;
+		// then reads from the buffer base as before. The vertex offset never
+		// shifts a stream indexed by the instance id.
+		const uint32_t shift     = !instance && stream_offset < buffer_info.num_records ? stream_offset : 0u;
 		const uint64_t address   = buffer_info.addr + static_cast<uint64_t>(shift) * buffer_info.stride;
 		const uint32_t available = buffer_info.num_records - shift;
-		const uint32_t records   = required_records == 0 ? available : std::min(available, required_records);
+		const uint32_t required  = instance ? instance_records : required_records;
+		const uint32_t first     = instance ? 0u : first_record;
+		const uint32_t records   = required == 0 ? available : std::min(available, required);
 		const uint64_t size     = ShaderBufferByteSize(buffer_info.stride, records);
-		// Every binding steps per vertex, so records below the draw's first are never fetched.
+		// Records below the draw's first vertex are never fetched.
 		const uint64_t read_begin =
-		    buffer_info.stride != 0u && first_record < records ? static_cast<uint64_t>(buffer_info.stride) * first_record : 0u;
+		    buffer_info.stride != 0u && first < records ? static_cast<uint64_t>(buffer_info.stride) * first : 0u;
 		// Fetches past the captured records only exist when the draw range is unknown or
-		// clamped, or when an attribute reaches beyond its record.
-		const bool tail_fetched = !records_exact || required_records == 0 || required_records > available ||
+		// clamped, or when an attribute reaches beyond its record. The instance range
+		// comes from the draw itself, so it is always exact.
+		const bool tail_fetched = (!instance && !records_exact) || required == 0 || required > available ||
 		                          VulkanVertexInputBindingFetchEnd(input, i) > buffer_info.stride;
 
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
