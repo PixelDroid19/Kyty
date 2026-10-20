@@ -405,17 +405,29 @@ inline bool GpuMemoryAllowsStorageTextureReclaimVertex(GpuMemoryObjectType exist
 	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin);
 }
 
-// Incoming StorageTexture over a read-only StorageBuffer the CPU uploaded, in
-// any overlap (captured story start: a 0x30000 128x128 eight-level view at the
-// base of a 0x1fa400 buffer, and a 0x120000 six-layer view holding a 0x110000
-// buffer, both over recycled allocations). The buffer only caches guest bytes,
-// so the storage image seeds from guest memory and both are linked.
-inline bool GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
-                                                          bool existing_read_only, GpuMemoryContentOrigin existing_origin,
-                                                          GpuMemoryObjectType incoming_type)
+// A StorageBuffer only caches guest bytes when it is a read-only CPU upload, or
+// when its latest writable use was already written back and nothing is pending.
+inline bool GpuMemoryStorageBufferCachesGuestBytes(bool read_only, GpuMemoryContentOrigin origin, bool in_use, uint64_t write_time,
+                                                   uint64_t cpu_update_time)
 {
-	return existing_type == GpuMemoryObjectType::StorageBuffer && existing_read_only &&
-	       existing_origin == GpuMemoryContentOrigin::CpuUpload && incoming_type == GpuMemoryObjectType::StorageTexture &&
+	if (origin == GpuMemoryContentOrigin::CpuUpload)
+	{
+		return read_only;
+	}
+	return origin == GpuMemoryContentOrigin::GpuWriteBack && !in_use && write_time <= cpu_update_time;
+}
+
+// Incoming StorageTexture over a StorageBuffer that caches guest bytes, in any
+// overlap (captured story start: a 0x30000 128x128 eight-level view at the base
+// of a 0x1fa400 CPU upload, and a 0x120000 six-layer view holding a 0x110000
+// one; story scene: a 0x100000 16x1020 RGBA16F mode-27 view holding a 0x90000
+// buffer idle since its write-back). The storage image seeds from guest memory
+// and both are linked.
+inline bool GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                          bool existing_caches_guest_bytes, GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::StorageBuffer && existing_caches_guest_bytes &&
+	       incoming_type == GpuMemoryObjectType::StorageTexture &&
 	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals ||
 	        relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin);
 }

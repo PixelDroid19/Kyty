@@ -6519,6 +6519,19 @@ TEST(EmulatorGraphicsState, LinksPendingStorageBeforeDepthStencilReuse)
 	EXPECT_FALSE(GpuMemoryHasPendingWritableWriteBack(false, false, true, false)); // not in use
 	EXPECT_FALSE(GpuMemoryHasPendingWritableWriteBack(true, false, false, false)); // no write-back
 
+	// A storage buffer caches guest bytes as a read-only upload or once written back.
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(true, GpuMemoryContentOrigin::CpuUpload, true, 0, 1));
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, GpuMemoryContentOrigin::CpuUpload, false, 0, 1));
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(false, GpuMemoryContentOrigin::GpuWriteBack, false, 5, 7));
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, GpuMemoryContentOrigin::GpuWriteBack, false, 8, 7)); // written since
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, GpuMemoryContentOrigin::GpuWriteBack, true, 5, 7));  // pending
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, GpuMemoryContentOrigin::Unknown, false, 0, 1));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                          true, GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType::StorageBuffer,
+	                                                           GpuMemoryOverlapType::IsContainedWithin, false,
+	                                                           GpuMemoryObjectType::StorageTexture));
+
 	// Combined create decision mirrors CreateObject single- and multi-parent paths.
 	EXPECT_TRUE(GpuMemoryShouldLinkPendingDepthStencilStorage(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
 	                                                          GpuMemoryObjectType::DepthStencilBuffer, true, false, true, false));

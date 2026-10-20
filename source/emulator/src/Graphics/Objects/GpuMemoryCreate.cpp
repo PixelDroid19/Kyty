@@ -1347,6 +1347,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		// A CPU-uploaded sampled Texture around, at or inside a storage view only caches guest bytes,
 		// unless a device write followed its last upload (both stamp gpu_update_time; a device write also
 		// stamps device_write_time) or a write-back is still pending.
+		const auto caches_guest_bytes = [](const ObjectInfo& o)
+		{ return GpuMemoryStorageBufferCachesGuestBytes(o.read_only, o.content_origin, o.in_use, o.write_time, o.cpu_update_time); };
 		const auto links_cpu_texture = [&](const Object& h, const OverlappedBlock& obj)
 		{
 			const auto& o = h.info;
@@ -1431,8 +1433,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				overlap = true;
 			} else if (GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type) ||
 			           links_cpu_texture(h, obj) ||
-			           GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, o.read_only, o.content_origin,
-			                                                           info.type))
+			           GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type))
 			{
 				overlap = true;
 			} else if (info.type == GpuMemoryObjectType::StorageTexture &&
@@ -1654,7 +1655,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 				multi_storage_growth =
 				    links_cpu_texture(h, obj) ||
-				    GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, o.read_only, o.content_origin, info.type);
+				    GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type);
 			}
 			multi_storage_growth = multi_storage_growth && !storage_growth_ids.IsEmpty() &&
 			                       (!storage_growth_links_materialized || storage_growth_links_render_target);
@@ -2199,7 +2200,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					storage_links_render_target = true;
 					continue;
 				}
-				if (GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, o.read_only, o.content_origin, info.type))
+				if (GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type))
 				{
 					continue;
 				}
