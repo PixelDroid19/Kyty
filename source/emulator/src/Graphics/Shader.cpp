@@ -4377,7 +4377,7 @@ bool ShaderScalarLoadIsZero(const ShaderBindResources& bind, const ShaderInstruc
 }
 
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
-                          ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable)
+                          uint32_t cb_target_mask, ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -4424,9 +4424,13 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	    vs_info->bind.push_constant_offset + (vs_info->bind.vsharp_uniform_buffer ? 0u : vs_info->bind.push_constant_size);
 	ps_info->bind.push_constant_size = 0;
 
+	// The CB writes a target only through the channels CB_TARGET_MASK and
+	// CB_SHADER_MASK both enable; an export to any other target is discarded,
+	// whatever SPI_SHADER_COL_FORMAT and the stale CB_COLOR*_INFO say.
 	for (int i = 0; i < 8; i++)
 	{
-		ps_info->target_output_mode[i]  = sh->target_output_mode[i];
+		const bool written              = State::ResolveColorWriteMask(cb_target_mask, sh->m_cbShaderMask, static_cast<uint32_t>(i)) != 0u;
+		ps_info->target_output_mode[i]  = written ? sh->target_output_mode[i] : 0u;
 		ps_info->target_output_order[i] = sh->target_output_order[i];
 		ps_info->target_output_number[i] = sh->target_output_number[i];
 	}

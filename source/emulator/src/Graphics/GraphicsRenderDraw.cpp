@@ -1603,8 +1603,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	MaybeDumpPrimitiveDrawPlan("indexed", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
-	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters(), ctx->GetDepthControl());
-	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info, !ps_required);
+	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters(), ctx->GetAlphaToMaskEnable());
+	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info, !ps_required);
 	ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count);
 	if (ShaderPixelInput0ProbeEligible(Config::IsNextGen(), sh_ctx->GetPs().ps_embedded))
 	{
@@ -2571,8 +2571,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	MaybeDumpPrimitiveDrawPlan("auto", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
-	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), shader_regs, ctx->GetDepthControl());
-	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info, !ps_required);
+	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), shader_regs, ctx->GetAlphaToMaskEnable());
+	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info, !ps_required);
 	ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(pixel_shader_info.ps_regs.chksum, false, index_count);
 	if (ShaderPixelInput0ProbeEligible(Config::IsNextGen(), pixel_shader_info.ps_embedded))
 	{

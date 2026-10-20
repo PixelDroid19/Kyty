@@ -2749,7 +2749,7 @@ bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, i
 void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
                                           const GraphicsGeRawRegister* shader_stages = nullptr);
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
-                                      ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
+                                      uint32_t cb_target_mask, ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
 void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, uint32_t dispatch_mode,
                                       ShaderComputeInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderVertexInputInfo* info);

@@ -216,9 +216,10 @@ struct ColorTargetLayout
 // mesh and depth would otherwise replace the textured color.
 [[nodiscard]] uint8_t ResolveColorWriteAgainstDepth(uint8_t channel_mask, bool disable_color_on_depth_pass,
                                                     bool enable_color_on_depth_fail);
-// A no-export pixel shader can still be required for depth/stencil, discard, or explicit memory effects.
-// The latter are verified from decoded shader code before disabling the stage.
-[[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, const HW::DepthControl& depth);
+// A pixel shader is observable only through unmasked color targets, depth/stencil/mask exports, discard,
+// alpha-to-coverage of its MRT0 export, or memory effects. Depth and stencil tests run without it. The
+// discard and memory effects are verified from decoded shader code before disabling the stage.
+[[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, bool alpha_to_mask);
 
 // Dual-source (SRC1) admission for blend0 with its guest decision reasons. Guest state is checked
 // before host capability, so each refusal names the first failing input.

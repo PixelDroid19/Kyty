@@ -122,6 +122,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_blend_color);
 KYTY_HW_CTX_PARSER(hw_ctx_set_blend_control);
 KYTY_HW_CTX_PARSER(hw_ctx_set_clip_control);
 KYTY_HW_CTX_PARSER(hw_ctx_set_color_control);
+KYTY_HW_CTX_PARSER(hw_ctx_set_alpha_to_mask);
 KYTY_HW_CTX_PARSER(hw_ctx_set_color_info);
 KYTY_HW_CTX_PARSER(hw_ctx_set_depth_clear);
 KYTY_HW_CTX_PARSER(hw_ctx_set_depth_control);

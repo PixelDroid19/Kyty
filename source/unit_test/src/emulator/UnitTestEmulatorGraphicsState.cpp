@@ -4715,45 +4715,41 @@ TEST(EmulatorGraphicsState, DepthPassCanSuppressColorWrites)
 TEST(EmulatorGraphicsState, RequiresPixelShaderOnlyForObservableFragmentWork)
 {
 	HW::ShaderRegisters shader {};
-	HW::DepthControl    depth {};
 
-	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, false));
 
 	shader.m_cbShaderMask = 0x0fu;
-	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, depth));
-	EXPECT_TRUE(State::PixelShaderStageRequired(0x0fu, shader, depth));
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, false));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0x0fu, shader, false));
 
-	shader                    = {};
+	// A color export the target mask drops is unobservable unless alpha-to-coverage reads MRT0.
+	shader                       = {};
 	shader.target_output_mode[0] = 4u;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, false));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, true));
+	shader.target_output_mode[0] = 0u;
+	shader.target_output_mode[1] = 4u;
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, true));
 
 	shader                 = {};
 	shader.shader_z_format = 1u;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 
-	shader                 = {};
-	depth.z_enable         = true;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
-
-	depth                  = {};
-	depth.stencil_enable   = true;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
-
-	depth                                      = {};
+	shader                                      = {};
 	shader.db_shader_control.shader_kill_enable = true;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 
-	shader.db_shader_control                       = {};
+	shader.db_shader_control                        = {};
 	shader.db_shader_control.shader_z_export_enable = true;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 
 	shader.db_shader_control                        = {};
 	shader.db_shader_control.shader_execute_on_noop = true;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 
 	shader.db_shader_control            = {};
 	shader.db_shader_control.other_bits = 1u;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 }
 
 TEST(EmulatorGraphicsState, RejectsUnsafeNoopPixelElision)

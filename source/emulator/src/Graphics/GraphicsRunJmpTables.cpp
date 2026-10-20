@@ -464,7 +464,8 @@ static void graphics_init_jmp_tables_cx_indirect()
 	g_hw_ctx_indirect_func[Pm4::PA_SC_BINNER_CNTL_1]                   = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::PA_SC_CONSERVATIVE_RASTERIZATION_CNTL] = ignore_cx;
 	g_hw_ctx_indirect_func[Pm4::PA_SC_NGG_MODE_CNTL]                   = ignore_cx;
-	g_hw_ctx_indirect_func[Pm4::DB_ALPHA_TO_MASK]                      = ignore_cx;
+	g_hw_ctx_indirect_func[Pm4::DB_ALPHA_TO_MASK]                      = [](KYTY_HW_CTX_INDIRECT_ARGS)
+	{ cp->GetCtx()->SetAlphaToMaskEnable(KYTY_PM4_GET(value, DB_ALPHA_TO_MASK, ALPHA_TO_MASK_ENABLE) != 0); };
 	// Window scissor/offset and tessellation stage regs need full Context
 	// fields (Kyty). Accept values for now so Gen5 bootstreams proceed;
 	// geometry that depends on them will need the proper setters later.
@@ -942,6 +943,7 @@ void graphics_init_jmp_tables()
 	g_hw_ctx_func[Pm4::DB_DEPTH_CONTROL]             = hw_ctx_set_depth_control;
 	g_hw_ctx_func[Pm4::DB_EQAA]                      = hw_ctx_set_eqaa_control;
 	g_hw_ctx_func[Pm4::CB_COLOR_CONTROL]             = hw_ctx_set_color_control;
+	g_hw_ctx_func[Pm4::DB_ALPHA_TO_MASK]             = hw_ctx_set_alpha_to_mask;
 	g_hw_ctx_func[Pm4::PA_CL_CLIP_CNTL]              = hw_ctx_set_clip_control;
 	g_hw_ctx_func[Pm4::PA_SU_SC_MODE_CNTL]           = hw_ctx_set_mode_control;
 	for (uint32_t reg = Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL; reg <= Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET; reg++)
@@ -983,7 +985,6 @@ void graphics_init_jmp_tables()
 	                          Pm4::PA_SC_BINNER_CNTL_1,
 	                          Pm4::PA_SC_CONSERVATIVE_RASTERIZATION_CNTL,
 	                          Pm4::PA_SC_NGG_MODE_CNTL,
-	                          Pm4::DB_ALPHA_TO_MASK,
 	                          Pm4::PA_SC_WINDOW_SCISSOR_TL,
 	                          Pm4::PA_SC_WINDOW_SCISSOR_BR,
 	                          Pm4::VGT_HOS_MAX_TESS_LEVEL,
