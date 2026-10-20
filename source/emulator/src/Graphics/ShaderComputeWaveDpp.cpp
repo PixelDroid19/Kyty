@@ -77,8 +77,9 @@ bool ShaderComputeWaveDppInstructionSupported(const ShaderInstruction& instructi
 	{
 		return instruction.src_num == 1 && instruction.format == ShaderInstructionFormat::SVdstSVsrc0 && UnusedSources(instruction, 1);
 	}
+	// VAddI32 is the carry-less V_ADD_NC_U32 (VOP2 0x25).
 	const bool binary = instruction.type == ShaderInstructionType::VAndB32 || instruction.type == ShaderInstructionType::VOrB32 ||
-	                    instruction.type == ShaderInstructionType::VXorB32;
+	                    instruction.type == ShaderInstructionType::VXorB32 || instruction.type == ShaderInstructionType::VAddI32;
 	return binary && instruction.src_num == 2 && instruction.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1 &&
 	       (Vector(instruction.src[1]) || Scalar(instruction.src[1])) && UnusedSources(instruction, 2);
 }

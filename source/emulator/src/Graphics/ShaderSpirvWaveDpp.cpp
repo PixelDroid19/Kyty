@@ -25,6 +25,7 @@ const char* BinaryOpcode(ShaderInstructionType type)
 		case ShaderInstructionType::VAndB32: return "OpBitwiseAnd";
 		case ShaderInstructionType::VOrB32: return "OpBitwiseOr";
 		case ShaderInstructionType::VXorB32: return "OpBitwiseXor";
+		case ShaderInstructionType::VAddI32: return "OpIAdd";
 		default: return nullptr;
 	}
 }
