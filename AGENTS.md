@@ -12,14 +12,18 @@ GPUs and resolutions. A fix is accepted only when it is backed by evidence and
 does not regress any title that already works.
 
 `docs/BRINGUP.md` is the operating manual and the single source of truth for
-status (invariants, methodology, architecture map, current verified frontier).
-Read it before touching the runtime, GPU or audio stacks.
+status (invariants, methodology, architecture map, current verified frontier)
+and indexes every record. Per-title records live in `docs/titles/`, cross-title
+records in `docs/bringup/`. Read it before touching the runtime, GPU or audio
+stacks.
 
 ## Documentation map
 
 | Area | Read this first |
 | --- | --- |
 | Bring-up, invariants, strict mode, current frontier | `docs/BRINGUP.md` |
+| Per-title fixes, evidence, exclusions and open items | `docs/titles/` |
+| Cross-title records and history | `docs/bringup/` |
 | Runtime diagnostics (`kyty_agent`) | `docs/agent-tools.md` |
 | Gen5 graphics: verified advances, evidence and exclusions | `docs/kyty-runtime-graphics-investigation-handoff.md` |
 | Reproducible guest input routes | `docs/input-replay.md` |
@@ -70,8 +74,9 @@ dead end wastes hours.
 4. **Fix the general contract**, then verify on the affected title and on the
    titles that share the touched path.
 5. **Record results.** Every disproven hypothesis goes into the docs with the
-   observation that excluded it (title-specific: the graphics handoff;
-   cross-title: `docs/BRINGUP.md`). A defect found but not fixed is recorded at
+   observation that excluded it (title-specific: `docs/titles/` and the
+   graphics handoff; cross-title: `docs/bringup/cross-title.md`), indexed in
+   `docs/BRINGUP.md`. A defect found but not fixed is recorded at
    once with file and line, the triggering input or state, and a suggested
    direction. Search existing issues and pull requests before starting
    non-trivial work.
@@ -156,7 +161,8 @@ dead end wastes hours.
 
 ## Documentation
 
-- `docs/BRINGUP.md` holds status, fixes with their evidence, and exclusions.
+- `docs/BRINGUP.md` holds the frontier and the record index; `docs/titles/`
+  and `docs/bringup/` hold fixes with their evidence, and exclusions.
 - Refer to titles descriptively ("the sandbox title", "the remaining Unity
   title"); never by name, title ID, internal class name or install path.
 - Keep entries factual: what was observed, what changed, how it was verified,
