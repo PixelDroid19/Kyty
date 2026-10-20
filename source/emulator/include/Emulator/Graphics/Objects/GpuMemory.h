@@ -363,6 +363,36 @@ inline bool GpuMemoryAllowsStorageTextureOverSampledTexture(GpuMemoryObjectType 
 	       incoming_type == GpuMemoryObjectType::StorageTexture;
 }
 
+// Incoming StorageTexture at or inside a CPU-uploaded sampled Texture
+// (captured: a 0x30000 storage view at the base of a 0x120000 texture, and a
+// 0x120000 six-layer view over the exact range of a texture of another shape,
+// in recycled allocations that render targets and vertex buffers also
+// describe; and a view inside a 0x1e0000 texture that is the only parent).
+// Only the CPU upload proves the texture holds no bytes newer than guest memory.
+inline bool GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                         GpuMemoryContentOrigin existing_origin, GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::Texture &&
+	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals) &&
+	       existing_origin == GpuMemoryContentOrigin::CpuUpload && incoming_type == GpuMemoryObjectType::StorageTexture;
+}
+
+// Sampled Texture materialized from a render target, overlapping an incoming
+// StorageTexture without crossing it (captured: a 0x120000 six-layer storage
+// view Equals two render targets and the texture copied from one of them; a
+// 0x30000 view at the base of the same three). Its pixels came from a surface;
+// it is linked only beside a render target the same create links, which stays
+// the owner of those bytes.
+inline bool GpuMemoryAllowsStorageTextureOverMaterializedTexture(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                                GpuMemoryContentOrigin existing_origin,
+                                                                GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::Texture && existing_origin == GpuMemoryContentOrigin::GpuAliasMaterialization &&
+	       incoming_type == GpuMemoryObjectType::StorageTexture &&
+	       (relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin ||
+	        relation == GpuMemoryOverlapType::Contains);
+}
+
 // Read-only VertexBuffer inside or across an incoming StorageTexture of a
 // recycled allocation (captured: two 0xa0 buffers and a CPU-uploaded 1024x540
 // texture inside a new 1024x1024 storage image). The buffer only caches guest
@@ -373,6 +403,21 @@ inline bool GpuMemoryAllowsStorageTextureReclaimVertex(GpuMemoryObjectType exist
 	return existing_type == GpuMemoryObjectType::VertexBuffer && existing_read_only &&
 	       incoming_type == GpuMemoryObjectType::StorageTexture &&
 	       (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin);
+}
+
+// Incoming StorageTexture over a read-only StorageBuffer the CPU uploaded, in
+// any overlap (captured story start: a 0x30000 128x128 eight-level view at the
+// base of a 0x1fa400 buffer, and a 0x120000 six-layer view holding a 0x110000
+// buffer, both over recycled allocations). The buffer only caches guest bytes,
+// so the storage image seeds from guest memory and both are linked.
+inline bool GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                          bool existing_read_only, GpuMemoryContentOrigin existing_origin,
+                                                          GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::StorageBuffer && existing_read_only &&
+	       existing_origin == GpuMemoryContentOrigin::CpuUpload && incoming_type == GpuMemoryObjectType::StorageTexture &&
+	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals ||
+	        relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin);
 }
 
 // Incoming StorageTexture fully inside a live RenderTexture allocation.

@@ -1340,6 +1340,19 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			selective_reclaim_ids.Add(stale_reuse_id);
 		}
 
+		// A CPU-uploaded sampled Texture around, at or inside a storage view only caches guest bytes,
+		// unless a device write followed its last upload (both stamp gpu_update_time; a device write also
+		// stamps device_write_time) or a write-back is still pending.
+		const auto links_cpu_texture = [&](const Object& h, const OverlappedBlock& obj)
+		{
+			const auto& o = h.info;
+			return (GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type) ||
+			        GpuMemoryAllowsStorageTextureInsideCpuTexture(o.object.type, obj.relation, o.content_origin, info.type)) &&
+			       o.content_origin == GpuMemoryContentOrigin::CpuUpload && o.device_write_time < o.gpu_update_time &&
+			       !GpuMemoryHasPendingWritableWriteBack(o.in_use, o.read_only, o.write_back_func != nullptr,
+			                                             m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies()));
+		};
+
 		if (others.Size() == 1)
 		{
 			const auto& obj = others.At(0);
@@ -1412,7 +1425,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// The first dispatch overwrites the entire new image. Keep the
 				// previous GPU surfaces alive for independent reads in that dispatch.
 				overlap = true;
-			} else if (GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type))
+			} else if (GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type) ||
+			           links_cpu_texture(h, obj) ||
+			           GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, o.read_only, o.content_origin,
+			                                                           info.type))
 			{
 				overlap = true;
 			} else if (info.type == GpuMemoryObjectType::StorageTexture &&
@@ -1569,28 +1585,75 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// crossing a neighbor 0x70). The single-overlap path already allows
 			// each share; require every parent to be an RO StorageBuffer that
 			// shares safely before treating the multi-overlap as linkable.
-			Vector<int> storage_growth_ids;
-			bool        multi_storage_growth = buffer != nullptr && info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
-			if (multi_storage_growth)
+			// A live render target a StorageTexture links rather than copies: a view inside
+			// one, or a redescription of its bytes that no render-alias copy applies to.
+			const auto links_render_target = [&](const Object& h, const OverlappedBlock& obj)
 			{
-				for (const auto& obj: others)
+				const auto& o = h.info;
+				if (GpuMemoryAllowsStorageTextureContainedInRenderTarget(o.object.type, obj.relation, info.type))
 				{
-					const auto& h = heap.objects[obj.object_id];
-					EXIT_IF(h.free);
-					const auto& o          = h.info;
-					const bool  compatible = o.object.type == GpuMemoryObjectType::StorageTexture &&
-					                         obj.relation == OverlapType::IsContainedWithin && h.block.vaddr_num == 1 && vaddr_num == 1 &&
-					                         h.block.vaddr[0] == vaddr[0] && h.block.size[0] < size[0] && h.others.IsEmpty() &&
-					                         StorageTextureCanCopyGrowingBacking(o.params, info.params);
-					if (!compatible)
-					{
-						multi_storage_growth = false;
-						storage_growth_ids.Clear();
-						break;
-					}
-					storage_growth_ids.Add(obj.object_id);
+					return true;
 				}
+				if (o.object.type != GpuMemoryObjectType::RenderTexture || h.block.vaddr_num != 1 || vaddr_num != 1)
+				{
+					return false;
+				}
+				Vector<StorageTextureRenderAliasCopy> copies;
+				return !StorageTexturePlanRenderAlias(o.params, h.block.vaddr[0], h.block.size[0], info.params, vaddr[0], size[0],
+				                                      &copies) &&
+				       StorageTextureRedescribesRenderTarget(o.params, info.params, obj.relation == OverlapType::Equals);
+			};
+			// A mipmapped storage array grows over its prefix (copied, then retired). The
+			// recycled allocation may still hold a live render target it links, a
+			// CPU-uploaded storage buffer or texture around it (linked), a texture
+			// materialized from that render target (linked beside it) and read-only
+			// VertexBuffers (reclaimed), as for a storage image over caches. The prefix image may only be linked
+			// to parents of the new view, which then link to the grown array instead.
+			Vector<int> storage_growth_ids;
+			Vector<int> storage_growth_reclaim_ids;
+			bool        multi_storage_growth = buffer != nullptr && info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
+			bool        storage_growth_links_render_target = false;
+			bool        storage_growth_links_materialized  = false;
+			const auto  is_parent            = [&others](int object_id)
+			{ return std::any_of(others.begin(), others.end(), [object_id](const auto& other) { return other.object_id == object_id; }); };
+			for (const auto& obj: others)
+			{
+				if (!multi_storage_growth)
+				{
+					break;
+				}
+				const auto& h = heap.objects[obj.object_id];
+				EXIT_IF(h.free);
+				const auto& o = h.info;
+				if (o.object.type == GpuMemoryObjectType::StorageTexture && obj.relation == OverlapType::IsContainedWithin &&
+				    h.block.vaddr_num == 1 && vaddr_num == 1 && h.block.vaddr[0] == vaddr[0] && h.block.size[0] < size[0] &&
+				    std::all_of(h.others.begin(), h.others.end(), [&is_parent](const auto& link) { return is_parent(link.object_id); }) &&
+				    StorageTextureCanCopyGrowingBacking(o.params, info.params))
+				{
+					storage_growth_ids.Add(obj.object_id);
+					continue;
+				}
+				if (GpuMemoryAllowsStorageTextureReclaimVertex(o.object.type, obj.relation, o.read_only, info.type))
+				{
+					storage_growth_reclaim_ids.Add(obj.object_id);
+					continue;
+				}
+				if (links_render_target(h, obj))
+				{
+					storage_growth_links_render_target = true;
+					continue;
+				}
+				if (GpuMemoryAllowsStorageTextureOverMaterializedTexture(o.object.type, obj.relation, o.content_origin, info.type))
+				{
+					storage_growth_links_materialized = true;
+					continue;
+				}
+				multi_storage_growth =
+				    links_cpu_texture(h, obj) ||
+				    GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, o.read_only, o.content_origin, info.type);
 			}
+			multi_storage_growth = multi_storage_growth && !storage_growth_ids.IsEmpty() &&
+			                       (!storage_growth_links_materialized || storage_growth_links_render_target);
 
 			bool multi_ro_storage_share = (info.type == GpuMemoryObjectType::StorageBuffer && info.read_only);
 			if (multi_ro_storage_share)
@@ -2091,12 +2154,16 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
-			// StorageTexture over a recycled allocation that only guest-byte caches
-			// describe: CPU-uploaded sampled textures inside it (linked, as for a single
-			// parent) and read-only VertexBuffers (reclaimed). Guest memory holds the
-			// current bytes of every parent, so the image seeds from it.
+			// StorageTexture over a recycled allocation that only guest-byte caches and
+			// stale surfaces describe: CPU-uploaded sampled textures inside it,
+			// CPU-uploaded read-only StorageBuffers and live render targets the
+			// single-parent path links (a view inside one, or a redescription of its
+			// bytes that no render-alias copy applies to), and read-only VertexBuffers
+			// (reclaimed). Guest memory holds the current bytes, so the image seeds from it.
 			Vector<int> storage_reclaim_vertex_ids;
 			bool        multi_storage_texture_over_caches = info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
+			bool        storage_links_render_target       = false;
+			bool        storage_links_materialized        = false;
 			for (const auto& obj: others)
 			{
 				if (!multi_storage_texture_over_caches)
@@ -2111,14 +2178,27 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					storage_reclaim_vertex_ids.Add(obj.object_id);
 					continue;
 				}
-				multi_storage_texture_over_caches =
-				    GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type) &&
-				    o.content_origin == GpuMemoryContentOrigin::CpuUpload &&
-				    !GpuMemoryHasPendingWritableWriteBack(o.in_use, o.read_only, o.write_back_func != nullptr,
-				                                          m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies()));
+				if (links_render_target(h, obj))
+				{
+					storage_links_render_target = true;
+					continue;
+				}
+				if (GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, o.read_only, o.content_origin, info.type))
+				{
+					continue;
+				}
+				if (GpuMemoryAllowsStorageTextureOverMaterializedTexture(o.object.type, obj.relation, o.content_origin, info.type))
+				{
+					storage_links_materialized = true;
+					continue;
+				}
+				multi_storage_texture_over_caches = links_cpu_texture(h, obj);
 			}
-			// Parents of one kind already take the uniform path below.
-			if (storage_reclaim_vertex_ids.IsEmpty() || storage_reclaim_vertex_ids.Size() == others.Size())
+			// The uniform path below has no relation for these parents, so uniform
+			// cache sets link here too (captured: four small CPU-uploaded read-only
+			// StorageBuffers inside a new 0x100000 storage image).
+			if ((storage_links_materialized && !storage_links_render_target) ||
+			    storage_reclaim_vertex_ids.Size() == others.Size())
 			{
 				multi_storage_texture_over_caches = false;
 			}
@@ -2157,6 +2237,22 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				create_from_objects   = true;
 				retire_after_copy_ids = storage_growth_ids;
+				if (storage_growth_ids.Size() != others.Size())
+				{
+					// Link the surviving surfaces; the retired prefix drops its links when freed.
+					Vector<OverlappedBlock> keep;
+					for (const auto& obj: others)
+					{
+						if (!std::any_of(storage_growth_reclaim_ids.begin(), storage_growth_reclaim_ids.end(),
+						                 [&obj](int id) { return id == obj.object_id; }))
+						{
+							keep.Add(obj);
+						}
+					}
+					selective_reclaim_ids = storage_growth_reclaim_ids;
+					others                = keep;
+					overlap               = true;
+				}
 			} else if (create_cpu_texture_storage_alias(others, info, heap_id, vaddr, size, vaddr_num))
 			{
 				overlap = true;

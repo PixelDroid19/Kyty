@@ -6595,6 +6595,19 @@ TEST(EmulatorGraphicsState, ReclaimsReadOnlyVertexBuffersUnderStorageTexture)
 	                                                        GpuMemoryObjectType::StorageTexture));
 	EXPECT_TRUE(GpuMemoryAllowsStorageTextureOverSampledTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::IsContainedWithin,
 	                                                            GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureOverSampledTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                             GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                          GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Equals,
+	                                                          GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Equals,
+	                                                           GpuMemoryContentOrigin::GpuAliasMaterialization,
+	                                                           GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                           GpuMemoryContentOrigin::Unknown, GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
+	                                                           GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
 }
 
 TEST(EmulatorGraphicsState, LinksExistingIndexViewsIntoIncomingTexture)
