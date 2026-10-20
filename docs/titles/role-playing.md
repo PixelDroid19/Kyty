@@ -25,9 +25,13 @@ Intel A770, strict 180 s movement runs.
   2500 VideoOut dump was clean, so the striping is not in the remembered render
   targets. The UI draw diagnostic reports small 1x1 descriptors for several
   720p UI draws (formats 56/60, tile 5/27); whether those are intentional solid
-  quads or a descriptor fallback is not established. Performance on this run:
-  p50 50 ms, 463 SPIR-V compiles (18.5 s), 756 pipelines (33.0 s), fence wait
-  39.8 s.
+  quads or a descriptor fallback is not established.
+- **Warm-cache check.** Two 180 s runs with a persistent SPIR-V and pipeline
+  cache directory: the second run fell to p50 26 ms from 50 ms, with 349
+  instead of 453 SPIR-V compiles and 763 instead of 978 graphics pipelines.
+  Fence wait remained 36.4 s and write-back 12.2 s, so the cache is a real
+  gain but not the whole frame cost. Isolated per-run cache paths hide this
+  gain.
 
 ## Role-playing title: storage, DCC and UI format gaps (2026-10-20)
 
