@@ -45,6 +45,27 @@ bool ResolveRenderTextureArrayView(uint64_t bytes_per_layer, uint32_t base_layer
 	return true;
 }
 
+bool ResolveRenderTextureVolumeView(uint64_t bytes_per_slice, uint32_t depth, uint32_t base_slice, uint32_t last_slice,
+                                    RenderTextureArrayView* view)
+{
+	if (view == nullptr)
+	{
+		return false;
+	}
+	*view = {};
+	if (bytes_per_slice == 0 || depth == 0 || base_slice >= depth || last_slice < base_slice ||
+	    bytes_per_slice > std::numeric_limits<uint64_t>::max() / depth)
+	{
+		return false;
+	}
+	const uint32_t last     = std::min(last_slice, depth - 1u);
+	view->image_layers      = depth;
+	view->base_layer        = base_slice;
+	view->layer_count       = last - base_slice + 1u;
+	view->full_backing_size = bytes_per_slice * depth;
+	return true;
+}
+
 // Everything except the layer count: format, guest and host extent, tiling,
 // pitch, ownership, sample count and mip levels.
 static bool RenderTextureSharesImageDescription(const uint64_t* existing, const uint64_t* incoming)
@@ -58,7 +79,8 @@ static bool RenderTextureSharesImageDescription(const uint64_t* existing, const 
 	}
 	return existing[RenderTextureObject::PARAM_HOST_WIDTH] == incoming[RenderTextureObject::PARAM_HOST_WIDTH] &&
 	       existing[RenderTextureObject::PARAM_HOST_HEIGHT] == incoming[RenderTextureObject::PARAM_HOST_HEIGHT] &&
-	       existing[RenderTextureObject::PARAM_MIP_LEVELS] == incoming[RenderTextureObject::PARAM_MIP_LEVELS];
+	       existing[RenderTextureObject::PARAM_MIP_LEVELS] == incoming[RenderTextureObject::PARAM_MIP_LEVELS] &&
+	       existing[RenderTextureObject::PARAM_VOLUME] == incoming[RenderTextureObject::PARAM_VOLUME];
 }
 
 bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming)
@@ -71,7 +93,8 @@ bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t
 	{
 		return false;
 	}
-	if (existing[RenderTextureObject::PARAM_TILED] == 0u || existing[RenderTextureObject::PARAM_WRITE_BACK] != 0u)
+	if (existing[RenderTextureObject::PARAM_TILED] == 0u || existing[RenderTextureObject::PARAM_WRITE_BACK] != 0u ||
+	    existing[RenderTextureObject::PARAM_VOLUME] != 0u)
 	{
 		return false;
 	}
@@ -86,7 +109,8 @@ bool RenderTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t
 	{
 		return false;
 	}
-	if (!RenderTextureSharesImageDescription(existing, incoming))
+	// A volume's depth is its MIP0_DEPTH, not a view of a deeper allocation.
+	if (!RenderTextureSharesImageDescription(existing, incoming) || existing[RenderTextureObject::PARAM_VOLUME] != 0u)
 	{
 		return false;
 	}
@@ -108,7 +132,8 @@ bool RenderTextureChangesHostExtent(const uint64_t* existing, const uint64_t* in
 			return false;
 		}
 	}
-	if (existing[RenderTextureObject::PARAM_MIP_LEVELS] != incoming[RenderTextureObject::PARAM_MIP_LEVELS])
+	if (existing[RenderTextureObject::PARAM_MIP_LEVELS] != incoming[RenderTextureObject::PARAM_MIP_LEVELS] ||
+	    existing[RenderTextureObject::PARAM_VOLUME] != incoming[RenderTextureObject::PARAM_VOLUME])
 	{
 		return false;
 	}
@@ -467,17 +492,24 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	const auto samples    = static_cast<VkSampleCountFlagBits>(params[RenderTextureObject::PARAM_SAMPLES]);
 	const auto array_layers = static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]);
 	const auto mip_levels   = static_cast<uint32_t>(params[RenderTextureObject::PARAM_MIP_LEVELS]);
+	const bool volume       = params[RenderTextureObject::PARAM_VOLUME] != 0u;
 	if (vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 || host_width == 0 || host_height == 0 || array_layers == 0 ||
 	    mip_levels == 0 || (mip_levels > 1u && (host_width != width || host_height != height)))
 	{
 		EXIT("invalid render-texture image description\n");
 	}
+	if (volume && (mip_levels != 1u || samples != VK_SAMPLE_COUNT_1_BIT || host_width != width || host_height != height))
+	{
+		EXIT("unsupported volume render target: levels=%u samples=%u guest=%" PRIu64 "x%" PRIu64 " host=%" PRIu64 "x%" PRIu64 "\n",
+		     mip_levels, static_cast<uint32_t>(samples), width, height, host_width, host_height);
+	}
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
-	if (array_layers > properties.limits.maxImageArrayLayers)
+	const uint32_t layer_limit = volume ? properties.limits.maxImageDimension3D : properties.limits.maxImageArrayLayers;
+	if (array_layers > layer_limit)
 	{
 		EXIT("render-texture layer count exceeds the device limit: requested=%" PRIu32 " limit=%" PRIu32 "\n", array_layers,
-		     properties.limits.maxImageArrayLayers);
+		     layer_limit);
 	}
 
 	VulkanResolutionAttachmentRequest capability_request {};
@@ -518,9 +550,12 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 		view = nullptr;
 	}
 
+	// A volume renders its slices through 2D-array views of the 3D image.
 	VulkanImageDescriptor image_descriptor {};
-	image_descriptor.extent = {vk_obj->extent.width, vk_obj->extent.height, 1};
-	image_descriptor.array_layers = vk_obj->array_layers;
+	image_descriptor.flags        = volume ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0u;
+	image_descriptor.image_type   = volume ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+	image_descriptor.extent       = {vk_obj->extent.width, vk_obj->extent.height, volume ? array_layers : 1u};
+	image_descriptor.array_layers = volume ? 1u : vk_obj->array_layers;
 	image_descriptor.mip_levels   = mip_levels;
 	image_descriptor.format = vk_obj->format;
 	image_descriptor.samples = vk_obj->samples;
@@ -742,7 +777,8 @@ bool RenderTextureObject::Equal(const uint64_t* other) const
 	        params[PARAM_NEO] == other[PARAM_NEO] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WRITE_BACK] == other[PARAM_WRITE_BACK] && params[PARAM_SAMPLES] == other[PARAM_SAMPLES] &&
 	        params[PARAM_ARRAY_LAYERS] == other[PARAM_ARRAY_LAYERS] && params[PARAM_HOST_WIDTH] == other[PARAM_HOST_WIDTH] &&
-	        params[PARAM_HOST_HEIGHT] == other[PARAM_HOST_HEIGHT] && params[PARAM_MIP_LEVELS] == other[PARAM_MIP_LEVELS]);
+	        params[PARAM_HOST_HEIGHT] == other[PARAM_HOST_HEIGHT] && params[PARAM_MIP_LEVELS] == other[PARAM_MIP_LEVELS] &&
+	        params[PARAM_VOLUME] == other[PARAM_VOLUME]);
 }
 
 GpuObject::create_func_t RenderTextureObject::GetCreateFunc() const

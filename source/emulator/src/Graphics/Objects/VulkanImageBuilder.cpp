@@ -155,6 +155,12 @@ bool VulkanCreateStandardColorImageViews(GraphicContext* context, VulkanImage* i
 	descriptor.format = image->format;
 
 	auto create = [&](int index) { return VulkanCreateDeviceImageView(context->device, descriptor, &image->image_view[index]); };
+	// A volume is read whole; its attachments are per-pass 2D-array slice views.
+	if (image->image_type == VK_IMAGE_TYPE_3D)
+	{
+		descriptor.view_type = VK_IMAGE_VIEW_TYPE_3D;
+		return create(VulkanImage::VIEW_3D);
+	}
 	if (!create(VulkanImage::VIEW_DEFAULT))
 	{
 		return false;

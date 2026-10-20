@@ -5328,6 +5328,26 @@ TEST(EmulatorGraphicsState, ResolvesLayeredRenderTargetBackingAndView)
 	RenderTextureObject cpu_visible(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, true, 1u, 1u);
 	RenderTextureObject cpu_visible_layered(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, true, 1u, 5u);
 	EXPECT_FALSE(RenderTextureCanCopyGrowingBacking(cpu_visible.params, cpu_visible_layered.params));
+
+	// A volume keeps its MIP0_DEPTH slices; a SLICE_MAX at the depth selects up to the last one.
+	ASSERT_TRUE(ResolveRenderTextureVolumeView(0x80000u, 64u, 0u, 64u, &view));
+	EXPECT_EQ(view.image_layers, 64u);
+	EXPECT_EQ(view.base_layer, 0u);
+	EXPECT_EQ(view.layer_count, 64u);
+	EXPECT_EQ(view.full_backing_size, 0x2000000u);
+	ASSERT_TRUE(ResolveRenderTextureVolumeView(0x80000u, 64u, 8u, 8u, &view));
+	EXPECT_EQ(view.image_layers, 64u);
+	EXPECT_EQ(view.layer_count, 1u);
+	EXPECT_FALSE(ResolveRenderTextureVolumeView(0x80000u, 64u, 64u, 64u, &view));
+	EXPECT_FALSE(ResolveRenderTextureVolumeView(0x80000u, 64u, 9u, 8u, &view));
+
+	RenderTextureObject volume(RenderTextureFormat::R16G16B16A16Sfloat, 64u, 64u, true, false, 64u, false, 1u, 64u, 0u, 0u, 1u, true);
+	RenderTextureObject shallow(RenderTextureFormat::R16G16B16A16Sfloat, 64u, 64u, true, false, 64u, false, 1u, 32u, 0u, 0u, 1u, true);
+	RenderTextureObject array(RenderTextureFormat::R16G16B16A16Sfloat, 64u, 64u, true, false, 64u, false, 1u, 64u);
+	EXPECT_FALSE(volume.Equal(array.params));
+	EXPECT_FALSE(RenderTextureCanReuseLargerBacking(volume.params, shallow.params));
+	EXPECT_FALSE(RenderTextureCanReuseLargerBacking(array.params, volume.params));
+	EXPECT_FALSE(RenderTextureCanCopyGrowingBacking(shallow.params, volume.params));
 }
 
 TEST(EmulatorGraphicsState, DecodesAndNormalizesVulkanComponentMappings)

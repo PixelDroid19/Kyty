@@ -1373,8 +1373,16 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		const uint64_t slice_size = attachment.tile && rt.attrib2.num_mip_levels != 0u
 		                                ? DescribeRenderColorMipChain(rt, rt_bpp, &attachment)
 		                                : size32.size;
+		// CB_COLOR_ATTRIB3.RESOURCE_TYPE 2 is a 3D target. Its 64 KiB R_X slices
+		// are stored like array layers; only the host image type differs.
+		attachment.volume = rt.attrib3.dimension == 2u;
 		RenderTextureArrayView array_view {};
-		if (!ResolveRenderTextureArrayView(slice_size, rt.view.base_array_slice_index, rt.view.last_array_slice_index, &array_view))
+		const bool             view_valid =
+		    attachment.volume ? ResolveRenderTextureVolumeView(slice_size, rt.attrib3.depth + 1u, rt.view.base_array_slice_index,
+		                                                       rt.view.last_array_slice_index, &array_view)
+		                      : ResolveRenderTextureArrayView(slice_size, rt.view.base_array_slice_index, rt.view.last_array_slice_index,
+		                                                      &array_view);
+		if (!view_valid)
 		{
 			EXIT("invalid layered render-target layout: width=%" PRIu32 " height=%" PRIu32 " pitch=%" PRIu32
 			     " tile=%u layer=%" PRIu32 "..%" PRIu32 "\n",
@@ -1678,7 +1686,8 @@ RenderTextureVulkanImage* DemoteScaledRenderTexture(uint64_t submit_id, CommandB
 	                           params[RenderTextureObject::PARAM_WRITE_BACK] != 0,
 	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_SAMPLES]),
 	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]), 0, 0,
-	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_MIP_LEVELS]));
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_MIP_LEVELS]),
+	                           params[RenderTextureObject::PARAM_VOLUME] != 0);
 	auto* demoted = static_cast<RenderTextureVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, object.vaddr, object.size, native));
 	EXIT_IF(demoted == nullptr || demoted == image || demoted->IsResolutionScaled());
@@ -1726,7 +1735,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		RenderTextureObject vulkan_buffer_info(attachment.render_texture_format, attachment.width, attachment.height, attachment.tile,
 		                                      attachment.neo, attachment.pitch, attachment.write_back,
 		                                      static_cast<uint32_t>(attachment.samples), attachment.image_layers, host.width,
-		                                      host.height, attachment.mip_levels);
+		                                      host.height, attachment.mip_levels, attachment.volume);
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, attachment.base_addr, attachment.size, vulkan_buffer_info));
 		if (buffer_vulkan == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_vulkan == nullptr condition ignored (continuing)\n"); }
@@ -2532,6 +2541,7 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
 	}
 	EXIT_IF(!RenderResolutionMarkScalingApplied(decision));
 }
+
 
 void InvalidateMemoryObject(const RenderColorInfo& r)
 {

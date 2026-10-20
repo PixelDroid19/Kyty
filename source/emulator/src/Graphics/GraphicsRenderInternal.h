@@ -888,6 +888,8 @@ struct RenderColorAttachmentInfo
 	uint32_t              image_layers            = 1;
 	uint32_t              base_array_layer         = 0;
 	uint32_t              layer_count              = 1;
+	// A 3D target: the layers are the depth slices of one volume.
+	bool                  volume                  = false;
 	// Levels of a mip-chained target and the one MIP_LEVEL renders.
 	uint32_t              mip_levels              = 1;
 	uint32_t              mip_level               = 0;
