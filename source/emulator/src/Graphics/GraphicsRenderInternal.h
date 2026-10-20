@@ -486,7 +486,8 @@ public:
 	KYTY_CLASS_NO_COPY(SamplerCache);
 
 	VkSampler GetSampler(uint64_t id);
-	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized = true);
+	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized,
+	                       bool uses_r_coordinate);
 	void      DeleteAllForTesting(GraphicContext* ctx);
 
 private:
@@ -495,6 +496,7 @@ private:
 		ShaderSamplerResource r;
 		State::ImageSampleOperation operation {};
 		bool                  allow_unnormalized = true;
+		bool                  uses_r_coordinate  = true;
 		VkSampler             vk = nullptr;
 	};
 
@@ -1509,26 +1511,17 @@ struct CubeDrawDepthCoverage
 	return shape == ShaderGen5SampledTextureShape::TwoDimensional;
 }
 
-[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_slot)
+[[nodiscard]] constexpr uint32_t SamplerViewShapeBit(ShaderGen5SampledTextureShape shape)
 {
-	bool matched = false;
-	for (int i = 0; i < textures.textures_num; ++i)
-	{
-		const auto& descriptor = textures.desc[i];
-		if (descriptor.usage != ShaderTextureUsage::ReadOnly || descriptor.slot != sampler_slot)
-		{
-			continue;
-		}
-		matched = true;
-		if (!SamplerViewAllowsUnnormalized(ShaderResolvedSampledTextureShape(descriptor)))
-		{
-			return false;
-		}
-	}
-	if (matched)
-	{
-		return true;
-	}
+	return 1u << static_cast<uint32_t>(shape);
+}
+
+// Shapes of the read-only views paired with a sampler slot; every read-only
+// view when none pairs with it.
+[[nodiscard]] inline uint32_t BindSamplerViewShapes(const ShaderTextureResources& textures, int sampler_slot)
+{
+	uint32_t paired = 0;
+	uint32_t all    = 0;
 	for (int i = 0; i < textures.textures_num; ++i)
 	{
 		const auto& descriptor = textures.desc[i];
@@ -1536,12 +1529,26 @@ struct CubeDrawDepthCoverage
 		{
 			continue;
 		}
-		if (!SamplerViewAllowsUnnormalized(ShaderResolvedSampledTextureShape(descriptor)))
+		const uint32_t bit = SamplerViewShapeBit(ShaderResolvedSampledTextureShape(descriptor));
+		all |= bit;
+		if (descriptor.slot == sampler_slot)
 		{
-			return false;
+			paired |= bit;
 		}
 	}
-	return true;
+	return paired != 0u ? paired : all;
+}
+
+[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_slot)
+{
+	return (BindSamplerViewShapes(textures, sampler_slot) & ~SamplerViewShapeBit(ShaderGen5SampledTextureShape::TwoDimensional)) == 0u;
+}
+
+// The W address mode (S# CLAMP_Z) wraps the R coordinate of 3D views only: 2D
+// views have none, and array and cube views select a layer or face without it.
+[[nodiscard]] inline bool BindSamplerUsesRCoordinate(const ShaderTextureResources& textures, int sampler_slot)
+{
+	return (BindSamplerViewShapes(textures, sampler_slot) & SamplerViewShapeBit(ShaderGen5SampledTextureShape::ThreeDimensional)) != 0u;
 }
 
 // Draw-local context for an opt-in, bounded material-binding diagnostic.

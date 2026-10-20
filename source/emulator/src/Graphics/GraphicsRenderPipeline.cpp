@@ -105,21 +105,26 @@ VulkanColorAttachmentBlendAdmission VulkanValidateColorAttachmentBlendRequest(Vk
 	           : VulkanColorAttachmentBlendAdmission::MissingFormatFeature;
 }
 
-uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized)
+uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized,
+                                    bool uses_r_coordinate)
 {
 	if (operation == State::ImageSampleOperation::Mixed)
 	{
 		EXIT("unsupported sampler contract: operation=mixed\n");
 	}
-	const auto& enabled_sampler = g_render_ctx->GetGraphicCtx()->enabled_sampler_features;
+	const auto& enabled_sampler     = g_render_ctx->GetGraphicCtx()->enabled_sampler_features;
+	const auto  unnormalized_policy = State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords(), allow_unnormalized);
 	VkSamplerAddressMode address[3] {};
 	if (!VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampX()), enabled_sampler, r.ForceUnormCoords(), &address[0]) ||
 	    !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampY()), enabled_sampler, r.ForceUnormCoords(), &address[1]) ||
-	    !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampZ()), enabled_sampler, r.ForceUnormCoords(), &address[2]))
+	    (uses_r_coordinate &&
+	     !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampZ()), enabled_sampler, r.ForceUnormCoords(), &address[2])))
 	{
-		EXIT("unsupported sampler coordinate lowering: clamp=%u,%u,%u unnormalized=%u operation=%u mirror_clamp_enabled=%u\n",
-		     r.ClampX(), r.ClampY(), r.ClampZ(), r.ForceUnormCoords() ? 1u : 0u, static_cast<uint32_t>(operation),
-		     enabled_sampler.mirror_clamp_to_edge);
+		EXIT("unsupported sampler coordinate lowering: clamp=%u,%u,%u unnormalized=%u view_allows_unnormalized=%u operation=%u "
+		     "mirror_clamp_enabled=%u uses_r=%u sampler=%08x %08x %08x %08x\n",
+		     r.ClampX(), r.ClampY(), r.ClampZ(), r.ForceUnormCoords() ? 1u : 0u, allow_unnormalized ? 1u : 0u,
+		     static_cast<uint32_t>(operation), enabled_sampler.mirror_clamp_to_edge, uses_r_coordinate ? 1u : 0u, r.fields[0],
+		     r.fields[1], r.fields[2], r.fields[3]);
 	}
 	Core::LockGuard lock(m_mutex);
 	uint32_t        m_samplers_size = m_samplers.Size();
@@ -127,7 +132,8 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	{
 		const auto& s = m_samplers.At(i);
 		if (s.r.fields[0] == r.fields[0] && s.r.fields[1] == r.fields[1] && s.r.fields[2] == r.fields[2] &&
-		    s.r.fields[3] == r.fields[3] && s.operation == operation && s.allow_unnormalized == allow_unnormalized)
+		    s.r.fields[3] == r.fields[3] && s.operation == operation && s.allow_unnormalized == allow_unnormalized &&
+		    s.uses_r_coordinate == uses_r_coordinate)
 		{
 			return i;
 		}
@@ -136,6 +142,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	s.r                   = r;
 	s.operation           = operation;
 	s.allow_unnormalized  = allow_unnormalized;
+	s.uses_r_coordinate   = uses_r_coordinate;
 	s.vk                  = nullptr;
 
 	auto mag_filter = r.XyMagFilter();
@@ -149,9 +156,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	const float       max_lod    = lod_range.max_lod;
 
 	VkSamplerCreateInfo sampler_info {};
-	const auto          sampler_comparison  = State::ResolveSamplerComparison(r.DepthCompareFunc(), operation);
-	const auto          unnormalized_policy =
-	    State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords(), allow_unnormalized);
+	const auto          sampler_comparison = State::ResolveSamplerComparison(r.DepthCompareFunc(), operation);
 	if (sampler_comparison.enabled && unnormalized_policy.disable_comparison)
 	{
 		EXIT("unsupported sampler contract: operation=%u unnormalized=1\n", static_cast<uint32_t>(operation));

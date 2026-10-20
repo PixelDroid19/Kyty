@@ -2415,6 +2415,26 @@ TEST(EmulatorTileDetile, UnnormalizedSamplerAllowanceIsPerSamplerView)
 	EXPECT_TRUE(BindSamplerAllowsUnnormalized(flat_only, 1));
 }
 
+TEST(EmulatorTileDetile, SamplerZClampAppliesOnlyToVolumeViews)
+{
+	ShaderTextureResources textures {};
+	textures.textures_num = 2;
+	textures.desc[0].usage                          = ShaderTextureUsage::ReadOnly;
+	textures.desc[0].slot                           = 0;
+	textures.desc[0].sampled_shape                  = ShaderGen5SampledTextureShape::TwoDimensionalArray;
+	textures.desc[0].sampled_shape_from_instruction = true;
+	textures.desc[1].usage                          = ShaderTextureUsage::ReadOnly;
+	textures.desc[1].slot                           = 1;
+	textures.desc[1].sampled_shape                  = ShaderGen5SampledTextureShape::ThreeDimensional;
+	textures.desc[1].sampled_shape_from_instruction = true;
+
+	// Array layers and 2D views never read CLAMP_Z; a volume view does.
+	EXPECT_FALSE(BindSamplerUsesRCoordinate(textures, 0));
+	EXPECT_TRUE(BindSamplerUsesRCoordinate(textures, 1));
+	// A sampler with no paired view is checked against every sampled view.
+	EXPECT_TRUE(BindSamplerUsesRCoordinate(textures, 2));
+}
+
 TEST(EmulatorTileDetile, ClassifiesBc6hUfloatModeBitsFromPublicSpec)
 {
 	uint8_t mode0[16] {};

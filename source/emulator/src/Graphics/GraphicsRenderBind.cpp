@@ -4676,7 +4676,8 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, const Shader
 
 		const bool comparison_eligible = ShaderSamplerDepthComparisonEligible(textures, samplers, i);
 		const auto sampler_operation = State::ResolveSamplerBindingOperation(samplers.operations[i], comparison_eligible);
-		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r, sampler_operation, allow_unnormalized);
+		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r, sampler_operation, allow_unnormalized,
+		                                                               BindSamplerUsesRCoordinate(textures, samplers.slots[i]));
 
 		r.UpdateIndex(i);
 
