@@ -1628,7 +1628,9 @@ struct ShaderExtendedResource
 		fields[1] = hi;
 	}
 
-	[[nodiscard]] uint64_t Base() const { return (fields[0] | (static_cast<uint64_t>(fields[1]) << 32u)); }
+	// A guest pointer in an SGPR pair addresses 48 bits, as for S_LOAD and SRT
+	// table pointers; the top 16 bits of the high word are not part of it.
+	[[nodiscard]] uint64_t Base() const { return (fields[0] | ((static_cast<uint64_t>(fields[1]) & 0xffffu) << 32u)); }
 };
 
 struct ShaderVertexInputBuffer
