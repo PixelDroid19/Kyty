@@ -33,11 +33,26 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 // A writable storage buffer holds the guest bytes while none of its GPU writes is
 // unpublished: `writable_storage_idle` states that for every such object over the range.
 // An index view also accepts the surfaces an IndexBuffer object is linked under
-// (GpuMemoryAllowsIndexContainedInSurface): that object is uploaded from the
-// same guest bytes and never seeded from the surface, so the snapshot reads
-// what the object path would.
+// (GpuMemoryAllowsIndexContainedInSurface), and a storage view those a
+// StorageBuffer object is linked under (GpuMemoryAllowsStorageSurfaceShare):
+// that object is uploaded from the same guest bytes and never seeded from the
+// surface, so the snapshot reads what the object path would.
+[[nodiscard]] inline bool GpuMemorySnapshotViewLinksSurface(GpuMemorySnapshotAdmission admission, GpuMemoryObjectType type,
+                                                            GpuMemoryOverlapType relation)
+{
+	switch (admission)
+	{
+		case GpuMemorySnapshotAdmission::IndexView:
+			return GpuMemoryAllowsIndexContainedInSurface(type, relation, GpuMemoryObjectType::IndexBuffer);
+		case GpuMemorySnapshotAdmission::StorageView:
+			return GpuMemoryAllowsStorageSurfaceShare(type, relation, GpuMemoryObjectType::StorageBuffer);
+		default: return false;
+	}
+}
+
 [[nodiscard]] inline bool GpuMemoryOverlapsAllowTransientReadOnlyBuffer(const GpuMemoryOverlapSnapshot& overlaps,
-                                                                        bool writable_storage_idle, bool index_view)
+                                                                        bool writable_storage_idle,
+                                                                        GpuMemorySnapshotAdmission admission)
 {
 	if (overlaps.truncated || overlaps.entry_count > GpuMemoryOverlapSnapshot::ENTRIES_MAX)
 	{
@@ -53,7 +68,7 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 		    entry.type == GpuMemoryObjectType::IndexBuffer;
 		const bool holds_guest_bytes =
 		    is_buffer ? entry.all_read_only || (entry.type == GpuMemoryObjectType::StorageBuffer && writable_storage_idle)
-		              : index_view && GpuMemoryAllowsIndexContainedInSurface(entry.type, entry.relation, GpuMemoryObjectType::IndexBuffer);
+		              : GpuMemorySnapshotViewLinksSurface(admission, entry.type, entry.relation);
 		if (!holds_guest_bytes || entry.count == 0u || classified_count > UINT32_MAX - entry.count)
 		{
 			return false;

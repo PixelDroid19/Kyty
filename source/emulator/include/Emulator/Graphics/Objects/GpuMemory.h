@@ -1317,11 +1317,14 @@ bool GpuMemoryDescribeObject(uint64_t vaddr, uint64_t size, const void* obj, Gpu
 // Which overlapping GPU objects a read-only snapshot accepts. Read-only buffers
 // always qualify. IndexView also accepts writable storage buffers none of whose
 // GPU writes is still unpublished, so the guest bytes are current, and the
-// surfaces an IndexBuffer object is linked under.
+// surfaces an IndexBuffer object is linked under. StorageView reads the bytes of
+// a bound read-only storage view and accepts the surfaces a StorageBuffer object
+// is linked under.
 enum class GpuMemorySnapshotAdmission: uint8_t
 {
 	ReadOnlyOverlaps,
 	IndexView,
+	StorageView,
 };
 // Validates a bounded allocated range and classifies its cached GPU overlaps.
 // Capture/compare additionally require dirty-page tracking and reject a read

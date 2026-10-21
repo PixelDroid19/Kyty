@@ -281,7 +281,9 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 		return false;
 	}
 	// The loaded value is read at record time from a source the CPU wrote; one
-	// with GPU writes behind it has no stable value here.
+	// with GPU writes behind it has no stable value here. The bound read-only
+	// view uploads these guest bytes even inside a stale surface of a reused
+	// range, so the dispatch writes the value read here.
 	uint32_t loaded_word = 0;
 	if (loaded_value)
 	{
@@ -289,7 +291,8 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 		const auto& source       = buffers.buffers[source_index];
 		if (buffers.start_register[source_index] != proof.value_buffer_register || !binding_is_exact(source_index, true) ||
 		    source.Base48() == 0u || ShaderBufferByteSize(source.Stride(), source.NumRecords()) < sizeof(loaded_word) ||
-		    !GpuMemoryCaptureSnapshotReadOnlyBuffer(source.Base48(), sizeof(loaded_word), &loaded_word))
+		    !GpuMemoryCaptureSnapshotReadOnlyBuffer(source.Base48(), sizeof(loaded_word), &loaded_word, nullptr, nullptr,
+		                                            GpuMemorySnapshotAdmission::StorageView))
 		{
 			return false;
 		}

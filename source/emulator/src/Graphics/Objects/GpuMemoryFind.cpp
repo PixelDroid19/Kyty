@@ -363,12 +363,11 @@ bool GpuMemory::TransientReadOnlyOverlapsAllowedLocked(uint64_t vaddr, uint64_t 
 		}
 		overlaps = &queried;
 	}
-	const bool index_view = admission == GpuMemorySnapshotAdmission::IndexView;
-	if (GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*overlaps, false, index_view))
+	if (GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*overlaps, false, admission))
 	{
 		return true;
 	}
-	return index_view && GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*overlaps, true, true) &&
+	return admission == GpuMemorySnapshotAdmission::IndexView && GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*overlaps, true, admission) &&
 	       !WritableStorageOverlapsLocked(vaddr, size);
 }
 
