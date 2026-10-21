@@ -7778,6 +7778,12 @@ TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5DepthSamples)
 	EXPECT_FALSE(accepts(7u, 13u, 0u));
 	EXPECT_FALSE(accepts(7u, 13u, 2049u));
 	EXPECT_FALSE(accepts(7u, 13u, 2u, 1u));
+	// A single cube map stores its six faces as layers; cube arrays and a
+	// partial face range are refused.
+	EXPECT_TRUE(accepts(7u, 11u, 5u));
+	EXPECT_FALSE(accepts(7u, 11u, 0u));
+	EXPECT_FALSE(accepts(7u, 11u, 11u));
+	EXPECT_FALSE(accepts(7u, 11u, 5u, 1u));
 	EXPECT_FALSE(accepts(7u, 9u, 1u));
 	EXPECT_FALSE(accepts(7u, 9u, 0u, 1u));
 	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 1u));
