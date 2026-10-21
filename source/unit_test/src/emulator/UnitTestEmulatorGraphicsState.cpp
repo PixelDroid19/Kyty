@@ -6555,13 +6555,23 @@ TEST(EmulatorGraphicsState, LinksPendingStorageBeforeDepthStencilReuse)
 	EXPECT_FALSE(GpuMemoryHasPendingWritableWriteBack(false, false, true, false)); // not in use
 	EXPECT_FALSE(GpuMemoryHasPendingWritableWriteBack(true, false, false, false)); // no write-back
 
-	// A storage buffer caches guest bytes as a read-only upload or once written back.
-	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(true, GpuMemoryContentOrigin::CpuUpload, true, 0, 1));
-	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, GpuMemoryContentOrigin::CpuUpload, false, 0, 1));
-	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(false, GpuMemoryContentOrigin::GpuWriteBack, false, 5, 7));
-	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, GpuMemoryContentOrigin::GpuWriteBack, false, 8, 7)); // written since
-	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, GpuMemoryContentOrigin::GpuWriteBack, true, 5, 7));  // pending
-	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, GpuMemoryContentOrigin::Unknown, false, 0, 1));
+	// A storage buffer caches guest bytes as a read-only upload, an idle upload
+	// with no device write since its refresh, or once written back.
+	// Arguments: read_only, origin, in_use, write_time, cpu_update_time, gpu_update_time, device_write_time.
+	using Origin = GpuMemoryContentOrigin;
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(true, Origin::CpuUpload, true, 0, 1, 1, 0));
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::CpuUpload, true, 2, 1, 1, 0));  // not written back
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::CpuUpload, false, 2, 1, 1, 0));  // written back unchanged
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::CpuUpload, false, 2, 1, 3, 0));  // refreshed after the write
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::CpuUpload, false, 2, 1, 3, 3)); // device write latest
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::GpuWriteBack, false, 5, 7, 7, 0));
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::GpuWriteBack, false, 8, 7, 7, 0)); // written since
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::GpuWriteBack, true, 5, 7, 7, 0));  // pending
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(true, Origin::GpuWriteBack, true, 5, 7, 7, 0));   // read in flight
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(true, Origin::GpuWriteBack, true, 8, 7, 7, 0));  // written since
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(true, Origin::AliasInvalidation, true, 0, 7, 7, 0));
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::AliasInvalidation, true, 0, 7, 7, 0));
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::Unknown, false, 0, 1, 1, 0));
 	EXPECT_TRUE(GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::IsContainedWithin,
 	                                                          true, GpuMemoryObjectType::StorageTexture));
 	EXPECT_FALSE(GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType::StorageBuffer,
@@ -6632,6 +6642,12 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                  GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
 	                                                  GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                          GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
+	                                                           GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideDepthRange(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Contains,
+	                                                           GpuMemoryObjectType::StorageTexture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                                 GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(
@@ -7871,6 +7887,23 @@ TEST(EmulatorGraphicsState, ClassifiesOnlyUnambiguousDepthD16Sources)
 	mixed_provenance.entries[0].relation = GpuMemoryOverlapType::Contains;
 	mixed_provenance.entries[1] = uploaded.entries[0];
 	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized, &mixed_provenance), GpuMemoryDepthD16Source::StorageBuffer);
+	auto stale_cover = texture;
+	stale_cover.total_count = 2u;
+	stale_cover.entry_count = 2u;
+	stale_cover.entries[1].type     = GpuMemoryObjectType::RenderTexture;
+	stale_cover.entries[1].relation = GpuMemoryOverlapType::Contains;
+	stale_cover.entries[1].count    = 1u;
+	auto stale_provenance = uploaded;
+	stale_provenance.total_count = 2u;
+	stale_provenance.entry_count = 2u;
+	stale_provenance.entries[1].type     = GpuMemoryObjectType::RenderTexture;
+	stale_provenance.entries[1].relation = GpuMemoryOverlapType::Contains;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(stale_cover, &stale_provenance, 1u), GpuMemoryDepthD16Source::Guest);
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(stale_cover, &stale_provenance), GpuMemoryDepthD16Source::Unsupported);
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(stale_cover, &stale_provenance, 2u), GpuMemoryDepthD16Source::Unsupported);
+	auto gpu_texture = stale_provenance;
+	gpu_texture.entries[0].content_origin = GpuMemoryContentOrigin::GpuWriteBack;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(stale_cover, &gpu_texture, 1u), GpuMemoryDepthD16Source::Unsupported);
 	auto duplicate_storage = materialized;
 	duplicate_storage.entries[1] = duplicate_storage.entries[0];
 	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(duplicate_storage), GpuMemoryDepthD16Source::Unsupported);

@@ -1344,17 +1344,29 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			selective_reclaim_ids.Add(stale_reuse_id);
 		}
 
-		// A CPU-uploaded sampled Texture around, at or inside a storage view only caches guest bytes,
-		// unless a device write followed its last upload (both stamp gpu_update_time; a device write also
-		// stamps device_write_time) or a write-back is still pending.
+		// A texture holds surface pixels when it was materialized from a render target or skipped its
+		// guest upload because a surface already owns those bytes.
+		const auto holds_surface_pixels = [](const ObjectInfo& o)
+		{
+			return o.content_origin == GpuMemoryContentOrigin::GpuAliasMaterialization ||
+			       (o.object.type == GpuMemoryObjectType::Texture && o.content_origin == GpuMemoryContentOrigin::Unknown &&
+			        o.params[TextureObject::PARAM_SKIP_GUEST_UPLOAD] != 0u);
+		};
 		const auto caches_guest_bytes = [](const ObjectInfo& o)
-		{ return GpuMemoryStorageBufferCachesGuestBytes(o.read_only, o.content_origin, o.in_use, o.write_time, o.cpu_update_time); };
+		{
+			return GpuMemoryStorageBufferCachesGuestBytes(o.read_only, o.content_origin, o.in_use, o.write_time, o.cpu_update_time,
+			                                              o.gpu_update_time, o.device_write_time);
+		};
+		// A sampled Texture around, at or inside a storage view only caches guest bytes when guest memory
+		// holds its content (a CPU upload or a write-back invalidation), unless a device write followed its
+		// last upload (both stamp gpu_update_time; a device write also stamps device_write_time) or a
+		// write-back is still pending.
 		const auto links_cpu_texture = [&](const Object& h, const OverlappedBlock& obj)
 		{
 			const auto& o = h.info;
 			return (GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type) ||
 			        GpuMemoryAllowsStorageTextureInsideCpuTexture(o.object.type, obj.relation, o.content_origin, info.type)) &&
-			       o.content_origin == GpuMemoryContentOrigin::CpuUpload && o.device_write_time < o.gpu_update_time &&
+			       GpuMemoryContentFollowsGuestBytes(o.content_origin) && o.device_write_time < o.gpu_update_time &&
 			       !GpuMemoryHasPendingWritableWriteBack(o.in_use, o.read_only, o.write_back_func != nullptr,
 			                                             m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies()));
 		};
@@ -1473,9 +1485,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				// Incoming Texture under a live RT/ST/SB/Texture surface: link and,
 				// when the parent holds a Vulkan image, copy from it instead of
-				// CPU-detiling empty GPU-owned guest memory.
+				// CPU-detiling empty GPU-owned guest memory. Depth views have no
+				// parent copy: the binder already chose guest bytes for them.
 				overlap = true;
-				if (o.object.type == GpuMemoryObjectType::RenderTexture || o.object.type == GpuMemoryObjectType::StorageTexture)
+				if ((o.object.type == GpuMemoryObjectType::RenderTexture || o.object.type == GpuMemoryObjectType::StorageTexture) &&
+				    info.GetCreateFromObjectsFunc() != nullptr)
 				{
 					create_from_objects = true;
 				}
@@ -1525,9 +1539,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// (captured full-screen RenderTexture Crossing a stale Texture).
 				overlap = true;
 			} else if (GpuMemoryAllowsTextureLinkDepthMetadata(o.object.type, obj.relation, info.type) ||
-			           GpuMemoryAllowsTextureOverDepthRange(o.object.type, obj.relation, info.type))
+			           GpuMemoryAllowsTextureOverDepthRange(o.object.type, obj.relation, info.type) ||
+			           GpuMemoryAllowsStorageTextureInsideDepthRange(o.object.type, obj.relation, info.type))
 			{
-				// Same link as the mixed-parent form: the texture uploads guest bytes.
+				// Same link as the mixed-parent form: the texture or storage view uploads guest bytes.
 				overlap = true;
 			} else if (buffer != nullptr && selective_reclaim_ids.IsEmpty() && create_texel_bits_seed(others, info, heap_id) == obj.object_id)
 			{
@@ -1649,7 +1664,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					storage_growth_links_render_target = true;
 					continue;
 				}
-				if (GpuMemoryAllowsStorageTextureOverMaterializedTexture(o.object.type, obj.relation, o.content_origin, info.type))
+				if (GpuMemoryAllowsStorageTextureOverMaterializedTexture(o.object.type, obj.relation, holds_surface_pixels(o), info.type))
 				{
 					storage_growth_links_materialized = true;
 					continue;
@@ -2159,7 +2174,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					{
 						continue;
 					}
-					if (GpuMemoryAllowsTextureLinkDepthMetadata(o.object.type, obj.relation, info.type))
+					if (GpuMemoryAllowsTextureLinkDepthMetadata(o.object.type, obj.relation, info.type) ||
+					    GpuMemoryAllowsTextureOverDepthRange(o.object.type, obj.relation, info.type))
 					{
 						continue;
 					}
@@ -2176,13 +2192,16 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// stale surfaces describe: CPU-uploaded sampled textures inside it,
 			// CPU-uploaded read-only StorageBuffers and live render targets the
 			// single-parent path links (a view inside one, or a redescription of its
-			// bytes that no render-alias copy applies to), and read-only VertexBuffers
-			// (reclaimed). Guest memory holds the current bytes, so the image seeds from it.
+			// bytes that no render-alias copy applies to), storage views it
+			// redescribes in another format, depth targets it lies inside, and
+			// read-only VertexBuffers (reclaimed). Guest memory holds the current
+			// bytes, so the image seeds from it.
 			Vector<int> storage_reclaim_vertex_ids;
 			bool        multi_storage_texture_over_caches = info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
 			bool        storage_links_render_target       = false;
 			bool        storage_links_materialized        = false;
 			bool        storage_links_cache               = false;
+			bool        storage_links_redescribed         = false;
 			for (const auto& obj: others)
 			{
 				if (!multi_storage_texture_over_caches)
@@ -2202,12 +2221,23 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					storage_links_render_target = true;
 					continue;
 				}
-				if (GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type))
+				if (GpuMemoryAllowsStorageTextureInsideDepthRange(o.object.type, obj.relation, info.type))
+				{
+					continue;
+				}
+				if (o.object.type == GpuMemoryObjectType::StorageTexture &&
+				    StorageTextureRedescribesRange(o.params, info.params, obj.relation == OverlapType::Equals))
+				{
+					storage_links_redescribed = true;
+					continue;
+				}
+				if (GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type) ||
+				    GpuMemoryAllowsStorageTextureInsideVertexCache(o.object.type, obj.relation, o.read_only, o.content_origin, info.type))
 				{
 					storage_links_cache = true;
 					continue;
 				}
-				if (GpuMemoryAllowsStorageTextureOverMaterializedTexture(o.object.type, obj.relation, o.content_origin, info.type))
+				if (GpuMemoryAllowsStorageTextureOverMaterializedTexture(o.object.type, obj.relation, holds_surface_pixels(o), info.type))
 				{
 					storage_links_materialized = true;
 					continue;
@@ -2219,7 +2249,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// links them here (captured: several small buffers inside a new
 			// 0x100000 volume). Guest memory already holds the current bytes.
 			if ((storage_links_cache && !storage_links_materialized && !storage_links_render_target) ||
-			    (storage_links_render_target && !storage_links_materialized))
+			    ((storage_links_render_target || storage_links_redescribed) && !storage_links_materialized))
 			{
 				if (!storage_reclaim_vertex_ids.IsEmpty())
 				{

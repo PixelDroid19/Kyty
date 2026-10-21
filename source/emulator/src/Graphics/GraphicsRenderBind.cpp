@@ -3224,14 +3224,20 @@ static ShaderSampledImageViewKind ResolveBoundSampledImageView(const VulkanImage
 	return arrayed ? ShaderSampledImageViewKind::Depth2DArray : ShaderSampledImageViewKind::Depth2D;
 }
 
-// A storage view of a whole single-sample depth plane at its guest extent: one layer at level 0 whose format
-// holds the depth texel bits unchanged (R32F over 32-bit float depth, R16 UNORM over 16-bit depth).
-static bool DepthPlaneStorageViewMatches(const VulkanImage* depth, uint32_t fmt, uint32_t width, uint32_t height, uint32_t levels,
-                                         uint32_t base_level, uint32_t layers, uint32_t base_array, bool three_dimensional)
+// A storage view of a single-sample depth plane: one layer at level 0 whose format holds the depth texel bits
+// unchanged (R32F over 32-bit float depth, R16 UNORM over 16-bit depth), at the plane's guest extent or at a
+// smaller extent with the plane's width as pitch. Same pitch, texel size and swizzle give every texel of the
+// smaller view the address it has in the plane (captured: a 240x135 R16 view, pitch 256, over a 256x256 D16
+// target of the same size).
+static bool DepthPlaneStorageViewMatches(const VulkanImage* depth, uint32_t fmt, uint32_t width, uint32_t height, uint32_t pitch,
+                                         uint32_t levels, uint32_t base_level, uint32_t layers, uint32_t base_array,
+                                         bool three_dimensional)
 {
 	const VkFormat plane_format = DepthStencilBufferStoragePlaneFormat(depth->format);
+	const auto     plane_extent = depth->GetGuestExtent();
+	const bool     plane_origin = pitch == plane_extent.width && width <= plane_extent.width && height <= plane_extent.height;
 	if (plane_format == VK_FORMAT_UNDEFINED || depth->samples != VK_SAMPLE_COUNT_1_BIT || depth->IsResolutionScaled() ||
-	    !depth->MatchesGuestExtent(width, height))
+	    !(depth->MatchesGuestExtent(width, height) || plane_origin))
 	{
 		return false;
 	}
@@ -3722,7 +3728,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// Vulkan has no storage depth image: a dispatch addresses the depth plane through the image's colour
 				// copy, seeded here and stored back once the dispatch is recorded, so the stencil plane is untouched.
 				if (depth_exact && compute_stage && textures.desc[i].textures2d_without_sampler &&
-				    DepthPlaneStorageViewMatches(tex, fmt, width, height, levels, base_level, view_layers, base_array, three_dimensional))
+				    DepthPlaneStorageViewMatches(tex, fmt, width, height, pitch, levels, base_level, view_layers, base_array,
+				                                 three_dimensional))
 				{
 					auto* depth_image = static_cast<DepthStencilVulkanImage*>(tex);
 					auto* plane       = DepthStencilBufferGetStoragePlane(g_render_ctx->GetGraphicCtx(), depth_image);
@@ -4047,17 +4054,33 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				                         mapped.kind == Kernel::Memory::KernelMappedRangeKind::Physical;
 				const bool overlaps_ok = GpuMemoryQueryOverlaps(&query_addr, &query_size, 1u, &overlaps);
 				bool has_texture_parent = false;
+				bool has_render_texture = false;
 				if (overlaps_ok)
 				{
 					for (uint32_t entry = 0u; entry < overlaps.entry_count; entry++)
 					{
 						has_texture_parent |= overlaps.entries[entry].type == GpuMemoryObjectType::Texture;
+						has_render_texture |= overlaps.entries[entry].type == GpuMemoryObjectType::RenderTexture;
 					}
+				}
+				// Only a render target that can hold this sample owns the range; one of
+				// another extent is stale after the guest reused the memory.
+				uint32_t stale_render_textures = 0u;
+				if (has_render_texture)
+				{
+					const auto covers = FindRenderTexture(buffer, addr, depth_span_size, false);
+					bool       stale  = !covers.IsEmpty();
+					for (const auto* cover: covers)
+					{
+						const auto extent = cover->GetGuestExtent();
+						stale = stale && !Gen5SurfaceExtentMayHoldSample(extent.width, extent.height, width, height, 1u, false);
+					}
+					stale_render_textures = stale ? covers.Size() : 0u;
 				}
 				GpuMemoryRangeProvenance provenance {};
 				const bool provenance_ok = !has_texture_parent || GpuMemoryQueryRangeProvenance(addr, depth_span_size, &provenance);
 				depth_source = overlaps_ok && provenance_ok
-				                   ? GpuMemoryClassifyDepthD16Source(overlaps, has_texture_parent ? &provenance : nullptr)
+				                   ? GpuMemoryClassifyDepthD16Source(overlaps, has_texture_parent ? &provenance : nullptr, stale_render_textures)
 				                   : GpuMemoryDepthD16Source::Unsupported;
 				// The storage-backed detile is a 16-bit equation.
 				const bool source_ok = depth_source == GpuMemoryDepthD16Source::Guest ||
@@ -4381,11 +4404,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			                  : !VulkanResolveStorageImageView(tex, three_dimensional, arrayed_2d, &images_storage_view[index_storage],
 			                                                   base_level))
 			{
-				EXIT("storage image has no compatible Vulkan view: backing{kind=%u vk_format=%u mips=%u layers=%u usage=0x%08x} "
+				EXIT("storage image has no compatible Vulkan view: backing{kind=%u provenance=%s vk_format=%u %ux%u samples=%u "
+				     "scaled=%d mips=%u layers=%u usage=0x%08x} compute=%d "
 				     "descriptor{format=%u %ux%u levels=%u base_level=%u last_level=%u type=%u tile=%u 3d=%d array=%d "
 				     "dwords=%08x %08x %08x %08x %08x %08x %08x %08x}\n",
-				     static_cast<uint32_t>(tex->type), static_cast<uint32_t>(tex->format), tex->mip_levels, tex->array_layers,
-				     static_cast<uint32_t>(tex->usage), static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+				     static_cast<uint32_t>(tex->type), materialize, static_cast<uint32_t>(tex->format), tex->extent.width,
+				     tex->extent.height, static_cast<uint32_t>(tex->samples), tex->IsResolutionScaled() ? 1 : 0, tex->mip_levels,
+				     tex->array_layers, static_cast<uint32_t>(tex->usage), compute_stage ? 1 : 0, static_cast<uint32_t>(fmt),
+				     static_cast<uint32_t>(width),
 				     static_cast<uint32_t>(height), levels, base_level, view_last_level, static_cast<uint32_t>(host_resource_type),
 				     static_cast<uint32_t>(tile), three_dimensional ? 1 : 0, arrayed_2d ? 1 : 0, r.fields[0], r.fields[1], r.fields[2],
 				     r.fields[3], r.fields[4], r.fields[5], r.fields[6], r.fields[7]);
