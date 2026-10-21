@@ -171,6 +171,28 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	       bytes_per_element == 16u;
 }
 
+// A live surface can hold a sample's content only when its extent equals one of
+// the sample's levels (in 4x4 blocks for a block-compressed sample, as a storage
+// alias addresses it). A surface of any other extent cannot have produced it.
+[[nodiscard]] inline bool Gen5SurfaceExtentMayHoldSample(uint32_t surface_width, uint32_t surface_height, uint32_t width,
+                                                         uint32_t height, uint32_t levels, bool block_compressed)
+{
+	for (uint32_t level = 0; level < levels && level < 32u; ++level)
+	{
+		const uint32_t level_width  = std::max(1u, width >> level);
+		const uint32_t level_height = std::max(1u, height >> level);
+		if (surface_width == level_width && surface_height == level_height)
+		{
+			return true;
+		}
+		if (block_compressed && surface_width == (level_width + 3u) / 4u && surface_height == (level_height + 3u) / 4u)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 [[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, uint32_t ufmt, bool live_color_surface_covers)
 {
 	if (tile == 0u)

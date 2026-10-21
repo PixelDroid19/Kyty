@@ -4162,9 +4162,23 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				bool live_cover = false;
 				if (gen5 && (tile == 27u || tile == 9u))
 				{
-					const auto r_cover = FindRenderTexture(buffer, addr, size.size, false);
-					const auto s_cover = FindOverlappingStorageTextures(buffer, addr, size.size);
-					live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
+					// Only a surface that can hold this sample's content owns the
+					// range; one of an unrelated extent is stale after the guest
+					// reused the memory, and the guest bytes are the content.
+					const bool block_compressed = ShaderGen5TextureIsBlockCompressed(fmt);
+					const auto holds_sample     = [&](const VulkanImage* cover)
+					{
+						const auto extent = cover->GetGuestExtent();
+						return Gen5SurfaceExtentMayHoldSample(extent.width, extent.height, width, height, levels, block_compressed);
+					};
+					for (const auto* cover: FindRenderTexture(buffer, addr, size.size, false))
+					{
+						live_cover = live_cover || holds_sample(cover);
+					}
+					for (const auto* cover: FindOverlappingStorageTextures(buffer, addr, size.size))
+					{
+						live_cover = live_cover || holds_sample(cover);
+					}
 				}
 				const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
 				TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, view_swizzle,

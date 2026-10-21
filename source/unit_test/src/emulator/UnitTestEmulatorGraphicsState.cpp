@@ -5494,6 +5494,20 @@ TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledRejectsCoveredTile27)
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(0u, false));
 }
 
+// A live surface covers a sample only when its extent is one of the sample's
+// levels; streamed mip chains in a reused UI-target range are guest content.
+TEST(EmulatorGraphicsState, Gen5SurfaceExtentMayHoldSampleMatchesLevels)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(Gen5SurfaceExtentMayHoldSample(642u, 362u, 642u, 362u, 1u, false));
+	EXPECT_TRUE(Gen5SurfaceExtentMayHoldSample(128u, 128u, 512u, 512u, 10u, false));
+	EXPECT_FALSE(Gen5SurfaceExtentMayHoldSample(708u, 295u, 512u, 512u, 10u, false));
+	EXPECT_FALSE(Gen5SurfaceExtentMayHoldSample(1920u, 78u, 512u, 1024u, 11u, true));
+	// A block-compressed sample is addressed by a storage alias in 4x4 blocks.
+	EXPECT_TRUE(Gen5SurfaceExtentMayHoldSample(29u, 30u, 116u, 120u, 1u, true));
+	EXPECT_FALSE(Gen5SurfaceExtentMayHoldSample(29u, 30u, 116u, 120u, 1u, false));
+}
+
 TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledTile27ByFormat)
 {
 	using namespace Kyty::Libs::Graphics;
