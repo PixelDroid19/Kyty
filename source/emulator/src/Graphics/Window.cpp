@@ -864,7 +864,10 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 
 	switch (host_command)
 	{
-		case HostWindowCommand::Quit: game->m_game_need_exit = true; break;
+		case HostWindowCommand::Quit:
+			::Kyty::Emulator::Ports::ControllerInputPort::SessionEnd();
+			game->m_game_need_exit = true;
+			break;
 		case HostWindowCommand::TogglePause: SetPause(game, !game->m_game_is_paused); break;
 		case HostWindowCommand::ToggleFullscreen: ToggleHostFullscreen(); break;
 		case HostWindowCommand::None: break;
@@ -1223,6 +1226,7 @@ static void process_window_event(GameApi* game, const ::Kyty::Emulator::Host::Wi
 			break;
 		case ::Kyty::Emulator::Host::WindowEvent::Close:
 			KYTY_LOG_DEBUG("Window %" PRIu32 " closed\n", window.window_id);
+			::Kyty::Emulator::Ports::ControllerInputPort::SessionEnd();
 			game->m_game_need_exit = true;
 			break;
 		default:

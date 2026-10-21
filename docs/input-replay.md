@@ -22,12 +22,15 @@ transitions.
 
 Set `KYTY_PAD_RECORD` to a file to record a route from a manual session. The
 host keyboard and controller input the guest reads is written in the same
-format and on the same clock (seconds from the first pad read): one line per
-completed press, flushed as it completes. A stick is written as its
-full-travel direction while it is past half deflection, and a press shorter
-than a poll is kept for 50 ms so a replay delivers it to a read. Script and
-agent input are not recorded, and a press still held when the process ends is
-not written. A replay follows wall-clock time, so loading-time differences
+format and on the same clock (seconds from the first pad read), one line per
+completed press. A stick is written as its full-travel direction while it is
+past half deflection, and a press shorter than a poll is kept for 50 ms so a
+replay delivers it to a read. Script and agent input are not recorded. The
+file is written only when the user ends the session by closing the window or
+with the host quit key; a session that ends in a fault or a signal, or that
+exceeds the 4096-entry route limit, writes nothing (an earlier file at that
+path is left as it was). A press still held at the end is not written. A
+replay follows wall-clock time, so loading-time differences
 between the recorded and the replayed run shift the guest state the inputs
 meet; record with the shader caches the replay will use.
 

@@ -58,6 +58,7 @@ void ControllerConnect(int id);
 void ControllerDisconnect(int id);
 void ControllerButton(int id, uint32_t button, bool down);
 void ControllerAxis(int id, Axis axis, int value);
+void ControllerSessionEnd();
 
 // A diagnostic tap may request one or two advancing guest press samples. The
 // two-sample default preserves existing behavior and does not use host timing.

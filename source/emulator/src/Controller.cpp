@@ -590,20 +590,21 @@ constexpr PadRecordAction kPadRecordActions[] = {
 
 constexpr std::size_t kPadRecordActionCount = sizeof(kPadRecordActions) / sizeof(kPadRecordActions[0]);
 
-// Writes the host pad input the guest reads (KYTY_PAD_RECORD=<file>) as a
+// Records the host pad input the guest reads (KYTY_PAD_RECORD=<file>) as a
 // KYTY_PAD_SCRIPT route on the same clock: seconds from the first pad read.
-// Each completed press becomes one line, flushed at once; a stick counts as
-// its full-travel direction past half deflection. A press shorter than a
-// guest poll is kept for 50 ms so the replay delivers it to a read. A press
-// still held when the process ends is not written.
+// Each completed press becomes one line; a stick counts as its full-travel
+// direction past half deflection. A press shorter than a guest poll is kept
+// for 50 ms so the replay delivers it to a read. The route is written only
+// when the user ends the session, so a session cut short by a fault or a
+// signal, or longer than a route can hold, leaves no file. A press still held
+// at the end is not written.
 class PadRecordRuntime
 {
 public:
 	void Observe(uint32_t buttons, const int* axes)
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		OpenLocked();
-		if (!m_file.is_open())
+		if (!RecordingLocked())
 		{
 			return;
 		}
@@ -622,13 +623,39 @@ public:
 				m_press_start[index] = elapsed;
 			} else if (!down && m_press_start[index] >= 0.0)
 			{
-				WriteLocked(kPadRecordActions[index].name, m_press_start[index], elapsed);
+				AppendLocked(kPadRecordActions[index].name, m_press_start[index], elapsed);
 				m_press_start[index] = -1.0;
 			}
 		}
 	}
 
+	void Finish()
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (!RecordingLocked())
+		{
+			return;
+		}
+		m_finished = true;
+		if (m_lines > kPadRecordLinesMax)
+		{
+			KYTY_LOG_DEBUG("KYTY_PAD_RECORD wrote nothing: the session exceeded the route entry limit\n");
+			return;
+		}
+		const std::string staging = m_path + ".partial";
+		std::ofstream     file(staging, std::ios::out | std::ios::trunc);
+		file << "# Host pad input recorded by KYTY_PAD_RECORD; replay with KYTY_PAD_SCRIPT.\n" << m_route;
+		file.close();
+		if (!file || std::rename(staging.c_str(), m_path.c_str()) != 0)
+		{
+			KYTY_LOG_DEBUG("KYTY_PAD_RECORD cannot write the route file\n");
+			std::remove(staging.c_str());
+		}
+	}
+
 private:
+	static constexpr uint32_t kPadRecordLinesMax = 4096;
+
 	static bool ActionDown(const PadRecordAction& action, uint32_t buttons, const int* axes)
 	{
 		if (action.button != 0)
@@ -639,51 +666,38 @@ private:
 		return action.direction < 0 ? value < 64 : value > 192;
 	}
 
-	void OpenLocked()
+	bool RecordingLocked()
 	{
-		if (m_initialized)
+		if (!m_initialized)
 		{
-			return;
+			m_initialized    = true;
+			const char* path = std::getenv("KYTY_PAD_RECORD");
+			m_path           = path != nullptr ? path : "";
+			std::fill(std::begin(m_press_start), std::end(m_press_start), -1.0);
 		}
-		m_initialized = true;
-		const char* path = std::getenv("KYTY_PAD_RECORD");
-		if (path == nullptr || path[0] == '\0')
-		{
-			return;
-		}
-		m_file.open(path, std::ios::out | std::ios::trunc);
-		if (!m_file)
-		{
-			KYTY_LOG_DEBUG("KYTY_PAD_RECORD cannot open the route file\n");
-			return;
-		}
-		m_file << "# Host pad input recorded by KYTY_PAD_RECORD; replay with KYTY_PAD_SCRIPT.\n";
-		m_file.flush();
-		std::fill(std::begin(m_press_start), std::end(m_press_start), -1.0);
+		return !m_path.empty() && !m_finished;
 	}
 
-	void WriteLocked(const char* name, double start, double end)
+	void AppendLocked(const char* name, double start, double end)
 	{
-		if (m_lines >= 4096)
+		if (++m_lines > kPadRecordLinesMax)
 		{
-			KYTY_LOG_DEBUG("KYTY_PAD_RECORD stopped: the route reached its entry limit\n");
-			m_file.close();
 			return;
 		}
 		char line[96];
 		std::snprintf(line, sizeof(line), "%.3f-%.3f:%s\n", start, std::max(end, start + 0.050), name);
-		m_file << line;
-		m_file.flush();
-		++m_lines;
+		m_route += line;
 	}
 
 	std::mutex                            m_mutex;
-	std::ofstream                         m_file;
+	std::string                           m_path;
+	std::string                           m_route;
 	std::chrono::steady_clock::time_point m_origin {};
 	double                                m_press_start[kPadRecordActionCount] = {};
 	uint32_t                              m_lines       = 0;
 	bool                                  m_initialized = false;
 	bool                                  m_started     = false;
+	bool                                  m_finished    = false;
 };
 
 static PadRecordRuntime g_pad_record;
@@ -1430,6 +1444,11 @@ void ControllerAxis(int id, Axis axis, int value)
 	EXIT_IF(g_controller == nullptr);
 
 	g_controller->Axis(id, axis, value);
+}
+
+void ControllerSessionEnd()
+{
+	g_pad_record.Finish();
 }
 
 // SCE_PAD_ERROR_* (public Sony codes; used for ordinary guest failures, not EXIT).

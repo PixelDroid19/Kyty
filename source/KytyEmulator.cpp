@@ -185,7 +185,7 @@ static void Init(const Scripts::ScriptVar& cfg)
 	// forward events or any guest event queue can watch a socket.
 	::Kyty::Emulator::Ports::ControllerInputPort::Install(
 	    {&Libs::Controller::ControllerConnect, &Libs::Controller::ControllerDisconnect, &Libs::Controller::ControllerButton,
-	     &Libs::Controller::ControllerAxis});
+	     &Libs::Controller::ControllerAxis, &Libs::Controller::ControllerSessionEnd});
 	::Kyty::Emulator::Ports::AudioPausePort::Install(&Libs::Audio::AudioOut::AudioOutSetHostPaused);
 	::Kyty::Emulator::Ports::SocketEventPort::Install({&Libs::Network::Net::NetIsSocket, &Libs::Network::Net::NetSocketReadiness,
 	                                                   &Libs::Network::Net::NetSocketWatch, &Libs::Network::Net::NetSocketUnwatch});

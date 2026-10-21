@@ -28,6 +28,7 @@ bool   g_last_button_down = false;
 int    g_last_axis_id = -1;
 ::Kyty::Emulator::Ports::Axis g_last_axis = ::Kyty::Emulator::Ports::Axis::LeftX;
 int    g_last_axis_value = 0;
+int    g_session_end_count = 0;
 
 void TestConnect(int id)
 {
@@ -53,6 +54,11 @@ void TestAxis(int id, ::Kyty::Emulator::Ports::Axis axis, int value)
 	g_last_axis_id    = id;
 	g_last_axis       = axis;
 	g_last_axis_value = value;
+}
+
+void TestSessionEnd()
+{
+	g_session_end_count++;
 }
 
 int g_pause_count = 0;
@@ -167,11 +173,13 @@ TEST(EmulatorNeutralPorts, ControllerInputPortDeliversInstalledCallbacks)
 	// No-op before install must be safe.
 	::Kyty::Emulator::Ports::ControllerInputPort::Connect(1);
 	::Kyty::Emulator::Ports::ControllerInputPort::Button(1, 0x00004000, true);
+	::Kyty::Emulator::Ports::ControllerInputPort::SessionEnd();
 	EXPECT_EQ(g_connect_count, 0);
 	EXPECT_EQ(g_button_count, 0);
+	EXPECT_EQ(g_session_end_count, 0);
 
 	::Kyty::Emulator::Ports::ControllerInputPort::Install(
-	    {TestConnect, TestDisconnect, TestButton, TestAxis});
+	    {TestConnect, TestDisconnect, TestButton, TestAxis, TestSessionEnd});
 
 	::Kyty::Emulator::Ports::ControllerInputPort::Connect(3);
 	::Kyty::Emulator::Ports::ControllerInputPort::Disconnect(3);
@@ -188,6 +196,9 @@ TEST(EmulatorNeutralPorts, ControllerInputPortDeliversInstalledCallbacks)
 	EXPECT_EQ(g_last_axis_id, 3);
 	EXPECT_EQ(g_last_axis, ::Kyty::Emulator::Ports::Axis::LeftY);
 	EXPECT_EQ(g_last_axis_value, 255);
+
+	::Kyty::Emulator::Ports::ControllerInputPort::SessionEnd();
+	EXPECT_EQ(g_session_end_count, 1);
 
 	// Reset to no-op dispatch after shutdown.
 	::Kyty::Emulator::Ports::ControllerInputPort::Install({});
