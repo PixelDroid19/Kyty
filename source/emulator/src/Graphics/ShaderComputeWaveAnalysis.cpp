@@ -322,11 +322,18 @@ bool IsReadlaneInstruction(const ShaderInstruction& instruction)
 	       IsOrdinaryVgpr(instruction.src[0]) && (IsUniformScalarWord(selector) || IsIntegerOrLiteralConstant(selector));
 }
 
+// One word of the architectural EXEC mask, as a register spill reads it.
+bool IsExecMaskWord(const ShaderOperand& operand)
+{
+	return operand.size == 1 && operand.register_id == 0 && ComputeWaveOperandIsPlain(operand) &&
+	       (operand.type == ShaderOperandType::ExecLo || operand.type == ShaderOperandType::ExecHi);
+}
+
 bool IsWritelaneInstruction(const ShaderInstruction& instruction)
 {
 	const auto uniform = [](const ShaderOperand& operand) { return IsUniformScalarWord(operand) || IsIntegerOrLiteralConstant(operand); };
 	return IsExactTupleBase(instruction, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, 2) && IsOrdinaryVgpr(instruction.dst) &&
-	       uniform(instruction.src[0]) && uniform(instruction.src[1]);
+	       (uniform(instruction.src[0]) || IsExecMaskWord(instruction.src[0])) && uniform(instruction.src[1]);
 }
 
 bool IsReadfirstlaneInstruction(const ShaderInstruction& instruction)
@@ -679,7 +686,7 @@ String8 ComputeWaveUnsupportedReason(const ShaderInstruction& instruction)
 		case ShaderInstructionType::VReadlaneB32:
 			return "VReadlaneB32 requires disjoint ordinary SGPR destination/selector and an ordinary VGPR source";
 		case ShaderInstructionType::VWritelaneB32:
-			return "VWritelaneB32 requires ordinary VGPR destination, scalar data, and SGPR selector";
+			return "VWritelaneB32 requires ordinary VGPR destination, scalar or EXEC-word data, and SGPR selector";
 		case ShaderInstructionType::VReadfirstlaneB32: return "VReadfirstlaneB32 requires ordinary SGPR destination and VGPR source";
 		case ShaderInstructionType::VCndmaskB32:
 			return "VCndmaskB32 requires a plain mask-select tuple: one-word VGPR destination, two plain data sources, "
