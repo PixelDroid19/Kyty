@@ -3991,12 +3991,23 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// every GPU write-back.
 				const auto video_image = VideoOut::VideoOutGetImageForSubmission(addr, buffer);
 				if (video_image.image != nullptr && video_image.buffer_size == size.size && video_image.buffer_pitch == pitch &&
-				    video_image.image->MatchesGuestExtent(width, height) &&
-				    (!gen5 || VulkanGen5SampleFormatMatchesEffective(static_cast<uint16_t>(fmt), use_srgb,
-				                                                     video_image.image->format)))
+				    video_image.image->MatchesGuestExtent(width, height))
 				{
-					tex         = video_image.image;
-					materialize = "videoout";
+					// The display buffer holds the bytes the guest reads; another
+					// encoding of the same texel (sRGB or not) reads the live image
+					// through a view in the sample's format.
+					const VkFormat sample_format =
+					    VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0u, 0u, static_cast<uint16_t>(fmt), use_srgb);
+					if (!gen5 || VulkanGen5SampleFormatMatchesEffective(static_cast<uint16_t>(fmt), use_srgb, video_image.image->format))
+					{
+						tex         = video_image.image;
+						materialize = "videoout";
+					} else if (video_image.image->mutable_format && VulkanColorFormatsShareTexels(video_image.image->format, sample_format))
+					{
+						tex                = video_image.image;
+						reinterpret_format = sample_format;
+						materialize        = "videoout-reinterpret";
+					}
 				}
 			}
 		}

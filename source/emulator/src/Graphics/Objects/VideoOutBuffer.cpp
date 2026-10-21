@@ -319,6 +319,7 @@ void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* 
 	    vk_obj->format == VK_FORMAT_R8G8B8A8_UNORM || vk_obj->format == VK_FORMAT_B8G8R8A8_UNORM)
 	{
 		image_descriptor.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+		vk_obj->mutable_format = true;
 	}
 	const auto image_info           = VulkanBuildImageCreateInfo(image_descriptor);
 	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, &vk_obj->memory)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImage(ctx, image_info, vk_obj, &vk_obj->memory) condition ignored (continuing)\n"); }
