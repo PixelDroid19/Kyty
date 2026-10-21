@@ -4,6 +4,237 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: story starts, cube depth samples and recycled ranges (2026-10-21)
+
+Intel A770, strict runs from the title screen through traveler selection
+(the maintainer selected the traveler by hand) with temporary diagnostics
+(removed).
+
+- **Compute translator.** A paired wave64 shader stored an EXEC half through
+  `v_writelane_b32` and compared halves with `v_cmpx_*_f16` (VOPC opcodes
+  0xD9-0xDE). The writelane data check refused EXEC words and the six F16
+  `v_cmpx` opcodes decoded as an unknown instruction. Both are now accepted;
+  the SDWA `WORD_1` source select of the F16 compare is applied by the shared
+  operand loader (checked against the disassembly).
+- **Cube depth samples.** The shadow pass samples a 512x512 and a 1024x1024
+  D16 cube (resource type 11, last array slice 5) with `image_sample_c_lz`.
+  The depth-sample materializer refused cubes. A cube with base array 0 and
+  last slice 5 now materializes six faces (cube arrays stay refused because
+  their face index is slice*8+face), and the depth-compare sample maps the
+  cube coordinates from the [1,2] face window to [0,1], as for colour cubes.
+  The traveler intro, the controls tutorial and the first prologue scene
+  were reached after the change.
+- **Stale render targets over cube ranges.** The 1024 cube was refused
+  because a 3840x2160 R16 render target, last created at boot, still covered
+  its range. The depth-source classifier now ignores render targets that the
+  binder proves cannot hold the sample (extent check, every cover counted);
+  CPU-uploaded texture views of the range keep the provenance rule. A depth
+  view under such a target is created from guest bytes: the parent-copy path
+  has no depth-view variant and exited with `create_func == nullptr`.
+- **Recycled range under several views.** After selection a 1920x1080
+  64-bit storage image (tile 27) was created over a range that equals a live
+  3840x2160 16-bit render target and contains an older 16-bit cube storage
+  image. Each pair was admitted alone (a redescription in another format);
+  the multi-parent path only lacked the storage-image case and exited with
+  `!create_all_the_same`. It now links storage views it redescribes, and the
+  image seeds from guest bytes as in the single-parent path.
+- **More storage views over guest-byte caches.** Three further storage
+  images were refused over objects that only cache guest bytes: a 0x120000
+  six-layer view at the base of a 0x152eec read-only CPU vertex upload; a
+  0x80000 512x512 view holding a 0x48000 storage buffer refreshed from guest
+  memory after its last writable use; a 0x20000 256x256 view holding a
+  0x14000 buffer whose write-back left its bytes unchanged. The vertex upload
+  is now linked as a cache (it extends past the view, so it is not
+  reclaimed), and a storage buffer counts as a cache when it is an idle CPU
+  upload with no device write since its last refresh, or when its last
+  writable period was written back and every use since then is read-only.
+- **Storage view over an invalidated texture.** At the first path action a
+  512x512 storage view was created over a 676x540 sampled texture at its base
+  and a 0x48000 read-only storage buffer, and exited with
+  `!create_all_the_same`. The buffer's write-back had invalidated the
+  texture (same CPU update stamp; origin `AliasInvalidation`, no device
+  write), so guest memory holds the current bytes. The multi-parent path
+  accepted only CPU-uploaded textures as caches; a texture invalidated by a
+  write-back now counts as one too.
+- **Storage view over a skip-upload texture.** A 1920x1080 64-bit storage
+  view held a 1920x1080 render target and a sampled view that had skipped its
+  guest upload under that target. Only textures materialized from a surface
+  were admitted; a texture whose pixels came from a surface either way is now
+  admitted beside the render target that owns them.
+- **48-bit extended user data pointers.** A pixel shader read its extended
+  user data through the SGPR pair `0x001000116125cc00` (bit 52 set) and the
+  snapshot exited as unreadable. The SRT table path and the native `S_LOAD`
+  lowering already use the low 48 bits; the extended-user-data base now does
+  too.
+- **Recycled depth range, mixed parents.** At battle entry a 64x64 BC mip
+  chain (7 levels, tile 5) was created at the base of a live 128x128 D16
+  target that a CPU-uploaded 128x128 BC chain also contains, and exited with
+  `!create_all_the_same`. The single-parent rule for a texture over a
+  recycled depth range now also applies in the mixed-parent loop.
+- **Depth plane storage sub-view.** A compute pass stores into a 240x135 R16
+  view with pitch 256 over a 256x256 D16 target of the same address and size
+  (`DepthStencilBuffer Equals StorageTexture`). The depth-plane storage path
+  required the exact guest extent. With the plane's width as pitch, the same
+  texel size and swizzle, every texel of the smaller view has the address it
+  has in the plane, so such a view now binds the plane. Known limit: an
+  `image_get_resinfo` on that view reports the plane extent (256x256), not
+  240x135. The refusal message for a storage image without a compatible view
+  now names the provenance, backing extent, samples and stage.
+- **"All lanes" test in a full-screen wave64 pixel pass.** At the battle
+  entry a 3840x2160 pixel shader saves EXEC, ANDs a per-lane compare with
+  it and branches on `s_cmp_lg_u64 s[12:13], s[30:31]`: a cheap path when
+  every launched lane passes, a long one otherwise. The mask-flow proof only
+  knew a mask compared with zero and refused with `mask observed as a number`.
+  Two lane masks compared for equality ask whether any lane's bits differ,
+  the same any-lane test on their XOR, so it is now admitted under the same
+  rules. The slow path ends with `s_branch` past the cheap one (an if/else);
+  the region analysis closed the divergent region at the start of the cheap
+  path and marked the slow path's scalar writes as divergent there, although
+  that path never falls through. A forward `s_branch` that ends a region's
+  block now moves the region's end to the branch target, so the else block
+  starts from the state before the branch and the writes of both blocks are
+  divergent after the final join. The old rule also missed that: a scalar
+  written only in the else block, or in both, was read after the join as if
+  uniform. The shader, dumped from the run, now proves lane-local offline.
+- **Uniform VGPRs decide a VCC branch.** With the join checked, a 1x1
+  exposure pass at boot was refused: `if (v7 > v10) s = cb[44] else s =
+  cb[48]` on `s_cbranch_vccz`, with `s` read by a vector op after the join.
+  Its compare reads VGPRs computed only from constants, scalar loads and
+  `image_load` at addresses built from a uniform loop counter, so every lane
+  holds the same value and the branch decides the same way for the whole
+  wave (the shape a compiler emits only for a condition it proved uniform).
+  The mask flow now tracks VGPRs that hold one value in every lane of the
+  current EXEC: a lane-local vector result of constants, clean scalars,
+  uniform VGPRs and uniform lane bits, or an image load of a uniform address
+  from a clean resource, written while EXEC keeps a lane of every launched
+  quad. Any EXEC write drops every such fact; the join of a divergent region
+  or loop drops it for the VGPRs written there; a write that may keep part of
+  the old register (SDWA `DST_SEL` other than DWORD with `DST_U` PRESERVE, a
+  16-bit form, an accumulator) also needs the old value uniform. A vector
+  compare of uniform sources is a uniform mask, as one of scalars already
+  was. The boot shader then proves lane-local offline, with no VGPR losing
+  uniformity.
+- **Cold-cache crash after selection.** With empty shader and pipeline caches
+  the title crashed with a null write in its garbage collector 120-150 s in
+  (two runs). The collector waits for objects whose render resources are
+  released by the render thread; after 10.0 s it reports the last pending
+  object through a pointer that this build never sets. The run had a 17.9 s
+  frame (one compute pipeline creation took 4.3 s, a command-processor run
+  5.3 s). The background compute precompile only replays recipes recorded by
+  an earlier session, so it does not help a first run.
+- **Storage view inside a recycled depth range.** A 128x128 eight-level
+  six-layer colour storage image was created at the base of a live
+  1024x1024 D16 target (`DepthStencilBuffer Contains StorageTexture`).
+  Storage views of a depth plane bind the depth image itself, so this is a
+  colour view of a recycled range: it now seeds from guest memory and the
+  depth object stays linked, as for sampled textures over depth ranges.
+- **Excluded for one traveler's GPU hang.** The volume-lighting compute shader
+  (60x34x128 groups of 8x8, paired wave64) loses the device about 3 minutes
+  in when it runs in full, and not when limited to one Z slice. A readback of
+  the light grid it walks showed zero lights in all 130,560 cells in every
+  dispatch (8 readbacks), so the light loop is not the cause. The F16 SDWA
+  compare that gates the loop is translated correctly.
+- **Battle flicker, localized but not fixed.** In the first battle the
+  stage floor goes dark in roughly 15-25% of the frames while the command
+  menu is idle (floor-band luma 6-15 against about 50). Per-pass probes of
+  four texels at the end of every wide colour pass (3840x2160) show that the
+  G-buffer, the half-resolution passes and every per-light attenuation pass
+  are equivalent in dark and lit frames. The divergence starts in the last
+  two-draw pass into the RGBA16F scene colour target: its floor texel is
+  0.000 in every dark frame and 0.004-0.007 in lit ones. That pass records
+  two draws in every frame and no draw is skipped.
+- **Excluded for the battle flicker.**
+  - Depth-compare cube samples: no depth-compare bind occurs in the battle.
+  - The storage-view-inside-depth rule above: a trace of that link stayed
+    silent through a burst with 12 of 30 frames dark.
+  - Bind signatures of the small cube and 128x128 textures are identical in
+    dark and lit frames, and so are the draw and dispatch counts.
+  - A same-command-buffer hazard: a full memory barrier before every draw
+    and dispatch did not reduce the rate (20 of 60 frames dark), and neither
+    did serialized submission with an idle queue (7 of 40).
+  - The layout round trip of the probe alone does not change the rate.
+    The full probe lowers it and makes dark frames fully black (luma about
+    2), so host timing is not excluded yet.
+- **Open.**
+  - The battle flicker: the inputs of the two draws of the last scene pass
+    (buffers, textures, depth and stencil state) still need a dark/lit
+    comparison.
+  - A device loss at battle entry in one run (render engine reset, fence
+    wait -4); the last recorded draws were indexed scene draws. The same
+    build without the bind trace entered the same battle and ran 720 s.
+  - One traveler's GPU hang (cause not localized; per-slice work outside the
+    light loop is the next candidate).
+  - The cold-cache garbage-collector crash.
+  - 161 VOPC opcodes in `ShaderParseVOPC.cpp` still decode as an unknown
+    instruction and continue; they should share the VOP3 compare table or
+    refuse strictly.
+  - The F16 compare emitters ignore SDWA `neg`/`abs` source modifiers.
+
+## Role-playing title: lost depth clears, display-buffer samples and stale covers (2026-10-21)
+
+Intel A770, strict 180-300 s camp runs with scripted input, per-present native
+captures and temporary diagnostics (removed). A maintainer screen recording of
+the same build showed the symptoms live.
+
+- **Symptom.** Characters and speech bubbles were duplicated in sharp copies
+  that multiplied while the camera moved (2, 3, then 4 copies over frames
+  2093-2095); static props were not duplicated. Frame 2096 showed the terrain
+  mostly black with dark-red blotches shaped like those copies. The next frame
+  was clean.
+- **Localization.** Sample resolution was identical in the bad frames and
+  their neighbours. A trace of every depth bind showed that the main 3840x2160
+  depth target was bound without consuming an HTILE clear in 229-338 of about
+  2,100 frames; the duplicated frames in the recording fall on those frames.
+  The guest clears that HTILE every frame with the generic uniform-fill
+  kernel, which loads its fill value from a 4-byte read-only buffer. That word
+  lives in a CPU-written constant ring whose memory is still covered by a
+  stale render target (`RenderTexture Contains`). The record-time snapshot of
+  the word refused any surface overlap, so the fill was not recognised (17%
+  of the HTILE fills with scripted input, 11% at normal speed) and the
+  uncleared depth kept last frame's sprites in front of the new terrain.
+- **Evidence for the fix.** The bound source view is a read-only
+  `StorageBuffer` whose content origin is a CPU upload; a storage view linked
+  under a surface uploads guest bytes and is never seeded from the surface.
+- **Fix.** A new `StorageView` snapshot admission accepts the surfaces a
+  `StorageBuffer` object links under, as `IndexView` does for index views. Only
+  the fill-value read uses it; other read-only snapshots keep the strict rule.
+- **Result.** With the change, 2,049 of 2,049 HTILE fills resolve and no frame
+  binds the main depth without its clear (was 229-338). Before the change,
+  four other uniform-fill destinations also lost fills through the same
+  refusal.
+- **Display-buffer samples.** The guest samples the two 3840x2160 display
+  buffers (format 56, tile 27) as R8G8B8A8 UNORM while the scan-out images are
+  B8G8R8A8 sRGB. The effective-format check failed and the samples resolved to
+  a stale texture created near frame 285: the shop menu opened over a black
+  background and the controls tutorial was dark. Display images created with a
+  mutable format now record it and such samples read the live image through a
+  view in the sample's format (11,420 samples in the menu run; the tutorial,
+  main menu and map captures are complete).
+- **Stale covers.** A tile-27/tile-9 sample skipped its guest upload whenever
+  any render or storage texture overlapped it, including a stale 708x295 target
+  over 512x512 mip chains. A cover now counts only when its extent equals one
+  of the sample's levels (in 4x4 blocks for block-compressed samples). A/B
+  runs: persistent white surfaces gone.
+- **Recycled depth range.** A 128x128 BC3 mip chain inside a live 128x128 D32
+  target exited with `unknown relation: DepthStencilBuffer - Contains -
+  Texture`. The equal-range rule now also covers a texture inside the depth
+  range. The exit was not reproduced after the change; the route did not reach
+  that allocation again.
+- **Open.**
+  - Intermittent device loss (`vkWaitSemaphores` -4, xe engine reset on the
+    render engine) predates these changes and recurred once in a per-present
+    run at 107 s.
+  - Shader compilation still causes multi-second stalls on warm runs: the
+    SPIR-V binary cache persists about 50 of about 500 entries per run because
+    entries carry the full source as identity (0.3-2.9 MB) against a 16 MiB
+    session write budget.
+  - About 5,000 samples per run still resolve as `guest-skip-live-cover` on
+    addresses other than the display buffers; not yet examined.
+  - Frame 1218 of an earlier run lost static props while their shadows
+    remained, after a 966 ms stall; not re-checked since the depth-clear fix.
+  - The stale render target over the CPU constant ring stays registered; it is
+    the same class as the stale boot target recorded earlier.
+
 ## Role-playing title: Standard256B UI images ignore the descriptor pitch (2026-10-20)
 
 Intel A770, strict 180 s movement runs on 1d8bc4e5 plus the change below,
@@ -26,8 +257,8 @@ with temporary diagnostics (removed).
   and tile-1 arrays and mip chains; word4 pitch applies to linear images
   only.
 - **Result.** The 180 s run completes; the dialogue capture (frame 2266)
-  shows an intact frame, name plate and advance marker. Bubble icons over
-  characters still need a capture in which they are on screen.
+  shows an intact frame, name plate and advance marker. Later camp captures
+  show the speech bubbles over characters with their ellipsis drawn.
 - **Excluded.** Tile-5 BC mip chains: 32 dumped 128x128 chains (BC1, BC3,
   BC4, BC5) decode coherently at every level, including the tail. Component
   swizzles of the sampled UI and sprite formats match their formats.
