@@ -87,6 +87,7 @@ struct Region
 	uint32_t            end_pc = 0;
 	std::bitset<kWords> written;
 	std::set<SpillSlot> written_slots;
+	std::bitset<kVgprs> vgprs; // VGPRs written in it: lanes that skipped it keep their old values
 	// Mask words whose bit is zero for every lane outside the region (a subset of the EXEC it was entered with):
 	// compares evaluated and EXEC copies taken while EXEC was such a subset (VOPC clears inactive lanes).
 	std::bitset<kWords> zero_outside;
@@ -104,9 +105,10 @@ struct Loop
 	// A lane-divergent branch leaves the loop or repeats it, so lanes run different numbers of
 	// iterations and the host subgroup's count is not the guest wave's.
 	bool divergent = false;
-	// Every scalar word and spill slot some instruction of the body may write.
+	// Every scalar word, spill slot and VGPR some instruction of the body may write.
 	std::bitset<kWords> written;
 	std::set<SpillSlot> written_slots;
+	std::bitset<kVgprs> vgprs;
 	// Words whose every write in the body keeps the bit of each lane outside its region (D = D AND/OR/ANDN2 with a
 	// mask confined that way): a lane's bit then follows only its own iterations, so leaving the loop does not
 	// make the word divergent. Observed during a walk and confirmed by the next one.
@@ -147,6 +149,26 @@ void CollectWrites(const ShaderInstruction& inst, std::bitset<kWords>* written)
 		for (unsigned word = 0; word < count; ++word) { written->set(first + word); }
 	}
 	if (IsCompare(inst.type) || (IsScalarAlu(inst.type) && WritesScc(inst.type))) { written->set(kSccWord); }
+}
+
+// VGPR words of an operand; an unsized register is one word.
+bool VgprWords(const ShaderOperand& op, unsigned* first, unsigned* count)
+{
+	if (op.type != Operand::Vgpr || op.register_id < 0) { return false; }
+	*first = static_cast<unsigned>(op.register_id);
+	*count = op.size > 0 ? static_cast<unsigned>(op.size) : 1u;
+	return *first + *count <= static_cast<unsigned>(kVgprs);
+}
+
+void CollectVgprWrites(const ShaderInstruction& inst, std::bitset<kVgprs>* written)
+{
+	for (const ShaderOperand* dst: {&inst.dst, &inst.dst2})
+	{
+		unsigned first = 0;
+		unsigned count = 0;
+		if (!VgprWords(*dst, &first, &count)) { continue; }
+		for (unsigned word = 0; word < count; ++word) { written->set(first + word); }
+	}
 }
 
 // Buffer, image and GDS counter writes. A Vulkan helper's write to them has no effect; LDS and scratch are
@@ -447,6 +469,10 @@ private:
 	void                  TrackRegionSubset(const ShaderInstruction& inst, bool exec_subset_before);
 	void                  UpdateScc(const ShaderInstruction& inst, uint8_t source_taint);
 	bool                  UniformComparison(const ShaderInstruction& inst) const;
+	[[nodiscard]] bool    UniformSource(const ShaderInstruction& inst, int source) const;
+	[[nodiscard]] bool    UniformVgprs(const ShaderOperand& operand, int words) const;
+	[[nodiscard]] bool    UniformVectorResult(const ShaderInstruction& inst) const;
+	void                  TrackUniformVgprs(const ShaderInstruction& inst);
 	void                  TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources, bool uniform_comparison);
 	[[nodiscard]] bool    SelectsExecOnUniformScc(const ShaderInstruction& inst) const;
 	[[nodiscard]] bool    IsUniformMask(const ShaderOperand& operand) const;
@@ -809,19 +835,92 @@ bool Flow::SelectsExecOnUniformScc(const ShaderInstruction& inst) const
 	return (a.type == Operand::ExecLo && zero(b)) || (b.type == Operand::ExecLo && zero(a));
 }
 
-// A vector compare of constants and scalar numbers gives every lane the same bit.
+// A vector compare of constants, scalar numbers and uniform VGPRs gives every lane the same bit.
 bool Flow::UniformComparison(const ShaderInstruction& inst) const
 {
 	if (!StartsWith(inst.type, "VCmp") || ShaderInstructionTypeChangesExec(inst.type)) { return false; }
 	for (int source = 0; source < inst.src_num; ++source)
 	{
-		const auto& operand = inst.src[source];
-		unsigned    first   = 0;
-		unsigned    count   = 0;
-		if (IsConstant(operand)) { continue; }
-		if (!ScalarRange(operand, &first, &count) || Taint(operand) != kClean) { return false; }
+		if (!UniformSource(inst, source)) { return false; }
 	}
 	return true;
+}
+
+// One value in every lane of the current EXEC: a constant, a scalar number, a lane bit of a uniform mask or a
+// uniform VGPR read without a lane exchange.
+bool Flow::UniformSource(const ShaderInstruction& inst, int source) const
+{
+	const auto& operand = inst.src[source];
+	unsigned    first   = 0;
+	unsigned    count   = 0;
+	if (IsConstant(operand)) { return true; }
+	if (IsLaneBit(inst, source)) { return IsUniformMask(operand); }
+	if (operand.type == Operand::Vgpr) { return !operand.dpp && UniformVgprs(operand, operand.size); }
+	return ScalarRange(operand, &first, &count) && Taint(operand) == kClean;
+}
+
+bool Flow::UniformVgprs(const ShaderOperand& operand, int words) const
+{
+	auto     range = operand;
+	unsigned first = 0;
+	unsigned count = 0;
+	range.size     = words;
+	if (!VgprWords(range, &first, &count)) { return false; }
+	for (unsigned word = 0; word < count; ++word)
+	{
+		if (!m_state.uniform.test(first + word)) { return false; }
+	}
+	return true;
+}
+
+// A lane-local vector result of uniform sources, or an image load of a uniform address from a resource the launch
+// does not select. A write that may keep part of the old register (an SDWA DST_SEL other than DWORD with DST_U
+// PRESERVE, a 16-bit half, an accumulator) also reads it.
+bool Flow::UniformVectorResult(const ShaderInstruction& inst) const
+{
+	if (inst.type == Type::ImageLoad)
+	{
+		const bool nsa       = inst.mimg_address_num > 0;
+		const int  addresses = ImageLoadAddressCount(inst);
+		if (nsa && inst.mimg_address_num < addresses) { return false; }
+		for (int address = 0; address < (nsa ? addresses : 1); ++address)
+		{
+			if (!UniformVgprs(nsa ? inst.mimg_address[address] : inst.src[0], nsa ? 1 : addresses)) { return false; }
+		}
+		for (int source = 1; source < inst.src_num; ++source)
+		{
+			if (Taint(inst.src[source]) != kClean) { return false; }
+		}
+		return true;
+	}
+	if (!StartsWith(inst.type, "V") || IsLaneExchange(inst.type) || AnyPrefix(inst.type, {"VMovrel", "VInterp"})) { return false; }
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		if (!UniformSource(inst, source)) { return false; }
+	}
+	const bool sdwa_part = inst.vop_sdwa && ((inst.vop_sdwa_ctrl >> 8u) & 7u) != 6u && ((inst.vop_sdwa_ctrl >> 11u) & 3u) == 2u;
+	const bool keeps_old = sdwa_part || AnyPrefix(inst.type, {"VMac", "VFmac"}) || ShaderInstructionTypeName(inst.type).find("16") != std::string_view::npos;
+	return !keeps_old || UniformVgprs(inst.dst, inst.dst.size);
+}
+
+// VGPRs holding one value in every lane of the current EXEC (FlowState::uniform). They become so only while EXEC
+// keeps a lane of every launched quad (a subgroup with no active lane would decide a VCC test alone); an EXEC write
+// drops every such fact, and the join of a divergent region or loop drops it for the VGPRs written there.
+void Flow::TrackUniformVgprs(const ShaderInstruction& inst)
+{
+	if (ShaderInstructionWritesExec(inst)) { m_state.uniform.reset(); }
+	std::bitset<kVgprs> written;
+	CollectVgprWrites(inst, &written);
+	if (written.none()) { return; }
+	for (auto& region: m_regions) { region.vgprs |= written; }
+	const bool quads = (m_state.scalar[kExecLoWord] & (kOuter | kMissesQuad)) == 0u;
+	if (quads && UniformVectorResult(inst))
+	{
+		m_state.uniform |= written;
+	} else
+	{
+		m_state.uniform &= ~written;
+	}
 }
 
 // Width of the mask an instruction produces: live-only (narrow) or possibly including the
@@ -941,6 +1040,7 @@ void Flow::LeaveLoops(MaskFlowState* state, uint32_t from_pc, uint32_t to_pc) co
 			if (loop.written.test(word) && !loop.exempt.test(word)) { state->scalar[word] |= kDiverged; }
 		}
 		for (const auto& slot: loop.written_slots) { state->spills[slot] |= kDiverged; }
+		state->uniform &= ~loop.vgprs;
 	}
 }
 
@@ -964,6 +1064,7 @@ void Flow::FindLoops()
 		{
 			if (!loop.Contains(inst.pc)) { continue; }
 			CollectWrites(inst, &loop.written);
+			CollectVgprWrites(inst, &loop.vgprs);
 			int vgpr = 0;
 			int lane = 0;
 			if (IsStaticScalarSpillWrite(inst, &vgpr, &lane)) { loop.written_slots.insert({vgpr, lane}); }
@@ -1029,6 +1130,16 @@ bool Flow::Branch(const ShaderInstruction& inst)
 	}
 	// A backward branch is the loop's own business (see Loop::divergent); a region has no end to reach.
 	if (divergent && !backward) { m_regions.push_back({target, {}}); }
+	// A forward S_BRANCH that ends a region's block is the "then" of an if/else: its writes do not reach the region's
+	// end, the block from there runs for the lanes that skipped it, and both paths meet at the branch target.
+	for (auto& region: m_regions)
+	{
+		if (inst.type != Type::SBranch || region.end_pc != inst.pc + 4u || target <= region.end_pc) { continue; }
+		region.end_pc = target;
+		region.zero_outside.reset();
+		region.one_outside.reset();
+		region.exec_subset = true;
+	}
 	if (inst.type == Type::SBranch)
 	{
 		m_state.reachable = false;
@@ -1060,6 +1171,7 @@ void Flow::EnterJoin(uint32_t pc)
 			if (region->written.test(word)) { m_state.scalar[word] |= kDiverged; }
 		}
 		for (const auto& slot: region->written_slots) { m_state.spills[slot] |= kDiverged; }
+		m_state.uniform &= ~region->vgprs;
 		region = m_regions.erase(region);
 	}
 }
@@ -1092,33 +1204,39 @@ bool Flow::ScalarSpill(const ShaderInstruction& inst)
 	return Define(inst, inst.dst, slot != m_state.spills.end() ? slot->second : kClean);
 }
 
-// S_CMP_LG_U64 / S_CMP_EQ_U64 of a lane mask against zero: whether any lane's bit is set. The pair must be
-// lane bits only; a word that is also a number or divergent does not qualify. Helper bits under WQM may count,
-// as they do for VCCZ: the packed host mask gathers every quad member's bit the guest compare produced.
+// S_CMP_LG_U64 / S_CMP_EQ_U64 of a lane mask against zero: whether any lane's bit is set. Of two lane masks:
+// whether any lane's bits differ, the same test of their XOR (an "all lanes hold it" test compares a mask
+// ANDed with a saved EXEC to that EXEC). Each pair must be lane bits only; a word that is also a number or
+// divergent does not qualify. Helper bits under WQM may count, as they do for VCCZ: the packed host mask
+// gathers every quad member's bit the guest compare produced.
 bool Flow::IsAnyLaneTest(const ShaderInstruction& inst) const
 {
 	if ((inst.type != Type::SCmpLgU64 && inst.type != Type::SCmpEqU64) || inst.src_num != 2) { return false; }
 	const auto zero = [](const ShaderOperand& operand)
 	{ return Plain(operand) && operand.type == Operand::IntegerInlineConstant && operand.constant.i == 0; };
-	const ShaderOperand* mask = zero(inst.src[1]) ? &inst.src[0] : (zero(inst.src[0]) ? &inst.src[1] : nullptr);
-	unsigned first = 0;
-	unsigned count = 0;
-	if (mask == nullptr || !Plain(*mask) || !ScalarRange(*mask, &first, &count) || count != 2u) { return false; }
 	const auto lane_bits = [](uint8_t taint) { return (taint & kMask) != 0u && (taint & ~(kMask | kWide | kExtent)) == 0u; };
-	return lane_bits(m_state.scalar[first]) && lane_bits(m_state.scalar[first + 1u]);
+	const auto lane_mask = [&](const ShaderOperand& operand)
+	{
+		unsigned first = 0;
+		unsigned count = 0;
+		return Plain(operand) && ScalarRange(operand, &first, &count) && count == 2u && lane_bits(m_state.scalar[first]) &&
+		       lane_bits(m_state.scalar[first + 1u]);
+	};
+	return (zero(inst.src[0]) || lane_mask(inst.src[0])) && (zero(inst.src[1]) || lane_mask(inst.src[1])) &&
+	       !(zero(inst.src[0]) && zero(inst.src[1]));
 }
 
 void Flow::AnyLaneTest(const ShaderInstruction& inst)
 {
-	const auto& mask = IsConstant(inst.src[0]) ? inst.src[1] : inst.src[0];
 	m_state.scalar[kSccWord] = kMask; // every other SCC reader still refuses it
 	MarkWritten(kSccWord, 1u);
 	m_scc_any_lane         = true;
-	m_scc_any_lane_uniform = IsUniformMask(mask);
+	m_scc_any_lane_uniform = (IsConstant(inst.src[0]) || IsUniformMask(inst.src[0])) && (IsConstant(inst.src[1]) || IsUniformMask(inst.src[1]));
 }
 
 bool Flow::Step(const ShaderInstruction& inst)
 {
+	TrackUniformVgprs(inst);
 	if (IsAnyLaneTest(inst))
 	{
 		AnyLaneTest(inst);

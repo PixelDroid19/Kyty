@@ -114,6 +114,12 @@ bool IsLaneLocalImageRead(Type type)
 	}
 }
 
+int ImageLoadAddressCount(const ShaderInstruction& inst)
+{
+	static constexpr int kCoordinates[8] = {1, 2, 3, 3, 2, 3, 3, 4};
+	return kCoordinates[inst.mimg_dimension & 7u] + (inst.mimg_explicit_lod ? 1 : 0);
+}
+
 bool IsLaneExchange(Type type)
 {
 	return AnyPrefix(type, {"VReadlane", "VReadfirstlane", "VWritelane", "VPermlane", "VPermlanex", "VMbcnt", "VCmpx"});

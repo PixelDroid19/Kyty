@@ -822,13 +822,6 @@ bool Body::Vector(const ShaderInstruction& inst)
 	return true;
 }
 
-// The address VGPRs an image load reads: its DIM's coordinates, then the level of a mip load.
-static int ImageLoadAddressCount(const ShaderInstruction& inst)
-{
-	static constexpr int kCoordinates[8] = {1, 2, 3, 3, 2, 3, 3, 4};
-	return kCoordinates[inst.mimg_dimension & 7u] + (inst.mimg_explicit_lod ? 1 : 0);
-}
-
 // An explicit-LOD image read: its address VGPRs (the NSA list or the contiguous range) must be
 // defined, its T#/S# must not depend on the launch; the result is a per-lane number.
 bool Body::ImageRead(const ShaderInstruction& inst)
