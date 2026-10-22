@@ -989,6 +989,16 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 		{
 			continue;
 		}
+		// A guest that copies a register-defaults entry unchanged leaves that state at its default; another value
+		// asks for behavior no register models.
+		if (GraphicsIsVirtualUcRegister(cmd_offset))
+		{
+			if (value != 0u)
+			{
+				EXIT("virtual uc register 0x%08" PRIx32 " holds a non-default value 0x%08" PRIx32 "\n", cmd_offset, value);
+			}
+			continue;
+		}
 		if (cmd_offset >= Pm4::UC_NUM)
 		{
 			static std::atomic_uint32_t dropped_out_of_range {0};

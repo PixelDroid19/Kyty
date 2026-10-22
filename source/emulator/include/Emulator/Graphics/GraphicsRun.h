@@ -75,6 +75,12 @@ constexpr bool GraphicsIsDefaultIndirectRegisterPair(uint32_t offset, uint32_t v
 	return offset == 0x10000000u + value;
 }
 
+// The UC register-defaults tables hand the guest host-only codes (Pm4.h), each with the default value 0.
+constexpr bool GraphicsIsVirtualUcRegister(uint32_t offset)
+{
+	return offset >= Pm4::FSR_EXTEND_SUBPIXEL_ROUNDING && offset <= Pm4::UC_NOP;
+}
+
 constexpr bool GraphicsDrawIndexAutoFlagsSupported(uint32_t flags)
 {
 	return (flags & ~0x22u) == 0;
