@@ -2738,22 +2738,31 @@ void VerifyFusedShaderUsesEffectiveBackEntry()
 	alignas(256) static uint32_t front_code[64] = {};
 	alignas(256) static uint32_t back_code[128] = {};
 	const uint64_t               back_entry     = reinterpret_cast<uint64_t>(back_code) + 256u;
-	ShaderRegister               back_registers[2] {};
+	ShaderRegister               back_registers[4] {};
 	back_registers[0].offset = Pm4::SPI_SHADER_PGM_LO_GS;
 	back_registers[0].value  = static_cast<uint32_t>((back_entry >> 8u) & 0xffffffffu);
 	back_registers[1].offset = Pm4::SPI_SHADER_PGM_LO_GS + 1u;
 	back_registers[1].value  = static_cast<uint32_t>((back_entry >> 40u) & 0xffu);
+	back_registers[2].offset = Pm4::SPI_SHADER_PGM_RSRC1_GS;
+	back_registers[3].offset = Pm4::SPI_SHADER_PGM_RSRC2_GS;
+	constexpr uint32_t front_user_sgprs = 12u << Pm4::SPI_SHADER_PGM_RSRC2_GS_USER_SGPR_SHIFT;
+	ShaderRegister     front_registers[2] {};
+	front_registers[0].offset = Pm4::SPI_SHADER_PGM_RSRC1_GS;
+	front_registers[1].offset = Pm4::SPI_SHADER_PGM_RSRC2_GS;
+	front_registers[1].value  = front_user_sgprs;
 
 	Shader front {};
-	front.type = 4u;
-	front.code = front_code;
+	front.type             = 4u;
+	front.code             = front_code;
+	front.sh_registers     = front_registers;
+	front.num_sh_registers = 2u;
 	Shader back {};
 	back.type             = 6u;
 	back.code             = back_code;
 	back.sh_registers     = back_registers;
-	back.num_sh_registers = 2u;
+	back.num_sh_registers = 4u;
 	Shader         fused {};
-	ShaderRegister scratch[2] {};
+	ShaderRegister scratch[4] {};
 	ShaderMappedData front_map {};
 	front_map.code_size_bytes = sizeof(front_code);
 	ShaderMappedData back_map {};
@@ -2762,6 +2771,7 @@ void VerifyFusedShaderUsesEffectiveBackEntry()
 	ShaderMapUserData(reinterpret_cast<uint64_t>(back_code), back_map);
 	Expect(Gen5::GraphicsUnknownFuseShaderHalves(&fused, &front, &back, scratch) == 0,
 	       "valid fused shader halves resolve their back program address");
+	Expect(scratch[3].value == front_user_sgprs, "fused geometry shader takes the user SGPR count of its front half");
 	Expect(ShaderLookupContinuation(reinterpret_cast<uint64_t>(front_code)) == back_entry,
 	       "fused shader continuation uses the effective back entry rather than the allocation base");
 	ShaderMappedData smaller_back_map {};
@@ -2773,11 +2783,13 @@ void VerifyFusedShaderUsesEffectiveBackEntry()
 	       "continuation registration rejects an entry outside the replacement owner range");
 	alignas(256) static uint32_t unmapped_back_code[64] = {};
 	const uint64_t               unmapped_back_entry    = reinterpret_cast<uint64_t>(unmapped_back_code);
-	ShaderRegister               unmapped_registers[2] {};
+	ShaderRegister               unmapped_registers[4] {};
 	unmapped_registers[0].offset = Pm4::SPI_SHADER_PGM_LO_GS;
 	unmapped_registers[0].value  = static_cast<uint32_t>((unmapped_back_entry >> 8u) & 0xffffffffu);
 	unmapped_registers[1].offset = Pm4::SPI_SHADER_PGM_LO_GS + 1u;
 	unmapped_registers[1].value  = static_cast<uint32_t>((unmapped_back_entry >> 40u) & 0xffu);
+	unmapped_registers[2].offset = Pm4::SPI_SHADER_PGM_RSRC1_GS;
+	unmapped_registers[3].offset = Pm4::SPI_SHADER_PGM_RSRC2_GS;
 	Shader unmapped_back          = back;
 	unmapped_back.code            = unmapped_back_code;
 	unmapped_back.sh_registers    = unmapped_registers;
@@ -5782,9 +5794,9 @@ void VerifyComparisonSamplerCacheIdentity()
 	Expect(vulkan.Initialize(), "Vulkan sampler context must initialize");
 	VerifyDepthStencilAttachmentAccess(vulkan.context.load_store_op_none_supported);
 	ShaderSamplerResource descriptor {};
-	const auto regular      = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::Regular);
-	const auto depth        = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference);
-	const auto depth_reused = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference);
+	const auto regular      = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::Regular, true, false);
+	const auto depth        = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference, true, false);
+	const auto depth_reused = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference, true, false);
 	Expect(regular != depth, "regular and depth-reference samplers must not alias");
 	Expect(depth == depth_reused, "identical depth-reference samplers must reuse the cache entry");
 	Expect(g_render_ctx->GetSamplerCache()->GetSampler(regular) != VK_NULL_HANDLE, "regular sampler must be created");

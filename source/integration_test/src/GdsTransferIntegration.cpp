@@ -161,6 +161,13 @@ public:
 		{
 			// This fixture owns the remaining allocator blocks after unbind returns its buffers.
 			VulkanMemoryPoolRelease(&context);
+			for (auto& queue: context.queues)
+			{
+				if (queue.timeline != VK_NULL_HANDLE)
+				{
+					vkDestroySemaphore(context.device, queue.timeline, nullptr);
+				}
+			}
 			vkDestroyDevice(context.device, nullptr);
 		}
 		if (messenger != VK_NULL_HANDLE)
@@ -343,6 +350,20 @@ private:
 			context.queues[GraphicContext::QUEUE_UTIL].index    = 0;
 			context.queues[GraphicContext::QUEUE_UTIL].mutex    = &context.queue_mutexes[0];
 			context.queue_mutex_count                           = 1;
+			// Command-processor submissions signal their queue's timeline, as in the window device.
+			VkSemaphoreTypeCreateInfo timeline_type {};
+			timeline_type.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+			timeline_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+			VkSemaphoreCreateInfo timeline_info {};
+			timeline_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+			timeline_info.pNext = &timeline_type;
+			for (const int id: {GraphicContext::QUEUE_GFX, GraphicContext::QUEUE_UTIL})
+			{
+				if (vkCreateSemaphore(context.device, &timeline_info, nullptr, &context.queues[id].timeline) != VK_SUCCESS)
+				{
+					return false;
+				}
+			}
 			FillWaveState(physical, properties, size_control_revision, features13);
 			return true;
 		}
