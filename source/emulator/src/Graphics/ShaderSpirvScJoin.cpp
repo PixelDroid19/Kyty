@@ -269,6 +269,32 @@ bool ScJoinIsLoopExitEdge(const ShaderCode& code, const ShaderInstruction& exit_
 	return false;
 }
 
+// Reconverging at the program end would open a selection whose merge lies past
+// the constructs enclosing the branch, so the edge returns where it is taken.
+bool ScJoinIsProgramExitEdge(const ShaderCode& code, const ShaderInstruction& inst)
+{
+	if (!instruction_is_conditional_branch(inst) || !operand_is_constant(inst.src[0]))
+	{
+		return false;
+	}
+	const auto&    instructions = code.GetInstructions();
+	const auto     exit         = ShaderLabel(inst);
+	const uint32_t target       = instruction_index(code, exit.GetDst());
+	if (exit.GetDst() <= inst.pc || target >= instructions.Size() || instructions.At(target).type != ShaderInstructionType::SEndpgm)
+	{
+		return false;
+	}
+	for (const auto& label: code.GetLabels())
+	{
+		// A backward edge spanning the branch makes it a loop exit.
+		if (!label.IsDisabled() && label.GetDst() <= inst.pc && label.GetSrc() >= inst.pc)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool ScJoinIsLoopMergeLabel(const ShaderCode& code, const ShaderLabel& label)
 {
 	for (const auto& inst: code.GetInstructions())
@@ -885,7 +911,7 @@ void ScJoinCollectSources(const ShaderCode& code, uint32_t join_pc, Vector<uint3
 			continue;
 		}
 		// Loop exits keep the guest merge label under OpLoopMerge — never sc_join.
-		if (ScJoinIsLoopExitEdge(code, cand))
+		if (ScJoinIsLoopExitEdge(code, cand) || ScJoinIsProgramExitEdge(code, cand))
 		{
 			continue;
 		}

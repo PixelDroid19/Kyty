@@ -1625,8 +1625,9 @@ TEST(EmulatorGraphicsPackets, NestedSelectionAtSharedJoinMergesOnItsOwnScJoinLin
 	auto              outer     = make_branch(0x04, ShaderInstructionType::SCbranchExecz, 0x18); // -> 0x20
 	auto              inner     = make_branch(0x0c, ShaderInstructionType::SCbranchScc0, 0x08);  // -> 0x18
 	auto              else_exit = make_branch(0x14, ShaderInstructionType::SBranch, 0x08);       // -> 0x20
+	// The join is not S_ENDPGM: a branch onto S_ENDPGM is an early return, not a join.
 	ShaderInstruction end;
-	end.pc     = 0x20;
+	end.pc     = 0x24;
 	end.type   = ShaderInstructionType::SEndpgm;
 	end.format = ShaderInstructionFormat::Empty;
 
@@ -1638,6 +1639,7 @@ TEST(EmulatorGraphicsPackets, NestedSelectionAtSharedJoinMergesOnItsOwnScJoinLin
 	code.GetInstructions().Add(else_exit);
 	code.GetInstructions().Add(make_nop(0x18));
 	code.GetInstructions().Add(make_nop(0x1c));
+	code.GetInstructions().Add(make_nop(0x20));
 	code.GetInstructions().Add(end);
 	code.GetLabels().Add(ShaderLabel(outer));
 	code.GetLabels().Add(ShaderLabel(inner));

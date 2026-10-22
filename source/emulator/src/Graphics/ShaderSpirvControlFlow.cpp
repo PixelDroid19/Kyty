@@ -298,6 +298,29 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		return true;
 	}
 
+	if (ScJoinIsProgramExitEdge(code, inst))
+	{
+		// if (condition) { S_ENDPGM }
+		static const char* text_program_exit = R"(
+        <param0>
+        <param1>
+               OpSelectionMerge %t230_<index> None
+               OpBranchConditional %cc_b_<index> %sc_return_<index> %t230_<index>
+        %sc_return_<index> = OpLabel
+<epilog>
+               OpReturn
+        %t230_<index> = OpLabel
+)";
+
+		*dst_source += String8(text_program_exit)
+		                   .ReplaceStr("<param0>", branch_param[0])
+		                   .ReplaceStr("<param1>", branch_param[1])
+		                   .ReplaceStr("<epilog>", spirv->UsesFragmentCompute() ? spirv->FragmentEpilog() : String8())
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index));
+
+		return true;
+	}
+
 	// The merge is where the arm that ends in S_BRANCH lands inside the other arm. Both arms may end in one;
 	// the fallthrough arm's jump into the taken arm is the diamond's join, the taken arm's may leave it.
 	const bool next_joins_dst = next_block.last.type == ShaderInstructionType::SBranch && label_next_block.GetDst() >= dst_block.pc &&
