@@ -171,6 +171,9 @@ struct GpuMemoryRangeProvenanceEntry
 	bool                   check_hash             = false;
 	bool                   dirty_registered       = false;
 	bool                   depth_meta_bound       = false;
+	// A depth-reference texture detiled from a storage buffer on every bind:
+	// it holds no guest bytes and no content newer than that buffer.
+	bool storage_depth_view = false;
 };
 
 struct GpuMemoryRangeProvenance
@@ -1062,6 +1065,7 @@ enum class GpuMemoryDepthD16Source : uint8_t
 	{
 		return GpuMemoryDepthD16Source::Unsupported;
 	}
+	bool storage_depth_views = false;
 	if (texture != nullptr)
 	{
 		// A large range can hit the provenance scan's page cap after it has
@@ -1075,8 +1079,11 @@ enum class GpuMemoryDepthD16Source : uint8_t
 		for (uint32_t index = 0u; index < provenance->entry_count; index++)
 		{
 			const auto& object = provenance->entries[index];
-			if (object.type == GpuMemoryObjectType::Texture &&
-			    (object.content_origin != GpuMemoryContentOrigin::CpuUpload || object.write_back_capable))
+			if (object.type == GpuMemoryObjectType::Texture && object.storage_depth_view)
+			{
+				storage_depth_views = true;
+			} else if (object.type == GpuMemoryObjectType::Texture &&
+			           (object.content_origin != GpuMemoryContentOrigin::CpuUpload || object.write_back_capable))
 			{
 				return GpuMemoryDepthD16Source::Unsupported;
 			}
@@ -1105,6 +1112,12 @@ enum class GpuMemoryDepthD16Source : uint8_t
 				return GpuMemoryDepthD16Source::Unsupported;
 			}
 		}
+	}
+	// A storage depth view is detiled again from the writable buffer that
+	// holds the range; without that buffer nothing refreshes it.
+	if (storage_depth_views && (storage == nullptr || storage->all_read_only))
+	{
+		return GpuMemoryDepthD16Source::Unsupported;
 	}
 	if (storage != nullptr)
 	{

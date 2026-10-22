@@ -20,6 +20,7 @@
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
+#include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
 
@@ -264,6 +265,8 @@ bool GpuMemory::QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRan
 		entry.check_hash            = info.check_hash;
 		entry.dirty_registered      = info.dirty_registered;
 		entry.depth_meta_bound      = info.depth_meta_bound;
+		entry.storage_depth_view = info.object.type == GpuMemoryObjectType::Texture && info.params[TextureObject::PARAM_DEPTH_VIEW] != 0u &&
+		                           info.params[TextureObject::PARAM_SKIP_GUEST_UPLOAD] != 0u;
 	}
 	return true;
 }

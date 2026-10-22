@@ -7887,6 +7887,20 @@ TEST(EmulatorGraphicsState, ClassifiesOnlyUnambiguousDepthD16Sources)
 	mixed_provenance.entries[0].relation = GpuMemoryOverlapType::Contains;
 	mixed_provenance.entries[1] = uploaded.entries[0];
 	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized, &mixed_provenance), GpuMemoryDepthD16Source::StorageBuffer);
+	// A depth view an earlier storage-backed bind detiled holds no guest bytes:
+	// it is accepted only while the writable buffer that refreshes it holds the range.
+	auto storage_view                      = mixed_provenance;
+	storage_view.entries[1].content_origin = GpuMemoryContentOrigin::Unknown;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized, &storage_view), GpuMemoryDepthD16Source::Unsupported);
+	storage_view.entries[1].storage_depth_view = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized, &storage_view), GpuMemoryDepthD16Source::StorageBuffer);
+	auto read_only_storage                     = materialized;
+	read_only_storage.entries[0].all_read_only = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(read_only_storage, &storage_view), GpuMemoryDepthD16Source::Unsupported);
+	auto lone_view                          = uploaded;
+	lone_view.entries[0].content_origin     = GpuMemoryContentOrigin::Unknown;
+	lone_view.entries[0].storage_depth_view = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(texture, &lone_view), GpuMemoryDepthD16Source::Unsupported);
 	auto stale_cover = texture;
 	stale_cover.total_count = 2u;
 	stale_cover.entry_count = 2u;

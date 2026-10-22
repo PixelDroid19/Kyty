@@ -4299,10 +4299,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						const auto& e = provenance.entries[pe];
 						state_written += std::snprintf(
 						    parent_state + state_written, sizeof(parent_state) - static_cast<size_t>(state_written),
-						    " obj%u=%u/%u:origin%u:seq%" PRIu64 ":submit%" PRIu64 ":cpu%" PRIu64 ":gpu%" PRIu64 ":in_use%d:deps_done%d:wb%d", pe,
-						    static_cast<uint32_t>(e.type), static_cast<uint32_t>(e.relation), static_cast<uint32_t>(e.content_origin),
+						    " obj%u=%u/%u:origin%u:seq%" PRIu64 ":submit%" PRIu64 ":cpu%" PRIu64 ":gpu%" PRIu64
+						    ":in_use%d:deps_done%d:wb%d:storage_view%d",
+						    pe, static_cast<uint32_t>(e.type), static_cast<uint32_t>(e.relation), static_cast<uint32_t>(e.content_origin),
 						    e.content_sequence, e.submit_id, e.cpu_update_time, e.gpu_update_time, e.in_use ? 1 : 0,
-						    e.dependencies_complete ? 1 : 0, e.write_back_capable ? 1 : 0);
+						    e.dependencies_complete ? 1 : 0, e.write_back_capable ? 1 : 0, e.storage_depth_view ? 1 : 0);
 					}
 				}
 				EXIT("unsupported depth-reference image binding: operation=%u shape=%u numeric=%u view=%u format=%u tile=%u "
