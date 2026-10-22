@@ -2,6 +2,7 @@
 
 #include "Emulator/AtomicFile.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Log.h"
 #include "Emulator/SystemContentPort.h"
@@ -95,10 +96,39 @@ struct Service
 };
 
 // Never destroyed: a worker may still be inside the driver at process exit.
-Service& State()
+Service& PrecompileService()
 {
 	static auto* service = new Service;
 	return *service;
+}
+
+// Recipes hold translator output, so each translator version keeps its own store.
+std::string TranslatorSuffix()
+{
+	return "-t" + std::to_string(kShaderTranslatorVersion) + "-g" + std::to_string(kShaderGeometryTranslatorVersion);
+}
+
+// Removes the stores this title recorded under other translator versions: their
+// modules are never dispatched again, and the largest ones would occupy the
+// workers for the whole session.
+void RemoveStaleStores(const std::filesystem::path& directory)
+{
+	const auto name   = directory.filename().string();
+	const auto suffix = TranslatorSuffix();
+	if (name.size() <= suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+	{
+		return;
+	}
+	const auto      title = name.substr(0, name.size() - suffix.size());
+	std::error_code error;
+	for (const auto& entry: std::filesystem::directory_iterator(directory.parent_path(), error))
+	{
+		const auto other = entry.path().filename().string();
+		if (other != name && entry.is_directory(error) && (other == title || other.rfind(title + "-t", 0) == 0))
+		{
+			std::filesystem::remove_all(entry.path(), error);
+		}
+	}
 }
 
 std::vector<QueuedRecipe> ScanDirectory(const std::filesystem::path& directory, size_t* count, uintmax_t* bytes)
@@ -135,7 +165,7 @@ std::vector<QueuedRecipe> ScanDirectory(const std::filesystem::path& directory, 
 
 void Precompile(const QueuedRecipe& queued)
 {
-	auto& service = State();
+	auto& service = PrecompileService();
 	{
 		std::lock_guard lock(service.mutex);
 		if (!service.entries.try_emplace(queued.hash, EntryState::Running).second)
@@ -162,7 +192,7 @@ void Precompile(const QueuedRecipe& queued)
 
 void Record(const ComputePipelineRecipe& recipe, uint64_t hash)
 {
-	auto& service = State();
+	auto& service = PrecompileService();
 	if (service.directory.empty())
 	{
 		return;
@@ -275,13 +305,13 @@ std::filesystem::path ComputePipelinePrecompileDirectory()
 	std::string name = std::string(title_id.C_Str()) + "-" + app_version.C_Str();
 	std::replace_if(name.begin(), name.end(), [](char c) { return !(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '.'); },
 	                '_');
-	return SpirvBinaryCacheDefaultRoot() / "compute-pipelines" / name;
+	return SpirvBinaryCacheDefaultRoot() / "compute-pipelines" / (name + TranslatorSuffix());
 }
 
 void ComputePipelinePrecompileStart(const std::filesystem::path& directory, uint32_t vendor_id, uint32_t device_id,
                                     ComputePipelinePrecompileCreate create)
 {
-	auto&                     service = State();
+	auto&                     service = PrecompileService();
 	std::vector<QueuedRecipe> queue;
 	{
 		std::lock_guard lock(service.mutex);
@@ -298,6 +328,7 @@ void ComputePipelinePrecompileStart(const std::filesystem::path& directory, uint
 		{
 			return;
 		}
+		RemoveStaleStores(directory);
 		queue = ScanDirectory(directory, &service.recipe_count, &service.directory_bytes);
 	}
 	if (queue.empty())
@@ -329,7 +360,7 @@ void ComputePipelinePrecompileStart(const std::filesystem::path& directory, uint
 
 void ComputePipelinePrecompileClaim(const ComputePipelineRecipe& recipe)
 {
-	auto&      service = State();
+	auto&      service = PrecompileService();
 	const auto hash    = ComputePipelineRecipeHash(recipe);
 	{
 		std::unique_lock lock(service.mutex);
