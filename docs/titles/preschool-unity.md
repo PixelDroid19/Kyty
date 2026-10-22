@@ -6,16 +6,47 @@ record. Titles are named descriptively only (`AGENTS.md`).
 
 ## Preschool Unity title: unreadable EUD snapshot (2026-10-21, open)
 
-- **Observed once.** Intel Arc A770, Mesa ANV 26.2.5, strict, HEAD
+- **First occurrence.** Intel Arc A770, Mesa ANV 26.2.5, strict, HEAD
   89e3b892, generic pad route: after about frame 30,400 (91 s) the run
   stopped on `unreadable Gen5 EUD snapshot: dwords=16` with the table
   pointer in user register 28 (`Shader.cpp:3366` on main). The guest
   words at the table address could not be read when the shader was bound.
 - **Not reproduced.** A 150 s repeat of the same binary and route ran
   without a stop at 290-367 FPS.
-- **Direction.** On the next occurrence, record the mapping state of the
-  table address (mapped, protected or released, and by which call) to
-  tell a guest that frees the table early from a host-side read race.
+- **Second occurrence (2026-10-22).** HEAD 36161708, same route: the run
+  stopped at about 26 s (frame 7,500) on the same message, again with 16
+  dwords and user register 28, at an ordinary 48-bit address. The
+  role-playing title's high-bit pointer (`0x0010...`) was a different
+  defect, fixed by the 48-bit pointer read (see that title's record).
+- **Excluded (2026-10-22).**
+  - Completion ordering. The snapshot is taken while the command processor
+    prepares the draw or dispatch, in packet order. No later label,
+    `WRITE_DATA`, flip or end-of-pipe event becomes visible to the guest
+    before it. No other thread reads live tables: the only scoped reader is
+    the fold-capture replay.
+  - GPU-only memory. Every guest protection value that carries GPU access
+    bits also grants CPU read. Bare GPU-only values are refused, so no table
+    can sit in CPU-unreadable GPU memory.
+  - Fixed-map replacement window. A fixed direct map over a live view cuts,
+    unmaps and re-reserves the range before mapping it again. A 150 s run
+    widened that window by 2 ms per replacement and logged every guest
+    unmap, decommit and protection change. It saw no fixed map over a live
+    view, no decommit and no stop. It did see 25 guest unmaps of
+    0x4000-0x32C000 bytes during the intro. It also logged about 572,000
+    eight-byte protection changes during boot, all from relocation (see
+    "Relocation protection round trips at module load" in the
+    cross-title records).
+- **Changes.**
+  - The snapshot also reads host allocations the HLE libc lent the guest
+    before its heap existed, as the audio paths already do. A table
+    there was refused before. Whether this title places tables there is
+    not proven.
+  - The stop message now adds `guest_owned`: 0 means the table's range
+    was unmapped, 1 means it was protected or decommitted.
+- **Direction.** On the next occurrence, `guest_owned` picks the class.
+  Then log the guest unmap or protection call that covers the table
+  address, to tell a guest that frees the table early from a host-side
+  read race.
 
 ## Preschool Unity title: sky-blue speckles on every outline (2026-10-19)
 

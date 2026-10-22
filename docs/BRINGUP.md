@@ -95,6 +95,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [Roguelike platformer](titles/roguelike-platformer.md)
   - A roguelike reaches gameplay (2026-10-07)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Relocation protection round trips at module load (2026-10-22)
   - Depth-reference samples over a storage-detiled view (2026-10-22)
   - Shader translator: GDS writes in split and native compute waves (2026-10-22)
   - Shader translator: paired wave64 layout removed (2026-10-22)

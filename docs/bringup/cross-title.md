@@ -4,6 +4,34 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Relocation protection round trips at module load (2026-10-22)
+
+- **Observed.** A 150 s strict run of the preschool Unity title logged
+  every guest protection change. About 572,000 changes of 8 bytes came
+  during boot, two per relocated slot, from `PatchReplace`. It set the
+  slot's page to read-write, wrote the slot and restored the old mode,
+  even when the page was already writable.
+- **Measured.** Timers around each relocation pass (Intel Arc A770, same
+  title, 45 s run): 14 passes took 440 ms. 325 ms of it was inside
+  `PatchReplace` for 286,201 slots, about 1.1 us each. The largest module
+  patched 230,371 slots in 262 ms.
+- **Change.** `PatchReplace` leaves a slot that already holds the value
+  and writes a slot whose tracked protection allows writes directly.
+  Read-only slots keep the protect, write and restore path. A direct
+  write to a page under a GPU write lease faults into the existing lease
+  handler, like other host writes into guest memory.
+- **Verified.**
+  - Same title, timers and run length: `PatchReplace` time fell from
+    325 ms to about 12 ms (largest module 262 ms to 9.6 ms), and
+    relocation as a whole from 440 ms to about 115 ms. The run reached
+    the interactive phase with no stop.
+  - 2440 unit tests pass. The boundary and graphics table gates pass.
+  - The racing title, 75 s strict on the same binary: no stop, race
+    reached at 52-80 FPS, clean capture.
+- **Open.** The remaining 100 ms or so is spent outside `PatchReplace`
+  (symbol lookup and relocation decoding) and was not profiled. Not
+  measured on AMD.
+
 ## Depth-reference samples over a storage-detiled view (2026-10-22)
 
 - **Symptom.** The racing title stopped now and then on
