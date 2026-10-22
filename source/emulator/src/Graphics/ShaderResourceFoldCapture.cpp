@@ -1299,12 +1299,26 @@ void PutZeroSBuffers(CanonicalText& out, const ShaderZeroSBufferResources& z)
 	}
 }
 
+void PutZeroDescriptorLoads(CanonicalText& out, const ShaderZeroDescriptorLoads& z)
+{
+	out.Put("bind.zero_descriptor_load.loads_num", z.loads_num);
+	for (int i = 0; i < z.loads_num; ++i)
+	{
+		out.Put("bind.zero_descriptor_load.pc" + std::to_string(i), z.pc[i]);
+		out.Put("bind.zero_descriptor_load.first_register" + std::to_string(i), z.first_register[i]);
+		out.Put("bind.zero_descriptor_load.dwords" + std::to_string(i), z.dwords[i]);
+	}
+}
+
 void PutZeroImages(CanonicalText& out, const ShaderZeroImageResources& z)
 {
 	out.Put("bind.zero_image.images_num", z.images_num);
 	for (int i = 0; i < ShaderZeroImageResources::IMAGES_MAX; ++i)
 	{
 		out.Put("bind.zero_image.start_register" + std::to_string(i), z.start_register[i]);
+		out.Put("bind.zero_image.loaded" + std::to_string(i), z.loaded[i] ? 1 : 0);
+		out.Put("bind.zero_image.load_pc" + std::to_string(i), z.load_pc[i]);
+		out.Put("bind.zero_image.last_pc" + std::to_string(i), z.last_pc[i]);
 	}
 }
 
@@ -1632,6 +1646,7 @@ std::string ShaderResourceFoldCanonicalOutput(const ShaderParsedUsage& usage, co
 	PutZeroSBuffers(out, bind.zero_sbuffer_resources);
 	PutTextures(out, bind.textures2D);
 	PutZeroImages(out, bind.zero_image_resources);
+	PutZeroDescriptorLoads(out, bind.zero_descriptor_loads);
 	PutSamplers(out, bind.samplers);
 	PutGdsDirectExtended(out, bind);
 	PutDynamicAndAssembled(out, bind);

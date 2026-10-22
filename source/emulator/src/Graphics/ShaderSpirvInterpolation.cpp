@@ -56,24 +56,30 @@ void Spirv::WriteCustomPixelProlog()
 			                                field, component, field, component, first + component, field, component);
 		}
 	}
+}
+
+void Spirv::WritePixelPositionProlog()
+{
+	if (m_ps_input_info == nullptr || !m_ps_input_info->ps_position) { return; }
+	// Each enabled POS_*_FLOAT field fills its own VGPR, placed by the address mask.
 	for (uint32_t field = 8u; field < 12u; ++field)
 	{
-		if ((m_ps_input_info->system_input_enable & (1u << field)) == 0) { continue; }
+		if ((m_ps_input_info->system_input_enable & m_ps_input_info->system_input_address & (1u << field)) == 0) { continue; }
 		const auto reg = ShaderPixelSystemInputRegister(*m_ps_input_info, field);
 		const auto component = field - 8u;
-		m_source += String8::FromPrintf("%%custom_pos_ptr%u = OpAccessChain %%_ptr_Input_float %%gl_FragCoord %%uint_%u\n"
-		                                "%%custom_pos%u = OpLoad %%float %%custom_pos_ptr%u\n", field, component, field, field);
+		m_source += String8::FromPrintf("%%pixel_pos_ptr%u = OpAccessChain %%_ptr_Input_float %%gl_FragCoord %%uint_%u\n"
+		                                "%%pixel_pos%u = OpLoad %%float %%pixel_pos_ptr%u\n", field, component, field, field);
 		const auto& scale = m_ps_input_info->host_to_guest_scale;
 		if (component >= 2u || scale.IsIdentity())
 		{
-			m_source += String8::FromPrintf("OpStore %%v%u %%custom_pos%u\n", reg, field);
+			m_source += String8::FromPrintf("OpStore %%v%u %%pixel_pos%u\n", reg, field);
 			continue;
 		}
 		const auto numerator = GetConstantFloat(static_cast<float>(component == 0 ? scale.x_guest_numerator : scale.y_guest_numerator));
 		const auto denominator = GetConstantFloat(static_cast<float>(component == 0 ? scale.x_host_denominator : scale.y_host_denominator));
-		m_source += String8::FromPrintf("%%custom_pos_scale%u = OpFDiv %%float %%%s %%%s\n"
-		                                "%%custom_pos_guest%u = OpFMul %%float %%custom_pos%u %%custom_pos_scale%u\n"
-		                                "OpStore %%v%u %%custom_pos_guest%u\n",
+		m_source += String8::FromPrintf("%%pixel_pos_scale%u = OpFDiv %%float %%%s %%%s\n"
+		                                "%%pixel_pos_guest%u = OpFMul %%float %%pixel_pos%u %%pixel_pos_scale%u\n"
+		                                "OpStore %%v%u %%pixel_pos_guest%u\n",
 		                                field, numerator.c_str(), denominator.c_str(), field, field, field, reg, field);
 	}
 }
@@ -90,6 +96,23 @@ void Spirv::WritePixelFrontFaceProlog()
 	    "%%front_face_bits = OpSelect %%uint %%front_face %%%s %%%s\n"
 	    "%%front_face_register = OpBitcast %%float %%front_face_bits\n"
 	    "OpStore %%v%u %%front_face_register\n", front.c_str(), back.c_str(), reg);
+}
+
+void Spirv::WritePixelAncillaryProlog()
+{
+	if (m_ps_input_info == nullptr || !m_ps_input_info->AncillaryEnabled()) { return; }
+	const auto reg = ShaderPixelSystemInputRegister(*m_ps_input_info, 13u);
+	const auto mask = GetConstantUint(0x7ffu);
+	const auto shift = GetConstantUint(16u);
+	// The render-target array index fills bits 16..26; the sample index and
+	// the remaining fields read zero (single-sample shading).
+	m_source += String8::FromPrintf(
+	    "%%ancillary_layer = OpLoad %%int %%gl_LayerIn\n"
+	    "%%ancillary_layer_bits = OpBitcast %%uint %%ancillary_layer\n"
+	    "%%ancillary_layer_index = OpBitwiseAnd %%uint %%ancillary_layer_bits %%%s\n"
+	    "%%ancillary_value = OpShiftLeftLogical %%uint %%ancillary_layer_index %%%s\n"
+	    "%%ancillary_register = OpBitcast %%float %%ancillary_value\n"
+	    "OpStore %%v%u %%ancillary_register\n", mask.c_str(), shift.c_str(), reg);
 }
 
 } // namespace Kyty::Libs::Graphics

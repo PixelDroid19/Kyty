@@ -70,11 +70,13 @@ VulkanComputeProbe::Result DispatchInternal(VkPhysicalDevice physical_device,
 	const bool paired_layout = layout.strategy == ShaderComputeWaveStrategy::Paired64On32 && layout.guest_wave_size == 64u &&
 	                           layout.native_subgroup_size == 32u && layout.banks == 2u && layout.waves != 0u &&
 	                           layout.physical_local[0] != 0u && layout.physical_local[1] == 1u && layout.physical_local[2] == 1u;
+	uint32_t   native_physical_local[3] {};
 	const bool native_w32_layout = layout.strategy == ShaderComputeWaveStrategy::Native && layout.guest_wave_size == 32u &&
 	                               layout.native_subgroup_size == 32u && layout.banks == 1u &&
-	                               layout.guest_local[0] != 0u && layout.guest_local[0] == layout.physical_local[0] &&
-	                               layout.guest_local[1] != 0u && layout.guest_local[1] == layout.physical_local[1] &&
-	                               layout.guest_local[2] != 0u && layout.guest_local[2] == layout.physical_local[2];
+	                               ShaderNativeWave32PhysicalLocal(layout.guest_local, native_physical_local) &&
+	                               layout.physical_local[0] == native_physical_local[0] &&
+	                               layout.physical_local[1] == native_physical_local[1] &&
+	                               layout.physical_local[2] == native_physical_local[2];
 	if (!paired_layout && !native_w32_layout)
 	{
 		*message = "wave probe received an invalid paired or native wave32 compute layout";

@@ -172,9 +172,9 @@ uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_
 			}
 		}
 	}
-	const auto start   = std::chrono::steady_clock::now();
+	const auto start   = DebugStatsClock::now();
 	const auto result  = XXH3_64bits(buf, size);
-	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - start).count();
 	DebugStatsRecordGpuMemoryHash(GpuMemoryStatsTypeIndex(type), size, static_cast<uint64_t>(elapsed));
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::Hash, static_cast<uint64_t>(elapsed), size);
 	return result;
@@ -709,6 +709,25 @@ uint64_t GpuMemoryGetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
 	return g_gpu_memory->GetAllocatedRangePrefix(vaddr, maximum_size);
 }
 
+uint64_t GpuMemoryGetMappedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
+{
+	if (vaddr > UINT64_MAX - maximum_size)
+	{
+		return 0;
+	}
+	uint64_t covered = 0;
+	while (covered < maximum_size)
+	{
+		const uint64_t prefix = GpuMemoryGetAllocatedRangePrefix(vaddr + covered, maximum_size - covered);
+		if (prefix == 0)
+		{
+			break;
+		}
+		covered += prefix;
+	}
+	return covered;
+}
+
 bool GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission)
 {
 	return g_gpu_memory != nullptr && g_gpu_memory->CanSnapshotReadOnlyBuffer(vaddr, size, admission);
@@ -858,6 +877,14 @@ bool GpuMemoryQueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRange
 	}
 	*out = GpuMemoryRangeProvenance {};
 	return g_gpu_memory != nullptr && g_gpu_memory->QueryRangeProvenance(vaddr, size, out);
+}
+
+void GpuMemoryLinkDepthMetaStorage(uint64_t depth_vaddr, uint64_t depth_size, uint64_t htile_addr, uint64_t htile_size)
+{
+	if (g_gpu_memory != nullptr)
+	{
+		g_gpu_memory->LinkDepthMetaStorage(depth_vaddr, depth_size, htile_addr, htile_size);
+	}
 }
 
 bool GpuMemoryDescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out)

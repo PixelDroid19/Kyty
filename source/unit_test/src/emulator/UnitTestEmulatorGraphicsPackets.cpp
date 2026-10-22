@@ -28,9 +28,11 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
+#include "../../../emulator/src/Graphics/ShaderParseInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvScJoin.h"
+#include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
 #include "../../../emulator/src/Graphics/GraphicsRunInternal.h"
 #include "../../../emulator/src/Graphics/GraphicsRunWaitPolicy.h"
 
@@ -1784,6 +1786,44 @@ TEST(EmulatorGraphicsPackets, BuildsPackedNormalized16BitVertexLayout)
 	}
 	input.resources[0].fields[3] = DstSel(4, 5, 6, 7);
 	EXPECT_FALSE(VulkanBuildVertexInputLayout(input, &layout));
+}
+
+// The attribute word's instance bit makes the fetch index the instance id, so the
+// attribute steps per instance and never shares a per-vertex binding of the same stream.
+TEST(EmulatorGraphicsPackets, InstanceAttributeStepsInItsOwnBinding)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+
+	const uint32_t buffer_table[4] = {0x00010000u, 16u << 16u, 64u, (56u << 12u) | DstSel(4, 5, 6, 7)};
+	const uint32_t attrib_table[2] = {(3u << 5u) | (56u << 7u), (1u << 26u) | (11u << 7u) | (4u << 14u)};
+	ShaderSemantic semantics[2] {};
+	semantics[0].semantic         = 0;
+	semantics[0].hardware_mapping = 0;
+	semantics[0].size_in_elements = 4;
+	semantics[1].semantic         = 1;
+	semantics[1].hardware_mapping = 4;
+	semantics[1].size_in_elements = 1;
+
+	ShaderVertexInputInfo input {};
+	ShaderParseAttrib(&input, semantics, 2, attrib_table, buffer_table);
+	ShaderDetectBuffers(&input, true);
+
+	ASSERT_EQ(input.resources_num, 2);
+	EXPECT_FALSE(input.resources_dst[0].instance);
+	EXPECT_TRUE(input.resources_dst[1].instance);
+	ASSERT_EQ(input.buffers_num, 2);
+	EXPECT_EQ(input.buffers[0].addr, 0x10000u);
+	EXPECT_EQ(input.buffers[1].addr, 0x10004u);
+
+	VulkanVertexInputLayout layout {};
+	ASSERT_TRUE(VulkanBuildVertexInputLayout(input, &layout));
+	EXPECT_EQ(layout.binding_count, 2u);
+	EXPECT_EQ(layout.bindings[0].inputRate, VK_VERTEX_INPUT_RATE_VERTEX);
+	EXPECT_EQ(layout.bindings[1].inputRate, VK_VERTEX_INPUT_RATE_INSTANCE);
+	EXPECT_EQ(layout.attributes[0].binding, 0u);
+	EXPECT_EQ(layout.attributes[1].binding, 1u);
+	EXPECT_EQ(layout.attributes[1].format, VK_FORMAT_R16_UINT);
 }
 
 TEST(EmulatorGraphicsPackets, BuildsFiveAttributeInterleavedMixedNumericVertexLayout)
@@ -4185,7 +4225,7 @@ TEST(EmulatorGraphicsPackets, ResolvesImplicitSampleShapeFromMixedDescriptorSet)
 	EXPECT_EQ(source.FindIndex("OpSampledImage %SampledImageA"), Core::STRING8_INVALID_INDEX);
 }
 
-TEST(EmulatorGraphicsPackets, SamplesThroughAllZeroDescriptorReturnZero)
+TEST(EmulatorGraphicsPackets, SamplesThroughUnboundDescriptorReturnZero)
 {
 	if (!Config::IsInitialized())
 	{
@@ -4244,6 +4284,19 @@ TEST(EmulatorGraphicsPackets, SamplesThroughAllZeroDescriptorReturnZero)
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 	EXPECT_EQ(source.FindIndex("OpImageSample"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpSelect %float %image_exec_active_0 %float_0_000000 %image_exec_old_0_3"), Core::STRING8_INVALID_INDEX);
+
+	// A non-zero descriptor reads as unbound only while its type nibble is a buffer encoding.
+	for (const uint32_t type: {0u, 7u, 9u})
+	{
+		HW::UserSgprInfo typed_sgpr = user_sgpr;
+		typed_sgpr.value[0]         = 0x00000600u;
+		typed_sgpr.value[1]         = 0x00fff000u;
+		typed_sgpr.value[3]         = type << 28u;
+		ShaderPixelInputInfo typed_input {};
+		ShaderParsedUsage    typed_usage {};
+		ShaderParseUsage2(&user_data, &typed_usage, &typed_input.bind, typed_sgpr, 12, &code, 0, false);
+		EXPECT_EQ(typed_input.bind.zero_image_resources.images_num, type < 8u ? 1 : 0) << "type=" << type;
+	}
 
 	// A descriptor the shader rewrites before the read is not the zero user data.
 	ShaderInstruction write {};
@@ -5757,11 +5810,11 @@ TEST(EmulatorGraphicsPackets, Gen5LiveBufferAtomicUsesResolvedStorageSlot)
 	EXPECT_EQ(source.FindIndex("%buf_addr_hieq_0_0_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%buf_addr_access_final_0_0 = OpLogicalAnd %bool %buf_addr_access_enabled_0_0 %buf_addr_valid_c_0_0"),
 	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%buf_addr_access_size_1_0 = OpSelect %uint %buf_addr_packed_1_0 %uint_8 %uint_12"),
+	EXPECT_NE(source.FindIndex("%buf_addr_access_size_1_0 = OpSelect %uint %buf_addr_format_known_1_0 %buf_addr_format_bytes_1_0 %uint_12"),
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpBranchConditional %buf_addr_valid_c_1_0 %gen5_mubuf_load_then_1_0 %gen5_mubuf_load_oob_1_0"),
 	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%buf_addr_access_size_2_0 = OpSelect %uint %buf_addr_packed_2_0 %uint_4 %uint_8"),
+	EXPECT_NE(source.FindIndex("%buf_addr_access_size_2_0 = OpSelect %uint %buf_addr_format_known_2_0 %buf_addr_format_bytes_2_0 %uint_8"),
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_3_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_3_0_0 %uint_16"),
 	          Core::STRING8_INVALID_INDEX);
@@ -7515,15 +7568,38 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordKeepsNativeCoordinatesAtOneToOneScal
 	ShaderCode code;
 	code.SetType(ShaderType::Pixel);
 
+	// PERSP_CENTER, POS_X_FLOAT and POS_Y_FLOAT: v[0:1] barycentrics, v2 x, v3 y.
 	ShaderPixelInputInfo input {};
-	input.ps_pos_xy = true;
+	input.system_input_enable  = 0x302u;
+	input.system_input_address = 0x302u;
+	input.ps_position          = true;
 
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
-	EXPECT_NE(source.FindIndex("OpStore %v2 %FragCoord_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %v3 %FragCoord_y"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(source.FindIndex("%FragCoord_guest_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(source.FindIndex("%FragCoord_guest_y"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_ptr8 = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %pixel_pos8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v3 %pixel_pos9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%pixel_pos_guest"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, PixelFragCoordLoadsOnlyEnabledFieldIntoItsAddressSlot)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	// Captured: LINEAR_CENTER and POS_Y_FLOAT alone. The y coordinate is v2.
+	ShaderPixelInputInfo input {};
+	input.system_input_enable  = 0x220u;
+	input.system_input_address = 0x220u;
+	input.ps_position          = ShaderPixelPositionEnabled(input.system_input_enable, input.system_input_address);
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("%pixel_pos_ptr9 = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %pixel_pos9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%pixel_pos8"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
@@ -7534,7 +7610,9 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
 	code.SetType(ShaderType::Pixel);
 
 	ShaderPixelInputInfo input {};
-	input.ps_pos_xy                              = true;
+	input.system_input_enable                    = 0x302u;
+	input.system_input_address                   = 0x302u;
+	input.ps_position                            = true;
 	input.host_to_guest_scale.x_guest_numerator  = 3;
 	input.host_to_guest_scale.x_host_denominator = 1;
 	input.host_to_guest_scale.y_guest_numerator  = 2;
@@ -7542,12 +7620,41 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
 
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
-	EXPECT_NE(source.FindIndex("%FragCoord_scale_x = OpFDiv %float %float_3_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%FragCoord_guest_x = OpFMul %float %FragCoord_x %FragCoord_scale_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %v2 %FragCoord_guest_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%FragCoord_scale_y = OpFDiv %float %float_2_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%FragCoord_guest_y = OpFMul %float %FragCoord_y %FragCoord_scale_y"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %v3 %FragCoord_guest_y"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_scale8 = OpFDiv %float %float_3_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_guest8 = OpFMul %float %pixel_pos8 %pixel_pos_scale8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %pixel_pos_guest8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_scale9 = OpFDiv %float %float_2_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_guest9 = OpFMul %float %pixel_pos9 %pixel_pos_scale9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v3 %pixel_pos_guest9"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, PixelAncillaryCarriesTheLayerInBits16To26OfItsAddressSlot)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+
+	// PERSP_CENTER and ANCILLARY: v[0:1] barycentrics, v2 ancillary.
+	ShaderPixelInputInfo input {};
+	input.system_input_enable         = 0x2002u;
+	input.system_input_address        = 0x2002u;
+	input.required_subgroup_size      = 32;
+	input.native_wave.guest_wave_size = 32;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpDecorate %gl_LayerIn BuiltIn Layer"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%ancillary_value = OpShiftLeftLogical %uint %ancillary_layer_index %uint_16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %ancillary_register"), Core::STRING8_INVALID_INDEX);
+	ScopedShaderValidation validation;
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
 }
 
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
@@ -9137,6 +9244,142 @@ TEST(EmulatorGraphicsPackets, StandaloneDiamondDeclaresItsSyntheticJoinAsSelecti
 	}
 }
 
+// Both arms of an inner diamond end in S_BRANCH: the fallthrough arm jumps into the taken arm's tail, which
+// then leaves for the outer join. The inner merge is the fallthrough arm's landing, not the outer join.
+TEST(EmulatorGraphicsPackets, DiamondWhoseArmsBothBranchMergesWhereTheFallthroughLands)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	auto make_nop = [](uint32_t pc)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = ShaderInstructionType::SInstPrefetch;
+		inst.format = ShaderInstructionFormat::Imm;
+		inst.src_num = 1;
+		inst.src[0].type = ShaderOperandType::LiteralConstant;
+		return inst;
+	};
+	auto make_branch = [](uint32_t pc, ShaderInstructionType type, uint32_t target)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = type;
+		inst.format = ShaderInstructionFormat::Label;
+		inst.src_num = 1;
+		inst.src[0].type = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.i = static_cast<int32_t>(target - pc - 4u);
+		return inst;
+	};
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	const auto outer     = make_branch(0x04, ShaderInstructionType::SCbranchScc0, 0x28);
+	const auto inner     = make_branch(0x0c, ShaderInstructionType::SCbranchScc0, 0x1c);
+	const auto into_tail = make_branch(0x18, ShaderInstructionType::SBranch, 0x24);
+	const auto to_outer  = make_branch(0x24, ShaderInstructionType::SBranch, 0x2c);
+	ShaderInstruction end {};
+	end.pc = 0x2c;
+	end.type = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	for (const auto& inst: {make_nop(0x00), outer, make_nop(0x08), inner, make_nop(0x10), make_nop(0x14), into_tail, make_nop(0x1c),
+	                        make_nop(0x20), to_outer, make_nop(0x28), end})
+	{
+		code.GetInstructions().Add(inst);
+	}
+	for (const auto& branch: {outer, inner, into_tail, to_outer}) { code.GetLabels().Add(ShaderLabel(branch)); }
+	ShaderPixelInputInfo pixel {};
+	pixel.required_subgroup_size = 32;
+	pixel.native_wave.guest_wave_size = 32;
+	const auto source = SpirvGenerateSource(code, nullptr, &pixel, nullptr);
+	EXPECT_EQ(source.FindIndex("OpSelectionMerge %label_002c_0024 None"), Core::STRING8_INVALID_INDEX);
+	ScopedShaderValidation validation;
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+}
+
+// A uniform branch targets a block that its fallthrough reaches only when an EXECZ skip over that block is not
+// taken: the two regions share the block without nesting. The skipped range only defines VCC, dead at the
+// skip target, so the skip goes away and the program is one selection.
+static ShaderCode SkipOverSharedBlock(bool target_reads_vcc)
+{
+	auto branch = [](uint32_t pc, ShaderInstructionType type, uint32_t target)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = type;
+		inst.format = ShaderInstructionFormat::Label;
+		inst.src_num = 1;
+		inst.src[0].type = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.i = static_cast<int32_t>(target - pc - 4u);
+		return inst;
+	};
+	auto move64 = [](uint32_t pc, ShaderOperand dst, ShaderOperand src)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = ShaderInstructionType::SMovB64;
+		inst.format = ShaderInstructionFormat::Sdst2Ssrc02;
+		inst.dst = dst;
+		inst.src[0] = src;
+		inst.src_num = 1;
+		return inst;
+	};
+	const ShaderOperand exec {.type = ShaderOperandType::ExecLo, .size = 2};
+	const ShaderOperand vcc {.type = ShaderOperandType::VccLo, .size = 2};
+	auto sgpr = [](int first) { return ShaderOperand {.type = ShaderOperandType::Sgpr, .register_id = first, .size = 2}; };
+	ShaderInstruction andn2 {};
+	andn2.pc = 0x08;
+	andn2.type = ShaderInstructionType::SAndn2B64;
+	andn2.format = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+	andn2.dst = exec;
+	andn2.src[0] = exec;
+	andn2.src[1] = vcc;
+	andn2.src_num = 2;
+	ShaderInstruction end {};
+	end.pc = 0x24;
+	end.type = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	const auto uniform = branch(0x04, ShaderInstructionType::SCbranchScc0, 0x18);
+	const auto skip    = branch(0x0c, ShaderInstructionType::SCbranchExecz, 0x1c);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	for (const auto& inst: {move64(0x00, sgpr(14), exec), uniform, andn2, skip, move64(0x10, vcc, sgpr(16)), move64(0x14, sgpr(4), sgpr(6)),
+	                        move64(0x18, vcc, sgpr(16)), move64(0x1c, exec, sgpr(14)),
+	                        move64(0x20, sgpr(2), target_reads_vcc ? vcc : sgpr(8)), end})
+	{
+		code.GetInstructions().Add(inst);
+	}
+	code.GetLabels().Add(ShaderLabel(uniform));
+	code.GetLabels().Add(ShaderLabel(skip));
+	return code;
+}
+
+TEST(EmulatorGraphicsPackets, ExeczSkipOverASharedBlockGoesAwayWhenItsDefinitionsAreDead)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	auto code = SkipOverSharedBlock(false);
+	ShaderRemoveNeutralExecSkips(&code);
+	for (const auto& inst: code.GetInstructions()) { EXPECT_NE(inst.type, ShaderInstructionType::SCbranchExecz); }
+	ShaderPixelInputInfo pixel {};
+	pixel.required_subgroup_size = 32;
+	pixel.native_wave.guest_wave_size = 32;
+	const auto source = SpirvGenerateSource(code, nullptr, &pixel, nullptr);
+	ScopedShaderValidation validation;
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+}
+
+TEST(EmulatorGraphicsPackets, ExeczSkipStaysWhenTheTargetReadsAScalarTheRangeDefines)
+{
+	auto code = SkipOverSharedBlock(true);
+	const auto count = code.GetInstructions().Size();
+	ShaderRemoveNeutralExecSkips(&code);
+	EXPECT_EQ(code.GetInstructions().Size(), count);
+}
+
 TEST(EmulatorGraphicsPackets, EmptyDiamondArmBranchesToItsDeclaredSyntheticMerge)
 {
 	InitCommandBufferTestRuntime();
@@ -9183,6 +9426,118 @@ TEST(EmulatorGraphicsPackets, EmptyDiamondArmBranchesToItsDeclaredSyntheticMerge
 	Vector<uint32_t> binary;
 	String8 error;
 	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+}
+
+// Captured dithered depth-only shader: an EXECZ skip region holds an SCC0
+// branch to the NULL-target discard tail placed after the region's join. The
+// tail is a terminating arm, not a selection merge crossing the outer join.
+TEST(EmulatorGraphicsPackets, NullTargetDiscardTailInsideSkipRegionIsTerminatingArm)
+{
+	ASSERT_EXIT(
+	    {
+		    InitCommandBufferTestRuntime();
+		    Config::SetNextGen(true);
+		    class ValidationConfig final: public Config::ConfigSource
+		    {
+		    public:
+		    	bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+		    	int64_t GetInteger(const Core::String&) const override { return 0; }
+		    	bool GetBool(const Core::String&) const override { return true; }
+		    	Core::String GetString(const Core::String&) const override { return {}; }
+		    } validation;
+		    Config::Load(validation);
+		    ShaderCode code;
+		    code.SetType(ShaderType::Pixel);
+		    const auto branch = [&code](ShaderInstructionType type, uint32_t pc, uint32_t target)
+		    {
+		    	ShaderInstruction inst {};
+		    	inst.pc = pc;
+		    	inst.type = type;
+		    	inst.format = ShaderInstructionFormat::Label;
+		    	inst.src_num = 1;
+		    	inst.src[0].type = ShaderOperandType::LiteralConstant;
+		    	inst.src[0].constant.i = static_cast<int32_t>(target) - static_cast<int32_t>(pc) - 4;
+		    	code.GetInstructions().Add(inst);
+		    	code.GetLabels().Add(ShaderLabel(inst));
+		    };
+		    branch(ShaderInstructionType::SCbranchExecz, 0, 16);
+		    ShaderInstruction compare {};
+		    compare.pc = 8;
+		    compare.type = ShaderInstructionType::SCmpEqU32;
+		    compare.format = ShaderInstructionFormat::Ssrc0Ssrc1;
+		    compare.src_num = 2;
+		    compare.src[0].type = ShaderOperandType::Sgpr;
+		    compare.src[0].size = 1;
+		    compare.src[1].type = ShaderOperandType::IntegerInlineConstant;
+		    ShaderInstruction move {};
+		    move.type = ShaderInstructionType::VMovB32;
+		    move.format = ShaderInstructionFormat::SVdstSVsrc0;
+		    move.dst.type = ShaderOperandType::Vgpr;
+		    move.dst.size = 1;
+		    move.src_num = 1;
+		    move.src[0].type = ShaderOperandType::FloatInlineConstant;
+		    move.src[0].constant.f = 0.25f;
+		    move.pc = 4;
+		    code.GetInstructions().Add(move);
+		    code.GetInstructions().Add(compare);
+		    // Its fallthrough is the skip region's join, as in the captured program.
+		    branch(ShaderInstructionType::SCbranchScc0, 12, 32);
+		    move.pc = 16;
+		    code.GetInstructions().Add(move);
+		    ShaderInstruction color {};
+		    color.pc = 20;
+		    color.type = ShaderInstructionType::Exp;
+		    color.format = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone;
+		    color.src_num = 4;
+		    color.exp_control = 3;
+		    for (uint32_t component = 0; component < 4; ++component)
+		    {
+		    	color.src[component].type = ShaderOperandType::Vgpr;
+		    	color.src[component].size = 1;
+		    }
+		    code.GetInstructions().Add(color);
+		    ShaderInstruction end {};
+		    end.pc = 28;
+		    end.type = ShaderInstructionType::SEndpgm;
+		    end.format = ShaderInstructionFormat::Empty;
+		    code.GetInstructions().Add(end);
+		    ShaderInstruction clear_exec {};
+		    clear_exec.pc = 32;
+		    clear_exec.type = ShaderInstructionType::SMovB64;
+		    clear_exec.format = ShaderInstructionFormat::Sdst2Ssrc02;
+		    clear_exec.dst.type = ShaderOperandType::ExecLo;
+		    clear_exec.dst.size = 2;
+		    clear_exec.src_num = 1;
+		    clear_exec.src[0].type = ShaderOperandType::IntegerInlineConstant;
+		    clear_exec.src[0].size = 2;
+		    code.GetInstructions().Add(clear_exec);
+		    ShaderInstruction null_export {};
+		    null_export.pc = 36;
+		    null_export.type = ShaderInstructionType::Exp;
+		    null_export.format = ShaderInstructionFormat::NullVmDone;
+		    code.GetInstructions().Add(null_export);
+		    end.pc = 44;
+		    code.GetInstructions().Add(end);
+		    if (!code.ReadBlock(32).is_discard)
+		    {
+		    	std::_Exit(2);
+		    }
+		    ShaderPixelInputInfo input {};
+		    input.required_subgroup_size = 32;
+		    input.native_wave.guest_wave_size = 32;
+		    input.ps_pixel_kill_enable = true;
+		    input.target_output_mode[0] = 4;
+		    const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+		    Vector<uint32_t> binary;
+		    String8 error;
+		    if (!ShaderToolchain::Run(source, &binary, &error))
+		    {
+		    	std::fprintf(stderr, "%.512s\n", error.c_str());
+		    	std::_Exit(4);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorGraphicsPackets, SharedDiscardTailsDoNotAcquireReconvergenceMerges)

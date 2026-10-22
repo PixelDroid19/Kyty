@@ -38,6 +38,7 @@
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
@@ -1675,7 +1676,7 @@ static void ShaderAppendContinuation(ShaderCode* code, const ShaderCode& back, u
 		inst.format                  = ShaderInstructionFormat::Label;
 		inst.src_num                 = 1;
 		inst.src[0]                  = {};
-		inst.src[0].type             = ShaderOperandType::IntegerInlineConstant;
+		inst.src[0].type             = ShaderOperandType::LiteralConstant;
 		inst.src[0].size             = 0;
 		inst.src[0].constant.i       = static_cast<int32_t>(rel);
 		inst.dst                     = {};
@@ -2100,8 +2101,9 @@ static bool IsDiscardInstruction(const Vector<ShaderInstruction>& code, uint32_t
 		     prev_inst.format == ShaderInstructionFormat::SVdstSVsrc0 &&
 		     prev_inst.dst.type == ShaderOperandType::ExecLo && prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
 		     prev_inst.src[0].constant.i == 0);
-		return (inst.type == ShaderInstructionType::Exp && ShaderIsNullMrtDoneFormat(inst.format) && exec_zeroed &&
-		        next_inst.type == ShaderInstructionType::SEndpgm);
+		// The NULL target carries only the valid mask, like a null MRT export.
+		const bool null_export = ShaderIsNullMrtDoneFormat(inst.format) || inst.format == ShaderInstructionFormat::NullVmDone;
+		return (inst.type == ShaderInstructionType::Exp && null_export && exec_zeroed && next_inst.type == ShaderInstructionType::SEndpgm);
 	}
 	return false;
 }
@@ -2223,8 +2225,9 @@ static void AddZeroSBufferResource(ShaderZeroSBufferResources* resources, int st
 }
 
 // The eight T# dwords an instruction reads are still the shader's entry user
-// SGPRs, and every one of them is zero.
-static bool ShaderImageResourceIsZeroUserData(const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
+// SGPRs, and they hold no image descriptor: every dword is zero, or the dword 3
+// type nibble is a buffer encoding (0-7) instead of an image type.
+static bool ShaderImageResourceIsUnboundUserData(const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
                                               uint32_t index, const ShaderOperand& resource, const HW::UserSgprInfo& user_sgpr,
                                               int user_sgpr_num, int user_data_register_base)
 {
@@ -2235,19 +2238,46 @@ static bool ShaderImageResourceIsZeroUserData(const std::vector<std::bitset<kSha
 	{
 		return false;
 	}
+	bool all_zero = true;
 	for (int dword = 0; dword < dwords; ++dword)
 	{
-		if (!entry_values[index].test(static_cast<size_t>(resource.register_id + dword)) || user_sgpr.value[user_register + dword] != 0)
+		if (!entry_values[index].test(static_cast<size_t>(resource.register_id + dword)))
 		{
 			return false;
 		}
+		all_zero = all_zero && user_sgpr.value[user_register + dword] == 0;
 	}
-	return true;
+	const uint32_t word3 = user_sgpr.value[user_register + 3];
+	return all_zero || !ShaderGen5TextureTypeIsImage(static_cast<uint8_t>((word3 >> 28u) & 0xfu));
 }
 
-// Records image reads through an all-zero T#. Such a resource binds nothing;
-// the emitter returns zero for it (RDNA2 ISA: an all-zero resource acts as an
-// unbound texture).
+// Reports reads through a non-zero descriptor of buffer type, which the ISA does
+// not define as unbound; bounded so a title that binds one per draw stays quiet.
+static void ReportNonImageResourceRead(const ShaderCode& code, const ShaderOperand& resource, const HW::UserSgprInfo& user_sgpr,
+                                       int user_data_register_base)
+{
+	constexpr uint32_t           kMaxReports = 16u;
+	static std::atomic<uint32_t> reports {0};
+	const int                    user_register = resource.register_id - user_data_register_base;
+	bool                         all_zero      = true;
+	for (int dword = 0; dword < 8; ++dword)
+	{
+		all_zero = all_zero && user_sgpr.value[user_register + dword] == 0;
+	}
+	if (all_zero || reports.fetch_add(1u, std::memory_order_relaxed) >= kMaxReports)
+	{
+		return;
+	}
+	char message[Emulator::Agent::kAgentEventMessageMax] {};
+	std::snprintf(message, sizeof(message), "crc=%08x register=s%d word0=%08x word3=%08x", code.GetCrc32(), resource.register_id,
+	              user_sgpr.value[user_register], user_sgpr.value[user_register + 3]);
+	Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Warn, "image_read_non_image", message);
+}
+
+// Records image reads through a T# that holds no image descriptor. Such a
+// resource binds nothing; the emitter returns zero for it (RDNA2 ISA: an
+// all-zero resource acts as an unbound texture; a buffer-typed descriptor is
+// read the same way, an inexact contract recorded in docs/BRINGUP.md).
 static void CollectZeroImageResources(const ShaderCode& code, const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
                                       const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, int user_data_register_base,
                                       ShaderZeroImageResources* resources)
@@ -2257,26 +2287,55 @@ static void CollectZeroImageResources(const ShaderCode& code, const std::vector<
 	{
 		const auto& inst = instructions.At(index);
 		if (!ShaderImageReadReturnsDmaskComponents(inst.type) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
-		    !ShaderImageResourceIsZeroUserData(entry_values, index, inst.src[1], user_sgpr, user_sgpr_num, user_data_register_base))
+		    !ShaderImageResourceIsUnboundUserData(entry_values, index, inst.src[1], user_sgpr, user_sgpr_num, user_data_register_base))
 		{
 			continue;
 		}
 		bool recorded = false;
 		for (int i = 0; i < resources->images_num; ++i)
 		{
-			recorded = recorded || resources->start_register[i] == inst.src[1].register_id;
+			recorded = recorded || (resources->start_register[i] == inst.src[1].register_id && !resources->loaded[i]);
 		}
 		if (recorded)
 		{
 			continue;
 		}
-		if (resources->images_num >= ShaderZeroImageResources::IMAGES_MAX)
-		{
-			EXIT("shader zero image capacity exceeded: count=%d capacity=%d register=%d\n", resources->images_num,
-			     ShaderZeroImageResources::IMAGES_MAX, inst.src[1].register_id);
-		}
-		resources->start_register[resources->images_num++] = inst.src[1].register_id;
+		ReportNonImageResourceRead(code, inst.src[1], user_sgpr, user_data_register_base);
+		ShaderAddZeroImageResource(resources, inst.src[1].register_id);
 	}
+}
+
+static void AddZeroImageResource(ShaderZeroImageResources* resources, int register_id, bool loaded, uint32_t load_pc, uint32_t last_pc)
+{
+	EXIT_IF(resources == nullptr);
+	for (int i = 0; i < resources->images_num; ++i)
+	{
+		if (resources->start_register[i] == register_id && resources->loaded[i] == loaded && resources->load_pc[i] == load_pc &&
+		    resources->last_pc[i] == last_pc)
+		{
+			return;
+		}
+	}
+	if (resources->images_num >= ShaderZeroImageResources::IMAGES_MAX)
+	{
+		EXIT("shader zero image capacity exceeded: count=%d capacity=%d register=%d\n", resources->images_num,
+		     ShaderZeroImageResources::IMAGES_MAX, register_id);
+	}
+	resources->start_register[resources->images_num] = register_id;
+	resources->loaded[resources->images_num]         = loaded;
+	resources->load_pc[resources->images_num]        = load_pc;
+	resources->last_pc[resources->images_num]        = last_pc;
+	resources->images_num++;
+}
+
+void ShaderAddZeroImageResource(ShaderZeroImageResources* resources, int register_id)
+{
+	AddZeroImageResource(resources, register_id, false, 0u, 0u);
+}
+
+void ShaderAddLoadedZeroImageResource(ShaderZeroImageResources* resources, int register_id, uint32_t load_pc, uint32_t last_pc)
+{
+	AddZeroImageResource(resources, register_id, true, load_pc, last_pc);
 }
 
 // A read-only sampled descriptor is counted in the bank of the shape it was registered with. An
@@ -2657,7 +2716,7 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	{
 		bind->push_constant_size += (((bind->direct_sgprs.sgprs_num - 1) / 4) + 1) * 16;
 	}
-	// Device-address and thread-limit blocks precede the program base, which
+	// Device-address, thread-limit and geometry blocks precede the program base, which
 	// stays the final block.
 	bind->device_address_offset_dw = 0;
 	if (bind->device_address_used)
@@ -2670,6 +2729,12 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	{
 		bind->thread_limits_offset_dw = bind->push_constant_size / 4u;
 		bind->push_constant_size += 16u;
+	}
+	bind->geometry_offset_dw = 0;
+	if (bind->geometry_used)
+	{
+		bind->geometry_offset_dw = bind->push_constant_size / 4u;
+		bind->push_constant_size += 32u;
 	}
 	bind->program_base_offset_dw = 0;
 	if (bind->program_base_used)
@@ -3297,7 +3362,9 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			eud_snapshot.resize(required_end_dw);
 			if (!ShaderSnapshotGuestDescriptorTable(eud_guest_address, required_end_dw, &eud_snapshot))
 			{
-				EXIT("unstable or unreadable Gen5 EUD snapshot: dwords=%u\n", static_cast<unsigned>(required_end_dw));
+				const bool readable = ShaderReadGuestDescriptorWords(eud_guest_address, required_end_dw, eud_snapshot.data());
+				EXIT("%s Gen5 EUD snapshot: dwords=%u address=0x%016" PRIx64 " pointer_reg=%d\n", readable ? "unstable" : "unreadable",
+				     static_cast<unsigned>(required_end_dw), eud_guest_address, bind->extended.start_register);
 			}
 			uint32_t expanded_end_dw = required_end_dw;
 			if (!ShaderGen5EudExpandEndDwordsForSharpImages(user_data, user_sgpr_num, eud_snapshot.data(), required_end_dw,
@@ -4160,7 +4227,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 // descriptor mapping resolves reads plain data at a runtime address.
 static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, const ShaderBindResources& bind)
 {
-	if (!ShaderInstructionTypeStartsWith(inst.type, "SLoad") || inst.src_num < 1 ||
+	if (!ShaderInstructionIsScalarMemoryLoad(inst.type) || inst.src_num < 1 ||
 	    (inst.src[0].type != ShaderOperandType::Sgpr && inst.src[0].type != ShaderOperandType::VccLo))
 	{
 		return false;
@@ -4176,7 +4243,7 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 			return false;
 		}
 	}
-	return true;
+	return inst.dst.type != ShaderOperandType::Sgpr || !ShaderScalarLoadWritesZero(bind, inst.pc, inst.dst.register_id);
 }
 
 // Instructions that dereference guest memory through a computed address: BVH
@@ -4184,27 +4251,52 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 // A vector buffer load whose V# no discovered resource describes reads
 // through a descriptor built at run time.
 static bool ShaderHasRuntimeDescriptorLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_register_base,
-                                           std::string_view type_prefix)
+                                           bool (*is_load)(ShaderInstructionType))
 {
 	const auto& instructions = code.GetInstructions();
 	return std::any_of(instructions.begin(), instructions.end(),
 	                   [&](const auto& inst)
 	                   {
-		                   return ShaderInstructionTypeStartsWith(inst.type, type_prefix) &&
+		                   return is_load(inst.type) &&
 		                          ShaderVectorBufferUsesRuntimeDescriptor(bind, inst, user_data_register_base);
 	                   });
 }
 
 bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_register_base)
 {
-	return ShaderHasRuntimeDescriptorLoad(code, bind, user_data_register_base, "BufferLoad");
+	return ShaderHasRuntimeDescriptorLoad(code, bind, user_data_register_base, ShaderInstructionIsBufferLoad);
 }
 
 // Typed loads count outside the vertex stage only: there the stream resolver
 // owns the fetched stream V#s, whose base is a guest address by design.
 static bool ShaderHasUnboundTypedBufferLoad(const ShaderCode& code, const ShaderBindResources& bind)
 {
-	return ShaderHasRuntimeDescriptorLoad(code, bind, 0, "TBufferLoad");
+	return ShaderHasRuntimeDescriptorLoad(code, bind, 0, ShaderInstructionIsTypedBufferLoad);
+}
+
+static std::vector<uint32_t> ShaderFindDescriptorLoadIndices(const ShaderCode& code)
+{
+	std::vector<uint32_t> indices;
+	const auto&           instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (ShaderInstructionIsBufferLoad(inst.type) || ShaderInstructionIsTypedBufferLoad(inst.type) ||
+		    ShaderInstructionIsScalarBufferLoad(inst) || ShaderInstructionIsScalarMemoryLoad(inst.type))
+		{
+			indices.push_back(index);
+		}
+	}
+	return indices;
+}
+
+// A pixel-stage load that reads through a runtime descriptor or a guest
+// pointer that no discovered resource resolves.
+static bool ShaderPixelLoadNeedsGuestAddress(const ShaderInstruction& inst, const ShaderBindResources& bind)
+{
+	const bool vector_load = ShaderInstructionIsBufferLoad(inst.type) || ShaderInstructionIsTypedBufferLoad(inst.type);
+	return (vector_load && ShaderVectorBufferUsesRuntimeDescriptor(bind, inst, 0)) ||
+	       ShaderScalarBufferUsesRuntimeDescriptor(bind, inst) || ShaderScalarLoadNeedsGuestAddress(inst, bind);
 }
 
 bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type)
@@ -4231,9 +4323,11 @@ bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderI
 	{
 		return false;
 	}
-	for (int i = 0; i < bind.zero_image_resources.images_num; ++i)
+	const auto& zero = bind.zero_image_resources;
+	for (int i = 0; i < zero.images_num; ++i)
 	{
-		if (bind.zero_image_resources.start_register[i] == inst.src[1].register_id)
+		if (zero.start_register[i] == inst.src[1].register_id &&
+		    (!zero.loaded[i] || (inst.pc > zero.load_pc[i] && inst.pc <= zero.last_pc[i])))
 		{
 			return true;
 		}
@@ -4241,8 +4335,58 @@ bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderI
 	return false;
 }
 
+void ShaderAddZeroDescriptorLoad(ShaderZeroDescriptorLoads* loads, uint32_t pc, int first_register, int dwords)
+{
+	EXIT_IF(loads == nullptr);
+	for (int i = 0; i < loads->loads_num; ++i)
+	{
+		if (loads->pc[i] == pc && loads->first_register[i] == first_register && loads->dwords[i] == dwords)
+		{
+			return;
+		}
+	}
+	if (loads->loads_num >= ShaderZeroDescriptorLoads::LOADS_MAX)
+	{
+		EXIT("shader zero descriptor load capacity exceeded: count=%d capacity=%d pc=0x%08" PRIx32 "\n", loads->loads_num,
+		     ShaderZeroDescriptorLoads::LOADS_MAX, pc);
+	}
+	loads->pc[loads->loads_num]             = pc;
+	loads->first_register[loads->loads_num] = first_register;
+	loads->dwords[loads->loads_num]         = dwords;
+	loads->loads_num++;
+}
+
+bool ShaderScalarLoadWritesZero(const ShaderBindResources& bind, uint32_t pc, int register_id)
+{
+	const auto& loads = bind.zero_descriptor_loads;
+	for (int i = 0; i < loads.loads_num; ++i)
+	{
+		if (loads.pc[i] == pc && register_id >= loads.first_register[i] && register_id < loads.first_register[i] + loads.dwords[i])
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool ShaderScalarLoadIsZero(const ShaderBindResources& bind, const ShaderInstruction& inst)
+{
+	if (!ShaderInstructionIsScalarMemoryLoad(inst.type) || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size <= 0)
+	{
+		return false;
+	}
+	for (int word = 0; word < inst.dst.size; ++word)
+	{
+		if (!ShaderScalarLoadWritesZero(bind, inst.pc, inst.dst.register_id + word))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
-                          ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable)
+                          uint32_t cb_target_mask, ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -4271,7 +4415,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	ps_info->system_input_enable  = sh->ps_input_ena;
 	ps_info->system_input_address = sh->ps_input_addr;
 	ps_info->front_face_all_bits  = (sh->baryc_cntl & (1u << 24u)) != 0;
-	ps_info->ps_pos_xy            = ShaderPixelPositionEnabled(sh->ps_input_ena, sh->ps_input_addr);
+	ps_info->ps_position          = ShaderPixelPositionEnabled(sh->ps_input_ena, sh->ps_input_addr);
 	ps_info->ps_pixel_kill_enable = sh->db_shader_control.shader_kill_enable;
 	ps_info->ps_early_z           = (sh->db_shader_control.shader_z_behavior == 1);
 	ps_info->ps_execute_on_noop   = sh->db_shader_control.shader_execute_on_noop;
@@ -4289,9 +4433,13 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	    vs_info->bind.push_constant_offset + (vs_info->bind.vsharp_uniform_buffer ? 0u : vs_info->bind.push_constant_size);
 	ps_info->bind.push_constant_size = 0;
 
+	// The CB writes a target only through the channels CB_TARGET_MASK and
+	// CB_SHADER_MASK both enable; an export to any other target is discarded,
+	// whatever SPI_SHADER_COL_FORMAT and the stale CB_COLOR*_INFO say.
 	for (int i = 0; i < 8; i++)
 	{
-		ps_info->target_output_mode[i]  = sh->target_output_mode[i];
+		const bool written              = State::ResolveColorWriteMask(cb_target_mask, sh->m_cbShaderMask, static_cast<uint32_t>(i)) != 0u;
+		ps_info->target_output_mode[i]  = written ? sh->target_output_mode[i] : 0u;
 		ps_info->target_output_order[i] = sh->target_output_order[i];
 		ps_info->target_output_number[i] = sh->target_output_number[i];
 	}
@@ -4336,6 +4484,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 			    pixel_analysis->prevents_noop_pixel_elision = ShaderPreventsNoopPixelElision(*code);
 			    pixel_analysis->has_getpc                   = code->HasAnyOf({ShaderInstructionType::SGetpcB64});
 			    pixel_analysis->has_global_memory_load      = ShaderHasGlobalMemoryLoad(*code);
+			    pixel_analysis->descriptor_load_indices     = ShaderFindDescriptorLoadIndices(*code);
 			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code,
 			                                           std::make_shared<ShaderNativeWaveVerdict>(),
 			                                           std::move(pixel_analysis), std::move(scalar_flow),
@@ -4364,11 +4513,11 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->bind.program_base_used = analysis.pixel_analysis->has_getpc;
 		ps_info->bind.program_base = ps_info->bind.program_base_used ? regs->ps_regs.data_addr : 0u;
 		const auto& instructions = analysis.code->GetInstructions();
+		const auto& loads        = analysis.pixel_analysis->descriptor_load_indices;
 		ps_info->bind.device_address_used =
-		    analysis.pixel_analysis->has_global_memory_load || ShaderHasUnboundBufferLoad(*analysis.code, ps_info->bind) ||
-		    ShaderHasUnboundTypedBufferLoad(*analysis.code, ps_info->bind) ||
-		    std::any_of(instructions.begin(), instructions.end(), [&bind = ps_info->bind](const auto& inst) {
-			    return ShaderScalarBufferUsesRuntimeDescriptor(bind, inst) || ShaderScalarLoadNeedsGuestAddress(inst, bind);
+		    analysis.pixel_analysis->has_global_memory_load ||
+		    std::any_of(loads.begin(), loads.end(), [&instructions, &bind = ps_info->bind](uint32_t index) {
+			    return ShaderPixelLoadNeedsGuestAddress(instructions.At(index), bind);
 		    });
 	} else
 	{
@@ -4503,6 +4652,14 @@ private:
 
 static ComputeProgramAnalysisCache g_compute_program_analysis_cache(512);
 
+// A quad DPP read needs whole guest quads in the workgroup: a trailing partial
+// quad would shuffle from host lanes that do not exist.
+static bool NativeEquivalenceFitsWorkgroup(const ShaderComputeWaveAnalysisResult& native, const ShaderComputeInputInfo& info)
+{
+	const uint64_t invocations = static_cast<uint64_t>(info.threads_num[0]) * info.threads_num[1] * info.threads_num[2];
+	return native.supported && (!native.reads_quad_lanes || invocations % 4u == 0u);
+}
+
 void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* /*sh*/, uint32_t dispatch_mode,
                           ShaderComputeInputInfo* info)
 {
@@ -4578,14 +4735,19 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 				     dispatch_mode, info->threads_num[0], info->threads_num[1], info->threads_num[2], native.unsupported_pc,
 				     native.reason.c_str());
 			}
+			if (!NativeEquivalenceFitsWorkgroup(native, *info))
+			{
+				EXIT("wave64 dispatch reads DPP quads across a partial quad: local=%ux%ux%u\n", info->threads_num[0],
+				     info->threads_num[1], info->threads_num[2]);
+			}
 		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
 		{
 			// A program proven wave-width independent runs one guest lane per
 			// invocation: half the code of paired banks, over the same workgroup.
 			const auto native = info->native_equivalent_valid ? program->NativeEquivalence() : ShaderComputeWaveAnalysisResult {};
-			const auto admission = native.supported ? ShaderComputeWaveAnalysisResult {true, 0, {}}
-			                                        : ShaderAnalyzeComputeWaveCode(code, *info);
-			if (native.supported)
+			const bool native_fits = NativeEquivalenceFitsWorkgroup(native, *info);
+			const auto admission = native_fits ? ShaderComputeWaveAnalysisResult {true, 0, {}} : ShaderAnalyzeComputeWaveCode(code, *info);
+			if (native_fits)
 			{
 				info->wave_layout = info->native_equivalent_layout;
 			} else if (!admission.supported)
@@ -4663,10 +4825,16 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->thread_ids_num >= 2;
 			const bool paired_xy_thread_ids =
 			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32 && info->thread_ids_num >= 2;
-			const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register,
-			                                                             info->threads_num, native_xy_thread_ids,
-			                                                             info->group_id[0] && info->group_id[1],
-			                                                             paired_xy_thread_ids);
+			auto coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register, info->threads_num,
+			                                                       native_xy_thread_ids, info->group_id[0] && info->group_id[1],
+			                                                       paired_xy_thread_ids);
+			// The paired proofs model the lanes of one 64-thread guest wave, which a
+			// native-equivalent wave64 layout keeps unchanged.
+			if (coverage.width == 0 && native_xy_thread_ids && info->wave_layout.guest_wave_size == 64u)
+			{
+				coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register, info->threads_num, false,
+				                                                 info->group_id[0] && info->group_id[1], true);
+			}
 			if (coverage.width != 0)
 			{
 				info->storage_image_tile_coverage[i] = coverage;
@@ -4978,7 +5146,7 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo* info)
 	KYTY_LOG_DEBUG("\t fp16_overflow_known = %s\n", info->fp16_overflow_known ? "true" : "false");
 
 	KYTY_LOG_DEBUG("\t input_num            = %u\n", info->input_num);
-	KYTY_LOG_DEBUG("\t ps_pos_xy            = %s\n", info->ps_pos_xy ? "true" : "false");
+	KYTY_LOG_DEBUG("\t ps_position          = %s\n", info->ps_position ? "true" : "false");
 	KYTY_LOG_DEBUG("\t ps_pixel_kill_enable = %s\n", info->ps_pixel_kill_enable ? "true" : "false");
 	KYTY_LOG_DEBUG("\t ps_early_z           = %s\n", info->ps_early_z ? "true" : "false");
 	KYTY_LOG_DEBUG("\t ps_execute_on_noop   = %s\n", info->ps_execute_on_noop ? "true" : "false");
@@ -5150,6 +5318,44 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 	log.DumpOptimizedShader(ret);
 	ShaderProbeWrite("vs", code, nullptr, &ret);
 
+	return ret;
+}
+
+Vector<uint32_t> ShaderCompileGeometryPullVS(const ShaderVertexInputInfo& input_info)
+{
+	EXIT_IF(!input_info.geometry_pull);
+	ShaderGeometryComputeInfo geometry;
+	geometry.parameter_count = input_info.geometry_pull_parameters;
+	Vector<uint32_t> ret;
+	String8          err_msg;
+	if (!ShaderToolchain::Run(SpirvGenerateGeometryPullSource(geometry, input_info.geometry_pull_layer), &ret, &err_msg))
+	{
+		EXIT("geometry pull vertex shader translation failed: %s\n", err_msg.c_str());
+	}
+	return ret;
+}
+
+Vector<uint32_t> ShaderRecompileGeometryCS(const ShaderCode& code, const ShaderVertexInputInfo& input_info,
+                                           const ShaderGeometryComputeInfo& geometry)
+{
+	KYTY_PROFILER_FUNCTION(profiler::colors::CyanA700);
+
+	ShaderLogHelper log("gs");
+	log.DumpOriginalShader(code);
+	String8 source;
+	{
+		DebugStatsScopedTimer timer(DebugStatsRecordSpirvSource);
+		source = SpirvGenerateGeometryComputeSource(code, input_info, geometry);
+	}
+	log.DumpRecompiledShader(source);
+	Vector<uint32_t> ret;
+	String8          err_msg;
+	if (!ShaderToolchain::Run(source, &ret, &err_msg))
+	{
+		KYTY_LOG_WARN("WARNING: geometry compute SpirvRun failed: id=%016" PRIx64 " %s\n", ShaderCodeId(code), err_msg.c_str());
+		return {};
+	}
+	log.DumpOptimizedShader(ret);
 	return ret;
 }
 
@@ -5457,207 +5663,237 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 //	return ShaderUpdateBindInfo(code, &input_info->bind);
 //}
 
-static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
+// Collects one shader identity in a reserved local buffer; the identity vector
+// then takes every word in one copy instead of a copy-on-write check per word.
+class ShaderIdWriter
+{
+public:
+	ShaderIdWriter() { m_words.reserve(512); }
+
+	void Add(uint32_t word) { m_words.push_back(word); }
+	void Finish(ShaderId* id) const { id->ids.Add(m_words.data(), static_cast<uint32_t>(m_words.size())); }
+
+private:
+	std::vector<uint32_t> m_words;
+};
+
+static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bind)
 {
 	// The SPIR-V interface bakes in the push block offset and descriptor set;
 	// a pixel stage takes both from the vertex stage it pairs with.
-	ret->ids.Add(bind.push_constant_offset);
-	ret->ids.Add(bind.descriptor_set_slot);
-	ret->ids.Add(static_cast<uint32_t>(bind.device_address_used));
+	ids->Add(bind.push_constant_offset);
+	ids->Add(bind.descriptor_set_slot);
+	ids->Add(static_cast<uint32_t>(bind.device_address_used));
 	if (bind.device_address_used)
 	{
-		ret->ids.Add(bind.device_address_offset_dw);
+		ids->Add(bind.device_address_offset_dw);
 	}
-	ret->ids.Add(static_cast<uint32_t>(bind.thread_limits_used));
+	ids->Add(static_cast<uint32_t>(bind.thread_limits_used));
 	if (bind.thread_limits_used)
 	{
-		ret->ids.Add(bind.thread_limits_offset_dw);
+		ids->Add(bind.thread_limits_offset_dw);
 	}
-	ret->ids.Add(static_cast<uint32_t>(bind.program_base_used));
+	// Only geometry compute modules carry this block; other identities stay unchanged.
+	if (bind.geometry_used)
+	{
+		ids->Add(bind.geometry_offset_dw);
+	}
+	ids->Add(static_cast<uint32_t>(bind.program_base_used));
 	if (bind.program_base_used)
 	{
-		ret->ids.Add(bind.program_base_offset_dw);
+		ids->Add(bind.program_base_offset_dw);
 	}
-	ret->ids.Add(bind.storage_buffers.buffers_num);
+	ids->Add(bind.storage_buffers.buffers_num);
 
 	for (int i = 0; i < bind.storage_buffers.buffers_num; i++)
 	{
 		// const auto& r = bind.storage_buffers.buffers[i];
 
-		// ret->ids.Add(static_cast<uint32_t>(r.SwizzleEnabled()));
-		// ret->ids.Add(r.DstSelX());
-		// ret->ids.Add(r.DstSelY());
-		// ret->ids.Add(r.DstSelZ());
-		// ret->ids.Add(r.DstSelW());
-		// ret->ids.Add(r.Nfmt());
-		// ret->ids.Add(r.Dfmt());
-		// ret->ids.Add(static_cast<uint32_t>(r.AddTid()));
-		ret->ids.Add(bind.storage_buffers.slots[i]);
-		ret->ids.Add(bind.storage_buffers.start_register[i]);
-		ret->ids.Add(static_cast<uint32_t>(bind.storage_buffers.extended[i]));
-		ret->ids.Add(static_cast<uint32_t>(bind.storage_buffers.usages[i]));
-		ret->ids.Add(static_cast<uint32_t>(bind.storage_buffers.dynamic_sload[i]));
+		// ids->Add(static_cast<uint32_t>(r.SwizzleEnabled()));
+		// ids->Add(r.DstSelX());
+		// ids->Add(r.DstSelY());
+		// ids->Add(r.DstSelZ());
+		// ids->Add(r.DstSelW());
+		// ids->Add(r.Nfmt());
+		// ids->Add(r.Dfmt());
+		// ids->Add(static_cast<uint32_t>(r.AddTid()));
+		ids->Add(bind.storage_buffers.slots[i]);
+		ids->Add(bind.storage_buffers.start_register[i]);
+		ids->Add(static_cast<uint32_t>(bind.storage_buffers.extended[i]));
+		ids->Add(static_cast<uint32_t>(bind.storage_buffers.usages[i]));
+		ids->Add(static_cast<uint32_t>(bind.storage_buffers.dynamic_sload[i]));
 	}
 
-	ret->ids.Add(bind.dynamic_sloads.records.Size());
+	ids->Add(bind.dynamic_sloads.records.Size());
 	for (uint32_t mapping = 0; mapping < bind.dynamic_sloads.records.Size(); ++mapping)
 	{
 		const auto& record = bind.dynamic_sloads.records.At(mapping);
-		ret->ids.Add(static_cast<uint32_t>(record.kind));
-		ret->ids.Add(record.resource_index);
-		ret->ids.Add(record.destination_register);
-		ret->ids.Add(record.instruction_pc);
-		ret->ids.Add(static_cast<uint32_t>(record.offset_dw));
-		ret->ids.Add(static_cast<uint32_t>(record.dword_count));
-		ret->ids.Add(static_cast<uint32_t>(record.resource_field_offset));
-		ret->ids.Add(record.last_consumer_pc);
-		ret->ids.Add(static_cast<uint32_t>(record.raw_vmem_oob_guarded));
+		ids->Add(static_cast<uint32_t>(record.kind));
+		ids->Add(record.resource_index);
+		ids->Add(record.destination_register);
+		ids->Add(record.instruction_pc);
+		ids->Add(static_cast<uint32_t>(record.offset_dw));
+		ids->Add(static_cast<uint32_t>(record.dword_count));
+		ids->Add(static_cast<uint32_t>(record.resource_field_offset));
+		ids->Add(record.last_consumer_pc);
+		ids->Add(static_cast<uint32_t>(record.raw_vmem_oob_guarded));
 	}
 
-	ret->ids.Add(bind.assembled_descriptors.Size());
+	ids->Add(bind.assembled_descriptors.Size());
 	for (const auto& record: bind.assembled_descriptors)
 	{
-		ret->ids.Add(record.consumer_pc);
-		ret->ids.Add(static_cast<uint32_t>(record.register_id));
-		ret->ids.Add(static_cast<uint32_t>(record.resource_index));
+		ids->Add(record.consumer_pc);
+		ids->Add(static_cast<uint32_t>(record.register_id));
+		ids->Add(static_cast<uint32_t>(record.resource_index));
 	}
 
-	ret->ids.Add(bind.redefined_descriptor_consumers.Size());
+	ids->Add(bind.redefined_descriptor_consumers.Size());
 	for (const auto pc: bind.redefined_descriptor_consumers)
 	{
-		ret->ids.Add(pc);
+		ids->Add(pc);
 	}
 
-	ret->ids.Add(bind.zero_sbuffer_resources.buffers_num);
+	ids->Add(bind.zero_sbuffer_resources.buffers_num);
 	for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
 	{
-		ret->ids.Add(bind.zero_sbuffer_resources.start_register[i]);
+		ids->Add(bind.zero_sbuffer_resources.start_register[i]);
 	}
 
-	ret->ids.Add(bind.zero_image_resources.images_num);
+	ids->Add(bind.zero_image_resources.images_num);
 	for (int i = 0; i < bind.zero_image_resources.images_num; ++i)
 	{
-		ret->ids.Add(bind.zero_image_resources.start_register[i]);
+		ids->Add(bind.zero_image_resources.start_register[i]);
+		ids->Add(bind.zero_image_resources.loaded[i] ? 1u : 0u);
+		ids->Add(bind.zero_image_resources.load_pc[i]);
+		ids->Add(bind.zero_image_resources.last_pc[i]);
 	}
 
-	ret->ids.Add(bind.textures2D.textures_num);
+	ids->Add(bind.zero_descriptor_loads.loads_num);
+	for (int i = 0; i < bind.zero_descriptor_loads.loads_num; ++i)
+	{
+		ids->Add(bind.zero_descriptor_loads.pc[i]);
+		ids->Add(bind.zero_descriptor_loads.first_register[i]);
+		ids->Add(bind.zero_descriptor_loads.dwords[i]);
+	}
+
+	ids->Add(bind.textures2D.textures_num);
 
 	for (int i = 0; i < bind.textures2D.textures_num; i++)
 	{
 		const auto& r = bind.textures2D.desc[i].texture;
-		// ret->ids.Add(r.MinLod());
-		// ret->ids.Add(r.Dfmt());
-		// ret->ids.Add(r.Nfmt());
-		// ret->ids.Add(r.Width());
-		// ret->ids.Add(r.Height());
-		// ret->ids.Add(r.PerfMod());
-		// ret->ids.Add(static_cast<uint32_t>(r.Interlaced()));
-		// ret->ids.Add(r.DstSelX());
-		// ret->ids.Add(r.DstSelY());
-		// ret->ids.Add(r.DstSelZ());
-		// ret->ids.Add(r.DstSelW());
-		// ret->ids.Add(r.BaseLevel());
-		// ret->ids.Add(r.LastLevel());
-		// ret->ids.Add(r.TilingIdx());
-		// ret->ids.Add(static_cast<uint32_t>(r.Pow2Pad()));
+		// ids->Add(r.MinLod());
+		// ids->Add(r.Dfmt());
+		// ids->Add(r.Nfmt());
+		// ids->Add(r.Width());
+		// ids->Add(r.Height());
+		// ids->Add(r.PerfMod());
+		// ids->Add(static_cast<uint32_t>(r.Interlaced()));
+		// ids->Add(r.DstSelX());
+		// ids->Add(r.DstSelY());
+		// ids->Add(r.DstSelZ());
+		// ids->Add(r.DstSelW());
+		// ids->Add(r.BaseLevel());
+		// ids->Add(r.LastLevel());
+		// ids->Add(r.TilingIdx());
+		// ids->Add(static_cast<uint32_t>(r.Pow2Pad()));
 		// Image type and format determine the SPIR-V image declaration. They
 		// must participate in the module key so a pipeline cannot reuse a
 		// shader specialized for a differently shaped or integer texture.
-		ret->ids.Add(r.Type());
-		ret->ids.Add(r.Format());
+		ids->Add(r.Type());
+		ids->Add(r.Format());
 		// Storage resinfo admission depends on the resource's mip view.
 		// A module admitted for one mip must not bypass that check on reuse.
 		const bool storage = bind.textures2D.desc[i].usage == ShaderTextureUsage::ReadWrite;
-		ret->ids.Add(storage ? r.BaseLevel() : 0u);
-		ret->ids.Add(storage ? r.LastLevel() : 0u);
-		ret->ids.Add(storage ? r.MaxMip() : 0u);
+		ids->Add(storage ? r.BaseLevel() : 0u);
+		ids->Add(storage ? r.LastLevel() : 0u);
+		ids->Add(storage ? r.MaxMip() : 0u);
 		// Image stores apply a channel selection the storage view cannot express.
-		ret->ids.Add(storage && ShaderStorageTextureSwizzleInShader(r) ? r.DstSelXYZW() : 0u);
-		// ret->ids.Add(r.Depth());
-		// ret->ids.Add(r.Pitch());
-		// ret->ids.Add(r.BaseArray());
-		// ret->ids.Add(r.LastArray());
-		// ret->ids.Add(r.MinLodWarn());
-		// ret->ids.Add(r.CounterBankId());
-		// ret->ids.Add(static_cast<uint32_t>(r.LodHdwCntEn()));
-		ret->ids.Add(bind.textures2D.desc[i].slot);
-		ret->ids.Add(bind.textures2D.desc[i].start_register);
-		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].extended));
-		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].dynamic_sload));
-		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].usage));
-		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].textures2d_without_sampler));
-		ret->ids.Add(static_cast<uint32_t>(ShaderResolvedSampledTextureShape(bind.textures2D.desc[i])));
-		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].sample_operation));
+		ids->Add(storage && ShaderStorageTextureSwizzleInShader(r) ? r.DstSelXYZW() : 0u);
+		// ids->Add(r.Depth());
+		// ids->Add(r.Pitch());
+		// ids->Add(r.BaseArray());
+		// ids->Add(r.LastArray());
+		// ids->Add(r.MinLodWarn());
+		// ids->Add(r.CounterBankId());
+		// ids->Add(static_cast<uint32_t>(r.LodHdwCntEn()));
+		ids->Add(bind.textures2D.desc[i].slot);
+		ids->Add(bind.textures2D.desc[i].start_register);
+		ids->Add(static_cast<uint32_t>(bind.textures2D.desc[i].extended));
+		ids->Add(static_cast<uint32_t>(bind.textures2D.desc[i].dynamic_sload));
+		ids->Add(static_cast<uint32_t>(bind.textures2D.desc[i].usage));
+		ids->Add(static_cast<uint32_t>(bind.textures2D.desc[i].textures2d_without_sampler));
+		ids->Add(static_cast<uint32_t>(ShaderResolvedSampledTextureShape(bind.textures2D.desc[i])));
+		ids->Add(static_cast<uint32_t>(bind.textures2D.desc[i].sample_operation));
 	}
 
-	ret->ids.Add(bind.samplers.samplers_num);
+	ids->Add(bind.samplers.samplers_num);
 
 	for (int i = 0; i < bind.samplers.samplers_num; i++)
 	{
 		const auto& r = bind.samplers.samplers[i];
 
-		// ret->ids.Add(r.ClampX());
-		// ret->ids.Add(r.ClampY());
-		// ret->ids.Add(r.ClampZ());
-		// ret->ids.Add(r.MaxAnisoRatio());
-		// ret->ids.Add(r.DepthCompareFunc());
-		// ret->ids.Add(static_cast<uint32_t>(r.ForceUnormCoords()));
-		// ret->ids.Add(r.AnisoThreshold());
-		// ret->ids.Add(static_cast<uint32_t>(r.McCoordTrunc()));
-		// ret->ids.Add(static_cast<uint32_t>(r.ForceDegamma()));
-		// ret->ids.Add(r.AnisoBias());
-		// ret->ids.Add(static_cast<uint32_t>(r.TruncCoord()));
-		// ret->ids.Add(static_cast<uint32_t>(r.DisableCubeWrap()));
-		// ret->ids.Add(r.FilterMode());
-		// ret->ids.Add(r.MinLod());
-		// ret->ids.Add(r.MaxLod());
-		// ret->ids.Add(r.PerfMip());
-		// ret->ids.Add(r.PerfZ());
-		// ret->ids.Add(r.LodBias());
-		// ret->ids.Add(r.LodBiasSec());
-		// ret->ids.Add(r.XyMagFilter());
-		// ret->ids.Add(r.XyMinFilter());
-		// ret->ids.Add(r.ZFilter());
-		// ret->ids.Add(r.MipFilter());
-		// ret->ids.Add(r.BorderColorPtr());
-		// ret->ids.Add(r.BorderColorType());
-		ret->ids.Add(r.DepthCompareFunc());
-		ret->ids.Add(static_cast<uint32_t>(r.ForceUnormCoords()));
+		// ids->Add(r.ClampX());
+		// ids->Add(r.ClampY());
+		// ids->Add(r.ClampZ());
+		// ids->Add(r.MaxAnisoRatio());
+		// ids->Add(r.DepthCompareFunc());
+		// ids->Add(static_cast<uint32_t>(r.ForceUnormCoords()));
+		// ids->Add(r.AnisoThreshold());
+		// ids->Add(static_cast<uint32_t>(r.McCoordTrunc()));
+		// ids->Add(static_cast<uint32_t>(r.ForceDegamma()));
+		// ids->Add(r.AnisoBias());
+		// ids->Add(static_cast<uint32_t>(r.TruncCoord()));
+		// ids->Add(static_cast<uint32_t>(r.DisableCubeWrap()));
+		// ids->Add(r.FilterMode());
+		// ids->Add(r.MinLod());
+		// ids->Add(r.MaxLod());
+		// ids->Add(r.PerfMip());
+		// ids->Add(r.PerfZ());
+		// ids->Add(r.LodBias());
+		// ids->Add(r.LodBiasSec());
+		// ids->Add(r.XyMagFilter());
+		// ids->Add(r.XyMinFilter());
+		// ids->Add(r.ZFilter());
+		// ids->Add(r.MipFilter());
+		// ids->Add(r.BorderColorPtr());
+		// ids->Add(r.BorderColorType());
+		ids->Add(r.DepthCompareFunc());
+		ids->Add(static_cast<uint32_t>(r.ForceUnormCoords()));
 		// Manual comparison filtering specializes the base-level footprint.
-		ret->ids.Add(r.MinLod());
-		ret->ids.Add(r.FilterMode());
-		ret->ids.Add(r.XyMagFilter());
-		ret->ids.Add(r.XyMinFilter());
-		ret->ids.Add(bind.samplers.slots[i]);
-		ret->ids.Add(bind.samplers.start_register[i]);
-		ret->ids.Add(static_cast<uint32_t>(bind.samplers.extended[i]));
-		ret->ids.Add(static_cast<uint32_t>(bind.samplers.dynamic_sload[i]));
-		ret->ids.Add(static_cast<uint32_t>(bind.samplers.operations[i]));
+		ids->Add(r.MinLod());
+		ids->Add(r.FilterMode());
+		ids->Add(r.XyMagFilter());
+		ids->Add(r.XyMinFilter());
+		ids->Add(bind.samplers.slots[i]);
+		ids->Add(bind.samplers.start_register[i]);
+		ids->Add(static_cast<uint32_t>(bind.samplers.extended[i]));
+		ids->Add(static_cast<uint32_t>(bind.samplers.dynamic_sload[i]));
+		ids->Add(static_cast<uint32_t>(bind.samplers.operations[i]));
 	}
 
-	ret->ids.Add(bind.gds_pointers.pointers_num);
-	ret->ids.Add(static_cast<uint32_t>(bind.gds_pointers.memory_used));
+	ids->Add(bind.gds_pointers.pointers_num);
+	ids->Add(static_cast<uint32_t>(bind.gds_pointers.memory_used));
 
 	for (int i = 0; i < bind.gds_pointers.pointers_num; i++)
 	{
 		// const auto& r = bind.gds_pointers.pointers[i];
 
-		ret->ids.Add(bind.gds_pointers.slots[i]);
-		ret->ids.Add(bind.gds_pointers.start_register[i]);
-		ret->ids.Add(static_cast<uint32_t>(bind.gds_pointers.extended[i]));
+		ids->Add(bind.gds_pointers.slots[i]);
+		ids->Add(bind.gds_pointers.start_register[i]);
+		ids->Add(static_cast<uint32_t>(bind.gds_pointers.extended[i]));
 	}
 
-	ret->ids.Add(bind.direct_sgprs.sgprs_num);
+	ids->Add(bind.direct_sgprs.sgprs_num);
 
 	for (int i = 0; i < bind.direct_sgprs.sgprs_num; i++)
 	{
-		ret->ids.Add(bind.direct_sgprs.start_register[i]);
-		ret->ids.Add(static_cast<uint32_t>(bind.direct_sgprs.absolute_register[i]));
+		ids->Add(bind.direct_sgprs.start_register[i]);
+		ids->Add(static_cast<uint32_t>(bind.direct_sgprs.absolute_register[i]));
 	}
 
-	ret->ids.Add(static_cast<uint32_t>(bind.extended.used));
-	ret->ids.Add(bind.extended.slot);
-	ret->ids.Add(bind.extended.start_register);
+	ids->Add(static_cast<uint32_t>(bind.extended.used));
+	ids->Add(bind.extended.slot);
+	ids->Add(bind.extended.start_register);
 }
 
 ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInputInfo* input_info)
@@ -5673,7 +5909,7 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 		return ret;
 	}
 
-	ret.ids.Expand(64);
+	ShaderIdWriter ids;
 
 	bool gs_instead_of_vs =
 	    (regs->vs_regs.data_addr == 0 && regs->gs_regs.data_addr == 0 && regs->es_regs.data_addr != 0 && regs->gs_regs.chksum != 0);
@@ -5694,8 +5930,8 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 			ShaderRequireVertexProgram(regs, input_info);
 			ret.hash0 = input_info->program->code.GetHash0();
 			ret.crc32 = input_info->program->code.GetCrc32();
-			ret.ids.Add(0x4c565031u); // LVP1: exact copied front/back content and frozen debug commands.
-			for (uint32_t word: input_info->program->fingerprint) { ret.ids.Add(word); }
+			ids.Add(0x4c565031u); // LVP1: exact copied front/back content and frozen debug commands.
+			for (uint32_t word: input_info->program->fingerprint) { ids.Add(word); }
 		}
 	} else
 	{
@@ -5709,32 +5945,32 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 
 		ret.hash0 = header->hash0;
 		ret.crc32 = header->crc32;
-		ret.ids.Add(header->length);
+		ids.Add(header->length);
 	}
 
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_external));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_embedded));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_inline));
-	ret.ids.Add(static_cast<uint32_t>(input_info->gs_prolog));
-	ret.ids.Add(static_cast<uint32_t>(input_info->position1_usage));
-	ret.ids.Add(0x4e574d31u); // NWM1: architectural width and native mapping proof.
-	ret.ids.Add(input_info->native_wave.guest_wave_size);
-	ret.ids.Add(static_cast<uint32_t>(input_info->native_wave.proof));
-	ret.ids.Add(input_info->required_subgroup_size);
-	ret.ids.Add(input_info->native_wave.refusal_reason != nullptr ? 1u : 0u);
-	ret.ids.Add(input_info->float_mode);
-	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_reg));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_buffer_reg));
-	ret.ids.Add(input_info->resources_num);
-	ret.ids.Add(input_info->export_count);
-	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_data_num));
+	ids.Add(static_cast<uint32_t>(input_info->fetch_external));
+	ids.Add(static_cast<uint32_t>(input_info->fetch_embedded));
+	ids.Add(static_cast<uint32_t>(input_info->fetch_inline));
+	ids.Add(static_cast<uint32_t>(input_info->gs_prolog));
+	ids.Add(static_cast<uint32_t>(input_info->position1_usage));
+	ids.Add(0x4e574d31u); // NWM1: architectural width and native mapping proof.
+	ids.Add(input_info->native_wave.guest_wave_size);
+	ids.Add(static_cast<uint32_t>(input_info->native_wave.proof));
+	ids.Add(input_info->required_subgroup_size);
+	ids.Add(input_info->native_wave.refusal_reason != nullptr ? 1u : 0u);
+	ids.Add(input_info->float_mode);
+	ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
+	ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
+	ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_reg));
+	ids.Add(static_cast<uint32_t>(input_info->fetch_buffer_reg));
+	ids.Add(input_info->resources_num);
+	ids.Add(input_info->export_count);
+	ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_data_num));
 	for (int i = 0; i < input_info->fetch_attrib_data_num; i++)
 	{
-		ret.ids.Add(input_info->fetch_attrib_data[i]);
+		ids.Add(input_info->fetch_attrib_data[i]);
 	}
 
 	for (int i = 0; i < input_info->resources_num; i++)
@@ -5742,54 +5978,62 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 		const auto& r  = input_info->resources[i];
 		const auto& rd = input_info->resources_dst[i];
 
-		ret.ids.Add(rd.register_start);
-		ret.ids.Add(rd.registers_num);
-		ret.ids.Add(static_cast<uint32_t>(rd.semantic));
-		ret.ids.Add(r.Stride());
-		ret.ids.Add(static_cast<uint32_t>(r.SwizzleEnabled()));
-		ret.ids.Add(r.DstSelX());
-		ret.ids.Add(r.DstSelY());
-		ret.ids.Add(r.DstSelZ());
-		ret.ids.Add(r.DstSelW());
+		ids.Add(rd.register_start);
+		ids.Add(rd.registers_num);
+		ids.Add(static_cast<uint32_t>(rd.semantic));
+		ids.Add(static_cast<uint32_t>(rd.instance));
+		ids.Add(r.Stride());
+		ids.Add(static_cast<uint32_t>(r.SwizzleEnabled()));
+		ids.Add(r.DstSelX());
+		ids.Add(r.DstSelY());
+		ids.Add(r.DstSelZ());
+		ids.Add(r.DstSelW());
 		if (gen5)
 		{
-			ret.ids.Add(r.Format());
-			ret.ids.Add(r.OutOfBounds());
+			ids.Add(r.Format());
+			ids.Add(r.OutOfBounds());
 		} else
 		{
-			ret.ids.Add(r.Nfmt());
-			ret.ids.Add(r.Dfmt());
+			ids.Add(r.Nfmt());
+			ids.Add(r.Dfmt());
 		}
-		ret.ids.Add(static_cast<uint32_t>(r.AddTid()));
+		ids.Add(static_cast<uint32_t>(r.AddTid()));
 	}
 
-	ret.ids.Add(input_info->buffers_num);
+	ids.Add(input_info->buffers_num);
 
 	for (int i = 0; i < input_info->buffers_num; i++)
 	{
 		const auto& r = input_info->buffers[i];
-		ret.ids.Add(r.attr_num);
-		ret.ids.Add(r.stride);
+		ids.Add(r.attr_num);
+		ids.Add(r.stride);
 		for (int j = 0; j < r.attr_num; j++)
 		{
-			ret.ids.Add(r.attr_indices[j]);
-			ret.ids.Add(r.attr_offsets[j]);
+			ids.Add(r.attr_indices[j]);
+			ids.Add(r.attr_offsets[j]);
 		}
 	}
 
-	ShaderGetBindIds(&ret, input_info->bind);
+	if (input_info->geometry_pull)
+	{
+		ids.Add(0x47504c31u); // GPL1: geometry pass output pull.
+		ids.Add(input_info->geometry_pull_parameters);
+		ids.Add(static_cast<uint32_t>(input_info->geometry_pull_layer));
+	}
+	ShaderGetBindIds(&ids, input_info->bind);
 	if (input_info->clip_probe.draw_scoped && input_info->clip_probe.enabled)
 	{
 		const uint32_t descriptor_set = input_info->clip_probe_descriptor_set;
 		const uint64_t diagnostic_identity = VertexClipProbeDiagnosticIdentity(descriptor_set);
 		EXIT_IF(descriptor_set == kVertexClipProbeInvalidDescriptorSet || descriptor_set > 2u || diagnostic_identity == 0 ||
 		        input_info->clip_probe.diagnostic_identity != diagnostic_identity);
-		ret.ids.Add(0x56435031u); // VCP1
-		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity));
-		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity >> 32u));
-		ret.ids.Add(descriptor_set);
+		ids.Add(0x56435031u); // VCP1
+		ids.Add(static_cast<uint32_t>(diagnostic_identity));
+		ids.Add(static_cast<uint32_t>(diagnostic_identity >> 32u));
+		ids.Add(descriptor_set);
 	}
 
+	ids.Finish(&ret);
 	return ret;
 }
 
@@ -5810,15 +6054,15 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 		return ret;
 	}
 
-	ret.ids.Expand(64);
+	ShaderIdWriter ids;
 
 	if (Config::IsNextGen())
 	{
 		ret.hash0 = (regs->ps_regs.chksum >> 32u) & 0xffffffffu;
 		ret.crc32 = regs->ps_regs.chksum & 0xffffffffu;
-		ret.ids.Add(0x504c4431u); // PLD1: reserved pixel LDS and implicit parameter scalar.
-		ret.ids.Add(static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u);
-		ret.ids.Add(regs->ps_regs.rsrc2.user_sgpr);
+		ids.Add(0x504c4431u); // PLD1: reserved pixel LDS and implicit parameter scalar.
+		ids.Add(static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u);
+		ids.Add(regs->ps_regs.rsrc2.user_sgpr);
 	} else
 	{
 		const auto* src = reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr);
@@ -5832,66 +6076,70 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 		ret.hash0 = header->hash0;
 		ret.crc32 = header->crc32;
 
-		ret.ids.Add(header->length);
+		ids.Add(header->length);
 	}
 
-	ret.ids.Add(input_info->input_num);
-	ret.ids.Add(input_info->system_input_enable);
-	ret.ids.Add(input_info->system_input_address);
+	ids.Add(input_info->input_num);
+	ids.Add(input_info->system_input_enable);
+	ids.Add(input_info->system_input_address);
 	if (input_info->FrontFaceEnabled())
 	{
-		ret.ids.Add(0x46464931u); // FFI1: explicit front-face system input.
-		ret.ids.Add(static_cast<uint32_t>(input_info->front_face_all_bits));
+		ids.Add(0x46464931u); // FFI1: explicit front-face system input.
+		ids.Add(static_cast<uint32_t>(input_info->front_face_all_bits));
+	}
+	if (input_info->AncillaryEnabled())
+	{
+		ids.Add(0x414e4331u); // ANC1: render-target array index in the ancillary VGPR.
 	}
 	if (input_info->custom_interpolation.Enabled())
 	{
-		ret.ids.Add(0x43504932u); // CPI2: raw inputs and qualified parameter aliases through geometry.
-		ret.ids.Add(input_info->custom_interpolation.inputs);
-		ret.ids.Add(input_info->custom_interpolation.per_vertex_inputs);
-		ret.ids.Add(input_info->custom_interpolation.aliased_parameter_inputs);
+		ids.Add(0x43504932u); // CPI2: raw inputs and qualified parameter aliases through geometry.
+		ids.Add(input_info->custom_interpolation.inputs);
+		ids.Add(input_info->custom_interpolation.per_vertex_inputs);
+		ids.Add(input_info->custom_interpolation.aliased_parameter_inputs);
 	}
-	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pos_xy));
-	ret.ids.Add(input_info->host_to_guest_scale.x_guest_numerator);
-	ret.ids.Add(input_info->host_to_guest_scale.x_host_denominator);
-	ret.ids.Add(input_info->host_to_guest_scale.y_guest_numerator);
-	ret.ids.Add(input_info->host_to_guest_scale.y_host_denominator);
-	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pixel_kill_enable));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ps_early_z));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ps_execute_on_noop));
-	ret.ids.Add(0x4e574d31u); // NWM1: distinct from the selected physical size.
-	ret.ids.Add(input_info->native_wave.guest_wave_size);
-	ret.ids.Add(static_cast<uint32_t>(input_info->native_wave.proof));
-	ret.ids.Add(input_info->required_subgroup_size);
-	ret.ids.Add(input_info->native_wave.refusal_reason != nullptr ? 1u : 0u);
-	ret.ids.Add(input_info->float_mode);
-	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
+	ids.Add(static_cast<uint32_t>(input_info->ps_position));
+	ids.Add(input_info->host_to_guest_scale.x_guest_numerator);
+	ids.Add(input_info->host_to_guest_scale.x_host_denominator);
+	ids.Add(input_info->host_to_guest_scale.y_guest_numerator);
+	ids.Add(input_info->host_to_guest_scale.y_host_denominator);
+	ids.Add(static_cast<uint32_t>(input_info->ps_pixel_kill_enable));
+	ids.Add(static_cast<uint32_t>(input_info->ps_early_z));
+	ids.Add(static_cast<uint32_t>(input_info->ps_execute_on_noop));
+	ids.Add(0x4e574d31u); // NWM1: distinct from the selected physical size.
+	ids.Add(input_info->native_wave.guest_wave_size);
+	ids.Add(static_cast<uint32_t>(input_info->native_wave.proof));
+	ids.Add(input_info->required_subgroup_size);
+	ids.Add(input_info->native_wave.refusal_reason != nullptr ? 1u : 0u);
+	ids.Add(input_info->float_mode);
+	ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
+	ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
 
 	// The export declarations, component order and channel type are part of the
 	// generated SPIR-V interface. They must distinguish pipelines that use the
 	// same guest shader with different render-target formats or COMP_SWAP values.
 	for (int i = 0; i < 8; i++)
 	{
-		ret.ids.Add(input_info->target_output_mode[i]);
-		ret.ids.Add(input_info->target_output_order[i]);
-		ret.ids.Add(input_info->target_output_number[i]);
+		ids.Add(input_info->target_output_mode[i]);
+		ids.Add(input_info->target_output_order[i]);
+		ids.Add(input_info->target_output_number[i]);
 	}
 	if (input_info->dual_source_blend)
 	{
-		ret.ids.Add(0x44534231u); // DSB1: MRT1 is emitted as Location 0 Index 1.
+		ids.Add(0x44534231u); // DSB1: MRT1 is emitted as Location 0 Index 1.
 	}
 
 	for (uint32_t i = 0; i < 32u; i++)
 	{
-		ret.ids.Add(input_info->interpolator_settings[i]);
+		ids.Add(input_info->interpolator_settings[i]);
 	}
 
-	ShaderGetBindIds(&ret, input_info->bind);
+	ShaderGetBindIds(&ids, input_info->bind);
 	if (input_info->fragment_tap.draw_scoped && input_info->fragment_tap.enabled)
 	{
-		ret.ids.Add(0x46535444u); // FSTD: fragment tap selected draw variant.
+		ids.Add(0x46535444u); // FSTD: fragment tap selected draw variant.
 	}
 	if (input_info->input0_probe.draw_scoped && input_info->input0_probe.enabled)
 	{
@@ -5909,22 +6157,23 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 		                                         : VertexClipProbeDiagnosticIdentity(descriptor_set);
 		EXIT_IF(descriptor_set == kVertexClipProbeInvalidDescriptorSet || descriptor_set > 2u || diagnostic_identity == 0 ||
 		        input_info->input0_probe.diagnostic_identity != diagnostic_identity);
-		ret.ids.Add(sample_result ? 0x50535031u : (mrt_result ? 0x504d5231u : 0x50493031u)); // PSP1 / PMR1 / PI01.
-		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity));
-		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity >> 32u));
-		ret.ids.Add(descriptor_set);
+		ids.Add(sample_result ? 0x50535031u : (mrt_result ? 0x504d5231u : 0x50493031u)); // PSP1 / PMR1 / PI01.
+		ids.Add(static_cast<uint32_t>(diagnostic_identity));
+		ids.Add(static_cast<uint32_t>(diagnostic_identity >> 32u));
+		ids.Add(descriptor_set);
 		if (sample_result)
 		{
-			ret.ids.Add(input_info->input0_probe.sample_ordinal);
-			ret.ids.Add(input_info->input0_probe.sparse_subgroup ? 1u : 0u);
+			ids.Add(input_info->input0_probe.sample_ordinal);
+			ids.Add(input_info->input0_probe.sparse_subgroup ? 1u : 0u);
 		}
 		if (mrt_result)
 		{
-			ret.ids.Add(input_info->input0_probe.mrt_target);
-			ret.ids.Add(input_info->input0_probe.export_ordinal);
+			ids.Add(input_info->input0_probe.mrt_target);
+			ids.Add(input_info->input0_probe.export_ordinal);
 		}
 	}
 
+	ids.Finish(&ret);
 	return ret;
 }
 
@@ -6095,7 +6344,7 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 	if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr condition ignored (continuing)\n"); }
 
 	ShaderId ret;
-	ret.ids.Expand(64);
+	ShaderIdWriter ids;
 
 	if (Config::IsNextGen())
 	{
@@ -6110,36 +6359,37 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 		ret.hash0 = header->hash0;
 		ret.crc32 = header->crc32;
 
-		ret.ids.Add(header->length);
+		ids.Add(header->length);
 	}
 
-	ret.ids.Add(input_info->float_mode);
-	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
-	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp_mode_known));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
-	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
-	ret.ids.Add(input_info->workgroup_register);
-	ret.ids.Add(input_info->thread_ids_num);
-	ret.ids.Add(input_info->lds_dwords);
-	ret.ids.Add(static_cast<uint32_t>(input_info->wave_layout.strategy));
-	ret.ids.Add(input_info->wave_layout.guest_wave_size);
-	ret.ids.Add(input_info->wave_layout.native_subgroup_size);
-	ret.ids.Add(input_info->wave_layout.banks);
-	ret.ids.Add(input_info->wave_layout.waves);
-	ret.ids.Add(static_cast<uint32_t>(input_info->native_wave_sensitive));
-	ret.ids.Add(input_info->required_subgroup_size);
+	ids.Add(input_info->float_mode);
+	ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
+	ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
+	ids.Add(static_cast<uint32_t>(input_info->fp_mode_known));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
+	ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
+	ids.Add(input_info->workgroup_register);
+	ids.Add(input_info->thread_ids_num);
+	ids.Add(input_info->lds_dwords);
+	ids.Add(static_cast<uint32_t>(input_info->wave_layout.strategy));
+	ids.Add(input_info->wave_layout.guest_wave_size);
+	ids.Add(input_info->wave_layout.native_subgroup_size);
+	ids.Add(input_info->wave_layout.banks);
+	ids.Add(input_info->wave_layout.waves);
+	ids.Add(static_cast<uint32_t>(input_info->native_wave_sensitive));
+	ids.Add(input_info->required_subgroup_size);
 
 	for (int i = 0; i < 3; i++)
 	{
-		ret.ids.Add(input_info->threads_num[i]);
-		ret.ids.Add(static_cast<uint32_t>(input_info->group_id[i]));
-		ret.ids.Add(input_info->wave_layout.guest_local[i]);
-		ret.ids.Add(input_info->wave_layout.physical_local[i]);
+		ids.Add(input_info->threads_num[i]);
+		ids.Add(static_cast<uint32_t>(input_info->group_id[i]));
+		ids.Add(input_info->wave_layout.guest_local[i]);
+		ids.Add(input_info->wave_layout.physical_local[i]);
 	}
 
-	ShaderGetBindIds(&ret, input_info->bind);
+	ShaderGetBindIds(&ids, input_info->bind);
 
+	ids.Finish(&ret);
 	return ret;
 }
 

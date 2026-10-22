@@ -165,12 +165,20 @@ public:
 	[[nodiscard]] bool UsesDsAddtidLds() const;
 	[[nodiscard]] ShaderType GetHostShaderType() const { return UsesFragmentCompute() ? ShaderType::Compute : m_code.GetType(); }
 	void SetFragmentComputeInfo(const ShaderFragmentComputeInfo* info) { m_fragment_compute_info = info; }
+	[[nodiscard]] bool UsesGeometryCompute() const { return m_geometry_compute_info != nullptr; }
+	void SetGeometryComputeInfo(const ShaderGeometryComputeInfo* info) { m_geometry_compute_info = info; }
+	[[nodiscard]] bool EmitGeometryProlog(String8* output) const;
+	[[nodiscard]] bool EmitGeometryExport(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitGeometryAlloc(uint32_t index, String8* output) const;
 	[[nodiscard]] String8 FragmentTransportAnnotations() const;
 	[[nodiscard]] String8 FragmentTransportTypes() const;
 	[[nodiscard]] String8 FragmentTransportVariables() const;
 	[[nodiscard]] String8 FragmentLocalVariables() const;
 	[[nodiscard]] String8 FragmentProlog() const;
 	[[nodiscard]] String8 FragmentEpilog() const;
+	// " tex=...": the resolved T#/S# indices and the bound textures of an image instruction, for a refusal report.
+	[[nodiscard]] String8 ImageBindingSummary(const ShaderInstruction& inst) const;
+	[[nodiscard]] String8 ExportBindingSummary(const ShaderInstruction& inst) const;
 	[[nodiscard]] bool EmitFragmentInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitFragmentInterpolation(const ShaderInstruction& instruction, ShaderWaveBank bank,
 	                                              const String8& tag, String8* output) const;
@@ -492,7 +500,9 @@ private:
 	void WriteCustomPixelAnnotations(Core::StringList8* annotations) const;
 	void WriteCustomPixelVariables(Core::StringList8* variables) const;
 	void WriteCustomPixelProlog();
+	void WritePixelPositionProlog();
 	void WritePixelFrontFaceProlog();
+	void WritePixelAncillaryProlog();
 	void WriteInstructions();
 	void WriteMainEpilog();
 	void WriteFunctions();
@@ -524,6 +534,7 @@ private:
 	const ShaderComputeInputInfo* m_cs_input_info = nullptr;
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
 	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
+	const ShaderGeometryComputeInfo* m_geometry_compute_info = nullptr;
 	mutable int                   m_native_wave_tier = -1;
 	mutable bool                  m_lane_reductions_ready = false;
 	mutable ShaderFragmentLaneReductions m_lane_reductions;
@@ -581,6 +592,7 @@ bool IsStorageImageInstruction(const ShaderInstruction& inst);
 bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst);
 String8 GuardImageDestinationStores(const String8& source, const ShaderInstruction& inst, uint32_t index);
 bool EmitZeroImageRead(const ShaderInstruction& inst, const Spirv* spirv, String8* dst_source);
+bool EmitZeroScalarLoad(const ShaderInstruction& inst, const Spirv* spirv, String8* dst_source);
 bool IsStaticScalarSpillWrite(const ShaderInstruction& inst, int* register_id, int* lane);
 bool IsStaticScalarSpillRead(const ShaderInstruction& inst, int* register_id, int* lane);
 String8 ScalarSpillSlotName(int register_id, int lane);
@@ -592,6 +604,12 @@ bool UsesNativeLaneExchange(const ShaderCode& code);
 // M0-relative moves lower to a named register only when M0 is a proven literal
 // in the same basic block. Returns the literal through m0 on success.
 bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0);
+// Gen5 BUFFER_LOAD_FORMAT lowers through shared functions that decode the
+// V#'s format and apply its DST_SEL; `bound_buffers` adds the storage-buffer
+// element reader next to the decoder.
+bool    SpirvUsesGen5BufferFormatLoads(const ShaderCode& code);
+void    SpirvAddGen5BufferFormatConstants(Spirv* spirv);
+String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, bool bound_buffers);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
 const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFormat::Format format);

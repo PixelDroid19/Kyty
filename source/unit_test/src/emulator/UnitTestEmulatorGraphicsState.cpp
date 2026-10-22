@@ -2276,6 +2276,24 @@ TEST(EmulatorGraphicsState, GpuMemoryFreeDeletesExactRange)
 	EXPECT_TRUE(GpuMemoryFindObjects(obj_addr, obj_size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
 }
 
+TEST(EmulatorGraphicsState, GpuMemoryMappedPrefixSpansAdjacentAllocations)
+{
+	EnsureGpuMemoryForTests();
+
+	// Three adjacent 64 KiB mappings, then a one-page gap before a fourth.
+	const uint64_t base = 0x0000005103000000ull;
+	GpuMemorySetAllocatedRange(base, 0x10000ull);
+	GpuMemorySetAllocatedRange(base + 0x10000ull, 0x10000ull);
+	GpuMemorySetAllocatedRange(base + 0x20000ull, 0x10000ull);
+	GpuMemorySetAllocatedRange(base + 0x34000ull, 0x10000ull);
+
+	EXPECT_EQ(GpuMemoryGetAllocatedRangePrefix(base, 0x30000ull), 0x10000ull);
+	EXPECT_EQ(GpuMemoryGetMappedRangePrefix(base, 0x30000ull), 0x30000ull);
+	EXPECT_EQ(GpuMemoryGetMappedRangePrefix(base + 0x8000ull, 0x20000ull), 0x20000ull);
+	EXPECT_EQ(GpuMemoryGetMappedRangePrefix(base, 0x40000ull), 0x30000ull);
+	EXPECT_EQ(GpuMemoryGetMappedRangePrefix(base + 0x30000ull, 0x1000ull), 0u);
+}
+
 TEST(EmulatorGraphicsState, GpuMemoryValidatesTheCompleteAllocatedGuestRangeReadOnly)
 {
 	EnsureGpuMemoryForTests();
@@ -3389,7 +3407,7 @@ TEST(EmulatorGraphicsState, TiledSampleDetileUsesTheGuestFormatElementWidth)
 TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
 {
 	GpuMemoryOverlapSnapshot empty;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(empty, false, false));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(empty, false, GpuMemorySnapshotAdmission::ReadOnlyOverlaps));
 
 	GpuMemoryOverlapSnapshot read_only_storage;
 	read_only_storage.total_count              = 2;
@@ -3398,45 +3416,47 @@ TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
 	read_only_storage.entries[0].relation      = GpuMemoryOverlapType::Crosses;
 	read_only_storage.entries[0].count         = 2;
 	read_only_storage.entries[0].all_read_only = true;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_storage, false, false));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_storage, false, GpuMemorySnapshotAdmission::ReadOnlyOverlaps));
 
 	auto read_only_vertex            = read_only_storage;
 	read_only_vertex.entries[0].type = GpuMemoryObjectType::VertexBuffer;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_vertex, false, false));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_vertex, false, GpuMemorySnapshotAdmission::ReadOnlyOverlaps));
 
 	auto read_only_index            = read_only_storage;
 	read_only_index.entries[0].type = GpuMemoryObjectType::IndexBuffer;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_index, false, false));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(read_only_index, false, GpuMemorySnapshotAdmission::ReadOnlyOverlaps));
 
 	auto writable_storage                     = read_only_storage;
 	writable_storage.entries[0].all_read_only = false;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage, false, false));
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage, true, false));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage, false, GpuMemorySnapshotAdmission::ReadOnlyOverlaps));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_storage, true, GpuMemorySnapshotAdmission::ReadOnlyOverlaps));
 
 	auto writable_vertex            = writable_storage;
 	writable_vertex.entries[0].type = GpuMemoryObjectType::VertexBuffer;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_vertex, true, false));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_vertex, true, GpuMemorySnapshotAdmission::ReadOnlyOverlaps));
 
 	auto surface                     = read_only_storage;
 	surface.entries[0].type          = GpuMemoryObjectType::RenderTexture;
 	surface.entries[0].relation      = GpuMemoryOverlapType::Contains;
 	surface.entries[0].all_read_only = false;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface, false, false));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface, false, GpuMemorySnapshotAdmission::ReadOnlyOverlaps));
 	// An index view reads the guest bytes the linked IndexBuffer object would upload.
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface, false, true));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface, false, GpuMemorySnapshotAdmission::IndexView));
+	// A storage view reads the guest bytes its linked StorageBuffer object uploads.
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(surface, false, GpuMemorySnapshotAdmission::StorageView));
 
 	auto depth_inside            = surface;
 	depth_inside.entries[0].type = GpuMemoryObjectType::DepthStencilBuffer;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(depth_inside, false, true));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(depth_inside, false, GpuMemorySnapshotAdmission::IndexView));
 	depth_inside.entries[0].relation = GpuMemoryOverlapType::Crosses;
-	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(depth_inside, false, true));
+	EXPECT_TRUE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(depth_inside, false, GpuMemorySnapshotAdmission::IndexView));
 
 	auto writable_vertex_index = writable_vertex;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_vertex_index, true, true));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(writable_vertex_index, true, GpuMemorySnapshotAdmission::IndexView));
 
 	auto truncated      = read_only_storage;
 	truncated.truncated = true;
-	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(truncated, false, false));
+	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(truncated, false, GpuMemorySnapshotAdmission::ReadOnlyOverlaps));
 }
 
 TEST(EmulatorGraphicsState, UsesTransientBuffersOnlyForBoundedSafeReadOnlyViews)
@@ -4485,7 +4505,8 @@ TEST(EmulatorGraphicsState, AcceptsSupportedPixelInputLayouts)
 	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000000u, 0x00000000u));
 
 	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000022u, 0x00000022u));
-	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000120u, 0x00000120u));
+	EXPECT_TRUE(ShaderPixelInputMaskSupported(0x00000220u, 0x00000220u));
+	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000100u, 0x00000100u));
 	EXPECT_FALSE(ShaderPixelInputMaskSupported(0x00000020u, 0x00000002u));
 }
 
@@ -4493,6 +4514,8 @@ TEST(EmulatorGraphicsState, DetectsPixelPositionFromInputBits)
 {
 	EXPECT_FALSE(ShaderPixelPositionEnabled(0x00000020u, 0x00000020u));
 	EXPECT_TRUE(ShaderPixelPositionEnabled(0x00000320u, 0x00000320u));
+	EXPECT_TRUE(ShaderPixelPositionEnabled(0x00000220u, 0x00000220u));
+	EXPECT_FALSE(ShaderPixelPositionEnabled(0x00000220u, 0x00000020u));
 }
 
 TEST(EmulatorGraphicsState, DecodesBlendControl)
@@ -4697,45 +4720,41 @@ TEST(EmulatorGraphicsState, DepthPassCanSuppressColorWrites)
 TEST(EmulatorGraphicsState, RequiresPixelShaderOnlyForObservableFragmentWork)
 {
 	HW::ShaderRegisters shader {};
-	HW::DepthControl    depth {};
 
-	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, false));
 
 	shader.m_cbShaderMask = 0x0fu;
-	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, depth));
-	EXPECT_TRUE(State::PixelShaderStageRequired(0x0fu, shader, depth));
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, false));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0x0fu, shader, false));
 
-	shader                    = {};
+	// A color export the target mask drops is unobservable unless alpha-to-coverage reads MRT0.
+	shader                       = {};
 	shader.target_output_mode[0] = 4u;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, false));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, true));
+	shader.target_output_mode[0] = 0u;
+	shader.target_output_mode[1] = 4u;
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, true));
 
 	shader                 = {};
 	shader.shader_z_format = 1u;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 
-	shader                 = {};
-	depth.z_enable         = true;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
-
-	depth                  = {};
-	depth.stencil_enable   = true;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
-
-	depth                                      = {};
+	shader                                      = {};
 	shader.db_shader_control.shader_kill_enable = true;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 
-	shader.db_shader_control                       = {};
+	shader.db_shader_control                        = {};
 	shader.db_shader_control.shader_z_export_enable = true;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 
 	shader.db_shader_control                        = {};
 	shader.db_shader_control.shader_execute_on_noop = true;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 
 	shader.db_shader_control            = {};
 	shader.db_shader_control.other_bits = 1u;
-	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, false));
 }
 
 TEST(EmulatorGraphicsState, RejectsUnsafeNoopPixelElision)
@@ -5311,6 +5330,26 @@ TEST(EmulatorGraphicsState, ResolvesLayeredRenderTargetBackingAndView)
 	RenderTextureObject cpu_visible(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, true, 1u, 1u);
 	RenderTextureObject cpu_visible_layered(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, true, 1u, 5u);
 	EXPECT_FALSE(RenderTextureCanCopyGrowingBacking(cpu_visible.params, cpu_visible_layered.params));
+
+	// A volume keeps its MIP0_DEPTH slices; a SLICE_MAX at the depth selects up to the last one.
+	ASSERT_TRUE(ResolveRenderTextureVolumeView(0x80000u, 64u, 0u, 64u, &view));
+	EXPECT_EQ(view.image_layers, 64u);
+	EXPECT_EQ(view.base_layer, 0u);
+	EXPECT_EQ(view.layer_count, 64u);
+	EXPECT_EQ(view.full_backing_size, 0x2000000u);
+	ASSERT_TRUE(ResolveRenderTextureVolumeView(0x80000u, 64u, 8u, 8u, &view));
+	EXPECT_EQ(view.image_layers, 64u);
+	EXPECT_EQ(view.layer_count, 1u);
+	EXPECT_FALSE(ResolveRenderTextureVolumeView(0x80000u, 64u, 64u, 64u, &view));
+	EXPECT_FALSE(ResolveRenderTextureVolumeView(0x80000u, 64u, 9u, 8u, &view));
+
+	RenderTextureObject volume(RenderTextureFormat::R16G16B16A16Sfloat, 64u, 64u, true, false, 64u, false, 1u, 64u, 0u, 0u, 1u, true);
+	RenderTextureObject shallow(RenderTextureFormat::R16G16B16A16Sfloat, 64u, 64u, true, false, 64u, false, 1u, 32u, 0u, 0u, 1u, true);
+	RenderTextureObject array(RenderTextureFormat::R16G16B16A16Sfloat, 64u, 64u, true, false, 64u, false, 1u, 64u);
+	EXPECT_FALSE(volume.Equal(array.params));
+	EXPECT_FALSE(RenderTextureCanReuseLargerBacking(volume.params, shallow.params));
+	EXPECT_FALSE(RenderTextureCanReuseLargerBacking(array.params, volume.params));
+	EXPECT_FALSE(RenderTextureCanCopyGrowingBacking(shallow.params, volume.params));
 }
 
 TEST(EmulatorGraphicsState, DecodesAndNormalizesVulkanComponentMappings)
@@ -5455,6 +5494,20 @@ TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledRejectsCoveredTile27)
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, false));
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(0u, true));
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(0u, false));
+}
+
+// A live surface covers a sample only when its extent is one of the sample's
+// levels; streamed mip chains in a reused UI-target range are guest content.
+TEST(EmulatorGraphicsState, Gen5SurfaceExtentMayHoldSampleMatchesLevels)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_TRUE(Gen5SurfaceExtentMayHoldSample(642u, 362u, 642u, 362u, 1u, false));
+	EXPECT_TRUE(Gen5SurfaceExtentMayHoldSample(128u, 128u, 512u, 512u, 10u, false));
+	EXPECT_FALSE(Gen5SurfaceExtentMayHoldSample(708u, 295u, 512u, 512u, 10u, false));
+	EXPECT_FALSE(Gen5SurfaceExtentMayHoldSample(1920u, 78u, 512u, 1024u, 11u, true));
+	// A block-compressed sample is addressed by a storage alias in 4x4 blocks.
+	EXPECT_TRUE(Gen5SurfaceExtentMayHoldSample(29u, 30u, 116u, 120u, 1u, true));
+	EXPECT_FALSE(Gen5SurfaceExtentMayHoldSample(29u, 30u, 116u, 120u, 1u, false));
 }
 
 TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledTile27ByFormat)
@@ -5937,10 +5990,11 @@ TEST(EmulatorGraphicsState, StorageMipViewTargetsOneLevelWhileSamplingRetainsCha
 	EXPECT_EQ(selected, VulkanImage::VIEW_DEFAULT);
 }
 
-// A 2D single-layer image with several levels is one mipmapped backing whose levels are written
-// through single-level views and sampled through the whole chain. The contract was established for
+// A 2D image with several levels is one mipmapped backing whose levels are written through
+// single-level views and sampled through the whole chain. The contract was established for
 // depth-tiled R32 chains; Gen5 colour chains in the render-target (27) and Standard64KB (9) tilings
-// follow it. Every other layout keeps the single-level atlas.
+// follow it, and so do Gen5 colour arrays, whose slices each hold a whole chain. Every other layout
+// keeps the single-level atlas.
 TEST(EmulatorGraphicsState, StorageTextureUsesMipBackingForDepthAndGen5ColourChainsOnly)
 {
 	const uint32_t identity = DstSel(4, 5, 6, 7);
@@ -5954,17 +6008,84 @@ TEST(EmulatorGraphicsState, StorageTextureUsesMipBackingForDepthAndGen5ColourCha
 		EXPECT_TRUE(StorageTextureUsesMipBacking(colour.params, true)) << "tile " << tile;
 		EXPECT_FALSE(StorageTextureUsesMipBacking(colour.params, false)) << "Gen4 numbers these tilings differently: tile " << tile;
 	}
-	// One level, Gen4-only tile ids, arrays, volumes and non-zero base layers keep their current layout.
+	for (const uint32_t tile: {5u, 9u, 27u})
+	{
+		const StorageTextureObject arrayed(0u, 0u, 71u, 128u, 128u, 128u, 1u, 8u, tile, true, identity, 13u, 6u, 5u);
+		EXPECT_TRUE(StorageTextureUsesMipBacking(arrayed.params, true)) << "array, tile " << tile;
+		EXPECT_FALSE(StorageTextureUsesMipBacking(arrayed.params, false)) << "array on Gen4, tile " << tile;
+	}
+	// One level, Gen4-only tile ids, linear arrays, volumes and non-zero base layers keep their current layout.
 	const StorageTextureObject one_level(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 1u, 27u, true, identity, 9u, 1u);
 	const StorageTextureObject legacy_linear(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 8u, true, identity, 9u, 1u);
 	const StorageTextureObject legacy_tiled(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 13u, true, identity, 9u, 1u);
-	const StorageTextureObject arrayed(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 27u, true, identity, 13u, 4u);
+	const StorageTextureObject linear_array(0u, 0u, 71u, 128u, 128u, 128u, 0u, 8u, 0u, true, identity, 13u, 4u);
+	const StorageTextureObject one_level_array(0u, 0u, 71u, 128u, 128u, 128u, 0u, 1u, 27u, true, identity, 13u, 4u);
 	const StorageTextureObject volume(0u, 0u, 71u, 64u, 64u, 64u, 0u, 6u, 27u, true, identity, 10u, 8u);
 	const StorageTextureObject based(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 27u, true, identity, 9u, 1u, 2u);
-	for (const auto* params: {one_level.params, legacy_linear.params, legacy_tiled.params, arrayed.params, volume.params, based.params})
+	for (const auto* params: {one_level.params, legacy_linear.params, legacy_tiled.params, linear_array.params, one_level_array.params,
+	                          volume.params, based.params})
 	{
 		EXPECT_FALSE(StorageTextureUsesMipBacking(params, true));
 	}
+}
+
+// Captured: a six-slice, eight-level 128x128 array, then a descriptor at its address naming slice 0
+// alone at level 1. That descriptor is a view of the live array, and so is one naming another slice.
+TEST(EmulatorGraphicsState, StorageTextureArrayDescriptorsAreViewsOfTheLiveArray)
+{
+	const uint32_t identity = DstSel(4, 5, 6, 7);
+	const StorageTextureObject array(0u, 0u, 71u, 128u, 128u, 128u, 0u, 8u, 27u, true, identity, 13u, 6u, 5u);
+	const StorageTextureObject other_slice(0u, 0u, 71u, 128u, 128u, 128u, 2u, 8u, 27u, true, identity, 13u, 6u, 0u);
+	const StorageTextureObject first_slice(0u, 0u, 71u, 128u, 128u, 128u, 1u, 8u, 27u, true, identity, 13u, 1u, 0u);
+	EXPECT_TRUE(array.Equal(other_slice.params));
+	EXPECT_TRUE(StorageTextureCanReuseLargerBacking(array.params, first_slice.params));
+	EXPECT_FALSE(StorageTextureCanReuseLargerBacking(first_slice.params, array.params)) << "a larger array grows instead";
+
+	const StorageTextureObject shorter_chain(0u, 0u, 71u, 128u, 128u, 128u, 1u, 7u, 27u, true, identity, 13u, 1u, 0u);
+	const StorageTextureObject other_format(0u, 0u, 72u, 128u, 128u, 128u, 1u, 8u, 27u, true, identity, 13u, 1u, 0u);
+	const StorageTextureObject single(0u, 0u, 71u, 128u, 128u, 128u, 1u, 8u, 27u, true, identity, 9u, 1u, 0u);
+	for (const auto* params: {shorter_chain.params, other_format.params, single.params})
+	{
+		EXPECT_FALSE(StorageTextureCanReuseLargerBacking(array.params, params));
+	}
+}
+
+static uint32_t g_storage_array_views = 0u;
+
+static bool CreateStorageArrayTestView(VkDevice /*device*/, const VulkanImageViewDescriptor& /*descriptor*/, VkImageView* view)
+{
+	*view = reinterpret_cast<VkImageView>(static_cast<uintptr_t>(0x100u + ++g_storage_array_views));
+	return true;
+}
+
+TEST(EmulatorGraphicsState, StorageTextureArrayStorageViewSelectsDescriptorWindowAndLevel)
+{
+	StorageTextureVulkanImage image;
+	image.image        = reinterpret_cast<VkImage>(static_cast<uintptr_t>(0x10u));
+	image.format       = VK_FORMAT_R16G16B16A16_SFLOAT;
+	image.usage        = StorageTextureGetImageUsage();
+	image.mip_levels   = 8u;
+	image.array_layers = 6u;
+	g_storage_array_views = 0u;
+
+	const int slice0_level1 = StorageTextureResolveArrayStorageView(VK_NULL_HANDLE, &image, 1u, 0u, 1u, CreateStorageArrayTestView);
+	ASSERT_GE(slice0_level1, VulkanImage::VIEW_MAX);
+	const auto& view = image.cached_view_descriptors.back();
+	EXPECT_EQ(view.view_type, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
+	EXPECT_EQ(view.base_mip_level, 1u);
+	EXPECT_EQ(view.level_count, 1u);
+	EXPECT_EQ(view.base_array_layer, 0u);
+	EXPECT_EQ(view.layer_count, 1u);
+
+	const int slice5_level0 = StorageTextureResolveArrayStorageView(VK_NULL_HANDLE, &image, 6u, 5u, 0u, CreateStorageArrayTestView);
+	ASSERT_GE(slice5_level0, VulkanImage::VIEW_MAX);
+	EXPECT_NE(slice5_level0, slice0_level1);
+	EXPECT_EQ(image.cached_view_descriptors.back().base_array_layer, 5u);
+	EXPECT_EQ(StorageTextureResolveArrayStorageView(VK_NULL_HANDLE, &image, 1u, 0u, 1u, CreateStorageArrayTestView), slice0_level1);
+	EXPECT_EQ(g_storage_array_views, 2u);
+
+	EXPECT_EQ(StorageTextureResolveArrayStorageView(VK_NULL_HANDLE, &image, 1u, 0u, 8u, CreateStorageArrayTestView), -1) << "level";
+	EXPECT_EQ(StorageTextureResolveArrayStorageView(VK_NULL_HANDLE, &image, 7u, 0u, 0u, CreateStorageArrayTestView), -1) << "layers";
 }
 
 // A captured downsample chain addresses level 6 of a resource whose T# says MAX_MIP = 5: the store lands
@@ -6299,6 +6420,8 @@ TEST(EmulatorGraphicsState, AllowsVertexContainedInStorageAndRenderTarget)
 	                                                    GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Crosses,
 	                                                    GpuMemoryObjectType::VertexBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                    GpuMemoryObjectType::VertexBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsVertexContainedInSurface(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
 	                                                     GpuMemoryObjectType::VertexBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexReclaimVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
@@ -6432,6 +6555,29 @@ TEST(EmulatorGraphicsState, LinksPendingStorageBeforeDepthStencilReuse)
 	EXPECT_FALSE(GpuMemoryHasPendingWritableWriteBack(false, false, true, false)); // not in use
 	EXPECT_FALSE(GpuMemoryHasPendingWritableWriteBack(true, false, false, false)); // no write-back
 
+	// A storage buffer caches guest bytes as a read-only upload, an idle upload
+	// with no device write since its refresh, or once written back.
+	// Arguments: read_only, origin, in_use, write_time, cpu_update_time, gpu_update_time, device_write_time.
+	using Origin = GpuMemoryContentOrigin;
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(true, Origin::CpuUpload, true, 0, 1, 1, 0));
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::CpuUpload, true, 2, 1, 1, 0));  // not written back
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::CpuUpload, false, 2, 1, 1, 0));  // written back unchanged
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::CpuUpload, false, 2, 1, 3, 0));  // refreshed after the write
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::CpuUpload, false, 2, 1, 3, 3)); // device write latest
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::GpuWriteBack, false, 5, 7, 7, 0));
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::GpuWriteBack, false, 8, 7, 7, 0)); // written since
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::GpuWriteBack, true, 5, 7, 7, 0));  // pending
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(true, Origin::GpuWriteBack, true, 5, 7, 7, 0));   // read in flight
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(true, Origin::GpuWriteBack, true, 8, 7, 7, 0));  // written since
+	EXPECT_TRUE(GpuMemoryStorageBufferCachesGuestBytes(true, Origin::AliasInvalidation, true, 0, 7, 7, 0));
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::AliasInvalidation, true, 0, 7, 7, 0));
+	EXPECT_FALSE(GpuMemoryStorageBufferCachesGuestBytes(false, Origin::Unknown, false, 0, 1, 1, 0));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                          true, GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureOverStorageCache(GpuMemoryObjectType::StorageBuffer,
+	                                                           GpuMemoryOverlapType::IsContainedWithin, false,
+	                                                           GpuMemoryObjectType::StorageTexture));
+
 	// Combined create decision mirrors CreateObject single- and multi-parent paths.
 	EXPECT_TRUE(GpuMemoryShouldLinkPendingDepthStencilStorage(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
 	                                                          GpuMemoryObjectType::DepthStencilBuffer, true, false, true, false));
@@ -6488,6 +6634,20 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                     GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureLinkDepthMetadata(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Crosses,
 	                                                     GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
+	                                                 GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                 GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                                  GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureOverDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
+	                                                  GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Contains,
+	                                                          GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideDepthRange(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryOverlapType::Equals,
+	                                                           GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideDepthRange(GpuMemoryObjectType::RenderTexture, GpuMemoryOverlapType::Contains,
+	                                                           GpuMemoryObjectType::StorageTexture));
 	EXPECT_FALSE(GpuMemoryAllowsTextureReclaimVertex(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
 	                                                 GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(
@@ -6509,6 +6669,19 @@ TEST(EmulatorGraphicsState, ReclaimsReadOnlyVertexBuffersUnderStorageTexture)
 	                                                        GpuMemoryObjectType::StorageTexture));
 	EXPECT_TRUE(GpuMemoryAllowsStorageTextureOverSampledTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::IsContainedWithin,
 	                                                            GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureOverSampledTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                             GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                          GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Equals,
+	                                                          GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Equals,
+	                                                           GpuMemoryContentOrigin::GpuAliasMaterialization,
+	                                                           GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                           GpuMemoryContentOrigin::Unknown, GpuMemoryObjectType::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
+	                                                           GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
 }
 
 TEST(EmulatorGraphicsState, LinksExistingIndexViewsIntoIncomingTexture)
@@ -7621,6 +7794,12 @@ TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5DepthSamples)
 	EXPECT_FALSE(accepts(7u, 13u, 0u));
 	EXPECT_FALSE(accepts(7u, 13u, 2049u));
 	EXPECT_FALSE(accepts(7u, 13u, 2u, 1u));
+	// A single cube map stores its six faces as layers; cube arrays and a
+	// partial face range are refused.
+	EXPECT_TRUE(accepts(7u, 11u, 5u));
+	EXPECT_FALSE(accepts(7u, 11u, 0u));
+	EXPECT_FALSE(accepts(7u, 11u, 11u));
+	EXPECT_FALSE(accepts(7u, 11u, 5u, 1u));
 	EXPECT_FALSE(accepts(7u, 9u, 1u));
 	EXPECT_FALSE(accepts(7u, 9u, 0u, 1u));
 	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 1u));
@@ -7708,6 +7887,23 @@ TEST(EmulatorGraphicsState, ClassifiesOnlyUnambiguousDepthD16Sources)
 	mixed_provenance.entries[0].relation = GpuMemoryOverlapType::Contains;
 	mixed_provenance.entries[1] = uploaded.entries[0];
 	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized, &mixed_provenance), GpuMemoryDepthD16Source::StorageBuffer);
+	auto stale_cover = texture;
+	stale_cover.total_count = 2u;
+	stale_cover.entry_count = 2u;
+	stale_cover.entries[1].type     = GpuMemoryObjectType::RenderTexture;
+	stale_cover.entries[1].relation = GpuMemoryOverlapType::Contains;
+	stale_cover.entries[1].count    = 1u;
+	auto stale_provenance = uploaded;
+	stale_provenance.total_count = 2u;
+	stale_provenance.entry_count = 2u;
+	stale_provenance.entries[1].type     = GpuMemoryObjectType::RenderTexture;
+	stale_provenance.entries[1].relation = GpuMemoryOverlapType::Contains;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(stale_cover, &stale_provenance, 1u), GpuMemoryDepthD16Source::Guest);
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(stale_cover, &stale_provenance), GpuMemoryDepthD16Source::Unsupported);
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(stale_cover, &stale_provenance, 2u), GpuMemoryDepthD16Source::Unsupported);
+	auto gpu_texture = stale_provenance;
+	gpu_texture.entries[0].content_origin = GpuMemoryContentOrigin::GpuWriteBack;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(stale_cover, &gpu_texture, 1u), GpuMemoryDepthD16Source::Unsupported);
 	auto duplicate_storage = materialized;
 	duplicate_storage.entries[1] = duplicate_storage.entries[0];
 	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(duplicate_storage), GpuMemoryDepthD16Source::Unsupported);
@@ -9102,6 +9298,23 @@ TEST(EmulatorGraphicsState, Gen5Eud268SnapshotFeedsConstantSLoad)
 	EXPECT_EQ(mapping.offset_dw, 264);
 	EXPECT_EQ(mapping.dword_count, 4);
 	EXPECT_EQ(mapping.last_consumer_pc, 0x10u);
+}
+
+TEST(EmulatorGraphicsState, DebugStatsClockMeasuresNanoseconds)
+{
+	// A preemption between the paired reads skews one sample, so the best of three must agree within 2%.
+	bool agrees = false;
+	for (int attempt = 0; attempt < 3 && !agrees; attempt++)
+	{
+		const auto stats_start = DebugStatsClock::now();
+		const auto wall_start  = std::chrono::steady_clock::now();
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		const auto wall_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wall_start).count();
+		const auto stats_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - stats_start).count();
+		agrees              = stats_ns > wall_ns * 98 / 100 && stats_ns < wall_ns * 102 / 100;
+	}
+
+	EXPECT_TRUE(agrees);
 }
 
 UT_END();

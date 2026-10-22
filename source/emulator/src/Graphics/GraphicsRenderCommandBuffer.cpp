@@ -963,11 +963,11 @@ public:
 			return nullptr;
 		}
 
-		const auto capture_start = std::chrono::steady_clock::now();
+		const auto capture_start      = DebugStatsClock::now();
 		const auto finish_upload_time = [&]()
 		{
-			const auto total_ns = static_cast<uint64_t>(
-			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - capture_start).count());
+			const auto total_ns =
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - capture_start).count());
 			const uint64_t excluded_ns = *validation_ns > UINT64_MAX - *compare_ns ? UINT64_MAX : *validation_ns + *compare_ns;
 			*upload_ns = total_ns > excluded_ns ? total_ns - excluded_ns : 0u;
 		};
@@ -1005,10 +1005,10 @@ public:
 		auto*      entry = Acquire(ctx, size, usage, GpuMemoryTransientBufferAllocationClass::Snapshot, false, nullptr);
 		if (entry == nullptr)
 		{
-			const auto preflight_start = std::chrono::steady_clock::now();
+			const auto preflight_start = DebugStatsClock::now();
 			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin, admission);
 			*validation_ns += static_cast<uint64_t>(
-			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - preflight_start).count());
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - preflight_start).count());
 			if (!eligible)
 			{
 				finish_upload_time();
@@ -1465,6 +1465,12 @@ void CommandBuffer::Free()
 		delete m_transient_copy_buffers;
 		m_transient_copy_buffers = nullptr;
 	}
+	if (m_transient_device_buffers != nullptr)
+	{
+		m_transient_device_buffers->Destroy(g_render_ctx->GetGraphicCtx());
+		delete m_transient_device_buffers;
+		m_transient_device_buffers = nullptr;
+	}
 
 	m_pool->busy[m_index] = false;
 	MarkCommandBufferResetting();
@@ -1573,6 +1579,10 @@ void CommandBuffer::Begin()
 	{
 		m_transient_copy_buffers->Reset();
 	}
+	if (m_transient_device_buffers != nullptr)
+	{
+		m_transient_device_buffers->Reset();
+	}
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -1654,6 +1664,16 @@ VulkanBuffer* CommandBuffer::AllocateTransientCopyBuffer(uint64_t size)
 	}
 	return m_transient_copy_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size,
 	                                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+}
+
+VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage)
+{
+	EXIT_IF(IsInvalid());
+	if (m_transient_device_buffers == nullptr)
+	{
+		m_transient_device_buffers = new TransientBufferPool;
+	}
+	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true);
 }
 
 void CommandBuffer::DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth)
@@ -1982,7 +2002,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 	{
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
-		const auto wait_start = std::chrono::steady_clock::now();
+		const auto wait_start  = DebugStatsClock::now();
 		const auto wait_result = VulkanCallAndPublishOnSuccess(
 		    [&]
 		    { return vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, 10000000000ULL); },
@@ -2017,7 +2037,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 			    }
 			    m_execute = false;
 		    });
-		const auto wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
+		const auto wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - wait_start).count();
 		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
 		if (wait_result != VK_SUCCESS)
 		{

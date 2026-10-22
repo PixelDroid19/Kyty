@@ -1058,6 +1058,45 @@ TEST(EmulatorFragmentMaskFlow, VccBranchRequiresUniformityOfTheWholePair)
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
+// s_cselect_b64 vcc, exec, 0 on a compare of a scalar number, then s_cbranch_vccz over a scalar write that a
+// vector reads after the join; with `narrowed_exec` a lane compare narrows EXEC first and the read follows
+// its restore.
+std::vector<Words> SelectedExecBranch(bool narrowed_exec)
+{
+	std::vector<Words> slots(1);
+	auto& words = slots[0];
+	words.insert(words.end(), {0xf4200508u, 0xfa000004u}); // s_buffer_load_dword s20, s[16:19], 4
+	Sopp(words, 12, 0xc07f);                               // s_waitcnt lgkmcnt(0)
+	if (narrowed_exec)
+	{
+		Append(words, Vopc(4, Inline(0), 0));  // v_cmp_gt_f32 vcc, 0, v0
+		Sop1(words, 36, 4, kVccLo);            // s_and_saveexec_b64 s[4:5], vcc
+	}
+	Append(words, Sopc(6, 20, Inline(0)));     // s_cmp_eq_u32 s20, 0
+	Sop2(words, 11, kVccLo, kExecLo, Inline(0)); // s_cselect_b64 vcc, exec, 0
+	Sopp(words, 6, 1);                         // s_cbranch_vccz over the scalar write
+	Sop1(words, 3, 21, Inline(1));             // s_mov_b32 s21, 1
+	if (narrowed_exec) { Sop1(words, 4, kExecLo, 4); } // s_mov_b64 exec, s[4:5]
+	Vop1(words, 1, 3, 21);                     // v_mov_b32 v3, s21
+	Vop1(words, 1, 2, Inline(0));
+	Append(words, Mrt0Export(2, 2, 2, 2));
+	Sopp(words, 1);
+	return slots;
+}
+
+TEST(EmulatorFragmentMaskFlow, ExecSelectedOnAUniformSccIsUniformOnlyUnderTheEntryExec)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(SelectedExecBranch(false)), 64u).lane_local,
+		      "EXEC or nothing, chosen by a scalar compare, decides the same way for every host subgroup");
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(ParsePixel(SelectedExecBranch(true)), 64u);
+		Check(!flow.lane_local && Contains(flow.reason, "divergent control flow"),
+		      "under a lane-narrowed EXEC a host subgroup with no active lane decides alone");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 // A compare of a scalar number whose destination pair overwrites that number decides the same way for every lane.
 TEST(EmulatorFragmentMaskFlow, ACompareOverwritingItsScalarSourceStaysUniform)
 {
@@ -1175,6 +1214,109 @@ TEST(EmulatorFragmentMaskFlow, AnAnyLaneTestBranchesLikeTheVccBranch)
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
+
+// "Does every lane hold the condition": the per-lane compare ANDed with a saved launch EXEC and compared
+// with that EXEC (S_CMP_LG_U64 s[6:7], s[4:5]), then an SCC branch over a block, as for the any-lane test.
+TEST(EmulatorFragmentMaskFlow, AnAllLanesTestBranchesLikeTheAnyLaneTest)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto program = [](bool number)
+		{
+			Words words;
+			Sop1(words, 4, 4, kExecLo);                                  // s_mov_b64 s[4:5], exec
+			Append(words, Vopc(0xc5, Inline(0), 0u));                    // v_cmp_ne_u32 vcc, 0, v0 (per lane)
+			Sop2(words, 15, 6, kVccLo, 4);                               // s_and_b64 s[6:7], vcc, s[4:5]
+			if (number) { Sop1(words, 4, 4, Inline(5)); }                // s_mov_b64 s[4:5], 5
+			Append(words, Sopc(0x13, 6, 4));                             // s_cmp_lg_u64 s[6:7], s[4:5]
+			Sopp(words, 4, 1);                                           // s_cbranch_scc0 over the next dword
+			Vop1(words, 1, 1, Inline(1));                                // v_mov_b32 v1, 1
+			Vop1(words, 1, 2, Inline(0));                                // v_mov_b32 v2, 0
+			words.insert(words.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
+			Sopp(words, 1);
+			return std::vector<Words> {words};
+		};
+		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(program(false)), 64u).lane_local,
+		      "comparing two lane masks asks whether any lane's bits differ");
+		const auto numeric = ShaderAnalyzeFragmentMaskFlow(ParsePixel(program(true)), 64u);
+		Check(!numeric.lane_local && Contains(numeric.reason, "mask observed as a number"), "a mask compared with a number is refused");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+// An if/else on an any-lane test: the "then" block ends with S_BRANCH over the "else" block. Each block runs only for
+// the lanes of its path, so the else block reads the value from before the branch; after the final join a scalar
+// either block wrote differs between paths.
+TEST(EmulatorFragmentMaskFlow, AnIfElseOnAnAnyLaneTestJoinsAfterBothBlocks)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto if_else = [](const Words& after)
+		{
+			Words words;
+			Sopp(words, 4, 2);                                           // s_cbranch_scc0 else
+			Sop1(words, 3, 20, Inline(1));                               // then: s_mov_b32 s20, 1
+			Sopp(words, 2, 2);                                           // s_branch join
+			Vop1(words, 1, 3, 20);                                       // else: v_mov_b32 v3, s20
+			Sop1(words, 3, 21, Inline(2));                               // s_mov_b32 s21, 2
+			Append(words, after);                                        // join
+			return words;
+		};
+		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(if_else({}))), 64u).lane_local,
+		      "the then block's write does not reach the else block");
+		for (const uint32_t written: {20u, 21u})
+		{
+			Words read;
+			Vop1(read, 1, 4, written);                                   // join: v_mov_b32 v4, s20 / s21
+			const auto flow = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AnyLaneProgram(if_else(read))), 64u);
+			Check(!flow.lane_local && Contains(flow.reason, "divergent control flow"), "either block's write diverges at the join");
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+// A VCC branch whose compare reads VGPRs holding one value in every lane decides the same way for the whole wave, so
+// it opens no divergent region: an if/else that picks a scalar on it may be read after the join. A VGPR from the
+// entry, or one written in a divergent region, holds a value per lane.
+TEST(EmulatorFragmentMaskFlow, AVccBranchOnUniformVgprsOpensNoRegion)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto program = [](const Words& operands)
+		{
+			std::vector<Words> slots(1);
+			auto& words = slots[0];
+			Append(words, operands);                                     // v4, v5
+			Append(words, Vopc(0xc5, kVgpr + 4u, 5u));                   // v_cmp_ne_u32 vcc, v4, v5
+			Sopp(words, 6, 2);                                           // s_cbranch_vccz else
+			Sop1(words, 3, 22, Inline(1));                               // then: s_mov_b32 s22, 1
+			Sopp(words, 2, 1);                                           // s_branch join
+			Sop1(words, 3, 22, Inline(2));                               // else: s_mov_b32 s22, 2
+			Vop1(words, 1, 2, 22);                                       // join: v_mov_b32 v2, s22
+			words.insert(words.end(), {0xf800180fu, 2u | (2u << 8u) | (2u << 16u) | (2u << 24u)});
+			Sopp(words, 1);
+			return slots;
+		};
+		Words scalars;
+		Vop1(scalars, 1, 4, 20);                                         // v_mov_b32 v4, s20
+		Vop1(scalars, 1, 5, Inline(3));                                  // v_mov_b32 v5, 3
+		Check(ShaderAnalyzeFragmentMaskFlow(ParsePixel(program(scalars)), 64u).lane_local, "VGPRs copied from scalars are uniform");
+
+		Words entry;
+		Vop1(entry, 1, 5, Inline(3));                                    // v4 keeps its per-lane entry value
+		Words region = scalars;
+		Append(region, Vopc(0xc5, Inline(0), 0u));                       // v_cmp_ne_u32 vcc, 0, v0 (per lane)
+		Sopp(region, 6, 1);                                              // s_cbranch_vccz over the next dword
+		Vop1(region, 1, 4, 21);                                          // v_mov_b32 v4, s21 in the lanes that enter
+		for (const auto& operands: {entry, region})
+		{
+			const auto flow = ShaderAnalyzeFragmentMaskFlow(ParsePixel(program(operands)), 64u);
+			Check(!flow.lane_local && Contains(flow.reason, "divergent control flow"), "a per-lane VGPR makes the branch divergent");
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 
 std::vector<Words> AsSlots(const Words& words)
 {

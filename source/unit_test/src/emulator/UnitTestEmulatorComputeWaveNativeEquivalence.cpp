@@ -220,6 +220,39 @@ static constexpr uint32_t kWaitLgkm0      = 0xbf8cc07fu; // s_waitcnt lgkmcnt(0)
 static constexpr uint32_t kMulV0VccLo     = 0x1000006au; // v_mul_f32 v0, vcc_lo, v0
 static constexpr uint32_t kFirstlaneV0    = 0x7e000500u; // v_readfirstlane_b32 s0, v0
 
+static constexpr uint32_t kMovV1Dpp        = 0x7e0202fau; // v_mov_b32_dpp v1, v0 ...
+static constexpr uint32_t kQuadPermBound   = 0xff08b100u; // quad_perm:[1,0,3,2] bound_ctrl:1
+static constexpr uint32_t kQuadPermUnbound = 0xff00b100u; // quad_perm:[1,0,3,2] bound_ctrl:0
+static constexpr uint32_t kRowShrBound     = 0xff091100u; // row_shr:1 bound_ctrl:1
+
+TEST(EmulatorComputeWaveNativeEquivalence, AdmitsABoundQuadPermuteAsAQuadRead)
+{
+	static constexpr uint32_t kWords[] = {kMovV1Dpp, kQuadPermBound, kEnd};
+	ASSERT_EXIT(
+	    {
+		    InitializeShaderConfig();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(kWords, sizeof(kWords), &code))
+		    {
+			    std::_Exit(2);
+		    }
+		    const auto result = ShaderAnalyzeComputeWaveNativeEquivalence(code);
+		    std::_Exit(result.supported && result.reads_quad_lanes ? 0 : 3);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsAnUnboundQuadPermute)
+{
+	ExpectNativeEquivalence({kMovV1Dpp, kQuadPermUnbound, kEnd}, false, 0x0u, "not representable per lane");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsARowShift)
+{
+	ExpectNativeEquivalence({kMovV1Dpp, kRowShrBound, kEnd}, false, 0x0u, "not representable per lane");
+}
+
 TEST(EmulatorComputeWaveNativeEquivalence, AdmitsReadfirstlaneOfAUniformImageLoad)
 {
 	ExpectNativeEquivalence({kMovV2Zero, kMovV3Zero, kMovV4V0, kImageLoad2d, kImageLoadAddr, kBufferVccLo, kNullOffset, kWaitLgkm0,

@@ -102,7 +102,7 @@ ShaderPixelInputInfo PixelInputFromRegisters(const HW::PixelShaderInfo& regs)
 	HW::ShaderRegisters    sh;
 	ShaderVertexInputInfo  vs_info;
 	ShaderPixelInputInfo   info;
-	ShaderGetInputInfoPS(&regs, &sh, &vs_info, &info, false);
+	ShaderGetInputInfoPS(&regs, &sh, &vs_info, 0xffffffffu, &info, false);
 	return info;
 }
 

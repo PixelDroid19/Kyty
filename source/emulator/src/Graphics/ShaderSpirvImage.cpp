@@ -1109,6 +1109,29 @@ bool EmitZeroImageRead(const ShaderInstruction& inst, const Spirv* spirv, String
 	return true;
 }
 
+// A descriptor S_LOAD whose descriptor binds nothing (ShaderZeroDescriptorLoads):
+// its destinations feed only reads that return zero, so it writes zero.
+bool EmitZeroScalarLoad(const ShaderInstruction& inst, const Spirv* spirv, String8* dst_source)
+{
+	const auto zero = spirv->GetConstantUint(0u);
+	if (zero.StartsWith("unknown_") || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size <= 0)
+	{
+		return false;
+	}
+	String8 source;
+	for (int word = 0; word < inst.dst.size; ++word)
+	{
+		const auto dst = operand_variable_to_str(inst.dst, word);
+		if (dst.type != SpirvType::Uint || dst.value.IsEmpty())
+		{
+			return false;
+		}
+		source += String8::FromPrintf("               OpStore %%%s %%%s\n", dst.value.c_str(), zero.c_str());
+	}
+	*dst_source += source;
+	return true;
+}
+
 static int ImageUserDataRegisterBase(const Spirv* spirv)
 {
 	const auto* vs_info = spirv->GetVsInputInfo();
@@ -2827,8 +2850,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 %image_dref_sampler_<index> = OpLoad %Sampler %image_dref_sampler_ptr_<index>
 %image_dref_sampled_<index> = OpSampledImage %SampledImageA %image_dref_image_<index> %image_dref_sampler_<index>
 %image_dref_reference_<index> = OpLoad %float %<dref>
-%image_dref_x_<index> = OpLoad %float %<x>
-%image_dref_y_<index> = OpLoad %float %<y>
+<array_coordinates>
 %image_dref_layer_<index> = OpLoad %float %<layer>
 %image_dref_coordinate_<index> = OpCompositeConstruct %v3float %image_dref_x_<index> %image_dref_y_<index> %image_dref_layer_<index>
 <array_sample>
@@ -2841,8 +2863,18 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 %image_dref_gather_<index> = OpImageGather %v4float %image_dref_sampled_<index> %image_dref_coordinate_<index> %int_0
 )";
 
+	static const char* array_coordinates_text = R"(%image_dref_x_<index> = OpLoad %float %<x>
+%image_dref_y_<index> = OpLoad %float %<y>)";
+	// Cube MIMG coordinates use the [1, 2] face-local window; the 2D-array view
+	// of the faces expects [0, 1].
+	static const char* cube_coordinates_text = R"(%image_dref_x_raw_<index> = OpLoad %float %<x>
+%image_dref_y_raw_<index> = OpLoad %float %<y>
+%image_dref_x_<index> = OpFSub %float %image_dref_x_raw_<index> %float_1_000000
+%image_dref_y_<index> = OpFSub %float %image_dref_y_raw_<index> %float_1_000000)";
+
 	const char* sample_text = comparison_sampled ? flat_depth_comparison_text : (depth_view ? flat_depth_text : (flat ? flat_text : array_text));
 	*dst_source += String8(sample_text)
+	                   .ReplaceStr("<array_coordinates>", inst.mimg_dimension == 3u ? cube_coordinates_text : array_coordinates_text)
 	                   .ReplaceStr("<array_sample>", manual_linear ? array_linear_text : array_nearest_text)
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<texture>", texture_value.value)

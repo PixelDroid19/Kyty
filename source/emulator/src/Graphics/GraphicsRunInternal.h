@@ -1,19 +1,19 @@
 #ifndef EMULATOR_SRC_GRAPHICS_GRAPHICSRUNINTERNAL_H_
 #define EMULATOR_SRC_GRAPHICS_GRAPHICSRUNINTERNAL_H_
 
-#include "Emulator/Graphics/GraphicsRun.h"
-
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/LinkList.h"
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Graphics/AsyncJob.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
-#include "Emulator/Graphics/Graphics.h"
-#include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GpuSubmissionCoordinator.h"
 #include "Emulator/Graphics/GpuSubmissionPublicationGate.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/Graphics.h"
+#include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
 
 #include <array>
@@ -122,6 +122,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_blend_color);
 KYTY_HW_CTX_PARSER(hw_ctx_set_blend_control);
 KYTY_HW_CTX_PARSER(hw_ctx_set_clip_control);
 KYTY_HW_CTX_PARSER(hw_ctx_set_color_control);
+KYTY_HW_CTX_PARSER(hw_ctx_set_alpha_to_mask);
 KYTY_HW_CTX_PARSER(hw_ctx_set_color_info);
 KYTY_HW_CTX_PARSER(hw_ctx_set_depth_clear);
 KYTY_HW_CTX_PARSER(hw_ctx_set_depth_control);
@@ -228,10 +229,10 @@ class ScopedDebugStatsTimer
 public:
 	using RecordFunc = void (*)(uint64_t);
 
-	explicit ScopedDebugStatsTimer(RecordFunc record): m_record(record), m_start(std::chrono::steady_clock::now()) {}
+	explicit ScopedDebugStatsTimer(RecordFunc record): m_record(record), m_start(DebugStatsClock::now()) {}
 	~ScopedDebugStatsTimer()
 	{
-		const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
+		const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - m_start).count();
 		m_record(static_cast<uint64_t>(elapsed_ns));
 	}
 
@@ -239,7 +240,7 @@ public:
 
 private:
 	RecordFunc                            m_record;
-	std::chrono::steady_clock::time_point m_start;
+	DebugStatsClock::time_point           m_start;
 };
 
 inline void TraceWait(const char* stage, int queue, uint64_t address, uint64_t value, uint64_t reference, uint64_t mask, uint64_t sequence,

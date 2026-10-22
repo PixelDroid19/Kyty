@@ -61,7 +61,6 @@
 #include <list>
 #include <map>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -265,6 +264,11 @@ public:
 	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, const ShaderComputeInputInfo* input_info,
 	                               const HW::ComputeShaderInfo* cs_regs,
 	                               const HW::ShaderRegisters* sh_regs);
+	// Compute pass of a merged ES+GS draw; `input_info` is the fused front with
+	// the geometry push block and guest device addressing bound.
+	VulkanPipeline* CreateGeometryPipeline(CommandBuffer* recording_buffer, const ShaderVertexInputInfo* input_info,
+	                                       const ShaderGeometryComputeInfo& geometry, const HW::VertexShaderInfo* vs_regs,
+	                                       const HW::ShaderRegisters* sh_regs);
 	void            DeletePipeline(VulkanPipeline* pipeline);
 	void            DeletePipelines(VulkanFramebuffer* framebuffer);
 	void            DeleteAllPipelines();
@@ -340,6 +344,7 @@ public:
 	KYTY_CLASS_NO_COPY(DescriptorCache);
 
 	VkDescriptorSetLayout GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind);
+	VkDescriptorSetLayout GetDescriptorSetLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 
 	VulkanDescriptorSet* Allocate(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                 Free(VulkanDescriptorSet* set);
@@ -364,6 +369,16 @@ public:
 	void                 DeleteAllForTesting(GraphicContext* ctx);
 
 private:
+	struct ResourceSlot
+	{
+		uint64_t unique_id = 0;
+		uint32_t position  = 0;
+	};
+	struct SetReference
+	{
+		int      set  = -1;
+		uint32_t slot = 0;
+	};
 	struct Set
 	{
 		VulkanDescriptorSet* set                                           = nullptr;
@@ -406,6 +421,9 @@ private:
 		GpuSubmissionHighWater uses;
 		bool                   untracked_use = false;
 		uint64_t               last_use      = 0;
+		// Each referenced resource with this set's position in that resource's
+		// reverse-index list, so unindexing removes the set in constant time.
+		std::vector<ResourceSlot> resources;
 	};
 
 	struct Pool
@@ -451,8 +469,10 @@ private:
 	uint64_t     m_use_clock       = 0;
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
-	// Live set indices by the unique id of each image or buffer they reference.
-	std::unordered_map<uint64_t, std::unordered_set<int>> m_sets_by_resource;
+	// Live sets by the unique id of each image or buffer they reference.
+	std::unordered_map<uint64_t, std::vector<SetReference>> m_sets_by_resource;
+	// IndexSet scratch, kept to avoid an allocation per created set.
+	std::vector<uint64_t>                                   m_resource_ids;
 
 	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
 	// Released sets, oldest first, and per layout the positions of its sets in
@@ -471,7 +491,8 @@ public:
 	KYTY_CLASS_NO_COPY(SamplerCache);
 
 	VkSampler GetSampler(uint64_t id);
-	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized = true);
+	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized,
+	                       bool uses_r_coordinate);
 	void      DeleteAllForTesting(GraphicContext* ctx);
 
 private:
@@ -480,6 +501,7 @@ private:
 		ShaderSamplerResource r;
 		State::ImageSampleOperation operation {};
 		bool                  allow_unnormalized = true;
+		bool                  uses_r_coordinate  = true;
 		VkSampler             vk = nullptr;
 	};
 
@@ -820,6 +842,7 @@ struct RenderDepthInfo
 	bool                        stencil_clear_enable     = false;
 	uint8_t                     stencil_clear_value      = 0;
 	bool                        stencil_plane            = false;
+	bool                        htile_stencil            = false;
 	bool                        stencil_test_enable      = false;
 	bool                        sampled                  = false;
 	bool                        update_compression_state = false;
@@ -870,6 +893,8 @@ struct RenderColorAttachmentInfo
 	uint32_t              image_layers            = 1;
 	uint32_t              base_array_layer         = 0;
 	uint32_t              layer_count              = 1;
+	// A 3D target: the layers are the depth slices of one volume.
+	bool                  volume                  = false;
 	// Levels of a mip-chained target and the one MIP_LEVEL renders.
 	uint32_t              mip_levels              = 1;
 	uint32_t              mip_level               = 0;
@@ -1493,26 +1518,17 @@ struct CubeDrawDepthCoverage
 	return shape == ShaderGen5SampledTextureShape::TwoDimensional;
 }
 
-[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_slot)
+[[nodiscard]] constexpr uint32_t SamplerViewShapeBit(ShaderGen5SampledTextureShape shape)
 {
-	bool matched = false;
-	for (int i = 0; i < textures.textures_num; ++i)
-	{
-		const auto& descriptor = textures.desc[i];
-		if (descriptor.usage != ShaderTextureUsage::ReadOnly || descriptor.slot != sampler_slot)
-		{
-			continue;
-		}
-		matched = true;
-		if (!SamplerViewAllowsUnnormalized(ShaderResolvedSampledTextureShape(descriptor)))
-		{
-			return false;
-		}
-	}
-	if (matched)
-	{
-		return true;
-	}
+	return 1u << static_cast<uint32_t>(shape);
+}
+
+// Shapes of the read-only views paired with a sampler slot; every read-only
+// view when none pairs with it.
+[[nodiscard]] inline uint32_t BindSamplerViewShapes(const ShaderTextureResources& textures, int sampler_slot)
+{
+	uint32_t paired = 0;
+	uint32_t all    = 0;
 	for (int i = 0; i < textures.textures_num; ++i)
 	{
 		const auto& descriptor = textures.desc[i];
@@ -1520,12 +1536,26 @@ struct CubeDrawDepthCoverage
 		{
 			continue;
 		}
-		if (!SamplerViewAllowsUnnormalized(ShaderResolvedSampledTextureShape(descriptor)))
+		const uint32_t bit = SamplerViewShapeBit(ShaderResolvedSampledTextureShape(descriptor));
+		all |= bit;
+		if (descriptor.slot == sampler_slot)
 		{
-			return false;
+			paired |= bit;
 		}
 	}
-	return true;
+	return paired != 0u ? paired : all;
+}
+
+[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_slot)
+{
+	return (BindSamplerViewShapes(textures, sampler_slot) & ~SamplerViewShapeBit(ShaderGen5SampledTextureShape::TwoDimensional)) == 0u;
+}
+
+// The W address mode (S# CLAMP_Z) wraps the R coordinate of 3D views only: 2D
+// views have none, and array and cube views select a layer or face without it.
+[[nodiscard]] inline bool BindSamplerUsesRCoordinate(const ShaderTextureResources& textures, int sampler_slot)
+{
+	return (BindSamplerViewShapes(textures, sampler_slot) & SamplerViewShapeBit(ShaderGen5SampledTextureShape::ThreeDimensional)) != 0u;
 }
 
 // Draw-local context for an opt-in, bounded material-binding diagnostic.
@@ -1766,8 +1796,10 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
 // --- Bind ---
 // The draw fetches only records [first_record, required_records); zero required_records means every declared record.
 // records_exact says the GPU reads the same draw range the host resolved, so fetches cannot pass it.
+// Per-instance streams fetch records [0, first_instance + instance_count) instead.
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
-	                   uint32_t first_record, uint32_t required_records, bool records_exact);
+	                   uint32_t first_record, uint32_t required_records, bool records_exact, uint32_t first_instance,
+	                   uint32_t instance_count);
 // How a shader stage may read a resolution-scaled image. Normalized sampling
 // without texel offsets reads the same content at any host extent; integer
 // texel access, size queries and texel offsets address host texels.

@@ -52,6 +52,9 @@ struct ControllerInputCallbacks
 	void (*disconnect)(int id)                       = nullptr;
 	void (*button)(int id, uint32_t button, bool down) = nullptr;
 	void (*axis)(int id, Axis axis, int value)       = nullptr;
+	// The user ended the session (window close or the host quit key), as
+	// opposed to a fault or a signal.
+	void (*session_end)()                            = nullptr;
 };
 
 // Function-pointer bridge, mirroring GuestRuntimePort: the composition root
@@ -66,6 +69,7 @@ public:
 	static void Disconnect(int id);
 	static void Button(int id, uint32_t button, bool down);
 	static void Axis(int id, ::Kyty::Emulator::Ports::Axis axis, int value);
+	static void SessionEnd();
 };
 
 } // namespace Kyty::Emulator::Ports

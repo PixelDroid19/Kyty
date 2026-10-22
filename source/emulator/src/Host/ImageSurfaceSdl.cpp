@@ -6,12 +6,8 @@
 
 #include "Emulator/Log.h"
 
-#include "SDL_blendmode.h"
-#include "SDL_error.h"
-#include "SDL_pixels.h"
-#include "SDL_rect.h"
-#include "SDL_rwops.h"
-#include "SDL_surface.h"
+#include <SDL3/SDL_error.h>
+#include <SDL3/SDL_surface.h>
 
 #include <climits>
 
@@ -27,6 +23,7 @@
 
 namespace Kyty::Emulator::Host {
 
+using Core::ByteBuffer;
 using Core::File;
 using Core::String;
 
@@ -39,7 +36,7 @@ public:
 
 	virtual ~HostImageSurfacePrivate()
 	{
-		SDL_FreeSurface(sdl);
+		SDL_DestroySurface(sdl);
 		stbi_image_free(decoded_pixels);
 	}
 
@@ -100,55 +97,37 @@ bool RectIsInside(const HostImageSurfaceMetadata& metadata, const HostImageSurfa
 	       rect.width <= metadata.width - rect.x && rect.height <= metadata.height - rect.y;
 }
 
-int ReadPng(void* user, char* data, int size)
-{
-	auto* source = static_cast<SDL_RWops*>(user);
-	return static_cast<int>(source->read(source, data, 1, size));
-}
-
-void SkipPng(void* user, int size)
-{
-	auto* source = static_cast<SDL_RWops*>(user);
-	source->seek(source, size, RW_SEEK_CUR);
-}
-
-int EofPng(void* user)
-{
-	auto* source = static_cast<SDL_RWops*>(user);
-	return source->seek(source, 0, RW_SEEK_CUR) >= source->size(source) ? 1 : 0;
-}
-
 } // namespace
 
 HostImageSurface* HostImageSurface::CreateFromNative(void* native_surface, void* decoded_pixels)
 {
 	auto* sdl = static_cast<SDL_Surface*>(native_surface);
-	EXIT_IF(sdl == nullptr || sdl->format == nullptr || sdl->pixels == nullptr || sdl->w <= 0 || sdl->h <= 0 || sdl->pitch <= 0);
+	EXIT_IF(sdl == nullptr || sdl->pixels == nullptr || sdl->w <= 0 || sdl->h <= 0 || sdl->pitch <= 0);
 
 	auto* surface = new HostImageSurfacePrivate(sdl, decoded_pixels);
 	auto* result  = new HostImageSurface(surface);
 
 	auto& metadata         = surface->metadata;
-	metadata.bits_per_pixel = static_cast<int>(KYTY_SDL_BITSPERPIXEL(sdl->format->format));
+	metadata.bits_per_pixel = static_cast<int>(KYTY_SDL_BITSPERPIXEL(sdl->format));
 
-	EXIT_IF(sdl->format->palette != nullptr && metadata.bits_per_pixel != 8);
+	EXIT_IF(SDL_GetSurfacePalette(sdl) != nullptr && metadata.bits_per_pixel != 8);
 
 	metadata.width  = static_cast<uint32_t>(sdl->w);
 	metadata.height = static_cast<uint32_t>(sdl->h);
 	metadata.pitch  = static_cast<uint32_t>(sdl->pitch);
 
-	EXIT_IF(KYTY_SDL_PIXELTYPE(sdl->format->format) != SDL_PIXELTYPE_ARRAYU8 &&
-	        KYTY_SDL_PIXELTYPE(sdl->format->format) != SDL_PIXELTYPE_INDEX8 &&
-	        KYTY_SDL_PIXELTYPE(sdl->format->format) != SDL_PIXELTYPE_PACKED32);
+	EXIT_IF(KYTY_SDL_PIXELTYPE(sdl->format) != SDL_PIXELTYPE_ARRAYU8 &&
+	        KYTY_SDL_PIXELTYPE(sdl->format) != SDL_PIXELTYPE_INDEX8 &&
+	        KYTY_SDL_PIXELTYPE(sdl->format) != SDL_PIXELTYPE_PACKED32);
 
-	EXIT_IF(KYTY_SDL_PIXELLAYOUT(sdl->format->format) != 0 && KYTY_SDL_PIXELLAYOUT(sdl->format->format) != SDL_PACKEDLAYOUT_8888);
+	EXIT_IF(KYTY_SDL_PIXELLAYOUT(sdl->format) != 0 && KYTY_SDL_PIXELLAYOUT(sdl->format) != SDL_PACKEDLAYOUT_8888);
 
 	if (metadata.bits_per_pixel == 8)
 	{
 		metadata.order = HostImageSurfaceOrder::Alpha;
-	} else if (SDL_ISPIXELFORMAT_PACKED(sdl->format->format)) // NOLINT(hicpp-signed-bitwise)
+	} else if (SDL_ISPIXELFORMAT_PACKED(sdl->format)) // NOLINT(hicpp-signed-bitwise)
 	{
-		switch (KYTY_SDL_PIXELORDER(sdl->format->format))
+		switch (KYTY_SDL_PIXELORDER(sdl->format))
 		{
 			case SDL_PACKEDORDER_NONE: EXIT("SDL_PACKEDORDER_NONE\n"); break;
 			case SDL_PACKEDORDER_XRGB: EXIT("SDL_PACKEDORDER_XRGB\n"); break;
@@ -168,11 +147,11 @@ HostImageSurface* HostImageSurface::CreateFromNative(void* native_surface, void*
 			case SDL_PACKEDORDER_ABGR: metadata.order = HostImageSurfaceOrder::Rgba; break;
 
 			case SDL_PACKEDORDER_BGRA: EXIT("SDL_PACKEDORDER_BGRA\n"); break;
-			default: EXIT("unknown packed format %d\n", int(KYTY_SDL_PIXELORDER(sdl->format->format)));
+			default: EXIT("unknown packed format %d\n", int(KYTY_SDL_PIXELORDER(sdl->format)));
 		}
-	} else if (SDL_ISPIXELFORMAT_ARRAY(sdl->format->format)) // NOLINT(hicpp-signed-bitwise)
+	} else if (SDL_ISPIXELFORMAT_ARRAY(sdl->format)) // NOLINT(hicpp-signed-bitwise)
 	{
-		switch (KYTY_SDL_PIXELORDER(sdl->format->format))
+		switch (KYTY_SDL_PIXELORDER(sdl->format))
 		{
 			case SDL_ARRAYORDER_NONE: EXIT("SDL_ARRAYORDER_NONE\n"); break;
 
@@ -190,20 +169,19 @@ HostImageSurface* HostImageSurface::CreateFromNative(void* native_surface, void*
 
 			case SDL_ARRAYORDER_BGRA: EXIT("SDL_ARRAYORDER_BGRA\n"); break;
 			case SDL_ARRAYORDER_ABGR: EXIT("SDL_ARRAYORDER_ABGR\n"); break;
-			default: EXIT("unknown array format %d\n", int(KYTY_SDL_PIXELORDER(sdl->format->format)));
+			default: EXIT("unknown array format %d\n", int(KYTY_SDL_PIXELORDER(sdl->format)));
 		}
 	} else
 	{
 		EXIT("invalid format\n");
 	}
 
-	EXIT_IF(static_cast<int>(KYTY_SDL_BITSPERPIXEL(sdl->format->format)) != sdl->format->BitsPerPixel);
 	EXIT_IF(metadata.bits_per_pixel != 24 && metadata.bits_per_pixel != 32 && metadata.bits_per_pixel != 8);
 
 	const uint64_t tight_pitch = static_cast<uint64_t>(metadata.width) * static_cast<uint32_t>(metadata.bits_per_pixel >> 3u);
 	EXIT_IF(metadata.pitch < tight_pitch || static_cast<uint64_t>(metadata.pitch) - tight_pitch >= 4u);
 
-	metadata.bytes_per_pixel = sdl->format->BytesPerPixel;
+	metadata.bytes_per_pixel = SDL_BYTESPERPIXEL(sdl->format); // NOLINT(hicpp-signed-bitwise)
 
 	return result;
 }
@@ -226,21 +204,20 @@ HostImageSurface* HostImageSurface::LoadPng(const String& file_name)
 		EXIT("Can't open file %s\n", file_name.C_Str());
 	}
 
-	SDL_RWops* ops = file.CreateSdlRWops();
-	EXIT_IF(ops == nullptr);
+	const ByteBuffer encoded = file.ReadWholeBuffer();
+	file.Close();
+	if (encoded.Size() > static_cast<uint32_t>(INT_MAX))
+	{
+		EXIT("Png file too large %s\n", file_name.C_Str());
+	}
 
 	constexpr int decoded_channels = 4;
 	int           width            = 0;
 	int           height           = 0;
 	int           source_channels  = 0;
 
-	stbi_io_callbacks callbacks {};
-	callbacks.read = ReadPng;
-	callbacks.skip = SkipPng;
-	callbacks.eof  = EofPng;
-
-	void* pixels = stbi_load_from_callbacks(&callbacks, ops, &width, &height, &source_channels, decoded_channels);
-	SDL_RWclose(ops);
+	void* pixels = stbi_load_from_memory(reinterpret_cast<const stbi_uc*>(encoded.GetData()), static_cast<int>(encoded.Size()), &width,
+	                                     &height, &source_channels, decoded_channels);
 
 	if (pixels == nullptr)
 	{
@@ -256,12 +233,7 @@ HostImageSurface* HostImageSurface::LoadPng(const String& file_name)
 
 	const int pitch = width * decoded_channels;
 
-	const uint32_t r_mask = 0x000000FF;
-	const uint32_t g_mask = 0x0000FF00;
-	const uint32_t b_mask = 0x00FF0000;
-	const uint32_t a_mask = 0xFF000000;
-
-	SDL_Surface* sdl = SDL_CreateRGBSurfaceFrom(pixels, width, height, decoded_channels * 8, pitch, r_mask, g_mask, b_mask, a_mask);
+	SDL_Surface* sdl = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_RGBA32, pixels, pitch);
 	if (sdl == nullptr)
 	{
 		stbi_image_free(pixels);
@@ -276,22 +248,17 @@ HostImageSurface* HostImageSurface::Create(uint32_t width, uint32_t height, int 
 	EXIT_IF(bits_per_pixel != 24 && bits_per_pixel != 32);
 	EXIT_IF(width == 0 || height == 0 || width > static_cast<uint32_t>(INT_MAX) || height > static_cast<uint32_t>(INT_MAX));
 
-	const uint32_t a_mask = 0xFF000000;
-	const uint32_t b_mask = 0x00FF0000;
-	const uint32_t g_mask = 0x0000FF00;
-	const uint32_t r_mask = 0x000000FF;
+	const SDL_PixelFormat format = bits_per_pixel == 32 ? SDL_PIXELFORMAT_RGBA32 : SDL_PIXELFORMAT_RGB24;
 
-	SDL_Surface* sdl =
-	    SDL_CreateRGBSurface(0, static_cast<int>(width), static_cast<int>(height), bits_per_pixel, r_mask, g_mask, b_mask, a_mask);
+	SDL_Surface* sdl = SDL_CreateSurface(static_cast<int>(width), static_cast<int>(height), format);
 	if (sdl == nullptr)
 	{
 		EXIT("SDL error: %s\n", SDL_GetError());
 	}
 
-	SDL_Rect rect = {0, 0, static_cast<int>(width), static_cast<int>(height)};
-	if (SDL_FillRect(sdl, &rect, 0) != 0)
+	if (!SDL_FillSurfaceRect(sdl, nullptr, 0))
 	{
-		SDL_FreeSurface(sdl);
+		SDL_DestroySurface(sdl);
 		EXIT("SDL error: %s\n", SDL_GetError());
 	}
 
@@ -307,7 +274,7 @@ HostImageSurface* HostImageSurface::Clone() const
 {
 	EXIT_IF(m_surface == nullptr || m_surface->sdl == nullptr);
 
-	SDL_Surface* copy = SDL_ConvertSurface(m_surface->sdl, m_surface->sdl->format, SDL_SWSURFACE);
+	SDL_Surface* copy = SDL_DuplicateSurface(m_surface->sdl);
 	if (copy == nullptr)
 	{
 		EXIT("SDL error: %s\n", SDL_GetError());
@@ -320,17 +287,7 @@ void HostImageSurface::SaveBmp(const String& file_name) const
 {
 	EXIT_IF(m_surface == nullptr || m_surface->sdl == nullptr);
 
-	File file;
-	if (!file.Create(file_name))
-	{
-		EXIT("Can't create file %s\n", file_name.C_Str());
-	}
-
-	SDL_RWops* ops = file.CreateSdlRWops();
-	EXIT_IF(ops == nullptr);
-
-	const int result = SDL_SaveBMP_RW(m_surface->sdl, ops, 1);
-	if (result != 0)
+	if (!SDL_SaveBMP(m_surface->sdl, file_name.utf8_str().GetData()))
 	{
 		EXIT("SDL error: %s\n", SDL_GetError());
 	}
@@ -349,11 +306,12 @@ bool HostImageSurface::BlitTo(HostImageSurface* destination, const HostImageSurf
 	SDL_Rect target_rect = {static_cast<int>(target.x), static_cast<int>(target.y), static_cast<int>(target.width),
 	                        static_cast<int>(target.height)};
 
-	const int result = source.width != target.width || source.height != target.height
-	                       ? SDL_BlitScaled(m_surface->sdl, &source_rect, destination->m_surface->sdl, &target_rect)
-	                       : SDL_BlitSurface(m_surface->sdl, &source_rect, destination->m_surface->sdl, &target_rect);
+	const bool result = source.width != target.width || source.height != target.height
+	                        ? SDL_BlitSurfaceScaled(m_surface->sdl, &source_rect, destination->m_surface->sdl, &target_rect,
+	                                                SDL_SCALEMODE_NEAREST)
+	                        : SDL_BlitSurface(m_surface->sdl, &source_rect, destination->m_surface->sdl, &target_rect);
 
-	if (result != 0)
+	if (!result)
 	{
 		KYTY_LOG_DEBUG("Blit failed: %s\n", SDL_GetError());
 		return false;
@@ -388,7 +346,7 @@ void* HostImageSurface::GetNativeHandle() const
 
 void HostImageSurface::DbgPrint(const String& name) const
 {
-	EXIT_IF(m_surface == nullptr || m_surface->sdl == nullptr || m_surface->sdl->format == nullptr);
+	EXIT_IF(m_surface == nullptr || m_surface->sdl == nullptr);
 
 	const SDL_Surface* sdl = m_surface->sdl;
 	KYTY_LOG_DEBUG("------\n");
@@ -396,14 +354,14 @@ void HostImageSurface::DbgPrint(const String& name) const
 	KYTY_LOG_DEBUG("width = %d\n", sdl->w);
 	KYTY_LOG_DEBUG("height = %d\n", sdl->h);
 	KYTY_LOG_DEBUG("pitch = %d\n", sdl->pitch);
-	KYTY_LOG_DEBUG("type = %d\n", static_cast<int>(KYTY_SDL_PIXELTYPE(sdl->format->format)));
+	KYTY_LOG_DEBUG("type = %d\n", static_cast<int>(KYTY_SDL_PIXELTYPE(sdl->format)));
 
 	if (m_surface->metadata.bits_per_pixel == 8)
 	{
 		KYTY_LOG_DEBUG("order = alpha\n");
-	} else if (SDL_ISPIXELFORMAT_PACKED(sdl->format->format)) // NOLINT(hicpp-signed-bitwise)
+	} else if (SDL_ISPIXELFORMAT_PACKED(sdl->format)) // NOLINT(hicpp-signed-bitwise)
 	{
-		switch (KYTY_SDL_PIXELORDER(sdl->format->format))
+		switch (KYTY_SDL_PIXELORDER(sdl->format))
 		{
 			case SDL_PACKEDORDER_NONE: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_NONE\n"); break;
 			case SDL_PACKEDORDER_XRGB: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_XRGB\n"); break;
@@ -416,9 +374,9 @@ void HostImageSurface::DbgPrint(const String& name) const
 			case SDL_PACKEDORDER_BGRA: KYTY_LOG_DEBUG("order = SDL_PACKEDORDER_BGRA\n"); break;
 			default: KYTY_LOG_DEBUG("order = <packed_invalid>\n");
 		}
-	} else if (SDL_ISPIXELFORMAT_ARRAY(sdl->format->format)) // NOLINT(hicpp-signed-bitwise)
+	} else if (SDL_ISPIXELFORMAT_ARRAY(sdl->format)) // NOLINT(hicpp-signed-bitwise)
 	{
-		switch (KYTY_SDL_PIXELORDER(sdl->format->format))
+		switch (KYTY_SDL_PIXELORDER(sdl->format))
 		{
 			case SDL_ARRAYORDER_NONE: KYTY_LOG_DEBUG("order = SDL_ARRAYORDER_NONE\n"); break;
 			case SDL_ARRAYORDER_RGB: KYTY_LOG_DEBUG("order = SDL_ARRAYORDER_RGB\n"); break;
@@ -431,11 +389,9 @@ void HostImageSurface::DbgPrint(const String& name) const
 		}
 	}
 
-	KYTY_LOG_DEBUG("layout = %d\n", static_cast<int>(KYTY_SDL_PIXELLAYOUT(sdl->format->format)));
-	KYTY_LOG_DEBUG("bits_per_pixel = %d\n", static_cast<int>(KYTY_SDL_BITSPERPIXEL(sdl->format->format)));
-	KYTY_LOG_DEBUG("bytes_per_pixel = %d\n", static_cast<int>(SDL_BYTESPERPIXEL(sdl->format->format))); // NOLINT(hicpp-signed-bitwise)
-	KYTY_LOG_DEBUG("bits_per_pixel = %d\n", static_cast<int>(sdl->format->BitsPerPixel));
-	KYTY_LOG_DEBUG("bytes_per_pixel = %d\n", static_cast<int>(sdl->format->BytesPerPixel));
+	KYTY_LOG_DEBUG("layout = %d\n", static_cast<int>(KYTY_SDL_PIXELLAYOUT(sdl->format)));
+	KYTY_LOG_DEBUG("bits_per_pixel = %d\n", static_cast<int>(KYTY_SDL_BITSPERPIXEL(sdl->format)));
+	KYTY_LOG_DEBUG("bytes_per_pixel = %d\n", static_cast<int>(SDL_BYTESPERPIXEL(sdl->format))); // NOLINT(hicpp-signed-bitwise)
 }
 
 } // namespace Kyty::Emulator::Host

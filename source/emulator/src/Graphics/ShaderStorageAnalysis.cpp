@@ -862,6 +862,128 @@ ShaderComputeUniformBufferFillEvidence MatchPatternBufferFill(const ShaderCode& 
 	return result;
 }
 
+// The fill tail: a buffer_store_format_x of the value VGPR at the invocation
+// index, then s_endpgm as the last instruction. The workgroup SGPR stays outside
+// the destination descriptor.
+bool UniformBufferFillMatchesIndexedStore(const ShaderCode& code, uint32_t store_index, int value_register, int index_register,
+                                          int workgroup_register, int* destination_start_register)
+{
+	const auto& instructions = code.GetInstructions();
+	const auto& store        = instructions.At(store_index);
+	const auto& end          = instructions.At(store_index + 1u);
+	if (store.type != ShaderInstructionType::BufferStoreFormatX || store.format != ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen ||
+	    store.src_num != 3 || store.vop3_op_sel != 0 || !store.buffer_idxen || store.buffer_offen || store.buffer_return_old_value ||
+	    store.buffer_imm_offset != 0u || !UniformBufferFillOperandIsVgpr(store.dst, value_register, 1) ||
+	    !UniformBufferFillOperandIsVgpr(store.src[0], index_register, 1) ||
+	    !UniformBufferFillOperandIsSgpr(store.src[1], store.src[1].register_id, k_uniform_buffer_fill_descriptor_words) ||
+	    !UniformBufferFillOperandIsZeroSoffset(store.src[2]))
+	{
+		return false;
+	}
+	const int destination = store.src[1].register_id;
+	if ((workgroup_register >= destination && workgroup_register < destination + k_uniform_buffer_fill_descriptor_words) ||
+	    end.type != ShaderInstructionType::SEndpgm || end.format != ShaderInstructionFormat::Empty || end.src_num != 0 ||
+	    store_index + 2u != instructions.Size())
+	{
+		return false;
+	}
+	*destination_start_register = destination;
+	return true;
+}
+
+bool UniformBufferFillMatchesValueVgprMove(const ShaderInstruction& move, int index_register, bool index_first)
+{
+	// A move-first sequence must leave the invocation-X VGPR for the index.
+	return move.type == ShaderInstructionType::VMovB32 && move.format == ShaderInstructionFormat::SVdstSVsrc0 && move.src_num == 1 &&
+	       move.vop3_op_sel == 0 && UniformBufferFillOperandIsPlain(move.src[0]) &&
+	       UniformBufferFillOperandIsVgpr(move.dst, move.dst.register_id, 1) && move.dst.register_id != index_register &&
+	       (index_first || move.dst.register_id != 0);
+}
+
+// The constant fill: the linear invocation index, one v_mov of an inline or
+// literal constant and a buffer_store_format_x of it at that index.
+ShaderComputeUniformBufferFillEvidence MatchConstantBufferFill(const ShaderCode& code, const uint32_t (&semantic_indices)[4])
+{
+	ShaderComputeUniformBufferFillEvidence result {};
+	const auto&                            instructions = code.GetInstructions();
+	const bool  index_first  = instructions.At(semantic_indices[0]).type == ShaderInstructionType::VLshlAddU32;
+	const auto& index        = instructions.At(semantic_indices[index_first ? 0 : 1]);
+	const auto& move         = instructions.At(semantic_indices[index_first ? 1 : 0]);
+	int         index_register             = -1;
+	int         workgroup_register         = -1;
+	uint32_t    workgroup_shift            = 0;
+	int         destination_start_register = -1;
+	if (!UniformBufferFillMatchesLinearIndex(index, &index_register, &workgroup_register, &workgroup_shift))
+	{
+		return result;
+	}
+	const bool constant_source = (move.src[0].type == ShaderOperandType::IntegerInlineConstant ||
+	                              move.src[0].type == ShaderOperandType::LiteralConstant) &&
+	                             move.src[0].size == 0;
+	if (!constant_source || !UniformBufferFillMatchesValueVgprMove(move, index_register, index_first) ||
+	    semantic_indices[3] != semantic_indices[2] + 1u ||
+	    !UniformBufferFillMatchesIndexedStore(code, semantic_indices[2], move.dst.register_id, index_register, workgroup_register,
+	                                          &destination_start_register))
+	{
+		return result;
+	}
+
+	result.destination_start_register = destination_start_register;
+	result.workgroup_register         = workgroup_register;
+	result.workgroup_shift            = workgroup_shift;
+	result.record_bytes               = 4;
+	result.value_is_constant          = true;
+	result.constant_value             = move.src[0].constant.u;
+	result.valid                      = true;
+	return result;
+}
+
+// The loaded fill: the linear invocation index, an s_buffer_load_dword of the
+// value at offset 0 of a one-descriptor source, one v_mov of that scalar and a
+// buffer_store_format_x of it at the index.
+ShaderComputeUniformBufferFillEvidence MatchLoadedBufferFill(const ShaderCode& code, const uint32_t (&semantic_indices)[5])
+{
+	ShaderComputeUniformBufferFillEvidence result {};
+	const auto&                            instructions = code.GetInstructions();
+	const auto& index = instructions.At(semantic_indices[0]);
+	const auto& load  = instructions.At(semantic_indices[1]);
+	const auto& move  = instructions.At(semantic_indices[2]);
+	int         index_register             = -1;
+	int         workgroup_register         = -1;
+	uint32_t    workgroup_shift            = 0;
+	int         destination_start_register = -1;
+	if (!UniformBufferFillMatchesLinearIndex(index, &index_register, &workgroup_register, &workgroup_shift))
+	{
+		return result;
+	}
+	const bool loaded_scalar = MetaFillOperandIsVccLo(load.dst) || MetaFillOperandIsSgpr(load.dst, load.dst.register_id, 1);
+	const int  source        = load.src[0].register_id;
+	if (load.type != ShaderInstructionType::SBufferLoadDword || load.format != ShaderInstructionFormat::SdstSvSoffset ||
+	    load.src_num != 2 || !loaded_scalar || !MetaFillOperandIsSgpr(load.src[0], source, k_meta_fill_descriptor_words) ||
+	    !MetaFillScalarOffsetIs(load, 0u) || (workgroup_register >= source && workgroup_register < source + k_meta_fill_descriptor_words) ||
+	    move.src[0].type != load.dst.type || move.src[0].register_id != load.dst.register_id ||
+	    !UniformBufferFillMatchesValueVgprMove(move, index_register, true) || semantic_indices[4] != semantic_indices[3] + 1u ||
+	    !UniformBufferFillMatchesIndexedStore(code, semantic_indices[3], move.dst.register_id, index_register, workgroup_register,
+	                                          &destination_start_register))
+	{
+		return result;
+	}
+	// The value is read once from the source descriptor; it must not be the destination.
+	if (source == destination_start_register || (load.dst.type == ShaderOperandType::Sgpr && load.dst.register_id >= source &&
+	                                             load.dst.register_id < source + k_meta_fill_descriptor_words))
+	{
+		return result;
+	}
+
+	result.destination_start_register = destination_start_register;
+	result.workgroup_register         = workgroup_register;
+	result.workgroup_shift            = workgroup_shift;
+	result.record_bytes               = 4;
+	result.value_buffer_register      = source;
+	result.valid                      = true;
+	return result;
+}
+
 } // namespace
 
 ShaderComputeUniformBufferFillEvidence AnalyzeShaderComputeUniformBufferFill(const ShaderCode& code)
@@ -890,6 +1012,17 @@ ShaderComputeUniformBufferFillEvidence AnalyzeShaderComputeUniformBufferFill(con
 			return result;
 		}
 		semantic_indices[semantic_count++] = instruction_index;
+	}
+	if (semantic_count == 4u)
+	{
+		const uint32_t constant_indices[4] = {semantic_indices[0], semantic_indices[1], semantic_indices[2], semantic_indices[3]};
+		return MatchConstantBufferFill(code, constant_indices);
+	}
+	if (semantic_count == 5u)
+	{
+		const uint32_t loaded_indices[5] = {semantic_indices[0], semantic_indices[1], semantic_indices[2], semantic_indices[3],
+		                                    semantic_indices[4]};
+		return MatchLoadedBufferFill(code, loaded_indices);
 	}
 	if (semantic_count != k_uniform_buffer_fill_instruction_count)
 	{

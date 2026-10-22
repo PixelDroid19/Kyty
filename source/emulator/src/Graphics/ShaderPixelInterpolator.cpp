@@ -35,20 +35,21 @@ bool ShaderPixelInputMaskSupported(uint32_t enable_mask, uint32_t address_mask)
 		return true;
 	}
 	const uint32_t interpolation = enable_mask & kInterpolation;
-	const uint32_t position      = enable_mask & kPositionXy;
 	const uint32_t perspective   = enable_mask & (kPerspectiveCenter | kPerspectiveCentroid);
 	const uint32_t linear        = enable_mask & (kLinearCenter | kLinearCentroid);
 	if (perspective != 0 && linear != 0)
 	{
 		return false;
 	}
-	return interpolation != 0 && (position == 0 || position == kPositionXy);
+	return interpolation != 0;
 }
 
 bool ShaderPixelPositionEnabled(uint32_t enable_mask, uint32_t address_mask)
 {
-	constexpr uint32_t kPositionXy = (1u << 8u) | (1u << 9u);
-	return (enable_mask & kPositionXy) == kPositionXy && (address_mask & kPositionXy) == kPositionXy;
+	// POS_X/Y/Z/W_FLOAT: each enabled field loads one VGPR, at the slot the
+	// address mask assigns to it, independently of the other fields.
+	constexpr uint32_t kPosition = 0xfu << 8u;
+	return (enable_mask & address_mask & kPosition) != 0;
 }
 
 uint32_t ShaderResolvePixelInterpolatorSetting(uint32_t stored_setting, uint32_t written_mask, uint32_t index)

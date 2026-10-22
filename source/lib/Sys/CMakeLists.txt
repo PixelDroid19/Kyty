@@ -13,7 +13,6 @@ list(APPEND check_headers
 )
 
 list(APPEND inc_headers
-	${CMAKE_SOURCE_DIR}/3rdparty/sdl2/sdl2/include
 	${CMAKE_SOURCE_DIR}/3rdparty/cpuinfo/include
 )
 

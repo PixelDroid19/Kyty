@@ -864,7 +864,10 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 
 	switch (host_command)
 	{
-		case HostWindowCommand::Quit: game->m_game_need_exit = true; break;
+		case HostWindowCommand::Quit:
+			::Kyty::Emulator::Ports::ControllerInputPort::SessionEnd();
+			game->m_game_need_exit = true;
+			break;
 		case HostWindowCommand::TogglePause: SetPause(game, !game->m_game_is_paused); break;
 		case HostWindowCommand::ToggleFullscreen: ToggleHostFullscreen(); break;
 		case HostWindowCommand::None: break;
@@ -1223,6 +1226,7 @@ static void process_window_event(GameApi* game, const ::Kyty::Emulator::Host::Wi
 			break;
 		case ::Kyty::Emulator::Host::WindowEvent::Close:
 			KYTY_LOG_DEBUG("Window %" PRIu32 " closed\n", window.window_id);
+			::Kyty::Emulator::Ports::ControllerInputPort::SessionEnd();
 			game->m_game_need_exit = true;
 			break;
 		default:
@@ -2134,6 +2138,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features_12.subgroupBroadcastDynamicId = supported_12.subgroupBroadcastDynamicId;
 	device_features_12.samplerMirrorClampToEdge = sampler_features.mirror_clamp_to_edge;
 	device_features_12.bufferDeviceAddress = guest_device_address ? VK_TRUE : VK_FALSE;
+	// Vertex stages export the render-target layer (ShaderLayer).
+	device_features_12.shaderOutputLayer = supported_12.shaderOutputLayer;
 	// Core since Vulkan 1.2 and mandatory there.
 	EXIT_IF(supported_12.timelineSemaphore == VK_FALSE);
 	device_features_12.timelineSemaphore = VK_TRUE;

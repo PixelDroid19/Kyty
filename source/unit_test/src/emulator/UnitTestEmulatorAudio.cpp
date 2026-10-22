@@ -10,7 +10,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
-#include "SDL.h"
+#include <SDL3/SDL_stdinc.h>
 #include "UnitTestEmulatorAudioFixtures.h"
 
 #include <algorithm>
@@ -2040,7 +2040,7 @@ TEST(EmulatorAudio, AudioInCloseReleasesTheHostInputSlot)
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-	EXPECT_EQ(SDL_setenv("SDL_AUDIODRIVER", "dummy", 0), 0);
+	EXPECT_EQ(SDL_setenv_unsafe("SDL_AUDIO_DRIVER", "dummy", 0), 0);
 
 	auto* subsystem = AudioSubsystem::Instance();
 	subsystem->Destroy(Core::SubsystemsList::Instance());
@@ -2244,7 +2244,7 @@ TEST(EmulatorAudio, AudioOut2HostStatePushPreservesPcmQueueAndSinkAcrossFailure)
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-	EXPECT_EQ(SDL_setenv("SDL_AUDIODRIVER", "dummy", 1), 0);
+	EXPECT_EQ(SDL_setenv_unsafe("SDL_AUDIO_DRIVER", "dummy", 1), 0);
 
 	auto* subsystem = AudioSubsystem::Instance();
 	subsystem->Destroy(Core::SubsystemsList::Instance());

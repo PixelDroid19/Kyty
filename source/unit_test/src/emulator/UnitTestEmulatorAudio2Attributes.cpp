@@ -6,7 +6,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
-#include "SDL.h"
+#include <SDL3/SDL_stdinc.h>
 
 #include <algorithm>
 #include <array>
@@ -91,7 +91,7 @@ public:
 			Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		}
 		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-		if (SDL_setenv("SDL_AUDIODRIVER", "dummy", 1) != 0)
+		if (SDL_setenv_unsafe("SDL_AUDIO_DRIVER", "dummy", 1) != 0)
 		{
 			return false;
 		}

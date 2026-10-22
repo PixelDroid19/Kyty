@@ -461,18 +461,12 @@ DualSourceBlendDecision ResolveDualSourceBlend(const DualSourceBlendInputs& in)
 	return DualSourceBlendDecision::Eligible;
 }
 
-bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, const HW::DepthControl& depth)
+bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, bool alpha_to_mask)
 {
-	if ((target_mask & shader.m_cbShaderMask) != 0 || depth.z_enable || depth.stencil_enable || shader.shader_z_format != 0)
+	if ((target_mask & shader.m_cbShaderMask) != 0 || shader.shader_z_format != 0 ||
+	    (alpha_to_mask && shader.target_output_mode[0] != 0))
 	{
 		return true;
-	}
-	for (const auto output_mode: shader.target_output_mode)
-	{
-		if (output_mode != 0)
-		{
-			return true;
-		}
 	}
 	const auto& control = shader.db_shader_control;
 	return control.shader_kill_enable || control.shader_z_export_enable || control.shader_execute_on_noop || control.other_bits != 0;

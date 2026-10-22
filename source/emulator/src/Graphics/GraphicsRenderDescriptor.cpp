@@ -1198,11 +1198,14 @@ void DescriptorCache::CollectResourceIds(const Set& s, std::vector<uint64_t>* id
 
 void DescriptorCache::IndexSet(int index)
 {
-	std::vector<uint64_t> ids;
-	CollectResourceIds(m_sets.At(index), &ids);
-	for (const auto id: ids)
+	CollectResourceIds(m_sets.At(index), &m_resource_ids);
+	auto& set = m_sets[index];
+	set.resources.clear();
+	for (const auto id: m_resource_ids)
 	{
-		m_sets_by_resource[id].insert(index);
+		auto& references = m_sets_by_resource[id];
+		set.resources.push_back({id, static_cast<uint32_t>(references.size())});
+		references.push_back({index, static_cast<uint32_t>(set.resources.size() - 1u)});
 	}
 }
 
@@ -1210,19 +1213,21 @@ VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 {
 	auto& set = m_sets[index];
 	EXIT_IF(set.set == nullptr);
-	std::vector<uint64_t> ids;
-	CollectResourceIds(set, &ids);
-	for (const auto id: ids)
+	for (const auto& resource: set.resources)
 	{
-		auto it = m_sets_by_resource.find(id);
-		EXIT_IF(it == m_sets_by_resource.end());
-		auto& indices = it->second;
-		indices.erase(index);
-		if (indices.empty())
+		auto it = m_sets_by_resource.find(resource.unique_id);
+		EXIT_IF(it == m_sets_by_resource.end() || resource.position >= it->second.size());
+		auto&      references = it->second;
+		const auto moved      = references.back();
+		references[resource.position] = moved;
+		m_sets[moved.set].resources[moved.slot].position = resource.position;
+		references.pop_back();
+		if (references.empty())
 		{
 			m_sets_by_resource.erase(it);
 		}
 	}
+	set.resources.clear();
 	auto* released    = set.set;
 	set.set           = nullptr;
 	set.next_free_set = m_first_free_set;
@@ -1318,7 +1323,12 @@ void DescriptorCache::FreeSetsReferencing(uint64_t unique_id, References referen
 	{
 		return;
 	}
-	std::vector<int> candidates(it->second.begin(), it->second.end());
+	std::vector<int> candidates;
+	candidates.reserve(it->second.size());
+	for (const auto& reference: it->second)
+	{
+		candidates.push_back(reference.set);
+	}
 	std::sort(candidates.begin(), candidates.end());
 	for (const int index: candidates)
 	{
@@ -1414,6 +1424,11 @@ VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const
 {
 	ShaderDescriptorLayoutPlan plan {};
 	EXIT_IF(!ShaderBuildDescriptorLayoutPlan(bind, &plan));
+	return GetDescriptorSetLayout(stage, plan);
+}
+
+VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan)
+{
 	Core::LockGuard lock(m_mutex);
 	return GetOrCreateLayout(stage, plan);
 }
@@ -1478,12 +1493,29 @@ static bool get_stencil_op(VkStencilOp* f, uint32_t* ref, uint8_t op, uint8_t te
 			vk = VK_STENCIL_OP_REPLACE;
 			r  = testval;
 			break;                                                /* ReplaceTest    */
-		case 0x04: vk = VK_STENCIL_OP_REPLACE; break;             /* ReplaceOp      */
-		case 0x05: vk = VK_STENCIL_OP_INCREMENT_AND_CLAMP; break; /* AddClamp       */
-		case 0x06: vk = VK_STENCIL_OP_DECREMENT_AND_CLAMP; break; /* SubClamp       */
-		case 0x07: vk = VK_STENCIL_OP_INVERT; break;              /* Invert         */
-		case 0x08: vk = VK_STENCIL_OP_INCREMENT_AND_WRAP; break;  /* AddWrap        */
-		case 0x09: vk = VK_STENCIL_OP_DECREMENT_AND_WRAP; break;  /* SubWrap        */
+		case 0x04: vk = VK_STENCIL_OP_REPLACE; break; /* ReplaceOp      */
+		// Vulkan's increment, decrement and invert ops never read the reference,
+		// so they must not displace the compare value (STENCILTESTVAL).
+		case 0x05:
+			vk      = VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+			use_ref = false;
+			break; /* AddClamp       */
+		case 0x06:
+			vk      = VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+			use_ref = false;
+			break; /* SubClamp       */
+		case 0x07:
+			vk      = VK_STENCIL_OP_INVERT;
+			use_ref = false;
+			break; /* Invert         */
+		case 0x08:
+			vk      = VK_STENCIL_OP_INCREMENT_AND_WRAP;
+			use_ref = false;
+			break; /* AddWrap        */
+		case 0x09:
+			vk      = VK_STENCIL_OP_DECREMENT_AND_WRAP;
+			use_ref = false;
+			break; /* SubWrap        */
 		case 0x0a:                                                /* And            */
 		case 0x0b:                                                /* Or             */
 		case 0x0c:                                                /* Xor            */
@@ -1536,7 +1568,9 @@ Vector<RenderTextureVulkanImage*> FindRenderTexture(CommandBuffer* buffer, uint6
 
 	Vector<RenderTextureVulkanImage*> ret;
 
-	auto objects = GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::RenderTexture, exact, false);
+	// A recycled range can hold several exact aliases of other formats and extents; callers pick among all of them.
+	auto objects = exact ? GpuMemoryFindEqualObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::RenderTexture)
+	                     : GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::RenderTexture, false, false);
 
 	for (const auto& obj: objects)
 	{

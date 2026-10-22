@@ -216,9 +216,10 @@ struct ColorTargetLayout
 // mesh and depth would otherwise replace the textured color.
 [[nodiscard]] uint8_t ResolveColorWriteAgainstDepth(uint8_t channel_mask, bool disable_color_on_depth_pass,
                                                     bool enable_color_on_depth_fail);
-// A no-export pixel shader can still be required for depth/stencil, discard, or explicit memory effects.
-// The latter are verified from decoded shader code before disabling the stage.
-[[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, const HW::DepthControl& depth);
+// A pixel shader is observable only through unmasked color targets, depth/stencil/mask exports, discard,
+// alpha-to-coverage of its MRT0 export, or memory effects. Depth and stencil tests run without it. The
+// discard and memory effects are verified from decoded shader code before disabling the stage.
+[[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, bool alpha_to_mask);
 
 // Dual-source (SRC1) admission for blend0 with its guest decision reasons. Guest state is checked
 // before host capability, so each refusal names the first failing input.
@@ -323,8 +324,12 @@ enum class ImageSampleOperation
 	// bounded so the caller can verify the full span mapping.
 	const bool single_layer = (resource_type == 8u || resource_type == 9u) && depth == 0u && base_array == 0u;
 	const bool array_layers = resource_type == 13u && depth >= 1u && depth <= 2048u && base_array == 0u;
-	const auto layer_bytes  = Gen5DepthSampleLayerBytes(format, pitch, height);
-	return tile == 24u && (single_layer || array_layers) && base_level == 0u && last_level == 0u && max_mip == 0u &&
+	// A cube map also carries its last slice in depth and stores its six faces
+	// as layers. Cube arrays stay refused: their sampled face id is
+	// slice * 8 + face, not a layer index.
+	const bool cube_faces  = resource_type == 11u && depth == 5u && base_array == 0u;
+	const auto layer_bytes = Gen5DepthSampleLayerBytes(format, pitch, height);
+	return tile == 24u && (single_layer || array_layers || cube_faces) && base_level == 0u && last_level == 0u && max_mip == 0u &&
 	       bc_swizzle == 0u && supported_swizzle && !msaa && !has_metadata && operation == ImageSampleOperation::DepthReference &&
 	       address != 0u && (address & 0xffffu) == 0u && width != 0u && pitch >= width && layer_bytes != 0u &&
 	       source_size >= layer_bytes;

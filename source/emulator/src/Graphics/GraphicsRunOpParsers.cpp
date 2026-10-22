@@ -3,6 +3,7 @@
 #include "Kyty/Core/BringUp.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
@@ -15,11 +16,25 @@
 
 #include <atomic>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+// An indirect register block pair outside its bank is ignored; the first few
+// reach the agent so a lost context or shader write stays visible.
+static void ReportDroppedIndirectRegister(const char* bank, uint32_t pair, uint32_t offset, uint32_t value, std::atomic_uint32_t* dropped)
+{
+	if (dropped->fetch_add(1, std::memory_order_relaxed) >= 4u)
+	{
+		return;
+	}
+	char message[Emulator::Agent::kAgentEventMessageMax] {};
+	std::snprintf(message, sizeof(message), "bank=%s pair=%" PRIu32 " offset=0x%08" PRIx32 " value=0x%08" PRIx32, bank, pair, offset, value);
+	Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Warn, "indirect_register_dropped", message);
+}
 
 static void RequirePacketBody(uint32_t cmd_id, uint32_t body_dw, uint32_t required_dw)
 {
@@ -998,13 +1013,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 		if (cmd_offset >= Pm4::CX_NUM)
 		{
 			static std::atomic_uint32_t dropped_out_of_range {0};
-			if (dropped_out_of_range.fetch_add(1, std::memory_order_relaxed) < 4u)
-			{
-				KYTY_LOG_DEBUG(
-				             "WARNING: dropping out-of-range indirect cx register pair=%" PRIu32 " offset=0x%08" PRIx32
-				             " value=0x%08" PRIx32 "\n",
-				             i, raw_cmd_offset, indirect_buffer[1]);
-			}
+			ReportDroppedIndirectRegister("cx", i, raw_cmd_offset, indirect_buffer[1], &dropped_out_of_range);
 			continue;
 		}
 		if (dump_ps_input_writes && cmd_offset >= Pm4::SPI_PS_INPUT_CNTL_0 && cmd_offset <= Pm4::SPI_PS_INPUT_CNTL_31)
@@ -1065,13 +1074,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 		if (cmd_offset >= Pm4::SH_NUM)
 		{
 			static std::atomic_uint32_t dropped_out_of_range {0};
-			if (dropped_out_of_range.fetch_add(1, std::memory_order_relaxed) < 4u)
-			{
-				KYTY_LOG_DEBUG(
-				             "WARNING: dropping out-of-range indirect sh register pair=%" PRIu32 " offset=0x%08" PRIx32
-				             " value=0x%08" PRIx32 "\n",
-				             i, cmd_offset, value);
-			}
+			ReportDroppedIndirectRegister("sh", i, cmd_offset, value, &dropped_out_of_range);
 			continue;
 		}
 
@@ -1127,13 +1130,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 		if (cmd_offset >= Pm4::UC_NUM)
 		{
 			static std::atomic_uint32_t dropped_out_of_range {0};
-			if (dropped_out_of_range.fetch_add(1, std::memory_order_relaxed) < 4u)
-			{
-				KYTY_LOG_DEBUG(
-				             "WARNING: dropping out-of-range indirect uc register pair=%" PRIu32 " offset=0x%08" PRIx32
-				             " value=0x%08" PRIx32 "\n",
-				             i, cmd_offset, value);
-			}
+			ReportDroppedIndirectRegister("uc", i, cmd_offset, value, &dropped_out_of_range);
 			continue;
 		}
 

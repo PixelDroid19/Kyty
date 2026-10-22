@@ -59,6 +59,8 @@ constexpr uint8_t kExtent     = kOuter | kNotFull | kMissesQuad;
 // Image reads whose result depends only on this lane's address and on scalar resources: explicit
 // LOD (or none, for loads), no derivatives, no write.
 [[nodiscard]] bool IsLaneLocalImageRead(ShaderInstructionType type);
+// The address VGPRs an image load reads: its DIM's coordinates, then the level of a mip load.
+[[nodiscard]] int ImageLoadAddressCount(const ShaderInstruction& inst);
 [[nodiscard]] bool IsLaneExchange(ShaderInstructionType type);
 // Condition operand of a vector select or carry-in: one bit per lane, read as this lane's bit.
 [[nodiscard]] bool IsLaneBit(const ShaderInstruction& inst, int source);

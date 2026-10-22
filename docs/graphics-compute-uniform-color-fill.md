@@ -56,9 +56,24 @@ by it, leaving only the UI visible.
 This is not general buffer/image coherence or support for other clear kernels,
 compressed formats, partial fills or arbitrary alias topologies.
 
+A second, constant form is also recognized: the linear invocation index, one
+`v_mov_b32` of an inline or literal integer constant, one
+`buffer_store_format_x` of that register at the index (idxen, no offset) and
+program end. The live binding must be one 32-bit UINT descriptor, stride 4,
+whose X lands in X, with a record count that is a whole number of 16-byte
+groups and equal to the dispatched invocation count. The fill words are the
+constant repeated.
+
+A third, loaded form reads the value instead: the linear invocation index, one
+`s_buffer_load_dword` at offset 0 of a second, read-only descriptor, one
+`v_mov_b32` of that scalar and the same store. The source descriptor must be
+exact, read-only and distinct from the destination, and the workgroup SGPR
+must lie outside it. The fill word is the source's first word, read once from
+guest memory when the command processor records the dispatch.
+
 ## DCC metadata clears
 
-The same kernel also fills color DCC metadata. Gen5 color DCC keeps one key
+The same kernels also fill color DCC metadata. Gen5 color DCC keeps one key
 byte per 256-byte compressed block; a key that names a clear state makes every
 texel of its block read as that state. A fill whose bytes all hold one of the
 clear keys `0x00` (all channels 0), `0x40` (color 0, alpha 1), `0x80` (color 1,
@@ -88,6 +103,18 @@ UI alpha as scene transmittance, hid the 3D scene. Its lighting target is reset
 with `0x00` and then written by four lighting compute passes before its first
 render-target bind; consuming the clear at that later bind erased the lighting,
 so the clear is consumed at the first shader image access instead.
+
+Evidence for the constant form: the role-playing title clears the DCC
+metadata of its render targets with `v_mov_b32 v1, 0` and
+`buffer_store_format_x` at the thread index (16,384 records over a
+1024x1024, 16-byte-texel target: one key per 256 bytes). Unrecognized, none
+of those clears were published; with the form recognized, the same run
+publishes them and the render-target and shader-image binds consume them.
+
+Evidence for the loaded form: the same title clears the DCC metadata of its
+1920x2200 depth-of-field target with a kernel that loads the fill value from a
+one-record buffer. With the form recognized, that metadata range has an owner
+and the clear is published (`tracked=1 published=1`).
 
 Not modelled: the pipe-dependent padding of the metadata plane (the coverage
 check uses the unpadded key count), mip chains, arrays, MSAA, REV component

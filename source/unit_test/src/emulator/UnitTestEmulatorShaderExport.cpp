@@ -1565,7 +1565,7 @@ TEST(EmulatorShaderExport, PreservesEmbeddedWritesAndSummarizesClassicPixelExpor
 		        ShaderVertexInputInfo vertex_info {};
 		        ShaderPixelInputInfo embedded_input {};
 		        embedded_shader.ps_embedded = true;
-		        ShaderGetInputInfoPS(&embedded_shader, &embedded_registers, &vertex_info, &embedded_input, false);
+		        ShaderGetInputInfoPS(&embedded_shader, &embedded_registers, &vertex_info, 0xffffffffu, &embedded_input, false);
 		        Require(embedded_input.color_exports.enable[0] == 0u && !embedded_input.has_only_null_exports,
 		                "embedded shader has no parsed export summary");
 		        Require(State::ResolveColorWriteAgainstExport(0x0fu, embedded_input.color_exports.enable[0],
@@ -1614,7 +1614,7 @@ TEST(EmulatorShaderExport, PreservesEmbeddedWritesAndSummarizesClassicPixelExpor
 		        HW::PixelShaderInfo classic_shader {};
 		        classic_shader.ps_regs.data_addr = guest_addr;
 		        ShaderPixelInputInfo classic_input {};
-		        ShaderGetInputInfoPS(&classic_shader, &classic_registers, &vertex_info, &classic_input, false);
+		        ShaderGetInputInfoPS(&classic_shader, &classic_registers, &vertex_info, 0xffffffffu, &classic_input, false);
 		        Require(!classic_input.has_only_null_exports && classic_input.color_exports.enable[0] == 3u,
 		                "classic shader summary comes from code parsed for input analysis");
 		        Require(State::ResolveColorWriteAgainstExport(0x0fu, classic_input.color_exports.enable[0],

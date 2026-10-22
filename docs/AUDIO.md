@@ -19,10 +19,11 @@ the exact selected channel gains for S16 and F32, saturates S16 output and
 preserves the interleaved layout. `8ChStd` remapping is performed once when the
 guest volume array is consumed.
 
-SDL may open a device with a different frequency, channel count or sample
-buffer size. One `SDL_AudioStream` per port converts the guest stream to that
-actual device contract. A different sample format is rejected at open time;
-it is not reinterpreted.
+Each port opens one `SDL_AudioStream` bound to its own default playback device.
+The stream is declared with the guest format, channel count and frequency;
+SDL converts it to whatever the device actually uses, so a device format,
+rate or layout that differs from the guest stream is converted, never
+reinterpreted. The grain size is requested as the device sample-frame hint.
 
 Each successful output advances one grain on a monotonic per-port clock. PCM
 is converted and copied into SDL while the port lifecycle lock is held, then
@@ -43,7 +44,7 @@ not invent a host sink.
 `F9` pauses/resumes the guest and host audio together. Pause closes the
 producer gate before pausing each SDL device. Resume starts devices before
 waking producers, preventing a resumed grain from racing a still-paused sink.
-Port close clears queued audio and releases both the conversion stream and SDL
+Port close destroys the stream, which drops queued audio and closes its SDL
 device. Shutdown first removes the shared host backend from the guest call
 path, then waits for any in-flight SDL copy before closing devices. Calls that
 already acquired the backend keep its lifetime valid until they return.
@@ -284,8 +285,8 @@ ATRAC9 RIFF file outside Git; that path stays unverified until root runs it.
 ```bash
 cmake -S source -B _build_linux -DBUILD_TESTING=ON
 cmake --build _build_linux --target kyty_audio_host_integration -j4
-SDL_AUDIODRIVER=disk \
-SDL_DISKAUDIOFILE=/tmp/kyty-audio-host-integration.raw \
+SDL_AUDIO_DRIVER=disk \
+SDL_AUDIO_DISK_OUTPUT_FILE=/tmp/kyty-audio-host-integration.raw \
   _build_linux/integration_test/kyty_audio_host_integration
 ```
 
@@ -310,9 +311,9 @@ proves device creation, not sound generation.
   Measure elapsed time across consecutive AudioOut grains: twelve 480-frame
   grains at 48 kHz must take approximately 120 ms, not complete immediately
   and not wait on a 60 ms queue threshold.
-- A host backend assertion can originate below Kyty. On Linux, PipeWire is
-  preferred when SDL compiled it and initialization succeeds; an explicit
-  `SDL_AUDIODRIVER` remains authoritative.
+- A host backend assertion can originate below Kyty. On Linux, SDL 3 prefers
+  PipeWire when it was compiled in and initializes; an explicit
+  `SDL_AUDIO_DRIVER` remains authoritative.
 - A valid device stream with silence moves the frontier to NGS2 voice
   format/data/play state.
 - Verbose HLE logging changes pacing and must not be used for underrun or FPS

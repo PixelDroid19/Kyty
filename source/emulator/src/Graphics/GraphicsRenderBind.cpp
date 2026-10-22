@@ -65,7 +65,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-using BindingStageClock = std::chrono::steady_clock;
+using BindingStageClock = DebugStatsClock;
 
 static uint64_t BindingStageElapsedNs(BindingStageClock::time_point start)
 {
@@ -2578,27 +2578,36 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 }
 
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
-	                   uint32_t first_record, uint32_t required_records, bool records_exact)
+	                   uint32_t first_record, uint32_t required_records, bool records_exact, uint32_t first_instance,
+	                   uint32_t instance_count)
 {
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 
 	const uint32_t stream_offset = ShaderVertexStreamRecordOffset(input);
+	// An instance range past 32 bits is unknown; the stream then keeps every declared record.
+	const uint64_t instance_end     = static_cast<uint64_t>(first_instance) + instance_count;
+	const uint32_t instance_records = instance_end > UINT32_MAX ? 0u : static_cast<uint32_t>(instance_end);
 	for (int i = 0; i < input.buffers_num; i++)
 	{
 		const auto& buffer_info = input.buffers[i];
+		const bool  instance    = buffer_info.instance;
 		// A base beyond the declared records cannot shift the stream; the fetch
-		// then reads from the buffer base as before.
-		const uint32_t shift     = stream_offset < buffer_info.num_records ? stream_offset : 0u;
+		// then reads from the buffer base as before. The vertex offset never
+		// shifts a stream indexed by the instance id.
+		const uint32_t shift     = !instance && stream_offset < buffer_info.num_records ? stream_offset : 0u;
 		const uint64_t address   = buffer_info.addr + static_cast<uint64_t>(shift) * buffer_info.stride;
 		const uint32_t available = buffer_info.num_records - shift;
-		const uint32_t records   = required_records == 0 ? available : std::min(available, required_records);
+		const uint32_t required  = instance ? instance_records : required_records;
+		const uint32_t first     = instance ? 0u : first_record;
+		const uint32_t records   = required == 0 ? available : std::min(available, required);
 		const uint64_t size     = ShaderBufferByteSize(buffer_info.stride, records);
-		// Every binding steps per vertex, so records below the draw's first are never fetched.
+		// Records below the draw's first vertex are never fetched.
 		const uint64_t read_begin =
-		    buffer_info.stride != 0u && first_record < records ? static_cast<uint64_t>(buffer_info.stride) * first_record : 0u;
+		    buffer_info.stride != 0u && first < records ? static_cast<uint64_t>(buffer_info.stride) * first : 0u;
 		// Fetches past the captured records only exist when the draw range is unknown or
-		// clamped, or when an attribute reaches beyond its record.
-		const bool tail_fetched = !records_exact || required_records == 0 || required_records > available ||
+		// clamped, or when an attribute reaches beyond its record. The instance range
+		// comes from the draw itself, so it is always exact.
+		const bool tail_fetched = (!instance && !records_exact) || required == 0 || required > available ||
 		                          VulkanVertexInputBindingFetchEnd(input, i) > buffer_info.stride;
 
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
@@ -3020,7 +3029,9 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 			                               !storage_buffers.raw_smem_dynamic_offset[i] && storage_buffers.raw_smem_required_bytes[i] != 0;
 			trace.requested_size =
 			    exact_static_smem ? std::min(declared_size, storage_buffers.raw_smem_required_bytes[i]) : declared_size;
-			trace.allocated_prefix = GpuMemoryGetAllocatedRangePrefix(addr, trace.requested_size);
+			// The guest maps GPU memory in small contiguous pieces, so a buffer may
+			// continue into the next registration.
+			trace.allocated_prefix = GpuMemoryGetMappedRangePrefix(addr, trace.requested_size);
 			const uint64_t requested_size = trace.requested_size;
 			const uint64_t materialized_size = trace.allocated_prefix;
 
@@ -3213,14 +3224,20 @@ static ShaderSampledImageViewKind ResolveBoundSampledImageView(const VulkanImage
 	return arrayed ? ShaderSampledImageViewKind::Depth2DArray : ShaderSampledImageViewKind::Depth2D;
 }
 
-// A storage view of a whole single-sample depth plane at its guest extent: one layer at level 0 whose format
-// holds the depth texel bits unchanged (R32F over 32-bit float depth, R16 UNORM over 16-bit depth).
-static bool DepthPlaneStorageViewMatches(const VulkanImage* depth, uint32_t fmt, uint32_t width, uint32_t height, uint32_t levels,
-                                         uint32_t base_level, uint32_t layers, uint32_t base_array, bool three_dimensional)
+// A storage view of a single-sample depth plane: one layer at level 0 whose format holds the depth texel bits
+// unchanged (R32F over 32-bit float depth, R16 UNORM over 16-bit depth), at the plane's guest extent or at a
+// smaller extent with the plane's width as pitch. Same pitch, texel size and swizzle give every texel of the
+// smaller view the address it has in the plane (captured: a 240x135 R16 view, pitch 256, over a 256x256 D16
+// target of the same size).
+static bool DepthPlaneStorageViewMatches(const VulkanImage* depth, uint32_t fmt, uint32_t width, uint32_t height, uint32_t pitch,
+                                         uint32_t levels, uint32_t base_level, uint32_t layers, uint32_t base_array,
+                                         bool three_dimensional)
 {
 	const VkFormat plane_format = DepthStencilBufferStoragePlaneFormat(depth->format);
+	const auto     plane_extent = depth->GetGuestExtent();
+	const bool     plane_origin = pitch == plane_extent.width && width <= plane_extent.width && height <= plane_extent.height;
 	if (plane_format == VK_FORMAT_UNDEFINED || depth->samples != VK_SAMPLE_COUNT_1_BIT || depth->IsResolutionScaled() ||
-	    !depth->MatchesGuestExtent(width, height))
+	    !(depth->MatchesGuestExtent(width, height) || plane_origin))
 	{
 		return false;
 	}
@@ -3394,7 +3411,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			if (r.MetaCompress() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MetaCompress() != false condition ignored (continuing)\n"); }
 			if (r.DccAlphaPos() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.DccAlphaPos() != false condition ignored (continuing)\n"); }
 			if (r.DccColorTransf() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.DccColorTransf() != false condition ignored (continuing)\n"); }
-			if (std::getenv("KYTY_SAMPLE_BIND_METADATA_LOG") != nullptr)
+			if (static const bool metadata_log = std::getenv("KYTY_SAMPLE_BIND_METADATA_LOG") != nullptr; metadata_log)
 			{
 				static std::atomic_uint metadata_log_count {0};
 				const unsigned ordinal = metadata_log_count.fetch_add(1, std::memory_order_relaxed);
@@ -3493,11 +3510,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		{
 			pitch = TileAlign64KBPitch(width, ShaderGen5TextureBytesPerElement(r.Format()));
 			if (pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch == 0u condition ignored (continuing)\n"); }
-		} else if (!three_dimensional && (tile == 5u || (tile == 1u && (arrayed_2d || r.MaxMip() != 0u))))
+		} else if (!three_dimensional && (tile == 5u || tile == 1u))
 		{
-			// Standard4KB resources and Standard256B arrays and mip chains use a
-			// canonical tiled pitch. Array word4 holds the last slice, not a row
-			// pitch; the linear row rule must not expand the tiled allocation.
+			// Standard4KB and Standard256B resources use a canonical tiled pitch.
+			// The word4 row pitch applies to linear resources only: a 156-wide
+			// BC3 Standard256B image declares pitch 192 yet stores 10 block
+			// columns, and array word4 holds the last slice, not a row pitch.
 			pitch = width;
 		} else
 		{
@@ -3710,7 +3728,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// Vulkan has no storage depth image: a dispatch addresses the depth plane through the image's colour
 				// copy, seeded here and stored back once the dispatch is recorded, so the stencil plane is untouched.
 				if (depth_exact && compute_stage && textures.desc[i].textures2d_without_sampler &&
-				    DepthPlaneStorageViewMatches(tex, fmt, width, height, levels, base_level, view_layers, base_array, three_dimensional))
+				    DepthPlaneStorageViewMatches(tex, fmt, width, height, pitch, levels, base_level, view_layers, base_array,
+				                                 three_dimensional))
 				{
 					auto* depth_image = static_cast<DepthStencilVulkanImage*>(tex);
 					auto* plane       = DepthStencilBufferGetStoragePlane(g_render_ctx->GetGraphicCtx(), depth_image);
@@ -3979,12 +3998,23 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// every GPU write-back.
 				const auto video_image = VideoOut::VideoOutGetImageForSubmission(addr, buffer);
 				if (video_image.image != nullptr && video_image.buffer_size == size.size && video_image.buffer_pitch == pitch &&
-				    video_image.image->MatchesGuestExtent(width, height) &&
-				    (!gen5 || VulkanGen5SampleFormatMatchesEffective(static_cast<uint16_t>(fmt), use_srgb,
-				                                                     video_image.image->format)))
+				    video_image.image->MatchesGuestExtent(width, height))
 				{
-					tex         = video_image.image;
-					materialize = "videoout";
+					// The display buffer holds the bytes the guest reads; another
+					// encoding of the same texel (sRGB or not) reads the live image
+					// through a view in the sample's format.
+					const VkFormat sample_format =
+					    VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0u, 0u, static_cast<uint16_t>(fmt), use_srgb);
+					if (!gen5 || VulkanGen5SampleFormatMatchesEffective(static_cast<uint16_t>(fmt), use_srgb, video_image.image->format))
+					{
+						tex         = video_image.image;
+						materialize = "videoout";
+					} else if (video_image.image->mutable_format && VulkanColorFormatsShareTexels(video_image.image->format, sample_format))
+					{
+						tex                = video_image.image;
+						reinterpret_format = sample_format;
+						materialize        = "videoout-reinterpret";
+					}
 				}
 			}
 		}
@@ -4024,17 +4054,33 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				                         mapped.kind == Kernel::Memory::KernelMappedRangeKind::Physical;
 				const bool overlaps_ok = GpuMemoryQueryOverlaps(&query_addr, &query_size, 1u, &overlaps);
 				bool has_texture_parent = false;
+				bool has_render_texture = false;
 				if (overlaps_ok)
 				{
 					for (uint32_t entry = 0u; entry < overlaps.entry_count; entry++)
 					{
 						has_texture_parent |= overlaps.entries[entry].type == GpuMemoryObjectType::Texture;
+						has_render_texture |= overlaps.entries[entry].type == GpuMemoryObjectType::RenderTexture;
 					}
+				}
+				// Only a render target that can hold this sample owns the range; one of
+				// another extent is stale after the guest reused the memory.
+				uint32_t stale_render_textures = 0u;
+				if (has_render_texture)
+				{
+					const auto covers = FindRenderTexture(buffer, addr, depth_span_size, false);
+					bool       stale  = !covers.IsEmpty();
+					for (const auto* cover: covers)
+					{
+						const auto extent = cover->GetGuestExtent();
+						stale = stale && !Gen5SurfaceExtentMayHoldSample(extent.width, extent.height, width, height, 1u, false);
+					}
+					stale_render_textures = stale ? covers.Size() : 0u;
 				}
 				GpuMemoryRangeProvenance provenance {};
 				const bool provenance_ok = !has_texture_parent || GpuMemoryQueryRangeProvenance(addr, depth_span_size, &provenance);
 				depth_source = overlaps_ok && provenance_ok
-				                   ? GpuMemoryClassifyDepthD16Source(overlaps, has_texture_parent ? &provenance : nullptr)
+				                   ? GpuMemoryClassifyDepthD16Source(overlaps, has_texture_parent ? &provenance : nullptr, stale_render_textures)
 				                   : GpuMemoryDepthD16Source::Unsupported;
 				// The storage-backed detile is a 16-bit equation.
 				const bool source_ok = depth_source == GpuMemoryDepthD16Source::Guest ||
@@ -4139,9 +4185,23 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				bool live_cover = false;
 				if (gen5 && (tile == 27u || tile == 9u))
 				{
-					const auto r_cover = FindRenderTexture(buffer, addr, size.size, false);
-					const auto s_cover = FindOverlappingStorageTextures(buffer, addr, size.size);
-					live_cover         = !r_cover.IsEmpty() || !s_cover.IsEmpty();
+					// Only a surface that can hold this sample's content owns the
+					// range; one of an unrelated extent is stale after the guest
+					// reused the memory, and the guest bytes are the content.
+					const bool block_compressed = ShaderGen5TextureIsBlockCompressed(fmt);
+					const auto holds_sample     = [&](const VulkanImage* cover)
+					{
+						const auto extent = cover->GetGuestExtent();
+						return Gen5SurfaceExtentMayHoldSample(extent.width, extent.height, width, height, levels, block_compressed);
+					};
+					for (const auto* cover: FindRenderTexture(buffer, addr, size.size, false))
+					{
+						live_cover = live_cover || holds_sample(cover);
+					}
+					for (const auto* cover: FindOverlappingStorageTextures(buffer, addr, size.size))
+					{
+						live_cover = live_cover || holds_sample(cover);
+					}
 				}
 				const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
 				TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, view_swizzle,
@@ -4254,7 +4314,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				     static_cast<uint32_t>(r.Depth()), static_cast<uint32_t>(r.BaseArray5()), depth_refusal, parent_state);
 			}
 		}
-		if (const char* dump_texture_bind = std::getenv("KYTY_DUMP_TEXTURE_BIND"); dump_texture_bind != nullptr)
+		if (static const char* dump_texture_bind = std::getenv("KYTY_DUMP_TEXTURE_BIND"); dump_texture_bind != nullptr)
 		{
 			uint32_t selected_width  = 0;
 			uint32_t selected_height = 0;
@@ -4334,14 +4394,24 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			{
 				tex->storage_write_stamp = VulkanImageNextStamp();
 			}
-			if (!VulkanResolveStorageImageView(tex, three_dimensional, arrayed_2d, &images_storage_view[index_storage],
-			                                   base_level))
+			const bool storage_array = arrayed_2d && tex != nullptr && tex->type == VulkanImageType::StorageTexture;
+			if (storage_array)
 			{
-				EXIT("storage image has no compatible Vulkan view: backing{kind=%u vk_format=%u mips=%u layers=%u usage=0x%08x} "
+				images_storage_view[index_storage] = StorageTextureResolveArrayStorageView(
+				    g_render_ctx->GetGraphicCtx()->device, static_cast<StorageTextureVulkanImage*>(tex), depth, base_array, base_level);
+			}
+			if (storage_array ? images_storage_view[index_storage] < 0
+			                  : !VulkanResolveStorageImageView(tex, three_dimensional, arrayed_2d, &images_storage_view[index_storage],
+			                                                   base_level))
+			{
+				EXIT("storage image has no compatible Vulkan view: backing{kind=%u provenance=%s vk_format=%u %ux%u samples=%u "
+				     "scaled=%d mips=%u layers=%u usage=0x%08x} compute=%d "
 				     "descriptor{format=%u %ux%u levels=%u base_level=%u last_level=%u type=%u tile=%u 3d=%d array=%d "
 				     "dwords=%08x %08x %08x %08x %08x %08x %08x %08x}\n",
-				     static_cast<uint32_t>(tex->type), static_cast<uint32_t>(tex->format), tex->mip_levels, tex->array_layers,
-				     static_cast<uint32_t>(tex->usage), static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+				     static_cast<uint32_t>(tex->type), materialize, static_cast<uint32_t>(tex->format), tex->extent.width,
+				     tex->extent.height, static_cast<uint32_t>(tex->samples), tex->IsResolutionScaled() ? 1 : 0, tex->mip_levels,
+				     tex->array_layers, static_cast<uint32_t>(tex->usage), compute_stage ? 1 : 0, static_cast<uint32_t>(fmt),
+				     static_cast<uint32_t>(width),
 				     static_cast<uint32_t>(height), levels, base_level, view_last_level, static_cast<uint32_t>(host_resource_type),
 				     static_cast<uint32_t>(tile), three_dimensional ? 1 : 0, arrayed_2d ? 1 : 0, r.fields[0], r.fields[1], r.fields[2],
 				     r.fields[3], r.fields[4], r.fields[5], r.fields[6], r.fields[7]);
@@ -4443,12 +4513,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					sampled_descriptor.format = reinterpret_format;
 					sampled_descriptor.usage  = VK_IMAGE_USAGE_SAMPLED_BIT;
 				}
-				const int sampled_view = VulkanGetOrCreateSampledImageView(g_render_ctx->GetGraphicCtx()->device, tex,
-				                                                          sampled_descriptor);
+				const int sampled_view = VulkanGetOrCreateCachedImageView(g_render_ctx->GetGraphicCtx()->device, tex,
+				                                                         sampled_descriptor);
 				if (sampled_view < 0)
 				{
 					EXIT("failed to create sampled alias view: format=%u swizzle=0x%03x cached_views=%zu\n", fmt,
-					     view_swizzle, tex->sampled_view_descriptors.size());
+					     view_swizzle, tex->cached_view_descriptors.size());
 				}
 				sampled_views[*sampled_index] = sampled_view;
 			}
@@ -4658,7 +4728,8 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, const Shader
 
 		const bool comparison_eligible = ShaderSamplerDepthComparisonEligible(textures, samplers, i);
 		const auto sampler_operation = State::ResolveSamplerBindingOperation(samplers.operations[i], comparison_eligible);
-		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r, sampler_operation, allow_unnormalized);
+		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r, sampler_operation, allow_unnormalized,
+		                                                               BindSamplerUsesRCoordinate(textures, samplers.slots[i]));
 
 		r.UpdateIndex(i);
 
@@ -4934,6 +5005,12 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			sgprs_ptr[2] = bind.thread_limits[2];
 			sgprs_ptr[3] = 0;
 			sgprs_ptr += 4;
+		}
+		if (bind.geometry_used)
+		{
+			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.geometry_offset_dw);
+			std::memcpy(sgprs_ptr, bind.geometry_block, sizeof(bind.geometry_block));
+			sgprs_ptr += 8;
 		}
 		if (bind.program_base_used)
 		{

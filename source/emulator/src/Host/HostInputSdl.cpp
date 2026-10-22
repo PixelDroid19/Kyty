@@ -1,15 +1,6 @@
 #include "Emulator/Host/HostInput.h"
 
-#include "SDL.h"
-#include "SDL_error.h"
-#include "SDL_events.h"
-#include "SDL_gamecontroller.h"
-#include "SDL_joystick.h"
-#include "SDL_keyboard.h"
-#include "SDL_keycode.h"
-#include "SDL_mouse.h"
-#include "SDL_stdinc.h"
-#include "SDL_touch.h"
+#include <SDL3/SDL.h>
 
 #include <algorithm>
 
@@ -22,24 +13,24 @@ namespace {
 	return static_cast<SDL_Event*>(event);
 }
 
-[[nodiscard]] WindowEvent TranslateWindowEvent(Uint8 event)
+[[nodiscard]] WindowEvent TranslateWindowEvent(Uint32 type)
 {
-	switch (event)
+	switch (type)
 	{
-		case SDL_WINDOWEVENT_SHOWN: return WindowEvent::Shown;
-		case SDL_WINDOWEVENT_HIDDEN: return WindowEvent::Hidden;
-		case SDL_WINDOWEVENT_EXPOSED: return WindowEvent::Exposed;
-		case SDL_WINDOWEVENT_MOVED: return WindowEvent::Moved;
-		case SDL_WINDOWEVENT_RESIZED: return WindowEvent::Resized;
-		case SDL_WINDOWEVENT_SIZE_CHANGED: return WindowEvent::SizeChanged;
-		case SDL_WINDOWEVENT_MINIMIZED: return WindowEvent::Minimized;
-		case SDL_WINDOWEVENT_MAXIMIZED: return WindowEvent::Maximized;
-		case SDL_WINDOWEVENT_RESTORED: return WindowEvent::Restored;
-		case SDL_WINDOWEVENT_ENTER: return WindowEvent::Enter;
-		case SDL_WINDOWEVENT_LEAVE: return WindowEvent::Leave;
-		case SDL_WINDOWEVENT_FOCUS_GAINED: return WindowEvent::FocusGained;
-		case SDL_WINDOWEVENT_FOCUS_LOST: return WindowEvent::FocusLost;
-		case SDL_WINDOWEVENT_CLOSE: return WindowEvent::Close;
+		case SDL_EVENT_WINDOW_SHOWN: return WindowEvent::Shown;
+		case SDL_EVENT_WINDOW_HIDDEN: return WindowEvent::Hidden;
+		case SDL_EVENT_WINDOW_EXPOSED: return WindowEvent::Exposed;
+		case SDL_EVENT_WINDOW_MOVED: return WindowEvent::Moved;
+		case SDL_EVENT_WINDOW_RESIZED: return WindowEvent::Resized;
+		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: return WindowEvent::SizeChanged;
+		case SDL_EVENT_WINDOW_MINIMIZED: return WindowEvent::Minimized;
+		case SDL_EVENT_WINDOW_MAXIMIZED: return WindowEvent::Maximized;
+		case SDL_EVENT_WINDOW_RESTORED: return WindowEvent::Restored;
+		case SDL_EVENT_WINDOW_MOUSE_ENTER: return WindowEvent::Enter;
+		case SDL_EVENT_WINDOW_MOUSE_LEAVE: return WindowEvent::Leave;
+		case SDL_EVENT_WINDOW_FOCUS_GAINED: return WindowEvent::FocusGained;
+		case SDL_EVENT_WINDOW_FOCUS_LOST: return WindowEvent::FocusLost;
+		case SDL_EVENT_WINDOW_CLOSE_REQUESTED: return WindowEvent::Close;
 		default: return WindowEvent::Unknown;
 	}
 }
@@ -48,21 +39,21 @@ namespace {
 {
 	switch (button)
 	{
-		case SDL_CONTROLLER_BUTTON_A: return ControllerButton::A;
-		case SDL_CONTROLLER_BUTTON_B: return ControllerButton::B;
-		case SDL_CONTROLLER_BUTTON_X: return ControllerButton::X;
-		case SDL_CONTROLLER_BUTTON_Y: return ControllerButton::Y;
-		case SDL_CONTROLLER_BUTTON_BACK: return ControllerButton::Back;
-		case SDL_CONTROLLER_BUTTON_GUIDE: return ControllerButton::Guide;
-		case SDL_CONTROLLER_BUTTON_START: return ControllerButton::Start;
-		case SDL_CONTROLLER_BUTTON_LEFTSTICK: return ControllerButton::LeftStick;
-		case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return ControllerButton::RightStick;
-		case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return ControllerButton::LeftShoulder;
-		case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return ControllerButton::RightShoulder;
-		case SDL_CONTROLLER_BUTTON_DPAD_UP: return ControllerButton::DpadUp;
-		case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return ControllerButton::DpadDown;
-		case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return ControllerButton::DpadLeft;
-		case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return ControllerButton::DpadRight;
+		case SDL_GAMEPAD_BUTTON_SOUTH: return ControllerButton::A;
+		case SDL_GAMEPAD_BUTTON_EAST: return ControllerButton::B;
+		case SDL_GAMEPAD_BUTTON_WEST: return ControllerButton::X;
+		case SDL_GAMEPAD_BUTTON_NORTH: return ControllerButton::Y;
+		case SDL_GAMEPAD_BUTTON_BACK: return ControllerButton::Back;
+		case SDL_GAMEPAD_BUTTON_GUIDE: return ControllerButton::Guide;
+		case SDL_GAMEPAD_BUTTON_START: return ControllerButton::Start;
+		case SDL_GAMEPAD_BUTTON_LEFT_STICK: return ControllerButton::LeftStick;
+		case SDL_GAMEPAD_BUTTON_RIGHT_STICK: return ControllerButton::RightStick;
+		case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return ControllerButton::LeftShoulder;
+		case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return ControllerButton::RightShoulder;
+		case SDL_GAMEPAD_BUTTON_DPAD_UP: return ControllerButton::DpadUp;
+		case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return ControllerButton::DpadDown;
+		case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return ControllerButton::DpadLeft;
+		case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return ControllerButton::DpadRight;
 		default: return ControllerButton::Invalid;
 	}
 }
@@ -71,12 +62,12 @@ namespace {
 {
 	switch (axis)
 	{
-		case SDL_CONTROLLER_AXIS_LEFTX: return ControllerAxis::LeftX;
-		case SDL_CONTROLLER_AXIS_LEFTY: return ControllerAxis::LeftY;
-		case SDL_CONTROLLER_AXIS_RIGHTX: return ControllerAxis::RightX;
-		case SDL_CONTROLLER_AXIS_RIGHTY: return ControllerAxis::RightY;
-		case SDL_CONTROLLER_AXIS_TRIGGERLEFT: return ControllerAxis::TriggerLeft;
-		case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: return ControllerAxis::TriggerRight;
+		case SDL_GAMEPAD_AXIS_LEFTX: return ControllerAxis::LeftX;
+		case SDL_GAMEPAD_AXIS_LEFTY: return ControllerAxis::LeftY;
+		case SDL_GAMEPAD_AXIS_RIGHTX: return ControllerAxis::RightX;
+		case SDL_GAMEPAD_AXIS_RIGHTY: return ControllerAxis::RightY;
+		case SDL_GAMEPAD_AXIS_LEFT_TRIGGER: return ControllerAxis::TriggerLeft;
+		case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER: return ControllerAxis::TriggerRight;
 		default: return ControllerAxis::Invalid;
 	}
 }
@@ -102,70 +93,83 @@ void TranslateEvent(const SDL_Event& native, InputEvent* event)
 
 	switch (native.type)
 	{
-		case SDL_QUIT: event->type = InputEventType::Quit; break;
-		case SDL_APP_TERMINATING: event->type = InputEventType::Terminate; break;
-		case SDL_APP_LOWMEMORY: event->type = InputEventType::LowMemory; break;
-		case SDL_APP_WILLENTERBACKGROUND: event->type = InputEventType::WillEnterBackground; break;
-		case SDL_APP_DIDENTERBACKGROUND: event->type = InputEventType::DidEnterBackground; break;
-		case SDL_APP_WILLENTERFOREGROUND: event->type = InputEventType::WillEnterForeground; break;
-		case SDL_APP_DIDENTERFOREGROUND: event->type = InputEventType::DidEnterForeground; break;
+		case SDL_EVENT_QUIT: event->type = InputEventType::Quit; break;
+		case SDL_EVENT_TERMINATING: event->type = InputEventType::Terminate; break;
+		case SDL_EVENT_LOW_MEMORY: event->type = InputEventType::LowMemory; break;
+		case SDL_EVENT_WILL_ENTER_BACKGROUND: event->type = InputEventType::WillEnterBackground; break;
+		case SDL_EVENT_DID_ENTER_BACKGROUND: event->type = InputEventType::DidEnterBackground; break;
+		case SDL_EVENT_WILL_ENTER_FOREGROUND: event->type = InputEventType::WillEnterForeground; break;
+		case SDL_EVENT_DID_ENTER_FOREGROUND: event->type = InputEventType::DidEnterForeground; break;
 
-		case SDL_KEYDOWN:
-		case SDL_KEYUP:
+		case SDL_EVENT_KEY_DOWN:
+		case SDL_EVENT_KEY_UP:
 			event->type                     = InputEventType::Keyboard;
-			event->keyboard.down            = native.type == SDL_KEYDOWN;
-			event->keyboard.up              = native.type == SDL_KEYUP;
-			event->keyboard.pressed         = native.key.state == SDL_PRESSED;
-			event->keyboard.released        = native.key.state == SDL_RELEASED;
-			event->keyboard.repeat          = native.key.repeat != 0u;
-			event->keyboard.scan_code       = native.key.keysym.scancode;
-			event->keyboard.key_code        = native.key.keysym.sym;
-			event->keyboard.mod             = native.key.keysym.mod;
+			event->keyboard.down            = native.type == SDL_EVENT_KEY_DOWN;
+			event->keyboard.up              = native.type == SDL_EVENT_KEY_UP;
+			event->keyboard.pressed         = native.key.down;
+			event->keyboard.released        = !native.key.down;
+			event->keyboard.repeat          = native.key.repeat;
+			event->keyboard.scan_code       = native.key.scancode;
+			event->keyboard.key_code        = static_cast<int>(native.key.key);
+			event->keyboard.mod             = native.key.mod;
 			break;
 
-		case SDL_WINDOWEVENT:
+		case SDL_EVENT_WINDOW_SHOWN:
+		case SDL_EVENT_WINDOW_HIDDEN:
+		case SDL_EVENT_WINDOW_EXPOSED:
+		case SDL_EVENT_WINDOW_MOVED:
+		case SDL_EVENT_WINDOW_RESIZED:
+		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+		case SDL_EVENT_WINDOW_MINIMIZED:
+		case SDL_EVENT_WINDOW_MAXIMIZED:
+		case SDL_EVENT_WINDOW_RESTORED:
+		case SDL_EVENT_WINDOW_MOUSE_ENTER:
+		case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+		case SDL_EVENT_WINDOW_FOCUS_GAINED:
+		case SDL_EVENT_WINDOW_FOCUS_LOST:
+		case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
 			event->type             = InputEventType::Window;
 			event->window.window_id = native.window.windowID;
-			event->window.event     = TranslateWindowEvent(native.window.event);
+			event->window.event     = TranslateWindowEvent(native.type);
 			event->window.data1     = native.window.data1;
 			event->window.data2     = native.window.data2;
 			break;
 
-		case SDL_DISPLAYEVENT:
+		case SDL_EVENT_DISPLAY_ORIENTATION:
 			event->type                    = InputEventType::Display;
-			event->display.display         = native.display.display;
+			event->display.display         = native.display.displayID;
 			event->display.orientation_value = native.display.data1;
-			event->display.native_orientation = native.display.event == SDL_DISPLAYEVENT_ORIENTATION;
+			event->display.native_orientation = true;
 			event->display.orientation      = TranslateDisplayOrientation(native.display.data1);
 			break;
 
-		case SDL_MOUSEBUTTONDOWN:
-		case SDL_MOUSEBUTTONUP:
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+		case SDL_EVENT_MOUSE_BUTTON_UP:
 			event->type                  = InputEventType::MouseButton;
-			event->mouse.down            = native.button.type == SDL_MOUSEBUTTONDOWN;
-			event->mouse.up              = native.button.type == SDL_MOUSEBUTTONUP;
+			event->mouse.down            = native.button.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+			event->mouse.up              = native.button.type == SDL_EVENT_MOUSE_BUTTON_UP;
 			event->mouse.left            = native.button.button == SDL_BUTTON_LEFT;
 			event->mouse.middle          = native.button.button == SDL_BUTTON_MIDDLE;
 			event->mouse.right           = native.button.button == SDL_BUTTON_RIGHT;
 			event->mouse.x1              = native.button.button == SDL_BUTTON_X1;
 			event->mouse.x2              = native.button.button == SDL_BUTTON_X2;
 			event->mouse.touch           = native.button.which == SDL_TOUCH_MOUSEID;
-			event->mouse.pressed         = native.button.state == SDL_PRESSED;
-			event->mouse.released        = native.button.state == SDL_RELEASED;
+			event->mouse.pressed         = native.button.down;
+			event->mouse.released        = !native.button.down;
 			event->mouse.num_of_clicks   = native.button.clicks;
-			event->mouse.x               = native.button.x;
-			event->mouse.y               = native.button.y;
+			event->mouse.x               = static_cast<int>(native.button.x);
+			event->mouse.y               = static_cast<int>(native.button.y);
 			break;
 
-		case SDL_MOUSEWHEEL:
+		case SDL_EVENT_MOUSE_WHEEL:
 			event->type                = InputEventType::MouseWheel;
 			event->mouse.touch         = native.wheel.which == SDL_TOUCH_MOUSEID;
 			event->mouse.wheel         = true;
-			event->mouse.x             = native.wheel.x;
-			event->mouse.y             = native.wheel.y;
+			event->mouse.x             = native.wheel.integer_x;
+			event->mouse.y             = native.wheel.integer_y;
 			break;
 
-		case SDL_MOUSEMOTION:
+		case SDL_EVENT_MOUSE_MOTION:
 			event->type                = InputEventType::MouseMotion;
 			event->mouse.left          = (native.motion.state & SDL_BUTTON_LMASK) != 0u;
 			event->mouse.middle        = (native.motion.state & SDL_BUTTON_MMASK) != 0u;
@@ -173,22 +177,22 @@ void TranslateEvent(const SDL_Event& native, InputEvent* event)
 			event->mouse.x1            = (native.motion.state & SDL_BUTTON_X1MASK) != 0u;
 			event->mouse.x2            = (native.motion.state & SDL_BUTTON_X2MASK) != 0u;
 			event->mouse.touch         = native.motion.which == SDL_TOUCH_MOUSEID;
-			event->mouse.x             = native.motion.x;
-			event->mouse.y             = native.motion.y;
+			event->mouse.x             = static_cast<int>(native.motion.x);
+			event->mouse.y             = static_cast<int>(native.motion.y);
 			event->mouse.motion        = true;
-			event->mouse.motion_x      = native.motion.xrel;
-			event->mouse.motion_y      = native.motion.yrel;
+			event->mouse.motion_x      = static_cast<int>(native.motion.xrel);
+			event->mouse.motion_y      = static_cast<int>(native.motion.yrel);
 			break;
 
-		case SDL_FINGERMOTION:
-		case SDL_FINGERDOWN:
-		case SDL_FINGERUP:
+		case SDL_EVENT_FINGER_MOTION:
+		case SDL_EVENT_FINGER_DOWN:
+		case SDL_EVENT_FINGER_UP:
 			event->type                 = InputEventType::Finger;
-			event->finger.down          = native.tfinger.type == SDL_FINGERDOWN;
-			event->finger.up            = native.tfinger.type == SDL_FINGERUP;
-			event->finger.motion        = native.tfinger.type == SDL_FINGERMOTION;
-			event->finger.finger_id     = static_cast<int>(native.tfinger.fingerId);
-			event->finger.touch_id      = static_cast<int>(native.tfinger.touchId);
+			event->finger.down          = native.tfinger.type == SDL_EVENT_FINGER_DOWN;
+			event->finger.up            = native.tfinger.type == SDL_EVENT_FINGER_UP;
+			event->finger.motion        = native.tfinger.type == SDL_EVENT_FINGER_MOTION;
+			event->finger.finger_id     = static_cast<int>(native.tfinger.fingerID);
+			event->finger.touch_id      = static_cast<int>(native.tfinger.touchID);
 			event->finger.x             = native.tfinger.x;
 			event->finger.y             = native.tfinger.y;
 			event->finger.dx            = native.tfinger.dx;
@@ -196,33 +200,33 @@ void TranslateEvent(const SDL_Event& native, InputEvent* event)
 			event->finger.pressure      = native.tfinger.pressure;
 			break;
 
-		case SDL_CONTROLLERAXISMOTION:
+		case SDL_EVENT_GAMEPAD_AXIS_MOTION:
 			event->type                   = InputEventType::ControllerAxis;
-			event->controller.id          = native.caxis.which;
-			event->controller.axis_id     = TranslateControllerAxis(native.caxis.axis);
-			event->controller.axis_value  = native.caxis.value;
+			event->controller.id          = static_cast<int>(native.gaxis.which);
+			event->controller.axis_id     = TranslateControllerAxis(native.gaxis.axis);
+			event->controller.axis_value  = native.gaxis.value;
 			event->controller.axis        = true;
 			break;
 
-		case SDL_CONTROLLERBUTTONDOWN:
-		case SDL_CONTROLLERBUTTONUP:
+		case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+		case SDL_EVENT_GAMEPAD_BUTTON_UP:
 			event->type                   = InputEventType::ControllerButton;
-			event->controller.id          = native.cbutton.which;
-			event->controller.button      = TranslateControllerButton(native.cbutton.button);
-			event->controller.down        = native.cbutton.type == SDL_CONTROLLERBUTTONDOWN;
-			event->controller.up          = native.cbutton.type == SDL_CONTROLLERBUTTONUP;
-			event->controller.pressed     = native.cbutton.state == SDL_PRESSED;
-			event->controller.released    = native.cbutton.state == SDL_RELEASED;
+			event->controller.id          = static_cast<int>(native.gbutton.which);
+			event->controller.button      = TranslateControllerButton(native.gbutton.button);
+			event->controller.down        = native.gbutton.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+			event->controller.up          = native.gbutton.type == SDL_EVENT_GAMEPAD_BUTTON_UP;
+			event->controller.pressed     = native.gbutton.down;
+			event->controller.released    = !native.gbutton.down;
 			break;
 
-		case SDL_CONTROLLERDEVICEADDED:
-		case SDL_CONTROLLERDEVICEREMOVED:
-		case SDL_CONTROLLERDEVICEREMAPPED:
+		case SDL_EVENT_GAMEPAD_ADDED:
+		case SDL_EVENT_GAMEPAD_REMOVED:
+		case SDL_EVENT_GAMEPAD_REMAPPED:
 			event->type                   = InputEventType::ControllerDevice;
-			event->controller.id          = native.cdevice.which;
-			event->controller.added       = native.cdevice.type == SDL_CONTROLLERDEVICEADDED;
-			event->controller.removed     = native.cdevice.type == SDL_CONTROLLERDEVICEREMOVED;
-			event->controller.remapped    = native.cdevice.type == SDL_CONTROLLERDEVICEREMAPPED;
+			event->controller.id          = static_cast<int>(native.gdevice.which);
+			event->controller.added       = native.gdevice.type == SDL_EVENT_GAMEPAD_ADDED;
+			event->controller.removed     = native.gdevice.type == SDL_EVENT_GAMEPAD_REMOVED;
+			event->controller.remapped    = native.gdevice.type == SDL_EVENT_GAMEPAD_REMAPPED;
 			break;
 
 		default: break;
@@ -241,13 +245,16 @@ HostInput::~HostInput()
 
 HostInput* HostInput::Create()
 {
+	// Key codes are the unshifted code points of the host layout, which is what
+	// KeyboardTextCharacter expects; no Latin or number-row substitution.
+	SDL_SetHint(SDL_HINT_KEYCODE_OPTIONS, "none");
 	return new HostInput;
 }
 
 int HostInput::Poll()
 {
 	m_event = {};
-	const int result = SDL_PollEvent(NativeEvent(m_native_event));
+	const int result = SDL_PollEvent(NativeEvent(m_native_event)) ? 1 : 0;
 	if (result != 0)
 	{
 		TranslateEvent(*NativeEvent(m_native_event), &m_event);
@@ -258,7 +265,7 @@ int HostInput::Poll()
 int HostInput::Wait()
 {
 	m_event = {};
-	const int result = SDL_WaitEvent(NativeEvent(m_native_event));
+	const int result = SDL_WaitEvent(NativeEvent(m_native_event)) ? 1 : 0;
 	if (result != 0)
 	{
 		TranslateEvent(*NativeEvent(m_native_event), &m_event);
@@ -278,7 +285,7 @@ const void* HostInput::GetNativeEvent() const
 
 bool HostInput::DisplayEventsEnabled() const
 {
-	return SDL_GetEventState(SDL_DISPLAYEVENT) == SDL_ENABLE;
+	return SDL_EventEnabled(SDL_EVENT_DISPLAY_ORIENTATION);
 }
 
 bool HostInput::EnterPressed() const
@@ -289,41 +296,29 @@ bool HostInput::EnterPressed() const
 	{
 		return false;
 	}
-	return keyboard[SDL_SCANCODE_RETURN] != 0 || keyboard[SDL_SCANCODE_KP_ENTER] != 0;
+	return keyboard[SDL_SCANCODE_RETURN] || keyboard[SDL_SCANCODE_KP_ENTER];
 }
 
-bool HostInput::OpenController(int device_index, int* instance_id)
+bool HostInput::OpenController(int device_id, int* instance_id)
 {
 	if (instance_id == nullptr)
 	{
 		return false;
 	}
 	*instance_id = 0;
-	SDL_GameController* controller = SDL_GameControllerOpen(device_index);
-	if (controller == nullptr)
+	if (device_id <= 0 || SDL_OpenGamepad(static_cast<SDL_JoystickID>(device_id)) == nullptr)
 	{
 		return false;
 	}
-	SDL_Joystick* joystick = SDL_GameControllerGetJoystick(controller);
-	if (joystick == nullptr)
-	{
-		SDL_GameControllerClose(controller);
-		return false;
-	}
-	*instance_id = SDL_JoystickInstanceID(joystick);
-	if (*instance_id < 0)
-	{
-		SDL_GameControllerClose(controller);
-		return false;
-	}
+	*instance_id = device_id;
 	return true;
 }
 
 void HostInput::CloseController(int instance_id)
 {
-	if (SDL_GameController* controller = SDL_GameControllerFromInstanceID(instance_id); controller != nullptr)
+	if (SDL_Gamepad* gamepad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(instance_id)); gamepad != nullptr)
 	{
-		SDL_GameControllerClose(controller);
+		SDL_CloseGamepad(gamepad);
 	}
 }
 
@@ -382,12 +377,12 @@ uint16_t HostInput::KeyboardTextCharacter(int key_code, uint16_t modifiers)
 {
 	// The SDL keycode of a printable key is the code point its unshifted position types
 	// under the host layout; keypad and function keys carry the scancode mask instead.
-	if (key_code < 0x20 || key_code == SDLK_DELETE || key_code > 0xffff || (modifiers & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) != 0)
+	if (key_code < 0x20 || key_code == SDLK_DELETE || key_code > 0xffff || (modifiers & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0)
 	{
 		return 0;
 	}
-	const bool shift  = (modifiers & KMOD_SHIFT) != 0;
-	const bool upper  = shift != ((modifiers & KMOD_CAPS) != 0);
+	const bool shift  = (modifiers & SDL_KMOD_SHIFT) != 0;
+	const bool upper  = shift != ((modifiers & SDL_KMOD_CAPS) != 0);
 	const bool letter = (key_code >= 'a' && key_code <= 'z') || (key_code >= 0xe0 && key_code <= 0xfe && key_code != 0xf7);
 	if (letter)
 	{
@@ -398,7 +393,7 @@ uint16_t HostInput::KeyboardTextCharacter(int key_code, uint16_t modifiers)
 
 bool HostInput::HasAltModifier(uint16_t modifiers)
 {
-	return (modifiers & KMOD_ALT) != 0;
+	return (modifiers & SDL_KMOD_ALT) != 0;
 }
 
 KeyboardAction HostInput::ClassifyKeyboardAction(int key_code)
@@ -407,17 +402,17 @@ KeyboardAction HostInput::ClassifyKeyboardAction(int key_code)
 	{
 		case SDLK_RETURN:
 		case SDLK_SPACE:
-		case SDLK_z: return KeyboardAction::Cross;
+		case SDLK_Z: return KeyboardAction::Cross;
 		case SDLK_ESCAPE:
-		case SDLK_x: return KeyboardAction::Circle;
-		case SDLK_c: return KeyboardAction::Square;
-		case SDLK_v: return KeyboardAction::Triangle;
+		case SDLK_X: return KeyboardAction::Circle;
+		case SDLK_C: return KeyboardAction::Square;
+		case SDLK_V: return KeyboardAction::Triangle;
 		case SDLK_UP: return KeyboardAction::Up;
 		case SDLK_DOWN: return KeyboardAction::Down;
 		case SDLK_LEFT: return KeyboardAction::Left;
 		case SDLK_RIGHT: return KeyboardAction::Right;
-		case SDLK_q: return KeyboardAction::L1;
-		case SDLK_e: return KeyboardAction::R1;
+		case SDLK_Q: return KeyboardAction::L1;
+		case SDLK_E: return KeyboardAction::R1;
 		case SDLK_TAB:
 		case SDLK_BACKSPACE: return KeyboardAction::Options;
 		default: return KeyboardAction::None;

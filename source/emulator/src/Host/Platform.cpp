@@ -1,7 +1,6 @@
 #include "Emulator/Host/Platform.h"
 
-#include "SDL_filesystem.h"
-#include "SDL_stdinc.h"
+#include <SDL3/SDL_filesystem.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -37,16 +36,13 @@ std::string UtcTimestamp()
 
 std::string ApplicationBasePath()
 {
-	char* base_path = SDL_GetBasePath();
+	// Owned by SDL; it stays valid until SDL_Quit.
+	const char* base_path = SDL_GetBasePath();
 	if (base_path == nullptr || base_path[0] == '\0')
 	{
-		SDL_free(base_path);
 		return {};
 	}
-
-	std::string result(base_path);
-	SDL_free(base_path);
-	return result;
+	return base_path;
 }
 
 std::filesystem::path DefaultCacheDirectory()

@@ -128,7 +128,8 @@ other than a color render target reaching a refused use stop the run. Copies,
 resolves and depth copies between images at different host extents stop the
 run as well.
 
-`BRINGUP.md` records the measured effect and the titles that hit each refusal.
+The bring-up records indexed in `BRINGUP.md` hold the measured effect and the
+titles that hit each refusal.
 
 ## States
 

@@ -172,6 +172,16 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_color_control)
 	return 1;
 }
 
+KYTY_HW_CTX_PARSER(hw_ctx_set_alpha_to_mask)
+{
+	if (cmd_id != 0xc0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_ALPHA_TO_MASK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_ALPHA_TO_MASK condition ignored (continuing)\n"); }
+
+	cp->GetCtx()->SetAlphaToMaskEnable(KYTY_PM4_GET(buffer[0], DB_ALPHA_TO_MASK, ALPHA_TO_MASK_ENABLE) != 0);
+
+	return 1;
+}
+
 KYTY_HW_CTX_PARSER(hw_ctx_set_color_info)
 {
 	if (cmd_id != 0xc0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0016900 condition ignored (continuing)\n"); }

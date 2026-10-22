@@ -39,7 +39,7 @@ bool VulkanBuildVertexInputLayout(const ShaderVertexInputInfo& input, VulkanVert
 		auto& binding       = layout->bindings[buffer_index];
 		binding.binding     = static_cast<uint32_t>(buffer_index);
 		binding.stride      = buffer.stride;
-		binding.inputRate   = VK_VERTEX_INPUT_RATE_VERTEX;
+		binding.inputRate   = buffer.instance ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
 
 		for (int attribute_index = 0; attribute_index < buffer.attr_num; attribute_index++)
 		{

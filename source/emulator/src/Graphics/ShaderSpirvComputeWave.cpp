@@ -57,7 +57,9 @@ bool ComputeWaveUintSourceIsSupported(const ShaderOperand& operand)
 		case ShaderOperandType::Sgpr:
 			return operand.size == 1 && ComputeWaveRegisterRangeIsValid(operand.register_id, operand.size, 0, kMaxSgpr);
 		case ShaderOperandType::VccLo:
-		case ShaderOperandType::VccHi: return operand.size == 1 && operand.register_id == 0;
+		case ShaderOperandType::VccHi:
+		case ShaderOperandType::ExecLo:
+		case ShaderOperandType::ExecHi: return operand.size == 1 && operand.register_id == 0;
 		case ShaderOperandType::LiteralConstant:
 		case ShaderOperandType::IntegerInlineConstant:
 		case ShaderOperandType::FloatInlineConstant: return operand.size == 0;
@@ -332,7 +334,7 @@ SpirvValue Spirv::GetComputeWaveRegister(ShaderOperand operand, ShaderWaveBank b
 			}
 			return result;
 		case ShaderOperandType::ExecLo:
-			if (operand.register_id == 0 && operand.size == 2 && word < 2)
+			if (operand.register_id == 0 && operand.size >= 1 && operand.size <= 2 && word < operand.size)
 			{
 				result.type  = SpirvType::Uint;
 				result.value = word == 0 ? "exec_lo" : "exec_hi";

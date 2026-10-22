@@ -202,7 +202,7 @@ ALLOWED_SOURCE_FILES = (
 GRAPHICS_INCLUDE_PREFIX = "Emulator/Graphics/"
 SOURCE_GRAPHICS_INCLUDE_PREFIX = "emulator/include/Emulator/Graphics/"
 SDL_INCLUDE_PREFIX = "SDL"
-IMGUI_SDL_INCLUDE = "imgui_impl_sdl2.h"
+IMGUI_SDL_INCLUDE = "imgui_impl_sdl3.h"
 DEVTOOLS_INCLUDE_PREFIXES = (
     "Emulator/DevTools/",
     "Kyty/DevTools/",
@@ -359,7 +359,7 @@ def _is_sdl_include(canonical_path: str) -> bool:
     return (
         basename == "sdl.h"
         or basename.startswith("sdl_")
-        or any(segment in ("sdl", "sdl2") for segment in canonical_path.split("/"))
+        or any(segment in ("sdl", "sdl3") for segment in canonical_path.split("/"))
     )
 
 
@@ -1275,9 +1275,9 @@ class BoundaryCheckerTests(unittest.TestCase):
                 root,
                 "emulator/src/Libs/LibSaveData.cpp",
                 '#include "SDL.h"\n#include "SDL_filesystem.h"\n#include <SDL_stdinc.h>\n'
-                '#include <SDL2/begin_code.h>\n'
-                '#include "../../../3rdparty/sdl2/sdl2/include/SDL.h"\n'
-                '#include "../../../3rdparty/sdl2/sdl2/include/SDL_filesystem.h"\n',
+                '#include <SDL3/SDL_begin_code.h>\n'
+                '#include "../../../3rdparty/sdl3/sdl3/include/SDL3/SDL.h"\n'
+                '#include "../../../3rdparty/sdl3/sdl3/include/SDL3/SDL_filesystem.h"\n',
             )
 
             self.assertEqual(
@@ -1288,9 +1288,9 @@ class BoundaryCheckerTests(unittest.TestCase):
                         "emulator/src/Libs/LibSaveData.cpp:1: forbidden include (Libs -> SDL): SDL.h",
                         "emulator/src/Libs/LibSaveData.cpp:2: forbidden include (Libs -> SDL): SDL_filesystem.h",
                         "emulator/src/Libs/LibSaveData.cpp:3: forbidden include (Libs -> SDL): SDL_stdinc.h",
-                        "emulator/src/Libs/LibSaveData.cpp:4: forbidden include (Libs -> SDL): SDL2/begin_code.h",
-                        "emulator/src/Libs/LibSaveData.cpp:5: forbidden include (Libs -> SDL): ../../../3rdparty/sdl2/sdl2/include/SDL.h",
-                        "emulator/src/Libs/LibSaveData.cpp:6: forbidden include (Libs -> SDL): ../../../3rdparty/sdl2/sdl2/include/SDL_filesystem.h",
+                        "emulator/src/Libs/LibSaveData.cpp:4: forbidden include (Libs -> SDL): SDL3/SDL_begin_code.h",
+                        "emulator/src/Libs/LibSaveData.cpp:5: forbidden include (Libs -> SDL): ../../../3rdparty/sdl3/sdl3/include/SDL3/SDL.h",
+                        "emulator/src/Libs/LibSaveData.cpp:6: forbidden include (Libs -> SDL): ../../../3rdparty/sdl3/sdl3/include/SDL3/SDL_filesystem.h",
                     ),
                 ),
             )
@@ -1358,14 +1358,14 @@ class BoundaryCheckerTests(unittest.TestCase):
     def test_rejects_imgui_sdl_backend_from_graphics_debug_overlay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.write_fixture(root, GRAPHICS_DEBUG_OVERLAY_SOURCE, '#include "imgui_impl_sdl2.h"\n')
+            self.write_fixture(root, GRAPHICS_DEBUG_OVERLAY_SOURCE, '#include "imgui_impl_sdl3.h"\n')
 
             self.assertEqual(
                 check_source_root(root),
                 CheckResult(
                     exit_code=1,
                     diagnostics=(
-                        "emulator/src/Graphics/DebugOverlay.cpp:1: forbidden include (Graphics DebugOverlay -> SDL GUI): imgui_impl_sdl2.h",
+                        "emulator/src/Graphics/DebugOverlay.cpp:1: forbidden include (Graphics DebugOverlay -> SDL GUI): imgui_impl_sdl3.h",
                     ),
                 ),
             )

@@ -55,6 +55,34 @@ struct ShaderDynamicSLoadSpan
 	bool     exact          = false;
 };
 
+// A whole-descriptor S_LOAD at a constant non-negative dword offset.
+struct ShaderDescriptorSLoadCandidate
+{
+	uint32_t index     = 0;
+	int      dwords    = 0;
+	int      offset_dw = 0;
+};
+
+// An image consumer whose 8-dword T# is written, within its block, by two
+// 4-dword S_LOADs: low at the T# register and high four registers above it.
+struct ShaderSplitTextureCandidate
+{
+	uint32_t consumer = 0;
+	uint32_t low      = 0;
+	uint32_t high     = 0;
+};
+
+// Code-only instruction candidates of the EUD descriptor scan, in ascending
+// instruction order. Per-draw checks (pointer register, entry values, EUD
+// span) still apply to every entry.
+struct ShaderEudDescriptorLoads
+{
+	std::vector<ShaderSplitTextureCandidate>    split_textures;
+	std::vector<ShaderDescriptorSLoadCandidate> sloads;
+};
+
+[[nodiscard]] ShaderEudDescriptorLoads ShaderFindEudDescriptorLoads(const ShaderCode& code);
+
 // Results of the resource analyses that depend only on the program code and one
 // start register. Each memo belongs to one immutable code object and is shared
 // by every draw of that program; a null memo analyzes the code directly. Entry
@@ -69,6 +97,7 @@ public:
 	// Consumers of every whole-descriptor S_LOAD up to the first branch, indexed
 	// by instruction; other entries keep the default value.
 	[[nodiscard]] const std::vector<ShaderDynamicSLoadUse>& DescriptorSLoadUses(const ShaderCode& code) const;
+	[[nodiscard]] const ShaderEudDescriptorLoads&           EudDescriptorLoads(const ShaderCode& code) const;
 	[[nodiscard]] ShaderDynamicSLoadSpan DynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping) const;
 
 private:
@@ -79,6 +108,8 @@ private:
 	mutable std::unordered_map<int, ShaderSamplerOperationEvidence> m_sampler_operation;
 	mutable std::vector<ShaderDynamicSLoadUse>                      m_descriptor_sload_uses;
 	mutable bool                                                    m_descriptor_sload_uses_ready = false;
+	mutable ShaderEudDescriptorLoads                                m_eud_descriptor_loads;
+	mutable bool                                                    m_eud_descriptor_loads_ready = false;
 	// Keyed by load PC, last consumer PC, destination register and dword count.
 	mutable std::map<std::tuple<uint32_t, uint32_t, int, int>, ShaderDynamicSLoadSpan> m_dynamic_sload_spans;
 };

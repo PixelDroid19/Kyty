@@ -1771,12 +1771,14 @@ TEST(EmulatorGraphicsDirtyTracking, SlotAndMappingChangesWaitForAFaultInFlight)
 
 	protection.release_signal_safe.store(true);
 	fault.join();
-	unregister.join();
 	unmap.join();
 	EXPECT_TRUE(fault_result);
-	EXPECT_TRUE(unregistered.load());
+	// The mapping change keeps its publisher admission until it ends, and a slot
+	// that changes identity waits for every publisher: end it before joining.
 	leases.EndUnmap(faulting, faulting + page_size, unmapped, true);
 	EXPECT_FALSE(leases.Find(faulting, nullptr));
+	unregister.join();
+	EXPECT_TRUE(unregistered.load());
 
 	// The revoked page is not the tracker's any more.
 	const uint32_t restores = protection.signal_safe_calls;

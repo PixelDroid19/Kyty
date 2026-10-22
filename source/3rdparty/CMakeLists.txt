@@ -1,6 +1,6 @@
 add_subdirectory(cpuinfo)
 add_subdirectory(lua)
-add_subdirectory(sdl2)
+add_subdirectory(sdl3)
 add_subdirectory(rijndael)
 add_subdirectory(lzma)
 add_subdirectory(vulkan)

@@ -38,6 +38,7 @@
             xorg.libXi
             xorg.libXfixes
             xorg.libXScrnSaver
+            xorg.libXtst
             xorg.libxcb
           ];
         };

@@ -7,6 +7,7 @@
 //#error "KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS"
 #else
 
+#include <intrin.h>
 #include <windows.h>
 
 namespace Kyty {
@@ -123,6 +124,25 @@ inline void sys_query_performance_counter(uint64_t* counter)
 	LARGE_INTEGER c;
 	QueryPerformanceCounter(&c);
 	*counter = c.QuadPart;
+}
+
+// Reads the processor's time-stamp counter.
+inline uint64_t sys_read_cycle_counter()
+{
+	return __rdtsc();
+}
+
+// True when the time-stamp counter ticks at a constant rate in every power state.
+inline bool sys_cycle_counter_invariant()
+{
+	int info[4] = {};
+	__cpuid(info, static_cast<int>(0x80000000u));
+	if (static_cast<unsigned int>(info[0]) < 0x80000007u)
+	{
+		return false;
+	}
+	__cpuid(info, static_cast<int>(0x80000007u));
+	return (static_cast<unsigned int>(info[3]) & (1u << 8u)) != 0;
 }
 
 } // namespace Kyty

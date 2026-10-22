@@ -56,6 +56,8 @@ namespace Kyty::Libs::Graphics {
 static ComputeColorFillEvents g_compute_color_fills;
 // Pending DCC metadata clears, keyed by the metadata range the guest filled.
 static ComputeColorFillEvents g_color_dcc_clears;
+
+
 static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, VkImageLayout new_layout, VkAccessFlags dst_access,
                                  VkPipelineStageFlags dst_stage);
 
@@ -110,6 +112,16 @@ static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, Com
 		if (entry.type != GpuMemoryObjectType::StorageBuffer && !image_alias)
 		{
 			return false;
+		}
+		// A partial buffer or read-only view of the filled bytes does not own
+		// the range; the writable exact storage is the representation that
+		// receives the fill. Refusing the whole fill on one of those aliases
+		// left every frame's clear unpublished and the previous image visible
+		// (moving-object trails).
+		if (aliases == ComputeFillAliases::SkipPartial && entry.type == GpuMemoryObjectType::StorageBuffer &&
+		    entry.relation != GpuMemoryOverlapType::Equals)
+		{
+			continue;
 		}
 		if (image_alias && entry.relation != GpuMemoryOverlapType::Equals)
 		{
@@ -241,7 +253,8 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	const auto& proof = input.uniform_buffer_fill;
 	const auto& buffers = input.bind.storage_buffers;
 
-	if (!proof.valid || buffers.buffers_num != 1 || input.bind.textures2D.textures_num != 0 ||
+	const bool loaded_value = proof.value_buffer_register >= 0;
+	if (!proof.valid || buffers.buffers_num != (loaded_value ? 2 : 1) || input.bind.textures2D.textures_num != 0 ||
 	    input.bind.samplers.samplers_num != 0 || ShaderGdsBufferBound(input.bind.gds_pointers) ||
 	    proof.workgroup_shift > 10u || proof.workgroup_register != input.workgroup_register ||
 	    input.threads_num[0] != (1u << proof.workgroup_shift) || input.threads_num[1] != 1u || input.threads_num[2] != 1u ||
@@ -250,14 +263,39 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	{
 		return false;
 	}
-	const auto& destination = buffers.buffers[0];
-	if (buffers.start_register[0] != proof.destination_start_register || buffers.accesses[0] != ShaderStorageAccess::Typed ||
-	    (buffers.sources[0] != ShaderStorageBindingSource::DirectResource && buffers.sources[0] != ShaderStorageBindingSource::MetadataSharp) ||
-	    !buffers.code_available[0] || !buffers.exact_matches[0] || buffers.unbased_matches[0] || buffers.decoded_unknown[0] ||
-	    buffers.indirect_descriptor_use[0] || ShaderStorageUsageIsReadOnly(buffers.usages[0]) || destination.SwizzleEnabled() ||
-	    destination.IndexStride() != 0u || destination.AddTid())
+	const auto binding_is_exact = [&](int index, bool read_only)
+	{
+		const auto& sharp = buffers.buffers[index];
+		return (buffers.sources[index] == ShaderStorageBindingSource::DirectResource ||
+		        buffers.sources[index] == ShaderStorageBindingSource::MetadataSharp) &&
+		       buffers.code_available[index] && buffers.exact_matches[index] && !buffers.unbased_matches[index] &&
+		       !buffers.decoded_unknown[index] && !buffers.indirect_descriptor_use[index] &&
+		       ShaderStorageUsageIsReadOnly(buffers.usages[index]) == read_only && !sharp.SwizzleEnabled() &&
+		       sharp.IndexStride() == 0u && !sharp.AddTid();
+	};
+	const int   destination_index = buffers.start_register[0] == proof.destination_start_register ? 0 : 1;
+	const auto& destination       = buffers.buffers[destination_index];
+	if (destination_index >= buffers.buffers_num || buffers.start_register[destination_index] != proof.destination_start_register ||
+	    buffers.accesses[destination_index] != ShaderStorageAccess::Typed || !binding_is_exact(destination_index, false))
 	{
 		return false;
+	}
+	// The loaded value is read at record time from a source the CPU wrote; one
+	// with GPU writes behind it has no stable value here. The bound read-only
+	// view uploads these guest bytes even inside a stale surface of a reused
+	// range, so the dispatch writes the value read here.
+	uint32_t loaded_word = 0;
+	if (loaded_value)
+	{
+		const int   source_index = 1 - destination_index;
+		const auto& source       = buffers.buffers[source_index];
+		if (buffers.start_register[source_index] != proof.value_buffer_register || !binding_is_exact(source_index, true) ||
+		    source.Base48() == 0u || ShaderBufferByteSize(source.Stride(), source.NumRecords()) < sizeof(loaded_word) ||
+		    !GpuMemoryCaptureSnapshotReadOnlyBuffer(source.Base48(), sizeof(loaded_word), &loaded_word, nullptr, nullptr,
+		                                            GpuMemorySnapshotAdmission::StorageView))
+		{
+			return false;
+		}
 	}
 	// Each live scalar input is one unique user-data SGPR.
 	const auto user_sgpr = [&](int reg, uint32_t* value)
@@ -288,6 +326,17 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 		{
 			if (!user_sgpr(proof.value_registers[component], &words[component])) { return false; }
 		}
+	} else if (proof.value_is_constant || loaded_value)
+	{
+		// BUF_FMT_32_UINT, one record per invocation; the store writes X only.
+		// Whole 16-byte groups keep the fill a repeated word quad.
+		if (proof.record_bytes != 4u || destination.Stride() != 4u || destination.Format() != 20u ||
+		    (destination.DstSelXYZW() & 7u) != 4u || destination.NumRecords() == 0u || destination.NumRecords() % 4u != 0u ||
+		    invocations != destination.NumRecords())
+		{
+			return false;
+		}
+		words.fill(loaded_value ? loaded_word : proof.constant_value);
 	} else
 	{
 		// BUF_FMT_32_UINT. A period of 1 repeats the first value; the count must
@@ -316,9 +365,18 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 	// The fill rewrites every byte of the bound range, so the whole storage
 	// object is the guest result; a wider object could hold older pending writes.
 	GpuMemoryStorageWriteIdentity identity {};
-	if (buffer == nullptr || !GpuMemoryFindExactWritableStorage(fill.address, fill.size, &identity) ||
-	    !GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->RecordOutsideRenderPass(),
-	                                         *identity.buffer, fill.address, fill.size))
+	if (buffer == nullptr || !GpuMemoryFindExactWritableStorage(fill.address, fill.size, &identity))
+	{
+		return false;
+	}
+	// One repeated word is written in place; copying the storage object would
+	// also read the whole range back.
+	auto*       ctx      = g_render_ctx->GetGraphicCtx();
+	auto*       cmd      = buffer->RecordOutsideRenderPass();
+	const auto& words    = fill.words;
+	const bool  one_word = std::all_of(words.begin(), words.end(), [&](uint32_t word) { return word == words[0]; });
+	if (!(one_word && GuestDeviceAddressRecordFill(ctx, cmd, words[0], fill.address, fill.size)) &&
+	    !GuestDeviceAddressRecordPublication(ctx, cmd, *identity.buffer, fill.address, fill.size))
 	{
 		return false;
 	}
@@ -529,12 +587,25 @@ static uint32_t ColorDccClearChannels(VkFormat format)
 {
 	switch (format)
 	{
-		case VK_FORMAT_R16G16B16A16_SFLOAT:
+		case VK_FORMAT_R8_UNORM: return 1u;
+		case VK_FORMAT_R8G8_UNORM: return 2u;
+		case VK_FORMAT_R16_UNORM: return 1u;
+		case VK_FORMAT_R16G16_UNORM: return 2u;
+		case VK_FORMAT_R16G16B16A16_UNORM: return 4u;
+		case VK_FORMAT_R16_SFLOAT: return 1u;
+		case VK_FORMAT_R16G16_SFLOAT: return 2u;
+		case VK_FORMAT_R16G16B16A16_SFLOAT: return 4u;
+		case VK_FORMAT_R32_SFLOAT: return 1u;
+		case VK_FORMAT_R32G32_SFLOAT: return 2u;
+		case VK_FORMAT_R32G32B32A32_SFLOAT: return 4u;
+		case VK_FORMAT_R5G6B5_UNORM_PACK16:
+		case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
+		case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+		case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
 		case VK_FORMAT_R8G8B8A8_UNORM:
 		case VK_FORMAT_R8G8B8A8_SRGB:
 		case VK_FORMAT_B8G8R8A8_UNORM:
 		case VK_FORMAT_B8G8R8A8_SRGB: return 4u;
-		case VK_FORMAT_R32_SFLOAT: return 1u;
 		default: return 0u;
 	}
 }
@@ -662,8 +733,8 @@ static bool ResolveDepthMetaStorageIdentity(uint64_t submit_id, const RenderDept
 // 0xfffffff0 has a maximum Z of 1.0 in both layouts: [1, 1] without stencil
 // tiling, and base 1.0 with SMem 3 (expanded) with it, so the stencil plane
 // keeps its contents and the pass loads it. A zero word encodes [0, 0] and,
-// with stencil tiling, SMem 0 (cleared), so a combined D32S8 target qualifies
-// only when the guest clears stencil to zero in the same use.
+// with stencil tiling, SMem 0: the stencil of the tile reads DB_STENCIL_CLEAR
+// whatever the draw's clear bits say, so the fill clears both planes.
 static bool DepthMetaComputeFillTranslatable(const RenderDepthInfo& depth, const DepthMetaClearEvent& pending)
 {
 	if (pending.pattern.kind == DepthMetaPatternKind::RecognizedClear)
@@ -678,11 +749,14 @@ static bool DepthMetaComputeFillTranslatable(const RenderDepthInfo& depth, const
 	{
 		return false;
 	}
-	if (!depth.stencil_plane)
-	{
-		return true;
-	}
-	return depth.format == VK_FORMAT_D32_SFLOAT_S8_UINT && depth.stencil_clear_enable && depth.stencil_clear_value == 0u;
+	return !depth.htile_stencil || depth.format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
+
+// A zero HTILE word over a target whose stencil is tiled in HTILE clears the
+// stencil plane too.
+static bool DepthMetaClearCoversStencil(const RenderDepthInfo& depth, const DepthMetaClearEvent& event)
+{
+	return depth.htile_stencil && event.pattern.kind == DepthMetaPatternKind::UniformZero;
 }
 
 static bool ConsumeDepthMetaClear(uint64_t submit_id, const RenderDepthInfo& depth, DepthMetaClearEvent* event)
@@ -1031,6 +1105,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	r->stencil_clear_enable = rc.stencil_clear_enable;
 	r->stencil_clear_value  = hw.GetStencilClearValue();
 	r->stencil_plane        = effective_stencil != 0;
+	r->htile_stencil        = r->stencil_plane && !z.stencil_info.tile_stencil_disable;
 	// EXIT_NOT_IMPLEMENTED(r->stencil_clear_enable);
 
 	r->stencil_test_enable = dc.stencil_enable;
@@ -1045,6 +1120,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 		r->stencil_test_enable  = false;
 		r->stencil_clear_enable = false;
 		r->stencil_plane        = false;
+		r->htile_stencil        = false;
 		r->width                = 0;
 		r->height               = 0;
 	}
@@ -1139,9 +1215,9 @@ static void RequireCommittedDepthExtent(CommandBuffer* buffer, const RenderDepth
 
 // An HTILE clear covers the whole surface, while an attachment clear covers
 // only the render area of the pass that consumes it, which can be smaller than
-// the depth image. Clear the depth plane of the whole image instead; the
-// stencil plane keeps its contents or takes the pass's register clear.
-static bool ClearDepthMetaWholeImage(CommandBuffer* buffer, const RenderDepthInfo& depth)
+// the depth image. Clear the whole image instead: the depth plane, and the
+// stencil plane when the HTILE word clears it too.
+static bool ClearDepthMetaWholeImage(CommandBuffer* buffer, const RenderDepthInfo& depth, bool clear_stencil)
 {
 	auto* image = depth.vulkan_buffer;
 	// Custom sample locations would have to accompany every layout transition.
@@ -1152,7 +1228,7 @@ static bool ClearDepthMetaWholeImage(CommandBuffer* buffer, const RenderDepthInf
 	// A first use defines every plane, as its CLEAR load op would.
 	const bool first_use      = image->layout == VK_IMAGE_LAYOUT_UNDEFINED;
 	const auto restore_layout = first_use ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : image->layout;
-	const auto aspects        = first_use ? DepthFormatAspectMask(image->format) : VkImageAspectFlags {VK_IMAGE_ASPECT_DEPTH_BIT};
+	const auto aspects        = (first_use || clear_stencil) ? DepthFormatAspectMask(image->format) : VkImageAspectFlags {VK_IMAGE_ASPECT_DEPTH_BIT};
 	auto*      vk_buffer      = buffer->RecordOutsideRenderPass();
 	TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 	const VkClearDepthStencilValue clear {depth.depth_clear_value, depth.stencil_clear_value};
@@ -1193,12 +1269,18 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		if (!r->vulkan_buffer->sample_locations_compatible) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !r->vulkan_buffer->sample_locations_compatible condition ignored (continuing)\n"); }
 	}
 
+	if (r->htile && r->vaddr_num > 0)
+	{
+		GpuMemoryLinkDepthMetaStorage(r->vaddr[0], r->size[0], r->htile_buffer_vaddr, r->htile_buffer_size);
+	}
 	DepthMetaClearEvent meta_clear_event {};
-	if (r->htile && ConsumeDepthMetaClear(submit_id, *r, &meta_clear_event) && !ClearDepthMetaWholeImage(buffer, *r))
+	if (r->htile && ConsumeDepthMetaClear(submit_id, *r, &meta_clear_event) &&
+	    !ClearDepthMetaWholeImage(buffer, *r, DepthMetaClearCoversStencil(*r, meta_clear_event)))
 	{
 		const auto clear_actions = State::ResolveDepthClearActions(r->depth_clear_enable, true);
 		r->depth_clear_enable    = clear_actions.vulkan_clear;
 		r->suppress_depth_write  = clear_actions.suppress_depth_write;
+		r->stencil_clear_enable  = r->stencil_clear_enable || DepthMetaClearCoversStencil(*r, meta_clear_event);
 	}
 	if (r->update_compression_state)
 	{
@@ -1233,10 +1315,10 @@ DepthStencilAttachmentAccess ResolveDepthStencilAttachmentAccess(const RenderDep
 	return stencil_writes && has_stencil ? DepthStencilAttachmentAccess::DepthReadOnly : DepthStencilAttachmentAccess::ReadOnly;
 }
 
-// MAX_MIP and MIP_LEVEL select one level of a tiled chain that starts at the
-// target base; the attachment covers the whole chain. Layered chains keep
-// their single-level description.
-static void DescribeRenderColorMipChain(const HW::RenderTarget& rt, uint32_t bytes_per_element, RenderColorAttachmentInfo* attachment)
+// MAX_MIP and MIP_LEVEL select one level of a tiled chain. Every slice holds
+// its whole chain, so the chain size is the slice pitch of a layered target
+// (the pitch a sampled array view of the same surface uses).
+static uint64_t DescribeRenderColorMipChain(const HW::RenderTarget& rt, uint32_t bytes_per_element, RenderColorAttachmentInfo* attachment)
 {
 	const uint32_t       levels = rt.attrib2.num_mip_levels + 1u;
 	Gen5TextureMipLayout layout {};
@@ -1246,9 +1328,9 @@ static void DescribeRenderColorMipChain(const HW::RenderTarget& rt, uint32_t byt
 		EXIT("unsupported render-target mip chain: %ux%u pitch=%u bpe=%u levels=%u mip=%u\n", attachment->width, attachment->height,
 		     attachment->pitch, bytes_per_element, levels, rt.view.current_mip_level);
 	}
-	attachment->size       = layout.tiled.size;
 	attachment->mip_levels = levels;
 	attachment->mip_level  = rt.view.current_mip_level;
+	return layout.tiled.size;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1316,8 +1398,19 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		Graphics::TileSizeAlign size32 {};
 		Graphics::TileGetRenderTargetSize(attachment.width, attachment.height, attachment.pitch, rt.attrib3.tile_mode, rt_bpp, &size32);
 
+		const uint64_t slice_size = attachment.tile && rt.attrib2.num_mip_levels != 0u
+		                                ? DescribeRenderColorMipChain(rt, rt_bpp, &attachment)
+		                                : size32.size;
+		// CB_COLOR_ATTRIB3.RESOURCE_TYPE 2 is a 3D target. Its 64 KiB R_X slices
+		// are stored like array layers; only the host image type differs.
+		attachment.volume = rt.attrib3.dimension == 2u;
 		RenderTextureArrayView array_view {};
-		if (!ResolveRenderTextureArrayView(size32.size, rt.view.base_array_slice_index, rt.view.last_array_slice_index, &array_view))
+		const bool             view_valid =
+		    attachment.volume ? ResolveRenderTextureVolumeView(slice_size, rt.attrib3.depth + 1u, rt.view.base_array_slice_index,
+		                                                       rt.view.last_array_slice_index, &array_view)
+		                      : ResolveRenderTextureArrayView(slice_size, rt.view.base_array_slice_index, rt.view.last_array_slice_index,
+		                                                      &array_view);
+		if (!view_valid)
 		{
 			EXIT("invalid layered render-target layout: width=%" PRIu32 " height=%" PRIu32 " pitch=%" PRIu32
 			     " tile=%u layer=%" PRIu32 "..%" PRIu32 "\n",
@@ -1328,15 +1421,17 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		attachment.image_layers     = array_view.image_layers;
 		attachment.base_array_layer = array_view.base_layer;
 		attachment.layer_count      = array_view.layer_count;
-		if (attachment.tile && attachment.image_layers == 1u && rt.attrib2.num_mip_levels != 0u)
+		// A layered target reads and writes its whole backing; the guest may map it in adjacent pieces.
+		const uint64_t mapped = attachment.image_layers > 1u ? GpuMemoryGetMappedRangePrefix(rt.base.addr, attachment.size)
+		                                                     : attachment.size;
+		if (mapped != attachment.size)
 		{
-			DescribeRenderColorMipChain(rt, rt_bpp, &attachment);
-		}
-		if (attachment.image_layers > 1u &&
-		    GpuMemoryValidateAllocatedRange(rt.base.addr, attachment.size) != GpuMemoryRangeValidationStatus::Valid)
-		{
-			EXIT("layered render-target backing is not fully allocated: size=%" PRIu64 " layers=%" PRIu32 "\n", attachment.size,
-			     attachment.image_layers);
+			EXIT("layered render-target backing is not fully mapped: addr=0x%012" PRIx64 " size=%" PRIu64 " mapped=%" PRIu64
+			     " layers=%" PRIu32 " layer=%" PRIu32 "..%" PRIu32 " %" PRIu32 "x%" PRIu32 " pitch=%" PRIu32 " bpp=%" PRIu32
+			     " tile=%u mips=%" PRIu32 " mip=%" PRIu32 "\n",
+			     static_cast<uint64_t>(rt.base.addr), attachment.size, mapped, attachment.image_layers, rt.view.base_array_slice_index,
+			     rt.view.last_array_slice_index, attachment.width, attachment.height, attachment.pitch, rt_bpp, rt.attrib3.tile_mode,
+			     rt.attrib2.num_mip_levels + 1u, rt.view.current_mip_level);
 		}
 	} else
 	{
@@ -1619,7 +1714,8 @@ RenderTextureVulkanImage* DemoteScaledRenderTexture(uint64_t submit_id, CommandB
 	                           params[RenderTextureObject::PARAM_WRITE_BACK] != 0,
 	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_SAMPLES]),
 	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]), 0, 0,
-	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_MIP_LEVELS]));
+	                           static_cast<uint32_t>(params[RenderTextureObject::PARAM_MIP_LEVELS]),
+	                           params[RenderTextureObject::PARAM_VOLUME] != 0);
 	auto* demoted = static_cast<RenderTextureVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, object.vaddr, object.size, native));
 	EXIT_IF(demoted == nullptr || demoted == image || demoted->IsResolutionScaled());
@@ -1667,7 +1763,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		RenderTextureObject vulkan_buffer_info(attachment.render_texture_format, attachment.width, attachment.height, attachment.tile,
 		                                      attachment.neo, attachment.pitch, attachment.write_back,
 		                                      static_cast<uint32_t>(attachment.samples), attachment.image_layers, host.width,
-		                                      host.height, attachment.mip_levels);
+		                                      host.height, attachment.mip_levels, attachment.volume);
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, attachment.base_addr, attachment.size, vulkan_buffer_info));
 		if (buffer_vulkan == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_vulkan == nullptr condition ignored (continuing)\n"); }
@@ -1754,17 +1850,25 @@ static void PreserveExpandedDccAttachment(CommandBuffer* buffer, const HW::Rende
 	{
 		EXIT("DCC decompression requires an existing render texture\n");
 	}
-	const auto images = FindRenderTexture(buffer, attachment.base_addr, attachment.size, true);
-	if (images.Size() != 1u)
-	{
-		EXIT("DCC decompression has no unique expanded backing: size=%" PRIu64 " matches=%u\n",
-		     attachment.size, images.Size());
-	}
-	const auto* image = images[0];
 	const auto format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
-	if (image == nullptr || image->image == nullptr || image->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
-	    !image->MatchesGuestExtent(attachment.width, attachment.height) || image->format != format ||
-	    image->samples != VK_SAMPLE_COUNT_1_BIT || image->array_layers != 1u || image->mip_levels != 1u)
+	const auto images = FindRenderTexture(buffer, attachment.base_addr, attachment.size, true);
+	const RenderTextureVulkanImage* image = nullptr;
+	uint32_t matches = 0;
+	for (const auto* candidate: images)
+	{
+		if (candidate->MatchesGuestExtent(attachment.width, attachment.height) && candidate->format == format)
+		{
+			image = candidate;
+			matches++;
+		}
+	}
+	if (matches != 1u)
+	{
+		EXIT("DCC decompression has no unique expanded backing: size=%" PRIu64 " aliases=%u matches=%u\n",
+		     attachment.size, images.Size(), matches);
+	}
+	if (image->image == nullptr || image->layout == VK_IMAGE_LAYOUT_UNDEFINED || image->samples != VK_SAMPLE_COUNT_1_BIT ||
+	    image->array_layers != 1u || image->mip_levels != 1u)
 	{
 		EXIT("DCC decompression backing is not an initialized matching single-sample image\n");
 	}
@@ -2104,7 +2208,7 @@ RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer, Rende
 	input.attachments                            = attachments;
 	input.attachment_count                       = attachment_count;
 	input.expected_count                         = attachment_count;
-	input.shader_usage.fragment_coordinates      = ps->ps_pos_xy;
+	input.shader_usage.fragment_coordinates      = ps->ps_position;
 	input.shader_usage.integer_image_coordinates = ps->integer_image_coordinates;
 	input.shader_usage.image_size_query          = ps->image_size_query;
 
@@ -2465,6 +2569,7 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
 	}
 	EXIT_IF(!RenderResolutionMarkScalingApplied(decision));
 }
+
 
 void InvalidateMemoryObject(const RenderColorInfo& r)
 {

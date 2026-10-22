@@ -2785,6 +2785,20 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpP1F32_VdstVsrcAttrChan)
 	return true;
 }
 
+// VINTRP is a vector-ALU encoding, so EXEC masks its VDST write (ISA 3.3, 6.1); an inactive
+// lane keeps its value.
+static String8 PixelInterpolatorStore(const String8& dst, const String8& value, const String8& index_str)
+{
+	static const char* text = R"(
+        %interp_exec_<index> = OpLoad %uint %exec_lo
+        %interp_active_<index> = OpINotEqual %bool %interp_exec_<index> %uint_0
+        %interp_old_<index> = OpLoad %float %<dst>
+        %interp_new_<index> = OpSelect %float %interp_active_<index> %<value> %interp_old_<index>
+               OpStore %<dst> %interp_new_<index>
+)";
+	return String8(text).ReplaceStr("<dst>", dst).ReplaceStr("<value>", value).ReplaceStr("<index>", index_str);
+}
+
 static bool RecompilePixelInterpolatorLoad(Spirv* spirv, const ShaderPixelInputInfo* ps_info, uint32_t input, uint32_t component,
                                            const String8& index_str, const String8& dst, String8* dst_source)
 {
@@ -2802,10 +2816,7 @@ static bool RecompilePixelInterpolatorLoad(Spirv* spirv, const ShaderPixelInputI
 		const auto value = spirv->GetConstantFloat(ShaderPixelInterpolatorDefaultComponent(interpolator, component));
 		EXIT_IF(value == "unknown_float_constant");
 
-		static const char* default_text = R"(
-                       OpStore %<dst> %<value>
-)";
-		*dst_source += String8(default_text).ReplaceStr("<dst>", dst).ReplaceStr("<value>", value);
+		*dst_source += PixelInterpolatorStore(dst, value, index_str);
 		return true;
 	}
 
@@ -2815,12 +2826,9 @@ static bool RecompilePixelInterpolatorLoad(Spirv* spirv, const ShaderPixelInputI
 	static const char* parameter_text = R"(
          <load0>
          %t1_<index> = OpLoad %float %t0_<index>
-                       OpStore %<dst> %t1_<index>
 )";
-	*dst_source += String8(parameter_text)
-	                   .ReplaceStr("<dst>", dst)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<index>", index_str);
+	*dst_source += String8(parameter_text).ReplaceStr("<load0>", load0).ReplaceStr("<index>", index_str);
+	*dst_source += PixelInterpolatorStore(dst, "t1_" + index_str, index_str);
 	return true;
 }
 
@@ -2869,9 +2877,9 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpMovF32_VdstVsrcAttrChan)
 		*dst_source += String8::FromPrintf(
 		    "%%custom_ptr_%u = OpAccessChain %%_ptr_Input_uint %%attr%u %%uint_%u %%uint_%u\n"
 		    "%%custom_raw_%u = OpLoad %%uint %%custom_ptr_%u\n"
-		    "%%custom_float_%u = OpBitcast %%float %%custom_raw_%u\n"
-		    "OpStore %%%s %%custom_float_%u\n",
-		    index, attribute, vertex, inst.src[2].constant.u, index, index, index, index, dst_value.value.c_str(), index);
+		    "%%custom_float_%u = OpBitcast %%float %%custom_raw_%u\n",
+		    index, attribute, vertex, inst.src[2].constant.u, index, index, index, index);
+		*dst_source += PixelInterpolatorStore(dst_value.value, String8::FromPrintf("custom_float_%u", index), index_str);
 		return true;
 	}
 	if (inst.src[0].constant.u != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].constant.u != 2 condition ignored (continuing)\n"); }

@@ -336,7 +336,8 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 	region.imageSubresource.layerCount     = 1;
 
 	region.imageOffset = {0, 0, 0};
-	region.imageExtent = {src_image->extent.width, src_image->extent.height, 1};
+	region.imageExtent = {src_image->extent.width, src_image->extent.height,
+	                      src_image->image_type == VK_IMAGE_TYPE_3D ? src_image->physical_extent.depth : 1u};
 
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer, 1, &region);
 
@@ -421,8 +422,39 @@ bool NormalizeImageImageCopy(const ImageImageCopy& requested, const VulkanImage*
 	    requested.height == 0u || requested.layer_count == 0u || requested.src_x < 0 || requested.src_y < 0 || requested.dst_x < 0 ||
 	    requested.dst_y < 0 || requested.src_level >= requested.src_image->mip_levels || requested.dst_level >= dst_image->mip_levels ||
 	    requested.src_image->physical_extent.width == 0u || requested.src_image->physical_extent.height == 0u ||
-	    dst_image->physical_extent.width == 0u || dst_image->physical_extent.height == 0u ||
-	    requested.src_array_layer >= requested.src_image->array_layers || requested.dst_array_layer >= dst_image->array_layers ||
+	    dst_image->physical_extent.width == 0u || dst_image->physical_extent.height == 0u)
+	{
+		return false;
+	}
+	const bool src_volume = requested.src_image->image_type == VK_IMAGE_TYPE_3D;
+	const bool dst_volume = dst_image->image_type == VK_IMAGE_TYPE_3D;
+	if (src_volume != dst_volume)
+	{
+		return false;
+	}
+	if (src_volume)
+	{
+		const uint32_t src_width  = std::max(1u, requested.src_image->physical_extent.width >> requested.src_level);
+		const uint32_t src_height = std::max(1u, requested.src_image->physical_extent.height >> requested.src_level);
+		const uint32_t dst_width  = std::max(1u, dst_image->physical_extent.width >> requested.dst_level);
+		const uint32_t dst_height = std::max(1u, dst_image->physical_extent.height >> requested.dst_level);
+		const uint32_t src_depth  = std::max(1u, requested.src_image->physical_extent.depth >> requested.src_level);
+		const uint32_t dst_depth  = std::max(1u, dst_image->physical_extent.depth >> requested.dst_level);
+		if (requested.depth == 0u || requested.depth > src_depth || requested.depth > dst_depth ||
+		    static_cast<uint32_t>(requested.src_x) + requested.width > src_width ||
+		    static_cast<uint32_t>(requested.src_y) + requested.height > src_height ||
+		    static_cast<uint32_t>(requested.dst_x) + requested.width > dst_width ||
+		    static_cast<uint32_t>(requested.dst_y) + requested.height > dst_height)
+		{
+			return false;
+		}
+		*normalized                 = requested;
+		normalized->layer_count     = 1u;
+		normalized->src_array_layer = 0u;
+		normalized->dst_array_layer = 0u;
+		return true;
+	}
+	if (requested.src_array_layer >= requested.src_image->array_layers || requested.dst_array_layer >= dst_image->array_layers ||
 	    requested.layer_count > requested.src_image->array_layers - requested.src_array_layer ||
 	    requested.layer_count > dst_image->array_layers - requested.dst_array_layer)
 	{
@@ -554,6 +586,7 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 		VkImageCopy region {};
 
 		auto src_layout = r.src_image->layout;
+		const bool volume = r.src_image->image_type == VK_IMAGE_TYPE_3D;
 
 		region.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 		region.srcSubresource.mipLevel       = r.src_level;
@@ -565,7 +598,14 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 		region.dstSubresource.baseArrayLayer = r.dst_array_layer;
 		region.dstSubresource.layerCount     = r.layer_count;
 		region.dstOffset                     = {r.dst_x, r.dst_y, 0};
-		region.extent                        = {r.width, r.height, 1};
+		region.extent                        = {r.width, r.height, volume ? r.depth : 1u};
+		if (volume)
+		{
+			region.srcSubresource.baseArrayLayer = 0u;
+			region.srcSubresource.layerCount     = 1u;
+			region.dstSubresource.baseArrayLayer = 0u;
+			region.dstSubresource.layerCount     = 1u;
+		}
 
 		set_image_layout(vk_buffer, r.src_image, r.src_level, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_layout,
 		                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -722,7 +762,9 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 
 	vkGetBufferMemoryRequirements(gctx->device, buffer->buffer, &buffer->memory.requirements);
 
-	if (!VulkanAllocate(gctx, &buffer->memory))
+	const auto resource = (buffer->usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0 ? VulkanMemoryResource::DeviceAddress
+	                                                                                      : VulkanMemoryResource::Linear;
+	if (!VulkanAllocate(gctx, &buffer->memory, resource))
 	{
 		vkDestroyBuffer(gctx->device, buffer->buffer, nullptr);
 		buffer->buffer = nullptr;

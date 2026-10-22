@@ -710,7 +710,7 @@ add_test(
 	COMMAND $<TARGET_FILE:kyty_audio_host_integration>
 )
 set_tests_properties(KytyAudioHostIntegration.PacingAndLifecycle PROPERTIES
-	ENVIRONMENT "SDL_AUDIODRIVER=disk;SDL_DISKAUDIOFILE=/tmp/kyty-audio-host-integration.raw"
+	ENVIRONMENT "SDL_AUDIO_DRIVER=disk;SDL_AUDIO_DISK_OUTPUT_FILE=/tmp/kyty-audio-host-integration.raw"
 	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 30
 )

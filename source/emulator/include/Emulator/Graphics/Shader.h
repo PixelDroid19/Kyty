@@ -610,6 +610,11 @@ enum class ShaderInstructionType : uint32_t
 [[nodiscard]] bool             ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix);
 // MUBUF or MTBUF instruction type (mnemonic "Buffer*" or "TBuffer*"), from a table built once.
 [[nodiscard]] bool             ShaderInstructionIsVectorBufferAccess(ShaderInstructionType type);
+// The classifiers below are tables built once from the mnemonic prefixes
+// "BufferLoad", "TBufferLoad" and "SLoad".
+[[nodiscard]] bool             ShaderInstructionIsBufferLoad(ShaderInstructionType type);
+[[nodiscard]] bool             ShaderInstructionIsTypedBufferLoad(ShaderInstructionType type);
+[[nodiscard]] bool             ShaderInstructionIsScalarMemoryLoad(ShaderInstructionType type);
 
 namespace ShaderInstructionFormat {
 
@@ -1623,7 +1628,9 @@ struct ShaderExtendedResource
 		fields[1] = hi;
 	}
 
-	[[nodiscard]] uint64_t Base() const { return (fields[0] | (static_cast<uint64_t>(fields[1]) << 32u)); }
+	// A guest pointer in an SGPR pair addresses 48 bits, as for S_LOAD and SRT
+	// table pointers; the top 16 bits of the high word are not part of it.
+	[[nodiscard]] uint64_t Base() const { return (fields[0] | ((static_cast<uint64_t>(fields[1]) & 0xffffu) << 32u)); }
 };
 
 struct ShaderVertexInputBuffer
@@ -1639,6 +1646,8 @@ struct ShaderVertexInputBuffer
 	// SSBO slot in bind.storage_buffers when this stream backs untagged MUBUF
 	// format-loads. -1 means the stream is Fetch-only.
 	int      storage_slot           = -1;
+	// The stream steps per instance instead of per vertex.
+	bool     instance               = false;
 };
 
 struct ShaderVertexDestination
@@ -1648,6 +1657,8 @@ struct ShaderVertexDestination
 	// Guest attribute-table semantic. This is not necessarily the dense Vulkan
 	// input location used by resources/resources_dst.
 	int semantic = -1;
+	// The attribute word selects the instance id as the fetch index.
+	bool instance = false;
 };
 
 enum class ShaderStorageUsage
@@ -1728,6 +1739,13 @@ struct ShaderComputeUniformBufferFillEvidence
 	uint32_t record_bytes               = 16;
 	int      count_register             = -1;
 	int      period_register            = -1;
+	// The constant form stores one inline or literal value with
+	// buffer_store_format_x at every invocation index; value_registers stay -1.
+	bool     value_is_constant          = false;
+	uint32_t constant_value             = 0;
+	// The loaded form stores the first word of the one-descriptor source at
+	// this SGPR, read with s_buffer_load_dword, the same way.
+	int      value_buffer_register      = -1;
 };
 
 // Structural evidence for one narrowly defined compute metadata-fill family.
@@ -1861,12 +1879,32 @@ struct ShaderZeroSBufferResources
 
 // Image reads whose T# is an all-zero resource: the RDNA2 ISA defines such a
 // resource as unbound, returning zero in every component.
+// An image read through start_register returns zero. A user-data descriptor
+// covers the whole program; a descriptor S_LOAD (loaded) covers the reads in
+// (load_pc, last_pc].
 struct ShaderZeroImageResources
 {
-	static constexpr int IMAGES_MAX = 16;
+	static constexpr int IMAGES_MAX = 32;
 
-	int start_register[IMAGES_MAX] = {0};
-	int images_num                 = 0;
+	int      start_register[IMAGES_MAX] = {0};
+	bool     loaded[IMAGES_MAX]         = {false};
+	uint32_t load_pc[IMAGES_MAX]        = {0};
+	uint32_t last_pc[IMAGES_MAX]        = {0};
+	int      images_num                 = 0;
+};
+
+// Descriptor S_LOADs whose descriptor binds nothing (a T# of buffer type, or an
+// S# that only feeds reads of such a T#) write zero to the SGPRs
+// [first_register, first_register + dwords) at pc. Sized for a T# load and an
+// S# load per zero image.
+struct ShaderZeroDescriptorLoads
+{
+	static constexpr int LOADS_MAX = 2 * ShaderZeroImageResources::IMAGES_MAX;
+
+	uint32_t pc[LOADS_MAX]             = {0};
+	int      first_register[LOADS_MAX] = {0};
+	int      dwords[LOADS_MAX]         = {0};
+	int      loads_num                 = 0;
 };
 
 [[nodiscard]] constexpr uint64_t ShaderBufferByteSize(uint32_t stride, uint32_t records)
@@ -1920,6 +1958,11 @@ struct ShaderBindResources;
 [[nodiscard]] bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type);
 // The image read's T# is an all-zero resource recorded by the usage parse.
 [[nodiscard]] bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst);
+void ShaderAddZeroImageResource(ShaderZeroImageResources* resources, int register_id);
+void ShaderAddLoadedZeroImageResource(ShaderZeroImageResources* resources, int register_id, uint32_t load_pc, uint32_t last_pc);
+void ShaderAddZeroDescriptorLoad(ShaderZeroDescriptorLoads* loads, uint32_t pc, int first_register, int dwords);
+[[nodiscard]] bool ShaderScalarLoadWritesZero(const ShaderBindResources& bind, uint32_t pc, int register_id);
+[[nodiscard]] bool ShaderScalarLoadIsZero(const ShaderBindResources& bind, const ShaderInstruction& inst);
 struct ShaderComputeEmptyGate
 {
 	int      storage_buffer_index = -1;
@@ -2101,10 +2144,16 @@ struct ShaderBindResources
 	bool     thread_limits_used      = false;
 	uint32_t thread_limits_offset_dw = 0;
 	uint32_t thread_limits[3]        = {0, 0, 0};
+	// Geometry compute pass and the draw that reads its output: two runtime
+	// blocks (ShaderGeometryComputeInfo), per-draw data.
+	bool     geometry_used      = false;
+	uint32_t geometry_offset_dw = 0;
+	uint32_t geometry_block[8]  = {};
 	ShaderStorageResources     storage_buffers;
 	ShaderZeroSBufferResources zero_sbuffer_resources;
 	ShaderTextureResources     textures2D;
 	ShaderZeroImageResources   zero_image_resources;
+	ShaderZeroDescriptorLoads  zero_descriptor_loads;
 	ShaderSamplerResources     samplers;
 	ShaderGdsResources         gds_pointers;
 	ShaderDirectSgprsResources direct_sgprs;
@@ -2247,6 +2296,12 @@ struct ShaderVertexInputInfo
 	// descriptor set is assigned by the renderer after both stages are known.
 	ShaderVertexClipProbeConfig clip_probe;
 	uint32_t                     clip_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+	// The host stage draws the output of a merged ES+GS geometry pass instead of
+	// running the guest program (SpirvGenerateGeometryPullSource). Its records carry
+	// geometry_pull_parameters parameters; geometry_pull_layer exports the layer.
+	bool     geometry_pull            = false;
+	bool     geometry_pull_layer      = false;
+	uint32_t geometry_pull_parameters = 0;
 };
 
 // Bind each merged vertex stream as a ReadOnly raw SSBO so untagged MUBUF
@@ -2466,6 +2521,10 @@ struct ShaderImmutablePixelAnalysis
 	bool prevents_noop_pixel_elision = false;
 	bool has_getpc = false;
 	bool has_global_memory_load = false;
+	// Buffer, typed buffer and scalar loads, in instruction order: the only
+	// instructions whose per-draw descriptor checks can require the guest
+	// device address table.
+	std::vector<uint32_t> descriptor_load_indices;
 };
 
 [[nodiscard]] ShaderPixelColorExports ShaderSummarizePixelColorExports(const ShaderCode& code);
@@ -2482,7 +2541,7 @@ struct ShaderPixelInputInfo
 	uint8_t                target_output_order[8]    = {};
 	uint8_t                target_output_number[8]   = {};
 	RenderHostToGuestScale host_to_guest_scale;
-	bool                   ps_pos_xy                 = false;
+	bool                   ps_position               = false;
 	bool                   front_face_all_bits       = false;
 	bool                   integer_image_coordinates = false;
 	bool                   image_size_query          = false;
@@ -2516,6 +2575,11 @@ struct ShaderPixelInputInfo
 	[[nodiscard]] bool FrontFaceEnabled() const
 	{
 		return (system_input_enable & system_input_address & (1u << 12u)) != 0;
+	}
+	// ANCILLARY_ENA: bits 16..26 of the VGPR hold the render-target array index.
+	[[nodiscard]] bool AncillaryEnabled() const
+	{
+		return (system_input_enable & system_input_address & (1u << 13u)) != 0;
 	}
 };
 
@@ -2710,7 +2774,7 @@ bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, i
 void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
                                           const GraphicsGeRawRegister* shader_stages = nullptr);
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
-                                      ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
+                                      uint32_t cb_target_mask, ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
 void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, uint32_t dispatch_mode,
                                       ShaderComputeInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderVertexInputInfo* info);
@@ -2734,8 +2798,14 @@ ShaderCode       ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::Shad
 	                                                         const ShaderPixelInputInfo& input_info,
 	                                                         const ShaderPixelInput0ProbeConfig& config);
 Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInputInfo* input_info);
+// Host vertex stage of a geometry pull draw (input_info.geometry_pull).
+Vector<uint32_t> ShaderCompileGeometryPullVS(const ShaderVertexInputInfo& input_info);
 Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInputInfo* input_info);
 Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeInputInfo* input_info);
+struct ShaderGeometryComputeInfo;
+// Compute pass running the linked merged ES+GS program `code` (SpirvGenerateGeometryComputeSource).
+Vector<uint32_t> ShaderRecompileGeometryCS(const ShaderCode& code, const ShaderVertexInputInfo& input_info,
+                                           const ShaderGeometryComputeInfo& geometry);
 bool             ShaderIsDisabled(uint64_t addr);
 bool             ShaderIsDisabled2(uint64_t addr, uint64_t chksum);
 void             ShaderDisable(uint64_t id);

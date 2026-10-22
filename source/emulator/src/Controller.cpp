@@ -18,8 +18,10 @@
 #include <cmath>
 #include <cctype>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -550,6 +552,155 @@ private:
 };
 
 static PadScriptRuntime g_pad_script;
+
+struct PadRecordAction
+{
+	const char* name;
+	uint32_t    button;
+	Axis        axis;
+	int         direction;
+};
+
+constexpr PadRecordAction kPadRecordActions[] = {
+    {"cross", PAD_BUTTON_CROSS, Axis::AxisMax, 0},
+    {"circle", PAD_BUTTON_CIRCLE, Axis::AxisMax, 0},
+    {"square", PAD_BUTTON_SQUARE, Axis::AxisMax, 0},
+    {"triangle", PAD_BUTTON_TRIANGLE, Axis::AxisMax, 0},
+    {"up", PAD_BUTTON_UP, Axis::AxisMax, 0},
+    {"down", PAD_BUTTON_DOWN, Axis::AxisMax, 0},
+    {"left", PAD_BUTTON_LEFT, Axis::AxisMax, 0},
+    {"right", PAD_BUTTON_RIGHT, Axis::AxisMax, 0},
+    {"l1", PAD_BUTTON_L1, Axis::AxisMax, 0},
+    {"r1", PAD_BUTTON_R1, Axis::AxisMax, 0},
+    {"l2", PAD_BUTTON_L2, Axis::AxisMax, 0},
+    {"r2", PAD_BUTTON_R2, Axis::AxisMax, 0},
+    {"l3", PAD_BUTTON_L3, Axis::AxisMax, 0},
+    {"r3", PAD_BUTTON_R3, Axis::AxisMax, 0},
+    {"options", PAD_BUTTON_OPTIONS, Axis::AxisMax, 0},
+    {"touchpad", PAD_BUTTON_TOUCH_PAD, Axis::AxisMax, 0},
+    {"left-stick-left", 0, Axis::LeftX, -1},
+    {"left-stick-right", 0, Axis::LeftX, 1},
+    {"left-stick-up", 0, Axis::LeftY, -1},
+    {"left-stick-down", 0, Axis::LeftY, 1},
+    {"right-stick-left", 0, Axis::RightX, -1},
+    {"right-stick-right", 0, Axis::RightX, 1},
+    {"right-stick-up", 0, Axis::RightY, -1},
+    {"right-stick-down", 0, Axis::RightY, 1},
+};
+
+constexpr std::size_t kPadRecordActionCount = sizeof(kPadRecordActions) / sizeof(kPadRecordActions[0]);
+
+// Records the host pad input the guest reads (KYTY_PAD_RECORD=<file>) as a
+// KYTY_PAD_SCRIPT route on the same clock: seconds from the first pad read.
+// Each completed press becomes one line; a stick counts as its full-travel
+// direction past half deflection. A press shorter than a guest poll is kept
+// for 50 ms so the replay delivers it to a read. The route is written only
+// when the user ends the session, so a session cut short by a fault or a
+// signal, or longer than a route can hold, leaves no file. A press still held
+// at the end is not written.
+class PadRecordRuntime
+{
+public:
+	void Observe(uint32_t buttons, const int* axes)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (!RecordingLocked())
+		{
+			return;
+		}
+		const auto now = std::chrono::steady_clock::now();
+		if (!m_started)
+		{
+			m_started = true;
+			m_origin  = now;
+		}
+		const double elapsed = std::chrono::duration<double>(now - m_origin).count();
+		for (std::size_t index = 0; index < kPadRecordActionCount; ++index)
+		{
+			const bool down = ActionDown(kPadRecordActions[index], buttons, axes);
+			if (down && m_press_start[index] < 0.0)
+			{
+				m_press_start[index] = elapsed;
+			} else if (!down && m_press_start[index] >= 0.0)
+			{
+				AppendLocked(kPadRecordActions[index].name, m_press_start[index], elapsed);
+				m_press_start[index] = -1.0;
+			}
+		}
+	}
+
+	void Finish()
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (!RecordingLocked())
+		{
+			return;
+		}
+		m_finished = true;
+		if (m_lines > kPadRecordLinesMax)
+		{
+			KYTY_LOG_DEBUG("KYTY_PAD_RECORD wrote nothing: the session exceeded the route entry limit\n");
+			return;
+		}
+		const std::string staging = m_path + ".partial";
+		std::ofstream     file(staging, std::ios::out | std::ios::trunc);
+		file << "# Host pad input recorded by KYTY_PAD_RECORD; replay with KYTY_PAD_SCRIPT.\n" << m_route;
+		file.close();
+		if (!file || std::rename(staging.c_str(), m_path.c_str()) != 0)
+		{
+			KYTY_LOG_DEBUG("KYTY_PAD_RECORD cannot write the route file\n");
+			std::remove(staging.c_str());
+		}
+	}
+
+private:
+	static constexpr uint32_t kPadRecordLinesMax = 4096;
+
+	static bool ActionDown(const PadRecordAction& action, uint32_t buttons, const int* axes)
+	{
+		if (action.button != 0)
+		{
+			return (buttons & action.button) != 0;
+		}
+		const int value = axes[static_cast<int>(action.axis)];
+		return action.direction < 0 ? value < 64 : value > 192;
+	}
+
+	bool RecordingLocked()
+	{
+		if (!m_initialized)
+		{
+			m_initialized    = true;
+			const char* path = std::getenv("KYTY_PAD_RECORD");
+			m_path           = path != nullptr ? path : "";
+			std::fill(std::begin(m_press_start), std::end(m_press_start), -1.0);
+		}
+		return !m_path.empty() && !m_finished;
+	}
+
+	void AppendLocked(const char* name, double start, double end)
+	{
+		if (++m_lines > kPadRecordLinesMax)
+		{
+			return;
+		}
+		char line[96];
+		std::snprintf(line, sizeof(line), "%.3f-%.3f:%s\n", start, std::max(end, start + 0.050), name);
+		m_route += line;
+	}
+
+	std::mutex                            m_mutex;
+	std::string                           m_path;
+	std::string                           m_route;
+	std::chrono::steady_clock::time_point m_origin {};
+	double                                m_press_start[kPadRecordActionCount] = {};
+	uint32_t                              m_lines       = 0;
+	bool                                  m_initialized = false;
+	bool                                  m_started     = false;
+	bool                                  m_finished    = false;
+};
+
+static PadRecordRuntime g_pad_record;
 
 static void AgentPadApplyToButtonsAndAxes(bool advance_tap, uint32_t* buttons, uint8_t* left_x, uint8_t* left_y, uint8_t* right_x,
                                           uint8_t* right_y, uint8_t* l2, uint8_t* r2)
@@ -1295,6 +1446,11 @@ void ControllerAxis(int id, Axis axis, int value)
 	g_controller->Axis(id, axis, value);
 }
 
+void ControllerSessionEnd()
+{
+	g_pad_record.Finish();
+}
+
 // SCE_PAD_ERROR_* (public Sony codes; used for ordinary guest failures, not EXIT).
 constexpr int PAD_ERROR_INVALID_ARG        = static_cast<int>(0x80920001u);
 constexpr int PAD_ERROR_INVALID_HANDLE     = static_cast<int>(0x80920003u);
@@ -1606,6 +1762,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	}
 
 	g_controller->ReadState(&state, &connected, &connected_count);
+	g_pad_record.Observe(state.buttons, state.axes);
 
 	// Every byte of the record is defined: padding, the extension unit and the
 	// reserve stay zero, and `connected` reads the same as a 32-bit boolean.
@@ -1720,6 +1877,10 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 	ControllerState states[64] {};
 
 	int ret_num = g_controller->ReadStates(states, num, &connected, &connected_count);
+	for (int i = 0; i < ret_num; i++)
+	{
+		g_pad_record.Observe(states[i].buttons, states[i].axes);
+	}
 	PadScriptState scripted {};
 	const bool script_active = g_pad_script.Sample(&scripted);
 	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };

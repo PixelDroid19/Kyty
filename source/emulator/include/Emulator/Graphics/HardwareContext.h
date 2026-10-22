@@ -881,6 +881,8 @@ public:
 	void                                 SetPolygonOffset(const PolygonOffset& offset) { m_polygon_offset = offset; }
 	[[nodiscard]] const EqaaControl&     GetEqaaControl() const { return m_eqaa_control; }
 	void                                 SetEqaaControl(const EqaaControl& control) { m_eqaa_control = control; }
+	[[nodiscard]] bool                   GetAlphaToMaskEnable() const { return m_alpha_to_mask_enable; }
+	void                                 SetAlphaToMaskEnable(bool enable) { m_alpha_to_mask_enable = enable; }
 	[[nodiscard]] const StencilControl&  GetStencilControl() const { return m_stencil_control; }
 	void                                 SetStencilControl(const StencilControl& control) { m_stencil_control = control; }
 	[[nodiscard]] const StencilMask&     GetStencilMask() const { return m_stencil_mask; }
@@ -978,6 +980,7 @@ private:
 	ModeControl   m_mode_control;
 	PolygonOffset m_polygon_offset;
 	EqaaControl   m_eqaa_control;
+	bool          m_alpha_to_mask_enable = false;
 
 	ShaderRegisters m_sh_regs;
 };

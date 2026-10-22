@@ -219,7 +219,7 @@ public:
 	[[nodiscard]] bool       DisplayEventsEnabled() const;
 	[[nodiscard]] bool       EnterPressed() const;
 
-	[[nodiscard]] bool OpenController(int device_index, int* instance_id);
+	[[nodiscard]] bool OpenController(int device_id, int* instance_id);
 	void               CloseController(int instance_id);
 	[[nodiscard]] const char* LastError() const;
 	[[nodiscard]] static int NormalizeAxis(ControllerAxis axis, int value);

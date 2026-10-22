@@ -2,6 +2,7 @@
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_DEBUGSTATS_H_
 
 #include "Kyty/Core/Common.h"
+#include "Kyty/Sys/SysTimer.h"
 
 #include "Emulator/Common.h"
 
@@ -12,6 +13,39 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+// Nanoseconds per time-stamp counter tick in 32.32 fixed point; zero when the
+// counter cannot be used.
+struct DebugStatsClockScale
+{
+	uint64_t multiplier = 0;
+};
+
+extern const DebugStatsClockScale g_debug_stats_clock_scale;
+
+// Clock for elapsed-time statistics. It reads the invariant time-stamp counter
+// scaled to nanoseconds, about a third of the cost of a steady_clock read, and
+// reads steady_clock on hosts where the counter is not usable.
+struct DebugStatsClock
+{
+	using duration                  = std::chrono::nanoseconds;
+	using rep                       = duration::rep;
+	using period                    = duration::period;
+	using time_point                = std::chrono::time_point<DebugStatsClock>;
+	static constexpr bool is_steady = true;
+
+	static time_point now() noexcept
+	{
+		const uint64_t multiplier = g_debug_stats_clock_scale.multiplier;
+		if (multiplier == 0)
+		{
+			return time_point(std::chrono::duration_cast<duration>(std::chrono::steady_clock::now().time_since_epoch()));
+		}
+		const uint64_t ticks = sys_read_cycle_counter();
+		const uint64_t ns    = (ticks >> 32u) * multiplier + (((ticks & 0xffffffffu) * multiplier) >> 32u);
+		return time_point(duration(static_cast<rep>(ns)));
+	}
+};
 
 constexpr uint32_t kDebugStatsGpuMemoryTypeCount = 9;
 constexpr uint32_t kDebugStatsSlowFrameCapacity  = 64;
@@ -116,7 +150,7 @@ public:
 private:
 	DebugStatsGpuMemorySlowCreateRecord* m_previous = nullptr;
 	DebugStatsGpuMemorySlowCreateRecord  m_record {};
-	std::chrono::steady_clock::time_point m_start;
+	DebugStatsClock::time_point          m_start;
 	uint32_t                             m_type_index = 0;
 	DebugStatsGpuMemoryCreateOutcome     m_outcome    = DebugStatsGpuMemoryCreateOutcome::FastReuse;
 	DebugStatsGpuMemoryLinkedTopology    m_linked_topology = DebugStatsGpuMemoryLinkedTopology::MutableOrOther;
@@ -389,6 +423,16 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t vk_compute_pipeline_create_count   = 0;
 	uint64_t vk_compute_pipeline_create_ns      = 0;
 	uint64_t vk_compute_pipeline_create_max_ns  = 0;
+	uint64_t compute_precompile_count           = 0;
+	uint64_t compute_precompile_ns              = 0;
+	uint64_t compute_precompile_max_ns          = 0;
+	uint64_t compute_precompile_failed          = 0;
+	uint64_t compute_precompile_wait_count      = 0;
+	uint64_t compute_precompile_wait_ns         = 0;
+	uint64_t compute_precompile_wait_max_ns     = 0;
+	// Gauges: compiles running now, and how long the oldest current wait has lasted.
+	uint64_t compute_precompile_running         = 0;
+	uint64_t compute_precompile_waiting_ns      = 0;
 	uint64_t shader_translation_cache_hits      = 0;
 	uint64_t shader_translation_cache_misses    = 0;
 	uint64_t shader_translation_cache_evictions = 0;
@@ -480,6 +524,11 @@ void DebugStatsRecordShaderIrParse(DebugStatsShaderParseKind kind, uint64_t elap
 void DebugStatsRecordSpirvSource(uint64_t elapsed_ns);
 void DebugStatsRecordSpirvCompile(uint64_t elapsed_ns);
 void DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind kind, uint64_t elapsed_ns);
+// A background compute pipeline compile, and a dispatch that waits for one.
+void DebugStatsBeginComputePrecompile();
+void DebugStatsEndComputePrecompile(bool created, uint64_t elapsed_ns);
+void DebugStatsBeginComputePrecompileWait();
+void DebugStatsEndComputePrecompileWait(uint64_t elapsed_ns);
 void DebugStatsRecordShaderTranslationCache(bool hit, bool evicted);
 void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCreateOutcome outcome, uint64_t elapsed_ns,
 	                                 const DebugStatsGpuMemorySlowCreateRecord* detail = nullptr,
@@ -497,12 +546,10 @@ class DebugStatsScopedWork final
 public:
 	using Recorder = void (*)(uint64_t bytes, uint64_t elapsed_ns);
 
-	DebugStatsScopedWork(Recorder recorder, uint64_t bytes): m_recorder(recorder), m_bytes(bytes), m_start(std::chrono::steady_clock::now())
-	{
-	}
+	DebugStatsScopedWork(Recorder recorder, uint64_t bytes): m_recorder(recorder), m_bytes(bytes), m_start(DebugStatsClock::now()) {}
 	~DebugStatsScopedWork()
 	{
-		const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
+		const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - m_start).count();
 		m_recorder(m_bytes, static_cast<uint64_t>(elapsed_ns));
 	}
 
@@ -511,7 +558,7 @@ public:
 private:
 	Recorder                              m_recorder;
 	uint64_t                              m_bytes;
-	std::chrono::steady_clock::time_point m_start;
+	DebugStatsClock::time_point           m_start;
 };
 
 class DebugStatsScopedTimer final
@@ -519,10 +566,10 @@ class DebugStatsScopedTimer final
 public:
 	using Recorder = void (*)(uint64_t elapsed_ns);
 
-	explicit DebugStatsScopedTimer(Recorder recorder): m_recorder(recorder), m_start(std::chrono::steady_clock::now()) {}
+	explicit DebugStatsScopedTimer(Recorder recorder): m_recorder(recorder), m_start(DebugStatsClock::now()) {}
 	~DebugStatsScopedTimer()
 	{
-		const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
+		const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - m_start).count();
 		m_recorder(static_cast<uint64_t>(elapsed_ns));
 	}
 
@@ -530,7 +577,7 @@ public:
 
 private:
 	Recorder                              m_recorder;
-	std::chrono::steady_clock::time_point m_start;
+	DebugStatsClock::time_point           m_start;
 };
 
 // Call from WindowDrawBuffer with the guest display image and swapchain extent.

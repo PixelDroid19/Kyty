@@ -9,13 +9,17 @@ namespace Kyty::Libs::Graphics {
 
 // Proves that a wave64 compute program computes the same results when each
 // host invocation runs one guest lane with its full guest workgroup preserved,
-// regardless of how the host groups invocations into subgroups. The proof is
-// fail-closed and requires all of:
+// regardless of how the host groups invocations into subgroups, except that a
+// quad DPP read (reads_quad_lanes) needs each host subgroup to hold aligned
+// runs of four consecutive local invocations, as the per-lane wave32 DPP path
+// already does, and a workgroup of whole quads. The proof is fail-closed and
+// requires all of:
 //
 // - no instruction that reads or writes another lane's data or a wave-wide
-//   count (lane reads/writes, MBCNT, WQM, DS append/consume, DPP, VCCZ/EXECZ
-//   operands, program-counter writes, messages), except a READFIRSTLANE whose
-//   source is proven wave-uniform under the launch EXEC;
+//   count (lane reads/writes, MBCNT, WQM, DS append/consume, DPP other than a
+//   full-mask quad_perm with FI=0 and BOUND_CTRL=1, VCCZ/EXECZ operands,
+//   program-counter writes, messages), except a READFIRSTLANE whose source is
+//   proven wave-uniform under the launch EXEC;
 // - every EXEC/VCC value used as a mask is consumed only per lane, and every
 //   scalar register that may hold a mask at a program point is never read there
 //   as uniform data (and vice versa); mask constants are only 0 or all ones;

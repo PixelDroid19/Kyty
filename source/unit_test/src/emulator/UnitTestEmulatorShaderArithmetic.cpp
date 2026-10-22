@@ -843,7 +843,7 @@ Core::String8 RejectionDiagnostic(Rejected rejected, ShaderType stage)
 		// lowering-preconditions (including an S_ENDPGM failure) cannot match.
 		return Core::String8::FromPrintf(
 		    "shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64
-		    " pc=0x00000000 sampled=0/0/0 inst=VBfeI32 .* clamp sopp=0xff raw=0xd5490010\n",
+		    " pc=0x00000000 sampled=0/0/0 inst=VBfeI32 .* clamp sopp=0xff raw=0xd5490010 crc=[0-9a-f]{8}\n",
 		    static_cast<unsigned>(stage), static_cast<unsigned>(ShaderInstructionType::VBfeI32),
 		    static_cast<uint64_t>(ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2));
 	}

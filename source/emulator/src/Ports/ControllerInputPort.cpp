@@ -56,6 +56,15 @@ void ControllerInputPort::Axis(int id, ::Kyty::Emulator::Ports::Axis axis, int v
 	}
 }
 
+void ControllerInputPort::SessionEnd()
+{
+	auto callbacks = g_callbacks.load();
+	if (callbacks.session_end != nullptr)
+	{
+		callbacks.session_end();
+	}
+}
+
 } // namespace Kyty::Emulator::Ports
 
 #endif // KYTY_EMU_ENABLED

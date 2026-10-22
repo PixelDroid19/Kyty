@@ -13,6 +13,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/ComputePipelinePrecompile.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/DiagnosticDump.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -28,6 +29,7 @@
 #include "Emulator/Graphics/RenderResolutionTransform.h"
 #include "Emulator/Graphics/SampleLocations.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Utils.h"
@@ -104,21 +106,26 @@ VulkanColorAttachmentBlendAdmission VulkanValidateColorAttachmentBlendRequest(Vk
 	           : VulkanColorAttachmentBlendAdmission::MissingFormatFeature;
 }
 
-uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized)
+uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized,
+                                    bool uses_r_coordinate)
 {
 	if (operation == State::ImageSampleOperation::Mixed)
 	{
 		EXIT("unsupported sampler contract: operation=mixed\n");
 	}
-	const auto& enabled_sampler = g_render_ctx->GetGraphicCtx()->enabled_sampler_features;
+	const auto& enabled_sampler     = g_render_ctx->GetGraphicCtx()->enabled_sampler_features;
+	const auto  unnormalized_policy = State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords(), allow_unnormalized);
 	VkSamplerAddressMode address[3] {};
 	if (!VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampX()), enabled_sampler, r.ForceUnormCoords(), &address[0]) ||
 	    !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampY()), enabled_sampler, r.ForceUnormCoords(), &address[1]) ||
-	    !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampZ()), enabled_sampler, r.ForceUnormCoords(), &address[2]))
+	    (uses_r_coordinate &&
+	     !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampZ()), enabled_sampler, r.ForceUnormCoords(), &address[2])))
 	{
-		EXIT("unsupported sampler coordinate lowering: clamp=%u,%u,%u unnormalized=%u operation=%u mirror_clamp_enabled=%u\n",
-		     r.ClampX(), r.ClampY(), r.ClampZ(), r.ForceUnormCoords() ? 1u : 0u, static_cast<uint32_t>(operation),
-		     enabled_sampler.mirror_clamp_to_edge);
+		EXIT("unsupported sampler coordinate lowering: clamp=%u,%u,%u unnormalized=%u view_allows_unnormalized=%u operation=%u "
+		     "mirror_clamp_enabled=%u uses_r=%u sampler=%08x %08x %08x %08x\n",
+		     r.ClampX(), r.ClampY(), r.ClampZ(), r.ForceUnormCoords() ? 1u : 0u, allow_unnormalized ? 1u : 0u,
+		     static_cast<uint32_t>(operation), enabled_sampler.mirror_clamp_to_edge, uses_r_coordinate ? 1u : 0u, r.fields[0],
+		     r.fields[1], r.fields[2], r.fields[3]);
 	}
 	Core::LockGuard lock(m_mutex);
 	uint32_t        m_samplers_size = m_samplers.Size();
@@ -126,7 +133,8 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	{
 		const auto& s = m_samplers.At(i);
 		if (s.r.fields[0] == r.fields[0] && s.r.fields[1] == r.fields[1] && s.r.fields[2] == r.fields[2] &&
-		    s.r.fields[3] == r.fields[3] && s.operation == operation && s.allow_unnormalized == allow_unnormalized)
+		    s.r.fields[3] == r.fields[3] && s.operation == operation && s.allow_unnormalized == allow_unnormalized &&
+		    s.uses_r_coordinate == uses_r_coordinate)
 		{
 			return i;
 		}
@@ -135,6 +143,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	s.r                   = r;
 	s.operation           = operation;
 	s.allow_unnormalized  = allow_unnormalized;
+	s.uses_r_coordinate   = uses_r_coordinate;
 	s.vk                  = nullptr;
 
 	auto mag_filter = r.XyMagFilter();
@@ -148,9 +157,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	const float       max_lod    = lod_range.max_lod;
 
 	VkSamplerCreateInfo sampler_info {};
-	const auto          sampler_comparison  = State::ResolveSamplerComparison(r.DepthCompareFunc(), operation);
-	const auto          unnormalized_policy =
-	    State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords(), allow_unnormalized);
+	const auto          sampler_comparison = State::ResolveSamplerComparison(r.DepthCompareFunc(), operation);
 	if (sampler_comparison.enabled && unnormalized_policy.disable_comparison)
 	{
 		EXIT("unsupported sampler contract: operation=%u unnormalized=1\n", static_cast<uint32_t>(operation));
@@ -858,11 +865,10 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	EXIT_IF(pipeline->pipeline != nullptr);
 
-	const auto vk_create_start = std::chrono::steady_clock::now();
+	const auto     vk_create_start = DebugStatsClock::now();
 	const VkResult create_result =
 	    vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
-	const auto vk_create_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vk_create_start).count();
+	const auto vk_create_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - vk_create_start).count();
 	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(vk_create_ns));
 
 	if (pipeline->pipeline == nullptr || create_result != VK_SUCCESS)
@@ -907,31 +913,14 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	return pipeline;
 }
 
+// The Vulkan inputs of one compute pipeline, decided on the dispatching thread.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* input_info, const Vector<uint32_t>& cs_shader,
-                                              const PipelineStaticParameters* static_params, PipelineDynamicParameters* dynamic_params)
+static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInputInfo* input_info, const Vector<uint32_t>& cs_shader)
 {
-	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(static_params == nullptr);
-	EXIT_IF(dynamic_params == nullptr);
-
-	auto* pipeline           = new VulkanPipeline;
-	pipeline->static_params  = static_params;
-	pipeline->dynamic_params = dynamic_params;
-
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 
 	EXIT_IF(gctx == nullptr);
 
-	VkShaderModule comp_shader_module = nullptr;
-
-	VkShaderModuleCreateInfo create_info {};
-
-	create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-	create_info.pNext    = nullptr;
-	create_info.flags    = 0;
-	create_info.codeSize = static_cast<size_t>(cs_shader.Size()) * 4;
-	create_info.pCode    = cs_shader.GetDataConst();
 	const auto subgroup_check = ShaderCheckSubgroupModule(cs_shader.GetDataConst(), cs_shader.Size(),
 	                                                       VK_SHADER_STAGE_COMPUTE_BIT, gctx->subgroup_stages,
 	                                                       gctx->subgroup_operations, gctx->compute_wave_vulkan_state,
@@ -941,18 +930,10 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 		EXIT("subgroup-module admission stage=compute word=%zu required_ops=0x%x reason=%s\n",
 		     subgroup_check.word, subgroup_check.required_operations, subgroup_check.reason);
 	}
-	vkCreateShaderModule(gctx->device, &create_info, nullptr, &comp_shader_module);
-
-	if (comp_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: comp_shader_module == nullptr condition ignored (continuing)\n"); }
 
 	VkPipelineShaderStageCreateInfo comp_shader_stage_info {};
-	comp_shader_stage_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	comp_shader_stage_info.pNext               = nullptr;
-	comp_shader_stage_info.flags               = 0;
-	comp_shader_stage_info.stage               = VK_SHADER_STAGE_COMPUTE_BIT;
-	comp_shader_stage_info.module              = comp_shader_module;
-	comp_shader_stage_info.pName               = "main";
-	comp_shader_stage_info.pSpecializationInfo = nullptr;
+	comp_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	comp_shader_stage_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
 	if (input_info->native_wave_sensitive)
 	{
@@ -994,53 +975,141 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 		}
 	}
 
-	VkDescriptorSetLayout set_layouts[1]  = {};
-	uint32_t              set_layouts_num = 0;
+	const auto&                bind                 = input_info->bind;
+	const ShaderBindResources* descriptor_stages[] = {&bind};
+	ValidatePipelineDescriptorLimits(gctx, descriptor_stages, 1, false);
 
-	VkPushConstantRange push_constant_info[1];
-	uint32_t            push_constant_info_num = 0;
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
 
-	CreateLayout(set_layouts, &set_layouts_num, push_constant_info, &push_constant_info_num,
-	             input_info->bind, /*additional_params->cs_bind,*/
-	             VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute);
+	ComputePipelineRecipe recipe;
+	recipe.vendor_id              = properties.vendorID;
+	recipe.device_id              = properties.deviceID;
+	recipe.stage_flags            = comp_shader_stage_info.flags;
+	recipe.required_subgroup_size = comp_shader_stage_info.pNext == &required_subgroup_size ? required_subgroup_size.requiredSubgroupSize : 0u;
+	if (bind.push_constant_size != 0 && !bind.vsharp_uniform_buffer)
+	{
+		recipe.push_constant_offset = bind.push_constant_offset;
+		recipe.push_constant_size   = bind.push_constant_size;
+	}
+	recipe.has_set_layout = ShaderBindRequiresDescriptorSet(bind);
+	EXIT_IF(recipe.has_set_layout && bind.push_constant_size == 0);
+	EXIT_IF(recipe.has_set_layout && bind.descriptor_set_slot != 0);
+	EXIT_IF(recipe.has_set_layout && !ShaderBuildDescriptorLayoutPlan(bind, &recipe.plan));
+	recipe.spirv.assign(cs_shader.GetDataConst(), cs_shader.GetDataConst() + cs_shader.Size());
+	return recipe;
+}
+
+// Creates the pipeline a recipe describes. Any thread may call it: it uses only
+// the device, the shared pipeline cache and the locked descriptor-layout cache.
+static VkResult CreateComputePipelineFromRecipe(GraphicContext* gctx, const ComputePipelineRecipe& recipe, VkPipelineLayout* layout,
+                                                VkPipeline* pipeline)
+{
+	VkShaderModuleCreateInfo create_info {};
+	create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	create_info.codeSize = recipe.spirv.size() * sizeof(uint32_t);
+	create_info.pCode    = recipe.spirv.data();
+
+	VkShaderModule comp_shader_module = VK_NULL_HANDLE;
+	VkResult       result             = vkCreateShaderModule(gctx->device, &create_info, nullptr, &comp_shader_module);
+	if (result != VK_SUCCESS)
+	{
+		return result;
+	}
+
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
+	VkPipelineShaderStageCreateInfo                        comp_shader_stage_info {};
+	comp_shader_stage_info.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	comp_shader_stage_info.flags  = recipe.stage_flags;
+	comp_shader_stage_info.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+	comp_shader_stage_info.module = comp_shader_module;
+	comp_shader_stage_info.pName  = "main";
+	if (recipe.required_subgroup_size != 0u)
+	{
+		required_subgroup_size.sType                = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT;
+		required_subgroup_size.requiredSubgroupSize = recipe.required_subgroup_size;
+		comp_shader_stage_info.pNext                = &required_subgroup_size;
+	}
+
+	VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+	if (recipe.has_set_layout)
+	{
+		set_layout = g_render_ctx->GetDescriptorCache()->GetDescriptorSetLayout(DescriptorCache::Stage::Compute, recipe.plan);
+	}
+	const VkPushConstantRange push_constant_info {VK_SHADER_STAGE_COMPUTE_BIT, recipe.push_constant_offset, recipe.push_constant_size};
 
 	VkPipelineLayoutCreateInfo pipeline_layout_info {};
 	pipeline_layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipeline_layout_info.pNext                  = nullptr;
-	pipeline_layout_info.flags                  = 0;
-	pipeline_layout_info.setLayoutCount         = set_layouts_num;
-	pipeline_layout_info.pSetLayouts            = (set_layouts_num > 0 ? set_layouts : nullptr);
-	pipeline_layout_info.pushConstantRangeCount = push_constant_info_num;
-	pipeline_layout_info.pPushConstantRanges    = push_constant_info_num > 0 ? push_constant_info : nullptr;
+	pipeline_layout_info.setLayoutCount         = recipe.has_set_layout ? 1u : 0u;
+	pipeline_layout_info.pSetLayouts            = recipe.has_set_layout ? &set_layout : nullptr;
+	pipeline_layout_info.pushConstantRangeCount = recipe.push_constant_size != 0u ? 1u : 0u;
+	pipeline_layout_info.pPushConstantRanges    = recipe.push_constant_size != 0u ? &push_constant_info : nullptr;
+
+	result = recipe.has_set_layout && set_layout == VK_NULL_HANDLE ? VK_ERROR_INITIALIZATION_FAILED
+	                                                               : vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, layout);
+	if (result == VK_SUCCESS)
+	{
+		VkComputePipelineCreateInfo info {};
+		info.sType             = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		info.stage             = comp_shader_stage_info;
+		info.layout            = *layout;
+		info.basePipelineIndex = -1;
+		result                 = vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, pipeline);
+	}
+	vkDestroyShaderModule(gctx->device, comp_shader_module, nullptr);
+	return result;
+}
+
+// Background compile of a recipe recorded in an earlier session; the driver
+// caches keep the result for the dispatch that needs it.
+static bool PrecompileComputePipeline(const ComputePipelineRecipe& recipe)
+{
+	auto*            gctx     = g_render_ctx->GetGraphicCtx();
+	VkPipelineLayout layout   = VK_NULL_HANDLE;
+	VkPipeline       pipeline = VK_NULL_HANDLE;
+	const auto       result   = CreateComputePipelineFromRecipe(gctx, recipe, &layout, &pipeline);
+	if (pipeline != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline(gctx->device, pipeline, nullptr);
+	}
+	if (layout != VK_NULL_HANDLE)
+	{
+		vkDestroyPipelineLayout(gctx->device, layout, nullptr);
+	}
+	return result == VK_SUCCESS;
+}
+
+static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* input_info, const Vector<uint32_t>& cs_shader,
+                                              const PipelineStaticParameters* static_params, PipelineDynamicParameters* dynamic_params)
+{
+	EXIT_IF(g_render_ctx == nullptr);
+	EXIT_IF(static_params == nullptr);
+	EXIT_IF(dynamic_params == nullptr);
+
+	auto* pipeline           = new VulkanPipeline;
+	pipeline->static_params  = static_params;
+	pipeline->dynamic_params = dynamic_params;
+
+	auto* gctx = g_render_ctx->GetGraphicCtx();
+
+	EXIT_IF(gctx == nullptr);
+
+	const auto recipe = BuildComputePipelineRecipe(input_info, cs_shader);
+	ComputePipelinePrecompileStart(ComputePipelinePrecompileDirectory(), recipe.vendor_id, recipe.device_id, PrecompileComputePipeline);
+	ComputePipelinePrecompileClaim(recipe);
 
 	EXIT_IF(pipeline->pipeline_layout != nullptr);
-
-	const ShaderBindResources* descriptor_stages[] = {&input_info->bind};
-	ValidatePipelineDescriptorLimits(gctx, descriptor_stages, 1, false);
-	const auto layout_result = vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
-	if (layout_result != VK_SUCCESS || pipeline->pipeline_layout == VK_NULL_HANDLE)
-	{
-		EXIT("compute pipeline layout creation failed: VkResult=%d\n", static_cast<int>(layout_result));
-	}
-
-	VkComputePipelineCreateInfo info {};
-	info.sType              = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-	info.pNext              = nullptr;
-	info.flags              = 0;
-	info.stage              = comp_shader_stage_info;
-	info.layout             = pipeline->pipeline_layout;
-	info.basePipelineHandle = nullptr;
-	info.basePipelineIndex  = -1;
-
 	EXIT_IF(pipeline->pipeline != nullptr);
 
-	const auto vk_create_start = std::chrono::steady_clock::now();
-	const VkResult create_result =
-	    vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, &pipeline->pipeline);
-	const auto vk_create_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vk_create_start).count();
+	const auto     vk_create_start = DebugStatsClock::now();
+	const VkResult create_result   = CreateComputePipelineFromRecipe(gctx, recipe, &pipeline->pipeline_layout, &pipeline->pipeline);
+	const auto     vk_create_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - vk_create_start).count();
 	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(vk_create_ns));
 
+	if (pipeline->pipeline_layout == VK_NULL_HANDLE)
+	{
+		EXIT("compute pipeline layout creation failed: VkResult=%d\n", static_cast<int>(create_result));
+	}
 	if (pipeline->pipeline == nullptr || create_result != VK_SUCCESS)
 	{
 		if (const char* dump_dir = std::getenv("KYTY_PIPELINE_FAIL_DUMP"))
@@ -1056,8 +1125,6 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 		EXIT("vkCreateComputePipelines failed: result=%d pipeline=%p\n", static_cast<int>(create_result),
 		     static_cast<void*>(pipeline->pipeline));
 	}
-
-	vkDestroyShaderModule(gctx->device, comp_shader_module, nullptr);
 
 	return pipeline;
 }
@@ -1262,7 +1329,8 @@ void PipelineCache::SaveDriverCacheIfDue()
 	{
 		return;
 	}
-	if (m_driver_cache_write_budget_exhausted)
+	// A clean cache is never due, so its per-lookup call skips the clock read.
+	if (m_driver_cache_write_budget_exhausted || !m_driver_cache_dirty)
 	{
 		return;
 	}
@@ -1283,7 +1351,7 @@ void PipelineCache::SaveDriverCacheIfDue()
 	const size_t budget           = PipelineCacheStoreSessionWriteBudgetBytes();
 	const size_t remaining_budget = m_driver_cache_bytes_attempted < budget ? budget - m_driver_cache_bytes_attempted : 0u;
 	size_t       attempted_size   = 0;
-	const auto   save_start       = std::chrono::steady_clock::now();
+	const auto   save_start       = DebugStatsClock::now();
 	const auto   save_result      = PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, remaining_budget, &attempted_size);
 	if (save_result == PipelineCacheStoreSaveResult::Unchanged)
 	{
@@ -1292,8 +1360,8 @@ void PipelineCache::SaveDriverCacheIfDue()
 		m_driver_cache_dirty          = false;
 		return;
 	}
-	const auto   save_elapsed_ns =
-	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - save_start).count());
+	const auto save_elapsed_ns =
+	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - save_start).count());
 	DebugStatsPipelineCacheCheckpointOutcome checkpoint_outcome = DebugStatsPipelineCacheCheckpointOutcome::Failed;
 	if (save_result == PipelineCacheStoreSaveResult::Written)
 	{
@@ -1541,9 +1609,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	// mode here disables valid scanout and render-target draws on other modes.
 	p.dynamic_params->color_write_enable = true;
 
-	const auto lookup_start = std::chrono::steady_clock::now();
+	const auto lookup_start = DebugStatsClock::now();
 	auto*      found        = Find(p);
-	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - lookup_start).count();
+	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - lookup_start).count();
 	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Graphics, found != nullptr, static_cast<uint64_t>(lookup_ns));
 
 	if (found != nullptr)
@@ -1556,7 +1624,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		return found->pipeline;
 	}
 
-	const auto miss_start = std::chrono::steady_clock::now();
+	const auto miss_start = DebugStatsClock::now();
 	for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
 	{
 		if (!RenderColorSlotActive(*color, rt))
@@ -1581,6 +1649,14 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		VkPhysicalDeviceFeatures features {};
 		vkGetPhysicalDeviceFeatures(gctx->physical_device, &features);
 		EXIT_IF(features.shaderClipDistance != VK_TRUE);
+	}
+	if (ps_input_info->AncillaryEnabled())
+	{
+		// The fragment Layer input needs the Geometry capability. The sample
+		// index field and a layer through the interpolation geometry stage are
+		// not provided.
+		EXIT_IF(!gctx->geometry_shader_supported);
+		EXIT_IF(p.static_params->sample_shading_enable || ps_input_info->custom_interpolation.Enabled());
 	}
 	if (ps_input_info->custom_interpolation.Enabled())
 	{
@@ -1626,6 +1702,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	                                                           vs_input_info->clip_probe.diagnostic_identity),
 	                                    [&]
 	                                    {
+		                                    if (vs_input_info->geometry_pull)
+		                                    {
+			                                    return ShaderCompileGeometryPullVS(*vs_input_info);
+		                                    }
 		                                    auto vs_code = ShaderParseVS(&vs_regs, &sh_regs, vs_input_info);
 		                                    return ShaderRecompileVS(vs_code, vs_input_info);
 	                                    });
@@ -1690,7 +1770,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 
 	m_driver_cache_dirty = true;
 	SaveDriverCacheIfDue();
-	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - miss_start).count();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(miss_ns));
 	return m_pipelines[static_cast<int>(slot)].pipeline;
 }
@@ -1721,9 +1801,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 	p.dynamic_params->vk_dynamic_state_stencil_write_mask   = true;
 	p.dynamic_params->color_write_enable                    = true;
 
-	const auto lookup_start = std::chrono::steady_clock::now();
+	const auto lookup_start = DebugStatsClock::now();
 	auto*      found        = Find(p);
-	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - lookup_start).count();
+	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - lookup_start).count();
 	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, found != nullptr, static_cast<uint64_t>(lookup_ns));
 
 	if (found != nullptr)
@@ -1736,7 +1816,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 		return found->pipeline;
 	}
 
-	const auto miss_start = std::chrono::steady_clock::now();
+	const auto miss_start = DebugStatsClock::now();
 
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
@@ -1774,7 +1854,77 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	m_driver_cache_dirty = true;
 	SaveDriverCacheIfDue();
-	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - miss_start).count();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));
+	return m_pipelines[static_cast<int>(slot)].pipeline;
+}
+
+VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_buffer, const ShaderVertexInputInfo* input_info,
+                                                      const ShaderGeometryComputeInfo& geometry, const HW::VertexShaderInfo* vs_regs,
+                                                      const HW::ShaderRegisters* sh_regs)
+{
+	KYTY_PROFILER_BLOCK("PipelineCache::CreateGeometryPipeline", profiler::colors::RedA100);
+
+	EXIT_IF(recording_buffer == nullptr || input_info == nullptr || vs_regs == nullptr || sh_regs == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+
+	auto id = ShaderGetIdVS(vs_regs, input_info);
+	id.ids.Add(0x47454f31u); // GEO1: merged ES+GS compute pass.
+	id.ids.Add(static_cast<uint32_t>(geometry.topology));
+	id.ids.Add(geometry.primitives_per_group);
+	id.ids.Add(geometry.parameter_count);
+	id.ids.Add(geometry.lds_dwords);
+
+	Pipeline p {};
+	p.cs_shader_id   = id;
+	p.static_params  = new PipelineStaticParameters {};
+	p.dynamic_params = new PipelineDynamicParameters {};
+
+	auto* found = Find(p);
+	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, found != nullptr, 0u);
+	if (found != nullptr)
+	{
+		delete p.static_params;
+		delete p.dynamic_params;
+		AttachPipelineLease(recording_buffer, *found);
+		return found->pipeline;
+	}
+
+	const auto miss_start = DebugStatsClock::now();
+	const auto code       = ShaderParseVS(vs_regs, sh_regs, input_info);
+	const auto host       = SpirvGeometryComputeHostInfo(code, *input_info, geometry);
+
+	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
+	EXIT_IF(translation_cache == nullptr);
+	const auto translation =
+	    translation_cache->GetOrCompile(ShaderModuleKey::Create(id, ShaderModuleStage::Compute, Config::GetShaderOptimizationType(),
+	                                                            Config::IsNextGen(), Config::SpirvDebugPrintfEnabled()),
+	                                    [&] { return ShaderRecompileGeometryCS(code, *input_info, geometry); });
+	DebugStatsRecordShaderTranslationCache(translation.hit, translation.evicted);
+	EXIT_IF(translation.binary.IsEmpty());
+
+	const uint32_t slot = FindAvailableSlot();
+	p.pipeline          = CreatePipelineInternal(&host, translation.binary, p.static_params, p.dynamic_params);
+	if (slot < m_pipelines.Size())
+	{
+		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
+		{
+			DebugStatsRecordPipelineEviction();
+			DeletePipelineInternal(slot);
+		}
+		m_pipelines[static_cast<int>(slot)] = p;
+	} else
+	{
+		EXIT_IF(slot != m_pipelines.Size());
+		m_pipelines.Add(p);
+	}
+	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
+	DumpPipeline("create", static_cast<int>(slot));
+
+	m_driver_cache_dirty = true;
+	SaveDriverCacheIfDue();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));
 	return m_pipelines[static_cast<int>(slot)].pipeline;
 }

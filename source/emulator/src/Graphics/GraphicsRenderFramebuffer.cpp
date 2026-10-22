@@ -34,9 +34,15 @@ namespace Kyty::Libs::Graphics {
 
 // A pass renders one subresource of a layered or mip-chained image, but the
 // image tracks one layout for all of them: keep the whole image an attachment.
+// Slices a pass can render: the depth of a volume, the layers otherwise.
+static uint32_t ColorAttachmentSlices(const VulkanImage& image)
+{
+	return image.image_type == VK_IMAGE_TYPE_3D ? image.physical_extent.depth : image.array_layers;
+}
+
 static VkImageLayout ColorAttachmentInitialLayout(const VulkanImage& image, const ColorAttachmentLoadOps& load_ops)
 {
-	return image.array_layers > 1u || image.mip_levels > 1u ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : load_ops.initial_layout;
+	return ColorAttachmentSlices(image) > 1u || image.mip_levels > 1u ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : load_ops.initial_layout;
 }
 
 static void DestroyCachedFramebuffer(GraphicContext* context, VulkanFramebuffer* framebuffer)
@@ -190,10 +196,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		{
 			EXIT("invalid color attachment mip level: level=%" PRIu32 " image_levels=%" PRIu32 "\n", mip_level, image->mip_levels);
 		}
-		if (layer_count == 0u || base_array_layer >= image->array_layers || layer_count > image->array_layers - base_array_layer)
+		const uint32_t slices = ColorAttachmentSlices(*image);
+		if (layer_count == 0u || base_array_layer >= slices || layer_count > slices - base_array_layer)
 		{
 			EXIT("invalid color attachment layer range: base=%" PRIu32 " count=%" PRIu32 " image_layers=%" PRIu32 "\n",
-			     base_array_layer, layer_count, image->array_layers);
+			     base_array_layer, layer_count, slices);
 		}
 		if (framebuffer_layers != 0u && layer_count != framebuffer_layers)
 		{
@@ -217,7 +224,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		attachments[attachment_count].initialLayout         = initial_layout;
 		attachments[attachment_count].finalLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		color_attachment_refs[slot]                         = {attachment_count, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-		if (base_array_layer == 0u && layer_count == 1u && mip_level == 0u)
+		if (base_array_layer == 0u && layer_count == 1u && mip_level == 0u && image->image_type != VK_IMAGE_TYPE_3D)
 		{
 			if (attachment_view < 0 || attachment_view >= VulkanImage::VIEW_MAX || image->image_view[attachment_view] == nullptr)
 			{

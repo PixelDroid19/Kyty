@@ -322,11 +322,18 @@ bool IsReadlaneInstruction(const ShaderInstruction& instruction)
 	       IsOrdinaryVgpr(instruction.src[0]) && (IsUniformScalarWord(selector) || IsIntegerOrLiteralConstant(selector));
 }
 
+// One word of the architectural EXEC mask, as a register spill reads it.
+bool IsExecMaskWord(const ShaderOperand& operand)
+{
+	return operand.size == 1 && operand.register_id == 0 && ComputeWaveOperandIsPlain(operand) &&
+	       (operand.type == ShaderOperandType::ExecLo || operand.type == ShaderOperandType::ExecHi);
+}
+
 bool IsWritelaneInstruction(const ShaderInstruction& instruction)
 {
 	const auto uniform = [](const ShaderOperand& operand) { return IsUniformScalarWord(operand) || IsIntegerOrLiteralConstant(operand); };
 	return IsExactTupleBase(instruction, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, 2) && IsOrdinaryVgpr(instruction.dst) &&
-	       uniform(instruction.src[0]) && uniform(instruction.src[1]);
+	       (uniform(instruction.src[0]) || IsExecMaskWord(instruction.src[0])) && uniform(instruction.src[1]);
 }
 
 bool IsReadfirstlaneInstruction(const ShaderInstruction& instruction)
@@ -414,7 +421,7 @@ uint8_t ComputeWaveInstructionEudBaseReadMask(const ShaderInstruction& instructi
 	// Scalar loads through the extended pointer resolve through the native
 	// per-PC EUD mapping; the emitter fails closed when a PC is unmapped.
 	const bool mapped_load =
-	    ShaderPairedEudStorageLoadSupported(instruction, bind) || ShaderInstructionTypeStartsWith(instruction.type, "SLoad");
+	    ShaderPairedEudStorageLoadSupported(instruction, bind) || ShaderInstructionIsScalarMemoryLoad(instruction.type);
 	uint8_t read_mask       = 0;
 	for (int source = 0; source < instruction.src_num; ++source)
 	{
@@ -552,7 +559,7 @@ ShaderComputeWaveAnalysisResult AnalyzeExtendedBaseLifetime(const ShaderCode& co
 		const bool mapped_load = instruction.src_num > 0 &&
 		                         ComputeWaveOperandSgprPairMask(instruction.src[0], pair_start) != 0u &&
 		                         (ShaderPairedEudStorageLoadSupported(instruction, bind) ||
-		                          ShaderInstructionTypeStartsWith(instruction.type, "SLoad"));
+		                          ShaderInstructionIsScalarMemoryLoad(instruction.type));
 		if (ComputeWaveInstructionHasInvalidSgprSource(instruction))
 		{
 			return {false, instruction.pc, "paired extended pointer base has an invalid SGPR source"};
@@ -679,7 +686,7 @@ String8 ComputeWaveUnsupportedReason(const ShaderInstruction& instruction)
 		case ShaderInstructionType::VReadlaneB32:
 			return "VReadlaneB32 requires disjoint ordinary SGPR destination/selector and an ordinary VGPR source";
 		case ShaderInstructionType::VWritelaneB32:
-			return "VWritelaneB32 requires ordinary VGPR destination, scalar data, and SGPR selector";
+			return "VWritelaneB32 requires ordinary VGPR destination, scalar or EXEC-word data, and SGPR selector";
 		case ShaderInstructionType::VReadfirstlaneB32: return "VReadfirstlaneB32 requires ordinary SGPR destination and VGPR source";
 		case ShaderInstructionType::VCndmaskB32:
 			return "VCndmaskB32 requires a plain mask-select tuple: one-word VGPR destination, two plain data sources, "
@@ -1309,9 +1316,58 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 	return true;
 }
 
+ShaderComputeWaveInstructionKind ShaderClassifyGeometryWaveInstruction(const ShaderInstruction& instruction)
+{
+	if (instruction.type == ShaderInstructionType::SSendmsg)
+	{
+		// RDNA2 message 9 is GS_ALLOC_REQ; no other message has a geometry effect here.
+		const bool alloc = instruction.sopp_opcode == 16u && instruction.src_num == 1 &&
+		                   instruction.src[0].type == ShaderOperandType::LiteralConstant && instruction.src[0].constant.u == 9u;
+		return alloc ? ShaderComputeWaveInstructionKind::GeometryAlloc : ShaderComputeWaveInstructionKind::Unsupported;
+	}
+	if (instruction.type != ShaderInstructionType::Exp)
+	{
+		return ShaderClassifyComputeWaveInstruction(instruction);
+	}
+	const uint32_t target  = (instruction.raw_word >> 4u) & 0x3fu;
+	const uint32_t enable  = instruction.raw_word & 0xfu;
+	const bool     compr   = ((instruction.raw_word >> 10u) & 1u) != 0u;
+	const bool     vertex  = target == 12u || target == 13u || (target >= 32u && target <= 63u);
+	const bool     prim    = target == 20u && enable == 1u;
+	if (compr || enable == 0u || enable != instruction.exp_enable_mask || (!vertex && !prim))
+	{
+		return ShaderComputeWaveInstructionKind::Unsupported;
+	}
+	for (uint32_t component = 0; component < 4u; ++component)
+	{
+		if ((enable & (1u << component)) != 0u && !IsOrdinaryVgpr(ShaderExportComponentSource(instruction, component)))
+		{
+			return ShaderComputeWaveInstructionKind::Unsupported;
+		}
+	}
+	return ShaderComputeWaveInstructionKind::GeometryExport;
+}
+
+const ShaderOperand& ShaderExportComponentSource(const ShaderInstruction& instruction, uint32_t component)
+{
+	if (instruction.format == ShaderInstructionFormat::Pos1OffOffVsrc0Off && component == 2u)
+	{
+		return instruction.src[0];
+	}
+	return instruction.src[component & 3u];
+}
+
+enum class PairedWaveFlavor
+{
+	Compute,
+	Fragment,
+	Geometry
+};
+
 static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input,
                                                               const ShaderPixelInputInfo* pixel,
-                                                              uint32_t parameter_register = UINT32_MAX)
+                                                              uint32_t parameter_register = UINT32_MAX,
+                                                              PairedWaveFlavor flavor = PairedWaveFlavor::Compute)
 {
 	ShaderComputeWaveAnalysisResult result {};
 	const auto&                     instructions = code.GetInstructions();
@@ -1360,8 +1416,9 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 		{
 			return {false, instruction.pc, "fragment interpolation requires an unobserved pair with unchanged native barycentrics"};
 		}
-		auto kind = pixel == nullptr ? ShaderClassifyComputeWaveInstruction(instruction)
-		                            : ShaderClassifyFragmentWaveInstruction(instruction, *pixel);
+		auto kind = pixel != nullptr                      ? ShaderClassifyFragmentWaveInstruction(instruction, *pixel)
+		            : flavor == PairedWaveFlavor::Geometry ? ShaderClassifyGeometryWaveInstruction(instruction)
+		                                                   : ShaderClassifyComputeWaveInstruction(instruction);
 		if (kind == ShaderComputeWaveInstructionKind::Unsupported &&
 		    ShaderPairedEudStorageLoadSupported(instruction, input.bind))
 		{
@@ -1490,6 +1547,11 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input)
 {
 	return AnalyzePairedWaveCode(code, input, nullptr);
+}
+
+ShaderComputeWaveAnalysisResult ShaderAnalyzeGeometryWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input)
+{
+	return AnalyzePairedWaveCode(code, input, nullptr, UINT32_MAX, PairedWaveFlavor::Geometry);
 }
 
 ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,
