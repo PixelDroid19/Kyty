@@ -1773,15 +1773,24 @@ TEST(EmulatorFragmentMaskFlow, ASaveexecCopyOfTheWqmExecStillHoldsHelperLanes)
 // A kill inside a divergent block: lanes selected by a per-lane compare test a second condition and drop out of
 // the live mask, ending in the inert tail once none survives. `kill_op` is the SOP2 opcode combining the live mask
 // with that compare: S_ANDN2_B64 (0x15) clears only lanes inside the block, S_AND_B64 (0x0f) clears every other lane.
-Words DivergentKillProgram(uint32_t kill_op)
+// With `condition_before_block` the compare runs for every lane before the block, which confines it to its lanes by
+// an AND with EXEC.
+Words DivergentKillProgram(uint32_t kill_op, bool condition_before_block = false)
 {
 	Words words;
 	Sop1(words, 4, 12, kExecLo);                       // s_mov_b64 s[12:13], exec (live lanes)
 	Sop1(words, 4, 14, kExecLo);                       // s_mov_b64 s[14:15], exec
+	if (condition_before_block) { Append(words, Vopc(0xc5, Inline(1), 1u)); } // v_cmp_ne_u32 vcc, 1, v1
 	Append(words, Vopc(0xd5, Inline(0), 0u));          // v_cmpx_ne_u32 0, v0: the block's lanes
 	Sopp(words, 8, 3);                                 // s_cbranch_execz over the block
-	Append(words, Vopc(0xc5, Inline(1), 1u));          // v_cmp_ne_u32 vcc, 1, v1 (kill condition, block lanes only)
-	Sop2(words, kill_op, 12, 12, kVccLo);              // s_andn2_b64 / s_and_b64 s[12:13], s[12:13], vcc
+	if (condition_before_block)
+	{
+		Sop2(words, 0x0f, 16, kExecLo, kVccLo);        // s_and_b64 s[16:17], exec, vcc
+	} else
+	{
+		Append(words, Vopc(0xc5, Inline(1), 1u));      // v_cmp_ne_u32 vcc, 1, v1 (kill condition, block lanes only)
+	}
+	Sop2(words, kill_op, 12, 12, condition_before_block ? 16 : kVccLo); // s_andn2_b64 / s_and_b64 s[12:13], s[12:13], cond
 	Sopp(words, 4, 6);                                 // s_cbranch_scc0 to the inert tail
 	Sop1(words, 4, kExecLo, 14);                       // join: s_mov_b64 exec, s[14:15]
 	Vop1(words, 1, 2, Inline(0));
@@ -1805,6 +1814,10 @@ TEST(EmulatorFragmentMaskFlow, AKillInsideADivergentBlockKeepsEveryOtherLanesLiv
 		// AND with the same compare clears every lane outside the block when the block runs: a diverged mask.
 		const auto cleared = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(DivergentKillProgram(0x0f))), 64u);
 		Check(!cleared.lane_local, "a mask the block may clear outside its lanes is diverged after the join");
+		const auto confined = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(DivergentKillProgram(0x15, true))), 64u);
+		Check(confined.lane_local, "an earlier condition ANDed with the block's EXEC clears no bit outside");
+		const auto unconfined = ShaderAnalyzeFragmentMaskFlow(ParsePixel(AsSlots(DivergentKillProgram(0x0f, true))), 64u);
+		Check(!unconfined.lane_local, "AND with the confined condition still clears lanes outside the block");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -1860,6 +1873,7 @@ TEST(EmulatorFragmentMaskFlow, PixelExecBranchesTakeTheVoteOfARealFragmentOfTheQ
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
+
 
 
 

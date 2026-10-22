@@ -717,6 +717,11 @@ void Flow::TrackRegionSubset(const ShaderInstruction& inst, bool exec_subset_bef
 	const bool move       = IsMaskOp(inst.type, Type::SMovB64, Type::SMovB32);
 	const bool and_saveexec = IsMaskOp(inst.type, Type::SAndSaveexecB64, Type::SAndSaveexecB32);
 	if (move && inst.src[0].type == Operand::ExecLo && inst.dst.type != Operand::ExecLo && exec_subset_before) { mark(inst.dst); }
+	// An AND with a subset, or an ANDN2 taken from one, is again a subset.
+	const bool and_subset   = IsMaskOp(inst.type, Type::SAndB64, Type::SAndB32) && inst.src_num == 2 &&
+	                          (subset_of(inst.src[0]) || subset_of(inst.src[1]));
+	const bool andn2_subset = IsMaskOp(inst.type, Type::SAndn2B64, Type::SAndn2B32) && inst.src_num == 2 && subset_of(inst.src[0]);
+	if (!writes_exec && (and_subset || andn2_subset)) { mark(inst.dst); }
 	if (!writes_exec) { return; }
 	if (and_saveexec && exec_subset_before) { mark(inst.dst); }
 	const bool to_exec = inst.dst.type == Operand::ExecLo;
