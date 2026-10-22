@@ -2464,16 +2464,27 @@ void VerifyBoundedShaderDecode()
 	ShaderParseFusedFront(terminal_setpc, sizeof(terminal_setpc), &code);
 	Expect(code.GetInstructions().Size() == 1u && code.GetInstructions().At(0).type == ShaderInstructionType::SSetpcB64,
 	       "registered fused front accepts an exact-range indirect terminator");
-	static const uint32_t setpc_then_endpgm[] = {0xbe802000u, 0xbf810000u};
+	// s_cbranch_scc0 over the setpc keeps the s_endpgm reachable.
+	static const uint32_t setpc_then_endpgm[] = {0xbf840001u, 0xbe802000u, 0xbf810000u};
 	ShaderMappedData branched_front_map {};
 	branched_front_map.code_size_bytes = sizeof(setpc_then_endpgm);
 	ShaderMapUserData(reinterpret_cast<uint64_t>(setpc_then_endpgm), branched_front_map);
 	Expect(ShaderRegisterContinuation(reinterpret_cast<uint64_t>(setpc_then_endpgm), reinterpret_cast<uint64_t>(terminated)),
 	       "mapped front with in-range control flow registers its continuation");
 	ShaderParseFusedFront(setpc_then_endpgm, sizeof(setpc_then_endpgm), &code);
-	Expect(code.GetInstructions().Size() == 2u && code.GetInstructions().At(1).type == ShaderInstructionType::SEndpgm,
+	Expect(code.GetInstructions().Size() == 3u && code.GetInstructions().At(2).type == ShaderInstructionType::SEndpgm,
 	       "in-range code after setpc remains available to other control-flow paths");
 	Expect(!ShaderHasTerminalSetpc(code), "non-terminal setpc does not authorize continuation linearization");
+	// Words that are not instructions, standing in for the binary's trailing metadata.
+	static const uint32_t setpc_then_metadata[] = {0xbe802000u, 0xffffffffu, 0xffffffffu};
+	ShaderMappedData metadata_front_map {};
+	metadata_front_map.code_size_bytes = sizeof(setpc_then_metadata);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(setpc_then_metadata), metadata_front_map);
+	Expect(ShaderRegisterContinuation(reinterpret_cast<uint64_t>(setpc_then_metadata), reinterpret_cast<uint64_t>(terminated)),
+	       "front with trailing metadata registers its continuation");
+	ShaderParseFusedFront(setpc_then_metadata, sizeof(setpc_then_metadata), &code);
+	Expect(code.GetInstructions().Size() == 1u && ShaderHasTerminalSetpc(code),
+	       "registered fused front ends at an unbranched setpc before trailing metadata");
 	ShaderMappedData replacement {};
 	replacement.code_size_bytes = sizeof(terminal_setpc);
 	ShaderMapUserData(reinterpret_cast<uint64_t>(terminal_setpc), replacement);

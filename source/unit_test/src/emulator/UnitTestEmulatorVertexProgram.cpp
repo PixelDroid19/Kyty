@@ -286,15 +286,16 @@ TEST(EmulatorVertexProgram, NonterminalSetpcDoesNotAppendRegisteredBack)
 	const auto probe = []
 	{
 		Initialize();
-		MappedProgram front({0xbe802000u, 0xbf810000u});
+		// s_cbranch_scc0 over the setpc keeps the s_endpgm reachable.
+		MappedProgram front({0xbf840001u, 0xbe802000u, 0xbf810000u});
 		MappedProgram back({0x7e000501u, 0xbf810000u});
 		ASSERT_TRUE(ShaderRegisterContinuation(front.address, back.address));
 		Draw draw(front.address, back.address);
 		const auto info = draw.Acquire();
 		const auto code = ShaderParseVS(&draw.regs, &draw.sh);
-		ASSERT_EQ(code.GetInstructions().Size(), 2u);
-		EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::SSetpcB64);
-		EXPECT_EQ(code.GetInstructions().At(1).type, ShaderInstructionType::SEndpgm);
+		ASSERT_EQ(code.GetInstructions().Size(), 3u);
+		EXPECT_EQ(code.GetInstructions().At(1).type, ShaderInstructionType::SSetpcB64);
+		EXPECT_EQ(code.GetInstructions().At(2).type, ShaderInstructionType::SEndpgm);
 		EXPECT_EQ(code.GetContinuationPc(), UINT32_MAX);
 		EXPECT_EQ(info.native_wave.proof, ShaderNativeWaveProof::LaneLocal);
 	};

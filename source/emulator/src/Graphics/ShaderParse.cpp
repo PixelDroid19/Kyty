@@ -155,17 +155,18 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 		{
 			saw_endpgm = true;
 		}
-		const bool setpc_terminator =
-		    allow_setpc_terminator && end != nullptr && ptr == end && !dst->GetInstructions().IsEmpty() &&
-		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).pc == pc &&
-		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).type == ShaderInstructionType::SSetpcB64;
-
 		const uint32_t next_pc = 4u * static_cast<uint32_t>(ptr - src);
 		const bool tail_has_static_entry = end != nullptr
 		                                       ? dst->GetLabels().Contains(
 		                                             next_pc, [](auto label, auto target) { return label.GetDst() >= target; })
 		                                       : dst->GetLabels().Contains(
 		                                             next_pc, [](auto label, auto target) { return label.GetDst() == target; });
+		// Like S_ENDPGM, the continuation jump ends the front unless a branch
+		// reaches later code; the binary's metadata may follow it in the range.
+		const bool setpc_terminator =
+		    allow_setpc_terminator && end != nullptr && !tail_has_static_entry && !dst->GetInstructions().IsEmpty() &&
+		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).pc == pc &&
+		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).type == ShaderInstructionType::SSetpcB64;
 		const bool endpgm_terminator =
 		    instruction == 0xBF810000 && (type == ShaderType::Vertex || type == ShaderType::Pixel || type == ShaderType::Compute) &&
 		    !tail_has_static_entry;
