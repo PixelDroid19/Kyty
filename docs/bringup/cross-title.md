@@ -4,6 +4,51 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Depth-reference samples over a storage-detiled view (2026-10-22)
+
+- **Symptom.** The racing title stopped now and then on
+  `unsupported depth-reference image binding ... format=7 tile=24
+  materialize=depth-unsupported ... 1x1 pitch=256 ... overlaps=2`
+  (`GraphicsRenderBind.cpp`). It happened in 3 of 55 strict runs since
+  2026-10-17. Two of them (2026-10-20, 2026-10-22) shared one overlap set:
+  - a writable storage buffer containing the range (written by the GPU,
+    write-back capable);
+  - a texture equal to the range whose content origin was unknown.
+- **Cause.**
+  - A depth-reference sample whose range lies in a writable storage
+    buffer becomes a texture detiled from that buffer (`depth-storage`).
+  - That texture skips the guest upload. Since 2026-10-07, a texture
+    that skips its guest upload records an unknown content origin.
+  - When the same image was bound again while the texture still lived,
+    the D16 source classifier counted it as a texture owner that held no
+    CPU-uploaded bytes, and refused the bind.
+  - The unit test for that case still modeled the texture as
+    CPU-uploaded.
+  - The only other way to get a texture that skips the upload is the
+    tile-9/27 live-cover path, which never handles tile 24.
+- **Change.**
+  - Range provenance marks storage depth views: depth-view textures that
+    skip the guest upload.
+  - The classifier accepts them only while a writable storage buffer
+    holds the range. That bind detiles the buffer into the view again.
+  - Every other texture over the range still needs a CPU-uploaded origin.
+  - The refusal message prints the flag for each overlapping object, so
+    a recurrence shows whether a storage view was involved.
+- **Verified.**
+  - The unit test covers four cases: a storage view with its writable
+    buffer is accepted; an unknown-origin texture without the flag, a
+    storage view over read-only storage, and a lone storage view are all
+    refused. Unit tests pass (2440).
+  - A 120 s strict racing run on Intel A770 reached the race with correct
+    visuals and about 58 fps, and did not stop.
+  - The stop is too rare (about 1 in 25 runs) for one run to prove the
+    fix.
+- **Open.** The 2026-10-18 occurrence had a different overlap set: a
+  texture containing the range, with an alias-invalidation origin, plus
+  an equal CPU-uploaded texture. The classifier still refuses that case.
+  Direction: decide whether an alias-invalidated texture that contains
+  the range can still own content newer than guest memory.
+
 ## Shader translator: GDS writes in split and native compute waves (2026-10-22)
 
 - **Regression.** A strict five-title Intel sweep after the paired
