@@ -351,8 +351,11 @@ void Spirv::GenerateSource()
 		                                              : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
 		if (!analysis.supported)
 		{
-			EXIT("paired-wave instruction contract unsupported: pc=0x%08" PRIx32 " reason=%s\n",
-			     analysis.unsupported_pc, analysis.reason.c_str());
+			const auto& code    = m_code.GetInstructions();
+			const auto  refused = std::find_if(code.begin(), code.end(), [&](const auto& inst) { return inst.pc == analysis.unsupported_pc; });
+			EXIT("paired-wave instruction contract unsupported: pc=0x%08" PRIx32 " reason=%s sopp=0x%02x raw=0x%08" PRIx32 "\n",
+			     analysis.unsupported_pc, analysis.reason.c_str(), refused != code.end() ? static_cast<unsigned>(refused->sopp_opcode) : 0u,
+			     refused != code.end() ? refused->raw_word : 0u);
 		}
 	}
 	if (UsesNativeComputeWave() && !NativeComputeWaveLayoutIsValid())
