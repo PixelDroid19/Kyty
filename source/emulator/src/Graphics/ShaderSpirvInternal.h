@@ -38,6 +38,7 @@
 
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
+#include "Emulator/Graphics/ShaderStorageImage.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 
 #include "ShaderControlFlowGraph.h"
@@ -588,14 +589,17 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load);
 String8 get_scc_check(SccCheck scc_check, int dst_num);
 bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usage);
-// True when the writable (storage) bank holds 3D images; the plan admits one shape per bank.
-bool UsesVolumeStorageImages(const ShaderBindResources* bind);
 bool UsesUnsignedIntegerImages(const ShaderBindResources* bind);
-bool UsesUnsignedIntegerStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
 int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction_index,
                                    const ShaderBindResources& bind, int user_data_register_base);
 bool UsesMixedSampledImageNumericTypes(const ShaderBindResources* bind);
 bool UsesFormatlessStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
+bool UsesExtendedStorageImageFormats(const ShaderCode& code, const ShaderBindResources* bind);
+// The aliased views WriteHeader declares over the storage binding, in view order.
+Vector<ShaderStorageImageView> ShaderStorageImageViews(const ShaderCode& code, const ShaderBindResources* bind);
+// The view through which the writable descriptor of an image instruction is accessed.
+bool ResolveStorageImageView(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind, int user_data_register_base,
+                             ShaderStorageImageView* view);
 bool IsImageInstruction(const ShaderInstruction& inst);
 bool IsSampledImageInstruction(const ShaderInstruction& inst);
 bool IsStorageImageInstruction(const ShaderInstruction& inst);

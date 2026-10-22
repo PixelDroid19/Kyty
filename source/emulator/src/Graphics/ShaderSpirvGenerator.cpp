@@ -752,8 +752,10 @@ void Spirv::WriteHeader()
 		}
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
-			vars.Add("%textures2D_L");
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap})) { vars.Add("%textures2D_LU"); }
+			for (const auto& view: ShaderStorageImageViews(m_code, m_bind))
+			{
+				vars.Add("%" + view.variable);
+			}
 		}
 		if (m_bind->samplers.samplers_num > 0)
 		{
@@ -1267,12 +1269,10 @@ void Spirv::WriteAnnotations()
 		}
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
-			m_source += String8(textures_annotations_l)
-			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
-			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_storage_index));
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap}))
+			// Every view aliases the one storage binding.
+			for (const auto& view: ShaderStorageImageViews(m_code, m_bind))
 			{
-				m_source += String8(textures_annotations_l).ReplaceStr("textures2D_L", "textures2D_LU")
+				m_source += String8(textures_annotations_l).ReplaceStr("textures2D_L", view.variable)
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 				                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_storage_index));
 			}
@@ -1596,14 +1596,10 @@ static const char* textures_loaded_types = R"(
 
 	if (m_bind != nullptr)
 	{
-		const char* storage_arrayed = UsesArrayed2dImages(m_bind, ShaderTextureUsage::ReadWrite) ? "1" : "0";
 		const bool uint_images = UsesUnsignedIntegerImages(m_bind);
 		const bool mixed_sampled_image_types = UsesMixedSampledImageNumericTypes(m_bind);
 		const char* image_scalar = uint_images ? "uint" : "float";
-		const bool uint_storage = UsesUnsignedIntegerStorageImages(m_code, m_bind);
-		const char* image_format = GetStorageImageFormat(m_code, m_bind);
 		const char* image_dimension = "2D";
-		const char* storage_dimension = UsesVolumeStorageImages(m_bind) ? "3D" : "2D";
 		// SPIR-V prohibits duplicate OpTypeImage/OpTypeSampledImage declarations.
 		// In a uint-only sampled domain the S and U banks have identical element
 		// types. Retain both descriptor variables/arrays but share the S types.
@@ -1672,35 +1668,25 @@ static const char* textures_loaded_types = R"(
 		}
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
-			const bool has_atomics = m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
-			const bool shared_atomic_type = has_atomics && uint_storage && std::strcmp(image_format, "R32ui") == 0 &&
-			                                std::strcmp(storage_arrayed, "0") == 0;
-			if (shared_atomic_type)
+			// Views have pairwise distinct image types, so no declaration repeats.
+			for (const auto& view: ShaderStorageImageViews(m_code, m_bind))
 			{
-				// Atomic and ordinary uint stores already load ImageLU. Declare it
-				// once, before either descriptor array references the shared type.
-				m_source += "%ImageLU = OpTypeImage %uint 2D 0 0 0 2 R32ui\n";
-			}
-			m_source += String8(textures_loaded_types)
-			                .ReplaceStr("<image_type>", shared_atomic_type ? "ImageLU" : "ImageL")
-			                .ReplaceStr("<image_type_declaration>", shared_atomic_type ? String8("") :
-			                                String8("%ImageL = OpTypeImage %<image_scalar> <image_dimension> 0 <arrayed> 0 2 <image_format>"))
-			                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_storage_num))
-			                .ReplaceStr("<image_scalar>", uint_storage ? "uint" : "float")
-			                .ReplaceStr("<image_format>", image_format)
-			                .ReplaceStr("<image_dimension>", storage_dimension)
-			                .ReplaceStr("<arrayed>", storage_arrayed);
-			if (has_atomics)
-			{
-				// Both variables address the existing storage binding; each access
-				// uses the numeric type of its proven descriptor.
-				m_source += String8(textures_loaded_types).ReplaceStr("ImageL", "ImageLU").ReplaceStr("textures2D_L", "textures2D_LU")
-				                .ReplaceStr("<image_type>", "ImageLU")
-				                .ReplaceStr("<image_type_declaration>", shared_atomic_type ? "" :
-				                                "%ImageLU = OpTypeImage %uint 2D 0 0 0 2 R32ui")
+				const bool arrayed = view.shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
+				const bool volume = view.shape == ShaderGen5SampledTextureShape::ThreeDimensional;
+				m_source += String8(textures_loaded_types)
+				                .ReplaceStr("<image_type_declaration>",
+				                            "%ImageL = OpTypeImage %<image_scalar> <image_dimension> 0 <arrayed> 0 2 <image_format>")
+				                .ReplaceStr("<image_type>", "ImageL")
 				                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_storage_num))
-				                .ReplaceStr("<image_scalar>", "uint").ReplaceStr("<image_format>", "R32ui")
-				                .ReplaceStr("<image_dimension>", "2D").ReplaceStr("<arrayed>", "0");
+				                .ReplaceStr("<image_scalar>", view.unsigned_integer ? "uint" : "float")
+				                .ReplaceStr("<image_format>", view.image_format)
+				                .ReplaceStr("<image_dimension>", volume ? "3D" : "2D")
+				                .ReplaceStr("<arrayed>", arrayed ? "1" : "0")
+				                .ReplaceStr("ImageL", view.image_type)
+				                .ReplaceStr("textures2D_L", view.variable);
+			}
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap}))
+			{
 				m_source += "%_ptr_Image_uint = OpTypePointer Image %uint\n";
 			}
 		}
@@ -1858,12 +1844,10 @@ void Spirv::WriteGlobalVariables()
 		}
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
-			vars.Add(String8::FromPrintf("%%textures2D_L = OpVariable %%_ptr_UniformConstant__arr_ImageL_uint_%d UniformConstant",
-			                             m_bind->textures2D.textures2d_storage_num));
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap}))
+			for (const auto& view: ShaderStorageImageViews(m_code, m_bind))
 			{
-				vars.Add(String8::FromPrintf("%%textures2D_LU = OpVariable %%_ptr_UniformConstant__arr_ImageLU_uint_%d UniformConstant",
-				                             m_bind->textures2D.textures2d_storage_num));
+				vars.Add(String8::FromPrintf("%%%s = OpVariable %%_ptr_UniformConstant__arr_%s_uint_%d UniformConstant",
+				                             view.variable.c_str(), view.image_type.c_str(), m_bind->textures2D.textures2d_storage_num));
 			}
 		}
 		if (m_bind->samplers.samplers_num > 0)

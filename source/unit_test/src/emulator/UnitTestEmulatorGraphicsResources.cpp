@@ -343,9 +343,11 @@ TEST(EmulatorGraphicsResources, EmitsAndValidatesFormat7FloatFormatlessStorage)
 		    textures.textures2d_storage_num = 1;
 
 		    const auto plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
-		    RequireImageModule(plan.supported && plan.formatless && !plan.unsigned_primary && !plan.extended_formats &&
-		                           std::strcmp(plan.image_format, "Unknown") == 0,
-		                       "format 7 uses the existing float, formatless storage bank");
+		    RequireImageModule(plan.supported, "format 7 is admitted");
+		    const auto view = ShaderStorageImageViewOf(plan, plan.descriptor_view[0]);
+		    RequireImageModule(plan.formatless && !view.unsigned_integer && !plan.extended_formats &&
+		                           std::strcmp(view.image_format, "Unknown") == 0,
+		                       "format 7 uses the existing float, formatless storage view");
 		    const auto source = EmitValidatedImageModule(fixture);
 		    RequireImageModule(source.ContainsStr("%ImageL = OpTypeImage %float 2D 0 0 0 2 Unknown"),
 		                       "format 7 writable declaration remains float and formatless");
@@ -403,10 +405,15 @@ TEST(EmulatorGraphicsResources, PlansAWritableVolumeBankAsItsOwnShape)
 		    {
 			    auto fixture = MakeVolumeStorageModule(format);
 			    const auto plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
-			    RequireImageModule(plan.supported && plan.three_dimensional, "a homogeneous 3D writable bank is supported");
+			    RequireImageModule(plan.supported && ShaderStorageImageViewOf(plan, plan.descriptor_view[1]).shape ==
+			                                             ShaderGen5SampledTextureShape::ThreeDimensional,
+			                       "a homogeneous 3D writable bank is supported");
 		    }
 		    auto flat = MakeImageModule(20u, 71u);
-		    RequireImageModule(!ShaderPlanStorageImages(flat.code, &flat.input.bind).three_dimensional, "a 2D bank is not a volume");
+		    const auto flat_plan = ShaderPlanStorageImages(flat.code, &flat.input.bind);
+		    RequireImageModule(ShaderStorageImageViewOf(flat_plan, flat_plan.descriptor_view[1]).shape ==
+		                           ShaderGen5SampledTextureShape::TwoDimensional,
+		                       "a 2D bank is not a volume");
 		    std::_Exit(0);
 	    },
 	    ::testing::ExitedWithCode(0), "");
@@ -476,14 +483,12 @@ TEST(EmulatorGraphicsResources, PreservesFloatStorageAndR32AtomicAliases)
 			    RequireImageModule(source.ContainsStr("OpAtomicIAdd %uint"), "actual integer atomic");
 			    RequireImageModule(source.ContainsStr("%t27_1 = OpLoad %ImageL"), "float store uses primary bank");
 			    const auto uint_source = EmitValidatedImageModule(MakeAtomicImageModule(mip_store, 20u));
-			    RequireImageModule(uint_source.ContainsStr("%t27_1 = OpLoad %ImageLU"), "uint store uses atomic bank");
-			    RequireImageModule(CountImageModuleToken(uint_source, "OpTypeImage %uint 2D 0 0 0 2 R32ui") == 1u,
-			                       "identical storage and atomic views share one image type");
-			    RequireImageModule(uint_source.ContainsStr("%_arr_ImageL_uint_2 = OpTypeArray %ImageLU") &&
-			                       uint_source.ContainsStr("%_arr_ImageLU_uint_2 = OpTypeArray %ImageLU"),
-			                       "both storage arrays reference the shared type");
-			    RequireImageModule(uint_source.ContainsStr("OpDecorate %textures2D_L Binding 1") &&
-			                       uint_source.ContainsStr("OpDecorate %textures2D_LU Binding 1"), "storage alias binding is preserved");
+			    RequireImageModule(uint_source.ContainsStr("%t27_1 = OpLoad %ImageL ") &&
+			                           uint_source.ContainsStr("%image_atomic_image_2 = OpLoad %ImageL "),
+			                       "uint store and atomic use the one R32 view");
+			    RequireImageModule(CountImageModuleToken(uint_source, "OpTypeImage %uint 2D 0 0 0 2 R32ui") == 1u &&
+			                           !uint_source.ContainsStr("textures2D_LU"),
+			                       "identical storage and atomic views are one view");
 		    }
 		    std::_Exit(0);
 	    },
@@ -573,16 +578,18 @@ TEST(EmulatorGraphicsResources, WritableNumericAdmissionIgnoresSampledDescriptor
 		    {
 			    textures.desc[0].texture.fields[1] = static_cast<uint32_t>(sampled_format) << 20u;
 			    const auto plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
-			    RequireImageModule(plan.supported && plan.formatless && !plan.unsigned_primary, "sampled type cannot change writable class");
+			    RequireImageModule(plan.supported && plan.formatless &&
+			                           !ShaderStorageImageViewOf(plan, plan.descriptor_view[1]).unsigned_integer,
+			                       "sampled type cannot change writable class");
 		    }
 		    AddWritableImage(&fixture, 20u);
 		    auto plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
-		    RequireImageModule(!plan.supported && std::strstr(plan.reason, "mixed float and uint") != nullptr &&
-		                       plan.descriptor_index == 2 && plan.guest_format == 20u, "precise mixed numeric rejection");
+		    RequireImageModule(plan.supported && plan.descriptor_view[1] != plan.descriptor_view[2],
+		                       "float and uint writable images use separate views");
 		    textures.desc[1].texture.fields[1] = 5u << 20u;
 		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
-		    RequireImageModule(!plan.supported && std::strstr(plan.reason, "mixed writable uint formats") != nullptr,
-		                       "R8ui and R32ui cannot share a declaration");
+		    RequireImageModule(plan.supported && plan.descriptor_view[1] != plan.descriptor_view[2] && plan.extended_formats,
+		                       "R8ui and R32ui use separate exact views");
 		    textures.desc[1].texture.fields[1] = 70u << 20u;
 		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
 		    RequireImageModule(!plan.supported && std::strstr(plan.reason, "signed writable") != nullptr, "signed bank is unsupported");
@@ -591,33 +598,67 @@ TEST(EmulatorGraphicsResources, WritableNumericAdmissionIgnoresSampledDescriptor
 	    ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorGraphicsResources, RejectsMixedWritableNumericDomainsBeforeModuleEmission)
+// Adds a store to the writable descriptor at `descriptor` before S_ENDPGM.
+void AddStorageStore(ImageModuleFixture* fixture, int descriptor, uint32_t dimension)
+{
+	auto& instructions = fixture->code.GetInstructions();
+	auto end = instructions.At(instructions.Size() - 1);
+	auto store = instructions.At(1);
+	store.pc = end.pc;
+	store.src[1].register_id = descriptor * 8;
+	store.mimg_dimension = dimension;
+	end.pc += 8;
+	instructions[instructions.Size() - 1] = store;
+	instructions.Add(end);
+}
+
+TEST(EmulatorGraphicsResources, EmitsAndValidatesOneAliasedViewPerWritableShapeAndType)
 {
 	ASSERT_EXIT(
 	    {
 		    InitializeImageModuleTest();
+		    // Float with R32ui, and two uint formats, each in its own exact view.
+		    for (uint16_t first: {71u, 5u})
+		    {
+			    auto fixture = MakeImageModule(20u, first);
+			    AddWritableImage(&fixture, 20u);
+			    AddStorageStore(&fixture, 2, 1u);
+			    const auto source = EmitValidatedImageModule(fixture);
+			    RequireImageModule(source.ContainsStr("%ImageLU = OpTypeImage %uint 2D 0 0 0 2 R32ui") &&
+			                           source.ContainsStr("%t27_2 = OpLoad %ImageLU"),
+			                       "the R32ui descriptor is written through its own view");
+		    }
+		    // Two 2D-array float images and a flat R32ui image in one dispatch.
 		    auto fixture = MakeImageModule(20u, 71u);
+		    auto& textures = fixture.input.bind.textures2D;
+		    textures.desc[1].texture.fields[3] = (13u << 28u) | DstSel(4u, 5u, 6u, 7u);
+		    AddWritableImage(&fixture, 13u);
 		    AddWritableImage(&fixture, 20u);
-		    (void)SpirvGenerateSource(fixture.code, nullptr, nullptr, &fixture.input);
+		    textures.desc[3].texture.fields[3] = (9u << 28u) | DstSel(4u, 5u, 6u, 7u);
+		    fixture.code.GetInstructions()[1].mimg_dimension = 5u;
+		    AddStorageStore(&fixture, 2, 5u);
+		    AddStorageStore(&fixture, 3, 1u);
+		    const auto plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
+		    RequireImageModule(plan.supported && plan.descriptor_view[1] == plan.descriptor_view[2] &&
+		                           plan.descriptor_view[2] != plan.descriptor_view[3],
+		                       "float arrays share a view, the flat uint image has its own");
+		    const auto source = EmitValidatedImageModule(fixture);
+		    RequireImageModule(source.ContainsStr("%ImageL = OpTypeImage %float 2D 0 1 0 2 Unknown") &&
+		                           source.ContainsStr("%ImageLU = OpTypeImage %uint 2D 0 0 0 2 R32ui"),
+		                       "one declaration per view");
+		    RequireImageModule(source.ContainsStr("OpDecorate %textures2D_L Binding 1") &&
+		                           source.ContainsStr("OpDecorate %textures2D_LU Binding 1"),
+		                       "every view aliases the storage binding");
+		    RequireImageModule(source.ContainsStr("%t27_2 = OpLoad %ImageL ") && source.ContainsStr("%t73_2 = OpCompositeConstruct %v3uint"),
+		                       "the array store keeps its layer coordinate");
+		    RequireImageModule(source.ContainsStr("%t27_3 = OpLoad %ImageLU") && source.ContainsStr("%t73_3 = OpCompositeConstruct %v2uint"),
+		                       "the flat store addresses its 2D view");
 		    std::_Exit(0);
 	    },
-	    ::testing::ExitedWithCode(kImageRejectedExit), "");
+	    ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorGraphicsResources, RejectsMixedUintFormatsBeforeModuleEmission)
-{
-	ASSERT_EXIT(
-	    {
-		    InitializeImageModuleTest();
-		    auto fixture = MakeImageModule(20u, 5u);
-		    AddWritableImage(&fixture, 20u);
-		    (void)SpirvGenerateSource(fixture.code, nullptr, nullptr, &fixture.input);
-		    std::_Exit(0);
-	    },
-	    ::testing::ExitedWithCode(kImageRejectedExit), "");
-}
-
-TEST(EmulatorGraphicsResources, RejectsStorageShapesAndAtomicFormatsWithoutInventingTypes)
+TEST(EmulatorGraphicsResources, RejectsAtomicsAndPackedMipStoresOutsideTheirExactViews)
 {
 	ASSERT_EXIT(
 	    {
@@ -625,21 +666,11 @@ TEST(EmulatorGraphicsResources, RejectsStorageShapesAndAtomicFormatsWithoutInven
 		    auto fixture = MakeAtomicImageModule();
 		    fixture.input.bind.textures2D.desc[2].texture.fields[1] = 5u << 20u;
 		    auto plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
-		    RequireImageModule(!plan.supported && std::strstr(plan.reason, "atomic uint alias") != nullptr, "R8 atomic must be rejected");
-		    fixture = MakeImageModule(20u, 71u);
-		    AddWritableImage(&fixture, 71u);
-		    fixture.input.bind.textures2D.desc[2].texture.fields[3] = 13u << 28u;
-		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
-		    RequireImageModule(!plan.supported && std::strstr(plan.reason, "separate shape banks") != nullptr, "mixed shape rejection");
-		    fixture = MakeImageModule(20u, 71u);
-		    AddWritableImage(&fixture, 71u);
+		    RequireImageModule(!plan.supported && std::strstr(plan.reason, "image atomic") != nullptr, "R8 atomic must be rejected");
+		    fixture = MakeAtomicImageModule();
 		    fixture.input.bind.textures2D.desc[2].texture.fields[3] = 10u << 28u;
 		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
-		    RequireImageModule(!plan.supported && std::strstr(plan.reason, "separate shape banks") != nullptr, "2D and 3D are separate banks");
-		    fixture = MakeAtomicImageModule();
-		    fixture.input.bind.textures2D.desc[1].texture.fields[3] = 10u << 28u;
-		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
-		    RequireImageModule(!plan.supported, "the 2D atomic alias cannot address a volume bank");
+		    RequireImageModule(!plan.supported && std::strstr(plan.reason, "image atomic") != nullptr, "an atomic cannot address a volume");
 		    fixture = MakeImageModule(20u, 71u, true);
 		    fixture.input.bind.textures2D.desc[1].texture.fields[3] = 10u << 28u;
 		    plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);

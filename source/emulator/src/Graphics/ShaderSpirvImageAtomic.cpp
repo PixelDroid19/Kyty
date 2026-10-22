@@ -16,7 +16,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageAtomic)
 	if (!Config::IsNextGen() || !stage || !ShaderImageAtomicSupported(instruction) || bind == nullptr ||
 	    !ShaderImageAtomicResourceSupported(code, index, *bind)) { return false; }
 	const int descriptor = ResolveStorageTextureArrayIndex(code, index, *bind, 0);
-	if (descriptor < 0) { return false; }
+	ShaderStorageImageView view;
+	if (descriptor < 0 || !ResolveStorageImageView(code, index, *bind, 0, &view)) { return false; }
 	const auto binding = spirv->GetConstantUint(static_cast<uint32_t>(descriptor));
 	const auto x = operand_variable_to_str(instruction.src[0], 0);
 	const auto y = operand_variable_to_str(instruction.src[0], 1);
@@ -61,7 +62,9 @@ OpBranchConditional %image_atomic_enabled_<index> %image_atomic_update_<index> %
 %image_atomic_merge_<index> = OpLabel
 )";
 	const char* atomic = instruction.type == ShaderInstructionType::ImageAtomicSwap ? "OpAtomicExchange" : "OpAtomicIAdd";
-	*dst_source += String8(text).ReplaceStr("<store>", store)
+	*dst_source += String8(text).ReplaceStr("ImageLU", view.image_type)
+	                          .ReplaceStr("textures2D_LU", view.variable)
+	                          .ReplaceStr("<store>", store)
 	                          .ReplaceStr("<atomic>", atomic)
 	                          .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                          .ReplaceStr("<binding>", binding)
