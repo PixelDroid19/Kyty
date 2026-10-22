@@ -28,6 +28,11 @@ record. Titles are named descriptively only (`AGENTS.md`).
   SPIR-V binaries are byte-identical to the entries stored under the old
   keys, so the GPU work is unchanged, and the old-key recipes still
   precompile to the same driver-cached pipelines (55 recipes, 49 ms).
+- **Generator A/B.** A second robot run with the SPIR-V store set aside
+  (Mesa cache warm) translated every module again: all 196 module entries
+  it wrote (vertex, pixel, geometry and native and split compute) are
+  byte-identical to the entries the previous translator stored under the
+  same keys.
 
 ## Shader caches: whole-title SPIR-V store and versioned compute recipes (2026-10-22)
 
