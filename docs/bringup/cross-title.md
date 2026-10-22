@@ -4,6 +4,69 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Depth array slices addressed and sampled as arrays (2026-10-22)
+
+- **Observed** (bounded trace of the robot platformer):
+  - Its shadow passes render a 1536x1536 16-bit depth target with
+    `DB_DEPTH_VIEW` slices 0..0, 1..1 and 2..2. The depth and HTILE bases
+    stay the same for every slice. Before them come three 0x30000-byte HTILE
+    clears, at the HTILE base, +0x30000 and +0x60000. The next HTILE the
+    guest allocates starts three strides after the base.
+  - The shadow lookup samples a three-layer 2D-array T# at the depth base.
+  - A second pool of 32-bit float depth is sampled as a 16-layer array. The
+    title renders only some of its layers.
+  - At boot the guest declares a 2048x2048 depth target over memory that
+    still holds two of the 1536x1536 slices.
+  - The renderer ignored the slice, which caused three faults:
+    - every cascade rendered into one image;
+    - the HTILE clears of slices 1 and 2 matched no target;
+    - the sampled array view had one layer, so every cascade read the one
+      rendered last.
+- **Contract.**
+  - The DB finds slice N of each plane (depth, stencil, HTILE) at the plane's
+    base plus N times its slice size. For a single-level surface that slice
+    size is the plane size the renderer already computes. The guest's HTILE
+    clear stride (0x30000 for 1536x1536) matches it.
+  - A sampled array layer reads the memory of that layer. A layer that no
+    slice rendered holds what guest memory holds.
+- **Change.**
+  - `DescribeRenderDepthInfo` offsets the three plane bases by the slice.
+    Each slice becomes its own depth image and takes its own HTILE clears.
+  - Each of the following stops with a message: layered rendering (a slice
+    range), slices on the previous generation, and slices of a mipmapped
+    depth target.
+  - A sampled depth array with several layers reads an array image owned by
+    its first slice. A layer is copied from its slice's image when the slice
+    was bound or written after its last copy. Depth binds, compute depth fills
+    and storage-plane store-backs stamp the image's content.
+  - A layer without a slice image is detiled from guest memory into the
+    array. It is read only when the view and the range pass the checks of
+    the guest-memory depth sample path: a 64 KiB tiled view with one level,
+    no MSAA and no metadata (HTILE would change what the bytes mean),
+    physical mapping, and no overlapping object that holds newer bytes. It is read again after a CPU write to its
+    pages, and at every bind when those pages are not write-tracked. The
+    staging buffer belongs to the recording and is freed when its command
+    buffer is next used.
+  - Each of the following stops with a message: a slice image that was never
+    rendered, slices that differ from the first, a layer whose guest bytes
+    another object owns, and a nonzero base array.
+  - A depth target declared over another depth target's memory reclaims it,
+    whatever the bases. Before, only a target at the same base did. The guest
+    reuses array memory for targets of another extent.
+- **Verified.** Strict runs on the Intel host (console warnings,
+  7 GiB memory limit), and `EmulatorGraphicsState` (301 tests) passes.
+  - Robot platformer: a 130 s run reaches frame 681 at about 20 fps with no
+    stop. Before the guest-layer read, a longer run stopped at 143 s on an
+    unrendered layer of the 16-layer pool. With it, runs of 190 s and 171 s
+    pass that point with no stop. They then reach the cold-cache compute
+    compile stall near frame 850, which predates this change.
+  - Sweep of the card title, the roguelike platformer, the racing title,
+    the preschool Unity title, the insect platformer sequel and the fishing
+    title: no stops. Frame counts stay within the spread between runs. The
+    racing route ends in a race or in a menu depending on route timing,
+    which also happened before this change.
+- **Not verified.** The look of the shadow cascades past the compile stall.
+
 ## Color CMASK fast clears and the eliminate pass (2026-10-22)
 
 - **Observed** (bounded trace of the robot platformer):
