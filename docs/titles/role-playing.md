@@ -304,7 +304,9 @@ the same build showed the symptoms live.
   - Shader compilation still causes multi-second stalls on warm runs: the
     SPIR-V binary cache persists about 50 of about 500 entries per run because
     entries carry the full source as identity (0.3-2.9 MB) against a 16 MiB
-    session write budget.
+    session write budget. Store fixed on 2026-10-22 (binary-only entries,
+    1 GiB store; see "Shader caches" in `docs/bringup/cross-title.md`); not
+    re-measured on this title.
   - About 5,000 samples per run still resolve as `guest-skip-live-cover` on
     addresses other than the display buffers; not yet examined.
   - Frame 1218 of an earlier run lost static props while their shadows

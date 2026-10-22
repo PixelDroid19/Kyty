@@ -4,6 +4,41 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Shader caches: whole-title SPIR-V store and versioned compute recipes (2026-10-22)
+
+- **SPIR-V store.** Toolchain entries (`.spvbin`, keyed by the SPIR-V
+  source) stored the full source text as identity, 0.3-2.9 MB each,
+  against a 64 MiB store, a 16 MiB session write budget and eviction by
+  write time. The robot title's store sat at 63 MiB, 82 % of it toolchain
+  entries, and every run exhausted the budget (one run: 12 toolchain
+  entries of 12 MiB and 35 modules of 3.7 MiB), so most translations were
+  never persisted. The 128-bit source key is now the whole identity, the
+  store is bounded at 1 GiB with a 256 MiB session budget, and its size is
+  scanned once per session.
+- **Compute recipes.** Recipes recorded by older translator versions were
+  never invalidated (132 recipes, 34 MB). The two precompile workers start
+  with the largest recipes, so they compiled stale 1.5-1.7 MB paired
+  kernels for the whole session (minutes each, never finished), while the
+  dispatching thread compiled the current kernels itself. A warm-run
+  hold profiled at frame 872 showed both workers at 100 % in the driver.
+  The recipe directory now carries the shader and geometry translator
+  versions (`<title>-<version>-t<translator>-g<geometry>`), and starting
+  the precompile removes the title's directories of other versions.
+- **Measured** (Intel A770, Mesa 26.2.5, strict, robot title, generic
+  route, 150 s, agent diagnostics at about 105 s). With the store fix
+  only: 358 translation hits, 2 misses, two workers still on stale
+  recipes, frame-time p99 2.57 s, longest `WAIT_REG_MEM` 1.25 s, longest
+  flip wait 1.88 s, frame 1187 at 116 s. With both fixes, first run
+  (recipes re-recorded): p99 0.38 s, longest `WAIT_REG_MEM` 22 ms, frame
+  1415 at 137 s. Second run: 54 recipes compiled in the background (8.7 ms
+  at most, driver cache hits), no translation miss, no SPIR-V compile, p99
+  0.33 s, frame 1434 at 146 s; the longest hold (5.8 s) is the next level
+  load, which the title itself reports as 4.1 s.
+- **Open.** The Vulkan pipeline cache file (74 MB for this title) is
+  rewritten whole at each checkpoint against a 128 MiB session budget, so
+  one checkpoint per session fits; not shown to cost a warm run while the
+  driver's own disk cache is enabled.
+
 ## Shader translator: split geometry pass and compute row DPP (2026-10-22)
 
 - **Geometry pass contract.** A merged ES+GS draw run as a compute pass

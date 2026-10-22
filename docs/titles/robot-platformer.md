@@ -357,7 +357,9 @@ record. Titles are named descriptively only (`AGENTS.md`).
     Mesa 26.2.5, strict). Every compute pipeline creation records a recipe
     (SPIR-V, stage flags, required subgroup size, push range, descriptor
     layout plan, vendor and device) under
-    `<spirv cache>/compute-pipelines/<title>-<version>/`, written before the
+    `<spirv cache>/compute-pipelines/<title>-<version>-t<translator>-g<geometry>/`
+    (translator versions added 2026-10-22; other versions are removed at
+    start), written before the
     blocking compile so a run that stalls in a compile still records it;
     the store is bounded at 2,048 recipes and 256 MiB. At the first compute
     pipeline of the next boot two workers compile the recipes of this

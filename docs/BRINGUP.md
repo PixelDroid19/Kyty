@@ -95,6 +95,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [Roguelike platformer](titles/roguelike-platformer.md)
   - A roguelike reaches gameplay (2026-10-07)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Shader caches: whole-title SPIR-V store and versioned compute recipes (2026-10-22)
   - Shader translator: split geometry pass and compute row DPP (2026-10-22)
   - Shader translator: float contraction and coherent loads (2026-10-22)
   - Depth sampling: integer reads and dropped pending clears (2026-10-22, found by inspection)
