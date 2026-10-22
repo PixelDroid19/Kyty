@@ -233,6 +233,7 @@ public:
 	                                                 uint32_t site, const String8& original);
 	[[nodiscard]] String8 EmitNativeThreadLimitExec() const;
 	[[nodiscard]] bool EmitComputeWaveCarryInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveMadU64Instruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveMbcnt(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveAppend(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] String8 EmitGdsCounterPointer(uint16_t byte_offset, const String8& prefix) const;

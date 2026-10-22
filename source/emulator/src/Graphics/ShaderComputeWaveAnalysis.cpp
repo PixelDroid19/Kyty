@@ -956,6 +956,12 @@ ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const Shad
 	{
 		return ShaderComputeWaveInstructionKind::BankedCarry;
 	}
+	if (instruction.type == ShaderInstructionType::VMadU64U32 && instruction.dst.type == ShaderOperandType::Vgpr &&
+	    instruction.dst.size == 2 && mask_pair(instruction.dst2) && instruction.src_num == 3 && !instruction.vop_sdwa &&
+	    !instruction.dst.clamp)
+	{
+		return ShaderComputeWaveInstructionKind::BankedCarry;
+	}
 	if (ShaderComputeWaveGenericCompareSupported(instruction))
 	{
 		return ShaderComputeWaveInstructionKind::BankedGenericCompare;
