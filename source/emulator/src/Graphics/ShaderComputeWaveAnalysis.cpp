@@ -1562,7 +1562,9 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 	// generic LDS path, so LDS accesses need no address proof here.
 	if (input.bind.extended.used)
 	{
-		const int extended_base = input.bind.extended.start_register;
+		// The bind keeps the EUD register relative to user data; the merged GS
+		// that a geometry pass runs receives user data from s8.
+		const int extended_base = input.bind.extended.start_register + (flavor == PairedWaveFlavor::Geometry ? 8 : 0);
 		if (!ComputeWaveRegisterRangeIsValid(extended_base, 2, kMaxSgpr) || (extended_base & 1) != 0)
 		{
 			result.unsupported_pc = instructions.At(0).pc;
