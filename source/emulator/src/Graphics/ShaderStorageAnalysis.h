@@ -24,6 +24,9 @@ namespace Kyty::Libs::Graphics {
 [[nodiscard]] bool ShaderInstructionWritesImageResource(ShaderInstructionType type);
 [[nodiscard]] bool ShaderInstructionUsesImageSampler(ShaderInstructionType type);
 [[nodiscard]] State::ImageSampleOperation ShaderInstructionSamplerOperation(ShaderInstructionType type);
+// Fills bind->copied_image_descriptors for image reads whose T# or S# the
+// direct lookups miss but the scalar copy flow resolves.
+void ShaderCollectCopiedImageDescriptors(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base);
 
 struct ShaderSamplerOperationEvidence
 {

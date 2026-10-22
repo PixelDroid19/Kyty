@@ -61,6 +61,13 @@ int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const
 			return index;
 		}
 	}
+	for (const auto& copied: bind.copied_image_descriptors)
+	{
+		if (copied.consumer_pc == inst.pc && copied.texture_index >= 0)
+		{
+			return copied.texture_index;
+		}
+	}
 	return -1;
 }
 
@@ -95,12 +102,20 @@ int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const Shader
 			return index;
 		}
 	}
+	for (const auto& copied: bind.copied_image_descriptors)
+	{
+		if (copied.consumer_pc == inst.pc && copied.sampler_index >= 0)
+		{
+			return copied.sampler_index;
+		}
+	}
 	return -1;
 }
 
 void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base)
 {
 	EXIT_IF(bind == nullptr);
+	ShaderCollectCopiedImageDescriptors(code, bind, user_data_register_base);
 	for (int index = 0; index < bind->textures2D.textures_num; ++index)
 	{
 		bind->textures2D.desc[index].sampler_indices_mask = 0u;

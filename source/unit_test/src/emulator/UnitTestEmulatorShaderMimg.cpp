@@ -2511,4 +2511,55 @@ TEST(EmulatorShaderMimg, KeepsTwoDimensionalAndArrayShapesOutsideTheOneDimension
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorShaderMimg, ResolvesSampledDescriptorsThroughShiftedScalarWindows)
+{
+	const auto make = [](bool complete_window)
+	{
+		ShaderCode code;
+		code.SetType(ShaderType::Compute);
+		auto add = [&code](ShaderInstructionType type, ShaderOperand dst, std::initializer_list<ShaderOperand> sources)
+		{
+			ShaderInstruction inst {};
+			inst.pc      = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+			inst.type    = type;
+			inst.dst     = dst;
+			inst.src_num = static_cast<int>(sources.size());
+			int source_index = 0;
+			for (const auto source: sources)
+			{
+				inst.src[source_index++] = source;
+			}
+			code.GetInstructions().Add(inst);
+		};
+		// The T# moves from s[2:9] to s[0:7] and the S# from s[10:13] to s[8:11].
+		for (int pair = 0; pair < 6; ++pair)
+		{
+			if (pair == 3 && !complete_window) { continue; }
+			add(ShaderInstructionType::SMovB64, TileSgpr(pair * 2, 2), {TileSgpr(pair * 2 + 2, 2)});
+		}
+		add(ShaderInstructionType::ImageSampleLz, TileVgpr(4), {TileVgpr(0), TileSgpr(0, 8), TileSgpr(8, 4)});
+		add(ShaderInstructionType::SEndpgm, {}, {});
+		return code;
+	};
+	ShaderBindResources bind {};
+	bind.textures2D.textures_num             = 1;
+	bind.textures2D.desc[0].usage            = ShaderTextureUsage::ReadOnly;
+	bind.textures2D.desc[0].start_register   = 2;
+	bind.samplers.samplers_num               = 1;
+	bind.samplers.start_register[0]          = 10;
+
+	const auto shifted = make(true);
+	const auto& sample = shifted.GetInstructions().At(shifted.GetInstructions().Size() - 2u);
+	ShaderAssociateSampledTextureSamplers(shifted, &bind, 0);
+	EXPECT_EQ(ShaderFindImageSampledTextureDescriptor(sample, bind, 0), 0);
+	EXPECT_EQ(ShaderFindImageSamplerDescriptor(sample, bind, 0), 0);
+	EXPECT_EQ(bind.textures2D.desc[0].sampler_indices_mask, 0x1u);
+
+	const auto partial = make(false);
+	ShaderAssociateSampledTextureSamplers(partial, &bind, 0);
+	const auto& partial_sample = partial.GetInstructions().At(partial.GetInstructions().Size() - 2u);
+	EXPECT_EQ(ShaderFindImageSampledTextureDescriptor(partial_sample, bind, 0), -1);
+	EXPECT_EQ(ShaderFindImageSamplerDescriptor(partial_sample, bind, 0), 0);
+}
+
 UT_END();

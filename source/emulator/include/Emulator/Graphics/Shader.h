@@ -1813,6 +1813,16 @@ struct ShaderAssembledDescriptor
 	int      resource_index = 0;
 };
 
+// An image instruction whose T# or S# reaches it only as a scalar copy of a
+// bound descriptor (S_MOV window shifts): the descriptors it reads, keyed by
+// its pc, -1 where the copy does not resolve to one.
+struct ShaderCopiedImageDescriptor
+{
+	uint32_t consumer_pc   = 0;
+	int      texture_index = -1;
+	int      sampler_index = -1;
+};
+
 enum class ShaderTextureUsage
 {
 	Unknown,
@@ -2164,6 +2174,7 @@ struct ShaderBindResources
 	// longer holds its user-data value there (redefined, for example from
 	// s_getpc): they read through the runtime V#, never the descriptor slot.
 	Vector<uint32_t> redefined_descriptor_consumers;
+	Vector<ShaderCopiedImageDescriptor> copied_image_descriptors;
 };
 
 [[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
