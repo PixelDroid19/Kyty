@@ -4,6 +4,61 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Per-draw shader resource scans memoized by layout and instruction class (2026-10-22)
+
+- **Observed** (frame-pointer stack samples of the command-processor thread,
+  robot platformer intro, Intel A770, warm caches, 12 s at 64 s):
+  - `ShaderParseUsage2` held 32.5% of the thread. The sampled
+    texture/sampler association took 38.6% of it, almost all in the
+    copied-image descriptor flow, which re-ran a whole-program analysis on
+    every draw although only the descriptor words change between draws.
+  - Vertex programs carried no `ShaderCodeResourceMemo`, so their EUD
+    descriptor-load and dynamic scalar-load scans ran uncached per draw.
+  - The redefined and assembled buffer-descriptor scans, the scalar-buffer
+    loop, the EUD span and the sampler mask each walked every instruction of
+    the program per draw to reach a few buffer, sampler or descriptor loads.
+    The zero-image check of each dynamically loaded S# did the same once per
+    sampler load.
+- **Change.**
+  - The copied-image flow is split into a layout-only part and the
+    value-dependent part. The program memo keeps the layout-only reads
+    (consumer PC, texture descriptor, sampler index) per binding-layout
+    signature, which lists every bind field that flow reads; at most 64
+    layouts, cleared on overflow. Descriptor words are still applied per draw.
+  - Vertex programs own two memos: one for the front-stage EUD code and one
+    for the program code.
+  - The memo keeps ascending instruction indices per class (buffer accesses,
+    image-sampler users, 4- and 8-dword descriptor loads). The per-draw scans
+    and the zero-image sampler check visit only those indices and keep their
+    original checks. Pointer-table and fused-GS user-data descriptors pass
+    their program's memo too.
+- **Measured** (same route, binary and window):
+  - Memos bypassed by a temporary switch versus enabled: `ShaderParseUsage2`
+    33.3% -> 22.3% of the thread, the association 14.1% -> 3.3%; 52-78 s
+    window 400 -> 327 us/draw and 244 -> 209 us/dispatch; frame 1004 -> 1101
+    at 100 s.
+  - Instruction classes on top: `ShaderParseUsage2` 22.3% -> 17.8% of the
+    thread; the redefined and assembled scans fell from 13.1% and 8.1% of it
+    to 1.8% and 1.3%, and per-instruction vector-buffer classification left
+    the samples.
+  - The zero-image sampler check on top: `ShaderParseUsage2` 17.8% ->
+    14.7% of the thread; the dynamic scalar-resource collection fell from
+    29.7% to 15.7% of it. Per-window us/draw stays within scene variation
+    (327-414 us at 33,000-48,000 draws per window).
+- **Verified.**
+  - Unit suites `EmulatorGraphicsState*` (301), `EmulatorGraphicsPackets*`
+    (284) and `EmulatorShader*` (316) pass; the graphics diagnostics
+    integration test passes.
+  - Strict sweep of the card title, roguelike platformer, racing title,
+    preschool Unity title, insect platformer and fishing title (60-75 s
+    each, before the zero-image change): no stop. The robot platformer's
+    100 s runs pass frame 1,050 without a stop.
+- **Open.** The thread is on the CPU for about a fifth of the window; in the
+  same window it waits 10.7 s of 26 s on fences and 2.0 s in `WAIT_REG_MEM`.
+  Its next CPU costs: `PrepareStorageBuffers` 25% (transient snapshot
+  compare and capture, `GpuMemoryCalcHash`) and the body of
+  `ShaderParseUsage2` about 6%.
+
 ## Host-only UCONFIG codes in indirect register blocks (2026-10-22)
 
 - **Observed** (agent events of strict runs): the fishing title, the

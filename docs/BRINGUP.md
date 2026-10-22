@@ -95,6 +95,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [Roguelike platformer](titles/roguelike-platformer.md)
   - A roguelike reaches gameplay (2026-10-07)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Per-draw shader resource scans memoized by layout and instruction class (2026-10-22)
   - Host-only UCONFIG codes in indirect register blocks (2026-10-22)
   - Depth array slices addressed and sampled as arrays (2026-10-22)
   - Color CMASK fast clears and the eliminate pass (2026-10-22)

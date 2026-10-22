@@ -2191,7 +2191,9 @@ struct ShaderBindResources
 [[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);
 [[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
 	                                                int user_data_register_base);
-void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base);
+class ShaderCodeResourceMemo;
+void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
+                                           const ShaderCodeResourceMemo* memo = nullptr);
 // Bytes read through a dynamically loaded buffer descriptor: the union of every
 // scalar buffer load that consumes the mapping. False when a consumer reads the
 // descriptor another way or at a non-constant offset.
@@ -2642,18 +2644,17 @@ struct ShaderUserData
 	uint16_t     sharp_resource_count[4];
 };
 
-class ShaderCodeResourceMemo;
-// Cached scalar flows must correspond to their code stream; EUD descriptor code can differ from general code.
+// Cached scalar flows and memos must correspond to their code stream; EUD descriptor code can differ from general code.
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
-                       int user_data_register_base = 0, bool vertex_resource_types = true,
-                       const ShaderCode* eud_descriptor_code = nullptr, const ShaderScalarFlow* cached_code_flow = nullptr,
-                       const ShaderScalarFlow* cached_eud_flow = nullptr, const ShaderCodeResourceMemo* code_memo = nullptr);
+                       int user_data_register_base = 0, bool vertex_resource_types = true, const ShaderCode* eud_descriptor_code = nullptr,
+                       const ShaderScalarFlow* cached_code_flow = nullptr, const ShaderScalarFlow* cached_eud_flow = nullptr,
+                       const ShaderCodeResourceMemo* code_memo = nullptr, const ShaderCodeResourceMemo* eud_code_memo = nullptr);
 
-[[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num,
-                                                   int eud_pointer_register, const ShaderCode* code,
-                                                   int user_data_register_base, uint32_t* required_end_dw,
-                                                   const ShaderScalarFlow* scalar_flow = nullptr);
+[[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num, int eud_pointer_register,
+                                                  const ShaderCode* code, int user_data_register_base, uint32_t* required_end_dw,
+                                                  const ShaderScalarFlow*       scalar_flow = nullptr,
+                                                  const ShaderCodeResourceMemo* memo        = nullptr);
 [[nodiscard]] bool ShaderGen5EudExpandEndDwordsForSharpImages(const ShaderUserData* user_data, int user_sgpr_num,
                                                                const uint32_t* eud_snapshot, uint32_t snapshot_dwords,
                                                                uint32_t* required_end_dw);

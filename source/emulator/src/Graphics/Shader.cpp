@@ -1305,6 +1305,9 @@ struct ShaderVertexProgram
 	ShaderCode             code;
 	// EUD scans use the front stream even when the linked program adds a continuation.
 	std::shared_ptr<const ShaderScalarFlow> front_scalar_flow;
+	// Resource analyses of front_code (EUD scans) and of code (image reads).
+	ShaderCodeResourceMemo front_resource_memo;
+	ShaderCodeResourceMemo resource_memo;
 	// T#/S# loads of `code` through the GS user-data address (fused GS only).
 	std::vector<ShaderGsUserDataDescriptorLoad> gs_user_data_loads;
 	std::array<uint32_t, 4> fingerprint {};
@@ -3067,9 +3070,9 @@ bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code, int user_data_register_base,
-                       bool vertex_resource_types, const ShaderCode* eud_descriptor_code,
-                       const ShaderScalarFlow* cached_code_flow, const ShaderScalarFlow* cached_eud_flow,
-                       const ShaderCodeResourceMemo* code_memo)
+                       bool vertex_resource_types, const ShaderCode* eud_descriptor_code, const ShaderScalarFlow* cached_code_flow,
+                       const ShaderScalarFlow* cached_eud_flow, const ShaderCodeResourceMemo* code_memo,
+                       const ShaderCodeResourceMemo* eud_code_memo)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -3101,6 +3104,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	//    at that pointer (post-detile: S#@0x20/0x24 in a 12-dword EUD).
 	const bool has_eud_ptr = Gen5HasEudPointer(user_data);
 	const auto* eud_code = eud_descriptor_code != nullptr ? eud_descriptor_code : code;
+	const auto*                             eud_memo    = eud_code == code ? code_memo : eud_code_memo;
 	std::shared_ptr<const ShaderScalarFlow> code_flow_owner;
 	const ShaderScalarFlow* code_flow = cached_code_flow;
 	if (code_flow == nullptr && code != nullptr && eud_code == code)
@@ -3352,8 +3356,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	if (eud_pointer_valid)
 	{
 		uint32_t required_end_dw = 0u;
-		if (!ShaderGen5EudRequiredEndDwords(user_data, user_sgpr_num, bind->extended.start_register, eud_code,
-		                                      user_data_register_base, &required_end_dw, eud_flow))
+		if (!ShaderGen5EudRequiredEndDwords(user_data, user_sgpr_num, bind->extended.start_register, eud_code, user_data_register_base,
+		                                    &required_end_dw, eud_flow, eud_memo))
 		{
 			EXIT("invalid Gen5 EUD snapshot span: eud_dw=%u pointer_reg=%d\n",
 			     static_cast<unsigned>(user_data->eud_size_dw), bind->extended.start_register);
@@ -3591,11 +3595,12 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	if (eud_code != nullptr && has_eud_ptr && extended_buffer != nullptr)
 	{
 		ShaderCollectDynamicScalarResources(*eud_code, bind, user_sgpr, info, extended_buffer, user_data->eud_size_dw,
-		                                    user_data_register_base, *eud_flow, eud_code == code ? code_memo : nullptr);
+		                                    user_data_register_base, *eud_flow, eud_memo);
 	}
 	if (code != nullptr && !vertex_resource_types)
 	{
-		ShaderCollectPointerTableResources(*code, bind, user_sgpr, info, user_data->srt_size_dw, user_data_register_base, *code_flow);
+		ShaderCollectPointerTableResources(*code, bind, user_sgpr, info, user_data->srt_size_dw, user_data_register_base, *code_flow,
+		                                   code_memo);
 	}
 
 	// Gen5 metadata is advisory: some shaders address an S# descriptor directly
@@ -3604,10 +3609,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// null-descriptor rejection and the same EUD translation used by metadata.
 	if (code != nullptr)
 	{
-		uint32_t inst_index = 0;
-		for (const auto& inst: code->GetInstructions())
+		const ShaderInstructionIndices direct_indices = code_memo == nullptr ? ShaderIndexInstructions(*code) : ShaderInstructionIndices {};
+		const auto&                    indices        = code_memo != nullptr ? code_memo->InstructionIndices(*code) : direct_indices;
+		for (const uint32_t current: indices.buffer_accesses)
 		{
-			const uint32_t current = inst_index++;
+			const auto& inst = code->GetInstructions().At(current);
 			if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr ||
 			    inst.src[0].size != 4 || ShaderIsDynamicScalarStorageConsumer(*bind, inst))
 			{
@@ -3724,7 +3730,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					exact_evidence.raw_smem_dynamic_offset = true;
 					continue;
 				}
-				const auto span = AnalyzeShaderDynamicSLoadSpan(*eud_code, record, eud_code == code ? code_memo : nullptr);
+				const auto span                        = AnalyzeShaderDynamicSLoadSpan(*eud_code, record, eud_memo);
 				exact_evidence.raw_smem_required_bytes = std::max(exact_evidence.raw_smem_required_bytes, span.required_bytes);
 				exact_evidence.raw_smem_dynamic_offset = exact_evidence.raw_smem_dynamic_offset || !span.exact;
 			}
@@ -3813,7 +3819,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 			bind->samplers.operations[i] = evidence.operation;
 		}
-		ShaderAssociateSampledTextureSamplers(*code, bind, user_data_register_base);
+		ShaderAssociateSampledTextureSamplers(*code, bind, user_data_register_base, code_memo);
 		CollectZeroImageResources(*code, entry_values, user_sgpr, user_sgpr_num, user_data_register_base, &bind->zero_image_resources);
 	}
 
@@ -3822,8 +3828,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	if (code != nullptr && !vertex_resource_types)
 	{
 		// Before assembly, whose resources reuse their consumer's register.
-		ShaderCollectRedefinedBufferDescriptors(*code, bind, user_data_register_base, *code_flow);
-		ShaderCollectAssembledBufferDescriptors(*code, bind, user_sgpr, user_sgpr_num, user_data_register_base, *code_flow);
+		ShaderCollectRedefinedBufferDescriptors(*code, bind, user_data_register_base, *code_flow, code_memo);
+		ShaderCollectAssembledBufferDescriptors(*code, bind, user_sgpr, user_sgpr_num, user_data_register_base, *code_flow, code_memo);
 	}
 }
 
@@ -4044,10 +4050,10 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		// Keep general ISA analysis disabled: the scalar-buffer fallback on a
 		// reused s[16:19] V# zeros the projection CBV. EUD load destinations
 		// are resolved separately from the rebased metadata sharp table.
-		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr,
-		                  kGen5GsFrontUserDataBase, true, vs_isa, nullptr, info->program->front_scalar_flow.get());
+		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr, kGen5GsFrontUserDataBase,
+		                  true, vs_isa, nullptr, info->program->front_scalar_flow.get(), nullptr, &info->program->front_resource_memo);
 		ShaderBindGsUserDataDescriptors(info->program->code, info->program->gs_user_data_loads, regs->gs_user_data_addr, user_sgpr,
-		                                &info->bind, &usage);
+		                                &info->bind, &usage, &info->program->resource_memo);
 		if (vs_isa != nullptr)
 		{
 			info->native_wave = info->program->native_wave.Get(info->program->code, guest_wave_size);
@@ -4055,7 +4061,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			    ShaderApplyNggFrontProof(&info->native_wave, info->program->code, shader_stages, info->program->ngg_front)
 			        ? guest_wave_size
 			        : 0u;
-			ShaderAssociateSampledTextureSamplers(info->program->code, &info->bind, kGen5GsFrontUserDataBase);
+			ShaderAssociateSampledTextureSamplers(info->program->code, &info->bind, kGen5GsFrontUserDataBase,
+			                                      &info->program->resource_memo);
 			// Constant tables embedded after the code are addressed from GETPC;
 			// the base stays runtime data so a cached pipeline can relocate.
 			info->bind.program_base_used   = vs_isa->HasAnyOf({ShaderInstructionType::SGetpcB64});

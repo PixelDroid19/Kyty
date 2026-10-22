@@ -343,6 +343,29 @@ ShaderSamplerOperationEvidence ShaderCodeResourceMemo::SamplerOperation(const Sh
 	                        [&] { return AnalyzeShaderSamplerOperationEvidence(code, start_register); });
 }
 
+std::vector<ShaderImageCopyRead> ShaderCodeResourceMemo::ImageCopyReads(const ShaderCode& code, const ShaderBindResources& bind,
+                                                                        int user_data_register_base) const
+{
+	// A program sees few binding layouts; the bound only guards against churn.
+	constexpr size_t kMaxLayouts = 64;
+	auto             layout      = ShaderImageCopyLayout(bind, user_data_register_base);
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (const auto it = m_image_copy_reads.find(layout); it != m_image_copy_reads.end())
+		{
+			return it->second;
+		}
+	}
+	auto                        reads = ShaderAnalyzeImageCopyReads(code, bind, user_data_register_base);
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (m_image_copy_reads.size() >= kMaxLayouts)
+	{
+		m_image_copy_reads.clear();
+	}
+	m_image_copy_reads.emplace(std::move(layout), reads);
+	return reads;
+}
+
 ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int start_register, const ShaderCodeResourceMemo* memo)
 {
 	return memo != nullptr ? memo->StorageUse(code, start_register) : AnalyzeShaderStorageUse(code, start_register);

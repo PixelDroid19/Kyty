@@ -113,20 +113,20 @@ int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const Shader
 	return -1;
 }
 
-void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base)
+void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
+                                           const ShaderCodeResourceMemo* memo)
 {
 	EXIT_IF(bind == nullptr);
-	ShaderCollectCopiedImageDescriptors(code, bind, user_data_register_base);
+	ShaderCollectCopiedImageDescriptors(code, bind, user_data_register_base, memo);
 	for (int index = 0; index < bind->textures2D.textures_num; ++index)
 	{
 		bind->textures2D.desc[index].sampler_indices_mask = 0u;
 	}
-	for (const auto& inst: code.GetInstructions())
+	const ShaderInstructionIndices direct  = memo == nullptr ? ShaderIndexInstructions(code) : ShaderInstructionIndices {};
+	const auto&                    indices = memo != nullptr ? memo->InstructionIndices(code) : direct;
+	for (const uint32_t instruction: indices.image_samplers)
 	{
-		if (!ShaderInstructionUsesImageSampler(inst.type))
-		{
-			continue;
-		}
+		const auto& inst          = code.GetInstructions().At(instruction);
 		const int texture_index = ShaderFindImageSampledTextureDescriptor(inst, *bind, user_data_register_base);
 		const int sampler_index = ShaderFindImageSamplerDescriptor(inst, *bind, user_data_register_base);
 		if (texture_index >= 0 && sampler_index >= 0 && sampler_index < 16)
@@ -340,9 +340,9 @@ static bool ShaderGen5EudAddSharpSpan(int offset_dw, int dwords, int user_sgpr_n
 	                                    required_end_dw);
 }
 
-bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num, int eud_pointer_register,
-                                    const ShaderCode* code, int user_data_register_base, uint32_t* required_end_dw,
-                                    const ShaderScalarFlow* scalar_flow)
+bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num, int eud_pointer_register, const ShaderCode* code,
+                                    int user_data_register_base, uint32_t* required_end_dw, const ShaderScalarFlow* scalar_flow,
+                                    const ShaderCodeResourceMemo* memo)
 {
 	if (user_data == nullptr || required_end_dw == nullptr || user_sgpr_num < 0 ||
 	    user_sgpr_num > HW::UserSgprInfo::SGPRS_MAX || eud_pointer_register < 0 ||
@@ -386,12 +386,17 @@ bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sg
 		}
 		const auto* flow = scalar_flow != nullptr ? scalar_flow : computed_flow.get();
 		const auto& entry_values = flow->holding_entry_value;
-		for (uint32_t index = 0; index < code->GetInstructions().Size() && index < entry_values.size(); ++index)
+		const ShaderInstructionIndices direct       = memo == nullptr ? ShaderIndexInstructions(*code) : ShaderInstructionIndices {};
+		const auto&                    indices      = memo != nullptr ? memo->InstructionIndices(*code) : direct;
+		for (const uint32_t index: indices.descriptor_loads)
 		{
+			if (index >= entry_values.size())
+			{
+				break;
+			}
 			const auto& inst = code->GetInstructions().At(index);
-			const int dwords = inst.type == ShaderInstructionType::SLoadDwordx4 ? 4 :
-			                   (inst.type == ShaderInstructionType::SLoadDwordx8 ? 8 : 0);
-			if (dwords == 0 || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != dwords || inst.src_num < 2 ||
+			const int   dwords = inst.type == ShaderInstructionType::SLoadDwordx4 ? 4 : 8;
+			if (inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != dwords || inst.src_num < 2 ||
 			    !ShaderMatchesEudPointer(inst.src[0], eud_pointer_register, user_data_register_base, entry_values[index]))
 			{
 				continue;
@@ -1289,6 +1294,48 @@ ShaderEudDescriptorLoads ShaderFindEudDescriptorLoads(const ShaderCode& code)
 	return loads;
 }
 
+ShaderInstructionIndices ShaderIndexInstructions(const ShaderCode& code)
+{
+	ShaderInstructionIndices indices;
+	const auto&              instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (ShaderInstructionIsScalarBufferLoad(inst) || ShaderInstructionIsVectorBufferAccess(inst.type))
+		{
+			indices.buffer_accesses.push_back(index);
+		}
+		if (ShaderInstructionUsesImageSampler(inst.type))
+		{
+			indices.image_samplers.push_back(index);
+		}
+		if (inst.type == ShaderInstructionType::SLoadDwordx4 || inst.type == ShaderInstructionType::SLoadDwordx8)
+		{
+			indices.descriptor_loads.push_back(index);
+		}
+	}
+	return indices;
+}
+
+const ShaderInstructionIndices& ShaderCodeResourceMemo::InstructionIndices(const ShaderCode& code) const
+{
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_instruction_indices_ready)
+		{
+			return m_instruction_indices;
+		}
+	}
+	auto                        indices = ShaderIndexInstructions(code);
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (!m_instruction_indices_ready)
+	{
+		m_instruction_indices       = std::move(indices);
+		m_instruction_indices_ready = true;
+	}
+	return m_instruction_indices;
+}
+
 const ShaderEudDescriptorLoads& ShaderCodeResourceMemo::EudDescriptorLoads(const ShaderCode& code) const
 {
 	{
@@ -1322,13 +1369,16 @@ static bool ShaderDescriptorLoadInPass(const ShaderDynamicSLoadUse& use, ShaderD
 // True when every image instruction that samples through the S# loaded by
 // sload, up to last_consumer_pc, reads a T# that binds nothing.
 static bool ShaderSamplerFeedsOnlyZeroImages(const ShaderCode& code, const ShaderBindResources& bind, const ShaderInstruction& sload,
-                                             uint32_t last_consumer_pc)
+                                             uint32_t last_consumer_pc, const ShaderCodeResourceMemo* memo)
 {
-	bool consumed = false;
-	for (const auto& inst: code.GetInstructions())
+	const ShaderInstructionIndices direct   = memo == nullptr ? ShaderIndexInstructions(code) : ShaderInstructionIndices {};
+	const auto&                    indices  = memo != nullptr ? memo->InstructionIndices(code) : direct;
+	bool                           consumed = false;
+	for (const uint32_t index: indices.image_samplers)
 	{
-		if (inst.pc <= sload.pc || inst.pc > last_consumer_pc || !ShaderInstructionUsesImageSampler(inst.type) || inst.src_num < 3 ||
-		    inst.src[2].type != ShaderOperandType::Sgpr || inst.src[2].register_id != sload.dst.register_id)
+		const auto& inst = code.GetInstructions().At(index);
+		if (inst.pc <= sload.pc || inst.pc > last_consumer_pc || inst.src_num < 3 || inst.src[2].type != ShaderOperandType::Sgpr ||
+		    inst.src[2].register_id != sload.dst.register_id)
 		{
 			continue;
 		}
@@ -1347,7 +1397,8 @@ static bool ShaderSamplerFeedsOnlyZeroImages(const ShaderCode& code, const Shade
 // that binds nothing binds nothing either.
 static bool ShaderAddDynamicScalarResource(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info,
                                            const ShaderInstruction& sload, int offset_dw, const ShaderDynamicSLoadUse& use,
-                                           const HW::UserSgprInfo& user_sgpr, const uint32_t* table, uint32_t instruction_count)
+                                           const HW::UserSgprInfo& user_sgpr, const uint32_t* table, uint32_t instruction_count,
+                                           const ShaderCodeResourceMemo* memo)
 {
 	bool added_resource = false;
 	bool added_mapping = false;
@@ -1374,7 +1425,7 @@ static bool ShaderAddDynamicScalarResource(const ShaderCode& code, ShaderBindRes
 			}
 			break;
 		case ShaderDynamicSLoadResourceKind::Sampler:
-			if (ShaderSamplerFeedsOnlyZeroImages(code, *bind, sload, use.last_consumer_pc))
+			if (ShaderSamplerFeedsOnlyZeroImages(code, *bind, sload, use.last_consumer_pc, memo))
 			{
 				ShaderAddZeroDescriptorLoad(&bind->zero_descriptor_loads, sload.pc, sload.dst.register_id, 4);
 				return true;
@@ -1441,7 +1492,7 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 			continue;
 		}
 
-		if (!ShaderAddDynamicScalarResource(code, bind, info, sload, offset_dw, use, user_sgpr, extended_buffer, instruction_count))
+		if (!ShaderAddDynamicScalarResource(code, bind, info, sload, offset_dw, use, user_sgpr, extended_buffer, instruction_count, memo))
 		{
 			EXIT("unable to materialize dynamic descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u "
 			     "storage=%d textures=%d samplers=%d mappings=%u eud_dw=%u\n",
@@ -1523,7 +1574,7 @@ static bool ShaderPartitionDescriptorLoad(const ShaderCode& code, uint32_t index
 // descriptors keep their existing paths.
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                         ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base,
-                                        const ShaderScalarFlow& scalar_flow)
+                                        const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo)
 {
 	EXIT_IF(bind == nullptr || info == nullptr);
 	if (srt_size_dw < 2u)
@@ -1565,7 +1616,7 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 				continue;
 			}
 			if (!ShaderAddDynamicScalarResource(code, bind, info, block.load, offset_dw + block.first_dword, block.use, user_sgpr,
-			                                    table.data(), instruction_count))
+				                                table.data(), instruction_count, memo))
 			{
 				EXIT("unable to materialize SRT pointer descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u textures=%d "
 				     "samplers=%d\n",
@@ -1714,7 +1765,7 @@ std::vector<ShaderGsUserDataDescriptorLoad> ShaderFindGsUserDataDescriptorLoads(
 
 void ShaderBindGsUserDataDescriptors(const ShaderCode& code, const std::vector<ShaderGsUserDataDescriptorLoad>& loads,
                                      uint64_t table_address, const HW::UserSgprInfo& user_sgpr, ShaderBindResources* bind,
-                                     ShaderParsedUsage* info)
+                                     ShaderParsedUsage* info, const ShaderCodeResourceMemo* memo)
 {
 	EXIT_IF(bind == nullptr || info == nullptr);
 	if (loads.empty())
@@ -1738,7 +1789,7 @@ void ShaderBindGsUserDataDescriptors(const ShaderCode& code, const std::vector<S
 		{
 			if (ShaderDescriptorLoadInPass(load.use, pass) &&
 			    !ShaderAddDynamicScalarResource(code, bind, info, load.block, load.offset_dw, load.use, user_sgpr, table.data(),
-			                                    code.GetInstructions().Size()))
+			                                    code.GetInstructions().Size(), memo))
 			{
 				EXIT("unable to materialize GS user-data descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u textures=%d "
 				     "samplers=%d\n",
@@ -1856,14 +1907,20 @@ static int ShaderAddAssembledStorageResource(ShaderStorageResources* resources, 
 // each consumer gets the storage resource its words select, and the V#
 // registers are written with that resource's metadata right before it.
 void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
-	                                             int user_sgpr_num, int user_data_register_base,
-	                                             const ShaderScalarFlow& scalar_flow)
+                                             int user_sgpr_num, int user_data_register_base, const ShaderScalarFlow& scalar_flow,
+                                             const ShaderCodeResourceMemo* memo)
 {
 	EXIT_IF(bind == nullptr);
 	const auto& sources      = scalar_flow.entry_sources;
 	const auto& instructions = code.GetInstructions();
-	for (uint32_t index = 0; index < instructions.Size() && index < sources.size(); ++index)
+	const ShaderInstructionIndices direct       = memo == nullptr ? ShaderIndexInstructions(code) : ShaderInstructionIndices {};
+	const auto&                    indices      = memo != nullptr ? memo->InstructionIndices(code) : direct;
+	for (const uint32_t index: indices.buffer_accesses)
 	{
+		if (index >= sources.size())
+		{
+			break;
+		}
 		const auto& inst       = instructions.At(index);
 		const auto* descriptor = ShaderVectorBufferDescriptor(inst);
 		std::array<uint32_t, 4> words {};
@@ -1907,7 +1964,7 @@ static bool ShaderBufferRegisterNamesBinding(const ShaderBindResources& bind, co
 }
 
 void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
-                                             const ShaderScalarFlow& scalar_flow)
+                                             const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo)
 {
 	EXIT_IF(bind == nullptr);
 	const auto& holding      = scalar_flow.holding_entry_value;
@@ -1917,8 +1974,14 @@ void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindR
 	{
 		return;
 	}
-	for (uint32_t index = 0; index < instructions.Size() && index < holding.size(); ++index)
+	const ShaderInstructionIndices direct  = memo == nullptr ? ShaderIndexInstructions(code) : ShaderInstructionIndices {};
+	const auto&                    indices = memo != nullptr ? memo->InstructionIndices(code) : direct;
+	for (const uint32_t index: indices.buffer_accesses)
 	{
+		if (index >= holding.size())
+		{
+			break;
+		}
 		const auto& inst   = instructions.At(index);
 		const bool  scalar = ShaderInstructionIsScalarBufferLoad(inst) && inst.src_num >= 1 &&
 		                    inst.src[0].type == ShaderOperandType::Sgpr && inst.src[0].size == 4;
