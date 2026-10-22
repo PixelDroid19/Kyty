@@ -722,7 +722,7 @@ static bool fragment_row_dpp_wave32_keeps_dst(const ShaderCode& code, uint32_t i
 	return false;
 }
 
-static bool fragment_row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const String8& index)
+static bool row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const String8& index)
 {
 	if (op.type != ShaderOperandType::Vgpr || op.dpp_row_mask != 0xfu || op.dpp_bank_mask != 0xfu || op.swizzle != 6u)
 	{
@@ -731,7 +731,7 @@ static bool fragment_row_dpp_supported(const Spirv& spirv, const ShaderOperand& 
 	const uint32_t control = op.dpp_ctrl;
 	const bool     row     = (control >= 0x101u && control <= 0x10fu) || (control >= 0x111u && control <= 0x11fu) ||
 	                         (control >= 0x121u && control <= 0x12fu) || control == 0x140u || control == 0x141u;
-	if (!row || (op.dpp_bound_ctrl && control < 0x121u))
+	if (!row)
 	{
 		return false;
 	}
@@ -743,13 +743,16 @@ static bool fragment_row_dpp_supported(const Spirv& spirv, const ShaderOperand& 
 		}
 	}
 	const uint32_t inst_index = index.ToUint32();
-	if (ShaderFragmentWaveInsideRegion(spirv.GetCode(), inst_index))
+	const bool     pixel      = spirv.GetHostShaderType() == ShaderType::Pixel;
+	if (pixel && ShaderFragmentWaveInsideRegion(spirv.GetCode(), inst_index))
 	{
-		return true;
+		return !op.dpp_bound_ctrl || control >= 0x121u;
 	}
-	const auto* pixel = spirv.GetPsInputInfo();
-	return pixel != nullptr && pixel->required_subgroup_size == 32u &&
-	       fragment_row_dpp_wave32_keeps_dst(spirv.GetCode(), inst_index, op);
+	// Each host subgroup must hold whole guest rows and no ghost lanes: a wave32
+	// fragment, a native wave32 compute wave, or one 32-lane half of a split wave64.
+	const bool whole_rows = pixel ? spirv.GetPsInputInfo() != nullptr && spirv.GetPsInputInfo()->required_subgroup_size == 32u
+	                              : spirv.UsesNativeComputeWave();
+	return whole_rows && fragment_row_dpp_wave32_keeps_dst(spirv.GetCode(), inst_index, op);
 }
 
 // Emits the row-class lane permutation for an already-loaded operand inside a
@@ -828,15 +831,15 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 {
 	if (!operand_dpp_supported(op))
 	{
-		if (spirv->GetHostShaderType() != ShaderType::Pixel || !fragment_row_dpp_supported(*spirv, op, index))
+		if (!row_dpp_supported(*spirv, op, index))
 		{
 			return false;
 		}
 		// Outside a proven region EXEC may be partial; FI=0 must then zero
 		// sources fetched from EXEC-inactive lanes. Inside a proven region
 		// EXEC is full and the extra shuffle would be a no-op.
-		const bool exec_guard = !op.dpp_fetch_inactive &&
-		                        !ShaderFragmentWaveInsideRegion(spirv->GetCode(), index.ToUint32());
+		const bool exec_guard = !op.dpp_fetch_inactive && !(spirv->GetHostShaderType() == ShaderType::Pixel &&
+		                                                    ShaderFragmentWaveInsideRegion(spirv->GetCode(), index.ToUint32()));
 		return operand_dpp_row_permute_uint(spirv, op, result_id, input_id, input_is_uint, exec_guard, text);
 	}
 	const auto control = op.dpp_ctrl;
@@ -935,7 +938,7 @@ bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, 
 
 	if (op.dpp)
 	{
-		if (!operand_dpp_supported(op) && !fragment_row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
 		{
 			return false;
 		}
@@ -994,7 +997,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 	EXIT_IF(load == nullptr);
 	if (op.dpp)
 	{
-		if (!operand_dpp_supported(op) && !fragment_row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
 		{
 			return false;
 		}
@@ -1114,7 +1117,7 @@ bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id
 	{
 		// DPP transforms source zero before the ALU operation, not only V_MOV.
 		// Keep the full-mask quad-permutation subset shared by all consumers.
-		if (!operand_dpp_supported(op) && !fragment_row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
 		{
 			return false;
 		}
