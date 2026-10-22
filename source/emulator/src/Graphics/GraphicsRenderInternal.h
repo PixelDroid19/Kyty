@@ -874,8 +874,9 @@ struct RenderColorAttachmentInfo
 	RenderColorType       type                    = RenderColorType::NoColorOutput;
 	VulkanImage*          vulkan_buffer           = nullptr;
 	uint64_t              base_addr               = 0;
-	// DCC metadata base of a single-level, single-slice target; zero otherwise.
+	// DCC and CMASK metadata bases of a single-level, single-slice target; zero otherwise.
 	uint64_t              dcc_addr                = 0;
+	uint64_t              cmask_addr              = 0;
 	bool                  dcc_alpha_on_msb        = false;
 	uint32_t              bytes_per_element       = 0;
 	bool                  cmask_fast_clear_enable = false;
@@ -1748,9 +1749,9 @@ void               InvalidateComputeColorFills(const ShaderBindResources& bind);
 // A pass that samples its depth attachment cannot CLEAR it, so a first use of the
 // image there receives the first-use clear contents before the pass begins.
 void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth);
-// A proven uniform fill of a DCC metadata range with a clear key is held until
-// a render target or shader image with that metadata base consumes it.
-[[nodiscard]] bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// A proven uniform fill of a DCC or CMASK metadata range with a clear key is
+// held until a render target or shader image with that metadata base consumes it.
+[[nodiscard]] bool PublishComputeColorMetaClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 
 // A color image bound to a shader, read or written, whose T# enables DCC.
 struct ColorDccImage
@@ -1783,6 +1784,7 @@ void InvalidateMemoryObject(const RenderColorInfo& r);
 void InvalidateMemoryObject(const RenderDepthInfo& r);
 bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw);
 bool GraphicsRenderColorDecompress(CommandBuffer* buffer, const HW::Context& hw);
+bool                 GraphicsRenderColorEliminateFastClear(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw);
 RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffer* buffer, const RenderColorInfo& color,
                                                              const RenderDepthInfo& depth);
 RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color, const RenderDepthInfo& depth,

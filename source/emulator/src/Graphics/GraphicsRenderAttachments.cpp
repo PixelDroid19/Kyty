@@ -54,9 +54,8 @@
 namespace Kyty::Libs::Graphics {
 
 static ComputeColorFillEvents g_compute_color_fills;
-// Pending DCC metadata clears, keyed by the metadata range the guest filled.
-static ComputeColorFillEvents g_color_dcc_clears;
-
+// Pending DCC and CMASK metadata clears, keyed by the metadata range the guest filled.
+static ComputeColorFillEvents g_color_meta_clears;
 
 static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, VkImageLayout new_layout, VkAccessFlags dst_access,
                                  VkPipelineStageFlags dst_stage);
@@ -218,7 +217,10 @@ static bool ApplyComputeColorFillImages(CommandBuffer* buffer, const ComputeColo
 
 void InvalidateComputeColorFills(const ShaderBindResources& bind)
 {
-	if (g_compute_color_fills.Empty() && g_color_dcc_clears.Empty()) { return; }
+	if (g_compute_color_fills.Empty() && g_color_meta_clears.Empty())
+	{
+		return;
+	}
 	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
 	{
 		if (ShaderStorageUsageIsReadOnly(bind.storage_buffers.usages[i])) { continue; }
@@ -227,11 +229,11 @@ void InvalidateComputeColorFills(const ShaderBindResources& bind)
 		if (resource.Base48() == 0u || size == 0u || resource.Base48() > UINT64_MAX - size)
 		{
 			g_compute_color_fills.DiscardAll();
-			g_color_dcc_clears.DiscardAll();
+			g_color_meta_clears.DiscardAll();
 			return;
 		}
 		g_compute_color_fills.DiscardOverlaps(resource.Base48(), size);
-		g_color_dcc_clears.DiscardOverlaps(resource.Base48(), size);
+		g_color_meta_clears.DiscardOverlaps(resource.Base48(), size);
 	}
 	// A DCC clear survives writable image binds: its consumer re-resolves the
 	// metadata range, which refuses a storage image over that range.
@@ -540,10 +542,10 @@ void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInf
 	TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 }
 
-bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+bool PublishComputeColorMetaClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
 {
 	// Any other fill of the metadata, including the uncompressed key, ends a pending clear.
-	g_color_dcc_clears.DiscardOverlaps(fill.address, fill.size);
+	g_color_meta_clears.DiscardOverlaps(fill.address, fill.size);
 	ColorDccClearCode code {};
 	ComputeColorFillIdentity identity {};
 	SubmissionId submission;
@@ -554,31 +556,38 @@ bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBuff
 		return false;
 	}
 	const auto observation = GpuDirtyPageTracker::Instance().BeginRead(identity.address, identity.size);
-	return observation.tracked && g_color_dcc_clears.Publish(identity, submission, fill.words, observation);
+	return observation.tracked && g_color_meta_clears.Publish(identity, submission, fill.words, observation);
 }
 
-// Removes the pending clear of the metadata plane at dcc_address and returns it
-// when the same storage incarnation still holds it and it rewrote every key of
-// the width x height surface.
-static bool TakeColorDccClear(CommandBuffer* buffer, uint64_t dcc_address, uint32_t width, uint32_t height, uint32_t bytes_per_element,
-                              ColorDccClearCode* code)
+// Removes the pending fill that starts at meta_address and returns it when the
+// same storage incarnation still holds it unchanged.
+static bool TakeColorMetaClear(CommandBuffer* buffer, uint64_t meta_address, ComputeColorFillIdentity* identity,
+                               ComputeColorFillEvent* event)
 {
-	const auto* pending = g_color_dcc_clears.FindAt(dcc_address);
+	const auto* pending = g_color_meta_clears.FindAt(meta_address);
 	if (pending == nullptr) { return false; }
 	const uint64_t address = pending->identity.address;
 	const uint64_t size    = pending->identity.size;
-	ComputeColorFillIdentity identity {};
 	SubmissionId submission;
-	if (!ResolveComputeColorFillIdentity(address, size, &identity, false, ComputeFillAliases::ExactOnly) ||
+	if (!ResolveComputeColorFillIdentity(address, size, identity, false, ComputeFillAliases::ExactOnly) ||
 	    !buffer->GetSubmissionId(&submission))
 	{
-		g_color_dcc_clears.DiscardOverlaps(address, size);
+		g_color_meta_clears.DiscardOverlaps(address, size);
 		return false;
 	}
-	ComputeColorFillEvent event {};
-	return g_color_dcc_clears.Consume(identity, submission, &event) &&
-	       GpuDirtyPageTracker::Instance().ReadObservationIsStable(address, size, event.cpu_observation) &&
-	       ColorDccFillCoversSurface(address, size, dcc_address, width, height, bytes_per_element) &&
+	return g_color_meta_clears.Consume(*identity, submission, event) &&
+	       GpuDirtyPageTracker::Instance().ReadObservationIsStable(address, size, event->cpu_observation);
+}
+
+// The pending clear of the metadata plane at dcc_address when it rewrote every
+// key of the width x height surface.
+static bool TakeColorDccClear(CommandBuffer* buffer, uint64_t dcc_address, uint32_t width, uint32_t height, uint32_t bytes_per_element,
+                              ColorDccClearCode* code)
+{
+	ComputeColorFillIdentity identity {};
+	ComputeColorFillEvent    event {};
+	return TakeColorMetaClear(buffer, dcc_address, &identity, &event) &&
+	       ColorDccFillCoversSurface(identity.address, identity.size, dcc_address, width, height, bytes_per_element) &&
 	       ColorDccClearCodeFromFill(event.words, code);
 }
 
@@ -619,29 +628,57 @@ static bool DecodeColorDccClear(ColorDccClearCode code, bool alpha_on_msb, VkFor
 	return true;
 }
 
-// A render target bound with DCC reads its pending metadata clear: the clear
-// key, or for the register key the target's clear words, becomes its contents.
-static void ConsumeColorDccClear(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
+// The target's clear words become its contents in the images of its own format.
+static void ClearColorAttachmentToWords(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
 {
-	ColorDccClearCode code {};
-	if (g_color_dcc_clears.Empty() || attachment.dcc_addr == 0u ||
-	    !TakeColorDccClear(buffer, attachment.dcc_addr, attachment.width, attachment.height, attachment.bytes_per_element, &code))
-	{
-		return;
-	}
 	const auto target_format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
 	(void)ClearColorImageAliases(buffer, attachment.base_addr, attachment.size,
 	                             FindComputeColorFillImages(buffer, attachment.base_addr, attachment.size),
 	                             [&](VkFormat format, VkClearColorValue* clear)
 	                             {
-		                             if (code != ColorDccClearCode::Register)
+		                             if (format != target_format || ColorDccClearChannels(format) == 0u)
 		                             {
-			                             return DecodeColorDccClear(code, attachment.dcc_alpha_on_msb, format, clear);
+			                             return false;
 		                             }
-		                             if (format != target_format || ColorDccClearChannels(format) == 0u) { return false; }
 		                             *clear = DecodeGuestColorClearWords(attachment.clear_word0, attachment.clear_word1, format);
 		                             return true;
 	                             });
+}
+
+// A render target bound with DCC reads its pending metadata clear: the clear
+// key, or for the register key the target's clear words, becomes its contents.
+static void ConsumeColorDccClear(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
+{
+	ColorDccClearCode code {};
+	if (g_color_meta_clears.Empty() || attachment.dcc_addr == 0u ||
+	    !TakeColorDccClear(buffer, attachment.dcc_addr, attachment.width, attachment.height, attachment.bytes_per_element, &code))
+	{
+		return;
+	}
+	if (code == ColorDccClearCode::Register)
+	{
+		ClearColorAttachmentToWords(buffer, attachment);
+		return;
+	}
+	(void)ClearColorImageAliases(
+	    buffer, attachment.base_addr, attachment.size, FindComputeColorFillImages(buffer, attachment.base_addr, attachment.size),
+	    [&](VkFormat format, VkClearColorValue* clear) { return DecodeColorDccClear(code, attachment.dcc_alpha_on_msb, format, clear); });
+}
+
+// A fast-clear target bound with a pending CMASK clear reads its clear words
+// in every tile, so they become its contents.
+static void ConsumeColorCmaskClear(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
+{
+	ComputeColorFillIdentity identity {};
+	ComputeColorFillEvent    event {};
+	if (g_color_meta_clears.Empty() || attachment.cmask_addr == 0u ||
+	    !TakeColorMetaClear(buffer, attachment.cmask_addr, &identity, &event) ||
+	    !ColorCmaskFillClearsSurface(event.words, identity.address, identity.size, attachment.cmask_addr, attachment.width,
+	                                 attachment.height))
+	{
+		return;
+	}
+	ClearColorAttachmentToWords(buffer, attachment);
 }
 
 // The first shader access to an image, read or write, follows its pending
@@ -651,9 +688,9 @@ void ConsumeImageColorDccClear(CommandBuffer* buffer, const ColorDccImage& image
 {
 	ColorDccClearCode code {};
 	// The texture unit decodes the clear keys but not the register key.
-	if (g_color_dcc_clears.Empty() || image.dcc_addr == 0u ||
-	    !TakeColorDccClear(buffer, image.dcc_addr, image.width, image.height, image.bytes_per_element, &code) ||
-	    !image.single_surface || code == ColorDccClearCode::Register)
+	if (g_color_meta_clears.Empty() || image.dcc_addr == 0u ||
+	    !TakeColorDccClear(buffer, image.dcc_addr, image.width, image.height, image.bytes_per_element, &code) || !image.single_surface ||
+	    code == ColorDccClearCode::Register)
 	{
 		return;
 	}
@@ -1498,13 +1535,18 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		attachment.existing_video_image = video_image.image;
 	}
 
-	// DCC clears are decoded for single-level, single-slice, single-sample targets only.
-	if (rt.info.dcc_compression_enable && rt.attrib2.num_mip_levels == 0u && rt.view.current_mip_level == 0u &&
-	    attachment.image_layers == 1u && attachment.samples == VK_SAMPLE_COUNT_1_BIT)
+	// DCC and CMASK clears are decoded for single-level, single-slice, single-sample targets only.
+	const bool single_surface = rt.attrib2.num_mip_levels == 0u && rt.view.current_mip_level == 0u && attachment.image_layers == 1u &&
+	                            attachment.samples == VK_SAMPLE_COUNT_1_BIT;
+	if (rt.info.dcc_compression_enable && single_surface)
 	{
 		attachment.dcc_addr          = rt.dcc_addr.addr;
 		attachment.dcc_alpha_on_msb  = ColorDccAlphaOnMsb(rt.info.channel_order);
 		attachment.bytes_per_element = render_format.bytes_per_element;
+	}
+	if (rt.info.cmask_fast_clear_enable && single_surface)
+	{
+		attachment.cmask_addr = rt.cmask.addr;
 	}
 	attachment.cmask_fast_clear_enable = rt.info.cmask_fast_clear_enable;
 	attachment.clear_word0             = rt.clear_word0.word0;
@@ -1777,6 +1819,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		attachment.attachment_view   = VulkanImage::VIEW_DEFAULT;
 		ConsumeComputeColorFill(buffer, attachment.base_addr, attachment.size);
 		ConsumeColorDccClear(buffer, attachment);
+		ConsumeColorCmaskClear(buffer, attachment);
 	}
 }
 
@@ -1875,6 +1918,44 @@ static void PreserveExpandedDccAttachment(CommandBuffer* buffer, const HW::Rende
 	// The host render texture already stores expanded color. Retain its exact
 	// backing and submission use; rasterizing the metadata shader would replace
 	// those pixels with an export used only to drive the guest color block.
+}
+
+// CB_COLOR_CONTROL.MODE=ELIMINATE_FAST_CLEAR writes the clear words into the
+// fast-cleared tiles of each bound target and discards the pixel shader's
+// color. A host target holds expanded color once it consumes its pending
+// metadata clear, so binding each fast-clear or DCC target is the whole pass.
+bool GraphicsRenderColorEliminateFastClear(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw)
+{
+	if (hw.GetColorControl().mode != 2u)
+	{
+		return false;
+	}
+	EXIT_IF(buffer == nullptr || buffer->IsInvalid());
+	if (hw.GetColorControl().op != 0xccu)
+	{
+		EXIT("unsupported fast-clear eliminate control: op=0x%x\n", hw.GetColorControl().op);
+	}
+	const auto& z = hw.GetDepthRenderTarget();
+	if (hw.GetDepthControl().z_enable && hw.GetDepthControl().z_write_enable && z.z_info.format != 0 && z.z_write_base_addr != 0)
+	{
+		EXIT("fast-clear eliminate with depth writes is not supported\n");
+	}
+	const auto mask = hw.GetRenderTargetMask() & hw.GetShaderRegisters().m_cbShaderMask;
+	for (uint32_t slot = 0; slot < RenderColorInfo::TARGETS_MAX; ++slot)
+	{
+		const auto& rt = hw.GetRenderTarget(slot);
+		if (((mask >> (slot * 4u)) & 0xfu) == 0u || (!rt.info.cmask_fast_clear_enable && !rt.info.dcc_compression_enable))
+		{
+			continue;
+		}
+		RenderColorInfo color {};
+		if (!DescribeRenderColorSlotInfo(buffer, rt, &color))
+		{
+			EXIT("fast-clear eliminate target is not describable: base=0x%" PRIx64 "\n", rt.base.addr);
+		}
+		MaterializeRenderColorInfo(submit_id, buffer, &color);
+	}
+	return true;
 }
 
 bool GraphicsRenderColorDecompress(CommandBuffer* buffer, const HW::Context& hw)

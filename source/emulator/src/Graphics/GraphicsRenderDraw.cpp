@@ -1508,6 +1508,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	{
 		return;
 	}
+	if (GraphicsRenderColorEliminateFastClear(submit_id, buffer, *ctx))
+	{
+		MaybeDumpIndexDrawSkip("fast-clear-eliminate", index_count, draw_modifier, type);
+		return;
+	}
 	if (GraphicsRenderColorResolve(submit_id, buffer, *ctx))
 	{
 		MaybeDumpIndexDrawSkip("color-resolve", index_count, draw_modifier, type);
@@ -2635,6 +2640,11 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	{
 		return;
 	}
+	if (GraphicsRenderColorEliminateFastClear(submit_id, buffer, *ctx))
+	{
+		MaybeDumpAutoDrawSkip("fast-clear-eliminate", index_count, draw_modifier);
+		return;
+	}
 	if (GraphicsRenderColorResolve(submit_id, buffer, *ctx))
 	{
 		MaybeDumpAutoDrawSkip("color-resolve", index_count, draw_modifier);
@@ -3431,7 +3441,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		(void)PropagateComputeUniformColorFill(buffer, fill);
 		(void)PropagateComputeUniformStencilFill(buffer, fill);
 		(void)PropagateComputeUniformDepthFill(buffer, fill);
-		(void)PublishComputeColorDccClear(buffer, fill);
+		(void)PublishComputeColorMetaClear(buffer, fill);
 		(void)PublishUniformDepthMetaFill(submit_id, fill);
 		(void)PublishComputeUniformFillToGuestAddress(buffer, fill);
 	}
