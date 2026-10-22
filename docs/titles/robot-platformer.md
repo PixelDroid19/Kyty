@@ -600,6 +600,16 @@ record. Titles are named descriptively only (`AGENTS.md`).
   - Publishing past those aliases (temporary, unsafe) cut the interval from
     211 to 175 ms, but `WAIT_REG_MEM` time rose from 4 to 47 ms: the guest
     then waits for GPU completion instead. Excluded as a standalone fix.
+  - Publishing past only the aliases the write-back leaves untouched
+    (storage textures, GPU-owned render targets) is safe but moves the wait
+    as well: device-address draws stop waiting and `WAIT_REG_MEM` time rises
+    from about 2 to 12 s per 26 s window; blocked time per draw stays near
+    290 us and frame p50 stays at 100 ms. The label waits cannot join their
+    batch because pending storage still has aliases the write-back refreshes:
+    a texture of the same range the device wrote after the storage (about
+    half) and depth images crossing it. Excluded. The render engine is busy
+    only 22-31% of the time (DRM fdinfo), so the frame is serialised by these
+    waits, not GPU-bound.
   - Frame time is CPU recording plus GPU execution serialised by the
     guest's own waits, so GPU time of the paired programs is on the
     critical path. A rigorous alias design (retire superseded pool
