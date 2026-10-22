@@ -77,14 +77,16 @@ record. Titles are named descriptively only (`AGENTS.md`).
   - Robot platformer: a 130 s run reaches frame 681 at about 20 fps with no
     stop. Before the guest-layer read, a longer run stopped at 143 s on an
     unrendered layer of the 16-layer pool. With it, runs of 190 s and 171 s
-    pass that point with no stop. They then reach the cold-cache compute
-    compile stall near frame 850, which predates this change.
+    pass that point with no stop. Under the 7 GiB limit they then stall near
+    frame 850: the title peaks at 12.4 GiB, so the run is throttled while
+    cold compute compiles run. A warm-cache run with a 14 GiB limit passes
+    frame 1,400 with no stop and renders the space intro at 5-8 fps.
   - Sweep of the card title, the roguelike platformer, the racing title,
     the preschool Unity title, the insect platformer sequel and the fishing
     title: no stops. Frame counts stay within the spread between runs. The
     racing route ends in a race or in a menu depending on route timing,
     which also happened before this change.
-- **Not verified.** The look of the shadow cascades past the compile stall.
+- **Not verified.** The look of the shadow cascades in gameplay.
 
 ## Color CMASK fast clears and the eliminate pass (2026-10-22)
 
