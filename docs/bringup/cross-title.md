@@ -4,6 +4,25 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Host-only UCONFIG codes in indirect register blocks (2026-10-22)
+
+- **Observed** (agent events of strict runs): the fishing title, the
+  preschool Unity title and the racing title send indirect UCONFIG register
+  blocks whose pairs 2 and 4 hold offset 0x80003FFD with value 0. That offset
+  is not a hardware register. It is one of the host-only codes
+  (0x80003FF4..0x80003FFF in `Pm4.h`) that the emulator's UC register-defaults
+  tables hand to the guest, each with value 0. The guest copies the entry
+  into its block unchanged. The command processor dropped those pairs with an
+  `indirect_register_dropped` warning. Across about 400 recent runs this was
+  the only dropped pair.
+- **Change.** The indirect UCONFIG parser consumes a host-only code that
+  holds its default value 0 without a state change, and stops on any other
+  value, since no register models one.
+- **Verified.** Strict 45 s runs of the fishing and preschool titles on the
+  Intel host: no dropped pair, no stop.
+- **Open.** Which hardware register, if any, the console library's defaults
+  name for this entry.
+
 ## Depth array slices addressed and sampled as arrays (2026-10-22)
 
 - **Observed** (bounded trace of the robot platformer):
