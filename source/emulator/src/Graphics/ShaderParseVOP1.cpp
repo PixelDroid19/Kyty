@@ -24,21 +24,16 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	uint32_t   size = ((sdwa || dpp) ? 2u : 1u);
 
 	src0               = ((sdwa || dpp) ? (buffer[1] >> 0u) & 0xffu : src0);
-	uint32_t dst_sel   = (sdwa ? (buffer[1] >> 8u) & 0x7u : 6u);
-	uint32_t dst_u     = (sdwa ? (buffer[1] >> 11u) & 0x3u : 2u);
 	uint32_t clmp      = (sdwa ? (buffer[1] >> 13u) & 0x1u : 0u);
 	uint32_t omod      = (sdwa ? (buffer[1] >> 14u) & 0x3u : 0u);
 	uint32_t src0_sel  = (sdwa ? (buffer[1] >> 16u) & 0x7u : 6u);
-	uint32_t src0_sext = (sdwa ? (buffer[1] >> 19u) & 0x1u : 0u);
 	uint32_t src0_neg  = (sdwa ? (buffer[1] >> 20u) & 0x1u : 0u);
 	uint32_t src0_abs  = (sdwa ? (buffer[1] >> 21u) & 0x1u : 0u);
 	uint32_t s0        = (sdwa ? (buffer[1] >> 23u) & 0x1u : 1u);
 
-	// Destination selects stay in vop_sdwa_ctrl: the per-lane emitter merges a byte/word
-	// (ShaderSdwaPartialDestinationSupported) and the lowering preconditions refuse the others.
-	if (sdwa && dst_sel == 6 && dst_u != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sdwa && dst_sel == 6 && dst_u != 0 condition ignored (continuing)\n"); }
-	if (src0_sel > 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sel > 6 condition ignored (continuing)\n"); }
-
+	// SDWA controls stay in vop_sdwa_ctrl: the per-lane emitter merges a byte/word destination
+	// (ShaderSdwaPartialDestinationSupported), and the lowering preconditions refuse the other
+	// destinations, SEL 7, reserved bits and SEXT outside the signed-convert emitter.
 	ShaderInstruction inst;
 	inst.pc            = pc;
 	inst.vop_sdwa      = sdwa;
@@ -110,10 +105,7 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x06: inst.type = ShaderInstructionType::VCvtF32U32; break;
 		case 0x07: inst.type = ShaderInstructionType::VCvtU32F32; break;
 		case 0x08: inst.type = ShaderInstructionType::VCvtI32F32; break;
-		case 0x09: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_mov_fed_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x09: KYTY_NI("v_mov_fed_b32"); break;
 		case 0x0A: inst.type = ShaderInstructionType::VCvtF16F32; break;
 		case 0x0b: inst.type = ShaderInstructionType::VCvtF32F16; break;
 		case 0x0C: inst.type = ShaderInstructionType::VCvtRpiI32F32; break;
@@ -170,18 +162,32 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x24: inst.type = ShaderInstructionType::VFloorF32; break;
 		case 0x25: inst.type = ShaderInstructionType::VExpF32; break;
 		case 0x26:
-			// v_log_clamp_f32 clamps the input before the log; the current IR
-			// carries the same value operation as v_log_f32.
-			inst.type = ShaderInstructionType::VLogF32;
+			if (next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			} else
+			{
+				KYTY_NI("v_log_clamp_f32");
+			};
 			break;
 		case 0x27: inst.type = ShaderInstructionType::VLogF32; break;
 		case 0x28:
-			// v_rcp_clamp_f32 has the same value operation as v_rcp_f32.
-			inst.type = ShaderInstructionType::VRcpF32;
+			if (next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			} else
+			{
+				KYTY_NI("v_rcp_clamp_f32");
+			};
 			break;
 		case 0x29:
-			// v_rcp_legacy_f32 has the same value operation as v_rcp_f32.
-			inst.type = ShaderInstructionType::VRcpF32;
+			if (next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			} else
+			{
+				KYTY_NI("v_rcp_legacy_f32");
+			};
 			break;
 		case 0x2a: inst.type = ShaderInstructionType::VRcpF32; break;
 		case 0x2B:
@@ -190,32 +196,33 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 			inst.type = ShaderInstructionType::VRcpF32;
 			break;
 		case 0x2C:
-			// v_rsq_clamp_f32 has the same value operation as v_rsq_f32.
-			inst.type = ShaderInstructionType::VRsqF32;
+			if (next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			} else
+			{
+				KYTY_NI("v_rsq_clamp_f32");
+			};
 			break;
 		case 0x2D:
-			// v_rsq_legacy_f32 has the same value operation as v_rsq_f32.
-			inst.type = ShaderInstructionType::VRsqF32;
+			if (next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			} else
+			{
+				KYTY_NI("v_rsq_legacy_f32");
+			};
 			break;
 		case 0x2e: inst.type = ShaderInstructionType::VRsqF32; break;
-		case 0x2F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_rcp_f64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x30: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_rcp_clamp_f64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x2F: KYTY_NI("v_rcp_f64"); break;
+		case 0x30: KYTY_NI("v_rcp_clamp_f64"); break;
 		case 0x31: {
 			inst.type      = ShaderInstructionType::VRsqF64;
 			inst.src[0].size = 2;
 			inst.dst.size    = 2;
 			break;
 		}
-		case 0x32: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_rsq_clamp_f64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x32: KYTY_NI("v_rsq_clamp_f64"); break;
 		case 0x33: inst.type = ShaderInstructionType::VSqrtF32; break;
 		case 0x34: {
 			inst.type      = ShaderInstructionType::VSqrtF64;
@@ -227,116 +234,70 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x36: inst.type = ShaderInstructionType::VCosF32; break;
 		case 0x37: inst.type = ShaderInstructionType::VNotB32; break;
 		case 0x38: inst.type = ShaderInstructionType::VBfrevB32; break;
-		case 0x39: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_ffbh_u32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x3A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_ffbl_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x3B: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_ffbh_i32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x3C: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_frexp_exp_i32_f64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x3D: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_frexp_mant_f64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x39: KYTY_NI("v_ffbh_u32"); break;
+		case 0x3A: KYTY_NI("v_ffbl_b32"); break;
+		case 0x3B: KYTY_NI("v_ffbh_i32"); break;
+		case 0x3C: KYTY_NI("v_frexp_exp_i32_f64"); break;
+		case 0x3D: KYTY_NI("v_frexp_mant_f64"); break;
 		case 0x3E: {
 			inst.type      = ShaderInstructionType::VFractF64;
 			inst.src[0].size = 2;
 			inst.dst.size    = 2;
 			break;
 		}
-		case 0x3F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_frexp_exp_i32_f32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x40: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_frexp_mant_f32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x41: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_clrexcp treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x3F: KYTY_NI("v_frexp_exp_i32_f32"); break;
+		case 0x40: KYTY_NI("v_frexp_mant_f32"); break;
+		case 0x41: KYTY_NI("v_clrexcp"); break;
 		case 0x42: inst.type = ShaderInstructionType::VMovreldB32; break;
 		case 0x43: inst.type = ShaderInstructionType::VMovrelsB32; break;
 		case 0x44: inst.type = ShaderInstructionType::VMovrelsdB32; break;
 		case 0x45:
-			// v_log_legacy_f32 has the same value operation as v_log_f32.
-			inst.type = ShaderInstructionType::VLogF32;
+			if (next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			} else
+			{
+				KYTY_NI("v_log_legacy_f32");
+			};
 			break;
 		case 0x46:
-			// v_exp_legacy_f32 has the same value operation as v_exp_f32.
-			inst.type = ShaderInstructionType::VExpF32;
+			if (next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			} else
+			{
+				KYTY_NI("v_exp_legacy_f32");
+			};
 			break;
 		case 0x50: inst.type = ShaderInstructionType::VCvtF16U16; break;
 		case 0x51: inst.type = ShaderInstructionType::VCvtF16I16; break;
 		case 0x52: inst.type = ShaderInstructionType::VCvtU16F16; break;
 		case 0x53: inst.type = ShaderInstructionType::VCvtI16F16; break;
-		case 0x54: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_rcp_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x54: KYTY_NI("v_rcp_f16"); break;
 		case 0x55: inst.type = ShaderInstructionType::VSqrtF16; break;
-		case 0x56: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_rsq_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x56: KYTY_NI("v_rsq_f16"); break;
 		case 0x57: inst.type = ShaderInstructionType::VLogF16; break;
 		case 0x58: inst.type = ShaderInstructionType::VExpF16; break;
-		case 0x59: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_frexp_mant_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x5A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_frexp_exp_i16_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x59: KYTY_NI("v_frexp_mant_f16"); break;
+		case 0x5A: KYTY_NI("v_frexp_exp_i16_f16"); break;
 		case 0x5B: inst.type = ShaderInstructionType::VFloorF16; break;
 		case 0x5C: inst.type = ShaderInstructionType::VCeilF16; break;
 		case 0x5D: inst.type = ShaderInstructionType::VTruncF16; break;
 		case 0x5E: inst.type = ShaderInstructionType::VRndneF16; break;
-		case 0x5F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_fract_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x5F: KYTY_NI("v_fract_f16"); break;
 		case 0x60: inst.type = ShaderInstructionType::VSinF16; break;
 		case 0x61: inst.type = ShaderInstructionType::VCosF16; break;
-		case 0x62: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_sat_pk_u8_i16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x63: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cvt_norm_i16_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x64: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cvt_norm_u16_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x65: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_swap_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x62: KYTY_NI("v_sat_pk_u8_i16"); break;
+		case 0x63: KYTY_NI("v_cvt_norm_i16_f16"); break;
+		case 0x64: KYTY_NI("v_cvt_norm_u16_f16"); break;
+		case 0x65: KYTY_NI("v_swap_b32"); break;
 
 		default: KYTY_UNKNOWN_OP();
 	}
 
 	// DPP VOP1 is currently represented only for v_mov_b32, whose lane routing
 	// can be emitted exactly. Other VOP1 operations need their own modifiers.
-	if (dpp && inst.type != ShaderInstructionType::VMovB32) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dpp && inst.type != ShaderInstructionType::VMovB32 condition ignored (continuing)\n"); }
-
-	if (src0_sext != 0 && !ShaderComputeWaveSdwaSignedConvertSupported(inst))
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported SDWA source sign extension\n");
-	}
+	EXIT_NOT_IMPLEMENTED(dpp && inst.type != ShaderInstructionType::VMovB32);
 
 	dst->GetInstructions().Add(inst);
 

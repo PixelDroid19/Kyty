@@ -88,9 +88,9 @@ TEST(EmulatorComputeWaveAnalysis, DoesNotPromoteSoppHintAliasesToInstructionPref
 
 TEST(EmulatorComputeWaveAnalysis, ClassifiesUntakenDebugBranchesButNotWaveStateAsHints)
 {
-	// s_cbranch_cdbg* (0x17..0x1a) are never taken without a debugger; s_setkill
-	// changes wave state, so it is not a hint.
-	for (const uint32_t encoded: {0xbf970024u, 0xbf980001u, 0xbf990001u, 0xbf9a0001u, 0xbf8b0001u})
+	// s_cbranch_cdbg* (0x17..0x1a) are never taken without a debugger. Wave-state
+	// controls such as s_setkill are refused by the decoder instead.
+	for (const uint32_t encoded: {0xbf970024u, 0xbf980001u, 0xbf990001u, 0xbf9a0001u})
 	{
 		EXPECT_EXIT(
 		    {
@@ -104,9 +104,8 @@ TEST(EmulatorComputeWaveAnalysis, ClassifiesUntakenDebugBranchesButNotWaveStateA
 			    {
 				    std::_Exit(2);
 			    }
-			    const bool debug_branch = encoded != 0xbf8b0001u;
 			    const bool hint = ShaderClassifyComputeWaveInstruction(code.GetInstructions().At(0)) == ShaderComputeWaveInstructionKind::ScalarHint;
-			    std::_Exit(hint == debug_branch ? 0 : 3);
+			    std::_Exit(hint ? 0 : 3);
 		    },
 		    ::testing::ExitedWithCode(0), "");
 	}

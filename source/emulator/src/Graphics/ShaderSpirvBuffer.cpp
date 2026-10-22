@@ -2732,15 +2732,6 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAtomic_XXX_VaddrVdataOffset)
 	return true;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_DsAtomicIncDec_VaddrOffset)
-{
-	// ISA DS_INC/DEC wrap at DATA0's unsigned limit; the VaddrOffset IR
-	// discarded that source. Refuse this lossy tuple rather than substitute
-	// SPIR-V's unconditional increment/decrement. A correct lowering needs the
-	// data operand retained by the parser and a compare/exchange loop.
-	return false;
-}
-
 KYTY_RECOMPILER_FUNC(Recompile_DsReadB32_VdstVaddrOffset)
 {
 	const auto& inst       = code.GetInstructions().At(index);

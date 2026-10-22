@@ -68,7 +68,6 @@ TEST(EmulatorComputeWaveTernaryAlu, BankedPathClaimsNoModifiedTuple)
 	};
 	const Case cases[] = {
 	    {kAdd3Word0 | (1u << 15u), kAdd3Word1}, // clamp
-	    {kAdd3Word0 | (1u << 11u), kAdd3Word1}, // op_sel
 	    {kAdd3Word0 | (1u << 8u), kAdd3Word1},  // abs src0
 	    {kAdd3Word0, kAdd3Word1 | (1u << 31u)}, // neg src2
 	    {kAdd3Word0, kAdd3Word1 | (1u << 27u)}, // omod

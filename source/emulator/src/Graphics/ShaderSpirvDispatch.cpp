@@ -107,8 +107,6 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_DsAtomic_XXX_VaddrVdataOffset,              ShaderInstructionType::DsAndB32,            ShaderInstructionFormat::VaddrVdataOffset,               {"OpAtomicAnd"}},
     {Recompile_DsAtomic_XXX_VaddrVdataOffset,              ShaderInstructionType::DsOrB32,             ShaderInstructionFormat::VaddrVdataOffset,               {"OpAtomicOr"}},
     {Recompile_DsAtomic_XXX_VaddrVdataOffset,              ShaderInstructionType::DsXorB32,            ShaderInstructionFormat::VaddrVdataOffset,               {"OpAtomicXor"}},
-    {Recompile_DsAtomicIncDec_VaddrOffset,                 ShaderInstructionType::DsIncU32,            ShaderInstructionFormat::VaddrOffset,                    {"OpAtomicIIncrement"}},
-    {Recompile_DsAtomicIncDec_VaddrOffset,                 ShaderInstructionType::DsDecU32,            ShaderInstructionFormat::VaddrOffset,                    {"OpAtomicIDecrement"}},
 	{Recompile_DsReadB32_VdstVaddrOffset,                  ShaderInstructionType::DsReadB32,           ShaderInstructionFormat::VdstVaddrOffset,                {""}},
     {Recompile_DsWriteB32_VaddrVdataOffset,                ShaderInstructionType::DsWriteB32,          ShaderInstructionFormat::VaddrVdataOffset,                {""}},
     {Recompile_DsWriteB32_VaddrVdataOffsetGds,             ShaderInstructionType::DsWriteB32,          ShaderInstructionFormat::VaddrVdataOffsetGds,             {""}},

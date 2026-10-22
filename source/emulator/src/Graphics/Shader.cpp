@@ -2828,9 +2828,8 @@ bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
 		}
 	}
 
-	// Unsupported MUBUF/MTBUF loads and stores currently retain their packet
-	// position as SBarrier. Fail closed until the parser preserves their exact
-	// read/write opcode; this intentionally sacrifices elision, never effects.
+	// Unknown records, barriers, messages, program-counter writes and memory
+	// writes are not proven effect-free; this sacrifices elision, never effects.
 	prevents = prevents || code.HasAnyOf({ShaderInstructionType::Unknown, ShaderInstructionType::SBarrier, ShaderInstructionType::SSendmsg,
 	                                      ShaderInstructionType::SSetpcB64, ShaderInstructionType::SSwappcB64,
 	                      ShaderInstructionType::BufferAtomicAdd, ShaderInstructionType::BufferAtomicAnd,

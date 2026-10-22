@@ -103,7 +103,7 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 			words = shader_parse_vop2(pc, decode_src, decode_ptr, dst, next_gen);
 		} else if ((instruction & 0xF8000000u) == 0xC0000000)
 		{
-			if (next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: next_gen guard ignored (continuing)\n"); }
+			EXIT_NOT_IMPLEMENTED(next_gen);
 			words = shader_parse_smrd(pc, decode_src, decode_ptr, dst, next_gen);
 		} else if ((instruction & 0xC0000000u) == 0x80000000)
 		{
@@ -115,11 +115,11 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 				case 0x32: words = shader_parse_vintrp(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x33: words = shader_parse_vop3p(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x34:
-					if (next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: next_gen guard ignored (continuing)\n"); }
+					EXIT_NOT_IMPLEMENTED(next_gen);
 					words = shader_parse_vop3(pc, decode_src, decode_ptr, dst, next_gen);
 					break;
 				case 0x35:
-					if (!next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !next_gen guard ignored (continuing)\n"); }
+					EXIT_NOT_IMPLEMENTED(!next_gen);
 					words = shader_parse_vop3(pc, decode_src, decode_ptr, dst, next_gen);
 					break;
 				case 0x36: words = shader_parse_ds(pc, decode_src, decode_ptr, dst, next_gen); break;
@@ -128,7 +128,7 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 				case 0x3a: words = shader_parse_mtbuf(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x3c: words = shader_parse_mimg(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x3d:
-					if (!next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !next_gen guard ignored (continuing)\n"); }
+					EXIT_NOT_IMPLEMENTED(!next_gen);
 					words = shader_parse_smem(pc, decode_src, decode_ptr, dst, next_gen);
 					break;
 				case 0x3e: words = shader_parse_exp(pc, decode_src, decode_ptr, dst, next_gen); break;

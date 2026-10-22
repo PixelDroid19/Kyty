@@ -53,15 +53,10 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		EXIT("unsupported SDWA reverse-borrow selection");
 	}
 
-	if (sdwa && dst_sel == 6 && dst_u != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sdwa && dst_sel == 6 && dst_u != 0 condition ignored (continuing)\n"); }
-	if (src0_sel > 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sel > 6 condition ignored (continuing)\n"); }
-	if (src0_sext != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sext != 0 condition ignored (continuing)\n"); }
 	// SDWA src0/src1 NEG bits map to operand.negate (same as VOP3).
 	// Captured post-Play Gen5 VOP2 SDWA sets src0_neg; SPIR-V already emits OpFNegate.
-	// Source SEL 0-6: BYTE_n / WORD_n / DWORD (zero-extend on load).
-	if (src1_sel > 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_sel > 6 condition ignored (continuing)\n"); }
-	if (src1_sext != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_sext != 0 condition ignored (continuing)\n"); }
-
+	// Source SEL 0-6: BYTE_n / WORD_n / DWORD (zero-extend on load). The lowering
+	// preconditions refuse SEL 7 and SEXT, which stay in vop_sdwa_ctrl.
 	ShaderInstruction inst;
 	inst.pc            = pc;
 	inst.vop_sdwa      = sdwa;
@@ -161,28 +156,14 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				KYTY_UNKNOWN_OP();
 			} else
 			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_mac_legacy_f32 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
+				KYTY_NI("v_mac_legacy_f32");
 			};
 			break;
-		case 0x07:
-			// v_mul_legacy_f32 has the same value operation as v_mul_f32.
-			inst.type = ShaderInstructionType::VMulF32;
-			break;
+		case 0x07: KYTY_NI("v_mul_legacy_f32"); break;
 		case 0x08: inst.type = ShaderInstructionType::VMulF32; break;
-		case 0x09: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_mul_i32_i24 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x0A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_mul_hi_i32_i24 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x0C: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_mul_hi_u32_u24 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x09: KYTY_NI("v_mul_i32_i24"); break;
+		case 0x0A: KYTY_NI("v_mul_hi_i32_i24"); break;
+		case 0x0C: KYTY_NI("v_mul_hi_u32_u24"); break;
 		case 0x0D:
 			if (next_gen)
 			{
@@ -190,15 +171,19 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				inst.format            = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
 				inst.src_num           = 3;
 				inst.src[2]            = inst.dst;
-			} 			else
+			} else
 			{
-				// v_min_legacy_f32 has the same value operation as v_min_f32.
-				inst.type = ShaderInstructionType::VMinF32;
+				KYTY_NI("v_min_legacy_f32");
 			};
 			break;
 		case 0x0E:
-			// v_max_legacy_f32 has the same value operation as v_max_f32.
-			inst.type = ShaderInstructionType::VMaxF32;
+			if (next_gen)
+			{
+				KYTY_UNKNOWN_OP();
+			} else
+			{
+				KYTY_NI("v_max_legacy_f32");
+			};
 			break;
 		case 0x0b: inst.type = ShaderInstructionType::VMulU32U24; break;
 		case 0x0f: inst.type = ShaderInstructionType::VMinF32; break;
@@ -295,9 +280,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				inst.dst2.size   = 2;
 			} else
 			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_addc_u32 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
+				KYTY_NI("v_addc_u32");
 			};
 			break;
 		case 0x29:
@@ -306,9 +289,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				KYTY_UNKNOWN_OP();
 			} else
 			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_subb_u32 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
+				KYTY_NI("v_subb_u32");
 			};
 			break;
 		case 0x2A:
@@ -323,9 +304,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				inst.dst2.size   = 2;
 			} else
 			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_subbrev_u32 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
+				KYTY_NI("v_subbrev_u32");
 			};
 			break;
 		case 0x2B:
@@ -335,9 +314,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				inst.type = ShaderInstructionType::VMacF32;
 			} else
 			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_ldexp_f32 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
+				KYTY_NI("v_ldexp_f32");
 			};
 			break;
 		case 0x2C:
@@ -354,9 +331,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				size++;
 			} else
 			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cvt_pkaccum_u8_f32 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
+				KYTY_NI("v_cvt_pkaccum_u8_f32");
 			};
 			break;
 		case 0x2D:
@@ -371,24 +346,13 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				size++;
 			} else
 			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cvt_pknorm_i16_f32 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
+				KYTY_NI("v_cvt_pknorm_i16_f32");
 			};
 			break;
-		case 0x2E: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cvt_pknorm_u16_f32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x2E: KYTY_NI("v_cvt_pknorm_u16_f32"); break;
 		case 0x2f: inst.type = ShaderInstructionType::VCvtPkrtzF16F32; break;
-		case 0x30: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cvt_pk_u16_u32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x31: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cvt_pk_i16_i32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x30: KYTY_NI("v_cvt_pk_u16_u32"); break;
+		case 0x31: KYTY_NI("v_cvt_pk_i16_i32"); break;
 		case 0x32: inst.type = ShaderInstructionType::VAddF16; break;
 		case 0x33: inst.type = ShaderInstructionType::VSubF16; break;
 		case 0x34: inst.type = ShaderInstructionType::VSubrevF16; break;
@@ -399,9 +363,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				KYTY_UNKNOWN_OP();
 			} else
 			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_mac_f16 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
+				KYTY_NI("v_mac_f16");
 			};
 			break;
 		case 0x37:
@@ -410,9 +372,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				KYTY_UNKNOWN_OP();
 			} else
 			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_madmk_f16 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
+				KYTY_NI("v_madmk_f16");
 			};
 			break;
 		case 0x38:
@@ -421,17 +381,12 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 				KYTY_UNKNOWN_OP();
 			} else
 			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_madak_f16 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
+				KYTY_NI("v_madak_f16");
 			};
 			break;
 		case 0x39: inst.type = ShaderInstructionType::VMaxF16; break;
 		case 0x3A: inst.type = ShaderInstructionType::VMinF16; break;
-		case 0x3B: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_ldexp_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x3B: KYTY_NI("v_ldexp_f16"); break;
 
 		default: KYTY_UNKNOWN_OP();
 	}

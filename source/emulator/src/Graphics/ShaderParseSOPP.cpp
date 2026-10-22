@@ -69,42 +69,14 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 			inst.src_num           = 1;
 			break;
 		case 0xA:
-			if (simm != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: simm != 0 condition ignored (continuing)\n"); }
 			inst.type    = ShaderInstructionType::SBarrier;
 			inst.format  = ShaderInstructionFormat::Empty;
 			inst.src_num = 0;
 			inst.src[0]  = {};
 			break;
-		case 0xB: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setkill skipped (continuing)\n");
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
-			break;
-		case 0xD: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_sethalt skipped (continuing)\n");
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
-			break;
-		case 0xE: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_sleep skipped (continuing)\n");
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
-			break;
-		case 0xF: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setprio skipped (continuing)\n");
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
-			break;
-		case 0x11: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_sendmsghalt skipped (continuing)\n");
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
-			break;
+		case 0xB: KYTY_NI("s_setkill"); break;
+		case 0xD: KYTY_NI("s_sethalt"); break;
+		case 0x11: KYTY_NI("s_sendmsghalt"); break;
 		case 0x12:
 			// Traps are not taken without a trap handler (STATUS.TRAP_EN = 0).
 			inst.type              = ShaderInstructionType::STrap;
@@ -112,24 +84,6 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 			inst.src[0].type       = ShaderOperandType::LiteralConstant;
 			inst.src[0].constant.u = simm;
 			inst.src_num           = 1;
-			break;
-		case 0x13: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_icache_inv skipped (continuing)\n");
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
-			break;
-		case 0x14: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_incperflevel skipped (continuing)\n");
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
-			break;
-		case 0x15: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_decperflevel skipped (continuing)\n");
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
 			break;
 		case 0x16:
 			// s_ttracedata only feeds the hardware thread-trace stream. It has no
@@ -140,27 +94,18 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 			inst.src[0].constant.u = simm;
 			inst.src_num           = 1;
 			break;
-		case 0x17: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbgsys skipped (continuing)\n");
-			// No attached GPU system debugger leaves COND_DBG_SYS clear, so the
-			// conditional branch is never taken and linearizes to a no-op.
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
-			break;
-		case 0x18: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbguser skipped (continuing)\n");
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
-			break;
-		case 0x19: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbgsys_or_user skipped (continuing)\n");
-			inst.type              = ShaderInstructionType::SBarrier;
-			inst.format            = ShaderInstructionFormat::Imm;
-			inst.src[0].type       = ShaderOperandType::LiteralConstant;
-			inst.src[0].constant.u = simm;
-			break;
-		case 0x1A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbgsys_and_user skipped (continuing)\n");
+		case 0xE:  // s_sleep
+		case 0xF:  // s_setprio
+		case 0x13: // s_icache_inv
+		case 0x14: // s_incperflevel
+		case 0x15: // s_decperflevel
+		case 0x17: // s_cbranch_cdbgsys
+		case 0x18: // s_cbranch_cdbguser
+		case 0x19: // s_cbranch_cdbgsys_or_user
+		case 0x1A: // s_cbranch_cdbgsys_and_user
+			// Scheduling, cache and performance hints have no architectural effect on a
+			// translated shader, and with no attached GPU debugger COND_DBG_SYS/USER stay
+			// clear so the debug branches are never taken. Emitters skip these Imm records.
 			inst.type              = ShaderInstructionType::SBarrier;
 			inst.format            = ShaderInstructionFormat::Imm;
 			inst.src[0].type       = ShaderOperandType::LiteralConstant;

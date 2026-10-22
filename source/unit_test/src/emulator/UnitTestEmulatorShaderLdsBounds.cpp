@@ -744,10 +744,10 @@ void RunRejectedDs(uint32_t control, ShaderInstructionType expected)
 	std::_Exit(source.IsEmpty() ? 3 : 0);
 }
 
-// ds_ordered_count (DS opcode 0x3f) is GDS-only and its VDST/counter contract is
-// not evidenced. It must be refused at its own PC, never lowered to a barrier
-// that leaves VDST and the ordered counter unchanged.
-void RunOrderedCount(uint32_t control)
+// A DS operation without a lossless IR must be refused at its own PC: for example
+// ds_ordered_count (GDS-only, VDST/counter contract not evidenced) must never be
+// lowered to a barrier that leaves VDST and the ordered counter unchanged.
+void RunRefusedDsDecode(uint32_t control)
 {
 	Initialize();
 	const uint32_t words[] = {control, 0x00000100u, 0xbf810000u};
@@ -1054,15 +1054,12 @@ TEST(EmulatorShaderLdsBounds, NativeRejectInvalidTuplesBeforeOperandDiscovery)
 
 TEST(EmulatorShaderLdsBounds, NativeDsRejectGdsReservedAndLossyAliases)
 {
-	struct Case { uint32_t control; ShaderInstructionType type; };
-	const Case cases[] = {{0xd8350000u, ShaderInstructionType::DsWriteB32},
-	                      {0xd8780000u, ShaderInstructionType::DsWriteB32},
-	                      {0xd80c0000u, ShaderInstructionType::DsIncU32},
-	                      {0xd8100000u, ShaderInstructionType::DsDecU32}};
-	for (const auto& test: cases)
+	EXPECT_EXIT(RunRejectedDs(0xd8350000u, ShaderInstructionType::DsWriteB32), ::testing::ExitedWithCode(kRejectedExit),
+	            EmitterRejection(ShaderInstructionType::DsWriteB32));
+	// ds_write_b8, ds_inc/dec_u32, ds_sub_rtn_u32 and ds_rsub_u32 have no lossless IR, so decoding refuses them.
+	for (uint32_t control: {0xd8780000u, 0xd80c0000u, 0xd8100000u, 0xd8840000u, 0xd8080000u})
 	{
-		const std::string reason = EmitterRejection(test.type);
-		EXPECT_EXIT(RunRejectedDs(test.control, test.type), ::testing::ExitedWithCode(kRejectedExit), reason);
+		EXPECT_EXIT(RunRefusedDsDecode(control), ::testing::ExitedWithCode(kRejectedExit), "");
 	}
 }
 
@@ -1075,7 +1072,7 @@ TEST(EmulatorShaderLdsBounds, NativeGdsWriteIsRefusedNotLoweredToLds)
 TEST(EmulatorShaderLdsBounds, OrderedCountDsIsRefusedNotLoweredToBarrier)
 {
 	// DS opcode 0x3f with gds=1: 0xd8000000 | (0x3f << 18) | (1 << 17).
-	EXPECT_EXIT(RunOrderedCount(0xd8fe0000u), ::testing::ExitedWithCode(kRejectedExit), "");
+	EXPECT_EXIT(RunRefusedDsDecode(0xd8fe0000u), ::testing::ExitedWithCode(kRejectedExit), "");
 }
 
 TEST(EmulatorShaderLdsBounds, CanonicalEndAndVop3UsedSourcesPassWithoutLiveTailExceptions)

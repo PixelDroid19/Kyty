@@ -156,7 +156,7 @@ Words DsWriteB32(uint32_t address, uint32_t data, uint16_t offset)
 Words VAddF32FromScalarMask()
 {
 	// VOP3 v_add_f32 v10, exec_lo, 0: a valid tuple that reads the mask as a number.
-	return {0xd0000000u | (0x103u << 16u) | 10u, kExecLo | (Inline(0) << 9u)};
+	return {0xd4000000u | (0x103u << 16u) | 10u, kExecLo | (Inline(0) << 9u)};
 }
 
 Words Mrt0Export(uint32_t red, uint32_t green, uint32_t blue, uint32_t alpha)

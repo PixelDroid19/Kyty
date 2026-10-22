@@ -98,7 +98,6 @@ TEST(EmulatorComputeWaveLds, LegacyTuplePredicateStaysExactForTheBankedEmitter)
 	    {0xd8340000u, 0x00000101u, ShaderInstructionType::DsWriteB32, true, Kind::BankedGenericLds},  // ds_write_b32 v1, v1
 	    {0xd8360000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false, Kind::BankedGdsWrite},   // GDS store, never LDS
 	    {0xd8350000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false, Kind::Unsupported},      // reserved control
-	    {0xd8780000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false, Kind::Unsupported},      // legacy write8 alias
 	};
 	for (const auto& test: cases)
 	{
@@ -119,13 +118,12 @@ TEST(EmulatorComputeWaveLds, LegacyTuplePredicateStaysExactForTheBankedEmitter)
 	}
 }
 
-TEST(EmulatorComputeWaveLds, RejectsLostAtomicInputsAndWrongRegisterSpans)
+TEST(EmulatorComputeWaveLds, RejectsWrongRegisterSpans)
 {
-	// INC/DEC's DATA0 wrap limit and the return destination of SUB_RTN are
-	// dropped by legacy aliases; ordinary native atomics cannot repair them.
-	for (const uint32_t opcode: {3u, 4u, 0x21u, 0x2u, 0x1eu, 0x38u})
+	// Decoding refuses the lossy legacy aliases (UnitTestEmulatorShaderLdsBounds);
+	// a read2st64 with a data register set is not a native tuple either.
 	{
-		const uint32_t words[] = {0xd8000000u | (opcode << 18u), 0x04000100u, 0xbf810000u};
+		const uint32_t words[] = {0xd8000000u | (0x38u << 18u), 0x04000100u, 0xbf810000u};
 		EXPECT_EXIT(
 		    {
 			    InitializeConfig();

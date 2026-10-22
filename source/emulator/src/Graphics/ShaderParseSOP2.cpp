@@ -180,13 +180,10 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.dst.size    = 2;
 			inst.src[0].size = 2;
 			break;
-		case 0x2B: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_g_fork treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x2B: KYTY_NI("s_cbranch_g_fork"); break;
 		case 0x2C: inst.type = ShaderInstructionType::SAbsdiffI32; break;
 		case 0x31:
-			if (!next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !next_gen condition ignored (continuing)\n"); }
+			EXIT_NOT_IMPLEMENTED(!next_gen);
 			inst.type = ShaderInstructionType::SLshl4AddU32;
 			break;
 		case 0x2E: inst.type = ShaderInstructionType::SLshl1AddU32; break;
