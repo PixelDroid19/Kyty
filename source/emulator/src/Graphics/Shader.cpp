@@ -3370,8 +3370,12 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			if (!ShaderSnapshotGuestDescriptorTable(eud_guest_address, required_end_dw, &eud_snapshot))
 			{
 				const bool readable = ShaderReadGuestDescriptorWords(eud_guest_address, required_end_dw, eud_snapshot.data());
-				EXIT("%s Gen5 EUD snapshot: dwords=%u address=0x%016" PRIx64 " pointer_reg=%d\n", readable ? "unstable" : "unreadable",
-				     static_cast<unsigned>(required_end_dw), eud_guest_address, bind->extended.start_register);
+				// An owned but unreadable table was protected or decommitted; an unowned one was unmapped.
+				const bool guest_owned =
+				    Core::VirtualMemory::IsRangeGuestOwned(eud_guest_address, static_cast<uint64_t>(required_end_dw) * sizeof(uint32_t));
+				EXIT("%s Gen5 EUD snapshot: dwords=%u address=0x%016" PRIx64 " pointer_reg=%d guest_owned=%d\n",
+				     readable ? "unstable" : "unreadable", static_cast<unsigned>(required_end_dw), eud_guest_address,
+				     bind->extended.start_register, guest_owned ? 1 : 0);
 			}
 			uint32_t expanded_end_dw = required_end_dw;
 			if (!ShaderGen5EudExpandEndDwordsForSharpImages(user_data, user_sgpr_num, eud_snapshot.data(), required_end_dw,
