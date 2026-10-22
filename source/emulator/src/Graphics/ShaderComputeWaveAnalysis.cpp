@@ -1357,7 +1357,7 @@ ShaderComputeWaveInstructionKind ShaderClassifyGeometryWaveInstruction(const Sha
 	}
 	if (instruction.type != ShaderInstructionType::Exp)
 	{
-		return ShaderClassifyComputeWaveInstruction(instruction);
+		return ShaderComputeWaveInstructionKind::Unsupported;
 	}
 	const uint32_t target  = (instruction.raw_word >> 4u) & 0x3fu;
 	const uint32_t enable  = instruction.raw_word & 0xfu;
@@ -1387,17 +1387,9 @@ const ShaderOperand& ShaderExportComponentSource(const ShaderInstruction& instru
 	return instruction.src[component & 3u];
 }
 
-enum class PairedWaveFlavor
-{
-	Compute,
-	Fragment,
-	Geometry
-};
-
 static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input,
                                                               const ShaderPixelInputInfo* pixel,
-                                                              uint32_t parameter_register = UINT32_MAX,
-                                                              PairedWaveFlavor flavor = PairedWaveFlavor::Compute)
+                                                              uint32_t parameter_register = UINT32_MAX)
 {
 	ShaderComputeWaveAnalysisResult result {};
 	const auto&                     instructions = code.GetInstructions();
@@ -1446,9 +1438,7 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 		{
 			return {false, instruction.pc, "fragment interpolation requires an unobserved pair with unchanged native barycentrics"};
 		}
-		auto kind = pixel != nullptr                      ? ShaderClassifyFragmentWaveInstruction(instruction, *pixel)
-		            : flavor == PairedWaveFlavor::Geometry ? ShaderClassifyGeometryWaveInstruction(instruction)
-		                                                   : ShaderClassifyComputeWaveInstruction(instruction);
+		auto kind = pixel != nullptr ? ShaderClassifyFragmentWaveInstruction(instruction, *pixel) : ShaderClassifyComputeWaveInstruction(instruction);
 		if (kind == ShaderComputeWaveInstructionKind::Unsupported &&
 		    ShaderPairedEudStorageLoadSupported(instruction, input.bind))
 		{
@@ -1562,9 +1552,7 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 	// generic LDS path, so LDS accesses need no address proof here.
 	if (input.bind.extended.used)
 	{
-		// The bind keeps the EUD register relative to user data; the merged GS
-		// that a geometry pass runs receives user data from s8.
-		const int extended_base = input.bind.extended.start_register + (flavor == PairedWaveFlavor::Geometry ? 8 : 0);
+		const int extended_base = input.bind.extended.start_register;
 		if (!ComputeWaveRegisterRangeIsValid(extended_base, 2, kMaxSgpr) || (extended_base & 1) != 0)
 		{
 			result.unsupported_pc = instructions.At(0).pc;
@@ -1579,11 +1567,6 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input)
 {
 	return AnalyzePairedWaveCode(code, input, nullptr);
-}
-
-ShaderComputeWaveAnalysisResult ShaderAnalyzeGeometryWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input)
-{
-	return AnalyzePairedWaveCode(code, input, nullptr, UINT32_MAX, PairedWaveFlavor::Geometry);
 }
 
 ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,

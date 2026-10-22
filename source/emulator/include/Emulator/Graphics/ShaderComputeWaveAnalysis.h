@@ -87,7 +87,6 @@ struct ShaderComputeWaveAnalysisResult
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyGeometryWaveInstruction(const ShaderInstruction& instruction);
 // Source of export component 0..3; a POS1 Z-only export carries Z in src[0].
 [[nodiscard]] const ShaderOperand& ShaderExportComponentSource(const ShaderInstruction& instruction, uint32_t component);
-[[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeGeometryWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input);
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyFragmentWaveInstruction(const ShaderInstruction&    instruction,
                                                                                      const ShaderPixelInputInfo& pixel);
 [[nodiscard]] bool ShaderFragmentInterpolationPairSupported(const ShaderCode& code, uint32_t index, const ShaderPixelInputInfo& pixel);

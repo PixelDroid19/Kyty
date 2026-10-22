@@ -347,8 +347,7 @@ void Spirv::GenerateSource()
 	{
 		const auto analysis = UsesFragmentCompute() ? ShaderAnalyzeFragmentWaveCode(m_code, *m_ps_input_info, *m_cs_input_info,
 		                                                                              m_fragment_compute_info->user_sgpr_count)
-		                      : UsesGeometryCompute() ? ShaderAnalyzeGeometryWaveCode(m_code, *m_cs_input_info)
-		                                              : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
+		                                           : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
 		if (!analysis.supported)
 		{
 			const auto& code    = m_code.GetInstructions();
@@ -2163,15 +2162,15 @@ void Spirv::WriteLocalVariables()
 				{
 					EXIT("paired-wave compute prolog contract unsupported\n");
 				}
-				if (UsesGeometryCompute() && !EmitGeometryProlog(&m_source))
-				{
-					EXIT("geometry compute prolog contract unsupported\n");
-				}
 			} else if (UsesNativeComputeWave())
 			{
 				if (!EmitNativeComputeWaveProlog(&m_source))
 				{
 					EXIT("native-wave compute prolog contract unsupported\n");
+				}
+				if (UsesGeometryCompute() && !EmitGeometryProlog(&m_source))
+				{
+					EXIT("geometry compute prolog contract unsupported\n");
 				}
 			} else
 			{
@@ -2408,7 +2407,7 @@ void Spirv::WriteLocalVariables()
 		            "%native_initial_hi = OpCompositeExtract %uint %native_initial_ballot 1\n"
 		            "OpStore %exec_lo %native_initial_lo\nOpStore %exec_hi %native_initial_hi\n";
 		m_source += NativeExecRefresh("initial");
-		if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog)
+		if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog && !UsesGeometryCompute())
 		{
 			// One host subgroup is one guest wave (see ShaderNggFront.h): s3 counts every lane
 			// up to the highest live one, as vertices [7:0] and as primitives [15:8].
@@ -2850,8 +2849,7 @@ void Spirv::WriteInstructions()
 	{
 		const auto analysis = UsesFragmentCompute() ? ShaderAnalyzeFragmentWaveCode(m_code, *m_ps_input_info, *m_cs_input_info,
 		                                                                              m_fragment_compute_info->user_sgpr_count)
-		                      : UsesGeometryCompute() ? ShaderAnalyzeGeometryWaveCode(m_code, *m_cs_input_info)
-		                                              : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
+		                                           : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
 		if (!analysis.supported)
 		{
 			EXIT("paired-wave transformed instruction unsupported: pc=0x%08" PRIx32 " reason=%s\n",
