@@ -370,6 +370,26 @@ bool IsInstructionPrefetchHint(const ShaderInstruction& instruction)
 	return true;
 }
 
+bool IsUntakenDebugBranch(const ShaderInstruction& instruction)
+{
+	// S_CBRANCH_CDBG* test COND_DBG_SYS/USER, which stay clear with no attached
+	// debugger; the parser keeps them as no-op SBarrier records.
+	if (instruction.sopp_opcode < 0x17u || instruction.sopp_opcode > 0x1au ||
+	    !IsExactTupleBase(instruction, ShaderInstructionFormat::Imm, 1) || !IsUnusedDestination(instruction.dst) ||
+	    instruction.src[0].type != ShaderOperandType::LiteralConstant || !ComputeWaveOperandIsPlain(instruction.src[0]))
+	{
+		return false;
+	}
+	for (int source = 1; source < 4; ++source)
+	{
+		if (!IsUnusedDestination(instruction.src[source]))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool IsBarrierInstruction(const ShaderInstruction& instruction)
 {
 	// S_BARRIER ignores its SIMM16. A paired wave is one converged subgroup and
@@ -1050,6 +1070,10 @@ ShaderComputeWaveInstructionKind ClassifySpecificComputeWaveInstruction(const Sh
 			return ShaderComputeWaveLdsInstructionSupported(instruction) ? ShaderComputeWaveInstructionKind::BankedLds
 			                                                          : ShaderComputeWaveInstructionKind::Unsupported;
 		case ShaderInstructionType::SBarrier:
+			if (IsUntakenDebugBranch(instruction))
+			{
+				return ShaderComputeWaveInstructionKind::ScalarHint;
+			}
 			return IsBarrierInstruction(instruction) ? ShaderComputeWaveInstructionKind::WorkgroupBarrier
 			                                    : ShaderComputeWaveInstructionKind::Unsupported;
 		case ShaderInstructionType::SMovB64:

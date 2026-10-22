@@ -288,6 +288,32 @@ TEST(EmulatorComputeWaveAnalysis, DoesNotPromoteSoppHintAliasesToInstructionPref
 	}
 }
 
+TEST(EmulatorComputeWaveAnalysis, AdmitsUntakenDebugBranchesButNotWaveStateHints)
+{
+	// s_cbranch_cdbg* (0x17..0x1a) are never taken without a debugger; s_setkill
+	// changes wave state, so it stays outside the paired set.
+	for (const uint32_t encoded: {0xbf970024u, 0xbf980001u, 0xbf990001u, 0xbf9a0001u, 0xbf8b0001u})
+	{
+		EXPECT_EXIT(
+		    {
+			    InitializeConfig();
+			    uint32_t words[2];
+			    words[0] = encoded;
+			    words[1] = 0xbf810000u;
+			    ShaderCode code;
+			    code.SetType(ShaderType::Compute);
+			    if (!ShaderTryParseBounded(words, sizeof(words), &code) || code.GetInstructions().At(0).type != ShaderInstructionType::SBarrier)
+			    {
+				    std::_Exit(2);
+			    }
+			    const bool debug_branch = encoded != 0xbf8b0001u;
+			    const bool hint = ShaderClassifyComputeWaveInstruction(code.GetInstructions().At(0)) == ShaderComputeWaveInstructionKind::ScalarHint;
+			    std::_Exit(hint == debug_branch && ShaderAnalyzeComputeWaveCode(code, PairedInput()).supported == debug_branch ? 0 : 3);
+		    },
+		    ::testing::ExitedWithCode(0), "");
+	}
+}
+
 TEST(EmulatorComputeWaveAnalysis, PreservesSmemCacheControlBitsForAdmission)
 {
 	for (const uint32_t flags: {0u, 1u, 2u})
