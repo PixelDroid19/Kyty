@@ -105,9 +105,12 @@ struct ShaderEudDescriptorLoads
 // instructions their own checks can accept.
 struct ShaderInstructionIndices
 {
-	std::vector<uint32_t> buffer_accesses;  // scalar buffer loads and vector buffer accesses
-	std::vector<uint32_t> image_samplers;   // instructions that read an S#
-	std::vector<uint32_t> descriptor_loads; // S_LOAD_DWORDX4 and S_LOAD_DWORDX8
+	std::vector<uint32_t> buffer_accesses;    // scalar buffer loads and vector buffer accesses
+	std::vector<uint32_t> image_samplers;     // instructions that read an S#
+	std::vector<uint32_t> image_reads;        // image reads that return dmask components
+	std::vector<uint32_t> descriptor_loads;   // S_LOAD_DWORDX4 and S_LOAD_DWORDX8
+	std::vector<uint32_t> gds_and_m0_writes;  // GDS data-share instructions and M0 writes
+	bool                  gds_memory = false; // a GDS memory instruction exists
 };
 
 [[nodiscard]] ShaderInstructionIndices ShaderIndexInstructions(const ShaderCode& code);

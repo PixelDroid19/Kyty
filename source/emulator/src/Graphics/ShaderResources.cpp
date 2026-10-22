@@ -1309,10 +1309,19 @@ ShaderInstructionIndices ShaderIndexInstructions(const ShaderCode& code)
 		{
 			indices.image_samplers.push_back(index);
 		}
+		if (ShaderImageReadReturnsDmaskComponents(inst.type))
+		{
+			indices.image_reads.push_back(index);
+		}
 		if (inst.type == ShaderInstructionType::SLoadDwordx4 || inst.type == ShaderInstructionType::SLoadDwordx8)
 		{
 			indices.descriptor_loads.push_back(index);
 		}
+		if (inst.format == ShaderInstructionFormat::VdstGds || inst.dst.type == ShaderOperandType::M0)
+		{
+			indices.gds_and_m0_writes.push_back(index);
+		}
+		indices.gds_memory = indices.gds_memory || inst.format == ShaderInstructionFormat::VaddrVdataOffsetGds;
 	}
 	return indices;
 }

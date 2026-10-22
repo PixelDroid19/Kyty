@@ -32,6 +32,10 @@ record. Titles are named descriptively only (`AGENTS.md`).
     and the zero-image sampler check visit only those indices and keep their
     original checks. Pointer-table and fused-GS user-data descriptors pass
     their program's memo too.
+  - The same index lists cover image reads, GDS or M0 writes and whether the
+    program touches GDS memory. The GDS pointer source register is resolved
+    once per draw instead of once per direct resource, and the zero-image
+    check visits only image reads.
 - **Measured** (same route, binary and window):
   - Memos bypassed by a temporary switch versus enabled: `ShaderParseUsage2`
     33.3% -> 22.3% of the thread, the association 14.1% -> 3.3%; 52-78 s
@@ -45,6 +49,8 @@ record. Titles are named descriptively only (`AGENTS.md`).
     14.7% of the thread; the dynamic scalar-resource collection fell from
     29.7% to 15.7% of it. Per-window us/draw stays within scene variation
     (327-414 us at 33,000-48,000 draws per window).
+  - GDS and image-read indices on top: `ShaderParseUsage2` 14.7% -> 10.4%
+    of the thread (14 s at 72 s).
 - **Verified.**
   - Unit suites `EmulatorGraphicsState*` (301), `EmulatorGraphicsPackets*`
     (284) and `EmulatorShader*` (316) pass; the graphics diagnostics
@@ -53,11 +59,13 @@ record. Titles are named descriptively only (`AGENTS.md`).
     preschool Unity title, insect platformer and fishing title (60-75 s
     each, before the zero-image change): no stop. The robot platformer's
     100 s runs pass frame 1,050 without a stop.
-- **Open.** The thread is on the CPU for about a fifth of the window; in the
-  same window it waits 10.7 s of 26 s on fences and 2.0 s in `WAIT_REG_MEM`.
-  Its next CPU costs: `PrepareStorageBuffers` 25% (transient snapshot
-  compare and capture, `GpuMemoryCalcHash`) and the body of
-  `ShaderParseUsage2` about 6%.
+- **Open.** Every context switch of the thread sampled with its user stack
+  (8 s at 58 s): blocked 74% of the window, on the CPU 26%. About 54% is
+  spent in fence waits (rotating into a recording slot still in flight,
+  `WAIT_REG_MEM` producers, indirect-dispatch and draw dependencies) and 20%
+  idle waiting for guest submissions. Its next CPU costs:
+  `PrepareStorageBuffers` 25% (transient snapshot compare and capture,
+  `GpuMemoryCalcHash`).
 
 ## Host-only UCONFIG codes in indirect register blocks (2026-10-22)
 

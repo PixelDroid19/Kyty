@@ -2289,13 +2289,12 @@ static void ReportNonImageResourceRead(const ShaderCode& code, const ShaderOpera
 // read the same way, an inexact contract recorded in docs/BRINGUP.md).
 static void CollectZeroImageResources(const ShaderCode& code, const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
                                       const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, int user_data_register_base,
-                                      ShaderZeroImageResources* resources)
+                                      const ShaderInstructionIndices& indices, ShaderZeroImageResources* resources)
 {
-	const auto& instructions = code.GetInstructions();
-	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	for (const uint32_t index: indices.image_reads)
 	{
-		const auto& inst = instructions.At(index);
-		if (!ShaderImageReadReturnsDmaskComponents(inst.type) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
+		const auto& inst = code.GetInstructions().At(index);
+		if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||
 		    !ShaderImageResourceIsUnboundUserData(entry_values, index, inst.src[1], user_sgpr, user_sgpr_num, user_data_register_base))
 		{
 			continue;
@@ -2547,12 +2546,13 @@ static void ShaderGetGdsPointer(ShaderGdsResources* info, bool* direct_sgprs, in
 // feed, -1 otherwise.
 // The SGPR that M0 was copied from when each GDS instruction runs, in program order; -1 unless every GDS
 // instruction sees the same one. A later M0 write (an interpolation base, say) does not name the counter.
-static int ShaderGdsPointerSourceSgpr(const ShaderCode& code)
+static int ShaderGdsPointerSourceSgpr(const ShaderCode& code, const ShaderInstructionIndices& indices)
 {
 	int gds_source = -1;
 	int m0_source  = -1;
-	for (const auto& inst: code.GetInstructions())
+	for (const uint32_t index: indices.gds_and_m0_writes)
 	{
+		const auto& inst = code.GetInstructions().At(index);
 		if (inst.format == ShaderInstructionFormat::VdstGds)
 		{
 			if (m0_source < 0 || (gds_source >= 0 && gds_source != m0_source)) { return -1; }
@@ -2564,28 +2564,6 @@ static int ShaderGdsPointerSourceSgpr(const ShaderCode& code)
 		}
 	}
 	return gds_source;
-}
-
-// GDS memory instructions address the buffer through M0 and need it bound
-// whether or not an SGPR carries a GDS pointer.
-static bool ShaderUsesGdsMemory(const ShaderCode& code)
-{
-	for (const auto& inst: code.GetInstructions())
-	{
-		if (inst.format == ShaderInstructionFormat::VaddrVdataOffsetGds)
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
-// A direct-resource slot is ambiguous in driver metadata when it can name the
-// GDS ordered-append pointer instead of its declared kind. Classify by
-// observed use so genuine descriptors keep their binding.
-static bool ShaderDirectResourceIsGdsPointer(const ShaderCode& code, int start_register)
-{
-	return ShaderGdsPointerSourceSgpr(code) == start_register;
 }
 
 bool ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type)
@@ -3105,6 +3083,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	const bool has_eud_ptr = Gen5HasEudPointer(user_data);
 	const auto* eud_code = eud_descriptor_code != nullptr ? eud_descriptor_code : code;
 	const auto*                             eud_memo    = eud_code == code ? code_memo : eud_code_memo;
+	const ShaderInstructionIndices          direct_indices =
+	    code != nullptr && code_memo == nullptr ? ShaderIndexInstructions(*code) : ShaderInstructionIndices {};
+	const auto& code_indices       = code != nullptr && code_memo != nullptr ? code_memo->InstructionIndices(*code) : direct_indices;
+	const int   gds_pointer_source = code != nullptr ? ShaderGdsPointerSourceSgpr(*code, code_indices) : -1;
 	std::shared_ptr<const ShaderScalarFlow> code_flow_owner;
 	const ShaderScalarFlow* code_flow = cached_code_flow;
 	if (code_flow == nullptr && code != nullptr && eud_code == code)
@@ -3187,10 +3169,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		int reg = user_data->direct_resource_offset[type];
 
 		// Ordered-append GDS pointer: the slot whose SGPR feeds m0 ahead of
-		// ds_append/ds_consume describes the global GDS buffer. Classify by
-		// observed use before the generic paths.
-		if (!vertex_resource_types && code != nullptr &&
-		    ShaderDirectResourceIsGdsPointer(*code, reg + user_data_register_base))
+		// ds_append/ds_consume describes the global GDS buffer. A slot is
+		// ambiguous in driver metadata, so classify by observed use before the
+		// generic paths and keep genuine descriptors bound.
+		if (!vertex_resource_types && gds_pointer_source == reg + user_data_register_base)
 		{
 			ShaderGetGdsPointer(&bind->gds_pointers, direct_sgprs, reg, bind->gds_pointers.pointers_num, user_sgpr, nullptr);
 			info->gds_pointers++;
@@ -3609,9 +3591,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// null-descriptor rejection and the same EUD translation used by metadata.
 	if (code != nullptr)
 	{
-		const ShaderInstructionIndices direct_indices = code_memo == nullptr ? ShaderIndexInstructions(*code) : ShaderInstructionIndices {};
-		const auto&                    indices        = code_memo != nullptr ? code_memo->InstructionIndices(*code) : direct_indices;
-		for (const uint32_t current: indices.buffer_accesses)
+		for (const uint32_t current: code_indices.buffer_accesses)
 		{
 			const auto& inst = code->GetInstructions().At(current);
 			if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr ||
@@ -3665,7 +3645,9 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		}
 	}
 
-	bind->gds_pointers.memory_used = code != nullptr && ShaderUsesGdsMemory(*code);
+	// GDS memory instructions address the buffer through M0 and need it bound
+	// whether or not an SGPR carries a GDS pointer.
+	bind->gds_pointers.memory_used = code_indices.gds_memory;
 
 	// Ordered-append GDS fallback: the descriptor slot is not always declared
 	// in direct_resource_offset, so bind the observed m0 source when the
@@ -3673,8 +3655,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// consumption so the GDS register is not double-bound.
 	if (code != nullptr && !vertex_resource_types && bind->gds_pointers.pointers_num == 0)
 	{
-		const int gds_sgpr = ShaderGdsPointerSourceSgpr(*code);
-		const int raw_gds  = gds_sgpr - user_data_register_base;
+		const int raw_gds = gds_pointer_source - user_data_register_base;
 		if (raw_gds >= 0 && raw_gds < user_sgpr_num && raw_gds < HW::UserSgprInfo::SGPRS_MAX && direct_sgprs[raw_gds])
 		{
 			ShaderGetGdsPointer(&bind->gds_pointers, direct_sgprs, raw_gds, bind->gds_pointers.pointers_num, user_sgpr, nullptr);
@@ -3820,7 +3801,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			bind->samplers.operations[i] = evidence.operation;
 		}
 		ShaderAssociateSampledTextureSamplers(*code, bind, user_data_register_base, code_memo);
-		CollectZeroImageResources(*code, entry_values, user_sgpr, user_sgpr_num, user_data_register_base, &bind->zero_image_resources);
+		CollectZeroImageResources(*code, entry_values, user_sgpr, user_sgpr_num, user_data_register_base, code_indices,
+		                          &bind->zero_image_resources);
 	}
 
 	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
