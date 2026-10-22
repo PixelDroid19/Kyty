@@ -216,7 +216,8 @@ and the device architecture must be `gfx1030`.
 `kyty_shader_arithmetic_oracle`, built from
 `source/integration_test/src/shader_compute/ShaderArithmeticOracle.cpp` by the
 `kyty_shader_arithmetic_oracle` target in `source/integration_test/CMakeLists.txt`.
-It is not a CTest case, because it needs a Vulkan device with paired-wave support.
+It is not a CTest case, because it needs a Vulkan device that supports the split
+wave64 layout.
 
 Build and run (root-owned; the commands are not run by this document):
 
@@ -264,7 +265,7 @@ metadata, so a failed run cannot produce a measured result.
 the fields `backend`, `op`, `pairs`, `dispatches`, `physical_device`,
 `subgroup_size` and `measured`. It may also include `default_subgroup_size`. The
 report is written only after every dispatch succeeded, with `measured` true. The
-`subgroup_size` is 32, the physical lanes the paired logical wave64 layout runs on.
+`subgroup_size` is 32, the host subgroup width of each half of a split wave64.
 The driver's default subgroup size is recorded separately and is not conflated
 with it. `physical_device` is the selected device name, restricted to printable
 characters the validator accepts. The Python side checks that `dispatches` equals

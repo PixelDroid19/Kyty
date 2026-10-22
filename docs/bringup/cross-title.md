@@ -4,6 +4,31 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Shader translator: paired wave64 layout removed (2026-10-22)
+
+- **Why.** Compute Wave64 dispatch on 32-lane hosts builds only the
+  split layout (each guest wave64 spans two 32-wide host subgroups, one
+  guest lane per invocation) or the native layout. Nothing in the
+  runtime selected the paired low/high bank layout any more; only tests
+  built it.
+- **Change.** The paired generator, its bank emitters, the paired
+  fragment-compute backend, the paired admission analyses and their
+  tests are removed. The instruction classifiers that native fragment
+  proofs use are kept.
+- **Verified.** Unit tests 2440 passed (23 skipped by design), the
+  four shader and diagnostics integration suites passed on Intel Arc
+  A770 (Mesa 26.2.5), and the boundary and graphics-table gates pass.
+  Robot title, warm caches, strict, generic route, 150 s: no fatal stop,
+  present 1374 at 137 s (1434 at 146 s before), longest hold after boot
+  1.7 s.
+- **One-time recompile.** Removing the enum value moved `Split64On32`
+  from 2 to 1, and the strategy is part of the shader ID, so the 11 split
+  modules met in that run got new keys and were translated and compiled
+  again (11 SPIR-V compiles, 5.9 s in total, during boot). Their stored
+  SPIR-V binaries are byte-identical to the entries stored under the old
+  keys, so the GPU work is unchanged, and the old-key recipes still
+  precompile to the same driver-cached pipelines (55 recipes, 49 ms).
+
 ## Shader caches: whole-title SPIR-V store and versioned compute recipes (2026-10-22)
 
 - **SPIR-V store.** Toolchain entries (`.spvbin`, keyed by the SPIR-V

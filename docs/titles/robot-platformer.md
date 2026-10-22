@@ -30,11 +30,21 @@ record. Titles are named descriptively only (`AGENTS.md`).
   boot holds at present 887 for the rest of a 180 s run while shaders
   compile; the next warm boot runs the stretch at 7.5-8.9 fps, shows the
   logo at presents 1055 and 1086, and ends clean at 150 s.
-- **Open.** Two loading holds in the warm boot, presents 850-905 (0.24
-  fps sample) and 1106-1112 (0.1-0.6 fps), are not attributed. About
-  3,000 spills remain per module.
+- **Holds attributed (2026-10-22).** Two loading holds in the warm boot,
+  presents 850-905 (0.24 fps sample) and 1106-1112 (0.1-0.6 fps), came
+  with both precompile workers compiling stale paired recipes from older
+  translator versions (profiled at frame 872). With versioned recipe
+  directories the warm boot's frame-time p99 is 0.33 s and its longest
+  hold (5.8 s) is the title's own level load (cross-title record
+  "Shader caches", 2026-10-22).
+- **Open.** About 3,000 spills remain per module.
 
-## Robot platformer: paired compute compile cost (2026-10-21, open)
+## Robot platformer: paired compute compile cost (2026-10-21, closed 2026-10-22)
+
+- **Outcome.** The direction below landed as split Wave64 compute
+  dispatch, and the paired layout was removed (cross-title record
+  "Shader translator: paired wave64 layout removed", 2026-10-22). The
+  split modules still carry about 3,000 spills each.
 
 - **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, HEAD 89e3b892,
   scripted route from logo to worldmap; a first boot with empty SPIR-V
