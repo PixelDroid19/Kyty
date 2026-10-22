@@ -87,6 +87,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [Anime fighter](titles/anime-fighter.md)
   - Anime fighter: storage write-back on the label path (2026-10-17)
 - [First-person puzzle title](titles/first-person-puzzle.md)
+  - First-person puzzle title: scalar-join sources per label (2026-10-22)
   - First-person puzzle title: cold shader compiles, not a GPU stall (2026-10-17)
 - [Beat 'em up](titles/beat-em-up.md)
   - Beat 'em up: device-address write-back waits (2026-10-14, open, measured)

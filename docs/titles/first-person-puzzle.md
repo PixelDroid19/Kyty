@@ -4,6 +4,24 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## First-person puzzle title: scalar-join sources per label (2026-10-22)
+
+- **Observation.** Cold boot, Intel, 40 s sampled on the command-processor
+  thread from 25 s: `ScJoinCollectSources` takes 37% of the thread inside
+  `Spirv::WriteLabel`; its loop-exit test and `ShaderCode::ReadBlock` scan the
+  whole program for every branch, and the collection itself ran once per
+  label.
+- **Change.** The sources of every join are collected in one pass per program
+  and kept in the existing per-program join memo, indexed by reconvergence
+  point (`ShaderSpirvScJoin.cpp`). The memo keeps its validity rule (program
+  identity and enabled-label count).
+- **Measured (90 s cold runs).** Translator source generation per 26 s window
+  7.9-13.3 s -> 1.7-1.9 s. The 317 SPIR-V cache entries both runs produced
+  are byte-identical. Pipeline misses resolved in the second window: 16 ->
+  114.
+- **Open.** First boot is now bound by `spirv-opt` (~14 s per window) and
+  driver pipeline creation (~15 s per window).
+
 ## First-person puzzle title: cold shader compiles, not a GPU stall (2026-10-17)
 
 The 10-17 regression set recorded this title as stalling early on a
