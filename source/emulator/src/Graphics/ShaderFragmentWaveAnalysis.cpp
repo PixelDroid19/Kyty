@@ -57,42 +57,6 @@ bool Interpolation(const ShaderInstruction& instruction, const ShaderPixelInputI
 	       Unused(instruction.src[3]);
 }
 
-int CompressedTarget(ShaderInstructionFormat::Format format)
-{
-	switch (format)
-	{
-		case ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone: return 0;
-		case ShaderInstructionFormat::Mrt1Vsrc0Vsrc1ComprVm: return 1;
-		case ShaderInstructionFormat::Mrt2Vsrc0Vsrc1ComprVm: return 2;
-		case ShaderInstructionFormat::Mrt3Vsrc0Vsrc1ComprVm: return 3;
-		case ShaderInstructionFormat::Mrt4Vsrc0Vsrc1ComprVm: return 4;
-		case ShaderInstructionFormat::Mrt5Vsrc0Vsrc1ComprVm: return 5;
-		case ShaderInstructionFormat::Mrt6Vsrc0Vsrc1ComprVm: return 6;
-		case ShaderInstructionFormat::Mrt7Vsrc0Vsrc1ComprVm: return 7;
-		default: return -1;
-	}
-}
-
-bool Export(const ShaderInstruction& instruction, const ShaderPixelInputInfo& pixel)
-{
-	if (instruction.type != ShaderInstructionType::Exp || !Metadata(instruction) || !Unused(instruction.dst))
-	{
-		return false;
-	}
-	if (ShaderIsNullMrtDoneFormat(instruction.format))
-	{
-		return instruction.src_num == 0 && instruction.exp_enable_mask == 0u && instruction.exp_control == 7u;
-	}
-	const int target = CompressedTarget(instruction.format);
-	return target >= 0 && (pixel.target_output_mode[target] == 0u || pixel.target_output_mode[target] == 4u) &&
-	       (pixel.target_output_mode[target] == 0u || pixel.target_output_number[target] != 4u) &&
-	       pixel.target_output_order[target] <= 3u && instruction.src_num == 2 && instruction.exp_control >= 4u &&
-	       instruction.exp_control <= 7u &&
-	       (instruction.exp_enable_mask == 3u || instruction.exp_enable_mask == 12u || instruction.exp_enable_mask == 15u) &&
-	       Vector(instruction.src[0]) && Vector(instruction.src[1]) && (Unused(instruction.src[2]) || Vector(instruction.src[2])) &&
-	       (Unused(instruction.src[3]) || Vector(instruction.src[3]));
-}
-
 bool Covers(const ShaderOperand& operand, int reg)
 {
 	return operand.type == ShaderOperandType::Vgpr && operand.register_id <= reg && reg < operand.register_id + operand.size;
@@ -324,89 +288,6 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentVirtualParameterState(const
 		overwritten |= entry_prefix && EntryParameterOverwrite(instruction, parameter_register);
 	}
 	return {true, 0u, {}};
-}
-
-ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentExports(const ShaderCode& code)
-{
-	const auto& instructions = code.GetInstructions();
-	if (instructions.IsEmpty())
-	{
-		return {false, 0u, "fragment code is empty"};
-	}
-	std::map<uint32_t, uint32_t> indices;
-	for (uint32_t index = 0; index < instructions.Size(); ++index)
-	{
-		indices.emplace(instructions.At(index).pc, index);
-	}
-	std::vector<uint8_t>                       visited(instructions.Size(), 0u);
-	std::vector<std::pair<uint32_t, uint32_t>> pending {{0u, 0u}};
-	while (!pending.empty())
-	{
-		const auto [index, incoming] = pending.back();
-		pending.pop_back();
-		if ((visited[index] & (1u << incoming)) != 0u)
-		{
-			continue;
-		}
-		visited[index] |= static_cast<uint8_t>(1u << incoming);
-		const auto& instruction = instructions.At(index);
-		uint32_t    state       = incoming;
-		if (instruction.type == ShaderInstructionType::Exp)
-		{
-			state |= instruction.exp_control & 3u;
-		}
-		if (instruction.type == ShaderInstructionType::SEndpgm)
-		{
-			if (state != 3u)
-			{
-				return {false, instruction.pc, "fragment termination requires VM and DONE exports on every path"};
-			}
-			continue;
-		}
-		const bool branch = ShaderClassifyComputeWaveInstruction(instruction) == ShaderComputeWaveInstructionKind::WaveBranch;
-		if (branch)
-		{
-			const int64_t target = static_cast<int64_t>(instruction.pc) + 4 + instruction.src[0].constant.i;
-			const auto    found  = target >= 0 && target <= UINT32_MAX ? indices.find(static_cast<uint32_t>(target)) : indices.end();
-			if (found == indices.end())
-			{
-				return {false, instruction.pc, "fragment branch target is not an instruction"};
-			}
-			pending.emplace_back(found->second, state);
-			if (instruction.type == ShaderInstructionType::SBranch)
-			{
-				continue;
-			}
-		}
-		if (index + 1u == instructions.Size())
-		{
-			return {false, instruction.pc, "fragment path falls past its code"};
-		}
-		pending.emplace_back(index + 1u, state);
-	}
-	return {true, 0u, {}};
-}
-
-ShaderComputeWaveInstructionKind ShaderClassifyFragmentWaveInstruction(const ShaderInstruction&    instruction,
-                                                                       const ShaderPixelInputInfo& pixel)
-{
-	if (Interpolation(instruction, pixel))
-	{
-		return ShaderComputeWaveInstructionKind::PixelInterpolation;
-	}
-	if (Export(instruction, pixel))
-	{
-		return ShaderComputeWaveInstructionKind::PixelExport;
-	}
-	const auto name = Core::EnumName8(instruction.type);
-	// Helper lanes may execute arithmetic and reads, but this transport has no
-	// proven ordering/coverage contract for observable writes or LDS accesses.
-	if (name.ContainsStr("Store") || name.ContainsStr("Atomic") || name.StartsWith("Ds") ||
-	    instruction.type == ShaderInstructionType::SBarrier || instruction.type == ShaderInstructionType::Exp)
-	{
-		return ShaderComputeWaveInstructionKind::Unsupported;
-	}
-	return ShaderClassifyComputeWaveInstruction(instruction);
 }
 
 } // namespace Kyty::Libs::Graphics

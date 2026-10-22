@@ -1,5 +1,4 @@
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
-#include "Emulator/Graphics/ShaderComputeWaveControlFlowAnalysis.h"
 
 #include "ShaderSpirvInternal.h"
 
@@ -282,7 +281,6 @@ ShaderComputeInputInfo SpirvGeometryComputeHostInfo(const ShaderCode& code, cons
 	                    geometry.waves, host.lds_dwords};
 	host.native_wave_sensitive    = true;
 	host.required_subgroup_size   = 32u;
-	host.barrier_workspace_dwords = ShaderComputeBarrierWorkspaceDwords(code, host.wave_layout);
 	host.bind        = vs_input_info.bind;
 	host.float_mode  = vs_input_info.float_mode;
 	host.dx10_clamp  = vs_input_info.dx10_clamp;

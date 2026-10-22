@@ -36,7 +36,7 @@ enum class ShaderComputeWaveInstructionKind
 	// followed by a subgroup barrier, which restores in-wave DS ordering.
 	BankedGenericLds,
 	// Scalar instruction on uniform SGPR/VCC words emitted once from its native
-	// emitter; paired mode keeps those registers in architectural form.
+	// emitter.
 	ScalarGeneric,
 	// Any VOPC compare: native per-lane predicate per bank, balloted into the
 	// architectural two-word mask (EXEC only for v_cmpx).
@@ -80,27 +80,17 @@ struct ShaderComputeWaveAnalysisResult
 // The same preconditions for the per-lane emitter, which also merges a low SDWA destination
 // select into its VGPR (ShaderSdwaPartialDestinationSupported). Banked and proof paths keep the strict form.
 [[nodiscard]] bool ShaderInstructionPerLaneLoweringPreconditions(const ShaderInstruction& instruction);
-[[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input);
-[[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,
-                                                                             const ShaderComputeInputInfo& host,
-                                                                             uint32_t                      parameter_register = UINT32_MAX);
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyGeometryWaveInstruction(const ShaderInstruction& instruction);
 // Source of export component 0..3; a POS1 Z-only export carries Z in src[0].
 [[nodiscard]] const ShaderOperand& ShaderExportComponentSource(const ShaderInstruction& instruction, uint32_t component);
-[[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyFragmentWaveInstruction(const ShaderInstruction&    instruction,
-                                                                                     const ShaderPixelInputInfo& pixel);
 [[nodiscard]] bool ShaderFragmentInterpolationPairSupported(const ShaderCode& code, uint32_t index, const ShaderPixelInputInfo& pixel);
 [[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentParameterBase(const ShaderCode& code,
                                                                                  uint32_t          parameter_register = UINT32_MAX);
-[[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentExports(const ShaderCode& code);
 // Virtualization is safe only when the initial parameter-state word reaches
 // the fixed M0 selector alone. Later SGPR uses need a complete overwrite in
 // the unconditional entry prefix; an observable M0 read rejects this route.
 [[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentVirtualParameterState(const ShaderCode& code,
                                                                                          uint32_t          parameter_register);
-// A closed, side-effect-free region may initialize uncaptured lanes itself.
-// Only its proven full-EXEC entry may bypass the ordinary allocation clamp.
-[[nodiscard]] bool ShaderFragmentNeutralRegionSupported(const ShaderCode& code, uint32_t index);
 // A scalar memory load ignores EXEC and names no VGPR, so a lane reduction may hold it among its steps.
 [[nodiscard]] bool ShaderReductionRegionScalarLoad(const ShaderInstruction& instruction);
 // The same proof for a lane reduction, giving the index of its initializer and of the EXEC restore that closes

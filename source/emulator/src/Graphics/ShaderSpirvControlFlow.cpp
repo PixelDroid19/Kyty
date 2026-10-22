@@ -224,22 +224,8 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	const char* branch_param[2] = {param[0], param[1]};
 	const bool exec_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz;
 	const bool vcc_branch  = inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz;
-	if (spirv->UsesComputeWaveBanks() && (exec_branch || vcc_branch))
-	{
-		// Each physical subgroup owns one complete guest wave. The packed mask
-		// pair is uniform within it, so no subgroup vote or low-half shortcut is
-		// needed to decide this wave's branch.
-		branch_param[0] = exec_branch ? "%cc_lo_<index> = OpLoad %uint %exec_lo\n"
-		                                "%cc_hi_<index> = OpLoad %uint %exec_hi\n"
-		                                "%cc_mask_<index> = OpBitwiseOr %uint %cc_lo_<index> %cc_hi_<index>"
-		                              : "%cc_lo_<index> = OpLoad %uint %vcc_lo\n"
-		                                "%cc_hi_<index> = OpLoad %uint %vcc_hi\n"
-		                                "%cc_mask_<index> = OpBitwiseOr %uint %cc_lo_<index> %cc_hi_<index>";
-		const bool zero_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchVccz;
-		branch_param[1] = zero_branch ? "%cc_b_<index> = OpIEqual %bool %cc_mask_<index> %uint_0"
-		                              : "%cc_b_<index> = OpINotEqual %bool %cc_mask_<index> %uint_0";
-	} else if ((inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz) &&
-	           ShaderVccBranchIsWaveUniform(code, index))
+	if ((inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz) &&
+	    ShaderVccBranchIsWaveUniform(code, index))
 	{
 		branch_param[0] = inst.type == ShaderInstructionType::SCbranchVccz
 		                      ? "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpIEqual %bool %cc_u_<index> %uint_0"
@@ -247,7 +233,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		branch_param[1] = "";
 	}
 	String8 quad_uniform_vote;
-	if (!spirv->UsesComputeWaveBanks() && spirv->GetHostShaderType() == ShaderType::Pixel && (exec_branch || vcc_branch) &&
+	if (spirv->GetCode().GetType() == ShaderType::Pixel && (exec_branch || vcc_branch) &&
 	    String8(branch_param[0]).ContainsStr("OpGroupNonUniformAny"))
 	{
 		// Helpers may sit out non-quad collectives and read an undefined vote. Hand them the vote of a real
@@ -307,7 +293,6 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
                OpSelectionMerge %t230_<index> None
                OpBranchConditional %cc_b_<index> %sc_return_<index> %t230_<index>
         %sc_return_<index> = OpLabel
-<epilog>
                OpReturn
         %t230_<index> = OpLabel
 )";
@@ -315,7 +300,6 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		*dst_source += String8(text_program_exit)
 		                   .ReplaceStr("<param0>", branch_param[0])
 		                   .ReplaceStr("<param1>", branch_param[1])
-		                   .ReplaceStr("<epilog>", spirv->UsesFragmentCompute() ? spirv->FragmentEpilog() : String8())
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index));
 
 		return true;

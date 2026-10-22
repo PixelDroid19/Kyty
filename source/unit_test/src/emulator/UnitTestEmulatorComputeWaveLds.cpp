@@ -23,17 +23,6 @@ static void InitializeConfig()
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 }
 
-static ShaderComputeInputInfo PairedInput(uint32_t dwords, uint32_t lanes = 64)
-{
-	ShaderComputeInputInfo input {};
-	input.threads_num[0] = lanes;
-	input.threads_num[1] = input.threads_num[2] = 1;
-	input.thread_ids_num = 1;
-	input.lds_dwords = dwords;
-	input.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {lanes, 1, 1}, {lanes / 2, 1, 1}, 64, 32, 2, lanes / 64, dwords};
-	return input;
-}
-
 TEST(EmulatorComputeWaveLds, ParsesAtomicReturnDestinationAndFullOffset)
 {
 	// Independently checked against AMD RDNA2 machine-readable ENC_DS and
@@ -100,37 +89,6 @@ TEST(EmulatorComputeWaveLds, PreservesControlsBeforeLegacyAliasLowering)
 	    ::testing::ExitedWithCode(0), "");
 }
 
-// Since 704f4ad3 every LDS access takes the ordered generic path and admission no
-// longer proves the address. RDNA2 ISA 3.6.1 makes an out-of-range LDS write a
-// discard and an out-of-range read zero. EmulatorShaderLdsBounds checks the
-// production memory bodies, including inactive lanes and pointer evaluation.
-TEST(EmulatorComputeWaveLds, AdmitsAnyLdsAddressWithoutAnAddressProof)
-{
-	struct Case { uint32_t move; uint32_t control; uint32_t registers; uint32_t dwords; };
-	const Case cases[] = {
-	    {0x7e020280u, 0xd8d80000u, 0x04000001u, 1}, // address zero, one dword read
-	    {0x7e020300u, 0xd8340000u, 0x00000101u, 1}, // dynamic address v0
-	    {0x7e020281u, 0xd8340000u, 0x00000101u, 1}, // unaligned address
-	    {0x7e020284u, 0xd8340000u, 0x00000101u, 1}, // beyond the allocation
-	    {0x7e020280u, 0xd8340004u, 0x00000101u, 1}, // offset beyond the allocation
-	    {0x7e0202c1u, 0xd8340000u, 0x00000101u, 1}, // address+width wraps
-	};
-	for (const auto& test: cases)
-	{
-		const uint32_t words[] = {test.move, test.control, test.registers, 0xbf810000u};
-		EXPECT_EXIT(
-		    {
-			    InitializeConfig();
-			    ShaderCode code;
-			    code.SetType(ShaderType::Compute);
-			    if (!ShaderTryParseBounded(words, sizeof(words), &code)) { std::_Exit(2); }
-			    const auto result = ShaderAnalyzeComputeWaveCode(code, PairedInput(test.dwords));
-			    std::_Exit(result.supported ? 0 : 3);
-		    },
-		    ::testing::ExitedWithCode(0), "");
-	}
-}
-
 TEST(EmulatorComputeWaveLds, LegacyTuplePredicateStaysExactForTheBankedEmitter)
 {
 	using Kind = ShaderComputeWaveInstructionKind;
@@ -174,8 +132,7 @@ TEST(EmulatorComputeWaveLds, RejectsLostAtomicInputsAndWrongRegisterSpans)
 			    ShaderCode code;
 			    code.SetType(ShaderType::Compute);
 			    if (!ShaderTryParseBounded(words, sizeof(words), &code)) { std::_Exit(2); }
-			    std::_Exit(!ShaderComputeWaveGenericLdsSupported(code.GetInstructions().At(0)) &&
-			               !ShaderAnalyzeComputeWaveCode(code, PairedInput(4)).supported ? 0 : 3);
+			    std::_Exit(!ShaderComputeWaveGenericLdsSupported(code.GetInstructions().At(0)) ? 0 : 3);
 		    }, ::testing::ExitedWithCode(0), "");
 	}
 	const uint32_t words[] = {0xd8dc0000u, 0xff000000u, 0xbf810000u}; // read2 v[255:256]
@@ -187,27 +144,6 @@ TEST(EmulatorComputeWaveLds, RejectsLostAtomicInputsAndWrongRegisterSpans)
 		    if (!ShaderTryParseBounded(words, sizeof(words), &code)) { std::_Exit(2); }
 		    std::_Exit(!ShaderComputeWaveGenericLdsSupported(code.GetInstructions().At(0)) ? 0 : 3);
 	    }, ::testing::ExitedWithCode(0), "");
-}
-
-// Branches and s_barrier are lowered by the block dispatcher, which resumes each
-// guest wave at its own barrier phase, so neither needs a reachability proof.
-TEST(EmulatorComputeWaveLds, AdmitsBarriersAndBranchPlaceholders)
-{
-	for (const uint32_t control: {0xbf820000u, 0xbf890000u, 0xbf8a0001u})
-	{
-		const uint32_t words[] = {control, 0xbf8a0000u, 0xbf810000u};
-		EXPECT_EXIT(
-		    {
-			    InitializeConfig();
-			    ShaderCode code;
-			    code.SetType(ShaderType::Compute);
-			    if (!ShaderTryParseBounded(words, sizeof(words), &code)) { std::_Exit(2); }
-			    ShaderComputeInputInfo input {};
-			    input.wave_layout.strategy = ShaderComputeWaveStrategy::Paired64On32;
-			    std::_Exit(ShaderAnalyzeComputeWaveCode(code, input).supported ? 0 : 3);
-		    },
-		    ::testing::ExitedWithCode(0), "");
-	}
 }
 
 UT_END();

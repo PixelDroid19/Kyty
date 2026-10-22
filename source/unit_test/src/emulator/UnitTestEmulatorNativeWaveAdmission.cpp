@@ -920,33 +920,6 @@ TEST(EmulatorNativeWaveAdmission, GuestWidthProofAndPreferredSizeArePartOfBothPi
 	}
 }
 
-TEST(EmulatorNativeWaveAdmission, PairedGuestCeilRejectsUint64BoundaryWithoutMutatingStage)
-{
-	const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(Host());
-	ShaderComputeWaveLayout layout {};
-	layout.strategy = ShaderComputeWaveStrategy::Paired64On32;
-	layout.guest_wave_size = 64;
-	layout.native_subgroup_size = 32;
-	layout.banks = 2;
-	layout.waves = 1;
-	layout.guest_local[0] = UINT32_MAX;
-	layout.guest_local[1] = 641;
-	layout.guest_local[2] = 6700417; // Product is exactly UINT64_MAX.
-	layout.physical_local[0] = 32;
-	layout.physical_local[1] = layout.physical_local[2] = 1;
-	VkPipelineShaderStageCreateInfo stage {};
-	stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required {};
-	EXPECT_FALSE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required));
-	EXPECT_EQ(stage.pNext, nullptr);
-	EXPECT_EQ(stage.flags, 0u);
-	layout.guest_local[0] = 65;
-	layout.guest_local[1] = layout.guest_local[2] = 1;
-	layout.waves = 2;
-	layout.physical_local[0] = 64;
-	EXPECT_TRUE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required));
-}
-
 TEST(EmulatorNativeWaveAdmission, NativeWave32RequiresFullSubgroupsForLogicalLaneMapping)
 {
 	auto state = Host();

@@ -10,7 +10,6 @@
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveLds.h"
-#include "Emulator/Graphics/ShaderComputeWaveResourceAnalysis.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -2360,6 +2359,19 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 	return false;
 }
 
+String8 Spirv::EmitGdsCounterPointer(uint16_t byte_offset, const String8& prefix) const
+{
+	// M0[31:16] and the instruction offset are bytes; the storage array holds dwords.
+	const char* p = prefix.c_str();
+	return String8::FromPrintf("%%%s_m0 = OpLoad %%uint %%m0\n"
+	                           "%%%s_base = OpShiftRightLogical %%uint %%%s_m0 %%%s\n"
+	                           "%%%s_byte = OpIAdd %%uint %%%s_base %%%s\n"
+	                           "%%%s_index = OpShiftRightLogical %%uint %%%s_byte %%%s\n"
+	                           "%%%s_ptr = OpAccessChain %%_ptr_StorageBuffer_uint %%gds %%int_0 %%%s_index\n",
+	                           p, p, p, GetConstantUint(16u).c_str(), p, p, GetConstantUint(byte_offset).c_str(), p, p,
+	                           GetConstantUint(2u).c_str(), p, p);
+}
+
 static bool EmitOrdinaryNativeGdsAppend(const ShaderInstruction& inst, uint32_t index, Spirv* spirv, String8* dst_source)
 {
 	const auto* bind_info = spirv == nullptr ? nullptr : spirv->GetBindInfo();
@@ -2777,25 +2789,14 @@ String8 DsAddtidIndex(Spirv* spirv, uint16_t offset, const String8& bound, const
 	return text;
 }
 
-// Lane-execution predicate for the shared-LDS path: a plain EXEC word test in
-// virtualized mode, or the bank's mask bit under paired compute waves.
-bool EmitDsAddtidActive(const Spirv* spirv, ShaderWaveBank bank, const String8& tag, String8* dst_source,
-                        String8* active_id)
+// Lane-execution predicate for the addtid paths: a plain EXEC word test.
+void EmitDsAddtidActive(const String8& tag, String8* dst_source, String8* active_id)
 {
-	if (spirv->UsesComputeWaveBanks())
-	{
-		ShaderOperand exec {};
-		exec.type = ShaderOperandType::ExecLo;
-		exec.size = 2;
-		*active_id = "addtid_exec_" + tag;
-		return spirv->EmitComputeWaveMaskBit(exec, bank, *active_id, dst_source);
-	}
 	*active_id = "addtid_active_" + tag;
 	*dst_source += String8::FromPrintf(
 	    "       %%addtid_exec_%s = OpLoad %%uint %%exec_lo\n"
 	    "    %%addtid_active_%s = OpINotEqual %%bool %%addtid_exec_%s %%uint_0\n",
 	    tag.c_str(), tag.c_str(), tag.c_str());
-	return true;
 }
 
 } // namespace
@@ -2841,36 +2842,8 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
 		{
 			return false;
 		}
-		if (spirv->UsesComputeWaveBanks())
-		{
-			for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
-			{
-				const auto data   = spirv->GetComputeWaveRegister(inst.src[0], bank, 0);
-				const auto bname  = bank == ShaderWaveBank::Low ? "low" : "high";
-				if (data.value.IsEmpty())
-				{
-					return false;
-				}
-				const auto tag = String8::FromPrintf("%u_%s", index, bname);
-				String8    active;
-				if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
-				{
-					return false;
-				}
-				*dst_source += String8::FromPrintf(
-				    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
-				if (!EmitDsAddtidLdsStore(data, active, tag, bound, "addtid_tid_" + tag, spirv, inst, dst_source))
-				{
-					return false;
-				}
-			}
-			return true;
-		}
 		String8 active;
-		if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
-		{
-			return false;
-		}
+		EmitDsAddtidActive(index_str, dst_source, &active);
 		*dst_source += String8::FromPrintf("        %%addtid_tidl_%s = OpLoad %%uint %%gl_LocalInvocationIndex\n"
 		                                   "         %%addtid_tid_%s = OpBitwiseAnd %%uint %%addtid_tidl_%s %%uint_63\n",
 		                                   index_str.c_str(), index_str.c_str(), index_str.c_str());
@@ -2883,46 +2856,11 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
 	}
 
 	// Private spill array: compute without an LDS allocation or any graphics
-	// stage. Under paired compute waves each invocation still emulates two
-	// lanes, so the bank loop and TID*4 term are kept — only the storage is
-	// per-invocation instead of the shared %lds array.
+	// stage. The storage is per-invocation instead of the shared %lds array.
 	const auto bound = spirv->GetConstantUint(kDsAddtidSpillDwords);
 	if (bound == "unknown_uint_constant")
 	{
 		return false;
-	}
-	if (spirv->UsesComputeWaveBanks())
-	{
-		for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
-		{
-			const auto data  = spirv->GetComputeWaveRegister(inst.src[0], bank, 0);
-			const auto bname = bank == ShaderWaveBank::Low ? "low" : "high";
-			if (data.value.IsEmpty())
-			{
-				return false;
-			}
-			const auto tag = String8::FromPrintf("%u_%s", index, bname);
-			String8    active;
-			if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
-			{
-				return false;
-			}
-			*dst_source += String8::FromPrintf(
-			    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
-			*dst_source += DsAddtidIndex(spirv, inst.ds_offset, bound, "addtid_tid_" + tag, active, tag);
-			*dst_source += String8::FromPrintf(
-			    "               OpSelectionMerge %%addtid_merge_%s None\n"
-			    "               OpBranchConditional %%addtid_gate_%s %%addtid_then_%s %%addtid_merge_%s\n"
-			    "        %%addtid_then_%s = OpLabel\n"
-			    "         %%addtid_ptr_%s = OpAccessChain %%_ptr_Function_float %%lds_addtid %%addtid_idx_%s\n"
-			    "        %%addtid_dataf_%s = OpLoad %%float %%%s\n"
-			    "               OpStore %%addtid_ptr_%s %%addtid_dataf_%s\n"
-			    "               OpBranch %%addtid_merge_%s\n"
-			    "       %%addtid_merge_%s = OpLabel\n",
-			    tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(),
-			    data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
-		}
-		return true;
 	}
 	const auto data = operand_variable_to_str(inst.src[0]);
 	if (data.value.IsEmpty())
@@ -2930,10 +2868,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
 		return false;
 	}
 	String8 active;
-	if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
-	{
-		return false;
-	}
+	EmitDsAddtidActive(index_str, dst_source, &active);
 	*dst_source += DsAddtidIndex(spirv, inst.ds_offset, bound, String8(), active, index_str);
 	*dst_source += String8::FromPrintf(
 	    "               OpSelectionMerge %%addtid_merge_%s None\n"
@@ -3010,36 +2945,8 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadAddtidB32_VdstOffset)
 		{
 			return false;
 		}
-		if (spirv->UsesComputeWaveBanks())
-		{
-			for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
-			{
-				const auto dst    = spirv->GetComputeWaveRegister(inst.dst, bank, 0);
-				const auto bname  = bank == ShaderWaveBank::Low ? "low" : "high";
-				if (dst.value.IsEmpty())
-				{
-					return false;
-				}
-				const auto tag = String8::FromPrintf("%u_%s", index, bname);
-				String8    active;
-				if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
-				{
-					return false;
-				}
-				*dst_source += String8::FromPrintf(
-				    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
-				if (!EmitDsAddtidLoad(dst, active, tag, bound, "addtid_tid_" + tag, spirv, inst, dst_source))
-				{
-					return false;
-				}
-			}
-			return true;
-		}
 		String8 active;
-		if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
-		{
-			return false;
-		}
+		EmitDsAddtidActive(index_str, dst_source, &active);
 		*dst_source += String8::FromPrintf("        %%addtid_tidl_%s = OpLoad %%uint %%gl_LocalInvocationIndex\n"
 		                                   "         %%addtid_tid_%s = OpBitwiseAnd %%uint %%addtid_tidl_%s %%uint_63\n",
 		                                   index_str.c_str(), index_str.c_str(), index_str.c_str());
@@ -3058,38 +2965,13 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadAddtidB32_VdstOffset)
 	{
 		return false;
 	}
-	if (spirv->UsesComputeWaveBanks())
-	{
-		for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
-		{
-			const auto dst   = spirv->GetComputeWaveRegister(inst.dst, bank, 0);
-			const auto bname = bank == ShaderWaveBank::Low ? "low" : "high";
-			if (dst.value.IsEmpty())
-			{
-				return false;
-			}
-			const auto tag = String8::FromPrintf("%u_%s", index, bname);
-			String8    active;
-			if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
-			{
-				return false;
-			}
-			*dst_source += String8::FromPrintf(
-			    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
-			if (!EmitDsAddtidLoad(dst, active, tag, bound, "addtid_tid_" + tag, spirv, inst, dst_source)) { return false; }
-		}
-		return true;
-	}
 	const auto dst = operand_variable_to_str(inst.dst);
 	if (dst.value.IsEmpty())
 	{
 		return false;
 	}
 	String8 active;
-	if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
-	{
-		return false;
-	}
+	EmitDsAddtidActive(index_str, dst_source, &active);
 	return EmitDsAddtidLoad(dst, active, index_str, bound, String8(), spirv, inst, dst_source);
 }
 

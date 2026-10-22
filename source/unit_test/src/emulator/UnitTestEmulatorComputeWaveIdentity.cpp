@@ -27,38 +27,38 @@ HW::ComputeShaderInfo SyntheticComputeShader()
 	return shader;
 }
 
-ShaderComputeInputInfo SyntheticPairedInput()
+ShaderComputeInputInfo SyntheticSplitInput()
 {
 	ShaderComputeInputInfo input {};
 	input.threads_num[0] = 64;
 	input.threads_num[1] = 1;
 	input.threads_num[2] = 1;
-	input.wave_layout    = {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0};
+	input.wave_layout    = {ShaderComputeWaveStrategy::Split64On32, {64, 1, 1}, {64, 1, 1}, 64, 32, 1, 1, 0};
 	return input;
 }
 
 } // namespace
 
-TEST(EmulatorComputeWaveIdentity, SeparatesNativeAndPairedStrategies)
+TEST(EmulatorComputeWaveIdentity, SeparatesNativeAndSplitStrategies)
 {
 	InitializeNextGenConfig();
 	const auto shader = SyntheticComputeShader();
 
 	// Keep every other translation input fixed to isolate the strategy field.
-	auto native                 = SyntheticPairedInput();
+	auto native                 = SyntheticSplitInput();
 	native.wave_layout.strategy = ShaderComputeWaveStrategy::Native;
-	const auto paired           = SyntheticPairedInput();
+	const auto split            = SyntheticSplitInput();
 
-	EXPECT_NE(ShaderGetIdCS(&shader, &native), ShaderGetIdCS(&shader, &paired));
+	EXPECT_NE(ShaderGetIdCS(&shader, &native), ShaderGetIdCS(&shader, &split));
 }
 
-TEST(EmulatorComputeWaveIdentity, SeparatesPairedPhysicalLocalShapes)
+TEST(EmulatorComputeWaveIdentity, SeparatesPhysicalLocalShapes)
 {
 	InitializeNextGenConfig();
 	const auto shader                  = SyntheticComputeShader();
-	auto       narrow                  = SyntheticPairedInput();
+	auto       narrow                  = SyntheticSplitInput();
 	auto       wide                    = narrow;
-	wide.wave_layout.physical_local[0] = 64;
+	wide.wave_layout.physical_local[0] = 128;
 
 	// This identity-level synthetic delta deliberately holds guest shape fixed.
 	EXPECT_NE(ShaderGetIdCS(&shader, &narrow), ShaderGetIdCS(&shader, &wide));
@@ -68,7 +68,7 @@ TEST(EmulatorComputeWaveIdentity, DistinguishesGuestShapeAndIgnoresGetpcBaseValu
 {
 	InitializeNextGenConfig();
 	const auto shader                          = SyntheticComputeShader();
-	auto       guest_shape_64                  = SyntheticPairedInput();
+	auto       guest_shape_64                  = SyntheticSplitInput();
 	auto       guest_shape_128                 = guest_shape_64;
 	guest_shape_128.threads_num[0]             = 128;
 	guest_shape_128.wave_layout.guest_local[0] = 128;

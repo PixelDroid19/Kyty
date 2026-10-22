@@ -158,8 +158,6 @@ TEST(EmulatorShaderScalarBit, DecodesAndLowersBfmB64WithoutWritingScc)
 		    input.threads_num[0] = 64u;
 		    input.threads_num[1] = input.threads_num[2] = 1u;
 		    input.thread_ids_num = 1;
-		    input.wave_layout = (decltype(input.wave_layout) {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0});
-		    if (!ShaderAnalyzeComputeWaveCode(code, input).supported) { std::_Exit(4); }
 		    const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 		    const auto first_store = source.FindIndex("OpStore %s8 %bfm_result_lo_0");
 		    const auto second_load = source.FindIndex("%t0_1 = OpLoad %uint %s8");

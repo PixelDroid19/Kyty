@@ -3592,7 +3592,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleCd_VdataVaddr6StSsMimgDmask)
 {
 	// Quad-uniform supplied slopes make per-invocation Grad preserve the
 	// admitted coarse sample's per-quad LOD. Arbitrary CD gradients are refused.
-	if (spirv->GetHostShaderType() != ShaderType::Pixel || !ShaderImageSampleCdHasQuadUniformGradients(code, index))
+	if (spirv->GetCode().GetType() != ShaderType::Pixel || !ShaderImageSampleCdHasQuadUniformGradients(code, index))
 	{
 		return false;
 	}

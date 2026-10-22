@@ -23,7 +23,7 @@ static ShaderComputeWaveCapabilities Capabilities()
 static ShaderComputeWaveDispatchPlan SentinelPlan()
 {
 	const ShaderComputeWaveLayout layout {
-	    ShaderComputeWaveStrategy::Paired64On32, {11u, 12u, 13u}, {21u, 22u, 23u}, 31u, 32u, 33u, 34u, 35u};
+	    ShaderComputeWaveStrategy::Split64On32, {11u, 12u, 13u}, {21u, 22u, 23u}, 31u, 32u, 33u, 34u, 35u};
 	return {0xdeadbeefu, {7u, 8u, 9u}, layout};
 }
 

@@ -13,7 +13,6 @@ enum class ShaderGuestLaneOrder
 enum class ShaderComputeWaveStrategy
 {
 	Native,
-	Paired64On32,
 	Split64On32,
 };
 

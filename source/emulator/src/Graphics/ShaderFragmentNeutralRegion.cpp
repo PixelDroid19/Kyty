@@ -654,12 +654,6 @@ bool ShaderReductionRegionScalarLoad(const ShaderInstruction& instruction)
 	return ShaderInstructionIsScalarMemoryLoad(instruction.type) || ShaderInstructionIsScalarBufferLoad(instruction);
 }
 
-bool ShaderFragmentNeutralRegionSupported(const ShaderCode& code, uint32_t index)
-{
-	NeutralRegion region;
-	return AnalyzeRegion(kWave64Masks, code, index, false, &region);
-}
-
 bool ShaderFragmentNeutralRegionBounds(const ShaderCode& code, uint32_t guest_wave_size, uint32_t index, uint32_t* seed, uint32_t* end)
 {
 	NeutralRegion region;

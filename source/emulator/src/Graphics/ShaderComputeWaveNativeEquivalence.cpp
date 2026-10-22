@@ -302,7 +302,7 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, boo
 		return Failure(instruction.pc, "instruction reads another lane or a wave-wide count");
 	}
 	// GDS is shared by every wave, so the order in which lanes reach it is
-	// observable, and only the paired emitter lowers it.
+	// observable.
 	if (instruction.format == ShaderInstructionFormat::VdstGds || instruction.format == ShaderInstructionFormat::VaddrVdataOffsetGds)
 	{
 		return Failure(instruction.pc, "GDS access depends on wave lane order");

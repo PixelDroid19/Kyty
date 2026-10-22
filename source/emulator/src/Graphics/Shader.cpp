@@ -17,7 +17,6 @@
 #include "Emulator/Graphics/GraphicsGeState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
-#include "Emulator/Graphics/ShaderComputeWaveControlFlowAnalysis.h"
 #include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "Emulator/Graphics/ShaderComputeWaveNativeEquivalence.h"
 #include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
@@ -4692,7 +4691,6 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 	info->threads_num[2] = regs->cs_regs.num_thread_z;
 	// COMPUTE_PGM_RSRC2.LDS_SIZE is expressed in 128-dword allocation units.
 	info->lds_dwords                    = ShaderComputeLdsDwords(regs->cs_regs.lds_size);
-	info->barrier_workspace_dwords      = 0;
 	info->group_id[0]                   = regs->cs_regs.tgid_x_en != 0;
 	info->group_id[1]                   = regs->cs_regs.tgid_y_en != 0;
 	info->group_id[2]                   = regs->cs_regs.tgid_z_en != 0;
@@ -4763,7 +4761,6 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 				info->required_subgroup_size = 32u;
 			}
 		}
-		info->barrier_workspace_dwords = ShaderComputeBarrierWorkspaceDwords(code, info->wave_layout);
 		// Compute parsing preserves byte PCs relative to this dispatch's start.
 		// The base must remain runtime data when a cached pipeline is relocated.
 		info->bind.program_base_used = code.HasAnyOf({ShaderInstructionType::SGetpcB64});

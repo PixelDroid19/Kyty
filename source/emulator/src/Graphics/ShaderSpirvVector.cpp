@@ -3470,7 +3470,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
 	if (spirv->UsesSplitComputeWave())
 	{
 		exchange = "%rfl_value_<index> = OpFunctionCall %uint %split_read %t0_<index> %rfl_lane_sel_<index>";
-	} else if (spirv->GetHostShaderType() == ShaderType::Pixel)
+	} else if (spirv->GetCode().GetType() == ShaderType::Pixel)
 	{
 		// If the first guest lane is a Vulkan helper, first gather its value
 		// into the other quad members. Broadcast from a participating member of
@@ -3554,9 +3554,9 @@ static bool RecompileLaneReductionRead(uint32_t index, const ShaderLaneReduction
 	                   .ReplaceStr("<high>", spirv->GetConstantUint(static_cast<uint32_t>(lanes >> 32u)))
 	                   .ReplaceStr("<negative_infinity>", spirv->GetConstantUint(0xff800000u))
 	                   .ReplaceStr("<index>", index_str);
-	*dst_source += spirv->GetHostShaderType() == ShaderType::Pixel
+	*dst_source += spirv->GetCode().GetType() == ShaderType::Pixel
 	                   ? spirv->NativeQuadUniform(String8("lr_raw_") + index_str, "uint", String8("lr_") + index_str)
-	                   : String8::FromPrintf("%%lr_%u = OpCopyObject %%uint %%lr_raw_%u\n", index, index);
+					   : String8::FromPrintf("%%lr_%u = OpCopyObject %%uint %%lr_raw_%u\n", index, index);
 	*dst_source += String8::FromPrintf("OpStore %%%s %%lr_%u\n", dst.c_str(), index);
 	return true;
 }
@@ -3695,8 +3695,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 static bool RecompilePermlane16(uint32_t index, const ShaderCode& code, String8* dst_source, Spirv* spirv, bool x16)
 {
 	const auto& inst = code.GetInstructions().At(index);
-	if (spirv->GetHostShaderType() != ShaderType::Pixel || !spirv->UsesFragmentWaveTier() ||
-	    !ShaderFragmentWaveInsideRegion(code, index))
+	if (spirv->GetCode().GetType() != ShaderType::Pixel || !spirv->UsesFragmentWaveTier() || !ShaderFragmentWaveInsideRegion(code, index))
 	{
 		return false;
 	}

@@ -366,15 +366,13 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 		return true;
 	}
 
-	// Paired waves share one 32-lane subgroup across two banks. Split waves use two
-	// whole 32-lane subgroups and exchange wave-wide values through workgroup memory.
-	const bool     split                   = layout.strategy == ShaderComputeWaveStrategy::Split64On32;
-	const uint32_t host_subgroups_per_wave = split ? 2u : 1u;
-	const uint32_t exchange_dwords         = split ? kShaderSplitWaveExchangeDwords : 0u;
-	if (!require_size || (layout.strategy != ShaderComputeWaveStrategy::Paired64On32 && !split) ||
-	    layout.guest_wave_size != kGuestWaveSize || layout.native_subgroup_size != kNativeSubgroupSize ||
-	    layout.banks != (split ? 1u : 2u) || layout.waves == 0 || !capabilities.size_control_enabled ||
-	    !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
+	// Split waves use two whole 32-lane subgroups and exchange wave-wide values
+	// through workgroup memory.
+	const uint32_t host_subgroups_per_wave = 2u;
+	const uint32_t exchange_dwords         = kShaderSplitWaveExchangeDwords;
+	if (!require_size || layout.strategy != ShaderComputeWaveStrategy::Split64On32 || layout.guest_wave_size != kGuestWaveSize ||
+	    layout.native_subgroup_size != kNativeSubgroupSize || layout.banks != 1u || layout.waves == 0 ||
+	    !capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
 	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > kNativeSubgroupSize ||
 	    capabilities.max_subgroup_size < kNativeSubgroupSize)
 	{

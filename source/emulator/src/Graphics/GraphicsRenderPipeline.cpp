@@ -963,19 +963,6 @@ static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInput
 	} else if (input_info->required_subgroup_size != 0u)
 	{
 		EXIT("compute subgroup-size metadata requires a native-wave sensitivity proof\n");
-	} else if (input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
-	{
-		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
-		const uint64_t shared_dwords = static_cast<uint64_t>(input_info->lds_dwords) + input_info->barrier_workspace_dwords;
-		if (shared_dwords * sizeof(uint32_t) > capabilities.max_shared_bytes)
-		{
-			EXIT("paired-wave compute barrier workspace exceeds the Vulkan shared-memory limit\n");
-		}
-		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(input_info->wave_layout, capabilities,
-		                                                     &comp_shader_stage_info, &required_subgroup_size))
-		{
-			EXIT("paired-wave compute layout is unsupported by the enabled Vulkan subgroup features or limits\n");
-		}
 	}
 
 	const auto&                bind                 = input_info->bind;

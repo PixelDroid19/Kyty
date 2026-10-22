@@ -122,7 +122,7 @@ public:
 		uint32_t loader_version = VK_API_VERSION_1_0;
 		if (vkEnumerateInstanceVersion(&loader_version) != VK_SUCCESS || loader_version < VK_API_VERSION_1_3)
 		{
-			*reason = "Vulkan 1.3 instance support is required for paired-wave subgroup control";
+			*reason = "Vulkan 1.3 instance support is required for split-wave subgroup control";
 			return NativeResult::Unavailable;
 		}
 
@@ -874,7 +874,9 @@ bool BuildStoreShader(bool packed_mip, ShaderCode* code, ShaderComputeInputInfo*
 	input->threads_num[1] = 1u;
 	input->threads_num[2] = 1u;
 	input->thread_ids_num = 1;
-	input->wave_layout    = {ShaderComputeWaveStrategy::Paired64On32, {64u, 1u, 1u}, {32u, 1u, 1u}, 64u, 32u, 2u, 1u, 0u};
+	input->wave_layout            = {ShaderComputeWaveStrategy::Split64On32, {64u, 1u, 1u}, {64u, 1u, 1u}, 64u, 32u, 1u, 1u, 0u};
+	input->native_wave_sensitive  = true;
+	input->required_subgroup_size = 32u;
 
 	auto& bind                             = input->bind;
 	bind.textures2D.textures_num           = 1;
@@ -1012,7 +1014,7 @@ bool RunNativeCases(const NativeVulkanContext& context, std::string* reason)
 
 } // namespace
 
-TEST(EmulatorPackedMipNative, ImageStoreMipAndOrdinaryStoreHonorEachExecBank)
+TEST(EmulatorPackedMipNative, ImageStoreMipAndOrdinaryStoreHonorBothExecWords)
 {
 	InitializeShaderHarness();
 	NativeVulkanContext context;
