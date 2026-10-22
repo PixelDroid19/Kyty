@@ -3173,11 +3173,14 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
                                       String8* dst_source)
 {
 	const uint32_t alignment = components == 1u ? 1u : (components == 2u ? 2u : 4u);
+	const bool     sgpr_dst  = inst.dst.type == ShaderOperandType::Sgpr && inst.dst.size == components && inst.dst.register_id >= 0 &&
+	                      inst.dst.register_id + components <= 106u && (inst.dst.register_id % alignment) == 0u;
+	const bool     vcc_dst   = (inst.dst.type == ShaderOperandType::VccLo && inst.dst.size == static_cast<int>(components) && components <= 2u) ||
+	                     (inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1 && components == 1u);
 	if (!spirv->UsesGuestDeviceAddress() || components == 0u || components > 16u || inst.smem_flags != 0u || inst.src_num != 2 ||
 	    inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].size != 4 || inst.src[0].register_id < 0 || inst.src[0].register_id > 100 ||
-	    (inst.src[0].register_id % 4) != 0 || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != components ||
-	    inst.dst.register_id < 0 || inst.dst.register_id + components > 106u || (inst.dst.register_id % alignment) != 0u ||
-	    inst.src[1].dpp || inst.src[1].absolute || inst.src[1].negate || inst.src[1].swizzle != 6u)
+	    (inst.src[0].register_id % 4) != 0 || (!sgpr_dst && !vcc_dst) || inst.src[1].dpp || inst.src[1].absolute ||
+	    inst.src[1].negate || inst.src[1].swizzle != 6u)
 	{
 		return false;
 	}
@@ -3199,10 +3202,11 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
 	return true;
 }
 
-static bool PixelScalarBufferUsesGuestAddress(const Spirv* spirv, const ShaderInstruction& inst)
+// Pixel programs and the geometry pass read runtime V#s at guest device addresses.
+static bool ScalarBufferUsesGuestAddress(const Spirv* spirv, const ShaderInstruction& inst)
 {
 	const auto* bind = spirv->GetBindInfo();
-	return Config::IsNextGen() && spirv->GetPsInputInfo() != nullptr && bind != nullptr &&
+	return Config::IsNextGen() && (spirv->GetPsInputInfo() != nullptr || spirv->UsesGeometryCompute()) && bind != nullptr &&
 	       ShaderScalarBufferUsesRuntimeDescriptor(*bind, inst);
 }
 
@@ -3240,7 +3244,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDword_SdstSvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 1u, dst_source);
 	}
@@ -3301,7 +3305,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx2_Sdst2SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 2u, dst_source);
 	}
@@ -3364,7 +3368,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 4u, dst_source);
 	}
@@ -3526,7 +3530,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 8u, dst_source);
 	}
@@ -3583,7 +3587,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 16u, dst_source);
 	}
