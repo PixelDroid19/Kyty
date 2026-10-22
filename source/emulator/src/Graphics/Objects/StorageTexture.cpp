@@ -1082,6 +1082,22 @@ static bool DescribeRenderAliasLayout(uint64_t address, uint64_t size, uint64_t 
 	return true;
 }
 
+// A copy that continues the previous one along the same rows extends it.
+static void AppendRenderAliasCopy(Vector<StorageTextureRenderAliasCopy>* plan, const StorageTextureRenderAliasCopy& copy)
+{
+	if (!plan->IsEmpty())
+	{
+		auto& last = (*plan)[plan->Size() - 1];
+		if (last.source_y == copy.source_y && last.destination_y == copy.destination_y && last.source_x + last.width == copy.source_x &&
+		    last.destination_x + last.width == copy.destination_x)
+		{
+			last.width += copy.width;
+			return;
+		}
+	}
+	plan->Add(copy);
+}
+
 bool StorageTexturePlanRenderAlias(const uint64_t* render_params, uint64_t render_address, uint64_t render_size,
                                    const uint64_t* storage_params, uint64_t storage_address, uint64_t storage_size,
                                    Vector<StorageTextureRenderAliasCopy>* copies)
@@ -1127,27 +1143,26 @@ bool StorageTexturePlanRenderAlias(const uint64_t* render_params, uint64_t rende
 		const uint64_t source_y = (render_index / render.blocks_x) * block_height;
 		const uint64_t destination_x = (storage_index % storage.blocks_x) * block_width;
 		const uint64_t destination_y = (storage_index / storage.blocks_x) * block_height;
-		// An edge block holds texels past an image's extent; copy only those both images cover.
-		const uint64_t width  = std::min({block_width, render.width - std::min(source_x, render.width),
-		                                  storage.width - std::min(destination_x, storage.width)});
 		const uint64_t height = std::min({block_height, render.height - std::min(source_y, render.height),
 		                                  storage.height - std::min(destination_y, storage.height)});
-		if (width == 0u || height == 0u)
+		// The 8-byte pattern folds y6, above its 64-row block, into bit 11 with x5: a block
+		// that sits on rows of opposite parity in the two images holds its 32-column strips swapped.
+		const bool     swap_strips = bytes_per_element == 8u && ((source_y ^ destination_y) & block_height) != 0u;
+		const uint64_t strip_width = swap_strips ? 32u : block_width;
+		for (uint64_t strip = 0; strip < block_width; strip += strip_width)
 		{
-			continue;
-		}
-		StorageTextureRenderAliasCopy copy {static_cast<uint32_t>(source_x), static_cast<uint32_t>(source_y),
-		                                    static_cast<uint32_t>(destination_x), static_cast<uint32_t>(destination_y),
-		                                    static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
-		if (!plan.IsEmpty() && plan.At(plan.Size() - 1).source_y == copy.source_y &&
-		    plan.At(plan.Size() - 1).destination_y == copy.destination_y &&
-		    plan.At(plan.Size() - 1).source_x + plan.At(plan.Size() - 1).width == copy.source_x &&
-		    plan.At(plan.Size() - 1).destination_x + plan.At(plan.Size() - 1).width == copy.destination_x)
-		{
-			plan[plan.Size() - 1].width += copy.width;
-		} else
-		{
-			plan.Add(copy);
+			const uint64_t strip_source_x      = source_x + strip;
+			const uint64_t strip_destination_x = destination_x + (swap_strips ? (strip ^ 32u) : strip);
+			// An edge block holds texels past an image's extent; copy only those both images cover.
+			const uint64_t width = std::min({strip_width, render.width - std::min(strip_source_x, render.width),
+			                                 storage.width - std::min(strip_destination_x, storage.width)});
+			if (width == 0u || height == 0u)
+			{
+				continue;
+			}
+			AppendRenderAliasCopy(&plan, {static_cast<uint32_t>(strip_source_x), static_cast<uint32_t>(source_y),
+			                              static_cast<uint32_t>(strip_destination_x), static_cast<uint32_t>(destination_y),
+			                              static_cast<uint32_t>(width), static_cast<uint32_t>(height)});
 		}
 	}
 	for (const auto& copy: plan)

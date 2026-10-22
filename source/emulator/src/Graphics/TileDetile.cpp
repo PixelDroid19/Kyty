@@ -87,11 +87,7 @@ uint64_t OffsetDepth64KB(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t 
 
 bool LayoutBpeSupported(TileDetileLayout layout, uint32_t bytes_per_element)
 {
-	if (layout == TileDetileLayout::Sw64kRx)
-	{
-		return bytes_per_element == 1u || bytes_per_element == 4u || bytes_per_element == 8u;
-	}
-	if (layout == TileDetileLayout::Standard64KB)
+	if (layout == TileDetileLayout::Sw64kRx || layout == TileDetileLayout::Standard64KB)
 	{
 		return TileGet64KBBlockWidth(bytes_per_element) != 0u;
 	}
