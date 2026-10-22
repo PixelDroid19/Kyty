@@ -29,6 +29,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen);
 KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds);
 KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds);
 KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset);
+KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffsetGds);
 KYTY_RECOMPILER_FUNC(Recompile_DsAddU32_VaddrVdataOffset);
 KYTY_RECOMPILER_FUNC(Recompile_DsAtomicRtn_VdstVaddrVdataOffset);
 KYTY_RECOMPILER_FUNC(Recompile_SBitcmp_XXX);

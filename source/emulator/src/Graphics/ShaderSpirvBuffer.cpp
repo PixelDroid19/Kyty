@@ -7,6 +7,7 @@
 #include "ShaderStorageAnalysis.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveLds.h"
@@ -2514,6 +2515,70 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
 KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds)
 {
 	return EmitGdsAppend(code, index, spirv, dst_source);
+}
+
+// One compute invocation is one guest lane. The store lands at M0.base + ADDR +
+// offset in bytes (M0 = {base[31:16], size[15:0]}). ADDR + offset beyond
+// M0.size, a misaligned address or one outside the host GDS window is a memory
+// violation on hardware; the store is dropped so the host buffer stays in bounds.
+KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffsetGds)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const auto* bind = spirv->GetBindInfo();
+	if (spirv->GetCsInputInfo() == nullptr || bind == nullptr || !bind->gds_pointers.memory_used ||
+	    !ShaderComputeWaveGdsWriteSupported(inst))
+	{
+		return false;
+	}
+	const auto offset = spirv->GetConstantUint(inst.ds_offset);
+	const auto mask   = spirv->GetConstantUint(0xffffu);
+	const auto shift  = spirv->GetConstantUint(16u);
+	const auto window = spirv->GetConstantUint(static_cast<uint32_t>(kGraphicsGdsDwords));
+	for (const auto* constant: {&offset, &mask, &shift, &window})
+	{
+		if (*constant == "unknown_uint_constant")
+		{
+			return false;
+		}
+	}
+
+	const auto tag  = String8::FromPrintf("gds_write_%u", index);
+	const auto body = String8(R"(
+%<t>_m0 = OpLoad %uint %m0
+%<t>_base = OpShiftRightLogical %uint %<t>_m0 %<shift>
+%<t>_size = OpBitwiseAnd %uint %<t>_m0 %<mask>
+%<t>_address_f = OpLoad %float %<address>
+%<t>_address = OpBitcast %uint %<t>_address_f
+%<t>_relative = OpIAdd %uint %<t>_address %<offset>
+%<t>_address_in = OpULessThan %bool %<t>_address %<t>_size
+%<t>_relative_in = OpULessThan %bool %<t>_relative %<t>_size
+%<t>_byte = OpIAdd %uint %<t>_base %<t>_relative
+%<t>_low_bits = OpBitwiseAnd %uint %<t>_byte %uint_3
+%<t>_aligned = OpIEqual %bool %<t>_low_bits %uint_0
+%<t>_index = OpShiftRightLogical %uint %<t>_byte %uint_2
+%<t>_in_window = OpULessThan %bool %<t>_index %<window>
+%<t>_in_m0 = OpLogicalAnd %bool %<t>_address_in %<t>_relative_in
+%<t>_in_host = OpLogicalAnd %bool %<t>_aligned %<t>_in_window
+%<t>_valid = OpLogicalAnd %bool %<t>_in_m0 %<t>_in_host
+               OpSelectionMerge %<t>_merge None
+               OpBranchConditional %<t>_valid %<t>_store %<t>_merge
+%<t>_store = OpLabel
+%<t>_data_f = OpLoad %float %<data>
+%<t>_data = OpBitcast %uint %<t>_data_f
+%<t>_ptr = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %<t>_index
+               OpStore %<t>_ptr %<t>_data
+               OpBranch %<t>_merge
+%<t>_merge = OpLabel
+)")
+	                      .ReplaceStr("<address>", operand_variable_to_str(inst.src[0]).value)
+	                      .ReplaceStr("<data>", operand_variable_to_str(inst.src[1]).value)
+	                      .ReplaceStr("<offset>", offset)
+	                      .ReplaceStr("<mask>", mask)
+	                      .ReplaceStr("<shift>", shift)
+	                      .ReplaceStr("<window>", window)
+	                      .ReplaceStr("<t>", tag);
+	*dst_source += GateLdsByExec(body, tag);
+	return true;
 }
 
 namespace {

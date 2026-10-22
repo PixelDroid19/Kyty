@@ -3189,7 +3189,9 @@ void Spirv::FindConstants()
 	}
 	if (m_bind != nullptr && m_bind->gds_pointers.memory_used)
 	{
-		// GDS stores bound the address by M0[15:0] and by the host GDS window.
+		// GDS stores split M0 into base[31:16] and size[15:0] and bound the
+		// address by that size and by the host GDS window.
+		AddConstantUint(16u);
 		AddConstantUint(0xffffu);
 		AddConstantUint(static_cast<uint32_t>(kGraphicsGdsDwords));
 	}
