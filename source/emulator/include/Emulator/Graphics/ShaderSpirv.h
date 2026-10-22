@@ -53,21 +53,24 @@ struct ShaderFragmentComputeInfo
 enum class ShaderGeometryInputTopology
 {
 	TriangleList,
-	TriangleStrip
+	TriangleStrip,
+	PointList
 };
 
 // Host-only contract for a merged ES+GS (NGG) program run as a compute pass.
-// Each workgroup is one guest subgroup of a single Wave64 holding up to
-// primitives_per_group input triangles of one instance, three ES lanes per
-// triangle. The prologue stands in for the geometry engine: s3 carries the
-// counts, v0/v1 the ES slot of each corner (slot * kGeometryVertexOffsetScale),
-// v2 the primitive id, v5/v8 the vertex and instance ids the ES fetches with.
+// Each workgroup is one guest subgroup of `waves` Wave64s holding up to
+// primitives_per_group input primitives of one instance, one ES thread per
+// corner (three per triangle, one per point); subgroup thread T is lane T % 64
+// of wave T / 64. The prologue stands in for the geometry engine: s3 carries
+// each wave's counts, v0/v1 the ES slot of each corner (slot *
+// kGeometryVertexOffsetScale), v2 the primitive id, v5/v8 the vertex and
+// instance ids the ES fetches with.
 // Exports and the allocation request land in an output buffer addressed by
 // the geometry push block (ShaderBindResources::geometry_offset_dw):
 // row 0 = {output_lo, output_hi, primitives per instance, groups per instance},
 // row 1 = {first vertex, first instance, 0, 0}.
 // Output group g holds one header word (the GS_ALLOC_REQ payload), one
-// primitive word per lane, then one record per lane: pos0, pos1, params.
+// primitive word per subgroup thread, then one record per thread: pos0, pos1, params.
 struct ShaderGeometryComputeInfo
 {
 	ShaderGeometryInputTopology topology             = ShaderGeometryInputTopology::TriangleList;
@@ -75,13 +78,18 @@ struct ShaderGeometryComputeInfo
 	uint32_t                    parameter_count      = 0;
 	// Guest LDS allocation of the merged stage, in dwords.
 	uint32_t                    lds_dwords           = 0;
+	uint32_t                    waves                = 1;
 
 	static constexpr uint32_t kLanes                    = 64;
+	// An NGG subgroup holds at most 256 threads.
+	static constexpr uint32_t kMaxWaves                 = 4;
 	static constexpr uint32_t kVertexOffsetScale        = 4;
 	static constexpr uint32_t kPrimitiveWordsOffset     = 1;
-	static constexpr uint32_t kRecordsOffset            = kPrimitiveWordsOffset + kLanes;
+	[[nodiscard]] uint32_t Corners() const { return topology == ShaderGeometryInputTopology::PointList ? 1u : 3u; }
+	[[nodiscard]] uint32_t GroupLanes() const { return kLanes * waves; }
+	[[nodiscard]] uint32_t RecordsOffset() const { return kPrimitiveWordsOffset + GroupLanes(); }
 	[[nodiscard]] uint32_t RecordDwords() const { return 8u + 4u * parameter_count; }
-	[[nodiscard]] uint32_t GroupDwords() const { return kRecordsOffset + kLanes * RecordDwords(); }
+	[[nodiscard]] uint32_t GroupDwords() const { return RecordsOffset() + GroupLanes() * RecordDwords(); }
 };
 
 // Highest interpolant the program reads, or the register count when larger.
@@ -97,12 +105,12 @@ uint32_t SpirvResolveVertexParameterCount(const ShaderCode& code, const ShaderVe
 // the geometry push block and guest device addressing enabled.
 String8 SpirvGenerateGeometryComputeSource(const ShaderCode& code, const ShaderVertexInputInfo& vs_input_info,
                                            const ShaderGeometryComputeInfo& geometry);
-// The compute-stage contract that pass runs under: one paired Wave64 per
+// The compute-stage contract that pass runs under: `waves` paired Wave64s per
 // workgroup over the guest LDS allocation.
 ShaderComputeInputInfo SpirvGeometryComputeHostInfo(const ShaderCode& code, const ShaderVertexInputInfo& vs_input_info,
                                                     const ShaderGeometryComputeInfo& geometry);
-// Host vertex stage drawing that pass's output as groups * 64 triangles:
-// vertex v is corner v % 3 of output primitive (v / 3) % 64 of group v / 192.
+// Host vertex stage drawing that pass's output as groups * GroupLanes() triangles:
+// vertex v is corner v % 3 of output primitive (v / 3) % lanes of group v / (3 * lanes).
 // Unallocated, null or out-of-range primitives collapse to the origin. Its
 // push block holds the output address in the first two words.
 String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometry, bool layer);

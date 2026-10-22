@@ -2414,12 +2414,12 @@ bool AutoDrawModifierSupported(uint64_t draw_modifier)
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 // A merged ES+GS (NGG) auto draw run as a geometry compute pass: one guest
-// Wave64 subgroup per group of input triangles of one instance, three ES lanes
-// per triangle, triangle output that fits one export per lane.
+// subgroup of up to four Wave64s per group of input primitives of one instance,
+// one ES thread per corner, triangle output of one export per subgroup thread.
 struct GeometryDrawPlan
 {
 	ShaderGeometryComputeInfo info;
-	uint32_t                  primitives          = 0; // input triangles per instance
+	uint32_t                  primitives          = 0; // input primitives per instance
 	uint32_t                  groups_per_instance = 0;
 	uint32_t                  groups              = 0;
 };
@@ -2427,6 +2427,7 @@ struct GeometryDrawPlan
 static bool ResolveGeometryDraw(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx, uint32_t index_count,
                                 uint32_t instance_count, GeometryDrawPlan* plan)
 {
+	constexpr uint32_t kPointListPrimType     = 1u;
 	constexpr uint32_t kTriangleListPrimType  = 4u;
 	constexpr uint32_t kTriangleStripPrimType = 6u;
 	constexpr uint32_t kTriangleOutPrimType   = 2u;
@@ -2444,17 +2445,34 @@ static bool ResolveGeometryDraw(const HW::Context& ctx, const HW::UserConfig& uc
 	}
 	const uint32_t prim_type    = ucfg.GetPrimType();
 	const uint32_t max_vert_out = regs.m_vgtGsMaxVertOut;
-	if ((prim_type != kTriangleListPrimType && prim_type != kTriangleStripPrimType) || regs.m_vgtGsOutPrimType != kTriangleOutPrimType ||
-	    max_vert_out == 0u || max_vert_out > kLanes || vs.gs_regs.rsrc2.lds_size == 0u)
+	if ((prim_type != kPointListPrimType && prim_type != kTriangleListPrimType && prim_type != kTriangleStripPrimType) ||
+	    regs.m_vgtGsOutPrimType != kTriangleOutPrimType || max_vert_out == 0u || vs.gs_regs.rsrc2.lds_size == 0u)
 	{
 		return false;
 	}
 	const bool strip = prim_type == kTriangleStripPrimType;
-	plan->info.topology             = strip ? ShaderGeometryInputTopology::TriangleStrip : ShaderGeometryInputTopology::TriangleList;
-	plan->info.primitives_per_group = std::min(kLanes / 3u, kLanes / max_vert_out);
+	plan->info.topology = prim_type == kPointListPrimType ? ShaderGeometryInputTopology::PointList
+	                      : strip                         ? ShaderGeometryInputTopology::TriangleStrip
+	                                                      : ShaderGeometryInputTopology::TriangleList;
+	const uint32_t corners = plan->info.Corners();
+	// The program sizes its LDS and counters for the subgroup the registers
+	// declare; a pass group never exceeds it, and stays one wave when it fits.
+	const uint32_t guest_primitives =
+	    std::min({regs.GetGsPrimsPerSubgrp(), regs.GetEsVertsPerSubgrp() / corners, regs.m_geMaxOutputPerSubgroup / max_vert_out});
+	const uint32_t one_wave   = std::min(kLanes / corners, kLanes / max_vert_out);
+	const uint32_t primitives = one_wave != 0u ? std::min(one_wave, guest_primitives) : guest_primitives;
+	const uint32_t threads    = primitives * std::max(corners, max_vert_out);
+	plan->info.waves          = (threads + kLanes - 1u) / kLanes;
+	if (primitives == 0u || plan->info.waves > ShaderGeometryComputeInfo::kMaxWaves)
+	{
+		return false;
+	}
+	plan->info.primitives_per_group = primitives;
 	plan->info.parameter_count      = regs.GetExportCount();
 	plan->info.lds_dwords           = vs.gs_regs.rsrc2.GetLdsSizeDwords();
-	plan->primitives                = strip ? (index_count >= 3u ? index_count - 2u : 0u) : index_count / 3u;
+	plan->primitives                = prim_type == kPointListPrimType ? index_count
+	                                  : strip                         ? (index_count >= 3u ? index_count - 2u : 0u)
+	                                                                  : index_count / 3u;
 	plan->groups_per_instance = (plan->primitives + plan->info.primitives_per_group - 1u) / plan->info.primitives_per_group;
 	const uint64_t groups     = static_cast<uint64_t>(plan->groups_per_instance) * instance_count;
 	if (groups > kMaxGroups)
@@ -2493,6 +2511,7 @@ static ShaderVertexInputInfo MakeGeometryPullInput(const ShaderVertexInputInfo& 
 	input.geometry_pull            = true;
 	input.geometry_pull_layer      = front.position1_usage == ShaderVertexPosition1Usage::RenderTargetLayer;
 	input.geometry_pull_parameters = plan.info.parameter_count;
+	input.geometry_pull_waves      = plan.info.waves;
 	input.bind.geometry_used       = true;
 	ShaderCalcBindingIndices(&input.bind);
 	return input;
@@ -2726,7 +2745,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	if (geometry_pass)
 	{
 		primitive_plan.topology   = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-		primitive_plan.draw_count = geometry_plan.groups * ShaderGeometryComputeInfo::kLanes * 3u;
+		primitive_plan.draw_count = geometry_plan.groups * geometry_plan.info.GroupLanes() * 3u;
 	} else if (!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, &primitive_plan))
 	{
 		static std::atomic_uint32_t unsupported_auto_draws {0};

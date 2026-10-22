@@ -62,17 +62,20 @@ bool Spirv::EmitGeometryProlog(String8* output) const
 	const auto  row1     = GetConstantInt(static_cast<int>(bind->geometry_offset_dw / 4u + 1u));
 	const auto  per      = GetConstantUint(geometry.primitives_per_group);
 	const auto  group    = GetConstantUint(geometry.GroupDwords());
-	const auto  waves    = GetConstantUint(1u << 28u);
+	const auto  waves    = GetConstantUint(geometry.waves << 28u);
+	const auto  corners  = GetConstantUint(geometry.Corners());
+	const auto  lanes    = GetConstantUint(ShaderGeometryComputeInfo::kLanes);
 	const auto  scale    = GetConstantUint(ShaderGeometryComputeInfo::kVertexOffsetScale);
-	const auto  scale3   = GetConstantUint(ShaderGeometryComputeInfo::kVertexOffsetScale * 3u);
+	const auto  stride   = GetConstantUint(ShaderGeometryComputeInfo::kVertexOffsetScale * geometry.Corners());
 	if (row0 == "unknown_int_constant" || row1 == "unknown_int_constant" || !IsKnownUint(per) || !IsKnownUint(group) ||
-	    !IsKnownUint(waves) || !IsKnownUint(scale) || !IsKnownUint(scale3))
+	    !IsKnownUint(waves) || !IsKnownUint(corners) || !IsKnownUint(lanes) || !IsKnownUint(scale) || !IsKnownUint(stride))
 	{
 		return false;
 	}
 
-	// One guest subgroup = one Wave64 of this workgroup (wave id 0, one wave):
-	// s3 = {ES vertices [7:0], GS primitives [15:8], wave id [27:24], wave count [31:28]}.
+	// One guest subgroup = this workgroup; each wave sees its share of the
+	// subgroup's ES and GS threads in s3 = {ES vertices [7:0], GS primitives
+	// [15:8], wave id [27:24], wave count [31:28]}.
 	*output += String8(R"(
 %geo_group_ptr = OpAccessChain %_ptr_Input_uint %gl_WorkGroupID %uint_0
 %geo_group = OpLoad %uint %geo_group_ptr
@@ -98,10 +101,19 @@ bool Spirv::EmitGeometryProlog(String8* output) const
 %geo_base = OpIMul %uint %geo_slice %<per>
 %geo_left = OpISub %uint %geo_total %geo_base
 %geo_prims = OpExtInst %uint %GLSL_std_450 UMin %geo_left %<per>
-%geo_es = OpIMul %uint %geo_prims %uint_3
-%geo_prims_field = OpShiftLeftLogical %uint %geo_prims %uint_8
-%geo_counts = OpBitwiseOr %uint %geo_es %geo_prims_field
-%geo_info = OpBitwiseOr %uint %geo_counts %<waves>
+%geo_es = OpIMul %uint %geo_prims %<corners>
+%geo_wave_first = OpIMul %uint %wave_subgroup_id %<lanes>
+%geo_es_rest = OpExtInst %uint %GLSL_std_450 UMax %geo_es %geo_wave_first
+%geo_es_after = OpISub %uint %geo_es_rest %geo_wave_first
+%geo_wave_es = OpExtInst %uint %GLSL_std_450 UMin %geo_es_after %<lanes>
+%geo_prims_rest = OpExtInst %uint %GLSL_std_450 UMax %geo_prims %geo_wave_first
+%geo_prims_after = OpISub %uint %geo_prims_rest %geo_wave_first
+%geo_wave_prims = OpExtInst %uint %GLSL_std_450 UMin %geo_prims_after %<lanes>
+%geo_prims_field = OpShiftLeftLogical %uint %geo_wave_prims %uint_8
+%geo_wave_field = OpShiftLeftLogical %uint %wave_subgroup_id %uint_24
+%geo_counts = OpBitwiseOr %uint %geo_wave_es %geo_prims_field
+%geo_ids = OpBitwiseOr %uint %geo_counts %geo_wave_field
+%geo_info = OpBitwiseOr %uint %geo_ids %<waves>
                OpStore %s3 %geo_info
 %geo_instance_id = OpIAdd %uint %geo_first_instance %geo_instance
 %geo_instance_float = OpBitcast %float %geo_instance_id
@@ -112,17 +124,19 @@ bool Spirv::EmitGeometryProlog(String8* output) const
 	               .ReplaceStr("<row1>", row1)
 	               .ReplaceStr("<group>", group)
 	               .ReplaceStr("<per>", per)
+	               .ReplaceStr("<corners>", corners)
+	               .ReplaceStr("<lanes>", lanes)
 	               .ReplaceStr("<waves>", waves);
 
 	for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
 	{
 		const auto b = String8(bank == ShaderWaveBank::Low ? "low" : "high");
-		// ES lane L computes corner L % 3 of input primitive base + L / 3. A strip's
-		// odd triangle keeps its first vertex and swaps the other two, the order the
-		// guest's own strip output uses with the provoking vertex first.
-		String8 vertex = geometry.topology == ShaderGeometryInputTopology::TriangleList
-		                     ? String8("%geo_<b>_triple = OpIMul %uint %geo_<b>_input %uint_3\n"
-		                               "%geo_<b>_vertex = OpIAdd %uint %geo_<b>_triple %geo_<b>_corner\n")
+		// ES thread T computes corner T % corners of input primitive base + T / corners.
+		// A strip's odd triangle keeps its first vertex and swaps the other two, the
+		// order the guest's own strip output uses with the provoking vertex first.
+		String8 vertex = geometry.topology != ShaderGeometryInputTopology::TriangleStrip
+		                     ? String8("%geo_<b>_first = OpIMul %uint %geo_<b>_input %<corners>\n"
+		                               "%geo_<b>_vertex = OpIAdd %uint %geo_<b>_first %geo_<b>_corner\n")
 		                     : String8("%geo_<b>_parity = OpBitwiseAnd %uint %geo_<b>_input %uint_1\n"
 		                               "%geo_<b>_odd = OpINotEqual %bool %geo_<b>_parity %uint_0\n"
 		                               "%geo_<b>_later = OpINotEqual %bool %geo_<b>_corner %uint_0\n"
@@ -130,20 +144,25 @@ bool Spirv::EmitGeometryProlog(String8* output) const
 		                               "%geo_<b>_swapped = OpISub %uint %uint_3 %geo_<b>_corner\n"
 		                               "%geo_<b>_strip_corner = OpSelect %uint %geo_<b>_swap %geo_<b>_swapped %geo_<b>_corner\n"
 		                               "%geo_<b>_vertex = OpIAdd %uint %geo_<b>_input %geo_<b>_strip_corner\n");
+		// GS thread T reads primitive T; a point has one corner, so its other
+		// vertex offsets stay zero.
+		String8 offsets = geometry.topology == ShaderGeometryInputTopology::PointList
+		                      ? String8("%geo_<b>_offsets01 = OpCopyObject %uint %geo_<b>_offset0\n"
+		                                "%geo_<b>_offset2 = OpCopyObject %uint %uint_0\n")
+		                      : String8("%geo_<b>_offset1 = OpIAdd %uint %geo_<b>_offset0 %<scale>\n"
+		                                "%geo_<b>_offset2 = OpIAdd %uint %geo_<b>_offset1 %<scale>\n"
+		                                "%geo_<b>_offset1_field = OpShiftLeftLogical %uint %geo_<b>_offset1 %uint_16\n"
+		                                "%geo_<b>_offsets01 = OpBitwiseOr %uint %geo_<b>_offset0 %geo_<b>_offset1_field\n");
 		*output += String8(R"(
-%geo_<b>_local = OpUDiv %uint %wave_logical_<b> %uint_3
-%geo_<b>_corner = OpUMod %uint %wave_logical_<b> %uint_3
+%geo_<b>_local = OpUDiv %uint %wave_logical_<b> %<corners>
+%geo_<b>_corner = OpUMod %uint %wave_logical_<b> %<corners>
 %geo_<b>_input = OpIAdd %uint %geo_base %geo_<b>_local
 <vertex>%geo_<b>_vertex_id = OpIAdd %uint %geo_first_vertex %geo_<b>_vertex
 %geo_<b>_vertex_float = OpBitcast %float %geo_<b>_vertex_id
                OpStore %v5_<b> %geo_<b>_vertex_float
                OpStore %v8_<b> %geo_instance_float
-%geo_<b>_offset0 = OpIMul %uint %wave_logical_<b> %<scale3>
-%geo_<b>_offset1 = OpIAdd %uint %geo_<b>_offset0 %<scale>
-%geo_<b>_offset2 = OpIAdd %uint %geo_<b>_offset1 %<scale>
-%geo_<b>_offset1_field = OpShiftLeftLogical %uint %geo_<b>_offset1 %uint_16
-%geo_<b>_offsets01 = OpBitwiseOr %uint %geo_<b>_offset0 %geo_<b>_offset1_field
-%geo_<b>_offsets01_float = OpBitcast %float %geo_<b>_offsets01
+%geo_<b>_offset0 = OpIMul %uint %wave_logical_<b> %<stride>
+<offsets>%geo_<b>_offsets01_float = OpBitcast %float %geo_<b>_offsets01
 %geo_<b>_offsets2_float = OpBitcast %float %geo_<b>_offset2
 %geo_<b>_primitive = OpIAdd %uint %geo_base %wave_logical_<b>
 %geo_<b>_primitive_float = OpBitcast %float %geo_<b>_primitive
@@ -154,7 +173,9 @@ bool Spirv::EmitGeometryProlog(String8* output) const
                OpStore %v4_<b> %geo_zero_float
 )")
 		               .ReplaceStr("<vertex>", vertex)
-		               .ReplaceStr("<scale3>", scale3)
+		               .ReplaceStr("<offsets>", offsets)
+		               .ReplaceStr("<corners>", corners)
+		               .ReplaceStr("<stride>", stride)
 		               .ReplaceStr("<scale>", scale)
 		               .ReplaceStr("<b>", b);
 	}
@@ -177,7 +198,7 @@ bool Spirv::EmitGeometryExport(const ShaderInstruction& instruction, uint32_t in
 		return false;
 	}
 	const auto record = GetConstantUint(geometry.RecordDwords());
-	const auto first  = GetConstantUint(prim ? ShaderGeometryComputeInfo::kPrimitiveWordsOffset : ShaderGeometryComputeInfo::kRecordsOffset);
+	const auto first  = GetConstantUint(prim ? ShaderGeometryComputeInfo::kPrimitiveWordsOffset : geometry.RecordsOffset());
 	if (!IsKnownUint(record) || !IsKnownUint(first))
 	{
 		return false;
@@ -261,10 +282,11 @@ ShaderComputeInputInfo SpirvGeometryComputeHostInfo(const ShaderCode& code, cons
                                                     const ShaderGeometryComputeInfo& geometry)
 {
 	ShaderComputeInputInfo host {};
-	host.threads_num[0] = ShaderGeometryComputeInfo::kLanes;
+	host.threads_num[0] = geometry.GroupLanes();
 	host.threads_num[1] = host.threads_num[2] = 1u;
 	host.lds_dwords  = geometry.lds_dwords;
-	host.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {64u, 1u, 1u}, {32u, 1u, 1u}, 64u, 32u, 2u, 1u, host.lds_dwords};
+	host.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {geometry.GroupLanes(), 1u, 1u}, {32u * geometry.waves, 1u, 1u}, 64u, 32u, 2u,
+	                    geometry.waves, host.lds_dwords};
 	host.barrier_workspace_dwords = ShaderComputeBarrierWorkspaceDwords(code, host.wave_layout);
 	host.bind        = vs_input_info.bind;
 	host.float_mode  = vs_input_info.float_mode;
@@ -279,7 +301,8 @@ String8 SpirvGenerateGeometryComputeSource(const ShaderCode& code, const ShaderV
 {
 	if (code.GetType() != ShaderType::Vertex || !vs_input_info.gs_prolog || vs_input_info.fetch_inline ||
 	    !vs_input_info.bind.geometry_used || !vs_input_info.bind.device_address_used || geometry.primitives_per_group == 0u ||
-	    geometry.primitives_per_group * 3u > ShaderGeometryComputeInfo::kLanes || geometry.lds_dwords == 0u ||
+	    geometry.waves == 0u || geometry.waves > ShaderGeometryComputeInfo::kMaxWaves ||
+	    geometry.primitives_per_group * geometry.Corners() > geometry.GroupLanes() || geometry.lds_dwords == 0u ||
 	    geometry.parameter_count < SpirvResolveVertexParameterCount(code, &vs_input_info))
 	{
 		return "OpKytyGeometryComputeRejected\n";
@@ -327,8 +350,8 @@ String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometr
     %uint_12 = OpConstant %uint 12
     %uint_20 = OpConstant %uint 20
     %uint_32 = OpConstant %uint 32
-    %uint_64 = OpConstant %uint 64
-   %uint_192 = OpConstant %uint 192
+ %uint_lanes = OpConstant %uint <lanes>
+%uint_group_corners = OpConstant %uint <group_corners>
  %uint_index_mask = OpConstant %uint 1023
  %uint_layer_mask = OpConstant %uint 2047
  %uint_count_mask = OpConstant %uint 4095
@@ -364,8 +387,8 @@ String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometr
      %output = OpBitwiseOr %ulong %output_his %output_lo64
 %vertex_signed = OpLoad %int %gl_VertexIndex
      %vertex = OpBitcast %uint %vertex_signed
-      %group = OpUDiv %uint %vertex %uint_192
-      %local = OpUMod %uint %vertex %uint_192
+      %group = OpUDiv %uint %vertex %uint_group_corners
+      %local = OpUMod %uint %vertex %uint_group_corners
   %primitive = OpUDiv %uint %local %uint_3
      %corner = OpUMod %uint %local %uint_3
 %group_words = OpIMul %uint %group %uint_group
@@ -383,7 +406,7 @@ String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometr
 %null_bits = OpBitwiseAnd %uint %primitive_word %uint_null
  %not_null = OpIEqual %bool %null_bits %uint_0
 %allocated = OpULessThan %bool %primitive %primitives
-%vertex_limit = OpExtInst %uint %glsl UMin %vertices %uint_64
+%vertex_limit = OpExtInst %uint %glsl UMin %vertices %uint_lanes
   %index0_ok = OpULessThan %bool %index0 %vertex_limit
   %index1_ok = OpULessThan %bool %index1 %vertex_limit
   %index2_ok = OpULessThan %bool %index2 %vertex_limit
@@ -470,7 +493,9 @@ String8 SpirvGenerateGeometryPullSource(const ShaderGeometryComputeInfo& geometr
 	    .ReplaceStr("<variables>", variables)
 	    .ReplaceStr("<group>", String8::FromPrintf("%u", geometry.GroupDwords()))
 	    .ReplaceStr("<record>", String8::FromPrintf("%u", geometry.RecordDwords()))
-	    .ReplaceStr("<records_offset>", String8::FromPrintf("%u", ShaderGeometryComputeInfo::kRecordsOffset))
+	    .ReplaceStr("<records_offset>", String8::FromPrintf("%u", geometry.RecordsOffset()))
+	    .ReplaceStr("<lanes>", String8::FromPrintf("%u", geometry.GroupLanes()))
+	    .ReplaceStr("<group_corners>", String8::FromPrintf("%u", geometry.GroupLanes() * 3u))
 	    .ReplaceStr("<load_header>", load("header", "uint_0"))
 	    .ReplaceStr("<load_primitive>", load("primitive_word", "primitive_word_offset"))
 	    .ReplaceStr("<records>", records);

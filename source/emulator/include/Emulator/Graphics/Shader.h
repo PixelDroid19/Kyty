@@ -2310,9 +2310,11 @@ struct ShaderVertexInputInfo
 	// The host stage draws the output of a merged ES+GS geometry pass instead of
 	// running the guest program (SpirvGenerateGeometryPullSource). Its records carry
 	// geometry_pull_parameters parameters; geometry_pull_layer exports the layer.
+	// Each output group holds geometry_pull_waves waves of records.
 	bool     geometry_pull            = false;
 	bool     geometry_pull_layer      = false;
 	uint32_t geometry_pull_parameters = 0;
+	uint32_t geometry_pull_waves      = 0;
 };
 
 // Bind each merged vertex stream as a ReadOnly raw SSBO so untagged MUBUF

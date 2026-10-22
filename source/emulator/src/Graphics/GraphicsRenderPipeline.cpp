@@ -1878,6 +1878,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 	id.ids.Add(geometry.primitives_per_group);
 	id.ids.Add(geometry.parameter_count);
 	id.ids.Add(geometry.lds_dwords);
+	id.ids.Add(geometry.waves);
 
 	Pipeline p {};
 	p.cs_shader_id   = id;

@@ -3324,10 +3324,11 @@ void Spirv::FindConstants()
 	if (UsesGeometryCompute() && m_bind != nullptr)
 	{
 		const auto& geometry = *m_geometry_compute_info;
-		for (uint32_t value: {0u, 1u, 2u, 3u, 8u, 16u, 32u, 1u << 28u, geometry.primitives_per_group, geometry.GroupDwords(),
-		                      geometry.RecordDwords(), ShaderGeometryComputeInfo::kVertexOffsetScale,
-		                      ShaderGeometryComputeInfo::kVertexOffsetScale * 3u, ShaderGeometryComputeInfo::kPrimitiveWordsOffset,
-		                      ShaderGeometryComputeInfo::kRecordsOffset})
+		for (uint32_t value: {0u, 1u, 2u, 3u, 8u, 16u, 24u, 32u, geometry.waves << 28u, geometry.primitives_per_group, geometry.GroupDwords(),
+		                      geometry.RecordDwords(), geometry.Corners(), ShaderGeometryComputeInfo::kLanes,
+		                      ShaderGeometryComputeInfo::kVertexOffsetScale,
+		                      ShaderGeometryComputeInfo::kVertexOffsetScale * geometry.Corners(),
+		                      ShaderGeometryComputeInfo::kPrimitiveWordsOffset, geometry.RecordsOffset()})
 		{
 			AddConstantUint(value);
 		}
