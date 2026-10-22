@@ -133,6 +133,16 @@ public:
 	[[nodiscard]] const ShaderControlFlowGraph& GetControlFlow() const { return m_control_flow; }
 	[[nodiscard]] bool UsesComputeWaveBanks() const;
 	[[nodiscard]] bool UsesNativeComputeWave() const;
+	// Split wave64 (ShaderSpirvSplitWave.cpp): two host subgroups per guest wave on the native per-lane path.
+	[[nodiscard]] bool UsesSplitComputeWave() const;
+	// The SubgroupLocalInvocationId builtin. A split wave keeps the guest lane in %gl_SubgroupInvocationID.
+	[[nodiscard]] String8 HostLaneVariable() const;
+	[[nodiscard]] String8 SplitWaveTypes() const;
+	[[nodiscard]] String8 SplitWaveVariables() const;
+	[[nodiscard]] String8 SplitWaveProlog() const;
+	[[nodiscard]] String8 SplitWaveDsOrder(uint32_t index) const;
+	[[nodiscard]] String8 SplitWaveFunctions() const;
+	void                  CheckSplitWaveCollectives(const String8& body) const;
 	[[nodiscard]] bool NativeComputeWaveLayoutIsValid() const;
 	[[nodiscard]] bool EmitNativeComputeWaveProlog(String8* output) const;
 	// Architectural EXEC/VCC and SGPR mask destinations always contain packed

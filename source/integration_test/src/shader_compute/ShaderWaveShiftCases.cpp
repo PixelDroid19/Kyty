@@ -1,8 +1,5 @@
 #include "ShaderWaveShiftCases.h"
 
-#include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
-#include "Emulator/Graphics/ShaderParse.h"
-
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 #include "ShaderWaveProbeSource.h"
 #include "VulkanComputeProbe.h"
@@ -43,20 +40,9 @@ void RunCase(VulkanComputeProbe& probe, const ShaderComputeInputInfo& input, con
 	// The tested SOP2 shifts s14 into VccHi; s_endpgm terminates the fixture.
 	// Keep these encoded guest words local to this test: there is no game fixture.
 	const std::vector<uint32_t> words {0xbe94046au, 0x8f6b860eu, 0xbf810000u};
-	ShaderCode                    code;
-	code.SetType(ShaderType::Compute);
-	if (!ShaderTryParseBounded(words.data(), words.size() * sizeof(uint32_t), &code))
-	{
-		Fail("bounded parser rejected the synthetic SOP2 shift fixture");
-	}
-	const auto admission = ShaderAnalyzeComputeWaveCode(code, input);
-	if (!admission.supported)
-	{
-		Fail(String8::FromPrintf("SLshlB32 to VccHi is not admitted: %s", admission.reason.c_str()).c_str());
-	}
 
-	const std::vector<WaveProbeObservation> observations {{"vcc_hi", "vcc_hi"}, {"vcc_lo", "vcc_lo"}, {"scc", "scc"},
-	                                                      {"exec_lo", "exec_lo"}, {"exec_hi", "exec_hi"}};
+	const std::vector<WaveProbeObservation> observations {{"vcc_hi"}, {"vcc_lo"}, {"scc"},
+	                                                      {"exec_lo"}, {"exec_hi"}};
 	const std::vector<WaveProbeSeed> seeds {{"s14", test.seed_s14}, {"exec_lo", kExecLow}, {"exec_hi", kExecHigh},
 	                                        {"vcc_lo", kVccLow}, {"vcc_hi", kInitialVccHi}, {"scc", test.seed_scc}};
 	String8                          source, error;
@@ -71,9 +57,9 @@ void RunCase(VulkanComputeProbe& probe, const ShaderComputeInputInfo& input, con
 	}
 
 	const uint32_t logical_count = input.wave_layout.waves * 64u;
-	if (input.wave_layout.banks != 2u || input.wave_layout.waves != 2u || logical_count != 128u)
+	if (input.wave_layout.banks != 1u || input.wave_layout.waves != 2u || logical_count != 128u)
 	{
-		Fail("fixture requires two paired banks and two logical waves");
+		Fail("fixture requires two split logical waves");
 	}
 	const size_t            stride = observations.size();
 	std::vector<uint32_t> initial((logical_count + 64u) * stride, kCanary), actual(initial.size());
@@ -118,11 +104,14 @@ void RunWaveShiftCases(VulkanComputeProbe& probe)
 	input.thread_ids_num    = 1;
 	input.workgroup_register = 14;
 	const ShaderComputeWaveRequest request {{128u, 1u, 1u}, {1u, 1u, 1u}, 0x41u, 0u, ShaderGuestLaneOrder::LinearXFirst};
-	if (ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
+	if (ShaderBuildSplitComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
 	    ShaderComputeWaveLayoutStatus::Supported)
 	{
 		Fail("two-wave paired layout unavailable");
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 
 	// The scalar seed overrides s14 for deterministic arithmetic; the values
 	// exercise both a nonzero shifted result and a result truncated to zero.

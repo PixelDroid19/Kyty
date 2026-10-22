@@ -3467,7 +3467,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
                OpStore %<dst> %rfl_value_<index>
 )";
 	String8 exchange = "%rfl_value_<index> = OpGroupNonUniformBroadcast %uint %uint_3 %t0_<index> %rfl_lane_sel_<index>";
-	if (spirv->GetHostShaderType() == ShaderType::Pixel)
+	if (spirv->UsesSplitComputeWave())
+	{
+		exchange = "%rfl_value_<index> = OpFunctionCall %uint %split_read %t0_<index> %rfl_lane_sel_<index>";
+	} else if (spirv->GetHostShaderType() == ShaderType::Pixel)
 	{
 		// If the first guest lane is a Vulkan helper, first gather its value
 		// into the other quad members. Broadcast from a participating member of
@@ -3650,8 +3653,14 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
         %readlane_<index> = OpGroupNonUniformShuffle %uint %uint_3 %t0_<index> %t1_<index>
                OpStore %<dst> %readlane_<index>
 )";
+	static const char* split_text = R"(
+        <load0>
+        <load1>
+        %readlane_<index> = OpFunctionCall %uint %split_read %t0_<index> %t1_<index>
+               OpStore %<dst> %readlane_<index>
+)";
 
-	*dst_source += String8(text)
+	*dst_source += String8(spirv->UsesSplitComputeWave() ? split_text : text)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<dst>", dst_value.value)
@@ -3780,11 +3789,16 @@ KYTY_RECOMPILER_FUNC(Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1)
 		return true;
 	}
 
+	// The lane is S1 % 64 for a split guest wave64 (%gl_SubgroupInvocationID holds the guest lane).
+	const char* selector = spirv->UsesSplitComputeWave() ? "%writelane_sel_<index> = OpBitwiseAnd %uint %t1_<index> %split_c63" : "";
+	const char* lane     = spirv->UsesSplitComputeWave() ? "writelane_sel_<index>" : "t1_<index>";
+
 	static const char* text = R"(
         <load0>
         <load1>
+        <selector>
         %writelane_id_<index> = OpLoad %uint %gl_SubgroupInvocationID
-        %writelane_match_<index> = OpIEqual %bool %writelane_id_<index> %t1_<index>
+        %writelane_match_<index> = OpIEqual %bool %writelane_id_<index> %<lane>
         %writelane_value_<index> = OpBitcast %float %t0_<index>
         %writelane_old_<index> = OpLoad %float %<dst>
         %writelane_result_<index> = OpSelect %float %writelane_match_<index> %writelane_value_<index> %writelane_old_<index>
@@ -3794,6 +3808,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1)
 	*dst_source += String8(text)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<selector>", selector)
+	                   .ReplaceStr("<lane>", lane)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 

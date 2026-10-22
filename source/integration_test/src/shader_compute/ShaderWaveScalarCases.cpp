@@ -24,11 +24,14 @@ void RunCase(VulkanComputeProbe& probe, uint32_t opcode, uint32_t destination, b
 	input.threads_num[1] = input.threads_num[2] = 1;
 	input.thread_ids_num                        = 1;
 	const ShaderComputeWaveRequest request {{64, 1, 1}, {1, 1, 1}, 0x41, 0, ShaderGuestLaneOrder::LinearXFirst};
-	if (ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
+	if (ShaderBuildSplitComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
 	    ShaderComputeWaveLayoutStatus::Supported)
 	{
 		Fail("paired layout unavailable");
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 	using Pair              = std::array<uint32_t, 2>;
 	const Pair            a = save ? Pair {0u, zero ? 0x40000000u : 0x80000000u} : Pair {1u, 0x80000000u};
 	const Pair            b = save ? Pair {1u, 0x80000000u} : Pair {0u, 0x80000000u};
@@ -61,8 +64,7 @@ void RunCase(VulkanComputeProbe& probe, uint32_t opcode, uint32_t destination, b
 	const std::string                       low  = destination == 4u ? "s4" : destination == 106u ? "vcc_lo" : "exec_lo";
 	const std::string                       high = destination == 4u ? "s5" : destination == 106u ? "vcc_hi" : "exec_hi";
 	const std::vector<WaveProbeObservation> observations {
-	    {low, low},     {high, high},       {"exec_lo", "exec_lo"},     {"exec_hi", "exec_hi"},
-	    {"scc", "scc"}, {"execz", "execz"}, {"v1_low", "v1_high", true}};
+	    {low}, {high}, {"exec_lo"}, {"exec_hi"}, {"scc"}, {"execz"}, {"v1", true}};
 	String8 source, error;
 	if (!BuildWaveProbeSource(words.data(), words.size() * sizeof(uint32_t), input, observations, {}, &source, &error))
 	{

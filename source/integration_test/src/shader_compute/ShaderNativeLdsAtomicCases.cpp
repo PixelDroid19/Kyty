@@ -24,14 +24,10 @@ void RunCase(VulkanComputeProbe& probe, uint32_t destination, bool active, uint3
 	input.threads_num[1] = input.threads_num[2] = 1;
 	input.thread_ids_num                        = 1;
 	input.lds_dwords                            = 128;
-	ShaderComputeWaveLayout        dispatch_layout {};
-	const ShaderComputeWaveRequest request {{64, 1, 1}, {1, 1, 1}, 0x41, 128, ShaderGuestLaneOrder::LinearXFirst};
-	if (ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &dispatch_layout) != ShaderComputeWaveLayoutStatus::Supported)
-	{
-		Fail("physical32 dispatch unavailable");
-	}
-	// Native32 lowering, one distinct LDS word per physical invocation. The
-	// observer duplicates each native result into two slots; this is not wave64.
+	// One exact 32-wide subgroup over the native wave32 lowering below.
+	const ShaderComputeWaveLayout dispatch_layout {ShaderComputeWaveStrategy::Native, {32, 1, 1}, {32, 1, 1}, 32, 32, 1, 0, 128};
+	// Native32 lowering, one distinct LDS word per physical invocation; the
+	// observer writes one two-word record per lane.
 	std::vector<uint32_t> words {0x34020082u, // v_lshlrev_b32 v1,2,v0
 	                             0x4a0a02ffu,
 	                             offset, // v_add_u32 v5,offset,v1
@@ -55,7 +51,7 @@ void RunCase(VulkanComputeProbe& probe, uint32_t destination, bool active, uint3
 		words.insert(words.begin() + 8, {0x7e020280u, 0x7e0a0280u}); // v1=0; v5=0
 	}
 	const auto                              register_name = "v" + std::to_string(destination);
-	const std::vector<WaveProbeObservation> observations {{register_name, register_name, true}, {"v4", "v4", true}};
+	const std::vector<WaveProbeObservation> observations {{register_name, true}, {"v4", true}};
 	String8                                 source, error;
 	if (!BuildWaveProbeSource(words.data(), words.size() * sizeof(uint32_t), input, observations, {}, &source, &error))
 	{
@@ -77,21 +73,15 @@ void RunCase(VulkanComputeProbe& probe, uint32_t destination, bool active, uint3
 	std::vector<uint32_t> returned;
 	for (size_t word = 0; word < result.size(); ++word)
 	{
-		const uint32_t lane            = (word / 2u) % 32u;
+		const uint32_t lane            = word / 2u;
 		const uint32_t old_destination = destination == 1u ? lane * 4u : destination == 2u ? 7u : 42u;
-		if (contended && word < 128u && word % 2u == 0u)
+		if (contended && word < 64u && word % 2u == 0u)
 		{
-			if (word < 64u)
-			{
-				returned.push_back(result[word]);
-			} else if (result[word] != result[word - 64u])
-			{
-				Fail("native observer duplicate differs");
-			}
+			returned.push_back(result[word]);
 			continue;
 		}
 		const uint32_t counter  = contended ? 266u : active ? 49u : 42u;
-		const uint32_t expected = word >= 128u ? sentinel : word % 2u == 0u ? (active ? 42u : old_destination) : counter;
+		const uint32_t expected = word >= 64u ? sentinel : word % 2u == 0u ? (active ? 42u : old_destination) : counter;
 		if (result[word] != expected)
 		{
 			Fail(String8::FromPrintf("dst%u active%u offset%u word%zu: %u != %u", destination, active, offset, word, result[word], expected)

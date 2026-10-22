@@ -93,11 +93,14 @@ void RunWaveMaskCases(VulkanComputeProbe& probe)
 	input.threads_num[1] = input.threads_num[2] = 1;
 	input.thread_ids_num                        = 1;
 	const ShaderComputeWaveRequest request {{64, 1, 1}, {1, 1, 1}, 0x41, 0, ShaderGuestLaneOrder::LinearXFirst};
-	if (ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
+	if (ShaderBuildSplitComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
 	    ShaderComputeWaveLayoutStatus::Supported)
 	{
 		Fail("paired layout must be supported after wave initialization");
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 	const MaskCase cases[] = {
 	    {"PairedLane63PackedMask", 0xc2u, 63u, {0u, 0x80000000u}},
 	    {"PairedZeroPredicate", 0xc2u, 64u, {0u, 0u}},
@@ -119,11 +122,14 @@ void RunWaveMaskCases(VulkanComputeProbe& probe)
 	input.threads_num[0] = 8;
 	input.threads_num[1] = input.threads_num[2] = 4;
 	input.thread_ids_num                        = 3;
-	if (ShaderBuildPairedComputeWaveLayout(xyz_request, probe.WaveCapabilities(), &input.wave_layout) !=
+	if (ShaderBuildSplitComputeWaveLayout(xyz_request, probe.WaveCapabilities(), &input.wave_layout) !=
 	    ShaderComputeWaveLayoutStatus::Supported)
 	{
 		Fail("multidimensional paired layout rejected");
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 	for (uint32_t axis = 0; axis < 3u; ++axis)
 	{
 		const uint32_t                       value = input.threads_num[axis] - 1u;

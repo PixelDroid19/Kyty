@@ -34,11 +34,14 @@ ShaderComputeInputInfo MappedInput(VulkanComputeProbe& probe, const std::array<u
 	input.threads_num[1] = input.threads_num[2] = 1u;
 	input.thread_ids_num                        = 1u;
 	const ShaderComputeWaveRequest request {{kLogicalLanes, 1u, 1u}, {1u, 1u, 1u}, 0x41u, 0u, ShaderGuestLaneOrder::LinearXFirst};
-	if (ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
+	if (ShaderBuildSplitComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
 	    ShaderComputeWaveLayoutStatus::Supported)
 	{
 		Fail("two-wave paired layout unavailable");
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 
 	auto& bind = input.bind;
 	bind.extended.used                       = true;
@@ -106,8 +109,8 @@ void RunMappedFourDwords(VulkanComputeProbe& probe, const std::array<uint32_t, N
 {
 	constexpr std::array<uint32_t, 4> descriptor {0x11223344u, 0x55667788u, 0x99aabbccu, 0xddeeff00u};
 	const auto                        input = MappedInput(probe, descriptor, 0x14u);
-	const std::vector<WaveProbeObservation> observations {{"s16", "s16"}, {"s17", "s17"},
-	                                                      {"s18", "s18"}, {"s19", "s19"}};
+	const std::vector<WaveProbeObservation> observations {{"s16"}, {"s17"},
+	                                                      {"s18"}, {"s19"}};
 	const std::vector<uint32_t> initial(kLogicalLanes * descriptor.size() + 64u, kSentinel);
 	const auto actual = DispatchMapped(probe, words.data(), sizeof(words), input, descriptor, observations, {}, initial);
 	for (uint32_t lane = 0; lane < kLogicalLanes; ++lane)
@@ -142,7 +145,7 @@ void RunMappedScalarBufferLoad(VulkanComputeProbe& probe, bool trailing_wait, co
 	initial[word]     = value;
 	const uint32_t bytes = static_cast<uint32_t>((trailing_wait ? words.size() : words.size() - 1u) * sizeof(uint32_t));
 	// Seeding a different value proves that the destination is overwritten.
-	const auto actual = DispatchMapped(probe, words.data(), bytes, input, descriptor, {{"vcc_lo", "vcc_lo"}}, {{"vcc_lo", 0x0badf00du}},
+	const auto actual = DispatchMapped(probe, words.data(), bytes, input, descriptor, {{"vcc_lo"}}, {{"vcc_lo", 0x0badf00du}},
 	                                       initial);
 	for (uint32_t lane = 0; lane < kLogicalLanes; ++lane)
 	{

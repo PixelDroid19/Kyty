@@ -937,8 +937,11 @@ static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInput
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
 	if (input_info->native_wave_sensitive)
 	{
-		if (input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native ||
-		    input_info->wave_layout.guest_wave_size != 32u || input_info->required_subgroup_size != 32u)
+		// A split guest wave identifies its halves by SubgroupId, so it always requires the exact width.
+		const bool split = input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
+		if (input_info->required_subgroup_size != 32u ||
+		    (split ? input_info->wave_layout.guest_wave_size != 64u
+		           : input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native || input_info->wave_layout.guest_wave_size != 32u))
 		{
 			EXIT("native-wave compute sensitivity has inconsistent guest-width metadata\n");
 		}
@@ -953,7 +956,7 @@ static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInput
 		native_layout.native_subgroup_size = input_info->required_subgroup_size;
 		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
 		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(native_layout, capabilities, &comp_shader_stage_info,
-		                                                     &required_subgroup_size, selection.require_size, cs_shader.At(1)))
+		                                                     &required_subgroup_size, split || selection.require_size, cs_shader.At(1)))
 		{
 			EXIT("native-wave compute layout lacks full subgroups or exceeds exact-width workgroup limits\n");
 		}

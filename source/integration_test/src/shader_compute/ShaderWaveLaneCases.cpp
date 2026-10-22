@@ -25,8 +25,7 @@ void RunCase(VulkanComputeProbe& probe, const ShaderComputeInputInfo& input, con
 	auto    source_input = input;
 	if (native32)
 	{
-		// The native shader has 32 physical lanes. Repeated scalar observations
-		// in the second record slot do not imply 64 native guest lanes.
+		// The native shader has 32 physical lanes, so it writes 32 records.
 		source_input.wave_layout    = {};
 		source_input.threads_num[0] = 32u;
 	}
@@ -41,7 +40,8 @@ void RunCase(VulkanComputeProbe& probe, const ShaderComputeInputInfo& input, con
 		Fail(error.c_str());
 	}
 	constexpr uint32_t sentinel = 0xa5c37e19u;
-	if (expected.size() != 64u * observations.size())
+	const uint32_t     lanes    = native32 ? 32u : 64u;
+	if (expected.size() != lanes * observations.size())
 	{
 		Fail("invalid lane oracle size");
 	}
@@ -71,7 +71,7 @@ void ReadLaneCases(VulkanComputeProbe& probe, const ShaderComputeInputInfo& inpu
 		// Scalar selector followed by repeated readlane catches temporary-ID collisions.
 		const std::vector<uint32_t>             words {0xbe8403ffu, test[0],           0xd7600005u, 256u | (4u << 9u),
 		                                               0xd7600005u, 256u | (4u << 9u), 0xbf810000u};
-		const std::vector<WaveProbeObservation> observations {{"s5", "s5"}, {"exec_lo", "exec_lo"}, {"exec_hi", "exec_hi"}, {"scc", "scc"}};
+		const std::vector<WaveProbeObservation> observations {{"s5"}, {"exec_lo"}, {"exec_hi"}, {"scc"}};
 		std::vector<uint32_t>                   expected;
 		for (uint32_t lane = 0; lane < 64u; ++lane)
 		{
@@ -91,7 +91,7 @@ void WriteLaneCases(VulkanComputeProbe& probe, const ShaderComputeInputInfo& inp
 		const std::vector<uint32_t>             words {0xbe8403ffu, test[0],           0xd7610000u, 170u | (4u << 9u),
 		                                               0xd7600005u, 256u | (4u << 9u), 0xbf810000u};
 		const std::vector<WaveProbeObservation> observations {
-		    {"v0_low", "v0_high", true}, {"s5", "s5"}, {"exec_lo", "exec_lo"}, {"exec_hi", "exec_hi"}};
+		    {"v0", true}, {"s5"}, {"exec_lo"}, {"exec_hi"}};
 		std::vector<uint32_t> expected;
 		for (uint32_t lane = 0; lane < 64u; ++lane)
 		{
@@ -118,7 +118,7 @@ void ReadFirstCases(VulkanComputeProbe& probe, const ShaderComputeInputInfo& inp
 	};
 	// Establish a nonzero lane0 through a real writelane, independently of EXEC.
 	const std::vector<uint32_t>             words {0xbe840380u, 0xd7610000u, 170u | (4u << 9u), 0xd5820005u, 256u, 0xbf810000u};
-	const std::vector<WaveProbeObservation> observations {{"s5", "s5"}, {"exec_lo", "exec_lo"}, {"exec_hi", "exec_hi"}, {"scc", "scc"}};
+	const std::vector<WaveProbeObservation> observations {{"s5"}, {"exec_lo"}, {"exec_hi"}, {"scc"}};
 	for (const auto& test: cases)
 	{
 		std::vector<uint32_t> expected;
@@ -136,7 +136,7 @@ void VectorMoveCase(VulkanComputeProbe& probe, const ShaderComputeInputInfo& inp
 	// destination preservation are observed through all 64 original lane values.
 	const std::vector<uint32_t>             words {0xbe840393u, 0x7e000204u, 0x7e000300u, 0xbf810000u};
 	const std::vector<WaveProbeObservation> observations {
-	    {"v0_low", "v0_high", true}, {"exec_lo", "exec_lo"}, {"exec_hi", "exec_hi"}, {"scc", "scc"}};
+	    {"v0", true}, {"exec_lo"}, {"exec_hi"}, {"scc"}};
 	std::vector<uint32_t> expected;
 	for (uint32_t lane = 0; lane < 64u; ++lane)
 	{
@@ -148,8 +148,8 @@ void VectorMoveCase(VulkanComputeProbe& probe, const ShaderComputeInputInfo& inp
 void NativeEmptyFirstCase(VulkanComputeProbe& probe, const ShaderComputeInputInfo& input)
 {
 	const std::vector<uint32_t>             words {0xbe840380u, 0xd7610000u, 170u | (4u << 9u), 0xd5820005u, 256u, 0xbf810000u};
-	const std::vector<WaveProbeObservation> observations {{"s5", "s5"}};
-	RunCase(probe, input, "Native32ReadFirstEmptyReadsNonzeroLane0", words, observations, {0u, 0u}, std::vector<uint32_t>(64u, 42u), true);
+	const std::vector<WaveProbeObservation> observations {{"s5"}};
+	RunCase(probe, input, "Native32ReadFirstEmptyReadsNonzeroLane0", words, observations, {0u, 0u}, std::vector<uint32_t>(32u, 42u), true);
 }
 
 void ScalarExecCopyCases(VulkanComputeProbe& probe, const ShaderComputeInputInfo& input)
@@ -159,7 +159,7 @@ void ScalarExecCopyCases(VulkanComputeProbe& probe, const ShaderComputeInputInfo
 	const std::vector<uint32_t>             words {0xd4c2006au, 256u | (191u << 9u), 0xbefe046au, 0x7e0002aau,
 	                                               0xbe84047eu, 0xbefe04c1u,         0xbe86047eu, 0xbf810000u};
 	const std::vector<WaveProbeObservation> observations {
-	    {"v0_low", "v0_high", true}, {"s4", "s4"}, {"s5", "s5"}, {"s6", "s6"}, {"s7", "s7"}, {"execz", "execz"}, {"scc", "scc"}};
+	    {"v0", true}, {"s4"}, {"s5"}, {"s6"}, {"s7"}, {"execz"}, {"scc"}};
 	std::vector<uint32_t> expected;
 	for (uint32_t lane = 0; lane < 64u; ++lane)
 	{
@@ -169,7 +169,7 @@ void ScalarExecCopyCases(VulkanComputeProbe& probe, const ShaderComputeInputInfo
 
 	const std::vector<uint32_t>             empty_words {0xbefe0480u, 0x7e0002aau, 0xbf810000u};
 	const std::vector<WaveProbeObservation> empty_observations {
-	    {"v0_low", "v0_high", true}, {"exec_lo", "exec_lo"}, {"exec_hi", "exec_hi"}, {"execz", "execz"}, {"scc", "scc"}};
+	    {"v0", true}, {"exec_lo"}, {"exec_hi"}, {"execz"}, {"scc"}};
 	expected.clear();
 	for (uint32_t lane = 0; lane < 64u; ++lane)
 	{
@@ -198,11 +198,14 @@ void RunWaveLaneCases(VulkanComputeProbe& probe)
 	input.threads_num[1] = input.threads_num[2] = 1u;
 	input.thread_ids_num                        = 1;
 	const ShaderComputeWaveRequest request {{64, 1, 1}, {1, 1, 1}, 0x41, 0, ShaderGuestLaneOrder::LinearXFirst};
-	if (ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
+	if (ShaderBuildSplitComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
 	    ShaderComputeWaveLayoutStatus::Supported)
 	{
 		Fail("paired lane layout unavailable after initialization");
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 	NativeEmptyFirstCase(probe, input);
 	ReadLaneCases(probe, input);
 	WriteLaneCases(probe, input);

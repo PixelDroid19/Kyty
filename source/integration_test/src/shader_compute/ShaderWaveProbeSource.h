@@ -10,8 +10,7 @@ namespace Kyty::Libs::Graphics {
 
 struct WaveProbeObservation
 {
-	std::string low;
-	std::string high;
+	std::string variable;
 	bool        floating = false;
 };
 

@@ -4740,28 +4740,18 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 				EXIT("wave64 dispatch reads DPP quads across a partial quad: local=%ux%ux%u\n", info->threads_num[0],
 				     info->threads_num[1], info->threads_num[2]);
 			}
-		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
+		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32)
 		{
 			// A program proven wave-width independent runs one guest lane per
-			// invocation: half the code of paired banks, over the same workgroup.
+			// invocation without exchanges between the halves of a guest wave.
 			const auto native = info->native_equivalent_valid ? program->NativeEquivalence() : ShaderComputeWaveAnalysisResult {};
-			const bool native_fits = NativeEquivalenceFitsWorkgroup(native, *info);
-			const auto admission = native_fits ? ShaderComputeWaveAnalysisResult {true, 0, {}} : ShaderAnalyzeComputeWaveCode(code, *info);
-			if (native_fits)
+			if (NativeEquivalenceFitsWorkgroup(native, *info))
 			{
 				info->wave_layout = info->native_equivalent_layout;
-			} else if (!admission.supported)
+			} else
 			{
-				std::string dump_note;
-				if (const char* dump_dir = std::getenv("KYTY_TRANSPORT_DUMP"); dump_dir != nullptr && dump_dir[0] != '\0')
-				{
-					dump_note = " (compute dump: " + ShaderDumpGuestProgram(dump_dir, "cs", regs->cs_regs.chksum, regs->cs_regs.data_addr, code) + ")";
-				}
-				EXIT("paired-wave dispatch admission unsupported: mode=0x%08" PRIx32 " pc=0x%08" PRIx32 " reason=%s; "
-				     "native-equivalence %s pc=0x%08" PRIx32 " reason=%s%s\n",
-				     dispatch_mode, admission.unsupported_pc, admission.reason.c_str(),
-				     info->native_equivalent_valid ? "rejected" : "unavailable", native.unsupported_pc, native.reason.c_str(),
-				     dump_note.c_str());
+				info->native_wave_sensitive  = true;
+				info->required_subgroup_size = 32u;
 			}
 		}
 		info->barrier_workspace_dwords = ShaderComputeBarrierWorkspaceDwords(code, info->wave_layout);
@@ -4824,7 +4814,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			const bool native_xy_thread_ids =
 			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->thread_ids_num >= 2;
 			const bool paired_xy_thread_ids =
-			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32 && info->thread_ids_num >= 2;
+			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32 && info->thread_ids_num >= 2;
 			auto coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register, info->threads_num,
 			                                                       native_xy_thread_ids, info->group_id[0] && info->group_id[1],
 			                                                       paired_xy_thread_ids);

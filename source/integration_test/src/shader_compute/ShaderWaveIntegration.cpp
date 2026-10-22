@@ -44,7 +44,7 @@ using Kyty::Libs::Graphics::VulkanComputeProbe;
 
 [[noreturn]] void Fail(const char* message)
 {
-	std::fprintf(stderr, "paired wave64 integration failure: %s\n", message);
+	std::fprintf(stderr, "split wave64 integration failure: %s\n", message);
 	std::fflush(stderr);
 	std::_Exit(EXIT_FAILURE);
 }
@@ -52,7 +52,7 @@ using Kyty::Libs::Graphics::VulkanComputeProbe;
 void CheckOversizedOutputRejectsBeforeVulkanInitialization()
 {
 	VulkanComputeProbe probe;
-	const ShaderComputeWaveLayout layout {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0};
+	const ShaderComputeWaveLayout layout {ShaderComputeWaveStrategy::Split64On32, {64, 1, 1}, {64, 1, 1}, 64, 32, 1, 1, 0};
 	const std::array<uint32_t, 3> groups {1, 1, 1};
 	const std::vector<uint32_t> initial(4097);
 	std::vector<uint32_t> oversized_output(4097);
@@ -105,7 +105,7 @@ OpCapability Shader
 OpCapability GroupNonUniform
 OpMemoryModel Logical GLSL450
 OpEntryPoint GLCompute %main "main" %subgroup_lane %subgroup_id %workgroup_id %output_buffer
-OpExecutionMode %main LocalSize 128 1 1
+OpExecutionMode %main LocalSize 256 1 1
 OpDecorate %subgroup_lane BuiltIn SubgroupLocalInvocationId
 OpDecorate %subgroup_id BuiltIn SubgroupId
 OpDecorate %workgroup_id BuiltIn WorkgroupId
@@ -120,7 +120,6 @@ OpDecorate %output_buffer Binding 0
 %v3uint = OpTypeVector %uint 3
 %uint_zero = OpConstant %uint 0
 %uint_32 = OpConstant %uint 32
-%uint_64 = OpConstant %uint 64
 %uint_256 = OpConstant %uint 256
 %output_words = OpTypeRuntimeArray %uint
 %output_block = OpTypeStruct %output_words
@@ -139,15 +138,11 @@ OpDecorate %output_buffer Binding 0
 %workgroup = OpLoad %v3uint %workgroup_id
 %workgroup_x = OpCompositeExtract %uint %workgroup 0
 %workgroup_base = OpIMul %uint %workgroup_x %uint_256
-%subgroup_base = OpIMul %uint %subgroup %uint_64
-%wave_base = OpIAdd %uint %workgroup_base %subgroup_base
-%bank_zero_index = OpIAdd %uint %wave_base %lane
-%bank_one_lane = OpIAdd %uint %lane %uint_32
-%bank_one_index = OpIAdd %uint %wave_base %bank_one_lane
-%bank_zero_pointer = OpAccessChain %output_uint_pointer %output_buffer %uint_zero %bank_zero_index
-%bank_one_pointer = OpAccessChain %output_uint_pointer %output_buffer %uint_zero %bank_one_index
-OpStore %bank_zero_pointer %bank_zero_index
-OpStore %bank_one_pointer %bank_one_index
+%subgroup_base = OpIMul %uint %subgroup %uint_32
+%half_base = OpIAdd %uint %workgroup_base %subgroup_base
+%guest_index = OpIAdd %uint %half_base %lane
+%guest_pointer = OpAccessChain %output_uint_pointer %output_buffer %uint_zero %guest_index
+OpStore %guest_pointer %guest_index
 OpReturn
 OpFunctionEnd
 )SPV";
@@ -208,12 +203,12 @@ void RunNativeLayoutFixture(VulkanComputeProbe* vulkan)
 	if (vulkan == nullptr) { Fail("wave probe is null"); }
 	const ShaderComputeWaveRequest request {{256, 1, 1}, {2, 1, 1}, 0x41, 0, ShaderGuestLaneOrder::LinearXFirst};
 	ShaderComputeWaveLayout layout {};
-	const auto layout_status = Kyty::Libs::Graphics::ShaderBuildPairedComputeWaveLayout(request,
+	const auto layout_status = Kyty::Libs::Graphics::ShaderBuildSplitComputeWaveLayout(request,
 	                                                                                     vulkan->WaveCapabilities(), &layout);
 	if (layout_status == ShaderComputeWaveLayoutStatus::MissingHostCapability ||
 	    layout_status == ShaderComputeWaveLayoutStatus::HostLimitExceeded)
 	{
-		std::fprintf(stderr, "paired-wave host layout unavailable: status=%u\n", static_cast<unsigned>(layout_status));
+		std::fprintf(stderr, "split-wave host layout unavailable: status=%u\n", static_cast<unsigned>(layout_status));
 		std::fflush(stderr);
 		std::_Exit(77);
 	}
@@ -240,13 +235,13 @@ void RunNativeLayoutFixture(VulkanComputeProbe* vulkan)
 	const auto result = vulkan->DispatchWave(spirv.GetDataConst(), spirv.Size(), layout, groups, initial_words, &actual, &message);
 	if (result == VulkanComputeProbe::Result::Unavailable)
 	{
-		std::fprintf(stderr, "paired-wave host layout unavailable: %s\n", message.c_str());
+		std::fprintf(stderr, "split-wave host layout unavailable: %s\n", message.c_str());
 		std::fflush(stderr);
 		std::_Exit(77);
 	}
 	if (result != VulkanComputeProbe::Result::Success)
 	{
-		std::fprintf(stderr, "paired-wave host layout dispatch failed: %s\n", message.c_str());
+		std::fprintf(stderr, "split-wave host layout dispatch failed: %s\n", message.c_str());
 		std::fflush(stderr);
 		Fail("host-layout Vulkan dispatch failed");
 	}
@@ -254,7 +249,7 @@ void RunNativeLayoutFixture(VulkanComputeProbe* vulkan)
 	{
 		if (actual[lane] != lane) { Fail("host-layout output did not preserve unique slots across guest waves and workgroups"); }
 	}
-	std::printf("PairedWave64HostLayout waves_per_group=4 groups=2 output_words=512 PASS\n");
+	std::printf("SplitWave64HostLayout waves_per_group=4 groups=2 output_words=512 PASS\n");
 }
 
 void RunNativeWave32MaskFixture(VulkanComputeProbe* vulkan)
@@ -412,7 +407,7 @@ void RunNativeWave32CoordinateFixture(VulkanComputeProbe* vulkan)
 	}
 
 	const std::vector<Kyty::Libs::Graphics::WaveProbeObservation> observations {
-	    {"v0", "v0", true}, {"v1", "v1", true}, {"s4", "s4"}, {"exec_lo", "exec_lo"}};
+	    {"v0", true}, {"v1", true}, {"s4"}, {"exec_lo"}};
 	Kyty::Core::String8 source, error;
 	if (!Kyty::Libs::Graphics::BuildWaveProbeSource(words.data(), sizeof(words), input, observations, {}, &source, &error, 1u))
 	{
@@ -454,18 +449,14 @@ void RunNativeWave32CoordinateFixture(VulkanComputeProbe* vulkan)
 		const uint32_t expected_exec = subgroup == 0u ? 0xffffffffu : 0u;
 		for (uint32_t lane = 0; lane < 32u; ++lane)
 		{
-			for (uint32_t bank = 0; bank < 2u; ++bank)
+			const uint32_t index = (subgroup * 32u + lane) * kObservationStride;
+			if (actual[index] != lane || actual[index + 1u] != subgroup || actual[index + 2u] != expected_exec ||
+			    actual[index + 3u] != expected_exec)
 			{
-				const uint32_t logical = subgroup * 64u + bank * 32u + lane;
-				const uint32_t index = logical * kObservationStride;
-				if (actual[index] != lane || actual[index + 1u] != subgroup || actual[index + 2u] != expected_exec ||
-				    actual[index + 3u] != expected_exec)
-				{
-					Fail(Kyty::Core::String8::FromPrintf(
-					         "native coordinate subgroup=%u lane=%u bank=%u got=(%u,%u,%08x,%08x) expected=(%u,%u,%08x,%08x)",
-					         subgroup, lane, bank, actual[index], actual[index + 1u], actual[index + 2u], actual[index + 3u], lane, subgroup,
-					         expected_exec, expected_exec).c_str());
-				}
+				Fail(Kyty::Core::String8::FromPrintf(
+				         "native coordinate subgroup=%u lane=%u got=(%u,%u,%08x,%08x) expected=(%u,%u,%08x,%08x)",
+				         subgroup, lane, actual[index], actual[index + 1u], actual[index + 2u], actual[index + 3u], lane, subgroup,
+				         expected_exec, expected_exec).c_str());
 			}
 		}
 	}
@@ -483,13 +474,13 @@ int main()
 	const auto initialized = vulkan.InitializeWave(&message);
 	if (initialized == VulkanComputeProbe::Result::Unavailable)
 	{
-		std::fprintf(stderr, "paired-wave compute capability unavailable: %s\n", message.c_str());
+		std::fprintf(stderr, "split-wave compute capability unavailable: %s\n", message.c_str());
 		std::fflush(stderr);
 		return 77;
 	}
 	if (initialized != VulkanComputeProbe::Result::Success)
 	{
-		std::fprintf(stderr, "paired-wave compute initialization failed: %s\n", message.c_str());
+		std::fprintf(stderr, "split-wave compute initialization failed: %s\n", message.c_str());
 		std::fflush(stderr);
 		Fail("optional Vulkan wave probe initialization failed");
 	}

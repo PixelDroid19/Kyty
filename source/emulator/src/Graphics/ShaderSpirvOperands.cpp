@@ -125,6 +125,10 @@ String8 Spirv::NativeQuadUniform(const String8& value, const String8& type, cons
 
 String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result) const
 {
+	if (UsesSplitComputeWave())
+	{
+		return "%" + result + " = OpFunctionCall %v4uint %split_ballot %" + predicate + "\n";
+	}
 	if (GetHostShaderType() != ShaderType::Pixel)
 	{
 		return "%" + result + " = OpGroupNonUniformBallot %v4uint %uint_3 %" + predicate + "\n";
@@ -760,7 +764,7 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 {
 	String8 head = input_is_uint ? String8("\n        %dpp_bits_<result> = OpCopyObject %uint %<in>\n")
 	                             : String8("\n        %dpp_bits_<result> = OpBitcast %uint %<in>\n");
-	static const char* permutation = R"(      %dpp_lane_<result> = OpLoad %uint %gl_SubgroupInvocationID
+	static const char* permutation = R"(      %dpp_lane_<result> = OpLoad %uint %<host_lane>
       %dpp_ssize_<result> = OpLoad %uint %gl_SubgroupSize
       %dpp_last_<result> = OpISub %uint %dpp_ssize_<result> %uint_1
      %dpp_local_<result> = OpBitwiseAnd %uint %dpp_lane_<result> %<lane_15>
@@ -803,6 +807,7 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 		                     : "    %dpp_bounds_<result> = OpUGreaterThanEqual %bool %dpp_local_<result> %<step>\n";
 	}
 	*text = (head + String8(permutation))
+	            .ReplaceStr("<host_lane>", spirv->HostLaneVariable())
 	            .ReplaceStr("<target>", target)
 	            .ReplaceStr("<exec_guard>", exec_guard ? String8(exec_guard_text) : String8())
 	            .ReplaceStr("<ok>", exec_guard ? String8("%dpp_okg_<result>") : String8("%dpp_ok_<result>"))
@@ -839,7 +844,7 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 
 	String8 head = input_is_uint ? String8("\n        %dpp_bits_<result> = OpCopyObject %uint %<in>\n")
 	                             : String8("\n        %dpp_bits_<result> = OpBitcast %uint %<in>\n");
-	static const char* permutation = R"(        %dpp_lane_<result> = OpLoad %uint %gl_SubgroupInvocationID
+	static const char* permutation = R"(        %dpp_lane_<result> = OpLoad %uint %<host_lane>
        %dpp_local_<result> = OpBitwiseAnd %uint %dpp_lane_<result> %<three>
        %dpp_shift_<result> = OpShiftLeftLogical %uint %dpp_local_<result> %<one>
        %dpp_table_<result> = OpShiftRightLogical %uint %<ctrl> %dpp_shift_<result>
@@ -911,6 +916,7 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 		}
 	}
 	*text = (head + String8(permutation))
+	                     .ReplaceStr("<host_lane>", spirv->HostLaneVariable())
 	                     .ReplaceStr("<exchange>", exchange)
 	                     .ReplaceStr("<result>", result_id)
 	                     .ReplaceStr("<in>", input_id)

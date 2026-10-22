@@ -2396,7 +2396,10 @@ static bool EmitOrdinaryNativeGdsAppend(const ShaderInstruction& inst, uint32_t 
 	source += String8::FromPrintf("%%%s_count_lo = OpBitCount %%uint %%%s_lo\n", tag.c_str(), tag.c_str());
 	source += String8::FromPrintf("%%%s_count_hi = OpBitCount %%uint %%%s_hi\n", tag.c_str(), tag.c_str());
 	source += String8::FromPrintf("%%%s_count = OpIAdd %%uint %%%s_count_lo %%%s_count_hi\n", tag.c_str(), tag.c_str(), tag.c_str());
-	source += String8::FromPrintf("%%%s_elected = OpGroupNonUniformElect %%bool %%%s\n", tag.c_str(), subgroup_scope.c_str());
+	// A split wave's lower half performs the wave's single update.
+	source += spirv->UsesSplitComputeWave()
+	              ? String8::FromPrintf("%%%s_elected = OpFunctionCall %%bool %%split_leader\n", tag.c_str())
+	              : String8::FromPrintf("%%%s_elected = OpGroupNonUniformElect %%bool %%%s\n", tag.c_str(), subgroup_scope.c_str());
 	source += String8::FromPrintf("%%%s_has_active = OpINotEqual %%bool %%%s_count %s\n", tag.c_str(), tag.c_str(), id(zero).c_str());
 	source +=
 	    String8::FromPrintf("%%%s_do_atomic = OpLogicalAnd %%bool %%%s_elected %%%s_has_active\n", tag.c_str(), tag.c_str(), tag.c_str());
@@ -2415,8 +2418,10 @@ static bool EmitOrdinaryNativeGdsAppend(const ShaderInstruction& inst, uint32_t 
 	source += String8::FromPrintf("%%%s_old = OpPhi %%uint %%%s_old_leader %%%s_atomic_do %%%s %%%s_atomic_skip\n", tag.c_str(),
 	                              tag.c_str(), tag.c_str(), zero.c_str(), tag.c_str());
 	// Reconverge before broadcasting the old counter, then preserve inactive destination VGPRs.
-	source += String8::FromPrintf("%%%s_broadcast = OpGroupNonUniformBroadcastFirst %%uint %%%s %%%s_old\n", tag.c_str(),
-	                              subgroup_scope.c_str(), tag.c_str());
+	source += spirv->UsesSplitComputeWave()
+	              ? String8::FromPrintf("%%%s_broadcast = OpFunctionCall %%uint %%split_first %%%s_old\n", tag.c_str(), tag.c_str())
+	              : String8::FromPrintf("%%%s_broadcast = OpGroupNonUniformBroadcastFirst %%uint %%%s %%%s_old\n", tag.c_str(),
+	                                    subgroup_scope.c_str(), tag.c_str());
 	source += "               OpMemoryBarrier %uint_1 %uint_72\n";
 	source += String8::FromPrintf("%%%s_exec_lane = OpLoad %%uint %%exec_lane_lo\n", tag.c_str());
 	source += String8::FromPrintf("%%%s_active = OpINotEqual %%bool %%%s_exec_lane %s\n", tag.c_str(), tag.c_str(), id(zero).c_str());

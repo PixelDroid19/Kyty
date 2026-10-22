@@ -43,8 +43,8 @@ void RunCase(VulkanComputeProbe& probe, const ShaderComputeInputInfo& input, uin
 	words.push_back(0xbe84046au); // s_mov_b64 s[4:5],vcc
 	words.push_back(0xbf810000u);
 	const std::vector<WaveProbeObservation> observations {
-	    {"v0_low", "v0_high", true}, {"exec_lo", "exec_lo"}, {"exec_hi", "exec_hi"},
-	    {"vcc_lo", "vcc_lo"}, {"vcc_hi", "vcc_hi"}, {"scc", "scc"}};
+	    {"v0", true}, {"exec_lo"}, {"exec_hi"},
+	    {"vcc_lo"}, {"vcc_hi"}, {"scc"}};
 	const std::vector<WaveProbeSeed> seeds {
 	    {"exec_lo", 0x80000001u}, {"exec_hi", 0x80000000u}, {"vcc_lo", 0x13579bdfu}, {"vcc_hi", 0x2468ace0u}, {"scc", 1u}};
 	String8 source, error;
@@ -91,7 +91,7 @@ void RunAdd3Case(VulkanComputeProbe& probe, const ShaderComputeInputInfo& input,
 	if (literal) { words.push_back(other); }
 	words.push_back(0xbe84046au); // s_mov_b64 s[4:5],vcc keeps VCC architectural
 	words.push_back(0xbf810000u);
-	const std::vector<WaveProbeObservation> observations {{"v0_low", "v0_high", true}, {"vcc_lo", "vcc_lo"}, {"vcc_hi", "vcc_hi"}};
+	const std::vector<WaveProbeObservation> observations {{"v0", true}, {"vcc_lo"}, {"vcc_hi"}};
 	const std::vector<WaveProbeSeed> seeds {{"exec_lo", 0x80000001u}, {"exec_hi", 0x80000000u}, {"vcc_lo", vcc_lo}, {"vcc_hi", vcc_hi}};
 	String8 source, error;
 	if (!BuildWaveProbeSource(words.data(), words.size() * sizeof(uint32_t), input, observations, seeds, &source, &error))
@@ -135,10 +135,13 @@ void RunWaveAluCases(VulkanComputeProbe& probe)
 	input.threads_num[1] = input.threads_num[2] = 1u;
 	input.thread_ids_num = 1;
 	const ShaderComputeWaveRequest request {{64, 1, 1}, {1, 1, 1}, 0x41, 0, ShaderGuestLaneOrder::LinearXFirst};
-	if (ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) != ShaderComputeWaveLayoutStatus::Supported)
+	if (ShaderBuildSplitComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) != ShaderComputeWaveLayoutStatus::Supported)
 	{
 		Fail("paired ALU layout unavailable");
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 	for (const uint32_t opcode: {0x1bu, 0x1cu, 0x1du, 0x25u, 0x26u})
 	{
 		RunCase(probe, input, opcode, false);

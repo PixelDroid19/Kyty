@@ -164,25 +164,19 @@ bool BuildShader(uint32_t opcode, uint32_t comparison_opcode, uint32_t compariso
 		return false;
 	}
 	std::string observation;
-	if (plan.wave_layout.strategy == Kyty::Libs::Graphics::ShaderComputeWaveStrategy::Paired64On32)
+	if (plan.wave_layout.strategy == Kyty::Libs::Graphics::ShaderComputeWaveStrategy::Split64On32)
 	{
+		// One invocation per guest lane; the prolog's logical index is wave * 64 + guest lane.
 		observation = "%gds_probe_group_ptr = OpAccessChain %_ptr_Input_uint %gl_WorkGroupID %uint_0\n"
 		              "%gds_probe_group = OpLoad %uint %gds_probe_group_ptr\n"
 		              "%gds_probe_group_base_half = OpIMul %uint %gds_probe_group %uint_32\n"
-		              "%gds_probe_group_base = OpIMul %uint %gds_probe_group_base_half %uint_2\n"
-		              "%gds_probe_float_low = OpLoad %float %v2_low\n"
-		              "%gds_probe_value_low = OpBitcast %uint %gds_probe_float_low\n"
-		              "%gds_probe_index_low_base = OpIAdd %uint %gds_probe_group_base %wave_lane_id\n"
-		              "%gds_probe_index_low = OpIAdd %uint %gds_probe_index_low_base %uint_1\n"
-		              "%gds_probe_ptr_low = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %gds_probe_index_low\n"
-		              "OpStore %gds_probe_ptr_low %gds_probe_value_low\n"
-		              "%gds_probe_float_high = OpLoad %float %v2_high\n"
-		              "%gds_probe_value_high = OpBitcast %uint %gds_probe_float_high\n"
-		              "%gds_probe_lane_high = OpIAdd %uint %wave_lane_id %uint_32\n"
-		              "%gds_probe_index_high_base = OpIAdd %uint %gds_probe_group_base %gds_probe_lane_high\n"
-		              "%gds_probe_index_high = OpIAdd %uint %gds_probe_index_high_base %uint_1\n"
-		              "%gds_probe_ptr_high = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %gds_probe_index_high\n"
-		              "OpStore %gds_probe_ptr_high %gds_probe_value_high\n";
+		              "%gds_probe_group_base = OpIAdd %uint %gds_probe_group_base_half %gds_probe_group_base_half\n"
+		              "%gds_probe_float = OpLoad %float %v2\n"
+		              "%gds_probe_value = OpBitcast %uint %gds_probe_float\n"
+		              "%gds_probe_index_base = OpIAdd %uint %gds_probe_group_base %native_wave_logical_index\n"
+		              "%gds_probe_index = OpIAdd %uint %gds_probe_index_base %uint_1\n"
+		              "%gds_probe_ptr = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %gds_probe_index\n"
+		              "OpStore %gds_probe_ptr %gds_probe_value\n";
 	} else
 	{
 		observation = "%gds_probe_group_ptr = OpAccessChain %_ptr_Input_uint %gl_WorkGroupID %uint_0\n"
@@ -999,12 +993,12 @@ int main()
 			RunCase(kConsumeOpcode, kVcmpxLeU32Opcode, 1u, 41u, 37u, 64u, 2u, *paired_multi_plan, "PairedTwoWorkgroupConsume", &vulkan);
 		} else
 		{
-			std::fprintf(stderr, "Paired64On32 multi-workgroup GDS EXEC fixture unavailable: preflight reason=%u\n",
+			std::fprintf(stderr, "Split64On32 multi-workgroup GDS EXEC fixture unavailable: preflight reason=%u\n",
 			             static_cast<unsigned>(vulkan.PairedMultiWavePreflightReason()));
 		}
 	} else
 	{
-		std::fprintf(stderr, "Paired64On32 GDS EXEC fixture unavailable: preflight reason=%u\n",
+		std::fprintf(stderr, "Split64On32 GDS EXEC fixture unavailable: preflight reason=%u\n",
 		             static_cast<unsigned>(vulkan.PairedWavePreflightReason()));
 	}
 	return 0;

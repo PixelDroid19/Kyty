@@ -35,7 +35,7 @@ static ShaderComputeWaveVulkanState SupportedState()
 	return state;
 }
 
-static ShaderComputeWaveRequest PairedRequest()
+static ShaderComputeWaveRequest SplitRequest()
 {
 	ShaderComputeWaveRequest request {};
 	request.local[0] = 64;
@@ -60,10 +60,10 @@ static ShaderComputeWaveVulkanState CoreOnlyState()
 	return state;
 }
 
-static ShaderComputeWaveLayoutStatus PairedStatus(const ShaderComputeWaveVulkanState& state)
+static ShaderComputeWaveLayoutStatus SplitStatus(const ShaderComputeWaveVulkanState& state)
 {
 	ShaderComputeWaveLayout layout {};
-	return ShaderBuildPairedComputeWaveLayout(PairedRequest(), ShaderComputeWaveVulkanBuildCapabilities(state), &layout);
+	return ShaderBuildSplitComputeWaveLayout(SplitRequest(), ShaderComputeWaveVulkanBuildCapabilities(state), &layout);
 }
 
 TEST(EmulatorComputeWaveVulkan, RequiresEnabledFeaturesInsteadOfExtensionAdvertisement)
@@ -76,31 +76,31 @@ TEST(EmulatorComputeWaveVulkan, RequiresEnabledFeaturesInsteadOfExtensionAdverti
 	EXPECT_EQ(capabilities.size_control_enabled, false);
 	EXPECT_EQ(capabilities.full_subgroups_enabled, false);
 	ShaderComputeWaveLayout layout {};
-	EXPECT_EQ(ShaderBuildPairedComputeWaveLayout(PairedRequest(), capabilities, &layout),
+	EXPECT_EQ(ShaderBuildSplitComputeWaveLayout(SplitRequest(), capabilities, &layout),
 	          ShaderComputeWaveLayoutStatus::MissingHostCapability);
 }
 
-TEST(EmulatorComputeWaveVulkan, EnablesPairedLayoutWhenSizeControlFeaturesAreEnabled)
+TEST(EmulatorComputeWaveVulkan, EnablesSplitLayoutWhenSizeControlFeaturesAreEnabled)
 {
 	const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(SupportedState());
 	ShaderComputeWaveLayout layout {};
-	EXPECT_EQ(ShaderBuildPairedComputeWaveLayout(PairedRequest(), capabilities, &layout),
+	EXPECT_EQ(ShaderBuildSplitComputeWaveLayout(SplitRequest(), capabilities, &layout),
 	          ShaderComputeWaveLayoutStatus::Supported);
 }
 
-TEST(EmulatorComputeWaveVulkan, CoreFeaturesAdmitPairedLayoutWithoutExtensionDiagnostics)
+TEST(EmulatorComputeWaveVulkan, CoreFeaturesAdmitSplitLayoutWithoutExtensionDiagnostics)
 {
 	const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(CoreOnlyState());
 	EXPECT_TRUE(capabilities.size_control_enabled);
 	EXPECT_TRUE(capabilities.full_subgroups_enabled);
 	EXPECT_TRUE(capabilities.compute_required_size_supported);
-	EXPECT_EQ(PairedStatus(CoreOnlyState()), ShaderComputeWaveLayoutStatus::Supported);
+	EXPECT_EQ(SplitStatus(CoreOnlyState()), ShaderComputeWaveLayoutStatus::Supported);
 
 	// Under the Vulkan 1.4 floor an older advertised revision is only a diagnostic.
 	auto revision_one                 = CoreOnlyState();
 	revision_one.extension_advertised = true;
 	revision_one.extension_revision   = 1;
-	EXPECT_EQ(PairedStatus(revision_one), ShaderComputeWaveLayoutStatus::Supported);
+	EXPECT_EQ(SplitStatus(revision_one), ShaderComputeWaveLayoutStatus::Supported);
 }
 
 TEST(EmulatorComputeWaveVulkan, ExtensionDiagnosticsWithoutQueriedFeaturesStayRefused)
@@ -108,34 +108,34 @@ TEST(EmulatorComputeWaveVulkan, ExtensionDiagnosticsWithoutQueriedFeaturesStayRe
 	auto state                             = SupportedState();
 	state.size_control_feature_supported   = false;
 	state.full_subgroups_feature_supported = false;
-	EXPECT_EQ(PairedStatus(state), ShaderComputeWaveLayoutStatus::MissingHostCapability);
+	EXPECT_EQ(SplitStatus(state), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 
 	state.size_control_feature_enabled   = false;
 	state.full_subgroups_feature_enabled = false;
-	EXPECT_EQ(PairedStatus(state), ShaderComputeWaveLayoutStatus::MissingHostCapability);
+	EXPECT_EQ(SplitStatus(state), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 }
 
-TEST(EmulatorComputeWaveVulkan, PairedLayoutRequiresEveryCoreCapability)
+TEST(EmulatorComputeWaveVulkan, SplitLayoutRequiresEveryCoreCapability)
 {
 	auto disabled                         = CoreOnlyState();
 	disabled.size_control_feature_enabled = false;
-	EXPECT_EQ(PairedStatus(disabled), ShaderComputeWaveLayoutStatus::MissingHostCapability);
+	EXPECT_EQ(SplitStatus(disabled), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 
 	auto no_full_subgroups                             = CoreOnlyState();
 	no_full_subgroups.full_subgroups_feature_supported = false;
 	no_full_subgroups.full_subgroups_feature_enabled   = false;
-	EXPECT_EQ(PairedStatus(no_full_subgroups), ShaderComputeWaveLayoutStatus::MissingHostCapability);
+	EXPECT_EQ(SplitStatus(no_full_subgroups), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 
 	auto no_compute_size                            = CoreOnlyState();
 	no_compute_size.compute_required_size_supported = false;
-	EXPECT_EQ(PairedStatus(no_compute_size), ShaderComputeWaveLayoutStatus::MissingHostCapability);
+	EXPECT_EQ(SplitStatus(no_compute_size), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 
 	auto no_ballot_shuffle                             = CoreOnlyState();
 	no_ballot_shuffle.compute_ballot_shuffle_supported = false;
-	EXPECT_EQ(PairedStatus(no_ballot_shuffle), ShaderComputeWaveLayoutStatus::MissingHostCapability);
+	EXPECT_EQ(SplitStatus(no_ballot_shuffle), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 }
 
-TEST(EmulatorComputeWaveVulkan, PairedLayoutRequiresExactSize32InQueriedRange)
+TEST(EmulatorComputeWaveVulkan, SplitLayoutRequiresExactSize32InQueriedRange)
 {
 	const uint32_t ranges[][2] = {{8, 32}, {32, 64}};
 	for (const auto& range: ranges)
@@ -145,7 +145,7 @@ TEST(EmulatorComputeWaveVulkan, PairedLayoutRequiresExactSize32InQueriedRange)
 		state.max_subgroup_size = range[1];
 		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(state);
 		ShaderComputeWaveLayout layout {};
-		ASSERT_EQ(ShaderBuildPairedComputeWaveLayout(PairedRequest(), capabilities, &layout),
+		ASSERT_EQ(ShaderBuildSplitComputeWaveLayout(SplitRequest(), capabilities, &layout),
 		          ShaderComputeWaveLayoutStatus::Supported);
 		VkPipelineShaderStageCreateInfo stage {};
 		stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -156,26 +156,26 @@ TEST(EmulatorComputeWaveVulkan, PairedLayoutRequiresExactSize32InQueriedRange)
 		EXPECT_NE(stage.flags & VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT, 0u);
 	}
 
-	// A 64-only host cannot run the paired layout; native guest64 stays selectable.
+	// A 64-only host cannot run the split layout; native guest64 stays selectable.
 	auto native64              = CoreOnlyState();
 	native64.min_subgroup_size = native64.max_subgroup_size = 64;
-	EXPECT_EQ(PairedStatus(native64), ShaderComputeWaveLayoutStatus::MissingHostCapability);
+	EXPECT_EQ(SplitStatus(native64), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 	const auto selection = ShaderSelectNativeSubgroup(native64, VK_SHADER_STAGE_COMPUTE_BIT, 64, 64, false, false, false);
 	EXPECT_TRUE(selection.supported);
 	EXPECT_EQ(selection.size, 64u);
 }
 
-TEST(EmulatorComputeWaveVulkan, PairedLayoutRefusesUnqueriedOrReversedRange)
+TEST(EmulatorComputeWaveVulkan, SplitLayoutRefusesUnqueriedOrReversedRange)
 {
 	auto zero              = CoreOnlyState();
 	zero.min_subgroup_size = 0;
 	EXPECT_FALSE(ShaderComputeWaveVulkanBuildCapabilities(zero).size_control_enabled);
-	EXPECT_EQ(PairedStatus(zero), ShaderComputeWaveLayoutStatus::MissingHostCapability);
+	EXPECT_EQ(SplitStatus(zero), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 
 	auto reversed              = CoreOnlyState();
 	reversed.min_subgroup_size = 64;
 	reversed.max_subgroup_size = 32;
-	EXPECT_EQ(PairedStatus(reversed), ShaderComputeWaveLayoutStatus::MissingHostCapability);
+	EXPECT_EQ(SplitStatus(reversed), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 }
 
 TEST(EmulatorComputeWaveVulkan, BoundsProbeOutputWordCountBeforeResourceCreation)
@@ -188,9 +188,9 @@ TEST(EmulatorComputeWaveVulkan, BoundsProbeOutputWordCountBeforeResourceCreation
 TEST(EmulatorComputeWaveVulkan, ChainsRequiredSizeStateWithoutDroppingExistingStageState)
 {
 	const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(SupportedState());
-	auto       request      = PairedRequest();
+	auto       request      = SplitRequest();
 	ShaderComputeWaveLayout layout {};
-	ASSERT_EQ(ShaderBuildPairedComputeWaveLayout(request, capabilities, &layout), ShaderComputeWaveLayoutStatus::Supported);
+	ASSERT_EQ(ShaderBuildSplitComputeWaveLayout(request, capabilities, &layout), ShaderComputeWaveLayoutStatus::Supported);
 
 	VkPipelineTessellationStateCreateInfo prior_state {};
 	prior_state.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
@@ -213,9 +213,9 @@ TEST(EmulatorComputeWaveVulkan, ChainsRequiredSizeStateWithoutDroppingExistingSt
 TEST(EmulatorComputeWaveVulkan, DoesNotMutateStageWhenFeatureAdmissionFails)
 {
 	const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(SupportedState());
-	auto       request      = PairedRequest();
+	auto       request      = SplitRequest();
 	ShaderComputeWaveLayout layout {};
-	ASSERT_EQ(ShaderBuildPairedComputeWaveLayout(request, capabilities, &layout), ShaderComputeWaveLayoutStatus::Supported);
+	ASSERT_EQ(ShaderBuildSplitComputeWaveLayout(request, capabilities, &layout), ShaderComputeWaveLayoutStatus::Supported);
 	VkPipelineShaderStageCreateInfo stage {};
 	stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;

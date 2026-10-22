@@ -67,9 +67,10 @@ VulkanComputeProbe::Result DispatchInternal(VkPhysicalDevice physical_device,
 		}
 	}
 
-	const bool paired_layout = layout.strategy == ShaderComputeWaveStrategy::Paired64On32 && layout.guest_wave_size == 64u &&
-	                           layout.native_subgroup_size == 32u && layout.banks == 2u && layout.waves != 0u &&
-	                           layout.physical_local[0] != 0u && layout.physical_local[1] == 1u && layout.physical_local[2] == 1u;
+	const bool split_layout = layout.strategy == ShaderComputeWaveStrategy::Split64On32 && layout.guest_wave_size == 64u &&
+	                          layout.native_subgroup_size == 32u && layout.banks == 1u && layout.waves != 0u &&
+	                          static_cast<uint64_t>(layout.physical_local[0]) == static_cast<uint64_t>(layout.waves) * 64u &&
+	                          layout.physical_local[1] == 1u && layout.physical_local[2] == 1u;
 	uint32_t   native_physical_local[3] {};
 	const bool native_w32_layout = layout.strategy == ShaderComputeWaveStrategy::Native && layout.guest_wave_size == 32u &&
 	                               layout.native_subgroup_size == 32u && layout.banks == 1u &&
@@ -77,9 +78,9 @@ VulkanComputeProbe::Result DispatchInternal(VkPhysicalDevice physical_device,
 	                               layout.physical_local[0] == native_physical_local[0] &&
 	                               layout.physical_local[1] == native_physical_local[1] &&
 	                               layout.physical_local[2] == native_physical_local[2];
-	if (!paired_layout && !native_w32_layout)
+	if (!split_layout && !native_w32_layout)
 	{
-		*message = "wave probe received an invalid paired or native wave32 compute layout";
+		*message = "wave probe received an invalid split or native wave32 compute layout";
 		return VulkanComputeProbe::Result::InvalidArgument;
 	}
 	if (groups[0] == 0 || groups[1] == 0 || groups[2] == 0)

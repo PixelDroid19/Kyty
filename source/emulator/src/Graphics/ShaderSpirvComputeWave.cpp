@@ -109,9 +109,14 @@ bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
 	}
 
 	const auto& layout = input->wave_layout;
-	if (layout.strategy != ShaderComputeWaveStrategy::Native || layout.guest_wave_size != kNativeSubgroupSize ||
-	    (layout.native_subgroup_size != 0u && layout.native_subgroup_size != kNativeSubgroupSize) || layout.banks != 1u ||
-	    layout.waves != 0u || layout.lds_dwords != input->lds_dwords)
+	const bool  split  = layout.strategy == ShaderComputeWaveStrategy::Split64On32;
+	if (split ? layout.guest_wave_size != kGuestWaveSize || layout.native_subgroup_size != kNativeSubgroupSize || layout.waves == 0u
+	          : layout.strategy != ShaderComputeWaveStrategy::Native || layout.guest_wave_size != kNativeSubgroupSize ||
+	                (layout.native_subgroup_size != 0u && layout.native_subgroup_size != kNativeSubgroupSize) || layout.waves != 0u)
+	{
+		return false;
+	}
+	if (layout.banks != 1u || layout.lds_dwords != input->lds_dwords)
 	{
 		return false;
 	}
@@ -120,6 +125,16 @@ bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
 	if (!ShaderNativeWave32PhysicalLocal(layout.guest_local, physical_local))
 	{
 		return false;
+	}
+	if (split)
+	{
+		// Whole guest waves: the trailing one keeps its padding lanes inactive.
+		const uint64_t waves = (static_cast<uint64_t>(physical_local[0]) + kGuestWaveSize - 1u) / kGuestWaveSize;
+		if (waves != layout.waves || waves * kGuestWaveSize > UINT32_MAX)
+		{
+			return false;
+		}
+		physical_local[0] = static_cast<uint32_t>(waves * kGuestWaveSize);
 	}
 
 	for (uint32_t axis = 0; axis < 3u; axis++)
@@ -187,9 +202,10 @@ bool Spirv::UsesComputeWaveBanks() const
 
 bool Spirv::UsesNativeComputeWave() const
 {
-	return m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->native_wave_sensitive &&
-	       m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Native &&
-	       m_cs_input_info->wave_layout.guest_wave_size == kNativeSubgroupSize;
+	return UsesSplitComputeWave() ||
+	       (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->native_wave_sensitive &&
+	        m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Native &&
+	        m_cs_input_info->wave_layout.guest_wave_size == kNativeSubgroupSize);
 }
 
 bool Spirv::NativeComputeWaveLayoutIsValid() const
@@ -217,7 +233,7 @@ bool Spirv::EmitNativeComputeWaveProlog(String8* output) const
 	}
 
 	*output += String8(R"(
-%native_wave_lane_id = OpLoad %uint %gl_SubgroupInvocationID
+%native_wave_lane_id = OpLoad %uint %<host_lane>
 %native_wave_subgroup_id = OpLoad %uint %gl_SubgroupID
 %native_wave_logical_base = OpIMul %uint %native_wave_subgroup_id %<wave>
 %native_wave_logical_index = OpIAdd %uint %native_wave_logical_base %native_wave_lane_id
@@ -227,6 +243,7 @@ bool Spirv::EmitNativeComputeWaveProlog(String8* output) const
 %native_wave_coord_z = OpUDiv %uint %native_wave_logical_index %<size_xy>
 %native_wave_in_group = OpULessThan %bool %native_wave_logical_index %<lanes>
 )")
+	                .ReplaceStr("<host_lane>", HostLaneVariable())
 	                .ReplaceStr("<wave>", wave)
 	                .ReplaceStr("<size_x>", size_x)
 	                .ReplaceStr("<size_y>", size_y)
@@ -235,6 +252,7 @@ bool Spirv::EmitNativeComputeWaveProlog(String8* output) const
 	if (m_cs_input_info->thread_ids_num >= 1) { AppendNativeComputeWaveCoordinate(output, "x", 0u); }
 	if (m_cs_input_info->thread_ids_num >= 2) { AppendNativeComputeWaveCoordinate(output, "y", 1u); }
 	if (m_cs_input_info->thread_ids_num >= 3) { AppendNativeComputeWaveCoordinate(output, "z", 2u); }
+	if (UsesSplitComputeWave()) { *output += SplitWaveProlog(); }
 	return true;
 }
 

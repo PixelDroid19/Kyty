@@ -425,10 +425,15 @@ void Spirv::GenerateSource()
 	WriteTypes();
 	WriteConstants();
 	WriteGlobalVariables();
+	const uint32_t main_begin = m_source.Size();
 	WriteMainProlog();
 	WriteLocalVariables();
 	WriteInstructions();
 	WriteMainEpilog();
+	if (UsesSplitComputeWave())
+	{
+		CheckSplitWaveCollectives(m_source.Mid(main_begin));
+	}
 	WriteFunctions();
 }
 
@@ -661,6 +666,12 @@ void Spirv::WriteHeader()
 		if (UsesComputeWaveBanks() || UsesNativeComputeWave())
 		{
 			vars.Add("%gl_SubgroupID");
+		}
+		if (UsesSplitComputeWave())
+		{
+			vars.Add("%split_host_lane");
+			vars.Add("%split_exchange");
+			vars.Add("%split_count");
 		}
 	}
 
@@ -993,7 +1004,7 @@ void Spirv::WriteAnnotations()
 	}
 	if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks() || UsesFragmentWaveTier())
 	{
-		vars.Add("OpDecorate %gl_SubgroupInvocationID BuiltIn SubgroupLocalInvocationId");
+		vars.Add("OpDecorate %" + HostLaneVariable() + " BuiltIn SubgroupLocalInvocationId");
 		if (GetHostShaderType() == ShaderType::Pixel)
 		{
 			vars.Add("OpDecorate %gl_HelperInvocation BuiltIn HelperInvocation");
@@ -1434,6 +1445,7 @@ static const char* compute_types = R"(
 		case ShaderType::Compute: m_source += compute_types; break;
 		default: KYTY_LOG_DEBUG("WARNING: unknown shader type (continuing)\n"); return;
 	}
+	m_source += SplitWaveTypes();
 	if (UsesGraphicsProbeStorage())
 	{
 		m_source += String8::FromPrintf("%%vertex_scalar_probe_word_count = OpConstant %%uint %u\n"
@@ -1755,7 +1767,7 @@ void Spirv::WriteGlobalVariables()
 	}
 	if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks() || UsesFragmentWaveTier())
 	{
-		vars.Add("%gl_SubgroupInvocationID = OpVariable %_ptr_Input_uint Input");
+		vars.Add(UsesSplitComputeWave() ? SplitWaveVariables() : String8("%gl_SubgroupInvocationID = OpVariable %_ptr_Input_uint Input"));
 		if (GetHostShaderType() == ShaderType::Pixel)
 		{
 			vars.Add("%gl_HelperInvocation = OpVariable %_ptr_Input_bool Input");
@@ -3024,6 +3036,10 @@ void Spirv::WriteInstructions()
 		{
 			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
 		}
+		if (UsesSplitComputeWave() && Core::EnumName8(inst.type).StartsWith("Ds"))
+		{
+			dst += SplitWaveDsOrder(static_cast<uint32_t>(index));
+		}
 		if (UsesVertexClipProbe() && ShaderInstructionIsScalarBufferLoad(inst))
 		{
 			dst = WrapVertexScalarBufferProbe(inst, static_cast<uint32_t>(index), scalar_probe_site++, dst);
@@ -3118,6 +3134,7 @@ void Spirv::WriteFunctions()
 	{
 		m_source += GuestDeviceAddressFunction();
 	}
+	m_source += SplitWaveFunctions();
 
 	if (spirv_uses_buffer_descriptor_addressing(m_code))
 	{
