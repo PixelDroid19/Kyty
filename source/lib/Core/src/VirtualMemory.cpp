@@ -2365,6 +2365,19 @@ bool FlushInstructionCache(uint64_t address, uint64_t size)
 
 bool PatchReplace(uint64_t vaddr, uint64_t value)
 {
+	// Relocation passes patch hundreds of thousands of slots. A slot that already
+	// holds the value needs no write, and a writable one needs no protection round trip.
+	auto* slot = reinterpret_cast<uint64_t*>(vaddr);
+	if (IsRangeReadable(vaddr, sizeof(value)) && *slot == value)
+	{
+		return false;
+	}
+	if (IsRangeWritable(vaddr, sizeof(value)))
+	{
+		*slot = value;
+		FlushInstructionCache(vaddr, sizeof(value));
+		return true;
+	}
 	return sys_virtual_patch_replace(vaddr, value);
 }
 
