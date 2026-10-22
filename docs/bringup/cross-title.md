@@ -4,6 +4,75 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Shader translator: float contraction and coherent loads (2026-10-22)
+
+- **NoContraction on guest float adds and multiplies: no effect, not
+  merged.** RDNA2 rounds `v_mul_f32` and `v_add_f32` separately, and SPIR-V
+  lets a driver fuse an `OpFMul` that feeds an `OpFAdd` unless the result
+  is decorated `NoContraction`. A translator change decorated every guest
+  float add and multiply result. In the pixel path each guest result passes
+  through a run-time `OpSelect` on the lane's EXEC bit, recomputed from the
+  native ballot (quad broadcast plus helper invocation), so no guest
+  multiply feeds a guest add directly and the driver cannot fuse the pair.
+  No visible or measured change on Intel Arc A770. The change alters every
+  shader hash, so it waits for a translator version bump that needs it.
+- **Defect found, not fixed: GLC and DLC loads are not coherent.**
+  `ShaderParseMUBUF.cpp:30` logs and ignores GLC on buffer loads, storage
+  buffers are not decorated `Coherent` (only GDS is,
+  `ShaderSpirvGenerator.cpp:1179`), and the translator emits no atomic
+  loads. On RDNA2 a GLC=1 load misses L0 and reads L2, and DLC also misses
+  L1: a kernel that polls a word another workgroup of the same dispatch
+  publishes relies on this. Trigger: a cross-workgroup flag or counter
+  poll; no title has been seen to need it. It does not explain the
+  role-playing title's GPU hang, which stops in fixed-function state with
+  the execution units idle. Direction: translate GLC or DLC word loads as
+  device-scope atomic loads with acquire semantics.
+- **Defect found, not fixed: barriers in lane-conditional regions of the
+  native wave64 route.** The native-equivalence proof refuses scalar
+  memory side effects inside a region that `s_cbranch_execz` or
+  `s_cbranch_vccz` can skip (`ShaderComputeWaveNativeEquivalence.cpp:960`),
+  but `HasScalarSideEffect` (`:179`) does not include `s_barrier`. The
+  native route needs no particular host subgroup size, so one guest
+  wave64 can span several host subgroups, and each subgroup takes the skip
+  from its own ballot. A host subgroup whose lanes are all inactive skips
+  the region and its `OpControlBarrier` (`ShaderSpirvBuffer.cpp:3102`)
+  while the rest of the guest wave executes it, which is undefined in
+  Vulkan and can hang the GPU. On the guest the whole wave executes the
+  barrier as long as any lane is active. Trigger: a barrier inside such a
+  region whose condition differs between the 32-lane halves of a guest
+  wave; no admitted kernel has been seen to do this. Direction: refuse
+  `s_barrier` inside lane-conditional regions in the proof, or keep the
+  skip off for regions that contain one.
+
+## Depth sampling: integer reads and dropped pending clears (2026-10-22, found by inspection)
+
+- **Defect found, not fixed: integer reads of a live depth target.** A
+  Gen5 texture with tile mode 24 is looked up as a depth target whatever
+  its format: `GraphicsRenderBind.cpp:3542` only logs a format other than
+  22, and `:3680` then binds the depth target's depth view. For a regular
+  sample the descriptor follows the guest format, so an unsigned-integer
+  format lands in the integer sampled set (`:4435`) over a float depth
+  view. Vulkan requires the view's numeric format to match the shader's
+  sampled type (VUID-vkCmdDraw-format-07753), and the guest expects the
+  raw depth bits. The depth-reference check (`:4270`) runs only for
+  depth-reference and mixed sampling. Trigger: an integer T# over a depth
+  target that is still live; no title has been seen to do this. Only 2 of
+  1055 recorded run logs keep ignored-condition warnings, so their absence
+  is not evidence. Direction: refuse an integer format over a depth
+  target, or copy the depth bits into an integer image of the guest
+  format.
+- **Defect found, not fixed: pending depth clears are dropped.**
+  `RetainPendingBounded` (`Objects/DepthMeta.cpp:43`) keeps at most 64
+  pending HTILE clears, keyed by address, and erases the oldest when a
+  65th address is cleared before any is consumed. The depth bind that
+  should consume the erased clear then finds none
+  (`GraphicsRenderAttachments.cpp:762`) and keeps the previous host depth.
+  The stale-depth ghosts fixed on 2026-10-19 had this symptom from another
+  cause. Trigger: more than 64 distinct depth metadata ranges cleared
+  between their binds; not observed. Direction: stop with the pending
+  count instead of dropping a clear, since the drop changes guest-visible
+  depth.
+
 ## EXECZ skip over a join shared with an outer branch (2026-10-20)
 
 - **Symptom.** The well platformer stopped at 77-122 s on the new-game

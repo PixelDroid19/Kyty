@@ -4,6 +4,57 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: GPU hang in the story prologue (2026-10-21, open)
+
+- **Symptom.** On the recorded story route about 5 of 10 uninstrumented
+  runs lose the device between frames 1295 and 1914 (xe render engine
+  reset, then the scheduler's job timeout; the emulator sees result -4
+  from a fence or semaphore wait). Intel Arc A770, Mesa ANV 26.2.5,
+  GuC 70.53.0, kernel 7.2.11.
+- **Localization.**
+  - With serial submission and an idle wait after each submit, one
+    command buffer of draws only stayed on the GPU for at least 690 ms,
+    so the stall is work inside one command buffer, not a race between
+    queues.
+  - Two decoded hang dumps show one render pass with tile-based
+    immediate-mode rendering (3x3 tiles): depth-only draws with no pixel
+    shader, then draws whose pixel shader discards (dithered discard, no
+    textures, no loops). The execution-unit rows and samplers report
+    done; fixed-function units do not. The command streamer is stuck on
+    the end-of-batch pipe control after draw 16 in one dump and while
+    sending draw 8 in the other.
+  - Runs that drain the GPU after every draw passed the hang window 6 of
+    6 times (one-sided Fisher p about 0.06; the two groups ran different
+    builds), so draw-level serialization is a lead only.
+- **Excluded.**
+  - Depth bounds: zero in both hung batches, so the related hardware
+    workaround does not apply.
+  - Custom sample locations: the default 1x pattern.
+  - The known tile-pass issue with pixel shaders that read no push
+    constants: every draw that dispatches pixel threads reads at least
+    one constant, and the depth-only draws dispatch none.
+  - Looping shaders: guest disassembly and a SPIR-V loop audit of the
+    hung pipelines.
+  - The volume-lighting dispatch: the hung command buffers contain no
+    dispatch.
+  - Turning tile passes off through a driver option (localization only)
+    is not a fix: 4 of 4 runs hung at boot (26-35 s). The three that
+    reset normally hung in a different command buffer, a post-process
+    pass with three colour fast clears, one draw, a 480x270 dispatch and
+    one draw. That hang persisted with the dispatch skipped (the command
+    streamer stopped at the sample-pattern state before the draw), and
+    those runs never reach the prologue window. The fourth wedged the GPU
+    after nine earlier resets in the same boot, which the option alone
+    does not explain.
+- **Lead.** The three fast clears happen every frame because the
+  post-process targets arrive with an undefined tracked layout, and the
+  emulator clears only undefined colour layouts. This is a churn and cost
+  question, not a cause.
+- **Next.** Multi-run A/B tests in the prologue (about five clean
+  4-minute runs per arm, about 50% hang risk per run) or a driver report
+  with the decoded batches. Both need the maintainer's go-ahead because
+  of the reset and wedge risk.
+
 ## Role-playing title: story starts, cube depth samples and recycled ranges (2026-10-21)
 
 Intel A770, strict runs from the title screen through traveler selection
@@ -544,7 +595,24 @@ temporary diagnostics (removed).
     layout of a one-level 512x512 BC3 texture is 0x40000, and the reason
     for the difference is unknown.
 - **Other open items in these runs.**
-  - `!create_all_the_same` at 0x2109b90000 (size 0x120000), 127 s, one run.
+  - `!create_all_the_same` at 0x2109b90000 (size 0x120000), 127 s
+    (`GpuMemoryCreate.cpp:2559` on main). The new object is a storage
+    image. Its 67 parents are a render target that contains the range
+    (0x1c0000 bytes), a read-only storage buffer of exactly the range
+    written back from the GPU, a read-only 0x1fa400-byte storage buffer
+    that contains it, and 64 read-only vertex buffers inside it left by
+    alias invalidation. The range is a recycled allocation that served as
+    a render target and as vertex data.
+  - Recurrence (survey of 2026-10-22): 18 of 303 runs of this title on
+    the 10-20 and 10-21 builds, all with diagnostic switches, stopped on
+    `!create_all_the_same`. In 17 the new object is a storage image
+    (0x2000 to 0xff0000 bytes); the parents mix render targets, textures,
+    storage images, storage buffers, depth targets, and vertex or index
+    buffers. One case is an incoming storage image over a 1920x78 render
+    target whose device content was never published, an index buffer and
+    483 read-only storage buffers. Direction: resolve stale parents of a
+    recycled allocation (retire, or seed from guest memory) before the
+    same-type check, instead of exiting.
   - Device lost (`vkWaitSemaphores` result -4), 103 s, one run of six.
   - A guest write to address 0 (status 139, rip in guest code) at 138 s,
     one run.

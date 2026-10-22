@@ -4,6 +4,19 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Preschool Unity title: unreadable EUD snapshot (2026-10-21, open)
+
+- **Observed once.** Intel Arc A770, Mesa ANV 26.2.5, strict, HEAD
+  89e3b892, generic pad route: after about frame 30,400 (91 s) the run
+  stopped on `unreadable Gen5 EUD snapshot: dwords=16` with the table
+  pointer in user register 28 (`Shader.cpp:3366` on main). The guest
+  words at the table address could not be read when the shader was bound.
+- **Not reproduced.** A 150 s repeat of the same binary and route ran
+  without a stop at 290-367 FPS.
+- **Direction.** On the next occurrence, record the mapping state of the
+  table address (mapped, protected or released, and by which call) to
+  tell a guest that frees the table early from a host-side read race.
+
 ## Preschool Unity title: sky-blue speckles on every outline (2026-10-19)
 
 - **Symptom.** In gameplay, outlines, grass blades and text strokes showed
