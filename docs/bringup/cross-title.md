@@ -4,6 +4,130 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Shader decoder refuses unimplemented encodings (2026-10-22)
+
+- **Observed.** The Gen5 decoder turned unimplemented opcodes into `SBarrier`
+  records ("treated as SBarrier (continuing)") and encodings used outside
+  their generation into warnings. The translator emits nothing for such a
+  record, so a shader that used one ran without that instruction's effect.
+  This closes the placeholder debt recorded in `docs/bringup/history.md`.
+- **Change.** Every unimplemented opcode stops translation with its
+  instruction name, and so does an encoding used outside its generation. No
+  placeholder record remains.
+- **Verified.**
+  - A temporary census decoded every opcode value of each encoding: 959
+    decode and 4879 stop by name.
+  - Strict sweep on the final binary (Intel Arc A770, 60 s per title,
+    130 s for the robot platformer): the card title, the roguelike
+    platformer, the fishing title, the racing title, the preschool title,
+    both insect platformers, the sandbox title, the watercolor platformer
+    and the isometric action title reach the same states as before, and
+    none stops on a refused encoding.
+
+## Output modifiers on vector results (2026-10-22)
+
+- **Observed.** The robot platformer runs `v_cvt_f32_u32` with OMOD `mul:2`
+  and `div:2`. The translator ignored OMOD and CLAMP on every conversion and
+  integer emitter, so those results were off by a factor of two.
+- **Rules** (RDNA2 ISA 6.2 and 6.5): OMOD scales floating-point results only.
+  It is ignored for integer and bit results, in IEEE mode, and when output
+  denormals are enabled. CLAMP saturates integer results and clamps float
+  results to [0, 1]; on float-to-integer conversions it only enables the
+  inexact exception.
+- **Change.**
+  - Conversions to f32 (`v_cvt_f32_*`, `v_cvt_off_f32_i4`, `v_cvt_f32_f64`)
+    apply OMOD and CLAMP through the shared helpers.
+  - Integer and bit emitters drop the OMOD warning and refuse CLAMP, whose
+    saturation is not translated.
+  - Half- and double-precision results refuse CLAMP, and refuse OMOD when the
+    double/half denormal field (`FP_DENORM` bit 7) lets it take effect.
+  - `v_cndmask_b32`, whose modifiers apply when the selected values are
+    floats, refuses either modifier.
+  - Float-to-integer conversions accept CLAMP as the exception switch it is.
+- **Verified.** Translator version 150, geometry translator version 91.
+  The robot platformer reaches its logo sequence (frame 347 at 130 s)
+  with no output-modifier warning left in its log.
+
+## Command processor cache events and acquires decoded generally (2026-10-22)
+
+- **Observed** (bounded census of the CP packets five titles emit):
+  - `EVENT_WRITE` `FLUSH_AND_INV_CB_PIXEL_DATA` (0x31) and
+    `CACHE_FLUSH_AND_INV_EVENT` (0x16) with event index 0 as well as 7, and
+    `DB_CACHE_FLUSH_AND_INV` (0x2a) with index 0 from the robot platformer.
+  - `WRITE_DATA` with cache policy 3 from the watercolor platformer and the
+    preschool title, and with dst 5 from the robot platformer.
+  - `ACQUIRE_MEM` with ranged color and depth targets outside the old table
+    of observed words (the robot platformer, the card title).
+- **Change.**
+  - `TriggerEvent` treats 0x16 and 0x31 at index 0 or 7, and 0x2a at
+    index 0, as full barriers.
+  - `WRITE_DATA` accepts every cache policy, and dst 5 as well as 4: dst
+    bit 0 selects the PM4 engine (micro engine or prefetch parser) and
+    bits 1-4 hold `DST_SEL`, so both are memory writes through L2. The
+    software CP stores immediately, so neither the engine nor the GL2 policy
+    hint has a visible effect. Basis: the PM4 field layout, independent
+    implementations that agree on the dst encoding, and the title's writes
+    landing on valid guest memory.
+  - `ACQUIRE_MEM` decodes its size, base and target bits instead of matching
+    whole words: no size or no target is a full barrier, a ranged color or
+    depth target barriers the images in that range, and `TC_WB_ACTION_ENA`
+    writes back.
+- **Verified.** The general decode reproduces every case of the old table.
+  On the final binary the robot platformer logs no `WRITE_DATA` warning,
+  and no sweep title logs an event or acquire refusal.
+
+## SW_64KB_R_X addressed by surface coordinates, 16-byte elements (2026-10-22)
+
+- **Observed.** The robot platformer logged "unsupported SW_64KB_R_X element
+  size": a 16-byte storage texture in the render-target swizzle fell through
+  to the 8-byte equation, so texels overlapped.
+- **Cause.** The 16-pipe `SW_64K_R_X` patterns of the published GFX10
+  address library XOR x6 and y6 into bits 10 and 11. For 8-byte elements
+  (128x64 block) y6 lies above the block; for 16-byte elements (64x64 block)
+  x6 and y6 both do. The address library evaluates the pattern with surface
+  coordinates, but `TileGetSw64kRxOffset` passed in-block coordinates, so
+  every odd block row of an 8-byte surface had its 32-column strips swapped,
+  and 16-byte elements had no equation.
+- **Change.**
+  - `Tile.cpp`: the pattern takes surface coordinates and gains the 16-byte
+    equation (`x0 y0 x1 y1 | x3^y3 x4^y4 y5^x6 x5^y6 | y2 x2 y3 x4`). The
+    1-, 2- and 4-byte equations mask their own bits and are unchanged.
+  - `gen5_detile.comp` (and its generated include): the same coordinates in
+    the detile and raw render scatter kernels.
+  - `TileDetile.cpp`: the CPU detile accepts every 64 KiB element size.
+  - `StorageTexture.cpp`: a render-target alias whose block sits on rows of
+    opposite parity in the two images copies its 32-column strips swapped.
+- **Verified.** Unit tests pin the published 16-byte pattern and the second
+  block row of the 8-byte one; the existing alias test caught the strip
+  swap. The robot platformer no longer logs the
+  element-size warning.
+
+## HLE trace lines formatted only when emitted (2026-10-22)
+
+- **Symptom.** With console logging at the warning level, the card title
+  ran gameplay at about 60 fps instead of 200-300 fps, and the roguelike
+  platformer at about 75 fps.
+- **Cause.** Every guest library call runs `PRINT_NAME()`
+  (`Hle/Registration.h`, `Kernel/Trace.h`). The macro skipped silent
+  output but, for console or file output, formatted the call time
+  (`HH24:MI:SS.FFF`) before the level gate dropped the Info line. That
+  formatting dominated the host profile. Silent runs never paid it, which
+  is why wall-clock runs did not show the drop.
+- **Change.** The macro checks the Info gate before it evaluates its
+  arguments.
+- **Verified** (Intel Arc A770, same scripted segment, frames counted at
+  +26 s and +52 s):
+  - Card title: about 70 fps before and 196 fps after with console logging
+    at Warn; about 260 fps silent, unchanged.
+  - Roguelike platformer: 71 fps before and 107 fps after with console
+    logging; 92-113 fps silent. Its levels are generated per run, so
+    single-run rates vary.
+- **Open.**
+  - The card title still runs about 25% slower with console logging than
+    silent; the remaining cost was not attributed.
+  - The roguelike platformer is bound by about 2.2 GPU fence waits per
+    frame (1.1 ms each) with the command processor busy 77% of the time.
+
 ## Relocation protection round trips at module load (2026-10-22)
 
 - **Observed.** A 150 s strict run of the preschool Unity title logged
