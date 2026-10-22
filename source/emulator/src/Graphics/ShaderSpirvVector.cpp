@@ -52,6 +52,13 @@ static String8 FloatOutputModifier(const Spirv* spirv, const ShaderInstruction& 
 	    .ReplaceStr("<limit>", spirv->GetConstantUint(quadruple ? 0x7e800000u : 0x7f000000u));
 }
 
+// OMOD on a double- or half-precision result takes effect under the same rules, decided by
+// the double/half FP_DENORM field (ISA 6.2).
+static bool Fp64Fp16OutputModifierActive(const Spirv* spirv, const ShaderInstruction& inst)
+{
+	return inst.dst.multiplier != 1.0f && spirv != nullptr && !spirv->IsIeeeModeEnabled() && spirv->Float64Float16OutputDenormalsFlushed();
+}
+
 // V_MIN_F32 / V_MAX_F32 operand selection (ISA 12.7): a NaN first operand returns the
 // second operand, otherwise a NaN second operand returns the first (so two NaNs return
 // the second, as ShaderSelectRdna2MinMaxResultBits records); in IEEE mode a signaling NaN
@@ -1441,8 +1448,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCndmaskB32_VdstVsrc0Vsrc1Smask2)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// Float output modifiers apply when the selected values are floats; they are not translated.
+	if (inst.dst.clamp || !FloatOutputModifier(spirv, inst).IsEmpty())
+	{
+		return false;
+	}
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -1497,8 +1507,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPkrtzF16F32_SVdstSVsrc0SVsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// CLAMP and an active OMOD on this result are not translated.
+	if (inst.dst.clamp || Fp64Fp16OutputModifierActive(spirv, inst))
+	{
+		return false;
+	}
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -1751,8 +1764,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32F64_SVdstSVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -1776,11 +1787,17 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32F64_SVdstSVsrc0)
         %t_<index> = OpConvertFToF %float %d0_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
+        %exec_keep_<index> = OpLoad %float %<dst>
+               OpStore %<dst> %t_<index>
+              <multiply>
+              <clamp>
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
+	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))
+	                   .ReplaceStr("<clamp>", FloatClampModifier(spirv, inst.dst.clamp))
 	                   .ReplaceStr("<load0lo>", load0lo)
 	                   .ReplaceStr("<load0hi>", load0hi)
 	                   .ReplaceStr("<dst>", dst_value.value)
@@ -1799,8 +1816,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF64F32_SVdst2SVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// CLAMP and an active OMOD on this result are not translated.
+	if (inst.dst.clamp || Fp64Fp16OutputModifierActive(spirv, inst))
+	{
+		return false;
+	}
 	if (inst.dst.size != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != 2 condition ignored (continuing)\n"); }
 
 	auto dst_lo = operand_variable_to_str(inst.dst, 0);
@@ -1850,8 +1870,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtI32F64_SVdstSVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// CLAMP only enables INEXACT exceptions here, and OMOD does not apply to an integer result.
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -1898,8 +1917,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF64I32_SVdst2SVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// CLAMP and an active OMOD on this result are not translated.
+	if (inst.dst.clamp || Fp64Fp16OutputModifierActive(spirv, inst))
+	{
+		return false;
+	}
 	if (inst.dst.size != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != 2 condition ignored (continuing)\n"); }
 
 	auto dst_lo = operand_variable_to_str(inst.dst, 0);
@@ -2177,8 +2199,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtU32F64_SVdstSVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// CLAMP only enables INEXACT exceptions here, and OMOD does not apply to an integer result.
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -2225,8 +2246,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF64U32_SVdst2SVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// CLAMP and an active OMOD on this result are not translated.
+	if (inst.dst.clamp || Fp64Fp16OutputModifierActive(spirv, inst))
+	{
+		return false;
+	}
 	if (inst.dst.size != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != 2 condition ignored (continuing)\n"); }
 
 	auto dst_lo = operand_variable_to_str(inst.dst, 0);
@@ -2278,8 +2302,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VF64_Unary_SVdst2SVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// CLAMP and an active OMOD on this result are not translated.
+	if (inst.dst.clamp || Fp64Fp16OutputModifierActive(spirv, inst))
+	{
+		return false;
+	}
 	if (inst.dst.size != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != 2 condition ignored (continuing)\n"); }
 
 	auto dst_lo = operand_variable_to_str(inst.dst, 0);
@@ -2339,8 +2366,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VFractF64_SVdst2SVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// CLAMP and an active OMOD on this result are not translated.
+	if (inst.dst.clamp || Fp64Fp16OutputModifierActive(spirv, inst))
+	{
+		return false;
+	}
 	if (inst.dst.size != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != 2 condition ignored (continuing)\n"); }
 
 	auto dst_lo = operand_variable_to_str(inst.dst, 0);
@@ -2611,8 +2641,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -3028,8 +3061,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VDot4cI32I8_VdstVsrc0Vsrc1Vsrc2)
 	const auto& inst = code.GetInstructions().At(index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 	for (int source = 0; source < 3; ++source)
 	{
 		if (inst.src[source].negate || inst.src[source].absolute || inst.src[source].swizzle != 6u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[source].negate || inst.src[source].absolute || inst.src[source].swizzle != 6u condition ignored (continuing)\n"); }
@@ -3567,8 +3603,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 	const auto& inst = code.GetInstructions().At(index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
@@ -3772,8 +3811,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1)
 	const auto& inst = code.GetInstructions().At(index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
@@ -4747,8 +4789,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -4802,8 +4847,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_I32_SVdstSVsrc0SVsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -4858,8 +4906,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_I32_VdstVsrc0Vsrc1Vsrc2)
 	const String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
@@ -4908,8 +4959,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvt_XXX_F32_SVdstSVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
@@ -4962,14 +5016,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32ToInteger_SVdstSVsrc0)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n");
 	}
-	if (inst.dst.clamp)
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n");
-	}
-	if (inst.dst.multiplier != 1.0f)
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n");
-	}
+	// CLAMP only enables INEXACT exceptions here, and OMOD does not apply to an integer result.
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Float)
@@ -5065,8 +5112,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32_XXX_SVdstSVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -5089,11 +5134,17 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32_XXX_SVdstSVsrc0)
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
+        %exec_keep_<index> = OpLoad %float %<dst>
+               OpStore %<dst> %t_<index>
+              <multiply>
+              <clamp>
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
+	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))
+	                   .ReplaceStr("<clamp>", FloatClampModifier(spirv, inst.dst.clamp))
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<param0>", param[0])
@@ -5110,8 +5161,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtOffF32I4_SVdstSVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
@@ -5133,11 +5182,17 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtOffF32I4_SVdstSVsrc0)
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
+        %exec_keep_<index> = OpLoad %float %<dst>
+               OpStore %<dst> %t_<index>
+              <multiply>
+              <clamp>
+        %exec_new_<index> = OpLoad %float %<dst>
+        %exec_val_<index> = OpSelect %float %exec_lo_b_<index> %exec_new_<index> %exec_keep_<index>
+               OpStore %<dst> %exec_val_<index>
 )";
 	*dst_source += String8(text)
+	                   .ReplaceStr("<multiply>", FloatOutputModifier(spirv, inst))
+	                   .ReplaceStr("<clamp>", FloatClampModifier(spirv, inst.dst.clamp))
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<param0>", param[0])
@@ -5159,8 +5214,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -5308,7 +5366,11 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 	if (!operand_is_variable(inst.dst2)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst2) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp || inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp || inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 
 	auto dst_value   = operand_variable_to_str(inst.dst);
 	auto dst2_value0 = single_destination ? operand_variable_to_str(inst.dst2) : operand_variable_to_str(inst.dst2, 0);
@@ -5407,7 +5469,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VMadU64U32_Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair)
 
 	if (!operand_is_variable(inst.dst) || !operand_is_variable(inst.dst2)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) || !operand_is_variable(inst.dst2) condition ignored (continuing)\n"); }
 	if (inst.dst.size != 2 || inst.dst2.size != 2 || inst.src[2].size != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != 2 || inst.dst2.size != 2 || inst.src[2].size != 2 condition ignored (continuing)\n"); }
-	if (inst.dst.clamp || inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp || inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
+	if (inst.dst.clamp)
+	{
+		return false;
+	}
 	if (operand_is_exec(inst.dst2)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst2) condition ignored (continuing)\n"); }
 
 	const String8 index_str = String8::FromPrintf("%u", index);

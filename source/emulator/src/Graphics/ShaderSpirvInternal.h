@@ -307,6 +307,8 @@ public:
 	[[nodiscard]] bool IsIeeeModeEnabled() const { return GetFloatModeControls().ieee_mode; }
 	// MODE.FP_DENORM single-precision field (bits 5:4): bit 5 clear flushes output denormals.
 	[[nodiscard]] bool Float32OutputDenormalsFlushed() const { return (GetFloatModeControls().float_mode & 0x20u) == 0u; }
+	// MODE.FP_DENORM double/half field (bits 7:6): bit 7 clear flushes output denormals.
+	[[nodiscard]] bool Float64Float16OutputDenormalsFlushed() const { return (GetFloatModeControls().float_mode & 0x80u) == 0u; }
 
 	[[nodiscard]] bool EmitPixelRgbaProbe(String8* dst_source, uint32_t index, const String8& value_id,
 	                                      const char* symbol_prefix, bool include_frag_coord = false) const;
