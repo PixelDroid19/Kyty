@@ -4,6 +4,33 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Shader translator: split geometry pass and compute row DPP (2026-10-22)
+
+- **Geometry pass contract.** A merged ES+GS draw run as a compute pass
+  now uses the split wave64 layout (`Split64On32`, required subgroup 32,
+  one guest lane per invocation, workgroup of the guest subgroup's lanes).
+  The paired geometry analysis, its classifier fallback to the compute
+  classifier and its `+8` EUD rebase are removed: non-export instructions
+  go through the split compute admission, exports and `GS_ALLOC_REQ`
+  through the geometry classifier. The native exec init no longer writes
+  the NGG `s3` prologue for geometry compute, whose own prologue sets it.
+- **Row DPP in compute waves.** Row shifts, rotates and mirrors (DPP16
+  controls 0x101-0x12f, 0x140, 0x141, full row and bank masks) were
+  translated only in pixel shaders. A native wave32 compute wave and each
+  half of a split wave64 hold whole 16-lane rows and no ghost lanes, so
+  they now use the same per-row shuffle. The ISA DPP16 table states that
+  BOUND_CTRL=1 writes zero for an out-of-row source and FI=0 reads zero
+  from an inactive lane; the lowering substitutes exactly that zero, so
+  BOUND_CTRL=1 shifts are admitted outside the proven fragment region.
+  BOUND_CTRL=0 still needs the destination-preserving or/xor/add shape,
+  and the proven fragment region, whose subgroup is narrower than the
+  guest wave, still refuses BOUND_CTRL=1 shifts.
+- **Verification.** Unit and shader integration suites pass; the robot
+  platformer's logo stretch renders its particle dissolve (title record
+  of the same date). The role-playing title's traveler map was blue
+  before and after this change; the cause was the scalar-load base
+  defect recorded in that title's file.
+
 ## Shader translator: float contraction and coherent loads (2026-10-22)
 
 - **NoContraction on guest float adds and multiplies: no effect, not

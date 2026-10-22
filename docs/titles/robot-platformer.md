@@ -4,6 +4,36 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Robot platformer: logo particles through a split geometry pass (2026-10-22)
+
+- **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, `generic.pad`,
+  `KYTY_RUN_MEMORY_HIGH=14G`, translator version 147; one boot with a
+  cold SPIR-V cache and one warm boot.
+- **Cost.** The studio-logo stretch (presents about 950-1100) dissolves
+  the logo into particles through merged ES+GS draws that run as the
+  geometry compute pass. In the paired layout the hot particle module
+  compiled offline in 47 s (6,726 spills, 20,407 fills, 128 KiB scratch,
+  2,144 live registers) and the stretch ran at about 2.8 fps.
+- **Change.** The geometry pass runs in the split layout: one guest lane
+  per invocation, each guest wave64 spanning two 32-wide host subgroups.
+  The prologue writes `v0`-`v5` and `v8` per lane, exports and
+  `GS_ALLOC_REQ` are per lane, and guest lane 0 of each wave leads the
+  allocation. The first split run stopped at a `v_add_i32` whose source
+  is a DPP `row_shr:1` with BOUND_CTRL=1; row DPP is now translated in
+  native and split compute waves (cross-title record of the same date).
+- **Result.** The two split modules of the stretch compile offline in
+  15.0 s and 7.4 s (3,085 and 2,939 spills, 32 KiB scratch, 896 and 809
+  live). The warm boot runs the stretch at 6.3-9.4 fps (agent samples)
+  and ends clean at the 150 s cap; captures at presents 955, 1048, 1068
+  and 1105 show the logo and its particle dissolve.
+- **Recheck at version 148.** After the GS user-data base fix a cold
+  boot holds at present 887 for the rest of a 180 s run while shaders
+  compile; the next warm boot runs the stretch at 7.5-8.9 fps, shows the
+  logo at presents 1055 and 1086, and ends clean at 150 s.
+- **Open.** Two loading holds in the warm boot, presents 850-905 (0.24
+  fps sample) and 1106-1112 (0.1-0.6 fps), are not attributed. About
+  3,000 spills remain per module.
+
 ## Robot platformer: paired compute compile cost (2026-10-21, open)
 
 - **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, HEAD 89e3b892,

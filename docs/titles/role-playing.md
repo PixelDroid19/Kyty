@@ -4,6 +4,32 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: blue traveler map from geometry-pass constants (2026-10-22)
+
+- **Symptom.** The traveler-selection map rendered pure blue: the map
+  centre averaged 1/1/124 against 165/151/133 in every capture through
+  89e3b892. The ornate frame was unchanged (189/157/120). Published
+  imagery of this screen shows a sepia parchment map, which the fixed
+  build matches; the earlier 96/81/23 record of 2026-10-20 predates the
+  blue-axis fix and was itself wrong.
+- **Bisection.** Cold-cache strict runs of the menus route (Intel Arc
+  A770, Mesa ANV 26.2.5, about 120 s each): 9a5e91b6, 64d63bb5,
+  c91c2717, 9baebf48 and 2af6ae31 good; a6fc714b and cea70de7 bad.
+  a6fc714b sent the geometry pass's `s_buffer_load` instructions to the
+  guest device-address path whenever the V# was not a bound binding.
+- **Cause.** Bindings record API user-data indices; the merged GS
+  receives user data from `s8`. The scalar-load checks compared a
+  binding's start register with the absolute SGPR, so the grading-volume
+  writer's constant buffer at `s[8:11]` (binding register 0) counted as a
+  runtime descriptor. Its UV constants read back as zero and the volume
+  held only the layer-derived blue. The vector-load check already
+  subtracted the base.
+- **Change.** Both scalar checks (runtime-descriptor classification and
+  the redefinition scan) use the base-aware binding helper; translator
+  version 148. A unit test covers bases 0 and 8 for the scalar check.
+- **Result.** The map centre averages 165/151/132 at a cold boot of the
+  fixed branch, and the captures match the published screen.
+
 ## Role-playing title: GPU hang in the story prologue (2026-10-21, open)
 
 - **Symptom.** On the recorded story route about 5 of 10 uninstrumented

@@ -18,6 +18,7 @@ Record a new finding in the file of the title that exposed it; a finding that
 spans titles goes in `docs/bringup/cross-title.md`.
 
 - [Role-playing title](titles/role-playing.md)
+  - Role-playing title: blue traveler map from geometry-pass constants (2026-10-22)
   - Role-playing title: GPU hang in the story prologue (2026-10-21, open)
   - Role-playing title: story starts, cube depth samples and recycled ranges (2026-10-21)
   - Role-playing title: lost depth clears, display-buffer samples and stale covers (2026-10-21)
@@ -38,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: logo particles through a split geometry pass (2026-10-22)
   - Robot platformer: paired compute compile cost (2026-10-21, open)
   - Robot platformer: worldmap stall and dark top-left quadrant (2026-10-17)
   - Robot platformer: intro frame cost on Intel (2026-10-18)
@@ -93,6 +95,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [Roguelike platformer](titles/roguelike-platformer.md)
   - A roguelike reaches gameplay (2026-10-07)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Shader translator: split geometry pass and compute row DPP (2026-10-22)
   - Shader translator: float contraction and coherent loads (2026-10-22)
   - Depth sampling: integer reads and dropped pending clears (2026-10-22, found by inspection)
   - EXECZ skip over a join shared with an outer branch (2026-10-20)
