@@ -21,8 +21,8 @@ enum class ShaderLaneReductionOp
 
 // A whole-wave reduction: a region with every lane in EXEC, entered by a V_CNDMASK_B32 seed `cond ? x : identity`,
 // whose row-shift DPP and PERMLANE steps only fold the seeds of other lanes together, read back by static
-// V_READLANE_B32 after EXEC is restored. Only instructions that name no register of the steps and keep EXEC may
-// sit between the restore and the reads.
+// V_READLANE_B32 after EXEC is restored. Scalar loads that keep EXEC may sit among the steps and run as written.
+// Only instructions that name no register of the steps and keep EXEC may sit between the restore and the reads.
 //
 // Each read folds the seed over a fixed set of guest lanes. A host subgroup of any width computes it as one
 // subgroup reduction: the condition holds only covered lanes, so a lane the subgroup does not hold (absent from
@@ -38,17 +38,20 @@ struct ShaderLaneReduction
 		uint64_t lanes = 0; // guest lanes whose seed it folds
 	};
 	ShaderLaneReductionOp op         = ShaderLaneReductionOp::Or;
-	uint32_t              seed_index = 0; // the V_CNDMASK_B32 that follows the region entry
+	uint32_t              seed_index = 0; // the V_CNDMASK_B32 that seeds the region
 	uint32_t              restore    = 0; // the EXEC restore that closes the region
 	int                   seed       = 0; // VGPR the seed is written to; it still holds the seed at every read
+	std::vector<uint32_t> steps;          // the network instructions between seed_index and restore
 	std::vector<Read>     reads;
+
+	[[nodiscard]] bool IsStep(uint32_t index) const;
 };
 
 struct ShaderLaneReductions
 {
 	std::vector<ShaderLaneReduction> reductions;
 
-	// An instruction between a seed and its restore: its effect is carried by the reductions of the reads.
+	// A network step of a reduction: its effect is carried by the reductions of the reads.
 	[[nodiscard]] bool IsStep(uint32_t index) const;
 	// The reduction a V_READLANE_B32 reads, with the lanes it folds, or nullptr.
 	[[nodiscard]] const ShaderLaneReduction* ReadAt(uint32_t index, uint64_t* lanes) const;
@@ -57,9 +60,9 @@ struct ShaderLaneReductions
 // Every proven whole-wave OR reduction of a lane-local fragment program (`masks` from the same code).
 [[nodiscard]] ShaderLaneReductions ShaderFindFragmentLaneReductions(const ShaderCode& code, const ShaderFragmentMaskFlow& masks);
 
-// The steps of `reduction.op` from seed_index + 1 to restore, which must all be steps, and the static reads that
-// follow restore, for a guest wave of guest_wave_size lanes. Proves neither the region nor that the steps are
-// dead; fills seed, restore and reads. False without a read.
+// The steps of `reduction.op` from seed_index + 1 to restore, which must all be steps or scalar loads that keep
+// EXEC, and the static reads that follow restore, for a guest wave of guest_wave_size lanes. Proves neither the
+// region nor that the steps are dead; fills seed, restore, steps and reads. False without a read.
 [[nodiscard]] bool ShaderProveLaneReductionNetwork(const ShaderCode& code, uint32_t guest_wave_size, uint32_t seed_index, uint32_t restore,
                                                    ShaderLaneReduction* reduction);
 

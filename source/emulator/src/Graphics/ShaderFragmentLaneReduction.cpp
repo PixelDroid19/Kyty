@@ -469,18 +469,17 @@ bool NetworkDead(const ShaderCode& code, const ShaderFragmentMaskFlow& masks, ui
 	return true;
 }
 
-bool ProveReduction(const ShaderCode& code, const ShaderFragmentMaskFlow& masks, uint32_t entry, uint32_t restore,
+bool ProveReduction(const ShaderCode& code, const ShaderFragmentMaskFlow& masks, uint32_t seed_index, uint32_t restore,
                     ShaderLaneReduction* reduction)
 {
-	const auto&    instructions = code.GetInstructions();
-	const uint32_t seed_index   = entry + 1u;
+	const auto& instructions = code.GetInstructions();
 	// The region proof made the seed V_CNDMASK_B32 0, x, cond with cond inside the region's EXEC; the
 	// mask flow adds that cond holds only covered lanes.
 	if (!masks.live_condition[seed_index]) { return false; }
 	if (!ShaderProveLaneReductionNetwork(code, masks.guest_wave_size, seed_index, restore, reduction)) { return false; }
 	VectorSet live;
 	live.set(static_cast<size_t>(reduction->seed));
-	for (uint32_t index = seed_index + 1u; index < restore; ++index) { live.set(static_cast<size_t>(instructions.At(index).dst.register_id)); }
+	for (const uint32_t step: reduction->steps) { live.set(static_cast<size_t>(instructions.At(step).dst.register_id)); }
 	return NetworkDead(code, masks, reduction->reads.back().index + 1u, live);
 }
 
@@ -495,9 +494,13 @@ bool ShaderProveLaneReductionNetwork(const ShaderCode& code, uint32_t guest_wave
 	Network   network;
 	auto&     own = network[seed];
 	for (uint32_t lane = 0; lane < guest_wave_size; ++lane) { own[lane] = uint64_t {1} << lane; }
+	reduction->steps.clear();
 	for (uint32_t index = seed_index + 1u; index < restore; ++index)
 	{
-		if (!Step(instructions.At(index), reduction->op, guest_wave_size, &network)) { return false; }
+		const auto& inst = instructions.At(index);
+		if (ShaderReductionRegionScalarLoad(inst) && !ShaderInstructionWritesExec(inst)) { continue; }
+		if (!Step(inst, reduction->op, guest_wave_size, &network)) { return false; }
+		reduction->steps.push_back(index);
 	}
 	VectorSet live;
 	for (const auto& [reg, sets]: network)
@@ -525,10 +528,14 @@ bool ShaderProveLaneReductionNetwork(const ShaderCode& code, uint32_t guest_wave
 	return !reduction->reads.empty();
 }
 
+bool ShaderLaneReduction::IsStep(uint32_t index) const
+{
+	return std::find(steps.begin(), steps.end(), index) != steps.end();
+}
+
 bool ShaderLaneReductions::IsStep(uint32_t index) const
 {
-	return std::any_of(reductions.begin(), reductions.end(),
-	                   [index](const auto& reduction) { return index > reduction.seed_index && index < reduction.restore; });
+	return std::any_of(reductions.begin(), reductions.end(), [index](const auto& reduction) { return reduction.IsStep(index); });
 }
 
 const ShaderLaneReduction* ShaderLaneReductions::ReadAt(uint32_t index, uint64_t* lanes) const
@@ -561,14 +568,15 @@ ShaderLaneReductions ShaderFindFragmentLaneReductions(const ShaderCode& code, co
 	const Type  entry_type   = wave32 ? Type::SOrn2SaveexecB32 : Type::SOrn2SaveexecB64;
 	for (uint32_t entry = 0; entry < instructions.Size(); ++entry)
 	{
+		uint32_t seed    = 0;
 		uint32_t restore = 0;
-		if (instructions.At(entry).type == entry_type) { }
-		if (instructions.At(entry).type != entry_type || !ShaderFragmentNeutralRegionEnd(program, masks.guest_wave_size, entry, &restore))
+		if (instructions.At(entry).type != entry_type ||
+		    !ShaderFragmentNeutralRegionBounds(program, masks.guest_wave_size, entry, &seed, &restore))
 		{
 			continue;
 		}
 		ShaderLaneReduction reduction;
-		if (ProveReduction(program, masks, entry, restore, &reduction)) { result.reductions.push_back(std::move(reduction)); }
+		if (ProveReduction(program, masks, seed, restore, &reduction)) { result.reductions.push_back(std::move(reduction)); }
 	}
 	return result;
 }

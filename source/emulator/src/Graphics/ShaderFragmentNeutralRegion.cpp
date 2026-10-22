@@ -2,6 +2,8 @@
 
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 
+#include "ShaderStorageAnalysis.h"
+
 #include <algorithm>
 #include <array>
 #include <vector>
@@ -18,6 +20,7 @@ using VectorSet = std::array<bool, 256>;
 struct NeutralRegion
 {
 	uint32_t  begin       = 0;
+	uint32_t  seed        = 0;
 	uint32_t  end         = 0;
 	VectorSet written     {};
 	VectorSet zero        {};
@@ -310,12 +313,45 @@ bool InitializerShape(const MaskForm& form, const ShaderInstruction& instruction
 	       VectorDestination(instruction) && VectorMetadata(instruction) && instruction.vop3_op_sel == 0u && Unused(instruction.src[3]);
 }
 
+bool RegionScalarLoad(const ShaderInstruction& instruction)
+{
+	return ShaderReductionRegionScalarLoad(instruction) && !WritesExec(instruction);
+}
+
+// The initializer follows the entry, after the scalar loads a reduction region may hold before it. No label
+// may enter between them.
+bool SeedIndex(const ShaderCode& code, uint32_t begin, bool scalar_loads, uint32_t* seed)
+{
+	for (uint32_t cursor = begin + 1u; cursor < code.GetInstructions().Size(); ++cursor)
+	{
+		const auto& instruction = code.GetInstructions().At(cursor);
+		if (LabelAt(code, instruction.pc))
+		{
+			return false;
+		}
+		if (!scalar_loads || !RegionScalarLoad(instruction))
+		{
+			*seed = cursor;
+			return true;
+		}
+	}
+	return false;
+}
+
 // Lanes outside the condition receive the zero constant. The condition is
 // a subset of the saved mask, itself a subset of the captured allocation.
-bool Initializer(const MaskForm& form, const ShaderCode& code, uint32_t begin, uint32_t anchor, const ShaderOperand& mask,
+// A load before the initializer keeps the condition and the saved mask.
+bool Initializer(const MaskForm& form, const ShaderCode& code, uint32_t begin, uint32_t seed, uint32_t anchor, const ShaderOperand& mask,
                  const ShaderOperand& saved)
 {
-	const auto& instruction = code.GetInstructions().At(begin + 1u);
+	const auto& instruction = code.GetInstructions().At(seed);
+	for (uint32_t cursor = begin + 1u; cursor < seed; ++cursor)
+	{
+		if (Writes(code.GetInstructions().At(cursor), instruction.src[2]) || Writes(code.GetInstructions().At(cursor), saved))
+		{
+			return false;
+		}
+	}
 	return InitializerShape(form, instruction) && ZeroConstant(instruction.src[0]) && Contribution(instruction.src[1]) &&
 	       !Overlaps(saved, instruction.src[2]) && MaskSubset(form, code, begin, anchor, instruction.src[2], mask);
 }
@@ -436,19 +472,25 @@ bool GhostZeroSources(const ShaderInstruction& instruction, const VectorSet& zer
 	return true;
 }
 
-bool ClosedRegion(const MaskForm& form, const ShaderCode& code, uint32_t begin, const ShaderOperand& saved, NeutralRegion* region)
+bool ClosedRegion(const MaskForm& form, const ShaderCode& code, uint32_t begin, uint32_t seed, const ShaderOperand& saved,
+                  bool scalar_loads, NeutralRegion* region)
 {
 	region->begin = begin;
+	region->seed  = seed;
 	region->written = {};
 	region->zero    = {};
-	region->written[code.GetInstructions().At(begin + 1u).dst.register_id] = true;
-	region->zero[code.GetInstructions().At(begin + 1u).dst.register_id]    = true;
-	for (uint32_t cursor = begin + 2u; cursor < code.GetInstructions().Size(); ++cursor)
+	region->written[code.GetInstructions().At(seed).dst.register_id] = true;
+	region->zero[code.GetInstructions().At(seed).dst.register_id]    = true;
+	for (uint32_t cursor = seed + 1u; cursor < code.GetInstructions().Size(); ++cursor)
 	{
 		const auto& instruction = code.GetInstructions().At(cursor);
 		if (LabelAt(code, instruction.pc))
 		{
 			return false;
+		}
+		if (scalar_loads && RegionScalarLoad(instruction) && !Writes(instruction, saved))
+		{
+			continue;
 		}
 		if (Restores(form, instruction, saved))
 		{
@@ -494,11 +536,12 @@ bool RegionEntry(const MaskForm& form, const ShaderCode& code, uint32_t index)
 	return instruction.type == form.entry && instruction.format == form.unary && instruction.src_num == 1 && Pair(form, mask) &&
 	       mask.type == ShaderOperandType::Sgpr && Pair(form, saved) &&
 	       saved.type != ShaderOperandType::ExecLo && !Overlaps(saved, mask) && Unused(instruction.dst2) && Unused(instruction.src[1]) &&
-	       Unused(instruction.src[2]) && Unused(instruction.src[3]) && ScalarMetadata(instruction) && !LabelAt(code, instruction.pc) &&
-	       !LabelAt(code, code.GetInstructions().At(index + 1u).pc);
+	       Unused(instruction.src[2]) && Unused(instruction.src[3]) && ScalarMetadata(instruction) && !LabelAt(code, instruction.pc);
 }
 
-bool AnalyzeRegion(const MaskForm& form, const ShaderCode& code, uint32_t index, NeutralRegion* region)
+// `scalar_loads` admits scalar memory loads before the initializer and among the steps: a lane reduction runs
+// them as written, while the uncaptured-lane tier keeps its regions free of scalar writes.
+bool AnalyzeRegion(const MaskForm& form, const ShaderCode& code, uint32_t index, bool scalar_loads, NeutralRegion* region)
 {
 	if (code.GetType() != ShaderType::Pixel || index >= code.GetInstructions().Size() || code.GetInstructions().Size() - index < 2u ||
 	    !RegionEntry(form, code, index))
@@ -507,9 +550,10 @@ bool AnalyzeRegion(const MaskForm& form, const ShaderCode& code, uint32_t index,
 	}
 	const auto& instruction = code.GetInstructions().At(index);
 	uint32_t    anchor      = 0;
-	return SavedMaskEqualsExec(form, code, index, instruction.src[0], &anchor) &&
-	       Initializer(form, code, index, anchor, instruction.src[0], instruction.dst) &&
-	       ClosedRegion(form, code, index, instruction.dst, region);
+	uint32_t    seed        = 0;
+	return SavedMaskEqualsExec(form, code, index, instruction.src[0], &anchor) && SeedIndex(code, index, scalar_loads, &seed) &&
+	       Initializer(form, code, index, seed, anchor, instruction.src[0], instruction.dst) &&
+	       ClosedRegion(form, code, index, seed, instruction.dst, scalar_loads, region);
 }
 
 std::vector<NeutralRegion> CollectRegions(const ShaderCode& code)
@@ -518,7 +562,7 @@ std::vector<NeutralRegion> CollectRegions(const ShaderCode& code)
 	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
 		NeutralRegion region;
-		if (AnalyzeRegion(kWave64Masks, code, index, &region))
+		if (AnalyzeRegion(kWave64Masks, code, index, false, &region))
 		{
 			regions.push_back(region);
 		}
@@ -605,18 +649,24 @@ bool DefinedBeforeRead(const ShaderCode& code, const std::vector<NeutralRegion>&
 
 } // namespace
 
+bool ShaderReductionRegionScalarLoad(const ShaderInstruction& instruction)
+{
+	return ShaderInstructionIsScalarMemoryLoad(instruction.type) || ShaderInstructionIsScalarBufferLoad(instruction);
+}
+
 bool ShaderFragmentNeutralRegionSupported(const ShaderCode& code, uint32_t index)
 {
 	NeutralRegion region;
-	return AnalyzeRegion(kWave64Masks, code, index, &region);
+	return AnalyzeRegion(kWave64Masks, code, index, false, &region);
 }
 
-bool ShaderFragmentNeutralRegionEnd(const ShaderCode& code, uint32_t guest_wave_size, uint32_t index, uint32_t* end)
+bool ShaderFragmentNeutralRegionBounds(const ShaderCode& code, uint32_t guest_wave_size, uint32_t index, uint32_t* seed, uint32_t* end)
 {
 	NeutralRegion region;
 	if (guest_wave_size != 32u && guest_wave_size != 64u) { return false; }
-	if (!AnalyzeRegion(guest_wave_size == 32u ? kWave32Masks : kWave64Masks, code, index, &region)) { return false; }
-	*end = region.end;
+	if (!AnalyzeRegion(guest_wave_size == 32u ? kWave32Masks : kWave64Masks, code, index, true, &region)) { return false; }
+	*seed = region.seed;
+	*end  = region.end;
 	return true;
 }
 
@@ -706,13 +756,13 @@ bool ConstantLane(const ShaderOperand& operand, uint32_t* lane)
 // before the region end observes exactly what the ghost lanes carry there.
 bool RegionZeroAt(const ShaderCode& code, const NeutralRegion& region, uint32_t index, int reg)
 {
-	if (reg < 0 || index <= region.begin + 1u)
+	if (reg < 0 || index <= region.seed)
 	{
 		return false;
 	}
 	VectorSet zero {};
-	zero[code.GetInstructions().At(region.begin + 1u).dst.register_id] = true;
-	for (uint32_t cursor = region.begin + 2u; cursor < index && cursor <= region.end; ++cursor)
+	zero[code.GetInstructions().At(region.seed).dst.register_id] = true;
+	for (uint32_t cursor = region.seed + 1u; cursor < index && cursor <= region.end; ++cursor)
 	{
 		const auto& instruction = code.GetInstructions().At(cursor);
 		const auto& source      = instruction.src[0];

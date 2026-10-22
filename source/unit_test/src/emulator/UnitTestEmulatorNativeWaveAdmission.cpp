@@ -1137,6 +1137,60 @@ TEST(EmulatorNativeWaveAdmission, Wave32OrReductionRunsAsAPartialWave)
 	EXPECT_NE(ShaderAnalyzeNativeWave(Wave32Reduction({Clear(10)}, 32), 32).proof, ShaderNativeWaveProof::FragmentPartialWave);
 }
 
+TEST(EmulatorNativeWaveAdmission, Wave32OrReductionMayHoldScalarLoadsAmongItsSteps)
+{
+	const auto load = [](ShaderOperand dst)
+	{
+		ShaderInstruction inst {};
+		inst.type    = ShaderInstructionType::SBufferLoadDword;
+		inst.format  = ShaderInstructionFormat::SdstSvSoffset;
+		inst.dst     = dst;
+		inst.src[0]  = Operand(ShaderOperandType::Sgpr, 12, 4);
+		inst.src[1]  = Constant(0);
+		inst.src_num = 2;
+		return inst;
+	};
+	// One load between the entry and the seed, one between the first two steps.
+	const auto with_loads = [](const ShaderInstruction& before_seed, const ShaderInstruction& among_steps)
+	{
+		const auto plain = Wave32Reduction({Clear(10)});
+		ShaderCode code;
+		code.SetType(ShaderType::Pixel);
+		const auto add = [&code](ShaderInstruction inst)
+		{
+			inst.pc = code.GetInstructions().Size() * 4u;
+			code.GetInstructions().Add(inst);
+		};
+		for (uint32_t index = 0; index < plain.GetInstructions().Size(); ++index)
+		{
+			if (index == 2u) { add(before_seed); }
+			if (index == 4u) { add(among_steps); }
+			add(plain.GetInstructions().At(index));
+		}
+		return code;
+	};
+	const auto code = with_loads(load(Operand(ShaderOperandType::VccHi)), load(Operand(ShaderOperandType::Sgpr, 16)));
+	EXPECT_EQ(ShaderAnalyzeNativeWave(code, 32).proof, ShaderNativeWaveProof::FragmentPartialWave);
+	const auto reductions = ShaderFindFragmentLaneReductions(code, ShaderAnalyzeFragmentMaskFlow(code, 32u));
+	ASSERT_EQ(reductions.reductions.size(), 1u);
+	EXPECT_EQ(reductions.reductions[0].seed_index, 3u);
+	EXPECT_FALSE(reductions.IsStep(2));
+	EXPECT_TRUE(reductions.IsStep(4));
+	EXPECT_FALSE(reductions.IsStep(5)); // the load runs as written
+	EXPECT_TRUE(reductions.IsStep(6));
+	uint64_t lanes = 0;
+	ASSERT_NE(reductions.ReadAt(11, &lanes), nullptr);
+	EXPECT_EQ(lanes, 0x000000000000ffffull);
+	// A load that writes the seed condition, the saved mask or EXEC breaks the region.
+	const auto refused = [&](const ShaderCode& program)
+	{ EXPECT_TRUE(ShaderFindFragmentLaneReductions(program, ShaderAnalyzeFragmentMaskFlow(program, 32u)).reductions.empty()); };
+	const auto other = load(Operand(ShaderOperandType::Sgpr, 16));
+	refused(with_loads(load(Operand(ShaderOperandType::Sgpr, 36)), other));
+	refused(with_loads(load(Operand(ShaderOperandType::VccLo)), other));
+	refused(with_loads(other, load(Operand(ShaderOperandType::VccLo))));
+	refused(with_loads(other, load(Operand(ShaderOperandType::ExecLo))));
+}
+
 TEST(EmulatorNativeWaveAdmission, PartialWaveKeepsStaleLanesOutsideTheRestoredExec)
 {
 	const auto exec  = Operand(ShaderOperandType::ExecLo, 0, 2);

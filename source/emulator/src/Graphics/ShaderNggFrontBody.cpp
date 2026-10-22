@@ -1599,7 +1599,7 @@ bool Body::MaxReductionPart(const ShaderInstruction& inst, const MaxReduction& u
 		Define(inst.dst, kInfo);
 		return true;
 	}
-	if (m_index >= unit.lanes.seed_index && m_index < unit.lanes.restore) { return true; } // folded by the reads
+	if (m_index == unit.lanes.seed_index || unit.lanes.IsStep(m_index)) { return true; } // folded by the reads
 	for (const auto& read: unit.lanes.reads)
 	{
 		if (read.index != m_index) { continue; }
