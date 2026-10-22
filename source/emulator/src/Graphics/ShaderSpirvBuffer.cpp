@@ -3205,9 +3205,11 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
 // Pixel programs and the geometry pass read runtime V#s at guest device addresses.
 static bool ScalarBufferUsesGuestAddress(const Spirv* spirv, const ShaderInstruction& inst)
 {
-	const auto* bind = spirv->GetBindInfo();
+	const auto* bind           = spirv->GetBindInfo();
+	const auto* vertex         = spirv->GetVsInputInfo();
+	const int   user_data_base = vertex != nullptr && vertex->gs_prolog ? 8 : 0;
 	return Config::IsNextGen() && (spirv->GetPsInputInfo() != nullptr || spirv->UsesGeometryCompute()) && bind != nullptr &&
-	       ShaderScalarBufferUsesRuntimeDescriptor(*bind, inst);
+	       ShaderScalarBufferUsesRuntimeDescriptor(*bind, inst, user_data_base);
 }
 
 static bool RecompileZeroSBufferLoad(const ShaderInstruction& inst, uint32_t components, const ShaderBindResources* bind_info,

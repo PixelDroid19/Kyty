@@ -434,6 +434,13 @@ TEST(EmulatorShaderGetpc, BufferNamespaceClassificationMatchesLoweringAndIgnores
 			ShaderCode code;
 			code.GetInstructions().Add(load);
 			EXPECT_EQ(ShaderHasUnboundBufferLoad(code, bind, base), !bound);
+			ShaderInstruction scalar_load {};
+			scalar_load.type    = ShaderInstructionType::SBufferLoadDword;
+			scalar_load.dst     = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 1};
+			scalar_load.src_num = 2;
+			scalar_load.src[0]  = resource;
+			scalar_load.src[1]  = {.type = ShaderOperandType::LiteralConstant, .size = 1};
+			EXPECT_EQ(ShaderScalarBufferUsesRuntimeDescriptor(bind, scalar_load, base), !bound);
 		}
 	}
 	const ShaderOperand invalid {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};

@@ -145,7 +145,9 @@ bool Gen5CodeUnavailableDirectResourceLooksStorage(const HW::UserSgprInfo& user_
 
 // Dynamic scalar resource analysis, shared by the usage parse paths.
 bool ShaderInstructionIsScalarBufferLoad(const ShaderInstruction& inst);
-bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst);
+// Bound storage buffers use API user-data indices; the fused vertex front emits them at s8.
+bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst,
+                                             int user_data_register_base = 0);
 void ShaderAccumulateScalarBufferLoadSpan(const ShaderInstruction& inst, uint64_t* required_bytes, bool* dynamic_offset);
 void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                          ShaderParsedUsage* info, const uint32_t* extended_buffer, uint16_t eud_size_dw,

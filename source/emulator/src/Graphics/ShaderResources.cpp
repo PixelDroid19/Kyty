@@ -1901,11 +1901,7 @@ static bool ShaderBufferRegisterNamesBinding(const ShaderBindResources& bind, co
 		{
 			if (bind.zero_sbuffer_resources.start_register[i] == reg) { return true; }
 		}
-		for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
-		{
-			if (bind.storage_buffers.start_register[i] == reg) { return true; }
-		}
-		return false;
+		return ShaderStorageBufferResourceIsBound(bind, inst.src[0], user_data_register_base);
 	}
 	return ShaderStorageBufferResourceIsBound(bind, inst.src[1], user_data_register_base);
 }
@@ -1964,7 +1960,7 @@ bool ShaderIsDynamicScalarStorageConsumer(const ShaderBindResources& bind, const
 	return false;
 }
 
-bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst)
+bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst, int user_data_register_base)
 {
 	if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num < 1 || inst.src[0].type != ShaderOperandType::Sgpr ||
 	    inst.src[0].size != 4 || ShaderIsDynamicScalarStorageConsumer(bind, inst))
@@ -1975,11 +1971,11 @@ bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, co
 	{
 		return true;
 	}
-	const int reg = inst.src[0].register_id;
-	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	if (ShaderStorageBufferResourceIsBound(bind, inst.src[0], user_data_register_base))
 	{
-		if (bind.storage_buffers.start_register[i] == reg) { return false; }
+		return false;
 	}
+	const int reg = inst.src[0].register_id;
 	for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
 	{
 		if (bind.zero_sbuffer_resources.start_register[i] == reg) { return false; }
