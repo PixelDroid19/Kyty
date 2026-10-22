@@ -651,7 +651,7 @@ void Spirv::WriteHeader()
 		{
 			capabilities.Add("OpCapability GroupNonUniformBallot");
 		}
-		if (GetHostShaderType() == ShaderType::Pixel)
+		if (GetHostShaderType() == ShaderType::Pixel || !LaneReductions().reductions.empty())
 		{
 			capabilities.Add("OpCapability GroupNonUniformArithmetic");
 		}
@@ -1017,7 +1017,8 @@ void Spirv::WriteAnnotations()
 	if (UsesFragmentWaveTier() || spirv_uses_dpp_row(m_code))
 	{
 		vars.Add("OpDecorate %gl_SubgroupSize BuiltIn SubgroupSize");
-		vars.Add("OpDecorate %gl_SubgroupSize Flat");
+		// Flat applies to fragment inputs only; a vertex input carrying it fails validation.
+		if (GetHostShaderType() == ShaderType::Pixel) { vars.Add("OpDecorate %gl_SubgroupSize Flat"); }
 	}
 	if (UsesComputeWaveBanks() || UsesNativeComputeWave())
 	{
@@ -2912,7 +2913,7 @@ void Spirv::WriteInstructions()
 		{
 			WriteLabel(index);
 		}
-		if (FragmentLaneReductions().IsStep(static_cast<uint32_t>(index)))
+		if (LaneReductions().IsStep(static_cast<uint32_t>(index)))
 		{
 			m_source += String8::FromPrintf("; reduction step: %s\n", ShaderCode::DbgInstructionToStr(inst).c_str());
 			continue;
@@ -3478,8 +3479,9 @@ void Spirv::FindConstants()
 			}
 		}
 	}
-	for (const auto& reduction: FragmentLaneReductions().reductions)
+	for (const auto& reduction: LaneReductions().reductions)
 	{
+		if (reduction.op == ShaderLaneReductionOp::MaxF32) { AddConstantUint(0xff800000u); } // -inf, the identity
 		// Each read selects the seeds of its guest lanes by a two-word lane set.
 		for (const auto& read: reduction.reads)
 		{

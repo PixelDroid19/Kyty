@@ -2,6 +2,7 @@
 
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveLayout.h"
+#include "Emulator/Graphics/ShaderNggFrontBody.h"
 
 #include <limits>
 
@@ -278,15 +279,20 @@ bool Spirv::UsesFragmentPartialWave() const
 	       m_ps_input_info->native_wave.refusal_reason == nullptr;
 }
 
-const ShaderFragmentLaneReductions& Spirv::FragmentLaneReductions() const
+const ShaderLaneReductions& Spirv::LaneReductions() const
 {
 	if (!m_lane_reductions_ready)
 	{
 		m_lane_reductions_ready = true;
+		const auto* vertex = m_code.GetType() == ShaderType::Vertex ? m_vs_input_info : nullptr;
 		if (UsesFragmentPartialWave())
 		{
 			m_lane_reductions = ShaderFindFragmentLaneReductions(
 			    m_code, ShaderAnalyzeFragmentMaskFlow(m_code, m_ps_input_info->native_wave.guest_wave_size));
+		} else if (vertex != nullptr && vertex->native_wave.proof == ShaderNativeWaveProof::LaneLocal && vertex->native_wave.refusal_reason == nullptr)
+		{
+			// The NGG front proof admitted the program with these wave maxima in it.
+			m_lane_reductions = ShaderFindNggFrontMaxReductions(m_code, vertex->native_wave.guest_wave_size);
 		}
 	}
 	return m_lane_reductions;

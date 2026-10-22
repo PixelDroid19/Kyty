@@ -3508,11 +3508,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
 	return true;
 }
 
-// A V_READLANE_B32 of a proven whole-wave OR reduction: the OR of the seed over the invocations whose
-// guest lane is in `lanes`. The seed register still holds the seed, since the network steps were not
-// emitted. Lanes the subgroup does not hold contribute nothing, as absent guest lanes seed zero; the
-// quad transfer gives helpers, which a general collective may leave undefined, their quad's result.
-static bool RecompileLaneReductionRead(uint32_t index, const ShaderFragmentLaneReduction& reduction, uint64_t lanes,
+// A V_READLANE_B32 of a proven whole-wave reduction: the seed folded over the invocations whose guest lane is
+// in `lanes`. The seed register still holds the seed, since the network steps were not emitted. Lanes the
+// subgroup does not hold contribute the identity, as absent guest lanes do; in a pixel program the quad transfer
+// gives helpers, which a general collective may leave undefined, their quad's result.
+static bool RecompileLaneReductionRead(uint32_t index, const ShaderLaneReduction& reduction, uint64_t lanes,
                                        const String8& dst, String8* dst_source, Spirv* spirv)
 {
 	ShaderOperand seed;
@@ -3531,15 +3531,32 @@ static bool RecompileLaneReductionRead(uint32_t index, const ShaderFragmentLaneR
         %lr_shifted_<index> = OpShiftRightLogical %uint %lr_word_<index> %lr_shift_<index>
         %lr_bit_<index> = OpBitwiseAnd %uint %lr_shifted_<index> %uint_1
         %lr_member_<index> = OpINotEqual %bool %lr_bit_<index> %uint_0
+)";
+	// V_MAX_F32 returns the other operand of a quiet NaN; the subgroup maximum of a NaN is undefined.
+	static const char* or_text = R"(
         %lr_part_<index> = OpSelect %uint %lr_member_<index> %lr_seed_<index> %uint_0
         %lr_raw_<index> = OpGroupNonUniformBitwiseOr %uint %uint_3 Reduce %lr_part_<index>
 )";
-	*dst_source += String8(text)
+	static const char* max_text = R"(
+        %lr_value_<index> = OpBitcast %float %lr_seed_<index>
+        %lr_identity_<index> = OpBitcast %float %<negative_infinity>
+        %lr_nan_<index> = OpIsNan %bool %lr_value_<index>
+        %lr_number_<index> = OpLogicalNot %bool %lr_nan_<index>
+        %lr_take_<index> = OpLogicalAnd %bool %lr_member_<index> %lr_number_<index>
+        %lr_part_<index> = OpSelect %float %lr_take_<index> %lr_value_<index> %lr_identity_<index>
+        %lr_max_<index> = OpGroupNonUniformFMax %float %uint_3 Reduce %lr_part_<index>
+        %lr_raw_<index> = OpBitcast %uint %lr_max_<index>
+)";
+	const bool maximum = reduction.op == ShaderLaneReductionOp::MaxF32;
+	*dst_source += (String8(text) + (maximum ? max_text : or_text))
 	                   .ReplaceStr("<load_seed>", load_seed)
 	                   .ReplaceStr("<low>", spirv->GetConstantUint(static_cast<uint32_t>(lanes)))
 	                   .ReplaceStr("<high>", spirv->GetConstantUint(static_cast<uint32_t>(lanes >> 32u)))
+	                   .ReplaceStr("<negative_infinity>", spirv->GetConstantUint(0xff800000u))
 	                   .ReplaceStr("<index>", index_str);
-	*dst_source += spirv->NativeQuadUniform(String8("lr_raw_") + index_str, "uint", String8("lr_") + index_str);
+	*dst_source += spirv->GetHostShaderType() == ShaderType::Pixel
+	                   ? spirv->NativeQuadUniform(String8("lr_raw_") + index_str, "uint", String8("lr_") + index_str)
+	                   : String8::FromPrintf("%%lr_%u = OpCopyObject %%uint %%lr_raw_%u\n", index, index);
 	*dst_source += String8::FromPrintf("OpStore %%%s %%lr_%u\n", dst.c_str(), index);
 	return true;
 }
@@ -3557,7 +3574,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	uint64_t reduction_lanes = 0;
-	if (const auto* reduction = spirv->FragmentLaneReductions().ReadAt(index, &reduction_lanes); reduction != nullptr)
+	if (const auto* reduction = spirv->LaneReductions().ReadAt(index, &reduction_lanes); reduction != nullptr)
 	{
 		return RecompileLaneReductionRead(index, *reduction, reduction_lanes, dst_value.value, dst_source, spirv);
 	}

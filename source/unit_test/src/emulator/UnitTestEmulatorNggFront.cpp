@@ -998,7 +998,7 @@ TEST(EmulatorNggFront, BodyRefusesSelectsBackEdgesMaskNumbersUndefinedInputsAndE
 		Sopp(back_edge, 2, 0xffff); // s_branch -1
 		Exp(back_edge, 12, 15, true, 13, 13, 13, 13);
 		Sopp(back_edge, 1);
-		refused(back_edge, "forward branches", "back edge");
+		refused(back_edge, "does not reach its terminator", "back edge without an exit");
 
 		Words undefined;
 		Exp(undefined, 12, 15, true, 30, 30, 30, 30);
@@ -1366,6 +1366,223 @@ TEST(EmulatorNggFront, AScopedReadfirstlaneAndAPartialExecVccBranchEmitPackedCod
 			std::fprintf(stderr, "%s\n", error.c_str());
 			std::_Exit(3);
 		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+namespace {
+
+// EXEC is saved in s[40:41] and spilled to lanes 0 and 1 of v20; v13 is written under a per-lane EXEC; EXEC is
+// restored from the lanes <low> and <high> of v20 and v13 is exported.
+Words SpilledExecBody(int low_lane, int high_lane)
+{
+	Words body;
+	Vop1(body, 1, 13, Inline(0));                                // v_mov_b32 v13, 0
+	Sop1(body, 4, 40, kExecLoReg);                               // s_mov_b64 s[40:41], exec
+	LaneMove(body, 0x361, 20, 40, Inline(0));                    // v_writelane_b32 v20, s40, 0
+	LaneMove(body, 0x361, 20, 41, Inline(1));                    // v_writelane_b32 v20, s41, 1
+	Append(body, Vopc(0xd5, Inline(1), 5u));                     // v_cmpx_ne_u32 1, v5
+	Vop1(body, 1, 13, 256u + 5u);                                // v_mov_b32 v13, v5
+	LaneMove(body, 0x360, 42, 256u + 20u, Inline(low_lane));     // v_readlane_b32 s42, v20, <low>
+	LaneMove(body, 0x360, 43, 256u + 20u, Inline(high_lane));    // v_readlane_b32 s43, v20, <high>
+	Sop1(body, 4, kExecLoReg, 42);                               // s_mov_b64 exec, s[42:43]
+	Exp(body, 12, 15, true, 13, 13, 13, 13);                     // exp pos0 v13 done
+	Sopp(body, 1);                                               // s_endpgm
+	return body;
+}
+
+} // namespace
+
+TEST(EmulatorNggFront, AnExecSavedThroughASpillSlotRestoresTheWholeExec)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto front = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(SpilledExecBody(0, 1))), 64u);
+		if (!front.lane_local) { std::fprintf(stderr, "refused: %s\n", front.reason.c_str()); }
+		Check(front.lane_local, "the restored pair is the saved EXEC");
+		const auto swapped = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(SpilledExecBody(1, 0))), 64u);
+		if (swapped.lane_local) { std::fprintf(stderr, "swapped admitted\n"); }
+		Check(!swapped.lane_local, "swapped words are not the saved EXEC");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+namespace {
+
+// v13 = 0, then a loop that adds 1.0 to v13 three times under a wave-uniform counter; v13 is exported.
+Words UniformLoopBody()
+{
+	Words body;
+	body.push_back(0xb0000000u | (24u << 16u) | 3u); // s_movk_i32 s24, 3
+	Vop1(body, 1, 13, Inline(0));                     // v_mov_b32 v13, 0
+	Vop2(body, 3, 13, 242, 13);                       // header: v_add_f32 v13, 1.0, v13
+	Sop2(body, 2, 24, 24, Inline(-1));                // s_add_i32 s24, s24, -1
+	Append(body, Sopc(7, 24, Inline(0)));             // s_cmp_lg_u32 s24, 0
+	Sopp(body, 4, 1);                                 // s_cbranch_scc0 over the back edge
+	Sopp(body, 2, 0xfffbu);                           // s_branch header
+	Exp(body, 12, 15, true, 13, 13, 13, 13);          // exp pos0 v13 done
+	Sopp(body, 1);                                    // s_endpgm
+	return body;
+}
+
+// v12 = float(v5), v13 = 0; each lane adds 1.0 to v13 until it reaches v12, leaving the loop once no lane is left;
+// `narrowed` runs after each iteration's narrowing. EXEC is restored and v<exported> is exported.
+Words LaneExitLoopBody(const Words& narrowed, uint32_t exported)
+{
+	Words body;
+	Vop1(body, 5, 12, 256u + 5u);                     // v_cvt_f32_i32 v12, v5
+	Vop1(body, 1, 13, Inline(0));                     // v_mov_b32 v13, 0
+	Sop1(body, 4, 40, kExecLoReg);                    // s_mov_b64 s[40:41], exec
+	Words loop;
+	Vop2(loop, 3, 13, 242, 13);                       // header: v_add_f32 v13, 1.0, v13
+	Append(loop, Vopc(0x11, 256u + 13u, 12u));        // v_cmpx_lt_f32 v13, v12
+	Append(loop, narrowed);
+	Sopp(loop, 8, 1);                                 // s_cbranch_execz over the back edge
+	Sopp(loop, 2, static_cast<uint16_t>(-static_cast<int>(loop.size() + 1u))); // s_branch header
+	Append(body, loop);
+	Sop1(body, 4, kExecLoReg, 40);                    // s_mov_b64 exec, s[40:41]
+	Exp(body, 12, 15, true, exported, exported, exported, exported); // exp pos0 v<exported> done
+	Sopp(body, 1);                                    // s_endpgm
+	return body;
+}
+
+} // namespace
+
+TEST(EmulatorNggFront, LoopsWithAUniformCounterOrALaneExitAreLaneLocal)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto prove = [](const Words& body, const char* why) {
+			const auto front = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(body)), 64u);
+			if (!front.lane_local) { std::fprintf(stderr, "%s: %s\n", why, front.reason.c_str()); }
+			Check(front.lane_local, why);
+		};
+		prove(UniformLoopBody(), "every lane runs each iteration of a uniform loop");
+		// Every iteration runs a subset of the lanes that entered, so a VGPR defined before the loop stays defined.
+		prove(LaneExitLoopBody({}, 13u), "lanes leave the loop one by one");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggFront, AVgprWrittenOnlyByLanesThatKeepLoopingIsUndefinedAfterTheLoop)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		Words narrowed;
+		Vop1(narrowed, 1, 14, 256u + 13u); // v_mov_b32 v14, v13: skipped by lanes that leave at the first iteration
+		const auto front = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(LaneExitLoopBody(narrowed, 14u))), 64u);
+		if (front.lane_local || !front.reason.ContainsStr("before it is defined")) { std::fprintf(stderr, "%s\n", front.reason.c_str()); }
+		Check(!front.lane_local && front.reason.ContainsStr("before it is defined"), "v14 is defined for the looping lanes only");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+namespace {
+
+// v20 = float(v5), v13 = 0, s52 = 3; the maximum of v20 over the lanes where it is positive is stored with an atomic
+// at index <index_source>, skipped when no lane is positive or s52 is 0; `after` runs at the join and v13 is exported.
+Words WaveMaximumBody(uint32_t compare_opcode, uint32_t index_source, const Words& after)
+{
+	Words body;
+	body.push_back(0xb0000000u | (52u << 16u) | 3u);   // s_movk_i32 s52, 3
+	Sop1(body, 4, 44, Inline(0));                       // s_mov_b64 s[44:45], 0: the store's buffer resource
+	Sop1(body, 4, 46, Inline(0));                       // s_mov_b64 s[46:47], 0
+	Vop1(body, 5, 20, 256u + 5u);                       // v_cvt_f32_i32 v20, v5
+	Vop1(body, 1, 13, Inline(0));                       // v_mov_b32 v13, 0
+	Append(body, Vopc(compare_opcode, Inline(0), 20u)); // v_cmp_lt_f32 vcc, 0, v20 (opcode 1)
+	body.push_back(0xd4000000u | (0xe4u << 16u) | 50u); // v_cmp_gt_u64 s[50:51], vcc, 0: any lane positive
+	body.push_back(kVccReg | (Inline(0) << 9u));
+	Append(body, Sopc(8, 52, Inline(0)));               // s_cmp_gt_u32 s52, 0
+	Sop2(body, 11, kVccReg, kExecLoReg, Inline(0));     // s_cselect_b64 vcc, exec, 0
+	Sop2(body, 15, kVccReg, 50, kVccReg);               // s_and_b64 vcc, s[50:51], vcc
+
+	Words region;
+	Sop1(region, 0x28, kVccReg, kExecLoReg);            // s_orn2_saveexec_b64 vcc, exec
+	Vop2(region, 1, 21, 255, 20);                       // v_cndmask_b32 v21, -inf, v20, vcc
+	region.push_back(0xff800000u);
+	for (const uint32_t shift: {1u, 2u, 4u, 8u})
+	{
+		Vop2(region, 0x10, 21, 0xfa, 21);                // v_max_f32_dpp v21, v21, v21 row_shr:<shift>
+		region.push_back(21u | ((0x110u + shift) << 8u) | (15u << 24u) | (15u << 28u));
+	}
+	region.push_back(0xd4000000u | (0x378u << 16u) | (2u << 11u) | 22u); // v_permlanex16_b32 v22, v21, -1, -1
+	region.push_back((256u + 21u) | (Inline(-1) << 9u) | (Inline(-1) << 18u));
+	Vop2(region, 0x10, 21, 256u + 21u, 22);              // v_max_f32 v21, v21, v22
+	Sop1(region, 4, kExecLoReg, kVccReg);               // s_mov_b64 exec, vcc
+	LaneMove(region, 0x360, 48, 256u + 21u, Inline(31)); // v_readlane_b32 s48, v21, 31
+	LaneMove(region, 0x360, 49, 256u + 21u, Inline(63)); // v_readlane_b32 s49, v21, 63
+	Vop2(region, 0x10, 23, 0xf9, 49);                   // v_max_f32_sdwa v23, s48, s49
+	region.push_back(48u | (6u << 8u) | (6u << 16u) | (1u << 23u) | (6u << 24u) | (1u << 31u));
+	Append(region, Vopc(0x12, 256u + 23u, 20u));        // v_cmpx_eq_f32 v23, v20: the lanes holding the maximum
+	Words store;
+	Vop1(store, 1, 24, index_source);                   // v_mov_b32 v24, <index>
+	store.push_back(0xe0000000u | (0x38u << 18u) | 0x2000u); // buffer_atomic_umax v23, v24, s[44:47], 0 idxen
+	store.push_back(24u | (23u << 8u) | ((44u / 4u) << 16u) | (Inline(0) << 24u));
+	Sopp(region, 8, static_cast<uint32_t>(store.size())); // s_cbranch_execz over the store
+	Append(region, store);
+	Sop1(region, 4, kExecLoReg, kVccReg);               // s_mov_b64 exec, vcc
+
+	Sopp(body, 6, static_cast<uint32_t>(region.size())); // s_cbranch_vccz to the join
+	Append(body, region);
+	Append(body, after);
+	Exp(body, 12, 15, true, 13, 13, 13, 13);            // exp pos0 v13 done
+	Sopp(body, 1);                                      // s_endpgm
+	return body;
+}
+
+} // namespace
+
+TEST(EmulatorNggFront, AWaveMaximumOfPositiveValuesStoredByAtomicIsLaneLocal)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		ScopedShaderValidation validation;
+		const auto code  = Parse(PrologueThenBody(WaveMaximumBody(0x01, 52u, {})));
+		const auto front = ShaderProveNggFrontLaneLocal(code, 64u);
+		if (!front.lane_local) { std::fprintf(stderr, "refused: %s\n", front.reason.c_str()); }
+		// Each host subgroup holding a positive lane stores its own maximum; the one holding the wave's maximum leaves
+		// memory where the guest wave would.
+		Check(front.lane_local, "the wave maximum is admitted");
+		ShaderVertexInputInfo input {};
+		input.gs_prolog       = true;
+		input.position1_usage = ShaderVertexPosition1Usage::RenderTargetLayer;
+		input.native_wave     = ShaderAnalyzeNativeWave(code, 64u);
+		input.bind.push_constant_size                = 16;
+		input.bind.storage_buffers.buffers_num       = 1;  // the atomic's target
+		input.bind.storage_buffers.start_register[0] = -1; // no user-SGPR home: the body writes its resource
+		const auto stages = Stages(kNggPassthroughStages);
+		const ShaderNggFrontVerdict verdict;
+		Check(!ShaderApplyNggFrontProof(&input.native_wave, code, &stages, verdict) &&
+		          input.native_wave.proof == ShaderNativeWaveProof::LaneLocal,
+		      "the program runs lane-local");
+		const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+		Check(source.FindIndex("OpGroupNonUniformFMax %float %uint_3 Reduce") != Core::STRING8_INVALID_INDEX, "subgroup maximum");
+		Kyty::Vector<uint32_t> binary;
+		String8                error;
+		if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+		{
+			std::fprintf(stderr, "%s\n", error.c_str());
+			std::_Exit(3);
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggFront, AWaveMaximumIsRefusedAtALaneIndexForANonPositiveCompareAndAfterItsJoin)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto refused = [](const Words& body, const char* reason, const char* why) {
+			const auto front = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(body)), 64u);
+			if (front.lane_local || !front.reason.ContainsStr(reason)) { std::fprintf(stderr, "%s: %s\n", why, front.reason.c_str()); }
+			Check(!front.lane_local && front.reason.ContainsStr(reason), why);
+		};
+		refused(WaveMaximumBody(0x01, 256u + 5u, {}), "lane-dependent address", "each lane would store at its own index");
+		// 0 > x: negative maxima order differently as unsigned words; outside the idiom the any-lane test reads VCC as a number.
+		refused(WaveMaximumBody(0x04, 52u, {}), "mask observed as a number", "a compare that is not x > 0");
+		Words read_after;
+		Vop1(read_after, 1, 13, 256u + 21u); // v_mov_b32 v13, v21: the guest and the host reduced over different lanes
+		refused(WaveMaximumBody(0x01, 52u, read_after), "before it is defined", "a region VGPR read after the join");
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
