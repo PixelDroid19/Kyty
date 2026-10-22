@@ -421,7 +421,7 @@ public:
 		for (uint32_t mapping = 0; mapping < m_bind->dynamic_sloads.records.Size(); ++mapping)
 		{
 			const auto& record = m_bind->dynamic_sloads.records.At(mapping);
-			if (record.instruction_pc == instruction_pc && (!found || record.offset_dw < *offset_dw))
+			if (record.instruction_pc == instruction_pc && !record.guest_load && (!found || record.offset_dw < *offset_dw))
 			{
 				*offset_dw = record.offset_dw;
 				found      = true;
@@ -441,7 +441,7 @@ public:
 		for (uint32_t mapping = 0; mapping < dynamic_sloads.records.Size(); ++mapping)
 		{
 			const auto& record = dynamic_sloads.records.At(mapping);
-			if (record.instruction_pc != instruction_pc)
+			if (record.instruction_pc != instruction_pc || record.guest_load)
 			{
 				continue;
 			}

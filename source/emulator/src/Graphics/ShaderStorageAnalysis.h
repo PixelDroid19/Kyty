@@ -160,6 +160,22 @@ void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindR
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                         ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base,
                                         const ShaderScalarFlow& scalar_flow);
+
+// A T# or S# that a fused GS program loads, at a constant table dword, through
+// the GS user-data address it receives in s[0:1] (block: its part of the load).
+struct ShaderGsUserDataDescriptorLoad
+{
+	ShaderInstruction     block;
+	int                   offset_dw = 0;
+	ShaderDynamicSLoadUse use;
+};
+// Draw-independent analysis of the program code.
+std::vector<ShaderGsUserDataDescriptorLoad> ShaderFindGsUserDataDescriptorLoads(const ShaderCode& code);
+// Binds what the loads read from the draw's table; the loads keep reading
+// guest memory and their mappings only name the bound resources.
+void ShaderBindGsUserDataDescriptors(const ShaderCode& code, const std::vector<ShaderGsUserDataDescriptorLoad>& loads,
+                                     uint64_t table_address, const HW::UserSgprInfo& user_sgpr, ShaderBindResources* bind,
+                                     ShaderParsedUsage* info);
 // Source of guest descriptor-table words for ShaderSnapshotGuestDescriptorTable.
 // Without an active scope the production read is Core::VirtualMemory::CopyFromGuest.
 class ShaderGuestDescriptorReader

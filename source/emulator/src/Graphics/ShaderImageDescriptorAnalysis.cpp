@@ -143,30 +143,33 @@ bool TransferLoad(const ShaderInstruction& instruction, const ShaderBindResource
 	{
 		return false;
 	}
+	// The records of one load name disjoint destination blocks (a table load
+	// partitioned into descriptors); words outside them stay unknown.
+	bool mapped = false;
 	for (const auto& mapping: bind.dynamic_sloads.records)
 	{
 		if (mapping.instruction_pc != instruction.pc) { continue; }
-		if (mapping.kind == ShaderDynamicSLoadResourceKind::Sampler)
+		mapped = true;
+		const bool sampler = mapping.kind == ShaderDynamicSLoadResourceKind::Sampler;
+		if (!sampler && mapping.kind != ShaderDynamicSLoadResourceKind::Texture) { continue; }
+		const int first     = mapping.destination_register - instruction.dst.register_id;
+		const int fields    = sampler ? 4 : 8;
+		const int resources = sampler ? bind.samplers.samplers_num : bind.textures2D.textures_num;
+		if (first < 0 || mapping.dword_count <= 0 || mapping.dword_count > count - first || mapping.resource_index < 0 ||
+		    mapping.resource_index >= resources || mapping.resource_field_offset < 0 ||
+		    mapping.resource_field_offset > fields - mapping.dword_count)
 		{
-			if (mapping.destination_register != instruction.dst.register_id || mapping.dword_count != count ||
-			    mapping.resource_index < 0 || mapping.resource_index >= bind.samplers.samplers_num ||
-			    mapping.resource_field_offset < 0 || mapping.resource_field_offset > 4 - count) { return true; }
-			for (int word = 0; word < count; ++word)
-			{
-				(*after)[instruction.dst.register_id + word] = SamplerWord(mapping.resource_index, mapping.resource_field_offset + word);
-			}
-			return true;
+			if (sampler) { continue; }
+			return false;
 		}
-		if (mapping.kind != ShaderDynamicSLoadResourceKind::Texture) { return true; }
-		if (mapping.destination_register != instruction.dst.register_id || mapping.dword_count != count ||
-		    mapping.resource_index < 0 || mapping.resource_index >= bind.textures2D.textures_num ||
-		    mapping.resource_field_offset < 0 || mapping.resource_field_offset > 8 - count) { return false; }
-		for (int word = 0; word < count; ++word)
+		for (int word = 0; word < mapping.dword_count; ++word)
 		{
-			(*after)[instruction.dst.register_id + word] = TextureWord(mapping.resource_index, mapping.resource_field_offset + word);
+			const int field = mapping.resource_field_offset + word;
+			(*after)[mapping.destination_register + word] =
+			    sampler ? SamplerWord(mapping.resource_index, field) : TextureWord(mapping.resource_index, field);
 		}
-		return true;
 	}
+	if (mapped) { return true; }
 	const auto& base = instruction.src[0];
 	const auto& offset = instruction.src[1];
 	if (!bind.extended.used || base.type != ShaderOperandType::Sgpr || base.size != 2 || !ValidRange(base.register_id, 2) ||

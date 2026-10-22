@@ -1306,6 +1306,8 @@ struct ShaderVertexProgram
 	ShaderCode             code;
 	// EUD scans use the front stream even when the linked program adds a continuation.
 	std::shared_ptr<const ShaderScalarFlow> front_scalar_flow;
+	// T#/S# loads of `code` through the GS user-data address (fused GS only).
+	std::vector<ShaderGsUserDataDescriptorLoad> gs_user_data_loads;
 	std::array<uint32_t, 4> fingerprint {};
 	// Native-wave classification of `code`, computed once per guest width.
 	ShaderNativeWaveVerdict native_wave;
@@ -2000,6 +2002,7 @@ static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program)
 		bytes += sizeof(Core::SimpleArray<ShaderDebugPrintf>) +
 		         static_cast<uint64_t>(code->GetDebugPrintfs().Capacity()) * sizeof(ShaderDebugPrintf);
 	}
+	bytes += static_cast<uint64_t>(program.gs_user_data_loads.capacity()) * sizeof(ShaderGsUserDataDescriptorLoad);
 	if (program.front_scalar_flow != nullptr)
 	{
 		const auto& flow = *program.front_scalar_flow;
@@ -2064,6 +2067,10 @@ static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(c
 		ShaderAppendContinuation(&program->code, back, key.continuation_addr);
 	}
 	ShaderCopyDebugPrintfsLocked(&program->code);
+	if (gs_front)
+	{
+		program->gs_user_data_loads = ShaderFindGsUserDataDescriptorLoads(program->code);
+	}
 	program->fingerprint = ShaderVertexProgramFingerprint(*program, front, back_words);
 	ShaderProbeWrite("vs", program->code, nullptr, nullptr);
 	const uint64_t cache_cost = ShaderVertexProgramCacheCost(*program);
@@ -4036,6 +4043,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		// are resolved separately from the rebased metadata sharp table.
 		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr,
 		                  kGen5GsFrontUserDataBase, true, vs_isa, nullptr, info->program->front_scalar_flow.get());
+		ShaderBindGsUserDataDescriptors(info->program->code, info->program->gs_user_data_loads, regs->gs_user_data_addr, user_sgpr,
+		                                &info->bind, &usage);
 		if (vs_isa != nullptr)
 		{
 			info->native_wave = info->program->native_wave.Get(info->program->code, guest_wave_size);
@@ -4043,7 +4052,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			    ShaderApplyNggFrontProof(&info->native_wave, info->program->code, shader_stages, info->program->ngg_front)
 			        ? guest_wave_size
 			        : 0u;
-			ShaderAssociateSampledTextureSamplers(*vs_isa, &info->bind, kGen5GsFrontUserDataBase);
+			ShaderAssociateSampledTextureSamplers(info->program->code, &info->bind, kGen5GsFrontUserDataBase);
 			// Constant tables embedded after the code are addressed from GETPC;
 			// the base stays runtime data so a cached pipeline can relocate.
 			info->bind.program_base_used   = vs_isa->HasAnyOf({ShaderInstructionType::SGetpcB64});
@@ -4238,7 +4247,7 @@ static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, con
 	}
 	for (const auto& record: bind.dynamic_sloads.records)
 	{
-		if (record.instruction_pc == inst.pc)
+		if (record.instruction_pc == inst.pc && !record.guest_load)
 		{
 			return false;
 		}
@@ -5316,6 +5325,7 @@ Vector<uint32_t> ShaderCompileGeometryPullVS(const ShaderVertexInputInfo& input_
 	EXIT_IF(!input_info.geometry_pull);
 	ShaderGeometryComputeInfo geometry;
 	geometry.parameter_count = input_info.geometry_pull_parameters;
+	geometry.waves           = input_info.geometry_pull_waves;
 	Vector<uint32_t> ret;
 	String8          err_msg;
 	if (!ShaderToolchain::Run(SpirvGenerateGeometryPullSource(geometry, input_info.geometry_pull_layer), &ret, &err_msg))
@@ -5727,6 +5737,7 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 		ids->Add(static_cast<uint32_t>(record.resource_field_offset));
 		ids->Add(record.last_consumer_pc);
 		ids->Add(static_cast<uint32_t>(record.raw_vmem_oob_guarded));
+		ids->Add(static_cast<uint32_t>(record.guest_load));
 	}
 
 	ids->Add(bind.assembled_descriptors.Size());
@@ -6009,6 +6020,7 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 		ids.Add(0x47504c31u); // GPL1: geometry pass output pull.
 		ids.Add(input_info->geometry_pull_parameters);
 		ids.Add(static_cast<uint32_t>(input_info->geometry_pull_layer));
+		ids.Add(input_info->geometry_pull_waves);
 	}
 	ShaderGetBindIds(&ids, input_info->bind);
 	if (input_info->clip_probe.draw_scoped && input_info->clip_probe.enabled)

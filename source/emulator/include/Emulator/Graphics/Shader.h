@@ -1795,6 +1795,9 @@ struct ShaderDynamicSLoadMapping
 	int                            resource_field_offset = 0;
 	uint32_t                       last_consumer_pc      = 0;
 	bool                           raw_vmem_oob_guarded  = false;
+	// The S_LOAD still reads guest memory; the record only names the bound
+	// resource its consumers sample.
+	bool                           guest_load            = false;
 };
 
 struct ShaderDynamicSLoadMappings
