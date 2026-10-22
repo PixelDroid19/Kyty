@@ -4,6 +4,45 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Color CMASK fast clears and the eliminate pass (2026-10-22)
+
+- **Observed** (bounded trace of the robot platformer):
+  - Single-sample color targets with `CB_COLOR_INFO.FAST_CLEAR` set and no
+    DCC have their CMASK filled with zero by the uniform compute fill. Their
+    `CB_COLOR_CLEAR_WORD0/1` hold the clear color (for example the FP16 pair
+    0.5, 0.5, 101.0, 0 on a 1024x1024 target).
+  - Targets with DCC get CMASK 0xff and carry the clear in their DCC keys
+    instead.
+  - Draws with `CB_COLOR_CONTROL.MODE` 2 (eliminate fast clear, ROP3 0xcc)
+    followed. They ran as ordinary draws, so the bound pixel shader's color
+    landed on the target.
+  - A target already materialized ignored the CMASK clear, so its previous
+    contents showed through every pixel the following draws did not cover.
+- **Contract.**
+  - A CMASK nibble of 0 marks a fast-cleared 8x8 tile, which the color block
+    reads as the clear words. A zero fill from the CMASK base that reaches
+    every tile's nibble clears the surface.
+  - The eliminate pass writes the clear words into the cleared tiles and
+    discards the pixel shader's color.
+  - Basis: the trace (zero CMASK only on fast-clear targets without DCC, the
+    expanded value on DCC targets) and two independent implementations that
+    agree on the zero code and on dropping the eliminate draw.
+- **Change.**
+  - The pending metadata-clear store, which already held DCC key fills,
+    also serves CMASK. A single-level, single-slice, single-sample
+    fast-clear target bound after a covering zero fill of its CMASK is
+    cleared to its clear words.
+  - A mode-2 draw binds each fast-clear or DCC target, which applies the
+    pending CMASK or DCC clear, and records no draw. It refuses depth writes,
+    which it does not model.
+  - MSAA CMASK (FMASK compression states) is not decoded.
+- **Verified.** Unit tests 2440/2440. In a strict 130-second run the robot
+  platformer applied CMASK clears on seven targets (1024x1024 to 2432x1368)
+  and the eliminate pass with no refusal, at an unchanged frame rate. A
+  strict sweep (card title, roguelike platformer, racing title, preschool
+  title, second insect platformer, fishing title; 60-75 s each) reached
+  the same states with no stop and unchanged frame rates.
+
 ## Shader decoder refuses unimplemented encodings (2026-10-22)
 
 - **Observed.** The Gen5 decoder turned unimplemented opcodes into `SBarrier`
