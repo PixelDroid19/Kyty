@@ -428,14 +428,6 @@ TEST(EmulatorGraphicsPackets, IdentifiesDefaultIndirectRegisterPlaceholders)
 	EXPECT_FALSE(GraphicsIsDefaultIndirectRegisterPair(0x88f5e915u, Pm4::PA_SC_FOV_WINDOW_LR));
 }
 
-TEST(EmulatorGraphicsPackets, AcceptsObservedFullTargetBarrierInvalidations)
-{
-	EXPECT_TRUE(GraphicsAgcFullTargetBarrierGcrSupported(0x280u));
-	EXPECT_TRUE(GraphicsAgcFullTargetBarrierGcrSupported(0x300u));
-	EXPECT_TRUE(GraphicsAgcFullTargetBarrierGcrSupported(0x8280u));
-	EXPECT_FALSE(GraphicsAgcFullTargetBarrierGcrSupported(0u));
-}
-
 TEST(EmulatorGraphicsPackets, DisablesMissingOrInvalidWaitDiagnosticDeadlines)
 {
 	EXPECT_EQ(ParseSuspendedWaitTimeoutMs(nullptr), 0u);

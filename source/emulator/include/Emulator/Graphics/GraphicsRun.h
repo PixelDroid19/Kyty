@@ -75,12 +75,6 @@ constexpr bool GraphicsIsDefaultIndirectRegisterPair(uint32_t offset, uint32_t v
 	return offset == 0x10000000u + value;
 }
 
-constexpr bool GraphicsAgcFullTargetBarrierGcrSupported(uint32_t gcr_cntl)
-{
-	const uint32_t invalidate_mode = gcr_cntl & ~0x8000u;
-	return invalidate_mode == 0x280u || invalidate_mode == 0x300u;
-}
-
 constexpr bool GraphicsDrawIndexAutoFlagsSupported(uint32_t flags)
 {
 	return (flags & ~0x22u) == 0;

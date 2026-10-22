@@ -1188,18 +1188,21 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	}
 
 	// Custom R_WRITE_DATA control = dst | cache_policy<<8 | increment<<16 |
-	// write_confirm<<24 (matches GraphicsDcbWriteData). Software CP always
-	// performs an immediate host memcpy; cache_policy is accepted when it is a
-	// form already emitted by the encoder.
+	// write_confirm<<24 (matches GraphicsDcbWriteData). dst bit 0 selects the
+	// PM4 engine (micro engine or prefetch parser) and bits 1-4 hold DST_SEL, so
+	// 4 and 5 are both DST_SEL 2, a memory write through L2. Software CP always
+	// performs an immediate host memcpy, so the engine and the GL2 cache_policy
+	// hint have no visible effect.
 	//   0x01000004 — dst=4, cache_policy=0, write_confirm=1
 	//   0x01000204 — dst=4, cache_policy=2, write_confirm=1 (post-Play load)
+	//   0x01000304 — dst=4, cache_policy=3, write_confirm=1
+	//   0x01000005 — dst=5, cache_policy=0, write_confirm=1
 	if (custom)
 	{
 		const uint32_t dst_sel       = write_control & 0xffu;
-		const uint32_t cache_policy  = (write_control >> 8u) & 0xffu;
 		const uint32_t increment     = (write_control >> 16u) & 0xffu;
 		const uint32_t write_confirm = (write_control >> 24u) & 0xffu;
-		if (dst_sel != 4u || increment != 0u || write_confirm != 1u || (cache_policy != 0u && cache_policy != 2u))
+		if ((dst_sel != 4u && dst_sel != 5u) || increment != 0u || write_confirm != 1u)
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: WriteData not supported (continuing)\n");
 		}
@@ -2905,10 +2908,16 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index, u
 		KYTY_LOG_DEBUG("\t address     = 0x%016" PRIx64 "\n", event_address);
 	}
 
-	if ((event_type == 0x00000016 || event_type == 0x00000031) && event_index == 0x00000007)
+	if ((event_type == 0x00000016 || event_type == 0x00000031) && (event_index == 0x00000000 || event_index == 0x00000007))
 	{
 		// CacheFlushAndInvEvent
 		// FlushAndInvalidateCbPixelData
+		// Titles emit these with index 0 as well as 7; a full barrier covers the
+		// flush either index requests.
+		MemoryBarrier();
+	} else if (event_type == 0x0000002a && event_index == 0x00000000)
+	{
+		// DB_CACHE_FLUSH_AND_INV
 		MemoryBarrier();
 	} else if (event_type == 0x0000002c && (event_index == 0x00000000 || event_index == 0x00000007))
 	{
