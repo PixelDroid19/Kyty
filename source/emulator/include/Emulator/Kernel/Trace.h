@@ -20,14 +20,16 @@
 #define PRINT_NAME_ENABLED g_kernel_print_name_enabled
 #define PRINT_NAME_ENABLE(flag) PRINT_NAME_ENABLED = flag;
 
+// The time string is built only for a line that will be emitted: every kernel HLE call runs this macro.
 #define PRINT_NAME()                                                                                                                       \
-	if (PRINT_NAME_ENABLED)                                                                                                                  \
-	{                                                                                                                                         \
-		if (Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent)                                                                       \
-		{                                                                                                                                     \
+	if (PRINT_NAME_ENABLED)                                                                                                                \
+	{                                                                                                                                      \
+		if (Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent && Kyty::Log::ShouldLog(Kyty::Log::Level::Info))                     \
+		{                                                                                                                                  \
 			Kyty::printf(FG_CYAN "[%d][%s] %s::%s::%s()" DEFAULT "\n", Core::Thread::GetThreadIdUnique(),                                  \
-			             ::Kyty::Kernel::TimePort::GetTime().ToString("HH24:MI:SS.FFF").C_Str(), g_kernel_library, g_kernel_module, __func__); \
-		}                                                                                                                                     \
+			             ::Kyty::Kernel::TimePort::GetTime().ToString("HH24:MI:SS.FFF").C_Str(), g_kernel_library, g_kernel_module,        \
+			             __func__);                                                                                                        \
+		}                                                                                                                                  \
 	}
 
 #endif // KYTY_EMU_ENABLED

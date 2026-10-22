@@ -105,15 +105,16 @@ Core::Time GetTraceTime();
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_FUNC_ALIASES(f, ...) LIB_ADD_ALIASES(f, ::Kyty::Hle::HleSymbolType::Func, __VA_ARGS__)
 
+// The time string is built only for a line that will be emitted: every HLE call runs this macro.
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME()                                                                                                                       \
-	if (PRINT_NAME_ENABLED)                                                                                                                 \
-	{                                                                                                                                         \
-		if (Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent)                                                                        \
-		{                                                                                                                                       \
+	if (PRINT_NAME_ENABLED)                                                                                                                \
+	{                                                                                                                                      \
+		if (Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent && Kyty::Log::ShouldLog(Kyty::Log::Level::Info))                     \
+		{                                                                                                                                  \
 			Kyty::printf(FG_CYAN "[%d][%s] %s::%s::%s()" DEFAULT "\n", Core::Thread::GetThreadIdUnique(),                                  \
-			             ::Kyty::Hle::GetTraceTime().ToString("HH24:MI:SS.FFF").C_Str(), g_library, g_module, __func__);                       \
-		}                                                                                                                                       \
+			             ::Kyty::Hle::GetTraceTime().ToString("HH24:MI:SS.FFF").C_Str(), g_library, g_module, __func__);                   \
+		}                                                                                                                                  \
 	}
 
 #endif // KYTY_EMU_ENABLED
