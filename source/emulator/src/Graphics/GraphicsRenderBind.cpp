@@ -3725,6 +3725,20 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					}
 				}
 				tex = dtex.At(static_cast<int>(alias_index));
+				// Each rendered slice of a depth array is its own image (DescribeRenderDepthInfo).
+				if (gen5 && arrayed_2d && view_layers > 1u && !textures.desc[i].textures2d_without_sampler)
+				{
+					if (!depth_exact || base_array != 0u)
+					{
+						EXIT("sampled depth array is not resolved: exact=%u base_array=%u layers=%u addr=0x%012" PRIx64 "\n",
+						     depth_exact ? 1u : 0u, base_array, view_layers, static_cast<uint64_t>(addr));
+					}
+					// The guest-memory depth sample contract: metadata (HTILE) or MSAA would change what the layer bytes mean.
+					const bool plain_guest_depth = tile == 24u && levels == 1u && !r.MsaaDepth() && r.MetaAddr() == 0u;
+					tex = GraphicsRenderDepthSliceArray(buffer, static_cast<DepthStencilVulkanImage*>(tex), addr, size.size, view_layers,
+					                                    fmt, pitch, plain_guest_depth);
+					materialize = "depth-slice-array";
+				}
 				// Vulkan has no storage depth image: a dispatch addresses the depth plane through the image's colour
 				// copy, seeded here and stored back once the dispatch is recorded, so the stencil plane is untouched.
 				if (depth_exact && compute_stage && textures.desc[i].textures2d_without_sampler &&

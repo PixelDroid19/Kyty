@@ -37,6 +37,7 @@
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
@@ -515,10 +516,160 @@ bool PropagateComputeUniformDepthFill(CommandBuffer* buffer, const ComputeUnifor
 		const VkImageSubresourceRange  range {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, image->mip_levels, 0u, image->array_layers};
 		vkCmdClearDepthStencilImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
 		TransitionDepthStencilImage(vk_buffer, image, restore_layout);
+		image->content_stamp = VulkanImageNextStamp();
 		cleared = true;
 	}
 	if (cleared) { GpuMemoryResetPlaneHash(fill.address, fill.size, GpuMemoryObjectType::DepthStencilBuffer); }
 	return cleared;
+}
+
+// The stamp of a slice array layer read from guest memory instead of copied from a slice image.
+static constexpr uint64_t kSliceArrayGuestLayer = UINT64_MAX;
+
+// Classifies who holds the current bytes of a depth layer that no slice image renders, under the contract the
+// guest-memory depth sample path applies to a whole surface: physically mapped, and every overlapping object
+// still holds the guest bytes.
+static GpuMemoryDepthD16Source GuestDepthLayerSource(uint64_t addr, uint64_t size)
+{
+	Kernel::Memory::KernelMappedRange mapped {};
+	if (!Kernel::Memory::KernelQueryMappedRange(addr, size, &mapped) || mapped.kind != Kernel::Memory::KernelMappedRangeKind::Physical)
+	{
+		return GpuMemoryDepthD16Source::Unsupported;
+	}
+	uint64_t                 query_addr = addr;
+	uint64_t                 query_size = size;
+	GpuMemoryOverlapSnapshot overlaps {};
+	if (!GpuMemoryQueryOverlaps(&query_addr, &query_size, 1, &overlaps))
+	{
+		return GpuMemoryDepthD16Source::Unsupported;
+	}
+	bool has_texture_parent = false;
+	for (uint32_t entry = 0; entry < overlaps.entry_count; entry++)
+	{
+		has_texture_parent |= overlaps.entries[entry].type == GpuMemoryObjectType::Texture;
+	}
+	GpuMemoryRangeProvenance provenance {};
+	if (has_texture_parent && !GpuMemoryQueryRangeProvenance(addr, size, &provenance))
+	{
+		return GpuMemoryDepthD16Source::Unsupported;
+	}
+	return GpuMemoryClassifyDepthD16Source(overlaps, has_texture_parent ? &provenance : nullptr);
+}
+
+// Records the detiled guest bytes of depth layer `layer` (at addr) into the array, which is in TRANSFER_DST_OPTIMAL.
+// The first read registers the range with the dirty-page tracker, as GPU memory objects do, so the layer is read
+// again only after a CPU write; a read the tracker cannot vouch for is repeated at the next bind.
+static void UploadGuestDepthLayer(CommandBuffer* buffer, VkCommandBuffer vk_buffer, DepthStencilVulkanImage* first, uint32_t layer,
+                                  uint64_t addr, uint64_t size, uint32_t fmt, uint32_t pitch)
+{
+	auto*          array   = first->slice_array;
+	const uint32_t width   = array->extent.width;
+	const uint32_t height  = array->extent.height;
+	const uint32_t bytes   = State::Gen5DepthSampleBytesPerElement(fmt);
+	const bool     depth16 = array->format == VK_FORMAT_D16_UNORM || array->format == VK_FORMAT_D16_UNORM_S8_UINT;
+	const auto     guest   = first->GetGuestExtent();
+	if (bytes != (depth16 ? 2u : 4u) || State::Gen5DepthSampleLayerBytes(fmt, pitch, height) != size || guest.width != width ||
+	    guest.height != height)
+	{
+		EXIT("depth array layer %u at 0x%012" PRIx64 " cannot be read from guest memory: format=%u/%u pitch=%u size=0x%" PRIx64
+		     " extent=%ux%u guest=%ux%u\n",
+		     layer, addr, fmt, static_cast<uint32_t>(array->format), pitch, size, width, height, guest.width, guest.height);
+	}
+	auto& state   = first->slice_array_layers[layer];
+	auto& tracker = GpuDirtyPageTracker::Instance();
+	EXIT_IF(state.guest_size != 0u && (state.guest_addr != addr || state.guest_size != size));
+	if (state.guest_size == 0u && tracker.RegisterRange(addr, size))
+	{
+		state.guest_addr = addr;
+		state.guest_size = size;
+	}
+	const auto           observation = tracker.BeginRead(addr, size);
+	std::vector<uint8_t> linear(static_cast<size_t>(width) * height * bytes);
+	TileConvertDepth64KBToLinear(linear.data(), reinterpret_cast<const void*>(addr), width, height, pitch, bytes, layer);
+	auto*             upload = buffer->UploadRecordingBuffer(linear.data(), linear.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+	VkBufferImageCopy region {};
+	region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, layer, 1u};
+	region.imageExtent      = {width, height, 1u};
+	vkCmdCopyBufferToImage(vk_buffer, upload->buffer, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
+	state.guest_generation = observation.generation;
+	state.stamp            = observation.tracked && tracker.ReadObservationIsStable(addr, size, observation) ? kSliceArrayGuestLayer : 0u;
+}
+
+VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVulkanImage* first, uint64_t addr, uint64_t slice_size,
+                                           uint32_t layers, uint32_t fmt, uint32_t pitch, bool plain_guest_depth)
+{
+	EXIT_IF(buffer == nullptr || first == nullptr || slice_size == 0u);
+	auto*           array     = DepthStencilBufferGetSliceArray(g_render_ctx->GetGraphicCtx(), first, layers);
+	VkCommandBuffer vk_buffer = nullptr;
+	const auto      record    = [&]()
+	{
+		if (vk_buffer == nullptr)
+		{
+			vk_buffer = buffer->RecordOutsideRenderPass();
+			TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		}
+	};
+	for (uint32_t layer = 0; layer < layers; layer++)
+	{
+		const uint64_t           slice_addr = addr + layer * slice_size;
+		DepthStencilVulkanImage* slice      = first;
+		if (layer != 0u)
+		{
+			const auto found = FindDepthStencil(buffer, slice_addr, slice_size, true);
+			slice            = found.IsEmpty() ? nullptr : found.At(0);
+		}
+		if (slice != nullptr && slice->layout == VK_IMAGE_LAYOUT_UNDEFINED)
+		{
+			EXIT("depth array layer %u at 0x%012" PRIx64 " has an unrendered depth slice\n", layer, slice_addr);
+		}
+		// A layer no slice renders holds what guest memory holds, as an unrendered depth surface sampled alone does.
+		if (slice == nullptr)
+		{
+			const auto source = plain_guest_depth ? GuestDepthLayerSource(slice_addr, slice_size) : GpuMemoryDepthD16Source::Unsupported;
+			if (source != GpuMemoryDepthD16Source::Guest)
+			{
+				EXIT("depth array layer %u at 0x%012" PRIx64 " has no depth slice and no guest bytes: plain=%u source=%u\n", layer,
+				     slice_addr, plain_guest_depth ? 1u : 0u, static_cast<uint32_t>(source));
+			}
+			const auto&                   state = first->slice_array_layers[layer];
+			const GpuDirtyReadObservation last_read {state.guest_generation, true};
+			if (state.stamp == kSliceArrayGuestLayer &&
+			    GpuDirtyPageTracker::Instance().ReadObservationIsStable(slice_addr, slice_size, last_read))
+			{
+				continue;
+			}
+			record();
+			UploadGuestDepthLayer(buffer, vk_buffer, first, layer, slice_addr, slice_size, fmt, pitch);
+			continue;
+		}
+		if (slice->format != array->format || slice->extent.width != array->extent.width || slice->extent.height != array->extent.height ||
+		    slice->samples != VK_SAMPLE_COUNT_1_BIT || slice->sample_locations_compatible)
+		{
+			EXIT("depth array layer %u at 0x%012" PRIx64 " does not match layer 0: format=%u/%u extent=%ux%u/%ux%u samples=%u\n", layer,
+			     slice_addr, static_cast<uint32_t>(slice->format), static_cast<uint32_t>(array->format), slice->extent.width,
+			     slice->extent.height, array->extent.width, array->extent.height, static_cast<uint32_t>(slice->samples));
+		}
+		if (first->slice_array_layers[layer].stamp == slice->content_stamp)
+		{
+			continue;
+		}
+		record();
+		const auto slice_layout = slice->layout;
+		TransitionDepthStencilImage(vk_buffer, slice, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		VkImageCopy region {};
+		region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 0u, 1u};
+		region.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, layer, 1u};
+		region.extent         = {array->extent.width, array->extent.height, 1u};
+		vkCmdCopyImage(vk_buffer, slice->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		               1u, &region);
+		TransitionDepthStencilImage(vk_buffer, slice, slice_layout);
+		first->slice_array_layers[layer].stamp = slice->content_stamp;
+	}
+	if (vk_buffer != nullptr)
+	{
+		TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	}
+	return array;
 }
 
 void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth)
@@ -1112,16 +1263,32 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	auto depth_addr_mask   = static_cast<uint64_t>(depth_size.align) - 1;
 	auto htile_addr_mask   = static_cast<uint64_t>(htile_size.align) - 1;
 
+	// DB_DEPTH_VIEW selects the slice a draw renders; the depth, stencil and HTILE bases stay at slice 0 and each
+	// plane's slices follow one another at its single-level slice size.
+	const uint64_t slice = z.depth_view.slice_start;
+	if (r->format != VK_FORMAT_UNDEFINED && (slice != 0u || z.depth_view.slice_max != 0u))
+	{
+		if (z.depth_view.slice_max != z.depth_view.slice_start)
+		{
+			EXIT("layered depth rendering is not implemented: slices %u..%u\n", z.depth_view.slice_start, z.depth_view.slice_max);
+		}
+		if (!ps5 || z.z_info.num_mip_levels != 0u)
+		{
+			EXIT("depth slice %u is not addressed: ps5=%u mip_levels=%u\n", z.depth_view.slice_start, ps5 ? 1u : 0u,
+			     static_cast<uint32_t>(z.z_info.num_mip_levels));
+		}
+	}
+
 	r->htile                = htile;
 	r->neo                  = neo;
 	r->depth_buffer_size    = depth_size.size;
-	r->depth_buffer_vaddr   = z.z_read_base_addr & ~depth_addr_mask;
+	r->depth_buffer_vaddr   = (z.z_read_base_addr & ~depth_addr_mask) + slice * depth_size.size;
 	r->depth_tile_swizzle   = z.z_read_base_addr & depth_addr_mask;
 	r->stencil_buffer_size  = stencil_size.size;
-	r->stencil_buffer_vaddr = z.stencil_read_base_addr & ~stencil_addr_mask;
+	r->stencil_buffer_vaddr = (z.stencil_read_base_addr & ~stencil_addr_mask) + slice * stencil_size.size;
 	r->stencil_tile_swizzle = z.stencil_read_base_addr & stencil_addr_mask;
 	r->htile_buffer_size    = htile_size.size;
-	r->htile_buffer_vaddr   = z.htile_data_base_addr & ~htile_addr_mask;
+	r->htile_buffer_vaddr   = (z.htile_data_base_addr & ~htile_addr_mask) + slice * htile_size.size;
 	r->htile_tile_swizzle   = z.htile_data_base_addr & htile_addr_mask;
 	r->width                = (ps5 ? depth_extent.width : z.width);
 	r->height               = (ps5 ? depth_extent.height : z.height);
@@ -1297,6 +1464,8 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 	if (r->vulkan_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->vulkan_buffer == nullptr condition ignored (continuing)\n"); }
+	// Every bind may write the image (draws, clears); sampled copies of it compare this stamp.
+	r->vulkan_buffer->content_stamp = VulkanImageNextStamp();
 	const bool stencil_plane        = r->stencil_buffer_size > 0 && DepthFormatHasStencil(r->format);
 	r->vulkan_buffer->depth_vaddr   = r->depth_buffer_size > 0 ? r->depth_buffer_vaddr : 0u;
 	r->vulkan_buffer->stencil_vaddr = stencil_plane ? r->stencil_buffer_vaddr : 0u;

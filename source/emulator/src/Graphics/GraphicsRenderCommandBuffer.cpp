@@ -1471,6 +1471,7 @@ void CommandBuffer::Free()
 		delete m_transient_device_buffers;
 		m_transient_device_buffers = nullptr;
 	}
+	DestroyRecordingUploads();
 
 	m_pool->busy[m_index] = false;
 	MarkCommandBufferResetting();
@@ -1583,6 +1584,7 @@ void CommandBuffer::Begin()
 	{
 		m_transient_device_buffers->Reset();
 	}
+	DestroyRecordingUploads();
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -1676,6 +1678,35 @@ VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32
 	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true);
 }
 
+VulkanBuffer* CommandBuffer::UploadRecordingBuffer(const void* data, uint64_t size, uint32_t usage)
+{
+	EXIT_IF(IsInvalid() || data == nullptr || size == 0u || usage == 0u);
+	auto*                      ctx = g_render_ctx->GetGraphicCtx();
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+	auto*                      upload = new VulkanBuffer;
+	upload->usage                     = usage;
+	upload->memory.property           = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VulkanCreateBuffer(ctx, size, upload);
+	void* mapped = nullptr;
+	VulkanMapMemory(ctx, &upload->memory, &mapped);
+	EXIT_IF(mapped == nullptr);
+	std::memcpy(mapped, data, static_cast<size_t>(size));
+	VulkanUnmapMemory(ctx, &upload->memory);
+	m_recording_uploads.push_back(upload);
+	return upload;
+}
+
+// The previous recording's fence has signalled (Begin) or been waited for (Free).
+void CommandBuffer::DestroyRecordingUploads()
+{
+	for (auto* upload: m_recording_uploads)
+	{
+		VulkanDeleteBuffer(g_render_ctx->GetGraphicCtx(), upload);
+		delete upload;
+	}
+	m_recording_uploads.clear();
+}
+
 void CommandBuffer::DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth)
 {
 	EXIT_IF(depth == nullptr || depth->storage_plane == nullptr);
@@ -1694,6 +1725,7 @@ void CommandBuffer::StoreBackDepthPlanes()
 			EXIT("depth storage plane store-back failed: extent=%ux%u format=%u\n", depth->extent.width, depth->extent.height,
 			     static_cast<uint32_t>(depth->format));
 		}
+		depth->content_stamp = VulkanImageNextStamp();
 	}
 	m_depth_plane_store_backs.clear();
 }

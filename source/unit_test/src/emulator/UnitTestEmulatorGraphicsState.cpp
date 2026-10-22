@@ -6514,19 +6514,11 @@ TEST(EmulatorGraphicsState, SharesTexelsOnlyBetweenDepthAndMatchingStorage)
 	EXPECT_FALSE(StorageTextureSharesDepthTexels(eight_bit.params, depth.params, true));
 }
 
-TEST(EmulatorGraphicsState, ReclaimsDepthStencilRedeclaredAtTheSameBase)
+TEST(EmulatorGraphicsState, ReclaimsDepthStencilRedeclaredOverAnOlderTarget)
 {
-	constexpr uint64_t base = 0x527430000ull;
-	EXPECT_TRUE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base,
-	                                                     GpuMemoryObjectType::DepthStencilBuffer, base));
-	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base + 0x10000u,
-	                                                      GpuMemoryObjectType::DepthStencilBuffer, base));
-	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::RenderTexture, base,
-	                                                      GpuMemoryObjectType::DepthStencilBuffer, base));
-	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base,
-	                                                      GpuMemoryObjectType::Texture, base));
-	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, 0u,
-	                                                      GpuMemoryObjectType::DepthStencilBuffer, 0u));
+	EXPECT_TRUE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::RenderTexture, GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryObjectType::Texture));
 }
 
 TEST(EmulatorGraphicsState, LinksPendingStorageBeforeDepthStencilReuse)

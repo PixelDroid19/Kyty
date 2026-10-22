@@ -708,6 +708,9 @@ public:
 	// Device-local intermediate written and read only by GPU commands of this recording (for example a
 	// geometry pass output), with its own budget. The same ordering and lifetime rules apply.
 	VulkanBuffer* AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage);
+	// Host-visible copy of data that only this recording reads, destroyed when the buffer next begins. For uploads
+	// too large for the transient pools' budget.
+	VulkanBuffer* UploadRecordingBuffer(const void* data, uint64_t size, uint32_t usage);
 	// A dispatch binds a storage view of a depth plane through the depth image's colour copy of it
 	// (DepthStencilVulkanImage::storage_plane); the copy returns to the depth plane once the dispatch is recorded.
 	void DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth);
@@ -726,6 +729,7 @@ private:
 	[[nodiscard]] bool AttachPipelineLease(VulkanPipeline* pipeline, bool* added);
 	void               MarkCommandBufferResetting();
 	void               ReleasePipelineLeases();
+	void               DestroyRecordingUploads();
 
 	VulkanCommandPool* m_pool    = nullptr;
 	uint32_t           m_index   = static_cast<uint32_t>(-1);
@@ -739,6 +743,7 @@ private:
 	TransientBufferPool* m_transient_scratch_buffers = nullptr;
 	TransientBufferPool* m_transient_copy_buffers    = nullptr;
 	TransientBufferPool* m_transient_device_buffers  = nullptr;
+	std::vector<VulkanBuffer*> m_recording_uploads;
 
 	mutable std::mutex           m_pipeline_lease_mutex;
 	std::vector<VulkanPipeline*> m_pipeline_leases;

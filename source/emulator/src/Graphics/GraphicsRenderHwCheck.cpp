@@ -402,8 +402,6 @@ static void z_check(const HW::DepthRenderTarget& target, const HW::RenderControl
 
 	const bool ps5 = Config::IsNextGen();
 	validate_depth_target_layout(z, ps5);
-	if (z.depth_view.slice_start != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.depth_view.slice_start != 0 condition ignored (continuing)\n"); }
-	if (z.depth_view.slice_max != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.depth_view.slice_max != 0 condition ignored (continuing)\n"); }
 	if (z.depth_view.current_mip_level != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.depth_view.current_mip_level != 0 condition ignored (continuing)\n"); }
 	if (z.depth_view.depth_write_disable) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.depth_view.depth_write_disable condition ignored (continuing)\n"); }
 	if (ps5)

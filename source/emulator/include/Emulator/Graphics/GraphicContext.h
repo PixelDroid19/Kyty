@@ -343,6 +343,18 @@ struct VideoOutVulkanImage: public VulkanImage
 
 struct StorageTextureVulkanImage;
 
+// One layer of DepthStencilVulkanImage::slice_array.
+struct DepthSliceArrayLayer
+{
+	// content_stamp of the slice image last copied into the layer, or the marker of a read from guest memory.
+	uint64_t stamp = 0;
+	// Guest range registered with the dirty-page tracker by the first read from guest memory (size 0 before it), and
+	// the page generation of the last read.
+	uint64_t guest_addr       = 0;
+	uint64_t guest_size       = 0;
+	uint64_t guest_generation = 0;
+};
+
 struct DepthStencilVulkanImage: public VulkanImage
 {
 	DepthStencilVulkanImage(): VulkanImage(VulkanImageType::DepthStencil) {}
@@ -357,6 +369,11 @@ struct DepthStencilVulkanImage: public VulkanImage
 	// first use and destroyed with this image.
 	StorageTextureVulkanImage* storage_plane = nullptr;
 	VulkanMemory               storage_plane_memory;
+	// Array image that a sampled view of this slice and the slices after it reads (each rendered guest slice is its
+	// own depth image), and the state of each layer. Created on first use and destroyed with this image.
+	DepthStencilVulkanImage*          slice_array = nullptr;
+	VulkanMemory                      slice_array_memory;
+	std::vector<DepthSliceArrayLayer> slice_array_layers;
 };
 
 struct TextureVulkanImage: public VulkanImage

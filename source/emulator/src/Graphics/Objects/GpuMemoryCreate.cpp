@@ -1552,7 +1552,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				texel_bits_parent_id = create_from_objects ? -1 : obj.object_id;
 				retire_after_copy_ids.Add(obj.object_id);
 			} else if (GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type) ||
-			           GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, h.block.vaddr[0], info.type, vaddr[0]))
+			           GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, info.type))
 			{
 				delete_all = true;
 			} else
@@ -1564,8 +1564,6 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 						overlap = true;
 						break;
 					}
-					case ObjectsRelation(GpuMemoryObjectType::DepthStencilBuffer, OverlapType::Contains,
-					                     GpuMemoryObjectType::DepthStencilBuffer):
 					case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::Crosses, GpuMemoryObjectType::IndexBuffer):
 					case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::Contains, GpuMemoryObjectType::IndexBuffer):
 					case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::IsContainedWithin,
@@ -2142,7 +2140,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					EXIT_IF(h.free);
 					const auto& o = h.info;
 					if (!GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type) &&
-					    !GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, h.block.vaddr[0], info.type, vaddr[0]))
+					    !GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, info.type))
 					{
 						multi_depth_stencil_reclaim = false;
 						break;

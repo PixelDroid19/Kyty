@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/StorageTexture.h"
@@ -93,6 +94,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	// EXIT_NOT_IMPLEMENTED(mem->requirements.size > *size);
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
+	vk_obj->content_stamp = VulkanImageNextStamp();
 
 	VulkanImageViewDescriptor view_descriptor {};
 	view_descriptor.image       = vk_obj->image;
@@ -223,6 +225,83 @@ static void DeleteStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* dep
 	depth->storage_plane = nullptr;
 }
 
+DepthStencilVulkanImage* DepthStencilBufferGetSliceArray(GraphicContext* ctx, DepthStencilVulkanImage* first, uint32_t layers)
+{
+	EXIT_IF(ctx == nullptr || first == nullptr || layers < 2u);
+	static std::mutex           create_mutex;
+	std::lock_guard<std::mutex> lock(create_mutex);
+	if (first->slice_array != nullptr)
+	{
+		// In-flight submissions may still read the array, so it is never replaced.
+		EXIT_IF(first->slice_array->array_layers != layers);
+		return first->slice_array;
+	}
+
+	auto* array = new DepthStencilVulkanImage;
+	array->SetNativeExtent(first->extent.width, first->extent.height);
+	array->format       = first->format;
+	array->image        = nullptr;
+	array->layout       = VK_IMAGE_LAYOUT_UNDEFINED;
+	array->array_layers = layers;
+	array->guest_size   = first->guest_size * layers;
+	for (auto& view: array->image_view)
+	{
+		view = nullptr;
+	}
+
+	VulkanImageDescriptor image_descriptor {};
+	image_descriptor.extent       = {first->extent.width, first->extent.height, 1u};
+	image_descriptor.array_layers = layers;
+	image_descriptor.format       = array->format;
+	image_descriptor.usage        = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), array, &first->slice_array_memory))
+	{
+		EXIT("depth slice array image creation failed: extent=%ux%u layers=%u\n", first->extent.width, first->extent.height, layers);
+	}
+
+	VulkanImageViewDescriptor view_descriptor {};
+	view_descriptor.image       = array->image;
+	view_descriptor.format      = array->format;
+	view_descriptor.components  = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R};
+	view_descriptor.aspect_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	view_descriptor.view_type   = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+	view_descriptor.layer_count = layers;
+	EXIT_IF(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &array->image_view[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY]));
+
+	first->slice_array_layers.assign(layers, {});
+	first->slice_array = array;
+	return array;
+}
+
+static void DeleteSliceArray(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+{
+	auto* array = depth->slice_array;
+	if (array == nullptr)
+	{
+		return;
+	}
+	for (auto& view: array->image_view)
+	{
+		if (view != nullptr)
+		{
+			vkDestroyImageView(ctx->device, view, nullptr);
+			view = nullptr;
+		}
+	}
+	vkDestroyImage(ctx->device, array->image, nullptr);
+	VulkanFree(ctx, &depth->slice_array_memory);
+	delete array;
+	depth->slice_array = nullptr;
+	for (const auto& layer: depth->slice_array_layers)
+	{
+		if (layer.guest_size != 0u)
+		{
+			(void)GpuDirtyPageTracker::Instance().UnregisterRange(layer.guest_addr, layer.guest_size);
+		}
+	}
+	depth->slice_array_layers.clear();
+}
+
 static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 {
 	KYTY_PROFILER_BLOCK("DepthStencilBufferObject::delete_func");
@@ -234,6 +313,7 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 
 	DeleteFramebuffer(vk_obj);
 	DeleteStoragePlane(ctx, vk_obj);
+	DeleteSliceArray(ctx, vk_obj);
 
 	for (auto& view: vk_obj->image_view)
 	{

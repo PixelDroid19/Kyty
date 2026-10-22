@@ -795,15 +795,15 @@ inline bool GpuMemoryAllowsDepthStencilReclaimSurface(GpuMemoryObjectType existi
 	                   relation == GpuMemoryOverlapType::IsContainedWithin || relation == GpuMemoryOverlapType::Equals);
 }
 
-// A depth target declared at the depth-plane base of an older depth target replaces
-// it (the guest re-describes that allocation, for example at another extent). Depth
-// images publish no guest bytes, and reclaimed objects are destroyed only after their
-// queued uses complete, so no in-flight image is discarded and no content is invented.
-inline bool GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType existing_type, uint64_t existing_depth_base,
-                                                     GpuMemoryObjectType incoming_type, uint64_t incoming_depth_base)
+// A depth target declared over any part of an older depth target replaces it: the
+// guest re-describes that allocation, at another extent or over some slices of a
+// depth array (captured: a 2048x2048 target over the first two 1536x1536 slices of a
+// shadow array). Depth images publish no guest bytes, and reclaimed objects are
+// destroyed only after their queued uses complete, so no in-flight image is discarded
+// and no content is invented.
+inline bool GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType existing_type, GpuMemoryObjectType incoming_type)
 {
-	return existing_type == GpuMemoryObjectType::DepthStencilBuffer && incoming_type == GpuMemoryObjectType::DepthStencilBuffer &&
-	       existing_depth_base != 0u && existing_depth_base == incoming_depth_base;
+	return existing_type == GpuMemoryObjectType::DepthStencilBuffer && incoming_type == GpuMemoryObjectType::DepthStencilBuffer;
 }
 
 // A writable storage view with pending GPU work cannot be reclaimed while a
