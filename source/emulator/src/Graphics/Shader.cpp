@@ -3022,7 +3022,8 @@ static bool ShaderReadGuestDescriptorWords(uint64_t guest_address, uint32_t dwor
 	{
 		return g_shader_guest_descriptor_reader->Read(guest_address, dwords, words);
 	}
-	return Core::VirtualMemory::CopyFromGuest(words, guest_address, static_cast<uint64_t>(dwords) * sizeof(uint32_t));
+	// Tables may sit in host allocations the HLE libc lent the guest before its heap existed.
+	return Core::VirtualMemory::CopyFromGuestOrLent(words, guest_address, static_cast<uint64_t>(dwords) * sizeof(uint32_t));
 }
 
 bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords, std::vector<uint32_t>* snapshot)
