@@ -4,6 +4,64 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Shader translator: GDS writes in split and native compute waves (2026-10-22)
+
+- **Regression.** A strict five-title Intel sweep after the paired
+  removal stopped both insect platformers at 61 s on
+  `shader emitter missing ... inst=DsWriteB32 [VaddrVdataOffsetGds]`.
+- **Cause.** The runtime had already been choosing the split layout for
+  wave64 compute (native when proven equivalent) before the removal. The
+  GDS write lowering existed only in the paired bank emitter, which
+  nothing selected any more. The stop therefore dates from the split
+  default, not from the removal. Native equivalence still refuses GDS
+  access, because GDS results depend on lane order, so these shaders run
+  split.
+- **Contract (RDNA2 ISA 3.6.1, 3.7, 10.4.3, 10.5).**
+  - M0[15:0] is the size in bytes and M0[31:16] the base in bytes.
+  - A store with ADDR + offset at or past the size is discarded.
+  - A misaligned address is a memory violation.
+- **Change.** Each invocation is one guest lane. It stores at
+  M0.base + ADDR + offset when its EXEC bit is set, ADDR and
+  ADDR + offset are below M0.size, the byte address is dword-aligned and
+  the dword lies in the host GDS window. Any other store is dropped. The
+  bounds are those of the removed paired emitter.
+- **Verified.**
+  - The GDS EXEC integration suite gained five write cases: base, size
+    bound, single lane, misaligned base, and a split-wave64 high lane.
+    They pass on Intel Arc A770 and on the AMD Raphael iGPU (RADV), both
+    Mesa 26.2.5.
+  - Unit tests pass (2440), the other shader integration suites pass,
+    and the boundary and graphics-table gates pass.
+  - Strict Intel runs: the void platformer ran 120 s and 200 s, and the
+    sequel 120 s, with no stop. The void platformer reaches gameplay
+    with a correct scene and HUD.
+  - The first run after the fix compiled the new split modules cold and
+    stayed black from about 79 s to past 105 s while loading. With warm
+    caches, gameplay starts at about 105 s.
+- **Open.**
+  - Void platformer gameplay runs at about 68 fps (frames between agent
+    samples), against about 81 fps on 89e3b892 (paired layout, many
+    commits earlier). The route also reaches gameplay about 26 s later
+    than on that build. Neither difference is attributed yet.
+
+### Host driver: Mesa 26.2.5 RADV loses a narrowed EXEC
+
+- **Seen** while building a write case whose M0 size bound dropped only
+  lane 31 of a 32-lane wave.
+- **What happened.**
+  - NIR folded the constant bound into an inverse ballot of 0x7fffffff.
+  - ACO emitted `s_bitset0_b32 vcc_lo, 31` on the `v_cmpx` mask, then
+    copied the result into EXEC.
+  - Post-RA copy elimination rewrote this as `s_bitset0_b32 exec_lo, 31`.
+    `s_bitset0` also reads its destination, so the instruction now
+    cleared the bit in the unnarrowed EXEC.
+  - Lanes 0-30 all stored, instead of only the lanes `v_cmpx` selected.
+- **Not a translator defect.** Adding any later read of the value hid
+  the miscompile.
+- **Integration suite.** The cases avoid this shape.
+- **Production impact unknown.** A title is exposed only when a
+  constant-folded mask has exactly one bit clear.
+
 ## Shader translator: paired wave64 layout removed (2026-10-22)
 
 - **Why.** Compute Wave64 dispatch on 32-lane hosts builds only the
