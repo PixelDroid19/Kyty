@@ -30,6 +30,7 @@
 #include <ctime>
 #include <future>
 #include <limits>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1946,6 +1947,46 @@ TEST(EmulatorKernelProcess, PosixSemInitPostWaitDestroy)
 	EXPECT_EQ(Posix::sem_wait(&guest), OK);
 	EXPECT_EQ(Posix::sem_destroy(&guest), OK);
 	EXPECT_EQ(guest.magic, 0);
+}
+
+// Destroying a semaphore wakes a blocked waiter, which fails with EINVAL.
+TEST(EmulatorKernelProcess, PosixSemDestroyWakesBlockedWaiter)
+{
+	EnsureKernelProcessSubsystems();
+	struct GuestSem
+	{
+		uint16_t magic;
+		uint16_t nameid;
+		uint32_t has_waiters;
+		uint32_t count;
+		uint32_t flags;
+	};
+	static_assert(sizeof(GuestSem) == 16);
+	auto guest = std::make_shared<GuestSem>();
+
+	ASSERT_EQ(Posix::sem_init(guest.get(), 0, 0), OK);
+
+	auto        waiter_result = std::make_shared<std::promise<int>>();
+	auto        result        = waiter_result->get_future();
+	std::thread waiter(
+	    [guest, waiter_result]
+	    {
+		    const int rc = Posix::sem_wait(guest.get());
+		    waiter_result->set_value(rc == OK ? OK : *Posix::GetErrorAddr());
+	    });
+	// Detached so a waiter that never wakes fails the test instead of hanging it in join().
+	waiter.detach();
+
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+	while (guest->has_waiters == 0 && std::chrono::steady_clock::now() < deadline)
+	{
+		std::this_thread::yield();
+	}
+	ASSERT_EQ(guest->has_waiters, 1u);
+
+	ASSERT_EQ(Posix::sem_destroy(guest.get()), OK);
+	ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(result.get(), Posix::POSIX_EINVAL);
 }
 
 UT_END();
