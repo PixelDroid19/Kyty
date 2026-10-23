@@ -1,6 +1,5 @@
 import QtQuick
 import Kyty.Launcher
-import "Util.js" as Util
 
 // Main page: recently played, the folders as tabs and the games of the selected folder as a grid or a table,
 // narrowed by the search box. Everything sits straight on the focused game's artwork, without panels.
@@ -33,10 +32,6 @@ FocusScope {
     readonly property var selectedGame: visibleGames[gameView.currentIndex] || ({})
     // The game the user is looking at, in the recently played row or in the list; the window backdrop follows it.
     readonly property var focusedGame: heroList.activeFocus ? backend.recent[heroList.currentIndex] || ({}) : selectedGame
-    // Covers grow to share the row evenly instead of leaving a gap at the right edge.
-    readonly property real tilePadding: 24 * Theme.u
-    readonly property int columnCount: Math.max(1, Math.floor(grid.width / (128 * Theme.u + tilePadding)))
-    readonly property real tileSize: grid.cellWidth - tilePadding
 
     function filterGames(games, entry, query) {
         const out = [];
@@ -159,19 +154,6 @@ FocusScope {
             actionRequested(action, row);
     }
 
-    // Keeps the selection inside the lists when games or folders are removed.
-    onVisibleGamesChanged: {
-        for (const view of [grid, table]) {
-            if (view.currentIndex >= visibleGames.length)
-                view.currentIndex = Math.max(0, visibleGames.length - 1);
-        }
-    }
-
-    onFoldersChanged: {
-        if (folderList.currentIndex >= backend.folders.length)
-            folderList.currentIndex = 0;
-    }
-
     // The focused game's name over its own artwork, as on the console's home screen.
     Column {
         id: header
@@ -257,36 +239,19 @@ FocusScope {
             font.pixelSize: Theme.fontSmall
         }
 
-        ListView {
+        HeroRow {
             id: heroList
             anchors.top: heroLabel.bottom
             anchors.topMargin: 12 * Theme.u
             anchors.left: parent.left
             anchors.right: parent.right
             height: 136 * Theme.u
-            orientation: ListView.Horizontal
-            spacing: 16 * Theme.u
-            model: backend.recent
-            focus: false
+            games: backend.recent
             KeyNavigation.down: folderList
             KeyNavigation.left: library.sidebarTarget
 
-            delegate: HeroTile {
-                required property var modelData
-                required property int index
-
-                game: modelData
-                focused: heroList.activeFocus && heroList.currentIndex === index
-                onClicked: {
-                    heroList.currentIndex = index;
-                    heroList.forceActiveFocus();
-                    library.runRequested(modelData.row);
-                }
-                onRightClicked: library.openMenu(modelData.row)
-            }
-
-            Keys.onReturnPressed: library.runRequested(backend.recent[heroList.currentIndex].row)
-            Keys.onEnterPressed: library.runRequested(backend.recent[heroList.currentIndex].row)
+            onActivated: (index) => library.runRequested(backend.recent[index].row)
+            onMenuRequested: (index) => library.openMenu(backend.recent[index].row)
             Keys.onPressed: (event) => {
                 if (event.key === Qt.Key_O || event.key === Qt.Key_Menu) {
                     library.openMenu(backend.recent[heroList.currentIndex].row);
@@ -307,93 +272,20 @@ FocusScope {
         anchors.rightMargin: Theme.margin
         height: 40 * Theme.u
 
-        ListView {
+        FolderTabs {
             id: folderList
-
-            // Each tab is padded so its focus ring fits; the list starts that much to the left to keep
-            // the first name in line with the title above.
-            readonly property real tabPadding: 12 * Theme.u
-
+            // The list starts one tab padding to the left, so the first name lines up with the title above.
             anchors.left: parent.left
             anchors.leftMargin: -tabPadding
             anchors.right: searchBox.left
             anchors.rightMargin: Theme.gap
             height: parent.height
-            orientation: ListView.Horizontal
-            spacing: 6 * Theme.u
-            clip: true
-            model: backend.folders
-            currentIndex: 0
+            folders: backend.folders
             focus: true
             KeyNavigation.left: library.sidebarTarget
             KeyNavigation.right: searchBox
             KeyNavigation.up: heroBox.visible ? heroList : null
             KeyNavigation.down: library.gameView
-
-            delegate: Item {
-                id: tab
-
-                required property var modelData
-                required property int index
-                readonly property bool selected: folderList.currentIndex === index
-
-                width: tabName.implicitWidth + tabCount.anchors.leftMargin + tabCount.implicitWidth + 2 * folderList.tabPadding
-                height: folderList.height
-
-                Accessible.role: Accessible.PageTab
-                Accessible.name: modelData.title
-
-                Rectangle {
-                    anchors.fill: parent
-                    anchors.topMargin: 2 * Theme.u
-                    anchors.bottomMargin: 2 * Theme.u
-                    visible: tab.selected && folderList.activeFocus
-                    radius: Theme.radiusSmall
-                    color: "transparent"
-                    border.width: 2 * Theme.u
-                    border.color: Theme.focusRing
-                }
-
-                Text {
-                    id: tabName
-                    x: folderList.tabPadding
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: tab.modelData.title
-                    color: tab.selected ? Theme.textPrimary : Theme.textSecondary
-                    font.pixelSize: Theme.fontBody
-                    font.weight: tab.selected ? Font.DemiBold : Font.Normal
-                }
-
-                Text {
-                    id: tabCount
-                    anchors.left: tabName.right
-                    anchors.leftMargin: 8 * Theme.u
-                    anchors.baseline: tabName.baseline
-                    text: tab.modelData.count
-                    color: Theme.textMuted
-                    font.pixelSize: Theme.fontSmall
-                }
-
-                // On the toolbar's bottom edge, in line with the search and view switch underlines.
-                Rectangle {
-                    anchors.left: tabName.left
-                    anchors.right: tabCount.right
-                    anchors.bottom: parent.bottom
-                    height: 2 * Theme.u
-                    radius: height / 2
-                    color: Theme.accent
-                    visible: tab.selected
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        folderList.currentIndex = tab.index;
-                        folderList.forceActiveFocus();
-                    }
-                }
-            }
 
             Keys.onPressed: (event) => {
                 if (!library.handleFolderKey(event))
@@ -521,7 +413,7 @@ FocusScope {
         }
     }
 
-    GridView {
+    GameGrid {
         id: grid
         anchors.left: parent.left
         anchors.right: parent.right
@@ -531,202 +423,32 @@ FocusScope {
         anchors.leftMargin: Theme.margin - 12 * Theme.u
         anchors.rightMargin: Theme.margin - 12 * Theme.u
         anchors.topMargin: 14 * Theme.u
-        clip: true
         visible: !backend.tableView && library.visibleGames.length > 0
-        cellWidth: Math.floor(width / library.columnCount)
-        cellHeight: library.tileSize + 60 * Theme.u
-        model: backend.tableView ? [] : library.visibleGames
-        currentIndex: 0
+        games: library.visibleGames
         KeyNavigation.up: folderList
+        KeyNavigation.left: library.sidebarTarget
 
-        delegate: Item {
-            required property var modelData
-            required property int index
-
-            width: grid.cellWidth
-            height: grid.cellHeight
-
-            CoverTile {
-                id: cover
-                anchors.horizontalCenter: parent.horizontalCenter
-                // Room for the focus ring around the enlarged cover.
-                y: 12 * Theme.u
-                tileSize: library.tileSize
-                game: modelData
-                focused: grid.activeFocus && grid.currentIndex === index
-                onClicked: {
-                    grid.currentIndex = index;
-                    grid.forceActiveFocus();
-                }
-                onDoubleClicked: {
-                    grid.currentIndex = index;
-                    library.runSelected(index);
-                }
-                onRightClicked: {
-                    grid.currentIndex = index;
-                    library.openMenu(modelData.row);
-                }
-            }
-
-            Text {
-                anchors.top: cover.bottom
-                anchors.topMargin: 14 * Theme.u
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: library.tileSize
-                horizontalAlignment: Text.AlignHCenter
-                text: modelData.title || modelData.name
-                elide: Text.ElideRight
-                color: grid.currentIndex === index ? Theme.textPrimary : Theme.textSecondary
-                font.pixelSize: Theme.fontSmall
-            }
-        }
-
-        Keys.onReturnPressed: library.runSelected(currentIndex)
-        Keys.onEnterPressed: library.runSelected(currentIndex)
-        Keys.onLeftPressed: (event) => {
-            if (currentIndex % library.columnCount === 0) {
-                library.sidebarTarget.forceActiveFocus();
-                event.accepted = true;
-            } else {
-                event.accepted = false;
-            }
-        }
+        onActivated: (index) => library.runSelected(index)
+        onMenuRequested: (index) => library.openMenu(library.visibleGames[index].row)
         Keys.onPressed: (event) => library.handleGameKey(event)
     }
 
-    // Column names sit outside the list, so rows scroll beneath nothing and need no backing.
-    Row {
-        id: tableHeader
-        anchors.left: table.left
-        anchors.leftMargin: table.thumbWidth
-        anchors.top: toolbar.bottom
-        anchors.topMargin: 16 * Theme.u
-        height: 20 * Theme.u
-        visible: table.visible
-
-        Repeater {
-            model: [
-                { label: qsTr("Name"), width: table.nameWidth },
-                { label: qsTr("Serial"), width: table.serialWidth },
-                { label: qsTr("Region"), width: table.regionWidth },
-                { label: qsTr("Version"), width: table.versionWidth }
-            ]
-
-            Text {
-                required property var modelData
-                width: modelData.width
-                text: modelData.label
-                color: Theme.textMuted
-                font.pixelSize: Theme.fontSmall
-                font.weight: Font.DemiBold
-            }
-        }
-    }
-
-    ListView {
+    GameTable {
         id: table
-
-        readonly property real thumbWidth: 66 * Theme.u
-        readonly property real serialWidth: 120 * Theme.u
-        readonly property real regionWidth: 80 * Theme.u
-        readonly property real versionWidth: 110 * Theme.u
-        readonly property real nameWidth: width - thumbWidth - serialWidth - regionWidth - versionWidth
-
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.top: tableHeader.bottom
+        anchors.top: toolbar.bottom
         anchors.bottom: parent.bottom
         anchors.leftMargin: Theme.margin - 6 * Theme.u
         anchors.rightMargin: Theme.margin
-        anchors.topMargin: 6 * Theme.u
-        clip: true
+        anchors.topMargin: 16 * Theme.u
         visible: backend.tableView && library.visibleGames.length > 0
-        model: backend.tableView ? library.visibleGames : []
-        currentIndex: 0
-        spacing: 2 * Theme.u
-        highlightMoveDuration: Theme.animation
+        games: library.visibleGames
         KeyNavigation.up: folderList
+        KeyNavigation.left: library.sidebarTarget
 
-        delegate: Rectangle {
-            id: row
-
-            required property var modelData
-            required property int index
-            readonly property bool current: table.currentIndex === index
-
-            width: table.width
-            height: 56 * Theme.u
-            radius: Theme.radiusSmall
-            color: current ? Theme.glassStrong : (rowMouse.containsMouse ? Theme.glass : "transparent")
-            border.width: current && table.activeFocus ? 2 * Theme.u : 0
-            border.color: Theme.focusRing
-
-            Image {
-                x: 6 * Theme.u
-                anchors.verticalCenter: parent.verticalCenter
-                width: 44 * Theme.u
-                height: width
-                source: Util.rounded(row.modelData.icon)
-                sourceSize.width: Math.ceil(width * Screen.devicePixelRatio)
-                sourceSize.height: Math.ceil(height * Screen.devicePixelRatio)
-                fillMode: Image.PreserveAspectCrop
-                asynchronous: true
-            }
-
-            Row {
-                x: table.thumbWidth
-                anchors.verticalCenter: parent.verticalCenter
-
-                Text {
-                    width: table.nameWidth - 12 * Theme.u
-                    text: row.modelData.title || row.modelData.name
-                    elide: Text.ElideRight
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontBody
-                }
-
-                Item { width: 12 * Theme.u; height: 1 }
-
-                Repeater {
-                    model: [
-                        { text: row.modelData.serial, width: table.serialWidth },
-                        { text: row.modelData.region, width: table.regionWidth },
-                        { text: row.modelData.version, width: table.versionWidth }
-                    ]
-
-                    Text {
-                        required property var modelData
-                        width: modelData.width
-                        text: modelData.text || "—"
-                        elide: Text.ElideRight
-                        color: Theme.textSecondary
-                        font.pixelSize: Theme.fontBody
-                        font.family: "monospace"
-                    }
-                }
-            }
-
-            MouseArea {
-                id: rowMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                onClicked: (mouse) => {
-                    table.currentIndex = row.index;
-                    table.forceActiveFocus();
-                    if (mouse.button === Qt.RightButton)
-                        library.openMenu(row.modelData.row);
-                }
-                onDoubleClicked: (mouse) => {
-                    if (mouse.button === Qt.LeftButton)
-                        library.runSelected(row.index);
-                }
-            }
-        }
-
-        Keys.onReturnPressed: library.runSelected(currentIndex)
-        Keys.onEnterPressed: library.runSelected(currentIndex)
-        Keys.onLeftPressed: library.sidebarTarget.forceActiveFocus()
+        onActivated: (index) => library.runSelected(index)
+        onMenuRequested: (index) => library.openMenu(library.visibleGames[index].row)
         Keys.onPressed: (event) => library.handleGameKey(event)
     }
 

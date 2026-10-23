@@ -50,7 +50,6 @@ int main(int argc, char* argv[])
 	LauncherBackend backend;
 
 	QQmlApplicationEngine engine;
-	engine.addImageProvider(ArtworkProvider::ID, new ArtworkProvider(&artwork));
 	engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
 	engine.loadFromModule("Kyty.Launcher", "Main");
 	if (engine.rootObjects().isEmpty())

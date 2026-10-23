@@ -112,7 +112,7 @@ struct LayerSlot
 	}
 };
 
-class BackdropNode: public QSGNode
+class BackdropNode: public GroupNode
 {
 public:
 	explicit BackdropNode(QQuickWindow* window)

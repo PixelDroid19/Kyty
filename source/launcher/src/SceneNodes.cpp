@@ -1,12 +1,17 @@
 #include "SceneNodes.h"
 
+#include <QFontDatabase>
+#include <QFontMetricsF>
+#include <QGuiApplication>
 #include <QImage>
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
 #include <QQuickWindow>
 #include <QSGImageNode>
+#include <QSGTextNode>
 #include <QSGTexture>
+#include <QTextLayout>
 
 #include <algorithm>
 #include <cmath>
@@ -78,6 +83,8 @@ void RoundedBoxNode::CreateSlices(QQuickWindow* window, const Style& style)
 		{
 			slice = window->createImageNode();
 			slice->setOwnsTexture(false);
+			// The software renderer reads the texture as soon as the node joins a shown tree.
+			slice->setTexture(m_texture);
 			appendChildNode(slice);
 		}
 	}
@@ -113,4 +120,92 @@ void RoundedBoxNode::Update(QQuickWindow* window, const QRectF& bounds, const St
 		const int row    = i / 3;
 		m_slices[i]->setRect(QRectF(QPointF(xs[column], ys[row]), QPointF(xs[column + 1], ys[row + 1])));
 	}
+}
+
+RectClipNode::RectClipNode(): m_geometry(QSGGeometry::defaultAttributes_Point2D(), 4)
+{
+	setGeometry(&m_geometry);
+	setIsRectangular(true);
+}
+
+void RectClipNode::SetRect(const QRectF& rect)
+{
+	setClipRect(rect);
+	QSGGeometry::updateRectGeometry(&m_geometry, rect);
+	markDirty(DirtyGeometry);
+}
+
+QFont SceneFont(qreal pixel_size, QFont::Weight weight)
+{
+	QFont font = QGuiApplication::font();
+	font.setPixelSize(std::max(1, qRound(pixel_size)));
+	font.setWeight(weight);
+	return font;
+}
+
+QFont SceneMonospaceFont(qreal pixel_size)
+{
+	QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+	font.setPixelSize(std::max(1, qRound(pixel_size)));
+	return font;
+}
+
+qreal TextWidth(const QString& text, const QFont& font)
+{
+	return QFontMetricsF(font).horizontalAdvance(text);
+}
+
+namespace {
+
+// Lays out text on one line elided to width and adds it to node with its baseline at baseline_y; left_edge maps
+// the laid-out line's width to its left edge.
+template <typename LeftEdge>
+void AddLine(QSGTextNode* node, const QString& text, const QFont& font, const QColor& color, qreal width, qreal baseline_y,
+             LeftEdge left_edge)
+{
+	node->clear();
+	if (text.isEmpty() || width <= 0)
+	{
+		return;
+	}
+	QTextLayout layout(QFontMetricsF(font).elidedText(text, Qt::ElideRight, width), font);
+	layout.beginLayout();
+	QTextLine line = layout.createLine();
+	line.setLineWidth(width);
+	line.setPosition(QPointF(0, 0));
+	layout.endLayout();
+
+	node->setColor(color);
+	node->addTextLayout(QPointF(std::round(left_edge(line.naturalTextWidth())), std::round(baseline_y - line.ascent())), &layout);
+}
+
+} // namespace
+
+qreal CentredBaseline(const QFont& font, const QRectF& rect)
+{
+	const QFontMetricsF metrics(font);
+	return rect.top() + (rect.height() - metrics.height()) / 2 + metrics.ascent();
+}
+
+void SetTextLine(QSGTextNode* node, const QString& text, const QFont& font, const QColor& color, const QRectF& rect,
+                 Qt::Alignment alignment)
+{
+	AddLine(node, text, font, color, rect.width(), CentredBaseline(font, rect),
+	        [&](qreal line_width)
+	        {
+		        if ((alignment & Qt::AlignHCenter) != 0)
+		        {
+			        return rect.left() + (rect.width() - line_width) / 2;
+		        }
+		        if ((alignment & Qt::AlignRight) != 0)
+		        {
+			        return rect.right() - line_width;
+		        }
+		        return rect.left();
+	        });
+}
+
+void SetTextAtBaseline(QSGTextNode* node, const QString& text, const QFont& font, const QColor& color, QPointF origin, qreal max_width)
+{
+	AddLine(node, text, font, color, max_width, origin.y(), [&](qreal /*line_width*/) { return origin.x(); });
 }

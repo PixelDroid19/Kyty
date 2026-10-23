@@ -143,14 +143,6 @@ QString ArtworkProvider::IdFromUrl(const QString& url)
 	return url.startsWith(prefix) ? url.mid(prefix.size()) : QString();
 }
 
-QQuickImageResponse* ArtworkProvider::requestImageResponse(const QString& id, const QSize& requested_size)
-{
-	auto* job      = m_loader->CreateJob(id, requested_size);
-	auto* response = new ArtworkResponse(job);
-	m_loader->Start(job);
-	return response;
-}
-
 void ArtworkJob::run()
 {
 	const QFileInfo info(m_path);
@@ -198,21 +190,4 @@ void ArtworkJob::run()
 		file.commit();
 	}
 	emit Done(image, {});
-}
-
-ArtworkResponse::ArtworkResponse(ArtworkJob* job)
-{
-	connect(job, &ArtworkJob::Done, this,
-	        [this](const QImage& image, const QString& error)
-	        {
-		        m_image = image;
-		        m_error = error;
-		        emit finished();
-	        },
-	        Qt::QueuedConnection);
-}
-
-QQuickTextureFactory* ArtworkResponse::textureFactory() const
-{
-	return QQuickTextureFactory::textureFactoryForImage(m_image);
 }

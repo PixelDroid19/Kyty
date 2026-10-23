@@ -4,8 +4,6 @@
 #include "Common.h"
 
 #include <QImage>
-#include <QQuickAsyncImageProvider>
-#include <QQuickImageResponse>
 #include <QRunnable>
 #include <QSize>
 #include <QString>
@@ -15,7 +13,7 @@ class ArtworkJob;
 
 // Loads game artwork scaled down to the size the launcher draws it, and keeps those small copies on disk.
 // A 4K pic0.png is then decoded once instead of on every start, on one idle-priority thread that never
-// competes with a running game. QML images and scene items share it.
+// competes with a running game. The scene items ask it for the artwork they draw.
 class ArtworkLoader
 {
 public:
@@ -37,28 +35,18 @@ private:
 	QString     m_cache_dir;
 };
 
-// Serves the loader's artwork to QML Image items under image://art/.
-class ArtworkProvider: public QQuickAsyncImageProvider
+// The image:// addresses that name game artwork in the backend's game maps.
+class ArtworkProvider
 {
 public:
 	static constexpr char ID[] = "art";
 	// Put before the encoded path, it asks for the artwork cut to the requested box with rounded corners.
 	static constexpr char ROUNDED_PREFIX[] = "round/";
 
-	explicit ArtworkProvider(ArtworkLoader* loader): m_loader(loader) {}
-	~ArtworkProvider() override = default;
-
-	KYTY_QT_CLASS_NO_COPY(ArtworkProvider);
-
-	// The image:// address QML uses for the artwork file at path; empty when path is empty.
+	// The image:// address of the artwork file at path; empty when path is empty.
 	static QString Url(const QString& path);
 	// The id inside an image:// address made by Url, or empty when url is not one.
 	static QString IdFromUrl(const QString& url);
-
-	QQuickImageResponse* requestImageResponse(const QString& id, const QSize& requested_size) override;
-
-private:
-	ArtworkLoader* m_loader;
 };
 
 // Loads one artwork file on the provider's thread and reports the scaled image back.
@@ -82,21 +70,6 @@ private:
 	QSize   m_size;
 	bool    m_rounded;
 	QString m_cache_dir;
-};
-
-class ArtworkResponse: public QQuickImageResponse
-{
-	Q_OBJECT
-
-public:
-	explicit ArtworkResponse(ArtworkJob* job);
-
-	[[nodiscard]] QQuickTextureFactory* textureFactory() const override;
-	[[nodiscard]] QString               errorString() const override { return m_error; }
-
-private:
-	QImage  m_image;
-	QString m_error;
 };
 
 #endif /* LAUNCHER_INCLUDE_ARTWORK_PROVIDER_H_ */

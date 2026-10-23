@@ -40,7 +40,7 @@ Window {
     onGameRunningChanged: {
         if (gameRunning) {
             restoreVisibility = visibility === Window.Minimized ? Window.Windowed : visibility;
-            sidebar.mascot.hop();
+            kit.hop();
             stepAside.start();
         } else {
             stepAside.stop();
@@ -140,18 +140,30 @@ Window {
 
     Sidebar {
         id: sidebar
+        // Its labels open over the page beside it.
+        z: 1
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         width: 96 * Theme.u
         current: root.page === "editor" ? (editor.global ? "settings" : "library") : root.page
         rightTarget: root.page === "library" ? library.gameView : null
+        entriesTop: kit.y + kit.height + 18 * Theme.u
 
         onLibraryRequested: root.openLibrary()
         onAddGameRequested: addDialog.open()
         onSettingsRequested: root.showPage("settings")
         onAboutRequested: root.showPage("about")
         onQuitRequested: root.close()
+
+        KitMascot {
+            id: kit
+            anchors.top: parent.top
+            anchors.topMargin: 30 * Theme.u
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: 44 * Theme.u
+            floating: false
+        }
     }
 
     Item {
@@ -166,7 +178,7 @@ Window {
         id: library
         anchors.fill: pageArea
         visible: root.page === "library"
-        sidebarTarget: sidebar.libraryButton
+        sidebarTarget: sidebar
 
         onRunRequested: (row) => root.runGame(row)
         onEditRequested: (row) => root.openEditor(row, backend.FieldsFor(row))
@@ -215,6 +227,7 @@ Window {
         anchors.bottom: parent.bottom
         height: 56 * Theme.u
         hints: root.activePage.hints
+        pad: backend.controllerName !== ""
     }
 
     Notice {
