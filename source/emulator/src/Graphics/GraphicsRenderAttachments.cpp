@@ -24,6 +24,7 @@
 #include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
+#include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/RenderResolutionAlias.h"
 #include "Emulator/Graphics/RenderResolutionDemotion.h"
 #include "Emulator/Graphics/RenderResolutionImageCapability.h"
@@ -1263,12 +1264,16 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	auto depth_addr_mask   = static_cast<uint64_t>(depth_size.align) - 1;
 	auto htile_addr_mask   = static_cast<uint64_t>(htile_size.align) - 1;
 
-	// DB_DEPTH_VIEW selects the slice a draw renders; the depth, stencil and HTILE bases stay at slice 0 and each
-	// plane's slices follow one another at its single-level slice size.
+	// DB_DEPTH_VIEW selects the slices a draw renders; the depth, stencil and HTILE bases stay at slice 0 and each
+	// plane's slices follow one another at its single-level slice size. Without
+	// PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX the render target index is zero, so a draw renders only SLICE_START,
+	// whatever SLICE_MAX.
 	const uint64_t slice = z.depth_view.slice_start;
+	const bool     layer_export =
+	    (hw.GetShaderRegisters().m_paClVsOutCntl & (1u << Pm4::PA_CL_VS_OUT_CNTL_USE_VTX_RENDER_TARGET_INDX_SHIFT)) != 0u;
 	if (r->format != VK_FORMAT_UNDEFINED && (slice != 0u || z.depth_view.slice_max != 0u))
 	{
-		if (z.depth_view.slice_max != z.depth_view.slice_start)
+		if (layer_export && z.depth_view.slice_max != z.depth_view.slice_start)
 		{
 			EXIT("layered depth rendering is not implemented: slices %u..%u\n", z.depth_view.slice_start, z.depth_view.slice_max);
 		}

@@ -416,8 +416,10 @@ record. Titles are named descriptively only (`AGENTS.md`).
   unmap. `BeginUnmap` holds the publisher fence, and the release waits for
   it in `AcquireIdentityWriter`, so the test deadlocked whenever the unmap
   thread was admitted first. The test now ends the unmap before joining.
-- **Defect found, not fixed: layered depth targets.** In the same frames a
-  lighting kernel samples a 16-layer D32 array (1536x1536, shadow cascades)
+- **Layered depth targets (fixed 2026-10-22: every slice is its own depth
+  image, and a sampled array view is assembled from the slice images).** In
+  the same frames a lighting kernel samples a 16-layer D32 array
+  (1536x1536, shadow cascades)
   whose cascades the guest renders as single-slice depth views at one base
   (`DB_DEPTH_VIEW` slices 0..0 and 1..1). `DescribeRenderDepthInfo` reads
   `slice_start` and `slice_max`, but the depth backing is one layer, so both

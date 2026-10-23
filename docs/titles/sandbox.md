@@ -4,6 +4,32 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Sandbox title: shadow cascades bound as slice ranges (2026-10-23, fixed)
+
+- **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
+  world-entry route).** After the depth-slice change of 2026-10-22 the title
+  stopped with "layered depth rendering is not implemented" right after the
+  player spawned. Temporary logging (removed) showed the shadow cascades on
+  the 2048x2048 D32 target bound with `DB_DEPTH_VIEW` slices 0..3, 1..3, 2..3
+  and 3..3: each pass starts at its cascade and keeps SLICE_MAX at 3, and
+  none sets `PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX`.
+- **Contract.** Without that bit the render target index is zero, so a draw
+  renders only SLICE_START; SLICE_MAX only bounds the indices an exported
+  layer could select. The colour path already applies this rule
+  (`CollapseRenderColorLayersWithoutLayerExport`).
+- **Change.** `DescribeRenderDepthInfo` refuses a slice range only when the
+  draw exports a layer index. Otherwise the pass renders the single slice
+  SLICE_START, exactly as a single-slice view does.
+- **Excluded.** Making each range a layered depth image over
+  SLICE_START..SLICE_MAX: the overlapping ranges reclaimed each other's
+  images on every pass, the cascades lost their content and the world ran at
+  5.5 fps. One run with that experiment ended in a GPU hang on queue 8.
+- **Verified.** Two 150-170 s strict runs reach the world with no stop, at
+  7-8 fps in world, with terrain and shadows as before the depth-slice
+  change. Only the case that used to stop changes behaviour.
+- **Open.** A depth slice range with an exported layer index still stops; no
+  title has reached it.
+
 ## Sandbox title: drifting dark patch on terrain (2026-10-16, open)
 
 - Observed (Intel, strict, world-entry route, no input after the spawn): from about frame

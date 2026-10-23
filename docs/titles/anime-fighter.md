@@ -49,9 +49,10 @@ record. Titles are named descriptively only (`AGENTS.md`).
 - **Shared-path check (Intel, strict runs).** The card title (262 fps in
   play, no present limit), racing (101 fps), beat 'em up (18.2 fps, was
   13.1) and fishing (22.6 fps, was 21.5) run their routes with no stop. The
-  sandbox reaches its world faster and then stops on a layered depth target,
+  sandbox reaches its world faster and then stopped on a depth slice range,
   a refusal added the same day by the depth-slice change, not by these
-  changes.
+  changes (fixed, see "Sandbox title: shadow cascades bound as slice
+  ranges").
 - **Remaining frame cost.** The graphics queue decodes ~8 ms per frame while
   the submitting guest thread waits, its GPU work runs ~7.5 ms after the last
   flush, and the async chain follows it. The ring thread's largest remaining
