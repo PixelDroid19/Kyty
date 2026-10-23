@@ -101,6 +101,7 @@ uint32_t GetRenderResolutionWidth();
 uint32_t GetRenderResolutionHeight();
 PresentationFilter GetPresentationFilter();
 uint32_t GetPresentationFsrSharpness();
+uint32_t GetPresentFpsLimit();
 TextureAnisotropy GetTextureAnisotropy();
 bool     IsNeo();
 bool     IsNextGen();

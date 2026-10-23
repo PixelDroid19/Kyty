@@ -48,6 +48,7 @@
 #include <set>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 #include <vulkan/vk_platform.h>
 
@@ -233,6 +234,8 @@ struct WindowContext
 	bool          graphic_initialized = false;
 	Core::CondVar graphic_initialized_condvar;
 	NativeCaptureState native_capture;
+
+	std::chrono::steady_clock::time_point next_present_time;
 };
 
 static WindowContext* g_window_ctx = nullptr;
@@ -3428,6 +3431,27 @@ static void WindowAcquireSwapchainImage()
 	DebugStatsRecordAcquire(static_cast<uint64_t>(acquire_ns));
 }
 
+// PresentFpsLimit caps host presents (0 = unpaced). A late present restarts the
+// schedule instead of bursting to catch up.
+static void WindowPacePresentRate()
+{
+	const uint32_t limit = Config::GetPresentFpsLimit();
+	if (limit == 0)
+	{
+		return;
+	}
+	const auto period = std::chrono::nanoseconds(1'000'000'000 / limit);
+	auto&      next   = g_window_ctx->next_present_time;
+	const auto now    = std::chrono::steady_clock::now();
+	if (next <= now)
+	{
+		next = now + period;
+		return;
+	}
+	std::this_thread::sleep_until(next);
+	next += period;
+}
+
 // Presents swapchain->current_index once render_finished is signalled.
 static void WindowQueuePresent(VkSemaphore* render_finished)
 {
@@ -3462,6 +3486,7 @@ static void WindowQueuePresent(VkSemaphore* render_finished)
 	}
 	const auto present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
 	DebugStatsRecordPresent(static_cast<uint64_t>(present_ns));
+	WindowPacePresentRate();
 }
 
 void WindowDrawBuffer(VideoOutVulkanImage* image)

@@ -18,6 +18,7 @@ struct Config
 	uint32_t               render_resolution_height    = 720;
 	PresentationFilter     presentation_filter         = PresentationFilter::Nearest;
 	uint32_t               presentation_fsr_sharpness  = 90;
+	uint32_t               present_fps_limit           = 0;
 	TextureAnisotropy      texture_anisotropy          = TextureAnisotropy::Guest;
 	bool                   neo                         = true;
 	GuestPlatform          guest_platform              = GuestPlatform::Unknown;
@@ -114,6 +115,7 @@ void Load(const ConfigSource& cfg)
 	LoadInt(g_config->render_resolution_height, cfg, U"RenderResolutionHeight");
 	LoadStrictEnum(g_config->presentation_filter, cfg, U"PresentationFilter");
 	LoadInt(g_config->presentation_fsr_sharpness, cfg, U"PresentationFsrSharpness");
+	LoadInt(g_config->present_fps_limit, cfg, U"PresentFpsLimit");
 	LoadStrictEnum(g_config->texture_anisotropy, cfg, U"TextureAnisotropy");
 	if (g_config->presentation_fsr_sharpness > 100)
 	{
@@ -181,6 +183,11 @@ PresentationFilter GetPresentationFilter()
 uint32_t GetPresentationFsrSharpness()
 {
 	return g_config->presentation_fsr_sharpness;
+}
+
+uint32_t GetPresentFpsLimit()
+{
+	return g_config->present_fps_limit;
 }
 
 TextureAnisotropy GetTextureAnisotropy()
