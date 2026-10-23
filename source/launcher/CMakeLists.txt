@@ -88,8 +88,24 @@ elseif(APPLE)
     endif()
 else()
     set(launcher_name "launcher")
-    set_target_properties(launcher PROPERTIES OUTPUT_NAME ${launcher_name})
+    set_target_properties(launcher PROPERTIES OUTPUT_NAME ${launcher_name} INSTALL_RPATH "$ORIGIN/lib")
     install(TARGETS launcher DESTINATION .)
+    # A distribution or Nix Qt is tied to its own system libraries, so only a relocatable Qt is copied next to the launcher.
+    if(NOT QT6_INSTALL_PREFIX MATCHES "^/(usr|nix)(/|$)")
+        # The build-tree binary still has Qt's library directory in its RPATH, so its dependencies resolve to the Qt it was built with.
+        # Qt deploys only its default platform plugin (xcb), so Wayland is named to keep Wayland sessions native.
+        qt_generate_deploy_script(TARGET launcher OUTPUT_SCRIPT launcher_deploy_script CONTENT "
+set(QT_DEPLOY_BIN_DIR .)
+qt6_deploy_runtime_dependencies(
+    EXECUTABLE \"$<TARGET_FILE:launcher>\"
+    LIB_DIR lib
+    PLUGINS_DIR plugins
+    INCLUDE_PLUGINS qwayland
+    GENERATE_QT_CONF
+    NO_TRANSLATIONS
+)")
+        install(SCRIPT ${launcher_deploy_script})
+    endif()
 endif()
 
 # Embedded as :/i18n/launcher_<language>.qm; the update_translations target refreshes the .ts files from the sources.
