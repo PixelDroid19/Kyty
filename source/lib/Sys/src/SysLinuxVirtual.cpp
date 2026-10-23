@@ -1050,6 +1050,57 @@ bool sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset
 #endif
 }
 
+bool sys_virtual_query_shared_backing_data_pages(void* backing, uint64_t backing_offset, uint64_t size, uint64_t page_size,
+                                                 uint8_t* populated)
+{
+	const auto* shared = static_cast<const SharedBacking*>(backing);
+	if (shared == nullptr || populated == nullptr || page_size == 0 || (backing_offset % page_size) != 0 || (size % page_size) != 0 ||
+	    backing_offset > shared->size || size > shared->size - backing_offset)
+	{
+		return false;
+	}
+#if defined(__linux__) && defined(SEEK_DATA) && defined(SEEK_HOLE)
+	if (shared->fd < 0)
+	{
+		return false;
+	}
+	// The memfd's extents skip a hole in one query, where a page-table or
+	// residency walk visits every page of it.
+	std::memset(populated, 0, static_cast<size_t>(size / page_size));
+	const int      saved_errno = errno;
+	const uint64_t end         = backing_offset + size;
+	bool           ok          = true;
+	for (uint64_t cursor = backing_offset; cursor < end;)
+	{
+		const off_t data = ::lseek(shared->fd, static_cast<off_t>(cursor), SEEK_DATA);
+		if (data < 0)
+		{
+			ok = errno == ENXIO;
+			break;
+		}
+		if (static_cast<uint64_t>(data) >= end)
+		{
+			break;
+		}
+		const off_t hole = ::lseek(shared->fd, data, SEEK_HOLE);
+		if (hole <= data)
+		{
+			ok = false;
+			break;
+		}
+		const uint64_t first = static_cast<uint64_t>(data) / page_size * page_size;
+		const uint64_t last  = std::min(end, (static_cast<uint64_t>(hole) + page_size - 1u) / page_size * page_size);
+		std::memset(populated + (first - backing_offset) / page_size, 1, static_cast<size_t>((last - first) / page_size));
+		cursor = last;
+	}
+	errno = saved_errno;
+	return ok;
+#else
+	std::memset(populated, 1, static_cast<size_t>(size / page_size));
+	return true;
+#endif
+}
+
 bool sys_virtual_query_shared_backing_populated_bytes(void* backing, uint64_t* bytes)
 {
 	const auto* shared = static_cast<const SharedBacking*>(backing);

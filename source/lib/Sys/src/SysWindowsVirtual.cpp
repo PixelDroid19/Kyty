@@ -919,6 +919,20 @@ bool sys_virtual_next_shared_backing_data([[maybe_unused]] void* backing, [[mayb
 	return false;
 }
 
+// Section views commit their pages when mapped, so every page is populated.
+bool sys_virtual_query_shared_backing_data_pages(void* backing, uint64_t backing_offset, uint64_t size, uint64_t page_size,
+                                                 uint8_t* populated)
+{
+	const auto* shared = static_cast<const SharedBacking*>(backing);
+	if (shared == nullptr || populated == nullptr || page_size == 0 || (backing_offset % page_size) != 0 || (size % page_size) != 0 ||
+	    backing_offset > shared->size || size > shared->size - backing_offset)
+	{
+		return false;
+	}
+	std::memset(populated, 1, static_cast<size_t>(size / page_size));
+	return true;
+}
+
 bool sys_virtual_query_shared_backing_populated_bytes([[maybe_unused]] void* backing, [[maybe_unused]] uint64_t* bytes)
 {
 	return false;

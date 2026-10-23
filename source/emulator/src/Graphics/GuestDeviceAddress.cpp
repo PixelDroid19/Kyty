@@ -885,17 +885,8 @@ bool ImportPhysicalSpan(GraphicContext* ctx, Registry* registry, uint64_t base, 
 	const uint64_t pages        = last - first;
 	const uint64_t span_address = base + first * kPageBytes;
 	const uint64_t span_size    = pages * kPageBytes;
-	resident->resize(static_cast<size_t>(pages));
-	if (!Core::VirtualMemory::QueryResidentPages(span_address, span_size, resident->data()))
-	{
-		return false;
-	}
-	if (std::none_of(resident->begin(), resident->end(), [](uint8_t value) { return value != 0; }))
-	{
-		return true;
-	}
-	uint64_t   offset     = 0;
-	const auto resolution = Kernel::Memory::KernelResolvePhysical(span_address, span_size, &offset);
+	uint64_t       offset       = 0;
+	const auto     resolution   = Kernel::Memory::KernelResolvePhysical(span_address, span_size, &offset);
 	if (resolution == Kernel::Memory::KernelPhysicalResolution::Withdrawing)
 	{
 		// The guest unmaps or releases this range, so no later GPU work reads
@@ -907,6 +898,18 @@ bool ImportPhysicalSpan(GraphicContext* ctx, Registry* registry, uint64_t base, 
 		std::fprintf(stderr, "guest import failed: base=0x%012" PRIx64 " size=0x%" PRIx64 " has no direct memory\n", span_address,
 		             span_size);
 		return false;
+	}
+	// The backing's extents, not the view's residency: a loading title keeps
+	// large spans mostly unwritten, and a per-page walk of them dominated
+	// every preparation while pages were being populated.
+	resident->resize(static_cast<size_t>(pages));
+	if (!Kernel::Memory::KernelQueryPopulatedPhysicalPages(offset, span_size, resident->data()))
+	{
+		return false;
+	}
+	if (std::none_of(resident->begin(), resident->end(), [](uint8_t value) { return value != 0; }))
+	{
+		return true;
 	}
 	// Guest writes reach physical pages one at a time, and importing each newly
 	// resident run gave a chunk per page or two. Whole blocks bound the chunks
@@ -971,7 +974,7 @@ bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* chan
 // Physical ranges number in the thousands and are mostly unpopulated. Their
 // unimported spans are asked about in one sweep of the backing, so a span
 // before the next populated page costs no host query and only spans holding
-// populated pages are scanned for resident ones.
+// populated pages have their backing extents read.
 bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 {
 	struct Pending

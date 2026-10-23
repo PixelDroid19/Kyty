@@ -157,6 +157,10 @@ struct SharedBackingSpan
 // one host query clears every span up to the next populated page. Unsupported
 // hosts and query errors leave spans unmarked.
 void           FindUnpopulatedSharedBackingSpans(SharedBacking* backing, SharedBackingSpan* spans, size_t count);
+// Snapshot query: one byte per page of the page-aligned backing interval
+// [backing_offset, backing_offset + size), nonzero when the page is populated
+// or swapped out. Hosts without a population query report every page populated.
+bool           QueryPopulatedSharedBackingPages(SharedBacking* backing, uint64_t backing_offset, uint64_t size, uint8_t* populated);
 // The backing gains a page only when a view first touches it and loses pages
 // only through DiscardSharedBackingRange, so an unchanged population means no
 // page of any view became resident or was dropped in between.

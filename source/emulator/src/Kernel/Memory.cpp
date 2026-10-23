@@ -292,6 +292,7 @@ public:
 	bool     ExportPinnedWindowDmaBuf(uint64_t phys_addr, uint64_t size, int* dma_buf);
 	void     UnpinWindow(uint64_t phys_addr, uint64_t size);
 	void     FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t count);
+	bool     QueryPopulatedPages(uint64_t phys_addr, uint64_t size, uint8_t* populated);
 	uint64_t TotalAllocatedBytes();
 	void     FillSnapshot(KernelMemorySnapshot* snapshot);
 	bool     FindLargestAvailableSpan(uint64_t search_start, uint64_t search_end, uint64_t alignment, uint64_t* span_start,
@@ -2020,6 +2021,12 @@ void PhysicalMemory::FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t coun
 	}
 }
 
+// The backing is created once and outlives every query; no mapping state is read.
+bool PhysicalMemory::QueryPopulatedPages(uint64_t phys_addr, uint64_t size, uint8_t* populated)
+{
+	return VirtualMemory::QueryPopulatedSharedBackingPages(m_backing, phys_addr, size, populated);
+}
+
 const PhysicalMemory::MappedBlock* PhysicalMemory::FindLiveViewUnlocked(uint64_t vaddr)
 {
 	auto next = std::upper_bound(m_mapped_order.begin(), m_mapped_order.end(), vaddr,
@@ -3397,6 +3404,11 @@ void KernelFindUnpopulatedPhysicalSpans(KernelPhysicalSpan* spans, size_t count)
 		return;
 	}
 	g_physical_memory->FindUnpopulatedSpans(spans, count);
+}
+
+bool KernelQueryPopulatedPhysicalPages(uint64_t phys_addr, uint64_t size, uint8_t* populated)
+{
+	return g_physical_memory != nullptr && g_physical_memory->QueryPopulatedPages(phys_addr, size, populated);
 }
 
 bool KernelQueryPhysicalPopulation(Core::VirtualMemory::SharedBackingPopulation* out)

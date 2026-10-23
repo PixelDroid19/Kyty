@@ -1985,6 +1985,12 @@ void FindUnpopulatedSharedBackingSpans(SharedBacking* backing, SharedBackingSpan
 	}
 }
 
+bool QueryPopulatedSharedBackingPages(SharedBacking* backing, uint64_t backing_offset, uint64_t size, uint8_t* populated)
+{
+	return shared_range_is_valid(backing, backing_offset, size) &&
+	       sys_virtual_query_shared_backing_data_pages(backing->handle, backing_offset, size, GetPageSize(), populated);
+}
+
 uint64_t MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                           uint64_t alignment)
 {
