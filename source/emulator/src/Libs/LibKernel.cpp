@@ -3,6 +3,7 @@
 #include "Kyty/Core/File.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/Subsystems.h"
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Math/Rand.h"
@@ -938,7 +939,8 @@ static void KYTY_SYSV_ABI exit(int code)
 {
 	PRINT_NAME();
 
-	::exit(code);
+	// The NID is _exit: it runs no guest handlers and flushes nothing.
+	Core::ShutdownActiveAndQuickExit(code);
 }
 
 static KYTY_SYSV_ABI MallocReplace* KernelGetSanitizerMallocReplaceExternal()

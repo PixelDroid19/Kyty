@@ -3255,11 +3255,7 @@ void WindowRun()
 
 	DebugOverlayShutdown(&g_window_ctx->graphic_ctx);
 
-	if (auto* subsystems = Core::SubsystemsList::Active(); subsystems != nullptr)
-	{
-		subsystems->ShutdownAll();
-	}
-	std::_Exit(0);
+	Core::ShutdownActiveAndQuickExit(0);
 }
 
 VkSurfaceCapabilitiesKHR* VulkanGetSurfaceCapabilities()

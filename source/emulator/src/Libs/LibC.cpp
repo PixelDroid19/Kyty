@@ -4,6 +4,7 @@
 #include "Kyty/Core/MSpace.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/Subsystems.h"
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Common.h"
@@ -223,7 +224,12 @@ static KYTY_SYSV_ABI void exit(int code)
 {
 	KYTY_LOG_WARN("guest exit(%d) from 0x%016" PRIx64 "\n", code, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 
-	::exit(code);
+	// exit() runs the guest's atexit and __cxa_atexit handlers on the calling
+	// thread and flushes every stream. The host then ends without its atexit
+	// handlers and static destructors, because other guest threads may still run.
+	cxa_finalize(nullptr);
+	std::fflush(nullptr);
+	Core::ShutdownActiveAndQuickExit(code);
 }
 
 static KYTY_SYSV_ABI void init_env(const ProcessEnvironment::InitParameters* parameters)
@@ -4264,17 +4270,14 @@ static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (*
 	     thrown_exception);
 }
 
-static KYTY_SYSV_ABI int atexit(void (*func)())
+static KYTY_SYSV_ABI int atexit(cxa_destructor_func_t func)
 {
 	PRINT_NAME();
 
 	KYTY_LOG_DEBUG("func = %" PRIx64 "\n", reinterpret_cast<uint64_t>(func));
 
-	int ok = ::atexit(func);
-
-	if (ok != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	return 0;
+	// atexit and __cxa_atexit share one list: exit() runs both, newest first.
+	return cxa_atexit(func, nullptr, nullptr);
 }
 
 static KYTY_SYSV_ABI int libc_printf(VA_ARGS)
