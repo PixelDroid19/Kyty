@@ -75,33 +75,59 @@ jobs:
           path: dist
           if-no-files-found: error
 
-  build-posix:
-    name: ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x64
-            os: ubuntu-24.04
-            artifact: linux-x64
-          - name: macOS x64
-            os: macos-15-intel
-            artifact: macos-x64
-    runs-on: ${{ matrix.os }}
+  build-linux:
+    name: Linux x64
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           lfs: true
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev libasound2-dev libpulse-dev
+          sudo apt-get install -y ninja-build libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev libasound2-dev libpulse-dev libgl-dev libegl-dev libxkbcommon-dev
 
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS'
+      - name: Build Vulkan 1.4 SDK components
+        uses: humbletim/setup-vulkan-sdk@c25f41106918cde0bf347e6f201277392b3a9e9d # v1.2.1
+        with:
+          vulkan-query-version: 1.4.357.0
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Headers, SPIRV-Tools
+          vulkan-use-cache: true
+
+      # The official Qt binaries are relocatable, so the package can carry them; the launcher dev shell pins the same version.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.11.2
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          cache: true
+
+      - name: Build package
+        run: |
+          package="kyty-${GITHUB_REF_NAME//\//-}-linux-x64"
+          CMAKE_PREFIX_PATH="$QT_ROOT_DIR" scripts/package_linux.sh build "dist/${package}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kyty-linux-x64-${{ github.sha }}
+          path: dist
+          if-no-files-found: error
+
+  build-macos:
+    name: macOS x64
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: true
+
+      - name: Install dependencies
         run: brew install ninja
 
       - name: Build Vulkan 1.4 SDK components
@@ -131,22 +157,20 @@ jobs:
           mkdir -p dist
           cp build/fc_script scripts/run_guest.lua README.md CHANGELOG.md LICENSE dist/
           chmod +x dist/fc_script
-          if [ "${RUNNER_OS}" = "macOS" ]; then
-            cp -L "$VULKAN_SDK/lib/libvulkan.1.dylib" dist/
-            install_name_tool -add_rpath @executable_path dist/fc_script
-          fi
+          cp -L "$VULKAN_SDK/lib/libvulkan.1.dylib" dist/
+          install_name_tool -add_rpath @executable_path dist/fc_script
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: kyty-${{ matrix.artifact }}-${{ github.sha }}
+          name: kyty-macos-x64-${{ github.sha }}
           path: dist
           if-no-files-found: error
 
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-windows, build-posix]
+    needs: [build-windows, build-linux, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -169,7 +193,8 @@ jobs:
           mac_dir="$(find artifacts -maxdepth 1 -type d -name 'kyty-macos-x64-*' -print -quit)"
           test -n "$win_dir" && test -n "$linux_dir" && test -n "$mac_dir"
           (cd "$win_dir" && zip -q -r "../../release-assets/kyty-${GITHUB_REF_NAME}-windows-x64.zip" .)
-          tar -czf "release-assets/kyty-${GITHUB_REF_NAME}-linux-x64.tar.gz" -C "$linux_dir" .
+          # The Linux job already archived its package, which keeps the executable bits that artifacts drop.
+          cp "$linux_dir/kyty-${GITHUB_REF_NAME}-linux-x64.tar.gz" release-assets/
           tar -czf "release-assets/kyty-${GITHUB_REF_NAME}-macos-x64.tar.gz" -C "$mac_dir" .
 
       - name: Create immutable release
