@@ -11,8 +11,6 @@
 #include "Emulator/Loader/MissingImport.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
-#include <atomic>
-
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Core::VirtualMemory {
@@ -116,6 +114,16 @@ struct DynamicInfo
 	Vector<LibraryId>   import_libs;
 };
 
+// Initializer progress of a provider admitted for a lazy import. Other programs
+// start in load order and stay None.
+enum class LazyStartState : uint8_t
+{
+	None,
+	Pending,
+	Starting,
+	Started,
+};
+
 struct Program
 {
 	int32_t                                unique_id = -1;
@@ -138,6 +146,9 @@ struct Program
 	uint64_t                               eh_frame_vaddr              = 0;
 	bool                                   eh_frame_registered         = false;
 	bool                                   guest_code_registered       = false;
+	LazyStartState                         lazy_start                  = LazyStartState::None;
+	// Host thread running the initializers while lazy_start is Starting.
+	uint64_t lazy_starter = 0;
 };
 
 // Immutable data copied while RuntimeLinker owns m_mutex. Consumers can inspect
@@ -248,7 +259,6 @@ public:
 	int  StartModule(Program* program, size_t args, const void* argp, module_func_t func);
 	int  StartModuleOnStack(Program* program, size_t args, const void* argp, module_func_t func, void* stack_top);
 	int  StopModule(Program* program, size_t args, const void* argp, module_func_t func);
-	void StartAllModules();
 	void StartAllModulesOnStack(void* stack_top);
 	void StopAllModules();
 	void DeleteTlss(int thread_id);
@@ -260,10 +270,15 @@ public:
 	void Resolve(const String& name, SymbolType type, Program* program, SymbolRecord* out_info, bool* bind_self = nullptr);
 	[[nodiscard]] MissingImportDiagnostics GetMissingImportDiagnostics() const;
 	[[nodiscard]] static MissingImportDiagnostics GetGlobalMissingImportDiagnostics();
-	// True while a program is applying RELA/JMPRELA records. Lazy package
-	// providers may be mapped and relocated during this window, but guest
-	// initializers must wait until the current relocation transaction completes.
-	[[nodiscard]] bool IsRelocationInProgress() const;
+	// Lazy provider admission maps and relocates programs. Relocation holds this
+	// lock when it admits a provider, so admission takes it before any other.
+	[[nodiscard]] Core::Mutex& AdmissionMutex() { return m_mutex; }
+	// Marks a provider admitted for a lazy import. Its initializers run before
+	// first use: at the next module start or lazy bind into it.
+	void MarkLazyStartPending(Program* program);
+	// Runs the initializers of the lazy provider that holds vaddr, or waits while
+	// another thread runs them. The caller holds no linker lock.
+	void StartLazyProviderAt(uint64_t vaddr);
 
 	SymbolDatabase* Symbols() { return m_symbols; }
 
@@ -320,19 +335,23 @@ private:
 
 	Program* FindProgram(const ModuleId& m, const LibraryId& l);
 
+	void StartLazyProvider(Program* program);
+	void StartPendingLazyProviders();
+	void FinishLazyStart(Program* program, int result);
+
 	static const ModuleId*  FindModule(const Program& program, const String& id);
 	static const LibraryId* FindLibrary(const Program& program, const String& id);
 
 	Vector<Program*>                       m_programs;
 	SymbolDatabase*                        m_symbols            = nullptr;
 	bool                                   m_relocated          = false;
-	std::atomic<uint32_t>                  m_relocation_depth {0};
 	uint64_t                               m_static_tls_size     = 0;
 	Core::Hashmap<int, StaticTlsAllocation*> m_static_tlss;
 	// module_id -> thread_id -> per-thread image buffer for dynamic TLS modules.
 	Core::Hashmap<uint64_t, Core::Hashmap<int, uint8_t*>*> m_dynamic_tlss;
 	Core::Mutex                                          m_static_tls_mutex;
 	Core::Mutex                            m_mutex;
+	Core::CondVar                                          m_lazy_start_changed;
 	RuntimeLinker*                         m_previous_guest_runtime_owner = nullptr;
 	uint32_t                               m_current_runtime_use_count    = 0;
 	bool                                   m_current_runtime_published    = false;

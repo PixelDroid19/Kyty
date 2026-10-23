@@ -163,10 +163,15 @@ void               AfterHleSymbolsRegistered(RuntimeLinker* rt);
 // offsets become immutable when the first guest thread materializes its block.
 [[nodiscard]] bool PrepareProvidersForExecution(RuntimeLinker* rt);
 
-// Resolves a strict unresolved package import from one validated provider. The
-// candidate must declare the requested module identity; a module is never
-// selected only because it happens to be adjacent on disk.
-[[nodiscard]] bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const Core::String& import_name, SymbolType type);
+// Loads the provider of a strict unresolved package import from one validated
+// candidate. The candidate must declare the requested module identity; a module
+// is never selected only because it happens to be adjacent on disk. Callers
+// resolve the import again afterwards, whatever happened here: a concurrent
+// call may have loaded the provider while this one waited. The provider's
+// initializers run before first use (RuntimeLinker::MarkLazyStartPending).
+void TryLoadProviderForLazyImport(RuntimeLinker* rt, const Core::String& import_name, SymbolType type);
+// Records the module_start result of a provider admitted for a lazy import.
+void               RecordLazyProviderStart(RuntimeLinker* rt, const Core::String& provider, bool started);
 void               ClearPending(RuntimeLinker* rt);
 
 } // namespace ModuleLifecycleCoordinator
