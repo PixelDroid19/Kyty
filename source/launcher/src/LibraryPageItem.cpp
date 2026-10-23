@@ -228,7 +228,6 @@ void LibraryPageItem::Refresh()
 	m_games             = backend->Games();
 	m_recent            = backend->Look("show_recent").toBool() ? backend->Recent() : QVariantList();
 	m_hero->SetGames(m_recent);
-	m_hero->setVisible(HasRecent());
 	m_tabs->SetFolders(backend->Folders());
 	m_add->setVisible(m_games.isEmpty());
 	Filter();
@@ -238,15 +237,16 @@ void LibraryPageItem::Filter()
 {
 	const auto folders = LauncherBackend::Instance()->Folders();
 	m_folder           = folders.value(m_tabs->CurrentIndex()).toMap();
-	const bool all     = m_folder.isEmpty() || m_folder.value("all").toBool();
-	const auto folder  = m_folder.value("folder").toString();
-	const auto query   = SearchText();
+	const bool all       = m_folder.isEmpty() || m_folder.value("all").toBool();
+	const bool favorites = m_folder.value("favorites").toBool();
+	const auto folder    = m_folder.value("folder").toString();
+	const auto query     = SearchText();
 
 	m_visible_games.clear();
 	for (const auto& entry: m_games)
 	{
 		const auto game = entry.toMap();
-		if (!all && game.value("folder").toString() != folder)
+		if (favorites ? !game.value("favorite").toBool() : !all && game.value("folder").toString() != folder)
 		{
 			continue;
 		}
@@ -261,6 +261,8 @@ void LibraryPageItem::Filter()
 		}
 	}
 
+	SortGames(&m_visible_games);
+
 	const bool table = LauncherBackend::Instance()->IsTableView();
 	const bool shown = !m_visible_games.isEmpty();
 	m_grid->SetGames(m_visible_games);
@@ -270,6 +272,28 @@ void LibraryPageItem::Filter()
 	UpdateFocusedGame();
 	polish();
 	update();
+}
+
+// Orders the games as the sort setting asks; the manual order is the library's own.
+void LibraryPageItem::SortGames(QVariantList* games)
+{
+	const auto sort = LauncherBackend::Instance()->Look("sort").toString();
+	auto       name = [](const QVariant& game)
+	{
+		const auto map   = game.toMap();
+		const auto title = map.value("title").toString();
+		return title.isEmpty() ? map.value("name").toString() : title;
+	};
+	if (sort == QLatin1String("ByName"))
+	{
+		std::stable_sort(games->begin(), games->end(),
+		                 [&](const QVariant& a, const QVariant& b) { return QString::localeAwareCompare(name(a), name(b)) < 0; });
+	} else if (sort == QLatin1String("LastPlayed") || sort == QLatin1String("PlayTime"))
+	{
+		const char* key = sort == QLatin1String("LastPlayed") ? "lastRun" : "playTime";
+		std::stable_sort(games->begin(), games->end(), [key](const QVariant& a, const QVariant& b)
+		                 { return a.toMap().value(key).toLongLong() > b.toMap().value(key).toLongLong(); });
+	}
 }
 
 void LibraryPageItem::UpdateFocusedGame()
@@ -382,13 +406,18 @@ void LibraryPageItem::OpenMenu(int row)
 	{
 		return;
 	}
-	const auto         last = m_games.size() - 1;
+	const auto last = m_games.size() - 1;
+	// Moving only shows in the manual order.
+	const bool         manual   = backend->Look("sort") == QLatin1String("Manual");
+	const bool         favorite = game.value("favorite").toBool();
 	const QVariantList items {
 	    QVariantMap {{"label", tr("Run")}, {"action", "run"}, {"allowed", backend->IsEmulatorReady() && !backend->IsRunning()}},
 	    QVariantMap {{"label", tr("Stop game")}, {"action", "stop"}, {"allowed", backend->IsRunning()}, {"danger", true}},
 	    QVariantMap {{"label", tr("Edit")}, {"action", "edit"}},
-	    QVariantMap {{"label", tr("Move up")}, {"action", "up"}, {"allowed", row > 0}},
-	    QVariantMap {{"label", tr("Move down")}, {"action", "down"}, {"allowed", row < last}},
+	    QVariantMap {{"label", favorite ? tr("Remove from favorites") : tr("Add to favorites")},
+		             {"action", favorite ? "unfavorite" : "favorite"}},
+	    QVariantMap {{"label", tr("Move up")}, {"action", "up"}, {"allowed", manual && row > 0}},
+	    QVariantMap {{"label", tr("Move down")}, {"action", "down"}, {"allowed", manual && row < last}},
 	    QVariantMap {{"label", tr("Open game folder")}, {"action", "folder"}},
 	    QVariantMap {{"label", tr("Delete")}, {"action", "delete"}, {"danger", true}},
 	    QVariantMap {{"label", tr("Close")}, {"action", "close"}}};
@@ -429,7 +458,7 @@ bool LibraryPageItem::NavigateKey(QKeyEvent* event)
 		{
 			return move(m_search);
 		}
-		if (key == Qt::Key_Up && HasRecent())
+		if (key == Qt::Key_Up && ShowsRecent())
 		{
 			return move(m_hero);
 		}
@@ -446,7 +475,7 @@ bool LibraryPageItem::NavigateKey(QKeyEvent* event)
 		{
 			return move(m_tabs);
 		}
-		if (key == Qt::Key_Up && HasRecent())
+		if (key == Qt::Key_Up && ShowsRecent())
 		{
 			return move(m_hero);
 		}
@@ -633,8 +662,19 @@ void LibraryPageItem::updatePolish()
 	g.title                  = QRectF(margin, HEADER_TOP * u, header_width, LineHeight(TitleFont()));
 	g.details = QRectF(margin, g.title.bottom() + HEADER_SPACING * u, header_width, std::ceil(theme->FontSmall() * 1.5));
 
+	// The recently played row gives way when the grid below it would not fit one whole row of covers.
+	const qreal grid_width = std::max<qreal>(0, w - 2 * (margin - GRID_INSET * u));
+	const qreal below_hero = h - g.details.bottom() - (HERO_TOP + HERO_BOX + TOOLBAR_TOP + TOOLBAR_HEIGHT + GRID_TOP) * u;
+	const bool  table_view = LauncherBackend::Instance()->IsTableView();
+	m_shows_recent         = !m_recent.isEmpty() && (table_view || below_hero >= m_grid->RowHeight(grid_width));
+	m_hero->setVisible(m_shows_recent);
+	if (!m_shows_recent && m_hero->hasActiveFocus())
+	{
+		m_tabs->forceActiveFocus();
+	}
+
 	qreal toolbar_top = g.details.bottom();
-	if (HasRecent())
+	if (m_shows_recent)
 	{
 		const qreal top = g.details.bottom() + HERO_TOP * u;
 		g.hero_label    = QRectF(margin, top, w - margin, status_line);
@@ -661,7 +701,7 @@ void LibraryPageItem::updatePolish()
 	m_tabs->setPosition(QPointF(tabs_left, toolbar.top()));
 	m_tabs->setSize(QSizeF(std::max<qreal>(0, g.search.left() - gap - tabs_left), toolbar.height()));
 
-	const QRectF grid(margin - GRID_INSET * u, toolbar.bottom() + GRID_TOP * u, std::max<qreal>(0, w - 2 * (margin - GRID_INSET * u)),
+	const QRectF grid(margin - GRID_INSET * u, toolbar.bottom() + GRID_TOP * u, grid_width,
 	                  std::max<qreal>(0, h - toolbar.bottom() - GRID_TOP * u));
 	m_grid->setPosition(grid.topLeft());
 	m_grid->setSize(grid.size());
@@ -730,6 +770,14 @@ QSGNode* LibraryPageItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData
 			details.append(value);
 		}
 	}
+	if (const auto minutes = m_focused_game.value("playTime").toLongLong() / 60; minutes > 0)
+	{
+		details.append(minutes < 60 ? tr("Played %1 min").arg(minutes) : tr("Played %1 h %2 min").arg(minutes / 60).arg(minutes % 60));
+	}
+	if (m_focused_game.value("favorite").toBool())
+	{
+		details.prepend(QStringLiteral("★"));
+	}
 	SetTextLine(node->details, details.join(QStringLiteral("  ·  ")), small, theme->TextSecondary(), g.details);
 
 	const auto   texts = StatusTexts();
@@ -751,7 +799,7 @@ QSGNode* LibraryPageItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData
 	}
 
 	node->hero_label->clear();
-	if (HasRecent())
+	if (ShowsRecent())
 	{
 		SetTextLine(node->hero_label, tr("Recently played"), small, theme->TextSecondary(), g.hero_label);
 	}

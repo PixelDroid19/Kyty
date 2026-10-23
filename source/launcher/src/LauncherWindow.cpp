@@ -61,10 +61,19 @@ LauncherWindow::LauncherWindow()
 	// Queued: the change may come from a key the page being replaced is still handling.
 	connect(backend, &LauncherBackend::LanguageChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
 	connect(backend, &LauncherBackend::AppearanceChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
+	connect(backend, &LauncherBackend::AppearanceChanged, this, &LauncherWindow::ApplyWindowMode);
 	connect(Theme::Instance(), &Theme::PaletteChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
 	connect(this, &QWindow::activeChanged, this, &LauncherWindow::UpdateLive);
 	connect(this, &QWindow::visibilityChanged, this, &LauncherWindow::UpdateLive);
-	connect(this, &QQuickWindow::closing, this, [this]() { LauncherBackend::Instance()->SaveWindowGeometry(x(), y(), width(), height()); });
+	// A maximized or full-screen size would make the next plain window cover the screen.
+	connect(this, &QQuickWindow::closing, this,
+	        [this]()
+	        {
+		        if (windowStates() == Qt::WindowNoState)
+		        {
+			        LauncherBackend::Instance()->SaveWindowGeometry(x(), y(), width(), height());
+		        }
+	        });
 
 	m_step_aside.setSingleShot(true);
 	m_step_aside.setInterval(STEP_ASIDE_MS);
@@ -93,6 +102,7 @@ LauncherWindow::LauncherWindow()
 
 	BuildItems();
 	RestoreGeometry();
+	ApplyWindowMode();
 	Layout();
 	StateChanged();
 	FocusPage();
@@ -193,6 +203,27 @@ void LauncherWindow::RestoreGeometry()
 	}
 	setPosition(geometry.value("x").toInt(), geometry.value("y").toInt());
 	resize(std::max(MINIMUM_WIDTH, geometry.value("width").toInt()), std::max(MINIMUM_HEIGHT, geometry.value("height").toInt()));
+}
+
+// Applied at start and when the setting changes, so another look change does not undo the user's own resizing.
+void LauncherWindow::ApplyWindowMode()
+{
+	const auto mode = LauncherBackend::Instance()->Look("window_mode").toString();
+	if (mode == m_window_mode)
+	{
+		return;
+	}
+	m_window_mode = mode;
+	if (mode == QLatin1String("Maximized"))
+	{
+		setWindowStates(Qt::WindowMaximized);
+	} else if (mode == QLatin1String("FullScreen"))
+	{
+		setWindowStates(Qt::WindowFullScreen);
+	} else
+	{
+		setWindowStates(Qt::WindowNoState);
+	}
 }
 
 void LauncherWindow::resizeEvent(QResizeEvent* event)
@@ -400,6 +431,9 @@ void LauncherWindow::HandleAction(const QString& action, int row)
 		const int delta = action == QLatin1String("up") ? -1 : 1;
 		backend->MoveGame(row, delta);
 		m_library->SelectRow(row + delta);
+	} else if (action == QLatin1String("favorite") || action == QLatin1String("unfavorite"))
+	{
+		backend->SetFavorite(row, action == QLatin1String("favorite"));
 	} else if (action == QLatin1String("folder"))
 	{
 		backend->OpenGameFolder(row);

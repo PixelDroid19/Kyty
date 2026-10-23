@@ -128,7 +128,8 @@ LauncherBackend* g_backend = nullptr;
 QVariantMap LookDefaults()
 {
 	return {{"accent", "Blue"},       {"interface_size", "Normal"}, {"animations", "Full"}, {"background", "Artwork"},
-	        {"cover_size", "Medium"}, {"show_titles", true},        {"show_recent", true},  {"on_launch", "Minimize"}};
+	        {"cover_size", "Medium"}, {"show_titles", true},        {"show_recent", true},  {"on_launch", "Minimize"},
+	        {"sort", "Manual"},       {"window_mode", "Windowed"}};
 }
 
 // Scale of every size for each interface_size, in the order of its choices.
@@ -280,6 +281,8 @@ QVariantMap LauncherBackend::GameToMap(int row) const
 	item["picture"]  = ArtworkProvider::Url(game.picture);
 	item["running"]  = row == m_running_row;
 	item["lastRun"]  = info.last_run;
+	item["playTime"] = info.play_time;
+	item["favorite"] = info.favorite;
 	return item;
 }
 
@@ -287,6 +290,18 @@ QVariantList LauncherBackend::Folders() const
 {
 	QVariantList list;
 	list << FolderToMap(tr("All games"), QString(), true);
+	int favorites = 0;
+	for (int row = 0; row < m_library.Count(); row++)
+	{
+		favorites += m_library.At(row).config->favorite ? 1 : 0;
+	}
+	if (favorites > 0)
+	{
+		auto item         = FolderToMap(tr("Favorites"), QString(), false);
+		item["favorites"] = true;
+		item["count"]     = favorites;
+		list << item;
+	}
 	for (const auto& name: m_library.Folders())
 	{
 		list << FolderToMap(name, name, false);
@@ -388,6 +403,8 @@ QVariantMap LauncherBackend::Choices() const
 	choices["background"]     = QStringList {"Artwork", "Dimmed", "Plain"};
 	choices["cover_size"]     = QStringList {"Small", "Medium", "Large"};
 	choices["on_launch"]      = QStringList {"Minimize", "KeepOpen"};
+	choices["sort"]           = QStringList {"Manual", "ByName", "LastPlayed", "PlayTime"};
+	choices["window_mode"]    = QStringList {"Windowed", "Maximized", "FullScreen"};
 	return choices;
 }
 
@@ -541,6 +558,17 @@ void LauncherBackend::MoveGame(int row, int delta)
 	emit StateChanged();
 }
 
+void LauncherBackend::SetFavorite(int row, bool favorite)
+{
+	if (row < 0 || row >= m_library.Count())
+	{
+		return;
+	}
+	m_library.At(row).config->favorite = favorite;
+	Save();
+	emit StateChanged();
+}
+
 QString LauncherBackend::RunGame(int row)
 {
 	if (row < 0 || row >= m_library.Count())
@@ -580,6 +608,7 @@ QString LauncherBackend::StartGame(const QVariantMap& fields, int row)
 		return error;
 	}
 	m_running_row = row;
+	m_run_started = QDateTime::currentMSecsSinceEpoch();
 	// The controller is released so the game is its only reader.
 	m_gamepad->SetPaused(true);
 	emit StateChanged();
@@ -593,6 +622,12 @@ void LauncherBackend::StopGame()
 
 void LauncherBackend::OnFinished(int exit_code, bool crashed)
 {
+	// A game cannot be deleted or moved while it runs, so its row still names it.
+	if (m_running_row >= 0)
+	{
+		m_library.At(m_running_row).config->play_time += (QDateTime::currentMSecsSinceEpoch() - m_run_started) / 1000;
+		Save();
+	}
 	m_running_row = -1;
 	m_gamepad->SetPaused(false);
 	emit StateChanged();

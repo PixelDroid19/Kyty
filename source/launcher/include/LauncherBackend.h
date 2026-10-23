@@ -75,6 +75,7 @@ public:
 	QString     SaveGlobal(const QVariantMap& fields);
 	void        DeleteGame(int row);
 	void        MoveGame(int row, int delta);
+	void        SetFavorite(int row, bool favorite);
 	QString     RunGame(int row);
 	QString     TestGame(const QVariantMap& fields);
 	QVariantMap DetectGame(const QString& folder) const;
@@ -124,6 +125,8 @@ private:
 	QVariantMap         m_look;
 	QTranslator         m_translator;
 	int                m_running_row       = -1;
+	// When the running library game started, in milliseconds since the epoch; its play time grows when it ends.
+	qint64             m_run_started = 0;
 	QRect              m_window_geometry;
 	bool               m_importing         = false;
 	bool               m_table_view        = false;

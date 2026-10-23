@@ -35,6 +35,8 @@ public:
 	void                       SetCoverLook(qreal min_tile, bool titles);
 	[[nodiscard]] int          CurrentIndex() const { return m_current; }
 	void                       SetCurrentIndex(int index);
+	// The height of one row of covers when the grid is grid_width wide.
+	[[nodiscard]] qreal RowHeight(qreal grid_width) const;
 
 protected:
 	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
@@ -58,6 +60,7 @@ private:
 	};
 
 	[[nodiscard]] Metrics LayoutMetrics() const;
+	[[nodiscard]] Metrics MetricsFor(qreal grid_width) const;
 	[[nodiscard]] QRectF  TileRect(int index, const Metrics& metrics) const;
 	[[nodiscard]] int     IndexAt(QPointF point) const;
 	[[nodiscard]] qreal   MaxContentY() const;

@@ -89,7 +89,9 @@ const QVector<EditorField> INTERFACE_FIELDS = {
 	 QT_TRANSLATE_NOOP("EditorPageItem", "Library")},
     {"show_titles", QT_TRANSLATE_NOOP("EditorPageItem", "Names under covers"), FieldType::Toggle},
     {"show_recent", QT_TRANSLATE_NOOP("EditorPageItem", "Recently played row"), FieldType::Toggle},
+    {"sort", QT_TRANSLATE_NOOP("EditorPageItem", "Sort games by"), FieldType::Choice, "sort"},
     {"on_launch", QT_TRANSLATE_NOOP("EditorPageItem", "When a game starts"), FieldType::Choice, "on_launch"},
+    {"window_mode", QT_TRANSLATE_NOOP("EditorPageItem", "Launcher window"), FieldType::Choice, "window_mode"},
 };
 
 } // namespace

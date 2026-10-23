@@ -120,6 +120,13 @@ const ChoiceText CHOICE_TEXTS[] = {
     {"Medium", QT_TRANSLATE_NOOP("FieldRowItem", "Medium")},
     {"Minimize", QT_TRANSLATE_NOOP("FieldRowItem", "Minimize the launcher")},
     {"KeepOpen", QT_TRANSLATE_NOOP("FieldRowItem", "Keep the launcher open")},
+    {"Manual", QT_TRANSLATE_NOOP("FieldRowItem", "My own order")},
+    {"ByName", QT_TRANSLATE_NOOP("FieldRowItem", "Name")},
+    {"LastPlayed", QT_TRANSLATE_NOOP("FieldRowItem", "Last played")},
+    {"PlayTime", QT_TRANSLATE_NOOP("FieldRowItem", "Time played")},
+    {"Windowed", QT_TRANSLATE_NOOP("FieldRowItem", "A window")},
+    {"Maximized", QT_TRANSLATE_NOOP("FieldRowItem", "Maximized")},
+    {"FullScreen", QT_TRANSLATE_NOOP("FieldRowItem", "Full screen")},
 };
 
 QString ChoiceDisplay(const QString& value)

@@ -74,6 +74,7 @@ private:
 
 	void Refresh();
 	void Filter();
+	static void SortGames(QVariantList* games);
 	void UpdateFocusedGame();
 	void SetHoveredSwitch(int index);
 	void OpenMenu(int row);
@@ -89,7 +90,7 @@ private:
 
 	[[nodiscard]] int        IndexOfRow(int row) const;
 	[[nodiscard]] int        SwitchAt(QPointF point) const;
-	[[nodiscard]] bool       HasRecent() const { return !m_recent.isEmpty(); }
+	[[nodiscard]] bool        ShowsRecent() const { return m_shows_recent; }
 	[[nodiscard]] QString    EmptyText() const;
 	[[nodiscard]] QString    SearchText() const;
 	[[nodiscard]] QStringList StatusTexts() const;
@@ -101,6 +102,7 @@ private:
 	QVariantMap      m_focused_game;
 	Geometry         m_geometry;
 	int              m_hovered_switch = -1;
+	bool             m_shows_recent   = false;
 	HeroRowItem*     m_hero           = nullptr;
 	FolderTabsItem*  m_tabs           = nullptr;
 	TextFieldItem*   m_search         = nullptr;

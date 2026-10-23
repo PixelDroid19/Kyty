@@ -208,13 +208,23 @@ void GameGridItem::SetCurrentIndex(int index)
 	emit CurrentIndexChanged();
 }
 
+qreal GameGridItem::RowHeight(qreal grid_width) const
+{
+	return MetricsFor(grid_width).cell_height;
+}
+
 GameGridItem::Metrics GameGridItem::LayoutMetrics() const
+{
+	return MetricsFor(width());
+}
+
+GameGridItem::Metrics GameGridItem::MetricsFor(qreal grid_width) const
 {
 	const qreal u       = Theme::Instance()->U();
 	const qreal padding = TILE_PADDING * u;
 	Metrics     metrics;
-	metrics.columns     = std::max(1, static_cast<int>(std::floor(width() / (m_min_tile * u + padding))));
-	metrics.cell_width  = std::floor(width() / metrics.columns);
+	metrics.columns     = std::max(1, static_cast<int>(std::floor(grid_width / (m_min_tile * u + padding))));
+	metrics.cell_width  = std::floor(grid_width / metrics.columns);
 	metrics.tile        = std::max<qreal>(0, metrics.cell_width - padding);
 	metrics.cell_height = metrics.tile + (m_titles ? LABEL_ROOM : BARE_ROOM) * u;
 	return metrics;

@@ -157,6 +157,8 @@ public:
 	QString basedir;    /* Game base directory */
 	QString param_file; /* Path to param.sfo / param.json */
 	qint64  last_run = 0; /* Milliseconds since epoch of the last run, 0 when never run */
+	qint64  play_time       = 0; /* Seconds the game has run when started from the library */
+	bool    favorite        = false;
 	bool    custom_settings = false; /* False runs the game with the global emulator settings */
 
 	// Screen / window
@@ -204,6 +206,8 @@ public:
 		KYTY_CFG_SET(basedir);
 		KYTY_CFG_SET(param_file);
 		s->setValue("last_run", last_run);
+		s->setValue("play_time", play_time);
+		s->setValue("favorite", favorite);
 		s->setValue("custom_settings", custom_settings);
 		s->setValue("screen_width", screen_width);
 		s->setValue("screen_height", screen_height);
@@ -240,6 +244,8 @@ public:
 		KYTY_CFG_GET(name);
 		folder   = s->value("folder").toString();
 		last_run = s->value("last_run", 0).toLongLong();
+		play_time       = s->value("play_time", 0).toLongLong();
+		favorite        = s->value("favorite", false).toBool();
 		custom_settings = s->value("custom_settings", false).toBool();
 		KYTY_CFG_GET(basedir);
 		KYTY_CFG_GET(param_file);

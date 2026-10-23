@@ -62,6 +62,7 @@ private:
 	void ReportGameFinished(const QString& message);
 	void ReportFolderImported(int added, int found, const QString& error);
 	void RestoreGeometry();
+	void                      ApplyWindowMode();
 
 	Page              m_page    = Page::Library;
 	bool              m_running = false;
@@ -69,6 +70,8 @@ private:
 	bool m_rebuild_pending = false;
 	// Visibility to return to when the game closes, so a maximized launcher comes back maximized.
 	Visibility        m_restore = Windowed;
+	// The window_mode setting last applied.
+	QString           m_window_mode;
 	BackgroundItem*   m_background = nullptr;
 	GameBackdropItem* m_backdrop = nullptr;
 	SidebarItem*      m_sidebar  = nullptr;

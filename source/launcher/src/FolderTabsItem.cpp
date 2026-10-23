@@ -87,12 +87,31 @@ void FolderTabsItem::SetFolders(const QVariantList& folders)
 	{
 		return;
 	}
-	m_folders = folders;
-	if (m_current >= m_folders.size())
+	// The same tab stays current when tabs come or go before it; names and counts change, the rest names a tab.
+	auto identity = [](const QVariant& folder)
 	{
-		SetCurrentIndex(0);
+		auto map = folder.toMap();
+		map.remove("title");
+		map.remove("count");
+		return map;
+	};
+	const auto current = identity(m_folders.value(m_current));
+	m_folders          = folders;
+	int index          = 0;
+	for (int i = 0; i < m_folders.size(); i++)
+	{
+		if (identity(m_folders.at(i)) == current)
+		{
+			index = i;
+		}
 	}
+	const bool moved = index != m_current;
+	m_current        = index;
 	Layout();
+	if (moved)
+	{
+		emit CurrentIndexChanged();
+	}
 }
 
 void FolderTabsItem::SetCurrentIndex(int index)

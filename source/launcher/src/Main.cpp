@@ -54,7 +54,8 @@ int main(int argc, char* argv[])
 	    &window, &QQuickWindow::sceneGraphError, &app,
 	    [](QQuickWindow::SceneGraphError /*kind*/, const QString& message) { RestartOnCpuRenderer(message); }, Qt::QueuedConnection);
 	backend.AttachWindow(&window);
-	window.show();
+	// show() would reset the maximized or full screen state the window chose for itself.
+	window.setVisible(true);
 
 	return QApplication::exec();
 }
