@@ -51,9 +51,10 @@ record. Titles are named descriptively only (`AGENTS.md`).
     Otherwise the handler records the address (`context_deferred_rip`) and
     arms a one-shot 100 µs per-thread timer that sends the signal again.
   - Declared safe waits: guest semaphores, event flags, event queues, POSIX
-    semaphores, condition variables (wait, signal and broadcast), contended
-    mutex and rwlock acquisitions, address waits, static-initialisation
-    waits, sleeps, joins, blocking socket calls and the socket-close drain.
+    semaphores, condition-variable sleeps and the mutex reacquisition after
+    them, contended mutex and rwlock acquisitions, address waits,
+    static-initialisation waits, sleeps, joins, blocking socket calls and
+    the socket-close drain.
   - On Linux `Core::CondVar` sleeps on a sequence word that every signal
     advances, so a signal never waits for a waiter. glibc's condition
     variable before 2.41 can make a signal wait until earlier waiters drop
@@ -62,6 +63,20 @@ record. Titles are named descriptively only (`AGENTS.md`).
     static-initialisation and once waits and the socket and epoll close
     drains moved from `std::condition_variable` to `Core::CondVar`; an
     address wake signals at most the registered waiters.
+  - Guest condition variables no longer use glibc's either. Each one has a
+    state with a `Core::Mutex`, a `Core::CondVar` and a generation that
+    every signal advances under that lock. A signal therefore wakes only
+    threads that were already waiting, never waits for a waiter, and takes
+    no lock when nobody waits. The lock is never held across a sleep, so no
+    stopped thread holds it.
+  - Waiters keep the state through a `shared_ptr`. Destroying a condition
+    right after a broadcast, which POSIX allows, frees nothing the woken
+    threads still use, so destroy returns at once. Destroying one that still
+    has blocked waiters is undefined; glibc's destroy blocked on them for
+    good.
+  - Timed waits read the condition's clock between sleeps. The monotonic
+    clock therefore works on every host, and the host `pthread_condattr_t`
+    is gone.
   - Requests coalesce: one raised while another is pending or running is
     answered by that delivery, or by a new delivery right after the handler
     returns. A request for a created thread that has not started is
@@ -102,6 +117,22 @@ record. Titles are named descriptively only (`AGENTS.md`).
     runs it on Ubuntu 24.04 (glibc 2.39). Emulator unit suite 2450 passed;
     the fishing title was interactive at 60 fps after 45 s and the four
     IL2CPP titles ran 45 s each with no stop.
+  - Guest condition variables:
+    - `GuestConditionSignalDoesNotWaitForStoppedWaiter` runs the same
+      sequence on guest conditions, with the collector's signal coming from
+      another thread. It passed 20 of 20 repeats.
+    - The recursive-mutex wait and timeout tests pass, and the emulator
+      unit suite passed 2451 tests.
+    - Strict 45 s runs at the 60 fps limit, none of which stopped:
+
+      | Title | Frames | fps |
+      | --- | --- | --- |
+      | Fishing title | 1293 | 60 |
+      | Insect platformer sequel | 1338 | 60 |
+      | 2D Unity action title | 1229 | 43.8 |
+
+      The 2D Unity action title's fps is a point sample. Earlier runs of the
+      same build read 45-60 at the same frame count.
 - **Open.**
   - Host locks held across guest code: the module linker's mutex during
     module initialisation and finalisation, the NGS2 dispatch mutex during
@@ -113,10 +144,6 @@ record. Titles are named descriptively only (`AGENTS.md`).
     labels, fibers, audio sleeps and `poll`. A request to a thread blocked
     there waits until the thread returns to guest code. GPU idle waits run
     under the submission admission mutex, so they cannot simply be declared.
-  - Guest condition variables still use glibc's. Before glibc 2.41 a guest
-    signal that waits for a stopped waiter is a safe point, so another
-    thread's signal cannot hold up a collection, but a signal from the
-    collecting thread would wait for a thread it stopped itself.
   - Code generated at run time is not in the guest code table.
 
 ## Transient snapshots shared by a command pool's command buffers (2026-10-23)

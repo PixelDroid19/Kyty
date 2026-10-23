@@ -1,15 +1,16 @@
 #ifndef EMULATOR_SRC_KERNEL_PTHREADINTERNAL_H_
 #define EMULATOR_SRC_KERNEL_PTHREADINTERNAL_H_
 
-#include "Emulator/Kernel/Pthread.h"
-
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Vector.h"
 
+#include "Emulator/Kernel/Pthread.h"
+
 #include <atomic>
 #include <ctime>
+#include <memory>
 #include <mutex>
 
 #ifdef KYTY_EMU_ENABLED
@@ -152,17 +153,32 @@ struct PthreadRwlockattrPrivate
 
 struct PthreadCondattrPrivate
 {
-	uint8_t            reserved[64];
-	KernelClockid      clock_id = 0;
-	pthread_condattr_t p;
+	uint8_t       reserved[64];
+	KernelClockid clock_id = 0;
+};
+
+// Each signal advances the generation under the lock, so it wakes only threads
+// that were already waiting, and it never waits for a waiter to leave. glibc's
+// condition variable before 2.41 can, which deadlocks a collector that signals
+// a thread it stopped inside the wait.
+struct PthreadCondState
+{
+	Core::Mutex   lock;
+	Core::CondVar cv;
+	uint64_t      generation = 0;
+	// Changed under the lock while the waiter still holds the guest mutex, so a
+	// signal sent after that mutex is released can skip the lock when it is 0.
+	std::atomic<uint32_t> waiters {0};
 };
 
 struct PthreadCondPrivate
 {
-	uint8_t        reserved[256];
-	String         name;
-	KernelClockid  clock_id = 0;
-	pthread_cond_t p;
+	uint8_t       reserved[256];
+	String        name;
+	KernelClockid clock_id = 0;
+	// Waiters hold the state, so destroying the condition right after a
+	// broadcast frees nothing that the woken threads still use.
+	std::shared_ptr<PthreadCondState> state = std::make_shared<PthreadCondState>();
 };
 
 struct PthreadStaticObject

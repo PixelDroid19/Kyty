@@ -36,16 +36,9 @@ int KYTY_SYSV_ABI PthreadCondattrDestroy(PthreadCondattr* attr)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_condattr_destroy(&(*attr)->p);
-
 	delete *attr;
 	*attr = nullptr;
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondattrInit(PthreadCondattr* attr)
@@ -58,21 +51,7 @@ int KYTY_SYSV_ABI PthreadCondattrInit(PthreadCondattr* attr)
 	}
 
 	*attr = new PthreadCondattrPrivate {};
-
-	int result = pthread_condattr_init(&(*attr)->p);
-
-	switch (result)
-	{
-		case 0: return OK;
-		case ENOMEM:
-			delete *attr;
-			*attr = nullptr;
-			return KERNEL_ERROR_ENOMEM;
-		default:
-			delete *attr;
-			*attr = nullptr;
-			return KERNEL_ERROR_EINVAL;
-	}
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondattrSetclock(PthreadCondattr* attr, KernelClockid clock_id)
@@ -84,26 +63,12 @@ int KYTY_SYSV_ABI PthreadCondattrSetclock(PthreadCondattr* attr, KernelClockid c
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	// Timed waits read the clock themselves, so every guest clock works.
 	KernelClockSource source {};
 	if (!KernelClockSourceFromId(clock_id, &source))
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	const clockid_t host_clock = source == KernelClockSource::Realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC;
-	if (pthread_condattr_setclock(&(*attr)->p, host_clock) != 0)
-	{
-		return KERNEL_ERROR_EINVAL;
-	}
-#else
-	// Platforms without pthread_condattr_setclock can only represent the
-	// default realtime contract; reject a different guest clock explicitly.
-	if (source != KernelClockSource::Realtime)
-	{
-		return KERNEL_ERROR_EINVAL;
-	}
-#endif
 
 	(*attr)->clock_id = clock_id;
 	return OK;
@@ -451,6 +416,24 @@ static void slot_trace_cond_event(const char* kind, PthreadCond* guest_cond, Pth
 	               g_slot_trace_sig_after_stall.load());
 }
 
+// Wakes one waiter, or all of them, that started waiting before this call.
+static void signal_cond_state(PthreadCondState* state, bool all)
+{
+	if (state->waiters.load() == 0)
+	{
+		return;
+	}
+	Core::LockGuard lock(state->lock);
+	state->generation++;
+	if (all)
+	{
+		state->cv.SignalAll();
+	} else
+	{
+		state->cv.Signal();
+	}
+}
+
 int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 {
 	PRINT_NAME();
@@ -477,19 +460,10 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
 	}
 
-	int result = 0;
-	{
-		PthreadInterruptibleScope any_syscall;
-		result = pthread_cond_broadcast(&(*cond)->p);
-	}
+	signal_cond_state((*cond)->state.get(), true);
 
-	KYTY_LOG_DEBUG("\tcond broadcast: %s, %d\n", (*cond)->name.C_Str(), result);
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	KYTY_LOG_DEBUG("\tcond broadcast: %s\n", (*cond)->name.C_Str());
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondDestroy(PthreadCond* cond)
@@ -506,20 +480,12 @@ int KYTY_SYSV_ABI PthreadCondDestroy(PthreadCond* cond)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_cond_destroy(&(*cond)->p);
+	KYTY_LOG_DEBUG("\tcond destroy: %s\n", (*cond)->name.C_Str());
 
-	KYTY_LOG_DEBUG("\tcond destroy: %s, %d\n", (*cond)->name.C_Str(), result);
-
-	switch (result)
-	{
-		case 0:
-			delete *cond;
-			*cond = nullptr;
-			return OK;
-		case EINVAL: return KERNEL_ERROR_EINVAL;
-		case EBUSY: return KERNEL_ERROR_EBUSY;
-		default: return KERNEL_ERROR_EINVAL;
-	}
+	// Woken waiters still leaving keep their own reference to the state.
+	delete *cond;
+	*cond = nullptr;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr, const char* name)
@@ -543,19 +509,9 @@ int KYTY_SYSV_ABI PthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr
 	created->name     = name;
 	created->clock_id = (*attr)->clock_id;
 
-	int result = pthread_cond_init(&created->p, &(*attr)->p);
-
-	KYTY_LOG_DEBUG("\tcond init: %s, %d\n", created->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\tcond init: %s\n", created->name.C_Str());
 	__atomic_store_n(cond, created, __ATOMIC_RELEASE);
-
-	switch (result)
-	{
-		case 0: return OK;
-		case EAGAIN: return KERNEL_ERROR_EAGAIN;
-		case EINVAL: return KERNEL_ERROR_EINVAL;
-		case ENOMEM: return KERNEL_ERROR_ENOMEM;
-		default: return KERNEL_ERROR_EINVAL;
-	}
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
@@ -586,19 +542,8 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
 	}
 
-	int result = 0;
-	{
-		PthreadInterruptibleScope any_syscall;
-		result = pthread_cond_signal(&(*cond)->p);
-	}
-
-	// KYTY_LOG_DEBUG("\tcond signal: %s, %d\n", (*cond)->name.C_Str(), result);
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	signal_cond_state((*cond)->state.get(), false);
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread)
@@ -676,31 +621,66 @@ static int resolve_cond_wait(PthreadCond* cond, PthreadMutex* mutex, ResolvedCon
 	return OK;
 }
 
-static int wait_on_resolved_cond(const ResolvedCondWait& resolved, const timespec& deadline)
+// Microseconds until the deadline on the condition's clock, rounded up so a
+// wait never ends early; 0 once it has passed. A far deadline takes several
+// sleeps.
+static uint32_t micros_until(KernelClockid clock_id, const timespec& deadline)
+{
+	constexpr int64_t kLongestSleepSeconds = UINT32_MAX / 1000000;
+
+	KernelTimespec now {};
+	EXIT_IF(KernelClockGettime(clock_id, &now) != OK);
+	const int64_t seconds = static_cast<int64_t>(deadline.tv_sec) - now.tv_sec;
+	if (seconds >= kLongestSleepSeconds)
+	{
+		return UINT32_MAX;
+	}
+	const int64_t nanos = seconds * 1000000000 + (static_cast<int64_t>(deadline.tv_nsec) - now.tv_nsec);
+	return nanos <= 0 ? 0 : static_cast<uint32_t>((nanos + 999) / 1000);
+}
+
+// Releases the guest mutex, waits for a signal sent after this call started or
+// for the deadline (null waits indefinitely), and takes the mutex again. The
+// state is held by value: the condition may be destroyed once this wait wakes.
+static int wait_for_signal(std::shared_ptr<PthreadCondState> state, KernelClockid clock_id, PthreadMutexPrivate* mutex,
+                           const timespec* deadline)
 {
 	uint32_t recursion_count = 0;
-	int      result          = pthread_cond_release_mutex_state(resolved.mutex, &recursion_count);
-	if (result == 0)
+	if (pthread_cond_release_mutex_state(mutex, &recursion_count) != 0)
 	{
-		{
-			// Waking up retakes the guest mutex, which another stopped guest
-			// thread may hold, so that is a safe point as well as the sleep.
-			PthreadInterruptibleScope any_syscall;
-			result = pthread_cond_timedwait(&resolved.cond->p, &resolved.mutex->p, &deadline);
-		}
-		// Condition waits reacquire the native mutex on success and timeout. Other
-		// validation errors leave it unchanged, so guest ownership is restored on every return.
-		pthread_cond_restore_mutex_state(resolved.mutex, recursion_count);
+		return KERNEL_ERROR_EPERM;
 	}
 
-	switch (result)
+	int result = OK;
+	state->lock.Lock();
+	const uint64_t generation = state->generation;
+	state->waiters.fetch_add(1);
+	EXIT_IF(pthread_mutex_unlock(&mutex->p) != 0);
+	while (state->generation == generation)
 	{
-		case 0: return OK;
-		case ETIMEDOUT: return KERNEL_ERROR_ETIMEDOUT;
-		case EPERM: return KERNEL_ERROR_EPERM;
-		case EINVAL:
-		default: return KERNEL_ERROR_EINVAL;
+		if (deadline == nullptr)
+		{
+			PthreadInterruptibleWait(&state->cv, &state->lock);
+			continue;
+		}
+		const uint32_t micros = micros_until(clock_id, *deadline);
+		if (micros == 0)
+		{
+			result = KERNEL_ERROR_ETIMEDOUT;
+			break;
+		}
+		(void)PthreadInterruptibleWaitFor(&state->cv, &state->lock, micros);
 	}
+	state->waiters.fetch_sub(1);
+	state->lock.Unlock();
+
+	{
+		// Another guest thread, possibly a stopped one, may hold the mutex.
+		PthreadInterruptibleScope lock_wait(&mutex->p, sizeof(mutex->p));
+		EXIT_IF(pthread_mutex_lock(&mutex->p) != 0);
+	}
+	pthread_cond_restore_mutex_state(mutex, recursion_count);
+	return result;
 }
 
 int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, KernelUseconds usec)
@@ -721,7 +701,7 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, K
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	return wait_on_resolved_cond(resolved, deadline);
+	return wait_for_signal(resolved.cond->state, resolved.cond->clock_id, resolved.mutex, &deadline);
 }
 
 int KYTY_SYSV_ABI PthreadCondTimedwaitAbsolute(PthreadCond* cond, PthreadMutex* mutex, const KernelTimespec* abstime)
@@ -742,7 +722,7 @@ int KYTY_SYSV_ABI PthreadCondTimedwaitAbsolute(PthreadCond* cond, PthreadMutex* 
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	return wait_on_resolved_cond(resolved, deadline);
+	return wait_for_signal(resolved.cond->state, resolved.cond->clock_id, resolved.mutex, &deadline);
 }
 
 namespace {
@@ -845,29 +825,10 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 		waiter_slot = slot_trace_register_waiter(cond_addr, mutex_addr, ret_addr, cond_h, mutex_h);
 	}
 
-	auto*    private_mutex   = *mutex;
-	uint32_t recursion_count = 0;
-	int      result          = pthread_cond_release_mutex_state(private_mutex, &recursion_count);
-	if (result == 0)
-	{
-		{
-			PthreadInterruptibleScope any_syscall;
-			result = pthread_cond_wait(&(*cond)->p, &private_mutex->p);
-		}
-		pthread_cond_restore_mutex_state(private_mutex, recursion_count);
-	}
+	const int result = wait_for_signal((*cond)->state, (*cond)->clock_id, *mutex, nullptr);
 
 	slot_trace_unregister_waiter(waiter_slot);
-
-	// KYTY_LOG_DEBUG("\tcond wait: %s, %d\n", (*cond)->name.C_Str(), result);
-
-	switch (result)
-	{
-		case 0: return OK;
-		case EPERM: return KERNEL_ERROR_EPERM;
-		case EINVAL:
-		default: return KERNEL_ERROR_EINVAL;
-	}
+	return result;
 }
 
 } // namespace Kyty::Kernel

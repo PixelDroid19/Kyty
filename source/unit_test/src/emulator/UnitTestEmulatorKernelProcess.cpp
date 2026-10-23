@@ -404,6 +404,32 @@ void* KYTY_SYSV_ABI RunConditionWaiter(void* arg)
 	return nullptr;
 }
 
+struct StoppedGuestWaiterTarget
+{
+	Kernel::PthreadMutex  mutex = nullptr;
+	Kernel::PthreadCond   cond  = nullptr;
+	bool                  done  = false;
+	std::atomic<uint32_t> calls {0};
+	std::atomic_bool      hold {true};
+};
+
+// Waits on the guest condition, a safe point, until done.
+void* KYTY_SYSV_ABI RunGuestConditionWaiter(void* arg)
+{
+	auto* target            = static_cast<StoppedGuestWaiterTarget*>(arg);
+	t_context_handler_calls = &target->calls;
+	t_context_hold          = &target->hold;
+	EXPECT_EQ(Kernel::PthreadMutexLock(&target->mutex), OK);
+	while (!target->done)
+	{
+		EXPECT_EQ(Kernel::PthreadCondWait(&target->cond, &target->mutex), OK);
+	}
+	EXPECT_EQ(Kernel::PthreadMutexUnlock(&target->mutex), OK);
+	t_context_handler_calls = nullptr;
+	t_context_hold          = nullptr;
+	return nullptr;
+}
+
 bool WaitForContextCalls(const std::atomic<uint32_t>& calls, uint32_t expected)
 {
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -575,6 +601,56 @@ TEST(EmulatorKernelProcess, ConditionSignalDoesNotWaitForStoppedWaiter)
 	second.join();
 	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
 	EXPECT_EQ(target.calls.load(), 1u);
+}
+
+// The same holds for guest condition variables, which a collector may signal
+// while it keeps their waiters stopped.
+TEST(EmulatorKernelProcess, GuestConditionSignalDoesNotWaitForStoppedWaiter)
+{
+	EnsureKernelProcessSubsystems();
+	ASSERT_TRUE(InstallCountContextHandler());
+	ScopedContextRuntimePort port;
+
+	StoppedGuestWaiterTarget target;
+	ASSERT_EQ(Kernel::PthreadMutexInit(&target.mutex, nullptr, nullptr), OK);
+	ASSERT_EQ(Kernel::PthreadCondInit(&target.cond, nullptr, nullptr), OK);
+	Kernel::Pthread thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, RunGuestConditionWaiter, &target, "guest-condition-waiter"), OK);
+	ASSERT_EQ(LibKernel::KernelRaiseException(thread, 30), OK);
+	EXPECT_TRUE(WaitForContextCalls(target.calls, 1));
+
+	// The first signal goes to the stopped waiter; a second waiter then joins.
+	EXPECT_EQ(Kernel::PthreadCondSignal(&target.cond), OK);
+	std::atomic_bool second_waiting {false};
+	std::thread      second(
+	    [&target, &second_waiting]()
+	    {
+		    EXPECT_EQ(Kernel::PthreadMutexLock(&target.mutex), OK);
+		    second_waiting.store(true, std::memory_order_release);
+		    (void)Kernel::PthreadCondTimedwait(&target.cond, &target.mutex, 5'000'000);
+		    EXPECT_EQ(Kernel::PthreadMutexUnlock(&target.mutex), OK);
+	    });
+	while (!second_waiting.load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+	// Taking the mutex proves the second waiter released it inside its wait.
+	EXPECT_EQ(Kernel::PthreadMutexLock(&target.mutex), OK);
+	EXPECT_EQ(Kernel::PthreadMutexUnlock(&target.mutex), OK);
+	auto signal = std::async(std::launch::async, [&target]() { return Kernel::PthreadCondSignal(&target.cond); });
+	EXPECT_EQ(signal.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+
+	target.hold.store(false, std::memory_order_release);
+	EXPECT_EQ(signal.get(), OK);
+	EXPECT_EQ(Kernel::PthreadMutexLock(&target.mutex), OK);
+	target.done = true;
+	EXPECT_EQ(Kernel::PthreadMutexUnlock(&target.mutex), OK);
+	EXPECT_EQ(Kernel::PthreadCondBroadcast(&target.cond), OK);
+	second.join();
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(target.calls.load(), 1u);
+	EXPECT_EQ(Kernel::PthreadCondDestroy(&target.cond), OK);
+	EXPECT_EQ(Kernel::PthreadMutexDestroy(&target.mutex), OK);
 }
 #endif
 
