@@ -152,6 +152,11 @@ QFont SceneMonospaceFont(qreal pixel_size)
 	return font;
 }
 
+qreal LineHeight(const QFont& font)
+{
+	return std::ceil(QFontMetricsF(font).height());
+}
+
 qreal TextWidth(const QString& text, const QFont& font)
 {
 	return QFontMetricsF(font).horizontalAdvance(text);
@@ -171,6 +176,10 @@ void AddLine(QSGTextNode* node, const QString& text, const QFont& font, const QC
 		return;
 	}
 	QTextLayout layout(QFontMetricsF(font).elidedText(text, Qt::ElideRight, width), font);
+	// A text exactly as wide as width must not wrap its last word away.
+	QTextOption option;
+	option.setWrapMode(QTextOption::NoWrap);
+	layout.setTextOption(option);
 	layout.beginLayout();
 	QTextLine line = layout.createLine();
 	line.setLineWidth(width);

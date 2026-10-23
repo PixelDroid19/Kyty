@@ -92,6 +92,9 @@ QFont SceneFont(qreal pixel_size, QFont::Weight weight = QFont::Normal);
 // The same, in the platform's fixed-width family.
 QFont SceneMonospaceFont(qreal pixel_size);
 
+// Height of one line of font, rounded up to whole pixels.
+qreal LineHeight(const QFont& font);
+
 // Width of text set on one line in font.
 qreal TextWidth(const QString& text, const QFont& font);
 

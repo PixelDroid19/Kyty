@@ -30,6 +30,9 @@ public:
 	void SetText(const QString& text);
 	// From now on only whole numbers of at most max_digits digits are accepted.
 	void SetDigitsOnly(int max_digits) { m_max_digits = max_digits; }
+	// Without a frame the field draws only its text, from its left edge, for a page that draws its own frame.
+	void SetFramed(bool framed);
+	void SelectAll();
 
 	// Whether text is empty or a whole number of at most max_digits digits.
 	[[nodiscard]] static bool IsNumberText(const QString& text, int max_digits);
@@ -73,6 +76,7 @@ private:
 	int         m_cursor         = 0;
 	int         m_anchor         = 0;
 	int         m_max_digits     = 0;
+	bool        m_framed         = true;
 	qreal       m_scroll         = 0;
 	bool        m_cursor_shown   = true;
 	QTextLayout m_layout;

@@ -32,11 +32,6 @@ enum Button
 	Back
 };
 
-qreal LineHeight(const QFont& font)
-{
-	return std::ceil(QFontMetricsF(font).height());
-}
-
 } // namespace
 
 SettingsPageItem::SettingsPageItem(QQuickItem* parent): PageItem(MAX_WIDTH, TOP, SPACING, parent)

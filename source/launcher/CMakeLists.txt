@@ -7,14 +7,9 @@ file(GLOB launcher_src
 	"src/*.cpp"
 )
 
-file(GLOB launcher_qml RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-	"qml/*.qml"
-	"qml/*.js"
-)
-
-file(GLOB launcher_icons RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-	"qml/icons/*.svg"
-	"qml/kit/*.svg"
+file(GLOB launcher_assets RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+	"assets/icons/*.svg"
+	"assets/kit/*.svg"
 )
 
 set(launcher_ts "ts/launcher_ru_RU.ts")
@@ -25,14 +20,9 @@ add_executable(launcher WIN32 MACOSX_BUNDLE
 )
 set_target_properties(launcher PROPERTIES AUTOMOC ON AUTORCC ON)
 
-qt_policy(SET QTP0001 NEW)
-qt_policy(SET QTP0004 OLD)
-
-qt_add_qml_module(launcher
-	URI Kyty.Launcher
-	VERSION 1.0
-	QML_FILES ${launcher_qml}
-	RESOURCES ${launcher_icons}
+qt_add_resources(launcher "launcher_assets"
+	PREFIX "/"
+	FILES ${launcher_assets}
 )
 
 target_link_libraries(launcher PRIVATE Qt6::Quick Qt6::Widgets SDL3-static)
@@ -70,7 +60,6 @@ if(WIN32)
                 --no-opengl
                 --no-opengl-sw
                 --no-system-d3d-compiler
-                --qmldir \"${CMAKE_CURRENT_SOURCE_DIR}/qml\"
     				--no-translations
     		)
     ")
@@ -91,7 +80,7 @@ elseif(APPLE)
         install(TARGETS launcher BUNDLE DESTINATION .)
         install(CODE "
             execute_process(
-                COMMAND ${QT_MACDEPLOYQT} \"\${CMAKE_INSTALL_PREFIX}/launcher.app\" -verbose=1 -qmldir=\"${CMAKE_CURRENT_SOURCE_DIR}/qml\"
+                COMMAND ${QT_MACDEPLOYQT} \"\${CMAKE_INSTALL_PREFIX}/launcher.app\" -verbose=1
             )
         ")
     else()
@@ -106,7 +95,7 @@ else()
     install(TARGETS launcher DESTINATION .)
 endif()
 
-qt6_create_translation(QM_FILES ${launcher_src} ${launcher_qml} ${launcher_ts} OPTIONS -I ${CMAKE_SOURCE_DIR}/launcher/include)
+qt6_create_translation(QM_FILES ${launcher_src} ${launcher_ts} OPTIONS -I ${CMAKE_SOURCE_DIR}/launcher/include)
 
 set(tidy_dirs "${CMAKE_SOURCE_DIR}/launcher/include")
 set(iwyu_maps "${CMAKE_SOURCE_DIR}/launcher/utils/qt5_15.imp")

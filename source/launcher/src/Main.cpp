@@ -1,12 +1,10 @@
 #include "ArtworkProvider.h"
 #include "LauncherBackend.h"
+#include "LauncherWindow.h"
 #include "Theme.h"
 
 #include <QApplication>
 #include <QProcess>
-#include <QQmlApplicationEngine>
-#include <QQmlContext>
-#include <QQuickWindow>
 
 // Set to "software" by the restart below; Qt Quick reads it to pick its CPU renderer.
 constexpr char BACKEND_VARIABLE[] = "QT_QUICK_BACKEND";
@@ -50,22 +48,13 @@ int main(int argc, char* argv[])
 	ArtworkLoader   artwork;
 	LauncherBackend backend;
 
-	QQmlApplicationEngine engine;
-	engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
-	engine.loadFromModule("Kyty.Launcher", "Main");
-	if (engine.rootObjects().isEmpty())
-	{
-		return 1;
-	}
-
-	if (auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().first()))
-	{
-		// Connected before the window is first exposed, which is when the renderer starts.
-		QObject::connect(
-		    window, &QQuickWindow::sceneGraphError, &app,
-		    [](QQuickWindow::SceneGraphError /*kind*/, const QString& message) { RestartOnCpuRenderer(message); }, Qt::QueuedConnection);
-		backend.AttachWindow(window);
-	}
+	LauncherWindow window;
+	// Connected before the window is first exposed, which is when the renderer starts.
+	QObject::connect(
+	    &window, &QQuickWindow::sceneGraphError, &app,
+	    [](QQuickWindow::SceneGraphError /*kind*/, const QString& message) { RestartOnCpuRenderer(message); }, Qt::QueuedConnection);
+	backend.AttachWindow(&window);
+	window.show();
 
 	return QApplication::exec();
 }

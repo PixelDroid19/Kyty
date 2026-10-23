@@ -43,11 +43,11 @@ struct Entry
 
 // In keyboard order, top to bottom.
 const Entry ENTRIES[] = {
-    {"library", ":/qt/qml/Kyty/Launcher/qml/icons/library.svg", QT_TRANSLATE_NOOP("SidebarItem", "Library"), Group::Top, 0},
-    {nullptr, ":/qt/qml/Kyty/Launcher/qml/icons/add.svg", QT_TRANSLATE_NOOP("SidebarItem", "Add game"), Group::Top, 1},
-    {"settings", ":/qt/qml/Kyty/Launcher/qml/icons/settings.svg", QT_TRANSLATE_NOOP("SidebarItem", "Settings"), Group::Top, 2},
-    {"about", ":/qt/qml/Kyty/Launcher/qml/icons/info.svg", QT_TRANSLATE_NOOP("SidebarItem", "About and controls"), Group::Bottom, 0},
-    {nullptr, ":/qt/qml/Kyty/Launcher/qml/icons/power.svg", QT_TRANSLATE_NOOP("SidebarItem", "Quit"), Group::Bottom, 1},
+    {"library", ":/assets/icons/library.svg", QT_TRANSLATE_NOOP("SidebarItem", "Library"), Group::Top, 0},
+    {nullptr, ":/assets/icons/add.svg", QT_TRANSLATE_NOOP("SidebarItem", "Add game"), Group::Top, 1},
+    {"settings", ":/assets/icons/settings.svg", QT_TRANSLATE_NOOP("SidebarItem", "Settings"), Group::Top, 2},
+    {"about", ":/assets/icons/info.svg", QT_TRANSLATE_NOOP("SidebarItem", "About and controls"), Group::Bottom, 0},
+    {nullptr, ":/assets/icons/power.svg", QT_TRANSLATE_NOOP("SidebarItem", "Quit"), Group::Bottom, 1},
 };
 constexpr int ENTRY_COUNT    = static_cast<int>(std::size(ENTRIES));
 constexpr int BOTTOM_ENTRIES = 2;

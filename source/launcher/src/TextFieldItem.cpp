@@ -110,6 +110,19 @@ void TextFieldItem::Relayout()
 	CursorMoved();
 }
 
+void TextFieldItem::SetFramed(bool framed)
+{
+	m_framed = framed;
+	CursorMoved();
+}
+
+void TextFieldItem::SelectAll()
+{
+	m_anchor = 0;
+	m_cursor = static_cast<int>(m_text.size());
+	CursorMoved();
+}
+
 bool TextFieldItem::IsNumberText(const QString& text, int max_digits)
 {
 	return text.size() <= max_digits && std::all_of(text.begin(), text.end(), [](QChar c) { return c >= '0' && c <= '9'; });
@@ -128,7 +141,7 @@ QString TextFieldItem::SelectedText() const
 
 QRectF TextFieldItem::InnerRect() const
 {
-	const qreal inset = INSET * Theme::Instance()->U();
+	const qreal inset = m_framed ? INSET * Theme::Instance()->U() : 0;
 	return {inset, 0, std::max<qreal>(0, width() - 2 * inset), height()};
 }
 
@@ -271,9 +284,7 @@ bool TextFieldItem::EditKey(QKeyEvent* event)
 	}
 	if (event->matches(QKeySequence::SelectAll))
 	{
-		m_anchor = 0;
-		m_cursor = length;
-		CursorMoved();
+		SelectAll();
 		return true;
 	}
 	if (event->matches(QKeySequence::Copy) || event->matches(QKeySequence::Cut))
@@ -431,7 +442,8 @@ QSGNode* TextFieldItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
 	style.border_width = focused ? RING_WIDTH * u : 1;
 	style.radius       = RADIUS * u;
 	style.dpr          = window()->effectiveDevicePixelRatio();
-	node->box->Update(window(), boundingRect(), style);
+	// An empty rectangle hides the box.
+	node->box->Update(window(), m_framed ? boundingRect() : QRectF(), style);
 
 	const auto inner = InnerRect();
 	node->clip->SetRect(inner.adjusted(-CursorWidth(), 0, CursorWidth(), 0));

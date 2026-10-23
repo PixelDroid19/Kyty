@@ -51,11 +51,6 @@ constexpr int COLUMNS = 4;
 // The action column is a little wider than the others.
 constexpr qreal COLUMN_WEIGHTS[COLUMNS] = {210, 190, 190, 190};
 
-qreal LineHeight(const QFont& font)
-{
-	return std::ceil(QFontMetricsF(font).height());
-}
-
 } // namespace
 
 AboutPageItem::AboutPageItem(QQuickItem* parent): PageItem(MAX_WIDTH, TOP, SPACING, parent)
