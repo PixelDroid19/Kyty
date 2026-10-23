@@ -5,7 +5,6 @@
 #include "Kyty/Core/LinkList.h"
 #include "Kyty/Core/Threads.h"
 
-#include "Emulator/Graphics/AsyncJob.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GpuSubmissionCoordinator.h"
@@ -527,7 +526,7 @@ private:
 class GraphicsRing
 {
 public:
-	GraphicsRing(): m_job1("Thread_Gfx_Draw"), m_job2("Thread_Gfx_Const") { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
+	GraphicsRing() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~GraphicsRing() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(GraphicsRing);
@@ -614,9 +613,6 @@ private:
 	Core::List<CmdBatch> m_cmd_batches;
 	bool                 m_done = true;
 	bool                 m_idle = true;
-
-	AsyncJob m_job1;
-	AsyncJob m_job2;
 
 	CommandProcessor* m_cp = nullptr;
 };

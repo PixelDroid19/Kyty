@@ -10,7 +10,6 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
-#include "Emulator/Graphics/AsyncJob.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GpuSubmissionPublicationGate.h"
@@ -1619,19 +1618,18 @@ void GraphicsRing::ThreadBatchRun(void* data)
 
 			struct ScheduledStream
 			{
-				AsyncJob*                      job       = nullptr;
 				CmdBuffer                      command;
 				CommandProcessor::SuspendedRun suspended;
 				bool                           blocked   = false;
 				bool                           completed = false;
 			};
 
-			ScheduledStream constant {&ring->m_job1, buf.const_buffer};
-			ScheduledStream draw {&ring->m_job2, buf.draw_buffer};
+			ScheduledStream constant {buf.const_buffer};
+			ScheduledStream draw {buf.draw_buffer};
 
 			auto run_ready_stream = [&](ScheduledStream* stream)
 			{
-				EXIT_IF(stream == nullptr || stream->job == nullptr);
+				EXIT_IF(stream == nullptr);
 				if (stream->completed)
 				{
 					return false;
@@ -1648,10 +1646,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 					stream->blocked        = false;
 				}
 
-				const auto command = stream->command;
-				stream->job->Execute(
-				    [cp, command](void* /*unused*/) { cp->Run(command.data, command.num_dw, command.source_data); });
-				stream->job->Wait();
+				cp->Run(stream->command.data, stream->command.num_dw, stream->command.source_data);
 				stream->command.source_data = nullptr;
 
 				if (cp->TakeSuspendedRun(&stream->suspended))

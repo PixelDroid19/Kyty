@@ -13,6 +13,7 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Log.h"
+#include "Emulator/Profiler.h"
 
 #include <atomic>
 #include <cinttypes>
