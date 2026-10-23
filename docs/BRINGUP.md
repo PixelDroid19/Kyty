@@ -72,6 +72,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [Survival title](titles/survival.md)
   - Survival title: hosting an offline world (2026-10-15, open)
 - [Fishing title](titles/fishing.md)
+  - Fishing title: gray rectangles behind the first dialogue portrait (2026-10-23, checked)
   - Fishing title: command-processor CPU costs (2026-10-14, partly fixed)
 - [Racing title](titles/racing.md)
   - Racing title on AMD: corruption from a degraded GPU, not from code (2026-10-17)
