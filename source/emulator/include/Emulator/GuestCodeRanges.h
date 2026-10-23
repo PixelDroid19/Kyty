@@ -9,9 +9,10 @@
 
 #ifdef KYTY_EMU_ENABLED
 
-// Executable segments of the loaded guest programs. The loader records them;
-// Contains() takes no lock and is async-signal-safe, so a signal handler can
-// tell whether an interrupted instruction is guest code rather than host code.
+// Executable guest memory: segments of the loaded programs and mappings the kernel
+// makes executable. Add and Remove take a lock; Contains() takes none and is
+// async-signal-safe, so a signal handler can tell whether an interrupted
+// instruction is guest code rather than host code.
 namespace Kyty::Emulator::GuestCodeRanges {
 
 void               Add(uint64_t begin, uint64_t end) noexcept;

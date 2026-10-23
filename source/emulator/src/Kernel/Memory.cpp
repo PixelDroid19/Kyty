@@ -9,6 +9,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/GuestCodeRanges.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Log.h"
@@ -159,6 +160,30 @@ static void remove_protection_blocks(std::vector<MemoryProtectionBlock>* blocks,
 	*blocks = std::move(updated);
 }
 
+// Keeps the guest code set in step with the protection just applied to
+// [address, address + size). Called only after the host change succeeded, so a
+// failed change records nothing.
+static void update_guest_code_ranges(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
+{
+	if (VirtualMemory::IsExecute(mode))
+	{
+		Emulator::GuestCodeRanges::Add(address, address + size);
+	} else
+	{
+		Emulator::GuestCodeRanges::Remove(address, address + size);
+	}
+}
+
+// A host free or decommit that fails leaves the mapping live, so the guest code
+// entries removed before it go back.
+static void restore_guest_code_ranges(uint64_t address, uint64_t size, VirtualMemory::Mode mode)
+{
+	if (VirtualMemory::IsExecute(mode))
+	{
+		Emulator::GuestCodeRanges::Add(address, address + size);
+	}
+}
+
 KernelGpuMappingPromotionStatus KernelPromoteGpuMappingRange(uint64_t mapping_addr, uint64_t mapping_size, uint64_t protected_addr,
                                                              uint64_t protected_size, KernelGpuMappingAccessMode requested_mode,
                                                              KernelGpuMappingAccessMode* cleanup_mode)
@@ -219,6 +244,7 @@ public:
 	{
 		for (const auto& mapping: m_mapped)
 		{
+			Emulator::GuestCodeRanges::Remove(mapping.map_vaddr, mapping.map_vaddr + mapping.map_size);
 			(void)VirtualMemory::FreeRange(mapping.map_vaddr, mapping.map_size);
 		}
 		VirtualMemory::DestroySharedBacking(m_backing);
@@ -381,6 +407,7 @@ public:
 	{
 		for (const auto& mapping: m_allocated)
 		{
+			Emulator::GuestCodeRanges::Remove(mapping.map_vaddr, mapping.map_vaddr + mapping.map_size);
 			(void)VirtualMemory::Free(mapping.map_vaddr);
 		}
 	}
@@ -889,6 +916,7 @@ public:
 		{
 			return Result::Failed;
 		}
+		update_guest_code_ranges(address, size, mode);
 
 		g_physical_memory->m_protections = std::move(physical_protections);
 		g_flexible_memory->m_protections = std::move(flexible_protections);
@@ -1521,6 +1549,11 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 		return 0;
 	}
 
+	if (VirtualMemory::IsExecute(mode))
+	{
+		Emulator::GuestCodeRanges::Add(map_vaddr, map_vaddr + map_size);
+	}
+
 	MappedBlock b {};
 	b.phys_addr        = phys_addr;
 	b.map_vaddr        = map_vaddr;
@@ -1581,8 +1614,10 @@ bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 			const uint64_t map_size  = b.map_size;
 			// A view may be one piece of a host mapping that a partial physical
 			// release split; free exactly its pages.
+			Emulator::GuestCodeRanges::Remove(vaddr, vaddr + size);
 			if (!VirtualMemory::FreeRange(vaddr, size))
 			{
+				restore_guest_code_ranges(vaddr, size, b.mode);
 				b.unmap_pending = false;
 				return false;
 			}
@@ -1682,8 +1717,10 @@ bool PhysicalMemory::CompleteCut(uint64_t vaddr, uint64_t size, uint64_t cut_vad
 		{
 			continue;
 		}
+		Emulator::GuestCodeRanges::Remove(cut_vaddr, cut_vaddr + cut_size);
 		if (!VirtualMemory::FreeRange(cut_vaddr, cut_size))
 		{
+			restore_guest_code_ranges(cut_vaddr, cut_size, b.mode);
 			b.unmap_pending = false;
 			return false;
 		}
@@ -1755,8 +1792,10 @@ bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 		{
 			return false;
 		}
+		Emulator::GuestCodeRanges::Remove(vaddr, vaddr + size);
 		if (!VirtualMemory::DecommitGuestRange(vaddr, size))
 		{
+			restore_guest_code_ranges(vaddr, size, mapping.mode);
 			return false;
 		}
 
@@ -2113,6 +2152,10 @@ bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mo
 	m_allocated.Add(b);
 	m_protections.push_back({vaddr, len, prot, mode});
 	m_allocated_total += len;
+	if (VirtualMemory::IsExecute(mode))
+	{
+		Emulator::GuestCodeRanges::Add(vaddr, vaddr + len);
+	}
 
 	return true;
 }
@@ -2167,8 +2210,10 @@ bool FlexibleMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 	{
 		if (b.map_vaddr == vaddr && b.map_size == size && b.unmap_pending)
 		{
+			Emulator::GuestCodeRanges::Remove(vaddr, vaddr + size);
 			if (!VirtualMemory::Free(vaddr))
 			{
+				restore_guest_code_ranges(vaddr, size, b.mode);
 				b.unmap_pending = false;
 				return false;
 			}
@@ -2263,6 +2308,7 @@ FlexibleMemory::GpuOwnerProtection FlexibleMemory::ProtectGpuOwner(uint64_t vadd
 	{
 		return GpuOwnerProtection::Failed;
 	}
+	update_guest_code_ranges(vaddr, size, mode);
 	EXIT_IF(!apply_protection_blocks(&m_protections, vaddr, size, prot, mode));
 	return GpuOwnerProtection::Applied;
 }
@@ -2537,6 +2583,9 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, in
 	{
 		return fixed ? KERNEL_ERROR_EBUSY : KERNEL_ERROR_ENOMEM;
 	}
+	// Reserved pages are not executable, so guest code entries that a fixed
+	// reservation replaced leave the set.
+	Emulator::GuestCodeRanges::Remove(reserved_addr, reserved_addr + len);
 	if (!decommitted && !g_reserved_memory->Add(reserved_addr, len))
 	{
 		VirtualMemory::Free(reserved_addr);

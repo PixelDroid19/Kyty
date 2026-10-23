@@ -133,32 +133,11 @@ uint64_t RuntimeLinker::GetProcessParametersForPort()
 	return address;
 }
 
+// The guest code set holds the executable segments of every loaded program and
+// the kernel's executable mappings, and answers without the runtime lock.
 bool RuntimeLinker::IsExecutableAddressForPort(uint64_t address)
 {
-	auto* runtime = AcquireCurrentRuntimeForUse();
-	if (runtime == nullptr) { return false; }
-	bool executable = false;
-	{
-		Core::LockGuard lock(runtime->m_mutex);
-		for (const auto* program: runtime->m_programs)
-		{
-			if (program->elf == nullptr || address < program->base_vaddr) { continue; }
-			const auto relative = address - program->base_vaddr;
-			const auto* phdr = program->elf->GetPhdr();
-			for (uint16_t i = 0; i < program->elf->GetEhdr()->e_phnum; ++i)
-			{
-				if (phdr[i].p_type == PT_LOAD && (phdr[i].p_flags & PF_X) != 0 &&
-				    relative >= phdr[i].p_vaddr && relative - phdr[i].p_vaddr < phdr[i].p_memsz)
-				{
-					executable = true;
-					break;
-				}
-			}
-			if (executable) { break; }
-		}
-	}
-	ReleaseCurrentRuntimeForUse(runtime);
-	return executable;
+	return Emulator::GuestCodeRanges::Contains(address);
 }
 
 void RuntimeLinker::SetCurrentRuntimeUnpublishedHookForTesting(void (*hook)(void*), void* context)

@@ -707,6 +707,51 @@ TEST(EmulatorKernelProcess, GuestConditionSignalDoesNotWaitForStoppedWaiter)
 }
 #endif
 
+// Guest code entries are page sets: adds merge with the entries they touch, and
+// a removal cuts out exactly the pages it covers. The addresses are test-only,
+// far from the guest code that other tests map, and are removed again.
+TEST(EmulatorKernelProcess, GuestCodeRangesTrackPagesAcrossAddAndRemove)
+{
+	constexpr uint64_t kPageSize = 4096;
+	constexpr uint64_t kBase     = 0x0000'0f80'0000'0000ull;
+	const auto         page      = [](uint64_t index) { return kBase + index * kPageSize; };
+
+	Emulator::GuestCodeRanges::Add(page(0), page(2));
+	Emulator::GuestCodeRanges::Add(page(1), page(4));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(0) - 1));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(0)));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(4) - 1));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(4)));
+
+	// Removing the middle leaves both sides in the set.
+	Emulator::GuestCodeRanges::Remove(page(1), page(2));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(0)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(1)));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(2)));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(3)));
+
+	// One removal trims the entries at its edges and drops the one inside it.
+	Emulator::GuestCodeRanges::Add(page(8), page(10));
+	Emulator::GuestCodeRanges::Add(page(12), page(14));
+	Emulator::GuestCodeRanges::Remove(page(3), page(13));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(2)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(3)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(9)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(12)));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(13)));
+
+	// A range that was never added changes nothing.
+	Emulator::GuestCodeRanges::Remove(page(20), page(22));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(20)));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(0)));
+
+	Emulator::GuestCodeRanges::Remove(page(0), page(3));
+	Emulator::GuestCodeRanges::Remove(page(13), page(14));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(0)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(2)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(13)));
+}
+
 TEST(EmulatorKernelProcess, PthreadPriorityRoundTripsGuestValue)
 {
 	EnsureKernelProcessSubsystems();
