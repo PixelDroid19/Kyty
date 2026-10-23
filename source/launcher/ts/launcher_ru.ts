@@ -346,8 +346,92 @@
         <translation>Ряд недавно запущенных</translation>
     </message>
     <message>
+        <source>Sort games by</source>
+        <translation>Сортировать игры</translation>
+    </message>
+    <message>
         <source>When a game starts</source>
         <translation>При запуске игры</translation>
+    </message>
+    <message>
+        <source>Launcher window</source>
+        <translation>Окно лаунчера</translation>
+    </message>
+    <message>
+        <source>Games in the same folder share a tab in the library.</source>
+        <translation>Игры из одной папки делят вкладку в библиотеке.</translation>
+    </message>
+    <message>
+        <source>The folder that holds the game&apos;s files.</source>
+        <translation>Папка с файлами игры.</translation>
+    </message>
+    <message>
+        <source>Off runs the game with the emulator settings from Settings.</source>
+        <translation>Если «Выкл.», игра запускается с настройками эмулятора из раздела «Настройки».</translation>
+    </message>
+    <message>
+        <source>The game window&apos;s size. It does not change the resolution the game renders at.</source>
+        <translation>Размер окна игры. Не меняет разрешение, в котором игра рендерит.</translation>
+    </message>
+    <message>
+        <source>Fills the graphics fields below. The preset itself is not saved.</source>
+        <translation>Заполняет поля графики ниже. Сам пресет не сохраняется.</translation>
+    </message>
+    <message>
+        <source>Native renders at the game&apos;s own size. Fixed renders at most at the size below, keeping the shape.</source>
+        <translation>«Родное» рендерит в собственном размере игры. «Фиксированный размер» — не больше размера ниже, сохраняя пропорции.</translation>
+    </message>
+    <message>
+        <source>Render targets also scales the game&apos;s full-screen render textures; not every game supports it.</source>
+        <translation>«Цели рендера» также масштабирует полноэкранные текстуры рендеринга игры; поддерживается не всеми играми.</translation>
+    </message>
+    <message>
+        <source>How the finished picture is scaled to the window.</source>
+        <translation>Как готовое изображение масштабируется под окно.</translation>
+    </message>
+    <message>
+        <source>Sharper textures seen at a slant. It does not change the resolution.</source>
+        <translation>Более чёткие текстуры под углом. Не меняет разрешение.</translation>
+    </message>
+    <message>
+        <source>Checks every graphics call for mistakes. For debugging; games run much slower.</source>
+        <translation>Проверяет каждый графический вызов на ошибки. Для отладки; игры работают намного медленнее.</translation>
+    </message>
+    <message>
+        <source>Where the emulator writes what it reports while the game runs.</source>
+        <translation>Куда эмулятор пишет сообщения во время работы игры.</translation>
+    </message>
+    <message>
+        <source>Writes the game&apos;s GPU commands to disk, for debugging. Uses a lot of space.</source>
+        <translation>Записывает команды GPU игры на диск для отладки. Занимает много места.</translation>
+    </message>
+    <message>
+        <source>Writes the game&apos;s graphics pipelines to disk, for debugging.</source>
+        <translation>Записывает графические конвейеры игры на диск для отладки.</translation>
+    </message>
+    <message>
+        <source>Scales every text and control of the launcher.</source>
+        <translation>Масштабирует весь текст и элементы управления лаунчера.</translation>
+    </message>
+    <message>
+        <source>Reduced keeps page changes and stops what moves on its own.</source>
+        <translation>«Сокращённая» оставляет смену страниц и останавливает то, что движется само.</translation>
+    </message>
+    <message>
+        <source>Hidden when the window is too small to show it with a row of covers.</source>
+        <translation>Скрывается, если окно слишком мало, чтобы показать её вместе с рядом обложек.</translation>
+    </message>
+    <message>
+        <source>In your own order, games move with Move up and Move down in their options.</source>
+        <translation>В собственном порядке игры перемещаются пунктами «Выше» и «Ниже» в их параметрах.</translation>
+    </message>
+    <message>
+        <source>Minimizing leaves the screen and the graphics card to the game.</source>
+        <translation>Сворачивание оставляет экран и видеокарту игре.</translation>
+    </message>
+    <message>
+        <source>How the launcher opens. Full screen suits a TV.</source>
+        <translation>Как открывается лаунчер. Полноэкранный режим подходит для телевизора.</translation>
     </message>
     <message>
         <source>Language</source>
@@ -569,6 +653,34 @@
         <translation>Оставить лаунчер открытым</translation>
     </message>
     <message>
+        <source>My own order</source>
+        <translation>Мой порядок</translation>
+    </message>
+    <message>
+        <source>Name</source>
+        <translation>Название</translation>
+    </message>
+    <message>
+        <source>Last played</source>
+        <translation>Последний запуск</translation>
+    </message>
+    <message>
+        <source>Time played</source>
+        <translation>Время в игре</translation>
+    </message>
+    <message>
+        <source>A window</source>
+        <translation>Окно</translation>
+    </message>
+    <message>
+        <source>Maximized</source>
+        <translation>Развёрнутое</translation>
+    </message>
+    <message>
+        <source>Full screen</source>
+        <translation>Полный экран</translation>
+    </message>
+    <message>
         <source>Rescan files</source>
         <translation>Пересканировать</translation>
     </message>
@@ -661,6 +773,10 @@
     <message>
         <source>All games</source>
         <translation>Все игры</translation>
+    </message>
+    <message>
+        <source>Favorites</source>
+        <translation>Избранное</translation>
     </message>
     <message>
         <source>Unfiled</source>
@@ -773,6 +889,14 @@
         <translation>Остановить игру</translation>
     </message>
     <message>
+        <source>Remove from favorites</source>
+        <translation>Убрать из избранного</translation>
+    </message>
+    <message>
+        <source>Add to favorites</source>
+        <translation>Добавить в избранное</translation>
+    </message>
+    <message>
         <source>Move up</source>
         <translation>Выше</translation>
     </message>
@@ -815,6 +939,14 @@
     <message>
         <source>No games in this folder.</source>
         <translation>В этой папке нет игр.</translation>
+    </message>
+    <message>
+        <source>Played %1 min</source>
+        <translation>Сыграно %1 мин</translation>
+    </message>
+    <message>
+        <source>Played %1 h %2 min</source>
+        <translation>Сыграно %1 ч %2 мин</translation>
     </message>
     <message>
         <source>Recently played</source>

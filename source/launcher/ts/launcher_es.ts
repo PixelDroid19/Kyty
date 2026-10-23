@@ -346,8 +346,92 @@
         <translation>Fila de jugados recientemente</translation>
     </message>
     <message>
+        <source>Sort games by</source>
+        <translation>Ordenar juegos por</translation>
+    </message>
+    <message>
         <source>When a game starts</source>
         <translation>Al iniciar un juego</translation>
+    </message>
+    <message>
+        <source>Launcher window</source>
+        <translation>Ventana del launcher</translation>
+    </message>
+    <message>
+        <source>Games in the same folder share a tab in the library.</source>
+        <translation>Los juegos de la misma carpeta comparten una pestaña en la biblioteca.</translation>
+    </message>
+    <message>
+        <source>The folder that holds the game&apos;s files.</source>
+        <translation>La carpeta que contiene los archivos del juego.</translation>
+    </message>
+    <message>
+        <source>Off runs the game with the emulator settings from Settings.</source>
+        <translation>Desactivado, el juego usa los ajustes del emulador de Configuración.</translation>
+    </message>
+    <message>
+        <source>The game window&apos;s size. It does not change the resolution the game renders at.</source>
+        <translation>El tamaño de la ventana del juego. No cambia la resolución a la que renderiza el juego.</translation>
+    </message>
+    <message>
+        <source>Fills the graphics fields below. The preset itself is not saved.</source>
+        <translation>Rellena los campos de gráficos de abajo. El preajuste en sí no se guarda.</translation>
+    </message>
+    <message>
+        <source>Native renders at the game&apos;s own size. Fixed renders at most at the size below, keeping the shape.</source>
+        <translation>Nativa renderiza al tamaño propio del juego. Tamaño fijo renderiza como máximo al tamaño de abajo, conservando la forma.</translation>
+    </message>
+    <message>
+        <source>Render targets also scales the game&apos;s full-screen render textures; not every game supports it.</source>
+        <translation>Render targets también escala las texturas de render a pantalla completa del juego; no todos los juegos lo admiten.</translation>
+    </message>
+    <message>
+        <source>How the finished picture is scaled to the window.</source>
+        <translation>Cómo se escala la imagen final a la ventana.</translation>
+    </message>
+    <message>
+        <source>Sharper textures seen at a slant. It does not change the resolution.</source>
+        <translation>Texturas más nítidas vistas en ángulo. No cambia la resolución.</translation>
+    </message>
+    <message>
+        <source>Checks every graphics call for mistakes. For debugging; games run much slower.</source>
+        <translation>Revisa cada llamada gráfica en busca de errores. Para depurar; los juegos van mucho más lentos.</translation>
+    </message>
+    <message>
+        <source>Where the emulator writes what it reports while the game runs.</source>
+        <translation>Dónde escribe el emulador lo que informa mientras el juego se ejecuta.</translation>
+    </message>
+    <message>
+        <source>Writes the game&apos;s GPU commands to disk, for debugging. Uses a lot of space.</source>
+        <translation>Escribe en disco los comandos de GPU del juego, para depurar. Ocupa mucho espacio.</translation>
+    </message>
+    <message>
+        <source>Writes the game&apos;s graphics pipelines to disk, for debugging.</source>
+        <translation>Escribe en disco los pipelines gráficos del juego, para depurar.</translation>
+    </message>
+    <message>
+        <source>Scales every text and control of the launcher.</source>
+        <translation>Escala todos los textos y controles del launcher.</translation>
+    </message>
+    <message>
+        <source>Reduced keeps page changes and stops what moves on its own.</source>
+        <translation>Reducidas mantiene los cambios de página y detiene lo que se mueve solo.</translation>
+    </message>
+    <message>
+        <source>Hidden when the window is too small to show it with a row of covers.</source>
+        <translation>Se oculta cuando la ventana es demasiado pequeña para mostrarla junto a una fila de portadas.</translation>
+    </message>
+    <message>
+        <source>In your own order, games move with Move up and Move down in their options.</source>
+        <translation>En tu propio orden, los juegos se mueven con Subir y Bajar en sus opciones.</translation>
+    </message>
+    <message>
+        <source>Minimizing leaves the screen and the graphics card to the game.</source>
+        <translation>Minimizar deja la pantalla y la tarjeta gráfica al juego.</translation>
+    </message>
+    <message>
+        <source>How the launcher opens. Full screen suits a TV.</source>
+        <translation>Cómo se abre el launcher. Pantalla completa va bien en un televisor.</translation>
     </message>
     <message>
         <source>Language</source>
@@ -569,6 +653,34 @@
         <translation>Mantener el launcher abierto</translation>
     </message>
     <message>
+        <source>My own order</source>
+        <translation>Mi propio orden</translation>
+    </message>
+    <message>
+        <source>Name</source>
+        <translation>Nombre</translation>
+    </message>
+    <message>
+        <source>Last played</source>
+        <translation>Última partida</translation>
+    </message>
+    <message>
+        <source>Time played</source>
+        <translation>Tiempo jugado</translation>
+    </message>
+    <message>
+        <source>A window</source>
+        <translation>Una ventana</translation>
+    </message>
+    <message>
+        <source>Maximized</source>
+        <translation>Maximizada</translation>
+    </message>
+    <message>
+        <source>Full screen</source>
+        <translation>Pantalla completa</translation>
+    </message>
+    <message>
         <source>Rescan files</source>
         <translation>Volver a buscar</translation>
     </message>
@@ -661,6 +773,10 @@
     <message>
         <source>All games</source>
         <translation>Todos los juegos</translation>
+    </message>
+    <message>
+        <source>Favorites</source>
+        <translation>Favoritos</translation>
     </message>
     <message>
         <source>Unfiled</source>
@@ -773,6 +889,14 @@
         <translation>Detener juego</translation>
     </message>
     <message>
+        <source>Remove from favorites</source>
+        <translation>Quitar de favoritos</translation>
+    </message>
+    <message>
+        <source>Add to favorites</source>
+        <translation>Añadir a favoritos</translation>
+    </message>
+    <message>
         <source>Move up</source>
         <translation>Subir</translation>
     </message>
@@ -815,6 +939,14 @@
     <message>
         <source>No games in this folder.</source>
         <translation>No hay juegos en esta carpeta.</translation>
+    </message>
+    <message>
+        <source>Played %1 min</source>
+        <translation>Jugado %1 min</translation>
+    </message>
+    <message>
+        <source>Played %1 h %2 min</source>
+        <translation>Jugado %1 h %2 min</translation>
     </message>
     <message>
         <source>Recently played</source>
