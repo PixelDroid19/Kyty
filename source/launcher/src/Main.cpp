@@ -1,25 +1,30 @@
-#include "MainDialog.h"
+#include "ArtworkProvider.h"
+#include "LauncherBackend.h"
 
-#include <QApplication>
-#include <QArgument>
-#include <QObject>
-#include <QStyleFactory>
-
-class QStyle;
+#include <QGuiApplication>
+#include <QQmlApplicationEngine>
+#include <QQmlContext>
+#include <QWindow>
 
 int main(int argc, char* argv[])
 {
-	QApplication a(argc, argv);
-	MainDialog   w;
+	QGuiApplication app(argc, argv);
 
-	QStyle* s = QStyleFactory::create("fusion");
-	QApplication::setStyle(s);
+	LauncherBackend backend;
 
-	QObject::connect(&a, &QApplication::aboutToQuit, &w, &MainDialog::Quit);
+	QQmlApplicationEngine engine;
+	engine.addImageProvider(ArtworkProvider::ID, new ArtworkProvider);
+	engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+	engine.loadFromModule("Kyty.Launcher", "Main");
+	if (engine.rootObjects().isEmpty())
+	{
+		return 1;
+	}
 
-	w.emit Start();
+	if (auto* window = qobject_cast<QWindow*>(engine.rootObjects().first()))
+	{
+		backend.AttachWindow(window);
+	}
 
-	w.show();
-
-	return QApplication::exec();
+	return QGuiApplication::exec();
 }

@@ -121,8 +121,11 @@ public:
 	Configuration() = default;
 
 	QString name;
+	QString folder;     /* Library folder, empty when unfiled */
 	QString basedir;    /* Game base directory */
 	QString param_file; /* Path to param.sfo / param.json */
+	qint64  last_run = 0; /* Milliseconds since epoch of the last run, 0 when never run */
+	bool    custom_settings = false; /* False runs the game with the global emulator settings */
 
 	// Screen / window
 	int screen_width  = 1280;
@@ -162,8 +165,11 @@ public:
 	void WriteSettings(QSettings* s) const
 	{
 		KYTY_CFG_SET(name);
+		KYTY_CFG_SET(folder);
 		KYTY_CFG_SET(basedir);
 		KYTY_CFG_SET(param_file);
+		s->setValue("last_run", last_run);
+		s->setValue("custom_settings", custom_settings);
 		s->setValue("screen_width", screen_width);
 		s->setValue("screen_height", screen_height);
 		KYTY_CFG_SET(render_resolution_mode);
@@ -194,6 +200,9 @@ public:
 	void ReadSettings(QSettings* s)
 	{
 		KYTY_CFG_GET(name);
+		folder   = s->value("folder").toString();
+		last_run = s->value("last_run", 0).toLongLong();
+		custom_settings = s->value("custom_settings", false).toBool();
 		KYTY_CFG_GET(basedir);
 		KYTY_CFG_GET(param_file);
 		if (s->contains("screen_width"))
