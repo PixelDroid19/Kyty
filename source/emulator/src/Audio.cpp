@@ -912,8 +912,9 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 	uint64_t wake_deadline = 0;
 	if (!EnsureHostSinkLocked(&ctx) || !SubmitMixedGrain(ctx.host_handle, mix.data(), grain, &wake_deadline))
 	{
-		// Host shutdown closes the sinks while guest threads may still push.
-		if (audio == nullptr || !audio->ShuttingDown())
+		// Host shutdown closes the sinks and clears the host audio while guest
+		// threads may still push; only a live host makes a failed submit news.
+		if (audio != nullptr && !audio->ShuttingDown())
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "AudioOut2: host submit failed for ctx %d\n", handle);
 		}
