@@ -393,6 +393,11 @@ int KYTY_SYSV_ABI PthreadRwlockattrInit(PthreadRwlockattr* attr)
 {
 	PRINT_NAME();
 
+	if (attr == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
 	*attr = new PthreadRwlockattrPrivate {};
 
 	int result = pthread_rwlockattr_init(&(*attr)->p);
@@ -424,7 +429,7 @@ int KYTY_SYSV_ABI PthreadRwlockattrGettype(PthreadRwlockattr* attr, int* type)
 {
 	PRINT_NAME();
 
-	if (type == nullptr || attr == nullptr)
+	if (type == nullptr || attr == nullptr || *attr == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
@@ -457,7 +462,7 @@ int KYTY_SYSV_ABI PthreadRwlockattrSettype(PthreadRwlockattr* attr, int type)
 {
 	PRINT_NAME();
 
-	if (attr == nullptr)
+	if (attr == nullptr || *attr == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
