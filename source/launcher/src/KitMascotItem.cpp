@@ -53,14 +53,17 @@ enum Layer
 	GLITCH_RED,
 	GLITCH_CYAN,
 	BODY,
+	WHISKERS,
 	GEAR,
 	EYES_OPEN,
+	EYES_SHINE,
 	EYES_HAPPY,
 	LAYER_COUNT
 };
 
-const char* const LAYER_FILES[LAYER_COUNT] = {":/assets/kit/glitch-r.svg", ":/assets/kit/glitch-c.svg", ":/assets/kit/body.svg",
-                                              ":/assets/kit/gear.svg",     ":/assets/kit/eyes-open.svg", ":/assets/kit/eyes-happy.svg"};
+const char* const LAYER_FILES[LAYER_COUNT] = {":/assets/kit/glitch-r.svg",   ":/assets/kit/glitch-c.svg",  ":/assets/kit/body.svg",
+                                              ":/assets/kit/whiskers.svg",   ":/assets/kit/gear.svg",      ":/assets/kit/eyes-open.svg",
+                                              ":/assets/kit/eyes-shine.svg", ":/assets/kit/eyes-happy.svg"};
 const char* const HEART_FILE              = ":/assets/kit/heart.svg";
 
 // The website's glitch keyframes: when a colour slice appears, its offset and its clip insets as shares of the
@@ -421,13 +424,19 @@ void KitMascotItem::updatePolish()
 	{
 		m_layers[i] = PaintLayer(LAYER_FILES[i], px, i == GLITCH_RED || i == GLITCH_CYAN ? GLITCH_OPACITY : 1);
 	}
+	const auto* theme = Theme::Instance();
 	// Kit stays a white cat; on the light palette a grey edge keeps the white body apart from the page.
-	if (!Theme::Instance()->IsDark() && !m_layers[BODY].isNull())
+	if (!theme->IsDark() && !m_layers[BODY].isNull())
 	{
-		m_layers[BODY] = Outlined(m_layers[BODY], Theme::Instance()->TextMuted(), std::max<qreal>(1, px.width() * OUTLINE_SHARE));
+		m_layers[BODY] = Outlined(m_layers[BODY], theme->TextMuted(), std::max<qreal>(1, px.width() * OUTLINE_SHARE));
 	}
 	const int heart_px = static_cast<int>(std::ceil(HEART_MAX * px.width() / VIEW_WIDTH));
 	m_heart            = PaintLayer(HEART_FILE, QSize(heart_px, static_cast<int>(std::ceil(heart_px * 0.9))), 1);
+	// The eyes, the collar and the hearts wear the accent.
+	for (auto* image: {&m_layers[GEAR], &m_layers[EYES_OPEN], &m_layers[EYES_HAPPY], &m_heart})
+	{
+		Recolour(image, theme->Accent());
+	}
 	update();
 }
 
@@ -496,10 +505,13 @@ QSGNode* KitMascotItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
 		node->layers[layer]->setSourceRect(QRectF(0, event.top * size.height(), size.width(), band * size.height()));
 	}
 	place(BODY, whole);
+	place(WHISKERS, whole);
 	place(GEAR, whole);
-	const qreal blink   = live ? BlinkScale(m_now) : 1;
-	const qreal eye_top = EYE_LINE * k * (1 - blink);
-	place(EYES_OPEN, happy ? QRectF() : QRectF(0, eye_top, w, h * blink));
+	const qreal  blink   = live ? BlinkScale(m_now) : 1;
+	const qreal  eye_top = EYE_LINE * k * (1 - blink);
+	const QRectF eyes    = happy ? QRectF() : QRectF(0, eye_top, w, h * blink);
+	place(EYES_OPEN, eyes);
+	place(EYES_SHINE, eyes);
 	place(EYES_HAPPY, happy ? whole : QRectF());
 
 	auto* heart_texture = node->textures.Get(window(), QStringLiteral("heart"), m_heart);
