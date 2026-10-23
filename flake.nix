@@ -43,6 +43,17 @@
           ];
         };
 
+        # Adds Qt 6 for the desktop launcher.
+        launcher = pkgs.mkShell {
+          hardeningDisable = [ "format" ];
+          inputsFrom = [ self.devShells.${system}.default ];
+          packages = with pkgs.qt6; [
+            qtbase
+            qtdeclarative
+            qttools
+          ];
+        };
+
         # Adds the public ROCm HIP tools for the optional hardware arithmetic oracle.
         # Running the oracle still needs an AMD GPU exposed through /dev/kfd.
         oracle = pkgs.mkShell {
