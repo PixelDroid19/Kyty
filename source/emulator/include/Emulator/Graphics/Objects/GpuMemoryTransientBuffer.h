@@ -8,26 +8,29 @@
 namespace Kyty::Libs::Graphics {
 
 constexpr uint64_t kGpuMemoryMaxTransientReadOnlyBytes = 4u * 1024u * 1024u;
-// Per command buffer. A 2D title streams about 31 MB of vertex and index
+// Per recording. A 2D title streams about 31 MB of vertex and index
 // snapshots into one command buffer; a refused snapshot falls back to a
 // GpuMemory object whose upload waits on its own fence.
-constexpr uint64_t kGpuMemoryTransientBufferPoolMaxBytes = 64u * 1024u * 1024u;
-constexpr uint64_t kGpuMemoryTransientBufferCriticalReserveBytes = 1u * 1024u * 1024u;
-constexpr uint32_t kGpuMemoryTransientBufferMaxEntriesPerUsage   = 16384u;
+constexpr uint64_t kGpuMemoryTransientBufferPoolMaxBytes       = 64u * 1024u * 1024u;
+constexpr uint32_t kGpuMemoryTransientBufferMaxEntriesPerUsage = 16384u;
+// The command buffers of one command pool share a snapshot pool, so it holds
+// the snapshots of every recording in flight (one per command buffer of the
+// pool), each within the per-recording budget.
+constexpr uint32_t kGpuMemoryTransientSnapshotPoolRecordings = 8u;
 
-static_assert(kGpuMemoryTransientBufferCriticalReserveBytes < kGpuMemoryTransientBufferPoolMaxBytes);
-static_assert(kGpuMemoryMaxTransientReadOnlyBytes <=
-              kGpuMemoryTransientBufferPoolMaxBytes - kGpuMemoryTransientBufferCriticalReserveBytes);
+static_assert(kGpuMemoryMaxTransientReadOnlyBytes <= kGpuMemoryTransientBufferPoolMaxBytes);
 
 enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 {
+	// Guest bytes in the snapshot pool of the recording's command pool.
 	Snapshot,
+	// Host data only one recording reads, in that command buffer's own pool.
 	Critical,
 };
 
 // Bounded immutable buffer views commonly come from guest command rings and
-// receive a new address every frame. They are snapshots owned by one command
-// buffer, not persistent GPU resources. Surface aliases, writable buffers,
+// receive a new address every frame. They are snapshots leased by the
+// recordings that bind them, not persistent GPU resources. Surface aliases, writable buffers,
 // oversized ranges, and incomplete overlap snapshots stay on the authoritative
 // GpuMemory path.
 // A writable storage buffer holds the guest bytes while none of its GPU writes is
@@ -92,12 +95,12 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 	// constants arrive as thousands of sub-KiB views per command buffer: a
 	// 3,300-draw pass filled 4,096 storage entries with 8.8 MB, a seventh of the
 	// byte budget, and every later view fell back to a persistent object.
-	constexpr uint32_t MaxEntriesPerUsage = kGpuMemoryTransientBufferMaxEntriesPerUsage;
-	constexpr uint32_t MaxEntries         = MaxEntriesPerUsage * 3u;
-	const uint64_t max_bytes = allocation_class == GpuMemoryTransientBufferAllocationClass::Snapshot
-	                               ? kGpuMemoryTransientBufferPoolMaxBytes - kGpuMemoryTransientBufferCriticalReserveBytes
-	                               : kGpuMemoryTransientBufferPoolMaxBytes;
-	return size != 0u && usage_entries < MaxEntriesPerUsage && total_entries < MaxEntries && total_bytes < max_bytes &&
+	const uint32_t recordings =
+	    allocation_class == GpuMemoryTransientBufferAllocationClass::Snapshot ? kGpuMemoryTransientSnapshotPoolRecordings : 1u;
+	const uint32_t max_entries_per_usage = kGpuMemoryTransientBufferMaxEntriesPerUsage * recordings;
+	const uint32_t max_entries           = max_entries_per_usage * 3u;
+	const uint64_t max_bytes             = kGpuMemoryTransientBufferPoolMaxBytes * recordings;
+	return size != 0u && usage_entries < max_entries_per_usage && total_entries < max_entries && total_bytes < max_bytes &&
 	       size <= max_bytes - total_bytes;
 }
 

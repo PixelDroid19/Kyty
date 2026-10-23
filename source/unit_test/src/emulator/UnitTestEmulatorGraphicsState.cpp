@@ -3541,19 +3541,25 @@ TEST(EmulatorGraphicsState, VertexAndIndexBuffersDeclareReadOnlyGpuUse)
 TEST(EmulatorGraphicsState, TransientBufferPoolReservesCapacityPerUsage)
 {
 	constexpr uint32_t per_usage = kGpuMemoryTransientBufferMaxEntriesPerUsage;
-	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(per_usage - 1u, per_usage, 0u, 0x80u,
-	                                                    GpuMemoryTransientBufferAllocationClass::Snapshot));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(per_usage, per_usage, 0u, 0x80u,
-	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, per_usage * 3u, 0u, 0x80u,
-	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
-	constexpr uint64_t snapshot_limit = kGpuMemoryTransientBufferPoolMaxBytes - kGpuMemoryTransientBufferCriticalReserveBytes;
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, snapshot_limit, 0x80u,
-	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
-	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, snapshot_limit, 0x80u,
-	                                                    GpuMemoryTransientBufferAllocationClass::Critical));
+	EXPECT_TRUE(
+	    GpuMemoryTransientBufferPoolCanAllocate(per_usage - 1u, per_usage, 0u, 0x80u, GpuMemoryTransientBufferAllocationClass::Critical));
+	EXPECT_FALSE(
+	    GpuMemoryTransientBufferPoolCanAllocate(per_usage, per_usage, 0u, 0x80u, GpuMemoryTransientBufferAllocationClass::Critical));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, per_usage * 3u, 0u, 0x80u, GpuMemoryTransientBufferAllocationClass::Critical));
 	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, kGpuMemoryTransientBufferPoolMaxBytes, 0x80u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Critical));
+	// A command pool's shared snapshot pool holds one per-recording budget for every recording in flight.
+	constexpr uint32_t recordings = kGpuMemoryTransientSnapshotPoolRecordings;
+	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(per_usage * recordings - 1u, per_usage, 0u, 0x80u,
+	                                                    GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(per_usage * recordings, per_usage, 0u, 0x80u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, per_usage * 3u * recordings, 0u, 0x80u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, kGpuMemoryTransientBufferPoolMaxBytes, 0x80u,
+	                                                    GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, kGpuMemoryTransientBufferPoolMaxBytes * recordings, 0x80u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
 	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 0u, 0u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Critical));
 }

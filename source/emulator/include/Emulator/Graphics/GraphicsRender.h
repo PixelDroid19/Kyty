@@ -31,6 +31,7 @@ class CommandBuffer;
 class CommandProcessor;
 class PipelineCache;
 class TransientBufferPool;
+struct TransientSnapshotLeases;
 class DiagnosticDumpWriter;
 struct ShaderNativeWaveInfo;
 struct ShaderProgramSnapshot;
@@ -692,11 +693,13 @@ public:
 	// One zero dword shared by every empty descriptor of this recording.
 	VulkanBuffer* UploadTransientZeroCarrier(uint32_t usage);
 	// Captures guest bytes [vaddr + read_begin, vaddr + size) at the same offsets of a buffer of size bytes.
-	// zero_tail keeps the bytes past size zero for consumers that can read beyond it.
+	// zero_tail keeps the bytes past size zero for consumers that can read beyond it. The buffer is shared with the
+	// other recordings of this command pool that capture the same unchanged bytes and stays immutable until this one
+	// is reset.
 	VulkanBuffer* CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage, bool zero_tail,
 	                                             uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns, bool* reused);
-	// Reads at most 16 bytes from the immutable guest snapshot already uploaded for this command buffer.
-	// This never rereads guest memory; the buffer must still belong to the current recording.
+	// Reads at most 16 bytes from the immutable guest snapshot this recording already bound.
+	// This never rereads guest memory; the buffer must come from the current recording.
 	[[nodiscard]] bool ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
 	                                               uint64_t size, void* dst) const;
 	// Reusable scratch for commands recorded in this buffer. Callers must order
@@ -743,6 +746,7 @@ private:
 	TransientBufferPool* m_transient_scratch_buffers = nullptr;
 	TransientBufferPool* m_transient_copy_buffers    = nullptr;
 	TransientBufferPool* m_transient_device_buffers  = nullptr;
+	TransientSnapshotLeases*   m_snapshot_leases           = nullptr;
 	std::vector<VulkanBuffer*> m_recording_uploads;
 
 	mutable std::mutex           m_pipeline_lease_mutex;

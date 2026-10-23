@@ -71,6 +71,7 @@ namespace Kyty::Libs::Graphics {
 
 struct PresentationEncodeStage;
 struct PresentationFsrStage;
+struct TransientSnapshotPool;
 
 struct VulkanSwapchain
 {
@@ -98,6 +99,8 @@ struct VulkanCommandPool
 	VkSemaphore*     semaphores    = nullptr;
 	bool*            busy          = nullptr;
 	uint32_t         buffers_count = 0;
+	// Guest snapshots shared by the command buffers of this pool; owned by the command buffer code.
+	TransientSnapshotPool* snapshots = nullptr;
 };
 
 struct VulkanQueueInfo

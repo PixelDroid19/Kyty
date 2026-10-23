@@ -1661,6 +1661,9 @@ struct PrimitiveDrawPlan
 extern RenderContext*           g_render_ctx;
 extern thread_local CommandPool g_command_pool;
 
+// Destroys the snapshots of a command pool whose command buffers have all been freed.
+void TransientSnapshotPoolDestroy(GraphicContext* ctx, VulkanCommandPool* pool);
+
 // Test-only context ownership seam. It binds a caller-owned GraphicContext to
 // the private renderer globals and unbinds it only after all thread-local
 // command-pool resources have been destroyed. Do not use from runtime paths.

@@ -680,6 +680,8 @@ void CommandPool::DeleteAll()
 
 			vkDestroyCommandPool(ctx->device, pool->pool, nullptr);
 
+			TransientSnapshotPoolDestroy(ctx, pool);
+
 			delete[] pool->semaphores;
 			delete[] pool->fences;
 			delete[] pool->buffers;

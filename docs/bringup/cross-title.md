@@ -4,6 +4,70 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Transient snapshots shared by a command pool's command buffers (2026-10-23)
+
+- **Observed** (fishing title, dock in gameplay, Intel A770, Mesa ANV,
+  strict runs at the 60 fps present limit, segments perf-4 and perf-5):
+  - Each command buffer owned its transient snapshot pool. Since the early
+    submission of 2026-10-22 a frame spans 130-150 command buffers, so a
+    guest range that many of them bind was captured and uploaded again in
+    each one. 61% of snapshot probes reused an entry.
+- **Change.**
+  - The command buffers of one command pool, one per submission slot, share
+    one snapshot pool behind a mutex. A recording leases every entry it
+    binds; the entry returns to the free index once the last recording that
+    leased it is reset or freed.
+  - Among free entries of the same size the earliest-created one is handed
+    out, so a frame that repeats the previous frame's captures binds the
+    same buffers and hits the descriptor sets keyed by them.
+  - The shared pool's byte and entry limits are the per-recording limits
+    times the eight recordings that can be in flight, the same total as
+    eight private pools. Host-only uploads stay in each command buffer's own
+    pool, so the reserve that kept room for them next to the snapshots is
+    removed.
+- **Results** (per draw, segments perf-4 and perf-5; descriptor-set misses
+  from a temporary counter, not committed):
+
+  | Snapshot pool | Reuse | Uploads | Upload bytes | Upload time | Set misses | Resource binding |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | Per command buffer (before) | 61% | 3.65 | 22-23 KB | 2.5-2.6 µs | 33% | 13.1-13.5 µs |
+  | Shared, release order | 71% | 3.0 | 15-17 KB | 1.9-2.0 µs | 53% | 13.2-13.6 µs |
+  | Shared, earliest-created first | 71-72% | 2.9-3.0 | 15-19 KB | 1.8-2.1 µs | 10% | 10.9-13.8 µs |
+
+  - Snapshot compares rose from 0.3 to 0.5-0.65 µs per draw, because more
+    probes find an entry to compare.
+  - End to end the fishing dock stayed within run-to-run noise: 26-32 µs
+    per draw in three runs with the change, 28-32 in three runs before.
+    Segments of different runs land on different game states.
+  - Card title (gameplay, single runs without the limit): reuse went from
+    24-32% to 28-35% and uploads from 1.73 to 1.61 per draw, at 15 µs per
+    draw either way. It has about 5 submissions per frame, so little to
+    share. At the 60 fps limit it holds 60 fps at 13-16 µs per draw, with
+    descriptor-set creates at 1.2% of lookups (same temporary counter).
+- **Excluded.**
+  - Handing out free entries in release order (the first shared version):
+    a recaptured range landed on an arbitrary buffer, so descriptor-set
+    misses rose from 33% to 53% and the descriptor finalize from 3.4 to
+    4.1 µs per draw.
+  - Handing a recaptured range the free entry that last held it: also 53%
+    misses; the guest rotates its constant-buffer addresses (see the
+    transient-pool affinity exclusion of 2026-10-22).
+  - Limiting early submission to one per millisecond, with private pools:
+    27-29 µs per draw and 74-80 submissions per frame, against 28-30 and
+    146 with every early submission. Turning early submission off gave
+    24-26 µs per draw with 54-56 submissions, but the cave platformer needs
+    it (see "Recorded work submitted while the GPU queue is idle").
+- **Open.** A submission costs the CP thread about 30 µs: `Begin` with its
+  kernel time (about 2% of the thread), the queue submit (about 1.3%) and
+  the lease release (about 1.1%). At 120-150 submissions per frame the
+  submissions the idle check starts are about 10% of the fishing dock's CP
+  thread.
+- **Verification.** Unit tests (2447 passed, 11 skipped), the 74 graphics
+  diagnostics integration tests and `check_emulator_boundaries.py` pass.
+  Strict runs: the fishing title reaches the dock and its capture renders
+  correctly; the cave platformer holds 59-60 fps at the 60 fps limit; the
+  card title plays at the limit.
+
 ## A graphics submit returns after its batch is decoded (2026-10-23)
 
 - **Contract.** A graphics command-buffer submit returns to the guest only
@@ -113,8 +177,9 @@ record. Titles are named descriptively only (`AGENTS.md`).
     (`VideoOut.cpp:2565`) validates `flip_mode` and never uses it, so
     titles that request VSYNC run uncapped. Pacing would cap them at the
     display rate.
-  - Transient snapshots are indexed per command buffer, so each early
-    submission re-captures them.
+  - Closed (2026-10-23): transient snapshots were indexed per command
+    buffer, so each early submission re-captured them. See "Transient
+    snapshots shared by a command pool's command buffers".
 - **Verification.** 635 focused unit tests (state, packets, submission) and
   the graphics diagnostics integration test pass;
   `check_emulator_boundaries.py` passes.
