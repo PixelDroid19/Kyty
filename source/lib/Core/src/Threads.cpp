@@ -16,6 +16,10 @@
 #if defined(__APPLE__)
 #include <pthread.h>
 #elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#include <cerrno>
+#include <climits>
+#include <ctime>
+#include <linux/futex.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -33,6 +37,10 @@
 
 //#define KYTY_DEBUG_LOCKS
 //#define KYTY_DEBUG_LOCKS_TIMED
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED))
+#define KYTY_FUTEX_CV
+#endif
 
 #ifdef KYTY_SDL_THREADS
 #include <SDL3/SDL_error.h>
@@ -166,10 +174,40 @@ struct CondVarPrivate
 	}
 	KYTY_CLASS_NO_COPY(CondVarPrivate);
 	SDL_Condition* sdl;
+#elif defined(KYTY_FUTEX_CV)
+	// Waiters sleep on the sequence word and each signal advances it, so a
+	// signal never waits for a waiter. glibc's condition variable before 2.41
+	// can make a signal wait until earlier waiters leave their futex, which a
+	// waiter suspended inside its wait does only once it resumes.
+	std::atomic<uint32_t> sequence {0};
+	std::atomic<uint32_t> waiters {0};
 #else
 	std::condition_variable_any m_cv;
 #endif
 };
+
+#ifdef KYTY_FUTEX_CV
+static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t));
+
+// Returns false only when the timeout expired. A wake-up, a sequence that
+// changed before the sleep and an interrupting signal all return true, as a
+// condition variable may wake spuriously.
+static bool FutexWait(std::atomic<uint32_t>* word, uint32_t expected, const timespec* timeout)
+{
+	if (::syscall(SYS_futex, reinterpret_cast<uint32_t*>(word), FUTEX_WAIT_PRIVATE, expected, timeout, nullptr, 0) == 0)
+	{
+		return true;
+	}
+	const int error = errno;
+	EXIT_IF(error != EAGAIN && error != EINTR && error != ETIMEDOUT);
+	return error != ETIMEDOUT;
+}
+
+static void FutexWake(std::atomic<uint32_t>* word, int count)
+{
+	EXIT_IF(::syscall(SYS_futex, reinterpret_cast<uint32_t*>(word), FUTEX_WAKE_PRIVATE, count, nullptr, nullptr, 0) < 0);
+}
+#endif
 
 class WaitForGraph
 {
@@ -759,6 +797,16 @@ CondVar::~CondVar()
 
 void CondVar::Wait(Mutex* mutex)
 {
+#ifdef KYTY_FUTEX_CV
+	// The waiter count and the sequence form a Dekker pair with Signal: either
+	// the signal sees this waiter or this waiter sees the new sequence.
+	m_cond_var->waiters.fetch_add(1);
+	const uint32_t sequence = m_cond_var->sequence.load();
+	mutex->Unlock();
+	(void)FutexWait(&m_cond_var->sequence, sequence, nullptr);
+	m_cond_var->waiters.fetch_sub(1);
+	mutex->Lock();
+#else
 #if defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)
 	std::unique_lock<std::recursive_timed_mutex> cpp_lock(mutex->m_mutex->m_mutex, std::adopt_lock_t());
 #else
@@ -794,11 +842,23 @@ void CondVar::Wait(Mutex* mutex)
 #else
 	cpp_lock.release();
 #endif
+#endif
 }
 
 bool CondVar::WaitFor(Mutex* mutex, uint32_t micros)
 {
 	bool ok = false;
+#ifdef KYTY_FUTEX_CV
+	timespec timeout {};
+	timeout.tv_sec  = static_cast<time_t>(micros / 1000000u);
+	timeout.tv_nsec = static_cast<long>(micros % 1000000u) * 1000;
+	m_cond_var->waiters.fetch_add(1);
+	const uint32_t sequence = m_cond_var->sequence.load();
+	mutex->Unlock();
+	ok = FutexWait(&m_cond_var->sequence, sequence, &timeout);
+	m_cond_var->waiters.fetch_sub(1);
+	mutex->Lock();
+#else
 #if defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)
 	std::unique_lock<std::recursive_timed_mutex> cpp_lock(mutex->m_mutex->m_mutex, std::adopt_lock_t());
 #else
@@ -817,12 +877,19 @@ bool CondVar::WaitFor(Mutex* mutex, uint32_t micros)
 	ok = (m_cond_var->m_cv.wait_for(cpp_lock, std::chrono::microseconds(micros)) == std::cv_status::no_timeout);
 	cpp_lock.release();
 #endif
+#endif
 	return ok;
 }
 
 void CondVar::Signal()
 {
-#if !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)) && defined(KYTY_WIN_CS)
+#ifdef KYTY_FUTEX_CV
+	m_cond_var->sequence.fetch_add(1);
+	if (m_cond_var->waiters.load() != 0)
+	{
+		FutexWake(&m_cond_var->sequence, 1);
+	}
+#elif !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)) && defined(KYTY_WIN_CS)
 	static auto func = ResolveWakeConditionVariable();
 	EXIT_NOT_IMPLEMENTED(func == nullptr);
 	func(&m_cond_var->m_cv);
@@ -845,7 +912,13 @@ size_t CondVar::NativeObjectSize() const
 
 void CondVar::SignalAll()
 {
-#if !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)) && defined(KYTY_WIN_CS)
+#ifdef KYTY_FUTEX_CV
+	m_cond_var->sequence.fetch_add(1);
+	if (m_cond_var->waiters.load() != 0)
+	{
+		FutexWake(&m_cond_var->sequence, INT_MAX);
+	}
+#elif !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)) && defined(KYTY_WIN_CS)
 	static auto func = ResolveWakeAllConditionVariable();
 	EXIT_NOT_IMPLEMENTED(func == nullptr);
 	func(&m_cond_var->m_cv);

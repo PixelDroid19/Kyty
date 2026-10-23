@@ -1,4 +1,5 @@
 #include "Kyty/Core/File.h"
+#include "Kyty/Core/Threads.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
@@ -290,6 +291,9 @@ namespace {
 std::atomic<uint32_t> g_context_handler_calls {0};
 // The handler runs on the thread the request was raised on.
 thread_local std::atomic<uint32_t>* t_context_handler_calls = nullptr;
+// While set, the handler keeps the thread inside it, as a collector keeps a
+// stopped thread.
+thread_local std::atomic_bool* t_context_hold = nullptr;
 
 // Guest signal-30 handler: PS5Util's collector handshake receives (signum, ucontext, 0).
 int KYTY_SYSV_ABI CountContextHandler(int signum, void* context, void* /*unused*/)
@@ -300,6 +304,10 @@ int KYTY_SYSV_ABI CountContextHandler(int signum, void* context, void* /*unused*
 		if (t_context_handler_calls != nullptr)
 		{
 			t_context_handler_calls->fetch_add(1, std::memory_order_acq_rel);
+		}
+		while (t_context_hold != nullptr && t_context_hold->load(std::memory_order_acquire))
+		{
+			std::this_thread::yield();
 		}
 	}
 	return 0;
@@ -366,6 +374,33 @@ void* KYTY_SYSV_ABI RunContextTarget(void* arg)
 		}
 	}
 	t_context_handler_calls = nullptr;
+	return nullptr;
+}
+
+struct StoppedWaiterTarget
+{
+	Core::Mutex           mutex;
+	Core::CondVar         cond_var;
+	bool                  done = false;
+	std::atomic<uint32_t> calls {0};
+	std::atomic_bool      hold {true};
+};
+
+// Waits on the condition, a safe point, until done.
+void* KYTY_SYSV_ABI RunConditionWaiter(void* arg)
+{
+	auto* target            = static_cast<StoppedWaiterTarget*>(arg);
+	t_context_handler_calls = &target->calls;
+	t_context_hold          = &target->hold;
+	{
+		Core::LockGuard lock(target->mutex);
+		while (!target->done)
+		{
+			Kernel::PthreadInterruptibleWait(&target->cond_var, &target->mutex);
+		}
+	}
+	t_context_handler_calls = nullptr;
+	t_context_hold          = nullptr;
 	return nullptr;
 }
 
@@ -491,6 +526,55 @@ TEST(EmulatorKernelProcess, ContextRequestInterruptsGuestCode)
 
 	Emulator::GuestCodeRanges::Remove(begin, begin + kPageSize);
 	EXPECT_EQ(munmap(code, kPageSize), 0);
+}
+
+// A collector keeps a stopped thread inside its handler, here inside a
+// condition wait, and may itself wait for the thread that signals that
+// condition. The signal must not wait for the stopped waiter to leave, which
+// glibc's condition variable before 2.41 does once a newer waiter has joined.
+TEST(EmulatorKernelProcess, ConditionSignalDoesNotWaitForStoppedWaiter)
+{
+	EnsureKernelProcessSubsystems();
+	ASSERT_TRUE(InstallCountContextHandler());
+	ScopedContextRuntimePort port;
+
+	StoppedWaiterTarget target;
+	Kernel::Pthread     thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, RunConditionWaiter, &target, "condition-waiter"), OK);
+	ASSERT_EQ(LibKernel::KernelRaiseException(thread, 30), OK);
+	EXPECT_TRUE(WaitForContextCalls(target.calls, 1));
+
+	// The first signal goes to the stopped waiter; a second waiter then joins.
+	target.cond_var.Signal();
+	std::atomic_bool second_waiting {false};
+	std::thread      second(
+	    [&target, &second_waiting]()
+	    {
+		    Core::LockGuard lock(target.mutex);
+		    second_waiting.store(true, std::memory_order_release);
+		    (void)target.cond_var.WaitFor(&target.mutex, 5'000'000);
+	    });
+	while (!second_waiting.load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+	{
+		// Taking the mutex proves the second waiter released it inside its wait.
+		Core::LockGuard lock(target.mutex);
+	}
+	auto signal = std::async(std::launch::async, [&target]() { target.cond_var.Signal(); });
+	EXPECT_EQ(signal.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+
+	target.hold.store(false, std::memory_order_release);
+	signal.wait();
+	{
+		Core::LockGuard lock(target.mutex);
+		target.done = true;
+	}
+	target.cond_var.SignalAll();
+	second.join();
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(target.calls.load(), 1u);
 }
 #endif
 

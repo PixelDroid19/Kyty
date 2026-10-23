@@ -1,5 +1,7 @@
 #include "Emulator/Kernel/SyncOnAddress.h"
 
+#include "Kyty/Core/Threads.h"
+
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Time.h"
@@ -9,7 +11,6 @@
 #include <algorithm>
 #include <chrono>
 #include <climits>
-#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -29,10 +30,10 @@ constexpr int64_t  kNanosecondsPerSecond = 1000000000;
 
 struct AddressWaitState
 {
-	std::mutex              mutex;
-	std::condition_variable cv;
-	uint64_t                generation = 0;
-	uint32_t                waiter_count = 0;
+	Core::Mutex   mutex;
+	Core::CondVar cv;
+	uint64_t      generation   = 0;
+	uint32_t      waiter_count = 0;
 };
 
 std::mutex g_address_map_mutex;
@@ -53,7 +54,7 @@ WaitRegistration RegisterWaiter(uint64_t address)
 		slot = std::make_shared<AddressWaitState>();
 	}
 
-	std::lock_guard state_lock(slot->mutex);
+	Core::LockGuard state_lock(slot->mutex);
 	slot->waiter_count++;
 	return {slot, slot->generation};
 }
@@ -67,7 +68,7 @@ void UnregisterWaiter(uint64_t address, const std::shared_ptr<AddressWaitState>&
 		return;
 	}
 
-	std::lock_guard state_lock(state->mutex);
+	Core::LockGuard state_lock(state->mutex);
 	EXIT_IF(state->waiter_count == 0);
 	state->waiter_count--;
 	if (state->waiter_count == 0)
@@ -79,6 +80,7 @@ void UnregisterWaiter(uint64_t address, const std::shared_ptr<AddressWaitState>&
 int WakeRegisteredWaiters(uint64_t address, int64_t wake_count)
 {
 	std::shared_ptr<AddressWaitState> state;
+	uint32_t                          waiters = 0;
 	{
 		std::unique_lock map_lock(g_address_map_mutex);
 		const auto        it = g_address_states.find(address);
@@ -88,27 +90,30 @@ int WakeRegisteredWaiters(uint64_t address, int64_t wake_count)
 		}
 
 		state = it->second;
-		std::lock_guard state_lock(state->mutex);
+		Core::LockGuard state_lock(state->mutex);
 		state->generation++;
+		waiters = state->waiter_count;
 	}
 
-	const int releases =
-	    (wake_count > 0 && wake_count < INT64_MAX) ? static_cast<int>(std::min<int64_t>(wake_count, INT32_MAX)) : INT32_MAX;
-	if (releases <= 1)
+	// A count of zero or less wakes every waiter, as does any count that covers
+	// all of them; otherwise one signal per released waiter.
+	if (wake_count <= 0 || wake_count >= static_cast<int64_t>(waiters))
 	{
-		state->cv.notify_one();
-	} else if (releases >= INT32_MAX)
-	{
-		state->cv.notify_all();
-	} else
-	{
-		for (int i = 0; i < releases; i++)
-		{
-			state->cv.notify_one();
-		}
+		state->cv.SignalAll();
+		return OK;
 	}
-
+	for (int64_t i = 0; i < wake_count; i++)
+	{
+		state->cv.Signal();
+	}
 	return OK;
+}
+
+// Rounds up so a timed wait never ends before its deadline, and caps a long
+// one; the caller waits again for the rest.
+uint32_t WaitMicros(std::chrono::nanoseconds remaining)
+{
+	return static_cast<uint32_t>(std::min<int64_t>(std::chrono::ceil<std::chrono::microseconds>(remaining).count(), UINT32_MAX));
 }
 
 // Blocks while the value at address equals expected, until a wake, a change
@@ -117,26 +122,28 @@ template <typename T>
 int WaitWhileEqual(uint64_t address, T expected, const std::chrono::nanoseconds* timeout)
 {
 	const auto registration = RegisterWaiter(address);
-	int        result       = OK;
+	auto*      state        = registration.state.get();
+	auto*      value        = reinterpret_cast<const T*>(address);
+	const auto changed      = [&]()
+	{ return state->generation != registration.generation || __atomic_load_n(value, __ATOMIC_ACQUIRE) != expected; };
+	const auto deadline = std::chrono::steady_clock::now() + (timeout != nullptr ? *timeout : std::chrono::nanoseconds::zero());
+	int        result   = OK;
 	{
-		std::unique_lock          state_lock(registration.state->mutex);
-		PthreadInterruptibleScope wait_scope(&registration.state->cv, sizeof(registration.state->cv));
-		auto*                     value      = reinterpret_cast<const T*>(address);
-		const auto       load_value = [&]() { return __atomic_load_n(value, __ATOMIC_ACQUIRE); };
-		if (load_value() == expected)
+		Core::LockGuard state_lock(state->mutex);
+		while (!changed())
 		{
-			const auto changed = [&]() { return registration.state->generation != registration.generation || load_value() != expected; };
 			if (timeout == nullptr)
 			{
-				registration.state->cv.wait(state_lock, changed);
-			} else
-			{
-				const auto deadline = std::chrono::steady_clock::now() + *timeout;
-				if (!registration.state->cv.wait_until(state_lock, deadline, changed) && load_value() == expected)
-				{
-					result = KERNEL_ERROR_ETIMEDOUT;
-				}
+				PthreadInterruptibleWait(&state->cv, &state->mutex);
+				continue;
 			}
+			const auto remaining = deadline - std::chrono::steady_clock::now();
+			if (remaining <= std::chrono::nanoseconds::zero())
+			{
+				result = KERNEL_ERROR_ETIMEDOUT;
+				break;
+			}
+			PthreadInterruptibleWaitFor(&state->cv, &state->mutex, WaitMicros(remaining));
 		}
 	}
 

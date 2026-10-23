@@ -54,6 +54,14 @@ record. Titles are named descriptively only (`AGENTS.md`).
     semaphores, condition variables (wait, signal and broadcast), contended
     mutex and rwlock acquisitions, address waits, static-initialisation
     waits, sleeps, joins, blocking socket calls and the socket-close drain.
+  - On Linux `Core::CondVar` sleeps on a sequence word that every signal
+    advances, so a signal never waits for a waiter. glibc's condition
+    variable before 2.41 can make a signal wait until earlier waiters drop
+    their group reference, and a waiter stopped inside its wait keeps that
+    reference for the whole collection. The address waits, the
+    static-initialisation and once waits and the socket and epoll close
+    drains moved from `std::condition_variable` to `Core::CondVar`; an
+    address wake signals at most the registered waiters.
   - Requests coalesce: one raised while another is pending or running is
     answered by that delivery, or by a new delivery right after the handler
     returns. A request for a created thread that has not started is
@@ -84,6 +92,16 @@ record. Titles are named descriptively only (`AGENTS.md`).
     delivered later. The insect platformer, its sequel, the preschool title
     and the 2D Unity action title, all IL2CPP, held the 60 fps limit for
     45 s each with no stop.
+  - Condition signals: a standalone reproduction holds a waiter in a signal
+    handler inside its wait, signals once, adds a second waiter and signals
+    again. With glibc 2.36 the second `pthread_cond_signal` stayed blocked
+    until the held waiter resumed (1000 ms); the sequence-word design
+    returned after 1.1 ms; with glibc 2.44 both returned. The unit test
+    `ConditionSignalDoesNotWaitForStoppedWaiter` runs that sequence on
+    `Core::CondVar` through a held context handler (20 of 20 repeats); CI
+    runs it on Ubuntu 24.04 (glibc 2.39). Emulator unit suite 2450 passed;
+    the fishing title was interactive at 60 fps after 45 s and the four
+    IL2CPP titles ran 45 s each with no stop.
 - **Open.**
   - Host locks held across guest code: the module linker's mutex during
     module initialisation and finalisation, the NGS2 dispatch mutex during
@@ -95,9 +113,10 @@ record. Titles are named descriptively only (`AGENTS.md`).
     labels, fibers, audio sleeps and `poll`. A request to a thread blocked
     there waits until the thread returns to guest code. GPU idle waits run
     under the submission admission mutex, so they cannot simply be declared.
-  - glibc before 2.41: a condition-variable signal can block until a stopped
-    waiter drops its group reference. Guest condition variables are covered
-    by their scopes; host `Core::CondVar` signals are not.
+  - Guest condition variables still use glibc's. Before glibc 2.41 a guest
+    signal that waits for a stopped waiter is a safe point, so another
+    thread's signal cannot hold up a collection, but a signal from the
+    collecting thread would wait for a thread it stopped itself.
   - Code generated at run time is not in the guest code table.
 
 ## Transient snapshots shared by a command pool's command buffers (2026-10-23)

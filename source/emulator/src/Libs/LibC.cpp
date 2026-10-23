@@ -35,7 +35,6 @@
 #include <array>
 #include <atomic>
 #include <cmath>
-#include <condition_variable>
 #include <cstddef>
 #include <clocale>
 #include <cstdarg>
@@ -1037,8 +1036,8 @@ static KYTY_SYSV_ABI void c_abort()
 
 namespace {
 
-std::mutex                                       g_static_init_mutex;
-std::condition_variable                          g_static_init_cv;
+Core::Mutex                                      g_static_init_mutex;
+Core::CondVar                                    g_static_init_cv;
 std::unordered_map<const void*, std::thread::id> g_static_init_owner;
 
 } // namespace
@@ -1068,7 +1067,7 @@ static KYTY_SYSV_ABI int c_cxa_guard_acquire(uint64_t* g)
 			return 0;
 		}
 
-		std::unique_lock lock(g_static_init_mutex);
+		Core::LockGuard lock(g_static_init_mutex);
 		val = guard->load(std::memory_order_acquire);
 		if ((val & 0x01) != 0)
 		{
@@ -1087,8 +1086,10 @@ static KYTY_SYSV_ABI int c_cxa_guard_acquire(uint64_t* g)
 			       static_cast<void*>(g));
 			return 0;
 		}
-		Kernel::PthreadInterruptibleScope wait_scope(&g_static_init_cv, sizeof(g_static_init_cv));
-		g_static_init_cv.wait(lock, [guard] { return (guard->load(std::memory_order_acquire) & 0xFF01) != 0x0100; });
+		while ((guard->load(std::memory_order_acquire) & 0xFF01) == 0x0100)
+		{
+			Kernel::PthreadInterruptibleWait(&g_static_init_cv, &g_static_init_mutex);
+		}
 	}
 }
 static KYTY_SYSV_ABI void c_cxa_guard_release(uint64_t* g)
@@ -1099,12 +1100,12 @@ static KYTY_SYSV_ABI void c_cxa_guard_release(uint64_t* g)
 	}
 	auto* guard = reinterpret_cast<std::atomic<uint64_t>*>(g);
 	{
-		std::lock_guard lock(g_static_init_mutex);
+		Core::LockGuard lock(g_static_init_mutex);
 		const uint64_t  val = guard->load(std::memory_order_relaxed);
 		guard->store((val & ~static_cast<uint64_t>(0xFFFF)) | 0x0001, std::memory_order_release);
 		g_static_init_owner.erase(g);
 	}
-	g_static_init_cv.notify_all();
+	g_static_init_cv.SignalAll();
 }
 static KYTY_SYSV_ABI void c_cxa_guard_abort(uint64_t* g)
 {
@@ -1114,12 +1115,12 @@ static KYTY_SYSV_ABI void c_cxa_guard_abort(uint64_t* g)
 	}
 	auto* guard = reinterpret_cast<std::atomic<uint64_t>*>(g);
 	{
-		std::lock_guard lock(g_static_init_mutex);
+		Core::LockGuard lock(g_static_init_mutex);
 		const uint64_t  val = guard->load(std::memory_order_relaxed);
 		guard->store(val & ~static_cast<uint64_t>(0xFFFF), std::memory_order_release);
 		g_static_init_owner.erase(g);
 	}
-	g_static_init_cv.notify_all();
+	g_static_init_cv.SignalAll();
 }
 
 using execute_once_callback_t = KYTY_SYSV_ABI int (*)(void*, void*, void**);
@@ -1141,12 +1142,12 @@ KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, vo
 	constexpr int once_complete      = 2;
 
 	{
-		std::unique_lock                  lock(g_static_init_mutex);
-		Kernel::PthreadInterruptibleScope wait_scope(&g_static_init_cv, sizeof(g_static_init_cv));
-		g_static_init_cv.wait(lock, [flag] {
-			return reinterpret_cast<std::atomic<uint32_t>*>(flag)->load(std::memory_order_acquire) != once_running;
-		});
-		auto* once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
+		Core::LockGuard lock(g_static_init_mutex);
+		auto*           once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
+		while (once_flag->load(std::memory_order_acquire) == once_running)
+		{
+			Kernel::PthreadInterruptibleWait(&g_static_init_cv, &g_static_init_mutex);
+		}
 		if (once_flag->load(std::memory_order_acquire) == once_complete)
 		{
 			return 0;
@@ -1159,12 +1160,12 @@ KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, vo
 	const int result          = callback(flag, context, &callback_result);
 
 	{
-		std::lock_guard lock(g_static_init_mutex);
-		auto*            once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
+		Core::LockGuard lock(g_static_init_mutex);
+		auto*           once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
 		once_flag->store(result != 0 ? once_complete : once_uninitialized, std::memory_order_release);
 		g_static_init_owner.erase(flag);
 	}
-	g_static_init_cv.notify_all();
+	g_static_init_cv.SignalAll();
 	return result != 0 ? 0 : LibKernel::KERNEL_ERROR_EAGAIN;
 }
 

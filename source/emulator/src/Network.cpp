@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
-#include <condition_variable>
 #include <cstddef>
 #include <cstring>
 #include <limits>
@@ -929,8 +928,8 @@ constexpr uint32_t kGuestSockaddrIn6  = 28;
 
 struct SocketState
 {
-	std::mutex              mutex;
-	std::condition_variable operations_done;
+	Core::Mutex             mutex;
+	Core::CondVar           operations_done;
 	bool                    closing    = false;
 	uint32_t                operations = 0;
 	bool                    datagram   = false;
@@ -1004,7 +1003,7 @@ static bool BeginSocketOperation(const SocketStatePtr& state, int* host_fd)
 		return false;
 	}
 
-	std::lock_guard lock(state->mutex);
+	Core::LockGuard lock(state->mutex);
 	if (state->closing || state->host_fd < 0)
 	{
 		return false;
@@ -1016,12 +1015,12 @@ static bool BeginSocketOperation(const SocketStatePtr& state, int* host_fd)
 
 static void EndSocketOperation(const SocketStatePtr& state)
 {
-	std::lock_guard lock(state->mutex);
+	Core::LockGuard lock(state->mutex);
 	EXIT_IF(state->operations == 0);
 	state->operations--;
 	if (state->operations == 0)
 	{
-		state->operations_done.notify_all();
+		state->operations_done.SignalAll();
 	}
 }
 
@@ -1041,7 +1040,7 @@ static bool SocketIsDatagram(const SocketStatePtr& state)
 	{
 		return false;
 	}
-	std::lock_guard lock(state->mutex);
+	Core::LockGuard lock(state->mutex);
 	return state->datagram;
 }
 
@@ -1694,7 +1693,7 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 	GuestSockaddr p2p_local {};
 	bool          p2p_bound = false;
 	{
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		p2p_bound = state->p2p && state->bound;
 		p2p_local = state->local;
 	}
@@ -1706,7 +1705,7 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 #if KYTY_NET_HOST_POSIX
 	int host_fd = -1;
 	{
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		state->closing = true;
 		host_fd        = state->host_fd;
 	}
@@ -1719,9 +1718,11 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 		(void)::shutdown(host_fd, SHUT_RDWR);
 	}
 	{
-		std::unique_lock                  lock(state->mutex);
-		Kernel::PthreadInterruptibleScope wait_scope(&state->operations_done, sizeof(state->operations_done));
-		state->operations_done.wait(lock, [&state]() { return state->operations == 0; });
+		Core::LockGuard lock(state->mutex);
+		while (state->operations != 0)
+		{
+			Kernel::PthreadInterruptibleWait(&state->operations_done, &state->mutex);
+		}
 	}
 #if KYTY_NET_HOST_EPOLL
 	if (host_fd >= 0)
@@ -1730,7 +1731,7 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 	}
 #endif
 	{
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		state->host_fd = -1;
 	}
 	if (host_fd >= 0)
@@ -1738,7 +1739,7 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 		(void)::close(host_fd);
 	}
 #else
-	std::lock_guard lock(state->mutex);
+	Core::LockGuard lock(state->mutex);
 	state->closing = true;
 #endif
 
@@ -1928,7 +1929,7 @@ int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 	#endif
 
 	{
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		if (!state->closing)
 		{
 			state->bound = true;
@@ -1985,7 +1986,7 @@ int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
 	}
 #endif
 
-	std::lock_guard lock(state->mutex);
+	Core::LockGuard lock(state->mutex);
 	if (state->closing)
 	{
 		return NET_ERROR_EBADF;
@@ -2113,7 +2114,7 @@ int KYTY_SYSV_ABI NetSocketAbort(int id, int flags)
 	}
 	EXIT_NOT_IMPLEMENTED(flags != 0);
 #if KYTY_NET_HOST_POSIX
-	std::lock_guard lock(state->mutex);
+	Core::LockGuard lock(state->mutex);
 	if (state->operations == 0 || state->host_fd < 0)
 	{
 		return NET_ERROR_ENOTBLK;
@@ -2765,7 +2766,7 @@ int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len)
 	}
 	GuestSockaddr stored {};
 	{
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		if (state->closing)
 		{
 			return NET_ERROR_EBADF;
@@ -2866,7 +2867,7 @@ int KYTY_SYSV_ABI NetFcntl(int id, int command, int64_t argument)
 	constexpr uint32_t guest_o_nonblock = 0x0004u;
 	if (command == guest_f_getfl)
 	{
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		return static_cast<int>(guest_o_rdwr | state->status_flags);
 	}
 	if (command != guest_f_getfd && command != guest_f_setfd && command != guest_f_setfl)
@@ -2904,7 +2905,7 @@ int KYTY_SYSV_ABI NetFcntl(int id, int command, int64_t argument)
 	}
 	if (command == guest_f_setfl)
 	{
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		state->status_flags = static_cast<uint32_t>(argument) & guest_o_nonblock;
 	}
 	return host_result;
@@ -2941,7 +2942,7 @@ int KYTY_SYSV_ABI NetGetsockopt(int id, int level, int option, void* value, int*
 		return NET_ERROR_EINVAL;
 	}
 	{
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		if (state->closing)
 		{
 			return NET_ERROR_EBADF;
@@ -3114,7 +3115,7 @@ int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* value
 		return NET_ERROR_EBADF;
 	}
 	{
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		if (state->closing)
 		{
 			return NET_ERROR_EBADF;
@@ -3168,7 +3169,7 @@ int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* value
 	{
 		int enable = 0;
 		std::memcpy(&enable, bytes, sizeof(enable));
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		state->status_flags = enable != 0 ? (state->status_flags | 0x0004u) : (state->status_flags & ~0x0004u);
 	}
 	return OK;
@@ -3263,8 +3264,8 @@ struct NetEpollRegistration
 // closes descriptors only after all outstanding leases finish.
 struct NetEpollState
 {
-	std::mutex                                      mutex;
-	std::condition_variable                         operations_done;
+	Core::Mutex                                     mutex;
+	Core::CondVar                                   operations_done;
 	bool                                            closing    = false;
 	uint32_t                                        operations = 0;
 	uint64_t                                        generation = 0;
@@ -3300,7 +3301,7 @@ static bool BeginEpollOperation(const NetEpollStatePtr& state, int* host_fd, int
 		return false;
 	}
 
-	std::lock_guard lock(state->mutex);
+	Core::LockGuard lock(state->mutex);
 	if (state->closing || state->host_fd < 0 || state->wake_fd < 0)
 	{
 		return false;
@@ -3314,18 +3315,18 @@ static bool BeginEpollOperation(const NetEpollStatePtr& state, int* host_fd, int
 
 static void EndEpollOperation(const NetEpollStatePtr& state)
 {
-	std::lock_guard lock(state->mutex);
+	Core::LockGuard lock(state->mutex);
 	EXIT_IF(state->operations == 0);
 	state->operations--;
 	if (state->operations == 0)
 	{
-		state->operations_done.notify_all();
+		state->operations_done.SignalAll();
 	}
 }
 
 static bool IsEpollCurrent(const NetEpollStatePtr& state, uint64_t generation)
 {
-	std::lock_guard lock(state->mutex);
+	Core::LockGuard lock(state->mutex);
 	return !state->closing && state->generation == generation;
 }
 
@@ -3372,7 +3373,7 @@ static void PurgeSocketFromEpolls(int socket_id, int host_socket_fd)
 		(void)wake_fd;
 		(void)::epoll_ctl(host_epoll_fd, EPOLL_CTL_DEL, host_socket_fd, nullptr);
 		{
-			std::lock_guard lock(state->mutex);
+			Core::LockGuard lock(state->mutex);
 			if (!state->closing && state->generation == generation)
 			{
 				state->registrations.erase(socket_id);
@@ -3454,7 +3455,7 @@ int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id)
 	int host_fd = -1;
 	int wake_fd = -1;
 	{
-		std::lock_guard lock(state->mutex);
+		Core::LockGuard lock(state->mutex);
 		state->closing = true;
 		state->generation++;
 		host_fd = state->host_fd;
@@ -3465,9 +3466,11 @@ int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id)
 		WakeEpoll(wake_fd);
 	}
 	{
-		std::unique_lock                  lock(state->mutex);
-		Kernel::PthreadInterruptibleScope wait_scope(&state->operations_done, sizeof(state->operations_done));
-		state->operations_done.wait(lock, [&state]() { return state->operations == 0; });
+		Core::LockGuard lock(state->mutex);
+		while (state->operations != 0)
+		{
+			Kernel::PthreadInterruptibleWait(&state->operations_done, &state->mutex);
+		}
 		state->host_fd = -1;
 		state->wake_fd = -1;
 		state->registrations.clear();
@@ -3575,7 +3578,7 @@ int KYTY_SYSV_ABI NetEpollControl(int epoll_id, int operation, int socket_id, co
 		result = HostErrnoToNet(control_errno);
 	} else
 	{
-		std::lock_guard lock(epoll_state->mutex);
+		Core::LockGuard lock(epoll_state->mutex);
 		if (epoll_state->closing || epoll_state->generation != generation)
 		{
 			result = NET_ERROR_EBADF;
@@ -3671,7 +3674,7 @@ int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int t
 		}
 		NetEpollRegistration registration {};
 		{
-			std::lock_guard lock(epoll_state->mutex);
+			Core::LockGuard lock(epoll_state->mutex);
 			if (epoll_state->closing || epoll_state->generation != generation)
 			{
 				cancelled = true;
