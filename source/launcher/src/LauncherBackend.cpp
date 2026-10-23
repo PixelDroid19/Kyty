@@ -124,6 +124,16 @@ QString FormatPsfValue(const QVariant& value)
 
 LauncherBackend* g_backend = nullptr;
 
+// The look and library settings with their defaults; each is stored under its key in the launcher group.
+QVariantMap LookDefaults()
+{
+	return {{"accent", "Blue"},       {"interface_size", "Normal"}, {"animations", "Full"}, {"background", "Artwork"},
+	        {"cover_size", "Medium"}, {"show_titles", true},        {"show_recent", true},  {"on_launch", "Minimize"}};
+}
+
+// Scale of every size for each interface_size, in the order of its choices.
+constexpr qreal INTERFACE_SCALES[] = {0.88, 1, 1.14, 1.3};
+
 } // namespace
 
 LauncherBackend::LauncherBackend(QObject* parent)
@@ -137,6 +147,7 @@ LauncherBackend::LauncherBackend(QObject* parent)
 	Load();
 	ApplyColorScheme();
 	ApplyLanguage();
+	ApplyLook();
 
 	connect(&m_runner, &EmulatorRunner::Probed, this, &LauncherBackend::OnProbed);
 	connect(&m_runner, &EmulatorRunner::Finished, this, &LauncherBackend::OnFinished);
@@ -187,6 +198,16 @@ void LauncherBackend::Load()
 	m_table_view         = settings->value("table_view", false).toBool();
 	m_color_scheme       = settings->value("color_scheme", SYSTEM_CHOICE).toString();
 	m_language           = settings->value("language", SYSTEM_CHOICE).toString();
+	m_look               = LookDefaults();
+	for (auto it = m_look.begin(); it != m_look.end(); ++it)
+	{
+		// A value edited by hand that the launcher does not know keeps the default.
+		const auto value = settings->value(it.key(), it.value());
+		if (IsValidLook(it.key(), value))
+		{
+			*it = it.value().typeId() == QMetaType::Bool ? QVariant(value.toBool()) : QVariant(value.toString());
+		}
+	}
 	settings->endGroup();
 
 	settings->beginGroup(SETTINGS_WINDOW);
@@ -214,6 +235,10 @@ void LauncherBackend::Save() const
 	settings->setValue("table_view", m_table_view);
 	settings->setValue("color_scheme", m_color_scheme);
 	settings->setValue("language", m_language);
+	for (auto it = m_look.cbegin(); it != m_look.cend(); ++it)
+	{
+		settings->setValue(it.key(), it.value());
+	}
 	settings->endGroup();
 
 	if (m_window_geometry.isValid())
@@ -356,14 +381,51 @@ QVariantMap LauncherBackend::Choices() const
 	choices["color_scheme"] = QStringList {SYSTEM_CHOICE, "Dark", "Light"};
 	// Languages with a translation built in, and English, which the texts are written in.
 	choices["language"] = QStringList {SYSTEM_CHOICE, "en", "es", "ru"};
+	// Accent and animations are listed in the order of Theme's enums.
+	choices["accent"]         = QStringList {"Blue", "Violet", "Green", "Orange", "Pink"};
+	choices["interface_size"] = QStringList {"Compact", "Normal", "Large", "ExtraLarge"};
+	choices["animations"]     = QStringList {"Full", "Reduced", "Off"};
+	choices["background"]     = QStringList {"Artwork", "Dimmed", "Plain"};
+	choices["cover_size"]     = QStringList {"Small", "Medium", "Large"};
+	choices["on_launch"]      = QStringList {"Minimize", "KeepOpen"};
 	return choices;
 }
 
 QVariantMap LauncherBackend::LauncherFields() const
 {
-	return {{"run_mode", m_run_modes.contains(m_run_mode) ? m_run_mode : QString(EmulatorRunner::DIRECT_MODE)},
-	        {"color_scheme", m_color_scheme},
-	        {"language", m_language}};
+	auto fields            = m_look;
+	fields["run_mode"]     = m_run_modes.contains(m_run_mode) ? m_run_mode : QString(EmulatorRunner::DIRECT_MODE);
+	fields["color_scheme"] = m_color_scheme;
+	fields["language"]     = m_language;
+	return fields;
+}
+
+bool LauncherBackend::IsValidLook(const QString& key, const QVariant& value) const
+{
+	const auto fallback = LookDefaults().value(key);
+	if (!fallback.isValid())
+	{
+		return false;
+	}
+	if (fallback.typeId() == QMetaType::Bool)
+	{
+		return value.canConvert<bool>();
+	}
+	return Choices().value(key).toStringList().contains(value.toString());
+}
+
+qreal LauncherBackend::InterfaceScale() const
+{
+	const auto index = Choices().value("interface_size").toStringList().indexOf(m_look.value("interface_size").toString());
+	return INTERFACE_SCALES[std::max<qsizetype>(0, index)];
+}
+
+void LauncherBackend::ApplyLook()
+{
+	const auto choices = Choices();
+	auto*      theme   = Theme::Instance();
+	theme->SetAccent(static_cast<Theme::AccentColor>(choices.value("accent").toStringList().indexOf(m_look.value("accent").toString())));
+	theme->SetMotion(static_cast<Theme::Motion>(choices.value("animations").toStringList().indexOf(m_look.value("animations").toString())));
 }
 
 void LauncherBackend::SetLauncherField(const QString& key, const QVariant& value)
@@ -381,9 +443,14 @@ void LauncherBackend::SetLauncherField(const QString& key, const QVariant& value
 		m_language = text;
 		ApplyLanguage();
 		emit LanguageChanged();
+	} else if (IsValidLook(key, value))
+	{
+		m_look[key] = m_look.value(key).typeId() == QMetaType::Bool ? QVariant(value.toBool()) : QVariant(text);
+		ApplyLook();
+		emit AppearanceChanged();
 	} else
 	{
-		qWarning("Unknown launcher setting %s", qPrintable(key));
+		qWarning("Unknown launcher setting or value %s", qPrintable(key));
 		return;
 	}
 	Save();

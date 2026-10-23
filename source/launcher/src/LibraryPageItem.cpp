@@ -33,6 +33,8 @@ constexpr qreal STATUS_SPACING   = 22;
 constexpr qreal DOT              = 8;
 constexpr qreal DOT_GAP          = 8;
 constexpr qreal HERO_TOP         = 20;
+// Smallest cover width for each cover size, in the order of its choices.
+constexpr qreal COVER_SIZES[]    = {104, 128, 168};
 constexpr qreal HERO_BOX         = 176;
 constexpr qreal HERO_GAP         = 12;
 constexpr qreal HERO_HEIGHT      = 136;
@@ -145,7 +147,9 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 	m_menu = new ActionMenuItem(this);
 	m_pad  = new TextPadItem(this);
 
-	auto* backend = LauncherBackend::Instance();
+	auto*      backend = LauncherBackend::Instance();
+	const auto cover   = backend->Choices().value("cover_size").toStringList().indexOf(backend->Look("cover_size").toString());
+	m_grid->SetCoverLook(COVER_SIZES[std::max<qsizetype>(0, cover)], backend->Look("show_titles").toBool());
 	connect(m_hero, &HeroRowItem::Activated, this,
 	        [this](int index) { emit RunRequested(m_recent.value(index).toMap().value("row").toInt()); });
 	connect(m_hero, &HeroRowItem::MenuRequested, this, [this](int index) { OpenMenu(m_recent.value(index).toMap().value("row").toInt()); });
@@ -222,7 +226,7 @@ void LibraryPageItem::Refresh()
 {
 	const auto* backend = LauncherBackend::Instance();
 	m_games             = backend->Games();
-	m_recent            = backend->Recent();
+	m_recent            = backend->Look("show_recent").toBool() ? backend->Recent() : QVariantList();
 	m_hero->SetGames(m_recent);
 	m_hero->setVisible(HasRecent());
 	m_tabs->SetFolders(backend->Folders());

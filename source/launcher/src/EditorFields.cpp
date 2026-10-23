@@ -78,8 +78,18 @@ const QVector<EditorField> PROGRAM_FIELDS = {
 };
 
 const QVector<EditorField> INTERFACE_FIELDS = {
-    {"color_scheme", QT_TRANSLATE_NOOP("EditorPageItem", "Theme"), FieldType::Choice, "color_scheme"},
     {"language", QT_TRANSLATE_NOOP("EditorPageItem", "Language"), FieldType::Choice, "language"},
+    {"color_scheme", QT_TRANSLATE_NOOP("EditorPageItem", "Theme"), FieldType::Choice, "color_scheme", false, nullptr,
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Appearance")},
+    {"accent", QT_TRANSLATE_NOOP("EditorPageItem", "Accent colour"), FieldType::Choice, "accent"},
+    {"interface_size", QT_TRANSLATE_NOOP("EditorPageItem", "Interface size"), FieldType::Choice, "interface_size"},
+    {"animations", QT_TRANSLATE_NOOP("EditorPageItem", "Animations"), FieldType::Choice, "animations"},
+    {"background", QT_TRANSLATE_NOOP("EditorPageItem", "Background"), FieldType::Choice, "background"},
+    {"cover_size", QT_TRANSLATE_NOOP("EditorPageItem", "Cover size"), FieldType::Choice, "cover_size", false, nullptr,
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Library")},
+    {"show_titles", QT_TRANSLATE_NOOP("EditorPageItem", "Names under covers"), FieldType::Toggle},
+    {"show_recent", QT_TRANSLATE_NOOP("EditorPageItem", "Recently played row"), FieldType::Toggle},
+    {"on_launch", QT_TRANSLATE_NOOP("EditorPageItem", "When a game starts"), FieldType::Choice, "on_launch"},
 };
 
 } // namespace

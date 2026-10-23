@@ -15,11 +15,14 @@
 #include <algorithm>
 #include <cmath>
 
-// Sizes in units. Covers are at least MIN_TILE wide; each cell pads its cover by TILE_PADDING.
+// Sizes in units. Covers are at least MIN_TILE wide unless the owner sets another width; each cell pads its cover
+// by TILE_PADDING.
 constexpr qreal MIN_TILE     = 128;
 constexpr qreal TILE_PADDING = 24;
 // Room below a cover for its name, and above it for the focus ring around the grown cover.
 constexpr qreal LABEL_ROOM = 60;
+// Room below a cover without its name.
+constexpr qreal BARE_ROOM  = 28;
 constexpr qreal COVER_TOP  = 12;
 constexpr qreal LABEL_GAP  = 14;
 constexpr qreal HOVER_ZOOM = 1.03;
@@ -42,13 +45,15 @@ struct TileContent
 {
 	GameCard card;
 	bool     current = false;
+	bool     title   = true;
 	qreal    tile    = 0;
 	qreal    u       = 0;
 	qreal    dpr     = 1;
 
 	bool operator==(const TileContent& other) const
 	{
-		return card == other.card && current == other.current && tile == other.tile && u == other.u && dpr == other.dpr;
+		return card == other.card && current == other.current && title == other.title && tile == other.tile && u == other.u &&
+		       dpr == other.dpr;
 	}
 };
 
@@ -76,8 +81,8 @@ public:
 		const auto*  theme = Theme::Instance();
 		const auto   font  = SceneFont(theme->FontSmall());
 		const QRectF label_rect(0, content.tile + LABEL_GAP * content.u, content.tile, QFontMetricsF(font).height());
-		SetTextLine(label, content.card.title, font, content.current ? theme->TextPrimary() : theme->TextSecondary(), label_rect,
-		            Qt::AlignHCenter);
+		SetTextLine(label, content.title ? content.card.title : QString(), font,
+		            content.current ? theme->TextPrimary() : theme->TextSecondary(), label_rect, Qt::AlignHCenter);
 
 		auto* overlay = cover->Overlay();
 		while (auto* child = overlay->firstChild())
@@ -140,6 +145,7 @@ public:
 
 GameGridItem::GameGridItem(QQuickItem* parent): QQuickItem(parent), m_zoom(FOCUS_ZOOM, this), m_hover_zoom(HOVER_ZOOM, this)
 {
+	m_min_tile = MIN_TILE;
 	setFlag(ItemHasContents);
 	setClip(true);
 	setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
@@ -153,6 +159,14 @@ GameGridItem::GameGridItem(QQuickItem* parent): QQuickItem(parent), m_zoom(FOCUS
 		        ShowCurrent(false);
 		        Changed();
 	        });
+}
+
+void GameGridItem::SetCoverLook(qreal min_tile, bool titles)
+{
+	m_min_tile = min_tile;
+	m_titles   = titles;
+	polish();
+	update();
 }
 
 void GameGridItem::SetGames(const QVariantList& games)
@@ -191,10 +205,10 @@ GameGridItem::Metrics GameGridItem::LayoutMetrics() const
 	const qreal u       = Theme::Instance()->U();
 	const qreal padding = TILE_PADDING * u;
 	Metrics     metrics;
-	metrics.columns     = std::max(1, static_cast<int>(std::floor(width() / (MIN_TILE * u + padding))));
+	metrics.columns     = std::max(1, static_cast<int>(std::floor(width() / (m_min_tile * u + padding))));
 	metrics.cell_width  = std::floor(width() / metrics.columns);
 	metrics.tile        = std::max<qreal>(0, metrics.cell_width - padding);
-	metrics.cell_height = metrics.tile + LABEL_ROOM * u;
+	metrics.cell_height = metrics.tile + (m_titles ? LABEL_ROOM : BARE_ROOM) * u;
 	return metrics;
 }
 
@@ -412,6 +426,7 @@ QSGNode* GameGridItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
 		content.card    = card;
 		content.current = index == m_current;
 		content.tile    = metrics.tile;
+		content.title   = m_titles;
 		content.u       = u;
 		content.dpr     = dpr;
 		tile->SetContent(content);

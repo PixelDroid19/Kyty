@@ -27,6 +27,23 @@ public:
 		Light
 	};
 
+	// Stored by name in the launcher settings, like the scheme.
+	enum class AccentColor
+	{
+		Blue,
+		Violet,
+		Green,
+		Orange,
+		Pink
+	};
+	enum class Motion
+	{
+		Full,
+		// Transitions only: nothing loops.
+		Reduced,
+		Off
+	};
+
 	explicit Theme(QObject* parent = nullptr);
 	~Theme() override;
 
@@ -36,19 +53,22 @@ public:
 	[[nodiscard]] qreal U() const { return m_u; }
 	void                SetU(qreal u);
 	// False while a game runs or the window is not in front; every looping animation stops on it.
-	[[nodiscard]] bool  Live() const { return m_live; }
+	[[nodiscard]] bool   Live() const { return m_live && m_motion == Motion::Full; }
 	void                SetLive(bool live);
 	[[nodiscard]] Scheme ColorScheme() const { return m_scheme; }
 	// System follows the desktop's light or dark setting while the launcher runs.
 	void               SetColorScheme(Scheme scheme);
 	[[nodiscard]] bool IsDark() const { return m_dark; }
+	// Items keep the accent and the motion in their nodes, so whoever changes them rebuilds the items.
+	void SetAccent(AccentColor accent) { m_accent = accent; }
+	void SetMotion(Motion motion);
 
 	// The website's palette, so Kit and the launcher look like the rest of the project; the light one mirrors it.
 	[[nodiscard]] QColor Background() const { return m_dark ? QColor(0x09, 0x09, 0x0b) : QColor(0xf4, 0xf4, 0xf6); }
 	[[nodiscard]] QColor Surface() const { return m_dark ? QColor(0x10, 0x10, 0x13) : QColor(0xff, 0xff, 0xff); }
 	// Modal panels, opaque enough that the page under them does not show through their text.
 	[[nodiscard]] QColor Panel() const { return m_dark ? QColor(0x15, 0x15, 0x19, 0xf5) : QColor(0xff, 0xff, 0xff, 0xf8); }
-	[[nodiscard]] QColor Accent() const { return m_dark ? QColor(0x6b, 0x9d, 0xff) : QColor(0x2f, 0x62, 0xd8); }
+	[[nodiscard]] QColor Accent() const;
 	[[nodiscard]] QColor GlitchRed() const { return {0xff, 0x00, 0x3c}; }
 	[[nodiscard]] QColor GlitchCyan() const { return {0x00, 0xe5, 0xff}; }
 	[[nodiscard]] QColor TextPrimary() const { return m_dark ? QColor(0xf4, 0xf4, 0xf5) : QColor(0x18, 0x18, 0x1b); }
@@ -74,7 +94,7 @@ public:
 	[[nodiscard]] qreal FontBody() const { return 15 * m_u; }
 	[[nodiscard]] qreal FontSmall() const { return 12 * m_u; }
 	[[nodiscard]] qreal FontTitle() const { return 26 * m_u; }
-	[[nodiscard]] int   Animation() const { return 140; }
+	[[nodiscard]] int   Animation() const { return m_motion == Motion::Off ? 0 : 140; }
 	// Corner radius of game artwork as a share of its shorter side; the artwork provider rounds with the same share.
 	[[nodiscard]] qreal ArtCorner() const { return 0.08; }
 	// Space between game artwork and its focus ring.
@@ -89,6 +109,8 @@ private:
 	bool   m_live   = true;
 	Scheme m_scheme = Scheme::System;
 	bool   m_dark   = true;
+	AccentColor m_accent = AccentColor::Blue;
+	Motion      m_motion = Motion::Full;
 };
 
 #endif /* LAUNCHER_INCLUDE_THEME_H_ */

@@ -56,6 +56,7 @@ LauncherWindow::LauncherWindow()
 	connect(backend, &LauncherBackend::FolderImported, this, &LauncherWindow::ReportFolderImported);
 	// Queued: the change may come from a key the page being replaced is still handling.
 	connect(backend, &LauncherBackend::LanguageChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
+	connect(backend, &LauncherBackend::AppearanceChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
 	connect(Theme::Instance(), &Theme::PaletteChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
 	connect(this, &QWindow::activeChanged, this, &LauncherWindow::UpdateLive);
 	connect(this, &QWindow::visibilityChanged, this, &LauncherWindow::UpdateLive);
@@ -93,6 +94,7 @@ void LauncherWindow::BuildItems()
 	m_editor     = AddItem<EditorPageItem>(root);
 	m_settings   = AddItem<SettingsPageItem>(root);
 	m_about      = AddItem<AboutPageItem>(root);
+	m_backdrop->SetDimmed(LauncherBackend::Instance()->Look("background") == QLatin1String("Dimmed"));
 	auto* mascot = new KitMascotItem;
 	mascot->setParent(m_about);
 	m_about->SetMascot(mascot);
@@ -186,9 +188,10 @@ void LauncherWindow::Layout()
 {
 	const qreal w = width();
 	const qreal h = height();
-	// Scales every size with the window, from 0.75 on small windows to 1.5 on large ones.
+	// Scales every size with the window, from 0.75 on small windows to 1.5 on large ones, then by the chosen
+	// interface size.
 	auto* theme = Theme::Instance();
-	theme->SetU(std::clamp(std::min(w / BASE_WIDTH, h / BASE_HEIGHT), 0.75, 1.5));
+	theme->SetU(std::clamp(std::min(w / BASE_WIDTH, h / BASE_HEIGHT), 0.75, 1.5) * LauncherBackend::Instance()->InterfaceScale());
 	const qreal u = theme->U();
 
 	m_background->setSize(QSizeF(w, h));
@@ -222,7 +225,10 @@ void LauncherWindow::StateChanged()
 		{
 			m_restore = visibility() == Minimized ? Windowed : visibility();
 			m_kit->Hop();
-			m_step_aside.start();
+			if (LauncherBackend::Instance()->Look("on_launch") == QLatin1String("Minimize"))
+			{
+				m_step_aside.start();
+			}
 		} else
 		{
 			m_step_aside.stop();
@@ -244,10 +250,11 @@ void LauncherWindow::UpdateLive()
 	Theme::Instance()->SetLive(!m_running && isActive() && shown != Minimized && shown != Hidden);
 }
 
-// Empty while a game runs, so the launcher holds no picture the emulator could use.
+// Empty while a game runs, so the launcher holds no picture the emulator could use, and with a plain background.
 void LauncherWindow::UpdateBackdrop()
 {
-	m_backdrop->SetPicture(m_running ? QString() : m_library->FocusedGame().value("picture").toString());
+	const bool plain = LauncherBackend::Instance()->Look("background") == QLatin1String("Plain");
+	m_backdrop->SetPicture(m_running || plain ? QString() : m_library->FocusedGame().value("picture").toString());
 }
 
 void LauncherWindow::UpdatePage()

@@ -32,6 +32,8 @@ signals:
 	void FolderImported(int added, int found, const QString& error);
 	// The launcher's texts are now in another language; pages built before still show the old one.
 	void LanguageChanged();
+	// The launcher's look or library layout changed; pages built before still show the old one.
+	void AppearanceChanged();
 
 public:
 	explicit LauncherBackend(QObject* parent = nullptr);
@@ -57,8 +59,13 @@ public:
 	[[nodiscard]] QString      SettingsFile() const { return m_settings_file; }
 	// The emulator settings of every game without custom settings, in the editor's field form.
 	[[nodiscard]] QVariantMap  GlobalFields() const;
-	// The launcher's own settings in the same form: run_mode, color_scheme and language.
+	// The launcher's own settings in the same form: run mode, colour scheme, language, look and library layout.
 	[[nodiscard]] QVariantMap LauncherFields() const;
+	// One of the look and library settings: accent, interface_size, animations, background, cover_size,
+	// show_titles, show_recent or on_launch.
+	[[nodiscard]] QVariant Look(const QString& key) const { return m_look.value(key); }
+	// How much interface_size grows or shrinks every size.
+	[[nodiscard]] qreal InterfaceScale() const;
 
 	QVariantMap FieldsFor(int row) const;
 	QVariantMap Choices() const;
@@ -98,6 +105,8 @@ private:
 	void         AddImported(const QList<QVariantMap>& games, int found);
 	void         ApplyColorScheme();
 	void         ApplyLanguage();
+	void               ApplyLook();
+	[[nodiscard]] bool IsValidLook(const QString& key, const QVariant& value) const;
 
 	GameLibrary        m_library;
 	Kyty::Configuration m_global;
@@ -112,6 +121,7 @@ private:
 	QString            m_run_mode;
 	QString             m_color_scheme;
 	QString             m_language;
+	QVariantMap         m_look;
 	QTranslator         m_translator;
 	int                m_running_row       = -1;
 	QRect              m_window_geometry;

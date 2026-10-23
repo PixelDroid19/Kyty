@@ -116,7 +116,7 @@ struct LayerSlot
 class BackdropNode: public GroupNode
 {
 public:
-	explicit BackdropNode(QQuickWindow* window)
+	BackdropNode(QQuickWindow* window, bool dimmed)
 	{
 		covered.Create(this);
 		front.Create(this);
@@ -124,8 +124,8 @@ public:
 		// The page background over the art, so the page's text keeps its contrast in either palette.
 		QColor top    = Theme::Instance()->Background();
 		QColor bottom = top;
-		top.setAlphaF(0.78F);
-		bottom.setAlphaF(0.93F);
+		top.setAlphaF(dimmed ? 0.9F : 0.78F);
+		bottom.setAlphaF(dimmed ? 0.97F : 0.93F);
 		const QGradientStops stops = {{0.0, top}, {1.0, bottom}};
 		scrim                      = CreateTextureNode(window, CreateGradientTexture(window, stops, Qt::Vertical), {});
 		scrim_opacity->appendChildNode(scrim);
@@ -280,7 +280,7 @@ QSGNode* GameBackdropItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeDat
 	auto* node = static_cast<BackdropNode*>(old_node);
 	if (node == nullptr)
 	{
-		node = new BackdropNode(window());
+		node = new BackdropNode(window(), m_dimmed);
 	}
 	// The covered slot goes first, so it can take the texture the front slot is about to replace.
 	node->covered.Assign(window(), m_covered, &node->front);

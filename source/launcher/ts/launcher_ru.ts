@@ -310,6 +310,46 @@
         <translation>Тема</translation>
     </message>
     <message>
+        <source>Appearance</source>
+        <translation>Внешний вид</translation>
+    </message>
+    <message>
+        <source>Accent colour</source>
+        <translation>Цвет акцента</translation>
+    </message>
+    <message>
+        <source>Interface size</source>
+        <translation>Размер интерфейса</translation>
+    </message>
+    <message>
+        <source>Animations</source>
+        <translation>Анимация</translation>
+    </message>
+    <message>
+        <source>Background</source>
+        <translation>Фон</translation>
+    </message>
+    <message>
+        <source>Cover size</source>
+        <translation>Размер обложек</translation>
+    </message>
+    <message>
+        <source>Library</source>
+        <translation>Библиотека</translation>
+    </message>
+    <message>
+        <source>Names under covers</source>
+        <translation>Названия под обложками</translation>
+    </message>
+    <message>
+        <source>Recently played row</source>
+        <translation>Ряд недавно запущенных</translation>
+    </message>
+    <message>
+        <source>When a game starts</source>
+        <translation>При запуске игры</translation>
+    </message>
+    <message>
         <source>Language</source>
         <translation>Язык</translation>
     </message>
@@ -451,6 +491,82 @@
     <message>
         <source>Errors</source>
         <translation>Ошибки</translation>
+    </message>
+    <message>
+        <source>Blue</source>
+        <translation>Синий</translation>
+    </message>
+    <message>
+        <source>Violet</source>
+        <translation>Фиолетовый</translation>
+    </message>
+    <message>
+        <source>Green</source>
+        <translation>Зелёный</translation>
+    </message>
+    <message>
+        <source>Orange</source>
+        <translation>Оранжевый</translation>
+    </message>
+    <message>
+        <source>Pink</source>
+        <translation>Розовый</translation>
+    </message>
+    <message>
+        <source>Compact</source>
+        <translation>Компактный</translation>
+    </message>
+    <message>
+        <source>Normal</source>
+        <translation>Обычный</translation>
+    </message>
+    <message>
+        <source>Large</source>
+        <translation>Крупный</translation>
+    </message>
+    <message>
+        <source>Extra large</source>
+        <translation>Очень крупный</translation>
+    </message>
+    <message>
+        <source>Full</source>
+        <translation>Полная</translation>
+    </message>
+    <message>
+        <source>Reduced, nothing loops</source>
+        <translation>Сокращённая, без повторов</translation>
+    </message>
+    <message>
+        <source>No animation</source>
+        <translation>Без анимации</translation>
+    </message>
+    <message>
+        <source>Game artwork</source>
+        <translation>Обложка игры</translation>
+    </message>
+    <message>
+        <source>Game artwork, dimmed</source>
+        <translation>Обложка игры, затемнённая</translation>
+    </message>
+    <message>
+        <source>Plain</source>
+        <translation>Однотонный</translation>
+    </message>
+    <message>
+        <source>Small</source>
+        <translation>Маленький</translation>
+    </message>
+    <message>
+        <source>Medium</source>
+        <translation>Средний</translation>
+    </message>
+    <message>
+        <source>Minimize the launcher</source>
+        <translation>Свернуть лаунчер</translation>
+    </message>
+    <message>
+        <source>Keep the launcher open</source>
+        <translation>Оставить лаунчер открытым</translation>
     </message>
     <message>
         <source>Rescan files</source>
@@ -807,8 +923,8 @@
         <translation>Программа</translation>
     </message>
     <message>
-        <source>How the launcher looks and which language it uses. Both change at once.</source>
-        <translation>Внешний вид лаунчера и его язык. Оба меняются сразу.</translation>
+        <source>How the launcher looks and behaves. Every change applies at once.</source>
+        <translation>Внешний вид и поведение лаунчера. Изменения применяются сразу.</translation>
     </message>
     <message>
         <source>Controller</source>

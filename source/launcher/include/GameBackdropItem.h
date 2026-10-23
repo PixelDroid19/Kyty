@@ -25,6 +25,8 @@ public:
 	// image:// address of the picture to show; empty shows none.
 	[[nodiscard]] const QString& Picture() const { return m_picture; }
 	void                         SetPicture(const QString& picture);
+	// Darkens the art more, for a calmer window; set before the item is first drawn.
+	void SetDimmed(bool dimmed) { m_dimmed = dimmed; }
 
 	// A decoded picture and how it is drawn. The key names the picture for the render thread, which keeps one
 	// texture per key; 0 is no picture.
@@ -49,6 +51,7 @@ private:
 	void ReleaseFront();
 
 	QString           m_picture;
+	bool              m_dimmed = false;
 	QTimer            m_settle;
 	QVariantAnimation m_dissolve;
 	QVariantAnimation m_vanish;

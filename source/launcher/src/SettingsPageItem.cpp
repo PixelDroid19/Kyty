@@ -212,7 +212,8 @@ void SettingsPageItem::ShowCategory()
 		case Shaders: m_form->AddFields(Fields(FieldGroup::Shaders)); break;
 		case Logs: m_form->AddFields(Fields(FieldGroup::Logs)); break;
 		case Emulator: m_form->AddFields(Fields(FieldGroup::Program)); break;
-		case Interface: m_form->AddFields(Fields(FieldGroup::Interface)); break;
+		// Not an editor section, so its headings divide the category itself.
+		case Interface: m_form->AddFields(EditorFields(FieldGroup::Interface)); break;
 		default: break;
 	}
 	m_form->SetValues(EmulatorCategory() ? m_global : LauncherBackend::Instance()->LauncherFields());
@@ -461,7 +462,7 @@ void SettingsPageItem::updatePolish()
 		}
 		case Interface:
 		{
-			add_block(tr("How the launcher looks and which language it uses. Both change at once."), theme->TextMuted());
+			add_block(tr("How the launcher looks and behaves. Every change applies at once."), theme->TextMuted());
 			const auto controller = backend->ControllerName();
 			AddInfo(tr("Controller"), controller.isEmpty() ? tr("None connected. Keyboard and mouse work everywhere.") : controller,
 			        theme->TextSecondary(), controller.isEmpty() ? QColor() : theme->Ok(), x, width, &y);

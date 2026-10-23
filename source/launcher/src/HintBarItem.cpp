@@ -109,6 +109,13 @@ QSGNode* HintBarItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*
 		const qreal  cap_width = glyph ? std::max(GLYPH_MIN * u, TextWidth(cap, font) + GLYPH_PAD * u) : TextWidth(cap, font) + KEY_PAD * u;
 		const qreal  cap_height = glyph ? cap_width : KEY_HEIGHT * u;
 		const QRectF cap_rect(x, middle - cap_height / 2, cap_width, cap_height);
+		const qreal  label_x     = x + cap_width + LABEL_GAP * u;
+		const qreal  label_width = TextWidth(text, label_font);
+		// Hints come most important first, so the ones that do not fit a narrow bar are dropped from the end.
+		if (label_x + label_width > width() - theme->Margin())
+		{
+			break;
+		}
 
 		auto*                 box = new RoundedBoxNode;
 		RoundedBoxNode::Style style;
@@ -124,9 +131,7 @@ QSGNode* HintBarItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*
 		SetTextLine(cap_text, cap, font, theme->TextPrimary(), cap_rect, Qt::AlignHCenter);
 		node->appendChildNode(cap_text);
 
-		const qreal label_x     = x + cap_width + LABEL_GAP * u;
-		const qreal label_width = TextWidth(text, label_font);
-		auto*       label       = window()->createTextNode();
+		auto* label = window()->createTextNode();
 		SetTextLine(label, text, label_font, theme->TextSecondary(), QRectF(label_x, 0, label_width + 1, height()));
 		node->appendChildNode(label);
 

@@ -310,6 +310,46 @@
         <translation>Tema</translation>
     </message>
     <message>
+        <source>Appearance</source>
+        <translation>Apariencia</translation>
+    </message>
+    <message>
+        <source>Accent colour</source>
+        <translation>Color de acento</translation>
+    </message>
+    <message>
+        <source>Interface size</source>
+        <translation>Tamaño de la interfaz</translation>
+    </message>
+    <message>
+        <source>Animations</source>
+        <translation>Animaciones</translation>
+    </message>
+    <message>
+        <source>Background</source>
+        <translation>Fondo</translation>
+    </message>
+    <message>
+        <source>Cover size</source>
+        <translation>Tamaño de las portadas</translation>
+    </message>
+    <message>
+        <source>Library</source>
+        <translation>Biblioteca</translation>
+    </message>
+    <message>
+        <source>Names under covers</source>
+        <translation>Nombres bajo las portadas</translation>
+    </message>
+    <message>
+        <source>Recently played row</source>
+        <translation>Fila de jugados recientemente</translation>
+    </message>
+    <message>
+        <source>When a game starts</source>
+        <translation>Al iniciar un juego</translation>
+    </message>
+    <message>
         <source>Language</source>
         <translation>Idioma</translation>
     </message>
@@ -451,6 +491,82 @@
     <message>
         <source>Errors</source>
         <translation>Errores</translation>
+    </message>
+    <message>
+        <source>Blue</source>
+        <translation>Azul</translation>
+    </message>
+    <message>
+        <source>Violet</source>
+        <translation>Violeta</translation>
+    </message>
+    <message>
+        <source>Green</source>
+        <translation>Verde</translation>
+    </message>
+    <message>
+        <source>Orange</source>
+        <translation>Naranja</translation>
+    </message>
+    <message>
+        <source>Pink</source>
+        <translation>Rosa</translation>
+    </message>
+    <message>
+        <source>Compact</source>
+        <translation>Compacto</translation>
+    </message>
+    <message>
+        <source>Normal</source>
+        <translation>Normal</translation>
+    </message>
+    <message>
+        <source>Large</source>
+        <translation>Grande</translation>
+    </message>
+    <message>
+        <source>Extra large</source>
+        <translation>Muy grande</translation>
+    </message>
+    <message>
+        <source>Full</source>
+        <translation>Completas</translation>
+    </message>
+    <message>
+        <source>Reduced, nothing loops</source>
+        <translation>Reducidas, nada en bucle</translation>
+    </message>
+    <message>
+        <source>No animation</source>
+        <translation>Sin animaciones</translation>
+    </message>
+    <message>
+        <source>Game artwork</source>
+        <translation>Arte del juego</translation>
+    </message>
+    <message>
+        <source>Game artwork, dimmed</source>
+        <translation>Arte del juego, atenuado</translation>
+    </message>
+    <message>
+        <source>Plain</source>
+        <translation>Liso</translation>
+    </message>
+    <message>
+        <source>Small</source>
+        <translation>Pequeño</translation>
+    </message>
+    <message>
+        <source>Medium</source>
+        <translation>Mediano</translation>
+    </message>
+    <message>
+        <source>Minimize the launcher</source>
+        <translation>Minimizar el launcher</translation>
+    </message>
+    <message>
+        <source>Keep the launcher open</source>
+        <translation>Mantener el launcher abierto</translation>
     </message>
     <message>
         <source>Rescan files</source>
@@ -807,8 +923,8 @@
         <translation>Programa</translation>
     </message>
     <message>
-        <source>How the launcher looks and which language it uses. Both change at once.</source>
-        <translation>El aspecto del launcher y su idioma. Ambos cambian al momento.</translation>
+        <source>How the launcher looks and behaves. Every change applies at once.</source>
+        <translation>Cómo se ve y se comporta el launcher. Cada cambio se aplica al momento.</translation>
     </message>
     <message>
         <source>Controller</source>

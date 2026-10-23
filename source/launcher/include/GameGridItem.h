@@ -29,6 +29,8 @@ public:
 
 	[[nodiscard]] QVariantList Games() const { return m_games; }
 	void                       SetGames(const QVariantList& games);
+	// Covers at least min_tile units wide, with or without the game's name under each.
+	void                       SetCoverLook(qreal min_tile, bool titles);
 	[[nodiscard]] int          CurrentIndex() const { return m_current; }
 	void                       SetCurrentIndex(int index);
 
@@ -63,6 +65,8 @@ private:
 	QVariantList      m_games;
 	QVector<GameCard> m_cards;
 	int               m_current = 0;
+	qreal             m_min_tile = 0;
+	bool              m_titles   = true;
 	ViewScroll        m_scroll;
 	ArtworkSet        m_art;
 	FocusZoom         m_zoom;

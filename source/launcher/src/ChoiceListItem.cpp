@@ -82,7 +82,7 @@ void ChoiceListItem::OpenFor(const QRectF& anchor, const QStringList& texts, int
 	setSize(parentItem()->size());
 	setVisible(true);
 	forceActiveFocus(Qt::OtherFocusReason);
-	if (Theme::Instance()->Live())
+	if (Theme::Instance()->Animation() > 0)
 	{
 		m_fade.setDuration(Theme::Instance()->Animation());
 		m_fade.start();
