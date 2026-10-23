@@ -13,6 +13,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Kernel/Trace.h"
+#include "Emulator/GuestCodeRanges.h"
 #include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Log.h"
 
@@ -165,6 +166,26 @@ static void capture_guest_callers(const PthreadPrivate* self, const void* frame,
 	}
 }
 
+// A POSIX export reaches the kernel function from host code, so its direct
+// return address names the wrapper. The first return address in guest code is
+// the guest caller; without one the direct address is kept.
+static uint64_t guest_caller_return(const void* direct, const uint64_t* callers)
+{
+	const auto address = reinterpret_cast<uint64_t>(direct);
+	if (Emulator::GuestCodeRanges::Contains(address))
+	{
+		return address;
+	}
+	for (int i = 0; i < PthreadWaitScope::kCallers; i++)
+	{
+		if (callers[i] != 0 && Emulator::GuestCodeRanges::Contains(callers[i]))
+		{
+			return callers[i];
+		}
+	}
+	return address;
+}
+
 PthreadWaitScope::PthreadWaitScope(PthreadWaitKind kind, const void* object, const void* guest_return, const void* frame)
 {
 	auto* self = g_pthread_self;
@@ -179,7 +200,7 @@ PthreadWaitScope::PthreadWaitScope(PthreadWaitKind kind, const void* object, con
 		self->wait_callers[i].store(callers[i], std::memory_order_relaxed);
 	}
 	self->wait_object.store(reinterpret_cast<uint64_t>(object), std::memory_order_relaxed);
-	self->wait_return.store(reinterpret_cast<uint64_t>(guest_return), std::memory_order_relaxed);
+	self->wait_return.store(guest_caller_return(guest_return, callers), std::memory_order_relaxed);
 	self->wait_kind.store(static_cast<uint8_t>(kind), std::memory_order_release);
 	m_active = true;
 }
