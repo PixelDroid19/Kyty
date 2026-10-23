@@ -22,6 +22,8 @@
 // draws Kit 120 px wide, so its offsets below apply in viewBox units.
 constexpr qreal VIEW_WIDTH  = 120;
 constexpr qreal VIEW_HEIGHT = 160;
+// The blue of Kit's eyes and collar in its drawings; the purr matches it.
+const QColor PURR_COLOUR(0x6b, 0x9d, 0xff);
 
 constexpr qreal  GLITCH_OPACITY = 0.85;
 constexpr qint64 GLITCH_PERIOD  = 4200;
@@ -431,12 +433,8 @@ void KitMascotItem::updatePolish()
 		m_layers[BODY] = Outlined(m_layers[BODY], theme->TextMuted(), std::max<qreal>(1, px.width() * OUTLINE_SHARE));
 	}
 	const int heart_px = static_cast<int>(std::ceil(HEART_MAX * px.width() / VIEW_WIDTH));
-	m_heart            = PaintLayer(HEART_FILE, QSize(heart_px, static_cast<int>(std::ceil(heart_px * 0.9))), 1);
-	// The eyes, the collar and the hearts wear the accent.
-	for (auto* image: {&m_layers[GEAR], &m_layers[EYES_OPEN], &m_layers[EYES_HAPPY], &m_heart})
-	{
-		Recolour(image, theme->Accent());
-	}
+	// Kit keeps its own colours whatever the accent, so it always looks the same.
+	m_heart = PaintLayer(HEART_FILE, QSize(heart_px, static_cast<int>(std::ceil(heart_px * 0.9))), 1);
 	update();
 }
 
@@ -561,7 +559,7 @@ QSGNode* KitMascotItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
 		const QString text = QStringLiteral("purrr…");
 		const qreal   tw   = TextWidth(text, font);
 		const QRectF  rect(w + 34 * k - tw, -4 * k, tw, QFontMetricsF(font).height());
-		QColor        color = theme->Accent();
+		QColor        color = PURR_COLOUR;
 		color.setAlphaF(static_cast<float>(level));
 		SetTextLine(node->purr_text, text, font, color, rect);
 		// Tilted and growing from its centre as it fades in.
