@@ -4,6 +4,121 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Crash evidence read only for a reported fault (2026-10-23)
+
+- **Observed** (isometric roguelike, boot into its first load, Intel A770,
+  warm shader caches): a kernel call-chain sample of the guest worker thread
+  that writes most write-tracked pages put 341 samples in `getpid` and 313 in
+  system-call entry for `process_vm_readv`. The POSIX signal handler read
+  1 KiB of the faulting thread's stack for every SIGSEGV before offering the
+  fault to the write-tracking and demand-mapping handlers, which handle it
+  and resume. The Windows exception handlers copied the stack the same way.
+- **Change.** The signal and exception contexts hold the registers only. The
+  stack, and with crash memory enabled the memory windows its words point
+  to, are read when a fault is reported: in `FatalFault`, on a copy of the
+  context, and on the SIGILL path. A context that already carries a stack
+  keeps it.
+- **Verified.** The crash-report unit test (stack and memory windows), the
+  unit suite (2,459 tests) and the integration and diagnostics tests (74).
+  Same route: neither call appears in the worker's profile any more, and its
+  CPU time fell from 4,317 ms to 3,953 ms. The number of tracked-page faults
+  changes between runs, so the total kernel samples (12,276 and 11,282
+  before, 11,331 after) do not compare.
+- **Not verified.** The Windows change was not built or run on Windows.
+
+## Direct-memory windows imported as pinned dma-bufs (2026-10-23)
+
+- **Observed** (isometric roguelike, boot into its first load, Intel A770,
+  Mesa ANV, Xe kernel driver, warm shader caches):
+  - The title stopped at its first load in 4 of 4 runs (and in most runs
+    before them), with a guest-thread write to address 0x40. The guest
+    allocates its staging pool (2 x 256 MiB) and the allocation failed:
+    its list of pending uploads kept growing because the render thread's
+    frame took too long, while the loader queued bursts of about 533 MiB
+    in 320 ms.
+  - The render thread waited in the graphics submit for the command
+    processor to decode its batch. The submit contract (above, "A graphics
+    submit returns after its batch is decoded") requires that wait.
+  - A kernel call-chain sample of the command-processor thread over the
+    whole run: 2,579 samples (250 us each, about 0.65 s) in the Xe exec
+    ioctl, 2,233 of them re-validating host-pointer imports
+    (`xe_vm_userptr_pin` > `drm_gpusvm_get_pages` > `hmm_range_fault`,
+    then IOMMU mapping). Creating the imports took 204 samples.
+- **Cause.** Direct-memory windows (up to 64 MiB each) were imported as host
+  pointers. Their pages stay movable, so every host migration or reclaim of
+  one page invalidates the whole import, and the next submission walks and
+  maps the whole window again. During the load the host migrated 137,509
+  pages (537 MiB) in 20 s through proactive compaction
+  (`compaction_proactiveness` 20) while it was also swapping.
+- **Change.** The import probe prefers a dma-buf of the backing (through
+  `/dev/udmabuf`), which pins the window's pages, and keeps the host pointer
+  for hosts that cannot export one. Devices that refuse shared host pointers
+  already took the dma-buf path. Guest releases inside a pinned window were
+  already zero-filled instead of discarded.
+- **Verified.**
+  - Command-processor thread, same route: 302 samples in the exec ioctl and
+    none re-validating imports; kernel time 2,310 samples against 5,411.
+  - The roguelike ran 5 of 5 runs without stopping. A 40 s run presented
+    1,611 frames, at 60 fps (limited) after the load, with p99 frame time
+    falling to about 45 ms, and its capture shows the title screen.
+  - Unit tests (2,459, including 14 device-address tests that now import
+    through dma-bufs on this host) and the integration and diagnostics
+    tests (74).
+  - Regression sweep, 30 s strict runs at the 60 fps present limit, frames
+    presented: fishing title 1,430, insect platformer sequel 1,328, 2D Unity
+    action title 1,237, card title 1,471, racing title 1,243, anime fighter
+    1,488, beat 'em up 318 (still loading at 30 s). No stop and no import
+    failure.
+  - Beat 'em up, 40 s from boot, host pointer against dma-buf: 542 against
+    761 frames presented; frame time p50 72 against 25 ms, p95 130 against
+    117 ms, p99 363 against 188 ms.
+- **Excluded earlier for the same stop:** a higher cgroup memory ceiling,
+  `MADV_HUGEPAGE` on the backing, a lost condition-variable wake-up,
+  populating all GPU-visible memory up front (the import blocked decode and
+  grew memory by 3.6 GiB), populating the CPU staging memory, userfaultfd,
+  and a faster 64 KiB detile on its own. A warm shader cache alone did not
+  remove it either.
+- **Open.**
+  - The guest's own tiler thread spends most of its time in first-touch
+    faults on direct memory (`shmem_fault`, page clearing) and in the
+    write-tracking signal path (`mprotect` TLB shootdowns); the crash
+    evidence reads in that path were removed (record above).
+  - Hosts without access to `/dev/udmabuf` keep the host-pointer path and
+    its re-validation cost.
+
+## Populated direct-memory pages read from the backing's extents (2026-10-23)
+
+- **Observed** (isometric roguelike, boot into the first load, Intel A770,
+  Mesa ANV, Xe kernel driver, warm shader caches):
+  - Preparing the guest device address table took about 3.6 ms per call
+    while the title loaded, and 68 ms for the first call.
+  - A kernel call-chain sample of the command-processor thread put about
+    40% of its CPU in `mincore` over the guest's physical views
+    (`filemap_get_entry`, `xas_load`, `__mincore_unmapped_range`): each
+    call asked the page cache, page by page, which pages of the views were
+    present.
+- **Change.** Physical ranges ask the direct-memory backing itself which
+  pages hold data: `SEEK_DATA`/`SEEK_HOLE` over the backing walks its
+  extents instead of every page. A page counts as populated once any view
+  touched it and stays so until the guest releases it, which is the same
+  set `mincore` reported for the views. Flexible memory keeps `mincore`.
+  Windows hosts report every page populated, as section views commit
+  their pages when mapped.
+  - A physical range is now resolved before the query. A range without
+    direct memory behind it fails the import with a message instead of
+    importing nothing.
+- **Verified.**
+  - Unit test for the extent query (populated pages 1, 2, 5, 6; queries
+    inside, between and past them), the unit suite (2459 tests), the
+    integration and diagnostics tests (74) and the emulator boundary gate.
+  - Isometric roguelike, same route: preparation fell to about 1.3 ms per
+    call and the first call to 45 ms; command-processor time over the load
+    was 173 ms for 129 batches against 264 ms for 99 before.
+  - Regression sweep, 30 s strict runs at the 60 fps present limit, frames
+    presented: fishing title 1,349, insect platformer sequel 1,296, 2D Unity
+    action title 1,198, card title 1,443, racing title 1,178, anime fighter
+    1,494, beat 'em up 357. No stop and no import failure.
+
 ## `sceKernelSleep` sleeps whole seconds (2026-10-23, found by inspection)
 
 - **Contract.** The published SDK header declares
