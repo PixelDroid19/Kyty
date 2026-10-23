@@ -43,14 +43,12 @@ constexpr int MEM_ALLOC_ALIGN = 16;
 [[maybe_unused]] constexpr int STACK_CHECK_FROM = 2;
 #endif
 
-static SysCS*                                  g_mem_cs          = nullptr;
 static bool                                    g_mem_initialized = false;
 static sys_heap_id_t                           g_default_heap    = nullptr;
 static size_t                                  g_mem_max_size    = 0;
-static MemoryAllocDetail::ThreadDomainRegistry g_guest_thread_domains;
-// Per-thread guest classification cache in host TLS (see
-// mem_guest_thread_enter/leave). Kept as a plain thread_local bool so the
-// per-allocation fast path never scans the registry.
+// Per-thread guest classification in host TLS (see mem_guest_thread_enter/leave).
+// It holds no per-process slot, so the number of live guest threads is not
+// bounded here.
 static thread_local bool                       g_mem_guest_thread_active = false;
 // Bootstrap symbol loading can allocate one tiny object per guest export. The
 // debug tracker records a stack and a hashmap entry for each one, which is
@@ -187,6 +185,8 @@ thread_local int  g_mem_depth           = 0;
 thread_local bool g_mem_tracker_enabled = true;
 #endif
 
+// Serializes the tracker map; untracked builds allocate from the thread-safe system heap.
+static SysCS*                              g_mem_cs          = nullptr;
 static Hashmap<uintptr_t, MemBlockInfoT*>* g_mem_map         = nullptr;
 static int                                 g_mem_state       = 0;
 static size_t                              g_total_allocated = 0;
@@ -199,8 +199,6 @@ static size_t                              g_total_allocated = 0;
 		}                                                                                                                                  \
 	}
 
-#endif
-
 class MemLock
 {
 public:
@@ -208,24 +206,20 @@ public:
 	{
 		g_mem_cs->Enter();
 
-#ifdef MEM_TRACKER
 #ifdef __APPLE__
 		m_thread_token = mem_current_thread_token();
 		g_mem_recursion_state.Enter(m_thread_token);
 #else
 		g_mem_depth++;
 #endif
-#endif
 	}
 
 	~MemLock()
 	{
-#ifdef MEM_TRACKER
 #ifdef __APPLE__
 		g_mem_recursion_state.Leave(m_thread_token);
 #else
 		g_mem_depth--;
-#endif
 #endif
 
 		g_mem_cs->Leave();
@@ -233,7 +227,6 @@ public:
 
 	KYTY_CLASS_NO_COPY(MemLock);
 
-#ifdef MEM_TRACKER
 	// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 	[[nodiscard]] bool IsRecursive() const
 	{
@@ -243,13 +236,14 @@ public:
 		return g_mem_depth > 1;
 #endif
 	}
-#endif
 
 private:
-#if defined(MEM_TRACKER) && defined(__APPLE__)
+#ifdef __APPLE__
 	uint64_t m_thread_token = 0;
 #endif
 };
+
+#endif
 
 #if KYTY_COMPILER == KYTY_COMPILER_MSVC
 #pragma code_seg(push)
@@ -316,10 +310,10 @@ static void mem_init()
 	g_pattern_id = static_cast<int>(rand() % g_mem_patterns.Size()); // NOLINT(cert-msc30-c,cert-msc50-cpp)
 #endif
 
+#ifdef MEM_TRACKER
 	// NOLINTNEXTLINE(cppcoreguidelines-no-malloc,hicpp-no-malloc)
 	g_mem_cs = new (std::malloc(sizeof(SysCS))) SysCS;
 	g_mem_cs->Init();
-#ifdef MEM_TRACKER
 #ifdef __APPLE__
 	const auto init_thread_token = mem_current_thread_token();
 	g_mem_recursion_state.Enter(init_thread_token);
@@ -347,16 +341,14 @@ void core_memory_init()
 
 void mem_guest_thread_enter()
 {
-	EXIT_IF(!g_guest_thread_domains.Add(mem_current_thread_token()));
-	// Cache the per-thread classification in host TLS (never guest-visible TLS)
-	// so the per-allocation fast path skips the registry scan entirely. The
-	// enter/leave calls always run on the thread whose state changes.
+	// Host TLS, never guest-visible TLS. The enter/leave calls always run on the
+	// thread whose state changes.
 	g_mem_guest_thread_active = true;
 }
 
 void mem_guest_thread_leave()
 {
-	EXIT_IF(!g_guest_thread_domains.Remove(mem_current_thread_token()));
+	EXIT_IF(!g_mem_guest_thread_active);
 	g_mem_guest_thread_active = false;
 }
 
@@ -364,7 +356,7 @@ bool mem_guest_thread_is_active()
 {
 	// Host TLS is out of reach of guest code, which can only replace its own
 	// guest TLS segment. A thread that never entered guest execution always
-	// returns false here, matching the empty-registry fast path.
+	// returns false here.
 	return g_mem_guest_thread_active;
 }
 
@@ -421,9 +413,10 @@ void* mem_alloc(size_t size)
 		return mem_alloc_check_alignment(mem_system_alloc(size));
 	}
 #endif
-	MemLock lock;
 
 #ifdef MEM_TRACKER
+	MemLock lock;
+
 	DebugStack stack;
 	DebugStack::Trace(&stack);
 
@@ -501,8 +494,9 @@ void* mem_realloc(void* ptr, size_t size)
 	}
 	if (header->domain == MemBlockDomain::Heap)
 	{
-		MemLock lock;
-		auto*   base = static_cast<MemBlockHeader*>(
+		// Heap blocks are untracked system allocations; the system allocator is
+		// thread-safe, so no global lock serializes host threads here.
+		auto* base = static_cast<MemBlockHeader*>(
 		    sys_heap_realloc(g_default_heap, header, sizeof(MemBlockHeader) + size));
 		if (base == nullptr)
 		{
@@ -626,7 +620,6 @@ void mem_free(void* ptr)
 	}
 	if (header->domain == MemBlockDomain::Heap)
 	{
-		MemLock lock;
 		header->magic = 0;
 		sys_heap_free(g_default_heap, header);
 		return;

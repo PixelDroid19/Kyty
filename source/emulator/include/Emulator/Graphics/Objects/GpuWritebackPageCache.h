@@ -45,6 +45,12 @@ public:
 	// whether the snapshot changed.
 	[[nodiscard]] bool AdoptUniform(const UniformWords& words, uint64_t size);
 
+	// Records that the device already copied `gpu_src` into guest memory at
+	// `guest_va`: changed pages enter the snapshot and their writes are notified,
+	// but guest memory is not written.
+	[[nodiscard]] GpuWritebackResult AdoptChangedPages(uint64_t guest_va, const void* gpu_src, uint64_t size,
+	                                                  NotifyWriteFunc notify_write, void* notify_opaque);
+
 private:
 	void Materialize();
 

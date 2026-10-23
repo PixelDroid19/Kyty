@@ -1,6 +1,7 @@
 #include "Kyty/UnitTest.h"
 
 #include "Kyty/Core/File.h"
+#include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Sys/SysFileIO.h"
 
 #include "Emulator/Config.h"
@@ -58,7 +59,8 @@ struct LeaseObservation
 
 LeaseObservation* g_lease_observation = nullptr;
 
-void IgnoreFrame(uint64_t, size_t, uint32_t) {}
+bool IgnoreFrame(uint64_t, size_t, uint32_t,
+	             const Kyty::Core::VirtualMemory::GuestMappingIdentitySnapshot&) { return true; }
 void IgnoreUnregister(uint64_t) {}
 void ObserveNotification(uint64_t, uint64_t) { ++g_lease_observation->notifications; }
 

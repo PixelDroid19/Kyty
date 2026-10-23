@@ -29,6 +29,8 @@ file(GLOB hle_domain_src CONFIGURE_DEPENDS
 	src/AudioAvPlayer.cpp
 	src/AudioHost.cpp
 	src/AudioNgs2.cpp
+	src/AudioNgs2Reverb.cpp
+	src/AudioNgs2Sampler.cpp
 	src/Dialog.cpp
 	src/Controller.cpp
 )
@@ -219,14 +221,14 @@ target_include_directories(kyty_host PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
 	"${CMAKE_SOURCE_DIR}/include"
 )
-target_link_libraries(kyty_host PUBLIC core sys kyty_runtime_core SDL2-static vulkan-1 imgui)
+target_link_libraries(kyty_host PUBLIC core sys kyty_runtime_core SDL3-static vulkan-1 imgui)
 
 target_include_directories(kyty_graphics PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
 	"${CMAKE_SOURCE_DIR}/include"
 )
 target_link_libraries(kyty_graphics PUBLIC core math sys kyty_runtime_core kyty_kernel kyty_host kyty_diagnostics
-	vulkan-1 spirv-tools-opt spirv-tools easy_profiler imgui SDL2-static)
+	vulkan-1 spirv-tools-opt spirv-tools easy_profiler imgui SDL3-static)
 
 target_include_directories(kyty_hle PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -234,12 +236,14 @@ target_include_directories(kyty_hle PUBLIC
 )
 target_link_libraries(kyty_hle PUBLIC core math sys kyty_runtime_core kyty_kernel kyty_loader kyty_graphics
 	kyty_host kyty_diagnostics kyty_audio_video_backend kyty_audio_pcm)
+# Header-only outline rasterizer for the font library.
+target_include_directories(kyty_hle PRIVATE "${CMAKE_SOURCE_DIR}/3rdparty/imgui")
 
 target_include_directories(kyty_audio_video_backend PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
 	"${CMAKE_SOURCE_DIR}/include"
 )
-target_link_libraries(kyty_audio_video_backend PUBLIC core)
+target_link_libraries(kyty_audio_video_backend PUBLIC core PRIVATE libatrac9)
 
 if(MSVC OR MINGW)
 	target_link_libraries(emulator PRIVATE psapi)
@@ -264,7 +268,7 @@ target_link_libraries(emulator
 	spirv-tools
 	easy_profiler
 	imgui
-	SDL2-static
+	SDL3-static
 	PRIVATE
 		# The runtime agent owns its local transport. Keep it out of the
 		# emulator's transitive link interface; host executables that expose
@@ -276,7 +280,7 @@ target_link_libraries(emulator
 get_property(inc_headers TARGET emulator PROPERTY INCLUDE_DIRECTORIES)
 
 list(APPEND inc_headers
-	${CMAKE_SOURCE_DIR}/3rdparty/sdl2/sdl2/include
+	${CMAKE_SOURCE_DIR}/3rdparty/sdl3/sdl3/include
 	${CMAKE_SOURCE_DIR}/3rdparty/easy_profiler/include
 	${CMAKE_SOURCE_DIR}/3rdparty/imgui
 	${CMAKE_SOURCE_DIR}/3rdparty/imgui/backends

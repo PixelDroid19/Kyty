@@ -3,6 +3,7 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Vector.h"
 
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
@@ -10,7 +11,9 @@
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Profiler.h"
 
+#include <algorithm>
 #include <limits>
+#include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -26,7 +29,7 @@ bool ResolveRenderTextureArrayView(uint64_t bytes_per_layer, uint32_t base_layer
 		return false;
 	}
 	*view = {};
-	if (bytes_per_layer == 0 || last_layer != base_layer || last_layer == std::numeric_limits<uint32_t>::max())
+	if (bytes_per_layer == 0 || last_layer < base_layer || last_layer == std::numeric_limits<uint32_t>::max())
 	{
 		return false;
 	}
@@ -37,9 +40,47 @@ bool ResolveRenderTextureArrayView(uint64_t bytes_per_layer, uint32_t base_layer
 	}
 	view->image_layers      = image_layers;
 	view->base_layer        = base_layer;
-	view->layer_count       = 1u;
+	view->layer_count       = last_layer - base_layer + 1u;
 	view->full_backing_size = bytes_per_layer * image_layers;
 	return true;
+}
+
+bool ResolveRenderTextureVolumeView(uint64_t bytes_per_slice, uint32_t depth, uint32_t base_slice, uint32_t last_slice,
+                                    RenderTextureArrayView* view)
+{
+	if (view == nullptr)
+	{
+		return false;
+	}
+	*view = {};
+	if (bytes_per_slice == 0 || depth == 0 || base_slice >= depth || last_slice < base_slice ||
+	    bytes_per_slice > std::numeric_limits<uint64_t>::max() / depth)
+	{
+		return false;
+	}
+	const uint32_t last     = std::min(last_slice, depth - 1u);
+	view->image_layers      = depth;
+	view->base_layer        = base_slice;
+	view->layer_count       = last - base_slice + 1u;
+	view->full_backing_size = bytes_per_slice * depth;
+	return true;
+}
+
+// Everything except the layer count: format, guest and host extent, tiling,
+// pitch, ownership, sample count and mip levels.
+static bool RenderTextureSharesImageDescription(const uint64_t* existing, const uint64_t* incoming)
+{
+	for (int param = RenderTextureObject::PARAM_FORMAT; param <= RenderTextureObject::PARAM_SAMPLES; param++)
+	{
+		if (existing[param] != incoming[param])
+		{
+			return false;
+		}
+	}
+	return existing[RenderTextureObject::PARAM_HOST_WIDTH] == incoming[RenderTextureObject::PARAM_HOST_WIDTH] &&
+	       existing[RenderTextureObject::PARAM_HOST_HEIGHT] == incoming[RenderTextureObject::PARAM_HOST_HEIGHT] &&
+	       existing[RenderTextureObject::PARAM_MIP_LEVELS] == incoming[RenderTextureObject::PARAM_MIP_LEVELS] &&
+	       existing[RenderTextureObject::PARAM_VOLUME] == incoming[RenderTextureObject::PARAM_VOLUME];
 }
 
 bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming)
@@ -48,14 +89,12 @@ bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t
 	{
 		return false;
 	}
-	for (int param = RenderTextureObject::PARAM_FORMAT; param <= RenderTextureObject::PARAM_SAMPLES; param++)
+	if (!RenderTextureSharesImageDescription(existing, incoming))
 	{
-		if (existing[param] != incoming[param])
-		{
-			return false;
-		}
+		return false;
 	}
-	if (existing[RenderTextureObject::PARAM_TILED] == 0u || existing[RenderTextureObject::PARAM_WRITE_BACK] != 0u)
+	if (existing[RenderTextureObject::PARAM_TILED] == 0u || existing[RenderTextureObject::PARAM_WRITE_BACK] != 0u ||
+	    existing[RenderTextureObject::PARAM_VOLUME] != 0u)
 	{
 		return false;
 	}
@@ -70,16 +109,36 @@ bool RenderTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t
 	{
 		return false;
 	}
-	for (int param = RenderTextureObject::PARAM_FORMAT; param <= RenderTextureObject::PARAM_SAMPLES; param++)
+	// A volume's depth is its MIP0_DEPTH, not a view of a deeper allocation.
+	if (!RenderTextureSharesImageDescription(existing, incoming) || existing[RenderTextureObject::PARAM_VOLUME] != 0u)
+	{
+		return false;
+	}
+	const auto existing_layers = existing[RenderTextureObject::PARAM_ARRAY_LAYERS];
+	const auto incoming_layers = incoming[RenderTextureObject::PARAM_ARRAY_LAYERS];
+	return incoming_layers > 0u && existing_layers >= incoming_layers;
+}
+
+bool RenderTextureChangesHostExtent(const uint64_t* existing, const uint64_t* incoming)
+{
+	if (existing == nullptr || incoming == nullptr)
+	{
+		return false;
+	}
+	for (int param = RenderTextureObject::PARAM_FORMAT; param <= RenderTextureObject::PARAM_ARRAY_LAYERS; param++)
 	{
 		if (existing[param] != incoming[param])
 		{
 			return false;
 		}
 	}
-	const auto existing_layers = existing[RenderTextureObject::PARAM_ARRAY_LAYERS];
-	const auto incoming_layers = incoming[RenderTextureObject::PARAM_ARRAY_LAYERS];
-	return incoming_layers > 0u && existing_layers >= incoming_layers;
+	if (existing[RenderTextureObject::PARAM_MIP_LEVELS] != incoming[RenderTextureObject::PARAM_MIP_LEVELS] ||
+	    existing[RenderTextureObject::PARAM_VOLUME] != incoming[RenderTextureObject::PARAM_VOLUME])
+	{
+		return false;
+	}
+	return existing[RenderTextureObject::PARAM_HOST_WIDTH] != incoming[RenderTextureObject::PARAM_HOST_WIDTH] ||
+	       existing[RenderTextureObject::PARAM_HOST_HEIGHT] != incoming[RenderTextureObject::PARAM_HOST_HEIGHT];
 }
 
 RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order)
@@ -92,6 +151,10 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::R16Sfloat, 2};
 	}
+	if (format == 0x2u && channel_type == 0x4u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R16Uint, 2};
+	}
 	if (format == 0x3u && channel_type == 0x0u && channel_order == 0x0u)
 	{
 		return {RenderTextureFormat::R8G8Unorm, 2};
@@ -103,6 +166,10 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	if (format == 0x5u && channel_type == 0x7u && channel_order == 0x0u)
 	{
 		return {RenderTextureFormat::R16G16Sfloat, 4};
+	}
+	if (format == 0x5u && channel_type == 0x4u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R16G16Uint, 4};
 	}
 	// CB data formats 6 (10_11_11) and 7 (11_11_10) with FLOAT both pack into
 	// the same 32-bit 10/11/11 layout. Vulkan's only colour-attachable match is
@@ -153,7 +220,41 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::R16G16B16A16Sfloat, 8};
 	}
+	// CB COLOR_32_32_32_32 (format 14) with FLOAT.
+	if (format == 0xeu && channel_type == 0x7u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R32G32B32A32Sfloat, 16};
+	}
 	return {};
+}
+
+uint32_t RenderTextureBytesPerElement(RenderTextureFormat format)
+{
+	switch (format)
+	{
+		case RenderTextureFormat::R8Unorm: return 1;
+		case RenderTextureFormat::R8G8Unorm:
+		case RenderTextureFormat::R16Sfloat:
+		case RenderTextureFormat::R16Uint: return 2;
+		case RenderTextureFormat::R8G8B8A8Unorm:
+		case RenderTextureFormat::R8G8B8A8Srgb:
+		case RenderTextureFormat::B8G8R8A8Unorm:
+		case RenderTextureFormat::B8G8R8A8Srgb:
+		case RenderTextureFormat::R16G16Sfloat:
+		case RenderTextureFormat::R16G16Uint:
+		case RenderTextureFormat::R32Sfloat:
+		case RenderTextureFormat::B10G11R11Ufloat:
+		case RenderTextureFormat::A2R10G10B10Unorm:
+		case RenderTextureFormat::A2B10G10R10Unorm: return 4;
+		case RenderTextureFormat::R16G16B16A16Unorm:
+		case RenderTextureFormat::R16G16B16A16Snorm:
+		case RenderTextureFormat::R16G16B16A16Uint:
+		case RenderTextureFormat::R16G16B16A16Sint:
+		case RenderTextureFormat::R16G16B16A16Sfloat: return 8;
+		case RenderTextureFormat::R32G32B32A32Sfloat: return 16;
+		case RenderTextureFormat::Unknown: break;
+	}
+	return 0;
 }
 
 static bool buffer_is_tiled(uint64_t vaddr, uint64_t size)
@@ -273,17 +374,22 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 		        !source->MatchesGuestExtent(vk_obj->GetGuestExtent().width, vk_obj->GetGuestExtent().height) ||
 		        source->extent.width != vk_obj->extent.width || source->extent.height != vk_obj->extent.height);
 
-		Vector<ImageImageCopy> regions(1);
-		regions[0].src_image   = source;
-		regions[0].src_level   = 0;
-		regions[0].dst_level   = 0;
-		regions[0].width       = source->extent.width;
-		regions[0].height      = source->extent.height;
-		regions[0].src_x       = 0;
-		regions[0].src_y       = 0;
-		regions[0].dst_x       = 0;
-		regions[0].dst_y       = 0;
-		regions[0].layer_count = source->array_layers;
+		const uint32_t         levels = std::min(source->mip_levels, vk_obj->mip_levels);
+		Vector<ImageImageCopy> regions(static_cast<int>(levels));
+		for (uint32_t level = 0; level < levels; level++)
+		{
+			auto& region       = regions[static_cast<int>(level)];
+			region.src_image   = source;
+			region.src_level   = level;
+			region.dst_level   = level;
+			region.width       = std::max(source->extent.width >> level, 1u);
+			region.height      = std::max(source->extent.height >> level, 1u);
+			region.src_x       = 0;
+			region.src_y       = 0;
+			region.dst_x       = 0;
+			region.dst_y       = 0;
+			region.layer_count = source->array_layers;
+		}
 		UtilImageToImage(buffer, regions, vk_obj, static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
 	} else if (objects.Size() == 3 && objects.At(0).type == GpuMemoryObjectType::StorageBuffer &&
 	    objects.At(1).type == GpuMemoryObjectType::Texture && objects.At(2).type == GpuMemoryObjectType::StorageTexture &&
@@ -355,6 +461,8 @@ uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format)
 		case RenderTextureFormat::B8G8R8A8Srgb: return VK_FORMAT_B8G8R8A8_SRGB;
 		case RenderTextureFormat::R16Sfloat: return VK_FORMAT_R16_SFLOAT;
 		case RenderTextureFormat::R16G16Sfloat: return VK_FORMAT_R16G16_SFLOAT;
+		case RenderTextureFormat::R16Uint: return VK_FORMAT_R16_UINT;
+		case RenderTextureFormat::R16G16Uint: return VK_FORMAT_R16G16_UINT;
 		case RenderTextureFormat::R32Sfloat: return VK_FORMAT_R32_SFLOAT;
 		case RenderTextureFormat::B10G11R11Ufloat: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
 		case RenderTextureFormat::A2R10G10B10Unorm: return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
@@ -364,6 +472,7 @@ uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format)
 		case RenderTextureFormat::R16G16B16A16Uint: return VK_FORMAT_R16G16B16A16_UINT;
 		case RenderTextureFormat::R16G16B16A16Sint: return VK_FORMAT_R16G16B16A16_SINT;
 		case RenderTextureFormat::R16G16B16A16Sfloat: return VK_FORMAT_R16G16B16A16_SFLOAT;
+		case RenderTextureFormat::R32G32B32A32Sfloat: return VK_FORMAT_R32G32B32A32_SFLOAT;
 		case RenderTextureFormat::Unknown: break;
 	}
 	return VK_FORMAT_UNDEFINED;
@@ -376,24 +485,35 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 
 	const auto width     = params[RenderTextureObject::PARAM_WIDTH];
 	const auto height    = params[RenderTextureObject::PARAM_HEIGHT];
+	const auto host_width  = params[RenderTextureObject::PARAM_HOST_WIDTH];
+	const auto host_height = params[RenderTextureObject::PARAM_HOST_HEIGHT];
 	const auto vk_format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(
 	    static_cast<RenderTextureFormat>(params[RenderTextureObject::PARAM_FORMAT])));
 	const auto samples    = static_cast<VkSampleCountFlagBits>(params[RenderTextureObject::PARAM_SAMPLES]);
 	const auto array_layers = static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]);
-	if (vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 || array_layers == 0)
+	const auto mip_levels   = static_cast<uint32_t>(params[RenderTextureObject::PARAM_MIP_LEVELS]);
+	const bool volume       = params[RenderTextureObject::PARAM_VOLUME] != 0u;
+	if (vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 || host_width == 0 || host_height == 0 || array_layers == 0 ||
+	    mip_levels == 0 || (mip_levels > 1u && (host_width != width || host_height != height)))
 	{
 		EXIT("invalid render-texture image description\n");
 	}
+	if (volume && (mip_levels != 1u || samples != VK_SAMPLE_COUNT_1_BIT || host_width != width || host_height != height))
+	{
+		EXIT("unsupported volume render target: levels=%u samples=%u guest=%" PRIu64 "x%" PRIu64 " host=%" PRIu64 "x%" PRIu64 "\n",
+		     mip_levels, static_cast<uint32_t>(samples), width, height, host_width, host_height);
+	}
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
-	if (array_layers > properties.limits.maxImageArrayLayers)
+	const uint32_t layer_limit = volume ? properties.limits.maxImageDimension3D : properties.limits.maxImageArrayLayers;
+	if (array_layers > layer_limit)
 	{
 		EXIT("render-texture layer count exceeds the device limit: requested=%" PRIu32 " limit=%" PRIu32 "\n", array_layers,
-		     properties.limits.maxImageArrayLayers);
+		     layer_limit);
 	}
 
 	VulkanResolutionAttachmentRequest capability_request {};
-	capability_request.extent       = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+	capability_request.extent       = {static_cast<uint32_t>(host_width), static_cast<uint32_t>(host_height)};
 	capability_request.format       = vk_format;
 	capability_request.usage        = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 	                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -416,6 +536,7 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 
 	auto* vk_obj = new RenderTextureVulkanImage;
 	vk_obj->SetNativeExtent(width, height);
+	vk_obj->SetHostExtent(host_width, host_height);
 	vk_obj->format = vk_format;
 	vk_obj->image  = nullptr;
 	vk_obj->samples = samples;
@@ -429,9 +550,13 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 		view = nullptr;
 	}
 
+	// A volume renders its slices through 2D-array views of the 3D image.
 	VulkanImageDescriptor image_descriptor {};
-	image_descriptor.extent = {vk_obj->extent.width, vk_obj->extent.height, 1};
-	image_descriptor.array_layers = vk_obj->array_layers;
+	image_descriptor.flags        = volume ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0u;
+	image_descriptor.image_type   = volume ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+	image_descriptor.extent       = {vk_obj->extent.width, vk_obj->extent.height, volume ? array_layers : 1u};
+	image_descriptor.array_layers = volume ? 1u : vk_obj->array_layers;
+	image_descriptor.mip_levels   = mip_levels;
 	image_descriptor.format = vk_obj->format;
 	image_descriptor.samples = vk_obj->samples;
 	image_descriptor.usage  = vk_usage;
@@ -441,6 +566,53 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 		EXIT("failed to create render-texture image\n");
 	}
 	return vk_obj;
+}
+
+// The guest addresses every level of a mip-chained target, so levels it never
+// renders hold what the CPU wrote there; render passes then update single levels.
+// Every array slice holds its own whole chain.
+static void fill_render_texture_mip_chain(GraphicContext* ctx, const uint64_t* params, RenderTextureVulkanImage* vk_obj,
+                                          uint64_t vaddr, uint64_t size)
+{
+	const auto      format = static_cast<RenderTextureFormat>(params[RenderTextureObject::PARAM_FORMAT]);
+	const uint32_t  layers = vk_obj->array_layers;
+	Gen5TextureMipLayout layout {};
+	if (!Gen5GetRenderTarget64KBMipLayout(RenderTextureBytesPerElement(format),
+	                                      static_cast<uint32_t>(params[RenderTextureObject::PARAM_WIDTH]),
+	                                      static_cast<uint32_t>(params[RenderTextureObject::PARAM_HEIGHT]),
+	                                      static_cast<uint32_t>(params[RenderTextureObject::PARAM_PITCH]), vk_obj->mip_levels, &layout) ||
+	    layers == 0u || layout.tiled.size == 0u || size / layout.tiled.size != layers || size % layout.tiled.size != 0u ||
+	    layout.linear_size > UINT32_MAX / layers)
+	{
+		EXIT("render-target mip chain does not match its guest range: size=0x%" PRIx64 " levels=%u layers=%u\n", size,
+		     vk_obj->mip_levels, layers);
+	}
+	std::vector<uint8_t>    linear(static_cast<size_t>(layout.linear_size) * layers);
+	Vector<BufferImageCopy> regions(static_cast<int>(layout.levels * layers));
+	for (uint32_t layer = 0; layer < layers; layer++)
+	{
+		uint8_t* layer_linear = linear.data() + static_cast<size_t>(layout.linear_size) * layer;
+		if (!Gen5DetileRenderTarget64KBTextureMipChain(layer_linear, static_cast<size_t>(layout.linear_size),
+		                                               reinterpret_cast<const void*>(vaddr + layout.tiled.size * layer), layout.tiled.size,
+		                                               layout))
+		{
+			EXIT("failed to detile a render-target mip chain: size=0x%" PRIx64 " levels=%u layer=%u\n", size, vk_obj->mip_levels, layer);
+		}
+		for (uint32_t level = 0; level < layout.levels; level++)
+		{
+			const auto& level_layout = layout.level[level];
+			auto&       region       = regions[static_cast<int>(layer * layout.levels + level)];
+			region.offset            = static_cast<uint32_t>(layout.linear_size * layer + level_layout.linear_offset);
+			region.pitch             = level_layout.element_width;
+			region.width             = level_layout.width;
+			region.height            = level_layout.height;
+			region.dst_level         = level;
+			region.dst_array_layer   = layer;
+			region.dst_x             = 0;
+			region.dst_y             = 0;
+		}
+	}
+	UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
 }
 
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
@@ -461,10 +633,35 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	// EXIT_NOT_IMPLEMENTED(mem->requirements.size > *size);
 
-	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
+	if (vk_obj->mip_levels > 1u)
+	{
+		fill_render_texture_mip_chain(ctx, params, vk_obj, *vaddr, *size);
+	} else
+	{
+		update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
+	}
 
 	create_render_texture_image_views(ctx, vk_obj);
 
+	return vk_obj;
+}
+
+// The same target at another host extent: resample the live image so its
+// content survives the extent change.
+static void* create_resampled_render_texture(GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* params,
+                                             RenderTextureVulkanImage* source, VulkanMemory* mem)
+{
+	EXIT_IF(buffer == nullptr || source == nullptr || source->guest_size == 0u);
+	const uint64_t guest_size = source->guest_size;
+	auto*          vk_obj     = create_render_texture_image(ctx, params, mem, &guest_size);
+
+	VkFormatProperties properties {};
+	vkGetPhysicalDeviceFormatProperties(ctx->physical_device, vk_obj->format, &properties);
+	const bool linear = (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+	UtilBlitImageToImage(buffer, source, vk_obj, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
+	                     static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+
+	create_render_texture_image_views(ctx, vk_obj);
 	return vk_obj;
 }
 
@@ -474,6 +671,17 @@ static void* create2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint
 	KYTY_PROFILER_BLOCK("RenderTextureObject::CreateFromObjects");
 
 	EXIT_IF(objects.IsEmpty());
+	if (scenario == GpuMemoryScenario::Common && objects.Size() == 1 && objects.At(0).type == GpuMemoryObjectType::RenderTexture)
+	{
+		auto* source = static_cast<RenderTextureVulkanImage*>(objects.At(0).obj);
+		EXIT_IF(source == nullptr);
+		if (source->array_layers == params[RenderTextureObject::PARAM_ARRAY_LAYERS] &&
+		    (source->extent.width != params[RenderTextureObject::PARAM_HOST_WIDTH] ||
+		     source->extent.height != params[RenderTextureObject::PARAM_HOST_HEIGHT]))
+		{
+			return create_resampled_render_texture(ctx, buffer, params, source, mem);
+		}
+	}
 	uint64_t       growing_guest_size = 0;
 	const uint64_t* guest_size        = nullptr;
 	if (scenario == GpuMemoryScenario::Common && objects.Size() == 1 &&
@@ -568,7 +776,9 @@ bool RenderTextureObject::Equal(const uint64_t* other) const
 	        params[PARAM_HEIGHT] == other[PARAM_HEIGHT] && params[PARAM_TILED] == other[PARAM_TILED] &&
 	        params[PARAM_NEO] == other[PARAM_NEO] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WRITE_BACK] == other[PARAM_WRITE_BACK] && params[PARAM_SAMPLES] == other[PARAM_SAMPLES] &&
-	        params[PARAM_ARRAY_LAYERS] == other[PARAM_ARRAY_LAYERS]);
+	        params[PARAM_ARRAY_LAYERS] == other[PARAM_ARRAY_LAYERS] && params[PARAM_HOST_WIDTH] == other[PARAM_HOST_WIDTH] &&
+	        params[PARAM_HOST_HEIGHT] == other[PARAM_HOST_HEIGHT] && params[PARAM_MIP_LEVELS] == other[PARAM_MIP_LEVELS] &&
+	        params[PARAM_VOLUME] == other[PARAM_VOLUME]);
 }
 
 GpuObject::create_func_t RenderTextureObject::GetCreateFunc() const

@@ -1,3 +1,4 @@
+#include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/ShaderComputeWaveLds.h"
 
 #include "ShaderSpirvInternal.h"
@@ -214,7 +215,82 @@ void AppendGuardedLdsAddReturn(String8* output, const LdsBankSnapshot& snapshot,
 	               .ReplaceStr("<destination>", destination.value);
 }
 
+// GDS address = M0.base + ADDR + offset, in bytes. ADDR + offset beyond M0.size,
+// a misaligned address or one outside the host GDS window is a memory violation
+// on hardware; the store is dropped so the host buffer stays in bounds.
+void AppendGuardedGdsWrite(String8* output, const LdsBankSnapshot& snapshot, const String8& m0_stem, const String8& offset,
+                           const String8& window)
+{
+	*output += String8(R"(
+%<s>_gds_relative = OpIAdd %uint %<address> %<offset>
+%<s>_gds_address_in = OpULessThan %bool %<address> %<m0>_size
+%<s>_gds_relative_in = OpULessThan %bool %<s>_gds_relative %<m0>_size
+%<s>_gds_byte = OpIAdd %uint %<m0>_base %<s>_gds_relative
+%<s>_gds_low_bits = OpBitwiseAnd %uint %<s>_gds_byte %uint_3
+%<s>_gds_aligned = OpIEqual %bool %<s>_gds_low_bits %uint_0
+%<s>_gds_index = OpShiftRightLogical %uint %<s>_gds_byte %uint_2
+%<s>_gds_window = OpULessThan %bool %<s>_gds_index %<window>
+%<s>_gds_in_m0 = OpLogicalAnd %bool %<s>_gds_address_in %<s>_gds_relative_in
+%<s>_gds_in_host = OpLogicalAnd %bool %<s>_gds_aligned %<s>_gds_window
+%<s>_gds_in = OpLogicalAnd %bool %<s>_gds_in_m0 %<s>_gds_in_host
+%<s>_gds_store = OpLogicalAnd %bool %<exec> %<s>_gds_in
+               OpSelectionMerge %<s>_gds_merge None
+               OpBranchConditional %<s>_gds_store %<s>_gds_then %<s>_gds_merge
+%<s>_gds_then = OpLabel
+%<s>_gds_pointer = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %<s>_gds_index
+               OpStore %<s>_gds_pointer %<data>
+               OpBranch %<s>_gds_merge
+%<s>_gds_merge = OpLabel
+)")
+	               .ReplaceStr("<address>", snapshot.address)
+	               .ReplaceStr("<data>", snapshot.data)
+	               .ReplaceStr("<exec>", snapshot.exec)
+	               .ReplaceStr("<offset>", offset)
+	               .ReplaceStr("<window>", window)
+	               .ReplaceStr("<m0>", m0_stem)
+	               .ReplaceStr("<s>", snapshot.stem);
+}
+
 } // namespace
+
+bool Spirv::EmitComputeWaveGdsWrite(const ShaderInstruction& instruction, uint32_t index, String8* output) const
+{
+	const auto* bind = GetBindInfo();
+	if (output == nullptr || !UsesComputeWaveBanks() || bind == nullptr || !bind->gds_pointers.memory_used ||
+	    !ShaderComputeWaveGdsWriteSupported(instruction))
+	{
+		return false;
+	}
+	const auto offset    = GetConstantUint(instruction.ds_offset);
+	const auto size_mask = GetConstantUint(0xffffu);
+	const auto window    = GetConstantUint(static_cast<uint32_t>(kGraphicsGdsDwords));
+	const auto shift     = GetConstantUint(16u);
+	if (!IsKnownUintConstant(offset) || !IsKnownUintConstant(size_mask) || !IsKnownUintConstant(window) || !IsKnownUintConstant(shift))
+	{
+		return false;
+	}
+
+	LdsSnapshots snapshots {};
+	String8      source;
+	if (!EmitLdsSnapshots(*this, instruction, index, LdsOperation::Write, &snapshots, &source))
+	{
+		return false;
+	}
+	// M0 = {base[31:16], size[15:0]} in bytes.
+	const auto m0_stem = String8::FromPrintf("wave_gds_m0_%u", index);
+	source += String8(R"(
+%<m0> = OpLoad %uint %m0
+%<m0>_base = OpShiftRightLogical %uint %<m0> %<shift>
+%<m0>_size = OpBitwiseAnd %uint %<m0> %<mask>
+)")
+	              .ReplaceStr("<m0>", m0_stem)
+	              .ReplaceStr("<shift>", shift)
+	              .ReplaceStr("<mask>", size_mask);
+	AppendGuardedGdsWrite(&source, snapshots.low, m0_stem, offset, window);
+	AppendGuardedGdsWrite(&source, snapshots.high, m0_stem, offset, window);
+	*output += source;
+	return true;
+}
 
 bool Spirv::EmitComputeWaveLdsInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const
 {

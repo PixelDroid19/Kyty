@@ -12,8 +12,12 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <utility>
+#include <vector>
+
+#include "libatrac9.h"
 
 #if defined(KYTY_HAVE_FFMPEG)
 extern "C" {
@@ -80,6 +84,8 @@ struct Decoder::State
 
 	uint64_t next_video_timestamp = 0;
 	uint64_t next_audio_timestamp = 0;
+	// Frames that end at or before this position precede the last seek target.
+	uint64_t seek_floor_ms = 0;
 
 	std::thread worker;
 	bool stop_requested = false;
@@ -387,6 +393,62 @@ static bool OpenCodec(AVFormatContext* format, int stream_index, AVCodecContext*
 	return true;
 }
 
+// Copies a decoded picture into tightly packed NV12 (the pitch is the width).
+static bool CopyNv12Picture(const AVFrame* source, uint32_t width, uint32_t height, SwsContext** scaler, VideoFrame* frame,
+                            const char** error)
+{
+	const size_t chroma_height = (static_cast<size_t>(height) + 1u) / 2u;
+	if (width == 0 || height == 0 || static_cast<size_t>(width) > std::numeric_limits<size_t>::max() / height)
+	{
+		*error = "decoded video dimensions overflow";
+		return false;
+	}
+	const size_t luma_bytes = static_cast<size_t>(width) * height;
+	if (static_cast<size_t>(width) > std::numeric_limits<size_t>::max() / chroma_height ||
+	    luma_bytes > std::numeric_limits<size_t>::max() - static_cast<size_t>(width) * chroma_height)
+	{
+		*error = "decoded video buffer size overflow";
+		return false;
+	}
+	frame->width  = width;
+	frame->height = height;
+	frame->pitch  = width;
+	frame->data.resize(luma_bytes + static_cast<size_t>(width) * chroma_height);
+	const bool copied_nv12 = source->format == AV_PIX_FMT_NV12 && source->width == static_cast<int>(width) &&
+	                         source->height == static_cast<int>(height) && source->data[0] != nullptr && source->data[1] != nullptr &&
+	                         source->linesize[0] >= static_cast<int>(width) && source->linesize[1] >= static_cast<int>(width);
+	if (copied_nv12)
+	{
+		for (uint32_t row = 0; row < height; ++row)
+		{
+			std::memcpy(frame->data.data() + static_cast<size_t>(row) * width,
+			            source->data[0] + static_cast<size_t>(row) * source->linesize[0], width);
+		}
+		for (size_t row = 0; row < chroma_height; ++row)
+		{
+			std::memcpy(frame->data.data() + luma_bytes + row * width,
+			            source->data[1] + row * static_cast<size_t>(source->linesize[1]), width);
+		}
+		return true;
+	}
+	*scaler = sws_getCachedContext(*scaler, source->width, source->height, static_cast<AVPixelFormat>(source->format),
+	                               static_cast<int>(width), static_cast<int>(height), AV_PIX_FMT_NV12, SWS_BILINEAR, nullptr, nullptr,
+	                               nullptr);
+	if (*scaler == nullptr)
+	{
+		*error = "initialize video scaler";
+		return false;
+	}
+	uint8_t* destination[4]       = {frame->data.data(), frame->data.data() + luma_bytes, nullptr, nullptr};
+	int      destination_pitch[4] = {static_cast<int>(width), static_cast<int>(width), 0, 0};
+	if (sws_scale(*scaler, source->data, source->linesize, 0, source->height, destination, destination_pitch) <= 0)
+	{
+		*error = "convert video frame to NV12";
+		return false;
+	}
+	return true;
+}
+
 static bool ConvertVideo(Decoder::State* state)
 {
 	AVFrame* source = state->video_frame;
@@ -411,77 +473,26 @@ static bool ConvertVideo(Decoder::State* state)
 		}
 		source = state->transferred_video_frame;
 	}
-	const uint32_t width  = static_cast<uint32_t>(state->info.video_width);
-	const uint32_t height = static_cast<uint32_t>(state->info.video_height);
-	const size_t chroma_height = (static_cast<size_t>(height) + 1u) / 2u;
-	if (width == 0 || height == 0 || static_cast<size_t>(width) > std::numeric_limits<size_t>::max() / height)
-	{
-		SetError(state, Status::DecodeFailed, "decoded video dimensions overflow");
-		return false;
-	}
-	const size_t luma_bytes = static_cast<size_t>(width) * height;
-	if (static_cast<size_t>(width) > std::numeric_limits<size_t>::max() / chroma_height ||
-	    luma_bytes > std::numeric_limits<size_t>::max() - static_cast<size_t>(width) * chroma_height)
-	{
-		SetError(state, Status::DecodeFailed, "decoded video buffer size overflow");
-		return false;
-	}
-
-	VideoFrame frame;
-	frame.width       = width;
-	frame.height      = height;
-	frame.pitch       = width;
-	frame.timestamp_ms = TimestampMilliseconds(source->best_effort_timestamp,
-	                                            state->format->streams[state->video_stream]->time_base,
-	                                            state->next_video_timestamp);
-	frame.data.resize(luma_bytes + static_cast<size_t>(width) * chroma_height);
-	bool copied_nv12 = source->format == AV_PIX_FMT_NV12 && source->width == static_cast<int>(width) &&
-	                   source->height == static_cast<int>(height) && source->data[0] != nullptr && source->data[1] != nullptr &&
-	                   source->linesize[0] >= static_cast<int>(width) && source->linesize[1] >= static_cast<int>(width);
-	if (copied_nv12)
-	{
-		for (uint32_t row = 0; row < height; ++row)
-		{
-			std::memcpy(frame.data.data() + static_cast<size_t>(row) * width,
-			            source->data[0] + static_cast<size_t>(row) * source->linesize[0], width);
-		}
-		for (size_t row = 0; row < chroma_height; ++row)
-		{
-			std::memcpy(frame.data.data() + luma_bytes + row * width,
-			            source->data[1] + row * static_cast<size_t>(source->linesize[1]), width);
-		}
-	}
-	else
-	{
-		state->scaler = sws_getCachedContext(state->scaler,
-		                                      source->width,
-		                                      source->height,
-		                                      static_cast<AVPixelFormat>(source->format),
-		                                      static_cast<int>(width),
-		                                      static_cast<int>(height),
-		                                      AV_PIX_FMT_NV12,
-		                                      SWS_BILINEAR,
-		                                      nullptr,
-		                                      nullptr,
-		                                      nullptr);
-		if (state->scaler == nullptr)
-		{
-			SetError(state, Status::DecodeFailed, "initialize video scaler");
-			return false;
-		}
-		uint8_t* destination[4] = {frame.data.data(), frame.data.data() + luma_bytes, nullptr, nullptr};
-		int destination_pitch[4] = {static_cast<int>(width), static_cast<int>(width), 0, 0};
-		if (sws_scale(state->scaler, source->data, source->linesize, 0, source->height, destination, destination_pitch) <= 0)
-		{
-			SetError(state, Status::DecodeFailed, "convert video frame to NV12");
-			return false;
-		}
-	}
-	state->next_video_timestamp = frame.timestamp_ms +
+	const uint64_t timestamp_ms = TimestampMilliseconds(source->best_effort_timestamp,
+	                                                    state->format->streams[state->video_stream]->time_base,
+	                                                    state->next_video_timestamp);
+	state->next_video_timestamp = timestamp_ms +
 	                              (state->info.video_frame_rate > 0.0
 	                                   ? static_cast<uint64_t>(1000.0 / state->info.video_frame_rate + 0.5)
-
-                                   : 0);
+	                                   : 0);
+	if (state->next_video_timestamp <= state->seek_floor_ms)
+	{
+		return true;
+	}
+	VideoFrame  frame;
+	const char* copy_error = nullptr;
+	if (!CopyNv12Picture(source, static_cast<uint32_t>(state->info.video_width), static_cast<uint32_t>(state->info.video_height),
+	                     &state->scaler, &frame, &copy_error))
+	{
+		SetError(state, Status::DecodeFailed, copy_error);
+		return false;
+	}
+	frame.timestamp_ms = timestamp_ms;
 	{
 		std::unique_lock<std::mutex> lock(state->mutex);
 		if (state->stop_requested)
@@ -539,7 +550,7 @@ static bool ConvertAudio(Decoder::State* state)
 	frame.data.resize(static_cast<size_t>(converted) * kOutputChannels);
 	state->next_audio_timestamp = frame.timestamp_ms +
 	                              static_cast<uint64_t>(static_cast<double>(converted) * 1000.0 / kOutputSampleRate + 0.5);
-	if (!frame.data.empty())
+	if (!frame.data.empty() && state->next_audio_timestamp > state->seek_floor_ms)
 	{
 		{
 			std::lock_guard<std::mutex> lock(state->mutex);
@@ -708,10 +719,48 @@ static void DecodeLoop(Decoder::State* state)
 		}
 	}
 	{
+		// A stop requested by Seek() is a pause in decoding, not the end of the stream.
 		std::lock_guard<std::mutex> lock(state->mutex);
-		state->decode_done = true;
+		state->decode_done = state->decode_done || !state->stop_requested;
 	}
 	state->condition.notify_all();
+}
+
+static bool RepositionInput(Decoder::State* state, uint64_t time_ms)
+{
+	if (time_ms > static_cast<uint64_t>(std::numeric_limits<int64_t>::max() / 1000))
+	{
+		SetError(state, Status::DecodeFailed, "seek position overflow");
+		return false;
+	}
+	const int64_t target = av_rescale(static_cast<int64_t>(time_ms), AV_TIME_BASE, 1000);
+	const int     result = avformat_seek_file(state->format, -1, std::numeric_limits<int64_t>::min(), target, target, 0);
+	if (result < 0)
+	{
+		SetFfmpegError(state, Status::DecodeFailed, result, "seek media input");
+		return false;
+	}
+	if (state->video != nullptr)
+	{
+		avcodec_flush_buffers(state->video);
+	}
+	if (state->audio != nullptr)
+	{
+		avcodec_flush_buffers(state->audio);
+	}
+	if (state->resampler != nullptr && swr_init(state->resampler) < 0)
+	{
+		SetError(state, Status::DecodeFailed, "reset audio resampler");
+		return false;
+	}
+	state->demux_eof            = false;
+	state->video_eof            = state->video == nullptr;
+	state->audio_eof            = state->audio == nullptr;
+	state->flushed              = false;
+	state->next_video_timestamp = time_ms;
+	state->next_audio_timestamp = time_ms;
+	state->seek_floor_ms        = time_ms;
+	return true;
 }
 
 #endif
@@ -1084,6 +1133,49 @@ bool Decoder::TryReadAudioFrame(AudioFrame* frame)
 #endif
 }
 
+bool Decoder::Seek(uint64_t time_ms)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)time_ms;
+	return false;
+#else
+	State* state = state_.get();
+	{
+		std::lock_guard<std::mutex> lock(state->mutex);
+		if (state->status != Status::Ok)
+		{
+			return false;
+		}
+		state->stop_requested = true;
+		state->decode_done    = false;
+	}
+	state->condition.notify_all();
+	if (state->worker.joinable())
+	{
+		state->worker.join();
+	}
+	{
+		std::lock_guard<std::mutex> lock(state->mutex);
+		state->video_queue.clear();
+		state->audio_queue.clear();
+		if (state->status != Status::Ok)
+		{
+			return false;
+		}
+	}
+	if (!RepositionInput(state, time_ms))
+	{
+		return false;
+	}
+	{
+		std::lock_guard<std::mutex> lock(state->mutex);
+		state->stop_requested = false;
+	}
+	state->worker = std::thread(DecodeLoop, state);
+	return true;
+#endif
+}
+
 void Decoder::Close()
 {
 #if defined(KYTY_HAVE_FFMPEG)
@@ -1094,6 +1186,725 @@ void Decoder::Close()
 		std::lock_guard<std::mutex> lock(state_->mutex);
 		state_->status = Status::Closed;
 	}
+}
+
+struct ElementaryVideoDecoder::State
+{
+	std::string error;
+	int32_t     max_frame_width  = 0;
+	int32_t     max_frame_height = 0;
+#if defined(KYTY_HAVE_FFMPEG)
+	AVCodecContext* context  = nullptr;
+	AVPacket*       packet   = nullptr;
+	AVFrame*        frame    = nullptr;
+	SwsContext*     scaler   = nullptr;
+	bool            drained  = false;
+	std::deque<std::pair<VideoFrame, int64_t>> pictures;
+#endif
+};
+
+ElementaryVideoDecoder::ElementaryVideoDecoder(): state_(std::make_unique<State>()) {}
+
+ElementaryVideoDecoder::~ElementaryVideoDecoder()
+{
+#if defined(KYTY_HAVE_FFMPEG)
+	sws_freeContext(state_->scaler);
+	av_frame_free(&state_->frame);
+	av_packet_free(&state_->packet);
+	avcodec_free_context(&state_->context);
+#endif
+}
+
+#if defined(KYTY_HAVE_FFMPEG)
+// Moves every picture the codec has finished into the queue.
+static bool CollectPictures(ElementaryVideoDecoder::State* state)
+{
+	for (;;)
+	{
+		const int result = avcodec_receive_frame(state->context, state->frame);
+		if (result == AVERROR(EAGAIN) || result == AVERROR_EOF)
+		{
+			return true;
+		}
+		if (result < 0)
+		{
+			state->error = "receive decoded picture";
+			return false;
+		}
+		if (state->frame->width <= 0 || state->frame->height <= 0 || state->frame->width > state->max_frame_width ||
+		    state->frame->height > state->max_frame_height)
+		{
+			state->error = "decoded picture exceeds configured maximum dimensions";
+			av_frame_unref(state->frame);
+			return false;
+		}
+		VideoFrame  picture;
+		const char* copy_error = nullptr;
+		const bool  copied     = CopyNv12Picture(state->frame, static_cast<uint32_t>(state->frame->width),
+		                                         static_cast<uint32_t>(state->frame->height), &state->scaler, &picture, &copy_error);
+		const int64_t tag = state->frame->pts;
+		av_frame_unref(state->frame);
+		if (!copied)
+		{
+			state->error = copy_error;
+			return false;
+		}
+		state->pictures.emplace_back(std::move(picture), tag);
+	}
+}
+#endif
+
+std::unique_ptr<ElementaryVideoDecoder> ElementaryVideoDecoder::Open(VideoCodec codec, int32_t max_frame_width,
+	                                                                 int32_t max_frame_height, std::string* error)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)codec;
+	(void)max_frame_width;
+	(void)max_frame_height;
+	if (error != nullptr)
+	{
+		*error = "FFmpeg is not available";
+	}
+	return nullptr;
+#else
+	if (max_frame_width <= 0 || max_frame_height <= 0)
+	{
+		if (error != nullptr)
+		{
+			*error = "invalid maximum video dimensions";
+		}
+		return nullptr;
+	}
+	std::unique_ptr<ElementaryVideoDecoder> decoder(new ElementaryVideoDecoder());
+	auto*                                   state = decoder->state_.get();
+	state->max_frame_width                   = max_frame_width;
+	state->max_frame_height                  = max_frame_height;
+	const AVCodec* av_codec = avcodec_find_decoder(codec == VideoCodec::Hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
+	state->context          = av_codec != nullptr ? avcodec_alloc_context3(av_codec) : nullptr;
+	state->packet           = av_packet_alloc();
+	state->frame            = av_frame_alloc();
+	if (state->context == nullptr || state->packet == nullptr || state->frame == nullptr)
+	{
+		if (error != nullptr)
+		{
+			*error = "allocate video decoder";
+		}
+		return nullptr;
+	}
+	// Slice threads add no picture latency beyond the stream's own reordering.
+	state->context->thread_type  = FF_THREAD_SLICE;
+	state->context->thread_count = 0;
+	if (avcodec_open2(state->context, av_codec, nullptr) < 0)
+	{
+		if (error != nullptr)
+		{
+			*error = "open video decoder";
+		}
+		return nullptr;
+	}
+	return decoder;
+#endif
+}
+
+bool ElementaryVideoDecoder::Send(const uint8_t* data, size_t size, int64_t tag)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)data;
+	(void)size;
+	(void)tag;
+	return false;
+#else
+	auto* state = state_.get();
+	if (data == nullptr || size == 0 || size > static_cast<size_t>(std::numeric_limits<int>::max()))
+	{
+		state->error = "invalid access unit";
+		return false;
+	}
+	if (state->drained)
+	{
+		avcodec_flush_buffers(state->context);
+		state->drained = false;
+	}
+	av_packet_unref(state->packet);
+	if (av_new_packet(state->packet, static_cast<int>(size)) < 0)
+	{
+		state->error = "allocate access unit";
+		return false;
+	}
+	std::memcpy(state->packet->data, data, size);
+	state->packet->pts = tag;
+	for (;;)
+	{
+		const int result = avcodec_send_packet(state->context, state->packet);
+		if (result == AVERROR(EAGAIN))
+		{
+			if (!CollectPictures(state))
+			{
+				return false;
+			}
+			continue;
+		}
+		if (result < 0)
+		{
+			state->error = "decode access unit";
+			return false;
+		}
+		return CollectPictures(state);
+	}
+#endif
+}
+
+bool ElementaryVideoDecoder::Drain()
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	return false;
+#else
+	auto* state = state_.get();
+	if (!state->drained)
+	{
+		state->drained = true;
+		if (avcodec_send_packet(state->context, nullptr) < 0)
+		{
+			state->error = "drain video decoder";
+			return false;
+		}
+	}
+	return CollectPictures(state);
+#endif
+}
+
+bool ElementaryVideoDecoder::Receive(VideoFrame* frame, int64_t* tag)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)frame;
+	(void)tag;
+	return false;
+#else
+	auto* state = state_.get();
+	if (frame == nullptr || tag == nullptr || state->pictures.empty())
+	{
+		return false;
+	}
+	*frame = std::move(state->pictures.front().first);
+	*tag   = state->pictures.front().second;
+	state->pictures.pop_front();
+	return true;
+#endif
+}
+
+void ElementaryVideoDecoder::Reset()
+{
+#if defined(KYTY_HAVE_FFMPEG)
+	avcodec_flush_buffers(state_->context);
+	state_->drained = false;
+	state_->pictures.clear();
+#endif
+}
+
+const char* ElementaryVideoDecoder::LastError() const
+{
+	return state_->error.c_str();
+}
+
+struct ElementaryAudioDecoder::State
+{
+	std::string error;
+	bool        is_opus                 = false;
+	uint32_t    channels                = 0;
+	uint32_t    sample_rate             = 0;
+	uint32_t    block_align             = 0;
+	uint32_t    max_samples_per_channel = 0;
+	// ATRAC9 decodes through its own decoder; packet keeps zero padding after one superframe.
+	void*                atrac9 = nullptr;
+	uint8_t              atrac9_config[ATRAC9_CONFIG_DATA_SIZE] {};
+	uint32_t             atrac9_frames        = 0;
+	uint32_t             atrac9_frame_samples = 0;
+	std::vector<uint8_t> atrac9_packet;
+	std::vector<int16_t> atrac9_pcm;
+#if defined(KYTY_HAVE_FFMPEG)
+	AVCodecContext* context = nullptr;
+	AVPacket*       packet  = nullptr;
+	AVFrame*        frame   = nullptr;
+#endif
+};
+
+namespace {
+
+bool Atrac9SuperframeBlockAlign(const uint8_t* config, uint32_t* block_align)
+{
+	const uint32_t superframe_index = (config[3] >> 3u) & 3u;
+	if ((superframe_index & 1u) != 0 || superframe_index > 2u)
+	{
+		return false;
+	}
+
+	const uint32_t frame_bytes = ((static_cast<uint32_t>(config[2]) << 3u) | (config[3] >> 5u)) + 1u;
+	const uint32_t frame_count = 1u << superframe_index;
+	if (frame_bytes > ElementaryAudioDecoder::kAtrac9MaxSuperframeBytes / frame_count)
+	{
+		return false;
+	}
+	*block_align = frame_bytes * frame_count;
+	return true;
+}
+
+// The supported config subset uses zero in the final three low bits; their
+// behavior for nonzero values is not established here. The decoder remains
+// authoritative for channels and sample rate.
+const char* Atrac9BlockAlignFromConfig(const uint8_t* config, size_t config_size, uint32_t* block_align)
+{
+	if (config == nullptr || config_size != 4)
+	{
+		return "ATRAC9 config must be exactly 4 bytes";
+	}
+	if (config[0] != 0xfeu)
+	{
+		return "ATRAC9 config has an invalid sync byte";
+	}
+	if ((config[1] & 1u) != 0)
+	{
+		return "ATRAC9 config verification bit must be clear";
+	}
+	if (((config[1] >> 1u) & 7u) > 5u)
+	{
+		return "ATRAC9 config has an invalid block configuration";
+	}
+	if ((config[3] & 7u) != 0)
+	{
+		return "ATRAC9 config uses unsupported nonzero low bits";
+	}
+
+	if (!Atrac9SuperframeBlockAlign(config, block_align))
+	{
+		return "ATRAC9 superframe index must describe 1 or 4 frames";
+	}
+	return nullptr;
+}
+
+// Each decoder init rewrites tables that every ATRAC9 handle reads while decoding.
+std::shared_mutex g_atrac9_tables;
+
+// The bit reader has no end: a malformed frame may read past its superframe into this zeroed tail.
+constexpr size_t kAtrac9PacketPadding = ElementaryAudioDecoder::kAtrac9MaxSuperframeBytes;
+
+void* OpenAtrac9Handle(const uint8_t* config, Atrac9CodecInfo* info)
+{
+	void* handle = Atrac9GetHandle();
+	if (handle == nullptr)
+	{
+		return nullptr;
+	}
+	unsigned char config_copy[ATRAC9_CONFIG_DATA_SIZE];
+	std::memcpy(config_copy, config, sizeof(config_copy));
+	int result = 0;
+	{
+		std::unique_lock lock(g_atrac9_tables);
+		result = Atrac9InitDecoder(handle, config_copy);
+	}
+	if (result != 0 || Atrac9GetCodecInfo(handle, info) != 0)
+	{
+		Atrac9ReleaseHandle(handle);
+		return nullptr;
+	}
+	return handle;
+}
+
+// A failed frame leaves the stream between frames, so the next packet starts a new stream.
+void RestartAtrac9(ElementaryAudioDecoder::State* state)
+{
+	if (state->atrac9 != nullptr)
+	{
+		Atrac9ReleaseHandle(state->atrac9);
+	}
+	Atrac9CodecInfo info {};
+	state->atrac9 = OpenAtrac9Handle(state->atrac9_config, &info);
+}
+
+} // namespace
+
+ElementaryAudioDecoder::ElementaryAudioDecoder(): state_(std::make_unique<State>()) {}
+
+ElementaryAudioDecoder::~ElementaryAudioDecoder()
+{
+	if (state_->atrac9 != nullptr)
+	{
+		Atrac9ReleaseHandle(state_->atrac9);
+	}
+#if defined(KYTY_HAVE_FFMPEG)
+	av_frame_free(&state_->frame);
+	av_packet_free(&state_->packet);
+	avcodec_free_context(&state_->context);
+#endif
+}
+
+std::unique_ptr<ElementaryAudioDecoder> ElementaryAudioDecoder::Open(AudioCodec codec, const uint8_t* extradata, size_t extradata_size,
+                                                                     uint32_t block_align, uint32_t channels, uint32_t sample_rate,
+                                                                     std::string* error)
+{
+	if (codec != AudioCodec::Atrac9)
+	{
+		if (error != nullptr)
+		{
+			*error = "unsupported audio codec";
+		}
+		return nullptr;
+	}
+	const ExpectedFormat expected_format {channels, sample_rate};
+	return OpenAtrac9(extradata, extradata_size, block_align, &expected_format, error);
+}
+
+std::unique_ptr<ElementaryAudioDecoder> ElementaryAudioDecoder::OpenOpus(uint32_t channels, uint32_t sample_rate, std::string* error)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)channels;
+	(void)sample_rate;
+	if (error != nullptr)
+	{
+		*error = "FFmpeg is not available";
+	}
+	return nullptr;
+#else
+	auto fail = [error](const char* message) -> std::unique_ptr<ElementaryAudioDecoder>
+	{
+		if (error != nullptr)
+		{
+			*error = message;
+		}
+		return nullptr;
+	};
+	if ((channels != 1 && channels != 2) || sample_rate != 48000)
+	{
+		return fail("Opus requires mono or stereo input at 48000 Hz");
+	}
+	const AVCodec* av_codec = avcodec_find_decoder(AV_CODEC_ID_OPUS);
+	if (av_codec == nullptr)
+	{
+		return fail("Opus decoder is unavailable");
+	}
+
+	std::unique_ptr<ElementaryAudioDecoder> decoder(new ElementaryAudioDecoder());
+	auto*                                   state = decoder->state_.get();
+	state->context                                = avcodec_alloc_context3(av_codec);
+	state->packet                                 = av_packet_alloc();
+	state->frame                                  = av_frame_alloc();
+	if (state->context == nullptr || state->packet == nullptr || state->frame == nullptr)
+	{
+		return fail("allocate Opus decoder");
+	}
+	state->context->sample_rate = static_cast<int>(sample_rate);
+	av_channel_layout_default(&state->context->ch_layout, static_cast<int>(channels));
+	if (avcodec_open2(state->context, av_codec, nullptr) < 0)
+	{
+		return fail("open Opus decoder");
+	}
+	const int actual_channels    = state->context->ch_layout.nb_channels;
+	const int actual_sample_rate = state->context->sample_rate;
+	if (actual_channels != static_cast<int>(channels) || actual_sample_rate != static_cast<int>(sample_rate))
+	{
+		return fail("Opus decoder format does not match the requested format");
+	}
+	if (state->context->sample_fmt != AV_SAMPLE_FMT_FLTP)
+	{
+		return fail("Opus decoder output is not planar float");
+	}
+	state->is_opus                 = true;
+	state->channels                = static_cast<uint32_t>(actual_channels);
+	state->sample_rate             = static_cast<uint32_t>(actual_sample_rate);
+	state->max_samples_per_channel = kOpusMaxPacketSamples;
+	return decoder;
+#endif
+}
+
+std::unique_ptr<ElementaryAudioDecoder> ElementaryAudioDecoder::OpenAtrac9FromConfig(const uint8_t* config, size_t config_size,
+                                                                                     std::string* error)
+{
+	uint32_t block_align = 0;
+	if (const char* config_error = Atrac9BlockAlignFromConfig(config, config_size, &block_align); config_error != nullptr)
+	{
+		if (error != nullptr)
+		{
+			*error = config_error;
+		}
+		return nullptr;
+	}
+
+	// Wrap the config in the RIFF WAVEFORMATEXTENSIBLE tail. Version and reserved
+	// words are zero for the standard ATRAC9 setup.
+	uint8_t extradata[kAtrac9ExtradataSize] = {};
+	std::memcpy(extradata + 4, config, config_size);
+	return OpenAtrac9(extradata, sizeof(extradata), block_align, nullptr, error);
+}
+
+std::unique_ptr<ElementaryAudioDecoder> ElementaryAudioDecoder::OpenAtrac9(const uint8_t* extradata, size_t extradata_size,
+                                                                          uint32_t block_align, const ExpectedFormat* expected_format,
+                                                                          std::string* error)
+{
+	auto fail = [error](const char* message) -> std::unique_ptr<ElementaryAudioDecoder>
+	{
+		if (error != nullptr)
+		{
+			*error = message;
+		}
+		return nullptr;
+	};
+	if (extradata == nullptr || extradata_size != kAtrac9ExtradataSize)
+	{
+		return fail("ATRAC9 extradata must be 12 bytes");
+	}
+	const uint32_t version = static_cast<uint32_t>(extradata[0]) | (static_cast<uint32_t>(extradata[1]) << 8u) |
+	                         (static_cast<uint32_t>(extradata[2]) << 16u) | (static_cast<uint32_t>(extradata[3]) << 24u);
+	if (version > 2)
+	{
+		return fail("ATRAC9 extradata version must be at most 2");
+	}
+	if (block_align == 0 || block_align > kAtrac9MaxSuperframeBytes)
+	{
+		return fail("ATRAC9 block align must be 1 to 8192 bytes");
+	}
+	if (expected_format != nullptr &&
+	    (expected_format->channels == 0 || expected_format->channels > kAtrac9MaxChannels || expected_format->sample_rate == 0 ||
+	     expected_format->sample_rate > kAtrac9MaxSampleRate))
+	{
+		return fail("ATRAC9 channels or sample rate out of range");
+	}
+	const uint8_t* config = extradata + 4;
+	if (config[0] != 0xfeu || (config[1] & 1u) != 0)
+	{
+		return fail("ATRAC9 config has an invalid sync byte or verification bit");
+	}
+	if (((config[1] >> 1u) & 7u) > 5u)
+	{
+		return fail("ATRAC9 config has an invalid block configuration");
+	}
+	uint32_t config_block_align = 0;
+	if (!Atrac9SuperframeBlockAlign(config, &config_block_align))
+	{
+		return fail("ATRAC9 config has an invalid superframe size");
+	}
+	if (block_align != config_block_align)
+	{
+		return fail("ATRAC9 block align does not match one configured superframe");
+	}
+
+	std::unique_ptr<ElementaryAudioDecoder> decoder(new ElementaryAudioDecoder());
+	auto*                                   state = decoder->state_.get();
+	std::memcpy(state->atrac9_config, config, sizeof(state->atrac9_config));
+	Atrac9CodecInfo info {};
+	state->atrac9 = OpenAtrac9Handle(state->atrac9_config, &info);
+	if (state->atrac9 == nullptr)
+	{
+		return fail("open ATRAC9 decoder: config rejected");
+	}
+	// The config, not the container, defines the channel layout and rate.
+	if (info.channels <= 0 || info.channels > static_cast<int>(kAtrac9MaxChannels) || info.samplingRate <= 0 ||
+	    info.samplingRate > static_cast<int>(kAtrac9MaxSampleRate))
+	{
+		return fail("ATRAC9 config derives an unsupported channel count or sample rate");
+	}
+	if (info.superframeSize != static_cast<int>(block_align) || info.framesInSuperframe <= 0 || info.frameSamples <= 0 ||
+	    static_cast<uint32_t>(info.framesInSuperframe * info.frameSamples) > kAtrac9MaxSuperframeSamples)
+	{
+		return fail("ATRAC9 config derives an unsupported superframe");
+	}
+	if (expected_format != nullptr &&
+	    (info.channels != static_cast<int>(expected_format->channels) || info.samplingRate != static_cast<int>(expected_format->sample_rate)))
+	{
+		return fail("ATRAC9 config does not match the waveform format");
+	}
+	state->channels                = static_cast<uint32_t>(info.channels);
+	state->sample_rate             = static_cast<uint32_t>(info.samplingRate);
+	state->block_align             = block_align;
+	state->max_samples_per_channel = kAtrac9MaxSuperframeSamples;
+	state->atrac9_frames           = static_cast<uint32_t>(info.framesInSuperframe);
+	state->atrac9_frame_samples    = static_cast<uint32_t>(info.frameSamples);
+	state->atrac9_packet.assign(block_align + kAtrac9PacketPadding, 0);
+	state->atrac9_pcm.resize(static_cast<size_t>(state->atrac9_frame_samples) * state->channels);
+	return decoder;
+}
+
+// Decodes the frames of one superframe into interleaved float PCM.
+static bool DecodeAtrac9Superframe(ElementaryAudioDecoder::State* state, const uint8_t* packet, size_t size, std::vector<float>* interleaved)
+{
+	if (state->atrac9 == nullptr)
+	{
+		RestartAtrac9(state);
+		if (state->atrac9 == nullptr)
+		{
+			state->error = "open ATRAC9 decoder: config rejected";
+			return false;
+		}
+	}
+	std::memcpy(state->atrac9_packet.data(), packet, size);
+	interleaved->reserve(static_cast<size_t>(state->atrac9_frames) * state->atrac9_pcm.size());
+	size_t consumed = 0;
+	bool   decoded  = true;
+	{
+		std::shared_lock lock(g_atrac9_tables);
+		for (uint32_t frame = 0; frame < state->atrac9_frames && decoded; frame++)
+		{
+			int used = 0;
+			decoded  = Atrac9Decode(state->atrac9, state->atrac9_packet.data() + consumed, state->atrac9_pcm.data(), &used) == 0 &&
+			          used > 0 && static_cast<size_t>(used) <= size - consumed;
+			if (decoded)
+			{
+				consumed += static_cast<size_t>(used);
+				for (const int16_t sample: state->atrac9_pcm)
+				{
+					interleaved->push_back(static_cast<float>(sample) / 32768.0f);
+				}
+			}
+		}
+	}
+	if (!decoded)
+	{
+		interleaved->clear();
+		RestartAtrac9(state);
+		state->error = "decode ATRAC9 packet";
+		return false;
+	}
+	return true;
+}
+
+#if defined(KYTY_HAVE_FFMPEG)
+// Appends one planar float frame within the codec's per-packet sample limit.
+static bool AppendInterleavedFrame(ElementaryAudioDecoder::State* state, std::vector<float>* interleaved)
+{
+	const AVFrame* frame = state->frame;
+	if (frame->format != AV_SAMPLE_FMT_FLTP || frame->ch_layout.nb_channels != static_cast<int>(state->channels) ||
+	    frame->nb_samples <= 0 || static_cast<uint32_t>(frame->nb_samples) > state->max_samples_per_channel)
+	{
+		state->error = "Opus frame layout does not match the decoder";
+		return false;
+	}
+	const auto channels           = static_cast<int>(state->channels);
+	const auto limit              = static_cast<size_t>(state->max_samples_per_channel) * state->channels;
+	const auto frame_sample_count = static_cast<size_t>(frame->nb_samples) * state->channels;
+	if (interleaved->size() > limit || frame_sample_count > limit - interleaved->size())
+	{
+		state->error = "Opus packet produced more than 120 ms of samples";
+		return false;
+	}
+	for (int channel = 0; channel < channels; channel++)
+	{
+		if (frame->data[channel] == nullptr)
+		{
+			state->error = "Opus frame is missing a channel plane";
+			return false;
+		}
+	}
+	for (int sample = 0; sample < frame->nb_samples; sample++)
+	{
+		for (int channel = 0; channel < channels; channel++)
+		{
+			interleaved->push_back(reinterpret_cast<const float*>(frame->data[channel])[sample]);
+		}
+	}
+	return true;
+}
+
+static bool CollectAvailableAudioFrames(ElementaryAudioDecoder::State* state, std::vector<float>* interleaved)
+{
+	for (;;)
+	{
+		const int result = avcodec_receive_frame(state->context, state->frame);
+		if (result == AVERROR(EAGAIN) || result == AVERROR_EOF)
+		{
+			return true;
+		}
+		if (result < 0)
+		{
+			state->error = "receive Opus frame";
+			return false;
+		}
+		const bool appended = AppendInterleavedFrame(state, interleaved);
+		av_frame_unref(state->frame);
+		if (!appended)
+		{
+			return false;
+		}
+	}
+}
+#endif
+
+bool ElementaryAudioDecoder::Decode(const uint8_t* packet, size_t size, std::vector<float>* interleaved)
+{
+	auto* state = state_.get();
+	if (packet == nullptr || interleaved == nullptr)
+	{
+		state->error = "audio packet or output is null";
+		return false;
+	}
+	if ((!state->is_opus && size != state->block_align) || (state->is_opus && (size == 0 || size > kOpusMaxPacketBytes)))
+	{
+		state->error = state->is_opus ? "Opus packet must be 1 to 65535 bytes" : "ATRAC9 packet must be exactly one superframe";
+		return false;
+	}
+	interleaved->clear();
+	if (!state->is_opus)
+	{
+		return DecodeAtrac9Superframe(state, packet, size, interleaved);
+	}
+#if !defined(KYTY_HAVE_FFMPEG)
+	state->error = "FFmpeg is not available";
+	return false;
+#else
+	av_packet_unref(state->packet);
+	if (av_new_packet(state->packet, static_cast<int>(size)) < 0)
+	{
+		state->error = "allocate Opus packet";
+		return false;
+	}
+	std::memcpy(state->packet->data, packet, size);
+	int send_result = avcodec_send_packet(state->context, state->packet);
+	if (send_result == AVERROR(EAGAIN))
+	{
+		// An Opus decoder can retain output until the caller receives it. Drain
+		// that output and retry without flushing the packet history.
+		if (!CollectAvailableAudioFrames(state, interleaved))
+		{
+			return false;
+		}
+		send_result = avcodec_send_packet(state->context, state->packet);
+	}
+	if (send_result < 0)
+	{
+		state->error = "send Opus packet to decoder";
+		return false;
+	}
+	return CollectAvailableAudioFrames(state, interleaved);
+#endif
+}
+
+void ElementaryAudioDecoder::Reset()
+{
+	if (!state_->is_opus)
+	{
+		RestartAtrac9(state_.get());
+		return;
+	}
+#if defined(KYTY_HAVE_FFMPEG)
+	avcodec_flush_buffers(state_->context);
+#endif
+}
+
+const char* ElementaryAudioDecoder::LastError() const
+{
+	return state_->error.c_str();
+}
+
+uint32_t ElementaryAudioDecoder::Channels() const
+{
+	return state_->channels;
+}
+
+uint32_t ElementaryAudioDecoder::SampleRate() const
+{
+	return state_->sample_rate;
+}
+
+uint32_t ElementaryAudioDecoder::BlockAlign() const
+{
+	return state_->block_align;
 }
 
 } // namespace Kyty::Emulator::AudioVideoBackend

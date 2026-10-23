@@ -58,6 +58,13 @@ void ControllerConnect(int id);
 void ControllerDisconnect(int id);
 void ControllerButton(int id, uint32_t button, bool down);
 void ControllerAxis(int id, Axis axis, int value);
+void ControllerSessionEnd();
+
+// A diagnostic tap may request one or two advancing guest press samples. The
+// two-sample default preserves existing behavior and does not use host timing.
+inline constexpr uint32_t kAgentPadTapPressSamples    = 2u;
+inline constexpr uint32_t kAgentPadTapPressSamplesMin = 1u;
+inline constexpr uint32_t kAgentPadTapPressSamplesMax = kAgentPadTapPressSamples;
 
 // Diagnostic agent overlay. OR-ed into PadReadState/PadRead separately from
 // KYTY_AUTO_CROSS. Not gameplay acceptance.
@@ -65,16 +72,11 @@ bool AgentPadButtonFromName(const char* name, uint32_t* out_button);
 bool AgentPadAxisFromName(const char* name, Axis* out_axis);
 void AgentPadSetButton(uint32_t button, bool down);
 void AgentPadSetAxis(Axis axis, uint8_t value);
-bool AgentPadScheduleTap(uint32_t button);
+bool AgentPadScheduleTap(uint32_t button, uint32_t press_samples = kAgentPadTapPressSamples);
 
 // Present-addressed diagnostic taps are intentionally small and local. A
 // successful schedule is retained by the emulator, not by the request socket.
 inline constexpr uint32_t kAgentPadScheduledTapMax = 8u;
-
-// Keep a diagnostic tap visible across a bounded pair of advancing guest
-// samples. This makes paired-poll reproduction deterministic without tying the
-// pulse to host timing or claiming gameplay input compatibility.
-inline constexpr uint32_t kAgentPadTapPressSamples = 2u;
 
 enum class AgentPadScheduleResult: uint8_t
 {
@@ -106,7 +108,7 @@ struct AgentPadPresentResult
 // targets: at_present + N * present_delta. Targets are fired only by
 // AgentPadOnPresent(), never by wall-clock time.
 AgentPadScheduleResult AgentPadScheduleTaps(uint32_t button, uint64_t at_present, uint32_t repeat,
-                                             uint64_t present_delta);
+                                            uint64_t present_delta, uint32_t press_samples = kAgentPadTapPressSamples);
 AgentPadPresentResult  AgentPadOnPresent(uint64_t present);
 void                   AgentPadUpdatePresentWatermark(uint64_t present);
 void                   AgentPadGetScheduledTapStats(AgentPadScheduledTapStats* out);
@@ -125,9 +127,10 @@ struct AgentPadReadStats
 
 void AgentPadGetReadStats(AgentPadReadStats* out);
 
-// Applies one PadReadState-equivalent overlay sample (advances tap FSM).
+// Applies one diagnostic overlay sample. Set advance_tap=false to model
+// additional PadRead records that do not advance the tap FSM.
 // Test/observability helper; does not touch SDL or guest memory.
-void AgentPadApplyReadStateSample(uint32_t* buttons);
+void AgentPadApplyReadStateSample(uint32_t* buttons, bool advance_tap = true);
 
 int KYTY_SYSV_ABI PadInit();
 int KYTY_SYSV_ABI PadUnnamedInitStep();

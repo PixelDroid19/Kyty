@@ -1,11 +1,13 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GPUMEMORYMATERIALIZATIONCACHE_H_
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GPUMEMORYMATERIALIZATIONCACHE_H_
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <utility>
 
 namespace Kyty::Libs::Graphics {
 
@@ -13,7 +15,7 @@ class GpuMemoryMaterializationKey final
 {
 public:
 	static constexpr int MaxRanges = 3;
-	static constexpr int MaxParams = 11;
+	static constexpr int MaxParams = 13;
 
 	[[nodiscard]] static GpuMemoryMaterializationKey Create(uint64_t guest_submit, uint32_t host_queue, uint64_t host_sequence,
 	                                                       const uint64_t* address, const uint64_t* size, int range_count,
@@ -72,6 +74,22 @@ public:
 		return false;
 	}
 
+	// Smallest [begin, end) covering every range; empty for an invalid key.
+	[[nodiscard]] std::pair<uint64_t, uint64_t> Span() const
+	{
+		if (!m_valid)
+		{
+			return {0u, 0u};
+		}
+		uint64_t begin = std::numeric_limits<uint64_t>::max();
+		uint64_t end   = 0u;
+		for (uint8_t i = 0; i < m_range_count; ++i)
+		{
+			begin = std::min(begin, m_address[i]);
+			end   = std::max(end, m_address[i] + m_size[i]);
+		}
+		return {begin, end};
+	}
 	[[nodiscard]] uint64_t Hash() const
 	{
 		uint64_t hash = 0x510e527fade682d1ull;
@@ -177,11 +195,16 @@ public:
 		{
 			return;
 		}
-		m_entries[static_cast<size_t>(key.Hash()) & (Capacity - 1u)] = Entry {m_epoch, key, value};
+		const size_t slot = static_cast<size_t>(key.Hash()) & (Capacity - 1u);
+		m_entries[slot]   = Entry {m_epoch, key, value};
+		m_spans[slot]     = key.Span();
+		m_store_log[static_cast<size_t>(m_store_seq % StoreLogSize)] = slot;
+		++m_store_seq;
 	}
 
 	void Invalidate()
 	{
+		m_spans.fill({0u, 0u});
 		++m_epoch;
 		if (m_epoch == 0u)
 		{
@@ -199,18 +222,75 @@ public:
 		{
 			return;
 		}
-		for (auto& entry: m_entries)
+		// Recording invalidates the same attachment ranges every draw. After a
+		// range has been invalidated no live entry overlaps it, so repeating
+		// it only needs the slots stored since; other ranges scan every span.
+		const uint64_t end   = size > std::numeric_limits<uint64_t>::max() - address ? std::numeric_limits<uint64_t>::max() : address + size;
+		auto*          clean = FindCleanRange(address, end);
+		if (clean != nullptr && m_store_seq - clean->store_seq <= StoreLogSize)
 		{
-			if (entry.has_value() && entry->epoch == m_epoch && entry->key.Overlaps(address, size))
+			for (uint64_t seq = clean->store_seq; seq < m_store_seq; ++seq)
 			{
-				entry.reset();
+				InvalidateSlot(m_store_log[static_cast<size_t>(seq % StoreLogSize)], address, size, end);
 			}
+			clean->store_seq = m_store_seq;
+			return;
 		}
+		for (size_t slot = 0; slot < Capacity; ++slot)
+		{
+			InvalidateSlot(slot, address, size, end);
+		}
+		if (clean == nullptr)
+		{
+			clean = &m_clean_ranges[m_clean_next];
+			m_clean_next = (m_clean_next + 1u) % m_clean_ranges.size();
+		}
+		*clean = CleanRange {address, end, m_store_seq};
 	}
 
 private:
+	static constexpr uint64_t StoreLogSize = 256u;
+
+	struct CleanRange
+	{
+		uint64_t address   = 0;
+		uint64_t end       = 0;
+		uint64_t store_seq = 0;
+	};
+
+	[[nodiscard]] CleanRange* FindCleanRange(uint64_t address, uint64_t end)
+	{
+		for (auto& range: m_clean_ranges)
+		{
+			if (range.end != 0u && range.address == address && range.end == end)
+			{
+				return &range;
+			}
+		}
+		return nullptr;
+	}
+
+	void InvalidateSlot(size_t slot, uint64_t address, uint64_t size, uint64_t end)
+	{
+		if (m_spans[slot].second <= address || m_spans[slot].first >= end)
+		{
+			return;
+		}
+		auto& entry = m_entries[slot];
+		if (entry.has_value() && entry->epoch == m_epoch && entry->key.Overlaps(address, size))
+		{
+			entry.reset();
+			m_spans[slot] = {0u, 0u};
+		}
+	}
+
 	std::array<std::optional<Entry>, Capacity> m_entries {};
-	uint64_t                                   m_epoch = 1u;
+	std::array<std::pair<uint64_t, uint64_t>, Capacity> m_spans {};
+	std::array<size_t, StoreLogSize>                    m_store_log {};
+	std::array<CleanRange, 16>                          m_clean_ranges {};
+	uint64_t                                            m_store_seq  = 0;
+	size_t                                              m_clean_next = 0;
+	uint64_t                                            m_epoch      = 1u;
 };
 
 } // namespace Kyty::Libs::Graphics

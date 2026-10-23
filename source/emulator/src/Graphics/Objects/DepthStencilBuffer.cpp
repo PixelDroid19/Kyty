@@ -4,10 +4,13 @@
 
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Profiler.h"
+
+#include <mutex>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -110,6 +113,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		view_descriptor.components  = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
 		                               VK_COMPONENT_SWIZZLE_IDENTITY};
 		view_descriptor.aspect_mask = VK_IMAGE_ASPECT_STENCIL_BIT;
+		// Stencil readers declare a non-arrayed 2D image.
+		view_descriptor.view_type = VK_IMAGE_VIEW_TYPE_2D;
 		if (
 		    !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_STENCIL_TEXTURE])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[V condition ignored (continuing)\n"); }
 	}
@@ -122,6 +127,102 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	return vk_obj;
 }
 
+// The depth image takes the texels of the storage view whose bytes it reinterprets
+// (StorageTextureSharesDepthTexels), instead of starting undefined.
+static void* create_from_texel_bits_func(GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* params,
+                                         GpuMemoryScenario /*scenario*/, const Vector<GpuMemoryObject>& objects, VulkanMemory* mem)
+{
+	KYTY_PROFILER_BLOCK("DepthStencilBufferObject::CreateFromObjects");
+
+	EXIT_IF(buffer == nullptr || objects.Size() != 1 || objects.At(0).type != GpuMemoryObjectType::StorageTexture);
+	auto* source = static_cast<StorageTextureVulkanImage*>(objects.At(0).obj);
+	EXIT_IF(source == nullptr || source->guest_size == 0u);
+
+	const uint64_t vaddr  = 0;
+	auto*          vk_obj = static_cast<DepthStencilVulkanImage*>(create_func(ctx, params, &vaddr, &source->guest_size, 1, mem));
+	if (!UtilCopyTexelBits(buffer, source, vk_obj, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL))
+	{
+		EXIT("texel bits to depth copy failed: extent=%ux%u\n", source->extent.width, source->extent.height);
+	}
+	return vk_obj;
+}
+
+VkFormat DepthStencilBufferStoragePlaneFormat(VkFormat depth_format)
+{
+	switch (depth_format)
+	{
+		case VK_FORMAT_D32_SFLOAT:
+		case VK_FORMAT_D32_SFLOAT_S8_UINT: return VK_FORMAT_R32_SFLOAT;
+		case VK_FORMAT_D16_UNORM:
+		case VK_FORMAT_D16_UNORM_S8_UINT: return VK_FORMAT_R16_UNORM;
+		default: return VK_FORMAT_UNDEFINED;
+	}
+}
+
+StorageTextureVulkanImage* DepthStencilBufferGetStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+{
+	EXIT_IF(ctx == nullptr || depth == nullptr);
+	static std::mutex          create_mutex;
+	std::lock_guard<std::mutex> lock(create_mutex);
+	if (depth->storage_plane != nullptr)
+	{
+		return depth->storage_plane;
+	}
+
+	auto* plane = new StorageTextureVulkanImage;
+	plane->SetNativeExtent(depth->extent.width, depth->extent.height);
+	plane->format       = DepthStencilBufferStoragePlaneFormat(depth->format);
+	plane->image        = nullptr;
+	plane->layout       = VK_IMAGE_LAYOUT_UNDEFINED;
+	plane->array_layers = 1u;
+	plane->guest_size   = depth->guest_size;
+	for (auto& view: plane->image_view)
+	{
+		view = nullptr;
+	}
+
+	VulkanImageDescriptor image_descriptor {};
+	image_descriptor.extent = {depth->extent.width, depth->extent.height, 1u};
+	image_descriptor.format = plane->format;
+	image_descriptor.usage  = StorageTextureGetImageUsage();
+	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), plane, &depth->storage_plane_memory))
+	{
+		EXIT("depth storage plane image creation failed: extent=%ux%u\n", depth->extent.width, depth->extent.height);
+	}
+
+	VulkanImageViewDescriptor view_descriptor {};
+	view_descriptor.image  = plane->image;
+	view_descriptor.format = plane->format;
+	EXIT_IF(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &plane->image_view[VulkanImage::VIEW_DEFAULT]));
+	view_descriptor.view_type   = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+	view_descriptor.layer_count = 1u;
+	EXIT_IF(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &plane->image_view[VulkanImage::VIEW_STORAGE_ARRAY]));
+
+	depth->storage_plane = plane;
+	return plane;
+}
+
+static void DeleteStoragePlane(GraphicContext* ctx, DepthStencilVulkanImage* depth)
+{
+	auto* plane = depth->storage_plane;
+	if (plane == nullptr)
+	{
+		return;
+	}
+	for (auto& view: plane->image_view)
+	{
+		if (view != nullptr)
+		{
+			vkDestroyImageView(ctx->device, view, nullptr);
+			view = nullptr;
+		}
+	}
+	vkDestroyImage(ctx->device, plane->image, nullptr);
+	VulkanFree(ctx, &depth->storage_plane_memory);
+	delete plane;
+	depth->storage_plane = nullptr;
+}
+
 static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 {
 	KYTY_PROFILER_BLOCK("DepthStencilBufferObject::delete_func");
@@ -132,6 +233,7 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 
 	DeleteFramebuffer(vk_obj);
+	DeleteStoragePlane(ctx, vk_obj);
 
 	for (auto& view: vk_obj->image_view)
 	{
@@ -162,6 +264,11 @@ bool DepthStencilBufferObject::Equal(const uint64_t* other) const
 GpuObject::create_func_t DepthStencilBufferObject::GetCreateFunc() const
 {
 	return create_func;
+}
+
+GpuObject::create_from_objects_func_t DepthStencilBufferObject::GetCreateFromObjectsFunc() const
+{
+	return create_from_texel_bits_func;
 }
 
 GpuObject::delete_func_t DepthStencilBufferObject::GetDeleteFunc() const

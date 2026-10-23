@@ -67,6 +67,37 @@ TEST(EmulatorComputeWaveTernaryAlu, AdmitsPlainAdd3WithScalarWordAndVectorSource
 	}
 }
 
+// A register spill saves EXEC word by word into VGPR lanes, and a half-precision
+// v_cmpx narrows EXEC on an SDWA-selected word. Words checked with the LLVM
+// gfx1030 disassembler: v_writelane_b32 v19, exec_hi, 39 and
+// v_cmpx_gt_f16_sdwa v7, 0 src0_sel:WORD_1 src1_sel:DWORD.
+TEST(EmulatorComputeWaveTernaryAlu, AdmitsExecSpillAndHalfExecCompare)
+{
+	const uint32_t words[] = {0xd7610013u, 0x00014e7fu, 0x7db900f9u, 0x86050007u, kEnd};
+	EXPECT_EXIT(
+	    {
+		    InitializeConfig();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(words, sizeof(words), &code) || code.GetInstructions().Size() != 3u)
+		    {
+			    std::_Exit(2);
+		    }
+		    const auto& spill   = code.GetInstructions().At(0);
+		    const auto& compare = code.GetInstructions().At(1);
+		    const bool  decoded = spill.type == ShaderInstructionType::VWritelaneB32 &&
+		                         spill.src[0].type == ShaderOperandType::ExecHi && compare.type == ShaderInstructionType::VCmpxGtF16 &&
+		                         compare.vop_sdwa && compare.src[0].type == ShaderOperandType::Vgpr &&
+		                         compare.src[0].register_id == 7 && compare.src[0].swizzle == 5u;
+		    if (!decoded)
+		    {
+			    std::_Exit(3);
+		    }
+		    std::_Exit(ShaderAnalyzeComputeWaveCode(code, PairedInput()).supported ? 0 : 4);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 // The banked ternary path lowers only the plain tuple. Encoding modifiers leave
 // it for the generic per-lane lowering; EXEC as a data source has no lowering at all.
 TEST(EmulatorComputeWaveTernaryAlu, BankedPathClaimsNoModifiedTuple)

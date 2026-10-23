@@ -10,7 +10,9 @@
 namespace Kyty::Libs::Graphics {
 
 // Captures the distinction between device advertisement, queried support and
-// the feature values explicitly enabled at vkCreateDevice time.
+// the feature values explicitly enabled at vkCreateDevice time. Subgroup size
+// control is core since Vulkan 1.3: the extension fields are diagnostics, and
+// extension_enabled stays false when the core features are enabled instead.
 struct ShaderComputeWaveVulkanState
 {
 	bool     extension_advertised = false;
@@ -101,11 +103,16 @@ struct ShaderNativeSubgroupSelection
 [[nodiscard]] bool ShaderComputeWaveVulkanProbeOutputWordCountValid(size_t words) noexcept;
 
 // On success, `required` owns the required-size node that is prepended to the
-// existing stage pNext chain. Both structures must remain alive through
-// vkCreateComputePipelines.
+// existing stage pNext chain when required. Native wave32 callers may omit the
+// node only after selecting an exact default width; paired64 always requires it.
+// Native guest coordinates reconstructed from subgroup IDs require full
+// subgroups: SPIR-V 1.6 guarantees these for the admitted X dimension, while
+// older modules require the explicitly enabled computeFullSubgroups feature.
+// Both structures must remain alive through vkCreateComputePipelines.
 [[nodiscard]] bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	const ShaderComputeWaveLayout& layout, const ShaderComputeWaveCapabilities& capabilities,
 	VkPipelineShaderStageCreateInfo* stage,
-	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT* required) noexcept;
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT* required, bool require_size = true,
+	uint32_t spirv_version = 0) noexcept;
 
 } // namespace Kyty::Libs::Graphics

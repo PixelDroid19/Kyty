@@ -23,7 +23,8 @@ namespace Kyty::Libs::Graphics {
 //  - 27, render target 64KB (SW_64KB_R_X): the addressing library keeps 3D thick
 //    blocks for the Z and standard swizzles only (titles carry its 64 KiB 3D block
 //    table), so a render-target volume is thin: every depth slice is a complete 2D
-//    render-target slice, laid out like the layers of a 2D array.
+//    render-target slice, laid out like the layers of a 2D array, with the slice
+//    index permuting the within-block pipe bits.
 struct Gen5TextureVolumeLayout
 {
 	TileSizeAlign tiled {};

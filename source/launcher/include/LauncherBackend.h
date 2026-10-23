@@ -74,6 +74,7 @@ public:
 
 	Q_INVOKABLE QVariantMap   FieldsFor(int row) const;
 	Q_INVOKABLE QVariantMap   Choices() const;
+	Q_INVOKABLE QVariantMap   GraphicsPreset(const QVariantMap& fields, const QString& preset) const;
 	Q_INVOKABLE QVariantMap   SaveGame(int row, const QVariantMap& fields);
 	// Returns an error text, or an empty string once the global emulator settings are saved.
 	Q_INVOKABLE QString       SaveGlobal(const QVariantMap& fields);

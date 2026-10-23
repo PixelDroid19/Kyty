@@ -138,7 +138,7 @@ uint32_t LayoutKind(TileDetileLayout layout)
 
 bool GpuLayoutSupported(const TileDetileRequest& request)
 {
-	if (!TileDetileIsSupported(request) || request.depth_layer != 0u || request.src_bytes == 0u ||
+	if (!TileDetileIsSupported(request) || request.slice != 0u || request.src_bytes == 0u ||
 	    request.src_bytes > k_max_shader_byte_range ||
 	    (request.src_bytes % 4u) != 0u || (request.bytes_per_element % 4u) != 0u)
 	{
@@ -1013,7 +1013,7 @@ TileGpuDetileStatus TileGpuDetileDepthD16Inline(GraphicContext* ctx, CommandBuff
 	uint64_t      no_samplers[DescriptorCache::SAMPLERS_MAX]                = {};
 	VulkanBuffer* no_gds[DescriptorCache::GDS_BUFFER_MAX]                   = {};
 	auto* descriptor = g_render_ctx->GetDescriptorCache()->GetDescriptor(
-	    DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
+	    command_buffer, DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
 	    no_images, no_views, no_images, no_views, no_images, no_views, no_images, no_views, no_storage_images, no_storage_views,
 	    no_samplers, no_gds, nullptr, bind);
 	if (descriptor == nullptr || descriptor->set == VK_NULL_HANDLE)
@@ -1021,7 +1021,7 @@ TileGpuDetileStatus TileGpuDetileDepthD16Inline(GraphicContext* ctx, CommandBuff
 		return TileGpuDetileStatus::ResourceUnavailable;
 	}
 
-	auto vk_buffer = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	auto vk_buffer = command_buffer->RecordOutsideRenderPass();
 	// The command buffer deliberately reuses one bounded scratch allocation.
 	// Complete any earlier shader/copy reads before the next transfer clear.
 	VkMemoryBarrier before_clear {};
@@ -1125,7 +1125,7 @@ bool StorageTextureCopyRawRenderAlias(GraphicContext* ctx, CommandBuffer* comman
 	uint64_t      no_samplers[DescriptorCache::SAMPLERS_MAX]                = {};
 	VulkanBuffer* no_gds[DescriptorCache::GDS_BUFFER_MAX]                   = {};
 	auto* descriptor = g_render_ctx->GetDescriptorCache()->GetDescriptor(
-	    DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
+	    command_buffer, DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
 	    no_images, no_views, no_images, no_views, no_images, no_views, no_images, no_views, no_storage_images, no_storage_views,
 	    no_samplers, no_gds, nullptr, bind);
 	if (descriptor == nullptr || descriptor->set == VK_NULL_HANDLE)
@@ -1136,7 +1136,7 @@ bool StorageTextureCopyRawRenderAlias(GraphicContext* ctx, CommandBuffer* comman
 	const VkImageLayout destination_layout = destination->layout;
 	UtilImageToBuffer(command_buffer, source, source_buffer, source->extent.width, source_layout);
 	UtilImageToBuffer(command_buffer, destination, destination_buffer, destination->extent.width, destination_layout);
-	auto vk_buffer = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	auto vk_buffer = command_buffer->RecordOutsideRenderPass();
 	VkMemoryBarrier before_compute {};
 	before_compute.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	before_compute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1231,6 +1231,18 @@ static bool PlanRawRenderSourceWindow(const StorageTextureRawRenderSource& sourc
 	return !window->regions.IsEmpty();
 }
 
+bool StorageTextureRawRenderSourceImageMatches(const StorageTextureRawRenderSource& source)
+{
+	const VkFormat expected = source.bytes_per_pixel == 2u ? VK_FORMAT_R8G8_UNORM :
+	                          source.bytes_per_pixel == 4u ? VK_FORMAT_R8G8B8A8_UNORM :
+	                          source.bytes_per_pixel == 8u ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_UNDEFINED;
+	return source.image != nullptr && source.image->image != VK_NULL_HANDLE && source.image->format == expected &&
+	       source.image->samples == VK_SAMPLE_COUNT_1_BIT && source.image->array_layers == 1u && source.image->mip_levels == 1u &&
+	       source.image->extent.width == source.width && source.image->extent.height == source.height &&
+	       source.image->guest_extent.width == source.width && source.image->guest_extent.height == source.height &&
+	       (source.image->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0u;
+}
+
 bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer* command_buffer,
                                              const Vector<StorageTextureRawRenderSource>& sources,
                                              VulkanImage* destination, uint64_t address, uint64_t size)
@@ -1262,15 +1274,7 @@ bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer*
 	{
 		const uint64_t bytes = static_cast<uint64_t>(source.width) * source.height * source.bytes_per_pixel;
 		const int64_t delta = static_cast<int64_t>(source.guest_address) - static_cast<int64_t>(address);
-		const VkFormat expected = source.bytes_per_pixel == 2u ? VK_FORMAT_R8G8_UNORM :
-		                          source.bytes_per_pixel == 4u ? VK_FORMAT_R8G8B8A8_UNORM :
-		                          source.bytes_per_pixel == 8u ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_UNDEFINED;
-		if (source.image == nullptr || source.image->image == VK_NULL_HANDLE || source.image->format != expected ||
-		    source.image->samples != VK_SAMPLE_COUNT_1_BIT || source.image->array_layers != 1u || source.image->mip_levels != 1u ||
-		    source.image->extent.width != source.width || source.image->extent.height != source.height ||
-		    source.image->guest_extent.width != source.width || source.image->guest_extent.height != source.height ||
-		    (source.image->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
-		    bytes == 0u || bytes > INT32_MAX || (bytes & 3u) != 0u || bytes > properties.limits.maxStorageBufferRange ||
+		if (!StorageTextureRawRenderSourceImageMatches(source) || bytes == 0u || bytes > INT32_MAX || (bytes & 3u) != 0u || bytes > properties.limits.maxStorageBufferRange ||
 		    source.guest_size > INT32_MAX || source.guest_address > INT64_MAX || delta < INT32_MIN || delta > INT32_MAX ||
 		    (source.guest_address & 65535u) != 0u || source.pitch == 0u ||
 		    source.pitch % TileGet64KBBlockWidth(source.bytes_per_pixel) != 0u ||
@@ -1313,14 +1317,14 @@ bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer*
 	uint64_t      no_samplers[DescriptorCache::SAMPLERS_MAX]                = {};
 	VulkanBuffer* no_gds[DescriptorCache::GDS_BUFFER_MAX]                   = {};
 	auto* descriptor = g_render_ctx->GetDescriptorCache()->GetDescriptor(
-	    DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
+	    command_buffer, DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
 	    no_images, no_views, no_images, no_views, no_images, no_views, no_images, no_views, no_storage_images, no_storage_views,
 	    no_samplers, no_gds, nullptr, bind);
 	if (descriptor == nullptr || descriptor->set == VK_NULL_HANDLE)
 	{
 		return false;
 	}
-	auto vk_buffer = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	auto vk_buffer = command_buffer->RecordOutsideRenderPass();
 	for (uint32_t index = 0u; index < sources.Size(); ++index)
 	{
 		const auto& source = sources.At(index);

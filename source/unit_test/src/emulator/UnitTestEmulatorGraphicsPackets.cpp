@@ -18,6 +18,7 @@
 #include "Emulator/Graphics/ShaderComputeWaveLds.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
@@ -27,13 +28,17 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
+#include "../../../emulator/src/Graphics/ShaderParseInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvScJoin.h"
+#include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
+#include "../../../emulator/src/Graphics/GraphicsRunInternal.h"
 #include "../../../emulator/src/Graphics/GraphicsRunWaitPolicy.h"
 
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -88,6 +93,24 @@ struct CommandBufferRefillState
 	bool      leave_invalid     = false;
 };
 
+struct Type3DispatchFixture
+{
+	uint32_t body_dw      = 0;
+	uint32_t available_dw = 0;
+	uint32_t run_dw       = 0;
+	uint32_t return_dw    = 0;
+};
+
+Type3DispatchFixture g_type3_dispatch_fixture;
+
+uint32_t TestType3DispatchHandler(CommandProcessor*, uint32_t, const uint32_t*, uint32_t body_dw, uint32_t available_dw, uint32_t run_dw)
+{
+	g_type3_dispatch_fixture.body_dw      = body_dw;
+	g_type3_dispatch_fixture.available_dw = available_dw;
+	g_type3_dispatch_fixture.run_dw       = run_dw;
+	return g_type3_dispatch_fixture.return_dw;
+}
+
 bool KYTY_SYSV_ABI TestCommandBufferRefill(Gen5::CommandBuffer* opaque, uint32_t need_dw, void* user_data)
 {
 	auto* dcb   = reinterpret_cast<TestCommandBuffer*>(opaque);
@@ -95,6 +118,9 @@ bool KYTY_SYSV_ABI TestCommandBufferRefill(Gen5::CommandBuffer* opaque, uint32_t
 	state->calls++;
 	EXPECT_EQ(need_dw, state->expected_need_dw);
 
+	// The callback hands over a whole new block.
+	dcb->bottom      = state->begin;
+	dcb->top         = state->end;
 	dcb->cursor_up   = state->begin;
 	dcb->cursor_down = state->end;
 	if (state->leave_invalid)
@@ -342,6 +368,32 @@ TEST(EmulatorGraphicsPackets, RejectsInvalidCommandBufferBeforeCallingRefillCall
 	                                     reinterpret_cast<void*>(0x12345678u), 0u),
 	          nullptr);
 	EXPECT_EQ(state.calls, 0u);
+}
+
+TEST(EmulatorGraphicsPackets, RefillsEmptyCommandBufferBeforeFirstPacket)
+{
+	InitCommandBufferTestRuntime();
+
+	// A buffer that never received memory has all four pointers null.
+	uint32_t                 storage[16] = {};
+	TestCommandBuffer        cb {};
+	CommandBufferRefillState state {storage, storage + 16, 5u, 0u, false};
+	cb.callback  = TestCommandBufferRefill;
+	cb.user_data = &state;
+
+	uint32_t* cmd = Gen5::GraphicsCbDispatch(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 2u, 3u, 4u, 0u);
+	ASSERT_EQ(cmd, storage);
+	EXPECT_EQ(state.calls, 1u);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0u));
+}
+
+TEST(EmulatorGraphicsPackets, RejectsEmptyCommandBufferWithoutRefillCallback)
+{
+	InitCommandBufferTestRuntime();
+
+	TestCommandBuffer cb {};
+	EXPECT_EQ(Gen5::GraphicsCbDispatch(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 2u, 3u, 4u, 0u), nullptr);
 }
 
 TEST(EmulatorGraphicsPackets, TreatsZeroPm4DwordAsSinglePadding)
@@ -848,7 +900,8 @@ TEST(EmulatorGraphicsPackets, ParsesVop2SdwaOmod)
 	ShaderPixelInputInfo input {};
 	input.target_output_mode[0] = 4;
 	const auto source           = SpirvGenerateSource(code, nullptr, &input, nullptr);
-	EXPECT_NE(source.FindIndex("%m200_0 = OpFMul %float %m197_0 %float_4_000000"), Core::STRING8_INVALID_INDEX);
+	// The default pixel mode (IEEE off, f32 output denormals flushed) applies mul:4 on the exponent.
+	EXPECT_NE(source.FindIndex("%om_scaled_0 = OpIAdd %uint %om_bits_0 %uint_0x01000000"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, ParsesVopcSdwaAbsolute)
@@ -1640,16 +1693,18 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(29).component_count, 2u);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).format, VK_FORMAT_UNDEFINED);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).component_count, 0u);
+	// Bytes one fetch reads decide whether a draw can reach past its last record.
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(1).element_bytes, 1u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(29).element_bytes, 4u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).element_bytes, 4u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(71).element_bytes, 8u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(74).element_bytes, 12u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(77).element_bytes, 16u);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).element_bytes, 0u);
 
-	// Attrib words store either a 9-bit encoded id (0x12a) or the unified
-	// guest format (74/64/29). Both must resolve; 74/64 are the live stride-48
-	// position/UV ids.
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(0x12a).format, VK_FORMAT_R32G32B32_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(74).format, VK_FORMAT_R32G32B32_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(74).component_count, 3u);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(64).format, VK_FORMAT_R32G32_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(29).format, VK_FORMAT_R16G16_SFLOAT);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(0).format, VK_FORMAT_UNDEFINED);
+	// Gen5 format 50 is 2_10_10_10_UNORM: R in the low 10 bits, 2-bit A on top.
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).format, VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(50).component_count, 4u);
 
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(14, 7).format, VK_FORMAT_R32G32B32A32_SFLOAT);
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(13, 7).component_count, 3u);
@@ -1659,13 +1714,39 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_TRUE(ShaderIsGen5SingleComponent32BitBufferFormat(22));
 }
 
+TEST(EmulatorGraphicsPackets, DecodesGen5VertexAttribControlWord)
+{
+	// Format override field is (data_format << 2) | (components - 1).
+	const uint32_t normal = (0x018u << 14u) | (0x10bu << 5u) | 3u;
+	const auto     decoded = ShaderDecodeGen5VertexAttrib(normal);
+	EXPECT_EQ(decoded.slot, 3u);
+	EXPECT_EQ(decoded.format, 66u);
+	EXPECT_EQ(decoded.components, 4u);
+	EXPECT_EQ(decoded.offset, 0x018u);
+	EXPECT_FALSE(decoded.instance);
+
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x12au << 5u).format, 74u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x12au << 5u).components, 3u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x101u << 5u).format, 64u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x101u << 5u).components, 2u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x05du << 5u).format, 23u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x0cbu << 5u).format, 50u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0x10au << 5u).components, 3u);
+	EXPECT_EQ(ShaderDecodeGen5VertexAttrib(0u).format, 0u);
+	EXPECT_TRUE(ShaderDecodeGen5VertexAttrib(1u << 26u).instance);
+
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(1u), DstSel(4, 0, 0, 1));
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(2u), DstSel(4, 5, 0, 1));
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(3u), DstSel(4, 5, 6, 1));
+	EXPECT_EQ(ShaderGen5VertexAttribDstSel(4u), DstSel(4, 5, 6, 7));
+}
+
 TEST(EmulatorGraphicsPackets, ResolvesNormalized16BitVertexFormat)
 {
 	const auto format = VulkanResolveGen5VertexInputFormat(66u);
 	EXPECT_EQ(format.format, VK_FORMAT_R16G16B16A16_SNORM);
 	EXPECT_EQ(format.component_count, 4u);
 	EXPECT_EQ(format.numeric_class, VulkanVertexInputNumericClass::Float);
-	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(66u).format, format.format);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0u).format, VK_FORMAT_UNDEFINED);
 }
 
@@ -1705,6 +1786,44 @@ TEST(EmulatorGraphicsPackets, BuildsPackedNormalized16BitVertexLayout)
 	}
 	input.resources[0].fields[3] = DstSel(4, 5, 6, 7);
 	EXPECT_FALSE(VulkanBuildVertexInputLayout(input, &layout));
+}
+
+// The attribute word's instance bit makes the fetch index the instance id, so the
+// attribute steps per instance and never shares a per-vertex binding of the same stream.
+TEST(EmulatorGraphicsPackets, InstanceAttributeStepsInItsOwnBinding)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+
+	const uint32_t buffer_table[4] = {0x00010000u, 16u << 16u, 64u, (56u << 12u) | DstSel(4, 5, 6, 7)};
+	const uint32_t attrib_table[2] = {(3u << 5u) | (56u << 7u), (1u << 26u) | (11u << 7u) | (4u << 14u)};
+	ShaderSemantic semantics[2] {};
+	semantics[0].semantic         = 0;
+	semantics[0].hardware_mapping = 0;
+	semantics[0].size_in_elements = 4;
+	semantics[1].semantic         = 1;
+	semantics[1].hardware_mapping = 4;
+	semantics[1].size_in_elements = 1;
+
+	ShaderVertexInputInfo input {};
+	ShaderParseAttrib(&input, semantics, 2, attrib_table, buffer_table);
+	ShaderDetectBuffers(&input, true);
+
+	ASSERT_EQ(input.resources_num, 2);
+	EXPECT_FALSE(input.resources_dst[0].instance);
+	EXPECT_TRUE(input.resources_dst[1].instance);
+	ASSERT_EQ(input.buffers_num, 2);
+	EXPECT_EQ(input.buffers[0].addr, 0x10000u);
+	EXPECT_EQ(input.buffers[1].addr, 0x10004u);
+
+	VulkanVertexInputLayout layout {};
+	ASSERT_TRUE(VulkanBuildVertexInputLayout(input, &layout));
+	EXPECT_EQ(layout.binding_count, 2u);
+	EXPECT_EQ(layout.bindings[0].inputRate, VK_VERTEX_INPUT_RATE_VERTEX);
+	EXPECT_EQ(layout.bindings[1].inputRate, VK_VERTEX_INPUT_RATE_INSTANCE);
+	EXPECT_EQ(layout.attributes[0].binding, 0u);
+	EXPECT_EQ(layout.attributes[1].binding, 1u);
+	EXPECT_EQ(layout.attributes[1].format, VK_FORMAT_R16_UINT);
 }
 
 TEST(EmulatorGraphicsPackets, BuildsFiveAttributeInterleavedMixedNumericVertexLayout)
@@ -1768,6 +1887,90 @@ TEST(EmulatorGraphicsPackets, BuildsFiveAttributeInterleavedMixedNumericVertexLa
 		EXPECT_EQ(layout.attributes[index].offset, expected_offsets[index]);
 		EXPECT_EQ(layout.attributes[index].format, expected_formats[index]);
 	}
+}
+
+TEST(EmulatorGraphicsPackets, BuildsTwoBufferRgb32AndR8UintStreamsAndUintFetch)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderVertexInputInfo input {};
+	input.resources_num = 2;
+	input.buffers_num   = 2;
+
+	auto& position_buffer           = input.buffers[0];
+	position_buffer.addr            = 0x1000;
+	position_buffer.stride          = 12;
+	position_buffer.num_records     = 16;
+	position_buffer.attr_num        = 1;
+	position_buffer.attr_indices[0] = 0;
+	position_buffer.attr_offsets[0] = 0;
+
+	auto& index_buffer           = input.buffers[1];
+	index_buffer.addr            = 0x2000;
+	index_buffer.stride          = 4;
+	index_buffer.num_records     = 16;
+	index_buffer.attr_num        = 1;
+	index_buffer.attr_indices[0] = 1;
+	index_buffer.attr_offsets[0] = 0;
+
+	input.resources[0].fields[3] = (74u << 12u) | DstSel(4, 5, 6, 1);
+	input.resources_dst[0]       = {0, 4};
+	input.resources[1].fields[3] = (5u << 12u) | DstSel(4, 0, 0, 1);
+	input.resources_dst[1]       = {4, 1};
+
+	const auto r8_uint = VulkanResolveGen5VertexInputFormat(5u);
+	EXPECT_EQ(r8_uint.format, VK_FORMAT_R8_UINT);
+	EXPECT_EQ(r8_uint.component_count, 1u);
+	EXPECT_EQ(r8_uint.numeric_class, VulkanVertexInputNumericClass::Uint);
+
+	VulkanVertexInputLayout layout {};
+	ASSERT_TRUE(VulkanBuildVertexInputLayout(input, &layout));
+	ASSERT_EQ(layout.binding_count, 2u);
+	ASSERT_EQ(layout.attribute_count, 2u);
+	EXPECT_EQ(layout.bindings[0].binding, 0u);
+	EXPECT_EQ(layout.bindings[0].stride, 12u);
+	EXPECT_EQ(layout.bindings[1].binding, 1u);
+	EXPECT_EQ(layout.bindings[1].stride, 4u);
+	EXPECT_EQ(layout.attributes[0].binding, 0u);
+	EXPECT_EQ(layout.attributes[0].location, 0u);
+	EXPECT_EQ(layout.attributes[0].offset, 0u);
+	EXPECT_EQ(layout.attributes[0].format, VK_FORMAT_R32G32B32_SFLOAT);
+	EXPECT_EQ(layout.attributes[1].binding, 1u);
+	EXPECT_EQ(layout.attributes[1].location, 1u);
+	EXPECT_EQ(layout.attributes[1].offset, 0u);
+	EXPECT_EQ(layout.attributes[1].format, VK_FORMAT_R8_UINT);
+
+	ShaderInstruction fetch {};
+	fetch.type               = ShaderInstructionType::FetchX;
+	fetch.format             = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	fetch.dst.type           = ShaderOperandType::Vgpr;
+	fetch.dst.register_id    = 0;
+	fetch.dst.size           = 1;
+	fetch.src[0].type        = ShaderOperandType::Vgpr;
+	fetch.src[0].register_id = 4;
+	fetch.src[0].size        = 1;
+	fetch.src[1].type        = ShaderOperandType::Sgpr;
+	fetch.src[1].register_id = 0;
+	fetch.src[1].size        = 4;
+	fetch.src[2].type        = ShaderOperandType::IntegerInlineConstant;
+	fetch.src[2].constant.i  = 1;
+	fetch.src_num            = 3;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(fetch);
+	input.fetch_embedded = true;
+
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+	EXPECT_NE(source.FindIndex("%attr1 = OpVariable %_ptr_Input_uint Input"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %uint %attr1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpBitcast %float"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%attr1 = OpVariable %_ptr_Input_float Input"), Core::STRING8_INVALID_INDEX);
 }
 
 // Interleaved mesh stream: position f32x3 + normal h16x4 + UV h16x2 in one stride-24 VB.
@@ -2068,7 +2271,7 @@ TEST(EmulatorGraphicsPackets, ReportsDcbStallAndDmaDataPacketSizes)
 // Observed post-Play: guest encodes WaitMem/ReleaseMem with a placeholder then
 // patches the address through GetDataPacketPayloadAddress. WaitMem stores the
 // 64-bit address in the first body dwords (cmd+1); ReleaseMem stores it after
-// action/gcr (cmd+3). Default consumers keep the historical cmd+2 payload.
+// action/gcr (cmd+3). Register packets keep the historical cmd+2 payload.
 TEST(EmulatorGraphicsPackets, ResolvesDataPacketPayloadAddressByOpcode)
 {
 	if (!Config::IsInitialized())
@@ -2098,6 +2301,12 @@ TEST(EmulatorGraphicsPackets, ResolvesDataPacketPayloadAddressByOpcode)
 	write_data[0] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WRITE_DATA);
 	ASSERT_EQ(Gen5::GraphicsGetDataPacketPayloadAddress(&payload, write_data, 1), 0);
 	EXPECT_EQ(payload, write_data + 2);
+
+	// A type-0 NOP data packet carries its payload right after the header: a
+	// 3-dword NOP holds exactly one 64-bit value.
+	uint32_t nop[3] = {KYTY_PM4(3, Pm4::IT_NOP, Pm4::R_ZERO)};
+	ASSERT_EQ(Gen5::GraphicsGetDataPacketPayloadAddress(&payload, nop, 0), 0);
+	EXPECT_EQ(payload, nop + 1);
 }
 
 // Post-Play load path: WriteData with cache_policy=2 packs into the same
@@ -2140,7 +2349,7 @@ TEST(EmulatorGraphicsPackets, EncodesWriteDataCachePolicy2ControlWord)
 	EXPECT_EQ(cmd[5], 0x22222222u);
 }
 
-// DrawIndexAuto accepts modifier 0x80000000 (Astro post-compute) as well as
+// DrawIndexAuto accepts modifier 0x80000000 (observed after compute) as well as
 // the historical 0x40000000 default.
 TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoModifier80000000)
 {
@@ -2337,7 +2546,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDispatchIndirect)
 	EXPECT_EQ(cmd[2], (1u & 0xa038u) | 0x41u);
 }
 
-// sceAgcDcbDrawIndexIndirect with modifier 0x80000000 (Astro after DrawIndexAuto).
+// sceAgcDcbDrawIndexIndirect with modifier 0x80000000 (observed after DrawIndexAuto).
 TEST(EmulatorGraphicsPackets, EncodesDcbDrawIndexIndirectModifier80000000)
 {
 	struct AlignasCommandBuffer
@@ -2375,7 +2584,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDrawIndexIndirectModifier80000000)
 	EXPECT_EQ(cmd[4], 2u);
 }
 
-// Placeholder address 0 is reserved then patched before submit (Astro path).
+// Placeholder address 0 is reserved then patched before submit (observed guest path).
 TEST(EmulatorGraphicsPackets, EncodesWriteDataZeroAddressThenPatches)
 {
 	struct AlignasCommandBuffer
@@ -2595,6 +2804,132 @@ TEST(EmulatorGraphicsPackets, PublishesConfirmedCompactWriteDataWithItsSubmissio
 	wait_packet[1] -= 8u;
 	wait_packet[5] = 2u;
 	EXPECT_FALSE(GraphicsWriteDataPrecedesMatchingWaitMem64(write_body, 5u, wait_packet, 9u));
+	wait_packet[5] = 1u;
+
+	EXPECT_FALSE(GraphicsWriteDataPrecedesMatchingWaitMem64(write_body, 5u, wait_packet, 8u));
+	wait_packet[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	EXPECT_FALSE(GraphicsWriteDataPrecedesMatchingWaitMem64(write_body, 5u, wait_packet, 9u));
+	wait_packet[0] = KYTY_PM4(9, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+	wait_packet[1] += 8u;
+	EXPECT_FALSE(GraphicsWriteDataPrecedesMatchingWaitMem64(write_body, 5u, wait_packet, 9u));
+}
+
+TEST(EmulatorGraphicsPackets, Type3DispatchSeparatesPacketBodyFromAvailableStream)
+{
+	const uint32_t cmd_id    = KYTY_PM4(5, Pm4::IT_NOP, Pm4::R_ZERO);
+	uint32_t       body[5]   = {1u, 2u, 3u, 4u, 5u};
+	g_type3_dispatch_fixture = {0u, 0u, 0u, 4u};
+
+	const auto ready = GraphicsRunDispatchType3Packet(nullptr, cmd_id, body, 5u, 7u, TestType3DispatchHandler);
+	EXPECT_EQ(ready.status, GraphicsRunType3DispatchStatus::Ready);
+	EXPECT_EQ(ready.packet_body_dw, 4u);
+	EXPECT_EQ(ready.consumed_dw, 4u);
+	EXPECT_EQ(g_type3_dispatch_fixture.body_dw, 4u);
+	EXPECT_EQ(g_type3_dispatch_fixture.available_dw, 5u);
+	EXPECT_EQ(g_type3_dispatch_fixture.run_dw, 7u);
+
+	const auto truncated = GraphicsRunDispatchType3Packet(nullptr, cmd_id, body, 3u, 7u, TestType3DispatchHandler);
+	EXPECT_EQ(truncated.status, GraphicsRunType3DispatchStatus::InvalidEnvelope);
+	const auto missing = GraphicsRunDispatchType3Packet(nullptr, cmd_id, body, 5u, 7u, nullptr);
+	EXPECT_EQ(missing.status, GraphicsRunType3DispatchStatus::MissingHandler);
+
+	g_type3_dispatch_fixture.return_dw = 6u;
+	const auto over_consumed           = GraphicsRunDispatchType3Packet(nullptr, cmd_id, body, 5u, 7u, TestType3DispatchHandler);
+	EXPECT_EQ(over_consumed.status, GraphicsRunType3DispatchStatus::OverConsumed);
+}
+
+TEST(EmulatorGraphicsPackets, ShortCustomWaitMem64DoesNotReadPastItsPacketBody)
+{
+	constexpr int debug_exit_status = 321;
+#if defined(_WIN32)
+	constexpr int expected_exit_status = debug_exit_status;
+#else
+	constexpr int expected_exit_status = debug_exit_status & 0xff;
+#endif
+
+	EXPECT_EXIT(
+	    {
+		    graphics_init_jmp_tables();
+		    const uint32_t cmd_id = KYTY_PM4(3, Pm4::IT_NOP, Pm4::R_WAIT_MEM_64);
+		    uint32_t       body[2] {};
+		    (void)cp_op_nop(nullptr, cmd_id, body, 2u, 2u, 3u);
+	    },
+	    ::testing::ExitedWithCode(expected_exit_status), "");
+}
+
+TEST(EmulatorGraphicsPackets, RejectsNoncanonicalDrawIndex2HeaderBeforeParsingPayload)
+{
+	constexpr int debug_exit_status = 321;
+#if defined(_WIN32)
+	constexpr int expected_exit_status = debug_exit_status;
+#else
+	constexpr int expected_exit_status = debug_exit_status & 0xff;
+#endif
+
+	EXPECT_EXIT(
+	    {
+		    const uint32_t cmd_id = KYTY_PM4(6, Pm4::IT_DRAW_INDEX_2, 1u);
+		    uint32_t       body[5] {};
+		    (void)GraphicsRunDispatchType3Packet(nullptr, cmd_id, body, 5u, 6u, cp_op_draw_index);
+	    },
+	    ::testing::ExitedWithCode(expected_exit_status), "");
+}
+
+TEST(EmulatorGraphicsPackets, Type3LookaheadRequiresMatchingCompletePacketEnvelope)
+{
+	uint32_t stream[8] = {};
+	stream[2]          = 0xc0026900u;
+	stream[3]          = Pm4::PA_SC_CENTROID_PRIORITY_0;
+
+	EXPECT_TRUE(GraphicsRunType3PacketAt(stream, 6u, 2u, 0xc0026900u));
+	EXPECT_FALSE(GraphicsRunType3PacketAt(stream, 5u, 2u, 0xc0026900u));
+	EXPECT_FALSE(GraphicsRunType3PacketAt(stream, 6u, 2u, 0xc0016900u));
+	EXPECT_FALSE(GraphicsRunType3PacketAt(stream, 6u, 6u, 0xc0026900u));
+	EXPECT_FALSE(GraphicsRunType3PacketAt(nullptr, 6u, 2u, 0xc0026900u));
+}
+
+TEST(EmulatorGraphicsPackets, GetLodStatsConsumesItsDeclaredBody)
+{
+	const uint32_t cmd_id = KYTY_PM4(5, Pm4::IT_GET_LOD_STATS, 0u);
+	uint32_t       body[4] {};
+
+	const auto result = GraphicsRunDispatchType3Packet(nullptr, cmd_id, body, 4u, 4u, cp_op_get_lod_stats);
+	EXPECT_EQ(result.status, GraphicsRunType3DispatchStatus::Ready);
+	EXPECT_EQ(result.packet_body_dw, 4u);
+	EXPECT_EQ(result.consumed_dw, 4u);
+}
+
+TEST(EmulatorGraphicsPackets, RejectsOversizedDrawIndexOffsetPacketBody)
+{
+	constexpr int debug_exit_status = 321;
+#if defined(_WIN32)
+	constexpr int expected_exit_status = debug_exit_status;
+#else
+	constexpr int expected_exit_status = debug_exit_status & 0xff;
+#endif
+
+	EXPECT_EXIT(
+	    {
+		    const uint32_t cmd_id = KYTY_PM4(6, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u);
+		    uint32_t       body[5] {};
+		    (void)GraphicsRunDispatchType3Packet(nullptr, cmd_id, body, 5u, 6u, cp_op_draw_index_offset);
+	    },
+	    ::testing::ExitedWithCode(expected_exit_status), "");
+}
+
+TEST(EmulatorGraphicsPackets, IndirectArgumentAddressRejectsOverflowAndInvalidRanges)
+{
+	uint64_t address = 0;
+	EXPECT_TRUE(GraphicsRunIndirectArgumentAddress(0x1000u, 0x20u, 20u, &address));
+	EXPECT_EQ(address, 0x1020u);
+	EXPECT_TRUE(GraphicsRunIndirectArgumentAddress(0u, 0x20u, 20u, &address));
+	EXPECT_EQ(address, 0x20u);
+	EXPECT_FALSE(GraphicsRunIndirectArgumentAddress(std::numeric_limits<uint64_t>::max() - 3u, 4u, 20u, &address));
+	EXPECT_TRUE(GraphicsRunIndirectArgumentAddress(std::numeric_limits<uint64_t>::max() - 8u, 0u, 8u, &address));
+	EXPECT_EQ(address, std::numeric_limits<uint64_t>::max() - 8u);
+	EXPECT_FALSE(GraphicsRunIndirectArgumentAddress(std::numeric_limits<uint64_t>::max() - 7u, 0u, 8u, &address));
+	EXPECT_FALSE(GraphicsRunIndirectArgumentAddress(0x1000u, 0u, 0u, &address));
+	EXPECT_FALSE(GraphicsRunIndirectArgumentAddress(0x1000u, 0u, 20u, nullptr));
 }
 
 // Post-Play: WaitMem address stays 0; preceding ReleaseMem is EopPatched.
@@ -3132,8 +3467,10 @@ TEST(EmulatorGraphicsPackets, PacksColor3DTextureMetadataWithinObjectParameterBu
 TEST(EmulatorGraphicsPackets, DistinguishesLayerAddressingFromColor3DDescriptorState)
 {
 	EXPECT_TRUE(ShaderGen5TextureTypeUsesArrayAddressing(13u));
+	EXPECT_TRUE(ShaderGen5TextureTypeUsesArrayAddressing(12u));
 	EXPECT_FALSE(ShaderGen5TextureTypeUsesArrayAddressing(10u));
 	EXPECT_FALSE(ShaderGen5TextureTypeUsesArrayAddressing(9u));
+	EXPECT_EQ(ShaderGen5SampledTextureShapeForType(12u), ShaderGen5SampledTextureShape::TwoDimensionalArray);
 }
 
 // Captured first fail after GPU chain: format 56, 800x320, tile 27 → 0x150000.
@@ -3184,8 +3521,11 @@ TEST(EmulatorGraphicsPackets, Sw64kRx4bppWithinBlockIsBijective)
 	EXPECT_EQ(unique, k_block * k_block);
 	EXPECT_EQ(TileGetSw64kRxOffset(0, 0, k_block, 4), 0u);
 	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_block, 4), 4u);
-	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x8u);
-	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0xcu);
+	EXPECT_EQ(TileGetSw64kRxOffset(2, 0, k_block, 4), 0x8u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 4), 0x10u);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0x14u);
+	EXPECT_EQ(TileGetSw64kRxOffset(4, 0, k_block, 4), 0x80u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 4, k_block, 4), 0x40u);
 }
 
 TEST(EmulatorGraphicsPackets, Sw64kRx2bppWithinBlockIsBijective)
@@ -3251,8 +3591,9 @@ TEST(EmulatorGraphicsPackets, Standard64KB32WithinBlockIsBijective)
 	EXPECT_EQ(TileGetStandard64KBOffset(0, 0, k_block, 4u), 0u);
 	EXPECT_EQ(TileGetStandard64KBOffset(1, 0, k_block, 4u), 4u);
 	EXPECT_EQ(TileGetStandard64KBOffset(0, 1, k_block, 4u), 0x10u);
-	// Distinct from kRenderTarget: (0,1) is 0x10 here, 0x8 for tile 27.
-	EXPECT_NE(TileGetStandard64KBOffset(0, 1, k_block, 4u), TileGetSw64kRxOffset(0, 1, k_block, 4));
+	// Distinct from kRenderTarget above the micro tile: (8,0) is 0x200 here, 0x100 for tile 27.
+	EXPECT_EQ(TileGetStandard64KBOffset(8, 0, k_block, 4u), 0x200u);
+	EXPECT_EQ(TileGetSw64kRxOffset(8, 0, k_block, 4), 0x100u);
 }
 
 TEST(EmulatorGraphicsPackets, Sw64kRx8bppWithinBlockIsBijective)
@@ -3572,7 +3913,7 @@ TEST(EmulatorGraphicsPackets, EncodesDcbResetQueueAsClearState)
 	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u));
 	EXPECT_EQ(cmd[1], 0u);
 
-	// Astro-style non-0x3ff op with non-zero state selector.
+	// Guest-observed non-0x3ff op with non-zero state selector.
 	uint32_t* cmd2 = Gen5::GraphicsDcbResetQueue(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x001u, 0x5u);
 	ASSERT_NE(cmd2, nullptr);
 	EXPECT_EQ(cmd2[0], KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u));
@@ -3669,6 +4010,23 @@ TEST(EmulatorGraphicsPackets, ResolvesGen5LinearPitchFromDescriptorWord4)
 	r.fields[4] = 1279u;
 	EXPECT_EQ(r.Pitch5(980u), 1280u);
 	EXPECT_EQ(ShaderGen5ResolveLinearPitch(980u, 56u, k_type_2d, r.fields[4]), 1280u);
+}
+
+// RDNA2 ISA table 45: word4[12:0] is the last array slice of a 1D array (type 12) and its base array
+// is word4[28:16]; pitch is defined only for 1D, 2D and 2D-MSAA. A 1D-array row pitch therefore
+// derives from width and format alone.
+TEST(EmulatorGraphicsPackets, ResolvesGen5OneDimensionalArrayPitchFromWidth)
+{
+	constexpr uint8_t k_type_1d_array = 12u;
+	constexpr uint32_t k_word4        = (1u << 16u) | 1279u; // base array 1, last slice 1279
+	// 8 RGBA8 texels are 32 bytes; the 256-byte row holds 64 texels.
+	EXPECT_EQ(ShaderGen5ResolveLinearPitch(8u, 56u, k_type_1d_array, k_word4), 64u);
+	ShaderTextureResource r {};
+	r.fields[3] = (static_cast<uint32_t>(k_type_1d_array) << 28u);
+	r.fields[4] = k_word4;
+	EXPECT_EQ(r.Pitch5(8u), 8u);
+	EXPECT_EQ(r.Depth(), 1279u);
+	EXPECT_EQ(r.BaseArray5(), 1u);
 }
 
 TEST(EmulatorGraphicsPackets, DecodesGen5WidthHeightFullIsaFields)
@@ -3865,6 +4223,97 @@ TEST(EmulatorGraphicsPackets, ResolvesImplicitSampleShapeFromMixedDescriptorSet)
 	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpSampledImage %SampledImage3D"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("OpSampledImage %SampledImageA"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, SamplesThroughUnboundDescriptorReturnZero)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction sample {};
+	sample.type           = ShaderInstructionType::ImageSample;
+	sample.format         = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
+	sample.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	sample.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 3};
+	sample.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
+	sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	sample.src_num        = 3;
+	sample.mimg_dimension = 1;
+	// As decoded: formats named after their DMASK leave mimg_dmask unset.
+	sample.mimg_dmask = 0;
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(sample);
+	code.GetInstructions().Add(end);
+
+	// Read-only image slot at s[0:7] and sampler at s[8:11], all user SGPRs zero.
+	uint16_t    direct_offsets[1] = {0xffffu};
+	ShaderSharp texture_sharp {};
+	texture_sharp.offset_dw = 0;
+	texture_sharp.size      = 0;
+	ShaderSharp sampler_sharp {};
+	sampler_sharp.offset_dw = 8;
+	sampler_sharp.size      = 1;
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset   = direct_offsets;
+	user_data.direct_resource_count    = 1;
+	user_data.sharp_resource_offset[0] = &texture_sharp;
+	user_data.sharp_resource_count[0]  = 1;
+	user_data.sharp_resource_offset[2] = &sampler_sharp;
+	user_data.sharp_resource_count[2]  = 1;
+	HW::UserSgprInfo user_sgpr {};
+	user_sgpr.count = 12;
+
+	ShaderPixelInputInfo input {};
+	ShaderParsedUsage    usage {};
+	ShaderParseUsage2(&user_data, &usage, &input.bind, user_sgpr, 12, &code, 0, false);
+	EXPECT_EQ(input.bind.textures2D.textures_num, 0);
+	ASSERT_EQ(input.bind.zero_image_resources.images_num, 1);
+	EXPECT_EQ(input.bind.zero_image_resources.start_register[0], 0);
+
+	ShaderCalcBindingIndices(&input.bind);
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_EQ(source.FindIndex("OpImageSample"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpSelect %float %image_exec_active_0 %float_0_000000 %image_exec_old_0_3"), Core::STRING8_INVALID_INDEX);
+
+	// A non-zero descriptor reads as unbound only while its type nibble is a buffer encoding.
+	for (const uint32_t type: {0u, 7u, 9u})
+	{
+		HW::UserSgprInfo typed_sgpr = user_sgpr;
+		typed_sgpr.value[0]         = 0x00000600u;
+		typed_sgpr.value[1]         = 0x00fff000u;
+		typed_sgpr.value[3]         = type << 28u;
+		ShaderPixelInputInfo typed_input {};
+		ShaderParsedUsage    typed_usage {};
+		ShaderParseUsage2(&user_data, &typed_usage, &typed_input.bind, typed_sgpr, 12, &code, 0, false);
+		EXPECT_EQ(typed_input.bind.zero_image_resources.images_num, type < 8u ? 1 : 0) << "type=" << type;
+	}
+
+	// A descriptor the shader rewrites before the read is not the zero user data.
+	ShaderInstruction write {};
+	write.type   = ShaderInstructionType::SMovB32;
+	write.format = ShaderInstructionFormat::SVdstSVsrc0;
+	write.dst    = {.type = ShaderOperandType::Sgpr, .register_id = 3, .size = 1};
+	write.src[0] = {.type = ShaderOperandType::IntegerInlineConstant, .size = 0};
+	write.src_num = 1;
+	ShaderCode written;
+	written.SetType(ShaderType::Pixel);
+	written.GetInstructions().Add(write);
+	written.GetInstructions().Add(sample);
+	written.GetInstructions().Add(end);
+	ShaderPixelInputInfo written_input {};
+	ShaderParsedUsage    written_usage {};
+	ShaderParseUsage2(&user_data, &written_usage, &written_input.bind, user_sgpr, 12, &written, 0, false);
+	EXPECT_EQ(written_input.bind.zero_image_resources.images_num, 0);
 }
 
 TEST(EmulatorGraphicsPackets, UnbiasesCubeDimCoordinatesBeforeArraySampling)
@@ -5361,11 +5810,11 @@ TEST(EmulatorGraphicsPackets, Gen5LiveBufferAtomicUsesResolvedStorageSlot)
 	EXPECT_EQ(source.FindIndex("%buf_addr_hieq_0_0_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%buf_addr_access_final_0_0 = OpLogicalAnd %bool %buf_addr_access_enabled_0_0 %buf_addr_valid_c_0_0"),
 	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%buf_addr_access_size_1_0 = OpSelect %uint %buf_addr_packed_1_0 %uint_8 %uint_12"),
+	EXPECT_NE(source.FindIndex("%buf_addr_access_size_1_0 = OpSelect %uint %buf_addr_format_known_1_0 %buf_addr_format_bytes_1_0 %uint_12"),
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpBranchConditional %buf_addr_valid_c_1_0 %gen5_mubuf_load_then_1_0 %gen5_mubuf_load_oob_1_0"),
 	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%buf_addr_access_size_2_0 = OpSelect %uint %buf_addr_packed_2_0 %uint_4 %uint_8"),
+	EXPECT_NE(source.FindIndex("%buf_addr_access_size_2_0 = OpSelect %uint %buf_addr_format_known_2_0 %buf_addr_format_bytes_2_0 %uint_8"),
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_3_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_3_0_0 %uint_16"),
 	          Core::STRING8_INVALID_INDEX);
@@ -5528,8 +5977,7 @@ TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 	EXPECT_EQ(0, 0); // srt_size_dw == 0
 }
 
-// Type-5 guest EUD tables may exceed metadata eud_size_dw. Astro: api=40,
-// dwords=4, eud_size=24 → need=28 still allowed under the hard 256 cap.
+// Type-5 guest EUD tables may exceed the declared lower bound.
 TEST(EmulatorGraphicsPackets, Gen5EudSpanAllowsModestMetadataOverrun)
 {
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16, 4, 24));          // fully inside metadata
@@ -5537,6 +5985,46 @@ TEST(EmulatorGraphicsPackets, Gen5EudSpanAllowsModestMetadataOverrun)
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + 24 - 4, 4, 24)); // last in-bound
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + SHADER_GEN5_EUD_MAX_DWORDS - 4, 4, 24));
 	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16 + SHADER_GEN5_EUD_MAX_DWORDS - 3, 4, 24));
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + 264, 4, 268));
+	EXPECT_FALSE(ShaderGen5EudSpanAllowed(15, 4, 268));
+	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16, 0, 268));
+	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16, -1, 268));
+}
+
+TEST(EmulatorGraphicsPackets, ExtendedMetadataMapIncludesDescriptorPastDword256)
+{
+	ASSERT_EXIT(
+	    {
+		    InitCommandBufferTestRuntime();
+		    Config::SetNextGen(true);
+		    ShaderCode code;
+		    code.SetType(ShaderType::Pixel);
+		    ShaderInstruction end {};
+		    end.type = ShaderInstructionType::SEndpgm;
+		    end.format = ShaderInstructionFormat::Empty;
+		    code.GetInstructions().Add(end);
+		    ShaderPixelInputInfo input {};
+		    input.bind.push_constant_size = 16;
+		    input.bind.storage_buffers.buffers_num = 1;
+		    input.bind.storage_buffers.extended[0] = true;
+		    input.bind.storage_buffers.start_register[0] = 16 + 264;
+		    input.bind.storage_buffers.sources[0] = ShaderStorageBindingSource::MetadataSharp;
+		    input.bind.extended.used = true;
+		    input.bind.extended.start_register = 28;
+		    input.bind.extended.eud_size_dw = 268;
+		    Spirv spirv;
+		    spirv.SetCode(code);
+		    spirv.SetPsInputInfo(&input);
+		    spirv.GenerateSource();
+		    int buffer = -1;
+		    int field = -1;
+		    const bool mapped = spirv.GetMappedIndex(267, &buffer, &field);
+		    const bool missing = spirv.GetMappedIndex(263, &buffer, &field);
+		    const bool negative = spirv.GetMappedIndex(-1, &buffer, &field);
+		    const bool beyond = spirv.GetMappedIndex(SHADER_GEN5_EUD_MAX_DWORDS, &buffer, &field);
+		    std::_Exit(mapped && buffer == 0 && field == 3 && !missing && !negative && !beyond ? 0 : 1);
+	    },
+	    ::testing::ExitedWithCode(0), "");
 }
 
 // Captured EXP target 0x03: MRT3 compressed (half2), done may be 0.
@@ -5610,9 +6098,10 @@ TEST(EmulatorGraphicsPackets, VertexExportsDeclareParametersUsedByTheShader)
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	ShaderInstruction export_param {};
-	export_param.type    = ShaderInstructionType::Exp;
-	export_param.format  = ShaderInstructionFormat::Param3Vsrc0Vsrc1Vsrc2Vsrc3;
-	export_param.src_num = 4;
+	export_param.type        = ShaderInstructionType::Exp;
+	export_param.format      = ShaderInstructionFormat::Param3Vsrc0Vsrc1Vsrc2Vsrc3;
+	export_param.src_num     = 4;
+	export_param.exp_control = 0u;
 	for (int component = 0; component < 4; component++)
 	{
 		export_param.src[component].type        = ShaderOperandType::Vgpr;
@@ -5912,6 +6401,102 @@ TEST(EmulatorGraphicsPackets, EmitsVop1MovrelsWithDynamicM0)
 	EXPECT_NE(source.FindIndex("rel_acc_"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpSelect"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpStore %v5"), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompilePS(code, &input).IsEmpty());
+}
+
+TEST(EmulatorGraphicsPackets, NarrowsDynamicMovrelsToBoundedM0Values)
+{
+	// m0 = bfe(s0, 0, 2) * 5 can only be 0, 5, 10 or 15, so the select chain
+	// keeps v4 and v9 and drops the named registers no such offset reaches.
+	const uint32_t shader[] = {
+	    0x80000000u | (0x27u << 23u) | (1u << 16u) | (255u << 8u), 0x00020000u, // s_bfe_u32 s1, s0, 0x20000
+	    0x80000000u | (0x26u << 23u) | (1u << 16u) | (133u << 8u) | 1u,          // s_mul_i32 s1, s1, 5
+	    0xbefc0301u,                                                             // s_mov_b32 m0, s1
+	    (0x3fu << 25u) | (9u << 17u) | (0x01u << 9u) | 266u,                     // v_mov_b32 v9, v10
+	    (0x3fu << 25u) | (5u << 17u) | (0x43u << 9u) | 260u,                     // v_movrels_b32 v5, v4
+	    0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+	ASSERT_EQ(code.GetInstructions().At(4).type, ShaderInstructionType::VMovrelsB32);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	const auto source           = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("%rel_v_4_4 = OpLoad %float %v4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%rel_v_4_9 = OpLoad %float %v9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%rel_v_4_5 "), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%rel_v_4_10 "), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompilePS(code, &input).IsEmpty());
+
+	// On the fallthrough of s_cbranch_scc0 after s_cmp_lt_u32 s1, 3, the
+	// unknown s1 is below 3: v7 (offset 3) is dropped.
+	const uint32_t guarded[] = {
+	    0xbf0a8301u,                                         // s_cmp_lt_u32 s1, 3
+	    0xbf840003u,                                         // s_cbranch_scc0 -> s_endpgm
+	    0xbefc0301u,                                         // s_mov_b32 m0, s1
+	    (0x3fu << 25u) | (6u << 17u) | (0x01u << 9u) | 263u, // v_mov_b32 v6, v7
+	    (0x3fu << 25u) | (5u << 17u) | (0x43u << 9u) | 260u, // v_movrels_b32 v5, v4
+	    0xbf810000u};
+	ShaderCode guarded_code;
+	guarded_code.SetType(ShaderType::Pixel);
+	ShaderParse(guarded, &guarded_code);
+	ASSERT_EQ(guarded_code.GetInstructions().At(4).type, ShaderInstructionType::VMovrelsB32);
+	const auto guarded_source = SpirvGenerateSource(guarded_code, nullptr, &input, nullptr);
+	EXPECT_NE(guarded_source.FindIndex("%rel_v_4_6 = OpLoad %float %v6"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(guarded_source.FindIndex("%rel_v_4_7 "), Core::STRING8_INVALID_INDEX);
+
+	// M0's source joins a branch and a fallthrough: every candidate stays.
+	const uint32_t joined[] = {
+	    0xbf840001u,                                          // s_cbranch_scc0 -> s_mov_b32 m0, s1
+	    0xbe810382u,                                          // s_mov_b32 s1, 2
+	    0xbefc0301u,                                          // s_mov_b32 m0, s1
+	    (0x3fu << 25u) | (9u << 17u) | (0x01u << 9u) | 266u,  // v_mov_b32 v9, v10
+	    (0x3fu << 25u) | (5u << 17u) | (0x43u << 9u) | 260u,  // v_movrels_b32 v5, v4
+	    0xbf810000u};
+	ShaderCode joined_code;
+	joined_code.SetType(ShaderType::Pixel);
+	ShaderParse(joined, &joined_code);
+	ASSERT_EQ(joined_code.GetInstructions().At(4).type, ShaderInstructionType::VMovrelsB32);
+	const auto joined_source = SpirvGenerateSource(joined_code, nullptr, &input, nullptr);
+	EXPECT_NE(joined_source.FindIndex("%rel_v_4_5 = OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(joined_source.FindIndex("%rel_v_4_10 = OpLoad %float %v10"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, EmitsVop1MovrelsdWithDynamicM0)
+{
+	// v_movrelsd_b32 v7, v5 with a runtime m0 reads through the source chain
+	// and writes through the gated stores; both cover the same registers.
+	const uint32_t shader[] = {0xbefc0300u, (0x3fu << 25u) | (7u << 17u) | (0x44u << 9u) | 261u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+	ASSERT_EQ(code.GetInstructions().At(1).type, ShaderInstructionType::VMovrelsdB32);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	// v7 is a candidate of both sides; each id is defined once.
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	const auto first  = source.FindIndex("%rel_eq_1_7 = ");
+	ASSERT_NE(first, Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.Mid(first + 1).FindIndex("%rel_eq_1_7 = "), Core::STRING8_INVALID_INDEX);
 	EXPECT_FALSE(ShaderRecompilePS(code, &input).IsEmpty());
 }
 
@@ -6499,7 +7084,12 @@ TEST(EmulatorGraphicsPackets, CompressedMrtExportReadsPackedHalfFromUintShadow)
 	          Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(tapped_source.FindIndex("OpStore %fs_tap_0 %fs_tap_signed_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(tapped_source.FindIndex("%fs_tap_out_0_2 = OpLoad"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v28"), Core::STRING8_INVALID_INDEX);
+	// The write of v28 reads its old and new value for the EXEC select; the
+	// export must add no further read.
+	const auto v28_keep = sparse_source.FindIndex("OpLoad %float %v28");
+	const auto v28_new  = v28_keep == Core::STRING8_INVALID_INDEX ? v28_keep : sparse_source.FindIndex("OpLoad %float %v28", v28_keep + 1u);
+	ASSERT_NE(v28_new, Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v28", v28_new + 1u), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v29"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v30"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(sparse_source.FindIndex("OpStore %fs_tap_1 %float_0_000000"), Core::STRING8_INVALID_INDEX);
@@ -6657,22 +7247,12 @@ TEST(EmulatorGraphicsPackets, VMinMaxF32UseRdna2NanSelection)
 
 	ShaderPixelInputInfo input {};
 	const auto           source = SpirvGenerateSource(code, nullptr, &input, nullptr);
-	EXPECT_NE(source.FindIndex("%minmax_lhs_nan_0 = OpIsNan %bool %t0_0"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%minmax_rhs_nan_0 = OpIsNan %bool %t1_0"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%minmax_rhs_number_0 = OpSelect %float %minmax_rhs_nan_0 %t0_0 %minmax_numeric_0"),
-	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%t_0 = OpSelect %float %minmax_lhs_nan_0 %t1_0 %minmax_rhs_number_0"),
-	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%minmax_lhs_nan_1 = OpIsNan %bool %t0_1"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%minmax_rhs_nan_1 = OpIsNan %bool %t1_1"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%minmax_numeric_1 = OpExtInst %float %GLSL_std_450 FMax %t0_1 %t1_1"),
-	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%minmax_rhs_number_1 = OpSelect %float %minmax_rhs_nan_1 %t0_1 %minmax_numeric_1"),
-	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%t_1 = OpSelect %float %minmax_lhs_nan_1 %t1_1 %minmax_rhs_number_1"),
-	          Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%minmax_numeric_0 = OpExtInst %float %GLSL_std_450 FMin %t0_0 %t1_0"),
-	          Core::STRING8_INVALID_INDEX);
+	// Values are covered by EmulatorShaderArithmetic.FloatModeClampOutputModifierAndMinMaxContracts;
+	// here only the selection order and the GLSL operation of each instruction are checked.
+	EXPECT_NE(source.FindIndex("%mm_0_second_nan = OpSelect %float %mm_0_bn %t0_0 %mm_0_ordered"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%mm_0_quiet = OpSelect %float %mm_0_an %t1_0 %mm_0_second_nan"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%mm_0_num = OpExtInst %float %GLSL_std_450 FMin %t0_0 %t1_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%mm_1_num = OpExtInst %float %GLSL_std_450 FMax %t0_1 %t1_1"), Core::STRING8_INVALID_INDEX);
 
 	constexpr uint32_t lhs_number = 0x3f800000u;
 	constexpr uint32_t rhs_number = 0x40000000u;
@@ -6738,6 +7318,61 @@ TEST(EmulatorGraphicsPackets, NullMrt3ExportAfterExecZeroKillsFragment)
 
 	EXPECT_TRUE(code.ReadBlock(0).is_discard);
 	EXPECT_NE(source.FindIndex("OpKill"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, Wave32ExecLoB32NullMrtTailKillsWithoutKillMetadataAndDisablesEarlyTests)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderOperand exec {};
+	exec.type = ShaderOperandType::ExecLo;
+	exec.size = 1;
+
+	ShaderOperand zero {};
+	zero.type       = ShaderOperandType::IntegerInlineConstant;
+	zero.constant.i = 0;
+
+	ShaderInstruction clear_exec {};
+	clear_exec.pc      = 0;
+	clear_exec.type    = ShaderInstructionType::SMovB32;
+	clear_exec.format  = ShaderInstructionFormat::SVdstSVsrc0;
+	clear_exec.dst     = exec;
+	clear_exec.src[0]  = zero;
+	clear_exec.src_num = 1;
+
+	ShaderInstruction null_mrt3 {};
+	null_mrt3.pc      = 4;
+	null_mrt3.type    = ShaderInstructionType::Exp;
+	null_mrt3.format  = ShaderInstructionFormat::Mrt3OffOffComprVmDone;
+	null_mrt3.src_num = 0;
+
+	ShaderInstruction end {};
+	end.pc     = 8;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(clear_exec);
+	code.GetInstructions().Add(null_mrt3);
+	code.GetInstructions().Add(end);
+
+	ShaderPixelInputInfo input {};
+	input.ps_early_z                  = true;
+	input.required_subgroup_size     = 32;
+	input.native_wave.guest_wave_size = 32;
+	input.target_output_mode[3]      = 4;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_TRUE(code.ReadBlock(0).is_discard);
+	EXPECT_NE(source.FindIndex("OpKill"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpExecutionMode %main EarlyFragmentTests"), Core::STRING8_INVALID_INDEX);
 }
 
 // Guest Z_ORDER=EarlyZThenLateZ may reject occluded fragments early, but a
@@ -6874,6 +7509,30 @@ TEST(EmulatorGraphicsPackets, PixelShaderIdentityIncludesTextureSampleOperation)
 	EXPECT_NE(depth_reference_id, mixed_id);
 }
 
+TEST(EmulatorGraphicsPackets, PixelShaderIdentityAndModuleKeyIncludeDualSourceBlend)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+
+	HW::PixelShaderInfo regs {};
+	regs.ps_regs.chksum = 0x0123456789abcdefu;
+
+	ShaderPixelInputInfo ordinary {};
+	auto                 dual = ordinary;
+	dual.dual_source_blend    = true;
+
+	const auto ordinary_id = ShaderGetIdPS(&regs, &ordinary);
+	const auto dual_id     = ShaderGetIdPS(&regs, &dual);
+	EXPECT_NE(ordinary_id, dual_id);
+
+	const auto ordinary_key = ShaderModuleKey::Create(ordinary_id, ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true);
+	const auto dual_key     = ShaderModuleKey::Create(dual_id, ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true);
+	EXPECT_NE(ordinary_key, dual_key);
+}
+
 TEST(EmulatorGraphicsPackets, VertexShaderIdentityIncludesGen5FetchRegistersAndProlog)
 {
 	if (!Config::IsInitialized())
@@ -6909,15 +7568,38 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordKeepsNativeCoordinatesAtOneToOneScal
 	ShaderCode code;
 	code.SetType(ShaderType::Pixel);
 
+	// PERSP_CENTER, POS_X_FLOAT and POS_Y_FLOAT: v[0:1] barycentrics, v2 x, v3 y.
 	ShaderPixelInputInfo input {};
-	input.ps_pos_xy = true;
+	input.system_input_enable  = 0x302u;
+	input.system_input_address = 0x302u;
+	input.ps_position          = true;
 
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
-	EXPECT_NE(source.FindIndex("OpStore %v2 %FragCoord_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %v3 %FragCoord_y"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(source.FindIndex("%FragCoord_guest_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(source.FindIndex("%FragCoord_guest_y"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_ptr8 = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %pixel_pos8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v3 %pixel_pos9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%pixel_pos_guest"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, PixelFragCoordLoadsOnlyEnabledFieldIntoItsAddressSlot)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	// Captured: LINEAR_CENTER and POS_Y_FLOAT alone. The y coordinate is v2.
+	ShaderPixelInputInfo input {};
+	input.system_input_enable  = 0x220u;
+	input.system_input_address = 0x220u;
+	input.ps_position          = ShaderPixelPositionEnabled(input.system_input_enable, input.system_input_address);
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("%pixel_pos_ptr9 = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %pixel_pos9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%pixel_pos8"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
@@ -6928,7 +7610,9 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
 	code.SetType(ShaderType::Pixel);
 
 	ShaderPixelInputInfo input {};
-	input.ps_pos_xy                              = true;
+	input.system_input_enable                    = 0x302u;
+	input.system_input_address                   = 0x302u;
+	input.ps_position                            = true;
 	input.host_to_guest_scale.x_guest_numerator  = 3;
 	input.host_to_guest_scale.x_host_denominator = 1;
 	input.host_to_guest_scale.y_guest_numerator  = 2;
@@ -6936,12 +7620,41 @@ TEST(EmulatorGraphicsPackets, PixelFragCoordConvertsHostCoordinatesToGuestScale)
 
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 
-	EXPECT_NE(source.FindIndex("%FragCoord_scale_x = OpFDiv %float %float_3_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%FragCoord_guest_x = OpFMul %float %FragCoord_x %FragCoord_scale_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %v2 %FragCoord_guest_x"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%FragCoord_scale_y = OpFDiv %float %float_2_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%FragCoord_guest_y = OpFMul %float %FragCoord_y %FragCoord_scale_y"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %v3 %FragCoord_guest_y"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_scale8 = OpFDiv %float %float_3_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_guest8 = OpFMul %float %pixel_pos8 %pixel_pos_scale8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %pixel_pos_guest8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_scale9 = OpFDiv %float %float_2_000000 %float_1_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%pixel_pos_guest9 = OpFMul %float %pixel_pos9 %pixel_pos_scale9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v3 %pixel_pos_guest9"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, PixelAncillaryCarriesTheLayerInBits16To26OfItsAddressSlot)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+
+	// PERSP_CENTER and ANCILLARY: v[0:1] barycentrics, v2 ancillary.
+	ShaderPixelInputInfo input {};
+	input.system_input_enable         = 0x2002u;
+	input.system_input_address        = 0x2002u;
+	input.required_subgroup_size      = 32;
+	input.native_wave.guest_wave_size = 32;
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpDecorate %gl_LayerIn BuiltIn Layer"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%ancillary_value = OpShiftLeftLogical %uint %ancillary_layer_index %uint_16"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v2 %ancillary_register"), Core::STRING8_INVALID_INDEX);
+	ScopedShaderValidation validation;
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
 }
 
 // Captured dual-strict first fail: EXP target 0x26 done=0 compr=0 vm=0 en=0xf
@@ -7007,9 +7720,10 @@ TEST(EmulatorGraphicsPackets, Param7ExportGeneratesStoreAndInterface)
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	ShaderInstruction export_param {};
-	export_param.type    = ShaderInstructionType::Exp;
-	export_param.format  = ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3;
-	export_param.src_num = 4;
+	export_param.type        = ShaderInstructionType::Exp;
+	export_param.format      = ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3;
+	export_param.src_num     = 4;
+	export_param.exp_control = 0u;
 	for (int component = 0; component < 4; component++)
 	{
 		export_param.src[component].type        = ShaderOperandType::Vgpr;
@@ -7067,9 +7781,10 @@ TEST(EmulatorGraphicsPackets, Param8ExportGeneratesStoreAndInterface)
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	ShaderInstruction export_param {};
-	export_param.type    = ShaderInstructionType::Exp;
-	export_param.format  = ShaderInstructionFormat::Param8Vsrc0Vsrc1Vsrc2Vsrc3;
-	export_param.src_num = 4;
+	export_param.type        = ShaderInstructionType::Exp;
+	export_param.format      = ShaderInstructionFormat::Param8Vsrc0Vsrc1Vsrc2Vsrc3;
+	export_param.src_num     = 4;
+	export_param.exp_control = 0u;
 	for (int component = 0; component < 4; component++)
 	{
 		export_param.src[component].type        = ShaderOperandType::Vgpr;
@@ -7963,18 +8678,64 @@ TEST(EmulatorGraphicsPackets, SizesGen5Standard4Kb8BitVideoTextures)
 
 TEST(EmulatorGraphicsPackets, BoundsRegisteredLinearVideoPlaneFootprints)
 {
-	constexpr uint64_t base         = 0x60000000u;
-	constexpr uint32_t row_bytes    = 1920u;
-	constexpr uint32_t luma_height  = 1080u;
+	constexpr uint32_t row_bytes     = 1920u;
+	constexpr uint32_t luma_height   = 1080u;
 	constexpr uint32_t chroma_height = 540u;
-	constexpr uint64_t luma_size    = static_cast<uint64_t>(row_bytes) * luma_height;
-	constexpr uint64_t chroma_size  = static_cast<uint64_t>(row_bytes) * chroma_height;
+	constexpr uint64_t luma_size     = static_cast<uint64_t>(row_bytes) * luma_height;
+	constexpr uint64_t chroma_size   = static_cast<uint64_t>(row_bytes) * chroma_height;
+	constexpr uint64_t total_size    = luma_size + chroma_size;
 
-	GuestTextureLayoutRegisterLinear(base, static_cast<size_t>(luma_size + chroma_size), row_bytes);
+	struct GuestAllocation
+	{
+		uint64_t address = 0;
+		~GuestAllocation()
+		{
+			if (address != 0)
+			{
+				(void)Core::VirtualMemory::Free(address);
+			}
+		}
+	} allocation {Core::VirtualMemory::Alloc(0, total_size, Core::VirtualMemory::Mode::ReadWrite)};
+	ASSERT_NE(allocation.address, 0u);
+
+	const uint64_t                                    base = allocation.address;
+	Core::VirtualMemory::GuestMappingIdentitySnapshot identity {};
+	ASSERT_TRUE(Core::VirtualMemory::CaptureGuestMappingIdentitySnapshot(base, total_size, &identity));
+
+	ASSERT_TRUE(GuestTextureLayoutRegisterLinear(base, static_cast<size_t>(total_size), row_bytes, identity));
 
 	EXPECT_EQ(GuestTextureLayoutGetLinearFootprint(base, row_bytes, luma_height), luma_size);
 	EXPECT_EQ(GuestTextureLayoutGetLinearFootprint(base + luma_size, row_bytes, chroma_height), chroma_size);
 	EXPECT_EQ(GuestTextureLayoutGetLinearFootprint(base + luma_size, row_bytes, 576u), 0u);
+	EXPECT_EQ(GuestTextureLayoutGetLinearRowPitch(base, row_bytes), row_bytes);
+
+	if (!Core::VirtualMemory::Free(base))
+	{
+		GuestTextureLayoutUnregister(base);
+		ADD_FAILURE() << "Could not release the registered frame range";
+		return;
+	}
+	allocation.address = 0;
+	if (!Core::VirtualMemory::AllocFixed(base, total_size, Core::VirtualMemory::Mode::ReadWrite))
+	{
+		GuestTextureLayoutUnregister(base);
+		ADD_FAILURE() << "Could not remap the registered frame range";
+		return;
+	}
+	allocation.address = base;
+
+	EXPECT_EQ(GuestTextureLayoutGetLinearFootprint(base, row_bytes, luma_height), 0u);
+	EXPECT_EQ(GuestTextureLayoutGetLinearRowPitch(base, row_bytes), 0u);
+
+	Core::VirtualMemory::GuestMappingIdentitySnapshot replacement_identity {};
+	if (!Core::VirtualMemory::CaptureGuestMappingIdentitySnapshot(base, total_size, &replacement_identity))
+	{
+		GuestTextureLayoutUnregister(base);
+		ADD_FAILURE() << "Could not capture the replacement frame mapping";
+		return;
+	}
+	ASSERT_TRUE(GuestTextureLayoutRegisterLinear(base, static_cast<size_t>(total_size), row_bytes, replacement_identity));
+	EXPECT_EQ(GuestTextureLayoutGetLinearFootprint(base, row_bytes, luma_height), luma_size);
 
 	GuestTextureLayoutUnregister(base);
 }
@@ -8295,8 +9056,8 @@ TEST(EmulatorGraphicsPackets, EncodesGen4DrawIndexOffset)
 
 	uint32_t command[9] = {};
 
-	ASSERT_EQ(Gen4::GraphicsDrawIndexOffset(command, 9, 0x10u, 0x30u, 0u), 0);
-	EXPECT_EQ(command[0], KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u));
+	ASSERT_EQ(Gen4::GraphicsDrawIndexOffset(command, 9, 0x10u, 0x30u, 1u), 0);
+	EXPECT_EQ(command[0], KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u) | 1u);
 	EXPECT_EQ(command[1], 0x30u);
 	EXPECT_EQ(command[2], 0x10u);
 	EXPECT_EQ(command[3], 0x30u);
@@ -8307,7 +9068,7 @@ TEST(EmulatorGraphicsPackets, EncodesGen4DrawIndexOffset)
 	EXPECT_EQ(command[8], 0u);
 }
 
-// Captured UI batch (Dreaming Sarah title logo): IndexBase holds 0,1,2,1,2,3 for a
+// Captured UI batch (a Construct title's logo): IndexBase holds 0,1,2,1,2,3 for a
 // 4-vert quad. NID B+aG9DUnTKA must emit Offset (not Auto) so those indices apply.
 TEST(EmulatorGraphicsPackets, DrawIndexOffsetEncodesUiQuadIndexCount)
 {
@@ -8483,6 +9244,142 @@ TEST(EmulatorGraphicsPackets, StandaloneDiamondDeclaresItsSyntheticJoinAsSelecti
 	}
 }
 
+// Both arms of an inner diamond end in S_BRANCH: the fallthrough arm jumps into the taken arm's tail, which
+// then leaves for the outer join. The inner merge is the fallthrough arm's landing, not the outer join.
+TEST(EmulatorGraphicsPackets, DiamondWhoseArmsBothBranchMergesWhereTheFallthroughLands)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	auto make_nop = [](uint32_t pc)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = ShaderInstructionType::SInstPrefetch;
+		inst.format = ShaderInstructionFormat::Imm;
+		inst.src_num = 1;
+		inst.src[0].type = ShaderOperandType::LiteralConstant;
+		return inst;
+	};
+	auto make_branch = [](uint32_t pc, ShaderInstructionType type, uint32_t target)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = type;
+		inst.format = ShaderInstructionFormat::Label;
+		inst.src_num = 1;
+		inst.src[0].type = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.i = static_cast<int32_t>(target - pc - 4u);
+		return inst;
+	};
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	const auto outer     = make_branch(0x04, ShaderInstructionType::SCbranchScc0, 0x28);
+	const auto inner     = make_branch(0x0c, ShaderInstructionType::SCbranchScc0, 0x1c);
+	const auto into_tail = make_branch(0x18, ShaderInstructionType::SBranch, 0x24);
+	const auto to_outer  = make_branch(0x24, ShaderInstructionType::SBranch, 0x2c);
+	ShaderInstruction end {};
+	end.pc = 0x2c;
+	end.type = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	for (const auto& inst: {make_nop(0x00), outer, make_nop(0x08), inner, make_nop(0x10), make_nop(0x14), into_tail, make_nop(0x1c),
+	                        make_nop(0x20), to_outer, make_nop(0x28), end})
+	{
+		code.GetInstructions().Add(inst);
+	}
+	for (const auto& branch: {outer, inner, into_tail, to_outer}) { code.GetLabels().Add(ShaderLabel(branch)); }
+	ShaderPixelInputInfo pixel {};
+	pixel.required_subgroup_size = 32;
+	pixel.native_wave.guest_wave_size = 32;
+	const auto source = SpirvGenerateSource(code, nullptr, &pixel, nullptr);
+	EXPECT_EQ(source.FindIndex("OpSelectionMerge %label_002c_0024 None"), Core::STRING8_INVALID_INDEX);
+	ScopedShaderValidation validation;
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+}
+
+// A uniform branch targets a block that its fallthrough reaches only when an EXECZ skip over that block is not
+// taken: the two regions share the block without nesting. The skipped range only defines VCC, dead at the
+// skip target, so the skip goes away and the program is one selection.
+static ShaderCode SkipOverSharedBlock(bool target_reads_vcc)
+{
+	auto branch = [](uint32_t pc, ShaderInstructionType type, uint32_t target)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = type;
+		inst.format = ShaderInstructionFormat::Label;
+		inst.src_num = 1;
+		inst.src[0].type = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.i = static_cast<int32_t>(target - pc - 4u);
+		return inst;
+	};
+	auto move64 = [](uint32_t pc, ShaderOperand dst, ShaderOperand src)
+	{
+		ShaderInstruction inst {};
+		inst.pc = pc;
+		inst.type = ShaderInstructionType::SMovB64;
+		inst.format = ShaderInstructionFormat::Sdst2Ssrc02;
+		inst.dst = dst;
+		inst.src[0] = src;
+		inst.src_num = 1;
+		return inst;
+	};
+	const ShaderOperand exec {.type = ShaderOperandType::ExecLo, .size = 2};
+	const ShaderOperand vcc {.type = ShaderOperandType::VccLo, .size = 2};
+	auto sgpr = [](int first) { return ShaderOperand {.type = ShaderOperandType::Sgpr, .register_id = first, .size = 2}; };
+	ShaderInstruction andn2 {};
+	andn2.pc = 0x08;
+	andn2.type = ShaderInstructionType::SAndn2B64;
+	andn2.format = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+	andn2.dst = exec;
+	andn2.src[0] = exec;
+	andn2.src[1] = vcc;
+	andn2.src_num = 2;
+	ShaderInstruction end {};
+	end.pc = 0x24;
+	end.type = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	const auto uniform = branch(0x04, ShaderInstructionType::SCbranchScc0, 0x18);
+	const auto skip    = branch(0x0c, ShaderInstructionType::SCbranchExecz, 0x1c);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	for (const auto& inst: {move64(0x00, sgpr(14), exec), uniform, andn2, skip, move64(0x10, vcc, sgpr(16)), move64(0x14, sgpr(4), sgpr(6)),
+	                        move64(0x18, vcc, sgpr(16)), move64(0x1c, exec, sgpr(14)),
+	                        move64(0x20, sgpr(2), target_reads_vcc ? vcc : sgpr(8)), end})
+	{
+		code.GetInstructions().Add(inst);
+	}
+	code.GetLabels().Add(ShaderLabel(uniform));
+	code.GetLabels().Add(ShaderLabel(skip));
+	return code;
+}
+
+TEST(EmulatorGraphicsPackets, ExeczSkipOverASharedBlockGoesAwayWhenItsDefinitionsAreDead)
+{
+	InitCommandBufferTestRuntime();
+	Config::SetNextGen(true);
+	auto code = SkipOverSharedBlock(false);
+	ShaderRemoveNeutralExecSkips(&code);
+	for (const auto& inst: code.GetInstructions()) { EXPECT_NE(inst.type, ShaderInstructionType::SCbranchExecz); }
+	ShaderPixelInputInfo pixel {};
+	pixel.required_subgroup_size = 32;
+	pixel.native_wave.guest_wave_size = 32;
+	const auto source = SpirvGenerateSource(code, nullptr, &pixel, nullptr);
+	ScopedShaderValidation validation;
+	Vector<uint32_t> binary;
+	String8          error;
+	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+}
+
+TEST(EmulatorGraphicsPackets, ExeczSkipStaysWhenTheTargetReadsAScalarTheRangeDefines)
+{
+	auto code = SkipOverSharedBlock(true);
+	const auto count = code.GetInstructions().Size();
+	ShaderRemoveNeutralExecSkips(&code);
+	EXPECT_EQ(code.GetInstructions().Size(), count);
+}
+
 TEST(EmulatorGraphicsPackets, EmptyDiamondArmBranchesToItsDeclaredSyntheticMerge)
 {
 	InitCommandBufferTestRuntime();
@@ -8529,6 +9426,118 @@ TEST(EmulatorGraphicsPackets, EmptyDiamondArmBranchesToItsDeclaredSyntheticMerge
 	Vector<uint32_t> binary;
 	String8 error;
 	EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+}
+
+// Captured dithered depth-only shader: an EXECZ skip region holds an SCC0
+// branch to the NULL-target discard tail placed after the region's join. The
+// tail is a terminating arm, not a selection merge crossing the outer join.
+TEST(EmulatorGraphicsPackets, NullTargetDiscardTailInsideSkipRegionIsTerminatingArm)
+{
+	ASSERT_EXIT(
+	    {
+		    InitCommandBufferTestRuntime();
+		    Config::SetNextGen(true);
+		    class ValidationConfig final: public Config::ConfigSource
+		    {
+		    public:
+		    	bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+		    	int64_t GetInteger(const Core::String&) const override { return 0; }
+		    	bool GetBool(const Core::String&) const override { return true; }
+		    	Core::String GetString(const Core::String&) const override { return {}; }
+		    } validation;
+		    Config::Load(validation);
+		    ShaderCode code;
+		    code.SetType(ShaderType::Pixel);
+		    const auto branch = [&code](ShaderInstructionType type, uint32_t pc, uint32_t target)
+		    {
+		    	ShaderInstruction inst {};
+		    	inst.pc = pc;
+		    	inst.type = type;
+		    	inst.format = ShaderInstructionFormat::Label;
+		    	inst.src_num = 1;
+		    	inst.src[0].type = ShaderOperandType::LiteralConstant;
+		    	inst.src[0].constant.i = static_cast<int32_t>(target) - static_cast<int32_t>(pc) - 4;
+		    	code.GetInstructions().Add(inst);
+		    	code.GetLabels().Add(ShaderLabel(inst));
+		    };
+		    branch(ShaderInstructionType::SCbranchExecz, 0, 16);
+		    ShaderInstruction compare {};
+		    compare.pc = 8;
+		    compare.type = ShaderInstructionType::SCmpEqU32;
+		    compare.format = ShaderInstructionFormat::Ssrc0Ssrc1;
+		    compare.src_num = 2;
+		    compare.src[0].type = ShaderOperandType::Sgpr;
+		    compare.src[0].size = 1;
+		    compare.src[1].type = ShaderOperandType::IntegerInlineConstant;
+		    ShaderInstruction move {};
+		    move.type = ShaderInstructionType::VMovB32;
+		    move.format = ShaderInstructionFormat::SVdstSVsrc0;
+		    move.dst.type = ShaderOperandType::Vgpr;
+		    move.dst.size = 1;
+		    move.src_num = 1;
+		    move.src[0].type = ShaderOperandType::FloatInlineConstant;
+		    move.src[0].constant.f = 0.25f;
+		    move.pc = 4;
+		    code.GetInstructions().Add(move);
+		    code.GetInstructions().Add(compare);
+		    // Its fallthrough is the skip region's join, as in the captured program.
+		    branch(ShaderInstructionType::SCbranchScc0, 12, 32);
+		    move.pc = 16;
+		    code.GetInstructions().Add(move);
+		    ShaderInstruction color {};
+		    color.pc = 20;
+		    color.type = ShaderInstructionType::Exp;
+		    color.format = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone;
+		    color.src_num = 4;
+		    color.exp_control = 3;
+		    for (uint32_t component = 0; component < 4; ++component)
+		    {
+		    	color.src[component].type = ShaderOperandType::Vgpr;
+		    	color.src[component].size = 1;
+		    }
+		    code.GetInstructions().Add(color);
+		    ShaderInstruction end {};
+		    end.pc = 28;
+		    end.type = ShaderInstructionType::SEndpgm;
+		    end.format = ShaderInstructionFormat::Empty;
+		    code.GetInstructions().Add(end);
+		    ShaderInstruction clear_exec {};
+		    clear_exec.pc = 32;
+		    clear_exec.type = ShaderInstructionType::SMovB64;
+		    clear_exec.format = ShaderInstructionFormat::Sdst2Ssrc02;
+		    clear_exec.dst.type = ShaderOperandType::ExecLo;
+		    clear_exec.dst.size = 2;
+		    clear_exec.src_num = 1;
+		    clear_exec.src[0].type = ShaderOperandType::IntegerInlineConstant;
+		    clear_exec.src[0].size = 2;
+		    code.GetInstructions().Add(clear_exec);
+		    ShaderInstruction null_export {};
+		    null_export.pc = 36;
+		    null_export.type = ShaderInstructionType::Exp;
+		    null_export.format = ShaderInstructionFormat::NullVmDone;
+		    code.GetInstructions().Add(null_export);
+		    end.pc = 44;
+		    code.GetInstructions().Add(end);
+		    if (!code.ReadBlock(32).is_discard)
+		    {
+		    	std::_Exit(2);
+		    }
+		    ShaderPixelInputInfo input {};
+		    input.required_subgroup_size = 32;
+		    input.native_wave.guest_wave_size = 32;
+		    input.ps_pixel_kill_enable = true;
+		    input.target_output_mode[0] = 4;
+		    const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+		    Vector<uint32_t> binary;
+		    String8 error;
+		    if (!ShaderToolchain::Run(source, &binary, &error))
+		    {
+		    	std::fprintf(stderr, "%.512s\n", error.c_str());
+		    	std::_Exit(4);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorGraphicsPackets, SharedDiscardTailsDoNotAcquireReconvergenceMerges)

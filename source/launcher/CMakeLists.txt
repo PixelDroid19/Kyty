@@ -36,7 +36,7 @@ qt_add_qml_module(launcher
 	RESOURCES ${launcher_icons}
 )
 
-target_link_libraries(launcher PRIVATE Qt6::Quick Qt6::QuickDialogs2 SDL2-static)
+target_link_libraries(launcher PRIVATE Qt6::Quick Qt6::QuickDialogs2 SDL3-static)
 if(MSVC OR MINGW)
 target_link_libraries(launcher PRIVATE psapi)
 target_link_libraries(launcher PRIVATE setupapi)

@@ -39,6 +39,12 @@ public:
 // caller must use the byte write-back.
 [[nodiscard]] bool StorageBufferWriteBackPublishedUniform(void* obj, uint64_t vaddr, uint64_t size,
                                                           const GpuWritebackPageCache::UniformWords& words, GpuWritebackResult* result);
+// Write-back of a storage object whose last GPU write a device copy already
+// published to guest memory: the GPU copy is read only to update the write-back
+// snapshot; guest memory is not written. False: the caller must use the byte
+// write-back.
+[[nodiscard]] bool StorageBufferWriteBackPublishedDevice(GraphicContext* ctx, void* obj, uint64_t vaddr, uint64_t size,
+                                                         GpuWritebackResult* result);
 
 // Uploads only `runs` of a storage object whose other bytes already match guest
 // memory. False when the object observes depth metadata, whose HTILE tracking

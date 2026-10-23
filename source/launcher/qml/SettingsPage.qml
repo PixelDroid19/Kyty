@@ -19,9 +19,12 @@ FocusScope {
         return [
             { label: qsTr("Screen"), value: "%1 × %2".arg(f.screen_width).arg(f.screen_height) },
             { label: qsTr("Render resolution"), value: f.render_resolution_mode === "Fixed"
-                  ? "%1 × %2".arg(f.render_resolution_width).arg(f.render_resolution_height)
+                  ? "%1 × %2 · %3".arg(f.render_resolution_width).arg(f.render_resolution_height).arg(f.render_resolution_scope)
                   : qsTr("Native") },
-            { label: qsTr("Presentation filter"), value: f.presentation_filter },
+            { label: qsTr("Presentation filter"), value: f.presentation_filter === "Fsr"
+                  ? "FSR · %1".arg(f.presentation_fsr_sharpness)
+                  : f.presentation_filter },
+            { label: qsTr("Texture anisotropy"), value: f.texture_anisotropy },
             { label: qsTr("Neo mode"), value: on(f.neo) },
             { label: qsTr("Shader optimization"), value: f.shader_optimization_type },
             { label: qsTr("Log output"), value: f.printf_direction === "Silent"

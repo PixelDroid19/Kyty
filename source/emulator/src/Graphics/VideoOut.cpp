@@ -6,6 +6,7 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Vector.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Common.h"
@@ -30,6 +31,7 @@
 #include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -528,7 +530,8 @@ public:
 	SubmitFlipStatus SubmitFlip(int handle, int index, int64_t flip_arg);
 	SubmitFlipStatus SubmitFlipInternal(int handle, int index, int64_t flip_arg);
 	void             QueueGpuFlip(int handle);
-	bool             RunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action, void* data);
+	bool             RunBufferUnmapTransaction(const VideoOutBufferRange* ranges, size_t range_count, VideoOutQuiescedAction action,
+	                                           void* data);
 
 	void Init(uint32_t width, uint32_t height);
 
@@ -2379,10 +2382,14 @@ void VideoOutContext::DetachRegisteredBuffersForUnmapLocked(uint64_t vaddr, uint
 	}
 }
 
-bool VideoOutContext::RunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action, void* data)
+bool VideoOutContext::RunBufferUnmapTransaction(const VideoOutBufferRange* ranges, size_t range_count,
+                                                VideoOutQuiescedAction action, void* data)
 {
-	EXIT_IF(size == 0);
-	EXIT_IF(action == nullptr);
+	if (ranges == nullptr || range_count == 0 || action == nullptr) { return false; }
+	for (size_t i = 0; i < range_count; ++i)
+	{
+		if (ranges[i].vaddr == 0 || ranges[i].size == 0 || ranges[i].vaddr > UINT64_MAX - ranges[i].size) { return false; }
+	}
 
 	auto drain = m_host_access_gate.Drain();
 
@@ -2409,7 +2416,10 @@ bool VideoOutContext::RunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, V
 
 	{
 		Core::LockGuard lock(m_mutex);
-		DetachRegisteredBuffersForUnmapLocked(vaddr, size);
+		for (size_t i = 0; i < range_count; ++i)
+		{
+			DetachRegisteredBuffersForUnmapLocked(ranges[i].vaddr, ranges[i].size);
+		}
 	}
 
 	return action(data);
@@ -2626,7 +2636,17 @@ void VideoOutWaitFlipDone(int handle, int index)
 bool VideoOutRunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action, void* data)
 {
 	EXIT_IF(g_video_out_context == nullptr);
-	return g_video_out_context->RunBufferUnmapTransaction(vaddr, size, action, data);
+	EXIT_IF(size == 0);
+	EXIT_IF(action == nullptr);
+	const VideoOutBufferRange range {vaddr, size};
+	return VideoOutRunBufferUnmapTransaction(&range, 1, action, data);
+}
+
+bool VideoOutRunBufferUnmapTransaction(const VideoOutBufferRange* ranges, size_t range_count, VideoOutQuiescedAction action,
+                                       void* data)
+{
+	EXIT_IF(g_video_out_context == nullptr);
+	return g_video_out_context->RunBufferUnmapTransaction(ranges, range_count, action, data);
 }
 
 KYTY_SYSV_ABI int VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status)
@@ -2928,19 +2948,76 @@ KYTY_SYSV_ABI int VideoOutGetEventData(const Kernel::EventQueue::KernelEvent* ev
 	return Kernel::OK;
 }
 
-KYTY_SYSV_ABI int VideoOutConfigureOutput(int handle)
+namespace {
+
+int ValidateOutputRequest(uint64_t mode, const void* options, const void* reserved_pointer, uint64_t reserved)
+{
+	if (reserved_pointer != nullptr || reserved != 0)
+	{
+		return VIDEO_OUT_ERROR_INVALID_VALUE;
+	}
+
+	switch (mode)
+	{
+		case kVideoOutOutputModeDefault:
+		case kVideoOutOutputMode119_88Hz: break;
+		case 4:
+		case 7:
+		case 8:
+		case 12:
+		case 13:
+		case 14:
+		case 16:
+		case 17:
+		case 19: return VIDEO_OUT_ERROR_UNSUPPORTED_OUTPUT_MODE;
+		default: return VIDEO_OUT_ERROR_INVALID_OUTPUT_MODE;
+	}
+
+	if (options == nullptr)
+	{
+		return Kernel::OK;
+	}
+
+	std::array<uint8_t, kVideoOutOutputOptionsSize> option_bytes {};
+	if (!Core::VirtualMemory::CopyFromGuest(option_bytes.data(), reinterpret_cast<uint64_t>(options), option_bytes.size()))
+	{
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
+
+	// The fourth option word is caller controlled. All other words retain
+	// the initialization pattern; read with memcpy to accept unaligned guest storage.
+	for (size_t i = 0; i < kVideoOutOutputOptionsSize / sizeof(uint32_t); i++)
+	{
+		uint32_t word = 0;
+		std::memcpy(&word, option_bytes.data() + i * sizeof(word), sizeof(word));
+		if (i != 3 && word != (i == 0 ? 0x00ff0000u : 0u))
+		{
+			return VIDEO_OUT_ERROR_INVALID_VALUE;
+		}
+	}
+	return Kernel::OK;
+}
+
+} // namespace
+
+KYTY_SYSV_ABI int VideoOutConfigureOutput(int handle, uint64_t mode, const void* options, const void* reserved_pointer, uint64_t reserved)
 {
 	PRINT_NAME();
-
 	EXIT_IF(g_video_out_context == nullptr);
 
 	auto session = g_video_out_context->AcquireSession(handle);
-	if (!session)
+	if (handle <= 0 || !session)
 	{
 		return VIDEO_OUT_ERROR_INVALID_HANDLE;
 	}
+	const int result = ValidateOutputRequest(mode, options, reserved_pointer, reserved);
+	if (result != Kernel::OK)
+	{
+		return result;
+	}
 
-	return Kernel::OK;
+	// Only the default output cadence is implemented by the presentation clock.
+	return mode == kVideoOutOutputModeDefault ? Kernel::OK : VIDEO_OUT_ERROR_UNSUPPORTED_OUTPUT_MODE;
 }
 
 KYTY_SYSV_ABI int VideoOutInitializeOutputOptions(void* options)
@@ -2952,45 +3029,30 @@ KYTY_SYSV_ABI int VideoOutInitializeOutputOptions(void* options)
 		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
 	}
 
-	std::memset(options, 0, kVideoOutOutputOptionsSize);
+	std::array<uint8_t, kVideoOutOutputOptionsSize> option_bytes {};
+	option_bytes[2] = 0xff;
+	if (!Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(options), option_bytes.data(), option_bytes.size()))
+	{
+		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+	}
 	return Kernel::OK;
 }
 
-KYTY_SYSV_ABI int VideoOutIsOutputSupported(int handle, uint64_t mode, const void* options, const void* reserved_pointer,
-                                            uint64_t reserved)
+KYTY_SYSV_ABI int VideoOutIsOutputSupported(int handle, uint64_t mode, const void* options, const void* reserved_pointer, uint64_t reserved)
 {
 	PRINT_NAME();
-
 	EXIT_IF(g_video_out_context == nullptr);
 
 	auto session = g_video_out_context->AcquireSession(handle);
-	if (!session)
+	if (handle <= 0 || !session)
 	{
 		return VIDEO_OUT_ERROR_INVALID_HANDLE;
 	}
-
-	if (reserved_pointer != nullptr || reserved != 0)
+	const int result = ValidateOutputRequest(mode, options, reserved_pointer, reserved);
+	if (result != Kernel::OK)
 	{
-		return VIDEO_OUT_ERROR_INVALID_VALUE;
+		return result;
 	}
-
-	if (options != nullptr)
-	{
-		const auto* bytes = static_cast<const uint8_t*>(options);
-		for (size_t i = 0; i < kVideoOutOutputOptionsSize; i++)
-		{
-			if (bytes[i] != 0)
-			{
-				return VIDEO_OUT_ERROR_INVALID_OPTION;
-			}
-		}
-	}
-
-	if (mode != kVideoOutOutputModeDefault && mode != kVideoOutOutputMode119_88Hz)
-	{
-		return VIDEO_OUT_ERROR_UNSUPPORTED_OUTPUT_MODE;
-	}
-
 	return mode == kVideoOutOutputModeDefault ? 1 : 0;
 }
 

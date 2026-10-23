@@ -8,8 +8,12 @@
 namespace Kyty::Libs::Graphics {
 
 constexpr uint64_t kGpuMemoryMaxTransientReadOnlyBytes = 4u * 1024u * 1024u;
-constexpr uint64_t kGpuMemoryTransientBufferPoolMaxBytes = 16u * 1024u * 1024u;
+// Per command buffer. A 2D title streams about 31 MB of vertex and index
+// snapshots into one command buffer; a refused snapshot falls back to a
+// GpuMemory object whose upload waits on its own fence.
+constexpr uint64_t kGpuMemoryTransientBufferPoolMaxBytes = 64u * 1024u * 1024u;
 constexpr uint64_t kGpuMemoryTransientBufferCriticalReserveBytes = 1u * 1024u * 1024u;
+constexpr uint32_t kGpuMemoryTransientBufferMaxEntriesPerUsage   = 16384u;
 
 static_assert(kGpuMemoryTransientBufferCriticalReserveBytes < kGpuMemoryTransientBufferPoolMaxBytes);
 static_assert(kGpuMemoryMaxTransientReadOnlyBytes <=
@@ -26,7 +30,29 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 // buffer, not persistent GPU resources. Surface aliases, writable buffers,
 // oversized ranges, and incomplete overlap snapshots stay on the authoritative
 // GpuMemory path.
-[[nodiscard]] inline bool GpuMemoryOverlapsAllowTransientReadOnlyBuffer(const GpuMemoryOverlapSnapshot& overlaps)
+// A writable storage buffer holds the guest bytes while none of its GPU writes is
+// unpublished: `writable_storage_idle` states that for every such object over the range.
+// An index view also accepts the surfaces an IndexBuffer object is linked under
+// (GpuMemoryAllowsIndexContainedInSurface), and a storage view those a
+// StorageBuffer object is linked under (GpuMemoryAllowsStorageSurfaceShare):
+// that object is uploaded from the same guest bytes and never seeded from the
+// surface, so the snapshot reads what the object path would.
+[[nodiscard]] inline bool GpuMemorySnapshotViewLinksSurface(GpuMemorySnapshotAdmission admission, GpuMemoryObjectType type,
+                                                            GpuMemoryOverlapType relation)
+{
+	switch (admission)
+	{
+		case GpuMemorySnapshotAdmission::IndexView:
+			return GpuMemoryAllowsIndexContainedInSurface(type, relation, GpuMemoryObjectType::IndexBuffer);
+		case GpuMemorySnapshotAdmission::StorageView:
+			return GpuMemoryAllowsStorageSurfaceShare(type, relation, GpuMemoryObjectType::StorageBuffer);
+		default: return false;
+	}
+}
+
+[[nodiscard]] inline bool GpuMemoryOverlapsAllowTransientReadOnlyBuffer(const GpuMemoryOverlapSnapshot& overlaps,
+                                                                        bool writable_storage_idle,
+                                                                        GpuMemorySnapshotAdmission admission)
 {
 	if (overlaps.truncated || overlaps.entry_count > GpuMemoryOverlapSnapshot::ENTRIES_MAX)
 	{
@@ -40,7 +66,10 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 		const bool  is_buffer =
 		    entry.type == GpuMemoryObjectType::StorageBuffer || entry.type == GpuMemoryObjectType::VertexBuffer ||
 		    entry.type == GpuMemoryObjectType::IndexBuffer;
-		if (!is_buffer || !entry.all_read_only || entry.count == 0u || classified_count > UINT32_MAX - entry.count)
+		const bool holds_guest_bytes =
+		    is_buffer ? entry.all_read_only || (entry.type == GpuMemoryObjectType::StorageBuffer && writable_storage_idle)
+		              : GpuMemorySnapshotViewLinksSurface(admission, entry.type, entry.relation);
+		if (!holds_guest_bytes || entry.count == 0u || classified_count > UINT32_MAX - entry.count)
 		{
 			return false;
 		}
@@ -59,7 +88,11 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 	                                                                    uint64_t total_bytes, uint64_t size,
 	                                                                    GpuMemoryTransientBufferAllocationClass allocation_class)
 {
-	constexpr uint32_t MaxEntriesPerUsage = 512u;
+	// Bytes bound the pool; the entry ceiling only bounds Vulkan objects. Ring
+	// constants arrive as thousands of sub-KiB views per command buffer: a
+	// 3,300-draw pass filled 4,096 storage entries with 8.8 MB, a seventh of the
+	// byte budget, and every later view fell back to a persistent object.
+	constexpr uint32_t MaxEntriesPerUsage = kGpuMemoryTransientBufferMaxEntriesPerUsage;
 	constexpr uint32_t MaxEntries         = MaxEntriesPerUsage * 3u;
 	const uint64_t max_bytes = allocation_class == GpuMemoryTransientBufferAllocationClass::Snapshot
 	                               ? kGpuMemoryTransientBufferPoolMaxBytes - kGpuMemoryTransientBufferCriticalReserveBytes
@@ -68,9 +101,11 @@ enum class GpuMemoryTransientBufferAllocationClass: uint8_t
 	       size <= max_bytes - total_bytes;
 }
 
-[[nodiscard]] constexpr uint64_t GpuMemoryTransientBufferTailBytes(uint64_t capacity, uint64_t logical_size)
+// Bytes between the logical end of a transient entry and the end of what earlier
+// writes may have left non-zero; those must be cleared before the entry is bound.
+[[nodiscard]] constexpr uint64_t GpuMemoryTransientBufferTailBytes(uint64_t nonzero_end, uint64_t logical_size)
 {
-	return logical_size <= capacity ? capacity - logical_size : 0u;
+	return logical_size <= nonzero_end ? nonzero_end - logical_size : 0u;
 }
 
 } // namespace Kyty::Libs::Graphics

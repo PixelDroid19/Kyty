@@ -39,10 +39,13 @@ int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len);
 int KYTY_SYSV_ABI NetListen(int id, int backlog);
 int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len);
 int KYTY_SYSV_ABI NetShutdown(int id, int how);
+int KYTY_SYSV_ABI NetSocketAbort(int id, int flags);
 int64_t KYTY_SYSV_ABI NetSend(int id, const void* buf, uint64_t len, int flags);
 int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags, const void* addr, uint32_t addr_len);
 int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags);
 int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, void* addr, uint32_t* addr_len);
+int64_t KYTY_SYSV_ABI NetSendmsg(int id, const void* msg, int flags);
+int64_t KYTY_SYSV_ABI NetRecvmsg(int id, void* msg, int flags);
 int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* value, int value_len);
 int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len);
 int KYTY_SYSV_ABI NetGetpeername(int id, void* addr, uint32_t* len);
@@ -84,7 +87,7 @@ int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id);
 int KYTY_SYSV_ABI NetEpollControl(int epoll_id, int operation, int socket_id, const void* event);
 int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int timeout_ms);
 
-int KYTY_SYSV_ABI NetGetSockInfo(int socket_id, void* info, int info_size, int flags);
+int KYTY_SYSV_ABI NetGetSockInfo(int socket_id, void* info, int count, int flags);
 
 } // namespace Net
 
@@ -186,6 +189,7 @@ int KYTY_SYSV_ABI  NpDeleteRequest(int req_id);
 int KYTY_SYSV_ABI  NpCheckNpAvailability(int req_id, const char* user, void* result);
 int KYTY_SYSV_ABI  NpPollAsync(int req_id, int* result);
 int KYTY_SYSV_ABI  NpGetState(int user_id, uint32_t* state);
+int KYTY_SYSV_ABI  NpGetNpReachabilityState(int user_id, uint32_t* state);
 int KYTY_SYSV_ABI  NpHasSignedUp(int user_id, bool* has_signed_up);
 
 } // namespace NpManager

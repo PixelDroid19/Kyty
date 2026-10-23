@@ -1,5 +1,6 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Graphics/ColorDccClear.h"
 #include "Emulator/Graphics/ComputeColorFill.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Utils.h"
@@ -139,6 +140,99 @@ ShaderCode UniformBufferFillCode(const UniformBufferFillPattern& pattern)
 	return code;
 }
 
+// v_lshl_add_u32 v0, s4, 6, v0; v_mov_b32 v1, <value>; buffer_store_format_x v1, v0, s[0:3], 0 idxen; s_endpgm
+ShaderCode ConstantBufferFillCode(uint32_t value)
+{
+	ShaderCode code {};
+	code.SetType(ShaderType::Compute);
+	uint32_t pc  = 0;
+	auto     add = [&code, &pc](ShaderInstruction instruction)
+	{
+		instruction.pc = pc;
+		pc += 4u;
+		code.GetInstructions().Add(instruction);
+	};
+
+	ShaderInstruction index {};
+	index.type    = ShaderInstructionType::VLshlAddU32;
+	index.format  = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+	index.dst     = UniformBufferFillVgpr(0);
+	index.src[0]  = UniformBufferFillSgpr(4);
+	index.src[1]  = UniformBufferFillInline(6u);
+	index.src[2]  = UniformBufferFillVgpr(0);
+	index.src_num = 3;
+	add(index);
+
+	ShaderInstruction move {};
+	move.type    = ShaderInstructionType::VMovB32;
+	move.format  = ShaderInstructionFormat::SVdstSVsrc0;
+	move.dst     = UniformBufferFillVgpr(1);
+	move.src[0]  = UniformBufferFillInline(value);
+	move.src_num = 1;
+	add(move);
+
+	ShaderInstruction store {};
+	store.type         = ShaderInstructionType::BufferStoreFormatX;
+	store.format       = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	store.dst          = UniformBufferFillVgpr(1);
+	store.src[0]       = UniformBufferFillVgpr(0);
+	store.src[1]       = UniformBufferFillSgpr(0, 4);
+	store.src[2]       = UniformBufferFillInline(0u);
+	store.src_num      = 3;
+	store.buffer_idxen = true;
+	add(store);
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	add(end);
+	return code;
+}
+
+// v_lshl_add_u32 v0, s8, 6, v0; s_buffer_load_dword vcc_lo, s[4:7], 0; s_waitcnt; v_mov_b32 v1, vcc_lo;
+// buffer_store_format_x v1, v0, s[0:3], 0 idxen; s_endpgm
+ShaderCode LoadedBufferFillCode()
+{
+	auto  code         = ConstantBufferFillCode(0u);
+	auto& instructions = code.GetInstructions();
+	instructions[0].src[0] = UniformBufferFillSgpr(8);
+
+	ShaderOperand vcc_lo {};
+	vcc_lo.type = ShaderOperandType::VccLo;
+	vcc_lo.size = 1;
+
+	ShaderInstruction load {};
+	load.type    = ShaderInstructionType::SBufferLoadDword;
+	load.format  = ShaderInstructionFormat::SdstSvSoffset;
+	load.dst     = vcc_lo;
+	load.src[0]  = UniformBufferFillSgpr(4, 4);
+	load.src[1]  = UniformBufferFillInline(0u);
+	load.src_num = 2;
+
+	ShaderInstruction wait {};
+	wait.type              = ShaderInstructionType::SWaitcnt;
+	wait.format            = ShaderInstructionFormat::Imm;
+	wait.src[0].type       = ShaderOperandType::LiteralConstant;
+	wait.src[0].constant.u = 0u;
+	wait.src_num           = 1;
+
+	auto move   = instructions[1];
+	move.src[0] = vcc_lo;
+	auto store  = instructions[2];
+	auto end    = instructions[3];
+
+	ShaderCode loaded {};
+	loaded.SetType(ShaderType::Compute);
+	uint32_t pc = 0;
+	for (auto instruction: {instructions[0], load, wait, move, store, end})
+	{
+		instruction.pc = pc;
+		pc += 4u;
+		loaded.GetInstructions().Add(instruction);
+	}
+	return loaded;
+}
+
 UniformBufferFillPattern UniformBufferFillTestPattern()
 {
 	return {
@@ -194,6 +288,63 @@ TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRecognizesRenamedRegister
 			EXPECT_EQ(evidence.value_registers[component], pattern.value_registers[component]);
 		}
 	}
+}
+
+TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRecognizesConstantStore)
+{
+	const auto evidence = AnalyzeShaderComputeUniformBufferFill(ConstantBufferFillCode(0u));
+	ASSERT_TRUE(evidence.valid);
+	EXPECT_TRUE(evidence.value_is_constant);
+	EXPECT_EQ(evidence.constant_value, 0u);
+	EXPECT_EQ(evidence.record_bytes, 4u);
+	EXPECT_EQ(evidence.destination_start_register, 0);
+	EXPECT_EQ(evidence.workgroup_register, 4);
+	EXPECT_EQ(evidence.workgroup_shift, 6u);
+
+	auto scalar_value = ConstantBufferFillCode(0u);
+	scalar_value.GetInstructions()[1].src[0] = UniformBufferFillSgpr(9);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(scalar_value).valid);
+
+	auto clobbered_index = ConstantBufferFillCode(0u);
+	clobbered_index.GetInstructions()[1].dst = UniformBufferFillVgpr(0);
+	clobbered_index.GetInstructions()[2].dst = UniformBufferFillVgpr(0);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(clobbered_index).valid);
+
+	auto vector_offset = ConstantBufferFillCode(0u);
+	vector_offset.GetInstructions()[2].buffer_offen = true;
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(vector_offset).valid);
+
+	auto workgroup_in_descriptor = ConstantBufferFillCode(0u);
+	workgroup_in_descriptor.GetInstructions()[0].src[0] = UniformBufferFillSgpr(2);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(workgroup_in_descriptor).valid);
+}
+
+TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRecognizesLoadedStore)
+{
+	const auto evidence = AnalyzeShaderComputeUniformBufferFill(LoadedBufferFillCode());
+	ASSERT_TRUE(evidence.valid);
+	EXPECT_FALSE(evidence.value_is_constant);
+	EXPECT_EQ(evidence.value_buffer_register, 4);
+	EXPECT_EQ(evidence.record_bytes, 4u);
+	EXPECT_EQ(evidence.destination_start_register, 0);
+	EXPECT_EQ(evidence.workgroup_register, 8);
+	EXPECT_EQ(evidence.workgroup_shift, 6u);
+
+	auto nonzero_offset = LoadedBufferFillCode();
+	nonzero_offset.GetInstructions()[1].src[1] = UniformBufferFillInline(4u);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(nonzero_offset).valid);
+
+	auto other_scalar = LoadedBufferFillCode();
+	other_scalar.GetInstructions()[3].src[0] = UniformBufferFillSgpr(9);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(other_scalar).valid);
+
+	auto source_is_destination = LoadedBufferFillCode();
+	source_is_destination.GetInstructions()[1].src[0] = UniformBufferFillSgpr(0, 4);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(source_is_destination).valid);
+
+	auto workgroup_in_source = LoadedBufferFillCode();
+	workgroup_in_source.GetInstructions()[0].src[0] = UniformBufferFillSgpr(5);
+	EXPECT_FALSE(AnalyzeShaderComputeUniformBufferFill(workgroup_in_source).valid);
 }
 
 TEST(EmulatorComputeColorFill, ComputeUniformBufferFillRejectsClobberedIndexAndNonScalarValues)
@@ -367,8 +518,73 @@ TEST(EmulatorComputeColorFill, UniformFillTexelsDecodeOnlyWhenTheQuadRepeatsOneT
 	ASSERT_TRUE(DecodeGuestUniformFillTexel({0x80808080u, 0x80808080u, 0x80808080u, 0x80808080u}, VK_FORMAT_R8G8B8A8_SRGB, &clear));
 	EXPECT_NEAR(clear.float32[0], 0.2158605f, 1e-5f);
 	EXPECT_FLOAT_EQ(clear.float32[3], 128.0f / 255.0f);
-	// Formats without an evidenced packing are not cleared.
-	EXPECT_FALSE(DecodeGuestUniformFillTexel({0u, 0u, 0u, 0u}, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &clear));
+	// One RGBA32F texel is the whole quad, red first: (1, -1, 0.5, 0.18).
+	ASSERT_TRUE(DecodeGuestUniformFillTexel({0x3f800000u, 0xbf800000u, 0x3f000000u, 0x3e3851ecu}, VK_FORMAT_R32G32B32A32_SFLOAT, &clear));
+	EXPECT_FLOAT_EQ(clear.float32[0], 1.0f);
+	EXPECT_FLOAT_EQ(clear.float32[1], -1.0f);
+	EXPECT_FLOAT_EQ(clear.float32[2], 0.5f);
+	EXPECT_FLOAT_EQ(clear.float32[3], 0.18f);
+	EXPECT_FALSE(DecodeGuestUniformFillTexel({0x7fc00000u, 0u, 0u, 0u}, VK_FORMAT_R32G32B32A32_SFLOAT, &clear));
+	// Formats without an evidenced packing are cleared only by an all-zero fill.
+	EXPECT_FALSE(DecodeGuestUniformFillTexel({0x3c003c00u, 0x3c003c00u, 0x3c003c00u, 0x3c003c00u}, VK_FORMAT_R16G16_SFLOAT, &clear));
+	clear.float32[0] = 1.0f;
+	ASSERT_TRUE(DecodeGuestUniformFillTexel({0u, 0u, 0u, 0u}, VK_FORMAT_B10G11R11_UFLOAT_PACK32, &clear));
+	EXPECT_EQ(clear.uint32[0], 0u);
+	EXPECT_EQ(clear.uint32[3], 0u);
+	EXPECT_FALSE(DecodeGuestUniformFillTexel({0u, 0u, 0u, 0u}, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, &clear));
+}
+
+TEST(EmulatorComputeColorFill, DccMetadataFillsNameOnlyTheClearKeys)
+{
+	ColorDccClearCode code {};
+	ASSERT_TRUE(ColorDccClearCodeFromFill({0x40404040u, 0x40404040u, 0x40404040u, 0x40404040u}, &code));
+	EXPECT_EQ(code, ColorDccClearCode::Alpha);
+	ASSERT_TRUE(ColorDccClearCodeFromFill({0u, 0u, 0u, 0u}, &code));
+	EXPECT_EQ(code, ColorDccClearCode::Zero);
+	ASSERT_TRUE(ColorDccClearCodeFromFill({0x20202020u, 0x20202020u, 0x20202020u, 0x20202020u}, &code));
+	EXPECT_EQ(code, ColorDccClearCode::Register);
+	// The uncompressed key, a single-color key and mixed bytes are not clears.
+	EXPECT_FALSE(ColorDccClearCodeFromFill({0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu}, &code));
+	EXPECT_FALSE(ColorDccClearCodeFromFill({0x10101010u, 0x10101010u, 0x10101010u, 0x10101010u}, &code));
+	EXPECT_FALSE(ColorDccClearCodeFromFill({0x40404000u, 0x40404040u, 0x40404040u, 0x40404040u}, &code));
+	EXPECT_FALSE(ColorDccClearCodeFromFill({0x40404040u, 0x40404040u, 0x40404040u, 0u}, &code));
+}
+
+TEST(EmulatorComputeColorFill, DccClearKeysDecodeAlphaOnlyWhereItIsTheMostSignificantChannel)
+{
+	std::array<float, 4> rgba {};
+	ASSERT_TRUE(ColorDccClearValue(ColorDccClearCode::Alpha, ColorDccAlphaOnMsb(0u), 4u, &rgba));
+	EXPECT_EQ(rgba, (std::array<float, 4> {0.0f, 0.0f, 0.0f, 1.0f}));
+	ASSERT_TRUE(ColorDccClearValue(ColorDccClearCode::Color, ColorDccAlphaOnMsb(1u), 4u, &rgba));
+	EXPECT_EQ(rgba, (std::array<float, 4> {1.0f, 1.0f, 1.0f, 0.0f}));
+	// Reversed swaps move alpha out of the most significant channel.
+	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Alpha, ColorDccAlphaOnMsb(2u), 4u, &rgba));
+	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Alpha, ColorDccAlphaOnMsb(3u), 4u, &rgba));
+	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Color, true, 1u, &rgba));
+	// Uniform keys hold for any channel order; the register key needs the clear words.
+	ASSERT_TRUE(ColorDccClearValue(ColorDccClearCode::All, false, 1u, &rgba));
+	EXPECT_EQ(rgba, (std::array<float, 4> {1.0f, 1.0f, 1.0f, 1.0f}));
+	EXPECT_FALSE(ColorDccClearValue(ColorDccClearCode::Register, true, 4u, &rgba));
+}
+
+TEST(EmulatorComputeColorFill, DccFillCoversASurfaceOnlyFromItsBaseWithEveryKey)
+{
+	// 3840x2160 RGBA16F holds 259200 keys; the observed allocation is 294912 bytes.
+	EXPECT_TRUE(ColorDccFillCoversSurface(0x40000u, 294912u, 0x40000u, 3840u, 2160u, 8u));
+	EXPECT_TRUE(ColorDccFillCoversSurface(0x40000u, 259200u, 0x40000u, 3840u, 2160u, 8u));
+	EXPECT_FALSE(ColorDccFillCoversSurface(0x40000u, 259199u, 0x40000u, 3840u, 2160u, 8u));
+	EXPECT_FALSE(ColorDccFillCoversSurface(0x40000u, 294912u, 0x41000u, 3840u, 2160u, 8u));
+	EXPECT_FALSE(ColorDccFillCoversSurface(0u, 294912u, 0u, 3840u, 2160u, 8u));
+}
+
+TEST(EmulatorComputeColorFill, PendingFillsAreFoundByTheirStartAddress)
+{
+	ComputeColorFillEvents events;
+	ASSERT_TRUE(events.Publish(FillIdentity(0x30000u), Submission(8, 4), {0x40404040u, 0x40404040u, 0x40404040u, 0x40404040u}));
+	const auto* event = events.FindAt(0x30000u);
+	ASSERT_NE(event, nullptr);
+	EXPECT_EQ(event->words[0], 0x40404040u);
+	EXPECT_EQ(events.FindAt(0x30100u), nullptr);
 }
 
 UT_END();

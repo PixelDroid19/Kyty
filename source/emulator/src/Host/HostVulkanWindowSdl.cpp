@@ -2,7 +2,7 @@
 
 #include "Emulator/Host/HostWindow.h"
 
-#include "SDL_vulkan.h"
+#include <SDL3/SDL_vulkan.h>
 
 namespace Kyty::Emulator::Host {
 
@@ -13,19 +13,14 @@ bool HostVulkanWindow::GetInstanceExtensions(const HostWindow* window, std::vect
 		return false;
 	}
 
-	uint32_t count = 0;
-	if (SDL_Vulkan_GetInstanceExtensions(static_cast<SDL_Window*>(window->GetNativeHandle()), &count, nullptr) == SDL_FALSE || count == 0)
+	Uint32             count = 0;
+	const char* const* names = SDL_Vulkan_GetInstanceExtensions(&count);
+	if (names == nullptr || count == 0)
 	{
 		return false;
 	}
 
-	extensions->assign(count, nullptr);
-	if (SDL_Vulkan_GetInstanceExtensions(static_cast<SDL_Window*>(window->GetNativeHandle()), &count, extensions->data()) == SDL_FALSE ||
-	    count != extensions->size())
-	{
-		extensions->clear();
-		return false;
-	}
+	extensions->assign(names, names + count);
 	return true;
 }
 
@@ -37,7 +32,7 @@ bool HostVulkanWindow::CreateSurface(const HostWindow* window, VkInstance instan
 	}
 
 	*surface = VK_NULL_HANDLE;
-	return SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(window->GetNativeHandle()), instance, surface) == SDL_TRUE;
+	return SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(window->GetNativeHandle()), instance, nullptr, surface);
 }
 
 } // namespace Kyty::Emulator::Host

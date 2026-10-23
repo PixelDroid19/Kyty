@@ -40,12 +40,18 @@ FocusScope {
     readonly property var emulatorDescriptors: [
         { heading: qsTr("Display"), key: "screen_width", label: qsTr("Screen width"), type: "number" },
         { key: "screen_height", label: qsTr("Screen height"), type: "number" },
+        { key: "graphics_preset", label: qsTr("Graphics preset"), type: "choice", choices: "graphics_preset" },
         { key: "render_resolution_mode", label: qsTr("Render resolution"), type: "choice", choices: "render_resolution_mode" },
+        { key: "render_resolution_scope", label: qsTr("Scaled surfaces"), type: "choice", choices: "render_resolution_scope",
+          when: (f) => f.render_resolution_mode === "Fixed" },
         { key: "render_resolution_width", label: qsTr("Render width"), type: "number",
           when: (f) => f.render_resolution_mode === "Fixed" },
         { key: "render_resolution_height", label: qsTr("Render height"), type: "number",
           when: (f) => f.render_resolution_mode === "Fixed" },
         { key: "presentation_filter", label: qsTr("Presentation filter"), type: "choice", choices: "presentation_filter" },
+        { key: "presentation_fsr_sharpness", label: qsTr("FSR sharpness (0–100)"), type: "number",
+          when: (f) => f.presentation_filter === "Fsr" },
+        { key: "texture_anisotropy", label: qsTr("Texture anisotropy"), type: "choice", choices: "texture_anisotropy" },
         { key: "neo", label: qsTr("Neo mode"), type: "toggle" },
 
         { heading: qsTr("Shaders and validation"), key: "shader_optimization_type", label: qsTr("Optimization"), type: "choice",
@@ -113,9 +119,19 @@ FocusScope {
         statusText = qsTr("Default settings loaded. Save to keep them.");
     }
 
+    // Editing any of these by hand leaves the chosen graphics preset.
+    readonly property var presetKeys: ["screen_width", "screen_height", "render_resolution_mode", "render_resolution_scope",
+        "render_resolution_width", "render_resolution_height", "presentation_filter", "texture_anisotropy"]
+
     function setField(key, value) {
+        if (key === "graphics_preset") {
+            values = Object.assign(backend.GraphicsPreset(values, value), { graphics_preset: value });
+            return;
+        }
         const next = Object.assign({}, values);
         next[key] = value;
+        if (presetKeys.includes(key))
+            next.graphics_preset = "Custom";
         values = next;
         if (key === "basedir")
             setField("elfs", backend.ScanElfs(value, values.elfs || []));

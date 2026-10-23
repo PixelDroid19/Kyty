@@ -35,8 +35,9 @@
 //#define KYTY_DEBUG_LOCKS_TIMED
 
 #ifdef KYTY_SDL_THREADS
-#include "SDL_thread.h"
-#include "SDL_timer.h"
+#include <SDL3/SDL_error.h>
+#include <SDL3/SDL_thread.h>
+#include <SDL3/SDL_timer.h>
 #else
 #include <sstream>
 #include <string>
@@ -44,7 +45,7 @@
 #endif
 
 #ifdef KYTY_SDL_CS
-#include "SDL_mutex.h"
+#include <SDL3/SDL_mutex.h>
 #endif
 
 #if defined(KYTY_WIN_CS) && defined(KYTY_SDL_CS)
@@ -138,7 +139,7 @@ struct MutexPrivate
 		SDL_DestroyMutex(sdl);
 	}
 	KYTY_CLASS_NO_COPY(MutexPrivate);
-	SDL_mutex* sdl;
+	SDL_Mutex* sdl;
 #else
 	std::recursive_mutex m_mutex;
 #endif
@@ -158,13 +159,13 @@ struct CondVarPrivate
 	KYTY_CLASS_NO_COPY(CondVarPrivate);
 	CONDITION_VARIABLE m_cv {};
 #elif !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)) && defined(KYTY_SDL_CS)
-	CondVarPrivate(): sdl(SDL_CreateCond()) {}
+	CondVarPrivate(): sdl(SDL_CreateCondition()) {}
 	~CondVarPrivate()
 	{
-		SDL_DestroyCond(sdl);
+		SDL_DestroyCondition(sdl);
 	}
 	KYTY_CLASS_NO_COPY(CondVarPrivate);
-	SDL_cond* sdl;
+	SDL_Condition* sdl;
 #else
 	std::condition_variable_any m_cv;
 #endif
@@ -236,21 +237,33 @@ struct ThreadPrivate
 	{
 	}
 #endif
+	~ThreadPrivate()
+	{
+#ifdef KYTY_DEBUG_LOCKS
+		if (started)
+		{
+			if (auto* graph = g_wait_for_graph.load(); graph != nullptr)
+			{
+				graph->Delete(unique_id);
+			}
+		}
+#endif
+	}
+
+	void Release()
+	{
+		if (references.fetch_sub(1, std::memory_order_acq_rel) == 1)
+		{
+			delete this;
+		}
+	}
 
 	static void Run(ThreadPrivate* t)
 	{
 		t->unique_id = Thread::GetThreadIdUnique();
 		t->started   = true;
 		t->func(t->arg);
-		if (t->auto_delete)
-		{
-#ifdef KYTY_DEBUG_LOCKS
-			if (g_wait_for_graph != nullptr)
-			{
-				g_wait_for_graph.load()->Delete(t->unique_id);
-			}
-#endif
-		}
+		t->Release();
 	}
 
 	static int SdlThreadRun(void* data)
@@ -265,6 +278,9 @@ struct ThreadPrivate
 	std::atomic_bool auto_delete = false;
 	std::atomic_bool started     = false;
 	int              unique_id   = 0;
+	// One reference belongs to the wrapper and one to the native callback.
+	// This must be initialized before the native thread member starts it.
+	std::atomic<uint32_t> references {2};
 #ifdef KYTY_SDL_THREADS
 	SDL_Thread* sdl;
 #else
@@ -279,7 +295,7 @@ static std::atomic<int> g_thread_counter = 0;
 void ThreadsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 #ifdef KYTY_SDL_THREADS
-	g_main_thread = SDL_ThreadID();
+	g_main_thread = SDL_GetCurrentThreadID();
 #else
 	g_main_thread = std::this_thread::get_id();
 #endif
@@ -517,6 +533,16 @@ void WaitForGraph::Delete(R r)
 
 Thread::Thread(thread_func_t func, void* arg): m_thread(new ThreadPrivate(func, arg))
 {
+#ifdef KYTY_SDL_THREADS
+	if (m_thread->sdl == nullptr)
+	{
+		const char* error = SDL_GetError();
+		m_thread->Release();
+		m_thread->Release();
+		m_thread = nullptr;
+		EXIT("SDL_CreateThread failed: %s\n", error != nullptr ? error : "unknown error");
+	}
+#endif
 	while (!m_thread->started)
 	{
 		Core::Thread::SleepMicro(1000);
@@ -526,18 +552,8 @@ Thread::Thread(thread_func_t func, void* arg): m_thread(new ThreadPrivate(func, 
 Thread::~Thread()
 {
 	EXIT_IF(!m_thread->finished && !m_thread->auto_delete);
-
-	if (m_thread->finished)
-	{
-#ifdef KYTY_DEBUG_LOCKS
-		if (g_wait_for_graph != nullptr)
-		{
-			g_wait_for_graph.load()->Delete(m_thread->unique_id);
-		}
-#endif
-	}
-
-	Delete(m_thread);
+	m_thread->Release();
+	m_thread = nullptr;
 }
 
 void Thread::Join()
@@ -579,7 +595,7 @@ void Thread::Sleep(uint32_t millis)
 void Thread::SleepMicro(uint32_t micros)
 {
 #ifdef KYTY_SDL_THREADS
-	SDL_Delay(micros < 1000 && micros != 0 ? 1 : micros / 1000);
+	SDL_DelayNS(static_cast<Uint64>(micros) * 1000u);
 #else
 	std::this_thread::sleep_for(std::chrono::microseconds(micros));
 #endif
@@ -588,7 +604,7 @@ void Thread::SleepMicro(uint32_t micros)
 void Thread::SleepNano(uint64_t nanos)
 {
 #ifdef KYTY_SDL_THREADS
-	SDL_Delay(nanos < 1000000 && nanos != 0 ? 1 : nanos / 1000000);
+	SDL_DelayNS(nanos);
 #else
 	std::this_thread::sleep_for(std::chrono::nanoseconds(nanos));
 #endif
@@ -597,7 +613,7 @@ void Thread::SleepNano(uint64_t nanos)
 bool Thread::IsMainThread()
 {
 #ifdef KYTY_SDL_THREADS
-	return g_main_thread == static_cast<thread_id_t>(SDL_ThreadID());
+	return g_main_thread == static_cast<thread_id_t>(SDL_GetCurrentThreadID());
 #else
 	return g_main_thread == std::this_thread::get_id();
 #endif
@@ -622,7 +638,7 @@ int Thread::GetUniqueId() const
 String Thread::GetThreadId()
 {
 #ifdef KYTY_SDL_THREADS
-	return String::FromPrintf("%" PRIu64, static_cast<uint64_t>(SDL_ThreadID()));
+	return String::FromPrintf("%" PRIu64, static_cast<uint64_t>(SDL_GetCurrentThreadID()));
 #else
 	std::stringstream ss;
 	ss << std::this_thread::get_id();
@@ -727,7 +743,7 @@ bool Mutex::TryLock()
 #if !defined(KYTY_DEBUG_LOCKS_TIMED) && defined(KYTY_WIN_CS)
 	return (TryEnterCriticalSection(&m_mutex->m_cs) != 0);
 #elif !defined(KYTY_DEBUG_LOCKS_TIMED) && defined(KYTY_SDL_CS)
-	return (SDL_TryLockMutex(m_mutex->sdl) == 0);
+	return SDL_TryLockMutex(m_mutex->sdl);
 #else
 	return m_mutex->m_mutex.try_lock();
 #endif
@@ -769,7 +785,7 @@ void CondVar::Wait(Mutex* mutex)
 	EXIT_NOT_IMPLEMENTED(func == nullptr);
 	func(&m_cond_var->m_cv, &mutex->m_mutex->m_cs, INFINITE);
 #elif !defined(KYTY_DEBUG_LOCKS_TIMED) && defined(KYTY_SDL_CS)
-	SDL_CondWait(m_cond_var->sdl, mutex->m_mutex->sdl);
+	SDL_WaitCondition(m_cond_var->sdl, mutex->m_mutex->sdl);
 #else
 	m_cond_var->m_cv.wait(cpp_lock);
 #endif
@@ -796,7 +812,7 @@ bool CondVar::WaitFor(Mutex* mutex, uint32_t micros)
 	EXIT_NOT_IMPLEMENTED(func == nullptr);
 	ok = !(func(&m_cond_var->m_cv, &mutex->m_mutex->m_cs, (micros < 1000 ? 1 : micros / 1000)) == 0 && GetLastError() == ERROR_TIMEOUT);
 #elif !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)) && defined(KYTY_SDL_CS)
-	ok = !(SDL_CondWaitTimeout(m_cond_var->sdl, mutex->m_mutex->sdl, (micros < 1000 ? 1 : micros / 1000)) == SDL_MUTEX_TIMEDOUT);
+	ok = SDL_WaitConditionTimeout(m_cond_var->sdl, mutex->m_mutex->sdl, static_cast<Sint32>(micros < 1000 ? 1 : micros / 1000));
 #else
 	ok = (m_cond_var->m_cv.wait_for(cpp_lock, std::chrono::microseconds(micros)) == std::cv_status::no_timeout);
 	cpp_lock.release();
@@ -811,7 +827,7 @@ void CondVar::Signal()
 	EXIT_NOT_IMPLEMENTED(func == nullptr);
 	func(&m_cond_var->m_cv);
 #elif !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)) && defined(KYTY_SDL_CS)
-	SDL_CondSignal(m_cond_var->sdl);
+	SDL_SignalCondition(m_cond_var->sdl);
 #else
 	m_cond_var->m_cv.notify_one();
 #endif
@@ -824,7 +840,7 @@ void CondVar::SignalAll()
 	EXIT_NOT_IMPLEMENTED(func == nullptr);
 	func(&m_cond_var->m_cv);
 #elif !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)) && defined(KYTY_SDL_CS)
-	SDL_CondBroadcast(m_cond_var->sdl);
+	SDL_BroadcastCondition(m_cond_var->sdl);
 #else
 	m_cond_var->m_cv.notify_all();
 #endif
@@ -865,7 +881,7 @@ uint64_t Thread::GetHostThreadId()
 #elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	return static_cast<uint64_t>(::syscall(SYS_gettid));
 #elif defined(KYTY_SDL_THREADS)
-	return static_cast<uint64_t>(SDL_ThreadID());
+	return static_cast<uint64_t>(SDL_GetCurrentThreadID());
 #else
 	return static_cast<uint64_t>(std::hash<std::thread::id> {}(std::this_thread::get_id()));
 #endif

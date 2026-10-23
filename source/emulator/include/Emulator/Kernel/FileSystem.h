@@ -101,18 +101,18 @@ private:
 [[nodiscard]] String PreferPackageFontHostPath(const String& requested_host_path);
 
 // When the exact host file is missing, try a known dump extension alias
-// (e.g. .odx → .odxb for Astro FIXED packages). Returns an existing path or
+// (e.g. .odx → .odxb in some packages). Returns an existing path or
 // the original request when no alias hits.
 [[nodiscard]] String PreferHostExtensionAlias(const String& requested_host_path);
 
-// Some Astro path builders open /app0/<tree>/... when the package stores the
-// tree under /app0/data/<tree>/... (e.g. /app0/prein/... → /app0/data/prein/...).
+// Some guest path builders open /app0/<tree>/... when the package stores the
+// tree under /app0/data/<tree>/....
 // When guest_path is under /app0/ and the mapped host file is missing, insert
 // a data/ segment after app0 and return that host path if it exists (also
 // applying PreferHostExtensionAlias). Otherwise returns the original host path.
 [[nodiscard]] String PreferHostApp0DataSegment(const String& guest_path, const String& requested_host_path);
 
-// After a successful OD open (.../odx/NAME.odxb), Astro may open bare companion
+// After a successful OD open (.../odx/NAME.odxb), a guest may open bare companion
 // extensions under app0 root (`/app0/.jxm`, `/app0/.skel`, `/app0/.anim`) when
 // path composition loses the basename. Map those to package companions of the
 // last OD: gfx/NAME.jxm, anim/NAME.skel, anim/NAME_anim_play.anim (then NAME.anim).

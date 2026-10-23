@@ -27,6 +27,9 @@ constexpr int kM0        = 108;
 constexpr int kScc       = 109;
 constexpr int kUnits     = 110;
 
+// LDS bytes one workgroup can address (RDNA2 ISA 10.1).
+constexpr uint64_t kLdsBytesMax = 64u * 1024u;
+
 using UnitSet = std::bitset<kUnits>;
 
 // Per-unit value class at a program point.
@@ -126,7 +129,8 @@ bool IsSccReaderType(ShaderInstructionType type)
 		case ShaderInstructionType::SCselectB64:
 		case ShaderInstructionType::SCmovB32:
 		case ShaderInstructionType::SCmovB64:
-		case ShaderInstructionType::SAddcU32: return true;
+		case ShaderInstructionType::SAddcU32:
+		case ShaderInstructionType::SSubbU32: return true;
 		default: return false;
 	}
 }
@@ -148,6 +152,27 @@ bool IsVectorMaskConsumer(ShaderInstructionType type)
 {
 	return type == ShaderInstructionType::VCndmaskB32 || type == ShaderInstructionType::VAddCoCiU32 ||
 	       type == ShaderInstructionType::VSubrevCoCiU32;
+}
+
+// Instructions that read M0 without naming it (RDNA2 ISA 6.4, 10.4, 12.x): the
+// ADD_TID LDS base, relative VGPR moves, interpolation, messages, GDS and
+// buffer loads into LDS.
+bool ReadsM0Implicitly(const ShaderInstruction& instruction)
+{
+	const auto name = magic_enum::enum_name(instruction.type);
+	if (NameStartsWith(name, "VMovrel") || NameStartsWith(name, "VInterp") || NameStartsWith(name, "SSendmsg"))
+	{
+		return true;
+	}
+	if (instruction.type == ShaderInstructionType::DsWriteAddtidB32 || instruction.type == ShaderInstructionType::DsReadAddtidB32)
+	{
+		return true;
+	}
+	if (instruction.format == ShaderInstructionFormat::VdstGds || instruction.format == ShaderInstructionFormat::VaddrVdataOffsetGds)
+	{
+		return true;
+	}
+	return (NameStartsWith(name, "Buffer") || NameStartsWith(name, "TBuffer")) && (instruction.buffer_flags & 1u) != 0u;
 }
 
 // Scalar memory side effects are not gated by EXEC.
@@ -206,6 +231,16 @@ OperandUnits CollectUnits(const ShaderOperand& operand, UnitSet* units)
 	}
 }
 
+// Full-mask quad_perm with FI=0 and BOUND_CTRL=1 (RDNA2 ISA 6.2.2): each lane reads a lane of its
+// own quad, or 0 when that lane is inactive. A guest quad is four consecutive local invocations, and
+// the per-lane emitter shuffles within the host quad holding them.
+bool OperandIsQuadPermute(const ShaderOperand& operand)
+{
+	return operand.type == ShaderOperandType::Vgpr && operand.swizzle == 6u && operand.dpp_ctrl <= 0xffu &&
+	       operand.dpp_row_mask == 0xfu && operand.dpp_bank_mask == 0xfu && !operand.dpp_fetch_inactive && operand.dpp_bound_ctrl &&
+	       operand.dpp_unmodeled_bits == 0u;
+}
+
 bool OperandIsMaskConstant(const ShaderOperand& operand)
 {
 	return operand.type == ShaderOperandType::IntegerInlineConstant && (operand.constant.i == 0 || operand.constant.i == -1);
@@ -229,20 +264,48 @@ struct DecodedInstruction
 	bool     writes_scc_from_mask = false;
 	bool     writes_scc_data      = false;
 	bool     vector               = false;
+	bool     reads_quad           = false;
 	uint32_t target               = 0;
 	bool     has_target           = false;
 };
 
-ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, DecodedInstruction* out)
+// Destinations (SCC included) of a scalar instruction whose only effect is to write them; empty
+// otherwise. S_MOVREL* is excluded because its indirect register is not among the decoded units.
+UnitSet PureScalarDefs(const ShaderInstruction& instruction, const DecodedInstruction& decoded)
+{
+	if (decoded.vector || decoded.has_target || HasScalarSideEffect(instruction) || ShaderInstructionWritesExec(instruction) ||
+	    NameStartsWith(magic_enum::enum_name(instruction.type), "SMovrel"))
+	{
+		return {};
+	}
+	UnitSet defs = decoded.defs;
+	if (defs.any() || decoded.writes_scc_data)
+	{
+		defs.set(kScc);
+	}
+	return defs;
+}
+
+// uniform_copy: a READFIRSTLANE whose source every active lane shares under the launch EXEC; each
+// lane then reads the word the guest's first active lane holds.
+ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, bool uniform_copy, DecodedInstruction* out)
 {
 	out->vector = IsVectorType(instruction.type);
 	const auto name = magic_enum::enum_name(instruction.type);
 	// V_CMPX writes only EXEC; the decoder's VCC destination is a placeholder.
 	const bool exec_compare = out->vector && NameStartsWith(name, "VCmpx");
-	out->writes_scc_data    = NameStartsWith(name, "SCmp") || instruction.type == ShaderInstructionType::SAbsI32;
-	if (IsLaneCrossingType(instruction.type))
+	out->writes_scc_data    = NameStartsWith(name, "SCmp") || instruction.type == ShaderInstructionType::SAbsI32 ||
+	                          instruction.type == ShaderInstructionType::SAbsdiffI32 ||
+	                          instruction.type == ShaderInstructionType::SSubbU32 || instruction.type == ShaderInstructionType::SAshrI64;
+	if (IsLaneCrossingType(instruction.type) && !uniform_copy)
 	{
 		return Failure(instruction.pc, "instruction reads another lane or a wave-wide count");
+	}
+	// GDS is shared by every wave, so the order in which lanes reach it is
+	// observable, and only the paired emitter lowers it.
+	if (instruction.format == ShaderInstructionFormat::VdstGds || instruction.format == ShaderInstructionFormat::VaddrVdataOffsetGds)
+	{
+		return Failure(instruction.pc, "GDS access depends on wave lane order");
 	}
 	if (instruction.type >= ShaderInstructionType::SAndSaveexecB32 && instruction.type <= ShaderInstructionType::SOrn1SaveexecB32)
 	{
@@ -261,9 +324,17 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, Dec
 
 	auto use_operand = [&](const ShaderOperand& operand, int source) -> bool
 	{
-		if (operand.dpp || operand.type == ShaderOperandType::VccZ || operand.type == ShaderOperandType::ExecZ)
+		if (operand.type == ShaderOperandType::VccZ || operand.type == ShaderOperandType::ExecZ)
 		{
 			return false;
+		}
+		if (operand.dpp)
+		{
+			if (!out->vector || source != 0 || !OperandIsQuadPermute(operand))
+			{
+				return false;
+			}
+			out->reads_quad = true;
 		}
 		UnitSet    units;
 		const auto kind = CollectUnits(operand, &units);
@@ -324,6 +395,11 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, Dec
 		out->uses.set(kScc);
 		out->data_uses.set(kScc);
 	}
+	if (ReadsM0Implicitly(instruction))
+	{
+		out->uses.set(kM0);
+		out->data_uses.set(kM0);
+	}
 	if (instruction.type == ShaderInstructionType::SCbranchVccz || instruction.type == ShaderInstructionType::SCbranchVccnz)
 	{
 		out->uses.set(kVccLo);
@@ -359,7 +435,10 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, Dec
 			continue;
 		}
 		out->defs |= units;
-		if (out->vector || saveexec)
+		if (uniform_copy)
+		{
+			out->data_defs |= units;
+		} else if (out->vector || saveexec)
 		{
 			// Vector results in scalar registers are compare/carry masks.
 			out->mask_defs |= units;
@@ -439,7 +518,7 @@ struct UniformityState
 {
 	std::bitset<256> uniform;
 	bool             exec_full   = false;
-	bool             vcc_uniform = false;
+	std::bitset<2>   vcc_uniform;
 	bool             reached     = false;
 
 	bool Merge(const UniformityState& other)
@@ -452,7 +531,7 @@ struct UniformityState
 		}
 		const auto merged_uniform = uniform & other.uniform;
 		const bool merged_exec    = exec_full && other.exec_full;
-		const bool merged_vcc     = vcc_uniform && other.vcc_uniform;
+		const auto merged_vcc     = vcc_uniform & other.vcc_uniform;
 		const bool changed        = merged_uniform != uniform || merged_exec != exec_full || merged_vcc != vcc_uniform;
 		uniform                   = merged_uniform;
 		exec_full                 = merged_exec;
@@ -460,6 +539,43 @@ struct UniformityState
 		return changed;
 	}
 };
+
+// VCC_LO may name one dword or the full pair; VCC_HI names only the high
+// dword. Keep the uniformity proof at that same granularity.
+bool VccRange(const ShaderOperand& operand, unsigned* first, unsigned* count)
+{
+	if (operand.type == ShaderOperandType::VccLo)
+	{
+		*first = 0u;
+	} else if (operand.type == ShaderOperandType::VccHi)
+	{
+		*first = 1u;
+	} else
+	{
+		return false;
+	}
+	const unsigned available = 2u - *first;
+	if (operand.size <= 0 || static_cast<unsigned>(operand.size) > available) { return false; }
+	*count = static_cast<unsigned>(operand.size);
+	return true;
+}
+
+bool IsUniformVccOperand(const ShaderOperand& operand, const UniformityState& state)
+{
+	unsigned first = 0u;
+	unsigned count = 0u;
+	if (!VccRange(operand, &first, &count)) { return false; }
+	for (unsigned word = 0u; word < count; ++word)
+	{
+		if (!state.vcc_uniform.test(first + word)) { return false; }
+	}
+	return true;
+}
+
+bool IsUniformVccPair(const UniformityState& state)
+{
+	return state.vcc_uniform.all();
+}
 
 bool WritesExecOperand(const ShaderInstruction& instruction)
 {
@@ -492,7 +608,7 @@ bool SourcesAreWaveUniform(const ShaderInstruction& instruction, const Uniformit
 		}
 		if (operand.type == ShaderOperandType::VccLo || operand.type == ShaderOperandType::VccHi)
 		{
-			if (!state.vcc_uniform) { return false; }
+			if (!IsUniformVccOperand(operand, state)) { return false; }
 			continue;
 		}
 		UnitSet    units;
@@ -526,7 +642,15 @@ void ApplyUniformity(const ShaderInstruction& instruction, const DecodedInstruct
 		} else if (destination->type == ShaderOperandType::VccLo || destination->type == ShaderOperandType::VccHi)
 		{
 			// A compare or carry defines VCC from its sources; any other writer of VCC is not modelled.
-			state->vcc_uniform = pure_vector && uniform_value;
+			unsigned first = 0u;
+			unsigned count = 0u;
+			if (!VccRange(*destination, &first, &count))
+			{
+				state->vcc_uniform.reset();
+				continue;
+			}
+			const bool uniform_mask = pure_vector && uniform_value;
+			for (unsigned word = 0u; word < count; ++word) { state->vcc_uniform.set(first + word, uniform_mask); }
 		}
 	}
 	// SAVEEXEC forms and V_CMPX rewrite EXEC implicitly; the rest name it as a destination.
@@ -616,7 +740,9 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 	for (uint32_t index = 0; index < count; ++index)
 	{
 		const auto& instruction = instructions.At(index);
-		const auto  result      = Decode(instruction, &decoded[index]);
+		const bool  uniform_copy =
+		    instruction.type == ShaderInstructionType::VReadfirstlaneB32 && ShaderReadfirstlaneCanUseUniformCopy(code, index);
+		const auto  result      = Decode(instruction, uniform_copy, &decoded[index]);
 		if (!result.supported)
 		{
 			return result;
@@ -649,6 +775,17 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 			return Failure(instruction.pc, "control reaches the end of the program without SEndpgm");
 		}
 		successors[index].push_back(index + 1);
+	}
+
+	// ADD_TID addresses LDS by the lane's index in its wave. One host invocation per guest lane keeps
+	// that index, but the two halves of a guest wave are no longer in lockstep, so each lane may only
+	// address dwords no other lane of its wave can reach.
+	const auto addtid = std::find_if(first, last, [](const ShaderInstruction& instruction) {
+		return instruction.type == ShaderInstructionType::DsWriteAddtidB32 || instruction.type == ShaderInstructionType::DsReadAddtidB32;
+	});
+	if (addtid != last && !ShaderAddtidAccessesArePrivatePlanes(code, -1, kLdsBytesMax))
+	{
+		return Failure(addtid->pc, "ADD_TID LDS access is not a lane-private plane");
 	}
 
 	// Forward mask/data classification. Entry SGPRs, VCC and M0 are data.
@@ -753,7 +890,13 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 		}
 	}
 
-	// Backward scalar liveness.
+	// Backward strong scalar liveness: an instruction that only writes scalar destinations keeps its
+	// operands live only while one of them is, so a save/restore of a value nothing reads stays dead.
+	std::vector<UnitSet> pure_defs(count);
+	for (uint32_t index = 0; index < count; ++index)
+	{
+		pure_defs[index] = PureScalarDefs(instructions.At(index), decoded[index]);
+	}
 	std::vector<UnitSet> live_in(count);
 	changed = true;
 	while (changed)
@@ -771,7 +914,8 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 			{
 				kills.set(kScc);
 			}
-			const auto updated = decoded[index].uses | (out & ~kills);
+			const bool dead     = pure_defs[index].any() && (out & pure_defs[index]).none();
+			const auto updated  = (dead ? UnitSet {} : decoded[index].uses) | (out & ~kills);
 			if (updated != live_in[index])
 			{
 				live_in[index] = updated;
@@ -803,7 +947,7 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 			{
 				uniformity = SolveUniformity(instructions, decoded, in, successors);
 			}
-			if (!uniformity[index].reached || !uniformity[index].vcc_uniform)
+			if (!uniformity[index].reached || !IsUniformVccPair(uniformity[index]))
 			{
 				return Failure(instruction.pc, "loop condition is not provably wave-uniform");
 			}
@@ -825,16 +969,14 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 				written.set(kScc);
 			}
 		}
-		if (written.test(kM0))
-		{
-			return Failure(instruction.pc, "M0 is written inside a lane-conditional region");
-		}
 		if ((written & live_in[static_cast<size_t>(target)]).any())
 		{
 			return Failure(instruction.pc, "a scalar value written inside a lane-conditional region is live at its join");
 		}
 	}
-	return {true, 0, {}};
+	ShaderComputeWaveAnalysisResult result {true, 0, {}};
+	result.reads_quad_lanes = std::any_of(decoded.begin(), decoded.end(), [](const auto& entry) { return entry.reads_quad; });
+	return result;
 }
 
 } // namespace Kyty::Libs::Graphics

@@ -10,16 +10,39 @@ tiling, descriptors, and ABI data remain guest values.
 The active render-resolution keys are:
 
 - `RenderResolutionMode`: `Fixed` or `Native`.
+- `RenderResolutionScope`: `Display` (default) or `RenderTargets`. See
+  [Render-target scope](#render-target-scope).
 - `RenderResolutionWidth`: fixed render target width. The default is `1280`.
 - `RenderResolutionHeight`: fixed render target height. The default is `720`.
-- `PresentationFilter`: `Linear` or `Nearest`.
+- `PresentationFilter`: `Linear`, `Nearest` or `Fsr`.
+- `PresentationFsrSharpness`: RCAS sharpness for `Fsr`, `0` to `100`. The
+  default is `90`.
+- `TextureAnisotropy`: `Guest` (default), `X2`, `X4`, `X8` or `X16`. `Guest`
+  keeps each sampler's own anisotropy. A level raises every sampler with linear
+  minification to at least that ratio; point-sampled and unnormalized samplers
+  keep their guest state. This is a host image-quality option, not a
+  resolution setting.
 
 The matching environment variables are:
 
 - `KYTY_RENDER_RESOLUTION_MODE`
+- `KYTY_RENDER_RESOLUTION_SCOPE`
 - `KYTY_RENDER_RESOLUTION_WIDTH`
 - `KYTY_RENDER_RESOLUTION_HEIGHT`
 - `KYTY_PRESENTATION_FILTER`
+- `KYTY_PRESENTATION_FSR_SHARPNESS`
+- `KYTY_TEXTURE_ANISOTROPY`
+
+The launcher's configuration dialog edits every key above. The scope is
+enabled only in `Fixed` mode and the sharpness only with the `Fsr` filter,
+because the emulator ignores them otherwise.
+
+The dialog's graphics preset only fills these fields and is not stored.
+`Native` selects native resolution, linear presentation and guest
+anisotropy. `Quality`, `Balanced` and `Performance` select `Fixed` with
+`RenderTargets` at 100, 75 and 50 percent of the window size, with linear,
+`Fsr` and `Fsr` presentation and `X16`, `X8` and guest anisotropy. A fixed
+resolution raises frame rate only when a title is bound by GPU pixel work.
 
 `ScreenWidth` and `ScreenHeight` configure only the host window and swapchain.
 They do not select the guest render resolution.
@@ -49,6 +72,65 @@ materialization. When a late binding changes the state, the framebuffer is
 replanned and rebound. Non-converging plans are errors; they are not substituted
 with a best-effort extent.
 
+## Render-target scope
+
+`Display` applies `Fixed` to the VideoOut cohort only. `RenderTargets` also
+plans offscreen render textures and their depth whose guest extent equals the
+registered display extent. The scope takes effect only under `Fixed`. It is
+opt-in because some titles use scaled targets in ways the contract below
+refuses.
+
+A new color target is a scaling candidate only when all of these hold:
+
+- it is GPU-owned: no CPU upload on update and no write-back;
+- it is single-sample;
+- its range is aliased by nothing but at most one exact storage-buffer view
+  and one exact texture view;
+- the device supports the format, samples and usage at the host extent, and
+  can blit the format in both directions;
+- its range was never demoted (see below).
+
+A new depth target follows the same rule. Storage views of its planes are its
+only allowed aliases, because depth is never uploaded from guest memory and
+never written back to it. HTILE and multisampled depth stay native.
+
+A target that already exists fixes its own extent: a Vulkan image cannot change
+extent in place. Every color target and the depth of a pass form one cohort with
+one guest extent and one host extent. The cohort scales only when every member
+agrees, and a committed member decides the extent for new ones. Mixed guest
+extents keep the cohort native.
+
+A scaled cohort uses the same viewport, scissor and pixel-shader host-to-guest
+transform as the display cohort. Shader reads of a scaled image are allowed
+only through normalized sampling without texel offsets.
+
+### Demotion
+
+Scaling a color target is speculative: the first use that needs guest texels
+revokes it. Demotion records the target's guest range, so the range never
+scales again, and resamples the scaled image into a new image at the guest
+extent (a linear blit when the format supports linear filtering, nearest
+otherwise). The scaled image retires after the copy. Two uses demote:
+
+- a cohort that cannot keep its scaled members, such as a committed scaled
+  color target beside a native depth or a display buffer. Its committed scaled
+  color targets are demoted and its new members stay native;
+- a storage view, integer texel access, size query, texel offset or
+  unnormalized sampler that binds a scaled color target. A pass cannot demote
+  its own color attachment; that stops the run.
+
+The demotion set holds 256 ranges. Once it is full, every range counts as
+demoted and new targets stay native.
+
+Depth is not demoted. A committed scaled depth beside a native member, a depth
+pass that would address a scaled depth at another extent, and any scaled image
+other than a color render target reaching a refused use stop the run. Copies,
+resolves and depth copies between images at different host extents stop the
+run as well.
+
+The bring-up records indexed in `BRINGUP.md` hold the measured effect and the
+titles that hit each refusal.
+
 ## States
 
 Render resources move through these states:
@@ -77,6 +159,52 @@ Presentation scaling is intentionally separate from render planning. The
 presentation stage consumes one final image and scales it into the swapchain
 using the configured filter after validating Vulkan support. It preserves the
 current framing and aspect-ratio policy.
+
+`Fsr` upscales the final image with AMD FidelityFX Super Resolution 1.0 (MIT,
+`source/3rdparty/fidelityfx_fsr1`):
+
+- A same-size blit converts the final image to half float. EASU then upsamples
+  it to the swapchain extent, RCAS sharpens it, and a same-size blit writes the
+  swapchain image.
+- Both passes run on display-encoded values. A linear-light source (sRGB or
+  float format) is encoded in the EASU input callbacks. For an sRGB swapchain,
+  RCAS decodes its result so that the final blit encodes it once.
+- The sharpness percentage maps to RCAS attenuation stops as
+  `(100 - value) / 50`. `100` is the sharpest, and `90` is 0.2 stops.
+- FSR 1.0 only upscales. It runs when the final image fits inside the
+  swapchain and is smaller on at least one axis. An equal or larger final
+  image uses the configured blit path instead (linear for `Fsr`), because the
+  passes would add cost without adding detail.
+- To use it as an upscaler, make the window larger than the final image: for
+  example `ScreenWidth = 1920`, `ScreenHeight = 1080` with
+  `RenderResolutionMode = Fixed` at 1280x720.
+- `Fsr` does not change the render resolution or the guest's work. `Fixed`
+  scales only the display attachment cohort (the VideoOut buffer and its
+  depth). Offscreen targets keep their guest size. A title whose GPU cost sits
+  in offscreen passes, or a title bound by the command processor or the guest
+  CPU, keeps its frame rate. The AMD beat 'em up renders 3840x2160 offscreen
+  passes. Under `Fixed` 1280x720 its display was scaled
+  (`scaling_applied: true`), yet it measured 7.1, 4.1 and 3.6 fps against
+  6.9, 4.1 and 3.8 fps at `Native`, with the GPU about 80% busy in both.
+- The shaders live in `source/emulator/src/Graphics/Shaders`.
+  `scripts/build_presentation_fsr_shaders.py` regenerates the embedded SPIR-V
+  in `PresentationFsrShaders.inc` (requires `glslangValidator`).
+- Verified on Intel with a 1920x1080 window. The beat 'em up presented a
+  1280x720 final image and was upscaled to 1920x1080. Its mean channel values
+  matched a bilinear upscale of the same frame to within 0.004. The racing
+  title at 1:1 matched its re-encoded source with an MAE of 0.0044 (RCAS
+  only), which is what led to the rule that equal extents skip the passes.
+  The swapchain on both hosts is UNORM BGRA, so the sRGB-swapchain branch has
+  not run.
+- Temporal upscalers are not offered. FSR 2 and later, FSR 4 (ML) and XeSS
+  all need the renderer's per-pixel motion vectors, depth and jittered
+  projection. A presentation stage, or an emulator in general, does not have
+  these for an arbitrary guest. On top of that, the FidelityFX SDK documents:
+  - FSR 4 needs its signed binary distribution and "an AMD 7000 series
+    discrete GPU or AMD 9000 series GPU or later".
+  - ML frame generation needs "Windows 11, DirectX 12 Agility SDK 1.4.9 and
+    an AMD 9000 series GPU or later".
+  - Its known-issues table states "Vulkan is currently not supported in SDK".
 
 ## Diagnostics
 

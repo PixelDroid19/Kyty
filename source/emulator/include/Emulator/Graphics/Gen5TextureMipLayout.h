@@ -76,6 +76,25 @@ struct Gen5TextureMipLayout
 [[nodiscard]] bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src,
                                                           uint64_t src_size, const Gen5TextureMipLayout& layout);
 
+// A mip-chained color target (tile mode 27) described by the CB registers,
+// which give the element size instead of a texture format.
+[[nodiscard]] bool Gen5GetRenderTarget64KBMipLayout(uint32_t bytes_per_element, uint32_t width, uint32_t height,
+                                                    uint32_t pitch, uint32_t levels, Gen5TextureMipLayout* layout);
+
+// Tile mode 27 (render target) shares the standard 64 KiB chain layout.
+[[nodiscard]] bool Gen5DetileRenderTarget64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src,
+                                                              uint64_t src_size, const Gen5TextureMipLayout& layout);
+
+// GFX10 256-byte swizzle modes (tile mode 1) have no mip tail: each level is
+// padded to whole 256-byte blocks and the chain is stored from the smallest
+// level up, so level 0 ends the allocation.
+[[nodiscard]] bool Gen5GetStandard256BTextureMipLayout(uint32_t format, uint32_t width, uint32_t height,
+                                                        uint32_t pitch, uint32_t levels,
+                                                        Gen5TextureMipLayout* layout);
+
+[[nodiscard]] bool Gen5DetileStandard256BTextureMipChain(void* dst, uint64_t dst_size, const void* src,
+                                                          uint64_t src_size, const Gen5TextureMipLayout& layout);
+
 [[nodiscard]] bool Gen5GetDepth64KBTextureMipLayout(uint32_t format, uint32_t width, uint32_t height,
                                                     uint32_t pitch, uint32_t levels,
                                                     Gen5TextureMipLayout* layout);

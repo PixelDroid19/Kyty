@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
@@ -10,6 +11,10 @@
 
 namespace Kyty::Libs::Graphics {
 
+// Vertex buffer objects live in the same host-visible coherent memory as the
+// transient vertex snapshots, so guest bytes are written through the mapping.
+// Coherent host writes are visible to every later submission, which is the
+// ordering the former one-shot staging copy and fence wait provided.
 static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* obj, const uint64_t* vaddr, const uint64_t* size,
                         int vaddr_num)
 {
@@ -17,24 +22,16 @@ static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* o
 
 	EXIT_IF(vaddr_num != 1 || size == nullptr || vaddr == nullptr || *vaddr == 0);
 	EXIT_IF(obj == nullptr);
+	EXIT_IF(ctx == nullptr);
 
 	auto* vk_obj = static_cast<VulkanBuffer*>(obj);
 
-	VulkanBuffer staging_buffer {};
-	staging_buffer.usage           = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-	staging_buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-
-	VulkanCreateBuffer(ctx, *size, &staging_buffer);
-	if (staging_buffer.buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: staging_buffer.buffer == nullptr condition ignored (continuing)\n"); }
-
-	void* data = nullptr;
-	VulkanMapMemory(ctx, &staging_buffer.memory, &data);
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, *size);
+	void*                      data = nullptr;
+	VulkanMapMemory(ctx, &vk_obj->memory, &data);
+	EXIT_IF(data == nullptr);
 	memcpy(data, reinterpret_cast<void*>(*vaddr), *size);
-	VulkanUnmapMemory(ctx, &staging_buffer.memory);
-
-	UtilCopyBuffer(&staging_buffer, vk_obj, *size);
-
-	VulkanDeleteBuffer(ctx, &staging_buffer);
+	VulkanUnmapMemory(ctx, &vk_obj->memory);
 }
 
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
@@ -48,8 +45,9 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	auto* vk_obj = new VulkanBuffer;
 
-	vk_obj->usage           = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-	vk_obj->memory.property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+	vk_obj->usage           = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+	vk_obj->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+	                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	vk_obj->buffer          = nullptr;
 
 	VulkanCreateBuffer(ctx, *size, vk_obj);

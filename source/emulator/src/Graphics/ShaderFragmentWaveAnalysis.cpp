@@ -85,6 +85,7 @@ bool Export(const ShaderInstruction& instruction, const ShaderPixelInputInfo& pi
 	}
 	const int target = CompressedTarget(instruction.format);
 	return target >= 0 && (pixel.target_output_mode[target] == 0u || pixel.target_output_mode[target] == 4u) &&
+	       (pixel.target_output_mode[target] == 0u || pixel.target_output_number[target] != 4u) &&
 	       pixel.target_output_order[target] <= 3u && instruction.src_num == 2 && instruction.exp_control >= 4u &&
 	       instruction.exp_control <= 7u &&
 	       (instruction.exp_enable_mask == 3u || instruction.exp_enable_mask == 12u || instruction.exp_enable_mask == 15u) &&

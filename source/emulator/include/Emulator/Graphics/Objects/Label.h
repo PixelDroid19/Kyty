@@ -8,6 +8,8 @@
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 #include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 
+#include <map>
+#include <utility>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -47,22 +49,34 @@ class LabelFenceRegistry
 public:
 	[[nodiscard]] LabelFenceRegistrationStatus Register(uint64_t addr, uint64_t bytes);
 	[[nodiscard]] LabelFenceReleaseStatus      ReleaseAllocation(uint64_t addr, uint64_t bytes);
-	void Snapshot(Vector<uint64_t>* begin, Vector<uint64_t>* end) const;
+	// Registered destinations that overlap [addr, addr + bytes).
+	void Snapshot(uint64_t addr, uint64_t bytes, Vector<uint64_t>* begin, Vector<uint64_t>* end) const;
 	// Called after the real completion callback/store, never at event creation
 	// or deletion. A completed version can be acquired by a subsequent upload.
 	void Complete(uint64_t addr, uint64_t bytes);
-	void SnapshotExcluded(uint64_t acquired_version, Vector<uint64_t>* begin, Vector<uint64_t>* end) const;
+	// Destinations overlapping [addr, addr + bytes) still pending or completed after acquired_version.
+	void SnapshotExcluded(uint64_t addr, uint64_t bytes, uint64_t acquired_version, Vector<uint64_t>* begin,
+	                      Vector<uint64_t>* end) const;
 	[[nodiscard]] bool NeedsUpload(uint64_t addr, uint64_t bytes, uint64_t acquired_version) const;
 	[[nodiscard]] uint64_t Version() const { return m_version; }
 
-	[[nodiscard]] uint32_t Size() const { return m_begin.Size(); }
+	[[nodiscard]] uint32_t Size() const { return static_cast<uint32_t>(m_holes.size()); }
 
 private:
-	Vector<uint64_t> m_begin;
-	Vector<uint64_t> m_end;
-	Vector<uint64_t> m_completed_version;
-	Vector<uint64_t> m_pending;
-	uint64_t m_version = 0;
+	struct Hole
+	{
+		uint64_t completed_version = 0;
+		uint64_t pending           = 0;
+	};
+	using Holes = std::map<std::pair<uint64_t, uint64_t>, Hole>;
+
+	// First hole that can overlap [addr, ...): none starting earlier spans to addr.
+	[[nodiscard]] Holes::const_iterator FirstCandidate(uint64_t addr) const;
+
+	// Keyed by [begin, end), so overlap queries visit only nearby holes.
+	Holes    m_holes;
+	uint64_t m_max_bytes = 0;
+	uint64_t m_version   = 0;
 };
 
 // Per-backing ownership acquired by a real guest->GPU upload. Excluded GPU
@@ -86,6 +100,12 @@ public:
 	[[nodiscard]] bool AdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
 	                                GpuWritebackPageCache* page_cache, GpuWritebackPageCache::NotifyWriteFunc notify_write,
 	                                void* notify_opaque, GpuWritebackResult* result);
+	// Write-back of an object whose last write a device copy already published to
+	// guest memory: only the snapshot and the write notification change. Declines
+	// like AdoptUniform.
+	[[nodiscard]] bool AdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+	                               GpuWritebackPageCache::NotifyWriteFunc notify_write, void* notify_opaque,
+	                               GpuWritebackResult* result);
 
 private:
 	struct FenceBaseline
@@ -122,11 +142,15 @@ void LabelCompleteSubmission(SubmissionId submission);
 void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
                         GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
 [[nodiscard]] bool LabelStorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication);
+// True when a registered label destination overlaps [addr, addr + size).
+[[nodiscard]] bool LabelRangeHasFence(uint64_t addr, uint64_t size);
 [[nodiscard]] GpuWritebackResult LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
                                                    GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
 [[nodiscard]] bool LabelWriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
                                               GpuWritebackPageCache* page_cache, LabelStoragePublication* publication,
                                               GpuWritebackResult* result);
+[[nodiscard]] bool LabelWriteBackAdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+                                             LabelStoragePublication* publication, GpuWritebackResult* result);
 // Called only after GPU submissions and host presentation have quiesced, while
 // the guest VA is still mapped and before it can be reused.
 void LabelReleaseMappedRange(uint64_t addr, uint64_t bytes);

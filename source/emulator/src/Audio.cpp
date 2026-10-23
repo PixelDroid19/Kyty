@@ -464,50 +464,39 @@ static bool DecodeDataFormat(uint32_t data_format, uint32_t* channels_out, uint3
 static bool IsGuestWritableRange(const void* pointer, size_t size)
 {
 	return pointer != nullptr && size != 0 &&
-	       Core::VirtualMemory::IsRangeWritable(reinterpret_cast<uint64_t>(pointer), static_cast<uint64_t>(size));
+	       Core::VirtualMemory::IsRangeWritableOrLent(reinterpret_cast<uint64_t>(pointer), static_cast<uint64_t>(size));
 }
 
 static bool CopyFromGuest(void* destination, const void* source, size_t size)
 {
 	return destination != nullptr && source != nullptr && size != 0 &&
-	       Core::VirtualMemory::CopyFromGuest(destination, reinterpret_cast<uint64_t>(source), static_cast<uint64_t>(size));
+	       Core::VirtualMemory::CopyFromGuestOrLent(destination, reinterpret_cast<uint64_t>(source), static_cast<uint64_t>(size));
 }
 
 static bool CopyToGuest(void* destination, const void* source, size_t size)
 {
 	return destination != nullptr && source != nullptr && size != 0 &&
-	       Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
+	       Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
 }
 
-struct CapturedContextProfile
+// sceAudioOut2 context parameters: six 32-bit fields lead the 0x40-byte block and the rest is reserved. Titles pass
+// uninitialized reserved bytes after ResetParam, so only the defined fields are read. The grain at +0x10 matches the
+// PCM count of live 256- and 512-frame producer/consumer traces. The port counts and the queue depth are capacities
+// the HLE context does not enforce.
+struct ContextParam
 {
-	std::array<uint64_t, kContextParamBytes / sizeof(uint64_t)> parameters;
-	uint32_t                                                    frames_per_submission;
+	uint32_t max_ports;
+	uint32_t max_object_ports;
+	uint32_t guarantee_object_ports;
+	uint32_t queue_depth;
+	uint32_t num_grains;
+	uint32_t flags;
 };
 
-static const CapturedContextProfile* ReadSupportedContextParam(const void* param)
+static bool ReadContextParam(const void* param, ContextParam* out)
 {
-	std::array<uint64_t, kContextParamBytes / sizeof(uint64_t)> words {};
-	if (!CopyFromGuest(words.data(), param, sizeof(words)))
-	{
-		return nullptr;
-	}
-	// Match complete live-observed parameter blocks, including their zero tail.
-	// The headers remain opaque; do not infer generic ranges from these values.
-	// The 512-frame producer/consumer trace establishes the PCM count and stride
-	// corresponding to the 32-bit input at +0x10 in the second configuration.
-	static constexpr CapturedContextProfile profiles[] = {
-	    {{0x0000008000000012ull, 0x0000000100000000ull, 0x0000000100000100ull}, 256},
-	    {{0x0000020000000014ull, 0x0000000100000000ull, 0x0000000100000200ull}, 512},
-	};
-	for (const auto& profile: profiles)
-	{
-		if (words == profile.parameters)
-		{
-			return &profile;
-		}
-	}
-	return nullptr;
+	// The host mixer handles 64..4096-frame grains.
+	return CopyFromGuest(out, param, sizeof(*out)) && out->num_grains >= 64 && out->num_grains <= 4096;
 }
 
 static bool CalculatePcmGrainBytes(uint32_t grain, uint32_t channels, uint32_t sample_bytes, size_t* bytes_out)
@@ -669,7 +658,8 @@ int KYTY_SYSV_ABI AudioOut2ContextQueryMemory(const void* param, uint64_t* size_
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 	KYTY_LOG_DEBUG("\t size_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(size_out));
-	if (!ReadSupportedContextParam(param))
+	ContextParam context_param {};
+	if (!ReadContextParam(param, &context_param))
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
@@ -685,9 +675,9 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64
 	KYTY_LOG_DEBUG("\t buffer     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
 	KYTY_LOG_DEBUG("\t size       = 0x%016" PRIx64 "\n", size);
 	KYTY_LOG_DEBUG("\t handle_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handle_out));
-	const auto* profile = ReadSupportedContextParam(param);
-	if (profile == nullptr || size != kHleContextWorkspaceBytes || !IsGuestWritableRange(buffer, static_cast<size_t>(size)) ||
-	    !IsGuestWritableRange(handle_out, sizeof(*handle_out)))
+	ContextParam context_param {};
+	if (!ReadContextParam(param, &context_param) || size != kHleContextWorkspaceBytes ||
+	    !IsGuestWritableRange(buffer, static_cast<size_t>(size)) || !IsGuestWritableRange(handle_out, sizeof(*handle_out)))
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
@@ -700,7 +690,7 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64
 	}
 	g_contexts[id - 1].buffer = buffer;
 	g_contexts[id - 1].size   = size;
-	g_contexts[id - 1].grain  = profile->frames_per_submission;
+	g_contexts[id - 1].grain  = context_param.num_grains;
 	if (!CopyToGuest(handle_out, &id, sizeof(id)))
 	{
 		g_contexts[id - 1] = ContextSlot {};
@@ -742,6 +732,16 @@ void FillContextQueue(int context)
 	}
 	auto& ctx      = g_contexts[context - 1];
 	ctx.queue_used = ctx.queue_depth != 0 ? ctx.queue_depth : kDefaultQueueDepth;
+}
+
+void SetContextGrain(int context, uint32_t grain)
+{
+	std::lock_guard lock(g_audio_out2_mutex);
+	if (context < 1 || context > kMaxContexts || !g_contexts[context - 1].used)
+	{
+		return;
+	}
+	g_contexts[context - 1].grain = grain;
 }
 
 } // namespace HostStateTest
@@ -1226,6 +1226,20 @@ int KYTY_SYSV_ABI AudioOut2GetSpeakerInfo(void* info, uint32_t flags)
 	return CopyToGuest(info, &out, sizeof(out)) ? OK : LibKernel::KERNEL_ERROR_EINVAL;
 }
 
+// sceAudioOut2Set3DLatency (NID TViD1EZXkNI): selects the system user's 3D
+// (object) audio latency mode, 1 or 2. The host mixer renders no object ports,
+// so the mode has nothing to change in the stereo output.
+int KYTY_SYSV_ABI AudioOut2Set3DLatency(int32_t user_id, uint32_t latency)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t user_id = 0x%x latency = %u\n", static_cast<uint32_t>(user_id), latency);
+	if (user_id != 0xff || latency < 1u || latency > 2u)
+	{
+		EXIT("unsupported sceAudioOut2Set3DLatency: user=0x%x latency=%u\n", static_cast<uint32_t>(user_id), latency);
+	}
+	return OK;
+}
+
 } // namespace AudioOut2
 
 namespace AudioIn {
@@ -1326,6 +1340,198 @@ int KYTY_SYSV_ABI VoiceQoSInit(void* mem_block, uint32_t mem_size, int32_t app_t
 }
 
 } // namespace VoiceQoS
+
+namespace Voice {
+
+LIB_NAME("Voice", "Voice");
+
+namespace {
+
+// Port types of the published voice port parameter (leading int32).
+constexpr int32_t VOICE_PORT_IN_DEVICE  = 0;
+constexpr int32_t VOICE_PORT_IN_VOICE   = 2;
+constexpr int32_t VOICE_PORT_OUT_VOICE  = 4;
+constexpr int32_t VOICE_PORT_OUT_DEVICE = 5;
+constexpr int32_t VOICE_PORT_STATE_READY = 1;
+// Encoded voice travels in 20 ms frames.
+constexpr uint32_t VOICE_FRAME_MS = 20;
+
+// Leading fields of the voice port parameter: the voice-port union member
+// (bitrate) starts at +12, after threshold, mute flag and volume.
+struct VoicePortParam
+{
+	int32_t  port_type;
+	uint16_t threshold;
+	uint16_t mute;
+	float    volume;
+	int32_t  bitrate;
+};
+
+struct VoicePortInfo
+{
+	int32_t   port_type;
+	int32_t   state;
+	uint32_t* edge;
+	uint32_t  byte_count;
+	uint32_t  frame_size;
+	uint16_t  edge_count;
+	uint16_t  reserved;
+};
+
+static_assert(sizeof(VoicePortInfo) == 32);
+
+struct VoicePort
+{
+	int32_t  type;
+	uint32_t bitrate;
+};
+
+struct VoiceState
+{
+	std::mutex                             mutex;
+	bool                                   initialized = false;
+	uint32_t                               next_id     = 0;
+	std::unordered_map<uint32_t, VoicePort> ports;
+};
+
+VoiceState& GetVoiceState()
+{
+	static VoiceState state;
+	return state;
+}
+
+bool IsInputPort(int32_t type)
+{
+	return type >= VOICE_PORT_IN_DEVICE && type <= VOICE_PORT_IN_VOICE;
+}
+
+// Returns the port type; an unknown port or an uninitialized library is a
+// contract the guest is not expected to exercise.
+const VoicePort& RequirePort(const VoiceState& state, uint32_t port_id)
+{
+	EXIT_NOT_IMPLEMENTED(!state.initialized);
+	auto it = state.ports.find(port_id);
+	EXIT_NOT_IMPLEMENTED(it == state.ports.end());
+	return it->second;
+}
+
+bool IsVoicePort(int32_t type)
+{
+	return type == VOICE_PORT_IN_VOICE || type == VOICE_PORT_OUT_VOICE;
+}
+
+} // namespace
+
+int KYTY_SYSV_ABI VoiceInit(const void* param, uint32_t version)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t version = %" PRIu32 "\n", version);
+
+	EXIT_NOT_IMPLEMENTED(param == nullptr);
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	EXIT_NOT_IMPLEMENTED(state.initialized);
+	state.initialized = true;
+	return OK;
+}
+
+int KYTY_SYSV_ABI VoiceStart(const void* param)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(param == nullptr);
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	EXIT_NOT_IMPLEMENTED(!state.initialized);
+	return OK;
+}
+
+int KYTY_SYSV_ABI VoiceCreatePort(uint32_t* port_id, const void* param)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(port_id == nullptr || param == nullptr);
+
+	VoicePortParam port_param {};
+	EXIT_NOT_IMPLEMENTED(!Core::VirtualMemory::CopyFromGuestOrLent(&port_param, reinterpret_cast<uint64_t>(param), sizeof(port_param)));
+	const int32_t type = port_param.port_type;
+
+	KYTY_LOG_DEBUG("\t port_type = %" PRId32 "\n", type);
+
+	EXIT_NOT_IMPLEMENTED(type < VOICE_PORT_IN_DEVICE || type > VOICE_PORT_OUT_DEVICE);
+	EXIT_NOT_IMPLEMENTED(IsVoicePort(type) && port_param.bitrate <= 0);
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	EXIT_NOT_IMPLEMENTED(!state.initialized);
+	const uint32_t id = state.next_id;
+	EXIT_NOT_IMPLEMENTED(!Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(port_id), &id, sizeof(id)));
+	state.next_id++;
+	state.ports[id] = VoicePort {type, IsVoicePort(type) ? static_cast<uint32_t>(port_param.bitrate) : 0u};
+	return OK;
+}
+
+int KYTY_SYSV_ABI VoiceDeletePort(uint32_t port_id)
+{
+	PRINT_NAME();
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	RequirePort(state, port_id);
+	state.ports.erase(port_id);
+	return OK;
+}
+
+int KYTY_SYSV_ABI VoiceConnectIPortToOPort(uint32_t input_port_id, uint32_t output_port_id)
+{
+	PRINT_NAME();
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	EXIT_NOT_IMPLEMENTED(!IsInputPort(RequirePort(state, input_port_id).type));
+	EXIT_NOT_IMPLEMENTED(IsInputPort(RequirePort(state, output_port_id).type));
+	return OK;
+}
+
+// No voice is captured or received, so an output port never has data.
+int KYTY_SYSV_ABI VoiceReadFromOPort(uint32_t output_port_id, void* data, uint32_t* size)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(data == nullptr || size == nullptr);
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	EXIT_NOT_IMPLEMENTED(IsInputPort(RequirePort(state, output_port_id).type));
+	const uint32_t read_size = 0;
+	EXIT_NOT_IMPLEMENTED(!Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(size), &read_size, sizeof(read_size)));
+	return OK;
+}
+
+// A port is ready but never buffers data. A voice port reports the encoded
+// size of one frame at its bitrate.
+int KYTY_SYSV_ABI VoiceGetPortInfo(uint32_t port_id, void* info)
+{
+	PRINT_NAME();
+
+	EXIT_NOT_IMPLEMENTED(info == nullptr);
+
+	auto&            state = GetVoiceState();
+	std::scoped_lock lock(state.mutex);
+	const auto&      port = RequirePort(state, port_id);
+
+	VoicePortInfo result {};
+	result.port_type  = port.type;
+	result.state      = VOICE_PORT_STATE_READY;
+	result.frame_size = (port.bitrate * VOICE_FRAME_MS + 7999u) / 8000u;
+	EXIT_NOT_IMPLEMENTED(!Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(info), &result, sizeof(result)));
+	return OK;
+}
+
+} // namespace Voice
 
 
 

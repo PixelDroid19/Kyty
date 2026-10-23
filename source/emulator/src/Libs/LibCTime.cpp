@@ -167,6 +167,17 @@ KYTY_SYSV_ABI char* c_asctime(const GuestTm* tmv)
 	return ::asctime(&host);
 }
 
+// ctime(t) is asctime(localtime(t)).
+KYTY_SYSV_ABI char* c_ctime(const int64_t* t)
+{
+	std::tm host {};
+	if (t == nullptr || !HostLocaltime(static_cast<time_t>(*t), &host))
+	{
+		return nullptr;
+	}
+	return ::asctime(&host);
+}
+
 } // namespace Kyty::Libs::LibC::Time
 
 #endif // KYTY_EMU_ENABLED

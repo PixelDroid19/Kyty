@@ -172,6 +172,11 @@ struct SharedBackingPopulation
 };
 // False when the host cannot report the population.
 bool           QuerySharedBackingPopulation(SharedBacking* backing, SharedBackingPopulation* population);
+// A dma-buf descriptor sharing the pages of a page-aligned backing interval, or
+// -1 when the host cannot export one. Release it with CloseDmaBuf unless a
+// consumer took ownership.
+int            ExportSharedBackingDmaBuf(SharedBacking* backing, uint64_t backing_offset, uint64_t size);
+void           CloseDmaBuf(int dma_buf);
 uint64_t       MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                 uint64_t alignment);
 bool           MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode);
@@ -191,6 +196,13 @@ bool           Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mod
 // Guest-only protection transition. Ownership validation, the host operation,
 // and protection tracking are one transaction with Free() and guest copies.
 bool           ProtectGuest(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
+// Applies guest protection only while the entire page-aligned range still
+// belongs to the supplied mapping instance. Identity validation, protection
+// tracking, and write-lease handling share one transaction with mapping changes.
+// The metadata-only check has no deferred-copy byte budget; invalid input or
+// an identity mismatch leaves the range and old_mode unchanged.
+bool ProtectGuestIfMappingMatches(uint64_t address, uint64_t size, Mode mode, uint64_t mapping_identity,
+                                 Mode* old_mode = nullptr);
 // Turn a committed guest-owned interval back into a NoAccess reservation.
 // Linux supports partial intervals; other hosts fail without changing state.
 bool           DecommitGuestRange(uint64_t address, uint64_t size);
@@ -217,6 +229,88 @@ bool VisitReadableGuestRange(uint64_t address, uint64_t size, ReadableGuestRange
 // and the copy. This serializes the transfer with Free() and Protect().
 bool           CopyFromGuest(void* destination, uint64_t source, uint64_t size);
 bool           CopyToGuest(uint64_t destination, const void* source, uint64_t size);
+// Host allocations an HLE allocator hands to the guest (libc before the application heap exists). They are guest
+// memory by contract but never guest mappings: protection, tracking and mapping identities do not apply to them.
+// Lend after allocating; reclaim before freeing, which waits for copies in flight. Lent ranges must not overlap.
+void           LendHostAllocation(uint64_t address, uint64_t size);
+void           ReclaimHostAllocation(uint64_t address);
+// HLE argument access: the guest-owned checks and copies above, or a range inside one lent host allocation.
+bool           IsRangeReadableOrLent(uint64_t address, uint64_t size);
+bool           IsRangeWritableOrLent(uint64_t address, uint64_t size);
+bool           CopyFromGuestOrLent(void* destination, uint64_t source, uint64_t size);
+bool           CopyToGuestOrLent(uint64_t destination, const void* source, uint64_t size);
+// The guest mapping instances that covered a guest range at one instant. Every successful map,
+// shared view, commit, decommit, or reservation (re)publication gives its interval a fresh
+// identity, even when it reuses the address or the backing bytes of an earlier mapping.
+// Splitting a mapping (a partial unmap or replacement elsewhere in it), guest protection changes,
+// and write-lease removal or rearm keep the identity; unmapping drops it. Identities are never
+// reused within the process. A snapshot is a fixed-size value: it owns no host resources and
+// needs no release.
+struct GuestMappingIdentitySnapshot
+{
+	static constexpr uint32_t kMaxSegments = 16;
+
+	struct Segment
+	{
+		uint64_t address  = 0;
+		uint64_t size     = 0;
+		uint64_t identity = 0;
+	};
+
+	uint64_t address                = 0;
+	uint64_t size                   = 0;
+	uint32_t segment_count          = 0;
+	Segment  segments[kMaxSegments] = {};
+};
+
+// Copy snapshots retain the bounded deferred-publication budget. The segment capacity covers
+// that budget at 4 KiB host pages from any start offset.
+struct GuestMappingSnapshot: GuestMappingIdentitySnapshot
+{
+	static constexpr uint64_t kMaxBytes = 48u * 1024u;
+};
+
+struct WritableGuestTransactionRange
+{
+	uint64_t address = 0;
+	uint64_t size = 0;
+	const GuestMappingSnapshot* expected_mapping = nullptr;
+};
+
+using WritableGuestTransactionVisitor = void (*)(const GuestMappingIdentitySnapshot* identity, void* context) noexcept;
+
+// Bound the complete transaction independently of each mapping snapshot's segment budget.
+static constexpr uint32_t kMaxWritableGuestTransactionRanges = 1024;
+
+// Captures, in one VM transaction, the mapping identities of a range that is entirely guest owned.
+// Capture is metadata only: it does not consult protection, so a read-only or NoAccess range of a
+// guest mapping is captured, and a write lease's native protection is irrelevant. Fails, leaving an
+// empty snapshot that every copy refuses, when any byte is not guest owned, or when the range
+// exceeds the byte or segment budget.
+bool CaptureGuestMappingSnapshot(uint64_t address, uint64_t size, GuestMappingSnapshot* snapshot);
+// Identity-only captures have the same segment limit without the copy snapshot's byte limit.
+// They are metadata only and do not consult protection.
+bool CaptureGuestMappingIdentitySnapshot(uint64_t address, uint64_t size, GuestMappingIdentitySnapshot* snapshot);
+// Tests whether every byte of a structurally valid identity snapshot still belongs to its captured
+// mapping instance.
+bool GuestMappingIdentityMatches(const GuestMappingIdentitySnapshot& identity);
+// Copies `size` bytes to the snapshot's range only when `size` equals its size, every byte still
+// belongs to the captured mapping instance, and the guest protection permits writes now. Identity,
+// write access, and the copy are one transaction with unmap, map, and protection changes. A
+// refusal copies nothing. Like CopyToGuest, it does not lift a write lease's native protection.
+bool CopyToGuestIfMappingMatches(const GuestMappingSnapshot& snapshot, const void* source, uint64_t size);
+// Preflights every range as guest-owned and writable under one VM transaction, then invokes the
+// visitor once while map, unmap, and protection changes remain excluded. Each expected mapping
+// snapshot must describe its range exactly and still match its mapping identities. An index of -1
+// passes nullptr; otherwise the selected range's identity snapshot is passed for the duration of
+// the callback. Invalid input, stale identities, or a range with more than kMaxSegments mapping
+// instances rejects before the visitor. The callback must not call virtual-memory, mapping,
+// protection, or dirty-tracker APIs. It must not retain the identity pointer. This transaction does
+// not acquire a HostWriteLease and does not roll back callback side effects; callers are responsible
+// for limiting pointer writes to the validated ranges.
+bool VisitWritableGuestTransaction(const WritableGuestTransactionRange* ranges, uint32_t count,
+	                               int32_t capture_identity_range_index,
+	                               WritableGuestTransactionVisitor visitor, void* context);
 enum class ProtectionChangeStatus : uint32_t
 {
 	Success,
@@ -241,15 +335,67 @@ struct ProtectionChangeResult
 	uint64_t applied_bytes = 0;
 	[[nodiscard]] bool Succeeded() const noexcept { return status == ProtectionChangeStatus::Success; }
 };
+// Write leases. RemoveWriteAndCapture() and RemoveWriteFromProtection() lease the write permission of
+// guest pages to an authority (for example a dirty-page tracker) that restores it from a fault
+// handler with RestoreProtectionSignalSafe(). The guest's own protection stays authoritative: guest
+// queries and copies see it, RestoreProtection() reapplies it, and the lease never outlives the
+// mapping. Every later protection change or mapping removal over a leased page is reported to its
+// authority inside the same VM transaction:
+//  - begin_change fences the authority: it must stop starting signal-safe restores and wait for the
+//    restores already in flight, so no stale token is applied after the change.
+//  - decide (protection changes only) reports, for every byte of the given run in ascending order,
+//    whether write stays removed under the new protection. It must not publish anything: the change
+//    may still fail and be rolled back.
+//  - end_change publishes the outcome and releases the fence. A committed protection change replaces
+//    the run's tokens; a committed removal (kind Unmap) revokes them; an uncommitted change leaves the
+//    authority's state as it was.
+// All callbacks run with the VM transaction locked: they must not lock, allocate, or call
+// VirtualMemory, and the fence holder never touches leased guest memory. A lease without an authority
+// is dropped by the next guest protection change.
+enum class WriteLeaseChangeKind : uint32_t
+{
+	Protect,
+	Unmap
+};
+struct WriteLeaseChange
+{
+	uint64_t             address     = 0;
+	uint64_t             size        = 0;
+	WriteLeaseChangeKind kind        = WriteLeaseChangeKind::Protect;
+	Mode                 mode        = Mode::NoAccess;
+	uint32_t             guest_token = 0;
+	bool                 committed   = false;
+};
+using WriteLeaseDecision = bool (*)(void* decision_context, uint64_t address, uint64_t size, bool remove_write) noexcept;
+struct WriteLeaseAuthority
+{
+	void* context = nullptr;
+	void (*begin_change)(void* context, uint64_t address, uint64_t size) noexcept = nullptr;
+	void (*decide)(void* context, const WriteLeaseChange& change, WriteLeaseDecision decision, void* decision_context) noexcept = nullptr;
+	void (*end_change)(void* context, const WriteLeaseChange& change) noexcept = nullptr;
+};
 // The visitor runs synchronously while the host protection transaction is locked. It must not call
 // Protect(), RemoveWriteAndCapture(), or RestoreProtection(). Returning false aborts before native
 // protection changes, but does not undo side effects produced by earlier visitor calls. Every run
 // is visited before write access is removed so fault handlers can always restore a published token.
-ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor,
-	                                         void* context) noexcept;
-bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+// The captured runs are leased to `authority` (which may be null).
+ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor, void* context,
+	                                         const WriteLeaseAuthority* authority = nullptr) noexcept;
+// Removes write from the current guest protection of a mapped range and leases it to `authority`. The
+// guest protection is authoritative; restore_token is the holder's last known token and is not trusted.
+// A page whose guest protection has no write access keeps it and stays leased.
+bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token,
+	                           const WriteLeaseAuthority* authority = nullptr) noexcept;
+// Reapplies the authoritative guest protection of a mapped range; restore_token is not trusted. The
+// lease remains, so later guest changes are still reported to its authority.
 bool RestoreProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+// Applies restore_token natively without the VM lock. Only a lease authority that is fenced against
+// guest protection changes (see above) may call it.
 bool RestoreProtectionSignalSafe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+// Ends every lease of `authority` and reapplies the guest protection of those pages. When a page's
+// protection cannot be reapplied, its lease stays without an authority and the call fails; in every
+// case the VM no longer refers to `authority` afterwards.
+[[nodiscard]] bool ReleaseWriteLeases(const WriteLeaseAuthority* authority) noexcept;
 // Write-enable a page from an access-violation handler without taking Kyty's
 // virtual-memory bookkeeping lock. This is intentionally narrow: callers must
 // restore tracked protection with Protect() outside the handler.

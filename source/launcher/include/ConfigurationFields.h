@@ -25,6 +25,10 @@ QString ApplyEmulatorFields(const QVariantMap& fields, Kyty::Configuration* info
 // together with the game's name, folders, parameters file and modules.
 QVariantMap FieldsToRun(const QVariantMap& game, const QVariantMap& global);
 
+// The fields with a graphics preset applied: render mode, scope and size (scaled from the screen size),
+// presentation filter and texture anisotropy. "Custom" leaves them unchanged.
+QVariantMap ApplyGraphicsPreset(const QVariantMap& fields, const QString& preset);
+
 // Allowed texts for each enum field, keyed by field name.
 QVariantMap ConfigurationChoices();
 

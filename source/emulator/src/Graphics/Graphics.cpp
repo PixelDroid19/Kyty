@@ -39,7 +39,9 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <new>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -59,8 +61,17 @@ struct GpuMappingReleaseTransaction
 
 struct GpuMappingInvalidationTransaction
 {
-	uint64_t vaddr = 0;
-	uint64_t size  = 0;
+	const Kernel::Memory::KernelGpuMappingRange* ranges      = nullptr;
+	const VideoOut::VideoOutBufferRange*         video_ranges = nullptr;
+	size_t                                       range_count  = 0;
+};
+
+struct GpuMappingProtectionTransaction
+{
+	uint64_t                         vaddr           = 0;
+	uint64_t                         size            = 0;
+	Kernel::Memory::KernelGpuMappingCompletion completion = nullptr;
+	void*                            completion_data = nullptr;
 };
 
 void GraphicsRegisterGpuMappingRange(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingBacking backing)
@@ -83,7 +94,9 @@ bool GraphicsCompleteGpuMappingRelease(void* data)
 		    auto* transaction = static_cast<GpuMappingReleaseTransaction*>(action_data);
 		    GpuMemoryFreeMappedRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
 		    GuestDeviceAddressReleaseRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
-		    return transaction->completion(transaction->completion_data);
+		    if (!transaction->completion(transaction->completion_data)) { return false; }
+		    GuestTextureLayoutInvalidateRange(transaction->vaddr, transaction->size);
+		    return true;
 	    },
 	    transaction);
 }
@@ -94,27 +107,48 @@ bool GraphicsCompleteGpuMappingInvalidation(void* data)
 
 	auto* transaction = static_cast<GpuMappingInvalidationTransaction*>(data);
 	return VideoOut::VideoOutRunBufferUnmapTransaction(
-	    transaction->vaddr, transaction->size,
+	    transaction->video_ranges, transaction->range_count,
 	    [](void* action_data)
 	    {
 		    EXIT_IF(action_data == nullptr);
 		    auto* transaction = static_cast<GpuMappingInvalidationTransaction*>(action_data);
-		    GpuMemoryInvalidateMappedRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
-		    GuestDeviceAddressInvalidateRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+		    for (size_t i = 0; i < transaction->range_count; ++i)
+		    {
+			    const auto& range = transaction->ranges[i];
+			    GpuMemoryInvalidateMappedRangeQuiesced(WindowGetGraphicContext(), range.vaddr, range.size);
+			    // Physical allocation release keeps the CPU view but retires the
+			    // backing from GPU address publication so it cannot be reimported.
+			    GuestDeviceAddressReleaseRangeQuiesced(WindowGetGraphicContext(), range.vaddr, range.size);
+			    GuestTextureLayoutInvalidateRange(range.vaddr, range.size);
+		    }
 		    return true;
 	    },
 	    transaction);
 }
 
-bool GraphicsInvalidateGpuMappingRange(void* context, uint64_t vaddr, uint64_t size)
+bool GraphicsInvalidateGpuMappingRanges(void* context, const Kernel::Memory::KernelGpuMappingRange* ranges, size_t range_count)
 {
 	(void)context;
-	if (vaddr == 0 || size == 0 || vaddr > std::numeric_limits<uint64_t>::max() - size)
+	if (ranges == nullptr || range_count == 0)
 	{
 		return false;
 	}
+	for (size_t i = 0; i < range_count; ++i)
+	{
+		if (ranges[i].vaddr == 0 || ranges[i].size == 0 || ranges[i].vaddr > std::numeric_limits<uint64_t>::max() - ranges[i].size)
+		{
+			return false;
+		}
+	}
+	auto video_ranges = std::unique_ptr<VideoOut::VideoOutBufferRange[]>(
+	    new (std::nothrow) VideoOut::VideoOutBufferRange[range_count]);
+	if (video_ranges == nullptr) { return false; }
+	for (size_t i = 0; i < range_count; ++i)
+	{
+		video_ranges[i] = {ranges[i].vaddr, ranges[i].size};
+	}
 
-	GpuMappingInvalidationTransaction transaction {vaddr, size};
+	GpuMappingInvalidationTransaction transaction {ranges, video_ranges.get(), range_count};
 	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingInvalidation, &transaction);
 }
 
@@ -129,6 +163,35 @@ bool GraphicsReleaseGpuMappingRange(void* context, uint64_t vaddr, uint64_t size
 
 	GpuMappingReleaseTransaction transaction {vaddr, size, completion, completion_data};
 	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingRelease, &transaction);
+}
+
+// The guest mapping and every ordinary GPU object over it stay; only the
+// device-address copies taken under the old rights go, once Kernel has applied
+// the new ones and before any submission can read them again.
+bool GraphicsCompleteGpuMappingProtection(void* data)
+{
+	EXIT_IF(data == nullptr);
+
+	auto* transaction = static_cast<GpuMappingProtectionTransaction*>(data);
+	if (!transaction->completion(transaction->completion_data))
+	{
+		return false;
+	}
+	GuestDeviceAddressInvalidateRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+	return true;
+}
+
+bool GraphicsProtectGpuMappingRange(void* context, uint64_t vaddr, uint64_t size,
+	                                Kernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
+{
+	(void)context;
+	if (vaddr == 0 || size == 0 || vaddr > std::numeric_limits<uint64_t>::max() - size || completion == nullptr)
+	{
+		return false;
+	}
+
+	GpuMappingProtectionTransaction transaction {vaddr, size, completion, completion_data};
+	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingProtection, &transaction);
 }
 
 bool GraphicsQueryPresentationStats(void* context, Kyty::Emulator::PresentationStats::Snapshot* out)
@@ -191,8 +254,9 @@ void GraphicsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 	const Kernel::Memory::GpuMappingLifecycleCallbacks gpu_mapping_lifecycle_callbacks {
 	    nullptr,
 	    GraphicsRegisterGpuMappingRange,
-	    GraphicsInvalidateGpuMappingRange,
+	    GraphicsInvalidateGpuMappingRanges,
 	    GraphicsReleaseGpuMappingRange,
+	    GraphicsProtectGpuMappingRange,
 	};
 	EXIT_IF(!Kernel::Memory::GetGpuMappingLifecyclePort().Install(gpu_mapping_lifecycle_callbacks));
 	const Kyty::Emulator::GuestMemory::Callbacks guest_memory_callbacks {GraphicsQueryMappedRange, GraphicsQueryProtection};
@@ -202,7 +266,8 @@ void GraphicsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 	    GuestTextureLayoutUnregister,
 	    [](uint64_t base, uint64_t size) { (void)GpuMemoryNotifyHostWrite(base, size); },
 	    [](uint64_t base, uint64_t size) { return GpuDirtyPageTracker::Instance().BeginHostWrite(base, size); },
-	    [](uint64_t token) { GpuDirtyPageTracker::Instance().EndHostWrite(token); }};
+	    [](uint64_t token) { GpuDirtyPageTracker::Instance().EndHostWrite(token); },
+	    GuestTextureLayoutPruneStale};
 	EXIT_IF(!Kyty::Emulator::VideoFrameMemory::InstallCallbacks(video_frame_memory_callbacks));
 	const Kyty::Emulator::PresentationStats::Callbacks presentation_stats_callbacks {nullptr, GraphicsQueryPresentationStats};
 	EXIT_IF(!Kyty::Emulator::PresentationStats::GetPort().Install(presentation_stats_callbacks));
@@ -1003,6 +1068,12 @@ struct CommandBuffer
 		const auto up_addr     = reinterpret_cast<uintptr_t>(cursor_up);
 		const auto down_addr   = reinterpret_cast<uintptr_t>(cursor_down);
 
+		// A buffer that has not received memory yet has all four pointers null:
+		// it holds zero dwords and its callback supplies the first block.
+		if ((bottom_addr | top_addr | up_addr | down_addr) == 0)
+		{
+			return true;
+		}
 		if (bottom_addr == 0 || (bottom_addr | top_addr | up_addr | down_addr) % alignof(uint32_t) != 0 || bottom_addr > up_addr ||
 		    up_addr > down_addr || down_addr > top_addr)
 		{
@@ -1026,8 +1097,8 @@ struct CommandBuffer
 		}
 		const auto up_addr      = reinterpret_cast<uintptr_t>(cursor_up);
 		const auto down_addr    = reinterpret_cast<uintptr_t>(cursor_down);
-		const auto available_dw = (down_addr - up_addr) / sizeof(uint32_t);
-		return static_cast<uint32_t>(available_dw) - reserved_dw;
+		const auto available_dw = static_cast<uint32_t>((down_addr - up_addr) / sizeof(uint32_t));
+		return available_dw > reserved_dw ? available_dw - reserved_dw : 0;
 	}
 
 	KYTY_SYSV_ABI bool ReserveDW(uint32_t num_dw)
@@ -2193,6 +2264,35 @@ static bool get_shader_register_address(const ShaderRegister* regs, uint32_t num
 	return *address != 0u;
 }
 
+// The geometry front half runs first in the merged wave and consumes the user
+// data, so the fused program takes the front's user SGPR count; the register
+// budgets must cover both halves.
+static bool merge_geometry_front_resources(ShaderRegister* fused_regs, uint32_t fused_reg_count, const Shader* front)
+{
+	constexpr uint32_t kRsrc1BudgetMask   = (Pm4::SPI_SHADER_PGM_RSRC1_GS_VGPRS_MASK << Pm4::SPI_SHADER_PGM_RSRC1_GS_VGPRS_SHIFT) |
+	                                      (Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_MASK << Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_SHIFT);
+	constexpr uint32_t kRsrc2UserSgprMask = (Pm4::SPI_SHADER_PGM_RSRC2_GS_USER_SGPR_MASK << Pm4::SPI_SHADER_PGM_RSRC2_GS_USER_SGPR_SHIFT) |
+	                                        (Pm4::SPI_SHADER_PGM_RSRC2_GS_USER_SGPR_MSB_MASK << Pm4::SPI_SHADER_PGM_RSRC2_GS_USER_SGPR_MSB_SHIFT);
+
+	const auto  front_reg_count = static_cast<uint32_t>(front->num_sh_registers);
+	const auto* front_rsrc1     = find_shader_register(front->sh_registers, front_reg_count, Pm4::SPI_SHADER_PGM_RSRC1_GS);
+	const auto* front_rsrc2     = find_shader_register(front->sh_registers, front_reg_count, Pm4::SPI_SHADER_PGM_RSRC2_GS);
+	auto*       rsrc1           = find_shader_register(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_RSRC1_GS);
+	auto*       rsrc2           = find_shader_register(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_RSRC2_GS);
+	if (front_rsrc1 == nullptr || front_rsrc2 == nullptr || rsrc1 == nullptr || rsrc2 == nullptr)
+	{
+		return false;
+	}
+
+	const uint32_t vgprs = std::max(rsrc1->value & Pm4::SPI_SHADER_PGM_RSRC1_GS_VGPRS_MASK,
+	                                front_rsrc1->value & Pm4::SPI_SHADER_PGM_RSRC1_GS_VGPRS_MASK);
+	const uint32_t sgprs = std::max(rsrc1->value & (Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_MASK << Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_SHIFT),
+	                                front_rsrc1->value & (Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_MASK << Pm4::SPI_SHADER_PGM_RSRC1_GS_SGPRS_SHIFT));
+	rsrc1->value         = (rsrc1->value & ~kRsrc1BudgetMask) | vgprs | sgprs;
+	rsrc2->value         = (rsrc2->value & ~kRsrc2UserSgprMask) | (front_rsrc2->value & kRsrc2UserSgprMask);
+	return true;
+}
+
 int KYTY_SYSV_ABI GraphicsUnknownGetFusedShaderSize(SizeAlign* dst, const Shader* front, const Shader* back)
 {
 	PRINT_NAME();
@@ -2272,6 +2372,10 @@ int KYTY_SYSV_ABI GraphicsUnknownFuseShaderHalves(Shader* fused_result, const Sh
 
 	if (front->type == kGsFront)
 	{
+		if (!merge_geometry_front_resources(fused_regs, fused_reg_count, front))
+		{
+			return kGraphics5ErrorInvalidShaderHalves;
+		}
 		for (uint32_t occurrence = 0; occurrence < 2; occurrence++)
 		{
 			auto*       dst = find_shader_register(fused_regs, fused_reg_count, Pm4::SPI_SHADER_PGM_CHKSUM_GS, occurrence);
@@ -2870,8 +2974,9 @@ int KYTY_SYSV_ABI GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t*
 
 	if (addr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: addr == nullptr condition ignored (continuing)\n"); }
 	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
-	// type 1: payload at cmd+2 (existing). type 0 observed on the post-logo
-	// path with the same relative payload offset.
+	// type 0: a NOP data packet whose payload follows the header. Guests size it
+	// exactly (a 3-dword NOP carries one 64-bit value) and align larger payloads
+	// themselves. type 1: a register packet whose values follow the offset dword.
 	if (type != 0 && type != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: type != 0 && type != 1 condition ignored (continuing)\n"); }
 
 	const uint32_t header = cmd[0];
@@ -2891,7 +2996,7 @@ int KYTY_SYSV_ABI GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t*
 	}
 	else
 	{
-		*addr = cmd + 2;
+		*addr = type == 0 ? cmd + 1 : cmd + 2;
 	}
 
 	return OK;
@@ -2960,6 +3065,7 @@ uint64_t* GraphicsResolveWaitMemAddressFromPrecedingRelease(const uint32_t* wait
 int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uint64_t address)
 {
 	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), address);
 
 	if (cmd == nullptr)
 	{
@@ -4481,6 +4587,36 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_
 	return cmd;
 }
 
+// sceAgcDcbDrawIndirect: IT_DRAW_INDIRECT from SetBaseIndirect args. The
+// non-indexed form patches no index-location register.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t data_offset = 0x%" PRIx32 "\n", data_offset_in_bytes);
+	KYTY_LOG_DEBUG("\t modifier    = 0x%016" PRIx64 "\n", modifier);
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	const auto patch_offsets = decode_indirect_modifier_patch_offsets(modifier, false);
+
+	cmd[0] = KYTY_PM4(5, Pm4::IT_DRAW_INDIRECT, 0u);
+	cmd[1] = data_offset_in_bytes;
+	cmd[2] = static_cast<uint32_t>(patch_offsets);
+	cmd[3] = static_cast<uint32_t>(patch_offsets >> 32u);
+	cmd[4] = decode_indirect_draw_initiator(modifier);
+	return cmd;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
                                              const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm)
 {
@@ -4804,6 +4940,51 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32
 uint32_t KYTY_SYSV_ABI GraphicsCbJumpGetSize()
 {
 	return 4u * sizeof(uint32_t);
+}
+
+// COND_INDIRECT_BUFFER for sceAgcCbBranch: mode and compare function, the 64-bit
+// compare address, mask and reference, then base, size and cache policy of the
+// buffer run when the compare passes and of the one run when it fails. The
+// argument order follows the published CommandBuffer::branch signature.
+uint32_t* KYTY_SYSV_ABI GraphicsCbBranch(CommandBuffer* buf, uint32_t mode, uint32_t function, const volatile uint64_t* compare_address,
+                                         uint64_t mask, uint64_t reference, uint32_t then_cache_policy, const void* then_target,
+                                         uint32_t then_size_dw, uint32_t else_cache_policy, const void* else_target, uint32_t else_size_dw)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr || mode > 3u || function > 7u || then_cache_policy > 3u || else_cache_policy > 3u || then_size_dw > 0xfffffu ||
+	    else_size_dw > 0xfffffu)
+	{
+		return nullptr;
+	}
+	auto* cmd = buf->AllocateDW(14);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	const auto compare = reinterpret_cast<uint64_t>(compare_address);
+	const auto then_ib = reinterpret_cast<uint64_t>(then_target);
+	const auto else_ib = reinterpret_cast<uint64_t>(else_target);
+	cmd[0]             = KYTY_PM4(14, Pm4::IT_INDIRECT_BUFFER, 0u);
+	cmd[1]             = mode | (function << 8u);
+	cmd[2]             = static_cast<uint32_t>(compare) & ~0x7u;
+	cmd[3]             = static_cast<uint32_t>(compare >> 32u);
+	cmd[4]             = static_cast<uint32_t>(mask);
+	cmd[5]             = static_cast<uint32_t>(mask >> 32u);
+	cmd[6]             = static_cast<uint32_t>(reference);
+	cmd[7]             = static_cast<uint32_t>(reference >> 32u);
+	cmd[8]             = static_cast<uint32_t>(then_ib) & ~0x3u;
+	cmd[9]             = static_cast<uint32_t>(then_ib >> 32u);
+	cmd[10]            = (then_target == nullptr ? 0u : then_size_dw) | (then_cache_policy << 28u);
+	cmd[11]            = static_cast<uint32_t>(else_ib) & ~0x3u;
+	cmd[12]            = static_cast<uint32_t>(else_ib >> 32u);
+	cmd[13]            = (else_target == nullptr ? 0u : else_size_dw) | (else_cache_policy << 28u);
+	return cmd;
+}
+
+uint32_t KYTY_SYSV_ABI GraphicsCbBranchGetSize()
+{
+	return 14u * sizeof(uint32_t);
 }
 
 // sceAgcSetPacketPredication: bit 0 of a packet header marks it predicated (1) or not.

@@ -5,8 +5,8 @@
 
 namespace Kyty::Libs::LibC {
 
-// Minimal MSVC/Orbis-style locale::_Locimp layout used by Dreaming Sarah's
-// ctype facet lookup (use_facet path at guest 0x900134a80):
+// Minimal MSVC/Orbis-style locale::_Locimp layout used by a Construct title's
+// ctype facet lookup (use_facet path):
 //   +0x00 vtable
 //   +0x10 facet**
 //   +0x18 facet count (lookup requires count > id)
@@ -30,16 +30,25 @@ struct alignas(8) CxxLocaleLayout
 	CxxLocimpLayout* ptr;
 };
 
-// The narrow-character facet stores the classification table at +0x10.
-// Guest code indexes this table directly with an unsigned character.
+// ctype<char> as laid out by the guest C++ runtime (0x30 bytes): the
+// classification table at +0x10 and the lowercase and uppercase tables at
+// +0x18 and +0x20, all indexed with an unsigned character. The case
+// conversion slots read these tables through the facet.
 struct alignas(8) CxxCtypeFacetLayout
 {
 	void**               vtable;
 	std::uint64_t        references;
 	const std::uint16_t* table;
+	const short*         tolower_table;
+	const short*         toupper_table;
+	std::int32_t         delete_flag;
 };
 
 static_assert(offsetof(CxxCtypeFacetLayout, table) == 0x10);
+static_assert(offsetof(CxxCtypeFacetLayout, tolower_table) == 0x18);
+static_assert(offsetof(CxxCtypeFacetLayout, toupper_table) == 0x20);
+static_assert(offsetof(CxxCtypeFacetLayout, delete_flag) == 0x28);
+static_assert(sizeof(CxxCtypeFacetLayout) == 0x30);
 
 // Itanium type_info (libstdc++): [0]=vtable, [8]=name (mangled; leading '*' = plain).
 // __si_class_type_info adds [16]=base type_info*.

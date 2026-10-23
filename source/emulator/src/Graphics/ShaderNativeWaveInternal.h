@@ -11,10 +11,30 @@ namespace Kyty::Libs::Graphics {
 // analysis, so that both classify EXEC/VCC words and packed results identically.
 [[nodiscard]] bool ShaderNativeMaskOperand(const ShaderOperand& operand);
 [[nodiscard]] bool ShaderNativePackedResult(const ShaderInstruction& inst);
+// A wave32 ignores the upper halves of EXEC and VCC (RDNA2 ISA 2.1, 3.x), so a VALU lane mask
+// (compare or carry-out destination, carry-in or V_CNDMASK condition) is one dword: the upper
+// SGPR of the pair is neither written nor read. Returns the instruction with each such SGPR/VCC
+// pair narrowed to its low word; an EXEC destination keeps its pair.
+[[nodiscard]] ShaderInstruction ShaderWave32LaneMasks(const ShaderInstruction& inst);
+// The program with ShaderWave32LaneMasks applied to every instruction.
+[[nodiscard]] ShaderCode ShaderWave32LaneMaskProgram(const ShaderCode& code);
 [[nodiscard]] bool ShaderInstructionTypeChangesExec(ShaderInstructionType type);
 [[nodiscard]] bool ShaderInstructionWritesExec(const ShaderInstruction& inst);
 // Branches, program transfers and S_ENDPGM.
 [[nodiscard]] bool ShaderInstructionIsControlFlowBoundary(const ShaderInstruction& inst);
+// Index of the first EXEC write or control-flow boundary. Every instruction before it runs once, under
+// the launch EXEC: the valid mask of the wave's pixels (RDNA2 ISA 3.x; an export with VM sends EXEC as it).
+[[nodiscard]] uint32_t ShaderLaunchExecEnd(const ShaderCode& code);
+// V_MBCNT_{LO,HI}_U32_B32 at `index` whose mask is its own half of the launch EXEC, so with S1 it counts the
+// valid pixels below the lane.
+[[nodiscard]] bool ShaderCountsLaunchExec(const ShaderCode& code, uint32_t index, uint32_t launch_exec_end);
+// Proves compiler spill slots, not arbitrary LDS. Every ADD_TID access addresses an exact M0 plane
+// (M0[15:0] + offset + TID*4, RDNA2 ISA 10.4) inside the first `reserved_bytes`, planes are equal or
+// disjoint, and no other LDS instruction can observe their bytes, so no lane can address another
+// lane's dword. A lane then only reads dwords it alone stores, whatever EXEC, branches or loops lie
+// between the store and the reload. Each read must follow a store to its plane on every path, and
+// every interpolation must observe the launch parameter M0 held in `parameter_sgpr` (-1: none).
+[[nodiscard]] bool ShaderAddtidAccessesArePrivatePlanes(const ShaderCode& code, int parameter_sgpr, uint64_t reserved_bytes);
 
 } // namespace Kyty::Libs::Graphics
 

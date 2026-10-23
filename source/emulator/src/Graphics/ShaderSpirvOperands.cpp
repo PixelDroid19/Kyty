@@ -153,6 +153,20 @@ String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result)
 )").ReplaceStr("<p>", predicate).ReplaceStr("<r>", result) + NativeQuadUniform(result + "_raw", "v4uint", result);
 }
 
+String8 Spirv::NativeValidPixelBallot(const String8& result) const
+{
+	EXIT_IF(GetHostShaderType() != ShaderType::Pixel);
+	// A helper is no valid pixel; with maximal reconvergence it is active and votes false.
+	return String8(R"(
+%<r>_exec = OpLoad %uint %exec_lane_lo
+%<r>_live = OpINotEqual %bool %<r>_exec %uint_0
+%<r>_helper = OpLoad %bool %gl_HelperInvocation
+%<r>_real = OpLogicalNot %bool %<r>_helper
+%<r>_valid = OpLogicalAnd %bool %<r>_live %<r>_real
+%<r> = OpGroupNonUniformBallot %v4uint %uint_3 %<r>_valid
+)").ReplaceStr("<r>", result);
+}
+
 String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index, const String8& source) const
 {
 	String8 result = source;
@@ -507,6 +521,13 @@ SpirvValue operand_variable_to_str(ShaderOperand op, int shift)
 				ret.value = "vcc_lo";
 				ret.type  = SpirvType::Uint;
 			} else if (shift == 1)
+			{
+				ret.value = "vcc_hi";
+				ret.type  = SpirvType::Uint;
+			}
+			break;
+		case ShaderOperandType::VccHi:
+			if (op.size == 1 && shift == 0)
 			{
 				ret.value = "vcc_hi";
 				ret.type  = SpirvType::Uint;

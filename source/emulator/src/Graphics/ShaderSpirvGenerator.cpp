@@ -1,12 +1,15 @@
 #include "Kyty/Core/MagicEnum.h"
 #include "ShaderSpirvInternal.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderComputeWaveSdwa.h"
 
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
+#include "ShaderNativeWaveInternal.h"
 #include "ShaderStorageAnalysis.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/ShaderMetadataResourceIndex.h"
 #include "Emulator/Graphics/ShaderNggFront.h"
@@ -90,6 +93,27 @@ static int ResolveVertexParameterCount(const ShaderCode& code, const ShaderVerte
 	return count;
 }
 
+uint32_t SpirvResolveVertexParameterCount(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info)
+{
+	return static_cast<uint32_t>(ResolveVertexParameterCount(code, vs_input_info));
+}
+
+static bool ShaderInstructionClearsExecLoToZero(const ShaderInstruction& inst)
+{
+	const bool width_matches =
+	    (inst.type == ShaderInstructionType::SMovB32 && inst.format == ShaderInstructionFormat::SVdstSVsrc0) ||
+	    (inst.type == ShaderInstructionType::SMovB64 && inst.format == ShaderInstructionFormat::Sdst2Ssrc02);
+	return width_matches && inst.dst.type == ShaderOperandType::ExecLo && inst.src_num == 1 &&
+	       inst.src[0].type == ShaderOperandType::IntegerInlineConstant && inst.src[0].constant.i == 0;
+}
+
+static bool ShaderInstructionClearsWholeExec(const ShaderInstruction& inst, const ShaderPixelInputInfo* pixel_input)
+{
+	if (!ShaderInstructionClearsExecLoToZero(inst)) { return false; }
+	return inst.type == ShaderInstructionType::SMovB64 ||
+	       (pixel_input != nullptr && pixel_input->native_wave.guest_wave_size == 32u);
+}
+
 static bool ShaderCodeCanDiscard(const ShaderCode& code)
 {
 	const auto& instructions = code.GetInstructions();
@@ -103,15 +127,20 @@ static bool ShaderCodeCanDiscard(const ShaderCode& code)
 		if (index == 0 || index + 1 >= instructions.Size()) { continue; }
 		const auto& previous = instructions.At(index - 1);
 		const auto& next     = instructions.At(index + 1);
-		if (previous.type == ShaderInstructionType::SMovB64 && previous.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
-		    previous.dst.type == ShaderOperandType::ExecLo && previous.src[0].type == ShaderOperandType::IntegerInlineConstant &&
-		    previous.src[0].constant.i == 0 && current.type == ShaderInstructionType::Exp && ShaderIsNullMrtDoneFormat(current.format) &&
+		if (ShaderInstructionClearsExecLoToZero(previous) && current.type == ShaderInstructionType::Exp &&
+		    ShaderIsNullMrtDoneFormat(current.format) &&
 		    next.type == ShaderInstructionType::SEndpgm)
 		{
 			return true;
 		}
 	}
 	return false;
+}
+
+static bool ShaderIsPixelDepthExport(const ShaderInstruction& inst)
+{
+	return inst.type == ShaderInstructionType::Exp && (inst.format == ShaderInstructionFormat::PixelZVsrc0Vm ||
+	                                                   inst.format == ShaderInstructionFormat::PixelZVsrc0VmDone);
 }
 
 static bool ShaderCodeHasPixelDepthExport(const ShaderCode& code)
@@ -122,7 +151,7 @@ static bool ShaderCodeHasPixelDepthExport(const ShaderCode& code)
 	}
 	for (const auto& inst: code.GetInstructions())
 	{
-		if (inst.type == ShaderInstructionType::Exp && inst.format == ShaderInstructionFormat::PixelZVsrc0VmDone)
+		if (ShaderIsPixelDepthExport(inst))
 		{
 			return true;
 		}
@@ -130,62 +159,85 @@ static bool ShaderCodeHasPixelDepthExport(const ShaderCode& code)
 	return false;
 }
 
-static bool ShaderInstructionChangesControlFlow(const ShaderInstruction& inst)
+// FragDepth requires an exact depth write on every exit that keeps an
+// invocation alive. Each S_ENDPGM must close a straight-line block that either
+// holds the exact Pixel-Z export or is a discard tail (EXEC cleared, then the
+// valid-mask-only export). A branch target may be entered from any branch, so it
+// starts a new block; a conditional branch's fall-through only continues its
+// own block. Indirect jumps have no static target and are rejected.
+static bool ShaderCodeHasSafePixelDepthExport(const ShaderCode& code, const ShaderPixelInputInfo* pixel_input)
 {
-	switch (inst.type)
-	{
-		case ShaderInstructionType::SBranch:
-		case ShaderInstructionType::SCbranchExecz:
-		case ShaderInstructionType::SCbranchExecnz:
-		case ShaderInstructionType::SCbranchScc0:
-		case ShaderInstructionType::SCbranchScc1:
-		case ShaderInstructionType::SCbranchVccz:
-		case ShaderInstructionType::SCbranchVccnz:
-		case ShaderInstructionType::SSetpcB64:
-		case ShaderInstructionType::SSwappcB64: return true;
-		default: return false;
-	}
-}
-
-// FragDepth requires an exact depth write on every non-discard exit. The
-// current emitter has no general depth-export CFG lowering, so admit only the
-// linear graph we can prove: one exact export followed by the sole terminal
-// s_endpgm. Any explicit label or control transfer could introduce a bypass
-// (including an early return), and is rejected rather than guessed.
-static bool ShaderCodeHasSafePixelDepthExport(const ShaderCode& code)
-{
-	if (code.GetType() != ShaderType::Pixel || code.GetLabels().Size() != 0 || code.GetIndirectLabels().Size() != 0)
+	if (code.GetType() != ShaderType::Pixel)
 	{
 		return false;
 	}
 
+	const auto label_at = [&code](uint32_t pc)
+	{
+		for (const auto& label: code.GetLabels())
+		{
+			if (label.GetDst() == pc) { return true; }
+		}
+		return false;
+	};
 	const auto& instructions = code.GetInstructions();
-	bool        has_depth    = false;
+	bool        any_depth    = false;
+	bool        block_depth  = false;
+	bool        exec_cleared = false;
+	bool        exec_empty_or_unknown = false;
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		const auto& inst = instructions.At(index);
-		if (inst.type == ShaderInstructionType::Unknown || ShaderInstructionChangesControlFlow(inst))
+		if (label_at(inst.pc))
+		{
+			block_depth  = false;
+			exec_cleared = false;
+			exec_empty_or_unknown = false;
+		}
+		if (inst.type == ShaderInstructionType::Unknown || inst.type == ShaderInstructionType::SSetpcB64 ||
+		    inst.type == ShaderInstructionType::SSwappcB64)
 		{
 			return false;
 		}
-		if (inst.type == ShaderInstructionType::Exp && inst.format == ShaderInstructionFormat::PixelZVsrc0VmDone)
+		if (ShaderIsPixelDepthExport(inst))
 		{
-			if (has_depth || inst.src_num != 1 || inst.exp_enable_mask != 0x1u || inst.src[0].type != ShaderOperandType::Vgpr ||
-			    inst.src[0].size != 1)
+			if (inst.src_num != 1 || inst.exp_enable_mask != 0x1u || inst.src[0].type != ShaderOperandType::Vgpr || inst.src[0].size != 1)
 			{
 				return false;
 			}
-			has_depth = true;
+			any_depth = true;
+			// An export issued under an empty EXEC mask proves nothing about
+			// lanes that a later restore can make live. Keep a prior valid export
+			// when the mask was only narrowed after that export.
+			if (!exec_empty_or_unknown) { block_depth = true; }
+		}
+		if (ShaderInstructionWritesExec(inst))
+		{
+			const bool exec_zero = ShaderInstructionClearsExecLoToZero(inst);
+			exec_cleared = ShaderInstructionClearsWholeExec(inst, pixel_input);
+			exec_empty_or_unknown =
+			    exec_zero && (inst.type == ShaderInstructionType::SMovB64 || pixel_input == nullptr ||
+			                  pixel_input->native_wave.guest_wave_size == 0u || pixel_input->native_wave.guest_wave_size == 32u);
+			// Directly assigning zero to EXEC only removes lanes; it cannot introduce
+			// lanes that lacked an earlier depth write. Other updates may restore lanes,
+			// so require a new Pixel-Z export after them.
+			if (!exec_zero) { block_depth = false; }
 		}
 		if (inst.type == ShaderInstructionType::SEndpgm)
 		{
-			// The only exit must be terminal and follows the exact Pixel-Z export,
-			// which establishes dominance for every reachable non-discard exit.
-			return has_depth && inst.format == ShaderInstructionFormat::Empty && index + 1 == instructions.Size();
+			const bool discard_tail = exec_cleared && index > 0 && instructions.At(index - 1).type == ShaderInstructionType::Exp &&
+			                          instructions.At(index - 1).format == ShaderInstructionFormat::NullVmDone;
+			if (inst.format != ShaderInstructionFormat::Empty || (!block_depth && !discard_tail))
+			{
+				return false;
+			}
+			block_depth  = false;
+			exec_cleared = false;
+			exec_empty_or_unknown = false;
 		}
 	}
 
-	return false;
+	return any_depth && !instructions.IsEmpty() && instructions.At(instructions.Size() - 1).type == ShaderInstructionType::SEndpgm;
 }
 
 uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
@@ -199,6 +251,80 @@ uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
 	return descriptor_set;
 }
 
+namespace {
+struct SdwaSelect
+{
+	uint32_t width;
+	uint32_t offset;
+	uint32_t field;
+};
+
+// DST_SEL 0-3 = BYTE_0-3, 4-5 = WORD_0-1 (ISA table 88).
+SdwaSelect SdwaDestinationSelect(const ShaderInstruction& instruction)
+{
+	static constexpr uint32_t kOffset[] = {0u, 8u, 16u, 24u, 0u, 16u};
+	const uint32_t            dst_sel   = (instruction.vop_sdwa_ctrl >> 8u) & 7u;
+	const uint32_t            width     = dst_sel < 4u ? 8u : 16u;
+	return {width, kOffset[dst_sel], ((1u << width) - 1u) << kOffset[dst_sel]};
+}
+} // namespace
+
+bool Spirv::EmitSdwaPartialDestinationInstruction(const RecompilerFunc* func, const ShaderInstruction& instruction, uint32_t index,
+                                              String8* output)
+{
+	if (output == nullptr || func == nullptr || func->type != instruction.type || func->format != instruction.format ||
+	    !ShaderSdwaPartialDestinationSupported(instruction))
+	{
+		return false;
+	}
+	String8 whole;
+	if (!func->func(static_cast<int>(index), m_code, &whole, this, func->param, func->scc_check))
+	{
+		return false;
+	}
+	// ISA table 88: DST_SEL places the result's low byte or word in its field; DST_U pads the other bits
+	// with zeros (0), sign-extends above the field and zeroes below it (1), or keeps the prior bits (2).
+	// An inactive lane keeps its prior value.
+	const auto     select = SdwaDestinationSelect(instruction);
+	const uint32_t width  = select.width;
+	const uint32_t offset = select.offset;
+	const uint32_t field  = select.field;
+	const uint32_t dst_u  = (instruction.vop_sdwa_ctrl >> 11u) & 3u;
+	const int      vgpr   = instruction.dst.register_id;
+
+	String8 merged;
+	if (dst_u == 1u)
+	{
+		merged = String8::FromPrintf("%%sdwa_sext_%u = OpBitFieldSExtract %%uint %%sdwa_new_bits_%u %%%s %%%s\n"
+		                             "%%sdwa_merged_%u = OpShiftLeftLogical %%uint %%sdwa_sext_%u %%%s\n",
+		                             index, index, GetConstantUint(0u).c_str(), GetConstantUint(width).c_str(), index, index,
+		                             GetConstantUint(offset).c_str());
+	} else
+	{
+		merged = String8::FromPrintf("%%sdwa_shifted_%u = OpShiftLeftLogical %%uint %%sdwa_new_bits_%u %%%s\n"
+		                             "%%sdwa_field_%u = OpBitwiseAnd %%uint %%sdwa_shifted_%u %%%s\n",
+		                             index, index, GetConstantUint(offset).c_str(), index, index, GetConstantUint(field).c_str());
+		merged += dst_u == 0u ? String8::FromPrintf("%%sdwa_merged_%u = OpCopyObject %%uint %%sdwa_field_%u\n", index, index)
+		                      : String8::FromPrintf("%%sdwa_kept_%u = OpBitwiseAnd %%uint %%sdwa_old_bits_%u %%%s\n"
+		                                            "%%sdwa_merged_%u = OpBitwiseOr %%uint %%sdwa_kept_%u %%sdwa_field_%u\n",
+		                                            index, index, GetConstantUint(~field).c_str(), index, index, index);
+	}
+	*output += String8::FromPrintf("%%sdwa_old_%u = OpLoad %%float %%v%d\n", index, vgpr);
+	*output += whole;
+	*output += String8::FromPrintf("%%sdwa_new_%u = OpLoad %%float %%v%d\n"
+	                               "%%sdwa_new_bits_%u = OpBitcast %%uint %%sdwa_new_%u\n"
+	                               "%%sdwa_old_bits_%u = OpBitcast %%uint %%sdwa_old_%u\n",
+	                               index, vgpr, index, index, index, index);
+	*output += merged;
+	*output += String8::FromPrintf("%%sdwa_exec_%u = OpLoad %%uint %%exec_lo\n"
+	                               "%%sdwa_active_%u = OpINotEqual %%bool %%sdwa_exec_%u %%uint_0\n"
+	                               "%%sdwa_value_%u = OpSelect %%uint %%sdwa_active_%u %%sdwa_merged_%u %%sdwa_old_bits_%u\n"
+	                               "%%sdwa_store_%u = OpBitcast %%float %%sdwa_value_%u\n"
+	                               "OpStore %%v%d %%sdwa_store_%u\n",
+	                               index, index, index, index, index, index, index, index, index, vgpr, index);
+	return true;
+}
+
 void Spirv::GenerateSource()
 {
 	m_source.Clear();
@@ -207,7 +333,9 @@ void Spirv::GenerateSource()
 	// format malformed operands through the debug instruction printer here.
 	for (const auto& inst: m_code.GetInstructions())
 	{
-		if (!ShaderInstructionLoweringPreconditions(inst))
+		const bool represented =
+		    UsesComputeWaveBanks() ? ShaderInstructionLoweringPreconditions(inst) : ShaderInstructionPerLaneLoweringPreconditions(inst);
+		if (!represented)
 		{
 			EXIT("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64 " pc=0x%08" PRIx32
 			     " reason=lowering-preconditions src_num=%d mimg_address_num=%d sopp=0x%02x raw=0x%08" PRIx32 "\n",
@@ -219,15 +347,20 @@ void Spirv::GenerateSource()
 	{
 		const auto analysis = UsesFragmentCompute() ? ShaderAnalyzeFragmentWaveCode(m_code, *m_ps_input_info, *m_cs_input_info,
 		                                                                              m_fragment_compute_info->user_sgpr_count)
-		                                           : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
+		                      : UsesGeometryCompute() ? ShaderAnalyzeGeometryWaveCode(m_code, *m_cs_input_info)
+		                                              : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
 		if (!analysis.supported)
 		{
 			EXIT("paired-wave instruction contract unsupported: pc=0x%08" PRIx32 " reason=%s\n",
 			     analysis.unsupported_pc, analysis.reason.c_str());
 		}
 	}
+	if (UsesNativeComputeWave() && !NativeComputeWaveLayoutIsValid())
+	{
+		EXIT("native-wave compute coordinate layout unsupported or inconsistent\n");
+	}
 
-	if (ShaderCodeHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code))
+	if (ShaderCodeHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
 		               "WARNING: pixel depth export rejected: control flow cannot prove a FragDepth write before every non-discard exit\n");
@@ -236,6 +369,20 @@ void Spirv::GenerateSource()
 		// an empty source can be assembled or served by its source cache.
 		m_source = "OpKytyPixelDepthControlFlowRejected\n";
 		return;
+	}
+	if (!UsesComputeWaveBanks())
+	{
+		// Structured emission derives loops and merges from the guest CFG. Fail
+		// closed on transfers it cannot express instead of emitting invalid SPIR-V;
+		// the banked block dispatcher needs no structurization.
+		m_control_flow = ShaderBuildControlFlowGraph(m_code);
+		if (!m_control_flow.Structurable())
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: structured control flow rejected: pc=0x%08" PRIx32 " reason=%s\n",
+			               m_control_flow.reject_pc, ShaderCfgRejectName(m_control_flow.reject));
+			m_source = "OpKytyControlFlowRejected\n";
+			return;
+		}
 	}
 
 	switch (m_code.GetType())
@@ -283,6 +430,23 @@ void Spirv::GenerateSource()
 	WriteInstructions();
 	WriteMainEpilog();
 	WriteFunctions();
+}
+
+// A dual-source pixel module is exactly the MRT0 and MRT1 color pair, both with supported mode 4 (COMPR) or 9 (full).
+// The program must have real color exports, and no other target may be declared.
+static bool DualSourcePixelVariantMalformed(const ShaderPixelInputInfo& input, bool only_null_exports)
+{
+	const uint8_t mode = input.target_output_mode[0];
+	if (only_null_exports || (mode != 4 && mode != 9) || input.target_output_mode[1] != mode)
+	{
+		return true;
+	}
+	uint8_t extra_modes = 0;
+	for (int rt = 2; rt < 8; rt++)
+	{
+		extra_modes |= input.target_output_mode[rt];
+	}
+	return extra_modes != 0;
 }
 
 static bool spirv_uses_dpp(const ShaderCode& code)
@@ -449,6 +613,11 @@ void Spirv::WriteHeader()
 		capabilities.Add("OpCapability ShaderLayer");
 		vars.Add("%gl_Layer");
 	}
+	if (m_ps_input_info != nullptr && m_ps_input_info->AncillaryEnabled())
+	{
+		capabilities.Add("OpCapability Geometry");
+	}
+	if (UsesVertexClipDistance0Export()) { capabilities.Add("OpCapability ClipDistance"); }
 
 	if (Config::SpirvDebugPrintfEnabled())
 	{
@@ -457,11 +626,14 @@ void Spirv::WriteHeader()
 	}
 
 	if (spirv_uses_subgroup_invocation(m_code) || UsesSparsePixelSampleProbe() || UsesComputeWaveBanks() ||
-	    UsesFragmentWaveTier())
+	    UsesNativeComputeWave() || UsesFragmentWaveTier())
 	{
 		capabilities.Add("OpCapability GroupNonUniform");
+		// A pixel append reads its leader's counter value with a shuffle.
+		const bool pixel_append = GetHostShaderType() == ShaderType::Pixel &&
+		                          m_code.HasAnyOf({ShaderInstructionType::DsAppend, ShaderInstructionType::DsConsume});
 		if ((spirv_uses_dpp(m_code) && GetHostShaderType() != ShaderType::Pixel) || spirv_uses_dpp_row(m_code) ||
-		    spirv_uses_lane_exchange(m_code) || UsesComputeWaveBanks() || UsesFragmentWaveTier())
+		    spirv_uses_lane_exchange(m_code) || UsesComputeWaveBanks() || UsesFragmentWaveTier() || pixel_append)
 		{
 			capabilities.Add("OpCapability GroupNonUniformShuffle");
 		}
@@ -470,7 +642,7 @@ void Spirv::WriteHeader()
 			capabilities.Add("OpCapability GroupNonUniformQuad");
 			vars.Add("%gl_HelperInvocation");
 		}
-		if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks())
+		if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks() || UsesNativeComputeWave())
 		{
 			capabilities.Add("OpCapability GroupNonUniformBallot");
 		}
@@ -478,7 +650,7 @@ void Spirv::WriteHeader()
 		{
 			capabilities.Add("OpCapability GroupNonUniformArithmetic");
 		}
-		if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks() || UsesFragmentWaveTier())
+		if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks() || UsesNativeComputeWave() || UsesFragmentWaveTier())
 		{
 			vars.Add("%gl_SubgroupInvocationID");
 		}
@@ -486,7 +658,7 @@ void Spirv::WriteHeader()
 		{
 			vars.Add("%gl_SubgroupSize");
 		}
-		if (UsesComputeWaveBanks())
+		if (UsesComputeWaveBanks() || UsesNativeComputeWave())
 		{
 			vars.Add("%gl_SubgroupID");
 		}
@@ -570,13 +742,13 @@ void Spirv::WriteHeader()
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
 			vars.Add("%textures2D_L");
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd})) { vars.Add("%textures2D_LU"); }
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap})) { vars.Add("%textures2D_LU"); }
 		}
 		if (m_bind->samplers.samplers_num > 0)
 		{
 			vars.Add("%samplers");
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			vars.Add("%gds");
 		}
@@ -592,7 +764,7 @@ void Spirv::WriteHeader()
 			// Location 0 always uses %outColor (legacy name). Additional RTs that
 			// have a non-zero target_output_mode are declared as %outColorN.
 			if (!ShaderHasOnlyNullPixelExports(m_code)) { vars.Add("%outColor"); }
-			if (ShaderCodeHasSafePixelDepthExport(m_code))
+			if (ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 			{
 				vars.Add("%fragDepth");
 			}
@@ -619,9 +791,8 @@ void Spirv::WriteHeader()
 				}
 				WriteCustomPixelInterface(&vars);
 				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("%gl_FrontFacing"); }
-				if (m_ps_input_info->ps_pos_xy ||
-				    (m_ps_input_info->custom_interpolation.Enabled() && (m_ps_input_info->system_input_enable & 0xf00u) != 0) ||
-				    UsesPixelMrtProbe())
+				if (m_ps_input_info->AncillaryEnabled()) { vars.Add("%gl_LayerIn"); }
+				if (m_ps_input_info->ps_position || UsesPixelMrtProbe())
 				{
 					vars.Add("%gl_FragCoord");
 				}
@@ -652,7 +823,7 @@ void Spirv::WriteHeader()
 				extensions.Add("OpExtension \"SPV_KHR_maximal_reconvergence\"");
 				execution_modes.Add("OpExecutionMode %main MaximallyReconvergesKHR\n");
 			}
-			if (ShaderCodeHasSafePixelDepthExport(m_code))
+			if (ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 			{
 				execution_modes.Add("OpExecutionMode %main DepthReplacing\n");
 			}
@@ -683,7 +854,8 @@ void Spirv::WriteHeader()
 		case ShaderType::Compute:
 			if (m_cs_input_info != nullptr)
 			{
-				const auto* local_size = UsesComputeWaveBanks() ? m_cs_input_info->wave_layout.physical_local : m_cs_input_info->threads_num;
+				const auto* local_size = UsesComputeWaveBanks() || UsesNativeComputeWave() ? m_cs_input_info->wave_layout.physical_local
+				                                                                           : m_cs_input_info->threads_num;
 				execution_modes.Add(String8::FromPrintf("OpExecutionMode %%main LocalSize %u %u %u", local_size[0], local_size[1], local_size[2]));
 				if (m_cs_input_info->lds_dwords > 0)
 				{
@@ -836,7 +1008,7 @@ void Spirv::WriteAnnotations()
 		vars.Add("OpDecorate %gl_SubgroupSize BuiltIn SubgroupSize");
 		vars.Add("OpDecorate %gl_SubgroupSize Flat");
 	}
-	if (UsesComputeWaveBanks())
+	if (UsesComputeWaveBanks() || UsesNativeComputeWave())
 	{
 		vars.Add("OpDecorate %gl_SubgroupID BuiltIn SubgroupId");
 	}
@@ -845,7 +1017,12 @@ void Spirv::WriteAnnotations()
 	{
 		case ShaderType::Pixel:
 			if (!ShaderHasOnlyNullPixelExports(m_code)) { vars.Add("OpDecorate %outColor Location 0"); }
-			if (ShaderCodeHasSafePixelDepthExport(m_code))
+			if (m_ps_input_info != nullptr && m_ps_input_info->dual_source_blend &&
+			    DualSourcePixelVariantMalformed(*m_ps_input_info, ShaderHasOnlyNullPixelExports(m_code)))
+			{
+				EXIT("dual-source pixel module requires MRT0 and MRT1 color exports only\n");
+			}
+			if (ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 			{
 				vars.Add("OpDecorate %fragDepth BuiltIn FragDepth");
 			}
@@ -855,7 +1032,10 @@ void Spirv::WriteAnnotations()
 				{
 					if (m_ps_input_info->target_output_mode[rt] != 0 && !ShaderHasOnlyNullPixelExports(m_code))
 					{
-						vars.Add(String8::FromPrintf("OpDecorate %%outColor%d Location %d", rt, rt));
+						// SRC1 consumers read MRT1 as the secondary color of Location 0.
+						const bool secondary = rt == 1 && m_ps_input_info->dual_source_blend;
+						vars.Add(String8::FromPrintf("OpDecorate %%outColor%d Location %d", rt, secondary ? 0 : rt));
+						if (secondary) { vars.Add("OpDecorate %outColor1 Index 1"); }
 					}
 				}
 				for (uint32_t i = 0; i < m_ps_input_info->input_num; i++)
@@ -899,9 +1079,12 @@ void Spirv::WriteAnnotations()
 				}
 				WriteCustomPixelAnnotations(&vars);
 				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("OpDecorate %gl_FrontFacing BuiltIn FrontFacing"); }
-				if (m_ps_input_info->ps_pos_xy ||
-				    (m_ps_input_info->custom_interpolation.Enabled() && (m_ps_input_info->system_input_enable & 0xf00u) != 0) ||
-				    UsesPixelMrtProbe())
+				if (m_ps_input_info->AncillaryEnabled())
+				{
+					vars.Add("OpDecorate %gl_LayerIn BuiltIn Layer");
+					vars.Add("OpDecorate %gl_LayerIn Flat");
+				}
+				if (m_ps_input_info->ps_position || UsesPixelMrtProbe())
 				{
 					vars.Add("OpDecorate %gl_FragCoord BuiltIn FragCoord");
 				}
@@ -1075,7 +1258,7 @@ void Spirv::WriteAnnotations()
 			m_source += String8(textures_annotations_l)
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_storage_index));
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap}))
 			{
 				m_source += String8(textures_annotations_l).ReplaceStr("textures2D_L", "textures2D_LU")
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
@@ -1088,7 +1271,7 @@ void Spirv::WriteAnnotations()
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->samplers.binding_index));
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			m_source += String8(gds_annotations)
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
@@ -1140,6 +1323,8 @@ void Spirv::WriteTypes()
            %_ptr_Input_v4float = OpTypePointer Input %v4float
             %_ptr_Input_v3uint = OpTypePointer Input %v3uint
           %_ptr_Output_v4float = OpTypePointer Output %v4float
+           %_ptr_Output_v4uint = OpTypePointer Output %v4uint
+            %_ptr_Output_uint = OpTypePointer Output %uint
            %_ptr_Output_float = OpTypePointer Output %float
              %_ptr_Output_int = OpTypePointer Output %int
           %_ptr_Function_float = OpTypePointer Function %float
@@ -1175,6 +1360,9 @@ void Spirv::WriteTypes()
  %function_tbuffer_load_store_format_x = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
 %function_tbuffer_load_store_format_xy = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
 %function_tbuffer_load_store_format_xyz = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
+%function_gen5_buffer_format_bytes = OpTypeFunction %uint %uint
+%function_gen5_buffer_element = OpTypeFunction %v4uint %v4uint %uint %uint
+%function_gen5_buffer_load_words = OpTypeFunction %v4uint %uint %uint %uint
           %function_sbuffer_load_dword = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_2 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_4 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
@@ -1471,7 +1659,7 @@ static const char* textures_loaded_types = R"(
 		}
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
-			const bool has_atomics = m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd});
+			const bool has_atomics = m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
 			const bool shared_atomic_type = has_atomics && uint_storage && std::strcmp(image_format, "R32ui") == 0 &&
 			                                std::strcmp(storage_arrayed, "0") == 0;
 			if (shared_atomic_type)
@@ -1507,7 +1695,7 @@ static const char* textures_loaded_types = R"(
 		{
 			m_source += String8(samplers_types).ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->samplers.samplers_num));
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			m_source += String8(gds_types);
 		}
@@ -1577,7 +1765,7 @@ void Spirv::WriteGlobalVariables()
 	{
 		vars.Add("%gl_SubgroupSize = OpVariable %_ptr_Input_uint Input");
 	}
-	if (UsesComputeWaveBanks())
+	if (UsesComputeWaveBanks() || UsesNativeComputeWave())
 	{
 		vars.Add("%gl_SubgroupID = OpVariable %_ptr_Input_uint Input");
 	}
@@ -1588,7 +1776,8 @@ void Spirv::WriteGlobalVariables()
 
 	if (GetHostShaderType() == ShaderType::Pixel && !ShaderHasOnlyNullPixelExports(m_code))
 	{
-		vars.Add("%outColor = OpVariable %_ptr_Output_v4float Output");
+		const char* pointer_type = ShaderIsUint16MrtOutput(m_ps_input_info, 0u) ? "%_ptr_Output_v4uint" : "%_ptr_Output_v4float";
+		vars.Add(String8::FromPrintf("%%outColor = OpVariable %s Output", pointer_type));
 	}
 	if (GetHostShaderType() == ShaderType::Pixel && m_ps_input_info != nullptr && !ShaderHasOnlyNullPixelExports(m_code))
 	{
@@ -1596,11 +1785,13 @@ void Spirv::WriteGlobalVariables()
 		{
 			if (m_ps_input_info->target_output_mode[rt] != 0)
 			{
-				vars.Add(String8::FromPrintf("%%outColor%d = OpVariable %%_ptr_Output_v4float Output", rt));
+				const char* pointer_type =
+				    ShaderIsUint16MrtOutput(m_ps_input_info, static_cast<uint32_t>(rt)) ? "%_ptr_Output_v4uint" : "%_ptr_Output_v4float";
+				vars.Add(String8::FromPrintf("%%outColor%d = OpVariable %s Output", rt, pointer_type));
 			}
 		}
 	}
-	if (GetHostShaderType() == ShaderType::Pixel && ShaderCodeHasSafePixelDepthExport(m_code))
+	if (GetHostShaderType() == ShaderType::Pixel && ShaderCodeHasSafePixelDepthExport(m_code, m_ps_input_info))
 	{
 		vars.Add("%fragDepth = OpVariable %_ptr_Output_float Output");
 	}
@@ -1656,7 +1847,7 @@ void Spirv::WriteGlobalVariables()
 		{
 			vars.Add(String8::FromPrintf("%%textures2D_L = OpVariable %%_ptr_UniformConstant__arr_ImageL_uint_%d UniformConstant",
 			                             m_bind->textures2D.textures2d_storage_num));
-			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap}))
 			{
 				vars.Add(String8::FromPrintf("%%textures2D_LU = OpVariable %%_ptr_UniformConstant__arr_ImageLU_uint_%d UniformConstant",
 				                             m_bind->textures2D.textures2d_storage_num));
@@ -1667,7 +1858,7 @@ void Spirv::WriteGlobalVariables()
 			vars.Add(String8::FromPrintf("%%samplers = OpVariable %%_ptr_UniformConstant__arr_Sampler_uint_%d UniformConstant",
 			                             m_bind->samplers.samplers_num));
 		}
-		if (m_bind->gds_pointers.pointers_num > 0)
+		if (ShaderGdsBufferBound(m_bind->gds_pointers))
 		{
 			vars.Add("%gds = OpVariable %_ptr_StorageBuffer_GDS StorageBuffer");
 		}
@@ -1708,9 +1899,8 @@ void Spirv::WriteGlobalVariables()
 				}
 				WriteCustomPixelVariables(&vars);
 				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("%gl_FrontFacing = OpVariable %_ptr_Input_bool Input"); }
-				if (m_ps_input_info->ps_pos_xy ||
-				    (m_ps_input_info->custom_interpolation.Enabled() && (m_ps_input_info->system_input_enable & 0xf00u) != 0) ||
-				    UsesPixelMrtProbe())
+				if (m_ps_input_info->AncillaryEnabled()) { vars.Add("%gl_LayerIn = OpVariable %_ptr_Input_int Input"); }
+				if (m_ps_input_info->ps_position || UsesPixelMrtProbe())
 				{
 					vars.Add("%gl_FragCoord = OpVariable %_ptr_Input_v4float Input");
 				}
@@ -1748,7 +1938,7 @@ void Spirv::WriteGlobalVariables()
 		case ShaderType::Compute:
 			if (m_cs_input_info != nullptr)
 			{
-				if (UsesComputeWaveBanks())
+				if (UsesComputeWaveBanks() || UsesNativeComputeWave())
 				{
 					// WorkgroupSize takes precedence over LocalSize in Vulkan;
 					// both must describe physical invocations, not guest lanes.
@@ -1940,52 +2130,15 @@ void Spirv::WriteLocalVariables()
 		}
 	}
 
-	if (m_code.GetType() == ShaderType::Pixel && !UsesFragmentCompute())
-	{
-		if (m_ps_input_info != nullptr && m_ps_input_info->ps_pos_xy && !m_ps_input_info->custom_interpolation.Enabled())
-		{
-			static const char* native_text = R"(
-         %FragCoord_px = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0
-         %FragCoord_x = OpLoad %float %FragCoord_px
-               OpStore %v2 %FragCoord_x
-         %FragCoord_py = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_1
-         %FragCoord_y = OpLoad %float %FragCoord_py
-               OpStore %v3 %FragCoord_y
-)";
-			static const char* scaled_text = R"(
-         %FragCoord_px = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0
-         %FragCoord_x = OpLoad %float %FragCoord_px
-         %FragCoord_scale_x = OpFDiv %float %<x_numerator> %<x_denominator>
-         %FragCoord_guest_x = OpFMul %float %FragCoord_x %FragCoord_scale_x
-               OpStore %v2 %FragCoord_guest_x
-         %FragCoord_py = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_1
-         %FragCoord_y = OpLoad %float %FragCoord_py
-         %FragCoord_scale_y = OpFDiv %float %<y_numerator> %<y_denominator>
-         %FragCoord_guest_y = OpFMul %float %FragCoord_y %FragCoord_scale_y
-               OpStore %v3 %FragCoord_guest_y
-)";
-			const auto&        scale       = m_ps_input_info->host_to_guest_scale;
-			if (scale.IsIdentity())
-			{
-				m_source += native_text;
-			} else
-			{
-				m_source += String8(scaled_text)
-				                .ReplaceStr("<x_numerator>", GetConstantFloat(static_cast<float>(scale.x_guest_numerator)))
-				                .ReplaceStr("<x_denominator>", GetConstantFloat(static_cast<float>(scale.x_host_denominator)))
-				                .ReplaceStr("<y_numerator>", GetConstantFloat(static_cast<float>(scale.y_guest_numerator)))
-				                .ReplaceStr("<y_denominator>", GetConstantFloat(static_cast<float>(scale.y_host_denominator)));
-			}
-		}
-	}
-
 	if (UsesFragmentCompute())
 	{
 		m_source += FragmentProlog();
 	} else
 	{
+		WritePixelPositionProlog();
 		WriteCustomPixelProlog();
 		WritePixelFrontFaceProlog();
+		WritePixelAncillaryProlog();
 	}
 
 	if (m_code.GetType() == ShaderType::Compute)
@@ -2009,6 +2162,16 @@ void Spirv::WriteLocalVariables()
 				if (!EmitComputeWaveProlog(&m_source))
 				{
 					EXIT("paired-wave compute prolog contract unsupported\n");
+				}
+				if (UsesGeometryCompute() && !EmitGeometryProlog(&m_source))
+				{
+					EXIT("geometry compute prolog contract unsupported\n");
+				}
+			} else if (UsesNativeComputeWave())
+			{
+				if (!EmitNativeComputeWaveProlog(&m_source))
+				{
+					EXIT("native-wave compute prolog contract unsupported\n");
 				}
 			} else
 			{
@@ -2039,10 +2202,7 @@ void Spirv::WriteLocalVariables()
 
 		int shift_regs = (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog ? 8 : 0);
 
-		for (auto& m: m_extended_mapping)
-		{
-			m[0] = m[1] = 0;
-		}
+		m_extended_mapping.clear();
 
 		for (int i = 0; i < m_bind->storage_buffers.buffers_num; i++)
 		{
@@ -2063,9 +2223,7 @@ void Spirv::WriteLocalVariables()
 				{
 					EXIT_IF(start_reg < 16);
 					if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
-					if (start_reg - 16 + f >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 + f >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
-					m_extended_mapping[start_reg - 16 + f][0] = buffer_index + i;
-					m_extended_mapping[start_reg - 16 + f][1] = f;
+					EXIT_IF(!SetMappedIndex(static_cast<int64_t>(start_reg) - 16 + f, buffer_index + i, f));
 				} else
 				{
 					String8 reg = String8::FromPrintf("s%d", start_reg + f + shift_regs);
@@ -2095,9 +2253,7 @@ void Spirv::WriteLocalVariables()
 					{
 						EXIT_IF(start_reg < 16);
 						if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
-						if (start_reg - 16 + 4 * ti + f >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 + 4 * ti + f >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
-						m_extended_mapping[start_reg - 16 + 4 * ti + f][0] = buffer_index + i * 2 + ti;
-						m_extended_mapping[start_reg - 16 + 4 * ti + f][1] = f;
+						EXIT_IF(!SetMappedIndex(static_cast<int64_t>(start_reg) - 16 + 4 * ti + f, buffer_index + i * 2 + ti, f));
 					} else
 					{
 						String8 reg = String8::FromPrintf("s%d", start_reg + 4 * ti + f + shift_regs);
@@ -2126,9 +2282,7 @@ void Spirv::WriteLocalVariables()
 				{
 					EXIT_IF(start_reg < 16);
 					if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
-					if (start_reg - 16 + f >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 + f >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
-					m_extended_mapping[start_reg - 16 + f][0] = buffer_index + i;
-					m_extended_mapping[start_reg - 16 + f][1] = f;
+					EXIT_IF(!SetMappedIndex(static_cast<int64_t>(start_reg) - 16 + f, buffer_index + i, f));
 				} else
 				{
 					String8 reg = String8::FromPrintf("s%d", start_reg + f + shift_regs);
@@ -2150,9 +2304,7 @@ void Spirv::WriteLocalVariables()
 			{
 				EXIT_IF(start_reg < 16);
 				if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
-				if (start_reg - 16 >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
-				m_extended_mapping[start_reg - 16][0] = buffer_index + i / 4;
-				m_extended_mapping[start_reg - 16][1] = i % 4;
+				EXIT_IF(!SetMappedIndex(static_cast<int64_t>(start_reg) - 16, buffer_index + i / 4, i % 4));
 			} else
 			{
 				String8 reg = String8::FromPrintf("s%d", start_reg + shift_regs);
@@ -2214,9 +2366,9 @@ void Spirv::WriteLocalVariables()
 			// TODO() load pointer
 
 			KYTY_LOG_DEBUG("Extended mapping: ");
-			for (auto& m: m_extended_mapping)
+			for (const auto& [offset, mapping]: m_extended_mapping)
 			{
-				KYTY_LOG_DEBUG("{%d, %d} ", m[0], m[1]);
+				KYTY_LOG_DEBUG("%d={%d, %d} ", offset, mapping[0], mapping[1]);
 			}
 			KYTY_LOG_DEBUG("\n");
 		}
@@ -2236,7 +2388,15 @@ void Spirv::WriteLocalVariables()
 		            "OpStore %execz %uint_0\nOpStore %scc %uint_0\n";
 	} else
 	{
-		m_source += "OpStore %exec_lane_lo %uint_1\nOpStore %exec_lane_hi %uint_0\nOpStore %scc %uint_0\n";
+		if (UsesNativeComputeWave())
+		{
+			m_source += "%native_wave_in_group_exec = OpSelect %uint %native_wave_in_group %uint_1 %uint_0\n"
+			            "OpStore %exec_lane_lo %native_wave_in_group_exec\n";
+		} else
+		{
+			m_source += "OpStore %exec_lane_lo %uint_1\n";
+		}
+		m_source += "OpStore %exec_lane_hi %uint_0\nOpStore %scc %uint_0\n";
 		if (m_cs_input_info != nullptr && m_bind != nullptr && m_bind->thread_limits_used)
 		{
 			m_source += EmitNativeThreadLimitExec();
@@ -2260,6 +2420,41 @@ void Spirv::WriteLocalVariables()
 		}
 	}
 	m_source += "\n";
+}
+
+// Pixel exports depend on the color-format state of every target (mode:number:order per MRT).
+String8 Spirv::ExportBindingSummary(const ShaderInstruction& inst) const
+{
+	if (m_ps_input_info == nullptr || inst.type != ShaderInstructionType::Exp)
+	{
+		return {};
+	}
+	String8 summary = " targets=";
+	for (uint32_t target = 0; target < 8u; ++target)
+	{
+		summary += String8::FromPrintf("%s%u:%u:%u", target == 0u ? "" : ",", m_ps_input_info->target_output_mode[target],
+		                               m_ps_input_info->target_output_number[target], m_ps_input_info->target_output_order[target]);
+	}
+	return summary;
+}
+
+String8 Spirv::ImageBindingSummary(const ShaderInstruction& inst) const
+{
+	if (m_bind == nullptr || !IsImageInstruction(inst))
+	{
+		return {};
+	}
+	const int base    = m_vs_input_info != nullptr && m_vs_input_info->gs_prolog ? 8 : 0;
+	String8   summary = String8::FromPrintf(" tex_index=%d sampler_index=%d sloads=%u tex=", ShaderFindImageSampledTextureDescriptor(inst, *m_bind, base),
+	                                        ShaderFindImageSamplerDescriptor(inst, *m_bind, base), m_bind->dynamic_sloads.records.Size());
+	for (int i = 0; i < m_bind->textures2D.textures_num; ++i)
+	{
+		const auto& desc = m_bind->textures2D.desc[i];
+		summary += String8::FromPrintf("%ss%d%s:u%u:sh%u:t%u%s", i == 0 ? "" : ",", desc.start_register, desc.extended ? "e" : "",
+		                               static_cast<unsigned>(desc.usage), static_cast<unsigned>(ShaderResolvedSampledTextureShape(desc)),
+		                               static_cast<unsigned>(desc.texture.Type()), desc.dynamic_sload ? ":dyn" : "");
+	}
+	return summary;
 }
 
 String8 Spirv::EmitMetadataLoad(int row, int field, const String8&id) const
@@ -2294,36 +2489,44 @@ String8 Spirv::EmitThreadLimitLoad(uint32_t axis, const String8&id) const
 String8 Spirv::EmitNativeThreadLimitExec() const
 {
 	String8 source;
+	static const char* const coordinate_names[3] = {"x", "y", "z"};
 	for (uint32_t axis = 0; axis < 3u; axis++)
 	{
 		const auto a = String8::FromPrintf("tl_native_%u", axis);
 		source += EmitThreadLimitLoad(axis, a + "_limit");
 		source += String8::FromPrintf("%%%s_group_ptr = OpAccessChain %%_ptr_Input_uint %%gl_WorkGroupID %%uint_%u\n"
 		                              "%%%s_group = OpLoad %%uint %%%s_group_ptr\n"
-		                              "%%%s_local_ptr = OpAccessChain %%_ptr_Input_uint %%gl_LocalInvocationID %%uint_%u\n"
-		                              "%%%s_local = OpLoad %%uint %%%s_local_ptr\n"
-		                              "%%%s_base = OpIMul %%uint %%%s_group %%%s\n"
-		                              "%%%s_global = OpIAdd %%uint %%%s_base %%%s_local\n"
+		                              "%%%s_base = OpIMul %%uint %%%s_group %%%s\n",
+		                              a.c_str(), axis, a.c_str(), a.c_str(), a.c_str(), a.c_str(),
+		                              GetConstantUint(m_cs_input_info->threads_num[axis]).c_str());
+		if (UsesNativeComputeWave())
+		{
+			source += String8::FromPrintf("%%%s_local = OpCopyObject %%uint %%native_wave_coord_%s\n", a.c_str(), coordinate_names[axis]);
+		} else
+		{
+			source += String8::FromPrintf("%%%s_local_ptr = OpAccessChain %%_ptr_Input_uint %%gl_LocalInvocationID %%uint_%u\n"
+			                              "%%%s_local = OpLoad %%uint %%%s_local_ptr\n",
+			                              a.c_str(), axis, a.c_str(), a.c_str());
+		}
+		source += String8::FromPrintf("%%%s_global = OpIAdd %%uint %%%s_base %%%s_local\n"
 		                              "%%%s_ok = OpULessThan %%bool %%%s_global %%%s_limit\n",
-		                              a.c_str(), axis, a.c_str(), a.c_str(), a.c_str(), axis, a.c_str(), a.c_str(), a.c_str(), a.c_str(),
-		                              GetConstantUint(m_cs_input_info->threads_num[axis]).c_str(), a.c_str(), a.c_str(), a.c_str(),
-		                              a.c_str(), a.c_str(), a.c_str());
+		                              a.c_str(), a.c_str(), a.c_str(), a.c_str(), a.c_str(), a.c_str());
 	}
 	source += "%tl_native_xy = OpLogicalAnd %bool %tl_native_0_ok %tl_native_1_ok\n"
-	          "%tl_native_ok = OpLogicalAnd %bool %tl_native_xy %tl_native_2_ok\n"
-	          "%tl_native_exec = OpSelect %uint %tl_native_ok %uint_1 %uint_0\n"
+	          "%tl_native_ok = OpLogicalAnd %bool %tl_native_xy %tl_native_2_ok\n";
+	// Padding lanes of a partial trailing wave stay inactive under any limit.
+	source += UsesNativeComputeWave() ? "%tl_native_live = OpLogicalAnd %bool %tl_native_ok %native_wave_in_group\n"
+	                                  : "%tl_native_live = OpCopyObject %bool %tl_native_ok\n";
+	source += "%tl_native_exec = OpSelect %uint %tl_native_live %uint_1 %uint_0\n"
 	          "OpStore %exec_lane_lo %tl_native_exec\n";
 	return source;
 }
 
-void Spirv::DetectFetch()
+// Format loads of a fetch-embedded vertex program that the attribute and buffer table
+// registers type as vertex-attribute fetches, with the attribute semantic each one reads.
+static Vector<std::pair<ShaderInstruction, int>> DetectVertexFetchSemantics(const ShaderCode& code, int fetch_attrib_reg,
+                                                                           int fetch_buffer_reg)
 {
-	EXIT_IF(m_vs_input_info == nullptr);
-	EXIT_IF(!m_vs_input_info->fetch_embedded);
-
-	if (!m_vs_input_info->gs_prolog) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_vs_input_info->gs_prolog condition ignored (continuing)\n"); }
-	if (m_vs_input_info->fetch_inline) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_vs_input_info->fetch_inline condition ignored (continuing)\n"); }
-
 	enum class Type
 	{
 		Unknown,
@@ -2351,34 +2554,56 @@ void Spirv::DetectFetch()
 	auto vgpr_reg = [](const ShaderOperand& op) { return op.register_id; };
 
 	int shift_regs = 8;
-	int attrib_reg = m_vs_input_info->fetch_attrib_reg + shift_regs;
-	int buffer_reg = m_vs_input_info->fetch_buffer_reg + shift_regs;
+	int attrib_reg = fetch_attrib_reg + shift_regs;
+	int buffer_reg = fetch_buffer_reg + shift_regs;
 
 	Vector<ShaderControlFlowBlock> blocks;
 
-	blocks.Add(m_code.ReadBlock(0));
+	blocks.Add(code.ReadBlock(0));
 
-	for (const auto& label: m_code.GetLabels())
+	for (const auto& label: code.GetLabels())
 	{
-		blocks.Add(m_code.ReadBlock(label.GetDst()));
+		blocks.Add(code.ReadBlock(label.GetDst()));
 	}
 
-	for (const auto& label: m_code.GetIndirectLabels())
+	for (const auto& label: code.GetIndirectLabels())
 	{
-		blocks.Add(m_code.ReadBlock(label.GetDst()));
+		blocks.Add(code.ReadBlock(label.GetDst()));
 	}
 
 	Vector<std::pair<ShaderInstruction, int>> load_instructions;
 
 	for (const auto& block: blocks)
 	{
-		auto code = m_code.ReadIntructions(block);
+		auto block_code = code.ReadIntructions(block);
 
 		Core::Array<SgprInfo, 108> sgprs;
 		Core::Array<VgprInfo, 256> vgprs;
 
-		for (const auto& inst: code)
+		// A register keeps its role only until another instruction writes it.
+		auto clear_dst = [&](const ShaderOperand& dst)
 		{
+			if (is_sgpr(dst))
+			{
+				for (int i = 0; i < std::max(dst.size, 1) && sgpr_reg(dst) + i < 108; i++)
+				{
+					sgprs[sgpr_reg(dst) + i] = {};
+				}
+			} else if (is_vgpr(dst))
+			{
+				for (int i = 0; i < std::max(dst.size, 1) && vgpr_reg(dst) + i < 256; i++)
+				{
+					vgprs[vgpr_reg(dst) + i] = {};
+				}
+			}
+		};
+
+		for (const auto& inst: block_code)
+		{
+			const auto prior_sgprs = sgprs;
+			const auto index_type  = is_vgpr(inst.src[0]) ? vgprs[vgpr_reg(inst.src[0])].type : Type::Unknown;
+			clear_dst(inst.dst);
+			clear_dst(inst.dst2);
 
 			switch (inst.type)
 			{
@@ -2387,10 +2612,9 @@ void Spirv::DetectFetch()
 				case ShaderInstructionType::SLoadDwordx4:
 				case ShaderInstructionType::SLoadDwordx8:
 				case ShaderInstructionType::SLoadDwordx16:
-					if (is_sgpr(inst.src[0]) && sgpr_reg(inst.src[0]) == attrib_reg)
+					if (is_sgpr(inst.src[0]) && sgpr_reg(inst.src[0]) == attrib_reg && operand_is_constant(inst.src[1]) &&
+					    inst.src[1].constant.i >= 0)
 					{
-						if (!operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
-						if (inst.src[1].constant.i < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[1].constant.i < 0 condition ignored (continuing)\n"); }
 						int register_id = sgpr_reg(inst.dst);
 						int index       = inst.src[1].constant.i / 4;
 						for (int i = 0; i < inst.dst.size; i++)
@@ -2399,15 +2623,14 @@ void Spirv::DetectFetch()
 							sgprs[register_id + i].attrib_id = i + index;
 						}
 					}
-					if (is_sgpr(inst.src[0]) && sgpr_reg(inst.src[0]) == buffer_reg)
+					if (is_sgpr(inst.src[0]) && sgpr_reg(inst.src[0]) == buffer_reg && is_sgpr(inst.src[1]) &&
+					    prior_sgprs[sgpr_reg(inst.src[1])].type == Type::Attrib)
 					{
-						if (operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
-						if (is_sgpr(inst.src[1]) && sgprs[sgpr_reg(inst.src[1])].type != Type::Attrib) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: is_sgpr(inst.src[1]) && sgprs[sgpr_reg(inst.src[1])].type != Type::Attrib condition ignored (continuing)\n"); }
 						int register_id = sgpr_reg(inst.dst);
 						for (int i = 0; i < inst.dst.size; i++)
 						{
 							sgprs[register_id + i].type      = Type::Buffer;
-							sgprs[register_id + i].attrib_id = sgprs[sgpr_reg(inst.src[1])].attrib_id;
+							sgprs[register_id + i].attrib_id = prior_sgprs[sgpr_reg(inst.src[1])].attrib_id;
 						}
 					}
 					break;
@@ -2422,9 +2645,9 @@ void Spirv::DetectFetch()
 				case ShaderInstructionType::SBfeU32:
 				case ShaderInstructionType::SAndB32:
 				case ShaderInstructionType::SLshlB32:
-					if (is_sgpr(inst.src[0]) && sgprs[sgpr_reg(inst.src[0])].type == Type::Attrib && operand_is_constant(inst.src[1]))
+					if (is_sgpr(inst.src[0]) && prior_sgprs[sgpr_reg(inst.src[0])].type == Type::Attrib && operand_is_constant(inst.src[1]))
 					{
-						sgprs[sgpr_reg(inst.dst)] = sgprs[sgpr_reg(inst.src[0])];
+						sgprs[sgpr_reg(inst.dst)] = prior_sgprs[sgpr_reg(inst.src[0])];
 					}
 					break;
 
@@ -2432,37 +2655,157 @@ void Spirv::DetectFetch()
 				case ShaderInstructionType::BufferLoadFormatXy:
 				case ShaderInstructionType::BufferLoadFormatXyz:
 				case ShaderInstructionType::BufferLoadFormatXyzw:
-				{
-					if (!(vgprs[vgpr_reg(inst.src[0])].type == Type::Index &&
-					                       sgprs[sgpr_reg(inst.src[1])].type == Type::Buffer &&
-					                       sgprs[sgpr_reg(inst.src[2])].type == Type::Attrib)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(vgprs[vgpr_reg(inst.src[0])].type == Type::Index && condition ignored (continuing)\n"); }
-
-					const int semantic = sgprs[sgpr_reg(inst.src[1])].attrib_id;
-					int       resource = -1;
-					for (int i = 0; i < m_vs_input_info->resources_num; i++)
+					// Only a load indexed by the vertex or instance id, through a V# of the buffer
+					// table at an attribute's offset, is an attribute fetch. Any other format load
+					// (a user-data V#, a computed index) stays a buffer load.
+					if (index_type == Type::Index && is_sgpr(inst.src[1]) &&
+					    prior_sgprs[sgpr_reg(inst.src[1])].type == Type::Buffer && is_sgpr(inst.src[2]) &&
+					    prior_sgprs[sgpr_reg(inst.src[2])].type == Type::Attrib)
 					{
-						if (m_vs_input_info->resources_dst[i].semantic == semantic)
-						{
-							resource = i;
-							break;
-						}
+						load_instructions.Add({inst, prior_sgprs[sgpr_reg(inst.src[1])].attrib_id});
 					}
-					if (resource < 0)
-					{
-						// No attribute-table semantic: keep BufferLoadFormat and
-						// address through the live V# / vertex-stream SSBO.
-						KYTY_LOG_DEBUG("WARNING: vertex fetch semantic missing input resource (continuing)\n");
-						break;
-					}
-
-					load_instructions.Add({inst, resource});
-
 					break;
-				}
 				default: break;
 			}
 		}
 	}
+
+	return load_instructions;
+}
+
+static int FindVertexInputResource(const ShaderVertexInputInfo& info, int semantic)
+{
+	for (int i = 0; i < info.resources_num; i++)
+	{
+		if (info.resources_dst[i].semantic == semantic)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const ShaderCode& code, const ShaderVertexInputInfo& info)
+{
+	Vector<std::pair<ShaderInstruction, int>> load_instructions;
+	for (const auto& [inst, semantic]: DetectVertexFetchSemantics(code, info.fetch_attrib_reg, info.fetch_buffer_reg))
+	{
+		const int resource = FindVertexInputResource(info, semantic);
+		if (resource < 0)
+		{
+			// No attribute-table semantic: keep BufferLoadFormat and
+			// address through the live V# / vertex-stream SSBO.
+			KYTY_LOG_DEBUG("WARNING: vertex fetch semantic missing input resource (continuing)\n");
+			continue;
+		}
+		load_instructions.Add({inst, resource});
+	}
+	return load_instructions;
+}
+
+static int AttribTableLoadDwords(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::SLoadDword: return 1;
+		case ShaderInstructionType::SLoadDwordx2: return 2;
+		case ShaderInstructionType::SLoadDwordx4: return 4;
+		case ShaderInstructionType::SLoadDwordx8: return 8;
+		case ShaderInstructionType::SLoadDwordx16: return 16;
+		default: return 0;
+	}
+}
+
+// Dwords of the attribute table that scalar loads of the fused-front attribute register
+// read. A load with a non-constant offset may reach any dword.
+static uint32_t AttribTableDwordsRead(const ShaderCode& code, int fetch_attrib_reg)
+{
+	constexpr int kGsFrontUserDataBase = 8;
+	constexpr int kDwords              = ShaderVertexInputInfo::RES_MAX;
+	static_assert(kDwords <= 32);
+	uint32_t read = 0;
+	for (const auto& inst: code.GetInstructions())
+	{
+		const int count = AttribTableLoadDwords(inst.type);
+		if (count == 0 || inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].register_id != fetch_attrib_reg + kGsFrontUserDataBase)
+		{
+			continue;
+		}
+		if (!operand_is_constant(inst.src[1]) || inst.src[1].constant.i < 0)
+		{
+			return ~0u;
+		}
+		const int first = inst.src[1].constant.i / 4;
+		for (int i = first; i < first + count && i < kDwords; i++)
+		{
+			read |= 1u << static_cast<uint32_t>(i);
+		}
+	}
+	return read;
+}
+
+ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& code, int fetch_attrib_reg, int fetch_buffer_reg)
+{
+	ShaderVertexStreamAccessScan scan;
+	scan.fetch_attrib_reg   = fetch_attrib_reg;
+	scan.fetch_buffer_reg   = fetch_buffer_reg;
+	scan.attrib_dwords_read = AttribTableDwordsRead(code, fetch_attrib_reg);
+	for (const auto& [inst, semantic]: DetectVertexFetchSemantics(code, fetch_attrib_reg, fetch_buffer_reg))
+	{
+		scan.fetch_candidates.Add(std::pair<uint32_t, int> {inst.pc, semantic});
+	}
+	for (const auto& inst: code.GetInstructions())
+	{
+		const auto name = Core::EnumName8(inst.type);
+		if (!name.StartsWith("Buffer") && !name.StartsWith("TBuffer") && !name.StartsWith("Tbuffer"))
+		{
+			continue;
+		}
+		if (!scan.fetch_candidates.Contains(inst.pc, [](const auto& candidate, uint32_t pc) { return candidate.first == pc; }))
+		{
+			scan.unconditional_reader = true;
+			break;
+		}
+	}
+	return scan;
+}
+
+bool ShaderVertexStreamStorageHasReader(const ShaderVertexStreamAccessScan& scan, const ShaderVertexInputInfo& info)
+{
+	if (scan.unconditional_reader)
+	{
+		return true;
+	}
+	const auto fetched = [&](uint32_t pc)
+	{
+		for (const auto& [candidate_pc, semantic]: scan.fetch_candidates)
+		{
+			if (candidate_pc == pc && FindVertexInputResource(info, semantic) >= 0)
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	for (const auto& candidate: scan.fetch_candidates)
+	{
+		if (!fetched(candidate.first))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void Spirv::DetectFetch()
+{
+	EXIT_IF(m_vs_input_info == nullptr);
+	EXIT_IF(!m_vs_input_info->fetch_embedded);
+
+	if (!m_vs_input_info->gs_prolog) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_vs_input_info->gs_prolog condition ignored (continuing)\n"); }
+	if (m_vs_input_info->fetch_inline) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_vs_input_info->fetch_inline condition ignored (continuing)\n"); }
+
+	const auto load_instructions = ShaderDetectVertexFetchLoads(m_code, *m_vs_input_info);
 
 	for (auto& inst: m_code.GetInstructions())
 	{
@@ -2507,7 +2850,8 @@ void Spirv::WriteInstructions()
 	{
 		const auto analysis = UsesFragmentCompute() ? ShaderAnalyzeFragmentWaveCode(m_code, *m_ps_input_info, *m_cs_input_info,
 		                                                                              m_fragment_compute_info->user_sgpr_count)
-		                                           : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
+		                      : UsesGeometryCompute() ? ShaderAnalyzeGeometryWaveCode(m_code, *m_cs_input_info)
+		                                              : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
 		if (!analysis.supported)
 		{
 			EXIT("paired-wave transformed instruction unsupported: pc=0x%08" PRIx32 " reason=%s\n",
@@ -2556,6 +2900,11 @@ void Spirv::WriteInstructions()
 		{
 			WriteLabel(index);
 		}
+		if (FragmentLaneReductions().IsStep(static_cast<uint32_t>(index)))
+		{
+			m_source += String8::FromPrintf("; reduction step: %s\n", ShaderCode::DbgInstructionToStr(inst).c_str());
+			continue;
+		}
 
 		String8 dst = MaterializeAssembledDescriptors(inst);
 		String8 dst_debug;
@@ -2565,11 +2914,23 @@ void Spirv::WriteInstructions()
 		const auto* func = RecompFunc(inst.type, inst.format);
 
 		const auto wave_kind = UsesFragmentCompute() ? ShaderClassifyFragmentWaveInstruction(inst, *m_ps_input_info)
+		                      : UsesGeometryCompute() ? ShaderClassifyGeometryWaveInstruction(inst)
 		                      : UsesComputeWaveBanks() ? ShaderClassifyComputeWaveInstruction(inst)
 		                                             : ShaderComputeWaveInstructionKind::Unsupported;
+		const bool low_destination = ShaderSdwaPartialDestinationSupported(inst);
+		if (low_destination && (UsesComputeWaveBanks() || wave_kind != ShaderComputeWaveInstructionKind::Unsupported))
+		{
+			EXIT("SDWA partial destination select outside the per-lane emitter: pc=0x%08" PRIx32 "\n", inst.pc);
+		}
 		if (wave_kind == ShaderComputeWaveInstructionKind::PixelInterpolation || wave_kind == ShaderComputeWaveInstructionKind::PixelExport)
 		{
 			ok = EmitFragmentInstruction(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::GeometryExport)
+		{
+			ok = EmitGeometryExport(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::GeometryAlloc)
+		{
+			ok = EmitGeometryAlloc(static_cast<uint32_t>(index), &dst);
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedVector || wave_kind == ShaderComputeWaveInstructionKind::WaveLane ||
 		    wave_kind == ShaderComputeWaveInstructionKind::BankedSdwaExtract)
 		{
@@ -2598,6 +2959,9 @@ void Spirv::WriteInstructions()
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::WaveAppend)
 		{
 			ok = EmitComputeWaveAppend(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedGdsWrite)
+		{
+			ok = EmitComputeWaveGdsWrite(inst, static_cast<uint32_t>(index), &dst);
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedGenericCompare)
 		{
 			ok = EmitComputeWaveGenericCompare(func, inst, static_cast<uint32_t>(index), &dst);
@@ -2623,12 +2987,19 @@ void Spirv::WriteInstructions()
 				dst += String8::FromPrintf("OpControlBarrier %%%s %%%s %%%s\n", GetConstantUint(3u).c_str(), GetConstantUint(3u).c_str(),
 				                           GetConstantUint(0x108u).c_str());
 			}
+		} else if (m_bind != nullptr && ShaderImageReadsZeroResource(*m_bind, inst))
+		{
+			ok = EmitZeroImageRead(inst, this, &dst);
+		} else if (m_bind != nullptr && ShaderScalarLoadIsZero(*m_bind, inst))
+		{
+			ok = EmitZeroScalarLoad(inst, this, &dst);
 		} else if (func != nullptr)
 		{
 			EXIT_IF(func->type != inst.type);
 			EXIT_IF(func->format != inst.format);
 			if (UsesFragmentCompute() && inst.type == ShaderInstructionType::SEndpgm) { dst += FragmentEpilog(); }
-			ok = func->func(index, m_code, &dst, this, func->param, func->scc_check);
+			ok = low_destination ? EmitSdwaPartialDestinationInstruction(func, inst, static_cast<uint32_t>(index), &dst)
+			                     : func->func(index, m_code, &dst, this, func->param, func->scc_check);
 		}
 
 		if (!ok)
@@ -2644,9 +3015,10 @@ void Spirv::WriteInstructions()
 				inst_text = inst_dump.c_str();
 			}
 			EXIT("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64 " pc=0x%08" PRIx32
-			     " sampled=%d/%d/%d inst=%s sopp=0x%02x raw=0x%08" PRIx32 "\n",
+			     " sampled=%d/%d/%d inst=%s sopp=0x%02x raw=0x%08" PRIx32 " crc=%08" PRIx32 "%s\n",
 			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<uint64_t>(inst.format), inst.pc,
-			     sampled_2d, sampled_array, sampled_3d, inst_text, static_cast<unsigned>(inst.sopp_opcode), inst.raw_word);
+			     sampled_2d, sampled_array, sampled_3d, inst_text, static_cast<unsigned>(inst.sopp_opcode), inst.raw_word,
+			     m_code.GetCrc32(), (ImageBindingSummary(inst) + ExportBindingSummary(inst)).c_str());
 		}
 		if (IsImageInstruction(inst) && !UsesComputeWaveBanks())
 		{
@@ -2818,10 +3190,17 @@ void Spirv::WriteFunctions()
 	    ShaderInstructionType::BufferLoadDwordx4, ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
 	    ShaderInstructionType::BufferLoadFormatXyz, ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionType::TBufferLoadFormatX,
 	    ShaderInstructionType::TBufferLoadFormatXy, ShaderInstructionType::TBufferLoadFormatXyz, ShaderInstructionType::TBufferLoadFormatXyzw});
-	const bool needs_tbuffer_load_helpers = m_code.HasAnyOf({
-	    ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy, ShaderInstructionType::BufferLoadFormatXyz,
-	    ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionType::TBufferLoadFormatX, ShaderInstructionType::TBufferLoadFormatXy,
-	    ShaderInstructionType::TBufferLoadFormatXyz, ShaderInstructionType::TBufferLoadFormatXyzw});
+	// Gen5 BUFFER_LOAD_FORMAT decodes through the shared format functions;
+	// the format helpers serve typed TBUFFER loads and the legacy encoding.
+	const bool gen5_format_loads          = SpirvUsesGen5BufferFormatLoads(m_code);
+	const bool needs_tbuffer_load_helpers = m_code.HasAnyOf({ShaderInstructionType::TBufferLoadFormatX,
+	                                                         ShaderInstructionType::TBufferLoadFormatXy,
+	                                                         ShaderInstructionType::TBufferLoadFormatXyz,
+	                                                         ShaderInstructionType::TBufferLoadFormatXyzw}) ||
+	                                        (!gen5_format_loads &&
+	                                         m_code.HasAnyOf({ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
+	                                                          ShaderInstructionType::BufferLoadFormatXyz,
+	                                                          ShaderInstructionType::BufferLoadFormatXyzw}));
 	const bool needs_buffer_store_helpers = m_code.HasAnyOf({
 	    ShaderInstructionType::BufferStoreDword, ShaderInstructionType::BufferStoreDwordx2, ShaderInstructionType::BufferStoreDwordx3,
 	    ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX, ShaderInstructionType::BufferStoreFormatXy,
@@ -2836,6 +3215,11 @@ void Spirv::WriteFunctions()
 	if (has_storage_buffers && (needs_tbuffer_load_helpers || needs_tbuffer_store_helpers))
 	{
 		m_source += TBUFFER_FORMAT_SCALAR32;
+	}
+
+	if (gen5_format_loads && (has_storage_buffers || UsesGuestDeviceAddress()))
+	{
+		m_source += SpirvGen5BufferFormatFunctions(*this, has_storage_buffers);
 	}
 
 	if (has_storage_buffers && needs_buffer_load_helpers)
@@ -2880,6 +3264,21 @@ void Spirv::WriteFunctions()
 void Spirv::FindConstants()
 {
 	m_constants.Clear();
+	for (const auto& inst: m_code.GetInstructions())
+	{
+		if (!ShaderSdwaPartialDestinationSupported(inst)) { continue; }
+		const auto select = SdwaDestinationSelect(inst);
+		for (const uint32_t value: {0u, select.width, select.offset, select.field, ~select.field})
+		{
+			AddConstantUint(value);
+		}
+	}
+	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32})) { AddConstantUint(0xffffu); }
+	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkI16I32}))
+	{
+		AddConstantUint(0x7fffu);
+		AddConstantUint(0xffff8000u);
+	}
 	if (m_bind != nullptr)
 	{
 		constexpr int rows = ShaderStorageResources::BUFFERS_MAX + ShaderTextureResources::RES_MAX * 2 + ShaderSamplerResources::RES_MAX;
@@ -2920,6 +3319,27 @@ void Spirv::FindConstants()
 		}
 	}
 	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog) { AddConstantUint(8u); }
+	if (UsesGeometryCompute() && m_bind != nullptr)
+	{
+		const auto& geometry = *m_geometry_compute_info;
+		for (uint32_t value: {0u, 1u, 2u, 3u, 8u, 16u, 32u, 1u << 28u, geometry.primitives_per_group, geometry.GroupDwords(),
+		                      geometry.RecordDwords(), ShaderGeometryComputeInfo::kVertexOffsetScale,
+		                      ShaderGeometryComputeInfo::kVertexOffsetScale * 3u, ShaderGeometryComputeInfo::kPrimitiveWordsOffset,
+		                      ShaderGeometryComputeInfo::kRecordsOffset})
+		{
+			AddConstantUint(value);
+		}
+		for (uint32_t slot = 0; slot < geometry.RecordDwords(); slot++)
+		{
+			AddConstantUint(slot);
+		}
+		for (int field = 0; field < 4; field++)
+		{
+			AddConstantInt(field);
+		}
+		AddConstantInt(static_cast<int>(m_bind->geometry_offset_dw / 4u));
+		AddConstantInt(static_cast<int>(m_bind->geometry_offset_dw / 4u + 1u));
+	}
 	if (UsesGuestDeviceAddress())
 	{
 		// Guest-pointer S_LOAD and GLOBAL lowering name their offsets, the
@@ -2929,8 +3349,8 @@ void Spirv::FindConstants()
 		AddConstantUint(0xffffu);
 		AddConstantUint(0xfffffffcu);
 		AddConstantUint(0xffffffffu);
-		// Typed loads through an unbound V#: element sizes and the decoded formats.
-		for (uint32_t value: {4u, 8u, 12u, 16u, 20u, 22u, 29u, 36u, 39u, 71u})
+		// Loads through an unbound V#: element sizes.
+		for (uint32_t value: {4u, 8u, 12u, 16u})
 		{
 			AddConstantUint(value);
 		}
@@ -2952,6 +3372,10 @@ void Spirv::FindConstants()
 			}
 		}
 	}
+	if (SpirvUsesGen5BufferFormatLoads(m_code))
+	{
+		SpirvAddGen5BufferFormatConstants(this);
+	}
 	AddConstantFloat(0.0f);
 	AddConstantFloat(0.5f);
 	AddConstantFloat(1.0f);
@@ -2965,6 +3389,14 @@ void Spirv::FindConstants()
 	AddConstantUint(0x40000000u);
 	AddConstantUint(0x7fffffffu);
 	AddConstantUint(0x80000000u);
+	// Float min/max NaN selection, single-precision output modifiers and float-to-integer
+	// conversion boundaries work on bit patterns. The predecessor f32 values keep SPIR-V
+	// conversion inputs in range where the next f32 would already exceed the integer limit.
+	for (uint32_t value: {0x003fffffu, 0x00400000u, 0x00800000u, 0x01000000u, 0x4effffffu, 0x4f7fffffu, 0x7e800000u, 0x7f000000u,
+	                      0x7f7fffffu, 0x7f800000u, 0x7fc00000u, 0xcf000000u, 0xffffffffu})
+	{
+		AddConstantUint(value);
+	}
 	if (spirv_uses_mbcnt(m_code))
 	{
 		// Numeric MBCNT constructs a prefix even in metadata-free fixtures.
@@ -2992,6 +3424,12 @@ void Spirv::FindConstants()
 		{
 			AddConstantUint(offset);
 		}
+	}
+	if (m_bind != nullptr && m_bind->gds_pointers.memory_used)
+	{
+		// GDS stores bound the address by M0[15:0] and by the host GDS window.
+		AddConstantUint(0xffffu);
+		AddConstantUint(static_cast<uint32_t>(kGraphicsGdsDwords));
 	}
 	if (UsesDsAddtid())
 	{
@@ -3021,6 +3459,15 @@ void Spirv::FindConstants()
 					AddConstantUint(inst.src[source].dpp_ctrl & 15u);
 				}
 			}
+		}
+	}
+	for (const auto& reduction: FragmentLaneReductions().reductions)
+	{
+		// Each read selects the seeds of its guest lanes by a two-word lane set.
+		for (const auto& read: reduction.reads)
+		{
+			AddConstantUint(static_cast<uint32_t>(read.lanes));
+			AddConstantUint(static_cast<uint32_t>(read.lanes >> 32u));
 		}
 	}
 	if (!UsesFragmentWaveTier() && spirv_uses_dpp_row(m_code))
@@ -3319,6 +3766,26 @@ void Spirv::FindConstants()
 		AddConstantUint(m_ps_input_info->front_face_all_bits ? 1u : 0x3f800000u);
 		AddConstantUint(m_ps_input_info->front_face_all_bits ? 0u : 0xbf800000u);
 	}
+	if (m_ps_input_info != nullptr && m_ps_input_info->AncillaryEnabled())
+	{
+		AddConstantUint(0x7ffu);
+		AddConstantUint(16u);
+	}
+	if (m_ps_input_info != nullptr)
+	{
+		for (uint32_t target = 0; target < 8u; ++target)
+		{
+			if (ShaderIsUint16MrtOutput(m_ps_input_info, target))
+			{
+				AddConstantUint(0u);
+				AddConstantUint(1u);
+				AddConstantUint(2u);
+				AddConstantUint(3u);
+				AddConstantUint(16u);
+				break;
+			}
+		}
+	}
 	if (m_ps_input_info != nullptr && (m_ps_input_info->system_input_enable & 0x300u) != 0 &&
 	    !m_ps_input_info->host_to_guest_scale.IsIdentity())
 	{
@@ -3339,10 +3806,20 @@ void Spirv::FindConstants()
 			{
 				AddConstantUint(dimension);
 			}
+		}
+		if (UsesComputeWaveBanks() || UsesNativeComputeWave())
+		{
 			for (const auto dimension: m_cs_input_info->wave_layout.physical_local)
 			{
 				AddConstantUint(dimension);
 			}
+		}
+		if (UsesNativeComputeWave())
+		{
+			const auto& local = m_cs_input_info->wave_layout.guest_local;
+			AddConstantUint(32u);
+			AddConstantUint(local[0] * local[1]);
+			AddConstantUint(local[0] * local[1] * local[2]);
 		}
 	}
 	FindFragmentConstants();
@@ -3362,9 +3839,10 @@ void Spirv::FindVariables()
 		AddVariable(ShaderOperandType::VccLo, 0, 2);
 	}
 
-	if (UsesDsAddtid())
+	if (UsesDsAddtid() || (m_bind != nullptr && m_bind->gds_pointers.memory_used))
 	{
-		// ds_*_addtid_b32 address with M0[15:0] without listing it as an operand.
+		// ds_*_addtid_b32 and GDS memory instructions address through M0
+		// without listing it as an operand.
 		AddVariable(ShaderOperandType::M0, 0, 1);
 	}
 
@@ -3426,19 +3904,26 @@ void Spirv::FindVariables()
 		{
 			AddVariable(ShaderOperandType::Vgpr, ShaderPixelSystemInputRegister(*m_ps_input_info, 12u), 1);
 		}
+		if (m_ps_input_info->AncillaryEnabled())
+		{
+			AddVariable(ShaderOperandType::Vgpr, ShaderPixelSystemInputRegister(*m_ps_input_info, 13u), 1);
+		}
 		if (m_ps_input_info->custom_interpolation.Enabled())
 		{
-			for (uint32_t field = 0; field < 12u; ++field)
+			for (uint32_t field = 0; field < 8u; ++field)
 			{
 				if ((m_ps_input_info->system_input_enable & (1u << field)) == 0) { continue; }
 				AddVariable(ShaderOperandType::Vgpr, ShaderPixelSystemInputRegister(*m_ps_input_info, field), field < 7u ? 2 : 1);
 			}
 		}
-		if (m_ps_input_info->ps_pos_xy)
+		if (m_ps_input_info->ps_position)
 		{
 			if (!m_ps_input_info->host_to_guest_scale.IsValid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_ps_input_info->host_to_guest_scale.IsValid() condition ignored (continuing)\n"); }
-			AddVariable(ShaderOperandType::Vgpr, 2, 1);
-			AddVariable(ShaderOperandType::Vgpr, 3, 1);
+			for (uint32_t field = 8u; field < 12u; ++field)
+			{
+				if ((m_ps_input_info->system_input_enable & m_ps_input_info->system_input_address & (1u << field)) == 0) { continue; }
+				AddVariable(ShaderOperandType::Vgpr, ShaderPixelSystemInputRegister(*m_ps_input_info, field), 1);
+			}
 		}
 	}
 
@@ -3449,6 +3934,11 @@ void Spirv::FindVariables()
 		{
 			AddVariable(ShaderOperandType::Sgpr, static_cast<int>(m_fragment_compute_info->user_sgpr_count), 1);
 		}
+	}
+	if (UsesGeometryCompute())
+	{
+		// The geometry prolog writes the ES-GS system VGPRs v0..v4.
+		AddVariable(ShaderOperandType::Vgpr, 0, 5);
 	}
 	if (m_cs_input_info != nullptr && !UsesFragmentCompute())
 	{

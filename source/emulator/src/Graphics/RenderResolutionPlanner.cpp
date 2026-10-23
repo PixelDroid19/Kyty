@@ -41,6 +41,19 @@ RenderResolutionPlan NativeDecision(RenderResolutionPlanReason reason, uint32_t 
 	return decision;
 }
 
+RenderResolutionPlan CohortDecision(ResolutionClassification classification, RenderResolutionPlanReason reason, ResolutionExtent guest,
+                                    ResolutionExtent host, uint32_t count, uint32_t blocking_index = UINT32_MAX)
+{
+	RenderResolutionPlan plan;
+	plan.classification            = classification;
+	plan.reason                    = reason;
+	plan.guest_extent              = guest;
+	plan.host_extent               = host;
+	plan.attachment_count          = count;
+	plan.blocking_attachment_index = blocking_index;
+	return plan;
+}
+
 } // namespace
 
 RenderResolutionPlan EvaluateRenderResolutionPlan(const RenderResolutionPolicy& policy, const RenderResolutionPlanInput& input)
@@ -208,13 +221,81 @@ RenderResolutionPlan ReconcileCommittedRenderExtent(const RenderResolutionPlan& 
 	return decision;
 }
 
+RenderResolutionPlan EvaluateRenderTargetCohort(const RenderResolutionCohortMember* members, uint32_t count)
+{
+	if (members == nullptr || count == 0)
+	{
+		return CohortDecision(ResolutionClassification::Unsupported, RenderResolutionPlanReason::InvalidInput, {}, {}, count);
+	}
+	const ResolutionExtent guest = members[0].guest;
+	bool                   committed_scaled = false;
+	for (uint32_t index = 0; index < count; index++)
+	{
+		committed_scaled = committed_scaled || (members[index].committed && members[index].host != members[index].guest);
+	}
+	// Mixed guest extents keep every member native; a scaled member cannot.
+	for (uint32_t index = 1; index < count; index++)
+	{
+		if (members[index].guest == guest)
+		{
+			continue;
+		}
+		const auto classification = committed_scaled ? ResolutionClassification::Unsupported : ResolutionClassification::Native;
+		return CohortDecision(classification, RenderResolutionPlanReason::MismatchedGuestExtent, guest, guest, count, index);
+	}
+	const RenderResolutionCohortMember* committed       = nullptr;
+	uint32_t                            committed_index = 0;
+	for (uint32_t index = 0; index < count; index++)
+	{
+		const auto& member = members[index];
+		if (!member.committed)
+		{
+			continue;
+		}
+		if (committed != nullptr && member.host != committed->host)
+		{
+			return CohortDecision(ResolutionClassification::Unsupported, RenderResolutionPlanReason::MismatchedHostExtent,
+			                              guest, member.host, count, index);
+		}
+		committed       = &member;
+		committed_index = index;
+	}
+	if (committed != nullptr && committed->host == guest)
+	{
+		return CohortDecision(ResolutionClassification::Native, RenderResolutionPlanReason::HostExtentCommitted, guest, guest,
+		                              count, committed_index);
+	}
+	const ResolutionExtent host = committed != nullptr ? committed->host : members[0].host;
+	for (uint32_t index = 0; index < count; index++)
+	{
+		if (members[index].host == host)
+		{
+			continue;
+		}
+		if (committed != nullptr)
+		{
+			return CohortDecision(ResolutionClassification::Unsupported, RenderResolutionPlanReason::AttachmentNotScalable,
+			                              guest, host, count, index);
+		}
+		return CohortDecision(ResolutionClassification::Native, RenderResolutionPlanReason::AttachmentNotScalable, guest,
+		                              guest, count, index);
+	}
+	const auto classification = host == guest ? ResolutionClassification::Native : ResolutionClassification::Scaled;
+	return CohortDecision(classification, RenderResolutionPlanReason::None, guest, host, count);
+}
+
 RenderShaderCoordinateUsage AnalyzeResolutionShaderUsage(const ShaderCode& code)
 {
 	RenderShaderCoordinateUsage usage;
 	usage.integer_image_coordinates =
 	    code.HasAnyOf({ShaderInstructionType::ImageGetResinfo, ShaderInstructionType::ImageLoad,
 	                   ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
-	                   ShaderInstructionType::ImageAtomicAdd});
+	                   ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
+	usage.texel_offset_sampling = code.HasAnyOf({ShaderInstructionType::ImageSampleO, ShaderInstructionType::ImageSampleLzO});
+	for (const auto& inst: code.GetInstructions())
+	{
+		usage.texel_offset_sampling = usage.texel_offset_sampling || (inst.type == ShaderInstructionType::ImageGather4 && inst.mimg_offset);
+	}
 	return usage;
 }
 

@@ -15,13 +15,14 @@
 // merged where control flow joins.
 namespace Kyty::Libs::Graphics::LaneFlow {
 
-// Scalar word numbering, identical to ShaderNggScalarDependencies.
-constexpr unsigned kSgprWords   = 104;
-constexpr unsigned kVccLoWord   = 104;
-constexpr unsigned kExecLoWord  = 106;
-constexpr unsigned kM0Word      = 108;
-constexpr unsigned kSccWord     = 109;
-constexpr unsigned kWords       = 110;
+// Scalar word numbering, identical to ShaderNggScalarDependencies: the RDNA2
+// SGPR0..SGPR105, then VCC, EXEC, M0 and SCC.
+constexpr unsigned kSgprWords   = 106;
+constexpr unsigned kVccLoWord   = 106;
+constexpr unsigned kExecLoWord  = 108;
+constexpr unsigned kM0Word      = 110;
+constexpr unsigned kSccWord     = 111;
+constexpr unsigned kWords       = 112;
 constexpr int      kVgprs       = 256;
 
 // Taint of a scalar word.
@@ -31,9 +32,15 @@ constexpr uint8_t kMask     = 2; // EXEC-derived lane bits
 constexpr uint8_t kDiverged = 4; // written under lane-divergent control flow: differs between lanes after the join
 constexpr uint8_t kMixed    = 8; // a register pair whose words disagree on being a mask
 constexpr uint8_t kWide     = 16; // a mask that may include helper lanes (reached through S_WQM, a complement or an OR)
+// Extent of a mask against the lanes of the launched quads (the fragment mask flow only). Each bit says what
+// the mask may do, so joins keep merging by union; a mask with none of them is exactly every launched lane.
+constexpr uint8_t kOuter      = 32;  // may hold a lane outside the launched quads (a complement, a nonzero constant)
+constexpr uint8_t kNotFull    = 64;  // may lack a lane of a launched quad
+constexpr uint8_t kMissesQuad = 128; // may lack every lane of some launched quad (implies kNotFull)
+constexpr uint8_t kExtent     = kOuter | kNotFull | kMissesQuad;
 
-[[nodiscard]] bool StartsWith(ShaderInstructionType type, const char* prefix);
-[[nodiscard]] bool AnyPrefix(ShaderInstructionType type, std::initializer_list<const char*> prefixes);
+[[nodiscard]] bool StartsWith(ShaderInstructionType type, std::string_view prefix);
+[[nodiscard]] bool AnyPrefix(ShaderInstructionType type, std::initializer_list<std::string_view> prefixes);
 // Scalar word range of an operand; false when the operand is not a scalar register.
 [[nodiscard]] bool ScalarRange(const ShaderOperand& op, unsigned* first, unsigned* count);
 [[nodiscard]] bool IsConstant(const ShaderOperand& op);
@@ -52,6 +59,8 @@ constexpr uint8_t kWide     = 16; // a mask that may include helper lanes (reach
 // Image reads whose result depends only on this lane's address and on scalar resources: explicit
 // LOD (or none, for loads), no derivatives, no write.
 [[nodiscard]] bool IsLaneLocalImageRead(ShaderInstructionType type);
+// The address VGPRs an image load reads: its DIM's coordinates, then the level of a mip load.
+[[nodiscard]] int ImageLoadAddressCount(const ShaderInstruction& inst);
 [[nodiscard]] bool IsLaneExchange(ShaderInstructionType type);
 // Condition operand of a vector select or carry-in: one bit per lane, read as this lane's bit.
 [[nodiscard]] bool IsLaneBit(const ShaderInstruction& inst, int source);

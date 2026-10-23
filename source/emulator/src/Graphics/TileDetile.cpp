@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <limits>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -13,7 +14,7 @@ namespace Kyty::Libs::Graphics {
 namespace {
 
 using TileOffsetFn = uint64_t (*)(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element,
-                                  uint32_t depth_layer);
+                                  uint32_t slice);
 
 constexpr uint64_t k_4kb_block_bytes  = 4096u;
 constexpr uint64_t k_64kb_block_bytes = 65536u;
@@ -58,9 +59,9 @@ bool CalculateBlockGridBytes(uint32_t pitch_elems, uint32_t height, uint32_t blo
 	       CheckedMultiply(blocks_x, blocks_y, &blocks) && CheckedMultiply(blocks, block_bytes, bytes);
 }
 
-uint64_t OffsetSw64kRx(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t)
+uint64_t OffsetSw64kRx(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t slice)
 {
-	return TileGetSw64kRxOffset(x, y, pitch_elems, bytes_per_element);
+	return TileGetSw64kRxOffset(x, y, pitch_elems, bytes_per_element, slice);
 }
 
 uint64_t OffsetStandard64KB(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t)
@@ -79,16 +80,16 @@ uint64_t OffsetStandard256B(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32
 }
 
 uint64_t OffsetDepth64KB(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element,
-	                     uint32_t depth_layer)
+	                     uint32_t slice)
 {
-	return TileGetDepth64KBOffset(x, y, pitch_elems, bytes_per_element, depth_layer);
+	return TileGetDepth64KBOffset(x, y, pitch_elems, bytes_per_element, slice);
 }
 
 bool LayoutBpeSupported(TileDetileLayout layout, uint32_t bytes_per_element)
 {
 	if (layout == TileDetileLayout::Sw64kRx)
 	{
-		return bytes_per_element == 4u || bytes_per_element == 8u;
+		return bytes_per_element == 1u || bytes_per_element == 4u || bytes_per_element == 8u;
 	}
 	if (layout == TileDetileLayout::Standard64KB)
 	{
@@ -151,7 +152,7 @@ bool CalculateRequiredSourceBytes(const TileDetileRequest& request, uint64_t* by
 	if (request.layout == TileDetileLayout::Sw64kRx)
 	{
 		const uint32_t block_width  = TileGet64KBBlockWidth(request.bytes_per_element);
-		const uint32_t block_height = (request.bytes_per_element == 8u ? 64u : 128u);
+		const uint32_t block_height = static_cast<uint32_t>(k_64kb_block_bytes / (block_width * request.bytes_per_element));
 		return CanRoundUpU32(pitch, block_width) &&
 		       CalculateBlockGridBytes(pitch, request.height, block_width, block_height, k_64kb_block_bytes, bytes);
 	}
@@ -210,7 +211,7 @@ bool ValidateDetileRequest(const TileDetileRequest& request)
 	{
 		return false;
 	}
-	if (request.depth_layer != 0u && request.layout != TileDetileLayout::Depth64KB)
+	if (request.slice != 0u && request.layout != TileDetileLayout::Depth64KB && request.layout != TileDetileLayout::Sw64kRx)
 	{
 		return false;
 	}
@@ -244,13 +245,13 @@ void CopyOneElement(uint8_t* dst, const uint8_t* src, uint64_t linear, uint64_t 
 }
 
 void DetileScalarRange(uint8_t* dst, const uint8_t* src, uint32_t y0, uint32_t y1, uint32_t width, uint32_t pitch,
-	                   uint32_t dst_pitch, uint32_t bytes_per_element, uint32_t depth_layer, TileOffsetFn offset_fn)
+	                   uint32_t dst_pitch, uint32_t bytes_per_element, uint32_t slice, TileOffsetFn offset_fn)
 {
 	for (uint32_t y = y0; y < y1; ++y)
 	{
 		for (uint32_t x = 0; x < width; ++x)
 		{
-			const uint64_t tiled  = offset_fn(x, y, pitch, bytes_per_element, depth_layer);
+			const uint64_t tiled  = offset_fn(x, y, pitch, bytes_per_element, slice);
 			const uint64_t linear = (static_cast<uint64_t>(y) * dst_pitch + x) * bytes_per_element;
 			CopyOneElement(dst, src, linear, tiled, bytes_per_element);
 		}
@@ -262,7 +263,7 @@ void DetileScalarRange(uint8_t* dst, const uint8_t* src, uint32_t y0, uint32_t y
 // direct layout helper call instead of an indirect function-pointer dispatch.
 template <TileOffsetFn OffsetFn>
 void DetileWorkgroupRange(uint8_t* dst, const uint8_t* src, uint32_t y0, uint32_t y1, uint32_t width, uint32_t pitch,
-	                      uint32_t dst_pitch, uint32_t bytes_per_element, uint32_t depth_layer)
+	                      uint32_t dst_pitch, uint32_t bytes_per_element, uint32_t slice)
 {
 	static constexpr uint32_t k_group = 8u;
 	const uint32_t            groups_x = DivideRoundUp(width, k_group);
@@ -288,7 +289,7 @@ void DetileWorkgroupRange(uint8_t* dst, const uint8_t* src, uint32_t y0, uint32_
 					{
 						break;
 					}
-					const uint64_t tiled  = OffsetFn(x, y, pitch, bytes_per_element, depth_layer);
+					const uint64_t tiled  = OffsetFn(x, y, pitch, bytes_per_element, slice);
 					const uint64_t linear = (static_cast<uint64_t>(y) * dst_pitch + x) * bytes_per_element;
 					CopyOneElement(dst, src, linear, tiled, bytes_per_element);
 				}
@@ -301,20 +302,35 @@ void DetileWorkgroupRange(uint8_t* dst, const uint8_t* src, uint32_t y0, uint32_
 // separate from the generic workgroup dispatch so texture uploads retain the
 // established memcpy specialization while the compute-style path remains
 // available for cross-checking the common layout dispatcher.
+// The SW_4K_S offset of (x, y) is offset(x, 0) + offset(0, y): the block index
+// is linear in the block column and row, and the in-block swizzle places X and
+// Y bits in disjoint positions. Column offsets are computed once per call.
 void DetileStandard4KBContiguousRange(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t height, uint32_t pitch,
                                       uint32_t dst_pitch, uint32_t bytes_per_element)
 {
+	constexpr size_t kRunBytes  = 16u;
+	const uint32_t   run_elems  = TileGetStandard4KBContiguousElements(0u, bytes_per_element);
+	const uint32_t   full_runs  = width / run_elems;
+	const size_t     tail_bytes = static_cast<size_t>(width % run_elems) * bytes_per_element;
+	EXIT_IF(static_cast<size_t>(run_elems) * bytes_per_element != kRunBytes);
+
+	std::vector<uint64_t> columns;
+	columns.reserve(full_runs + 1u);
+	for (uint32_t x = 0; x < width; x += run_elems)
+	{
+		columns.push_back(TileGetStandard4KBOffset(x, 0u, pitch, bytes_per_element));
+	}
 	for (uint32_t y = 0; y < height; ++y)
 	{
-		for (uint32_t x = 0; x < width;)
+		const uint8_t* row_src = src + TileGetStandard4KBOffset(0u, y, pitch, bytes_per_element);
+		uint8_t*       row_dst = dst + static_cast<uint64_t>(y) * dst_pitch * bytes_per_element;
+		for (uint32_t run = 0; run < full_runs; ++run)
 		{
-			const uint32_t available = TileGetStandard4KBContiguousElements(x, bytes_per_element);
-			const uint32_t remaining = width - x;
-			const uint32_t run       = available < remaining ? available : remaining;
-			const uint64_t tiled     = TileGetStandard4KBOffset(x, y, pitch, bytes_per_element);
-			const uint64_t linear    = (static_cast<uint64_t>(y) * dst_pitch + x) * bytes_per_element;
-			std::memcpy(dst + linear, src + tiled, static_cast<size_t>(run) * bytes_per_element);
-			x += run;
+			std::memcpy(row_dst + run * kRunBytes, row_src + columns[run], kRunBytes);
+		}
+		if (tail_bytes != 0u)
+		{
+			std::memcpy(row_dst + full_runs * kRunBytes, row_src + columns[full_runs], tail_bytes);
 		}
 	}
 }
@@ -354,7 +370,7 @@ bool RunDetile(const TileDetileRequest& request, bool reference, bool compute_st
 	if (reference)
 	{
 		DetileScalarRange(dst, src, 0, request.height, request.width, pitch, dst_pitch, request.bytes_per_element,
-		                  request.depth_layer, offset_fn);
+		                  request.slice, offset_fn);
 		return true;
 	}
 	if (standard4kb_contiguous && GetProductionPathUnchecked(request) == TileDetileProductionPath::Standard4KBContiguous)
@@ -368,30 +384,30 @@ bool RunDetile(const TileDetileRequest& request, bool reference, bool compute_st
 		{
 			case TileDetileLayout::Sw64kRx:
 				DetileWorkgroupRange<OffsetSw64kRx>(dst, src, 0, request.height, request.width, pitch, dst_pitch,
-				                                         request.bytes_per_element, request.depth_layer);
+				                                         request.bytes_per_element, request.slice);
 				break;
 			case TileDetileLayout::Standard64KB:
 				DetileWorkgroupRange<OffsetStandard64KB>(dst, src, 0, request.height, request.width, pitch, dst_pitch,
-				                                             request.bytes_per_element, request.depth_layer);
+				                                             request.bytes_per_element, request.slice);
 				break;
 			case TileDetileLayout::Standard4KB:
 				DetileWorkgroupRange<OffsetStandard4KB>(dst, src, 0, request.height, request.width, pitch, dst_pitch,
-				                                            request.bytes_per_element, request.depth_layer);
+				                                            request.bytes_per_element, request.slice);
 				break;
 			case TileDetileLayout::Standard256B:
 				DetileWorkgroupRange<OffsetStandard256B>(dst, src, 0, request.height, request.width, pitch, dst_pitch,
-				                                            request.bytes_per_element, request.depth_layer);
+				                                            request.bytes_per_element, request.slice);
 				break;
 			case TileDetileLayout::Depth64KB:
 				DetileWorkgroupRange<OffsetDepth64KB>(dst, src, 0, request.height, request.width, pitch, dst_pitch,
-				                                           request.bytes_per_element, request.depth_layer);
+				                                           request.bytes_per_element, request.slice);
 				break;
 			default: return false;
 		}
 		return true;
 	}
 	DetileScalarRange(dst, src, 0, request.height, request.width, pitch, dst_pitch, request.bytes_per_element,
-	                  request.depth_layer, offset_fn);
+	                  request.slice, offset_fn);
 	return true;
 }
 

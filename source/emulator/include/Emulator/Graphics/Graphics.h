@@ -263,6 +263,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t
 uint32_t* KYTY_SYSV_ABI GraphicsAcbDispatchIndirect(CommandBuffer* buf, const volatile void* indirect_args, uint32_t modifier);
 // sceAgcDcbDrawIndexIndirect (NID t1vNu082-jM).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier);
+// sceAgcDcbDrawIndirect (NID 1q1titRBL6o).
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, uint8_t compare_function, uint8_t op, uint8_t cache_policy,
                                               const volatile void* address, uint64_t reference, uint64_t mask, uint32_t poll_cycles);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_out_handle, int32_t display_buffer_index, uint32_t flip_mode,
@@ -294,6 +296,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t in
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances);
 uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32_t cache_policy, const void* target, uint32_t size_dw);
 uint32_t KYTY_SYSV_ABI  GraphicsCbJumpGetSize();
+uint32_t* KYTY_SYSV_ABI GraphicsCbBranch(CommandBuffer* buf, uint32_t mode, uint32_t function, const volatile uint64_t* compare_address,
+                                         uint64_t mask, uint64_t reference, uint32_t then_cache_policy, const void* then_target,
+                                         uint32_t then_size_dw, uint32_t else_cache_policy, const void* else_target, uint32_t else_size_dw);
+uint32_t KYTY_SYSV_ABI  GraphicsCbBranchGetSize();
 int KYTY_SYSV_ABI       GraphicsSetPacketPredication(uint32_t* packet, uint32_t predication);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetPredication(CommandBuffer* buf, uint32_t condition, uint32_t operation, uint32_t wait,
                                                   const volatile void* address);

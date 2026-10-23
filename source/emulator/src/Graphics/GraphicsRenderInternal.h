@@ -29,7 +29,10 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DepthStencilCopy.h"
+#include "Emulator/Graphics/GdsRange.h"
+#include "Emulator/Graphics/GpuDeferredDeletionQueue.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
@@ -53,7 +56,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <iterator>
+#include <list>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -180,6 +187,69 @@ struct VulkanPipeline
 	VkExtent2D                      framebuffer_extent {};
 };
 
+// A cache entry remains alive while a recorded executable command buffer can
+// still be submitted with it. Retirement hides it from new lookups and destroys
+// it only when its last recording lease is released.
+class PipelineLifetimeState
+{
+public:
+	[[nodiscard]] bool Acquire()
+	{
+		if (m_retirement_requested || m_references == UINT32_MAX)
+		{
+			return false;
+		}
+		m_references++;
+		return true;
+	}
+
+	[[nodiscard]] bool Release()
+	{
+		if (m_references == 0)
+		{
+			return false;
+		}
+		m_references--;
+		return m_retirement_requested && m_references == 0;
+	}
+
+	[[nodiscard]] bool RequestRetirement()
+	{
+		m_retirement_requested = true;
+		return m_references == 0;
+	}
+
+	[[nodiscard]] bool CanEvict() const { return !m_retirement_requested && m_references == 0; }
+	[[nodiscard]] bool RetirementRequested() const { return m_retirement_requested; }
+	[[nodiscard]] uint32_t ReferenceCount() const { return m_references; }
+
+private:
+	uint32_t m_references = 0;
+	bool     m_retirement_requested = false;
+};
+
+template <typename IsEvictable>
+[[nodiscard]] inline uint32_t PipelineCacheNextEvictableIndex(uint32_t size, uint32_t* cursor, IsEvictable is_evictable)
+{
+	if (size == 0 || cursor == nullptr)
+	{
+		return UINT32_MAX;
+	}
+
+	const uint32_t first = *cursor % size;
+	for (uint32_t offset = 0; offset < size; offset++)
+	{
+		const uint32_t index = (first + offset) % size;
+		if (is_evictable(index))
+		{
+			*cursor = (index + 1u) % size;
+			return index;
+		}
+	}
+
+	return UINT32_MAX;
+}
+
 class PipelineCache
 {
 public:
@@ -187,17 +257,27 @@ public:
 	virtual ~PipelineCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(PipelineCache);
 
-	VulkanPipeline* CreatePipeline(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
+	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
 	                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
 	                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
 	                               const VulkanSampleLocationState& sample_locations);
-	VulkanPipeline* CreatePipeline(const ShaderComputeInputInfo* input_info, const HW::ComputeShaderInfo* cs_regs,
+	VulkanPipeline* CreatePipeline(CommandBuffer* recording_buffer, const ShaderComputeInputInfo* input_info,
+	                               const HW::ComputeShaderInfo* cs_regs,
 	                               const HW::ShaderRegisters* sh_regs);
+	// Compute pass of a merged ES+GS draw; `input_info` is the fused front with
+	// the geometry push block and guest device addressing bound.
+	VulkanPipeline* CreateGeometryPipeline(CommandBuffer* recording_buffer, const ShaderVertexInputInfo* input_info,
+	                                       const ShaderGeometryComputeInfo& geometry, const HW::VertexShaderInfo* vs_regs,
+	                                       const HW::ShaderRegisters* sh_regs);
 	void            DeletePipeline(VulkanPipeline* pipeline);
 	void            DeletePipelines(VulkanFramebuffer* framebuffer);
 	void            DeleteAllPipelines();
+	void            ReleasePipelineLease(VulkanPipeline* pipeline);
+	[[nodiscard]] static constexpr uint32_t MaxPipelineCount() { return MAX_PIPELINES; }
 
 private:
+	friend class PipelineLifetimeTestAccess;
+
 	static constexpr uint32_t MAX_PIPELINES = 512;
 
 	struct Pipeline
@@ -209,9 +289,12 @@ private:
 		VulkanPipeline*            pipeline       = nullptr;
 		PipelineStaticParameters*  static_params  = nullptr;
 		PipelineDynamicParameters* dynamic_params = nullptr;
+		PipelineLifetimeState      lifetime;
 	};
 
-	[[nodiscard]] VulkanPipeline* Find(const Pipeline& p) const;
+	[[nodiscard]] Pipeline* Find(const Pipeline& p);
+	[[nodiscard]] uint32_t  FindAvailableSlot();
+	void                    AttachPipelineLease(CommandBuffer* recording_buffer, Pipeline& pipeline);
 
 	void DeletePipelineInternal(uint32_t id);
 	void SaveDriverCacheIfDue();
@@ -261,11 +344,16 @@ public:
 	KYTY_CLASS_NO_COPY(DescriptorCache);
 
 	VkDescriptorSetLayout GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind);
+	VkDescriptorSetLayout GetDescriptorSetLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 
 	VulkanDescriptorSet* Allocate(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                 Free(VulkanDescriptorSet* set);
+	// Keeps a set whose submissions all completed for the next set of its layout.
+	void                 Recycle(VulkanDescriptorSet* set);
 
-	VulkanDescriptorSet* GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
+	// The set is recorded as used by `buffer`'s submission; an untracked use
+	// keeps the set until a resource it references is deleted.
+	VulkanDescriptorSet* GetDescriptor(CommandBuffer* buffer, Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
 	                                   const int* textures2d_sampled_view, VulkanImage** textures2d_sampled_depth,
 	                                   const int* textures2d_sampled_depth_view, VulkanImage** textures2d_array_sampled,
 	                                   const int* textures2d_array_sampled_view, VulkanImage** textures3d_sampled,
@@ -277,8 +365,20 @@ public:
 	                                   VulkanBuffer* vsharp_buffer, const ShaderBindResources& bind);
 	void                 FreeDescriptor(VulkanBuffer* buffer);
 	void                 FreeDescriptor(VulkanImage* image);
+	// Test contexts own their device and discard the cache before destroying it.
+	void                 DeleteAllForTesting(GraphicContext* ctx);
 
 private:
+	struct ResourceSlot
+	{
+		uint64_t unique_id = 0;
+		uint32_t position  = 0;
+	};
+	struct SetReference
+	{
+		int      set  = -1;
+		uint32_t slot = 0;
+	};
 	struct Set
 	{
 		VulkanDescriptorSet* set                                           = nullptr;
@@ -318,6 +418,12 @@ private:
 		uint64_t             gds_buffers_id[GDS_BUFFER_MAX]                = {};
 		bool                 vsharp_uniform_buffer                         = false;
 		VulkanBufferDescriptorKey vsharp_uniform_buffer_key                = {};
+		GpuSubmissionHighWater uses;
+		bool                   untracked_use = false;
+		uint64_t               last_use      = 0;
+		// Each referenced resource with this set's position in that resource's
+		// reverse-index list, so unindexing removes the set in constant time.
+		std::vector<ResourceSlot> resources;
 	};
 
 	struct Pool
@@ -331,18 +437,50 @@ private:
 	void                  CreatePool();
 
 	static uint32_t CalcHash(const Set& s);
+	static void     CollectResourceIds(const Set& s, std::vector<uint64_t>* ids);
 
-	VulkanDescriptorSet* FindSet(const Set& s);
+	// Live sets are bounded: past the limit, the least recently used tracked
+	// sets leave the cache and are freed once their submissions complete.
+	static constexpr uint32_t LIVE_SETS_MAX = 65536;
+	static constexpr uint32_t TRIM_SETS     = 8192;
+	// Released sets wait for reuse by the next set of their layout, up to this
+	// many in all; past it the oldest returns to its pool. Pools never give memory
+	// back to the system, so a held set only reserves pool space, while a driver
+	// free and reallocation walks the pool's free list. The limit holds several
+	// trim batches so a trim does not overflow it.
+	static constexpr uint32_t RECYCLED_SETS_MAX = TRIM_SETS * 4;
+
+	int                  FindSet(const Set& s);
+	void                 IndexSet(int index);
+	VulkanDescriptorSet* UnindexSet(int index);
+	void                 ReleaseSet(int index);
+	void                 RecordSetUse(int index, CommandBuffer* buffer);
+	void                 TrimSets();
+	void                 FreeOldestRecycled();
+	template <typename References>
+	void FreeSetsReferencing(uint64_t unique_id, References references);
 
 	Core::Mutex  m_mutex;
 	Vector<Pool> m_pools;
 	Vector<Set>  m_sets;
 	int          m_first_free_set  = -1;
 	int          m_first_free_pool = -1;
+	uint32_t     m_live_sets       = 0;
+	uint64_t     m_use_clock       = 0;
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
+	// Live sets by the unique id of each image or buffer they reference.
+	std::unordered_map<uint64_t, std::vector<SetReference>> m_sets_by_resource;
+	// IndexSet scratch, kept to avoid an allocation per created set.
+	std::vector<uint64_t>                                   m_resource_ids;
 
 	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
+	// Released sets, oldest first, and per layout the positions of its sets in
+	// that order. A layout's sets are taken newest first; a full list drops its
+	// oldest set so stale layouts cannot fill it.
+	using RecycledOrder = std::list<VulkanDescriptorSet*>;
+	RecycledOrder                                                               m_recycled_order;
+	std::unordered_map<VkDescriptorSetLayout, std::deque<RecycledOrder::iterator>> m_recycled_sets;
 };
 
 class SamplerCache
@@ -353,7 +491,8 @@ public:
 	KYTY_CLASS_NO_COPY(SamplerCache);
 
 	VkSampler GetSampler(uint64_t id);
-	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized = true);
+	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized,
+	                       bool uses_r_coordinate);
 	void      DeleteAllForTesting(GraphicContext* ctx);
 
 private:
@@ -362,6 +501,7 @@ private:
 		ShaderSamplerResource r;
 		State::ImageSampleOperation operation {};
 		bool                  allow_unnormalized = true;
+		bool                  uses_r_coordinate  = true;
 		VkSampler             vk = nullptr;
 	};
 
@@ -422,6 +562,7 @@ private:
 		uint64_t           image_id[8]             = {};
 		uint32_t           base_array_layer[8]     = {};
 		uint32_t           layer_count[8]          = {};
+		uint32_t           mip_level[8]            = {};
 		VkFormat           color_format[8]         = {};
 		int                color_view[8]           = {};
 		uint64_t           depth_id                = 0;
@@ -446,18 +587,41 @@ public:
 	virtual ~GdsBuffer() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(GdsBuffer);
 
-	void Clear(GraphicContext* ctx, uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value);
-	void Read(GraphicContext* ctx, uint32_t* dst, uint32_t dw_offset, uint32_t dw_size);
+	// GDS is only touched through recorded commands, outside any render pass, so transfers keep
+	// their stream order against dispatches. Each recorder validates its spans first and returns
+	// false, recording nothing, when a span is outside the guest window. Empty spans record nothing.
+	[[nodiscard]] bool RecordFill(CommandBuffer* buffer, GraphicContext* ctx, uint64_t dw_offset, uint64_t dw_count, uint32_t value);
+	[[nodiscard]] bool RecordUpdate(CommandBuffer* buffer, GraphicContext* ctx, uint64_t dw_offset, const uint32_t* src, uint64_t dw_count);
+	// `src` holds GPU-owned guest bytes at byte offset `src_offset`.
+	[[nodiscard]] bool RecordCopyFromBuffer(CommandBuffer* buffer, GraphicContext* ctx, const VulkanBuffer* src, uint64_t src_offset,
+	                                        uint64_t dw_offset, uint64_t dw_count);
+	[[nodiscard]] bool RecordCopy(CommandBuffer* buffer, GraphicContext* ctx, uint64_t src_dw_offset, uint64_t dst_dw_offset, uint64_t dw_count);
+	// Copies a span to offset 0 of host-visible `dst`, readable by the host once the fence completes.
+	[[nodiscard]] bool RecordCopyToHost(CommandBuffer* buffer, GraphicContext* ctx, uint64_t dw_offset, const VulkanBuffer* dst,
+	                                    uint64_t dw_count);
 
-	VulkanBuffer* GetBuffer(GraphicContext* ctx);
+	// Bounded publication staging: reserved when a GDS read is recorded and returned by the
+	// deferred release of that read's submission.
+	[[nodiscard]] bool TryReserveStaging(uint64_t bytes);
+	void               ReleaseStaging(uint64_t bytes);
+	// Publications recorded and not yet released.
+	[[nodiscard]] uint64_t PendingPublications();
+
+	VulkanBuffer* GetBuffer(GraphicContext* ctx, CommandBuffer* buffer);
+	// Test contexts only: frees the backing after every submission using it has completed.
+	void ReleaseForTesting(GraphicContext* ctx);
 
 private:
-	static constexpr uint64_t DW_SIZE = 0x3000;
+	static constexpr uint64_t kStagingRecordsMax = 64;
+	static constexpr uint64_t kStagingBytesMax   = 16u * kGraphicsGdsDwords * 4u;
 
-	void Init(GraphicContext* ctx);
+	void Init(GraphicContext* ctx, CommandBuffer* buffer);
 
 	Core::Mutex   m_mutex;
-	VulkanBuffer* m_buffer = nullptr;
+	VulkanBuffer* m_buffer          = nullptr;
+	uint32_t      m_queue_family    = VK_QUEUE_FAMILY_IGNORED;
+	uint64_t      m_staging_records = 0;
+	uint64_t      m_staging_bytes   = 0;
 };
 
 class VertexClipProbeRenderer
@@ -652,6 +816,9 @@ struct RenderDepthInfo
 	VkSampleCountFlagBits       samples                  = VK_SAMPLE_COUNT_1_BIT;
 	uint32_t                    width                    = 0;
 	uint32_t                    height                   = 0;
+	// DB_DEPTH_VIEW slice range; the depth image itself holds one slice.
+	uint32_t                    slice_start              = 0;
+	uint32_t                    slice_max                = 0;
 	bool                        htile                    = false;
 	bool                        neo                      = false;
 	uint64_t                    depth_buffer_size        = 0;
@@ -674,6 +841,8 @@ struct RenderDepthInfo
 	float                       depth_max_bounds         = 0.0f;
 	bool                        stencil_clear_enable     = false;
 	uint8_t                     stencil_clear_value      = 0;
+	bool                        stencil_plane            = false;
+	bool                        htile_stencil            = false;
 	bool                        stencil_test_enable      = false;
 	bool                        sampled                  = false;
 	bool                        update_compression_state = false;
@@ -705,6 +874,10 @@ struct RenderColorAttachmentInfo
 	RenderColorType       type                    = RenderColorType::NoColorOutput;
 	VulkanImage*          vulkan_buffer           = nullptr;
 	uint64_t              base_addr               = 0;
+	// DCC metadata base of a single-level, single-slice target; zero otherwise.
+	uint64_t              dcc_addr                = 0;
+	bool                  dcc_alpha_on_msb        = false;
+	uint32_t              bytes_per_element       = 0;
 	bool                  cmask_fast_clear_enable = false;
 	uint32_t              clear_word0             = 0;
 	uint32_t              clear_word1             = 0;
@@ -720,9 +893,18 @@ struct RenderColorAttachmentInfo
 	uint32_t              image_layers            = 1;
 	uint32_t              base_array_layer         = 0;
 	uint32_t              layer_count              = 1;
+	// A 3D target: the layers are the depth slices of one volume.
+	bool                  volume                  = false;
+	// Levels of a mip-chained target and the one MIP_LEVEL renders.
+	uint32_t              mip_levels              = 1;
+	uint32_t              mip_level               = 0;
 	bool                  tile                    = false;
 	bool                  neo                     = false;
 	bool                  write_back              = false;
+	// Vulkan extent a render-texture cohort selected; zero lets the attachment
+	// keep its committed extent or choose its own.
+	uint32_t              host_width              = 0;
+	uint32_t              host_height             = 0;
 };
 
 struct RenderColorInfo
@@ -731,6 +913,22 @@ struct RenderColorInfo
 	uint32_t                  targets_num = 0;
 	RenderColorAttachmentInfo attachment[TARGETS_MAX] {};
 };
+
+enum class VulkanColorAttachmentBlendAdmission
+{
+	Supported,
+	InvalidInput,
+	MissingFormatFeature,
+};
+
+[[nodiscard]] inline VkBool32 VulkanResolveColorAttachmentBlendEnable(bool blend_enable, bool blend_bypass)
+{
+	return blend_enable && !blend_bypass ? VK_TRUE : VK_FALSE;
+}
+
+// Uses the render-pass view format; bound color images use optimal tiling.
+[[nodiscard]] VulkanColorAttachmentBlendAdmission VulkanValidateColorAttachmentBlendRequest(
+	VkPhysicalDevice physical_device, VkFormat attachment_format, bool blend_enable, bool blend_bypass);
 
 // Opt-in PS bind probe. KYTY_TRACE_DRAW_PS is a hex checksum, a comma-separated
 // list of up to four checksums, or "*" / "all" for a unique-checksum census.
@@ -1320,26 +1518,17 @@ struct CubeDrawDepthCoverage
 	return shape == ShaderGen5SampledTextureShape::TwoDimensional;
 }
 
-[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_slot)
+[[nodiscard]] constexpr uint32_t SamplerViewShapeBit(ShaderGen5SampledTextureShape shape)
 {
-	bool matched = false;
-	for (int i = 0; i < textures.textures_num; ++i)
-	{
-		const auto& descriptor = textures.desc[i];
-		if (descriptor.usage != ShaderTextureUsage::ReadOnly || descriptor.slot != sampler_slot)
-		{
-			continue;
-		}
-		matched = true;
-		if (!SamplerViewAllowsUnnormalized(ShaderResolvedSampledTextureShape(descriptor)))
-		{
-			return false;
-		}
-	}
-	if (matched)
-	{
-		return true;
-	}
+	return 1u << static_cast<uint32_t>(shape);
+}
+
+// Shapes of the read-only views paired with a sampler slot; every read-only
+// view when none pairs with it.
+[[nodiscard]] inline uint32_t BindSamplerViewShapes(const ShaderTextureResources& textures, int sampler_slot)
+{
+	uint32_t paired = 0;
+	uint32_t all    = 0;
 	for (int i = 0; i < textures.textures_num; ++i)
 	{
 		const auto& descriptor = textures.desc[i];
@@ -1347,12 +1536,26 @@ struct CubeDrawDepthCoverage
 		{
 			continue;
 		}
-		if (!SamplerViewAllowsUnnormalized(ShaderResolvedSampledTextureShape(descriptor)))
+		const uint32_t bit = SamplerViewShapeBit(ShaderResolvedSampledTextureShape(descriptor));
+		all |= bit;
+		if (descriptor.slot == sampler_slot)
 		{
-			return false;
+			paired |= bit;
 		}
 	}
-	return true;
+	return paired != 0u ? paired : all;
+}
+
+[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_slot)
+{
+	return (BindSamplerViewShapes(textures, sampler_slot) & ~SamplerViewShapeBit(ShaderGen5SampledTextureShape::TwoDimensional)) == 0u;
+}
+
+// The W address mode (S# CLAMP_Z) wraps the R coordinate of 3D views only: 2D
+// views have none, and array and cube views select a layer or face without it.
+[[nodiscard]] inline bool BindSamplerUsesRCoordinate(const ShaderTextureResources& textures, int sampler_slot)
+{
+	return (BindSamplerViewShapes(textures, sampler_slot) & SamplerViewShapeBit(ShaderGen5SampledTextureShape::ThreeDimensional)) != 0u;
 }
 
 // Draw-local context for an opt-in, bounded material-binding diagnostic.
@@ -1479,15 +1682,16 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
                                      VulkanSampleLocationState* sample_locations);
 
 // Internal image barriers (VkCommandBuffer overloads; public API uses CommandBuffer*).
-void GraphicsRenderRenderTextureBarrier(VkCommandBuffer vk_buffer, VulkanImage* image);
-void GraphicsRenderDepthStencilBarrier(VkCommandBuffer vk_buffer, VulkanImage* image);
-void GraphicsRenderStorageImageBarrier(VkCommandBuffer vk_buffer, VulkanImage* image);
+void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* image);
+void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, VulkanImage* image);
+void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image);
 
 // --- Core (color / dump) ---
 
 void FormatTextureList(const ShaderTextureResources& textures, char* buffer, size_t buffer_size);
+// Bytes before read_begin are never read through the returned buffer and are not captured.
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
-                                               VkBufferUsageFlags usage);
+                                               VkBufferUsageFlags usage, uint64_t read_begin = 0, bool zero_tail = true);
 
 bool                            RenderColorSlotConfigured(const RenderColorInfo& color, uint32_t slot);
 bool                            RenderColorSlotActive(const RenderColorInfo& color, uint32_t slot);
@@ -1496,8 +1700,10 @@ const RenderColorAttachmentInfo* RenderColorFirstConfiguredAttachment(const Rend
 VulkanImage*                    RenderColorFirstActiveImage(const RenderColorInfo& color);
 VkSampleCountFlagBits           decode_guest_sample_count(uint32_t encoded);
 VkSampleCountFlagBits           resolve_render_attachment_sample_count(const RenderColorInfo& color, const RenderDepthInfo& depth);
-VkExtent2D                      IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment);
+VkExtent2D                      IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment,
+                                                                     uint32_t mip_level = 0);
 void                            SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* depth);
+void                            CollapseRenderColorLayersWithoutLayerExport(RenderColorInfo* color, uint32_t pa_cl_vs_out_cntl);
 void                            MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& vs_input,
                                                 const ShaderPixelInputInfo& ps_input, const HW::Context& hw, const HW::UserConfig& ucfg,
                                                 uint32_t index_count, uint32_t index_type_and_size, bool indexed, uint32_t flags = 0);
@@ -1525,11 +1731,46 @@ struct ComputeUniformBufferFill
 // Copies the filled storage object into the guest device-address view in queue
 // order, so later device-address consumers on this queue need no CPU write-back.
 [[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// Before a device-address read on `buffer`'s queue: copies every pending storage
+// result written only on that queue into the guest device-address view in queue
+// order. Returns true with a dependency to wait for when a pending result does not
+// qualify or cannot be published.
+[[nodiscard]] bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* dependency);
 // Ordered compute fills of color-image aliases (docs/graphics-compute-uniform-color-fill.md).
 void               InvalidateComputeColorFills(const ShaderBindResources& bind);
 [[nodiscard]] bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
-Vector<StorageTextureVulkanImage*> FindStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
+// A proven uniform fill of a live depth image's whole stencil plane clears its
+// host stencil aspect in recording order.
+[[nodiscard]] bool PropagateComputeUniformStencilFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// A proven uniform fill of a live 32-bit float depth image's whole depth plane
+// with a value in [0, 1] clears its host depth aspect in recording order.
+[[nodiscard]] bool PropagateComputeUniformDepthFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// A pass that samples its depth attachment cannot CLEAR it, so a first use of the
+// image there receives the first-use clear contents before the pass begins.
+void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth);
+// A proven uniform fill of a DCC metadata range with a clear key is held until
+// a render target or shader image with that metadata base consumes it.
+[[nodiscard]] bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+
+// A color image bound to a shader, read or written, whose T# enables DCC.
+struct ColorDccImage
+{
+	uint64_t address           = 0;
+	uint64_t size              = 0;
+	uint64_t dcc_addr          = 0;
+	uint32_t width             = 0;
+	uint32_t height            = 0;
+	uint32_t bytes_per_element = 0;
+	bool     alpha_on_msb      = false;
+	bool     single_surface    = false; // one level, one slice
+};
+void ConsumeImageColorDccClear(CommandBuffer* buffer, const ColorDccImage& image);
+// The view of exactly this range that holds its latest storage write, or nullptr.
+StorageTextureVulkanImage*         FindLatestStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
+Vector<StorageTextureVulkanImage*> FindOverlappingStorageTextures(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 Vector<DepthStencilVulkanImage*>   FindDepthStencil(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
+// The depth-stencil image whose stencil plane is exactly [vaddr, vaddr + size) and spans width x height texels, or nullptr.
+DepthStencilVulkanImage*           FindStencilPlane(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, uint32_t width, uint32_t height);
 
 // --- Attachments ---
 void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r);
@@ -1546,17 +1787,49 @@ RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffer* buff
                                                              const RenderDepthInfo& depth);
 RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color, const RenderDepthInfo& depth,
                                                     ShaderPixelInputInfo* ps);
+RenderResolutionPlan PrepareRenderTargetResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color, const RenderDepthInfo& depth,
+                                                         ShaderPixelInputInfo* ps);
 void RequireSupportedRenderResolutionPlan(const RenderResolutionPlan& decision);
 void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision, const RenderColorInfo& color,
                                             const RenderDepthInfo& depth);
 
 // --- Bind ---
+// The draw fetches only records [first_record, required_records); zero required_records means every declared record.
+// records_exact says the GPU reads the same draw range the host resolved, so fetches cannot pass it.
+// Per-instance streams fetch records [0, first_instance + instance_count) instead.
 void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
-	                   uint32_t required_records);
+	                   uint32_t first_record, uint32_t required_records, bool records_exact, uint32_t first_instance,
+	                   uint32_t instance_count);
+// How a shader stage may read a resolution-scaled image. Normalized sampling
+// without texel offsets reads the same content at any host extent; integer
+// texel access, size queries and texel offsets address host texels.
+enum class ScaledImageReadAccess : uint8_t
+{
+	Refused,
+	NormalizedSampling,
+};
+
+[[nodiscard]] inline ScaledImageReadAccess ResolvePixelScaledImageReadAccess(const ShaderPixelInputInfo& ps)
+{
+	const bool host_texel_access = ps.integer_image_coordinates || ps.image_size_query || ps.texel_offset_sampling;
+	return host_texel_access ? ScaledImageReadAccess::Refused : ScaledImageReadAccess::NormalizedSampling;
+}
+
+// A use that addresses guest texels demotes a resolution-scaled render target:
+// its range stops scaling and its content is resampled into a guest-extent
+// image. `pass_color` holds the color attachments of the current pass, or is
+// null when the pass has none; a pass cannot demote its own attachment.
+RenderTextureVulkanImage* DemoteScaledRenderTexture(uint64_t submit_id, CommandBuffer* buffer, RenderTextureVulkanImage* image,
+                                                    uint64_t vaddr, uint64_t size, const RenderColorInfo* pass_color);
+
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
-                     uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr,
-                     uint64_t shader_checksum = 0, const VulkanImage* stencil_attached_depth = nullptr);
+                     uint64_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr,
+                     uint64_t shader_checksum = 0, const VulkanImage* stencil_attached_depth = nullptr,
+                     const ShaderStorageImageTileCoverage* storage_seed_coverage = nullptr,
+                     const GuestDeviceAddressTable* device_address_table = nullptr,
+                     ScaledImageReadAccess scaled_image_reads = ScaledImageReadAccess::Refused,
+                     const RenderColorInfo* pass_color = nullptr);
 void TraceRenderTargetLifetimeDraw(uint64_t submit_id, const DrawMaterialTraceContext& draw);
 void TraceRenderTargetLifetimePassBegin(uint64_t submit_id, const RenderColorInfo& color,
 	                                    const VulkanFramebuffer& framebuffer);
@@ -1589,7 +1862,8 @@ void MaybeDumpPrimitiveDrawPlan(const char* path, uint32_t primitive_type, uint3
 bool AutoDrawModifierSupported(uint64_t draw_modifier);
 void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
 	                                uint32_t index_count, uint32_t index_type_and_size, const void* index_addr,
-	                                uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance);
+	                                uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
+	                                SubmissionId* pending_submission);
 
 } // namespace Kyty::Libs::Graphics
 

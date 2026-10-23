@@ -48,8 +48,11 @@ KYTY_SCRIPT_FUNC(copy_func)
 		EXIT("invalid args\n");
 	}
 
-	Core::File::CreateDirectories(dst.DirectoryWithoutFilename());
-	Core::File::CopyFile(src, dst);
+	const String directory = dst.DirectoryWithoutFilename();
+	if ((!directory.IsEmpty() && !Core::File::CreateDirectories(directory)) || !Core::File::CopyFile(src, dst))
+	{
+		EXIT("copy failed\n");
+	}
 
 	return 0;
 }
@@ -101,13 +104,16 @@ KYTY_SCRIPT_FUNC(sync_func)
 	{
 		src = Scripts::ArgGetVar(0).ToString();
 		dst = Scripts::ArgGetVar(1).ToString();
-		del = Scripts::ArgGetVar(1).ToInteger();
+		del = Scripts::ArgGetVar(2).ToInteger();
 	} else
 	{
 		EXIT("invalid args\n");
 	}
 
-	Core::File::SyncDirectories(src, dst, del != 0);
+	if (!Core::File::SyncDirectories(src, dst, del != 0))
+	{
+		EXIT("sync failed\n");
+	}
 
 	return 0;
 }

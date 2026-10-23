@@ -122,7 +122,23 @@ bool IsDsAddRtnU32InstructionSupported(const ShaderInstruction& instruction)
 	       instruction.ds_offset == offset;
 }
 
+bool IsDsWriteB32GdsInstructionSupported(const ShaderInstruction& instruction)
+{
+	const auto encoding = DecodeDsEncoding(instruction);
+	const auto offset   = static_cast<uint16_t>(encoding.offset0 | (encoding.offset1 << 8u));
+	return IsExactDsTupleBase(instruction, ShaderInstructionFormat::VaddrVdataOffsetGds, 2) && IsUnusedOperand(instruction.dst) &&
+	       IsOrdinaryVgpr(instruction.src[0]) && IsOrdinaryVgpr(instruction.src[1]) && encoding.prefix == kDsEncodingPrefix &&
+	       encoding.gds == 1u && encoding.reserved == 0u && encoding.opcode == kDsWriteB32Opcode && encoding.vdst == 0u &&
+	       encoding.data1 == 0u && encoding.address == VgprIndex(instruction.src[0]) && encoding.data0 == VgprIndex(instruction.src[1]) &&
+	       instruction.ds_offset == offset;
+}
+
 } // namespace
+
+bool ShaderComputeWaveGdsWriteSupported(const ShaderInstruction& instruction)
+{
+	return instruction.type == ShaderInstructionType::DsWriteB32 && IsDsWriteB32GdsInstructionSupported(instruction);
+}
 
 bool ShaderComputeWaveLdsInstructionSupported(const ShaderInstruction& instruction)
 {

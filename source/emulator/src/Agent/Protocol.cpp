@@ -830,11 +830,21 @@ void AppendRenderResolutionPerformanceJson(const Libs::Graphics::RenderResolutio
 		}
 		return "unknown";
 	};
+	const auto presentation_filter_name = [](Config::PresentationFilter filter)
+	{
+		switch (filter)
+		{
+			case Config::PresentationFilter::Linear: return "linear";
+			case Config::PresentationFilter::Nearest: return "nearest";
+			case Config::PresentationFilter::Fsr: return "fsr";
+		}
+		return "unknown";
+	};
 	const auto& decision = resolution.candidate_decision;
 	*out += "\"render_resolution\":{\"mode\":\"";
 	*out += Config::IsInitialized() && Config::GetRenderResolutionMode() == Config::RenderResolutionMode::Native ? "native" : "fixed";
 	*out += "\",\"presentation_filter\":\"";
-	*out += Config::IsInitialized() && Config::GetPresentationFilter() == Config::PresentationFilter::Nearest ? "nearest" : "linear";
+	*out += Config::IsInitialized() ? presentation_filter_name(Config::GetPresentationFilter()) : "linear";
 	*out += "\",\"target\":{\"width\":" + std::to_string(resolution.target_extent.width);
 	*out += ",\"height\":" + std::to_string(resolution.target_extent.height);
 	*out += "},\"guest_display\":{\"registered\":";
@@ -988,6 +998,10 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	    "\"vk_graphics_pipeline_create_max_ns\":%llu,"
 	    "\"vk_compute_pipeline_create_count\":%llu,\"vk_compute_pipeline_create_ns\":%llu,"
 	    "\"vk_compute_pipeline_create_max_ns\":%llu,"
+	    "\"compute_precompile_count\":%llu,\"compute_precompile_ns\":%llu,\"compute_precompile_max_ns\":%llu,"
+	    "\"compute_precompile_failed\":%llu,\"compute_precompile_wait_count\":%llu,"
+	    "\"compute_precompile_wait_ns\":%llu,\"compute_precompile_wait_max_ns\":%llu,"
+	    "\"compute_precompile_running\":%llu,\"compute_precompile_waiting_ns\":%llu,"
 	    "\"shader_translation_cache_hits\":%llu,\"shader_translation_cache_misses\":%llu,"
 	    "\"shader_translation_cache_evictions\":%llu,"
 	    "\"live_objects\":%llu,\"fps\":%.3f,\"frame_time_ms\":%.3f",
@@ -1054,6 +1068,15 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	    static_cast<unsigned long long>(performance.vk_compute_pipeline_create_count),
 	    static_cast<unsigned long long>(performance.vk_compute_pipeline_create_ns),
 	    static_cast<unsigned long long>(performance.vk_compute_pipeline_create_max_ns),
+	    static_cast<unsigned long long>(performance.compute_precompile_count),
+	    static_cast<unsigned long long>(performance.compute_precompile_ns),
+	    static_cast<unsigned long long>(performance.compute_precompile_max_ns),
+	    static_cast<unsigned long long>(performance.compute_precompile_failed),
+	    static_cast<unsigned long long>(performance.compute_precompile_wait_count),
+	    static_cast<unsigned long long>(performance.compute_precompile_wait_ns),
+	    static_cast<unsigned long long>(performance.compute_precompile_wait_max_ns),
+	    static_cast<unsigned long long>(performance.compute_precompile_running),
+	    static_cast<unsigned long long>(performance.compute_precompile_waiting_ns),
 	    static_cast<unsigned long long>(performance.shader_translation_cache_hits),
 	    static_cast<unsigned long long>(performance.shader_translation_cache_misses),
 	    static_cast<unsigned long long>(performance.shader_translation_cache_evictions),
@@ -1111,6 +1134,8 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	out += ",\"transient_buffer_upload_ns\":" + std::to_string(performance.transient_buffer_upload_ns);
 	out += ",\"wait_reg_mem_satisfied\":" + std::to_string(performance.wait_reg_mem_satisfied);
 	out += ",\"wait_reg_mem_current_producer\":" + std::to_string(performance.wait_reg_mem_current_producer);
+	out += ",\"render_pass_begins\":" + std::to_string(performance.render_pass_begins);
+	out += ",\"render_pass_continuations\":" + std::to_string(performance.render_pass_continuations);
 	out += ",\"wait_reg_mem_queued_producer\":" + std::to_string(performance.wait_reg_mem_queued_producer);
 	out += ",\"wait_reg_mem_producer_mismatch\":" + std::to_string(performance.wait_reg_mem_producer_mismatch);
 	out += ",\"wait_reg_mem_producer_not_found\":" + std::to_string(performance.wait_reg_mem_producer_not_found);

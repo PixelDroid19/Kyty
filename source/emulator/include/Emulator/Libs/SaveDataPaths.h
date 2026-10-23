@@ -19,6 +19,11 @@ namespace Kyty::Libs::SaveData {
 // path syntax is rejected at the HLE boundary instead of being redirected.
 [[nodiscard]] bool SaveDataDirectoryNameValid(const char* directory_name);
 
+// Match a save-slot name against a directory search pattern: '%' matches any
+// run of characters (including none), '_' matches exactly one character and
+// every other character matches itself.
+[[nodiscard]] bool SaveDataDirectoryNameMatches(const char* directory_name, const char* pattern);
+
 // Build the canonical per-title save root below an already-resolved user root.
 // A missing title identity uses UNKNOWN until SFO metadata is available.
 [[nodiscard]] std::filesystem::path SaveDataBuildTitleRoot(const std::filesystem::path& save_data_root, const char* title_id);

@@ -6,6 +6,10 @@
 .claude/
 .codex/
 .agents/
+.codemie/
+.grok/
+.opencode/
+.superpowers/
 .DS_Store
 
 # Build output

@@ -49,6 +49,99 @@ uint64_t GpuMemory::NextContentSequence()
 	return ++m_content_sequence;
 }
 
+namespace {
+
+enum class GuestSpanStatus : uint8_t
+{
+	Readable,
+	Unmapped,
+	Incomplete,
+	NotReadable,
+};
+
+const char* GuestSpanStatusName(GuestSpanStatus status)
+{
+	switch (status)
+	{
+		case GuestSpanStatus::Unmapped: return "unmapped";
+		case GuestSpanStatus::Incomplete: return "incompletely mapped";
+		case GuestSpanStatus::NotReadable: return "non-CPU-readable";
+		case GuestSpanStatus::Readable: break;
+	}
+	return "readable";
+}
+
+// Validates the single run that starts at cursor. The mapped record and the
+// protection record must both contain cursor; the run ends at the nearer of
+// their exclusive ends or at end. On success *next is always beyond cursor.
+GuestSpanStatus GpuMemoryGuestSpanStep(const Emulator::GuestMemory::Port& guest_memory, uint64_t cursor, uint64_t end, uint64_t* next)
+{
+	// Asking for one byte returns the record that contains cursor, not one that spans the whole request.
+	Emulator::GuestMemory::MappedRange mapped {};
+	if (!guest_memory.QueryMappedRange(cursor, 1, &mapped) || mapped.kind == Emulator::GuestMemory::MappedRangeKind::None)
+	{
+		return GuestSpanStatus::Unmapped;
+	}
+	const bool kind_ok = mapped.kind == Emulator::GuestMemory::MappedRangeKind::Physical ||
+	                     mapped.kind == Emulator::GuestMemory::MappedRangeKind::Flexible;
+	if (!kind_ok || mapped.base == 0 || mapped.size == 0 || cursor < mapped.base || cursor - mapped.base >= mapped.size ||
+	    mapped.size > UINT64_MAX - mapped.base)
+	{
+		return GuestSpanStatus::Incomplete;
+	}
+
+	void* protection_start = nullptr;
+	void* protection_end   = nullptr;
+	int   protection       = 0;
+	if (guest_memory.QueryProtection(reinterpret_cast<void*>(cursor), &protection_start, &protection_end, &protection) != 0)
+	{
+		return GuestSpanStatus::NotReadable;
+	}
+	// QueryProtection reports an inclusive end; an end at UINT64_MAX has no exclusive form.
+	const uint64_t start = reinterpret_cast<uint64_t>(protection_start);
+	const uint64_t last  = reinterpret_cast<uint64_t>(protection_end);
+	if (protection_start == nullptr || protection_end == nullptr || start > cursor || last < cursor || last == UINT64_MAX)
+	{
+		return GuestSpanStatus::Incomplete;
+	}
+	if ((protection & 0x3) == 0)
+	{
+		return GuestSpanStatus::NotReadable;
+	}
+
+	const uint64_t bound = std::min(std::min(end, mapped.base + mapped.size), last + 1);
+	if (bound <= cursor)
+	{
+		return GuestSpanStatus::Incomplete;
+	}
+	*next = bound;
+	return GuestSpanStatus::Readable;
+}
+
+// Every byte of [addr, addr + size) must lie in a CPU-readable guest segment
+// before the range may be hashed. Adjacent segments join; a hole stops the walk.
+GuestSpanStatus GpuMemoryValidateCpuReadableSpan(const Emulator::GuestMemory::Port& guest_memory, uint64_t addr, uint64_t size)
+{
+	if (size > UINT64_MAX - addr)
+	{
+		return GuestSpanStatus::Incomplete;
+	}
+	const uint64_t end = addr + size;
+	for (uint64_t cursor = addr; cursor < end;)
+	{
+		uint64_t next     = cursor;
+		const auto status = GpuMemoryGuestSpanStep(guest_memory, cursor, end, &next);
+		if (status != GuestSpanStatus::Readable)
+		{
+			return status;
+		}
+		cursor = next;
+	}
+	return GuestSpanStatus::Readable;
+}
+
+} // namespace
+
 uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_t size)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -63,51 +156,25 @@ uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_
 	// installed and retain the historical direct-hash path.
 	{
 		auto&                              guest_memory = Emulator::GuestMemory::GetPort();
-		Emulator::GuestMemory::MappedRange mapped {};
 		const uint64_t                     addr = reinterpret_cast<uint64_t>(buf);
 		// Guest malloc memory served from the host heap (no application heap yet) is
 		// host-readable and not a guest mapping; its content must still be hashed or
 		// buffers the title rewrites every frame never look changed.
 		if (guest_memory.IsInstalled() && !GpuMemoryIsHostGuestMallocRange(addr, size))
 		{
-			const bool range_known = guest_memory.QueryMappedRange(addr, size, &mapped);
-			if (!range_known)
+			const auto status = GpuMemoryValidateCpuReadableSpan(guest_memory, addr, size);
+			if (status != GuestSpanStatus::Readable)
 			{
 				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-				               "WARNING: GpuMemoryCalcHash skipping unmapped guest range type=%u buf=0x%012" PRIx64
-				               " size=0x%012" PRIx64 "\n",
-				               static_cast<unsigned>(type), addr, size);
-				return 0;
-			}
-			const bool covered = mapped.base != 0 && mapped.size != 0 && size <= mapped.size && addr >= mapped.base &&
-			                     addr - mapped.base <= mapped.size - size;
-			if (!covered)
-			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-				               "WARNING: GpuMemoryCalcHash skipping incompletely mapped range type=%u buf=0x%012" PRIx64
-				               " size=0x%012" PRIx64 "\n",
-				               static_cast<unsigned>(type), addr, size);
-				return 0;
-			}
-
-			void* protection_start = nullptr;
-			void* protection_end   = nullptr;
-			int   protection       = 0;
-			const int protection_result =
-			    guest_memory.QueryProtection(const_cast<uint8_t*>(buf), &protection_start, &protection_end, &protection);
-			if (protection_result != 0 || (protection & 0x3) == 0)
-			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-				               "WARNING: GpuMemoryCalcHash skipping non-CPU-readable range type=%u buf=0x%012" PRIx64
-				               " size=0x%012" PRIx64 " prot=0x%x result=%d\n",
-				               static_cast<unsigned>(type), addr, size, protection, protection_result);
+				               "WARNING: GpuMemoryCalcHash skipping %s guest range type=%u buf=0x%012" PRIx64 " size=0x%012" PRIx64 "\n",
+				               GuestSpanStatusName(status), static_cast<unsigned>(type), addr, size);
 				return 0;
 			}
 		}
 	}
-	const auto start   = std::chrono::steady_clock::now();
+	const auto start   = DebugStatsClock::now();
 	const auto result  = XXH3_64bits(buf, size);
-	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - start).count();
 	DebugStatsRecordGpuMemoryHash(GpuMemoryStatsTypeIndex(type), size, static_cast<uint64_t>(elapsed));
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::Hash, static_cast<uint64_t>(elapsed), size);
 	return result;
@@ -642,21 +709,42 @@ uint64_t GpuMemoryGetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
 	return g_gpu_memory->GetAllocatedRangePrefix(vaddr, maximum_size);
 }
 
-bool GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size)
+uint64_t GpuMemoryGetMappedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
 {
-	return g_gpu_memory != nullptr && g_gpu_memory->CanSnapshotReadOnlyBuffer(vaddr, size);
+	if (vaddr > UINT64_MAX - maximum_size)
+	{
+		return 0;
+	}
+	uint64_t covered = 0;
+	while (covered < maximum_size)
+	{
+		const uint64_t prefix = GpuMemoryGetAllocatedRangePrefix(vaddr + covered, maximum_size - covered);
+		if (prefix == 0)
+		{
+			break;
+		}
+		covered += prefix;
+	}
+	return covered;
 }
 
-bool GpuMemoryCaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns, uint64_t* copy_ns)
+bool GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, GpuMemorySnapshotAdmission admission)
 {
-	return g_gpu_memory != nullptr && g_gpu_memory->CaptureSnapshotReadOnlyBuffer(vaddr, size, dst, validation_ns, copy_ns);
+	return g_gpu_memory != nullptr && g_gpu_memory->CanSnapshotReadOnlyBuffer(vaddr, size, admission);
+}
+
+bool GpuMemoryCaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns, uint64_t* copy_ns,
+                                            GpuMemorySnapshotAdmission admission)
+{
+	return g_gpu_memory != nullptr &&
+	       g_gpu_memory->CaptureSnapshotReadOnlyBuffer(vaddr, size, dst, validation_ns, copy_ns, admission);
 }
 
 bool GpuMemoryCompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
-	                                        uint64_t* validation_ns, uint64_t* compare_ns)
+	                                        uint64_t* validation_ns, uint64_t* compare_ns, GpuMemorySnapshotAdmission admission)
 {
 	return g_gpu_memory != nullptr &&
-	       g_gpu_memory->CompareSnapshotReadOnlyBuffer(vaddr, size, snapshot, matches, validation_ns, compare_ns);
+	       g_gpu_memory->CompareSnapshotReadOnlyBuffer(vaddr, size, snapshot, matches, validation_ns, compare_ns, admission);
 }
 
 void GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
@@ -743,6 +831,24 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer,
 	return GpuMemoryFindObjectsForSubmission(submission, vaddr, size, type, exact, only_first);
 }
 
+Vector<GpuMemoryObject> GpuMemoryFindEqualObjectsForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	EXIT_IF(buffer == nullptr);
+	SubmissionId submission;
+	EXIT_IF(!buffer->GetSubmissionId(&submission));
+	return g_gpu_memory->FindEqualObjects(vaddr, size, type, submission);
+}
+
+Vector<GpuMemoryObject> GpuMemoryFindObjectsWithRangeForSubmission(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, GpuMemoryObjectType type)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	EXIT_IF(buffer == nullptr);
+	SubmissionId submission;
+	EXIT_IF(!buffer->GetSubmissionId(&submission));
+	return g_gpu_memory->FindObjectsWithRange(vaddr, size, type, submission);
+}
+
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                                                           GpuMemoryObjectType type, bool exact, bool only_first)
 {
@@ -773,11 +879,36 @@ bool GpuMemoryQueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRange
 	return g_gpu_memory != nullptr && g_gpu_memory->QueryRangeProvenance(vaddr, size, out);
 }
 
+void GpuMemoryLinkDepthMetaStorage(uint64_t depth_vaddr, uint64_t depth_size, uint64_t htile_addr, uint64_t htile_size)
+{
+	if (g_gpu_memory != nullptr)
+	{
+		g_gpu_memory->LinkDepthMetaStorage(depth_vaddr, depth_size, htile_addr, htile_size);
+	}
+}
+
+bool GpuMemoryDescribeObject(uint64_t vaddr, uint64_t size, const void* obj, GpuMemoryObjectDescription* out)
+{
+	if (out == nullptr || obj == nullptr || size == 0)
+	{
+		return false;
+	}
+	*out = GpuMemoryObjectDescription {};
+	return g_gpu_memory != nullptr && g_gpu_memory->DescribeObject(vaddr, size, obj, out);
+}
+
 void GpuMemoryResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
 
 	g_gpu_memory->ResetHash(vaddr, size, vaddr_num, type);
+}
+
+void GpuMemoryResetPlaneHash(uint64_t vaddr, uint64_t size, GpuMemoryObjectType type)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+
+	g_gpu_memory->ResetPlaneHash(vaddr, size, type);
 }
 
 void GpuMemoryDbgDump()
@@ -853,10 +984,17 @@ void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRa
 	g_gpu_memory->WriteBackStorageRanges(ctx, ranges, consumer);
 }
 
-bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency)
+bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer,
+                                      std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
-	return g_gpu_memory->PendingStorageWriteBack(ranges, consumer, dependency);
+	return g_gpu_memory->PendingStorageWriteBack(ranges, consumer, publishable, dependency);
+}
+
+bool GpuMemoryPendingStorageHasAliases()
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	return g_gpu_memory->PendingStorageHasAliases();
 }
 
 bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity)
@@ -864,15 +1002,15 @@ bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryS
 	return g_gpu_memory != nullptr && identity != nullptr && g_gpu_memory->FindExactWritableStorage(vaddr, size, identity);
 }
 
-bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
+bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, SubmissionId publication,
                                         const GpuWritebackPageCache::UniformWords* uniform_words)
 {
-	return g_gpu_memory != nullptr && g_gpu_memory->MarkStorageGuestPublished(identity, queue, uniform_words);
+	return g_gpu_memory != nullptr && g_gpu_memory->MarkStorageGuestPublished(identity, publication, uniform_words);
 }
 
-bool GpuMemoryCheckAccessViolation(uint64_t vaddr)
+bool GpuMemoryCheckAccessViolation(uint64_t vaddr, Core::VirtualMemory::ExceptionHandler::AccessViolationType access)
 {
-	return GpuDirtyPageTracker::Instance().HandleWriteFault(vaddr);
+	return GpuDirtyPageTrackerHandleAccessFault(vaddr, access);
 }
 
 bool GpuMemoryNotifyHostWrite(uint64_t vaddr, uint64_t size)

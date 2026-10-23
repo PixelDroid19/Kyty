@@ -66,6 +66,16 @@ array (often **0** voices). Subsequent `Ngs2RackGetVoiceHandle` calls with
 `Ngs2RackCreate` stores the resolved count in `rack->option.common.max_voices`
 and initializes that many voice slots.
 
+## Default and expanded routing options
+
+A rack created with a null option takes its default voice count: 256 for the
+standard sampler (0x1000), one voice for submixer (0x2000), reverb (0x2001) and
+mastering (0x3000) racks. Custom racks have no default option and refuse a null
+one. Submixer, reverb and mastering options are accepted at their classic size
+or at the classic size plus the 0x30-byte common expansion; the expanded blocks
+a title passes (0xc8 submixer, 0xb8 mastering) repeat the default fields and set
+only the voice count at +0x50.
+
 ## GetVoiceHandle errors
 
 | Condition | Result |
@@ -83,6 +93,38 @@ Focused coverage lives in `UnitTestEmulatorAudio.cpp`:
 - Custom rack 0x518: buffer size scales with the +0x50 voice count.
 - Reverb-style 0xb8 option: create with 16 voices at +0x50; handles for ids
   0 and 15 succeed; id 16 returns `0x804a0300`.
+- Null options for the sampler, reverb and routing racks, and expanded
+  submixer and mastering options, create the evidenced voice counts.
+
+## Standard sampler rack (0x1000)
+
+The sampler option is accepted at size 0xd8. That size is derived from the
+classic 0xa8 sampler option plus the 0x30-byte common expansion shared by the
+extended rack options; `max_voices` is read at +0x50, as for the other extended
+options. It has not been captured as a whole option block.
+
+Voice params for the standard sampler share one header (size u16, next i16, id
+u32). Sizes written by the guest's builders: setup 40 (format at +8), blocks 32,
+pitch 16, callback registration 32 (callback at +8, data at +0x10, flags at
++0x18). Block entries are the 40-byte waveform block already used by the
+waveform parser.
+
+The callback info is a 56-byte block. Only three field offsets are **confirmed**
+by a native callback that reads them: callback data at +0, the flag byte at +0x10,
+and the caller's waveform user data at +0x18 (passed back unchanged). The
+remaining offsets are **inferred** from a classic (non-native) header and are not
+verified against this title: voice handle at +8, block data at +0x20, block size
+at +0x28, repeat count at +0x2c. Kyty writes real values there, never invented
+ones, but those positions must not be treated as a confirmed native ABI. The
+GetState block is 48 bytes with decoded frames at +0x10 (confirmed by a guest
+read); a 56-byte request adds an error word after the voice state, which moves every
+later field by 8 bytes (decoded frames at +0x18, read by a streaming caller). Only the END flag (1) is confirmed; a registration with any other flag,
+including REPEAT, is refused, so no repeat callback is delivered.
+
+The blocks builder takes (param, next, data, blocks, count, flags) in SysV order,
+so count lands at +0x14 and flags at +0x10. One native caller passes one block and
+flags 4 (waveform reset); a streaming caller passes flags 1 for its first block
+and 3 (continue and append) for every later piece.
 
 ## Residual
 

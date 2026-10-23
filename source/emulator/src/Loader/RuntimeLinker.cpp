@@ -43,6 +43,7 @@
 // titles, which throw/catch managed exceptions through __cxa_throw).
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 extern "C" void __register_frame(const void* begin);
+extern "C" void __deregister_frame(const void* begin);
 #endif
 
 #ifdef KYTY_EMU_ENABLED
@@ -420,6 +421,8 @@ static uint64_t g_next_tls_module_id = 1;
 
 // Native service plugins validate this descriptor before registering their ABI.
 // Passing a null argument makes their module_start entry dereference address zero.
+// Plugins are identified by the module name their ELF declares: a package may
+// ship the same image under another file name.
 struct NativeModuleStartParam
 {
 	uint32_t size;
@@ -429,21 +432,28 @@ struct NativeModuleStartParam
 
 static const NativeModuleStartParam g_native_module_start_param {0x10u, 0x200u, 0};
 
-bool LoaderModuleUsesNativeStartParam(const String& file_name)
+bool LoaderModuleUsesNativeStartParam(const String& module_name)
 {
-	const String name = file_name.FilenameWithoutDirectory();
-	return name.EqualNoCase(U"PSN.prx") || name.EqualNoCase(U"PSNCore.prx") || name.EqualNoCase(U"PSNCommon.prx") ||
-	       name.EqualNoCase(U"SaveData.prx") || name.EqualNoCase(U"Share.prx") || name.EqualNoCase(U"PS5EntitlementsPlugin.prx");
+	return module_name.EqualNoCase(U"PSN") || module_name.EqualNoCase(U"PSNCore") || module_name.EqualNoCase(U"PSNCommon") ||
+	       module_name.EqualNoCase(U"SaveData") || module_name.EqualNoCase(U"Share") ||
+	       module_name.EqualNoCase(U"PS5EntitlementsPlugin");
 }
 
 static bool NeedsNativeModuleStartParam(const Program* program)
 {
-	if (program == nullptr)
+	if (program == nullptr || program->dynamic_info == nullptr)
 	{
 		return false;
 	}
 
-	return LoaderModuleUsesNativeStartParam(program->file_name);
+	for (const auto& module: program->dynamic_info->export_modules)
+	{
+		if (LoaderModuleUsesNativeStartParam(module.name))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 static void NormalizeModuleStartArguments(const Program* program, size_t* args, const void** argp)
@@ -659,11 +669,16 @@ static void kyty_exception_handler(const Core::VirtualMemory::ExceptionHandler::
 	// (which terminate the process anyway) use printf.
 	if (info->type == Core::VirtualMemory::ExceptionHandler::ExceptionType::AccessViolation)
 	{
-		// On macOS ARM/Rosetta, access-type bits are not always reliable.
-		// Attempt GPU watch handling for any access violation before treating it
-		// as fatal; this preserves write handling when the signal classification
-		// can only be inferred from the faulting context.
-		if (Kyty::Emulator::GpuMemoryFault::GetPort().HandleAccessViolation(info->access_violation_vaddr))
+		// On macOS ARM/Rosetta, access-type bits are not always reliable, so the
+		// GPU watch sees an Unknown access there and treats it as a possible
+		// write. Elsewhere the decoded kind is passed through: write tracking
+		// never claims a read or execute fault.
+#if defined(__APPLE__)
+		constexpr auto access = Core::VirtualMemory::ExceptionHandler::AccessViolationType::Unknown;
+#else
+		const auto access = info->access_violation_type;
+#endif
+		if (Kyty::Emulator::GpuMemoryFault::GetPort().HandleAccessViolation(info->access_violation_vaddr, access))
 		{
 			return;
 		}
@@ -718,6 +733,10 @@ static void get_dyn_data(Elf64* elf, uint64_t base_vaddr, T* out, Elf64_Sxword t
 {
 	if (const auto* dyn = elf->GetDynValue(tag); dyn != nullptr)
 	{
+		if (dyn->d_un.d_ptr > std::numeric_limits<uint64_t>::max() - base_vaddr)
+		{
+			EXIT("ELF dynamic pointer overflows the mapped image address\n");
+		}
 		*out = reinterpret_cast<T>(base_vaddr + dyn->d_un.d_ptr);
 	}
 }
@@ -747,6 +766,50 @@ static void get_dyn_ptr(Elf64* elf, T* out, Elf64_Sxword tag)
 	{
 		*out = dyn->d_un.d_ptr;
 	}
+}
+
+static const char* GetBoundedElfString(const DynamicInfo& info, uint64_t offset)
+{
+	if (info.str_table == nullptr || info.str_table_size == 0 || info.str_table_size > std::numeric_limits<size_t>::max() ||
+	    offset >= info.str_table_size)
+	{
+		return nullptr;
+	}
+
+	return info.str_table[static_cast<size_t>(info.str_table_size - 1)] == '\0' ?
+	           info.str_table + static_cast<size_t>(offset) :
+	           nullptr;
+}
+
+static bool IsDynamicSymbolIndexValid(const DynamicInfo& info, uint32_t index)
+{
+	if (info.symbol_table == nullptr || info.symbol_table_entry_size != sizeof(Elf64_Sym) ||
+	    info.symbol_table_total_size % sizeof(Elf64_Sym) != 0)
+	{
+		return false;
+	}
+	return index < info.symbol_table_total_size / sizeof(Elf64_Sym);
+}
+
+bool RuntimeLinker::ValidateDynamicStringReferences(const Elf64* elf, const DynamicInfo& info)
+{
+	if (elf == nullptr) { return false; }
+
+	auto validate_offsets = [&elf, &info](Elf64_Sxword tag, bool packed_offset)
+	{
+		for (const auto* entry: elf->GetDynList(tag))
+		{
+			const uint64_t offset = packed_offset ? entry->d_un.d_val & 0xffffffffu : entry->d_un.d_val;
+			if (GetBoundedElfString(info, offset) == nullptr) { return false; }
+		}
+		return true;
+	};
+
+	return validate_offsets(DT_NEEDED, false) && validate_offsets(DT_SONAME, false) &&
+	       validate_offsets(DT_OS_NEEDED_MODULE, true) && validate_offsets(DT_OS_NEEDED_MODULE_1, true) &&
+	       validate_offsets(DT_OS_MODULE_INFO, true) && validate_offsets(DT_OS_MODULE_INFO_1, true) &&
+	       validate_offsets(DT_OS_IMPORT_LIB, true) && validate_offsets(DT_OS_IMPORT_LIB_1, true) &&
+	       validate_offsets(DT_OS_EXPORT_LIB, true) && validate_offsets(DT_OS_EXPORT_LIB_1, true);
 }
 
 static void KYTY_SYSV_ABI ProgramExitHandler()
@@ -836,6 +899,10 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 		case R_X86_64_JUMP_SLOT: addend = 0; [[fallthrough]];
 		case R_X86_64_64:
 		{
+			if (!IsDynamicSymbolIndexValid(*program->dynamic_info, symbol))
+			{
+				EXIT("ELF relocation references a symbol outside the symbol table\n");
+			}
 			auto         sym          = symbols[symbol];
 			auto         bind         = sym.GetBind();
 			auto         sym_type     = sym.GetType();
@@ -872,6 +939,7 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 		}
 		break;
 		case R_X86_64_RELATIVE:
+			if (symbol != 0) { EXIT("ELF relative relocation has a nonzero symbol index\n"); }
 			ret.value    = ret.base_vaddr + addend;
 			ret.resolved = true;
 			break;
@@ -882,6 +950,10 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 			uint64_t symbol_offset = 0;
 			if (symbol != 0)
 			{
+				if (!IsDynamicSymbolIndexValid(*program->dynamic_info, symbol))
+				{
+					EXIT("ELF relocation references a symbol outside the symbol table\n");
+				}
 				symbol_offset = symbols[symbol].st_value;
 			}
 			EXIT_IF(program->tls.module_id == 0);
@@ -1054,10 +1126,13 @@ static void relocate_all(Elf64_Rela* records, uint64_t size, Program* program, b
 {
 	KYTY_LOADER_PROFILE_FUNCTION();
 
-	uint32_t index = 0;
-	for (auto* r = records; reinterpret_cast<uint8_t*>(r) < reinterpret_cast<uint8_t*>(records) + size; r++, index++)
+	if (size == 0) { return; }
+	EXIT_IF(records == nullptr || size % sizeof(Elf64_Rela) != 0);
+	const uint64_t count = size / sizeof(Elf64_Rela);
+	EXIT_IF(count > std::numeric_limits<uint32_t>::max());
+	for (uint64_t index = 0; index < count; index++)
 	{
-		relocate(index, r, program, jmprela_table);
+		relocate(static_cast<uint32_t>(index), records + index, program, jmprela_table);
 	}
 }
 
@@ -1099,6 +1174,29 @@ static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_ind
 	return ri.value;
 }
 
+#if defined(__linux__) && defined(__x86_64__)
+// Guest thread pointer of the current host thread, read by the TlsCachedCall
+// stub. It lives in the executable's static TLS block, so its offset from the
+// host thread pointer is the same on every thread. The main program's static
+// TLS block of a thread is never freed or resized while the thread runs, so
+// the cached pointer stays valid.
+static thread_local uint64_t g_tls_guest_thread_pointer = 0;
+static int64_t               g_tls_guest_thread_pointer_offset = 0;
+
+static int64_t TlsGuestThreadPointerCacheOffset()
+{
+	uint64_t host_thread_pointer = 0;
+	asm volatile("mov %%fs:0, %0" : "=r"(host_thread_pointer));
+	return static_cast<int64_t>(reinterpret_cast<uint64_t>(&g_tls_guest_thread_pointer) - host_thread_pointer);
+}
+
+static void TlsCacheGuestThreadPointer(uint8_t* thread_pointer)
+{
+	EXIT_IF(TlsGuestThreadPointerCacheOffset() != g_tls_guest_thread_pointer_offset);
+	g_tls_guest_thread_pointer = reinterpret_cast<uint64_t>(thread_pointer);
+}
+#endif
+
 static KYTY_MS_ABI uint8_t* TlsMainGetAddr()
 {
 	EXIT_IF(g_tls_main_program == nullptr);
@@ -1108,7 +1206,11 @@ static KYTY_MS_ABI uint8_t* TlsMainGetAddr()
 		EXIT("xsave buffer is too small\n");
 	}
 
-	return RuntimeLinker::TlsGetAddr(g_tls_main_program) + g_tls_main_program->tls.static_offset;
+	auto* thread_pointer = RuntimeLinker::TlsGetAddr(g_tls_main_program) + g_tls_main_program->tls.static_offset;
+#if defined(__linux__) && defined(__x86_64__)
+	TlsCacheGuestThreadPointer(thread_pointer);
+#endif
+	return thread_pointer;
 }
 
 uint64_t LoaderRewriteTlsGdCallRexPrefix(uint8_t* code, uint64_t size)
@@ -2276,14 +2378,19 @@ uint64_t RuntimeLinker::ReadFromElf(Program* program, uint64_t vaddr)
 
 	for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
 	{
-		if (phdr[i].p_memsz != 0 && (phdr[i].p_type == PT_LOAD || phdr[i].p_type == PT_OS_RELRO))
+		if (phdr[i].p_memsz != 0 && (phdr[i].p_type == PT_LOAD || phdr[i].p_type == PT_OS_RELRO) &&
+		    phdr[i].p_vaddr <= std::numeric_limits<uint64_t>::max() - program->base_vaddr)
 		{
-			uint64_t segment_addr      = phdr[i].p_vaddr + program->base_vaddr;
-			uint64_t segment_file_size = phdr[i].p_filesz;
-
-			if (vaddr >= segment_addr && vaddr < segment_addr + segment_file_size)
+			const uint64_t segment_addr = phdr[i].p_vaddr + program->base_vaddr;
+			if (vaddr < segment_addr) { continue; }
+			const uint64_t segment_offset = vaddr - segment_addr;
+			if (segment_offset < phdr[i].p_filesz && sizeof(ret) <= phdr[i].p_filesz - segment_offset &&
+			    phdr[i].p_offset <= std::numeric_limits<uint64_t>::max() - segment_offset)
 			{
-				program->elf->LoadSegment(reinterpret_cast<uint64_t>(&ret), phdr[i].p_offset + vaddr - segment_addr, sizeof(ret));
+				if (!program->elf->LoadSegment(reinterpret_cast<uint64_t>(&ret), phdr[i].p_offset + segment_offset, sizeof(ret)))
+				{
+					return 0;
+				}
 				break;
 			}
 		}
@@ -2758,7 +2865,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 			KYTY_LOG_DEBUG("[%d] memory_size = %" PRIu64 "\n", i, segment_memory_size);
 			KYTY_LOG_DEBUG("[%d] mode        = %s\n", i, Core::EnumName(mode).C_Str());
 
-			program->elf->LoadSegment(segment_addr, phdr[i].p_offset, segment_file_size);
+			EXIT_IF(!program->elf->LoadSegment(segment_addr, phdr[i].p_offset, segment_file_size));
 
 			bool skip_protect = (phdr[i].p_type == PT_LOAD && is_next_gen && mode == Core::VirtualMemory::Mode::NoAccess);
 
@@ -2840,6 +2947,8 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 
 void RuntimeLinker::DeleteProgram(Program* p)
 {
+	UnregisterProgramEhFrame(p);
+
 	if (p->rt != nullptr && p->tls.module_id != 0)
 	{
 		Core::LockGuard tls_lock(p->rt->m_static_tls_mutex);
@@ -2906,6 +3015,17 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program)
 	get_dyn_value(elf, &program->dynamic_info->symbol_table_total_size, DT_OS_SYMTABSZ);
 	get_dyn_value(elf, &program->dynamic_info->symbol_table_entry_size, DT_OS_SYMENT);
 	get_dyn_value(elf, &program->dynamic_info->symbol_table_entry_size, DT_SYMENT);
+	if (program->dynamic_info->symbol_table != nullptr && program->dynamic_info->symbol_table_total_size == 0 &&
+	    !elf->HasDynValue(DT_OS_SYMTABSZ) && elf->HasDynValue(DT_HASH))
+	{
+		if (program->dynamic_info->hash_table == nullptr) { EXIT("elf is not valid: %s\n", program->file_name.C_Str()); }
+		const auto* hash = static_cast<const uint32_t*>(program->dynamic_info->hash_table);
+		program->dynamic_info->symbol_table_total_size = static_cast<uint64_t>(hash[1]) * sizeof(Elf64_Sym);
+	}
+	if (!ValidateSymbolTableMetadata(*program->dynamic_info) || !ValidateDynamicStringReferences(elf, *program->dynamic_info))
+	{
+		EXIT("elf is not valid: %s\n", program->file_name.C_Str());
+	}
 
 	get_dyn_ptr(elf, &program->dynamic_info->init_vaddr, DT_INIT);
 	get_dyn_ptr(elf, &program->dynamic_info->fini_vaddr, DT_FINI);
@@ -2957,12 +3077,13 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program)
 	get_dyn_values(elf, &needed, DT_NEEDED);
 	for (auto need: needed)
 	{
-		program->dynamic_info->needed.Add(program->dynamic_info->str_table + need);
+		program->dynamic_info->needed.Add(GetBoundedElfString(*program->dynamic_info, need));
 	}
 
-	uint64_t so_name = 0;
-	get_dyn_value(elf, &so_name, DT_SONAME);
-	program->dynamic_info->so_name = program->dynamic_info->str_table + so_name;
+	if (const auto* so_name = elf->GetDynValue(DT_SONAME); so_name != nullptr)
+	{
+		program->dynamic_info->so_name = GetBoundedElfString(*program->dynamic_info, so_name->d_un.d_val);
+	}
 
 	if (elf->HasDynValue(DT_OS_NEEDED_MODULE) && elf->HasDynValue(DT_OS_NEEDED_MODULE_1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	if (elf->HasDynValue(DT_OS_MODULE_INFO) && elf->HasDynValue(DT_OS_MODULE_INFO_1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
@@ -3019,7 +3140,7 @@ static void InstallRelocateHandler(Program* program)
 // registered, the host _Unwind_RaiseException can unwind them and reach the
 // guest's own landing pads. Registered once per program (idempotent flag) after
 // relocations so the CIE personality indirection through the GOT is resolved.
-static void RegisterProgramEhFrame(Program* program)
+void RuntimeLinker::RegisterProgramEhFrame(Program* program)
 {
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 	if (program == nullptr || program->elf == nullptr || program->eh_frame_registered)
@@ -3059,7 +3180,24 @@ static void RegisterProgramEhFrame(Program* program)
 		__register_frame(reinterpret_cast<const void*>(decoded.frame_addr));
 		program->eh_frame_vaddr      = decoded.frame_addr;
 		program->eh_frame_registered = true;
+		break;
 	}
+#else
+	(void)program;
+#endif
+}
+
+void RuntimeLinker::UnregisterProgramEhFrame(Program* program)
+{
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+	if (program == nullptr || !program->eh_frame_registered || program->eh_frame_vaddr == 0)
+	{
+		return;
+	}
+
+	__deregister_frame(reinterpret_cast<const void*>(program->eh_frame_vaddr));
+	program->eh_frame_vaddr      = 0;
+	program->eh_frame_registered = false;
 #else
 	(void)program;
 #endif
@@ -3160,6 +3298,46 @@ const LibraryId* RuntimeLinker::FindLibrary(const Program& program, const String
 	return nullptr;
 }
 
+bool RuntimeLinker::ValidateSymbolTableMetadata(const DynamicInfo& info)
+{
+	if (info.str_table == nullptr)
+	{
+		if (info.str_table_size != 0) { return false; }
+	} else if (info.str_table_size == 0 || info.str_table_size > std::numeric_limits<size_t>::max())
+	{
+		return false;
+	} else if (info.str_table[0] != '\0' || info.str_table[static_cast<size_t>(info.str_table_size - 1)] != '\0')
+	{
+		return false;
+	}
+
+	if (info.symbol_table == nullptr)
+	{
+		return info.symbol_table_total_size == 0 &&
+		       (info.symbol_table_entry_size == 0 || info.symbol_table_entry_size == sizeof(Elf64_Sym));
+	}
+
+	if (info.symbol_table_total_size == 0 || info.symbol_table_total_size > std::numeric_limits<size_t>::max() ||
+	    info.symbol_table_entry_size != sizeof(Elf64_Sym) || info.symbol_table_total_size % sizeof(Elf64_Sym) != 0 ||
+	    info.str_table == nullptr || info.str_table_size == 0)
+	{
+		return false;
+	}
+
+	const uint64_t symbol_count = info.symbol_table_total_size / sizeof(Elf64_Sym);
+	for (uint64_t i = 0; i < symbol_count; i++)
+	{
+		if (GetBoundedElfString(info, info.symbol_table[i].st_name) == nullptr) { return false; }
+	}
+
+	return true;
+}
+
+bool RuntimeLinker::IsSymbolTableIndexValid(const DynamicInfo& info, uint32_t index)
+{
+	return IsDynamicSymbolIndexValid(info, index);
+}
+
 void RuntimeLinker::CreateSymbolDatabase(Program* program)
 {
 	KYTY_LOADER_PROFILE_FUNCTION();
@@ -3167,6 +3345,10 @@ void RuntimeLinker::CreateSymbolDatabase(Program* program)
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->export_symbols != nullptr);
 	EXIT_IF(program->import_symbols != nullptr);
+	if (program->dynamic_info == nullptr || !ValidateSymbolTableMetadata(*program->dynamic_info))
+	{
+		EXIT("elf is not valid: %s\n", program->file_name.C_Str());
+	}
 
 	program->export_symbols = new SymbolDatabase;
 	program->import_symbols = new SymbolDatabase;
@@ -3178,12 +3360,11 @@ void RuntimeLinker::CreateSymbolDatabase(Program* program)
 			return;
 		}
 
-		for (auto* sym = program->dynamic_info->symbol_table;
-		     reinterpret_cast<uint8_t*>(sym) <
-		     reinterpret_cast<uint8_t*>(program->dynamic_info->symbol_table) + program->dynamic_info->symbol_table_total_size;
-		     sym++)
+		const uint64_t symbol_count = program->dynamic_info->symbol_table_total_size / sizeof(Elf64_Sym);
+		for (uint64_t i = 0; i < symbol_count; i++)
 		{
-			String id   = String::FromUtf8(program->dynamic_info->str_table + sym->st_name);
+			auto* sym  = program->dynamic_info->symbol_table + i;
+			String id  = String::FromUtf8(GetBoundedElfString(*program->dynamic_info, sym->st_name));
 			auto   bind = sym->GetBind();
 			auto   type = sym->GetType();
 			auto   ids  = id.Split(U'#');
@@ -3230,7 +3411,25 @@ void RuntimeLinker::SetupTlsHandler(Program* program)
 
 	g_tls_main_program = program;
 
-	auto* code = new (reinterpret_cast<void*>(program->tls.handler_vaddr)) Jit::SafeCall;
+	// Patched sites call handler_vaddr. On Linux x86-64 that is the cached fast
+	// path, which falls back to SafeCall only on a host thread's first access.
+	uint64_t safe_call_vaddr = program->tls.handler_vaddr;
+#if defined(__linux__) && defined(__x86_64__)
+	constexpr uint64_t safe_call_offset = 0x40;
+	static_assert(Jit::TlsCachedCall::GetSize() <= safe_call_offset);
+
+	g_tls_guest_thread_pointer_offset = TlsGuestThreadPointerCacheOffset();
+	EXIT_IF(g_tls_guest_thread_pointer_offset < std::numeric_limits<int32_t>::min() ||
+	        g_tls_guest_thread_pointer_offset > std::numeric_limits<int32_t>::max());
+
+	safe_call_vaddr = program->tls.handler_vaddr + safe_call_offset;
+	auto* cached    = new (reinterpret_cast<void*>(program->tls.handler_vaddr)) Jit::TlsCachedCall;
+	cached->SetCacheOffset(static_cast<int32_t>(g_tls_guest_thread_pointer_offset));
+	cached->SetMissHandler(reinterpret_cast<void*>(safe_call_vaddr));
+#endif
+	EXIT_IF(safe_call_vaddr + sizeof(Jit::SafeCall) > program->tls.handler_vaddr + Jit::SafeCall::GetSize());
+
+	auto* code = new (reinterpret_cast<void*>(safe_call_vaddr)) Jit::SafeCall;
 
 	memset(g_tls_reg_save_area, 0, XSAVE_BUFFER_SIZE);
 	std::memcpy(&g_tls_reg_save_area[XSAVE_BUFFER_SIZE], &XSAVE_CHK_GUARD, sizeof(XSAVE_CHK_GUARD));

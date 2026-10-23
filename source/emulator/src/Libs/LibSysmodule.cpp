@@ -17,6 +17,9 @@ LIB_VERSION("Sysmodule", 1, "Sysmodule", 1, 1);
 
 namespace Sysmodule {
 
+// Result for a module that is not loaded; titles compare against it before loading the module.
+constexpr int SYSMODULE_ERROR_UNLOADED = static_cast<int>(0x805A1001u);
+
 static std::mutex        g_loaded_modules_mutex;
 static std::set<uint16_t> g_loaded_modules;
 
@@ -58,7 +61,7 @@ static KYTY_SYSV_ABI int SysmoduleLoadModuleInternalWithArg(uint16_t id, int arg
 static KYTY_SYSV_ABI int SysmoduleIsLoaded(uint16_t id)
 {
 	std::lock_guard lock(g_loaded_modules_mutex);
-	return g_loaded_modules.find(id) != g_loaded_modules.end() ? 0 : LibKernel::KERNEL_ERROR_ENOENT;
+	return g_loaded_modules.find(id) != g_loaded_modules.end() ? 0 : SYSMODULE_ERROR_UNLOADED;
 }
 
 } // namespace Sysmodule

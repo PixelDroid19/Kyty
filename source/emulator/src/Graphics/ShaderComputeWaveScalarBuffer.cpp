@@ -12,7 +12,7 @@
 namespace Kyty::Libs::Graphics {
 namespace {
 
-constexpr int      kMaxSgpr       = 103;
+constexpr int      kMaxSgpr       = 105; // RDNA2 SGPR0..SGPR105
 constexpr uint32_t kNoInstruction = UINT32_MAX;
 
 ShaderComputeWaveAnalysisResult Failure(uint32_t pc, const String8& detail)

@@ -29,16 +29,31 @@
 #include "Kyty/Core/String8.h"
 #include "Kyty/Core/Vector.h"
 
+#include <array>
+#include <cstdint>
 #include <set>
-#include <vector>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+
+#include "ShaderControlFlowGraph.h"
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+constexpr uint8_t kShaderColorExportModeUint16Abgr = 7u;
+constexpr uint8_t kShaderColorExportNumberUint     = 4u;
+
+[[nodiscard]] constexpr bool ShaderIsUint16MrtOutput(const ShaderPixelInputInfo* input, uint32_t target)
+{
+	return input != nullptr && target < 8u && input->target_output_mode[target] == kShaderColorExportModeUint16Abgr &&
+	       input->target_output_number[target] == kShaderColorExportNumberUint && input->target_output_order[target] == 0u;
+}
 
 // Function-local array backing ds_*_addtid_b32 spill slots in non-compute
 // stages: indexed by (M0[15:0] + offset) >> 2 and private to each invocation.
@@ -114,7 +129,12 @@ public:
 	void GenerateSource();
 
 	[[nodiscard]] const String8& GetSource() const { return m_source; }
+	// Built by GenerateSource for the structured (non-banked) emission path.
+	[[nodiscard]] const ShaderControlFlowGraph& GetControlFlow() const { return m_control_flow; }
 	[[nodiscard]] bool UsesComputeWaveBanks() const;
+	[[nodiscard]] bool UsesNativeComputeWave() const;
+	[[nodiscard]] bool NativeComputeWaveLayoutIsValid() const;
+	[[nodiscard]] bool EmitNativeComputeWaveProlog(String8* output) const;
 	// Architectural EXEC/VCC and SGPR mask destinations always contain packed
 	// words. Native templates' implicit EXEC loads use a separate lane view;
 	// explicit numeric operand loads are marked until the strategy is resolved.
@@ -122,6 +142,9 @@ public:
 	[[nodiscard]] String8 NativeExecRefresh(const String8& tag) const;
 	[[nodiscard]] String8 NativeQuadUniform(const String8& value, const String8& type, const String8& result) const;
 	[[nodiscard]] String8 NativeMaskBallot(const String8& predicate, const String8& result) const;
+	// Pixel: ballot of the wave's valid pixels under the launch EXEC, the non-helper invocations with EXEC set.
+	// `result` is the v4uint ballot and `result`_valid this invocation's membership.
+	[[nodiscard]] String8 NativeValidPixelBallot(const String8& result) const;
 	[[nodiscard]] String8 ResolveMaskAccesses(const ShaderInstruction& instruction, uint32_t index, const String8& source) const;
 	[[nodiscard]] bool EmitNativeMaskBit(const ShaderOperand& mask, const String8& result, String8* output) const;
 	// A guest Wave64 pixel program admitted as a partially populated wave on a
@@ -129,6 +152,11 @@ public:
 	// READLANE over the ghost half) run only inside proven neutral regions or
 	// against proven-neutral sources.
 	[[nodiscard]] bool UsesFragmentWaveTier() const;
+	// A pixel program admitted as FragmentPartialWave: each host subgroup is a partially populated guest wave.
+	[[nodiscard]] bool UsesFragmentPartialWave() const;
+	// The whole-wave OR reductions of a pixel program admitted as FragmentPartialWave; empty otherwise.
+	// Their network steps are not emitted and each read lowers to one subgroup reduction of the seed.
+	[[nodiscard]] const ShaderFragmentLaneReductions& FragmentLaneReductions() const;
 	[[nodiscard]] bool UsesFragmentCompute() const { return m_fragment_compute_info != nullptr; }
 	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.
 	// Compute lowers it onto the shared %lds array; other stages carry it in
@@ -137,12 +165,20 @@ public:
 	[[nodiscard]] bool UsesDsAddtidLds() const;
 	[[nodiscard]] ShaderType GetHostShaderType() const { return UsesFragmentCompute() ? ShaderType::Compute : m_code.GetType(); }
 	void SetFragmentComputeInfo(const ShaderFragmentComputeInfo* info) { m_fragment_compute_info = info; }
+	[[nodiscard]] bool UsesGeometryCompute() const { return m_geometry_compute_info != nullptr; }
+	void SetGeometryComputeInfo(const ShaderGeometryComputeInfo* info) { m_geometry_compute_info = info; }
+	[[nodiscard]] bool EmitGeometryProlog(String8* output) const;
+	[[nodiscard]] bool EmitGeometryExport(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitGeometryAlloc(uint32_t index, String8* output) const;
 	[[nodiscard]] String8 FragmentTransportAnnotations() const;
 	[[nodiscard]] String8 FragmentTransportTypes() const;
 	[[nodiscard]] String8 FragmentTransportVariables() const;
 	[[nodiscard]] String8 FragmentLocalVariables() const;
 	[[nodiscard]] String8 FragmentProlog() const;
 	[[nodiscard]] String8 FragmentEpilog() const;
+	// " tex=...": the resolved T#/S# indices and the bound textures of an image instruction, for a refusal report.
+	[[nodiscard]] String8 ImageBindingSummary(const ShaderInstruction& inst) const;
+	[[nodiscard]] String8 ExportBindingSummary(const ShaderInstruction& inst) const;
 	[[nodiscard]] bool EmitFragmentInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitFragmentInterpolation(const ShaderInstruction& instruction, ShaderWaveBank bank,
 	                                              const String8& tag, String8* output) const;
@@ -153,9 +189,14 @@ public:
 	[[nodiscard]] bool EmitComputeWaveDppInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWavePermutation(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveLdsInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveGdsWrite(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveAluInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveBufferLoadInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveGenericInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
+	                                                     uint32_t index, String8* output);
+	// Emits a per-lane instruction whose SDWA destination selects one byte or word of its VGPR
+	// (ShaderSdwaPartialDestinationSupported): the whole-dword result, then the merge into the prior bits.
+	[[nodiscard]] bool EmitSdwaPartialDestinationInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
 	                                                     uint32_t index, String8* output);
 	[[nodiscard]] String8 EmitMetadataLoad(int row, int field, const String8& id) const;
 	// Writes the metadata of each assembled V# the instruction consumes into its
@@ -242,6 +283,24 @@ public:
 		}
 		return false;
 	}
+	[[nodiscard]] bool UsesVertexClipDistance0Export() const
+	{
+		if (m_code.GetType() != ShaderType::Vertex || m_vs_input_info == nullptr ||
+		    m_vs_input_info->position1_usage != ShaderVertexPosition1Usage::ClipDistance0)
+		{
+			return false;
+		}
+		for (const auto& inst: m_code.GetInstructions())
+		{
+			if (inst.type == ShaderInstructionType::Exp &&
+			    (inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOff ||
+			     inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 	[[nodiscard]] uint32_t GetGraphicsProbeDescriptorSet() const;
 
 	void                                       SetVsInputInfo(const ShaderVertexInputInfo* input_info) { m_vs_input_info = input_info; }
@@ -252,16 +311,48 @@ public:
 
 	void                                      SetPsInputInfo(const ShaderPixelInputInfo* input_info) { m_ps_input_info = input_info; }
 	[[nodiscard]] const ShaderPixelInputInfo* GetPsInputInfo() const { return m_ps_input_info; }
-	[[nodiscard]] bool IsDx10ClampEnabled() const
+	// Effective MODE controls of the translated stage: the initial RSRC1 controls of a
+	// graphics stage, or the recorded launch controls of a compute program. Unknown
+	// compute controls keep the emitters' long-standing assumption (no DX10 clamp, no
+	// IEEE mode, single-precision denormals flushed); the half-precision emitters refuse
+	// that case themselves.
+	struct FloatModeControls
 	{
-		return (m_code.GetType() == ShaderType::Vertex && m_vs_input_info != nullptr && m_vs_input_info->dx10_clamp) ||
-		       (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && m_ps_input_info->dx10_clamp);
-	}
-	[[nodiscard]] bool IsIeeeModeEnabled() const
+		uint8_t float_mode = 0;
+		bool    dx10_clamp = false;
+		bool    ieee_mode  = false;
+	};
+	[[nodiscard]] FloatModeControls GetFloatModeControls() const
 	{
-		return (m_code.GetType() == ShaderType::Vertex && m_vs_input_info != nullptr && m_vs_input_info->ieee_mode) ||
-		       (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && m_ps_input_info->ieee_mode);
+		FloatModeControls controls {};
+		switch (m_code.GetType())
+		{
+			case ShaderType::Vertex:
+				if (m_vs_input_info != nullptr)
+				{
+					controls = {m_vs_input_info->float_mode, m_vs_input_info->dx10_clamp, m_vs_input_info->ieee_mode};
+				}
+				break;
+			case ShaderType::Pixel:
+				if (m_ps_input_info != nullptr)
+				{
+					controls = {m_ps_input_info->float_mode, m_ps_input_info->dx10_clamp, m_ps_input_info->ieee_mode};
+				}
+				break;
+			case ShaderType::Compute:
+				if (m_cs_input_info != nullptr && m_cs_input_info->fp_mode_known)
+				{
+					controls = {m_cs_input_info->float_mode, m_cs_input_info->dx10_clamp, m_cs_input_info->ieee_mode};
+				}
+				break;
+			default: break;
+		}
+		return controls;
 	}
+	[[nodiscard]] bool IsDx10ClampEnabled() const { return GetFloatModeControls().dx10_clamp; }
+	[[nodiscard]] bool IsIeeeModeEnabled() const { return GetFloatModeControls().ieee_mode; }
+	// MODE.FP_DENORM single-precision field (bits 5:4): bit 5 clear flushes output denormals.
+	[[nodiscard]] bool Float32OutputDenormalsFlushed() const { return (GetFloatModeControls().float_mode & 0x20u) == 0u; }
 
 	[[nodiscard]] bool EmitPixelRgbaProbe(String8* dst_source, uint32_t index, const String8& value_id,
 	                                      const char* symbol_prefix, bool include_frag_coord = false) const;
@@ -278,11 +369,32 @@ public:
 	[[nodiscard]] String8 GetConstantFloat(float f) const;
 	[[nodiscard]] String8 GetConstant(ShaderOperand op) const;
 
-	void GetMappedIndex(int offset, int* buffer, int* field) const
+	[[nodiscard]] bool SetMappedIndex(int64_t offset, int buffer, int field)
 	{
-		if (offset >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
-		*buffer = m_extended_mapping[offset][0];
-		*field  = m_extended_mapping[offset][1];
+		if (offset < 0 || offset >= SHADER_GEN5_EUD_MAX_DWORDS || buffer < 0 || field < 0 || field >= 4)
+		{
+			return false;
+		}
+		// Overlapping descriptor rows retain the last resource in binding order.
+		m_extended_mapping[static_cast<int>(offset)] = {buffer, field};
+		return true;
+	}
+
+	[[nodiscard]] bool GetMappedIndex(int offset, int* buffer, int* field) const
+	{
+		EXIT_IF(buffer == nullptr || field == nullptr);
+		if (offset < 0 || offset >= SHADER_GEN5_EUD_MAX_DWORDS)
+		{
+			return false;
+		}
+		const auto mapped = m_extended_mapping.find(offset);
+		if (mapped == m_extended_mapping.end())
+		{
+			return false;
+		}
+		*buffer = mapped->second[0];
+		*field  = mapped->second[1];
+		return true;
 	}
 
 	// First table dword that the PC-keyed descriptor S_LOAD at instruction_pc
@@ -388,7 +500,9 @@ private:
 	void WriteCustomPixelAnnotations(Core::StringList8* annotations) const;
 	void WriteCustomPixelVariables(Core::StringList8* variables) const;
 	void WriteCustomPixelProlog();
+	void WritePixelPositionProlog();
 	void WritePixelFrontFaceProlog();
+	void WritePixelAncillaryProlog();
 	void WriteInstructions();
 	void WriteMainEpilog();
 	void WriteFunctions();
@@ -413,22 +527,24 @@ private:
 	// the already-emitted join (discard tails are dead code after the first
 	// OpKill anyway).
 	std::set<std::string>         m_emitted_sc_joins;
+	ShaderControlFlowGraph        m_control_flow;
 	Vector<Constant>              m_constants;
 	Vector<Variable>              m_variables;
 	const ShaderVertexInputInfo*  m_vs_input_info = nullptr;
 	const ShaderComputeInputInfo* m_cs_input_info = nullptr;
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
 	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
+	const ShaderGeometryComputeInfo* m_geometry_compute_info = nullptr;
 	mutable int                   m_native_wave_tier = -1;
+	mutable bool                  m_lane_reductions_ready = false;
+	mutable ShaderFragmentLaneReductions m_lane_reductions;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;
 
-	// Extended user data is addressed relative to SGPR 16. Keep the emitted
-	// mapping aligned with the shared EUD span policy rather than the old 64-dw
-	// local assumption; Gen5 descriptor tables may legitimately address later
-	// entries through the EUD pointer.
-	Core::Array2<int, SHADER_GEN5_EUD_MAX_DWORDS, 2> m_extended_mapping {};
+	// Extended user data is addressed relative to SGPR 16. Sparse descriptor
+	// fields avoid coupling translation to the snapshot's bounded dword count.
+	std::unordered_map<int, std::array<int, 2>> m_extended_mapping;
 };
 
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
@@ -440,6 +556,8 @@ struct RecompilerFunc
 	const char*                     param[4]  = {nullptr, nullptr, nullptr, nullptr};
 	SccCheck                        scc_check = SccCheck::None;
 };
+
+KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_I64_Sdst2Ssrc02Ssrc1);
 
 bool operand_is_constant(ShaderOperand op);
 bool operand_is_variable(ShaderOperand op);
@@ -473,6 +591,8 @@ bool IsSampledImageInstruction(const ShaderInstruction& inst);
 bool IsStorageImageInstruction(const ShaderInstruction& inst);
 bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst);
 String8 GuardImageDestinationStores(const String8& source, const ShaderInstruction& inst, uint32_t index);
+bool EmitZeroImageRead(const ShaderInstruction& inst, const Spirv* spirv, String8* dst_source);
+bool EmitZeroScalarLoad(const ShaderInstruction& inst, const Spirv* spirv, String8* dst_source);
 bool IsStaticScalarSpillWrite(const ShaderInstruction& inst, int* register_id, int* lane);
 bool IsStaticScalarSpillRead(const ShaderInstruction& inst, int* register_id, int* lane);
 String8 ScalarSpillSlotName(int register_id, int lane);
@@ -484,6 +604,12 @@ bool UsesNativeLaneExchange(const ShaderCode& code);
 // M0-relative moves lower to a named register only when M0 is a proven literal
 // in the same basic block. Returns the literal through m0 on success.
 bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0);
+// Gen5 BUFFER_LOAD_FORMAT lowers through shared functions that decode the
+// V#'s format and apply its DST_SEL; `bound_buffers` adds the storage-buffer
+// element reader next to the decoder.
+bool    SpirvUsesGen5BufferFormatLoads(const ShaderCode& code);
+void    SpirvAddGen5BufferFormatConstants(Spirv* spirv);
+String8 SpirvGen5BufferFormatFunctions(const Spirv& spirv, bool bound_buffers);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
 const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFormat::Format format);

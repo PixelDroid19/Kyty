@@ -874,9 +874,19 @@ void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, ui
 	size->size  = 0;
 	size->align = 0;
 
-	if (tile_mode != 0x1bu ||
+	if ((tile_mode != 0x1bu && tile_mode != 0u) ||
 	    (bytes_per_texel != 1u && bytes_per_texel != 2u && bytes_per_texel != 4u && bytes_per_texel != 8u && bytes_per_texel != 16u))
 	{
+		return;
+	}
+	if (tile_mode == 0u)
+	{
+		const uint64_t total = static_cast<uint64_t>(pitch != 0 ? pitch : width) * height * bytes_per_texel;
+		if (total <= UINT32_MAX)
+		{
+			size->size  = static_cast<uint32_t>(total);
+			size->align = 256u;
+		}
 		return;
 	}
 
@@ -912,6 +922,26 @@ void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, ui
 static uint32_t Sw64kRxWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_per_element)
 {
 	uint32_t offset = 0;
+	if (bytes_per_element == 1u)
+	{
+		// The 256x256 block of the published 16-pipe SW_64K_R_X pattern:
+		// x0 x1 x2 y1 y0 y2 x3 y4 | x3^y3 x4^y4 x6^y5 x5^y6 | y6 x6 y7 x7.
+		offset |= x & 0x7u;
+		offset |= (y & 0x2u) << 2u;
+		offset |= (y & 0x1u) << 4u;
+		offset |= (y & 0x4u) << 3u;
+		offset |= (x & 0x8u) << 3u;
+		offset |= (y & 0x10u) << 3u;
+		offset |= ((x ^ y) & 0x8u) << 5u;
+		offset |= ((x ^ y) & 0x10u) << 5u;
+		offset |= (((x >> 6u) ^ (y >> 5u)) & 1u) << 10u;
+		offset |= (((x >> 5u) ^ (y >> 6u)) & 1u) << 11u;
+		offset |= (y & 0x40u) << 6u;
+		offset |= (x & 0x40u) << 7u;
+		offset |= (y & 0x80u) << 7u;
+		offset |= (x & 0x80u) << 8u;
+		return offset;
+	}
 	if (bytes_per_element == 2u)
 	{
 		// The 256x128 block needs all 15 element-address bits. Reusing the
@@ -931,15 +961,16 @@ static uint32_t Sw64kRxWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_
 	}
 	if (bytes_per_element == 4u)
 	{
-		offset ^= (y << 3u) & 0x0008u;
-		offset ^= (y << 4u) & 0x0020u;
-		offset ^= (y << 5u) & 0x0f80u;
+		// The 8x8 micro tile orders x0 x1 y0 y1 y2 x2; the pipe and bank
+		// bits above it match the depth equation.
+		offset ^= (y << 4u) & 0x0070u;
+		offset ^= (y << 5u) & 0x0f00u;
 		offset ^= (y << 9u) & 0x1000u;
 		offset ^= (y << 8u) & 0x4000u;
 
-		offset ^= (x << 2u) & 0x0004u;
-		offset ^= (x << 3u) & 0x0010u;
-		offset ^= (x << 4u) & 0x0440u;
+		offset ^= (x << 2u) & 0x000cu;
+		offset ^= (x << 5u) & 0x0080u;
+		offset ^= (x << 4u) & 0x0400u;
 		offset ^= (x << 5u) & 0x0300u;
 		offset ^= (x << 6u) & 0x0800u;
 		offset ^= (x << 9u) & 0xa000u;
@@ -1035,14 +1066,22 @@ static uint32_t Standard64KBWithinBlockOffset(uint32_t x, uint32_t y, uint32_t b
 	return offset;
 }
 
-uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
+// The 16-pipe 64 KiB render-target and depth patterns XOR slice bits Z3..Z0
+// into offset bits 8..11. Each slice starts on a whole-block boundary, so only
+// these within-block bits change with the slice index.
+static uint32_t Sw64kPipeSliceXor(uint32_t slice)
 {
-	if (bytes_per_element != 2u && bytes_per_element != 4u && bytes_per_element != 8u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported SW_64KB_R_X element size (continuing)\n"); }
+	return ((slice & 1u) << 11u) ^ ((slice & 2u) << 9u) ^ ((slice & 4u) << 7u) ^ ((slice & 8u) << 5u);
+}
+
+uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t slice)
+{
+	if (bytes_per_element != 1u && bytes_per_element != 2u && bytes_per_element != 4u && bytes_per_element != 8u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported SW_64KB_R_X element size (continuing)\n"); }
 	if (pitch_elems == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u condition ignored (continuing)\n"); }
 
 	static constexpr uint32_t k_block_bytes = 65536u;
 	const uint32_t            block_w       = TileGet64KBBlockWidth(bytes_per_element);
-	const uint32_t            block_h       = (bytes_per_element == 8u ? 64u : 128u);
+	const uint32_t            block_h       = k_block_bytes / (block_w * bytes_per_element);
 
 	const uint32_t blocks_x = (pitch_elems + block_w - 1u) / block_w;
 	const uint32_t xb       = x / block_w;
@@ -1050,7 +1089,7 @@ uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint
 	const uint64_t blk_idx  = static_cast<uint64_t>(yb) * blocks_x + xb;
 	const uint32_t lx       = x % block_w;
 	const uint32_t ly       = y % block_h;
-	return (blk_idx * k_block_bytes) + Sw64kRxWithinBlockOffset(lx, ly, bytes_per_element);
+	return (blk_idx * k_block_bytes) + (Sw64kRxWithinBlockOffset(lx, ly, bytes_per_element) ^ Sw64kPipeSliceXor(slice));
 }
 
 uint32_t TileGet64KBBlockWidth(uint32_t bytes_per_element)
@@ -1076,8 +1115,18 @@ uint32_t TileAlign64KBPitch(uint32_t width, uint32_t bytes_per_element)
 	return (width + block_width - 1u) & ~(block_width - 1u);
 }
 
+uint32_t TileAlignLinearPitch(uint32_t width, uint32_t bytes_per_element)
+{
+	if (width == 0u || bytes_per_element == 0u || bytes_per_element > 256u || (bytes_per_element & (bytes_per_element - 1u)) != 0u)
+	{
+		return 0u;
+	}
+	const uint32_t align = 256u / bytes_per_element;
+	return (width + align - 1u) & ~(align - 1u);
+}
+
 void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
-                                uint32_t bytes_per_element)
+                                uint32_t bytes_per_element, uint32_t slice)
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
@@ -1090,6 +1139,7 @@ void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint
 	request.dst_pitch_elems   = width;
 	request.bytes_per_element = bytes_per_element;
 	request.layout            = TileDetileLayout::Sw64kRx;
+	request.slice             = slice;
 	if (!TileDetile(request))
 	{
 		EXIT("TileConvertSw64kRxToLinear unsupported request\n");
@@ -1160,13 +1210,8 @@ uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, ui
 	const uint32_t            xb            = x / block_width;
 	const uint32_t            yb            = y / k_block_height;
 	const uint64_t            block_index   = static_cast<uint64_t>(yb) * blocks_x + xb;
-	// The matched 16-pipe GFX10 Z_X equation contributes Z3..Z0 to offset
-	// bits 8..11. Each array slice starts on a whole-block boundary, so only
-	// these within-block bits change with the layer index.
-	const uint32_t slice_xor = ((layer & 1u) << 11u) ^ ((layer & 2u) << 9u) ^ ((layer & 4u) << 7u) ^
-	                           ((layer & 8u) << 5u);
 	return (block_index * k_block_bytes) +
-	       (Depth64KBWithinBlockOffset(x % block_width, y % k_block_height, bytes_per_element) ^ slice_xor);
+	       (Depth64KBWithinBlockOffset(x % block_width, y % k_block_height, bytes_per_element) ^ Sw64kPipeSliceXor(layer));
 }
 
 void TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
@@ -1182,7 +1227,7 @@ void TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, ui
 	request.dst_pitch_elems   = width;
 	request.bytes_per_element = bytes_per_element;
 	request.layout            = TileDetileLayout::Depth64KB;
-	request.depth_layer       = layer;
+	request.slice       = layer;
 	if (!TileDetile(request))
 	{
 		EXIT("TileConvertDepth64KBToLinear unsupported request\n");
@@ -2151,12 +2196,14 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 	bool pow2 = (IsPowerOfTwo(width) && IsPowerOfTwo(height) && IsPowerOfTwo(pitch));
 
 	EXIT_IF(levels == 0 || levels > 16);
-	if (tile == 9u && ShaderGen5TextureIsBlockCompressed(format))
+	// Render-target (27) chains share the 64 KiB block geometry and mip
+	// placement of the standard mode; only the in-block swizzle differs.
+	if ((tile == 9u && (ShaderGen5TextureIsBlockCompressed(format) || levels > 1u)) || (tile == 0x1bu && levels > 1u))
 	{
 		Gen5TextureMipLayout mip_layout {};
 		if (!Gen5GetStandard64KBTextureMipLayout(format, width, height, pitch, levels, &mip_layout))
 		{
-			EXIT("unsupported Gen5 Standard64KB compressed layout: format=%u %ux%u pitch=%u levels=%u\n",
+			EXIT("unsupported Gen5 64 KiB mip layout: tile=%u format=%u %ux%u pitch=%u levels=%u\n", tile,
 			     format, width, height, pitch, levels);
 		}
 		if (total_size != nullptr) { *total_size = mip_layout.tiled; }
@@ -2307,11 +2354,34 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// This path is intentionally limited to a single mip until the tail layout is
 		// independently exercised; it still covers any dimensions/pitches that
 		// fit the documented one-level block geometry.
-		// kStandard256B (tile 1) uses the same arithmetic with 256-byte blocks; its mip
-		// tail is not modelled, so it accepts one level only.
+		// kStandard256B (tile 1) uses the same arithmetic with 256-byte blocks. Its
+		// mip chains have no tail; Gen5GetStandard256BTextureMipLayout places them.
 		if (tile == 0x01u && levels != 1u)
 		{
-			EXIT("unsupported Gen5 SW_256B_S mip chain: format=%u %ux%u levels=%u\n", format, width, height, levels);
+			Gen5TextureMipLayout chain {};
+			if (!Gen5GetStandard256BTextureMipLayout(format, width, height, pitch != 0u ? pitch : width, levels, &chain))
+			{
+				EXIT("unsupported Gen5 SW_256B_S mip chain: format=%u %ux%u levels=%u\n", format, width, height, levels);
+			}
+			if (total_size != nullptr)
+			{
+				*total_size = chain.tiled;
+			}
+			for (uint32_t l = 0; l < levels; l++)
+			{
+				const auto& entry = chain.level[l];
+				if (level_sizes != nullptr)
+				{
+					level_sizes[l].offset = entry.tiled_offset;
+					level_sizes[l].size   = entry.tiled_size;
+				}
+				if (padded_size != nullptr)
+				{
+					padded_size[l].width  = entry.tiled_pitch * chain.texels_per_element_x;
+					padded_size[l].height = entry.tiled_size / (entry.tiled_pitch * chain.bytes_per_element) * chain.texels_per_element_y;
+				}
+			}
+			return;
 		}
 		if (tile == 0x05u || tile == 0x01u)
 		{

@@ -226,6 +226,90 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Lshr_B64_Sdst2Ssrc02Ssrc1)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_SAshrI64_Sdst2Ssrc02Ssrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.dst.size != 2 || inst.src[0].size != 2 || inst.src[1].size != 1)
+	{
+		return false;
+	}
+
+	const bool discard_result = inst.dst.type == ShaderOperandType::Null;
+	if (!discard_result && !operand_is_variable(inst.dst))
+	{
+		return false;
+	}
+	const auto dst_value0 = discard_result ? SpirvValue {} : operand_variable_to_str(inst.dst, 0);
+	const auto dst_value1 = discard_result ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
+	if (!discard_result && (dst_value0.type != SpirvType::Uint || dst_value1.type != SpirvType::Uint))
+	{
+		return false;
+	}
+
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8       load0;
+	String8       load1;
+	String8       load2;
+	if (!operand_load_uint(spirv, inst.src[0], "ashr_source_lo_<index>", index_str, &load0, 0) ||
+	    !operand_load_uint(spirv, inst.src[0], "ashr_source_hi_<index>", index_str, &load1, 1) ||
+	    !operand_load_uint(spirv, inst.src[1], "ashr_shift_source_<index>", index_str, &load2))
+	{
+		return false;
+	}
+
+	// The two-word value is snapshotted before either destination word is written.
+	// The branches keep every SPIR-V shift count below 32; the zero-count arm
+	// also avoids relying on a shift by 32 in an unselected OpSelect operand.
+	static const char* text = R"(
+<load0>
+<load1>
+<load2>
+%ashr_count_<index> = OpBitwiseAnd %uint %ashr_shift_source_<index> %uint_63
+%ashr_small_<index> = OpULessThan %bool %ashr_count_<index> %uint_32
+OpSelectionMerge %ashr_merge_<index> None
+OpBranchConditional %ashr_small_<index> %ashr_small_block_<index> %ashr_large_block_<index>
+%ashr_small_block_<index> = OpLabel
+%ashr_small_right_<index> = OpShiftRightLogical %uint %ashr_source_lo_<index> %ashr_count_<index>
+%ashr_small_cross_count_raw_<index> = OpISub %uint %uint_32 %ashr_count_<index>
+%ashr_small_cross_count_<index> = OpBitwiseAnd %uint %ashr_small_cross_count_raw_<index> %uint_31
+%ashr_small_cross_<index> = OpShiftLeftLogical %uint %ashr_source_hi_<index> %ashr_small_cross_count_<index>
+%ashr_small_join_<index> = OpBitwiseOr %uint %ashr_small_right_<index> %ashr_small_cross_<index>
+%ashr_small_is_zero_<index> = OpIEqual %bool %ashr_count_<index> %uint_0
+%ashr_small_low_<index> = OpSelect %uint %ashr_small_is_zero_<index> %ashr_source_lo_<index> %ashr_small_join_<index>
+%ashr_small_high_<index> = OpShiftRightArithmetic %uint %ashr_source_hi_<index> %ashr_count_<index>
+OpStore %temp_uint_0 %ashr_small_low_<index>
+OpStore %temp_uint_1 %ashr_small_high_<index>
+OpBranch %ashr_merge_<index>
+%ashr_large_block_<index> = OpLabel
+%ashr_large_count_<index> = OpISub %uint %ashr_count_<index> %uint_32
+%ashr_large_low_<index> = OpShiftRightArithmetic %uint %ashr_source_hi_<index> %ashr_large_count_<index>
+%ashr_large_high_<index> = OpShiftRightArithmetic %uint %ashr_source_hi_<index> %uint_31
+OpStore %temp_uint_0 %ashr_large_low_<index>
+OpStore %temp_uint_1 %ashr_large_high_<index>
+OpBranch %ashr_merge_<index>
+%ashr_merge_<index> = OpLabel
+%ashr_result_lo_<index> = OpLoad %uint %temp_uint_0
+%ashr_result_hi_<index> = OpLoad %uint %temp_uint_1
+%ashr_low_nonzero_<index> = OpINotEqual %bool %ashr_result_lo_<index> %uint_0
+%ashr_high_nonzero_<index> = OpINotEqual %bool %ashr_result_hi_<index> %uint_0
+%ashr_result_nonzero_<index> = OpLogicalOr %bool %ashr_low_nonzero_<index> %ashr_high_nonzero_<index>
+%ashr_scc_<index> = OpSelect %uint %ashr_result_nonzero_<index> %uint_1 %uint_0
+<store0>
+<store1>
+<execz>
+OpStore %scc %ashr_scc_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<store0>", discard_result ? "" : String8("OpStore %<dst0> %ashr_result_lo_<index>").ReplaceStr("<dst0>", dst_value0.value))
+	                   .ReplaceStr("<store1>", discard_result ? "" : String8("OpStore %<dst1> %ashr_result_hi_<index>").ReplaceStr("<dst1>", dst_value1.value))
+	                   .ReplaceStr("<execz>", !discard_result && operand_is_exec(inst.dst) ? EXECZ : "")
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_U64_Sdst2Ssrc02Ssrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -298,6 +382,101 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_U64_Sdst2Ssrc02Ssrc1)
 	                   .ReplaceStr("<dst1>", dst_value1.value)
 	                   .ReplaceStr("<index>", index_str);
 
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_I64_Sdst2Ssrc02Ssrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.type != ShaderInstructionType::SBfeI64 || inst.format != ShaderInstructionFormat::Sdst2Ssrc02Ssrc1 || inst.src_num != 2 ||
+	    inst.dst.size != 2 || inst.src[0].size != 2 || inst.src[1].size != 1)
+	{
+		return false;
+	}
+
+	const bool discard_result = inst.dst.type == ShaderOperandType::Null;
+	if (!discard_result && !operand_is_variable(inst.dst))
+	{
+		return false;
+	}
+	const auto dst_value0 = discard_result ? SpirvValue {} : operand_variable_to_str(inst.dst, 0);
+	const auto dst_value1 = discard_result ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
+	if (!discard_result && (dst_value0.type != SpirvType::Uint || dst_value1.type != SpirvType::Uint))
+	{
+		return false;
+	}
+
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8       load0;
+	String8       load1;
+	String8       load2;
+	if (!operand_load_uint(spirv, inst.src[0], "bfei64_source_lo_<index>", index_str, &load0, 0) ||
+	    !operand_load_uint(spirv, inst.src[0], "bfei64_source_hi_<index>", index_str, &load1, 1) ||
+	    !operand_load_uint(spirv, inst.src[1], "bfei64_control_<index>", index_str, &load2))
+	{
+		return false;
+	}
+
+	// Shift the source pair right by the field offset, then sign-extract its low
+	// and high portions. Clamp the field to the bits remaining in the source.
+	// All variable shift counts and signed extract widths stay within 0..31/32.
+	static const char* text = R"(
+<load0>
+<load1>
+<load2>
+%bfei64_offset_<index> = OpBitFieldUExtract %uint %bfei64_control_<index> %uint_0 %uint_6
+%bfei64_width_<index> = OpBitFieldUExtract %uint %bfei64_control_<index> %uint_16 %uint_7
+%bfei64_remaining_<index> = OpISub %uint %uint_64 %bfei64_offset_<index>
+%bfei64_width_within_<index> = OpULessThan %bool %bfei64_width_<index> %bfei64_remaining_<index>
+%bfei64_count_<index> = OpSelect %uint %bfei64_width_within_<index> %bfei64_width_<index> %bfei64_remaining_<index>
+%bfei64_small_offset_<index> = OpULessThan %bool %bfei64_offset_<index> %uint_32
+%bfei64_offset_count_<index> = OpBitwiseAnd %uint %bfei64_offset_<index> %uint_31
+%bfei64_cross_count_raw_<index> = OpISub %uint %uint_32 %bfei64_offset_<index>
+%bfei64_cross_count_<index> = OpBitwiseAnd %uint %bfei64_cross_count_raw_<index> %uint_31
+%bfei64_cross_shift_<index> = OpShiftLeftLogical %uint %bfei64_source_hi_<index> %bfei64_cross_count_<index>
+%bfei64_offset_is_zero_<index> = OpIEqual %bool %bfei64_offset_<index> %uint_0
+%bfei64_cross_<index> = OpSelect %uint %bfei64_offset_is_zero_<index> %uint_0 %bfei64_cross_shift_<index>
+%bfei64_small_low_shift_<index> = OpShiftRightLogical %uint %bfei64_source_lo_<index> %bfei64_offset_count_<index>
+%bfei64_small_low_<index> = OpBitwiseOr %uint %bfei64_small_low_shift_<index> %bfei64_cross_<index>
+%bfei64_small_high_<index> = OpShiftRightLogical %uint %bfei64_source_hi_<index> %bfei64_offset_count_<index>
+%bfei64_large_offset_raw_<index> = OpISub %uint %bfei64_offset_<index> %uint_32
+%bfei64_large_offset_<index> = OpBitwiseAnd %uint %bfei64_large_offset_raw_<index> %uint_31
+%bfei64_large_low_<index> = OpShiftRightLogical %uint %bfei64_source_hi_<index> %bfei64_large_offset_<index>
+%bfei64_shifted_low_<index> = OpSelect %uint %bfei64_small_offset_<index> %bfei64_small_low_<index> %bfei64_large_low_<index>
+%bfei64_shifted_high_<index> = OpSelect %uint %bfei64_small_offset_<index> %bfei64_small_high_<index> %uint_0
+
+%bfei64_low_count_is_small_<index> = OpULessThan %bool %bfei64_count_<index> %uint_32
+%bfei64_low_count_<index> = OpSelect %uint %bfei64_low_count_is_small_<index> %bfei64_count_<index> %uint_32
+%bfei64_high_count_<index> = OpISub %uint %bfei64_count_<index> %bfei64_low_count_<index>
+%bfei64_shifted_low_signed_<index> = OpBitcast %int %bfei64_shifted_low_<index>
+%bfei64_shifted_high_signed_<index> = OpBitcast %int %bfei64_shifted_high_<index>
+%bfei64_result_low_signed_<index> = OpBitFieldSExtract %int %bfei64_shifted_low_signed_<index> %uint_0 %bfei64_low_count_<index>
+%bfei64_result_low_<index> = OpBitcast %uint %bfei64_result_low_signed_<index>
+%bfei64_result_high_part_<index> = OpBitFieldSExtract %int %bfei64_shifted_high_signed_<index> %uint_0 %bfei64_high_count_<index>
+%bfei64_result_high_from_low_<index> = OpBitFieldSExtract %int %bfei64_result_low_signed_<index> %uint_31 %uint_1
+%bfei64_count_exceeds_word_<index> = OpUGreaterThan %bool %bfei64_count_<index> %uint_32
+%bfei64_result_high_signed_<index> = OpSelect %int %bfei64_count_exceeds_word_<index> %bfei64_result_high_part_<index> %bfei64_result_high_from_low_<index>
+%bfei64_result_high_<index> = OpBitcast %uint %bfei64_result_high_signed_<index>
+%bfei64_low_nonzero_<index> = OpINotEqual %bool %bfei64_result_low_<index> %uint_0
+%bfei64_high_nonzero_<index> = OpINotEqual %bool %bfei64_result_high_<index> %uint_0
+%bfei64_result_nonzero_<index> = OpLogicalOr %bool %bfei64_low_nonzero_<index> %bfei64_high_nonzero_<index>
+%bfei64_scc_<index> = OpSelect %uint %bfei64_result_nonzero_<index> %uint_1 %uint_0
+<store0>
+<store1>
+<execz>
+OpStore %scc %bfei64_scc_<index>
+)";
+	*dst_source +=
+	    String8(text)
+	        .ReplaceStr("<load0>", load0)
+	        .ReplaceStr("<load1>", load1)
+	        .ReplaceStr("<load2>", load2)
+	        .ReplaceStr("<store0>",
+	                    discard_result ? "" : String8("OpStore %<dst0> %bfei64_result_low_<index>").ReplaceStr("<dst0>", dst_value0.value))
+	        .ReplaceStr("<store1>",
+	                    discard_result ? "" : String8("OpStore %<dst1> %bfei64_result_high_<index>").ReplaceStr("<dst1>", dst_value1.value))
+	        .ReplaceStr("<execz>", !discard_result && operand_is_exec(inst.dst) ? EXECZ : "")
+	        .ReplaceStr("<index>", index_str);
 	return true;
 }
 
@@ -508,6 +687,62 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_SSubbU32_SVdstSVsrc0SVsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.src_num != 2)
+	{
+		return false;
+	}
+
+	const bool discard_result = inst.dst.type == ShaderOperandType::Null;
+	if (!discard_result && (!operand_is_variable(inst.dst) || inst.dst.size != 1))
+	{
+		return false;
+	}
+	const auto dst_value = discard_result ? SpirvValue {} : operand_variable_to_str(inst.dst);
+	if (!discard_result && dst_value.type != SpirvType::Uint)
+	{
+		return false;
+	}
+
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8       load0;
+	String8       load1;
+	if (!operand_load_uint(spirv, inst.src[0], "subb_source0_<index>", index_str, &load0) ||
+	    !operand_load_uint(spirv, inst.src[1], "subb_source1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	// Snapshot SCC before the destination store, then use comparisons that do
+	// not overflow when source1 is UINT32_MAX and the incoming borrow is one.
+	static const char* text = R"(
+<load0>
+<load1>
+%subb_scc_in_<index> = OpLoad %uint %scc
+%subb_scc_nonzero_<index> = OpINotEqual %bool %subb_scc_in_<index> %uint_0
+%subb_scc_bit_<index> = OpSelect %uint %subb_scc_nonzero_<index> %uint_1 %uint_0
+%subb_result0_<index> = OpISub %uint %subb_source0_<index> %subb_source1_<index>
+%subb_result_<index> = OpISub %uint %subb_result0_<index> %subb_scc_bit_<index>
+%subb_source_gt_<index> = OpUGreaterThan %bool %subb_source1_<index> %subb_source0_<index>
+%subb_sources_equal_<index> = OpIEqual %bool %subb_source1_<index> %subb_source0_<index>
+%subb_equal_borrow_<index> = OpLogicalAnd %bool %subb_sources_equal_<index> %subb_scc_nonzero_<index>
+%subb_borrow_<index> = OpLogicalOr %bool %subb_source_gt_<index> %subb_equal_borrow_<index>
+%subb_scc_out_<index> = OpSelect %uint %subb_borrow_<index> %uint_1 %uint_0
+<store>
+<execz>
+OpStore %scc %subb_scc_out_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<store>", discard_result ? "" : String8("OpStore %<dst> %subb_result_<index>").ReplaceStr("<dst>", dst_value.value))
+	                   .ReplaceStr("<execz>", !discard_result && operand_is_exec(inst.dst) ? EXECZ : "")
+	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
 

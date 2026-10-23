@@ -4,9 +4,11 @@
 #include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderBufferFormat.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderStorageImage.h"
 #include "Emulator/Graphics/Utils.h"
@@ -269,6 +271,19 @@ ImageModuleFixture MakeSampledShapesImageModule(uint32_t shapes, ShaderInstructi
 
 } // namespace
 
+TEST(EmulatorGraphicsResources, FindObjectsWithoutRegisteredHeapReturnsEmpty)
+{
+	ASSERT_EXIT(
+	    {
+		    InitializeImageModuleTest();
+		    GpuMemoryInit();
+		    const auto objects = GpuMemoryFindObjects(0x0000005100000000ull, 0x1000ull, GpuMemoryObjectType::StorageBuffer, true, false);
+		    RequireImageModule(objects.IsEmpty(), "unregistered GPU range has no alias objects");
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorGraphicsResources, EmitsAndValidatesUintSampledWithFloatStorage)
 {
 	// Production red control: the original non-atomic classifier incorrectly
@@ -299,6 +314,48 @@ TEST(EmulatorGraphicsResources, EmitsAndValidatesFloatSampledWithUintStorage)
 		    RequireImageModule(source.ContainsStr("%ImageL = OpTypeImage %uint 2D 0 0 0 2 R32ui"), "R32 writable declaration");
 		    RequireImageModule(source.ContainsStr("%t88_1 = OpCompositeConstruct %v4uint"), "unsigned writable texel");
 		    RequireImageModule(!source.ContainsStr("OpCapability StorageImageWriteWithoutFormat"), "typed write needs no formatless capability");
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsResources, EmitsAndValidatesFormat7FloatFormatlessStorage)
+{
+	ASSERT_EXIT(
+	    {
+		    InitializeImageModuleTest();
+		    auto fixture = MakeImageModule(71u, 7u);
+		    auto& instructions = fixture.code.GetInstructions();
+		    auto store       = instructions.At(1);
+		    auto end         = instructions.At(2);
+		    instructions.Clear();
+		    store.pc = 0;
+		    instructions.Add(store);
+		    end.pc = 8;
+		    instructions.Add(end);
+
+		    auto& textures = fixture.input.bind.textures2D;
+		    textures.desc[0] = textures.desc[1];
+		    textures.desc[0].slot = 0;
+		    textures.textures_num = 1;
+		    textures.textures2d_sampled_num = 0;
+		    textures.textures2d_sampled_uint_num = 0;
+		    textures.textures2d_storage_num = 1;
+
+		    const auto plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
+		    RequireImageModule(plan.supported && plan.formatless && !plan.unsigned_primary && !plan.extended_formats &&
+		                           std::strcmp(plan.image_format, "Unknown") == 0,
+		                       "format 7 uses the existing float, formatless storage bank");
+		    const auto source = EmitValidatedImageModule(fixture);
+		    RequireImageModule(source.ContainsStr("%ImageL = OpTypeImage %float 2D 0 0 0 2 Unknown"),
+		                       "format 7 writable declaration remains float and formatless");
+		    RequireImageModule(source.ContainsStr("OpCapability StorageImageReadWithoutFormat") &&
+		                           source.ContainsStr("OpCapability StorageImageWriteWithoutFormat"),
+		                       "formatless read and write capabilities");
+		    RequireImageModule(!source.ContainsStr("OpCapability StorageImageExtendedFormats"),
+		                       "formatless declaration does not invent an extended typed format");
+		    RequireImageModule(source.ContainsStr("OpImageWrite %t27_0 %t73_0 %t88_0") && source.ContainsStr("%t88_0 = OpCompositeConstruct %v4float"),
+		                       "float storage write");
 		    std::_Exit(0);
 	    },
 	    ::testing::ExitedWithCode(0), "");
@@ -670,6 +727,32 @@ TEST(EmulatorGraphicsResources, DualSourceLimitTracksUsedOutputsRatherThanUnused
 	EXPECT_EQ(VulkanValidateBlendAttachments(capabilities, attachments, 2u, 0u, 3u), VulkanBlendAdmission::Supported);
 }
 
+TEST(EmulatorGraphicsResources, DualSourceProductionMasksAdmitOnlyTheSecondaryVariant)
+{
+	VkPipelineColorBlendAttachmentState attachment {};
+	attachment.blendEnable         = VK_TRUE;
+	attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC1_COLOR;
+	attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+	attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+	attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC1_ALPHA;
+	attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+	attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+	const VulkanBlendCapabilities enabled {{VK_TRUE, VK_TRUE}, 8u, 1u};
+	const VulkanBlendCapabilities host_disabled {{VK_TRUE, VK_FALSE}, 8u, 1u};
+	const VulkanBlendCapabilities host_limit_zero {{VK_TRUE, VK_TRUE}, 8u, 0u};
+
+	// The dual variant declares only Location 0 (fragment mask 1); MRT1 is the secondary of attachment 0.
+	EXPECT_EQ(VulkanValidateBlendAttachments(enabled, &attachment, 1u, 1u, 1u), VulkanBlendAdmission::Supported);
+	EXPECT_EQ(VulkanValidateBlendAttachments(host_disabled, &attachment, 1u, 1u, 1u),
+	          VulkanBlendAdmission::DualSourceBlendNotEnabled);
+	EXPECT_EQ(VulkanValidateBlendAttachments(host_limit_zero, &attachment, 1u, 1u, 1u),
+	          VulkanBlendAdmission::DualSourceAttachmentLimit);
+	// An ordinary MRT1 is a second Location: it exceeds the one-location limit, and nothing supplies a secondary.
+	EXPECT_EQ(VulkanValidateBlendAttachments(enabled, &attachment, 1u, 0u, 3u), VulkanBlendAdmission::DualSourceAttachmentLimit);
+	EXPECT_EQ(VulkanValidateBlendAttachments(VulkanBlendCapabilities {{VK_TRUE, VK_TRUE}, 8u, 8u}, &attachment, 1u, 0u, 3u),
+	          VulkanBlendAdmission::MissingSecondaryOutput);
+}
+
 TEST(EmulatorGraphicsResources, RawFormat5PreservesUnsignedByteValuesAndAliasType)
 {
 	ShaderTextureResource descriptor {};
@@ -729,6 +812,67 @@ TEST(EmulatorGraphicsResources, RawRgb565AndHistoricalBc1HaveSeparateNamespaces)
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(66u).format, VK_FORMAT_R16G16B16A16_SNORM);
 }
 
+// BUFFER_LOAD_FORMAT decodes exactly the buffer formats of RDNA2 ISA table 47,
+// and agrees with the vertex input table wherever both describe a format.
+TEST(EmulatorGraphicsResources, Gen5BufferFormatsCoverIsaTableAndAgreeWithVertexInput)
+{
+	uint32_t   count   = 0;
+	const auto formats = ShaderGen5BufferFormats(&count);
+	std::vector<uint32_t> listed;
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const auto& format = formats[i];
+		listed.push_back(format.format);
+		EXPECT_EQ(ShaderGen5BufferFormat(format.format), &format);
+		ASSERT_GE(format.channels, 1u);
+		ASSERT_LE(format.channels, 4u);
+		uint32_t next_bit = 0;
+		for (uint32_t c = 0; c < format.channels; c++)
+		{
+			const auto layout = format.layout[c];
+			EXPECT_EQ(layout.offset, next_bit) << format.format;
+			// A channel never straddles a dword.
+			EXPECT_EQ(layout.offset / 32u, (layout.offset + layout.bits - 1u) / 32u) << format.format;
+			next_bit = layout.offset + layout.bits;
+		}
+		EXPECT_EQ(next_bit, format.bytes * 8u) << format.format;
+
+		const auto vertex = VulkanResolveGen5VertexInputFormat(format.format);
+		if (vertex.format != VK_FORMAT_UNDEFINED)
+		{
+			EXPECT_EQ(vertex.component_count, format.channels) << format.format;
+			EXPECT_EQ(vertex.element_bytes, format.bytes) << format.format;
+		}
+	}
+	std::vector<uint32_t> isa;
+	for (uint32_t format = 1; format <= 77; format++)
+	{
+		const bool gap = (format >= 30 && format <= 35) || (format >= 37 && format <= 42) || format == 46 || format == 47;
+		if (!gap)
+		{
+			isa.push_back(format);
+		}
+	}
+	EXPECT_EQ(listed, isa);
+	EXPECT_EQ(ShaderGen5BufferFormat(0u), nullptr);
+	EXPECT_EQ(ShaderGen5BufferFormat(78u), nullptr);
+
+	// Packed formats keep X in the low bits, as their image formats do.
+	const auto* r11g11b10 = ShaderGen5BufferFormat(36u);
+	ASSERT_NE(r11g11b10, nullptr);
+	EXPECT_EQ(r11g11b10->layout[0].bits, 11u);
+	EXPECT_EQ(r11g11b10->layout[2].offset, 22u);
+	const auto* a2b10g10r10 = ShaderGen5BufferFormat(50u);
+	ASSERT_NE(a2b10g10r10, nullptr);
+	EXPECT_EQ(a2b10g10r10->layout[0].bits, 10u);
+	EXPECT_EQ(a2b10g10r10->layout[3].offset, 30u);
+	const auto* snorm8 = ShaderGen5BufferFormat(57u);
+	ASSERT_NE(snorm8, nullptr);
+	EXPECT_EQ(snorm8->number, ShaderBufferNumber::Snorm);
+	EXPECT_EQ(snorm8->channels, 4u);
+	EXPECT_EQ(snorm8->bytes, 4u);
+}
+
 TEST(EmulatorGraphicsResources, SampledComponentViewsAgreeAcrossUploadRenderAndStorageBackings)
 {
 	for (auto type: {VulkanImageType::Texture, VulkanImageType::RenderTexture, VulkanImageType::StorageTexture})
@@ -756,13 +900,13 @@ TEST(EmulatorGraphicsResources, SimultaneousSampledViewsDoNotChangeStorageWriteV
 	ASSERT_TRUE(VulkanPlanSampledImageView(image, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
 	                                     0u, 1u, 0u, 1u, DstSel(5, 4, 0, 1), &swapped));
 	g_created_views = 0u;
-	const int first = VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, identity, CreateTestView);
-	const int second = VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, swapped, CreateTestView);
+	const int first = VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, identity, CreateTestView);
+	const int second = VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, swapped, CreateTestView);
 	ASSERT_GE(first, VulkanImage::VIEW_MAX);
 	ASSERT_GE(second, VulkanImage::VIEW_MAX);
 	EXPECT_NE(first, second);
 	EXPECT_NE(image.image_view[first], image.image_view[second]);
-	EXPECT_EQ(VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, identity, CreateTestView), first);
+	EXPECT_EQ(VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, identity, CreateTestView), first);
 	EXPECT_EQ(g_created_views, 2u);
 	int storage_index = -1;
 	ASSERT_TRUE(VulkanResolveStorageImageView(&image, false, false, &storage_index));
@@ -793,7 +937,7 @@ TEST(EmulatorGraphicsResources, SampledViewIdentityIncludesSubresourcesShapeForm
 	second = first;
 	second.format = VK_FORMAT_R8G8B8A8_UNORM;
 	EXPECT_FALSE(VulkanImageViewDescriptorsEqual(first, second));
-	EXPECT_EQ(VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, second, CreateTestView), -1);
+	EXPECT_EQ(VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, second, CreateTestView), -1);
 	EXPECT_FALSE(VulkanPlanSampledImageView(image, VK_IMAGE_VIEW_TYPE_3D, VK_IMAGE_ASPECT_COLOR_BIT,
 	                                      0u, 1u, 0u, 1u, DstSel(4, 5, 6, 7), &second));
 	EXPECT_FALSE(VulkanPlanSampledImageView(image, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -816,8 +960,8 @@ TEST(EmulatorGraphicsResources, SampledViewCreationFailureDoesNotPublishAnIndex)
 	VulkanImageViewDescriptor view {};
 	ASSERT_TRUE(VulkanPlanSampledImageView(image, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
 	                                     0u, 1u, 0u, 1u, DstSel(7, 6, 5, 4), &view));
-	EXPECT_EQ(VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, view, FailTestView), -1);
-	EXPECT_TRUE(image.sampled_view_descriptors.empty());
+	EXPECT_EQ(VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, view, FailTestView), -1);
+	EXPECT_TRUE(image.cached_view_descriptors.empty());
 	EXPECT_EQ(image.image_view.size(), static_cast<size_t>(VulkanImage::VIEW_MAX));
 }
 
@@ -834,12 +978,12 @@ TEST(EmulatorGraphicsResources, SampledViewCacheIsBoundedAndKeepsExistingIndices
 		ASSERT_TRUE(VulkanPlanSampledImageView(image, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
 		                                     0u, 1u, 0u, 1u, swizzle, &view));
 		if (i == 0u) { first = view; }
-		const int index = VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, view, CreateTestView);
+		const int index = VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, view, CreateTestView);
 		EXPECT_EQ(index, i < VulkanImage::VIEW_CACHE_LIMIT - VulkanImage::VIEW_MAX ?
 		                     VulkanImage::VIEW_MAX + static_cast<int>(i) : -1);
 	}
 	EXPECT_EQ(image.image_view.size(), static_cast<size_t>(VulkanImage::VIEW_CACHE_LIMIT));
-	EXPECT_EQ(VulkanGetOrCreateSampledImageView(VK_NULL_HANDLE, &image, first, CreateTestView), VulkanImage::VIEW_MAX);
+	EXPECT_EQ(VulkanGetOrCreateCachedImageView(VK_NULL_HANDLE, &image, first, CreateTestView), VulkanImage::VIEW_MAX);
 }
 
 TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinearBytes)

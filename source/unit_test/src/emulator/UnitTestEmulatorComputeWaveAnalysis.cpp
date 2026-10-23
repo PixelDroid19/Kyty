@@ -114,6 +114,19 @@ static ShaderInstruction EudBasePairRead(uint32_t pc)
 	return instruction;
 }
 
+static ShaderInstruction ScalarBfeI64(uint32_t pc, int destination, int source, int control)
+{
+	ShaderInstruction instruction {};
+	instruction.pc      = pc;
+	instruction.type    = ShaderInstructionType::SBfeI64;
+	instruction.format  = ShaderInstructionFormat::Sdst2Ssrc02Ssrc1;
+	instruction.dst     = {.type = ShaderOperandType::Sgpr, .register_id = destination, .size = 2};
+	instruction.src[0]  = {.type = ShaderOperandType::Sgpr, .register_id = source, .size = 2};
+	instruction.src[1]  = {.type = ShaderOperandType::Sgpr, .register_id = control, .size = 1};
+	instruction.src_num = 2;
+	return instruction;
+}
+
 static ShaderInstruction EudBasePairBufferLoad(uint32_t pc)
 {
 	ShaderInstruction instruction {};
@@ -451,7 +464,7 @@ TEST(EmulatorComputeWaveAnalysis, RejectsExtendedBasePairOutsideSgprRange)
 	end.format = ShaderInstructionFormat::Empty;
 	code.GetInstructions().Add(end);
 	auto input = Type5EudInput();
-	input.bind.extended.start_register = 104;
+	input.bind.extended.start_register = 106; // past SGPR105
 	const auto result                  = ShaderAnalyzeComputeWaveCode(code, input);
 	EXPECT_FALSE(result.supported);
 	EXPECT_EQ(result.unsupported_pc, 0u);
@@ -580,6 +593,46 @@ TEST(EmulatorComputeWaveAnalysis, ScalarMaskCopyClaimsOnlyAlignedBoundedPairs)
 	}
 }
 
+TEST(EmulatorComputeWaveAnalysis, ScalarBfeI64RequiresExactPairsAndTracksExtendedBaseEffects)
+{
+	auto instruction = ScalarBfeI64(0u, 20, 22, 24);
+	ASSERT_TRUE(ShaderInstructionLoweringPreconditions(instruction));
+	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(instruction), ShaderComputeWaveInstructionKind::ScalarGeneric);
+
+	auto invalid            = instruction;
+	invalid.dst.type        = ShaderOperandType::ExecLo;
+	invalid.dst.register_id = 0;
+	EXPECT_TRUE(ShaderInstructionLoweringPreconditions(invalid));
+	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(invalid), ShaderComputeWaveInstructionKind::Unsupported);
+	invalid             = instruction;
+	invalid.src[0].size = 1;
+	EXPECT_TRUE(ShaderInstructionLoweringPreconditions(invalid));
+	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(invalid), ShaderComputeWaveInstructionKind::Unsupported);
+	invalid             = instruction;
+	invalid.src[1].type = ShaderOperandType::Vgpr;
+	EXPECT_TRUE(ShaderInstructionLoweringPreconditions(invalid));
+	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(invalid), ShaderComputeWaveInstructionKind::Unsupported);
+
+	// The generic SGPR span analysis reads both source words and records both
+	// destination words as writes.
+	ShaderCode read_before_write;
+	read_before_write.SetType(ShaderType::Compute);
+	read_before_write.GetInstructions().Add(ScalarBfeI64(0u, 20, 12, 16));
+	read_before_write.GetInstructions().Add(EudTestEnd(4u));
+	const auto read_result = ShaderAnalyzeComputeWaveCode(read_before_write, Type5EudInput());
+	EXPECT_FALSE(read_result.supported);
+	EXPECT_EQ(read_result.unsupported_pc, 0u);
+	EXPECT_TRUE(read_result.reason.ContainsStr("extended pointer base"));
+
+	ShaderCode pair_write;
+	pair_write.SetType(ShaderType::Compute);
+	pair_write.GetInstructions().Add(ScalarBfeI64(0u, 12, 20, 24));
+	pair_write.GetInstructions().Add(EudBasePairRead(4u));
+	pair_write.GetInstructions().Add(EudTestEnd(8u));
+	const auto write_result = ShaderAnalyzeComputeWaveCode(pair_write, Type5EudInput());
+	EXPECT_TRUE(write_result.supported) << write_result.reason.c_str();
+}
+
 TEST(EmulatorComputeWaveAnalysis, AdmitsOnlyTheRealSoppBarrierTuple)
 {
 	// SOPP opcode 0x0a is a barrier; opcode 0x0b is still a parser placeholder.
@@ -622,7 +675,7 @@ TEST(EmulatorComputeWaveAnalysis, GenericFallbackRequiresValidOperandSpans)
 			case 0: invalid.dst.register_id = 256; break;
 			case 1: invalid.dst.size = 2; break; // crosses v255
 			case 2: invalid.src[0].register_id = -1; break;
-			case 3: invalid.src[1].size = 2; break; // crosses s103
+			case 3: invalid.src[1] = {.type = ShaderOperandType::Sgpr, .register_id = 105, .size = 2}; break; // crosses s105
 			case 4: invalid.src_num = 1; break; // live source outside the tuple
 			case 5: invalid.src_num = 5; break;
 		}

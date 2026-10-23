@@ -7,8 +7,6 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Vector.h"
 
-struct SDL_RWops;
-
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #ifdef CreateDirectory
 #undef CreateDirectory
@@ -142,14 +140,12 @@ public:
 	static bool             CopyFile(const String& src, const String& dst);
 	static bool             MoveFile(const String& src, const String& dst);
 	static void             RemoveReadonly(const String& name);
-	static void             SyncDirectories(const String& src_dir, const String& dst_dir, bool del_dst = true);
+	[[nodiscard]] static bool SyncDirectories(const String& src_dir, const String& dst_dir, bool del_dst = true);
 
 	static void   SetAssetsDir(const String& dir);
 	static String GetAssetsDir();
 	static void   SetAssetsSubDir(const String& dir);
 	static String GetAssetsSubDir();
-
-	SDL_RWops* CreateSdlRWops();
 
 	KYTY_CLASS_NO_COPY(File);
 

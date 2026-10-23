@@ -219,7 +219,7 @@ public:
 	[[nodiscard]] bool       DisplayEventsEnabled() const;
 	[[nodiscard]] bool       EnterPressed() const;
 
-	[[nodiscard]] bool OpenController(int device_index, int* instance_id);
+	[[nodiscard]] bool OpenController(int device_id, int* instance_id);
 	void               CloseController(int instance_id);
 	[[nodiscard]] const char* LastError() const;
 	[[nodiscard]] static int NormalizeAxis(ControllerAxis axis, int value);
@@ -229,6 +229,13 @@ public:
 	[[nodiscard]] static bool IsF11Key(int key_code);
 	[[nodiscard]] static bool IsEnterKey(int key_code);
 	[[nodiscard]] static bool IsF1Key(int key_code);
+	// F2 switches the keyboard between the virtual pad and text entry for the guest IME keyboard.
+	[[nodiscard]] static bool IsTextEntryToggleKey(int key_code);
+	// USB HID keyboard usage of a key, 0 when it has none.
+	[[nodiscard]] static uint16_t KeyboardHidUsage(int scan_code);
+	// UTF-16 code unit the key types under the host layout, 0 when it types none or only a
+	// layout-dependent shifted symbol.
+	[[nodiscard]] static uint16_t KeyboardTextCharacter(int key_code, uint16_t modifiers);
 	[[nodiscard]] static bool HasAltModifier(uint16_t modifiers);
 	[[nodiscard]] static KeyboardAction ClassifyKeyboardAction(int key_code);
 

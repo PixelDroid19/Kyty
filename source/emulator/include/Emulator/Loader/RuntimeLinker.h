@@ -201,8 +201,9 @@ struct ModuleStartDescriptor
 Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>& modules);
 
 // Native service modules consume the platform module-start descriptor when
-// the caller does not provide explicit arguments.
-[[nodiscard]] bool LoaderModuleUsesNativeStartParam(const String& file_name);
+// the caller does not provide explicit arguments. module_name is the name the
+// module's ELF declares, not its file name.
+[[nodiscard]] bool LoaderModuleUsesNativeStartParam(const String& module_name);
 
 // Decode the captured GNU EH-frame header form (version 1, pcrel+sdata4).
 // readable_end is the exclusive bound of the mapped readable range.
@@ -297,6 +298,11 @@ private:
 	static void CreateSymbolDatabase(Program* program);
 	static void Relocate(Program* program);
 	static void DeleteProgram(Program* program);
+	static void RegisterProgramEhFrame(Program* program);
+	static void UnregisterProgramEhFrame(Program* program);
+	[[nodiscard]] static bool ValidateSymbolTableMetadata(const DynamicInfo& info);
+	[[nodiscard]] static bool ValidateDynamicStringReferences(const Elf64* elf, const DynamicInfo& info);
+	[[nodiscard]] static bool IsSymbolTableIndexValid(const DynamicInfo& info, uint32_t index);
 	static void SetupTlsHandler(Program* program);
 	static const void* FindProgramByAddrForPort(uint64_t vaddr);
 	static uint64_t GetProcessParametersForPort();

@@ -10,7 +10,6 @@
 #include "Kyty/Sys/SysFileIO.h"
 #include "Kyty/Sys/SysTimer.h"
 
-#include "SDL_system.h"
 
 #include <cerrno>
 #include <dirent.h>

@@ -15,6 +15,7 @@
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
+#include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
@@ -125,15 +126,28 @@ VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorIn
 	return samples;
 }
 
-VkExtent2D IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment)
+VkExtent2D IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment, uint32_t mip_level)
 {
-	EXIT_IF(attachment == nullptr);
+	EXIT_IF(attachment == nullptr || mip_level >= 32u);
 	if (attachment->extent.width == 0 || attachment->extent.height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment->extent.width == 0 || attachment->extent.height == 0 condition ignored (continuing)\n"); }
-	return {std::min(current.width, attachment->extent.width), std::min(current.height, attachment->extent.height)};
+	const uint32_t width  = std::max(1u, attachment->extent.width >> mip_level);
+	const uint32_t height = std::max(1u, attachment->extent.height >> mip_level);
+	return {std::min(current.width, width), std::min(current.height, height)};
 }
 
-// Drop a depth/stencil surface that cannot form a legal framebuffer with the
-// active color targets (guest depth size 0 → 1x1 while color is full-screen).
+// The DB only touches its surface when the draw tests, writes or clears depth or
+// stencil; an untouched surface does not bound the rasterized area.
+static bool RenderDepthIsInert(const RenderDepthInfo& depth)
+{
+	const bool stencil_used = depth.stencil_plane && (depth.stencil_test_enable || depth.stencil_clear_enable);
+	return !depth.depth_test_enable && !depth.depth_write_enable && !depth.depth_bounds_test_enable && !depth.depth_clear_enable &&
+	       !stencil_used;
+}
+
+// Drop a depth/stencil surface smaller than the active color targets when it
+// cannot form a legal framebuffer (guest depth size 0 → 1x1 while color is
+// full-screen) or the draw leaves it inert: Vulkan clamps the framebuffer to the
+// smallest attachment, which would clip color writes the guest DB never bounds.
 // Clears format so CreatePipeline does not enable depth test without a DS attachment.
 void SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* depth)
 {
@@ -154,7 +168,7 @@ void SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* de
 	const auto dh = depth->vulkan_buffer->extent.height;
 	const auto cw = color_img->extent.width;
 	const auto ch = color_img->extent.height;
-	if ((dw < cw || dh < ch) && (dw <= 1u || dh <= 1u))
+	if ((dw < cw || dh < ch) && (dw <= 1u || dh <= 1u || RenderDepthIsInert(*depth)))
 	{
 		KYTY_LOG_DEBUG(
 		             "KYTY_GRAPHICS: sanitizing undersized depth %ux%u against color %ux%u (disabling depth attachment)\n", dw, dh, cw,
@@ -166,6 +180,22 @@ void SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* de
 		depth->depth_clear_enable = false;
 		depth->stencil_clear_enable = false;
 		depth->stencil_test_enable  = false;
+	}
+}
+
+// Without PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX the rasterizer's render
+// target index is zero, so a draw writes only the first slice (SLICE_START) of
+// each color view, whatever its SLICE_MAX.
+void CollapseRenderColorLayersWithoutLayerExport(RenderColorInfo* color, uint32_t pa_cl_vs_out_cntl)
+{
+	EXIT_IF(color == nullptr);
+	if ((pa_cl_vs_out_cntl & (1u << Pm4::PA_CL_VS_OUT_CNTL_USE_VTX_RENDER_TARGET_INDX_SHIFT)) != 0u)
+	{
+		return;
+	}
+	for (auto& attachment: color->attachment)
+	{
+		attachment.layer_count = std::min(attachment.layer_count, 1u);
 	}
 }
 
@@ -235,7 +265,7 @@ void GraphicsPeekRememberedSceneTargets(GraphicContext* ctx)
 	// Full-screen HDR/depth readback is a separate opt-in. Binding it to
 	// KYTY_TRACE_DRAW_PS raced native capture (layout tracker EXIT at
 	// Utils.cpp:37) and allocated two 1920×1080 buffers on every present≥3840.
-	const char* trace = std::getenv("KYTY_TRACE_SCENE_PEEK");
+	static const char* trace = std::getenv("KYTY_TRACE_SCENE_PEEK");
 	if (ctx == nullptr || trace == nullptr || trace[0] == '\0')
 	{
 		return;
@@ -250,7 +280,7 @@ void GraphicsPeekRememberedSceneTargets(GraphicContext* ctx)
 		return;
 	}
 	FILE* out = stderr;
-	if (const char* path = std::getenv("KYTY_TRACE_DRAW_PS_LOG"); path != nullptr && path[0] != '\0')
+	if (static const char* path = std::getenv("KYTY_TRACE_DRAW_PS_LOG"); path != nullptr && path[0] != '\0')
 	{
 		char scene_path[512];
 		std::snprintf(scene_path, sizeof(scene_path), "%s.scene", path);
@@ -710,7 +740,7 @@ void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& 
 void MaybeDumpColorTargets(GraphicContext* ctx, const RenderColorInfo& color)
 {
 	static const char* spec = std::getenv("KYTY_DUMP_RT");
-	const char*        trace = std::getenv("KYTY_TRACE_DRAW_PS");
+	static const char* trace = std::getenv("KYTY_TRACE_DRAW_PS");
 	if (ctx == nullptr)
 	{
 		return;

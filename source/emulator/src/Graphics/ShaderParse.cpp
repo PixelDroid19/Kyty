@@ -60,18 +60,21 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 		auto pc          = 4 * static_cast<uint32_t>(ptr - src);
 		if (instruction == kSCodeEndWord)
 		{
-			if (!saw_endpgm || dst->GetInstructions().IsEmpty() ||
-			    !shader_code_end_padding_valid(ptr, end, src, *dst))
+			if (dst->GetInstructions().IsEmpty() || !shader_code_end_padding_valid(ptr, end, src, *dst))
 			{
 				return false;
 			}
+			// A registered front ends in its continuation jump; the padding that
+			// follows it delimits the code exactly as it does after S_ENDPGM.
 			const auto last_type = dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).type;
-			if (last_type != ShaderInstructionType::SEndpgm && last_type != ShaderInstructionType::SBranch)
+			const bool ends_program =
+			    saw_endpgm && (last_type == ShaderInstructionType::SEndpgm || last_type == ShaderInstructionType::SBranch);
+			const bool ends_front = allow_setpc_terminator && last_type == ShaderInstructionType::SSetpcB64;
+			if (!ends_program && !ends_front)
 			{
 				return false;
 			}
-			*parsed_words = static_cast<uint32_t>(ptr - src);
-			return true;
+			break;
 		}
 		constexpr uint32_t kMaxDecodedInstructionWords = 8u;
 		uint32_t           bounded_words[kMaxDecodedInstructionWords] = {};
@@ -174,6 +177,8 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 		}
 	}
 
+	ShaderLowerWaterfallMoves(dst);
+	ShaderRemoveNeutralExecSkips(dst);
 	*parsed_words = static_cast<uint32_t>(ptr - src);
 	return true;
 }

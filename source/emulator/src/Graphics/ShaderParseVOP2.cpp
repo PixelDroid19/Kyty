@@ -53,7 +53,6 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		EXIT("unsupported SDWA reverse-borrow selection");
 	}
 
-	if (dst_sel != 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_sel != 6 condition ignored (continuing)\n"); }
 	if (sdwa && dst_sel == 6 && dst_u != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sdwa && dst_sel == 6 && dst_u != 0 condition ignored (continuing)\n"); }
 	if (src0_sel > 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sel > 6 condition ignored (continuing)\n"); }
 	if (src0_sext != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sext != 0 condition ignored (continuing)\n"); }
@@ -101,6 +100,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		inst.src[0].dpp_bound_ctrl     = ((buffer[1] & (1u << 19u)) != 0);
 		inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
 		inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+		inst.src[0].dpp_unmodeled_bits = buffer[1] & 0x00f20000u;
 	}
 
 	inst.dst.clamp = (clmp != 0);

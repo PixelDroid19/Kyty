@@ -70,6 +70,8 @@ void* PthreadCreateMainGuestStack();
 void PthreadDeleteStaticObjects(const void* program);
 [[nodiscard]] bool PthreadIsInitialized();
 bool PthreadQueryStack(const void* addr, void** start, void** end);
+int* GetThreadErrorAddr();
+void ReleaseThreadErrorAddr();
 
 int KYTY_SYSV_ABI PthreadMutexattrInit(PthreadMutexattr* attr);
 int KYTY_SYSV_ABI PthreadMutexattrDestroy(PthreadMutexattr* attr);

@@ -70,6 +70,7 @@ namespace Kyty::Libs::Graphics {
 }
 
 struct PresentationEncodeStage;
+struct PresentationFsrStage;
 
 struct VulkanSwapchain
 {
@@ -84,6 +85,8 @@ struct VulkanSwapchain
 	uint32_t       current_index              = 0;
 	// sRGB encoding stage for linear-light present sources; owned by PresentationScaler.
 	PresentationEncodeStage* encode_stage = nullptr;
+	// FSR 1.0 passes of the Fsr presentation filter; owned by PresentationScaler.
+	PresentationFsrStage* fsr_stage = nullptr;
 };
 
 struct VulkanCommandPool
@@ -103,6 +106,10 @@ struct VulkanQueueInfo
 	uint32_t     family   = static_cast<uint32_t>(-1);
 	uint32_t     index    = static_cast<uint32_t>(-1);
 	VkQueue      vk_queue = nullptr;
+	// Signaled by every command-processor submission with a value that rises in
+	// submission order (guarded by mutex), so rings wait for completion.
+	VkSemaphore timeline       = nullptr;
+	uint64_t    timeline_value = 0;
 };
 
 struct GpuDetileContext;
@@ -187,6 +194,8 @@ struct GraphicContext
 	// Guest memory is importable as device-addressable buffers (host pointer
 	// import, buffer device address and 64-bit shader integers).
 	bool guest_device_address_supported = false;
+	// Device-addressable buffers can also import dma-buf descriptors.
+	bool guest_dma_buf_import_supported = false;
 	ShaderComputeWaveVulkanState compute_wave_vulkan_state {};
 
 	// VK_EXT_sample_locations is optional at device discovery time. A draw that
@@ -292,7 +301,7 @@ struct VulkanImage
 	VkExtent3D             physical_extent      = {};
 	VkImage                image                = nullptr;
 	std::vector<VkImageView> image_view = std::vector<VkImageView>(VIEW_MAX, nullptr);
-	std::vector<VulkanImageViewDescriptor> sampled_view_descriptors;
+	std::vector<VulkanImageViewDescriptor> cached_view_descriptors;
 	VkImageType           image_type           = VK_IMAGE_TYPE_2D;
 	VkImageUsageFlags      usage                = 0;
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -332,12 +341,22 @@ struct VideoOutVulkanImage: public VulkanImage
 	bool        neo         = false;
 };
 
+struct StorageTextureVulkanImage;
+
 struct DepthStencilVulkanImage: public VulkanImage
 {
 	DepthStencilVulkanImage(): VulkanImage(VulkanImageType::DepthStencil) {}
 	bool                       compressed                   = false;
 	bool                       sample_locations_compatible = false;
 	VulkanSampleLocationState last_sample_locations;
+	// Guest base of the depth plane this image holds, 0 without one.
+	uint64_t depth_vaddr = 0;
+	// Guest base of the 8-bit stencil plane this image holds, 0 without one.
+	uint64_t stencil_vaddr = 0;
+	// Colour copy of the depth plane that storage views address (depth formats are not storage images), created on
+	// first use and destroyed with this image.
+	StorageTextureVulkanImage* storage_plane = nullptr;
+	VulkanMemory               storage_plane_memory;
 };
 
 struct TextureVulkanImage: public VulkanImage
@@ -349,6 +368,8 @@ struct StorageTextureVulkanImage: public VulkanImage
 {
 	StorageTextureVulkanImage(): VulkanImage(VulkanImageType::StorageTexture) {}
 	uint64_t guest_vaddr = 0;
+	// Normalized identity mapping of every storage view of this image.
+	VkComponentMapping storage_components = {};
 };
 
 struct RenderTextureVulkanImage: public VulkanImage

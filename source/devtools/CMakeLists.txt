@@ -49,3 +49,6 @@ target_link_libraries(kyty_devtools
 if (NOT MSVC)
 	target_compile_options(kyty_devtools PRIVATE -fno-exceptions)
 endif()
+
+add_executable(kyty_resource_fold_replay resource_fold_replay/ResourceFoldReplayMain.cpp)
+target_link_libraries(kyty_resource_fold_replay PRIVATE emulator)

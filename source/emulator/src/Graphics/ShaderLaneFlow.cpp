@@ -9,14 +9,14 @@ namespace Kyty::Libs::Graphics::LaneFlow {
 using Type    = ShaderInstructionType;
 using Operand = ShaderOperandType;
 
-bool StartsWith(Type type, const char* prefix)
+bool StartsWith(Type type, std::string_view prefix)
 {
 	return ShaderInstructionTypeStartsWith(type, prefix);
 }
 
-bool AnyPrefix(Type type, std::initializer_list<const char*> prefixes)
+bool AnyPrefix(Type type, std::initializer_list<std::string_view> prefixes)
 {
-	for (const char* prefix: prefixes)
+	for (const auto prefix: prefixes)
 	{
 		if (StartsWith(type, prefix)) { return true; }
 	}
@@ -64,7 +64,7 @@ bool IsScalarAlu(Type type)
 
 bool ReadsSccImplicitly(Type type)
 {
-	return StartsWith(type, "SCselect") || StartsWith(type, "SCmov") || type == Type::SAddcU32;
+	return StartsWith(type, "SCselect") || StartsWith(type, "SCmov") || type == Type::SAddcU32 || type == Type::SSubbU32;
 }
 
 bool WritesScc(Type type)
@@ -107,9 +107,17 @@ bool IsLaneLocalImageRead(Type type)
 		case Type::ImageSampleL:
 		case Type::ImageSampleLz:
 		case Type::ImageSampleLzO:
+		case Type::ImageSampleCd:
+		case Type::ImageSampleD:
 		case Type::ImageSampleDrefLz: return true;
 		default: return false;
 	}
+}
+
+int ImageLoadAddressCount(const ShaderInstruction& inst)
+{
+	static constexpr int kCoordinates[8] = {1, 2, 3, 3, 2, 3, 3, 4};
+	return kCoordinates[inst.mimg_dimension & 7u] + (inst.mimg_explicit_lod ? 1 : 0);
 }
 
 bool IsLaneExchange(Type type)
@@ -124,7 +132,7 @@ bool IsLaneBit(const ShaderInstruction& inst, int source)
 
 bool UsesImplicitDerivatives(Type type)
 {
-	return type == Type::ImageSample || type == Type::ImageSampleB || StartsWith(type, "ImageGather4");
+	return type == Type::ImageSample || type == Type::ImageSampleO || type == Type::ImageSampleB || StartsWith(type, "ImageGather4");
 }
 
 bool WritesMemory(Type type)

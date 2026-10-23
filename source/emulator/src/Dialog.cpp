@@ -5,10 +5,12 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/KeyboardTextPort.h"
 
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <string>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -51,47 +53,132 @@ namespace ImeDialog {
 
 LIB_NAME("ImeDialog", "ImeDialog");
 
-static std::mutex g_mutex;
-static int        g_status     = STATUS_NONE;
-static uint32_t   g_end_status = END_STATUS_OK;
+// Results the system returns, as titles map them to SCE_IME_ERROR_* names.
+constexpr int IME_ERROR_BUSY                    = static_cast<int>(0x80BC0001u);
+constexpr int IME_ERROR_INVALID_MAX_TEXT_LENGTH = static_cast<int>(0x80BC0016u);
+constexpr int IME_ERROR_INVALID_INPUT_TEXT_BUFFER = static_cast<int>(0x80BC0017u);
+constexpr int IME_ERROR_INVALID_ADDRESS         = static_cast<int>(0x80BC0031u);
+
+// USB HID usages that edit the text instead of typing a character.
+constexpr uint16_t KEY_USAGE_ENTER        = 0x28;
+constexpr uint16_t KEY_USAGE_BACKSPACE    = 0x2a;
+constexpr uint16_t KEY_USAGE_KEYPAD_ENTER = 0x58;
+
+struct ImeDialogState
+{
+	int            status     = STATUS_NONE;
+	uint32_t       end_status = END_STATUS_OK;
+	char16_t*      buffer     = nullptr;
+	uint32_t       max_length = 0;
+	std::u16string text;
+};
+
+static std::mutex     g_mutex;
+static ImeDialogState g_dialog;
+
+static void FinishLocked(uint32_t end_status)
+{
+	g_dialog.status     = STATUS_FINISHED;
+	g_dialog.end_status = end_status;
+	Emulator::Ports::KeyboardTextPort::SetDialogOpen(false);
+}
+
+// Applies the host keys typed since the last poll; Enter confirms the text.
+static void ApplyHostKeysLocked()
+{
+	Emulator::Ports::KeyboardTextKey keys[Emulator::Ports::KeyboardTextPort::QUEUE_MAX];
+	const size_t num     = Emulator::Ports::KeyboardTextPort::Drain(keys, Emulator::Ports::KeyboardTextPort::QUEUE_MAX);
+	bool         changed = false;
+	for (size_t i = 0; i < num && g_dialog.status == STATUS_RUNNING; i++)
+	{
+		const auto& key = keys[i];
+		if (!key.down)
+		{
+			continue;
+		}
+		if (key.usage == KEY_USAGE_ENTER || key.usage == KEY_USAGE_KEYPAD_ENTER)
+		{
+			std::memcpy(g_dialog.buffer, g_dialog.text.data(), g_dialog.text.size() * sizeof(char16_t));
+			g_dialog.buffer[g_dialog.text.size()] = u'\0';
+			FinishLocked(END_STATUS_OK);
+			return;
+		}
+		if (key.usage == KEY_USAGE_BACKSPACE)
+		{
+			if (!g_dialog.text.empty())
+			{
+				g_dialog.text.pop_back();
+				changed = true;
+			}
+		} else if (key.character != 0 && g_dialog.text.size() < g_dialog.max_length)
+		{
+			g_dialog.text.push_back(static_cast<char16_t>(key.character));
+			changed = true;
+		}
+	}
+	if (changed)
+	{
+		Emulator::Ports::KeyboardTextPort::SetDialogText(g_dialog.text);
+	}
+}
 
 int KYTY_SYSV_ABI ImeDialogInit(const ImeDialogParam* param, const void* /*extended*/)
 {
 	PRINT_NAME();
-	if (param == nullptr || param->input_text_buffer == nullptr || param->max_text_length == 0)
+	if (param == nullptr)
 	{
-		EXIT("sceImeDialogInit: unsupported parameters (param=%p buffer=%p max=%u)\n", static_cast<const void*>(param),
-		     param != nullptr ? static_cast<void*>(param->input_text_buffer) : nullptr,
-		     param != nullptr ? param->max_text_length : 0u);
+		return IME_ERROR_INVALID_ADDRESS;
+	}
+	if (param->input_text_buffer == nullptr)
+	{
+		return IME_ERROR_INVALID_INPUT_TEXT_BUFFER;
+	}
+	if (param->max_text_length == 0)
+	{
+		return IME_ERROR_INVALID_MAX_TEXT_LENGTH;
 	}
 	std::lock_guard lock(g_mutex);
-	if (g_status != STATUS_NONE)
+	if (g_dialog.status != STATUS_NONE)
 	{
-		EXIT("sceImeDialogInit: a dialog is already open (status %d)\n", g_status);
+		return IME_ERROR_BUSY;
 	}
-	// No on-screen keyboard exists: the user accepts the text the title placed in the buffer.
-	g_status     = STATUS_FINISHED;
-	g_end_status = END_STATUS_OK;
+	// No on-screen keyboard exists: the host keyboard edits the text the title placed
+	// in the buffer, and the dialog runs until the user confirms it.
+	g_dialog            = {};
+	g_dialog.status     = STATUS_RUNNING;
+	g_dialog.buffer     = param->input_text_buffer;
+	g_dialog.max_length = param->max_text_length;
+	for (uint32_t i = 0; i < param->max_text_length && param->input_text_buffer[i] != u'\0'; i++)
+	{
+		g_dialog.text.push_back(param->input_text_buffer[i]);
+	}
+	Emulator::Ports::KeyboardTextPort::SetDialogOpen(true);
+	Emulator::Ports::KeyboardTextPort::SetDialogText(g_dialog.text);
 	return OK;
 }
 
+// Titles poll the status on their own thread, which is where the typed keys apply.
 int KYTY_SYSV_ABI ImeDialogGetStatus()
 {
 	PRINT_NAME();
 	std::lock_guard lock(g_mutex);
-	return g_status;
+	if (g_dialog.status == STATUS_RUNNING)
+	{
+		ApplyHostKeysLocked();
+	}
+	return g_dialog.status;
 }
 
 int KYTY_SYSV_ABI ImeDialogGetResult(ImeDialogResult* result)
 {
 	PRINT_NAME();
 	std::lock_guard lock(g_mutex);
-	if (result == nullptr || g_status != STATUS_FINISHED)
+	if (result == nullptr || g_dialog.status != STATUS_FINISHED)
 	{
-		EXIT("sceImeDialogGetResult: no finished dialog (result=%p status %d)\n", static_cast<void*>(result), g_status);
+		EXIT("sceImeDialogGetResult: no finished dialog (result=%p status %d)\n", static_cast<void*>(result), g_dialog.status);
 	}
 	std::memset(result, 0, sizeof(*result));
-	result->end_status = g_end_status;
+	result->end_status = g_dialog.end_status;
 	return OK;
 }
 
@@ -99,12 +186,11 @@ int KYTY_SYSV_ABI ImeDialogAbort()
 {
 	PRINT_NAME();
 	std::lock_guard lock(g_mutex);
-	if (g_status == STATUS_NONE)
+	if (g_dialog.status == STATUS_NONE)
 	{
 		EXIT("sceImeDialogAbort: no dialog is open\n");
 	}
-	g_status     = STATUS_FINISHED;
-	g_end_status = END_STATUS_ABORTED;
+	FinishLocked(END_STATUS_ABORTED);
 	return OK;
 }
 
@@ -112,8 +198,8 @@ int KYTY_SYSV_ABI ImeDialogTerm()
 {
 	PRINT_NAME();
 	std::lock_guard lock(g_mutex);
-	g_status     = STATUS_NONE;
-	g_end_status = END_STATUS_OK;
+	g_dialog = {};
+	Emulator::Ports::KeyboardTextPort::SetDialogOpen(false);
 	return OK;
 }
 

@@ -34,6 +34,10 @@ bool     sys_virtual_discard_shared_backing_range(void* backing, uint64_t backin
 bool     sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset, uint64_t* next);
 // Bytes of the backing that hold a page (st_blocks). False when the host cannot tell.
 bool     sys_virtual_query_shared_backing_populated_bytes(void* backing, uint64_t* bytes);
+// A dma-buf descriptor sharing the pages of a page-aligned backing interval, or
+// -1 when the host cannot export it. The caller owns the descriptor.
+int      sys_virtual_export_shared_backing_dma_buf(void* backing, uint64_t backing_offset, uint64_t size);
+void     sys_virtual_close_dma_buf(int dma_buf);
 uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                         VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
@@ -49,6 +53,8 @@ bool     sys_virtual_free_range(uint64_t address, uint64_t size);
 bool     sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode = nullptr);
 bool     sys_virtual_protect_guest(uint64_t address, uint64_t size, VirtualMemory::Mode mode,
                                    VirtualMemory::Mode* old_mode = nullptr);
+bool     sys_virtual_protect_guest_if_mapping_matches(uint64_t address, uint64_t size, VirtualMemory::Mode mode,
+                                                     uint64_t mapping_identity, VirtualMemory::Mode* old_mode = nullptr);
 bool     sys_virtual_decommit_guest_range(uint64_t address, uint64_t size);
 bool     sys_virtual_is_range_guest_owned(uint64_t address, uint64_t size);
 bool     sys_virtual_is_range_readable(uint64_t address, uint64_t size);
@@ -57,12 +63,24 @@ bool     sys_virtual_visit_readable_guest_range(uint64_t address, uint64_t size,
 	                                            VirtualMemory::ReadableGuestRangeVisitor visitor, void* context);
 bool     sys_virtual_copy_from_guest(void* destination, uint64_t source, uint64_t size);
 bool     sys_virtual_copy_to_guest(uint64_t destination, const void* source, uint64_t size);
+bool     sys_virtual_capture_guest_mapping_snapshot(uint64_t address, uint64_t size, VirtualMemory::GuestMappingSnapshot* snapshot);
+bool     sys_virtual_capture_guest_mapping_identity_snapshot(uint64_t address, uint64_t size,
+	                                                         VirtualMemory::GuestMappingIdentitySnapshot* snapshot);
+bool     sys_virtual_guest_mapping_identity_matches(const VirtualMemory::GuestMappingIdentitySnapshot& identity);
+bool     sys_virtual_copy_to_guest_if_mapping_matches(const VirtualMemory::GuestMappingSnapshot& snapshot, const void* source);
+bool     sys_virtual_visit_writable_guest_transaction(const VirtualMemory::WritableGuestTransactionRange* ranges,
+	                                                   uint32_t count, int32_t capture_identity_range_index,
+	                                                   VirtualMemory::WritableGuestTransactionVisitor visitor,
+	                                                   void* context);
 VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint64_t address, uint64_t size,
 	                                                                      VirtualMemory::CapturedProtectionVisitor visitor,
-	                                                                      void* context) noexcept;
-bool     sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+	                                                                      void* context,
+	                                                                      const VirtualMemory::WriteLeaseAuthority* authority) noexcept;
+bool     sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t restore_token,
+                                                  const VirtualMemory::WriteLeaseAuthority* authority) noexcept;
 bool     sys_virtual_restore_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
 bool     sys_virtual_restore_protection_signal_safe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+bool     sys_virtual_release_write_leases(const VirtualMemory::WriteLeaseAuthority* authority) noexcept;
 bool     sys_virtual_protect_write_signal_safe(uint64_t address, uint64_t size);
 bool     sys_virtual_flush_instruction_cache(uint64_t address, uint64_t size);
 bool     sys_virtual_patch_replace(uint64_t vaddr, uint64_t value);

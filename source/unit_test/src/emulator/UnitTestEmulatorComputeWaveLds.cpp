@@ -59,6 +59,28 @@ TEST(EmulatorComputeWaveLds, ParsesAtomicReturnDestinationAndFullOffset)
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorComputeWaveLds, ConditionalExchangeNeverLowersToAddition)
+{
+	// These opcode tables name conditional exchanges, not adds. Refuse them
+	// until their target-generation semantics and return widths are implemented.
+	for (const bool next_gen: {false, true})
+	{
+		for (const uint32_t opcode: {0x7eu, 0xfdu})
+		{
+			const uint32_t words[] = {0xd8000000u | (opcode << 18u) | 0x0112u, 0x04000302u, 0xbf810000u};
+			EXPECT_DEATH(
+			    {
+				    InitializeConfig();
+				    Config::SetNextGen(next_gen);
+				    ShaderCode code;
+				    code.SetType(ShaderType::Compute);
+				    (void)ShaderTryParseBounded(words, sizeof(words), &code);
+			    },
+			    "");
+		}
+	}
+}
+
 TEST(EmulatorComputeWaveLds, PreservesControlsBeforeLegacyAliasLowering)
 {
 	// A write2/GDS must remain distinguishable from the legacy write32 alias.
@@ -111,13 +133,14 @@ TEST(EmulatorComputeWaveLds, AdmitsAnyLdsAddressWithoutAnAddressProof)
 
 TEST(EmulatorComputeWaveLds, LegacyTuplePredicateStaysExactForTheBankedEmitter)
 {
-	struct Case { uint32_t control; uint32_t registers; ShaderInstructionType type; bool banked; };
+	using Kind = ShaderComputeWaveInstructionKind;
+	struct Case { uint32_t control; uint32_t registers; ShaderInstructionType type; bool banked; Kind kind; };
 	const Case cases[] = {
-	    {0xd8d80000u, 0x04000001u, ShaderInstructionType::DsReadB32, true},   // ds_read_b32 v4, v1
-	    {0xd8340000u, 0x00000101u, ShaderInstructionType::DsWriteB32, true},  // ds_write_b32 v1, v1
-	    {0xd8360000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false}, // GDS
-	    {0xd8350000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false}, // reserved control
-	    {0xd8780000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false}, // legacy write8 alias
+	    {0xd8d80000u, 0x04000001u, ShaderInstructionType::DsReadB32, true, Kind::BankedGenericLds},   // ds_read_b32 v4, v1
+	    {0xd8340000u, 0x00000101u, ShaderInstructionType::DsWriteB32, true, Kind::BankedGenericLds},  // ds_write_b32 v1, v1
+	    {0xd8360000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false, Kind::BankedGdsWrite},   // GDS store, never LDS
+	    {0xd8350000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false, Kind::Unsupported},      // reserved control
+	    {0xd8780000u, 0x00000101u, ShaderInstructionType::DsWriteB32, false, Kind::Unsupported},      // legacy write8 alias
 	};
 	for (const auto& test: cases)
 	{
@@ -132,9 +155,7 @@ TEST(EmulatorComputeWaveLds, LegacyTuplePredicateStaysExactForTheBankedEmitter)
 			    const bool  banked      = ShaderComputeWaveLdsInstructionSupported(instruction);
 			    const bool generic = ShaderComputeWaveGenericLdsSupported(instruction);
 			    const auto kind = ShaderClassifyComputeWaveInstruction(instruction);
-			    std::_Exit(banked == test.banked && generic == test.banked &&
-			               kind == (test.banked ? ShaderComputeWaveInstructionKind::BankedGenericLds
-			                                   : ShaderComputeWaveInstructionKind::Unsupported) ? 0 : 3);
+			    std::_Exit(banked == test.banked && generic == test.banked && kind == test.kind ? 0 : 3);
 		    },
 		    ::testing::ExitedWithCode(0), "");
 	}

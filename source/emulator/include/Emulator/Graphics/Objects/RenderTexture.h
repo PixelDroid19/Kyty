@@ -30,6 +30,9 @@ enum class RenderTextureFormat : uint64_t
 	R16G16B16A16Sint,
 	R16G16B16A16Sfloat,
 	A2B10G10R10Unorm,
+	R32G32B32A32Sfloat,
+	R16Uint,
+	R16G16Uint,
 };
 
 struct RenderTextureFormatInfo
@@ -46,15 +49,23 @@ struct RenderTextureArrayView
 	uint64_t full_backing_size = 0;
 };
 
-// A color-target view names one slice inside an allocation whose storage starts
-// at layer zero. Keep the storage extent and the selected view separate so
+// A color-target view names the slices SLICE_START..SLICE_MAX inside an allocation
+// whose storage starts at layer zero; the shader's layer index is relative to the
+// first one. Keep the storage extent and the selected view separate so
 // cache identity cannot collapse a layered image into a single-layer image.
 [[nodiscard]] bool ResolveRenderTextureArrayView(uint64_t bytes_per_layer, uint32_t base_layer, uint32_t last_layer,
                                                  RenderTextureArrayView* view);
+// A 3D target's storage is its MIP0_DEPTH slices whatever the view names; a
+// SLICE_MAX past the last slice (seen as the depth itself) selects up to it.
+[[nodiscard]] bool ResolveRenderTextureVolumeView(uint64_t bytes_per_slice, uint32_t depth, uint32_t base_slice, uint32_t last_slice,
+                                                  RenderTextureArrayView* view);
 [[nodiscard]] bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
 [[nodiscard]] bool RenderTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t* incoming);
+// The same guest target, layers included, requested at another host extent.
+[[nodiscard]] bool RenderTextureChangesHostExtent(const uint64_t* existing, const uint64_t* incoming);
 
 [[nodiscard]] RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order);
+[[nodiscard]] uint32_t RenderTextureBytesPerElement(RenderTextureFormat format);
 [[nodiscard]] uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format);
 
 // GPU-owned tiled render targets without write-back never upload guest memory
@@ -76,9 +87,19 @@ public:
 	static constexpr int PARAM_WRITE_BACK = 6;
 	static constexpr int PARAM_SAMPLES    = 7;
 	static constexpr int PARAM_ARRAY_LAYERS = 8;
+	// Vulkan storage extent; equals the guest extent unless the render
+	// resolution scales this target. Zero selects the guest extent.
+	static constexpr int PARAM_HOST_WIDTH  = 9;
+	static constexpr int PARAM_HOST_HEIGHT = 10;
+	// More than one level: a tiled 64 KiB mip chain whose levels all live in
+	// the guest range, created from the bytes the guest already wrote there.
+	static constexpr int PARAM_MIP_LEVELS = 11;
+	// A 3D target: the layers are the depth slices of one volume.
+	static constexpr int PARAM_VOLUME = 12;
 
 	explicit RenderTextureObject(RenderTextureFormat pixel_format, uint32_t width, uint32_t height, bool tiled, bool neo, uint32_t pitch,
-	                             bool write_back, uint32_t sample_count = 1, uint32_t array_layers = 1)
+	                             bool write_back, uint32_t sample_count = 1, uint32_t array_layers = 1, uint32_t host_width = 0,
+	                             uint32_t host_height = 0, uint32_t mip_levels = 1, bool volume = false)
 	{
 		params[PARAM_FORMAT]     = static_cast<uint64_t>(pixel_format);
 		params[PARAM_WIDTH]      = width;
@@ -89,6 +110,10 @@ public:
 		params[PARAM_WRITE_BACK] = write_back ? 1 : 0;
 		params[PARAM_SAMPLES]    = sample_count;
 		params[PARAM_ARRAY_LAYERS] = array_layers;
+		params[PARAM_HOST_WIDTH]   = host_width == 0 ? width : host_width;
+		params[PARAM_HOST_HEIGHT]  = host_height == 0 ? height : host_height;
+		params[PARAM_MIP_LEVELS]   = mip_levels;
+		params[PARAM_VOLUME]       = volume ? 1 : 0;
 		check_hash               = RenderTextureMayCpuUploadOnUpdate(tiled, write_back);
 		type                     = Graphics::GpuMemoryObjectType::RenderTexture;
 	}

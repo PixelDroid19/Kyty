@@ -11,12 +11,7 @@
 #endif
 
 // IWYU pragma: no_include <intrin.h>
-// IWYU pragma: no_include "SDL_error.h"
-// IWYU pragma: no_include "SDL_platform.h"
-// IWYU pragma: no_include "SDL_stdinc.h"
-// IWYU pragma: no_include "begin_code.h"
-
-#include "SDL.h"
+#include <SDL3/SDL.h>
 
 namespace Kyty::Core {
 
@@ -136,18 +131,14 @@ static void sdl_host_free(void* memory)
 
 void SDLSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
-	if (SDL_SetMemoryFunctions(sdl_host_malloc, sdl_host_calloc, sdl_host_realloc, sdl_host_free) != 0)
+	if (!SDL_SetMemoryFunctions(sdl_host_malloc, sdl_host_calloc, sdl_host_realloc, sdl_host_free))
 	{
 		this->Fail("%s\n", SDL_GetError());
 		return;
 	}
 	SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, "0");
 
-#if SDL_DYNAMIC_API != 0
-#error "SDL_DYNAMIC_API"
-#endif
-
-	if (SDL_Init(0) < 0)
+	if (!SDL_Init(0))
 	{
 		this->Fail("%s\n", SDL_GetError());
 		return;

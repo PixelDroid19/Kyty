@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cinttypes>
 #include <condition_variable>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -881,22 +882,6 @@ int KYTY_SYSV_ABI NetPoolDestroy(int memid)
 	return OK;
 }
 
-int KYTY_SYSV_ABI NetInetPton(int af, const char* src, void* dst)
-{
-	PRINT_NAME();
-
-	if (af != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (dst == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (strcmp(src, "127.0.0.1") != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	KYTY_LOG_DEBUG("\t src = %.16s\n", src);
-
-	*static_cast<uint32_t*>(dst) = 0x7f000001;
-
-	return OK;
-}
-
 int KYTY_SYSV_ABI NetEtherNtostr(const NetEtherAddr* n, char* str, size_t len)
 {
 	PRINT_NAME();
@@ -934,6 +919,7 @@ struct GuestSockaddr
 	uint8_t  addr[16] {}; // IPv4 uses the first four bytes
 	uint32_t flowinfo = 0;
 	uint32_t scope_id = 0;
+	uint16_t vport    = 0; // P2P datagram sockets: virtual port, bytes 8-9 in network order
 };
 
 constexpr uint8_t  kGuestAfInet       = 2;
@@ -948,6 +934,7 @@ struct SocketState
 	bool                    closing    = false;
 	uint32_t                operations = 0;
 	bool                    datagram   = false;
+	bool                    p2p        = false; // SOCK_DGRAM_P2P: IPv4 UDP whose addresses carry a virtual port
 	bool                    bound      = false;
 	uint32_t                status_flags = 0;
 	GuestSockaddr           local;
@@ -971,7 +958,6 @@ constexpr size_t   kSocketIoChunkSize  = 64u * 1024u;
 // ever partly filled.
 constexpr uint64_t kMaxUdpReceive      = 65'535;
 constexpr int      kMaxEpollEvents     = 1024;
-constexpr int      kMaxSocketInfoSize  = 64 * 1024;
 
 static int RegisterSocketState(SocketStatePtr state)
 {
@@ -1185,7 +1171,7 @@ static int CopyGuestOutput(void* output, const uint8_t* source, size_t length)
 	return Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(output), source, length) ? OK : NET_ERROR_EFAULT;
 }
 
-static bool ReadGuestSockaddr(const void* addr, uint32_t len, GuestSockaddr* out)
+static bool ReadGuestSockaddr(const void* addr, uint32_t len, GuestSockaddr* out, bool with_vport = false)
 {
 	uint8_t bytes[kGuestSockaddrIn6] {};
 	if (addr == nullptr || out == nullptr || len < 8 || !IsGuestReadableRange(addr, 2) ||
@@ -1205,6 +1191,12 @@ static bool ReadGuestSockaddr(const void* addr, uint32_t len, GuestSockaddr* out
 	if (out->family == kGuestAfInet)
 	{
 		std::memcpy(out->addr, bytes + 4, 4);
+		uint8_t vport[2] {};
+		if (with_vport && len >= 10u && IsGuestReadableRange(static_cast<const uint8_t*>(addr) + 8, 2) &&
+		    Core::VirtualMemory::CopyFromGuest(vport, reinterpret_cast<uint64_t>(addr) + 8u, 2))
+		{
+			out->vport = static_cast<uint16_t>((static_cast<uint16_t>(vport[0]) << 8u) | vport[1]);
+		}
 	} else
 	{
 		std::memcpy(&out->flowinfo, bytes + 4, 4);
@@ -1235,6 +1227,8 @@ static bool WriteGuestSockaddr(void* addr, void* len, uint32_t max_len, const Gu
 	} else
 	{
 		std::memcpy(out + 4, in.addr, 4);
+		out[8] = static_cast<uint8_t>((in.vport >> 8u) & 0xffu);
+		out[9] = static_cast<uint8_t>(in.vport & 0xffu);
 	}
 	const uint32_t write_len = std::min(max_len, size);
 	return IsGuestOutputRange(addr, write_len) && Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(addr), out, write_len) &&
@@ -1245,17 +1239,19 @@ static bool WriteGuestSockaddr(void* addr, void* len, uint32_t max_len, const Gu
 // Guest message flags carry the BSD values. Linux numbers several differently (BSD MSG_DONTWAIT 0x80 is MSG_EOR
 // there and BSD MSG_WAITALL 0x40 is MSG_DONTWAIT), so a non-blocking receive blocked and a waiting one did not.
 // Sends never raise SIGPIPE on the host: a closed peer reports EPIPE instead of ending the emulator.
+struct MessageFlagPair
+{
+	int guest;
+	int host;
+};
+
+static constexpr MessageFlagPair kMessageFlags[] = {{0x1, MSG_OOB},    {0x2, MSG_PEEK},    {0x4, MSG_DONTROUTE}, {0x8, MSG_EOR},
+                                                    {0x10, MSG_TRUNC}, {0x20, MSG_CTRUNC}, {0x40, MSG_WAITALL},  {0x80, MSG_DONTWAIT}};
+
 static int GuestToHostMessageFlags(int guest_flags, bool sending)
 {
-	struct FlagPair
-	{
-		int guest;
-		int host;
-	};
-	static constexpr FlagPair kFlags[] = {{0x1, MSG_OOB},    {0x2, MSG_PEEK},    {0x4, MSG_DONTROUTE}, {0x8, MSG_EOR},
-	                                      {0x10, MSG_TRUNC}, {0x20, MSG_CTRUNC}, {0x40, MSG_WAITALL},  {0x80, MSG_DONTWAIT}};
 	int host_flags = 0;
-	for (const auto& pair: kFlags)
+	for (const auto& pair: kMessageFlags)
 	{
 		if ((guest_flags & pair.guest) != 0)
 		{
@@ -1271,6 +1267,20 @@ static int GuestToHostMessageFlags(int guest_flags, bool sending)
 	(void)sending;
 #endif
 	return host_flags;
+}
+
+// Received message flags (MSG_TRUNC, MSG_CTRUNC, MSG_EOR, MSG_OOB) go back with their BSD values.
+static int HostToGuestMessageFlags(int host_flags)
+{
+	int guest_flags = 0;
+	for (const auto& pair: kMessageFlags)
+	{
+		if ((host_flags & pair.host) != 0)
+		{
+			guest_flags |= pair.guest;
+		}
+	}
+	return guest_flags;
 }
 #endif
 
@@ -1300,6 +1310,7 @@ static int HostErrnoToNet(int host_errno)
 		case EADDRNOTAVAIL: return NET_ERROR_EADDRNOTAVAIL;
 		case ENETDOWN: return NET_ERROR_ENETDOWN;
 		case ENETUNREACH: return NET_ERROR_ENETUNREACH;
+		case EHOSTUNREACH: return NET_ERROR_EHOSTUNREACH;
 		case ECONNABORTED: return NET_ERROR_ECONNABORTED;
 		case ECONNRESET: return NET_ERROR_ECONNRESET;
 		case ENOBUFS: return NET_ERROR_ENOBUFS;
@@ -1434,11 +1445,22 @@ static void CancelSocketWatches(int id)
 }
 
 static bool TranslateGuestSocketParams(int family, int type, int protocol, int* host_family, int* host_type,
-                                       int* host_protocol)
+                                       int* host_protocol, bool* p2p)
 {
-	if (host_family == nullptr || host_type == nullptr || host_protocol == nullptr)
+	if (host_family == nullptr || host_type == nullptr || host_protocol == nullptr || p2p == nullptr)
 	{
 		return false;
+	}
+
+	// SOCK_DGRAM_P2P (6) is an IPv4 UDP socket whose addresses also carry a
+	// virtual port (sin_vport). Stream P2P (10) stays unsupported.
+	*p2p = (type & 0xf) == 6;
+	if (*p2p)
+	{
+		*host_family   = AF_INET;
+		*host_type     = SOCK_DGRAM;
+		*host_protocol = IPPROTO_UDP;
+		return family == 2 && protocol == 0;
 	}
 
 	switch (family)
@@ -1495,6 +1517,82 @@ static socklen_t GuestToHostSockaddr(const GuestSockaddr& guest, sockaddr_storag
 	return sizeof(sockaddr_in);
 }
 
+// P2P datagram sockets have their own address space: an endpoint is named by
+// its P2P port and virtual port, which never collide with UDP ports. Each one
+// is carried by an ephemeral host UDP port, and this table maps between the
+// two for the endpoints of this process. Peers on other hosts are not routed.
+struct P2pEndpoint
+{
+	uint16_t host_port = 0; // zero while the host bind is in flight
+	int      id        = -1;
+};
+
+static std::mutex                                g_p2p_mutex;
+static std::unordered_map<uint32_t, P2pEndpoint> g_p2p_endpoints;  // P2P port << 16 | vport
+static std::unordered_map<uint16_t, uint32_t>    g_p2p_host_ports; // host port -> endpoint key
+
+static uint32_t P2pKey(const GuestSockaddr& addr)
+{
+	return (static_cast<uint32_t>(addr.port) << 16u) | addr.vport;
+}
+
+static bool ReserveP2pEndpoint(const GuestSockaddr& addr, int id)
+{
+	std::lock_guard lock(g_p2p_mutex);
+	return g_p2p_endpoints.emplace(P2pKey(addr), P2pEndpoint {0, id}).second;
+}
+
+static void PublishP2pEndpoint(const GuestSockaddr& addr, uint16_t host_port)
+{
+	std::lock_guard lock(g_p2p_mutex);
+	const uint32_t key                = P2pKey(addr);
+	g_p2p_endpoints[key].host_port    = host_port;
+	g_p2p_host_ports[host_port]       = key;
+}
+
+static void ReleaseP2pEndpoint(const GuestSockaddr& addr, int id)
+{
+	std::lock_guard lock(g_p2p_mutex);
+	const auto      it = g_p2p_endpoints.find(P2pKey(addr));
+	if (it == g_p2p_endpoints.end() || it->second.id != id)
+	{
+		return;
+	}
+	g_p2p_host_ports.erase(it->second.host_port);
+	g_p2p_endpoints.erase(it);
+}
+
+// The host destination of a P2P address: the same host address, at the host
+// port that carries the named endpoint.
+static int ResolveP2pDestination(const GuestSockaddr& guest, GuestSockaddr* host)
+{
+	std::lock_guard lock(g_p2p_mutex);
+	const auto      it = g_p2p_endpoints.find(P2pKey(guest));
+	if (it == g_p2p_endpoints.end() || it->second.host_port == 0)
+	{
+		return NET_ERROR_EHOSTUNREACH;
+	}
+	*host       = guest;
+	host->port  = it->second.host_port;
+	host->vport = 0;
+	return OK;
+}
+
+// The P2P address of a host peer; a sender that is no P2P endpoint keeps its
+// host port and reports virtual port zero.
+static GuestSockaddr P2pPeerAddress(const GuestSockaddr& host_peer)
+{
+	GuestSockaddr   peer = host_peer;
+	std::lock_guard lock(g_p2p_mutex);
+	const auto      it = g_p2p_host_ports.find(host_peer.port);
+	if (it != g_p2p_host_ports.end())
+	{
+		peer.port  = static_cast<uint16_t>(it->second >> 16u);
+		peer.vport = static_cast<uint16_t>(it->second & 0xffffu);
+	}
+	return peer;
+}
+
 static bool HostToGuestSockaddr(const sockaddr_storage& host, GuestSockaddr* out)
 {
 	*out = {};
@@ -1531,11 +1629,13 @@ int KYTY_SYSV_ABI NetSocket(const char* name, int family, int type, int protocol
 	int host_family   = 0;
 	int host_type     = 0;
 	int host_protocol = 0;
-	if (!TranslateGuestSocketParams(family, type, protocol, &host_family, &host_type, &host_protocol))
+	bool p2p           = false;
+	if (!TranslateGuestSocketParams(family, type, protocol, &host_family, &host_type, &host_protocol, &p2p))
 	{
 		return NET_ERROR_EINVAL;
 	}
 	state->datagram = (host_type == SOCK_DGRAM);
+	state->p2p      = p2p;
 	state->host_fd = ::socket(host_family, host_type, host_protocol);
 	if (state->host_fd < 0)
 	{
@@ -1581,6 +1681,17 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 		}
 		state = it->second;
 		g_sockets.erase(it);
+	}
+	GuestSockaddr p2p_local {};
+	bool          p2p_bound = false;
+	{
+		std::lock_guard lock(state->mutex);
+		p2p_bound = state->p2p && state->bound;
+		p2p_local = state->local;
+	}
+	if (p2p_bound)
+	{
+		ReleaseP2pEndpoint(p2p_local, id);
 	}
 
 #if KYTY_NET_HOST_POSIX
@@ -1737,6 +1848,52 @@ void NetSocketUnwatch(int id, bool write, uint64_t owner)
 #endif
 }
 
+#if KYTY_NET_HOST_POSIX
+// Binds the host socket and, when asked, reports the host port it got.
+static int BindHostSocket(const SocketStatePtr& state, const GuestSockaddr& addr, uint16_t* host_port)
+{
+	sockaddr_storage host_addr {};
+	const socklen_t  host_addr_len = GuestToHostSockaddr(addr, &host_addr);
+	int host_fd = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	int result = ::bind(host_fd, reinterpret_cast<sockaddr*>(&host_addr), host_addr_len) == 0 ? OK : HostErrnoToNet(errno);
+	if (result == OK && host_port != nullptr)
+	{
+		sockaddr_in bound {};
+		socklen_t   bound_len = sizeof(bound);
+		result     = ::getsockname(host_fd, reinterpret_cast<sockaddr*>(&bound), &bound_len) == 0 ? OK : HostErrnoToNet(errno);
+		*host_port = ntohs(bound.sin_port);
+	}
+	EndSocketOperation(state);
+	return result;
+}
+
+// A P2P endpoint owns its (P2P port, virtual port) pair and rides on an
+// ephemeral host port of the requested host address.
+static int BindP2pSocket(int id, const SocketStatePtr& state, const GuestSockaddr& addr)
+{
+	if (!ReserveP2pEndpoint(addr, id))
+	{
+		return NET_ERROR_EADDRINUSE;
+	}
+	GuestSockaddr host_addr = addr;
+	host_addr.port          = 0;
+	host_addr.vport         = 0;
+	uint16_t  host_port     = 0;
+	const int result        = BindHostSocket(state, host_addr, &host_port);
+	if (result != OK)
+	{
+		ReleaseP2pEndpoint(addr, id);
+		return result;
+	}
+	PublishP2pEndpoint(addr, host_port);
+	return OK;
+}
+#endif
+
 int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 {
 	PRINT_NAME();
@@ -1747,36 +1904,34 @@ int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 		return NET_ERROR_EBADF;
 	}
 	GuestSockaddr guest_addr {};
-	if (len < 0 || !ReadGuestSockaddr(addr, static_cast<uint32_t>(len), &guest_addr))
+	if (len < 0 || !ReadGuestSockaddr(addr, static_cast<uint32_t>(len), &guest_addr, state->p2p))
 	{
 		return NET_ERROR_EINVAL;
 	}
 
 #if KYTY_NET_HOST_POSIX
-	sockaddr_storage host_addr {};
-	const socklen_t  host_addr_len = GuestToHostSockaddr(guest_addr, &host_addr);
-	int host_fd = -1;
-	if (!BeginSocketOperation(state, &host_fd))
+	const int bind_result = state->p2p ? BindP2pSocket(id, state, guest_addr) : BindHostSocket(state, guest_addr, nullptr);
+	if (bind_result != OK)
 	{
-		return NET_ERROR_EBADF;
-	}
-	const int bind_result = ::bind(host_fd, reinterpret_cast<sockaddr*>(&host_addr), host_addr_len);
-	const int bind_errno  = errno;
-	EndSocketOperation(state);
-	if (bind_result != 0)
-	{
-		return HostErrnoToNet(bind_errno);
+		return bind_result;
 	}
 	#endif
 
-	std::lock_guard lock(state->mutex);
-	if (state->closing)
 	{
-		return NET_ERROR_EBADF;
+		std::lock_guard lock(state->mutex);
+		if (!state->closing)
+		{
+			state->bound = true;
+			state->local = guest_addr;
+			return OK;
+		}
 	}
-	state->bound = true;
-	state->local = guest_addr;
-	return OK;
+	// The socket closed during the bind, so its close saw no endpoint to release.
+	if (state->p2p)
+	{
+		ReleaseP2pEndpoint(guest_addr, id);
+	}
+	return NET_ERROR_EBADF;
 }
 
 int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
@@ -1789,13 +1944,22 @@ int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
 		return NET_ERROR_EBADF;
 	}
 	GuestSockaddr guest_addr {};
-	if (len < 0 || !ReadGuestSockaddr(addr, static_cast<uint32_t>(len), &guest_addr))
+	if (len < 0 || !ReadGuestSockaddr(addr, static_cast<uint32_t>(len), &guest_addr, state->p2p))
 	{
 		return NET_ERROR_EINVAL;
 	}
 #if KYTY_NET_HOST_POSIX
+	GuestSockaddr destination = guest_addr;
+	if (state->p2p)
+	{
+		const int route = ResolveP2pDestination(guest_addr, &destination);
+		if (route != OK)
+		{
+			return route;
+		}
+	}
 	sockaddr_storage host_addr {};
-	const socklen_t  host_addr_len = GuestToHostSockaddr(guest_addr, &host_addr);
+	const socklen_t  host_addr_len = GuestToHostSockaddr(destination, &host_addr);
 	int host_fd = -1;
 	if (!BeginSocketOperation(state, &host_fd))
 	{
@@ -1924,6 +2088,31 @@ int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len)
 	return NET_ERROR_ENFILE;
 }
 
+// Aborts the operations blocked on a socket. Only flags 0 is implemented: the
+// preservation flags keep an abort pending for the next call. Operations on a
+// non-blocking socket return at once, so they are never blocked.
+int KYTY_SYSV_ABI NetSocketAbort(int id, int flags)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t id = %d flags = %d\n", id, flags);
+	const auto state = FindSocketState(id);
+	if (state == nullptr)
+	{
+		return NET_ERROR_EBADF;
+	}
+	EXIT_NOT_IMPLEMENTED(flags != 0);
+#if KYTY_NET_HOST_POSIX
+	std::lock_guard lock(state->mutex);
+	if (state->operations == 0 || state->host_fd < 0)
+	{
+		return NET_ERROR_ENOTBLK;
+	}
+	const int host_flags = ::fcntl(state->host_fd, F_GETFL);
+	EXIT_NOT_IMPLEMENTED(host_flags < 0 || (host_flags & O_NONBLOCK) == 0);
+#endif
+	return NET_ERROR_ENOTBLK;
+}
+
 int KYTY_SYSV_ABI NetShutdown(int id, int how)
 {
 	PRINT_NAME();
@@ -2029,7 +2218,7 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		return NET_ERROR_EBADF;
 	}
 	GuestSockaddr guest_addr {};
-	if (!ReadGuestSockaddr(addr, addr_len, &guest_addr))
+	if (!ReadGuestSockaddr(addr, addr_len, &guest_addr, state->p2p))
 	{
 		return NET_ERROR_EINVAL;
 	}
@@ -2047,8 +2236,17 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		return NET_ERROR_EFAULT;
 	}
 #if KYTY_NET_HOST_POSIX
+	GuestSockaddr destination = guest_addr;
+	if (state->p2p)
+	{
+		const int route = ResolveP2pDestination(guest_addr, &destination);
+		if (route != OK)
+		{
+			return route;
+		}
+	}
 	sockaddr_storage host_addr {};
-	const socklen_t  host_addr_len = GuestToHostSockaddr(guest_addr, &host_addr);
+	const socklen_t  host_addr_len = GuestToHostSockaddr(destination, &host_addr);
 	if (len == 0)
 	{
 		int host_fd = -1;
@@ -2233,11 +2431,279 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 	{
 		return NET_ERROR_EAFNOSUPPORT;
 	}
-	return WriteGuestSockaddr(addr, addr_len, max_addr_len, peer) ? received : NET_ERROR_EFAULT;
+	return WriteGuestSockaddr(addr, addr_len, max_addr_len, state->p2p ? P2pPeerAddress(peer) : peer) ? received : NET_ERROR_EFAULT;
 #else
 	(void)flags;
 	(void)write_peer;
 	(void)max_addr_len;
+	return NET_ERROR_EOPNOTSUPP;
+#endif
+}
+
+// Guest msghdr and iovec follow the BSD x86-64 layout.
+struct GuestMsghdr
+{
+	uint64_t name;
+	uint32_t name_len;
+	uint32_t pad0;
+	uint64_t iov;
+	int32_t  iov_len;
+	uint32_t pad1;
+	uint64_t control;
+	uint32_t control_len;
+	int32_t  flags;
+};
+static_assert(sizeof(GuestMsghdr) == 48);
+
+struct GuestIovec
+{
+	uint64_t base;
+	uint64_t length;
+};
+static_assert(sizeof(GuestIovec) == 16);
+
+constexpr int      kGuestIovMax              = 1024;
+constexpr uint64_t kGuestMsghdrNameLenOffset = 8;
+
+static int ReadGuestMsghdr(const void* msg, GuestMsghdr* header, std::vector<GuestIovec>* iovecs, uint64_t* total)
+{
+	if (!IsGuestReadableRange(msg, sizeof(GuestMsghdr)) ||
+	    !Core::VirtualMemory::CopyFromGuest(header, reinterpret_cast<uint64_t>(msg), sizeof(GuestMsghdr)))
+	{
+		return NET_ERROR_EFAULT;
+	}
+	if (header->iov_len < 0 || header->iov_len > kGuestIovMax)
+	{
+		return NET_ERROR_EMSGSIZE;
+	}
+	iovecs->resize(static_cast<size_t>(header->iov_len));
+	*total = 0;
+	if (iovecs->empty())
+	{
+		return OK;
+	}
+	const uint64_t table_size = iovecs->size() * sizeof(GuestIovec);
+	const auto*    table      = reinterpret_cast<const void*>(header->iov);
+	if (!IsGuestReadableRange(table, table_size) || !Core::VirtualMemory::CopyFromGuest(iovecs->data(), header->iov, table_size))
+	{
+		return NET_ERROR_EFAULT;
+	}
+	for (const auto& iovec: *iovecs)
+	{
+		if (iovec.length > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - *total)
+		{
+			return NET_ERROR_EINVAL;
+		}
+		*total += iovec.length;
+	}
+	return OK;
+}
+
+// Copies the first `length` bytes described by the guest iovecs into one host buffer.
+static int GatherGuestIovecs(const std::vector<GuestIovec>& iovecs, uint64_t length, HostArray<uint8_t>* payload)
+{
+	if (!payload->Allocate(static_cast<size_t>(length)))
+	{
+		return NET_ERROR_ENOMEM;
+	}
+	uint64_t offset = 0;
+	for (const auto& iovec: iovecs)
+	{
+		const uint64_t part = std::min(iovec.length, length - offset);
+		if (part == 0)
+		{
+			continue;
+		}
+		if (!IsGuestReadableRange(reinterpret_cast<const void*>(iovec.base), part) ||
+		    !Core::VirtualMemory::CopyFromGuest(payload->Data() + offset, iovec.base, part))
+		{
+			return NET_ERROR_EFAULT;
+		}
+		offset += part;
+	}
+	return OK;
+}
+
+static int ScatterGuestIovecs(const std::vector<GuestIovec>& iovecs, const uint8_t* data, uint64_t length)
+{
+	uint64_t offset = 0;
+	for (const auto& iovec: iovecs)
+	{
+		const uint64_t part = std::min(iovec.length, length - offset);
+		if (part == 0)
+		{
+			continue;
+		}
+		const int copy_result = CopyGuestOutput(reinterpret_cast<void*>(iovec.base), data + offset, static_cast<size_t>(part));
+		if (copy_result != OK)
+		{
+			return copy_result;
+		}
+		offset += part;
+	}
+	return OK;
+}
+
+static bool GuestIovecsWritable(const std::vector<GuestIovec>& iovecs)
+{
+	return std::all_of(iovecs.begin(), iovecs.end(), [](const GuestIovec& iovec)
+	                   { return iovec.length == 0 || IsGuestOutputRange(reinterpret_cast<void*>(iovec.base), iovec.length); });
+}
+
+// Ancillary data is not supported: a send that carries it fails, and a receive reports none.
+int64_t KYTY_SYSV_ABI NetSendmsg(int id, const void* msg, int flags)
+{
+	PRINT_NAME();
+	const auto state = FindSocketState(id);
+	if (state == nullptr)
+	{
+		return NET_ERROR_EBADF;
+	}
+	GuestMsghdr             header {};
+	std::vector<GuestIovec> iovecs;
+	uint64_t                total       = 0;
+	const int               read_result = ReadGuestMsghdr(msg, &header, &iovecs, &total);
+	if (read_result != OK)
+	{
+		return read_result;
+	}
+	if (header.control_len != 0)
+	{
+		return NET_ERROR_EOPNOTSUPP;
+	}
+	const bool datagram = SocketIsDatagram(state);
+	if (datagram && total > kMaxIpv4UdpPayload)
+	{
+		return NET_ERROR_EMSGSIZE;
+	}
+	GuestSockaddr guest_addr {};
+	const bool    has_name = header.name != 0;
+	if (has_name && !ReadGuestSockaddr(reinterpret_cast<const void*>(header.name), header.name_len, &guest_addr, state->p2p))
+	{
+		return NET_ERROR_EINVAL;
+	}
+	// A stream send may be partial; one call moves at most one I/O chunk.
+	HostArray<uint8_t> payload;
+	const int gather_result = GatherGuestIovecs(iovecs, datagram ? total : std::min<uint64_t>(total, kSocketIoChunkSize), &payload);
+	if (gather_result != OK)
+	{
+		return gather_result;
+	}
+#if KYTY_NET_HOST_POSIX
+	GuestSockaddr destination = guest_addr;
+	if (has_name && state->p2p)
+	{
+		const int route = ResolveP2pDestination(guest_addr, &destination);
+		if (route != OK)
+		{
+			return route;
+		}
+	}
+	sockaddr_storage host_addr {};
+	const socklen_t  host_addr_len = has_name ? GuestToHostSockaddr(destination, &host_addr) : 0;
+	int              host_fd       = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	const auto sent = ::sendto(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true),
+	                           has_name ? reinterpret_cast<const sockaddr*>(&host_addr) : nullptr, host_addr_len);
+	const int send_errno = errno;
+	EndSocketOperation(state);
+	return sent < 0 ? HostErrnoToNet(send_errno) : sent;
+#else
+	(void)flags;
+	return NET_ERROR_EOPNOTSUPP;
+#endif
+}
+
+int64_t KYTY_SYSV_ABI NetRecvmsg(int id, void* msg, int flags)
+{
+	PRINT_NAME();
+	const auto state = FindSocketState(id);
+	if (state == nullptr)
+	{
+		return NET_ERROR_EBADF;
+	}
+	GuestMsghdr             header {};
+	std::vector<GuestIovec> iovecs;
+	uint64_t                total       = 0;
+	const int               read_result = ReadGuestMsghdr(msg, &header, &iovecs, &total);
+	if (read_result != OK)
+	{
+		return read_result;
+	}
+	if (!IsGuestOutputRange(msg, sizeof(GuestMsghdr)) || !GuestIovecsWritable(iovecs))
+	{
+		return NET_ERROR_EFAULT;
+	}
+	const bool write_peer = header.name != 0 && header.name_len != 0;
+	if (write_peer && header.name_len < 8u)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	HostArray<uint8_t> payload;
+	if (!payload.Allocate(static_cast<size_t>(std::min<uint64_t>(total, SocketIsDatagram(state) ? kMaxUdpReceive : kSocketIoChunkSize))))
+	{
+		return NET_ERROR_ENOMEM;
+	}
+#if KYTY_NET_HOST_POSIX
+	sockaddr_storage host_addr {};
+	iovec            host_iov {payload.Data(), payload.Size()};
+	msghdr           host_msg {};
+	host_msg.msg_name    = write_peer ? &host_addr : nullptr;
+	host_msg.msg_namelen = write_peer ? sizeof(host_addr) : 0;
+	host_msg.msg_iov     = &host_iov;
+	host_msg.msg_iovlen  = 1;
+	int host_fd          = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	const auto received   = ::recvmsg(host_fd, &host_msg, GuestToHostMessageFlags(flags, false));
+	const int  recv_errno = errno;
+	EndSocketOperation(state);
+	if (received < 0)
+	{
+		return HostErrnoToNet(recv_errno);
+	}
+	const int scatter_result = ScatterGuestIovecs(iovecs, payload.Data(), std::min<uint64_t>(received, payload.Size()));
+	if (scatter_result != OK)
+	{
+		return scatter_result;
+	}
+	GuestSockaddr peer {};
+	auto*         name_len = reinterpret_cast<uint8_t*>(msg) + kGuestMsghdrNameLenOffset;
+	if (write_peer && host_msg.msg_namelen != 0)
+	{
+		if (!HostToGuestSockaddr(host_addr, &peer))
+		{
+			return NET_ERROR_EAFNOSUPPORT;
+		}
+		if (!WriteGuestSockaddr(reinterpret_cast<void*>(header.name), name_len, header.name_len, state->p2p ? P2pPeerAddress(peer) : peer))
+		{
+			return NET_ERROR_EFAULT;
+		}
+	} else
+	{
+		header.name_len = 0;
+		if (!Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(name_len), &header.name_len, sizeof(header.name_len)))
+		{
+			return NET_ERROR_EFAULT;
+		}
+	}
+	const uint32_t control_len = 0;
+	const int32_t  msg_flags   = HostToGuestMessageFlags(host_msg.msg_flags);
+	auto*          out         = reinterpret_cast<uint8_t*>(msg);
+	if (!Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(out + offsetof(GuestMsghdr, control_len)), &control_len, sizeof(control_len)) ||
+	    !Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(out + offsetof(GuestMsghdr, flags)), &msg_flags, sizeof(msg_flags)))
+	{
+		return NET_ERROR_EFAULT;
+	}
+	return received;
+#else
+	(void)flags;
+	(void)write_peer;
 	return NET_ERROR_EOPNOTSUPP;
 #endif
 }
@@ -2293,7 +2759,8 @@ int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len)
 	const int getsockname_result = ::getsockname(host_fd, reinterpret_cast<sockaddr*>(&host_addr), &host_len);
 	EndSocketOperation(state);
 	GuestSockaddr local {};
-	if (getsockname_result == 0 && HostToGuestSockaddr(host_addr, &local))
+	// A P2P socket reports its P2P address, not the host port that carries it.
+	if (!state->p2p && getsockname_result == 0 && HostToGuestSockaddr(host_addr, &local))
 	{
 		return WriteGuestSockaddr(addr, len, max_len, local) ? OK : NET_ERROR_EFAULT;
 	}
@@ -2347,7 +2814,7 @@ int KYTY_SYSV_ABI NetGetpeername(int id, void* addr, uint32_t* len)
 	{
 		return NET_ERROR_EAFNOSUPPORT;
 	}
-	return WriteGuestSockaddr(addr, len, max_len, peer) ? OK : NET_ERROR_EFAULT;
+	return WriteGuestSockaddr(addr, len, max_len, state->p2p ? P2pPeerAddress(peer) : peer) ? OK : NET_ERROR_EFAULT;
 #else
 	return NET_ERROR_EOPNOTSUPP;
 #endif
@@ -2532,6 +2999,50 @@ const char* KYTY_SYSV_ABI NetInetNtop(int af, const void* src, char* dst, int si
 	(void)af;
 	(void)size;
 	return nullptr;
+#endif
+}
+
+// Converts a text address to its binary form in network byte order. Like BSD
+// inet_pton it returns 1 on success and 0 when the text is no address of the family.
+int KYTY_SYSV_ABI NetInetPton(int af, const char* src, void* dst)
+{
+	PRINT_NAME();
+	if (af != kGuestAfInet && af != kGuestAfInet6)
+	{
+		return NET_ERROR_EAFNOSUPPORT;
+	}
+	// The longest address text, an IPv6 address with an embedded IPv4 one, is 45 characters.
+	char   text[64] {};
+	size_t length = 0;
+	for (; length + 1 < sizeof(text); ++length)
+	{
+		const auto* cursor = src + length;
+		if (src == nullptr || !IsGuestReadableRange(cursor, 1) ||
+		    !Core::VirtualMemory::CopyFromGuest(&text[length], reinterpret_cast<uint64_t>(cursor), 1))
+		{
+			return NET_ERROR_EFAULT;
+		}
+		if (text[length] == '\0')
+		{
+			break;
+		}
+	}
+	if (length + 1 == sizeof(text))
+	{
+		return 0;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	uint8_t   address[16] {};
+	const int host_af = af == kGuestAfInet ? AF_INET : AF_INET6;
+	if (::inet_pton(host_af, text, address) != 1)
+	{
+		return 0;
+	}
+	const int copy_result = CopyGuestOutput(dst, address, host_af == AF_INET ? 4u : 16u);
+	return copy_result == OK ? 1 : copy_result;
+#else
+	(void)dst;
+	return NET_ERROR_EAFNOSUPPORT;
 #endif
 }
 
@@ -3254,67 +3765,140 @@ int KYTY_SYSV_ABI NetResolverStartAton(int rid, const void* addr, char* hostname
 #endif
 }
 
-int KYTY_SYSV_ABI NetGetSockInfo(int socket_id, void* info, int info_size, int flags)
+// sceNetGetSockInfo record. A title polls `state` at 0x44 for its P2P socket
+// (type 6 at 0x28) after bind, and steps through results 160 bytes apart.
+struct GuestSockInfo
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t socket    = %d\n", socket_id);
-	KYTY_LOG_DEBUG("\t info      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
-	KYTY_LOG_DEBUG("\t info_size = %d\n", info_size);
-	KYTY_LOG_DEBUG("\t flags     = %d\n", flags);
+	char     name[32];
+	int32_t  pid;
+	int32_t  s;
+	int8_t   socket_type;
+	int8_t   policy;
+	int8_t   priority;
+	int8_t   reserved8;
+	int32_t  recv_queue_length;
+	int32_t  send_queue_length;
+	uint32_t local_adr;  // network byte order
+	uint32_t remote_adr; // network byte order
+	uint16_t local_port; // network byte order, like the ports below
+	uint16_t remote_port;
+	uint16_t local_vport;
+	uint16_t remote_vport;
+	int32_t  state;
+	int32_t  flags;
+	int32_t  counters[21]; // bandwidth, buffer-size and drop statistics, not tracked
+};
+static_assert(sizeof(GuestSockInfo) == 160);
+static_assert(offsetof(GuestSockInfo, s) == 0x24 && offsetof(GuestSockInfo, socket_type) == 0x28);
+static_assert(offsetof(GuestSockInfo, local_vport) == 0x40 && offsetof(GuestSockInfo, state) == 0x44);
 
-	if (info == nullptr || info_size <= 0)
-	{
-		return NET_ERROR_EINVAL;
-	}
-	if (info_size > kMaxSocketInfoSize)
-	{
-		return NET_ERROR_EMSGSIZE;
-	}
-
-	const auto state = FindSocketState(socket_id);
-	if (state == nullptr)
-	{
-		return NET_ERROR_EBADF;
-	}
-	HostArray<uint8_t> output;
-	const int prepare_result = PrepareGuestOutput(info, static_cast<uint64_t>(info_size), &output);
-	if (prepare_result != OK)
-	{
-		return prepare_result;
-	}
-	std::memset(output.Data(), 0, output.Size());
-
-	(void)flags;
+constexpr int32_t  kSockInfoStateOpened      = 2;
+constexpr int32_t  kSockInfoStateEstablished = 6;
+constexpr int32_t  kSockInfoFlagSelf         = 0x1;
+constexpr int32_t  kSockInfoFlagNonblock     = 0x200000;
+constexpr uint32_t kGuestONonblock           = 0x0004;
 
 #if KYTY_NET_HOST_POSIX
-	// Report the locally-bound address, mirroring getsockname semantics. The
-	// caller decides which fields matter, so fill what the host exposes.
-	sockaddr_storage host_addr {};
-	socklen_t        host_len = sizeof(host_addr);
+static void FillSockInfoAddresses(const SocketStatePtr& state, GuestSockInfo* info)
+{
 	int host_fd = -1;
 	if (!BeginSocketOperation(state, &host_fd))
 	{
-		return NET_ERROR_EBADF;
+		return;
 	}
-	const int getsockname_result = ::getsockname(host_fd, reinterpret_cast<sockaddr*>(&host_addr), &host_len);
-	EndSocketOperation(state);
-	if (getsockname_result == 0)
+	sockaddr_storage local {};
+	socklen_t        local_len = sizeof(local);
+	sockaddr_storage peer {};
+	socklen_t        peer_len  = sizeof(peer);
+	int              pending   = 0;
+	const bool       has_local = ::getsockname(host_fd, reinterpret_cast<sockaddr*>(&local), &local_len) == 0;
+	const bool       has_peer  = ::getpeername(host_fd, reinterpret_cast<sockaddr*>(&peer), &peer_len) == 0;
+	if (::ioctl(host_fd, FIONREAD, &pending) == 0)
 	{
-		const auto* in = reinterpret_cast<const sockaddr_in*>(&host_addr);
-		if (in->sin_family == AF_INET && info_size >= 8)
-		{
-			auto* bytes = output.Data();
-			bytes[0]    = 16;
-			bytes[1]    = 2;
-			const uint16_t port = ntohs(in->sin_port);
-			bytes[2] = static_cast<uint8_t>((port >> 8u) & 0xffu);
-			bytes[3] = static_cast<uint8_t>(port & 0xffu);
-			std::memcpy(bytes + 4, &in->sin_addr, 4);
-		}
+		info->recv_queue_length = pending;
 	}
+	EndSocketOperation(state);
+
+	GuestSockaddr address {};
+	if (state->p2p && state->bound)
+	{
+		std::memcpy(&info->local_adr, state->local.addr, 4);
+		info->local_port  = htons(state->local.port);
+		info->local_vport = htons(state->local.vport);
+	} else if (has_local && HostToGuestSockaddr(local, &address) && address.family == kGuestAfInet)
+	{
+		std::memcpy(&info->local_adr, address.addr, 4);
+		info->local_port = htons(address.port);
+	}
+	if (!has_peer || !HostToGuestSockaddr(peer, &address) || address.family != kGuestAfInet)
+	{
+		return;
+	}
+	const GuestSockaddr remote = state->p2p ? P2pPeerAddress(address) : address;
+	std::memcpy(&info->remote_adr, remote.addr, 4);
+	info->remote_port  = htons(remote.port);
+	info->remote_vport = htons(remote.vport);
+	info->state        = kSockInfoStateEstablished;
+}
 #endif
 
-	return CopyGuestOutput(info, output.Data(), output.Size());
+static GuestSockInfo MakeSockInfo(int id, const SocketStatePtr& state)
+{
+	GuestSockInfo info {};
+	info.s           = id;
+	info.socket_type = static_cast<int8_t>(state->p2p ? 6 : state->datagram ? 2 : 1);
+	info.state       = kSockInfoStateOpened;
+	info.flags       = kSockInfoFlagSelf | ((state->status_flags & kGuestONonblock) != 0 ? kSockInfoFlagNonblock : 0);
+#if KYTY_NET_HOST_POSIX
+	FillSockInfoAddresses(state, &info);
+#endif
+	return info;
+}
+
+// Fills one record for socket `socket_id`, or up to `count` records for all
+// sockets when `socket_id` is negative, and returns how many it wrote. A
+// negative id with no buffer returns the number of open sockets.
+int KYTY_SYSV_ABI NetGetSockInfo(int socket_id, void* info, int count, int flags)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t socket = %d count = %d flags = %d\n", socket_id, count, flags);
+	(void)flags;
+
+	std::vector<std::pair<int, SocketStatePtr>> sockets;
+	if (socket_id >= 0)
+	{
+		const auto state = FindSocketState(socket_id);
+		if (state == nullptr)
+		{
+			return NET_ERROR_EBADF;
+		}
+		sockets.emplace_back(socket_id, state);
+	} else
+	{
+		std::lock_guard lock(g_sockets_mutex);
+		sockets.assign(g_sockets.begin(), g_sockets.end());
+	}
+	std::sort(sockets.begin(), sockets.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+	if (info == nullptr)
+	{
+		return socket_id < 0 ? static_cast<int>(sockets.size()) : NET_ERROR_EINVAL;
+	}
+	if (count <= 0)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	const size_t written = std::min(sockets.size(), static_cast<size_t>(count));
+	for (size_t index = 0; index < written; ++index)
+	{
+		const GuestSockInfo record = MakeSockInfo(sockets[index].first, sockets[index].second);
+		auto*               output = static_cast<uint8_t*>(info) + index * sizeof(GuestSockInfo);
+		const int copy_result = CopyGuestOutput(output, reinterpret_cast<const uint8_t*>(&record), sizeof(record));
+		if (copy_result != OK)
+		{
+			return copy_result;
+		}
+	}
+	return static_cast<int>(written);
 }
 
 } // namespace Net
@@ -3886,7 +4470,9 @@ int KYTY_SYSV_ABI NetCtlGetState(int* state)
 {
 	PRINT_NAME();
 
-	const int staged = 0; // Disconnected
+	// The emulated network is local only: the loopback address GetInfo reports
+	// is assigned, so the state is IP-obtained (3), not Disconnected (0).
+	const int staged = 3;
 	return Net::CopyGuestOutput(state, reinterpret_cast<const uint8_t*>(&staged), sizeof(staged));
 }
 
@@ -3910,12 +4496,14 @@ int KYTY_SYSV_ABI NetCtlGetInfo(int code, NetCtlInfo* info)
 	uint64_t   output_size = 0;
 	switch (code)
 	{
+		// DEVICE: the wired device (0).
+		case 1: output.device = 0; output_size = sizeof(output.device); break;
 		case 2:
 			memset(output.ether_addr.data, 0, sizeof(output.ether_addr.data));
 			output_size = sizeof(output.ether_addr);
 			break;
-		// LINK: the cable or radio link, consistent with the disconnected NetCtl state.
-		case 4: output.link = 0; output_size = sizeof(output.link); break;
+		// LINK: connected (1), consistent with the IP-obtained NetCtl state.
+		case 4: output.link = 1; output_size = sizeof(output.link); break;
 		case 11: output.ip_config = 0; output_size = sizeof(output.ip_config); break;
 		case 14:
 			memcpy(output.ip_address, "127.0.0.1", sizeof("127.0.0.1"));
@@ -4157,6 +4745,27 @@ int KYTY_SYSV_ABI NpGetState(int user_id, uint32_t* state)
 	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 
 	*state = 1; // Signed out
+
+	return OK;
+}
+
+// An offline runtime reports the NP service as unavailable.
+int KYTY_SYSV_ABI NpGetNpReachabilityState(int user_id, uint32_t* state)
+{
+	PRINT_NAME();
+
+	constexpr int np_error_invalid_argument = static_cast<int>(0x80550003u);
+	if (state == nullptr)
+	{
+		return np_error_invalid_argument;
+	}
+	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
+
+	const uint32_t unavailable = 0;
+	if (!Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(state), &unavailable, sizeof(unavailable)))
+	{
+		return np_error_invalid_argument;
+	}
 
 	return OK;
 }

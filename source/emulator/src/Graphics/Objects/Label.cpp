@@ -85,6 +85,9 @@ public:
 	void StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
 	                   GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
 	[[nodiscard]] bool StorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication);
+	[[nodiscard]] bool RangeHasFence(uint64_t addr, uint64_t size);
+	[[nodiscard]] bool WriteBackAdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+	                                        LabelStoragePublication* publication, GpuWritebackResult* result);
 	void   ReleaseMappedRange(uint64_t addr, uint64_t bytes);
 
 private:
@@ -117,22 +120,16 @@ LabelFenceRegistrationStatus LabelFenceRegistry::Register(uint64_t addr, uint64_
 		return LabelFenceRegistrationStatus::InvalidArgument;
 	}
 
-	const uint64_t end = addr + bytes;
-	for (int i = 0; i < static_cast<int>(m_begin.Size()); i++)
-	{
-		if (m_begin.At(i) == addr && m_end.At(i) == end)
-		{
-			EXIT_IF(m_pending.At(i) == UINT64_MAX);
-			m_pending[i]++;
-			return LabelFenceRegistrationStatus::AlreadyRegistered;
-		}
-	}
+	const auto [hole, inserted] = m_holes.try_emplace({addr, addr + bytes});
+	EXIT_IF(hole->second.pending == UINT64_MAX);
+	hole->second.pending++;
+	m_max_bytes = std::max(m_max_bytes, bytes);
+	return inserted ? LabelFenceRegistrationStatus::Inserted : LabelFenceRegistrationStatus::AlreadyRegistered;
+}
 
-	m_begin.Add(addr);
-	m_end.Add(end);
-	m_completed_version.Add(0);
-	m_pending.Add(1);
-	return LabelFenceRegistrationStatus::Inserted;
+LabelFenceRegistry::Holes::const_iterator LabelFenceRegistry::FirstCandidate(uint64_t addr) const
+{
+	return m_holes.lower_bound({addr > m_max_bytes ? addr - m_max_bytes : 0u, 0u});
 }
 
 LabelFenceReleaseStatus LabelFenceRegistry::ReleaseAllocation(uint64_t addr, uint64_t bytes)
@@ -142,13 +139,14 @@ LabelFenceReleaseStatus LabelFenceRegistry::ReleaseAllocation(uint64_t addr, uin
 		return LabelFenceReleaseStatus::InvalidArgument;
 	}
 
-	const uint64_t end      = addr + bytes;
+	const uint64_t end   = addr + bytes;
+	const auto     first = FirstCandidate(addr);
+	auto           last  = first;
 	bool           released = false;
-	for (int i = 0; i < static_cast<int>(m_begin.Size()); i++)
+	for (; last != m_holes.end() && last->first.first < end; ++last)
 	{
-		const uint64_t hole_begin = m_begin.At(i);
-		const uint64_t hole_end   = m_end.At(i);
-		if (hole_begin >= end || addr >= hole_end)
+		const auto [hole_begin, hole_end] = last->first;
+		if (addr >= hole_end)
 		{
 			continue;
 		}
@@ -164,30 +162,44 @@ LabelFenceReleaseStatus LabelFenceRegistry::ReleaseAllocation(uint64_t addr, uin
 		return LabelFenceReleaseStatus::NotFound;
 	}
 
-	for (int i = static_cast<int>(m_begin.Size()) - 1; i >= 0; i--)
+	bool widest_released = false;
+	for (auto it = first; it != last;)
 	{
-		if (m_begin.At(i) >= addr && m_end.At(i) <= end)
+		const auto [hole_begin, hole_end] = it->first;
+		if (hole_begin < addr || hole_end > end)
 		{
-			m_begin.RemoveAt(i);
-			m_end.RemoveAt(i);
-			m_completed_version.RemoveAt(i);
-			m_pending.RemoveAt(i);
+			++it;
+			continue;
+		}
+		widest_released = widest_released || hole_end - hole_begin == m_max_bytes;
+		it              = m_holes.erase(it);
+	}
+	if (widest_released)
+	{
+		m_max_bytes = 0;
+		for (const auto& [range, hole]: m_holes)
+		{
+			m_max_bytes = std::max(m_max_bytes, range.second - range.first);
 		}
 	}
 	return LabelFenceReleaseStatus::Released;
 }
 
-void LabelFenceRegistry::Snapshot(Vector<uint64_t>* begin, Vector<uint64_t>* end) const
+void LabelFenceRegistry::Snapshot(uint64_t addr, uint64_t bytes, Vector<uint64_t>* begin, Vector<uint64_t>* end) const
 {
 	EXIT_IF(begin == nullptr);
 	EXIT_IF(end == nullptr);
+	EXIT_IF(bytes > UINT64_MAX - addr);
 
 	begin->Clear();
 	end->Clear();
-	for (int i = 0; i < static_cast<int>(m_begin.Size()); i++)
+	for (auto it = FirstCandidate(addr); it != m_holes.end() && it->first.first < addr + bytes; ++it)
 	{
-		begin->Add(m_begin.At(i));
-		end->Add(m_end.At(i));
+		if (addr < it->first.second)
+		{
+			begin->Add(it->first.first);
+			end->Add(it->first.second);
+		}
 	}
 }
 
@@ -200,30 +212,33 @@ void LabelManager::RegisterFenceHole(uint64_t addr, uint64_t bytes)
 void LabelFenceRegistry::Complete(uint64_t addr, uint64_t bytes)
 {
 	EXIT_IF(bytes == 0 || bytes > UINT64_MAX - addr);
-	for (uint32_t i = 0; i < m_begin.Size(); ++i)
+	const auto hole = m_holes.find({addr, addr + bytes});
+	if (hole == m_holes.end())
 	{
-		if (m_begin.At(i) == addr && m_end.At(i) == addr + bytes)
-		{
-			EXIT_IF(m_pending.At(i) == 0 || m_version == UINT64_MAX);
-			m_pending[i]--;
-			m_completed_version[i] = ++m_version;
-			return;
-		}
+		EXIT("Completion of unregistered label destination\n");
 	}
-	EXIT("Completion of unregistered label destination\n");
+	EXIT_IF(hole->second.pending == 0 || m_version == UINT64_MAX);
+	hole->second.pending--;
+	hole->second.completed_version = ++m_version;
 }
 
-void LabelFenceRegistry::SnapshotExcluded(uint64_t acquired_version, Vector<uint64_t>* begin, Vector<uint64_t>* end) const
+void LabelFenceRegistry::SnapshotExcluded(uint64_t addr, uint64_t bytes, uint64_t acquired_version, Vector<uint64_t>* begin,
+                                          Vector<uint64_t>* end) const
 {
 	EXIT_IF(begin == nullptr || end == nullptr);
+	EXIT_IF(bytes > UINT64_MAX - addr);
 	begin->Clear();
 	end->Clear();
-	for (uint32_t i = 0; i < m_begin.Size(); ++i)
+	for (auto it = FirstCandidate(addr); it != m_holes.end() && it->first.first < addr + bytes; ++it)
 	{
-		if (m_pending.At(i) != 0 || m_completed_version.At(i) > acquired_version)
+		if (addr >= it->first.second)
 		{
-			begin->Add(m_begin.At(i));
-			end->Add(m_end.At(i));
+			continue;
+		}
+		if (it->second.pending != 0 || it->second.completed_version > acquired_version)
+		{
+			begin->Add(it->first.first);
+			end->Add(it->first.second);
 		}
 	}
 }
@@ -231,9 +246,9 @@ void LabelFenceRegistry::SnapshotExcluded(uint64_t acquired_version, Vector<uint
 bool LabelFenceRegistry::NeedsUpload(uint64_t addr, uint64_t bytes, uint64_t acquired_version) const
 {
 	EXIT_IF(bytes == 0 || bytes > UINT64_MAX - addr);
-	for (uint32_t i = 0; i < m_begin.Size(); ++i)
+	for (auto it = FirstCandidate(addr); it != m_holes.end() && it->first.first < addr + bytes; ++it)
 	{
-		if (m_begin.At(i) < addr + bytes && addr < m_end.At(i) && m_completed_version.At(i) > acquired_version)
+		if (addr < it->first.second && it->second.completed_version > acquired_version)
 		{
 			return true;
 		}
@@ -266,7 +281,7 @@ void LabelStoragePublication::Upload(const LabelFenceRegistry& registry, void* g
 	m_cpu_conflict = false;
 	Vector<uint64_t> begin;
 	Vector<uint64_t> end;
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(base, size, &begin, &end);
 	for (uint32_t i = 0; i < begin.Size(); ++i)
 	{
 		const auto first = std::max(base, begin.At(i));
@@ -315,10 +330,10 @@ GpuWritebackResult LabelStoragePublication::Copy(const LabelFenceRegistry& regis
 	Vector<uint64_t> end;
 	// Bulk page copies always retain the holes. Eligible words are published
 	// separately by CAS, making a concurrent CPU store authoritative as well.
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(base, size, &begin, &end);
 	auto result = page_cache->CopyChangedPages(guest_dst, gpu_src, size, begin.GetData(), end.GetData(),
 	                                           static_cast<int>(begin.Size()), notify_write, notify_opaque);
-	registry.SnapshotExcluded(m_version, &begin, &end);
+	registry.SnapshotExcluded(base, size, m_version, &begin, &end);
 	if (m_cpu_conflict) { return result; }
 	for (auto& fence: m_fences)
 	{
@@ -413,6 +428,20 @@ bool LabelStoragePublication::AdoptUniform(uint64_t guest_addr, uint64_t size, c
 		result->content_changed = true;
 		result->changed_pages   = (size + 4095u) / 4096u;
 	}
+	return true;
+}
+
+bool LabelStoragePublication::AdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+                                          GpuWritebackPageCache::NotifyWriteFunc notify_write, void* notify_opaque,
+                                          GpuWritebackResult* result)
+{
+	EXIT_IF(gpu_src == nullptr || page_cache == nullptr || notify_write == nullptr || result == nullptr || size == 0 ||
+	        guest_addr > UINT64_MAX - size);
+	if (!m_fences.empty() || m_cpu_conflict)
+	{
+		return false;
+	}
+	*result = page_cache->AdoptChangedPages(guest_addr, gpu_src, size, notify_write, notify_opaque);
 	return true;
 }
 
@@ -696,6 +725,15 @@ bool LabelManager::WriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, con
 	return publication->AdoptUniform(guest_addr, size, words, page_cache, notify_write, nullptr, result);
 }
 
+bool LabelManager::WriteBackAdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+                                        LabelStoragePublication* publication, GpuWritebackResult* result)
+{
+	EXIT_IF(publication == nullptr);
+	Core::LockGuard lock(m_mutex);
+	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { (void)GpuMemoryNotifyHostWrite(address, bytes); };
+	return publication->AdoptDevice(guest_addr, gpu_src, size, page_cache, notify_write, nullptr, result);
+}
+
 void LabelManager::StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
                                   GpuWritebackPageCache* page_cache, LabelStoragePublication* publication)
 {
@@ -708,6 +746,15 @@ bool LabelManager::StorageNeedsUpload(uint64_t addr, uint64_t size, const LabelS
 {
 	Core::LockGuard lock(m_mutex);
 	return publication.NeedsUpload(m_fence_holes, addr, size);
+}
+
+bool LabelManager::RangeHasFence(uint64_t addr, uint64_t size)
+{
+	Core::LockGuard  lock(m_mutex);
+	Vector<uint64_t> begin;
+	Vector<uint64_t> end;
+	m_fence_holes.Snapshot(addr, size, &begin, &end);
+	return !begin.IsEmpty();
 }
 
 void LabelManager::ReleaseMappedRange(uint64_t addr, uint64_t bytes)
@@ -904,7 +951,7 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label)
 
 	label->cp = buffer->GetParent();
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
 	if (vk_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_buffer == nullptr condition ignored (continuing)\n"); }
 
@@ -980,6 +1027,13 @@ bool LabelWriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWri
 	return g_label_manager->WriteBackAdoptUniform(guest_addr, size, words, page_cache, publication, result);
 }
 
+bool LabelWriteBackAdoptDevice(uint64_t guest_addr, const void* gpu_src, uint64_t size, GpuWritebackPageCache* page_cache,
+                               LabelStoragePublication* publication, GpuWritebackResult* result)
+{
+	EXIT_IF(g_label_manager == nullptr);
+	return g_label_manager->WriteBackAdoptDevice(guest_addr, gpu_src, size, page_cache, publication, result);
+}
+
 void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
                         GpuWritebackPageCache* page_cache, LabelStoragePublication* publication)
 {
@@ -991,6 +1045,12 @@ bool LabelStorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePub
 {
 	EXIT_IF(g_label_manager == nullptr);
 	return g_label_manager->StorageNeedsUpload(addr, size, publication);
+}
+
+bool LabelRangeHasFence(uint64_t addr, uint64_t size)
+{
+	EXIT_IF(g_label_manager == nullptr);
+	return g_label_manager->RangeHasFence(addr, size);
 }
 
 void LabelReleaseMappedRange(uint64_t addr, uint64_t bytes)

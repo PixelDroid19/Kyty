@@ -26,6 +26,7 @@
 #include <cstring>
 #include <ctime>
 #include <limits>
+#include <map>
 #include <mutex>
 
 #ifdef KYTY_EMU_ENABLED
@@ -61,6 +62,23 @@ thread_local Pthread g_pthread_self                   = nullptr;
 Pthread              g_pthread_main                   = nullptr;
 thread_local bool    g_pthread_key_destructors_active = false;
 PThreadContext*      g_pthread_context                = nullptr;
+
+static Core::Mutex        g_thread_error_mutex;
+static std::map<int, int> g_thread_error_addresses;
+
+int* GetThreadErrorAddr()
+{
+	const int       thread_id = Core::Thread::GetThreadIdUnique();
+	Core::LockGuard lock(g_thread_error_mutex);
+	return &g_thread_error_addresses[thread_id];
+}
+
+void ReleaseThreadErrorAddr()
+{
+	const int       thread_id = Core::Thread::GetThreadIdUnique();
+	Core::LockGuard lock(g_thread_error_mutex);
+	g_thread_error_addresses.erase(thread_id);
+}
 
 static void FreeDetachedThreads(void* /*arg*/)
 {
@@ -281,6 +299,7 @@ static void cleanup_thread(void* arg)
 	GuestRuntimePort::ReleaseThreadDynamicTls(thread->unique_id);
 
 	Core::mem_guest_thread_leave();
+	ReleaseThreadErrorAddr();
 
 	thread->almost_done = true;
 }
@@ -371,24 +390,29 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 		(*thread)->guest_stack_base = 0;
 		(*thread)->guest_stack_size = 0;
 
-			result = create_guest_stack((*thread)->attr);
-			if (result == OK)
-			{
-				(*thread)->guest_stack_base = reinterpret_cast<uint64_t>((*thread)->attr->stack_addr);
-				(*thread)->guest_stack_size = (*thread)->attr->stack_size;
-			}
-
-			if (result == OK)
-			{
-				result = pthread_create(&(*thread)->p, &(*thread)->attr->p, run_thread, *thread);
-				if (result != 0)
-				{
-					free_guest_stack((*thread)->attr);
-					(*thread)->guest_stack_base = 0;
-					(*thread)->guest_stack_size = 0;
-				}
-			}
+		result = create_guest_stack((*thread)->attr);
+		if (result == OK)
+		{
+			(*thread)->guest_stack_base = reinterpret_cast<uint64_t>((*thread)->attr->stack_addr);
+			(*thread)->guest_stack_size = (*thread)->attr->stack_size;
 		}
+
+		if (result == OK)
+		{
+			result = pthread_create(&(*thread)->p, &(*thread)->attr->p, run_thread, *thread);
+		}
+	}
+
+	if (result != 0)
+	{
+		free_guest_stack((*thread)->attr);
+		(*thread)->guest_stack_base = 0;
+		(*thread)->guest_stack_size = 0;
+		(*thread)->started          = false;
+		(*thread)->almost_done      = false;
+		(*thread)->detached         = false;
+		(*thread)->unique_id        = -1;
+	}
 
 	// Do not wait for the child to enter its guest entry. Real pthread_create
 	// returns as soon as the thread is constructed; the parent may still run
@@ -403,6 +427,10 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 	pthread_attr_dbg_print(attr);
 
 	PRINT_NAME_ENABLE(true);
+	if (result != 0)
+	{
+		(*thread)->free.store(true, std::memory_order_release);
+	}
 
 	if (result < 0)
 	{

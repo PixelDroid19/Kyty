@@ -326,6 +326,129 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Sequel platformer menu glyphs (2026-10-16; FIXED 2026-10-17). The root
+  cause was in the command buffer: copies replayed into a fresh, all-null
+  Agc command buffer were dropped because `IsValid` refused it before its
+  refill callback could run. The fix and the two stops it unmasked (GDS
+  `ds_write_b32`, DCC decompress on a display buffer) are in BRINGUP,
+  "Platformer pair: unreadable glyphs were dropped command-buffer packets".
+  The exclusions below still hold. The "Next step" at the end of this entry
+  is superseded.
+  The runtime 512x512 one-byte atlas keeps `0xcd` in every one of its
+  pages through gameplay (sampled every 32-64 binds, 90-150 s Intel runs).
+  `0xcd` is the engine's default fill for a new texture, so creation reaches
+  memory and every later update does not. Bounded temporary logs in the same
+  runs found no GPU writer of that atlas: the only `image_store` emitted in
+  the whole run targets a 1920x1080 four-byte image with identity DST_SEL;
+  only one compute dispatch binds any texture and none binds the atlas;
+  no compute storage buffer overlaps it; no colour target is placed on it;
+  no dispatch is skipped by the empty-store gate; and no DMA_DATA packet
+  (hardware or custom) is dropped. A store-selector fault would write the
+  atlas with wrong channels instead of leaving `0xcd`, so the DST_SEL lead
+  does not apply here. A later 150 s Intel run executed no DMA_DATA packet
+  of 64 KiB or more at all, so the engine does not move atlas data through
+  the command processor. The T# is not stale on the emulator side: pointer
+  tables are copied from guest memory on every draw
+  (`ShaderSnapshotGuestDescriptorTable`, `Shader.cpp`) and the per-program
+  resource memo holds analysis only, never descriptor values. The atlas
+  address stays the same for the whole run. The five graphics-library
+  imports the sequel resolves to nothing (UC register, indirect draw,
+  async-safe wait, NOP helpers) are not upload paths. The first insect
+  platformer binds a 512x512 one-byte atlas that is also entirely `0xcd`,
+  so one cause likely covers both. Its separate R8 copy compute (BRINGUP)
+  does not explain that atlas. Next step: follow the engine's CPU upload on
+  the guest side (the hardware-watch notes in BRINGUP), not another GPU
+  writer probe.
+- Card title: a hand card turns white for a moment when it gains focus
+  (2026-10-16, not a defect). Thirty captures 2 s apart while the route
+  stepped the hand focus showed the newly focused card blank white, then
+  with faded pips, then normal. The title's own UI definitions draw a
+  card-sized white rounded rectangle over a focused hand card and ease its
+  alpha from 1.5 to 0 in 0.2 s of real time; the card front and centre use
+  the same shader and tilt, and nothing else fades the front. Do not chase
+  it as a sampling, interpolation or blend bug.
+- Racing title attract scene looks dark (2026-10-14, not a defect). The
+  intro behind the title credits is a night track: lit windows, a dusk sky
+  and brown asphalt, while in-race daytime tracks look correct. The
+  publisher's own trailer of a night track shows the same palette; the mean
+  asphalt colour of a strict Intel capture (96, 80, 63) and of that footage
+  (98, 84, 52) agree within a few percent. Do not chase it as a lighting or
+  exposure bug without a reference of the same scene that differs.
+- Robot-platformer title screen save cards (2026-10-14, open). The two lower
+  save cards render black because the tiled light classifier writes an
+  empty list for every tile. Excluded so far: dispatch ordering, the
+  classifier's control-flow, append and lane-count translation, a
+  render-target/storage alias of its normal input, and the G-buffer exports,
+  write masks and depth-stencil state. The debug image dump does not submit
+  the recording in progress, so states read through it are from earlier in
+  the frame: the constant normal input and the black temporal
+  antialiasing and HDR images are unverified, not exclusions. The lighting
+  stencil plane is excluded: with d72457e5 and 55cd634d the lighting reads
+  the device stencil, cleared each frame and written by the G-buffer, and
+  the screen does not change. Details, fixes found on the
+  way and open defects: "Robot platformer: title screen save cards" in
+  `docs/BRINGUP.md`.
+- Racing-title shadows (2026-10-11, partly open). The two shadow-receiver
+  pixel shaders take one `image_sample_c_lz` against a 2048x1024 D16 atlas
+  (two 1024x1024 cascades chosen from squared camera distance) with a GEQUAL
+  reverse-Z, bilinear, clamp-to-edge sampler read from a descriptor table.
+  Before the instruction-pairing change in `docs/BRINGUP.md` they took the
+  manual filter-then-compare path. They now take hardware comparison. A dark
+  disc around the camera and curved bands on the road, plus stepped shadow
+  edges, appear the same on both paths in captures from the same route at a
+  1920 edge. Excluded: caster bias (offset -4, scale -40, 16-bit unorm DB
+  format, enabled front and back on every shadow draw), the `/16` slope scale,
+  the atlas viewports and scissors, and a per-frame copy of the atlas.
+  Earlier reference imagery shows hard polygonal shadows are part of the
+  title's art direction, so judge the stepped edges against a same-checkpoint
+  reference before treating them as a defect. The disc follows the camera.
+  Env-gated, temporary receiver rewrites (one strict 115-130 s run each,
+  captures every 4 s, translator output in a separate SPIR-V cache) localize
+  it:
+  - Forcing the comparison result to lit removes the disc, so it comes from
+    the shadow term.
+  - Marking samples whose atlas x is in the left half (the near cascade) gives
+    exactly the disc's outline, so the disc is the near-cascade region
+    reporting occlusion over bare road.
+  - On the manual path, no road sample reads a texel of exactly 1.0 or 0.0,
+    and no reference is at or below 0. The near half is neither left at a
+    clear value nor empty: it holds real road depth.
+  - Shading `1 + (reference - texel) * 2^n` shows no disc at n = 8, so any
+    shortfall is below 1/256. At n = 14 (about four D16 units), the rolling
+    start frames of that run show only genuine car shadows, yet other normal
+    runs show the disc at comparable frames.
+  - The defect is therefore a small, uniform, frame-dependent depth offset
+    across the near cascade, not a clear, content or comparison-path fault.
+  - The receiver picks the cascade from four nested camera spheres (index 0
+    to 3, 4 for none) and reads that cascade's light matrix as four records
+    at `cascade * 4` of a matrix buffer; a reference outside [0, 1] is lit.
+    The disc is the cascade-0 sphere.
+  - Excluded, frame mismatch (2026-10-11): in 460 receiver draws over one
+    strict run, every receiver had the near-cascade caster pass of the same
+    guest frame 4 to 6 submits earlier, and the receiver's cascade-0 matrix
+    equals the caster's light matrix mapped to the atlas half (x / 4 + 1/4,
+    -y / 2 + 1/2, z unchanged; linear terms within 1e-7, depth translation
+    identical at print precision). Every storage binding of both receivers
+    and of the caster vertex shader took the per-submit snapshot path, which
+    copies guest memory at record time and reuses an entry only on a
+    byte-exact `memcmp`, so the GPU reads the same values.
+  - Excluded, same strict route with captures every 4 s: caster bias times 8
+    (car shadows shrink, so the bias reaches Vulkan; the disc stays), depth
+    clamp instead of clipping for every pipeline, and `vkQueueWaitIdle` after
+    every submit (no cross-submit hazard). The near and far caster passes and
+    the receivers all use one host depth image at one guest address; the
+    receiver samples it directly (`depth-exact`, no copy). A census of every
+    draw into the atlas shows only the expected caster vertex shader with
+    depth test and write on (GEQUAL), plus 3-vertex draws that leave the atlas
+    bound with depth test and write off while sampling it; those bind it in
+    the read-only depth layout.
+  - Still open: the shortfall that the 8x bias does not cover is larger than
+    about 32 D16 units and below 1/256. Next, read back the receiver's
+    reference and texel for one road pixel inside the cascade-0 sphere in a
+    disc frame (one shader readback, not colour encoding), and compare the
+    interpolated world position against the caster's vertex for the same
+    road triangle.
+
 - Uninitialized constant-buffer V# in a Unity title's EUD (2026-10-04, open).
   A colour-grading pixel shader loads its constant-buffer V# with `s_load_dwordx4
   s[88:91], s[28:29], 160` and reads 208 bytes through it at immediate offsets
@@ -5479,6 +5602,45 @@ two jobs under the bounded zero-swap profile, and the existing short integration
 contract passes. Those final guard-only changes have not yet repeated the
 private strict route, so do not present them as a new runtime acceptance result.
 
+## Depth-only compute HTILE fill and stale shadow depth (2026-10-12)
+
+Symptom: in the racing title's race window the vehicle shadows were smeared
+across the track and the barrier, with shapes that trailed earlier caster
+positions instead of following the cars. The shadow atlas is a 2048x1024 D16
+target with HTILE, two 1024-wide cascades, reverse-Z `GEQUAL` casters and a
+zero depth clear value.
+
+Excluded first, one bounded strict run each:
+
+- Viewport depth transform of the atlas: `zscale` 1, `zoffset` 0, ZMIN/ZMAX
+  [0, 1] and DX clip space, so the Vulkan depth range is exactly [0, 1].
+- The engine's in-shader caster bias: the SPIR-V of the caster applies the
+  same normal and depth bias as the guest ISA, about 56 D16 units.
+- The hardware depth bias: constant -4 and slope -40/16 are translated
+  consistently by `ResolveDepthBias`.
+
+Cause: a temporary log at depth-target setup (removed) recorded both atlas
+incarnations with `htile=1`, the register depth clear disabled, and a pending
+`ComputeMetadataFill` event with a uniform zero pattern before the first bind
+of each frame. None was ever consumed. The consumer accepted that event only
+for a combined D32S8 target and discarded it otherwise, so the D16 atlas kept
+the previous frames' depth and `GEQUAL` rejected the new casters.
+
+Fix: a zero HTILE word marks the tile cleared in both the depth-only and the
+stencil-tiled layouts; the stencil-clear requirement only protects the stencil
+plane of a combined image. Whether a target has a stencil plane is now taken
+from the guest target (`ResolveEffectiveStencilFormat`), and a depth-only
+target translates the same proven event to `CLEAR`. The zero pattern, the
+bit-exact positive zero clear value, the storage identity, coverage and
+generation checks are unchanged, and combined targets other than D32S8 stay
+refused.
+
+Verification on Intel Arc A770, `Fixed` 1280x720 + RenderTargets: a strict
+run with a temporary consumption log (removed) consumed the atlas event every
+frame, and the race captures show a crisp shadow under each car instead of the
+stale smear on the track and barrier. The previously consumed D32S8 events
+are still consumed.
+
 ## Remaining producer-side color/material corruption
 
 The post-depth temporal sequence changes the diagnosis. Geometry no longer
@@ -5778,3 +5940,25 @@ sole guest was explicitly stopped. There is no matched-scene visual A/B or
 sustained gameplay/performance acceptance for this change. Resolve the
 source-EXEC/FI concern and validate the actual scene before publishing a
 complete DPP or visual-correctness claim.
+
+## Open defect: intermittent image-layout tracker fatal
+
+`set_image_layout` in `source/emulator/src/Graphics/Utils.cpp` (the `EXIT_IF`
+on `dst_image->layout != old_image_layout`) stopped two strict runs of the
+2D pixel-art exploration title during gameplay, about 42 s and 75 s after boot,
+on an Intel Arc A770 with a bounded scripted route. Several later runs of the
+same route and binary family passed 90-120 s without it, so the trigger is
+nondeterministic. The fatal block carries an empty stack trace, so the caller,
+the image and both layouts are not known.
+
+The check means a caller expected a tracked layout the image no longer had:
+either another recording path changed the single per-allocation tracker in
+between, or a caller derived its expected layout from stale state. It is
+independent of the audio changes made alongside it (it was seen before the NGS2
+reverb existed).
+
+Suggested direction: in a repeat run, gate a capped stderr record of the caller,
+image (format, extent, usage, array layers) and both layouts just before the
+check, then compare a failing run with a passing one; check whether two command
+buffers recorded against the same image disagree about the order in which the
+tracker was updated.

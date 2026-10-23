@@ -25,6 +25,7 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <limits>
 
@@ -44,7 +45,8 @@ static int SampledViewIndex(int view)
 
 static bool IsDepthSampledView(int view)
 {
-	return SampledViewIndex(view) == VulkanImage::VIEW_DEPTH_TEXTURE || SampledViewIndex(view) == VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY;
+	return SampledViewIndex(view) == VulkanImage::VIEW_DEPTH_TEXTURE || SampledViewIndex(view) == VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY ||
+	       SampledViewIndex(view) == VulkanImage::VIEW_STENCIL_TEXTURE;
 }
 
 // A depth plane sampled while the same image's stencil is a writable attachment
@@ -261,9 +263,11 @@ void DescriptorCache::CreatePool()
 
 	Pool pool {};
 
-	vkCreateDescriptorPool(gctx->device, &pool_info, nullptr, &pool.pool);
-
-	if (pool.pool == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pool.pool == nullptr condition ignored (continuing)\n"); }
+	if (const VkResult result = vkCreateDescriptorPool(gctx->device, &pool_info, nullptr, &pool.pool); result != VK_SUCCESS)
+	{
+		EXIT("vkCreateDescriptorPool failed: result=%d pools=%u live_sets=%u\n", static_cast<int>(result), static_cast<unsigned>(m_pools.Size()),
+		     m_live_sets);
+	}
 
 	pool.free           = true;
 	pool.next_free_pool = m_first_free_pool;
@@ -282,6 +286,16 @@ VulkanDescriptorSet* DescriptorCache::Allocate(Stage stage, const ShaderDescript
 	if (layout == VK_NULL_HANDLE)
 	{
 		return nullptr;
+	}
+	// The caller writes every binding of the layout, so a released set of the
+	// same layout serves without a pool allocation.
+	if (const auto recycled = m_recycled_sets.find(layout); recycled != m_recycled_sets.end() && !recycled->second.empty())
+	{
+		const auto position = recycled->second.back();
+		auto*      set      = *position;
+		recycled->second.pop_back();
+		m_recycled_order.erase(position);
+		return set;
 	}
 
 	auto* ret = new VulkanDescriptorSet;
@@ -352,6 +366,35 @@ void DescriptorCache::Free(VulkanDescriptorSet* set)
 	}
 
 	delete set;
+}
+
+void DescriptorCache::Recycle(VulkanDescriptorSet* set)
+{
+	EXIT_IF(set == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+	if (m_recycled_order.size() >= RECYCLED_SETS_MAX)
+	{
+		FreeOldestRecycled();
+	}
+	m_recycled_order.push_back(set);
+	m_recycled_sets[set->layout].push_back(std::prev(m_recycled_order.end()));
+}
+
+// The oldest released set is also the oldest of its layout, so it leads that
+// layout's positions.
+void DescriptorCache::FreeOldestRecycled()
+{
+	auto* oldest    = m_recycled_order.front();
+	auto  positions = m_recycled_sets.find(oldest->layout);
+	EXIT_IF(positions == m_recycled_sets.end() || positions->second.empty() || *positions->second.front() != oldest);
+	positions->second.pop_front();
+	if (positions->second.empty())
+	{
+		m_recycled_sets.erase(positions);
+	}
+	m_recycled_order.pop_front();
+	Free(oldest);
 }
 
 uint32_t DescriptorCache::CalcHash(const Set& s)
@@ -436,7 +479,7 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
+int DescriptorCache::FindSet(const Set& s)
 {
 	const auto* list = m_sets_map.Find(s.hash);
 	if (list != nullptr)
@@ -589,16 +632,16 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 				}
 				if (match)
 				{
-					return set.set;
+					return index;
 				}
 			}
 		}
 	}
-	return nullptr;
+	return -1;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
+VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
                                                     const int* textures2d_sampled_view, VulkanImage** textures2d_sampled_depth,
                                                     const int* textures2d_sampled_depth_view, VulkanImage** textures2d_array_sampled,
                                                     const int* textures2d_array_sampled_view, VulkanImage** textures3d_sampled,
@@ -612,6 +655,8 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
                                                     VulkanBuffer* vsharp_buffer, const ShaderBindResources& bind)
 {
 	KYTY_PROFILER_BLOCK("DescriptorCache::GetDescriptor::search");
+
+	TrimSets();
 
 	int        storage_buffers_num    = bind.storage_buffers.buffers_num;
 	const int  sampled_total = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_sampled_depth_num +
@@ -657,7 +702,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	int        sampled_descriptor_num = sampled_total;
 	int        textures2d_storage_num = bind.textures2D.textures2d_storage_num;
 	int        samplers_num           = bind.samplers.samplers_num;
-	int        gds_buffers_num        = bind.gds_pointers.pointers_num;
+	int        gds_buffers_num        = ShaderGdsBufferBound(bind.gds_pointers) ? 1 : 0;
 	const bool vsharp_uniform_buffer  = bind.vsharp_uniform_buffer;
 
 	EXIT_IF(storage_buffers_num < 0 || storage_buffers_num > BUFFERS_MAX);
@@ -753,9 +798,10 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	}
 	nset.hash = CalcHash(nset);
 
-	if (auto* f = FindSet(nset); f != nullptr)
+	if (const int found = FindSet(nset); found != -1)
 	{
-		return f;
+		RecordSetUse(found, buffer);
+		return m_sets[found].set;
 	}
 
 	KYTY_PROFILER_END_BLOCK;
@@ -1118,8 +1164,179 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	{
 		ids.Add(index);
 	}
+	IndexSet(index);
+	m_live_sets++;
+	RecordSetUse(index, buffer);
 
 	return new_set;
+}
+
+void DescriptorCache::CollectResourceIds(const Set& s, std::vector<uint64_t>* ids)
+{
+	EXIT_IF(ids == nullptr);
+	ids->clear();
+	const auto add = [ids](const uint64_t* first, int num) { ids->insert(ids->end(), first, first + num); };
+	add(s.textures2d_sampled_id, s.textures2d_sampled_num);
+	add(s.textures2d_sampled_depth_id, s.textures2d_sampled_depth_num);
+	add(s.textures2d_array_sampled_id, s.textures2d_array_sampled_num);
+	add(s.textures3d_sampled_id, s.textures3d_sampled_num);
+	add(s.textures2d_sampled_uint_id, s.textures2d_sampled_uint_num);
+	add(s.textures2d_array_sampled_uint_id, s.textures2d_array_sampled_uint_num);
+	add(s.textures3d_sampled_uint_id, s.textures3d_sampled_uint_num);
+	add(s.textures2d_storage_id, s.textures2d_storage_num);
+	for (int i = 0; i < s.storage_buffers_num; i++)
+	{
+		ids->push_back(s.storage_buffers[i].unique_id);
+	}
+	if (s.vsharp_uniform_buffer)
+	{
+		ids->push_back(s.vsharp_uniform_buffer_key.unique_id);
+	}
+	std::sort(ids->begin(), ids->end());
+	ids->erase(std::unique(ids->begin(), ids->end()), ids->end());
+}
+
+void DescriptorCache::IndexSet(int index)
+{
+	CollectResourceIds(m_sets.At(index), &m_resource_ids);
+	auto& set = m_sets[index];
+	set.resources.clear();
+	for (const auto id: m_resource_ids)
+	{
+		auto& references = m_sets_by_resource[id];
+		set.resources.push_back({id, static_cast<uint32_t>(references.size())});
+		references.push_back({index, static_cast<uint32_t>(set.resources.size() - 1u)});
+	}
+}
+
+VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
+{
+	auto& set = m_sets[index];
+	EXIT_IF(set.set == nullptr);
+	for (const auto& resource: set.resources)
+	{
+		auto it = m_sets_by_resource.find(resource.unique_id);
+		EXIT_IF(it == m_sets_by_resource.end() || resource.position >= it->second.size());
+		auto&      references = it->second;
+		const auto moved      = references.back();
+		references[resource.position] = moved;
+		m_sets[moved.set].resources[moved.slot].position = resource.position;
+		references.pop_back();
+		if (references.empty())
+		{
+			m_sets_by_resource.erase(it);
+		}
+	}
+	set.resources.clear();
+	auto* released    = set.set;
+	set.set           = nullptr;
+	set.next_free_set = m_first_free_set;
+	m_first_free_set  = index;
+	auto& hash_ids    = m_sets_map[set.hash];
+	hash_ids.Remove(index);
+	if (hash_ids.IsEmpty())
+	{
+		m_sets_map.Remove(set.hash);
+	}
+	EXIT_IF(m_live_sets == 0);
+	m_live_sets--;
+	return released;
+}
+
+// A resource can be deleted while a submission that bound one of its sets is
+// still pending; only a set with every recorded use complete may be rewritten.
+void DescriptorCache::ReleaseSet(int index)
+{
+	const auto& set      = m_sets.At(index);
+	const bool  complete = !set.untracked_use && GpuMemorySubmissionsComplete(set.uses.Dependencies());
+	auto*       released = UnindexSet(index);
+	if (complete)
+	{
+		Recycle(released);
+		return;
+	}
+	Free(released);
+}
+
+void DescriptorCache::RecordSetUse(int index, CommandBuffer* buffer)
+{
+	auto& set    = m_sets[index];
+	set.last_use = ++m_use_clock;
+	SubmissionId submission {};
+	if (buffer == nullptr || !buffer->GetSubmissionId(&submission) || set.uses.RecordUse(submission) != GpuDeferredDeletionResult::Success)
+	{
+		set.untracked_use = true;
+	}
+}
+
+// Sets are otherwise released only with a resource they reference, so long-lived
+// resources bound in many combinations grow the cache until pool allocation fails.
+// At the live limit the least recently used tracked sets are unindexed at once and
+// freed after every submission that recorded them completes.
+void DescriptorCache::TrimSets()
+{
+	struct Retired
+	{
+		std::vector<SubmissionId> submissions;
+		VulkanDescriptorSet*      set;
+	};
+	std::vector<Retired> retired;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (m_live_sets < LIVE_SETS_MAX)
+		{
+			return;
+		}
+		std::vector<std::pair<uint64_t, int>> candidates;
+		for (int index = 0; index < static_cast<int>(m_sets.Size()); index++)
+		{
+			const auto& set = m_sets.At(index);
+			if (set.set != nullptr && !set.untracked_use && !set.uses.Dependencies().empty())
+			{
+				candidates.emplace_back(set.last_use, index);
+			}
+		}
+		const size_t count = std::min<size_t>(candidates.size(), TRIM_SETS);
+		std::partial_sort(candidates.begin(), candidates.begin() + static_cast<ptrdiff_t>(count), candidates.end());
+		for (size_t i = 0; i < count; i++)
+		{
+			const int index = candidates[i].second;
+			retired.push_back({m_sets.At(index).uses.Dependencies(), UnindexSet(index)});
+		}
+	}
+	// The deletion queue may run a ready task synchronously, and resource deletion
+	// enters this cache under the GPU memory lock: enqueue without holding m_mutex.
+	for (auto& entry: retired)
+	{
+		auto* set = entry.set;
+		GpuMemoryDeferUntilSubmissionsComplete(std::move(entry.submissions), [this, set]() { Recycle(set); });
+	}
+}
+
+// Candidates come from the reverse index; `references` keeps each caller's
+// exact ownership rule. Sets are released in index order.
+template <typename References>
+void DescriptorCache::FreeSetsReferencing(uint64_t unique_id, References references)
+{
+	const auto it = m_sets_by_resource.find(unique_id);
+	if (it == m_sets_by_resource.end())
+	{
+		return;
+	}
+	std::vector<int> candidates;
+	candidates.reserve(it->second.size());
+	for (const auto& reference: it->second)
+	{
+		candidates.push_back(reference.set);
+	}
+	std::sort(candidates.begin(), candidates.end());
+	for (const int index: candidates)
+	{
+		if (references(m_sets.At(index)))
+		{
+			ReleaseSet(index);
+		}
+	}
 }
 
 void DescriptorCache::FreeDescriptor(VulkanBuffer* buffer)
@@ -1133,27 +1350,11 @@ void DescriptorCache::FreeDescriptor(VulkanBuffer* buffer)
 	}
 
 	Core::LockGuard lock(m_mutex);
-
-	int index = 0;
-	for (auto& set: m_sets)
-	{
-		if (set.set != nullptr &&
-		    VulkanDescriptorReferencesBuffer(set.storage_buffers, set.storage_buffers_num, set.vsharp_uniform_buffer,
-		                                     set.vsharp_uniform_buffer_key, buffer->memory.unique_id))
-		{
-			Free(set.set);
-			set.set           = nullptr;
-			set.next_free_set = m_first_free_set;
-			m_first_free_set  = index;
-			auto& ids         = m_sets_map[set.hash];
-			ids.Remove(index);
-			if (ids.IsEmpty())
-			{
-				m_sets_map.Remove(set.hash);
-			}
-		}
-		index++;
-	}
+	const uint64_t  unique_id = buffer->memory.unique_id;
+	FreeSetsReferencing(unique_id, [unique_id](const Set& set) {
+		return VulkanDescriptorReferencesBuffer(set.storage_buffers, set.storage_buffers_num, set.vsharp_uniform_buffer,
+		                                        set.vsharp_uniform_buffer_key, unique_id);
+	});
 }
 
 void DescriptorCache::FreeDescriptor(VulkanImage* image)
@@ -1163,67 +1364,71 @@ void DescriptorCache::FreeDescriptor(VulkanImage* image)
 	EXIT_IF(image == nullptr);
 
 	Core::LockGuard lock(m_mutex);
+	const uint64_t  unique_id = image->memory.unique_id;
+	FreeSetsReferencing(unique_id, [unique_id](const Set& set) {
+		const auto references = [unique_id](const uint64_t* ids, int num) { return std::find(ids, ids + num, unique_id) != ids + num; };
+		return references(set.textures2d_sampled_id, set.textures2d_sampled_num) ||
+		       references(set.textures2d_array_sampled_id, set.textures2d_array_sampled_num) ||
+		       references(set.textures3d_sampled_id, set.textures3d_sampled_num) ||
+		       references(set.textures2d_sampled_uint_id, set.textures2d_sampled_uint_num) ||
+		       references(set.textures2d_array_sampled_uint_id, set.textures2d_array_sampled_uint_num) ||
+		       references(set.textures3d_sampled_uint_id, set.textures3d_sampled_uint_num) ||
+		       references(set.textures2d_storage_id, set.textures2d_storage_num);
+	});
+}
 
-	int index = 0;
+void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
+{
+	EXIT_IF(ctx == nullptr || ctx->device == VK_NULL_HANDLE);
+	Core::LockGuard lock(m_mutex);
+
+	for (auto& pool: m_pools)
+	{
+		if (pool.pool != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorPool(ctx->device, pool.pool, nullptr);
+			pool.pool = VK_NULL_HANDLE;
+		}
+	}
 	for (auto& set: m_sets)
 	{
-		if (set.set != nullptr)
-		{
-			bool references_image = false;
-			for (int i = 0; i < set.textures2d_sampled_num; i++)
-			{
-				if (set.textures2d_sampled_id[i] == image->memory.unique_id)
-				{
-					references_image = true;
-					break;
-				}
-			}
-			for (int i = 0; !references_image && i < set.textures2d_array_sampled_num; i++)
-			{
-				references_image = set.textures2d_array_sampled_id[i] == image->memory.unique_id;
-			}
-			for (int i = 0; !references_image && i < set.textures3d_sampled_num; i++)
-			{
-				references_image = set.textures3d_sampled_id[i] == image->memory.unique_id;
-			}
-			for (int i = 0; !references_image && i < set.textures2d_sampled_uint_num; i++)
-			{
-				references_image = set.textures2d_sampled_uint_id[i] == image->memory.unique_id;
-			}
-			for (int i = 0; !references_image && i < set.textures2d_array_sampled_uint_num; i++)
-			{
-				references_image = set.textures2d_array_sampled_uint_id[i] == image->memory.unique_id;
-			}
-			for (int i = 0; !references_image && i < set.textures3d_sampled_uint_num; i++)
-			{
-				references_image = set.textures3d_sampled_uint_id[i] == image->memory.unique_id;
-			}
-			for (int i = 0; !references_image && i < set.textures2d_storage_num; i++)
-			{
-				references_image = set.textures2d_storage_id[i] == image->memory.unique_id;
-			}
-			if (references_image)
-			{
-				Free(set.set);
-				set.set           = nullptr;
-				set.next_free_set = m_first_free_set;
-				m_first_free_set  = index;
-				auto& ids         = m_sets_map[set.hash];
-				ids.Remove(index);
-				if (ids.IsEmpty())
-				{
-					m_sets_map.Remove(set.hash);
-				}
-			}
-		}
-		index++;
+		delete set.set;
+		set.set = nullptr;
 	}
+	for (auto* set: m_recycled_order)
+	{
+		delete set;
+	}
+	m_recycled_order.clear();
+	m_recycled_sets.clear();
+	for (const auto& [key, layout]: m_descriptor_set_layouts)
+	{
+		(void)key;
+		if (layout != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorSetLayout(ctx->device, layout, nullptr);
+		}
+	}
+
+	m_descriptor_set_layouts.clear();
+	m_sets_map.Clear();
+	m_sets_by_resource.clear();
+	m_sets.Clear();
+	m_pools.Clear();
+	m_first_free_set  = -1;
+	m_first_free_pool = -1;
+	m_live_sets       = 0;
 }
 
 VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind)
 {
 	ShaderDescriptorLayoutPlan plan {};
 	EXIT_IF(!ShaderBuildDescriptorLayoutPlan(bind, &plan));
+	return GetDescriptorSetLayout(stage, plan);
+}
+
+VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan)
+{
 	Core::LockGuard lock(m_mutex);
 	return GetOrCreateLayout(stage, plan);
 }
@@ -1288,12 +1493,29 @@ static bool get_stencil_op(VkStencilOp* f, uint32_t* ref, uint8_t op, uint8_t te
 			vk = VK_STENCIL_OP_REPLACE;
 			r  = testval;
 			break;                                                /* ReplaceTest    */
-		case 0x04: vk = VK_STENCIL_OP_REPLACE; break;             /* ReplaceOp      */
-		case 0x05: vk = VK_STENCIL_OP_INCREMENT_AND_CLAMP; break; /* AddClamp       */
-		case 0x06: vk = VK_STENCIL_OP_DECREMENT_AND_CLAMP; break; /* SubClamp       */
-		case 0x07: vk = VK_STENCIL_OP_INVERT; break;              /* Invert         */
-		case 0x08: vk = VK_STENCIL_OP_INCREMENT_AND_WRAP; break;  /* AddWrap        */
-		case 0x09: vk = VK_STENCIL_OP_DECREMENT_AND_WRAP; break;  /* SubWrap        */
+		case 0x04: vk = VK_STENCIL_OP_REPLACE; break; /* ReplaceOp      */
+		// Vulkan's increment, decrement and invert ops never read the reference,
+		// so they must not displace the compare value (STENCILTESTVAL).
+		case 0x05:
+			vk      = VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+			use_ref = false;
+			break; /* AddClamp       */
+		case 0x06:
+			vk      = VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+			use_ref = false;
+			break; /* SubClamp       */
+		case 0x07:
+			vk      = VK_STENCIL_OP_INVERT;
+			use_ref = false;
+			break; /* Invert         */
+		case 0x08:
+			vk      = VK_STENCIL_OP_INCREMENT_AND_WRAP;
+			use_ref = false;
+			break; /* AddWrap        */
+		case 0x09:
+			vk      = VK_STENCIL_OP_DECREMENT_AND_WRAP;
+			use_ref = false;
+			break; /* SubWrap        */
 		case 0x0a:                                                /* And            */
 		case 0x0b:                                                /* Or             */
 		case 0x0c:                                                /* Xor            */
@@ -1346,7 +1568,9 @@ Vector<RenderTextureVulkanImage*> FindRenderTexture(CommandBuffer* buffer, uint6
 
 	Vector<RenderTextureVulkanImage*> ret;
 
-	auto objects = GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::RenderTexture, exact, false);
+	// A recycled range can hold several exact aliases of other formats and extents; callers pick among all of them.
+	auto objects = exact ? GpuMemoryFindEqualObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::RenderTexture)
+	                     : GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::RenderTexture, false, false);
 
 	for (const auto& obj: objects)
 	{
@@ -1359,14 +1583,33 @@ Vector<RenderTextureVulkanImage*> FindRenderTexture(CommandBuffer* buffer, uint6
 	return ret;
 }
 
-Vector<StorageTextureVulkanImage*> FindStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact)
+StorageTextureVulkanImage* FindLatestStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size)
+{
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(buffer == nullptr);
+
+	// Guest memory is untyped: views of a recycled range in other formats keep the texels of their own last
+	// write, and only the view of the latest storage write holds the bytes the guest wrote there.
+	StorageTextureVulkanImage* latest = nullptr;
+	for (const auto& obj: GpuMemoryFindEqualObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::StorageTexture))
+	{
+		auto* image = static_cast<StorageTextureVulkanImage*>(obj.obj);
+		if (latest == nullptr || image->storage_write_stamp > latest->storage_write_stamp)
+		{
+			latest = image;
+		}
+	}
+	return latest;
+}
+
+Vector<StorageTextureVulkanImage*> FindOverlappingStorageTextures(CommandBuffer* buffer, uint64_t vaddr, uint64_t size)
 {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer == nullptr);
 
 	Vector<StorageTextureVulkanImage*> ret;
 
-	auto objects = GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::StorageTexture, exact, false);
+	auto objects = GpuMemoryFindObjectsForSubmission(buffer, vaddr, size, GpuMemoryObjectType::StorageTexture, false, false);
 
 	for (const auto& obj: objects)
 	{
@@ -1377,6 +1620,25 @@ Vector<StorageTextureVulkanImage*> FindStorageTexture(CommandBuffer* buffer, uin
 	}
 
 	return ret;
+}
+
+// The depth-stencil image whose stencil plane is exactly [vaddr, vaddr + size) and spans width x height texels, or nullptr.
+DepthStencilVulkanImage* FindStencilPlane(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, uint32_t width, uint32_t height)
+{
+	EXIT_IF(buffer == nullptr);
+	DepthStencilVulkanImage* found = nullptr;
+	for (const auto& object: GpuMemoryFindObjectsWithRangeForSubmission(buffer, vaddr, size, GpuMemoryObjectType::DepthStencilBuffer))
+	{
+		auto*      image  = static_cast<DepthStencilVulkanImage*>(object.obj);
+		const auto extent = image->GetGuestExtent();
+		if (image->stencil_vaddr != vaddr || extent.width != width || extent.height != height)
+		{
+			continue;
+		}
+		EXIT_IF(found != nullptr && found != image);
+		found = image;
+	}
+	return found;
 }
 
 Vector<DepthStencilVulkanImage*> FindDepthStencil(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact)

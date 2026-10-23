@@ -28,10 +28,19 @@ struct ShaderFragmentMaskFlow
 	// of a validated whole-quad wrapper (save EXEC, S_WQM_B64 EXEC, restore EXEC) are
 	// closed; a lone S_WQM_B64 widening EXEC is not.
 	std::vector<bool> closed_exec_write;
+	// Per instruction, only when lane_local, for the lanes of the launched quads (the host invocations):
+	// before it, EXEC holds no other lane (exec_in_quads), or exactly all of them (exec_full).
+	std::vector<bool> exec_in_quads;
+	std::vector<bool> exec_full;
+	// Per instruction, only when lane_local: a V_CNDMASK_B32 whose condition holds only lanes of the entry
+	// EXEC, so no helper lane and no lane outside the launched quads.
+	std::vector<bool> live_condition;
+	// The guest wave width the proof was made for (32 or 64).
+	uint32_t guest_wave_size = 64;
 };
 
 // Flow-sensitive mask provenance for a fragment program (S_ENDPGM last, no memory write
-// anywhere). Backward branches are loops; the states are iterated to a fixpoint.
+// after the launch EXEC ends, see ShaderLaunchExecEnd). Backward branches are loops; the states are iterated to a fixpoint.
 //
 // Under the host model each fragment invocation stands for one guest lane of an
 // existing quad, so EXEC and every mask derived from it is one bit per invocation.
@@ -55,7 +64,9 @@ struct ShaderFragmentMaskFlow
 //  - Derivative texture fetches are refused inside a divergent region or divergent loop.
 //  - S_WQM_B64 is the identity on an existing quad lane; it is only closed inside a
 //    validated save/widen/restore bracket with no export and no save-area write.
-[[nodiscard]] ShaderFragmentMaskFlow ShaderAnalyzeFragmentMaskFlow(const ShaderCode& code);
+//  - In a guest wave32 (guest_wave_size 32) a VALU lane mask is one dword (ShaderWave32LaneMasks): a compare
+//    leaves the upper SGPR of its destination pair, which the program may hold a number in.
+[[nodiscard]] ShaderFragmentMaskFlow ShaderAnalyzeFragmentMaskFlow(const ShaderCode& code, uint32_t guest_wave_size);
 
 } // namespace Kyty::Libs::Graphics
 

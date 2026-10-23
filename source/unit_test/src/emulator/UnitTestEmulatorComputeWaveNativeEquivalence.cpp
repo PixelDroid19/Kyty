@@ -81,6 +81,51 @@ TEST(EmulatorComputeWaveNativeEquivalence, AdmitsScalarWriteDeadAtJoin)
 	ExpectNativeEquivalence({kCmpNeVcc, kSaveexecVcc, kExeczSkip1, kMovS20Seven, kRestoreExec, kEnd}, true, 0, "");
 }
 
+// ADD_TID spill slots: LDS[M0[15:0] + offset + TID*4].
+static constexpr uint32_t kSaveM0       = 0xbe88037cu; // s_mov_b32 s8, m0
+static constexpr uint32_t kM0Zero       = 0xb07c0000u; // s_movk_i32 m0, 0
+static constexpr uint32_t kRestoreM0    = 0xbefc0308u; // s_mov_b32 m0, s8
+static constexpr uint32_t kAddtidWrite  = 0xdac00000u; // ds_write_addtid_b32 v1
+static constexpr uint32_t kAddtidWrite4 = 0xdac00004u; // ds_write_addtid_b32 v1 offset:4
+static constexpr uint32_t kAddtidData1  = 0x00000100u;
+static constexpr uint32_t kAddtidRead   = 0xdac40000u; // ds_read_addtid_b32 v2
+static constexpr uint32_t kAddtidDst2   = 0x02000000u;
+static constexpr uint32_t kExeczSkip7   = 0xbf880007u; // s_cbranch_execz +7 dwords
+
+TEST(EmulatorComputeWaveNativeEquivalence, AdmitsAddtidSpillWithM0DeadAtJoin)
+{
+	ExpectNativeEquivalence({kCmpNeVcc, kSaveexecVcc, kExeczSkip7, kSaveM0, kM0Zero, kAddtidWrite, kAddtidData1, kAddtidRead, kAddtidDst2,
+	                         kRestoreM0, kRestoreExec, kEnd},
+	                        true, 0, "");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, AdmitsM0SavedAndRestoredAfterJoin)
+{
+	// After the join M0 only flows into a save/restore pair around an ADD_TID access that uses its own M0.
+	ExpectNativeEquivalence({kCmpNeVcc, kSaveexecVcc, kExeczSkip1, kM0Zero, kRestoreExec, kSaveM0, kM0Zero, kAddtidWrite, kAddtidData1,
+	                         kAddtidRead, kAddtidDst2, kRestoreM0, kEnd},
+	                        true, 0, "");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsM0WriteLiveAtJoin)
+{
+	ExpectNativeEquivalence({kM0Zero, kAddtidWrite, kAddtidData1, kCmpNeVcc, kSaveexecVcc, kExeczSkip1, kM0Zero, kRestoreExec, kAddtidRead,
+	                         kAddtidDst2, kEnd},
+	                        false, 0x14u, "live at its join");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsGdsWrite)
+{
+	// ds_write_b32 v0, v1 gds
+	ExpectNativeEquivalence({kM0Zero, 0xd8360000u, 0x00000100u, kEnd}, false, 0x4u, "GDS access");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsAddtidPlanesReachingAnotherLane)
+{
+	ExpectNativeEquivalence({kM0Zero, kAddtidWrite, kAddtidData1, kAddtidWrite4, kAddtidData1, kAddtidRead, kAddtidDst2, kEnd}, false, 0x4u,
+	                        "lane-private plane");
+}
+
 TEST(EmulatorComputeWaveNativeEquivalence, RejectsMaskReadAsData)
 {
 	ExpectNativeEquivalence({kCmpNeVcc, kMovV1VccLo, kEnd}, false, 0x4u, "read as uniform data");
@@ -110,6 +155,25 @@ static constexpr uint32_t kCmpV1Below8 = 0x7d880288u; // v_cmp_gt_u32 vcc, 8, v1
 static constexpr uint32_t kCmpV0V1     = 0x7d880300u; // v_cmp_gt_u32 vcc, v0, v1 (v0 is a per-lane input)
 static constexpr uint32_t kBackVccnz3  = 0xbf87fffdu; // s_cbranch_vccnz -3 dwords
 static constexpr uint32_t kBackExecz3  = 0xbf88fffdu; // s_cbranch_execz -3 dwords
+static constexpr uint32_t kCmpEqVccHiFalse  = 0xd4c2006bu; // v_cmp_eq_u32_e64 vcc_hi, 0, 1 (uniform zero in the high word)
+static constexpr uint32_t kCmpEqVccHiSources = 0x00010280u; // inline 0, inline 1
+
+TEST(EmulatorComputeWaveNativeEquivalence, AdmitsLoopWhenBothVccWordsStayUniform)
+{
+	// The ordinary VOPC comparison defines both VCC words uniformly. The VOP3
+	// comparison then rewrites only VCC_HI, also uniformly, and the loop branch
+	// still observes a uniform 64-bit pair.
+	ExpectNativeEquivalence({kExecFull, kMovV1Zero, kCmpV1Below8, kCmpEqVccHiFalse, kCmpEqVccHiSources, kBackVccnz3, kEnd}, true, 0, "");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsLoopWhenOnlyVccHiIsUniform)
+{
+	// The first compare leaves VCC_LO varying by lane. This VOP3 compare writes
+	// only the high dword and makes that dword uniformly zero. A VCC branch reads
+	// both words, so different host subgroups can still disagree on this back edge.
+	ExpectNativeEquivalence({kExecFull, kCmpNeVcc, kCmpEqVccHiFalse, kCmpEqVccHiSources, kBackVccnz3, kEnd}, false, 0x10u,
+	                        "wave-uniform");
+}
 
 TEST(EmulatorComputeWaveNativeEquivalence, AdmitsALoopOnAWaveUniformCounter)
 {
@@ -140,6 +204,65 @@ TEST(EmulatorComputeWaveNativeEquivalence, StillRejectsALoopExitedThroughExec)
 {
 	// A lane that has left the loop is only kept idle by an EXEC narrowing this proof does not model.
 	ExpectNativeEquivalence({kExecFull, kMovV1Zero, kAddV1One, kCmpV1Below8, kBackExecz3, kEnd}, false, 0x10u, "not a forward region");
+}
+
+// READFIRSTLANE of a value every lane shares reads the same word from any lane. A 2D image load
+// reads x and y only (DIM matches the T# type), so the per-lane VGPR after them is not an input.
+static constexpr uint32_t kMovV2Zero      = 0x7e040280u; // v_mov_b32 v2, 0
+static constexpr uint32_t kMovV3Zero      = 0x7e060280u; // v_mov_b32 v3, 0
+static constexpr uint32_t kMovV3V0        = 0x7e060100u; // v_mov_b32 v3, v0 (v0 is a per-lane input)
+static constexpr uint32_t kMovV4V0        = 0x7e080100u; // v_mov_b32 v4, v0
+static constexpr uint32_t kImageLoad2d    = 0xf0000108u; // image_load v0, v[2:4], s[0:7] dmask:0x1 dim:2D
+static constexpr uint32_t kImageLoadAddr  = 0x00000002u;
+static constexpr uint32_t kBufferVccLo    = 0xf4201a88u; // s_buffer_load_dword vcc_lo, s[16:19], null
+static constexpr uint32_t kNullOffset     = 0xfa000000u;
+static constexpr uint32_t kWaitLgkm0      = 0xbf8cc07fu; // s_waitcnt lgkmcnt(0)
+static constexpr uint32_t kMulV0VccLo     = 0x1000006au; // v_mul_f32 v0, vcc_lo, v0
+static constexpr uint32_t kFirstlaneV0    = 0x7e000500u; // v_readfirstlane_b32 s0, v0
+
+static constexpr uint32_t kMovV1Dpp        = 0x7e0202fau; // v_mov_b32_dpp v1, v0 ...
+static constexpr uint32_t kQuadPermBound   = 0xff08b100u; // quad_perm:[1,0,3,2] bound_ctrl:1
+static constexpr uint32_t kQuadPermUnbound = 0xff00b100u; // quad_perm:[1,0,3,2] bound_ctrl:0
+static constexpr uint32_t kRowShrBound     = 0xff091100u; // row_shr:1 bound_ctrl:1
+
+TEST(EmulatorComputeWaveNativeEquivalence, AdmitsABoundQuadPermuteAsAQuadRead)
+{
+	static constexpr uint32_t kWords[] = {kMovV1Dpp, kQuadPermBound, kEnd};
+	ASSERT_EXIT(
+	    {
+		    InitializeShaderConfig();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(kWords, sizeof(kWords), &code))
+		    {
+			    std::_Exit(2);
+		    }
+		    const auto result = ShaderAnalyzeComputeWaveNativeEquivalence(code);
+		    std::_Exit(result.supported && result.reads_quad_lanes ? 0 : 3);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsAnUnboundQuadPermute)
+{
+	ExpectNativeEquivalence({kMovV1Dpp, kQuadPermUnbound, kEnd}, false, 0x0u, "not representable per lane");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsARowShift)
+{
+	ExpectNativeEquivalence({kMovV1Dpp, kRowShrBound, kEnd}, false, 0x0u, "not representable per lane");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, AdmitsReadfirstlaneOfAUniformImageLoad)
+{
+	ExpectNativeEquivalence({kMovV2Zero, kMovV3Zero, kMovV4V0, kImageLoad2d, kImageLoadAddr, kBufferVccLo, kNullOffset, kWaitLgkm0,
+	                         kMulV0VccLo, kFirstlaneV0, kEnd},
+	                        true, 0, "");
+}
+
+TEST(EmulatorComputeWaveNativeEquivalence, RejectsReadfirstlaneOfAPerLaneImageCoordinate)
+{
+	ExpectNativeEquivalence({kMovV2Zero, kMovV3V0, kImageLoad2d, kImageLoadAddr, kFirstlaneV0, kEnd}, false, 0x10u, "another lane");
 }
 
 UT_END();

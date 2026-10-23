@@ -138,9 +138,27 @@ public:
 			if (found == values.end()) { Fail("undefined id " + id); }
 			return found->second;
 		};
-		for (const auto& t: m_body)
+		// Structured selections (the EXEC guard around every store) are followed
+		// linearly: a branch skips forward to its target label.
+		const auto skip_to_label = [&](size_t from, const std::string& label) {
+			for (size_t at = from; at < m_body.size(); ++at)
+			{
+				if (m_body[at].size() >= 3u && m_body[at][0] == label && m_body[at][2] == "OpLabel") { return at; }
+			}
+			Fail("undefined label " + label);
+		};
+		for (size_t index = 0; index < m_body.size(); ++index)
 		{
+			const auto& t = m_body[index];
 			if (t[0] == "OpStore") { values[t.at(1)] = value(t.at(2)); continue; }
+			if (t[0] == "OpSelectionMerge") { continue; }
+			if (t[0] == "OpBranch") { index = skip_to_label(index, t.at(1)); continue; }
+			if (t[0] == "OpBranchConditional")
+			{
+				index = skip_to_label(index, t.at(value(t.at(1)).words[0] != 0u ? 2 : 3));
+				continue;
+			}
+			if (t.size() >= 3u && t[2] == "OpLabel") { continue; }
 			if (t.size() < 4u || t[1] != "=") { Fail("unexpected instruction " + t[0]); }
 			const auto& op = t[2];
 			const auto arg = [&](size_t i) { return value(t.at(i)).words[0]; };
@@ -204,7 +222,15 @@ public:
 			else if (op == "OpIsInf") { r = std::isinf(fp(4)); }
 			else if (op == "OpConvertUToF") { r = Bits(static_cast<float>(arg(4))); }
 			else if (op == "OpConvertSToF") { r = Bits(static_cast<float>(static_cast<int32_t>(arg(4)))); }
-			else if (op == "OpConvertFToS")
+			else if (op == "OpConvertFToU")
+			{
+				const double input = fp(4);
+				if (!std::isfinite(input) || input < 0.0 || input >= 4294967296.0)
+				{
+					Fail("undefined conversion");
+				}
+				r = static_cast<uint32_t>(input);
+			} else if (op == "OpConvertFToS")
 			{
 				if (!std::isfinite(fp(4)) || fp(4) < -2147483648.0 || fp(4) >= 2147483648.0) { Fail("undefined conversion"); }
 				r = static_cast<uint32_t>(static_cast<int32_t>(fp(4)));
@@ -215,6 +241,11 @@ public:
 				const auto& ext = t.at(5);
 				if (ext == "UMin") { r = std::min(arg(6), arg(7)); }
 				else if (ext == "UMax") { r = std::max(arg(6), arg(7)); }
+				else if (ext == "SClamp")
+				{
+					const auto signed_arg = [&](size_t index) { return static_cast<int32_t>(arg(index)); };
+					r = static_cast<uint32_t>(std::min(std::max(signed_arg(6), signed_arg(7)), signed_arg(8)));
+				}
 				else if (ext == "FindUMsb")
 				{
 					uint32_t word = arg(6);
@@ -228,6 +259,8 @@ public:
 				}
 				else if (ext == "FAbs") { r = arg(6) & 0x7fffffffu; }
 				else if (ext == "FClamp") { r = Bits(std::min(std::max(fp(6), fp(7)), fp(8))); }
+				else if (ext == "FMin") { r = Bits(std::fmin(fp(6), fp(7))); }
+				else if (ext == "FMax") { r = Bits(std::fmax(fp(6), fp(7))); }
 				else if (ext == "Trunc") { r = Bits(std::trunc(fp(6))); }
 				else if (ext == "Floor") { r = Bits(std::floor(fp(6))); }
 				else if (ext == "Ceil") { r = Bits(std::ceil(fp(6))); }

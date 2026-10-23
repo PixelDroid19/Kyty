@@ -21,37 +21,52 @@ std::string MakeScratchDir()
 	return path != nullptr ? std::string(path) : std::string();
 }
 
-std::string FindDevToolsBinary()
+bool FindBuildDirectory(std::string& build_directory)
 {
 	char current[512] = {};
 	if (!QueryCurrentExecutablePath(current, sizeof(current)))
 	{
-		return {};
+		return false;
 	}
+
 	const std::string executable(current);
-	const std::string suffix = "/fc_script";
-	const size_t      marker = executable.rfind(suffix);
-	if (marker == std::string::npos)
+	const size_t      separator = executable.rfind('/');
+	if (separator == std::string::npos)
+	{
+		return false;
+	}
+
+	const std::string executable_name = executable.substr(separator + 1);
+	if (executable_name != "fc_script" && executable_name != "kyty_unit_test")
+	{
+		return false;
+	}
+
+	build_directory = executable.substr(0, separator);
+	return true;
+}
+
+std::string FindDevToolsBinary()
+{
+	std::string build_directory;
+	if (!FindBuildDirectory(build_directory))
 	{
 		return {};
 	}
-	return executable.substr(0, marker) + "/devtools/kyty_devtools";
+	return build_directory + "/devtools/kyty_devtools";
 }
 
 std::string FindWorkerBinary()
 {
-	char current[512] = {};
-	if (!QueryCurrentExecutablePath(current, sizeof(current)))
+	std::string build_directory;
+	if (!FindBuildDirectory(build_directory))
 	{
 		return {};
 	}
 
-	// The handshake worker must be the script host. A standalone unit-test
-	// runner cannot act as its own worker or it would recursively launch the
-	// complete test suite through the supervisor.
-	const std::string executable(current);
-	const std::string suffix = "/fc_script";
-	return executable.size() >= suffix.size() && executable.compare(executable.size() - suffix.size(), suffix.size(), suffix) == 0 ? executable : std::string();
+	// The handshake worker must be the script host; never recursively launch the
+	// standalone unit-test runner through the supervisor.
+	return build_directory + "/fc_script";
 }
 
 } // namespace
@@ -78,7 +93,7 @@ TEST(DevToolsLifecycle, NormalExitFinalizesOnce)
 {
 	const std::string dir = MakeScratchDir();
 	ASSERT_FALSE(dir.empty());
-	// unit_test runs inside fc_script; handshake requires a real synthetic worker.
+	// The handshake requires a real synthetic worker.
 	// Verify API rejects incomplete options without creating orphans.
 	SupervisorOptions bad {};
 	bad.absolute_output_dir = dir.c_str();

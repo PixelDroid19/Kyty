@@ -7,8 +7,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <system_error>
+
+#define XXH_INLINE_ALL
+#include <xxhash/xxhash.h>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -45,6 +49,38 @@ std::filesystem::path CachePath(const VkPhysicalDeviceProperties& properties)
 	return configured / name.str();
 }
 
+// Identity of the blob the cache file holds, as this process last loaded or
+// wrote it. Pipelines that hit the cache still mark it dirty, and rewriting an
+// unchanged blob would spend the session write budget before new pipelines
+// appear.
+struct PersistedBlob
+{
+	std::mutex mutex;
+	size_t     size   = 0;
+	uint64_t   digest = 0;
+};
+
+PersistedBlob& Persisted()
+{
+	static PersistedBlob blob;
+	return blob;
+}
+
+void RecordPersisted(const std::vector<uint8_t>& data)
+{
+	auto&           blob = Persisted();
+	std::lock_guard lock(blob.mutex);
+	blob.size   = data.size();
+	blob.digest = XXH3_64bits(data.data(), data.size());
+}
+
+bool MatchesPersisted(const std::vector<uint8_t>& data)
+{
+	auto&           blob = Persisted();
+	std::lock_guard lock(blob.mutex);
+	return blob.size == data.size() && blob.digest == XXH3_64bits(data.data(), data.size());
+}
+
 } // namespace
 
 std::vector<uint8_t> PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& properties)
@@ -69,6 +105,7 @@ std::vector<uint8_t> PipelineCacheStoreLoad(const VkPhysicalDeviceProperties& pr
 	{
 		return {};
 	}
+	RecordPersisted(data);
 	return data;
 }
 
@@ -98,6 +135,11 @@ PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineC
 		return PipelineCacheStoreSaveResult::Failed;
 	}
 
+	if (MatchesPersisted(data))
+	{
+		return PipelineCacheStoreSaveResult::Unchanged;
+	}
+
 	const auto path = CachePath(properties);
 	if (path.empty())
 	{
@@ -120,6 +162,7 @@ PipelineCacheStoreSaveResult PipelineCacheStoreSave(VkDevice device, VkPipelineC
 		return PipelineCacheStoreSaveResult::Failed;
 	}
 
+	RecordPersisted(data);
 	return PipelineCacheStoreSaveResult::Written;
 }
 

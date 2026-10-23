@@ -171,6 +171,28 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	       bytes_per_element == 16u;
 }
 
+// A live surface can hold a sample's content only when its extent equals one of
+// the sample's levels (in 4x4 blocks for a block-compressed sample, as a storage
+// alias addresses it). A surface of any other extent cannot have produced it.
+[[nodiscard]] inline bool Gen5SurfaceExtentMayHoldSample(uint32_t surface_width, uint32_t surface_height, uint32_t width,
+                                                         uint32_t height, uint32_t levels, bool block_compressed)
+{
+	for (uint32_t level = 0; level < levels && level < 32u; ++level)
+	{
+		const uint32_t level_width  = std::max(1u, width >> level);
+		const uint32_t level_height = std::max(1u, height >> level);
+		if (surface_width == level_width && surface_height == level_height)
+		{
+			return true;
+		}
+		if (block_compressed && surface_width == (level_width + 3u) / 4u && surface_height == (level_height + 3u) / 4u)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 [[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, uint32_t ufmt, bool live_color_surface_covers)
 {
 	if (tile == 0u)
@@ -570,8 +592,8 @@ struct DepthAttachmentLoadOps
 };
 
 // Guest HTILE/register clears map to attachment loadOp CLEAR. No invented color CLEAR0.
-// When not clearing, LOAD OPTIMAL preserves prior DS contents. Depth-only CLEAR uses
-// UNDEFINED init, so stencil cannot LOAD in that pass (DONT_CARE unless stencil clears).
+// When not clearing, LOAD OPTIMAL preserves prior DS contents. A depth-only CLEAR of a
+// combined image keeps OPTIMAL and LOADs stencil, which the guest clear leaves intact.
 // Stencil-only CLEAR keeps OPTIMAL because depth still LOADs prior contents.
 // First GPU-owned use (tracked UNDEFINED) has no prior contents: the depth object
 // never uploads guest bytes. LOAD then samples undefined host pixels (often ~1).
@@ -593,14 +615,15 @@ struct DepthAttachmentLoadOps
 	} else if (stencil_clear)
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	} else if (clear_depth)
+	} else if (first_use)
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	} else
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_LOAD;
 	}
-	ops.initial_layout = clear_depth ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	const bool loads_any = ops.depth_load == VK_ATTACHMENT_LOAD_OP_LOAD || ops.stencil_load == VK_ATTACHMENT_LOAD_OP_LOAD;
+	ops.initial_layout   = loads_any ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
 	return ops;
 }
 
@@ -709,12 +732,14 @@ struct ColorAttachmentLoadOps
 }
 
 // A uniform compute fill stores one 16-byte word quad per invocation. Over a color image whose texel
-// repeats exactly within that quad the fill is independent of tiling, so an image clear reproduces the
-// guest memory contents. Returns false for formats without an evidenced packing or a non-repeating quad.
+// repeats exactly within that quad, or is that quad, the fill is independent of tiling, so an image clear
+// reproduces the guest memory contents. Returns false for formats without an evidenced packing or a
+// non-repeating quad.
 [[nodiscard]] inline uint32_t GuestUniformFillTexelBytes(VkFormat format)
 {
 	switch (format)
 	{
+		case VK_FORMAT_R32G32B32A32_SFLOAT: return 16u;
 		case VK_FORMAT_R16G16B16A16_SFLOAT: return 8u;
 		case VK_FORMAT_R8G8B8A8_UNORM:
 		case VK_FORMAT_R8G8B8A8_SRGB:
@@ -727,11 +752,27 @@ struct ColorAttachmentLoadOps
 
 [[nodiscard]] inline bool DecodeGuestUniformFillTexel(const std::array<uint32_t, 4>& words, VkFormat format, VkClearColorValue* clear)
 {
+	if (clear == nullptr) { return false; }
+	// All-zero bits decode to zero in every channel of every uncompressed color format.
+	const bool zero_fill = words[0] == 0u && words[1] == 0u && words[2] == 0u && words[3] == 0u;
+	if (zero_fill && format >= VK_FORMAT_R4G4_UNORM_PACK8 && format <= VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)
+	{
+		*clear = {};
+		return true;
+	}
 	const uint32_t texel   = GuestUniformFillTexelBytes(format);
-	const bool     repeats = texel == 8u ? (words[0] == words[2] && words[1] == words[3])
-	                                     : (texel == 4u && words[0] == words[1] && words[0] == words[2] && words[0] == words[3]);
-	if (clear == nullptr || !repeats) { return false; }
-	*clear = DecodeGuestColorClearWords(words[0], words[1], format);
+	const bool     repeats = texel == 16u || (texel == 8u ? (words[0] == words[2] && words[1] == words[3])
+	                                                      : (texel == 4u && words[0] == words[1] && words[0] == words[2] && words[0] == words[3]));
+	if (!repeats) { return false; }
+	if (texel == 16u)
+	{
+		// Each 32-bit channel is stored in order, red at the lowest address.
+		*clear = {};
+		for (uint32_t channel = 0; channel < 4u; ++channel) { std::memcpy(&clear->float32[channel], &words[channel], sizeof(float)); }
+	} else
+	{
+		*clear = DecodeGuestColorClearWords(words[0], words[1], format);
+	}
 	// vkCmdClearColorImage encodes sRGB images from linear input: decode the stored bytes first.
 	if (format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_SRGB)
 	{
@@ -811,6 +852,8 @@ struct ImageImageCopy
 	uint32_t     src_array_layer = 0;
 	uint32_t     dst_array_layer = 0;
 	uint32_t     layer_count     = 1;
+	// Volume copy depth; layer_count is one for a 3D image.
+	uint32_t     depth           = 1;
 };
 
 // Intersect a requested copy with the real host mip extents and validate its
@@ -829,9 +872,16 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer,
                        const Vector<VkBufferImageCopy>& regions, uint64_t src_layout);
 void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
+// Copy the raw 32-bit texels of a single-sample, single-layer image into another of the same extent through a
+// transient buffer, one of them D32 depth (or the depth plane of D32S8, whose stencil it keeps) and the other R32 or
+// B10G11R11 color. Returns false for any other pair.
+// A depth destination keeps every word only on a device with unrestricted depth (VUID-VkCopyBufferToImageInfo2-pRegions-07931).
+[[nodiscard]] bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter);
 // Blit the whole source into [0, dst_extent) of dst_image, which ends in TRANSFER_DST_OPTIMAL (its prior contents are discarded).
 void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_image, VkExtent2D dst_extent, VkFilter filter);
+// Resample every layer of a single-sample color image into another of the same format and layer count at any extent.
+void UtilBlitImageToImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanImage* dst_image, VkFilter filter, uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
                    uint64_t dst_layout);
 void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
@@ -924,13 +974,21 @@ enum class LabelForceCompleteKind : uint8_t
 	return completion_callback_issued;
 }
 
-[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool current_submission, uint8_t producer_effects)
+[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool current_submission, uint8_t producer_effects,
+                                                                           bool pending_storage_has_aliases)
 {
-	// Only a plain label store can rely on same-queue GPU ordering until one
-	// end-of-batch fence publishes it. Write-back and notification callbacks
-	// have host-visible effects that must stay synchronous at their wait packet.
+	// A label store relies on same-queue GPU ordering until one end-of-batch
+	// fence publishes it. A write-back may join it only when no pending storage
+	// write has a GPU alias: guest-side readers (memory reads, device-address
+	// views) already wait for pending storage themselves, while aliases are
+	// refreshed only by the write-back. Notification callbacks stay synchronous.
 	constexpr uint8_t guest_store = 1u;
-	return current_submission && producer_effects == guest_store;
+	constexpr uint8_t write_back  = 2u;
+	if (!current_submission)
+	{
+		return false;
+	}
+	return producer_effects == guest_store || (producer_effects == (guest_store | write_back) && !pending_storage_has_aliases);
 }
 
 // Completion callbacks a command-processor batch can record.

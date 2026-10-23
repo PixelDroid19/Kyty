@@ -29,7 +29,6 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 	uint32_t   src0           = (buffer[1] >> 0u) & 0x1ffu;
 	uint32_t   src1           = (buffer[1] >> 9u) & 0x1ffu;
 	uint32_t   src2           = (buffer[1] >> 18u) & 0x1ffu;
-
 	const bool permlane = next_gen && (opcode == 0x377u || opcode == 0x378u);
 	const bool half_opsel = next_gen && (opcode == 0x34bu || opcode == 0x351u || opcode == 0x354u || opcode == 0x357u);
 	if (op_sel != 0 && !permlane && !half_opsel) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op_sel != 0 condition ignored (continuing)\n"); }
@@ -1390,6 +1389,15 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 				KYTY_UNKNOWN_OP();
 			}
 			inst.type    = ShaderInstructionType::VCvtPknormU16F32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			break;
+		case 0x36a:
+			if (!next_gen || op_sel != 0u || abs != 0u || neg != 0u || omod != 0u || clamp != 0u)
+			{
+				KYTY_UNKNOWN_OP();
+			}
+			inst.type    = ShaderInstructionType::VCvtPkU16U32;
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
 			inst.src_num = 2;
 			break;

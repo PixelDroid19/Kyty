@@ -5,8 +5,10 @@
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
+#include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
 #include "Emulator/Log.h"
 
 #include <array>
@@ -226,6 +228,192 @@ TEST(EmulatorShaderGetpc, NggBoundBufferUsesShiftedShaderRegister)
 	EXPECT_FALSE(binary.IsEmpty());
 }
 
+// A typed load through a V# built from s_getpc reads guest bytes; its base
+// must never become a descriptor-array index. A V# that a mapped descriptor
+// S_LOAD writes keeps the bound lowering.
+static String8 GetpcTypedLoadSource(bool mapped_sload)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction getpc {};
+	getpc.type   = ShaderInstructionType::SGetpcB64;
+	getpc.format = ShaderInstructionFormat::Sdst2;
+	getpc.dst    = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	ShaderInstruction load {};
+	load.pc                   = 4;
+	load.type                 = ShaderInstructionType::TBufferLoadFormatX;
+	load.format               = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxenFloat1;
+	load.dst                  = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	load.src[0]               = {.type = ShaderOperandType::Vgpr, .register_id = 5, .size = 1};
+	load.src[1]               = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 4};
+	load.src[2].type          = ShaderOperandType::IntegerInlineConstant;
+	load.src[2].constant.u    = 0;
+	load.src_num              = 3;
+	load.buffer_idxen         = true;
+	load.buffer_flags         = 0;
+	load.mtbuf_format         = 22; // 32_FLOAT
+	load.mtbuf_format_is_gen5 = true;
+	load.mtbuf_components     = 1;
+	ShaderInstruction end {};
+	end.pc     = 12;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(getpc);
+	code.GetInstructions().Add(load);
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+	input.bind.program_base_used                 = true;
+	input.bind.device_address_used               = true;
+	input.bind.storage_buffers.buffers_num        = 1;
+	input.bind.storage_buffers.start_register[0] = 8;
+	input.bind.storage_buffers.usages[0]          = ShaderStorageUsage::ReadOnly;
+	if (mapped_sload)
+	{
+		ShaderDynamicSLoadMapping record {};
+		record.destination_register = 0;
+		record.dword_count          = 4;
+		record.last_consumer_pc     = load.pc;
+		input.bind.dynamic_sloads.records.Add(record);
+	}
+	ShaderCalcBindingIndices(&input.bind);
+	return SpirvGenerateSource(code, nullptr, nullptr, &input);
+}
+
+TEST(EmulatorShaderGetpc, RuntimeTypedBufferLoadReadsGuestAddress)
+{
+	const auto source = GetpcTypedLoadSource(false);
+	EXPECT_NE(source.FindIndex("%gbl_1_d0 = OpLoad %uint %s0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%gen5_tbuffer_load_1"), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
+
+TEST(EmulatorShaderGetpc, MappedTypedBufferLoadKeepsBoundLowering)
+{
+	const auto source = GetpcTypedLoadSource(true);
+	EXPECT_EQ(source.FindIndex("%gbl_1_d0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gen5_tbuffer_load_1"), Core::STRING8_INVALID_INDEX);
+}
+
+// BUFFER_LOAD_FORMAT decodes the V#'s format and DST_SEL both through a V#
+// built from s_getpc (guest addressed) and through a bound V#.
+TEST(EmulatorShaderGetpc, FormatLoadsDecodeDescriptorFormatOnBothPaths)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction getpc {};
+	getpc.type   = ShaderInstructionType::SGetpcB64;
+	getpc.format = ShaderInstructionFormat::Sdst2;
+	getpc.dst    = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	ShaderInstruction runtime {};
+	runtime.pc                = 4;
+	runtime.type              = ShaderInstructionType::BufferLoadFormatXyzw;
+	runtime.format            = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
+	runtime.dst               = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	runtime.src[0]            = {.type = ShaderOperandType::Vgpr, .register_id = 5, .size = 1};
+	runtime.src[1]            = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 4};
+	runtime.src[2].type       = ShaderOperandType::IntegerInlineConstant;
+	runtime.src[2].constant.u = 0;
+	runtime.src_num           = 3;
+	runtime.buffer_idxen      = true;
+	runtime.buffer_flags      = 0;
+	ShaderInstruction bound   = runtime;
+	bound.pc                  = 12;
+	bound.type                = ShaderInstructionType::BufferLoadFormatXy;
+	bound.format              = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen;
+	bound.dst                 = {.type = ShaderOperandType::Vgpr, .register_id = 6, .size = 2};
+	bound.src[1]              = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	ShaderInstruction end {};
+	end.pc     = 20;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(getpc);
+	code.GetInstructions().Add(runtime);
+	code.GetInstructions().Add(bound);
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+	input.bind.program_base_used                 = true;
+	input.bind.device_address_used               = true;
+	input.bind.storage_buffers.buffers_num        = 1;
+	input.bind.storage_buffers.start_register[0] = 8;
+	input.bind.storage_buffers.usages[0]          = ShaderStorageUsage::ReadOnly;
+	ShaderCalcBindingIndices(&input.bind);
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("%gtl_1_value = OpFunctionCall %v4uint %gen5_buffer_format_decode"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gen5_mubuf_value_2_0 = OpFunctionCall %v4uint %gen5_buffer_format_decode"),
+	          Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
+
+TEST(EmulatorShaderGetpc, OnlyAttributeTableFormatLoadsAreVertexFetches)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	const auto sgpr     = [](int reg, int size) { return ShaderOperand {.type = ShaderOperandType::Sgpr, .register_id = reg, .size = size}; };
+	const auto vgpr     = [](int reg, int size) { return ShaderOperand {.type = ShaderOperandType::Vgpr, .register_id = reg, .size = size}; };
+	const auto constant = [](int value)
+	{
+		ShaderOperand op {};
+		op.type       = ShaderOperandType::IntegerInlineConstant;
+		op.constant.i = value;
+		return op;
+	};
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	const auto add = [&](ShaderInstructionType type, ShaderOperand dst, std::initializer_list<ShaderOperand> src)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = static_cast<uint32_t>(code.GetInstructions().Size()) * 8u;
+		inst.type    = type;
+		inst.dst     = dst;
+		inst.src_num = static_cast<int>(src.size());
+		int i        = 0;
+		for (const auto& op: src)
+		{
+			inst.src[i++] = op;
+		}
+		inst.buffer_idxen = true;
+		code.GetInstructions().Add(inst);
+		return inst.pc;
+	};
+	// Attribute table at user data 22 (s30), buffer table at user data 20 (s28).
+	add(ShaderInstructionType::SLoadDwordx2, sgpr(48, 2), {sgpr(30, 2), constant(0)});
+	add(ShaderInstructionType::SLshlB32, sgpr(50, 1), {sgpr(48, 1), constant(4)});
+	add(ShaderInstructionType::SLoadDwordx4, sgpr(20, 4), {sgpr(28, 2), sgpr(50, 1)});
+	add(ShaderInstructionType::SBfeU32, sgpr(51, 1), {sgpr(48, 1), constant(14)});
+	add(ShaderInstructionType::VCndmaskB32, vgpr(0, 1), {vgpr(8, 1), vgpr(5, 1), sgpr(2, 2)});
+	const uint32_t fetch = add(ShaderInstructionType::BufferLoadFormatXyz, vgpr(14, 3), {vgpr(0, 1), sgpr(20, 4), sgpr(51, 1)});
+	// A user-data V# indexed by the vertex id is a buffer load; it also overwrites the index.
+	add(ShaderInstructionType::BufferLoadFormatXyzw, vgpr(0, 4), {vgpr(0, 1), sgpr(16, 4), constant(0)});
+	add(ShaderInstructionType::BufferLoadFormatX, vgpr(4, 1), {vgpr(0, 1), sgpr(20, 4), sgpr(51, 1)});
+	add(ShaderInstructionType::SEndpgm, {}, {});
+
+	const auto scan = ShaderScanVertexStreamAccesses(code, 22, 20);
+	ASSERT_EQ(scan.fetch_candidates.Size(), 1u);
+	EXPECT_EQ(scan.fetch_candidates.At(0).first, fetch);
+	EXPECT_EQ(scan.fetch_candidates.At(0).second, 0);
+	EXPECT_TRUE(scan.unconditional_reader);
+}
+
 TEST(EmulatorShaderGetpc, BufferNamespaceClassificationMatchesLoweringAndIgnoresStreamSentinels)
 {
 	ShaderBindResources bind {};
@@ -252,6 +440,58 @@ TEST(EmulatorShaderGetpc, BufferNamespaceClassificationMatchesLoweringAndIgnores
 	EXPECT_FALSE(ShaderStorageBufferResourceIsBound(bind, invalid));
 	const ShaderOperand negative {.type = ShaderOperandType::Sgpr, .register_id = -1, .size = 4};
 	EXPECT_FALSE(ShaderStorageBufferResourceIsBound(bind, negative));
+}
+
+// A bound V# register that S_GETPC redefines holds a guest base afterwards; the
+// binding's descriptor slot index is valid only while it holds user data.
+TEST(EmulatorShaderGetpc, RedefinedBoundDescriptorReadsRuntimeDescriptor)
+{
+	const ShaderOperand descriptor {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 4};
+	const auto scalar_load = [&](uint32_t pc, int dst)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = pc;
+		inst.type    = ShaderInstructionType::SBufferLoadDword;
+		inst.dst     = {.type = ShaderOperandType::Sgpr, .register_id = dst, .size = 1};
+		inst.src_num = 2;
+		inst.src[0]  = descriptor;
+		inst.src[1]  = {.type = ShaderOperandType::LiteralConstant, .size = 1};
+		return inst;
+	};
+	ShaderInstruction getpc {};
+	getpc.pc   = 8;
+	getpc.type = ShaderInstructionType::SGetpcB64;
+	getpc.dst  = {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 2};
+	ShaderInstruction vector_load {};
+	vector_load.pc      = 16;
+	vector_load.type    = ShaderInstructionType::BufferLoadDword;
+	vector_load.dst     = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	vector_load.src_num = 3;
+	vector_load.src[0]  = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	vector_load.src[1]  = descriptor;
+	ShaderInstruction end {};
+	end.pc   = 24;
+	end.type = ShaderInstructionType::SEndpgm;
+
+	ShaderCode code;
+	code.GetInstructions().Add(scalar_load(0, 20));
+	code.GetInstructions().Add(getpc);
+	code.GetInstructions().Add(scalar_load(12, 21));
+	code.GetInstructions().Add(vector_load);
+	code.GetInstructions().Add(end);
+
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num       = 1;
+	bind.storage_buffers.start_register[0] = 12;
+	ShaderCollectRedefinedBufferDescriptors(code, &bind, 0, *ShaderScalarFlowOf(code));
+
+	ASSERT_EQ(bind.redefined_descriptor_consumers.Size(), 2u);
+	EXPECT_EQ(bind.redefined_descriptor_consumers.At(0), 12u);
+	EXPECT_EQ(bind.redefined_descriptor_consumers.At(1), 16u);
+	const auto& instructions = code.GetInstructions();
+	EXPECT_FALSE(ShaderScalarBufferUsesRuntimeDescriptor(bind, instructions.At(0)));
+	EXPECT_TRUE(ShaderScalarBufferUsesRuntimeDescriptor(bind, instructions.At(2)));
+	EXPECT_TRUE(ShaderVectorBufferUsesRuntimeDescriptor(bind, instructions.At(3)));
 }
 
 static String8 VertexScalarProbeSource(bool enabled, uint32_t loads)

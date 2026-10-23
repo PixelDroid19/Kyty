@@ -1,6 +1,7 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Graphics/VulkanQueueIdentity.h"
+#include "Emulator/Graphics/VulkanQueueSelection.h"
 
 UT_BEGIN(EmulatorVulkanQueueIdentity);
 
@@ -76,6 +77,88 @@ TEST(EmulatorVulkanQueueIdentity, RejectsDifferentHandlesForTheSameFamilyAndInde
 
 	EXPECT_EQ(VulkanAssignQueueLockIndices(identities, 2, lock_indices, &lock_count),
 	          VulkanQueueLockAssignmentStatus::ConflictingIdentity);
+}
+
+TEST(EmulatorVulkanQueueIdentity, SelectsOneFamilyForGraphicsComputeTransferAndPresentation)
+{
+	const VulkanQueueFamilyCapabilities families[] = {
+	    {1, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, true},
+	    {1, VK_QUEUE_TRANSFER_BIT, true},
+	    {0, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, true},
+	};
+	VulkanQueueFamilySelection selected;
+
+	EXPECT_EQ(VulkanSelectCommonRenderQueueFamily(families, 3, &selected), VulkanQueueSelectionResult::Success);
+	EXPECT_EQ(selected.family, 0u);
+	EXPECT_EQ(selected.index, 0u);
+}
+
+TEST(EmulatorVulkanQueueIdentity, RejectsSplitFamiliesWithoutOwnershipTransferSupport)
+{
+	const VulkanQueueFamilyCapabilities families[] = {
+	    {1, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, false},
+	    {1, VK_QUEUE_TRANSFER_BIT, true},
+	};
+	VulkanQueueFamilySelection selected;
+
+	EXPECT_EQ(VulkanSelectCommonRenderQueueFamily(families, 2, &selected), VulkanQueueSelectionResult::NoCommonFamily);
+}
+
+TEST(EmulatorVulkanQueueIdentity, PrefersCommonFamilyWithMoreNativeQueueIndices)
+{
+	const VulkanQueueFamilyCapabilities families[] = {
+	    {1, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, true},
+	    {16, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, true},
+	};
+	VulkanQueueFamilySelection selected;
+
+	EXPECT_EQ(VulkanSelectCommonRenderQueueFamily(families, 2, &selected), VulkanQueueSelectionResult::Success);
+	EXPECT_EQ(selected.family, 1u);
+	EXPECT_EQ(selected.index, 0u);
+}
+
+TEST(EmulatorVulkanQueueIdentity, SharesQueueRolesWhenTheFamilyHasOneQueue)
+{
+	VulkanQueueRoleAllocation allocation;
+
+	EXPECT_EQ(VulkanAllocateSharedQueueRoles(1, 8, &allocation), VulkanQueueSelectionResult::Success);
+	EXPECT_EQ(allocation.graphics_index, 0u);
+	EXPECT_EQ(allocation.compute_first_index, 0u);
+	EXPECT_EQ(allocation.compute_count, 1u);
+	EXPECT_EQ(allocation.transfer_index, 0u);
+	EXPECT_EQ(allocation.present_index, 0u);
+	EXPECT_EQ(allocation.family_used, 1u);
+}
+
+TEST(EmulatorVulkanQueueIdentity, PreservesOneIndependentComputeQueueWhenOnlyTwoAreAvailable)
+{
+	VulkanQueueRoleAllocation allocation;
+
+	EXPECT_EQ(VulkanAllocateSharedQueueRoles(2, 8, &allocation), VulkanQueueSelectionResult::Success);
+	EXPECT_EQ(allocation.graphics_index, 0u);
+	EXPECT_EQ(allocation.compute_first_index, 1u);
+	EXPECT_EQ(allocation.compute_count, 1u);
+	EXPECT_EQ(allocation.transfer_index, 0u);
+	EXPECT_EQ(allocation.present_index, 0u);
+	EXPECT_EQ(allocation.family_used, 2u);
+}
+
+TEST(EmulatorVulkanQueueIdentity, UsesAvailableIndicesForAllLogicalQueueRoles)
+{
+	VulkanQueueRoleAllocation allocation;
+
+	EXPECT_EQ(VulkanAllocateSharedQueueRoles(16, 8, &allocation), VulkanQueueSelectionResult::Success);
+	EXPECT_EQ(allocation.graphics_index, 0u);
+	EXPECT_EQ(allocation.compute_first_index, 1u);
+	EXPECT_EQ(allocation.compute_count, 8u);
+	EXPECT_EQ(allocation.transfer_index, 9u);
+	EXPECT_EQ(allocation.present_index, 10u);
+	EXPECT_EQ(allocation.family_used, 11u);
+
+	for (uint32_t i = 0; i < allocation.compute_count; i++)
+	{
+		EXPECT_EQ(allocation.compute_first_index + i, i + 1);
+	}
 }
 
 UT_END();

@@ -3,8 +3,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace Kyty::Kernel::FileSystem::Path {
@@ -39,30 +43,52 @@ inline std::string NormalizeGuest(std::string path)
 	return result;
 }
 
+// Resolves `relative` below `root`, which must already be canonical, so only
+// the components of `relative` touch the host filesystem. Each existing
+// symlink is resolved; a dangling one is refused because the filename could
+// still escape on a later O_CREAT. From the first missing component the rest
+// is appended verbatim. The result may lie outside `root`; callers check
+// containment.
+inline std::filesystem::path CanonicalBelow(const std::filesystem::path& root, const std::filesystem::path& relative)
+{
+	if (root.empty() || relative.has_root_path()) { return {}; }
+	auto result   = root;
+	bool existing = true;
+	for (const auto& component: relative)
+	{
+		if (component.empty() || component == ".") { continue; }
+		if (component == "..")
+		{
+			// `result` is canonical while every component exists, so its
+			// lexical parent is its physical parent.
+			result   = result.parent_path();
+			existing = true;
+			continue;
+		}
+		result /= component;
+		if (!existing) { continue; }
+		std::error_code error;
+		const auto      status = std::filesystem::symlink_status(result, error);
+		if (error == std::errc::no_such_file_or_directory)
+		{
+			existing = false;
+			continue;
+		}
+		if (error) { return {}; }
+		if (!std::filesystem::is_symlink(status)) { continue; }
+		result = std::filesystem::canonical(result, error);
+		if (error) { return {}; }
+	}
+	return result;
+}
+
 inline std::filesystem::path Canonical(const std::filesystem::path& path)
 {
 	if (path.empty()) { return {}; }
-	// weakly_canonical alone leaves a dangling symlink unresolved. Such a
-	// filename can still escape on a later O_CREAT, so reject it explicitly.
-	std::filesystem::path prefix;
-	for (const auto& component: path)
-	{
-		prefix /= component;
-		std::error_code error;
-		const auto status = std::filesystem::symlink_status(prefix, error);
-		if (error == std::errc::no_such_file_or_directory) { break; }
-		if (error) { return {}; }
-		if (std::filesystem::is_symlink(status))
-		{
-			(void)std::filesystem::canonical(prefix, error);
-			if (error) { return {}; }
-		}
-	}
 	std::error_code error;
-	auto result = std::filesystem::weakly_canonical(path, error);
-	if (error || !result.is_absolute()) { return {}; }
-	if (result != result.root_path() && result.filename().empty()) { result = result.parent_path(); }
-	return result;
+	const auto      absolute = std::filesystem::absolute(path, error);
+	if (error) { return {}; }
+	return CanonicalBelow(absolute.root_path(), absolute.relative_path());
 }
 
 inline bool Contains(const std::filesystem::path& root, const std::filesystem::path& candidate)
@@ -71,20 +97,100 @@ inline bool Contains(const std::filesystem::path& root, const std::filesystem::p
 	return std::mismatch(root.begin(), root.end(), candidate.begin(), candidate.end()).first == root.end();
 }
 
-inline std::string ResolveContained(const std::string& root, const std::string& relative)
+// `canonical_root` must come from Canonical().
+inline std::string ResolveContained(const std::filesystem::path& canonical_root, const std::string& relative)
 {
 	const auto suffix = std::filesystem::u8path(relative);
 	if (suffix.has_root_path() || relative.find('\0') != std::string::npos) { return {}; }
-	const auto base = Canonical(std::filesystem::u8path(root));
-	if (base.empty()) { return {}; }
-	const auto candidate = Canonical(base / suffix);
-	return Contains(base, candidate) ? candidate.u8string() : std::string();
+	const auto candidate = CanonicalBelow(canonical_root, suffix);
+	return Contains(canonical_root, candidate) ? candidate.u8string() : std::string();
 }
 
-inline bool EqualsIgnoringAsciiCase(const std::string& a, const std::string& b)
+// Canonical form of a host path. When it lies lexically below one of the
+// canonical `roots`, only the components below that root are resolved.
+inline std::filesystem::path CanonicalFrom(const std::vector<std::filesystem::path>& roots, const std::filesystem::path& path)
 {
-	return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](unsigned char x, unsigned char y)
-	                                          { return std::tolower(x) == std::tolower(y); });
+	for (const auto& root: roots)
+	{
+		if (Contains(root, path)) { return CanonicalBelow(root, path.lexically_relative(root)); }
+	}
+	return Canonical(path);
+}
+
+inline std::string LowerAscii(std::string text)
+{
+	std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return text;
+}
+
+// Entries of one host directory keyed by their lowered name. The value is the
+// host entry, or empty when several entries differ only in case.
+struct CaseFoldedDirectory
+{
+	std::filesystem::file_time_type              write_time;
+	std::unordered_map<std::string, std::string> entries;
+};
+
+inline std::shared_ptr<const CaseFoldedDirectory> ScanCaseFoldedDirectory(const std::filesystem::path&          directory,
+                                                                          std::filesystem::file_time_type write_time)
+{
+	auto            folded = std::make_shared<CaseFoldedDirectory>();
+	std::error_code error;
+	folded->write_time = write_time;
+	for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end; it.increment(error))
+	{
+		auto entry            = it->path().filename().u8string();
+		auto [slot, inserted] = folded->entries.try_emplace(LowerAscii(entry), entry);
+		if (!inserted) { slot->second.clear(); }
+	}
+	return folded;
+}
+
+// Title packages hold directories of tens of thousands of entries, and a guest
+// that probes for absent files would rescan one per lookup. Indexes are reused
+// while the directory's write time is unchanged. A directory written within
+// the last two seconds is not cached, since a later change in the same
+// timestamp tick would leave its write time equal. The cache is bounded by the
+// total number of names and cleared when it would exceed the bound.
+inline std::shared_ptr<const CaseFoldedDirectory> CaseFoldedEntries(const std::filesystem::path& directory)
+{
+	constexpr size_t kMaxCachedNames = size_t {1} << 18u;
+	constexpr auto   kSettleTime     = std::chrono::seconds(2);
+
+	static std::mutex                                                                    mutex;
+	static std::unordered_map<std::string, std::shared_ptr<const CaseFoldedDirectory>> cache;
+	static size_t                                                                        cached_names = 0;
+
+	std::error_code error;
+	const auto      write_time = std::filesystem::last_write_time(directory, error);
+	if (error) { return {}; }
+	const auto key = directory.u8string();
+	{
+		std::lock_guard lock(mutex);
+		const auto      it = cache.find(key);
+		if (it != cache.end() && it->second->write_time == write_time) { return it->second; }
+	}
+
+	auto folded = ScanCaseFoldedDirectory(directory, write_time);
+	if (std::filesystem::file_time_type::clock::now() - write_time < kSettleTime) { return folded; }
+
+	std::lock_guard lock(mutex);
+	if (const auto it = cache.find(key); it != cache.end())
+	{
+		cached_names -= it->second->entries.size();
+		cache.erase(it);
+	}
+	if (cached_names + folded->entries.size() > kMaxCachedNames)
+	{
+		cache.clear();
+		cached_names = 0;
+	}
+	if (folded->entries.size() <= kMaxCachedNames)
+	{
+		cached_names += folded->entries.size();
+		cache.emplace(key, folded);
+	}
+	return folded;
 }
 
 // The host entry of `directory` named `name`: the exact entry, otherwise the
@@ -94,15 +200,10 @@ inline std::string FindEntryIgnoringCase(const std::filesystem::path& directory,
 {
 	std::error_code error;
 	if (std::filesystem::exists(directory / std::filesystem::u8path(name), error)) { return name; }
-	std::string found;
-	for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end; it.increment(error))
-	{
-		const auto entry = it->path().filename().u8string();
-		if (!EqualsIgnoringAsciiCase(entry, name)) { continue; }
-		if (!found.empty()) { return {}; }
-		found = entry;
-	}
-	return found;
+	const auto folded = CaseFoldedEntries(directory);
+	if (folded == nullptr) { return {}; }
+	const auto it = folded->entries.find(LowerAscii(name));
+	return it != folded->entries.end() ? it->second : std::string();
 }
 
 // Guest filesystems match names ignoring case: a title opens
@@ -131,11 +232,6 @@ inline std::string MatchCaseInsensitive(const std::string& root, const std::stri
 		result += (result.empty() ? "" : "/") + name;
 	}
 	return result;
-}
-
-inline bool Allows(const std::string& root, const std::string& candidate)
-{
-	return Contains(Canonical(std::filesystem::u8path(root)), Canonical(std::filesystem::u8path(candidate)));
 }
 
 } // namespace Kyty::Kernel::FileSystem::Path

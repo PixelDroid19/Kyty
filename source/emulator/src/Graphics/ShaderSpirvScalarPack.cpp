@@ -22,7 +22,31 @@ static bool pack_source_is_supported(const ShaderOperand& op)
 	return operand_is_variable(op) && op.type != ShaderOperandType::Vgpr && op.size == 1;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_SPackLlB32B16)
+// S_PACK_{LL,LH,HH}_B32_B16: D[15:0] is the low (LL, LH) or high (HH) half of
+// S0 and D[31:16] the low (LL) or high (LH, HH) half of S1. SCC is unchanged.
+static const char* PackLowHalf(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::SPackHhB32B16 ? R"(
+%pack_low_<index> = OpShiftRightLogical %uint %pack_s0_<index> %uint_16
+)"
+	                                                     : R"(
+%pack_s0_shift_<index> = OpShiftLeftLogical %uint %pack_s0_<index> %uint_16
+%pack_low_<index> = OpShiftRightLogical %uint %pack_s0_shift_<index> %uint_16
+)";
+}
+
+static const char* PackHighHalf(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::SPackLlB32B16 ? R"(
+%pack_high_<index> = OpShiftLeftLogical %uint %pack_s1_<index> %uint_16
+)"
+	                                                     : R"(
+%pack_s1_shift_<index> = OpShiftRightLogical %uint %pack_s1_<index> %uint_16
+%pack_high_<index> = OpShiftLeftLogical %uint %pack_s1_shift_<index> %uint_16
+)";
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_SPackB32B16)
 {
 	const auto& inst = code.GetInstructions().At(index);
 	if (inst.format != ShaderInstructionFormat::SVdstSVsrc0SVsrc1 || inst.src_num != 2 || inst.dst.size != 1 || inst.dst.dpp ||
@@ -55,15 +79,16 @@ KYTY_RECOMPILER_FUNC(Recompile_SPackLlB32B16)
 	*dst_source += String8(R"(
 <load_s0>
 <load_s1>
-%pack_s0_shift_<index> = OpShiftLeftLogical %uint %pack_s0_<index> %uint_16
-%pack_low_<index> = OpShiftRightLogical %uint %pack_s0_shift_<index> %uint_16
-%pack_high_<index> = OpShiftLeftLogical %uint %pack_s1_<index> %uint_16
+<low>
+<high>
 %pack_result_<index> = OpBitwiseOr %uint %pack_low_<index> %pack_high_<index>
 OpStore %<dst> %pack_result_<index>
 <execz>
 )")
 	                   .ReplaceStr("<load_s0>", load_s0)
 	                   .ReplaceStr("<load_s1>", load_s1)
+	                   .ReplaceStr("<low>", PackLowHalf(inst.type))
+	                   .ReplaceStr("<high>", PackHighHalf(inst.type))
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<execz>", operand_is_exec(inst.dst) ? String8(EXECZ).ReplaceStr("<index>", index_str) : String8())
 	                   .ReplaceStr("<index>", index_str);

@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -28,6 +29,7 @@ class Shader;
 
 class CommandBuffer;
 class CommandProcessor;
+class PipelineCache;
 class TransientBufferPool;
 class DiagnosticDumpWriter;
 struct ShaderNativeWaveInfo;
@@ -39,6 +41,7 @@ struct StorageTextureVulkanImage;
 struct RenderTextureVulkanImage;
 struct VulkanCommandPool;
 struct VulkanBuffer;
+struct VulkanPipeline;
 struct VulkanFramebuffer;
 struct RenderDepthInfo;
 struct RenderColorInfo;
@@ -623,13 +626,25 @@ public:
 
 	void Allocate();
 	void Free();
-	void Begin() const;
-	void End() const;
+	void Begin();
+	void End();
 	void Execute();
 	void ExecuteWithSemaphore(VkSemaphore signal_semaphore);
+	// Consecutive draws on one framebuffer share a render pass instance: a draw
+	// continues the instance an earlier draw left open when beginning a new one
+	// would neither clear, discard nor transition an attachment.
 	void BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
-	                     const VulkanSampleLocationState* sample_locations = nullptr) const;
-	void EndRenderPass() const;
+	                     const VulkanSampleLocationState* sample_locations = nullptr);
+	// Ends the open render pass instance and makes its attachment writes visible
+	// to later shader and attachment reads.
+	void CloseRenderPass();
+	// Transfers, barriers, dispatches, events and query resets are illegal inside
+	// a render pass instance; this handle ends an open one first. Bindings, push
+	// constants, dynamic state and query scopes are legal in both scopes
+	// (RecordState), draws only inside one (RecordInsideRenderPass).
+	[[nodiscard]] VkCommandBuffer RecordOutsideRenderPass();
+	[[nodiscard]] VkCommandBuffer RecordState() const;
+	[[nodiscard]] VkCommandBuffer RecordInsideRenderPass() const;
 	void WaitForFence();
 	void WaitForFenceWithoutLabelCallbacks();
 	void WaitForFenceAndReset();
@@ -637,6 +652,7 @@ public:
 	[[nodiscard]] bool TryCompleteFenceAndResetWithoutLabelCallbacks();
 
 	[[nodiscard]] uint32_t GetIndex() const { return m_index; }
+	// Pool and fence ownership only; commands go through the Record* handles.
 	VulkanCommandPool*     GetPool() { return m_pool; }
 	[[nodiscard]] bool     IsExecute() const { return m_execute; }
 	void                   SetSubmissionId(SubmissionId submission)
@@ -645,6 +661,9 @@ public:
 		m_has_submission = true;
 	}
 	[[nodiscard]] int GetQueueIndex() const { return m_queue; }
+	// Queue timeline the GPU signals with value when this execution completes;
+	// false for an execution without a submission identity.
+	[[nodiscard]] bool GetTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value) const;
 	[[nodiscard]] bool GetSubmissionId(SubmissionId* submission) const
 	{
 		if (!m_has_submission || submission == nullptr)
@@ -670,13 +689,44 @@ public:
 		draw->host_submission_sequence = m_has_submission ? m_submission.sequence : 0u;
 	}
 	VulkanBuffer* UploadTransientBuffer(const void* data, uint64_t size, uint32_t usage);
-	VulkanBuffer* CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t* validation_ns,
-	                                             uint64_t* upload_ns, uint64_t* compare_ns, bool* reused);
+	// One zero dword shared by every empty descriptor of this recording.
+	VulkanBuffer* UploadTransientZeroCarrier(uint32_t usage);
+	// Captures guest bytes [vaddr + read_begin, vaddr + size) at the same offsets of a buffer of size bytes.
+	// zero_tail keeps the bytes past size zero for consumers that can read beyond it.
+	VulkanBuffer* CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage, bool zero_tail,
+	                                             uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns, bool* reused);
+	// Reads at most 16 bytes from the immutable guest snapshot already uploaded for this command buffer.
+	// This never rereads guest memory; the buffer must still belong to the current recording.
+	[[nodiscard]] bool ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
+	                                               uint64_t size, void* dst) const;
 	// Reusable scratch for commands recorded in this buffer. Callers must order
 	// write/read/write hazards explicitly; lifetime extends through its fence.
 	VulkanBuffer* AllocateTransientScratchBuffer(uint64_t size, uint32_t usage);
+	// Device-local staging for an image-to-image copy through a buffer, kept apart from the scratch above so
+	// compute scratch cannot exhaust its budget. The same ordering and lifetime rules apply.
+	VulkanBuffer* AllocateTransientCopyBuffer(uint64_t size);
+	// Device-local intermediate written and read only by GPU commands of this recording (for example a
+	// geometry pass output), with its own budget. The same ordering and lifetime rules apply.
+	VulkanBuffer* AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage);
+	// A dispatch binds a storage view of a depth plane through the depth image's colour copy of it
+	// (DepthStencilVulkanImage::storage_plane); the copy returns to the depth plane once the dispatch is recorded.
+	void DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth);
+	void StoreBackDepthPlanes();
 
 private:
+	friend class PipelineCache;
+
+	struct OpenRenderPass
+	{
+		VkRenderPass  render_pass = nullptr;
+		VkFramebuffer framebuffer = nullptr;
+		bool          continuable = false;
+	};
+
+	[[nodiscard]] bool AttachPipelineLease(VulkanPipeline* pipeline, bool* added);
+	void               MarkCommandBufferResetting();
+	void               ReleasePipelineLeases();
+
 	VulkanCommandPool* m_pool    = nullptr;
 	uint32_t           m_index   = static_cast<uint32_t>(-1);
 	int                m_queue   = -1;
@@ -684,8 +734,19 @@ private:
 	CommandProcessor*  m_parent  = nullptr;
 	SubmissionId       m_submission;
 	bool               m_has_submission = false;
+	uint64_t           m_timeline_value = 0;
 	TransientBufferPool* m_transient_buffers = nullptr;
 	TransientBufferPool* m_transient_scratch_buffers = nullptr;
+	TransientBufferPool* m_transient_copy_buffers    = nullptr;
+	TransientBufferPool* m_transient_device_buffers  = nullptr;
+
+	mutable std::mutex           m_pipeline_lease_mutex;
+	std::vector<VulkanPipeline*> m_pipeline_leases;
+	mutable bool                 m_recording = false;
+	bool                         m_resetting = false;
+	std::optional<OpenRenderPass> m_open_render_pass;
+	std::vector<DepthStencilVulkanImage*> m_depth_plane_store_backs;
+
 	bool               m_has_guest_context = false;
 	uint64_t           m_guest_submit = 0;
 	uint32_t           m_pm4_op       = 0;
@@ -704,9 +765,11 @@ void GraphicsRenderCreateContext();
 
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
-                             uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance);
+                             uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
+                             SubmissionId* pending_submission);
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
-	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count);
+	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count, int32_t vertex_offset_add,
+	                             uint32_t first_instance, SubmissionId* pending_submission);
 void GraphicsRenderWriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr);
 void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value);
@@ -739,13 +802,14 @@ enum class ComputeDispatchResult
 	Completed,
 	ProcessorWriteBackRequired,
 	SubmissionCompletionRequired,
+	ReaderCompletionRequired,
 };
 // Preparation and recording share one resource analysis. A required write-back
-// leaves the command buffer untouched; retry after completing it with fresh inputs.
+// or submission wait leaves the command buffer untouched; retry with fresh inputs.
 [[nodiscard]] ComputeDispatchResult GraphicsRenderDispatchDirect(
     uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, bool processor_writeback_complete,
-    SubmissionId* pending_writeback);
+    SubmissionId* pending_submission);
 void GraphicsRenderMemoryBarrier(CommandBuffer* buffer);
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
@@ -769,8 +833,54 @@ void DeleteDescriptor(RenderTextureVulkanImage* image);
 int GraphicsRenderAddEqEvent(Kernel::EventQueue::KernelEqueue eq, int id, void* udata);
 int GraphicsRenderDeleteEqEvent(Kernel::EventQueue::KernelEqueue eq, int id);
 
-void GraphicsRenderClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value);
-void GraphicsRenderReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size);
+// GDS transfers are recorded into a command-processor recording at its stream position, so they
+// are ordered behind earlier work on that queue and ahead of later work. Anything but Recorded
+// recorded nothing. Empty in-window spans record nothing and report Recorded.
+enum class GraphicsGdsTransferResult : uint8_t
+{
+	Recorded,
+	// A GDS span is outside the guest window, or a same-buffer copy overlaps.
+	InvalidRange,
+	// The guest source is unaligned or not a registered GPU mapping.
+	InvalidSource,
+	// The guest destination is not a registered GPU mapping.
+	InvalidDestination,
+	// Publication staging is exhausted: complete earlier submissions, then retry.
+	StagingBudgetExhausted,
+	// The recording owns the source in another form: submit and wait, then retry.
+	ProcessorWriteBackRequired,
+	// Another queue's incomplete submission owns the source: wait for it, then retry.
+	SubmissionCompletionRequired,
+	// A texture-type writer owns the source; no byte conversion is established.
+	UnsupportedSource,
+};
+
+[[nodiscard]] GraphicsGdsTransferResult GraphicsRenderClearGds(CommandBuffer* buffer, uint64_t dw_offset, uint64_t dw_count,
+                                                               uint32_t clear_value);
+// The source is read where it is current: the guest bytes, or the device buffer whose writes on
+// the recording queue are not yet written back.
+[[nodiscard]] GraphicsGdsTransferResult GraphicsRenderWriteGdsFromMemory(CommandBuffer* buffer, uint64_t dw_offset, uint64_t src_vaddr,
+                                                                         uint64_t dw_count, SubmissionId* dependency);
+[[nodiscard]] GraphicsGdsTransferResult GraphicsRenderCopyGds(CommandBuffer* buffer, uint64_t src_dw_offset, uint64_t dst_dw_offset,
+                                                              uint64_t dw_count);
+// Publishes a GDS span to guest memory when the recording's submission is published.
+[[nodiscard]] GraphicsGdsTransferResult GraphicsRenderReadGds(CommandBuffer* buffer, uint32_t* dst, uint64_t dw_offset, uint64_t dw_count);
+
+// The command processor reads packet operands such as indirect arguments at record time; the guest
+// bytes are current only when no GPU writer, earlier in the recording or on another queue, still
+// owns newer content. Anything but Read copied nothing.
+enum class GraphicsGuestReadResult : uint8_t
+{
+	Read,
+	// The recording owns the range: submit and wait, then retry.
+	ProcessorWriteBackRequired,
+	// Another queue's incomplete submission owns the range: wait for it, then retry.
+	SubmissionCompletionRequired,
+	// A texture-type writer owns the range, or the guest bytes are unreadable.
+	Unsupported,
+};
+[[nodiscard]] GraphicsGuestReadResult GraphicsRenderReadCurrentGuestBytes(CommandBuffer* buffer, uint64_t vaddr, void* dst, uint64_t size,
+                                                                         SubmissionId* dependency);
 
 } // namespace Kyty::Libs::Graphics
 

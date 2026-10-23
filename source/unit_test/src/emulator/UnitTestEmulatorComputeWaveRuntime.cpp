@@ -80,7 +80,16 @@ TEST(EmulatorComputeWaveRuntime, BuildsPaired64AndNative32LayoutsWithoutChanging
 	EXPECT_EQ(plan.wave_layout.strategy, ShaderComputeWaveStrategy::Native);
 	EXPECT_EQ(plan.wave_layout.guest_wave_size, 32u);
 	EXPECT_EQ(plan.wave_layout.guest_local[0], 16u);
-	EXPECT_EQ(plan.wave_layout.physical_local[0], 16u);
+	EXPECT_EQ(plan.wave_layout.physical_local[0], 128u);
+	EXPECT_EQ(plan.wave_layout.physical_local[1], 1u);
+
+	// A group smaller than one wave launches one whole host subgroup.
+	request.local_size[0] = request.local_size[1] = 1u;
+	ASSERT_EQ(ShaderBuildComputeWaveDispatchPlan(request, capabilities, &plan).status, ShaderComputeWavePreflightStatus::Supported);
+	EXPECT_EQ(plan.wave_layout.guest_local[0], 1u);
+	EXPECT_EQ(plan.wave_layout.physical_local[0], 32u);
+	EXPECT_EQ(plan.wave_layout.physical_local[1], 1u);
+	EXPECT_EQ(plan.wave_layout.physical_local[2], 1u);
 
 	request                       = Request(true, 0x43u);
 	request.raw_dispatch_count[1] = 0u;

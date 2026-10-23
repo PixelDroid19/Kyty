@@ -195,7 +195,9 @@ TEST(EmulatorShaderResourcePointers, SparseSharpSlotsDoNotConsumeDescriptorStora
 	end = snapshot.size();
 	EXPECT_TRUE(ShaderGen5EudExpandEndDwordsForSharpImages(&data, 16, snapshot.data(), snapshot.size(), &end));
 	EXPECT_EQ(end, snapshot.size());
-	sharps.back().offset_dw = 32 + SHADER_GEN5_EUD_MAX_DWORDS;
+	// Offset 30 lies between the 16-word user-SGPR window and EUD base 32.
+	// A descriptor starting in that gap is unsupported.
+	sharps.back().offset_dw = 30;
 	EXPECT_FALSE(ShaderGen5EudRequiredEndDwords(&data, 16, 14, nullptr, 0, &end));
 	EXPECT_FALSE(ShaderGen5EudExpandEndDwordsForSharpImages(&data, 16, snapshot.data(), snapshot.size(), &end));
 }
@@ -384,6 +386,76 @@ TEST(EmulatorShaderResourcePointers, DirectStorageSpanContainedBySrtRemainsBinda
 	ASSERT_EQ(bind.storage_buffers.buffers_num, 1);
 	EXPECT_EQ(bind.storage_buffers.start_register[0], 0);
 	EXPECT_EQ(usage.storage_buffers_readonly, 1);
+}
+
+TEST(EmulatorShaderResourcePointers, ZeroSBufferLoadToVccHiEmitsValidStoreBeforeScalarMove)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	input.bind.zero_sbuffer_resources.start_register[0] = 20;
+	input.bind.zero_sbuffer_resources.buffers_num       = 1;
+
+	ShaderInstruction load {};
+	load.pc                  = 0;
+	load.type                = ShaderInstructionType::SBufferLoadDword;
+	load.format              = ShaderInstructionFormat::SdstSvSoffset;
+	load.dst                 = {.type = ShaderOperandType::VccHi, .register_id = 0, .size = 1};
+	load.src[0]              = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 4};
+	load.src[1].type         = ShaderOperandType::IntegerInlineConstant;
+	load.src[1].size         = 0;
+	load.src_num             = 2;
+	load.smem_imm_offset      = 64;
+	ShaderInstruction move {};
+	move.pc                  = 8;
+	move.type                = ShaderInstructionType::SMovB32;
+	move.format              = ShaderInstructionFormat::SVdstSVsrc0;
+	move.dst                 = {.type = ShaderOperandType::Sgpr, .register_id = 18, .size = 1};
+	move.src[0].type         = ShaderOperandType::FloatInlineConstant;
+	move.src[0].constant.f   = 0.3333f;
+	move.src[0].size         = 0;
+	move.src_num             = 1;
+	ShaderInstruction end {};
+	end.pc     = 12;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(load);
+	code.GetInstructions().Add(move);
+	code.GetInstructions().Add(end);
+
+	const auto source    = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	const auto vcc_store = source.FindIndex("OpStore %vcc_hi %uint_0");
+	const auto move_store = source.FindIndex("OpStore %s18");
+	EXPECT_NE(vcc_store, Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpStore % %uint_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(move_store, Core::STRING8_INVALID_INDEX);
+	EXPECT_LT(vcc_store, move_store);
+
+	class ValidationConfig final: public Config::ConfigSource
+	{
+	public:
+		explicit ValidationConfig(bool enabled): m_enabled(enabled) {}
+		bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+		int64_t GetInteger(const Core::String&) const override { return 0; }
+		bool GetBool(const Core::String&) const override { return m_enabled; }
+		Core::String GetString(const Core::String&) const override { return {}; }
+
+	private:
+		bool m_enabled;
+	};
+	const ValidationConfig restore(Config::ShaderValidationEnabled());
+	Config::Load(ValidationConfig(true));
+	Vector<uint32_t> binary;
+	String8 error;
+	const bool valid = ShaderToolchain::Run(source, &binary, &error);
+	Config::Load(restore);
+	EXPECT_TRUE(valid) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
 }
 
 UT_END();

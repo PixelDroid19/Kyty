@@ -113,12 +113,19 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		}
 	} else if (target == 0x08u && dst->GetType() == ShaderType::Pixel)
 	{
-		// RDNA2 Table 56: target 8 is pixel Z. Only the captured full-precision
-		// one-channel form is accepted; all other target-8 encodings remain strict.
-		if (done != 0 && compr == 0 && vm != 0 && en == 0x1u)
+		// RDNA2 Table 56: target 8 is pixel Z. Only the full-precision depth-only
+		// form is accepted, as the last export or ahead of the color exports;
+		// stencil, sample-mask and alpha channels remain strict.
+		if (compr == 0 && vm != 0 && en == 0x1u)
 		{
-			inst.format  = ShaderInstructionFormat::PixelZVsrc0VmDone;
+			inst.format  = done != 0 ? ShaderInstructionFormat::PixelZVsrc0VmDone : ShaderInstructionFormat::PixelZVsrc0Vm;
 			inst.src_num = 1;
+		} else if (done != 0 && compr == 0 && vm != 0 && en == 0u)
+		{
+			// With no channel enabled the export carries only the valid mask and
+			// DONE, exactly like the NULL target (a discard tail).
+			inst.format  = ShaderInstructionFormat::NullVmDone;
+			inst.src_num = 0;
 		}
 	} else if (target == 0x09u && next_gen && dst->GetType() == ShaderType::Pixel)
 	{
@@ -133,15 +140,26 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		if (done != 0 && en == 0xfu)
 		{
 			inst.format = ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done;
+		} else if (next_gen && dst->GetType() == ShaderType::Vertex && done == 0 && compr == 0 && vm == 0 && en == 0xfu)
+		{
+			inst.format = ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3;
 		}
 	} else if (target == 0x0du && dst->GetType() == ShaderType::Vertex && Config::IsNextGen())
 	{
-		// Z is the only source in this form. DONE marks the last position
-		// export, so both intermediate and final miscellaneous exports are valid.
+		// Preserve physical Z or non-final X. The position-format/output-control
+		// state determines their meaning when the instruction is lowered.
 		if (compr == 0 && vm == 0 && en == 0x4u)
 		{
 			inst.format  = ShaderInstructionFormat::Pos1OffOffVsrc0Off;
 			inst.src[0]  = inst.src[2];
+			inst.src_num = 1;
+		} else if (compr == 0 && vm == 0 && done != 0 && en == 0x1u)
+		{
+			inst.format  = ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone;
+			inst.src_num = 1;
+		} else if (compr == 0 && vm == 0 && done == 0 && en == 0x1u)
+		{
+			inst.format  = ShaderInstructionFormat::Pos1Vsrc0OffOffOff;
 			inst.src_num = 1;
 		}
 	} else if (target == 0x14u)
@@ -153,88 +171,31 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		}
 	}
 
-	// GCN/GFX: parameter exports use targets 0x20+N (N = param index, up to 31).
-	if (inst.format == ShaderInstructionFormat::Unknown && done == 0 && compr == 0 && vm == 0 && en == 0xf)
+	// RDNA2 EXP targets 0x20..0x3f are PARAM0..31. Table 56 assigns each
+	// uncompressed EN bit to the corresponding physical VSRC slot; EN=0 is the
+	// NULL form and is not a data export.
+	static constexpr ShaderInstructionFormat::Format k_parameter_formats[] = {
+	    ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3,  ShaderInstructionFormat::Param1Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param2Vsrc0Vsrc1Vsrc2Vsrc3,  ShaderInstructionFormat::Param3Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param4Vsrc0Vsrc1Vsrc2Vsrc3,  ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3,  ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param8Vsrc0Vsrc1Vsrc2Vsrc3,  ShaderInstructionFormat::Param9Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param10Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param11Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param12Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param13Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param14Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param15Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param16Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param17Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param18Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param19Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param20Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param21Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param22Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param23Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param24Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param25Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param26Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param27Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param28Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param29Vsrc0Vsrc1Vsrc2Vsrc3,
+	    ShaderInstructionFormat::Param30Vsrc0Vsrc1Vsrc2Vsrc3, ShaderInstructionFormat::Param31Vsrc0Vsrc1Vsrc2Vsrc3,
+	};
+	if (inst.format == ShaderInstructionFormat::Unknown && target >= 0x20u && target <= 0x3fu && done == 0u && compr == 0u &&
+	    vm == 0u && en != 0u)
 	{
-		switch (target)
-		{
-			case 0x20: inst.format = ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x21: inst.format = ShaderInstructionFormat::Param1Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x22: inst.format = ShaderInstructionFormat::Param2Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x23: inst.format = ShaderInstructionFormat::Param3Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x24: inst.format = ShaderInstructionFormat::Param4Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x25: inst.format = ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x26: inst.format = ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x27: inst.format = ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x28: inst.format = ShaderInstructionFormat::Param8Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x29: inst.format = ShaderInstructionFormat::Param9Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2a: inst.format = ShaderInstructionFormat::Param10Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2b: inst.format = ShaderInstructionFormat::Param11Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2c: inst.format = ShaderInstructionFormat::Param12Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2d: inst.format = ShaderInstructionFormat::Param13Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2e: inst.format = ShaderInstructionFormat::Param14Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2f: inst.format = ShaderInstructionFormat::Param15Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x30: inst.format = ShaderInstructionFormat::Param16Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x31: inst.format = ShaderInstructionFormat::Param17Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x32: inst.format = ShaderInstructionFormat::Param18Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x33: inst.format = ShaderInstructionFormat::Param19Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x34: inst.format = ShaderInstructionFormat::Param20Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x35: inst.format = ShaderInstructionFormat::Param21Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x36: inst.format = ShaderInstructionFormat::Param22Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x37: inst.format = ShaderInstructionFormat::Param23Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x38: inst.format = ShaderInstructionFormat::Param24Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x39: inst.format = ShaderInstructionFormat::Param25Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3a: inst.format = ShaderInstructionFormat::Param26Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3b: inst.format = ShaderInstructionFormat::Param27Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3c: inst.format = ShaderInstructionFormat::Param28Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3d: inst.format = ShaderInstructionFormat::Param29Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3e: inst.format = ShaderInstructionFormat::Param30Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3f: inst.format = ShaderInstructionFormat::Param31Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			default: break;
-		}
-	}
-
-	// Fallback: parameter exports with a partial channel mask (en != 0xf) still
-	// map to the full ParamN format for bring-up — unwritten channels read
-	// whatever is in the vsrc regs, which is harmless for a param.
-	if (inst.format == ShaderInstructionFormat::Unknown && done == 0 && compr == 0 && vm == 0)
-	{
-		switch (target)
-		{
-			case 0x20: inst.format = ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x21: inst.format = ShaderInstructionFormat::Param1Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x22: inst.format = ShaderInstructionFormat::Param2Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x23: inst.format = ShaderInstructionFormat::Param3Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x24: inst.format = ShaderInstructionFormat::Param4Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x25: inst.format = ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x26: inst.format = ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x27: inst.format = ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x28: inst.format = ShaderInstructionFormat::Param8Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x29: inst.format = ShaderInstructionFormat::Param9Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2a: inst.format = ShaderInstructionFormat::Param10Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2b: inst.format = ShaderInstructionFormat::Param11Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2c: inst.format = ShaderInstructionFormat::Param12Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2d: inst.format = ShaderInstructionFormat::Param13Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2e: inst.format = ShaderInstructionFormat::Param14Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x2f: inst.format = ShaderInstructionFormat::Param15Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x30: inst.format = ShaderInstructionFormat::Param16Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x31: inst.format = ShaderInstructionFormat::Param17Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x32: inst.format = ShaderInstructionFormat::Param18Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x33: inst.format = ShaderInstructionFormat::Param19Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x34: inst.format = ShaderInstructionFormat::Param20Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x35: inst.format = ShaderInstructionFormat::Param21Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x36: inst.format = ShaderInstructionFormat::Param22Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x37: inst.format = ShaderInstructionFormat::Param23Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x38: inst.format = ShaderInstructionFormat::Param24Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x39: inst.format = ShaderInstructionFormat::Param25Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3a: inst.format = ShaderInstructionFormat::Param26Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3b: inst.format = ShaderInstructionFormat::Param27Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3c: inst.format = ShaderInstructionFormat::Param28Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3d: inst.format = ShaderInstructionFormat::Param29Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3e: inst.format = ShaderInstructionFormat::Param30Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			case 0x3f: inst.format = ShaderInstructionFormat::Param31Vsrc0Vsrc1Vsrc2Vsrc3; break;
-			default: break;
-		}
+		inst.format = k_parameter_formats[target - 0x20u];
 	}
 
 	if (inst.format == ShaderInstructionFormat::Unknown)

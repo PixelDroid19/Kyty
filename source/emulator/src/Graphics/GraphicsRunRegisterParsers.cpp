@@ -66,28 +66,28 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_aa_config)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_aa_sample_control)
 {
-	if (cmd_id != 0xc0106900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0106900 condition ignored (continuing)\n"); }
-	if (cmd_offset != Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0 condition ignored (continuing)\n"); }
-
-	uint32_t count = 1;
-
-	if (dw >= 20 && buffer[16] == 0xc0026900 && buffer[17] == Pm4::PA_SC_CENTROID_PRIORITY_0)
+	if (cmd_id != 0xc0106900u || cmd_offset != Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0 || dw != 16u)
 	{
-		count = 20;
-
-		HW::AaSampleControl r;
-
-		memcpy(r.locations, buffer, static_cast<size_t>(16) * 4);
-
-		r.centroid_priority = static_cast<uint64_t>(buffer[18]) | (static_cast<uint64_t>(buffer[19]) << 32u);
-
-		cp->GetCtx()->SetAaSampleControl(r);
-	} else
+		EXIT("invalid AA sample control packet: cmd_id=0x%08" PRIx32 " offset=0x%08" PRIx32 " value_dw=%" PRIu32 "\n", cmd_id, cmd_offset,
+		     dw);
+	}
+	constexpr uint32_t next_packet_offset = 16u;
+	constexpr uint32_t next_packet_header = 0xc0026900u;
+	if (!GraphicsRunType3PacketAt(buffer, available_dw, next_packet_offset, next_packet_header))
 	{
-		KYTY_NOT_IMPLEMENTED;
+		EXIT("truncated or invalid AA centroid priority packet\n");
+	}
+	if (buffer[next_packet_offset + 1u] != Pm4::PA_SC_CENTROID_PRIORITY_0)
+	{
+		EXIT("invalid AA centroid priority register offset: 0x%08" PRIx32 "\n", buffer[next_packet_offset + 1u]);
 	}
 
-	return count;
+	HW::AaSampleControl r;
+	memcpy(r.locations, buffer, sizeof(r.locations));
+	r.centroid_priority = static_cast<uint64_t>(buffer[18]) | (static_cast<uint64_t>(buffer[19]) << 32u);
+	cp->GetCtx()->SetAaSampleControl(r);
+
+	return 20u;
 }
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_blend_color)
@@ -172,6 +172,16 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_color_control)
 	return 1;
 }
 
+KYTY_HW_CTX_PARSER(hw_ctx_set_alpha_to_mask)
+{
+	if (cmd_id != 0xc0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_ALPHA_TO_MASK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_ALPHA_TO_MASK condition ignored (continuing)\n"); }
+
+	cp->GetCtx()->SetAlphaToMaskEnable(KYTY_PM4_GET(buffer[0], DB_ALPHA_TO_MASK, ALPHA_TO_MASK_ENABLE) != 0);
+
+	return 1;
+}
+
 KYTY_HW_CTX_PARSER(hw_ctx_set_color_info)
 {
 	if (cmd_id != 0xc0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0016900 condition ignored (continuing)\n"); }
@@ -204,18 +214,23 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_depth_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_depth_render_target)
 {
-	if (cmd_offset != Pm4::DB_Z_INFO) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_Z_INFO condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_Z_INFO)
+	{
+		EXIT("invalid depth render target register offset: 0x%08" PRIx32 "\n", cmd_offset);
+	}
 
 	uint32_t count = 1;
 
-	if (cmd_id == 0xC0016900)
+	if (cmd_id == 0xC0016900 && dw == 1u)
 	{
 		cp->GetCtx()->SetDepthZInfo(State::DecodeDepthZInfo(buffer[0]));
-	} else if (cmd_id == 0xC0086900)
+	} else if (cmd_id == 0xC0086900 && dw == 8u)
 	{
-		if (dw >= 22 && buffer[8] == 0xC0016900 && buffer[9] == Pm4::DB_DEPTH_INFO && buffer[11] == 0xC0016900 &&
-		    buffer[12] == Pm4::DB_DEPTH_VIEW && buffer[14] == 0xC0016900 && buffer[15] == Pm4::DB_HTILE_DATA_BASE &&
-		    buffer[17] == 0xC0016900 && buffer[18] == Pm4::DB_HTILE_SURFACE && buffer[20] == 0xC0001000)
+		if (GraphicsRunType3PacketAt(buffer, available_dw, 8u, 0xC0016900u) && buffer[9] == Pm4::DB_DEPTH_INFO &&
+		    GraphicsRunType3PacketAt(buffer, available_dw, 11u, 0xC0016900u) && buffer[12] == Pm4::DB_DEPTH_VIEW &&
+		    GraphicsRunType3PacketAt(buffer, available_dw, 14u, 0xC0016900u) && buffer[15] == Pm4::DB_HTILE_DATA_BASE &&
+		    GraphicsRunType3PacketAt(buffer, available_dw, 17u, 0xC0016900u) && buffer[18] == Pm4::DB_HTILE_SURFACE &&
+		    GraphicsRunType3PacketAt(buffer, available_dw, 20u, 0xC0001000u))
 		{
 			count = 22;
 
@@ -268,11 +283,11 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_depth_render_target)
 			cp->GetCtx()->SetDepthRenderTarget(z);
 		} else
 		{
-			KYTY_NOT_IMPLEMENTED;
+			EXIT("truncated or invalid depth render target lookahead packet\n");
 		}
 	} else
 	{
-		KYTY_NOT_IMPLEMENTED;
+		EXIT("invalid depth render target packet: cmd_id=0x%08" PRIx32 " value_dw=%" PRIu32 "\n", cmd_id, dw);
 	}
 
 	return count;
@@ -426,7 +441,10 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_render_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_render_target)
 {
-	if (cmd_id != 0xC00E6900 && cmd_id != 0xC00B6900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC00E6900 && cmd_id != 0xC00B6900 condition ignored (continuing)\n"); }
+	if ((cmd_id != 0xC00E6900u || dw != 14u) && (cmd_id != 0xC00B6900u || dw != 11u))
+	{
+		EXIT("invalid color render target packet: cmd_id=0x%08" PRIx32 " value_dw=%" PRIu32 "\n", cmd_id, dw);
+	}
 
 	uint32_t slot = (cmd_offset - Pm4::CB_COLOR0_BASE) / 15;
 
@@ -522,8 +540,13 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_render_target)
 		ctx->SetColorDccAddr(slot, dcc_addr);
 	}
 
-	if (dw >= count + 2 && buffer[count] == 0xC0001000)
+	if (available_dw > count && buffer[count] == 0xC0001000u)
 	{
+		if (!GraphicsRunType3PacketAt(buffer, available_dw, count, 0xC0001000u))
+		{
+			EXIT("truncated color target size packet\n");
+		}
+
 		HW::ColorSize size;
 
 		size.width  = (buffer[count + 1] >> 0u) & 0xffffu;
@@ -990,7 +1013,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_vs_user_sgpr)
 
 KYTY_HW_SH_PARSER(hw_sh_set_es_rsrc1)
 {
-	EXIT_IF(cmd_offset != Pm4::SPI_SHADER_PGM_RSRC1_ES || ((cmd_id >> 16u) & 0x3fffu) != 1u || dw < 2u);
+	EXIT_IF(cmd_offset != Pm4::SPI_SHADER_PGM_RSRC1_ES || ((cmd_id >> 16u) & 0x3fffu) != 1u || dw != 1u);
 	cp->GetShCtx()->SetEsShaderResource1(buffer[0]);
 	return 1;
 }
@@ -999,7 +1022,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_gs_user_data_address)
 {
 	const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
 	EXIT_IF(cmd_offset < Pm4::SPI_SHADER_USER_DATA_ADDR_LO_GS || cmd_offset > Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS);
-	EXIT_IF(count == 0 || count > Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS - cmd_offset + 1u || count + 1u > dw);
+	EXIT_IF(count == 0 || count != dw || count > Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS - cmd_offset + 1u);
 	for (uint32_t i = 0; i < count; ++i)
 	{
 		if (cmd_offset + i == Pm4::SPI_SHADER_USER_DATA_ADDR_LO_GS)

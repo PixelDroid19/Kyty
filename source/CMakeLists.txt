@@ -260,7 +260,7 @@ if(KYTY_BUILD_UNIT_TESTS)
 		math
 		scripts
 		lua
-		SDL2-static
+		SDL3-static
 		emulator
 		kyty_agent_transport
 	)
@@ -319,7 +319,7 @@ target_link_libraries(fc_script sys)
 target_link_libraries(fc_script math)
 target_link_libraries(fc_script scripts)
 target_link_libraries(fc_script lua)
-target_link_libraries(fc_script SDL2-static)
+target_link_libraries(fc_script SDL3-static)
 target_link_libraries(fc_script emulator)
 target_link_libraries(fc_script kyty_agent_transport)
 target_link_libraries(fc_script kyty_runtime_devtools)

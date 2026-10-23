@@ -319,6 +319,11 @@ QString LauncherBackend::SaveGlobal(const QVariantMap& fields)
 	return error;
 }
 
+QVariantMap LauncherBackend::GraphicsPreset(const QVariantMap& fields, const QString& preset) const
+{
+	return ApplyGraphicsPreset(fields, preset);
+}
+
 QVariantMap LauncherBackend::Choices() const
 {
 	return ConfigurationChoices();

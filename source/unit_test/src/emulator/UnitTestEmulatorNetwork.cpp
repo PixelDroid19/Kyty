@@ -80,6 +80,21 @@ uint16_t LoadGuestSockaddrPort(const uint8_t* address)
 	return static_cast<uint16_t>((static_cast<uint16_t>(address[2]) << 8u) | address[3]);
 }
 
+// A P2P datagram address carries its virtual port in bytes 8-9, in network order.
+void StoreGuestP2pSockaddr(uint8_t* address, uint16_t port, uint16_t vport)
+{
+	ASSERT_NE(address, nullptr);
+	std::memset(address, 0, 16);
+	StoreGuestSockaddr(address, port);
+	address[8] = static_cast<uint8_t>(vport >> 8u);
+	address[9] = static_cast<uint8_t>(vport & 0xffu);
+}
+
+uint16_t LoadGuestSockaddrVport(const uint8_t* address)
+{
+	return static_cast<uint16_t>((static_cast<uint16_t>(address[8]) << 8u) | address[9]);
+}
+
 bool WaitForFlag(const std::atomic<bool>& flag, std::chrono::milliseconds timeout)
 {
 	const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -307,7 +322,7 @@ TEST(EmulatorNetwork, NetCtlNatInfoAndScalarOutputsUseGuestMemory)
 	EXPECT_EQ(nat_info->nat_type, 3);
 	EXPECT_EQ(nat_info->mapped_addr, 0x7f000001u);
 	ASSERT_EQ(get_state(state), 0);
-	EXPECT_EQ(*state, 0);
+	EXPECT_EQ(*state, 3);
 	ASSERT_EQ(register_callback(nullptr, nullptr, cid), 0);
 	EXPECT_EQ(*cid, 1);
 
@@ -583,7 +598,6 @@ TEST(EmulatorNetwork, NetRejectsOversizedStagingBeforeGuestAccess)
 	EXPECT_EQ(NetSendto(socket_id, invalid_guest, 65'508, 0, guest_bytes, 8), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
 	// A receive buffer longer than any datagram is valid; only its range is checked.
 	EXPECT_EQ(NetRecv(socket_id, invalid_output, 65'508, 0), Kyty::Libs::Network::NET_ERROR_EFAULT);
-	EXPECT_EQ(NetGetSockInfo(socket_id, invalid_output, 65'537, 0), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
 	EXPECT_EQ(NetEpollWait(1, invalid_output, 1025, 0), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
 
 	EXPECT_EQ(NetSocketClose(socket_id), 0);
@@ -707,6 +721,231 @@ TEST(EmulatorNetwork, NetLoopbackDatagramAndPeerLifecycle)
 	EXPECT_EQ(NetSocketClose(client), 0);
 	EXPECT_EQ(::close(accepted), 0);
 	EXPECT_EQ(::close(listener), 0);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+#endif
+}
+
+TEST(EmulatorNetwork, NetInetPtonWritesNetworkOrder)
+{
+	using namespace Libs::Network::Net;
+
+	const uint64_t guest_storage = AllocateGuestPage();
+	ASSERT_NE(guest_storage, 0u);
+	auto* const text    = reinterpret_cast<char*>(guest_storage);
+	auto* const address = reinterpret_cast<uint8_t*>(guest_storage + 64);
+
+	std::strcpy(text, "127.0.0.1");
+	ASSERT_EQ(NetInetPton(2, text, address), 1);
+	const uint8_t loopback[4] {127, 0, 0, 1};
+	EXPECT_EQ(std::memcmp(address, loopback, sizeof(loopback)), 0);
+
+	std::strcpy(text, "::1");
+	ASSERT_EQ(NetInetPton(28, text, address), 1);
+	EXPECT_EQ(address[0], 0u);
+	EXPECT_EQ(address[15], 1u);
+
+	std::strcpy(text, "127.0.0");
+	EXPECT_EQ(NetInetPton(2, text, address), 0);
+	EXPECT_EQ(NetInetPton(1, text, address), Kyty::Libs::Network::NET_ERROR_EAFNOSUPPORT);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+}
+
+TEST(EmulatorNetwork, NetP2pDatagramVirtualPorts)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX
+	GTEST_SKIP() << "host socket integration is Linux-specific";
+#else
+	using namespace Libs::Network::Net;
+
+	const uint64_t guest_storage = AllocateGuestPage();
+	ASSERT_NE(guest_storage, 0u);
+	auto* const guest_bytes = reinterpret_cast<uint8_t*>(guest_storage);
+	auto* const name        = guest_bytes + 32;
+	auto* const name_len    = reinterpret_cast<uint32_t*>(guest_bytes + 48);
+
+	// A UDP socket and a P2P virtual port with the same number do not collide.
+	StoreGuestSockaddr(guest_bytes, 0);
+	const int udp = NetSocket("network-udp", 2, 2, 0);
+	ASSERT_GT(udp, 0);
+	ASSERT_EQ(NetBind(udp, guest_bytes, 8), 0);
+	*name_len = 8;
+	ASSERT_EQ(NetGetsockname(udp, name, reinterpret_cast<int*>(name_len)), 0);
+	const uint16_t udp_port = LoadGuestSockaddrPort(name);
+
+	// Two sockets share one P2P port and are told apart by their virtual ports.
+	constexpr uint16_t kP2pPort = 3658;
+	const uint16_t     vports[2] {udp_port, static_cast<uint16_t>(udp_port + 1u)};
+	int                sockets[2] {};
+	for (int index = 0; index < 2; ++index)
+	{
+		sockets[index] = NetSocket("network-p2p", 2, 6, 0);
+		ASSERT_GT(sockets[index], 0);
+		StoreGuestP2pSockaddr(guest_bytes, kP2pPort, vports[index]);
+		ASSERT_EQ(NetBind(sockets[index], guest_bytes, 16), 0);
+	}
+	const int duplicate = NetSocket("network-p2p-duplicate", 2, 6, 0);
+	ASSERT_GT(duplicate, 0);
+	StoreGuestP2pSockaddr(guest_bytes, kP2pPort, vports[0]);
+	EXPECT_EQ(NetBind(duplicate, guest_bytes, 16), Kyty::Libs::Network::NET_ERROR_EADDRINUSE);
+
+	*name_len = 16;
+	ASSERT_EQ(NetGetsockname(sockets[0], name, reinterpret_cast<int*>(name_len)), 0);
+	EXPECT_EQ(LoadGuestSockaddrPort(name), kP2pPort);
+	EXPECT_EQ(LoadGuestSockaddrVport(name), vports[0]);
+
+	constexpr char packet[] = "p2p";
+	std::memcpy(guest_bytes + 64, packet, sizeof(packet));
+	StoreGuestP2pSockaddr(guest_bytes, kP2pPort, vports[0]);
+	ASSERT_EQ(NetSendto(sockets[1], guest_bytes + 64, sizeof(packet), 0, guest_bytes, 16), static_cast<int64_t>(sizeof(packet)));
+	*name_len = 16;
+	ASSERT_EQ(NetRecvfrom(sockets[0], guest_bytes + 96, sizeof(packet), 0, name, name_len), static_cast<int64_t>(sizeof(packet)));
+	EXPECT_EQ(std::memcmp(guest_bytes + 96, packet, sizeof(packet)), 0);
+	EXPECT_EQ(LoadGuestSockaddrPort(name), kP2pPort);
+	EXPECT_EQ(LoadGuestSockaddrVport(name), vports[1]);
+
+	// Closing an endpoint frees its virtual port and makes it unreachable.
+	EXPECT_EQ(NetSocketClose(sockets[0]), 0);
+	EXPECT_EQ(NetSendto(sockets[1], guest_bytes + 64, sizeof(packet), 0, guest_bytes, 16), Kyty::Libs::Network::NET_ERROR_EHOSTUNREACH);
+	EXPECT_EQ(NetBind(duplicate, guest_bytes, 16), 0);
+
+	EXPECT_EQ(NetSocketClose(duplicate), 0);
+	EXPECT_EQ(NetSocketClose(sockets[1]), 0);
+	EXPECT_EQ(NetSocketClose(udp), 0);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+#endif
+}
+
+// Guest msghdr (BSD x86-64): name, namelen, iov, iovlen, control, controllen, flags.
+struct GuestTestMsghdr
+{
+	uint64_t name;
+	uint32_t name_len;
+	uint32_t pad0;
+	uint64_t iov;
+	int32_t  iov_len;
+	uint32_t pad1;
+	uint64_t control;
+	uint32_t control_len;
+	int32_t  flags;
+};
+static_assert(sizeof(GuestTestMsghdr) == 48);
+
+TEST(EmulatorNetwork, NetMsgDatagramGathersAndScatters)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX
+	GTEST_SKIP() << "host socket integration is Linux-specific";
+#else
+	using namespace Libs::Network::Net;
+
+	const uint64_t guest_storage = AllocateGuestPage();
+	ASSERT_NE(guest_storage, 0u);
+	auto* const guest_bytes = reinterpret_cast<uint8_t*>(guest_storage);
+	auto* const address     = guest_bytes;
+	auto* const iovecs      = reinterpret_cast<uint64_t*>(guest_bytes + 64);
+	auto* const header      = reinterpret_cast<GuestTestMsghdr*>(guest_bytes + 128);
+	auto* const data        = guest_bytes + 256;
+
+	StoreGuestSockaddr(address, 0);
+	const int socket = NetSocket("network-msg", 2, 2, 0);
+	ASSERT_GT(socket, 0);
+	ASSERT_EQ(NetBind(socket, address, 8), 0);
+	auto* const name_len = reinterpret_cast<int*>(guest_bytes + 48);
+	*name_len            = 8;
+	ASSERT_EQ(NetGetsockname(socket, address, name_len), 0);
+	const uint16_t port = LoadGuestSockaddrPort(address);
+
+	// sendmsg gathers two iovecs into one datagram.
+	std::memcpy(data, "abcdef", 6);
+	iovecs[0] = reinterpret_cast<uint64_t>(data);
+	iovecs[1] = 2;
+	iovecs[2] = reinterpret_cast<uint64_t>(data + 2);
+	iovecs[3] = 4;
+	*header          = {};
+	header->name     = reinterpret_cast<uint64_t>(address);
+	header->name_len = 16;
+	header->iov      = reinterpret_cast<uint64_t>(iovecs);
+	header->iov_len  = 2;
+	ASSERT_EQ(NetSendmsg(socket, header, 0), 6);
+
+	// recvmsg scatters it across iovecs and reports the sender, no control data and no flags.
+	std::memset(data, 0, 16);
+	iovecs[0] = reinterpret_cast<uint64_t>(data);
+	iovecs[1] = 3;
+	iovecs[2] = reinterpret_cast<uint64_t>(data + 8);
+	iovecs[3] = 8;
+	std::memset(address, 0, 16);
+	header->name_len    = 16;
+	header->control_len = 4;
+	header->flags       = -1;
+	ASSERT_EQ(NetRecvmsg(socket, header, 0), 6);
+	EXPECT_EQ(std::memcmp(data, "abc", 3), 0);
+	EXPECT_EQ(std::memcmp(data + 8, "def", 3), 0);
+	EXPECT_EQ(header->name_len, 16u);
+	EXPECT_EQ(LoadGuestSockaddrPort(address), port);
+	EXPECT_EQ(header->control_len, 0u);
+	EXPECT_EQ(header->flags, 0);
+
+	// A datagram larger than the iovecs is truncated and flagged with the BSD MSG_TRUNC value.
+	header->control_len = 0;
+	header->iov_len     = 2;
+	iovecs[1]           = 2;
+	iovecs[3]           = 4;
+	StoreGuestSockaddr(address, port);
+	std::memcpy(data, "abcdef", 6);
+	iovecs[2] = reinterpret_cast<uint64_t>(data + 2);
+	ASSERT_EQ(NetSendmsg(socket, header, 0), 6);
+	header->iov_len = 1;
+	ASSERT_EQ(NetRecvmsg(socket, header, 0), 2);
+	EXPECT_EQ(header->flags, 0x10);
+
+	// Ancillary data cannot be sent.
+	header->control     = reinterpret_cast<uint64_t>(data + 64);
+	header->control_len = 16;
+	EXPECT_EQ(NetSendmsg(socket, header, 0), Kyty::Libs::Network::NET_ERROR_EOPNOTSUPP);
+
+	EXPECT_EQ(NetSocketClose(socket), 0);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+#endif
+}
+
+// A title waits for its bound P2P socket to report state 2 (opened) in the
+// 160-byte record, matching on the socket id at 0x24 and type 6 at 0x28.
+TEST(EmulatorNetwork, NetGetSockInfoReportsBoundP2pSocket)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX
+	GTEST_SKIP() << "host socket integration is Linux-specific";
+#else
+	using namespace Libs::Network::Net;
+
+	const uint64_t guest_storage = AllocateGuestPage();
+	ASSERT_NE(guest_storage, 0u);
+	auto* const guest_bytes = reinterpret_cast<uint8_t*>(guest_storage);
+	auto* const records     = guest_bytes + 64;
+
+	const int socket = NetSocket("network-sockinfo", 2, 6, 0);
+	ASSERT_GT(socket, 0);
+	StoreGuestP2pSockaddr(guest_bytes, 3658, 10999);
+	ASSERT_EQ(NetBind(socket, guest_bytes, 16), 0);
+
+	ASSERT_EQ(NetGetSockInfo(socket, records, 8, 0), 1);
+	int32_t id = 0;
+	int32_t state = 0;
+	std::memcpy(&id, records + 0x24, sizeof(id));
+	std::memcpy(&state, records + 0x44, sizeof(state));
+	EXPECT_EQ(id, socket);
+	EXPECT_EQ(records[0x28], 6u);
+	EXPECT_EQ(state, 2);
+	// Ports are in network byte order: local_port at 0x3c, local_vport at 0x40.
+	EXPECT_EQ(LoadGuestSockaddrPort(records + 0x3c - 2), 3658u);
+	EXPECT_EQ(LoadGuestSockaddrPort(records + 0x40 - 2), 10999u);
+
+	const int all = NetGetSockInfo(-1, nullptr, 0, 0);
+	EXPECT_GE(all, 1);
+	EXPECT_EQ(NetGetSockInfo(-1, records, 1, 0), 1);
+	EXPECT_EQ(NetGetSockInfo(socket, nullptr, 1, 0), Kyty::Libs::Network::NET_ERROR_EINVAL);
+
+	EXPECT_EQ(NetSocketClose(socket), 0);
+	EXPECT_EQ(NetGetSockInfo(socket, records, 1, 0), Kyty::Libs::Network::NET_ERROR_EBADF);
 	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
 #endif
 }

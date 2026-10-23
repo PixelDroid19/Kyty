@@ -1,5 +1,8 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Graphics/RenderResolutionShaderUsageCache.h"
+#include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 
@@ -8,8 +11,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 
 UT_BEGIN(EmulatorShaderTranslationCache);
 
@@ -214,6 +219,84 @@ TEST(EmulatorShaderTranslationCache, ExactMissCompilesOnceAndHitDoesNotInvokeCom
 	EXPECT_EQ(compiles.load(), 1u);
 	ASSERT_EQ(miss.binary.Size(), 1u);
 	EXPECT_EQ(hit.binary, miss.binary);
+}
+
+TEST(EmulatorShaderTranslationCache, PixelLdsInputsInvalidateShaderUsageAnalysis)
+{
+	RenderResolutionShaderUsageCache cache(4);
+	RenderResolutionShaderUsageKey   base_key;
+	base_key.address           = 0x1000;
+	base_key.checksum          = 0x2000;
+	base_key.translator_version = 29;
+
+	ShaderCode parsed_pixel_code;
+	parsed_pixel_code.SetType(ShaderType::Pixel);
+	ShaderInstruction color_export {};
+	color_export.type            = ShaderInstructionType::Exp;
+	color_export.format          = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone;
+	color_export.exp_enable_mask = 0x5u;
+	parsed_pixel_code.GetInstructions().Add(color_export);
+	const auto color_exports = ShaderSummarizePixelColorExports(parsed_pixel_code);
+	const auto scalar_flow   = ShaderScalarFlowOf(parsed_pixel_code);
+	EXPECT_EQ(color_exports.enable[0], 0x5u);
+	EXPECT_EQ(color_exports.full, 0x1u);
+	EXPECT_EQ(color_exports.partial_targets, 0x1u);
+
+	uint32_t analyses = 0;
+	auto analyze = [&analyses, color_exports, scalar_flow]
+	{
+		const auto analysis_number = ++analyses;
+		auto pixel_analysis = std::make_shared<ShaderImmutablePixelAnalysis>();
+		pixel_analysis->color_exports = color_exports;
+		pixel_analysis->uses_native_wave_state = true;
+		pixel_analysis->prevents_noop_pixel_elision = true;
+		pixel_analysis->has_getpc = (analysis_number == 1u);
+		pixel_analysis->has_global_memory_load = true;
+
+		RenderResolutionShaderAnalysis analysis;
+		analysis.pixel_analysis = std::move(pixel_analysis);
+		analysis.scalar_flow    = scalar_flow;
+		return analysis;
+	};
+
+	const auto miss = cache.GetOrAnalyze(base_key, analyze);
+	const auto hit  = cache.GetOrAnalyze(base_key, analyze);
+	EXPECT_FALSE(miss.hit);
+	EXPECT_TRUE(hit.hit);
+	EXPECT_EQ(analyses, 1u);
+	ASSERT_NE(miss.pixel_analysis, nullptr);
+	ASSERT_NE(hit.pixel_analysis, nullptr);
+	EXPECT_EQ(hit.pixel_analysis, miss.pixel_analysis);
+	ASSERT_NE(miss.scalar_flow, nullptr);
+	EXPECT_EQ(hit.scalar_flow, miss.scalar_flow);
+	EXPECT_EQ(hit.pixel_analysis->color_exports.enable[0], 0x5u);
+	EXPECT_EQ(hit.pixel_analysis->color_exports.full, 0x1u);
+	EXPECT_EQ(hit.pixel_analysis->color_exports.partial_targets, 0x1u);
+	EXPECT_FALSE(hit.pixel_analysis->has_only_null_exports);
+	EXPECT_TRUE(hit.pixel_analysis->uses_native_wave_state);
+	EXPECT_TRUE(hit.pixel_analysis->prevents_noop_pixel_elision);
+	EXPECT_TRUE(hit.pixel_analysis->has_getpc);
+	EXPECT_TRUE(hit.pixel_analysis->has_global_memory_load);
+
+	auto with_extra_lds = base_key;
+	with_extra_lds.pixel_extra_lds_dwords = 2;
+	const auto lds_miss = cache.GetOrAnalyze(with_extra_lds, analyze);
+	EXPECT_FALSE(lds_miss.hit);
+	EXPECT_EQ(analyses, 2u);
+	ASSERT_NE(lds_miss.pixel_analysis, nullptr);
+	EXPECT_FALSE(lds_miss.pixel_analysis->has_getpc);
+
+	auto with_parameter_sgpr = base_key;
+	with_parameter_sgpr.pixel_parameter_sgpr = 30;
+	EXPECT_FALSE(cache.GetOrAnalyze(with_parameter_sgpr, analyze).hit);
+	EXPECT_EQ(analyses, 3u);
+
+	auto with_new_checksum = base_key;
+	with_new_checksum.checksum++;
+	const auto checksum_miss = cache.GetOrAnalyze(with_new_checksum, analyze);
+	EXPECT_FALSE(checksum_miss.hit);
+	EXPECT_EQ(analyses, 4u);
+	EXPECT_EQ(checksum_miss.scalar_flow, miss.scalar_flow);
 }
 
 TEST(EmulatorShaderTranslationCache, PersistentModuleHitSkipsCompilerAcrossCacheInstances)

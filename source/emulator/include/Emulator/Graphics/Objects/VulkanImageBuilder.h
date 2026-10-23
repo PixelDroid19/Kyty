@@ -39,11 +39,12 @@ struct VulkanImageDescriptor
 [[nodiscard]] bool VulkanImageViewDescriptorsEqual(const VulkanImageViewDescriptor& a, const VulkanImageViewDescriptor& b);
 
 using VulkanImageViewCreator = bool (*)(VkDevice, const VulkanImageViewDescriptor&, VkImageView*);
-// Called under the renderer's resource lock. Injectable creation permits a CPU
+// Descriptor-specific views (sampled aliases, storage array windows) are cached on the image and
+// destroyed with it. Called under the renderer's resource lock. Injectable creation permits a CPU
 // contract test of cache identity/lifetime without a Vulkan device.
-[[nodiscard]] int VulkanGetOrCreateSampledImageView(VkDevice device, VulkanImage* image,
-                                                   const VulkanImageViewDescriptor& descriptor,
-                                                   VulkanImageViewCreator create = VulkanCreateDeviceImageView);
+[[nodiscard]] int VulkanGetOrCreateCachedImageView(VkDevice device, VulkanImage* image,
+                                                  const VulkanImageViewDescriptor& descriptor,
+                                                  VulkanImageViewCreator create = VulkanCreateDeviceImageView);
 
 // Canonical color-image view set used by render targets and video buffers.
 // Creation is atomic: a partial set is destroyed and cleared on failure.
@@ -58,7 +59,8 @@ using VulkanImageViewCreator = bool (*)(VkDevice, const VulkanImageViewDescripto
 
 // Resolve the descriptor view for a storage-image bind. Render-target arrays
 // reuse their canonical identity array view; storage textures keep their
-// dedicated normalized storage view.
+// dedicated normalized storage view. Storage-texture arrays select their window
+// per descriptor (StorageTextureResolveArrayStorageView).
 [[nodiscard]] bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index,
                                                  uint32_t base_mip_level = 0u);
 

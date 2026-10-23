@@ -10,7 +10,8 @@ namespace Kyty::Libs::Graphics {
 
 bool RenderResolutionShaderUsageKey::operator==(const RenderResolutionShaderUsageKey& other) const
 {
-	return address == other.address && checksum == other.checksum && translator_version == other.translator_version;
+	return address == other.address && checksum == other.checksum && translator_version == other.translator_version &&
+	       pixel_extra_lds_dwords == other.pixel_extra_lds_dwords && pixel_parameter_sgpr == other.pixel_parameter_sgpr;
 }
 
 namespace {
@@ -20,7 +21,9 @@ struct KeyHash
 	{
 		size_t hash = std::hash<uint64_t> {}(key.address);
 		hash ^= std::hash<uint64_t> {}(key.checksum) + 0x9e3779b9u + (hash << 6u) + (hash >> 2u);
-		return hash ^ (static_cast<size_t>(key.translator_version) + 0x9e3779b9u + (hash << 6u) + (hash >> 2u));
+		hash ^= static_cast<size_t>(key.translator_version) + 0x9e3779b9u + (hash << 6u) + (hash >> 2u);
+		hash ^= std::hash<uint32_t> {}(key.pixel_extra_lds_dwords) + 0x9e3779b9u + (hash << 6u) + (hash >> 2u);
+		return hash ^ (std::hash<int> {}(key.pixel_parameter_sgpr) + 0x9e3779b9u + (hash << 6u) + (hash >> 2u));
 	}
 };
 struct Entry
@@ -52,7 +55,9 @@ RenderResolutionShaderUsageResult RenderResolutionShaderUsageCache::GetOrAnalyze
 	if (auto found = m_state->entries.find(key); found != m_state->entries.end())
 	{
 		found->second.last_use = ++m_state->use_seq;
-		return {found->second.analysis.usage, found->second.analysis.code, true, false, found->second.analysis.native_wave};
+		return {found->second.analysis.usage, found->second.analysis.code, true, false, found->second.analysis.native_wave,
+		        found->second.analysis.pixel_analysis, found->second.analysis.scalar_flow,
+		        found->second.analysis.resource_memo};
 	}
 
 	bool evicted = false;
@@ -71,7 +76,8 @@ RenderResolutionShaderUsageResult RenderResolutionShaderUsageCache::GetOrAnalyze
 	}
 	const auto analysis = analyzer();
 	m_state->entries.emplace(key, Entry {analysis, ++m_state->use_seq});
-	return {analysis.usage, analysis.code, false, evicted, analysis.native_wave};
+	return {analysis.usage, analysis.code, false, evicted, analysis.native_wave, analysis.pixel_analysis, analysis.scalar_flow,
+	        analysis.resource_memo};
 }
 
 } // namespace Kyty::Libs::Graphics

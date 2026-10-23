@@ -4,6 +4,7 @@
 #include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderImageGradientProof.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
@@ -13,6 +14,8 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <utility>
 
 #if defined(_WIN32)
 #include <io.h>
@@ -46,6 +49,35 @@ static ShaderOperand TileConstant(uint32_t value)
 	ShaderOperand operand {.type = ShaderOperandType::IntegerInlineConstant, .size = 1};
 	operand.constant.u = value;
 	return operand;
+}
+
+static ShaderInstruction* FirstWaitcntInstruction(ShaderCode& code)
+{
+	for (auto& instruction: code.GetInstructions())
+	{
+		if (instruction.type == ShaderInstructionType::SWaitcnt) { return &instruction; }
+	}
+	return nullptr;
+}
+
+static void ExpectExactWaitcntTuple(const ShaderInstruction& instruction, uint32_t immediate)
+{
+	EXPECT_EQ(instruction.type, ShaderInstructionType::SWaitcnt);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::Imm);
+	EXPECT_EQ(instruction.sopp_opcode, 0x0cu);
+	EXPECT_EQ(instruction.src_num, 1);
+	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Unknown);
+	EXPECT_EQ(instruction.dst.size, 0);
+	EXPECT_EQ(instruction.dst2.type, ShaderOperandType::Unknown);
+	EXPECT_EQ(instruction.dst2.size, 0);
+	EXPECT_EQ(instruction.src[0].type, ShaderOperandType::LiteralConstant);
+	EXPECT_EQ(instruction.src[0].size, 0);
+	EXPECT_EQ(instruction.src[0].constant.u, immediate);
+	for (int source = 1; source < 4; ++source)
+	{
+		EXPECT_EQ(instruction.src[source].type, ShaderOperandType::Unknown);
+		EXPECT_EQ(instruction.src[source].size, 0);
+	}
 }
 
 static ShaderCode MakeFourQuadrantTileShader(bool omit_last_store = false, bool read_destination = false)
@@ -415,6 +447,486 @@ TEST(EmulatorShaderMimg, RejectsUnprovenBoundedGridStorageOverwrite)
 	rejects(MakeBoundedGridStoreShader(), bind);
 	EXPECT_EQ(AnalyzeShaderStorageImageTileCoverage(code, BoundedGridStoreBinding(code), 0, 14, threads, true, false).width,
 	          0u);
+}
+
+// Sanitized offset-grid shape: origin and extent come from a static raw
+// metadata V#, while the write-only R8 target is a separate static T#.
+static ShaderCode MakeMetadataOffsetBoundedGridStoreShader(bool overwrite_parameters = false,
+                                                           bool overwrite_target = false,
+                                                           bool clobber_coordinate = false,
+                                                           bool read_target = false,
+                                                           bool y_inplace_prelude = false,
+                                                           bool restore_exec_before_store = false,
+                                                           int optional_coefficient_byte_offset = -1,
+                                                           uint32_t tile_shift = 2)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	auto add = [&code](ShaderInstructionType type, ShaderOperand dst, std::initializer_list<ShaderOperand> sources)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		inst.type    = type;
+		inst.dst     = dst;
+		inst.src_num = static_cast<int>(sources.size());
+		int source_index = 0;
+		for (const auto source: sources) { inst.src[source_index++] = source; }
+		code.GetInstructions().Add(inst);
+	};
+	const ShaderOperand vcc {.type = ShaderOperandType::VccLo, .size = 2};
+	auto add_waitcnt = [&code](uint32_t immediate)
+	{
+		ShaderInstruction wait {};
+		wait.pc          = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		wait.type        = ShaderInstructionType::SWaitcnt;
+		wait.format      = ShaderInstructionFormat::Imm;
+		wait.sopp_opcode = 0x0cu;
+		wait.src_num     = 1;
+		wait.src[0].type = ShaderOperandType::LiteralConstant;
+		wait.src[0].constant.u = immediate;
+		code.GetInstructions().Add(wait);
+	};
+	const int x_register = y_inplace_prelude ? 3 : 10;
+	const int y_register = y_inplace_prelude ? 1 : 11;
+	if (y_inplace_prelude)
+	{
+		// Match the observed ordering shape: form Y in place, load the metadata
+		// parameters, then form X in a different VGPR.
+		add(ShaderInstructionType::VLshlAddU32, TileVgpr(1), {TileSgpr(7), TileConstant(tile_shift), TileVgpr(1)});
+	} else
+	{
+		add(ShaderInstructionType::VLshlAddU32, TileVgpr(x_register), {TileSgpr(6), TileConstant(tile_shift), TileVgpr(0)});
+		add(ShaderInstructionType::VLshlAddU32, TileVgpr(y_register), {TileSgpr(7), TileConstant(tile_shift), TileVgpr(1)});
+	}
+	if (overwrite_parameters) { add(ShaderInstructionType::SMovB32, TileSgpr(12), {TileConstant(0)}); }
+	add(ShaderInstructionType::SBufferLoadDwordx4, TileSgpr(20, 4), {TileSgpr(12, 4), TileConstant(16)});
+	if (y_inplace_prelude)
+	{
+		add(ShaderInstructionType::VLshlAddU32, TileVgpr(x_register), {TileSgpr(6), TileConstant(tile_shift), TileVgpr(0)});
+	}
+	add_waitcnt(0xc07fu);
+	add(ShaderInstructionType::VCmpxGtU32, vcc, {TileSgpr(22), TileVgpr(x_register)});
+	add(ShaderInstructionType::VCmpxGtU32, vcc, {TileSgpr(23), TileVgpr(y_register)});
+	const int branch_index = code.GetInstructions().Size();
+	add(ShaderInstructionType::SCbranchExecz, {}, {TileConstant(0)});
+	if (restore_exec_before_store)
+	{
+		const ShaderOperand exec {.type = ShaderOperandType::ExecLo, .size = 2};
+		add(ShaderInstructionType::SMovB64, exec, {TileConstant(UINT32_MAX)});
+	}
+	if (optional_coefficient_byte_offset >= 0)
+	{
+		add(ShaderInstructionType::SBufferLoadDwordx2, vcc,
+		    {TileSgpr(12, 4), TileConstant(static_cast<uint32_t>(optional_coefficient_byte_offset))});
+		add_waitcnt(0xc07fu);
+	}
+	if (overwrite_target) { add(ShaderInstructionType::SMovB32, TileSgpr(40), {TileConstant(0)}); }
+	add(ShaderInstructionType::VAddI32, TileVgpr(12), {TileSgpr(20), TileVgpr(x_register)});
+	add(ShaderInstructionType::VAddI32, TileVgpr(13), {TileSgpr(21), TileVgpr(y_register)});
+	if (clobber_coordinate) { add(ShaderInstructionType::VMovB32, TileVgpr(12), {TileConstant(0)}); }
+	if (read_target)
+	{
+		ShaderInstruction load {};
+		load.pc               = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		load.type             = ShaderInstructionType::ImageLoad;
+		load.dst              = TileVgpr(14);
+		load.src[0]           = TileVgpr(12);
+		load.src[0].size      = 2;
+		load.src[1]           = TileSgpr(40, 8);
+		load.src_num          = 2;
+		load.mimg_dimension   = 1;
+		load.mimg_dmask       = 1;
+		load.mimg_address_num = 2;
+		load.mimg_address[0]  = TileVgpr(12);
+		load.mimg_address[1]  = TileVgpr(13);
+		code.GetInstructions().Add(load);
+	}
+	// Keep one unrelated typed buffer read in the sanitized data body. The
+	// coverage proof must distinguish it from a read of the target image.
+	ShaderInstruction typed_read {};
+	typed_read.pc                   = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+	typed_read.type                 = ShaderInstructionType::BufferLoadFormatX;
+	typed_read.format               = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	typed_read.dst                  = TileVgpr(18);
+	typed_read.src[0]               = TileVgpr(0);
+	typed_read.src[1]               = TileSgpr(28, 4);
+	typed_read.src[2]               = TileConstant(0);
+	typed_read.src_num              = 3;
+	typed_read.buffer_idxen         = true;
+	typed_read.buffer_imm_offset    = 0;
+	code.GetInstructions().Add(typed_read);
+	ShaderInstruction store {};
+	store.pc               = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+	store.type             = ShaderInstructionType::ImageStore;
+	store.src[0]           = TileVgpr(12);
+	store.src[0].size      = 2;
+	store.src[1]           = TileSgpr(40, 8);
+	store.src_num          = 2;
+	store.mimg_dimension   = 1;
+	store.mimg_dmask       = 0xf;
+	store.mimg_address_num = 2;
+	store.mimg_address[0]  = TileVgpr(12);
+	store.mimg_address[1]  = TileVgpr(13);
+	code.GetInstructions().Add(store);
+	ShaderInstruction end {};
+	end.pc   = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+	end.type = ShaderInstructionType::SEndpgm;
+	code.GetInstructions().Add(end);
+	code.GetInstructions()[branch_index].src[0].constant.u =
+	    code.GetInstructions().At(code.GetInstructions().Size() - 1).pc -
+	    code.GetInstructions().At(branch_index).pc - 4u;
+	return code;
+}
+
+static ShaderBindResources MetadataOffsetBoundedGridStoreBinding()
+{
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num                    = 2;
+	bind.storage_buffers.usages[0]                     = ShaderStorageUsage::ReadOnly;
+	bind.storage_buffers.accesses[0]                   = ShaderStorageAccess::Typed;
+	bind.storage_buffers.sources[0]                    = ShaderStorageBindingSource::DirectResource;
+	bind.storage_buffers.code_available[0]             = true;
+	bind.storage_buffers.exact_matches[0]              = true;
+	bind.storage_buffers.start_register[0]              = 28;
+	bind.storage_buffers.buffers[0].fields[0]           = 0x2000u;
+	bind.storage_buffers.buffers[0].fields[1]           = 4u << 16u;
+	bind.storage_buffers.buffers[0].fields[2]           = 4u;
+	bind.storage_buffers.buffers[0].fields[3]           = DstSel(4, 0, 0, 1) | (5u << 12u);
+	bind.storage_buffers.usages[1]                     = ShaderStorageUsage::Constant;
+	bind.storage_buffers.accesses[1]                   = ShaderStorageAccess::Raw;
+	bind.storage_buffers.sources[1]                    = ShaderStorageBindingSource::MetadataSharp;
+	bind.storage_buffers.code_available[1]             = true;
+	bind.storage_buffers.exact_matches[1]              = true;
+	bind.storage_buffers.start_register[1]              = 12;
+	bind.storage_buffers.buffers[1].fields[0]           = 0x1000u;
+	bind.storage_buffers.buffers[1].fields[1]           = 16u << 16u;
+	bind.storage_buffers.buffers[1].fields[2]           = 2u;
+	bind.storage_buffers.raw_smem_use[1]                = true;
+	bind.storage_buffers.raw_smem_required_bytes[1]      = 32u;
+	bind.textures2D.textures_num                        = 1;
+	bind.textures2D.desc[0].usage                       = ShaderTextureUsage::ReadWrite;
+	bind.textures2D.desc[0].textures2d_without_sampler  = true;
+	bind.textures2D.desc[0].start_register              = 40;
+	bind.textures2D.desc[0].texture.fields[1]            = (5u << 20u) | ((31u & 3u) << 30u);
+	bind.textures2D.desc[0].texture.fields[2]            = (17u << 14u) | (31u >> 2u);
+	bind.textures2D.desc[0].texture.fields[3]            = 9u << 28u;
+	return bind;
+}
+
+static bool ParseSanitizedMetadataOffsetImageStore(uint32_t nsa, uint32_t explicit_y_register, uint32_t dimension,
+                                                  ShaderInstruction* store)
+{
+	if (store == nullptr || nsa > 1u) { return false; }
+
+	// Exercise coordinate representation within the parser's admitted flag
+	// subset; this fixture does not establish complete ISA flag conformance.
+	std::array<uint32_t, 4> words {};
+	words[0] = (0x3cu << 26u) | (0x08u << 18u) | (0xfu << 8u) | (dimension << 3u) | (nsa << 1u);
+	words[1] = (10u << 16u) | (8u << 8u) | 4u; // T#40, VDATA v8, VADDR v4.
+	uint32_t word_count = 2u;
+	if (nsa != 0u)
+	{
+		words[word_count++] = explicit_y_register | (7u << 8u) | (8u << 16u) | (9u << 24u);
+	}
+	words[word_count++] = 0xbf810000u; // s_endpgm
+
+	ShaderCode parsed;
+	parsed.SetType(ShaderType::Compute);
+	if (!ShaderTryParseBounded(words.data(), static_cast<uint32_t>(word_count * sizeof(words[0])), &parsed) ||
+	    parsed.GetInstructions().Size() != 2u)
+	{
+		return false;
+	}
+	const auto& instruction = parsed.GetInstructions().At(0);
+	if (instruction.type != ShaderInstructionType::ImageStore ||
+	    parsed.GetInstructions().At(1).type != ShaderInstructionType::SEndpgm ||
+	    !ShaderInstructionLoweringPreconditions(instruction))
+	{
+		return false;
+	}
+	*store = instruction;
+	return true;
+}
+
+static bool ReplaceMetadataOffsetGridStoreWithParsedAddress(ShaderCode* code, uint32_t nsa = 0u,
+                                                            uint32_t explicit_y_register = 5u,
+                                                            uint32_t sequential_y_register = 5u, uint32_t dimension = 1u)
+{
+	if (code == nullptr || code->GetInstructions().Size() < 2u) { return false; }
+
+	uint32_t x_add_count = 0;
+	uint32_t y_add_count = 0;
+	for (auto& instruction: code->GetInstructions())
+	{
+		if (instruction.type != ShaderInstructionType::VAddI32 || instruction.src_num != 2) { continue; }
+		if (instruction.src[0].type == ShaderOperandType::Sgpr && instruction.src[0].register_id == 20 &&
+		    instruction.src[1].type == ShaderOperandType::Vgpr && instruction.src[1].register_id == 10)
+		{
+			instruction.dst = TileVgpr(4);
+			x_add_count++;
+		} else if (instruction.src[0].type == ShaderOperandType::Sgpr && instruction.src[0].register_id == 21 &&
+		           instruction.src[1].type == ShaderOperandType::Vgpr && instruction.src[1].register_id == 11)
+		{
+			instruction.dst = TileVgpr(sequential_y_register);
+			y_add_count++;
+		}
+	}
+	if (x_add_count != 1u || y_add_count != 1u) { return false; }
+
+	const uint32_t store_index = code->GetInstructions().Size() - 2u;
+	auto& store = code->GetInstructions()[store_index];
+	if (store.type != ShaderInstructionType::ImageStore) { return false; }
+	const uint32_t store_pc = store.pc;
+	ShaderInstruction parsed_store {};
+	if (!ParseSanitizedMetadataOffsetImageStore(nsa, explicit_y_register, dimension, &parsed_store)) { return false; }
+	parsed_store.pc = store_pc;
+	store            = parsed_store;
+	return true;
+}
+
+TEST(EmulatorShaderMimg, ProvesMetadataOffsetBoundedR8StorageImageCoverage)
+{
+	auto code = MakeMetadataOffsetBoundedGridStoreShader();
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	const auto* metadata_wait = FirstWaitcntInstruction(code);
+	ASSERT_NE(metadata_wait, nullptr);
+	ExpectExactWaitcntTuple(*metadata_wait, 0xc07fu);
+	const uint32_t store_index = code.GetInstructions().Size() - 2u;
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Format(), 5u);
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Width5() + 1u, 32u);
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Height5() + 1u, 18u);
+	ASSERT_EQ(ShaderFindImageStorageTextureDescriptor(code, store_index, bind, 0), 0);
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 4u);
+	EXPECT_EQ(coverage.height, 4u);
+	EXPECT_EQ(coverage.bounds_storage_buffer_index, 1);
+	EXPECT_EQ(coverage.bounds_byte_offset, 24u);
+	EXPECT_EQ(coverage.origin_byte_offset, 16);
+}
+
+TEST(EmulatorShaderMimg, ProvesMetadataOffsetCoverageForParsedSequentialImageAddress)
+{
+	InitMimgParser();
+	auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+	ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code));
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {8, 8, 1};
+	const uint32_t store_index = code.GetInstructions().Size() - 2u;
+	const auto& store = code.GetInstructions().At(store_index);
+	ASSERT_EQ(store.type, ShaderInstructionType::ImageStore);
+	ASSERT_EQ(store.src_num, 2);
+	EXPECT_EQ(store.mimg_address_num, 0);
+	EXPECT_EQ(store.mimg_dimension, 1u);
+	EXPECT_EQ(store.mimg_dmask, 0xfu);
+	ASSERT_EQ(store.src[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(store.src[0].register_id, 4);
+	EXPECT_EQ(store.src[0].size, 3);
+	EXPECT_EQ(store.src[1].type, ShaderOperandType::Sgpr);
+	EXPECT_EQ(store.src[1].register_id, 40);
+	EXPECT_EQ(store.src[1].size, 8);
+	ASSERT_TRUE(ShaderInstructionLoweringPreconditions(store));
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Format(), 5u);
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Width5() + 1u, 32u);
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Height5() + 1u, 18u);
+	ASSERT_EQ(ShaderFindImageStorageTextureDescriptor(code, store_index, bind, 0), 0);
+
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 8u);
+	EXPECT_EQ(coverage.height, 8u);
+	EXPECT_EQ(coverage.bounds_storage_buffer_index, 1);
+	EXPECT_EQ(coverage.bounds_byte_offset, 24u);
+	EXPECT_EQ(coverage.origin_byte_offset, 16);
+}
+
+TEST(EmulatorShaderMimg, RejectsMalformedMetadataOffsetParsedImageAddress)
+{
+	InitMimgParser();
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {8, 8, 1};
+	const auto rejects = [&](const ShaderCode& code)
+	{
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		ASSERT_TRUE(ShaderInstructionLoweringPreconditions(code.GetInstructions().At(store_index)));
+		ASSERT_EQ(ShaderFindImageStorageTextureDescriptor(code, store_index, bind, 0), 0);
+		const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+		EXPECT_EQ(coverage.width, 0u);
+		EXPECT_EQ(coverage.height, 0u);
+	};
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+		ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code));
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		auto& store = code.GetInstructions()[store_index];
+		ASSERT_EQ(store.mimg_address_num, 0);
+		ASSERT_EQ(store.src[0].size, 3);
+		// An IR-only short span provides X but not the implicit adjacent Y VGPR.
+		store.src[0].size = 1;
+		ASSERT_TRUE(ShaderInstructionLoweringPreconditions(store));
+		rejects(code);
+	}
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+		ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code, 1u, 6u));
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		const auto& store = code.GetInstructions().At(store_index);
+		ASSERT_EQ(store.mimg_address_num, 5);
+		ASSERT_EQ(store.mimg_address[0].register_id, 4);
+		ASSERT_EQ(store.mimg_address[1].register_id, 6);
+		rejects(code);
+	}
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+		ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code, 0u, 5u, 6u));
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		const auto& store = code.GetInstructions().At(store_index);
+		ASSERT_EQ(store.mimg_address_num, 0);
+		ASSERT_EQ(store.src[0].register_id, 4);
+		rejects(code);
+	}
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+		ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code, 0u, 5u, 5u, 2u));
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		EXPECT_EQ(code.GetInstructions().At(store_index).mimg_dimension, 2u);
+		rejects(code);
+	}
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+		ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code));
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		// MIMG VADDR has no encoded modifier; this models malformed internal IR.
+		code.GetInstructions()[store_index].src[0].negate = true;
+		rejects(code);
+	}
+}
+
+TEST(EmulatorShaderMimg, ProvesMetadataOffsetCoverageWithYInplacePreludeOrdering)
+{
+	const auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, true);
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	const uint32_t store_index = code.GetInstructions().Size() - 2u;
+	ASSERT_EQ(ShaderFindImageStorageTextureDescriptor(code, store_index, bind, 0), 0);
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 4u);
+	EXPECT_EQ(coverage.height, 4u);
+	EXPECT_EQ(coverage.bounds_storage_buffer_index, 1);
+	EXPECT_EQ(coverage.bounds_byte_offset, 24u);
+	EXPECT_EQ(coverage.origin_byte_offset, 16);
+}
+
+TEST(EmulatorShaderMimg, ProvesMetadataOffsetCoverageWithOptionalCoefficientLoad)
+{
+	const auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, 0);
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	uint32_t wait_count = 0;
+	for (const auto& instruction: code.GetInstructions())
+	{
+		if (instruction.type == ShaderInstructionType::SWaitcnt)
+		{
+			ExpectExactWaitcntTuple(instruction, 0xc07fu);
+			wait_count++;
+		}
+	}
+	EXPECT_EQ(wait_count, 2u);
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 4u);
+	EXPECT_EQ(coverage.height, 4u);
+	EXPECT_EQ(coverage.bounds_storage_buffer_index, 1);
+	EXPECT_EQ(coverage.bounds_byte_offset, 24u);
+	EXPECT_EQ(coverage.origin_byte_offset, 16);
+}
+
+TEST(EmulatorShaderMimg, RejectsOutOfRangeOptionalMetadataCoefficientLoad)
+{
+	const auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, 32);
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 0u);
+	EXPECT_EQ(coverage.height, 0u);
+}
+
+TEST(EmulatorShaderMimg, RejectsMetadataWaitWithLgkmcntOne)
+{
+	auto code = MakeMetadataOffsetBoundedGridStoreShader();
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	ASSERT_EQ(coverage.width, 4u);
+	ASSERT_EQ(coverage.height, 4u);
+	auto* metadata_wait = FirstWaitcntInstruction(code);
+	ASSERT_NE(metadata_wait, nullptr);
+	ExpectExactWaitcntTuple(*metadata_wait, 0xc07fu);
+	metadata_wait->src[0].constant.u = 0xc17fu;
+	ExpectExactWaitcntTuple(*metadata_wait, 0xc17fu);
+	coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 0u);
+	EXPECT_EQ(coverage.height, 0u);
+}
+
+TEST(EmulatorShaderMimg, RejectsMetadataWaitWithLgkmcntFifteen)
+{
+	auto code = MakeMetadataOffsetBoundedGridStoreShader();
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	ASSERT_EQ(coverage.width, 4u);
+	ASSERT_EQ(coverage.height, 4u);
+	auto* metadata_wait = FirstWaitcntInstruction(code);
+	ASSERT_NE(metadata_wait, nullptr);
+	ExpectExactWaitcntTuple(*metadata_wait, 0xc07fu);
+	metadata_wait->src[0].constant.u = 0xcf70u;
+	ExpectExactWaitcntTuple(*metadata_wait, 0xcf70u);
+	coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 0u);
+	EXPECT_EQ(coverage.height, 0u);
+}
+
+TEST(EmulatorShaderMimg, RejectsUnprovenMetadataOffsetBoundedR8Coverage)
+{
+	const uint32_t threads[3] = {4, 4, 1};
+	const auto rejects = [&](const ShaderCode& code, const ShaderBindResources& bind)
+	{
+		const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+		EXPECT_EQ(coverage.width, 0u);
+		EXPECT_EQ(coverage.height, 0u);
+	};
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader();
+		for (auto& inst: code.GetInstructions())
+		{
+			if (inst.type == ShaderInstructionType::VCmpxGtU32) { inst.type = ShaderInstructionType::VCmpGtU32; }
+		}
+		rejects(code, MetadataOffsetBoundedGridStoreBinding());
+	}
+	rejects(MakeMetadataOffsetBoundedGridStoreShader(false, false, true), MetadataOffsetBoundedGridStoreBinding());
+	rejects(MakeMetadataOffsetBoundedGridStoreShader(true), MetadataOffsetBoundedGridStoreBinding());
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, true);
+		const auto bind = MetadataOffsetBoundedGridStoreBinding();
+		EXPECT_EQ(ShaderFindImageStorageTextureDescriptor(code, code.GetInstructions().Size() - 2u, bind, 0), -1);
+		rejects(code, bind);
+	}
+	rejects(MakeMetadataOffsetBoundedGridStoreShader(false, false, false, true), MetadataOffsetBoundedGridStoreBinding());
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader();
+		code.GetInstructions()[code.GetInstructions().Size() - 2].mimg_dmask = 0u;
+		rejects(code, MetadataOffsetBoundedGridStoreBinding());
+	}
+	// The metadata V# must still be the resource bound at the shader's load
+	// register; matching descriptor bytes alone do not establish provenance.
+	{
+		auto bind = MetadataOffsetBoundedGridStoreBinding();
+		bind.storage_buffers.start_register[1]++;
+		rejects(MakeMetadataOffsetBoundedGridStoreShader(), bind);
+	}
+	// Restoring EXEC after the bounds guard re-enables lanes that the guard
+	// excluded, so the store no longer proves the analyzed tile coverage.
+	rejects(MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, true),
+	        MetadataOffsetBoundedGridStoreBinding());
 }
 
 static ShaderCode MakePairedSplitStoreShader(bool omit_first_store = false, bool clobber_coordinate = false,
@@ -1025,11 +1537,12 @@ bool EmptyMimgOperand(const ShaderOperand& operand)
 	return operand == ShaderOperand {} && operand.multiplier == 1.0f && !operand.absolute && !operand.negate && !operand.clamp;
 }
 
+// The MIMG DIM field is word 0 bits [5:3]; 1 selects 2D and 4 selects a 1D array.
 ShaderCode ParseMimgTailInstruction(uint32_t opcode, uint32_t ssamp = 0u, uint32_t nsa = 0u, uint32_t dmask = 0xfu,
-                                   ShaderType stage = ShaderType::Pixel, uint32_t flags = 0u)
+                                   ShaderType stage = ShaderType::Pixel, uint32_t flags = 0u, uint32_t dim = 1u)
 {
 	std::array<uint32_t, 6> words = {
-	    (0x3cu << 26u) | (opcode << 18u) | (dmask << 8u) | (1u << 3u) | (nsa << 1u) | flags,
+	    (0x3cu << 26u) | (opcode << 18u) | (dmask << 8u) | (dim << 3u) | (nsa << 1u) | flags,
 	    (ssamp << 21u) | (8u << 16u) | (8u << 8u) | 4u,
 	    0xfffd0911u, 0x17130f0bu, 0x27231f1bu, 0u};
 	words[2u + nsa] = 0xbf810000u;
@@ -1037,6 +1550,143 @@ ShaderCode ParseMimgTailInstruction(uint32_t opcode, uint32_t ssamp = 0u, uint32
 	code.SetType(stage);
 	ShaderParse(words.data(), (3u + nsa) * sizeof(uint32_t), &code);
 	return code;
+}
+
+ShaderCode ParseCdMimgInstruction(uint32_t nsa = 2u, uint32_t dmask = 0xau, uint32_t dimension = 1u,
+                                  uint32_t flags = 0u, uint32_t word1_flags = 0u,
+                                  ShaderType stage = ShaderType::Pixel, bool next_gen = true, uint32_t ssamp = 5u,
+                                  uint32_t vaddr = 30u, uint32_t opcode = 0x68u)
+{
+	Config::SetNextGen(next_gen);
+	std::array<uint32_t, 6> words = {
+	    (0x3cu << 26u) | (opcode << 18u) | (dmask << 8u) | (dimension << 3u) | (nsa << 1u) | flags,
+	    (ssamp << 21u) | (8u << 16u) | (64u << 8u) | (vaddr & 0xffu) | word1_flags,
+	    32u | (31u << 8u) | (33u << 16u) | (7u << 24u),
+	    42u | (60u << 8u) | (61u << 16u) | (62u << 24u),
+	    0xbf810000u, 0u};
+	words[2u + nsa] = 0xbf810000u;
+	ShaderCode code;
+	code.SetType(stage);
+	ShaderParse(words.data(), (3u + nsa) * sizeof(uint32_t), &code);
+	return code;
+}
+
+static ShaderInstruction MimgGradientWqm()
+{
+	ShaderInstruction instruction {};
+	instruction.type        = ShaderInstructionType::SWqmB64;
+	instruction.format      = ShaderInstructionFormat::Sdst2Ssrc02;
+	instruction.dst.type    = ShaderOperandType::ExecLo;
+	instruction.dst.size    = 2;
+	instruction.src[0].type = ShaderOperandType::ExecLo;
+	instruction.src[0].size = 2;
+	instruction.src_num     = 1;
+	return instruction;
+}
+
+static ShaderInstruction MimgGradientMove(int destination, ShaderOperand source)
+{
+	ShaderInstruction instruction {};
+	instruction.type        = ShaderInstructionType::VMovB32;
+	instruction.format      = ShaderInstructionFormat::SVdstSVsrc0;
+	instruction.dst         = TileVgpr(destination);
+	instruction.src[0]      = source;
+	instruction.src_num     = 1;
+	return instruction;
+}
+
+static ShaderInstruction MimgGradientDppMove(int destination, int source, uint16_t control)
+{
+	auto instruction                  = MimgGradientMove(destination, TileVgpr(source));
+	instruction.src[0].dpp            = true;
+	instruction.src[0].dpp_ctrl       = control;
+	instruction.src[0].dpp_row_mask   = 0x0fu;
+	instruction.src[0].dpp_bank_mask  = 0x0fu;
+	instruction.src[0].dpp_bound_ctrl = true;
+	return instruction;
+}
+
+static bool ParseSanitizedDppInstruction(bool vop2, uint32_t destination, uint32_t source, uint32_t source1,
+                                         uint16_t control, ShaderInstruction* instruction)
+{
+	if (instruction == nullptr) { return false; }
+
+	constexpr uint32_t unmodeled_bits = (1u << 17u) | (1u << 20u) | (1u << 23u);
+	const uint32_t dpp_word = (source & 0xffu) | (static_cast<uint32_t>(control & 0x1ffu) << 8u) | (1u << 19u) |
+	                         unmodeled_bits | (0xfu << 24u) | (0xfu << 28u);
+	const uint32_t word = vop2 ? ((0x04u << 25u) | ((destination & 0xffu) << 17u) | ((source1 & 0xffu) << 9u) | 250u)
+	                           : ((0x3fu << 25u) | ((destination & 0xffu) << 17u) | (0x01u << 9u) | 250u);
+	const uint32_t words[] = {word, dpp_word, 0xbf810000u};
+	ShaderCode       parsed;
+	parsed.SetType(ShaderType::Pixel);
+	if (!ShaderTryParseBounded(words, sizeof(words), &parsed) || parsed.GetInstructions().Size() != 2u) { return false; }
+
+	const auto& decoded = parsed.GetInstructions().At(0);
+	if (decoded.type != (vop2 ? ShaderInstructionType::VSubF32 : ShaderInstructionType::VMovB32) ||
+	    decoded.dst.type != ShaderOperandType::Vgpr || decoded.dst.register_id != static_cast<int>(destination) ||
+	    decoded.src[0].type != ShaderOperandType::Vgpr || decoded.src[0].register_id != static_cast<int>(source) ||
+	    decoded.src[0].dpp_unmodeled_bits != unmodeled_bits)
+	{
+		return false;
+	}
+	*instruction = decoded;
+	return true;
+}
+
+static ShaderInstruction MimgGradientSubtract(int destination, int base, int offset, uint16_t control)
+{
+	ShaderInstruction instruction {};
+	instruction.type                  = ShaderInstructionType::VSubF32;
+	instruction.format                = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	instruction.dst                   = TileVgpr(destination);
+	instruction.src[0]                = TileVgpr(base);
+	instruction.src[0].dpp            = true;
+	instruction.src[0].dpp_ctrl       = control;
+	instruction.src[0].dpp_row_mask   = 0x0fu;
+	instruction.src[0].dpp_bank_mask  = 0x0fu;
+	instruction.src[0].dpp_bound_ctrl = true;
+	instruction.src[1]                = TileVgpr(offset);
+	instruction.src_num               = 2;
+	return instruction;
+}
+
+static ShaderCode MakeParsedCdGradientShader()
+{
+	const auto parsed = ParseCdMimgInstruction(2u, 0xau);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	auto append = [&code](ShaderInstruction instruction)
+	{
+		instruction.pc = static_cast<uint32_t>(code.GetInstructions().Size() * 4u);
+		code.GetInstructions().Add(instruction);
+	};
+	append(MimgGradientWqm());
+	append(MimgGradientMove(7, TileSgpr(16)));
+	append(MimgGradientMove(42, TileSgpr(17)));
+	append(MimgGradientDppMove(20, 7, 0x00u));
+	append(MimgGradientDppMove(24, 42, 0xffu));
+	append(MimgGradientSubtract(30, 7, 20, 0x55u));
+	append(MimgGradientSubtract(31, 7, 20, 0xaau));
+	append(MimgGradientSubtract(32, 42, 24, 0x55u));
+	append(MimgGradientSubtract(33, 42, 24, 0xaau));
+	auto sample = parsed.GetInstructions().At(0);
+	append(sample);
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	append(end);
+	return code;
+}
+
+static bool CdGradientProofRejectsParsedDpp(ShaderInstruction replacement, uint32_t instruction_index)
+{
+	auto code = MakeParsedCdGradientShader();
+	if (instruction_index >= code.GetInstructions().Size() - 2u) { return false; }
+	const auto sample_index = code.GetInstructions().Size() - 2u;
+	if (!ShaderImageSampleCdHasQuadUniformGradients(code, sample_index)) { return false; }
+	replacement.pc = code.GetInstructions().At(instruction_index).pc;
+	code.GetInstructions()[instruction_index] = replacement;
+	return !ShaderImageSampleCdHasQuadUniformGradients(code, sample_index);
 }
 
 void EnableMimgModuleValidation()
@@ -1053,22 +1703,35 @@ void EnableMimgModuleValidation()
 	RequireMimgTail(Config::ShaderValidationEnabled(), "full-module validation must be enabled");
 }
 
-Core::String8 EmitValidatedMimgTailModule(const ShaderCode& code, bool writable, bool sampler = false)
+// The descriptor is registered as the T# type defines it: types 12 and 13 in the array bank,
+// 8 and 9 in the flat bank. Format 22 is R32_FLOAT and 20 is R32_UINT.
+Core::String8 EmitValidatedMimgTailModule(const ShaderCode& code, bool writable, bool sampler = false, uint32_t texture_type = 9u,
+                                          uint32_t texture_format = 22u, bool paired_compute_wave = false)
 {
 	ShaderPixelInputInfo pixel {};
 	ShaderComputeInputInfo compute {};
 	compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+	if (paired_compute_wave)
+	{
+		compute.threads_num[0] = 64u;
+		compute.thread_ids_num = 1;
+		compute.wave_layout    = {ShaderComputeWaveStrategy::Paired64On32, {64u, 1u, 1u}, {32u, 1u, 1u}, 64u, 32u, 2u, 1u, 0u};
+	}
 	auto& bind = code.GetType() == ShaderType::Pixel ? pixel.bind : compute.bind;
+	const auto shape = ShaderGen5SampledTextureShapeForType(static_cast<uint8_t>(texture_type));
+	const bool array = shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
 	bind.textures2D.textures_num = 1;
-	bind.textures2D.textures2d_sampled_num = writable ? 0 : 1;
+	bind.textures2D.textures2d_sampled_num       = writable || array ? 0 : 1;
+	bind.textures2D.textures2d_array_sampled_num = !writable && array ? 1 : 0;
 	bind.textures2D.textures2d_storage_num = writable ? 1 : 0;
 	auto& descriptor = bind.textures2D.desc[0];
 	descriptor.start_register = 32;
 	descriptor.usage = writable ? ShaderTextureUsage::ReadWrite : ShaderTextureUsage::ReadOnly;
 	descriptor.textures2d_without_sampler = writable;
+	descriptor.sampled_shape = shape;
 	descriptor.texture.fields[0] = 0x100u;
-	descriptor.texture.fields[1] = 22u << 20u; // raw R32_FLOAT, independent of the sampler field
-	descriptor.texture.fields[3] = (9u << 28u) | 4u | (5u << 3u) | (6u << 6u) | (7u << 9u);
+	descriptor.texture.fields[1] = texture_format << 20u; // raw format, independent of the sampler field
+	descriptor.texture.fields[3] = (texture_type << 28u) | 4u | (5u << 3u) | (6u << 6u) | (7u << 9u);
 	if (sampler)
 	{
 		bind.samplers.samplers_num = 1;
@@ -1088,6 +1751,316 @@ Core::String8 EmitValidatedMimgTailModule(const ShaderCode& code, bool writable,
 }
 
 } // namespace
+
+TEST(EmulatorShaderMimg, ParsesGen5SampleCdWithTwoDimensionalNsaAddressTuple)
+{
+	// Sanitized DIM=1 (2D), DMASK=R IMAGE_SAMPLE_CD fields. The two NSA dwords
+	// encode nine register fields, while this 2D derivative sample consumes the
+	// first six in ISA order: dx/dh, dy/dh, dx/dv, dy/dv, x, y.
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    const uint32_t shader[] = {
+		        (0x3cu << 26u) | (0x68u << 18u) | (1u << 8u) | (1u << 3u) | (2u << 1u),
+		        (5u << 21u) | (8u << 16u) | (16u << 8u) | 4u,
+		        7u | (13u << 8u) | (19u << 16u) | (29u << 24u),
+		        37u | (41u << 8u) | (43u << 16u) | (47u << 24u),
+		        0xbf810000u};
+		    ShaderCode code;
+		    code.SetType(ShaderType::Pixel);
+		    RequireMimgTail(ShaderTryParseBounded(shader, sizeof(shader), &code), "bounded parse accepts IMAGE_SAMPLE_CD");
+		    RequireMimgTail(code.GetInstructions().Size() == 2u, "sample and terminal instruction");
+		    const auto& sample = code.GetInstructions().At(0);
+		    RequireMimgTail(sample.type != ShaderInstructionType::Unknown && sample.mimg_dimension == 1u && sample.mimg_dmask == 1u,
+		                    "recognized 2D sample with a red-only result");
+		    RequireMimgTail(sample.dst.type == ShaderOperandType::Vgpr && sample.dst.register_id == 16 && sample.dst.size == 1,
+		                    "DMASK selects exactly one destination VGPR");
+		    RequireMimgTail(sample.src_num == 3 && sample.src[0].type == ShaderOperandType::Vgpr &&
+		                    sample.src[0].register_id == 4 && sample.src[0].size == 1,
+		                    "the NSA-form encoded base is one VGPR; six logical addresses live in the explicit tuple");
+		    RequireMimgTail(sample.src[1].type == ShaderOperandType::Sgpr && sample.src[1].register_id == 32 &&
+		                    sample.src[1].size == 8,
+		                    "T# resource base and eight-SGPR descriptor are retained");
+		    RequireMimgTail(sample.src[2].type == ShaderOperandType::Sgpr && sample.src[2].register_id == 20 &&
+		                    sample.src[2].size == 4,
+		                    "S# sampler base and four-SGPR descriptor are retained");
+		    const int expected_addresses[] = {4, 7, 13, 19, 29, 37};
+		    RequireMimgTail(sample.mimg_address_num == 9, "both NSA dwords retain all nine encoded address fields");
+		    for (int index = 0; index < 6; ++index)
+		    {
+			    RequireMimgTail(sample.mimg_address[index].type == ShaderOperandType::Vgpr &&
+			                    sample.mimg_address[index].register_id == expected_addresses[index],
+			                    "logical derivative and coordinate register order is retained");
+		    }
+		    RequireMimgTail(code.GetInstructions().At(1).pc == 16u, "terminal PC follows both NSA dwords");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, ParsesGen5SampleCdWithSequentialSixAddressSpan)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    const auto code = ParseCdMimgInstruction(0u, 0xau);
+		    RequireMimgTail(code.GetInstructions().Size() == 2u, "sample and terminal instruction");
+		    const auto& sample = code.GetInstructions().At(0);
+		    RequireMimgTail(sample.type == ShaderInstructionType::ImageSampleCd &&
+		                    sample.format == ShaderInstructionFormat::VdataVaddr6StSsMimgDmask && sample.mimg_dimension == 1u &&
+		                    sample.mimg_dmask == 0xau && sample.dst.size == 2 && sample.src[0].register_id == 30 &&
+		                    sample.src[0].size == 6 && sample.mimg_address_num == 0,
+		                    "regular 2D CD retains its sequential six-register address span and packed DMASK");
+		    const auto& sampler = sample.src[2];
+		    RequireMimgTail(sampler.type == ShaderOperandType::Sgpr && sampler.register_id == 20 && sampler.size == 4,
+		                    "ordinary sampled-image S# remains four SGPRs");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, ParsesGen5SampleDWithTheDerivativeAddressSpan)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    const auto code = ParseCdMimgInstruction(0u, 0xfu, 1u, 0u, 0u, ShaderType::Pixel, true, 5u, 30u, 0x22u);
+		    RequireMimgTail(code.GetInstructions().Size() == 2u, "sample and terminal instruction");
+		    const auto& sample = code.GetInstructions().At(0);
+		    RequireMimgTail(sample.type == ShaderInstructionType::ImageSampleD &&
+		                    sample.format == ShaderInstructionFormat::VdataVaddr6StSsMimgDmask && sample.dst.size == 4 &&
+		                    sample.src[0].register_id == 30 && sample.src[0].size == 6,
+		                    "2D SAMPLE_D reads four slopes then x,y from six sequential registers");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, ParsesSampleCdUpperSsampBitWithinOrdinarySgprRange)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    for (const uint32_t ssamp: {16u, 25u})
+		    {
+			    const auto code = ParseCdMimgInstruction(2u, 0xau, 1u, 0u, 0u, ShaderType::Pixel, true, ssamp);
+			    const auto& sample = code.GetInstructions().At(0);
+			    RequireMimgTail(sample.type == ShaderInstructionType::ImageSampleCd && sample.src[2].type == ShaderOperandType::Sgpr &&
+			                    sample.src[2].register_id == static_cast<int>(ssamp * 4u) && sample.src[2].size == 4,
+			                    "SSAMP's upper bit maps within the ordinary four-SGPR sampler range");
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, KeepsSparseNsaTupleValidAtHighestVaddr)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    const auto code = ParseCdMimgInstruction(2u, 0xau, 1u, 0u, 0u, ShaderType::Pixel, true, 5u, 255u);
+		    const auto& sample = code.GetInstructions().At(0);
+		    const int expected_addresses[] = {255, 32, 31, 33, 7, 42};
+		    RequireMimgTail(sample.type == ShaderInstructionType::ImageSampleCd && sample.src[0].type == ShaderOperandType::Vgpr &&
+		                    sample.src[0].register_id == 255 && sample.src[0].size == 1 && sample.mimg_address_num == 9,
+		                    "NSA's base VGPR at the register-file boundary remains a single valid operand");
+		    for (int address = 0; address < 6; ++address)
+		    {
+			    RequireMimgTail(sample.mimg_address[address].type == ShaderOperandType::Vgpr &&
+			                    sample.mimg_address[address].register_id == expected_addresses[address],
+					            "sparse NSA registers supply the six logical addresses without a contiguous overflow");
+		    }
+		    RequireMimgTail(ShaderInstructionLoweringPreconditions(sample),
+					            "all encoded and logical operands pass shared lowering preconditions");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, RejectsUnsupportedSampleCdModifiers)
+{
+	for (const uint32_t flags: {1u << 25u, 1u << 17u, 1u << 16u, 1u << 15u, 1u << 14u, 1u << 13u, 1u << 12u, 1u << 6u,
+	                            1u << 7u})
+	{
+		ASSERT_EXIT(
+		    {
+			    InitMimgParser();
+			    CaptureMimgRejectionDiagnostic();
+			    (void)ParseCdMimgInstruction(2u, 0xau, 1u, flags);
+			    std::_Exit(0);
+		    },
+		    ::testing::ExitedWithCode(kMimgRejectedExit), "");
+	}
+	ASSERT_EXIT(
+	    {
+		    InitMimgParser();
+		    CaptureMimgRejectionDiagnostic();
+		    (void)ParseCdMimgInstruction(2u, 0xau, 1u, 0u, 1u << 31u);
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(kMimgRejectedExit), "");
+}
+
+TEST(EmulatorShaderMimg, RejectsNonTwoDimensionalSampleCd)
+{
+	for (const uint32_t dimension: {0u, 2u, 3u, 4u, 5u, 6u, 7u})
+	{
+		ASSERT_EXIT(
+		    {
+			    InitMimgParser();
+			    CaptureMimgRejectionDiagnostic();
+			    (void)ParseCdMimgInstruction(2u, 0xau, dimension);
+			    std::_Exit(0);
+		    },
+		    ::testing::ExitedWithCode(kMimgRejectedExit), "");
+	}
+}
+
+TEST(EmulatorShaderMimg, RejectsLegacySampleCd)
+{
+	ASSERT_EXIT(
+	    {
+		    InitMimgParser();
+		    CaptureMimgRejectionDiagnostic();
+		    (void)ParseCdMimgInstruction(0u, 0xau, 1u, 0u, 0u, ShaderType::Pixel, false);
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(kMimgRejectedExit), "");
+}
+
+TEST(EmulatorShaderMimg, RejectsSampleCdAddressTupleTooShortForTwoDimensionalGradients)
+{
+	ASSERT_EXIT(
+	    {
+		    InitMimgParser();
+		    CaptureMimgRejectionDiagnostic();
+		    (void)ParseCdMimgInstruction(1u, 0xau);
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(kMimgRejectedExit), "");
+}
+
+// SAMPLE_D uses each pixel's own slopes, so it needs no quad-uniform gradient
+// proof: the same sample with unproven slopes emits a validated Grad sample.
+TEST(EmulatorShaderMimg, EmitsSampleDWithoutQuadUniformGradientProof)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    const auto code = ParseCdMimgInstruction(0u, 0xfu, 1u, 0u, 0u, ShaderType::Pixel, true, 5u, 30u, 0x22u);
+		    RequireMimgTail(!ShaderImageSampleCdHasQuadUniformGradients(code, 0u), "slopes from plain registers are unproven");
+		    const auto source = EmitValidatedMimgTailModule(code, false, true);
+		    RequireMimgTail(source.ContainsStr("%sample_grad_value_0 = OpImageSampleExplicitLod %v4float %sample_grad_sampled_0 "
+		                                       "%sample_grad_coordinate_0 Grad %sample_grad_grad_x_0 %sample_grad_grad_y_0"),
+		                    "SAMPLE_D emits a per-invocation explicit-gradient sample");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, EmitsAndValidatesParsedCdWithOrderedGradientsAndPackedDmask)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    const auto code = MakeParsedCdGradientShader();
+		    const auto sample_index = code.GetInstructions().Size() - 2u;
+		    const auto& sample = code.GetInstructions().At(sample_index);
+		    RequireMimgTail(sample.type == ShaderInstructionType::ImageSampleCd && sample.mimg_dimension == 1u &&
+		                    sample.mimg_dmask == 0xau && sample.dst.register_id == 64 && sample.dst.size == 2,
+		                    "parsed CD carries the nontrivial two-component DMASK destination span");
+		    const int expected_addresses[] = {30, 32, 31, 33, 7, 42};
+		    RequireMimgTail(sample.mimg_address_num == 9 && sample.src[0].size == 1,
+		                    "the two NSA dwords retain the CD six-address span plus three unused slots");
+		    for (int address = 0; address < 6; ++address)
+		    {
+			    RequireMimgTail(sample.mimg_address[address].register_id == expected_addresses[address],
+			                    "each parsed address register is distinct and in CD operand order");
+		    }
+		    const auto source = EmitValidatedMimgTailModule(code, false, true);
+		    const auto tag = Core::String8::FromPrintf("%u", sample_index);
+		    const auto expected_grad_x = Core::String8::FromPrintf(
+		        "%%sample_grad_grad_x_%s = OpCompositeConstruct %%v2float %%sample_grad_address_%s_0 %%sample_grad_address_%s_1",
+		        tag.c_str(), tag.c_str(), tag.c_str());
+		    const auto expected_grad_y = Core::String8::FromPrintf(
+		        "%%sample_grad_grad_y_%s = OpCompositeConstruct %%v2float %%sample_grad_address_%s_2 %%sample_grad_address_%s_3",
+		        tag.c_str(), tag.c_str(), tag.c_str());
+		    const auto expected_coordinates = Core::String8::FromPrintf(
+		        "%%sample_grad_coordinate_%s = OpCompositeConstruct %%v2float %%sample_grad_address_%s_4 %%sample_grad_address_%s_5",
+		        tag.c_str(), tag.c_str(), tag.c_str());
+		    const auto expected_sample = Core::String8::FromPrintf(
+		        "%%sample_grad_value_%s = OpImageSampleExplicitLod %%v4float %%sample_grad_sampled_%s %%sample_grad_coordinate_%s "
+		        "Grad %%sample_grad_grad_x_%s %%sample_grad_grad_y_%s",
+		        tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+		    RequireMimgTail(source.ContainsStr(expected_grad_x.c_str()) && source.ContainsStr(expected_grad_y.c_str()) &&
+		                    source.ContainsStr(expected_coordinates.c_str()) && source.ContainsStr(expected_sample.c_str()),
+		                    "validated SPIR-V source supplies dx/dh, dy/dh, dx/dv, dy/dv in the exact Grad vector order");
+		    for (int address = 0; address < 6; ++address)
+		    {
+			    const auto load = Core::String8::FromPrintf("%%sample_grad_address_%s_%d = OpLoad %%float %%v%d", tag.c_str(), address,
+			                                               expected_addresses[address]);
+			    RequireMimgTail(source.ContainsStr(load.c_str()), "Grad vectors load the exact parsed NSA VGPR operands");
+		    }
+		    const auto green_extract = Core::String8::FromPrintf(
+		        "%%sample_grad_component_%s_1 = OpCompositeExtract %%float %%sample_grad_value_%s 1", tag.c_str(), tag.c_str());
+		    const auto alpha_extract = Core::String8::FromPrintf(
+		        "%%sample_grad_component_%s_3 = OpCompositeExtract %%float %%sample_grad_value_%s 3", tag.c_str(), tag.c_str());
+		    const auto exec_active = Core::String8::FromPrintf(
+		        "%%image_exec_active_%s = OpINotEqual %%bool %%image_exec_value_%s %%uint_0", tag.c_str(), tag.c_str());
+		    const auto green_old = Core::String8::FromPrintf("%%image_exec_old_%s_0 = OpLoad %%float %%v64", tag.c_str());
+		    const auto alpha_old = Core::String8::FromPrintf("%%image_exec_old_%s_1 = OpLoad %%float %%v65", tag.c_str());
+		    const auto green_select = Core::String8::FromPrintf(
+		        "%%image_exec_value_%s_0 = OpSelect %%float %%image_exec_active_%s %%sample_grad_component_%s_1 %%image_exec_old_%s_0",
+		        tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+		    const auto alpha_select = Core::String8::FromPrintf(
+		        "%%image_exec_value_%s_1 = OpSelect %%float %%image_exec_active_%s %%sample_grad_component_%s_3 %%image_exec_old_%s_1",
+		        tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+		    const auto green_store = Core::String8::FromPrintf("OpStore %%v64 %%image_exec_value_%s_0", tag.c_str());
+		    const auto alpha_store = Core::String8::FromPrintf("OpStore %%v65 %%image_exec_value_%s_1", tag.c_str());
+		    const auto red_component = Core::String8::FromPrintf("%%sample_grad_component_%s_0", tag.c_str());
+		    const auto blue_component = Core::String8::FromPrintf("%%sample_grad_component_%s_2", tag.c_str());
+		    RequireMimgTail(source.ContainsStr(green_extract.c_str()) && source.ContainsStr(alpha_extract.c_str()) &&
+		                    source.ContainsStr(exec_active.c_str()) && source.ContainsStr(green_old.c_str()) &&
+		                    source.ContainsStr(alpha_old.c_str()) && source.ContainsStr(green_select.c_str()) &&
+		                    source.ContainsStr(alpha_select.c_str()) && source.ContainsStr(green_store.c_str()) &&
+		                    source.ContainsStr(alpha_store.c_str()) &&
+		                    !source.ContainsStr(red_component.c_str()) && !source.ContainsStr(blue_component.c_str()),
+		                    "DMASK G+A packs selected channels into consecutive VGPRs while preserving inactive EXEC lanes");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, RetainsUnmodeledDppBitsAndRejectsCdGradientProof)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    constexpr uint32_t unmodeled_bits = (1u << 17u) | (1u << 20u) | (1u << 23u);
+		    ShaderInstruction vop1_dpp {};
+		    ShaderInstruction vop2_dpp {};
+		    RequireMimgTail(ParseSanitizedDppInstruction(false, 20u, 7u, 0u, 0x00u, &vop1_dpp),
+		                    "sanitized VOP1 DPP word parses into its instruction tuple");
+		    RequireMimgTail(ParseSanitizedDppInstruction(true, 30u, 7u, 20u, 0x55u, &vop2_dpp),
+		                    "sanitized VOP2 DPP word parses into its instruction tuple");
+		    RequireMimgTail(vop1_dpp.src[0].dpp && vop1_dpp.src[0].dpp_ctrl == 0x00u &&
+		                    vop1_dpp.src[0].dpp_unmodeled_bits == unmodeled_bits,
+		                    "VOP1 preserves reserved bits from the second DPP dword");
+		    RequireMimgTail(vop2_dpp.src[0].dpp && vop2_dpp.src[0].dpp_ctrl == 0x55u &&
+		                    vop2_dpp.src[0].dpp_unmodeled_bits == unmodeled_bits &&
+		                    vop2_dpp.src[1].type == ShaderOperandType::Vgpr && vop2_dpp.src[1].register_id == 20,
+		                    "VOP2 preserves reserved bits and its ordinary second source");
+		    RequireMimgTail(CdGradientProofRejectsParsedDpp(vop1_dpp, 3u),
+		                    "the CD proof rejects a parsed VOP1 broadcast with unmodeled controls");
+		    RequireMimgTail(CdGradientProofRejectsParsedDpp(vop2_dpp, 5u),
+		                    "the CD proof rejects a parsed VOP2 subtract with unmodeled controls");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
 
 TEST(EmulatorShaderMimg, ParsesSamplerlessMimgWithExactEmptySourceTail)
 {
@@ -1194,11 +2167,16 @@ TEST(EmulatorShaderMimg, PreservesAtomicDataSourceWithoutSamplerOperand)
 	ASSERT_EXIT(
 	    ([] {
 		    InitMimgParser();
-		    for (uint32_t glc: {0u, 1u})
+		    // IMAGE_ATOMIC_SWAP (0x0f) and IMAGE_ATOMIC_ADD (0x11), each without and with the GLC return.
+		    const std::array<std::pair<uint32_t, ShaderInstructionType>, 2> atomics {
+		        {{0x0fu, ShaderInstructionType::ImageAtomicSwap}, {0x11u, ShaderInstructionType::ImageAtomicAdd}}};
+		    for (uint32_t form = 0; form < 4u; form++)
 		    {
-			    const auto code = ParseMimgTailInstruction(0x11u, 0u, 0u, 1u, ShaderType::Compute, glc << 13u);
+			    const auto [opcode, type] = atomics[form / 2u];
+			    const uint32_t glc        = form % 2u;
+			    const auto code = ParseMimgTailInstruction(opcode, 0u, 0u, 1u, ShaderType::Compute, glc << 13u);
 			    const auto& inst = code.GetInstructions().At(0);
-			    RequireMimgTail(inst.type == ShaderInstructionType::ImageAtomicAdd && inst.src_num == 3 &&
+			    RequireMimgTail(inst.type == type && inst.src_num == 3 &&
 			                   inst.src[1] == TileSgpr(32, 8) && inst.src[2] == TileVgpr(8) && EmptyMimgOperand(inst.src[3]) &&
 			                   inst.mimg_return_old_value == (glc != 0u), "atomic's third source is real VGPR data, not SSAMP");
 			    RequireMimgTail(ShaderInstructionLoweringPreconditions(inst), "atomic data source passes the unchanged validator");
@@ -1210,11 +2188,11 @@ TEST(EmulatorShaderMimg, PreservesAtomicDataSourceWithoutSamplerOperand)
 
 TEST(EmulatorShaderMimg, RejectsUnprovenNonzeroSsampOnSamplerlessOpcodes)
 {
-	for (uint32_t opcode: {0x00u, 0x01u, 0x08u, 0x09u, 0x0eu, 0x11u})
+	for (uint32_t opcode: {0x00u, 0x01u, 0x08u, 0x09u, 0x0eu, 0x0fu, 0x11u})
 	{
 		for (uint32_t ssamp: {1u, 2u, 4u, 8u, 16u, 31u})
 		{
-			const uint32_t dmask = opcode == 0x11u ? 1u : 0xfu;
+			const uint32_t dmask = opcode == 0x0fu || opcode == 0x11u ? 1u : 0xfu;
 			const auto diagnostic = Core::String8::FromPrintf(
 			    "unsupported samplerless MIMG SSAMP: opcode=0x%02x ssamp=0x%02x pc=0x00000000 "
 			    "word0=0x%08x word1=0x%08x; only SSAMP=0 is admitted",
@@ -1280,6 +2258,37 @@ TEST(EmulatorShaderMimg, EmitsAndValidatesParsedSamplerlessImageModules)
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorShaderMimg, PackedMipAndOrdinaryStoresRespectEachPairedExecBank)
+{
+	ASSERT_EXIT((
+	                []
+	                {
+		                InitMimgParser();
+		                EnableMimgModuleValidation();
+		                for (const uint32_t opcode: {0x08u, 0x09u})
+		                {
+			                const bool        mip       = opcode == 0x09u;
+			                const auto        code      = ParseMimgTailInstruction(opcode, 0u, 0u, 0xfu, ShaderType::Compute, 0u, 1u);
+			                const auto        source    = EmitValidatedMimgTailModule(code, true, false, 9u, 22u, true);
+			                const std::string operation = mip ? "image_store_mip" : "image_store";
+			                const std::string active    = mip ? operation + "_active_0" : "image_store_enabled_0";
+			                const std::string write     = mip ? operation + "_write_0" : "image_store_write_0";
+			                const std::string merge     = mip ? operation + "_merge_0" : "image_store_merge_0";
+			                for (const char* bank: {"low", "high"})
+			                {
+				                const std::string suffix = "_" + std::string(bank);
+				                const std::string branch =
+				                    "OpBranchConditional %" + active + suffix + " %" + write + suffix + " %" + merge + suffix;
+				                RequireMimgTail(source.ContainsStr(branch.c_str()), "each bank branches on its own active EXEC bit");
+				                RequireMimgTail(source.ContainsStr(("OpImageWrite %t27_0" + suffix).c_str()),
+				                                "each active bank emits its storage write");
+			                }
+		                }
+		                std::_Exit(0);
+	                }()),
+	            ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorShaderMimg, EmitsAndValidatesParsedSampleWithRealSampler)
 {
 	ASSERT_EXIT(
@@ -1290,6 +2299,213 @@ TEST(EmulatorShaderMimg, EmitsAndValidatesParsedSampleWithRealSampler)
 		    const auto source = EmitValidatedMimgTailModule(code, false, true);
 		    RequireMimgTail(source.ContainsStr("OpLoad %Sampler") && source.ContainsStr("OpSampledImage") &&
 		                   source.ContainsStr("OpImageSampleExplicitLod"), "parsed sample consumes its real sampler");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// RDNA2 ISA tables 43 and 44: a DIM 4 (1D array) sample, sample_lz and sample_l supply x, then
+// slice, then the sample_l LOD; sample_b and the _o forms put their bias or packed offset first.
+// The address VGPRs start at v4. The emitted coordinate keeps x and the slice in place and pins
+// the row of the one-row host array.
+TEST(EmulatorShaderMimg, EmitsAndValidatesOneDimensionalArraySampling)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    struct Form
+		    {
+			    uint32_t    opcode;
+			    uint32_t    dmask;
+			    ShaderType  stage;
+			    const char* x;
+			    const char* slice;
+			    const char* operand;
+			    const char* operation;
+		    };
+		    const Form forms[] = {
+		        {0x20u, 0xfu, ShaderType::Pixel, "%v4", "%v5", nullptr,
+		         "%image_1da_value_0 = OpImageSampleImplicitLod %v4float %image_1da_sampled_0 %image_1da_coord_0\n"},
+		        {0x27u, 0xfu, ShaderType::Compute, "%v4", "%v5", nullptr,
+		         "%image_1da_value_0 = OpImageSampleExplicitLod %v4float %image_1da_sampled_0 %image_1da_coord_0 Lod %float_0_000000\n"},
+		        {0x24u, 0xfu, ShaderType::Compute, "%v4", "%v5", "%image_1da_lod_0 = OpLoad %float %v6\n",
+		         "%image_1da_value_0 = OpImageSampleExplicitLod %v4float %image_1da_sampled_0 %image_1da_coord_0 Lod %image_1da_lod_0\n"},
+		        {0x25u, 0xfu, ShaderType::Pixel, "%v5", "%v6", "%image_1da_bias_0 = OpLoad %float %v4\n",
+		         "%image_1da_value_0 = OpImageSampleImplicitLod %v4float %image_1da_sampled_0 %image_1da_coord_0 Bias %image_1da_bias_0\n"},
+		        {0x37u, 0x1u, ShaderType::Compute, "%v5", "%v6", "%image_1da_offset_f_0 = OpLoad %float %v4\n",
+		         "%image_1da_value_0 = OpImageSampleExplicitLod %v4float %image_1da_sampled_0 %image_1da_coord_0 Lod %float_0_000000\n"},
+		    };
+		    for (const auto& form: forms)
+		    {
+			    const auto code   = ParseMimgTailInstruction(form.opcode, 5u, 0u, form.dmask, form.stage, 0u, 4u);
+			    const auto source = EmitValidatedMimgTailModule(code, false, true, 12u);
+			    RequireMimgTail(source.ContainsStr(Core::String8::FromPrintf("%%image_1da_x_raw_0 = OpLoad %%float %s\n", form.x)) &&
+			                        source.ContainsStr(Core::String8::FromPrintf("%%image_1da_slice_0 = OpLoad %%float %s\n", form.slice)),
+			                    "x and slice come from their published address dwords");
+			    RequireMimgTail(source.ContainsStr("%image_1da_coord_0 = OpCompositeConstruct %v3float %image_1da_x_0 %float_0_500000 "
+			                                       "%image_1da_slice_0\n"),
+			                    "the slice stays the array layer and the only row is pinned");
+			    RequireMimgTail(source.ContainsStr("OpAccessChain %_ptr_UniformConstant_ImageSA %textures2DA_S"),
+			                    "a 1D array samples through the 2D-array bank");
+			    RequireMimgTail(form.operand == nullptr || source.ContainsStr(form.operand), "bias, LOD or offset address is read");
+			    RequireMimgTail(source.ContainsStr(form.operation), "sampling operation matches the instruction");
+			    const bool four = form.dmask == 0xfu;
+			    RequireMimgTail(source.ContainsStr("%image_1da_component_0_0 = OpCompositeExtract %float %image_1da_value_0 0") &&
+			                        (four == source.ContainsStr("%image_1da_component_0_3 = OpCompositeExtract %float %image_1da_value_0 3")),
+			                    "exactly the enabled components are extracted");
+		    }
+		    // _LZ_O: only the signed six-bit x field [5:0] moves the coordinate, by texels of level 0.
+		    const auto offset = EmitValidatedMimgTailModule(ParseMimgTailInstruction(0x37u, 5u, 0u, 1u, ShaderType::Compute, 0u, 4u),
+		                                                    false, true, 12u);
+		    RequireMimgTail(offset.ContainsStr("OpBitFieldSExtract %int %image_1da_offset_bits_0 %int_0 %int_6") &&
+		                        offset.ContainsStr("%image_1da_size_0 = OpImageQuerySizeLod %v3int %image_1da_image_0 %int_0") &&
+		                        offset.ContainsStr("%image_1da_x_0 = OpFAdd %float %image_1da_x_raw_0 %image_1da_shift_0") &&
+		                        !offset.ContainsStr("OpBitFieldSExtract %int %image_1da_offset_bits_0 %int_8"),
+		                    "the 1D offset uses the x field only");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// RDNA2 ISA table 42: a DIM 4 load supplies (x, slice). It fetches the slice's layer at row 0 and
+// keeps the integer and float result types of the descriptor format.
+TEST(EmulatorShaderMimg, EmitsAndValidatesOneDimensionalArrayIntegerLoad)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    for (auto stage: {ShaderType::Pixel, ShaderType::Compute})
+		    {
+			    for (uint32_t format: {22u, 20u})
+			    {
+				    const auto code   = ParseMimgTailInstruction(0x00u, 0u, 0u, 0xfu, stage, 0u, 4u);
+				    const auto source = EmitValidatedMimgTailModule(code, false, false, 12u, format);
+				    RequireMimgTail(source.ContainsStr("%image_load_x_f_0 = OpLoad %float %v4\n") &&
+				                        source.ContainsStr("%image_load_y_f_0 = OpCopyObject %float %float_0_000000\n") &&
+				                        source.ContainsStr("%image_load_z_f_0 = OpLoad %float %v5\n"),
+				                    "x and slice come from v4 and v5; the row is zero");
+				    RequireMimgTail(source.ContainsStr("OpCompositeConstruct %v3uint %image_load_x_0 %image_load_y_0 %image_load_z_0"),
+				                    "the fetch addresses (x, row, layer)");
+				    RequireMimgTail(source.ContainsStr(format == 20u ? "OpImageFetch %v4uint" : "OpImageFetch %v4float"),
+				                    "integer formats fetch integer texels");
+				    RequireMimgTail(!source.ContainsStr("%image_load_array_tag_0"), "a 1D array needs no runtime shape selection");
+			    }
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// RDNA2 ISA tables 42 and 43: a DIM 4 load_mip addresses (x, slice, mip) and a DIM 4 sample_l
+// addresses (x, slice, lod) for any enabled-component set. Raw words parse to those three
+// addresses and the production emitter reads the level from the third.
+TEST(EmulatorShaderMimg, ParsesAndEmitsOneDimensionalArrayExplicitLevelForms)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    for (auto stage: {ShaderType::Pixel, ShaderType::Compute})
+		    {
+			    const auto mip_load = ParseMimgTailInstruction(0x01u, 0u, 0u, 0xfu, stage, 0u, 4u);
+			    const auto& load    = mip_load.GetInstructions().At(0);
+			    RequireMimgTail(load.type == ShaderInstructionType::ImageLoad && load.mimg_explicit_lod && load.mimg_dimension == 4u &&
+			                        load.src[0].size == 3 && load.format == ShaderInstructionFormat::VdataVaddr3StDmask,
+			                    "a 1D-array load_mip decodes three address VGPRs");
+			    const auto load_source = EmitValidatedMimgTailModule(mip_load, false, false, 12u);
+			    RequireMimgTail(load_source.ContainsStr("%image_load_z_f_0 = OpLoad %float %v5\n") &&
+			                        load_source.ContainsStr("%image_load_lod_f_0 = OpLoad %float %v6\n") &&
+			                        load_source.ContainsStr(" Lod %image_load_lod_0") && load_source.ContainsStr("OpImageFetch %v4float"),
+			                    "the slice is v5 and the level is v6");
+		    }
+		    for (uint32_t dmask: {0x1u, 0x6u, 0xbu})
+		    {
+			    const auto code = ParseMimgTailInstruction(0x24u, 5u, 0u, dmask, ShaderType::Compute, 0u, 4u);
+			    const auto& inst = code.GetInstructions().At(0);
+			    RequireMimgTail(inst.format == ShaderInstructionFormat::VdataVaddr3StSsMimgDmask && inst.src[0].size == 3 &&
+			                        inst.dst.size == (dmask == 0xbu ? 3 : dmask == 0x6u ? 2 : 1),
+			                    "a 1D-array sample_l decodes every enabled-component set");
+			    const auto source = EmitValidatedMimgTailModule(code, false, true, 12u);
+			    RequireMimgTail(source.ContainsStr("%image_1da_lod_0 = OpLoad %float %v6\n") &&
+			                        source.ContainsStr("%image_1da_slice_0 = OpLoad %float %v5\n"),
+			                    "sample_l reads slice and LOD from the second and third addresses");
+			    for (uint32_t component = 0; component < 4u; ++component)
+			    {
+				    const auto extract =
+				        Core::String8::FromPrintf("%%image_1da_component_0_%u = OpCompositeExtract %%float %%image_1da_value_0 %u", component, component);
+				    RequireMimgTail(source.ContainsStr(extract) == ((dmask & (1u << component)) != 0u), "exactly the enabled components");
+			    }
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// The 1D-array contract admits only DIM 4 reads of a type-12 T#. Forms without a published
+// 1D-array result, DIM 4 on another type, a type-12 T# under DIM 1 or DIM 5, and every type-12
+// store stop at the emitter instead of reading the slice as y, dropping the layer or inventing a result.
+TEST(EmulatorShaderMimg, RejectsOneDimensionalArrayFormsWithoutAContract)
+{
+	struct Rejection
+	{
+		uint32_t opcode;
+		uint32_t ssamp;
+		uint32_t dmask;
+		uint32_t dim;
+		uint32_t type;
+		uint32_t format;
+		bool     writable;
+	};
+	const Rejection rejections[] = {
+	    {0x47u, 5u, 0x1u, 4u, 12u, 22u, false}, // gather4_lz: no 1D-array gather in table 43
+	    {0x30u, 5u, 0x1u, 4u, 12u, 22u, false}, // sample_o: offset in texels of a derivative-selected level
+	    {0x20u, 5u, 0xfu, 4u, 13u, 22u, false}, // DIM 4 on a 2D-array T#
+	    {0x20u, 5u, 0xfu, 4u, 12u, 20u, false}, // filtered sample of an integer 1D array
+	    {0x0eu, 0u, 0xfu, 1u, 12u, 22u, false}, // get_resinfo: 1D-array result layout unpublished
+	    {0x20u, 5u, 0xfu, 1u, 12u, 22u, false}, // type-12 sample under DIM 1
+	    {0x20u, 5u, 0xfu, 5u, 12u, 22u, false}, // type-12 sample under DIM 5
+	    {0x24u, 5u, 0xfu, 5u, 12u, 22u, false}, // type-12 sample_l under DIM 5
+	    {0x47u, 5u, 0x1u, 1u, 12u, 22u, false}, // type-12 gather4_lz under DIM 1
+	    {0x47u, 5u, 0x1u, 5u, 12u, 22u, false}, // type-12 gather4_lz under DIM 5
+	    {0x2fu, 5u, 0x1u, 1u, 12u, 22u, false}, // type-12 compare sample under DIM 1
+	    {0x00u, 0u, 0xfu, 1u, 12u, 22u, false}, // type-12 load under DIM 1
+	    {0x00u, 0u, 0xfu, 5u, 12u, 22u, false}, // type-12 load under DIM 5
+	    {0x01u, 0u, 0xfu, 5u, 12u, 22u, false}, // type-12 load_mip under DIM 5
+	    {0x00u, 0u, 0xfu, 4u, 13u, 22u, false}, // DIM 4 load of a 2D-array T#
+	    {0x08u, 0u, 0xfu, 1u, 12u, 22u, true},  // type-12 store under DIM 1
+	    {0x08u, 0u, 0xfu, 5u, 12u, 22u, true},  // type-12 store under DIM 5
+	    {0x08u, 0u, 0xfu, 4u, 12u, 22u, true},  // DIM 4 store: no 1D-array storage contract
+	};
+	for (const auto& rejection: rejections)
+	{
+		ASSERT_EXIT(
+		    {
+			    InitMimgParser();
+			    CaptureMimgRejectionDiagnostic();
+			    const auto code = ParseMimgTailInstruction(rejection.opcode, rejection.ssamp, 0u, rejection.dmask, ShaderType::Pixel, 0u,
+			                                               rejection.dim);
+			    (void)EmitValidatedMimgTailModule(code, rejection.writable, rejection.ssamp != 0u, rejection.type, rejection.format);
+			    std::_Exit(0);
+		    },
+		    ::testing::ExitedWithCode(kMimgRejectedExit), "shader emitter missing");
+	}
+}
+
+// Inverse control: the contract leaves 2D and 2D-array T#s under their own DIMs on their existing paths.
+TEST(EmulatorShaderMimg, KeepsTwoDimensionalAndArrayShapesOutsideTheOneDimensionalContract)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    const auto flat = EmitValidatedMimgTailModule(ParseMimgTailInstruction(0x00u, 0u, 0u, 0xfu, ShaderType::Compute, 0u, 1u),
+		                                                  false, false, 9u);
+		    const auto array = EmitValidatedMimgTailModule(ParseMimgTailInstruction(0x00u, 0u, 0u, 0xfu, ShaderType::Compute, 0u, 5u),
+		                                                   false, false, 13u);
+		    RequireMimgTail(flat.ContainsStr("OpImageFetch %v4float") && !flat.ContainsStr("%image_1da_"), "2D load keeps its path");
+		    RequireMimgTail(array.ContainsStr("%image_load_z_f_0 = OpLoad %float %v6\n"), "2D-array load keeps (x, y, slice)");
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");

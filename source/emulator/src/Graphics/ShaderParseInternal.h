@@ -54,6 +54,12 @@ KYTY_SHADER_PARSER(shader_parse_mubuf);
 KYTY_SHADER_PARSER(shader_parse_ds);
 KYTY_SHADER_PARSER(shader_parse_mimg);
 KYTY_SHADER_PARSER(shader_parse_bvh);
+
+// Rewrites relative-move waterfall loops into per-lane indexed moves (ShaderWaterfall.cpp).
+void ShaderLowerWaterfallMoves(ShaderCode* code);
+// Removes S_CBRANCH_EXECZ skips whose range another branch enters from outside, when the range is inert under
+// an empty EXEC and defines no scalar word read after the target (ShaderExecSkip.cpp).
+void ShaderRemoveNeutralExecSkips(ShaderCode* code);
 KYTY_SHADER_PARSER(shader_parse_mtbuf);
 KYTY_SHADER_PARSER(shader_parse_flat);
 KYTY_SHADER_PARSER(shader_parse_vintrp);

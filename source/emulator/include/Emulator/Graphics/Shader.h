@@ -13,6 +13,7 @@
 #include "Emulator/Graphics/VertexClipProbe.h"
 
 #include <bitset>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -21,6 +22,8 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+struct ShaderScalarFlow;
 
 namespace HW {
 struct VertexShaderInfo;
@@ -134,6 +137,8 @@ enum class ShaderInstructionType : uint32_t
 	ImageSampleLzO,
 	ImageSampleB,
 	ImageSampleDrefLz,
+	ImageSampleCd,
+	ImageSampleD,
 	ImageStore,
 	ImageStoreMip,
 	SAddcU32,
@@ -166,6 +171,7 @@ enum class ShaderInstructionType : uint32_t
 	SBfeI32,
 	SBfeU32,
 	SBfeU64,
+	SBfeI64,
 	SBfmB32,
 	SBfmB64,
 	SBarrier,
@@ -585,6 +591,14 @@ enum class ShaderInstructionType : uint32_t
 	VPermlanex16B32,
 	SSubU32,
 	TBufferLoadFormatXyz,
+	BufferAtomicSwap,
+	ImageSampleO,
+	SSubbU32,
+	SAshrI64,
+	ImageAtomicSwap,
+	SPackLhB32B16,
+	SPackHhB32B16,
+	SAbsdiffI32,
 
 	ZMax
 };
@@ -594,6 +608,13 @@ enum class ShaderInstructionType : uint32_t
 // helpers rather than instantiating magic_enum in other translation units.
 [[nodiscard]] std::string_view ShaderInstructionTypeName(ShaderInstructionType type);
 [[nodiscard]] bool             ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix);
+// MUBUF or MTBUF instruction type (mnemonic "Buffer*" or "TBuffer*"), from a table built once.
+[[nodiscard]] bool             ShaderInstructionIsVectorBufferAccess(ShaderInstructionType type);
+// The classifiers below are tables built once from the mnemonic prefixes
+// "BufferLoad", "TBufferLoad" and "SLoad".
+[[nodiscard]] bool             ShaderInstructionIsBufferLoad(ShaderInstructionType type);
+[[nodiscard]] bool             ShaderInstructionIsTypedBufferLoad(ShaderInstructionType type);
+[[nodiscard]] bool             ShaderInstructionIsScalarMemoryLoad(ShaderInstructionType type);
 
 namespace ShaderInstructionFormat {
 
@@ -699,6 +720,7 @@ enum FormatByte : uint64_t
 	NullTarget, // pixel valid mask without data
 	DsOff,  // byte offset carried by ShaderInstruction::ds_offset
 	Float3, // format:float3
+	S0A6,   // operand_array_to_str(inst.src[0], 6)
 };
 
 constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
@@ -747,7 +769,8 @@ enum Format : uint64_t
 	Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt5, S0, S1, S2, S3, Vm}),
 	Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt6, S0, S1, S2, S3, Vm}),
 	Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt7, S0, S1, S2, S3, Vm}),
-	// RDNA2 pixel Z export (target 0x08): en=0x1, compr=0, vm=1, done=1.
+	// RDNA2 pixel Z export (target 0x08): en=0x1, compr=0, vm=1; done=0 when color exports follow.
+	PixelZVsrc0Vm                        = FormatDefine({PixelZ, S0, Vm}),
 	PixelZVsrc0VmDone                    = FormatDefine({PixelZ, S0, Vm, Done}),
 	Param0Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param0, S0, S1, S2, S3}),
 	Param1Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param1, S0, S1, S2, S3}),
@@ -781,8 +804,11 @@ enum Format : uint64_t
 	Param29Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param29, S0, S1, S2, S3}),
 	Param30Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param30, S0, S1, S2, S3}),
 	Param31Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param31, S0, S1, S2, S3}),
+	Pos0Vsrc0Vsrc1Vsrc2Vsrc3           = FormatDefine({Pos0, S0, S1, S2, S3}),
 	Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done        = FormatDefine({Pos0, S0, S1, S2, S3, Done}),
 	Pos1OffOffVsrc0Off                = FormatDefine({Pos1, Off, Off, S0, Off}),
+	Pos1Vsrc0OffOffOff                 = FormatDefine({Pos1, S0, Off, Off, Off}),
+	Pos1Vsrc0OffOffOffDone             = FormatDefine({Pos1, S0, Off, Off, Off, Done}),
 	PrimVsrc0OffOffOffDone              = FormatDefine({Prim, S0, Off, Off, Off, Done}),
 	Saddr                               = FormatDefine({S0A2}),
 	SdstSbaseSoffset                    = FormatDefine({D, S0A2, S1}),
@@ -838,6 +864,7 @@ enum Format : uint64_t
 	VdataVaddr2StSsMimgDmask                = FormatDefine({DA, S0A2, S1A8, S2A4, MimgDmask}),
 	VdataVaddr3StSsMimgDmask                = FormatDefine({DA, S0A3, S1A8, S2A4, MimgDmask}),
 	VdataVaddr4StSsMimgDmask                = FormatDefine({DA, S0A4, S1A8, S2A4, MimgDmask}),
+	VdataVaddr6StSsMimgDmask                = FormatDefine({DA, S0A6, S1A8, S2A4, MimgDmask}),
 	Vdata4Vaddr4StDmaskF                = FormatDefine({DA4, S0A4, S1A8, DmaskF}),
 	// image_gather4 returns four values from the selected component. The MIMG
 	// component mask selects that component; it does not alter result width.
@@ -858,6 +885,8 @@ enum Format : uint64_t
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
+	// ds_write_b32 with GDS=1: the store addresses GDS through M0, not LDS.
+	VaddrVdataOffsetGds                 = FormatDefine({S0, S1, Gds}),
 	VaddrOffset                         = FormatDefine({S0}),
 	// ds_*_addtid_b32: no ADDR field; S0 carries DATA0 for the write.
 	VdataOffset                         = FormatDefine({S0, DsOff}),
@@ -932,13 +961,15 @@ struct ShaderOperand
 	uint8_t  dpp_bank_mask      = 0;
 	bool     dpp_fetch_inactive = false;
 	bool     dpp_bound_ctrl     = false;
+	// DPP control-dword bits without an established lowering contract.
+	uint32_t dpp_unmodeled_bits = 0;
 
 	bool operator==(const ShaderOperand& other) const
 	{
 		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size &&
 		       swizzle == other.swizzle && dpp == other.dpp && dpp_ctrl == other.dpp_ctrl && dpp_row_mask == other.dpp_row_mask &&
 		       dpp_bank_mask == other.dpp_bank_mask && dpp_fetch_inactive == other.dpp_fetch_inactive &&
-		       dpp_bound_ctrl == other.dpp_bound_ctrl;
+		       dpp_bound_ctrl == other.dpp_bound_ctrl && dpp_unmodeled_bits == other.dpp_unmodeled_bits;
 	}
 };
 
@@ -981,6 +1012,9 @@ struct ShaderInstruction
 	uint8_t mimg_dimension = 0;
 	// IMAGE_LOAD_MIP fetches the resource-view level carried after the coordinates.
 	bool mimg_explicit_lod = false;
+	// The _O variants carry 6-bit signed texel offsets (x in bits 5:0, y in bits
+	// 13:8) in the first address VGPR, before the coordinates.
+	bool mimg_offset = false;
 	// Image atomics replace VDATA with the pre-operation value only for GLC=1.
 	bool mimg_return_old_value = false;
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
@@ -1071,6 +1105,14 @@ struct ShaderControlFlowBlock
 	ShaderInstruction last;
 };
 
+enum class ShaderGuestSourceSnapshotStatus: uint8_t
+{
+	Unavailable,
+	Captured,
+	Truncated,
+	UnsupportedContinuation,
+};
+
 class ShaderCode
 {
 public:
@@ -1093,6 +1135,15 @@ public:
 
 	[[nodiscard]] ShaderType GetType() const { return m_type; }
 	void                     SetType(ShaderType type) { this->m_type = type; }
+
+	// Pixel spill admission needs the launch allocation, not only the instruction bytes.
+	void SetPixelLdsAllocation(uint32_t extra_dwords, int parameter_sgpr)
+	{
+		m_pixel_extra_lds_dwords = extra_dwords;
+		m_pixel_parameter_sgpr   = parameter_sgpr;
+	}
+	[[nodiscard]] uint32_t GetPixelExtraLdsDwords() const { return m_pixel_extra_lds_dwords; }
+	[[nodiscard]] int      GetPixelParameterSgpr() const { return m_pixel_parameter_sgpr; }
 
 	[[nodiscard]] bool HasAnyOf(std::initializer_list<ShaderInstructionType> types) const
 	{
@@ -1123,6 +1174,22 @@ public:
 	// program's own base address.
 	[[nodiscard]] uint32_t GetContinuationPc() const { return m_continuation_pc; }
 	void                   SetContinuationPc(uint32_t pc) { m_continuation_pc = pc; }
+	[[nodiscard]] const std::shared_ptr<const std::vector<uint32_t>>& GetGuestSourceSnapshot() const
+	{
+		return m_guest_source_snapshot;
+	}
+	[[nodiscard]] ShaderGuestSourceSnapshotStatus GetGuestSourceSnapshotStatus() const { return m_guest_source_snapshot_status; }
+	void SetGuestSourceSnapshot(std::shared_ptr<const std::vector<uint32_t>> snapshot)
+	{
+		m_guest_source_snapshot = snapshot;
+		m_guest_source_snapshot_status = snapshot != nullptr ? ShaderGuestSourceSnapshotStatus::Captured :
+		                                                       ShaderGuestSourceSnapshotStatus::Unavailable;
+	}
+	void SetGuestSourceSnapshotStatus(ShaderGuestSourceSnapshotStatus status)
+	{
+		m_guest_source_snapshot.reset();
+		m_guest_source_snapshot_status = status;
+	}
 
 private:
 	uint32_t                  m_continuation_pc = UINT32_MAX;
@@ -1132,7 +1199,11 @@ private:
 	Vector<ShaderLabel>       m_labels;
 	Vector<ShaderLabel>       m_indirect_labels;
 	ShaderType                m_type = ShaderType::Unknown;
+	uint32_t                  m_pixel_extra_lds_dwords = 0;
+	int                       m_pixel_parameter_sgpr = -1;
 	Vector<ShaderDebugPrintf> m_debug_printfs;
+	std::shared_ptr<const std::vector<uint32_t>> m_guest_source_snapshot;
+	ShaderGuestSourceSnapshotStatus             m_guest_source_snapshot_status = ShaderGuestSourceSnapshotStatus::Unavailable;
 	uint32_t                  m_vs_embedded_id = 0;
 	uint32_t                  m_ps_embedded_id = 0;
 	bool                      m_vs_embedded    = false;
@@ -1161,6 +1232,42 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 	return x | (y << 3u) | (z << 6u) | (w << 9u);
 }
 
+// Gen5 vertex attribute control word, decoded the way guest fetch code does:
+// bits 0..4 V# slot, 5..6 component count - 1, 7..13 buffer data format
+// (0 keeps the V# format and DST_SEL), 14..25 byte offset, 26 instance index.
+struct ShaderGen5VertexAttrib
+{
+	uint32_t slot       = 0;
+	uint32_t components = 0;
+	uint8_t  format     = 0;
+	uint32_t offset     = 0;
+	bool     instance   = false;
+};
+
+constexpr ShaderGen5VertexAttrib ShaderDecodeGen5VertexAttrib(uint32_t word)
+{
+	ShaderGen5VertexAttrib attrib;
+	attrib.slot       = word & 0x1fu;
+	attrib.components = ((word >> 5u) & 0x3u) + 1u;
+	attrib.format     = static_cast<uint8_t>((word >> 7u) & 0x7fu);
+	attrib.offset     = (word >> 14u) & 0xfffu;
+	attrib.instance   = ((word >> 26u) & 0x1u) != 0;
+	return attrib;
+}
+
+// DST_SEL the guest writes for a format override: present components are
+// identity, missing Y/Z read 0 and missing W reads 1.
+constexpr uint32_t ShaderGen5VertexAttribDstSel(uint32_t components)
+{
+	switch (components)
+	{
+		case 1: return DstSel(4, 0, 0, 1);
+		case 2: return DstSel(4, 5, 0, 1);
+		case 3: return DstSel(4, 5, 6, 1);
+		default: return DstSel(4, 5, 6, 7);
+	}
+}
+
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format);
@@ -1178,6 +1285,7 @@ enum class ShaderVertexPosition1Usage : uint32_t
 {
 	Unknown,
 	RenderTargetLayer,
+	ClipDistance0,
 };
 
 [[nodiscard]] ShaderVertexPosition1Usage ShaderDecodeVertexPosition1Usage(uint32_t position_format, uint32_t output_control,
@@ -1192,8 +1300,14 @@ uint32_t ShaderGen5ResolveLinearPitch(uint32_t width, uint32_t format, uint8_t t
 // Color3D has a separate volume layout and must not be validated as an array.
 constexpr bool ShaderGen5TextureTypeUsesArrayAddressing(uint8_t type)
 {
-	// 13 = 2D array; 11 = cube (six faces addressed like layers).
-	return type == 13u || type == 11u;
+	// 12 = 1D array; 13 = 2D array; 11 = cube (six faces addressed like layers).
+	return type == 12u || type == 13u || type == 11u;
+}
+
+// T# types that the sampled and storage image path can bind (8 = 1D through 13 = 2D array).
+constexpr bool ShaderGen5TextureTypeIsImage(uint8_t type)
+{
+	return type == 8u || type == 9u || type == 10u || type == 11u || type == 12u || type == 13u;
 }
 
 // Sampled-image descriptor arrays have a static SPIR-V view type. Classify
@@ -1270,22 +1384,34 @@ inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 	return (swizzle >> (channel * 3u)) & 0x7u;
 }
 
-// Formatted image stores put shader component i in memory channel DST_SEL[i].
-// Storage views keep identity components and BGRA selects a BGRA8 view, so
-// the image-store emitter applies any other selection of four distinct channels.
-inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle)
+// Formatted image stores put shader component i in memory channel DST_SEL[i]; a
+// component that selects a constant is not stored. Storage views keep identity
+// components and, for formats with a red/blue-exchanged host format, BGRA selects
+// that view; the image-store emitter applies any other selection of distinct
+// channels that covers the view: all four, or red alone on a single-channel view.
+inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle, bool red_blue_view, bool single_channel)
 {
-	uint32_t channels = 0;
+	uint32_t channels  = 0;
+	bool     constants = false;
 	for (uint32_t component = 0; component < 4; component++)
 	{
 		const uint32_t select = GetDstSel(swizzle, component);
+		if (select == 0u || select == 1u)
+		{
+			constants = true;
+			continue;
+		}
 		if (select < 4u || (channels & (1u << (select - 4u))) != 0u)
 		{
 			return false;
 		}
 		channels |= 1u << (select - 4u);
 	}
-	return swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7);
+	if (constants && !(single_channel && channels == 1u))
+	{
+		return false;
+	}
+	return swizzle != DstSel(4, 5, 6, 7) && !(red_blue_view && swizzle == DstSel(6, 5, 4, 7));
 }
 
 struct ShaderBufferResource
@@ -1425,6 +1551,9 @@ struct ShaderTextureResource
 	}
 };
 
+// ShaderStorageImageSwizzleInShader for a bound T#, with the red/blue view decided by its storage format.
+[[nodiscard]] bool ShaderStorageTextureSwizzleInShader(const ShaderTextureResource& texture);
+
 // A comparison sample of a Gen5 color surface compares its first channel in the
 // shader: Vulkan depth-reference sampling requires a depth view.
 [[nodiscard]] State::ImageSampleOperation ShaderTextureSampleOperation(const ShaderTextureResource& texture,
@@ -1499,7 +1628,9 @@ struct ShaderExtendedResource
 		fields[1] = hi;
 	}
 
-	[[nodiscard]] uint64_t Base() const { return (fields[0] | (static_cast<uint64_t>(fields[1]) << 32u)); }
+	// A guest pointer in an SGPR pair addresses 48 bits, as for S_LOAD and SRT
+	// table pointers; the top 16 bits of the high word are not part of it.
+	[[nodiscard]] uint64_t Base() const { return (fields[0] | ((static_cast<uint64_t>(fields[1]) & 0xffffu) << 32u)); }
 };
 
 struct ShaderVertexInputBuffer
@@ -1515,6 +1646,8 @@ struct ShaderVertexInputBuffer
 	// SSBO slot in bind.storage_buffers when this stream backs untagged MUBUF
 	// format-loads. -1 means the stream is Fetch-only.
 	int      storage_slot           = -1;
+	// The stream steps per instance instead of per vertex.
+	bool     instance               = false;
 };
 
 struct ShaderVertexDestination
@@ -1524,6 +1657,8 @@ struct ShaderVertexDestination
 	// Guest attribute-table semantic. This is not necessarily the dense Vulkan
 	// input location used by resources/resources_dst.
 	int semantic = -1;
+	// The attribute word selects the instance id as the fetch index.
+	bool instance = false;
 };
 
 enum class ShaderStorageUsage
@@ -1604,6 +1739,13 @@ struct ShaderComputeUniformBufferFillEvidence
 	uint32_t record_bytes               = 16;
 	int      count_register             = -1;
 	int      period_register            = -1;
+	// The constant form stores one inline or literal value with
+	// buffer_store_format_x at every invocation index; value_registers stay -1.
+	bool     value_is_constant          = false;
+	uint32_t constant_value             = 0;
+	// The loaded form stores the first word of the one-descriptor source at
+	// this SGPR, read with s_buffer_load_dword, the same way.
+	int      value_buffer_register      = -1;
 };
 
 // Structural evidence for one narrowly defined compute metadata-fill family.
@@ -1714,6 +1856,9 @@ struct ShaderStorageResources
 	// True only when this physical binding exists solely for a dynamic S_LOAD
 	// result and must therefore not be initialized at shader entry.
 	bool                       dynamic_sload[BUFFERS_MAX]           = {};
+	// A vertex-stream SSBO that no instruction of the compiled program reads. The
+	// slot stays in the layout; its descriptor gets an empty carrier.
+	bool                       unread_stream[BUFFERS_MAX]           = {};
 	int                        slots[BUFFERS_MAX]                   = {0};
 	int                        start_register[BUFFERS_MAX]          = {0};
 	bool                       extended[BUFFERS_MAX]                = {};
@@ -1730,6 +1875,36 @@ struct ShaderZeroSBufferResources
 
 	int start_register[BUFFERS_MAX] = {0};
 	int buffers_num                 = 0;
+};
+
+// Image reads whose T# is an all-zero resource: the RDNA2 ISA defines such a
+// resource as unbound, returning zero in every component.
+// An image read through start_register returns zero. A user-data descriptor
+// covers the whole program; a descriptor S_LOAD (loaded) covers the reads in
+// (load_pc, last_pc].
+struct ShaderZeroImageResources
+{
+	static constexpr int IMAGES_MAX = 32;
+
+	int      start_register[IMAGES_MAX] = {0};
+	bool     loaded[IMAGES_MAX]         = {false};
+	uint32_t load_pc[IMAGES_MAX]        = {0};
+	uint32_t last_pc[IMAGES_MAX]        = {0};
+	int      images_num                 = 0;
+};
+
+// Descriptor S_LOADs whose descriptor binds nothing (a T# of buffer type, or an
+// S# that only feeds reads of such a T#) write zero to the SGPRs
+// [first_register, first_register + dwords) at pc. Sized for a T# load and an
+// S# load per zero image.
+struct ShaderZeroDescriptorLoads
+{
+	static constexpr int LOADS_MAX = 2 * ShaderZeroImageResources::IMAGES_MAX;
+
+	uint32_t pc[LOADS_MAX]             = {0};
+	int      first_register[LOADS_MAX] = {0};
+	int      dwords[LOADS_MAX]         = {0};
+	int      loads_num                 = 0;
 };
 
 [[nodiscard]] constexpr uint64_t ShaderBufferByteSize(uint32_t stride, uint32_t records)
@@ -1765,11 +1940,29 @@ struct ShaderBindResources;
 // indices at s8; negative stream sentinels never identify shader registers.
 [[nodiscard]] bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
                                                        int user_data_register_base = 0);
+// A vector buffer V# that no discovered resource describes: neither a bound
+// storage buffer register still holding its user data nor the destination of a mapped descriptor S_LOAD
+// that reaches this consumer. It is built at run time (for example from
+// s_getpc), so its base is a guest address, never a descriptor slot.
+[[nodiscard]] bool ShaderVectorBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst,
+                                                           int user_data_register_base = 0);
+// The instruction's V# register is a bound descriptor's, redefined before it.
+[[nodiscard]] bool ShaderBufferConsumerRedefinesDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst);
+[[nodiscard]] bool ShaderIsDynamicVectorStorageConsumer(const ShaderBindResources& bind, const ShaderInstruction& inst);
 // GLOBAL memory loads dereference per-lane guest addresses through the
 // guest device address table.
 [[nodiscard]] bool ShaderHasGlobalMemoryLoad(const ShaderCode& code);
 [[nodiscard]] bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind,
                                               int user_data_register_base = 0);
+// Image reads that return one destination dword per DMASK component.
+[[nodiscard]] bool ShaderImageReadReturnsDmaskComponents(ShaderInstructionType type);
+// The image read's T# is an all-zero resource recorded by the usage parse.
+[[nodiscard]] bool ShaderImageReadsZeroResource(const ShaderBindResources& bind, const ShaderInstruction& inst);
+void ShaderAddZeroImageResource(ShaderZeroImageResources* resources, int register_id);
+void ShaderAddLoadedZeroImageResource(ShaderZeroImageResources* resources, int register_id, uint32_t load_pc, uint32_t last_pc);
+void ShaderAddZeroDescriptorLoad(ShaderZeroDescriptorLoads* loads, uint32_t pc, int first_register, int dwords);
+[[nodiscard]] bool ShaderScalarLoadWritesZero(const ShaderBindResources& bind, uint32_t pc, int register_id);
+[[nodiscard]] bool ShaderScalarLoadIsZero(const ShaderBindResources& bind, const ShaderInstruction& inst);
 struct ShaderComputeEmptyGate
 {
 	int      storage_buffer_index = -1;
@@ -1787,6 +1980,10 @@ struct ShaderStorageImageTileCoverage
 	// A nonnegative index requires a validated, read-only runtime snapshot of
 	// the exact image width and height before the seed may be skipped.
 	int bounds_storage_buffer_index = -1;
+	uint32_t bounds_byte_offset = 0;
+	// A nonnegative origin offset requires one coherent origin/bounds snapshot
+	// and a zero origin before whole-image coverage can skip initialization.
+	int origin_byte_offset = -1;
 };
 [[nodiscard]] ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code,
                                                                                    const ShaderBindResources& bind, int texture_index,
@@ -1822,12 +2019,17 @@ constexpr ShaderGen5SampledTextureShape ShaderResolvedSampledTextureShape(const 
 	                                                 : ShaderGen5SampledTextureShapeForType(descriptor.texture.Type());
 }
 
+struct ShaderTextureResources;
+// Sets the instruction-derived shape of a read-only sampled descriptor and moves its bank count
+// from the shape it was registered with to the resolved shape.
+void ShaderSetSampledTextureInstructionShape(ShaderTextureResources* textures, int index, ShaderGen5SampledTextureShape shape);
+
 struct ShaderTextureResources
 {
 	// This table combines sampled and storage images. The host descriptor
 	// classes have separate limits, checked when constructing their layouts.
-	static constexpr int RES_MAX = 32;
-	static_assert(RES_MAX <= 32, "storage-image write-only masks use one uint32_t bit per logical resource");
+	static constexpr int RES_MAX = 64;
+	static_assert(RES_MAX <= 64, "storage-image write-only masks use one uint64_t bit per logical resource");
 	// A virtual sampled-texture descriptor carries a local index and the
 	// SPIR-V image shape of its target descriptor array. Vulkan descriptor
 	// arrays are statically typed, so 2D, 2D-array and 3D images cannot share
@@ -1888,7 +2090,15 @@ struct ShaderGdsResources
 	bool              extended[POINTERS_MAX]       = {};
 	int               pointers_num                 = 0;
 	int               binding_index                = 0;
+	// The program reads or writes GDS memory through a constant M0, so the
+	// buffer is bound even when no SGPR carries a GDS pointer.
+	bool              memory_used                  = false;
 };
+
+[[nodiscard]] inline bool ShaderGdsBufferBound(const ShaderGdsResources& gds)
+{
+	return gds.pointers_num > 0 || gds.memory_used;
+}
 
 struct ShaderDirectSgprsResources
 {
@@ -1934,22 +2144,35 @@ struct ShaderBindResources
 	bool     thread_limits_used      = false;
 	uint32_t thread_limits_offset_dw = 0;
 	uint32_t thread_limits[3]        = {0, 0, 0};
+	// Geometry compute pass and the draw that reads its output: two runtime
+	// blocks (ShaderGeometryComputeInfo), per-draw data.
+	bool     geometry_used      = false;
+	uint32_t geometry_offset_dw = 0;
+	uint32_t geometry_block[8]  = {};
 	ShaderStorageResources     storage_buffers;
 	ShaderZeroSBufferResources zero_sbuffer_resources;
 	ShaderTextureResources     textures2D;
+	ShaderZeroImageResources   zero_image_resources;
+	ShaderZeroDescriptorLoads  zero_descriptor_loads;
 	ShaderSamplerResources     samplers;
 	ShaderGdsResources         gds_pointers;
 	ShaderDirectSgprsResources direct_sgprs;
 	ShaderExtendedResources    extended;
 	ShaderDynamicSLoadMappings dynamic_sloads;
 	Vector<ShaderAssembledDescriptor> assembled_descriptors;
+	// Buffer instructions whose V# register is a bound descriptor's but no
+	// longer holds its user-data value there (redefined, for example from
+	// s_getpc): they read through the runtime V#, never the descriptor slot.
+	Vector<uint32_t> redefined_descriptor_consumers;
 };
 
 [[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
 	                                                       int user_data_register_base);
 [[nodiscard]] int ShaderFindImageStorageTextureDescriptor(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind,
                                                          int user_data_register_base);
-[[nodiscard]] bool ShaderImageAtomicAddSupported(const ShaderInstruction& instruction);
+// IMAGE_ATOMIC_ADD and IMAGE_ATOMIC_SWAP: 32-bit read-modify-writes of one storage image texel.
+[[nodiscard]] bool ShaderIsImageAtomic(ShaderInstructionType type);
+[[nodiscard]] bool ShaderImageAtomicSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind);
 [[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);
 [[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
@@ -1995,6 +2218,9 @@ enum class ShaderNativeWaveProof : uint32_t
 	QuadLocal,
 	ExactSubgroup,
 	FragmentNeutral32,
+	// A Wave64 or Wave32 pixel program whose only whole-wave observations are proven OR reductions and reads that
+	// stay inside launched quads, run as a partially populated guest wave on a host subgroup of any width.
+	FragmentPartialWave,
 };
 
 struct ShaderNativeWaveInfo
@@ -2070,13 +2296,44 @@ struct ShaderVertexInputInfo
 	// descriptor set is assigned by the renderer after both stages are known.
 	ShaderVertexClipProbeConfig clip_probe;
 	uint32_t                     clip_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+	// The host stage draws the output of a merged ES+GS geometry pass instead of
+	// running the guest program (SpirvGenerateGeometryPullSource). Its records carry
+	// geometry_pull_parameters parameters; geometry_pull_layer exports the layer.
+	bool     geometry_pull            = false;
+	bool     geometry_pull_layer      = false;
+	uint32_t geometry_pull_parameters = 0;
 };
 
 // Bind each merged vertex stream as a ReadOnly raw SSBO so untagged MUBUF
 // format-loads can address through the live V# base instead of Fetch-remapping
 // onto semantic 0. start_register stays negative so bind-time UpdateAddress48
 // leaves the guest base in the descriptor word.
-void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info);
+// streams_read false records every SSBO appended here as unread: PrepareStorageBuffers then
+// binds an empty carrier instead of materializing the stream range.
+void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info, bool streams_read = true);
+
+// MUBUF format loads of a fetch-embedded vertex program that the generator rewrites into
+// vertex-attribute fetches, with the input resource each one reads.
+[[nodiscard]] Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const ShaderCode&            code,
+                                                                                    const ShaderVertexInputInfo& info);
+// MUBUF/MTBUF instructions of a fetch-embedded vertex program, scanned once per program and
+// fetch-register pair. Each fetch candidate keeps the attribute semantic it reads; whether it
+// becomes a fetch depends on the input resources of the draw.
+struct ShaderVertexStreamAccessScan
+{
+	int fetch_attrib_reg = 0;
+	int fetch_buffer_reg = 0;
+	// A MUBUF/MTBUF instruction that is never a fetch candidate always reads its stream.
+	bool                             unconditional_reader = false;
+	Vector<std::pair<uint32_t, int>> fetch_candidates;
+	// Attribute-table dwords (bit i = dword i) the program loads from fetch_attrib_reg.
+	uint32_t attrib_dwords_read = 0;
+};
+[[nodiscard]] ShaderVertexStreamAccessScan ShaderScanVertexStreamAccesses(const ShaderCode& code, int fetch_attrib_reg,
+                                                                          int fetch_buffer_reg);
+// Only a MUBUF/MTBUF instruction left after that rewrite addresses a vertex-stream SSBO.
+// False when every such instruction becomes a fetch: the streams then have no reader.
+[[nodiscard]] bool ShaderVertexStreamStorageHasReader(const ShaderVertexStreamAccessScan& scan, const ShaderVertexInputInfo& info);
 
 // Why the fused NGG front of this vertex stage was not proven width neutral at its guest
 // width ("" when it was, or when the stage has no fused front). For the native-wave
@@ -2186,6 +2443,11 @@ struct ShaderComputeInputInfo
 	bool    fp16_overflow       = false;
 	bool    fp16_overflow_known = false;
 	ShaderComputeWaveLayout wave_layout;
+	// A native Gen5 wave32 shader needs exact physical lanes only when its guest
+	// instructions observe wave state. Generated subgroup operations by
+	// themselves do not establish guest sensitivity.
+	bool                    native_wave_sensitive = false;
+	uint32_t                required_subgroup_size = 0;
 	// See ShaderComputeWaveDispatchPlan::native_equivalent_layout.
 	bool                    native_equivalent_valid = false;
 	ShaderComputeWaveLayout native_equivalent_layout;
@@ -2199,7 +2461,7 @@ struct ShaderComputeInputInfo
 	bool                group_id[3]        = {false, false, false};
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;
-	uint32_t            storage_image_write_only_mask = 0;
+	uint64_t            storage_image_write_only_mask = 0;
 	ShaderStorageImageTileCoverage storage_image_tile_coverage[ShaderTextureResources::RES_MAX] {};
 	ShaderComputeEmptyGate empty_gate;
 	ShaderComputeMetaFillEvidence meta_fill;
@@ -2207,7 +2469,7 @@ struct ShaderComputeInputInfo
 	ShaderBindResources bind;
 };
 
-[[nodiscard]] uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen,
+[[nodiscard]] uint64_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen,
                                                        uint32_t groups_x, uint32_t groups_y, uint32_t groups_z);
 
 [[nodiscard]] constexpr uint32_t ShaderComputeLdsDwords(uint16_t granulated_lds_size)
@@ -2240,6 +2502,33 @@ struct ShaderPixelCustomInterpolation
 	[[nodiscard]] bool Enabled() const { return per_vertex_inputs != 0 || aliased_parameter_inputs != 0; }
 };
 
+// Non-null color exports per guest MRT, summarized from the parsed pixel program.
+struct ShaderPixelColorExports
+{
+	uint8_t enable[8]       = {}; // OR of export EN bits; 0 = target never exported
+	uint8_t packed          = 0;  // bit per target with a COMPR export
+	uint8_t full            = 0;  // bit per target with a non-COMPR export
+	uint8_t partial_targets = 0;  // bit per target with any color export whose EN is not 0xF
+};
+
+// Values derived only from a parsed pixel program. Descriptor and user-data
+// predicates remain per draw because their inputs can change between draws.
+struct ShaderImmutablePixelAnalysis
+{
+	bool has_only_null_exports = false;
+	ShaderPixelColorExports color_exports;
+	bool uses_native_wave_state = false;
+	bool prevents_noop_pixel_elision = false;
+	bool has_getpc = false;
+	bool has_global_memory_load = false;
+	// Buffer, typed buffer and scalar loads, in instruction order: the only
+	// instructions whose per-draw descriptor checks can require the guest
+	// device address table.
+	std::vector<uint32_t> descriptor_load_indices;
+};
+
+[[nodiscard]] ShaderPixelColorExports ShaderSummarizePixelColorExports(const ShaderCode& code);
+
 struct ShaderPixelInputInfo
 {
 	bool                   stage_enabled             = true;
@@ -2250,11 +2539,13 @@ struct ShaderPixelInputInfo
 	ShaderPixelCustomInterpolation custom_interpolation;
 	uint8_t                target_output_mode[8]     = {};
 	uint8_t                target_output_order[8]    = {};
+	uint8_t                target_output_number[8]   = {};
 	RenderHostToGuestScale host_to_guest_scale;
-	bool                   ps_pos_xy                 = false;
+	bool                   ps_position               = false;
 	bool                   front_face_all_bits       = false;
 	bool                   integer_image_coordinates = false;
 	bool                   image_size_query          = false;
+	bool                   texel_offset_sampling     = false;
 	bool                   ps_pixel_kill_enable      = false;
 	bool                   ps_early_z                = false;
 	bool                   ps_execute_on_noop        = false;
@@ -2264,6 +2555,10 @@ struct ShaderPixelInputInfo
 	bool                   ieee_mode                 = false;
 	bool                   fp16_overflow             = false;
 	bool                   fp16_overflow_known       = false;
+	// Summary of the parsed color exports. Filled only for admitted Gen5 pixel programs.
+	ShaderPixelColorExports color_exports;
+	// Guest MRT1 is lowered to Location 0 Index 1 for blend0's SRC1 factors.
+	bool                   dual_source_blend         = false;
 	// Immutable diagnostic configuration resolved once at the draw boundary.
 	ShaderFragmentTapConfig fragment_tap;
 	// Immutable host-only aggregate selection resolved at the draw boundary.
@@ -2280,6 +2575,11 @@ struct ShaderPixelInputInfo
 	[[nodiscard]] bool FrontFaceEnabled() const
 	{
 		return (system_input_enable & system_input_address & (1u << 12u)) != 0;
+	}
+	// ANCILLARY_ENA: bits 16..26 of the VGPR hold the render-target array index.
+	[[nodiscard]] bool AncillaryEnabled() const
+	{
+		return (system_input_enable & system_input_address & (1u << 13u)) != 0;
 	}
 };
 
@@ -2327,13 +2627,18 @@ struct ShaderUserData
 	uint16_t     sharp_resource_count[4];
 };
 
+class ShaderCodeResourceMemo;
+// Cached scalar flows must correspond to their code stream; EUD descriptor code can differ from general code.
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
-                       int user_data_register_base = 0, bool vertex_resource_types = true);
+                       int user_data_register_base = 0, bool vertex_resource_types = true,
+                       const ShaderCode* eud_descriptor_code = nullptr, const ShaderScalarFlow* cached_code_flow = nullptr,
+                       const ShaderScalarFlow* cached_eud_flow = nullptr, const ShaderCodeResourceMemo* code_memo = nullptr);
 
 [[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num,
                                                    int eud_pointer_register, const ShaderCode* code,
-                                                   int user_data_register_base, uint32_t* required_end_dw);
+                                                   int user_data_register_base, uint32_t* required_end_dw,
+                                                   const ShaderScalarFlow* scalar_flow = nullptr);
 [[nodiscard]] bool ShaderGen5EudExpandEndDwordsForSharpImages(const ShaderUserData* user_data, int user_sgpr_num,
                                                                const uint32_t* eud_snapshot, uint32_t snapshot_dwords,
                                                                uint32_t* required_end_dw);
@@ -2344,20 +2649,19 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 using ShaderGen5EudSnapshotTestHook = void (*)(void*);
 void ShaderSetGen5EudSnapshotTestHook(ShaderGen5EudSnapshotTestHook hook, void* context);
 
-// Gen5 EUD sharp span policy: metadata eud_size_dw is a lower bound. Type-5
-// guest pointer tables may extend past it (Astro: eud=24, sharp@40 needs 28).
-// api is the ShaderGet* start index (16 + eud_index). Hard-cap runaway offsets.
-constexpr int             SHADER_GEN5_EUD_MAX_DWORDS = 256;
+// Gen5 EUD table extent is bounded by the guest metadata field's representation.
+constexpr int             SHADER_GEN5_EUD_MAX_DWORDS = std::numeric_limits<uint16_t>::max();
 [[nodiscard]] int         ShaderGen5EudOffsetBase(int user_sgpr_num);
 [[nodiscard]] uint32_t    ShaderResolveGen5UserSgprCount(uint32_t declared_count, uint32_t written_count, uint16_t eud_size_dw);
-[[nodiscard]] inline bool ShaderGen5EudSpanAllowed(int api, int dwords, uint16_t eud_size_dw)
+// Metadata eud_size_dw is a lower bound; api is the ShaderGet* start index
+// (16 + EUD dword offset). Reject spans that exceed the table's representable extent.
+[[nodiscard]] inline bool ShaderGen5EudSpanAllowed(int api, int dwords, uint16_t /*eud_size_dw*/)
 {
-	const int need = api - 16 + dwords;
-	if (need <= static_cast<int>(eud_size_dw))
+	if (api < 16 || dwords <= 0 || dwords > SHADER_GEN5_EUD_MAX_DWORDS)
 	{
-		return true;
+		return false;
 	}
-	return need <= SHADER_GEN5_EUD_MAX_DWORDS;
+	return api - 16 <= SHADER_GEN5_EUD_MAX_DWORDS - dwords;
 }
 
 struct ShaderRegisterRange
@@ -2470,7 +2774,7 @@ bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, i
 void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
                                           const GraphicsGeRawRegister* shader_stages = nullptr);
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
-                                      ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
+                                      uint32_t cb_target_mask, ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
 void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, uint32_t dispatch_mode,
                                       ShaderComputeInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderVertexInputInfo* info);
@@ -2494,8 +2798,14 @@ ShaderCode       ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::Shad
 	                                                         const ShaderPixelInputInfo& input_info,
 	                                                         const ShaderPixelInput0ProbeConfig& config);
 Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInputInfo* input_info);
+// Host vertex stage of a geometry pull draw (input_info.geometry_pull).
+Vector<uint32_t> ShaderCompileGeometryPullVS(const ShaderVertexInputInfo& input_info);
 Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInputInfo* input_info);
 Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeInputInfo* input_info);
+struct ShaderGeometryComputeInfo;
+// Compute pass running the linked merged ES+GS program `code` (SpirvGenerateGeometryComputeSource).
+Vector<uint32_t> ShaderRecompileGeometryCS(const ShaderCode& code, const ShaderVertexInputInfo& input_info,
+                                           const ShaderGeometryComputeInfo& geometry);
 bool             ShaderIsDisabled(uint64_t addr);
 bool             ShaderIsDisabled2(uint64_t addr, uint64_t chksum);
 void             ShaderDisable(uint64_t id);

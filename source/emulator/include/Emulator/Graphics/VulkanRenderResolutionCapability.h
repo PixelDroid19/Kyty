@@ -36,6 +36,8 @@ struct VulkanResolutionAttachmentRequest
 	VkImageUsageFlags     usage        = 0;
 	VkImageCreateFlags    flags        = 0;
 	VkSampleCountFlagBits sample_count = VK_SAMPLE_COUNT_1_BIT;
+	// Format features the caller needs beyond those implied by the usage.
+	VkFormatFeatureFlags  format_features = 0;
 };
 
 struct VulkanResolutionNormalizedRequest

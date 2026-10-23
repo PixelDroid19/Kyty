@@ -1,5 +1,7 @@
 #include "Emulator/VideoFrameMemory.h"
 
+#include "Kyty/Core/VirtualMemory.h"
+
 #include <cerrno>
 #include <mutex>
 
@@ -13,7 +15,7 @@ Callbacks  g_callbacks {};
 bool callbacks_are_empty(const Callbacks& callbacks)
 {
 	return callbacks.register_linear_frame == nullptr && callbacks.unregister_frame == nullptr && callbacks.notify_host_write == nullptr &&
-	       callbacks.begin_host_write == nullptr && callbacks.end_host_write == nullptr;
+	       callbacks.begin_host_write == nullptr && callbacks.end_host_write == nullptr && callbacks.prune_stale_layouts == nullptr;
 }
 
 bool callbacks_are_complete(const Callbacks& callbacks)
@@ -42,12 +44,49 @@ bool InstallCallbacks(const Callbacks& callbacks)
 	return true;
 }
 
-void RegisterLinearFrame(uint64_t base, size_t size, uint32_t row_pitch_bytes)
+bool RegisterLinearFrame(uint64_t base, size_t size, uint32_t row_pitch_bytes)
+{
+	if (base == 0 || size == 0 || row_pitch_bytes == 0 || size > UINT64_MAX - base)
+	{
+		return false;
+	}
+
+	const auto callbacks = copy_callbacks();
+	if (callbacks.register_linear_frame == nullptr)
+	{
+		return true;
+	}
+	if (callbacks.prune_stale_layouts != nullptr)
+	{
+		callbacks.prune_stale_layouts();
+	}
+
+	Core::VirtualMemory::GuestMappingIdentitySnapshot identity {};
+	if (!Core::VirtualMemory::CaptureGuestMappingIdentitySnapshot(base, size, &identity))
+	{
+		return false;
+	}
+	return callbacks.register_linear_frame(base, size, row_pitch_bytes, identity);
+}
+
+bool RegisterLinearFrame(uint64_t base, size_t size, uint32_t row_pitch_bytes,
+                         const Core::VirtualMemory::GuestMappingIdentitySnapshot& identity)
+{
+	if (base == 0 || size == 0 || row_pitch_bytes == 0 || size > UINT64_MAX - base || identity.address != base || identity.size != size)
+	{
+		return false;
+	}
+
+	const auto callbacks = copy_callbacks();
+	return callbacks.register_linear_frame == nullptr || callbacks.register_linear_frame(base, size, row_pitch_bytes, identity);
+}
+
+void PruneStaleLayouts()
 {
 	const auto callbacks = copy_callbacks();
-	if (callbacks.register_linear_frame != nullptr)
+	if (callbacks.prune_stale_layouts != nullptr)
 	{
-		callbacks.register_linear_frame(base, size, row_pitch_bytes);
+		callbacks.prune_stale_layouts();
 	}
 }
 

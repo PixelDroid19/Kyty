@@ -101,8 +101,9 @@ static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err
 		SpirvDisassemble(spirv.data(), spirv.size(), &disassembly);
 		KYTY_LOG_DEBUG("%s\n", disassembly.c_str());
 		KYTY_LOG_DEBUG("Validate failed\n");
-		*err_msg = String8::FromPrintf("%s\n\nValidate failed:\n%s\n", Log::RemoveColors(String::FromUtf8(disassembly.c_str())).C_Str(),
-		                               error_msg.c_str());
+		// The validator message comes first: callers report a bounded prefix.
+		*err_msg = String8::FromPrintf("Validate failed: %s\n\n%s\n", error_msg.c_str(),
+		                               Log::RemoveColors(String::FromUtf8(disassembly.c_str())).C_Str());
 		return false;
 	}
 

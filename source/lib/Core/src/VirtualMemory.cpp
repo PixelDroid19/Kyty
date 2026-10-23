@@ -10,6 +10,7 @@
 #endif
 
 #include <cstring>
+#include <map>
 #include <vector>
 #include "Kyty/Core/VirtualMemory.h"
 
@@ -1936,6 +1937,20 @@ bool QuerySharedBackingPopulation(SharedBacking* backing, SharedBackingPopulatio
 	return sys_virtual_query_shared_backing_populated_bytes(backing->handle, &population->populated_bytes);
 }
 
+int ExportSharedBackingDmaBuf(SharedBacking* backing, uint64_t backing_offset, uint64_t size)
+{
+	if (!shared_range_is_valid(backing, backing_offset, size))
+	{
+		return -1;
+	}
+	return sys_virtual_export_shared_backing_dma_buf(backing->handle, backing_offset, size);
+}
+
+void CloseDmaBuf(int dma_buf)
+{
+	sys_virtual_close_dma_buf(dma_buf);
+}
+
 void FindUnpopulatedSharedBackingSpans(SharedBacking* backing, SharedBackingSpan* spans, size_t count)
 {
 	const uint64_t                  page_size = GetPageSize();
@@ -2035,6 +2050,19 @@ bool ProtectGuest(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
 	return sys_virtual_protect_guest(address, size, mode, old_mode);
 }
 
+bool ProtectGuestIfMappingMatches(uint64_t address, uint64_t size, Mode mode, uint64_t mapping_identity, Mode* old_mode)
+{
+	const uint64_t page_size   = GetPageSize();
+	const uint64_t pointer_max = static_cast<uint64_t>(UINTPTR_MAX);
+	if (mapping_identity == 0 || address == 0 || size == 0 || page_size == 0 || address % page_size != 0 ||
+	    size % page_size != 0 || address > pointer_max || size > pointer_max - address ||
+	    static_cast<uint32_t>(mode) > static_cast<uint32_t>(Mode::ExecuteReadWrite))
+	{
+		return false;
+	}
+	return sys_virtual_protect_guest_if_mapping_matches(address, size, mode, mapping_identity, old_mode);
+}
+
 bool DecommitGuestRange(uint64_t address, uint64_t size)
 {
 	if (address == 0 || size == 0 || address > UINT64_MAX - size)
@@ -2105,15 +2133,214 @@ bool CopyToGuest(uint64_t destination, const void* source, uint64_t size)
 	return source != nullptr && sys_virtual_copy_to_guest(destination, source, size);
 }
 
-ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor,
-	                                         void* context) noexcept
+// Lent host allocations keyed by start address, mapped to their end. Copies hold the lock, so a reclaim (and the free
+// after it) never races a transfer.
+static std::mutex                   g_lent_mutex;
+static std::map<uint64_t, uint64_t> g_lent_allocations;
+
+void LendHostAllocation(uint64_t address, uint64_t size)
 {
-	return sys_virtual_remove_write_and_capture(address, size, visitor, context);
+	EXIT_IF(address == 0 || size == 0 || address > UINT64_MAX - size);
+	std::lock_guard lock(g_lent_mutex);
+	const auto      next = g_lent_allocations.lower_bound(address);
+	EXIT_IF(next != g_lent_allocations.end() && next->first < address + size);
+	EXIT_IF(next != g_lent_allocations.begin() && std::prev(next)->second > address);
+	g_lent_allocations.emplace(address, address + size);
 }
 
-bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+void ReclaimHostAllocation(uint64_t address)
 {
-	return sys_virtual_remove_write_from_protection(address, size, restore_token);
+	std::lock_guard lock(g_lent_mutex);
+	EXIT_IF(g_lent_allocations.erase(address) != 1);
+}
+
+static bool lent_range_contains_locked(uint64_t address, uint64_t size)
+{
+	if (size == 0 || address > UINT64_MAX - size)
+	{
+		return false;
+	}
+	auto it = g_lent_allocations.upper_bound(address);
+	if (it == g_lent_allocations.begin())
+	{
+		return false;
+	}
+	--it;
+	return address + size <= it->second;
+}
+
+static bool is_range_lent(uint64_t address, uint64_t size)
+{
+	std::lock_guard lock(g_lent_mutex);
+	return lent_range_contains_locked(address, size);
+}
+
+bool IsRangeReadableOrLent(uint64_t address, uint64_t size)
+{
+	return IsRangeReadable(address, size) || is_range_lent(address, size);
+}
+
+bool IsRangeWritableOrLent(uint64_t address, uint64_t size)
+{
+	return IsRangeWritable(address, size) || is_range_lent(address, size);
+}
+
+bool CopyFromGuestOrLent(void* destination, uint64_t source, uint64_t size)
+{
+	if (CopyFromGuest(destination, source, size))
+	{
+		return true;
+	}
+	std::lock_guard lock(g_lent_mutex);
+	if (destination == nullptr || !lent_range_contains_locked(source, size))
+	{
+		return false;
+	}
+	std::memcpy(destination, reinterpret_cast<const void*>(source), size);
+	return true;
+}
+
+bool CopyToGuestOrLent(uint64_t destination, const void* source, uint64_t size)
+{
+	if (CopyToGuest(destination, source, size))
+	{
+		return true;
+	}
+	std::lock_guard lock(g_lent_mutex);
+	if (source == nullptr || !lent_range_contains_locked(destination, size))
+	{
+		return false;
+	}
+	std::memcpy(reinterpret_cast<void*>(destination), source, size);
+	return true;
+}
+
+static bool guest_mapping_identity_range_is_valid(uint64_t address, uint64_t size)
+{
+	return size != 0 && address <= UINT64_MAX - size;
+}
+
+// Structural check only: segments must tile the range exactly, in order, each with a nonzero
+// identity. An empty or structurally invalid token is rejected here before the VM is consulted.
+// This is not authentication: whether each identity still covers its bytes is checked by the
+// backend, and a well-formed token that splits one mapping into adjacent segments is harmless.
+static bool guest_mapping_identity_snapshot_well_formed(const GuestMappingIdentitySnapshot& snapshot)
+{
+	if (!guest_mapping_identity_range_is_valid(snapshot.address, snapshot.size) || snapshot.segment_count == 0 ||
+	    snapshot.segment_count > GuestMappingIdentitySnapshot::kMaxSegments)
+	{
+		return false;
+	}
+	const uint64_t end    = snapshot.address + snapshot.size;
+	uint64_t       cursor = snapshot.address;
+	for (uint32_t i = 0; i < snapshot.segment_count; ++i)
+	{
+		const auto& segment = snapshot.segments[i];
+		if (segment.address != cursor || segment.size == 0 || segment.size > end - cursor || segment.identity == 0)
+		{
+			return false;
+		}
+		cursor += segment.size;
+	}
+	return cursor == end;
+}
+
+static bool guest_mapping_snapshot_well_formed(const GuestMappingSnapshot& snapshot)
+{
+	return snapshot.size <= GuestMappingSnapshot::kMaxBytes &&
+	       guest_mapping_identity_snapshot_well_formed(snapshot);
+}
+
+bool CaptureGuestMappingSnapshot(uint64_t address, uint64_t size, GuestMappingSnapshot* snapshot)
+{
+	if (snapshot == nullptr)
+	{
+		return false;
+	}
+	*snapshot = {};
+	GuestMappingSnapshot captured;
+	if (size > GuestMappingSnapshot::kMaxBytes || !guest_mapping_identity_range_is_valid(address, size) ||
+	    !sys_virtual_capture_guest_mapping_snapshot(address, size, &captured) ||
+	    !guest_mapping_snapshot_well_formed(captured))
+	{
+		return false;
+	}
+	*snapshot = captured;
+	return true;
+}
+
+bool CaptureGuestMappingIdentitySnapshot(uint64_t address, uint64_t size, GuestMappingIdentitySnapshot* snapshot)
+{
+	if (snapshot == nullptr)
+	{
+		return false;
+	}
+	*snapshot = {};
+	GuestMappingIdentitySnapshot captured;
+	if (!guest_mapping_identity_range_is_valid(address, size) ||
+	    !sys_virtual_capture_guest_mapping_identity_snapshot(address, size, &captured) ||
+	    !guest_mapping_identity_snapshot_well_formed(captured))
+	{
+		return false;
+	}
+	*snapshot = captured;
+	return true;
+}
+
+bool GuestMappingIdentityMatches(const GuestMappingIdentitySnapshot& identity)
+{
+	return guest_mapping_identity_snapshot_well_formed(identity) &&
+	       sys_virtual_guest_mapping_identity_matches(identity);
+}
+
+bool CopyToGuestIfMappingMatches(const GuestMappingSnapshot& snapshot, const void* source, uint64_t size)
+{
+	return source != nullptr && size == snapshot.size && guest_mapping_snapshot_well_formed(snapshot) &&
+	       sys_virtual_copy_to_guest_if_mapping_matches(snapshot, source);
+}
+
+bool VisitWritableGuestTransaction(const WritableGuestTransactionRange* ranges, uint32_t count,
+	                               int32_t capture_identity_range_index,
+	                               WritableGuestTransactionVisitor visitor, void* context)
+{
+	if (ranges == nullptr || count == 0 || count > kMaxWritableGuestTransactionRanges || visitor == nullptr ||
+	    capture_identity_range_index < -1 || capture_identity_range_index >= static_cast<int32_t>(count))
+	{
+		return false;
+	}
+
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		const auto& range = ranges[i];
+		if (!guest_mapping_identity_range_is_valid(range.address, range.size))
+		{
+			return false;
+		}
+		if (range.expected_mapping != nullptr &&
+		    (range.expected_mapping->address != range.address || range.expected_mapping->size != range.size ||
+		     !guest_mapping_snapshot_well_formed(*range.expected_mapping)))
+		{
+			return false;
+		}
+	}
+
+	return sys_virtual_visit_writable_guest_transaction(ranges, count, capture_identity_range_index, visitor, context);
+}
+
+ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor, void* context,
+	                                         const WriteLeaseAuthority* authority) noexcept
+{
+	return sys_virtual_remove_write_and_capture(address, size, visitor, context, authority);
+}
+
+bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token, const WriteLeaseAuthority* authority) noexcept
+{
+	return sys_virtual_remove_write_from_protection(address, size, restore_token, authority);
+}
+
+bool ReleaseWriteLeases(const WriteLeaseAuthority* authority) noexcept
+{
+	return authority == nullptr || sys_virtual_release_write_leases(authority);
 }
 
 bool RestoreProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept

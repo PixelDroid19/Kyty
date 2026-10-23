@@ -13,6 +13,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/ComputePipelinePrecompile.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/DiagnosticDump.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -28,6 +29,7 @@
 #include "Emulator/Graphics/RenderResolutionTransform.h"
 #include "Emulator/Graphics/SampleLocations.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Utils.h"
@@ -66,25 +68,64 @@ bool VertexInputLayoutLogEnabled()
 	return value != nullptr && std::strcmp(value, "0") != 0 && std::strcmp(value, "off") != 0 && std::strcmp(value, "false") != 0;
 }
 
+// Device selection requires maxSamplerAnisotropy >= 16, so every level is valid.
+float HostTextureAnisotropyRatio()
+{
+	switch (Config::GetTextureAnisotropy())
+	{
+		case Config::TextureAnisotropy::Guest: return 1.0f;
+		case Config::TextureAnisotropy::X2: return 2.0f;
+		case Config::TextureAnisotropy::X4: return 4.0f;
+		case Config::TextureAnisotropy::X8: return 8.0f;
+		case Config::TextureAnisotropy::X16: return 16.0f;
+	}
+	return 1.0f;
+}
+
 } // namespace
 
 // SamplerCache::GetSamplerId, PipelineCache, CreatePipelineInternal
 
-uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized)
+VulkanColorAttachmentBlendAdmission VulkanValidateColorAttachmentBlendRequest(VkPhysicalDevice physical_device,
+                                                                              VkFormat attachment_format, bool blend_enable,
+                                                                              bool blend_bypass)
+{
+	if (physical_device == VK_NULL_HANDLE || attachment_format == VK_FORMAT_UNDEFINED)
+	{
+		return VulkanColorAttachmentBlendAdmission::InvalidInput;
+	}
+	if (VulkanResolveColorAttachmentBlendEnable(blend_enable, blend_bypass) == VK_FALSE)
+	{
+		return VulkanColorAttachmentBlendAdmission::Supported;
+	}
+
+	VkFormatProperties properties {};
+	vkGetPhysicalDeviceFormatProperties(physical_device, attachment_format, &properties);
+	return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0u
+	           ? VulkanColorAttachmentBlendAdmission::Supported
+	           : VulkanColorAttachmentBlendAdmission::MissingFormatFeature;
+}
+
+uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized,
+                                    bool uses_r_coordinate)
 {
 	if (operation == State::ImageSampleOperation::Mixed)
 	{
 		EXIT("unsupported sampler contract: operation=mixed\n");
 	}
-	const auto& enabled_sampler = g_render_ctx->GetGraphicCtx()->enabled_sampler_features;
+	const auto& enabled_sampler     = g_render_ctx->GetGraphicCtx()->enabled_sampler_features;
+	const auto  unnormalized_policy = State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords(), allow_unnormalized);
 	VkSamplerAddressMode address[3] {};
 	if (!VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampX()), enabled_sampler, r.ForceUnormCoords(), &address[0]) ||
 	    !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampY()), enabled_sampler, r.ForceUnormCoords(), &address[1]) ||
-	    !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampZ()), enabled_sampler, r.ForceUnormCoords(), &address[2]))
+	    (uses_r_coordinate &&
+	     !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampZ()), enabled_sampler, r.ForceUnormCoords(), &address[2])))
 	{
-		EXIT("unsupported sampler coordinate lowering: clamp=%u,%u,%u unnormalized=%u operation=%u mirror_clamp_enabled=%u\n",
-		     r.ClampX(), r.ClampY(), r.ClampZ(), r.ForceUnormCoords() ? 1u : 0u, static_cast<uint32_t>(operation),
-		     enabled_sampler.mirror_clamp_to_edge);
+		EXIT("unsupported sampler coordinate lowering: clamp=%u,%u,%u unnormalized=%u view_allows_unnormalized=%u operation=%u "
+		     "mirror_clamp_enabled=%u uses_r=%u sampler=%08x %08x %08x %08x\n",
+		     r.ClampX(), r.ClampY(), r.ClampZ(), r.ForceUnormCoords() ? 1u : 0u, allow_unnormalized ? 1u : 0u,
+		     static_cast<uint32_t>(operation), enabled_sampler.mirror_clamp_to_edge, uses_r_coordinate ? 1u : 0u, r.fields[0],
+		     r.fields[1], r.fields[2], r.fields[3]);
 	}
 	Core::LockGuard lock(m_mutex);
 	uint32_t        m_samplers_size = m_samplers.Size();
@@ -92,7 +133,8 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	{
 		const auto& s = m_samplers.At(i);
 		if (s.r.fields[0] == r.fields[0] && s.r.fields[1] == r.fields[1] && s.r.fields[2] == r.fields[2] &&
-		    s.r.fields[3] == r.fields[3] && s.operation == operation && s.allow_unnormalized == allow_unnormalized)
+		    s.r.fields[3] == r.fields[3] && s.operation == operation && s.allow_unnormalized == allow_unnormalized &&
+		    s.uses_r_coordinate == uses_r_coordinate)
 		{
 			return i;
 		}
@@ -101,28 +143,13 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	s.r                   = r;
 	s.operation           = operation;
 	s.allow_unnormalized  = allow_unnormalized;
+	s.uses_r_coordinate   = uses_r_coordinate;
 	s.vk                  = nullptr;
 
-	bool  aniso       = false;
-	float aniso_ratio = 1.0f;
-	auto  mag_filter  = r.XyMagFilter();
-	auto  min_filter  = r.XyMinFilter();
+	auto mag_filter = r.XyMagFilter();
+	auto min_filter = r.XyMinFilter();
 
-	if (mag_filter == 2 || mag_filter == 3 || min_filter == 2 || min_filter == 3)
-	{
-		aniso = true;
-		switch (r.MaxAnisoRatio())
-		{
-			case 0: aniso_ratio = 1.0f; break;
-			case 1: aniso_ratio = 2.0f; break;
-			case 2: aniso_ratio = 4.0f; break;
-			case 3: aniso_ratio = 8.0f; break;
-			case 4:
-				aniso_ratio = 16.0f;
-				break;
-				KYTY_LOG_DEBUG("WARNING: unknown aniso ratio (continuing)\n");
-		}
-	}
+	const auto anisotropy = State::ResolveSamplerAnisotropy(mag_filter, min_filter, r.MaxAnisoRatio(), HostTextureAnisotropyRatio());
 
 	auto              mip_filter = r.MipFilter();
 	const auto        lod_range  = State::ResolveSamplerLodRange(r.MinLod(), r.MaxLod(), r.LodBias(), mip_filter);
@@ -130,9 +157,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	const float       max_lod    = lod_range.max_lod;
 
 	VkSamplerCreateInfo sampler_info {};
-	const auto          sampler_comparison  = State::ResolveSamplerComparison(r.DepthCompareFunc(), operation);
-	const auto          unnormalized_policy =
-	    State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords(), allow_unnormalized);
+	const auto          sampler_comparison = State::ResolveSamplerComparison(r.DepthCompareFunc(), operation);
 	if (sampler_comparison.enabled && unnormalized_policy.disable_comparison)
 	{
 		EXIT("unsupported sampler contract: operation=%u unnormalized=1\n", static_cast<uint32_t>(operation));
@@ -175,8 +200,8 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	sampler_info.addressModeV            = address[1];
 	sampler_info.addressModeW            = address[2];
 	sampler_info.mipLodBias              = lod_range.lod_bias;
-	sampler_info.anisotropyEnable        = (aniso ? VK_TRUE : VK_FALSE);
-	sampler_info.maxAnisotropy           = aniso_ratio;
+	sampler_info.anisotropyEnable        = (anisotropy.enabled ? VK_TRUE : VK_FALSE);
+	sampler_info.maxAnisotropy           = anisotropy.max_ratio;
 	sampler_info.compareEnable           = sampler_comparison.enabled ? VK_TRUE : VK_FALSE;
 	sampler_info.compareOp               = get_compare_op(sampler_comparison.function);
 	sampler_info.minLod                  = min_lod;
@@ -351,7 +376,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		// These stages use flags0. SPIR-V 1.6 itself permits varying widths.
 		const auto selection = ShaderSelectNativeSubgroup(gctx->compute_wave_vulkan_state, stage, gctx->subgroup_size,
 		                                                  wave.guest_wave_size, wave.proof == ShaderNativeWaveProof::LaneLocal ||
-		                                                  wave.proof == ShaderNativeWaveProof::QuadLocal,
+		                                                  wave.proof == ShaderNativeWaveProof::QuadLocal ||
+		                                                  wave.proof == ShaderNativeWaveProof::FragmentPartialWave,
 		                                                  wave.proof == ShaderNativeWaveProof::FragmentNeutral32,
 		                                                  spirv_version >= 0x00010600u);
 		const char* reason = wave.refusal_reason;
@@ -445,18 +471,21 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		{
 			if (FILE* f = fopen("/tmp/kyty_vil.log", "a"))
 			{
+				// Decoded counts are reported as-is; the fixed arrays bound the traversal.
+				const int buffer_count   = std::min(vs_input_info->buffers_num, ShaderVertexInputInfo::RES_MAX);
+				const int resource_count = std::min(vs_input_info->resources_num, ShaderVertexInputInfo::RES_MAX);
 				fprintf(f, "VIL FAIL: resources=%d buffers=%d\n", vs_input_info->resources_num, vs_input_info->buffers_num);
-				for (int bi = 0; bi < vs_input_info->buffers_num; bi++)
+				for (int bi = 0; bi < buffer_count; bi++)
 				{
 					const auto& b = vs_input_info->buffers[bi];
 					fprintf(f, "  buf[%d] addr=0x%llx stride=%u records=%u attr_num=%d\n", bi, (unsigned long long)b.addr, b.stride,
 					        b.num_records, b.attr_num);
-					for (int ai = 0; ai < b.attr_num && ai < 16; ai++)
+					for (int ai = 0; ai < b.attr_num && ai < ShaderVertexInputBuffer::ATTR_MAX; ai++)
 					{
 						fprintf(f, "    attr[%d] resource=%d offset=%u\n", ai, b.attr_indices[ai], b.attr_offsets[ai]);
 					}
 				}
-				for (int ri = 0; ri < vs_input_info->resources_num; ri++)
+				for (int ri = 0; ri < resource_count; ri++)
 				{
 					const auto& r = vs_input_info->resources[ri];
 					fprintf(f,
@@ -622,7 +651,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 		auto& att               = color_blend_attachments[rt];
 		att.colorWriteMask      = color_write_mask;
-		att.blendEnable         = (static_params->blend_enable[rt] && !static_params->blend_bypass[rt]) ? VK_TRUE : VK_FALSE;
+		att.blendEnable         = VulkanResolveColorAttachmentBlendEnable(static_params->blend_enable[rt], static_params->blend_bypass[rt]);
 		const auto color_blend  = get_blend_factors(static_params->color_srcblend[rt], static_params->color_destblend[rt]);
 		const auto alpha_blend  = (static_params->separate_alpha_blend[rt]
 		                               ? get_blend_factors(static_params->alpha_srcblend[rt], static_params->alpha_destblend[rt])
@@ -654,22 +683,23 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		}
 	}
 
-	// The current pixel emitter exports MRT locations, not Index=1 secondary
-	// colors. Enabling dualSrcBlend alone cannot supply those missing values.
-	uint32_t fragment_output_mask = has_fragment_stage ? 1u : 0u;
+	// A dual-source variant writes MRT1 as Location 0 Index 1, so only Location 0 is a fragment output location.
+	const uint32_t secondary_output_mask = ps_input_info->dual_source_blend ? 1u : 0u;
+	uint32_t       fragment_output_mask  = has_fragment_stage ? 1u : 0u;
 	for (uint32_t rt = 1u; rt < 8u; ++rt)
 	{
-		if (ps_input_info->target_output_mode[rt] != 0u) { fragment_output_mask |= 1u << rt; }
+		if (ps_input_info->target_output_mode[rt] != 0u && !(secondary_output_mask != 0u && rt == 1u)) { fragment_output_mask |= 1u << rt; }
 	}
 	const auto blend_admission = VulkanValidateBlendAttachments(gctx->blend_capabilities, color_blend_attachments,
-	                                                            static_params->color_targets_num, 0u, fragment_output_mask);
+	                                                            static_params->color_targets_num, secondary_output_mask, fragment_output_mask);
 	if (blend_admission != VulkanBlendAdmission::Supported)
 	{
 		EXIT("unsupported graphics blend state: reason=%u targets=%u independent_enabled=%u dual_source_enabled=%u "
-		     "max_targets=%u max_dual_source_targets=%u secondary_outputs=0\n",
+		     "max_targets=%u max_dual_source_targets=%u secondary_outputs=%u\n",
 		     static_cast<uint32_t>(blend_admission), static_params->color_targets_num,
 		     gctx->blend_capabilities.enabled.independent_blend, gctx->blend_capabilities.enabled.dual_source_blend,
-		     gctx->blend_capabilities.max_color_attachments, gctx->blend_capabilities.max_dual_source_attachments);
+		     gctx->blend_capabilities.max_color_attachments, gctx->blend_capabilities.max_dual_source_attachments,
+		     secondary_output_mask);
 	}
 
 	VkPipelineColorBlendStateCreateInfo color_blending {};
@@ -724,7 +754,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	EXIT_IF(pipeline->pipeline_layout != nullptr);
 
 	const ShaderBindResources* descriptor_stages[] = {&vs_input_info->bind, &ps_input_info->bind};
-	// Match the generated fragment interface: Location 0 is always declared.
+	// Declared color Output variables, including a dual-source Index 1 secondary.
+	// maxFragmentCombinedOutputResources is not a Location count.
 	uint32_t fragment_outputs = 1;
 	for (uint32_t rt = 1; rt < 8; ++rt)
 	{
@@ -834,11 +865,10 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	EXIT_IF(pipeline->pipeline != nullptr);
 
-	const auto vk_create_start = std::chrono::steady_clock::now();
+	const auto     vk_create_start = DebugStatsClock::now();
 	const VkResult create_result =
 	    vkCreateGraphicsPipelines(gctx->device, gctx->pipeline_cache, 1, &pipeline_info, nullptr, &pipeline->pipeline);
-	const auto vk_create_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vk_create_start).count();
+	const auto vk_create_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - vk_create_start).count();
 	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(vk_create_ns));
 
 	if (pipeline->pipeline == nullptr || create_result != VK_SUCCESS)
@@ -883,7 +913,172 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	return pipeline;
 }
 
+// The Vulkan inputs of one compute pipeline, decided on the dispatching thread.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInputInfo* input_info, const Vector<uint32_t>& cs_shader)
+{
+	auto* gctx = g_render_ctx->GetGraphicCtx();
+
+	EXIT_IF(gctx == nullptr);
+
+	const auto subgroup_check = ShaderCheckSubgroupModule(cs_shader.GetDataConst(), cs_shader.Size(),
+	                                                       VK_SHADER_STAGE_COMPUTE_BIT, gctx->subgroup_stages,
+	                                                       gctx->subgroup_operations, gctx->compute_wave_vulkan_state,
+	                                                       gctx->shader_maximal_reconvergence_enabled);
+	if (!subgroup_check.supported)
+	{
+		EXIT("subgroup-module admission stage=compute word=%zu required_ops=0x%x reason=%s\n",
+		     subgroup_check.word, subgroup_check.required_operations, subgroup_check.reason);
+	}
+
+	VkPipelineShaderStageCreateInfo comp_shader_stage_info {};
+	comp_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	comp_shader_stage_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
+	if (input_info->native_wave_sensitive)
+	{
+		if (input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native ||
+		    input_info->wave_layout.guest_wave_size != 32u || input_info->required_subgroup_size != 32u)
+		{
+			EXIT("native-wave compute sensitivity has inconsistent guest-width metadata\n");
+		}
+		const auto selection = ShaderSelectNativeSubgroup(gctx->compute_wave_vulkan_state, VK_SHADER_STAGE_COMPUTE_BIT,
+		                                                   gctx->subgroup_size, input_info->required_subgroup_size,
+		                                                   false, false, cs_shader.At(1) >= 0x00010600u);
+		if (!selection.supported)
+		{
+			EXIT("native-wave compute shader requires exact subgroup width 32, unavailable from the default width or enabled compute subgroup-size control\n");
+		}
+		auto native_layout = input_info->wave_layout;
+		native_layout.native_subgroup_size = input_info->required_subgroup_size;
+		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
+		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(native_layout, capabilities, &comp_shader_stage_info,
+		                                                     &required_subgroup_size, selection.require_size, cs_shader.At(1)))
+		{
+			EXIT("native-wave compute layout lacks full subgroups or exceeds exact-width workgroup limits\n");
+		}
+	} else if (input_info->required_subgroup_size != 0u)
+	{
+		EXIT("compute subgroup-size metadata requires a native-wave sensitivity proof\n");
+	} else if (input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
+	{
+		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
+		const uint64_t shared_dwords = static_cast<uint64_t>(input_info->lds_dwords) + input_info->barrier_workspace_dwords;
+		if (shared_dwords * sizeof(uint32_t) > capabilities.max_shared_bytes)
+		{
+			EXIT("paired-wave compute barrier workspace exceeds the Vulkan shared-memory limit\n");
+		}
+		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(input_info->wave_layout, capabilities,
+		                                                     &comp_shader_stage_info, &required_subgroup_size))
+		{
+			EXIT("paired-wave compute layout is unsupported by the enabled Vulkan subgroup features or limits\n");
+		}
+	}
+
+	const auto&                bind                 = input_info->bind;
+	const ShaderBindResources* descriptor_stages[] = {&bind};
+	ValidatePipelineDescriptorLimits(gctx, descriptor_stages, 1, false);
+
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
+
+	ComputePipelineRecipe recipe;
+	recipe.vendor_id              = properties.vendorID;
+	recipe.device_id              = properties.deviceID;
+	recipe.stage_flags            = comp_shader_stage_info.flags;
+	recipe.required_subgroup_size = comp_shader_stage_info.pNext == &required_subgroup_size ? required_subgroup_size.requiredSubgroupSize : 0u;
+	if (bind.push_constant_size != 0 && !bind.vsharp_uniform_buffer)
+	{
+		recipe.push_constant_offset = bind.push_constant_offset;
+		recipe.push_constant_size   = bind.push_constant_size;
+	}
+	recipe.has_set_layout = ShaderBindRequiresDescriptorSet(bind);
+	EXIT_IF(recipe.has_set_layout && bind.push_constant_size == 0);
+	EXIT_IF(recipe.has_set_layout && bind.descriptor_set_slot != 0);
+	EXIT_IF(recipe.has_set_layout && !ShaderBuildDescriptorLayoutPlan(bind, &recipe.plan));
+	recipe.spirv.assign(cs_shader.GetDataConst(), cs_shader.GetDataConst() + cs_shader.Size());
+	return recipe;
+}
+
+// Creates the pipeline a recipe describes. Any thread may call it: it uses only
+// the device, the shared pipeline cache and the locked descriptor-layout cache.
+static VkResult CreateComputePipelineFromRecipe(GraphicContext* gctx, const ComputePipelineRecipe& recipe, VkPipelineLayout* layout,
+                                                VkPipeline* pipeline)
+{
+	VkShaderModuleCreateInfo create_info {};
+	create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	create_info.codeSize = recipe.spirv.size() * sizeof(uint32_t);
+	create_info.pCode    = recipe.spirv.data();
+
+	VkShaderModule comp_shader_module = VK_NULL_HANDLE;
+	VkResult       result             = vkCreateShaderModule(gctx->device, &create_info, nullptr, &comp_shader_module);
+	if (result != VK_SUCCESS)
+	{
+		return result;
+	}
+
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
+	VkPipelineShaderStageCreateInfo                        comp_shader_stage_info {};
+	comp_shader_stage_info.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	comp_shader_stage_info.flags  = recipe.stage_flags;
+	comp_shader_stage_info.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+	comp_shader_stage_info.module = comp_shader_module;
+	comp_shader_stage_info.pName  = "main";
+	if (recipe.required_subgroup_size != 0u)
+	{
+		required_subgroup_size.sType                = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT;
+		required_subgroup_size.requiredSubgroupSize = recipe.required_subgroup_size;
+		comp_shader_stage_info.pNext                = &required_subgroup_size;
+	}
+
+	VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+	if (recipe.has_set_layout)
+	{
+		set_layout = g_render_ctx->GetDescriptorCache()->GetDescriptorSetLayout(DescriptorCache::Stage::Compute, recipe.plan);
+	}
+	const VkPushConstantRange push_constant_info {VK_SHADER_STAGE_COMPUTE_BIT, recipe.push_constant_offset, recipe.push_constant_size};
+
+	VkPipelineLayoutCreateInfo pipeline_layout_info {};
+	pipeline_layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pipeline_layout_info.setLayoutCount         = recipe.has_set_layout ? 1u : 0u;
+	pipeline_layout_info.pSetLayouts            = recipe.has_set_layout ? &set_layout : nullptr;
+	pipeline_layout_info.pushConstantRangeCount = recipe.push_constant_size != 0u ? 1u : 0u;
+	pipeline_layout_info.pPushConstantRanges    = recipe.push_constant_size != 0u ? &push_constant_info : nullptr;
+
+	result = recipe.has_set_layout && set_layout == VK_NULL_HANDLE ? VK_ERROR_INITIALIZATION_FAILED
+	                                                               : vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, layout);
+	if (result == VK_SUCCESS)
+	{
+		VkComputePipelineCreateInfo info {};
+		info.sType             = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		info.stage             = comp_shader_stage_info;
+		info.layout            = *layout;
+		info.basePipelineIndex = -1;
+		result                 = vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, pipeline);
+	}
+	vkDestroyShaderModule(gctx->device, comp_shader_module, nullptr);
+	return result;
+}
+
+// Background compile of a recipe recorded in an earlier session; the driver
+// caches keep the result for the dispatch that needs it.
+static bool PrecompileComputePipeline(const ComputePipelineRecipe& recipe)
+{
+	auto*            gctx     = g_render_ctx->GetGraphicCtx();
+	VkPipelineLayout layout   = VK_NULL_HANDLE;
+	VkPipeline       pipeline = VK_NULL_HANDLE;
+	const auto       result   = CreateComputePipelineFromRecipe(gctx, recipe, &layout, &pipeline);
+	if (pipeline != VK_NULL_HANDLE)
+	{
+		vkDestroyPipeline(gctx->device, pipeline, nullptr);
+	}
+	if (layout != VK_NULL_HANDLE)
+	{
+		vkDestroyPipelineLayout(gctx->device, layout, nullptr);
+	}
+	return result == VK_SUCCESS;
+}
+
 static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* input_info, const Vector<uint32_t>& cs_shader,
                                               const PipelineStaticParameters* static_params, PipelineDynamicParameters* dynamic_params)
 {
@@ -899,99 +1094,22 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 
 	EXIT_IF(gctx == nullptr);
 
-	VkShaderModule comp_shader_module = nullptr;
-
-	VkShaderModuleCreateInfo create_info {};
-
-	create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-	create_info.pNext    = nullptr;
-	create_info.flags    = 0;
-	create_info.codeSize = static_cast<size_t>(cs_shader.Size()) * 4;
-	create_info.pCode    = cs_shader.GetDataConst();
-	const auto subgroup_check = ShaderCheckSubgroupModule(cs_shader.GetDataConst(), cs_shader.Size(),
-	                                                       VK_SHADER_STAGE_COMPUTE_BIT, gctx->subgroup_stages,
-	                                                       gctx->subgroup_operations, gctx->compute_wave_vulkan_state,
-	                                                       gctx->shader_maximal_reconvergence_enabled);
-	if (!subgroup_check.supported)
-	{
-		EXIT("subgroup-module admission stage=compute word=%zu required_ops=0x%x reason=%s\n",
-		     subgroup_check.word, subgroup_check.required_operations, subgroup_check.reason);
-	}
-	vkCreateShaderModule(gctx->device, &create_info, nullptr, &comp_shader_module);
-
-	if (comp_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: comp_shader_module == nullptr condition ignored (continuing)\n"); }
-
-	VkPipelineShaderStageCreateInfo comp_shader_stage_info {};
-	comp_shader_stage_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	comp_shader_stage_info.pNext               = nullptr;
-	comp_shader_stage_info.flags               = 0;
-	comp_shader_stage_info.stage               = VK_SHADER_STAGE_COMPUTE_BIT;
-	comp_shader_stage_info.module              = comp_shader_module;
-	comp_shader_stage_info.pName               = "main";
-	comp_shader_stage_info.pSpecializationInfo = nullptr;
-	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
-	if (input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
-	{
-		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
-		const uint64_t shared_dwords = static_cast<uint64_t>(input_info->lds_dwords) + input_info->barrier_workspace_dwords;
-		if (shared_dwords * sizeof(uint32_t) > capabilities.max_shared_bytes)
-		{
-			EXIT("paired-wave compute barrier workspace exceeds the Vulkan shared-memory limit\n");
-		}
-		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(input_info->wave_layout, capabilities,
-		                                                     &comp_shader_stage_info, &required_subgroup_size))
-		{
-			EXIT("paired-wave compute layout is unsupported by the enabled Vulkan subgroup features or limits\n");
-		}
-	}
-
-	VkDescriptorSetLayout set_layouts[1]  = {};
-	uint32_t              set_layouts_num = 0;
-
-	VkPushConstantRange push_constant_info[1];
-	uint32_t            push_constant_info_num = 0;
-
-	CreateLayout(set_layouts, &set_layouts_num, push_constant_info, &push_constant_info_num,
-	             input_info->bind, /*additional_params->cs_bind,*/
-	             VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute);
-
-	VkPipelineLayoutCreateInfo pipeline_layout_info {};
-	pipeline_layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipeline_layout_info.pNext                  = nullptr;
-	pipeline_layout_info.flags                  = 0;
-	pipeline_layout_info.setLayoutCount         = set_layouts_num;
-	pipeline_layout_info.pSetLayouts            = (set_layouts_num > 0 ? set_layouts : nullptr);
-	pipeline_layout_info.pushConstantRangeCount = push_constant_info_num;
-	pipeline_layout_info.pPushConstantRanges    = push_constant_info_num > 0 ? push_constant_info : nullptr;
+	const auto recipe = BuildComputePipelineRecipe(input_info, cs_shader);
+	ComputePipelinePrecompileStart(ComputePipelinePrecompileDirectory(), recipe.vendor_id, recipe.device_id, PrecompileComputePipeline);
+	ComputePipelinePrecompileClaim(recipe);
 
 	EXIT_IF(pipeline->pipeline_layout != nullptr);
-
-	const ShaderBindResources* descriptor_stages[] = {&input_info->bind};
-	ValidatePipelineDescriptorLimits(gctx, descriptor_stages, 1, false);
-	const auto layout_result = vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
-	if (layout_result != VK_SUCCESS || pipeline->pipeline_layout == VK_NULL_HANDLE)
-	{
-		EXIT("compute pipeline layout creation failed: VkResult=%d\n", static_cast<int>(layout_result));
-	}
-
-	VkComputePipelineCreateInfo info {};
-	info.sType              = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-	info.pNext              = nullptr;
-	info.flags              = 0;
-	info.stage              = comp_shader_stage_info;
-	info.layout             = pipeline->pipeline_layout;
-	info.basePipelineHandle = nullptr;
-	info.basePipelineIndex  = -1;
-
 	EXIT_IF(pipeline->pipeline != nullptr);
 
-	const auto vk_create_start = std::chrono::steady_clock::now();
-	const VkResult create_result =
-	    vkCreateComputePipelines(gctx->device, gctx->pipeline_cache, 1, &info, nullptr, &pipeline->pipeline);
-	const auto vk_create_ns =
-	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - vk_create_start).count();
+	const auto     vk_create_start = DebugStatsClock::now();
+	const VkResult create_result   = CreateComputePipelineFromRecipe(gctx, recipe, &pipeline->pipeline_layout, &pipeline->pipeline);
+	const auto     vk_create_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - vk_create_start).count();
 	DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(vk_create_ns));
 
+	if (pipeline->pipeline_layout == VK_NULL_HANDLE)
+	{
+		EXIT("compute pipeline layout creation failed: VkResult=%d\n", static_cast<int>(create_result));
+	}
 	if (pipeline->pipeline == nullptr || create_result != VK_SUCCESS)
 	{
 		if (const char* dump_dir = std::getenv("KYTY_PIPELINE_FAIL_DUMP"))
@@ -1007,8 +1125,6 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 		EXIT("vkCreateComputePipelines failed: result=%d pipeline=%p\n", static_cast<int>(create_result),
 		     static_cast<void*>(pipeline->pipeline));
 	}
-
-	vkDestroyShaderModule(gctx->device, comp_shader_module, nullptr);
 
 	return pipeline;
 }
@@ -1107,9 +1223,12 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 	if (!m_pipelines.IndexValid(id)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_pipelines.IndexValid(id) condition ignored (continuing)\n"); }
 
 	Pipeline& p = m_pipelines[id];
+	if (p.pipeline == nullptr)
+	{
+		return;
+	}
 
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(p.pipeline == nullptr);
 	EXIT_IF(p.pipeline->pipeline == nullptr);
 	EXIT_IF(p.pipeline->pipeline_layout == nullptr);
 	EXIT_IF(p.static_params == nullptr);
@@ -1117,6 +1236,10 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 
 	EXIT_IF(p.pipeline->static_params != p.static_params);
 	EXIT_IF(p.pipeline->dynamic_params != p.dynamic_params);
+	if (!p.lifetime.RequestRetirement())
+	{
+		return;
+	}
 
 	DumpPipeline("delete", id);
 
@@ -1134,22 +1257,69 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 	vkDestroyPipelineLayout(gctx->device, p.pipeline->pipeline_layout, nullptr);
 
 	delete p.pipeline;
-
-	p.pipeline = nullptr;
+	p = {};
 }
 
-VulkanPipeline* PipelineCache::Find(const Pipeline& p) const
+PipelineCache::Pipeline* PipelineCache::Find(const Pipeline& p)
 {
-	for (const auto& pn: m_pipelines)
+	for (auto& pn: m_pipelines)
 	{
-		if (pn.pipeline != nullptr && p.render_pass_id == pn.render_pass_id && p.vs_shader_id == pn.vs_shader_id &&
+		if (pn.pipeline != nullptr && !pn.lifetime.RetirementRequested() && p.render_pass_id == pn.render_pass_id &&
+		    p.vs_shader_id == pn.vs_shader_id &&
 		    p.ps_shader_id == pn.ps_shader_id && p.cs_shader_id == pn.cs_shader_id && *p.static_params == *pn.static_params &&
 		    *p.dynamic_params == *pn.dynamic_params)
 		{
-			return pn.pipeline;
+			return &pn;
 		}
 	}
 	return nullptr;
+}
+
+uint32_t PipelineCache::FindAvailableSlot()
+{
+	for (uint32_t index = 0; index < m_pipelines.Size(); index++)
+	{
+		if (m_pipelines[index].pipeline == nullptr)
+		{
+			return index;
+		}
+	}
+
+	if (m_pipelines.Size() < PipelineCache::MAX_PIPELINES)
+	{
+		return m_pipelines.Size();
+	}
+
+	const auto evict =
+	    PipelineCacheNextEvictableIndex(m_pipelines.Size(), &m_evict_cursor, [this](uint32_t index)
+	                                    { return m_pipelines[index].pipeline != nullptr && m_pipelines[index].lifetime.CanEvict(); });
+	if (evict == UINT32_MAX)
+	{
+		EXIT("pipeline cache limit reached: all %u pipeline entries are leased by recorded command buffers\n",
+		     PipelineCache::MAX_PIPELINES);
+	}
+	return evict;
+}
+
+void PipelineCache::AttachPipelineLease(CommandBuffer* recording_buffer, Pipeline& pipeline)
+{
+	EXIT_IF(recording_buffer == nullptr);
+	EXIT_IF(pipeline.pipeline == nullptr);
+	if (!pipeline.lifetime.Acquire())
+	{
+		EXIT("attempted to lease a retired or saturated Vulkan pipeline\n");
+	}
+
+	bool added = false;
+	if (!recording_buffer->AttachPipelineLease(pipeline.pipeline, &added))
+	{
+		(void)pipeline.lifetime.Release();
+		EXIT("failed to attach Vulkan pipeline to its recording command buffer\n");
+	}
+	if (!added)
+	{
+		EXIT_IF(pipeline.lifetime.Release());
+	}
 }
 
 void PipelineCache::SaveDriverCacheIfDue()
@@ -1159,7 +1329,8 @@ void PipelineCache::SaveDriverCacheIfDue()
 	{
 		return;
 	}
-	if (m_driver_cache_write_budget_exhausted)
+	// A clean cache is never due, so its per-lookup call skips the clock read.
+	if (m_driver_cache_write_budget_exhausted || !m_driver_cache_dirty)
 	{
 		return;
 	}
@@ -1180,10 +1351,17 @@ void PipelineCache::SaveDriverCacheIfDue()
 	const size_t budget           = PipelineCacheStoreSessionWriteBudgetBytes();
 	const size_t remaining_budget = m_driver_cache_bytes_attempted < budget ? budget - m_driver_cache_bytes_attempted : 0u;
 	size_t       attempted_size   = 0;
-	const auto   save_start       = std::chrono::steady_clock::now();
+	const auto   save_start       = DebugStatsClock::now();
 	const auto   save_result      = PipelineCacheStoreSave(ctx->device, ctx->pipeline_cache, properties, remaining_budget, &attempted_size);
-	const auto   save_elapsed_ns =
-	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - save_start).count());
+	if (save_result == PipelineCacheStoreSaveResult::Unchanged)
+	{
+		m_driver_cache_attempted_once = true;
+		m_last_driver_cache_attempt   = now;
+		m_driver_cache_dirty          = false;
+		return;
+	}
+	const auto save_elapsed_ns =
+	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - save_start).count());
 	DebugStatsPipelineCacheCheckpointOutcome checkpoint_outcome = DebugStatsPipelineCacheCheckpointOutcome::Failed;
 	if (save_result == PipelineCacheStoreSaveResult::Written)
 	{
@@ -1210,13 +1388,24 @@ void PipelineCache::SaveDriverCacheIfDue()
 	}
 }
 
-VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, RenderColorInfo* color, RenderDepthInfo* depth,
+// A resolution cohort shares one guest and one host extent, so its first
+// attachment describes the framebuffer. Depth-only passes use the depth image.
+static const VulkanImage* ResolutionScaledFramebufferImage(const RenderColorInfo& color, const RenderDepthInfo& depth)
+{
+	const auto*        attachment = RenderColorFirstConfiguredAttachment(color);
+	const VulkanImage* image      = attachment != nullptr ? attachment->vulkan_buffer : depth.vulkan_buffer;
+	return image != nullptr && image->IsResolutionScaled() ? image : nullptr;
+}
+
+VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color,
+                                              RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
                                               const ShaderPixelInputInfo* ps_input_info, VkPrimitiveTopology topology,
                                               const VulkanSampleLocationState& sample_locations)
 {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Gfx)", profiler::colors::DeepOrangeA200);
 
+	EXIT_IF(recording_buffer == nullptr);
 	EXIT_IF(framebuffer == nullptr);
 	EXIT_IF(depth == nullptr);
 	EXIT_IF(color == nullptr);
@@ -1230,6 +1419,16 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	const HW::ScreenViewport&  vp      = ctx->GetScreenViewport();
 	const HW::ScanModeControl& smc     = ctx->GetScanModeControl();
 	const HW::ModeControl&     mc      = ctx->GetModeControl();
+
+	if (ps_regs.ps_embedded && ps_input_info->stage_enabled && RenderColorSlotActive(*color, 0u))
+	{
+		const auto format = color->attachment[0].attachment_format;
+		if (format == VK_FORMAT_R16_UINT || format == VK_FORMAT_R16G16_UINT || format == VK_FORMAT_R16G16B16A16_UINT)
+		{
+			// The embedded pixel template writes a floating-point output at location zero.
+			EXIT("embedded pixel shader has no unsigned color export interface: format=%u\n", static_cast<unsigned>(format));
+		}
+	}
 
 	if (Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
@@ -1282,12 +1481,11 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.dynamic_params->scissor_ltrb[1]    = scissor.top;
 	p.dynamic_params->scissor_ltrb[2]    = scissor.right;
 	p.dynamic_params->scissor_ltrb[3]    = scissor.bottom;
-	if (color->targets_num == 1 && color->attachment[0].type == RenderColorType::DisplayBuffer &&
-	    color->attachment[0].vulkan_buffer != nullptr && color->attachment[0].vulkan_buffer->IsResolutionScaled())
+	if (const auto* scaled_image = ResolutionScaledFramebufferImage(*color, *depth); scaled_image != nullptr)
 	{
 		RenderResolutionTransform transform;
-		const ResolutionExtent        guest {color->attachment[0].width, color->attachment[0].height};
-		const ResolutionExtent        host {color->attachment[0].vulkan_buffer->extent.width, color->attachment[0].vulkan_buffer->extent.height};
+		const ResolutionExtent        guest {scaled_image->guest_extent.width, scaled_image->guest_extent.height};
+		const ResolutionExtent        host {scaled_image->extent.width, scaled_image->extent.height};
 		if (CreateRenderResolutionTransform(guest, host, &transform) != RenderResolutionTransformStatus::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: CreateRenderResolutionTransform(guest, host, &transform) != RenderResolutionTransformStatus::Success condition ignored (continuing)\n"); }
 
 		const auto         xy = State::ResolveViewportXy(p.dynamic_params->viewport_scale[0], p.dynamic_params->viewport_offset[0],
@@ -1356,11 +1554,26 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 				p.static_params->blend_enable[rt] = false;
 				continue;
 			}
-			const auto& blend                         = ctx->GetBlendControl(rt);
-			p.static_params->color_mask[rt]           = State::ResolveColorWriteAgainstDepth(
+			const uint8_t requested_mask = State::ResolveColorWriteAgainstDepth(
 			    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), sh_regs.m_cbShaderMask, rt),
-			    ctx->GetDepthControl().color_writes_on_depth_pass_disable,
-			    ctx->GetDepthControl().color_writes_on_depth_fail_enable);
+			    ctx->GetDepthControl().color_writes_on_depth_pass_disable, ctx->GetDepthControl().color_writes_on_depth_fail_enable);
+			const uint8_t export_enable           = ps_input_info->color_exports.enable[rt];
+			const bool    export_summary_available = !ps_regs.ps_embedded;
+			const uint8_t export_admitted_mask =
+			    State::ResolveColorWriteAgainstExport(requested_mask, export_enable, export_summary_available);
+			if (export_summary_available && export_enable == 0u)
+			{
+				p.static_params->color_mask[rt]   = export_admitted_mask;
+				p.static_params->blend_enable[rt] = false;
+				continue;
+			}
+			const bool uint16_mrt_output = ps_input_info->target_output_mode[rt] == 7u &&
+			                               ps_input_info->target_output_number[rt] == 4u &&
+			                               ps_input_info->target_output_order[rt] == 0u;
+			const auto& blend               = ctx->GetBlendControl(rt);
+			p.static_params->color_mask[rt] = uint16_mrt_output
+			                                      ? State::ResolveColorWriteAgainstUint16Export(export_admitted_mask, export_enable)
+			                                      : export_admitted_mask;
 			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
 			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
 			p.static_params->color_destblend[rt]      = blend.color_destblend;
@@ -1396,9 +1609,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	// mode here disables valid scanout and render-target draws on other modes.
 	p.dynamic_params->color_write_enable = true;
 
-	const auto lookup_start = std::chrono::steady_clock::now();
+	const auto lookup_start = DebugStatsClock::now();
 	auto*      found        = Find(p);
-	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - lookup_start).count();
+	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - lookup_start).count();
 	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Graphics, found != nullptr, static_cast<uint64_t>(lookup_ns));
 
 	if (found != nullptr)
@@ -1406,11 +1619,45 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		*found->dynamic_params = *p.dynamic_params;
 		delete p.static_params;
 		delete p.dynamic_params;
+		AttachPipelineLease(recording_buffer, *found);
 		SaveDriverCacheIfDue();
-		return found;
+		return found->pipeline;
 	}
 
-	const auto miss_start = std::chrono::steady_clock::now();
+	const auto miss_start = DebugStatsClock::now();
+	for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
+	{
+		if (!RenderColorSlotActive(*color, rt))
+		{
+			continue;
+		}
+
+		const auto& attachment = color->attachment[rt];
+		const auto  admission  = VulkanValidateColorAttachmentBlendRequest(gctx->physical_device, attachment.attachment_format,
+		                                                                  p.static_params->blend_enable[rt],
+		                                                                  p.static_params->blend_bypass[rt]);
+		if (admission != VulkanColorAttachmentBlendAdmission::Supported)
+		{
+			EXIT("unsupported graphics color attachment blend: reason=%u target=%u format=%u blend_enable=%u blend_bypass=%u\n",
+			     static_cast<uint32_t>(admission), rt, static_cast<uint32_t>(attachment.attachment_format),
+			     p.static_params->blend_enable[rt] ? 1u : 0u, p.static_params->blend_bypass[rt] ? 1u : 0u);
+		}
+	}
+
+	if (vs_input_info->position1_usage == ShaderVertexPosition1Usage::ClipDistance0)
+	{
+		VkPhysicalDeviceFeatures features {};
+		vkGetPhysicalDeviceFeatures(gctx->physical_device, &features);
+		EXIT_IF(features.shaderClipDistance != VK_TRUE);
+	}
+	if (ps_input_info->AncillaryEnabled())
+	{
+		// The fragment Layer input needs the Geometry capability. The sample
+		// index field and a layer through the interpolation geometry stage are
+		// not provided.
+		EXIT_IF(!gctx->geometry_shader_supported);
+		EXIT_IF(p.static_params->sample_shading_enable || ps_input_info->custom_interpolation.Enabled());
+	}
 	if (ps_input_info->custom_interpolation.Enabled())
 	{
 		EXIT_IF(!gctx->geometry_shader_supported);
@@ -1455,6 +1702,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	                                                           vs_input_info->clip_probe.diagnostic_identity),
 	                                    [&]
 	                                    {
+		                                    if (vs_input_info->geometry_pull)
+		                                    {
+			                                    return ShaderCompileGeometryPullVS(*vs_input_info);
+		                                    }
 		                                    auto vs_code = ShaderParseVS(&vs_regs, &sh_regs, vs_input_info);
 		                                    return ShaderRecompileVS(vs_code, vs_input_info);
 	                                    });
@@ -1494,61 +1745,42 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		EXIT_IF(geometry_translation.binary.IsEmpty());
 	}
 
+	const uint32_t slot = FindAvailableSlot();
 	p.pipeline = CreatePipelineInternal(framebuffer->render_pass, vs_input_info, vs_translation.binary, ps_input_info,
 	                                    ps_translation.binary, geometry_translation.binary, p.static_params, p.dynamic_params);
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 	p.pipeline->framebuffer_extent = framebuffer->extent;
 
-	bool updated = false;
-	int  index   = 0;
-	for (auto& pn: m_pipelines)
+	if (slot < m_pipelines.Size())
 	{
-		if (pn.pipeline == nullptr)
+		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
 		{
-			pn      = p;
-			updated = true;
-
-			DumpPipeline("create", index);
-
-			break;
-		}
-		index++;
-	}
-
-	if (!updated)
-	{
-		if (m_pipelines.Size() >= PipelineCache::MAX_PIPELINES)
-		{
-			// Bound host pipeline object growth for long sessions: recycle a
-			// slot instead of EXIT_NOT_IMPLEMENTED when variants exceed the cap.
-			const uint32_t evict = PipelineCacheNextEvictIndex(m_pipelines.Size(), &m_evict_cursor);
 			DebugStatsRecordPipelineEviction();
-			DeletePipelineInternal(evict);
-			m_pipelines[static_cast<int>(evict)] = p;
-			DumpPipeline("create", static_cast<int>(evict));
-		} else
-		{
-			EXIT_IF(m_pipelines.Size() != static_cast<uint32_t>(index));
-
-			m_pipelines.Add(p);
-
-			DumpPipeline("create", index);
+			DeletePipelineInternal(slot);
 		}
+		m_pipelines[static_cast<int>(slot)] = p;
+	} else
+	{
+		EXIT_IF(slot != m_pipelines.Size());
+		m_pipelines.Add(p);
 	}
+	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
+	DumpPipeline("create", static_cast<int>(slot));
 
 	m_driver_cache_dirty = true;
 	SaveDriverCacheIfDue();
-	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - miss_start).count();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Graphics, static_cast<uint64_t>(miss_ns));
-	return p.pipeline;
+	return m_pipelines[static_cast<int>(slot)].pipeline;
 }
 
-VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* input_info, const HW::ComputeShaderInfo* cs_regs,
-                                              const HW::ShaderRegisters* sh_regs)
+VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, const ShaderComputeInputInfo* input_info,
+                                              const HW::ComputeShaderInfo* cs_regs, const HW::ShaderRegisters* sh_regs)
 {
 	KYTY_PROFILER_BLOCK("PipelineCache::CreatePipeline(Compute)", profiler::colors::RedA100);
 
+	EXIT_IF(recording_buffer == nullptr);
 	EXIT_IF(cs_regs == nullptr);
 	EXIT_IF(sh_regs == nullptr);
 
@@ -1569,9 +1801,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 	p.dynamic_params->vk_dynamic_state_stencil_write_mask   = true;
 	p.dynamic_params->color_write_enable                    = true;
 
-	const auto lookup_start = std::chrono::steady_clock::now();
+	const auto lookup_start = DebugStatsClock::now();
 	auto*      found        = Find(p);
-	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - lookup_start).count();
+	const auto lookup_ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - lookup_start).count();
 	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, found != nullptr, static_cast<uint64_t>(lookup_ns));
 
 	if (found != nullptr)
@@ -1579,11 +1811,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 		*found->dynamic_params = *p.dynamic_params;
 		delete p.static_params;
 		delete p.dynamic_params;
+		AttachPipelineLease(recording_buffer, *found);
 		SaveDriverCacheIfDue();
-		return found;
+		return found->pipeline;
 	}
 
-	const auto miss_start = std::chrono::steady_clock::now();
+	const auto miss_start = DebugStatsClock::now();
 
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
@@ -1598,40 +1831,102 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 	DebugStatsRecordShaderTranslationCache(cs_translation.hit, cs_translation.evicted);
 	EXIT_IF(cs_translation.binary.IsEmpty());
 
+	const uint32_t slot = FindAvailableSlot();
 	p.pipeline = CreatePipelineInternal(input_info, cs_translation.binary, p.static_params, p.dynamic_params /*, params2*/);
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 
-	bool updated = false;
-	for (auto& pn: m_pipelines)
+	if (slot < m_pipelines.Size())
 	{
-		if (pn.pipeline == nullptr)
+		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
 		{
-			pn      = p;
-			updated = true;
-			break;
-		}
-	}
-
-	if (!updated)
-	{
-		if (m_pipelines.Size() >= PipelineCache::MAX_PIPELINES)
-		{
-			const uint32_t evict = PipelineCacheNextEvictIndex(m_pipelines.Size(), &m_evict_cursor);
 			DebugStatsRecordPipelineEviction();
-			DeletePipelineInternal(evict);
-			m_pipelines[static_cast<int>(evict)] = p;
-		} else
-		{
-			m_pipelines.Add(p);
+			DeletePipelineInternal(slot);
 		}
+		m_pipelines[static_cast<int>(slot)] = p;
+	} else
+	{
+		EXIT_IF(slot != m_pipelines.Size());
+		m_pipelines.Add(p);
 	}
+	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
+	DumpPipeline("create", static_cast<int>(slot));
 
 	m_driver_cache_dirty = true;
 	SaveDriverCacheIfDue();
-	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - miss_start).count();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
 	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));
-	return p.pipeline;
+	return m_pipelines[static_cast<int>(slot)].pipeline;
+}
+
+VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_buffer, const ShaderVertexInputInfo* input_info,
+                                                      const ShaderGeometryComputeInfo& geometry, const HW::VertexShaderInfo* vs_regs,
+                                                      const HW::ShaderRegisters* sh_regs)
+{
+	KYTY_PROFILER_BLOCK("PipelineCache::CreateGeometryPipeline", profiler::colors::RedA100);
+
+	EXIT_IF(recording_buffer == nullptr || input_info == nullptr || vs_regs == nullptr || sh_regs == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+
+	auto id = ShaderGetIdVS(vs_regs, input_info);
+	id.ids.Add(0x47454f31u); // GEO1: merged ES+GS compute pass.
+	id.ids.Add(static_cast<uint32_t>(geometry.topology));
+	id.ids.Add(geometry.primitives_per_group);
+	id.ids.Add(geometry.parameter_count);
+	id.ids.Add(geometry.lds_dwords);
+
+	Pipeline p {};
+	p.cs_shader_id   = id;
+	p.static_params  = new PipelineStaticParameters {};
+	p.dynamic_params = new PipelineDynamicParameters {};
+
+	auto* found = Find(p);
+	DebugStatsRecordPipelineLookup(DebugStatsPipelineKind::Compute, found != nullptr, 0u);
+	if (found != nullptr)
+	{
+		delete p.static_params;
+		delete p.dynamic_params;
+		AttachPipelineLease(recording_buffer, *found);
+		return found->pipeline;
+	}
+
+	const auto miss_start = DebugStatsClock::now();
+	const auto code       = ShaderParseVS(vs_regs, sh_regs, input_info);
+	const auto host       = SpirvGeometryComputeHostInfo(code, *input_info, geometry);
+
+	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
+	EXIT_IF(translation_cache == nullptr);
+	const auto translation =
+	    translation_cache->GetOrCompile(ShaderModuleKey::Create(id, ShaderModuleStage::Compute, Config::GetShaderOptimizationType(),
+	                                                            Config::IsNextGen(), Config::SpirvDebugPrintfEnabled()),
+	                                    [&] { return ShaderRecompileGeometryCS(code, *input_info, geometry); });
+	DebugStatsRecordShaderTranslationCache(translation.hit, translation.evicted);
+	EXIT_IF(translation.binary.IsEmpty());
+
+	const uint32_t slot = FindAvailableSlot();
+	p.pipeline          = CreatePipelineInternal(&host, translation.binary, p.static_params, p.dynamic_params);
+	if (slot < m_pipelines.Size())
+	{
+		if (m_pipelines[static_cast<int>(slot)].pipeline != nullptr)
+		{
+			DebugStatsRecordPipelineEviction();
+			DeletePipelineInternal(slot);
+		}
+		m_pipelines[static_cast<int>(slot)] = p;
+	} else
+	{
+		EXIT_IF(slot != m_pipelines.Size());
+		m_pipelines.Add(p);
+	}
+	AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(slot)]);
+	DumpPipeline("create", static_cast<int>(slot));
+
+	m_driver_cache_dirty = true;
+	SaveDriverCacheIfDue();
+	const auto miss_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - miss_start).count();
+	DebugStatsRecordPipelineMiss(DebugStatsPipelineKind::Compute, static_cast<uint64_t>(miss_ns));
+	return m_pipelines[static_cast<int>(slot)].pipeline;
 }
 
 void PipelineCache::DeletePipeline(VulkanPipeline* pipeline)
@@ -1672,6 +1967,25 @@ void PipelineCache::DeleteAllPipelines()
 	for (uint32_t index = 0; index < m_pipelines.Size(); index++)
 	{
 		DeletePipelineInternal(index);
+	}
+}
+
+void PipelineCache::ReleasePipelineLease(VulkanPipeline* pipeline)
+{
+	EXIT_IF(pipeline == nullptr);
+	Core::LockGuard lock(m_mutex);
+	const auto      index = m_pipelines.Find(pipeline, [](const auto& entry, const auto* value) { return value == entry.pipeline; });
+	EXIT_IF(!m_pipelines.IndexValid(index));
+	if (!m_pipelines.IndexValid(index))
+	{
+		return;
+	}
+
+	Pipeline& entry = m_pipelines[index];
+	EXIT_IF(entry.lifetime.ReferenceCount() == 0);
+	if (entry.lifetime.Release())
+	{
+		DeletePipelineInternal(static_cast<uint32_t>(index));
 	}
 }
 

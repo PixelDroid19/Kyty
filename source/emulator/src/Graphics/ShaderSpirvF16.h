@@ -165,6 +165,19 @@ inline String8 Narrow(const Spirv* spirv, const String8& bits, const String8& re
 	    .ReplaceStr("uint_255", spirv->GetConstantUint(255));
 }
 
+// SDWA on a widening conversion (ISA SDWA fields): the f32 result fills the
+// whole destination (DST_SEL DWORD) and SRC0_SEL picks the half it reads,
+// WORD_1 (bits 31:16) or WORD_0/DWORD (bits 15:0). A float source has no sign
+// extension; byte selects and partial destinations stay refused.
+inline bool SdwaWideningSupported(const ShaderInstruction& inst)
+{
+	const uint32_t control  = inst.vop_sdwa_ctrl;
+	const uint32_t dst_sel  = (control >> 8u) & 7u;
+	const uint32_t src0_sel = (control >> 16u) & 7u;
+	const bool     sext     = (control & (1u << 19u)) != 0u;
+	return dst_sel == 6u && !sext && src0_sel >= 4u && src0_sel <= 6u;
+}
+
 inline bool HasHalfDestinationSelect(ShaderInstructionType type)
 {
 	return type == ShaderInstructionType::VFmaF16 || type == ShaderInstructionType::VMin3F16 ||
@@ -406,7 +419,11 @@ inline bool LoadHalf(Spirv* spirv, const ShaderInstruction& inst, uint32_t sourc
                      bool flush_input, bool integer, String8* text)
 {
 	auto operand = inst.src[source];
-	if (operand.dpp || operand.swizzle != 6u || operand.size > 1 || (integer && (operand.negate || operand.absolute)))
+	// SDWA word selects (admitted by SdwaWideningSupported): the operand load
+	// already zero-extends the selected word into bits 15:0.
+	const bool word_select = operand.swizzle == 4u || operand.swizzle == 5u;
+	if (operand.dpp || (operand.swizzle != 6u && !word_select) || operand.size > 1 ||
+	    (integer && (operand.negate || operand.absolute)))
 	{
 		return false;
 	}
@@ -513,7 +530,7 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	{
 		return reject("invalid-operand-tuple");
 	}
-	if (inst.vop_sdwa) { return reject("unsupported-sdwa"); }
+	if (inst.vop_sdwa && (operation != Operation::ToFloat || !SdwaWideningSupported(inst))) { return reject("unsupported-sdwa"); }
 	if (inst.dst.multiplier != 1.0f || inst.vop3_omod != 0u) { return reject("unsupported-omod"); }
 	if (!HasHalfDestinationSelect(inst.type) && inst.vop3_op_sel != 0u) { return reject("unsupported-opsel"); }
 	for (int source = 0; source < sources; ++source)
@@ -692,8 +709,7 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	if (inst.dst.clamp)
 	{
 		// Clamp of half results is exact. Handle NaN in bits according to
-		// DX10_CLAMP; IEEE disables this output modifier, as for f32.
-		if (!mode.ieee)
+		// DX10_CLAMP. IEEE mode ignores OMOD but not CLAMP, as for f32.
 		{
 			// F32 conversion destinations need a distinct float clamp contract.
 			if (operation == Operation::ToFloat) { return reject("unsupported-widening-clamp"); }
@@ -710,9 +726,6 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 )";
 			text = text.ReplaceStr("<nan_result>", mode.dx10_clamp ? "uint_0" : "fh_result_<index>");
 			text += Store(inst, index, "fh_clamped_<index>");
-		} else
-		{
-			text += Store(inst, index, "fh_result_<index>");
 		}
 	} else
 	{

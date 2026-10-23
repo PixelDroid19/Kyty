@@ -5,7 +5,7 @@
 #include <QKeyEvent>
 #include <QWindow>
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 // Poll rate while a controller is attached and the launcher is in use.
 constexpr int ACTIVE_INTERVAL_MS = 16;
@@ -20,19 +20,19 @@ namespace {
 
 struct ButtonBinding
 {
-	SDL_GameControllerButton button;
-	int                      key;
+	SDL_GamepadButton button;
+	int               key;
 };
 
-// Positions follow SDL's standard layout, which is Cross/Circle/Square/Triangle on a PlayStation controller.
+// Face buttons by position, which is Cross/Circle/Square/Triangle on a PlayStation controller.
 constexpr ButtonBinding BUTTONS[] = {
-    {SDL_CONTROLLER_BUTTON_A, Qt::Key_Return},
-    {SDL_CONTROLLER_BUTTON_B, Qt::Key_Escape},
-    {SDL_CONTROLLER_BUTTON_X, Qt::Key_E},
-    {SDL_CONTROLLER_BUTTON_Y, Qt::Key_O},
-    {SDL_CONTROLLER_BUTTON_START, Qt::Key_Menu},
-    {SDL_CONTROLLER_BUTTON_LEFTSHOULDER, Qt::Key_PageUp},
-    {SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, Qt::Key_PageDown},
+    {SDL_GAMEPAD_BUTTON_SOUTH, Qt::Key_Return},
+    {SDL_GAMEPAD_BUTTON_EAST, Qt::Key_Escape},
+    {SDL_GAMEPAD_BUTTON_WEST, Qt::Key_E},
+    {SDL_GAMEPAD_BUTTON_NORTH, Qt::Key_O},
+    {SDL_GAMEPAD_BUTTON_START, Qt::Key_Menu},
+    {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, Qt::Key_PageUp},
+    {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, Qt::Key_PageDown},
 };
 
 // Direction order matches the arrays in GamepadInput.
@@ -57,7 +57,7 @@ void GamepadInput::OpenSdl()
 	// SDL would otherwise take over SIGINT and SIGTERM and turn them into events nobody reads, so the launcher could not be stopped.
 	SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
 	// SDL reports the controllers already plugged in as added devices on the first poll.
-	m_sdl_ready = SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) == 0;
+	m_sdl_ready = SDL_InitSubSystem(SDL_INIT_GAMEPAD);
 	UpdateInterval();
 	if (m_sdl_ready)
 	{
@@ -71,7 +71,7 @@ void GamepadInput::CloseSdl()
 	CloseController();
 	if (m_sdl_ready)
 	{
-		SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+		SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
 	}
 	m_sdl_ready = false;
 }
@@ -108,10 +108,10 @@ void GamepadInput::Poll()
 	SDL_Event event;
 	while (SDL_PollEvent(&event))
 	{
-		if (event.type == SDL_CONTROLLERDEVICEADDED && m_pad == nullptr)
+		if (event.type == SDL_EVENT_GAMEPAD_ADDED && m_pad == nullptr)
 		{
-			OpenController(event.cdevice.which);
-		} else if (event.type == SDL_CONTROLLERDEVICEREMOVED && m_pad != nullptr && SDL_GameControllerGetAttached(m_pad) == SDL_FALSE)
+			OpenController(event.gdevice.which);
+		} else if (event.type == SDL_EVENT_GAMEPAD_REMOVED && m_pad != nullptr && !SDL_GamepadConnected(m_pad))
 		{
 			CloseController();
 		}
@@ -128,7 +128,7 @@ void GamepadInput::Poll()
 
 	for (int i = 0; i < BUTTON_COUNT; i++)
 	{
-		const bool down = SDL_GameControllerGetButton(m_pad, BUTTONS[i].button) != 0;
+		const bool down = SDL_GetGamepadButton(m_pad, BUTTONS[i].button);
 		if (down && !m_button_down[i] && deliver)
 		{
 			Tap(BUTTONS[i].key);
@@ -136,14 +136,14 @@ void GamepadInput::Poll()
 		m_button_down[i] = down;
 	}
 
-	const double x = SDL_GameControllerGetAxis(m_pad, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0;
-	const double y = SDL_GameControllerGetAxis(m_pad, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0;
+	const double x = SDL_GetGamepadAxis(m_pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0;
+	const double y = SDL_GetGamepadAxis(m_pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0;
 
 	const bool directions[DIRECTION_COUNT] = {
-	    SDL_GameControllerGetButton(m_pad, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0 || y < -STICK_DEADZONE,
-	    SDL_GameControllerGetButton(m_pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0 || y > STICK_DEADZONE,
-	    SDL_GameControllerGetButton(m_pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) != 0 || x < -STICK_DEADZONE,
-	    SDL_GameControllerGetButton(m_pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) != 0 || x > STICK_DEADZONE,
+	    SDL_GetGamepadButton(m_pad, SDL_GAMEPAD_BUTTON_DPAD_UP) || y < -STICK_DEADZONE,
+	    SDL_GetGamepadButton(m_pad, SDL_GAMEPAD_BUTTON_DPAD_DOWN) || y > STICK_DEADZONE,
+	    SDL_GetGamepadButton(m_pad, SDL_GAMEPAD_BUTTON_DPAD_LEFT) || x < -STICK_DEADZONE,
+	    SDL_GetGamepadButton(m_pad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || x > STICK_DEADZONE,
 	};
 
 	for (int d = 0; d < DIRECTION_COUNT; d++)
@@ -182,14 +182,14 @@ void GamepadInput::Tap(int key) const
 	QCoreApplication::postEvent(m_window, new QKeyEvent(QEvent::KeyRelease, key, Qt::NoModifier));
 }
 
-void GamepadInput::OpenController(int device_index)
+void GamepadInput::OpenController(quint32 joystick_id)
 {
-	m_pad = SDL_GameControllerOpen(device_index);
+	m_pad = SDL_OpenGamepad(joystick_id);
 	if (m_pad == nullptr)
 	{
 		return;
 	}
-	const char* name = SDL_GameControllerName(m_pad);
+	const char* name = SDL_GetGamepadName(m_pad);
 	m_name           = name != nullptr ? QString::fromUtf8(name) : QStringLiteral("Controller");
 	UpdateInterval();
 	emit ControllerChanged(m_name);
@@ -201,7 +201,7 @@ void GamepadInput::CloseController()
 	{
 		return;
 	}
-	SDL_GameControllerClose(m_pad);
+	SDL_CloseGamepad(m_pad);
 	m_pad = nullptr;
 	m_name.clear();
 	for (bool& down: m_button_down)

@@ -98,6 +98,9 @@ struct AvPlayerInternal
 	bool                 paused = false;
 	bool                 stop_fired = false;
 	bool                 source_failed = false;
+	// A completed jump publishes its landing frame even while the player is
+	// paused; the first delivered frame closes the window.
+	bool                 jump_frame_pending = false;
 	uint64_t             start_time_ms = 0;
 	AvPlayerEventReplacement event;
 	AvPlayerMemAllocator mem;
@@ -405,9 +408,9 @@ static void avplayer_dump_lifetime(const char* event, const AvPlayerInternal* pl
 	}
 }
 
-static void register_video_frame(uint8_t* frame, size_t bytes, uint32_t pitch)
+static bool register_video_frame(uint8_t* frame, size_t bytes, uint32_t pitch)
 {
-	VideoFrameMemory::RegisterLinearFrame(reinterpret_cast<uint64_t>(frame), bytes, pitch);
+	return VideoFrameMemory::RegisterLinearFrame(reinterpret_cast<uint64_t>(frame), bytes, pitch);
 }
 
 static void unregister_video_frame(uint8_t* frame)
@@ -485,7 +488,11 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 				return false;
 			}
 			r->video_frames.push_back(AvPlayerInternal::VideoFrameBuffer {frame, true});
-			register_video_frame(frame, size, video_frame_pitch(luma_width));
+			if (!register_video_frame(frame, size, video_frame_pitch(luma_width)))
+			{
+				release_synthetic_video(r);
+				return false;
+			}
 			if (r->closing.load(std::memory_order_acquire))
 			{
 				release_synthetic_video(r);
@@ -503,7 +510,8 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 		const auto aligned_address = (raw_address + 255u) & ~static_cast<uintptr_t>(255u);
 		r->synthetic_storage_data  = reinterpret_cast<uint8_t*>(aligned_address);
 		r->video_frames.push_back(AvPlayerInternal::VideoFrameBuffer {r->synthetic_storage_data, false});
-		register_video_frame(r->synthetic_storage_data, size, video_frame_pitch(luma_width));
+		// This host-owned scratch buffer has no guest mapping identity to register.
+		(void)register_video_frame(r->synthetic_storage_data, size, video_frame_pitch(luma_width));
 		if (r->closing.load(std::memory_order_acquire))
 		{
 			release_synthetic_video(r);
@@ -721,18 +729,33 @@ static void stop_once_after_eof(AvPlayerInternal* h)
 		return;
 	}
 	{
-		Core::LockGuard lock(h->mutex);
-		if (h->playing && !synthetic_is_playing(h))
+		// Exclusive: a looping decoder is repositioned while no frame pull observes it.
+		std::unique_lock<std::shared_mutex> decoder_lock(h->decoder_mutex);
+		bool rewind = false;
 		{
-			if (h->loop)
+			Core::LockGuard lock(h->mutex);
+			if (!h->playing || synthetic_is_playing(h))
+			{
+				return;
+			}
+			rewind = h->loop;
+			if (h->loop && h->decoder == nullptr)
 			{
 				h->synthetic_obtained_num = 0;
-			} else if (!h->stop_fired)
-			{
-				h->playing    = false;
-				h->stop_fired = true;
-				fire_stop     = true;
+				return;
 			}
+		}
+		// A looping stream restarts at its beginning; the guest sees the loop as a timestamp that goes back.
+		if (rewind && h->decoder->Seek(0))
+		{
+			return;
+		}
+		Core::LockGuard lock(h->mutex);
+		if (!h->stop_fired)
+		{
+			h->playing    = false;
+			h->stop_fired = true;
+			fire_stop     = true;
 		}
 	}
 	if (fire_stop)
@@ -760,7 +783,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info, 
 
 	{
 		Core::LockGuard lock(r->mutex);
-		if (!r->playing || r->paused || r->video_frames.empty() || !synthetic_is_playing(r))
+		if (!r->playing || (r->paused && !r->jump_frame_pending) || r->video_frames.empty() || !synthetic_is_playing(r))
 		{
 			return false;
 		}
@@ -803,6 +826,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info, 
 		Core::LockGuard lock(r->mutex);
 		r->synthetic_obtained_num++;
 		r->last_media_time_ms = timestamp;
+		r->jump_frame_pending = false;
 	} else
 	{
 		{
@@ -828,6 +852,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info, 
 		draw_synthetic_frame(video_row_pitch(width, layout), height, frame, level * 0.7f);
 		Core::LockGuard lock(r->mutex);
 		r->synthetic_obtained_num++;
+		r->jump_frame_pending = false;
 	}
 
 	std::memset(info, 0, sizeof(*info));
@@ -1224,6 +1249,7 @@ static int start_player(AvPlayerInternal* h)
 		h->playing           = true;
 		h->paused            = false;
 		h->stop_fired        = false;
+		h->jump_frame_pending = false;
 		h->synthetic_obtained_num = 0;
 		h->start_time_ms     = 0;
 	}
@@ -1262,6 +1288,7 @@ int KYTY_SYSV_ABI AvPlayerStartEx(AvPlayerInternal* h, const void* start_info_ex
 		h->playing    = true;
 		h->paused     = false;
 		h->stop_fired = false;
+		h->jump_frame_pending = false;
 	}
 	emit_event(h, AVPLAYER_EVENT_STATE_PLAY);
 	if (avplayer_dump_enabled())
@@ -1285,6 +1312,7 @@ int KYTY_SYSV_ABI AvPlayerStop(AvPlayerInternal* h)
 		h->playing    = false;
 		h->paused     = false;
 		h->stop_fired = true;
+		h->jump_frame_pending = false;
 	}
 	emit_event(h, AVPLAYER_EVENT_STATE_STOP);
 	return 0;
@@ -1318,7 +1346,8 @@ int KYTY_SYSV_ABI AvPlayerResume(AvPlayerInternal* h)
 	h = player.get();
 	{
 		Core::LockGuard lock(h->mutex);
-		h->paused = false;
+		h->paused             = false;
+		h->jump_frame_pending = false;
 	}
 	emit_event(h, AVPLAYER_EVENT_STATE_PLAY);
 	return 0;
@@ -1530,11 +1559,20 @@ int KYTY_SYSV_ABI AvPlayerJumpToTime(AvPlayerInternal* h, uint64_t time_ms)
 	}
 	h = player.get();
 	{
+		// Exclusive: no frame pull may observe the decoder while it is repositioned.
+		std::unique_lock<std::shared_mutex> decoder_lock(h->decoder_mutex);
+		if (h->decoder != nullptr && !h->decoder->Seek(time_ms))
+		{
+			return AVPLAYER_ERROR_OPERATION_FAILED;
+		}
 		Core::LockGuard lock(h->mutex);
-		h->start_time_ms     = time_ms;
+		// Decoded timestamps are stream positions, so the media clock restarts at the target.
+		h->start_time_ms          = 0;
+		h->last_media_time_ms     = time_ms;
 		h->synthetic_obtained_num = static_cast<uint32_t>(
 		    std::min<uint64_t>(h->synthetic_frame_count, static_cast<uint64_t>(time_ms * h->synthetic_frame_rate / 1000.0f)));
-		h->stop_fired = false;
+		h->stop_fired         = false;
+		h->jump_frame_pending = true;
 	}
 	int32_t warning = AVPLAYER_WARNING_JUMP_COMPLETE;
 	emit_event(h, 0x20, &warning);

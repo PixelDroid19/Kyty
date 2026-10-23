@@ -6,6 +6,7 @@
 #include "ShaderNativeWaveInternal.h"
 #include "ShaderSpirvInternal.h"
 
+#include <algorithm>
 #include <bitset>
 #include <iterator>
 #include <map>
@@ -25,6 +26,10 @@ using Operand = ShaderOperandType;
 
 constexpr unsigned kVertexIdVgpr   = 5;
 constexpr unsigned kInstanceIdVgpr = 8;
+constexpr unsigned kPosition0Seen  = 1u << 0u;
+constexpr unsigned kPosition1Seen  = 1u << 1u;
+constexpr unsigned kPositionDone   = 1u << 2u;
+constexpr unsigned kPositionHistoryCount = 8u;
 
 // Symbolic EXEC of the body. Node 0 is every launched lane; a compare splits a node into the lanes where it holds
 // (then) and the rest (else). A VGPR written under a node is defined for exactly the lanes of that node, and it is
@@ -108,19 +113,26 @@ private:
 
 struct CompareMask
 {
-	uint32_t compare = 0; // pc of the compare
-	int      under   = 0; // EXEC node it was evaluated under (inactive lanes read 0)
-	bool operator==(const CompareMask& other) const { return compare == other.compare && under == other.under; }
+	uint32_t compare = 0;     // pc of the compare
+	int      under   = 0;     // EXEC node it was evaluated under (inactive lanes read 0)
+	bool     uniform = false; // of wave-uniform values: every lane of `under` holds the same bit
+	bool operator==(const CompareMask& other) const { return compare == other.compare && under == other.under && uniform == other.uniform; }
 };
 
 // Per path: the EXEC node (-1 when it is no node of the partition), the scalar pairs holding a node or a compare,
 // and the nodes under which each VGPR is defined beyond FlowState::defined (every lane).
+// A VGPR in `uniform_under` holds one clean value in every lane of its node (FlowState::uniform: of node 0). A scalar
+// in `scope` (taint kDiverged) is a value read from such a VGPR under a partial EXEC: the host reads it from a lane of
+// its own subgroup, so it is the guest value only for the lanes of the EXEC it was read under.
 struct ExecShape
 {
 	int                                exec = 0;
+	uint8_t                            position_histories = 1u; // bit 0: no position export has occurred
 	std::map<unsigned, int>            saved;
 	std::map<unsigned, CompareMask>    compare;
 	std::map<unsigned, std::set<int>>  partial;
+	std::map<unsigned, int>            uniform_under;
+	std::map<unsigned, int>            scope;
 };
 
 class Body
@@ -140,6 +152,10 @@ private:
 	void    DefineUniformMask(const ShaderOperand& op, bool uniform);
 	[[nodiscard]] bool IsUniformMask(const ShaderOperand& op) const;
 	bool    SourcesAreUniformClean(const ShaderInstruction& inst) const;
+	[[nodiscard]] bool VgprUniformHere(unsigned vgpr) const;
+	[[nodiscard]] bool InScope(const ShaderOperand& op) const;
+	[[nodiscard]] int  SourceScope(const ShaderInstruction& inst) const;
+	void    SetScope(const ShaderOperand& op, int node);
 
 	bool Step(const ShaderInstruction& inst);
 	bool Branch(const ShaderInstruction& inst);
@@ -147,9 +163,12 @@ private:
 	bool ScalarLoad(const ShaderInstruction& inst);
 	bool Vector(const ShaderInstruction& inst);
 	bool ScalarSpill(const ShaderInstruction& inst);
+	bool UniformReadFirstLane(const ShaderInstruction& inst);
 	bool VectorSources(const ShaderInstruction& inst);
 	bool VectorDestinations(const ShaderInstruction& inst, bool uniform_result);
 	bool Export(const ShaderInstruction& inst);
+	bool PositionExport(const ShaderInstruction& inst, bool position0, bool done);
+	bool EndProgram(const ShaderInstruction& inst);
 	bool ImageRead(const ShaderInstruction& inst);
 	bool ExecWrite(const ShaderInstruction& inst);
 	void OpenRegion(const ShaderInstruction& inst, uint32_t target);
@@ -200,6 +219,7 @@ void Body::Define(const ShaderOperand& op, uint8_t taint)
 	{
 		m_state.scalar[first + word] = taint;
 		m_state.uniform_mask.reset(first + word);
+		m_shape.scope.erase(first + word);
 	}
 	ForgetScalarShape(op);
 	if (op.type == Operand::VccLo || op.type == Operand::VccHi) { m_state.vcc_uniform = false; }
@@ -213,7 +233,13 @@ void Body::DefineUniformMask(const ShaderOperand& op, bool uniform)
 	unsigned count = 0;
 	if (!ScalarRange(op, &first, &count)) { return; }
 	for (unsigned word = 0; word < count; ++word) { m_state.uniform_mask.set(first + word, uniform); }
-	if (op.type == Operand::VccLo) { m_state.vcc_uniform = uniform; } // wave32 compares define VCC_LO only
+	if (op.type == Operand::VccLo || op.type == Operand::VccHi)
+	{
+		ShaderOperand vcc {};
+		vcc.type = Operand::VccLo;
+		vcc.size = 2;
+		m_state.vcc_uniform = IsUniformMask(vcc);
+	}
 }
 
 bool Body::IsUniformMask(const ShaderOperand& op) const
@@ -228,7 +254,16 @@ bool Body::IsUniformMask(const ShaderOperand& op) const
 	return true;
 }
 
-// Sources that are wave-uniform numbers: constants, launch-free scalars, uniform VGPRs.
+// A VGPR holding one clean value in every lane of the current EXEC.
+bool Body::VgprUniformHere(unsigned vgpr) const
+{
+	if (m_state.uniform[vgpr]) { return true; }
+	const auto under = m_shape.uniform_under.find(vgpr);
+	return under != m_shape.uniform_under.end() && m_shape.exec >= 0 && m_partition.Descends(m_shape.exec, under->second);
+}
+
+// Sources holding one number in every lane of the current EXEC: constants, launch-free scalars, scoped scalars
+// read under an ancestor of it, VGPRs uniform under an ancestor of it.
 bool Body::SourcesAreUniformClean(const ShaderInstruction& inst) const
 {
 	for (int source = 0; source < inst.src_num; ++source)
@@ -241,13 +276,68 @@ bool Body::SourcesAreUniformClean(const ShaderInstruction& inst) const
 		{
 			for (unsigned word = 0; word < count; ++word)
 			{
-				if (!m_state.uniform[first + word]) { return false; }
+				if (!VgprUniformHere(first + word)) { return false; }
 			}
 			continue;
 		}
-		if (Taint(op) != kClean || !ScalarRange(op, &first, &count)) { return false; }
+		if (!ScalarRange(op, &first, &count) || (Taint(op) != kClean && !InScope(op))) { return false; }
+	}
+	if (inst.type == Type::VMacF32)
+	{
+		unsigned first = 0;
+		unsigned count = 0;
+		if (!VgprRange(inst.dst, &first, &count)) { return false; }
+		for (unsigned word = 0; word < count; ++word)
+		{
+			if (!VgprUniformHere(first + word)) { return false; }
+		}
 	}
 	return true;
+}
+
+// A scoped scalar the current EXEC may read: every word holds a value read under an ancestor of EXEC.
+bool Body::InScope(const ShaderOperand& op) const
+{
+	unsigned first = 0;
+	unsigned count = 0;
+	if (!ScalarRange(op, &first, &count) || Taint(op) != kDiverged || m_shape.exec < 0) { return false; }
+	for (unsigned word = first; word < first + count; ++word)
+	{
+		const auto scope = m_shape.scope.find(word);
+		if (m_state.scalar[word] == kClean) { continue; }
+		if (scope == m_shape.scope.end() || !m_partition.Descends(m_shape.exec, scope->second)) { return false; }
+	}
+	return true;
+}
+
+// The scope of a scalar computed from these sources: the deepest scope among them when they lie on one chain of
+// nodes (the value is then known for the lanes of all of them), or -1.
+int Body::SourceScope(const ShaderInstruction& inst) const
+{
+	int deepest = 0;
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		unsigned first = 0;
+		unsigned count = 0;
+		if (!ScalarRange(inst.src[source], &first, &count)) { continue; }
+		for (unsigned word = first; word < first + count; ++word)
+		{
+			if (m_state.scalar[word] == kClean) { continue; }
+			const auto scope = m_shape.scope.find(word);
+			if (m_state.scalar[word] != kDiverged || scope == m_shape.scope.end()) { return -1; }
+			if (m_partition.Descends(scope->second, deepest)) { deepest = scope->second; }
+			if (!m_partition.Descends(deepest, scope->second)) { return -1; }
+		}
+	}
+	return deepest;
+}
+
+void Body::SetScope(const ShaderOperand& op, int node)
+{
+	unsigned first = 0;
+	unsigned count = 0;
+	if (node < 0 || !ScalarRange(op, &first, &count)) { return; }
+	for (unsigned word = first; word < first + count; ++word) { m_shape.scope[word] = node; }
 }
 
 bool Body::Branch(const ShaderInstruction& inst)
@@ -256,9 +346,19 @@ bool Body::Branch(const ShaderInstruction& inst)
 	// inactive, so the region's vector writes are masked either way; its scalar writes are not (see OpenRegion).
 	// A VCC branch leaves EXEC alone: a non-uniform one would run vector writes for lanes chosen by other lanes.
 	const bool divergent = inst.type == Type::SCbranchExecz || inst.type == Type::SCbranchExecnz;
+	// A compare of wave-uniform values under a partial EXEC holds the same bit in every lane of its EXEC, so a VCC
+	// branch on it is uniform for the lanes still inside that EXEC and splits only lanes outside it, as an EXEC
+	// branch does. Unlike an EXEC branch, active lanes take both edges, so the join keeps only what both define.
+	bool exec_split = false;
 	if (inst.type == Type::SCbranchVccz || inst.type == Type::SCbranchVccnz)
 	{
-		if (!m_state.vcc_uniform) { return Fail(inst, "VCC branch on a comparison that is not wave-uniform"); }
+		ShaderOperand vcc {};
+		vcc.type = Operand::VccLo;
+		vcc.size = 2;
+		const auto compare = m_shape.compare.find(kVccLoWord);
+		exec_split = !IsUniformMask(vcc) && compare != m_shape.compare.end() && compare->second.uniform && m_shape.exec >= 0 &&
+		             m_partition.Descends(m_shape.exec, compare->second.under);
+		if (!IsUniformMask(vcc) && !exec_split) { return Fail(inst, "VCC branch on a comparison that is not wave-uniform"); }
 	} else if (inst.type == Type::SCbranchScc0 || inst.type == Type::SCbranchScc1)
 	{
 		if (m_state.scalar[kSccWord] != kClean) { return Fail(inst, "SCC branch on launch-dependent data"); }
@@ -273,7 +373,8 @@ bool Body::Branch(const ShaderInstruction& inst)
 	for (const auto& candidate: m_code->GetInstructions()) { exists = exists || candidate.pc == static_cast<uint32_t>(target); }
 	if (!exists) { return Fail(inst, "branch target is not an instruction"); }
 	const auto join = static_cast<uint32_t>(target);
-	if (divergent) { OpenRegion(inst, join); } else { m_uniform_targets.insert(join); }
+	if (divergent || exec_split) { OpenRegion(inst, join); }
+	if (!divergent) { m_uniform_targets.insert(join); }
 	const auto found = m_pending.find(join);
 	if (found == m_pending.end())
 	{
@@ -329,6 +430,11 @@ void Body::CloseRegions(uint32_t pc)
 		m_state.uniform_mask.reset(word);
 		m_shape.saved.erase(word);
 		m_shape.compare.erase(word);
+		m_shape.scope.erase(word);
+	}
+	for (unsigned vgpr = 0; vgpr < static_cast<unsigned>(kVgprs); ++vgpr)
+	{
+		if (region->second.vgprs.test(vgpr)) { m_shape.uniform_under.erase(vgpr); }
 	}
 	if (region->second.scalars.test(kVccLoWord) || region->second.scalars.test(kVccLoWord + 1u)) { m_state.vcc_uniform = false; }
 	m_state.uniform &= ~region->second.vgprs;
@@ -351,7 +457,7 @@ bool Body::ExecWrite(const ShaderInstruction& inst)
 	{
 		if (IsConstant(inst.src[source])) { continue; }
 		const uint8_t source_taint = Taint(inst.src[source]);
-		if ((source_taint & kInfo) != 0u || (source_taint & kMask) == 0u) { return Fail(inst, "EXEC assigned a value that is not a mask"); }
+		if ((source_taint & (kInfo | kDiverged)) != 0u || (source_taint & kMask) == 0u) { return Fail(inst, "EXEC assigned a value that is not a mask"); }
 		taint |= source_taint;
 	}
 	const bool saveexec = inst.dst.type != Operand::ExecLo && inst.dst.type != Operand::ExecHi;
@@ -427,27 +533,33 @@ int Body::ExecAfter(const ShaderInstruction& inst) const
 		*mask = found->second;
 		return true;
 	};
-	const int  exec = m_shape.exec;
-	CompareMask mask {};
+	// EXEC = mask & EXEC (or ~mask & EXEC) splits EXEC in two halves that partition it. A compare made under an
+	// ancestor of EXEC holds each lane of EXEC exactly, since that lane was active when it ran, so the compare names
+	// the split; any other mask splits it by this instruction alone.
+	const int exec  = m_shape.exec;
+	const auto split = [&](const ShaderOperand& op, bool then_side) {
+		if (exec < 0) { return -1; }
+		CompareMask mask {};
+		const bool named = compare_of(op, &mask) && m_partition.Descends(exec, mask.under);
+		return const_cast<ExecPartition&>(m_partition).Child(exec, named ? mask.compare : inst.pc, then_side);
+	};
 	switch (inst.type)
 	{
 		case Type::SMovB64: return node_of(inst.src[0]);
-		case Type::SAndSaveexecB64:
-			// EXEC &= (compare under EXEC): the lanes of EXEC where the compare holds.
-			return exec >= 0 && compare_of(inst.src[0], &mask) && mask.under == exec ? const_cast<ExecPartition&>(m_partition).Child(exec, mask.compare, true) : -1;
+		case Type::SAndSaveexecB64: return split(inst.src[0], true);
+		case Type::SAndn1SaveexecB64: return split(inst.src[0], false);
 		case Type::SAndB64:
 		{
 			const bool exec_first = inst.src[0].type == Operand::ExecLo;
-			const auto& other     = exec_first ? inst.src[1] : inst.src[0];
-			if (exec < 0 || (!exec_first && inst.src[1].type != Operand::ExecLo) || !compare_of(other, &mask) || mask.under != exec) { return -1; }
-			return const_cast<ExecPartition&>(m_partition).Child(exec, mask.compare, true);
+			if (!exec_first && inst.src[1].type != Operand::ExecLo) { return -1; }
+			return split(exec_first ? inst.src[1] : inst.src[0], true);
 		}
 		case Type::SAndn2B64:
 		{
-			// EXEC = saved \ EXEC: the else half of the split EXEC is the then half of.
+			// EXEC = saved \ EXEC: the other half of the split EXEC is one half of.
 			const int saved = node_of(inst.src[0]);
-			if (inst.src[1].type != Operand::ExecLo || saved < 0 || m_partition.Parent(exec) != saved || !m_partition.IsThen(exec)) { return -1; }
-			return const_cast<ExecPartition&>(m_partition).Child(saved, m_partition.Compare(exec), false);
+			if (inst.src[1].type != Operand::ExecLo || saved < 0 || exec <= 0 || m_partition.Parent(exec) != saved) { return -1; }
+			return const_cast<ExecPartition&>(m_partition).Child(saved, m_partition.Compare(exec), !m_partition.IsThen(exec));
 		}
 		case Type::SOrB64:
 		{
@@ -469,6 +581,7 @@ int Body::ExecAfter(const ShaderInstruction& inst) const
 // lane takes also reaches keep only what both paths define.
 void Body::MergeShape(ExecShape* into, const ExecShape& other, uint32_t pc) const
 {
+	into->position_histories |= other.position_histories;
 	std::vector<int> vacuous;
 	if (const auto region = m_regions.find(pc); region != m_regions.end() && m_uniform_targets.count(pc) == 0u) { vacuous = region->second.roots; }
 	const auto vacuous_node = [&](int node) {
@@ -488,6 +601,15 @@ void Body::MergeShape(ExecShape* into, const ExecShape& other, uint32_t pc) cons
 	{
 		const auto found = other.compare.find(it->first);
 		it = (found != other.compare.end() && found->second == it->second) ? std::next(it) : into->compare.erase(it);
+	}
+	for (auto* facts: {&into->uniform_under, &into->scope})
+	{
+		const auto& theirs = facts == &into->scope ? other.scope : other.uniform_under;
+		for (auto it = facts->begin(); it != facts->end();)
+		{
+			const auto found = theirs.find(it->first);
+			it = (found != theirs.end() && found->second == it->second) ? std::next(it) : facts->erase(it);
+		}
 	}
 	std::map<unsigned, std::set<int>> merged;
 	const std::map<unsigned, std::set<int>>* sides[] = {&into->partial, &other.partial};
@@ -531,14 +653,22 @@ bool Body::ScalarAlu(const ShaderInstruction& inst)
 		return Fail(inst, "mask observed as a number");
 	}
 	if (inst.dst.type == Operand::ExecLo || inst.dst.type == Operand::ExecHi) { return ExecWrite(inst); }
-	const int  exec_copy    = inst.type == Type::SMovB64 && inst.src_num == 1 && inst.src[0].type == Operand::ExecLo ? m_shape.exec : -1;
+	// Snapshot an exact saved EXEC node before Define invalidates an aliased destination pair.
+	const int  exec_copy    = inst.type == Type::SMovB64 && inst.src_num == 1 ? ExecAfter(inst) : -1;
 	const bool uniform_copy = ((inst.type == Type::SMovB64 || inst.type == Type::SMovB32) && inst.src_num == 1 && IsUniformMask(inst.src[0])) ||
-	                          ((inst.type == Type::SAndB64 || inst.type == Type::SAndB32) && inst.src_num == 2 &&
+	                          ((inst.type == Type::SAndB64 || inst.type == Type::SAndB32) && inst.src_num == 2 && m_shape.exec == 0 &&
 	                           ((inst.src[0].type == Operand::ExecLo && IsUniformMask(inst.src[1])) ||
 	                            (inst.src[1].type == Operand::ExecLo && IsUniformMask(inst.src[0]))));
+	// A scalar intersection keeps two complete uniform masks uniform, including when the destination aliases a source.
+	const bool uniform_and = inst.type == Type::SAndB64 && inst.src_num == 2 && inst.dst.size == 2 &&
+	                         inst.src[0].size == 2 && inst.src[1].size == 2 &&
+	                         IsUniformMask(inst.src[0]) && IsUniformMask(inst.src[1]);
+	const int scope = (taint & kDiverged) != 0u ? SourceScope(inst) : -1;
 	Define(inst.dst, taint);
 	Define(inst.dst2, taint);
-	if (uniform_copy) { DefineUniformMask(inst.dst, true); }
+	SetScope(inst.dst, scope);
+	SetScope(inst.dst2, scope);
+	if (uniform_copy || uniform_and) { DefineUniformMask(inst.dst, true); }
 	if (exec_copy >= 0)
 	{
 		unsigned first = 0;
@@ -570,8 +700,19 @@ bool Body::VectorSources(const ShaderInstruction& inst)
 			continue;
 		}
 		const uint8_t taint = Taint(op);
-		if (taint == kClean || (taint == kMask && IsLaneBit(inst, source))) { continue; }
+		if (taint == kClean || (taint == kMask && IsLaneBit(inst, source)) || InScope(op)) { continue; }
+		if (taint == kDiverged) { return Fail(inst, "scalar read from a lane reaches lanes outside the EXEC it was read under"); }
 		return Fail(inst, (taint & kInfo) != 0u ? "launch-dependent scalar reaches a vector instruction" : "mask observed as a number");
+	}
+	if (inst.type == Type::VMacF32)
+	{
+		unsigned first = 0;
+		unsigned count = 0;
+		if (!VgprRange(inst.dst, &first, &count)) { return Fail(inst, "MAC destination is not a VGPR"); }
+		for (unsigned word = 0; word < count; ++word)
+		{
+			if (!VgprDefined(first + word)) { return Fail(inst, "VGPR read before it is defined on every path"); }
+		}
 	}
 	return true;
 }
@@ -589,6 +730,8 @@ bool Body::VectorDestinations(const ShaderInstruction& inst, bool uniform_result
 				DefineVgpr(first + word);
 				// A write under part of the lanes leaves the others their old value.
 				m_state.uniform[first + word] = uniform_result && m_shape.exec == 0;
+				m_shape.uniform_under.erase(first + word);
+				if (uniform_result && m_shape.exec > 0) { m_shape.uniform_under[first + word] = m_shape.exec; }
 			}
 			continue;
 		}
@@ -598,17 +741,24 @@ bool Body::VectorDestinations(const ShaderInstruction& inst, bool uniform_result
 		unsigned words      = 0;
 		if (StartsWith(inst.type, "VCmp") && ScalarRange(*dst, &first_word, &words) && words == 2u && m_shape.exec >= 0)
 		{
-			m_shape.compare[first_word] = {inst.pc, m_shape.exec};
+			m_shape.compare[first_word] = {inst.pc, m_shape.exec, uniform_result};
 		}
 	}
 	return true;
 }
 
-// SDWA with whole-dword selects and no sub-dword modifiers computes what the plain encoding does;
-// anything else selects bytes or words of its sources and is not modelled here.
-bool SdwaIsIdentity(const ShaderInstruction& inst)
+// SDWA compare source modifiers are lane-local; all other control fields must match a whole-dword compare.
+bool SdwaPreservesUniformity(const ShaderInstruction& inst)
 {
-	return StartsWith(inst.type, "VCmp") ? (!StartsWith(inst.type, "VCmpx") && ShaderComputeWaveSdwaCompareIdentityTuple(inst)) : ShaderComputeWaveSdwaVop2IdentitySupported(inst);
+	if (StartsWith(inst.type, "VCmp"))
+	{
+		if (StartsWith(inst.type, "VCmpx")) { return false; }
+		constexpr uint32_t kSourceModifierBits = (1u << 20u) | (1u << 21u) | (1u << 28u) | (1u << 29u);
+		auto normalized = inst;
+		normalized.vop_sdwa_ctrl &= ~kSourceModifierBits;
+		return ShaderComputeWaveSdwaCompareIdentityTuple(normalized);
+	}
+	return ShaderComputeWaveSdwaVop2IdentitySupported(inst);
 }
 
 // A V_WRITELANE/V_READLANE with a constant lane that only moves a scalar through one VGPR lane and
@@ -634,6 +784,29 @@ bool Body::ScalarSpill(const ShaderInstruction& inst)
 	return Fail(inst, "lane exchange");
 }
 
+// V_READFIRSTLANE of a VGPR holding one clean value in every lane reads that value whichever
+// lane is first: a uniform copy, not a lane exchange. Under a partial EXEC the VGPR need only hold one value in the
+// lanes of an ancestor of EXEC: the guest reads its first EXEC lane, the host the first EXEC lane of its subgroup,
+// which is the same value wherever the subgroup holds a lane of EXEC. The scalar is the guest value for those lanes
+// only, so it is scoped to EXEC (see ExecShape).
+bool Body::UniformReadFirstLane(const ShaderInstruction& inst)
+{
+	unsigned first = 0;
+	unsigned count = 0;
+	if (inst.src_num != 1 || !VgprRange(inst.src[0], &first, &count) || count != 1u || !VgprDefined(first) || !VgprUniformHere(first))
+	{
+		return Fail(inst, "lane exchange");
+	}
+	if (m_state.uniform[first])
+	{
+		Define(inst.dst, kClean);
+		return true;
+	}
+	Define(inst.dst, kDiverged);
+	SetScope(inst.dst, m_shape.exec);
+	return true;
+}
+
 bool Body::Vector(const ShaderInstruction& inst)
 {
 	const bool valu = StartsWith(inst.type, "V");
@@ -641,10 +814,11 @@ bool Body::Vector(const ShaderInstruction& inst)
 	if (IsLaneExchange(inst.type)) { return Fail(inst, "lane exchange"); }
 	if (!VectorSources(inst)) { return false; }
 	const bool compare = StartsWith(inst.type, "VCmp");
-	const bool pure    = valu && (!inst.vop_sdwa || SdwaIsIdentity(inst));
-	const bool uniform = pure && SourcesAreUniformClean(inst);
+	const bool pure    = valu && (!inst.vop_sdwa || SdwaPreservesUniformity(inst));
+	// A relative move reads a register its operands do not name.
+	const bool uniform = pure && !StartsWith(inst.type, "VMovrel") && SourcesAreUniformClean(inst);
 	if (!VectorDestinations(inst, uniform)) { return false; }
-	if (compare) { DefineUniformMask(inst.dst, uniform); }
+	if (compare) { DefineUniformMask(inst.dst, uniform && m_shape.exec == 0); }
 	return true;
 }
 
@@ -653,7 +827,8 @@ bool Body::Vector(const ShaderInstruction& inst)
 bool Body::ImageRead(const ShaderInstruction& inst)
 {
 	const bool nsa       = inst.mimg_address_num > 0;
-	const int  addresses = inst.src[0].size;
+	const int  addresses =
+	    inst.type == Type::ImageLoad ? std::min(inst.src[0].size, ImageLoadAddressCount(inst)) : inst.src[0].size;
 	if (nsa && addresses > inst.mimg_address_num) { return Fail(inst, "image address list shorter than its format"); }
 	for (int address = 0; address < addresses; ++address)
 	{
@@ -671,10 +846,107 @@ bool Body::ImageRead(const ShaderInstruction& inst)
 	return VectorDestinations(inst, false);
 }
 
+bool Body::PositionExport(const ShaderInstruction& inst, bool position0, bool done)
+{
+	if (m_shape.exec != 0) { return Fail(inst, "position export under partial or unknown EXEC"); }
+	if (!VectorSources(inst)) { return false; }
+
+	const unsigned target_bit = position0 ? kPosition0Seen : kPosition1Seen;
+	uint8_t        next_histories = 0;
+	for (unsigned history = 0; history < kPositionHistoryCount; ++history)
+	{
+		if ((m_shape.position_histories & (1u << history)) == 0u) { continue; }
+		if ((history & kPositionDone) != 0u) { return Fail(inst, "position export follows DONE on an incoming path"); }
+		if ((history & target_bit) != 0u) { return Fail(inst, "position target is exported more than once on an incoming path"); }
+		const unsigned next = history | target_bit | (done ? kPositionDone : 0u);
+		next_histories |= static_cast<uint8_t>(1u << next);
+	}
+	if (next_histories == 0u) { return Fail(inst, "position export has no reachable history"); }
+	m_shape.position_histories = next_histories;
+	return true;
+}
+
 bool Body::Export(const ShaderInstruction& inst)
 {
 	if (inst.format == ShaderInstructionFormat::PrimVsrc0OffOffOffDone) { return Fail(inst, "primitive export outside the prologue"); }
+
+	const uint32_t target = (inst.raw_word >> 4u) & 0x3fu;
+	const bool position0 = inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done ||
+	                       inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3;
+	const bool position1 = inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOff ||
+	                       inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone ||
+	                       inst.format == ShaderInstructionFormat::Pos1OffOffVsrc0Off;
+	if ((position0 && target != 12u) || (position1 && target != 13u))
+	{
+		return Fail(inst, "position format disagrees with its raw export target");
+	}
+	if ((target == 12u || target == 13u) &&
+	    ((inst.raw_word & 0xfu) != inst.exp_enable_mask || ((inst.raw_word >> 10u) & 7u) != inst.exp_control))
+	{
+		return Fail(inst, "position control tuple disagrees with its raw export fields");
+	}
+	if (target == 0x0cu)
+	{
+		if (inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done)
+		{
+			if (inst.exp_enable_mask != 0x0fu || inst.exp_control != 0x02u || inst.src_num != 4)
+			{
+				return Fail(inst, "POS0 DONE requires EN=0xf and four full-precision sources");
+			}
+			return PositionExport(inst, true, true);
+		}
+		if (inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3)
+		{
+			if (inst.exp_enable_mask != 0x0fu || inst.exp_control != 0x00u || inst.src_num != 4)
+			{
+				return Fail(inst, "non-final POS0 requires EN=0xf and four full-precision sources");
+			}
+			return PositionExport(inst, true, false);
+		}
+		return Fail(inst, "unsupported POS0 export control form");
+	}
+	if (target == 0x0du)
+	{
+		if (inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOff)
+		{
+			if (inst.exp_enable_mask != 0x01u || inst.exp_control != 0x00u || inst.src_num != 1)
+			{
+				return Fail(inst, "non-final POS1-X requires EN=1 and one source");
+			}
+			return PositionExport(inst, false, false);
+		}
+		if (inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone)
+		{
+			if (inst.exp_enable_mask != 0x01u || inst.exp_control != 0x02u || inst.src_num != 1)
+			{
+				return Fail(inst, "final POS1-X requires EN=1 and one source");
+			}
+			return PositionExport(inst, false, true);
+		}
+		if (inst.format == ShaderInstructionFormat::Pos1OffOffVsrc0Off)
+		{
+			if (inst.exp_enable_mask != 0x04u || inst.exp_control != 0x00u || inst.src_num != 1)
+			{
+				return Fail(inst, "non-final POS1-Z requires EN=4 and one source");
+			}
+			return PositionExport(inst, false, false);
+		}
+		return Fail(inst, "unsupported POS1 export control form");
+	}
 	return VectorSources(inst);
+}
+
+bool Body::EndProgram(const ShaderInstruction& inst)
+{
+	for (unsigned history = 0; history < kPositionHistoryCount; ++history)
+	{
+		if ((m_shape.position_histories & (1u << history)) == 0u) { continue; }
+		if ((history & (kPosition0Seen | kPositionDone)) != (kPosition0Seen | kPositionDone))
+		{
+			return Fail(inst, "every path must export POS0 and reach a final position DONE");
+		}
+	}
+	return m_shape.position_histories != 0u || Fail(inst, "terminator has no position history");
 }
 
 bool Body::Step(const ShaderInstruction& inst)
@@ -683,7 +955,7 @@ bool Body::Step(const ShaderInstruction& inst)
 	{
 		case Type::SInstPrefetch:
 		case Type::SWaitcnt: return true;
-		case Type::SEndpgm: return true;
+		case Type::SEndpgm: return EndProgram(inst);
 		case Type::SBranch:
 		case Type::SCbranchScc0:
 		case Type::SCbranchScc1:
@@ -696,9 +968,12 @@ bool Body::Step(const ShaderInstruction& inst)
 	}
 	if (ShaderInstructionTypeChangesExec(inst.type)) { return ExecWrite(inst); }
 	if (IsScalarLoad(inst.type)) { return ScalarLoad(inst); }
+	if (inst.type == Type::SSubbU32) { return Fail(inst, "S_SUBB_U32 borrow-in is not modeled by the NGG front proof"); }
+	if (inst.type == Type::SAshrI64) { return Fail(inst, "S_ASHR_I64 pair shifts are not modeled by the NGG front proof"); }
 	if (IsScalarAlu(inst.type)) { return ScalarAlu(inst); }
 	if (IsLaneLocalImageRead(inst.type)) { return ImageRead(inst); }
 	if (inst.type == Type::VWritelaneB32 || inst.type == Type::VReadlaneB32) { return ScalarSpill(inst); }
+	if (inst.type == Type::VReadfirstlaneB32) { return UniformReadFirstLane(inst); }
 	return Vector(inst);
 }
 

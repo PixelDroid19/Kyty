@@ -15,7 +15,9 @@
 #include <cstring>
 #include <algorithm>
 #include <iterator>
+#include <limits>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -121,6 +123,48 @@ static int KYTY_SYSV_ABI NetShutdown(int socket, int how)
 	return NET_CALL(Net::NetShutdown(socket, how));
 }
 
+static int KYTY_SYSV_ABI NetSocketAbort(int socket, int flags)
+{
+	return NET_CALL(Net::NetSocketAbort(socket, flags));
+}
+
+static int KYTY_SYSV_ABI NetConnect(int socket, const void* addr, int len)
+{
+	return NET_CALL(Net::NetConnect(socket, addr, len));
+}
+
+// Transfer results are int byte counts, so one call moves at most INT_MAX bytes;
+// errors are the negative net error codes.
+static uint64_t NetTransferLength(uint64_t len)
+{
+	return std::min<uint64_t>(len, static_cast<uint64_t>(std::numeric_limits<int>::max()));
+}
+
+static int NetTransferResult(int64_t result)
+{
+	const int value = static_cast<int>(result);
+	if (value < 0)
+	{
+		*GetNetErrorAddr() = value;
+	}
+	return value;
+}
+
+static int KYTY_SYSV_ABI NetSend(int socket, const void* buf, uint64_t len, int flags)
+{
+	return NetTransferResult(Net::NetSend(socket, buf, NetTransferLength(len), flags));
+}
+
+static int KYTY_SYSV_ABI NetSendto(int socket, const void* buf, uint64_t len, int flags, const void* addr, uint32_t addr_len)
+{
+	return NetTransferResult(Net::NetSendto(socket, buf, NetTransferLength(len), flags, addr, addr_len));
+}
+
+static int KYTY_SYSV_ABI NetRecv(int socket, void* buf, uint64_t len, int flags)
+{
+	return NetTransferResult(Net::NetRecv(socket, buf, NetTransferLength(len), flags));
+}
+
 LIB_DEFINE(InitNet_1_Net)
 {
 	LIB_FUNC("Nlev7Lg8k3A", LibNet::NetInit);
@@ -134,6 +178,12 @@ LIB_DEFINE(InitNet_1_Net)
 	LIB_FUNC("kOj1HiAGE54", Net::NetListen);
 	LIB_FUNC("PIWqhn9oSxc", Net::NetAccept);
 	LIB_FUNC("TSM6whtekok", LibNet::NetShutdown);
+	LIB_FUNC("zJGf8xjFnQE", LibNet::NetSocketAbort);
+	LIB_FUNC("OXXX4mUk3uk", LibNet::NetConnect);
+	LIB_FUNC("beRjXBn-z+o", LibNet::NetSend);
+	LIB_FUNC("gvD1greCu0A", LibNet::NetSendto);
+	LIB_FUNC("9wO9XrMsNhc", LibNet::NetRecv);
+	LIB_FUNC("9vA2aW+CHuA", Net::NetInetNtop);
 	LIB_FUNC("2mKX2Spso7I", Net::NetSetsockopt);
 	LIB_FUNC("xphrZusl78E", Net::NetGetsockopt);
 	LIB_FUNC("9T2pDF2Ryqg", Net::NetHtonl);
@@ -575,6 +625,7 @@ struct Http2Options
 	void*    ssl_callback_arg {};
 	void*    redirect_callback {};
 	void*    redirect_callback_arg {};
+	int      cookie_box_id {};
 };
 
 struct Http2Context
@@ -673,9 +724,12 @@ struct Http2Registry
 	int                          next_context_id  = 1;
 	int                          next_template_id = 1;
 	int                          next_request_id  = 1;
+	int                          next_cookie_box_id = 1;
 	std::map<int, Http2Context>  contexts;
 	std::map<int, Http2Template> templates;
 	std::map<int, Http2Request>  requests;
+	// Created cookie boxes; no cookie is stored, since no request reaches a server.
+	std::set<int>                cookie_boxes;
 };
 
 Http2Registry g_http2_registry;
@@ -830,6 +884,36 @@ static int KYTY_SYSV_ABI Http2SetAuthEnabled(int id, int enabled)
 	}
 
 	options->auth_enabled = enabled != 0;
+	return 0;
+}
+
+// Titles create one box and attach it to their templates. The argument they pass is
+// a constant (0x80000), not the id of their libhttp2 context; nothing here reads it.
+static int KYTY_SYSV_ABI Http2CreateCookieBox(uint64_t arg)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t arg = 0x%016" PRIx64 "\n", arg);
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	const int       cookie_box_id = g_http2_registry.next_cookie_box_id++;
+	g_http2_registry.cookie_boxes.insert(cookie_box_id);
+	return cookie_box_id;
+}
+
+static int KYTY_SYSV_ABI Http2SetCookieBox(int id, int cookie_box_id)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t id            = %d\n", id);
+	KYTY_LOG_DEBUG("\t cookie_box_id = %d\n", cookie_box_id);
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto*           options = FindOptions(id);
+	if (options == nullptr || g_http2_registry.cookie_boxes.count(cookie_box_id) == 0)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+
+	options->cookie_box_id = cookie_box_id;
 	return 0;
 }
 
@@ -1258,6 +1342,8 @@ LIB_DEFINE(InitNet_1_Http2)
 	LIB_FUNC("FSAFOzi0FpM", LibHttp2::Http2SetRequestContentLength);
 	LIB_FUNC("jjFahkBPCYs", LibHttp2::Http2SetAuthEnabled);
 	LIB_FUNC("5VlQSzXW-SQ", LibHttp2::Http2CookieFlush);
+	LIB_FUNC("N4UfjvWJsMw", LibHttp2::Http2CreateCookieBox);
+	LIB_FUNC("jrVHsKCXA0g", LibHttp2::Http2SetCookieBox);
 	LIB_FUNC("b9AvoIaOuHI", LibHttp2::Http2SetAutoRedirect);
 	LIB_FUNC("uRosf8GQbHQ", LibHttp2::Http2SetInflateGzipEnabled);
 	LIB_FUNC("B37SruheQ5Y", LibHttp2::Http2SslDisableOption);

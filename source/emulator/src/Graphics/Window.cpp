@@ -15,6 +15,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Ports/AudioPausePort.h"
 #include "Emulator/Ports/ControllerInputPort.h"
+#include "Emulator/Ports/KeyboardTextPort.h"
 #include "Emulator/Graphics/DebugOverlay.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -27,6 +28,7 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VulkanQueueIdentity.h"
+#include "Emulator/Graphics/VulkanQueueSelection.h"
 #include "Emulator/Graphics/WindowControls.h"
 #include "Emulator/Host/CaptureImageCodec.h"
 #include "Emulator/Host/HostInput.h"
@@ -61,6 +63,7 @@ namespace Kyty::Libs::Graphics {
 
 constexpr float FPS_AVERAGE_FRAMES = 5.0f;
 constexpr float FPS_UPDATE_TIME    = 0.25f;
+constexpr VkImageUsageFlags SWAPCHAIN_IMAGE_USAGE = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
 // Lock-free mirror of the presented-frame counter. Submission-thread tooling
 // needs the frame index without touching window state owned by the UI thread.
@@ -791,6 +794,46 @@ static void ApplyKeyboardLeftStickControllerAxes(const ::Kyty::Emulator::Host::K
 	::Kyty::Emulator::Ports::ControllerInputPort::Axis(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, ::Kyty::Emulator::Ports::Axis::LeftY, update.axes.y);
 }
 
+// Text entry (F2, and always while a guest IME dialog runs): keys reach only the
+// guest IME, so letters bound to pad buttons or to the stick type instead of pressing them.
+static std::atomic<bool> g_keyboard_text_entry {false};
+
+static void ReleaseKeyboardPad()
+{
+	ApplyKeyboardLeftStickControllerAxes(::Kyty::Emulator::Host::ResetKeyboardLeftStick(g_keyboard_left_stick));
+	for (const uint32_t button:
+	     {::Kyty::Emulator::Ports::PAD_BUTTON_CROSS, ::Kyty::Emulator::Ports::PAD_BUTTON_CIRCLE, ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE,
+	      ::Kyty::Emulator::Ports::PAD_BUTTON_TRIANGLE, ::Kyty::Emulator::Ports::PAD_BUTTON_UP, ::Kyty::Emulator::Ports::PAD_BUTTON_DOWN,
+	      ::Kyty::Emulator::Ports::PAD_BUTTON_LEFT, ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT, ::Kyty::Emulator::Ports::PAD_BUTTON_L1,
+	      ::Kyty::Emulator::Ports::PAD_BUTTON_R1, ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS})
+	{
+		::Kyty::Emulator::Ports::ControllerInputPort::Button(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, button, false);
+	}
+}
+
+static void SetKeyboardTextEntry(bool on)
+{
+	g_keyboard_text_entry.store(on);
+	// Keys held across the switch would otherwise stay pressed on the virtual pad.
+	ReleaseKeyboardPad();
+	KYTY_LOG_INFO("Keyboard text entry %s (F2 toggles)%s\n", on ? "on" : "off",
+	              on && !::Kyty::Emulator::Ports::KeyboardTextPort::GuestOpen() ? ": the title has no keyboard open" : "");
+}
+
+static void ForwardKeyboardText(const EventKeyboard& key)
+{
+	::Kyty::Emulator::Ports::KeyboardTextKey text {};
+	text.usage = ::Kyty::Emulator::Host::HostInput::KeyboardHidUsage(key.scan_code);
+	if (text.usage == 0)
+	{
+		return;
+	}
+	text.down      = key.down;
+	text.repeat    = key.repeat;
+	text.character = key.down ? ::Kyty::Emulator::Host::HostInput::KeyboardTextCharacter(key.key_code, key.mod) : 0;
+	(void)::Kyty::Emulator::Ports::KeyboardTextPort::Push(text);
+}
+
 void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 {
 	if (NativeCaptureEnvEnabled("KYTY_INPUT_LOG") && key != nullptr && (key->down || key->up))
@@ -821,10 +864,38 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 
 	switch (host_command)
 	{
-		case HostWindowCommand::Quit: game->m_game_need_exit = true; break;
+		case HostWindowCommand::Quit:
+			::Kyty::Emulator::Ports::ControllerInputPort::SessionEnd();
+			game->m_game_need_exit = true;
+			break;
 		case HostWindowCommand::TogglePause: SetPause(game, !game->m_game_is_paused); break;
 		case HostWindowCommand::ToggleFullscreen: ToggleHostFullscreen(); break;
 		case HostWindowCommand::None: break;
+	}
+
+	if (::Kyty::Emulator::Host::HostInput::IsTextEntryToggleKey(key->key_code))
+	{
+		if (key->down && !key->repeat)
+		{
+			SetKeyboardTextEntry(!g_keyboard_text_entry.load());
+		}
+		return;
+	}
+	const bool text_entry = g_keyboard_text_entry.load() || ::Kyty::Emulator::Ports::KeyboardTextPort::DialogOpen();
+	static bool s_text_entry = false;
+	if (text_entry != s_text_entry)
+	{
+		// Keys held across the switch would otherwise stay pressed on the virtual pad.
+		s_text_entry = text_entry;
+		ReleaseKeyboardPad();
+	}
+	if (text_entry)
+	{
+		if ((key->down || key->up) && !suppress_guest_enter)
+		{
+			ForwardKeyboardText(*key);
+		}
+		return;
 	}
 
 	// Virtual pad (id 0): keyboard maps to DualShock buttons so splash/menus are skippable
@@ -1155,6 +1226,7 @@ static void process_window_event(GameApi* game, const ::Kyty::Emulator::Host::Wi
 			break;
 		case ::Kyty::Emulator::Host::WindowEvent::Close:
 			KYTY_LOG_DEBUG("Window %" PRIu32 " closed\n", window.window_id);
+			::Kyty::Emulator::Ports::ControllerInputPort::SessionEnd();
 			game->m_game_need_exit = true;
 			break;
 		default:
@@ -1610,15 +1682,13 @@ struct VulkanQueues
 {
 	uint32_t          family_count = 0;
 	Vector<uint32_t>  family_used;
-	Vector<QueueInfo> available;
 	Vector<QueueInfo> graphics;
 	Vector<QueueInfo> compute;
 	Vector<QueueInfo> transfer;
 	Vector<QueueInfo> present;
 };
 
-static void VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, uint32_t graphics_num, uint32_t compute_num,
-                             uint32_t transfer_num, uint32_t present_num, VulkanQueues* out)
+static bool VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, VulkanQueues* out)
 {
 	EXIT_IF(device == nullptr);
 	EXIT_IF(surface == nullptr);
@@ -1630,6 +1700,7 @@ static void VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, uint
 	vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nullptr);
 	Vector<VkQueueFamilyProperties> queue_families(queue_family_count);
 	vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_families.GetData());
+	Vector<VulkanQueueFamilyCapabilities> capabilities(queue_family_count);
 
 	qs.family_count = queue_family_count;
 
@@ -1637,134 +1708,57 @@ static void VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, uint
 	for (auto& f: queue_families)
 	{
 		VkBool32 presentation_supported = VK_FALSE;
-		vkGetPhysicalDeviceSurfaceSupportKHR(device, family, surface, &presentation_supported);
-
-		for (uint32_t i = 0; i < f.queueCount; i++)
+		const auto    surface_result = vkGetPhysicalDeviceSurfaceSupportKHR(device, family, surface, &presentation_supported);
+		if (surface_result != VK_SUCCESS)
 		{
-			QueueInfo info;
-			info.family   = family;
-			info.index    = i;
-			info.graphics = (f.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
-			info.compute  = (f.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
-			info.transfer = (f.queueFlags & VK_QUEUE_TRANSFER_BIT) != 0;
-			info.present  = (presentation_supported == VK_TRUE);
-
-			qs.available.Add(info);
+			KYTY_LOG_DEBUG("Failed to query Vulkan surface support for queue family %u: result=%d\n", family,
+			               static_cast<int>(surface_result));
+			return false;
 		}
 
+		capabilities[family] = {f.queueCount, f.queueFlags, presentation_supported == VK_TRUE};
 		qs.family_used.Add(0);
-
 		family++;
 	}
 
-	// Preferred path: assign each role a dedicated (unshared) queue, consuming it
-	// from the pool. This works on desktop GPUs that expose many queues/families.
-	for (uint32_t i = 0; i < graphics_num; i++)
+	VulkanQueueFamilySelection selection;
+	const auto selection_result = VulkanSelectCommonRenderQueueFamily(capabilities.GetData(), capabilities.Size(), &selection);
+	if (selection_result != VulkanQueueSelectionResult::Success)
 	{
-		if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.graphics == b; }); qs.available.IndexValid(index))
-		{
-			qs.family_used[qs.available.At(index).family]++;
-			qs.graphics.Add(qs.available.At(index));
-			qs.available.RemoveAt(index);
-		}
+		KYTY_LOG_DEBUG("No single Vulkan queue family supports the renderer's graphics, compute, transfer and present operations.\n");
+		return false;
 	}
 
-	// Keep exclusive resources on the graphics queue family whenever possible.
-	// The renderer uses VK_SHARING_MODE_EXCLUSIVE and does not emit queue-family
-	// ownership transfers, so selecting a separate compute/transfer family makes
-	// uploads and presentation invalid on drivers that expose dedicated families.
-	if (!qs.graphics.IsEmpty())
+	const auto&               selected = capabilities[selection.family];
+	VulkanQueueRoleAllocation allocation;
+	if (VulkanAllocateSharedQueueRoles(selected.queue_count, GraphicContext::QUEUE_COMPUTE_NUM, &allocation) !=
+	    VulkanQueueSelectionResult::Success)
 	{
-		const QueueInfo primary = qs.graphics.At(0);
-		if (primary.compute)
-		{
-			qs.compute.Add(primary);
-		}
-		if (primary.transfer)
-		{
-			qs.transfer.Add(primary);
-		}
-		if (primary.present)
-		{
-			qs.present.Add(primary);
-		}
+		KYTY_LOG_DEBUG("Failed to allocate queue roles in the selected Vulkan family.\n");
+		return false;
 	}
 
-	if (qs.compute.IsEmpty())
+	auto make_queue = [&](uint32_t index)
 	{
-		for (uint32_t i = 0; i < compute_num; i++)
-		{
-			if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.compute == b; }); qs.available.IndexValid(index))
-			{
-				qs.family_used[qs.available.At(index).family]++;
-				qs.compute.Add(qs.available.At(index));
-				qs.available.RemoveAt(index);
-			}
-		}
-	}
+		QueueInfo queue;
+		queue.family   = selection.family;
+		queue.index    = index;
+		queue.graphics = (selected.queue_flags & VK_QUEUE_GRAPHICS_BIT) != 0;
+		queue.compute  = (selected.queue_flags & VK_QUEUE_COMPUTE_BIT) != 0;
+		queue.transfer = (selected.queue_flags & VK_QUEUE_TRANSFER_BIT) != 0 || queue.graphics || queue.compute;
+		queue.present  = selected.present;
+		return queue;
+	};
 
-	if (qs.transfer.IsEmpty())
+	qs.family_used[selection.family] = allocation.family_used;
+	qs.graphics.Add(make_queue(allocation.graphics_index));
+	for (uint32_t i = 0; i < allocation.compute_count; i++)
 	{
-		for (uint32_t i = 0; i < transfer_num; i++)
-		{
-			if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.transfer == b; }); qs.available.IndexValid(index))
-			{
-				qs.family_used[qs.available.At(index).family]++;
-				qs.transfer.Add(qs.available.At(index));
-				qs.available.RemoveAt(index);
-			}
-		}
+		qs.compute.Add(make_queue(allocation.compute_first_index + i));
 	}
-
-	if (qs.present.IsEmpty())
-	{
-		for (uint32_t i = 0; i < present_num; i++)
-		{
-			if (auto index = qs.available.Find(true, [](auto& q, auto& b) { return q.present == b; }); qs.available.IndexValid(index))
-			{
-				qs.family_used[qs.available.At(index).family]++;
-				qs.present.Add(qs.available.At(index));
-				qs.available.RemoveAt(index);
-			}
-		}
-	}
-
-	// Fallback for GPUs that expose a single queue family with a single queue
-	// (notably Metal via MoltenVK on Apple Silicon): the one queue supports
-	// graphics, compute, transfer and present, so share it across every role
-	// that could not be given a dedicated queue above.
-	{
-		bool      have_shared = false;
-		QueueInfo shared;
-		if (!qs.graphics.IsEmpty())
-		{
-			shared      = qs.graphics.At(0);
-			have_shared = true;
-		} else if (!qs.available.IsEmpty())
-		{
-			shared = qs.available.At(0);
-			qs.family_used[shared.family]++;
-			qs.graphics.Add(shared);
-			qs.available.RemoveAt(0);
-			have_shared = true;
-		}
-
-		if (have_shared)
-		{
-			if (qs.compute.IsEmpty())
-			{
-				qs.compute.Add(shared);
-			}
-			if (qs.transfer.IsEmpty())
-			{
-				qs.transfer.Add(shared);
-			}
-			if (qs.present.IsEmpty() && shared.present)
-			{
-				qs.present.Add(shared);
-			}
-		}
-	}
+	qs.transfer.Add(make_queue(allocation.transfer_index));
+	qs.present.Add(make_queue(allocation.present_index));
+	return true;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1815,14 +1809,14 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		KYTY_LOG_DEBUG("Vulkan device: %s\n", device_properties.deviceName);
 
 		VulkanQueues qs;
-		VulkanFindQueues(device, surface, GraphicContext::QUEUE_GFX_NUM, GraphicContext::QUEUE_COMPUTE_NUM, GraphicContext::QUEUE_UTIL_NUM,
-		                 GraphicContext::QUEUE_PRESENT_NUM, &qs);
-
-		if (qs.graphics.Size() != GraphicContext::QUEUE_GFX_NUM ||
+		if (!VulkanFindQueues(device, surface, &qs))
+		{
+			skip_device = true;
+		} else if (qs.graphics.Size() != GraphicContext::QUEUE_GFX_NUM ||
 		    !(qs.compute.Size() >= 1 && qs.compute.Size() <= GraphicContext::QUEUE_COMPUTE_NUM) ||
 		    qs.transfer.Size() != GraphicContext::QUEUE_UTIL_NUM || qs.present.Size() != GraphicContext::QUEUE_PRESENT_NUM)
 		{
-			KYTY_LOG_DEBUG("Not enough queues\n");
+			KYTY_LOG_DEBUG("Selected Vulkan queue family does not satisfy the renderer's queue counts.\n");
 			skip_device = true;
 		}
 
@@ -1912,9 +1906,9 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		{
 			VulkanGetSurfaceCapabilities(device, surface, out_capabilities);
 
-			if ((out_capabilities->capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0)
+			if ((out_capabilities->capabilities.supportedUsageFlags & SWAPCHAIN_IMAGE_USAGE) != SWAPCHAIN_IMAGE_USAGE)
 			{
-				KYTY_LOG_DEBUG("Surface cannot be destination of blit\n");
+				KYTY_LOG_DEBUG("Surface does not support the required swapchain image usage flags\n");
 				skip_device = true;
 			}
 		}
@@ -2105,6 +2099,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features.sampleRateShading = supported_features.sampleRateShading;
 	device_features.geometryShader = supported_features.geometryShader;
 	device_features.depthClamp = supported_features.depthClamp;
+	device_features.shaderClipDistance = supported_features.shaderClipDistance;
 	const auto blend_features = VulkanPlanBlendFeatures(supported_features, true, true);
 	device_features.independentBlend = blend_features.independent_blend;
 	device_features.dualSrcBlend = blend_features.dual_source_blend;
@@ -2125,14 +2120,15 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	color_write_ext.pNext            = nullptr;
 	color_write_ext.colorWriteEnable = VK_TRUE;
 
-	VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_size_control_features {};
-	subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
-	if (compute_wave_state != nullptr && compute_wave_state->extension_enabled)
+	// Planned core subgroup size control features: request exactly what the
+	// Vulkan 1.3 aggregate reported. No promoted 1.3 feature structure may share
+	// this chain with the aggregate (VUID-VkDeviceCreateInfo-pNext-06532).
+	VkPhysicalDeviceVulkan13Features device_features_13 {};
+	device_features_13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	if (compute_wave_state != nullptr)
 	{
-		subgroup_size_control_features.subgroupSizeControl =
-		    compute_wave_state->size_control_feature_supported ? VK_TRUE : VK_FALSE;
-		subgroup_size_control_features.computeFullSubgroups =
-		    compute_wave_state->full_subgroups_feature_supported ? VK_TRUE : VK_FALSE;
+		device_features_13.subgroupSizeControl = compute_wave_state->size_control_feature_supported ? VK_TRUE : VK_FALSE;
+		device_features_13.computeFullSubgroups = compute_wave_state->full_subgroups_feature_supported ? VK_TRUE : VK_FALSE;
 	}
 
 	// Use the Vulkan 1.2 aggregate for both core features. Its pNext chain may
@@ -2142,6 +2138,11 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features_12.subgroupBroadcastDynamicId = supported_12.subgroupBroadcastDynamicId;
 	device_features_12.samplerMirrorClampToEdge = sampler_features.mirror_clamp_to_edge;
 	device_features_12.bufferDeviceAddress = guest_device_address ? VK_TRUE : VK_FALSE;
+	// Vertex stages export the render-target layer (ShaderLayer).
+	device_features_12.shaderOutputLayer = supported_12.shaderOutputLayer;
+	// Core since Vulkan 1.2 and mandatory there.
+	EXIT_IF(supported_12.timelineSemaphore == VK_FALSE);
+	device_features_12.timelineSemaphore = VK_TRUE;
 	if (guest_device_address)
 	{
 		device_features.shaderInt64 = VK_TRUE;
@@ -2162,6 +2163,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	}
 	device_features_12.pNext = device_feature_chain;
 	device_feature_chain = &device_features_12;
+	device_features_13.pNext = device_feature_chain;
+	device_feature_chain = &device_features_13;
 	if (depth_clip_control_supported)
 	{
 		depth_clip_control_ext.pNext = device_feature_chain;
@@ -2176,11 +2179,6 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	{
 		color_write_ext.pNext = device_feature_chain;
 		device_feature_chain  = &color_write_ext;
-	}
-	if (compute_wave_state != nullptr && compute_wave_state->extension_enabled)
-	{
-		subgroup_size_control_features.pNext = device_feature_chain;
-		device_feature_chain                = &subgroup_size_control_features;
 	}
 
 	VkDeviceCreateInfo create_info {};
@@ -2198,19 +2196,21 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	VkDevice device = nullptr;
 
 	const auto result = vkCreateDevice(physical_device, &create_info, nullptr, &device);
-	if (result == VK_SUCCESS && device != VK_NULL_HANDLE)
+	const bool created = result == VK_SUCCESS && device != VK_NULL_HANDLE;
+	if (compute_wave_state != nullptr)
 	{
-		*enabled_blend_features = blend_features;
-		*enabled_sampler_features = sampler_features;
-		if (compute_wave_state != nullptr)
-		{
-			compute_wave_state->subgroup_broadcast_dynamic_id_enabled =
-			    device_features_12.subgroupBroadcastDynamicId == VK_TRUE;
-		}
-	} else
+		compute_wave_state->extension_enabled = false;
+		compute_wave_state->subgroup_broadcast_dynamic_id_enabled =
+		    created && device_features_12.subgroupBroadcastDynamicId == VK_TRUE;
+		compute_wave_state->size_control_feature_enabled = created && device_features_13.subgroupSizeControl == VK_TRUE;
+		compute_wave_state->full_subgroups_feature_enabled = created && device_features_13.computeFullSubgroups == VK_TRUE;
+	}
+	if (!created)
 	{
 		return VK_NULL_HANDLE;
 	}
+	*enabled_blend_features = blend_features;
+	*enabled_sampler_features = sampler_features;
 
 	return device;
 }
@@ -2419,6 +2419,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	EXIT_IF(swapchain_images_count == nullptr);
 
 	if (r->formats.IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->formats.IsEmpty() condition ignored (continuing)\n"); }
+	if ((r->capabilities.supportedUsageFlags & SWAPCHAIN_IMAGE_USAGE) != SWAPCHAIN_IMAGE_USAGE)
+	{
+		KYTY_LOG_DEBUG("Surface no longer supports the required swapchain image usage flags\n");
+		return nullptr;
+	}
 
 	VkExtent2D extent {};
 	// Surface extents: only clamp when the max bound is usable (min <= max).
@@ -2474,12 +2479,24 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 
 	create_info.imageExtent           = extent;
 	create_info.imageArrayLayers      = 1;
-	create_info.imageUsage            = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	create_info.imageUsage            = SWAPCHAIN_IMAGE_USAGE;
 	create_info.imageSharingMode      = VK_SHARING_MODE_EXCLUSIVE;
 	create_info.queueFamilyIndexCount = 0;
 	create_info.pQueueFamilyIndices   = nullptr;
 	create_info.preTransform          = r->capabilities.currentTransform;
-	create_info.compositeAlpha        = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	constexpr VkCompositeAlphaFlagBitsKHR alpha_modes[] = {
+	    VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+	    VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+	};
+	for (const auto mode: alpha_modes)
+	{
+		if ((r->capabilities.supportedCompositeAlpha & mode) != 0)
+		{
+			create_info.compositeAlpha = mode;
+			break;
+		}
+	}
+	EXIT_IF(create_info.compositeAlpha == 0);
 	// Capability-driven present mode: prefer MAILBOX (low-latency triple-buffer)
 	// then IMMEDIATE, else FIFO (guaranteed vsync). Hardcoding FIFO alone can
 	// couple host present to display refresh with only minImageCount images.
@@ -2586,6 +2603,22 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 	{
 		EXIT_IF(lock_indices[id] >= ctx->queue_mutex_count);
 		ctx->queues[id].mutex = &ctx->queue_mutexes[lock_indices[id]];
+	}
+
+	VkSemaphoreTypeCreateInfo timeline_type {};
+	timeline_type.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+	timeline_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+	timeline_type.initialValue  = 0;
+	VkSemaphoreCreateInfo timeline_info {};
+	timeline_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	timeline_info.pNext = &timeline_type;
+	for (auto& queue: ctx->queues)
+	{
+		const auto result = vkCreateSemaphore(ctx->device, &timeline_info, nullptr, &queue.timeline);
+		if (result != VK_SUCCESS)
+		{
+			EXIT("vkCreateSemaphore (queue timeline) failed: result=%d\n", static_cast<int>(result));
+		}
 	}
 }
 
@@ -2870,17 +2903,16 @@ static void VulkanCreate(WindowContext* ctx)
 		depth_clip_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT;
 		VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control {};
 		depth_clip_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT;
-		VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_size_control_features {};
-		subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
+		// Vulkan 1.4 is required, so the core aggregate is authoritative for the
+		// promoted subgroup size control features with or without the extension name.
+		VkPhysicalDeviceVulkan13Features features_13 {};
+		features_13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 		VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives {};
 		derivatives.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
 		VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR maximal_reconvergence {};
 		maximal_reconvergence.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR;
-		const uint32_t subgroup_size_control_revision = extension_revision(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
-		const bool subgroup_size_control_revision2 =
-		    subgroup_size_control_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION;
 
-		void* query_chain = nullptr;
+		void* query_chain = &features_13;
 		if (has_ext(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME))
 		{
 			derivatives.pNext = query_chain;
@@ -2900,11 +2932,6 @@ static void VulkanCreate(WindowContext* ctx)
 		{
 			depth_clip_control.pNext = query_chain;
 			query_chain              = &depth_clip_control;
-		}
-		if (subgroup_size_control_revision2)
-		{
-			subgroup_size_control_features.pNext = query_chain;
-			query_chain                          = &subgroup_size_control_features;
 		}
 		if (has_ext(VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME))
 		{
@@ -2993,38 +3020,73 @@ static void VulkanCreate(WindowContext* ctx)
 			features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 			features2.pNext = &address_features;
 			vkGetPhysicalDeviceFeatures2(ctx->graphic_ctx.physical_device, &features2);
-			ctx->graphic_ctx.guest_device_address_supported = has_ext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) &&
-			                                                  address_features.bufferDeviceAddress == VK_TRUE &&
-			                                                  features2.features.shaderInt64 == VK_TRUE;
+			const bool host_memory_extension = has_ext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+			VkExternalMemoryFeatureFlags host_buffer_features = 0;
+			VkExternalMemoryHandleTypeFlags host_buffer_compatible_types = 0;
+			if (host_memory_extension)
+			{
+				VkPhysicalDeviceExternalBufferInfo external_buffer_info {};
+				external_buffer_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
+				external_buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+				                            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+				external_buffer_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+				VkExternalBufferProperties external_buffer_properties {};
+				external_buffer_properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES;
+				vkGetPhysicalDeviceExternalBufferProperties(ctx->graphic_ctx.physical_device, &external_buffer_info,
+				                                           &external_buffer_properties);
+				host_buffer_features = external_buffer_properties.externalMemoryProperties.externalMemoryFeatures;
+				host_buffer_compatible_types = external_buffer_properties.externalMemoryProperties.compatibleHandleTypes;
+			}
+			ctx->graphic_ctx.guest_device_address_supported =
+			    host_memory_extension && (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
+			    (host_buffer_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0 &&
+			    (host_buffer_compatible_types & VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT) != 0 &&
+			    address_features.bufferDeviceAddress == VK_TRUE && features2.features.shaderInt64 == VK_TRUE;
 			if (ctx->graphic_ctx.guest_device_address_supported &&
 			    !device_extensions.Contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, [](auto s, auto l) { return strcmp(s, l) == 0; }))
 			{
 				device_extensions.Add(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 			}
+			// Some drivers import only private anonymous host pointers; guest
+			// physical memory is shared, so it is imported as a dma-buf there.
+			VkExternalMemoryFeatureFlags dma_buf_features = 0;
+			if (ctx->graphic_ctx.guest_device_address_supported && has_ext(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+			    has_ext(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME))
+			{
+				VkPhysicalDeviceExternalBufferInfo external_buffer_info {};
+				external_buffer_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
+				external_buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+				                            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+				external_buffer_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+				VkExternalBufferProperties external_buffer_properties {};
+				external_buffer_properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES;
+				vkGetPhysicalDeviceExternalBufferProperties(ctx->graphic_ctx.physical_device, &external_buffer_info,
+				                                           &external_buffer_properties);
+				dma_buf_features = external_buffer_properties.externalMemoryProperties.externalMemoryFeatures;
+			}
+			ctx->graphic_ctx.guest_dma_buf_import_supported =
+			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
+			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0;
+			for (const char* extension: {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME})
+			{
+				if (ctx->graphic_ctx.guest_dma_buf_import_supported &&
+				    !device_extensions.Contains(extension, [](auto s, auto l) { return strcmp(s, l) == 0; }))
+				{
+					device_extensions.Add(extension);
+				}
+			}
 		}
 		ctx->graphic_ctx.subgroup_size_control_supported = has_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 		auto& wave_state = ctx->graphic_ctx.compute_wave_vulkan_state;
 		wave_state.extension_advertised = ctx->graphic_ctx.subgroup_size_control_supported;
-		wave_state.extension_revision = subgroup_size_control_revision;
-		wave_state.size_control_feature_supported = subgroup_size_control_revision2 &&
-		                                           subgroup_size_control_features.subgroupSizeControl == VK_TRUE;
-		wave_state.full_subgroups_feature_supported = subgroup_size_control_revision2 &&
-		                                              subgroup_size_control_features.computeFullSubgroups == VK_TRUE;
-		wave_state.extension_enabled = subgroup_size_control_revision2 &&
-		                               (wave_state.size_control_feature_supported || wave_state.full_subgroups_feature_supported);
-		wave_state.size_control_feature_enabled = wave_state.extension_enabled && wave_state.size_control_feature_supported;
-		wave_state.full_subgroups_feature_enabled = wave_state.extension_enabled && wave_state.full_subgroups_feature_supported;
-		if (wave_state.extension_enabled)
-		{
-			if (!device_extensions.Contains(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME,
-			                               [](auto s, auto l) { return strcmp(s, l) == 0; }))
-			{
-				device_extensions.Add(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
-			}
-		} else
-		{
-			drop_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
-		}
+		wave_state.extension_revision = extension_revision(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+		// The core features are enabled instead of the extension; the enabled
+		// values are published only by a successful vkCreateDevice.
+		wave_state.extension_enabled = false;
+		wave_state.size_control_feature_supported = features_13.subgroupSizeControl == VK_TRUE;
+		wave_state.full_subgroups_feature_supported = features_13.computeFullSubgroups == VK_TRUE;
+		wave_state.size_control_feature_enabled = false;
+		wave_state.full_subgroups_feature_enabled = false;
 
 		ctx->graphic_ctx.sample_location_capabilities.extension_enabled = has_ext(VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME) ? 1u : 0u;
 		if (ctx->graphic_ctx.sample_location_capabilities.extension_enabled == 0)
@@ -3273,7 +3335,19 @@ void WindowUpdateTitle()
 	}
 	s_last_title_time = t;
 
-	auto fps = String::FromPrintf("%s%s%s%s%s%s[%s] [%s], frame: %d, fps: %f", (has_title ? title : ""), (has_title ? ", " : ""),
+	// No system keyboard is drawn, so the title shows what the user types into a guest IME dialog.
+	String text_entry;
+	if (::Kyty::Emulator::Ports::KeyboardTextPort::DialogOpen())
+	{
+		const std::u16string typed = ::Kyty::Emulator::Ports::KeyboardTextPort::DialogText();
+		text_entry                 = typed.c_str();
+		text_entry                 = "[type, Enter confirms: " + text_entry + "_] ";
+	} else if (g_keyboard_text_entry.load())
+	{
+		text_entry = "[text entry] ";
+	}
+	auto fps = String::FromPrintf("%s%s%s%s%s%s%s[%s] [%s], frame: %d, fps: %f", text_entry.C_Str(),
+	                              (has_title ? title : ""), (has_title ? ", " : ""),
 	                              (has_title_id ? title_id : ""), (has_title_id ? ", " : ""), (has_app_ver ? app_ver : ""),
 	                              (has_app_ver ? ", " : ""), g_window_ctx->device_name, g_window_ctx->processor_name, frame_num, fps_now);
 
@@ -3544,7 +3618,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
 
-	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
+	auto* vk_buffer = buffer.RecordOutsideRenderPass();
 
 	buffer.Begin();
 
@@ -3670,7 +3744,7 @@ void WindowDrawBlank()
 
 	CommandBuffer buffer(GraphicContext::QUEUE_PRESENT);
 	EXIT_IF(buffer.IsInvalid());
-	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
+	auto* vk_buffer = buffer.RecordOutsideRenderPass();
 
 	buffer.Begin();
 	RecordBlankSwapchainImage(vk_buffer, g_window_ctx->swapchain->swapchain_images[g_window_ctx->swapchain->current_index]);

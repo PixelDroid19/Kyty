@@ -65,6 +65,8 @@ int KYTY_SYSV_ABI AudioOut2UserDestroy(uintptr_t user);
 // sceAudioOut2GetSpeakerInfo (NID DImz2Ft9E2g): flags is the speaker-set
 // selector (0 and 1 observed); the output is a 0x50-byte record.
 int KYTY_SYSV_ABI AudioOut2GetSpeakerInfo(void* info, uint32_t flags);
+// sceAudioOut2Set3DLatency (NID TViD1EZXkNI): (user, latency) for the system user.
+int KYTY_SYSV_ABI AudioOut2Set3DLatency(int32_t user_id, uint32_t latency);
 
 // C++-only unit-test seam for host-state regression coverage. It is not a
 // guest export and must not be used to infer an AudioOut2 ContextCreate ABI.
@@ -73,6 +75,7 @@ int CreateContext();
 void FailNextSubmit();
 int  GetContextSinkHandle(int context);
 void FillContextQueue(int context);
+void SetContextGrain(int context, uint32_t grain);
 }
 
 } // namespace AudioOut2
@@ -90,6 +93,20 @@ namespace VoiceQoS {
 int KYTY_SYSV_ABI VoiceQoSInit(void* mem_block, uint32_t mem_size, int32_t app_type);
 
 } // namespace VoiceQoS
+
+// Voice chat ports. The host has no voice capture or chat transport, so ports
+// are tracked for the guest but never carry data.
+namespace Voice {
+
+int KYTY_SYSV_ABI VoiceInit(const void* param, uint32_t version);
+int KYTY_SYSV_ABI VoiceStart(const void* param);
+int KYTY_SYSV_ABI VoiceCreatePort(uint32_t* port_id, const void* param);
+int KYTY_SYSV_ABI VoiceDeletePort(uint32_t port_id);
+int KYTY_SYSV_ABI VoiceConnectIPortToOPort(uint32_t input_port_id, uint32_t output_port_id);
+int KYTY_SYSV_ABI VoiceReadFromOPort(uint32_t output_port_id, void* data, uint32_t* size);
+int KYTY_SYSV_ABI VoiceGetPortInfo(uint32_t port_id, void* info);
+
+} // namespace Voice
 
 namespace Ajm {
 
@@ -132,22 +149,22 @@ int KYTY_SYSV_ABI   AjmBatchWait(uint32_t context, uint32_t batch_id, uint32_t t
 int KYTY_SYSV_ABI   AjmBatchCancel(uint32_t context, uint32_t batch_id);
 int KYTY_SYSV_ABI   AjmBatchJobInitialize(void* batch, uint32_t instance, const void* config, size_t config_size, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobClearContext(void* batch, uint32_t instance, void* result);
-int KYTY_SYSV_ABI   AjmBatchJobSetGaplessDecode(void* batch, uint32_t instance, const void* config, uint64_t enabled, void* result);
+int KYTY_SYSV_ABI   AjmBatchJobSetGaplessDecode(void* batch, uint32_t instance, const void* config, uint64_t reset, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobGetGaplessDecode(void* batch, uint32_t instance, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobSetResampleParameters(void* batch, uint32_t instance, float ratio, uint32_t flags, void* result);
-int KYTY_SYSV_ABI   AjmBatchJobSetResampleParametersEx(void* batch, uint32_t instance, float ratio_start,
-                                                       float ratio_change_per_sample, uint32_t flags, void* result);
+int KYTY_SYSV_ABI   AjmBatchJobSetResampleParametersEx(void* batch, uint32_t instance, float ratio_start, float ratio_change_per_sample,
+                                                       uint32_t flags, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobGetResampleInfo(void* batch, uint32_t instance, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobDecode(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
-                                      size_t data_output_size, void* result, void* return_address, uint64_t reserved, void* result_alias);
-int KYTY_SYSV_ABI   AjmBatchJobDecodeSingle(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
-                                            size_t data_output_size, void* result);
-int KYTY_SYSV_ABI   AjmBatchJobDecodeSplit(void* batch, uint32_t instance, const AjmBuffer* data_input_buffers,
-                                           size_t data_input_buffer_count, const AjmBuffer* data_output_buffers,
-                                           size_t data_output_buffer_count, void* result);
-int KYTY_SYSV_ABI   AjmBatchJobEncode(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
                                       size_t data_output_size, void* result);
-int KYTY_SYSV_ABI   AjmBatchJobGetInfo(void* batch, uint32_t instance, void* result);
+int KYTY_SYSV_ABI AjmBatchJobDecodeSingle(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
+                                          size_t data_output_size, void* result);
+int KYTY_SYSV_ABI AjmBatchJobDecodeSplit(void* batch, uint32_t instance, const AjmBuffer* data_input_buffers,
+                                         size_t data_input_buffer_count, const AjmBuffer* data_output_buffers,
+                                         size_t data_output_buffer_count, void* result);
+int KYTY_SYSV_ABI AjmBatchJobEncode(void* batch, uint32_t instance, const void* data_input, size_t data_input_size, void* data_output,
+                                    size_t data_output_size, void* result);
+int KYTY_SYSV_ABI AjmBatchJobGetInfo(void* batch, uint32_t instance, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobGetCodecInfo(void* batch, uint32_t instance, void* result, size_t result_size);
 int KYTY_SYSV_ABI   AjmBatchJobGetStatistics(void* batch, float interval, void* result);
 int KYTY_SYSV_ABI   AjmBatchJobControl(void* batch, uint32_t instance, uint64_t flags, const void* sideband_input, size_t sideband_input_size,
@@ -495,6 +512,8 @@ struct Ngs2VoiceParamHeader;
 struct Ngs2RenderBufferInfo;
 struct Ngs2ContextBufferInfo;
 struct Ngs2VoiceState;
+struct Ngs2WaveformInfo;
+struct Ngs2WaveformBlock;
 
 int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info);
 int KYTY_SYSV_ABI Ngs2SystemQueryBufferSize(const Ngs2SystemOption* option, Ngs2ContextBufferInfo* buffer_info);
@@ -523,6 +542,10 @@ int KYTY_SYSV_ABI Ngs2SystemSetGrainSamples(uintptr_t system_handle, uint32_t gr
 int KYTY_SYSV_ABI Ngs2SystemSetSampleRate(uintptr_t system_handle, uint32_t sample_rate);
 int KYTY_SYSV_ABI Ngs2PanInit(void* pan_param);
 // 3D geometry helpers (positional audio). Observed NIDs: ResetSource/Listener, CalcListener, Apply.
+int KYTY_SYSV_ABI Ngs2ParseWaveformData(const void* data, size_t data_size, Ngs2WaveformInfo* info);
+int KYTY_SYSV_ABI Ngs2ParseWaveformFile(const char* path, uint64_t offset, Ngs2WaveformInfo* info);
+int KYTY_SYSV_ABI Ngs2CalcWaveformBlock(const Ngs2WaveformInfo* info, uint32_t sample_pos, uint32_t num_samples,
+                                        Ngs2WaveformBlock* block);
 int KYTY_SYSV_ABI Ngs2GeomResetSourceParam(void* out_source_param);
 int KYTY_SYSV_ABI Ngs2GeomResetListenerParam(void* out_listener_param);
 int KYTY_SYSV_ABI Ngs2GeomCalcListener(const void* listener_param, void* out_work, uint32_t flags);

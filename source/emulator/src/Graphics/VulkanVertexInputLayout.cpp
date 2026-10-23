@@ -4,9 +4,17 @@
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 
+#include <algorithm>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+static VulkanVertexInputFormat ResolveVertexInputFormat(const ShaderBufferResource& resource, bool gen5)
+{
+	return gen5 ? VulkanResolveGen5VertexInputFormat(resource.Format())
+	            : VulkanResolveLegacyVertexInputFormat(resource.Dfmt(), resource.Nfmt());
+}
 
 bool VulkanBuildVertexInputLayout(const ShaderVertexInputInfo& input, VulkanVertexInputLayout* layout)
 {
@@ -31,7 +39,7 @@ bool VulkanBuildVertexInputLayout(const ShaderVertexInputInfo& input, VulkanVert
 		auto& binding       = layout->bindings[buffer_index];
 		binding.binding     = static_cast<uint32_t>(buffer_index);
 		binding.stride      = buffer.stride;
-		binding.inputRate   = VK_VERTEX_INPUT_RATE_VERTEX;
+		binding.inputRate   = buffer.instance ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
 
 		for (int attribute_index = 0; attribute_index < buffer.attr_num; attribute_index++)
 		{
@@ -43,8 +51,7 @@ bool VulkanBuildVertexInputLayout(const ShaderVertexInputInfo& input, VulkanVert
 
 			const auto& resource   = input.resources[resource_index];
 			const auto& destination = input.resources_dst[resource_index];
-			const auto format = gen5 ? VulkanResolveGen5VertexInputFormat(resource.Format())
-			                         : VulkanResolveLegacyVertexInputFormat(resource.Dfmt(), resource.Nfmt());
+			const auto format = ResolveVertexInputFormat(resource, gen5);
 			if (format.format == VK_FORMAT_UNDEFINED || format.component_count == 0 || resource.AddTid() || resource.SwizzleEnabled())
 			{
 				return false;
@@ -117,6 +124,36 @@ bool VulkanBuildVertexInputLayout(const ShaderVertexInputInfo& input, VulkanVert
 	layout->binding_count   = static_cast<uint32_t>(input.buffers_num);
 	layout->attribute_count = static_cast<uint32_t>(input.resources_num);
 	return true;
+}
+
+uint64_t VulkanVertexInputBindingFetchEnd(const ShaderVertexInputInfo& input, int buffer_index)
+{
+	if (buffer_index < 0 || buffer_index >= input.buffers_num || buffer_index >= ShaderVertexInputInfo::RES_MAX)
+	{
+		return UINT64_MAX;
+	}
+	const auto& buffer = input.buffers[buffer_index];
+	if (buffer.attr_num < 0 || buffer.attr_num > ShaderVertexInputBuffer::ATTR_MAX)
+	{
+		return UINT64_MAX;
+	}
+	const bool gen5 = Config::IsNextGen();
+	uint64_t   end  = 0;
+	for (int attribute_index = 0; attribute_index < buffer.attr_num; attribute_index++)
+	{
+		const int resource_index = buffer.attr_indices[attribute_index];
+		if (resource_index < 0 || resource_index >= input.resources_num || resource_index >= ShaderVertexInputInfo::RES_MAX)
+		{
+			return UINT64_MAX;
+		}
+		const auto format = ResolveVertexInputFormat(input.resources[resource_index], gen5);
+		if (format.element_bytes == 0)
+		{
+			return UINT64_MAX;
+		}
+		end = std::max(end, static_cast<uint64_t>(buffer.attr_offsets[attribute_index]) + format.element_bytes);
+	}
+	return end;
 }
 
 } // namespace Kyty::Libs::Graphics

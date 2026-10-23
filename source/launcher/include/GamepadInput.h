@@ -9,10 +9,10 @@
 #include <QTimer>
 
 class QWindow;
-struct _SDL_GameController;
+struct SDL_Gamepad;
 
 // Turns a game controller into key presses sent to the window, so the QML pages share one navigation path with the keyboard.
-// Uses SDL2 for input only; no SDL video is initialised.
+// Uses SDL 3 for input only; no SDL video is initialised.
 class GamepadInput: public QObject
 {
 	Q_OBJECT
@@ -37,7 +37,7 @@ private:
 	void Poll();
 	void OpenSdl();
 	void CloseSdl();
-	void OpenController(int device_index);
+	void OpenController(quint32 joystick_id);
 	void CloseController();
 	void UpdateInterval();
 	void Tap(int key) const;
@@ -45,7 +45,7 @@ private:
 	QTimer              m_timer;
 	QElapsedTimer       m_clock;
 	QWindow*            m_window = nullptr;
-	_SDL_GameController* m_pad   = nullptr;
+	SDL_Gamepad*        m_pad    = nullptr;
 	QString             m_name;
 	bool                m_paused = false;
 	bool                m_sdl_ready = false;

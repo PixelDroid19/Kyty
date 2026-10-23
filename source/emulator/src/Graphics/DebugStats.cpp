@@ -16,6 +16,57 @@
 
 namespace Kyty::Libs::Graphics {
 
+struct ClockPair
+{
+	std::chrono::steady_clock::time_point wall;
+	uint64_t                              ticks = 0;
+};
+
+// Reads steady_clock between two counter reads and retries while a preemption
+// widens the bracket, so a descheduled thread cannot skew the calibration.
+static bool ReadClockPair(ClockPair* pair)
+{
+	constexpr uint64_t kMaxBracketTicks = 20000;
+	for (int attempt = 0; attempt < 64; attempt++)
+	{
+		const uint64_t before = sys_read_cycle_counter();
+		const auto     wall   = std::chrono::steady_clock::now();
+		const uint64_t after  = sys_read_cycle_counter();
+		if (after > before && after - before < kMaxBracketTicks)
+		{
+			*pair = {wall, before + (after - before) / 2};
+			return true;
+		}
+	}
+	return false;
+}
+
+// Measures the counter rate against steady_clock over 10 ms once at startup.
+static DebugStatsClockScale CalibrateDebugStatsClock()
+{
+	ClockPair start;
+	ClockPair end;
+	if (!sys_cycle_counter_invariant() || !ReadClockPair(&start))
+	{
+		return {};
+	}
+	do
+	{
+		if (!ReadClockPair(&end))
+		{
+			return {};
+		}
+	} while (end.wall - start.wall < std::chrono::milliseconds(10));
+	if (end.ticks <= start.ticks)
+	{
+		return {};
+	}
+	const auto ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end.wall - start.wall).count());
+	return {(ns << 32u) / (end.ticks - start.ticks)};
+}
+
+const DebugStatsClockScale g_debug_stats_clock_scale = CalibrateDebugStatsClock();
+
 namespace {
 
 std::atomic<uint64_t> g_draws {0};
@@ -49,6 +100,8 @@ std::atomic<uint64_t> g_wait_reg_mem_producer_not_found {0};
 std::atomic<uint64_t> g_wait_reg_mem_suspended {0};
 std::atomic<uint64_t> g_wait_flip_done {0};
 std::atomic<uint64_t> g_wait_flip_done_ns {0};
+std::atomic<uint64_t> g_render_pass_begins {0};
+std::atomic<uint64_t> g_render_pass_continuations {0};
 std::atomic<uint64_t> g_wait_flip_done_max_ns {0};
 std::atomic<uint64_t> g_in_flight_current {0};
 std::atomic<uint64_t> g_in_flight_max {0};
@@ -151,6 +204,13 @@ TimedMetric           g_spirv_source;
 TimedMetric           g_spirv_compile;
 TimedMetric           g_vk_graphics_pipeline_create;
 TimedMetric           g_vk_compute_pipeline_create;
+TimedMetric           g_compute_precompile;
+std::atomic<uint64_t> g_compute_precompile_failed {0};
+TimedMetric           g_compute_precompile_wait;
+std::atomic<uint64_t> g_compute_precompile_running {0};
+std::mutex            g_compute_precompile_wait_mutex;
+uint64_t              g_compute_precompile_waiters = 0;
+std::chrono::steady_clock::time_point g_compute_precompile_wait_since;
 std::atomic<uint64_t> g_shader_translation_cache_hits {0};
 std::atomic<uint64_t> g_shader_translation_cache_misses {0};
 std::atomic<uint64_t> g_shader_translation_cache_evictions {0};
@@ -291,6 +351,8 @@ struct PerformanceBaseline
 	uint64_t wait_reg_mem_suspended          = 0;
 	uint64_t wait_flip_done    = 0;
 	uint64_t wait_flip_done_ns = 0;
+	uint64_t render_pass_begins        = 0;
+	uint64_t render_pass_continuations = 0;
 };
 
 std::mutex          g_performance_mutex;
@@ -589,9 +651,8 @@ void AddGpuMemoryCreatePhase(DebugStatsGpuMemorySlowCreateRecord* record, DebugS
 
 } // namespace
 
-DebugStatsGpuMemoryCreateTrace::DebugStatsGpuMemoryCreateTrace(uint32_t type_index, uint64_t requested_bytes,
-	                                                           uint32_t range_count)
-	: m_previous(g_current_gpu_memory_create), m_start(std::chrono::steady_clock::now()), m_type_index(type_index)
+DebugStatsGpuMemoryCreateTrace::DebugStatsGpuMemoryCreateTrace(uint32_t type_index, uint64_t requested_bytes, uint32_t range_count)
+    : m_previous(g_current_gpu_memory_create), m_start(DebugStatsClock::now()), m_type_index(type_index)
 {
 	m_record.requested_bytes = requested_bytes;
 	m_record.range_count     = range_count;
@@ -603,8 +664,7 @@ DebugStatsGpuMemoryCreateTrace::~DebugStatsGpuMemoryCreateTrace()
 	g_current_gpu_memory_create = m_previous;
 	if (m_completed)
 	{
-		const auto elapsed =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
+		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - m_start).count();
 		DebugStatsRecordGpuMemoryCreate(m_type_index, m_outcome, static_cast<uint64_t>(elapsed), &m_record, m_linked_topology);
 	}
 }
@@ -673,6 +733,8 @@ void DebugStatsInit()
 	g_wait_reg_mem_suspended.store(0, std::memory_order_relaxed);
 	g_wait_flip_done.store(0, std::memory_order_relaxed);
 	g_wait_flip_done_ns.store(0, std::memory_order_relaxed);
+	g_render_pass_begins.store(0, std::memory_order_relaxed);
+	g_render_pass_continuations.store(0, std::memory_order_relaxed);
 	g_wait_flip_done_max_ns.store(0, std::memory_order_relaxed);
 	g_in_flight_current.store(0, std::memory_order_relaxed);
 	g_in_flight_max.store(0, std::memory_order_relaxed);
@@ -755,6 +817,9 @@ void DebugStatsInit()
 	ResetTimed(&g_spirv_compile);
 	ResetTimed(&g_vk_graphics_pipeline_create);
 	ResetTimed(&g_vk_compute_pipeline_create);
+	ResetTimed(&g_compute_precompile);
+	g_compute_precompile_failed.store(0, std::memory_order_relaxed);
+	ResetTimed(&g_compute_precompile_wait);
 	g_shader_translation_cache_hits.store(0, std::memory_order_relaxed);
 	g_shader_translation_cache_misses.store(0, std::memory_order_relaxed);
 	g_shader_translation_cache_evictions.store(0, std::memory_order_relaxed);
@@ -906,6 +971,16 @@ void DebugStatsRecordFlip(double fps, double frame_time_ms)
 void DebugStatsRecordBufferFlush()
 {
 	g_buffer_flushes.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DebugStatsRecordRenderPassBegin()
+{
+	g_render_pass_begins.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DebugStatsRecordRenderPassContinuation()
+{
+	g_render_pass_continuations.fetch_add(1, std::memory_order_relaxed);
 }
 
 void DebugStatsRecordCommandBuffer()
@@ -1206,6 +1281,39 @@ void DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind kind, uint64_t elap
 	RecordTimed(kind == DebugStatsPipelineKind::Graphics ? &g_vk_graphics_pipeline_create : &g_vk_compute_pipeline_create, elapsed_ns);
 }
 
+void DebugStatsBeginComputePrecompile()
+{
+	g_compute_precompile_running.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DebugStatsEndComputePrecompile(bool created, uint64_t elapsed_ns)
+{
+	g_compute_precompile_running.fetch_sub(1, std::memory_order_relaxed);
+	RecordTimed(&g_compute_precompile, elapsed_ns);
+	if (!created)
+	{
+		g_compute_precompile_failed.fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+void DebugStatsBeginComputePrecompileWait()
+{
+	std::lock_guard lock(g_compute_precompile_wait_mutex);
+	if (g_compute_precompile_waiters++ == 0)
+	{
+		g_compute_precompile_wait_since = std::chrono::steady_clock::now();
+	}
+}
+
+void DebugStatsEndComputePrecompileWait(uint64_t elapsed_ns)
+{
+	{
+		std::lock_guard lock(g_compute_precompile_wait_mutex);
+		g_compute_precompile_waiters--;
+	}
+	RecordTimed(&g_compute_precompile_wait, elapsed_ns);
+}
+
 void DebugStatsRecordShaderTranslationCache(bool hit, bool evicted)
 {
 	(hit ? g_shader_translation_cache_hits : g_shader_translation_cache_misses).fetch_add(1, std::memory_order_relaxed);
@@ -1453,6 +1561,8 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	const uint64_t wait_reg_mem_suspended          = g_wait_reg_mem_suspended.load(std::memory_order_relaxed);
 	const uint64_t wait_flip_done    = g_wait_flip_done.load(std::memory_order_relaxed);
 	const uint64_t wait_flip_done_ns = g_wait_flip_done_ns.load(std::memory_order_relaxed);
+	const uint64_t render_pass_begins        = g_render_pass_begins.load(std::memory_order_relaxed);
+	const uint64_t render_pass_continuations = g_render_pass_continuations.load(std::memory_order_relaxed);
 
 	std::lock_guard<std::mutex> lock(g_performance_mutex);
 	if (g_performance_baseline.time_ms == 0)
@@ -1504,6 +1614,8 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	snapshot.wait_reg_mem_suspended = wait_reg_mem_suspended - g_performance_baseline.wait_reg_mem_suspended;
 	snapshot.wait_flip_done    = wait_flip_done - g_performance_baseline.wait_flip_done;
 	snapshot.wait_flip_done_ns = wait_flip_done_ns - g_performance_baseline.wait_flip_done_ns;
+	snapshot.render_pass_begins        = render_pass_begins - g_performance_baseline.render_pass_begins;
+	snapshot.render_pass_continuations = render_pass_continuations - g_performance_baseline.render_pass_continuations;
 	snapshot.wait_flip_done_max_ns =
 	    reset ? g_wait_flip_done_max_ns.exchange(0, std::memory_order_relaxed) : g_wait_flip_done_max_ns.load(std::memory_order_relaxed);
 	snapshot.in_flight_current = g_in_flight_current.load(std::memory_order_relaxed);
@@ -1646,6 +1758,20 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	           &snapshot.vk_graphics_pipeline_create_max_ns);
 	take_timed(g_vk_compute_pipeline_create, &snapshot.vk_compute_pipeline_create_count, &snapshot.vk_compute_pipeline_create_ns,
 	           &snapshot.vk_compute_pipeline_create_max_ns);
+	take_timed(g_compute_precompile, &snapshot.compute_precompile_count, &snapshot.compute_precompile_ns,
+	           &snapshot.compute_precompile_max_ns);
+	snapshot.compute_precompile_failed = take_window(g_compute_precompile_failed);
+	take_timed(g_compute_precompile_wait, &snapshot.compute_precompile_wait_count, &snapshot.compute_precompile_wait_ns,
+	           &snapshot.compute_precompile_wait_max_ns);
+	snapshot.compute_precompile_running = g_compute_precompile_running.load(std::memory_order_relaxed);
+	{
+		std::lock_guard lock(g_compute_precompile_wait_mutex);
+		if (g_compute_precompile_waiters != 0)
+		{
+			snapshot.compute_precompile_waiting_ns = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_compute_precompile_wait_since).count());
+		}
+	}
 	snapshot.shader_translation_cache_hits      = take_window(g_shader_translation_cache_hits);
 	snapshot.shader_translation_cache_misses    = take_window(g_shader_translation_cache_misses);
 	snapshot.shader_translation_cache_evictions = take_window(g_shader_translation_cache_evictions);
@@ -1735,7 +1861,9 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 		                          wait_reg_mem_producer_not_found,
 		                          wait_reg_mem_suspended,
 		                          wait_flip_done,
-		                          wait_flip_done_ns};
+		                          wait_flip_done_ns,
+		                          render_pass_begins,
+		                          render_pass_continuations};
 	}
 	return snapshot;
 }

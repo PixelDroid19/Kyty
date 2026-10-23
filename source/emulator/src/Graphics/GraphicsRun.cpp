@@ -39,6 +39,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -59,6 +60,73 @@ cp_op_parser_func_t    g_cp_op_func[256]                   = {};
 cp_op_parser_func_t    g_cp_op_custom_func[Pm4::R_NUM]     = {};
 
 Gpu* g_gpu = nullptr;
+
+GraphicsRunType3DispatchResult GraphicsRunDispatchType3Packet(CommandProcessor* cp, uint32_t cmd_id, const uint32_t* body,
+                                                              uint32_t available_body_dw, uint32_t num_dw, cp_op_parser_func_t handler)
+{
+	GraphicsRunType3DispatchResult result {};
+	if ((cmd_id >> 30u) != 3u || body == nullptr)
+	{
+		return result;
+	}
+
+	const uint32_t special_packet_dw = Pm4::Pm4SpecialType3PacketDwords(cmd_id);
+	const uint32_t packet_dw         = special_packet_dw != 0u ? special_packet_dw : KYTY_PM4_LEN(cmd_id);
+	if (packet_dw < 2u)
+	{
+		return result;
+	}
+
+	result.packet_body_dw = packet_dw - 1u;
+	if (result.packet_body_dw > available_body_dw)
+	{
+		return result;
+	}
+	if (handler == nullptr)
+	{
+		result.status = GraphicsRunType3DispatchStatus::MissingHandler;
+		return result;
+	}
+
+	result.consumed_dw = handler(cp, cmd_id, body, result.packet_body_dw, available_body_dw, num_dw);
+	if (result.consumed_dw > available_body_dw)
+	{
+		result.status = GraphicsRunType3DispatchStatus::OverConsumed;
+		return result;
+	}
+
+	result.status = GraphicsRunType3DispatchStatus::Ready;
+	return result;
+}
+
+bool GraphicsRunType3PacketAt(const uint32_t* stream, uint32_t available_dw, uint32_t offset, uint32_t expected_header)
+{
+	if (stream == nullptr || offset >= available_dw || (expected_header >> 30u) != 3u || stream[offset] != expected_header)
+	{
+		return false;
+	}
+
+	const uint32_t special_packet_dw = Pm4::Pm4SpecialType3PacketDwords(expected_header);
+	const uint32_t packet_dw         = special_packet_dw != 0u ? special_packet_dw : KYTY_PM4_LEN(expected_header);
+	return packet_dw >= 2u && packet_dw <= available_dw - offset;
+}
+
+bool GraphicsRunIndirectArgumentAddress(uint64_t base, uint32_t offset, uint64_t size, uint64_t* address)
+{
+	if (address == nullptr || size == 0u || static_cast<uint64_t>(offset) > std::numeric_limits<uint64_t>::max() - base)
+	{
+		return false;
+	}
+
+	const uint64_t resolved = base + offset;
+	if (size > std::numeric_limits<uint64_t>::max() - resolved)
+	{
+		return false;
+	}
+
+	*address = resolved;
+	return true;
+}
 
 void GraphicsRunInit()
 {
@@ -570,10 +638,10 @@ void CommandProcessor::WaitUntilPublishedUnlessReentrant(SubmissionId submission
 	{
 		return;
 	}
-	const auto started = std::chrono::steady_clock::now();
+	const auto started = DebugStatsClock::now();
 	TraceWait("publication_begin", m_queue, 0, 0, 0, 0, submission.sequence);
 	require_publication_success(m_publication_gate.WaitUntilPublished(submission), "WaitUntilPublished", m_queue, submission);
-	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count();
+	const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - started).count();
 	TraceWait("publication_end", m_queue, 0, 0, 0, 0, submission.sequence, static_cast<uint64_t>(elapsed));
 }
 
@@ -615,6 +683,7 @@ void CommandProcessor::WaitSubmission(SubmissionId submission)
 
 	PublishCompletedSubmissions();
 	WaitUntilPublishedUnlessReentrant(submission);
+	(void)GuestDeviceAddressAcknowledgeReader(submission);
 }
 
 void CommandProcessor::BufferWait()
@@ -653,6 +722,13 @@ void CommandProcessor::BufferWait()
 	WaitUntilPublishedUnlessReentrant(latest_completed);
 }
 
+GpuSubmissionResult CommandProcessor::FindSuspendedWaitProducer(const void* address, uint32_t size_bytes, uint64_t reference,
+                                                                uint64_t mask, SubmissionDependency* dependency)
+{
+	Core::LockGuard lock(m_mutex);
+	return m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(address), size_bytes, reference, mask, dependency);
+}
+
 bool CommandProcessor::PumpCompletedSubmissions()
 {
 	BufferInit();
@@ -673,6 +749,90 @@ bool CommandProcessor::PumpCompletedSubmissions()
 	}
 	PublishCompletedSubmissions();
 	return pending;
+}
+
+bool CommandProcessor::OldestSubmittedTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value)
+{
+	Core::LockGuard lock(m_mutex);
+	uint32_t        slot = 0;
+	SubmissionId    oldest;
+	if (m_submission_slots.GetOldestSubmitted(&slot, &oldest) != GpuSubmissionResult::Success)
+	{
+		return false;
+	}
+	EXIT_IF(slot >= static_cast<uint32_t>(VK_BUFFERS_NUM) || m_buffer[slot] == nullptr);
+	return m_buffer[slot]->GetTimeline(device, semaphore, value);
+}
+
+bool SubmissionTimelineWaiter::Arm(VkDevice device, VkSemaphore semaphore, uint64_t value)
+{
+	EXIT_IF(device == nullptr || semaphore == nullptr || value == 0);
+	Core::LockGuard lock(m_mutex);
+	if (value <= m_fired && semaphore == m_semaphore)
+	{
+		return false;
+	}
+	if (semaphore != m_semaphore)
+	{
+		m_fired = 0;
+	}
+	m_device    = device;
+	m_semaphore = semaphore;
+	m_target    = value;
+	if (!m_started)
+	{
+		m_started = true;
+		Core::Thread t(ThreadRun, this);
+		t.Detach();
+	}
+	m_cond_var.Signal();
+	return true;
+}
+
+void SubmissionTimelineWaiter::ThreadRun(void* data)
+{
+	// Bounds one wait so a re-armed target is picked up even if the old one
+	// never signals.
+	constexpr uint64_t kWaitSliceNs = 100'000'000;
+
+	auto* waiter = static_cast<SubmissionTimelineWaiter*>(data);
+	EXIT_IF(waiter == nullptr);
+
+	waiter->m_mutex.Lock();
+	for (;;)
+	{
+		while (waiter->m_target <= waiter->m_fired)
+		{
+			waiter->m_cond_var.Wait(&waiter->m_mutex);
+		}
+		VkDevice    device    = waiter->m_device;
+		VkSemaphore semaphore = waiter->m_semaphore;
+		uint64_t    target    = waiter->m_target;
+		waiter->m_mutex.Unlock();
+
+		VkSemaphoreWaitInfo wait_info {};
+		wait_info.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		wait_info.semaphoreCount = 1;
+		wait_info.pSemaphores    = &semaphore;
+		wait_info.pValues        = &target;
+		const VkResult result    = vkWaitSemaphores(device, &wait_info, kWaitSliceNs);
+		if (result != VK_SUCCESS && result != VK_TIMEOUT)
+		{
+			EXIT("vkWaitSemaphores (queue timeline) failed: result=%d\n", static_cast<int>(result));
+		}
+
+		waiter->m_mutex.Lock();
+		if (result != VK_SUCCESS || semaphore != waiter->m_semaphore)
+		{
+			continue;
+		}
+		waiter->m_fired = std::max(waiter->m_fired, target);
+		waiter->m_mutex.Unlock();
+		waiter->m_ring_mutex->Lock();
+		waiter->m_ring_cond_var->Signal();
+		waiter->m_ring_mutex->Unlock();
+		waiter->m_mutex.Lock();
+	}
 }
 
 void CommandProcessor::SubmitAndWait()
@@ -821,8 +981,11 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	// ordered before everything recorded after it, and it is published when the
 	// batch's fence completes either way. A full barrier keeps its memory
 	// effects visible without splitting the submission.
+	const auto effects = static_cast<uint8_t>(dependency.effects);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, effects,
+	                                                    producer_is_current_submission && (effects & 2u) != 0u &&
+	                                                        GpuMemoryPendingStorageHasAliases()))
 	{
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
@@ -901,8 +1064,11 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	// ordered before everything recorded after it, and it is published when the
 	// batch's fence completes either way. A full barrier keeps its memory
 	// effects visible without splitting the submission.
+	const auto effects = static_cast<uint8_t>(dependency.effects);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, effects,
+	                                                    producer_is_current_submission && (effects & 2u) != 0u &&
+	                                                        GpuMemoryPendingStorageHasAliases()))
 	{
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
@@ -923,6 +1089,25 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	TraceWait("wait64_suspended", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 	RequestSuspendedWait(addr, sizeof(uint64_t), func, ref, mask);
 	return;
+}
+
+// COND_INDIRECT_BUFFER reads its compare word when the CP reaches the packet.
+// A write still pending in a recorded or queued submission precedes the packet
+// in stream order, so it is published before the word is read.
+bool CommandProcessor::BranchCompare(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask)
+{
+	if (func == 0u)
+	{
+		return true;
+	}
+	SubmissionDependency dependency;
+	const auto           producer = m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(addr), 8, ref, mask, &dependency);
+	if (producer == GpuSubmissionResult::Success || producer == GpuSubmissionResult::ProducerValueMismatch)
+	{
+		BufferFlushForGpuWait();
+		g_gpu->WaitSubmission(dependency.producer);
+	}
+	return GraphicsWaitRegMemCompare(func, *addr, ref, mask);
 }
 
 bool GraphicsWriteDataPrecedesMatchingWaitMem64(const uint32_t* write_body, uint32_t write_body_dwords, const uint32_t* next_packet,
@@ -1090,6 +1275,8 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 		buf.decode_completion   = decode_completion;
 
 		m_cmd_batches.Add(buf);
+		// A drain must see queued work before the worker wakes to dequeue it.
+		m_idle = false;
 
 		m_cond_var.Signal();
 	}
@@ -1098,6 +1285,28 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 	{
 		decode_completion->Wait();
 	}
+}
+
+// The command processor reads through the GPU's contiguous virtual space, so the range may cross from one
+// mapping into an adjacent one.
+static bool GpuRangeMapped(uint64_t address, uint64_t size)
+{
+	if (address == 0u || size == 0u || size > std::numeric_limits<uint64_t>::max() - address)
+	{
+		return false;
+	}
+
+	while (size != 0u)
+	{
+		const uint64_t prefix = GpuMemoryGetAllocatedRangePrefix(address, size);
+		if (prefix == 0u || prefix > size)
+		{
+			return false;
+		}
+		address += prefix;
+		size -= prefix;
+	}
+	return true;
 }
 
 GraphicsRing::CmdBuffer GraphicsRing::SnapshotCommandBuffer(uint32_t* data, uint32_t num_dw)
@@ -1158,7 +1367,7 @@ GraphicsRing::CmdBuffer GraphicsRing::SnapshotCommandBuffer(uint32_t* data, uint
 					const uint64_t address = snapshot->words[offset + 2u] |
 					                         (static_cast<uint64_t>(snapshot->words[offset + 3u]) << 32u);
 					const uint64_t byte_count = static_cast<uint64_t>(count) * 2u * sizeof(uint32_t);
-					if (address == 0u || GpuMemoryValidateAllocatedRange(address, byte_count) != GpuMemoryRangeValidationStatus::Valid)
+					if (address == 0u || !GpuRangeMapped(address, byte_count))
 					{
 						EXIT("indirect register packet references invalid guest storage: class=0x%02" PRIx32
 						     " address=0x%016" PRIx64 " count=%" PRIu32 "\n",
@@ -1264,12 +1473,17 @@ static void WaitForSuspendedRuns(CommandProcessor* cp, CommandProcessor::Suspend
 			TraceWait("wait_timeout", 0, reinterpret_cast<uint64_t>(suspended->address), ReadSuspendedRunValue(*suspended),
 			          suspended->reference, suspended->mask, 0,
 			          now_ns - suspended->blocked_since_ns);
+			SubmissionDependency dependency;
+			const auto producer = cp->FindSuspendedWaitProducer(suspended->address, suspended->size, suspended->reference,
+			                                                    suspended->mask, &dependency);
 			EXIT("WAIT_REG_MEM diagnostic deadline expired: addr=0x%016" PRIx64 " value=0x%016" PRIx64
-			     " ref=0x%016" PRIx64 " mask=0x%016" PRIx64 " func=%" PRIu32 " size=%" PRIu32 "\n",
+			     " ref=0x%016" PRIx64 " mask=0x%016" PRIx64 " func=%" PRIu32 " size=%" PRIu32 " queue=%d producer_now=%d"
+			     " producer_queue=%u producer_sequence=%" PRIu64 "\n",
 			     reinterpret_cast<uint64_t>(suspended->address), ReadSuspendedRunValue(*suspended), suspended->reference,
-			     suspended->mask, suspended->function, suspended->size);
+			     suspended->mask, suspended->function, suspended->size, cp->QueueIndex(), static_cast<int>(producer),
+			     dependency.producer.queue.Value(), dependency.producer.sequence);
 		}
-		if (std::getenv("KYTY_WAIT_TRACE") != nullptr)
+		if (static const char* env = std::getenv("KYTY_WAIT_TRACE"); env != nullptr)
 		{
 			const auto& suspended = first != nullptr ? *first : *second;
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
@@ -1307,12 +1521,20 @@ GraphicsRing::CmdBatch GraphicsRing::GetCmdBatch()
 			// not idle until its last submission retired.
 			m_mutex.Unlock();
 			m_cp->RunLock();
-			const bool pending = m_cp->PumpCompletedSubmissions();
+			const bool  pending  = m_cp->PumpCompletedSubmissions();
+			VkDevice    device   = nullptr;
+			VkSemaphore timeline = nullptr;
+			uint64_t    value    = 0;
+			const bool  armable  = pending && m_cp->OldestSubmittedTimeline(&device, &timeline, &value);
 			m_cp->RunUnlock();
 			m_mutex.Lock();
 			m_async_completion_pending = pending;
 			if (m_cmd_batches.Size() == 0 && pending)
 			{
+				if (armable)
+				{
+					(void)m_timeline_waiter.Arm(device, timeline, value);
+				}
 				(void)m_cond_var.WaitFor(&m_mutex, 1000u);
 			}
 			continue;
@@ -1491,12 +1713,20 @@ void ComputeRing::ThreadRun(void* data)
 				// idle until its last submission retired.
 				ring->m_mutex.Unlock();
 				cp->RunLock();
-				const bool pending = cp->PumpCompletedSubmissions();
+				const bool  pending  = cp->PumpCompletedSubmissions();
+				VkDevice    device   = nullptr;
+				VkSemaphore timeline = nullptr;
+				uint64_t    value    = 0;
+				const bool  armable  = pending && cp->OldestSubmittedTimeline(&device, &timeline, &value);
 				cp->RunUnlock();
 				ring->m_mutex.Lock();
 				ring->m_completion_pending = pending;
 				if (pending && !(ring->m_active && ring->m_run_offset_dw > 0))
 				{
+					if (armable)
+					{
+						(void)ring->m_timeline_waiter.Arm(device, timeline, value);
+					}
 					(void)ring->m_cond_var.WaitFor(&ring->m_mutex, 1000u);
 				}
 				continue;
@@ -1758,7 +1988,11 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 		const uint32_t special_packet_dwords = Pm4::Pm4SpecialType3PacketDwords(cmd_id);
 		if (special_packet_dwords != 0u)
 		{
-			if (remaining_including_header < special_packet_dwords) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: remaining_including_header < special_packet_dwords condition ignored (continuing)\n"); }
+			if (remaining_including_header < special_packet_dwords)
+			{
+				// A trailing header without its fixed one-dword body is padding.
+				continue;
+			}
 		} else if (KYTY_PM4_LEN(cmd_id) > remaining_including_header)
 		{
 			if (dw < 1)
@@ -1810,7 +2044,23 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown PM4 op (continuing)\n");
 		}
 
-		auto s = pfunc(this, cmd_id, cmd, dw + 1, num_dw);
+		auto dispatch = GraphicsRunDispatchType3Packet(this, cmd_id, cmd, dw, num_dw, pfunc);
+		if (dispatch.status == GraphicsRunType3DispatchStatus::MissingHandler)
+		{
+			EXIT("unsupported PM4 op 0x%02" PRIx32 " at dw=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 "\n", op, num_dw - dw - 1u, cmd_id);
+		}
+		if (dispatch.status == GraphicsRunType3DispatchStatus::InvalidEnvelope)
+		{
+			EXIT("invalid PM4 packet envelope at dw=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 " body_dw=%" PRIu32 " available_dw=%" PRIu32 "\n",
+			     num_dw - dw - 1u, cmd_id, dispatch.packet_body_dw, dw);
+		}
+		if (dispatch.status == GraphicsRunType3DispatchStatus::OverConsumed)
+		{
+			EXIT("PM4 op 0x%02" PRIx32 " over-consumed packet stream at dw=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 " consumed_dw=%" PRIu32
+			     " available_dw=%" PRIu32 "\n",
+			     op, num_dw - dw - 1u, cmd_id, dispatch.consumed_dw, dw);
+		}
+		const uint32_t s = dispatch.consumed_dw;
 
 		if (m_suspend_run_requested)
 		{
@@ -1818,7 +2068,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			// the guest condition. Never retain a cursor that bypasses the packet.
 			// Commands before it were submitted by WaitRegMem32/64.
 			m_suspended_run.data            = cmd - 1;
-			m_suspended_run.num_dw          = dw + 1u;
+			m_suspended_run.num_dw          = remaining_including_header;
 			m_suspended_run.blocked_since_ns = SuspendedWaitNowNs();
 			m_suspended_run_valid           = true;
 			m_suspend_run_requested         = false;
@@ -1880,7 +2130,7 @@ void CommandProcessor::SetIndirectArgsBaseAddress(uint32_t base_index, uint64_t 
 		default: if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); } break;
 	}
 
-	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Debug, 64, "KYTY_DUMP_INDIRECT set_base index=%u addr=0x%012" PRIx64 "\n", base_index, address);
 	}
@@ -1898,58 +2148,108 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances)
 	m_num_instances = num_instances;
 }
 
+template <typename Callback>
+static void RetryGuestDeviceAddressDraw(const Callback& callback)
+{
+	SubmissionId pending;
+	for (uint32_t attempt = 0; attempt < 64u; ++attempt)
+	{
+		pending = {};
+		callback(&pending);
+		if (pending.sequence == 0) { return; }
+
+		// A wait can submit and rotate a recording command buffer. The callback
+		// reacquires the processor lock and retries against the new current buffer.
+		g_gpu->WaitSubmission(pending);
+	}
+	EXIT("device-address draw preparation did not stabilize: queue=%u sequence=%" PRIu64 "\n", pending.queue.Value(),
+	     pending.sequence);
+}
+
 void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type)
 {
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
-	WaitDeviceAddressWriteBacks();
-	Core::LockGuard lock(m_mutex);
-
-	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-
-	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+	uint64_t submit_id = 0;
+	uint32_t index_type_and_size = 0;
+	uint32_t instance_count = 1;
 	{
-		static uint32_t logs = 0;
-		if (logs < 48u)
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		submit_id = m_sumbit_id;
+		index_type_and_size = m_index_type_and_size;
+		instance_count = m_num_instances;
+		if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env != nullptr)
 		{
-			++logs;
-			KYTY_LOG_DEBUG(
+			static uint32_t logs = 0;
+			if (logs < 48u)
+			{
+				++logs;
+				KYTY_LOG_DEBUG(
 			             "KYTY_DUMP_DRAW_INDEX count=%u modifier=0x%016" PRIx64 " type=%u index_addr=0x%012" PRIx64
 			             " index_base=0x%012" PRIx64 " index_buf_size=%u index_type=%u\n",
 			             index_count, draw_modifier, type, reinterpret_cast<uint64_t>(index_addr), m_index_base_addr,
 			             m_index_buffer_size, m_index_type_and_size);
+			}
 		}
 	}
-
-	GraphicsRenderDrawIndex(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, index_count,
-	                        index_addr, draw_modifier, type, m_num_instances, 0, 0);
+	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
+		                        index_addr, draw_modifier, type, instance_count, 0, 0, pending);
+	});
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags)
 {
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
-	WaitDeviceAddressWriteBacks();
-	Core::LockGuard lock(m_mutex);
-
-	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-	if (m_index_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_index_base_addr == 0 condition ignored (continuing)\n"); }
-	if ((flags & ~0xE0000001u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (flags & ~0xE0000001u) != 0 condition ignored (continuing)\n"); }
-
-	uint32_t index_bytes = 0;
-	switch (m_index_type_and_size)
+	uint64_t submit_id = 0;
+	uint32_t index_type_and_size = 0;
+	uint32_t instance_count = 1;
+	void*    index_addr = nullptr;
 	{
-		case 0: index_bytes = 2; break;
-		case 1: index_bytes = 4; break;
-		default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown index_type_and_size %u (continuing)\n", m_index_type_and_size); break;
-	}
+		Core::LockGuard lock(m_mutex);
 
-	auto* index_addr = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(index_offset) * index_bytes);
-	GraphicsRenderDrawIndex(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, index_count,
-	                        index_addr, flags, 1, m_num_instances, 0, 0);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		if (m_index_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_index_base_addr == 0 condition ignored (continuing)\n"); }
+		if ((flags & ~0xE0000001u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (flags & ~0xE0000001u) != 0 condition ignored (continuing)\n"); }
+
+		uint32_t index_bytes = 0;
+		switch (m_index_type_and_size)
+		{
+			case 0: index_bytes = 2; break;
+			case 1: index_bytes = 4; break;
+			default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown index_type_and_size %u (continuing)\n", m_index_type_and_size); break;
+		}
+
+		index_addr = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(index_offset) * index_bytes);
+		submit_id = m_sumbit_id;
+		index_type_and_size = m_index_type_and_size;
+		instance_count = m_num_instances;
+	}
+	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
+		                        index_addr, flags, 1, instance_count, 0, 0, pending);
+	});
 }
 
 void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiator)
 {
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
+	// This precedes the CPU snapshot of indirect arguments; renderer preflight
+	// runs later and cannot provide freshness for this host-side read.
+	WaitDeviceAddressWriteBacks();
+	uint64_t submit_id = 0;
+	uint32_t index_type_and_size = 0;
+	uint32_t index_count = 0;
+	uint32_t instance_count = 0;
+	int32_t vertex_offset = 0;
+	uint32_t first_instance = 0;
+	void* index_addr = nullptr;
 	struct DrawIndexedIndirectArgs
 	{
 		uint32_t index_count_per_instance;
@@ -1959,66 +2259,151 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		uint32_t start_instance_location;
 	};
 
-	WaitDeviceAddressWriteBacks();
-	Core::LockGuard lock(m_mutex);
-
-	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-	if (m_draw_indirect_args_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_draw_indirect_args_base_addr == 0 condition ignored (continuing)\n"); }
-	if (m_index_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_index_base_addr == 0 condition ignored (continuing)\n"); }
-	if ((initiator & ~0x20u) != 2u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (initiator & ~0x20u) != 2u condition ignored (continuing)\n"); }
-
 	DrawIndexedIndirectArgs args {};
-	memcpy(&args, reinterpret_cast<const void*>(m_draw_indirect_args_base_addr + data_offset), sizeof(args));
-	if (args.index_count_per_instance == 0 || args.instance_count == 0)
+	uint64_t                args_address = 0;
 	{
-		if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+		Core::LockGuard lock(m_mutex);
+		if (!GraphicsRunIndirectArgumentAddress(m_draw_indirect_args_base_addr, data_offset, sizeof(args), &args_address) ||
+		    !GpuRangeMapped(args_address, sizeof(args)))
 		{
+			EXIT("DRAW_INDEX_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
+			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
+		}
+	}
+	// The arguments can be written by an earlier dispatch of this recording.
+	if (!ReadCurrentGuestBytes(args_address, &args, sizeof(args)))
+	{
+		EXIT("DRAW_INDEX_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
+		     args_address, static_cast<uint64_t>(sizeof(args)));
+	}
+	{
+		Core::LockGuard lock(m_mutex);
+
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		if (m_index_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_index_base_addr == 0 condition ignored (continuing)\n"); }
+		if ((initiator & ~0x20u) != 2u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (initiator & ~0x20u) != 2u condition ignored (continuing)\n"); }
+
+		if (args.index_count_per_instance == 0 || args.instance_count == 0)
+		{
+			if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
+			{
+				static uint32_t logs = 0;
+				if (logs < 64u)
+				{
+					++logs;
+					KYTY_LOG_DEBUG(
+					             "KYTY_DUMP_INDIRECT draw_index_skip offset=0x%08" PRIx32 " count=%u instances=%u base=0x%012" PRIx64
+					             "\n",
+					             data_offset, args.index_count_per_instance, args.instance_count, m_draw_indirect_args_base_addr);
+				}
+			}
+			return;
+		}
+
+		uint32_t index_bytes = 0;
+		switch (m_index_type_and_size)
+		{
+			case 0: index_bytes = 2; break;
+			case 1: index_bytes = 4; break;
+			case 2: index_bytes = 1; break;
+			default: if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); } break;
+		}
+
+		index_count =
+		    (m_index_buffer_size != 0 && args.index_count_per_instance > m_index_buffer_size) ? m_index_buffer_size
+		                                                                                     : args.index_count_per_instance;
+		index_addr = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(args.start_index_location) * index_bytes);
+
+		if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
+		{
+			const int32_t base_vertex_location = static_cast<int32_t>(args.base_vertex_location);
 			static uint32_t logs = 0;
 			if (logs < 64u)
 			{
 				++logs;
 				KYTY_LOG_DEBUG(
-				             "KYTY_DUMP_INDIRECT draw_index_skip offset=0x%08" PRIx32 " count=%u instances=%u base=0x%012" PRIx64
-				             "\n",
-				             data_offset, args.index_count_per_instance, args.instance_count, m_draw_indirect_args_base_addr);
+				             "KYTY_DUMP_INDIRECT draw_index offset=0x%08" PRIx32 " count=%u instances=%u start_index=%u base_vertex=%" PRId32 " "
+				             "first_instance=%u initiator=0x%08" PRIx32 "\n",
+				             data_offset, index_count, args.instance_count, args.start_index_location, base_vertex_location,
+				             args.start_instance_location, initiator);
 			}
 		}
-		return;
+
+		m_num_instances = args.instance_count;
+		submit_id = m_sumbit_id;
+		index_type_and_size = m_index_type_and_size;
+		instance_count = args.instance_count;
+		vertex_offset = static_cast<int32_t>(args.base_vertex_location);
+		first_instance = args.start_instance_location;
 	}
-
-	uint32_t index_bytes = 0;
-	switch (m_index_type_and_size)
+	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
 	{
-		case 0: index_bytes = 2; break;
-		case 1: index_bytes = 4; break;
-		case 2: index_bytes = 1; break;
-		default: if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); } break;
-	}
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
+		                        index_addr, 0, 1, instance_count, vertex_offset, first_instance, pending);
+	});
+}
 
-	const uint32_t index_count =
-	    (m_index_buffer_size != 0 && args.index_count_per_instance > m_index_buffer_size) ? m_index_buffer_size
-	                                                                                     : args.index_count_per_instance;
-	auto*          index_addr  = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(args.start_index_location) * index_bytes);
-
-	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
+{
+	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
+	// This precedes the CPU snapshot of indirect arguments; renderer preflight
+	// runs later and cannot provide freshness for this host-side read.
+	WaitDeviceAddressWriteBacks();
+	struct DrawIndirectArgs
 	{
-		const int32_t base_vertex_location = static_cast<int32_t>(args.base_vertex_location);
-		static uint32_t logs = 0;
-		if (logs < 64u)
+		uint32_t vertex_count_per_instance;
+		uint32_t instance_count;
+		uint32_t start_vertex_location;
+		uint32_t start_instance_location;
+	};
+
+	uint64_t         submit_id = 0;
+	DrawIndirectArgs args {};
+	uint64_t         args_address = 0;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (!GraphicsRunIndirectArgumentAddress(m_draw_indirect_args_base_addr, data_offset, sizeof(args), &args_address) ||
+		    !GpuRangeMapped(args_address, sizeof(args)))
 		{
-			++logs;
-			KYTY_LOG_DEBUG(
-			             "KYTY_DUMP_INDIRECT draw_index offset=0x%08" PRIx32 " count=%u instances=%u start_index=%u base_vertex=%" PRId32 " "
-			             "first_instance=%u initiator=0x%08" PRIx32 "\n",
-			             data_offset, index_count, args.instance_count, args.start_index_location, base_vertex_location,
-			             args.start_instance_location, initiator);
+			EXIT("DRAW_INDIRECT argument range is not fully mapped: base=0x%016" PRIx64 " offset=0x%08" PRIx32 " size=%" PRIu64 "\n",
+			     m_draw_indirect_args_base_addr, data_offset, static_cast<uint64_t>(sizeof(args)));
 		}
 	}
+	// The arguments can be written by an earlier dispatch of this recording.
+	if (!ReadCurrentGuestBytes(args_address, &args, sizeof(args)))
+	{
+		EXIT("DRAW_INDIRECT argument range is not readable guest memory: address=0x%016" PRIx64 " size=%" PRIu64 "\n",
+		     args_address, static_cast<uint64_t>(sizeof(args)));
+	}
+	{
+		Core::LockGuard lock(m_mutex);
 
-	m_num_instances = args.instance_count;
-	GraphicsRenderDrawIndex(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, index_count,
-	                        index_addr, 0, 1, args.instance_count, static_cast<int32_t>(args.base_vertex_location),
-	                        args.start_instance_location);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		EXIT_IF((initiator & ~0x20u) != 2u);
+
+		if (args.vertex_count_per_instance == 0 || args.instance_count == 0)
+		{
+			return;
+		}
+		if (args.start_vertex_location > static_cast<uint32_t>(INT32_MAX))
+		{
+			EXIT("unsupported indirect draw start vertex: offset=0x%08" PRIx32 " start=%" PRIu32 "\n", data_offset,
+			     args.start_vertex_location);
+		}
+
+		m_num_instances = args.instance_count;
+		submit_id       = m_sumbit_id;
+	}
+	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		GraphicsRenderDrawIndexAuto(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, args.vertex_count_per_instance, 0,
+		                            args.instance_count, static_cast<int32_t>(args.start_vertex_location), args.start_instance_location,
+		                            pending);
+	});
 }
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
@@ -2047,6 +2432,8 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 		// Waiting can submit another processor's recording buffer and publish
 		// its resources; neither processor nor render recording locks may be held.
 		g_gpu->WaitSubmission(pending);
+		EXIT_IF(result != ComputeDispatchResult::SubmissionCompletionRequired &&
+		        result != ComputeDispatchResult::ReaderCompletionRequired);
 		++attempt;
 	}
 	EXIT("device-address dispatch preparation did not stabilize: queue=%u sequence=%" PRIu64 "\n",
@@ -2082,18 +2469,19 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 		uint32_t thread_group_z;
 	};
 
+	// The arguments are often written by an earlier dispatch of this recording.
 	DispatchIndirectArgs args {};
+	if (address == 0 || !ReadCurrentGuestBytes(address, &args, sizeof(args)))
+	{
+		EXIT("unreadable dispatch-indirect arguments: address=0x%016" PRIx64 "\n", address);
+	}
 	{
 		Core::LockGuard lock(m_mutex);
 
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-		if (address == 0 || !Core::VirtualMemory::CopyFromGuest(&args, address, sizeof(args)))
-		{
-			EXIT("unreadable dispatch-indirect arguments: address=0x%016" PRIx64 "\n", address);
-		}
 		if (args.thread_group_x == 0 || args.thread_group_y == 0 || args.thread_group_z == 0)
 		{
-			if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+			if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 			{
 				static uint32_t logs = 0;
 				if (logs < 64u)
@@ -2106,7 +2494,7 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 			return;
 		}
 
-		if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+		if (static const char* env = std::getenv("KYTY_DUMP_INDIRECT"); env != nullptr)
 		{
 			static uint32_t logs = 0;
 			if (logs < 64u)
@@ -2123,60 +2511,143 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier)
 {
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
-	WaitDeviceAddressWriteBacks();
+	uint64_t submit_id = 0;
+	uint32_t instance_count = 1;
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		submit_id = m_sumbit_id;
+		instance_count = m_num_instances;
+
+		if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env != nullptr)
+		{
+			static uint32_t auto_logs = 0;
+			if (auto_logs < 48u)
+			{
+				++auto_logs;
+				KYTY_LOG_DEBUG(
+				             "KYTY_DUMP_DRAW_AUTO count=%u modifier=0x%016" PRIx64 " index_base=0x%012" PRIx64
+				             " index_buf_size=%u index_type=%u",
+				             index_count, draw_modifier, m_index_base_addr, m_index_buffer_size, m_index_type_and_size);
+				if (m_index_base_addr != 0 && index_count > 0 && index_count <= 64)
+				{
+					KYTY_LOG_DEBUG( " idx=");
+					if (m_index_type_and_size == 0)
+					{
+						const auto* idx = reinterpret_cast<const uint16_t*>(static_cast<uintptr_t>(m_index_base_addr));
+						for (uint32_t i = 0; i < index_count; i++)
+						{
+							KYTY_LOG_DEBUG( "%s%u", (i ? "," : ""), static_cast<unsigned>(idx[i]));
+						}
+					} else if (m_index_type_and_size == 1)
+					{
+						const auto* idx = reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(m_index_base_addr));
+						for (uint32_t i = 0; i < index_count; i++)
+						{
+							KYTY_LOG_DEBUG( "%s%u", (i ? "," : ""), idx[i]);
+						}
+					}
+				}
+				KYTY_LOG_DEBUG( "\n");
+			}
+		}
+	}
+	RetryGuestDeviceAddressDraw([&](SubmissionId* pending)
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		GraphicsRenderDrawIndexAuto(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, draw_modifier,
+		                            instance_count, 0, 0, pending);
+	});
+}
+
+void CommandProcessor::ClearGds(uint64_t dw_offset, uint64_t dw_count, uint32_t clear_value)
+{
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
-	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+	const auto result = GraphicsRenderClearGds(m_buffer[m_current_buffer], dw_offset, dw_count, clear_value);
+	if (result != GraphicsGdsTransferResult::Recorded)
 	{
-		static uint32_t auto_logs = 0;
-		if (auto_logs < 48u)
+		EXIT("GDS clear rejected: offset=%" PRIu64 " count=%" PRIu64 " result=%u\n", dw_offset, dw_count, static_cast<uint32_t>(result));
+	}
+}
+
+void CommandProcessor::WriteGds(uint64_t dw_offset, uint64_t src_vaddr, uint64_t dw_count)
+{
+	// The same admission as a device-address dispatch: a source owned by this recording is
+	// written back by submitting it, and one owned by another queue is waited for. Neither
+	// processor nor render locks are held while waiting.
+	SubmissionId dependency;
+	for (uint32_t attempt = 0; attempt < 64u; ++attempt)
+	{
+		GraphicsGdsTransferResult result = GraphicsGdsTransferResult::InvalidRange;
 		{
-			++auto_logs;
-			KYTY_LOG_DEBUG(
-			             "KYTY_DUMP_DRAW_AUTO count=%u modifier=0x%016" PRIx64 " index_base=0x%012" PRIx64
-			             " index_buf_size=%u index_type=%u",
-			             index_count, draw_modifier, m_index_base_addr, m_index_buffer_size, m_index_type_and_size);
-			if (m_index_base_addr != 0 && index_count > 0 && index_count <= 64)
-			{
-				KYTY_LOG_DEBUG( " idx=");
-				if (m_index_type_and_size == 0)
+			Core::LockGuard lock(m_mutex);
+			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+			result = GraphicsRenderWriteGdsFromMemory(m_buffer[m_current_buffer], dw_offset, src_vaddr, dw_count, &dependency);
+		}
+		switch (result)
+		{
+			case GraphicsGdsTransferResult::Recorded: return;
+			case GraphicsGdsTransferResult::ProcessorWriteBackRequired: WriteBack(); continue;
+			case GraphicsGdsTransferResult::SubmissionCompletionRequired:
+				if (OwnsSubmissionQueue(dependency))
 				{
-					const auto* idx = reinterpret_cast<const uint16_t*>(static_cast<uintptr_t>(m_index_base_addr));
-					for (uint32_t i = 0; i < index_count; i++)
-					{
-						KYTY_LOG_DEBUG( "%s%u", (i ? "," : ""), static_cast<unsigned>(idx[i]));
-					}
-				} else if (m_index_type_and_size == 1)
+					WaitSubmission(dependency);
+				} else
 				{
-					const auto* idx = reinterpret_cast<const uint32_t*>(static_cast<uintptr_t>(m_index_base_addr));
-					for (uint32_t i = 0; i < index_count; i++)
-					{
-						KYTY_LOG_DEBUG( "%s%u", (i ? "," : ""), idx[i]);
-					}
+					EXIT_IF(g_gpu == nullptr);
+					g_gpu->WaitSubmission(dependency);
 				}
-			}
-			KYTY_LOG_DEBUG( "\n");
+				continue;
+			default:
+				EXIT("memory to GDS rejected: src=0x%016" PRIx64 " offset=%" PRIu64 " count=%" PRIu64 " result=%u\n", src_vaddr, dw_offset,
+				     dw_count, static_cast<uint32_t>(result));
 		}
 	}
-
-	GraphicsRenderDrawIndexAuto(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, draw_modifier,
-	                            m_num_instances);
+	EXIT("memory to GDS source did not stabilize: src=0x%016" PRIx64 " queue=%u sequence=%" PRIu64 "\n", src_vaddr,
+	     dependency.queue.Value(), dependency.sequence);
 }
 
-void CommandProcessor::ClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value)
+void CommandProcessor::CopyGds(uint64_t src_dw_offset, uint64_t dst_dw_offset, uint64_t dw_count)
 {
 	Core::LockGuard lock(m_mutex);
 
-	GraphicsRenderClearGds(dw_offset, dw_num, clear_value);
+	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+
+	const auto result = GraphicsRenderCopyGds(m_buffer[m_current_buffer], src_dw_offset, dst_dw_offset, dw_count);
+	if (result != GraphicsGdsTransferResult::Recorded)
+	{
+		EXIT("GDS copy rejected: src=%" PRIu64 " dst=%" PRIu64 " count=%" PRIu64 " result=%u\n", src_dw_offset, dst_dw_offset, dw_count,
+		     static_cast<uint32_t>(result));
+	}
 }
 
-void CommandProcessor::ReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size)
+void CommandProcessor::ReadGds(uint32_t* dst, uint64_t dw_offset, uint64_t dw_count)
 {
-	Core::LockGuard lock(m_mutex);
-
-	GraphicsRenderReadGds(dst, dw_offset, dw_size);
+	// Staging is returned when earlier submissions publish, so one submit-and-wait of this queue
+	// frees it unless other queues hold the whole budget.
+	for (uint32_t attempt = 0; attempt < 2u; ++attempt)
+	{
+		GraphicsGdsTransferResult result = GraphicsGdsTransferResult::InvalidRange;
+		{
+			Core::LockGuard lock(m_mutex);
+			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+			result = GraphicsRenderReadGds(m_buffer[m_current_buffer], dst, dw_offset, dw_count);
+		}
+		if (result == GraphicsGdsTransferResult::Recorded)
+		{
+			return;
+		}
+		if (result != GraphicsGdsTransferResult::StagingBudgetExhausted || attempt != 0u)
+		{
+			EXIT("GDS read rejected: offset=%" PRIu64 " count=%" PRIu64 " result=%u\n", dw_offset, dw_count, static_cast<uint32_t>(result));
+		}
+		BufferFlush();
+		BufferWait();
+	}
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index)
@@ -2574,7 +3045,7 @@ void CommandProcessor::WaitDeviceAddressWriteBacks()
 	// publish its guest copy. Waiting must run without the recording mutex —
 	// completion of the pending submission can publish resources that need it.
 	SubmissionId pending;
-	for (uint32_t attempt = 0; GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(m_queue)), &pending);)
+	for (uint32_t attempt = 0; GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(m_queue)), nullptr, &pending);)
 	{
 		g_gpu->WaitSubmission(pending);
 		if (++attempt >= 64u)
@@ -2583,6 +3054,41 @@ void CommandProcessor::WaitDeviceAddressWriteBacks()
 			     pending.sequence);
 		}
 	}
+}
+
+bool CommandProcessor::ReadCurrentGuestBytes(uint64_t vaddr, void* dst, uint64_t size)
+{
+	// The same admission as a memory->GDS transfer: content this recording owns is written back by
+	// submitting it, and content another queue owns is waited for. No lock is held while waiting.
+	SubmissionId dependency;
+	for (uint32_t attempt = 0; attempt < 64u; ++attempt)
+	{
+		GraphicsGuestReadResult result = GraphicsGuestReadResult::Unsupported;
+		{
+			Core::LockGuard lock(m_mutex);
+			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+			result = GraphicsRenderReadCurrentGuestBytes(m_buffer[m_current_buffer], vaddr, dst, size, &dependency);
+		}
+		switch (result)
+		{
+			case GraphicsGuestReadResult::Read: return true;
+			case GraphicsGuestReadResult::ProcessorWriteBackRequired: WriteBack(); continue;
+			case GraphicsGuestReadResult::SubmissionCompletionRequired:
+				if (OwnsSubmissionQueue(dependency))
+				{
+					WaitSubmission(dependency);
+				} else
+				{
+					EXIT_IF(g_gpu == nullptr);
+					g_gpu->WaitSubmission(dependency);
+				}
+				continue;
+			case GraphicsGuestReadResult::Unsupported: return false;
+		}
+	}
+	EXIT("guest read did not stabilize: vaddr=0x%016" PRIx64 " queue=%u sequence=%" PRIu64 "\n", vaddr, dependency.queue.Value(),
+	     dependency.sequence);
+	return false;
 }
 
 void CommandProcessor::WriteBack()

@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 
 #include <cstdint>
+#include <vector>
 
 struct VkCommandBuffer_T;
 
@@ -14,6 +15,7 @@ namespace Kyty::Libs::Graphics {
 
 struct GraphicContext;
 struct VulkanBuffer;
+struct GpuMemoryStoragePublication;
 
 // Guest GPU-visible mappings imported as host-pointer device memory, so a
 // shader can dereference a computed guest address. Guest and host virtual
@@ -27,6 +29,19 @@ struct VulkanBuffer;
 constexpr uint32_t kGuestDeviceAddressEntryDwords = 8;
 constexpr uint32_t kGuestDeviceAddressNullBytes   = 256;
 constexpr uint32_t kGuestDeviceAddressPageBytes   = 4096;
+
+struct GuestDeviceAddressTable
+{
+	uint64_t address     = 0;
+	uint32_t entry_count = 0;
+};
+
+enum class GuestDeviceAddressPrepareResult: uint8_t
+{
+	Ready,
+	PendingReader,
+	Failed,
+};
 
 // A load of `bytes` at `offset` into a chunk matches only when it starts in
 // the guest `size` and ends inside the imported `span`. An access that would
@@ -52,7 +67,7 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 
 // Must run with GPU submissions quiesced: destroys imports of the range and
-// every table retired since the last quiesced release.
+// every table still retained in the retirement list.
 void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 
 // Writes back GPU results held in Kyty storage-buffer objects over every
@@ -63,7 +78,10 @@ void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
 
 // The caller holds the render recording lock through the later write-back.
 // Wait for a returned dependency only after releasing recording locks, then retry.
-[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, SubmissionId* dependency);
+// With `publishable`, results the caller can publish in the consumer's queue order
+// (GuestDeviceAddressRecordPublication) are listed there instead of reported.
+[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, std::vector<GpuMemoryStoragePublication>* publishable,
+                                                      SubmissionId* dependency);
 
 // Records into `cmd`, after the GPU work already recorded there, a copy of
 // `source` (whose first byte is guest address `vaddr`, `size` bytes) into the
@@ -76,9 +94,24 @@ void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
 [[nodiscard]] bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source,
                                                        uint64_t vaddr, uint64_t size);
 
+// Records, with the same ordering and range rules as GuestDeviceAddressRecordPublication,
+// `word` repeated over the imported view of `size` bytes at guest address `vaddr`.
+// Fails without recording when a piece of the range is not 4-byte aligned.
+[[nodiscard]] bool GuestDeviceAddressRecordFill(GraphicContext* ctx, VkCommandBuffer_T* cmd, uint32_t word, uint64_t vaddr, uint64_t size);
+
 // Imports all registered ranges not imported yet and returns the translation
-// table. Fails when the device cannot import guest memory.
+// table. This legacy synchronous helper is for quiesced unit-test setup; runtime
+// GPU readers must use GuestDeviceAddressPrepareForRead to track their lifetime.
 [[nodiscard]] bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uint32_t* entry_count);
+
+// Prepares the translation table for a command buffer that will read through
+// it. If a tracked snapshot refresh or table rebuild must wait for an earlier
+// reader, returns that reader without publishing a table. The caller must wait
+// outside recording locks and acknowledge the exact completed ID.
+[[nodiscard]] GuestDeviceAddressPrepareResult GuestDeviceAddressPrepareForRead(GraphicContext* ctx, SubmissionId reader,
+	                                                                          GuestDeviceAddressTable* table,
+	                                                                          SubmissionId* dependency);
+[[nodiscard]] bool GuestDeviceAddressAcknowledgeReader(SubmissionId completed);
 
 } // namespace Kyty::Libs::Graphics
 

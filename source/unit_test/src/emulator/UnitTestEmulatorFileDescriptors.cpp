@@ -114,7 +114,8 @@ public:
 	}
 
 private:
-	static void Register(uint64_t, size_t, uint32_t) {}
+	static bool Register(uint64_t, size_t, uint32_t,
+	                     const Kyty::Core::VirtualMemory::GuestMappingIdentitySnapshot&) { return true; }
 	static void Unregister(uint64_t) {}
 	static void Notify(uint64_t, uint64_t) { ADD_FAILURE() << "paired write lease was bypassed"; }
 	static uint64_t Begin(uint64_t base, uint64_t bytes)

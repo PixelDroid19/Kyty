@@ -22,6 +22,7 @@ void Close()
 
 void ProfilerSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
+	g_blocks_enabled = Config::GetProfilerDirection() != Config::ProfilerDirection::None;
 	switch (Config::GetProfilerDirection())
 	{
 		case Config::ProfilerDirection::File: EASY_PROFILER_ENABLE; break;

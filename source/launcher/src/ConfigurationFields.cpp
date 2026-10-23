@@ -6,6 +6,7 @@
 #include <QStringList>
 #include <QVariant>
 #include <QVariantList>
+#include <algorithm>
 
 namespace {
 
@@ -24,6 +25,10 @@ QVariantList ElfsToList(const Config& info)
 	}
 	return list;
 }
+
+// Range of the screen and render sizes the editor offers.
+constexpr int MIN_EXTENT = 320;
+constexpr int MAX_EXTENT = 8192;
 
 // Fields that say which game runs, as opposed to how the emulator runs it.
 const QStringList GAME_IDENTITY_KEYS = {"name", "folder", "basedir", "param_file", "elfs", "custom_settings"};
@@ -64,6 +69,13 @@ bool RequiredPathsFilled(const QVariantMap& f)
 	return true;
 }
 
+bool SharpnessValid(const QVariantMap& f)
+{
+	bool       ok        = false;
+	const auto sharpness = f.value("presentation_fsr_sharpness").toInt(&ok);
+	return ok && sharpness >= 0 && sharpness <= 100;
+}
+
 bool ResolutionsValid(const QVariantMap& f)
 {
 	return f.value("screen_width").toInt() > 0 && f.value("screen_height").toInt() > 0 && f.value("render_resolution_width").toInt() > 0 &&
@@ -85,7 +97,12 @@ QVariantMap ConfigurationToFields(const Kyty::Configuration& info)
 	f["render_resolution_mode"]       = EnumToText(info.render_resolution_mode);
 	f["render_resolution_width"]      = info.render_resolution_width;
 	f["render_resolution_height"]     = info.render_resolution_height;
+	f["render_resolution_scope"]      = EnumToText(info.render_resolution_scope);
 	f["presentation_filter"]          = EnumToText(info.presentation_filter);
+	f["presentation_fsr_sharpness"]   = info.presentation_fsr_sharpness;
+	f["texture_anisotropy"]           = EnumToText(info.texture_anisotropy);
+	// Presets are not stored, so a loaded configuration always starts as custom.
+	f["graphics_preset"] = EnumToText(Config::GraphicsPreset::Custom);
 	f["neo"]                          = info.neo;
 	f["vulkan_validation_enabled"]    = info.vulkan_validation_enabled;
 	f["shader_validation_enabled"]    = info.shader_validation_enabled;
@@ -117,6 +134,10 @@ QString ApplyEmulatorFields(const QVariantMap& fields, Kyty::Configuration* info
 	{
 		return QCoreApplication::translate("Launcher", "Resolution extents must be > 0");
 	}
+	if (!SharpnessValid(fields))
+	{
+		return QCoreApplication::translate("Launcher", "FSR sharpness must be between 0 and 100");
+	}
 
 	const auto text = [&fields](const char* key) { return fields.value(key).toString(); };
 
@@ -125,7 +146,10 @@ QString ApplyEmulatorFields(const QVariantMap& fields, Kyty::Configuration* info
 	info->render_resolution_mode      = TextToEnum<Config::RenderResolutionMode>(text("render_resolution_mode"));
 	info->render_resolution_width     = fields.value("render_resolution_width").toInt();
 	info->render_resolution_height    = fields.value("render_resolution_height").toInt();
+	info->render_resolution_scope     = TextToEnum<Config::RenderResolutionScope>(text("render_resolution_scope"));
 	info->presentation_filter         = TextToEnum<Config::PresentationFilter>(text("presentation_filter"));
+	info->presentation_fsr_sharpness  = fields.value("presentation_fsr_sharpness").toInt();
+	info->texture_anisotropy          = TextToEnum<Config::TextureAnisotropy>(text("texture_anisotropy"));
 	info->neo                         = fields.value("neo").toBool();
 	info->vulkan_validation_enabled   = fields.value("vulkan_validation_enabled").toBool();
 	info->shader_validation_enabled   = fields.value("shader_validation_enabled").toBool();
@@ -183,6 +207,46 @@ QString ApplyFields(const QVariantMap& fields, Kyty::Configuration* info)
 	return {};
 }
 
+QVariantMap ApplyGraphicsPreset(const QVariantMap& fields, const QString& preset_text)
+{
+	using Preset = Config::GraphicsPreset;
+	using Mode   = Config::RenderResolutionMode;
+	using Scope  = Config::RenderResolutionScope;
+	using Filter = Config::PresentationFilter;
+	using Aniso  = Config::TextureAnisotropy;
+
+	struct Graphics
+	{
+		Mode   mode;
+		Scope  scope;
+		int    percent;
+		Filter filter;
+		Aniso  anisotropy;
+	};
+	Graphics graphics {};
+	switch (TextToEnum<Preset>(preset_text))
+	{
+		case Preset::Custom: return fields;
+		case Preset::Native: graphics = {Mode::Native, Scope::Display, 100, Filter::Linear, Aniso::Guest}; break;
+		case Preset::Quality: graphics = {Mode::Fixed, Scope::RenderTargets, 100, Filter::Linear, Aniso::X16}; break;
+		case Preset::Balanced: graphics = {Mode::Fixed, Scope::RenderTargets, 75, Filter::Fsr, Aniso::X8}; break;
+		case Preset::Performance: graphics = {Mode::Fixed, Scope::RenderTargets, 50, Filter::Fsr, Aniso::Guest}; break;
+	}
+
+	// The render size follows the screen size, kept even and inside the editor's range.
+	const auto scaled = [&](const char* screen_key)
+	{ return std::clamp((fields.value(screen_key).toInt() * graphics.percent / 100) & ~1, MIN_EXTENT, MAX_EXTENT); };
+
+	auto result                        = fields;
+	result["render_resolution_mode"]   = EnumToText(graphics.mode);
+	result["render_resolution_scope"]  = EnumToText(graphics.scope);
+	result["render_resolution_width"]  = scaled("screen_width");
+	result["render_resolution_height"] = scaled("screen_height");
+	result["presentation_filter"]      = EnumToText(graphics.filter);
+	result["texture_anisotropy"]       = EnumToText(graphics.anisotropy);
+	return result;
+}
+
 QVariantMap FieldsToRun(const QVariantMap& game, const QVariantMap& global)
 {
 	if (game.value("custom_settings").toBool())
@@ -201,7 +265,10 @@ QVariantMap ConfigurationChoices()
 {
 	QVariantMap choices;
 	choices["render_resolution_mode"]    = EnumToList<Config::RenderResolutionMode>();
+	choices["render_resolution_scope"]   = EnumToList<Config::RenderResolutionScope>();
 	choices["presentation_filter"]       = EnumToList<Config::PresentationFilter>();
+	choices["texture_anisotropy"]        = EnumToList<Config::TextureAnisotropy>();
+	choices["graphics_preset"]           = EnumToList<Config::GraphicsPreset>();
 	choices["shader_optimization_type"]  = EnumToList<Config::ShaderOptimizationType>();
 	choices["shader_log_direction"]      = EnumToList<Config::ShaderLogDirection>();
 	choices["printf_direction"]          = EnumToList<Config::LogDirection>();

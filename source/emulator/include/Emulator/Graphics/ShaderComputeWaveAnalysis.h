@@ -45,6 +45,8 @@ enum class ShaderComputeWaveInstructionKind
 	WaveCount,
 	// ds_append/ds_consume on GDS: one per-wave counter update, broadcast.
 	WaveAppend,
+	// ds_write_b32 on GDS: per-lane store at M0.base + ADDR + offset.
+	BankedGdsWrite,
 	// ds_write_addtid_b32/ds_read_addtid_b32: per-lane LDS slot addressed by
 	// M0[15:0] + offset + TID*4; the emitter walks both banks itself because
 	// the flat lane index differs per bank.
@@ -55,6 +57,11 @@ enum class ShaderComputeWaveInstructionKind
 	BankedDpp,
 	PixelInterpolation,
 	PixelExport,
+	// Merged ES+GS run as compute: an uncompressed position 0/1, parameter or
+	// primitive export, stored per lane into the geometry output buffer.
+	GeometryExport,
+	// S_SENDMSG GS_ALLOC_REQ: the M0 payload becomes the group header.
+	GeometryAlloc,
 };
 
 struct ShaderComputeWaveAnalysisResult
@@ -62,16 +69,25 @@ struct ShaderComputeWaveAnalysisResult
 	bool                supported      = false;
 	uint32_t            unsupported_pc = 0;
 	Kyty::Core::String8 reason;
+	// A supported native-equivalent program reads quad neighbours through DPP.
+	bool reads_quad_lanes = false;
 };
 
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const ShaderInstruction& instruction);
 // Strategy-independent rejection of malformed register spans and controls that
 // these lowerings cannot represent. Must precede both native and generic choice.
 [[nodiscard]] bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction);
+// The same preconditions for the per-lane emitter, which also merges a low SDWA destination
+// select into its VGPR (ShaderSdwaPartialDestinationSupported). Banked and proof paths keep the strict form.
+[[nodiscard]] bool ShaderInstructionPerLaneLoweringPreconditions(const ShaderInstruction& instruction);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,
                                                                              const ShaderComputeInputInfo& host,
                                                                              uint32_t                      parameter_register = UINT32_MAX);
+[[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyGeometryWaveInstruction(const ShaderInstruction& instruction);
+// Source of export component 0..3; a POS1 Z-only export carries Z in src[0].
+[[nodiscard]] const ShaderOperand& ShaderExportComponentSource(const ShaderInstruction& instruction, uint32_t component);
+[[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeGeometryWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input);
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyFragmentWaveInstruction(const ShaderInstruction&    instruction,
                                                                                      const ShaderPixelInputInfo& pixel);
 [[nodiscard]] bool ShaderFragmentInterpolationPairSupported(const ShaderCode& code, uint32_t index, const ShaderPixelInputInfo& pixel);
@@ -86,6 +102,11 @@ struct ShaderComputeWaveAnalysisResult
 // A closed, side-effect-free region may initialize uncaptured lanes itself.
 // Only its proven full-EXEC entry may bypass the ordinary allocation clamp.
 [[nodiscard]] bool ShaderFragmentNeutralRegionSupported(const ShaderCode& code, uint32_t index);
+// The same proof, also giving the index of the EXEC restore that closes the region. The initializer is the
+// instruction after `index`; every instruction between it and the restore is a bitwise or permutation step
+// that reads only registers the region wrote. A guest Wave32 program (`guest_wave_size` 32) uses the B32 mask
+// forms on single SGPRs and must have its VALU lane masks narrowed by ShaderWave32LaneMasks.
+[[nodiscard]] bool ShaderFragmentNeutralRegionEnd(const ShaderCode& code, uint32_t guest_wave_size, uint32_t index, uint32_t* end);
 // Reads that ignore EXEC or fetch inactive lanes can observe lanes absent from
 // a partial captured wave. Each needs a source that a proven neutral region
 // initialized in every lane; otherwise the program is rejected with its PC.

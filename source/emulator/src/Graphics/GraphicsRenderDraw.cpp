@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/DepthStencilCopy.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GuestDeviceAddress.h"
+#include "Emulator/Graphics/GraphicsOperationTrace.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
@@ -27,6 +28,7 @@
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderComputeWaveRuntime.h"
 #include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Utils.h"
@@ -46,6 +48,7 @@
 #include <cstdlib>
 #include <limits>
 #include <set>
+#include <utility>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -55,15 +58,18 @@ namespace Kyty::Libs::Graphics {
 
 namespace {
 
-using DrawStageClock = std::chrono::steady_clock;
+using DrawStageClock = DebugStatsClock;
 
 uint64_t DrawStageElapsedNs(DrawStageClock::time_point start)
 {
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DrawStageClock::now() - start).count());
 }
 
+
 struct VertexRecordRequirement
 {
+	// Records [first, records) are the only ones the draw can fetch.
+	uint32_t first   = 0;
 	uint32_t records = 0;
 	bool     valid   = true;
 };
@@ -79,8 +85,25 @@ VertexRecordRequirement ResolveLinearVertexRecords(int32_t first_vertex, uint32_
 		return {.valid = false};
 	}
 	const uint64_t records = static_cast<uint64_t>(first_vertex) + vertex_count;
-	return records <= UINT32_MAX ? VertexRecordRequirement {.records = static_cast<uint32_t>(records)}
-	                             : VertexRecordRequirement {.valid = false};
+	return records <= UINT32_MAX
+	           ? VertexRecordRequirement {.first = static_cast<uint32_t>(first_vertex), .records = static_cast<uint32_t>(records)}
+	           : VertexRecordRequirement {.valid = false};
+}
+
+// Smallest and largest index value; one loop per index width so it vectorizes.
+template <typename Index>
+static std::pair<uint32_t, uint32_t> IndexValueRange(const uint8_t* bytes, uint32_t index_count)
+{
+	Index minimum = std::numeric_limits<Index>::max();
+	Index maximum = 0;
+	for (uint32_t index = 0; index < index_count; ++index)
+	{
+		Index value = 0;
+		std::memcpy(&value, bytes + static_cast<uint64_t>(index) * sizeof(Index), sizeof(Index));
+		minimum = std::min(minimum, value);
+		maximum = std::max(maximum, value);
+	}
+	return {minimum, maximum};
 }
 
 VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint32_t index_count, VkIndexType index_type,
@@ -104,16 +127,10 @@ VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint
 		return {};
 	}
 
-	const auto* bytes = static_cast<const uint8_t*>(index_addr);
-	uint32_t    minimum = UINT32_MAX;
-	uint32_t    maximum = 0;
-	for (uint32_t index = 0; index < index_count; ++index)
-	{
-		uint32_t value = 0;
-		std::memcpy(&value, bytes + static_cast<uint64_t>(index) * element_size, element_size);
-		minimum = std::min(minimum, value);
-		maximum = std::max(maximum, value);
-	}
+	const auto* bytes   = static_cast<const uint8_t*>(index_addr);
+	const auto  range   = element_size == 2u ? IndexValueRange<uint16_t>(bytes, index_count) : IndexValueRange<uint32_t>(bytes, index_count);
+	const uint32_t minimum = range.first;
+	const uint32_t maximum = range.second;
 
 	const int64_t first = static_cast<int64_t>(minimum) + vertex_offset;
 	const int64_t last  = static_cast<int64_t>(maximum) + vertex_offset;
@@ -121,7 +138,7 @@ VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint
 	{
 		return {.valid = false};
 	}
-	return {.records = static_cast<uint32_t>(last) + 1u};
+	return {.first = static_cast<uint32_t>(first), .records = static_cast<uint32_t>(last) + 1u};
 }
 
 uint32_t ResolveVertexClipProbeDescriptorSet(const ShaderVertexInputInfo& vs_input_info,
@@ -298,11 +315,13 @@ bool DispatchTextureExtentMatches(const ShaderComputeInputInfo& input, const cha
 	return false;
 }
 
-bool ShaderSamplesDepthAttachment(CommandBuffer* buffer, const RenderDepthInfo& depth, const ShaderBindResources& bind)
+// Returns the read-only descriptor that samples the bound depth attachment, or nullptr.
+static const ShaderTextureDescriptor* FindSampledDepthAttachment(CommandBuffer* buffer, const RenderDepthInfo& depth,
+                                                                 const ShaderBindResources& bind)
 {
 	if (buffer == nullptr || depth.vulkan_buffer == nullptr)
 	{
-		return false;
+		return nullptr;
 	}
 	const bool gen5 = Config::IsNextGen();
 	for (int i = 0; i < bind.textures2D.textures_num; ++i)
@@ -327,24 +346,44 @@ bool ShaderSamplesDepthAttachment(CommandBuffer* buffer, const RenderDepthInfo& 
 		{
 			if (alias == depth.vulkan_buffer)
 			{
-				return true;
+				return &descriptor;
 			}
 		}
 	}
-	return false;
+	return nullptr;
 }
 
 DepthStencilAttachmentAccess ResolveDrawDepthStencilAccess(CommandBuffer* buffer, const RenderDepthInfo& depth,
 	                                                        const ShaderBindResources& vertex_bind,
-	                                                        const ShaderBindResources& pixel_bind)
+	                                                        const ShaderBindResources& pixel_bind, const HW::Shader& sh_ctx)
 {
-	const bool sampled_in_same_draw = ShaderSamplesDepthAttachment(buffer, depth, vertex_bind) ||
-	                                  ShaderSamplesDepthAttachment(buffer, depth, pixel_bind);
-	const auto access = ResolveDepthStencilAttachmentAccess(
-	    depth, sampled_in_same_draw, g_render_ctx->GetGraphicCtx()->load_store_op_none_supported);
+	const auto* sampled       = FindSampledDepthAttachment(buffer, depth, vertex_bind);
+	const bool  pixel_sampled = sampled == nullptr;
+	if (pixel_sampled)
+	{
+		sampled = FindSampledDepthAttachment(buffer, depth, pixel_bind);
+	}
+	const bool store_op_none = g_render_ctx->GetGraphicCtx()->load_store_op_none_supported;
+	const auto access        = ResolveDepthStencilAttachmentAccess(depth, sampled != nullptr, store_op_none);
 	if (access == DepthStencilAttachmentAccess::Unsupported)
 	{
-		EXIT("same-draw depth sampling conflicts with attachment writes or missing store-op-none support\n");
+		const auto& t = sampled->texture;
+		EXIT("same-draw depth sampling conflicts with attachment writes: depth{addr=0x%012" PRIx64 " size=0x%" PRIx64
+		     " %ux%u vk_format=%u slices=%u..%u clear=%d/%d write=%d suppress=%d test=%d stencil_test=%d} store_op_none=%d "
+		     "sampled{stage=%s slot=%d op=%u addr=0x%012" PRIx64 " fmt=%u %ux%u type=%u tile=%u levels=%u..%u array=%u depth=%u} "
+		     "vs=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n",
+		     depth.depth_buffer_vaddr, depth.depth_buffer_size, depth.width, depth.height, static_cast<uint32_t>(depth.format),
+		     depth.slice_start, depth.slice_max, depth.depth_clear_enable ? 1 : 0, depth.stencil_clear_enable ? 1 : 0,
+		     depth.depth_write_enable ? 1 : 0, depth.suppress_depth_write ? 1 : 0, depth.depth_test_enable ? 1 : 0,
+		     depth.stencil_test_enable ? 1 : 0, store_op_none ? 1 : 0, pixel_sampled ? "ps" : "vs", sampled->slot,
+		     static_cast<uint32_t>(sampled->sample_operation), t.Base40(), static_cast<uint32_t>(t.Format()),
+		     t.Width5() + 1u, t.Height5() + 1u, static_cast<uint32_t>(t.Type()), static_cast<uint32_t>(t.TileMode()),
+		     static_cast<uint32_t>(t.BaseLevel()), static_cast<uint32_t>(t.LastLevel()), static_cast<uint32_t>(t.BaseArray5()),
+		     static_cast<uint32_t>(t.Depth()), sh_ctx.GetVs().gs_regs.chksum, sh_ctx.GetPs().ps_regs.chksum);
+	}
+	if (access != DepthStencilAttachmentAccess::Writable)
+	{
+		InitializeReadOnlyDepthFirstUse(buffer, depth);
 	}
 	return access;
 }
@@ -356,7 +395,41 @@ DepthStencilAttachmentAccess ResolveDrawDepthStencilAccess(CommandBuffer* buffer
 void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
                                            HW::Shader* sh_ctx, uint32_t index_count, uint32_t index_type_and_size,
 	                                       const void* index_addr, uint32_t instance_count, int32_t vertex_offset_add,
-	                                       uint32_t first_instance);
+	                                       uint32_t first_instance, SubmissionId* pending_submission);
+// Selects the dual-source (SRC1) lowering for one draw. Guest state is resolved first. The format
+// query runs only for a candidate on a device where dual-source blending is enabled.
+static bool ResolveDrawDualSourceBlend(const HW::Context* ctx, const HW::PixelShaderInfo& ps, const RenderColorInfo& color,
+                                const ShaderPixelInputInfo& ps_input_info)
+{
+	const auto* gctx = g_render_ctx->GetGraphicCtx();
+	if (gctx == nullptr)
+	{
+		return false;
+	}
+	State::DualSourceBlendInputs in;
+	in.blend0                           = ctx->GetBlendControl(0);
+	in.blend_bypass0                    = ctx->GetRenderTarget(0).info.blend_bypass;
+	in.slot0_active                     = RenderColorSlotActive(color, 0) && color.attachment[0].attachment_format != VK_FORMAT_UNDEFINED;
+	in.targets_num                      = color.targets_num;
+	in.program_admitted                 = Config::IsNextGen() && ps_input_info.stage_enabled && !ps.ps_embedded;
+	in.null_exports_only                = ps_input_info.has_only_null_exports;
+	in.exports                          = &ps_input_info.color_exports;
+	in.output_mode                      = ps_input_info.target_output_mode;
+	in.output_order                     = ps_input_info.target_output_order;
+	in.host_dual_source_enabled         = gctx->blend_capabilities.enabled.dual_source_blend == VK_TRUE;
+	in.host_max_dual_source_attachments = gctx->blend_capabilities.max_dual_source_attachments;
+	// Optimistic first pass: every host input except the format is checked without a driver query.
+	in.target0_blendable = true;
+	if (State::ResolveDualSourceBlend(in) != State::DualSourceBlendDecision::Eligible)
+	{
+		return false;
+	}
+	VkFormatProperties format_properties {};
+	vkGetPhysicalDeviceFormatProperties(gctx->physical_device, color.attachment[0].attachment_format, &format_properties);
+	in.target0_blendable = (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0u;
+	return State::ResolveDualSourceBlend(in) == State::DualSourceBlendDecision::Eligible;
+}
+
 static bool vertex_shader_is_disabled(HW::Shader* sh_ctx)
 {
 	if (const auto& vs = sh_ctx->GetVs();
@@ -386,20 +459,92 @@ static const char* shader_disable_reason(HW::Shader* sh_ctx)
 	return nullptr;
 }
 
-uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen, uint32_t groups_x,
+static bool StorageSeedOffsetBoundsMatch(const ShaderStorageImageTileCoverage& coverage,
+                                         const ShaderBufferResource& resource, uint64_t width, uint64_t height)
+{
+	const uint64_t address = resource.Base48();
+	const uint64_t declared_size = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
+	if (coverage.origin_byte_offset == -1 && coverage.bounds_byte_offset == 0u)
+	{
+		uint32_t bounds[2] {};
+		return address != 0u && declared_size >= sizeof(bounds) &&
+		       GpuMemoryCaptureSnapshotReadOnlyBuffer(address, sizeof(bounds), bounds) &&
+		       bounds[0] == width && bounds[1] == height;
+	}
+	if (coverage.origin_byte_offset < 0 || coverage.bounds_byte_offset < 8u ||
+	    (coverage.bounds_byte_offset & 3u) != 0u)
+	{
+		return false;
+	}
+	const uint64_t origin_offset = static_cast<uint32_t>(coverage.origin_byte_offset);
+	uint32_t origin_and_bounds[4] {};
+	if (origin_offset != static_cast<uint64_t>(coverage.bounds_byte_offset) - 8u ||
+	    address == 0u || (address & 3u) != 0u || origin_offset > declared_size ||
+	    sizeof(origin_and_bounds) > declared_size - origin_offset || address > UINT64_MAX - origin_offset)
+	{
+		return false;
+	}
+	return GpuMemoryCaptureSnapshotReadOnlyBuffer(address + origin_offset, sizeof(origin_and_bounds), origin_and_bounds) &&
+	       origin_and_bounds[0] == 0u && origin_and_bounds[1] == 0u &&
+	       origin_and_bounds[2] == width && origin_and_bounds[3] == height;
+}
+
+static bool StorageSeedInputsAreDisjoint(const ShaderBindResources& bind, const ShaderTextureResource& texture,
+                                         uint32_t width, uint32_t height)
+{
+	// This proof covers a single linear image. Its inputs must retain their
+	// original bytes rather than alias an image whose initialization is omitted.
+	if (texture.Type() != 9u || texture.TileMode() != 0u || texture.MaxMip() != 0u ||
+	    texture.BCSwizzle() != 0u || texture.MetaCompress() || texture.WriteCompress() ||
+	    ShaderGen5TextureIsBlockCompressed(texture.Format()))
+	{
+		return false;
+	}
+	const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(texture.Format());
+	if (bytes_per_element == 0u)
+	{
+		return false;
+	}
+	const uint32_t pitch = ShaderGen5ResolveLinearPitch(width, texture.Format(), texture.Type(), texture.fields[4]);
+	const uint64_t image_address = texture.Base40();
+	const uint64_t image_size = static_cast<uint64_t>(pitch) * height * bytes_per_element;
+	if (pitch < width || image_address == 0u || image_size == 0u ||
+	    image_address > UINT64_MAX - image_size)
+	{
+		return false;
+	}
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		const auto& resource = bind.storage_buffers.buffers[i];
+		const uint64_t address = resource.Base48();
+		const uint64_t size = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
+		if (!ShaderStorageUsageIsReadOnly(bind.storage_buffers.usages[i]) || address == 0u || size == 0u ||
+		    address > UINT64_MAX - size || (address < image_address + image_size && image_address < address + size))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+uint64_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen, uint32_t groups_x,
                                           uint32_t groups_y, uint32_t groups_z)
 {
-	if (!next_gen || input_info.storage_image_write_only_mask == 0u)
+	if (!next_gen || input_info.storage_image_write_only_mask == 0u ||
+	    input_info.bind.textures2D.textures_num < 0 ||
+	    input_info.bind.textures2D.textures_num > ShaderTextureResources::RES_MAX ||
+	    input_info.bind.storage_buffers.buffers_num < 0 ||
+	    input_info.bind.storage_buffers.buffers_num > ShaderStorageResources::BUFFERS_MAX)
 	{
 		return 0u;
 	}
 
 	const uint64_t global_z = static_cast<uint64_t>(groups_z) * input_info.threads_num[2];
-	uint32_t       result   = 0u;
+	uint64_t       result   = 0u;
 	for (int i = 0; i < input_info.bind.textures2D.textures_num; ++i)
 	{
 		const auto& descriptor = input_info.bind.textures2D.desc[i];
-		if ((input_info.storage_image_write_only_mask & (1u << static_cast<uint32_t>(i))) == 0u ||
+		if ((input_info.storage_image_write_only_mask & (uint64_t {1} << static_cast<uint32_t>(i))) == 0u ||
 		    !descriptor.textures2d_without_sampler)
 		{
 			continue;
@@ -417,6 +562,19 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 		const uint64_t height = static_cast<uint64_t>(descriptor.texture.Height5()) + 1u;
 		const uint64_t depth  = shape == ShaderGen5SampledTextureShape::TwoDimensional ? 1u :
 		                       static_cast<uint64_t>(descriptor.texture.Depth()) + 1u;
+		if (coverage.origin_byte_offset >= 0 &&
+		    ((input_info.dispatch_mode & 1u) == 0u || (input_info.dispatch_mode & 2u) != 0u || input_info.thread_limits_used ||
+		     shape != ShaderGen5SampledTextureShape::TwoDimensional ||
+		     !StorageSeedInputsAreDisjoint(input_info.bind, descriptor.texture, static_cast<uint32_t>(width),
+		                                   static_cast<uint32_t>(height))))
+		{
+			continue;
+		}
+		if (coverage.bounds_storage_buffer_index < 0 &&
+		    (coverage.origin_byte_offset != -1 || coverage.bounds_byte_offset != 0u))
+		{
+			continue;
+		}
 		if (coverage.bounds_storage_buffer_index >= 0)
 		{
 			const auto& buffers = input_info.bind.storage_buffers;
@@ -425,19 +583,14 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 			{
 				continue;
 			}
-			const auto& bounds_resource = buffers.buffers[bounds_index];
-			const uint64_t address = bounds_resource.Base48();
-			uint32_t bounds[2] {};
-			if (address == 0u || ShaderBufferByteSize(bounds_resource.Stride(), bounds_resource.NumRecords()) < sizeof(bounds) ||
-			    !GpuMemoryCaptureSnapshotReadOnlyBuffer(address, sizeof(bounds), bounds) ||
-			    bounds[0] != width || bounds[1] != height)
+			if (!StorageSeedOffsetBoundsMatch(coverage, buffers.buffers[bounds_index], width, height))
 			{
 				continue;
 			}
 		}
 		if (global_x <= UINT32_MAX && global_y <= UINT32_MAX && global_x >= width && global_y >= height && global_z >= depth)
 		{
-			result |= 1u << static_cast<uint32_t>(i);
+			result |= uint64_t {1} << static_cast<uint32_t>(i);
 		}
 	}
 	if (result != 0u)
@@ -446,7 +599,7 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 		static std::atomic_uint32_t logged {0};
 		if (dump && logged.fetch_add(1, std::memory_order_relaxed) < 32u)
 		{
-			KYTY_LOG_DEBUG("KYTY_STORAGE_SEED_SKIP mask=0x%08" PRIx32 "\n", result);
+			KYTY_LOG_DEBUG("KYTY_STORAGE_SEED_SKIP mask=0x%016" PRIx64 "\n", result);
 		}
 	}
 	return result;
@@ -454,7 +607,7 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 
 static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint64_t draw_modifier)
 {
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -470,7 +623,7 @@ static void MaybeDumpAutoDrawSkip(const char* reason, uint32_t index_count, uint
 
 static void MaybeDumpIndexDrawSkip(const char* reason, uint32_t index_count, uint64_t draw_modifier, uint32_t type)
 {
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -552,7 +705,7 @@ static uint64_t PixelShaderSnapshotHash(const ShaderPixelInputInfo& input)
 
 static void MaybeDumpPixelShaderTextureBytes(uint64_t shader_id, int index, const ShaderTextureResource& resource)
 {
-	if (std::getenv("KYTY_DUMP_PS_BYTES") == nullptr || !Config::IsNextGen() || resource.TileMode() != 5u)
+	if (static const char* env = std::getenv("KYTY_DUMP_PS_BYTES"); env == nullptr || !Config::IsNextGen() || resource.TileMode() != 5u)
 	{
 		return;
 	}
@@ -613,7 +766,7 @@ static void MaybeDumpPixelShaderSnapshot(const char* path, const HW::Shader& sh,
 	static std::set<uint64_t> seen;
 	static uint32_t           logs  = 0;
 	uint32_t                  limit = 128u;
-	if (const char* env_limit = std::getenv("KYTY_DUMP_PS_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	if (static const char* env_limit = std::getenv("KYTY_DUMP_PS_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
 	{
 		const auto parsed = std::strtoul(env_limit, nullptr, 10);
 		if (parsed > 0u && parsed <= 4096u)
@@ -688,7 +841,7 @@ static void MaybeDumpPixelShaderSnapshot(const char* path, const HW::Shader& sh,
 static void MaybeDumpVideoDrawReady(const char* path, const HW::Shader& sh, const ShaderPixelInputInfo& ps_input,
                                     const RenderColorInfo& color, uint32_t count, uint32_t primitive_type)
 {
-	if (std::getenv("KYTY_DUMP_VIDEO_DRAW") == nullptr || !Config::IsNextGen())
+	if (static const char* env = std::getenv("KYTY_DUMP_VIDEO_DRAW"); env == nullptr || !Config::IsNextGen())
 	{
 		return;
 	}
@@ -743,7 +896,7 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 {
 	MaybeDumpPixelShaderSnapshot("index", sh, ps_input, index_count, primitive_type);
 	MaybeDumpVideoDrawReady("index", sh, ps_input, color, index_count, primitive_type);
-	if (std::getenv("KYTY_DUMP_DRAW2") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW2"); env != nullptr)
 	{
 		static uint32_t draw2_logs = 0;
 		if (draw2_logs < 5000)
@@ -764,13 +917,13 @@ static void MaybeDumpIndexDrawReady(const RenderColorInfo& color, const RenderDe
 			}
 		}
 	}
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
 	static uint32_t logs = 0;
 	uint32_t limit = 48u;
-	if (const char* env_limit = std::getenv("KYTY_DUMP_DRAW_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	if (static const char* env_limit = std::getenv("KYTY_DUMP_DRAW_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
 	{
 		const auto parsed = std::strtoul(env_limit, nullptr, 10);
 		if (parsed > 0u && parsed <= 100000u)
@@ -840,7 +993,7 @@ static void MaybeDumpAutoDrawReady(const RenderColorInfo& color, const RenderDep
 {
 	MaybeDumpPixelShaderSnapshot("auto", sh, ps_input, index_count, primitive_type);
 	MaybeDumpVideoDrawReady("auto", sh, ps_input, color, index_count, primitive_type);
-	if (std::getenv("KYTY_DUMP_DRAW") == nullptr || !DumpDrawFrameSelected())
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env == nullptr || !DumpDrawFrameSelected())
 	{
 		return;
 	}
@@ -918,7 +1071,7 @@ bool GraphicsResolvePrimitiveDrawPlan(uint32_t primitive_type, uint32_t guest_co
 
 static bool PrimitiveDumpMatches(uint32_t primitive_type)
 {
-	const char* selector = std::getenv("KYTY_DUMP_PRIMITIVE");
+	static const char* selector = std::getenv("KYTY_DUMP_PRIMITIVE");
 	if (selector == nullptr || selector[0] == '\0')
 	{
 		return false;
@@ -944,7 +1097,7 @@ void MaybeDumpPrimitiveDrawPlan(const char* path, uint32_t primitive_type, uint3
 
 	static uint32_t logs = 0;
 	uint32_t        limit = 128u;
-	if (const char* env_limit = std::getenv("KYTY_DUMP_PRIMITIVE_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	if (static const char* env_limit = std::getenv("KYTY_DUMP_PRIMITIVE_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
 	{
 		const auto parsed = std::strtoul(env_limit, nullptr, 10);
 		if (parsed > 0u && parsed <= 100000u)
@@ -1059,7 +1212,7 @@ GraphicsSkippedGeState GraphicsDescribeSkippedGeState(const HW::Context& ctx, co
 static void MaybeReportNativeWaveInput(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shader,
                                       const ShaderVertexInputInfo& input, const GraphicsNativeWaveDrawInfo& draw)
 {
-	const char* prefix = std::getenv("KYTY_NATIVE_WAVE_REPORT");
+	static const char* prefix = std::getenv("KYTY_NATIVE_WAVE_REPORT");
 	if (prefix == nullptr || prefix[0] == '\0')
 	{
 		return;
@@ -1142,14 +1295,16 @@ static bool ShouldSkipUnsupportedGeShader(const HW::Context& ctx, const HW::User
 
 // Every skipped guest draw is counted and its first occurrence per reason is
 // published natively, so an omission is never silent under Silent logging.
-static bool SkipGuestDrawForUnsupportedVertexState(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx)
+// An admitted geometry pass replaces the GE stage-shape admission.
+static bool SkipGuestDrawForUnsupportedVertexState(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx,
+                                                   bool geometry_pass)
 {
 	if (!DrawHasValidVertexShader(sh_ctx))
 	{
 		GraphicsRecordSkippedDraw(GraphicsSkippedDrawReason::InvalidVertexShader, nullptr);
 		return true;
 	}
-	return ShouldSkipUnsupportedGeShader(ctx, ucfg, sh_ctx);
+	return !geometry_pass && ShouldSkipUnsupportedGeShader(ctx, ucfg, sh_ctx);
 }
 
 // Opt-in recent-draw identity for commands already emitted into buffer. The
@@ -1176,12 +1331,103 @@ static void RecordRecentGuestDraw(uint64_t submit_id, const CommandBuffer* buffe
 	VulkanRecentDrawRecord(buffer, draw);
 }
 
+// Operation trace descriptions. A plane that is not attached yields no flags, so nothing is guessed.
+static OperationTraceDepthTarget OperationTraceDepthOf(const RenderDepthInfo& depth)
+{
+	if (depth.depth_buffer_vaddr == 0 && depth.depth_buffer_size == 0)
+	{
+		return {};
+	}
+	OperationTraceDepthTarget target {};
+	target.address         = depth.depth_buffer_vaddr;
+	target.size            = depth.depth_buffer_size;
+	target.reads           = depth.depth_test_enable;
+	target.writes          = depth.depth_write_enable && !depth.suppress_depth_write;
+	target.htile_present   = depth.htile;
+	target.stencil_present = depth.stencil_buffer_size != 0;
+	target.clear_present   = depth.depth_clear_enable;
+	return target;
+}
+
+static uint32_t OperationTraceColorOutputs(const RenderColorInfo& color)
+{
+	uint32_t outputs = 0;
+	for (uint32_t i = 0; i < color.targets_num && i < RenderColorInfo::TARGETS_MAX; ++i)
+	{
+		if (color.attachment[i].type != RenderColorType::NoColorOutput)
+		{
+			++outputs;
+		}
+	}
+	return outputs;
+}
+
+enum class GuestDeviceAddressReadPreparation
+{
+	Ready,
+	PendingWriteBack,
+	PendingReader,
+};
+
+static GuestDeviceAddressReadPreparation PrepareGuestDeviceAddressForRead(
+	CommandBuffer* buffer, const ShaderBindResources& first, const ShaderBindResources* second,
+	GuestDeviceAddressTable* table, SubmissionId* pending_submission)
+{
+	EXIT_IF(buffer == nullptr || table == nullptr || pending_submission == nullptr);
+	*table = {};
+	*pending_submission = {};
+	if (!first.device_address_used && (second == nullptr || !second->device_address_used))
+	{
+		return GuestDeviceAddressReadPreparation::Ready;
+	}
+
+	if (PublishPendingStorageToGuestAddress(buffer, pending_submission))
+	{
+		return GuestDeviceAddressReadPreparation::PendingWriteBack;
+	}
+
+	const GpuQueueId consumer(static_cast<uint32_t>(buffer->GetQueueIndex()));
+	// Keep write-back before table preparation, but outside the GDA registry
+	// lock. The draw and both descriptor stages share this one publication.
+	GuestDeviceAddressWriteBack(g_render_ctx->GetGraphicCtx(), consumer);
+	SubmissionId reader;
+	EXIT_IF(!buffer->GetSubmissionId(&reader));
+	SubmissionId dependency;
+	switch (GuestDeviceAddressPrepareForRead(g_render_ctx->GetGraphicCtx(), reader, table, &dependency))
+	{
+		case GuestDeviceAddressPrepareResult::Ready: return GuestDeviceAddressReadPreparation::Ready;
+		case GuestDeviceAddressPrepareResult::PendingReader:
+			*pending_submission = dependency;
+			return GuestDeviceAddressReadPreparation::PendingReader;
+		case GuestDeviceAddressPrepareResult::Failed:
+			EXIT("guest memory device addressing is unavailable for a shader that dereferences guest pointers\n");
+	}
+	return GuestDeviceAddressReadPreparation::PendingWriteBack;
+}
+
+// The display cohort owns display buffers and depth-only display passes; the
+// render-target cohort owns scaled offscreen color targets and their depth.
+static const RenderResolutionPlan& SelectMaterializationResolution(const RenderColorInfo&      color,
+                                                                   const RenderResolutionPlan& depth_only,
+                                                                   const RenderResolutionPlan& display,
+                                                                   const RenderResolutionPlan& target)
+{
+	if (!RenderColorHasActiveTarget(color))
+	{
+		return depth_only;
+	}
+	return target.classification == ResolutionClassification::Scaled ? target : display;
+}
+
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
-                             uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance)
+                             uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
+                             SubmissionId* pending_submission)
 {
 	KYTY_PROFILER_FUNCTION();
 
+	EXIT_IF(pending_submission == nullptr);
+	*pending_submission = {};
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(ucfg == nullptr);
 	EXIT_IF(g_render_ctx == nullptr);
@@ -1189,11 +1435,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	EXIT_IF(buffer->IsInvalid());
 
 	// Diagnostic A/B: KYTY_AB_SKIP_ALL_DRAWS=1 skips graphics draws (DEVICE_LOST triage).
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_ALL_DRAWS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_ALL_DRAWS"); ab != nullptr && ab[0] != '\0')
 	{
 		return;
 	}
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_INDEXED_DRAWS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_INDEXED_DRAWS"); ab != nullptr && ab[0] != '\0')
 	{
 		return;
 	}
@@ -1202,13 +1448,13 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 	DebugStatsRecordDrawRenderLockWait(DrawStageElapsedNs(render_lock_start));
 	const auto state_setup_start = DrawStageClock::now();
-	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx))
+	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx, false))
 	{
 		MaybeDumpIndexDrawSkip("invalid-vs-or-ge", index_count, draw_modifier, type);
 		return;
 	}
 	// Diagnostic A/B: skip draws whose depth target is a 1x1 D/S surface while color is larger.
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_TINY_DEPTH"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_TINY_DEPTH"); ab != nullptr && ab[0] != '\0')
 	{
 		RenderDepthInfo probe {};
 		DescribeRenderDepthInfo(*ctx, &probe);
@@ -1220,7 +1466,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		}
 	}
 	// Diagnostic A/B: skip embedded-VS draws (vs data_addr == 0).
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_EMBEDDED_VS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_EMBEDDED_VS"); ab != nullptr && ab[0] != '\0')
 	{
 		const auto& vs = sh_ctx->GetVs();
 		if (vs.vs_embedded || vs.vs_regs.data_addr == 0)
@@ -1231,7 +1477,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		}
 	}
 	// Diagnostic A/B: skip draws whose PS data_addr matches KYTY_AB_SKIP_PS_ADDR (hex).
-	if (const char* ab_ps = std::getenv("KYTY_AB_SKIP_PS_ADDR"); ab_ps != nullptr && ab_ps[0] != '\0')
+	if (static const char* ab_ps = std::getenv("KYTY_AB_SKIP_PS_ADDR"); ab_ps != nullptr && ab_ps[0] != '\0')
 	{
 		char*      end     = nullptr;
 		const auto skip_ps = std::strtoull(ab_ps, &end, 0);
@@ -1241,7 +1487,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 			return;
 		}
 	}
-	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
+	if (static const char* env = std::getenv("KYTY_DUMP_DRAW"); env != nullptr)
 	{
 		static uint32_t logs = 0;
 		if (logs < 48u)
@@ -1286,7 +1532,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 		if (!AutoDrawModifierSupported(draw_modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !AutoDrawModifierSupported(draw_modifier) condition ignored (continuing)\n"); }
 		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, index_type_and_size, index_addr,
-		                                      instance_count, vertex_offset_add, first_instance);
+		                                      instance_count, vertex_offset_add, first_instance, pending_submission);
 		return;
 	}
 
@@ -1348,9 +1594,6 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	}
 	VulkanSampleLocationState sample_locations {};
 	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info), &sample_locations);
-	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
-	RequireSupportedRenderResolutionPlan(depth_only_resolution);
-
 	ShaderVertexInputInfo vs_input_info;
 	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info, &ctx->GetShaderStagesRaw());
 	MaybeReportNativeWaveInput(*ctx, *ucfg, *sh_ctx, vs_input_info,
@@ -1381,8 +1624,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	MaybeDumpPrimitiveDrawPlan("indexed", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
-	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters(), ctx->GetDepthControl());
-	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info, !ps_required);
+	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters(), ctx->GetAlphaToMaskEnable());
+	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info, !ps_required);
 	ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count);
 	if (ShaderPixelInput0ProbeEligible(Config::IsNextGen(), sh_ctx->GetPs().ps_embedded))
 	{
@@ -1390,11 +1633,22 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		    ShaderResolvePixelProbeConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count, ps_input_info.stage_enabled);
 	}
 	ValidatePixelProbeSelection(sh_ctx->GetPs(), ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
+	GuestDeviceAddressTable device_address_table {};
+	if (PrepareGuestDeviceAddressForRead(buffer, vs_input_info.bind, &ps_input_info.bind, &device_address_table,
+	                                     pending_submission) != GuestDeviceAddressReadPreparation::Ready)
+	{
+		return;
+	}
+	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
+	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
+	const auto target_resolution = PrepareRenderTargetResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
+	RequireSupportedRenderResolutionPlan(target_resolution);
 	DebugStatsRecordDrawStateSetup(DrawStageElapsedNs(state_setup_start));
 	const auto materialization_start = DrawStageClock::now();
-	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
+	const auto& materialization_resolution = SelectMaterializationResolution(color_info, depth_only_resolution, resolution,
+	                                                                         target_resolution);
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
 	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.width : 0,
@@ -1405,10 +1659,12 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	// Guest depth size 0 can materialize as 1x1 while color is full-screen; drop it
 	// before framebuffer/pipeline creation so Xe does not hang on illegal FB extent.
 	SanitizeRenderDepthAgainstColor(&color_info, &depth_info);
+	CollapseRenderColorLayersWithoutLayerExport(&color_info, ctx->GetShaderRegisters().m_paClVsOutCntl);
+	ps_input_info.dual_source_blend = ResolveDrawDualSourceBlend(ctx, sh_ctx->GetPs(), color_info, ps_input_info);
 	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
 	const auto pipeline_setup_start = DrawStageClock::now();
-	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind);
+	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind, *sh_ctx);
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access);
 	const VulkanImage* stencil_attached_depth =
 	    depth_access == DepthStencilAttachmentAccess::DepthReadOnly ? depth_info.vulkan_buffer : nullptr;
@@ -1416,7 +1672,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
 	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordState();
 
 	int32_t vertex_offset = 0;
 	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info, &vertex_offset, vertex_offset_add))
@@ -1447,7 +1703,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		    ps_input_info.input0_probe.match_ordinal, ps_input_info.input0_probe.mrt_target,
 		    ps_input_info.input0_probe.export_ordinal, depth_info, *framebuffer, *ctx, sample_locations);
 	}
-	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
+	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
 
@@ -1458,18 +1714,36 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	SetDynamicParams(vk_buffer, pipeline);
 
+	// The vertex range was resolved from the guest indexes; only their snapshot is
+	// guaranteed to hold the same values when the GPU reads them.
+	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
+	const auto     index_buffer_binding_start = DrawStageClock::now();
+	VulkanBuffer*  indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+	const bool     indices_snapshotted = indices != nullptr;
+	if (indices == nullptr)
+	{
+		indices = static_cast<VulkanBuffer*>(
+		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
+	}
+	if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
+
+	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
+	DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start));
+
 	const auto     vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_records);
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records, indices_snapshotted,
+	                  first_instance, instance_count);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
 	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum,
-	                stencil_attached_depth);
+	                stencil_attached_depth, nullptr, &device_address_table, ScaledImageReadAccess::Refused, &color_info);
 
 	uint32_t declared_vertex_records = 0;
 	for (int buffer_index = 0; buffer_index < vs_input_info.buffers_num; ++buffer_index)
 	{
-		declared_vertex_records = std::max(declared_vertex_records, vs_input_info.buffers[buffer_index].num_records);
+		const auto& stream = vs_input_info.buffers[buffer_index];
+		declared_vertex_records = stream.instance ? declared_vertex_records : std::max(declared_vertex_records, stream.num_records);
 	}
 	const auto guest_vp_xy = State::ResolveViewportXy(ctx->GetScreenViewport().viewports[0].xscale,
 	                                                  ctx->GetScreenViewport().viewports[0].xoffset,
@@ -1549,22 +1823,13 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum,
-	                stencil_attached_depth);
+	                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info),
+	                &color_info);
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 
-	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
-	const auto     index_buffer_binding_start = DrawStageClock::now();
-	VulkanBuffer*  indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-	if (indices == nullptr)
-	{
-		indices = static_cast<VulkanBuffer*>(
-		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
-	}
-	if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
-
-	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
-	DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start));
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
+	GraphicsOperationTraceIndexedDraw(index_addr_u64, index_size, index_type_and_size <= 1u, vs_input_info, ps_input_info,
+	                                  OperationTraceColorOutputs(color_info), OperationTraceDepthOf(depth_info));
 
 	const auto command_emission_start = DrawStageClock::now();
 	if (vertex_clip_probe != nullptr)
@@ -1573,6 +1838,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		vertex_clip_probe->CaptureAttachmentBeforePass(buffer);
 	}
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
+	auto* pass_buffer = buffer->RecordInsideRenderPass();
 	if (vertex_clip_probe != nullptr)
 	{
 		vertex_clip_probe->BeginDepthPassQuery(buffer);
@@ -1582,13 +1848,13 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
-			vkCmdDrawIndexed(vk_buffer, primitive_plan.chunk_count, instance_count, i, vertex_offset, first_instance);
+			vkCmdDrawIndexed(pass_buffer, primitive_plan.chunk_count, instance_count, i, vertex_offset, first_instance);
 			DebugStatsRecordDraw();
 			host_draws++;
 		}
 	} else
 	{
-		vkCmdDrawIndexed(vk_buffer, primitive_plan.draw_count, instance_count, 0, vertex_offset, first_instance);
+		vkCmdDrawIndexed(pass_buffer, primitive_plan.draw_count, instance_count, 0, vertex_offset, first_instance);
 		DebugStatsRecordDraw();
 		host_draws++;
 	}
@@ -1599,26 +1865,12 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		vertex_clip_probe->EndDepthPassQuery(buffer);
 	}
 
-	buffer->EndRenderPass();
+	// The pass stays open for a following draw on the same framebuffer. The
+	// vertex-clip probe reads its results with transfers outside it.
 	if (vertex_clip_probe != nullptr)
 	{
+		buffer->CloseRenderPass();
 		vertex_clip_probe->Finish(buffer);
-	}
-
-	// Explicit attachment-write → later shader/attachment-read dependency across the
-	// render-pass boundary. Without this, hosts can hang when the next draw samples
-	// a color target written earlier in the same command buffer.
-	if (vk_buffer != nullptr)
-	{
-		VkMemoryBarrier memory_barrier {};
-		memory_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-		memory_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-		memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-		                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-		                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-		                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-		                     0, 1, &memory_barrier, 0, nullptr, 0, nullptr);
 	}
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
@@ -1643,7 +1895,7 @@ static bool GraphicsRenderDepthStencilCopyClearSource(uint64_t submit_id, Comman
 	if (source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 	TraceRenderTargetLifetimeDepthClearPass(submit_id, *source, *source_framebuffer);
 	buffer->BeginRenderPass(source_framebuffer, &no_color, source, &sample_locations);
-	buffer->EndRenderPass();
+	buffer->CloseRenderPass();
 	return true;
 }
 
@@ -1760,21 +2012,25 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 	                                                   const DepthStencilCopyRequest& request, bool guest_geometry, bool static_rect_list,
 	                                                   const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count,
 	                                                   VulkanBuffer* index_buffer, VkIndexType index_type, int32_t vertex_offset,
-	                                                   uint32_t vertex_records, uint32_t instance_count, uint32_t first_instance)
+	                                                   uint32_t vertex_records, uint32_t instance_count, uint32_t first_instance,
+	                                                   const GuestDeviceAddressTable* device_address_table)
 {
 	EXIT_IF(buffer == nullptr || framebuffer == nullptr || color == nullptr || depth == nullptr);
 	EXIT_IF(guest_geometry && guest_vertex_input == nullptr);
 	EXIT_IF(index_buffer != nullptr && !guest_geometry);
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordState();
 	auto* depth_stencil_copy_renderer = g_render_ctx->GetDepthStencilCopyRenderer();
 	const auto draw = depth_stencil_copy_renderer->PrepareDraw(g_render_ctx->GetGraphicCtx(), request);
 	depth_stencil_copy_renderer->BindPreparedDraw(vk_buffer, draw);
 	if (guest_geometry)
 	{
 		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, guest_vertex_input->bind,
-		                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
-		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input, vertex_records);
+		                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, 0, nullptr, nullptr,
+		                device_address_table);
+		// The copy does not track whether its indexes were snapshotted.
+		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input, 0, vertex_records, false, first_instance,
+		                  instance_count);
 		if (index_buffer != nullptr)
 		{
 			vkCmdBindIndexBuffer(vk_buffer, index_buffer->buffer, 0, index_type);
@@ -1800,7 +2056,7 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 		vkCmdDraw(vk_buffer, vertex_count, 1, 0, 0);
 	}
 	DebugStatsRecordDraw();
-	buffer->EndRenderPass();
+	buffer->CloseRenderPass();
 }
 
 void GraphicsRenderDepthStencilCopyWriteDepthStencil(
@@ -1808,7 +2064,8 @@ void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 	const VulkanSampleLocationState& sample_locations, bool apply_clear,
 	bool effective_depth_write, bool guest_geometry, bool static_rect_list, const DepthStencilCopyVertexStage* vertex_stage,
 	const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count, VulkanBuffer* index_buffer, VkIndexType index_type,
-	int32_t vertex_offset, uint32_t vertex_records, uint32_t instance_count, uint32_t first_instance)
+	int32_t vertex_offset, uint32_t vertex_records, uint32_t instance_count, uint32_t first_instance,
+	const GuestDeviceAddressTable* device_address_table)
 {
 	EXIT_IF(buffer == nullptr || source_info == nullptr);
 	EXIT_IF(guest_geometry && guest_vertex_input == nullptr);
@@ -1843,7 +2100,7 @@ void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 	GraphicsRenderDepthStencilCopySetDrawArea(context, guest_geometry, source_guest, source->extent, &request);
 	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &no_color, &draw_depth, request, guest_geometry, static_rect_list,
 	                                        guest_vertex_input, index_count, index_buffer, index_type, vertex_offset, vertex_records,
-	                                        instance_count, first_instance);
+	                                        instance_count, first_instance, device_address_table);
 
 	InvalidateMemoryObject(draw_depth);
 }
@@ -1851,9 +2108,10 @@ void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
                                            HW::Shader* sh_ctx, uint32_t index_count, uint32_t index_type_and_size,
 	                                       const void* index_addr, uint32_t instance_count, int32_t vertex_offset_add,
-	                                       uint32_t first_instance)
+	                                       uint32_t first_instance, SubmissionId* pending_submission)
 {
 	EXIT_IF(buffer == nullptr || ctx == nullptr || ucfg == nullptr || sh_ctx == nullptr);
+	EXIT_IF(pending_submission == nullptr);
 
 	const auto& render_control = ctx->GetRenderControl();
 	RenderDepthInfo depth_info;
@@ -1914,30 +2172,20 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	VkIndexType                  index_type            = VK_INDEX_TYPE_UINT16;
 	int32_t                      vertex_offset         = 0;
 	uint32_t                     vertex_records        = 0;
+	GuestDeviceAddressTable      device_address_table {};
 	if (indexed_draw)
 	{
-		uint64_t index_size = 0;
 		switch (index_type_and_size)
 		{
 			case 0:
 				index_type = VK_INDEX_TYPE_UINT16;
-				index_size = 2 * static_cast<uint64_t>(index_count);
 				break;
 			case 1:
 				index_type = VK_INDEX_TYPE_UINT32;
-				index_size = 4 * static_cast<uint64_t>(index_count);
 				break;
 			default:
 				if (index_type_and_size != 0 && index_type_and_size != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index_type_and_size != 0 && index_type_and_size != 1 condition ignored (continuing)\n"); }
 		}
-		const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
-		indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-		if (indices == nullptr)
-		{
-			indices = static_cast<VulkanBuffer*>(
-			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
-		}
-		if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
 	}
 	if (guest_geometry)
 	{
@@ -1953,6 +2201,11 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		                          {index_count, indexed_draw, index_type_and_size, first_instance, instance_count,
 		                           reinterpret_cast<uint64_t>(index_addr), vertex_offset_add, std::nullopt});
 		if (!guest_vertex_input.input_resources_valid)
+		{
+			return;
+		}
+		if (PrepareGuestDeviceAddressForRead(buffer, guest_vertex_input.bind, nullptr, &device_address_table,
+		                                     pending_submission) != GuestDeviceAddressReadPreparation::Ready)
 		{
 			return;
 		}
@@ -2009,6 +2262,18 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		}
 		vertex_records = vertex_requirement.records;
 	}
+	if (indexed_draw)
+	{
+		const uint64_t index_size = static_cast<uint64_t>(index_type == VK_INDEX_TYPE_UINT16 ? 2u : 4u) * index_count;
+		const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
+		indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		if (indices == nullptr)
+		{
+			indices = static_cast<VulkanBuffer*>(
+			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
+		}
+		if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
+	}
 
 	if (!color_expansion_enabled)
 	{
@@ -2017,7 +2282,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		    submit_id, buffer, *ctx, &depth_info, sample_locations, true, effective_depth_write, guest_geometry, static_rect_list,
 		    request_vertex_stage,
 		    (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices, index_type, vertex_offset, vertex_records,
-		    instance_count, first_instance);
+		    instance_count, first_instance, (guest_geometry ? &device_address_table : nullptr));
 		return;
 	}
 
@@ -2054,6 +2319,12 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		if (!supported_target_format) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !supported_target_format condition ignored (continuing)\n"); }
 	}
 	if (source->samples != target->samples || source->samples != sample_locations.sample_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source->samples != target->samples || source->samples != sample_locations.sample_count condition ignored (continuing)\n"); }
+	if ((source->IsResolutionScaled() || target->IsResolutionScaled()) &&
+	    (source->extent.width != target->extent.width || source->extent.height != target->extent.height))
+	{
+		EXIT("depth-stencil copy across render resolutions: source=%ux%u target=%ux%u\n", source->extent.width, source->extent.height,
+		     target->extent.width, target->extent.height);
+	}
 	const auto source_guest = source->GetGuestExtent();
 	const auto target_guest = target->GetGuestExtent();
 	if (source_guest.width != target_guest.width || source_guest.height != target_guest.height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source_guest.width != target_guest.width || source_guest.height != target_guest.height condition ignored (continuing)\n"); }
@@ -2064,8 +2335,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	// plane independently of the geometry used for the color expansion.
 	const bool source_modified = GraphicsRenderDepthStencilCopyClearSource(submit_id, buffer, &source_setup, sample_locations);
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
-	GraphicsRenderDepthStencilBarrier(vk_buffer, source);
+	GraphicsRenderDepthStencilBarrier(buffer, source);
 	if (source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL condition ignored (continuing)\n"); }
 
 	RenderDepthInfo no_depth;
@@ -2113,7 +2383,8 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	GraphicsRenderDepthStencilCopySetDrawArea(*ctx, guest_geometry, target_guest, target->extent, &request);
 	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &color_info, depth_attachment, request,
 	                                        guest_geometry, static_rect_list, (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices,
-	                                        index_type, vertex_offset, vertex_records, instance_count, first_instance);
+	                                        index_type, vertex_offset, vertex_records, instance_count, first_instance,
+	                                        (guest_geometry ? &device_address_table : nullptr));
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
 	InvalidateMemoryObject(color_info);
@@ -2126,7 +2397,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		    static_rect_list,
 		    request_vertex_stage,
 		    (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices, index_type, vertex_offset, vertex_records,
-		    instance_count, first_instance);
+		    instance_count, first_instance, (guest_geometry ? &device_address_table : nullptr));
 	} else if (source_modified)
 	{
 		InvalidateMemoryObject(source_setup);
@@ -2142,21 +2413,160 @@ bool AutoDrawModifierSupported(uint64_t draw_modifier)
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+// A merged ES+GS (NGG) auto draw run as a geometry compute pass: one guest
+// Wave64 subgroup per group of input triangles of one instance, three ES lanes
+// per triangle, triangle output that fits one export per lane.
+struct GeometryDrawPlan
+{
+	ShaderGeometryComputeInfo info;
+	uint32_t                  primitives          = 0; // input triangles per instance
+	uint32_t                  groups_per_instance = 0;
+	uint32_t                  groups              = 0;
+};
+
+static bool ResolveGeometryDraw(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx, uint32_t index_count,
+                                uint32_t instance_count, GeometryDrawPlan* plan)
+{
+	constexpr uint32_t kTriangleListPrimType  = 4u;
+	constexpr uint32_t kTriangleStripPrimType = 6u;
+	constexpr uint32_t kTriangleOutPrimType   = 2u;
+	constexpr uint32_t kLanes                 = ShaderGeometryComputeInfo::kLanes;
+	constexpr uint32_t kMaxGroups             = 65535u;
+
+	const auto& raw    = ctx.GetShaderStagesRaw();
+	const auto  stages = GraphicsDecodeGeStages(raw, GraphicsGeGeneration::Gfx103);
+	const auto& vs     = sh_ctx.GetVs();
+	const auto& regs   = ctx.GetShaderRegisters();
+	if (!Config::IsNextGen() || !raw.known || stages.raw_unknown_bits != 0u || stages.kind != GraphicsGeStageKind::MergedEsGs ||
+	    stages.gs_wave_lanes != kLanes || vs.es_regs.data_addr == 0u || vs.gs_back_addr == 0u)
+	{
+		return false;
+	}
+	const uint32_t prim_type    = ucfg.GetPrimType();
+	const uint32_t max_vert_out = regs.m_vgtGsMaxVertOut;
+	if ((prim_type != kTriangleListPrimType && prim_type != kTriangleStripPrimType) || regs.m_vgtGsOutPrimType != kTriangleOutPrimType ||
+	    max_vert_out == 0u || max_vert_out > kLanes || vs.gs_regs.rsrc2.lds_size == 0u)
+	{
+		return false;
+	}
+	const bool strip = prim_type == kTriangleStripPrimType;
+	plan->info.topology             = strip ? ShaderGeometryInputTopology::TriangleStrip : ShaderGeometryInputTopology::TriangleList;
+	plan->info.primitives_per_group = std::min(kLanes / 3u, kLanes / max_vert_out);
+	plan->info.parameter_count      = regs.GetExportCount();
+	plan->info.lds_dwords           = vs.gs_regs.rsrc2.GetLdsSizeDwords();
+	plan->primitives                = strip ? (index_count >= 3u ? index_count - 2u : 0u) : index_count / 3u;
+	plan->groups_per_instance = (plan->primitives + plan->info.primitives_per_group - 1u) / plan->info.primitives_per_group;
+	const uint64_t groups     = static_cast<uint64_t>(plan->groups_per_instance) * instance_count;
+	if (groups > kMaxGroups)
+	{
+		return false;
+	}
+	plan->groups = static_cast<uint32_t>(groups);
+	return true;
+}
+
+// The compute-pass input: the fused front with its output block and guest
+// device addressing bound.
+static ShaderVertexInputInfo MakeGeometryFrontInput(const ShaderVertexInputInfo& front)
+{
+	auto input = front;
+	// Compute has no vertex input stage: the ES reads its streams through the
+	// V#s it loads from the tables, over guest device addresses.
+	input.fetch_external           = false;
+	input.fetch_embedded           = false;
+	input.fetch_inline             = false;
+	input.resources_num            = 0;
+	input.buffers_num              = 0;
+	input.fetch_attrib_data_num    = 0;
+	input.bind.device_address_used = true;
+	input.bind.geometry_used       = true;
+	ShaderCalcBindingIndices(&input.bind);
+	return input;
+}
+
+// The host vertex stage that draws the pass output in place of the guest program.
+static ShaderVertexInputInfo MakeGeometryPullInput(const ShaderVertexInputInfo& front, const GeometryDrawPlan& plan)
+{
+	ShaderVertexInputInfo input;
+	input.program                  = front.program;
+	input.export_count             = static_cast<int>(plan.info.parameter_count);
+	input.geometry_pull            = true;
+	input.geometry_pull_layer      = front.position1_usage == ShaderVertexPosition1Usage::RenderTargetLayer;
+	input.geometry_pull_parameters = plan.info.parameter_count;
+	input.bind.geometry_used       = true;
+	ShaderCalcBindingIndices(&input.bind);
+	return input;
+}
+
+// Records the zeroed output, the pass and the barrier to its vertex-stage
+// readers outside the render pass; sets the output address in `pull`.
+static void RecordGeometryPass(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& ctx, const HW::Shader& sh_ctx,
+                               ShaderVertexInputInfo* front, const GeometryDrawPlan& plan, int32_t first_vertex,
+                               uint32_t first_instance, const GuestDeviceAddressTable* device_address_table,
+                               ShaderVertexInputInfo* pull)
+{
+	const uint64_t bytes  = static_cast<uint64_t>(plan.groups) * plan.info.GroupDwords() * 4u;
+	auto*          output = buffer->AllocateTransientDeviceBuffer(
+        bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	if (output == nullptr)
+	{
+		EXIT("geometry pass output of %" PRIu64 " bytes exceeds the transient device buffer budget\n", bytes);
+	}
+	VkBufferDeviceAddressInfo address_info {};
+	address_info.sType     = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+	address_info.buffer    = output->buffer;
+	const uint64_t address = vkGetBufferDeviceAddress(g_render_ctx->GetGraphicCtx()->device, &address_info);
+	const uint32_t lo      = static_cast<uint32_t>(address);
+	const uint32_t hi      = static_cast<uint32_t>(address >> 32u);
+	const uint32_t block[8] = {lo, hi, plan.primitives, plan.groups_per_instance, static_cast<uint32_t>(first_vertex), first_instance, 0u, 0u};
+	std::memcpy(front->bind.geometry_block, block, sizeof(block));
+	std::memcpy(pull->bind.geometry_block, block, sizeof(block));
+
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
+	// The output may be reused within this recording: earlier pulls finish first.
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0,
+	                     nullptr);
+	vkCmdFillBuffer(vk_buffer, output->buffer, 0, bytes, 0u);
+	VkMemoryBarrier barrier {};
+	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+	                     nullptr);
+
+	const auto& vs       = sh_ctx.GetVs();
+	auto*       pipeline = g_render_ctx->GetPipelineCache()->CreateGeometryPipeline(buffer, front, plan.info, &vs,
+	                                                                                 &ctx.GetShaderRegisters());
+	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, front->bind, VK_SHADER_STAGE_COMPUTE_BIT,
+	                DescriptorCache::Stage::Compute, 0, nullptr, vs.gs_regs.chksum, nullptr, nullptr, device_address_table);
+	// Binding may record host commands; restore the pass pipeline before dispatch.
+	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+	vkCmdDispatch(vk_buffer, plan.groups, 1u, 1u);
+	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+	                     nullptr);
+}
+
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
-	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count)
+	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count, int32_t vertex_offset_add,
+	                             uint32_t first_instance, SubmissionId* pending_submission)
 {
 	KYTY_PROFILER_FUNCTION();
 
+	EXIT_IF(pending_submission == nullptr);
+	*pending_submission = {};
 	EXIT_IF(ctx == nullptr || ucfg == nullptr);
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(buffer == nullptr || buffer->IsInvalid());
 
 	// Diagnostic A/B: KYTY_AB_SKIP_ALL_DRAWS=1 skips graphics draws (DEVICE_LOST triage).
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_ALL_DRAWS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_ALL_DRAWS"); ab != nullptr && ab[0] != '\0')
 	{
 		return;
 	}
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_AUTO_DRAWS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_AUTO_DRAWS"); ab != nullptr && ab[0] != '\0')
 	{
 		return;
 	}
@@ -2165,11 +2575,13 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 	DebugStatsRecordDrawRenderLockWait(DrawStageElapsedNs(render_lock_start));
 	const auto state_setup_start = DrawStageClock::now();
-	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx))
+	GeometryDrawPlan geometry_plan;
+	const bool       geometry_pass = ResolveGeometryDraw(*ctx, *ucfg, *sh_ctx, index_count, instance_count, &geometry_plan);
+	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx, geometry_pass))
 	{
 		return;
 	}
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_TINY_DEPTH"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_TINY_DEPTH"); ab != nullptr && ab[0] != '\0')
 	{
 		RenderDepthInfo probe {};
 		DescribeRenderDepthInfo(*ctx, &probe);
@@ -2180,7 +2592,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 			return;
 		}
 	}
-	if (const char* ab = std::getenv("KYTY_AB_SKIP_EMBEDDED_VS"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_SKIP_EMBEDDED_VS"); ab != nullptr && ab[0] != '\0')
 	{
 		const auto& vs = sh_ctx->GetVs();
 		if (vs.vs_embedded || vs.vs_regs.data_addr == 0)
@@ -2190,7 +2602,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 			return;
 		}
 	}
-	if (const char* ab_ps = std::getenv("KYTY_AB_SKIP_PS_ADDR"); ab_ps != nullptr && ab_ps[0] != '\0')
+	if (static const char* ab_ps = std::getenv("KYTY_AB_SKIP_PS_ADDR"); ab_ps != nullptr && ab_ps[0] != '\0')
 	{
 		char*      end     = nullptr;
 		const auto skip_ps = std::strtoull(ab_ps, &end, 0);
@@ -2226,7 +2638,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		if (!AutoDrawModifierSupported(draw_modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !AutoDrawModifierSupported(draw_modifier) condition ignored (continuing)\n"); }
 		if (ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000 condition ignored (continuing)\n"); }
 
-		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, UINT32_MAX, nullptr, instance_count, 0, 0);
+		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, UINT32_MAX, nullptr, instance_count,
+		                               vertex_offset_add, first_instance, pending_submission);
 		return;
 	}
 
@@ -2263,15 +2676,12 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	}
 	VulkanSampleLocationState sample_locations {};
 	aa_check_for_attachment_samples(*ctx, resolve_render_attachment_sample_count(color_info, depth_info), &sample_locations);
-	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
-	RequireSupportedRenderResolutionPlan(depth_only_resolution);
-
 	const auto& vertex_shader_info = sh_ctx->GetVs();
 	const auto& pixel_shader_info  = sh_ctx->GetPs();
 	const auto& shader_regs        = ctx->GetShaderRegisters();
 	if (const auto* target = RenderColorFirstConfiguredAttachment(color_info); target != nullptr)
 	{
-		if (const char* ab = std::getenv("KYTY_AB_SKIP_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
+		if (static const char* ab = std::getenv("KYTY_AB_SKIP_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
 		{
 			char*      end       = nullptr;
 			const auto skip_addr = std::strtoull(ab, &end, 0);
@@ -2280,7 +2690,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 				return;
 			}
 		}
-		if (const char* ab = std::getenv("KYTY_AB_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
+		if (static const char* ab = std::getenv("KYTY_AB_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
 		{
 			char*      end       = nullptr;
 			const auto only_addr = std::strtoull(ab, &end, 0);
@@ -2304,9 +2714,20 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		MaybeDumpAutoDrawSkip("invalid-vs-resources", index_count, draw_modifier);
 		return;
 	}
+	// A geometry pass runs the guest program; the host vertex stage draws its output.
+	ShaderVertexInputInfo geometry_front;
+	if (geometry_pass)
+	{
+		geometry_front = MakeGeometryFrontInput(vs_input_info);
+		vs_input_info  = MakeGeometryPullInput(vs_input_info, geometry_plan);
+	}
 
 	PrimitiveDrawPlan primitive_plan {};
-	if (!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, &primitive_plan))
+	if (geometry_pass)
+	{
+		primitive_plan.topology   = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+		primitive_plan.draw_count = geometry_plan.groups * ShaderGeometryComputeInfo::kLanes * 3u;
+	} else if (!GraphicsResolvePrimitiveDrawPlan(ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, &primitive_plan))
 	{
 		static std::atomic_uint32_t unsupported_auto_draws {0};
 		if (unsupported_auto_draws.fetch_add(1, std::memory_order_relaxed) < 16u)
@@ -2320,8 +2741,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	MaybeDumpPrimitiveDrawPlan("auto", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
-	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), shader_regs, ctx->GetDepthControl());
-	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info, !ps_required);
+	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), shader_regs, ctx->GetAlphaToMaskEnable());
+	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, ctx->GetRenderTargetMask(), &ps_input_info, !ps_required);
 	ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(pixel_shader_info.ps_regs.chksum, false, index_count);
 	if (ShaderPixelInput0ProbeEligible(Config::IsNextGen(), pixel_shader_info.ps_embedded))
 	{
@@ -2329,11 +2750,22 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		                                                          ps_input_info.stage_enabled);
 	}
 	ValidatePixelProbeSelection(pixel_shader_info, shader_regs, &vs_input_info, &ps_input_info);
+	GuestDeviceAddressTable device_address_table {};
+	if (PrepareGuestDeviceAddressForRead(buffer, geometry_pass ? geometry_front.bind : vs_input_info.bind, &ps_input_info.bind,
+	                                     &device_address_table, pending_submission) != GuestDeviceAddressReadPreparation::Ready)
+	{
+		return;
+	}
+	const auto depth_only_resolution = PrepareDepthOnlyDisplayResolutionCohort(buffer, color_info, depth_info);
+	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
+	const auto target_resolution = PrepareRenderTargetResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
+	RequireSupportedRenderResolutionPlan(target_resolution);
 	DebugStatsRecordDrawStateSetup(DrawStageElapsedNs(state_setup_start));
 	const auto materialization_start = DrawStageClock::now();
-	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
+	const auto& materialization_resolution = SelectMaterializationResolution(color_info, depth_only_resolution, resolution,
+	                                                                         target_resolution);
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
 	    materialization_resolution.classification == ResolutionClassification::Scaled ? materialization_resolution.host_extent.width : 0,
@@ -2344,10 +2776,12 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	// Guest depth size 0 can materialize as 1x1 while color is full-screen; drop it
 	// before framebuffer/pipeline creation so Xe does not hang on illegal FB extent.
 	SanitizeRenderDepthAgainstColor(&color_info, &depth_info);
+	CollapseRenderColorLayersWithoutLayerExport(&color_info, ctx->GetShaderRegisters().m_paClVsOutCntl);
+	ps_input_info.dual_source_blend = ResolveDrawDualSourceBlend(ctx, sh_ctx->GetPs(), color_info, ps_input_info);
 	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
 	const auto pipeline_setup_start = DrawStageClock::now();
-	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind);
+	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind, *sh_ctx);
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access);
 	const VulkanImage* stencil_attached_depth =
 	    depth_access == DepthStencilAttachmentAccess::DepthReadOnly ? depth_info.vulkan_buffer : nullptr;
@@ -2355,15 +2789,25 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
 	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordState();
 
 	// GE_INDX_OFFSET is the first vertex of an auto-index draw, as it is the base
 	// vertex of an indexed one; batches sharing one vertex buffer depend on it.
+	// An indirect draw adds its start vertex the same way.
 	int32_t resolved_first_vertex = 0;
-	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info, &resolved_first_vertex))
+	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), geometry_pass ? geometry_front : vs_input_info, &resolved_first_vertex,
+	                               vertex_offset_add))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: auto-draw vertex offset is outside int32 range; draw skipped\n");
 		return;
+	}
+	if (geometry_pass)
+	{
+		RecordGeometryPass(submit_id, buffer, *ctx, *sh_ctx, &geometry_front, geometry_plan, resolved_first_vertex, first_instance,
+		                   &device_address_table, &vs_input_info);
+		resolved_first_vertex = 0;
+		instance_count        = 1;
+		first_instance        = 0;
 	}
 	const uint32_t actual_vertex_count = primitive_plan.chunked ? index_count : primitive_plan.draw_count;
 	const auto     vertex_requirement  = ResolveLinearVertexRecords(resolved_first_vertex, actual_vertex_count);
@@ -2375,7 +2819,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	const uint32_t vertex_records = vertex_requirement.records;
 
 	bool clear_only = false;
-	if (const char* ab = std::getenv("KYTY_AB_CLEAR_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
+	if (static const char* ab = std::getenv("KYTY_AB_CLEAR_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
 	{
 		char*      end        = nullptr;
 		const auto clear_addr = std::strtoull(ab, &end, 0);
@@ -2406,7 +2850,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		    ps_input_info.input0_probe.match_ordinal, ps_input_info.input0_probe.mrt_target,
 		    ps_input_info.input0_probe.export_ordinal, depth_info, *framebuffer, *ctx, sample_locations);
 	}
-	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
+	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
 
@@ -2418,17 +2862,19 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	SetDynamicParams(vk_buffer, pipeline);
 
 	const auto     vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_records);
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_requirement.first, vertex_records, true, first_instance,
+	                  instance_count);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
 	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum,
-	                stencil_attached_depth);
+	                stencil_attached_depth, nullptr, &device_address_table, ScaledImageReadAccess::Refused, &color_info);
 
 	uint32_t declared_vertex_records = 0;
 	for (int buffer_index = 0; buffer_index < vs_input_info.buffers_num; ++buffer_index)
 	{
-		declared_vertex_records = std::max(declared_vertex_records, vs_input_info.buffers[buffer_index].num_records);
+		const auto& stream = vs_input_info.buffers[buffer_index];
+		declared_vertex_records = stream.instance ? declared_vertex_records : std::max(declared_vertex_records, stream.num_records);
 	}
 	const auto guest_vp_xy = State::ResolveViewportXy(ctx->GetScreenViewport().viewports[0].xscale,
 	                                                  ctx->GetScreenViewport().viewports[0].xoffset,
@@ -2464,7 +2910,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                                               .index_size = 0,
 	                                               .vertex_offset = resolved_first_vertex,
 	                                               .instance_count = instance_count,
-	                                               .first_instance = 0,
+	                                               .first_instance = first_instance,
 	                                               .required_vertex_records = vertex_records,
 	                                               .vertex_input = &vs_input_info,
 	                                               .color = &color_info,
@@ -2508,7 +2954,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum,
-	                stencil_attached_depth);
+	                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info),
+	                &color_info);
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 
@@ -2519,6 +2966,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		vertex_clip_probe->CaptureAttachmentBeforePass(buffer);
 	}
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
+	auto* pass_buffer = buffer->RecordInsideRenderPass();
 	if (vertex_clip_probe != nullptr)
 	{
 		vertex_clip_probe->BeginDepthPassQuery(buffer);
@@ -2530,13 +2978,13 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
-			vkCmdDraw(vk_buffer, primitive_plan.chunk_count, instance_count, first_vertex + i, 0);
+			vkCmdDraw(pass_buffer, primitive_plan.chunk_count, instance_count, first_vertex + i, first_instance);
 			DebugStatsRecordDraw();
 			host_draws++;
 		}
 	} else if (!clear_only)
 	{
-		vkCmdDraw(vk_buffer, primitive_plan.draw_count, instance_count, first_vertex, 0);
+		vkCmdDraw(pass_buffer, primitive_plan.draw_count, instance_count, first_vertex, first_instance);
 		DebugStatsRecordDraw();
 		host_draws++;
 	}
@@ -2550,23 +2998,12 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		vertex_clip_probe->EndDepthPassQuery(buffer);
 	}
 
-	buffer->EndRenderPass();
+	// The pass stays open for a following draw on the same framebuffer. The
+	// vertex-clip probe reads its results with transfers outside it.
 	if (vertex_clip_probe != nullptr)
 	{
+		buffer->CloseRenderPass();
 		vertex_clip_probe->Finish(buffer);
-	}
-
-	if (vk_buffer != nullptr)
-	{
-		VkMemoryBarrier memory_barrier {};
-		memory_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-		memory_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-		memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-		                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-		                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-		                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-		                     0, 1, &memory_barrier, 0, nullptr, 0, nullptr);
 	}
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
@@ -2576,13 +3013,56 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	DebugStatsRecordDrawCommandEmission(DrawStageElapsedNs(command_emission_start));
 }
 
+// The single writable storage object exactly covering a metadata fill
+// destination, live and produced no later than this submission.
+static const GpuMemoryRangeProvenanceEntry* FindDepthMetaFillStorage(uint64_t submit_id, uint64_t address, uint64_t size,
+                                                                     GpuMemoryRangeProvenance* provenance)
+{
+	if (size == 0u || !GpuMemoryQueryRangeProvenance(address, size, provenance) || provenance->truncated)
+	{
+		return nullptr;
+	}
+	const GpuMemoryRangeProvenanceEntry* storage = nullptr;
+	for (uint32_t i = 0; i < provenance->entry_count; ++i)
+	{
+		const auto& entry = provenance->entries[i];
+		if (entry.type != GpuMemoryObjectType::StorageBuffer || entry.relation != GpuMemoryOverlapType::Equals || entry.read_only)
+		{
+			continue;
+		}
+		if (storage != nullptr)
+		{
+			return nullptr;
+		}
+		storage = &entry;
+	}
+	if (storage == nullptr || !storage->in_use || !storage->write_back_capable || storage->logical_generation == 0u ||
+	    storage->backing_generation == 0u || storage->submit_id > submit_id)
+	{
+		return nullptr;
+	}
+	return storage;
+}
+
+static bool PublishDepthMetaFillWord(uint64_t submit_id, uint64_t address, uint64_t size, const GpuMemoryRangeProvenanceEntry& storage,
+                                     uint32_t word)
+{
+	DepthMetaStorageIdentity identity {};
+	identity.address                     = address;
+	identity.size                        = size;
+	identity.logical_generation          = storage.logical_generation;
+	identity.backing_generation          = storage.backing_generation;
+	identity.producer_or_consumer_submit = submit_id;
+	return DepthMetaPublishComputeFill(identity, word);
+}
+
 static bool TryPublishComputeDepthMetaFill(uint64_t submit_id, const ShaderComputeInputInfo& input, uint32_t thread_group_x,
                                            uint32_t thread_group_y, uint32_t thread_group_z)
 {
 	const auto& evidence = input.meta_fill;
 	const auto& buffers  = input.bind.storage_buffers;
 	if (!evidence.valid || buffers.buffers_num != 3 || input.bind.textures2D.textures_num != 0 ||
-	    input.bind.samplers.samplers_num != 0 || input.bind.gds_pointers.pointers_num != 0 ||
+	    input.bind.samplers.samplers_num != 0 || ShaderGdsBufferBound(input.bind.gds_pointers) ||
 	    evidence.workgroup_register != input.workgroup_register || evidence.workgroup_shift != 6u ||
 	    input.threads_num[0] != 64u || input.threads_num[1] != 1u || input.threads_num[2] != 1u ||
 	    !input.group_id[0] || input.group_id[1] || input.group_id[2] || input.thread_ids_num != 1 ||
@@ -2657,38 +3137,24 @@ static bool TryPublishComputeDepthMetaFill(uint64_t submit_id, const ShaderCompu
 
 	const uint64_t destination_size = ShaderBufferByteSize(destination.Stride(), destination.NumRecords());
 	GpuMemoryRangeProvenance provenance {};
-	if (destination_size == 0u || !GpuMemoryQueryRangeProvenance(destination.Base48(), destination_size, &provenance) ||
-	    provenance.truncated)
-	{
-		return false;
-	}
-	const GpuMemoryRangeProvenanceEntry* storage = nullptr;
-	for (uint32_t i = 0; i < provenance.entry_count; ++i)
-	{
-		const auto& entry = provenance.entries[i];
-		if (entry.type != GpuMemoryObjectType::StorageBuffer || entry.relation != GpuMemoryOverlapType::Equals || entry.read_only)
-		{
-			continue;
-		}
-		if (storage != nullptr)
-		{
-			return false;
-		}
-		storage = &entry;
-	}
-	if (storage == nullptr || !storage->in_use || !storage->write_back_capable || storage->logical_generation == 0u ||
-	    storage->backing_generation == 0u || storage->submit_id > submit_id)
-	{
-		return false;
-	}
+	const auto* storage = FindDepthMetaFillStorage(submit_id, destination.Base48(), destination_size, &provenance);
+	return storage != nullptr && PublishDepthMetaFillWord(submit_id, destination.Base48(), destination_size, *storage, source_word);
+}
 
-	DepthMetaStorageIdentity identity {};
-	identity.address                     = destination.Base48();
-	identity.size                        = destination_size;
-	identity.logical_generation          = storage->logical_generation;
-	identity.backing_generation          = storage->backing_generation;
-	identity.producer_or_consumer_submit = submit_id;
-	return DepthMetaPublishComputeFill(identity, source_word);
+// The generic uniform fill kernel also resets HTILE. A fill of storage bound as
+// a depth target's metadata publishes the same event as the dedicated metadata
+// kernel, so the next bind of that target sees the clear in recording order.
+static bool PublishUniformDepthMetaFill(uint64_t submit_id, const ComputeUniformBufferFill& fill)
+{
+	const auto& words = fill.words;
+	if (words[1] != words[0] || words[2] != words[0] || words[3] != words[0])
+	{
+		return false;
+	}
+	GpuMemoryRangeProvenance provenance {};
+	const auto* storage = FindDepthMetaFillStorage(submit_id, fill.address, fill.size, &provenance);
+	return storage != nullptr && storage->depth_meta_bound &&
+	       PublishDepthMetaFillWord(submit_id, fill.address, fill.size, *storage, words[0]);
 }
 
 static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x, uint32_t thread_group_y,
@@ -2714,7 +3180,7 @@ static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint
 
 	ShaderComputeWavePreflightRequest request {};
 	request.is_next_gen           = Config::IsNextGen();
-	request.dispatch_mode         = mode;
+	request.dispatch_mode         = ShaderComputeDispatchExecutionMode(mode, request.is_next_gen);
 	request.raw_dispatch_count[0] = thread_group_x;
 	request.raw_dispatch_count[1] = thread_group_y;
 	request.raw_dispatch_count[2] = thread_group_z;
@@ -2726,7 +3192,8 @@ static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint
 	// These are the ordinary GFX10.3 group-count modes. Unknown scheduling or
 	// partial controls never inherit a verified guest lane order.
 	request.lane_order =
-	    request.is_next_gen && (mode == 0x01u || mode == 0x41u) ? ShaderGuestLaneOrder::LinearXFirst : ShaderGuestLaneOrder::Unverified;
+	    request.is_next_gen && (request.dispatch_mode == 0x01u || request.dispatch_mode == 0x41u) ? ShaderGuestLaneOrder::LinearXFirst
+	                                                                                           : ShaderGuestLaneOrder::Unverified;
 	const auto                    capabilities = ShaderComputeWaveVulkanBuildCapabilities(graphic_context->compute_wave_vulkan_state);
 	const auto preflight = ShaderBuildComputeWaveDispatchPlan(request, capabilities, plan);
 	if (preflight.status == ShaderComputeWavePreflightStatus::NoWork)
@@ -2754,10 +3221,10 @@ static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint
 ComputeDispatchResult GraphicsRenderDispatchDirect(
     uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, bool processor_writeback_complete,
-    SubmissionId* pending_writeback)
+    SubmissionId* pending_submission)
 {
-	EXIT_IF(pending_writeback == nullptr);
-	*pending_writeback = {};
+	EXIT_IF(pending_submission == nullptr);
+	*pending_submission = {};
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -2795,12 +3262,14 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		}
 	}
 
-	// Keep this check and descriptor publication under the same render lock.
-	// A peer queue may record a new use after the caller's own queue drains.
-	if (input_info.bind.device_address_used &&
-	    GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(buffer->GetQueueIndex())), pending_writeback))
+	GuestDeviceAddressTable device_address_table {};
+	switch (PrepareGuestDeviceAddressForRead(buffer, input_info.bind, nullptr, &device_address_table, pending_submission))
 	{
-		return ComputeDispatchResult::SubmissionCompletionRequired;
+		case GuestDeviceAddressReadPreparation::Ready: break;
+		case GuestDeviceAddressReadPreparation::PendingWriteBack:
+			return ComputeDispatchResult::SubmissionCompletionRequired;
+		case GuestDeviceAddressReadPreparation::PendingReader:
+			return ComputeDispatchResult::ReaderCompletionRequired;
 	}
 
 	const auto& cs_regs = sh_ctx->GetCs();
@@ -2808,19 +3277,19 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	//   KYTY_AB_SKIP_ALL_CS=1 — skip every compute dispatch
 	//   KYTY_AB_SKIP_TEX_CS=1 — skip compute that binds textures
 	//   KYTY_AB_SKIP_CS_ADDR=0x... — skip one guest CS data address (hex)
-	if (const char* ab_all = std::getenv("KYTY_AB_SKIP_ALL_CS"); ab_all != nullptr && ab_all[0] != '\0')
+	if (static const char* ab_all = std::getenv("KYTY_AB_SKIP_ALL_CS"); ab_all != nullptr && ab_all[0] != '\0')
 	{
 		KYTY_LOG_DEBUG( "KYTY_AB_SKIP_ALL_CS skip shader=0x%012" PRIx64 "\n", cs_regs.cs_regs.data_addr);
 		return ComputeDispatchResult::Completed;
 	}
-	if (const char* ab_skip = std::getenv("KYTY_AB_SKIP_TEX_CS");
+	if (static const char* ab_skip = std::getenv("KYTY_AB_SKIP_TEX_CS");
 	    ab_skip != nullptr && ab_skip[0] != '\0' && input_info.bind.textures2D.textures_num > 0)
 	{
 		KYTY_LOG_DEBUG( "KYTY_AB_SKIP_TEX_CS skip shader=0x%012" PRIx64 " textures=%d\n", cs_regs.cs_regs.data_addr,
 		             input_info.bind.textures2D.textures_num);
 		return ComputeDispatchResult::Completed;
 	}
-	if (const char* ab_addr = std::getenv("KYTY_AB_SKIP_CS_ADDR"); ab_addr != nullptr && ab_addr[0] != '\0')
+	if (static const char* ab_addr = std::getenv("KYTY_AB_SKIP_CS_ADDR"); ab_addr != nullptr && ab_addr[0] != '\0')
 	{
 		char*      end      = nullptr;
 		const auto skip_addr = std::strtoull(ab_addr, &end, 0);
@@ -2831,8 +3300,8 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		}
 	}
 	static const char* dump_dispatch = std::getenv("KYTY_DUMP_DISPATCH");
-	const char*        dump_cs_id    = std::getenv("KYTY_DUMP_CS_ID");
-	const char*        dump_texture  = std::getenv("KYTY_DUMP_CS_TEXTURE");
+	static const char* dump_cs_id    = std::getenv("KYTY_DUMP_CS_ID");
+	static const char* dump_texture  = std::getenv("KYTY_DUMP_CS_TEXTURE");
 	bool               selected_cs   = true;
 	bool               selector_used = false;
 	if (dump_cs_id != nullptr && dump_cs_id[0] != '\0')
@@ -2850,7 +3319,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	selected_cs = selector_used && selected_cs;
 	static uint32_t    dispatch_logs = 0;
 	uint32_t           dispatch_limit = 256u;
-	if (const char* env_limit = std::getenv("KYTY_DUMP_DISPATCH_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
+	if (static const char* env_limit = std::getenv("KYTY_DUMP_DISPATCH_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
 	{
 		const auto parsed = std::strtoul(env_limit, nullptr, 10);
 		if (parsed > 0u && parsed <= 100000u)
@@ -2910,27 +3379,30 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 		}
 	}
 
-	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
-	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(&input_info, &sh_ctx->GetCs(), &ctx->GetShaderRegisters());
+	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(buffer, &input_info, &sh_ctx->GetCs(), &ctx->GetShaderRegisters());
 
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	const uint32_t storage_seed_skip_mask =
+	const uint64_t storage_seed_skip_mask =
 	    ShaderComputeStorageSeedSkipMask(input_info, Config::IsNextGen(), thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
 	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr,
-	                cs_regs.cs_regs.chksum);
+	                cs_regs.cs_regs.chksum, nullptr, input_info.storage_image_tile_coverage, &device_address_table);
 	(void)TryPublishComputeDepthMetaFill(submit_id, input_info, thread_group_x, thread_group_y, thread_group_z);
 
 	// Materialization may dispatch a host compute kernel. Restore the guest
 	// pipeline after all preparation has completed.
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+	GraphicsOperationTraceDispatch(input_info.bind);
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
+	buffer->StoreBackDepthPlanes();
 	// The buffer write always executes. A proven full uniform fill additionally updates its exact
-	// color-image aliases in this recording; partial thread groups would leave the range uncovered.
+	// color-image aliases and depth and stencil planes in this recording; partial thread groups would leave
+	// the range uncovered.
 	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
 	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
 	ComputeUniformBufferFill fill;
@@ -2938,6 +3410,10 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	    ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill))
 	{
 		(void)PropagateComputeUniformColorFill(buffer, fill);
+		(void)PropagateComputeUniformStencilFill(buffer, fill);
+		(void)PropagateComputeUniformDepthFill(buffer, fill);
+		(void)PublishComputeColorDccClear(buffer, fill);
+		(void)PublishUniformDepthMetaFill(submit_id, fill);
 		(void)PublishComputeUniformFillToGuestAddress(buffer, fill);
 	}
 	DebugStatsRecordDispatch();

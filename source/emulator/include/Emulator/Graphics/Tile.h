@@ -50,20 +50,25 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t 
 void TileGetVideoOutSize(uint32_t width, uint32_t height, uint32_t pitch, bool tile, bool neo, TileSizeAlign* size);
 // Computes the allocation for a Gen5 color target. Mode 0x1b is the 64 KiB
 // rotated-X swizzle used by render targets; the result is padded to complete
-// swizzle blocks rather than treated as a linear byte span.
+// swizzle blocks rather than treated as a linear byte span. Mode 0 is linear:
+// pitch-sized rows.
 void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t tile_mode, uint32_t bytes_per_texel,
                              TileSizeAlign* size);
 // Width in elements of a 64 KiB swizzle block for an exact power-of-two BPE.
 // Returns zero for unsupported element sizes.
 [[nodiscard]] uint32_t TileGet64KBBlockWidth(uint32_t bytes_per_element);
 [[nodiscard]] uint32_t TileAlign64KBPitch(uint32_t width, uint32_t bytes_per_element);
+// Element pitch of a linear Gen5 surface: rows aligned to 256 bytes.
+// Returns zero for unsupported element sizes.
+[[nodiscard]] uint32_t TileAlignLinearPitch(uint32_t width, uint32_t bytes_per_element);
 // Byte offset of texel (x,y) inside a Gen5 kRenderTarget (tile mode 27) surface.
 // pitch_elems is the element pitch used for the block grid (0 → width).
-// Supported: 2-, 4-, and 8-byte elements.
-uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element);
+// Supported: 1-, 2-, 4-, and 8-byte elements. slice is the array layer or
+// volume depth index; it permutes the within-block pipe bits.
+uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t slice = 0u);
 // Detile kRenderTarget into tightly packed linear rows of width*bytes_per_element.
 void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
-                                uint32_t bytes_per_element);
+                                uint32_t bytes_per_element, uint32_t slice = 0u);
 // Gen5 kStandard64KB (tile mode 9) sample atlas layout. The element size
 // determines the 64 KiB block geometry and the within-block swizzle.
 uint64_t TileGetStandard64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element);
@@ -121,7 +126,7 @@ void     TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, u
 // helpers (TileGet*Offset); no alternate address math is allowed.
 enum class TileDetileLayout : uint32_t
 {
-	Sw64kRx,      // tile mode 27 / kRenderTarget (4 or 8 BPE)
+	Sw64kRx,      // tile mode 27 / kRenderTarget (1, 4 or 8 BPE)
 	Standard64KB, // tile mode 9  (1/2/4/8/16 BPE)
 	Standard4KB,  // tile mode 5  (power-of-two BPE <= 16)
 	Standard256B, // tile mode 1  (power-of-two BPE <= 16)
@@ -138,7 +143,7 @@ struct TileDetileRequest
 	uint32_t         dst_pitch_elems   = 0; // linear row pitch in elements
 	uint32_t         bytes_per_element = 0;
 	TileDetileLayout layout            = TileDetileLayout::Sw64kRx;
-	uint32_t         depth_layer       = 0; // Z_X slice index; valid only for Depth64KB.
+	uint32_t         slice             = 0; // Array layer or volume depth index; valid for Depth64KB and Sw64kRx.
 	// Guest tiled allocation size. A nonzero value is a hard source-read limit
 	// for every detile path; GPU paths require it. Zero is retained only for
 	// legacy host wrappers whose containing allocation was validated by the caller.

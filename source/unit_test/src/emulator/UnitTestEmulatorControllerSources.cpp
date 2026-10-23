@@ -1,5 +1,6 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Controller.h"
 #include "Emulator/ControllerState.h"
 
 #include <initializer_list>
@@ -27,6 +28,109 @@ int ReadHistory(GameController& controller, ControllerState* states)
 }
 
 } // namespace
+
+TEST(EmulatorControllerSources, AgentTapDefaultRemainsTwoAdvancingPressSamples)
+{
+	AgentPadClear();
+	AgentPadReadStats stats_before {};
+	AgentPadGetReadStats(&stats_before);
+	ASSERT_TRUE(AgentPadScheduleTap(PAD_BUTTON_CROSS));
+
+	uint32_t sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, 0u);
+	for (uint32_t press_sample = 0; press_sample < kAgentPadTapPressSamples; ++press_sample)
+	{
+		sample = 0;
+		AgentPadApplyReadStateSample(&sample);
+		EXPECT_EQ(sample & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
+	}
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, 0u);
+
+	AgentPadReadStats stats_after {};
+	AgentPadGetReadStats(&stats_after);
+	EXPECT_EQ(stats_after.delivered_taps, stats_before.delivered_taps + 1);
+	EXPECT_FALSE(stats_after.tap_pending);
+	AgentPadClear();
+}
+
+TEST(EmulatorControllerSources, AgentTapOnePressSampleIgnoresNonAdvancingSamples)
+{
+	AgentPadClear();
+	AgentPadReadStats stats_before {};
+	AgentPadGetReadStats(&stats_before);
+	ASSERT_TRUE(AgentPadScheduleTap(PAD_BUTTON_CROSS, 1));
+
+	AgentPadReadStats stats {};
+	uint32_t          sample = 0;
+	AgentPadApplyReadStateSample(&sample, false);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, 0u);
+	AgentPadGetReadStats(&stats);
+	EXPECT_TRUE(stats.tap_pending);
+	EXPECT_EQ(stats.delivered_taps, stats_before.delivered_taps);
+
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, 0u);
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample, false);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
+	AgentPadGetReadStats(&stats);
+	EXPECT_TRUE(stats.tap_pending);
+	EXPECT_EQ(stats.delivered_taps, stats_before.delivered_taps);
+
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
+	AgentPadGetReadStats(&stats);
+	EXPECT_TRUE(stats.tap_pending);
+	EXPECT_EQ(stats.delivered_taps, stats_before.delivered_taps + 1);
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, 0u);
+	AgentPadGetReadStats(&stats);
+	EXPECT_FALSE(stats.tap_pending);
+	AgentPadClear();
+}
+
+TEST(EmulatorControllerSources, AgentScheduledTapRetainsOnePressSampleAndRejectsOutOfBounds)
+{
+	AgentPadClear();
+	EXPECT_FALSE(AgentPadScheduleTap(PAD_BUTTON_CROSS, 0));
+	EXPECT_FALSE(AgentPadScheduleTap(PAD_BUTTON_CROSS, 3));
+	EXPECT_EQ(AgentPadScheduleTaps(PAD_BUTTON_CROSS, 1, 1, 0, 0), AgentPadScheduleResult::Invalid);
+	EXPECT_EQ(AgentPadScheduleTaps(PAD_BUTTON_CROSS, 1, 1, 0, 3), AgentPadScheduleResult::Invalid);
+	ASSERT_TRUE(AgentPadScheduleTap(PAD_BUTTON_CROSS, kAgentPadTapPressSamplesMax));
+	AgentPadClear();
+	ASSERT_EQ(AgentPadScheduleTaps(PAD_BUTTON_CROSS, 10, 1, 0, kAgentPadTapPressSamplesMax),
+	          AgentPadScheduleResult::Scheduled);
+	AgentPadClear();
+
+	AgentPadReadStats stats_before {};
+	AgentPadGetReadStats(&stats_before);
+	ASSERT_EQ(AgentPadScheduleTaps(PAD_BUTTON_CROSS, 10, 1, 0, 1), AgentPadScheduleResult::Scheduled);
+	EXPECT_EQ(AgentPadOnPresent(9).started, 0u);
+	const auto started = AgentPadOnPresent(10);
+	ASSERT_EQ(started.started, 1u);
+
+	uint32_t sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, 0u);
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, 0u);
+
+	AgentPadReadStats stats_after {};
+	AgentPadGetReadStats(&stats_after);
+	EXPECT_EQ(stats_after.delivered_taps, stats_before.delivered_taps + 1);
+	EXPECT_FALSE(stats_after.tap_pending);
+	AgentPadClear();
+}
 
 TEST(EmulatorControllerSources, SharedButtonBothReleaseOrdersPreserveTheOtherHoldAndHistory)
 {

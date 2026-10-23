@@ -1,19 +1,19 @@
 #ifndef EMULATOR_SRC_GRAPHICS_GRAPHICSRUNINTERNAL_H_
 #define EMULATOR_SRC_GRAPHICS_GRAPHICSRUNINTERNAL_H_
 
-#include "Emulator/Graphics/GraphicsRun.h"
-
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/LinkList.h"
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Graphics/AsyncJob.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
-#include "Emulator/Graphics/Graphics.h"
-#include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GpuSubmissionCoordinator.h"
 #include "Emulator/Graphics/GpuSubmissionPublicationGate.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/Graphics.h"
+#include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
 
 #include <array>
@@ -30,13 +30,13 @@
 
 #define KYTY_HW_CTX_PARSER_ARGS                                                                                                            \
 	[[maybe_unused]] CommandProcessor *cp, uint32_t cmd_id, [[maybe_unused]] uint32_t cmd_offset, const uint32_t *buffer,                  \
-	    [[maybe_unused]] uint32_t dw
+	    [[maybe_unused]] uint32_t dw, [[maybe_unused]] uint32_t available_dw
 #define KYTY_HW_UC_PARSER_ARGS                                                                                                             \
 	[[maybe_unused]] CommandProcessor *cp, uint32_t cmd_id, [[maybe_unused]] uint32_t cmd_offset, const uint32_t *buffer,                  \
-	    [[maybe_unused]] uint32_t dw
+	    [[maybe_unused]] uint32_t dw, [[maybe_unused]] uint32_t available_dw
 #define KYTY_HW_SH_PARSER_ARGS                                                                                                             \
 	[[maybe_unused]] CommandProcessor *cp, uint32_t cmd_id, [[maybe_unused]] uint32_t cmd_offset, const uint32_t *buffer,                  \
-	    [[maybe_unused]] uint32_t dw
+	    [[maybe_unused]] uint32_t dw, [[maybe_unused]] uint32_t available_dw
 #define KYTY_HW_CTX_INDIRECT_ARGS CommandProcessor *cp, [[maybe_unused]] uint32_t cmd_offset, uint32_t value
 #define KYTY_HW_UC_INDIRECT_ARGS  CommandProcessor *cp, [[maybe_unused]] uint32_t cmd_offset, uint32_t value
 #define KYTY_HW_SH_INDIRECT_ARGS  CommandProcessor *cp, [[maybe_unused]] uint32_t cmd_offset, uint32_t value
@@ -47,7 +47,7 @@
 
 #define KYTY_CP_OP_PARSER_ARGS                                                                                                             \
 	[[maybe_unused]] CommandProcessor *cp, [[maybe_unused]] uint32_t cmd_id, [[maybe_unused]] const uint32_t *buffer,                      \
-	    [[maybe_unused]] uint32_t dw, [[maybe_unused]] uint32_t num_dw
+	    [[maybe_unused]] uint32_t dw, [[maybe_unused]] uint32_t available_dw, [[maybe_unused]] uint32_t num_dw
 #define KYTY_CP_OP_PARSER(f) uint32_t f(KYTY_CP_OP_PARSER_ARGS)
 
 namespace Kyty::Libs::Graphics {
@@ -59,6 +59,27 @@ using cp_op_parser_func_t    = uint32_t (*)(KYTY_CP_OP_PARSER_ARGS);
 using hw_ctx_indirect_func_t = void (*)(KYTY_HW_CTX_INDIRECT_ARGS);
 using hw_uc_indirect_func_t  = void (*)(KYTY_HW_UC_INDIRECT_ARGS);
 using hw_sh_indirect_func_t  = void (*)(KYTY_HW_SH_INDIRECT_ARGS);
+
+enum class GraphicsRunType3DispatchStatus : uint8_t
+{
+	Ready,
+	InvalidEnvelope,
+	MissingHandler,
+	OverConsumed,
+};
+
+struct GraphicsRunType3DispatchResult
+{
+	GraphicsRunType3DispatchStatus status         = GraphicsRunType3DispatchStatus::InvalidEnvelope;
+	uint32_t                       packet_body_dw = 0;
+	uint32_t                       consumed_dw    = 0;
+};
+
+[[nodiscard]] GraphicsRunType3DispatchResult GraphicsRunDispatchType3Packet(CommandProcessor* cp, uint32_t cmd_id, const uint32_t* body,
+                                                                            uint32_t available_body_dw, uint32_t num_dw,
+                                                                            cp_op_parser_func_t handler);
+[[nodiscard]] bool GraphicsRunType3PacketAt(const uint32_t* stream, uint32_t available_dw, uint32_t offset, uint32_t expected_header);
+[[nodiscard]] bool GraphicsRunIndirectArgumentAddress(uint64_t base, uint32_t offset, uint64_t size, uint64_t* address);
 
 // Jump tables populated once by graphics_init_jmp_tables_*(). The per-domain
 // parser units register their functions here at startup.
@@ -101,6 +122,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_blend_color);
 KYTY_HW_CTX_PARSER(hw_ctx_set_blend_control);
 KYTY_HW_CTX_PARSER(hw_ctx_set_clip_control);
 KYTY_HW_CTX_PARSER(hw_ctx_set_color_control);
+KYTY_HW_CTX_PARSER(hw_ctx_set_alpha_to_mask);
 KYTY_HW_CTX_PARSER(hw_ctx_set_color_info);
 KYTY_HW_CTX_PARSER(hw_ctx_set_depth_clear);
 KYTY_HW_CTX_PARSER(hw_ctx_set_depth_control);
@@ -159,6 +181,7 @@ KYTY_CP_OP_PARSER(cp_op_dma_data);
 KYTY_CP_OP_PARSER(cp_op_draw_index);
 KYTY_CP_OP_PARSER(cp_op_draw_index_auto);
 KYTY_CP_OP_PARSER(cp_op_draw_index_indirect);
+KYTY_CP_OP_PARSER(cp_op_draw_indirect);
 KYTY_CP_OP_PARSER(cp_op_draw_index_offset);
 KYTY_CP_OP_PARSER(cp_op_draw_reset);
 KYTY_CP_OP_PARSER(cp_op_dump_const_ram);
@@ -206,10 +229,10 @@ class ScopedDebugStatsTimer
 public:
 	using RecordFunc = void (*)(uint64_t);
 
-	explicit ScopedDebugStatsTimer(RecordFunc record): m_record(record), m_start(std::chrono::steady_clock::now()) {}
+	explicit ScopedDebugStatsTimer(RecordFunc record): m_record(record), m_start(DebugStatsClock::now()) {}
 	~ScopedDebugStatsTimer()
 	{
-		const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
+		const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - m_start).count();
 		m_record(static_cast<uint64_t>(elapsed_ns));
 	}
 
@@ -217,7 +240,7 @@ public:
 
 private:
 	RecordFunc                            m_record;
-	std::chrono::steady_clock::time_point m_start;
+	DebugStatsClock::time_point           m_start;
 };
 
 inline void TraceWait(const char* stage, int queue, uint64_t address, uint64_t value, uint64_t reference, uint64_t mask, uint64_t sequence,
@@ -256,6 +279,9 @@ public:
 	void               BufferWait();
 	// True while a submitted command buffer has not completed yet.
 	[[nodiscard]] bool PumpCompletedSubmissions();
+	// Queue timeline semaphore and the value it reaches when the oldest
+	// submitted command buffer completes; false when none is pending.
+	[[nodiscard]] bool OldestSubmittedTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value);
 	void               SubmitAndWait();
 	void               WaitSubmission(SubmissionId submission);
 	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
@@ -265,6 +291,12 @@ public:
 
 	void RunLock() { m_run_mutex.Lock(); }
 	void RunUnlock() { m_run_mutex.Unlock(); }
+
+	// Diagnostic deadline only: this processor's queue and the pending-producer
+	// search for a suspended wait as it stands when the deadline expires.
+	[[nodiscard]] int QueueIndex() const { return m_queue; }
+	[[nodiscard]] GpuSubmissionResult FindSuspendedWaitProducer(const void* address, uint32_t size_bytes, uint64_t reference,
+	                                                           uint64_t mask, SubmissionDependency* dependency);
 
 	HW::Context*    GetCtx() { return &m_ctx; }
 	HW::UserConfig* GetUcfg() { return &m_ucfg; }
@@ -278,6 +310,7 @@ public:
 	void DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type);
 	void DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags);
 	void DrawIndexIndirect(uint32_t data_offset, uint32_t initiator);
+	void DrawIndirect(uint32_t data_offset, uint32_t initiator);
 	void DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier);
 	void WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type, uint32_t cache_action,
 	                        uint32_t event_index, uint32_t event_write_source, void* dst_gpu_addr, uint32_t value,
@@ -291,6 +324,8 @@ public:
 	void QueueQueuedGraphicsInterrupt();
 	void WriteBack();
 	void WaitDeviceAddressWriteBacks();
+	// Copies guest bytes the processor reads at record time once no GPU writer owns newer content.
+	[[nodiscard]] bool ReadCurrentGuestBytes(uint64_t vaddr, void* dst, uint64_t size);
 	void MemoryBarrier();
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
 	void DepthStencilBarrier(uint64_t vaddr, uint64_t size);
@@ -307,8 +342,17 @@ public:
 	void                           PopMarker() {}
 
 	void PrefetchL2(void* addr, uint32_t size) {}
-	void ClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value);
-	void ReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size);
+	void ClearGds(uint64_t dw_offset, uint64_t dw_count, uint32_t clear_value);
+	void WriteGds(uint64_t dw_offset, uint64_t src_vaddr, uint64_t dw_count);
+	void CopyGds(uint64_t src_dw_offset, uint64_t dst_dw_offset, uint64_t dw_count);
+	void ReadGds(uint32_t* dst, uint64_t dw_offset, uint64_t dw_count);
+	// Integration seam: the open recording, so a fixture can record a production GPU writer ahead
+	// of a packet. Not for runtime use.
+	[[nodiscard]] CommandBuffer* RecordingBufferForTesting()
+	{
+		Core::LockGuard lock(m_mutex);
+		return m_current_buffer >= 0 ? m_buffer[m_current_buffer] : nullptr;
+	}
 
 	void ResetDeCe();
 	void WaitCe();
@@ -333,6 +377,7 @@ public:
 
 	void WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll);
 	void WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll);
+	[[nodiscard]] bool BranchCompare(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask);
 	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom, bool matching_wait_mem64);
 	[[nodiscard]] bool HasPendingDeferredWrite(const uint32_t* dst, uint32_t size_bytes) const;
 	void DeferWriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num);
@@ -443,6 +488,39 @@ private:
 	}
 };
 
+// Wakes a ring when the GPU completes its oldest pending submission, which
+// signals its queue timeline (CommandBuffer::Execute). Otherwise the ring sees
+// a completion only when its bounded wait expires, and a guest spinning on an
+// end-of-pipe label loses up to that bound per submission.
+class SubmissionTimelineWaiter
+{
+public:
+	SubmissionTimelineWaiter(Core::Mutex* ring_mutex, Core::CondVar* ring_cond_var)
+	    : m_ring_mutex(ring_mutex), m_ring_cond_var(ring_cond_var)
+	{
+	}
+	~SubmissionTimelineWaiter() { KYTY_NOT_IMPLEMENTED; }
+
+	KYTY_CLASS_NO_COPY(SubmissionTimelineWaiter);
+
+	// Called with the ring mutex held. False when the value already fired but
+	// its fence was not yet visible: the ring keeps its bounded wait then.
+	bool Arm(VkDevice device, VkSemaphore semaphore, uint64_t value);
+
+private:
+	static void ThreadRun(void* data);
+
+	Core::Mutex    m_mutex;
+	Core::CondVar  m_cond_var;
+	Core::Mutex*   m_ring_mutex    = nullptr;
+	Core::CondVar* m_ring_cond_var = nullptr;
+	VkDevice       m_device        = nullptr;
+	VkSemaphore    m_semaphore     = nullptr;
+	uint64_t       m_target        = 0;
+	uint64_t       m_fired         = 0;
+	bool           m_started       = false;
+};
+
 class GraphicsRing
 {
 public:
@@ -529,6 +607,7 @@ private:
 	bool                 m_async_completion_pending = false;
 	Core::CondVar        m_cond_var;
 	Core::CondVar        m_idle_cond_var;
+	SubmissionTimelineWaiter m_timeline_waiter {&m_mutex, &m_cond_var};
 	Core::List<CmdBatch> m_cmd_batches;
 	bool                 m_done = true;
 	bool                 m_idle = true;
@@ -577,6 +656,7 @@ private:
 	Core::Mutex   m_mutex;
 	Core::CondVar m_cond_var;
 	Core::CondVar m_idle_cond_var;
+	SubmissionTimelineWaiter m_timeline_waiter {&m_mutex, &m_cond_var};
 	bool          m_done = true;
 	bool          m_idle = true;
 	// Submitted work whose completions (end-of-pipe labels, interrupts) the

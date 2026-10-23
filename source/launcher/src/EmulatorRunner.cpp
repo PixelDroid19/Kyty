@@ -93,9 +93,12 @@ bool CreateLuaScript(const Kyty::Configuration& info, const QString& file_name)
 	s << "\t ScreenWidth = " << info.screen_width << ";\n";
 	s << "\t ScreenHeight = " << info.screen_height << ";\n";
 	s << "\t RenderResolutionMode = '" << EnumToText(info.render_resolution_mode) << "';\n";
+	s << "\t RenderResolutionScope = '" << EnumToText(info.render_resolution_scope) << "';\n";
 	s << "\t RenderResolutionWidth = " << info.render_resolution_width << ";\n";
 	s << "\t RenderResolutionHeight = " << info.render_resolution_height << ";\n";
 	s << "\t PresentationFilter = '" << EnumToText(info.presentation_filter) << "';\n";
+	s << "\t PresentationFsrSharpness = " << info.presentation_fsr_sharpness << ";\n";
+	s << "\t TextureAnisotropy = '" << EnumToText(info.texture_anisotropy) << "';\n";
 	s << "\t Neo = " << (info.neo ? "true" : "false") << ";\n";
 	s << "\t VulkanValidationEnabled = " << (info.vulkan_validation_enabled ? "true" : "false") << ";\n";
 	s << "\t ShaderValidationEnabled = " << (info.shader_validation_enabled ? "true" : "false") << ";\n";
@@ -332,7 +335,7 @@ QString EmulatorRunner::Start(const Kyty::Configuration& info, const QString& mo
 	m_process.start();
 	if (!m_process.waitForStarted(START_TIMEOUT_MS))
 	{
-		return QCoreApplication::translate("Launcher", "The emulator could not be started.");
+		return QCoreApplication::translate("Launcher", "The emulator could not be started: %1").arg(m_process.errorString());
 	}
 	return {};
 }
