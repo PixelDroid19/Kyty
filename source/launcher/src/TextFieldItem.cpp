@@ -12,6 +12,7 @@
 #include <QSGRectangleNode>
 #include <QSGTextNode>
 #include <QStyleHints>
+#include <QTextBoundaryFinder>
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,8 @@
 constexpr qreal INSET      = 14;
 constexpr qreal RADIUS     = 12;
 constexpr qreal RING_WIDTH = 3;
+
+constexpr int UNDO_LIMIT = 100;
 
 namespace {
 
@@ -95,6 +98,10 @@ void TextFieldItem::SetText(const QString& text)
 	}
 	m_text   = text;
 	m_cursor = m_anchor = static_cast<int>(text.size());
+	// A text set from outside starts a new history.
+	m_undo.clear();
+	m_redo.clear();
+	m_typing = false;
 	Relayout();
 }
 
@@ -202,23 +209,54 @@ bool TextFieldItem::MoveCursor(int position, bool select)
 	{
 		m_anchor = position;
 	}
+	m_typing = false;
 	CursorMoved();
 	return true;
 }
 
-void TextFieldItem::Commit(const QString& text, int cursor)
+// Keeps the text before the edit for undo; a run of typed characters is undone at once.
+void TextFieldItem::Commit(const QString& text, int cursor, bool typed)
 {
-	const bool changed = text != m_text;
-	m_text             = text;
+	if (text == m_text)
+	{
+		m_cursor = m_anchor = cursor;
+		Relayout();
+		return;
+	}
+	if (!typed || !m_typing)
+	{
+		m_undo.append({m_text, m_cursor});
+		if (m_undo.size() > UNDO_LIMIT)
+		{
+			m_undo.removeFirst();
+		}
+	}
+	m_redo.clear();
+	m_typing = typed;
+	m_text   = text;
 	m_cursor = m_anchor = cursor;
 	Relayout();
-	if (changed)
-	{
-		emit Edited(m_text);
-	}
+	emit Edited(m_text);
 }
 
-bool TextFieldItem::Insert(const QString& text)
+// Moves one step back (or forward again) through the history; false when there is none.
+bool TextFieldItem::Restore(QVector<Snapshot>* from, QVector<Snapshot>* to)
+{
+	if (from->isEmpty())
+	{
+		return false;
+	}
+	to->append({m_text, m_cursor});
+	const auto snapshot = from->takeLast();
+	m_typing            = false;
+	m_text              = snapshot.text;
+	m_cursor = m_anchor = snapshot.cursor;
+	Relayout();
+	emit Edited(m_text);
+	return true;
+}
+
+bool TextFieldItem::Insert(const QString& text, bool typed)
 {
 	const int start = std::min(m_anchor, m_cursor);
 	auto      next  = m_text;
@@ -227,7 +265,7 @@ bool TextFieldItem::Insert(const QString& text)
 	{
 		return false;
 	}
-	Commit(next, start + static_cast<int>(text.size()));
+	Commit(next, start + static_cast<int>(text.size()), typed);
 	return true;
 }
 
@@ -299,6 +337,16 @@ bool TextFieldItem::EditKey(QKeyEvent* event)
 		}
 		return true;
 	}
+	if (event->matches(QKeySequence::Undo))
+	{
+		Restore(&m_undo, &m_redo);
+		return true;
+	}
+	if (event->matches(QKeySequence::Redo))
+	{
+		Restore(&m_redo, &m_undo);
+		return true;
+	}
 	if (event->matches(QKeySequence::Paste))
 	{
 		Insert(FirstLine(QGuiApplication::clipboard()->text()));
@@ -332,7 +380,7 @@ bool TextFieldItem::EditKey(QKeyEvent* event)
 		return false;
 	}
 	// A rejected character goes on to the page, so the page's letter keys still work from a number field.
-	return Insert(text);
+	return Insert(text, true);
 }
 
 void TextFieldItem::keyPressEvent(QKeyEvent* event)
@@ -395,6 +443,29 @@ void TextFieldItem::mousePressEvent(QMouseEvent* event)
 {
 	forceActiveFocus(Qt::MouseFocusReason);
 	MoveCursor(PositionAt(event->position().x()), (event->modifiers() & Qt::ShiftModifier) != 0);
+}
+
+// Selects the word under the pointer.
+void TextFieldItem::mouseDoubleClickEvent(QMouseEvent* event)
+{
+	const int           position = PositionAt(event->position().x());
+	QTextBoundaryFinder words(QTextBoundaryFinder::Word, m_text);
+	words.setPosition(position);
+	const auto reasons = words.boundaryReasons();
+	int        start   = position;
+	if (!reasons.testFlag(QTextBoundaryFinder::StartOfItem))
+	{
+		start = static_cast<int>(std::max<qsizetype>(0, words.toPreviousBoundary()));
+	}
+	int end = position;
+	if (!reasons.testFlag(QTextBoundaryFinder::EndOfItem) || start == position)
+	{
+		words.setPosition(position);
+		const auto next = words.toNextBoundary();
+		end             = next < 0 ? static_cast<int>(m_text.size()) : static_cast<int>(next);
+	}
+	MoveCursor(start, false);
+	MoveCursor(end, true);
 }
 
 void TextFieldItem::mouseMoveEvent(QMouseEvent* event)

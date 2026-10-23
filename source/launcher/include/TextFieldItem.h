@@ -7,10 +7,11 @@
 #include <QString>
 #include <QTextLayout>
 #include <QTimer>
+#include <QVector>
 
 // One line of editable text in a framed box: a blinking cursor, a selection made with Shift and the arrow keys or
-// by dragging, the clipboard keys, word jumps and input methods. Enter and Return ask for the on-screen keyboard;
-// keys the field does not use (Up, Down, Escape, and Left or Right at an end) go on to the page.
+// by dragging or a double-click on a word, the clipboard keys, undo and redo, word jumps and input methods. Enter and Return ask for the
+// on-screen keyboard; keys the field does not use (Up, Down, Escape, and Left or Right at an end) go on to the page.
 class TextFieldItem: public QQuickItem
 {
 	Q_OBJECT
@@ -47,19 +48,27 @@ protected:
 	void     inputMethodEvent(QInputMethodEvent* event) override;
 	void     mousePressEvent(QMouseEvent* event) override;
 	void     mouseMoveEvent(QMouseEvent* event) override;
+	void     mouseDoubleClickEvent(QMouseEvent* event) override;
 
 private:
+	struct Snapshot
+	{
+		QString text;
+		int     cursor = 0;
+	};
+
 	// Lays the text and any input method preedit out again, for a new text or font size.
 	void Relayout();
 	// Handles the cursor and editing keys; false for a key the field does not use here.
 	bool EditKey(QKeyEvent* event);
 	// Moves the cursor, extending the selection when select is set; false when nothing would change.
 	bool MoveCursor(int position, bool select);
-	// Replaces the selection with text; false when the result is not acceptable.
-	bool Insert(const QString& text);
+	// Replaces the selection with text, typed or pasted; false when the result is not acceptable.
+	bool Insert(const QString& text, bool typed = false);
 	// Deletes the selection, or the text between the cursor and position; false when nothing would change.
 	bool Erase(int position);
-	void Commit(const QString& text, int cursor);
+	void Commit(const QString& text, int cursor, bool typed = false);
+	bool Restore(QVector<Snapshot>* from, QVector<Snapshot>* to);
 	void CursorMoved();
 	void RestartBlink();
 
@@ -79,6 +88,10 @@ private:
 	bool        m_framed         = true;
 	qreal       m_scroll         = 0;
 	bool        m_cursor_shown   = true;
+	// The last edit was typing, which the next typed character joins in the undo history.
+	bool              m_typing = false;
+	QVector<Snapshot> m_undo;
+	QVector<Snapshot> m_redo;
 	QTextLayout m_layout;
 	QTimer      m_blink;
 };
