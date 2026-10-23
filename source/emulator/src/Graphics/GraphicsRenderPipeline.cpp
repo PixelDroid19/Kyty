@@ -1420,7 +1420,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		}
 	}
 
-	if (Config::GetPrintfDirection() != Log::Direction::Silent)
+	if (Log::ShouldLog(Log::Level::Debug) && Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
 		ShaderDbgDumpInputInfo(vs_input_info);
 		ShaderDbgDumpInputInfo(ps_input_info);
@@ -1776,7 +1776,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	Core::LockGuard lock(m_mutex);
 
-	if (Config::GetPrintfDirection() != Log::Direction::Silent)
+	if (Log::ShouldLog(Log::Level::Debug) && Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
 		ShaderDbgDumpInputInfo(input_info);
 	}

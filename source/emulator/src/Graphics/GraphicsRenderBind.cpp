@@ -4545,7 +4545,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 			RecordDrawMaterialTraceTexture(material_trace, i, textures.desc[i], r, addr, width, height, pitch, depth, tex,
 			                               sampled_views[*sampled_index], trace_provenance, &textures, &samplers);
-			if (std::getenv("KYTY_DUMP_VIDEO_BIND") != nullptr && gen5 && (fmt == 1u || fmt == 14u))
+			static const bool dump_video_bind = std::getenv("KYTY_DUMP_VIDEO_BIND") != nullptr;
+			if (dump_video_bind && gen5 && (fmt == 1u || fmt == 14u))
 			{
 				const uint64_t bind_addr = static_cast<uint64_t>(addr);
 				const bool     video_va  = bind_addr >= 0x6c000000ull && bind_addr <= 0x6e000000ull;
@@ -5174,7 +5175,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 				auto* storage_image = textures2d_storage[i];
 				const auto old_layout = storage_image->layout;
 				GraphicsRenderStorageImageBarrier(buffer, storage_image);
-				if (std::getenv("KYTY_DUMP_STORAGE_IMAGE") != nullptr)
+				static const bool dump_storage_image = std::getenv("KYTY_DUMP_STORAGE_IMAGE") != nullptr;
+				if (dump_storage_image)
 				{
 					static std::atomic_uint storage_image_logs {0};
 					const unsigned         ordinal = storage_image_logs.fetch_add(1, std::memory_order_relaxed);

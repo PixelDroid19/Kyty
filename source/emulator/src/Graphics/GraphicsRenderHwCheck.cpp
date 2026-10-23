@@ -706,7 +706,8 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 	// Preserve the values for sample-shading selection in the pipeline and let
 	// the rasterizer use the effective attachment count instead of rejecting a
 	// valid draw because an EQAA field describes a lower anchor/iteration count.
-	if (scan_mode.msaa_enable && std::getenv("KYTY_DUMP_AA_REGS") != nullptr)
+	static const bool dump_aa_regs = std::getenv("KYTY_DUMP_AA_REGS") != nullptr;
+	if (scan_mode.msaa_enable && dump_aa_regs)
 	{
 		static bool dumped_eqaa_mapping = false;
 		if (!dumped_eqaa_mapping)
@@ -859,7 +860,7 @@ void hw_print(const HW::Context& hw)
 	const auto& aa   = hw.GetAaSampleControl();
 	const auto& ac   = hw.GetAaConfig();
 
-	if (Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent)
+	if (Kyty::Log::ShouldLog(Kyty::Log::Level::Debug) && Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent)
 	{
 		KYTY_LOG_DEBUG("Context\n");
 		KYTY_LOG_DEBUG("\t GetRenderTargetMask()   = 0x%08" PRIx32 "\n", hw.GetRenderTargetMask());

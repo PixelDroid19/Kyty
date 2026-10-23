@@ -12,7 +12,8 @@ namespace Kyty::Libs::Graphics {
 
 void GraphicsRunTraceAaRegisterWrite(const char* path, const char* name, uint32_t value)
 {
-	if (std::getenv("KYTY_DUMP_AA_REGS") == nullptr)
+	static const bool dump_aa_regs = std::getenv("KYTY_DUMP_AA_REGS") != nullptr;
+	if (!dump_aa_regs)
 	{
 		return;
 	}

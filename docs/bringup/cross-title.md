@@ -841,6 +841,16 @@ record. Titles are named descriptively only (`AGENTS.md`).
     switches per bound texture; they are now read once per process.
     Environment reads were about 1.5% of CP time in total; the remaining
     ones are switches that tests set at runtime.
+  - Fix (2026-10-23): with console logging at the Warn level, as in the
+    sweep runs, every pipeline lookup still built the shader input-info
+    dumps and every draw ran `hw_print`, because both checked only that
+    logging was not silent; the level filter then dropped every line. In a
+    CP-thread sample of the fishing title's dock they took about 2.5% of
+    the thread (input-info dumps 1.8% with their level checks, `hw_print`
+    0.6%). They now also require the Debug level, and a later sample of
+    the same scene no longer shows them. Three more per-draw switches
+    (`KYTY_DUMP_VIDEO_BIND`, `KYTY_DUMP_STORAGE_IMAGE`, `KYTY_DUMP_AA_REGS`)
+    that no test sets are now read once per process too.
   - Excluded: caching the shared-backing population query that guest
     address preparation issues once per draw (one `fstat`, about 0.7%).
     It is the check that detects newly populated physical pages, so a
