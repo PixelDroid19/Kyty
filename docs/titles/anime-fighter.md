@@ -4,6 +4,30 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Anime fighter: Vulkan validation errors (2026-10-23, fixed)
+
+- **Found by** a 90 s strict run under the Khronos validation layer (log
+  only, errors only). The other seven titles in the sweep reported none.
+- **Compressed mip uploads past the host chain.** Block-compressed images
+  keep only the levels whose dimensions are at least 4x4
+  (`Gen5CompressedHostMipCount`). The generic upload path in
+  `Objects/Texture.cpp` still built one buffer-to-image region per guest
+  level, so a BC3 128x128 texture with 8 guest levels copied into levels 6
+  and 7 of a 6-level image (VUIDs 07967, 07971, 00207, 00208). The region
+  list now stops at the host level count, as the 2D-array and
+  standard-64KB chain paths already did.
+- **Zero-width viewport.** One triangle-list draw per run reaches the GPU
+  with all viewport registers at zero (`PA_CL_VTE_CNTL` at its default,
+  every transform enabled), and Vulkan requires a positive viewport width
+  (VUID 01770). A zero scale sends every vertex to one screen line, so no
+  triangle covers a sample; an independent implementation reaches the same
+  result. `ResolveViewportXy` now returns a 1x1 viewport wholly above and
+  left of the framebuffer for a zero scale on either axis. Point sprites
+  and wide lines under such a viewport would still cover pixels on the
+  hardware; no title has shown that case.
+- **Verified** (Intel A770, Mesa ANV): validation log empty for 90 s, fight
+  scene rendered, unit 2447 and integration 74/74 pass.
+
 ## Anime fighter: excluded, one submission order across queues (2026-10-23)
 
 - **Follows** "excluded, submit without waiting for decode" below, which
