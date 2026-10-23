@@ -4,6 +4,45 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Anime fighter: excluded, one submission order across queues (2026-10-23)
+
+- **Follows** "excluded, submit without waiting for decode" below, which
+  proposed an order between submissions on different queues.
+- **Experiment (not kept).** Every graphics and compute submit took a ticket
+  in one guest submission order and returned without waiting for decode.
+  Each ring decoded a batch only when its ticket came up, so a draw never
+  waited for compute work submitted after it. Compute runs were split per
+  doorbell to give each its own ticket.
+- **Result (Intel A770, Mesa ANV, strict run, 60 fps present limit).**
+  - Fight window 43.6 fps before, 43.1 fps with the order: no gain. The
+    command-processor thread was still idle 52% of the time, waiting for
+    the next batch.
+  - The submitting guest thread then waited on a guest event flag 30% of the
+    time, and another guest thread spun at 95% CPU polling one field of a
+    shared object. What writes that field was not identified.
+  - The card title stopped at boot: the guest rewrites memory that submitted
+    commands point to once a submit returns. The decode wait is a
+    guest-visible contract ("A graphics submit returns after its batch is
+    decoded" in `docs/bringup/cross-title.md`). The experiment was reverted.
+- **Where the frame goes (fight, 26 s window).**
+  - The GPU is not saturated. Temporary per-command-buffer timestamps
+    (removed) put the GPU busy 55-66% of the fight windows, detile and
+    present excluded. Fixed 1920x1080 render targets ran 44.7 fps, the same
+    as native targets. The GT's RC6 idle residency read 0-2%, but at about
+    1,000 submits per second it does not measure load.
+  - The command processor ran 12.8 s of 26 s: about 193,000 draws, 19,000
+    dispatches and 1,138 flips, so ~170 draws and ~11 ms per frame.
+  - Its largest costs: `BindVertexBuffers` 21.5% of the thread (half of it
+    creating and freeing vertex-buffer objects, 45% capturing transient
+    snapshots), transient snapshot capture 18.7% in total, `GpuMemory`
+    object creation 17%, `PrepareTextures` 7%, `CommandBuffer::Begin` 6.4%.
+  - Vertex-buffer objects per window: 5,385 created, 7,351 reclaimed,
+    12,646 freed. Storage write-back: 19,110 calls, 1.0 GB, 336 ms.
+- **Direction.** Vertices that compute writes into storage are written back
+  to guest memory and copied into a new vertex-buffer object for each draw.
+  Binding the storage buffer itself would remove the write-back, the copy
+  and the object churn.
+
 ## Anime fighter: black boxes behind glyphs were a capture artifact (2026-10-23)
 
 - **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit).**

@@ -4,6 +4,36 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## A graphics submit returns after its batch is decoded (2026-10-23)
+
+- **Contract.** A graphics command-buffer submit returns to the guest only
+  once the command processor has decoded the batch. The ring snapshot covers
+  the command words only. Titles rewrite memory those commands point to,
+  such as descriptor tables embedded next to the commands, as soon as the
+  submit returns.
+- **Evidence (card title, Intel A770, Mesa ANV, strict run).**
+  - An experiment returned from submit at once. Each queue took an order
+    ticket instead, and decode honoured the guest's order across queues.
+  - The card title then stopped at boot every time, in the vertex input
+    layout check (`unsupported vertex input layout: resources=3 buffers=2`).
+    The vertex-buffer descriptors it read held floating-point constants
+    (`0xbf800000`, `0x3f800000`): the guest had already reused that memory.
+  - With the decode wait, the same build boots and plays at about 320 fps.
+- **Consequence.** Overlapping guest work and decode needs a snapshot of the
+  memory the commands reference, not a submit that returns early. The order
+  gate is excluded; `docs/titles/anime-fighter.md` has its frame-rate result.
+
+## Compute ring runs copied in bytes across the ring end (2026-10-23)
+
+- **Defect.** When a run of compute packets crossed the end of the ring, the
+  copy into the internal buffer counted bytes instead of dwords. Three
+  quarters of the run then decoded stale words from an earlier wrap.
+- **Found by reading** the ring code during the order-gate experiment. No
+  run was seen to fail from it.
+- **Change.** Both halves are copied as dwords.
+- **Verified.** Build, unit and integration tests, and 10 fishing-title
+  boots on the fixed build.
+
 ## Decoded video frames delivered after a decode error (2026-10-22)
 
 - **Found by reading the decoder** while a logo video of the 2D Unity action
@@ -983,6 +1013,17 @@ record. Titles are named descriptively only (`AGENTS.md`).
   - Direction: enable sync-wait tracking and take host stacks of the
     command-processor thread at the stall. The 2026-10-11 record saw it
     runnable inside the driver's graphics pipeline creation.
+  - 2026-10-23: the stall recurred once on an earlier build of the day.
+    - In 2 of the 3 stall snapshots of 2026-10-22/23, an IL2CPP-started
+      guest thread was inside emulator code (host return address, no
+      recorded wait type). The third snapshot did not show it.
+    - The next 28 boots in a row were clean (8 sweep boots, then 20
+      boots stopped at 16 s once past frame 3), up to the build with the
+      compute ring wrap fix. At the historical rate of about 7%, 28 clean
+      boots make a remaining stall unlikely (about 13%) but do not show
+      that it is gone.
+    - It stays open. The next stall needs host stacks, not only agent
+      snapshots.
 - **Evidence (Intel, strict, one run each, capture-method fps).** Every run
   ended in status 1 with no error, and the final captures show intact
   geometry.

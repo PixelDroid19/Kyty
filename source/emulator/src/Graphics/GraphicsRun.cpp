@@ -1270,6 +1270,9 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 {
 	EXIT_IF(m_cp == nullptr);
 
+	// A Gen5 DCB submit returns once the batch is decoded: titles rewrite memory
+	// the commands point to (embedded descriptor tables) as soon as the submit
+	// returns, and the snapshot below covers only the command words.
 	const auto decode_completion = completion == GraphicsSubmissionCompletion::QueuedGraphicsInterrupt
 	                                   ? std::make_shared<CmdBatch::DecodeCompletion>()
 	                                   : nullptr;
