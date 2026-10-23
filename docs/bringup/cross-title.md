@@ -4,6 +4,37 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Guest-window searches skip occupied spans (2026-10-23)
+
+- **Observed** (role-playing title, boot, Intel A770): the first frame
+  appeared after about 17.6 s, and a 30 s run presented 3 frames. One
+  thread spent about 11.5 s of CPU in `mmap` under
+  `mmap_in_guest_window`. With `KYTY_DEBUG_FLEX_ALLOC=1`, 78 of 79 window
+  searches succeeded on their first attempt; one, a 64 MiB request with a
+  16 KiB alignment and an occupied hint, took 33,554,433 attempts and
+  landed 512 GiB above its hint.
+- **Cause.** On Linux both window searches (private and shared mappings)
+  stepped by the alignment and issued one refused fixed mapping per step,
+  so an occupied interval cost one system call per aligned address inside
+  it. The Apple shared search already skipped to the end of the occupied
+  region.
+- **Change.** When a fixed mapping is refused because the span is
+  occupied, the search reads the kernel's sorted mapping list and resumes
+  at the first aligned address whose whole span is free. Any other refusal
+  ends the search, since it would repeat at every address. Requests larger
+  than the window are refused up front.
+- **Verified.**
+  - The same request now succeeds on its second attempt, at the same
+    address as before.
+  - Role-playing title: 339 frames in 40 s (38 in 45 s before), and it
+    reaches its initial settings screen within 30 s.
+  - Unit tests (2,459) and the integration and diagnostics tests (74).
+  - 30 s strict runs at the 60 fps present limit: fishing title 1,442
+    frames, insect platformer sequel 1,345, card title 1,479, racing title
+    1,455, beat 'em up 493. No stop.
+  - The sandbox title's intermittent GPU hang about 11 s into its boot
+    also reproduces on the previous binary, without this change.
+
 ## Proven one-word buffer fills recorded as transfer fills (2026-10-23)
 
 - **Observed** (beat 'em up, title screen, Intel A770, Mesa ANV, Xe kernel
