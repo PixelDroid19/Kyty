@@ -3170,8 +3170,6 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 			}
 		}
 
-		if (((gen5 ? r.Base48() : r.Base44()) >> 32u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ((gen5 ? r.Base48() : r.Base44()) >> 32u) != 0 condition ignored (continuing)\n"); }
-
 		(*sgprs)[0] = r.fields[0];
 		(*sgprs)[1] = r.fields[1];
 		(*sgprs)[2] = r.fields[2];

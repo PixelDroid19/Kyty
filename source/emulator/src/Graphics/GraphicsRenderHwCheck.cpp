@@ -192,7 +192,12 @@ static void rt_check(const HW::RenderTarget& rt)
 		{
 			if (rt.attrib2.width == 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib2.width == 0x00000000 condition ignored (continuing)\n"); }
 			if (rt.attrib2.height == 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib2.height == 0x00000000 condition ignored (continuing)\n"); }
-			if (rt.attrib2.num_mip_levels != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib2.num_mip_levels != 0x00000000 condition ignored (continuing)\n"); }
+			if (rt.attrib2.num_mip_levels != 0x00000000 && rt.attrib3.tile_mode != 0x0000001b)
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+				               "WARNING: rt.attrib2.num_mip_levels != 0x00000000 && rt.attrib3.tile_mode != 0x0000001b condition ignored "
+				               "(continuing)\n");
+			}
 			if (rt.attrib3.depth != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib3.depth != 0x00000000 condition ignored (continuing)\n"); }
 			if (rt.attrib3.tile_mode != 0x0000001b) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib3.tile_mode != 0x0000001b condition ignored (continuing)\n"); }
 			if (rt.attrib3.dimension != 0x00000001) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib3.dimension != 0x00000001 condition ignored (continuing)\n"); }
@@ -304,7 +309,11 @@ static void validate_depth_plane(const HW::DepthRenderTarget& z)
 		if (z.z_info.plane_compression != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.z_info.plane_compression != 0 condition ignored (continuing)\n"); }
 		return;
 	}
-	if (z.z_info.format != 0x00000003) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.z_info.format != 0x00000003 condition ignored (continuing)\n"); }
+	if (z.z_info.format != 0x00000001 && z.z_info.format != 0x00000003)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+		               "WARNING: z.z_info.format != 0x00000001 && z.z_info.format != 0x00000003 condition ignored (continuing)\n");
+	}
 	(void)decode_guest_sample_count(z.z_info.num_samples);
 	if (z.z_info.expclear_enabled) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.z_info.expclear_enabled condition ignored (continuing)\n"); }
 	if (z.z_info.zrange_precision != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.z_info.zrange_precision != 1 condition ignored (continuing)\n"); }
