@@ -253,7 +253,8 @@ DepthStencilVulkanImage* DepthStencilBufferGetSliceArray(GraphicContext* ctx, De
 	image_descriptor.extent       = {first->extent.width, first->extent.height, 1u};
 	image_descriptor.array_layers = layers;
 	image_descriptor.format       = array->format;
-	image_descriptor.usage        = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	// Sampled in DEPTH_STENCIL_READ_ONLY_OPTIMAL, a layout valid only for depth-stencil attachment images.
+	image_descriptor.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 	if (!VulkanCreateDeviceImage(ctx, VulkanBuildImageCreateInfo(image_descriptor), array, &first->slice_array_memory))
 	{
 		EXIT("depth slice array image creation failed: extent=%ux%u layers=%u\n", first->extent.width, first->extent.height, layers);

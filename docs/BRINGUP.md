@@ -66,6 +66,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Platformer pair: index range over a depth target (2026-10-16)
   - Insect sequel: intermittent depth/index overlap (2026-10-16, open)
 - [Sandbox title](titles/sandbox.md)
+  - Sandbox title: GPU hang on the first world frame (2026-10-23, fixed)
   - Sandbox title: shadow cascades bound as slice ranges (2026-10-23, fixed)
   - Sandbox title: drifting dark patch on terrain (2026-10-16, open)
   - Sandbox title: missing terrain in the world (2026-10-15, fixed 2026-10-16)

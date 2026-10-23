@@ -4,6 +4,48 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Sandbox title: GPU hang on the first world frame (2026-10-23, fixed)
+
+- **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
+  world-entry route).** About two seconds after the player spawned, the
+  kernel reset the render engine ("Timedout job", always the same GuC
+  context) and the run stopped with `VK_ERROR_DEVICE_LOST` on queue 8. Nine
+  of eleven runs without instrumentation hung. In every submit-fault report
+  the unfinished command buffer was the post-processing and UI pass of the
+  first world frame. All eleven queues share one queue family and run on the
+  render engine, so the reset alone does not name the queue.
+- **Cause.** With the Vulkan validation layer (core checks; no emulator
+  instrumentation) the run still hung, and the layer reported one error in
+  the whole run, at the hang: the depth slice array
+  (`DepthStencilBufferGetSliceArray`) had TRANSFER_DST and SAMPLED usage only,
+  but was transitioned to and sampled in DEPTH_STENCIL_READ_ONLY_OPTIMAL, a
+  layout valid only for images with depth-stencil attachment usage
+  (VUID-VkImageMemoryBarrier-oldLayout-01210). The shadow cascades are first
+  sampled through that array on the first world frame.
+- **Change.** The array is created with depth-stencil attachment usage, as
+  sampled depth views already are (`Texture.cpp`).
+- **Verified.** A validation run reports no error and reaches and draws the
+  world. Three runs (one with validation, two without) hold the world with no
+  engine reset, where nine of eleven hung before. Unit 2446/2446,
+  integration 74/74.
+- **Excluded on the way.**
+  - Runaway guest loops: the five guest shaders with loops in that command
+    buffer (three pixel shaders bounded by constant-buffer values, a histogram
+    compute whose counter stops at 255, a 3D blur bounded by its radius)
+    translate to bounded loops. Skipping them, all five compute dispatches or
+    the other post-processing pixel shaders still hung; a skip also feeds its
+    consumers stale data, so these runs exclude little on their own.
+  - GPU-side waits: the renderer records no event waits and no Vulkan
+    indirect commands.
+  - The `condition ignored` warnings before the hang appear in clean runs too.
+  - Localizing by timing did not work: a fence-polling watcher and per-command
+    buffer markers (top and bottom of pipe, or top only) each gave clean runs.
+    The validation layer did not hide the hang.
+  - A stop on the "Get started" menu in earlier runs that day was host input
+    reaching the window during the runs, not an emulator defect.
+- **Open.** The driver path that turns the invalid layout into a hang was not
+  examined; the device core dump was not read.
+
 ## Sandbox title: shadow cascades bound as slice ranges (2026-10-23, fixed)
 
 - **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
