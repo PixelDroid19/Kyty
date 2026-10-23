@@ -74,6 +74,9 @@ public:
 	bool AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_t* samples_num);
 	bool AudioOutGetStatus(Id handle, int* type, int* channels_num);
 	void SetHostPaused(bool paused);
+	// Blocks while host output is paused. Call it before taking any lock a guest
+	// thread could need: the wait is a safe point for guest context requests.
+	void WaitWhileHostPaused();
 
 	Id       AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format);
 	bool     AudioInClose(Id handle);
