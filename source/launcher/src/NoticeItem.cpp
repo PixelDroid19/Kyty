@@ -103,7 +103,8 @@ QSGNode* NoticeItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*d
 	const qreal u     = theme->U();
 
 	RoundedBoxNode::Style style;
-	style.fill         = theme->GlassStrong();
+	// Opaque like the other panels, so the names under the notice do not show through its text.
+	style.fill         = theme->Panel();
 	style.border       = theme->GlassBorder();
 	style.border_width = 1;
 	style.radius       = height() / 2;
