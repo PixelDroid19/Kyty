@@ -46,7 +46,8 @@ constexpr char SYSTEM_CHOICE[] = "System";
 
 namespace {
 
-// Same lookup as the Qt widget launcher: Kyty.ini next to the working directory wins, otherwise the per-user settings.
+// Kyty.ini next to the working directory wins, otherwise the per-user settings: the machine-wide location is not
+// writable by an ordinary user on Windows and macOS.
 std::unique_ptr<QSettings> OpenSettings()
 {
 	QFile file(QDir(".").absoluteFilePath(CONF_FILE_NAME));
@@ -54,11 +55,21 @@ std::unique_ptr<QSettings> OpenSettings()
 	{
 		return std::make_unique<QSettings>(CONF_FILE_NAME, QSettings::IniFormat);
 	}
-#ifdef __linux__
-	return std::make_unique<QSettings>(QSettings::IniFormat, QSettings::UserScope, CONF_ORG_NAME, CONF_APP_NAME);
-#else
-	return std::make_unique<QSettings>(QSettings::IniFormat, QSettings::SystemScope, CONF_ORG_NAME, CONF_APP_NAME);
+	auto settings = std::make_unique<QSettings>(QSettings::IniFormat, QSettings::UserScope, CONF_ORG_NAME, CONF_APP_NAME);
+#ifndef __linux__
+	// The widget launcher kept its library in the machine-wide file there; a first start brings it over once.
+	if (!QFile::exists(settings->fileName()))
+	{
+		const QSettings machine(QSettings::IniFormat, QSettings::SystemScope, CONF_ORG_NAME, CONF_APP_NAME);
+		if (QFile::exists(machine.fileName()))
+		{
+			QDir().mkpath(QFileInfo(settings->fileName()).absolutePath());
+			QFile::copy(machine.fileName(), settings->fileName());
+			settings = std::make_unique<QSettings>(QSettings::IniFormat, QSettings::UserScope, CONF_ORG_NAME, CONF_APP_NAME);
+		}
+	}
 #endif
+	return settings;
 }
 
 QString FindParamFile(const QDir& dir)
@@ -222,7 +233,7 @@ void LauncherBackend::Load()
 	settings->endGroup();
 }
 
-void LauncherBackend::Save() const
+void LauncherBackend::Save()
 {
 	const auto settings = OpenSettings();
 
@@ -252,6 +263,12 @@ void LauncherBackend::Save() const
 		settings->setValue("width", m_window_geometry.width());
 		settings->setValue("height", m_window_geometry.height());
 		settings->endGroup();
+	}
+
+	settings->sync();
+	if (settings->status() != QSettings::NoError)
+	{
+		emit SaveFailed(settings->fileName());
 	}
 }
 

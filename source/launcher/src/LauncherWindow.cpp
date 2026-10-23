@@ -58,6 +58,8 @@ LauncherWindow::LauncherWindow()
 	connect(backend, &LauncherBackend::StateChanged, this, &LauncherWindow::StateChanged);
 	connect(backend, &LauncherBackend::GameFinished, this, &LauncherWindow::ReportGameFinished);
 	connect(backend, &LauncherBackend::FolderImported, this, &LauncherWindow::ReportFolderImported);
+	connect(backend, &LauncherBackend::SaveFailed, this,
+	        [this](const QString& file) { m_notice->Show(tr("The settings could not be saved to %1.").arg(file)); });
 	// Queued: the change may come from a key the page being replaced is still handling.
 	connect(backend, &LauncherBackend::LanguageChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
 	connect(backend, &LauncherBackend::AppearanceChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
@@ -259,7 +261,9 @@ void LauncherWindow::Layout()
 	}
 	m_hints->setPosition(QPointF(sidebar, page.bottom()));
 	m_hints->setSize(QSizeF(page.width(), HINTS_HEIGHT * u));
-	m_notice->setPosition(QPointF(std::round(page.center().x() - m_notice->width() / 2), page.bottom() - NOTICE_GAP * u - m_notice->height()));
+	// Centred on the page, but a notice wider than the page moves left over the sidebar instead of leaving the window.
+	const qreal notice_x = std::min(page.center().x() - m_notice->width() / 2, w - NOTICE_GAP * u - m_notice->width());
+	m_notice->setPosition(QPointF(std::round(notice_x), page.bottom() - NOTICE_GAP * u - m_notice->height()));
 }
 
 void LauncherWindow::StateChanged()

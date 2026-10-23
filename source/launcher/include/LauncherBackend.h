@@ -36,6 +36,8 @@ signals:
 	void LanguageChanged();
 	// The launcher's look or library layout changed; pages built before still show the old one.
 	void AppearanceChanged();
+	// The settings could not be written to file, so the last changes are lost when the launcher closes.
+	void SaveFailed(const QString& file);
 
 public:
 	explicit LauncherBackend(QObject* parent = nullptr);
@@ -102,7 +104,7 @@ public:
 
 private:
 	void         Load();
-	void         Save() const;
+	void               Save();
 	QVariantMap  GameToMap(int row) const;
 	QVariantMap        FolderToMap(const QString& title, const QString& kind, const QString& section,
 	                               const std::function<bool(const Kyty::Configuration&)>& shows) const;

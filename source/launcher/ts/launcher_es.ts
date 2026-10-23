@@ -810,6 +810,10 @@
 <context>
     <name>LauncherWindow</name>
     <message>
+        <source>The settings could not be saved to %1.</source>
+        <translation>No se pudieron guardar los ajustes en %1.</translation>
+    </message>
+    <message>
         <source>Kyty Launcher</source>
         <translation>Kyty Launcher</translation>
     </message>
