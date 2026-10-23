@@ -593,9 +593,13 @@ enum class PhysicalImport
 	Unavailable,
 };
 
-// Physical direct memory is a shared host mapping. Some drivers import only
-// private anonymous host pointers, so one shared page decides how physical
-// ranges are imported for the device's lifetime.
+// Physical direct memory is a shared host mapping, and one shared page decides
+// how physical ranges are imported for the device's lifetime. A dma-buf of the
+// backing pins its pages. An imported host pointer leaves them movable: each
+// host migration or reclaim of a page invalidates the import, and the next
+// submission walks and remaps the whole window again. Some drivers also import
+// only private anonymous host pointers. The host pointer serves hosts that
+// cannot export the backing.
 PhysicalImport ProbePhysicalImport(GraphicContext* ctx)
 {
 	PreparedHostImport prepared;
@@ -606,14 +610,14 @@ PhysicalImport ProbePhysicalImport(GraphicContext* ctx)
 	                                                      std::max(prepared.min_pointer_alignment, kPageBytes));
 	Chunk          probe;
 	PhysicalImport result = PhysicalImport::Unavailable;
-	if (view != 0 && ImportPointer(ctx, reinterpret_cast<void*>(view), kPageBytes, kPageBytes, true, &prepared, &probe))
-	{
-		result = PhysicalImport::HostPointer;
-		DestroyImport(ctx->device, probe);
-	} else if (backing != nullptr && ctx->guest_dma_buf_import_supported &&
-	           ImportDmaBuf(ctx, Core::VirtualMemory::ExportSharedBackingDmaBuf(backing, 0, kPageBytes), kPageBytes, &probe))
+	if (backing != nullptr && ctx->guest_dma_buf_import_supported &&
+	    ImportDmaBuf(ctx, Core::VirtualMemory::ExportSharedBackingDmaBuf(backing, 0, kPageBytes), kPageBytes, &probe))
 	{
 		result = PhysicalImport::DmaBuf;
+		DestroyImport(ctx->device, probe);
+	} else if (view != 0 && ImportPointer(ctx, reinterpret_cast<void*>(view), kPageBytes, kPageBytes, true, &prepared, &probe))
+	{
+		result = PhysicalImport::HostPointer;
 		DestroyImport(ctx->device, probe);
 	}
 	if (view != 0)
@@ -630,8 +634,8 @@ PhysicalImport ProbePhysicalImport(GraphicContext* ctx)
 }
 
 // Imports direct memory [offset, offset + size) as a window pinned in Kernel,
-// through a writable alias of the backing or, where the device refuses shared
-// host pointers, a dma-buf of it.
+// through a dma-buf of the backing or, where the host cannot export one, a
+// writable alias of it.
 bool ImportWindow(GraphicContext* ctx, uint64_t offset, uint64_t size, Chunk* out)
 {
 	*out       = {};
