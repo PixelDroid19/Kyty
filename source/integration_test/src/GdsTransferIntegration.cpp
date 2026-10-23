@@ -364,14 +364,14 @@ private:
 					return false;
 				}
 			}
-			FillWaveState(physical, properties, size_control_revision, features13);
+			FillWaveState(physical, properties, size_control_revision, features12, features13);
 			return true;
 		}
 		return false;
 	}
 
 	void FillWaveState(VkPhysicalDevice physical, const VkPhysicalDeviceProperties& properties, uint32_t size_control_revision,
-	                   const VkPhysicalDeviceVulkan13Features& features13)
+	                   const VkPhysicalDeviceVulkan12Features& features12, const VkPhysicalDeviceVulkan13Features& features13)
 	{
 		VkPhysicalDeviceSubgroupSizeControlProperties size_control {};
 		size_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
@@ -392,6 +392,8 @@ private:
 		wave.extension_advertised   = size_control_revision != 0;
 		wave.extension_revision     = size_control_revision;
 		wave.extension_enabled      = false;
+		// The device enables every queried feature, as the window device enables this one when supported.
+		wave.subgroup_broadcast_dynamic_id_enabled = features12.subgroupBroadcastDynamicId == VK_TRUE;
 		wave.size_control_feature_supported   = features13.subgroupSizeControl == VK_TRUE;
 		wave.full_subgroups_feature_supported = features13.computeFullSubgroups == VK_TRUE;
 		wave.size_control_feature_enabled     = wave.size_control_feature_supported;
