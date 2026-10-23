@@ -26,6 +26,7 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
@@ -1271,6 +1272,10 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 {
 	EXIT_IF(m_cp == nullptr);
 
+	// Window init is awaited outside the ring lock: a guest thread stopped in
+	// that declared wait must not keep other submitters blocked on the lock.
+	WindowWaitForGraphicInitialized();
+
 	// A Gen5 DCB submit returns once the batch is decoded: titles rewrite memory
 	// the commands point to (embedded descriptor tables) as soon as the submit
 	// returns, and the snapshot below covers only the command words.
@@ -1280,14 +1285,13 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 	{
 		Core::LockGuard lock(m_mutex);
 
-		WindowWaitForGraphicInitialized();
 		GraphicsRenderCreateContext();
 
 		if (m_done)
 		{
 			while (!m_idle)
 			{
-				m_idle_cond_var.Wait(&m_mutex);
+				Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
 			}
 			m_done = false;
 
@@ -1438,7 +1442,7 @@ void GraphicsRing::Done()
 	{
 		while (!m_idle)
 		{
-			m_idle_cond_var.Wait(&m_mutex);
+			Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
 		}
 	}
 	m_done = true;
@@ -1449,7 +1453,7 @@ void GraphicsRing::WaitForIdle()
 	Core::LockGuard lock(m_mutex);
 	while (!m_idle)
 	{
-		m_idle_cond_var.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
 	}
 }
 
@@ -1854,18 +1858,21 @@ void ComputeRing::MapComputeQueue(uint32_t* ring_addr, uint32_t ring_size_dw, ui
 
 void ComputeRing::DingDong(uint32_t offset_dw)
 {
+	// Window init is awaited outside the ring lock: a guest thread stopped in
+	// that declared wait must not keep other submitters blocked on the lock.
+	WindowWaitForGraphicInitialized();
+
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(!m_active);
 
-	WindowWaitForGraphicInitialized();
 	GraphicsRenderCreateContext();
 
 	if (m_done)
 	{
 		while (!m_idle)
 		{
-			m_idle_cond_var.Wait(&m_mutex);
+			Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
 		}
 		m_done = false;
 		/*m_cp->Reset();*/
@@ -1887,7 +1894,7 @@ void ComputeRing::Done()
 	{
 		while (!m_idle)
 		{
-			m_idle_cond_var.Wait(&m_mutex);
+			Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
 		}
 	}
 	m_done = true;
@@ -1898,7 +1905,7 @@ void ComputeRing::WaitForIdle()
 	Core::LockGuard lock(m_mutex);
 	while (!m_idle)
 	{
-		m_idle_cond_var.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
 	}
 }
 

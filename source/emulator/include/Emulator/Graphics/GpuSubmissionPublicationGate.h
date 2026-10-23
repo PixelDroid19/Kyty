@@ -1,11 +1,11 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GPUSUBMISSIONPUBLICATIONGATE_H_
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GPUSUBMISSIONPUBLICATIONGATE_H_
 
+#include "Kyty/Core/Threads.h"
+
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 
-#include <condition_variable>
 #include <cstdint>
-#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -59,8 +59,8 @@ private:
 	Entry*             Find(SubmissionId submission);
 
 	GpuQueueId              m_queue;
-	std::mutex              m_mutex;
-	std::condition_variable m_condition;
+	Core::Mutex             m_mutex;
+	Core::CondVar           m_condition;
 	std::vector<Entry>      m_entries;
 	uint64_t                m_published_sequence = 0;
 	std::thread::id         m_publisher_thread;

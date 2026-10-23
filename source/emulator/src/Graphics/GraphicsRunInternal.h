@@ -14,11 +14,11 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
+#include "Emulator/Kernel/Pthread.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -570,22 +570,25 @@ private:
 		{
 			void Wait()
 			{
-				std::unique_lock<std::mutex> lock(mutex);
-				condition.wait(lock, [&] { return complete; });
+				Core::LockGuard lock(mutex);
+				while (!complete)
+				{
+					Kernel::PthreadInterruptibleWait(&condition, &mutex);
+				}
 			}
 
 			void Signal()
 			{
 				{
-					std::lock_guard<std::mutex> lock(mutex);
+					Core::LockGuard lock(mutex);
 					complete = true;
 				}
-				condition.notify_all();
+				condition.SignalAll();
 			}
 
-			std::mutex              mutex;
-			std::condition_variable condition;
-			bool                    complete = false;
+			Core::Mutex   mutex;
+			Core::CondVar condition;
+			bool          complete = false;
 		};
 
 		CmdBuffer draw_buffer;

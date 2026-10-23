@@ -248,8 +248,10 @@ bool PthreadInstallContextHandler(uint64_t handler);
 int PthreadRaiseContext(Pthread thread);
 
 // Marks the blocking host wait in its lifetime as a safe point for context
-// requests. The wait must hold no host lock while it blocks: a request runs
-// the guest handler there, which may block until another guest thread acts.
+// requests. A request runs the guest handler there, which may block until
+// another guest thread acts, so the wait must hold no host lock that thread
+// could need. The only lock held across such waits is the GPU admission gate
+// during a drain (GpuSubmissionAdmissionGate).
 class PthreadInterruptibleScope
 {
 public:

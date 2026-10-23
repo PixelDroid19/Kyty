@@ -6,6 +6,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Kernel/Pthread.h"
 
 #include <mutex>
 #include <utility>
@@ -21,7 +22,11 @@ struct CsStageRegisters;
 
 // Serializes command admission with teardown transactions. A quiesced action
 // keeps admission closed across both the GPU drain and the caller-owned host
-// lifetime change (for example, unmapping guest virtual memory).
+// lifetime change (for example, unmapping guest virtual memory). Taking the
+// lock is a safe point, and so are the ring waits of the drain: the GPU may wait
+// on memory a stopped guest thread writes later. A thread stopped there keeps the
+// gate, so guest code that runs while the world is stopped must not submit or
+// unmap.
 class GpuSubmissionAdmissionGate
 {
 public:
@@ -33,14 +38,14 @@ public:
 	template <typename Action>
 	decltype(auto) RunAdmitted(Action&& action)
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
+		const auto lock = Kernel::PthreadLockAtSafePoint(m_mutex);
 		return std::forward<Action>(action)();
 	}
 
 	template <typename Drain, typename Action>
 	decltype(auto) RunQuiesced(Drain&& drain, Action&& action)
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
+		const auto lock = Kernel::PthreadLockAtSafePoint(m_mutex);
 		std::forward<Drain>(drain)();
 		return std::forward<Action>(action)();
 	}

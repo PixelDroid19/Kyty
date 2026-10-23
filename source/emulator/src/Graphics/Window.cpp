@@ -34,6 +34,7 @@
 #include "Emulator/Host/HostInput.h"
 #include "Emulator/Host/HostVulkanWindow.h"
 #include "Emulator/Host/HostWindow.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/SystemContentPort.h"
@@ -3217,7 +3218,7 @@ void WindowWaitForGraphicInitialized()
 
 	while (!g_window_ctx->graphic_initialized)
 	{
-		g_window_ctx->graphic_initialized_condvar.Wait(&g_window_ctx->mutex);
+		Kernel::PthreadInterruptibleWait(&g_window_ctx->graphic_initialized_condvar, &g_window_ctx->mutex);
 	}
 }
 

@@ -1,5 +1,7 @@
 #include "Emulator/Graphics/GpuSubmissionPublicationGate.h"
 
+#include "Emulator/Kernel/Pthread.h"
+
 namespace Kyty::Libs::Graphics {
 
 bool GpuSubmissionPublicationGate::IsValid(SubmissionId submission) const
@@ -26,7 +28,7 @@ GpuSubmissionPublicationResult GpuSubmissionPublicationGate::RegisterSubmitted(S
 		return GpuSubmissionPublicationResult::InvalidArgument;
 	}
 
-	std::lock_guard<std::mutex> lock(m_mutex);
+	Core::LockGuard lock(m_mutex);
 	if (submission.sequence <= m_published_sequence || Find(submission) != nullptr ||
 	    (!m_entries.empty() && submission.sequence <= m_entries.back().submission.sequence))
 	{
@@ -43,8 +45,8 @@ GpuSubmissionPublicationResult GpuSubmissionPublicationGate::MarkFenceComplete(S
 		return GpuSubmissionPublicationResult::InvalidArgument;
 	}
 
-	std::lock_guard<std::mutex> lock(m_mutex);
-	auto*                       entry = Find(submission);
+	Core::LockGuard lock(m_mutex);
+	auto*           entry = Find(submission);
 	if (entry == nullptr)
 	{
 		return GpuSubmissionPublicationResult::UnknownSubmission;
@@ -64,7 +66,7 @@ GpuSubmissionPublicationResult GpuSubmissionPublicationGate::TryAcquireNextForPu
 		return GpuSubmissionPublicationResult::InvalidArgument;
 	}
 
-	std::lock_guard<std::mutex> lock(m_mutex);
+	Core::LockGuard lock(m_mutex);
 	if (m_entries.empty() || m_entries.front().state != State::FenceComplete)
 	{
 		return GpuSubmissionPublicationResult::NotReady;
@@ -83,7 +85,7 @@ GpuSubmissionPublicationResult GpuSubmissionPublicationGate::MarkPublished(Submi
 	}
 
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
+		Core::LockGuard lock(m_mutex);
 		if (m_entries.empty() || m_entries.front().submission != submission || m_entries.front().state != State::Publishing)
 		{
 			return GpuSubmissionPublicationResult::InvalidTransition;
@@ -92,7 +94,7 @@ GpuSubmissionPublicationResult GpuSubmissionPublicationGate::MarkPublished(Submi
 		m_entries.erase(m_entries.begin());
 		m_publisher_thread = {};
 	}
-	m_condition.notify_all();
+	m_condition.SignalAll();
 	return GpuSubmissionPublicationResult::Success;
 }
 
@@ -103,7 +105,7 @@ GpuSubmissionPublicationResult GpuSubmissionPublicationGate::WaitUntilPublished(
 		return GpuSubmissionPublicationResult::InvalidArgument;
 	}
 
-	std::unique_lock<std::mutex> lock(m_mutex);
+	Core::LockGuard lock(m_mutex);
 	if (submission.sequence <= m_published_sequence)
 	{
 		return GpuSubmissionPublicationResult::Success;
@@ -112,13 +114,16 @@ GpuSubmissionPublicationResult GpuSubmissionPublicationGate::WaitUntilPublished(
 	{
 		return GpuSubmissionPublicationResult::UnknownSubmission;
 	}
-	m_condition.wait(lock, [&] { return submission.sequence <= m_published_sequence; });
+	while (submission.sequence > m_published_sequence)
+	{
+		Kernel::PthreadInterruptibleWait(&m_condition, &m_mutex);
+	}
 	return GpuSubmissionPublicationResult::Success;
 }
 
 bool GpuSubmissionPublicationGate::IsPublishingOnCurrentThread()
 {
-	std::lock_guard<std::mutex> lock(m_mutex);
+	Core::LockGuard lock(m_mutex);
 	return m_publisher_thread == std::this_thread::get_id();
 }
 
