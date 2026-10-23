@@ -292,7 +292,18 @@ void HostAudio::WaitWhileHostPaused()
 
 bool HostAudio::AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_t* samples_num)
 {
-	if (params == nullptr || samples_num == nullptr || num == 0 || num > OUT_PORTS_MAX)
+	uint64_t   wake_deadline = 0;
+	const bool queued        = AudioOutQueue(params, num, samples_num, &wake_deadline);
+	{
+		Kernel::PthreadInterruptibleScope any_syscall;
+		Kyty::Emulator::HostClock::SleepUntil(wake_deadline);
+	}
+	return queued;
+}
+
+bool HostAudio::AudioOutQueue(const OutputParam* params, uint32_t num, uint32_t* samples_num, uint64_t* wake_deadline_us)
+{
+	if (params == nullptr || samples_num == nullptr || wake_deadline_us == nullptr || num == 0 || num > OUT_PORTS_MAX)
 	{
 		return false;
 	}
@@ -352,7 +363,7 @@ bool HostAudio::AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_
 		}
 	}
 
-	Kyty::Emulator::HostClock::SleepUntil(wake_deadline);
+	*wake_deadline_us = wake_deadline;
 	return all_queues_ok;
 }
 
@@ -427,7 +438,10 @@ uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 		}
 		port.last_input_time = deadline;
 	}
-	Kyty::Emulator::HostClock::SleepUntil(deadline);
+	{
+		Kernel::PthreadInterruptibleScope any_syscall;
+		Kyty::Emulator::HostClock::SleepUntil(deadline);
+	}
 	return samples;
 }
 
