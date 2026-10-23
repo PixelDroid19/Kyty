@@ -1214,7 +1214,8 @@ static void Ngs2ReleaseLease(Ngs2LeaseIdentity identity)
 		auto found = records.find(identity.handle);
 		EXIT_IF(found == records.end() || found->second.generation != identity.generation || found->second.pins == 0);
 		found->second.pins--;
-		if (found->second.pins == 0)
+		// A destroy owner keeps one pin and waits for the count to fall to it.
+		if (found->second.pins <= 1)
 		{
 			g_ngs_registry_changed.notify_all();
 		}

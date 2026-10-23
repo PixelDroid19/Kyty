@@ -121,6 +121,11 @@ captured streaming title; sizes are the values the guest writes:
   is still registered, active and the same record; a callback that destroys its
   voice, rack or system stops the later callbacks for those voices. A destroy on
   another thread waits for a running callback before erasing records.
+- A destroy keeps one pin on its object and waits until every other lease is
+  released. A release that leaves at most that pin wakes it; waking only at
+  zero pins left a rack destroy blocked when a lookup on another thread
+  released its lease after the destroy began (24 of 400 repeats of the
+  rack-destroy test, 0 of 1,000 after the fix).
 - A render on a thread that holds the explicit system lock does not run
   callbacks; they are held for the system and run at unlock. At most 16384
   callbacks are admitted per render or held per system. A render that could
