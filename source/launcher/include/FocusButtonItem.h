@@ -7,7 +7,7 @@
 #include <QString>
 
 // A pill-shaped text button for mouse, keyboard and controller: Enter, Return and Space activate it. It sizes
-// itself to its text, like the buttons PageLayout places.
+// itself to its text, like the buttons PageLayout places, and lights up under the pointer and while pressed.
 class FocusButtonItem: public QQuickItem
 {
 	Q_OBJECT
@@ -36,6 +36,9 @@ protected:
 	void     keyPressEvent(QKeyEvent* event) override;
 	void     mousePressEvent(QMouseEvent* event) override;
 	void     mouseReleaseEvent(QMouseEvent* event) override;
+	void     mouseUngrabEvent() override;
+	void     hoverEnterEvent(QHoverEvent* event) override;
+	void     hoverLeaveEvent(QHoverEvent* event) override;
 
 private:
 	void Resize();
@@ -45,6 +48,8 @@ private:
 	bool    m_primary = false;
 	bool    m_danger  = false;
 	bool    m_allowed = true;
+	bool    m_hovered = false;
+	bool    m_pressed = false;
 };
 
 #endif /* LAUNCHER_INCLUDE_FOCUS_BUTTON_ITEM_H_ */

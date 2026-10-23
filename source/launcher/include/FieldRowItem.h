@@ -46,7 +46,8 @@ struct EditorField
 };
 
 // One line of the editor: an optional section heading, the label and the control for the field's type. A hidden
-// row takes no space.
+// row takes no space. The row lights up under the pointer and while one of its controls has the focus; a click on
+// its label focuses its control, and on a switch's label flips the switch too.
 class FieldRowItem: public QQuickItem
 {
 	Q_OBJECT
@@ -56,6 +57,8 @@ signals:
 	void Edited(const QString& key, const QVariant& value);
 	void PadRequested(const QString& key, const QString& title);
 	void BrowseRequested(const QString& key, bool folder);
+	void ListRequested(const QString& key);
+	void FocusRequested(const QString& key);
 
 public:
 	FieldRowItem(const EditorField& field, QQuickItem* parent);
@@ -66,6 +69,11 @@ public:
 	// The row's controls the arrow keys move through, from the top.
 	[[nodiscard]] QVector<QQuickItem*> FocusItems() const;
 
+	// A choice field's stored values, what each shows as, and the box showing the value.
+	[[nodiscard]] const QStringList& Choices() const { return m_choices; }
+	[[nodiscard]] QStringList        ChoiceTexts() const;
+	[[nodiscard]] QQuickItem*        ChoiceBox() const;
+
 	// Shows the field's value out of values, or hides the row.
 	void SetValues(const QVariantMap& values, bool shown);
 	// Places the row's parts for a row of this width; returns the height the row takes.
@@ -73,6 +81,10 @@ public:
 
 protected:
 	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
+	void     mousePressEvent(QMouseEvent* event) override;
+	void     mouseReleaseEvent(QMouseEvent* event) override;
+	void     hoverEnterEvent(QHoverEvent* event) override;
+	void     hoverLeaveEvent(QHoverEvent* event) override;
 
 private:
 	void ShowValue();
@@ -81,6 +93,7 @@ private:
 	void  ShowModules(const QVariantList& modules);
 	void  Step(int delta);
 	void  ToggleModule(int index);
+	[[nodiscard]] bool HasFocusWithin() const;
 
 	EditorField      m_field;
 	bool             m_shown = true;
@@ -98,6 +111,9 @@ private:
 	FocusButtonItem*          m_button = nullptr;
 	QVector<ModuleRowItem*>   m_modules;
 	QVector<PageLayout::Text> m_texts;
+	// The part of the row under its heading, which lights up.
+	QRectF m_body;
+	bool   m_hovered = false;
 	// Bumped whenever m_texts is replaced, so the nodes are built again.
 	int m_generation = 0;
 };

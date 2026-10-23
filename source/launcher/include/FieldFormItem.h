@@ -9,6 +9,7 @@
 #include <QVariantMap>
 #include <QVector>
 
+class ChoiceListItem;
 class FieldRowItem;
 class TextPadItem;
 struct EditorField;
@@ -16,7 +17,8 @@ struct EditorField;
 // A scrolling column of fields over one set of values; fields that do not apply to the current values are
 // hidden. Up and Down move through the fields' controls and keep the focused one in view; Up from the first
 // control is left to the owner. Edits change the values at once and are reported, the owner decides when to keep
-// them. Text fields open the owner's on-screen keyboard and path fields the platform's file dialog.
+// them. Text fields open the owner's on-screen keyboard, choice fields a drop-down list over the owner's page and
+// path fields the platform's file dialog.
 class FieldFormItem: public QQuickItem
 {
 	Q_OBJECT
@@ -57,6 +59,7 @@ private:
 	void OpenPad(const QString& key, const QString& title);
 	void PadEdited(const QString& text);
 	void Browse(const QString& key, bool folder);
+	void OpenList(const QString& key);
 
 	[[nodiscard]] QVector<QQuickItem*> FocusItems() const;
 	[[nodiscard]] FieldRowItem*        RowFor(const QString& key) const;
@@ -71,6 +74,9 @@ private:
 	// Per row: a game's emulator field, shown only while the game has custom settings.
 	QVector<bool> m_custom_only;
 	TextPadItem*  m_pad = nullptr;
+	// Shared by the choice fields; the key is the field it is open for.
+	ChoiceListItem* m_list = nullptr;
+	QString         m_list_key;
 	FileChooser   m_chooser;
 	ViewScroll    m_scroll;
 };

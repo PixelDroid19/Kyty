@@ -9,6 +9,7 @@
 
 #include <QCoreApplication>
 #include <QFontMetricsF>
+#include <QMouseEvent>
 #include <QQuickWindow>
 #include <QSGTextNode>
 
@@ -16,6 +17,8 @@
 #include <cmath>
 
 // Sizes in units.
+constexpr qreal ROW_INSET_X     = 12;
+constexpr qreal ROW_INSET_Y     = 4;
 constexpr qreal LABEL_WIDTH     = 230;
 constexpr qreal LABEL_GAP       = 16;
 constexpr qreal CONTROL_HEIGHT  = 40;
@@ -35,7 +38,17 @@ namespace {
 class RowNode: public GroupNode
 {
 public:
-	int generation = -1;
+	RowNode()
+	{
+		backing = new RoundedBoxNode;
+		appendChildNode(backing);
+		texts = new GroupNode;
+		appendChildNode(texts);
+	}
+
+	RoundedBoxNode* backing    = nullptr;
+	GroupNode*      texts      = nullptr;
+	int             generation = -1;
 };
 
 QString Translated(const char* text)
@@ -123,6 +136,8 @@ PageLayout::Text Line(const QRectF& rect, const QString& text, const QFont& font
 FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuickItem(parent), m_field(field)
 {
 	setFlag(ItemHasContents);
+	setAcceptedMouseButtons(Qt::LeftButton);
+	setAcceptHoverEvents(true);
 	const QString key = field.key;
 	switch (field.type)
 	{
@@ -140,6 +155,7 @@ FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuick
 			m_choices = LauncherBackend::Instance()->Choices().value(field.choices).toStringList();
 			m_choice  = new ChoiceItem(this);
 			connect(m_choice, &FieldControlItem::Activated, this, &FieldRowItem::Step);
+			connect(m_choice, &FieldControlItem::ListRequested, this, [this, key]() { emit ListRequested(key); });
 			break;
 		case FieldType::Modules:
 			m_button = new FocusButtonItem(this);
@@ -180,6 +196,31 @@ FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuick
 		m_plus->SetText(QStringLiteral("+10"));
 		connect(m_plus, &FocusButtonItem::Activated, this, [this]() { Step(10); });
 	}
+	for (auto* item: FocusItems())
+	{
+		connect(item, &QQuickItem::activeFocusChanged, this, &QQuickItem::update);
+	}
+}
+
+QStringList FieldRowItem::ChoiceTexts() const
+{
+	QStringList texts;
+	for (const auto& choice: m_choices)
+	{
+		texts << ChoiceDisplay(choice);
+	}
+	return texts;
+}
+
+QQuickItem* FieldRowItem::ChoiceBox() const
+{
+	return m_choice;
+}
+
+bool FieldRowItem::HasFocusWithin() const
+{
+	const auto items = FocusItems();
+	return std::any_of(items.begin(), items.end(), [](const QQuickItem* item) { return item->hasActiveFocus(); });
 }
 
 QVector<QQuickItem*> FieldRowItem::FocusItems() const
@@ -250,6 +291,7 @@ void FieldRowItem::ShowModules(const QVariantList& modules)
 		const int index  = static_cast<int>(m_modules.size());
 		auto*     module = new ModuleRowItem(this);
 		connect(module, &FieldControlItem::Activated, this, [this, index]() { ToggleModule(index); });
+		connect(module, &QQuickItem::activeFocusChanged, this, &QQuickItem::update);
 		m_modules << module;
 	}
 	for (int i = 0; i < modules.size(); i++)
@@ -299,21 +341,25 @@ qreal FieldRowItem::Layout(qreal width)
 	const qreal u     = theme->U();
 	m_texts.clear();
 
-	qreal y = 0;
+	const qreal inset_x = ROW_INSET_X * u;
+	const qreal inset_y = ROW_INSET_Y * u;
+	qreal       y       = 0;
 	if (m_field.heading != nullptr)
 	{
 		auto font = SceneFont(theme->FontSmall(), QFont::DemiBold);
 		font.setCapitalization(QFont::AllUppercase);
 		const qreal height = std::ceil(QFontMetricsF(font).height());
-		m_texts << Line(QRectF(0, 0, width, height), Translated(m_field.heading), font, theme->TextMuted());
+		m_texts << Line(QRectF(inset_x, 0, width - inset_x, height), Translated(m_field.heading), font, theme->TextMuted());
 		y = height + HEADING_GAP * u;
 	}
-	m_texts << Line(QRectF(0, y, LABEL_WIDTH * u, CONTROL_HEIGHT * u), Translated(m_field.label), SceneFont(theme->FontBody()),
+	const qreal top = y + inset_y;
+	m_texts << Line(QRectF(inset_x, top, LABEL_WIDTH * u, CONTROL_HEIGHT * u), Translated(m_field.label), SceneFont(theme->FontBody()),
 	                theme->TextSecondary());
 
-	const qreal control_x = (LABEL_WIDTH + LABEL_GAP) * u;
-	const qreal height =
-	    y + std::max(CONTROL_HEIGHT * u, PlaceControl(QRectF(control_x, y, std::max<qreal>(0, width - control_x), CONTROL_HEIGHT * u)));
+	const qreal control_x = inset_x + (LABEL_WIDTH + LABEL_GAP) * u;
+	const qreal control   = PlaceControl(QRectF(control_x, top, std::max<qreal>(0, width - inset_x - control_x), CONTROL_HEIGHT * u));
+	const qreal height    = top + std::max(CONTROL_HEIGHT * u, control) + inset_y;
+	m_body                = QRectF(0, y, width, height - y);
 	m_generation++;
 	setSize(QSizeF(width, height));
 	update();
@@ -409,14 +455,30 @@ QSGNode* FieldRowItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
 	{
 		node = new RowNode;
 	}
+	const auto*           theme = Theme::Instance();
+	RoundedBoxNode::Style backing;
+	if (HasFocusWithin())
+	{
+		backing.fill = theme->GlassStrong();
+	} else if (m_hovered)
+	{
+		backing.fill = theme->Glass();
+	} else
+	{
+		backing.fill = Qt::transparent;
+	}
+	backing.radius = theme->RadiusSmall();
+	backing.dpr    = window()->effectiveDevicePixelRatio();
+	node->backing->Update(window(), m_body, backing);
+
 	if (node->generation == m_generation)
 	{
 		return node;
 	}
 	node->generation = m_generation;
-	while (auto* child = node->firstChild())
+	while (auto* child = node->texts->firstChild())
 	{
-		node->removeChildNode(child);
+		node->texts->removeChildNode(child);
 		delete child;
 	}
 	for (const auto& text: m_texts)
@@ -429,7 +491,40 @@ QSGNode* FieldRowItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
 		{
 			SetTextBlock(text_node, text.text, text.font, text.color, text.rect, text.alignment, text.wrap);
 		}
-		node->appendChildNode(text_node);
+		node->texts->appendChildNode(text_node);
 	}
 	return node;
+}
+
+void FieldRowItem::mousePressEvent(QMouseEvent* event)
+{
+	if (!m_body.contains(event->position()))
+	{
+		event->ignore();
+	}
+}
+
+void FieldRowItem::mouseReleaseEvent(QMouseEvent* event)
+{
+	if (!m_body.contains(event->position()))
+	{
+		return;
+	}
+	if (m_toggle != nullptr)
+	{
+		emit Edited(m_field.key, !m_value.toBool());
+	}
+	emit FocusRequested(m_field.key);
+}
+
+void FieldRowItem::hoverEnterEvent(QHoverEvent* /*event*/)
+{
+	m_hovered = true;
+	update();
+}
+
+void FieldRowItem::hoverLeaveEvent(QHoverEvent* /*event*/)
+{
+	m_hovered = false;
+	update();
 }

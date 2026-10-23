@@ -22,6 +22,7 @@ constexpr qreal TILE_PADDING = 24;
 constexpr qreal LABEL_ROOM = 60;
 constexpr qreal COVER_TOP  = 12;
 constexpr qreal LABEL_GAP  = 14;
+constexpr qreal HOVER_ZOOM = 1.03;
 constexpr qreal FOCUS_ZOOM = 1.06;
 // Wheel notches scroll this share of a row each.
 constexpr qreal WHEEL_ROW_SHARE = 0.5;
@@ -137,11 +138,12 @@ public:
 
 } // namespace
 
-GameGridItem::GameGridItem(QQuickItem* parent): QQuickItem(parent), m_zoom(FOCUS_ZOOM, this)
+GameGridItem::GameGridItem(QQuickItem* parent): QQuickItem(parent), m_zoom(FOCUS_ZOOM, this), m_hover_zoom(HOVER_ZOOM, this)
 {
 	setFlag(ItemHasContents);
 	setClip(true);
 	setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
+	setAcceptHoverEvents(true);
 
 	connect(&m_scroll, &ViewScroll::Moved, this, &GameGridItem::Changed);
 	connect(&m_art, &ArtworkSet::Loaded, this, &QQuickItem::update);
@@ -326,6 +328,16 @@ void GameGridItem::keyPressEvent(QKeyEvent* event)
 	SetCurrentIndex(target);
 }
 
+void GameGridItem::hoverMoveEvent(QHoverEvent* event)
+{
+	m_hover_zoom.SetFocused(IndexAt(event->position()));
+}
+
+void GameGridItem::hoverLeaveEvent(QHoverEvent* /*event*/)
+{
+	m_hover_zoom.SetFocused(-1);
+}
+
 void GameGridItem::mousePressEvent(QMouseEvent* event)
 {
 	const int index = IndexAt(event->position());
@@ -407,7 +419,7 @@ QSGNode* GameGridItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
 		CoverNode::Look look;
 		look.rect = QRectF(0, 0, metrics.tile, metrics.tile);
 		look.fill = card.icon_id.isEmpty() ? CoverColor(card.row) : Theme::Instance()->Glass();
-		look.zoom = m_zoom.Zoom(index);
+		look.zoom = std::max(m_zoom.Zoom(index), m_hover_zoom.Zoom(index));
 		look.ring = hasActiveFocus() && index == m_current;
 		look.dpr  = dpr;
 		tile->cover->Update(window(), look, node->textures.Get(window(), card.icon_id, m_art.Find(card.icon_id)));

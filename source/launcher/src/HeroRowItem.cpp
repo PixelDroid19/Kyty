@@ -24,6 +24,7 @@ constexpr qreal CARD_WIDTH   = 240;
 constexpr qreal CARD_HEIGHT  = 136;
 constexpr qreal CARD_SPACING = 16;
 constexpr qreal TITLE_MARGIN = 12;
+constexpr qreal HOVER_ZOOM   = 1.02;
 constexpr qreal FOCUS_ZOOM   = 1.04;
 // The shade under the name covers this share of the card, from the bottom.
 constexpr qreal SHADE_SHARE = 0.55;
@@ -144,10 +145,11 @@ public:
 
 } // namespace
 
-HeroRowItem::HeroRowItem(QQuickItem* parent): QQuickItem(parent), m_zoom(FOCUS_ZOOM, this)
+HeroRowItem::HeroRowItem(QQuickItem* parent): QQuickItem(parent), m_zoom(FOCUS_ZOOM, this), m_hover_zoom(HOVER_ZOOM, this)
 {
 	setFlag(ItemHasContents);
 	setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
+	setAcceptHoverEvents(true);
 	connect(&m_scroll, &ViewScroll::Moved, this, &HeroRowItem::Changed);
 	connect(&m_art, &ArtworkSet::Loaded, this, &QQuickItem::update);
 	connect(Theme::Instance(), &Theme::UChanged, this,
@@ -306,6 +308,16 @@ void HeroRowItem::keyPressEvent(QKeyEvent* event)
 	event->ignore();
 }
 
+void HeroRowItem::hoverMoveEvent(QHoverEvent* event)
+{
+	m_hover_zoom.SetFocused(IndexAt(event->position()));
+}
+
+void HeroRowItem::hoverLeaveEvent(QHoverEvent* /*event*/)
+{
+	m_hover_zoom.SetFocused(-1);
+}
+
 void HeroRowItem::mousePressEvent(QMouseEvent* event)
 {
 	const int index = IndexAt(event->position());
@@ -385,7 +397,7 @@ QSGNode* HeroRowItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*
 		CoverNode::Look look;
 		look.rect = QRectF(QPointF(0, 0), card);
 		look.fill = theme->Surface();
-		look.zoom = m_zoom.Zoom(index);
+		look.zoom = std::max(m_zoom.Zoom(index), m_hover_zoom.Zoom(index));
 		look.ring = hasActiveFocus() && index == m_current;
 		look.dpr  = dpr;
 		slot->cover->Update(window(), look, node->textures.Get(window(), id, m_art.Find(id)));

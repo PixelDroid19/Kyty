@@ -39,6 +39,8 @@ protected:
 	void     itemChange(ItemChange change, const ItemChangeData& value) override;
 	void     keyPressEvent(QKeyEvent* event) override;
 	void     mousePressEvent(QMouseEvent* event) override;
+	void     hoverMoveEvent(QHoverEvent* event) override;
+	void     hoverLeaveEvent(QHoverEvent* event) override;
 	void     mouseDoubleClickEvent(QMouseEvent* event) override;
 	void     wheelEvent(QWheelEvent* event) override;
 
@@ -64,6 +66,8 @@ private:
 	ViewScroll        m_scroll;
 	ArtworkSet        m_art;
 	FocusZoom         m_zoom;
+	// Grows the card under the pointer a little, less than the focused one.
+	FocusZoom m_hover_zoom;
 };
 
 #endif /* LAUNCHER_INCLUDE_GAME_GRID_ITEM_H_ */

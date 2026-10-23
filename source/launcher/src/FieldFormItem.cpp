@@ -1,5 +1,6 @@
 #include "FieldFormItem.h"
 
+#include "ChoiceListItem.h"
 #include "FieldRowItem.h"
 #include "LauncherBackend.h"
 #include "TextFieldItem.h"
@@ -12,8 +13,8 @@
 #include <algorithm>
 
 // Sizes in units.
-constexpr qreal ROW_SPACING    = 10;
-constexpr qreal SECTION_GAP    = 22;
+constexpr qreal ROW_SPACING    = 2;
+constexpr qreal SECTION_GAP    = 18;
 constexpr qreal SCROLLBAR_ROOM = 12;
 constexpr qreal SHOW_MARGIN    = 16;
 constexpr qreal WHEEL_STEP     = 48;
@@ -37,6 +38,19 @@ FieldFormItem::FieldFormItem(TextPadItem* pad, QQuickItem* parent): QQuickItem(p
 	setFlag(ItemIsFocusScope);
 	setClip(true);
 	m_content = new QQuickItem(this);
+	// On the owner's page, so the list is not cut off by the form's edge.
+	m_list = new ChoiceListItem(parent);
+	connect(m_list, &ChoiceListItem::Chosen, this,
+	        [this](int index)
+	        {
+		        const auto* row = RowFor(m_list_key);
+		        if (row != nullptr && index < row->Choices().size())
+		        {
+			        SetField(m_list_key, row->Choices().at(index));
+		        }
+		        FocusKey(m_list_key);
+	        });
+	connect(m_list, &ChoiceListItem::Cancelled, this, [this]() { FocusKey(m_list_key); });
 
 	connect(m_pad, &TextPadItem::Edited, this, &FieldFormItem::PadEdited);
 	connect(m_pad, &TextPadItem::ShownChanged, this,
@@ -78,6 +92,8 @@ void FieldFormItem::AddFields(const QVector<EditorField>& fields, bool custom_on
 		connect(row, &FieldRowItem::Edited, this, &FieldFormItem::SetField);
 		connect(row, &FieldRowItem::PadRequested, this, &FieldFormItem::OpenPad);
 		connect(row, &FieldRowItem::BrowseRequested, this, &FieldFormItem::Browse);
+		connect(row, &FieldRowItem::ListRequested, this, &FieldFormItem::OpenList);
+		connect(row, &FieldRowItem::FocusRequested, this, &FieldFormItem::FocusKey);
 		m_rows << row;
 		m_custom_only << custom_only;
 	}
@@ -171,6 +187,19 @@ void FieldFormItem::Browse(const QString& key, bool folder)
 	{
 		m_chooser.ChooseFile(title);
 	}
+}
+
+void FieldFormItem::OpenList(const QString& key)
+{
+	const auto* row = RowFor(key);
+	if (row == nullptr || row->ChoiceBox() == nullptr || m_list->parentItem() == nullptr)
+	{
+		return;
+	}
+	m_list_key      = key;
+	const auto* box = row->ChoiceBox();
+	m_list->OpenFor(box->mapRectToItem(m_list->parentItem(), box->boundingRect()), row->ChoiceTexts(),
+	                static_cast<int>(row->Choices().indexOf(m_values.value(key).toString())));
 }
 
 QVector<QQuickItem*> FieldFormItem::FocusItems() const

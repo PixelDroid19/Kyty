@@ -231,8 +231,16 @@ void ActionMenuItem::mouseReleaseEvent(QMouseEvent* event)
 	}
 }
 
-// Accepting hover keeps the page below from reacting to the pointer.
-void ActionMenuItem::hoverMoveEvent(QHoverEvent* /*event*/) {}
+// Accepting hover keeps the page below from reacting to the pointer; the row under it becomes the current one.
+void ActionMenuItem::hoverMoveEvent(QHoverEvent* event)
+{
+	const int index = RowAt(event->position());
+	if (index >= 0 && index != m_current)
+	{
+		m_current = index;
+		update();
+	}
+}
 
 void ActionMenuItem::wheelEvent(QWheelEvent* /*event*/) {}
 

@@ -40,6 +40,7 @@ FocusButtonItem::FocusButtonItem(QQuickItem* parent): QQuickItem(parent)
 	setFlag(ItemHasContents);
 	setFlag(ItemIsFocusScope);
 	setAcceptedMouseButtons(Qt::LeftButton);
+	setAcceptHoverEvents(true);
 	setCursor(Qt::PointingHandCursor);
 	connect(Theme::Instance(), &Theme::UChanged, this, &FocusButtonItem::Resize);
 	connect(this, &FocusButtonItem::Changed, this, &FocusButtonItem::Resize);
@@ -124,11 +125,34 @@ void FocusButtonItem::mousePressEvent(QMouseEvent* event)
 	if (!m_allowed)
 	{
 		event->ignore();
+		return;
 	}
+	m_pressed = true;
+	update();
+}
+
+void FocusButtonItem::mouseUngrabEvent()
+{
+	m_pressed = false;
+	update();
+}
+
+void FocusButtonItem::hoverEnterEvent(QHoverEvent* /*event*/)
+{
+	m_hovered = true;
+	update();
+}
+
+void FocusButtonItem::hoverLeaveEvent(QHoverEvent* /*event*/)
+{
+	m_hovered = false;
+	update();
 }
 
 void FocusButtonItem::mouseReleaseEvent(QMouseEvent* event)
 {
+	m_pressed = false;
+	update();
 	if (!contains(event->position()))
 	{
 		return;
@@ -148,8 +172,15 @@ QSGNode* FocusButtonItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData
 	const bool  focused = hasActiveFocus();
 
 	RoundedBoxNode::Style style;
-	style.fill         = m_primary ? theme->GlassStrong() : theme->Glass();
-	style.border       = focused ? theme->Accent() : theme->GlassBorder();
+	const bool            lit = m_allowed && (m_hovered || m_pressed);
+	if (m_pressed)
+	{
+		style.fill = theme->GlassBorder();
+	} else
+	{
+		style.fill = m_primary || lit ? theme->GlassStrong() : theme->Glass();
+	}
+	style.border       = focused ? theme->Accent() : (lit ? theme->TextMuted() : theme->GlassBorder());
 	style.border_width = focused ? RING_WIDTH * theme->U() : 1;
 	style.radius       = height() / 2;
 	style.dpr          = window()->effectiveDevicePixelRatio();

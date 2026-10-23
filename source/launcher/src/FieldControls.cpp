@@ -15,6 +15,7 @@
 constexpr qreal RING_WIDTH    = 3;
 constexpr qreal INSET         = 14;
 constexpr qreal BOX_RADIUS    = 12;
+constexpr qreal ARROW_ROOM    = 24;
 constexpr qreal TRACK_WIDTH   = 56;
 constexpr qreal TRACK_HEIGHT  = 30;
 constexpr qreal KNOB_INSET    = 4;
@@ -54,13 +55,13 @@ ControlNode* ControlNodeFor(QSGNode* old_node, QQuickWindow* window)
 	return old_node != nullptr ? static_cast<ControlNode*>(old_node) : new ControlNode(window);
 }
 
-RoundedBoxNode::Style BoxStyle(const QQuickItem* item, QColor fill, qreal radius)
+RoundedBoxNode::Style BoxStyle(const QQuickItem* item, bool hovered, QColor fill, qreal radius)
 {
 	const auto*           theme   = Theme::Instance();
 	const bool            focused = item->hasActiveFocus();
 	RoundedBoxNode::Style style;
 	style.fill         = fill;
-	style.border       = focused ? theme->Accent() : theme->GlassBorder();
+	style.border       = focused ? theme->Accent() : (hovered ? theme->TextMuted() : theme->GlassBorder());
 	style.border_width = focused ? RING_WIDTH * theme->U() : 1;
 	style.radius       = radius;
 	style.dpr          = item->window()->effectiveDevicePixelRatio();
@@ -78,6 +79,7 @@ FieldControlItem::FieldControlItem(QQuickItem* parent): QQuickItem(parent)
 {
 	setFlag(ItemHasContents);
 	setAcceptedMouseButtons(Qt::LeftButton);
+	setAcceptHoverEvents(true);
 	setCursor(Qt::PointingHandCursor);
 	connect(Theme::Instance(), &Theme::UChanged, this, &QQuickItem::update);
 }
@@ -97,7 +99,7 @@ void FieldControlItem::keyPressEvent(QKeyEvent* event)
 	{
 		case Qt::Key_Return:
 		case Qt::Key_Enter:
-		case Qt::Key_Space: emit Activated(1); return;
+		case Qt::Key_Space: Press(); return;
 		default: event->ignore(); return;
 	}
 }
@@ -111,7 +113,22 @@ void FieldControlItem::mouseReleaseEvent(QMouseEvent* event)
 		return;
 	}
 	forceActiveFocus(Qt::MouseFocusReason);
-	emit Activated(1);
+	Press();
+}
+
+void FieldControlItem::hoverEnterEvent(QHoverEvent* event)
+{
+	m_hovered = true;
+	update();
+	// The row under the control shows the pointer too.
+	event->ignore();
+}
+
+void FieldControlItem::hoverLeaveEvent(QHoverEvent* event)
+{
+	m_hovered = false;
+	update();
+	event->ignore();
 }
 
 ToggleItem::ToggleItem(QQuickItem* parent): FieldControlItem(parent)
@@ -153,7 +170,7 @@ QSGNode* ToggleItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*d
 	const qreal u     = theme->U();
 
 	const QRectF track(0, std::round((height() - TRACK_HEIGHT * u) / 2), TRACK_WIDTH * u, TRACK_HEIGHT * u);
-	node->box->Update(window(), track, BoxStyle(this, m_on ? theme->GlassStrong() : theme->Glass(), track.height() / 2));
+	node->box->Update(window(), track, BoxStyle(this, Hovered(), m_on ? theme->GlassStrong() : theme->Glass(), track.height() / 2));
 
 	const qreal           knob_size = track.height() - 2 * KNOB_INSET * u;
 	const qreal           travel    = track.width() - knob_size - 2 * KNOB_INSET * u;
@@ -196,10 +213,11 @@ QSGNode* ChoiceItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*d
 	const auto* theme = Theme::Instance();
 	const qreal u     = theme->U();
 
-	node->box->Update(window(), boundingRect(), BoxStyle(this, theme->Glass(), BOX_RADIUS * u));
+	node->box->Update(window(), boundingRect(),
+	                  BoxStyle(this, Hovered(), Hovered() ? theme->GlassStrong() : theme->Glass(), BOX_RADIUS * u));
 	const auto text = boundingRect().adjusted(INSET * u, 0, -INSET * u, 0);
-	SetTextLine(node->first, m_value, BodyFont(), theme->TextPrimary(), text);
-	SetTextLine(node->second, QStringLiteral("‹  ›"), BodyFont(), theme->TextMuted(), text, Qt::AlignRight);
+	SetTextLine(node->first, m_value, BodyFont(), theme->TextPrimary(), text.adjusted(0, 0, -ARROW_ROOM * u, 0));
+	SetTextLine(node->second, QStringLiteral("▾"), BodyFont(), theme->TextSecondary(), text, Qt::AlignRight);
 	return node;
 }
 
@@ -222,7 +240,7 @@ QSGNode* ModuleRowItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
 	const bool  focused = hasActiveFocus();
 
 	RoundedBoxNode::Style highlight;
-	highlight.fill         = focused ? theme->GlassStrong() : Qt::transparent;
+	highlight.fill         = focused ? theme->GlassStrong() : (Hovered() ? theme->Glass() : QColor(Qt::transparent));
 	highlight.border       = theme->Accent();
 	highlight.border_width = focused ? MODULE_RING * u : 0;
 	highlight.radius       = MODULE_RADIUS * u;

@@ -17,6 +17,8 @@ class FieldControlItem: public QQuickItem
 signals:
 	// Enter, Return, Space or a click step by 1; Left and Right on a choice step by -1 and 1.
 	void Activated(int delta);
+	// Enter, Return, Space or a click on a choice, which opens its list.
+	void ListRequested();
 
 public:
 	~FieldControlItem() override = default;
@@ -24,10 +26,19 @@ public:
 protected:
 	explicit FieldControlItem(QQuickItem* parent);
 
+	[[nodiscard]] bool Hovered() const { return m_hovered; }
+	// What Enter, Return, Space and a click do.
+	virtual void Press() { emit Activated(1); }
+
 	void itemChange(ItemChange change, const ItemChangeData& value) override;
 	void keyPressEvent(QKeyEvent* event) override;
 	void mousePressEvent(QMouseEvent* event) override;
 	void mouseReleaseEvent(QMouseEvent* event) override;
+	void hoverEnterEvent(QHoverEvent* event) override;
+	void hoverLeaveEvent(QHoverEvent* event) override;
+
+private:
+	bool m_hovered = false;
 };
 
 // An on/off switch with its state written beside it.
@@ -52,7 +63,7 @@ private:
 	QVariantAnimation m_slide;
 };
 
-// One value out of a fixed list.
+// One value out of a fixed list, picked from a drop-down list or stepped through with Left and Right.
 class ChoiceItem: public FieldControlItem
 {
 	Q_OBJECT
@@ -67,6 +78,7 @@ public:
 protected:
 	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
 	void     keyPressEvent(QKeyEvent* event) override;
+	void     Press() override { emit ListRequested(); }
 
 private:
 	QString m_value;
