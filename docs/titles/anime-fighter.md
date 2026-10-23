@@ -15,18 +15,30 @@ record. Titles are named descriptively only (`AGENTS.md`).
   returned without waiting for decode. The ring queue never held more than
   one buffer.
 - **Result.** Fight windows fell from 43.5 / 35.6 fps to 34.3 / 26.3 fps.
-  The guest now writes the next frame's data while the previous buffer is
-  being decoded. Those writes dirty the host snapshots behind
-  guest-device-address reads (`PendingReaderForSnapshotRefresh`). Any
-  dirty tracked chunk makes the next device-address draw wait for every
-  active reader. That reader is often the buffer being recorded, so the
-  draw submits it and waits for its fence. `DrawIndexOffset` spent 32.7% of
-  the command-processor thread in `CommandBuffer::WaitForFence`, over 15,000
-  short waits in 6 s. Two guest threads also spun at 97-99% CPU.
-- **Direction.** The decode wait cannot be removed while one host snapshot
-  serves every device-address reader. Snapshot refreshes would need their own
-  versions, so that a refresh never waits for a reader of the old bytes.
-  Until then, the decode cost itself is the lever.
+  `DrawIndexOffset` spent 32.7% of the command-processor thread in
+  `CommandBuffer::WaitForFence`, over 15,000 short waits in 6 s. Two guest
+  threads spun at 97-99% CPU.
+- **Cause (temporary counters, removed).**
+  - All 22,000 waits came from `PublishPendingStorageToGuestAddress`.
+  - A draw that dereferences guest pointers waits for every writable storage
+    object in the device-address ranges that still has an incomplete use on
+    another queue (`GpuMemory::PendingStorageWriteBack`).
+  - Without the decode wait, the guest has already submitted its next async
+    compute work, which uses the 15.7 MB storage buffer, while the graphics
+    buffer is still being decoded. Each device-address draw therefore waits
+    for compute work the guest submitted after it.
+  - The snapshot-refresh reader wait (`PendingReaderForSnapshotRefresh`) is
+    not the cause. Skipping it as well left the windows at 33.6 / 27.2 fps,
+    and no wait came from it.
+- **Direction.** Overlapping guest and decode needs an order between
+  submissions on different queues, so that a draw ignores uses the guest
+  submitted after it. It also needs the write-back of earlier writes to reach
+  guest memory before a later use is in flight. Until then, the decode cost
+  itself is the lever.
+- **Side check.** The transient snapshot index (`TransientBufferPool`) now
+  links the entries of one key through the entries themselves. Before, every
+  recapture searched and erased in a vector (2.5% of the thread). The fight
+  windows are unchanged (42.6 / 36.5 fps, within run-to-run noise).
 
 ## Anime fighter: write-back restores protection once per run (2026-10-23)
 

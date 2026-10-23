@@ -904,6 +904,9 @@ class TransientBufferPool
 		uint64_t     snapshot_begin = 0;
 		// Bytes at or past this offset are known to be zero.
 		uint64_t     nonzero_end    = 0;
+		// Neighbours among the entries holding the same snapshot key, in commit order.
+		Entry* snapshot_older = nullptr;
+		Entry* snapshot_newer = nullptr;
 		// Position in the free index while the entry is unused.
 		std::multimap<uint64_t, Entry*>::iterator free_position;
 		bool                                      free_indexed = false;
@@ -1045,7 +1048,7 @@ public:
 		entry->snapshot_vaddr = vaddr;
 		entry->snapshot_size  = size;
 		entry->snapshot_begin = read_begin;
-		m_snapshots[SnapshotKey {vaddr, size, usage}].push_back(entry);
+		IndexSnapshot(entry);
 		Commit(entry, size, zero_tail);
 		finish_upload_time();
 		return &entry->buffer;
@@ -1187,6 +1190,14 @@ private:
 		}
 	};
 
+	// Entries of one snapshot key, linked through the entries themselves so
+	// that a key rewritten by every draw unindexes an entry in constant time.
+	struct SnapshotChain
+	{
+		Entry* oldest = nullptr;
+		Entry* newest = nullptr;
+	};
+
 	// Latest committed entry first: the one most likely to still match guest memory.
 	Entry* FindSnapshot(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin) const
 	{
@@ -1195,14 +1206,29 @@ private:
 		{
 			return nullptr;
 		}
-		for (auto entry = it->second.rbegin(); entry != it->second.rend(); ++entry)
+		for (auto* entry = it->second.newest; entry != nullptr; entry = entry->snapshot_older)
 		{
-			if ((*entry)->snapshot_begin <= read_begin)
+			if (entry->snapshot_begin <= read_begin)
 			{
-				return *entry;
+				return entry;
 			}
 		}
 		return nullptr;
+	}
+
+	void IndexSnapshot(Entry* entry)
+	{
+		auto& chain           = m_snapshots[SnapshotKey {entry->snapshot_vaddr, entry->snapshot_size, entry->usage}];
+		entry->snapshot_older = chain.newest;
+		entry->snapshot_newer = nullptr;
+		if (chain.newest != nullptr)
+		{
+			chain.newest->snapshot_newer = entry;
+		} else
+		{
+			chain.oldest = entry;
+		}
+		chain.newest = entry;
 	}
 
 	void UnindexSnapshot(Entry* entry)
@@ -1213,11 +1239,24 @@ private:
 		}
 		const auto it = m_snapshots.find(SnapshotKey {entry->snapshot_vaddr, entry->snapshot_size, entry->usage});
 		EXIT_IF(it == m_snapshots.end());
-		auto&      entries = it->second;
-		const auto indexed = std::find(entries.begin(), entries.end(), entry);
-		EXIT_IF(indexed == entries.end());
-		entries.erase(indexed);
-		if (entries.empty())
+		auto& chain = it->second;
+		if (entry->snapshot_older != nullptr)
+		{
+			entry->snapshot_older->snapshot_newer = entry->snapshot_newer;
+		} else
+		{
+			chain.oldest = entry->snapshot_newer;
+		}
+		if (entry->snapshot_newer != nullptr)
+		{
+			entry->snapshot_newer->snapshot_older = entry->snapshot_older;
+		} else
+		{
+			chain.newest = entry->snapshot_older;
+		}
+		entry->snapshot_older = nullptr;
+		entry->snapshot_newer = nullptr;
+		if (chain.newest == nullptr)
 		{
 			m_snapshots.erase(it);
 		}
@@ -1383,7 +1422,7 @@ private:
 
 	std::vector<Entry*> m_entries;
 	// Entries holding a valid snapshot, by the guest range and usage they hold.
-	std::unordered_map<SnapshotKey, std::vector<Entry*>, SnapshotKeyHash> m_snapshots;
+	std::unordered_map<SnapshotKey, SnapshotChain, SnapshotKeyHash> m_snapshots;
 	// Unused snapshot and upload entries, by usage and size.
 	std::unordered_map<uint32_t, std::multimap<uint64_t, Entry*>> m_free;
 	std::unordered_map<uint32_t, uint32_t>                        m_usage_entries;
