@@ -1719,14 +1719,110 @@ bool GpuDirtyPageTracker::NotifyPageWriteEntered(PageEntry* entry, uintptr_t pag
 	return true;
 }
 
+// The caller is an announced restorer. Takes an armed page whose guest
+// protection grants writes into a batched restore; every other state is left to
+// NotifyPageWrite, which handles each transition.
+bool GpuDirtyPageTracker::ClaimArmedPageForWrite(PageEntry* entry, uintptr_t page, uint32_t* token) noexcept
+{
+	uint32_t state = static_cast<uint32_t>(GpuDirtyProtectionState::Armed);
+	if (entry->key.load(std::memory_order_acquire) != page || entry->refs.load(std::memory_order_acquire) == 0u ||
+	    !entry->protection_state.compare_exchange_strong(state, static_cast<uint32_t>(GpuDirtyProtectionState::Disarming),
+	                                                     std::memory_order_acq_rel, std::memory_order_acquire))
+	{
+		return false;
+	}
+	// As in NotifyPageWriteEntered, the slot may have been recycled since the walk
+	// resolved it; never apply another page's token.
+	if (entry->key.load(std::memory_order_acquire) != page || entry->original_mode_valid.load(std::memory_order_acquire) == 0u ||
+	    !ModeGrantsWrite(entry->original_mode.load(std::memory_order_acquire)))
+	{
+		entry->protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Armed), std::memory_order_release);
+		return false;
+	}
+	*token = entry->original_token.load(std::memory_order_acquire);
+	return true;
+}
+
+// One restore for the whole run, then each page leaves Disarming as
+// NotifyPageWriteEntered would leave it.
+void GpuDirtyPageTracker::RestoreWriteRun(const WriteRun& run) noexcept
+{
+	const bool restored =
+	    m_protection_ops.restore_signal_safe(m_protection_ops.context, run.first, run.last - run.first + m_page_size, run.token);
+	for (uintptr_t page = run.first;; page += m_page_size)
+	{
+		auto* entry = FindPage(page);
+		entry->protection_state.store(static_cast<uint32_t>(restored ? GpuDirtyProtectionState::Writable : GpuDirtyProtectionState::Armed),
+		                              std::memory_order_release);
+		if (!restored)
+		{
+			MarkPageFallback(entry);
+		}
+		if (page == run.last)
+		{
+			break;
+		}
+	}
+}
+
+// Consecutive armed pages under one restore token share one restore, so a host
+// write of N pages changes protection once instead of N times. The restorer is
+// announced only while a run is open and is left before any per-page notify,
+// which announces itself.
 bool GpuDirtyPageTracker::NotifyWritePages(uintptr_t first, uintptr_t last) noexcept
 {
-	bool handled = false;
-	VisitWritePages(first, last, [this, &handled](PageEntry* entry, uintptr_t page) noexcept
+	bool     handled = false;
+	WriteRun run;
+	auto     close_run = [&]() noexcept
 	{
-		const bool page_handled = NotifyPageWrite(entry, page);
-		handled = handled || page_handled;
-	});
+		if (run.open)
+		{
+			RestoreWriteRun(run);
+			run.open = false;
+			LeaveRestorer();
+		}
+	};
+	VisitWritePages(first, last,
+	                [&](PageEntry* entry, uintptr_t page) noexcept
+	                {
+		                if (run.open && page != run.last + m_page_size)
+		                {
+			                close_run();
+		                }
+		                if (!run.open)
+		                {
+			                EnterRestorer();
+		                }
+		                uint32_t token = 0;
+		                if (!ClaimArmedPageForWrite(entry, page, &token))
+		                {
+			                if (run.open)
+			                {
+				                close_run();
+			                } else
+			                {
+				                LeaveRestorer();
+			                }
+			                const bool page_handled = NotifyPageWrite(entry, page);
+			                handled                 = handled || page_handled;
+			                return;
+		                }
+		                MarkPageWrite(entry);
+		                handled = true;
+		                if (run.open && token != run.token)
+		                {
+			                // Still announced: this page opens the next run.
+			                RestoreWriteRun(run);
+			                run.open = false;
+		                }
+		                if (!run.open)
+		                {
+			                run = {page, page, token, true};
+			                return;
+		                }
+		                run.last = page;
+	                });
+	close_run();
 	return handled;
 }
 

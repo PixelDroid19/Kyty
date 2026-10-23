@@ -10,6 +10,30 @@
 
 namespace Kyty::Libs::Graphics {
 
+// Calls visit(offset, bytes, pages) for each run of consecutive changed pages,
+// so a run's write is notified once and its protection changes once.
+template <typename Visit>
+static void VisitChangedRuns(const std::vector<uint8_t>& changed, uint64_t page_size, uint64_t size, const Visit& visit)
+{
+	const uint64_t pages = changed.size();
+	for (uint64_t page = 0; page < pages;)
+	{
+		if (changed[page] == 0u)
+		{
+			page++;
+			continue;
+		}
+		uint64_t end = page + 1u;
+		while (end < pages && changed[end] != 0u)
+		{
+			end++;
+		}
+		const uint64_t offset = page * page_size;
+		visit(offset, std::min(end * page_size, size) - offset, end - page);
+		page = end;
+	}
+}
+
 void GpuWritebackPageCache::Reset(const void* source, uint64_t size)
 {
 	EXIT_IF(source == nullptr || size == 0u || m_page_size == 0u);
@@ -92,17 +116,13 @@ GpuWritebackResult GpuWritebackPageCache::AdoptChangedPages(uint64_t guest_va, c
 	const auto*        gpu     = static_cast<const uint8_t*>(gpu_src);
 	const auto         changed = TakeChangedPages(gpu);
 	GpuWritebackResult result;
-	for (uint64_t offset = 0; offset < size; offset += m_page_size)
-	{
-		const uint64_t page_bytes = std::min(m_page_size, size - offset);
-		if (changed[offset / m_page_size] == 0u)
-		{
-			continue;
-		}
-		notify_write(notify_opaque, guest_va + offset, page_bytes);
-		std::memcpy(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(page_bytes));
-		result.changed_pages++;
-	}
+	VisitChangedRuns(changed, m_page_size, size,
+	                 [&](uint64_t offset, uint64_t bytes, uint64_t pages)
+	                 {
+		                 notify_write(notify_opaque, guest_va + offset, bytes);
+		                 std::memcpy(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(bytes));
+		                 result.changed_pages += pages;
+	                 });
 	result.content_changed = result.changed_pages != 0u;
 	return result;
 }
@@ -121,20 +141,15 @@ GpuWritebackResult GpuWritebackPageCache::CopyChangedPages(void* guest_dst, cons
 	const auto  changed  = TakeChangedPages(gpu);
 
 	GpuWritebackResult result;
-	for (uint64_t offset = 0; offset < size; offset += m_page_size)
-	{
-		const uint64_t page_bytes = std::min(m_page_size, size - offset);
-		if (changed[offset / m_page_size] == 0u)
-		{
-			continue;
-		}
-
-		notify_write(notify_opaque, guest_va + offset, page_bytes);
-		MemcpySkipAbsoluteRanges(guest + offset, gpu + offset, page_bytes, hole_begin, hole_end, hole_count);
-		std::memcpy(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(page_bytes));
-		result.changed_pages++;
-		result.copied_bytes += page_bytes;
-	}
+	VisitChangedRuns(changed, m_page_size, size,
+	                 [&](uint64_t offset, uint64_t bytes, uint64_t pages)
+	                 {
+		                 notify_write(notify_opaque, guest_va + offset, bytes);
+		                 MemcpySkipAbsoluteRanges(guest + offset, gpu + offset, bytes, hole_begin, hole_end, hole_count);
+		                 std::memcpy(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(bytes));
+		                 result.changed_pages += pages;
+		                 result.copied_bytes += bytes;
+	                 });
 	result.content_changed = result.changed_pages != 0u;
 	return result;
 }

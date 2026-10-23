@@ -1440,6 +1440,48 @@ TEST(EmulatorGraphicsDirtyTracking, NotifyWriteWaitsForConcurrentRetirement)
 	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
 }
 
+// A host write over armed pages changes protection once per run of
+// consecutive pages with the same guest protection, and records the write on
+// every page; a later rearm protects them again.
+TEST(EmulatorGraphicsDirtyTracking, HostWriteRestoresEachArmedRunOnce)
+{
+	Mapping mapping(5);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page_size = GetPageSize();
+	FakeProtection      protection(mapping.address, page_size,
+	                               {Mode::ReadWrite, Mode::ReadWrite, Mode::ReadWrite, Mode::ExecuteReadWrite, Mode::ReadWrite});
+	GpuDirtyPageTracker tracker(protection.Ops());
+	// One range per page, so each page keeps its own write evidence.
+	for (uint64_t page = 0; page < 5u; page++)
+	{
+		ASSERT_TRUE(tracker.RegisterRange(mapping.address + page * page_size, page_size));
+	}
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	std::vector<uint64_t> snapshots;
+	for (uint64_t page = 0; page < 5u; page++)
+	{
+		snapshots.push_back(tracker.SnapshotGeneration(mapping.address + page * page_size, page_size));
+	}
+	const uint32_t restores = protection.signal_safe_calls;
+
+	ASSERT_TRUE(tracker.NotifyWrite(mapping.address, 4u * page_size));
+	EXPECT_EQ(protection.signal_safe_calls, restores + 2u);
+	for (uint64_t page = 0; page < 4u; page++)
+	{
+		EXPECT_EQ(protection.current_modes[page], protection.original_modes[page]) << "page " << page;
+		EXPECT_TRUE(tracker.ChangedSince(mapping.address + page * page_size, page_size, snapshots[page])) << "page " << page;
+	}
+	EXPECT_EQ(protection.current_modes[4], Mode::Read);
+	EXPECT_FALSE(tracker.ChangedSince(mapping.address + 4u * page_size, page_size, snapshots[4]));
+
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	for (uint64_t page = 0; page < 5u; page++)
+	{
+		EXPECT_EQ(static_cast<uint32_t>(protection.current_modes[page]) & static_cast<uint32_t>(Mode::Write), 0u) << "page " << page;
+		EXPECT_TRUE(tracker.UnregisterRange(mapping.address + page * page_size, page_size)) << "page " << page;
+	}
+}
+
 // Range admission is bounded by page metadata, not by a fixed range count.
 // Each disjoint range keeps exact generation evidence for its own pages.
 TEST(EmulatorGraphicsDirtyTracking, RegistersMoreThanFiveHundredTwelveDisjointRanges)

@@ -273,6 +273,16 @@ private:
 	                            Core::VirtualMemory::WriteLeaseDecision decision, void* decision_context) noexcept;
 	static void AuthorityEndChange(void* context, const Core::VirtualMemory::WriteLeaseChange& change) noexcept;
 	template <typename Visitor> void VisitWritePages(uintptr_t first, uintptr_t last, const Visitor& visitor) noexcept;
+	// Consecutive pages a host writer claimed from Armed under one restore token.
+	struct WriteRun
+	{
+		uintptr_t first = 0;
+		uintptr_t last  = 0;
+		uint32_t  token = 0;
+		bool      open  = false;
+	};
+	[[nodiscard]] bool              ClaimArmedPageForWrite(PageEntry* entry, uintptr_t page, uint32_t* token) noexcept;
+	void                            RestoreWriteRun(const WriteRun& run) noexcept;
 	[[nodiscard]] bool              NotifyPageWrite(PageEntry* entry, uintptr_t page_address) noexcept;
 	[[nodiscard]] bool              NotifyWritePages(uintptr_t first, uintptr_t last) noexcept;
 	[[nodiscard]] bool              HasHostWriteLocked(uintptr_t first, uintptr_t last) const noexcept;

@@ -4,6 +4,38 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Anime fighter: write-back restores protection once per run (2026-10-23)
+
+- **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
+  generic route into a fight).** Temporary counters (removed) over 58,000
+  write-backs: the changed pages of one write-back averaged 13.4, and in
+  every write-back they formed a single run of consecutive pages. The
+  storage range lies in direct memory. The write-back notified each changed
+  page separately, so each page took its own `mprotect` back to writable,
+  with a TLB shootdown on every core; the rearm after the write-back already
+  protected the whole run with one call.
+- **Change.** The write-back cache notifies each run of consecutive changed
+  pages once. `GpuDirtyPageTracker::NotifyWritePages` claims consecutive
+  armed pages with the same guest protection under one restorer announcement,
+  records the write on each, and restores the run with one call. A page in
+  any other state, or whose guest protection denies writes, keeps the
+  per-page path; the restorer is left before that path announces itself.
+- **Measured (same route and capture windows, one run per build).**
+
+  | Build | 53-79 s | 79-105 s (fight) |
+  | --- | --- | --- |
+  | before | 40.9 fps | 34.2 fps |
+  | per-run restore | 42.5 fps | 36.2 fps |
+
+  One run per build, so this is an indication, not a measured change. A
+  write-back now changes protection twice: one restore and one rearm.
+- **Shared-path check (Intel, strict, 75 s, 60 fps present limit).** The card
+  title and racing hold the 60 fps limit with no stop. The beat 'em up ran
+  25.8 fps in its 27-53 s window (16.0 fps in the previous run's same
+  window). The fishing title hit its known intermittent frame-3 boot stall
+  (1 draw, 1 dispatch, 2 presents), the signature recorded before this
+  change; its write-back ran once and changed no page.
+
 ## Anime fighter: async round-trip latency (2026-10-23)
 
 - **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
@@ -57,7 +89,8 @@ record. Titles are named descriptively only (`AGENTS.md`).
   the submitting guest thread waits, its GPU work runs ~7.5 ms after the last
   flush, and the async chain follows it. The ring thread's largest remaining
   cost is the write-back itself: every changed page is made writable, copied
-  and protected again, two `mprotect` calls with TLB shootdowns per page.
+  and protected again, two `mprotect` calls with TLB shootdowns per page
+  (one restore per run since 2026-10-23, see above).
 
 ## Anime fighter: write-back copies only GPU-flagged pages (2026-10-22)
 

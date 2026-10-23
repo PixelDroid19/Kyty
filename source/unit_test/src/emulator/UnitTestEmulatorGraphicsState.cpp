@@ -7128,18 +7128,20 @@ TEST(EmulatorGraphicsState, GpuWritebackPageCacheComparesOnlyWrittenPages)
 	// The flags bound the compare: a page the GPU did not flag is never read.
 	gpu[500u * PageSize] ^= 0xffu;
 
-	std::vector<uint64_t> notified;
-	const auto            notify = [](void* opaque, uint64_t address, uint64_t /*size*/)
-	{ static_cast<std::vector<uint64_t>*>(opaque)->push_back(address); };
+	using Notified = std::vector<std::pair<uint64_t, uint64_t>>;
+	Notified   notified;
+	const auto notify = [](void* opaque, uint64_t address, uint64_t size) { static_cast<Notified*>(opaque)->emplace_back(address, size); };
 
 	const auto result = cache.CopyChangedPages(guest.data(), gpu.data(), Size, nullptr, nullptr, 0, notify, &notified);
 	EXPECT_EQ(result.changed_pages, pages.size());
 	EXPECT_EQ(result.copied_bytes, PageSize * (pages.size() - 1u) + 100u);
-	ASSERT_EQ(notified.size(), pages.size());
-	for (size_t i = 0; i < pages.size(); i++)
-	{
-		EXPECT_EQ(notified[i], reinterpret_cast<uint64_t>(guest.data()) + pages[i] * PageSize);
-	}
+	// Adjacent changed pages are notified as one run.
+	const auto base = reinterpret_cast<uint64_t>(guest.data());
+	EXPECT_EQ(notified, (Notified {{base, PageSize},
+	                               {base + 63u * PageSize, 2u * PageSize},
+	                               {base + 255u * PageSize, 2u * PageSize},
+	                               {base + 777u * PageSize, PageSize},
+	                               {base + 1100u * PageSize, 100u}}));
 	EXPECT_NE(guest[500u * PageSize], gpu[500u * PageSize]);
 	EXPECT_EQ(std::count(written.begin(), written.end(), 0u), static_cast<std::ptrdiff_t>(Pages));
 
