@@ -1778,8 +1778,8 @@ void ComputeRing::ThreadRun(void* data)
 			auto d1 = next_pos - ring_size;
 			auto d2 = num_dw - d1;
 			buffer  = ring->m_internal_buffer;
-			memcpy(buffer, ring_addr + pos, d2);
-			memcpy(buffer + d2, ring_addr, d1);
+			memcpy(buffer, ring_addr + pos, d2 * sizeof(uint32_t));
+			memcpy(buffer + d2, ring_addr, d1 * sizeof(uint32_t));
 		}
 
 		ring->m_mutex.Unlock();
