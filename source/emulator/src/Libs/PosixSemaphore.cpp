@@ -1,10 +1,11 @@
 #include "Emulator/Libs/PosixSemaphore.h"
 
+#include "Kyty/Core/Threads.h"
+
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
-
-#include "Kyty/Core/Threads.h"
 
 #include <algorithm>
 #include <chrono>
@@ -48,7 +49,7 @@ public:
 		{
 			m_waiters++;
 			SyncGuest();
-			m_cond_var.WaitFor(&m_mutex, kPosixSemPollMicro);
+			Kernel::PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, kPosixSemPollMicro);
 			m_waiters--;
 		}
 		m_count--;
@@ -91,7 +92,7 @@ public:
 			const auto slice     = static_cast<uint32_t>(std::min<int64_t>(remain_us, kPosixSemPollMicro));
 			m_waiters++;
 			SyncGuest();
-			m_cond_var.WaitFor(&m_mutex, slice);
+			Kernel::PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, slice);
 			m_waiters--;
 		}
 		m_count--;

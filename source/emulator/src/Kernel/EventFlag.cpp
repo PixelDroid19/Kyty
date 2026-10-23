@@ -181,7 +181,7 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Delete()
 
 	while (m_status == Status::Canceled)
 	{
-		m_cond_var.Wait(&m_mutex);
+		PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 	}
 	if (m_status == Status::Deleted)
 	{
@@ -192,7 +192,7 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Delete()
 	m_cond_var.SignalAll();
 	while (m_active_wait_calls > 0)
 	{
-		m_cond_var.Wait(&m_mutex);
+		PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 	}
 
 	return Result::Ok;
@@ -247,10 +247,10 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Wait(uint64_t bits, WaitM
 
 		if (infinitely)
 		{
-			m_cond_var.Wait(&m_mutex);
+			PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 		} else
 		{
-			m_cond_var.WaitFor(&m_mutex, micros - elapsed);
+			PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, micros - elapsed);
 		}
 		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
 		if (m_status == Status::Deleted)
@@ -288,10 +288,10 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Wait(uint64_t bits, WaitM
 
 		if (infinitely)
 		{
-			m_cond_var.Wait(&m_mutex);
+			PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 		} else
 		{
-			m_cond_var.WaitFor(&m_mutex, micros - elapsed);
+			PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, micros - elapsed);
 		}
 
 		m_waiting_threads--;
@@ -356,7 +356,7 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Set(uint64_t bits)
 
 	while (m_status == Status::Canceled)
 	{
-		m_cond_var.Wait(&m_mutex);
+		PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 	}
 	if (m_status == Status::Deleted)
 	{
@@ -375,7 +375,7 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Clear(uint64_t bits)
 
 	while (m_status == Status::Canceled)
 	{
-		m_cond_var.Wait(&m_mutex);
+		PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 	}
 	if (m_status == Status::Deleted)
 	{
@@ -392,7 +392,7 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Cancel(uint64_t bits, int
 
 	while (m_status == Status::Canceled)
 	{
-		m_cond_var.Wait(&m_mutex);
+		PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 	}
 	if (m_status == Status::Deleted)
 	{
@@ -411,7 +411,7 @@ KernelEventFlagPrivate::Result KernelEventFlagPrivate::Cancel(uint64_t bits, int
 
 	while (m_waiting_threads > 0)
 	{
-		m_cond_var.Wait(&m_mutex);
+		PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 		if (m_status == Status::Deleted)
 		{
 			return Result::Deleted;

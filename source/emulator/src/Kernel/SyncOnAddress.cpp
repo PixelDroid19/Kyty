@@ -1,6 +1,7 @@
 #include "Emulator/Kernel/SyncOnAddress.h"
 
 #include "Emulator/Kernel/Errors.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Time.h"
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Log.h"
@@ -118,8 +119,9 @@ int WaitWhileEqual(uint64_t address, T expected, const std::chrono::nanoseconds*
 	const auto registration = RegisterWaiter(address);
 	int        result       = OK;
 	{
-		std::unique_lock state_lock(registration.state->mutex);
-		auto*            value      = reinterpret_cast<const T*>(address);
+		std::unique_lock          state_lock(registration.state->mutex);
+		PthreadInterruptibleScope wait_scope(&registration.state->cv, sizeof(registration.state->cv));
+		auto*                     value      = reinterpret_cast<const T*>(address);
 		const auto       load_value = [&]() { return __atomic_load_n(value, __ATOMIC_ACQUIRE); };
 		if (load_value() == expected)
 		{

@@ -501,17 +501,19 @@ std::string ThreadsResult()
 			out += ',';
 		}
 		const auto& thread = diagnostics.threads[i];
-		char        item[512];
+		char        item[640];
 		std::snprintf(item, sizeof(item),
 		              "{\"entry\":\"0x%016llx\",\"argument\":\"0x%016llx\",\"unique_id\":%d,\"started\":%s,"
 		              "\"detached\":%s,\"almost_done\":%s,\"free\":%s,\"main\":%s,\"wait\":\"%s\",\"wait_object\":\"0x%016llx\","
-		              "\"wait_return\":\"0x%016llx\",\"wait_callers\":[\"0x%016llx\",\"0x%016llx\",\"0x%016llx\"]}",
+		              "\"wait_return\":\"0x%016llx\",\"wait_callers\":[\"0x%016llx\",\"0x%016llx\",\"0x%016llx\"],"
+		              "\"context_pending\":%s,\"context_running\":%s,\"context_deferred_rip\":\"0x%016llx\"}",
 		              static_cast<unsigned long long>(thread.entry), static_cast<unsigned long long>(thread.argument), thread.unique_id,
 		              thread.started ? "true" : "false", thread.detached ? "true" : "false", thread.almost_done ? "true" : "false",
 		              thread.free ? "true" : "false", thread.main ? "true" : "false", Core::EnumName8(thread.wait_kind).c_str(),
 		              static_cast<unsigned long long>(thread.wait_object), static_cast<unsigned long long>(thread.wait_return),
 		              static_cast<unsigned long long>(thread.wait_callers[0]), static_cast<unsigned long long>(thread.wait_callers[1]),
-		              static_cast<unsigned long long>(thread.wait_callers[2]));
+		              static_cast<unsigned long long>(thread.wait_callers[2]), thread.context_pending ? "true" : "false",
+		              thread.context_running ? "true" : "false", static_cast<unsigned long long>(thread.context_deferred_rip));
 		out += item;
 	}
 	// Module bases tie each wait's guest return address to its module.

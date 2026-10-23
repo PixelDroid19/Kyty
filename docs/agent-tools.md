@@ -70,6 +70,14 @@ kyty_agent capture --timeout-ms 10000
 kyty_agent score
 ```
 
+`threads` reports each guest thread's current wait (`wait`, `wait_object`,
+`wait_return`, `wait_callers`) and its context-request state: a request that
+waits for delivery sets `context_pending`, the guest handler running on the
+thread sets `context_running`, and `context_deferred_rip` keeps the last host
+instruction at which delivery was deferred because the thread was neither in
+guest code nor in an interruptible wait. A thread that stays pending with the
+same deferred address points at a host wait that is not a safe point.
+
 For a bounded point-in-time diagnostic followed by an exact event wait, use
 the snapshot's `event_seq_end` as the cursor for the next request:
 

@@ -1024,6 +1024,15 @@ static void EndSocketOperation(const SocketStatePtr& state)
 		state->operations_done.notify_all();
 	}
 }
+
+// Blocking socket calls are safe points for guest context requests: they hold
+// no host lock, and the operation lease keeps the descriptor open meanwhile.
+template <typename Call>
+static auto InterruptibleSocketCall(Call call)
+{
+	Kernel::PthreadInterruptibleScope any_syscall;
+	return call();
+}
 #endif
 
 static bool SocketIsDatagram(const SocketStatePtr& state)
@@ -1710,7 +1719,8 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 		(void)::shutdown(host_fd, SHUT_RDWR);
 	}
 	{
-		std::unique_lock lock(state->mutex);
+		std::unique_lock                  lock(state->mutex);
+		Kernel::PthreadInterruptibleScope wait_scope(&state->operations_done, sizeof(state->operations_done));
 		state->operations_done.wait(lock, [&state]() { return state->operations == 0; });
 	}
 #if KYTY_NET_HOST_EPOLL
@@ -1965,7 +1975,8 @@ int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
 	{
 		return NET_ERROR_EBADF;
 	}
-	const int connect_result = ::connect(host_fd, reinterpret_cast<sockaddr*>(&host_addr), host_addr_len);
+	const int connect_result =
+	    InterruptibleSocketCall([&] { return ::connect(host_fd, reinterpret_cast<sockaddr*>(&host_addr), host_addr_len); });
 	const int connect_errno  = errno;
 	EndSocketOperation(state);
 	if (connect_result != 0)
@@ -2054,7 +2065,7 @@ int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len)
 	{
 		return NET_ERROR_EBADF;
 	}
-	accepted_state->host_fd = ::accept(host_fd, reinterpret_cast<sockaddr*>(&peer), &peer_len);
+	accepted_state->host_fd = InterruptibleSocketCall([&] { return ::accept(host_fd, reinterpret_cast<sockaddr*>(&peer), &peer_len); });
 	const int accept_errno  = errno;
 	EndSocketOperation(state);
 	if (accepted_state->host_fd < 0)
@@ -2187,7 +2198,8 @@ int64_t KYTY_SYSV_ABI NetSend(int id, const void* buf, uint64_t len, int flags)
 		{
 			return total != 0 ? static_cast<int64_t>(total) : NET_ERROR_EBADF;
 		}
-		const auto sent = ::send(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true));
+		const auto sent =
+		    InterruptibleSocketCall([&] { return ::send(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true)); });
 		const int send_errno = errno;
 		EndSocketOperation(state);
 		if (sent < 0)
@@ -2254,8 +2266,12 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		{
 			return NET_ERROR_EBADF;
 		}
-		const auto sent = ::sendto(host_fd, nullptr, 0, GuestToHostMessageFlags(flags, true), reinterpret_cast<const sockaddr*>(&host_addr),
-		                           host_addr_len);
+		const auto sent = InterruptibleSocketCall(
+		    [&]
+		    {
+			    return ::sendto(host_fd, nullptr, 0, GuestToHostMessageFlags(flags, true), reinterpret_cast<const sockaddr*>(&host_addr),
+				                host_addr_len);
+		    });
 		const int send_errno = errno;
 		EndSocketOperation(state);
 		return sent < 0 ? HostErrnoToNet(send_errno) : sent;
@@ -2278,8 +2294,12 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		{
 			return total != 0 ? static_cast<int64_t>(total) : NET_ERROR_EBADF;
 		}
-		const auto sent = ::sendto(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true),
-		                           reinterpret_cast<const sockaddr*>(&host_addr), host_addr_len);
+		const auto sent = InterruptibleSocketCall(
+		    [&]
+		    {
+			    return ::sendto(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true),
+				                reinterpret_cast<const sockaddr*>(&host_addr), host_addr_len);
+		    });
 		const int send_errno = errno;
 		EndSocketOperation(state);
 		if (sent < 0)
@@ -2335,7 +2355,8 @@ int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags)
 	{
 		return NET_ERROR_EBADF;
 	}
-	const auto received = ::recv(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, false));
+	const auto received =
+	    InterruptibleSocketCall([&] { return ::recv(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, false)); });
 	const int recv_errno = errno;
 	EndSocketOperation(state);
 	if (received < 0)
@@ -2408,9 +2429,12 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 	{
 		return NET_ERROR_EBADF;
 	}
-	const auto received = ::recvfrom(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, false),
-	                                 write_peer ? reinterpret_cast<sockaddr*>(&host_addr) : nullptr,
-	                                 write_peer ? &host_addr_len : nullptr);
+	const auto received = InterruptibleSocketCall(
+	    [&]
+	    {
+		    return ::recvfrom(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, false),
+			                  write_peer ? reinterpret_cast<sockaddr*>(&host_addr) : nullptr, write_peer ? &host_addr_len : nullptr);
+	    });
 	const int recv_errno = errno;
 	EndSocketOperation(state);
 	if (received < 0)
@@ -2606,8 +2630,12 @@ int64_t KYTY_SYSV_ABI NetSendmsg(int id, const void* msg, int flags)
 	{
 		return NET_ERROR_EBADF;
 	}
-	const auto sent = ::sendto(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true),
-	                           has_name ? reinterpret_cast<const sockaddr*>(&host_addr) : nullptr, host_addr_len);
+	const auto sent = InterruptibleSocketCall(
+	    [&]
+	    {
+		    return ::sendto(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true),
+			                has_name ? reinterpret_cast<const sockaddr*>(&host_addr) : nullptr, host_addr_len);
+	    });
 	const int send_errno = errno;
 	EndSocketOperation(state);
 	return sent < 0 ? HostErrnoToNet(send_errno) : sent;
@@ -2660,7 +2688,7 @@ int64_t KYTY_SYSV_ABI NetRecvmsg(int id, void* msg, int flags)
 	{
 		return NET_ERROR_EBADF;
 	}
-	const auto received   = ::recvmsg(host_fd, &host_msg, GuestToHostMessageFlags(flags, false));
+	const auto received   = InterruptibleSocketCall([&] { return ::recvmsg(host_fd, &host_msg, GuestToHostMessageFlags(flags, false)); });
 	const int  recv_errno = errno;
 	EndSocketOperation(state);
 	if (received < 0)
@@ -2955,6 +2983,7 @@ int KYTY_SYSV_ABI NetSelect(int nfds, void* readfds, void* writefds, void* excep
 	{
 		// A null timeout blocks indefinitely. Use bounded sleeps so shutdown and signal
 		// delivery remain responsive without pretending a descriptor query succeeded.
+		Kernel::PthreadInterruptibleScope any_syscall;
 		for (;;)
 		{
 			Core::Thread::SleepMicro(1'000'000);
@@ -2976,7 +3005,8 @@ int KYTY_SYSV_ABI NetSelect(int nfds, void* readfds, void* writefds, void* excep
 	{
 		return NET_ERROR_EINVAL;
 	}
-	uint64_t remaining = seconds_u * 1'000'000ull + microseconds_u;
+	uint64_t                          remaining = seconds_u * 1'000'000ull + microseconds_u;
+	Kernel::PthreadInterruptibleScope any_syscall;
 	while (remaining != 0)
 	{
 		const uint32_t slice = static_cast<uint32_t>(std::min<uint64_t>(remaining, 1'000'000ull));
@@ -3435,7 +3465,8 @@ int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id)
 		WakeEpoll(wake_fd);
 	}
 	{
-		std::unique_lock lock(state->mutex);
+		std::unique_lock                  lock(state->mutex);
+		Kernel::PthreadInterruptibleScope wait_scope(&state->operations_done, sizeof(state->operations_done));
 		state->operations_done.wait(lock, [&state]() { return state->operations == 0; });
 		state->host_fd = -1;
 		state->wake_fd = -1;
@@ -3618,7 +3649,7 @@ int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int t
 		return NET_ERROR_ENOMEM;
 	}
 	const int host_timeout = timeout_ms < 0 ? -1 : timeout_ms;
-	const int result       = ::epoll_wait(host_epoll_fd, host_events.Data(), max_events, host_timeout);
+	const int result = InterruptibleSocketCall([&] { return ::epoll_wait(host_epoll_fd, host_events.Data(), max_events, host_timeout); });
 	const int wait_errno    = errno;
 	if (result < 0)
 	{

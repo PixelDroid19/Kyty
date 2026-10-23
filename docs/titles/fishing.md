@@ -100,4 +100,7 @@ record. Titles are named descriptively only (`AGENTS.md`).
   match by index. Unrelated and pre-existing: some fishing-title launches never
   present a first frame. The build before the rule failed in 2 of 12 launches
   and presented in 5 of 5 short boot checks; three earlier builds showed the
-  same symptom (2026-10-12 and 2026-10-13). Cause unknown.
+  same symptom (2026-10-12 and 2026-10-13). Cause found on 2026-10-23: a
+  collector context request delivered while the thread held a host lock
+  (cross-title record "Collector context requests delivered only at safe
+  points").

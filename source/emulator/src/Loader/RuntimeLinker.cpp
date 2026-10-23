@@ -14,18 +14,19 @@
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Config.h"
 #include "Emulator/GpuMemoryFault.h"
+#include "Emulator/GuestCodeRanges.h"
 #include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/Elf.h"
-#include "Emulator/Loader/GuestProgramName.h"
 #include "Emulator/Loader/GuestCall.h"
+#include "Emulator/Loader/GuestProgramName.h"
 #include "Emulator/Loader/Instrumentation.h"
 #include "Emulator/Loader/Jit.h"
 #include "Emulator/Loader/MissingImport.h"
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/SymbolDatabase.h"
-#include "Emulator/Validation/DomainValidators.h"
 #include "Emulator/Log.h"
+#include "Emulator/Validation/DomainValidators.h"
 
 #include <atomic>
 #include <cstdio>
@@ -617,6 +618,13 @@ static Core::VirtualMemory::Mode get_mode(Elf64_Word flags)
 
 		default: return Core::VirtualMemory::Mode::NoAccess;
 	}
+}
+
+// Executable PT_LOAD segments stay recorded as guest code while the program is
+// mapped, so a signal handler can classify an interrupted instruction.
+static bool is_guest_code_segment(const Elf64_Phdr& phdr)
+{
+	return phdr.p_type == PT_LOAD && phdr.p_memsz != 0 && Core::VirtualMemory::IsExecute(get_mode(phdr.p_flags));
 }
 
 struct FrameS
@@ -2883,6 +2891,12 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 					Core::VirtualMemory::FlushInstructionCache(segment_addr, segment_memory_size);
 				}
 			}
+
+			if (is_guest_code_segment(phdr[i]))
+			{
+				Emulator::GuestCodeRanges::Add(segment_addr, segment_addr + segment_memory_size);
+				program->guest_code_registered = true;
+			}
 		}
 
 		if (phdr[i].p_type == PT_TLS && phdr[i].p_memsz != 0)
@@ -2963,6 +2977,21 @@ void RuntimeLinker::DeleteProgram(Program* p)
 			delete per_thread;
 			p->rt->m_dynamic_tlss.Remove(p->tls.module_id);
 		}
+	}
+
+	if (p->guest_code_registered)
+	{
+		const auto* ehdr = p->elf->GetEhdr();
+		const auto* phdr = p->elf->GetPhdr();
+		for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
+		{
+			if (is_guest_code_segment(phdr[i]))
+			{
+				const uint64_t segment_addr = phdr[i].p_vaddr + p->base_vaddr;
+				Emulator::GuestCodeRanges::Remove(segment_addr, segment_addr + get_aligned_size(phdr + i));
+			}
+		}
+		p->guest_code_registered = false;
 	}
 
 	if (p->base_vaddr != 0 || p->base_size != 0)

@@ -4,6 +4,89 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Collector context requests delivered only at safe points (2026-10-23)
+
+- **Observed** (fishing title, the intermittent frame-3 boot hang recorded
+  under "Index snapshots over linked surfaces", host stacks at the stall):
+  - The title's IL2CPP collector installs a handler for exception 30
+    (`sceKernelInstallExceptionHandler`) and stops the world by raising it
+    on each thread (`sceKernelRaiseException`, reached through the platform
+    utility's thread-context request). The handler stores the interrupted
+    stack pointer, posts the suspend semaphore and waits on an event flag
+    until the world restarts.
+  - The host signal that carried the request could land while the thread
+    ran emulator code holding a host lock. In the captured stall the thread
+    held the virtual-memory lock inside a guest-memory copy; the handler's
+    event-flag wait took the same non-recursive lock to record its guest
+    callers, so the thread deadlocked with itself and the collector waited
+    for an acknowledgement that never came.
+  - Any host lock has the same problem: the handler keeps it for the whole
+    collection, and every thread that needs it stops.
+- **Approach.** Collected runtimes suspend a thread only at a safe point:
+  while it runs managed code, or while it blocks in a wait the runtime
+  declared safe. A suspension that lands anywhere else is deferred until the
+  thread reaches one. Kyty applies the same rule to guest code and host waits.
+- **Change.**
+  - The loader records the executable segments of every loaded program in a
+    lock-free table (`GuestCodeRanges`) that a signal handler can read.
+  - `PthreadContext.cpp` owns the handshake. A request sets a per-thread
+    pending bit and signals the thread. The signal runs the guest handler
+    only when the interrupted instruction is guest code, or when the thread
+    is stopped at the boundary of a blocking system call inside a
+    `PthreadInterruptibleScope` whose first argument names the declared wait
+    object. Scopes that hold no host lock at all accept any system call.
+    Otherwise the handler records the address (`context_deferred_rip`) and
+    arms a one-shot 100 µs per-thread timer that sends the signal again.
+  - Declared safe waits: guest semaphores, event flags, event queues, POSIX
+    semaphores, condition variables (wait, signal and broadcast), contended
+    mutex and rwlock acquisitions, address waits, static-initialisation
+    waits, sleeps, joins, blocking socket calls and the socket-close drain.
+  - Requests coalesce: one raised while another is pending or running is
+    answered by that delivery, or by a new delivery right after the handler
+    returns. A request for a created thread that has not started is
+    delivered when it starts; a thread that exits takes its pending request
+    first; a thread that has exited answers `ESRCH`.
+  - The guest handler runs on a trampoline stack and returns through
+    `rt_sigreturn`, so an interrupted restartable system call resumes as it
+    would without the request. One trampoline stack and one retry timer per
+    pooled thread replace the 1 MiB stack allocated per request, so the
+    stack retention noted under "Host context requests" in the history is
+    gone.
+  - The wait scopes record guest callers by reading the thread's own guest
+    stack, without the virtual-memory lock.
+  - `kyty_agent threads` reports `context_pending`, `context_running` and
+    `context_deferred_rip` (`docs/agent-tools.md`).
+- **Verified.**
+  - Three real-signal unit tests replace the overlap test: requests reach
+    sleeping threads (two raisers, 200 requests each, exact handler counts,
+    `ESRCH` after the join); a request waits for a safe point (no delivery
+    during 20 ms of host-code spinning, delivered once the thread sleeps);
+    a request interrupts guest code (a page registered as guest code). Each
+    passed 8 of 8 runs.
+  - Emulator unit suite 2449 passed, 11 skipped; integration and
+    diagnostics tests pass, with the archive check taught the new source.
+  - Strict runs at the 60 fps present limit: the fishing title reached the
+    dock in 3 of 3 boots (1790-1884 frames in 45 s, 22-26 fps). Its end
+    snapshot shows no thread pending and one deferred request that was
+    delivered later. The insect platformer, its sequel, the preschool title
+    and the 2D Unity action title, all IL2CPP, held the 60 fps limit for
+    45 s each with no stop.
+- **Open.**
+  - Host locks held across guest code: the module linker's mutex during
+    module initialisation and finalisation, the NGS2 dispatch mutex during
+    guest callbacks, the locale facet mutex and the AV player decoder mutex.
+    A thread stopped in guest code under one of them keeps it for the
+    collection, and a thread blocked on it is not at a safe point.
+  - Host waits not yet declared: the application heap's startup wait, the
+    video-out flip queue and its gates, the GPU ring submit and idle waits,
+    labels, fibers, audio sleeps and `poll`. A request to a thread blocked
+    there waits until the thread returns to guest code. GPU idle waits run
+    under the submission admission mutex, so they cannot simply be declared.
+  - glibc before 2.41: a condition-variable signal can block until a stopped
+    waiter drops its group reference. Guest condition variables are covered
+    by their scopes; host `Core::CondVar` signals are not.
+  - Code generated at run time is not in the guest code table.
+
 ## Transient snapshots shared by a command pool's command buffers (2026-10-23)
 
 - **Observed** (fishing title, dock in gameplay, Intel A770, Mesa ANV,
@@ -1119,6 +1202,9 @@ record. Titles are named descriptively only (`AGENTS.md`).
       that it is gone.
     - It stays open. The next stall needs host stacks, not only agent
       snapshots.
+  - Cause found later on 2026-10-23 from host stacks: a collector context
+    request delivered under the virtual-memory lock. Fixed by "Collector
+    context requests delivered only at safe points".
 - **Evidence (Intel, strict, one run each, capture-method fps).** Every run
   ended in status 1 with no error, and the final captures show intact
   geometry.

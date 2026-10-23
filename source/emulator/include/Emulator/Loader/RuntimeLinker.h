@@ -137,6 +137,7 @@ struct Program
 	uint32_t                               custom_call_plt_num         = 0;
 	uint64_t                               eh_frame_vaddr              = 0;
 	bool                                   eh_frame_registered         = false;
+	bool                                   guest_code_registered       = false;
 };
 
 // Immutable data copied while RuntimeLinker owns m_mutex. Consumers can inspect

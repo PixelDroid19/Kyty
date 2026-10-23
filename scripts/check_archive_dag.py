@@ -23,6 +23,7 @@ DOMAIN_SOURCE_GLOBS = {
         "src/Log.cpp",
         "src/Config.cpp",
         "src/GuestRuntimePort.cpp",
+        "src/GuestCodeRanges.cpp",
         "src/GuestMemory.cpp",
         "src/GpuMemoryFault.cpp",
         "src/AtomicFile.cpp",

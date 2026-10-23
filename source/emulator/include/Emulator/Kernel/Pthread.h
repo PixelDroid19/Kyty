@@ -25,6 +25,11 @@ extern "C" {
 struct sched_param;
 }
 
+namespace Kyty::Core {
+class CondVar;
+class Mutex;
+} // namespace Kyty::Core
+
 namespace Kyty::Kernel {
 
 class PthreadSubsystem: public Core::Subsystem
@@ -87,7 +92,6 @@ bool KYTY_SYSV_ABI PthreadMutexCurrentOwns(PthreadMutex* mutex);
 
 Pthread KYTY_SYSV_ABI PthreadSelf();
 int KYTY_SYSV_ABI     PthreadSignal(Pthread thread, int signum);
-int KYTY_SYSV_ABI     PthreadSignalWithValue(Pthread thread, int signum, void* value);
 int KYTY_SYSV_ABI     PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthread_entry_func_t entry, void* arg, const char* name);
 int KYTY_SYSV_ABI     PthreadDetach(Pthread thread);
 int KYTY_SYSV_ABI     PthreadJoin(Pthread thread, void** value);
@@ -231,6 +235,42 @@ private:
 #define KYTY_GUEST_WAIT(kind, object)                                                                                                     \
 	::Kyty::Kernel::PthreadWaitScope kyty_guest_wait_scope(kind, object, __builtin_return_address(0), __builtin_frame_address(0))
 
+// Guest context requests (the collector handshake on signal 30). The handler
+// receives (30, ucontext, 0) on the requested thread, but only at a safe point:
+// while the thread runs guest code or blocks inside a PthreadInterruptibleScope.
+// Returns false when the host cannot deliver requests.
+bool PthreadInstallContextHandler(uint64_t handler);
+// Requests a handler call on the thread. Requests raised before the call starts
+// share it; a thread that has finished its guest code reports ESRCH.
+int PthreadRaiseContext(Pthread thread);
+
+// Marks the blocking host wait in its lifetime as a safe point for context
+// requests. The wait must hold no host lock while it blocks: a request runs
+// the guest handler there, which may block until another guest thread acts.
+class PthreadInterruptibleScope
+{
+public:
+	// Any syscall that blocks inside the scope.
+	PthreadInterruptibleScope();
+	// Only a syscall that blocks on a word inside [object, object + size).
+	PthreadInterruptibleScope(const void* object, size_t size);
+	~PthreadInterruptibleScope();
+	PthreadInterruptibleScope(const PthreadInterruptibleScope&)            = delete;
+	PthreadInterruptibleScope& operator=(const PthreadInterruptibleScope&) = delete;
+
+private:
+	void Enter(uint64_t begin, uint64_t end);
+
+	PthreadPrivate* m_thread         = nullptr;
+	uint64_t        m_previous_begin = 0;
+	uint64_t        m_previous_end   = 0;
+};
+
+// Core::CondVar waits that are safe points. Only the sleep on the condition is
+// interruptible; taking the mutex before or after it is not.
+void PthreadInterruptibleWait(Core::CondVar* cond_var, Core::Mutex* mutex);
+bool PthreadInterruptibleWaitFor(Core::CondVar* cond_var, Core::Mutex* mutex, uint32_t micros);
+
 struct PthreadThreadDiagnostic
 {
 	uint64_t        entry       = 0;
@@ -245,6 +285,9 @@ struct PthreadThreadDiagnostic
 	uint64_t        wait_object = 0;
 	uint64_t        wait_return = 0;
 	uint64_t        wait_callers[PthreadWaitScope::kCallers] {};
+	bool            context_pending      = false;
+	bool            context_running      = false;
+	uint64_t        context_deferred_rip = 0;
 };
 
 struct PthreadThreadDiagnostics

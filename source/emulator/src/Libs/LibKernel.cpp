@@ -28,7 +28,6 @@
 #include "Emulator/Loader/GuestProgramName.h"
 #include "Emulator/Libs/PosixSemaphore.h"
 #include "Emulator/Loader/Elf.h"
-#include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/RuntimeLinker.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Network.h"
@@ -41,17 +40,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <memory>
 #include <mutex>
-#include <new>
-#include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #include <arpa/inet.h>
-#include <asm/prctl.h>
-#include <csignal>
-#include <sys/syscall.h>
-#include <ucontext.h>
 #include <unistd.h>
 #endif
 
@@ -899,235 +891,6 @@ static bool is_allowed_exception_signal(int signum)
 static std::array<std::atomic<uintptr_t>, 128> g_exception_handlers {};
 static std::mutex                              g_exception_handlers_mutex;
 
-struct SignalMcontext
-{
-	uint64_t mc_onstack;
-	uint64_t mc_rdi;
-	uint64_t mc_rsi;
-	uint64_t mc_rdx;
-	uint64_t mc_rcx;
-	uint64_t mc_r8;
-	uint64_t mc_r9;
-	uint64_t mc_rax;
-	uint64_t mc_rbx;
-	uint64_t mc_rbp;
-	uint64_t mc_r10;
-	uint64_t mc_r11;
-	uint64_t mc_r12;
-	uint64_t mc_r13;
-	uint64_t mc_r14;
-	uint64_t mc_r15;
-	int      mc_trapno;
-	uint16_t mc_fs;
-	uint16_t mc_gs;
-	uint64_t mc_addr;
-	int      mc_flags;
-	uint16_t mc_es;
-	uint16_t mc_ds;
-	uint64_t mc_err;
-	uint64_t mc_rip;
-	uint64_t mc_cs;
-	uint64_t mc_rflags;
-	uint64_t mc_rsp;
-	uint64_t mc_ss;
-	uint64_t mc_len;
-	uint64_t mc_fpformat;
-	uint64_t mc_ownedfp;
-	uint64_t mc_lbrfrom;
-	uint64_t mc_lbrto;
-	uint64_t mc_aux1;
-	uint64_t mc_aux2;
-	uint64_t mc_fpstate[104];
-	uint64_t mc_fsbase;
-	uint64_t mc_gsbase;
-	uint64_t mc_spare[6];
-};
-
-struct SignalUcontext
-{
-	uint8_t        uc_sigmask[0x10] {};
-	uint8_t        uc_private[0x30] {};
-	SignalMcontext uc_mcontext;
-};
-
-static_assert(offsetof(SignalUcontext, uc_mcontext) == 0x40);
-static_assert(offsetof(SignalMcontext, mc_rip) == 0xa0);
-static_assert(offsetof(SignalMcontext, mc_rsp) == 0xb8);
-static_assert(offsetof(SignalMcontext, mc_fsbase) == 0x440);
-static_assert(offsetof(SignalMcontext, mc_gsbase) == 0x448);
-
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-constexpr size_t kHostContextTrampolineStackSize = 1024 * 1024;
-
-struct HostContextRequest
-{
-	SignalUcontext             guest_context {};
-	ucontext_t                 resume_context {};
-	std::unique_ptr<uint8_t[]> trampoline_stack {};
-	ucontext_t*                signal_context = nullptr;
-	uintptr_t                  signal_frame   = 0;
-	uintptr_t                  handler        = 0;
-	uint64_t                   trace_id       = 0;
-	std::atomic_bool           completed {false};
-};
-
-// HostContextTrampoline publishes completion with a single-byte store from assembly.
-static_assert(sizeof(std::atomic_bool) == 1 && std::atomic_bool::is_always_lock_free);
-
-static std::mutex                       g_host_context_requests_mutex;
-static std::vector<HostContextRequest*> g_host_context_requests;
-static std::atomic<uint64_t>            g_host_context_next_trace_id {1};
-static std::atomic<uint32_t>            g_host_context_trace_count {0};
-
-// The IL2CPP collector's context handshake can deadlock without producing a
-// guest error. Keep its diagnostic path explicitly opt-in and avoid logging in
-// HostContextSignalHandler itself, where only async-signal-safe work is valid.
-static bool HostContextTraceEnabled()
-{
-	static const bool enabled = []()
-	{
-		const char* value = std::getenv("KYTY_CONTEXT_TRACE");
-		return value != nullptr && value[0] == '1';
-	}();
-	return enabled;
-}
-
-static void HostContextTrace(const char* stage, uint64_t trace_id, const void* request, const void* target, uintptr_t handler,
-                             uint64_t result)
-{
-	if (!HostContextTraceEnabled())
-	{
-		return;
-	}
-	if (g_host_context_trace_count.fetch_add(1, std::memory_order_relaxed) >= 512)
-	{
-		return;
-	}
-
-	KYTY_LOG_DEBUG( "CONTEXT_TRACE stage=%s id=%llu request=%p target=%p handler=0x%016llx result=0x%016llx\n", stage,
-	             static_cast<unsigned long long>(trace_id), request, target, static_cast<unsigned long long>(handler),
-	             static_cast<unsigned long long>(result));
-}
-
-static void ReclaimCompletedHostContextRequests()
-{
-	std::lock_guard lock(g_host_context_requests_mutex);
-	const auto      new_end = std::remove_if(g_host_context_requests.begin(), g_host_context_requests.end(),
-	                                         [](HostContextRequest* request)
-	                                         {
-		                                    if (!request->completed.load(std::memory_order_acquire))
-		                                    {
-			                                    return false;
-		                                    }
-		                                    HostContextTrace("reclaim", request->trace_id, request, nullptr, request->handler, 0);
-		                                    delete request;
-		                                    return true;
-	                                         });
-	g_host_context_requests.erase(new_end, g_host_context_requests.end());
-}
-#endif
-
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-static int HostContextSignal()
-{
-	return SIGRTMIN + 6;
-}
-
-// Linux does not place FSBASE/GSBASE in the public x86_64 gregset. The
-// exception is delivered on the interrupted guest thread, so ARCH_GET_* reads
-// the exact TLS bases that the PS5 callback must see in its ucontext.
-// This path performs only raw kernel queries and stack-local writes, which is
-// safe for the signal-delivery bridge.
-static uint64_t ReadHostSegmentBase(int selector)
-{
-	uint64_t value = 0;
-	return (::syscall(SYS_arch_prctl, selector, &value) == 0 ? value : 0);
-}
-
-static void CopyHostContext(SignalMcontext* guest, const ucontext_t* host)
-{
-	EXIT_IF(guest == nullptr || host == nullptr);
-
-	guest->mc_len    = sizeof(SignalMcontext);
-	guest->mc_rdi    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RDI]);
-	guest->mc_rsi    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RSI]);
-	guest->mc_rdx    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RDX]);
-	guest->mc_rcx    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RCX]);
-	guest->mc_r8     = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R8]);
-	guest->mc_r9     = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R9]);
-	guest->mc_rax    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RAX]);
-	guest->mc_rbx    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RBX]);
-	guest->mc_rbp    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RBP]);
-	guest->mc_r10    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R10]);
-	guest->mc_r11    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R11]);
-	guest->mc_r12    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R12]);
-	guest->mc_r13    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R13]);
-	guest->mc_r14    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R14]);
-	guest->mc_r15    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_R15]);
-	guest->mc_rip    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RIP]);
-	guest->mc_rflags = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_EFL]);
-	guest->mc_rsp    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RSP]);
-	guest->mc_fsbase = ReadHostSegmentBase(ARCH_GET_FS);
-	guest->mc_gsbase = ReadHostSegmentBase(ARCH_GET_GS);
-}
-
-[[noreturn]] static void HostContextTrampoline(HostContextRequest* request)
-{
-	HostContextTrace("trampoline_enter", request->trace_id, request, nullptr, request->handler, 0);
-	const uint64_t guest_result = Loader::GuestCall::Invoke(request->handler, 30, reinterpret_cast<uint64_t>(&request->guest_context), 0);
-	HostContextTrace("trampoline_done", request->trace_id, request, nullptr, request->handler, guest_result);
-
-	// Returning through rt_sigreturn instead of setcontext preserves Linux's
-	// restart handling for a futex or other syscall interrupted by this signal.
-	// The request owns this stack and the saved contexts. Its completion is
-	// published only after the last read of the request and after RSP has left
-	// the request-owned stack, so a concurrent reclaim can never free memory
-	// that this thread is still executing on or reading from.
-	*request->signal_context = request->resume_context;
-	const uintptr_t signal_frame = request->signal_frame;
-	std::atomic_bool* completed = &request->completed;
-	asm volatile("mov %0, %%rsp\n\t"
-	             "movb $1, (%1)\n\t"
-	             "mov %2, %%rax\n\t"
-	             "syscall\n\t"
-	             :
-	             : "r"(signal_frame), "r"(completed), "i"(SYS_rt_sigreturn)
-	             : "memory", "rax");
-	std::abort();
-	__builtin_unreachable();
-}
-
-static void HostContextSignalHandler(int signal, siginfo_t* info, void* raw_context)
-{
-	if (signal != HostContextSignal() || info == nullptr || info->si_code != SI_QUEUE || raw_context == nullptr)
-	{
-		return;
-	}
-
-	auto* request = static_cast<HostContextRequest*>(info->si_value.sival_ptr);
-	if (request == nullptr || request->handler == 0 || request->trampoline_stack == nullptr)
-	{
-		return;
-	}
-
-	auto* host_context = static_cast<ucontext_t*>(raw_context);
-	CopyHostContext(&request->guest_context.uc_mcontext, host_context);
-	request->resume_context = *host_context;
-	request->signal_context = host_context;
-	// libc's signal restorer returns through the synthetic return address
-	// before issuing rt_sigreturn, leaving RSP at the ucontext itself.
-	request->signal_frame = reinterpret_cast<uintptr_t>(host_context);
-
-	uintptr_t stack_top = reinterpret_cast<uintptr_t>(request->trampoline_stack.get()) + kHostContextTrampolineStackSize;
-	stack_top &= ~static_cast<uintptr_t>(0xf);
-	stack_top -= sizeof(uintptr_t);
-	*reinterpret_cast<uintptr_t*>(stack_top) = 0;
-	host_context->uc_mcontext.gregs[REG_RIP] = reinterpret_cast<greg_t>(HostContextTrampoline);
-	host_context->uc_mcontext.gregs[REG_RDI] = reinterpret_cast<greg_t>(request);
-	host_context->uc_mcontext.gregs[REG_RSP] = static_cast<greg_t>(stack_top);
-}
-#endif
-
 static int KYTY_SYSV_ABI KernelIsSignalReturn()
 {
 	// Guest code never executes the host's rt_sigreturn trampoline. The host
@@ -1148,21 +911,9 @@ static int KYTY_SYSV_ABI KernelInstallExceptionHandler(int signum, void* handler
 	{
 		return KERNEL_ERROR_EAGAIN;
 	}
-	if (signum == 30)
+	if (signum == 30 && !Kernel::PthreadInstallContextHandler(reinterpret_cast<uint64_t>(handler)))
 	{
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-		struct sigaction action {};
-		action.sa_sigaction = HostContextSignalHandler;
-		sigemptyset(&action.sa_mask);
-		action.sa_flags = SA_SIGINFO | SA_RESTART;
-		if (sigaction(HostContextSignal(), &action, nullptr) != 0)
-		{
-			return KERNEL_ERROR_EINVAL;
-		}
-		HostContextTrace("install", 0, nullptr, nullptr, reinterpret_cast<uintptr_t>(handler), 0);
-#else
 		return KERNEL_ERROR_EINVAL;
-#endif
 	}
 	g_exception_handlers[static_cast<size_t>(signum)].store(reinterpret_cast<uintptr_t>(handler), std::memory_order_release);
 	return OK;
@@ -1174,67 +925,7 @@ int KYTY_SYSV_ABI KernelRaiseException(Kernel::Pthread thread, int signum)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-
-	const uintptr_t handler = g_exception_handlers[static_cast<size_t>(signum)].load(std::memory_order_acquire);
-	if (handler == 0)
-	{
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-		HostContextTrace("raise_no_handler", 0, nullptr, thread, 0, 0);
-#endif
-		return OK;
-	}
-
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	ReclaimCompletedHostContextRequests();
-	auto* request = new (std::nothrow) HostContextRequest {};
-	if (request == nullptr)
-	{
-		return KERNEL_ERROR_ENOMEM;
-	}
-	request->trampoline_stack = std::unique_ptr<uint8_t[]>(new (std::nothrow) uint8_t[kHostContextTrampolineStackSize]);
-	if (request->trampoline_stack == nullptr)
-	{
-		delete request;
-		return KERNEL_ERROR_ENOMEM;
-	}
-	request->handler  = handler;
-	request->trace_id = g_host_context_next_trace_id.fetch_add(1, std::memory_order_relaxed);
-
-	{
-		std::lock_guard lock(g_host_context_requests_mutex);
-		g_host_context_requests.push_back(request);
-	}
-
-	// Once queued, the target thread may complete and another raise may reclaim
-	// the request at any moment; only the copied identity is traced afterwards.
-	const uint64_t trace_id = request->trace_id;
-	const int      result   = PthreadSignalWithValue(thread, HostContextSignal(), request);
-	HostContextTrace("raise_queued", trace_id, request, thread, handler, static_cast<uint64_t>(result));
-	if (result != OK)
-	{
-		HostContextTrace("raise_failed", trace_id, request, thread, handler, static_cast<uint64_t>(result));
-		std::lock_guard lock(g_host_context_requests_mutex);
-		const auto      iterator = std::find(g_host_context_requests.begin(), g_host_context_requests.end(), request);
-		if (iterator != g_host_context_requests.end())
-		{
-			g_host_context_requests.erase(iterator);
-		}
-		delete request;
-	}
-	return result;
-#else
-	return KERNEL_ERROR_EINVAL;
-#endif
-}
-
-size_t KernelHostContextRequestsPending()
-{
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	std::lock_guard lock(g_host_context_requests_mutex);
-	return g_host_context_requests.size();
-#else
-	return 0;
-#endif
+	return Kernel::PthreadRaiseContext(thread);
 }
 
 static KYTY_SYSV_ABI int KernelIsAddressSanitizerEnabled()

@@ -105,6 +105,7 @@ int KYTY_SYSV_ABI PthreadRwlockRdlock(PthreadRwlock* rwlock)
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
 	}
 
+	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
 	int result = pthread_rwlock_rdlock(&(*rwlock)->p);
 
 	// KYTY_LOG_DEBUG("\trwlock rdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
@@ -138,6 +139,7 @@ int KYTY_SYSV_ABI PthreadRwlockTimedrdlock(PthreadRwlock* rwlock, KernelUseconds
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
 	}
 
+	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
 #ifdef __APPLE__
 	timespec timeout {};
 	usec_to_timespec(&timeout, usec);
@@ -183,6 +185,7 @@ int KYTY_SYSV_ABI PthreadRwlockTimedwrlock(PthreadRwlock* rwlock, KernelUseconds
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
 	}
 
+	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
 #ifdef __APPLE__
 	timespec timeout {};
 	usec_to_timespec(&timeout, usec);
@@ -346,6 +349,7 @@ int KYTY_SYSV_ABI PthreadRwlockWrlock(PthreadRwlock* rwlock)
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
 	}
 
+	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
 	int result = pthread_rwlock_wrlock(&(*rwlock)->p);
 
 	// KYTY_LOG_DEBUG("\trwlock wrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);

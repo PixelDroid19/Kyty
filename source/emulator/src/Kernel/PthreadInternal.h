@@ -101,6 +101,8 @@ struct PthreadAttrPrivate
 	pthread_attr_t p;
 };
 
+struct PthreadContextDelivery;
+
 struct PthreadPrivate
 {
 	uint8_t              reserved[4096];
@@ -123,6 +125,15 @@ struct PthreadPrivate
 	std::atomic_uint64_t wait_object {0};
 	std::atomic_uint64_t wait_return {0};
 	std::atomic_uint64_t wait_callers[PthreadWaitScope::kCallers] {};
+	// Context requests (see PthreadContext.cpp). The signal handler reads these
+	// on the thread itself, so each is a lock-free atomic or is published before
+	// a request is marked pending.
+	int                     host_tid = 0;
+	std::atomic_uint32_t    context_state {0};
+	std::atomic_uint64_t    context_deferred_rip {0};
+	std::atomic_uint64_t    interruptible_begin {0};
+	std::atomic_uint64_t    interruptible_end {0};
+	PthreadContextDelivery* context_delivery = nullptr;
 };
 
 struct PthreadRwlockPrivate
@@ -281,6 +292,14 @@ private:
 
 extern thread_local Pthread g_pthread_self;
 extern Pthread              g_pthread_main;
+
+// A thread accepts context requests from its creation until it closes them
+// after its last guest code ran. Requests raised before the thread starts
+// running are delivered once it does.
+void PthreadOpenContext(PthreadPrivate* thread);
+void PthreadStartContext(PthreadPrivate* thread);
+void PthreadCloseContext(PthreadPrivate* thread);
+void PthreadSnapshotContext(const PthreadPrivate* thread, PthreadThreadDiagnostic* snapshot);
 
 // Copies a thread's lifecycle and current HLE wait into a diagnostics entry.
 void PthreadSnapshotDiagnostic(const PthreadPrivate* thread, PthreadThreadDiagnostic* snapshot);

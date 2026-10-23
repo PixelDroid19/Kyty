@@ -1087,6 +1087,7 @@ static KYTY_SYSV_ABI int c_cxa_guard_acquire(uint64_t* g)
 			       static_cast<void*>(g));
 			return 0;
 		}
+		Kernel::PthreadInterruptibleScope wait_scope(&g_static_init_cv, sizeof(g_static_init_cv));
 		g_static_init_cv.wait(lock, [guard] { return (guard->load(std::memory_order_acquire) & 0xFF01) != 0x0100; });
 	}
 }
@@ -1140,7 +1141,8 @@ KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, vo
 	constexpr int once_complete      = 2;
 
 	{
-		std::unique_lock lock(g_static_init_mutex);
+		std::unique_lock                  lock(g_static_init_mutex);
+		Kernel::PthreadInterruptibleScope wait_scope(&g_static_init_cv, sizeof(g_static_init_cv));
 		g_static_init_cv.wait(lock, [flag] {
 			return reinterpret_cast<std::atomic<uint32_t>*>(flag)->load(std::memory_order_acquire) != once_running;
 		});

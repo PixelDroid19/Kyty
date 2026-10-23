@@ -178,6 +178,7 @@ void PthreadSnapshotDiagnostic(const PthreadPrivate* thread, PthreadThreadDiagno
 	{
 		snapshot->wait_callers[i] = thread->wait_callers[i].load(std::memory_order_relaxed);
 	}
+	PthreadSnapshotContext(thread, snapshot);
 }
 
 bool PthreadPool::QueryStack(uint64_t addr, uint64_t* start, uint64_t* end)

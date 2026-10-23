@@ -175,7 +175,7 @@ void KernelSemaPrivate::Delete()
 	m_cond_var.SignalAll();
 	while (m_active_wait_calls > 0)
 	{
-		m_cond_var.Wait(&m_mutex);
+		PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 	}
 }
 
@@ -195,7 +195,7 @@ KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_wait
 
 	while (m_status == Status::Canceled)
 	{
-		m_cond_var.Wait(&m_mutex);
+		PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 		if (m_status == Status::Deleted)
 		{
 			return Result::Deleted;
@@ -215,7 +215,7 @@ KernelSemaPrivate::Result KernelSemaPrivate::Cancel(int set_count, int* num_wait
 
 	while (!m_waiting_threads.IsEmpty())
 	{
-		m_cond_var.Wait(&m_mutex);
+		PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 		if (m_status == Status::Deleted)
 		{
 			return Result::Deleted;
@@ -244,7 +244,7 @@ KernelSemaPrivate::Result KernelSemaPrivate::Signal(int signal_count)
 
 	while (m_status == Status::Canceled)
 	{
-		m_cond_var.Wait(&m_mutex);
+		PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 		if (m_status == Status::Deleted)
 		{
 			return Result::Deleted;
@@ -303,10 +303,10 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 
 		if (infinitely)
 		{
-			m_cond_var.Wait(&m_mutex);
+			PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 		} else
 		{
-			m_cond_var.WaitFor(&m_mutex, micros - elapsed);
+			PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, micros - elapsed);
 		}
 		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
 		if (m_status == Status::Deleted)
@@ -333,10 +333,10 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 
 		if (infinitely)
 		{
-			m_cond_var.Wait(&m_mutex);
+			PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 		} else
 		{
-			m_cond_var.WaitFor(&m_mutex, micros - elapsed);
+			PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, micros - elapsed);
 		}
 
 		m_waiting_threads.Remove(id);

@@ -477,7 +477,11 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
 	}
 
-	int result = pthread_cond_broadcast(&(*cond)->p);
+	int result = 0;
+	{
+		PthreadInterruptibleScope any_syscall;
+		result = pthread_cond_broadcast(&(*cond)->p);
+	}
 
 	KYTY_LOG_DEBUG("\tcond broadcast: %s, %d\n", (*cond)->name.C_Str(), result);
 
@@ -582,7 +586,11 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
 	}
 
-	int result = pthread_cond_signal(&(*cond)->p);
+	int result = 0;
+	{
+		PthreadInterruptibleScope any_syscall;
+		result = pthread_cond_signal(&(*cond)->p);
+	}
 
 	// KYTY_LOG_DEBUG("\tcond signal: %s, %d\n", (*cond)->name.C_Str(), result);
 
@@ -674,7 +682,12 @@ static int wait_on_resolved_cond(const ResolvedCondWait& resolved, const timespe
 	int      result          = pthread_cond_release_mutex_state(resolved.mutex, &recursion_count);
 	if (result == 0)
 	{
-		result = pthread_cond_timedwait(&resolved.cond->p, &resolved.mutex->p, &deadline);
+		{
+			// Waking up retakes the guest mutex, which another stopped guest
+			// thread may hold, so that is a safe point as well as the sleep.
+			PthreadInterruptibleScope any_syscall;
+			result = pthread_cond_timedwait(&resolved.cond->p, &resolved.mutex->p, &deadline);
+		}
 		// Condition waits reacquire the native mutex on success and timeout. Other
 		// validation errors leave it unchanged, so guest ownership is restored on every return.
 		pthread_cond_restore_mutex_state(resolved.mutex, recursion_count);
@@ -837,7 +850,10 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 	int      result          = pthread_cond_release_mutex_state(private_mutex, &recursion_count);
 	if (result == 0)
 	{
-		result = pthread_cond_wait(&(*cond)->p, &private_mutex->p);
+		{
+			PthreadInterruptibleScope any_syscall;
+			result = pthread_cond_wait(&(*cond)->p, &private_mutex->p);
+		}
 		pthread_cond_restore_mutex_state(private_mutex, recursion_count);
 	}
 

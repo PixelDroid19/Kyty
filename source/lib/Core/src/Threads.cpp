@@ -833,6 +833,16 @@ void CondVar::Signal()
 #endif
 }
 
+const void* CondVar::NativeObject() const
+{
+	return m_cond_var;
+}
+
+size_t CondVar::NativeObjectSize() const
+{
+	return sizeof(CondVarPrivate);
+}
+
 void CondVar::SignalAll()
 {
 #if !(defined(KYTY_DEBUG_LOCKS) || defined(KYTY_DEBUG_LOCKS_TIMED)) && defined(KYTY_WIN_CS)

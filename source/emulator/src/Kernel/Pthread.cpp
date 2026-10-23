@@ -128,25 +128,38 @@ void PthreadInitSelfForMainThread()
 	g_pthread_self->entry       = nullptr;
 	g_pthread_self->arg         = nullptr;
 	g_pthread_main              = g_pthread_self;
+	PthreadOpenContext(g_pthread_self);
+	PthreadStartContext(g_pthread_self);
 }
 
 // Guest return addresses above the waiting HLE function: its saved frame
 // pointer is the guest caller's frame, and each frame holds the next frame and
-// its return address. Every read is validated, so a broken chain only ends the
-// walk.
-static void capture_guest_callers(const void* frame, uint64_t* callers)
+// its return address. The walk reads the thread's own guest stack directly and
+// takes no lock, because a guest context handler can interrupt this thread
+// while it holds the virtual-memory lock and then wait here. Each frame must
+// lie inside the stack and above the previous one, so a broken chain only ends
+// the walk.
+static void capture_guest_callers(const PthreadPrivate* self, const void* frame, uint64_t* callers)
 {
-	uint64_t record[2] = {};
-	uint64_t next      = 0;
-	if (!Core::VirtualMemory::CopyFromGuest(&next, reinterpret_cast<uint64_t>(frame), sizeof(next)))
+	constexpr uint64_t kRecordSize = 2 * sizeof(uint64_t);
+	if (self->guest_stack_size < kRecordSize)
 	{
 		return;
 	}
-	for (int i = 0; i < PthreadWaitScope::kCallers && next != 0; i++)
+	const uint64_t stack_begin   = self->guest_stack_base;
+	const uint64_t last_record   = stack_begin + self->guest_stack_size - kRecordSize;
+	const auto     holds_record  = [&](uint64_t address) { return address >= stack_begin && address <= last_record && address % 8 == 0; };
+	const auto     frame_address = reinterpret_cast<uint64_t>(frame);
+	if (!holds_record(frame_address))
 	{
-		if (!Core::VirtualMemory::CopyFromGuest(record, next, sizeof(record)) || record[0] <= next)
+		return;
+	}
+	uint64_t next = *reinterpret_cast<const uint64_t*>(frame_address);
+	for (int i = 0; i < PthreadWaitScope::kCallers && holds_record(next); i++)
+	{
+		const auto* record = reinterpret_cast<const uint64_t*>(next);
+		if (record[0] <= next)
 		{
-			callers[i] = 0;
 			return;
 		}
 		callers[i] = record[1];
@@ -162,7 +175,7 @@ PthreadWaitScope::PthreadWaitScope(PthreadWaitKind kind, const void* object, con
 		return;
 	}
 	uint64_t callers[kCallers] = {};
-	capture_guest_callers(frame, callers);
+	capture_guest_callers(self, frame, callers);
 	for (int i = 0; i < kCallers; i++)
 	{
 		self->wait_callers[i].store(callers[i], std::memory_order_relaxed);
@@ -245,31 +258,6 @@ int KYTY_SYSV_ABI PthreadSignal(Pthread thread, int signum)
 	}
 }
 
-int KYTY_SYSV_ABI PthreadSignalWithValue(Pthread thread, int signum, void* value)
-{
-	if (thread == nullptr || thread->free.load(std::memory_order_acquire))
-	{
-		return KERNEL_ERROR_ESRCH;
-	}
-
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	union sigval signal_value {};
-	signal_value.sival_ptr = value;
-	switch (pthread_sigqueue(thread->p, signum, signal_value))
-	{
-		case 0: return OK;
-		case ESRCH: return KERNEL_ERROR_ESRCH;
-		case EAGAIN: return KERNEL_ERROR_EAGAIN;
-		case EINVAL: return KERNEL_ERROR_EINVAL;
-		default: return KERNEL_ERROR_EINVAL;
-	}
-#else
-	(void)signum;
-	(void)value;
-	return KERNEL_ERROR_EINVAL;
-#endif
-}
-
 static void cleanup_thread(void* arg)
 {
 	auto* thread = static_cast<Pthread>(arg);
@@ -296,6 +284,7 @@ static void cleanup_thread(void* arg)
 	// values for up to DESTRUCTOR_ITERATIONS passes and may still use guest TLS.
 	// Keep both the guest stack and the TLS image live until all callbacks finish.
 	g_pthread_context->GetPthreadKeys()->Destruct(thread->unique_id, stack_top);
+	PthreadCloseContext(thread);
 	GuestRuntimePort::ReleaseThreadDynamicTls(thread->unique_id);
 
 	Core::mem_guest_thread_leave();
@@ -327,6 +316,7 @@ static void* run_thread(void* arg)
 	EXIT_IF(thread->attr == nullptr || thread->attr->stack_addr == nullptr || thread->attr->stack_size == 0);
 	auto* stack_top = reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(thread->attr->stack_addr) + thread->attr->stack_size) &
 	                                          ~static_cast<uintptr_t>(0xf));
+	PthreadStartContext(thread);
 	ret = reinterpret_cast<void*>(GuestRuntimePort::InvokeOnStack(reinterpret_cast<uint64_t>(thread->entry),
 	                                                               reinterpret_cast<uint64_t>(thread->arg), 0, 0, stack_top));
 
@@ -399,7 +389,12 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 
 		if (result == OK)
 		{
+			PthreadOpenContext(*thread);
 			result = pthread_create(&(*thread)->p, &(*thread)->attr->p, run_thread, *thread);
+			if (result != 0)
+			{
+				PthreadCloseContext(*thread);
+			}
 		}
 	}
 
@@ -466,7 +461,11 @@ int KYTY_SYSV_ABI PthreadDetach(Pthread thread)
 
 static int pthread_join_internal(Pthread thread, void** value)
 {
-	int result = pthread_join(thread->p, value);
+	int result = 0;
+	{
+		PthreadInterruptibleScope any_syscall;
+		result = pthread_join(thread->p, value);
+	}
 
 	if (PRINT_NAME_ENABLED)
 	{
@@ -807,6 +806,7 @@ void PthreadSetHostThreadDtors(host_thread_dtors_func_t dtors)
 int KYTY_SYSV_ABI KernelUsleep(KernelUseconds microseconds)
 {
 	KYTY_GUEST_WAIT(PthreadWaitKind::Sleep, nullptr);
+	PthreadInterruptibleScope any_syscall;
 	Core::Thread::SleepMicro(microseconds);
 	return OK;
 }
@@ -817,7 +817,10 @@ unsigned int KYTY_SYSV_ABI KernelSleep(unsigned int seconds)
 	KYTY_LOG_DEBUG("\tsleep: %u\n", seconds);
 	Core::Timer t;
 	t.Start();
-	Core::Thread::Sleep(seconds);
+	{
+		PthreadInterruptibleScope any_syscall;
+		Core::Thread::Sleep(seconds);
+	}
 	double ts = t.GetTimeS();
 	KYTY_LOG_DEBUG("\tactual: %g seconds\n", ts);
 	return OK;
@@ -885,7 +888,10 @@ int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rm
 
 	Core::Timer t;
 	t.Start();
-	Core::Thread::SleepNano(nanos);
+	{
+		PthreadInterruptibleScope any_syscall;
+		Core::Thread::SleepNano(nanos);
+	}
 	double ts = t.GetTimeS();
 	KYTY_LOG_DEBUG("\tactual: %g nanoseconds\n", ts * 1000000000.0);
 

@@ -226,6 +226,7 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex)
 	if (result == EBUSY)
 	{
 		KYTY_GUEST_WAIT(PthreadWaitKind::Mutex, mutex);
+		PthreadInterruptibleScope lock_wait(&private_mutex->p, sizeof(private_mutex->p));
 		result = pthread_mutex_lock(&private_mutex->p);
 	}
 
@@ -324,7 +325,11 @@ int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	const int result = pthread_mutex_timedlock(&private_mutex->p, &deadline);
+	int result = 0;
+	{
+		PthreadInterruptibleScope lock_wait(&private_mutex->p, sizeof(private_mutex->p));
+		result = pthread_mutex_timedlock(&private_mutex->p, &deadline);
+	}
 #endif
 	if (result == 0)
 	{
