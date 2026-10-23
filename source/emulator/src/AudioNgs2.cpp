@@ -1,22 +1,23 @@
-#include "Emulator/Audio.h"
-
 #include "Kyty/Core/DbgAssert.h"
+#include "Kyty/Core/Threads.h"
 #include "Kyty/Core/VirtualMemory.h"
 
+#include "Emulator/Audio.h"
 #include "Emulator/AudioNgs2Reverb.h"
 #include "Emulator/AudioNgs2Sampler.h"
 #include "Emulator/AudioVideoBackend.h"
 #include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/FileSystem.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
 
 #include <algorithm>
 #include <array>
+#include <cinttypes>
 #include <cmath>
 #include <condition_variable>
-#include <cinttypes>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -1061,11 +1062,6 @@ struct Ngs2SystemRecord
 	// Set when the workspace came from the guest's allocator, which takes it back at destroy.
 	Ngs2BufferAllocator                                            allocator {};
 	std::unordered_map<uintptr_t, std::shared_ptr<Ngs2RackRecord>> racks;
-	// Callbacks produced by a render that ran while its thread held the explicit
-	// system lock. They run at unlock, never under the lock. deferred_mutex is a
-	// leaf lock guarding only this list; no other lock is taken while it is held.
-	std::mutex                                                     deferred_mutex;
-	std::vector<Ngs2PendingCallback>                               deferred_callbacks;
 };
 
 struct Ngs2RackRecord
@@ -1185,12 +1181,20 @@ template <typename T> struct Ngs2RegistryEntry
 	bool               closing = false;
 };
 
-std::mutex                                                          g_ngs_registry_mutex;
-std::condition_variable                                             g_ngs_registry_changed;
+Core::Mutex g_ngs_registry_mutex;
+// A destroy waits here for pins that a guest thread may hold while it runs
+// guest code (the explicit system lock), so the wait is a safe point.
+Core::CondVar                                                       g_ngs_registry_changed;
 std::unordered_map<uintptr_t, Ngs2RegistryEntry<Ngs2SystemRecord>> g_ngs_systems;
 std::unordered_map<uintptr_t, Ngs2RegistryEntry<Ngs2RackRecord>>   g_ngs_racks;
 std::unordered_map<uintptr_t, Ngs2RegistryEntry<Ngs2VoiceRecord>>  g_ngs_voices;
 uint64_t                                                            g_ngs_next_generation = 1;
+
+// A system's state_mutex stays held while the explicit system lock's owner runs
+// guest code, and its dispatch_mutex while a guest callback runs, so both are
+// taken at safe points. A thread may block on one while it holds another: every
+// waiter on them is at a safe point too.
+using ::Kyty::Kernel::PthreadLockAtSafePoint;
 
 static uint64_t Ngs2NextGenerationLocked()
 {
@@ -1208,7 +1212,7 @@ static void Ngs2ReleaseLease(Ngs2LeaseIdentity identity)
 	{
 		return;
 	}
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto release = [&](auto& records)
 	{
 		auto found = records.find(identity.handle);
@@ -1217,7 +1221,7 @@ static void Ngs2ReleaseLease(Ngs2LeaseIdentity identity)
 		// A destroy owner keeps one pin and waits for the count to fall to it.
 		if (found->second.pins <= 1)
 		{
-			g_ngs_registry_changed.notify_all();
+			g_ngs_registry_changed.SignalAll();
 		}
 	};
 	switch (identity.kind)
@@ -1289,7 +1293,7 @@ static Ngs2SystemLease Ngs2AcquireSystem(uintptr_t handle)
 	{
 		return {};
 	}
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto found = g_ngs_systems.find(handle);
 	if (found == g_ngs_systems.end() || found->second.closing || found->second.pins == UINT32_MAX)
 	{
@@ -1305,7 +1309,7 @@ static Ngs2RackLease Ngs2AcquireRack(uintptr_t handle)
 	{
 		return {};
 	}
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto found = g_ngs_racks.find(handle);
 	if (found == g_ngs_racks.end() || found->second.closing || found->second.pins == UINT32_MAX)
 	{
@@ -1321,7 +1325,7 @@ static Ngs2VoiceLease Ngs2AcquireVoice(uintptr_t handle)
 	{
 		return {};
 	}
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto found = g_ngs_voices.find(handle);
 	if (found == g_ngs_voices.end() || found->second.closing || found->second.pins == UINT32_MAX)
 	{
@@ -1336,7 +1340,7 @@ static Ngs2VoiceLease Ngs2AcquireVoice(uintptr_t handle)
 // initialized host record into public use.
 static bool Ngs2ReserveSystem(uintptr_t handle, const std::shared_ptr<Ngs2SystemRecord>& record)
 {
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	if (handle == 0 || record == nullptr || g_ngs_systems.find(handle) != g_ngs_systems.end())
 	{
 		return false;
@@ -1347,25 +1351,25 @@ static bool Ngs2ReserveSystem(uintptr_t handle, const std::shared_ptr<Ngs2System
 
 static bool Ngs2ActivateSystem(uintptr_t handle, const std::shared_ptr<Ngs2SystemRecord>& record)
 {
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto found = g_ngs_systems.find(handle);
 	if (found == g_ngs_systems.end() || found->second.record.get() != record.get() || !found->second.closing)
 	{
 		return false;
 	}
 	found->second.closing = false;
-	g_ngs_registry_changed.notify_all();
+	g_ngs_registry_changed.SignalAll();
 	return true;
 }
 
 static void Ngs2CancelSystemReservation(uintptr_t handle, const std::shared_ptr<Ngs2SystemRecord>& record)
 {
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto found = g_ngs_systems.find(handle);
 	if (found != g_ngs_systems.end() && found->second.record.get() == record.get() && found->second.closing && found->second.pins == 0)
 	{
 		g_ngs_systems.erase(found);
-		g_ngs_registry_changed.notify_all();
+		g_ngs_registry_changed.SignalAll();
 	}
 }
 
@@ -1375,7 +1379,7 @@ static bool Ngs2ReserveRack(const Ngs2SystemLease& system, const std::shared_ptr
 	{
 		return false;
 	}
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto active_system = g_ngs_systems.find(system.Identity().handle);
 	if (active_system == g_ngs_systems.end() || active_system->second.record.get() != system.Get() ||
 	    active_system->second.generation != system.Identity().generation || active_system->second.closing ||
@@ -1404,7 +1408,7 @@ static bool Ngs2ActivateRack(const Ngs2SystemLease& system, const std::shared_pt
 	{
 		return false;
 	}
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto active_system = g_ngs_systems.find(system.Identity().handle);
 	auto rack_entry    = g_ngs_racks.find(rack->workspace);
 	if (active_system == g_ngs_systems.end() || active_system->second.record.get() != system.Get() ||
@@ -1426,7 +1430,7 @@ static bool Ngs2ActivateRack(const Ngs2SystemLease& system, const std::shared_pt
 	{
 		g_ngs_voices.find(voice->handle)->second.closing = false;
 	}
-	g_ngs_registry_changed.notify_all();
+	g_ngs_registry_changed.SignalAll();
 	return true;
 }
 
@@ -1436,7 +1440,7 @@ static void Ngs2CancelRackReservation(const std::shared_ptr<Ngs2RackRecord>& rac
 	{
 		return;
 	}
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	for (const auto& voice: rack->voices)
 	{
 		auto found = g_ngs_voices.find(voice->handle);
@@ -1451,14 +1455,14 @@ static void Ngs2CancelRackReservation(const std::shared_ptr<Ngs2RackRecord>& rac
 	{
 		g_ngs_racks.erase(rack_entry);
 	}
-	g_ngs_registry_changed.notify_all();
+	g_ngs_registry_changed.SignalAll();
 }
 
 // A destroy owner holds one private pin. The condition variable waits for all
 // other leases without a registry lock ever being held under a system lock.
 static Ngs2SystemLease Ngs2BeginSystemDestroy(uintptr_t handle)
 {
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto found = g_ngs_systems.find(handle);
 	if (found == g_ngs_systems.end() || found->second.closing || found->second.pins == UINT32_MAX)
 	{
@@ -1494,39 +1498,42 @@ static void Ngs2WaitAndEraseSystem(Ngs2SystemLease* owner)
 	}
 	const auto system = owner->Shared();
 	const auto handle = owner->Identity().handle;
-	std::unique_lock lock(g_ngs_registry_mutex);
-	g_ngs_registry_changed.wait(lock,
-	                            [&]
-	                            {
-				auto system_entry = g_ngs_systems.find(handle);
-				if (system_entry == g_ngs_systems.end() || system_entry->second.record.get() != system.get() ||
-				    system_entry->second.pins != 1)
-				{
-					return false;
-				}
-				for (const auto& [unused_handle, entry]: g_ngs_racks)
-				{
-					(void)unused_handle;
-					if (entry.record->system.get() == system.get() && entry.pins != 0)
-					{
-						return false;
-					}
-				}
-				for (const auto& [unused_handle, entry]: g_ngs_voices)
-				{
-					(void)unused_handle;
-					if (entry.record->system.get() == system.get() && entry.pins != 0)
-					{
-						return false;
-					}
-				}
-				return true;
-			});
+	const auto drained = [&]
+	{
+		auto system_entry = g_ngs_systems.find(handle);
+		if (system_entry == g_ngs_systems.end() || system_entry->second.record.get() != system.get() || system_entry->second.pins != 1)
+		{
+			return false;
+		}
+		for (const auto& [unused_handle, entry]: g_ngs_racks)
+		{
+			(void)unused_handle;
+			if (entry.record->system.get() == system.get() && entry.pins != 0)
+			{
+				return false;
+			}
+		}
+		for (const auto& [unused_handle, entry]: g_ngs_voices)
+		{
+			(void)unused_handle;
+			if (entry.record->system.get() == system.get() && entry.pins != 0)
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+	{
+		Core::LockGuard lock(g_ngs_registry_mutex);
+		while (!drained())
+		{
+			::Kyty::Kernel::PthreadInterruptibleWait(&g_ngs_registry_changed, &g_ngs_registry_mutex);
+		}
+	}
 	// A callback running on another thread finishes before the records go away.
 	// Closing entries take no new pins, so the predicate still holds after relock.
-	lock.unlock();
-	std::lock_guard dispatch(system->dispatch_mutex);
-	lock.lock();
+	const auto      dispatch = PthreadLockAtSafePoint(system->dispatch_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	for (auto it = g_ngs_voices.begin(); it != g_ngs_voices.end();)
 	{
 		if (it->second.record->system.get() == system.get())
@@ -1549,12 +1556,12 @@ static void Ngs2WaitAndEraseSystem(Ngs2SystemLease* owner)
 	}
 	g_ngs_systems.erase(handle);
 	owner->Disarm();
-	g_ngs_registry_changed.notify_all();
+	g_ngs_registry_changed.SignalAll();
 }
 
 static Ngs2RackLease Ngs2BeginRackDestroy(uintptr_t handle)
 {
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto found = g_ngs_racks.find(handle);
 	if (found == g_ngs_racks.end() || found->second.closing || found->second.pins == UINT32_MAX)
 	{
@@ -1588,30 +1595,34 @@ static void Ngs2WaitAndEraseRack(Ngs2RackLease* owner)
 	}
 	const auto rack   = owner->Shared();
 	const auto handle = owner->Identity().handle;
-	std::unique_lock lock(g_ngs_registry_mutex);
-	g_ngs_registry_changed.wait(lock,
-	                            [&]
-	                            {
-				auto rack_entry = g_ngs_racks.find(handle);
-				if (rack_entry == g_ngs_racks.end() || rack_entry->second.record.get() != rack.get() || rack_entry->second.pins != 1)
-				{
-					return false;
-				}
-				for (const auto& [unused_handle, entry]: g_ngs_voices)
-				{
-					(void)unused_handle;
-					auto voice_rack = entry.record->rack.lock();
-					if (voice_rack.get() == rack.get() && entry.pins != 0)
-					{
-						return false;
-					}
-				}
-				return true;
-			});
+	const auto drained = [&]
+	{
+		auto rack_entry = g_ngs_racks.find(handle);
+		if (rack_entry == g_ngs_racks.end() || rack_entry->second.record.get() != rack.get() || rack_entry->second.pins != 1)
+		{
+			return false;
+		}
+		for (const auto& [unused_handle, entry]: g_ngs_voices)
+		{
+			(void)unused_handle;
+			auto voice_rack = entry.record->rack.lock();
+			if (voice_rack.get() == rack.get() && entry.pins != 0)
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+	{
+		Core::LockGuard lock(g_ngs_registry_mutex);
+		while (!drained())
+		{
+			::Kyty::Kernel::PthreadInterruptibleWait(&g_ngs_registry_changed, &g_ngs_registry_mutex);
+		}
+	}
 	// As for a system: wait for another thread's running callback, then erase.
-	lock.unlock();
-	std::lock_guard dispatch(rack->system->dispatch_mutex);
-	lock.lock();
+	const auto      dispatch = PthreadLockAtSafePoint(rack->system->dispatch_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	for (auto it = g_ngs_voices.begin(); it != g_ngs_voices.end();)
 	{
 		auto voice_rack = it->second.record->rack.lock();
@@ -1625,7 +1636,7 @@ static void Ngs2WaitAndEraseRack(Ngs2RackLease* owner)
 	}
 	g_ngs_racks.erase(handle);
 	owner->Disarm();
-	g_ngs_registry_changed.notify_all();
+	g_ngs_registry_changed.SignalAll();
 }
 
 static bool Ngs2MakeVoiceHandle(const Ngs2RackRecord& rack, uint32_t voice_id, uintptr_t* handle_out)
@@ -1648,7 +1659,10 @@ static bool Ngs2MakeVoiceHandle(const Ngs2RackRecord& rack, uint32_t voice_id, u
 class Ngs2HeldSystemLock
 {
 public:
-	explicit Ngs2HeldSystemLock(Ngs2SystemLease&& lease): m_lease(std::move(lease)), m_state_lock(m_lease->state_mutex) {}
+	explicit Ngs2HeldSystemLock(Ngs2SystemLease&& lease)
+	    : m_lease(std::move(lease)), m_state_lock(PthreadLockAtSafePoint(m_lease->state_mutex))
+	{
+	}
 
 	// The record stays alive through this shared_ptr even after the lock and lease
 	// are gone, so deferred callbacks can run once the lock is released.
@@ -1661,6 +1675,18 @@ private:
 };
 
 thread_local std::unordered_map<uintptr_t, std::unique_ptr<Ngs2HeldSystemLock>> g_ngs_thread_locks;
+
+struct Ngs2DeferredCallback
+{
+	std::shared_ptr<Ngs2SystemRecord> system;
+	Ngs2PendingCallback               callback;
+};
+
+// Callbacks of renders, of any system, that ran while this thread held an
+// explicit system lock. They run once it holds none: under a lock, a callback
+// would wait for another thread's callback of its system, which may itself wait
+// for that lock.
+thread_local std::vector<Ngs2DeferredCallback> g_ngs_thread_deferred_callbacks;
 
 static void Ngs2ApplyVoiceEvent(Ngs2VoiceRecord* voice)
 {
@@ -2384,7 +2410,7 @@ static int32_t Ngs2PatchVoice(Ngs2VoiceRecord* voice, const Ngs2VoiceParamHeader
 	{
 		return kNgs2InvalidControl;
 	}
-	std::lock_guard lock(voice->system->state_mutex);
+	const auto lock             = PthreadLockAtSafePoint(voice->system->state_mutex);
 	const auto source_rack      = voice->rack.lock();
 	const auto destination_rack = destination->rack.lock();
 	if (source_rack == nullptr || destination_rack == nullptr || source_rack->type == Ngs2RackType::Mastering ||
@@ -2655,7 +2681,7 @@ static int32_t Ngs2MixSystem(uintptr_t system_handle, const Ngs2RenderBufferInfo
 		return read_result;
 	}
 
-	std::lock_guard lock(system->state_mutex);
+	const auto     lock  = PthreadLockAtSafePoint(system->state_mutex);
 	const uint32_t grain = system->option.num_grain_samples;
 	if (grain == 0 || grain > system->option.max_grain_samples || grain > kNgs2MaxGrainSamples)
 	{
@@ -2666,14 +2692,7 @@ static int32_t Ngs2MixSystem(uintptr_t system_handle, const Ngs2RenderBufferInfo
 	{
 		return size_result;
 	}
-	size_t deferred = 0;
-	if (defer_callbacks)
-	{
-		{
-			std::lock_guard deferred_lock(system->deferred_mutex);
-			deferred = system->deferred_callbacks.size();
-		}
-	}
+	const size_t deferred = defer_callbacks ? g_ngs_thread_deferred_callbacks.size() : 0;
 	if (deferred + Ngs2MaxEndCallbacks(*system.Get()) > kNgs2MaxDeferredCallbacks)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: NGS2 render refused: callback budget is full\n");
@@ -2793,28 +2812,25 @@ static bool Ngs2WriteRenderTarget(const Ngs2RenderTarget& target)
 // the same record: a destroyed, closing or replaced voice is skipped.
 static bool Ngs2CallbackTargetLive(const Ngs2PendingCallback& callback)
 {
-	std::lock_guard lock(g_ngs_registry_mutex);
+	Core::LockGuard lock(g_ngs_registry_mutex);
 	auto            found = g_ngs_voices.find(callback.info.voice_handle);
 	return found != g_ngs_voices.end() && found->second.record == callback.voice && !found->second.closing;
 }
 
-// Runs the queued callbacks after the system lease and the state lock are
-// released. Each one is checked and run under the system's dispatch mutex: a
-// destroy on another thread either marks the voice closing before the check
-// (the callback is skipped) or waits for the callback to return. A callback may
+// Runs a queued callback after the system lease and the state lock are
+// released. It is checked and run under the system's dispatch mutex: a destroy
+// on another thread either marks the voice closing before the check (the
+// callback is skipped) or waits for the callback to return. A callback may
 // destroy its own voice, rack or system; later callbacks of destroyed voices
 // are skipped.
-static void Ngs2DispatchCallbacks(const std::shared_ptr<Ngs2SystemRecord>& system, const std::vector<Ngs2PendingCallback>& pending)
+static void Ngs2DispatchCallback(const std::shared_ptr<Ngs2SystemRecord>& system, const Ngs2PendingCallback& callback)
 {
-	for (const auto& callback: pending)
+	const auto dispatch = PthreadLockAtSafePoint(system->dispatch_mutex);
+	if (!Ngs2CallbackTargetLive(callback))
 	{
-		std::lock_guard dispatch(system->dispatch_mutex);
-		if (!Ngs2CallbackTargetLive(callback))
-		{
-			continue;
-		}
-		(void)::Kyty::Emulator::GuestRuntimePort::Invoke(callback.handler, reinterpret_cast<uint64_t>(&callback.info), 0, 0);
+		return;
 	}
+	(void)::Kyty::Emulator::GuestRuntimePort::Invoke(callback.handler, reinterpret_cast<uint64_t>(&callback.info), 0, 0);
 }
 
 } // namespace
@@ -2973,7 +2989,7 @@ int KYTY_SYSV_ABI Ngs2SystemDestroy(uintptr_t system_handle)
 	Ngs2WaitAndEraseSystem(&system);
 	std::vector<std::shared_ptr<Ngs2RackRecord>> racks;
 	{
-		std::lock_guard lock(record->state_mutex);
+		const auto lock = PthreadLockAtSafePoint(record->state_mutex);
 		for (auto& [unused_workspace, rack]: record->racks)
 		{
 			(void)unused_workspace;
@@ -3019,19 +3035,19 @@ int KYTY_SYSV_ABI Ngs2SystemUnlock(uintptr_t system_handle)
 	{
 		return kNgs2InvalidSystem;
 	}
-	// Keep the record alive, release the lock and lease, then run the callbacks a
-	// render deferred while the lock was held. They now run with no explicit lock
-	// or lease held, so a callback may stop or destroy its own objects.
-	auto system = found->second->Record();
+	// Release the lock and lease. Once this thread holds no explicit lock, run the
+	// callbacks its renders deferred; each keeps its system record alive. They run
+	// with no lock or lease held, so a callback may stop or destroy its own objects.
 	g_ngs_thread_locks.erase(found);
-	std::vector<Ngs2PendingCallback> deferred;
+	if (!g_ngs_thread_locks.empty())
 	{
-		std::lock_guard deferred_lock(system->deferred_mutex);
-		deferred.swap(system->deferred_callbacks);
+		return OK;
 	}
-	if (!deferred.empty())
+	std::vector<Ngs2DeferredCallback> deferred;
+	deferred.swap(g_ngs_thread_deferred_callbacks);
+	for (const auto& entry: deferred)
 	{
-		Ngs2DispatchCallbacks(system, deferred);
+		Ngs2DispatchCallback(entry.system, entry.callback);
 	}
 	return OK;
 }
@@ -3044,7 +3060,7 @@ int KYTY_SYSV_ABI Ngs2SystemSetGrainSamples(uintptr_t system_handle, uint32_t gr
 	{
 		return kNgs2InvalidSystem;
 	}
-	std::lock_guard lock(system->state_mutex);
+	const auto lock = PthreadLockAtSafePoint(system->state_mutex);
 	if (grain_samples == 0 || grain_samples > system->option.max_grain_samples || grain_samples > kNgs2MaxGrainSamples)
 	{
 		return kNgs2InvalidControl;
@@ -3065,7 +3081,7 @@ int KYTY_SYSV_ABI Ngs2SystemSetSampleRate(uintptr_t system_handle, uint32_t samp
 	{
 		return kNgs2InvalidControl;
 	}
-	std::lock_guard lock(system->state_mutex);
+	const auto lock            = PthreadLockAtSafePoint(system->state_mutex);
 	system->option.sample_rate = sample_rate;
 	return OK;
 }
@@ -3160,7 +3176,7 @@ static int32_t Ngs2CreateRack(uintptr_t system_handle, uint32_t rack_id, const N
 	// The system lease stays pinned while this host record is linked. No
 	// registry lock is held while taking the per-system state lock.
 	{
-		std::lock_guard lock(system->state_mutex);
+		const auto lock         = PthreadLockAtSafePoint(system->state_mutex);
 		auto [unused, inserted] = system->racks.emplace(rack->workspace, rack);
 		(void)unused;
 		if (!inserted)
@@ -3170,7 +3186,7 @@ static int32_t Ngs2CreateRack(uintptr_t system_handle, uint32_t rack_id, const N
 	}
 	if (!Ngs2ReserveRack(system, rack))
 	{
-		std::lock_guard lock(system->state_mutex);
+		const auto lock = PthreadLockAtSafePoint(system->state_mutex);
 		system->racks.erase(rack->workspace);
 		return kNgs2InvalidSystem;
 	}
@@ -3179,14 +3195,14 @@ static int32_t Ngs2CreateRack(uintptr_t system_handle, uint32_t rack_id, const N
 	if (!Ngs2WriteGuest(handle, public_handle))
 	{
 		Ngs2CancelRackReservation(rack);
-		std::lock_guard lock(system->state_mutex);
+		const auto lock = PthreadLockAtSafePoint(system->state_mutex);
 		system->racks.erase(rack->workspace);
 		return kNgs2InvalidOut;
 	}
 	if (!Ngs2ActivateRack(system, rack))
 	{
 		Ngs2CancelRackReservation(rack);
-		std::lock_guard lock(system->state_mutex);
+		const auto lock = PthreadLockAtSafePoint(system->state_mutex);
 		system->racks.erase(rack->workspace);
 		return kNgs2InvalidSystem;
 	}
@@ -3261,7 +3277,7 @@ int KYTY_SYSV_ABI Ngs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* 
 	}
 	auto record = rack.Shared();
 	{
-		std::lock_guard lock(record->system->state_mutex);
+		const auto lock  = PthreadLockAtSafePoint(record->system->state_mutex);
 		auto found = record->system->racks.find(record->workspace);
 		if (found != record->system->racks.end() && found->second.get() == record.get())
 		{
@@ -3287,11 +3303,11 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 	std::vector<Ngs2RenderTarget>     targets;
 	std::vector<Ngs2PendingCallback>  pending;
 	std::shared_ptr<Ngs2SystemRecord> system;
-	// If this thread holds the explicit system lock, that lock is still held after
-	// the render's own lease and state lock are released, so running a guest
-	// callback would hold the state mutex across it. Those callbacks wait for
-	// unlock; the mix admits the render only if they all fit (see Ngs2MixSystem).
-	const bool    defer_callbacks = g_ngs_thread_locks.find(system_handle) != g_ngs_thread_locks.end();
+	// An explicit system lock this thread holds, of this system or another, stays
+	// held after the render's own lease and state lock are released. The callbacks
+	// wait until this thread holds none; the mix admits the render only if they all
+	// fit (see Ngs2MixSystem).
+	const bool    defer_callbacks = !g_ngs_thread_locks.empty();
 	const int32_t mix_result =
 	    Ngs2MixSystem(system_handle, buffer_info, num_buffer_info, defer_callbacks, &targets, &pending, &system);
 	if (mix_result != OK)
@@ -3305,14 +3321,16 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 		if (defer_callbacks)
 		{
 			// Room was reserved by the admission check; nothing is dropped.
-			std::lock_guard deferred_lock(system->deferred_mutex);
 			for (auto& callback: pending)
 			{
-				system->deferred_callbacks.push_back(std::move(callback));
+				g_ngs_thread_deferred_callbacks.push_back({system, std::move(callback)});
 			}
 		} else
 		{
-			Ngs2DispatchCallbacks(system, pending);
+			for (const auto& callback: pending)
+			{
+				Ngs2DispatchCallback(system, callback);
+			}
 		}
 	}
 	return copy_result;
@@ -3331,7 +3349,7 @@ int KYTY_SYSV_ABI Ngs2RackGetVoiceHandle(uintptr_t rack_handle, uint32_t voice_i
 		const uintptr_t invalid_handle = 0;
 		return Ngs2WriteGuest(handle, invalid_handle) ? kNgs2InvalidRack : kNgs2InvalidOut;
 	}
-	std::lock_guard lock(rack->system->state_mutex);
+	const auto lock = PthreadLockAtSafePoint(rack->system->state_mutex);
 	if (voice_id >= rack->max_voices || voice_id >= rack->voices.size())
 	{
 		const uintptr_t invalid_handle = 0;
@@ -3357,7 +3375,7 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 	{
 		return Ngs2PatchVoice(voice.Get(), header, param_list);
 	}
-	std::lock_guard lock(voice->system->state_mutex);
+	const auto lock = PthreadLockAtSafePoint(voice->system->state_mutex);
 	auto rack = voice->rack.lock();
 	if (rack != nullptr && rack->type == Ngs2RackType::Sampler)
 	{
@@ -3459,7 +3477,7 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 	{
 		return kNgs2InvalidVoice;
 	}
-	std::lock_guard lock(voice->system->state_mutex);
+	const auto lock = PthreadLockAtSafePoint(voice->system->state_mutex);
 	auto rack = voice->rack.lock();
 	if (rack != nullptr && rack->type == Ngs2RackType::Sampler)
 	{
@@ -3632,7 +3650,7 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 	uint64_t  user_data       = 0;
 	uintptr_t waveform_data   = 0;
 	{
-		std::lock_guard lock(voice->system->state_mutex);
+		const auto lock           = PthreadLockAtSafePoint(voice->system->state_mutex);
 		auto rack = voice->rack.lock();
 		const bool sampler        = rack != nullptr && rack->type == Ngs2RackType::Sampler;
 		const bool custom_sampler = rack != nullptr && rack->type == Ngs2RackType::CustomSampler;
@@ -3685,7 +3703,7 @@ int KYTY_SYSV_ABI Ngs2VoiceGetStateFlags(uintptr_t voice_handle, uint32_t* state
 	}
 	uint32_t output = 0;
 	{
-		std::lock_guard lock(voice->system->state_mutex);
+		const auto lock = PthreadLockAtSafePoint(voice->system->state_mutex);
 		output = Ngs2GetVoiceStateFlags(*voice.Get());
 	}
 	return Ngs2WriteGuest(state_flags, output) ? OK : kNgs2InvalidControl;
@@ -3724,7 +3742,7 @@ int KYTY_SYSV_ABI Ngs2VoiceGetPortInfo(uintptr_t voice_handle, uint32_t port, vo
 	Ngs2VoicePortInfo info {};
 	info.matrix_id = -1;
 	{
-		std::lock_guard lock(voice->system->state_mutex);
+		const auto lock  = PthreadLockAtSafePoint(voice->system->state_mutex);
 		info.volume      = voice->port_volume;
 		info.destination = voice->patch.expired() ? 0 : voice->patch_handle;
 	}
