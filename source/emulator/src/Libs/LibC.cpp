@@ -3374,8 +3374,10 @@ static KYTY_SYSV_ABI void c_locale_RegisterFacet(void* /*self*/) {}
 // locale::_Locimp facet vectors follow the guest runtime: both operations run
 // under the locale lock and take facet references through the facet vtable
 // (+0x10 incref, +0x18 decref returning the facet to delete, +0x08 deleting
-// destructor).
-static std::mutex g_locimp_mutex;
+// destructor). Those calls are guest code, so the lock is taken at a safe point,
+// and it is recursive so a facet destructor that reaches these operations again
+// on the same thread cannot deadlock.
+static std::recursive_mutex g_locimp_mutex;
 
 static void LocimpIncref(void* facet)
 {
@@ -3409,7 +3411,7 @@ static KYTY_SYSV_ABI void c_locimp_copy_ctor(CxxLocimpLayout* self, const CxxLoc
 	self->flag_24     = right->flag_24;
 	self->name        = right->name;
 
-	std::scoped_lock lock(g_locimp_mutex);
+	const auto lock = Kernel::PthreadLockAtSafePoint(g_locimp_mutex);
 	if (self->facet_count == 0)
 	{
 		return;
@@ -3435,7 +3437,7 @@ static KYTY_SYSV_ABI void c_locimp_copy_ctor(CxxLocimpLayout* self, const CxxLoc
 static KYTY_SYSV_ABI void c_locimp_addfac(CxxLocimpLayout* self, void* facet, std::uint64_t id)
 {
 	EXIT_IF(self == nullptr || facet == nullptr);
-	std::scoped_lock lock(g_locimp_mutex);
+	const auto lock = Kernel::PthreadLockAtSafePoint(g_locimp_mutex);
 	if (self->facet_count <= id)
 	{
 		const std::uint64_t count = std::max<std::uint64_t>(id + 1, 40);
