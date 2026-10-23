@@ -14,7 +14,6 @@
 #include "Theme.h"
 
 #include <QHoverEvent>
-#include <QImageReader>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QQuickWindow>
@@ -67,18 +66,6 @@ enum Icon
 
 const char* const ICON_FILES[ICON_COUNT] = {":/assets/icons/search.svg", ":/assets/icons/library.svg", ":/assets/icons/list.svg"};
 constexpr qreal   ICON_SIZES[ICON_COUNT] = {SEARCH_ICON, SWITCH_ICON, SWITCH_ICON};
-
-QImage PaintIcon(const char* path, int px)
-{
-	QImageReader reader(QString::fromLatin1(path));
-	reader.setScaledSize(QSize(px, px));
-	auto image = reader.read();
-	if (image.isNull())
-	{
-		qWarning("Library icon %s: %s", path, qPrintable(reader.errorString()));
-	}
-	return image;
-}
 
 QFont TitleFont()
 {
@@ -490,9 +477,6 @@ bool LibraryPageItem::GameKey(QKeyEvent* event)
 	} else if (key == Qt::Key_V)
 	{
 		ToggleView();
-	} else if (key == Qt::Key_Slash || (key == Qt::Key_F && (event->modifiers() & Qt::ControlModifier) != 0))
-	{
-		FocusSearch();
 	} else
 	{
 		return false;
@@ -508,6 +492,12 @@ void LibraryPageItem::keyPressEvent(QKeyEvent* event)
 	if ((games_view || focus == m_tabs) && (event->key() == Qt::Key_PageUp || event->key() == Qt::Key_PageDown))
 	{
 		ChangeFolder(event->key() == Qt::Key_PageUp ? -1 : 1);
+		return;
+	}
+	// Search works from anywhere on the page; the search field keeps the slash it types.
+	if (event->key() == Qt::Key_Slash || (event->key() == Qt::Key_F && (event->modifiers() & Qt::ControlModifier) != 0))
+	{
+		FocusSearch();
 		return;
 	}
 	if (focus == m_hero && (event->key() == Qt::Key_O || event->key() == Qt::Key_Menu))
@@ -695,7 +685,8 @@ void LibraryPageItem::updatePolish()
 		m_icon_scale = icon_scale;
 		for (int i = 0; i < ICON_COUNT; i++)
 		{
-			m_icons[i] = PaintIcon(ICON_FILES[i], static_cast<int>(std::ceil(ICON_SIZES[i] * icon_scale)));
+			m_icons[i] =
+			    PaintIcon(ICON_FILES[i], static_cast<int>(std::ceil(ICON_SIZES[i] * icon_scale)), Theme::Instance()->TextPrimary());
 		}
 	}
 	update();

@@ -43,6 +43,8 @@ private:
 		About
 	};
 
+	void BuildItems();
+	void Rebuild();
 	void Layout();
 	void StateChanged();
 	void UpdateLive();
@@ -60,6 +62,8 @@ private:
 
 	Page              m_page    = Page::Library;
 	bool              m_running = false;
+	// A new theme or language arrived while the editor was open.
+	bool m_rebuild_pending = false;
 	// Visibility to return to when the game closes, so a maximized launcher comes back maximized.
 	Visibility        m_restore = Windowed;
 	BackgroundItem*   m_background = nullptr;

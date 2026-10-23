@@ -2,7 +2,6 @@
 #define LAUNCHER_INCLUDE_LAUNCHER_BACKEND_H_
 
 #include "Common.h"
-
 #include "Configuration.h"
 #include "EmulatorRunner.h"
 #include "GameLibrary.h"
@@ -12,6 +11,7 @@
 #include <QString>
 #include <QStringList>
 #include <QThreadPool>
+#include <QTranslator>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -30,6 +30,8 @@ signals:
 	void GameFinished(const QString& message);
 	// Result of ImportFolder: games added, game folders found (already listed ones included), and an error text.
 	void FolderImported(int added, int found, const QString& error);
+	// The launcher's texts are now in another language; pages built before still show the old one.
+	void LanguageChanged();
 
 public:
 	explicit LauncherBackend(QObject* parent = nullptr);
@@ -50,13 +52,13 @@ public:
 	[[nodiscard]] bool         IsRunning() const { return m_runner.IsBusy(); }
 	[[nodiscard]] int          RunningRow() const { return m_running_row; }
 	[[nodiscard]] QString      ControllerName() const;
-	[[nodiscard]] QStringList  RunModes() const { return m_run_modes; }
-	[[nodiscard]] int          RunModeIndex() const;
 	[[nodiscard]] bool         IsTableView() const { return m_table_view; }
 	[[nodiscard]] QString      LogPath() const { return m_runner.LogPath(); }
 	[[nodiscard]] QString      SettingsFile() const { return m_settings_file; }
 	// The emulator settings of every game without custom settings, in the editor's field form.
 	[[nodiscard]] QVariantMap  GlobalFields() const;
+	// The launcher's own settings in the same form: run_mode, color_scheme and language.
+	[[nodiscard]] QVariantMap LauncherFields() const;
 
 	QVariantMap FieldsFor(int row) const;
 	QVariantMap Choices() const;
@@ -75,7 +77,8 @@ public:
 	QVariantList ScanElfs(const QString& basedir, const QVariantList& current) const;
 	QVariantList ParamEntries(const QString& param_file) const;
 	void         SetEmulatorPath(const QString& path);
-	void         SetRunModeIndex(int index);
+	// Applies and remembers one of LauncherFields().
+	void SetLauncherField(const QString& key, const QVariant& value);
 	// Shows the library as a table instead of a grid of covers; remembered between starts.
 	void        SetTableView(bool table);
 	void        StopGame();
@@ -93,6 +96,8 @@ private:
 	void         OnFinished(int exit_code, bool crashed);
 	QString      StartGame(const QVariantMap& fields, int row);
 	void         AddImported(const QList<QVariantMap>& games, int found);
+	void         ApplyColorScheme();
+	void         ApplyLanguage();
 
 	GameLibrary        m_library;
 	Kyty::Configuration m_global;
@@ -105,6 +110,9 @@ private:
 	bool               m_emulator_ready    = false;
 	QStringList        m_run_modes;
 	QString            m_run_mode;
+	QString             m_color_scheme;
+	QString             m_language;
+	QTranslator         m_translator;
 	int                m_running_row       = -1;
 	QRect              m_window_geometry;
 	bool               m_importing         = false;

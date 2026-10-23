@@ -2,6 +2,7 @@
 
 #include "ArtworkProvider.h"
 #include "SceneNodes.h"
+#include "Theme.h"
 
 #include <QEasingCurve>
 #include <QMatrix4x4>
@@ -120,8 +121,12 @@ public:
 		covered.Create(this);
 		front.Create(this);
 		scrim_opacity              = new QSGOpacityNode;
-		const QGradientStops stops = {{0.0, QColor::fromRgbF(0.035F, 0.035F, 0.043F, 0.78F)},
-		                              {1.0, QColor::fromRgbF(0.035F, 0.035F, 0.043F, 0.93F)}};
+		// The page background over the art, so the page's text keeps its contrast in either palette.
+		QColor top    = Theme::Instance()->Background();
+		QColor bottom = top;
+		top.setAlphaF(0.78F);
+		bottom.setAlphaF(0.93F);
+		const QGradientStops stops = {{0.0, top}, {1.0, bottom}};
 		scrim                      = CreateTextureNode(window, CreateGradientTexture(window, stops, Qt::Vertical), {});
 		scrim_opacity->appendChildNode(scrim);
 		appendChildNode(scrim_opacity);

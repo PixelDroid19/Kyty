@@ -45,7 +45,9 @@ QSGNode* BackgroundItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData*
 		    CreateTextureNode(window(), CreateGradientTexture(window(), {{0.0, clear}, {0.5, faint}, {1.0, clear}}, Qt::Horizontal), {}));
 		base->appendChildNode(band);
 
-		const QGradientStops glow = {{0.0, QColor(0x09, 0x09, 0x0b, 0)}, {1.0, QColor(0x10, 0x1e, 0x3c, 0x14)}};
+		QColor glow_clear = Theme::Instance()->Glow();
+		glow_clear.setAlpha(0);
+		const QGradientStops glow = {{0.0, glow_clear}, {1.0, Theme::Instance()->Glow()}};
 		base->appendChildNode(CreateTextureNode(window(), CreateGradientTexture(window(), glow, Qt::Vertical), {}));
 	}
 

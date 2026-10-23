@@ -6,6 +6,7 @@
 #include <QBrush>
 #include <QColor>
 #include <QFont>
+#include <QImage>
 #include <QRectF>
 #include <QSGGeometry>
 #include <QSGNode>
@@ -85,6 +86,12 @@ public:
 private:
 	QSGGeometry m_geometry;
 };
+
+// Paints every visible pixel of image in color, keeping its coverage.
+void Recolour(QImage* image, const QColor& color);
+
+// Reads an icon file, drawn in white, at px by px pixels and recolours it to color.
+QImage PaintIcon(const char* path, int px, const QColor& color);
 
 // The application font at a pixel size, as text without a font family uses it.
 QFont SceneFont(qreal pixel_size, QFont::Weight weight = QFont::Normal);

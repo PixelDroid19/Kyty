@@ -43,6 +43,65 @@ QString Translated(const char* text)
 	return QCoreApplication::translate("EditorPageItem", text);
 }
 
+// What a choice shows for each stored value; values not listed show as they are.
+struct ChoiceText
+{
+	const char* value;
+	const char* text;
+	// Language names are written in their own language.
+	bool translated = true;
+};
+
+const ChoiceText CHOICE_TEXTS[] = {
+    {"System", QT_TRANSLATE_NOOP("FieldRowItem", "Same as the system")},
+    {"Dark", QT_TRANSLATE_NOOP("FieldRowItem", "Dark")},
+    {"Light", QT_TRANSLATE_NOOP("FieldRowItem", "Light")},
+    {"en", "English", false},
+    {"es", "Español", false},
+    {"ru", "Русский", false},
+    {"Direct", QT_TRANSLATE_NOOP("FieldRowItem", "Direct, output to a log file")},
+    {"Custom", QT_TRANSLATE_NOOP("FieldRowItem", "Custom")},
+    {"Native", QT_TRANSLATE_NOOP("FieldRowItem", "Native")},
+    {"Quality", QT_TRANSLATE_NOOP("FieldRowItem", "Quality")},
+    {"Balanced", QT_TRANSLATE_NOOP("FieldRowItem", "Balanced")},
+    {"Performance", QT_TRANSLATE_NOOP("FieldRowItem", "Performance")},
+    {"Fixed", QT_TRANSLATE_NOOP("FieldRowItem", "Fixed size")},
+    {"Display", QT_TRANSLATE_NOOP("FieldRowItem", "Display only")},
+    {"RenderTargets", QT_TRANSLATE_NOOP("FieldRowItem", "Render targets")},
+    {"Linear", QT_TRANSLATE_NOOP("FieldRowItem", "Linear")},
+    {"Nearest", QT_TRANSLATE_NOOP("FieldRowItem", "Nearest")},
+    {"Fsr", "FSR", false},
+    {"Guest", QT_TRANSLATE_NOOP("FieldRowItem", "As the game asks")},
+    {"X2", "2×", false},
+    {"X4", "4×", false},
+    {"X8", "8×", false},
+    {"X16", "16×", false},
+    {"None", QT_TRANSLATE_NOOP("FieldRowItem", "None")},
+    {"Size", QT_TRANSLATE_NOOP("FieldRowItem", "Smaller code")},
+    {"Silent", QT_TRANSLATE_NOOP("FieldRowItem", "Off")},
+    {"Console", QT_TRANSLATE_NOOP("FieldRowItem", "Console")},
+    {"File", QT_TRANSLATE_NOOP("FieldRowItem", "File")},
+    {"Directory", QT_TRANSLATE_NOOP("FieldRowItem", "Folder, one file per run")},
+    {"Network", QT_TRANSLATE_NOOP("FieldRowItem", "Network")},
+    {"FileAndNetwork", QT_TRANSLATE_NOOP("FieldRowItem", "File and network")},
+    {"Debug", QT_TRANSLATE_NOOP("FieldRowItem", "Debug")},
+    {"Info", QT_TRANSLATE_NOOP("FieldRowItem", "Info")},
+    {"Warn", QT_TRANSLATE_NOOP("FieldRowItem", "Warnings")},
+    {"Error", QT_TRANSLATE_NOOP("FieldRowItem", "Errors")},
+};
+
+QString ChoiceDisplay(const QString& value)
+{
+	for (const auto& choice: CHOICE_TEXTS)
+	{
+		if (value == QLatin1String(choice.value))
+		{
+			return choice.translated ? QCoreApplication::translate("FieldRowItem", choice.text) : QString::fromUtf8(choice.text);
+		}
+	}
+	return value;
+}
+
 QFont SmallFont()
 {
 	return SceneFont(Theme::Instance()->FontSmall());
@@ -163,7 +222,7 @@ void FieldRowItem::ShowValue()
 			}
 			break;
 		case FieldType::Toggle: m_toggle->SetOn(m_value.toBool()); break;
-		case FieldType::Choice: m_choice->SetValue(m_value.toString()); break;
+		case FieldType::Choice: m_choice->SetValue(ChoiceDisplay(m_value.toString())); break;
 		case FieldType::Modules: ShowModules(m_value.toList()); break;
 		case FieldType::Params:
 			// Read again only when the file changes, since every edit in the form passes through here.

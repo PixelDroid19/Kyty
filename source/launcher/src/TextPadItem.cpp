@@ -30,9 +30,60 @@ constexpr int COLUMNS = 10;
 
 namespace {
 
-const char* const TOKENS[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "q", "w", "e", "r", "t",     "y",     "u",   "i",
-                              "o", "p", "a", "s", "d", "f", "g", "h", "j", "k", "l", "-", "z", "x", "c",     "v",     "b",   "n",
-                              "m", ".", "_", "/", ":", "+", "(", ")", "@", "&", "?", "'", "~", "#", "Shift", "Space", "Del", "Done"};
+const char* const TOKENS[] = {"1",
+                              "2",
+                              "3",
+                              "4",
+                              "5",
+                              "6",
+                              "7",
+                              "8",
+                              "9",
+                              "0",
+                              "q",
+                              "w",
+                              "e",
+                              "r",
+                              "t",
+                              "y",
+                              "u",
+                              "i",
+                              "o",
+                              "p",
+                              "a",
+                              "s",
+                              "d",
+                              "f",
+                              "g",
+                              "h",
+                              "j",
+                              "k",
+                              "l",
+                              "-",
+                              "z",
+                              "x",
+                              "c",
+                              "v",
+                              "b",
+                              "n",
+                              "m",
+                              ".",
+                              "_",
+                              "/",
+                              ":",
+                              "+",
+                              "(",
+                              ")",
+                              "@",
+                              "&",
+                              "?",
+                              "'",
+                              "~",
+                              "#",
+                              QT_TRANSLATE_NOOP("TextPadItem", "Shift"),
+                              QT_TRANSLATE_NOOP("TextPadItem", "Space"),
+                              QT_TRANSLATE_NOOP("TextPadItem", "Del"),
+                              QT_TRANSLATE_NOOP("TextPadItem", "Done")};
 
 constexpr int TOKEN_COUNT = static_cast<int>(std::size(TOKENS));
 constexpr int ROWS        = (TOKEN_COUNT + COLUMNS - 1) / COLUMNS;
@@ -141,6 +192,11 @@ void TextPadItem::Close()
 QString TextPadItem::Label(int index) const
 {
 	const QString token = QString::fromLatin1(TOKENS[index]);
+	// Word keys are named in the launcher's language; Press still matches them by their source name.
+	if (token.size() > 1)
+	{
+		return tr(TOKENS[index]);
+	}
 	return m_upper && token.size() == 1 && token.at(0).isLower() ? token.toUpper() : token;
 }
 
@@ -303,7 +359,7 @@ QSGNode* TextPadItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*
 	node->scrim->setColor(theme->Scrim());
 
 	RoundedBoxNode::Style panel;
-	panel.fill         = theme->Scrim();
+	panel.fill         = theme->Panel();
 	panel.border       = theme->GlassBorder();
 	panel.border_width = 1;
 	panel.radius       = theme->Radius();

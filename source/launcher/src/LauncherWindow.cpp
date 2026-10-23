@@ -47,10 +47,44 @@ Item* AddItem(QQuickItem* parent)
 
 LauncherWindow::LauncherWindow()
 {
-	setTitle(tr("Kyty Launcher"));
-	setColor(Theme::Instance()->Background());
 	setMinimumSize(QSize(MINIMUM_WIDTH, MINIMUM_HEIGHT));
 	resize(BASE_WIDTH, BASE_HEIGHT);
+
+	auto* backend = LauncherBackend::Instance();
+	connect(backend, &LauncherBackend::StateChanged, this, &LauncherWindow::StateChanged);
+	connect(backend, &LauncherBackend::GameFinished, this, &LauncherWindow::ReportGameFinished);
+	connect(backend, &LauncherBackend::FolderImported, this, &LauncherWindow::ReportFolderImported);
+	// Queued: the change may come from a key the page being replaced is still handling.
+	connect(backend, &LauncherBackend::LanguageChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
+	connect(Theme::Instance(), &Theme::PaletteChanged, this, &LauncherWindow::Rebuild, Qt::QueuedConnection);
+	connect(this, &QWindow::activeChanged, this, &LauncherWindow::UpdateLive);
+	connect(this, &QWindow::visibilityChanged, this, &LauncherWindow::UpdateLive);
+	connect(this, &QQuickWindow::closing, this, [this]() { LauncherBackend::Instance()->SaveWindowGeometry(x(), y(), width(), height()); });
+
+	m_step_aside.setSingleShot(true);
+	m_step_aside.setInterval(STEP_ASIDE_MS);
+	connect(&m_step_aside, &QTimer::timeout, this,
+	        [this]()
+	        {
+		        showMinimized();
+		        releaseResources();
+	        });
+
+	connect(&m_add_chooser, &FileChooser::Chosen, this, &LauncherWindow::AddFolder);
+	connect(&m_program_chooser, &FileChooser::Chosen, backend, &LauncherBackend::SetEmulatorPath);
+
+	BuildItems();
+	RestoreGeometry();
+	Layout();
+	StateChanged();
+	FocusPage();
+}
+
+// The items bake the palette and the texts into their nodes, so a new theme or language builds them again.
+void LauncherWindow::BuildItems()
+{
+	setTitle(tr("Kyty Launcher"));
+	setColor(Theme::Instance()->Background());
 
 	auto* root   = contentItem();
 	m_background = AddItem<BackgroundItem>(root);
@@ -69,23 +103,6 @@ LauncherWindow::LauncherWindow()
 	m_kit->SetFloating(false);
 	m_notice = AddItem<NoticeItem>(root);
 
-	auto* backend = LauncherBackend::Instance();
-	connect(backend, &LauncherBackend::StateChanged, this, &LauncherWindow::StateChanged);
-	connect(backend, &LauncherBackend::GameFinished, this, &LauncherWindow::ReportGameFinished);
-	connect(backend, &LauncherBackend::FolderImported, this, &LauncherWindow::ReportFolderImported);
-	connect(this, &QWindow::activeChanged, this, &LauncherWindow::UpdateLive);
-	connect(this, &QWindow::visibilityChanged, this, &LauncherWindow::UpdateLive);
-	connect(this, &QQuickWindow::closing, this, [this]() { LauncherBackend::Instance()->SaveWindowGeometry(x(), y(), width(), height()); });
-
-	m_step_aside.setSingleShot(true);
-	m_step_aside.setInterval(STEP_ASIDE_MS);
-	connect(&m_step_aside, &QTimer::timeout, this,
-	        [this]()
-	        {
-		        showMinimized();
-		        releaseResources();
-	        });
-
 	const auto add_title = tr("Choose a game folder or a folder of games");
 	connect(m_sidebar, &SidebarItem::LibraryRequested, this, [this]() { ShowPage(Page::Library); });
 	connect(m_sidebar, &SidebarItem::AddGameRequested, this, [this, add_title]() { m_add_chooser.ChooseFolder(add_title); });
@@ -103,38 +120,49 @@ LauncherWindow::LauncherWindow()
 	connect(m_editor, &EditorPageItem::Saved, this,
 	        [this](int row)
 	        {
-		        if (m_editor->Global())
-		        {
-			        ShowPage(Page::Settings);
-			        return;
-		        }
 		        ShowPage(Page::Library);
 		        m_library->SelectRow(row);
 	        });
-	connect(m_editor, &EditorPageItem::Cancelled, this, [this]() { ShowPage(m_editor->Global() ? Page::Settings : Page::Library); });
-	connect(m_editor, &EditorPageItem::ModeChanged, this, &LauncherWindow::UpdatePage);
+	connect(m_editor, &EditorPageItem::Cancelled, this, [this]() { ShowPage(Page::Library); });
 
 	connect(m_settings, &SettingsPageItem::Closed, this, [this]() { ShowPage(Page::Library); });
-	connect(m_settings, &SettingsPageItem::EmulatorSettingsRequested, this,
-	        [this]()
-	        {
-		        m_editor->OpenGlobal();
-		        m_page = Page::Editor;
-		        UpdatePage();
-	        });
 	connect(m_settings, &SettingsPageItem::ProgramRequested, this,
 	        [this]() { m_program_chooser.ChooseFile(tr("Choose the emulator program")); });
 	connect(m_about, &AboutPageItem::Closed, this, [this]() { ShowPage(Page::Library); });
 
-	connect(&m_add_chooser, &FileChooser::Chosen, this, &LauncherWindow::AddFolder);
-	connect(&m_program_chooser, &FileChooser::Chosen, backend, &LauncherBackend::SetEmulatorPath);
 	connect(m_notice, &QQuickItem::widthChanged, this, &LauncherWindow::Layout);
 	connect(m_notice, &QQuickItem::heightChanged, this, &LauncherWindow::Layout);
+}
 
-	RestoreGeometry();
+void LauncherWindow::Rebuild()
+{
+	// The editor may hold changes not saved yet; it is rebuilt once the user leaves it.
+	if (m_page == Page::Editor)
+	{
+		m_rebuild_pending = true;
+		return;
+	}
+	m_rebuild_pending = false;
+	const auto place  = m_settings->CurrentPlace();
+	const int  row    = m_library->FocusedGame().value("row", -1).toInt();
+	for (QQuickItem* item: contentItem()->childItems())
+	{
+		item->setParentItem(nullptr);
+		item->deleteLater();
+	}
+	BuildItems();
 	Layout();
 	StateChanged();
-	FocusPage();
+	if (row >= 0)
+	{
+		m_library->SelectRow(row);
+	}
+	if (m_page == Page::Settings)
+	{
+		QTimer::singleShot(0, m_settings, [settings = m_settings, place]() { settings->GoTo(place); });
+		return;
+	}
+	QTimer::singleShot(0, this, &LauncherWindow::FocusPage);
 }
 
 void LauncherWindow::RestoreGeometry()
@@ -237,14 +265,14 @@ void LauncherWindow::UpdatePage()
 			m_hints->SetHints(LibraryPageItem::Hints());
 			break;
 		case Page::Editor:
-			m_sidebar->SetCurrent(m_editor->Global() ? QStringLiteral("settings") : QStringLiteral("library"));
+			m_sidebar->SetCurrent(QStringLiteral("library"));
 			m_sidebar->SetRightTarget(nullptr);
 			m_hints->SetHints(m_editor->Hints());
 			break;
 		case Page::Settings:
 			m_sidebar->SetCurrent(QStringLiteral("settings"));
 			m_sidebar->SetRightTarget(m_settings);
-			m_hints->SetHints(m_settings->Hints());
+			m_hints->SetHints(SettingsPageItem::Hints());
 			break;
 		case Page::About:
 			m_sidebar->SetCurrent(QStringLiteral("about"));
@@ -257,6 +285,11 @@ void LauncherWindow::UpdatePage()
 void LauncherWindow::ShowPage(Page page)
 {
 	m_page = page;
+	if (m_rebuild_pending)
+	{
+		Rebuild();
+		return;
+	}
 	UpdatePage();
 	// After the page is shown, since a hidden item cannot take the focus.
 	QTimer::singleShot(0, this, &LauncherWindow::FocusPage);

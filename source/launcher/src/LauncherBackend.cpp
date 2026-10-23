@@ -1,18 +1,20 @@
 #include "LauncherBackend.h"
 
 #include "ArtworkProvider.h"
-
 #include "Configuration.h"
 #include "ConfigurationFields.h"
 #include "GamepadInput.h"
 #include "Psf.h"
+#include "Theme.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QLocale>
 #include <QMap>
 #include <QSet>
 #include <QSettings>
@@ -37,6 +39,8 @@ constexpr int  MAX_LISTED_ELFS       = 512;
 constexpr int  IMPORT_DEPTH          = 3;
 constexpr int  MAX_IMPORT_DIRS       = 4096;
 constexpr int  MAX_IMPORTED_GAMES    = 512;
+// The colour scheme and language that follow the desktop's.
+constexpr char SYSTEM_CHOICE[] = "System";
 
 namespace {
 
@@ -131,6 +135,8 @@ LauncherBackend::LauncherBackend(QObject* parent)
 	m_import_pool.setThreadPriority(QThread::IdlePriority);
 
 	Load();
+	ApplyColorScheme();
+	ApplyLanguage();
 
 	connect(&m_runner, &EmulatorRunner::Probed, this, &LauncherBackend::OnProbed);
 	connect(&m_runner, &EmulatorRunner::Finished, this, &LauncherBackend::OnFinished);
@@ -179,6 +185,8 @@ void LauncherBackend::Load()
 	m_emulator_override  = settings->value("emulator_path").toString();
 	m_run_mode           = settings->value("run_mode", EmulatorRunner::DIRECT_MODE).toString();
 	m_table_view         = settings->value("table_view", false).toBool();
+	m_color_scheme       = settings->value("color_scheme", SYSTEM_CHOICE).toString();
+	m_language           = settings->value("language", SYSTEM_CHOICE).toString();
 	settings->endGroup();
 
 	settings->beginGroup(SETTINGS_WINDOW);
@@ -204,6 +212,8 @@ void LauncherBackend::Save() const
 	settings->setValue("emulator_path", m_emulator_override);
 	settings->setValue("run_mode", m_run_mode);
 	settings->setValue("table_view", m_table_view);
+	settings->setValue("color_scheme", m_color_scheme);
+	settings->setValue("language", m_language);
 	settings->endGroup();
 
 	if (m_window_geometry.isValid())
@@ -341,7 +351,67 @@ QVariantMap LauncherBackend::GraphicsPreset(const QVariantMap& fields, const QSt
 
 QVariantMap LauncherBackend::Choices() const
 {
-	return ConfigurationChoices();
+	auto choices            = ConfigurationChoices();
+	choices["run_mode"]     = m_run_modes;
+	choices["color_scheme"] = QStringList {SYSTEM_CHOICE, "Dark", "Light"};
+	// Languages with a translation built in, and English, which the texts are written in.
+	choices["language"] = QStringList {SYSTEM_CHOICE, "en", "es", "ru"};
+	return choices;
+}
+
+QVariantMap LauncherBackend::LauncherFields() const
+{
+	return {{"run_mode", m_run_modes.contains(m_run_mode) ? m_run_mode : QString(EmulatorRunner::DIRECT_MODE)},
+	        {"color_scheme", m_color_scheme},
+	        {"language", m_language}};
+}
+
+void LauncherBackend::SetLauncherField(const QString& key, const QVariant& value)
+{
+	const auto text = value.toString();
+	if (key == QLatin1String("run_mode") && m_run_modes.contains(text))
+	{
+		m_run_mode = text;
+	} else if (key == QLatin1String("color_scheme"))
+	{
+		m_color_scheme = text;
+		ApplyColorScheme();
+	} else if (key == QLatin1String("language"))
+	{
+		m_language = text;
+		ApplyLanguage();
+		emit LanguageChanged();
+	} else
+	{
+		qWarning("Unknown launcher setting %s", qPrintable(key));
+		return;
+	}
+	Save();
+	emit StateChanged();
+}
+
+void LauncherBackend::ApplyColorScheme()
+{
+	auto scheme = Theme::Scheme::System;
+	if (m_color_scheme == QLatin1String("Dark"))
+	{
+		scheme = Theme::Scheme::Dark;
+	} else if (m_color_scheme == QLatin1String("Light"))
+	{
+		scheme = Theme::Scheme::Light;
+	}
+	Theme::Instance()->SetColorScheme(scheme);
+}
+
+void LauncherBackend::ApplyLanguage()
+{
+	QCoreApplication::removeTranslator(&m_translator);
+	const QLocale locale = m_language == QLatin1String(SYSTEM_CHOICE) ? QLocale::system() : QLocale(m_language);
+	// English needs no translation; any other language without one stays in English too.
+	if (m_translator.load(locale, "launcher", "_", ":/i18n"))
+	{
+		QCoreApplication::installTranslator(&m_translator);
+	}
 }
 
 QVariantMap LauncherBackend::SaveGame(int row, const QVariantMap& fields)
@@ -657,22 +727,6 @@ void LauncherBackend::SetEmulatorPath(const QString& path)
 	m_emulator_override = path;
 	Save();
 	m_runner.Probe(path);
-	emit StateChanged();
-}
-
-int LauncherBackend::RunModeIndex() const
-{
-	return std::max(0, static_cast<int>(m_run_modes.indexOf(m_run_mode)));
-}
-
-void LauncherBackend::SetRunModeIndex(int index)
-{
-	if (index < 0 || index >= m_run_modes.size())
-	{
-		return;
-	}
-	m_run_mode = m_run_modes.at(index);
-	Save();
 	emit StateChanged();
 }
 

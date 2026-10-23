@@ -154,7 +154,10 @@ void AboutPageItem::AddControls(PageLayout* layout) const
 			cell.text  = cells[c];
 			cell.font  = font;
 			cell.color = color;
-			cell.rect  = QRectF(lefts[c], y, widths[c], TextBlockHeight(cell.text, font, widths[c]));
+			// A one-line cell takes the font's line, even when a pad glyph comes from a taller fallback font, so the
+			// rows stay even.
+			const bool one_line = TextWidth(cell.text, font) <= widths[c];
+			cell.rect           = QRectF(lefts[c], y, widths[c], one_line ? LineHeight(font) : TextBlockHeight(cell.text, font, widths[c]));
 			height     = std::max(height, cell.rect.height());
 			layout->AddText(cell);
 		}

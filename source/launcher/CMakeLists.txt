@@ -12,11 +12,8 @@ file(GLOB launcher_assets RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
 	"assets/kit/*.svg"
 )
 
-set(launcher_ts "ts/launcher_ru_RU.ts")
-
 add_executable(launcher WIN32 MACOSX_BUNDLE
 	${launcher_src}
-	${launcher_ts}
 )
 set_target_properties(launcher PROPERTIES AUTOMOC ON AUTORCC ON)
 
@@ -95,7 +92,12 @@ else()
     install(TARGETS launcher DESTINATION .)
 endif()
 
-qt6_create_translation(QM_FILES ${launcher_src} ${launcher_ts} OPTIONS -I ${CMAKE_SOURCE_DIR}/launcher/include)
+# Embedded as :/i18n/launcher_<language>.qm; the update_translations target refreshes the .ts files from the sources.
+qt_add_translations(launcher
+	TS_FILES "ts/launcher_es.ts" "ts/launcher_ru.ts"
+	RESOURCE_PREFIX "/i18n"
+	LUPDATE_OPTIONS -locations none
+)
 
 set(tidy_dirs "${CMAKE_SOURCE_DIR}/launcher/include")
 set(iwyu_maps "${CMAKE_SOURCE_DIR}/launcher/utils/qt5_15.imp")

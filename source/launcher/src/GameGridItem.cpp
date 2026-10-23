@@ -87,7 +87,7 @@ public:
 		if (content.card.icon_id.isEmpty())
 		{
 			auto* initials = m_window->createTextNode();
-			SetTextLine(initials, Initials(content.card.title), SceneFont(content.tile * 0.3, QFont::DemiBold), theme->TextPrimary(), card,
+			SetTextLine(initials, Initials(content.card.title), SceneFont(content.tile * 0.3, QFont::DemiBold), theme->TextOnArt(), card,
 			            Qt::AlignHCenter);
 			overlay->appendChildNode(initials);
 		}
@@ -120,7 +120,7 @@ private:
 		overlay->appendChildNode(badge);
 
 		auto* label_node = m_window->createTextNode();
-		SetTextLine(label_node, text, font, theme->TextPrimary(), pill, Qt::AlignHCenter);
+		SetTextLine(label_node, text, font, theme->TextOnArt(), pill, Qt::AlignHCenter);
 		overlay->appendChildNode(label_node);
 	}
 
@@ -241,7 +241,12 @@ void GameGridItem::Changed()
 
 void GameGridItem::updatePolish()
 {
-	if (!isVisible() || m_cards.isEmpty() || width() <= 0)
+	// A hidden view keeps what it decoded, so its covers are there at once when its page comes back.
+	if (!isVisible())
+	{
+		return;
+	}
+	if (m_cards.isEmpty() || width() <= 0)
 	{
 		m_art.Keep({}, {});
 		return;

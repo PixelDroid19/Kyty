@@ -400,6 +400,11 @@ void KitMascotItem::updatePolish()
 	{
 		m_layers[i] = PaintLayer(LAYER_FILES[i], px, i == GLITCH_RED || i == GLITCH_CYAN ? GLITCH_OPACITY : 1);
 	}
+	// The body is drawn white for the dark palette; on the light one Kit is a dark cat.
+	if (!Theme::Instance()->IsDark() && !m_layers[BODY].isNull())
+	{
+		Recolour(&m_layers[BODY], Theme::Instance()->TextPrimary());
+	}
 	const int heart_px = static_cast<int>(std::ceil(HEART_MAX * px.width() / VIEW_WIDTH));
 	m_heart            = PaintLayer(HEART_FILE, QSize(heart_px, static_cast<int>(std::ceil(heart_px * 0.9))), 1);
 	update();

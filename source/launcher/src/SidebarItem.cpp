@@ -3,7 +3,6 @@
 #include "SceneNodes.h"
 #include "Theme.h"
 
-#include <QImageReader>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QQuickWindow>
@@ -51,18 +50,6 @@ const Entry ENTRIES[] = {
 };
 constexpr int ENTRY_COUNT    = static_cast<int>(std::size(ENTRIES));
 constexpr int BOTTOM_ENTRIES = 2;
-
-QImage PaintIcon(const char* path, int px)
-{
-	QImageReader reader(QString::fromLatin1(path));
-	reader.setScaledSize(QSize(px, px));
-	auto image = reader.read();
-	if (image.isNull())
-	{
-		qWarning("Sidebar icon %s: %s", path, qPrintable(reader.errorString()));
-	}
-	return image;
-}
 
 class EntryNode: public GroupNode
 {
@@ -210,7 +197,7 @@ void SidebarItem::updatePolish()
 	m_icon_px = px;
 	for (int i = 0; i < ENTRY_COUNT; i++)
 	{
-		m_icons[i] = PaintIcon(ENTRIES[i].icon, px);
+		m_icons[i] = PaintIcon(ENTRIES[i].icon, px, Theme::Instance()->TextPrimary());
 	}
 	update();
 }

@@ -98,7 +98,7 @@ public:
 		const auto  font   = SceneFont(theme->FontBody(), QFont::DemiBold);
 		const qreal margin = TITLE_MARGIN * content.u;
 		const qreal line   = QFontMetricsF(font).height();
-		SetTextLine(title, content.title, font, theme->TextPrimary(),
+		SetTextLine(title, content.title, font, theme->TextOnArt(),
 		            QRectF(margin, size.height() - margin - line, size.width() - 2 * margin, line));
 	}
 
@@ -230,7 +230,12 @@ void HeroRowItem::Changed()
 
 void HeroRowItem::updatePolish()
 {
-	if (!isVisible() || m_cards.isEmpty())
+	// A hidden view keeps what it decoded, so its covers are there at once when its page comes back.
+	if (!isVisible())
+	{
+		return;
+	}
+	if (m_cards.isEmpty())
 	{
 		m_art.Keep({}, {});
 		return;

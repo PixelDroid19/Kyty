@@ -252,7 +252,7 @@ QSGNode* ActionMenuItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData*
 	node->scrim->setColor(theme->Scrim());
 
 	RoundedBoxNode::Style panel;
-	panel.fill         = theme->Scrim();
+	panel.fill         = theme->Panel();
 	panel.border       = theme->GlassBorder();
 	panel.border_width = 1;
 	panel.radius       = theme->Radius();

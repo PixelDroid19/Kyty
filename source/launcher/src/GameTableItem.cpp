@@ -259,7 +259,12 @@ void GameTableItem::Changed()
 
 void GameTableItem::updatePolish()
 {
-	if (!isVisible() || m_cards.isEmpty())
+	// A hidden view keeps what it decoded, so its covers are there at once when its page comes back.
+	if (!isVisible())
+	{
+		return;
+	}
+	if (m_cards.isEmpty())
 	{
 		m_art.Keep({}, {});
 		return;

@@ -4,6 +4,7 @@
 #include <QFontMetricsF>
 #include <QGuiApplication>
 #include <QImage>
+#include <QImageReader>
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
@@ -135,6 +136,28 @@ void RectClipNode::SetRect(const QRectF& rect)
 	setClipRect(rect);
 	QSGGeometry::updateRectGeometry(&m_geometry, rect);
 	markDirty(DirtyGeometry);
+}
+
+void Recolour(QImage* image, const QColor& color)
+{
+	*image = image->convertToFormat(QImage::Format_ARGB32_Premultiplied);
+	QPainter painter(image);
+	painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+	painter.fillRect(image->rect(), color);
+}
+
+QImage PaintIcon(const char* path, int px, const QColor& color)
+{
+	QImageReader reader(QString::fromLatin1(path));
+	reader.setScaledSize(QSize(px, px));
+	auto image = reader.read();
+	if (image.isNull())
+	{
+		qWarning("Icon %s: %s", path, qPrintable(reader.errorString()));
+		return image;
+	}
+	Recolour(&image, color);
+	return image;
 }
 
 QFont SceneFont(qreal pixel_size, QFont::Weight weight)
