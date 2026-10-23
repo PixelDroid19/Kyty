@@ -43,6 +43,8 @@ constexpr qreal  HEART_RISE     = 86;
 constexpr qreal  HEART_MAX      = 17 * 1.1;
 constexpr int    HEART_INTERVAL = 150;
 constexpr int    UNPET_DELAY    = 220;
+// The edge round the body on the light palette, as a share of Kit's width.
+constexpr qreal OUTLINE_SHARE = 0.018;
 
 namespace {
 
@@ -170,6 +172,25 @@ QImage PaintLayer(const char* path, QSize px, qreal opacity)
 	painter.setOpacity(opacity);
 	painter.drawImage(0, 0, image);
 	return faded;
+}
+
+// The body with a ring of color round its silhouette, width pixels wide, drawn by stamping the silhouette around
+// a circle under the body.
+QImage Outlined(const QImage& body, const QColor& color, qreal width)
+{
+	QImage silhouette = body;
+	Recolour(&silhouette, color);
+	QImage outlined(body.size(), QImage::Format_ARGB32_Premultiplied);
+	outlined.fill(Qt::transparent);
+	QPainter   painter(&outlined);
+	const auto steps = std::max(8, static_cast<int>(std::ceil(width * 8)));
+	for (int i = 0; i < steps; i++)
+	{
+		const qreal angle = 2 * M_PI * i / steps;
+		painter.drawImage(QPointF(width * std::cos(angle), width * std::sin(angle)), silhouette);
+	}
+	painter.drawImage(0, 0, body);
+	return outlined;
 }
 
 QSGImageNode* CreateLayerNode(QQuickWindow* window, QSGTexture* texture)
@@ -400,10 +421,10 @@ void KitMascotItem::updatePolish()
 	{
 		m_layers[i] = PaintLayer(LAYER_FILES[i], px, i == GLITCH_RED || i == GLITCH_CYAN ? GLITCH_OPACITY : 1);
 	}
-	// The body is drawn white for the dark palette; on the light one Kit is a dark cat.
+	// Kit stays a white cat; on the light palette a grey edge keeps the white body apart from the page.
 	if (!Theme::Instance()->IsDark() && !m_layers[BODY].isNull())
 	{
-		Recolour(&m_layers[BODY], Theme::Instance()->TextPrimary());
+		m_layers[BODY] = Outlined(m_layers[BODY], Theme::Instance()->TextMuted(), std::max<qreal>(1, px.width() * OUTLINE_SHARE));
 	}
 	const int heart_px = static_cast<int>(std::ceil(HEART_MAX * px.width() / VIEW_WIDTH));
 	m_heart            = PaintLayer(HEART_FILE, QSize(heart_px, static_cast<int>(std::ceil(heart_px * 0.9))), 1);
