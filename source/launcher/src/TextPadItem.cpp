@@ -215,6 +215,7 @@ void TextPadItem::Press(int index)
 		emit Edited(m_text + QLatin1Char(' '));
 	} else if (token == QLatin1String("Done"))
 	{
+		emit Accepted();
 		Close();
 	} else
 	{
@@ -318,6 +319,8 @@ void TextPadItem::keyPressEvent(QKeyEvent* event)
 	    modifiers != (Qt::ControlModifier | Qt::ShiftModifier))
 	{
 		emit Edited(m_text + text);
+		// Typing on a keyboard leaves the pad's keys alone, so Return then means Done.
+		MoveCurrent(TOKEN_COUNT - 1);
 	}
 }
 

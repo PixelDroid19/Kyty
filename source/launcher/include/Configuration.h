@@ -153,7 +153,7 @@ public:
 	Configuration() = default;
 
 	QString name;
-	QString folder;     /* Library folder, empty when unfiled */
+	QStringList sections;   /* Library sections the game is shown in */
 	QString basedir;    /* Game base directory */
 	QString param_file; /* Path to param.sfo / param.json */
 	qint64  last_run = 0; /* Milliseconds since epoch of the last run, 0 when never run */
@@ -202,7 +202,7 @@ public:
 	void WriteSettings(QSettings* s) const
 	{
 		KYTY_CFG_SET(name);
-		KYTY_CFG_SET(folder);
+		KYTY_CFG_SETL(sections);
 		KYTY_CFG_SET(basedir);
 		KYTY_CFG_SET(param_file);
 		s->setValue("last_run", last_run);
@@ -242,7 +242,7 @@ public:
 	void ReadSettings(QSettings* s)
 	{
 		KYTY_CFG_GET(name);
-		folder   = s->value("folder").toString();
+		KYTY_CFG_GETL(sections);
 		last_run = s->value("last_run", 0).toLongLong();
 		play_time       = s->value("play_time", 0).toLongLong();
 		favorite        = s->value("favorite", false).toBool();

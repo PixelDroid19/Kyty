@@ -17,6 +17,8 @@ class TextPadItem: public QQuickItem
 signals:
 	void ShownChanged();
 	void Edited(const QString& text);
+	// Done was pressed; Escape and a click outside close the pad without it.
+	void Accepted();
 
 public:
 	explicit TextPadItem(QQuickItem* parent = nullptr);

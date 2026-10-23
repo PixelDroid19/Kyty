@@ -72,14 +72,14 @@ void GameLibrary::Write(QSettings* s) const
 	s->endArray();
 }
 
-QStringList GameLibrary::Folders() const
+QStringList GameLibrary::Sections() const
 {
 	QSet<QString> names;
 	for (const auto& game: m_games)
 	{
-		if (!game.config->folder.isEmpty())
+		for (const auto& section: game.config->sections)
 		{
-			names.insert(game.config->folder);
+			names.insert(section);
 		}
 	}
 	QStringList list(names.begin(), names.end());

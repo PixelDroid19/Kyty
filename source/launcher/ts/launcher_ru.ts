@@ -48,12 +48,12 @@
         <translation>Options, затем «Изменить»</translation>
     </message>
     <message>
-        <source>Switch folder</source>
-        <translation>Сменить папку</translation>
+        <source>Switch section</source>
+        <translation>Сменить раздел</translation>
     </message>
     <message>
-        <source>Click a folder</source>
-        <translation>Щелчок по папке</translation>
+        <source>Click a section</source>
+        <translation>Щелчок по разделу</translation>
     </message>
     <message>
         <source>Save in the editor</source>
@@ -148,10 +148,6 @@
     <message>
         <source>General</source>
         <translation>Общие</translation>
-    </message>
-    <message>
-        <source>Folder (group)</source>
-        <translation>Папка (группа)</translation>
     </message>
     <message>
         <source>Game folder</source>
@@ -356,10 +352,6 @@
     <message>
         <source>Launcher window</source>
         <translation>Окно лаунчера</translation>
-    </message>
-    <message>
-        <source>Games in the same folder share a tab in the library.</source>
-        <translation>Игры из одной папки делят вкладку в библиотеке.</translation>
     </message>
     <message>
         <source>The folder that holds the game&apos;s files.</source>
@@ -779,8 +771,8 @@
         <translation>Избранное</translation>
     </message>
     <message>
-        <source>Unfiled</source>
-        <translation>Без папки</translation>
+        <source>No section</source>
+        <translation>Без раздела</translation>
     </message>
     <message>
         <source>A game is running. Changes can be saved after it closes.</source>
@@ -869,8 +861,8 @@
         <translation>Изменить</translation>
     </message>
     <message>
-        <source>Switch folder</source>
-        <translation>Сменить папку</translation>
+        <source>Switch section</source>
+        <translation>Сменить раздел</translation>
     </message>
     <message>
         <source>Search</source>
@@ -897,6 +889,10 @@
         <translation>Добавить в избранное</translation>
     </message>
     <message>
+        <source>Sections…</source>
+        <translation>Разделы…</translation>
+    </message>
+    <message>
         <source>Move up</source>
         <translation>Выше</translation>
     </message>
@@ -915,6 +911,14 @@
     <message>
         <source>Close</source>
         <translation>Закрыть</translation>
+    </message>
+    <message>
+        <source>Name of the new section</source>
+        <translation>Название нового раздела</translation>
+    </message>
+    <message>
+        <source>New section…</source>
+        <translation>Новый раздел…</translation>
     </message>
     <message>
         <source>Emulator ready</source>
@@ -937,8 +941,8 @@
         <translation>Нет игр по запросу «%1».</translation>
     </message>
     <message>
-        <source>No games in this folder.</source>
-        <translation>В этой папке нет игр.</translation>
+        <source>No games in this section.</source>
+        <translation>В этом разделе нет игр.</translation>
     </message>
     <message>
         <source>Played %1 min</source>

@@ -37,7 +37,7 @@ public:
 
 	[[nodiscard]] int                Count() const { return m_games.size(); }
 	[[nodiscard]] const Game&        At(int row) const { return m_games.at(row); }
-	[[nodiscard]] QStringList        Folders() const;
+	[[nodiscard]] QStringList        Sections() const;
 
 	// Takes ownership of config. Returns the new row.
 	int  Add(Kyty::Configuration* config);

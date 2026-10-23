@@ -88,7 +88,6 @@ QVariantMap ConfigurationToFields(const Kyty::Configuration& info)
 {
 	QVariantMap f;
 	f["name"]                         = info.name;
-	f["folder"]                       = info.folder;
 	f["basedir"]                      = info.basedir;
 	f["param_file"]                   = info.param_file;
 	f["custom_settings"]              = info.custom_settings;
@@ -182,7 +181,6 @@ QString ApplyFields(const QVariantMap& fields, Kyty::Configuration* info)
 	}
 
 	info->name            = fields.value("name").toString().trimmed();
-	info->folder          = fields.value("folder").toString().trimmed();
 	info->basedir         = fields.value("basedir").toString().trimmed();
 	info->param_file      = fields.value("param_file").toString();
 	info->custom_settings = fields.value("custom_settings").toBool();

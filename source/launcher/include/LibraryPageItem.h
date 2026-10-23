@@ -79,6 +79,9 @@ private:
 	void SetHoveredSwitch(int index);
 	void OpenMenu(int row);
 	void MenuChosen(const QString& action, int row);
+	// The sections menu of the game in row: each section checked when the game is in it, then a new section.
+	void                             OpenSectionsMenu(int row, int current);
+	[[nodiscard]] static QStringList SectionNames();
 	void ToggleView();
 	void ChangeFolder(int delta);
 	void FocusSearch();
@@ -103,6 +106,8 @@ private:
 	Geometry         m_geometry;
 	int              m_hovered_switch = -1;
 	bool             m_shows_recent   = false;
+	// The game a new section is being named for.
+	int              m_section_row    = -1;
 	HeroRowItem*     m_hero           = nullptr;
 	FolderTabsItem*  m_tabs           = nullptr;
 	TextFieldItem*   m_search         = nullptr;

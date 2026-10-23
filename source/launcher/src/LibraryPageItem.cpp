@@ -183,16 +183,35 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 	connect(m_pad, &TextPadItem::Edited, this,
 	        [this](const QString& text)
 	        {
+		        if (m_pad->Key() == QLatin1String("section"))
+		        {
+			        m_pad->SetText(text);
+			        return;
+		        }
 		        m_search->SetText(text);
 		        Filter();
+	        });
+	connect(m_pad, &TextPadItem::Accepted, this,
+	        [this]()
+	        {
+		        if (m_pad->Key() == QLatin1String("section"))
+		        {
+			        LauncherBackend::Instance()->SetInSection(m_section_row, m_pad->Text(), true);
+		        }
 	        });
 	connect(m_pad, &TextPadItem::ShownChanged, this,
 	        [this]()
 	        {
-		        if (!m_pad->Shown())
+		        if (m_pad->Shown())
 		        {
-			        m_search->forceActiveFocus();
+			        return;
 		        }
+		        if (m_pad->Key() == QLatin1String("section"))
+		        {
+			        FocusGames();
+			        return;
+		        }
+		        m_search->forceActiveFocus();
 	        });
 	connect(backend, &LauncherBackend::StateChanged, this, &LibraryPageItem::Refresh);
 	connect(Theme::Instance(), &Theme::UChanged, this, &QQuickItem::polish);
@@ -204,7 +223,7 @@ QVariantList LibraryPageItem::Hints()
 	return {QVariantMap {{"pad", QStringLiteral("✕")}, {"key", QStringLiteral("Enter")}, {"text", tr("Run")}},
 	        QVariantMap {{"pad", QStringLiteral("△")}, {"key", QStringLiteral("O")}, {"text", tr("Options")}},
 	        QVariantMap {{"pad", QStringLiteral("□")}, {"key", QStringLiteral("E")}, {"text", tr("Edit")}},
-	        QVariantMap {{"pad", QStringLiteral("L1 R1")}, {"key", QStringLiteral("PgUp/PgDn")}, {"text", tr("Switch folder")}},
+	        QVariantMap {{"pad", QStringLiteral("L1 R1")}, {"key", QStringLiteral("PgUp/PgDn")}, {"text", tr("Switch section")}},
 	        QVariantMap {{"key", QStringLiteral("Ctrl+F")}, {"text", tr("Search")}},
 	        QVariantMap {{"key", QStringLiteral("V")}, {"text", tr("Grid / table")}}};
 }
@@ -239,16 +258,28 @@ void LibraryPageItem::Filter()
 {
 	const auto folders = LauncherBackend::Instance()->Folders();
 	m_folder           = folders.value(m_tabs->CurrentIndex()).toMap();
-	const bool all       = m_folder.isEmpty() || m_folder.value("all").toBool();
-	const bool favorites = m_folder.value("favorites").toBool();
-	const auto folder    = m_folder.value("folder").toString();
+	const auto kind      = m_folder.value("kind").toString();
+	const auto section   = m_folder.value("section").toString();
 	const auto query     = SearchText();
+	auto       shows     = [&](const QVariantMap& game)
+	{
+		const auto sections = game.value("sections").toStringList();
+		if (kind == QLatin1String("favorites"))
+		{
+			return game.value("favorite").toBool();
+		}
+		if (kind == QLatin1String("section"))
+		{
+			return sections.contains(section);
+		}
+		return kind != QLatin1String("unfiled") || sections.isEmpty();
+	};
 
 	m_visible_games.clear();
 	for (const auto& entry: m_games)
 	{
 		const auto game = entry.toMap();
-		if (favorites ? !game.value("favorite").toBool() : !all && game.value("folder").toString() != folder)
+		if (!shows(game))
 		{
 			continue;
 		}
@@ -418,6 +449,7 @@ void LibraryPageItem::OpenMenu(int row)
 	    QVariantMap {{"label", tr("Edit")}, {"action", "edit"}},
 	    QVariantMap {{"label", favorite ? tr("Remove from favorites") : tr("Add to favorites")},
 		             {"action", favorite ? "unfavorite" : "favorite"}},
+	    QVariantMap {{"label", tr("Sections…")}, {"action", "sections"}},
 	    QVariantMap {{"label", tr("Move up")}, {"action", "up"}, {"allowed", manual && row > 0}},
 	    QVariantMap {{"label", tr("Move down")}, {"action", "down"}, {"allowed", manual && row < last}},
 	    QVariantMap {{"label", tr("Open game folder")}, {"action", "folder"}},
@@ -434,10 +466,54 @@ void LibraryPageItem::MenuChosen(const QString& action, int row)
 	} else if (action == QLatin1String("edit"))
 	{
 		emit EditRequested(row);
+	} else if (action == QLatin1String("sections"))
+	{
+		OpenSectionsMenu(row, 0);
+	} else if (action.startsWith(QLatin1String("section:")))
+	{
+		const auto name = action.mid(8);
+		const bool in   = m_games.value(row).toMap().value("sections").toStringList().contains(name);
+		// The menu stays open on the same section, so several can be changed in a row.
+		LauncherBackend::Instance()->SetInSection(row, name, !in);
+		OpenSectionsMenu(row, static_cast<int>(std::max<qsizetype>(0, SectionNames().indexOf(name))));
+	} else if (action == QLatin1String("new-section"))
+	{
+		m_section_row = row;
+		m_pad->SetText(QString());
+		m_pad->OpenFor(QStringLiteral("section"), tr("Name of the new section"));
 	} else
 	{
 		emit ActionRequested(action, row);
 	}
+}
+
+QStringList LibraryPageItem::SectionNames()
+{
+	QStringList names;
+	for (const auto& entry: LauncherBackend::Instance()->Folders())
+	{
+		const auto folder = entry.toMap();
+		if (folder.value("kind") == QLatin1String("section"))
+		{
+			names << folder.value("section").toString();
+		}
+	}
+	return names;
+}
+
+void LibraryPageItem::OpenSectionsMenu(int row, int current)
+{
+	const auto   game     = m_games.value(row).toMap();
+	const auto   sections = game.value("sections").toStringList();
+	QVariantList items;
+	for (const auto& name: SectionNames())
+	{
+		items << QVariantMap {{"label", (sections.contains(name) ? QStringLiteral("✓ ") : QString()) + name},
+		                      {"action", QStringLiteral("section:") + name}};
+	}
+	items << QVariantMap {{"label", tr("New section…")}, {"action", "new-section"}};
+	items << QVariantMap {{"label", tr("Close")}, {"action", "close"}};
+	m_menu->OpenFor(game, row, items, current);
 }
 
 // Moves between the hero row, the tabs, the search box and the games.
@@ -636,7 +712,7 @@ QString LibraryPageItem::EmptyText() const
 	{
 		return tr("No games match “%1”.").arg(m_search->Text().trimmed());
 	}
-	return tr("No games in this folder.");
+	return tr("No games in this section.");
 }
 
 // Places the child items and works out where the page's own drawing goes.

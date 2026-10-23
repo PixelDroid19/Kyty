@@ -10,7 +10,6 @@ bool Is(const QVariantMap& values, const char* key, const char* value)
 const QVector<EditorField> GAME_FIELDS = {
     {"name", QT_TRANSLATE_NOOP("EditorPageItem", "Name"), FieldType::Text, nullptr, false, nullptr,
 	 QT_TRANSLATE_NOOP("EditorPageItem", "General")},
-    {"folder", QT_TRANSLATE_NOOP("EditorPageItem", "Folder (group)"), FieldType::Text},
     {"basedir", QT_TRANSLATE_NOOP("EditorPageItem", "Game folder"), FieldType::Path, nullptr, true},
     {"param_file", QT_TRANSLATE_NOOP("EditorPageItem", "Parameters file"), FieldType::Path},
     {"custom_settings", QT_TRANSLATE_NOOP("EditorPageItem", "Custom emulator settings"), FieldType::Toggle},
@@ -101,7 +100,6 @@ struct Help
 };
 
 const Help HELP[] = {
-    {"folder", QT_TRANSLATE_NOOP("EditorPageItem", "Games in the same folder share a tab in the library.")},
     {"basedir", QT_TRANSLATE_NOOP("EditorPageItem", "The folder that holds the game's files.")},
     {"custom_settings", QT_TRANSLATE_NOOP("EditorPageItem", "Off runs the game with the emulator settings from Settings.")},
     {"screen_width", QT_TRANSLATE_NOOP("EditorPageItem", "The game window's size. It does not change the resolution the game renders at.")},

@@ -15,6 +15,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+#include <functional>
+
 class GamepadInput;
 class QWindow;
 
@@ -45,6 +47,7 @@ public:
 	void AttachWindow(QWindow* window);
 
 	[[nodiscard]] QVariantList Games() const;
+	// The library's tabs, each { title, kind, section, count }: kind is all, favorites, section or unfiled.
 	[[nodiscard]] QVariantList Folders() const;
 	[[nodiscard]] QVariantList Recent() const;
 	[[nodiscard]] bool         IsEmulatorReady() const { return m_emulator_ready; }
@@ -76,6 +79,8 @@ public:
 	void        DeleteGame(int row);
 	void        MoveGame(int row, int delta);
 	void        SetFavorite(int row, bool favorite);
+	// Adds the game to the section named section, or takes it out; a section exists while a game is in it.
+	void        SetInSection(int row, const QString& section, bool in);
 	QString     RunGame(int row);
 	QString     TestGame(const QVariantMap& fields);
 	QVariantMap DetectGame(const QString& folder) const;
@@ -99,7 +104,8 @@ private:
 	void         Load();
 	void         Save() const;
 	QVariantMap  GameToMap(int row) const;
-	QVariantMap  FolderToMap(const QString& title, const QString& folder, bool all) const;
+	QVariantMap        FolderToMap(const QString& title, const QString& kind, const QString& section,
+	                               const std::function<bool(const Kyty::Configuration&)>& shows) const;
 	void         OnProbed(bool found, const QString& version, const QString& message);
 	void         OnFinished(int exit_code, bool crashed);
 	QString      StartGame(const QVariantMap& fields, int row);

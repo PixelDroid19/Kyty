@@ -101,14 +101,14 @@ void ActionMenuItem::SetShown(bool shown)
 	emit ShownChanged();
 }
 
-void ActionMenuItem::OpenFor(const QVariantMap& game, int row, const QVariantList& items)
+void ActionMenuItem::OpenFor(const QVariantMap& game, int row, const QVariantList& items, int current)
 {
 	m_row        = row;
 	m_heading    = game.value("title").toString();
 	m_heading    = m_heading.isEmpty() ? game.value("name").toString() : m_heading;
 	m_actions    = items;
 	m_confirming = false;
-	SetCurrent(0);
+	SetCurrent(std::clamp<int>(current, 0, std::max<int>(0, static_cast<int>(items.size()) - 1)));
 	SetShown(true);
 	forceActiveFocus(Qt::OtherFocusReason);
 }

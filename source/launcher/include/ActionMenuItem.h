@@ -25,8 +25,8 @@ public:
 	[[nodiscard]] bool Shown() const { return m_shown; }
 
 	// Opens the menu for the game in row with items, each { label, action, allowed, danger }; allowed defaults
-	// to true and danger to false.
-	void OpenFor(const QVariantMap& game, int row, const QVariantList& items);
+	// to true and danger to false. current is the item selected first.
+	void OpenFor(const QVariantMap& game, int row, const QVariantList& items, int current = 0);
 	void Close();
 
 protected:

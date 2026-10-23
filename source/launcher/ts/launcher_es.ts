@@ -48,12 +48,12 @@
         <translation>Options y luego Editar</translation>
     </message>
     <message>
-        <source>Switch folder</source>
-        <translation>Cambiar de carpeta</translation>
+        <source>Switch section</source>
+        <translation>Cambiar de apartado</translation>
     </message>
     <message>
-        <source>Click a folder</source>
-        <translation>Clic en una carpeta</translation>
+        <source>Click a section</source>
+        <translation>Clic en un apartado</translation>
     </message>
     <message>
         <source>Save in the editor</source>
@@ -148,10 +148,6 @@
     <message>
         <source>General</source>
         <translation>General</translation>
-    </message>
-    <message>
-        <source>Folder (group)</source>
-        <translation>Carpeta (grupo)</translation>
     </message>
     <message>
         <source>Game folder</source>
@@ -356,10 +352,6 @@
     <message>
         <source>Launcher window</source>
         <translation>Ventana del launcher</translation>
-    </message>
-    <message>
-        <source>Games in the same folder share a tab in the library.</source>
-        <translation>Los juegos de la misma carpeta comparten una pestaña en la biblioteca.</translation>
     </message>
     <message>
         <source>The folder that holds the game&apos;s files.</source>
@@ -779,8 +771,8 @@
         <translation>Favoritos</translation>
     </message>
     <message>
-        <source>Unfiled</source>
-        <translation>Sin carpeta</translation>
+        <source>No section</source>
+        <translation>Sin apartado</translation>
     </message>
     <message>
         <source>A game is running. Changes can be saved after it closes.</source>
@@ -869,8 +861,8 @@
         <translation>Editar</translation>
     </message>
     <message>
-        <source>Switch folder</source>
-        <translation>Cambiar carpeta</translation>
+        <source>Switch section</source>
+        <translation>Cambiar apartado</translation>
     </message>
     <message>
         <source>Search</source>
@@ -897,6 +889,10 @@
         <translation>Añadir a favoritos</translation>
     </message>
     <message>
+        <source>Sections…</source>
+        <translation>Apartados…</translation>
+    </message>
+    <message>
         <source>Move up</source>
         <translation>Subir</translation>
     </message>
@@ -915,6 +911,14 @@
     <message>
         <source>Close</source>
         <translation>Cerrar</translation>
+    </message>
+    <message>
+        <source>Name of the new section</source>
+        <translation>Nombre del nuevo apartado</translation>
+    </message>
+    <message>
+        <source>New section…</source>
+        <translation>Nuevo apartado…</translation>
     </message>
     <message>
         <source>Emulator ready</source>
@@ -937,8 +941,8 @@
         <translation>Ningún juego coincide con «%1».</translation>
     </message>
     <message>
-        <source>No games in this folder.</source>
-        <translation>No hay juegos en esta carpeta.</translation>
+        <source>No games in this section.</source>
+        <translation>No hay juegos en este apartado.</translation>
     </message>
     <message>
         <source>Played %1 min</source>

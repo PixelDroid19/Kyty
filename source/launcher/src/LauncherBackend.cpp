@@ -39,6 +39,8 @@ constexpr int  MAX_LISTED_ELFS       = 512;
 constexpr int  IMPORT_DEPTH          = 3;
 constexpr int  MAX_IMPORT_DIRS       = 4096;
 constexpr int  MAX_IMPORTED_GAMES    = 512;
+// Longer section names would not fit their tab.
+constexpr int SECTION_NAME_MAX = 40;
 // The colour scheme and language that follow the desktop's.
 constexpr char SYSTEM_CHOICE[] = "System";
 
@@ -271,7 +273,7 @@ QVariantMap LauncherBackend::GameToMap(int row) const
 	QVariantMap item;
 	item["row"]      = row;
 	item["name"]     = info.name;
-	item["folder"]   = info.folder;
+	item["sections"] = info.sections;
 	item["title"]    = game.param.title;
 	item["serial"]   = game.param.serial;
 	item["region"]   = game.param.region;
@@ -288,52 +290,43 @@ QVariantMap LauncherBackend::GameToMap(int row) const
 
 QVariantList LauncherBackend::Folders() const
 {
+	const auto   sections = m_library.Sections();
 	QVariantList list;
-	list << FolderToMap(tr("All games"), QString(), true);
-	int favorites = 0;
-	for (int row = 0; row < m_library.Count(); row++)
+	list << FolderToMap(tr("All games"), "all", QString(), [](const Kyty::Configuration& /*info*/) { return true; });
+	const auto favorites =
+	    FolderToMap(tr("Favorites"), "favorites", QString(), [](const Kyty::Configuration& info) { return info.favorite; });
+	if (favorites.value("count").toInt() > 0)
 	{
-		favorites += m_library.At(row).config->favorite ? 1 : 0;
+		list << favorites;
 	}
-	if (favorites > 0)
+	for (const auto& name: sections)
 	{
-		auto item         = FolderToMap(tr("Favorites"), QString(), false);
-		item["favorites"] = true;
-		item["count"]     = favorites;
-		list << item;
+		list << FolderToMap(name, "section", name, [&name](const Kyty::Configuration& info) { return info.sections.contains(name); });
 	}
-	for (const auto& name: m_library.Folders())
+	// Without sections every game would be unfiled, and the tab would repeat All games.
+	const auto unfiled =
+	    FolderToMap(tr("No section"), "unfiled", QString(), [](const Kyty::Configuration& info) { return info.sections.isEmpty(); });
+	if (!sections.isEmpty() && unfiled.value("count").toInt() > 0)
 	{
-		list << FolderToMap(name, name, false);
-	}
-	bool has_unfiled = false;
-	for (int row = 0; row < m_library.Count(); row++)
-	{
-		has_unfiled = has_unfiled || m_library.At(row).config->folder.isEmpty();
-	}
-	if (has_unfiled)
-	{
-		list << FolderToMap(tr("Unfiled"), QString(), false);
+		list << unfiled;
 	}
 	return list;
 }
 
-QVariantMap LauncherBackend::FolderToMap(const QString& title, const QString& folder, bool all) const
+QVariantMap LauncherBackend::FolderToMap(const QString& title, const QString& kind, const QString& section,
+                                         const std::function<bool(const Kyty::Configuration&)>& shows) const
 {
 	int count = 0;
 	for (int row = 0; row < m_library.Count(); row++)
 	{
-		if (all || m_library.At(row).config->folder == folder)
-		{
-			count++;
-		}
+		count += shows(*m_library.At(row).config) ? 1 : 0;
 	}
 
 	QVariantMap item;
-	item["title"]  = title;
-	item["folder"] = folder;
-	item["all"]    = all;
-	item["count"]  = count;
+	item["title"]   = title;
+	item["kind"]    = kind;
+	item["section"] = section;
+	item["count"]   = count;
 	return item;
 }
 
@@ -565,6 +558,29 @@ void LauncherBackend::SetFavorite(int row, bool favorite)
 		return;
 	}
 	m_library.At(row).config->favorite = favorite;
+	Save();
+	emit StateChanged();
+}
+
+void LauncherBackend::SetInSection(int row, const QString& section, bool in)
+{
+	const auto name = section.trimmed().left(SECTION_NAME_MAX);
+	if (row < 0 || row >= m_library.Count() || name.isEmpty())
+	{
+		return;
+	}
+	auto& sections = m_library.At(row).config->sections;
+	if (sections.contains(name) == in)
+	{
+		return;
+	}
+	if (in)
+	{
+		sections << name;
+	} else
+	{
+		sections.removeAll(name);
+	}
 	Save();
 	emit StateChanged();
 }

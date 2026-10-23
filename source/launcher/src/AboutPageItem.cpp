@@ -39,7 +39,7 @@ const Control CONTROLS[] = {
 	 QT_TRANSLATE_NOOP("AboutPageItem", "Double-click")},
     {QT_TRANSLATE_NOOP("AboutPageItem", "Options"), "O", "△ / Start", QT_TRANSLATE_NOOP("AboutPageItem", "Right-click")},
     {QT_TRANSLATE_NOOP("AboutPageItem", "Edit a game"), "E", "□", QT_TRANSLATE_NOOP("AboutPageItem", "Options, then Edit")},
-    {QT_TRANSLATE_NOOP("AboutPageItem", "Switch folder"), "PgUp / PgDn", "L1 / R1", QT_TRANSLATE_NOOP("AboutPageItem", "Click a folder")},
+    {QT_TRANSLATE_NOOP("AboutPageItem", "Switch section"), "PgUp / PgDn", "L1 / R1", QT_TRANSLATE_NOOP("AboutPageItem", "Click a section")},
     {QT_TRANSLATE_NOOP("AboutPageItem", "Save in the editor"), "O", "△", QT_TRANSLATE_NOOP("AboutPageItem", "Save")},
     {QT_TRANSLATE_NOOP("AboutPageItem", "Test run in the editor"), "E", "□", QT_TRANSLATE_NOOP("AboutPageItem", "Test run")},
     {QT_TRANSLATE_NOOP("AboutPageItem", "Type text"), QT_TRANSLATE_NOOP("AboutPageItem", "Type"),
