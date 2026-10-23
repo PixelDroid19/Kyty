@@ -182,11 +182,11 @@ private:
 		uint64_t             registered_epoch = 0;
 		mutable EdgeEvidence head {};
 		mutable EdgeEvidence tail {};
-		// Block change total read before a rearm found every page armed. A page
-		// leaves Armed only through a write, fallback or authority change that
-		// advances its block, so an equal total proves the range still armed.
-		uint64_t armed_block_changes = 0;
-		bool     armed_proven        = false;
+		// Per block the range spans: the block's change count read before a
+		// rearm found every page of the range in it armed, or kUnprovenBlock. A
+		// page leaves Armed only through a write, fallback or authority change
+		// that advances its block, so an equal count proves those pages armed.
+		std::vector<uint64_t> armed_blocks;
 	};
 	using RangeKey = std::pair<uintptr_t, uintptr_t>;
 
@@ -209,6 +209,7 @@ private:
 	// Summaries of kBlockPages consecutive pages answer queries over fully
 	// covered blocks; edge pages are always checked individually.
 	static constexpr size_t   kBlockPages     = 64u;
+	static constexpr uint64_t kUnprovenBlock  = ~uint64_t {0};
 	static constexpr size_t   kBlockTableSize = 1u << 17u;
 	static constexpr uint32_t kNoBlock        = UINT32_MAX;
 	// The high bit reserves the gate for a page/block identity writer after the
@@ -242,7 +243,6 @@ private:
 	[[nodiscard]] const BlockEntry* FindBlock(uintptr_t page) const noexcept;
 	[[nodiscard]] uint32_t          FindOrCreateBlock(uintptr_t page) noexcept;
 	[[nodiscard]] BlockEntry*       BlockOf(const PageEntry* page) noexcept;
-	[[nodiscard]] bool              BlockChangesOf(uintptr_t first, uintptr_t last, uint64_t* changes) const noexcept;
 	[[nodiscard]] RangeEvidence     SegmentEvidence(uintptr_t first_index, uintptr_t last_index) const noexcept;
 	[[nodiscard]] RangeEvidence     RangeEvidenceOf(const RangeKey& range, const RangeRecord& record) const noexcept;
 	[[nodiscard]] bool              RangeIsFallback(const RangeKey& range, const RangeRecord& record) const noexcept;
@@ -295,6 +295,9 @@ private:
 	std::unique_ptr<PageEntry[]>  m_pages;
 	std::unique_ptr<BlockEntry[]> m_blocks;
 	std::map<RangeKey, RangeRecord> m_ranges;
+	// Rearm scratch: each block's change count read before its pages are
+	// visited, kUnprovenBlock once one of them was not found armed.
+	std::vector<uint64_t> m_rearm_block_changes;
 	// Counts every keyed identity, including retained late-fault evidence.
 	// Read and changed only under m_registration_mutex.
 	size_t                        m_page_identity_count = 0;

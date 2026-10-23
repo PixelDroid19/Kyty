@@ -624,6 +624,31 @@ TEST(EmulatorGraphicsDirtyTracking, RearmSplitsRunsAtOriginalPermissionBoundarie
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
+TEST(EmulatorGraphicsDirtyTracking, RearmRevisitsOnlyBlocksWithWrittenPages)
+{
+	constexpr uint64_t kPages = 130;
+	Mapping            mapping(kPages);
+	ASSERT_NE(mapping.address, 0u);
+	FakeProtection      protection {mapping.address, GetPageSize(), std::vector<Mode>(kPages, Mode::ReadWrite)};
+	GpuDirtyPageTracker tracker(protection.Ops());
+	protection.tracker = &tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	const uintptr_t written = mapping.address + 100u * GetPageSize();
+	ASSERT_TRUE(tracker.HandleWriteFault(written));
+	protection.calls.clear();
+
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	ASSERT_EQ(protection.calls.size(), 1u);
+	EXPECT_EQ(protection.calls[0].address, written);
+	EXPECT_EQ(protection.calls[0].size, GetPageSize());
+	EXPECT_EQ(protection.calls[0].mode, Mode::Read);
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	EXPECT_EQ(protection.calls.size(), 1u);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
 TEST(EmulatorGraphicsDirtyTracking, RearmSplitsRunsAtNativeProtectionBoundaries)
 {
 	Mapping mapping(2);
