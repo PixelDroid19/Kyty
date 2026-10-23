@@ -89,3 +89,31 @@ jobs:
           message='GPU integration contracts skipped: this runner exposes no Vulkan render device at /dev/dri/renderD*.'
           echo "$message"
           echo "- $message" >> "$GITHUB_STEP_SUMMARY"
+
+  launcher:
+    name: Launcher build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Configure and build the launcher
+        run: |
+          nix develop .#launcher --no-write-lock-file --command bash -euo pipefail -c '
+            cmake -S source -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DKYTY_PROJECT_NAME=Emulator \
+              -DKYTY_WARNINGS_ARE_ERRORS=OFF \
+              -DKYTY_BUILD_LAUNCHER=ON \
+              -DKYTY_BUILD_DEVTOOLS=OFF \
+              -DKYTY_BUILD_UNIT_TESTS=OFF \
+              -DKYTY_GENERATE_MAP_CSV=OFF
+            cmake --build build --parallel 2 --target launcher
+          '

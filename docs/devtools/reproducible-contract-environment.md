@@ -50,8 +50,10 @@ graphics-table and checked-in shader CTest checks. It then runs the strict
 repository boundary checker. The matrix covers `KYTY_BUILD_DEVTOOLS=ON` and
 `OFF`; the process supervisor tests are included only in the ON configuration.
 The ON job also compiles the GPU integration executables without requiring a
-device. The launcher is outside this job's coverage because the workflow does
-not install Qt.
+device. A separate `launcher` job enters the `launcher` shell, which adds the
+pinned nixpkgs Qt 6 (`qtbase`, `qtdeclarative`, `qttools`, version 6.11.2) to
+the default shell, and builds only the `launcher` target. It compiles the
+launcher and its translations; it does not start it.
 
 GPU integration tests run only when the runner exposes a Vulkan render node at
 `/dev/dri/renderD*`. Otherwise the workflow records an explicit skip in the
