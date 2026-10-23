@@ -4,6 +4,60 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Anime fighter: async round-trip latency (2026-10-23)
+
+- **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
+  story scenes).** Temporary per-batch timestamps (removed) showed the
+  eight async compute queues strictly serial: never two batches in flight,
+  about 29 round trips per frame. Each round trip spent ~6 us dequeued,
+  105-140 us decoding, 150-460 us on the GPU and 110-125 us publishing its
+  completion. A stack sampler on the ring thread found three host costs that
+  do not depend on the guest's work:
+  - `GpuDirtyPageTracker::Rearm` walked all 3,840 pages of the 15.7 MB
+    storage range after every write-back (17% of the thread). The whole-range
+    armed proof fails as soon as one block changes, and the walk that re-arms
+    the written pages cannot record a new proof, so every write-back cost two
+    full walks.
+  - Mapping and unmapping dedicated host-visible allocations around each copy
+    changed the process page tables, with a TLB shootdown on every core.
+  - Each command stream ran on a helper thread while the ring thread waited
+    for it, so every batch paid two thread hand-offs and gained no overlap.
+- **Changes.**
+  1. A registered range keeps one armed proof per 64-page block: the block's
+     change count read before a rearm found every page of the range in it
+     armed. A rearm skips proven blocks and walks only blocks whose count
+     moved. A page still leaves Armed only through a write, fallback or
+     authority change that advances its block, so the proof keeps the
+     guarantee of the whole-range proof it replaces.
+  2. Dedicated host-visible allocations are mapped once, whole, and stay
+     mapped until they are freed, like pooled blocks.
+  3. The ring thread runs the constant and draw streams itself; the two
+     helper threads per ring are removed.
+- **Measured (same route and window, per async round trip).**
+
+  | Build | Decode (even / odd queues) | Completion publish | Batches per 5 s per queue |
+  | --- | --- | --- | --- |
+  | before | 125 / 170 us | 112-124 us | 607 |
+  | + persistent mappings | - | 104-111 us | - |
+  | + per-block armed proofs | 105 / 141 us | 84-89 us | 670 |
+  | + streams on the ring thread | 80 / 113 us | 83-89 us | 682 |
+
+  `Rearm` falls from 17% to about 3% of the ring thread. Graphics-queue
+  frames in the first four 5 s story windows went from 211/206/200/192 to
+  220/221/198/193; story scenes differ between runs, so this is a small gain,
+  not a measured frame-rate change.
+- **Shared-path check (Intel, strict runs).** The card title (262 fps in
+  play, no present limit), racing (101 fps), beat 'em up (18.2 fps, was
+  13.1) and fishing (22.6 fps, was 21.5) run their routes with no stop. The
+  sandbox reaches its world faster and then stops on a layered depth target,
+  a refusal added the same day by the depth-slice change, not by these
+  changes.
+- **Remaining frame cost.** The graphics queue decodes ~8 ms per frame while
+  the submitting guest thread waits, its GPU work runs ~7.5 ms after the last
+  flush, and the async chain follows it. The ring thread's largest remaining
+  cost is the write-back itself: every changed page is made writable, copied
+  and protected again, two `mprotect` calls with TLB shootdowns per page.
+
 ## Anime fighter: write-back copies only GPU-flagged pages (2026-10-22)
 
 - **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit).**
@@ -40,8 +94,8 @@ record. Titles are named descriptively only (`AGENTS.md`).
   The copied bytes per call match, so the flags select the same changed
   pages the full compare found. The title screen and the menus run at the
   60 fps limit with no write-back. Captures are visually unchanged.
-- **Open.** At 28 ms the story scenes are still below 60 fps. The
-  remaining cost has not been attributed yet.
+- **Open (attributed 2026-10-23, see above).** At 28 ms the story scenes
+  are still below 60 fps.
 
 ## Anime fighter: storage write-back on the label path (2026-10-17)
 
