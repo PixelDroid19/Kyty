@@ -4328,6 +4328,8 @@ zero, with both stencil base addresses zero. `GraphicsState.cpp:146` still
 classifies the enabled test as a missing plane before checking the disabled
 format contract. Trace the format and test-enable interaction before changing
 this classification; the observation alone does not validate stencil output.
+Resolved 2026-10-23: format 0 is STENCIL_INVALID and disables the stencil
+test; see "Stencil test without a stencil format" in the cross-title records.
 
 ## Register-default lookup and context restoration (2026-09-29)
 

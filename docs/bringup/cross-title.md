@@ -17,6 +17,40 @@ record. Titles are named descriptively only (`AGENTS.md`).
 - **Verified.** Kernel unit tests pass. No run has been observed calling
   this export, so no title result changes are claimed.
 
+## Stencil test without a stencil format (2026-10-23)
+
+- **Observed.** The insect platformer sequel (one draw per run) and the robot
+  platformer (8 per run, limited by the log cap) left
+  `DB_DEPTH_CONTROL.STENCIL_ENABLE` set while `DB_STENCIL_INFO.FORMAT` was 0
+  (`STENCIL_INVALID`). An earlier read-only capture recorded both depth and
+  stencil formats as zero, with both stencil base addresses zero. The validator
+  classified this as a missing stencil read base and logged a warning per draw,
+  while the backend already bound no stencil plane
+  (`ResolveEffectiveStencilFormat` returns 0 for format 0), and Vulkan leaves
+  coverage unmodified without a stencil attachment.
+- **Evidence.** The register enum names format 0 `STENCIL_INVALID`. A host GL
+  driver for the same GPU family programs `STENCIL_ENABLE` from the
+  depth-stencil state alone and writes `STENCIL_INVALID` when the framebuffer
+  has no stencil, relying on the depth block to ignore the test (GL: "as if the
+  stencil test always passes").
+- **Change.** `ValidateStencilPlane` returns `Inactive` for format 0 regardless
+  of enables and base addresses. The separate "stencil format 0" warning was
+  removed as unreachable. The unit test
+  `IgnoresStencilControlWithoutStencilFormat` covers an enabled test, a clear, a
+  stray write base, and format 1 still reporting a missing read base.
+- **Also in this change set.** Warnings removed or narrowed for supported
+  states: 48-bit vertex-stream storage bases (the shader consumes the full
+  base), `Z_16` depth format (mapped to D16), and mipmapped 64 KiB-tiled color
+  targets (described as a mip chain). Untiled mipmapped targets and unmapped
+  depth formats still warn.
+- **Verified.** Emulator unit suite 2457 passed; integration and diagnostics
+  tests 74 of 74; `check_emulator_boundaries.py` clean.
+- **Sweep.** Strict, 45 s per title, 60 fps present limit, Intel A770 host:
+  fishing title 1321 frames at 60 fps, insect platformer sequel 1315 at 60,
+  card title 1467 at 60, 2D Unity action title 1169 at 47 (a point sample
+  during its level load). All stop=none, and the stencil, 48-bit base and
+  depth-format warnings no longer appear.
+
 ## Collector context requests delivered only at safe points (2026-10-23)
 
 - **Observed** (fishing title, the intermittent frame-3 boot hang recorded
@@ -40,8 +74,13 @@ record. Titles are named descriptively only (`AGENTS.md`).
   declared safe. A suspension that lands anywhere else is deferred until the
   thread reaches one. Kyty applies the same rule to guest code and host waits.
 - **Change.**
-  - The loader records the executable segments of every loaded program in a
-    lock-free table (`GuestCodeRanges`) that a signal handler can read.
+  - The loader and the kernel record executable guest memory in
+    `GuestCodeRanges`: the segments of every loaded program and the mappings
+    the kernel makes executable. It is a page-interval set with a lock-free
+    `Contains` that a signal handler can read. Adding a range merges it with
+    the ranges it touches; removing one trims or splits them. Map, protect,
+    unmap, cut, decommit, reserve and the destructors keep it current, and the
+    runtime linker's executable-address check uses it.
   - `PthreadContext.cpp` owns the handshake. A request sets a per-thread
     pending bit and signals the thread. The signal runs the guest handler
     only when the interrupted instruction is guest code, or when the thread
@@ -180,11 +219,51 @@ record. Titles are named descriptively only (`AGENTS.md`).
     | Insect platformer sequel | 1323 | 60 | interactive |
     | 2D Unity action title | 1203 | 46.8 | interactive |
     | Card title | 1461 | 60 | interactive |
-- **Open.**
-  - Code generated at run time is not in the guest code table.
-  - A guest `exit` runs the host's static destructors while guest threads
-    still run, so a thread that uses a destroyed host global afterwards
-    fails. This is a process-exit issue, not a collector one.
+- **Third pass** (same day): guest-code tracking, audio and thread fixes,
+  guest exit and one shader translation.
+  - Executable guest mappings are tracked as guest code (above).
+  - Audio output waits for host pause at a collector safe point before taking
+    the AudioOut2 mutex, and AudioOut2 sleeps are interruptible.
+  - AudioOut2 context pushes queue the mixed grain under the context lock and
+    pace to the host sink after releasing it (`HostAudio::AudioOutQueue` queues
+    without waiting; `AudioOutOutputs` queues and then waits in an interruptible
+    scope), so a thread stopped at that safe point no longer holds the AudioOut2
+    lock; the audio-input pacing wait is a safe point too.
+  - pthread mutex, cond and rwlock calls return `EINVAL` for unusable objects
+    instead of dereferencing null. Hard-coded address traces and a fixed 50 ms
+    sleep in the async memory thread were removed; the blocked-waiter record
+    that feeds `kyty_agent sync-waits` stays.
+  - pthread rwlock attribute calls return `EINVAL` for a null or uninitialized
+    attribute.
+  - AudioOut2 pushes that fail after host audio shutdown no longer warn. The
+    "host submit failed" lines at the end of every run came from the process
+    shutdown closing the host sinks, not from a host sink fault.
+  - Wait records name the first return address inside guest code as the
+    caller.
+  - `v_cvt_pk_u8_f32` is translated: NaN to 0, saturate to [0, 255], truncate,
+    with the byte selected by `S1[1:0]`. Clamp, omod and op_sel are refused.
+  - Guest exit runs the guest `__cxa_atexit` list (`atexit` shares it, newest
+    first), flushes streams, shuts subsystems down and ends with `quick_exit`.
+    The kernel `_exit` NID and window close end the same way without guest
+    handlers. Host `atexit` handlers and static destructors no longer run while
+    guest threads are alive.
+  - Verified: emulator unit suite 2457 passed; integration and diagnostics
+    tests 74 of 74; `check_emulator_boundaries.py` clean. Strict sweep, 45 s
+    per title, at the 60 fps present limit on an Intel A770 host:
+
+    | Title | Frames | fps | Stop |
+    | --- | --- | --- | --- |
+    | Fishing title | 1298 | 60 | none |
+    | Insect platformer sequel | 1325 | 60 | none |
+    | 2D Unity action title | 1217 | 60 | none |
+    | Card title | 1468 | 60 | none |
+
+    The 2D Unity action title's first sample read 8.2 fps, a load hitch with
+    249 ms since the last present; its rerun held 60 fps. The fishing title was
+    23 fps before this pass at the same point.
+    The AudioOut2 pacing, rwlock-attribute and shutdown items landed after
+    this table; the sweep in "Stencil test without a stencil format" covers
+    them.
 
 ## Transient snapshots shared by a command pool's command buffers (2026-10-23)
 
