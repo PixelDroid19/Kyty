@@ -133,18 +133,58 @@ record. Titles are named descriptively only (`AGENTS.md`).
 
       The 2D Unity action title's fps is a point sample. Earlier runs of the
       same build read 45-60 at the same frame count.
+- **Second pass** (same day): the guest-reachable waits and host locks
+  found by a review of every wait site are now safe points.
+  - Host locks that a thread may keep while it runs guest code are taken
+    through `PthreadLockAtSafePoint` or its shared variant, which tries the
+    lock and otherwise blocks inside a scope covering the mutex object: the
+    NGS2 system and dispatch locks, the locale facet lock, the AV player
+    decoder lock and the video-out registration lock.
+  - The module linker no longer runs initializers under its lock. A provider
+    loaded for a lazy import is relocated and marked pending under the
+    linker lock. Its `module_start` runs outside the lock at the next module
+    start or lazy bind into it, and a concurrent caller waits at a safe point
+    until the starter finishes. Admission now takes the linker lock instead
+    of a second lock that relocation took in the opposite order. A failed
+    start is logged and recorded as a rejected lazy load; the provider stays
+    loaded, as after `sceKernelLoadStartModule`.
+  - NGS2 callbacks produced while a thread holds any system lock are queued
+    per thread and run once it releases its last one, so a callback never
+    runs under a lock that another system's renderer may wait for.
+  - The locale facet lock is recursive: a facet destructor that re-enters
+    the copy or add-facet operation on the same thread no longer deadlocks.
+  - Declared waits: GPU ring submit, done and idle waits, decode completion,
+    submission publication, window initialization, the video-out access,
+    materialization, registration and flip lifecycle gates, `WaitFlipDone`,
+    the application heap's startup wait, Videodec2 decoder removal, the AV
+    player decoder joins and the 3D audio port push.
+  - The GPU admission gate stays held across the drain of an unmap or
+    protection change, because the drain must finish before the mapping
+    changes. Taking the gate and the ring waits under it are safe points,
+    because GPU work may wait on memory that a stopped guest thread writes
+    later. A thread stopped in such a drain keeps the gate, so guest code
+    that runs while the world is stopped must not submit GPU work or unmap
+    memory.
+  - POSIX semaphores are shared with every caller. Destroy wakes blocked
+    waiters, which fail with `EINVAL` as a call on an unknown semaphore
+    does, instead of freeing the object under them.
+  - Verified: `ContextRequestReachesLockWaiter` (std and recursive
+    mutexes), `StandardSamplerDefersCallbacksWhileAnotherSystemIsLocked`
+    and `PosixSemDestroyWakesBlockedWaiter` pass; emulator unit suite 2453
+    passed, integration and diagnostics tests 74 of 74. Strict 45 s runs at
+    the 60 fps limit, none of which stopped:
+
+    | Title | Frames | fps | End state |
+    | --- | --- | --- | --- |
+    | Fishing title | 1169 | 23.0 | 3D title menu (earlier build: autosave notice) |
+    | Insect platformer sequel | 1323 | 60 | interactive |
+    | 2D Unity action title | 1203 | 46.8 | interactive |
+    | Card title | 1461 | 60 | interactive |
 - **Open.**
-  - Host locks held across guest code: the module linker's mutex during
-    module initialisation and finalisation, the NGS2 dispatch mutex during
-    guest callbacks, the locale facet mutex and the AV player decoder mutex.
-    A thread stopped in guest code under one of them keeps it for the
-    collection, and a thread blocked on it is not at a safe point.
-  - Host waits not yet declared: the application heap's startup wait, the
-    video-out flip queue and its gates, the GPU ring submit and idle waits,
-    labels, fibers, audio sleeps and `poll`. A request to a thread blocked
-    there waits until the thread returns to guest code. GPU idle waits run
-    under the submission admission mutex, so they cannot simply be declared.
   - Code generated at run time is not in the guest code table.
+  - A guest `exit` runs the host's static destructors while guest threads
+    still run, so a thread that uses a destroyed host global afterwards
+    fails. This is a process-exit issue, not a collector one.
 
 ## Transient snapshots shared by a command pool's command buffers (2026-10-23)
 
