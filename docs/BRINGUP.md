@@ -108,6 +108,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - `sceKernelSleep` sleeps whole seconds (2026-10-23, found by inspection)
   - Collector context requests delivered only at safe points (2026-10-23)
   - Transient snapshots shared by a command pool's command buffers (2026-10-23)
   - A graphics submit returns after its batch is decoded (2026-10-23)

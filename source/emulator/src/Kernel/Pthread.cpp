@@ -815,11 +815,12 @@ unsigned int KYTY_SYSV_ABI KernelSleep(unsigned int seconds)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\tsleep: %u\n", seconds);
+	KYTY_GUEST_WAIT(PthreadWaitKind::Sleep, nullptr);
 	Core::Timer t;
 	t.Start();
 	{
 		PthreadInterruptibleScope any_syscall;
-		Core::Thread::Sleep(seconds);
+		Core::Thread::SleepNano(static_cast<uint64_t>(seconds) * 1000000000u);
 	}
 	double ts = t.GetTimeS();
 	KYTY_LOG_DEBUG("\tactual: %g seconds\n", ts);

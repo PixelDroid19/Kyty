@@ -4,6 +4,19 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## `sceKernelSleep` sleeps whole seconds (2026-10-23, found by inspection)
+
+- **Contract.** The published SDK header declares
+  `sceKernelSleep(uint32_t seconds)`, and two independent implementations
+  sleep that many seconds.
+- **Defect.** The HLE passed the count to a millisecond sleep, so a guest
+  that slept one second resumed after one millisecond.
+- **Change.** The sleep converts seconds to nanoseconds in 64 bits and
+  records a `Sleep` wait for the thread diagnostics, as `sceKernelUsleep`
+  does.
+- **Verified.** Kernel unit tests pass. No run has been observed calling
+  this export, so no title result changes are claimed.
+
 ## Collector context requests delivered only at safe points (2026-10-23)
 
 - **Observed** (fishing title, the intermittent frame-3 boot hang recorded
