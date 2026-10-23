@@ -86,15 +86,45 @@ void PruneCache(const QString& cache_dir)
 	}
 }
 
+ArtworkLoader* g_loader = nullptr;
+
 } // namespace
 
-ArtworkProvider::ArtworkProvider()
+ArtworkLoader::ArtworkLoader()
     : m_cache_dir(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation) + "/Kyty/launcher-artwork")
 {
+	Q_ASSERT(g_loader == nullptr);
+	g_loader = this;
 	m_pool.setMaxThreadCount(1);
 	m_pool.setThreadPriority(QThread::IdlePriority);
 	QDir().mkpath(m_cache_dir);
 	m_pool.start([dir = m_cache_dir] { PruneCache(dir); });
+}
+
+ArtworkLoader::~ArtworkLoader()
+{
+	m_pool.waitForDone();
+	g_loader = nullptr;
+}
+
+ArtworkLoader* ArtworkLoader::Instance()
+{
+	Q_ASSERT(g_loader != nullptr);
+	return g_loader;
+}
+
+ArtworkJob* ArtworkLoader::CreateJob(const QString& id, const QSize& size) const
+{
+	const auto prefix  = QLatin1String(ArtworkProvider::ROUNDED_PREFIX);
+	const bool rounded = id.startsWith(prefix);
+	const auto encoded = rounded ? id.mid(prefix.size()) : id;
+	const auto path    = QString::fromUtf8(QByteArray::fromBase64(encoded.toLatin1(), QByteArray::Base64UrlEncoding));
+	return new ArtworkJob(path, size, rounded, m_cache_dir);
+}
+
+void ArtworkLoader::Start(ArtworkJob* job)
+{
+	m_pool.start(job);
 }
 
 QString ArtworkProvider::Url(const QString& path)
@@ -107,14 +137,17 @@ QString ArtworkProvider::Url(const QString& path)
 	return QString("image://%1/%2").arg(ID, QString::fromLatin1(id));
 }
 
+QString ArtworkProvider::IdFromUrl(const QString& url)
+{
+	const auto prefix = QString("image://%1/").arg(ID);
+	return url.startsWith(prefix) ? url.mid(prefix.size()) : QString();
+}
+
 QQuickImageResponse* ArtworkProvider::requestImageResponse(const QString& id, const QSize& requested_size)
 {
-	const bool rounded  = id.startsWith(QLatin1String(ROUNDED_PREFIX));
-	const auto encoded  = rounded ? id.mid(static_cast<int>(sizeof(ROUNDED_PREFIX)) - 1) : id;
-	const auto path     = QString::fromUtf8(QByteArray::fromBase64(encoded.toLatin1(), QByteArray::Base64UrlEncoding));
-	auto*      job      = new ArtworkJob(path, requested_size, rounded, m_cache_dir);
-	auto*      response = new ArtworkResponse(job);
-	m_pool.start(job);
+	auto* job      = m_loader->CreateJob(id, requested_size);
+	auto* response = new ArtworkResponse(job);
+	m_loader->Start(job);
 	return response;
 }
 

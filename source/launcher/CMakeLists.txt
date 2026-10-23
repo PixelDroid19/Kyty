@@ -25,7 +25,6 @@ add_executable(launcher WIN32 MACOSX_BUNDLE
 )
 set_target_properties(launcher PROPERTIES AUTOMOC ON AUTORCC ON)
 
-set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 qt_policy(SET QTP0001 NEW)
 qt_policy(SET QTP0004 OLD)
 

@@ -11,9 +11,33 @@
 #include <QString>
 #include <QThreadPool>
 
-// Serves game artwork scaled down to the size the launcher draws it, and keeps those small copies on disk.
+class ArtworkJob;
+
+// Loads game artwork scaled down to the size the launcher draws it, and keeps those small copies on disk.
 // A 4K pic0.png is then decoded once instead of on every start, on one idle-priority thread that never
-// competes with a running game.
+// competes with a running game. QML images and scene items share it.
+class ArtworkLoader
+{
+public:
+	ArtworkLoader();
+	~ArtworkLoader();
+
+	KYTY_QT_CLASS_NO_COPY(ArtworkLoader);
+
+	// The one loader of the process, created before the UI.
+	static ArtworkLoader* Instance();
+
+	// A job for the artwork an image:// id names (the address without "image://art/"), sized to fill size.
+	// Connect to its Done signal, then Start it; the job deletes itself after it runs.
+	[[nodiscard]] ArtworkJob* CreateJob(const QString& id, const QSize& size) const;
+	void                      Start(ArtworkJob* job);
+
+private:
+	QThreadPool m_pool;
+	QString     m_cache_dir;
+};
+
+// Serves the loader's artwork to QML Image items under image://art/.
 class ArtworkProvider: public QQuickAsyncImageProvider
 {
 public:
@@ -21,19 +45,20 @@ public:
 	// Put before the encoded path, it asks for the artwork cut to the requested box with rounded corners.
 	static constexpr char ROUNDED_PREFIX[] = "round/";
 
-	ArtworkProvider();
+	explicit ArtworkProvider(ArtworkLoader* loader): m_loader(loader) {}
 	~ArtworkProvider() override = default;
 
 	KYTY_QT_CLASS_NO_COPY(ArtworkProvider);
 
 	// The image:// address QML uses for the artwork file at path; empty when path is empty.
 	static QString Url(const QString& path);
+	// The id inside an image:// address made by Url, or empty when url is not one.
+	static QString IdFromUrl(const QString& url);
 
 	QQuickImageResponse* requestImageResponse(const QString& id, const QSize& requested_size) override;
 
 private:
-	QThreadPool m_pool;
-	QString     m_cache_dir;
+	ArtworkLoader* m_loader;
 };
 
 // Loads one artwork file on the provider's thread and reports the scaled image back.
