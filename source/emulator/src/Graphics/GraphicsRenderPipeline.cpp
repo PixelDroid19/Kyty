@@ -1776,7 +1776,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	Core::LockGuard lock(m_mutex);
 
-	ShaderDbgDumpInputInfo(input_info);
+	if (Config::GetPrintfDirection() != Log::Direction::Silent)
+	{
+		ShaderDbgDumpInputInfo(input_info);
+	}
 
 	auto cs_id = ShaderGetIdCS(cs_regs, input_info);
 
