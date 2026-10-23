@@ -4,6 +4,30 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Anime fighter: excluded, submit without waiting for decode (2026-10-23)
+
+- **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
+  fight at ~75 s).** The submitting guest thread spends 47.6% of the wall
+  clock in `GraphicsRing::Submit`, waiting until the command processor has
+  decoded its command buffer. The command-processor thread itself is idle
+  53-59% of the time, waiting for the next batch.
+- **Experiment (not kept).** Submit kept the command-buffer snapshot but
+  returned without waiting for decode. The ring queue never held more than
+  one buffer.
+- **Result.** Fight windows fell from 43.5 / 35.6 fps to 34.3 / 26.3 fps.
+  The guest now writes the next frame's data while the previous buffer is
+  being decoded. Those writes dirty the host snapshots behind
+  guest-device-address reads (`PendingReaderForSnapshotRefresh`). Any
+  dirty tracked chunk makes the next device-address draw wait for every
+  active reader. That reader is often the buffer being recorded, so the
+  draw submits it and waits for its fence. `DrawIndexOffset` spent 32.7% of
+  the command-processor thread in `CommandBuffer::WaitForFence`, over 15,000
+  short waits in 6 s. Two guest threads also spun at 97-99% CPU.
+- **Direction.** The decode wait cannot be removed while one host snapshot
+  serves every device-address reader. Snapshot refreshes would need their own
+  versions, so that a refresh never waits for a reader of the old bytes.
+  Until then, the decode cost itself is the lever.
+
 ## Anime fighter: write-back restores protection once per run (2026-10-23)
 
 - **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
