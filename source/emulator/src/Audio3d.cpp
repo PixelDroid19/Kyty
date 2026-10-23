@@ -5,6 +5,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Audio.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
@@ -716,6 +717,7 @@ int KYTY_SYSV_ABI Audio3dPortPush(uint32_t port_id, uint32_t blocking)
 			auto wait_time = port->data_delay / 8;
 			while (first_data->state != Audio3dData::State::Empty)
 			{
+				Kernel::PthreadInterruptibleScope any_syscall;
 				Core::Thread::SleepMicro(wait_time);
 			}
 		}

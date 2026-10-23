@@ -1,14 +1,15 @@
+#include "Kyty/Core/Threads.h"
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/AudioVideoBackend.h"
 #include "Emulator/Common.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
 #include "Emulator/VideoFrameMemory.h"
 
 #include <cinttypes>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -260,8 +261,8 @@ public:
 
 	Handle Insert(std::unique_ptr<Object> object)
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		size_t                      index = 0;
+		Core::LockGuard lock(m_mutex);
+		size_t          index = 0;
 		for (; index < m_size; index++)
 		{
 			const auto& slot = m_slots[index];
@@ -301,7 +302,7 @@ public:
 			return {};
 		}
 
-		std::lock_guard<std::mutex> lock(m_mutex);
+		Core::LockGuard lock(m_mutex);
 		if (index >= m_size)
 		{
 			return {};
@@ -324,28 +325,33 @@ public:
 			return false;
 		}
 
-		std::unique_lock<std::mutex> lock(m_mutex);
-		if (index >= m_size)
+		std::unique_ptr<Object> object;
 		{
-			return false;
+			Core::LockGuard lock(m_mutex);
+			if (index >= m_size)
+			{
+				return false;
+			}
+			auto& slot = m_slots[index];
+			if (slot.generation != generation || slot.closing || slot.retired || slot.object == nullptr)
+			{
+				return false;
+			}
+			slot.closing = true;
+			while (m_slots[index].active_leases != 0)
+			{
+				Kernel::PthreadInterruptibleWait(&m_condition, &m_mutex);
+			}
+			object = std::move(m_slots[index].object);
+			if (m_slots[index].generation == kGenerationMax)
+			{
+				m_slots[index].retired = true;
+			} else
+			{
+				++m_slots[index].generation;
+			}
+			m_slots[index].closing = false;
 		}
-		auto& slot = m_slots[index];
-		if (slot.generation != generation || slot.closing || slot.retired || slot.object == nullptr)
-		{
-			return false;
-		}
-		slot.closing = true;
-		m_condition.wait(lock, [&] { return m_slots[index].active_leases == 0; });
-		auto object = std::move(m_slots[index].object);
-		if (m_slots[index].generation == kGenerationMax)
-		{
-			m_slots[index].retired = true;
-		} else
-		{
-			++m_slots[index].generation;
-		}
-		m_slots[index].closing = false;
-		lock.unlock();
 		object.reset();
 		return true;
 	}
@@ -419,19 +425,19 @@ private:
 
 	void ReleaseLease(size_t index)
 	{
-		std::lock_guard<std::mutex> lock(m_mutex);
+		Core::LockGuard lock(m_mutex);
 		if (index < m_size && m_slots[index].active_leases != 0)
 		{
 			--m_slots[index].active_leases;
 			if (m_slots[index].active_leases == 0)
 			{
-				m_condition.notify_all();
+				m_condition.SignalAll();
 			}
 		}
 	}
 
-	std::mutex              m_mutex;
-	std::condition_variable m_condition;
+	Core::Mutex             m_mutex;
+	Core::CondVar           m_condition;
 	std::unique_ptr<Slot[]> m_slots;
 	size_t                  m_size     = 0;
 	size_t                  m_capacity = 0;

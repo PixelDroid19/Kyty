@@ -546,7 +546,7 @@ static void delete_synthetic_video(AvPlayerInternal* r)
 	AvPlayerMemAllocator                          mem;
 	std::unique_ptr<::Kyty::Emulator::AudioVideoBackend::Decoder> decoder;
 	{
-		std::unique_lock<std::shared_mutex> decoder_lock(r->decoder_mutex);
+		const auto decoder_lock = Kernel::PthreadLockAtSafePoint(r->decoder_mutex);
 		{
 			Core::LockGuard lock(r->mutex);
 			decoder = std::move(r->decoder);
@@ -730,7 +730,7 @@ static void stop_once_after_eof(AvPlayerInternal* h)
 	}
 	{
 		// Exclusive: a looping decoder is repositioned while no frame pull observes it.
-		std::unique_lock<std::shared_mutex> decoder_lock(h->decoder_mutex);
+		const auto decoder_lock = Kernel::PthreadLockAtSafePoint(h->decoder_mutex);
 		bool rewind = false;
 		{
 			Core::LockGuard lock(h->mutex);
@@ -770,7 +770,8 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info, 
 	{
 		return false;
 	}
-	std::shared_lock<std::shared_mutex> decoder_lock(r->decoder_mutex);
+	const auto decoder_lock = Kernel::PthreadLockSharedAtSafePoint(r->decoder_mutex);
+
 	uint8_t*                             frame       = nullptr;
 	uint64_t                             timestamp   = 0;
 	uint32_t                             width       = 0;
@@ -1459,7 +1460,8 @@ Bool KYTY_SYSV_ABI AvPlayerGetAudioData(AvPlayerInternal* h, AvPlayerFrameInfo* 
 		return 0;
 	}
 	h = player.get();
-	std::shared_lock<std::shared_mutex> decoder_lock(h->decoder_mutex);
+	const auto decoder_lock = Kernel::PthreadLockSharedAtSafePoint(h->decoder_mutex);
+
 	::Kyty::Emulator::AudioVideoBackend::Decoder*          decoder = nullptr;
 	uint64_t                             timestamp = 0;
 	uint64_t                             start_time = 0;
@@ -1560,7 +1562,7 @@ int KYTY_SYSV_ABI AvPlayerJumpToTime(AvPlayerInternal* h, uint64_t time_ms)
 	h = player.get();
 	{
 		// Exclusive: no frame pull may observe the decoder while it is repositioned.
-		std::unique_lock<std::shared_mutex> decoder_lock(h->decoder_mutex);
+		const auto decoder_lock = Kernel::PthreadLockAtSafePoint(h->decoder_mutex);
 		if (h->decoder != nullptr && !h->decoder->Seek(time_ms))
 		{
 			return AVPLAYER_ERROR_OPERATION_FAILED;

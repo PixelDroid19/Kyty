@@ -1,4 +1,5 @@
 #include "Emulator/AudioVideoBackend.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
 
 #include <algorithm>
@@ -212,6 +213,8 @@ static void FreeState(Decoder::State* state)
 	state->condition.notify_all();
 	if (state->worker.joinable())
 	{
+		// The decode worker runs guest read callbacks, so waiting for it is a safe point.
+		Kernel::PthreadInterruptibleScope any_syscall;
 		state->worker.join();
 	}
 	if (state->resampler != nullptr)
@@ -1152,6 +1155,8 @@ bool Decoder::Seek(uint64_t time_ms)
 	state->condition.notify_all();
 	if (state->worker.joinable())
 	{
+		// The decode worker runs guest read callbacks, so waiting for it is a safe point.
+		Kernel::PthreadInterruptibleScope any_syscall;
 		state->worker.join();
 	}
 	{
