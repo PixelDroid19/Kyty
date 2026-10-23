@@ -4,6 +4,54 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Proven one-word buffer fills recorded as transfer fills (2026-10-23)
+
+- **Observed** (beat 'em up, title screen, Intel A770, Mesa ANV, Xe kernel
+  driver, `INTEL_MEASURE` over about 440 frames): the GPU was busy for about
+  20.8 ms per frame and the title presented about 45 fps.
+  - 13.3 ms per frame went to five dispatches of the generic uniform-fill
+    kernel (the 16-byte record form, one 32-bit word repeated), 2.6 to 3.7 ms
+    each, four of them over 33 MB storage buffers.
+  - 6.3 ms per frame went to the transfer fills that publish the same fills
+    into the guest device-address view.
+- **Cause.** Storage objects live in host-cached system memory, so the
+  kernel's 16-byte stores cross PCIe on a discrete GPU, and every store also
+  sets its page's flag in the write mask, in system memory as well. Temporary
+  experiment (removed, never a candidate): with storage objects of 16 MiB or
+  more in device-local, host-visible memory, the kernel took about 1.3 ms, so
+  the page-flag stores alone cost about as much as the data.
+- **Change.** When a dispatch is a proven full uniform fill whose words are one
+  repeated 32-bit value, and the exact storage object of the range exists, the
+  dispatch is recorded as a transfer fill of that object instead. A second fill
+  sets every flag of the object's write mask, as the kernel's stores would, so
+  the write-back that follows is unchanged. Barriers on both sides order the
+  fill against earlier shader and transfer writes and every later access. Fills
+  of other word patterns, partial thread groups or ranges without an exact
+  storage object still execute the dispatch. Alias propagation and the
+  device-address publication that follow the dispatch are unchanged.
+- **Verified.**
+  - Same route and frames: the fill dispatches disappeared, and transfer fills
+    took 13.3 ms per frame (storage objects 0.75 to 0.86 ms each, device-address
+    view 1.2 to 1.8 ms each). The GPU frame fell to about 16 ms, and the title
+    screen holds the 60 fps present limit (frame 439 at 60.0 fps against
+    frame 409 at 45.2 fps). The capture matches the earlier build.
+  - Unit tests (2,459) and the integration and diagnostics tests (74).
+  - Regression sweep, 30 s strict runs at the 60 fps present limit, frames
+    presented: fishing title 1,434, insect platformer sequel 1,341, 2D Unity
+    action title 1,233, card title 1,472, racing title 1,254, anime fighter
+    1,490, isometric roguelike 1,152, preschool title 1,447, well platformer
+    1,355. No stop.
+  - The role-playing title presented 3 frames in 30 s: one boot frame took
+    17.6 s, as on the earlier build. A 45 s repeat reached 38 frames at
+    51 fps on the same loading screen as the earlier build.
+  - The two titles that fill targets with this kernel every frame, 90 s strict
+    runs with their recorded routes: the 2D Unity action title in gameplay
+    (4,331 frames, 60 fps) without trails or a white scene, and the isometric
+    roguelike in its first room (4,035 frames, 60 fps) with correct lighting.
+- **Open.** Both fills still write the range to system memory over PCIe.
+  Removing that cost needs storage objects in device-local memory with an
+  explicit read-back for the CPU write-back.
+
 ## Crash evidence read only for a reported fault (2026-10-23)
 
 - **Observed** (isometric roguelike, boot into its first load, Intel A770,

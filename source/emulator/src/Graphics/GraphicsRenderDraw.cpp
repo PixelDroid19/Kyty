@@ -3427,16 +3427,20 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	// pipeline after all preparation has completed.
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 	GraphicsOperationTraceDispatch(input_info.bind);
-	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
-	buffer->StoreBackDepthPlanes();
-	// The buffer write always executes. A proven full uniform fill additionally updates its exact
-	// color-image aliases and depth and stencil planes in this recording; partial thread groups would leave
-	// the range uncovered.
+	// The buffer write always happens: as the dispatch, or for a proven fill of one repeated word as a
+	// transfer fill. A proven full uniform fill additionally updates its exact color-image aliases and depth
+	// and stencil planes in this recording; partial thread groups would leave the range uncovered.
 	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
 	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
 	ComputeUniformBufferFill fill;
-	if ((mode & kDispatchComputeShaderEnable) != 0u && (mode & kDispatchPartialThreadGroups) == 0u &&
-	    ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill))
+	const bool proven_fill = (mode & kDispatchComputeShaderEnable) != 0u && (mode & kDispatchPartialThreadGroups) == 0u &&
+	                         ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill);
+	if (!(proven_fill && RecordComputeUniformFillTransfer(buffer, fill)))
+	{
+		vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
+	}
+	buffer->StoreBackDepthPlanes();
+	if (proven_fill)
 	{
 		(void)PropagateComputeUniformColorFill(buffer, fill);
 		(void)PropagateComputeUniformStencilFill(buffer, fill);

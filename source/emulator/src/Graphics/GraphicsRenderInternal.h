@@ -1741,6 +1741,10 @@ struct ComputeUniformBufferFill
 };
 [[nodiscard]] bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x, uint32_t group_y,
                                                    uint32_t group_z, ComputeUniformBufferFill* fill);
+// Records a fill of one repeated word as a transfer fill of the exact storage
+// object, with every page flagged written, in place of the dispatch. Returns
+// false, recording nothing, when the dispatch must execute.
+[[nodiscard]] bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 // Copies the filled storage object into the guest device-address view in queue
 // order, so later device-address consumers on this queue need no CPU write-back.
 [[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);

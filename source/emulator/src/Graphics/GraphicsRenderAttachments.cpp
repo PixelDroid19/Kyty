@@ -389,6 +389,34 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 	return GpuMemoryMarkStorageGuestPublished(identity, publication, &fill.words);
 }
 
+bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+{
+	const auto& words = fill.words;
+	if (buffer == nullptr || !std::all_of(words.begin(), words.end(), [&](uint32_t word) { return word == words[0]; }))
+	{
+		return false;
+	}
+	GpuMemoryStorageWriteIdentity identity {};
+	if (!GpuMemoryFindExactWritableStorage(fill.address, fill.size, &identity) || identity.buffer->write_mask == nullptr)
+	{
+		return false;
+	}
+	auto*           cmd = buffer->RecordOutsideRenderPass();
+	VkMemoryBarrier barrier {};
+	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+	vkCmdFillBuffer(cmd, identity.buffer->buffer, 0, fill.size, words[0]);
+	// Flag every page as the dispatch's stores would, for the write-back.
+	vkCmdFillBuffer(cmd, identity.buffer->write_mask->buffer, 0, VK_WHOLE_SIZE, 1u);
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
+	                     &barrier, 0, nullptr, 0, nullptr);
+	return true;
+}
+
 bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* dependency)
 {
 	EXIT_IF(buffer == nullptr || dependency == nullptr);

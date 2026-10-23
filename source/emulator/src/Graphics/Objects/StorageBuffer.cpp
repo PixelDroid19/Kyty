@@ -65,7 +65,7 @@ static void create_write_mask(GraphicContext* ctx, StorageVulkanBuffer* vk_obj)
 {
 	const uint64_t pages  = (vk_obj->guest_size + GpuWritebackPageCache::kDefaultPageSize - 1u) / GpuWritebackPageCache::kDefaultPageSize;
 	auto*          mask   = new VulkanBuffer;
-	mask->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	mask->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	mask->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 	                        VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	VulkanCreateBuffer(ctx, pages * sizeof(uint32_t), mask);
@@ -90,8 +90,9 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->guest_addr = *vaddr;
 	vk_obj->guest_size = *size;
 
-	// Transfer source: a proven full fill is copied into the guest device-address view.
-	vk_obj->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	// Transfers: a proven uniform fill is written by a fill, and copied into the
+	// guest device-address view.
+	vk_obj->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	vk_obj->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 	                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	vk_obj->buffer = nullptr;
