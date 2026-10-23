@@ -355,7 +355,6 @@ public:
 		info.r13               = context->R13;
 		info.r14               = context->R14;
 		info.r15               = context->R15;
-		CaptureCrashStack(context->Rsp, &info);
 		info.exception_win_code = exception_record->ExceptionCode;
 
 		auto* p = *static_cast<ExceptionHandlerPrivate**>(dispatcher_context->HandlerData);
@@ -1571,13 +1570,18 @@ void FatalFault(const ExceptionHandler::ExceptionInfo* info) noexcept
 {
 	if (info != nullptr)
 	{
-#if defined(KYTY_HAS_SIGNAL_EXCEPTIONS) && (defined(__x86_64__) || defined(__i386__))
 		auto report = *info;
+#if defined(KYTY_HAS_SIGNAL_EXCEPTIONS) && (defined(__x86_64__) || defined(__i386__))
 		capture_posix_crash_evidence(&report);
-		WriteCrashReport(report);
-#else
-		WriteCrashReport(*info);
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		// As on POSIX, the exception handlers leave the stack out of the
+		// context, and only a reported fault reads it.
+		if (report.stack_count == 0)
+		{
+			CaptureCrashStack(report.rsp, &report);
+		}
 #endif
+		WriteCrashReport(report);
 	}
 	std::_Exit(139);
 }
@@ -1719,7 +1723,6 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception)
 	info.r13               = exception->ContextRecord->R13;
 	info.r14               = exception->ContextRecord->R14;
 	info.r15               = exception->ContextRecord->R15;
-	CaptureCrashStack(exception->ContextRecord->Rsp, &info);
 	info.exception_win_code = exception_record->ExceptionCode;
 
 	ExceptionHandlerPrivate::g_vec_func(&info);
