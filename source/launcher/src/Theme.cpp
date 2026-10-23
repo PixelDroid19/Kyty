@@ -1,7 +1,5 @@
 #include "Theme.h"
 
-#include <QJSEngine>
-
 namespace {
 
 Theme* g_theme = nullptr;
@@ -23,13 +21,6 @@ Theme* Theme::Instance()
 {
 	Q_ASSERT(g_theme != nullptr);
 	return g_theme;
-}
-
-Theme* Theme::create(QQmlEngine* /*qml_engine*/, QJSEngine* /*js_engine*/)
-{
-	auto* theme = Instance();
-	QJSEngine::setObjectOwnership(theme, QJSEngine::CppOwnership);
-	return theme;
 }
 
 void Theme::SetU(qreal u)

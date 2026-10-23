@@ -10,12 +10,12 @@ FileChooser::~FileChooser()
 	delete m_dialog;
 }
 
-void FileChooser::chooseFile(const QString& title)
+void FileChooser::ChooseFile(const QString& title)
 {
 	Open(title, QFileDialog::ExistingFile);
 }
 
-void FileChooser::chooseFolder(const QString& title)
+void FileChooser::ChooseFolder(const QString& title)
 {
 	Open(title, QFileDialog::Directory);
 }
@@ -44,6 +44,6 @@ void FileChooser::Open(const QString& title, QFileDialog::FileMode mode)
 		dialog->winId();
 		dialog->windowHandle()->setTransientParent(parent);
 	}
-	connect(dialog, &QFileDialog::fileSelected, this, &FileChooser::chosen);
+	connect(dialog, &QFileDialog::fileSelected, this, &FileChooser::Chosen);
 	dialog->open();
 }

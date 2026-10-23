@@ -159,8 +159,9 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 	m_pad  = new TextPadItem(this);
 
 	auto* backend = LauncherBackend::Instance();
-	connect(m_hero, &HeroRowItem::activated, this, [this](int index) { emit RunRequested(m_recent.value(index).toMap().value("row").toInt()); });
-	connect(m_hero, &HeroRowItem::menuRequested, this, [this](int index) { OpenMenu(m_recent.value(index).toMap().value("row").toInt()); });
+	connect(m_hero, &HeroRowItem::Activated, this,
+	        [this](int index) { emit RunRequested(m_recent.value(index).toMap().value("row").toInt()); });
+	connect(m_hero, &HeroRowItem::MenuRequested, this, [this](int index) { OpenMenu(m_recent.value(index).toMap().value("row").toInt()); });
 	connect(m_hero, &HeroRowItem::CurrentIndexChanged, this, &LibraryPageItem::UpdateFocusedGame);
 	connect(m_hero, &QQuickItem::activeFocusChanged, this, &LibraryPageItem::UpdateFocusedGame);
 	connect(m_tabs, &FolderTabsItem::CurrentIndexChanged, this, &LibraryPageItem::Filter);
@@ -172,13 +173,13 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 	connect(m_table, &GameTableItem::CurrentIndexChanged, this, &LibraryPageItem::UpdateFocusedGame);
 	auto run  = [this](int index) { emit RunRequested(m_visible_games.value(index).toMap().value("row").toInt()); };
 	auto menu = [this](int index) { OpenMenu(m_visible_games.value(index).toMap().value("row").toInt()); };
-	connect(m_grid, &GameGridItem::activated, this, run);
-	connect(m_grid, &GameGridItem::menuRequested, this, menu);
-	connect(m_table, &GameTableItem::activated, this, run);
-	connect(m_table, &GameTableItem::menuRequested, this, menu);
-	connect(m_add, &FocusButtonItem::activated, this, &LibraryPageItem::AddRequested);
-	connect(m_menu, &ActionMenuItem::chosen, this, &LibraryPageItem::MenuChosen);
-	connect(m_menu, &ActionMenuItem::shownChanged, this,
+	connect(m_grid, &GameGridItem::Activated, this, run);
+	connect(m_grid, &GameGridItem::MenuRequested, this, menu);
+	connect(m_table, &GameTableItem::Activated, this, run);
+	connect(m_table, &GameTableItem::MenuRequested, this, menu);
+	connect(m_add, &FocusButtonItem::Activated, this, &LibraryPageItem::AddRequested);
+	connect(m_menu, &ActionMenuItem::Chosen, this, &LibraryPageItem::MenuChosen);
+	connect(m_menu, &ActionMenuItem::ShownChanged, this,
 	        [this]()
 	        {
 		        if (!m_menu->Shown())
@@ -186,13 +187,13 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 			        FocusGames();
 		        }
 	        });
-	connect(m_pad, &TextPadItem::edited, this,
+	connect(m_pad, &TextPadItem::Edited, this,
 	        [this](const QString& text)
 	        {
 		        m_search->SetText(text);
 		        Filter();
 	        });
-	connect(m_pad, &TextPadItem::shownChanged, this,
+	connect(m_pad, &TextPadItem::ShownChanged, this,
 	        [this]()
 	        {
 		        if (!m_pad->Shown())
@@ -379,7 +380,7 @@ void LibraryPageItem::SearchReturn()
 		return;
 	}
 	m_pad->SetText(m_search->Text());
-	m_pad->openFor(QStringLiteral("search"), tr("Search games"));
+	m_pad->OpenFor(QStringLiteral("search"), tr("Search games"));
 }
 
 void LibraryPageItem::OpenMenu(int row)
@@ -400,7 +401,7 @@ void LibraryPageItem::OpenMenu(int row)
 	    QVariantMap {{"label", tr("Open game folder")}, {"action", "folder"}},
 	    QVariantMap {{"label", tr("Delete")}, {"action", "delete"}, {"danger", true}},
 	    QVariantMap {{"label", tr("Close")}, {"action", "close"}}};
-	m_menu->openFor(game, row, items);
+	m_menu->OpenFor(game, row, items);
 }
 
 void LibraryPageItem::MenuChosen(const QString& action, int row)

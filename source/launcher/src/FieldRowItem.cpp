@@ -85,7 +85,7 @@ FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuick
 		case FieldType::Modules:
 			m_button = new FocusButtonItem(this);
 			m_button->SetText(tr("Rescan files"));
-			connect(m_button, &FocusButtonItem::activated, this,
+			connect(m_button, &FocusButtonItem::Activated, this,
 			        [this, key]() { emit Edited(key, LauncherBackend::Instance()->ScanElfs(m_basedir, m_value.toList())); });
 			break;
 		case FieldType::Params: break;
@@ -99,7 +99,7 @@ FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuick
 	{
 		m_button = new FocusButtonItem(this);
 		m_button->SetText(tr("Browse…"));
-		connect(m_button, &FocusButtonItem::activated, this, [this, key]() { emit BrowseRequested(key, m_field.folder); });
+		connect(m_button, &FocusButtonItem::Activated, this, [this, key]() { emit BrowseRequested(key, m_field.folder); });
 	}
 	if (field.type == FieldType::Number)
 	{
@@ -116,10 +116,10 @@ FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuick
 		connect(m_input, &QQuickItem::activeFocusChanged, this, &FieldRowItem::ShowValue);
 		m_minus = new FocusButtonItem(this);
 		m_minus->SetText(QStringLiteral("−10"));
-		connect(m_minus, &FocusButtonItem::activated, this, [this]() { Step(-10); });
+		connect(m_minus, &FocusButtonItem::Activated, this, [this]() { Step(-10); });
 		m_plus = new FocusButtonItem(this);
 		m_plus->SetText(QStringLiteral("+10"));
-		connect(m_plus, &FocusButtonItem::activated, this, [this]() { Step(10); });
+		connect(m_plus, &FocusButtonItem::Activated, this, [this]() { Step(10); });
 	}
 }
 

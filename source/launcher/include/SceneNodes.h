@@ -86,7 +86,7 @@ private:
 	QSGGeometry m_geometry;
 };
 
-// The application font at a pixel size, as a QML Text item without a font family uses it.
+// The application font at a pixel size, as text without a font family uses it.
 QFont SceneFont(qreal pixel_size, QFont::Weight weight = QFont::Normal);
 
 // The same, in the platform's fixed-width family.

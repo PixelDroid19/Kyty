@@ -110,12 +110,11 @@ void TextPadItem::SetText(const QString& text)
 	if (text != m_text)
 	{
 		m_text = text;
-		emit TextChanged();
 		update();
 	}
 }
 
-void TextPadItem::openFor(const QString& key, const QString& title)
+void TextPadItem::OpenFor(const QString& key, const QString& title)
 {
 	m_key     = key;
 	m_title   = title;
@@ -124,11 +123,11 @@ void TextPadItem::openFor(const QString& key, const QString& title)
 	m_shown   = true;
 	setVisible(true);
 	forceActiveFocus(Qt::OtherFocusReason);
-	emit shownChanged();
+	emit ShownChanged();
 	update();
 }
 
-void TextPadItem::close()
+void TextPadItem::Close()
 {
 	if (!m_shown)
 	{
@@ -136,7 +135,7 @@ void TextPadItem::close()
 	}
 	m_shown = false;
 	setVisible(false);
-	emit shownChanged();
+	emit ShownChanged();
 }
 
 QString TextPadItem::Label(int index) const
@@ -154,16 +153,16 @@ void TextPadItem::Press(int index)
 		update();
 	} else if (token == QLatin1String("Del"))
 	{
-		emit edited(m_text.left(m_text.size() - 1));
+		emit Edited(m_text.left(m_text.size() - 1));
 	} else if (token == QLatin1String("Space"))
 	{
-		emit edited(m_text + QLatin1Char(' '));
+		emit Edited(m_text + QLatin1Char(' '));
 	} else if (token == QLatin1String("Done"))
 	{
-		close();
+		Close();
 	} else
 	{
-		emit edited(m_text + Label(index));
+		emit Edited(m_text + Label(index));
 	}
 }
 
@@ -253,8 +252,8 @@ void TextPadItem::keyPressEvent(QKeyEvent* event)
 			return;
 		case Qt::Key_Return:
 		case Qt::Key_Enter: Press(m_current); return;
-		case Qt::Key_Escape: close(); return;
-		case Qt::Key_Backspace: emit edited(m_text.left(m_text.size() - 1)); return;
+		case Qt::Key_Escape: Close(); return;
+		case Qt::Key_Backspace: emit Edited(m_text.left(m_text.size() - 1)); return;
 		default: break;
 	}
 	const auto modifiers = event->modifiers() & ~Qt::KeypadModifier;
@@ -262,7 +261,7 @@ void TextPadItem::keyPressEvent(QKeyEvent* event)
 	if (!text.isEmpty() && text.at(0).isPrint() && modifiers != Qt::ControlModifier &&
 	    modifiers != (Qt::ControlModifier | Qt::ShiftModifier))
 	{
-		emit edited(m_text + text);
+		emit Edited(m_text + text);
 	}
 }
 
@@ -279,7 +278,7 @@ void TextPadItem::mouseReleaseEvent(QMouseEvent* event)
 	}
 	if (!Layout().panel.contains(event->position()))
 	{
-		close();
+		Close();
 	}
 }
 

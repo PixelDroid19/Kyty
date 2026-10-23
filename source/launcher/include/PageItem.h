@@ -7,7 +7,6 @@
 
 #include <QQuickItem>
 #include <QVariantList>
-#include <QtQml/qqmlregistration.h>
 
 // A scrolling page of text and buttons, described by a subclass with a PageLayout. The arrow keys move the
 // focus between the buttons and scroll it into view, Enter and Space press the focused button, Escape closes
@@ -15,23 +14,19 @@
 class PageItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_ANONYMOUS
 	KYTY_QT_CLASS_NO_COPY(PageItem);
 
-	// What the page's keys and buttons do, for the hint bar; see HintBarItem.
-	Q_PROPERTY(QVariantList hints READ Hints CONSTANT)
-
 signals:
-	// QML maps only signals that start in lower case to on... handlers.
-	void closed(); // NOLINT(readability-identifier-naming)
+	void Closed();
 
 public:
 	~PageItem() override = default;
 
+	// What the page's keys and buttons do, for the hint bar; see HintBarItem.
 	[[nodiscard]] virtual QVariantList Hints() const = 0;
 
 	// Puts the focus on the page's first button.
-	Q_INVOKABLE void focusDefault(); // NOLINT(readability-identifier-naming)
+	void FocusDefault();
 
 protected:
 	// The content is at most max_width wide and starts top below the item's top; sizes in units.

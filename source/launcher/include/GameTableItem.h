@@ -8,7 +8,6 @@
 
 #include <QQuickItem>
 #include <QVariantList>
-#include <QtQml/qqmlregistration.h>
 
 // The games of the library as a table: icon, name, serial, region and version under fixed column names. Only
 // the rows in view are drawn. Up and Down move the selection; Up on the first row and Left are left to
@@ -16,18 +15,12 @@
 class GameTableItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(GameTable)
 	KYTY_QT_CLASS_NO_COPY(GameTableItem);
 
-	Q_PROPERTY(QVariantList games READ Games WRITE SetGames NOTIFY GamesChanged)
-	Q_PROPERTY(int currentIndex READ CurrentIndex WRITE SetCurrentIndex NOTIFY CurrentIndexChanged)
-
 signals:
-	void GamesChanged();
 	void CurrentIndexChanged();
-	// QML maps only signals that start in lower case to on... handlers.
-	void activated(int index);     // NOLINT(readability-identifier-naming)
-	void menuRequested(int index); // NOLINT(readability-identifier-naming)
+	void Activated(int index);
+	void MenuRequested(int index);
 
 public:
 	explicit GameTableItem(QQuickItem* parent = nullptr);

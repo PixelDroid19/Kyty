@@ -189,7 +189,6 @@ void GameTableItem::SetGames(const QVariantList& games)
 		ShowCurrent(false);
 		Changed();
 	}
-	emit GamesChanged();
 }
 
 void GameTableItem::SetCurrentIndex(int index)
@@ -325,7 +324,7 @@ void GameTableItem::keyPressEvent(QKeyEvent* event)
 		case Qt::Key_Enter:
 			if (count > 0)
 			{
-				emit activated(m_current);
+				emit Activated(m_current);
 				return;
 			}
 			break;
@@ -346,7 +345,7 @@ void GameTableItem::mousePressEvent(QMouseEvent* event)
 	forceActiveFocus(Qt::MouseFocusReason);
 	if (event->button() == Qt::RightButton)
 	{
-		emit menuRequested(index);
+		emit MenuRequested(index);
 	}
 }
 
@@ -355,7 +354,7 @@ void GameTableItem::mouseDoubleClickEvent(QMouseEvent* event)
 	const int index = IndexAt(event->position());
 	if (index >= 0 && event->button() == Qt::LeftButton)
 	{
-		emit activated(index);
+		emit Activated(index);
 	}
 }
 

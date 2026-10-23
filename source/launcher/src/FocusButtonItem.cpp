@@ -95,7 +95,7 @@ void FocusButtonItem::Activate()
 {
 	if (m_allowed)
 	{
-		emit activated();
+		emit Activated();
 	}
 }
 

@@ -9,25 +9,18 @@
 
 #include <QQuickItem>
 #include <QVariantList>
-#include <QtQml/qqmlregistration.h>
 
 // The recently played games as a row of wide cards showing each game's picture and name. Left and Right move
 // the selection; Left on the first card is left to KeyNavigation. A click runs the game, as Enter does.
 class HeroRowItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(HeroRow)
 	KYTY_QT_CLASS_NO_COPY(HeroRowItem);
 
-	Q_PROPERTY(QVariantList games READ Games WRITE SetGames NOTIFY GamesChanged)
-	Q_PROPERTY(int currentIndex READ CurrentIndex WRITE SetCurrentIndex NOTIFY CurrentIndexChanged)
-
 signals:
-	void GamesChanged();
 	void CurrentIndexChanged();
-	// QML maps only signals that start in lower case to on... handlers.
-	void activated(int index);     // NOLINT(readability-identifier-naming)
-	void menuRequested(int index); // NOLINT(readability-identifier-naming)
+	void Activated(int index);
+	void MenuRequested(int index);
 
 public:
 	explicit HeroRowItem(QQuickItem* parent = nullptr);

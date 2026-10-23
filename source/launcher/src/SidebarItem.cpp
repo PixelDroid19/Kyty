@@ -117,7 +117,6 @@ void SidebarItem::SetCurrent(const QString& current)
 	}
 	m_current = current;
 	update();
-	emit CurrentChanged();
 }
 
 void SidebarItem::SetRightTarget(QQuickItem* target)
@@ -127,7 +126,6 @@ void SidebarItem::SetRightTarget(QQuickItem* target)
 		return;
 	}
 	m_right_target = target;
-	emit RightTargetChanged();
 }
 
 void SidebarItem::SetEntriesTop(qreal top)
@@ -138,7 +136,6 @@ void SidebarItem::SetEntriesTop(qreal top)
 	}
 	m_entries_top = top;
 	update();
-	emit EntriesTopChanged();
 }
 
 QRectF SidebarItem::EntryRect(int index) const
@@ -184,11 +181,11 @@ void SidebarItem::Activate(int index)
 {
 	switch (index)
 	{
-		case 0: emit libraryRequested(); break;
-		case 1: emit addGameRequested(); break;
-		case 2: emit settingsRequested(); break;
-		case 3: emit aboutRequested(); break;
-		case 4: emit quitRequested(); break;
+		case 0: emit LibraryRequested(); break;
+		case 1: emit AddGameRequested(); break;
+		case 2: emit SettingsRequested(); break;
+		case 3: emit AboutRequested(); break;
+		case 4: emit QuitRequested(); break;
 		default: break;
 	}
 }

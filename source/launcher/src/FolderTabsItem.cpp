@@ -93,7 +93,6 @@ void FolderTabsItem::SetFolders(const QVariantList& folders)
 		SetCurrentIndex(0);
 	}
 	Layout();
-	emit FoldersChanged();
 }
 
 void FolderTabsItem::SetCurrentIndex(int index)

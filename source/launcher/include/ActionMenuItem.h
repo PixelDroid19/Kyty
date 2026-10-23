@@ -6,22 +6,17 @@
 #include <QQuickItem>
 #include <QVariantList>
 #include <QVariantMap>
-#include <QtQml/qqmlregistration.h>
 
 // Options for one game, opened with O, the Start button or a right click, over a scrim that keeps the page
 // below from taking input. Delete asks for confirmation first.
 class ActionMenuItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(ActionMenu)
 	KYTY_QT_CLASS_NO_COPY(ActionMenuItem);
 
-	Q_PROPERTY(bool shown READ Shown NOTIFY shownChanged)
-
 signals:
-	// QML maps only signals that start in lower case to on... handlers.
-	void shownChanged();                         // NOLINT(readability-identifier-naming)
-	void chosen(const QString& action, int row); // NOLINT(readability-identifier-naming)
+	void ShownChanged();
+	void Chosen(const QString& action, int row);
 
 public:
 	explicit ActionMenuItem(QQuickItem* parent = nullptr);
@@ -31,8 +26,8 @@ public:
 
 	// Opens the menu for the game in row with items, each { label, action, allowed, danger }; allowed defaults
 	// to true and danger to false.
-	Q_INVOKABLE void openFor(const QVariantMap& game, int row, const QVariantList& items); // NOLINT(readability-identifier-naming)
-	Q_INVOKABLE void close();                                                              // NOLINT(readability-identifier-naming)
+	void OpenFor(const QVariantMap& game, int row, const QVariantList& items);
+	void Close();
 
 protected:
 	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;

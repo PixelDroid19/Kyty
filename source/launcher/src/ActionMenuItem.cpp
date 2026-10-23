@@ -97,10 +97,10 @@ void ActionMenuItem::SetShown(bool shown)
 	}
 	m_shown = shown;
 	setVisible(shown);
-	emit shownChanged();
+	emit ShownChanged();
 }
 
-void ActionMenuItem::openFor(const QVariantMap& game, int row, const QVariantList& items)
+void ActionMenuItem::OpenFor(const QVariantMap& game, int row, const QVariantList& items)
 {
 	m_row        = row;
 	m_heading    = game.value("title").toString();
@@ -113,7 +113,7 @@ void ActionMenuItem::openFor(const QVariantMap& game, int row, const QVariantLis
 	update();
 }
 
-void ActionMenuItem::close()
+void ActionMenuItem::Close()
 {
 	m_confirming = false;
 	SetShown(false);
@@ -128,7 +128,7 @@ void ActionMenuItem::Activate(int index)
 	const auto action = m_actions.at(index).toMap().value("action").toString();
 	if (action == QLatin1String("close"))
 	{
-		close();
+		Close();
 		return;
 	}
 	if (action == QLatin1String("delete"))
@@ -140,8 +140,8 @@ void ActionMenuItem::Activate(int index)
 		update();
 		return;
 	}
-	close();
-	emit chosen(action == QLatin1String("confirm-delete") ? QStringLiteral("delete") : action, m_row);
+	Close();
+	emit Chosen(action == QLatin1String("confirm-delete") ? QStringLiteral("delete") : action, m_row);
 }
 
 ActionMenuItem::Geometry ActionMenuItem::Layout() const
@@ -207,7 +207,7 @@ void ActionMenuItem::keyPressEvent(QKeyEvent* event)
 		case Qt::Key_Return:
 		case Qt::Key_Enter: Activate(m_current); return;
 		case Qt::Key_Escape:
-		case Qt::Key_Menu: close(); return;
+		case Qt::Key_Menu: Close(); return;
 		default: return;
 	}
 	update();
@@ -227,7 +227,7 @@ void ActionMenuItem::mouseReleaseEvent(QMouseEvent* event)
 	}
 	if (!Layout().panel.contains(event->position()))
 	{
-		close();
+		Close();
 	}
 }
 

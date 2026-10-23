@@ -8,7 +8,6 @@
 #include <QString>
 #include <QTimer>
 #include <QVariantAnimation>
-#include <QtQml/qqmlregistration.h>
 
 // The focused game's key art behind the whole window, darkened so the pages stay readable.
 // A new picture loads only after the focus has rested a moment, so scrolling decodes nothing.
@@ -17,19 +16,13 @@
 class GameBackdropItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(GameBackdrop)
 	KYTY_QT_CLASS_NO_COPY(GameBackdropItem);
-
-	// image:// address of the picture to show; empty shows none.
-	Q_PROPERTY(QString picture READ Picture WRITE SetPicture NOTIFY PictureChanged)
-
-signals:
-	void PictureChanged();
 
 public:
 	explicit GameBackdropItem(QQuickItem* parent = nullptr);
 	~GameBackdropItem() override = default;
 
+	// image:// address of the picture to show; empty shows none.
 	[[nodiscard]] const QString& Picture() const { return m_picture; }
 	void                         SetPicture(const QString& picture);
 

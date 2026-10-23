@@ -85,7 +85,7 @@ PageItem::PageItem(qreal max_width, qreal top, qreal spacing, QQuickItem* parent
 	        });
 }
 
-void PageItem::focusDefault()
+void PageItem::FocusDefault()
 {
 	FocusButton(0);
 	forceActiveFocus(Qt::OtherFocusReason);
@@ -249,7 +249,7 @@ void PageItem::keyPressEvent(QKeyEvent* event)
 		case Qt::Key_Return:
 		case Qt::Key_Enter:
 		case Qt::Key_Space: PressButton(m_focused); return;
-		case Qt::Key_Escape: emit closed(); return;
+		case Qt::Key_Escape: emit Closed(); return;
 		default: break;
 	}
 	if (target < 0)

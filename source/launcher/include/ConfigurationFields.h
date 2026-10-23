@@ -10,7 +10,7 @@ namespace Kyty {
 class Configuration;
 } // namespace Kyty
 
-// Plain-map view of a configuration, the form the QML editor works on.
+// Plain-map view of a configuration, the form the editor works on.
 // Enum fields are stored as their text, elfs as a list of {path, selected, present}.
 QVariantMap ConfigurationToFields(const Kyty::Configuration& info);
 

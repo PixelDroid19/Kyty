@@ -24,24 +24,6 @@ class LauncherBackend: public QObject
 	Q_OBJECT
 	KYTY_QT_CLASS_NO_COPY(LauncherBackend);
 
-	Q_PROPERTY(QVariantList games READ Games NOTIFY StateChanged)
-	Q_PROPERTY(QVariantList folders READ Folders NOTIFY StateChanged)
-	Q_PROPERTY(QVariantList recent READ Recent NOTIFY StateChanged)
-	Q_PROPERTY(bool emulatorReady READ IsEmulatorReady NOTIFY StateChanged)
-	Q_PROPERTY(QString emulatorPath READ EmulatorPath NOTIFY StateChanged)
-	Q_PROPERTY(QString emulatorVersion READ EmulatorVersion NOTIFY StateChanged)
-	Q_PROPERTY(QString emulatorMessage READ EmulatorMessage NOTIFY StateChanged)
-	Q_PROPERTY(bool running READ IsRunning NOTIFY StateChanged)
-	Q_PROPERTY(int runningRow READ RunningRow NOTIFY StateChanged)
-	Q_PROPERTY(QString controllerName READ ControllerName NOTIFY StateChanged)
-	Q_PROPERTY(QStringList runModes READ RunModes CONSTANT)
-	Q_PROPERTY(int runModeIndex READ RunModeIndex NOTIFY StateChanged)
-	Q_PROPERTY(bool tableView READ IsTableView NOTIFY StateChanged)
-	Q_PROPERTY(QString logPath READ LogPath NOTIFY StateChanged)
-	Q_PROPERTY(QString settingsFile READ SettingsFile CONSTANT)
-	// The emulator settings of every game without custom settings, in the editor's field form.
-	Q_PROPERTY(QVariantMap globalFields READ GlobalFields NOTIFY StateChanged)
-
 signals:
 	void StateChanged();
 	// message is empty when the game closed normally, otherwise it says how it ended.
@@ -73,33 +55,34 @@ public:
 	[[nodiscard]] bool         IsTableView() const { return m_table_view; }
 	[[nodiscard]] QString      LogPath() const { return m_runner.LogPath(); }
 	[[nodiscard]] QString      SettingsFile() const { return m_settings_file; }
+	// The emulator settings of every game without custom settings, in the editor's field form.
 	[[nodiscard]] QVariantMap  GlobalFields() const;
 
-	Q_INVOKABLE QVariantMap   FieldsFor(int row) const;
-	Q_INVOKABLE QVariantMap   Choices() const;
-	Q_INVOKABLE QVariantMap   GraphicsPreset(const QVariantMap& fields, const QString& preset) const;
-	Q_INVOKABLE QVariantMap   SaveGame(int row, const QVariantMap& fields);
+	QVariantMap FieldsFor(int row) const;
+	QVariantMap Choices() const;
+	QVariantMap GraphicsPreset(const QVariantMap& fields, const QString& preset) const;
+	QVariantMap SaveGame(int row, const QVariantMap& fields);
 	// Returns an error text, or an empty string once the global emulator settings are saved.
-	Q_INVOKABLE QString       SaveGlobal(const QVariantMap& fields);
-	Q_INVOKABLE void          DeleteGame(int row);
-	Q_INVOKABLE void          MoveGame(int row, int delta);
-	Q_INVOKABLE QString       RunGame(int row);
-	Q_INVOKABLE QString       TestGame(const QVariantMap& fields);
-	Q_INVOKABLE QVariantMap   DetectGame(const QString& folder) const;
-	Q_INVOKABLE bool          IsGameFolder(const QString& folder) const;
+	QString     SaveGlobal(const QVariantMap& fields);
+	void        DeleteGame(int row);
+	void        MoveGame(int row, int delta);
+	QString     RunGame(int row);
+	QString     TestGame(const QVariantMap& fields);
+	QVariantMap DetectGame(const QString& folder) const;
+	bool        IsGameFolder(const QString& folder) const;
 	// Finds the games below folder in the background and adds the ones not listed yet; reports FolderImported().
-	Q_INVOKABLE QString       ImportFolder(const QString& folder);
-	Q_INVOKABLE QVariantList  ScanElfs(const QString& basedir, const QVariantList& current) const;
-	Q_INVOKABLE QVariantList  ParamEntries(const QString& param_file) const;
-	Q_INVOKABLE void          SetEmulatorPath(const QString& path);
-	Q_INVOKABLE void          SetRunModeIndex(int index);
+	QString      ImportFolder(const QString& folder);
+	QVariantList ScanElfs(const QString& basedir, const QVariantList& current) const;
+	QVariantList ParamEntries(const QString& param_file) const;
+	void         SetEmulatorPath(const QString& path);
+	void         SetRunModeIndex(int index);
 	// Shows the library as a table instead of a grid of covers; remembered between starts.
-	Q_INVOKABLE void          SetTableView(bool table);
-	Q_INVOKABLE void          StopGame();
-	Q_INVOKABLE void          OpenLog() const;
-	Q_INVOKABLE void          OpenGameFolder(int row) const;
-	Q_INVOKABLE QVariantMap   WindowGeometry() const;
-	Q_INVOKABLE void          SaveWindowGeometry(int x, int y, int width, int height);
+	void        SetTableView(bool table);
+	void        StopGame();
+	void        OpenLog() const;
+	void        OpenGameFolder(int row) const;
+	QVariantMap WindowGeometry() const;
+	void        SaveWindowGeometry(int x, int y, int width, int height);
 
 private:
 	void         Load();

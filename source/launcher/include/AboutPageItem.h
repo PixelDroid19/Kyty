@@ -9,14 +9,7 @@
 class AboutPageItem: public PageItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(AboutPage)
 	KYTY_QT_CLASS_NO_COPY(AboutPageItem);
-
-	// The mascot shown in the header; the page sizes it and scrolls it with the content.
-	Q_PROPERTY(QQuickItem* mascot READ Mascot WRITE SetMascot NOTIFY MascotChanged)
-
-signals:
-	void MascotChanged();
 
 public:
 	explicit AboutPageItem(QQuickItem* parent = nullptr);
@@ -24,6 +17,7 @@ public:
 
 	[[nodiscard]] QVariantList Hints() const override;
 	[[nodiscard]] QQuickItem*  Mascot() const { return m_mascot; }
+	// The mascot shown in the header; the page sizes it and scrolls it with the content.
 	void                       SetMascot(QQuickItem* mascot);
 
 protected:

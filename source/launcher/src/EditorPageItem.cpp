@@ -141,21 +141,21 @@ EditorPageItem::EditorPageItem(QQuickItem* parent): QQuickItem(parent)
 		auto* button = new FocusButtonItem(this);
 		button->SetText(text);
 		button->SetPrimary(primary);
-		connect(button, &FocusButtonItem::activated, this, action);
+		connect(button, &FocusButtonItem::Activated, this, action);
 		return button;
 	};
 	m_save     = add_button(tr("Save"), true, &EditorPageItem::Save);
 	m_test     = add_button(tr("Test run"), false, &EditorPageItem::TestRun);
 	m_defaults = add_button(tr("Restore defaults"), false, &EditorPageItem::RestoreDefaults);
-	m_cancel   = add_button(tr("Cancel"), false, &EditorPageItem::cancelled);
+	m_cancel   = add_button(tr("Cancel"), false, &EditorPageItem::Cancelled);
 
 	m_viewport = new QQuickItem(this);
 	m_viewport->setClip(true);
 	m_content = new QQuickItem(m_viewport);
 
 	m_pad = new TextPadItem(this);
-	connect(m_pad, &TextPadItem::edited, this, &EditorPageItem::PadEdited);
-	connect(m_pad, &TextPadItem::shownChanged, this,
+	connect(m_pad, &TextPadItem::Edited, this, &EditorPageItem::PadEdited);
+	connect(m_pad, &TextPadItem::ShownChanged, this,
 	        [this]()
 	        {
 		        if (!m_pad->Shown())
@@ -164,7 +164,7 @@ EditorPageItem::EditorPageItem(QQuickItem* parent): QQuickItem(parent)
 		        }
 	        });
 
-	connect(&m_chooser, &FileChooser::chosen, this, [this](const QString& path) { SetField(m_browse_key, path); });
+	connect(&m_chooser, &FileChooser::Chosen, this, [this](const QString& path) { SetField(m_browse_key, path); });
 	connect(&m_scroll, &ViewScroll::Moved, this, [this]() { m_content->setY(-m_scroll.Position()); });
 	connect(Theme::Instance(), &Theme::UChanged, this, &QQuickItem::polish);
 }
@@ -180,7 +180,7 @@ QVariantList EditorPageItem::Hints() const
 	return hints;
 }
 
-void EditorPageItem::open(int row, const QVariantMap& fields)
+void EditorPageItem::OpenGame(int row, const QVariantMap& fields)
 {
 	auto values = fields;
 	if (!values.value("basedir").toString().isEmpty())
@@ -190,7 +190,7 @@ void EditorPageItem::open(int row, const QVariantMap& fields)
 	Open(false, row, values);
 }
 
-void EditorPageItem::openGlobal()
+void EditorPageItem::OpenGlobal()
 {
 	Open(true, -1, LauncherBackend::Instance()->GlobalFields());
 }
@@ -202,7 +202,7 @@ void EditorPageItem::Open(bool global, int row, const QVariantMap& values)
 	m_row                   = row;
 	m_error.clear();
 	m_status.clear();
-	m_pad->close();
+	m_pad->Close();
 	m_test->setVisible(!global);
 	m_defaults->setVisible(global);
 	if (mode_changed)
@@ -296,7 +296,7 @@ void EditorPageItem::SetField(const QString& key, const QVariant& value)
 void EditorPageItem::OpenPad(const QString& key, const QString& title)
 {
 	m_pad->SetText(m_values.value(key).toString());
-	m_pad->openFor(key, title);
+	m_pad->OpenFor(key, title);
 }
 
 void EditorPageItem::PadEdited(const QString& text)
@@ -326,10 +326,10 @@ void EditorPageItem::Browse(const QString& key, bool folder)
 	m_browse_key = key;
 	if (folder)
 	{
-		m_chooser.chooseFolder(tr("Choose the game folder"));
+		m_chooser.ChooseFolder(tr("Choose the game folder"));
 	} else
 	{
-		m_chooser.chooseFile(tr("Choose a file"));
+		m_chooser.ChooseFile(tr("Choose a file"));
 	}
 }
 
@@ -342,7 +342,7 @@ void EditorPageItem::Save()
 		polish();
 		if (m_error.isEmpty())
 		{
-			emit saved(-1);
+			emit Saved(-1);
 		}
 		return;
 	}
@@ -351,7 +351,7 @@ void EditorPageItem::Save()
 	polish();
 	if (m_error.isEmpty())
 	{
-		emit saved(result.value("row").toInt());
+		emit Saved(result.value("row").toInt());
 	}
 }
 
@@ -495,7 +495,7 @@ void EditorPageItem::keyPressEvent(QKeyEvent* event)
 				return;
 			}
 			break;
-		case Qt::Key_Escape: emit cancelled(); return;
+		case Qt::Key_Escape: emit Cancelled(); return;
 		case Qt::Key_O: Save(); return;
 		case Qt::Key_E:
 			if (!m_global)

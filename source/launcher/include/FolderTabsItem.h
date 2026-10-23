@@ -7,7 +7,6 @@
 #include <QQuickItem>
 #include <QVariantList>
 #include <QVector>
-#include <QtQml/qqmlregistration.h>
 
 // The library's folders as tabs, each with its game count, the selected one underlined. Left and Right change
 // the folder; Left on the first tab and Right on the last are left to KeyNavigation. Each tab is padded so its
@@ -15,15 +14,9 @@
 class FolderTabsItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(FolderTabs)
 	KYTY_QT_CLASS_NO_COPY(FolderTabsItem);
 
-	Q_PROPERTY(QVariantList folders READ Folders WRITE SetFolders NOTIFY FoldersChanged)
-	Q_PROPERTY(int currentIndex READ CurrentIndex WRITE SetCurrentIndex NOTIFY CurrentIndexChanged)
-	Q_PROPERTY(qreal tabPadding READ TabPadding NOTIFY TabPaddingChanged)
-
 signals:
-	void FoldersChanged();
 	void CurrentIndexChanged();
 	void TabPaddingChanged();
 

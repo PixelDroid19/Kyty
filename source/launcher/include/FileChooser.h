@@ -7,26 +7,23 @@
 #include <QObject>
 #include <QPointer>
 #include <QString>
-#include <QtQml/qqmlregistration.h>
 
 // Picks a file or a folder with the platform's file dialog, without blocking the event loop; the launcher's
 // window stays drawn but takes no input until the dialog closes.
 class FileChooser: public QObject
 {
 	Q_OBJECT
-	QML_ELEMENT
 	KYTY_QT_CLASS_NO_COPY(FileChooser);
 
 signals:
-	// QML maps only signals that start in lower case to on... handlers.
-	void chosen(const QString& path); // NOLINT(readability-identifier-naming)
+	void Chosen(const QString& path);
 
 public:
 	explicit FileChooser(QObject* parent = nullptr);
 	~FileChooser() override;
 
-	Q_INVOKABLE void chooseFile(const QString& title);   // NOLINT(readability-identifier-naming)
-	Q_INVOKABLE void chooseFolder(const QString& title); // NOLINT(readability-identifier-naming)
+	void ChooseFile(const QString& title);
+	void ChooseFolder(const QString& title);
 
 private:
 	void Open(const QString& title, QFileDialog::FileMode mode);

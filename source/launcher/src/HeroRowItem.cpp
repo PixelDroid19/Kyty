@@ -172,7 +172,6 @@ void HeroRowItem::SetGames(const QVariantList& games)
 		ShowCurrent(false);
 		Changed();
 	}
-	emit GamesChanged();
 }
 
 void HeroRowItem::SetCurrentIndex(int index)
@@ -293,7 +292,7 @@ void HeroRowItem::keyPressEvent(QKeyEvent* event)
 		case Qt::Key_Enter:
 			if (count > 0)
 			{
-				emit activated(m_current);
+				emit Activated(m_current);
 				return;
 			}
 			break;
@@ -312,12 +311,12 @@ void HeroRowItem::mousePressEvent(QMouseEvent* event)
 	}
 	if (event->button() == Qt::RightButton)
 	{
-		emit menuRequested(index);
+		emit MenuRequested(index);
 		return;
 	}
 	SetCurrentIndex(index);
 	forceActiveFocus(Qt::MouseFocusReason);
-	emit activated(index);
+	emit Activated(index);
 }
 
 void HeroRowItem::wheelEvent(QWheelEvent* event)

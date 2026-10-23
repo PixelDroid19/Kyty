@@ -11,7 +11,7 @@
 class QWindow;
 struct SDL_Gamepad;
 
-// Turns a game controller into key presses sent to the window, so the QML pages share one navigation path with the keyboard.
+// Turns a game controller into key presses sent to the window, so the pages share one navigation path with the keyboard.
 // Uses SDL 3 for input only; no SDL video is initialised.
 class GamepadInput: public QObject
 {

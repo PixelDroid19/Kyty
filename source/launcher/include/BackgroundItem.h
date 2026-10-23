@@ -4,13 +4,11 @@
 #include "Common.h"
 
 #include <QQuickItem>
-#include <QtQml/qqmlregistration.h>
 
 // Static backdrop made of linear gradients only: no blur, no animation, drawn once per size.
 class BackgroundItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(Background)
 	KYTY_QT_CLASS_NO_COPY(BackgroundItem);
 
 public:

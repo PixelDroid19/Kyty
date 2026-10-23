@@ -5,7 +5,6 @@
 
 #include <QQuickItem>
 #include <QString>
-#include <QtQml/qqmlregistration.h>
 
 // An on-screen keyboard over a scrim, so a controller can enter names and paths. It does not keep the text: each
 // key reports the text it would make, and the owner sets the text it accepts back. While it is open no key
@@ -13,18 +12,11 @@
 class TextPadItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(TextPad)
 	KYTY_QT_CLASS_NO_COPY(TextPadItem);
 
-	Q_PROPERTY(bool shown READ Shown NOTIFY shownChanged)
-	Q_PROPERTY(QString key READ Key NOTIFY shownChanged)
-	Q_PROPERTY(QString text READ Text WRITE SetText NOTIFY TextChanged)
-
 signals:
-	void TextChanged();
-	// QML maps only signals that start in lower case to on... handlers.
-	void shownChanged();              // NOLINT(readability-identifier-naming)
-	void edited(const QString& text); // NOLINT(readability-identifier-naming)
+	void ShownChanged();
+	void Edited(const QString& text);
 
 public:
 	explicit TextPadItem(QQuickItem* parent = nullptr);
@@ -36,8 +28,8 @@ public:
 	void                  SetText(const QString& text);
 
 	// Opens the pad for the field named key, with title above the text.
-	Q_INVOKABLE void openFor(const QString& key, const QString& title); // NOLINT(readability-identifier-naming)
-	Q_INVOKABLE void close();                                           // NOLINT(readability-identifier-naming)
+	void OpenFor(const QString& key, const QString& title);
+	void Close();
 
 protected:
 	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;

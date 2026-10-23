@@ -5,14 +5,12 @@
 
 #include <QQuickItem>
 #include <QTimer>
-#include <QtQml/qqmlregistration.h>
 
 // A short message in a pill that hides itself after a few seconds. It sizes itself to its text, at most as wide
 // as its parent less a margin, and wraps the text past that.
 class NoticeItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(Notice)
 	KYTY_QT_CLASS_NO_COPY(NoticeItem);
 
 public:
@@ -20,7 +18,7 @@ public:
 	~NoticeItem() override = default;
 
 	// Shows text, replacing any message still shown, and starts the time to hide it again.
-	Q_INVOKABLE void show(const QString& text); // NOLINT(readability-identifier-naming)
+	void Show(const QString& text);
 
 protected:
 	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;

@@ -170,7 +170,6 @@ void GameBackdropItem::SetPicture(const QString& picture)
 	}
 	m_picture = picture;
 	m_settle.start();
-	emit PictureChanged();
 }
 
 void GameBackdropItem::Show()

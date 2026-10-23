@@ -200,12 +200,12 @@ void SettingsPageItem::Press(int id)
 	auto* backend = LauncherBackend::Instance();
 	switch (id)
 	{
-		case EmulatorSettings: emit emulatorSettingsRequested(); break;
-		case ChooseProgram: emit programRequested(); break;
+		case EmulatorSettings: emit EmulatorSettingsRequested(); break;
+		case ChooseProgram: emit ProgramRequested(); break;
 		case SearchProgram: backend->SetEmulatorPath(QString()); break;
 		case RunMode: backend->SetRunModeIndex((backend->RunModeIndex() + 1) % std::max<int>(1, backend->RunModes().size())); break;
 		case OpenLog: backend->OpenLog(); break;
-		case Back: emit closed(); break;
+		case Back: emit Closed(); break;
 		default: break;
 	}
 }

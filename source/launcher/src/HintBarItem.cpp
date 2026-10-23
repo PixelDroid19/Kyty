@@ -50,7 +50,6 @@ void HintBarItem::SetHints(const QVariantList& hints)
 	m_hints = hints;
 	m_layout++;
 	update();
-	emit HintsChanged();
 }
 
 void HintBarItem::SetPad(bool pad)
@@ -62,7 +61,6 @@ void HintBarItem::SetPad(bool pad)
 	m_pad = pad;
 	m_layout++;
 	update();
-	emit PadChanged();
 }
 
 void HintBarItem::geometryChange(const QRectF& new_geometry, const QRectF& old_geometry)

@@ -5,25 +5,17 @@
 
 #include <QQuickItem>
 #include <QString>
-#include <QtQml/qqmlregistration.h>
 
 // A pill-shaped text button for mouse, keyboard and controller: Enter, Return and Space activate it. It sizes
 // itself to its text, like the buttons PageLayout places.
 class FocusButtonItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(FocusButton)
 	KYTY_QT_CLASS_NO_COPY(FocusButtonItem);
-
-	Q_PROPERTY(QString text READ Text WRITE SetText NOTIFY Changed)
-	Q_PROPERTY(bool primary READ Primary WRITE SetPrimary NOTIFY Changed)
-	Q_PROPERTY(bool danger READ Danger WRITE SetDanger NOTIFY Changed)
-	Q_PROPERTY(bool allowed READ Allowed WRITE SetAllowed NOTIFY Changed)
 
 signals:
 	void Changed();
-	// QML maps only signals that start in lower case to on... handlers.
-	void activated(); // NOLINT(readability-identifier-naming)
+	void Activated();
 
 public:
 	explicit FocusButtonItem(QQuickItem* parent = nullptr);

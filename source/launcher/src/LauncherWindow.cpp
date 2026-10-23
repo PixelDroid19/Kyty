@@ -33,7 +33,7 @@ constexpr qreal NOTICE_GAP    = 12;
 
 namespace {
 
-// Builds the item before it joins the scene, so its own itemChange sees it arrive, as for an item built by QML.
+// Builds the item before it joins the scene, so its own itemChange sees it arrive.
 template <typename Item>
 Item* AddItem(QQuickItem* parent)
 {
@@ -87,20 +87,20 @@ LauncherWindow::LauncherWindow()
 	        });
 
 	const auto add_title = tr("Choose a game folder or a folder of games");
-	connect(m_sidebar, &SidebarItem::libraryRequested, this, [this]() { ShowPage(Page::Library); });
-	connect(m_sidebar, &SidebarItem::addGameRequested, this, [this, add_title]() { m_add_chooser.chooseFolder(add_title); });
-	connect(m_sidebar, &SidebarItem::settingsRequested, this, [this]() { ShowPage(Page::Settings); });
-	connect(m_sidebar, &SidebarItem::aboutRequested, this, [this]() { ShowPage(Page::About); });
-	connect(m_sidebar, &SidebarItem::quitRequested, this, &QWindow::close);
+	connect(m_sidebar, &SidebarItem::LibraryRequested, this, [this]() { ShowPage(Page::Library); });
+	connect(m_sidebar, &SidebarItem::AddGameRequested, this, [this, add_title]() { m_add_chooser.ChooseFolder(add_title); });
+	connect(m_sidebar, &SidebarItem::SettingsRequested, this, [this]() { ShowPage(Page::Settings); });
+	connect(m_sidebar, &SidebarItem::AboutRequested, this, [this]() { ShowPage(Page::About); });
+	connect(m_sidebar, &SidebarItem::QuitRequested, this, &QWindow::close);
 	connect(m_kit, &QQuickItem::heightChanged, this, &LauncherWindow::Layout);
 
 	connect(m_library, &LibraryPageItem::RunRequested, this, &LauncherWindow::RunGame);
 	connect(m_library, &LibraryPageItem::EditRequested, this, [this](int row) { OpenEditor(row, LauncherBackend::Instance()->FieldsFor(row)); });
-	connect(m_library, &LibraryPageItem::AddRequested, this, [this, add_title]() { m_add_chooser.chooseFolder(add_title); });
+	connect(m_library, &LibraryPageItem::AddRequested, this, [this, add_title]() { m_add_chooser.ChooseFolder(add_title); });
 	connect(m_library, &LibraryPageItem::ActionRequested, this, &LauncherWindow::HandleAction);
 	connect(m_library, &LibraryPageItem::FocusedGameChanged, this, &LauncherWindow::UpdateBackdrop);
 
-	connect(m_editor, &EditorPageItem::saved, this,
+	connect(m_editor, &EditorPageItem::Saved, this,
 	        [this](int row)
 	        {
 		        if (m_editor->Global())
@@ -111,22 +111,23 @@ LauncherWindow::LauncherWindow()
 		        ShowPage(Page::Library);
 		        m_library->SelectRow(row);
 	        });
-	connect(m_editor, &EditorPageItem::cancelled, this, [this]() { ShowPage(m_editor->Global() ? Page::Settings : Page::Library); });
+	connect(m_editor, &EditorPageItem::Cancelled, this, [this]() { ShowPage(m_editor->Global() ? Page::Settings : Page::Library); });
 	connect(m_editor, &EditorPageItem::ModeChanged, this, &LauncherWindow::UpdatePage);
 
-	connect(m_settings, &SettingsPageItem::closed, this, [this]() { ShowPage(Page::Library); });
-	connect(m_settings, &SettingsPageItem::emulatorSettingsRequested, this,
+	connect(m_settings, &SettingsPageItem::Closed, this, [this]() { ShowPage(Page::Library); });
+	connect(m_settings, &SettingsPageItem::EmulatorSettingsRequested, this,
 	        [this]()
 	        {
-		        m_editor->openGlobal();
+		        m_editor->OpenGlobal();
 		        m_page = Page::Editor;
 		        UpdatePage();
 	        });
-	connect(m_settings, &SettingsPageItem::programRequested, this, [this]() { m_program_chooser.chooseFile(tr("Choose the emulator program")); });
-	connect(m_about, &AboutPageItem::closed, this, [this]() { ShowPage(Page::Library); });
+	connect(m_settings, &SettingsPageItem::ProgramRequested, this,
+	        [this]() { m_program_chooser.ChooseFile(tr("Choose the emulator program")); });
+	connect(m_about, &AboutPageItem::Closed, this, [this]() { ShowPage(Page::Library); });
 
-	connect(&m_add_chooser, &FileChooser::chosen, this, &LauncherWindow::AddFolder);
-	connect(&m_program_chooser, &FileChooser::chosen, backend, &LauncherBackend::SetEmulatorPath);
+	connect(&m_add_chooser, &FileChooser::Chosen, this, &LauncherWindow::AddFolder);
+	connect(&m_program_chooser, &FileChooser::Chosen, backend, &LauncherBackend::SetEmulatorPath);
 	connect(m_notice, &QQuickItem::widthChanged, this, &LauncherWindow::Layout);
 	connect(m_notice, &QQuickItem::heightChanged, this, &LauncherWindow::Layout);
 
@@ -266,15 +267,15 @@ void LauncherWindow::FocusPage()
 	switch (m_page)
 	{
 		case Page::Library: m_library->FocusDefault(); break;
-		case Page::Settings: m_settings->focusDefault(); break;
-		case Page::About: m_about->focusDefault(); break;
+		case Page::Settings: m_settings->FocusDefault(); break;
+		case Page::About: m_about->FocusDefault(); break;
 		case Page::Editor: break;
 	}
 }
 
 void LauncherWindow::OpenEditor(int row, const QVariantMap& fields)
 {
-	m_editor->open(row, fields);
+	m_editor->OpenGame(row, fields);
 	m_page = Page::Editor;
 	UpdatePage();
 }
@@ -289,7 +290,7 @@ void LauncherWindow::AddFolder(const QString& folder)
 		return;
 	}
 	const auto error = backend->ImportFolder(folder);
-	m_notice->show(error.isEmpty() ? tr("Looking for games…") : error);
+	m_notice->Show(error.isEmpty() ? tr("Looking for games…") : error);
 }
 
 void LauncherWindow::RunGame(int row)
@@ -297,7 +298,7 @@ void LauncherWindow::RunGame(int row)
 	const auto error = LauncherBackend::Instance()->RunGame(row);
 	if (!error.isEmpty())
 	{
-		m_notice->show(error);
+		m_notice->Show(error);
 	}
 }
 
@@ -328,7 +329,7 @@ void LauncherWindow::ReportGameFinished(const QString& message)
 		return;
 	}
 	const auto log = LauncherBackend::Instance()->LogPath();
-	m_notice->show(log.isEmpty() ? message : tr("%1 Log: %2").arg(message, log));
+	m_notice->Show(log.isEmpty() ? message : tr("%1 Log: %2").arg(message, log));
 }
 
 void LauncherWindow::ReportFolderImported(int added, int found, const QString& error)
@@ -348,7 +349,7 @@ void LauncherWindow::ReportFolderImported(int added, int found, const QString& e
 	{
 		message += QLatin1Char(' ') + error;
 	}
-	m_notice->show(message);
+	m_notice->Show(message);
 }
 
 void LauncherWindow::keyPressEvent(QKeyEvent* event)

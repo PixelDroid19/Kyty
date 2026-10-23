@@ -81,7 +81,6 @@ void AboutPageItem::SetMascot(QQuickItem* mascot)
 		connect(mascot, &QQuickItem::heightChanged, this, &AboutPageItem::Recompose);
 	}
 	Recompose();
-	emit MascotChanged();
 }
 
 // The mascot beside the launcher's name and a line about the mascot, centred on each other.
@@ -192,7 +191,7 @@ void AboutPageItem::Press(int id)
 {
 	if (id == BACK)
 	{
-		emit closed();
+		emit Closed();
 	}
 }
 

@@ -10,7 +10,6 @@
 #include <QVariantList>
 #include <QVariantMap>
 #include <QVector>
-#include <QtQml/qqmlregistration.h>
 
 class FieldRowItem;
 class FocusButtonItem;
@@ -23,30 +22,25 @@ struct EditorField;
 class EditorPageItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(EditorPage)
 	KYTY_QT_CLASS_NO_COPY(EditorPageItem);
-
-	// Edits the global emulator settings instead of a game.
-	Q_PROPERTY(bool global READ Global NOTIFY ModeChanged)
-	// What the page's keys do, for the hint bar; see HintBarItem.
-	Q_PROPERTY(QVariantList hints READ Hints NOTIFY ModeChanged)
 
 signals:
 	void ModeChanged();
-	// QML maps only signals that start in lower case to on... handlers.
-	void saved(int row); // NOLINT(readability-identifier-naming)
-	void cancelled();    // NOLINT(readability-identifier-naming)
+	void Saved(int row);
+	void Cancelled();
 
 public:
 	explicit EditorPageItem(QQuickItem* parent = nullptr);
 	~EditorPageItem() override = default;
 
+	// Edits the global emulator settings instead of a game.
 	[[nodiscard]] bool         Global() const { return m_global; }
+	// What the page's keys do, for the hint bar; see HintBarItem.
 	[[nodiscard]] QVariantList Hints() const;
 
 	// Edits the game in row, or a new game when row is negative, starting from fields.
-	Q_INVOKABLE void open(int row, const QVariantMap& fields); // NOLINT(readability-identifier-naming)
-	Q_INVOKABLE void openGlobal();                             // NOLINT(readability-identifier-naming)
+	void OpenGame(int row, const QVariantMap& fields);
+	void OpenGlobal();
 
 protected:
 	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;

@@ -8,7 +8,6 @@
 #include <QPointer>
 #include <QQuickItem>
 #include <QVector>
-#include <QtQml/qqmlregistration.h>
 
 // Left rail with the launcher's main actions as icon buttons, drawn straight on the backdrop: library, add game
 // and settings below entriesTop, about and quit at the bottom. Up and Down move between them, Right goes to
@@ -16,34 +15,25 @@
 class SidebarItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(Sidebar)
 	KYTY_QT_CLASS_NO_COPY(SidebarItem);
 
-	// The page shown: "library", "settings" or "about"; its button is marked and takes the focus first.
-	Q_PROPERTY(QString current READ Current WRITE SetCurrent NOTIFY CurrentChanged)
-	Q_PROPERTY(QQuickItem* rightTarget READ RightTarget WRITE SetRightTarget NOTIFY RightTargetChanged)
-	// Where the first button starts, below whatever the rail shows above it.
-	Q_PROPERTY(qreal entriesTop READ EntriesTop WRITE SetEntriesTop NOTIFY EntriesTopChanged)
-
 signals:
-	void CurrentChanged();
-	void RightTargetChanged();
-	void EntriesTopChanged();
-	// QML maps only signals that start in lower case to on... handlers.
-	void libraryRequested();  // NOLINT(readability-identifier-naming)
-	void addGameRequested();  // NOLINT(readability-identifier-naming)
-	void settingsRequested(); // NOLINT(readability-identifier-naming)
-	void aboutRequested();    // NOLINT(readability-identifier-naming)
-	void quitRequested();     // NOLINT(readability-identifier-naming)
+	void LibraryRequested();
+	void AddGameRequested();
+	void SettingsRequested();
+	void AboutRequested();
+	void QuitRequested();
 
 public:
 	explicit SidebarItem(QQuickItem* parent = nullptr);
 	~SidebarItem() override = default;
 
+	// The page shown: "library", "settings" or "about"; its button is marked and takes the focus first.
 	[[nodiscard]] QString     Current() const { return m_current; }
 	void                      SetCurrent(const QString& current);
 	[[nodiscard]] QQuickItem* RightTarget() const { return m_right_target; }
 	void                      SetRightTarget(QQuickItem* target);
+	// Where the first button starts, below whatever the rail shows above it.
 	[[nodiscard]] qreal       EntriesTop() const { return m_entries_top; }
 	void                      SetEntriesTop(qreal top);
 

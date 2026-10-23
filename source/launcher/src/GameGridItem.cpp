@@ -168,7 +168,6 @@ void GameGridItem::SetGames(const QVariantList& games)
 		ShowCurrent(false);
 		Changed();
 	}
-	emit GamesChanged();
 }
 
 void GameGridItem::SetCurrentIndex(int index)
@@ -309,7 +308,7 @@ void GameGridItem::keyPressEvent(QKeyEvent* event)
 		case Qt::Key_Enter:
 			if (count > 0)
 			{
-				emit activated(m_current);
+				emit Activated(m_current);
 			}
 			return;
 		default: event->ignore(); return;
@@ -334,7 +333,7 @@ void GameGridItem::mousePressEvent(QMouseEvent* event)
 	forceActiveFocus(Qt::MouseFocusReason);
 	if (event->button() == Qt::RightButton)
 	{
-		emit menuRequested(index);
+		emit MenuRequested(index);
 	}
 }
 
@@ -343,7 +342,7 @@ void GameGridItem::mouseDoubleClickEvent(QMouseEvent* event)
 	const int index = IndexAt(event->position());
 	if (index >= 0 && event->button() == Qt::LeftButton)
 	{
-		emit activated(index);
+		emit Activated(index);
 	}
 }
 

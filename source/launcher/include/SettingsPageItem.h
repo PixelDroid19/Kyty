@@ -8,14 +8,12 @@
 class SettingsPageItem: public PageItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(SettingsPage)
 	KYTY_QT_CLASS_NO_COPY(SettingsPageItem);
 
 signals:
-	// QML maps only signals that start in lower case to on... handlers.
-	void emulatorSettingsRequested(); // NOLINT(readability-identifier-naming)
+	void EmulatorSettingsRequested();
 	// The user wants to pick the emulator program in a file dialog.
-	void programRequested(); // NOLINT(readability-identifier-naming)
+	void ProgramRequested();
 
 public:
 	explicit SettingsPageItem(QQuickItem* parent = nullptr);

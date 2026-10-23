@@ -45,11 +45,11 @@ NoticeItem::NoticeItem(QQuickItem* parent): QQuickItem(parent)
 	setVisible(false);
 	m_hide_timer.setSingleShot(true);
 	m_hide_timer.setInterval(SHOWN_MS);
-	connect(&m_hide_timer, &QTimer::timeout, this, [this]() { show(QString()); });
+	connect(&m_hide_timer, &QTimer::timeout, this, [this]() { Show(QString()); });
 	connect(Theme::Instance(), &Theme::UChanged, this, &NoticeItem::Resize);
 }
 
-void NoticeItem::show(const QString& text)
+void NoticeItem::Show(const QString& text)
 {
 	m_text = text;
 	setVisible(!text.isEmpty());

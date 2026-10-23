@@ -9,7 +9,6 @@
 
 #include <QQuickItem>
 #include <QVariantList>
-#include <QtQml/qqmlregistration.h>
 
 // The games of the library as a grid of covers with their names. Covers grow to share each row evenly; only the
 // rows in view are drawn and only their artwork is kept. Arrows move the selection; a key the grid cannot use
@@ -17,18 +16,12 @@
 class GameGridItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(GameGrid)
 	KYTY_QT_CLASS_NO_COPY(GameGridItem);
 
-	Q_PROPERTY(QVariantList games READ Games WRITE SetGames NOTIFY GamesChanged)
-	Q_PROPERTY(int currentIndex READ CurrentIndex WRITE SetCurrentIndex NOTIFY CurrentIndexChanged)
-
 signals:
-	void GamesChanged();
 	void CurrentIndexChanged();
-	// QML maps only signals that start in lower case to on... handlers.
-	void activated(int index);     // NOLINT(readability-identifier-naming)
-	void menuRequested(int index); // NOLINT(readability-identifier-naming)
+	void Activated(int index);
+	void MenuRequested(int index);
 
 public:
 	explicit GameGridItem(QQuickItem* parent = nullptr);

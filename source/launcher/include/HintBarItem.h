@@ -5,28 +5,19 @@
 
 #include <QQuickItem>
 #include <QVariantList>
-#include <QtQml/qqmlregistration.h>
 
 // Bottom strip listing what the current page's buttons do: each hint is a key cap and its action. While a
 // controller is connected, hints with a pad glyph show it instead of the key.
 class HintBarItem: public QQuickItem
 {
 	Q_OBJECT
-	QML_NAMED_ELEMENT(HintBar)
 	KYTY_QT_CLASS_NO_COPY(HintBarItem);
-
-	// Each hint: { pad: "✕", key: "Enter", text: "Run" }; pad is optional.
-	Q_PROPERTY(QVariantList hints READ Hints WRITE SetHints NOTIFY HintsChanged)
-	Q_PROPERTY(bool pad READ Pad WRITE SetPad NOTIFY PadChanged)
-
-signals:
-	void HintsChanged();
-	void PadChanged();
 
 public:
 	explicit HintBarItem(QQuickItem* parent = nullptr);
 	~HintBarItem() override = default;
 
+	// Each hint: { pad: "✕", key: "Enter", text: "Run" }; pad is optional.
 	[[nodiscard]] QVariantList Hints() const { return m_hints; }
 	void                       SetHints(const QVariantList& hints);
 	[[nodiscard]] bool         Pad() const { return m_pad; }
