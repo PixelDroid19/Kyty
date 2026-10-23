@@ -210,6 +210,14 @@ DepthTargetExtent ResolveDepthTargetExtent(const HW::DepthRenderTarget& target, 
 
 ViewportXy ResolveViewportXy(float xscale, float xoffset, float yscale, float yoffset)
 {
+	// A zero scale maps every vertex onto one screen line, so no triangle covers
+	// a sample. Vulkan requires a positive width; a 1x1 viewport wholly above and
+	// left of the framebuffer gives the same empty coverage.
+	if (xscale == 0.0f || yscale == 0.0f)
+	{
+		return {-1.0f, -1.0f, 1.0f, 1.0f};
+	}
+
 	ViewportXy xy {};
 	xy.x      = xoffset - xscale;
 	xy.y      = yoffset - yscale;

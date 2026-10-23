@@ -4892,6 +4892,18 @@ TEST(EmulatorGraphicsState, ResolvesViewportXyFromScaleAndOffset)
 	EXPECT_FLOAT_EQ(xy2.height, 100.0f);
 }
 
+TEST(EmulatorGraphicsState, ResolvesCollapsedViewportToValidOffScreenRect)
+{
+	// Unprogrammed viewport registers are all zero; Vulkan rejects a zero width.
+	for (const auto& xy: {State::ResolveViewportXy(0.0f, 0.0f, -0.0f, 0.0f), State::ResolveViewportXy(960.0f, 960.0f, 0.0f, 540.0f)})
+	{
+		EXPECT_GT(xy.width, 0.0f);
+		EXPECT_GT(xy.height, 0.0f);
+		EXPECT_LE(xy.x + xy.width, 0.0f);
+		EXPECT_LE(xy.y + xy.height, 0.0f);
+	}
+}
+
 TEST(EmulatorGraphicsState, SeparatesHtileMetaClearFromRegisterDepthClear)
 {
 	// Captured world path: register DEPTH_CLEAR_ENABLE=0, HTILE meta clear=1.
