@@ -436,6 +436,7 @@ enum class ShaderInstructionType : uint32_t
 	VCvtPknormI16F32,
 	VCvtPkU16U32,
 	VCvtPkI16I32,
+	VCvtPkU8F32,
 	VCvtU32F32,
 	VExpF32,
 	VExpF16,

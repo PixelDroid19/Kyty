@@ -3120,6 +3120,12 @@ void Spirv::FindConstants()
 		AddConstantUint(0x7fffu);
 		AddConstantUint(0xffff8000u);
 	}
+	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU8F32}))
+	{
+		AddConstantUint(3u);
+		AddConstantUint(0xffu);
+		AddConstantFloat(255.0f);
+	}
 	if (m_bind != nullptr)
 	{
 		constexpr int rows = ShaderStorageResources::BUFFERS_MAX + ShaderTextureResources::RES_MAX * 2 + ShaderSamplerResources::RES_MAX;

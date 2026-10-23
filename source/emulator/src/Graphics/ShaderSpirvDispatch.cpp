@@ -755,6 +755,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 	 {"%ta_<index> = OpBitwiseAnd %uint %t0_<index> %t1_<index>", "%tn_<index> = OpNot %uint %t0_<index>",
 	  "%tb_<index> = OpBitwiseAnd %uint %tn_<index> %t2_<index>",
 	  "%t_<index> = OpBitwiseOr %uint %ta_<index> %tb_<index>"}},
+	{Recompile_VCvtPkU8F32_VdstVsrc0Vsrc1Vsrc2, ShaderInstructionType::VCvtPkU8F32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2, {""}},
 	{Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2, ShaderInstructionType::VLshlAddU32, ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2,
 	 {"%ts_<index> = OpBitwiseAnd %uint %t1_<index> %uint_31", "%tm_<index> = OpShiftLeftLogical %uint %t0_<index> %ts_<index>",
 	  "%t_<index> = OpIAdd %uint %tm_<index> %t2_<index>"}},

@@ -652,7 +652,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x15B: KYTY_NI("v_sad_hi_u8"); break;
 		case 0x15C: KYTY_NI("v_sad_u16"); break;
 		case 0x15d: inst.type = ShaderInstructionType::VSadU32; break;
-		case 0x15E: KYTY_NI("v_cvt_pk_u8_f32"); break;
+		case 0x15E: inst.type = ShaderInstructionType::VCvtPkU8F32; break;
 		case 0x15F: KYTY_NI("v_div_fixup_f32"); break;
 		case 0x160: KYTY_NI("v_div_fixup_f64"); break;
 		case 0x161: KYTY_NI("v_lshl_b64"); break;

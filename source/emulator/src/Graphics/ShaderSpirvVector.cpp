@@ -2188,6 +2188,77 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPknormI16F32_SVdstSVsrc0SVsrc1)
 	return true;
 }
 
+/* v_cvt_pk_u8_f32: convert S0 to an unsigned byte and insert it into byte S1[1:0] of S2.
+ * The other three bytes of S2 are kept. NaN converts to zero and the value saturates to
+ * [0, 255], so the OpConvertFToU input stays in the SPIR-V defined domain. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtPkU8F32_VdstVsrc0Vsrc1Vsrc2)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	if (!operand_is_variable(inst.dst) || inst.dst.clamp || inst.dst.multiplier != 1.0f || inst.vop3_op_sel != 0u || inst.vop3_omod != 0u)
+	{
+		return false;
+	}
+
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	if (dst_value.type != SpirvType::Float)
+	{
+		return false;
+	}
+
+	String8 index_str = String8::FromPrintf("%u", index);
+	String8 load0;
+	String8 load1;
+	String8 load2;
+	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0) ||
+	    !operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1) ||
+	    !operand_load_uint(spirv, inst.src[2], "t2_<index>", index_str, &load2))
+	{
+		return false;
+	}
+
+	const auto lane_mask = spirv->GetConstantUint(3u);
+	const auto byte_mask = spirv->GetConstantUint(0xffu);
+	const auto max_value = spirv->GetConstantFloat(255.0f);
+	if (lane_mask.StartsWith("unknown_") || byte_mask.StartsWith("unknown_") || max_value.StartsWith("unknown_"))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+    <load1>
+    <load2>
+        %pk_nan_<index> = OpIsNan %bool %t0_<index>
+        %pk_safe_<index> = OpSelect %float %pk_nan_<index> %float_0_000000 %t0_<index>
+        %pk_clamped_<index> = OpExtInst %float %GLSL_std_450 FClamp %pk_safe_<index> %float_0_000000 %<max_value>
+        %pk_u8_<index> = OpConvertFToU %uint %pk_clamped_<index>
+        %pk_lane_<index> = OpBitwiseAnd %uint %t1_<index> %<lane_mask>
+        %pk_shift_<index> = OpShiftLeftLogical %uint %pk_lane_<index> %<lane_mask>
+        %pk_byte_mask_<index> = OpShiftLeftLogical %uint %<byte_mask> %pk_shift_<index>
+        %pk_keep_mask_<index> = OpNot %uint %pk_byte_mask_<index>
+        %pk_keep_<index> = OpBitwiseAnd %uint %t2_<index> %pk_keep_mask_<index>
+        %pk_byte_<index> = OpShiftLeftLogical %uint %pk_u8_<index> %pk_shift_<index>
+        %pk_result_<index> = OpBitwiseOr %uint %pk_keep_<index> %pk_byte_<index>
+        %pk_packed_<index> = OpBitcast %float %pk_result_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %pk_packed_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<max_value>", max_value)
+	                   .ReplaceStr("<lane_mask>", lane_mask)
+	                   .ReplaceStr("<byte_mask>", byte_mask)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 /* v_cvt_u32_f64: double source pair to unsigned int. */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtU32F64_SVdstSVsrc0)
 {
