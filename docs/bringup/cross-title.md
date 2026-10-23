@@ -1024,12 +1024,19 @@ record. Titles are named descriptively only (`AGENTS.md`).
   more than 20 minutes at full CPU in one full-suite run, then passed in
   750 ms on the rerun. Direction: give the stall wait a bounded deadline
   and find the missed wake.
-- **Defect seen once.**
+- **Fixed (ad8d4c76).**
   `EmulatorAudio.StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
   (`source/unit_test/src/emulator/UnitTestEmulatorAudio.cpp:8715`) hit its
-  10 s barrier timeout in one full-suite run. It passed 5 of 5 alone and
-  in the 115-test audio suite. Direction: check whether the render thread
-  can miss the end callback under a loaded host.
+  10 s barrier timeout in one full-suite run. The render thread did not
+  miss the end callback: a rack destroy keeps one pin and waits for the
+  other leases to go, but a lease release woke it only at zero pins, so a
+  lookup released after the destroy began left it blocked. A release now
+  wakes the destroy when at most its pin remains (`docs/AUDIO.md`: 24 of
+  400 repeats failed before, 0 of 1,000 after). A test process that hung
+  for hours at exit predates the fix; its core showed the main thread
+  destroying a condition variable in `exit` while the blocked destroy still
+  waited on it. On 2026-10-23 the test passed 15 of 15 runs on an idle host
+  and 30 of 30 under a 12-core load.
 
 ## Open: WAIT_REG_MEM poll address 1 crashes the command processor (2026-10-17)
 
@@ -2794,7 +2801,8 @@ previous section; the count of live ranges stays open.
 - `EmulatorAudio.StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
   times out (10 s) in about one of four runs of the `EmulatorAudio.*` suite.
   It does so with and without this change, and it passes when run alone.
-  The cause is not investigated.
+  Fixed since (ad8d4c76): a lease release woke the rack destroy only at
+  zero pins, while the destroy waits for its own last pin.
 
 ## Table-loaded comparison samplers paired by instruction (2026-10-11)
 

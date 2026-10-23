@@ -997,7 +997,8 @@ record. Titles are named descriptively only (`AGENTS.md`).
       intermittent boot stall, which also reproduces on older binaries.
   - Unit tests: 2,413 pass. The one failure is the known intermittent
     `StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
-    timeout (see the 2026-10-11 entry); it passes alone 3/3.
+    timeout (see the 2026-10-11 entry); it passes alone 3/3. Fixed since
+    (ad8d4c76).
 - Open: per-draw structures grow with the table (`ShaderPixelInputInfo`
   6,392 bytes, `ShaderVertexInputInfo` 8,984 bytes), and `BindDescriptors`
   zero-initializes and scans the full arrays rather than the bound counts.
