@@ -1,5 +1,6 @@
 #include "SidebarItem.h"
 
+#include "Accessibility.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -229,7 +230,7 @@ void SidebarItem::focusInEvent(QFocusEvent* event)
 	// Coming from a page, the focus lands on that page's button; a click keeps the button it hit.
 	if (event->reason() != Qt::MouseFocusReason)
 	{
-		m_focused = CurrentEntry();
+		SetFocused(CurrentEntry());
 	}
 }
 
@@ -240,16 +241,14 @@ void SidebarItem::keyPressEvent(QKeyEvent* event)
 		case Qt::Key_Up:
 			if (m_focused > 0)
 			{
-				m_focused--;
-				update();
+				SetFocused(m_focused - 1);
 				return;
 			}
 			break;
 		case Qt::Key_Down:
 			if (m_focused + 1 < ENTRY_COUNT)
 			{
-				m_focused++;
-				update();
+				SetFocused(m_focused + 1);
 				return;
 			}
 			break;
@@ -286,10 +285,16 @@ void SidebarItem::mouseReleaseEvent(QMouseEvent* event)
 	{
 		return;
 	}
-	m_focused = index;
+	SetFocused(index);
 	forceActiveFocus(Qt::MouseFocusReason);
-	update();
 	Activate(index);
+}
+
+void SidebarItem::SetFocused(int index)
+{
+	m_focused = index;
+	SetAccessible(this, QAccessible::PageTabList, tr(ENTRIES[index].label));
+	update();
 }
 
 void SidebarItem::hoverMoveEvent(QHoverEvent* event)

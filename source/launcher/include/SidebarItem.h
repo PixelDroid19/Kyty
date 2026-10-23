@@ -55,6 +55,7 @@ private:
 	[[nodiscard]] int    CurrentEntry() const;
 	void                 Activate(int index);
 	void                 SetHovered(int index);
+	void                 SetFocused(int index);
 
 	QString              m_current;
 	QPointer<QQuickItem> m_right_target;

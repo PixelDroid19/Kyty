@@ -1,5 +1,6 @@
 #include "ActionMenuItem.h"
 
+#include "Accessibility.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -107,9 +108,15 @@ void ActionMenuItem::OpenFor(const QVariantMap& game, int row, const QVariantLis
 	m_heading    = m_heading.isEmpty() ? game.value("name").toString() : m_heading;
 	m_actions    = items;
 	m_confirming = false;
-	m_current    = 0;
+	SetCurrent(0);
 	SetShown(true);
 	forceActiveFocus(Qt::OtherFocusReason);
+}
+
+void ActionMenuItem::SetCurrent(int index)
+{
+	m_current = index;
+	SetAccessible(this, QAccessible::PopupMenu, m_actions.value(index).toMap().value("label").toString(), m_heading);
 	update();
 }
 
@@ -136,8 +143,7 @@ void ActionMenuItem::Activate(int index)
 		m_confirming = true;
 		m_actions    = {QVariantMap {{"label", tr("Remove from library")}, {"action", "confirm-delete"}, {"danger", true}},
 		                QVariantMap {{"label", tr("Cancel")}, {"action", "close"}}};
-		m_current    = 1;
-		update();
+		SetCurrent(1);
 		return;
 	}
 	Close();
@@ -202,15 +208,14 @@ void ActionMenuItem::keyPressEvent(QKeyEvent* event)
 	// The menu is modal: no key reaches the page below while it is open.
 	switch (event->key())
 	{
-		case Qt::Key_Up: m_current = std::max(m_current - 1, 0); break;
-		case Qt::Key_Down: m_current = std::min(m_current + 1, static_cast<int>(m_actions.size()) - 1); break;
+		case Qt::Key_Up: SetCurrent(std::max(m_current - 1, 0)); return;
+		case Qt::Key_Down: SetCurrent(std::min(m_current + 1, static_cast<int>(m_actions.size()) - 1)); return;
 		case Qt::Key_Return:
 		case Qt::Key_Enter: Activate(m_current); return;
 		case Qt::Key_Escape:
 		case Qt::Key_Menu: Close(); return;
 		default: return;
 	}
-	update();
 }
 
 void ActionMenuItem::mousePressEvent(QMouseEvent* /*event*/) {}
@@ -220,8 +225,7 @@ void ActionMenuItem::mouseReleaseEvent(QMouseEvent* event)
 	const int index = event->button() == Qt::LeftButton ? RowAt(event->position()) : -1;
 	if (index >= 0)
 	{
-		m_current = index;
-		update();
+		SetCurrent(index);
 		Activate(index);
 		return;
 	}
@@ -237,8 +241,7 @@ void ActionMenuItem::hoverMoveEvent(QHoverEvent* event)
 	const int index = RowAt(event->position());
 	if (index >= 0 && index != m_current)
 	{
-		m_current = index;
-		update();
+		SetCurrent(index);
 	}
 }
 

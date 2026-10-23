@@ -1,5 +1,6 @@
 #include "FieldControls.h"
 
+#include "Accessibility.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -228,6 +229,8 @@ void ModuleRowItem::SetModule(const QString& path, bool present, bool selected)
 	m_path     = path;
 	m_present  = present;
 	m_selected = selected;
+	SetAccessible(this, QAccessible::CheckBox, path);
+	SetAccessibleChecked(this, selected);
 	update();
 }
 

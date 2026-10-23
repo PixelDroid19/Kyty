@@ -1,5 +1,6 @@
 #include "FolderTabsItem.h"
 
+#include "Accessibility.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -108,6 +109,7 @@ void FolderTabsItem::SetFolders(const QVariantList& folders)
 	const bool moved = index != m_current;
 	m_current        = index;
 	Layout();
+	SetAccessible(this, QAccessible::PageTabList, m_folders.value(m_current).toMap().value("title").toString());
 	if (moved)
 	{
 		emit CurrentIndexChanged();
@@ -122,6 +124,7 @@ void FolderTabsItem::SetCurrentIndex(int index)
 		return;
 	}
 	m_current = index;
+	SetAccessible(this, QAccessible::PageTabList, m_folders.value(m_current).toMap().value("title").toString());
 	ShowCurrent(true);
 	update();
 	emit CurrentIndexChanged();

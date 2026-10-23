@@ -1,5 +1,6 @@
 #include "ChoiceListItem.h"
 
+#include "Accessibility.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -150,6 +151,7 @@ void ChoiceListItem::MoveCurrent(int index)
 {
 	m_current = std::clamp<int>(index, 0, static_cast<int>(m_texts.size()) - 1);
 	m_first   = std::clamp(m_first, m_current - VisibleRows() + 1, m_current);
+	SetAccessible(this, QAccessible::List, m_texts.value(m_current));
 	update();
 }
 
@@ -201,8 +203,7 @@ void ChoiceListItem::hoverMoveEvent(QHoverEvent* event)
 	const int index = RowAt(event->position());
 	if (index >= 0 && index != m_current)
 	{
-		m_current = index;
-		update();
+		MoveCurrent(index);
 	}
 }
 

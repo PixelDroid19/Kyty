@@ -1,5 +1,6 @@
 #include "FieldRowItem.h"
 
+#include "Accessibility.h"
 #include "EditorFields.h"
 #include "FieldControls.h"
 #include "FocusButtonItem.h"
@@ -279,18 +280,32 @@ void FieldRowItem::SetValues(const QVariantMap& values, bool shown)
 
 void FieldRowItem::ShowValue()
 {
+	const char*   help_text = FieldHelp(m_field.key);
+	const QString help      = help_text != nullptr ? Translated(help_text) : QString();
 	switch (m_field.type)
 	{
 		case FieldType::Text:
-		case FieldType::Path: m_input->SetText(m_value.toString()); break;
+		case FieldType::Path:
+			SetAccessible(m_input, QAccessible::EditableText, Translated(m_field.label), help);
+			m_input->SetText(m_value.toString());
+			break;
 		case FieldType::Number:
+			SetAccessible(m_input, QAccessible::SpinBox, Translated(m_field.label), help);
 			if (!m_input->hasActiveFocus())
 			{
 				m_input->SetText(m_value.toString());
 			}
 			break;
-		case FieldType::Toggle: m_toggle->SetOn(m_value.toBool()); break;
-		case FieldType::Choice: m_choice->SetValue(ChoiceDisplay(m_value.toString())); break;
+		case FieldType::Toggle:
+			SetAccessible(m_toggle, QAccessible::CheckBox, Translated(m_field.label), help);
+			SetAccessibleChecked(m_toggle, m_value.toBool());
+			m_toggle->SetOn(m_value.toBool());
+			break;
+		case FieldType::Choice:
+			SetAccessible(m_choice, QAccessible::ComboBox, Translated(m_field.label),
+			              help.isEmpty() ? ChoiceDisplay(m_value.toString()) : ChoiceDisplay(m_value.toString()) + ". " + help);
+			m_choice->SetValue(ChoiceDisplay(m_value.toString()));
+			break;
 		case FieldType::Modules: ShowModules(m_value.toList()); break;
 		case FieldType::Params:
 			// Read again only when the file changes, since every edit in the form passes through here.

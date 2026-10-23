@@ -1,5 +1,6 @@
 #include "GameTableItem.h"
 
+#include "Accessibility.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -261,6 +262,7 @@ void GameTableItem::SetHovered(int index)
 
 void GameTableItem::Changed()
 {
+	SetAccessible(this, QAccessible::List, m_cards.value(m_current).title);
 	polish();
 	update();
 }

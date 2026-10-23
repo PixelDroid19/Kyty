@@ -1,5 +1,6 @@
 #include "FocusButtonItem.h"
 
+#include "Accessibility.h"
 #include "PageLayout.h"
 #include "SceneNodes.h"
 #include "Theme.h"
@@ -52,6 +53,7 @@ void FocusButtonItem::SetText(const QString& text)
 	if (text != m_text)
 	{
 		m_text = text;
+		SetAccessible(this, QAccessible::Button, text);
 		emit Changed();
 	}
 }

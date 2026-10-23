@@ -52,6 +52,7 @@ private:
 	[[nodiscard]] QRectF   RowRect(const Geometry& geometry, int index) const;
 	[[nodiscard]] int      RowAt(QPointF point) const;
 	void                   SetShown(bool shown);
+	void                   SetCurrent(int index);
 	void                   Activate(int index);
 
 	bool         m_shown      = false;

@@ -1,5 +1,6 @@
 #include "GameGridItem.h"
 
+#include "Accessibility.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -269,6 +270,7 @@ void GameGridItem::ShowCurrent(bool animated)
 
 void GameGridItem::Changed()
 {
+	SetAccessible(this, QAccessible::List, m_cards.value(m_current).title);
 	polish();
 	update();
 }

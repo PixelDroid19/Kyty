@@ -1,5 +1,6 @@
 #include "LibraryPageItem.h"
 
+#include "Accessibility.h"
 #include "ActionMenuItem.h"
 #include "ArtworkSet.h"
 #include "FocusButtonItem.h"
@@ -138,6 +139,7 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 	m_tabs = new FolderTabsItem(this);
 	m_search = new TextFieldItem(this);
 	m_search->SetFramed(false);
+	SetAccessible(m_search, QAccessible::EditableText, tr("Search by name or serial"));
 	m_grid  = new GameGridItem(this);
 	m_table = new GameTableItem(this);
 	m_add   = new FocusButtonItem(this);

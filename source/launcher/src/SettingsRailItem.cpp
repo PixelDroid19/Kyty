@@ -1,5 +1,6 @@
 #include "SettingsRailItem.h"
 
+#include "Accessibility.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -92,6 +93,7 @@ void SettingsRailItem::SetEntries(const QVector<Entry>& entries)
 	m_entries = entries;
 	m_current = std::clamp<int>(m_current, 0, std::max<int>(0, static_cast<int>(entries.size()) - 1));
 	m_generation++;
+	SetAccessible(this, QAccessible::PageTabList, m_entries.value(m_current).title);
 	UpdateClock();
 	update();
 }
@@ -103,6 +105,7 @@ void SettingsRailItem::SetCurrent(int index)
 		return;
 	}
 	m_current = index;
+	SetAccessible(this, QAccessible::PageTabList, m_entries.value(m_current).title);
 	// The newly selected icon starts its animation from its rest pose.
 	m_since.restart();
 	m_generation++;

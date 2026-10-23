@@ -1,5 +1,6 @@
 #include "HeroRowItem.h"
 
+#include "Accessibility.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -234,6 +235,7 @@ void HeroRowItem::ShowCurrent(bool animated)
 
 void HeroRowItem::Changed()
 {
+	SetAccessible(this, QAccessible::List, m_cards.value(m_current).title);
 	polish();
 	update();
 }
