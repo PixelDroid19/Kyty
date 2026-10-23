@@ -428,6 +428,9 @@ struct VulkanBuffer
 	VulkanMemory       memory;
 	VkBufferUsageFlags usage = 0;
 	uint64_t           descriptor_range = 0;
+	// The page flags translated shaders set when they write this buffer; only
+	// storage objects, which are written back page by page, have one.
+	VulkanBuffer* write_mask = nullptr;
 
 	[[nodiscard]] VulkanBufferDescriptorKey DescriptorKey() const { return {memory.unique_id, descriptor_range}; }
 };

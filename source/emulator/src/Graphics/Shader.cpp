@@ -2733,6 +2733,8 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	EXIT_IF((bind->push_constant_size % 16) != 0);
 	bind->vsharp_uniform_buffer = bind->push_constant_size > ShaderBindResources::PORTABLE_PUSH_CONSTANT_BYTES;
 	bind->vsharp_binding_index  = bind->vsharp_uniform_buffer ? binding_index++ : -1;
+	// Last, so the indices of host-authored layouts that drop it stay unchanged.
+	bind->storage_buffers.write_mask_binding_index = bind->storage_buffers.buffers_num > 0 ? binding_index++ : -1;
 }
 
 ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register)

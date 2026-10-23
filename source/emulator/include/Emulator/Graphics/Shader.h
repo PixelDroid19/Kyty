@@ -1877,6 +1877,9 @@ struct ShaderStorageResources
 	bool                       extended[BUFFERS_MAX]                = {};
 	int                        buffers_num   = 0;
 	int                        binding_index = 0;
+	// Per-buffer page flags that translated stores and atomics set (see
+	// ShaderSpirvStorageWriteMask.h); -1 when the module declares none.
+	int write_mask_binding_index = -1;
 };
 
 // Scalar descriptors with no readable dwords are lowered directly to zero.

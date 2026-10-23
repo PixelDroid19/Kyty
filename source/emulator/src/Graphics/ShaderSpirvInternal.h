@@ -137,6 +137,7 @@ public:
 	[[nodiscard]] String8 SplitWaveDsOrder(uint32_t index) const;
 	[[nodiscard]] String8 SplitWaveFunctions() const;
 	void                  CheckSplitWaveCollectives(const String8& body) const;
+	void                  MarkStorageWrites(uint32_t annotations_end, uint32_t main_begin);
 	[[nodiscard]] bool NativeComputeWaveLayoutIsValid() const;
 	[[nodiscard]] bool EmitNativeComputeWaveProlog(String8* output) const;
 	// Architectural EXEC/VCC and SGPR mask destinations always contain packed

@@ -7057,6 +7057,8 @@ TEST(EmulatorGraphicsState, GpuWritebackPageCacheCopiesOnlyChangedPagesAndPreser
 	}
 
 	GpuWritebackPageCache cache(PageSize);
+	uint32_t              written[3] {1u, 1u, 1u};
+	cache.TrackWrittenPages(written);
 	cache.Reset(gpu, sizeof(gpu));
 
 	gpu[PageSize + 2u]        = 0xe1u;
@@ -7096,11 +7098,12 @@ TEST(EmulatorGraphicsState, GpuWritebackPageCacheCopiesOnlyChangedPagesAndPreser
 	EXPECT_EQ(notifications.calls, 0u);
 }
 
-TEST(EmulatorGraphicsState, GpuWritebackPageCacheFindsChangedPagesAcrossLargeRanges)
+TEST(EmulatorGraphicsState, GpuWritebackPageCacheComparesOnlyWrittenPages)
 {
 	using namespace Kyty::Libs::Graphics;
 	constexpr uint64_t PageSize = 4096u;
-	constexpr uint64_t Size     = PageSize * 1100u + 100u;
+	constexpr uint64_t   Pages    = 1101u;
+	constexpr uint64_t   Size     = PageSize * (Pages - 1u) + 100u;
 	std::vector<uint8_t> guest(Size);
 	std::vector<uint8_t> gpu(Size);
 	for (uint64_t i = 0; i < Size; ++i)
@@ -7110,13 +7113,20 @@ TEST(EmulatorGraphicsState, GpuWritebackPageCacheFindsChangedPagesAcrossLargeRan
 	}
 
 	GpuWritebackPageCache cache(PageSize);
+	std::vector<uint32_t> written(Pages);
+	cache.TrackWrittenPages(written.data());
 	cache.Reset(gpu.data(), Size);
 
 	const std::vector<uint64_t> pages = {0u, 63u, 64u, 255u, 256u, 777u, 1100u};
 	for (const auto page: pages)
 	{
 		gpu[page * PageSize + 17u] ^= 0xffu;
+		written[page] = 1u;
 	}
+	// A flagged page whose bytes did not change is compared, not copied.
+	written[5] = 1u;
+	// The flags bound the compare: a page the GPU did not flag is never read.
+	gpu[500u * PageSize] ^= 0xffu;
 
 	std::vector<uint64_t> notified;
 	const auto            notify = [](void* opaque, uint64_t address, uint64_t /*size*/)
@@ -7130,7 +7140,8 @@ TEST(EmulatorGraphicsState, GpuWritebackPageCacheFindsChangedPagesAcrossLargeRan
 	{
 		EXPECT_EQ(notified[i], reinterpret_cast<uint64_t>(guest.data()) + pages[i] * PageSize);
 	}
-	EXPECT_EQ(guest, gpu);
+	EXPECT_NE(guest[500u * PageSize], gpu[500u * PageSize]);
+	EXPECT_EQ(std::count(written.begin(), written.end(), 0u), static_cast<std::ptrdiff_t>(Pages));
 
 	notified.clear();
 	EXPECT_FALSE(cache.CopyChangedPages(guest.data(), gpu.data(), Size, nullptr, nullptr, 0, notify, &notified).content_changed);

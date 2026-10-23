@@ -435,6 +435,7 @@ private:
 
 	VkDescriptorSetLayout GetOrCreateLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                  CreatePool();
+	const VulkanBuffer*   WriteMaskSink(GraphicContext* gctx);
 
 	static uint32_t CalcHash(const Set& s);
 	static void     CollectResourceIds(const Set& s, std::vector<uint64_t>* ids);
@@ -481,6 +482,8 @@ private:
 	using RecycledOrder = std::list<VulkanDescriptorSet*>;
 	RecycledOrder                                                               m_recycled_order;
 	std::unordered_map<VkDescriptorSetLayout, std::deque<RecycledOrder::iterator>> m_recycled_sets;
+	// Write-mask target of storage slots whose buffer is not written back.
+	VulkanBuffer m_write_mask_sink;
 };
 
 class SamplerCache

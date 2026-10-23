@@ -640,6 +640,18 @@ int DescriptorCache::FindSet(const Set& s)
 	return -1;
 }
 
+// Called under m_mutex. Shaders may write any slot, so every slot needs a mask.
+const VulkanBuffer* DescriptorCache::WriteMaskSink(GraphicContext* gctx)
+{
+	if (m_write_mask_sink.buffer == nullptr)
+	{
+		m_write_mask_sink.usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		m_write_mask_sink.memory.property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		VulkanCreateBuffer(gctx, 16u, &m_write_mask_sink);
+	}
+	return &m_write_mask_sink;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
                                                     const int* textures2d_sampled_view, VulkanImage** textures2d_sampled_depth,
@@ -821,6 +833,15 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		buffer_info[i].offset = 0;
 		EXIT_IF(storage_buffers[i]->descriptor_range == 0u);
 		buffer_info[i].range  = storage_buffers[i]->descriptor_range;
+	}
+
+	const bool             write_mask = bind.storage_buffers.write_mask_binding_index >= 0;
+	VkDescriptorBufferInfo write_mask_info[BUFFERS_MAX] {};
+	for (int i = 0; write_mask && i < storage_buffers_num; i++)
+	{
+		const VulkanBuffer* mask  = storage_buffers[i]->write_mask != nullptr ? storage_buffers[i]->write_mask : WriteMaskSink(gctx);
+		write_mask_info[i].buffer = mask->buffer;
+		write_mask_info[i].range  = mask->descriptor_range;
 	}
 
 	VkDescriptorImageInfo texture2d_sampled_info[TEXTURES_SAMPLED_MAX] {};
@@ -1136,6 +1157,22 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		descriptor_write[binding_num].descriptorType   = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 		descriptor_write[binding_num].descriptorCount  = 1;
 		descriptor_write[binding_num].pBufferInfo      = &vsharp_buffer_info;
+		descriptor_write[binding_num].pImageInfo       = nullptr;
+		descriptor_write[binding_num].pTexelBufferView = nullptr;
+		binding_num++;
+	}
+
+	if (write_mask && storage_buffers_num > 0)
+	{
+		EXIT_IF(binding_num >= B_MAX);
+		descriptor_write[binding_num].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptor_write[binding_num].pNext            = nullptr;
+		descriptor_write[binding_num].dstSet           = new_set->set;
+		descriptor_write[binding_num].dstBinding       = bind.storage_buffers.write_mask_binding_index;
+		descriptor_write[binding_num].dstArrayElement  = 0;
+		descriptor_write[binding_num].descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		descriptor_write[binding_num].descriptorCount  = storage_buffers_num;
+		descriptor_write[binding_num].pBufferInfo      = write_mask_info;
 		descriptor_write[binding_num].pImageInfo       = nullptr;
 		descriptor_write[binding_num].pTexelBufferView = nullptr;
 		binding_num++;

@@ -6,10 +6,12 @@
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
 #include "ShaderNativeWaveInternal.h"
+#include "ShaderSpirvStorageWriteMask.h"
 #include "ShaderStorageAnalysis.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GdsRange.h"
+#include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/ShaderMetadataResourceIndex.h"
 #include "Emulator/Graphics/ShaderNggFront.h"
@@ -404,6 +406,7 @@ void Spirv::GenerateSource()
 	WriteHeader();
 	WriteDebug();
 	WriteAnnotations();
+	const uint32_t annotations_end = m_source.Size();
 	WriteTypes();
 	WriteConstants();
 	WriteGlobalVariables();
@@ -417,6 +420,57 @@ void Spirv::GenerateSource()
 		CheckSplitWaveCollectives(m_source.Mid(main_begin));
 	}
 	WriteFunctions();
+	MarkStorageWrites(annotations_end, main_begin);
+}
+
+// A completion write-back compares and copies only the pages flagged here. A
+// module without storage writes is left unchanged and declares no mask.
+static_assert((sizeof(uint32_t) << kStorageWriteMaskPageShift) == GpuWritebackPageCache::kDefaultPageSize);
+void Spirv::MarkStorageWrites(uint32_t annotations_end, uint32_t main_begin)
+{
+	if (m_bind == nullptr || m_bind->storage_buffers.write_mask_binding_index < 0)
+	{
+		return;
+	}
+	String8  body;
+	uint32_t writes = 0;
+	if (!SpirvMarkStorageWrites(m_source.Mid(main_begin), &body, &writes))
+	{
+		EXIT("storage write through a pointer the write mask cannot trace\n");
+	}
+	if (writes == 0)
+	{
+		return;
+	}
+	static const char* annotations  = R"(
+       OpDecorate %wmask_runtimearr_uint ArrayStride 4
+       OpMemberDecorate %WriteMaskObject 0 Offset 0
+       OpDecorate %WriteMaskObject Block
+       OpDecorate %buf_write_mask DescriptorSet <DescriptorSet>
+       OpDecorate %buf_write_mask Binding <BindingIndex>
+)";
+	static const char* declarations = R"(
+                                %wmask_runtimearr_uint = OpTypeRuntimeArray %uint
+                                      %WriteMaskObject = OpTypeStruct %wmask_runtimearr_uint
+               %_arr_WriteMaskObject_uint_<buffers_num> = OpTypeArray %WriteMaskObject %buffers_num_uint_<buffers_num>
+%_ptr_StorageBuffer__arr_WriteMaskObject_uint_<buffers_num> = OpTypePointer StorageBuffer %_arr_WriteMaskObject_uint_<buffers_num>
+                                     %wmask_page_shift = OpConstant %uint <page_shift>
+                                        %wmask_written = OpConstant %uint 1
+                                       %buf_write_mask = OpVariable %_ptr_StorageBuffer__arr_WriteMaskObject_uint_<buffers_num> StorageBuffer
+)";
+	const auto         entry_point  = m_source.FindIndex("OpEntryPoint ");
+	const auto         entry_end    = m_source.FindIndex('\n', entry_point);
+	EXIT_IF(entry_point == Core::STRING8_INVALID_INDEX || entry_end == Core::STRING8_INVALID_INDEX || entry_end > annotations_end);
+	const auto buffers_num = String8::FromPrintf("%d", m_bind->storage_buffers.buffers_num);
+	m_source = m_source.Left(entry_end) + " %buf_write_mask" + m_source.Mid(entry_end, annotations_end - entry_end) +
+	           String8(annotations)
+	               .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
+	               .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->storage_buffers.write_mask_binding_index)) +
+	           m_source.Mid(annotations_end, main_begin - annotations_end) +
+	           String8(declarations)
+	               .ReplaceStr("<buffers_num>", buffers_num)
+	               .ReplaceStr("<page_shift>", String8::FromPrintf("%u", kStorageWriteMaskPageShift)) +
+	           body;
 }
 
 // A dual-source pixel module is exactly the MRT0 and MRT1 color pair, both with supported mode 4 (COMPR) or 9 (full).

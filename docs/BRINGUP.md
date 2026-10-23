@@ -85,6 +85,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [Puzzle title](titles/puzzle-title.md)
   - Puzzle title on AMD: two causes of the gfx ring timeout (2026-10-17)
 - [Anime fighter](titles/anime-fighter.md)
+  - Anime fighter: write-back copies only GPU-flagged pages (2026-10-22)
   - Anime fighter: storage write-back on the label path (2026-10-17)
 - [First-person puzzle title](titles/first-person-puzzle.md)
   - First-person puzzle title: scalar-join sources per label (2026-10-22)
