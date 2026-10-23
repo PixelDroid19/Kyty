@@ -67,7 +67,8 @@ record. Titles are named descriptively only (`AGENTS.md`).
     fix) moved gameplay only from about 52 to 58 fps; render passes still
     split once per draw by another path.
 - **Change.**
-  - After every eighth draw or completed dispatch, the graphics queue checks
+  - Once eight draws or completed dispatches are recorded since the last
+    submission, the graphics queue checks after every further operation
     whether all its submissions have completed. If they have, it submits
     what is recorded so far and keeps recording into the next slot.
   - A plain label store that a later `WAIT_REG_MEM` waits on may now sit in
@@ -95,6 +96,18 @@ record. Titles are named descriptively only (`AGENTS.md`).
     about 50 fps, with more fence waits per frame.
   - No run hit the extended consolidation (`wait_reg_mem_queued_producer`
     stayed 0).
+- **Correction (2026-10-23).** The first commit checked only on every
+  eighth operation, while the results above were measured with the check
+  after every operation. With the committed check the cave platformer stayed
+  at 44-50 fps (21-22 ms median): 5 submissions and 4.3 ms of fence waits
+  per frame, against 7 and 1.0 ms with the measured variant. The check now
+  runs after every operation once eight are recorded. A strict run at the
+  60 fps present limit holds 59-60 fps with a 17-18 ms median, 1.4-2.1 ms
+  of fence waits and 5.7 submissions per frame, and reaches frame 4399 at
+  100 s against 3899. The check costs a fence query per operation only
+  while the GPU is busy: in a 20 s CP-thread sample of the fishing title's
+  dock it took about 0.1% of the thread. The submissions it starts took
+  about 10%, about 30 µs each at 120-150 submissions per frame.
 - **Open.**
   - VSYNC flips are not paced to vblank: `VideoOutSubmitFlip`
     (`VideoOut.cpp:2565`) validates `flip_mode` and never uses it, so

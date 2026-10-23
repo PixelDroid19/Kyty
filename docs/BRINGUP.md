@@ -111,7 +111,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - A graphics submit returns after its batch is decoded (2026-10-23)
   - Compute ring runs copied in bytes across the ring end (2026-10-23)
   - Decoded video frames delivered after a decode error (2026-10-22)
-  - Recorded work submitted while the GPU queue is idle (2026-10-22)
+  - Recorded work submitted while the GPU queue is idle (2026-10-22, corrected 2026-10-23)
   - Per-draw shader resource scans memoized by layout and instruction class (2026-10-22)
   - Host-only UCONFIG codes in indirect register blocks (2026-10-22)
   - Depth array slices addressed and sampled as arrays (2026-10-22)

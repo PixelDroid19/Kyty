@@ -521,16 +521,17 @@ void CommandProcessor::SubmitRecordedWorkIfGpuIdle()
 {
 	// A title that waits for each frame on the CPU leaves the GPU idle while
 	// the next batch is decoded. Submitting what is recorded so far lets the
-	// GPU run while decoding continues. The idle check runs once per probe
-	// interval so a busy queue pays for it rarely.
-	constexpr uint32_t operations_per_probe = 8;
+	// GPU run while decoding continues. Once a submission's worth of
+	// operations is recorded, every operation checks whether the queue went
+	// idle, so the GPU waits at most one operation for the next batch.
+	constexpr uint32_t operations_per_submission = 8;
 	if (m_queue != GraphicContext::QUEUE_GFX)
 	{
 		return;
 	}
 	{
 		Core::LockGuard lock(m_mutex);
-		if (++m_operations_since_submit % operations_per_probe != 0u)
+		if (++m_operations_since_submit < operations_per_submission)
 		{
 			return;
 		}
