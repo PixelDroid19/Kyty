@@ -1,6 +1,7 @@
 #include "Emulator/Kernel/SyncOnAddress.h"
-#include "Emulator/Kernel/Errors.h"
 
+#include "Emulator/Kernel/Errors.h"
+#include "Emulator/Kernel/Time.h"
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Log.h"
 
@@ -21,6 +22,9 @@ KERNEL_LIB_NAME();
 namespace {
 
 constexpr uint32_t kSupportedWaitFlags = 0u;
+constexpr int      kUmtxOpWait           = 2;
+constexpr int      kUmtxOpWake           = 3;
+constexpr int64_t  kNanosecondsPerSecond = 1000000000;
 
 struct AddressWaitState
 {
@@ -106,6 +110,56 @@ int WakeRegisteredWaiters(uint64_t address, int64_t wake_count)
 	return OK;
 }
 
+// Blocks while the value at address equals expected, until a wake, a change
+// or the relative timeout (null waits indefinitely).
+template <typename T>
+int WaitWhileEqual(uint64_t address, T expected, const std::chrono::nanoseconds* timeout)
+{
+	const auto registration = RegisterWaiter(address);
+	int        result       = OK;
+	{
+		std::unique_lock state_lock(registration.state->mutex);
+		auto*            value      = reinterpret_cast<const T*>(address);
+		const auto       load_value = [&]() { return __atomic_load_n(value, __ATOMIC_ACQUIRE); };
+		if (load_value() == expected)
+		{
+			const auto changed = [&]() { return registration.state->generation != registration.generation || load_value() != expected; };
+			if (timeout == nullptr)
+			{
+				registration.state->cv.wait(state_lock, changed);
+			} else
+			{
+				const auto deadline = std::chrono::steady_clock::now() + *timeout;
+				if (!registration.state->cv.wait_until(state_lock, deadline, changed) && load_value() == expected)
+				{
+					result = KERNEL_ERROR_ETIMEDOUT;
+				}
+			}
+		}
+	}
+
+	UnregisterWaiter(address, registration.state);
+	return result;
+}
+
+int UmtxWait(uint64_t address, uint64_t expected, uint64_t timeout_size, const void* timeout)
+{
+	if (timeout == nullptr)
+	{
+		return WaitWhileEqual(address, expected, nullptr);
+	}
+	// A size above a timespec selects struct _umtx_time (absolute or clock-selected
+	// timeouts); no title has used it yet.
+	EXIT_IF(timeout_size > sizeof(KernelTimespec));
+	const auto* relative = static_cast<const KernelTimespec*>(timeout);
+	if (relative->tv_sec < 0 || relative->tv_nsec < 0 || relative->tv_nsec >= kNanosecondsPerSecond)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	const auto timeout_ns = std::chrono::seconds(relative->tv_sec) + std::chrono::nanoseconds(relative->tv_nsec);
+	return WaitWhileEqual(address, expected, &timeout_ns);
+}
+
 } // namespace
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWait(uint64_t address, uint32_t expected_value, const uint32_t* timeout, uint32_t flags)
@@ -119,36 +173,14 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWait(uint64_t address, uint32_t expected_va
 	}
 
 	KYTY_LOG_DEBUG("\t address = 0x%016" PRIx64 " expected = 0x%08" PRIx32 " timeout = %p flags = 0x%08" PRIx32 "\n", address,
-	       expected_value, static_cast<const void*>(timeout), flags);
+	               expected_value, static_cast<const void*>(timeout), flags);
 
-	const uint32_t timeout_us = timeout != nullptr ? __atomic_load_n(timeout, __ATOMIC_ACQUIRE) : 0u;
-	const auto registration = RegisterWaiter(address);
-	int        result       = OK;
+	if (timeout == nullptr)
 	{
-		std::unique_lock state_lock(registration.state->mutex);
-		auto*            value = reinterpret_cast<const uint32_t*>(address);
-		const auto       load_value = [&]() { return __atomic_load_n(value, __ATOMIC_ACQUIRE); };
-		if (load_value() == expected_value)
-		{
-			const auto changed = [&]() {
-				return registration.state->generation != registration.generation || load_value() != expected_value;
-			};
-			if (timeout == nullptr)
-			{
-				registration.state->cv.wait(state_lock, changed);
-			} else
-			{
-				const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
-				if (!registration.state->cv.wait_until(state_lock, deadline, changed) && load_value() == expected_value)
-				{
-					result = KERNEL_ERROR_ETIMEDOUT;
-				}
-			}
-		}
+		return WaitWhileEqual(address, expected_value, nullptr);
 	}
-
-	UnregisterWaiter(address, registration.state);
-	return result;
+	const std::chrono::nanoseconds timeout_ns = std::chrono::microseconds(__atomic_load_n(timeout, __ATOMIC_ACQUIRE));
+	return WaitWhileEqual(address, expected_value, &timeout_ns);
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWake(uint64_t address, int64_t wake_count)
@@ -162,6 +194,27 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWake(uint64_t address, int64_t wake_count)
 
 	KYTY_LOG_DEBUG("\t address = 0x%016" PRIx64 " wake_count = %" PRId64 "\n", address, wake_count);
 	return WakeRegisteredWaiters(address, wake_count);
+}
+
+int KernelUmtxOp(void* object, int operation, uint64_t value, uint64_t timeout_size, const void* timeout)
+{
+	PRINT_NAME();
+
+	const auto address = reinterpret_cast<uint64_t>(object);
+	KYTY_LOG_DEBUG("\t object = 0x%016" PRIx64 " op = %d value = 0x%016" PRIx64 " timeout_size = %" PRIu64 " timeout = %p\n", address,
+	               operation, value, timeout_size, timeout);
+	if (address == 0)
+	{
+		return KERNEL_ERROR_EFAULT;
+	}
+	switch (operation)
+	{
+		case kUmtxOpWait: return UmtxWait(address, value, timeout_size, timeout);
+		// The count is an int; a wake releases at least one waiter.
+		case kUmtxOpWake: return WakeRegisteredWaiters(address, std::max<int64_t>(1, static_cast<int32_t>(value)));
+		default: EXIT("unimplemented _umtx_op operation %d\n", operation);
+	}
+	return KERNEL_ERROR_EINVAL;
 }
 
 } // namespace Kyty::Kernel::SyncOnAddress

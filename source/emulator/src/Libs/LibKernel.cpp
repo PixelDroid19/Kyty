@@ -17,6 +17,7 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/Semaphore.h"
+#include "Emulator/Kernel/SyncOnAddress.h"
 #include "Emulator/Kernel/Time.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/Errno.h"
@@ -1353,6 +1354,14 @@ int KYTY_SYSV_ABI KernelIsNeoMode()
 	return (Config::IsNeo() ? 1 : 0);
 }
 
+int KYTY_SYSV_ABI umtx_op(void* object, int operation, uint64_t value, void* uaddr1, void* uaddr2)
+{
+	PRINT_NAME();
+
+	// For UMTX_OP_WAIT, uaddr1 carries the size of the timeout structure at uaddr2.
+	return POSIX_CALL(Kernel::SyncOnAddress::KernelUmtxOp(object, operation, value, reinterpret_cast<uint64_t>(uaddr1), uaddr2));
+}
+
 int KYTY_SYSV_ABI clock_gettime(int clock_id, Kernel::KernelTimespec* time)
 {
 	PRINT_NAME();
@@ -2223,6 +2232,7 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("959qrazPIrg", LibKernel::KernelGetProcParam);
 	LIB_FUNC("LwG8g3niqwA", LibKernel::KernelDlsym);
 	LIB_FUNC("9BcDykPmo1I", LibKernel::get_error_addr);
+	LIB_FUNC("04AjkP0jO9U", LibKernel::umtx_op);
 	LIB_FUNC("HoLVWNanBBc", Posix::getpid);
 	LIB_FUNC("bnZxYgAFeA0", LibKernel::KernelGetSanitizerNewReplaceExternal);
 	LIB_FUNC("ca7v6Cxulzs", LibKernel::KernelSetGPO);

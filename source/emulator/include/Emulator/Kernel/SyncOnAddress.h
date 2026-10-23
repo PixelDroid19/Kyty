@@ -14,6 +14,11 @@ namespace Kyty::Kernel::SyncOnAddress {
 int KYTY_SYSV_ABI KernelSyncOnAddressWait(uint64_t address, uint32_t expected_value, const uint32_t* timeout, uint32_t flags);
 int KYTY_SYSV_ABI KernelSyncOnAddressWake(uint64_t address, int64_t wake_count);
 
+// _umtx_op: UMTX_OP_WAIT blocks while the 64-bit value at object equals value,
+// with an optional relative timespec at timeout (timeout_size up to 16 bytes);
+// UMTX_OP_WAKE releases up to value waiters. Returns OK or a kernel error.
+int KernelUmtxOp(void* object, int operation, uint64_t value, uint64_t timeout_size, const void* timeout);
+
 } // namespace Kyty::Kernel::SyncOnAddress
 
 #endif // KYTY_EMU_ENABLED

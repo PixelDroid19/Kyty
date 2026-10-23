@@ -95,6 +95,8 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Mechanical-fist platformer startup frontier (2026-10-08, not gameplay)
 - [Roguelike platformer](titles/roguelike-platformer.md)
   - A roguelike reaches gameplay (2026-10-07)
+- [2D Unity action title](titles/2d-unity-action.md)
+  - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
   - Recorded work submitted while the GPU queue is idle (2026-10-22)
   - Per-draw shader resource scans memoized by layout and instruction class (2026-10-22)
