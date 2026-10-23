@@ -4,6 +4,23 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Decoded video frames delivered after a decode error (2026-10-22)
+
+- **Found by reading the decoder** while a logo video of the 2D Unity action
+  title stayed on one frame. That freeze did not repeat, so this path is not
+  confirmed as its cause.
+- **Defect.**
+  - A decode error marks the decoding as done but keeps the queued frames.
+  - The non-blocking and blocking reads refused every frame once the decoder
+    status was an error.
+  - End of stream needs an empty queue, so the stream could not end: the
+    player stayed on its last frame and neither looped nor stopped.
+- **Change.** The reads drain frames decoded before the error. The stream
+  then ends as on a normal end of file: a looping player tries to rewind,
+  which fails on a failed decoder, and the player stops.
+- **Verified.** A strict run of the 2D Unity action title still plays its
+  logo video and loads the first level. A decode error was not injected.
+
 ## Recorded work submitted while the GPU queue is idle (2026-10-22)
 
 - **Observed** (pixel cave platformer, gameplay room, Intel A770, Mesa ANV,

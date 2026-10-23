@@ -1038,7 +1038,7 @@ bool Decoder::ReadVideoFrame(VideoFrame* frame)
 	return false;
 #else
 	std::unique_lock<std::mutex> lock(state_->mutex);
-	if (state_->status != Status::Ok || state_->video == nullptr)
+	if (state_->video == nullptr)
 	{
 		return false;
 	}
@@ -1068,7 +1068,7 @@ bool Decoder::ReadAudioFrame(AudioFrame* frame)
 	return false;
 #else
 	std::unique_lock<std::mutex> lock(state_->mutex);
-	if (state_->status != Status::Ok || state_->audio == nullptr)
+	if (state_->audio == nullptr)
 	{
 		return false;
 	}
@@ -1098,7 +1098,7 @@ bool Decoder::TryReadVideoFrame(VideoFrame* frame)
 	return false;
 #else
 	std::lock_guard<std::mutex> lock(state_->mutex);
-	if (state_->status != Status::Ok || state_->video == nullptr || state_->video_queue.empty())
+	if (state_->video == nullptr || state_->video_queue.empty())
 	{
 		return false;
 	}
@@ -1121,7 +1121,7 @@ bool Decoder::TryReadAudioFrame(AudioFrame* frame)
 #else
 	{
 		std::lock_guard<std::mutex> lock(state_->mutex);
-		if (state_->status != Status::Ok || state_->audio == nullptr || state_->audio_queue.empty())
+		if (state_->audio == nullptr || state_->audio_queue.empty())
 		{
 			return false;
 		}

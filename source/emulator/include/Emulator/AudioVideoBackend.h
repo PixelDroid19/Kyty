@@ -88,6 +88,7 @@ public:
 	// Non-blocking pulls used by the guest-facing AvPlayer ABI. A false result
 	// means that no decoded frame is ready yet; it is not an end-of-stream
 	// indication. EndOfStream() remains the authoritative completion query.
+	// Frames decoded before a decode error are still delivered; the stream then ends.
 	bool TryReadVideoFrame(VideoFrame* frame);
 	bool TryReadAudioFrame(AudioFrame* frame);
 	// Repositions decoding at time_ms: queued frames are discarded and the next
