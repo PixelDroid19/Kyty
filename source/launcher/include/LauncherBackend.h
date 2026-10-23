@@ -18,7 +18,7 @@
 class GamepadInput;
 class QWindow;
 
-// The object the QML pages use: the library, the editor, the emulator, the controller and persistence.
+// The object the pages use: the library, the editor, the emulator, the controller and persistence.
 class LauncherBackend: public QObject
 {
 	Q_OBJECT
@@ -51,7 +51,10 @@ signals:
 
 public:
 	explicit LauncherBackend(QObject* parent = nullptr);
-	~LauncherBackend() override = default;
+	~LauncherBackend() override;
+
+	// The one backend of the process, created before the UI.
+	static LauncherBackend* Instance();
 
 	void AttachWindow(QWindow* window);
 

@@ -147,7 +147,7 @@ Window {
         anchors.bottom: parent.bottom
         width: 96 * Theme.u
         current: root.page === "editor" ? (editor.global ? "settings" : "library") : root.page
-        rightTarget: root.page === "library" ? library.gameView : null
+        rightTarget: root.page === "library" ? library.gameView : root.page === "settings" ? settings : root.page === "about" ? about : null
         entriesTop: kit.y + kit.height + 18 * Theme.u
 
         onLibraryRequested: root.openLibrary()
@@ -207,16 +207,26 @@ Window {
         anchors.fill: pageArea
         visible: root.page === "settings"
         onClosed: root.openLibrary()
+        KeyNavigation.left: sidebar
         onEmulatorSettingsRequested: {
             editor.openGlobal();
             root.page = "editor";
         }
+        onProgramRequested: programDialog.open()
+    }
+
+    FileDialog {
+        id: programDialog
+        title: qsTr("Choose the emulator program")
+        onAccepted: backend.SetEmulatorPath(Util.localPath(selectedFile))
     }
 
     AboutPage {
         id: about
         anchors.fill: pageArea
         visible: root.page === "about"
+        KeyNavigation.left: sidebar
+        mascot: KitMascot {}
         onClosed: root.openLibrary()
     }
 

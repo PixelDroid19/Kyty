@@ -74,8 +74,9 @@ void RoundedBoxNode::CreateSlices(QQuickWindow* window, const Style& style)
 	painter.fillPath(inner, style.fill);
 	painter.end();
 
-	delete m_texture;
-	m_texture = window->createTextureFromImage(image, QQuickWindow::TextureHasAlphaChannel);
+	// The slices' materials still point at the old texture; it goes only after they have the new one.
+	auto* old_texture = m_texture;
+	m_texture         = window->createTextureFromImage(image, QQuickWindow::TextureHasAlphaChannel);
 
 	if (m_slices[0] == nullptr)
 	{
@@ -100,6 +101,7 @@ void RoundedBoxNode::CreateSlices(QQuickWindow* window, const Style& style)
 		// Corners are drawn at their own size; the one-pixel edges and middle are stretched and must not blend.
 		slice->setFiltering(column == 1 || row == 1 ? QSGTexture::Nearest : QSGTexture::Linear);
 	}
+	delete old_texture;
 	m_style = style;
 }
 
@@ -179,7 +181,57 @@ void AddLine(QSGTextNode* node, const QString& text, const QFont& font, const QC
 	node->addTextLayout(QPointF(std::round(left_edge(line.naturalTextWidth())), std::round(baseline_y - line.ascent())), &layout);
 }
 
+// Breaks the layout's text into lines no wider than width, each placed by alignment; returns the block's height.
+qreal BreakLines(QTextLayout* layout, qreal width, Qt::Alignment alignment, QTextOption::WrapMode wrap)
+{
+	QTextOption option;
+	option.setWrapMode(wrap);
+	layout->setTextOption(option);
+	layout->beginLayout();
+	qreal y = 0;
+	for (auto line = layout->createLine(); line.isValid(); line = layout->createLine())
+	{
+		line.setLineWidth(width);
+		qreal x = 0;
+		if ((alignment & Qt::AlignHCenter) != 0)
+		{
+			x = (width - line.naturalTextWidth()) / 2;
+		} else if ((alignment & Qt::AlignRight) != 0)
+		{
+			x = width - line.naturalTextWidth();
+		}
+		line.setPosition(QPointF(std::round(x), std::round(y)));
+		y += line.height();
+	}
+	layout->endLayout();
+	return y;
+}
+
 } // namespace
+
+qreal TextBlockHeight(const QString& text, const QFont& font, qreal width, QTextOption::WrapMode wrap)
+{
+	if (text.isEmpty() || width <= 0)
+	{
+		return 0;
+	}
+	QTextLayout layout(text, font);
+	return std::ceil(BreakLines(&layout, width, Qt::AlignLeft, wrap));
+}
+
+void SetTextBlock(QSGTextNode* node, const QString& text, const QFont& font, const QColor& color, const QRectF& rect,
+                  Qt::Alignment alignment, QTextOption::WrapMode wrap)
+{
+	node->clear();
+	if (text.isEmpty() || rect.width() <= 0)
+	{
+		return;
+	}
+	QTextLayout layout(text, font);
+	BreakLines(&layout, rect.width(), alignment, wrap);
+	node->setColor(color);
+	node->addTextLayout(QPointF(std::round(rect.left()), std::round(rect.top())), &layout);
+}
 
 qreal CentredBaseline(const QFont& font, const QRectF& rect)
 {

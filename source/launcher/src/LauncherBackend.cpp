@@ -118,11 +118,15 @@ QString FormatPsfValue(const QVariant& value)
 	return value.toString();
 }
 
+LauncherBackend* g_backend = nullptr;
+
 } // namespace
 
 LauncherBackend::LauncherBackend(QObject* parent)
     : QObject(parent), m_gamepad(new GamepadInput(this)), m_run_modes(EmulatorRunner::RunModes())
 {
+	Q_ASSERT(g_backend == nullptr);
+	g_backend = this;
 	m_import_pool.setMaxThreadCount(1);
 	m_import_pool.setThreadPriority(QThread::IdlePriority);
 
@@ -133,6 +137,17 @@ LauncherBackend::LauncherBackend(QObject* parent)
 	connect(m_gamepad, &GamepadInput::ControllerChanged, this, &LauncherBackend::StateChanged);
 
 	m_runner.Probe(m_emulator_override);
+}
+
+LauncherBackend::~LauncherBackend()
+{
+	g_backend = nullptr;
+}
+
+LauncherBackend* LauncherBackend::Instance()
+{
+	Q_ASSERT(g_backend != nullptr);
+	return g_backend;
 }
 
 void LauncherBackend::AttachWindow(QWindow* window)

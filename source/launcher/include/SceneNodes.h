@@ -10,6 +10,7 @@
 #include <QSGGeometry>
 #include <QSGNode>
 #include <QSGTransformNode>
+#include <QTextOption>
 
 class QQuickWindow;
 class QSGImageNode;
@@ -104,5 +105,13 @@ void SetTextAtBaseline(QSGTextNode* node, const QString& text, const QFont& font
 
 // The baseline SetTextLine gives a line of font centred in rect.
 qreal CentredBaseline(const QFont& font, const QRectF& rect);
+
+// Height of text in font broken into lines no wider than width.
+qreal TextBlockHeight(const QString& text, const QFont& font, qreal width, QTextOption::WrapMode wrap = QTextOption::WordWrap);
+
+// Replaces what node shows with text broken into lines no wider than rect, from rect's top; each line is aligned
+// horizontally by alignment.
+void SetTextBlock(QSGTextNode* node, const QString& text, const QFont& font, const QColor& color, const QRectF& rect,
+                  Qt::Alignment alignment = Qt::AlignLeft, QTextOption::WrapMode wrap = QTextOption::WordWrap);
 
 #endif /* LAUNCHER_INCLUDE_SCENE_NODES_H_ */
