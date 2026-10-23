@@ -1293,6 +1293,68 @@ static void capture_posix_signal_stack(ExceptionHandler::ExceptionInfo* info) no
 	info->stack_count = count;
 }
 
+static void capture_posix_crash_memory(ExceptionHandler::ExceptionInfo* info) noexcept
+{
+	constexpr uint64_t kGuestDataAddressEnd = 0x40000000000ull;
+	constexpr uint64_t kStackExclusion      = 0x100000ull;
+	const uint64_t     stack_low            = info->rsp > kStackExclusion ? info->rsp - kStackExclusion : 0;
+	const uint64_t     stack_high           = info->rsp <= UINT64_MAX - kStackExclusion ? info->rsp + kStackExclusion : UINT64_MAX;
+
+	for (uint32_t i = info->stack_count; i != 0 && info->memory_window_count < ExceptionHandler::ExceptionInfo::MemoryWindowCapacity; --i)
+	{
+		const uint64_t candidate = info->stack[i - 1u];
+		if (candidate < 0x10000ull || candidate >= kGuestDataAddressEnd || (candidate >= stack_low && candidate < stack_high) ||
+		    IsGuestCodeAddress(candidate))
+		{
+			continue;
+		}
+		const uint64_t start     = candidate >= 16u ? candidate - 16u : candidate;
+		bool           duplicate = false;
+		for (uint32_t j = 0; j < info->memory_window_count; ++j)
+		{
+			const auto&    existing     = info->memory_windows[j];
+			const uint64_t existing_end = existing.address + existing.size;
+			if (start >= existing.address && start < existing_end)
+			{
+				duplicate = true;
+				break;
+			}
+		}
+		if (duplicate)
+		{
+			continue;
+		}
+
+		auto&         window = info->memory_windows[info->memory_window_count];
+		struct iovec  local  = {window.bytes, ExceptionHandler::ExceptionInfo::MemoryWindowSize};
+		struct iovec  remote = {reinterpret_cast<void*>(start), ExceptionHandler::ExceptionInfo::MemoryWindowSize};
+		const ssize_t got    = syscall(SYS_process_vm_readv, getpid(), &local, 1UL, &remote, 1UL, 0UL);
+		if (got <= 0)
+		{
+			continue;
+		}
+		window.address = start;
+		window.size    = static_cast<uint32_t>(got);
+		++info->memory_window_count;
+	}
+}
+
+// The stack and the memory it points to are read only for a fault that is
+// reported. Handled faults (write tracking, demand mapping) return without
+// them: they are taken once per tracked page and the reads were two more
+// system calls each.
+static void capture_posix_crash_evidence(ExceptionHandler::ExceptionInfo* info) noexcept
+{
+	if (info->stack_count == 0)
+	{
+		capture_posix_signal_stack(info);
+	}
+	if (g_signal_crash_memory != 0 && info->memory_window_count == 0)
+	{
+		capture_posix_crash_memory(info);
+	}
+}
+
 static ExceptionHandler::ExceptionInfo capture_posix_signal_context(ucontext_t* uc) noexcept
 {
 	ExceptionHandler::ExceptionInfo info {};
@@ -1319,7 +1381,6 @@ static ExceptionHandler::ExceptionInfo capture_posix_signal_context(ucontext_t* 
 	info.r13               = uc_get_r13(uc);
 	info.r14               = uc_get_r14(uc);
 	info.r15               = uc_get_r15(uc);
-	capture_posix_signal_stack(&info);
 	return info;
 }
 
@@ -1408,6 +1469,7 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 		sigsafe_fault("ILL-R14R15", uc_get_r14(uc), uc_get_r15(uc));
 		auto crash_info                = capture_posix_signal_context(uc);
 		crash_info.exception_win_code = static_cast<uint32_t>(SIGILL);
+		capture_posix_crash_evidence(&crash_info);
 		WriteCrashReport(crash_info);
 		// Returning would retry the same unsupported guest instruction forever.
 		// Keep strict runs bounded and preserve the first-failure evidence.
@@ -1417,53 +1479,6 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 	auto einfo = capture_posix_signal_context(uc);
 	einfo.type               = ExceptionHandler::ExceptionType::AccessViolation;
 	einfo.exception_win_code = static_cast<uint32_t>(info->si_code);
-	if (g_signal_crash_memory != 0 && einfo.stack_count != 0)
-	{
-		constexpr uint64_t kGuestDataAddressEnd = 0x40000000000ull;
-		constexpr uint64_t kStackExclusion      = 0x100000ull;
-		const uint64_t     stack_low            = einfo.rsp > kStackExclusion ? einfo.rsp - kStackExclusion : 0;
-		const uint64_t     stack_high           = einfo.rsp <= UINT64_MAX - kStackExclusion ? einfo.rsp + kStackExclusion : UINT64_MAX;
-
-		for (uint32_t i = einfo.stack_count; i != 0 && einfo.memory_window_count < ExceptionHandler::ExceptionInfo::MemoryWindowCapacity;
-		     --i)
-		{
-			const uint64_t candidate = einfo.stack[i - 1u];
-			if (candidate < 0x10000ull || candidate >= kGuestDataAddressEnd || (candidate >= stack_low && candidate < stack_high) ||
-			    IsGuestCodeAddress(candidate))
-			{
-				continue;
-			}
-			const uint64_t start     = candidate >= 16u ? candidate - 16u : candidate;
-			bool           duplicate = false;
-			for (uint32_t j = 0; j < einfo.memory_window_count; ++j)
-			{
-				const auto&    existing     = einfo.memory_windows[j];
-				const uint64_t existing_end = existing.address + existing.size;
-				if (start >= existing.address && start < existing_end)
-				{
-					duplicate = true;
-					break;
-				}
-			}
-			if (duplicate)
-			{
-				continue;
-			}
-
-			auto&         window = einfo.memory_windows[einfo.memory_window_count];
-			struct iovec  local  = {window.bytes, ExceptionHandler::ExceptionInfo::MemoryWindowSize};
-			struct iovec  remote = {reinterpret_cast<void*>(start), ExceptionHandler::ExceptionInfo::MemoryWindowSize};
-			const ssize_t got    = syscall(SYS_process_vm_readv, getpid(), &local, 1UL, &remote, 1UL, 0UL);
-			if (got <= 0)
-			{
-				continue;
-			}
-			window.address = start;
-			window.size    = static_cast<uint32_t>(got);
-			++einfo.memory_window_count;
-		}
-	}
-
 	einfo.access_violation_vaddr = reinterpret_cast<uint64_t>(info->si_addr);
 
 	uint64_t err = uc_get_err(uc);
@@ -1556,7 +1571,13 @@ void FatalFault(const ExceptionHandler::ExceptionInfo* info) noexcept
 {
 	if (info != nullptr)
 	{
+#if defined(KYTY_HAS_SIGNAL_EXCEPTIONS) && (defined(__x86_64__) || defined(__i386__))
+		auto report = *info;
+		capture_posix_crash_evidence(&report);
+		WriteCrashReport(report);
+#else
 		WriteCrashReport(*info);
+#endif
 	}
 	std::_Exit(139);
 }
