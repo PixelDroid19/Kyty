@@ -7,6 +7,9 @@
 #include "Emulator/Common.h"
 #include "Emulator/Kernel/Time.h"
 
+#include <mutex>
+#include <shared_mutex>
+
 // IWYU pragma: no_include <pthread.h>
 
 #ifdef KYTY_EMU_ENABLED
@@ -270,6 +273,35 @@ private:
 // interruptible; taking the mutex before or after it is not.
 void PthreadInterruptibleWait(Core::CondVar* cond_var, Core::Mutex* mutex);
 bool PthreadInterruptibleWaitFor(Core::CondVar* cond_var, Core::Mutex* mutex, uint32_t micros);
+
+// Takes a host mutex that a thread may keep while it runs guest code (a lock
+// the guest holds explicitly, a guest callback in progress), so blocking on it
+// is a safe point. The mutex must sleep on a word inside its own object, and
+// the caller must hold no other host lock.
+template <typename Mutex>
+[[nodiscard]] std::unique_lock<Mutex> PthreadLockAtSafePoint(Mutex& mutex)
+{
+	std::unique_lock lock(mutex, std::try_to_lock);
+	if (!lock.owns_lock())
+	{
+		PthreadInterruptibleScope wait(&mutex, sizeof(mutex));
+		lock.lock();
+	}
+	return lock;
+}
+
+// Shared counterpart of PthreadLockAtSafePoint; the same precondition applies.
+template <typename Mutex>
+[[nodiscard]] std::shared_lock<Mutex> PthreadLockSharedAtSafePoint(Mutex& mutex)
+{
+	std::shared_lock<Mutex> lock(mutex, std::try_to_lock);
+	if (!lock.owns_lock())
+	{
+		PthreadInterruptibleScope wait(&mutex, sizeof(mutex));
+		lock.lock();
+	}
+	return lock;
+}
 
 struct PthreadThreadDiagnostic
 {

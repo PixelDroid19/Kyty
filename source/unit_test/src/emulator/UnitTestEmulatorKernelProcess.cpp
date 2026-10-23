@@ -430,6 +430,28 @@ void* KYTY_SYSV_ABI RunGuestConditionWaiter(void* arg)
 	return nullptr;
 }
 
+template <class Mutex>
+struct LockWaiterTarget
+{
+	Mutex                 mutex;
+	std::atomic<uint32_t> calls {0};
+	std::atomic_bool      locked {false};
+};
+
+// Blocks on a mutex another thread holds, a safe point, until it is released.
+template <class Mutex>
+void* KYTY_SYSV_ABI RunLockWaiter(void* arg)
+{
+	auto* target            = static_cast<LockWaiterTarget<Mutex>*>(arg);
+	t_context_handler_calls = &target->calls;
+	{
+		const auto lock = Kernel::PthreadLockAtSafePoint(target->mutex);
+		target->locked.store(true, std::memory_order_release);
+	}
+	t_context_handler_calls = nullptr;
+	return nullptr;
+}
+
 bool WaitForContextCalls(const std::atomic<uint32_t>& calls, uint32_t expected)
 {
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -514,6 +536,36 @@ TEST(EmulatorKernelProcess, ContextRequestWaitsForSafePoint)
 	target.release.store(true, std::memory_order_release);
 	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
 	EXPECT_EQ(target.calls.load(), 1u);
+}
+
+// A host lock taken through PthreadLockAtSafePoint is a safe point while it
+// blocks: the sleep must be on a word inside the mutex object.
+template <class Mutex>
+void ExpectContextRequestReachesLockWaiter()
+{
+	LockWaiterTarget<Mutex> target;
+	std::unique_lock        held(target.mutex);
+	Kernel::Pthread         thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, RunLockWaiter<Mutex>, &target, "lock-waiter"), OK);
+
+	ASSERT_EQ(LibKernel::KernelRaiseException(thread, 30), OK);
+	EXPECT_TRUE(WaitForContextCalls(target.calls, 1));
+	EXPECT_FALSE(target.locked.load(std::memory_order_acquire));
+
+	held.unlock();
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_TRUE(target.locked.load(std::memory_order_acquire));
+	EXPECT_EQ(target.calls.load(), 1u);
+}
+
+TEST(EmulatorKernelProcess, ContextRequestReachesLockWaiter)
+{
+	EnsureKernelProcessSubsystems();
+	ASSERT_TRUE(InstallCountContextHandler());
+	ScopedContextRuntimePort port;
+
+	ExpectContextRequestReachesLockWaiter<std::mutex>();
+	ExpectContextRequestReachesLockWaiter<std::recursive_mutex>();
 }
 
 // Guest code is a safe point. The request interrupts a guest loop, and the loop
