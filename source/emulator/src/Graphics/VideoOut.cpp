@@ -39,6 +39,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdarg>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -582,7 +583,7 @@ private:
 	                                                                        uint32_t*                       image_count);
 
 	Core::Mutex                           m_mutex;
-	Core::Mutex                           m_registration_mutex;
+	std::mutex                            m_registration_mutex;
 	Graphics::VideoOutHostAccessGate      m_host_access_gate;
 	Graphics::VideoOutMaterializationGate m_registration_gate;
 	Graphics::VideoOutMaterializationGate m_materialization_gate;
@@ -1579,7 +1580,7 @@ void FlipQueue::Wait(VideoOutConfig* cfg, int index)
 	while (
 	    m_requests.IndexValid(m_requests.Find(cfg, index, [](auto r, auto cfg, auto index) { return r.cfg == cfg && r.index == index; })))
 	{
-		m_done_cond_var.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_done_cond_var, &m_mutex);
 	}
 }
 
@@ -2235,8 +2236,9 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 
 	// Staging may run concurrently with vblank, flips, image queries and Close,
 	// but registrations themselves remain ordered so resolution epochs and
-	// generated set IDs cannot overtake one another.
-	Core::LockGuard registration_lock(m_registration_mutex);
+	// generated set IDs cannot overtake one another. The lock is held across the
+	// window initialization wait, so other registrations block at a safe point.
+	const auto registration_lock = Kernel::PthreadLockAtSafePoint(m_registration_mutex);
 
 	{
 		Core::LockGuard lock(m_mutex);

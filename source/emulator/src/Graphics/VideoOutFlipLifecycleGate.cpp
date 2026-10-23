@@ -2,6 +2,8 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Kernel/Pthread.h"
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -63,7 +65,7 @@ void VideoOutFlipLifecycleGate::WaitUntilIdle(const void* owner)
 	Core::LockGuard lock(m_mutex);
 	while (FindOwner(owner) != nullptr)
 	{
-		m_idle_cond_var.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
 	}
 }
 
