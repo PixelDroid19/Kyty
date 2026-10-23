@@ -6,6 +6,7 @@
 
 #include <QQuickWindow>
 #include <QTimer>
+#include <QVariantAnimation>
 #include <QVariantMap>
 
 class AboutPageItem;
@@ -51,6 +52,8 @@ private:
 	void UpdatePage();
 	void UpdateBackdrop();
 	void ShowPage(Page page);
+	[[nodiscard]] QQuickItem* PageFor(Page page) const;
+	void                      Reveal(Page previous);
 	void FocusPage();
 	void OpenEditor(int row, const QVariantMap& fields);
 	void AddFolder(const QString& folder);
@@ -80,6 +83,8 @@ private:
 	FileChooser       m_program_chooser;
 	// Lets Kit's hop finish before the window steps aside for a game.
 	QTimer m_step_aside;
+	// Brings the page just shown in.
+	QVariantAnimation m_reveal;
 };
 
 #endif /* LAUNCHER_INCLUDE_LAUNCHER_WINDOW_H_ */

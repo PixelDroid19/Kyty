@@ -150,7 +150,15 @@ HeroRowItem::HeroRowItem(QQuickItem* parent): QQuickItem(parent), m_zoom(FOCUS_Z
 	setFlag(ItemHasContents);
 	setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
 	setAcceptHoverEvents(true);
-	connect(&m_scroll, &ViewScroll::Moved, this, &HeroRowItem::Changed);
+	connect(&m_scroll, &ViewScroll::Moved, this,
+	        [this]()
+	        {
+		        Changed();
+		        if (m_pointer)
+		        {
+			        m_hover_zoom.SetFocused(IndexAt(*m_pointer));
+		        }
+	        });
 	connect(&m_art, &ArtworkSet::Loaded, this, &QQuickItem::update);
 	connect(Theme::Instance(), &Theme::UChanged, this,
 	        [this]()
@@ -310,11 +318,13 @@ void HeroRowItem::keyPressEvent(QKeyEvent* event)
 
 void HeroRowItem::hoverMoveEvent(QHoverEvent* event)
 {
-	m_hover_zoom.SetFocused(IndexAt(event->position()));
+	m_pointer = event->position();
+	m_hover_zoom.SetFocused(IndexAt(*m_pointer));
 }
 
 void HeroRowItem::hoverLeaveEvent(QHoverEvent* /*event*/)
 {
+	m_pointer.reset();
 	m_hover_zoom.SetFocused(-1);
 }
 
@@ -343,7 +353,7 @@ void HeroRowItem::wheelEvent(QWheelEvent* event)
 	const auto  angle  = event->angleDelta();
 	const qreal delta =
 	    !pixels.isNull() ? (pixels.x() != 0 ? pixels.x() : pixels.y()) : (angle.x() != 0 ? angle.x() : angle.y()) / 120.0 * Pitch() / 2;
-	m_scroll.ScrollTo(m_scroll.Position() - delta, MaxContentX(), false);
+	m_scroll.ScrollBy(-delta, MaxContentX(), event->pixelDelta().isNull());
 }
 
 QSGNode* HeroRowItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)

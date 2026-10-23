@@ -1,5 +1,7 @@
 #include "ViewScroll.h"
 
+#include "Theme.h"
+
 #include <QEasingCurve>
 
 #include <algorithm>
@@ -22,7 +24,7 @@ void ViewScroll::ScrollTo(qreal position, qreal limit, bool animated)
 {
 	position = std::clamp<qreal>(position, 0, std::max<qreal>(0, limit));
 	m_animation.stop();
-	if (!animated || position == m_position)
+	if (!animated || position == m_position || Theme::Instance()->Animation() == 0)
 	{
 		if (position != m_position)
 		{
@@ -36,10 +38,20 @@ void ViewScroll::ScrollTo(qreal position, qreal limit, bool animated)
 	m_animation.start();
 }
 
+void ViewScroll::ScrollBy(qreal delta, qreal limit, bool animated)
+{
+	ScrollTo(Heading() + delta, limit, animated);
+}
+
+qreal ViewScroll::Heading() const
+{
+	return m_animation.state() == QAbstractAnimation::Running ? m_animation.endValue().toReal() : m_position;
+}
+
 void ViewScroll::Show(qreal start, qreal end, qreal viewport, qreal limit, bool animated)
 {
 	// Measured from where a running scroll is heading, so held arrow keys do not lag behind.
-	const qreal heading = m_animation.state() == QAbstractAnimation::Running ? m_animation.endValue().toReal() : m_position;
+	const qreal heading = Heading();
 	qreal       target  = heading;
 	if (start < heading)
 	{

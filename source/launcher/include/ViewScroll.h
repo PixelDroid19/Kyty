@@ -23,10 +23,14 @@ public:
 	[[nodiscard]] qreal Position() const { return m_position; }
 	// Scrolls to position, kept between 0 and limit.
 	void ScrollTo(qreal position, qreal limit, bool animated);
+	// Scrolls by delta from where a running scroll is heading, so quick wheel notches add up into one glide.
+	void ScrollBy(qreal delta, qreal limit, bool animated);
 	// Scrolls just enough to show the span from start to end in a viewport of the given length.
 	void Show(qreal start, qreal end, qreal viewport, qreal limit, bool animated);
 
 private:
+	[[nodiscard]] qreal Heading() const;
+
 	QVariantAnimation m_animation;
 	qreal             m_position = 0;
 };

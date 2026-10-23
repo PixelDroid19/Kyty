@@ -165,7 +165,15 @@ GameTableItem::GameTableItem(QQuickItem* parent): QQuickItem(parent)
 	setFlag(ItemHasContents);
 	setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
 	setAcceptHoverEvents(true);
-	connect(&m_scroll, &ViewScroll::Moved, this, &GameTableItem::Changed);
+	connect(&m_scroll, &ViewScroll::Moved, this,
+	        [this]()
+	        {
+		        Changed();
+		        if (m_pointer)
+		        {
+			        SetHovered(IndexAt(*m_pointer));
+		        }
+	        });
 	connect(&m_art, &ArtworkSet::Loaded, this, &QQuickItem::update);
 	connect(Theme::Instance(), &Theme::UChanged, this,
 	        [this]()
@@ -365,18 +373,20 @@ void GameTableItem::mouseDoubleClickEvent(QMouseEvent* event)
 
 void GameTableItem::hoverMoveEvent(QHoverEvent* event)
 {
-	SetHovered(IndexAt(event->position()));
+	m_pointer = event->position();
+	SetHovered(IndexAt(*m_pointer));
 }
 
 void GameTableItem::hoverLeaveEvent(QHoverEvent* /*event*/)
 {
+	m_pointer.reset();
 	SetHovered(-1);
 }
 
 void GameTableItem::wheelEvent(QWheelEvent* event)
 {
 	const qreal delta = !event->pixelDelta().isNull() ? event->pixelDelta().y() : event->angleDelta().y() / 120.0 * Pitch();
-	m_scroll.ScrollTo(m_scroll.Position() - delta, MaxContentY(), false);
+	m_scroll.ScrollBy(-delta, MaxContentY(), event->pixelDelta().isNull());
 }
 
 QSGNode* GameTableItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)

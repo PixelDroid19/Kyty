@@ -151,7 +151,15 @@ GameGridItem::GameGridItem(QQuickItem* parent): QQuickItem(parent), m_zoom(FOCUS
 	setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
 	setAcceptHoverEvents(true);
 
-	connect(&m_scroll, &ViewScroll::Moved, this, &GameGridItem::Changed);
+	connect(&m_scroll, &ViewScroll::Moved, this,
+	        [this]()
+	        {
+		        Changed();
+		        if (m_pointer)
+		        {
+			        m_hover_zoom.SetFocused(IndexAt(*m_pointer));
+		        }
+	        });
 	connect(&m_art, &ArtworkSet::Loaded, this, &QQuickItem::update);
 	connect(Theme::Instance(), &Theme::UChanged, this,
 	        [this]()
@@ -344,11 +352,13 @@ void GameGridItem::keyPressEvent(QKeyEvent* event)
 
 void GameGridItem::hoverMoveEvent(QHoverEvent* event)
 {
-	m_hover_zoom.SetFocused(IndexAt(event->position()));
+	m_pointer = event->position();
+	m_hover_zoom.SetFocused(IndexAt(*m_pointer));
 }
 
 void GameGridItem::hoverLeaveEvent(QHoverEvent* /*event*/)
 {
+	m_pointer.reset();
 	m_hover_zoom.SetFocused(-1);
 }
 
@@ -381,7 +391,7 @@ void GameGridItem::wheelEvent(QWheelEvent* event)
 {
 	const qreal delta = !event->pixelDelta().isNull() ? event->pixelDelta().y()
 	                                                  : event->angleDelta().y() / 120.0 * LayoutMetrics().cell_height * WHEEL_ROW_SHARE;
-	m_scroll.ScrollTo(m_scroll.Position() - delta, MaxContentY(), false);
+	m_scroll.ScrollBy(-delta, MaxContentY(), event->pixelDelta().isNull());
 }
 
 QSGNode* GameGridItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)

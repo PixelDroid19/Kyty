@@ -9,6 +9,8 @@
 #include <QQuickItem>
 #include <QVariantList>
 
+#include <optional>
+
 // The games of the library as a table: icon, name, serial, region and version under fixed column names. Only
 // the rows in view are drawn. Up and Down move the selection; Up on the first row and Left are left to
 // KeyNavigation.
@@ -57,6 +59,8 @@ private:
 	QVector<GameCard> m_cards;
 	int               m_current = 0;
 	int               m_hovered = -1;
+	// Where the pointer rests over the item, so a scroll under a still pointer moves the hover with it.
+	std::optional<QPointF> m_pointer;
 	ViewScroll        m_scroll;
 	ArtworkSet        m_art;
 };

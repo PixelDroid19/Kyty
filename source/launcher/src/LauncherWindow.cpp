@@ -13,6 +13,7 @@
 #include "SidebarItem.h"
 #include "Theme.h"
 
+#include <QEasingCurve>
 #include <QKeyEvent>
 
 #include <algorithm>
@@ -22,6 +23,9 @@ constexpr int BASE_HEIGHT    = 720;
 constexpr int MINIMUM_WIDTH  = 960;
 constexpr int MINIMUM_HEIGHT = 540;
 constexpr int STEP_ASIDE_MS  = 450;
+constexpr int REVEAL_MS      = 200;
+// A page comes in from a little smaller than its size.
+constexpr qreal REVEAL_SCALE = 0.985;
 
 // Sizes in units.
 constexpr qreal SIDEBAR_WIDTH = 96;
@@ -69,6 +73,19 @@ LauncherWindow::LauncherWindow()
 	        {
 		        showMinimized();
 		        releaseResources();
+	        });
+
+	m_reveal.setDuration(REVEAL_MS);
+	m_reveal.setStartValue(0.0);
+	m_reveal.setEndValue(1.0);
+	m_reveal.setEasingCurve(QEasingCurve::OutCubic);
+	connect(&m_reveal, &QVariantAnimation::valueChanged, this,
+	        [this](const QVariant& value)
+	        {
+		        const qreal t    = value.toReal();
+		        auto*       page = PageFor(m_page);
+		        page->setOpacity(t);
+		        page->setScale(REVEAL_SCALE + (1 - REVEAL_SCALE) * t);
 	        });
 
 	connect(&m_add_chooser, &FileChooser::Chosen, this, &LauncherWindow::AddFolder);
@@ -291,13 +308,15 @@ void LauncherWindow::UpdatePage()
 
 void LauncherWindow::ShowPage(Page page)
 {
-	m_page = page;
+	const Page previous = m_page;
+	m_page              = page;
 	if (m_rebuild_pending)
 	{
 		Rebuild();
 		return;
 	}
 	UpdatePage();
+	Reveal(previous);
 	// After the page is shown, since a hidden item cannot take the focus.
 	QTimer::singleShot(0, this, &LauncherWindow::FocusPage);
 }
@@ -316,8 +335,36 @@ void LauncherWindow::FocusPage()
 void LauncherWindow::OpenEditor(int row, const QVariantMap& fields)
 {
 	m_editor->OpenGame(row, fields);
-	m_page = Page::Editor;
+	const Page previous = m_page;
+	m_page              = Page::Editor;
 	UpdatePage();
+	Reveal(previous);
+}
+
+QQuickItem* LauncherWindow::PageFor(Page page) const
+{
+	switch (page)
+	{
+		case Page::Library: return m_library;
+		case Page::Editor: return m_editor;
+		case Page::Settings: return m_settings;
+		case Page::About: return m_about;
+	}
+	return m_library;
+}
+
+// Fades the page just shown in with a slight zoom, so a page change reads as one motion; previous is left as it rests.
+void LauncherWindow::Reveal(Page previous)
+{
+	m_reveal.stop();
+	auto* left = PageFor(previous);
+	left->setOpacity(1);
+	left->setScale(1);
+	if (previous == m_page || Theme::Instance()->Animation() == 0)
+	{
+		return;
+	}
+	m_reveal.start();
 }
 
 // A game folder opens the editor; any other folder adds every game found inside it.

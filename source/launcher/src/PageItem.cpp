@@ -312,7 +312,7 @@ void PageItem::wheelEvent(QWheelEvent* event)
 {
 	const qreal step  = WHEEL_STEP * Theme::Instance()->U();
 	const qreal delta = !event->pixelDelta().isNull() ? event->pixelDelta().y() : event->angleDelta().y() / 120.0 * step;
-	m_scroll.ScrollTo(m_scroll.Position() - delta, ScrollLimit(), false);
+	m_scroll.ScrollBy(-delta, ScrollLimit(), event->pixelDelta().isNull());
 }
 
 QSGNode* PageItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)

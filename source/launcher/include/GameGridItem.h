@@ -10,6 +10,8 @@
 #include <QQuickItem>
 #include <QVariantList>
 
+#include <optional>
+
 // The games of the library as a grid of covers with their names. Covers grow to share each row evenly; only the
 // rows in view are drawn and only their artwork is kept. Arrows move the selection; a key the grid cannot use
 // at its edge (Up on the first row, Left on the first column) is left to KeyNavigation.
@@ -72,6 +74,8 @@ private:
 	FocusZoom         m_zoom;
 	// Grows the card under the pointer a little, less than the focused one.
 	FocusZoom m_hover_zoom;
+	// Where the pointer rests over the item, so a scroll under a still pointer moves the hover with it.
+	std::optional<QPointF> m_pointer;
 };
 
 #endif /* LAUNCHER_INCLUDE_GAME_GRID_ITEM_H_ */

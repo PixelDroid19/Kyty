@@ -10,6 +10,8 @@
 #include <QQuickItem>
 #include <QVariantList>
 
+#include <optional>
+
 // The recently played games as a row of wide cards showing each game's picture and name. Left and Right move
 // the selection; Left on the first card is left to KeyNavigation. A click runs the game, as Enter does.
 class HeroRowItem: public QQuickItem
@@ -58,6 +60,8 @@ private:
 	FocusZoom         m_zoom;
 	// Grows the card under the pointer a little, less than the focused one.
 	FocusZoom m_hover_zoom;
+	// Where the pointer rests over the item, so a scroll under a still pointer moves the hover with it.
+	std::optional<QPointF> m_pointer;
 };
 
 #endif /* LAUNCHER_INCLUDE_HERO_ROW_ITEM_H_ */

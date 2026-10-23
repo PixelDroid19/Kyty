@@ -302,7 +302,7 @@ void FieldFormItem::wheelEvent(QWheelEvent* event)
 {
 	const qreal step  = WHEEL_STEP * Theme::Instance()->U();
 	const qreal delta = !event->pixelDelta().isNull() ? event->pixelDelta().y() : event->angleDelta().y() / 120.0 * step;
-	m_scroll.ScrollTo(m_scroll.Position() - delta, ScrollLimit(), false);
+	m_scroll.ScrollBy(-delta, ScrollLimit(), event->pixelDelta().isNull());
 }
 
 void FieldFormItem::geometryChange(const QRectF& new_geometry, const QRectF& old_geometry)
