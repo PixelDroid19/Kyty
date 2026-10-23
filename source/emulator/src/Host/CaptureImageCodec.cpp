@@ -246,7 +246,9 @@ HostCaptureImageCodecResult HostCaptureImageCodecWritePng(const HostCaptureImage
 	if (scaled_extent.width != source.extent.width || scaled_extent.height != source.extent.height)
 	{
 		scaled = SDL_CreateSurface(static_cast<int>(scaled_extent.width), static_cast<int>(scaled_extent.height), sdl_format);
-		if (scaled != nullptr && SDL_BlitSurfaceScaled(surface, nullptr, scaled, nullptr, SDL_SCALEMODE_NEAREST))
+		// SDL blends surfaces with alpha by default; a scaled capture must copy pixels, not composite them over black.
+		if (scaled != nullptr && SDL_SetSurfaceBlendMode(surface, SDL_BLENDMODE_NONE) &&
+		    SDL_BlitSurfaceScaled(surface, nullptr, scaled, nullptr, SDL_SCALEMODE_NEAREST))
 		{
 			save_surface        = scaled;
 			result.output_extent = scaled_extent;

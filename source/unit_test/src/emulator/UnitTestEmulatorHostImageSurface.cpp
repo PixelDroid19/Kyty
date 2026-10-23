@@ -1,6 +1,7 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Host/CaptureImageCodec.h"
 #include "Emulator/Host/ImageSurface.h"
 #include "Emulator/Host/Png.h"
 
@@ -98,6 +99,29 @@ TEST(EmulatorHostImageSurface, CreatesClonesAndBlitsRgbaPixels)
 	EXPECT_EQ(PixelAt(destination.get(), 1, 1)[1], 2u);
 	EXPECT_EQ(PixelAt(destination.get(), 1, 1)[2], 3u);
 	EXPECT_EQ(PixelAt(destination.get(), 1, 1)[3], 4u);
+}
+
+TEST(EmulatorHostImageSurface, CaptureDownscaleCopiesTransparentPixels)
+{
+	using namespace Emulator::Host;
+
+	ScopedHostImageSurfaceFile png_file(".png");
+	uint8_t                    pixels[4 * 2 * 4] {};
+	for (size_t pixel = 0; pixel < 8; pixel++)
+	{
+		pixels[pixel * 4 + 0] = 200;
+		pixels[pixel * 4 + 1] = 100;
+		pixels[pixel * 4 + 2] = 50;
+	}
+	ASSERT_TRUE(HostCaptureImageCodecWritePng({pixels, {4, 2}, 16, HostCaptureImagePixelFormat::Rgba8}, 2, png_file.path).success);
+
+	std::unique_ptr<HostImageSurface> image(HostImageSurface::LoadPng(HostImageSurfacePath(png_file.path)));
+	ASSERT_NE(image, nullptr);
+	ASSERT_EQ(image->GetMetadata().width, 2u);
+	EXPECT_EQ(PixelAt(image.get(), 1, 0)[0], 200u);
+	EXPECT_EQ(PixelAt(image.get(), 1, 0)[1], 100u);
+	EXPECT_EQ(PixelAt(image.get(), 1, 0)[2], 50u);
+	EXPECT_EQ(PixelAt(image.get(), 1, 0)[3], 0u);
 }
 
 TEST(EmulatorHostImageSurface, LoadsPngThroughHostFileSurfaceAndWritesBmp)

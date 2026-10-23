@@ -510,6 +510,11 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		}
 		pixels = std::move(converted);
 	}
+	// The swapchain presents opaque, so flip alpha never reaches the screen; the capture shows what is displayed.
+	for (size_t alpha = 3; alpha < pixels.size(); alpha += 4)
+	{
+		pixels[alpha] = 255u;
+	}
 	if (milestone == NativeCaptureMilestone::FirstPresent)
 	{
 		const uint64_t now_ms = WindowSteadyMs();

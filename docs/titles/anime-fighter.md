@@ -4,6 +4,39 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Anime fighter: black boxes behind glyphs were a capture artifact (2026-10-23)
+
+- **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit).**
+  Native captures of the help screen and of the auto-save notice showed an
+  opaque black box behind every glyph. Box pixels were `(0,0,0,0)`.
+- **Localized with the MRT probe and raw attachment readbacks.**
+  - The text pixel shader exports correct colour and coverage. Only glyph
+    pixels change RGB in the UI target; the parchment around them stays
+    intact.
+  - The UI target's alpha drops to 0 where a glyph quad is transparent,
+    which matches the text blend writing source alpha. The final copy into
+    the flip buffer carries that alpha.
+  - The capture writer scaled the 3840x2160 flip image down with an SDL blit.
+    SDL blends surfaces that have an alpha channel by default, so every
+    pixel was composited over black: RGB times alpha. Alpha-0 pixels became
+    black.
+- **Excluded on the way.**
+  - Depth: the depth target is cleared every frame and the text is the
+    nearest layer.
+  - The packed `pkrtz` export, the compressed MRT export and the alpha test
+    (its threshold is -1, so nothing is killed).
+  - The BC3 atlas contents and the view swizzle.
+- **Fix.**
+  - The capture downscale copies pixels (blend mode none).
+  - The swapchain presents opaque, so flip alpha never reaches the screen.
+    Native captures now force alpha to 255 and show what is displayed.
+  - A unit test writes a transparent image through the capture codec and
+    checks that the downscaled PNG keeps its RGB. It fails without the fix.
+- **Verified.** The help screen at frame 4167 shows clean text, and capture
+  alpha is 255 everywhere. Earlier captures of any title whose flip alpha is
+  below 255 were darkened by the same blend; on-screen output was not
+  affected.
+
 ## Anime fighter: excluded, submit without waiting for decode (2026-10-23)
 
 - **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
