@@ -349,7 +349,6 @@ static State::StencilPlaneValidation validate_stencil_plane(const HW::DepthRende
 	if (validation == State::StencilPlaneValidation::MissingReadBase) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: validation == State::StencilPlaneValidation::MissingReadBase condition ignored (continuing)\n"); }
 	if (validation == State::StencilPlaneValidation::MissingWriteBase) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: validation == State::StencilPlaneValidation::MissingWriteBase condition ignored (continuing)\n"); }
 	if (validation == State::StencilPlaneValidation::MismatchedBases) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: validation == State::StencilPlaneValidation::MismatchedBases condition ignored (continuing)\n"); }
-	if (z.stencil_info.format == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.stencil_info.format == 0 condition ignored (continuing)\n"); }
 	if (z.stencil_info.tile_stencil_disable != true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.stencil_info.tile_stencil_disable != true condition ignored (continuing)\n"); }
 	if (z.stencil_info.expclear_enabled) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.stencil_info.expclear_enabled condition ignored (continuing)\n"); }
 	if (z.stencil_info.partially_resident) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.stencil_info.partially_resident condition ignored (continuing)\n"); }

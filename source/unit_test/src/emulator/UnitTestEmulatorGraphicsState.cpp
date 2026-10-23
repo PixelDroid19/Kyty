@@ -4820,7 +4820,7 @@ TEST(EmulatorGraphicsState, RejectsUnsafeNoopPixelElision)
 	EXPECT_FALSE(ShaderPreventsNoopPixelElision(code));
 }
 
-TEST(EmulatorGraphicsState, IgnoresMetadataOnlyStencilControlWithoutStencilPlane)
+TEST(EmulatorGraphicsState, IgnoresStencilControlWithoutStencilFormat)
 {
 	HW::DepthRenderTarget target {};
 	target.stencil_info.tile_stencil_disable = true;
@@ -4835,7 +4835,15 @@ TEST(EmulatorGraphicsState, IgnoresMetadataOnlyStencilControlWithoutStencilPlane
 	HW::DepthControl depth_control {};
 	EXPECT_EQ(State::ValidateStencilPlane(target, render_control, depth_control), State::StencilPlaneValidation::Inactive);
 
-	depth_control.stencil_enable = true;
+	// STENCIL_INVALID disables the stencil test and stencil writes on the depth block.
+	depth_control.stencil_enable        = true;
+	render_control.stencil_clear_enable = true;
+	EXPECT_EQ(State::ValidateStencilPlane(target, render_control, depth_control), State::StencilPlaneValidation::Inactive);
+
+	target.stencil_write_base_addr = 0x1000;
+	EXPECT_EQ(State::ValidateStencilPlane(target, render_control, depth_control), State::StencilPlaneValidation::Inactive);
+
+	target.stencil_info.format = 1;
 	EXPECT_EQ(State::ValidateStencilPlane(target, render_control, depth_control), State::StencilPlaneValidation::MissingReadBase);
 }
 
