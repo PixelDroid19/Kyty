@@ -61,6 +61,34 @@ job summary. The CMake tests that can report missing Vulkan capabilities also
 use CTest's skip return code where configured. This is integration-test
 coverage only; it does not validate a guest title or prove compatibility.
 
+## Linux release package
+
+The Linux release is one archive, `kyty-<version>-linux-x64.tar.gz`, with a
+single top-level directory that holds `fc_script`, the `launcher`, and the Qt
+runtime the launcher needs (`lib/`, `plugins/`, `qt.conf`). The launcher's
+Spanish and Russian translations are compiled into the binary. The launcher
+looks for `fc_script` next to its own executable first, so it finds the
+emulator after extracting without a configured path. Its `RPATH` points at
+`lib/`, so `fc_script`, which it starts, does not inherit the bundled Qt
+libraries.
+
+```bash
+CMAKE_PREFIX_PATH=/path/to/Qt/6.11.2/gcc_64 scripts/package_linux.sh _build_linux_package dist/kyty-local-linux-x64.tar.gz
+```
+
+The script configures a Release build with the launcher enabled, builds
+`fc_script` and `launcher` (`KYTY_PACKAGE_JOBS`, default 4), installs the
+launcher directory, whose install step copies Qt through Qt's own deployment
+support, and archives the result. Qt must be relocatable, such as the official
+Qt binaries; a distribution or Nix Qt depends on its own system libraries, so
+the launcher's CMake does not bundle it and the script stops with an error.
+`.github/workflows/build-release.yml` installs the official Qt 6.11.2 binaries,
+the version pinned by the `launcher` shell, and runs the same script. Libraries
+from the host's system directories, such as glibc, Vulkan, X11, XCB, Wayland
+and fontconfig, are not bundled; the archive targets hosts at least as new as
+the Ubuntu 24.04 build runner. Qt's XCB platform plugin also needs
+`libxcb-cursor` on X11 sessions.
+
 ## Pin and local validation status
 
 The flake input is pinned to the exact nixpkgs revision

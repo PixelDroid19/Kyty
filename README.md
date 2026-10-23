@@ -67,6 +67,9 @@ on every operating system, GPU, or driver.
 Tagged releases are published on the
 [GitHub Releases](https://github.com/PixelDroid19/Kyty/releases) page. Every
 release is built by GitHub Actions for Windows, Linux, and macOS.
+The Linux archive contains the emulator and the desktop launcher with its Qt
+runtime; extract it and run `launcher`. To build the same archive locally, see
+[the Linux release package](docs/devtools/reproducible-contract-environment.md#linux-release-package).
 
 Artifacts from untagged commits are development snapshots. They may be useful
 for testing but can be unstable and are not releases.
