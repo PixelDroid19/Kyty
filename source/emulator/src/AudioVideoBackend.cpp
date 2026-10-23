@@ -1365,16 +1365,18 @@ bool ElementaryVideoDecoder::Drain()
 	return false;
 #else
 	auto* state = state_.get();
+	bool  sent  = true;
 	if (!state->drained)
 	{
-		state->drained = true;
-		if (avcodec_send_packet(state->context, nullptr) < 0)
+		sent           = avcodec_send_packet(state->context, nullptr) >= 0;
+		state->drained = sent;
+		if (!sent)
 		{
 			state->error = "drain video decoder";
-			return false;
 		}
 	}
-	return CollectPictures(state);
+	// Pictures the codec already finished are kept even when the drain send failed.
+	return CollectPictures(state) && sent;
 #endif
 }
 
