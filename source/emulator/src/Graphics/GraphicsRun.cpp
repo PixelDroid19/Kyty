@@ -1582,8 +1582,7 @@ GraphicsRing::CmdBatch GraphicsRing::GetCmdBatch()
 
 		// Do not dump guest slot table from ring-idle: GetCmdBatch idles before
 		// guest BSS is mapped, and mincore is not a reliable guard on macOS /
-		// Rosetta (SLOT_IDLE_DUMP segfaulted during init). Soft-lock dumps live
-		// in KernelNanosleep under KYTY_SLOT_TRACE once the guest sleep-polls.
+		// Rosetta (SLOT_IDLE_DUMP segfaulted during init).
 
 		m_cond_var.Wait(&m_mutex);
 	}

@@ -337,9 +337,6 @@ struct PthreadThreadDiagnostics
 // schedule, join, detach, or otherwise change guest threads.
 bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out);
 
-// Opt-in KYTY_SLOT_TRACE dump of currently blocked CondWait guests.
-void SlotTraceDumpBlockedCondWaiters();
-
 } // namespace Kyty::Kernel
 
 namespace Kyty::Libs::Posix {

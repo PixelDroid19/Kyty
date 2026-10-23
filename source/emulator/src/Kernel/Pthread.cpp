@@ -14,7 +14,6 @@
 
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/GuestRuntimePort.h"
-#include "Emulator/PresentationStats.h"
 #include "Emulator/Log.h"
 
 #include <atomic>
@@ -54,8 +53,7 @@ namespace Kyty::Kernel {
 
 KERNEL_LIB_NAME();
 
-namespace PresentationStats = Kyty::Emulator::PresentationStats;
-namespace GuestRuntimePort  = ::Kyty::Emulator::GuestRuntimePort;
+namespace GuestRuntimePort = ::Kyty::Emulator::GuestRuntimePort;
 
 
 thread_local Pthread g_pthread_self                   = nullptr;
@@ -307,11 +305,6 @@ static void* run_thread(void* arg)
 	pthread_cleanup_push(cleanup_thread, thread);
 
 	thread->started = true;
-
-	if (thread->name.ContainsStr(U"AsyncMemoryThread"))
-	{
-		usleep(50000);
-	}
 
 	EXIT_IF(thread->attr == nullptr || thread->attr->stack_addr == nullptr || thread->attr->stack_size == 0);
 	auto* stack_top = reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(thread->attr->stack_addr) + thread->attr->stack_size) &
@@ -843,47 +836,6 @@ int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rm
 	}
 
 	uint64_t nanos = rqtp->tv_sec * 1000000000 + rqtp->tv_nsec;
-
-	// Soft-lock diagnostic: a job pump may sleep-poll via Nanosleep while
-	// waiting on guest slot table 0x901c434c8 (0x20-byte entries). Guest VAs are
-	// host-mapped only after load — never read the table before present>=2200.
-	// Opt-in via KYTY_SLOT_TRACE=1. Do not invent EventFlag wakes.
-	if (std::getenv("KYTY_SLOT_TRACE") != nullptr && nanos >= 1000000ull)
-	{
-		PresentationStats::Snapshot stats {};
-		if (PresentationStats::GetPort().Query(&stats) && stats.present >= 2200ull)
-		{
-			static std::atomic<uint32_t> ns_logs {0};
-			const uint32_t               n = ns_logs.fetch_add(1);
-			if (n < 64u || (n % 4u) == 0u)
-			{
-				const auto         ret        = reinterpret_cast<uint64_t>(__builtin_return_address(0));
-				constexpr uint64_t kSlotTable  = 0x901c434c8ull;
-				constexpr uint64_t kSlotStride = 0x20ull;
-				KYTY_LOG_DEBUG( "SLOT_TRACE ns=%" PRIu64 " ret=0x%016" PRIx64 " n=%u present=%llu\n", nanos, ret, n,
-				             static_cast<unsigned long long>(stats.present));
-				for (uint32_t i = 8; i <= 11; i++)
-				{
-					const auto*    entry = reinterpret_cast<const volatile uint64_t*>(kSlotTable + i * kSlotStride);
-					const uint64_t typ   = entry[0];
-					const uint64_t obj   = entry[1];
-					uint32_t       s0    = 0;
-					uint32_t       s1    = 0;
-					uint64_t       fn    = 0;
-					if (obj >= 0x900000000ull && obj < 0x940000000ull)
-					{
-						const auto* o = reinterpret_cast<const volatile uint32_t*>(obj);
-						s0            = o[0];
-						s1            = o[1];
-						fn            = *reinterpret_cast<const volatile uint64_t*>(obj + 0x10);
-					}
-					KYTY_LOG_DEBUG(
-					             "SLOT[%u] typ=0x%" PRIx64 " obj=0x%016" PRIx64 " state=%u/%u fn=0x%016" PRIx64 "\n", i, typ, obj, s0,
-					             s1, fn);
-				}
-			}
-		}
-	}
 
 	KYTY_LOG_DEBUG("\tnanosleep: %" PRIu64 "\n", nanos);
 
