@@ -613,8 +613,11 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	uint32_t mip_height = height;
 	uint32_t mip_pitch  = pitch;
 
-	Vector<BufferImageCopy> regions(levels);
-	for (uint32_t i = 0; i < levels; i++)
+	// The host image holds only the levels create_texture_image allocated.
+	const uint32_t          host_levels = resolve_host_mip_count(static_cast<uint16_t>(fmt), static_cast<uint32_t>(width),
+	                                                             static_cast<uint32_t>(height), static_cast<uint32_t>(levels));
+	Vector<BufferImageCopy> regions(static_cast<int>(host_levels));
+	for (uint32_t i = 0; i < host_levels; i++)
 	{
 		// SKIPPED: level_sizes[i].size == 0
 		if (level_sizes[i].size == 0)
