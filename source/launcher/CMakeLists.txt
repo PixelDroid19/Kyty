@@ -1,4 +1,4 @@
-find_package(Qt6 COMPONENTS Quick QuickDialogs2 LinguistTools REQUIRED)
+find_package(Qt6 COMPONENTS Quick Widgets LinguistTools REQUIRED)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
@@ -35,7 +35,7 @@ qt_add_qml_module(launcher
 	RESOURCES ${launcher_icons}
 )
 
-target_link_libraries(launcher PRIVATE Qt6::Quick Qt6::QuickDialogs2 SDL3-static)
+target_link_libraries(launcher PRIVATE Qt6::Quick Qt6::Widgets SDL3-static)
 if(MSVC OR MINGW)
 target_link_libraries(launcher PRIVATE psapi)
 target_link_libraries(launcher PRIVATE setupapi)

@@ -2,7 +2,7 @@
 #include "LauncherBackend.h"
 #include "Theme.h"
 
-#include <QGuiApplication>
+#include <QApplication>
 #include <QProcess>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -43,7 +43,8 @@ void RestartOnCpuRenderer(const QString& error)
 
 int main(int argc, char* argv[])
 {
-	QGuiApplication app(argc, argv);
+	// A widget application, for the file dialogs; the window itself is Qt Quick.
+	QApplication app(argc, argv);
 
 	Theme           theme;
 	ArtworkLoader   artwork;
@@ -66,5 +67,5 @@ int main(int argc, char* argv[])
 		backend.AttachWindow(window);
 	}
 
-	return QGuiApplication::exec();
+	return QApplication::exec();
 }

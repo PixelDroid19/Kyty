@@ -1,7 +1,5 @@
 import QtQuick
 import Kyty.Launcher
-import QtQuick.Dialogs
-import "Util.js" as Util
 
 // Window and page switcher. Each page handles its own keys; the sidebar moves between pages.
 Window {
@@ -151,7 +149,7 @@ Window {
         entriesTop: kit.y + kit.height + 18 * Theme.u
 
         onLibraryRequested: root.openLibrary()
-        onAddGameRequested: addDialog.open()
+        onAddGameRequested: addChooser.chooseFolder(qsTr("Choose a game folder or a folder of games"))
         onSettingsRequested: root.showPage("settings")
         onAboutRequested: root.showPage("about")
         onQuitRequested: root.close()
@@ -182,7 +180,7 @@ Window {
 
         onRunRequested: (row) => root.runGame(row)
         onEditRequested: (row) => root.openEditor(row, backend.FieldsFor(row))
-        onAddRequested: addDialog.open()
+        onAddRequested: addChooser.chooseFolder(qsTr("Choose a game folder or a folder of games"))
         onActionRequested: (action, row) => root.handleAction(action, row)
     }
 
@@ -212,13 +210,12 @@ Window {
             editor.openGlobal();
             root.page = "editor";
         }
-        onProgramRequested: programDialog.open()
+        onProgramRequested: programChooser.chooseFile(qsTr("Choose the emulator program"))
     }
 
-    FileDialog {
-        id: programDialog
-        title: qsTr("Choose the emulator program")
-        onAccepted: backend.SetEmulatorPath(Util.localPath(selectedFile))
+    FileChooser {
+        id: programChooser
+        onChosen: (path) => backend.SetEmulatorPath(path)
     }
 
     AboutPage {
@@ -248,10 +245,9 @@ Window {
         anchors.bottomMargin: 12 * Theme.u
     }
 
-    FolderDialog {
-        id: addDialog
-        title: qsTr("Choose a game folder or a folder of games")
-        onAccepted: root.addFolder(Util.localPath(selectedFolder))
+    FileChooser {
+        id: addChooser
+        onChosen: (path) => root.addFolder(path)
     }
 
     Component.onCompleted: {
