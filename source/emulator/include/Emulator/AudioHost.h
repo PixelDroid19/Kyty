@@ -79,6 +79,8 @@ public:
 	bool AudioOutQueue(const OutputParam* params, uint32_t num, uint32_t* samples_num, uint64_t* wake_deadline_us);
 	bool AudioOutGetStatus(Id handle, int* type, int* channels_num);
 	void SetHostPaused(bool paused);
+	// True once Shutdown has closed the host ports.
+	bool ShuttingDown();
 	// Blocks while host output is paused. Call it before taking any lock a guest
 	// thread could need: the wait is a safe point for guest context requests.
 	void WaitWhileHostPaused();

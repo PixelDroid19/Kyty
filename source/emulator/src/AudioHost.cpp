@@ -120,6 +120,12 @@ void HostAudio::Shutdown()
 	SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
+bool HostAudio::ShuttingDown()
+{
+	Core::LockGuard lock(m_impl->mutex);
+	return m_impl->shutting_down;
+}
+
 HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format)
 {
 	Core::LockGuard lock(m_impl->mutex);
