@@ -397,8 +397,8 @@ public:
 	[[nodiscard]] bool    FlipIssued() const { return m_flip_issued; }
 	[[nodiscard]] bool    CompletionCallbackIssued() const { return m_completion_callback_sources != 0u; }
 	[[nodiscard]] uint8_t CompletionCallbackSources() const { return m_completion_callback_sources; }
-	// A wait on a plain label store of the current submission was answered by
-	// queue order; the batch still retires that submission before it ends.
+	// A wait on a plain label store of a submission of this queue was answered
+	// by queue order; the batch still retires that submission before it ends.
 	[[nodiscard]] bool TakeConsolidatedPlainWait()
 	{
 		const bool pending        = m_consolidated_plain_wait;
@@ -418,6 +418,7 @@ private:
 	void                 PublishCompletedSubmissions();
 	void                 WaitUntilPublishedUnlessReentrant(SubmissionId submission);
 	SubmissionId         BufferFlushForGpuWait();
+	void                 SubmitRecordedWorkIfGpuIdle();
 
 	struct Counter
 	{
@@ -467,6 +468,8 @@ private:
 	// Which completion callbacks the batch recorded (GraphicsBatchCanDeferSubmissionCompletion bits).
 	uint8_t  m_completion_callback_sources = 0u;
 	bool     m_consolidated_plain_wait     = false;
+	// Draws and dispatches recorded since this processor's last submission.
+	uint32_t        m_operations_since_submit     = 0;
 	uint64_t m_sumbit_id                   = 0;
 	uint64_t m_synthetic_occlusion_counter = 0;
 	uint32_t m_last_pm4_op                 = 0;

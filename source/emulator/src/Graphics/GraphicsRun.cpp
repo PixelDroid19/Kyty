@@ -518,6 +518,31 @@ SubmissionId CommandProcessor::BufferFlushForGpuWait()
 	return submitted;
 }
 
+void CommandProcessor::SubmitRecordedWorkIfGpuIdle()
+{
+	// A title that waits for each frame on the CPU leaves the GPU idle while
+	// the next batch is decoded. Submitting what is recorded so far lets the
+	// GPU run while decoding continues. The idle check runs once per probe
+	// interval so a busy queue pays for it rarely.
+	constexpr uint32_t operations_per_probe = 8;
+	if (m_queue != GraphicContext::QUEUE_GFX)
+	{
+		return;
+	}
+	{
+		Core::LockGuard lock(m_mutex);
+		if (++m_operations_since_submit % operations_per_probe != 0u)
+		{
+			return;
+		}
+	}
+	if (PumpCompletedSubmissions())
+	{
+		return;
+	}
+	(void)BufferFlushForGpuWait();
+}
+
 SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_completed)
 {
 	EXIT_IF(latest_completed == nullptr);
@@ -536,6 +561,7 @@ SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_complete
 	}
 	m_buffer[submitted_slot]->End();
 	m_buffer[submitted_slot]->Execute();
+	m_operations_since_submit = 0;
 	require_submission_success(m_submission_slots.MarkSubmitted(submitted_slot), "MarkSubmitted", m_queue, submitted_slot);
 	require_publication_success(m_publication_gate.RegisterSubmitted(submitted_id), "RegisterSubmitted", m_queue, submitted_id);
 
@@ -977,15 +1003,16 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	// When the awaited producer is already queued, avoid the redundant
 	// publication wait for the latest completed submission; the subsequent
 	// WaitSubmission for the specific producer covers the needed ordering.
-	// A plain label store recorded earlier in the current command buffer is
-	// ordered before everything recorded after it, and it is published when the
-	// batch's fence completes either way. A full barrier keeps its memory
-	// effects visible without splitting the submission.
-	const auto effects = static_cast<uint8_t>(dependency.effects);
+	// A plain label store recorded earlier on this queue, in the current
+	// command buffer or in one already submitted, is ordered before everything
+	// recorded after it, and it is published when its fence completes either
+	// way. A full barrier keeps its memory effects visible without splitting
+	// the submission.
+	const auto effects                = static_cast<uint8_t>(dependency.effects);
+	const bool producer_on_this_queue = producer == GpuSubmissionResult::Success && OwnsSubmissionQueue(dependency.producer);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, effects,
-	                                                    producer_is_current_submission && (effects & 2u) != 0u &&
-	                                                        GpuMemoryPendingStorageHasAliases()))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(
+	        producer_on_this_queue, effects, producer_on_this_queue && (effects & 2u) != 0u && GpuMemoryPendingStorageHasAliases()))
 	{
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
@@ -1060,15 +1087,16 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	// exact submission order. Suspend only when no matching producer is proven.
 	// Avoid the redundant publication wait for the latest completed submission;
 	// the subsequent WaitSubmission for the specific producer covers ordering.
-	// A plain label store recorded earlier in the current command buffer is
-	// ordered before everything recorded after it, and it is published when the
-	// batch's fence completes either way. A full barrier keeps its memory
-	// effects visible without splitting the submission.
-	const auto effects = static_cast<uint8_t>(dependency.effects);
+	// A plain label store recorded earlier on this queue, in the current
+	// command buffer or in one already submitted, is ordered before everything
+	// recorded after it, and it is published when its fence completes either
+	// way. A full barrier keeps its memory effects visible without splitting
+	// the submission.
+	const auto effects                = static_cast<uint8_t>(dependency.effects);
+	const bool producer_on_this_queue = producer == GpuSubmissionResult::Success && OwnsSubmissionQueue(dependency.producer);
 	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
-	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, effects,
-	                                                    producer_is_current_submission && (effects & 2u) != 0u &&
-	                                                        GpuMemoryPendingStorageHasAliases()))
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(
+	        producer_on_this_queue, effects, producer_on_this_queue && (effects & 2u) != 0u && GpuMemoryPendingStorageHasAliases()))
 	{
 		MemoryBarrier();
 		m_consolidated_plain_wait = true;
@@ -2202,6 +2230,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
 		                        index_addr, draw_modifier, type, instance_count, 0, 0, pending);
 	});
+	SubmitRecordedWorkIfGpuIdle();
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags)
@@ -2238,6 +2267,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
 		                        index_addr, flags, 1, instance_count, 0, 0, pending);
 	});
+	SubmitRecordedWorkIfGpuIdle();
 }
 
 void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiator)
@@ -2346,6 +2376,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		GraphicsRenderDrawIndex(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_type_and_size, index_count,
 		                        index_addr, 0, 1, instance_count, vertex_offset, first_instance, pending);
 	});
+	SubmitRecordedWorkIfGpuIdle();
 }
 
 void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
@@ -2407,6 +2438,7 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
 		                            args.instance_count, static_cast<int32_t>(args.start_vertex_location), args.start_instance_location,
 		                            pending);
 	});
+	SubmitRecordedWorkIfGpuIdle();
 }
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
@@ -2423,7 +2455,11 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 			result = GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, thread_group_x,
 			                                      thread_group_y, thread_group_z, mode, processor_writeback_complete, &pending);
 		}
-		if (result == ComputeDispatchResult::Completed) { return; }
+		if (result == ComputeDispatchResult::Completed)
+		{
+			SubmitRecordedWorkIfGpuIdle();
+			return;
+		}
 		if (result == ComputeDispatchResult::ProcessorWriteBackRequired)
 		{
 			EXIT_IF(processor_writeback_complete);
@@ -2562,6 +2598,7 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 		GraphicsRenderDrawIndexAuto(submit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, draw_modifier,
 		                            instance_count, 0, 0, pending);
 	});
+	SubmitRecordedWorkIfGpuIdle();
 }
 
 void CommandProcessor::ClearGds(uint64_t dw_offset, uint64_t dw_count, uint32_t clear_value)

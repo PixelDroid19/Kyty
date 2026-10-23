@@ -4,6 +4,61 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Recorded work submitted while the GPU queue is idle (2026-10-22)
+
+- **Observed** (pixel cave platformer, gameplay room, Intel A770, Mesa ANV,
+  Xe kernel driver):
+  - A frame is about 4.7 ms of guest CPU, then about 3.5 ms of command
+    processing, then about 15 ms of GPU work. The main command buffer was
+    submitted only at the end of the batch, so the GPU stayed idle while
+    the batch was decoded.
+  - GPU timestamps (temporary, not committed) put the 3840x2160 uniform
+    fill at about 4.5 ms of the frame and the final 4K render pass at
+    1-2 ms. The GPU clock averaged about 1840 MHz, so it was not
+    downclocking.
+  - Excluded: skipping the per-draw full barriers (temporary, invalid as a
+    fix) moved gameplay only from about 52 to 58 fps; render passes still
+    split once per draw by another path.
+- **Change.**
+  - After every eighth draw or completed dispatch, the graphics queue checks
+    whether all its submissions have completed. If they have, it submits
+    what is recorded so far and keeps recording into the next slot.
+  - A plain label store that a later `WAIT_REG_MEM` waits on may now sit in
+    an already submitted command buffer of the same queue. The consolidation
+    predicate accepts any producer on the same queue, since queue order and
+    its fence publish the store either way.
+- **Results** (strict runs, `KYTY_RUN_PERF=1`, segment metrics):
+
+  | Title (segment) | Before | After |
+  | --- | --- | --- |
+  | Pixel cave platformer (gameplay) | 52 fps, 19 ms median | 62-64 fps, 16 ms median |
+  | Insect platformer sequel (26-52 s) | 158 µs/draw, 4.8 ms/frame | 121 µs/draw, 3.7 ms/frame |
+  | Racing title (race) | 39.4 µs/draw | 39.9 µs/draw |
+  | Card title (gameplay) | 22.4-22.8 µs/draw | 24.2-27.4 µs/draw |
+
+  - The racing title, the roguelike platformer and the preschool Unity title
+    reach their menus earlier, so routes timed by wall clock land on other
+    screens. The racing title still reaches the race and the roguelike its
+    first room; compare game state, not frame counts, across this change.
+  - The card title pays 6-20% per draw; it stays near 180 fps. Stack samples
+    spread the cost over transient snapshot churn per command buffer
+    (`TransientBufferPool::UnindexSnapshot`, `Acquire`, tree erases).
+  - Excluded: probing every 32 operations inside an open render pass kept
+    the card title at its old cost but returned the cave platformer to
+    about 50 fps, with more fence waits per frame.
+  - No run hit the extended consolidation (`wait_reg_mem_queued_producer`
+    stayed 0).
+- **Open.**
+  - VSYNC flips are not paced to vblank: `VideoOutSubmitFlip`
+    (`VideoOut.cpp:2565`) validates `flip_mode` and never uses it, so
+    titles that request VSYNC run uncapped. Pacing would cap them at the
+    display rate.
+  - Transient snapshots are indexed per command buffer, so each early
+    submission re-captures them.
+- **Verification.** 635 focused unit tests (state, packets, submission) and
+  the graphics diagnostics integration test pass;
+  `check_emulator_boundaries.py` passes.
+
 ## Per-draw shader resource scans memoized by layout and instruction class (2026-10-22)
 
 - **Observed** (frame-pointer stack samples of the command-processor thread,
