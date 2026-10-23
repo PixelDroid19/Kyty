@@ -1,5 +1,6 @@
 #include "FieldRowItem.h"
 
+#include "EditorFields.h"
 #include "FieldControls.h"
 #include "FocusButtonItem.h"
 #include "LauncherBackend.h"
@@ -378,13 +379,25 @@ qreal FieldRowItem::Layout(qreal width)
 		m_texts << Line(QRectF(inset_x, 0, width - inset_x, height), Translated(m_field.heading), font, theme->TextMuted());
 		y = height + HEADING_GAP * u;
 	}
-	const qreal top = y + inset_y;
-	m_texts << Line(QRectF(inset_x, top, LABEL_WIDTH * u, CONTROL_HEIGHT * u), Translated(m_field.label), SceneFont(theme->FontBody()),
+	const qreal top        = y + inset_y;
+	const auto  label_font = SceneFont(theme->FontBody());
+	m_texts << Line(QRectF(inset_x, top, LABEL_WIDTH * u, CONTROL_HEIGHT * u), Translated(m_field.label), label_font,
 	                theme->TextSecondary());
+	// The help starts just under the label's line, which sits centred on the control.
+	qreal label_bottom = top + CONTROL_HEIGHT * u;
+	if (const char* help = FieldHelp(m_field.key); help != nullptr)
+	{
+		auto line            = Line(QRectF(), Translated(help), SmallFont(), theme->TextMuted());
+		line.wrap            = QTextOption::WordWrap;
+		const qreal help_top = top + std::round((CONTROL_HEIGHT * u + LineHeight(label_font)) / 2);
+		line.rect            = QRectF(inset_x, help_top, LABEL_WIDTH * u, TextBlockHeight(line.text, line.font, LABEL_WIDTH * u));
+		label_bottom         = line.rect.bottom();
+		m_texts << line;
+	}
 
 	const qreal control_x = inset_x + (LABEL_WIDTH + LABEL_GAP) * u;
 	const qreal control   = PlaceControl(QRectF(control_x, top, std::max<qreal>(0, width - inset_x - control_x), CONTROL_HEIGHT * u));
-	const qreal height    = top + std::max(CONTROL_HEIGHT * u, control) + inset_y;
+	const qreal height    = std::max(top + std::max(CONTROL_HEIGHT * u, control), label_bottom) + inset_y;
 	m_body                = QRectF(0, y, width, height - y);
 	m_generation++;
 	setSize(QSizeF(width, height));

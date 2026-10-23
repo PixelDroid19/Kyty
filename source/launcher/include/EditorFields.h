@@ -21,5 +21,7 @@ enum class FieldGroup
 };
 
 [[nodiscard]] const QVector<EditorField>& EditorFields(FieldGroup group);
+// A line under a field's label that says what the field changes, untranslated; null when the label says enough.
+[[nodiscard]] const char* FieldHelp(const char* key);
 
 #endif /* LAUNCHER_INCLUDE_EDITOR_FIELDS_H_ */

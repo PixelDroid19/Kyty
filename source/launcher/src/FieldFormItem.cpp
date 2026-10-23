@@ -238,7 +238,16 @@ void FieldFormItem::FocusItem(QQuickItem* item)
 	// A field shown or hidden by the last edit moves the ones below it.
 	ensurePolished();
 	const qreal  margin = SHOW_MARGIN * Theme::Instance()->U();
-	const QRectF rect   = item->mapRectToItem(m_content, item->boundingRect());
+	QRectF       rect   = item->mapRectToItem(m_content, item->boundingRect());
+	// The whole row when it fits, so the help under its label is not cut off.
+	for (const auto* row: m_rows)
+	{
+		const QRectF whole(row->position(), row->size());
+		if (row->isAncestorOf(item) && whole.height() + 2 * margin <= height())
+		{
+			rect = rect.united(whole);
+		}
+	}
 	m_scroll.Show(rect.top() - margin, rect.bottom() + margin, height(), ScrollLimit(), true);
 }
 

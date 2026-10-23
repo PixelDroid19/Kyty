@@ -94,7 +94,52 @@ const QVector<EditorField> INTERFACE_FIELDS = {
     {"window_mode", QT_TRANSLATE_NOOP("EditorPageItem", "Launcher window"), FieldType::Choice, "window_mode"},
 };
 
+struct Help
+{
+	const char* key;
+	const char* text;
+};
+
+const Help HELP[] = {
+    {"folder", QT_TRANSLATE_NOOP("EditorPageItem", "Games in the same folder share a tab in the library.")},
+    {"basedir", QT_TRANSLATE_NOOP("EditorPageItem", "The folder that holds the game's files.")},
+    {"custom_settings", QT_TRANSLATE_NOOP("EditorPageItem", "Off runs the game with the emulator settings from Settings.")},
+    {"screen_width", QT_TRANSLATE_NOOP("EditorPageItem", "The game window's size. It does not change the resolution the game renders at.")},
+    {"graphics_preset", QT_TRANSLATE_NOOP("EditorPageItem", "Fills the graphics fields below. The preset itself is not saved.")},
+    {"render_resolution_mode",
+	 QT_TRANSLATE_NOOP("EditorPageItem",
+	                   "Native renders at the game's own size. Fixed renders at most at the size below, keeping the shape.")},
+    {"render_resolution_scope",
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Render targets also scales the game's full-screen render textures; not every game supports it.")},
+    {"presentation_filter", QT_TRANSLATE_NOOP("EditorPageItem", "How the finished picture is scaled to the window.")},
+    {"texture_anisotropy", QT_TRANSLATE_NOOP("EditorPageItem", "Sharper textures seen at a slant. It does not change the resolution.")},
+    {"vulkan_validation_enabled",
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Checks every graphics call for mistakes. For debugging; games run much slower.")},
+    {"printf_direction", QT_TRANSLATE_NOOP("EditorPageItem", "Where the emulator writes what it reports while the game runs.")},
+    {"command_buffer_dump_enabled",
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Writes the game's GPU commands to disk, for debugging. Uses a lot of space.")},
+    {"pipeline_dump_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Writes the game's graphics pipelines to disk, for debugging.")},
+    {"interface_size", QT_TRANSLATE_NOOP("EditorPageItem", "Scales every text and control of the launcher.")},
+    {"animations", QT_TRANSLATE_NOOP("EditorPageItem", "Reduced keeps page changes and stops what moves on its own.")},
+    {"show_recent", QT_TRANSLATE_NOOP("EditorPageItem", "Hidden when the window is too small to show it with a row of covers.")},
+    {"sort", QT_TRANSLATE_NOOP("EditorPageItem", "In your own order, games move with Move up and Move down in their options.")},
+    {"on_launch", QT_TRANSLATE_NOOP("EditorPageItem", "Minimizing leaves the screen and the graphics card to the game.")},
+    {"window_mode", QT_TRANSLATE_NOOP("EditorPageItem", "How the launcher opens. Full screen suits a TV.")},
+};
+
 } // namespace
+
+const char* FieldHelp(const char* key)
+{
+	for (const auto& help: HELP)
+	{
+		if (qstrcmp(help.key, key) == 0)
+		{
+			return help.text;
+		}
+	}
+	return nullptr;
+}
 
 const QVector<EditorField>& EditorFields(FieldGroup group)
 {
