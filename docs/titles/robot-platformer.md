@@ -1761,10 +1761,13 @@ Known approximations and debt recorded by this chain:
 - **Measured load-window cost.** An agent performance window over present
   1282 to 1571 (103.993 s, 2.78 presents per second while the tutorial loads)
   records per frame: 292 draws, 82 dispatches, 51 submits and command buffers,
-  about 1,390 upload calls (6.6 MB), 52 MB hashed and 41 ms inside fence
-  waits. The sampled frame-time p50 is 38 ms, so the multi-second stalls sit
-  outside the recorded draw frame. Submission and upload work on the CPU, not
-  GPU execution, sets this rate.
+  about 1,390 upload calls (6.6 MB) and 52 MB hashed. Attribution from the
+  same window's timers: draw state setup 31 ms, resource binding 12.5 ms,
+  descriptor finalize/storage/texture 11 ms, dispatch write-back 9.4 ms and
+  fence waits 41 ms per frame. The many upload calls are individually cheap
+  (0.3 s in total); the sampled frame-time p50 is 38 ms, so the multi-second
+  stalls sit outside the recorded draw frame. CPU draw and submission work,
+  not GPU execution, sets this rate.
 - **Excluded: dropped label publications.** A lost EOP fence value could have
   stalled the guest's particle free list, so the label path was checked first:
   across five 900-second runs the "label destination released before
