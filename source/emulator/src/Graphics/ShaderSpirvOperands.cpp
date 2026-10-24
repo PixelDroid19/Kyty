@@ -106,6 +106,12 @@ OpStore %execz %mask_exec_z_<tag>
 String8 Spirv::NativeQuadUniform(const String8& value, const String8& type, const String8& result) const
 {
 	EXIT_IF(m_code.GetType() != ShaderType::Pixel);
+	if (UsesFragmentCompute())
+	{
+		// Every transport lane is an active invocation, so the collective
+		// already produced the guest result for all of them.
+		return "%" + result + " = OpCopyObject %" + type + " %" + value + "\n";
+	}
 	// Non-quad collectives can return undefined values in Vulkan helpers.
 	// Transfer the real members' uniform result back to every lane of the quad.
 	// Constant broadcast indices remain valid with pre-SPIR-V-1.5 toolchains.
@@ -162,6 +168,17 @@ String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result)
 String8 Spirv::NativeValidPixelBallot(const String8& result) const
 {
 	EXIT_IF(m_code.GetType() != ShaderType::Pixel);
+	if (UsesFragmentCompute())
+	{
+		// A transported lane is a valid pixel when the captured wave executes
+		// it and the capture covered it; helpers never become invocations.
+		return String8(R"(
+%<r>_live = OpINotEqual %bool %exec_lane_lo %uint_0
+%<r>_covered = OpLoad %bool %fragment_covered
+%<r>_valid = OpLogicalAnd %bool %<r>_live %<r>_covered
+%<r> = OpFunctionCall %v4uint %split_ballot %<r>_valid
+)").ReplaceStr("<r>", result);
+	}
 	// A helper is no valid pixel; with maximal reconvergence it is active and votes false.
 	return String8(R"(
 %<r>_exec = OpLoad %uint %exec_lane_lo

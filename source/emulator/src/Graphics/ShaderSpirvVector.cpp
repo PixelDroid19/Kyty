@@ -3819,7 +3819,7 @@ static bool RecompileSplitPermlane16(uint32_t index, const ShaderCode& code, Str
         <load0>
         <load1>
         <load2>
-          %perm_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
+          %perm_lane_<index> = OpLoad %uint %split_host_lane
          %perm_local_<index> = OpBitwiseAnd %uint %perm_lane_<index> %uint_15
         %perm_second_<index> = OpUGreaterThanEqual %bool %perm_local_<index> %uint_8
          %perm_table_<index> = OpSelect %uint %perm_second_<index> %perm_src2_<index> %perm_src1_<index>
@@ -3827,15 +3827,15 @@ static bool RecompileSplitPermlane16(uint32_t index, const ShaderCode& code, Str
          %perm_shift_<index> = OpShiftLeftLogical %uint %perm_nibble_<index> %uint_2
        %perm_shifted_<index> = OpShiftRightLogical %uint %perm_table_<index> %perm_shift_<index>
       %perm_selected_<index> = OpBitwiseAnd %uint %perm_shifted_<index> %uint_15
-           %perm_row_<index> = OpBitwiseAnd %uint %perm_lane_<index> %uint_0xfffffff0
+           %perm_row_<index> = OpBitwiseAnd %uint %perm_lane_<index> %uint_16
         %perm_row_in_<index> = OpBitwiseXor %uint %perm_row_<index> %uint_<row_xor>
         %perm_target_<index> = OpBitwiseOr %uint %perm_row_in_<index> %perm_selected_<index>
-         %perm_value_<index> = OpFunctionCall %uint %split_read %perm_src0_<index> %perm_target_<index>
+     %dpp_perm_value_<index> = OpGroupNonUniformShuffle %uint %uint_3 %perm_src0_<index> %perm_target_<index>
           %perm_exec_<index> = OpLoad %uint %exec_lane_lo
          %perm_write_<index> = OpINotEqual %bool %perm_exec_<index> %uint_0
            %perm_old_<index> = OpLoad %float %<dst>
         %perm_old_u_<index> = OpBitcast %uint %perm_old_<index>
-      %perm_result_<index> = OpSelect %uint %perm_write_<index> %perm_value_<index> %perm_old_u_<index>
+      %perm_result_<index> = OpSelect %uint %perm_write_<index> %dpp_perm_value_<index> %perm_old_u_<index>
      %perm_resultf_<index> = OpBitcast %float %perm_result_<index>
                OpStore %<dst> %perm_resultf_<index>
 )";

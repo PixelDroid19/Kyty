@@ -671,7 +671,12 @@ void Spirv::WriteHeader()
 		if (m_code.GetType() == ShaderType::Pixel)
 		{
 			capabilities.Add("OpCapability GroupNonUniformQuad");
-			vars.Add("%gl_HelperInvocation");
+			// The fragment-compute pass runs every guest lane as an active
+			// invocation: helper state is carried by the transport flags.
+			if (!UsesFragmentCompute())
+			{
+				vars.Add("%gl_HelperInvocation");
+			}
 		}
 		if (spirv_uses_subgroup_invocation(m_code) || UsesNativeComputeWave())
 		{
@@ -3776,9 +3781,11 @@ void Spirv::FindVariables()
 	if (UsesFragmentCompute())
 	{
 		// The captured record initializes the first VGPRs before the first guest
-		// instruction; the normalized selector lives in one user SGPR.
+		// instruction; the normalized selector lives in one user SGPR. The
+		// compare mask is named by instructions without listing it as an operand.
 		AddVariable(ShaderOperandType::Vgpr, 0, m_fragment_compute_info->initial_vgpr_count);
 		AddVariable(ShaderOperandType::Sgpr, m_fragment_compute_info->user_sgpr_count, 1);
+		AddVariable(ShaderOperandType::VccLo, 0, 2);
 	}
 
 	if (m_bind != nullptr)

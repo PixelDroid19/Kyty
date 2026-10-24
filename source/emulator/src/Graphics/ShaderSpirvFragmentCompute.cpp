@@ -328,6 +328,9 @@ bool Spirv::EmitFragmentInstruction(const ShaderInstruction& instruction, uint32
 	{
 		return false;
 	}
+	// The accessor uses the packed alias for explicit EXEC operands; this pass
+	// reads the architectural pair the prolog initialized.
+	*output = output->ReplaceStr("%packed_exec_", "%exec_");
 	*output += String8::FromPrintf("%%%s_exec_pred = OpINotEqual %%bool %%%s_exec %%uint_0\n", tag.c_str(), tag.c_str());
 	const auto predicate = tag + "_exec_pred";
 	return interpolation ? EmitFragmentInterpolation(instruction, predicate, tag, output)
