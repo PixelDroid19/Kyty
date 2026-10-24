@@ -87,7 +87,11 @@ record. Titles are named descriptively only (`AGENTS.md`).
   errors (color-attachment access with compute-queue stages) led to dropping
   graphics access types, after which its run reports none. Only the fighter
   and the role-playing title recorded on the compute family.
-- **Not verified:** the robot platformer and the AMD host.
+- **AMD host** (Radeon iGPU, RADV, validation layer errors only, 90 s): the
+  anime fighter reached its consent screen at 14.4 fps with correct output
+  and no validation error. That run did not confirm that a compute-family
+  queue recorded work before it ended.
+- **Not verified:** the robot platformer; async compute on the AMD host.
 
 ## Early submissions at least half a millisecond apart (2026-10-24)
 
