@@ -30,6 +30,18 @@ record. Titles are named descriptively only (`AGENTS.md`).
   Descriptor-set misses are therefore not the dominant CP cost; binding work
   per draw (texture preparation, pixel-shader input analysis, snapshot
   capture) is.
+- **Excluded, pixel-shader resource parse memo:** reusing the last eight
+  `ShaderParseUsage2` results of a pixel program when user data, user SGPRs
+  and layout seeds match and every recorded descriptor-table read returns the
+  same words. In game it hit 46% of draws; 37% of misses differ only in the
+  extended-user-data pointer SGPR pair, which the guest moves every draw.
+  Gain about 0.5 µs per draw (31.3 against 31.6-32.1), within noise, for
+  about 7 KiB per entry. Reusing a result across a moved pointer would need
+  proof that the parse consumes the pointer only through that table read.
+- **Measurement caveat:** a second emulator instance started during a run
+  raised every per-draw cost of the fishing title by about 15% at once
+  (22 → 15 fps, same draws per frame). Perf windows that overlap another
+  instance are discarded.
 
 ## Transient snapshot pool: covering vertex snapshots and expiry (2026-10-24)
 
