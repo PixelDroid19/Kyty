@@ -418,8 +418,10 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 				break;
 			}
 			case ShaderInstructionFormat::DA2:
+				// The array part names a dword destination; the read2 forms carry
+				// two dwords for b32 and four for b64.
 				s = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1 ? operand_to_str(inst.dst)
-				                                                                  : operand_array_to_str(inst.dst, 2);
+				                                                                  : operand_array_to_str(inst.dst, inst.dst.size);
 				break;
 			case ShaderInstructionFormat::DA3: s = operand_array_to_str(inst.dst, 3); break;
 			case ShaderInstructionFormat::DA4: s = operand_array_to_str(inst.dst, 4); break;

@@ -3542,9 +3542,13 @@ void Spirv::FindConstants()
 			AddConstantUint(((inst.ds_offset >> 8u) & 0xffu) * 4u * stride);
 			AddConstantUint(1u);
 		}
-		else if (inst.type == ShaderInstructionType::DsWrite2B64 || inst.type == ShaderInstructionType::DsWrite2St64B64)
+		else if (inst.type == ShaderInstructionType::DsWrite2B64 || inst.type == ShaderInstructionType::DsWrite2St64B64 ||
+		         inst.type == ShaderInstructionType::DsRead2B64 || inst.type == ShaderInstructionType::DsRead2St64B64)
 		{
-			const uint32_t stride = inst.type == ShaderInstructionType::DsWrite2St64B64 ? 64u : 1u;
+			const uint32_t stride = (inst.type == ShaderInstructionType::DsWrite2St64B64 ||
+			                         inst.type == ShaderInstructionType::DsRead2St64B64)
+			                            ? 64u
+			                            : 1u;
 			for (uint32_t operand = 0; operand < 2u; operand++)
 			{
 				const uint32_t base = ((inst.ds_offset >> (operand * 8u)) & 0xffu) * 8u * stride;

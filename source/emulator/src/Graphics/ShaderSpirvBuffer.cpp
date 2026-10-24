@@ -2857,6 +2857,30 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWrite2B64_VaddrVdata2Offset01)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_DsRead2B64_Vdst2VaddrOffset01)
+{
+	const auto& inst       = code.GetInstructions().At(index);
+	const auto* input_info = spirv->GetCsInputInfo();
+
+	if (input_info == nullptr || input_info->lds_dwords == 0 || !ShaderLdsMemoryInstructionSupported(inst))
+	{
+		return false;
+	}
+
+	const auto address   = operand_variable_to_str(inst.src[0]);
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8    body      = LdsAddressSnapshot(address.value, index_str);
+	for (uint32_t operand = 0; operand < 2u; ++operand)
+	{
+		// Each qword is an independent address and lands in two destination dwords.
+		const auto tag = String8::FromPrintf("%u_read2b64_%u", index, operand);
+		body += EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str, Ds2OffsetBytes64(inst, operand, 0, param), 2, tag);
+		body += LdsReadSpan(spirv, inst.dst, static_cast<int>(operand * 2u), 2, tag);
+	}
+	*dst_source += GateLdsByExec(body, index_str);
+	return true;
+}
+
 namespace {
 
 // Byte address for ds_*_addtid_b32: M0[15:0] + ds_offset (+ TID*4 on the

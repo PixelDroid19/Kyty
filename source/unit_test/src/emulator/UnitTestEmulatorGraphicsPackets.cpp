@@ -8097,6 +8097,32 @@ TEST(EmulatorGraphicsPackets, Gen5DsWrite2St64B64ScalesQwordOffsetsBySixtyFour)
 	EXPECT_FALSE(ShaderRecompileCS(code, &input).IsEmpty());
 }
 
+TEST(EmulatorGraphicsPackets, Gen5DsRead2B64LoadsTwoQwordsIntoFourRegisters)
+{
+	// ds_read2_b64 v[4:7], v0 offset0:0 offset1:1 -> the two qwords land in
+	// v4/v5 and v6/v7.
+	const uint32_t shader[] = {0xd9dc0100u, 0x04000000u, 0xbf810000u};
+	const auto     code     = ParseGen5DsPair(shader);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::DsRead2B64);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::Vdst2VaddrOffset01);
+	EXPECT_EQ(instruction.dst.register_id, 4);
+	EXPECT_EQ(instruction.dst.size, 4);
+	EXPECT_EQ(instruction.ds_offset, 0x0100u);
+	EXPECT_TRUE(ShaderLdsMemoryInstructionSupported(instruction));
+
+	auto       input  = Gen5DsPairInput();
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("OpStore %v4 %lds_data_f_0_read2b64_0_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v5 %lds_data_f_0_read2b64_0_1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v6 %lds_data_f_0_read2b64_1_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v7 %lds_data_f_0_read2b64_1_1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_uint_constant"), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompileCS(code, &input).IsEmpty());
+}
+
 TEST(EmulatorGraphicsPackets, Gen5DsRead2St64B32ScalesOffsetsBySixtyFourDwords)
 {
 	// ds_read2st64_b32 v[4:5], v2 offset0:0 offset1:1 -> byte offsets 0 and 256; it used to decode as a one-word ds_read_b32.

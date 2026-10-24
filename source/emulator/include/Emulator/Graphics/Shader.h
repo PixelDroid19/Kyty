@@ -101,6 +101,9 @@ enum class ShaderInstructionType : uint32_t
 	// (times 64 for st64); DATA0 and DATA1 each name a two-dword register pair.
 	DsWrite2B64,
 	DsWrite2St64B64,
+	// ds_read2[st64]_b64: two qwords from the same addresses into four VGPRs.
+	DsRead2B64,
+	DsRead2St64B64,
 	// ds_write_addtid_b32 / ds_read_addtid_b32: per-lane LDS slot at
 	// M0[15:0] + offset + TID*4 (RDNA2 ISA 10.4). In graphics stages the
 	// slot is private to the invocation (compiler spill/reload idiom).
@@ -1053,6 +1056,7 @@ struct ShaderInstruction
 	// - DsRead2B32: packed as (offset1 << 8) | offset0; each offset is dword-scaled
 	//   while src[0] remains a byte address (addr_i = vaddr + offset_i * 4).
 	// - DsWrite2B64: the same packing, each offset qword-scaled (addr_i = vaddr + offset_i * 8).
+	// - DsRead2B64: the same packing and qword scaling, into four destination dwords.
 	uint16_t ds_offset = 0;
 	// Retain exact DS encoding for admission: legacy aliases and ignored
 	// controls must not become evidence that a different operation is supported.

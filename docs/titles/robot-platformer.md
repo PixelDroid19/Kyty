@@ -1708,14 +1708,21 @@ Known approximations and debt recorded by this chain:
   and scale by 8 bytes (times 64 for st64). The SPIR-V LDS recompiler stores
   both pairs, the wave-LDS path re-emits the raw opcode, and the module declares
   the offset constants. Two packet tests cover the tuple and the qword scaling.
+- **Fix: `ds_read2[st64]_b64`.** The same level also loads two qwords per
+  instruction (opcode 0x77). Both read opcodes decode into a four-dword
+  destination, reuse the qword-scaled offsets and are re-emitted on the
+  wave-LDS path; a packet test checks that the two qwords land in four
+  destination registers.
 - **Verification.** Strict run, SDL offscreen, scripted route, 900 s cap, Intel
   Arc A770, Mesa ANV 26.2.5: the transition crash is gone and the tutorial
-  level loads (5.7 s), which the title never reached before. The DS packet
+  level loads (5.3 s), which the title never reached before. The DS packet
   tests, `check_emulator_boundaries.py` and `check_graphics_tables.py` pass.
-- **Current frontier: first real RCS timeout in the tutorial level.** The kernel
-  reports `Engine reset: engine_class=rcs` with a timed-out `fc_script` job and
-  creates a Xe device coredump (root-only). The run then sees `vkWaitForFences`
-  return `-4` (queue 8, slot 6, sequence 98847, 697 ms). Guest write faults
-  during the flyby remain handled GPU-watch faults. Next: bisect the tutorial
-  level's submissions (transport shade against base draws) and capture the hung
-  batch.
+- **Current frontier: guest resource overlap in the tutorial.** With the DS
+  gaps closed, the level runs its gameplay resource setup. The guest reports its
+  particle heap full (`JsParticle heap memory is full!`, 36813 KB of 36864 KB)
+  and a strict `!create_all_the_same` stop follows at
+  `GpuMemoryCreate.cpp:2557`: a CPU-uploaded texture contained within storage
+  and render views of several types reaches the mixed-parent path. This is a
+  guest-resource lifetime question, not a parser gap. The earlier RCS timeout
+  appeared in a build without the read2 support; this build has not reproduced
+  it, so the two outcomes are recorded separately and neither is excluded.
