@@ -1831,6 +1831,14 @@ Known approximations and debt recorded by this chain:
   create, then produced a real RCS job timeout (Xe engine reset, device
   coredump, `vkWaitForFences -4`, queue 8 slot 0 sequence 97393). The view is
   read before being fully written, so the seed and its ordering are required.
+  Narrowing from the same measurement: one StorageTexture parent (id 103)
+  describes and covers the whole range, and another (id 129) covers it as well.
+  The seed can therefore come from a storage image of the same family, which is
+  a same-format image copy, not a conversion from a render target. The missing
+  piece is a copy path whose destination is linear and multi-level: the existing
+  raw copy writes destination blocks, and the composite admission still demands
+  a single-level 64-bit-uint destination. Extending the destination shape and
+  writing rows instead of blocks is the concrete work.
   Layout note for that extension: a linear (tile 0) storage view with levels
   above one is created as one stacked image (`real_height = height + height/2`
   and per-level offsets from the same layout helpers), while the guest range
