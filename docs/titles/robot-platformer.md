@@ -1813,8 +1813,12 @@ Known approximations and debt recorded by this chain:
   declines. A probe at the emitter's failure points shows why: the first
   source is a VGPR with `dpp` set while the destination and second source are
   plain VGPRs of the same register. The unsupported part is the DPP control,
-  not the min/max operation; the next gap needs the row-class DPP tier
-  extended, not a new emitter.
+  not the min/max operation. The row-DPP tier admits an out-of-row source with
+  `bound_ctrl=0` only for zero-identity ALU shapes that keep the destination
+  (or/xor/add); a maximum does not preserve the destination there, so the
+  refusal is deliberate. Closing it needs either a predicated DPP lowering for
+  non-keep-dst operations or the split-wave transport path for this program,
+  not a new emitter.
   Excluded: linking the mixed parents with the ordinary guest seed. A
   temporary policy let the create proceed with the guest upload for this shape:
   the level passed the resource create and ran without an engine reset (present
