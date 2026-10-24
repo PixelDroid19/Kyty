@@ -1783,6 +1783,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 			SetDynamicParams(vk, const_cast<VulkanPipeline*>(capture));
 			vkCmdSetScissor(vk, 0, 1, &band);
 			vkCmdPushConstants(vk, capture->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters), &kernel_parameters);
+			vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
 			vkCmdBindIndexBuffer(vk, indices->buffer, 0, index_type);
 			BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_requirement.first, vertex_records, indices_snapshotted,
 			                  first_instance, instance_count);
@@ -1802,6 +1803,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 			SetDynamicParams(vk, resolve);
 			vkCmdSetScissor(vk, 0, 1, &band);
 			vkCmdPushConstants(vk, resolve->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters), &kernel_parameters);
+			vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
 			vkCmdBindIndexBuffer(vk, indices->buffer, 0, index_type);
 			BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_requirement.first, vertex_records, indices_snapshotted,
 			                  first_instance, instance_count);
@@ -3463,8 +3465,8 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 			dispatch_limit = static_cast<uint32_t>(parsed);
 		}
 	}
-	if (((dump_dispatch != nullptr && dump_dispatch[0] != '\0') || selected_cs) && dispatch_logs < dispatch_limit &&
-	    (selected_cs || GraphicsRunGetFrameNum() <= 5 || std::strcmp(dump_dispatch, "all") == 0))
+	if (((dump_dispatch != nullptr && dump_dispatch[0] != '\0') || selected_cs) &&
+	    dispatch_logs < dispatch_limit && (selected_cs || GraphicsRunGetFrameNum() <= 5 || std::strcmp(dump_dispatch, "all") == 0))
 	{
 		++dispatch_logs;
 		KYTY_LOG_WARN(

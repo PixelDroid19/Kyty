@@ -40,6 +40,10 @@ struct FragmentTransportResources
 	VulkanBuffer*             wave_output = nullptr;
 	VkDescriptorSet           set         = VK_NULL_HANDLE;
 	uint32_t                  band_height = 0;
+	uint64_t                  control_offset      = 0;
+	uint64_t                  control_bytes       = 0;
+	uint64_t                  references_offset   = 0;
+	uint64_t                  references_bytes    = 0;
 	VkExtent2D                extent {};
 };
 

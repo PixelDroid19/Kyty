@@ -808,6 +808,13 @@ void Spirv::WriteHeader()
 		capabilities.Add("OpCapability ComputeDerivativeGroupLinearKHR");
 		extensions.Add("OpExtension \"SPV_KHR_compute_shader_derivatives\"");
 		execution_modes.Add("OpExecutionMode %main DerivativeGroupLinearKHR");
+		// Storage buffers used by the entry point are part of its interface.
+		vars.Add("%fragment_input");
+		vars.Add("%fragment_output");
+		if (m_fragment_compute_info->control_binding != UINT32_MAX)
+		{
+			vars.Add("%fragment_control");
+		}
 	}
 
 	switch (HostType())
@@ -2930,7 +2937,13 @@ void Spirv::WriteInstructions()
 		}
 		if (UsesFragmentCompute() && inst.type == ShaderInstructionType::SEndpgm)
 		{
-			dst = FragmentEpilog() + dst;
+			// A kill tail (exec=0, null export, s_endpgm) leaves the program end
+			// without a terminator: the export already accounts for every lane.
+			if (dst.IsEmpty())
+			{
+				dst = "OpReturn\n";
+			}
+			dst = FragmentEpilog(index) + dst;
 		}
 
 		// Unknown parser formats must reach the actionable missing-emitter
@@ -3783,7 +3796,11 @@ void Spirv::FindVariables()
 		// The captured record initializes the first VGPRs before the first guest
 		// instruction; the normalized selector lives in one user SGPR. The
 		// compare mask is named by instructions without listing it as an operand.
-		AddVariable(ShaderOperandType::Vgpr, 0, m_fragment_compute_info->initial_vgpr_count);
+		// A draw that carries no interpolated or system input has no such VGPRs.
+		if (m_fragment_compute_info->initial_vgpr_count > 0u)
+		{
+			AddVariable(ShaderOperandType::Vgpr, 0, m_fragment_compute_info->initial_vgpr_count);
+		}
 		AddVariable(ShaderOperandType::Sgpr, m_fragment_compute_info->user_sgpr_count, 1);
 		AddVariable(ShaderOperandType::VccLo, 0, 2);
 	}

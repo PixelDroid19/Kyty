@@ -1496,7 +1496,7 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
                                                               const Vector<uint32_t>& geometry_shader,
                                                               const PipelineStaticParameters& static_params,
                                                               PipelineDynamicParameters* dynamic_params, uint32_t user_sgprs,
-                                                              const String8& requirement_facts)
+                                                              uint32_t lds_dwords, const String8& requirement_facts)
 {
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	if (gctx == nullptr)
@@ -1535,7 +1535,30 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	Vector<uint32_t> resolve_binary;
 	Vector<uint32_t> shade_binary;
 	String8          error;
-	const auto       capture_source = FragmentTransport::GenerateCaptureSource(ps_code, ps_input, info);
+	ShaderPixelInputInfo capture_input = ps_input;
+	capture_input.input_num            = resolved_inputs;
+	const auto capture_source          = FragmentTransport::GenerateCaptureSource(ps_code, capture_input, info);
+	if (capture_source.StartsWith("OpKyty"))
+	{
+		uint32_t interp_count = 0;
+		int      first_interp = -1;
+		for (uint32_t i = 0; i < ps_code.GetInstructions().Size(); ++i)
+		{
+			const auto& instruction = ps_code.GetInstructions().At(i);
+			if (instruction.type == ShaderInstructionType::VInterpP1F32 || instruction.type == ShaderInstructionType::VInterpP2F32 ||
+			    instruction.type == ShaderInstructionType::VInterpMovF32)
+			{
+				++interp_count;
+				if (first_interp < 0)
+				{
+					first_interp = static_cast<int>(instruction.src[1].constant.u);
+				}
+			}
+		}
+		EXIT("fragment transport capture inputs are unavailable: %s custom=%u scale=%u interp=%u/%d %s\n", capture_source.TrimRight().c_str(),
+		     ps_input.custom_interpolation.Enabled() ? 1u : 0u, ps_input.host_to_guest_scale.IsIdentity() ? 1u : 0u, interp_count, first_interp,
+		     requirement_facts.c_str());
+	}
 	if (!ShaderToolchain::Run(capture_source, &capture_binary, &error))
 	{
 		EXIT("fragment transport capture assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
@@ -1545,13 +1568,13 @@ static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer*
 	{
 		EXIT("fragment transport resolve assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
 	}
-	if (!FragmentTransportBuildShadeModule(ps_code, ps_input, user_sgprs, 0u, &shade_binary, &error))
+	if (!FragmentTransportBuildShadeModule(ps_code, ps_input, user_sgprs, lds_dwords, &shade_binary, &error))
 	{
 		EXIT("fragment transport shade compilation failed: %s %s\n", error.c_str(), requirement_facts.c_str());
 	}
 
 	auto* passes            = new FragmentTransportPasses;
-	passes->lane_words      = FragmentTransportLaneWords(ps_input, resolved_inputs);
+	passes->lane_words      = FragmentTransportLaneWords(ps_code, ps_input);
 	passes->initial_vgpr    = info.initial_vgpr_count;
 	passes->capture_static  = new PipelineStaticParameters(static_params);
 	passes->capture_dynamic = new PipelineDynamicParameters(*dynamic_params);
@@ -1897,10 +1920,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 			}
 			auto* passes = CreateFragmentTransportPasses(framebuffer, *color, *vs_input_info, vs_translation.binary, *ps_input_info,
 			                                             ps_transport_code, transport_geometry.binary, *p.static_params, p.dynamic_params,
-			                                             static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr), requirement.facts);
+			                                             static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr),
+			                                             ps_transport_code.GetPixelExtraLdsDwords(), requirement.facts);
 			const uint32_t transport_slot = FindAvailableSlot();
 			p.pipeline                    = passes->resolve;
 			p.transport                   = passes;
+			p.pipeline->transport         = passes;
 			p.pipeline->framebuffer_extent = framebuffer->extent;
 			if (transport_slot < m_pipelines.Size())
 			{

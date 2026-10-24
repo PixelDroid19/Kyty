@@ -21,7 +21,7 @@ namespace Kyty::Libs::Graphics {
 
 // Lane record shape shared by the capture reader and the shade prolog.
 [[nodiscard]] uint32_t FragmentTransportInitialVgprs(const ShaderPixelInputInfo& pixel);
-[[nodiscard]] uint32_t FragmentTransportLaneWords(const ShaderPixelInputInfo& pixel, uint32_t resolved_inputs);
+[[nodiscard]] uint32_t FragmentTransportLaneWords(const ShaderCode& code, const ShaderPixelInputInfo& pixel);
 
 // Creates the split compute pipeline over the guest pixel resources and the
 // transport storage set at index two. The caller owns and destroys both handles.

@@ -20,6 +20,10 @@ namespace {
 
 constexpr uint32_t kTransportBindings = 5;
 constexpr uint32_t kTransportPushBytes = sizeof(FragmentTransport::KernelParameters);
+// The device-local scratch pool caps one recording at 64 MiB. Every transport
+// draw allocates this fixed block, so later draws of the recording reuse the
+// same entry instead of accumulating one block each.
+constexpr uint64_t kTransportAllocationBytes = 40ull * 1024u * 1024u;
 
 struct HostKernels
 {
@@ -148,7 +152,9 @@ FragmentTransport::Limits HostLimits(const GraphicContext& context)
 {
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(context.physical_device, &properties);
-	return {properties.limits.maxStorageBufferRange, FragmentTransport::MAX_TRANSIENT_BYTES, properties.limits.maxComputeWorkGroupCount[0]};
+	// Other passes share the pool, so a draw plans below its layout maximum.
+	return {properties.limits.maxStorageBufferRange, std::min(FragmentTransport::MAX_TRANSIENT_BYTES, kTransportAllocationBytes),
+	        properties.limits.maxComputeWorkGroupCount[0]};
 }
 
 // The capture records one quad per rasterized 2x2 tile and per primitive. A
@@ -225,24 +231,44 @@ bool FragmentTransportPrepareResources(CommandBuffer* buffer, VkExtent2D extent,
 	}
 
 	constexpr uint32_t kBufferCount = static_cast<uint32_t>(FragmentTransport::Buffer::Count);
+	constexpr uint64_t kAlignment   = 256u;
 
-	VulkanBuffer** targets[kBufferCount]    = {&resources->records, &resources->control, &resources->references,
-	                                           &resources->wave_input, &resources->wave_output};
-	VkBuffer       buffers[kBufferCount]    = {};
+	// All five regions live in one device-local allocation: the scratch pool
+	// caps a recording at 64 MiB and a draw needs most of it, while a second
+	// draw must still fit. One buffer per draw can be reused by the next draw
+	// because the tile barriers order every write after the previous reads.
+	uint64_t offsets[kBufferCount] = {};
+	uint64_t sizes[kBufferCount]   = {};
+	uint64_t total                 = 0;
 	for (uint32_t index = 0; index < kBufferCount; ++index)
 	{
-		const uint64_t bytes = std::max<uint64_t>(layout.Bytes(static_cast<FragmentTransport::Buffer>(index)), 4u);
-		*targets[index]      = buffer->AllocateTransientDeviceBuffer(
-            bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-		if (*targets[index] == nullptr)
-		{
-			return false;
-		}
-		buffers[index] = (*targets[index])->buffer;
+		total        = (total + kAlignment - 1u) & ~(kAlignment - 1u);
+		offsets[index] = total;
+		sizes[index]   = std::max<uint64_t>(layout.Bytes(static_cast<FragmentTransport::Buffer>(index)), 4u);
+		total += sizes[index];
 	}
-	resources->layout      = layout;
-	resources->band_height = band_height;
-	resources->extent      = extent;
+	if (total > kTransportAllocationBytes)
+	{
+		return false;
+	}
+	VulkanBuffer* combined = buffer->AllocateTransientDeviceBuffer(
+	    kTransportAllocationBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	if (combined == nullptr)
+	{
+		return false;
+	}
+	resources->records     = combined;
+	resources->control     = combined;
+	resources->references  = combined;
+	resources->wave_input  = combined;
+	resources->wave_output = combined;
+	resources->control_offset    = offsets[static_cast<uint32_t>(FragmentTransport::Buffer::Control)];
+	resources->control_bytes     = sizes[static_cast<uint32_t>(FragmentTransport::Buffer::Control)];
+	resources->references_offset = offsets[static_cast<uint32_t>(FragmentTransport::Buffer::References)];
+	resources->references_bytes  = sizes[static_cast<uint32_t>(FragmentTransport::Buffer::References)];
+	resources->layout            = layout;
+	resources->band_height       = band_height;
+	resources->extent            = extent;
 
 	resources->set = buffer->AllocateTransportDescriptorSet(Kernels().set_layout);
 	if (resources->set == VK_NULL_HANDLE)
@@ -253,9 +279,9 @@ bool FragmentTransportPrepareResources(CommandBuffer* buffer, VkExtent2D extent,
 	VkWriteDescriptorSet   writes[kBufferCount] {};
 	for (uint32_t index = 0; index < kBufferCount; ++index)
 	{
-		info[index].buffer            = buffers[index];
-		info[index].offset            = 0;
-		info[index].range             = VK_WHOLE_SIZE;
+		info[index].buffer            = combined->buffer;
+		info[index].offset            = offsets[index];
+		info[index].range             = sizes[index];
 		writes[index].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writes[index].dstSet          = resources->set;
 		writes[index].dstBinding      = index;
@@ -274,8 +300,8 @@ void FragmentTransportBeginTile(CommandBuffer* buffer, const FragmentTransportRe
 	        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
 	auto cmd = buffer->RecordOutsideRenderPass();
-	vkCmdFillBuffer(cmd, resources.control->buffer, 0, VK_WHOLE_SIZE, 0u);
-	vkCmdFillBuffer(cmd, resources.references->buffer, 0, VK_WHOLE_SIZE, 0xffffffffu);
+	vkCmdFillBuffer(cmd, resources.control->buffer, resources.control_offset, resources.control_bytes, 0u);
+	vkCmdFillBuffer(cmd, resources.references->buffer, resources.references_offset, resources.references_bytes, 0xffffffffu);
 
 	Barrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 	        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,

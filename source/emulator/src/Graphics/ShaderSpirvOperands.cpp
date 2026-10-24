@@ -804,10 +804,11 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
     %dpp_value_<result> = OpSelect %uint <ok> %dpp_fetch_<result> %<zero>
 )";
 	// FI=0 substitutes zero when the fetched source lane is EXEC-inactive.
-	// %exec_lo holds this lane's bit; shuffling it by the source lane index
-	// yields the source lane's bit.
+	// %exec_lane_lo holds this lane's bit (exec_lo is a mask word in compute and
+	// split waves); shuffling the bit by the source lane index yields the source
+	// lane's bit.
 	static const char* exec_guard_text =
-	    R"( %dpp_exlo_<result> = OpLoad %uint %exec_lo
+	    R"( %dpp_exlo_<result> = OpLoad %uint %exec_lane_lo
  %dpp_srclive_<result> = OpGroupNonUniformShuffle %uint %uint_3 %dpp_exlo_<result> %dpp_clamped_<result>
     %dpp_srcon_<result> = OpINotEqual %bool %dpp_srclive_<result> %<zero>
       %dpp_okg_<result> = OpLogicalAnd %bool %dpp_ok_<result> %dpp_srcon_<result>
@@ -1097,7 +1098,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 			            .ReplaceStr("<result_id>", raw_id);
 		} else if (value.type == SpirvType::Uint)
 		{
-			*load = (String8("%<result_id> = OpLoad %uint %<id>"))
+			*load = (String8("%<result_id> = OpLoad %uint %<id>\n"))
 			            .ReplaceStr("<index>", index)
 			            .ReplaceStr("<id>", value.value)
 			            .ReplaceStr("<result_id>", raw_id);

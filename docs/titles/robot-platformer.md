@@ -4,6 +4,102 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Robot platformer: fragment wave transport executes (2026-10-24)
+
+- **Runtime.** A pixel program refused by native fragment admission now runs as
+  host passes: a capture draw over the covered lanes, scan and pack compute
+  kernels that assemble guest 64-lane waves, the split-Wave64 shade compute
+  module over the guest pixel resources, and a resolve draw that applies the
+  draw's original fixed-function state. Capture, shade and resolve pipelines
+  live with the draw state in the pipeline cache; the five transport regions
+  share one device-local allocation, so every draw of a recording reuses it
+  inside the 64 MiB scratch pool.
+- **Verified.** With the transport selected, the flyby's transported draws
+  recorded every tile (20-row bands planned to 39 MB, 35-word lane records
+  after parameter packing) and the run presented frames past the previous
+  gate, up to frames 2530-2660. Captures of those frames score healthy.
+- **Module contract fixed.** The generated module listed `gl_HelperInvocation`
+  in its entry-point interface without declaring it, and the fragment mask
+  accessor loaded the packed EXEC alias that only the write adapter renames;
+  both left undefined ids and the driver rejected the pipeline. Lane records
+  now hold only the interpolation forms the program reads (4 words per
+  interpolated parameter, 12 per `v_interp_mov` source, none for attributes the
+  program never interpolates), and the shade prolog reads pack's active-wave
+  count from the transport control buffer so dispatched groups past it exit
+  immediately. Capture and resolve also need the transport descriptor set
+  bound at index two; without it the host faults in the driver at the first
+  draw.
+- **Split compute pipeline admission fixed.** A transported pixel program failed
+  split compute pipeline creation with `VK_ERROR_UNKNOWN` (-13). The generated
+  module was invalid SPIR-V that the assembler accepts without validation:
+  - a program with two `s_endpgm` sites reused one set of output-store ids;
+  - the discard tail (`s_mov exec, 0`; null export; `s_endpgm`) emitted no
+    terminator, leaving the last block unterminated;
+  - an integer SDWA swizzle was written on the same line as its `OpLoad`, so the
+    assembler dropped it as trailing text.
+
+  Each epilog now carries its instruction index, an empty `s_endpgm` emits
+  `OpReturn`, the epilog base reference uses the indexed id, and integer loads
+  end with a newline. The dumped modules assemble and `spirv-val` clean after
+  these changes. The row-DPP FI=0 guard also shuffled `%exec_lo`, a mask word in
+  compute and split waves; it now shuffles the per-lane `%exec_lane_lo`.
+- **On-device.** With those fixes the flyby's programs created their split
+  compute pipelines and rendered 13,830 tiles: the 39,499-word module and the
+  131,944-word row-DPP module (lane_words 33) both ran capture, scan, pack,
+  shade and resolve per band.
+- **Default-location capture.** A reused program drawn as a depth-only pass
+  (`input_num=0`, `system_inputs=0`, `write_mask=0`) enables no interpolators,
+  yet its code names attributes 1-3. The native pixel pipeline resolves the
+  input count from those `v_interp` attributes, and resolves a default setting
+  to attribute `i` at location `i`; the transport now does the same:
+  - the capture receives the resolved input count, not the draw's register
+    count;
+  - input locations come from the decoded interpolator when custom
+    interpolation is off;
+  - a pair without an enabled barycentric field (and without custom
+    interpolation) uses the perspective-center default instead of being
+    refused;
+  - a rejected capture names its exact admission clause.
+
+  The transport also passes the guest pixel program's LDS size into the shade
+  compute instead of zero dwords (`ExtraLdsDwords`).
+- **On-device, depth-only draw admitted.** The depth-only program now creates a
+  131,548-word shade module (17 lane words) and the run rendered past the
+  previous 13,830-tile gate to 15,482 tiles with four transported programs.
+- **Host SIGSEGV at label publication (fixed).** Those runs then exited with
+  SIGSEGV. A gdb reproduction stopped in `LabelManager::FireCallbacks` at the
+  EOP store `*dst_gpu_addr64 = value64`: the destination range was validated
+  when the label was created, but the GPU allocation could be released before
+  the fence fired. A destination that validated as a GPU allocation at creation
+  now re-validates at publication; a released one is skipped with a bounded
+  warning, while a plain host destination stores as before. Validating every
+  destination instead stalled the guest at frame 27, so the label records at
+  creation whether its destination is GPU-tracked. The check also runs outside
+  the label manager's mutex at both creation and publication: taking the GPU
+  memory lock under that mutex inverts the release path's lock order and
+  stalls the guest (frame 6 with the first version). A run with this fix is the
+  current check.
+- **Offline suite.** `EmulatorFragmentTransport` now runs in the unit build
+  (it was compiled but never force-linked from the runner): capture, shade and
+  resolve modules assemble and `spirv-val`-validate, and the lane packing
+  follows the draw's interpolator source (`v_interp_mov` costs four words as a
+  parameter and twelve per-vertex). The suite also exposed a real gap for the
+  depth-only draw: the shade generator registered a zero-length VGPR range when
+  a program had no initial VGPRs and aborted; it now registers none. The
+  runtime result of the depth-only program is the current frontier.
+- **Host device loss (separate).** The flyby/hub load intermittently loses the
+  device (`VK_ERROR_DEVICE_LOST` after about 0.7 s) even with exclusive GPU
+  access. Kernel evidence: `xe ... Engine reset: engine_class=rcs` with a timed
+  out `fc_script` job and a device coredump (root-only). One occurrence had no
+  transport draw recorded at all and several runs cross the same frames
+  normally, so the loss is not caused by the transport passes; it is tracked
+  separately. Bounded compute-dispatch dumps (frames 2400-3200) and a draw-PS
+  census are used to name the last submitted program when it recurs.
+- **Parser gap seen from the pause menu.** Pressing options during the flyby
+  reaches a shader with VOP3P opcode `0x21`, which the parser rejects
+  (`ShaderParseVOP3P.cpp`). The plain route does not reach it; the opcode is
+  still unimplemented.
+
 ## Robot platformer: gameplay level stops at the fragment transport gate (2026-10-24)
 
 - **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, SDL offscreen video,

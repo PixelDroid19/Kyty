@@ -122,9 +122,9 @@ uint32_t FragmentTransportInitialVgprs(const ShaderPixelInputInfo& pixel)
 	return InitialVgprCount(pixel);
 }
 
-uint32_t FragmentTransportLaneWords(const ShaderPixelInputInfo& pixel, uint32_t resolved_inputs)
+uint32_t FragmentTransportLaneWords(const ShaderCode& code, const ShaderPixelInputInfo& pixel)
 {
-	return 1u + InitialVgprCount(pixel) + resolved_inputs * 16u;
+	return 1u + InitialVgprCount(pixel) + FragmentTransport::BuildLanePacking(code, pixel).words;
 }
 
 bool FragmentTransportBuildShadeModule(const ShaderCode& code, const ShaderPixelInputInfo& pixel, uint32_t user_sgpr_count,
@@ -138,6 +138,7 @@ bool FragmentTransportBuildShadeModule(const ShaderCode& code, const ShaderPixel
 	info.descriptor_set     = kTransportDescriptorSet;
 	info.input_binding      = kWaveInputBinding;
 	info.output_binding     = kWaveOutputBinding;
+	info.control_binding    = 1u;
 	info.initial_vgpr_count = InitialVgprCount(pixel);
 	info.user_sgpr_count    = user_sgpr_count;
 	info.parameter_state    = ShaderFragmentParameterState::Virtualized;
@@ -214,14 +215,16 @@ bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipel
 	}
 
 	ShaderDescriptorLayoutPlan plan;
-	const bool                 has_ps_set = ShaderBindRequiresDescriptorSet(ps_bind) && ShaderBuildDescriptorLayoutPlan(ps_bind, &plan);
-	VkDescriptorSetLayout      ps_layout  = empty_layout;
+	const bool                 bind_requires_set = ShaderBindRequiresDescriptorSet(ps_bind);
+	const bool                 plan_ok           = ShaderBuildDescriptorLayoutPlan(ps_bind, &plan);
+	const bool                 has_ps_set        = bind_requires_set && plan_ok;
+	VkDescriptorSetLayout      ps_layout         = empty_layout;
 	if (has_ps_set)
 	{
 		ps_layout = g_render_ctx->GetDescriptorCache()->GetDescriptorSetLayout(DescriptorCache::Stage::Compute, plan);
 	}
 	const uint32_t ps_slot = ps_bind.descriptor_set_slot;
-	if (ps_slot >= 2u)
+	if (ps_slot >= 2u || (has_ps_set && ps_layout == VK_NULL_HANDLE))
 	{
 		vkDestroyDescriptorSetLayout(device, empty_layout, nullptr);
 		return false;
@@ -342,9 +345,14 @@ FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, co
 	const char* missing = FragmentTransport::MissingHostCapability(*context);
 	ShaderPixelInputInfo resolved = pixel;
 	resolved.input_num            = SpirvResolvePixelParameterCount(code, pixel.input_num);
-	ShaderFragmentComputeInfo info {kTransportDescriptorSet, kWaveInputBinding, kWaveOutputBinding,
-	                                InitialVgprCount(pixel), user_sgpr_count,   ShaderFragmentParameterState::Virtualized};
-	const uint32_t            lane_words = 1u + info.initial_vgpr_count + resolved.input_num * 16u;
+	ShaderFragmentComputeInfo info;
+	info.descriptor_set     = kTransportDescriptorSet;
+	info.input_binding      = kWaveInputBinding;
+	info.output_binding     = kWaveOutputBinding;
+	info.initial_vgpr_count = InitialVgprCount(pixel);
+	info.user_sgpr_count    = user_sgpr_count;
+	info.parameter_state    = ShaderFragmentParameterState::Virtualized;
+	const uint32_t            lane_words = 1u + info.initial_vgpr_count + FragmentTransport::BuildLanePacking(code, resolved).words;
 	const auto                limits     = HostLimits(*context);
 
 	facts += String8::FromPrintf("missing_host_capability=%s ", missing != nullptr ? missing : "none");

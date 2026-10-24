@@ -712,7 +712,7 @@ public:
 	VulkanBuffer* AllocateTransientCopyBuffer(uint64_t size);
 	// Device-local intermediate written and read only by GPU commands of this recording (for example a
 	// geometry pass output), with its own budget. The same ordering and lifetime rules apply.
-	VulkanBuffer* AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage);
+	VulkanBuffer* AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage, bool allow_reuse = true);
 	// Storage-buffer set for one fragment-transport draw state. The pool is reset
 	// when the recording starts, so its sets live exactly as long as the commands
 	// that bind them.

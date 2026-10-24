@@ -1217,7 +1217,7 @@ public:
 	}
 
 	// A device-local scratch is never mapped: only commands recorded in this buffer read and write it.
-	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage, bool device_local)
+	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage, bool device_local, bool allow_reuse = true)
 	{
 		if (ctx == nullptr || size == 0u || usage == 0u)
 		{
@@ -1231,7 +1231,7 @@ public:
 			{
 				usage_entries++;
 			}
-			if (candidate->scratch && candidate->usage == usage && candidate->size >= size &&
+			if (allow_reuse && candidate->scratch && candidate->usage == usage && candidate->size >= size &&
 			    (best == nullptr || candidate->size < best->size))
 			{
 				best = candidate;
@@ -2136,14 +2136,14 @@ VulkanBuffer* CommandBuffer::AllocateTransientCopyBuffer(uint64_t size)
 	                                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
 }
 
-VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage)
+VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage, bool allow_reuse)
 {
 	EXIT_IF(IsInvalid());
 	if (m_transient_device_buffers == nullptr)
 	{
 		m_transient_device_buffers = new TransientBufferPool;
 	}
-	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true);
+	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true, allow_reuse);
 }
 
 VkDescriptorSet CommandBuffer::AllocateTransportDescriptorSet(VkDescriptorSetLayout layout)

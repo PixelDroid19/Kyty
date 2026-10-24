@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/FragmentTransportCapture.h"
 #include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
 #include "Emulator/Graphics/ShaderStorageImage.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
@@ -204,10 +205,12 @@ public:
 	[[nodiscard]] String8        FragmentTransportAnnotations() const;
 	[[nodiscard]] String8        FragmentTransportTypes() const;
 	[[nodiscard]] String8        FragmentTransportVariables() const;
+	// Attribute words the captured lane record holds for this program.
+	[[nodiscard]] const FragmentTransport::LanePacking& FragmentLanePacking() const;
 	[[nodiscard]] String8        FragmentLocalVariables() const;
 	void                         FindFragmentConstants();
 	[[nodiscard]] String8        FragmentProlog() const;
-	[[nodiscard]] String8        FragmentEpilog() const;
+	[[nodiscard]] String8        FragmentEpilog(uint32_t index) const;
 	[[nodiscard]] bool EmitFragmentInterpolation(const ShaderInstruction& instruction, const String8& exec, const String8& tag,
 	                                             String8* output) const;
 	[[nodiscard]] bool EmitFragmentExport(const ShaderInstruction& instruction, uint32_t index, const String8& exec, const String8& tag,
@@ -511,6 +514,8 @@ private:
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
 	const ShaderGeometryComputeInfo* m_geometry_compute_info = nullptr;
 	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
+	mutable FragmentTransport::LanePacking m_fragment_lane_packing {};
+	mutable bool                  m_fragment_lane_packing_valid = false;
 	mutable int                   m_native_wave_tier = -1;
 	mutable bool                  m_lane_reductions_ready = false;
 	mutable ShaderLaneReductions m_lane_reductions;

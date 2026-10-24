@@ -40,6 +40,8 @@ struct ShaderFragmentComputeInfo
 	uint32_t                     descriptor_set     = 1;
 	uint32_t                     input_binding      = 0;
 	uint32_t                     output_binding     = 1;
+	// Optional transport control buffer; word two is the active wave count.
+	uint32_t                     control_binding    = UINT32_MAX;
 	uint32_t                     initial_vgpr_count = 0;
 	uint32_t                     user_sgpr_count    = UINT32_MAX;
 	ShaderFragmentParameterState parameter_state    = ShaderFragmentParameterState::Captured;
