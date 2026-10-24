@@ -4,6 +4,63 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## A draw after a dispatch starts a new command buffer (2026-10-23)
+
+- **Observed** (sandbox title, boot, Intel A770, Mesa ANV 26.2.5, Xe kernel
+  driver):
+  - About 11 s into boot (presented frame 85-150), when the menu's
+    post-process chain first runs, the graphics queue's job timed out in
+    roughly half of the 30 s runs. The kernel logged a GuC engine reset of
+    the render engine after its 640 ms preemption timeout, then
+    `Timedout job`, and the next fence wait returned
+    `VK_ERROR_DEVICE_LOST`.
+  - The hung submission held the same chain each time: post-process draws,
+    two dispatches, six draws and sometimes one more dispatch. Every earlier
+    submission had completed. The validation layer reported no error.
+- **Excluded.**
+  - Loop bounds of the chain's pixel shaders. Their constant words were the
+    same in every frame, including the hung one. The translated loops are
+    bounded, and `V_CVT_I32_F32` saturates as on the guest GPU.
+  - A missing dependency between recorded commands. A full
+    `ALL_COMMANDS` memory barrier at every draw/dispatch transition still
+    hung (frame 546).
+  - Color compression. `INTEL_DEBUG=noccs` still hung (second run).
+  - New command buffers at draw-to-dispatch transitions only. Still hung
+    (frame 89).
+- **Cause.** The hang needs a draw recorded after a dispatch in the same
+  host command buffer:
+  - ending the command buffer before such a draw avoided it in 8 of 8 runs;
+  - `INTEL_DEBUG=reemit`, which makes the driver emit all graphics state at
+    every draw, avoided it in 6 of 6 runs without any other change.
+
+  Within one command buffer the driver keeps graphics state across its
+  switch from the compute pipeline back to 3D and emits only the state that
+  changed. On this host part of that state is not valid after the switch.
+  The packet involved was not isolated; that needs a driver build.
+- **Change.** The command processor submits its recording before a draw
+  when a guest dispatch was recorded since its last submission. The next
+  command buffer emits every graphics state again.
+- **Verified.**
+  - Sandbox title: 8 of 8 runs of 30 s without a hang (3 of 4 hung before).
+  - Unit tests (2,459) and the integration and diagnostics tests (74).
+  - 30 s strict runs at the 60 fps present limit, frames before and after:
+    fishing title 1,442 / 1,438, insect platformer sequel 1,345 / 1,341,
+    card title 1,479 / 1,473, racing title 1,455 / 1,453, beat 'em up
+    493 / 524.
+  - Racing title on AMD Raphael (RADV), 30 s: 1,456 / 1,462 frames.
+  - Robot platformer, Intel, warm caches, 100 s: 986 frames at 26-33 fps
+    with the change; 156 and 1,171 frames at 12-28 fps in the two runs
+    without it. No measurable cost.
+  - Full scripted routes of 22 titles on Intel (200-240 s each, 60 fps
+    present limit): every title ran its whole route without a stop and
+    reached the same gameplay captures as the previous sweep.
+  - Beat 'em up, 110 s, perf snapshots every 26 s: 3,427 frames with the
+    change against 3,340 without it. In combat the submissions per frame
+    rose from 10.7 to 12.3 and the median frame time stayed at 41-42 ms.
+- **Not verified.** Other Intel generations, and drivers other than Mesa
+  ANV and RADV. The robot platformer's full 700 s route and the 2D Unity
+  action title were not run with the change.
+
 ## Guest-window searches skip occupied spans (2026-10-23)
 
 - **Observed** (role-playing title, boot, Intel A770): the first frame

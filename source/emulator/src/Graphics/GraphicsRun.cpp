@@ -544,6 +544,24 @@ void CommandProcessor::SubmitRecordedWorkIfGpuIdle()
 	(void)BufferFlushForGpuWait();
 }
 
+void CommandProcessor::SubmitRecordedDispatchesBeforeDraw()
+{
+	// Mesa's Intel driver can hang the GPU (verified on Gfx12.5) on a draw
+	// that follows a dispatch in the same command buffer; a full barrier there
+	// does not help, re-emitting all graphics state does. A new command buffer
+	// starts with every graphics state emitted again.
+	SubmissionId latest_completed;
+	{
+		Core::LockGuard lock(m_mutex);
+		if (!m_dispatch_recorded)
+		{
+			return;
+		}
+		(void)SubmitCurrentLocked(&latest_completed);
+	}
+	PublishCompletedSubmissions();
+}
+
 SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_completed)
 {
 	EXIT_IF(latest_completed == nullptr);
@@ -563,6 +581,7 @@ SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_complete
 	m_buffer[submitted_slot]->End();
 	m_buffer[submitted_slot]->Execute();
 	m_operations_since_submit = 0;
+	m_dispatch_recorded       = false;
 	require_submission_success(m_submission_slots.MarkSubmitted(submitted_slot), "MarkSubmitted", m_queue, submitted_slot);
 	require_publication_success(m_publication_gate.RegisterSubmitted(submitted_id), "RegisterSubmitted", m_queue, submitted_id);
 
@@ -2204,6 +2223,7 @@ static void RetryGuestDeviceAddressDraw(const Callback& callback)
 
 void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type)
 {
+	SubmitRecordedDispatchesBeforeDraw();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	uint64_t submit_id = 0;
 	uint32_t index_type_and_size = 0;
@@ -2240,6 +2260,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags)
 {
+	SubmitRecordedDispatchesBeforeDraw();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	uint64_t submit_id = 0;
 	uint32_t index_type_and_size = 0;
@@ -2277,6 +2298,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 
 void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiator)
 {
+	SubmitRecordedDispatchesBeforeDraw();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	// This precedes the CPU snapshot of indirect arguments; renderer preflight
 	// runs later and cannot provide freshness for this host-side read.
@@ -2386,6 +2408,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 
 void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t initiator)
 {
+	SubmitRecordedDispatchesBeforeDraw();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	// This precedes the CPU snapshot of indirect arguments; renderer preflight
 	// runs later and cannot provide freshness for this host-side read.
@@ -2459,6 +2482,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 			result = GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, thread_group_x,
 			                                      thread_group_y, thread_group_z, mode, processor_writeback_complete, &pending);
+			m_dispatch_recorded = m_dispatch_recorded || result == ComputeDispatchResult::Completed;
 		}
 		if (result == ComputeDispatchResult::Completed)
 		{
@@ -2554,6 +2578,7 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 
 void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier)
 {
+	SubmitRecordedDispatchesBeforeDraw();
 	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	uint64_t submit_id = 0;
 	uint32_t instance_count = 1;

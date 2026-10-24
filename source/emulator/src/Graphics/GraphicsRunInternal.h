@@ -418,6 +418,7 @@ private:
 	void                 WaitUntilPublishedUnlessReentrant(SubmissionId submission);
 	SubmissionId         BufferFlushForGpuWait();
 	void                 SubmitRecordedWorkIfGpuIdle();
+	void                 SubmitRecordedDispatchesBeforeDraw();
 
 	struct Counter
 	{
@@ -469,6 +470,8 @@ private:
 	bool     m_consolidated_plain_wait     = false;
 	// Draws and dispatches recorded since this processor's last submission.
 	uint32_t        m_operations_since_submit     = 0;
+	// A guest dispatch is recorded in the current command buffer.
+	bool            m_dispatch_recorded           = false;
 	uint64_t m_sumbit_id                   = 0;
 	uint64_t m_synthetic_occlusion_counter = 0;
 	uint32_t m_last_pm4_op                 = 0;
