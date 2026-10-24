@@ -1752,6 +1752,12 @@ Known approximations and debt recorded by this chain:
   relaxation. The particle-heap warning stays an open guest-side observation;
   the RCS timeout seen in one earlier build was not reproduced and both remain
   recorded.
+- **Visual state and rate after the DS fixes.** Native captures at present 1343
+  (intro flyby) and 2985 (tutorial loading, ship scene) both score healthy
+  (first: entropy 4.03, 739 colour bins, no stripe, white 0.33%, sparkle 1.1%)
+  and show the logo, ship and asteroid field without visible corruption. The
+  same agent sample reports 5.6 fps at present 1343; performance is a separate
+  open item. The tutorial still stops at the mixed-view storage alias above.
 - **Excluded: dropped label publications.** A lost EOP fence value could have
   stalled the guest's particle free list, so the label path was checked first:
   across five 900-second runs the "label destination released before
