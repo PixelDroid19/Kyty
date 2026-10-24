@@ -4,6 +4,49 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Robot platformer: gameplay level stops at the fragment transport gate (2026-10-24)
+
+- **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, SDL offscreen video,
+  scripted route (cross every 3 s from the first pad poll), 600 s cap, HEAD
+  e214bc69; one cold boot and one boot on the caches it left. Native PNG
+  captures and agent samples only.
+- **Warm boot removes the cold compiles.** The first present appeared inside
+  the agent's ready window, presents 362-1034 ran at 23-30 fps, and the
+  run wrote no Mesa shader-cache entries and two SPIR-V entries. The cold
+  boot of the same tree held twice for 90 s and more than 120 s while it
+  compiled pipelines and wrote more than 50 Mesa entries. Loading the same
+  scenes therefore no longer pays a translation or pipeline compile; the
+  remaining load time is the game's own resource work.
+- **Guest-reported loads** (`LoadLevelResources`, warm boot): title level at
+  0:45, worldmap 4.98 s, the intro flyby 14.87 s, and the first gameplay hub
+  8.61 s. The guest's timer includes the GPU waits its loader performs, so
+  these are not pure file reads.
+- **First strict fail: the first gameplay draw.** The hub level starts and
+  the renderer stops in `GraphicsRenderPipeline.cpp:1680`:
+  `fragment wave transport is required by the pixel stage but the renderer
+  does not select it yet`. Facts:
+  `native_admission{guest=64 proof=3 host=unavailable mapping=0 mask_ops=1
+  pc=0x568 reason=fragment row DPP source participation is unproven (neutral
+  values do not prove helper recovery)}` and `draw{extent=1920x1080
+  samples=1 color_targets=3 write_mask=0x00000037 depth=1 depth_write=1
+  blend0=1 input_num=5 system_inputs=0x1b02 subgroup=64}`. The run exited
+  with code 65. This is the first blocker after startup: the level loads,
+  but its first pixel program needs a guest wave64 transport that the
+  renderer computes but does not execute (`docs/fragment-wave-execution.md`).
+- **Visual state before the stop.** Captures show the publisher card, the
+  studio logo, the tunnel with the lit ship, and the asteroid-field intro
+  scene without visible corruption. The later gameplay scene is not rendered
+  because the pipeline is refused.
+- **Frame cost in the same warm run** (agent interval of 30 s during the
+  load-to-interactive transition): 290 presents, 64,913 draws, 26,411
+  dispatches, 16,729 submissions and 7,830 fence waits (13.6 s of the 30 s),
+  with 14.9 GB hashed, 2.43 GB uploaded and frame-time p50 98 ms. The
+  command processor and its fence waits, not GPU execution, set the rate.
+- **Guest particle warning.** During the intro the guest logs
+  `JsParticle heap memory is full!` with a 36 MiB heap while it renders at
+  10-25 fps. It is a guest allocation failure and is not yet shown to be an
+  emulator defect; a native-rate run must show whether it persists.
+
 ## Robot platformer: logo particles through a split geometry pass (2026-10-22)
 
 - **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, `generic.pad`,

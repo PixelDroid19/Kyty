@@ -39,6 +39,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Role-playing title menu defect (2026-10-08, deferred; not gameplay)
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
+  - Robot platformer: gameplay level stops at the fragment transport gate (2026-10-24)
   - Robot platformer: logo particles through a split geometry pass (2026-10-22)
   - Robot platformer: paired compute compile cost (2026-10-21, closed 2026-10-22)
   - Robot platformer: worldmap stall and dark top-left quadrant (2026-10-17)
