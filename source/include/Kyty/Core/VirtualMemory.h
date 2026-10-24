@@ -396,6 +396,11 @@ bool RestoreProtection(uint64_t address, uint64_t size, uint32_t restore_token) 
 // Applies restore_token natively without the VM lock. Only a lease authority that is fenced against
 // guest protection changes (see above) may call it.
 bool RestoreProtectionSignalSafe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+// Signal-safe: true only when the host lets this process write every page of the page-aligned range now.
+// Unmapped or write-denied pages, and hosts without the query (see CanQueryHostWriteSignalSafe), give false.
+// Pages it reports writable may be populated, as the write it vouches for would populate them.
+bool HostGrantsWriteSignalSafe(uint64_t address, uint64_t size) noexcept;
+bool CanQueryHostWriteSignalSafe() noexcept;
 // Ends every lease of `authority` and reapplies the guest protection of those pages. When a page's
 // protection cannot be reapplied, its lease stays without an authority and the call fails; in every
 // case the VM no longer refers to `authority` afterwards.

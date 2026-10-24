@@ -2383,6 +2383,40 @@ bool RestoreProtectionSignalSafe(uint64_t address, uint64_t size, uint32_t resto
 	return sys_virtual_restore_protection_signal_safe(address, size, restore_token);
 }
 
+bool HostGrantsWriteSignalSafe(uint64_t address, uint64_t size) noexcept
+{
+#if defined(__linux__) && !defined(__APPLE__) && defined(MADV_POPULATE_WRITE)
+	// Prefaulting for write fails, without a signal, wherever a write would fault.
+	return size != 0 && ::madvise(reinterpret_cast<void*>(static_cast<uintptr_t>(address)), size, MADV_POPULATE_WRITE) == 0;
+#else
+	(void)address;
+	(void)size;
+	return false;
+#endif
+}
+
+bool CanQueryHostWriteSignalSafe() noexcept
+{
+#if defined(__linux__) && !defined(__APPLE__) && defined(MADV_POPULATE_WRITE)
+	// Kernels before 5.14 reject the advice on every page.
+	static const bool supported = []() noexcept
+	{
+		const auto page  = static_cast<size_t>(GetPageSize());
+		void*      probe = ::mmap(nullptr, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (probe == MAP_FAILED)
+		{
+			return false;
+		}
+		const bool granted = ::madvise(probe, page, MADV_POPULATE_WRITE) == 0;
+		::munmap(probe, page);
+		return granted;
+	}();
+	return supported;
+#else
+	return false;
+#endif
+}
+
 bool ProtectWriteSignalSafe(uint64_t address, uint64_t size)
 {
 	return sys_virtual_protect_write_signal_safe(address, size);

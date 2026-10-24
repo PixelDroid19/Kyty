@@ -4,6 +4,60 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Restored retired tracker pages keep no identity (2026-10-24)
+
+- **Observed** (beat 'em up, Intel A770, strict runs at the 60 fps present
+  limit): in the intro cutscene `GpuMemoryCreateObject` held 44% of the CP
+  thread, and about half of that was content hashing in `GpuMemory::Update`
+  for ranges the dirty tracker had refused. A temporary counter (removed) showed about
+  91,000 `RegisterRange` refusals per 60 s, all for the page-identity budget
+  (524,288 pages), already on the title screen and with only about 5,750
+  registered ranges. A table dump showed about 295,000 referenced pages and
+  about 229,000 retired pages with a live token; nothing was revoked, so the
+  2026-10-11 sweep of revoked identities freed nothing. The title allocates
+  new resources at fresh addresses and does not unmap the old ones, so
+  retired identities only accumulated.
+- **Why retired identities were kept:** a guest write that faulted while
+  the page was still armed can reach the handler after unregistration
+  restored the page. The retired identity let that late fault restore its
+  token and run again; without it the fault was reported as the guest's.
+- **Fix** (`GpuDirtyPageTracker.cpp`, `VirtualMemory.cpp`): the protection
+  operations gain an optional signal-safe host query, "does the host let this
+  process write these pages now". On Linux it is
+  `madvise(MADV_POPULATE_WRITE)`, which fails without a signal wherever a
+  write would fault and is probed once at start (kernels before 5.14 reject
+  it). A write fault that the tracked path does not claim runs again when the
+  host grants the write: whatever removed the write is gone, and the access
+  either succeeds or faults again for a real reason. Write faults are
+  classified from the hardware error code on Linux; hosts without the query
+  keep the old behaviour. With that rule, unregistration releases the
+  identities of a run whose batched restore succeeded. A run whose restore
+  failed keeps its identities and tokens, so a later write still restores the
+  page. Released slots become tombstones; a tombstone followed by an empty slot
+  (and the tombstones before it) becomes empty, in the page and block tables,
+  so absent lookups do not lengthen with churn. That is safe because no probe
+  chain continues past an empty slot.
+- **Result:** registration refusals went from about 91,000 per 60 s to 0.
+  Hashed bytes on the title screen fell from 8.8 GB to 3.1 GB per 60 s run
+  (79,800 vs 117,500 calls). In the intro cutscene the same-binary A/B
+  (release on vs off) gave 22.1 vs 20.6 fps between the same captures; this
+  is one sample per side.
+- **Verified:** unit tests pass (2463; one devtools process test failed once
+  and passed on three reruns), including a focused case for released
+  identities, failed restores and host-denied late faults; the existing
+  late-fault case now runs through the real VM query. Regression sweep
+  with no stop on five titles (racing 60 fps, anime fighter 48 fps between
+  its last captures, isometric roguelike 57 fps, insect platformer sequel
+  60 fps, beat 'em up title screen 56 fps), in line with the previous sweep.
+- **Open:** storage textures are never retired while they hold writes
+  (`GpuMemoryWriteback.cpp`, `FrameDone`): the beat 'em up creates about 18
+  sprite-sized storage textures per cutscene frame at new addresses, and about
+  11,000 stay live after 52 s, with 2.3 GB hashed at creation. The guest
+  device-address registry follows them (about 11,000 ranges), and walks of
+  that map (`MergedRanges`, `RebuildTable`, `ImportPhysicalRanges`) cost
+  about 10% of the CP thread in tree iteration. Both need a proof that the
+  storage contents are dead before anything can be released.
+
 ## Release-ordered snapshot lists instead of trees (2026-10-24)
 
 - **Observed** (fishing title in game, Intel A770, CP-thread profile): the
@@ -25,7 +79,7 @@ record. Titles are named descriptively only (`AGENTS.md`).
   11.2% → 10.3% of the CP thread, about 2.4 points in total.
 - **Verified:** unit tests pass (2462); regression sweep with no stop on
   five titles (racing 60 fps, anime fighter 47 fps, isometric roguelike
-  60 fps, insect platformer sequel 60 fps, beat 'em up 18 fps in gameplay),
+  60 fps, insect platformer sequel 60 fps, beat 'em up 18 fps in the intro cutscene),
   frame counts in line with the previous binary for the same scene.
 
 ## Attachment writes keep their own materialization (2026-10-24)

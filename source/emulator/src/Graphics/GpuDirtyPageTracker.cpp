@@ -90,6 +90,11 @@ bool DefaultRestoreSignalSafe(void*, uintptr_t address, size_t size, uint32_t re
 	return Core::VirtualMemory::RestoreProtectionSignalSafe(address, size, restore_token);
 }
 
+bool DefaultHostGrantsWriteSignalSafe(void*, uintptr_t address, size_t size) noexcept
+{
+	return Core::VirtualMemory::HostGrantsWriteSignalSafe(address, size);
+}
+
 bool DefaultReleaseLeases(void*, const Core::VirtualMemory::WriteLeaseAuthority* authority) noexcept
 {
 	return Core::VirtualMemory::ReleaseWriteLeases(authority);
@@ -98,9 +103,11 @@ bool DefaultReleaseLeases(void*, const Core::VirtualMemory::WriteLeaseAuthority*
 } // namespace
 
 GpuDirtyPageTracker::GpuDirtyPageTracker(bool enabled)
-    : GpuDirtyPageTracker(GpuDirtyPageProtectionOps {nullptr, &DefaultRemoveWriteAndCapture, &DefaultRemoveWrite, &DefaultRestore,
-                                                     &DefaultRestoreSignalSafe, &DefaultReleaseLeases},
-                          enabled)
+    : GpuDirtyPageTracker(
+          GpuDirtyPageProtectionOps {nullptr, &DefaultRemoveWriteAndCapture, &DefaultRemoveWrite, &DefaultRestore,
+		                             &DefaultRestoreSignalSafe, &DefaultReleaseLeases,
+		                             Core::VirtualMemory::CanQueryHostWriteSignalSafe() ? &DefaultHostGrantsWriteSignalSafe : nullptr},
+          enabled)
 {
 }
 
@@ -428,12 +435,28 @@ void GpuDirtyPageTracker::ReleasePageSlot(PageEntry* entry) noexcept
 	const uint32_t block = entry->block.exchange(kNoBlock, std::memory_order_acq_rel);
 	entry->key.store(kTombstoneKey, std::memory_order_release);
 	--m_page_identity_count;
+	// A tombstone followed by an empty slot continues no probe chain, so it and
+	// the tombstones before it become empty and absent lookups stay short.
+	auto slot = static_cast<size_t>(entry - m_pages.get());
+	while (m_pages[slot].key.load(std::memory_order_relaxed) == kTombstoneKey &&
+	       m_pages[(slot + 1u) & (kPageTableSize - 1u)].key.load(std::memory_order_relaxed) == 0)
+	{
+		m_pages[slot].key.store(0, std::memory_order_release);
+		slot = (slot - 1u) & (kPageTableSize - 1u);
+	}
 	if (block < kBlockTableSize)
 	{
 		m_blocks[block].page_mask.fetch_and(~(uint64_t {1} << ((page / m_page_size) % kBlockPages)), std::memory_order_relaxed);
 		if (m_blocks[block].pages.fetch_sub(1, std::memory_order_acq_rel) == 1u)
 		{
 			m_blocks[block].key.store(kBlockTombstoneKey, std::memory_order_release);
+			size_t block_slot = block;
+			while (m_blocks[block_slot].key.load(std::memory_order_relaxed) == kBlockTombstoneKey &&
+			       m_blocks[(block_slot + 1u) & (kBlockTableSize - 1u)].key.load(std::memory_order_relaxed) == 0)
+			{
+				m_blocks[block_slot].key.store(0, std::memory_order_release);
+				block_slot = (block_slot - 1u) & (kBlockTableSize - 1u);
+			}
 		}
 	}
 	LowerFence();
@@ -675,6 +698,9 @@ bool GpuDirtyPageTracker::RestoreRetirementRun(uintptr_t first, uintptr_t last, 
 {
 	const size_t size = last - first + m_page_size;
 	const bool batch_restored = m_protection_ops.restore(m_protection_ops.context, first, size, token);
+	// A restored run needs no late-fault identity: such a fault finds its page
+	// writable again and runs again (see HandleWriteFault).
+	const bool release = batch_restored && m_protection_ops.host_grants_write_signal_safe != nullptr;
 	if (!batch_restored)
 	{
 		for (uintptr_t page = first;; page += m_page_size)
@@ -691,6 +717,10 @@ bool GpuDirtyPageTracker::RestoreRetirementRun(uintptr_t first, uintptr_t last, 
 		if (auto* entry = FindPage(page); entry != nullptr)
 		{
 			entry->protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Retired), std::memory_order_release);
+			if (release)
+			{
+				ReleasePageSlot(entry);
+			}
 		}
 		if (page == last || page > last - m_page_size)
 		{
@@ -1487,7 +1517,20 @@ bool GpuDirtyPageTracker::HandleWriteFault(uintptr_t address) noexcept
 		return false;
 	}
 	const uintptr_t page_address = PageStart(address);
-	// A page without metadata was never armed. Registration precedes arming.
+	// A write that faulted before its page was restored may find the identity
+	// already released. The restored page grants the write, so it runs again.
+	return HandleTrackedWriteFault(page_address) || HostGrantsWrite(page_address);
+}
+
+bool GpuDirtyPageTracker::HostGrantsWrite(uintptr_t page) const noexcept
+{
+	return m_protection_ops.host_grants_write_signal_safe != nullptr &&
+	       m_protection_ops.host_grants_write_signal_safe(m_protection_ops.context, page, m_page_size);
+}
+
+bool GpuDirtyPageTracker::HandleTrackedWriteFault(uintptr_t page_address) noexcept
+{
+	// A page without metadata is not armed. Registration precedes arming.
 	const PageEntry* entry = FindPage(page_address);
 	if (entry == nullptr)
 	{
