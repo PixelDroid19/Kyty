@@ -525,7 +525,11 @@ void CommandProcessor::SubmitRecordedWorkIfGpuIdle()
 	// GPU run while decoding continues. Once a submission's worth of
 	// operations is recorded, every operation checks whether the queue went
 	// idle, so the GPU waits at most one operation for the next batch.
+	// A submission costs the CP thread about 30 us, so batches shorter than
+	// the interval below are extended; that bounds the cost to a few percent
+	// of the CP thread while the GPU waits at most that long.
 	constexpr uint32_t operations_per_submission = 8;
+	constexpr auto     min_submission_interval   = std::chrono::microseconds(500);
 	if (m_queue != GraphicContext::QUEUE_GFX)
 	{
 		return;
@@ -533,6 +537,10 @@ void CommandProcessor::SubmitRecordedWorkIfGpuIdle()
 	{
 		Core::LockGuard lock(m_mutex);
 		if (++m_operations_since_submit < operations_per_submission)
+		{
+			return;
+		}
+		if (std::chrono::steady_clock::now() - m_last_submit_time < min_submission_interval)
 		{
 			return;
 		}
@@ -581,6 +589,7 @@ SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_complete
 	m_buffer[submitted_slot]->End();
 	m_buffer[submitted_slot]->Execute();
 	m_operations_since_submit = 0;
+	m_last_submit_time        = std::chrono::steady_clock::now();
 	m_dispatch_recorded       = false;
 	require_submission_success(m_submission_slots.MarkSubmitted(submitted_slot), "MarkSubmitted", m_queue, submitted_slot);
 	require_publication_success(m_publication_gate.RegisterSubmitted(submitted_id), "RegisterSubmitted", m_queue, submitted_id);

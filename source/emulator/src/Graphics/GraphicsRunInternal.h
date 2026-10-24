@@ -470,6 +470,8 @@ private:
 	bool     m_consolidated_plain_wait     = false;
 	// Draws and dispatches recorded since this processor's last submission.
 	uint32_t        m_operations_since_submit     = 0;
+	// When this processor last submitted a command buffer.
+	std::chrono::steady_clock::time_point m_last_submit_time;
 	// A guest dispatch is recorded in the current command buffer.
 	bool            m_dispatch_recorded           = false;
 	uint64_t m_sumbit_id                   = 0;

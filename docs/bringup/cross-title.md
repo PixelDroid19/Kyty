@@ -4,6 +4,36 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Early submissions at least half a millisecond apart (2026-10-24)
+
+- **Observed** (sandbox title in the world, Intel A770, Mesa ANV, strict
+  runs at the 60 fps present limit, agent counters 245-290 s into the run):
+  - About 4300 draws per frame and about 380 submissions per frame: the GPU
+    finished each eight-operation batch before the CP thread recorded the
+    next one, so the idle check (see "Recorded work submitted while the GPU
+    queue is idle") submitted every eight draws.
+  - In CP-thread stack samples the submissions the idle check starts took
+    about 7% of the thread, and the command-buffer `Begin` that follows each
+    one (driver time and lease release) about 6% more.
+- **Change.** An early submission also needs 0.5 ms since the processor's
+  previous submission. At about 30 µs per submission that bounds their
+  cost to about 6% of the CP thread, while the GPU waits at most 0.5 ms for
+  the next batch.
+- **Results** (same route and window, one run each):
+
+  | Binary | CP per frame | Draws per frame | fps | Submissions per frame |
+  | --- | --- | --- | --- | --- |
+  | Before | 87-95 ms | 4200-4390 | 9.0-11.3 | about 380 |
+  | After | 68-74 ms | 4260-4400 | 10.5-12.2 | 113 |
+
+  - Regression runs at the 60 fps limit, no stops: the pixel cave
+    platformer holds 60 fps and reaches frame 4446 at 100 s (4399 in the
+    2026-10-22 record); the fishing title shows 20.2 fps at the dock (17.4
+    before); the racing, card, beat 'em up and insect platformer sequel
+    titles reach their usual screens at 58-60 fps.
+- **Verification.** Unit tests (2459 passed) and the 74 graphics
+  diagnostics integration tests pass.
+
 ## A draw after a dispatch starts a new command buffer (2026-10-23)
 
 - **Observed** (sandbox title, boot, Intel A770, Mesa ANV 26.2.5, Xe kernel
