@@ -16,6 +16,153 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Restored retired tracker pages keep no identity (2026-10-24)
+
+- **Observed** (beat 'em up, Intel A770, strict runs at the 60 fps present
+  limit): in the intro cutscene `GpuMemoryCreateObject` held 44% of the CP
+  thread, and about half of that was content hashing in `GpuMemory::Update`
+  for ranges the dirty tracker had refused. A temporary counter (removed) showed about
+  91,000 `RegisterRange` refusals per 60 s, all for the page-identity budget
+  (524,288 pages), already on the title screen and with only about 5,750
+  registered ranges. A table dump showed about 295,000 referenced pages and
+  about 229,000 retired pages with a live token; nothing was revoked, so the
+  2026-10-11 sweep of revoked identities freed nothing. The title allocates
+  new resources at fresh addresses and does not unmap the old ones, so
+  retired identities only accumulated.
+- **Why retired identities were kept:** a guest write that faulted while
+  the page was still armed can reach the handler after unregistration
+  restored the page. The retired identity let that late fault restore its
+  token and run again; without it the fault was reported as the guest's.
+- **Fix** (`GpuDirtyPageTracker.cpp`, `VirtualMemory.cpp`): the protection
+  operations gain an optional signal-safe host query, "does the host let this
+  process write these pages now". On Linux it is
+  `madvise(MADV_POPULATE_WRITE)`, which fails without a signal wherever a
+  write would fault and is probed once at start (kernels before 5.14 reject
+  it). A write fault that the tracked path does not claim runs again when the
+  host grants the write: whatever removed the write is gone, and the access
+  either succeeds or faults again for a real reason. Write faults are
+  classified from the hardware error code on Linux; hosts without the query
+  keep the old behaviour. With that rule, unregistration releases the
+  identities of a run whose batched restore succeeded. A run whose restore
+  failed keeps its identities and tokens, so a later write still restores the
+  page. Released slots become tombstones; a tombstone followed by an empty slot
+  (and the tombstones before it) becomes empty, in the page and block tables,
+  so absent lookups do not lengthen with churn. That is safe because no probe
+  chain continues past an empty slot.
+- **Result:** registration refusals went from about 91,000 per 60 s to 0.
+  Hashed bytes on the title screen fell from 8.8 GB to 3.1 GB per 60 s run
+  (79,800 vs 117,500 calls). In the intro cutscene the same-binary A/B
+  (release on vs off) gave 22.1 vs 20.6 fps between the same captures; this
+  is one sample per side.
+- **Verified:** unit tests pass (2463; one devtools process test failed once
+  and passed on three reruns), including a focused case for released
+  identities, failed restores and host-denied late faults; the existing
+  late-fault case now runs through the real VM query. Regression sweep
+  with no stop on five titles (racing 60 fps, anime fighter 48 fps between
+  its last captures, isometric roguelike 57 fps, insect platformer sequel
+  60 fps, beat 'em up title screen 56 fps), in line with the previous sweep.
+- **Open:** storage textures are never retired while they hold writes
+  (`GpuMemoryWriteback.cpp`, `FrameDone`): the beat 'em up creates about 18
+  sprite-sized storage textures per cutscene frame at new addresses, and about
+  11,000 stay live after 52 s, with 2.3 GB hashed at creation. The guest
+  device-address registry follows them (about 11,000 ranges), and walks of
+  that map (`MergedRanges`, `RebuildTable`, `ImportPhysicalRanges`) cost
+  about 10% of the CP thread in tree iteration. Both need a proof that the
+  storage contents are dead before anything can be released.
+
+## Release-ordered snapshot lists instead of trees (2026-10-24)
+
+- **Observed** (fishing title in game, Intel A770, CP-thread profile): the
+  transient snapshot pool's free index cost about 4% of the CP thread.
+  Every recording releases the snapshots it leased (`IndexFree`, 2.0%) and
+  leases most of them again during the same recording, and each step
+  inserted into and erased from two ordered maps (the per-usage
+  size-and-release map and the pool-wide release map; tree erase 1.9%, plus
+  node allocations).
+- **Fix** (`TransientBufferPool`, `GraphicsRenderCommandBuffer.cpp`): release
+  order only grows, so both release orders are intrusive lists. Free
+  snapshots sit in one list per size, under a map from size to list; the
+  first non-empty size at or above a request holds the answer at its head,
+  which is the entry the previous size-and-release key chose. Empty sizes
+  are dropped when a lookup passes them or when their last entry is
+  destroyed.
+- **Result:** in the same window of the scene (90-120 s) the tree erase
+  share fell 1.86% → 0.33%, `IndexFree` 1.99% → 1.16% and `Capture`
+  11.2% → 10.3% of the CP thread, about 2.4 points in total.
+- **Verified:** unit tests pass (2462); regression sweep with no stop on
+  five titles (racing 60 fps, anime fighter 47 fps, isometric roguelike
+  60 fps, insect platformer sequel 60 fps, beat 'em up 18 fps in the intro cutscene),
+  frame counts in line with the previous binary for the same scene.
+
+## Attachment writes keep their own materialization (2026-10-24)
+
+- **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps
+  present limit): render targets and depth buffers never reused the
+  materialization cache; temporary counters (removed) showed 0 hits for
+  about 0.9 million stores each. Every draw calls `ResetHash` on its
+  attachment ranges, which invalidated every overlapping entry, including
+  the attachment's own, so each of its about 1.8 attachment creates per
+  draw went through `FindFast` and `Update` again.
+- **Fix** (`GpuMemoryMaterializationCache.h`, `GpuMemory::ResetHash`): the
+  invalidation names the writer by type and exact ranges and keeps only its
+  entry; every other overlapping entry (a texture over the same memory, an
+  object of the same type over different ranges) is still dropped. For the
+  writer in the same submission `Update` does nothing, so the cached path
+  does the same work as the fast path. The repeated-range shortcut records
+  the writer, so a later plain invalidation of the range still scans every
+  slot.
+- **Result:** render target hits 0 → 83%, depth 0 → 88%, with no rejected
+  hit. CP cost per draw, alternating the two behaviours every 5 s inside
+  one run (another instance overlapped every sample): about 52.7 against
+  54.0 µs per draw, about 2% and within noise.
+- **Verified:** unit test for the writer entry, the dropped overlapping
+  entry and a later plain invalidation; racing, fighter, roguelike, insect sequel and beat 'em up
+  sweeps finish without a stop and with their captures; the fighter repeated
+  without overlap holds its baseline (4394 frames in 100 s against 4405).
+  Beat 'em up frame counts are bimodal on both binaries: runs whose boot
+  lets the route reach gameplay render about 900 frames in 60 s, runs left
+  on the title screen about 2100, so frame counts are compared only for the
+  same scene.
+
+## Descriptor set trim order and descriptor-miss attribution (2026-10-24)
+
+- **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps
+  present limit, about 31.6-32.1 µs per draw): temporary counters (removed)
+  showed about 37% descriptor-set hits per 100k lookups; about 62% of lookups
+  missed only because a bound buffer had a different identity (textures,
+  ranges and other fields about 0%). Most of those buffers are shared-pool
+  snapshots (reused or newly captured), far fewer per-recording uploads.
+  `TrimSets` took 4.1% of the CP thread, about 0.7% of it in a scan and
+  partial sort over every live set.
+- **Fix** (`DescriptorCache`, `GraphicsRenderDescriptor.cpp`): sets whose
+  every use is tracked by a submission sit in a list ordered by last use,
+  and a trim releases from its oldest end. The policy is unchanged; the scan
+  and sort are gone.
+- **Result:** `TrimSets` 4.1% → 3.5% of the CP thread (what remains is
+  unindexing and deferred deletion of the released sets); 31.1-32.1 µs per
+  draw against 31.6-32.1, within noise.
+- **Excluded:**
+  - keeping snapshots below the tracked-snapshot size in the release-ordered
+    free index so their buffers keep their identity: hits 37% → 65%, but
+    32.8 against 31.8 µs per draw, no gain;
+  - binding read-only storage snapshots with the full entry range: hits
+    unchanged, range differences were not the cause of misses.
+  Descriptor-set misses are therefore not the dominant CP cost; binding work
+  per draw (texture preparation, pixel-shader input analysis, snapshot
+  capture) is.
+- **Excluded, pixel-shader resource parse memo:** reusing the last eight
+  `ShaderParseUsage2` results of a pixel program when user data, user SGPRs
+  and layout seeds match and every recorded descriptor-table read returns the
+  same words. In game it hit 46% of draws; 37% of misses differ only in the
+  extended-user-data pointer SGPR pair, which the guest moves every draw.
+  Gain about 0.5 µs per draw (31.3 against 31.6-32.1), within noise, for
+  about 7 KiB per entry. Reusing a result across a moved pointer would need
+  proof that the parse consumes the pointer only through that table read.
+- **Measurement caveat:** a second emulator instance started during a run
+  raised every per-draw cost of the fishing title by about 15% at once
+  (22 → 15 fps, same draws per frame). Perf windows that overlap another
+  instance are discarded.
+
 ## Transient snapshot pool: covering vertex snapshots and expiry (2026-10-24)
 
 - **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps

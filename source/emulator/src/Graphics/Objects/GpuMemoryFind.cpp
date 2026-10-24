@@ -513,9 +513,10 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
 
+	const auto writer = GpuMemoryMaterializationWriter::Create(static_cast<uint32_t>(type), vaddr, size, vaddr_num);
 	for (int vi = 0; vi < vaddr_num; vi++)
 	{
-		m_materialization_cache.InvalidateRange(vaddr[vi], size[vi]);
+		m_materialization_cache.InvalidateRange(vaddr[vi], size[vi], writer);
 	}
 
 	int heap_id = GetHeapId(vaddr[0], size[0]);

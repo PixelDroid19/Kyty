@@ -260,6 +260,34 @@ TEST(EmulatorGpuMemoryRangeQueryCache, MaterializationRepeatedRangeInvalidationR
 	}
 }
 
+TEST(EmulatorGpuMemoryRangeQueryCache, MaterializationWriterKeepsOnlyItsOwnEntry)
+{
+	GpuMemoryMaterializationCache<int, 8> cache;
+
+	const uint64_t address[] = {0x200000u};
+	const uint64_t size[]    = {0x1000u};
+	const uint64_t params[]  = {1u};
+	const auto     target    = GpuMemoryMaterializationKey::Create(1u, 1u, 1u, address, size, 1, 5u, params, 1, false, false);
+	const auto     texture   = GpuMemoryMaterializationKey::Create(1u, 1u, 1u, address, size, 1, 6u, params, 1, true, true);
+	const auto     writer    = GpuMemoryMaterializationWriter::Create(5u, address, size, 1);
+
+	int value = 0;
+	for (int draw = 0; draw < 2; ++draw)
+	{
+		// The second draw replays only the store log of the clean range.
+		cache.Store(target, 3);
+		cache.Store(texture, 4);
+		cache.InvalidateRange(address[0], size[0], writer);
+		ASSERT_TRUE(cache.Lookup(target, &value));
+		EXPECT_EQ(value, 3);
+		EXPECT_FALSE(cache.Lookup(texture, &value));
+	}
+
+	// A plain invalidation of the same range must not reuse the writer's clean record.
+	cache.InvalidateRange(address[0], size[0]);
+	EXPECT_FALSE(cache.Lookup(target, &value));
+}
+
 TEST(EmulatorGpuMemoryRangeQueryCache, MaterializationCacheRejectsIncompleteKeys)
 {
 	GpuMemoryMaterializationCache<int, 8> cache;

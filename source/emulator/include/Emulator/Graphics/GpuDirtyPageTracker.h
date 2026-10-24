@@ -81,6 +81,9 @@ struct GpuDirtyPageProtectionOps
 	// Ends every lease of the authority (see VirtualMemory::ReleaseWriteLeases). Optional for
 	// operations that never lease through the VM.
 	bool (*release_leases)(void* context, const Core::VirtualMemory::WriteLeaseAuthority* authority) noexcept = nullptr;
+	// Signal-safe: whether the host lets this process write the whole range now. Optional: without it a
+	// retired page keeps its identity for late faults.
+	bool (*host_grants_write_signal_safe)(void* context, uintptr_t address, size_t size) noexcept = nullptr;
 };
 
 // Bounded dirty-page metadata. Registration and protection changes happen on
@@ -114,9 +117,10 @@ public:
 
 	// Called by the exception handler for a write fault. It is async-signal-safe
 	// and never waits: while a fence is held it reports the fault handled without
-	// any change, so the access is executed again. It returns false for
-	// untracked/unarmed addresses and for pages whose guest protection denies
-	// the write.
+	// any change, so the access is executed again. A write that faulted before
+	// its page was restored finds the page writable and is executed again too.
+	// It returns false for other untracked/unarmed addresses and for pages
+	// whose guest protection denies the write.
 	[[nodiscard]] bool HandleWriteFault(uintptr_t address) noexcept;
 	// Access-classified entry from the exception boundary. Write-only tracking
 	// never claims a read or execute fault; Unknown is treated as a write and is
@@ -266,6 +270,8 @@ private:
 	[[nodiscard]] RestoreResult     RestoreFromAuthority(PageEntry* entry, uintptr_t page) noexcept;
 	[[nodiscard]] bool              FaultMayBeTracked(const PageEntry* entry, uintptr_t page_address) const noexcept;
 	[[nodiscard]] bool              HandleWriteFaultEntered(uintptr_t page_address) noexcept;
+	[[nodiscard]] bool               HandleTrackedWriteFault(uintptr_t page_address) noexcept;
+	[[nodiscard]] bool               HostGrantsWrite(uintptr_t page) const noexcept;
 	[[nodiscard]] bool              NotifyPageWriteEntered(PageEntry* entry, uintptr_t page_address, bool* handled) noexcept;
 	void                            PublishAuthorityChange(const Core::VirtualMemory::WriteLeaseChange& change) noexcept;
 	static void AuthorityBeginChange(void* context, uint64_t address, uint64_t size) noexcept;

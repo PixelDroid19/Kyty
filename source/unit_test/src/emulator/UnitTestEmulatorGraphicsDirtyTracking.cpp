@@ -435,9 +435,30 @@ struct FakeProtection
 		return !static_cast<FakeProtection*>(context)->fail_release;
 	}
 
+	static bool HostGrantsWrite(void* context, uintptr_t address, size_t size) noexcept
+	{
+		auto*        self  = static_cast<FakeProtection*>(context);
+		const size_t first = (address - self->base) / self->page_size;
+		for (size_t page = 0; page < size / self->page_size; page++)
+		{
+			if ((static_cast<uint32_t>(self->current_modes[first + page]) & static_cast<uint32_t>(Mode::Write)) == 0u)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
 	[[nodiscard]] GpuDirtyPageProtectionOps Ops() noexcept
 	{
 		return {this, &RemoveWriteAndCapture, &RemoveWrite, &Restore, &RestoreSignalSafe, &ReleaseLeases};
+	}
+
+	[[nodiscard]] GpuDirtyPageProtectionOps OpsWithHostQuery() noexcept
+	{
+		auto ops                          = Ops();
+		ops.host_grants_write_signal_safe = &HostGrantsWrite;
+		return ops;
 	}
 };
 
@@ -1111,6 +1132,37 @@ TEST(EmulatorGraphicsDirtyTracking, UnregisterRetainsLateWritableFaultEvidence)
 	EXPECT_TRUE(tracker.PrepareForRead(mapping.address, mapping.size));
 	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address));
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
+// With a host write query, a restored page keeps no identity: a write that
+// faulted before the restore runs again because the host grants it, and once
+// the guest denies the write the fault is the guest's.
+TEST(EmulatorGraphicsDirtyTracking, RestoredRetiredPageAnswersLateFaultsFromHostProtection)
+{
+	Mapping mapping(2);
+	ASSERT_NE(mapping.address, 0u);
+	FakeProtection      protection {mapping.address, GetPageSize(), std::vector<Mode>(2, Mode::ReadWrite)};
+	GpuDirtyPageTracker tracker(protection.OpsWithHostQuery());
+	protection.tracker = &tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+
+	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address));
+	EXPECT_EQ(protection.signal_safe_calls, 0u);
+	protection.current_modes[1] = Mode::Read;
+	EXPECT_FALSE(tracker.HandleWriteFault(mapping.address + GetPageSize()));
+
+	// A failed restore keeps the identity, whose token still restores the write.
+	protection.current_modes[1] = Mode::ReadWrite;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	protection.fail_next_restore.store(true);
+	EXPECT_FALSE(tracker.UnregisterRange(mapping.address, mapping.size));
+	protection.current_modes[1] = Mode::Read;
+	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address + GetPageSize()));
+	EXPECT_EQ(protection.signal_safe_calls, 1u);
+	EXPECT_EQ(protection.current_modes[1], Mode::ReadWrite);
 }
 
 TEST(EmulatorGraphicsDirtyTracking, ReregisteredRetiredPageRecapturesNativeProtection)

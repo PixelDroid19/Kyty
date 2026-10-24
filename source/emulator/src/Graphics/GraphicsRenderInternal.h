@@ -426,7 +426,10 @@ private:
 		VulkanBufferDescriptorKey vsharp_uniform_buffer_key                = {};
 		GpuSubmissionHighWater uses;
 		bool                   untracked_use = false;
-		uint64_t               last_use      = 0;
+		// Neighbours in the use order of the sets a trim may release, oldest first.
+		int  lru_older = -1;
+		int  lru_newer = -1;
+		bool in_lru    = false;
 		// Each referenced resource with this set's position in that resource's
 		// reverse-index list, so unindexing removes the set in constant time.
 		std::vector<ResourceSlot> resources;
@@ -462,6 +465,8 @@ private:
 	VulkanDescriptorSet* UnindexSet(int index);
 	void                 ReleaseSet(int index);
 	void                 RecordSetUse(int index, CommandBuffer* buffer);
+	void                 LruUnlink(int index);
+	void                 LruAppend(int index);
 	void                 TrimSets();
 	void                 FreeOldestRecycled();
 	template <typename References>
@@ -473,7 +478,8 @@ private:
 	int          m_first_free_set  = -1;
 	int          m_first_free_pool = -1;
 	uint32_t     m_live_sets       = 0;
-	uint64_t     m_use_clock       = 0;
+	int          m_lru_oldest      = -1;
+	int          m_lru_newest      = -1;
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
 	// Live sets by the unique id of each image or buffer they reference.
