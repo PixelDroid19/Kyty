@@ -1717,12 +1717,30 @@ Known approximations and debt recorded by this chain:
   Arc A770, Mesa ANV 26.2.5: the transition crash is gone and the tutorial
   level loads (5.3 s), which the title never reached before. The DS packet
   tests, `check_emulator_boundaries.py` and `check_graphics_tables.py` pass.
-- **Current frontier: guest resource overlap in the tutorial.** With the DS
-  gaps closed, the level runs its gameplay resource setup. The guest reports its
-  particle heap full (`JsParticle heap memory is full!`, 36813 KB of 36864 KB)
-  and a strict `!create_all_the_same` stop follows at
-  `GpuMemoryCreate.cpp:2557`: a CPU-uploaded texture contained within storage
-  and render views of several types reaches the mixed-parent path. This is a
-  guest-resource lifetime question, not a parser gap. The earlier RCS timeout
-  appeared in a build without the read2 support; this build has not reproduced
-  it, so the two outcomes are recorded separately and neither is excluded.
+- **Current frontier: new guest-seeded StorageTexture over mixed views.** With
+  the DS gaps closed, the level runs its gameplay resource setup. The guest
+  reports its particle heap full (`JsParticle heap memory is full!`, 36813 KB of
+  36864 KB) and a strict `!create_all_the_same` stop follows in the memory
+  create path. Measured facts (temporary diagnostic, not committed):
+  - The new object is a StorageTexture, guest-seeded
+    (`PARAM_SKIP_SEED = 0`), `neo = 1`, `levels = 0x1_00000006`, resource type 9,
+    depth 1, base array 0, one range.
+  - Its nine parents are four StorageTextures (IsContainedWithin, Contains,
+    Crosses), four RenderTextures (Crosses, Contains twice, IsContainedWithin)
+    and one sampled Texture (IsContainedWithin, CPU upload). Every parent
+    reports `in_use` and no pending write-back function, but the four
+    RenderTexture parents and the sampled Texture have
+    `gpu_update_time > cpu_update_time`, and only some parents' submission
+    dependencies are complete; one StorageTexture parent was materialized from
+    a device image.
+  - `multi_storage_texture_alias` refuses this shape correctly: seeding the new
+    image from guest bytes would miss the render targets' pending device writes.
+    The overwritten-storage and single-format-redescription policies do not
+    apply either.
+  The required capability is ordering: publish the parents' device writes
+  (the per-range `WriteBackStorageRanges`/consumer path exists) before the guest
+  seed, then link all views for lifetime. No copy between different formats is
+  admissible. The open design point is the create-time consumer queue, which
+  decides when that write-back can run. The particle-heap warning stays an open
+  guest-side observation; the RCS timeout seen in one earlier build was not
+  reproduced by this run and both remain recorded.
