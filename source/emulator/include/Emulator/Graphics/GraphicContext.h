@@ -139,6 +139,10 @@ struct GraphicContext
 	VulkanQueueInfo          queues[QUEUES_NUM];
 	Core::Mutex              queue_mutexes[QUEUES_NUM];
 	uint32_t                 queue_mutex_count = 0;
+	// Distinct families of the queues above. Queues never transfer ownership,
+	// so with more than one family every image and buffer is shared CONCURRENT.
+	uint32_t resource_families[QUEUES_NUM] = {};
+	uint32_t resource_family_count         = 0;
 	// Diagnostic compute detile owns Vulkan objects through this exact context;
 	// it is never cached only by a raw VkDevice handle.
 	Core::Mutex       gpu_detile_mutex;
@@ -206,6 +210,18 @@ struct GraphicContext
 	// represent the exact state.
 	VulkanSampleLocationCapabilities sample_location_capabilities;
 };
+
+inline void VulkanApplyResourceSharing(const GraphicContext& ctx, VkSharingMode* mode, uint32_t* family_count, const uint32_t** families)
+{
+	if (ctx.resource_family_count < 2)
+	{
+		*mode = VK_SHARING_MODE_EXCLUSIVE;
+		return;
+	}
+	*mode         = VK_SHARING_MODE_CONCURRENT;
+	*family_count = ctx.resource_family_count;
+	*families     = ctx.resource_families;
+}
 
 struct VulkanMemory
 {

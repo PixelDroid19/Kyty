@@ -4,6 +4,60 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Compute queues on a compute-only family (2026-10-24)
+
+- **Observed** (anime fighter, Intel A770, Mesa ANV, strict runs at the 60 fps
+  present limit, about 38 fps in a menu scene):
+  - The guest chains about 30 async compute submissions per frame. Each
+    one is a single small dispatch followed by a label write that the guest
+    polls before it builds the next one.
+  - Temporary Vulkan timestamps (removed) put the CP and the GPU each about
+    half of the frame busy, and both at once only 28% of it. An async
+    submission made while a graphics batch was queued waited 4.7 ms for
+    that batch to finish.
+  - Cause: the A770 exposes one queue in its only graphics family (the AMD
+    iGPU tested exposes one as well). Queue selection put every Kyty queue
+    in that family, so all eight compute queues and the graphics queue were
+    the same `VkQueue`, and the GPU ran their batches strictly in order.
+    The record "Anime fighter: async round-trip latency" measured the chain
+    but not this cause.
+- **Change.**
+  - When the common graphics family has a single queue and the device has a
+    compute-only family, the compute queues are created there, up to eight.
+    Hosts whose graphics family has several queues keep the old layout.
+  - `GraphicContext` records the distinct families its queues use. Queues
+    never transfer ownership, so with more than one family every image and
+    buffer is created `VK_SHARING_MODE_CONCURRENT` across them. Cross-queue
+    order still comes from the existing host waits on labels and fences.
+  - A command buffer on a queue without graphics support records no graphics
+    pipeline stage or access type. Layout transitions and the guest barrier
+    helpers drop graphics access types there and wait on all of that queue's
+    commands instead of graphics stages; those accesses ran on the graphics
+    queue and are ordered by the host waits.
+  - Dispatches no longer set graphics dynamic state: a compute pipeline has
+    none, and `vkCmdSetLineWidth` is invalid on a compute-only queue.
+  - Compute fills that would clear aliasing images still require the
+    physical graphics queue and are refused on a compute-only queue, as on
+    any host with distinct queues. No run below reached that refusal.
+- **Measured** (Intel A770, strict runs, same route):
+  - Anime fighter, agent counters over the same 40 s window 50-90 s into
+    the run: 1,654 presented frames with the old layout, 2,010 with the new
+    one (+21.5%); the last three 5 s windows moved from about 35 to about
+    43 fps. An earlier experiment with the same layout read 49.3 fps against
+    about 38 fps in a menu scene, with CP and GPU both busy 41% of the frame
+    instead of 28%.
+  - Fishing title (no async compute): 23.0 fps with the old layout, 22.1 fps
+    with the new one, at a single in-game reading each. That is within run
+    noise; `CONCURRENT` sharing showed no GPU cost there.
+- **Validation** (Vulkan validation layer, errors only, 60-90 s each): no
+  error on the anime fighter, racing, insect platformer sequel, fishing, beat
+  'em up, isometric roguelike and 2D Unity action titles. The role-playing
+  title uses async compute; its 20 `VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02819`
+  errors (color-attachment access with compute-queue stages) led to dropping
+  graphics access types, after which its run reports none. Only the fighter
+  and the role-playing title recorded on the compute family.
+- **Not verified:** the robot platformer and the AMD host.
+
 ## Early submissions at least half a millisecond apart (2026-10-24)
 
 - **Observed** (sandbox title in the world, Intel A770, Mesa ANV, strict

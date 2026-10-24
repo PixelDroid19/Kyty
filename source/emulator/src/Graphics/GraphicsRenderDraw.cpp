@@ -3414,8 +3414,6 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 
-	SetDynamicParams(vk_buffer, pipeline);
-
 	const uint64_t storage_seed_skip_mask =
 	    ShaderComputeStorageSeedSkipMask(input_info, Config::IsNextGen(), thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,

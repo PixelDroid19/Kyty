@@ -341,7 +341,7 @@ bool FindHostImportMemoryType(VkPhysicalDevice physical, uint32_t type_bits, uin
 }
 
 // A zero handle type creates a device-owned buffer.
-VkBuffer CreateAddressBuffer(VkDevice device, uint64_t size, VkExternalMemoryHandleTypeFlags handle_type)
+VkBuffer CreateAddressBuffer(const GraphicContext* ctx, uint64_t size, VkExternalMemoryHandleTypeFlags handle_type)
 {
 	const bool external = handle_type != 0;
 	VkExternalMemoryBufferCreateInfo external_info {};
@@ -355,9 +355,9 @@ VkBuffer CreateAddressBuffer(VkDevice device, uint64_t size, VkExternalMemoryHan
 	// Imports also receive device-side publications of GPU results.
 	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
 	             (external ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : 0u);
-	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	VkBuffer buffer  = nullptr;
-	return vkCreateBuffer(device, &info, nullptr, &buffer) == VK_SUCCESS ? buffer : nullptr;
+	VulkanApplyResourceSharing(*ctx, &info.sharingMode, &info.queueFamilyIndexCount, &info.pQueueFamilyIndices);
+	VkBuffer buffer = nullptr;
+	return vkCreateBuffer(ctx->device, &info, nullptr, &buffer) == VK_SUCCESS ? buffer : nullptr;
 }
 
 uint64_t BufferDeviceAddress(VkDevice device, VkBuffer buffer)
@@ -426,7 +426,7 @@ struct PreparedHostImport
 			return false;
 		}
 
-		buffer = CreateAddressBuffer(device, size, handle_type);
+		buffer = CreateAddressBuffer(ctx, size, handle_type);
 		if (buffer == VK_NULL_HANDLE)
 		{
 			return false;
@@ -1062,7 +1062,7 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 	}
 	const uint64_t bytes  = words.size() * 4u;
 	Table          table;
-	table.buffer          = CreateAddressBuffer(ctx->device, bytes, 0);
+	table.buffer = CreateAddressBuffer(ctx, bytes, 0);
 	VkMemoryRequirements requirements {};
 	uint32_t             type_index = 0;
 	if (table.buffer == nullptr)
