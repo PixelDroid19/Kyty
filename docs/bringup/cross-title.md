@@ -4,6 +4,39 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Dirty-page tracker admits 4 GiB of live ranges (2026-10-24)
+
+- **Observed** (beat 'em up intro cutscene and gameplay, Intel A770, strict
+  runs at the 60 fps present limit): after the record below, XXH3 still held
+  13.6% of the CP thread in the cutscene and 20.7% in gameplay, under
+  `PrepareStorageBuffers` -> `GpuMemory::CreateObject` -> `Update`. Temporary
+  counters (removed) showed about 500 storage-buffer hashes per 2 s window
+  over ranges of 2.5-32 MiB (about 11 MiB on average), 5-6.6 GB hashed per
+  window, every one unchanged and none of them registered with the dirty-page
+  tracker. `RegisterRange` refused them in `AdmitPages`: all 524,288 page
+  identities were live (no unreferenced, retired or revoked identity to
+  reuse) across about 11,600-13,400 ranges. The title keeps more than 2 GiB
+  of tracked ranges live, and a refused range is hashed whole on every use.
+- **Fix** (`GpuDirtyPageTracker.h`): the page table grows from 1,048,576 to
+  2,097,152 slots, so the admission budget is 1,048,576 pages (4 GiB on a
+  4 KiB host). The table costs 56 MiB more host memory; full-table scans
+  (large write spans, revoked-identity release) visit twice the slots.
+- **Result:** with the larger table the same cutscene showed no refusal and
+  storage hashing fell from 5-6.6 GB to almost nothing per window. In the
+  gameplay profile XXH3 fell below 0.6% of the CP thread (from 20.7%), and
+  `GpuDirtyPageTracker::PageGenerations` (4.3%) took the place of the hash;
+  the camp area of gameplay held 35.8-36.7 fps (27-31 fps in gameplay before;
+  one run, a foreign build overlapped its start). The intro cutscene read
+  23.6-23.8 fps (21-24 before).
+- **Verified:** unit tests pass (2463; the lookup tests that mirror the table
+  size were updated), graphics diagnostics integration passes (15).
+  Regression sweep with no stop: racing 60 fps (56.8 at the lowest sample),
+  anime fighter 48.9 fps in the tutorial (about 48 before), isometric
+  roguelike 60 fps, insect platformer sequel 60 fps (ends on the black load
+  after the prologue, as the previous run did).
+- **Open:** a title that keeps more than 4 GiB of tracked ranges live is
+  refused again; the refusal is not reported outside temporary counters.
+
 ## Physical device-address scans visit only partly imported ranges (2026-10-24)
 
 - **Observed** (beat 'em up intro cutscene, Intel A770, strict runs at the
