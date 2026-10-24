@@ -1806,6 +1806,11 @@ Known approximations and debt recorded by this chain:
   composite raw path does for its supported destination shape. Extending that
   path is the correct direction; guest-byte seeding cannot represent this
   alias.
+  Excluded: skipping the seed for this shape. Temporarily forcing an unseeded
+  create for tile-0 format-71 multi-level storage views let the level pass the
+  create, then produced a real RCS job timeout (Xe engine reset, device
+  coredump, `vkWaitForFences -4`, queue 8 slot 0 sequence 97393). The view is
+  read before being fully written, so the seed and its ordering are required.
   Layout note for that extension: a linear (tile 0) storage view with levels
   above one is created as one stacked image (`real_height = height + height/2`
   and per-level offsets from the same layout helpers), while the guest range
