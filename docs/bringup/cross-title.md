@@ -4,6 +4,37 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Fishing title CP cost per draw and an excluded usage memo (2026-10-24)
+
+- **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps
+  present limit): 17-23 fps, about 1,150-1,490 draws per frame, command
+  processor busy 40-55 ms per frame, 34.5-36.6 µs per draw. 60 fps needs
+  about 11 µs per draw. The frame is bound by the command processor.
+- **Profile** (frame-pointer sampler on the CP thread, in game; inclusive):
+  descriptor binding 33% (descriptor-set lookup and creation 12%, texture
+  preparation 10%, storage-buffer preparation 7%), transient snapshot capture
+  16% (vertex buffers 8%, mostly copies and compares of guest bytes),
+  pixel-shader input analysis 12% of which `ShaderParseUsage2` 9%, pipeline
+  lookup 6.5%, GPU object creation 6.4%, the Vulkan driver 12%.
+- **Counters** (temporary, removed): descriptor-set lookups hit 77-81%; the
+  live-set count stays at the 65,536 limit, so the cache trims 8,192 sets at
+  a time. The exact `ShaderParseUsage2` input (shader, all user SGPRs) repeats
+  in 89% of pixel-shader calls over the whole run; the EUD pointer SGPR
+  changes in 44% of consecutive calls of the same shader, so a key recurs
+  about one frame later.
+- **Excluded: exact memo of `ShaderParseUsage2`.** The result was stored with
+  every input (SGPRs, user-data metadata, output seeds) and the guest
+  descriptor words read through the reader seam, re-read and compared on
+  reuse. Its output copies SGPR values, so the key cannot drop the EUD
+  pointer. Hit rates: 45% with 16 results per shader, 61% with 128, 62% with
+  a global LRU of 8,192. With the global LRU the in-game cost stayed at
+  36 µs per draw (41.6 ms for 1,158 draws), against 34.5-36.6 µs before:
+  recording and copying the 7 KB bind output on each miss cancels the hits.
+  Not adopted.
+- **Open:** the remaining levers are per-draw state that does not change
+  between frames (descriptor sets, texture and vertex snapshots, pipeline
+  lookup), not the usage parse alone.
+
 ## Compute queues on a compute-only family (2026-10-24)
 
 - **Observed** (anime fighter, Intel A770, Mesa ANV, strict runs at the 60 fps
