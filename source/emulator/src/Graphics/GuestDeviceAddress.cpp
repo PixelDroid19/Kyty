@@ -112,9 +112,11 @@ struct Registry
 	// ranges, so ranges share the windows over their pages.
 	std::map<uint64_t, PhysicalWindow> windows;
 	// Titles map thousands of ranges. Preparation revisits flexible ranges and
-	// refreshes snapshots every time, so it walks these subsets, not every range.
+	// refreshes snapshots every time, and a physical scan visits the physical
+	// ranges with pages not imported yet, so it walks these subsets, not every range.
 	std::set<uint64_t>        flexible;
 	std::set<uint64_t>        tracked;
+	std::set<uint64_t>        partial;
 	bool                      dirty = true;
 	// Physical-backing population at the last complete scan of physical ranges.
 	Core::VirtualMemory::SharedBackingPopulation scanned_population;
@@ -290,6 +292,10 @@ void DropChunks(VkDevice device, Registry* registry, uint64_t base, Range* range
 		}
 		registry->dirty              = true;
 		registry->population_scanned = false;
+		if (range->physical_backing)
+		{
+			registry->partial.insert(base);
+		}
 	}
 	range->chunks.erase(kept, range->chunks.end());
 	if (range->tracked_chunks == 0)
@@ -1009,10 +1015,10 @@ bool ImportResident(GraphicContext* ctx, Registry* registry, uint64_t base, Rang
 	                             { return ImportResidentSpan(ctx, registry, base, range, first, last, &resident, changed); });
 }
 
-// Physical ranges number in the thousands and are mostly unpopulated. Their
-// unimported spans are asked about in one sweep of the backing, so a span
-// before the next populated page costs no host query and only spans holding
-// populated pages have their backing extents read.
+// Physical ranges number in the thousands; only those with pages not imported
+// yet are visited. Their unimported spans are asked about in one sweep of the
+// backing, so a span before the next populated page costs no host query and
+// only spans holding populated pages have their backing extents read.
 bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 {
 	struct Pending
@@ -1024,10 +1030,12 @@ bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 	};
 	std::vector<Pending>                            pending;
 	std::vector<Kernel::Memory::KernelPhysicalSpan> spans;
-	for (auto& [base, range]: registry->ranges)
+	for (const uint64_t base: registry->partial)
 	{
+		auto&          range = registry->ranges.at(base);
 		const uint64_t pages = range.size / kPageBytes;
-		if (!range.physical_backing || range.imported_pages == pages)
+		EXIT_IF(!range.physical_backing);
+		if (range.imported_pages == pages)
 		{
 			continue;
 		}
@@ -1067,6 +1075,11 @@ bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 		{
 			registry->tracked.insert(span.base);
 		}
+	}
+	for (auto base = registry->partial.begin(); base != registry->partial.end();)
+	{
+		const auto& range = registry->ranges.at(*base);
+		base              = range.imported_pages == range.size / kPageBytes ? registry->partial.erase(base) : std::next(base);
 	}
 	return true;
 }
@@ -1153,9 +1166,11 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 	if (physical_backing)
 	{
 		registry.flexible.erase(vaddr);
+		registry.partial.insert(vaddr);
 	} else
 	{
 		registry.flexible.insert(vaddr);
+		registry.partial.erase(vaddr);
 	}
 	registry.dirty              = true;
 	registry.population_scanned = false;
@@ -1193,6 +1208,7 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 		}
 		registry.flexible.erase(base);
 		registry.tracked.erase(base);
+		registry.partial.erase(base);
 		it              = registry.ranges.erase(it);
 		registry.dirty  = true;
 		if (base < vaddr)
@@ -1209,6 +1225,9 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 		if (!range.physical_backing)
 		{
 			registry.flexible.insert(base);
+		} else
+		{
+			registry.partial.insert(base);
 		}
 		registry.ranges.emplace(base, std::move(range));
 		registry.population_scanned = false;
