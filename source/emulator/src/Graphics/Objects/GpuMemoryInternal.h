@@ -32,7 +32,11 @@
 #include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
 #include "Emulator/Graphics/GraphicContext.h"
 
+#include <algorithm>
+#include <array>
+#include <climits>
 #include <set>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -117,6 +121,11 @@ private:
 	Core::Hashmap<uint64_t, Vector<int>> m_map;
 };
 
+// Candidate index for range queries over a heap's object blocks. Blocks are
+// kept in size classes, each ordered by start address: a block of a class
+// overlaps [vaddr, end) only if it starts in (vaddr - largest, end), where
+// largest is the class's largest live block. Thousands of small objects near
+// a range then cost nothing unless they are within reach of it.
 class GpuMap2
 {
 public:
@@ -128,59 +137,24 @@ public:
 	void Insert(uint64_t vaddr, uint64_t size, int id)
 	{
 		EXIT_IF(size == 0);
-		auto first_page = CalcPageId(vaddr);
-		auto last_page  = CalcPageId(vaddr + size - 1);
-		EXIT_IF(last_page < first_page);
-		for (auto page = first_page; page <= last_page; page++)
-		{
-			auto& ids = m_map[page];
-			if (!ids.Contains(id))
-			{
-				ids.Add(id);
-			}
-		}
+		EXIT_IF(vaddr > UINT64_MAX - (size - 1u));
+		auto& level = m_levels[LevelOf(size)];
+		level.blocks.insert({vaddr, id, size});
+		level.sizes.insert(size);
 	}
 
 	void Erase(uint64_t vaddr, uint64_t size, int id)
 	{
 		EXIT_IF(size == 0);
-		auto first_page = CalcPageId(vaddr);
-		auto last_page  = CalcPageId(vaddr + size - 1);
-		EXIT_IF(last_page < first_page);
-		for (auto page = first_page; page <= last_page; page++)
-		{
-			auto& ids = m_map[page];
-			ids.Remove(id);
-			if (ids.IsEmpty())
-			{
-				m_map.Remove(page);
-			}
-		}
+		auto&      level = m_levels[LevelOf(size)];
+		const auto block = level.blocks.find({vaddr, id, size});
+		EXIT_IF(block == level.blocks.end());
+		level.blocks.erase(block);
+		level.sizes.erase(level.sizes.find(size));
 	}
 
-	[[nodiscard]] Vector<int> FindAll(uint64_t vaddr, uint64_t size) const
-	{
-		Vector<int> ret;
-		EXIT_IF(size == 0);
-		auto first_page = CalcPageId(vaddr);
-		auto last_page  = CalcPageId(vaddr + size - 1);
-		EXIT_IF(last_page < first_page);
-		if (first_page == last_page)
-		{
-			// Insert keeps each bucket unique. Vector copies share immutable data
-			// until mutation, so this preserves a stable result without rebuilding it.
-			return m_map.Get(first_page);
-		}
-		std::unordered_set<int> seen;
-		for (auto page = first_page; page <= last_page; page++)
-		{
-			for (int id: m_map.Get(page))
-			{
-				AddUnique(&ret, &seen, id);
-			}
-		}
-		return ret;
-	}
+	// Ids of the blocks overlapping [vaddr, vaddr + size), each once.
+	[[nodiscard]] Vector<int> FindAll(uint64_t vaddr, uint64_t size) const { return FindAll(&vaddr, &size, 1); }
 
 	[[nodiscard]] Vector<int> FindAll(const uint64_t* vaddr, const uint64_t* size, int vaddr_num) const
 	{
@@ -191,14 +165,21 @@ public:
 		for (int i = 0; i < vaddr_num; i++)
 		{
 			EXIT_IF(size[i] == 0);
-			auto first_page = CalcPageId(vaddr[i]);
-			auto last_page  = CalcPageId(vaddr[i] + size[i] - 1);
-			EXIT_IF(last_page < first_page);
-			for (auto page = first_page; page <= last_page; page++)
+			const uint64_t end = size[i] > UINT64_MAX - vaddr[i] ? UINT64_MAX : vaddr[i] + size[i];
+			for (const auto& level: m_levels)
 			{
-				for (int id: m_map.Get(page))
+				if (level.blocks.empty())
 				{
-					AddUnique(&ret, &seen, id);
+					continue;
+				}
+				const uint64_t largest = *level.sizes.rbegin();
+				const uint64_t from    = vaddr[i] >= largest ? vaddr[i] - largest + 1u : 0u;
+				for (auto block = level.blocks.lower_bound({from, INT_MIN, 0}); block != level.blocks.end() && block->vaddr < end; ++block)
+				{
+					if (block->vaddr + block->size > vaddr[i])
+					{
+						AddUnique(&ret, &seen, block->id);
+					}
 				}
 			}
 		}
@@ -207,31 +188,41 @@ public:
 
 	[[nodiscard]] bool IsEmpty() const
 	{
-		int num = 0;
-		m_map.ForEach(
-		    [](auto /*key*/, auto value, void* arg)
-		    {
-			    (*static_cast<int*>(arg)) += value->Size();
-			    return true;
-		    },
-		    &num);
-		return num == 0;
+		return std::all_of(m_levels.begin(), m_levels.end(), [](const auto& level) { return level.blocks.empty(); });
 	}
 
 private:
-	// This index only produces candidates; FindBlocks validates each range with
-	// GpuMemoryClassifyRangeSets before accepting it. A 1 MiB bucket keeps that exact
-	// contract while avoiding thousands of 16 KiB probes for large descriptors.
-	static constexpr uint32_t PAGE_BITS = 20u;
-
-	static uint32_t CalcPageId(uint64_t vaddr)
+	struct IndexedBlock
 	{
-		EXIT_IF((vaddr >> (PAGE_BITS + 32u)) != 0);
-		return static_cast<uint32_t>(vaddr >> PAGE_BITS);
+		uint64_t vaddr = 0;
+		int      id    = 0;
+		uint64_t size  = 0;
+
+		bool operator<(const IndexedBlock& other) const { return std::tie(vaddr, id, size) < std::tie(other.vaddr, other.id, other.size); }
+	};
+
+	struct Level
+	{
+		// An object may index the same block twice; each Insert pairs with one Erase.
+		std::multiset<IndexedBlock> blocks;
+		std::multiset<uint64_t>     sizes;
+	};
+
+	// Classes of up to 256 B, 4 KiB, 64 KiB, 1 MiB, 16 MiB and larger.
+	static constexpr int LEVELS = 6;
+
+	static int LevelOf(uint64_t size)
+	{
+		int level = 0;
+		for (uint64_t limit = 256u; level < LEVELS - 1 && size > limit; limit <<= 4u)
+		{
+			level++;
+		}
+		return level;
 	}
 
-	// Order-preserving union of page buckets. A query spanning buckets that
-	// hold thousands of small objects dedups through a set, not a scan per id.
+	// Order-preserving union of candidates. A query reaching thousands of
+	// small objects dedups through a set, not a scan per id.
 	static void AddUnique(Vector<int>* ret, std::unordered_set<int>* seen, int id)
 	{
 		constexpr uint32_t kLinearLimit = 32;
@@ -254,7 +245,7 @@ private:
 		}
 	}
 
-	Core::Hashmap<uint32_t, Vector<int>> m_map;
+	std::array<Level, LEVELS> m_levels;
 };
 
 class GpuMemory
@@ -298,8 +289,8 @@ public:
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 	void WriteBackAllCompleted(GraphicContext* ctx);
-	void               WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer);
-	[[nodiscard]] bool PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer,
+	void               WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
+	[[nodiscard]] bool PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
 	                                           std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
 	[[nodiscard]] bool PendingStorageHasAliases();
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
@@ -466,8 +457,8 @@ private:
 	void              ForgetHeapStorageObjects(int removed_heap_id);
 	// (heap id, object id) of each in-use writable StorageBuffer overlapping a range
 	// whose writes are not published to the guest device-address view on `consumer`.
-	// The ranges are sorted by address and disjoint.
-	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer) const;
+	// `ranges` answers whether a block meets one of the queried guest ranges.
+	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const;
 	[[nodiscard]] static bool StorageIsWholeGuestContent(const Object& object);
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);

@@ -89,6 +89,14 @@ struct Table
 	uint32_t       entries = 0;
 };
 
+struct TableEntry
+{
+	uint64_t guest  = 0;
+	uint64_t size   = 0;
+	uint64_t device = 0;
+	uint64_t span   = 0;
+};
+
 struct Reader
 {
 	SubmissionId submission {};
@@ -114,8 +122,10 @@ struct Registry
 	Table                     table;
 	std::vector<Table>        retired;
 	std::array<Reader, GraphicContext::QUEUES_NUM> readers {}; // Latest registered reader for each queue.
-	// Sorted, disjoint union of the registered ranges; rebuilt after a change.
-	std::shared_ptr<const GpuMemoryGuestRanges> merged;
+	// The device table's entries, one per chunk, sorted by guest base. Kept in
+	// step with the chunks so a rebuild after a mapping change copies it
+	// instead of walking thousands of ranges.
+	std::vector<TableEntry> entries;
 };
 
 Registry& GetRegistry()
@@ -195,8 +205,30 @@ void DestroyImport(VkDevice device, const Chunk& chunk)
 	}
 }
 
+std::vector<TableEntry>::iterator EntryAtOrAfter(Registry* registry, uint64_t guest)
+{
+	return std::lower_bound(registry->entries.begin(), registry->entries.end(), guest,
+	                        [](const TableEntry& entry, uint64_t value) { return entry.guest < value; });
+}
+
+// Chunks cover disjoint guest bytes, so the guest base identifies an entry.
+void AddTableEntry(Registry* registry, const Chunk& chunk)
+{
+	const auto at = EntryAtOrAfter(registry, chunk.guest);
+	EXIT_IF(at != registry->entries.end() && at->guest == chunk.guest);
+	registry->entries.insert(at, TableEntry {chunk.guest, chunk.size, chunk.device, chunk.span});
+}
+
+void RemoveTableEntry(Registry* registry, const Chunk& chunk)
+{
+	const auto at = EntryAtOrAfter(registry, chunk.guest);
+	EXIT_IF(at == registry->entries.end() || at->guest != chunk.guest);
+	registry->entries.erase(at);
+}
+
 void DestroyChunk(VkDevice device, Registry* registry, const Chunk& chunk)
 {
+	RemoveTableEntry(registry, chunk);
 	if (!chunk.windowed)
 	{
 		DestroyImport(device, chunk);
@@ -741,6 +773,7 @@ bool ImportPhysicalRun(GraphicContext* ctx, Registry* registry, Range* range, ui
 		chunk.windowed      = true;
 		chunk.window        = base;
 		window->users++;
+		AddTableEntry(registry, chunk);
 		range->chunks.push_back(chunk);
 		cursor = piece_end;
 	}
@@ -833,7 +866,7 @@ void MarkImported(Range* range, uint64_t first, uint64_t last)
 	          1);
 }
 
-bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64_t first, uint64_t last,
+bool ImportResidentSpan(GraphicContext* ctx, Registry* registry, uint64_t base, Range* range, uint64_t first, uint64_t last,
                         std::vector<uint8_t>* resident, bool* changed)
 {
 	const uint64_t pages        = last - first;
@@ -873,6 +906,7 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 			             Core::VirtualMemory::IsRangeWritable(guest, size) ? 1 : 0);
 			return false;
 		}
+		AddTableEntry(registry, chunk);
 		range->chunks.push_back(chunk);
 		range->tracked_chunks += chunk.tracked ? 1u : 0u;
 		MarkImported(range, first + page, first + end);
@@ -968,11 +1002,11 @@ bool ForEachUnimportedSpan(Range* range, const Visit& visit)
 // remaining interval of a range whose backing may have gained pages, so newly
 // faulted pages are discovered.
 // Quiesced invalidation clears the bitmap when those imports cease to be valid.
-bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* changed)
+bool ImportResident(GraphicContext* ctx, Registry* registry, uint64_t base, Range* range, bool* changed)
 {
 	std::vector<uint8_t> resident;
 	return ForEachUnimportedSpan(range, [&](uint64_t first, uint64_t last)
-	                             { return ImportResidentSpan(ctx, base, range, first, last, &resident, changed); });
+	                             { return ImportResidentSpan(ctx, registry, base, range, first, last, &resident, changed); });
 }
 
 // Physical ranges number in the thousands and are mostly unpopulated. Their
@@ -1042,25 +1076,9 @@ bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 bool RebuildTable(GraphicContext* ctx, Registry* registry)
 {
 	// The device lookup binary-searches entries by guest base.
-	std::vector<const Chunk*> sorted;
-	for (const auto& [base, range]: registry->ranges)
-	{
-		for (const auto& chunk: range.chunks)
-		{
-			sorted.push_back(&chunk);
-		}
-	}
-	std::sort(sorted.begin(), sorted.end(), [](const Chunk* a, const Chunk* b) { return a->guest < b->guest; });
-	std::vector<uint32_t> words(kGuestDeviceAddressNullBytes / 4u, 0u);
-	for (const auto* chunk: sorted)
-	{
-		const uint32_t entry[kGuestDeviceAddressEntryDwords] = {static_cast<uint32_t>(chunk->guest), static_cast<uint32_t>(chunk->guest >> 32u),
-		                                                        static_cast<uint32_t>(chunk->size),  static_cast<uint32_t>(chunk->size >> 32u),
-		                                                        static_cast<uint32_t>(chunk->device), static_cast<uint32_t>(chunk->device >> 32u),
-		                                                        static_cast<uint32_t>(chunk->span),  static_cast<uint32_t>(chunk->span >> 32u)};
-		words.insert(words.end(), entry, entry + kGuestDeviceAddressEntryDwords);
-	}
-	const uint64_t bytes  = words.size() * 4u;
+	static_assert(sizeof(TableEntry) == kGuestDeviceAddressEntryDwords * 4u);
+	const uint64_t entry_bytes = registry->entries.size() * sizeof(TableEntry);
+	const uint64_t bytes       = kGuestDeviceAddressNullBytes + entry_bytes;
 	Table          table;
 	table.buffer = CreateAddressBuffer(ctx, bytes, 0);
 	VkMemoryRequirements requirements {};
@@ -1092,10 +1110,16 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 		DestroyTable(ctx->device, table);
 		return false;
 	}
-	std::memcpy(mapped, words.data(), bytes);
+	// Each entry is the guest base, size, device address and span as
+	// little-endian 64-bit words, the layout TableEntry already has.
+	std::memset(mapped, 0, kGuestDeviceAddressNullBytes);
+	if (entry_bytes != 0)
+	{
+		std::memcpy(static_cast<uint8_t*>(mapped) + kGuestDeviceAddressNullBytes, registry->entries.data(), entry_bytes);
+	}
 	vkUnmapMemory(ctx->device, table.memory);
 	table.device  = BufferDeviceAddress(ctx->device, table.buffer);
-	table.entries = static_cast<uint32_t>((words.size() - kGuestDeviceAddressNullBytes / 4u) / kGuestDeviceAddressEntryDwords);
+	table.entries = static_cast<uint32_t>(registry->entries.size());
 	if (registry->table.buffer != nullptr)
 	{
 		registry->retired.push_back(registry->table);
@@ -1115,6 +1139,15 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 	}
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
+	// The table mirrors the chunks of the registered ranges; a replaced range's
+	// chunks leave it with the range.
+	if (const auto replaced = registry.ranges.find(vaddr); replaced != registry.ranges.end())
+	{
+		for (const auto& chunk: replaced->second.chunks)
+		{
+			RemoveTableEntry(&registry, chunk);
+		}
+	}
 	registry.ranges[vaddr]      = {size, {}, {}, physical_backing};
 	registry.tracked.erase(vaddr);
 	if (physical_backing)
@@ -1124,7 +1157,6 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 	{
 		registry.flexible.insert(vaddr);
 	}
-	registry.merged             = nullptr;
 	registry.dirty              = true;
 	registry.population_scanned = false;
 }
@@ -1163,7 +1195,6 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 		registry.tracked.erase(base);
 		it              = registry.ranges.erase(it);
 		registry.dirty  = true;
-		registry.merged = nullptr;
 		if (base < vaddr)
 		{
 			survivors.push_back({base, Range {vaddr - base, {}, {}, physical, 0}});
@@ -1185,45 +1216,26 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 	DestroyRetiredTables(ctx->device, &registry);
 }
 
-static std::shared_ptr<const GpuMemoryGuestRanges> MergedRanges(const std::map<uint64_t, Range>& ranges)
-{
-	auto merged = std::make_shared<GpuMemoryGuestRanges>();
-	for (const auto& [base, range]: ranges)
-	{
-		const uint64_t end = base + range.size;
-		if (!merged->empty() && base <= merged->back().first + merged->back().second)
-		{
-			auto& last  = merged->back();
-			last.second = std::max(last.first + last.second, end) - last.first;
-			continue;
-		}
-		merged->emplace_back(base, range.size);
-	}
-	return merged;
-}
-
-static std::shared_ptr<const GpuMemoryGuestRanges> RegisteredRangesSnapshot()
+// GPU memory asks this under its own lock; the registry never reaches GPU
+// memory while it holds the registry lock, so the nesting has one order.
+static bool OverlapsRegisteredRange(uint64_t vaddr, uint64_t size)
 {
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
-	if (registry.merged == nullptr)
-	{
-		registry.merged = MergedRanges(registry.ranges);
-	}
-	return registry.merged;
+	const auto                  it = FirstOverlapCandidate(&registry.ranges, vaddr);
+	return it != registry.ranges.end() && it->first < vaddr + size;
 }
 
 bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, std::vector<GpuMemoryStoragePublication>* publishable,
                                         SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
-	return GpuMemoryPendingStorageWriteBack(*RegisteredRangesSnapshot(), consumer, publishable, dependency);
+	return GpuMemoryPendingStorageWriteBack(OverlapsRegisteredRange, consumer, publishable, dependency);
 }
 
 void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer)
 {
-	// GPU-memory mutation never nests inside the address registry lock.
-	GpuMemoryWriteBackStorageRanges(ctx, *RegisteredRangesSnapshot(), consumer);
+	GpuMemoryWriteBackStorageRanges(ctx, OverlapsRegisteredRange, consumer);
 }
 
 struct PublicationPiece
@@ -1366,7 +1378,7 @@ static GuestDeviceAddressPrepareResult PrepareLocked(GraphicContext* ctx, Regist
 		const auto                  revisit = [&](uint64_t base, Range* range)
 		{
 			bool changed = false;
-			if (!ImportResident(ctx, base, range, &changed))
+			if (!ImportResident(ctx, registry, base, range, &changed))
 			{
 				return false;
 			}

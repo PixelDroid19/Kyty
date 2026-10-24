@@ -16,6 +16,76 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Object range queries indexed by block size (2026-10-24)
+
+- **Observed** (beat 'em up gameplay, Intel A770, strict runs at the 60 fps
+  present limit, 18-23 fps): 37% of the CP thread was `GpuMemory::FindBlocks`
+  under the vertex-snapshot admission check
+  (`TransientReadOnlyOverlapsAllowedLocked`). Temporary counters (removed)
+  showed, per window of about 2 s, about 11,400 admission queries missing the
+  overlap cache; each miss took every object of the 1 MiB index buckets the
+  range touched as a candidate, on average about 5,700, to find about 11
+  overlapping blocks (about 400 ms per window). The heap held about 8,400
+  objects, most of them small.
+- **Fix** (`GpuMemoryInternal.h`, `GpuMap2`): blocks are indexed in six size
+  classes (up to 256 B, 4 KiB, 64 KiB, 1 MiB, 16 MiB and larger), each an
+  ordered set by start address with the sizes of its live blocks. A query
+  visits, per class, only the blocks starting between the range end and the
+  range start minus the class's largest live block, and keeps those that
+  reach the range. `FindBlocks` still classifies each candidate exactly.
+- **Result:** candidates per miss went from about 5,700 to about 14 (the
+  overlapping blocks themselves) and the miss time from about 400 ms to about
+  48 ms per window; other `FindBlocks` callers went from about 31 ms to 9 ms.
+  The agent's gameplay fps read 31 against 19-23 before (one sample each, in
+  different runs). In the regression sweep the anime fighter's controls menu
+  ran at 52.5 fps between the same captures where the previous sweep read
+  48.2.
+- **Verified:** unit tests pass (2463) and the graphics diagnostics
+  integration suite passes (15), whose index case now expects exact
+  candidates and covers a large block reaching a range from far before it.
+  Regression sweep with no stop: racing 59 fps, anime fighter 52.5 fps,
+  isometric roguelike 58 fps, insect platformer sequel 60 fps, beat 'em up
+  32 fps in a dark intro scene.
+
+## Device-address registry changes without whole-registry walks (2026-10-24)
+
+- **Observed** (beat 'em up, Intel A770, strict runs at the 60 fps present
+  limit): on the title screen after the intro, `std::_Rb_tree_increment` held
+  28% of the CP thread, reached from `GuestDeviceAddressPrepareForRead` and
+  `GuestDeviceAddressPendingWriteBack`. Temporary counters (removed) over
+  each 3,000 preparations showed about 11,300 registered ranges, about 1,000
+  registrations and 1,000 releases, about 360 rebuilds of the merged range
+  snapshot (about 1.0 ms each), about 360 device-table rebuilds (about
+  0.9 ms each, of which the Vulkan allocation was about 40 µs) and about 700
+  physical import passes (about 1.4 ms each). Every registration or release
+  dropped the merged snapshot and dirtied the table, so each change walked the
+  whole registry twice.
+- **Fix** (`GuestDeviceAddress.cpp`, `GpuMemoryWriteback.cpp`): the storage
+  write-back paths ask the registry whether a storage block overlaps a
+  registered range (one ordered-map lookup under the registry lock) instead of
+  scanning a merged copy of every range. GPU memory calls it under its own
+  lock and the registry never calls GPU memory while it holds its lock, so the
+  lock order stays one way. The device table's entries are kept as a vector
+  sorted by guest base, updated when a chunk is imported or destroyed; a table
+  rebuild copies that vector after the zero prefix instead of collecting and
+  sorting every chunk. Chunks cover disjoint guest bytes, so an entry is keyed
+  by its guest base and a duplicate or missing entry stops the emulator.
+- **Verified:** unit tests pass (2463). In a 130 s beat 'em up run the
+  registry functions and tree iteration no longer appear in a 25 s CP profile;
+  that run reached gameplay at 79 s instead of the title screen, so the same
+  scene was not measured before and after. Regression sweep with no stop on
+  five titles (racing 59 fps, anime fighter 45 fps in a fight, isometric
+  roguelike 58 fps, insect platformer sequel 60 fps, beat 'em up 19 fps in
+  the intro).
+- **Open:** a population change or a new registration still sends every
+  physical range through `ImportPhysicalRanges`. The calls of
+  `GuestDeviceAddressReleaseRangeQuiesced` from `release_direct_memory`
+  (`Kernel/Memory.cpp`) grew from 178,000 to 918,000 per window on the title
+  screen; whether the invalidation list accumulates was not checked. In
+  beat 'em up gameplay (18-23 fps) 37% of the CP thread is
+  `GpuMemory::FindBlocks` under the vertex-snapshot admission check
+  (`TransientReadOnlyOverlapsAllowedLocked`).
+
 ## Restored retired tracker pages keep no identity (2026-10-24)
 
 - **Observed** (beat 'em up, Intel A770, strict runs at the 60 fps present

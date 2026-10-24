@@ -1261,12 +1261,13 @@ void  GpuMemoryFrameDone(GraphicContext* ctx);
 void  GpuMemoryFrameDone();
 void  GpuMemoryWriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 void  GpuMemoryCompleteSubmission(SubmissionId submission);
-// Guest [vaddr, vaddr + size) spans, sorted by address and disjoint, queried under one GPU-memory lock.
-using GpuMemoryGuestRanges = std::vector<std::pair<uint64_t, uint64_t>>;
+// True when guest [vaddr, vaddr + size) meets one of the queried ranges. Called
+// under the GPU-memory lock, so it must not reach GPU memory itself.
+using GpuMemoryGuestRangeQuery = bool (*)(uint64_t vaddr, uint64_t size);
 // GPU→CPU for the writable StorageBuffers overlapping any of the ranges, except
 // those whose writes are already published to the guest device-address view in
 // the consumer's queue order.
-void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer);
+void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
 // True when a writable StorageBuffer with an incomplete submission use shares
 // guest bytes with another GPU object. Its write-back refreshes or invalidates
 // those aliases, so a wait that publishes it must stay synchronous.
@@ -1296,7 +1297,7 @@ struct GpuMemoryStoragePublication
 // any of the ranges, with the same publication exemption. With `publishable`,
 // results that qualify for publication in the consumer's queue order are listed
 // there instead of being reported.
-[[nodiscard]] bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer,
+[[nodiscard]] bool GpuMemoryPendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
                                                     std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
 // The caller recorded in `publication`, after the object's last write, a device
 // copy of its whole content into the guest device-address view. Device-address
