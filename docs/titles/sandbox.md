@@ -4,6 +4,38 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Sandbox title: snapshot comparisons in the world (2026-10-24, improved)
+
+- **Observation (Intel A770, strict, 60 fps present limit, world-entry route,
+  profile 225-265 s).** In the world the command processor spends about
+  100-108 ms per frame on about 4300 draws (23.8 us/draw); waits are below
+  1 ms. Sampling the command-processor thread put 12.5% of it in the
+  comparison of transient read-only snapshots against guest memory, 93% of
+  that in `memcmp`.
+- **Cause.** A temporary per-probe count showed about 30 000 snapshots of
+  16 KiB or more per 400 000 probes, averaging about 490 KB, matching guest
+  memory on almost every probe and compared in full each time.
+- **Change.** A matching snapshot of at least 4 KiB is registered with the
+  dirty page tracker before its comparison and reused without one until a
+  write reaches its range (`TransientBufferPool`, `GraphicsRenderCommandBuffer.cpp`).
+  The admission check still runs on every probe, so unpublished GPU writes
+  are still refused. A key whose tracking fails waits a number of probes that
+  doubles with each quick failure, up to 1024; a key whose tracked bytes
+  served at least 16 probes is tracked again at once after a write. A
+  capture now drops the entry's previous snapshot before copying, so a
+  refused copy never leaves partial bytes indexed.
+- **Verified.** 20.8 us/draw (89.6 ms per frame at the same draw count),
+  `memcmp` gone from the comparison profile; world draws textured. Racing
+  (60 fps menu), fishing (dock) and beat 'em up (intro) reach their usual
+  states with no stop. Unit 2459/2459, integration 74/74.
+- **Excluded on the way.** A sticky "compare only" mark per key (no retry)
+  tracked only a third of the large probes: keys rewritten during loading
+  kept the mark in the world.
+- **Open.** The remaining per-draw cost: descriptor and storage preparation,
+  admission checks (`TransientReadOnlyOverlapsAllowedLocked`, `FindBlocks`),
+  `GpuMemory::CreateObject`, shader input parsing and about 380 Vulkan
+  submits per frame.
+
 ## Sandbox title: GPU hang on the first world frame (2026-10-23, fixed)
 
 - **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,

@@ -13,6 +13,7 @@
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/DiagnosticDump.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -901,6 +902,11 @@ struct TransientBufferEntry
 	uint64_t snapshot_begin = 0;
 	// Bytes at or past this offset are known to be zero.
 	uint64_t nonzero_end = 0;
+	// The dirty tracker covers the snapshot bytes, which match the guest at this write generation.
+	bool     tracked            = false;
+	uint64_t tracked_generation = 0;
+	// Probes the tracked bytes served without a comparison.
+	uint32_t tracked_reuses = 0;
 	// Creation order; the free index hands out the earliest-created fitting entry.
 	uint64_t creation = 0;
 	// Recordings of the shared snapshot pool that bind this entry, and the latest of them.
@@ -927,6 +933,9 @@ struct TransientSnapshotLeases
 class TransientBufferPool
 {
 	static constexpr uint64_t kMaxSnapshotReadSize = 16u;
+	// A matching snapshot this large is tracked for guest writes, so later probes
+	// skip the comparison. Smaller ones compare faster than page protection costs.
+	static constexpr uint64_t kMinTrackedSnapshotSize = 4096u;
 
 	using Entry = TransientBufferEntry;
 
@@ -1019,19 +1028,34 @@ public:
 		// as do the IndexBuffer objects linked under a surface.
 		const auto admission = usage == VK_BUFFER_USAGE_INDEX_BUFFER_BIT ? GpuMemorySnapshotAdmission::IndexView
 		                                                                  : GpuMemorySnapshotAdmission::ReadOnlyOverlaps;
-		Entry* previous = FindSnapshot(vaddr, size, usage, read_begin);
+		SnapshotChain* chain     = nullptr;
+		Entry*         previous  = FindSnapshot(vaddr, size, usage, read_begin, &chain);
 		if (previous != nullptr)
 		{
 			bool     matches             = false;
+			bool     admitted            = false;
 			uint64_t reuse_validation_ns = 0u;
-			if (!GpuMemoryCompareSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
-			                                            static_cast<const uint8_t*>(previous->mapped) + read_begin, &matches,
-			                                            &reuse_validation_ns, compare_ns, admission))
+			if (TrackedSnapshotUnwritten(previous, chain))
 			{
-				*validation_ns += reuse_validation_ns;
-				return nullptr;
+				// The bytes still match; only the range's admission is checked again.
+				const auto preflight_start = DebugStatsClock::now();
+				admitted                   = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin, admission);
+				reuse_validation_ns        = static_cast<uint64_t>(
+				    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - preflight_start).count());
+				matches = admitted;
+			} else
+			{
+				const auto observation = BeginTracking(previous, read_begin, chain);
+				admitted = GpuMemoryCompareSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
+				                                                  static_cast<const uint8_t*>(previous->mapped) + read_begin, &matches,
+				                                                  &reuse_validation_ns, compare_ns, admission);
+				FinishTracking(previous, chain, observation, admitted && matches);
 			}
 			*validation_ns += reuse_validation_ns;
+			if (!admitted)
+			{
+				return nullptr;
+			}
 			if (matches)
 			{
 				// Recordings still in flight bind at most `size` bytes of this key, so clearing past it is safe.
@@ -1068,8 +1092,11 @@ public:
 
 		uint64_t atomic_validation_ns = 0u;
 		uint64_t copy_ns              = 0u;
-		// A refused capture may already have copied part of the range.
-		entry->nonzero_end = std::max(entry->nonzero_end, size);
+		// A refused capture may already have copied part of the range, so the
+		// entry's previous snapshot is dropped first.
+		UnindexSnapshot(entry);
+		entry->snapshot_valid = false;
+		entry->nonzero_end    = std::max(entry->nonzero_end, size);
 		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
 		                                            static_cast<uint8_t*>(entry->mapped) + read_begin, &atomic_validation_ns,
 		                                            &copy_ns, admission))
@@ -1084,7 +1111,6 @@ public:
 		}
 		*validation_ns += atomic_validation_ns;
 		DebugStatsRecordUpload(size - read_begin, copy_ns);
-		UnindexSnapshot(entry);
 		entry->snapshot_valid = true;
 		entry->snapshot_vaddr = vaddr;
 		entry->snapshot_size  = size;
@@ -1194,6 +1220,7 @@ public:
 			EXIT_IF(entry == nullptr || (entry->mapped == nullptr && !entry->scratch));
 			// A live lease means a command buffer that binds the entry was not freed.
 			EXIT_IF(entry->leases != 0u);
+			Untrack(entry);
 			if (entry->mapped != nullptr)
 			{
 				VulkanUnmapMemory(ctx, &entry->buffer.memory);
@@ -1240,16 +1267,23 @@ private:
 	{
 		Entry* oldest = nullptr;
 		Entry* newest = nullptr;
+		// After the guest wrote a tracked snapshot of this key, or tracking was
+		// refused, probes compare bytes for a while. The wait doubles with every
+		// failure, so a key rewritten each frame rarely pays for page protection
+		// and one that settles after loading is tracked again.
+		uint32_t track_failures     = 0;
+		uint32_t probes_until_track = 0;
 	};
 
 	// Latest committed entry first: the one most likely to still match guest memory.
-	Entry* FindSnapshot(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin) const
+	Entry* FindSnapshot(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin, SnapshotChain** chain)
 	{
 		const auto it = m_snapshots.find(SnapshotKey {vaddr, size, usage});
 		if (it == m_snapshots.end())
 		{
 			return nullptr;
 		}
+		*chain = &it->second;
 		for (auto* entry = it->second.newest; entry != nullptr; entry = entry->snapshot_older)
 		{
 			if (entry->snapshot_begin <= read_begin)
@@ -1281,6 +1315,7 @@ private:
 		{
 			return;
 		}
+		Untrack(entry);
 		const auto it = m_snapshots.find(SnapshotKey {entry->snapshot_vaddr, entry->snapshot_size, entry->usage});
 		EXIT_IF(it == m_snapshots.end());
 		auto& chain = it->second;
@@ -1304,6 +1339,99 @@ private:
 		{
 			m_snapshots.erase(it);
 		}
+	}
+
+	static uint64_t TrackedAddress(const Entry* entry) { return entry->snapshot_vaddr + entry->snapshot_begin; }
+	static uint64_t TrackedSize(const Entry* entry) { return entry->snapshot_size - entry->snapshot_begin; }
+
+	// No guest write reached a tracked snapshot since it matched. A written one
+	// is untracked; its key is compared until tracking is tried again.
+	static bool TrackedSnapshotUnwritten(Entry* entry, SnapshotChain* chain)
+	{
+		if (!entry->tracked)
+		{
+			return false;
+		}
+		if (!GpuDirtyPageTracker::Instance().ChangedSince(TrackedAddress(entry), TrackedSize(entry), entry->tracked_generation))
+		{
+			entry->tracked_reuses++;
+			return true;
+		}
+		// Protection that served enough probes paid for itself: track the key again at once.
+		static constexpr uint32_t kReusesWorthTracking = 16u;
+		if (entry->tracked_reuses >= kReusesWorthTracking)
+		{
+			chain->track_failures = 0u;
+		} else
+		{
+			RefuseTracking(chain);
+		}
+		Untrack(entry);
+		return false;
+	}
+
+	static void RefuseTracking(SnapshotChain* chain)
+	{
+		static constexpr uint32_t kMaxTrackFailureShift = 10u;
+
+		chain->track_failures     = std::min(chain->track_failures + 1u, kMaxTrackFailureShift);
+		chain->probes_until_track = 1u << chain->track_failures;
+	}
+
+	// Arms write tracking before a large snapshot is compared, so a write after
+	// the comparison read the bytes advances the observed generation.
+	static GpuDirtyReadObservation BeginTracking(const Entry* entry, uint64_t read_begin, SnapshotChain* chain)
+	{
+		if (read_begin != entry->snapshot_begin || TrackedSize(entry) < kMinTrackedSnapshotSize)
+		{
+			return {};
+		}
+		if (chain->probes_until_track != 0u)
+		{
+			chain->probes_until_track--;
+			return {};
+		}
+		auto& tracker = GpuDirtyPageTracker::Instance();
+		if (!tracker.RegisterRange(TrackedAddress(entry), TrackedSize(entry)))
+		{
+			RefuseTracking(chain);
+			return {};
+		}
+		const auto observation = tracker.BeginRead(TrackedAddress(entry), TrackedSize(entry));
+		if (!observation.tracked)
+		{
+			(void)tracker.UnregisterRange(TrackedAddress(entry), TrackedSize(entry));
+			RefuseTracking(chain);
+		}
+		return observation;
+	}
+
+	static void FinishTracking(Entry* entry, SnapshotChain* chain, const GpuDirtyReadObservation& observation, bool matched)
+	{
+		if (!observation.tracked)
+		{
+			return;
+		}
+		auto& tracker = GpuDirtyPageTracker::Instance();
+		if (matched && tracker.ReadObservationIsStable(TrackedAddress(entry), TrackedSize(entry), observation))
+		{
+			entry->tracked            = true;
+			entry->tracked_generation = observation.generation;
+			entry->tracked_reuses     = 0u;
+			return;
+		}
+		(void)tracker.UnregisterRange(TrackedAddress(entry), TrackedSize(entry));
+		RefuseTracking(chain);
+	}
+
+	static void Untrack(Entry* entry)
+	{
+		if (!entry->tracked)
+		{
+			return;
+		}
+		(void)GpuDirtyPageTracker::Instance().UnregisterRange(TrackedAddress(entry), TrackedSize(entry));
+		entry->tracked = false;
 	}
 
 	Entry* Acquire(GraphicContext* ctx, uint64_t size, uint32_t usage, GpuMemoryTransientBufferAllocationClass allocation_class,
