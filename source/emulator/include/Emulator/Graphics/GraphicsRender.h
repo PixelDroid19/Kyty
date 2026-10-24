@@ -662,6 +662,8 @@ public:
 		m_has_submission = true;
 	}
 	[[nodiscard]] int GetQueueIndex() const { return m_queue; }
+	// False on a compute-only queue family: no graphics commands or stages.
+	[[nodiscard]] bool SupportsGraphics() const;
 	// Queue timeline the GPU signals with value when this execution completes;
 	// false for an execution without a submission identity.
 	[[nodiscard]] bool GetTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value) const;

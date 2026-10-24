@@ -353,7 +353,9 @@ bool VulkanCreateDeviceImage(GraphicContext* context, const VkImageCreateInfo& i
 	EXIT_IF(context == nullptr || image == nullptr || memory == nullptr);
 	EXIT_IF(image->image != nullptr);
 
-	if (vkCreateImage(context->device, &image_info, nullptr, &image->image) != VK_SUCCESS || image->image == nullptr)
+	VkImageCreateInfo shared_info = image_info;
+	VulkanApplyResourceSharing(*context, &shared_info.sharingMode, &shared_info.queueFamilyIndexCount, &shared_info.pQueueFamilyIndices);
+	if (vkCreateImage(context->device, &shared_info, nullptr, &image->image) != VK_SUCCESS || image->image == nullptr)
 	{
 		image->image = nullptr;
 		return false;

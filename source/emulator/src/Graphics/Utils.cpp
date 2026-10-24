@@ -31,7 +31,29 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image)
 	return image->layout;
 }
 
-static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uint32_t base_level, uint32_t levels,
+VkPipelineStageFlags VulkanQueueBarrierScope(const CommandBuffer* buffer, VkPipelineStageFlags stages, VkAccessFlags* access)
+{
+	EXIT_IF(buffer == nullptr);
+	EXIT_IF(access == nullptr);
+
+	constexpr VkPipelineStageFlags kGraphicsStages =
+	    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+	    VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT | VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+	    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+	    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+	constexpr VkAccessFlags kGraphicsAccess = VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+	                                          VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+	                                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+	                                          VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	if (buffer->SupportsGraphics())
+	{
+		return stages;
+	}
+	*access &= ~kGraphicsAccess;
+	return (stages & kGraphicsStages) == 0 ? stages : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+}
+
+static void set_image_layout(const CommandBuffer* cmd, VkCommandBuffer buffer, VulkanImage* dst_image, uint32_t base_level, uint32_t levels,
                              VkImageAspectFlags aspect_mask, VkImageLayout old_image_layout, VkImageLayout new_image_layout)
 {
 	EXIT_IF(buffer == nullptr);
@@ -140,6 +162,8 @@ static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uin
 			break;
 	}
 
+	src_stages  = VulkanQueueBarrierScope(cmd, src_stages, &image_memory_barrier.srcAccessMask);
+	dest_stages = VulkanQueueBarrierScope(cmd, dest_stages, &image_memory_barrier.dstAccessMask);
 	vkCmdPipelineBarrier(buffer, src_stages, dest_stages, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 
 	dst_image->layout = new_image_layout;
@@ -176,7 +200,7 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t
 
 	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
-	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
+	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 	VkBufferImageCopy region {};
@@ -194,7 +218,7 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t
 
 	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 	                 static_cast<VkImageLayout>(dst_layout));
 }
 
@@ -204,7 +228,7 @@ void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uin
 	EXIT_IF(buffer == nullptr || src_buffer == nullptr || src_buffer->buffer == nullptr || dst_image == nullptr ||
 	        dst_image->image == nullptr);
 	auto* vk_buffer = buffer->RecordOutsideRenderPass();
-	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, UtilGetImageUploadSourceLayout(dst_image),
+	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 	VkBufferImageCopy region {};
 	region.bufferRowLength             = src_pitch != dst_image->extent.width ? src_pitch : 0u;
@@ -213,7 +237,7 @@ void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uin
 	region.imageSubresource.layerCount = 1u;
 	region.imageExtent                 = {dst_image->extent.width, dst_image->extent.height, 1u};
 	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
-	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 	                 static_cast<VkImageLayout>(dst_layout));
 }
 
@@ -293,9 +317,11 @@ bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImag
 	region.imageSubresource.aspectMask = TexelBitsAspect(src_image);
 	region.imageSubresource.layerCount = 1u;
 	region.imageExtent                 = {src_image->extent.width, src_image->extent.height, 1u};
-	set_image_layout(vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), src_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), src_layout,
+	                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scratch->buffer, 1u, &region);
-	set_image_layout(vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_layout);
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, TexelBitsLayoutAspect(src_image), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                 src_layout);
 
 	scratch_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	scratch_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -303,10 +329,10 @@ bool UtilCopyTexelBits(CommandBuffer* buffer, VulkanImage* src_image, VulkanImag
 	                     0u, nullptr);
 
 	region.imageSubresource.aspectMask = TexelBitsAspect(dst_image);
-	set_image_layout(vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), UtilGetImageUploadSourceLayout(dst_image),
+	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 	vkCmdCopyBufferToImage(vk_buffer, scratch->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
-	set_image_layout(vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	set_image_layout(buffer, vk_buffer, dst_image, 0, 1, TexelBitsLayoutAspect(dst_image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 	                 static_cast<VkImageLayout>(dst_layout));
 	return true;
 }
@@ -323,7 +349,8 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 
 	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 
-	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout,
+	                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
 	VkBufferImageCopy region {};
 	region.bufferOffset      = 0;
@@ -341,7 +368,7 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer, 1, &region);
 
-	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	                 static_cast<VkImageLayout>(src_layout));
 }
 
@@ -352,10 +379,11 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 	EXIT_IF(src_image->image == VK_NULL_HANDLE || dst_buffer->buffer == VK_NULL_HANDLE);
 	RequireGuestAddressableImage(src_image, "image-to-buffer readback");
 	auto* vk_buffer = buffer->RecordOutsideRenderPass();
-	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout,
+	                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer,
 	                       regions.Size(), regions.GetDataConst());
-	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	                 static_cast<VkImageLayout>(src_layout));
 }
 
@@ -365,14 +393,14 @@ static void UtilImageDepthToBuffer(CommandBuffer* buffer, VulkanImage* src_image
 	EXIT_IF(dst_buffer == nullptr || dst_buffer->buffer == nullptr || src_image == nullptr || src_image->image == nullptr);
 	auto* vk_buffer = buffer->RecordOutsideRenderPass();
 	const auto transition_aspects = DepthFormatAspectMask(src_image->format);
-	set_image_layout(vk_buffer, src_image, 0, 1, transition_aspects, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, transition_aspects, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	VkBufferImageCopy region {};
 	region.bufferRowLength                 = (dst_pitch != src_image->extent.width ? dst_pitch : 0);
 	region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
 	region.imageSubresource.layerCount     = 1;
 	region.imageExtent                     = {src_image->extent.width, src_image->extent.height, 1};
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer, 1, &region);
-	set_image_layout(vk_buffer, src_image, 0, 1, transition_aspects, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, transition_aspects, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	                 static_cast<VkImageLayout>(src_layout));
 }
 
@@ -407,13 +435,13 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanIm
 		index++;
 	}
 
-	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
-	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	set_image_layout(buffer, vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+	                 UtilGetImageUploadSourceLayout(dst_image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, index, copies.data());
 
-	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-	                 static_cast<VkImageLayout>(dst_layout));
+	set_image_layout(buffer, vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<VkImageLayout>(dst_layout));
 }
 
 bool NormalizeImageImageCopy(const ImageImageCopy& requested, const VulkanImage* dst_image, ImageImageCopy* normalized)
@@ -564,8 +592,8 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: regions.Size() >= 16 condition ignored (continuing)\n");
 	}
 
-	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
-	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	set_image_layout(buffer, vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+	                 UtilGetImageUploadSourceLayout(dst_image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 	for (const auto& requested: regions)
 	{
@@ -607,18 +635,18 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 			region.dstSubresource.layerCount     = 1u;
 		}
 
-		set_image_layout(vk_buffer, r.src_image, r.src_level, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_layout,
+		set_image_layout(buffer, vk_buffer, r.src_image, r.src_level, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_layout,
 		                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
 		vkCmdCopyImage(vk_buffer, r.src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_image->image,
 		               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-		set_image_layout(vk_buffer, r.src_image, r.src_level, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		set_image_layout(buffer, vk_buffer, r.src_image, r.src_level, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		                 src_layout);
 	}
 
-	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-	                 static_cast<VkImageLayout>(dst_layout));
+	set_image_layout(buffer, vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<VkImageLayout>(dst_layout));
 }
 
 void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_image, VkExtent2D dst_extent, VkFilter filter)
@@ -640,7 +668,7 @@ void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_
 	const auto source_layout = src_image->layout;
 	if (UtilBlitImageNeedsSourceInitialization(source_layout))
 	{
-		set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+		set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
 		                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 		VkClearColorValue       clear_color {{0.0f, 0.0f, 0.0f, 1.0f}};
@@ -652,13 +680,14 @@ void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_
 		clear_range.layerCount     = 1;
 		vkCmdClearColorImage(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &clear_range);
 
-		set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	} else
 	{
-		set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, source_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, source_layout,
+		                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	}
-	set_image_layout(vk_buffer, &swapchain_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+	set_image_layout(buffer, vk_buffer, &swapchain_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 	VkImageBlit region {};
@@ -686,7 +715,7 @@ void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_
 	vkCmdBlitImage(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain_image.image,
 	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter);
 
-	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	set_image_layout(buffer, vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
@@ -705,9 +734,9 @@ void UtilBlitImageToImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanI
 	}
 
 	auto* vk_buffer = buffer->RecordOutsideRenderPass();
-	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+	set_image_layout(buffer, vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	set_image_layout(vk_buffer, src_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, source_layout,
+	set_image_layout(buffer, vk_buffer, src_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, source_layout,
 	                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
 	VkImageBlit region {};
@@ -725,10 +754,10 @@ void UtilBlitImageToImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanI
 	vkCmdBlitImage(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_image->image,
 	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter);
 
-	set_image_layout(vk_buffer, src_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-	                 source_layout);
-	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-	                 static_cast<VkImageLayout>(dst_layout));
+	set_image_layout(buffer, vk_buffer, src_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+	                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, source_layout);
+	set_image_layout(buffer, vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<VkImageLayout>(dst_layout));
 }
 
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter)
@@ -749,7 +778,7 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 	buffer_info.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	buffer_info.size        = size;
 	buffer_info.usage       = buffer->usage;
-	buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VulkanApplyResourceSharing(*gctx, &buffer_info.sharingMode, &buffer_info.queueFamilyIndexCount, &buffer_info.pQueueFamilyIndices);
 	buffer->descriptor_range = size;
 
 	VkBuffer handle = nullptr;
@@ -1007,7 +1036,8 @@ void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image)
 
 	const VkImageAspectFlags aspect_mask = DepthFormatAspectMask(image->format);
 
-	set_image_layout(vk_buffer, image, 0, 1, aspect_mask, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+	set_image_layout(&buffer, vk_buffer, image, 0, 1, aspect_mask, VK_IMAGE_LAYOUT_UNDEFINED,
+	                 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
 	buffer.End();
 	buffer.Execute();
@@ -1030,7 +1060,7 @@ void UtilSetImageLayoutOptimal(VulkanImage* image)
 
 	VkImageAspectFlags aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT;
 
-	set_image_layout(vk_buffer, image, 0, 1, aspect_mask, image->layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	set_image_layout(&buffer, vk_buffer, image, 0, 1, aspect_mask, image->layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
 	buffer.End();
 	buffer.Execute();

@@ -37,6 +37,7 @@ enum class VulkanQueueSelectionResult : uint8_t
 	Success,
 	InvalidArgument,
 	NoCommonFamily,
+	NoComputeOnlyFamily,
 };
 
 // Kyty currently requires one family for graphics, compute, upload, and
@@ -44,6 +45,12 @@ enum class VulkanQueueSelectionResult : uint8_t
 // contract. Distinct queues within that family remain usable.
 [[nodiscard]] VulkanQueueSelectionResult VulkanSelectCommonRenderQueueFamily(const VulkanQueueFamilyCapabilities* families, uint32_t count,
                                                                              VulkanQueueFamilySelection* selection);
+
+// A compute-only family runs beside the graphics queue. The renderer uses one
+// when the common family has a single queue, which would otherwise serialize
+// every compute submission behind graphics work.
+[[nodiscard]] VulkanQueueSelectionResult VulkanSelectComputeOnlyFamily(const VulkanQueueFamilyCapabilities* families, uint32_t count,
+                                                                       uint32_t* family);
 
 [[nodiscard]] VulkanQueueSelectionResult VulkanAllocateSharedQueueRoles(uint32_t queue_count, uint32_t max_compute_count,
                                                                         VulkanQueueRoleAllocation* allocation);

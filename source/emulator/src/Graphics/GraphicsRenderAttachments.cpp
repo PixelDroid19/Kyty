@@ -69,9 +69,9 @@ static bool ComputeColorFillUsesGraphicsQueue(CommandBuffer* buffer)
 	if (queue < 0 || queue >= GraphicContext::QUEUES_NUM) { return false; }
 	const auto& recording = context->queues[queue];
 	const auto& graphics = context->queues[GraphicContext::QUEUE_GFX];
-	// Images use exclusive ownership. A virtual compute queue is supported
-	// here only when it records onto the very same physical graphics queue;
-	// neither queue-family ownership nor cross-queue dependencies are inferred.
+	// A virtual compute queue is supported here only when it records onto the
+	// very same physical graphics queue: depth and stencil clears need a
+	// graphics queue, and no cross-queue dependency is inferred.
 	return recording.vk_queue != nullptr && recording.vk_queue == graphics.vk_queue && recording.family == graphics.family;
 }
 
@@ -1051,12 +1051,15 @@ void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* imag
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
 		image_memory_barrier.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
 
-		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(),
-		                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-		                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-		                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-		                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		                     0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+		const VkPipelineStageFlags src_stage =
+		    VulkanQueueBarrierScope(buffer,
+			                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+			                            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			                        &image_memory_barrier.srcAccessMask);
+		const VkPipelineStageFlags dst_stage = VulkanQueueBarrierScope(
+		    buffer, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		    &image_memory_barrier.dstAccessMask);
+		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 
 		image->layout = image_memory_barrier.newLayout;
 	}
@@ -1095,9 +1098,10 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, VulkanImage* image
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
 		image_memory_barrier.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
 
-		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		                     VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-		                     &image_memory_barrier);
+		constexpr VkPipelineStageFlags stages    = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+		const VkPipelineStageFlags     src_stage = VulkanQueueBarrierScope(buffer, stages, &image_memory_barrier.srcAccessMask);
+		const VkPipelineStageFlags     dst_stage = VulkanQueueBarrierScope(buffer, stages, &image_memory_barrier.dstAccessMask);
+		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 
 		image->layout = image_memory_barrier.newLayout;
 	}
@@ -1162,7 +1166,9 @@ void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image
 
 	const VkPipelineStageFlags dst_stage =
 	    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-	vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+	vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), VulkanQueueBarrierScope(buffer, src_stage, &image_memory_barrier.srcAccessMask),
+	                     VulkanQueueBarrierScope(buffer, dst_stage, &image_memory_barrier.dstAccessMask), 0, 0, nullptr, 0, nullptr, 1,
+	                     &image_memory_barrier);
 	image->layout = image_memory_barrier.newLayout;
 }
 

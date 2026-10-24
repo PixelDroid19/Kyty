@@ -1646,6 +1646,15 @@ void TransientSnapshotPoolDestroy(GraphicContext* ctx, VulkanCommandPool* pool)
 
 // CommandBuffer methods (uses TransientBufferPool from Internal.h)
 
+bool CommandBuffer::SupportsGraphics() const
+{
+	EXIT_IF(g_render_ctx == nullptr);
+	EXIT_IF(m_queue < 0 || m_queue >= GraphicContext::QUEUES_NUM);
+
+	const auto* ctx = g_render_ctx->GetGraphicCtx();
+	return ctx->queues[m_queue].family == ctx->queues[GraphicContext::QUEUE_GFX].family;
+}
+
 bool CommandBuffer::IsInvalid() const
 {
 	EXIT_IF(g_render_ctx == nullptr);

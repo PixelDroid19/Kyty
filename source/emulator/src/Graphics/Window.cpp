@@ -13,15 +13,11 @@
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Audio.h"
 #include "Emulator/Config.h"
-#include "Emulator/Ports/AudioPausePort.h"
-#include "Emulator/Ports/ControllerInputPort.h"
-#include "Emulator/Ports/KeyboardTextPort.h"
 #include "Emulator/Graphics/DebugOverlay.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/ImageAsset.h"
-#include "Emulator/Host/KeyboardInput.h"
 #include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/PresentationScaler.h"
@@ -34,13 +30,18 @@
 #include "Emulator/Host/HostInput.h"
 #include "Emulator/Host/HostVulkanWindow.h"
 #include "Emulator/Host/HostWindow.h"
+#include "Emulator/Host/KeyboardInput.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/AudioPausePort.h"
+#include "Emulator/Ports/ControllerInputPort.h"
+#include "Emulator/Ports/KeyboardTextPort.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/SystemContentPort.h"
 
 #include "KytyBuildInfo.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -1761,9 +1762,32 @@ static bool VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, Vulk
 
 	qs.family_used[selection.family] = allocation.family_used;
 	qs.graphics.Add(make_queue(allocation.graphics_index));
-	for (uint32_t i = 0; i < allocation.compute_count; i++)
+
+	// A single common queue would run every compute submission behind queued
+	// graphics work, so compute moves to a compute-only family that runs beside it.
+	uint32_t compute_family = UINT32_MAX;
+	if (selected.queue_count == 1 &&
+	    VulkanSelectComputeOnlyFamily(capabilities.GetData(), capabilities.Size(), &compute_family) == VulkanQueueSelectionResult::Success)
 	{
-		qs.compute.Add(make_queue(allocation.compute_first_index + i));
+		const auto&    compute = capabilities[compute_family];
+		const uint32_t count   = std::min<uint32_t>(compute.queue_count, GraphicContext::QUEUE_COMPUTE_NUM);
+		for (uint32_t i = 0; i < count; i++)
+		{
+			QueueInfo queue;
+			queue.family   = compute_family;
+			queue.index    = i;
+			queue.compute  = true;
+			queue.transfer = true;
+			queue.present  = compute.present;
+			qs.compute.Add(queue);
+		}
+		qs.family_used[compute_family] = count;
+	} else
+	{
+		for (uint32_t i = 0; i < allocation.compute_count; i++)
+		{
+			qs.compute.Add(make_queue(allocation.compute_first_index + i));
+		}
 	}
 	qs.transfer.Add(make_queue(allocation.transfer_index));
 	qs.present.Add(make_queue(allocation.present_index));
@@ -2595,6 +2619,16 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 	for (int id = 0; id < GraphicContext::QUEUE_COMPUTE_NUM; id++)
 	{
 		get_queue(GraphicContext::QUEUE_COMPUTE_START + id, queues.compute.At(id % queues.compute.Size()));
+	}
+
+	for (const auto& queue: ctx->queues)
+	{
+		const uint32_t* begin = ctx->resource_families;
+		const uint32_t* end   = begin + ctx->resource_family_count;
+		if (std::find(begin, end, queue.family) == end)
+		{
+			ctx->resource_families[ctx->resource_family_count++] = queue.family;
+		}
 	}
 
 	VulkanQueueIdentity identities[GraphicContext::QUEUES_NUM] {};
