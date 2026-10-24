@@ -1737,13 +1737,21 @@ Known approximations and debt recorded by this chain:
     image from guest bytes would miss the render targets' pending device writes.
     The overwritten-storage and single-format-redescription policies do not
     apply either.
-  The required capability is ordering: publish the parents' device writes
-  (the per-range `WriteBackStorageRanges`/consumer path exists) before the guest
-  seed, then link all views for lifetime. No copy between different formats is
-  admissible. The open design point is the create-time consumer queue, which
-  decides when that write-back can run. The particle-heap warning stays an open
-  guest-side observation; the RCS timeout seen in one earlier build was not
-  reproduced by this run and both remain recorded.
+  The intended mechanism is the composite raw-render path (newest complete
+  covering writer as baseline, newer GPU writers replayed in write order), but
+  its destination shape does not admit this view: it requires a single-level
+  64-bit-uint image (`PARAM_LEVELS == 1`, format 65, `size == width * height *
+  8`), while this one is a linear R32F mip tail (format 71, `base_level = 1`,
+  six levels, 960x540 starting from a 1920x1080 chain, size 5.55 MB). Coverage
+  itself is available: parent 80 (RenderTexture, Contains) describes and covers
+  the whole range and parent 103 (StorageTexture, Contains) also covers it;
+  the other parents describe but do not cover.
+  The existing raw copy is specialized (B10G11R11 to R16F, tile 27, one level),
+  so admitting this view needs a level-aware linear composite seed path
+  (per-level newest-writer selection and ordered replay), not a predicate
+  relaxation. The particle-heap warning stays an open guest-side observation;
+  the RCS timeout seen in one earlier build was not reproduced and both remain
+  recorded.
 - **Excluded: dropped label publications.** A lost EOP fence value could have
   stalled the guest's particle free list, so the label path was checked first:
   across five 900-second runs the "label destination released before
