@@ -1744,3 +1744,8 @@ Known approximations and debt recorded by this chain:
   decides when that write-back can run. The particle-heap warning stays an open
   guest-side observation; the RCS timeout seen in one earlier build was not
   reproduced by this run and both remain recorded.
+- **Excluded: dropped label publications.** A lost EOP fence value could have
+  stalled the guest's particle free list, so the label path was checked first:
+  across five 900-second runs the "label destination released before
+  publication" warning never fired, and no store was skipped. The particle-heap
+  warning is not caused by a dropped fence store.
