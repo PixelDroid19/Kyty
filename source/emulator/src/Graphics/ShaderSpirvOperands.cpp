@@ -748,14 +748,18 @@ static bool row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const
 	}
 	const uint32_t inst_index = index.ToUint32();
 	const bool     pixel      = spirv.GetCode().GetType() == ShaderType::Pixel;
-	if (pixel && ShaderFragmentWaveInsideRegion(spirv.GetCode(), inst_index))
+	const bool     fragment_compute = spirv.UsesFragmentCompute();
+	if (pixel && !fragment_compute && ShaderFragmentWaveInsideRegion(spirv.GetCode(), inst_index))
 	{
 		return !op.dpp_bound_ctrl || control >= 0x121u;
 	}
 	// Each host subgroup must hold whole guest rows and no ghost lanes: a wave32
-	// fragment, a native wave32 compute wave, or one 32-lane half of a split wave64.
-	const bool whole_rows = pixel ? spirv.GetPsInputInfo() != nullptr && spirv.GetPsInputInfo()->required_subgroup_size == 32u
-	                              : spirv.UsesNativeComputeWave();
+	// fragment, a native wave32 compute wave, or one 32-lane half of a split
+	// wave64. A fragment compute module is the latter even though its guest
+	// stage is Pixel.
+	const bool whole_rows = pixel && !fragment_compute
+	                            ? spirv.GetPsInputInfo() != nullptr && spirv.GetPsInputInfo()->required_subgroup_size == 32u
+	                            : spirv.UsesNativeComputeWave();
 	return whole_rows && fragment_row_dpp_wave32_keeps_dst(spirv.GetCode(), inst_index, op);
 }
 

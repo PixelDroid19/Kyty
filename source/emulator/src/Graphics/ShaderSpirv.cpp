@@ -69,6 +69,23 @@ String8 SpirvGenerateSource(const ShaderCode& code, const ShaderVertexInputInfo*
 	return spirv.GetSource();
 }
 
+String8 SpirvGenerateFragmentComputeSource(const ShaderCode& code, const ShaderPixelInputInfo& ps_input_info,
+                                           const ShaderComputeInputInfo& cs_input_info,
+                                           const ShaderFragmentComputeInfo& fragment_compute_info)
+{
+	ShaderPixelInputInfo resolved = ps_input_info;
+	resolved.input_num            = SpirvResolvePixelParameterCount(code, ps_input_info.input_num);
+
+	Spirv spirv;
+	spirv.SetCode(code);
+	spirv.SetPsInputInfo(&resolved);
+	spirv.SetCsInputInfo(&cs_input_info);
+	spirv.SetFragmentComputeInfo(&fragment_compute_info);
+	spirv.GenerateSource();
+
+	return spirv.GetSource();
+}
+
 String8 SpirvGetEmbeddedVs(uint32_t id)
 {
 	if (id != 0)

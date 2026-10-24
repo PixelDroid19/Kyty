@@ -2712,11 +2712,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V16_XXX_VdstVsrc0Vsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -3132,11 +3129,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VDot4cI32I8_VdstVsrc0Vsrc1Vsrc2)
 	const auto& inst = code.GetInstructions().At(index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 	for (int source = 0; source < 3; ++source)
 	{
 		if (inst.src[source].negate || inst.src[source].absolute || inst.src[source].swizzle != 6u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[source].negate || inst.src[source].absolute || inst.src[source].swizzle != 6u condition ignored (continuing)\n"); }
@@ -3674,11 +3668,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 	const auto& inst = code.GetInstructions().At(index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
@@ -3802,6 +3793,62 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 // the shuffle follows it, and targets past the host subgroup (the ghost lanes
 // of the guest wave64) read the proven zero. FI and BOUND_CTRL are irrelevant
 // there: the region runs with full EXEC and every target stays inside a row.
+// Split compute holds one guest lane per invocation and exchanges the two
+// halves through %split_read, so PERMLANE follows a selector that may name a
+// lane in the other half of the guest wave.
+static bool RecompileSplitPermlane16(uint32_t index, const ShaderCode& code, String8* dst_source, Spirv* spirv, bool x16)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!operand_is_variable(inst.dst) || inst.dst.type != ShaderOperandType::Vgpr || inst.src_num < 3 ||
+	    inst.src[0].type != ShaderOperandType::Vgpr || inst.vop_sdwa)
+	{
+		return false;
+	}
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8    load0;
+	String8    load1;
+	String8    load2;
+	if (!operand_load_uint(spirv, inst.src[0], "perm_src0_<index>", index_str, &load0) ||
+	    !operand_load_uint(spirv, inst.src[1], "perm_src1_<index>", index_str, &load1) ||
+	    !operand_load_uint(spirv, inst.src[2], "perm_src2_<index>", index_str, &load2))
+	{
+		return false;
+	}
+	static const char* text = R"(
+        <load0>
+        <load1>
+        <load2>
+          %perm_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
+         %perm_local_<index> = OpBitwiseAnd %uint %perm_lane_<index> %uint_15
+        %perm_second_<index> = OpUGreaterThanEqual %bool %perm_local_<index> %uint_8
+         %perm_table_<index> = OpSelect %uint %perm_second_<index> %perm_src2_<index> %perm_src1_<index>
+        %perm_nibble_<index> = OpBitwiseAnd %uint %perm_local_<index> %uint_7
+         %perm_shift_<index> = OpShiftLeftLogical %uint %perm_nibble_<index> %uint_2
+       %perm_shifted_<index> = OpShiftRightLogical %uint %perm_table_<index> %perm_shift_<index>
+      %perm_selected_<index> = OpBitwiseAnd %uint %perm_shifted_<index> %uint_15
+           %perm_row_<index> = OpBitwiseAnd %uint %perm_lane_<index> %uint_0xfffffff0
+        %perm_row_in_<index> = OpBitwiseXor %uint %perm_row_<index> %uint_<row_xor>
+        %perm_target_<index> = OpBitwiseOr %uint %perm_row_in_<index> %perm_selected_<index>
+         %perm_value_<index> = OpFunctionCall %uint %split_read %perm_src0_<index> %perm_target_<index>
+          %perm_exec_<index> = OpLoad %uint %exec_lane_lo
+         %perm_write_<index> = OpINotEqual %bool %perm_exec_<index> %uint_0
+           %perm_old_<index> = OpLoad %float %<dst>
+        %perm_old_u_<index> = OpBitcast %uint %perm_old_<index>
+      %perm_result_<index> = OpSelect %uint %perm_write_<index> %perm_value_<index> %perm_old_u_<index>
+     %perm_resultf_<index> = OpBitcast %float %perm_result_<index>
+               OpStore %<dst> %perm_resultf_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<row_xor>", x16 ? "16" : "0")
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 static bool RecompilePermlane16(uint32_t index, const ShaderCode& code, String8* dst_source, Spirv* spirv, bool x16)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -3868,11 +3915,13 @@ static bool RecompilePermlane16(uint32_t index, const ShaderCode& code, String8*
 
 KYTY_RECOMPILER_FUNC(Recompile_VPermlane16B32_VdstVsrc0Vsrc1Vsrc2)
 {
+	if (spirv->UsesSplitComputeWave()) { return RecompileSplitPermlane16(index, code, dst_source, spirv, false); }
 	return RecompilePermlane16(index, code, dst_source, spirv, false);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VPermlanex16B32_VdstVsrc0Vsrc1Vsrc2)
 {
+	if (spirv->UsesSplitComputeWave()) { return RecompileSplitPermlane16(index, code, dst_source, spirv, true); }
 	return RecompilePermlane16(index, code, dst_source, spirv, true);
 }
 
@@ -3882,11 +3931,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1)
 	const auto& inst = code.GetInstructions().At(index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
@@ -4860,11 +4906,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -4918,11 +4961,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_I32_SVdstSVsrc0SVsrc1)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -4977,11 +5017,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_I32_VdstVsrc0Vsrc1Vsrc2)
 	const String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
@@ -5030,11 +5067,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvt_XXX_F32_SVdstSVsrc0)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
@@ -5285,11 +5319,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2)
 	String8 index_str = String8::FromPrintf("%u", index);
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
@@ -5437,11 +5468,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 
 	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 	if (!operand_is_variable(inst.dst2)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst2) condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 
 	auto dst_value   = operand_variable_to_str(inst.dst);
 	auto dst2_value0 = single_destination ? operand_variable_to_str(inst.dst2) : operand_variable_to_str(inst.dst2, 0);
@@ -5540,11 +5568,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VMadU64U32_Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair)
 
 	if (!operand_is_variable(inst.dst) || !operand_is_variable(inst.dst2)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) || !operand_is_variable(inst.dst2) condition ignored (continuing)\n"); }
 	if (inst.dst.size != 2 || inst.dst2.size != 2 || inst.src[2].size != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != 2 || inst.dst2.size != 2 || inst.src[2].size != 2 condition ignored (continuing)\n"); }
-	// OMOD does not apply to an integer or bit result (ISA 6.2); CLAMP is not translated.
-	if (inst.dst.clamp)
-	{
-		return false;
-	}
+	// OMOD and CLAMP apply to floating-point results only (ISA 6.2); an
+	// integer operation ignores these VOP3 encoding bits.
 	if (operand_is_exec(inst.dst2)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst2) condition ignored (continuing)\n"); }
 
 	const String8 index_str = String8::FromPrintf("%u", index);

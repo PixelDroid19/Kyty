@@ -33,6 +33,15 @@ record. Titles are named descriptively only (`AGENTS.md`).
   with code 65. This is the first blocker after startup: the level loads,
   but its first pixel program needs a guest wave64 transport that the
   renderer computes but does not execute (`docs/fragment-wave-execution.md`).
+- **Fragment-compute module validated (2026-10-24).** The refused pixel
+  program now translates to a split Wave64 compute module of 94,932 SPIR-V
+  words that assembles and validates. The module reads the captured per-lane
+  record and writes the 34-word result lane. Three general emitter gaps
+  surfaced: a VOP3 integer operation carries CLAMP, which integer results
+  ignore; PERMLANE on the split layout needs the two halves' exchange (a split
+  read); and a row DPP with BOUND_CTRL=1 is admitted when each host subgroup
+  holds whole guest rows. The renderer still refuses the draw; the
+  capture/scan/pack/shade/resolve runtime is the next step.
 - **Visual state before the stop.** Captures show the publisher card, the
   studio logo, the tunnel with the lit ship, and the asteroid-field intro
   scene without visible corruption. The later gameplay scene is not rendered

@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/FragmentTransportCapture.h"
 #include "Emulator/Graphics/FragmentTransportLayout.h"
 #include "Emulator/Graphics/FragmentTransportResolve.h"
+#include "Emulator/Graphics/FragmentTransportShade.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Shader.h"
@@ -114,6 +115,56 @@ String8 DrawState(const PipelineStaticParameters& state, const VkExtent2D& exten
 }
 
 } // namespace
+
+bool FragmentTransportBuildShadeModule(const ShaderCode& code, const ShaderPixelInputInfo& pixel, uint32_t user_sgpr_count,
+                                       uint32_t lds_dwords, Vector<uint32_t>* binary, String8* error)
+{
+	EXIT_IF(binary == nullptr || error == nullptr);
+	binary->Clear();
+	error->Clear();
+
+	ShaderFragmentComputeInfo info;
+	info.descriptor_set     = kTransportDescriptorSet;
+	info.input_binding      = kWaveInputBinding;
+	info.output_binding     = kWaveOutputBinding;
+	info.initial_vgpr_count = InitialVgprCount(pixel);
+	info.user_sgpr_count    = user_sgpr_count;
+	info.parameter_state    = ShaderFragmentParameterState::Virtualized;
+
+	ShaderComputeInputInfo compute;
+	compute.wave_layout.strategy             = ShaderComputeWaveStrategy::Split64On32;
+	compute.wave_layout.guest_local[0]       = 64u;
+	compute.wave_layout.guest_local[1]       = 1u;
+	compute.wave_layout.guest_local[2]       = 1u;
+	compute.wave_layout.physical_local[0]    = 64u;
+	compute.wave_layout.physical_local[1]    = 1u;
+	compute.wave_layout.physical_local[2]    = 1u;
+	compute.wave_layout.guest_wave_size      = 64u;
+	compute.wave_layout.native_subgroup_size = 32u;
+	compute.wave_layout.banks                = 1u;
+	compute.wave_layout.waves                = 1u;
+	compute.wave_layout.lds_dwords           = lds_dwords;
+	compute.native_wave_sensitive            = true;
+	compute.required_subgroup_size           = 32u;
+	compute.threads_num[0]                   = 64u;
+	compute.threads_num[1]                   = 1u;
+	compute.threads_num[2]                   = 1u;
+	compute.lds_dwords                       = lds_dwords;
+	compute.float_mode                       = pixel.float_mode;
+	compute.dx10_clamp                       = pixel.dx10_clamp;
+	compute.ieee_mode                        = pixel.ieee_mode;
+	compute.fp_mode_known                    = true;
+	compute.fp16_overflow                    = pixel.fp16_overflow;
+	compute.fp16_overflow_known              = pixel.fp16_overflow_known;
+
+	const auto source = SpirvGenerateFragmentComputeSource(code, pixel, compute, info);
+	if (source.StartsWith("OpKyty"))
+	{
+		*error = source;
+		return false;
+	}
+	return ShaderToolchain::Run(source, binary, error);
+}
 
 FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, const ShaderPixelInputInfo& pixel, uint32_t user_sgpr_count,
                                                       const PipelineStaticParameters& state, const VkExtent2D& extent)

@@ -169,6 +169,13 @@ public:
 	[[nodiscard]] bool UsesDsAddtidLds() const;
 	[[nodiscard]] bool UsesGeometryCompute() const { return m_geometry_compute_info != nullptr; }
 	void SetGeometryComputeInfo(const ShaderGeometryComputeInfo* info) { m_geometry_compute_info = info; }
+	// A guest pixel program emitted as a split Wave64 compute module: inputs are
+	// read from the captured per-lane record and results are written to a lane
+	// output buffer. The guest stage stays Pixel for classification.
+	[[nodiscard]] bool UsesFragmentCompute() const { return m_fragment_compute_info != nullptr; }
+	void SetFragmentComputeInfo(const ShaderFragmentComputeInfo* info) { m_fragment_compute_info = info; }
+	[[nodiscard]] const ShaderFragmentComputeInfo* GetFragmentComputeInfo() const { return m_fragment_compute_info; }
+	[[nodiscard]] ShaderType HostType() const { return UsesFragmentCompute() ? ShaderType::Compute : m_code.GetType(); }
 	[[nodiscard]] bool EmitGeometryProlog(String8* output) const;
 	[[nodiscard]] bool EmitGeometryExport(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitGeometryAlloc(uint32_t index, String8* output) const;
@@ -194,6 +201,18 @@ public:
 	[[nodiscard]] String8 EmitNativeThreadLimitExec() const;
 	[[nodiscard]] String8 EmitGdsCounterPointer(uint16_t byte_offset, const String8& prefix) const;
 	[[nodiscard]] bool           CanLoadPackedHalfForExport(int export_index, ShaderOperand op) const;
+	[[nodiscard]] String8        FragmentTransportAnnotations() const;
+	[[nodiscard]] String8        FragmentTransportTypes() const;
+	[[nodiscard]] String8        FragmentTransportVariables() const;
+	[[nodiscard]] String8        FragmentLocalVariables() const;
+	void                         FindFragmentConstants();
+	[[nodiscard]] String8        FragmentProlog() const;
+	[[nodiscard]] String8        FragmentEpilog() const;
+	[[nodiscard]] bool EmitFragmentInterpolation(const ShaderInstruction& instruction, const String8& exec, const String8& tag,
+	                                             String8* output) const;
+	[[nodiscard]] bool EmitFragmentExport(const ShaderInstruction& instruction, uint32_t index, const String8& exec, const String8& tag,
+	                                      String8* output);
+	[[nodiscard]] bool EmitFragmentInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output);
 	[[nodiscard]] bool UsesVertexClipProbe() const
 	{
 		return m_code.GetType() == ShaderType::Vertex && m_vs_input_info != nullptr && m_vs_input_info->clip_probe.enabled;
@@ -491,6 +510,7 @@ private:
 	const ShaderComputeInputInfo* m_cs_input_info = nullptr;
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
 	const ShaderGeometryComputeInfo* m_geometry_compute_info = nullptr;
+	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
 	mutable int                   m_native_wave_tier = -1;
 	mutable bool                  m_lane_reductions_ready = false;
 	mutable ShaderLaneReductions m_lane_reductions;

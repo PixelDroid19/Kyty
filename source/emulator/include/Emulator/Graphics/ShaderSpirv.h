@@ -97,6 +97,11 @@ struct ShaderGeometryComputeInfo
 uint32_t SpirvResolvePixelParameterCount(const ShaderCode& code, uint32_t register_count);
 String8 SpirvGenerateSource(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info, const ShaderPixelInputInfo* ps_input_info,
                             const ShaderComputeInputInfo* cs_input_info);
+// Emits a guest pixel program as a split Wave64 compute module over the
+// captured per-lane records described by ShaderFragmentComputeInfo.
+String8 SpirvGenerateFragmentComputeSource(const ShaderCode& code, const ShaderPixelInputInfo& ps_input_info,
+                                           const ShaderComputeInputInfo& cs_input_info,
+                                           const ShaderFragmentComputeInfo& fragment_compute_info);
 // Highest vertex parameter the program exports, or the declared count when larger.
 uint32_t SpirvResolveVertexParameterCount(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info);
 // `code` is the linked ES+GS program; `vs_input_info` its fused-front input with
