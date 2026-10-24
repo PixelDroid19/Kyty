@@ -4,6 +4,48 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Transient snapshot pool: covering vertex snapshots and expiry (2026-10-24)
+
+- **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps
+  present limit): the transient snapshot pool sat at its 512 MiB cap (64 MiB
+  per recording, eight recordings) with about 770 entries. Temporary counters
+  (removed) showed that 99.9% of new captures found no previous snapshot for
+  their key, although 96% of those keys had been seen before: entries were
+  recycled before their key came back. About 3 million captures in 130 s;
+  vertex captures 33% (keys about 865 KB, about 19 KB read per draw), index
+  27%, storage 40%.
+- **Cause:** a vertex draw keys its snapshot by (base, size), and the size is
+  the end of the records that draw reads. Per 1,500 binds there were 250-300
+  distinct bases but 770-826 distinct (base, size) pairs over the same bytes,
+  so one buffer held several overlapping snapshots, and 88% of the windows
+  repeated in the next frame. Shifting the vertex offset instead is not
+  possible: the vertex index feeds guest VGPRs directly.
+- **Fix** (`TransientBufferPool`, `GraphicsRenderCommandBuffer.cpp`):
+  - Vertex snapshots without a zero tail are keyed by base and usage only. A
+    probe reuses the newest snapshot that covers its read window, compares
+    the whole snapshot, and binds the snapshot's full range. A miss captures
+    the union with the previous snapshot of that base when the union stays
+    within the read-only transient limit and the admission check accepts it.
+  - Free entries that still hold a snapshot sit in their own index ordered
+    by release. A new capture takes, in order: an empty free entry, the stale
+    entry of its own chain, an aged entry, a new entry while the pool is
+    below its cap, and only then the least recently released snapshot.
+  - Free snapshots not reused for 256 recordings are destroyed, at most four
+    per capture, so the pool shrinks back after a scene change.
+- **Result** (fishing title in game): 34.5-36.6 → 30.6 µs per draw
+  (35.4 ms for 1,157 draws), about 24.8 fps, pool 420-512 MiB → 51 MB,
+  uploads 1.3-2 → 0.34 ms per frame. Racing, anime fighter, isometric
+  roguelike, insect platformer sequel and beat 'em up strict runs reach the
+  same frame counts and fps as the same morning's baseline, captures match.
+- **Excluded:** least-recently-released recycling alone (37.2 µs per draw:
+  keys still did not cover each other); capturing whole vertex buffers (up
+  to 818 MB per window); keeping released snapshots for 1,024 recordings
+  instead of 64 (about 32 µs per draw, pool 71 MB: storage ring constants
+  that come back hold new bytes, so the extra hits are mismatches).
+- **Open:** storage captures still find no previous snapshot in about 96% of
+  probes (ring constants); descriptor binding and pixel-shader input analysis
+  remain the largest CP costs. 60 fps needs about 11 µs per draw.
+
 ## Fishing title CP cost per draw and an excluded usage memo (2026-10-24)
 
 - **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps

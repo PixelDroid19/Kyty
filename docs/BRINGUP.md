@@ -109,6 +109,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Transient snapshot pool: covering vertex snapshots and expiry (2026-10-24)
   - Fishing title CP cost per draw and an excluded usage memo (2026-10-24)
   - Compute queues on a compute-only family (2026-10-24)
   - Early submissions at least half a millisecond apart (2026-10-24)
