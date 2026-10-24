@@ -1797,5 +1797,12 @@ Known approximations and debt recorded by this chain:
   compute dispatch (write-without-sampler, dispatch mode 0x41), the
   write-only proof bit is zero, and the guest supplies no tile coverage for
   the binding (`coverage = 0x0`, origin and bounds absent). The proof route is
-  therefore unavailable for this shape; ordered publication of the parents'
-  device writes before the guest seed is the remaining admissible direction.
+  therefore unavailable for this shape.
+  The materialization cache stores creation recipes, not byte copies, and the
+  render-target parents remain device-only, so their content never exists in
+  guest bytes to publish. Publishing writes to guest memory is therefore not a
+  valid seed source. A linear view over that memory needs a GPU-side raw copy
+  with format reinterpretation into the linear destination, which is what the
+  composite raw path does for its supported destination shape. Extending that
+  path is the correct direction; guest-byte seeding cannot represent this
+  alias.
