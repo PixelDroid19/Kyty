@@ -25,6 +25,7 @@
 #include "Emulator/Graphics/RenderResolutionPolicy.h"
 #include "Emulator/Graphics/RenderResolutionTransform.h"
 #include "Emulator/Graphics/SampleLocations.h"
+#include "Emulator/Graphics/FragmentTransportRuntime.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderComputeWaveRuntime.h"
 #include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
@@ -1711,6 +1712,112 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(buffer, framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
+
+	if (pipeline->transport != nullptr)
+	{
+		// Capture the covered lanes exactly as rasterized, shade them as guest
+		// waves in compute, then resolve through the draw's fixed-function state.
+		if (primitive_plan.chunked || instance_count > 1u)
+		{
+			EXIT("fragment transport does not split instanced or chunked draws yet: chunked=%u instances=%u\n",
+			     primitive_plan.chunked ? 1u : 0u, instance_count);
+		}
+		uint32_t primitive_count = 0;
+		switch (primitive_plan.topology)
+		{
+			case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: primitive_count = primitive_plan.draw_count / 3u; break;
+			case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+				primitive_count = primitive_plan.draw_count > 2u ? primitive_plan.draw_count - 2u : 0u;
+				break;
+			default: EXIT("fragment transport needs a triangle topology: topology=%u\n", static_cast<unsigned>(primitive_plan.topology));
+		}
+		if (primitive_count == 0u)
+		{
+			return;
+		}
+		FragmentTransportResources transport;
+		if (!FragmentTransportPrepareResources(buffer, framebuffer->extent, primitive_count, pipeline->transport->lane_words, &transport))
+		{
+			EXIT("fragment transport could not reserve host storage: extent=%ux%u primitives=%u lane_words=%u\n", framebuffer->extent.width,
+			     framebuffer->extent.height, primitive_count, pipeline->transport->lane_words);
+		}
+
+		const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
+		VulkanBuffer*  indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		const bool     indices_snapshotted = indices != nullptr;
+		if (indices == nullptr)
+		{
+			indices = static_cast<VulkanBuffer*>(
+			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
+		}
+		if (indices == nullptr)
+		{
+			EXIT("fragment transport index buffer is unavailable\n");
+		}
+
+		auto* capture = pipeline->transport->capture;
+		auto* resolve = pipeline->transport->resolve;
+		const auto& scissor = pipeline->dynamic_params->scissor_ltrb;
+		const auto  kernel_parameters = FragmentTransport::GetKernelParameters(transport.layout);
+		const auto  bind_vertex = [&](VkPipelineLayout layout)
+		{
+			BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, vs_input_info.bind, VK_SHADER_STAGE_VERTEX_BIT,
+			                DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum, stencil_attached_depth, nullptr,
+			                &device_address_table, ScaledImageReadAccess::Refused, &color_info);
+		};
+		const auto draw_geometry = [&](VkCommandBuffer cmd)
+		{
+			vkCmdDrawIndexed(cmd, primitive_plan.draw_count, instance_count, 0, vertex_offset, first_instance);
+		};
+
+		for (uint32_t band_top = static_cast<uint32_t>(scissor[1]); band_top < static_cast<uint32_t>(scissor[3]);
+		     band_top += transport.band_height)
+		{
+			const uint32_t band_bottom = std::min<uint32_t>(static_cast<uint32_t>(scissor[3]), band_top + transport.band_height);
+			const VkRect2D band {{scissor[0], static_cast<int32_t>(band_top)},
+			                     {static_cast<uint32_t>(scissor[2] - scissor[0]), band_bottom - band_top}};
+			FragmentTransportBeginTile(buffer, transport);
+
+			auto* vk = buffer->RecordState();
+			vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline);
+			SetDynamicParams(vk, const_cast<VulkanPipeline*>(capture));
+			vkCmdSetScissor(vk, 0, 1, &band);
+			vkCmdPushConstants(vk, capture->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters), &kernel_parameters);
+			vkCmdBindIndexBuffer(vk, indices->buffer, 0, index_type);
+			BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_requirement.first, vertex_records, indices_snapshotted,
+			                  first_instance, instance_count);
+			bind_vertex(capture->pipeline_layout);
+			buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
+			draw_geometry(buffer->RecordInsideRenderPass());
+
+			FragmentTransportDispatchScanPack(buffer, transport);
+			BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->transport->shade_layout, ps_input_info.bind,
+			                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, 0, nullptr, sh_ctx->GetPs().ps_regs.chksum,
+			                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info),
+			                &color_info);
+			FragmentTransportRecordShade(buffer, transport, *pipeline->transport, ps_input_info.bind, ps_input_info);
+
+			vk = buffer->RecordOutsideRenderPass();
+			vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline);
+			SetDynamicParams(vk, resolve);
+			vkCmdSetScissor(vk, 0, 1, &band);
+			vkCmdPushConstants(vk, resolve->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters), &kernel_parameters);
+			vkCmdBindIndexBuffer(vk, indices->buffer, 0, index_type);
+			BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_requirement.first, vertex_records, indices_snapshotted,
+			                  first_instance, instance_count);
+			bind_vertex(resolve->pipeline_layout);
+			buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
+			draw_geometry(buffer->RecordInsideRenderPass());
+			FragmentTransportEndTile(buffer);
+			DebugStatsRecordDraw();
+		}
+
+		MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
+		InvalidateMemoryObject(color_info);
+		InvalidateMemoryObject(depth_info);
+		return;
+	}
+
 
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 

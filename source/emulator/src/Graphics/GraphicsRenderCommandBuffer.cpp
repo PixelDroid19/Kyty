@@ -55,6 +55,11 @@ namespace Kyty::Libs::Graphics {
 
 namespace {
 
+// One transport set holds the five host transport buffers; a recording needs
+// one set per draw tile, and tiles are bounded per draw.
+constexpr uint32_t kTransportBindingsMax = 5;
+constexpr uint32_t kTransportSetsMax     = 1024;
+
 VulkanSubmitAttemptTrail g_submit_fault_trail;
 
 const char* VulkanSubmitKindName(VulkanSubmitKind kind)
@@ -1743,6 +1748,11 @@ void CommandBuffer::Free()
 		delete m_transient_device_buffers;
 		m_transient_device_buffers = nullptr;
 	}
+	if (m_transport_descriptor_pool != VK_NULL_HANDLE)
+	{
+		vkDestroyDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, nullptr);
+		m_transport_descriptor_pool = VK_NULL_HANDLE;
+	}
 	DestroyRecordingUploads();
 
 	m_pool->busy[m_index] = false;
@@ -1862,6 +1872,10 @@ void CommandBuffer::Begin()
 	{
 		m_transient_device_buffers->Reset();
 	}
+	if (m_transport_descriptor_pool != VK_NULL_HANDLE)
+	{
+		vkResetDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, 0);
+	}
 	DestroyRecordingUploads();
 
 	auto* buffer = m_pool->buffers[m_index];
@@ -1962,6 +1976,36 @@ VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32
 		m_transient_device_buffers = new TransientBufferPool;
 	}
 	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true);
+}
+
+VkDescriptorSet CommandBuffer::AllocateTransportDescriptorSet(VkDescriptorSetLayout layout)
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(layout == VK_NULL_HANDLE);
+	if (m_transport_descriptor_pool == VK_NULL_HANDLE)
+	{
+		VkDescriptorPoolSize size {};
+		size.type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		size.descriptorCount = kTransportSetsMax * kTransportBindingsMax;
+		VkDescriptorPoolCreateInfo info {};
+		info.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		info.maxSets       = kTransportSetsMax;
+		info.poolSizeCount = 1;
+		info.pPoolSizes    = &size;
+		const auto result  = vkCreateDescriptorPool(g_render_ctx->GetGraphicCtx()->device, &info, nullptr, &m_transport_descriptor_pool);
+		if (result != VK_SUCCESS)
+		{
+			m_transport_descriptor_pool = VK_NULL_HANDLE;
+			return VK_NULL_HANDLE;
+		}
+	}
+	VkDescriptorSetAllocateInfo info {};
+	info.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	info.descriptorPool     = m_transport_descriptor_pool;
+	info.descriptorSetCount = 1;
+	info.pSetLayouts        = &layout;
+	VkDescriptorSet set     = VK_NULL_HANDLE;
+	return vkAllocateDescriptorSets(g_render_ctx->GetGraphicCtx()->device, &info, &set) == VK_SUCCESS ? set : VK_NULL_HANDLE;
 }
 
 VulkanBuffer* CommandBuffer::UploadRecordingBuffer(const void* data, uint64_t size, uint32_t usage)
