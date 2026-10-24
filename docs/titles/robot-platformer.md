@@ -1773,3 +1773,23 @@ Known approximations and debt recorded by this chain:
   across five 900-second runs the "label destination released before
   publication" warning never fired, and no store was skipped. The particle-heap
   warning is not caused by a dropped fence store.
+- **Implementation map for the mixed-view storage seed.** Measured call
+  sites: `GraphicsRenderBind.cpp` builds `StorageTextureObject` (including
+  `skip_seed` from the binder mask) and calls `GpuMemoryCreateObject`;
+  `ShaderComputeStorageSeedSkipMask` (`GraphicsRenderDraw.cpp`) proves a
+  write-only, fully covered base extent; `ValidateUploadedStorageSeedCoverage`
+  (`GraphicsRenderBind.cpp`) cross-checks the guest coverage buffer against
+  `Width5+1 x Height5+1`; `GpuMemoryCreate.cpp` classifies the overlap and
+  refuses mixed parents whose device writes are unpublished.
+  Two admissible directions, both general:
+  1. Publish pending device writes for the aliased range before the guest seed
+     (materialize through the existing write-back/materialization path with the
+     recording queue as consumer), then link every view. The per-range
+     `WriteBackStorageRanges` entry exists but only collects writable storage,
+     so render-target publication would need the materialization path and a
+     create-time ordering point.
+  2. Prove per-level coverage for a linear mipmapped destination so the image
+     can be created without a guest seed, mirroring the write-only proof for a
+     single base extent.
+  Neither may copy between differing formats. The current refusal is correct
+  until one of these exists.
