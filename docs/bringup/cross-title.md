@@ -1,3 +1,15 @@
+## GDS is shared across queue families (2026-10-24)
+
+- **Observed.** After compute queues moved to a compute-only family, a title
+  that initializes GDS on a compute queue and later binds it on the graphics
+  queue stopped at boot with `GDS queue-family migration is unsupported`.
+- **Cause and fix.** The GDS buffer is created through the common buffer path,
+  which already applies concurrent sharing across every used family; the
+  first-use family check still treated it as exclusively owned. The check and
+  the owner field are removed.
+- **Verified.** A strict boot on Intel A770 passes the publisher card, the
+  studio logo and the title, and loads the intro level.
+
 # Cross-title records (2026-10-10 onward)
 
 Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up

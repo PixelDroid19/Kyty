@@ -622,7 +622,6 @@ private:
 
 	Core::Mutex   m_mutex;
 	VulkanBuffer* m_buffer          = nullptr;
-	uint32_t      m_queue_family    = VK_QUEUE_FAMILY_IGNORED;
 	uint64_t      m_staging_records = 0;
 	uint64_t      m_staging_bytes   = 0;
 };
