@@ -887,6 +887,13 @@ static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, u
 	             occupancy.used_duplicates, occupancy.largest_duplicate_group);
 }
 
+// Entries in release order: the oldest leads.
+struct TransientFreeList
+{
+	struct TransientBufferEntry* oldest = nullptr;
+	struct TransientBufferEntry* newest = nullptr;
+};
+
 struct TransientBufferEntry
 {
 	VulkanBuffer buffer;
@@ -922,8 +929,13 @@ struct TransientBufferEntry
 	std::map<std::pair<uint64_t, uint64_t>, TransientBufferEntry*>::iterator free_position;
 	bool                                                                     free_indexed  = false;
 	bool                                                                     free_snapshot = false;
-	// A free snapshot's place in the pool-wide release order.
-	std::map<uint64_t, TransientBufferEntry*>::iterator released_position;
+	// A free snapshot's neighbours in its size's release order and in the
+	// pool-wide release order, and the size's list it sits in.
+	TransientBufferEntry*     free_older     = nullptr;
+	TransientBufferEntry*     free_newer     = nullptr;
+	TransientBufferEntry*     released_older = nullptr;
+	TransientBufferEntry*     released_newer = nullptr;
+	struct TransientFreeList* free_list      = nullptr;
 	// Position in the pool's entry list.
 	size_t pool_index = 0;
 };
@@ -955,6 +967,9 @@ class TransientBufferPool
 
 	using Entry     = TransientBufferEntry;
 	using FreeIndex = std::map<std::pair<uint64_t, uint64_t>, Entry*>;
+	// Free snapshots by size; each size lists its entries in release order, so
+	// the first non-empty size at or above a request holds the answer at its head.
+	using FreeSnapshotIndex = std::map<uint64_t, TransientFreeList>;
 
 public:
 	VulkanBuffer* Upload(GraphicContext* ctx, const void* data, uint64_t size, uint32_t usage,
@@ -1145,7 +1160,7 @@ public:
 		}
 		if (entry == nullptr)
 		{
-			entry = TakeFree(m_free_snapshots, usage, capture_end);
+			entry = TakeFreeSnapshot(usage, capture_end);
 		}
 		if (entry == nullptr)
 		{
@@ -1298,7 +1313,7 @@ public:
 		m_snapshots.clear();
 		m_free.clear();
 		m_free_snapshots.clear();
-		m_released.clear();
+		m_released = {};
 		m_usage_entries.clear();
 		m_zero_carriers.clear();
 		m_by_buffer.clear();
@@ -1545,7 +1560,7 @@ private:
 		{
 			return Create(ctx, size, usage);
 		}
-		if (auto* entry = TakeFree(m_free_snapshots, usage, size); entry != nullptr)
+		if (auto* entry = TakeFreeSnapshot(usage, size); entry != nullptr)
 		{
 			return entry;
 		}
@@ -1572,6 +1587,65 @@ private:
 		return fit != free->second.end() ? fit->second : nullptr;
 	}
 
+	// The smallest fitting size, and within it the snapshot released longest ago.
+	// Sizes left empty are dropped on the way.
+	Entry* TakeFreeSnapshot(uint32_t usage, uint64_t size)
+	{
+		const auto free = m_free_snapshots.find(usage);
+		if (free == m_free_snapshots.end())
+		{
+			return nullptr;
+		}
+		auto& sizes = free->second;
+		for (auto fit = sizes.lower_bound(size); fit != sizes.end();)
+		{
+			if (fit->second.oldest != nullptr)
+			{
+				return fit->second.oldest;
+			}
+			fit = sizes.erase(fit);
+		}
+		return nullptr;
+	}
+
+	// Lists link through one pair of an entry's neighbour fields: the free
+	// pair for a size's list, the released pair for the pool-wide order.
+	static void ListAppend(TransientFreeList* list, Entry* entry, Entry* Entry::* older, Entry* Entry::* newer)
+	{
+		entry->*older = list->newest;
+		entry->*newer = nullptr;
+		if (list->newest != nullptr)
+		{
+			list->newest->*newer = entry;
+		} else
+		{
+			list->oldest = entry;
+		}
+		list->newest = entry;
+	}
+
+	static void ListUnlink(TransientFreeList* list, Entry* entry, Entry* Entry::* older, Entry* Entry::* newer)
+	{
+		Entry* const previous = entry->*older;
+		Entry* const next     = entry->*newer;
+		if (previous != nullptr)
+		{
+			previous->*newer = next;
+		} else
+		{
+			list->oldest = next;
+		}
+		if (next != nullptr)
+		{
+			next->*older = previous;
+		} else
+		{
+			list->newest = previous;
+		}
+		entry->*older = nullptr;
+		entry->*newer = nullptr;
+	}
+
 	static Entry* TakeStale(const SnapshotChain* chain, uint64_t size)
 	{
 		for (auto* entry = chain->oldest; entry != nullptr; entry = entry->snapshot_newer)
@@ -1587,7 +1661,7 @@ private:
 	// The fitting free snapshot released longest ago, unless a recent recording leased it.
 	Entry* TakeAged(uint32_t usage, uint64_t size)
 	{
-		auto* entry = TakeFree(m_free_snapshots, usage, size);
+		auto* entry = TakeFreeSnapshot(usage, size);
 		return entry != nullptr && entry->lease_generation + kRetainedRecordings <= m_lease_generation ? entry : nullptr;
 	}
 
@@ -1669,9 +1743,9 @@ private:
 	void DestroyExpired(GraphicContext* ctx)
 	{
 		static constexpr uint32_t kMaxDestroyedPerCapture = 4u;
-		for (uint32_t i = 0; i < kMaxDestroyedPerCapture && !m_released.empty(); ++i)
+		for (uint32_t i = 0; i < kMaxDestroyedPerCapture && m_released.oldest != nullptr; ++i)
 		{
-			auto* entry = m_released.begin()->second;
+			auto* entry = m_released.oldest;
 			if (entry->lease_generation + kExpiredRecordings > m_lease_generation)
 			{
 				return;
@@ -1679,6 +1753,21 @@ private:
 			UnindexSnapshot(entry);
 			entry->snapshot_valid = false;
 			DestroyEntry(ctx, entry);
+		}
+	}
+
+	// Destroying an entry leaves no empty size list behind, so the free
+	// snapshot index stays bounded by the sizes of live entries.
+	void DropEmptyFreeSize(uint32_t usage, uint64_t size)
+	{
+		const auto free = m_free_snapshots.find(usage);
+		if (free == m_free_snapshots.end())
+		{
+			return;
+		}
+		if (const auto list = free->second.find(size); list != free->second.end() && list->second.oldest == nullptr)
+		{
+			free->second.erase(list);
 		}
 	}
 
@@ -1690,6 +1779,7 @@ private:
 		moved->pool_index            = entry->pool_index;
 		m_entries.pop_back();
 		UnindexFree(entry);
+		DropEmptyFreeSize(entry->usage, entry->size);
 		m_by_buffer.erase(&entry->buffer);
 		m_usage_entries[entry->usage]--;
 		m_total_bytes -= entry->size;
@@ -1747,9 +1837,9 @@ private:
 		entry->free_snapshot = entry->snapshot_valid;
 		if (entry->free_snapshot)
 		{
-			const uint64_t release   = ++m_releases;
-			entry->free_position     = m_free_snapshots[entry->usage].emplace(std::make_pair(entry->size, release), entry).first;
-			entry->released_position = m_released.emplace(release, entry).first;
+			entry->free_list = &m_free_snapshots[entry->usage][entry->size];
+			ListAppend(entry->free_list, entry, &Entry::free_older, &Entry::free_newer);
+			ListAppend(&m_released, entry, &Entry::released_older, &Entry::released_newer);
 		} else
 		{
 			entry->free_position = m_free[entry->usage].emplace(std::make_pair(entry->size, entry->creation), entry).first;
@@ -1763,10 +1853,14 @@ private:
 		{
 			return;
 		}
-		(entry->free_snapshot ? m_free_snapshots : m_free)[entry->usage].erase(entry->free_position);
 		if (entry->free_snapshot)
 		{
-			m_released.erase(entry->released_position);
+			ListUnlink(entry->free_list, entry, &Entry::free_older, &Entry::free_newer);
+			ListUnlink(&m_released, entry, &Entry::released_older, &Entry::released_newer);
+			entry->free_list = nullptr;
+		} else
+		{
+			m_free[entry->usage].erase(entry->free_position);
 		}
 		entry->free_indexed = false;
 	}
@@ -1777,9 +1871,9 @@ private:
 	// Unused entries without a snapshot, by usage, size and creation order.
 	std::unordered_map<uint32_t, FreeIndex> m_free;
 	// Unused entries holding a snapshot, by usage, size and release order.
-	std::unordered_map<uint32_t, FreeIndex> m_free_snapshots;
+	std::unordered_map<uint32_t, FreeSnapshotIndex> m_free_snapshots;
 	// The same entries in release order across usages.
-	std::map<uint64_t, Entry*>                                                    m_released;
+	TransientFreeList                                                             m_released;
 	std::unordered_map<uint32_t, uint32_t>                                        m_usage_entries;
 	// The zero carrier each usage holds until the next Reset.
 	std::unordered_map<uint32_t, Entry*>              m_zero_carriers;
@@ -1787,7 +1881,6 @@ private:
 	uint64_t            m_total_bytes = 0;
 	uint64_t                                          m_lease_generation = 0;
 	uint64_t                                          m_creations        = 0;
-	uint64_t                                          m_releases         = 0;
 };
 
 // A command pool holds one command buffer per submission slot (CommandPool::Create).

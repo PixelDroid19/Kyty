@@ -4,6 +4,30 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Release-ordered snapshot lists instead of trees (2026-10-24)
+
+- **Observed** (fishing title in game, Intel A770, CP-thread profile): the
+  transient snapshot pool's free index cost about 4% of the CP thread.
+  Every recording releases the snapshots it leased (`IndexFree`, 2.0%) and
+  leases most of them again during the same recording, and each step
+  inserted into and erased from two ordered maps (the per-usage
+  size-and-release map and the pool-wide release map; tree erase 1.9%, plus
+  node allocations).
+- **Fix** (`TransientBufferPool`, `GraphicsRenderCommandBuffer.cpp`): release
+  order only grows, so both release orders are intrusive lists. Free
+  snapshots sit in one list per size, under a map from size to list; the
+  first non-empty size at or above a request holds the answer at its head,
+  which is the entry the previous size-and-release key chose. Empty sizes
+  are dropped when a lookup passes them or when their last entry is
+  destroyed.
+- **Result:** in the same window of the scene (90-120 s) the tree erase
+  share fell 1.86% → 0.33%, `IndexFree` 1.99% → 1.16% and `Capture`
+  11.2% → 10.3% of the CP thread, about 2.4 points in total.
+- **Verified:** unit tests pass (2462); regression sweep with no stop on
+  five titles (racing 60 fps, anime fighter 47 fps, isometric roguelike
+  60 fps, insect platformer sequel 60 fps, beat 'em up 18 fps in gameplay),
+  frame counts in line with the previous binary for the same scene.
+
 ## Attachment writes keep their own materialization (2026-10-24)
 
 - **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps
