@@ -1793,9 +1793,7 @@ Known approximations and debt recorded by this chain:
      single base extent.
   Neither may copy between differing formats. The current refusal is correct
   until one of these exists.
-  Measured refinement: a diagnostic probe inside the seed-skip computation
-  never fired for this view, which means the create comes from a graphics draw,
-  not from a compute dispatch. The write-only proof is built only on the compute
-  path, so a storage view bound by a draw is always guest-seeded regardless of
-  its usage. A draw-side coverage proof is therefore also part of the required
-  work.
+  A probe inside the compute seed-skip computation never fired, but that is
+  not evidence of a draw-side create: the loop skips descriptors without the
+  write-only bit before reaching the probe. The binding stage for this view is
+  therefore still unmeasured; the probe must run before the write-only check.
