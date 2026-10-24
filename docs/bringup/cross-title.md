@@ -4649,3 +4649,10 @@ acceptance remains open.
   The same review confirmed that no existing derivative implements the
   level-aware linear R32F composite seed this title's tutorial needs; the
   mixed-view storage alias remains a local design task.
+- **Lineage.** The reviewed derivative tree belongs to an unrelated project
+  lineage: it uses different top-level paths (`src/graphics`, `src/kernel`) and
+  shares no commit with our repository, so merging it is neither possible nor
+  appropriate. Its synchronisations also mention two split-wave leads worth
+  verifying later: sharing SMEM load results across emulated wave64 halves and
+  allocating split-wave dispatcher spill IDs in program order. Both overlap
+  files we own; treat them as leads, never as patches.
