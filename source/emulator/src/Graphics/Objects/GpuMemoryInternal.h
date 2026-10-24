@@ -298,8 +298,8 @@ public:
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 	void WriteBackAllCompleted(GraphicContext* ctx);
-	void               WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer);
-	[[nodiscard]] bool PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer,
+	void               WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer);
+	[[nodiscard]] bool PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
 	                                           std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency);
 	[[nodiscard]] bool PendingStorageHasAliases();
 	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
@@ -466,8 +466,8 @@ private:
 	void              ForgetHeapStorageObjects(int removed_heap_id);
 	// (heap id, object id) of each in-use writable StorageBuffer overlapping a range
 	// whose writes are not published to the guest device-address view on `consumer`.
-	// The ranges are sorted by address and disjoint.
-	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer) const;
+	// `ranges` answers whether a block meets one of the queried guest ranges.
+	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const;
 	[[nodiscard]] static bool StorageIsWholeGuestContent(const Object& object);
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
