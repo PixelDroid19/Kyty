@@ -87,14 +87,19 @@ record. Titles are named descriptively only (`AGENTS.md`).
   depth-only draw: the shade generator registered a zero-length VGPR range when
   a program had no initial VGPRs and aborted; it now registers none. The
   runtime result of the depth-only program is the current frontier.
-- **Host device loss (separate).** The flyby/hub load intermittently loses the
-  device (`VK_ERROR_DEVICE_LOST` after about 0.7 s) even with exclusive GPU
-  access. Kernel evidence: `xe ... Engine reset: engine_class=rcs` with a timed
-  out `fc_script` job and a device coredump (root-only). One occurrence had no
-  transport draw recorded at all and several runs cross the same frames
-  normally, so the loss is not caused by the transport passes; it is tracked
-  separately. Bounded compute-dispatch dumps (frames 2400-3200) and a draw-PS
-  census are used to name the last submitted program when it recurs.
+- **Hub-transition GPU hang (separate, current blocker).** The flyby/hub load
+  hangs the render engine: the kernel reports an RCS engine reset with a timed
+  out `fc_script` job and writes a Xe device coredump (root-only). Two failure
+  modes follow it:
+  - `vkWaitForFences` reports `VK_ERROR_DEVICE_LOST` when a wait sees it first;
+  - otherwise the next Vulkan call faults inside a driver library (crash report:
+    read at `0xf8`, PC in a shared object) and the process exits 139. That is a
+    post-loss driver crash, not a guest or Kyty code fault.
+  The hang reproduces at the same game point (about frame 2925) with zero
+  transport draws recorded, and it still happens when the split shade dispatch
+  is skipped, so the transport passes do not own it. Guest write faults logged
+  during the flyby are handled GPU-watch faults. The next step needs the Xe
+  coredump (root) or a base-renderer submission bisect around the transition.
 - **Parser gap seen from the pause menu.** Pressing options during the flyby
   reaches a shader with VOP3P opcode `0x21`, which the parser rejects
   (`ShaderParseVOP3P.cpp`). The plain route does not reach it; the opcode is
