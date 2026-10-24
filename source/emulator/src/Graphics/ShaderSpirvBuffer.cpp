@@ -2759,6 +2759,15 @@ static uint32_t Ds2OffsetBytes(const ShaderInstruction& inst, uint32_t word, con
 	return ((inst.ds_offset >> (word * 8u)) & 0xffu) * 4u * stride;
 }
 
+// ds_write2[st64]_b64 carries two independent qword offsets, each scaled by
+// 8 bytes (times 64 for the st64 forms), and word selects the dword inside
+// the qword.
+static uint32_t Ds2OffsetBytes64(const ShaderInstruction& inst, uint32_t operand, uint32_t word, const char* const* param)
+{
+	const uint32_t stride = (param != nullptr && param[0] != nullptr && param[0][0] == '6') ? 64u : 1u;
+	return ((inst.ds_offset >> (operand * 8u)) & 0xffu) * 8u * stride + word * 4u;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_DsRead2B32_Vdst2VaddrOffset01)
 {
 	const auto& inst       = code.GetInstructions().At(index);
@@ -2808,6 +2817,41 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWrite2B32_VaddrVdata2Offset01)
 		                             tag.c_str(), data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
 		body += EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str, Ds2OffsetBytes(inst, static_cast<uint32_t>(word), param), 1, tag);
 		body += GateLdsByBounds(store, tag);
+	}
+	*dst_source += GateLdsByExec(body, index_str);
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_DsWrite2B64_VaddrVdata2Offset01)
+{
+	const auto& inst       = code.GetInstructions().At(index);
+	const auto* input_info = spirv->GetCsInputInfo();
+
+	if (input_info == nullptr || input_info->lds_dwords == 0 || !ShaderLdsMemoryInstructionSupported(inst))
+	{
+		return false;
+	}
+
+	const auto address   = operand_variable_to_str(inst.src[0]);
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8    body      = LdsAddressSnapshot(address.value, index_str);
+	// DATA0 and DATA1 each contribute two dwords; the stores target independent
+	// qword addresses.
+	for (int operand = 0; operand < 2; ++operand)
+	{
+		for (int word = 0; word < 2; ++word)
+		{
+			const auto tag  = String8::FromPrintf("%u_write2b64_%d_%d", index, operand, word);
+			const auto data = operand_variable_to_str(inst.src[1 + operand], word);
+			String8    store = EmitLdsWordPointer(spirv, 0, tag);
+			store += String8::FromPrintf("        %%lds_data_f_%s = OpLoad %%float %%%s\n"
+			                             "        %%lds_data_u_%s = OpBitcast %%uint %%lds_data_f_%s\n"
+			                             "               OpStore %%lds_ptr_%s_0 %%lds_data_u_%s\n",
+			                             tag.c_str(), data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+			body += EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str,
+			                            Ds2OffsetBytes64(inst, static_cast<uint32_t>(operand), static_cast<uint32_t>(word), param), 1, tag);
+			body += GateLdsByBounds(store, tag);
+		}
 	}
 	*dst_source += GateLdsByExec(body, index_str);
 	return true;

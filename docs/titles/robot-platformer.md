@@ -87,19 +87,17 @@ record. Titles are named descriptively only (`AGENTS.md`).
   depth-only draw: the shade generator registered a zero-length VGPR range when
   a program had no initial VGPRs and aborted; it now registers none. The
   runtime result of the depth-only program is the current frontier.
-- **Hub-transition GPU hang (separate, current blocker).** The flyby/hub load
-  hangs the render engine: the kernel reports an RCS engine reset with a timed
-  out `fc_script` job and writes a Xe device coredump (root-only). Two failure
-  modes follow it:
-  - `vkWaitForFences` reports `VK_ERROR_DEVICE_LOST` when a wait sees it first;
-  - otherwise the next Vulkan call faults inside a driver library (crash report:
-    read at `0xf8`, PC in a shared object) and the process exits 139. That is a
-    post-loss driver crash, not a guest or Kyty code fault.
-  The hang reproduces at the same game point (about frame 2925) with zero
-  transport draws recorded, and it still happens when the split shade dispatch
-  is skipped, so the transport passes do not own it. Guest write faults logged
-  during the flyby are handled GPU-watch faults. The next step needs the Xe
-  coredump (root) or a base-renderer submission bisect around the transition.
+- **Transition crash: a non-indexed transport draw, not a GPU hang (fixed).**
+  The earlier record attributed the exit at the flyby/hub transition to a
+  render-engine hang. The kernel journal shows no engine reset at those
+  crashes: the process died from a host fault inside the Intel driver (read at
+  `0xf8`), captured as a userspace core. `GraphicsRenderDrawIndexAuto` had no
+  fragment-transport branch, so the first non-indexed draw whose pixel program
+  requires the wave64 transport bound the transport resolve pipeline and issued
+  a plain `vkCmdDraw`; the driver dereferenced the resulting null pipeline
+  state. The indexed path already recorded the transport; the recording is now
+  shared and each path replays its own geometry. The RCS resets recorded
+  earlier and below belong to other runs, not to this crash.
 - **Parser gap seen from the pause menu.** Pressing options during the flyby
   reaches a shader with VOP3P opcode `0x21`, which the parser rejects
   (`ShaderParseVOP3P.cpp`). The plain route does not reach it; the opcode is
@@ -1691,3 +1689,33 @@ Known approximations and debt recorded by this chain:
   as a mask (a numeric use is refused, an EXEC assignment is accepted); it is sound for refusals but imprecise.
 - `KYTY_DUMP_VIDEOOUT` writes present-source PNGs only for 8-bit and FP16 formats; the reference workload presents a
   10-bit format, so that dump (and the paired `KYTY_DUMP_RT`) produces nothing there.
+
+## Robot platformer: non-indexed transport and 64-bit DS writes (2026-10-24)
+
+- **Evidence for the transition crash.** A gated in-process core capture (a
+  temporary build that restores the default fault action so the system keeps
+  the fault context; not committed) symbolized the driver frames, and the Kyty
+  frame resolved to `GraphicsRenderDrawIndexAuto` at the plain `vkCmdDraw`. The
+  kernel journal for the same timestamps contains no Xe reset: this was a host
+  driver fault, not a render-engine hang.
+- **Fix: non-indexed transport draws.** The capture/shade/resolve recording is
+  extracted into one helper. Indexed draws replay the guest index snapshot;
+  non-indexed draws replay `draw_count` vertices from the resolved first vertex.
+  Both use the same band planning and fixed-function state.
+- **Fix: `ds_write2[st64]_b64`.** The tutorial level's pixel program uses
+  `ds_write2st64_b64` (opcode 0x4F), which the decoder refused. Both opcodes now
+  decode with two-dword data pairs; the offsets stay packed like the b32 form
+  and scale by 8 bytes (times 64 for st64). The SPIR-V LDS recompiler stores
+  both pairs, the wave-LDS path re-emits the raw opcode, and the module declares
+  the offset constants. Two packet tests cover the tuple and the qword scaling.
+- **Verification.** Strict run, SDL offscreen, scripted route, 900 s cap, Intel
+  Arc A770, Mesa ANV 26.2.5: the transition crash is gone and the tutorial
+  level loads (5.7 s), which the title never reached before. The DS packet
+  tests, `check_emulator_boundaries.py` and `check_graphics_tables.py` pass.
+- **Current frontier: first real RCS timeout in the tutorial level.** The kernel
+  reports `Engine reset: engine_class=rcs` with a timed-out `fc_script` job and
+  creates a Xe device coredump (root-only). The run then sees `vkWaitForFences`
+  return `-4` (queue 8, slot 6, sequence 98847, 697 ms). Guest write faults
+  during the flyby remain handled GPU-watch faults. Next: bisect the tutorial
+  level's submissions (transport shade against base draws) and capture the hung
+  batch.

@@ -8046,6 +8046,57 @@ TEST(EmulatorGraphicsPackets, Gen5DsWrite2St64B32ScalesOffsetsBySixtyFourDwords)
 	EXPECT_FALSE(ShaderRecompileCS(code, &input).IsEmpty());
 }
 
+TEST(EmulatorGraphicsPackets, Gen5DsWrite2B64StoresBothRegisterPairsAtQwordScaledOffsets)
+{
+	// ds_write2_b64 v0, v[2:3], v[4:5] offset0:0 offset1:1. Each data operand is a
+	// register pair and each offset is scaled by the qword size.
+	const uint32_t shader[] = {0xd9380100u, 0x00040200u, 0xbf810000u};
+	const auto     code     = ParseGen5DsPair(shader);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::DsWrite2B64);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VaddrVdata2Offset01);
+	ASSERT_EQ(instruction.src_num, 3);
+	EXPECT_EQ(instruction.src[0].register_id, 0);
+	EXPECT_EQ(instruction.src[1].register_id, 2);
+	EXPECT_EQ(instruction.src[1].size, 2);
+	EXPECT_EQ(instruction.src[2].register_id, 4);
+	EXPECT_EQ(instruction.src[2].size, 2);
+	EXPECT_EQ(instruction.ds_offset, 0x0100u);
+	EXPECT_TRUE(ShaderLdsMemoryInstructionSupported(instruction));
+
+	auto       input  = Gen5DsPairInput();
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v3"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_uint_constant"), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompileCS(code, &input).IsEmpty());
+}
+
+TEST(EmulatorGraphicsPackets, Gen5DsWrite2St64B64ScalesQwordOffsetsBySixtyFour)
+{
+	// ds_write2st64_b64 v0, v[2:3], v[4:5] offset0:1 offset1:2 -> qword offsets
+	// scaled by 64: byte offsets 512/516 and 1024/1028.
+	const uint32_t shader[] = {0xd93c0201u, 0x00040200u, 0xbf810000u};
+	const auto     code     = ParseGen5DsPair(shader);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::DsWrite2St64B64);
+	EXPECT_EQ(instruction.ds_offset, 0x0201u);
+	EXPECT_TRUE(ShaderLdsMemoryInstructionSupported(instruction));
+
+	auto       input  = Gen5DsPairInput();
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("OpIAdd %uint %lds_addr_u_0 %uint_0x00000200"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpIAdd %uint %lds_addr_u_0 %uint_0x00000400"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_uint_constant"), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompileCS(code, &input).IsEmpty());
+}
+
 TEST(EmulatorGraphicsPackets, Gen5DsRead2St64B32ScalesOffsetsBySixtyFourDwords)
 {
 	// ds_read2st64_b32 v[4:5], v2 offset0:0 offset1:1 -> byte offsets 0 and 256; it used to decode as a one-word ds_read_b32.

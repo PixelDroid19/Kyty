@@ -200,6 +200,13 @@ bool ShaderLdsMemoryInstructionSupported(const ShaderInstruction& instruction)
 			sources = 3;
 			format = ShaderInstructionFormat::VaddrVdata2Offset01;
 			break;
+		case ShaderInstructionType::DsWrite2B64:
+		case ShaderInstructionType::DsWrite2St64B64:
+			opcode = instruction.type == ShaderInstructionType::DsWrite2B64 ? 0x4eu : 0x4fu;
+			words = 2;
+			sources = 3;
+			format = ShaderInstructionFormat::VaddrVdata2Offset01;
+			break;
 		case ShaderInstructionType::DsAddRtnU32:
 		case ShaderInstructionType::DsWrxchgRtnB32:
 			opcode = instruction.type == ShaderInstructionType::DsAddRtnU32 ? 0x20u : 0x2du;
