@@ -1806,6 +1806,13 @@ Known approximations and debt recorded by this chain:
   composite raw path does for its supported destination shape. Extending that
   path is the correct direction; guest-byte seeding cannot represent this
   alias.
+  Excluded: linking the mixed parents with the ordinary guest seed. A
+  temporary policy let the create proceed with the guest upload for this shape:
+  the level passed the resource create and ran without an engine reset (present
+  3046, loading phase), but the captured frame shows bright streaked corruption
+  above the ship where the earlier frame had none. Guest bytes do not represent
+  the parents' device content; the strict refusal is correct and the seed must
+  copy from that content.
   Excluded: skipping the seed for this shape. Temporarily forcing an unseeded
   create for tile-0 format-71 multi-level storage views let the level pass the
   create, then produced a real RCS job timeout (Xe engine reset, device
