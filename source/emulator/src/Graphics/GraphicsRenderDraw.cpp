@@ -1420,6 +1420,134 @@ static const RenderResolutionPlan& SelectMaterializationResolution(const RenderC
 	return target.classification == ResolutionClassification::Scaled ? target : display;
 }
 
+namespace {
+
+// The geometry a transport pass replays. Indexed draws bind the guest index
+// snapshot; non-indexed draws start at the guest's first vertex instead.
+struct FragmentTransportGeometry
+{
+	VulkanBuffer* indices             = nullptr;
+	VkIndexType   index_type          = VK_INDEX_TYPE_UINT32;
+	int32_t       base_vertex         = 0;
+	uint32_t      first_vertex        = 0;
+	bool          indices_snapshotted = false;
+};
+
+// Capture the covered lanes exactly as rasterized, shade them as guest waves in
+// compute, then resolve through the draw's fixed-function state. Indexed and
+// non-indexed draws differ only in how each band replays its geometry.
+void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Shader* sh_ctx, VulkanFramebuffer* framebuffer,
+                                         RenderColorInfo* color_info, RenderDepthInfo* depth_info,
+                                         const VulkanSampleLocationState& sample_locations, const ShaderVertexInputInfo& vs_input_info,
+                                         const ShaderPixelInputInfo& ps_input_info, uint32_t vertex_first, uint32_t vertex_records,
+                                         const GuestDeviceAddressTable& device_address_table, const VulkanImage* stencil_attached_depth,
+                                         VulkanPipeline* pipeline, const PrimitiveDrawPlan& primitive_plan, uint32_t instance_count,
+                                         uint32_t first_instance, const FragmentTransportGeometry& geometry)
+{
+	EXIT_IF(pipeline == nullptr || pipeline->transport == nullptr || color_info == nullptr || depth_info == nullptr);
+	if (primitive_plan.chunked || instance_count > 1u)
+	{
+		EXIT("fragment transport does not split instanced or chunked draws yet: chunked=%u instances=%u\n",
+		     primitive_plan.chunked ? 1u : 0u, instance_count);
+	}
+	uint32_t primitive_count = 0;
+	switch (primitive_plan.topology)
+	{
+		case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: primitive_count = primitive_plan.draw_count / 3u; break;
+		case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+			primitive_count = primitive_plan.draw_count > 2u ? primitive_plan.draw_count - 2u : 0u;
+			break;
+		default: EXIT("fragment transport needs a triangle topology: topology=%u\n", static_cast<unsigned>(primitive_plan.topology));
+	}
+	if (primitive_count == 0u)
+	{
+		return;
+	}
+	FragmentTransportResources transport;
+	if (!FragmentTransportPrepareResources(buffer, framebuffer->extent, primitive_count, pipeline->transport->lane_words, &transport))
+	{
+		EXIT("fragment transport could not reserve host storage: extent=%ux%u primitives=%u lane_words=%u\n", framebuffer->extent.width,
+		     framebuffer->extent.height, primitive_count, pipeline->transport->lane_words);
+	}
+
+	auto* capture = pipeline->transport->capture;
+	auto* resolve = pipeline->transport->resolve;
+	const auto& scissor = pipeline->dynamic_params->scissor_ltrb;
+	const auto  kernel_parameters = FragmentTransport::GetKernelParameters(transport.layout);
+	const auto  bind_vertex = [&](VkPipelineLayout layout)
+	{
+		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, vs_input_info.bind, VK_SHADER_STAGE_VERTEX_BIT,
+		                DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum, stencil_attached_depth, nullptr,
+		                &device_address_table, ScaledImageReadAccess::Refused, color_info);
+	};
+	const auto bind_index_buffer = [&](VkCommandBuffer cmd)
+	{
+		if (geometry.indices != nullptr)
+		{
+			vkCmdBindIndexBuffer(cmd, geometry.indices->buffer, 0, geometry.index_type);
+		}
+	};
+	const auto draw_geometry = [&](VkCommandBuffer cmd)
+	{
+		if (geometry.indices != nullptr)
+		{
+			vkCmdDrawIndexed(cmd, primitive_plan.draw_count, instance_count, 0, geometry.base_vertex, first_instance);
+		} else
+		{
+			vkCmdDraw(cmd, primitive_plan.draw_count, instance_count, geometry.first_vertex, first_instance);
+		}
+	};
+
+	for (uint32_t band_top = static_cast<uint32_t>(scissor[1]); band_top < static_cast<uint32_t>(scissor[3]);
+	     band_top += transport.band_height)
+	{
+		const uint32_t band_bottom = std::min<uint32_t>(static_cast<uint32_t>(scissor[3]), band_top + transport.band_height);
+		const VkRect2D band {{scissor[0], static_cast<int32_t>(band_top)},
+		                     {static_cast<uint32_t>(scissor[2] - scissor[0]), band_bottom - band_top}};
+		FragmentTransportBeginTile(buffer, transport);
+
+		auto* vk = buffer->RecordState();
+		vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline);
+		SetDynamicParams(vk, capture);
+		vkCmdSetScissor(vk, 0, 1, &band);
+		vkCmdPushConstants(vk, capture->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters), &kernel_parameters);
+		vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
+		bind_index_buffer(vk);
+		BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_first, vertex_records, geometry.indices_snapshotted, first_instance,
+		                  instance_count);
+		bind_vertex(capture->pipeline_layout);
+		buffer->BeginRenderPass(framebuffer, color_info, depth_info, &sample_locations);
+		draw_geometry(buffer->RecordInsideRenderPass());
+
+		FragmentTransportDispatchScanPack(buffer, transport);
+		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->transport->shade_layout, ps_input_info.bind,
+		                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, 0, nullptr, sh_ctx->GetPs().ps_regs.chksum,
+		                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info), color_info);
+		FragmentTransportRecordShade(buffer, transport, *pipeline->transport, ps_input_info.bind, ps_input_info);
+
+		vk = buffer->RecordOutsideRenderPass();
+		vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline);
+		SetDynamicParams(vk, resolve);
+		vkCmdSetScissor(vk, 0, 1, &band);
+		vkCmdPushConstants(vk, resolve->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters), &kernel_parameters);
+		vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
+		bind_index_buffer(vk);
+		BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_first, vertex_records, geometry.indices_snapshotted, first_instance,
+		                  instance_count);
+		bind_vertex(resolve->pipeline_layout);
+		buffer->BeginRenderPass(framebuffer, color_info, depth_info, &sample_locations);
+		draw_geometry(buffer->RecordInsideRenderPass());
+		FragmentTransportEndTile(buffer);
+		DebugStatsRecordDraw();
+	}
+
+	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), *color_info);
+	InvalidateMemoryObject(*color_info);
+	InvalidateMemoryObject(*depth_info);
+}
+
+} // namespace
+
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance,
@@ -1715,108 +1843,24 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	if (pipeline->transport != nullptr)
 	{
-		// Capture the covered lanes exactly as rasterized, shade them as guest
-		// waves in compute, then resolve through the draw's fixed-function state.
-		if (primitive_plan.chunked || instance_count > 1u)
-		{
-			EXIT("fragment transport does not split instanced or chunked draws yet: chunked=%u instances=%u\n",
-			     primitive_plan.chunked ? 1u : 0u, instance_count);
-		}
-		uint32_t primitive_count = 0;
-		switch (primitive_plan.topology)
-		{
-			case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: primitive_count = primitive_plan.draw_count / 3u; break;
-			case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
-				primitive_count = primitive_plan.draw_count > 2u ? primitive_plan.draw_count - 2u : 0u;
-				break;
-			default: EXIT("fragment transport needs a triangle topology: topology=%u\n", static_cast<unsigned>(primitive_plan.topology));
-		}
-		if (primitive_count == 0u)
-		{
-			return;
-		}
-		FragmentTransportResources transport;
-		if (!FragmentTransportPrepareResources(buffer, framebuffer->extent, primitive_count, pipeline->transport->lane_words, &transport))
-		{
-			EXIT("fragment transport could not reserve host storage: extent=%ux%u primitives=%u lane_words=%u\n", framebuffer->extent.width,
-			     framebuffer->extent.height, primitive_count, pipeline->transport->lane_words);
-		}
-
+		FragmentTransportGeometry geometry {};
 		const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
-		VulkanBuffer*  indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-		const bool     indices_snapshotted = indices != nullptr;
-		if (indices == nullptr)
+		geometry.indices             = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		geometry.indices_snapshotted = geometry.indices != nullptr;
+		if (geometry.indices == nullptr)
 		{
-			indices = static_cast<VulkanBuffer*>(
+			geometry.indices = static_cast<VulkanBuffer*>(
 			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
 		}
-		if (indices == nullptr)
+		if (geometry.indices == nullptr)
 		{
 			EXIT("fragment transport index buffer is unavailable\n");
 		}
-
-		auto* capture = pipeline->transport->capture;
-		auto* resolve = pipeline->transport->resolve;
-		const auto& scissor = pipeline->dynamic_params->scissor_ltrb;
-		const auto  kernel_parameters = FragmentTransport::GetKernelParameters(transport.layout);
-		const auto  bind_vertex = [&](VkPipelineLayout layout)
-		{
-			BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, vs_input_info.bind, VK_SHADER_STAGE_VERTEX_BIT,
-			                DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum, stencil_attached_depth, nullptr,
-			                &device_address_table, ScaledImageReadAccess::Refused, &color_info);
-		};
-		const auto draw_geometry = [&](VkCommandBuffer cmd)
-		{
-			vkCmdDrawIndexed(cmd, primitive_plan.draw_count, instance_count, 0, vertex_offset, first_instance);
-		};
-
-		for (uint32_t band_top = static_cast<uint32_t>(scissor[1]); band_top < static_cast<uint32_t>(scissor[3]);
-		     band_top += transport.band_height)
-		{
-			const uint32_t band_bottom = std::min<uint32_t>(static_cast<uint32_t>(scissor[3]), band_top + transport.band_height);
-			const VkRect2D band {{scissor[0], static_cast<int32_t>(band_top)},
-			                     {static_cast<uint32_t>(scissor[2] - scissor[0]), band_bottom - band_top}};
-			FragmentTransportBeginTile(buffer, transport);
-
-			auto* vk = buffer->RecordState();
-			vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline);
-			SetDynamicParams(vk, const_cast<VulkanPipeline*>(capture));
-			vkCmdSetScissor(vk, 0, 1, &band);
-			vkCmdPushConstants(vk, capture->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters), &kernel_parameters);
-			vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, capture->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
-			vkCmdBindIndexBuffer(vk, indices->buffer, 0, index_type);
-			BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_requirement.first, vertex_records, indices_snapshotted,
-			                  first_instance, instance_count);
-			bind_vertex(capture->pipeline_layout);
-			buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
-			draw_geometry(buffer->RecordInsideRenderPass());
-
-			FragmentTransportDispatchScanPack(buffer, transport);
-			BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->transport->shade_layout, ps_input_info.bind,
-			                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, 0, nullptr, sh_ctx->GetPs().ps_regs.chksum,
-			                stencil_attached_depth, nullptr, &device_address_table, ResolvePixelScaledImageReadAccess(ps_input_info),
-			                &color_info);
-			FragmentTransportRecordShade(buffer, transport, *pipeline->transport, ps_input_info.bind, ps_input_info);
-
-			vk = buffer->RecordOutsideRenderPass();
-			vkCmdBindPipeline(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline);
-			SetDynamicParams(vk, resolve);
-			vkCmdSetScissor(vk, 0, 1, &band);
-			vkCmdPushConstants(vk, resolve->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(kernel_parameters), &kernel_parameters);
-			vkCmdBindDescriptorSets(vk, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve->pipeline_layout, 2, 1, &transport.set, 0, nullptr);
-			vkCmdBindIndexBuffer(vk, indices->buffer, 0, index_type);
-			BindVertexBuffers(submit_id, buffer, vk, vs_input_info, vertex_requirement.first, vertex_records, indices_snapshotted,
-			                  first_instance, instance_count);
-			bind_vertex(resolve->pipeline_layout);
-			buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
-			draw_geometry(buffer->RecordInsideRenderPass());
-			FragmentTransportEndTile(buffer);
-			DebugStatsRecordDraw();
-		}
-
-		MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
-		InvalidateMemoryObject(color_info);
-		InvalidateMemoryObject(depth_info);
+		geometry.index_type  = index_type;
+		geometry.base_vertex = vertex_offset;
+		GraphicsRenderFragmentTransportDraw(submit_id, buffer, sh_ctx, framebuffer, &color_info, &depth_info, sample_locations, vs_input_info,
+		                                    ps_input_info, vertex_requirement.first, vertex_records, device_address_table,
+		                                    stencil_attached_depth, pipeline, primitive_plan, instance_count, first_instance, geometry);
 		return;
 	}
 
@@ -2992,6 +3036,21 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
 
+	const uint32_t first_vertex = static_cast<uint32_t>(resolved_first_vertex);
+	if (pipeline->transport != nullptr && !clear_only)
+	{
+		// A transport-selected pixel program carries its work in the capture,
+		// shade and resolve passes; recording a plain draw with that pipeline
+		// would bind a pipeline this draw does not execute.
+		FragmentTransportGeometry geometry {};
+		geometry.first_vertex        = first_vertex;
+		geometry.indices_snapshotted = true;
+		GraphicsRenderFragmentTransportDraw(submit_id, buffer, sh_ctx, framebuffer, &color_info, &depth_info, sample_locations, vs_input_info,
+		                                    ps_input_info, vertex_requirement.first, vertex_records, device_address_table,
+		                                    stencil_attached_depth, pipeline, primitive_plan, instance_count, first_instance, geometry);
+		return;
+	}
+
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 
 	const auto resource_binding_start = DrawStageClock::now();
@@ -3109,7 +3168,6 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	{
 		vertex_clip_probe->BeginDepthPassQuery(buffer);
 	}
-	const uint32_t first_vertex = static_cast<uint32_t>(resolved_first_vertex);
 
 	uint32_t host_draws = 0;
 	if (!clear_only && primitive_plan.chunked)
