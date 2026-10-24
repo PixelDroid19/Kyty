@@ -428,19 +428,24 @@ void VerifyRenderTargetIndexAliasContract()
 	candidate_index.Insert(0x200020u, 0x10u, 7);
 	candidate_index.Insert(0x2ffff0u, 0x20u, 9);
 	auto retained_candidates = candidate_index.FindAll(0x200000u, 0x100u);
-	Expect(retained_candidates.Size() == 2u && retained_candidates.Contains(7) && retained_candidates.Contains(9),
-	       "single-bucket candidates are unique and still include bucket false positives");
+	Expect(retained_candidates.Size() == 1u && retained_candidates.Contains(7),
+	       "candidates are unique and leave out blocks the range does not reach");
 	candidate_index.Erase(0x200010u, 0x10u, 7);
-	Expect(retained_candidates.Size() == 2u && retained_candidates.Contains(7),
-	       "retained candidate result survives index mutation");
+	Expect(retained_candidates.Size() == 1u && retained_candidates.Contains(7), "retained candidate result survives index mutation");
 	retained_candidates.Add(11);
 	const auto current_candidates = candidate_index.FindAll(0x200000u, 0x100u);
-	Expect(current_candidates.Size() == 1u && current_candidates.Contains(9) && !current_candidates.Contains(11),
-	       "caller mutation cannot change the indexed candidate bucket");
+	Expect(current_candidates.Size() == 1u && current_candidates.Contains(7) && !current_candidates.Contains(11),
+	       "an object stays a candidate through its remaining block, and caller mutation cannot change the index");
 	const auto spanning_candidates = candidate_index.FindAll(0x2ffff0u, 0x20u);
 	Expect(spanning_candidates.Size() == 1u && spanning_candidates.Contains(9),
 	       "multi-bucket queries still deduplicate spanning objects");
 	Expect(candidate_index.FindAll(0x400000u, 0x10u).IsEmpty(), "absent bucket has no candidates");
+	candidate_index.Insert(0x10000000u, 0x2000000u, 21);
+	candidate_index.Insert(0x11ffff00u, 0x100u, 22);
+	const auto tail_candidates = candidate_index.FindAll(0x11fffff0u, 0x10u);
+	Expect(tail_candidates.Size() == 2u && tail_candidates.Contains(21) && tail_candidates.Contains(22),
+	       "a large block starting far before the range is still found");
+	Expect(candidate_index.FindAll(0x12000000u, 0x10u).IsEmpty(), "blocks ending at the range start are not candidates");
 	GpuWriteHistoryConfigureForTesting(0x4000u, 0x100u);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaData, 0x2000u, 0x20u, 1u, 0u, 0u);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::WriteData, 0x4040u, 0x20u, 2u, 0u, 0u);

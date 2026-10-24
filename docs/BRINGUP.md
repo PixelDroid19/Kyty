@@ -109,6 +109,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Object range queries indexed by block size (2026-10-24)
   - Device-address registry changes without whole-registry walks (2026-10-24)
   - Restored retired tracker pages keep no identity (2026-10-24)
   - Release-ordered snapshot lists instead of trees (2026-10-24)
