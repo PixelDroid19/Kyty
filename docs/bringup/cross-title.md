@@ -4,6 +4,33 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Descriptor set trim order and descriptor-miss attribution (2026-10-24)
+
+- **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps
+  present limit, about 31.6-32.1 µs per draw): temporary counters (removed)
+  showed about 37% descriptor-set hits per 100k lookups; about 62% of lookups
+  missed only because a bound buffer had a different identity (textures,
+  ranges and other fields about 0%). Most of those buffers are shared-pool
+  snapshots (reused or newly captured), far fewer per-recording uploads.
+  `TrimSets` took 4.1% of the CP thread, about 0.7% of it in a scan and
+  partial sort over every live set.
+- **Fix** (`DescriptorCache`, `GraphicsRenderDescriptor.cpp`): sets whose
+  every use is tracked by a submission sit in a list ordered by last use,
+  and a trim releases from its oldest end. The policy is unchanged; the scan
+  and sort are gone.
+- **Result:** `TrimSets` 4.1% → 3.5% of the CP thread (what remains is
+  unindexing and deferred deletion of the released sets); 31.1-32.1 µs per
+  draw against 31.6-32.1, within noise.
+- **Excluded:**
+  - keeping snapshots below the tracked-snapshot size in the release-ordered
+    free index so their buffers keep their identity: hits 37% → 65%, but
+    32.8 against 31.8 µs per draw, no gain;
+  - binding read-only storage snapshots with the full entry range: hits
+    unchanged, range differences were not the cause of misses.
+  Descriptor-set misses are therefore not the dominant CP cost; binding work
+  per draw (texture preparation, pixel-shader input analysis, snapshot
+  capture) is.
+
 ## Transient snapshot pool: covering vertex snapshots and expiry (2026-10-24)
 
 - **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps

@@ -1248,6 +1248,7 @@ void DescriptorCache::IndexSet(int index)
 
 VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 {
+	LruUnlink(index);
 	auto& set = m_sets[index];
 	EXIT_IF(set.set == nullptr);
 	for (const auto& resource: set.resources)
@@ -1295,15 +1296,62 @@ void DescriptorCache::ReleaseSet(int index)
 	Free(released);
 }
 
+// A set with an untracked use cannot tell when it is idle, so it never joins the trim order.
 void DescriptorCache::RecordSetUse(int index, CommandBuffer* buffer)
 {
-	auto& set    = m_sets[index];
-	set.last_use = ++m_use_clock;
+	LruUnlink(index);
+	auto&        set = m_sets[index];
 	SubmissionId submission {};
 	if (buffer == nullptr || !buffer->GetSubmissionId(&submission) || set.uses.RecordUse(submission) != GpuDeferredDeletionResult::Success)
 	{
 		set.untracked_use = true;
 	}
+	if (!set.untracked_use)
+	{
+		LruAppend(index);
+	}
+}
+
+void DescriptorCache::LruUnlink(int index)
+{
+	auto& set = m_sets[index];
+	if (!set.in_lru)
+	{
+		return;
+	}
+	if (set.lru_older != -1)
+	{
+		m_sets[set.lru_older].lru_newer = set.lru_newer;
+	} else
+	{
+		m_lru_oldest = set.lru_newer;
+	}
+	if (set.lru_newer != -1)
+	{
+		m_sets[set.lru_newer].lru_older = set.lru_older;
+	} else
+	{
+		m_lru_newest = set.lru_older;
+	}
+	set.lru_older = -1;
+	set.lru_newer = -1;
+	set.in_lru    = false;
+}
+
+void DescriptorCache::LruAppend(int index)
+{
+	auto& set     = m_sets[index];
+	set.lru_older = m_lru_newest;
+	set.lru_newer = -1;
+	set.in_lru    = true;
+	if (m_lru_newest != -1)
+	{
+		m_sets[m_lru_newest].lru_newer = index;
+	} else
+	{
+		m_lru_oldest = index;
+	}
+	m_lru_newest = index;
 }
 
 // Sets are otherwise released only with a resource they reference, so long-lived
@@ -1324,20 +1372,9 @@ void DescriptorCache::TrimSets()
 		{
 			return;
 		}
-		std::vector<std::pair<uint64_t, int>> candidates;
-		for (int index = 0; index < static_cast<int>(m_sets.Size()); index++)
+		for (uint32_t i = 0; i < TRIM_SETS && m_lru_oldest != -1; i++)
 		{
-			const auto& set = m_sets.At(index);
-			if (set.set != nullptr && !set.untracked_use && !set.uses.Dependencies().empty())
-			{
-				candidates.emplace_back(set.last_use, index);
-			}
-		}
-		const size_t count = std::min<size_t>(candidates.size(), TRIM_SETS);
-		std::partial_sort(candidates.begin(), candidates.begin() + static_cast<ptrdiff_t>(count), candidates.end());
-		for (size_t i = 0; i < count; i++)
-		{
-			const int index = candidates[i].second;
+			const int index = m_lru_oldest;
 			retired.push_back({m_sets.At(index).uses.Dependencies(), UnindexSet(index)});
 		}
 	}
@@ -1455,6 +1492,8 @@ void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
 	m_first_free_set  = -1;
 	m_first_free_pool = -1;
 	m_live_sets       = 0;
+	m_lru_oldest      = -1;
+	m_lru_newest      = -1;
 }
 
 VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind)
