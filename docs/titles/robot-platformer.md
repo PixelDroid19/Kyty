@@ -1806,3 +1806,9 @@ Known approximations and debt recorded by this chain:
   composite raw path does for its supported destination shape. Extending that
   path is the correct direction; guest-byte seeding cannot represent this
   alias.
+  Layout note for that extension: a linear (tile 0) storage view with levels
+  above one is created as one stacked image (`real_height = height + height/2`
+  and per-level offsets from the same layout helpers), while the guest range
+  measured for this view (5.55 MB for 960x540) is larger than the image bytes,
+  so the size alone cannot validate the destination shape. The raw copy must
+  derive per-level offsets from the layout, not from the range.
