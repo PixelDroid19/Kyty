@@ -11,10 +11,46 @@
 
 namespace Kyty::Libs::Graphics {
 
+// The object a GPU write went through, identified by type and exact ranges.
+// The write changes memory that object already holds, so its own cached
+// materialization stays valid; every other overlapping entry is stale.
+struct GpuMemoryMaterializationWriter
+{
+	static constexpr int MaxRanges = 3;
+
+	uint32_t                        object_type = 0;
+	std::array<uint64_t, MaxRanges> address {};
+	std::array<uint64_t, MaxRanges> size {};
+	uint8_t                         range_count = 0;
+
+	[[nodiscard]] static GpuMemoryMaterializationWriter Create(uint32_t object_type, const uint64_t* address, const uint64_t* size,
+	                                                           int range_count)
+	{
+		GpuMemoryMaterializationWriter writer;
+		if (object_type == 0u || address == nullptr || size == nullptr || range_count <= 0 || range_count > MaxRanges)
+		{
+			return writer;
+		}
+		writer.object_type = object_type;
+		writer.range_count = static_cast<uint8_t>(range_count);
+		for (int i = 0; i < range_count; ++i)
+		{
+			writer.address[static_cast<size_t>(i)] = address[i];
+			writer.size[static_cast<size_t>(i)]    = size[i];
+		}
+		return writer;
+	}
+
+	[[nodiscard]] bool operator==(const GpuMemoryMaterializationWriter& other) const
+	{
+		return object_type == other.object_type && range_count == other.range_count && address == other.address && size == other.size;
+	}
+};
+
 class GpuMemoryMaterializationKey final
 {
 public:
-	static constexpr int MaxRanges = 3;
+	static constexpr int MaxRanges = GpuMemoryMaterializationWriter::MaxRanges;
 	static constexpr int MaxParams = 13;
 
 	[[nodiscard]] static GpuMemoryMaterializationKey Create(uint64_t guest_submit, uint32_t host_queue, uint64_t host_sequence,
@@ -90,6 +126,13 @@ public:
 		}
 		return {begin, end};
 	}
+
+	[[nodiscard]] bool WrittenThrough(const GpuMemoryMaterializationWriter& writer) const
+	{
+		return m_valid && writer.object_type != 0u && m_object_type == writer.object_type && m_range_count == writer.range_count &&
+		       m_address == writer.address && m_size == writer.size;
+	}
+
 	[[nodiscard]] uint64_t Hash() const
 	{
 		uint64_t hash = 0x510e527fade682d1ull;
@@ -216,36 +259,38 @@ public:
 		}
 	}
 
-	void InvalidateRange(uint64_t address, uint64_t size)
+	// Removes every entry overlapping the range except the writer's own.
+	void InvalidateRange(uint64_t address, uint64_t size, const GpuMemoryMaterializationWriter& writer = {})
 	{
 		if (size == 0u)
 		{
 			return;
 		}
 		// Recording invalidates the same attachment ranges every draw. After a
-		// range has been invalidated no live entry overlaps it, so repeating
-		// it only needs the slots stored since; other ranges scan every span.
+		// range has been invalidated no live entry but the writer's overlaps
+		// it, so repeating it only needs the slots stored since; other ranges
+		// or writers scan every span.
 		const uint64_t end   = size > std::numeric_limits<uint64_t>::max() - address ? std::numeric_limits<uint64_t>::max() : address + size;
-		auto*          clean = FindCleanRange(address, end);
+		auto*          clean = FindCleanRange(address, end, writer);
 		if (clean != nullptr && m_store_seq - clean->store_seq <= StoreLogSize)
 		{
 			for (uint64_t seq = clean->store_seq; seq < m_store_seq; ++seq)
 			{
-				InvalidateSlot(m_store_log[static_cast<size_t>(seq % StoreLogSize)], address, size, end);
+				InvalidateSlot(m_store_log[static_cast<size_t>(seq % StoreLogSize)], address, size, end, writer);
 			}
 			clean->store_seq = m_store_seq;
 			return;
 		}
 		for (size_t slot = 0; slot < Capacity; ++slot)
 		{
-			InvalidateSlot(slot, address, size, end);
+			InvalidateSlot(slot, address, size, end, writer);
 		}
 		if (clean == nullptr)
 		{
 			clean = &m_clean_ranges[m_clean_next];
 			m_clean_next = (m_clean_next + 1u) % m_clean_ranges.size();
 		}
-		*clean = CleanRange {address, end, m_store_seq};
+		*clean = CleanRange {address, end, m_store_seq, writer};
 	}
 
 private:
@@ -253,16 +298,17 @@ private:
 
 	struct CleanRange
 	{
-		uint64_t address   = 0;
-		uint64_t end       = 0;
-		uint64_t store_seq = 0;
+		uint64_t                       address   = 0;
+		uint64_t                       end       = 0;
+		uint64_t                       store_seq = 0;
+		GpuMemoryMaterializationWriter writer;
 	};
 
-	[[nodiscard]] CleanRange* FindCleanRange(uint64_t address, uint64_t end)
+	[[nodiscard]] CleanRange* FindCleanRange(uint64_t address, uint64_t end, const GpuMemoryMaterializationWriter& writer)
 	{
 		for (auto& range: m_clean_ranges)
 		{
-			if (range.end != 0u && range.address == address && range.end == end)
+			if (range.end != 0u && range.address == address && range.end == end && range.writer == writer)
 			{
 				return &range;
 			}
@@ -270,14 +316,14 @@ private:
 		return nullptr;
 	}
 
-	void InvalidateSlot(size_t slot, uint64_t address, uint64_t size, uint64_t end)
+	void InvalidateSlot(size_t slot, uint64_t address, uint64_t size, uint64_t end, const GpuMemoryMaterializationWriter& writer)
 	{
 		if (m_spans[slot].second <= address || m_spans[slot].first >= end)
 		{
 			return;
 		}
 		auto& entry = m_entries[slot];
-		if (entry.has_value() && entry->epoch == m_epoch && entry->key.Overlaps(address, size))
+		if (entry.has_value() && entry->epoch == m_epoch && entry->key.Overlaps(address, size) && !entry->key.WrittenThrough(writer))
 		{
 			entry.reset();
 			m_spans[slot] = {0u, 0u};

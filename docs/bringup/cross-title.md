@@ -4,6 +4,36 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Attachment writes keep their own materialization (2026-10-24)
+
+- **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps
+  present limit): render targets and depth buffers never reused the
+  materialization cache; temporary counters (removed) showed 0 hits for
+  about 0.9 million stores each. Every draw calls `ResetHash` on its
+  attachment ranges, which invalidated every overlapping entry, including
+  the attachment's own, so each of its about 1.8 attachment creates per
+  draw went through `FindFast` and `Update` again.
+- **Fix** (`GpuMemoryMaterializationCache.h`, `GpuMemory::ResetHash`): the
+  invalidation names the writer by type and exact ranges and keeps only its
+  entry; every other overlapping entry (a texture over the same memory, an
+  object of the same type over different ranges) is still dropped. For the
+  writer in the same submission `Update` does nothing, so the cached path
+  does the same work as the fast path. The repeated-range shortcut records
+  the writer, so a later plain invalidation of the range still scans every
+  slot.
+- **Result:** render target hits 0 → 83%, depth 0 → 88%, with no rejected
+  hit. CP cost per draw, alternating the two behaviours every 5 s inside
+  one run (another instance overlapped every sample): about 52.7 against
+  54.0 µs per draw, about 2% and within noise.
+- **Verified:** unit test for the writer entry, the dropped overlapping
+  entry and a later plain invalidation; racing, fighter, roguelike, insect sequel and beat 'em up
+  sweeps finish without a stop and with their captures; the fighter repeated
+  without overlap holds its baseline (4394 frames in 100 s against 4405).
+  Beat 'em up frame counts are bimodal on both binaries: runs whose boot
+  lets the route reach gameplay render about 900 frames in 60 s, runs left
+  on the title screen about 2100, so frame counts are compared only for the
+  same scene.
+
 ## Descriptor set trim order and descriptor-miss attribution (2026-10-24)
 
 - **Observed** (fishing title in game, Intel A770, strict runs at the 60 fps
