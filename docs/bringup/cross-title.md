@@ -4,6 +4,34 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Physical device-address scans visit only partly imported ranges (2026-10-24)
+
+- **Observed** (beat 'em up intro cutscene, Intel A770, strict runs at the
+  60 fps present limit): after the two records below, `std::_Rb_tree_increment`
+  still held about 21% of the CP thread under `GuestDeviceAddressPrepareForRead`.
+  Temporary counters (removed) over a window of heavy churn showed 419 full
+  physical scans visiting 4.02 million ranges, 99.6% of them already fully
+  imported (328 ms of walking); in steady cutscene windows about 700 scans per
+  window, each started by a change of the physical-backing population. A list
+  of ranges not scanned since the last population was tried first and did not
+  help, because the population changes on almost every registration.
+- **Fix** (`GuestDeviceAddress.cpp`): the registry keeps the set of physical
+  ranges with pages not imported yet. A registration, a release survivor or a
+  chunk drop that clears imported pages adds the range; a release removes it;
+  `ImportPhysicalRanges` walks only that set and removes the ranges it leaves
+  fully imported. A non-physical range in the set stops the emulator.
+- **Result:** in the same cutscene window `_Rb_tree_increment` went from
+  20.9% to 1.8% of the CP thread and XXH3 hashing from 34% to 13.6% of the
+  profile. The import itself (about 135 µs per imported span) is unchanged.
+- **Verified:** unit tests pass (2463). Regression sweep with no stop: racing
+  57.8 fps, anime fighter controls menu about 48 fps between captures (48.2
+  before), isometric roguelike 58 fps, insect platformer sequel 60 fps,
+  beat 'em up 27-28 fps in combat (one sample each; gameplay read 31 in an
+  earlier run at another moment).
+- **Open:** each imported span still costs about 135 µs; the sorted table
+  insert, the window import and the populated-page query have not been
+  measured apart.
+
 ## Object range queries indexed by block size (2026-10-24)
 
 - **Observed** (beat 'em up gameplay, Intel A770, strict runs at the 60 fps
