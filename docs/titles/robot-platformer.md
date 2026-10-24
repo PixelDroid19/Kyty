@@ -1793,7 +1793,9 @@ Known approximations and debt recorded by this chain:
      single base extent.
   Neither may copy between differing formats. The current refusal is correct
   until one of these exists.
-  A probe inside the compute seed-skip computation never fired, but that is
-  not evidence of a draw-side create: the loop skips descriptors without the
-  write-only bit before reaching the probe. The binding stage for this view is
-  therefore still unmeasured; the probe must run before the write-only check.
+  Measured with a probe ahead of the write-only check: the view is bound in a
+  compute dispatch (write-without-sampler, dispatch mode 0x41), the
+  write-only proof bit is zero, and the guest supplies no tile coverage for
+  the binding (`coverage = 0x0`, origin and bounds absent). The proof route is
+  therefore unavailable for this shape; ordered publication of the parents'
+  device writes before the guest seed is the remaining admissible direction.
