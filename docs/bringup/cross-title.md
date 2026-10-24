@@ -4630,3 +4630,22 @@ preparation and 2.670 seconds of texture preparation; these nested measurements
 must not be added to their parent. The different binaries and independent runs
 do not isolate the cause of the rate difference. Completed multi-workload
 acceptance remains open.
+
+## Unverified ISA leads from a fork comparison (2026-10-24)
+
+- **Context.** A comparison against a derivative tree surfaced four general
+  instruction contracts that our decoder still refuses. They are secondary
+  implementation leads to verify against the published ISA and a live trace,
+  not evidence-backed contracts, and none is the current platformer blocker.
+  - `ds_cmpst_rtn_b32` (opcode 0x30): returns the pre-compare value and stores
+    only on match.
+  - 64-bit returning LDS forms (`ds_min_rtn_u64`, `ds_max_rtn_u64`,
+    `ds_cmpst_rtn_b64`, opcodes around 0x68-0x70), including the 64-bit source
+    width.
+  - D16 XY/XYZ formatted buffer loads and stores (MUBUF forms 0x80-0x87).
+  - Raw D16 depth bits through integer image loads (an integer view over a live
+    depth target), which matches the open defect recorded for integer T# over
+    depth binds.
+  The same review confirmed that no existing derivative implements the
+  level-aware linear R32F composite seed this title's tutorial needs; the
+  mixed-view storage alias remains a local design task.

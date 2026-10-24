@@ -1758,6 +1758,13 @@ Known approximations and debt recorded by this chain:
   and show the logo, ship and asteroid field without visible corruption. The
   same agent sample reports 5.6 fps at present 1343; performance is a separate
   open item. The tutorial still stops at the mixed-view storage alias above.
+- **Measured load-window cost.** An agent performance window over present
+  1282 to 1571 (103.993 s, 2.78 presents per second while the tutorial loads)
+  records per frame: 292 draws, 82 dispatches, 51 submits and command buffers,
+  about 1,390 upload calls (6.6 MB), 52 MB hashed and 41 ms inside fence
+  waits. The sampled frame-time p50 is 38 ms, so the multi-second stalls sit
+  outside the recorded draw frame. Submission and upload work on the CPU, not
+  GPU execution, sets this rate.
 - **Excluded: dropped label publications.** A lost EOP fence value could have
   stalled the guest's particle free list, so the label path was checked first:
   across five 900-second runs the "label destination released before
