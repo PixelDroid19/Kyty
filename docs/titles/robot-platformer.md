@@ -1810,7 +1810,11 @@ Known approximations and debt recorded by this chain:
   the resource create and stops in the fragment stage on a shader emitter
   rejection for `VMaxF32 v8, v8, v8` (format 0x20405, raw 0x201010fa) even
   though the min/max emitter exists, so the operand form is what the emitter
-  declines; record it as the next gap after the alias.
+  declines. A probe at the emitter's failure points shows why: the first
+  source is a VGPR with `dpp` set while the destination and second source are
+  plain VGPRs of the same register. The unsupported part is the DPP control,
+  not the min/max operation; the next gap needs the row-class DPP tier
+  extended, not a new emitter.
   Excluded: linking the mixed parents with the ordinary guest seed. A
   temporary policy let the create proceed with the guest upload for this shape:
   the level passed the resource create and ran without an engine reset (present
