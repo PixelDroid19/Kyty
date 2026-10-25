@@ -38,6 +38,13 @@ enum class GuestWait: uint8_t
 	Address
 };
 
+// Host work a command batch blocks on other than running packets.
+enum class CommandPhase: uint8_t
+{
+	PipelineCompile,
+	RegisterWait
+};
+
 class ProgressPort final
 {
 public:
@@ -45,17 +52,17 @@ public:
 	{
 		void (*begin)(ProgressLane lane) = nullptr;
 		void (*end)(ProgressLane lane)   = nullptr;
-		void (*begin_compile)()          = nullptr;
-		void (*end_compile)()            = nullptr;
-		void (*begin_wait)(GuestWait wait) = nullptr;
-		void (*end_wait)()                 = nullptr;
+		void (*begin_phase)(CommandPhase phase) = nullptr;
+		void (*end_phase)()                     = nullptr;
+		void (*begin_wait)(GuestWait wait)      = nullptr;
+		void (*end_wait)()                      = nullptr;
 	};
 
 	static void Install(Sink sink);
 	static void Begin(ProgressLane lane);
 	static void End(ProgressLane lane);
-	static void BeginCompile();
-	static void EndCompile();
+	static void BeginCommandPhase(CommandPhase phase);
+	static void EndCommandPhase();
 	static void BeginGuestWait(GuestWait wait);
 	static void EndGuestWait();
 };
@@ -73,17 +80,18 @@ private:
 	ProgressLane m_lane;
 };
 
-// Marks the command lane open on this thread as compiling a pipeline, so a
-// long synchronous compile is judged against compile thresholds instead of
-// being reported as a stuck command batch.
-class ScopedShaderCompile final
+// Marks the command lane open on this thread as compiling a pipeline or
+// waiting on guest memory, so a long synchronous compile is judged against
+// compile thresholds and a guest-paced WAIT_REG_MEM as a guest wait, instead
+// of either being reported as a stuck command batch.
+class ScopedCommandPhase final
 {
 public:
-	ScopedShaderCompile() { ProgressPort::BeginCompile(); }
-	~ScopedShaderCompile() { ProgressPort::EndCompile(); }
+	explicit ScopedCommandPhase(CommandPhase phase) { ProgressPort::BeginCommandPhase(phase); }
+	~ScopedCommandPhase() { ProgressPort::EndCommandPhase(); }
 
-	ScopedShaderCompile(const ScopedShaderCompile&)            = delete;
-	ScopedShaderCompile& operator=(const ScopedShaderCompile&) = delete;
+	ScopedCommandPhase(const ScopedCommandPhase&)            = delete;
+	ScopedCommandPhase& operator=(const ScopedCommandPhase&) = delete;
 };
 
 } // namespace Kyty::Emulator::Ports

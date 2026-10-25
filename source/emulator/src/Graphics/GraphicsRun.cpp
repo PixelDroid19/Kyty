@@ -1526,6 +1526,7 @@ static void WaitForSuspendedRuns(CommandProcessor* cp, CommandProcessor::Suspend
 	EXIT_IF(cp == nullptr);
 	EXIT_IF(first == nullptr && second == nullptr);
 
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase wait(::Kyty::Emulator::Ports::CommandPhase::RegisterWait);
 	for (;;)
 	{
 		if ((first != nullptr && SuspendedRunReady(*first)) || (second != nullptr && SuspendedRunReady(*second)))

@@ -78,6 +78,14 @@ namespace {
 	return entry.key.domain == Domain::GuestThread;
 }
 
+// A command lane parked on WAIT_REG_MEM waits for memory the guest writes: it
+// is guest-paced, so only the guest deadlock rule judges it.
+[[nodiscard]] bool WaitsOnGuestMemory(const ProgressSnapshotEntry& entry) noexcept
+{
+	return entry.key.domain == Domain::CommandProcessor &&
+	       entry.record.operation == static_cast<uint32_t>(OperationCode::RegisterMemoryWait);
+}
+
 [[nodiscard]] bool LaneBusy(const ProgressRecord& record) noexcept
 {
 	const auto st = static_cast<ProgressState>(record.state);
@@ -142,7 +150,7 @@ struct StallCandidate
 	for (uint32_t i = 0; i < input.progress.count && i < MaxProgressSnapshotEntries; ++i)
 	{
 		const auto& e = input.progress.entries[i];
-		if (IsGuestThread(e) || !LaneBusy(e.record))
+		if (IsGuestThread(e) || WaitsOnGuestMemory(e) || !LaneBusy(e.record))
 		{
 			continue;
 		}
@@ -229,7 +237,7 @@ void PushStalledLanes(const ObservationInput& input, const StallSettings& settin
 	for (uint32_t i = 0; i < input.progress.count && i < MaxProgressSnapshotEntries; ++i)
 	{
 		const auto& e = input.progress.entries[i];
-		if (IsGuestThread(e) || !LaneBusy(e.record) ||
+		if (IsGuestThread(e) || WaitsOnGuestMemory(e) || !LaneBusy(e.record) ||
 		    LaneAge(e.record, input.sample_time_ns, not_before_ns) < ThresholdSuspected(settings, e.key.domain, e.record.operation))
 		{
 			continue;
@@ -246,9 +254,10 @@ void PushStalledLanes(const ObservationInput& input, const StallSettings& settin
 }
 
 // Every guest thread parked in a blocking wait while the command processor has
-// had nothing to run: the guest waits for something nothing will signal. A
-// running guest thread or a busy command lane rules it out, and so does any
-// untracked guest thread, which might be the one still running.
+// had nothing to run but waits on guest memory: the guest waits for something
+// nothing will signal. A running guest thread or a busy command lane rules it
+// out, and so does any untracked guest thread, which might be the one still
+// running.
 [[nodiscard]] StallCandidate FindGuestDeadlock(const ObservationInput& input, const StallSettings& settings,
                                                uint64_t not_before_ns) noexcept
 {
@@ -264,7 +273,7 @@ void PushStalledLanes(const ObservationInput& input, const StallSettings& settin
 		const uint64_t age = LaneAge(e.record, input.sample_time_ns, not_before_ns);
 		if (e.key.domain == Domain::CommandProcessor)
 		{
-			if (LaneBusy(e.record))
+			if (!WaitsOnGuestMemory(e) && LaneBusy(e.record))
 			{
 				return {};
 			}
@@ -298,12 +307,19 @@ void PushStalledLanes(const ObservationInput& input, const StallSettings& settin
 	return best.age_ns >= best.suspected_ns ? best : StallCandidate {};
 }
 
-// Evidence code is the wait kind the thread is parked in.
+// Evidence code is the wait kind a guest thread is parked in, or the operation
+// of a command lane waiting on guest memory.
 void PushGuestWaits(const ObservationInput& input, SuspectedEvidence* suspected) noexcept
 {
 	for (uint32_t i = 0; i < input.progress.count && i < MaxProgressSnapshotEntries; ++i)
 	{
 		const auto& e = input.progress.entries[i];
+		if (WaitsOnGuestMemory(e))
+		{
+			PushEvidence(suspected, StallFact {e.key.domain, static_cast<uint16_t>(e.record.operation), e.record.state,
+			                                   e.key.instance, e.record.correlation});
+			continue;
+		}
 		if (!IsGuestThread(e))
 		{
 			continue;

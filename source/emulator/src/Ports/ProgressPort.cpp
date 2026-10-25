@@ -20,7 +20,7 @@ ProgressPort::Sink                     g_installed {};
 
 void ProgressPort::Install(Sink sink)
 {
-	if (sink.begin == nullptr || sink.end == nullptr || sink.begin_compile == nullptr || sink.end_compile == nullptr ||
+	if (sink.begin == nullptr || sink.end == nullptr || sink.begin_phase == nullptr || sink.end_phase == nullptr ||
 	    sink.begin_wait == nullptr || sink.end_wait == nullptr)
 	{
 		g_sink.store(nullptr);
@@ -48,21 +48,21 @@ void ProgressPort::End(ProgressLane lane)
 	}
 }
 
-void ProgressPort::BeginCompile()
+void ProgressPort::BeginCommandPhase(CommandPhase phase)
 {
 	const auto* sink = g_sink.load(std::memory_order_acquire);
 	if (sink != nullptr)
 	{
-		sink->begin_compile();
+		sink->begin_phase(phase);
 	}
 }
 
-void ProgressPort::EndCompile()
+void ProgressPort::EndCommandPhase()
 {
 	const auto* sink = g_sink.load(std::memory_order_acquire);
 	if (sink != nullptr)
 	{
-		sink->end_compile();
+		sink->end_phase();
 	}
 }
 

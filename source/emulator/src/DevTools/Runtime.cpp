@@ -125,7 +125,7 @@ struct ThreadLane
 {
 	LaneSlot* slot          = nullptr;
 	uint32_t  depth         = 0;
-	uint32_t  compile_depth = 0;
+	uint32_t  phase_depth   = 0;
 	uint32_t  wait_depth    = 0;
 };
 
@@ -213,7 +213,7 @@ void EndLane(ProgressLane lane)
 	{
 		return;
 	}
-	owned.compile_depth = 0;
+	owned.phase_depth = 0;
 	if (lane == ProgressLane::GuestThread)
 	{
 		// The thread left guest code for good; its lane closes.
@@ -225,8 +225,8 @@ void EndLane(ProgressLane lane)
 	owned.slot->ended.store(owned.slot->begun.load(std::memory_order_relaxed), std::memory_order_release);
 }
 
-// A compile changes the operation of the command lane already open on this
-// thread; compiles outside a command batch (background precompile) block
+// A command phase changes the operation of the command lane already open on
+// this thread; phases outside a command batch (background precompile) block
 // nothing the supervisor tracks.
 [[nodiscard]] ThreadLane* OpenCommandLane() noexcept
 {
@@ -241,19 +241,27 @@ void EndLane(ProgressLane lane)
 	return nullptr;
 }
 
-void BeginCompile()
+[[nodiscard]] Kyty::DevTools::OperationCode PhaseOperation(Ports::CommandPhase phase) noexcept
+{
+	return phase == Ports::CommandPhase::RegisterWait ? Kyty::DevTools::OperationCode::RegisterMemoryWait
+	                                                  : Kyty::DevTools::OperationCode::PipelineCompile;
+}
+
+// Phases do not interleave: a compile runs under the run lock, which a
+// register wait releases. Only the outermost phase names the operation.
+void BeginCommandPhase(Ports::CommandPhase phase)
 {
 	auto* owned = OpenCommandLane();
-	if (owned != nullptr && owned->compile_depth++ == 0u)
+	if (owned != nullptr && owned->phase_depth++ == 0u)
 	{
-		BumpBegun(owned->slot, Kyty::DevTools::OperationCode::PipelineCompile);
+		BumpBegun(owned->slot, PhaseOperation(phase));
 	}
 }
 
-void EndCompile()
+void EndCommandPhase()
 {
 	auto* owned = OpenCommandLane();
-	if (owned != nullptr && owned->compile_depth != 0u && --owned->compile_depth == 0u)
+	if (owned != nullptr && owned->phase_depth != 0u && --owned->phase_depth == 0u)
 	{
 		BumpBegun(owned->slot, Kyty::DevTools::OperationCode::CommandSubmit);
 	}
@@ -321,7 +329,9 @@ void RegisterSlot(RuntimeState* state, LaneSlot* slot) noexcept
 	Kyty::DevTools::ProgressUpdate update {};
 	update.epoch     = epoch;
 	update.operation = operation;
-	update.state     = operation == Kyty::DevTools::OperationCode::FenceWait ? ProgressState::Waiting : ProgressState::Active;
+	update.state     = operation == Kyty::DevTools::OperationCode::FenceWait || operation == Kyty::DevTools::OperationCode::RegisterMemoryWait
+	                       ? ProgressState::Waiting
+	                       : ProgressState::Active;
 	update.flags     = static_cast<uint16_t>(ProgressFlag::OperationValid);
 	if (slot.lane == ProgressLane::GuestThread)
 	{
@@ -415,7 +425,7 @@ void StartPublisher(RuntimeState* state) noexcept
 {
 	state->publisher_stop = false;
 	state->publisher      = std::thread(PublisherLoop);
-	Ports::ProgressPort::Install({&BeginLane, &EndLane, &BeginCompile, &EndCompile, &BeginGuestWait, &EndGuestWait});
+	Ports::ProgressPort::Install({&BeginLane, &EndLane, &BeginCommandPhase, &EndCommandPhase, &BeginGuestWait, &EndGuestWait});
 }
 
 void StopPublisher(RuntimeState* state) noexcept

@@ -184,6 +184,27 @@ TEST(DevToolsClassifier, CommandWorkRulesOutGuestDeadlock)
 	EXPECT_EQ(Observe(recent, settings, &state).category, StallCategory::HealthyIdle);
 }
 
+TEST(DevToolsClassifier, CommandLaneWaitingOnGuestMemoryIsGuestPaced)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	// A WAIT_REG_MEM far past the command threshold while the guest still runs.
+	auto loading = MakeBaseInput(100'000'000'000ull);
+	AddGuestThread(&loading, 1, OperationCode::Unknown, 99'000'000'000ull);
+	AddLane(&loading, Domain::CommandProcessor, OperationCode::RegisterMemoryWait, 2, 9, 40'000'000'000ull);
+	EXPECT_EQ(Observe(loading, settings, &state).category, StallCategory::None);
+
+	// The guest parks too: nothing will write the label.
+	auto parked = MakeBaseInput(100'000'000'000ull);
+	AddGuestThread(&parked, 1, OperationCode::CondWait, 60'000'000'000ull);
+	AddLane(&parked, Domain::CommandProcessor, OperationCode::RegisterMemoryWait, 2, 9, 40'000'000'000ull);
+	const auto r = Observe(parked, settings, &state);
+	EXPECT_EQ(r.category, StallCategory::GuestDeadlock);
+	ASSERT_EQ(r.evidence_stored, 2u);
+	EXPECT_EQ(r.evidence[1].code, static_cast<uint16_t>(OperationCode::RegisterMemoryWait));
+}
+
 TEST(DevToolsClassifier, UntrackedGuestThreadRulesOutGuestDeadlock)
 {
 	ClassifierState state {};

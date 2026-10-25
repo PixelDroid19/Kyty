@@ -1400,7 +1400,7 @@ public:
 	{
 		if (!m_mutex.TryLock())
 		{
-			const ::Kyty::Emulator::Ports::ScopedShaderCompile compile;
+			const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
 			m_mutex.Lock();
 		}
 	}
@@ -1643,7 +1643,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	}
 
 	const auto miss_start = DebugStatsClock::now();
-	const ::Kyty::Emulator::Ports::ScopedShaderCompile compile;
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
 	for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
 	{
 		if (!RenderColorSlotActive(*color, rt))
@@ -1839,7 +1839,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 	}
 
 	const auto miss_start = DebugStatsClock::now();
-	const ::Kyty::Emulator::Ports::ScopedShaderCompile compile;
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
 
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
@@ -1916,7 +1916,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 	}
 
 	const auto miss_start = DebugStatsClock::now();
-	const ::Kyty::Emulator::Ports::ScopedShaderCompile compile;
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
 	const auto code       = ShaderParseVS(vs_regs, sh_regs, input_info);
 	const auto host       = SpirvGeometryComputeHostInfo(code, *input_info, geometry);
 

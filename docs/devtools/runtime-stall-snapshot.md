@@ -81,8 +81,16 @@ A command batch that is compiling a pipeline (or waiting for another thread's
 compile of the same cache) switches its lane to `PipelineCompile`, judged at
 60 s / 180 s, so a long synchronous compile is not a `command_processor_stall`.
 
+A command batch suspended on `WAIT_REG_MEM` switches its lane to
+`RegisterMemoryWait`. The label is written by the guest or by another queue,
+so the wait is guest-paced: it is never a stall candidate on its own and only
+counts as one more parked participant in the `guest_deadlock` rule. A producer
+queue that hangs shows as its own stuck lane; a running guest that never
+writes the label gets no verdict.
+
 `guest_deadlock` (always medium confidence): every guest thread is parked in a
-blocking wait, no command lane is busy, and nothing has changed for 10 s
+blocking wait, no command lane is busy except on `RegisterMemoryWait`, and
+nothing has changed for 10 s
 (suspected) / 30 s (confirmed). Any guest thread that could not be tracked
 rules the verdict out. Guest threads are never stall candidates on their own:
 a thread busy in guest code for a long time is normal.
