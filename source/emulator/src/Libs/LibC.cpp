@@ -4393,7 +4393,7 @@ static KYTY_SYSV_ABI float c_frexpf(float value, int* exp)
 	{
 		return 0.0f;
 	}
-	return std::frexpf(value, exp);
+	return std::frexp(value, exp);
 }
 
 static KYTY_SYSV_ABI float c_remainderf(float x, float y)
