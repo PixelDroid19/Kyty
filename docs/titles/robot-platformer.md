@@ -1999,6 +1999,13 @@ Known approximations and debt recorded by this chain:
   With those translated the run reaches the hub's own resources and then
   fails with the device lost described below, so the hub's first gameplay
   draw now executes.
+- **The narrowing SDWA is translated.** The hub's pixel program also uses
+  `vcvt_f16_f32` with a sub-dword addressing modifier, which the half
+  arithmetic refused. The ISA's SDWA fields give the contract: the source is
+  read as a whole word and the result is written to one half of the
+  destination, and `DST_U` says whether the other half is zeroed or kept
+  (`firmware/work/evidence/sdwa-isa.txt`). The half conversion now accepts
+  that form and merges the result into the half the fields name.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
