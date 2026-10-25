@@ -106,6 +106,8 @@ enum class KeyboardAction : uint8_t
 	Right,
 	L1,
 	R1,
+	L2,
+	R2,
 	Options,
 };
 
