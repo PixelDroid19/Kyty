@@ -95,9 +95,12 @@ command lane on `RegisterMemoryWait`, and nothing has changed for 10 s
 rules the verdict out. Guest threads are never stall candidates on their own:
 a thread busy in guest code for a long time is normal.
 
-Limits: waits outside the instrumented primitives (guest spin loops, HLE calls
-that block without a wait scope, timed waits) leave the thread `active`, so a
-hang through them reads as `healthy_idle`, which is conservative. The rule
+Every blocking kernel primitive marks its contended wait as parked, timed
+variants included: a timed wait that expires and waits again resets the
+thread's age, so a polling loop never reads as parked. Waits that end by
+themselves or by a party outside the process stay `active` on purpose:
+guest spin loops, sleeps, paced audio output and socket calls. A hang through
+them reads as `healthy_idle`, which is conservative. The rule
 sees that every thread is parked, not which thread holds what: it does not
 build a wait-for graph.
 
