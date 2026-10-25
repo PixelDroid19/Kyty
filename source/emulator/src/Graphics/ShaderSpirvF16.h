@@ -190,6 +190,32 @@ inline bool SdwaWholeWordSupported(const ShaderInstruction& inst)
 	return src0_sel == 6u && dst_sel == 6u && dst_u <= 2u && (control & 0xe000u) == 0u;
 }
 
+// The sub-dword form of a half operation (ISA SDWA fields): the sources read
+// WORD_0 or WORD_1 and DST_SEL names the half the 16-bit result fills. The
+// operand loader already applies the source selects; the generator's per-lane
+// pass merges the whole-dword result into DST_SEL under DST_U. This predicate
+// admits only the half form that pass can merge: byte/DWORD selects, source
+// sign extension and CLMP/OMOD stay refused.
+inline bool SdwaHalfDestinationSupported(const ShaderInstruction& inst)
+{
+	if (!inst.vop_sdwa)
+	{
+		return false;
+	}
+	const uint32_t control  = inst.vop_sdwa_ctrl;
+	const uint32_t dst_sel  = (control >> 8u) & 7u;
+	const uint32_t dst_u    = (control >> 11u) & 3u;
+	const uint32_t src0_sel = (control >> 16u) & 7u;
+	const uint32_t src1_sel = (control >> 24u) & 7u;
+	const bool     sext     = (control & (1u << 19u)) != 0u;
+	if (sext || dst_u > 2u || (control & 0xe000u) != 0u || (dst_sel != 4u && dst_sel != 5u) ||
+	    (src0_sel != 4u && src0_sel != 5u))
+	{
+		return false;
+	}
+	return inst.src_num < 2 || src1_sel == 4u || src1_sel == 5u;
+}
+
 inline bool HasHalfDestinationSelect(ShaderInstructionType type)
 {
 	return type == ShaderInstructionType::VFmaF16 || type == ShaderInstructionType::VMin3F16 ||
@@ -491,7 +517,9 @@ inline bool LoadHalf(Spirv* spirv, const ShaderInstruction& inst, uint32_t sourc
 
 // All arithmetic entry points share raw-bit storage. Ordinary VOP1/VOP2
 // half results clear the upper word; native OPSEL operations preserve the
-// other destination half. Inactive lanes preserve the entire original VGPR.
+// other destination half. A whole-dword SDWA partial destination is merged by
+// the generator's per-lane pass after this store. Inactive lanes preserve the
+// entire original VGPR.
 inline String8 Store(const ShaderInstruction& inst, const String8& index, const String8& value)
 {
 	String8 text = R"(
@@ -542,8 +570,13 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	{
 		return reject("invalid-operand-tuple");
 	}
+	// A whole-word SDWA names the whole source and the whole destination, so it
+	// changes nothing; a widening one reads a half of the source; a half
+	// operation may name the half it reads and the half it writes.
+	const bool sdwa_half_destination = SdwaHalfDestinationSupported(inst);
 	if (inst.vop_sdwa && !((operation == Operation::ToFloat && SdwaWideningSupported(inst)) ||
-	                       (operation == Operation::FromFloat && SdwaWholeWordSupported(inst))))
+	                       (operation == Operation::FromFloat && SdwaWholeWordSupported(inst)) ||
+	                       (arithmetic && sdwa_half_destination)))
 	{
 		return reject("unsupported-sdwa");
 	}

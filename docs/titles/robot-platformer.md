@@ -2022,24 +2022,22 @@ Known approximations and debt recorded by this chain:
   operations.** The dump refused a negate or absolute modifier on an inline
   constant, which those operations carry; it now shows the modifier with the
   value.
-- **The half path still refuses the sub-dword forms the hub's program uses.**
-  Two forms are missing and both are pinned by the ISA
-  (`firmware/work/evidence/sdwa-f16-isa.txt`):
-  - The half compare family has no not-equal entry, so the program has no
-    translation for it.
-  - The hub's half minimum carries the sub-dword control `0x05051403`: the
-    source is the high half, the destination is the low half, the other half
-    of the destination is preserved, and the output modifier and the clamp
-    are clear. The half path reads the low half of each source, writes the
-    whole destination word and implements neither the output modifier nor
-    the SDWA's clamp, so the form is refused.
-  A first attempt at the second form broke the established contract: the F16
-  unit tests require the half path to refuse every sub-dword form except the
-  widening conversion
-  (`EmulatorShaderArithmetic.Fp16RefusesUnmodeledControlDomains`), so the
-  change was reverted rather than left in. The next implementation has to
-  model the half selection, the destination merge, the output modifier and
-  the clamp, and to update that contract with the test.
+- **The half sub-dword form is translated (fixed 2026-10-25).** The hub's
+  half minimum carries the SDWA control `0x05051403` (ISA fields in
+  `firmware/work/evidence/sdwa-f16-isa.txt`): WORD_1 of both sources,
+  WORD_0 of the destination, DST_U=2 (preserve the other half), no output
+  modifier and no clamp. The operand loader already applies the source word
+  selects; the half emitter now admits that form and leaves the destination
+  merge to the generator's per-lane SDWA pass, which implements DST_SEL and
+  DST_U under the EXEC guard. A first attempt merged the destination in the
+  half store as well and the per-lane pass merged it a second time, which
+  corrupted the result (for WORD_1 it moved the new low half into the high
+  half). Translator 153; unit test
+  `EmulatorShaderArithmetic.Fp16SdwaHalfDestinationReadsAndPreservesHalves`
+  covers both source word selects, preserved/zeroed/high-half destinations
+  and the inactive lane. The 335 shader and packet tests pass. The hub run
+  with this translator is pending.
+  Still open: the half compare family has no not-equal entry.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
