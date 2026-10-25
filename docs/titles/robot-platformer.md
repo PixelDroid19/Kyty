@@ -1900,6 +1900,14 @@ Known approximations and debt recorded by this chain:
   points at a load-dependent hang in the hub's own work rather than a fixed
   defect in the copy. Next step: capture the hub frames before the hang and
   compare a run with the new path disabled at the same scripted route.
+- **Next test to write: the mip-backing destination at the Vulkan level.**
+  The composite copy is proven for the single-level destination by
+  `EmulatorTileDetile` (a source pair and a destination image, compared
+  against the expected tiled bytes), but the new mip-backing destination is
+  only proven by the layout planner and by the title no longer stopping. The
+  fixture used there creates single-mip images, so the test needs a variant
+  that creates a mip chain and reads every level back, and it must compare
+  each level's rows against the guest bytes of that level of the GFX10 chain.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
