@@ -413,7 +413,8 @@ static KYTY_SYSV_ABI int c_fsetpos(FILE* f, const fpos_t* pos)
 static KYTY_SYSV_ABI void c_quick_exit(int code)
 {
 	KYTY_LOG_WARN("guest quick_exit(%d) from 0x%016" PRIx64 "\n", code, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
-	::quick_exit(code);
+	// Unlike exit(), no guest atexit handlers run and no streams are flushed.
+	Core::ShutdownActiveAndQuickExit(code);
 }
 // Gen5 libc_v1 strtok (oVkZ8W8-Q8A): host uses strtok_r with a per-thread save pointer.
 static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
