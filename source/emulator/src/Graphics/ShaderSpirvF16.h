@@ -522,9 +522,8 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	{
 		// Keep the failed contract alongside the generator's final diagnostic.
 		// A generic missing-emitter exit alone cannot identify a mode refusal.
-		std::fprintf(stderr, "shader fp16 unsupported: stage=%u instruction=%u pc=0x%08" PRIx32 " reason=%s sdwa=0x%08" PRIx32 "\n",
-		             static_cast<unsigned>(code.GetType()), static_cast<unsigned>(inst.type), inst.pc, reason,
-		             inst.vop_sdwa_ctrl);
+		std::fprintf(stderr, "shader fp16 unsupported: stage=%u instruction=%u pc=0x%08" PRIx32 " reason=%s\n",
+		             static_cast<unsigned>(code.GetType()), static_cast<unsigned>(inst.type), inst.pc, reason);
 		return false;
 	};
 	const String8 index = String8::FromPrintf("%u", instruction_index);
@@ -543,9 +542,8 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	{
 		return reject("invalid-operand-tuple");
 	}
-	// A whole-word SDWA names the whole source and the whole destination, so it
-	// changes nothing; a widening one reads a half of the source.
-	if (inst.vop_sdwa && !((operation == Operation::ToFloat && SdwaWideningSupported(inst)) || SdwaWholeWordSupported(inst)))
+	if (inst.vop_sdwa && !((operation == Operation::ToFloat && SdwaWideningSupported(inst)) ||
+	                       (operation == Operation::FromFloat && SdwaWholeWordSupported(inst))))
 	{
 		return reject("unsupported-sdwa");
 	}

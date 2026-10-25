@@ -2028,20 +2028,6 @@ Known approximations and debt recorded by this chain:
     translation for it.
   - The instruction dump refused a negate or absolute modifier on an inline
     constant, which the mixed-precision operations carry.
-- **The half compare reaches a mask destination that can be one word.** A
-  compare can name the high mask dword alone, and the compare emitters asked
-  for the second word of a one-word destination. The half and double compare
-  emitters now take the single high dword when the descriptor names it.
-- **The half arithmetic reaches a sub-dword form that is not a no-op.** The
-  hub's half minimum carries the control `0x05051403`: the source and the
-  destination are the high halves, the other half of the destination is
-  preserved, the result is clamped and the low half of the result word is
-  negated (`firmware/work/evidence/sdwa-f16-isa.txt`). The half path reads
-  the low half of each source, writes the whole destination word and implements
-  neither the output modifier nor the SDWA's clamp, so the form is still
-  refused. That is the next piece of work: the half path needs the operand
-  half selection, the destination half merge, the output modifier and the
-  clamp.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
