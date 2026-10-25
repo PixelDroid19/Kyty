@@ -1967,6 +1967,20 @@ Known approximations and debt recorded by this chain:
   binary32 intermediates with the addition residue recovered, one rounding to
   half, and the low half of the destination written while the high half is
   kept. The translation is not yet observed in a run.
+- **The AGC commands the game imports are being filled in.** The game
+  reserves the space of a command with the writer's GetSize before it calls
+  the writer, and eighteen writers of the draw command buffer had no such
+  export, so the guest reserved the wrong amount and the emulator's packet
+  did not fit in it. The rewind and conditional execution commands of both
+  command buffers were missing as well, so the guest could not run them at
+  all. Each implementation follows the AGC module's own body: the packet
+  words it writes, and the size its size function reports, are the evidence
+  kept in `firmware/work/evidence/`.
+  The inventory of missing exports is now measured against the tree itself
+  (`firmware/abi/astro-imports-missing.csv`): 124 exports are really
+  missing, 58 of them AGC commands, 25 libc, 21 AGC driver, 13 JSON and 3
+  video out. The earlier count of 245 included ninety exports the tree does
+  register under a second registration style.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
