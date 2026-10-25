@@ -1,8 +1,10 @@
 # Insect platformer pair
 
+Title: PPSA34971 - Hollow Knight: Voidheart Edition and PPSA12544 - Hollow Knight: Silksong.
+
 Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
-record. Titles are named descriptively only (`AGENTS.md`).
+record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
 ## Platformer pair: intro cinematics were black (2026-10-17)
 

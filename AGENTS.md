@@ -37,7 +37,8 @@ stacks.
 
 Before forming a hypothesis about a failure, read the "Evidence and exclusions"
 sections of the bring-up manual and the graphics handoff. Re-testing a recorded
-dead end wastes hours.
+dead end wastes hours. Do not reopen an excluded hypothesis without new
+evidence that contradicts the exclusion.
 
 ## Non-negotiable rules
 
@@ -47,9 +48,10 @@ dead end wastes hours.
   the guest's own disassembly > a single secondary implementation. Agreement
   between independent implementations outweighs any one of them; a lone
   secondary implementation is a lead to verify, never an answer to ship.
-- **Reimplement, never copy.** Other emulators and research projects are
-  behavior references only. Do not copy their code, and do not name or link
-  them in code, comments, commits or documentation.
+- **Reimplement, never copy.** Behavior, algorithms and architecture from other
+  emulators and research projects may be reused by reimplementing them with
+  Kyty's own types and conventions. Do not copy their code, and do not name or
+  link them in code, comments, commits or documentation.
 - **No title-specific hacks.** No per-title branches, stubs that report success
   for unimplemented work, skipped draws or waits, or permissive bring-up flags
   as a fix. Implement the general contract.
@@ -58,17 +60,22 @@ dead end wastes hours.
   proves the replaced behavior was itself wrong.
 - **Respect the data boundary.** Never commit proprietary SDK code, firmware,
   keys, decrypted assets, game files, dumps, captures, logs, shader dumps,
-  save data, title IDs, local paths or credentials.
+  save data, local paths or credentials.
   `docs/legal-and-data-boundaries.md` defines the boundary.
 
 ## Investigation workflow
 
 1. **Reproduce** with a bounded strict run and a scripted input route
    (`docs/input-replay.md`). Record commit, host, GPU, driver and environment.
+   Start from a fetched `origin/main`, and confirm the binary was built from
+   the revision under test before quoting any result from it.
 2. **Localize with machine evidence.** Use `kyty_agent` first (see Runtime
    diagnostics), native captures around the event, and the existing opt-in
    traces. For nondeterministic failures, always compare a good run with a bad
-   run and repeat before concluding.
+   run and repeat before concluding. Confirm every instrument actually engaged
+   (the trace fired, the validation layer loaded, the variable was read);
+   before trusting a clean zero, make the check report one case built by hand
+   outside the source that produced the zero.
 3. **One hypothesis at a time.** Design an experiment that can falsify it,
    measure, and record the outcome before moving on.
 4. **Fix the general contract**, then verify on the affected title and on the
@@ -79,7 +86,9 @@ dead end wastes hours.
    `docs/BRINGUP.md`. A defect found but not fixed is recorded at
    once with file and line, the triggering input or state, and a suggested
    direction. Search existing issues and pull requests before starting
-   non-trivial work.
+   non-trivial work. When a measurement changes, update every doc that quotes
+   it in the same change; a dated figure is true when measured, so re-measure
+   before quoting it as current.
 
 ## Temporary diagnostics
 
@@ -110,7 +119,8 @@ dead end wastes hours.
 - Keep evidence, captures and scratch files outside the repository and delete
   old run artifacts regularly.
 - Wall-clock and frame-time runs use `PrintfDirection = Silent`; console
-  logging is evidence-only.
+  logging is evidence-only. A speed claim compares `main` and the change on the
+  same host, scene, cache state and settings.
 
 ## Engineering standards
 
@@ -124,6 +134,8 @@ dead end wastes hours.
   boundaries.
 - No over-engineering: add an abstraction only when there is a real, present
   need for it.
+- Reuse existing helpers, abstractions and diagnostics before adding new ones.
+- When code and documentation disagree, report it; do not silently pick one.
 - No legacy paths and no unnecessary fallbacks. When a behavior is replaced,
   remove the old one instead of keeping both.
 - Write code that reads like the surrounding code: same naming, idioms and
@@ -153,9 +165,12 @@ dead end wastes hours.
 - No trivial tests and no tests written only to raise coverage.
 - When a change alters a contract covered by existing tests, update those
   tests in the same change.
+- An assertion must be satisfiable only by the behavior under test; ask what
+  else in the output could make it pass.
 - Run the narrowest relevant suite (`ctest` with the focused target or
   `scripts/run_unit_tests.lua`), complemented by manual QA on the affected
-  titles when it makes sense.
+  titles when it makes sense. Pass `--no-tests=error` to `ctest` and report the
+  test count with the exit code: a filter that matches nothing exits 0.
 - A successful build is not working functionality: validate the affected flow
   on the titles that exercise it.
 
@@ -163,8 +178,9 @@ dead end wastes hours.
 
 - `docs/BRINGUP.md` holds the frontier and the record index; `docs/titles/`
   and `docs/bringup/` hold fixes with their evidence, and exclusions.
-- Refer to titles descriptively ("the sandbox title", "the remaining Unity
-  title"); never by name, title ID, internal class name or install path.
+- Name the title a record is about by its PS5 content ID and public name,
+  `PPSA06084 - Superliminal`, so the cause can be traced and the run repeated
+  on the same title. Never record install paths or internal class names.
 - Keep entries factual: what was observed, what changed, how it was verified,
   what remains open.
 

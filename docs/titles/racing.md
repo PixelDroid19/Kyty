@@ -1,8 +1,10 @@
 # Racing title
 
+Title: PPSA17189 - Formula Retro Racing - World Tour - Special Edition.
+
 Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
-record. Titles are named descriptively only (`AGENTS.md`).
+record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
 ## Racing title on AMD: corruption from a degraded GPU, not from code (2026-10-17)
 
