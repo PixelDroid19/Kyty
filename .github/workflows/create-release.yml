@@ -1,6 +1,6 @@
 name: Create Version
 
-run-name: Create ${{ inputs.bump }} version from main
+run-name: Create ${{ inputs.bump }} version${{ inputs.prerelease != '' && format(' ({0})', inputs.prerelease) || '' }} from main
 
 on:
   workflow_dispatch:
@@ -13,6 +13,11 @@ on:
           - patch
           - minor
           - major
+      prerelease:
+        description: Prerelease label such as beta.1; empty creates a stable version
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -38,10 +43,13 @@ jobs:
       - name: Calculate next semantic version
         id: version
         shell: bash
+        env:
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
 
-          latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+          # Prerelease tags never become the base: a beta of the next version bumps from the last stable one.
+          latest="$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
           current="${latest:-v0.0.0}"
 
           if [[ ! "$current" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
@@ -73,6 +81,14 @@ jobs:
           esac
 
           version="v${major}.${minor}.${patch}"
+          prerelease="$PRERELEASE"
+          if [[ -n "$prerelease" ]]; then
+            if [[ ! "$prerelease" =~ ^[0-9A-Za-z]+(\.[0-9A-Za-z]+)*$ ]]; then
+              echo "Unsupported prerelease label: $prerelease" >&2
+              exit 1
+            fi
+            version="${version}-${prerelease}"
+          fi
           if git rev-parse "$version" >/dev/null 2>&1; then
             echo "Tag already exists: $version" >&2
             exit 1
@@ -111,5 +127,5 @@ jobs:
             echo "- Source branch: \`$SOURCE_BRANCH\`"
             echo "- Previous version: \`$CURRENT\`"
             echo "- New version: \`$VERSION\`"
-            echo "- Build workflow: dispatched for Windows, Linux, and macOS"
+            echo "- Build workflow: dispatched for Windows and Linux"
           } >> "$GITHUB_STEP_SUMMARY"
