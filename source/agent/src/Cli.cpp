@@ -347,16 +347,7 @@ int Main(int argc, char** argv)
 		break;
 	}
 
-	if (endpoint == nullptr)
-	{
-		endpoint = std::getenv("KYTY_AGENT_ENDPOINT");
-	}
-	if (endpoint == nullptr || endpoint[0] == '\0')
-	{
-		std::fprintf(stderr, "kyty_agent: provide --endpoint ENDPOINT or KYTY_AGENT_ENDPOINT\n");
-		PrintUsage();
-		return 125;
-	}
+	// The crash report is read after the emulator has exited, so it needs no endpoint.
 	if (std::strcmp(argv[1], "crash-context") == 0)
 	{
 		const char* path = nullptr;
@@ -397,6 +388,16 @@ int Main(int argc, char** argv)
 			std::fputc('\n', stdout);
 		}
 		return 0;
+	}
+	if (endpoint == nullptr)
+	{
+		endpoint = std::getenv("KYTY_AGENT_ENDPOINT");
+	}
+	if (endpoint == nullptr || endpoint[0] == '\0')
+	{
+		std::fprintf(stderr, "kyty_agent: provide --endpoint ENDPOINT or KYTY_AGENT_ENDPOINT\n");
+		PrintUsage();
+		return 125;
 	}
 	if (i >= argc)
 	{
