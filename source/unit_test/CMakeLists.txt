@@ -57,6 +57,7 @@ if(KYTY_BUILD_DEVTOOLS)
 endif()
 target_link_libraries(unit_test math)
 target_link_libraries(unit_test kyty_devtools_core)
+target_link_libraries(unit_test kyty_agent_runner)
 target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/devtools/include")
 target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/emulator/include")
 

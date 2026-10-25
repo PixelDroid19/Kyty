@@ -2,6 +2,7 @@
 
 #include "Kyty/Agent/Json.h"
 #include "Kyty/Agent/LocalTransport.h"
+#include "Kyty/Agent/Runner/RunnerCli.h"
 #include "Kyty/Agent/WireContract.h"
 
 #include <chrono>
@@ -14,11 +15,13 @@
 #include <limits>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace Kyty::AgentCli {
 namespace {
 
 namespace Transport = Kyty::Agent::LocalTransport;
+namespace Runner    = Kyty::Agent::Runner;
 
 using Kyty::Agent::JsonEscape;
 using Kyty::Agent::kProtocolVersion;
@@ -314,7 +317,12 @@ int Main(int argc, char** argv)
 	if (argc < 2)
 	{
 		PrintUsage();
+		Runner::PrintRunnerUsage();
 		return 125;
+	}
+	if (Runner::IsRunnerCommand(argv[1]))
+	{
+		return Runner::RunnerMain(argv[1], std::vector<std::string>(argv + 2, argv + argc));
 	}
 
 	const char* endpoint = nullptr;
