@@ -360,21 +360,32 @@ static KYTY_SYSV_ABI int c_rand()
 	return ::rand();
 }
 // drand48 family — 48-bit linear-congruential PRNG, independent state from rand().
-static KYTY_SYSV_ABI void c_srand48(long seed)
+// The POSIX generator is kept here because the Windows C runtime has none; the
+// guest's long is 64-bit on every host.
+static std::mutex g_rand48_mutex;
+static uint64_t   g_rand48_state = 0;
+static uint64_t   Rand48Next()
 {
-	::srand48(seed);
+	std::lock_guard lock(g_rand48_mutex);
+	g_rand48_state = (UINT64_C(0x5DEECE66D) * g_rand48_state + 0xBu) & UINT64_C(0xFFFFFFFFFFFF);
+	return g_rand48_state;
+}
+static KYTY_SYSV_ABI void c_srand48(int64_t seed)
+{
+	std::lock_guard lock(g_rand48_mutex);
+	g_rand48_state = (static_cast<uint64_t>(static_cast<uint32_t>(seed)) << 16u) | 0x330Eu;
 }
 static KYTY_SYSV_ABI double c_drand48()
 {
-	return ::drand48();
+	return std::ldexp(static_cast<double>(Rand48Next()), -48);
 }
-static KYTY_SYSV_ABI long c_lrand48()
+static KYTY_SYSV_ABI int64_t c_lrand48()
 {
-	return ::lrand48();
+	return static_cast<int64_t>(Rand48Next() >> 17u);
 }
-static KYTY_SYSV_ABI long c_mrand48()
+static KYTY_SYSV_ABI int64_t c_mrand48()
 {
-	return ::mrand48();
+	return static_cast<int32_t>(static_cast<uint32_t>(Rand48Next() >> 16u));
 }
 
 // --- libc_v1 math/time/stdio imports required by IL2CPP modules -------------
@@ -3200,14 +3211,22 @@ static KYTY_SYSV_ABI void c_Lockfilelock(FILE* f)
 {
 	if (f != nullptr)
 	{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		::_lock_file(f);
+#else
 		::flockfile(f);
+#endif
 	}
 }
 static KYTY_SYSV_ABI void c_Unlockfilelock(FILE* f)
 {
 	if (f != nullptr)
 	{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		::_unlock_file(f);
+#else
 		::funlockfile(f);
+#endif
 	}
 }
 

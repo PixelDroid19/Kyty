@@ -1690,6 +1690,7 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 		state = it->second;
 		g_sockets.erase(it);
 	}
+#if KYTY_NET_HOST_POSIX
 	GuestSockaddr p2p_local {};
 	bool          p2p_bound = false;
 	{
@@ -1702,7 +1703,6 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 		ReleaseP2pEndpoint(p2p_local, id);
 	}
 
-#if KYTY_NET_HOST_POSIX
 	int host_fd = -1;
 	{
 		Core::LockGuard lock(state->mutex);
@@ -1938,10 +1938,12 @@ int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 		}
 	}
 	// The socket closed during the bind, so its close saw no endpoint to release.
+#if KYTY_NET_HOST_POSIX
 	if (state->p2p)
 	{
 		ReleaseP2pEndpoint(guest_addr, id);
 	}
+#endif
 	return NET_ERROR_EBADF;
 }
 
