@@ -2018,16 +2018,28 @@ Known approximations and debt recorded by this chain:
   shader work. The coredump of that job is the evidence for the next step:
   the hub's draw is the first one that runs the fragment transport's compute
   shade pass at scale, and the hang is in the compute engine.
-- **Three more gfx10 gaps of the hub's pixel program are closed.** The hub's
-  program reaches them one after another, and each one stopped the run:
-  - The `vcvt_f16_f32` of the program carries a sub-dword addressing
-    modifier whose control names whole words for the source and the
-    destination, so the modifier changes nothing and the conversion is the
-    plain one (`firmware/work/evidence/sdwa-isa.txt`).
-  - The half compare family had no not-equal entry, so the program had no
+- **The instruction dump accepts the modifiers of the mixed-precision
+  operations.** The dump refused a negate or absolute modifier on an inline
+  constant, which those operations carry; it now shows the modifier with the
+  value.
+- **The half path still refuses the sub-dword forms the hub's program uses.**
+  Two forms are missing and both are pinned by the ISA
+  (`firmware/work/evidence/sdwa-f16-isa.txt`):
+  - The half compare family has no not-equal entry, so the program has no
     translation for it.
-  - The instruction dump refused a negate or absolute modifier on an inline
-    constant, which the mixed-precision operations carry.
+  - The hub's half minimum carries the sub-dword control `0x05051403`: the
+    source is the high half, the destination is the low half, the other half
+    of the destination is preserved, and the output modifier and the clamp
+    are clear. The half path reads the low half of each source, writes the
+    whole destination word and implements neither the output modifier nor
+    the SDWA's clamp, so the form is refused.
+  A first attempt at the second form broke the established contract: the F16
+  unit tests require the half path to refuse every sub-dword form except the
+  widening conversion
+  (`EmulatorShaderArithmetic.Fp16RefusesUnmodeledControlDomains`), so the
+  change was reverted rather than left in. The next implementation has to
+  model the half selection, the destination merge, the output modifier and
+  the clamp, and to update that contract with the test.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
