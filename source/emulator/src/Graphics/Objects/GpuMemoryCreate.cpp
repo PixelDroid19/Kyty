@@ -1625,9 +1625,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			};
 			// A mipmapped storage array grows over its prefix (copied, then retired). The
 			// recycled allocation may still hold a live render target it links, a
-			// CPU-uploaded storage buffer or texture around it (linked), a texture
-			// materialized from that render target (linked beside it) and read-only
-			// VertexBuffers (reclaimed), as for a storage image over caches. The prefix image may only be linked
+			// CPU-uploaded storage buffer, texture or read-only vertex buffer around it
+			// (linked), a texture materialized from that render target (linked beside
+			// it) and read-only VertexBuffers (reclaimed), as for a storage image over caches. The prefix image may only be linked
 			// to parents of the new view, which then link to the grown array instead.
 			Vector<int> storage_growth_ids;
 			Vector<int> storage_growth_reclaim_ids;
@@ -1670,7 +1670,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 				multi_storage_growth =
 				    links_cpu_texture(h, obj) ||
-				    GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type);
+				    GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type) ||
+				    GpuMemoryAllowsStorageTextureInsideVertexCache(o.object.type, obj.relation, o.read_only, o.content_origin, info.type);
 			}
 			multi_storage_growth = multi_storage_growth && !storage_growth_ids.IsEmpty() &&
 			                       (!storage_growth_links_materialized || storage_growth_links_render_target);

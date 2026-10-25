@@ -927,6 +927,8 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 			case ::Kyty::Emulator::Host::KeyboardAction::Right: button = ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT; break;
 			case ::Kyty::Emulator::Host::KeyboardAction::L1: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L1; break;
 			case ::Kyty::Emulator::Host::KeyboardAction::R1: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R1; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::L2: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L2; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::R2: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R2; break;
 			case ::Kyty::Emulator::Host::KeyboardAction::Options: button = ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS; break;
 			case ::Kyty::Emulator::Host::KeyboardAction::None: break;
 		}

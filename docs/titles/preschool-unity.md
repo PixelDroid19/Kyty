@@ -4,7 +4,7 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
-## Preschool Unity title: unreadable EUD snapshot (2026-10-21, open)
+## Preschool Unity title: unreadable EUD snapshot (2026-10-21, fixed 2026-10-25)
 
 - **First occurrence.** Intel Arc A770, Mesa ANV 26.2.5, strict, HEAD
   89e3b892, generic pad route: after about frame 30,400 (91 s) the run
@@ -47,6 +47,33 @@ record. Titles are named descriptively only (`AGENTS.md`).
   Then log the guest unmap or protection call that covers the table
   address, to tell a guest that frees the table early from a host-side
   read race.
+- **Root cause (2026-10-25).** On the Intel route the stop repeated at
+  about frame 3,440 on every run, with `guest_owned=0` and a pointer whose
+  high dword was 1. The 1 was not a guest store: it was a pending
+  end-of-pipe label store, landing in a command buffer the guest had
+  already rebuilt at the same address.
+  - The guest's command buffer clears a label, releases it at end of pipe,
+    waits on it with `WAIT_REG_MEM`, then writes a "consumed" counter with
+    `WRITE_DATA`.
+  - The wait's producer was a plain label store of the same queue, so the
+    command processor consolidated it (queue order already covers it) and
+    went on. The following `WRITE_DATA` was then stored immediately, at
+    parse time, about 5 ms before the label landed.
+  - The guest saw the counter, reused the command buffer memory and wrote
+    new packets there. The late label store overwrote one of their
+    dwords, the EUD pointer's high half.
+  - The "completion ordering" exclusion above was therefore wrong: a write
+    behind a consolidated wait did become visible before an earlier label.
+- **Fix.** A one- or two-dword `WRITE_DATA` that follows a consolidated
+  wait in the same batch is deferred to end of pipe, like a write behind
+  an earlier deferred write to its address. Longer writes still store
+  immediately.
+- **Verification.** Suite 113/113. Intel, 100 s: frame 5,609 at 60 FPS,
+  no stop (every run before stopped at about 3,440). AMD, 100 s:
+  gameplay at 17.7 FPS, as before, no stop. Intel regression runs of the
+  racing, insect platformer, isometric action and first-person puzzle titles
+  showed no new errors and the same frame rates as the baseline at the
+  same duration.
 
 ## Preschool Unity title: sky-blue speckles on every outline (2026-10-19)
 

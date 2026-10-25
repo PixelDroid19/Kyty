@@ -2,7 +2,7 @@
 
 [![Build and Release](https://github.com/PixelDroid19/Kyty/actions/workflows/build-release.yml/badge.svg)](https://github.com/PixelDroid19/Kyty/actions/workflows/build-release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#supported-platforms)
+[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-lightgrey.svg)](#supported-platforms)
 
 **Project website:** [pixeldroid19.github.io/kyty-web](https://pixeldroid19.github.io/kyty-web/)
 
@@ -25,7 +25,7 @@ Kyty explores and implements:
 - graphics command processing, shader translation, and Vulkan presentation;
 - audio, input, filesystem, and other guest-facing services;
 - deterministic diagnostics and regression tests;
-- portable builds for Windows, Linux, and macOS.
+- portable builds for Windows and Linux.
 
 The project favors general, evidence-based implementations over title-specific
 hacks. Compatibility claims should always include the tested commit, host
@@ -51,36 +51,43 @@ belong to their respective owners.
 
 ## Supported platforms
 
-The continuous-integration pipeline currently builds the following targets:
+Release builds are produced for the following targets:
 
-| Platform | Architecture | CI environment | Graphics path |
+| Platform | Architecture | Build environment | Graphics path |
 | --- | --- | --- | --- |
-| Windows | x86-64 | Windows Server 2022 / MinGW-w64 | Vulkan |
-| Linux | x86-64 | Ubuntu 24.04 | Vulkan |
-| macOS | x86-64 | macOS 15 Intel | MoltenVK |
+| Windows | x86-64 | Windows Server 2022 / MinGW-w64 | Vulkan 1.4 |
+| Linux | x86-64 | Ubuntu 24.04 | Vulkan 1.4 |
 
 These are build targets, not guarantees that every workload behaves identically
-on every operating system, GPU, or driver.
+on every operating system, GPU, or driver. The macOS (MoltenVK) code paths are
+kept in the source tree but are not built or tested by any workflow.
+
+The host layer (window, keyboard, controllers, audio output) uses SDL 3, which
+is vendored in `source/3rdparty/sdl3`.
 
 ## Downloads
 
 Tagged releases are published on the
 [GitHub Releases](https://github.com/PixelDroid19/Kyty/releases) page. Every
-release is built by GitHub Actions for Windows, Linux, and macOS.
+release is built by GitHub Actions for Windows and Linux. Versions with a
+prerelease label (for example `v0.0.2-beta.1`) are published as prereleases.
+The Linux archive contains the emulator and the desktop launcher with its Qt 6
+runtime; extract it and run `launcher`. To build the same archive locally, see
+[the Linux release package](docs/devtools/reproducible-contract-environment.md#linux-release-package).
 
 Artifacts from untagged commits are development snapshots. They may be useful
 for testing but can be unstable and are not releases.
 
 Versions follow [Semantic Versioning](https://semver.org/):
 
-- `major` releases contain incompatible or foundational changes and come from
-  `main`;
-- `minor` releases add backward-compatible functionality and come from `main`;
-- `patch` releases contain compatible bug fixes and come from `release`.
+- `major` releases contain incompatible or foundational changes;
+- `minor` releases add backward-compatible functionality;
+- `patch` releases contain compatible bug fixes.
 
-Maintainers create versions through the **Create Version** GitHub Actions
-workflow. Creating a version tag starts the Windows, Linux, and macOS release
-build and publishes the resulting archives.
+Every version is cut from `main`. Maintainers create versions through the
+**Create Version** GitHub Actions workflow, choosing the bump and, optionally, a
+prerelease label such as `beta.1`. Creating a version tag starts the Windows and
+Linux release build and publishes the resulting archives.
 
 ## Building from source
 
@@ -89,10 +96,11 @@ build and publishes the resulting archives.
 - Git;
 - CMake 3.24 or newer;
 - Ninja;
-- a C++17-capable compiler;
+- a C++17 compiler (the build sets `CMAKE_CXX_STANDARD 17`);
 - Vulkan 1.4 headers and loader, plus SPIRV-Headers and SPIRV-Tools with
   Vulkan 1.4 support (including the optimizer CMake package);
-- platform-specific window, input, and audio development packages.
+- Qt 6 (Quick, Widgets, LinguistTools) only when building the launcher;
+- the platform display and audio development packages that SDL 3 needs.
 
 Set `VULKAN_SDK` to a Vulkan 1.4 SDK installation or install equivalent host
 development packages. Configuration rejects older headers or shader tools;
@@ -118,7 +126,9 @@ cmake --build build --target fc_script --parallel 4
 ```
 
 The resulting executable is `build/fc_script.exe` on Windows and
-`build/fc_script` on Linux and macOS.
+`build/fc_script` on Linux. Set `-DKYTY_BUILD_LAUNCHER=ON` to also build the
+desktop launcher, which lists installed workloads, starts them and offers
+themes and personalization.
 
 ## Running a lawful test workload
 
@@ -137,6 +147,38 @@ build\fc_script.exe scripts\run_guest.lua "C:\path\to\authorized\workload"
 
 Only use files you are legally permitted to access. Paths, dumps, and logs may
 contain private information; sanitize them before sharing a report.
+
+### Keyboard and controllers
+
+A connected game controller is used directly. Without one, the keyboard drives
+a virtual pad:
+
+| Key | Pad input |
+| --- | --- |
+| `Z`, `Space`, `Enter` | Cross |
+| `X` | Circle |
+| `C` | Square |
+| `V` | Triangle |
+| Arrow keys | D-pad |
+| `Q` / `E` | L1 / R1 |
+| `1` / `3` | L2 / R2 (full trigger travel) |
+| `Tab`, `Backspace` | Options |
+
+`F11` or `Alt+Enter` toggles fullscreen, `F9` pauses presentation and audio,
+`F2` toggles text entry for a guest keyboard, and `Escape` exits. The full
+host contract is in [docs/HOST_RUNTIME.md](docs/HOST_RUNTIME.md).
+
+### Useful runtime options
+
+- `KYTY_PRESENT_FPS_LIMIT=60` caps host presents per second.
+- `KYTY_RENDER_RESOLUTION_MODE` and the related options select the internal
+  render resolution; see [docs/render-resolution.md](docs/render-resolution.md).
+  On integrated GPUs, `KYTY_RENDER_RESOLUTION_SCOPE=RenderTargets` (the
+  launcher's Quality, Balanced and Performance presets) also scales offscreen
+  targets and can raise the frame rate of titles bound by pixel work.
+- `KYTY_PAD_RECORD=<file>` records the pad input of a manual session, and
+  `KYTY_PAD_SCRIPT=<file>` replays it; see
+  [docs/input-replay.md](docs/input-replay.md).
 
 ## Reporting issues
 
@@ -165,15 +207,13 @@ Commit messages and squash-merge titles follow
 Repository-wide engineering and automation rules are documented in
 [AGENTS.md](AGENTS.md).
 
-Development uses two long-lived branches:
-
-- new features and other evolutionary work branch from and return to `main`;
-- bug fixes branch from and return to `release`.
+Every branch (`feature/*`, `fix/*`, `perf/*`, `refactor/*`, documentation)
+starts from `main` and returns to `main` through a pull request.
 
 Feature and fix commits can be accumulated without creating a multiplatform
 build for every push or pull request. Maintainers can request a manual build
-when validation is needed. Official Windows, Linux, and macOS archives are
-created only when a semantic version is released.
+when validation is needed. Official Windows and Linux archives are created only
+when a semantic version is released.
 
 ## Special thanks
 

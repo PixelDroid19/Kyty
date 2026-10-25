@@ -1285,6 +1285,15 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 		DeferWriteData(dst, src, dw_num);
 		return;
 	}
+	// A consolidated wait was not passed on the GPU yet: the CP reaches a write recorded
+	// behind it only after the awaited label lands. Storing it now lets the guest see,
+	// for example, its command buffer as consumed and reuse memory that the pending
+	// label store still targets.
+	if (m_consolidated_plain_wait && (dw_num == 1u || dw_num == 2u))
+	{
+		DeferWriteData(dst, src, dw_num);
+		return;
+	}
 
 	GpuMemoryNotifyHostWrite(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
 

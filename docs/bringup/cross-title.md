@@ -16,6 +16,55 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Render-target scaling on the AMD integrated GPU (2026-10-25)
+
+- **Question:** the AMD Radeon 610M (RADV, 2 compute units) ran the slowest
+  titles at 9-19 fps in strict runs, which force `Native`. The preschool
+  Unity title's command processor spent 43 ms per frame in fence waits,
+  almost all from `RetryGuestDeviceAddressDraw` waiting for a 192 KiB
+  HTILE-linked storage buffer that overlaps a device-address range
+  (`StorageIsWholeGuestContent` refuses depth metadata, so it is not
+  published on the device).
+- **Not the bound:** a removed diagnostic that published those buffers
+  anyway removed the waits but left the title at 17.1 fps against 18.0. The
+  wait only moved the command processor's idle time; the GPU is the bound.
+  The exclusion stays.
+- **Measured** at `Fixed` 1280x720 with `RenderResolutionScope =
+  RenderTargets`, one user-recorded route per title, against the strict
+  `Native` runs:
+  - preschool Unity title, outdoor gameplay: 20.6 fps against 17.8;
+  - dungeon crawler gameplay: 30.9 fps against 14.5;
+  - well platformer gameplay: 24.3 fps against 19;
+  - fishing title: 11.2 fps against 11, CPU-bound (see its title record);
+  - first-person puzzle, first room: 11-12 fps against 9, and 12-13 fps at
+    640x360, so its bound is GPU work that the display extent does not
+    scale.
+- Captures stay correct and no run stopped. The scope stays opt-in; the
+  launcher's Quality, Balanced and Performance presets select it.
+
+## Vertex objects cover the declared stream (2026-10-24)
+
+- **Observed** (beat 'em up gameplay, Intel A770, strict runs at the 60 fps
+  present limit, replaying a user-recorded route that reaches combat at
+  about 79 s): vertex bindings over GPU-written storage cannot use a
+  transient snapshot and create a GPU vertex object instead. Temporary
+  counters (removed) over 100,000 such binds: two vertex V#s, each a
+  288 KiB pool, gave about 5,700 distinct windows each, because every draw
+  shifts the stream base by its vertex offset and ends it at its own last
+  record. Each window was a new object that reclaimed the crossing peer:
+  25,582 objects for 100,000 binds.
+- **Fix** (`BindVertexBuffers`, `GraphicsRenderBind.cpp`): when the declared
+  stream (stride times records) is at most the read-only transient limit
+  (4 MiB), the vertex object covers the whole declared stream from the V#
+  base, and the draw's shifted start becomes the bind offset. Every draw of
+  the pool then takes the exact-match reuse path. Fetches stay inside the
+  records the V# declares. Larger streams keep the per-draw window.
+- **Result:** 239 vertex objects for 100,000 binds. Over the same replayed
+  route, the gameplay window between the 60 s and 120 s status reports
+  presented 1,824 frames against 1,674 (+9%), and the run ended at 35.3 fps
+  against 31.8. Captures match frame for frame in content.
+- **Verified:** all 113 tests pass.
+
 ## In-memory database name ends with an empty parameter list (2026-10-24)
 
 - **Observed** (Linux, executables linked with LLD): `GpuMemory::DbgInit`

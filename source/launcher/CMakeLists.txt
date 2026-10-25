@@ -1,7 +1,5 @@
+find_package(Qt6 COMPONENTS Quick Widgets LinguistTools REQUIRED)
 
-find_package(Qt6 COMPONENTS Widgets LinguistTools REQUIRED)
-
-set(CMAKE_AUTOUIC_SEARCH_PATHS forms)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
 file(GLOB launcher_src
@@ -9,37 +7,33 @@ file(GLOB launcher_src
 	"src/*.cpp"
 )
 
-file(GLOB launcher_forms
-	"forms/*.ui"
+file(GLOB launcher_assets RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+	"assets/icons/*.svg"
+	"assets/kit/*.svg"
 )
-
-file(GLOB launcher_res
-	"res/*.qrc"
-)
-
-set(launcher_ts "ts/launcher_ru_RU.ts")
 
 add_executable(launcher WIN32 MACOSX_BUNDLE
 	${launcher_src}
-	${launcher_forms}
-	${launcher_res}
-	${launcher_ts}
+)
+set_target_properties(launcher PROPERTIES AUTOMOC ON AUTORCC ON)
+
+qt_add_resources(launcher "launcher_assets"
+	PREFIX "/"
+	FILES ${launcher_assets}
 )
 
-
-target_link_libraries(launcher Qt6::Widgets)
+target_link_libraries(launcher PRIVATE Qt6::Quick Qt6::Widgets SDL3-static)
 if(MSVC OR MINGW)
-target_link_libraries(launcher psapi)
-target_link_libraries(launcher setupapi)
+target_link_libraries(launcher PRIVATE psapi)
+target_link_libraries(launcher PRIVATE setupapi)
 endif()
 if (CLANG AND NOT MSVC)
-target_link_libraries(launcher pthread)
+target_link_libraries(launcher PRIVATE pthread)
 endif()
 #if (CLANG AND MSVC)
 #target_link_libraries(launcher winpthread)
 #endif()
 target_include_directories(launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/src")
-set_target_properties(launcher PROPERTIES AUTOUIC ON AUTOMOC ON AUTORCC ON)
 
 if(MINGW)
 	set_target_properties(launcher PROPERTIES LINK_FLAGS "${KYTY_LD_OPTIONS}")
@@ -59,7 +53,6 @@ if(WIN32)
         install(CODE "
     		execute_process(
     			COMMAND ${QT_WINDEPLOYQT} \"\${CMAKE_INSTALL_PREFIX}/${launcher_name}.exe\"
-                --no-svg
                 --no-angle
                 --no-opengl
                 --no-opengl-sw
@@ -95,13 +88,34 @@ elseif(APPLE)
     endif()
 else()
     set(launcher_name "launcher")
-    set_target_properties(launcher PROPERTIES OUTPUT_NAME ${launcher_name})
+    set_target_properties(launcher PROPERTIES OUTPUT_NAME ${launcher_name} INSTALL_RPATH "$ORIGIN/lib")
     install(TARGETS launcher DESTINATION .)
+    # A distribution or Nix Qt is tied to its own system libraries, so only a relocatable Qt is copied next to the launcher.
+    if(NOT QT6_INSTALL_PREFIX MATCHES "^/(usr|nix)(/|$)")
+        # The build-tree binary still has Qt's library directory in its RPATH, so its dependencies resolve to the Qt it was built with.
+        # Qt deploys only its default platform plugin (xcb), so Wayland is named to keep Wayland sessions native.
+        qt_generate_deploy_script(TARGET launcher OUTPUT_SCRIPT launcher_deploy_script CONTENT "
+set(QT_DEPLOY_BIN_DIR .)
+qt6_deploy_runtime_dependencies(
+    EXECUTABLE \"$<TARGET_FILE:launcher>\"
+    LIB_DIR lib
+    PLUGINS_DIR plugins
+    INCLUDE_PLUGINS qwayland
+    GENERATE_QT_CONF
+    NO_TRANSLATIONS
+)")
+        install(SCRIPT ${launcher_deploy_script})
+    endif()
 endif()
 
-qt6_create_translation(QM_FILES ${launcher_src} ${launcher_forms} ${launcher_ts} OPTIONS -I ${CMAKE_SOURCE_DIR}/launcher/include)
+# Embedded as :/i18n/launcher_<language>.qm; the update_translations target refreshes the .ts files from the sources.
+qt_add_translations(launcher
+	TS_FILES "ts/launcher_es.ts" "ts/launcher_ru.ts"
+	RESOURCE_PREFIX "/i18n"
+	LUPDATE_OPTIONS -locations none
+)
 
-set(tidy_dirs "${CMAKE_SOURCE_DIR}/launcher/include") 
+set(tidy_dirs "${CMAKE_SOURCE_DIR}/launcher/include")
 set(iwyu_maps "${CMAKE_SOURCE_DIR}/launcher/utils/qt5_15.imp")
 
 get_property(inc_headers TARGET launcher PROPERTY INCLUDE_DIRECTORIES)
@@ -109,7 +123,7 @@ get_property(inc_headers TARGET launcher PROPERTY INCLUDE_DIRECTORIES)
 list(APPEND inc_headers
 	${CMAKE_SOURCE_DIR}/launcher
 	${CMAKE_BINARY_DIR}/launcher/launcher_autogen/include
-	${Qt6Widgets_INCLUDE_DIRS}
+	${Qt6Quick_INCLUDE_DIRS}
 	${Qt6Core_INCLUDE_DIRS}
 	${Qt6Gui_INCLUDE_DIRS}
 )

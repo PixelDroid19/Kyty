@@ -6693,6 +6693,9 @@ TEST(EmulatorGraphicsState, ReclaimsReadOnlyVertexBuffersUnderStorageTexture)
 	                                                          GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
 	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Equals,
 	                                                          GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                          GpuMemoryContentOrigin::AliasInvalidation,
+	                                                          GpuMemoryObjectType::StorageTexture));
 	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Equals,
 	                                                           GpuMemoryContentOrigin::GpuAliasMaterialization,
 	                                                           GpuMemoryObjectType::StorageTexture));
