@@ -120,6 +120,10 @@ struct ClassifierState
 	uint64_t          first_observed_ns  = 0;
 	uint64_t          suspected_ns       = 0;
 	uint64_t          confirmed_ns       = 0;
+	// Worker heartbeat at which publication resumed after a stale gap; lane
+	// ages are measured from here so a paused process does not age its lanes.
+	uint64_t          resumed_heartbeat_ns = 0;
+	bool              heartbeat_stale      = false;
 	bool              terminal_finalized = false;
 	SuspectedEvidence suspected {};
 };

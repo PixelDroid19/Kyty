@@ -77,7 +77,229 @@ void AddHleActive(ObservationInput* in, uint64_t instance, uint64_t submitted, u
 	in->progress.entries[i].record.correlation    = instance;
 }
 
+void AddLane(ObservationInput* in, Domain domain, OperationCode operation, uint64_t instance, uint64_t submitted,
+             uint64_t last_change)
+{
+	const uint32_t i = in->progress.count++;
+	in->progress.entries[i].key.domain   = domain;
+	in->progress.entries[i].key.instance = instance;
+	uint64_t wire = 0;
+	(void)in->progress.entries[i].key.TryPack(&wire);
+	in->progress.entries[i].record.instance_key   = wire;
+	in->progress.entries[i].record.submitted      = submitted;
+	in->progress.entries[i].record.operation      = static_cast<uint32_t>(operation);
+	in->progress.entries[i].record.state          = static_cast<uint16_t>(ProgressState::Active);
+	in->progress.entries[i].record.flags          = static_cast<uint16_t>(ProgressFlag::OperationValid);
+	in->progress.entries[i].record.last_change_ns = last_change;
+}
+
+void AddGuestThread(ObservationInput* in, uint64_t instance, OperationCode wait, uint64_t last_change)
+{
+	AddLane(in, Domain::GuestThread, OperationCode::ExecutionBoundary, instance, 3, last_change);
+	auto& record        = in->progress.entries[in->progress.count - 1u].record;
+	record.state        = static_cast<uint16_t>(wait == OperationCode::Unknown ? ProgressState::Active : ProgressState::Waiting);
+	record.auxiliary[0] = static_cast<uint64_t>(wait);
+	record.flags |= static_cast<uint16_t>(ProgressFlag::Auxiliary0Valid);
+}
+
+void AddIdleCommandLane(ObservationInput* in, uint64_t instance, uint64_t last_change)
+{
+	AddLane(in, Domain::CommandProcessor, OperationCode::CommandSubmit, instance, 50, last_change);
+	auto& record     = in->progress.entries[in->progress.count - 1u].record;
+	record.completed = 50;
+	record.state     = static_cast<uint16_t>(ProgressState::Idle);
+}
+
 } // namespace
+
+TEST(DevToolsClassifier, LongCompileIsJudgedByCompileThreshold)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+	settings.overrides[0]   = {Domain::CommandProcessor, static_cast<uint32_t>(OperationCode::PipelineCompile), 60'000'000'000ull,
+	                           180'000'000'000ull};
+	settings.override_count = 1;
+
+	// A 40 s synchronous compile is far past the command threshold but is work.
+	auto compiling = MakeBaseInput(100'000'000'000ull);
+	AddLane(&compiling, Domain::CommandProcessor, OperationCode::PipelineCompile, 1, 8, 60'000'000'000ull);
+	EXPECT_EQ(Observe(compiling, settings, &state).category, StallCategory::None);
+
+	auto stuck = MakeBaseInput(250'000'000'000ull);
+	AddLane(&stuck, Domain::CommandProcessor, OperationCode::PipelineCompile, 1, 8, 60'000'000'000ull);
+	const auto r = Observe(stuck, settings, &state);
+	EXPECT_EQ(r.category, StallCategory::CommandProcessorStall);
+	EXPECT_NE(r.confirmed_ns, 0u);
+	ASSERT_EQ(r.evidence_stored, 1u);
+	EXPECT_EQ(r.evidence[0].code, static_cast<uint16_t>(OperationCode::PipelineCompile));
+}
+
+TEST(DevToolsClassifier, EveryGuestThreadParkedWithNoCommandWorkIsAGuestDeadlock)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	auto in = MakeBaseInput(100'000'000'000ull);
+	AddGuestThread(&in, 1, OperationCode::CondWait, 70'000'000'000ull);
+	AddGuestThread(&in, 2, OperationCode::MutexWait, 75'000'000'000ull);
+	AddIdleCommandLane(&in, 3, 78'000'000'000ull);
+	const auto r = Observe(in, settings, &state);
+	EXPECT_EQ(r.category, StallCategory::GuestDeadlock);
+	EXPECT_NE(r.confirmed_ns, 0u);
+	// Inferred from parked threads, not from a wait cycle.
+	EXPECT_EQ(r.confidence, Confidence::Medium);
+	ASSERT_EQ(r.evidence_stored, 2u);
+	EXPECT_EQ(r.evidence[0].code, static_cast<uint16_t>(OperationCode::CondWait));
+	EXPECT_EQ(r.evidence[1].code, static_cast<uint16_t>(OperationCode::MutexWait));
+}
+
+TEST(DevToolsClassifier, RunningGuestThreadRulesOutGuestDeadlock)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	// One thread runs guest code (a load, a spin, a sleep); parked peers are fine.
+	auto in = MakeBaseInput(100'000'000'000ull);
+	AddGuestThread(&in, 1, OperationCode::CondWait, 70'000'000'000ull);
+	AddGuestThread(&in, 2, OperationCode::Unknown, 70'000'000'000ull);
+	AddIdleCommandLane(&in, 3, 70'000'000'000ull);
+	EXPECT_EQ(Observe(in, settings, &state).category, StallCategory::HealthyIdle);
+}
+
+TEST(DevToolsClassifier, CommandWorkRulesOutGuestDeadlock)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	// Guest threads wait on a batch that is still compiling.
+	auto busy = MakeBaseInput(100'000'000'000ull);
+	AddGuestThread(&busy, 1, OperationCode::EventQueueWait, 70'000'000'000ull);
+	AddLane(&busy, Domain::CommandProcessor, OperationCode::PipelineCompile, 2, 9, 98'000'000'000ull);
+	EXPECT_EQ(Observe(busy, settings, &state).category, StallCategory::None);
+
+	// Batches that keep completing are progress the guest waits on.
+	auto recent = MakeBaseInput(100'000'000'000ull);
+	AddGuestThread(&recent, 1, OperationCode::EventQueueWait, 70'000'000'000ull);
+	AddIdleCommandLane(&recent, 2, 99'900'000'000ull);
+	EXPECT_EQ(Observe(recent, settings, &state).category, StallCategory::HealthyIdle);
+}
+
+TEST(DevToolsClassifier, UntrackedGuestThreadRulesOutGuestDeadlock)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	// A guest thread without a lane might be the one still running.
+	auto in = MakeBaseInput(100'000'000'000ull);
+	AddGuestThread(&in, 1, OperationCode::CondWait, 70'000'000'000ull);
+	AddIdleCommandLane(&in, 2, 70'000'000'000ull);
+	in.loss.progress.capacity[static_cast<uint32_t>(Domain::GuestThread)].total = 1;
+	EXPECT_EQ(Observe(in, settings, &state).category, StallCategory::HealthyIdle);
+}
+
+TEST(DevToolsClassifier, BusyLaneYoungerThanThresholdIsNotAStall)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	// Work in flight for 4 s on a 5 s threshold, sampled repeatedly.
+	auto in = MakeBaseInput(100'000'000'000ull);
+	AddLane(&in, Domain::CommandProcessor, OperationCode::CommandSubmit, 1, 40, 96'000'000'000ull);
+	for (int i = 0; i < 100; ++i)
+	{
+		const auto r = Observe(in, settings, &state);
+		EXPECT_EQ(r.category, StallCategory::None);
+		EXPECT_EQ(r.confirmed_ns, 0u);
+	}
+}
+
+TEST(DevToolsClassifier, StuckLaneIsFoundAmongProgressingLanes)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	// The CP lane has not moved for 20 s while presentation keeps advancing.
+	auto in = MakeBaseInput(100'000'000'000ull);
+	AddLane(&in, Domain::Presentation, OperationCode::PresentationPresent, 1, 9000, 99'990'000'000ull);
+	AddLane(&in, Domain::CommandProcessor, OperationCode::CommandSubmit, 2, 77, 80'000'000'000ull);
+	const auto r = Observe(in, settings, &state);
+	EXPECT_EQ(r.category, StallCategory::CommandProcessorStall);
+	EXPECT_EQ(r.confidence, Confidence::High);
+	EXPECT_NE(r.confirmed_ns, 0u);
+	ASSERT_EQ(r.evidence_stored, 1u);
+	EXPECT_EQ(r.evidence[0].domain, Domain::CommandProcessor);
+	EXPECT_EQ(r.evidence[0].instance, 2u);
+}
+
+TEST(DevToolsClassifier, HungGpuQueueOutranksTheLanesWaitingOnIt)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	auto in = MakeBaseInput(100'000'000'000ull);
+	AddLane(&in, Domain::Hle, OperationCode::HleCall, 1, 3, 70'000'000'000ull);
+	AddLane(&in, Domain::CommandProcessor, OperationCode::CommandSubmit, 2, 77, 75'000'000'000ull);
+	AddLane(&in, Domain::GpuQueue, OperationCode::FenceWait, 3, 12, 80'000'000'000ull);
+	const auto r = Observe(in, settings, &state);
+	EXPECT_EQ(r.category, StallCategory::GpuStall);
+	EXPECT_EQ(r.evidence_stored, 3u);
+}
+
+TEST(DevToolsClassifier, StaleHeartbeatIsUnresponsiveEvenWithBusyLanes)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	// The worker stopped publishing 16 s ago; its last lane data is not evidence.
+	auto in         = MakeBaseInput(100'000'000'000ull);
+	in.heartbeat_ns = 84'000'000'000ull;
+	AddLane(&in, Domain::CommandProcessor, OperationCode::CommandSubmit, 1, 5, 83'000'000'000ull);
+	const auto r = Observe(in, settings, &state);
+	EXPECT_EQ(r.category, StallCategory::WorkerUnresponsive);
+	EXPECT_NE(r.confirmed_ns, 0u);
+	EXPECT_EQ(r.evidence_stored, 0u);
+}
+
+TEST(DevToolsClassifier, PausedWorkerDoesNotAgeItsLanes)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	// A batch was in flight when the whole process was paused for 20 s.
+	auto paused         = MakeBaseInput(70'000'000'000ull);
+	paused.heartbeat_ns = 50'000'000'000ull;
+	AddLane(&paused, Domain::CommandProcessor, OperationCode::CommandSubmit, 1, 9, 49'900'000'000ull);
+	ASSERT_EQ(Observe(paused, settings, &state).category, StallCategory::WorkerUnresponsive);
+
+	// Publication resumes before the batch moves: the pause is not lane age.
+	auto resumed = MakeBaseInput(70'500'000'000ull);
+	AddLane(&resumed, Domain::CommandProcessor, OperationCode::CommandSubmit, 1, 9, 49'900'000'000ull);
+	EXPECT_EQ(Observe(resumed, settings, &state).category, StallCategory::None);
+
+	// The same batch still stuck 16 s after the resume is a stall.
+	auto stuck = MakeBaseInput(86'600'000'000ull);
+	AddLane(&stuck, Domain::CommandProcessor, OperationCode::CommandSubmit, 1, 9, 49'900'000'000ull);
+	const auto r = Observe(stuck, settings, &state);
+	EXPECT_EQ(r.category, StallCategory::CommandProcessorStall);
+	EXPECT_NE(r.confirmed_ns, 0u);
+}
+
+TEST(DevToolsClassifier, CompletedLaneStartsANewStall)
+{
+	ClassifierState state {};
+	StallSettings   settings {};
+
+	auto first = MakeBaseInput(100'000'000'000ull);
+	AddLane(&first, Domain::CommandProcessor, OperationCode::CommandSubmit, 1, 5, 80'000'000'000ull);
+	ASSERT_EQ(Observe(first, settings, &state).category, StallCategory::CommandProcessorStall);
+	const uint64_t first_stall = state.causal_fingerprint;
+
+	// The same lane completed epoch 5 and has now been stuck on epoch 6.
+	auto second = MakeBaseInput(140'000'000'000ull);
+	AddLane(&second, Domain::CommandProcessor, OperationCode::CommandSubmit, 1, 6, 120'000'000'000ull);
+	ASSERT_EQ(Observe(second, settings, &state).category, StallCategory::CommandProcessorStall);
+	EXPECT_NE(state.causal_fingerprint, first_stall);
+}
 
 TEST(DevToolsClassifier, ClassifiesHleStallAfterVirtualThreshold)
 {
@@ -177,12 +399,13 @@ TEST(DevToolsClassifier, LossPreventsHighConfidenceOnConfirmedStall)
 	settings.suspected_after_ns = 1'000'000'000ull;
 	settings.confirmed_after_ns = 2'000'000'000ull;
 
-	auto t0 = MakeBaseInput(0);
-	AddHleActive(&t0, 3, 1, 0);
+	// Heartbeat 0 is the protocol's "no heartbeat" value; start at a real time.
+	auto t0 = MakeBaseInput(1'000'000'000ull);
+	AddHleActive(&t0, 3, 1, 1'000'000'000ull);
 	(void)Observe(t0, settings, &state);
 
 	auto t1 = t0;
-	t1.sample_time_ns = 3'000'000'000ull;
+	t1.sample_time_ns = 4'000'000'000ull;
 	t1.heartbeat_ns   = t1.sample_time_ns;
 	t1.loss.skipped_publications.total = 1;
 	auto r                             = Observe(t1, settings, &state);

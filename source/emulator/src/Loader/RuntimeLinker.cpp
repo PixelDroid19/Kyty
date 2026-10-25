@@ -26,6 +26,7 @@
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/ProgressPort.h"
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <atomic>
@@ -462,6 +463,7 @@ static uint8_t g_tls_spinlock = 0;
 
 static KYTY_SYSV_ABI void run_entry(uint64_t addr, EntryParams* params, atexit_func_t atexit_func, void* stack_top)
 {
+	const Emulator::Ports::ScopedProgress guest(Emulator::Ports::ProgressLane::GuestThread);
 	GuestCall::InvokeOnStack(addr, reinterpret_cast<uint64_t>(params), reinterpret_cast<uint64_t>(atexit_func), 0, stack_top);
 }
 

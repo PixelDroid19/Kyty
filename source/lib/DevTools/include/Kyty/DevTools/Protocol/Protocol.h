@@ -224,6 +224,7 @@ struct ProtocolReadLossState
 [[nodiscard]] ProtocolResult PublishTimeline(MutableMappingView mapping,
                                              const TimelineSnapshot& timeline) noexcept;
 [[nodiscard]] ProtocolResult ReadPublicationHeartbeat(ConstMappingView mapping, uint64_t* out_ns) noexcept;
+[[nodiscard]] ProtocolResult ReadHandshakeState(ConstMappingView mapping, HandshakeState* out) noexcept;
 [[nodiscard]] ProtocolResult ReadProgressPublication(ConstMappingView mapping,
                                                      ProtocolReadLossState* loss_state,
                                                      ProgressPublication* out) noexcept;

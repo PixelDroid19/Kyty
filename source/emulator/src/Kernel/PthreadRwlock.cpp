@@ -105,8 +105,14 @@ int KYTY_SYSV_ABI PthreadRwlockRdlock(PthreadRwlock* rwlock)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
-	int result = pthread_rwlock_rdlock(&(*rwlock)->p);
+	// Only a contended lock is recorded as a wait; the uncontended path stays cheap.
+	int result = pthread_rwlock_tryrdlock(&(*rwlock)->p);
+	if (result == EBUSY)
+	{
+		KYTY_GUEST_WAIT(PthreadWaitKind::Rwlock, rwlock);
+		PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
+		result = pthread_rwlock_rdlock(&(*rwlock)->p);
+	}
 
 	// KYTY_LOG_DEBUG("\trwlock rdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
@@ -349,8 +355,14 @@ int KYTY_SYSV_ABI PthreadRwlockWrlock(PthreadRwlock* rwlock)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
-	int result = pthread_rwlock_wrlock(&(*rwlock)->p);
+	// Only a contended lock is recorded as a wait; the uncontended path stays cheap.
+	int result = pthread_rwlock_trywrlock(&(*rwlock)->p);
+	if (result == EBUSY)
+	{
+		KYTY_GUEST_WAIT(PthreadWaitKind::Rwlock, rwlock);
+		PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
+		result = pthread_rwlock_wrlock(&(*rwlock)->p);
+	}
 
 	// KYTY_LOG_DEBUG("\trwlock wrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
