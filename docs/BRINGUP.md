@@ -82,7 +82,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [Card title](titles/card-title.md)
   - Card title: streamed music and an offline service retry (2026-10-16)
 - [Preschool Unity title](titles/preschool-unity.md)
-  - Preschool Unity title: unreadable EUD snapshot (2026-10-21, open)
+  - Preschool Unity title: unreadable EUD snapshot (2026-10-21, fixed 2026-10-25)
   - Preschool Unity title: sky-blue speckles on every outline (2026-10-19)
 - [Pixel cave platformer](titles/pixel-cave-platformer.md)
   - Pixel cave platformer: compute fill cost on Intel (2026-10-19)
