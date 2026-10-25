@@ -375,7 +375,9 @@ void SampleLanes(RuntimeState* state) noexcept
 		{
 			continue;
 		}
-		if (!slot.registered && !slot.refused)
+		// `lane` is written after the claim and published by the owner's first
+		// begin; an unbegun slot has nothing to register yet.
+		if (!slot.registered && !slot.refused && slot.begun.load(std::memory_order_acquire) != 0u)
 		{
 			RegisterSlot(state, &slot);
 		}
