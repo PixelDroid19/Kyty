@@ -2032,16 +2032,16 @@ Known approximations and debt recorded by this chain:
   compare can name the high mask dword alone, and the compare emitters asked
   for the second word of a one-word destination. The half and double compare
   emitters now take the single high dword when the descriptor names it.
-- **The half arithmetic reaches a sub-dword form that is not a no-op.** The
-  hub's half minimum carries the control `0x05051403`: the source and the
-  destination are the high halves, the other half of the destination is
-  preserved, the result is clamped and the low half of the result word is
-  negated (`firmware/work/evidence/sdwa-f16-isa.txt`). The half path reads
-  the low half of each source, writes the whole destination word and implements
-  neither the output modifier nor the SDWA's clamp, so the form is still
-  refused. That is the next piece of work: the half path needs the operand
-  half selection, the destination half merge, the output modifier and the
-  clamp.
+- **The half arithmetic reads and writes the halves the descriptor names.** The
+  hub's half minimum carries the sub-dword control `0x05051403`: the source is
+  the high half, the destination is the low half, the other half of the
+  destination is preserved, and the output modifier and the clamp are clear
+  (`firmware/work/evidence/sdwa-f16-isa.txt`). The half path now reads the
+  named source half, writes the result into the named destination half, keeps
+  or clears the other half as the field says, applies the output modifier to
+  the result word and clamps the result when the form asks for it. With that,
+  the hub's pixel program translates completely and the run reaches the
+  level's first gameplay draw.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
