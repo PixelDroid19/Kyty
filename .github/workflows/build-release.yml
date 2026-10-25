@@ -35,6 +35,7 @@ jobs:
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-vulkan-headers
             mingw-w64-x86_64-vulkan-loader
+            mingw-w64-x86_64-spirv-headers
             mingw-w64-x86_64-spirv-tools
 
       - name: Configure

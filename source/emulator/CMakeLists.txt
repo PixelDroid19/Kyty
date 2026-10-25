@@ -196,7 +196,8 @@ target_include_directories(kyty_runtime_core PUBLIC
 	"${CMAKE_SOURCE_DIR}/include"
 )
 target_link_libraries(kyty_runtime_core PUBLIC core math sys)
-if(MINGW)
+# Callback tables are 16-byte atomics; older GCC does not add libatomic on its own.
+if(MINGW OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 	target_link_libraries(kyty_runtime_core PUBLIC atomic)
 endif()
 

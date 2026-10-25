@@ -62,6 +62,9 @@ These are build targets, not guarantees that every workload behaves identically
 on every operating system, GPU, or driver. The macOS (MoltenVK) code paths are
 kept in the source tree but are not built or tested by any workflow.
 
+On Windows, MinGW's unwinder cannot see guest code, so titles that propagate
+C++ exceptions through guest frames (common in IL2CPP titles) may fail there.
+
 The host layer (window, keyboard, controllers, audio output) uses SDL 3, which
 is vendored in `source/3rdparty/sdl3`.
 
