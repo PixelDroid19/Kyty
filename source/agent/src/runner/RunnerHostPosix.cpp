@@ -77,7 +77,9 @@ bool ConnectWithDeadline(int fd, const sockaddr_un& address, double deadline)
 	{
 		return true;
 	}
-	if (errno != EINPROGRESS && errno != EAGAIN)
+	// On a unix socket EAGAIN means the listener backlog is full and nothing
+	// is in progress; the caller retries.
+	if (errno != EINPROGRESS)
 	{
 		return false;
 	}
