@@ -296,6 +296,24 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t in
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances);
 uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32_t cache_policy, const void* target, uint32_t size_dw);
 uint32_t KYTY_SYSV_ABI  GraphicsCbJumpGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbDispatchIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbAcquireMemGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbCopyDataGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDispatchIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexOffsetGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexBufferGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexCountGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexSizeGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetNumInstancesGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetShRegisterDirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirectGetSize();
 uint32_t* KYTY_SYSV_ABI GraphicsCbBranch(CommandBuffer* buf, uint32_t mode, uint32_t function, const volatile uint64_t* compare_address,
                                          uint64_t mask, uint64_t reference, uint32_t then_cache_policy, const void* then_target,
                                          uint32_t then_size_dw, uint32_t else_cache_policy, const void* else_target, uint32_t else_size_dw);

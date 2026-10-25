@@ -143,6 +143,24 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("xSAR0LTcRKM", Gen5::GraphicsCbJump);        // sceAgcDcbJump
 	LIB_FUNC("e1DFTg+Sd8U", Gen5::GraphicsCbJump);        // sceAgcAcbJump
 	LIB_FUNC("VEGu4dixjUg", Gen5::GraphicsCbJumpGetSize); // sceAgcDcbJumpGetSize
+	LIB_FUNC("PxKWV2fVAps", Gen5::GraphicsAcbDispatchIndirectGetSize);
+	LIB_FUNC("-vnlTPPXPrw", Gen5::GraphicsDcbAcquireMemGetSize);
+	LIB_FUNC("b5u0Jzm8TF8", Gen5::GraphicsDcbCopyDataGetSize);
+	LIB_FUNC("w8HVkEeXPv8", Gen5::GraphicsDcbDispatchIndirectGetSize);
+	LIB_FUNC("WrdP9Zxx3lQ", Gen5::GraphicsDcbDrawIndexAutoGetSize);
+	LIB_FUNC("6ee9Hd3EWXQ", Gen5::GraphicsDcbDrawIndexGetSize);
+	LIB_FUNC("mStuvI0zOtc", Gen5::GraphicsDcbDrawIndexIndirectGetSize);
+	LIB_FUNC("qMlfB1ZhMDc", Gen5::GraphicsDcbDrawIndexOffsetGetSize);
+	LIB_FUNC("cxPZ4Wgvdj8", Gen5::GraphicsDcbDrawIndirectGetSize);
+	LIB_FUNC("1DeUNpRIDDA", Gen5::GraphicsDcbSetCxRegisterDirectGetSize);
+	LIB_FUNC("GBCh3zCihoU", Gen5::GraphicsDcbSetCxRegistersIndirectGetSize);
+	LIB_FUNC("j4emHHndCPY", Gen5::GraphicsDcbSetIndexBufferGetSize);
+	LIB_FUNC("mljzuGDZRQ4", Gen5::GraphicsDcbSetIndexCountGetSize);
+	LIB_FUNC("ca4KPvp0qLQ", Gen5::GraphicsDcbSetIndexSizeGetSize);
+	LIB_FUNC("6DFuRKT4C9w", Gen5::GraphicsDcbSetNumInstancesGetSize);
+	LIB_FUNC("QhPDD513V0w", Gen5::GraphicsDcbSetShRegisterDirectGetSize);
+	LIB_FUNC("nNlUtdDDvZ0", Gen5::GraphicsDcbSetShRegistersIndirectGetSize);
+	LIB_FUNC("UQGTw4xRlcM", Gen5::GraphicsDcbSetUcRegistersIndirectGetSize);
 	LIB_FUNC("b-oySn+G2tE", Gen5::GraphicsCbJumpGetSize); // sceAgcAcbJumpGetSize
 	LIB_FUNC("w1KFAHVqpaU", Gen5::GraphicsCbBranch);        // sceAgcCbBranch
 	LIB_FUNC("uZW-mqsxkrM", Gen5::GraphicsCbBranchGetSize); // sceAgcCbBranchGetSize
