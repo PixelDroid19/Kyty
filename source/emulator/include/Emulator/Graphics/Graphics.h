@@ -295,7 +295,15 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t i
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances);
 uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32_t cache_policy, const void* target, uint32_t size_dw);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t count);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t count);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbRewind(CommandBuffer* buf, int32_t flags, uint8_t queue);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbRewind(CommandBuffer* buf, int32_t flags);
 uint32_t KYTY_SYSV_ABI  GraphicsCbJumpGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbCondExecGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbCondExecGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbRewindGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbRewindGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsAcbDmaDataGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsAcbCopyDataGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsAcbAcquireMemGetSize();

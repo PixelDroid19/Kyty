@@ -1157,6 +1157,145 @@ TEST(EmulatorGraphicsPackets, AcbDmaDataGetSizeMatchesItsWriter)
 	EXPECT_EQ(Gen5::GraphicsAcbDmaDataGetSize(), 28u);
 }
 
+
+TEST(EmulatorGraphicsPackets, DcbRewindMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsDcbRewind(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_REWIND, 0u));
+	EXPECT_EQ(cmd[1], 0x80000000u);
+	EXPECT_EQ(Gen5::GraphicsDcbRewindGetSize(), 8u);
+
+	cb.cursor_up = storage;
+	auto* masked = Gen5::GraphicsDcbRewind(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x1e);
+	ASSERT_NE(masked, nullptr);
+	EXPECT_EQ(masked[1], 0u);
+}
+
+TEST(EmulatorGraphicsPackets, AcbRewindMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsAcbRewind(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1, 1);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_REWIND, 0u));
+	EXPECT_EQ(cmd[1], 0x81000000u);
+	EXPECT_EQ(Gen5::GraphicsAcbRewindGetSize(), 8u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbCondExecMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsDcbCondExec(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x12345678ull, 5u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u));
+	EXPECT_EQ(cmd[1], 0x12345678u & 0xfffffffcu);
+	EXPECT_EQ(cmd[2], 0u);
+	EXPECT_EQ(cmd[3], 0u);
+	EXPECT_EQ(cmd[4], 5u);
+	EXPECT_EQ(Gen5::GraphicsDcbCondExecGetSize(), 20u);
+
+	cb.cursor_up = storage;
+	auto* wide = Gen5::GraphicsDcbCondExec(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x12345678ull, 0xffffu);
+	ASSERT_NE(wide, nullptr);
+	EXPECT_EQ(wide[4], 0x3fffu);
+}
+
+TEST(EmulatorGraphicsPackets, AcbCondExecMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsAcbCondExec(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x12345678ull, 5u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u));
+	EXPECT_EQ(cmd[1], 0x12345678u & 0xfffffffcu);
+	EXPECT_EQ(cmd[4], 5u);
+	EXPECT_EQ(Gen5::GraphicsAcbCondExecGetSize(), 20u);
+}
+
 TEST(EmulatorGraphicsPackets, CbDispatchMatchesItsReportedHardwarePacketSize)
 {
 	if (!Config::IsInitialized())

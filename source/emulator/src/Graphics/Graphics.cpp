@@ -5098,6 +5098,127 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32
 	return cmd;
 }
 
+// sceAgcDcbRewind: the rewind packet of the draw command buffer. Only the
+// lowest flag bit reaches the packet.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbRewind(CommandBuffer* buf, int32_t flags)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_REWIND, 0u);
+	cmd[1] = (static_cast<uint32_t>(flags) & 1u) << 31u;
+	return cmd;
+}
+
+// GraphicsDcbRewindGetSize: the size of the packet the writer above emits.
+uint32_t KYTY_SYSV_ABI GraphicsDcbRewindGetSize()
+{
+	return 8u;
+}
+
+
+
+// sceAgcAcbRewind: the rewind packet of the async command buffer. It also
+// names the queue the rewind applies to.
+uint32_t* KYTY_SYSV_ABI GraphicsAcbRewind(CommandBuffer* buf, int32_t flags, uint8_t queue)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_REWIND, 0u);
+	cmd[1] = (static_cast<uint32_t>(flags) & 1u) << 31u | (static_cast<uint32_t>(queue) & 1u) << 24u;
+	return cmd;
+}
+
+// GraphicsAcbRewindGetSize: the size of the packet the writer above emits.
+uint32_t KYTY_SYSV_ABI GraphicsAcbRewindGetSize()
+{
+	return 8u;
+}
+
+
+
+// sceAgcDcbCondExec: the conditional execution packet. It names the address
+// the execution jumps to and the count of the following packets to skip.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t count)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u);
+	cmd[1] = static_cast<uint32_t>(address) & 0xfffffffcu;
+	cmd[2] = static_cast<uint32_t>(address >> 32u);
+	cmd[3] = 0u;
+	cmd[4] = count & 0x3fffu;
+	return cmd;
+}
+
+// GraphicsDcbCondExecGetSize: the size of the packet the writer above emits.
+uint32_t KYTY_SYSV_ABI GraphicsDcbCondExecGetSize()
+{
+	return 20u;
+}
+
+
+// sceAgcAcbCondExec: the conditional execution packet of the async command
+// buffer. Its layout is the one of the draw command buffer.
+uint32_t* KYTY_SYSV_ABI GraphicsAcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t count)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u);
+	cmd[1] = static_cast<uint32_t>(address) & 0xfffffffcu;
+	cmd[2] = static_cast<uint32_t>(address >> 32u);
+	cmd[3] = 0u;
+	cmd[4] = count & 0x3fffu;
+	return cmd;
+}
+
+// GraphicsAcbCondExecGetSize: the size of the packet the writer above emits.
+uint32_t KYTY_SYSV_ABI GraphicsAcbCondExecGetSize()
+{
+	return 20u;
+}
+
+
+
 uint32_t KYTY_SYSV_ABI GraphicsCbJumpGetSize()
 {
 	return 4u * sizeof(uint32_t);
@@ -5252,3 +5373,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_ou
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED
+
+
+
+
