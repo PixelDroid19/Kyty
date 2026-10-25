@@ -551,6 +551,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1,  ShaderInstructionType::VCmpOF32,     ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFunctionCall %bool %ordered %t0_<index> %t1_<index> ; "}},
     {Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1,  ShaderInstructionType::VCmpTruF32,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpIEqual %bool %uint_0 %uint_0 ; "}},
     {Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1,  ShaderInstructionType::VCmpUF32,     ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFunctionCall %bool %unordered %t0_<index> %t1_<index> ; "}},
+    {Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1,   ShaderInstructionType::VCmpNeqF16,   ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFOrdNotEqual"}},
     {Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1,   ShaderInstructionType::VCmpLtF16,    ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFOrdLessThan"}},
     {Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1,   ShaderInstructionType::VCmpEqF16,    ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFOrdEqual"}},
     {Recompile_VCmpF16_XXX_SmaskVsrc0Vsrc1,   ShaderInstructionType::VCmpLeF16,    ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpFOrdLessThanEqual"}},

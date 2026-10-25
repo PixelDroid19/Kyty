@@ -178,44 +178,16 @@ inline bool SdwaWideningSupported(const ShaderInstruction& inst)
 	return dst_sel == 6u && !sext && src0_sel >= 4u && src0_sel <= 6u;
 }
 
-// SDWA on a narrowing conversion (ISA SDWA fields): the source is read as a
-// whole word and the result is written to one half of the destination. DST_U
-// says what happens to the other half: zero or preserve.
-inline bool SdwaNarrowingSupported(const ShaderInstruction& inst)
+// SDWA on a conversion that names whole words (ISA SDWA fields): the source
+// select 6 and the destination select 6 name the whole word, so the modifier
+// changes nothing. A sign extension of a whole word is the word itself.
+inline bool SdwaWholeWordSupported(const ShaderInstruction& inst)
 {
 	const uint32_t control  = inst.vop_sdwa_ctrl;
 	const uint32_t dst_sel  = (control >> 8u) & 7u;
 	const uint32_t src0_sel = (control >> 16u) & 7u;
 	const uint32_t dst_u    = (control >> 11u) & 3u;
-	const bool     sext     = (control & (1u << 19u)) != 0u;
-	return !sext && src0_sel == 6u && (dst_sel == 4u || dst_sel == 5u) && (dst_u == 0u || dst_u == 2u);
-}
-
-// The store of a narrowing SDWA: the result goes to the selected half and the
-// other half is zeroed or preserved, as DST_U says.
-inline String8 StoreNarrowingSdwa(const ShaderInstruction& inst, const String8& index, const String8& value)
-{
-	const uint32_t control = inst.vop_sdwa_ctrl;
-	const uint32_t dst_sel = (control >> 8u) & 7u;
-	const uint32_t dst_u   = (control >> 11u) & 3u;
-	const bool     high   = dst_sel == 5u;
-	const String8  text   = R"(
-%fh_sdwa_old_float_<index> = OpLoad %float %<dst>
-%fh_sdwa_old_<index> = OpBitcast %uint %fh_sdwa_old_float_<index>
-%fh_sdwa_selected_<index> = OpBitFieldInsert %uint %fh_sdwa_old_<index> %<value> %uint_<offset> %uint_16
-%fh_sdwa_kept_<index> = OpBitwiseAnd %uint %fh_sdwa_old_<index> %uint_<other_mask>
-%fh_sdwa_zeroed_<index> = OpBitwiseAnd %uint %fh_sdwa_selected_<index> %uint_<selected_mask>
-%fh_sdwa_other_<index> = OpBitwiseAnd %uint %fh_sdwa_old_<index> %uint_<other_mask>
-%fh_sdwa_result_<index> = OpSelect %uint %preserve %fh_sdwa_selected_<index> %fh_sdwa_zeroed_<index>
-OpStore %<dst> %fh_sdwa_result_<index>
-)";
-	return text.ReplaceStr("<index>", index)
-	    .ReplaceStr("<value>", value)
-	    .ReplaceStr("<dst>", operand_variable_to_str(inst.dst).value)
-	    .ReplaceStr("<offset>", high ? "16" : "0")
-	    .ReplaceStr("<other_mask>", high ? "0x0000ffff" : "0xffff0000")
-	    .ReplaceStr("<selected_mask>", high ? "0xffff0000" : "0x0000ffff")
-	    .ReplaceStr("<preserve>", dst_u == 2u ? "%uint_1" : "%uint_0");
+	return src0_sel == 6u && dst_sel == 6u && dst_u <= 2u && (control & 0xe000u) == 0u;
 }
 
 inline bool HasHalfDestinationSelect(ShaderInstructionType type)
@@ -571,7 +543,7 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 		return reject("invalid-operand-tuple");
 	}
 	if (inst.vop_sdwa && !((operation == Operation::ToFloat && SdwaWideningSupported(inst)) ||
-	                       (operation == Operation::FromFloat && SdwaNarrowingSupported(inst))))
+	                       (operation == Operation::FromFloat && SdwaWholeWordSupported(inst))))
 	{
 		return reject("unsupported-sdwa");
 	}
@@ -771,9 +743,6 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 			text = text.ReplaceStr("<nan_result>", mode.dx10_clamp ? "uint_0" : "fh_result_<index>");
 			text += Store(inst, index, "fh_clamped_<index>");
 		}
-	} else if (inst.vop_sdwa && operation == Operation::FromFloat)
-	{
-		text += StoreNarrowingSdwa(inst, index, "fh_result_<index>");
 	} else
 	{
 		text += Store(inst, index, "fh_result_<index>");

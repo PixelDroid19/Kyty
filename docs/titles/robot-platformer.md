@@ -2018,6 +2018,16 @@ Known approximations and debt recorded by this chain:
   shader work. The coredump of that job is the evidence for the next step:
   the hub's draw is the first one that runs the fragment transport's compute
   shade pass at scale, and the hang is in the compute engine.
+- **Three more gfx10 gaps of the hub's pixel program are closed.** The hub's
+  program reaches them one after another, and each one stopped the run:
+  - The `vcvt_f16_f32` of the program carries a sub-dword addressing
+    modifier whose control names whole words for the source and the
+    destination, so the modifier changes nothing and the conversion is the
+    plain one (`firmware/work/evidence/sdwa-isa.txt`).
+  - The half compare family had no not-equal entry, so the program had no
+    translation for it.
+  - The instruction dump refused a negate or absolute modifier on an inline
+    constant, which the mixed-precision operations carry.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence

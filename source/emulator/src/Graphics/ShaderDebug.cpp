@@ -99,6 +99,21 @@ bool ShaderInstructionIsScalarMemoryLoad(ShaderInstructionType type)
 	return ShaderInstructionTypeIn(kTable, type);
 }
 
+// The mixed-precision operations carry a negate or absolute modifier on an
+// inline constant; the dump shows the modifier with the value.
+static const char* OperandModifierPrefix(const ShaderOperand& op)
+{
+	if (op.negate)
+	{
+		return "-";
+	}
+	if (op.absolute)
+	{
+		return "abs ";
+	}
+	return "";
+}
+
 static String8 operand_to_str(ShaderOperand op)
 {
 	String8 ret = "???";
@@ -106,18 +121,15 @@ static String8 operand_to_str(ShaderOperand op)
 	{
 		case ShaderOperandType::LiteralConstant:
 			EXIT_IF(op.size != 0);
-			EXIT_IF(op.negate || op.absolute);
-			return String8::FromPrintf("%f (%u)", op.constant.f, op.constant.u);
+			return String8::FromPrintf("%s%f (%u)", OperandModifierPrefix(op), op.constant.f, op.constant.u);
 			break;
 		case ShaderOperandType::IntegerInlineConstant:
 			EXIT_IF(op.size != 0);
-			EXIT_IF(op.negate || op.absolute);
-			return String8::FromPrintf("%d", op.constant.i);
+			return String8::FromPrintf("%s%d", OperandModifierPrefix(op), op.constant.i);
 			break;
 		case ShaderOperandType::FloatInlineConstant:
 			EXIT_IF(op.size != 0);
-			EXIT_IF(op.negate || op.absolute);
-			return String8::FromPrintf("%f", op.constant.f);
+			return String8::FromPrintf("%s%f", OperandModifierPrefix(op), op.constant.f);
 			break;
 		default: break;
 	}
