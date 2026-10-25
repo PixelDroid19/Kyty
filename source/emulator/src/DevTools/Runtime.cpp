@@ -70,6 +70,9 @@ struct RuntimeState
 	// forwards them as progress loss.
 	std::atomic<uint32_t>        unclaimed[static_cast<uint32_t>(ProgressLane::Count)] {};
 	uint32_t                     reported_unclaimed[static_cast<uint32_t>(ProgressLane::Count)] {};
+	// Slots handed back to the pool; a thread refused a slot rescans only
+	// after it changes.
+	std::atomic<uint64_t>        freed_slots {0};
 };
 
 RuntimeState& GetState() noexcept
@@ -127,6 +130,8 @@ struct ThreadLane
 	uint32_t  depth         = 0;
 	uint32_t  phase_depth   = 0;
 	uint32_t  wait_depth    = 0;
+	bool      claim_refused = false;
+	uint64_t  refused_at    = 0;
 };
 
 // One slot per (host thread, lane kind), handed back when the thread exits so
@@ -149,21 +154,30 @@ struct ThreadLanes
 
 thread_local ThreadLanes t_lanes;
 
-[[nodiscard]] LaneSlot* ClaimSlot(ProgressLane lane) noexcept
+[[nodiscard]] LaneSlot* ClaimSlot(ProgressLane lane, ThreadLane* owned) noexcept
 {
-	auto& state = GetState();
+	auto&          state = GetState();
+	const uint64_t freed = state.freed_slots.load(std::memory_order_acquire);
+	if (owned->claim_refused && owned->refused_at == freed)
+	{
+		state.unclaimed[static_cast<uint32_t>(lane)].fetch_add(1u, std::memory_order_relaxed);
+		return nullptr;
+	}
 	for (auto& slot: state.slots)
 	{
 		auto expected = static_cast<uint32_t>(SlotOwner::Free);
 		if (slot.owner.load(std::memory_order_relaxed) == expected &&
 		    slot.owner.compare_exchange_strong(expected, static_cast<uint32_t>(SlotOwner::Claimed), std::memory_order_acquire))
 		{
-			slot.lane = lane;
+			slot.lane            = lane;
+			owned->claim_refused = false;
 			return &slot;
 		}
 	}
 	// Reported as progress loss so the supervisor never claims high
 	// confidence while a lane is invisible.
+	owned->claim_refused = true;
+	owned->refused_at    = freed;
 	state.unclaimed[static_cast<uint32_t>(lane)].fetch_add(1u, std::memory_order_relaxed);
 	return nullptr;
 }
@@ -175,12 +189,13 @@ thread_local ThreadLanes t_lanes;
 	{
 		return nullptr;
 	}
-	// A thread left without a slot retries on every begin, so the loss stays
-	// reported for as long as its lane is invisible.
+	// A thread left without a slot counts the loss on every begin, so it
+	// stays reported for as long as its lane is invisible, and rescans the
+	// pool once a slot was freed.
 	auto& owned = t_lanes.lanes[index];
 	if (owned.slot == nullptr)
 	{
-		owned.slot = ClaimSlot(lane);
+		owned.slot = ClaimSlot(lane, &owned);
 	}
 	return owned.slot != nullptr ? &owned : nullptr;
 }
@@ -309,6 +324,7 @@ void ResetSlot(LaneSlot* slot) noexcept
 	slot->registered = false;
 	slot->refused    = false;
 	slot->owner.store(static_cast<uint32_t>(SlotOwner::Free), std::memory_order_release);
+	GetState().freed_slots.fetch_add(1u, std::memory_order_release);
 }
 
 void RegisterSlot(RuntimeState* state, LaneSlot* slot) noexcept
