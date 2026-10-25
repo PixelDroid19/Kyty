@@ -1981,6 +1981,24 @@ Known approximations and debt recorded by this chain:
   missing, 58 of them AGC commands, 25 libc, 21 AGC driver, 13 JSON and 3
   video out. The earlier count of 245 included ninety exports the tree does
   register under a second registration style.
+- **The gfx10 lane permute and the mixed FMA variants are translated.** The
+  hub's pixel program reached two instructions the emulator did not know:
+  `ds_bpermute_b32` (opcode 0xb3) and `V_FMA_MIXHI_F16` (VOP3P 0x22). The
+  official gfx10 ISA (the RDNA 1.0 instruction set architecture, sections
+  10.4.4 and 12.10) gives both contracts, kept in
+  `firmware/work/evidence/`:
+  - `ds_bpermute_b32` is a gather: every lane takes the value of the lane its
+    index names, the index is a byte address with the instruction offset added
+    to it, only its bits [6:2] select a lane of the same half wave, and a
+    disabled source lane reads zero. One subgroup shuffle with a per-lane
+    source lane reproduces it.
+  - `V_FMA_MIXLO_F16` and `V_FMA_MIXHI_F16` are the mixed FMA of the
+    selected sources with the result in the low or the high half of the
+    destination. The emulator now decodes both and merges the half the opcode
+    names.
+  With those translated the run reaches the hub's own resources and then
+  fails with the device lost described below, so the hub's first gameplay
+  draw now executes.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence

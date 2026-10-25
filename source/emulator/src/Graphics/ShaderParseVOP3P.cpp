@@ -9,14 +9,16 @@ KYTY_SHADER_PARSER(shader_parse_vop3p)
 	EXIT_IF(dst == nullptr || src == nullptr || buffer == nullptr || buffer < src);
 	KYTY_TYPE_STR("vop3p");
 	const uint32_t opcode = (buffer[0] >> 16u) & 0x7fu;
-	if (!next_gen || (buffer[0] & 0xff800000u) != 0xcc000000u || (opcode != 0x20u && opcode != 0x21u))
+	if (!next_gen || (buffer[0] & 0xff800000u) != 0xcc000000u || (opcode != 0x20u && opcode != 0x21u && opcode != 0x22u))
 	{
 		KYTY_UNKNOWN_OP();
 	}
 
 	ShaderInstruction inst;
 	inst.pc = pc;
-	inst.type = opcode == 0x20u ? ShaderInstructionType::VFmaMixF32 : ShaderInstructionType::VFmaMixLoF16;
+	inst.type = opcode == 0x20u ? ShaderInstructionType::VFmaMixF32 :
+	            opcode == 0x21u ? ShaderInstructionType::VFmaMixLoF16 :
+	                              ShaderInstructionType::VFmaMixHiF16;
 	inst.format = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
 	inst.dst = operand_parse(256u + (buffer[0] & 0xffu));
 	inst.dst.clamp = ((buffer[0] >> 15u) & 1u) != 0u;

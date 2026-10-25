@@ -79,9 +79,9 @@ OpBranch %<t>_done
 	return true;
 }
 
-// V_FMA_MIXLO_F16: the mixed-precision FMA of the selected sources, rounded
-// to half and written to the low half of the destination. The high half of
-// the destination is kept. The arithmetic follows the engine's half contract:
+// V_FMA_MIXLO_F16 and V_FMA_MIXHI_F16: the mixed-precision FMA of the
+// selected sources, rounded to half and written to the low or the high half
+// of the destination. The other half is kept. The arithmetic follows the engine's half contract:
 // binary32 intermediates with the addition residue recovered, then one
 // rounding of the result to half.
 KYTY_RECOMPILER_FUNC(Recompile_VFmaMixLoF16)
@@ -146,13 +146,14 @@ KYTY_RECOMPILER_FUNC(Recompile_VFmaMixLoF16)
 	source += String8(R"(
 %fh_old_float_<index> = OpLoad %float %<dst>
 %fh_old_<index> = OpBitcast %uint %fh_old_float_<index>
-%fh_merged_<index> = OpBitFieldInsert %uint %fh_old_<index> %fh_result_<index> %uint_0 %uint_16
+%fh_merged_<index> = OpBitFieldInsert %uint %fh_old_<index> %fh_result_<index> %uint_<offset> %uint_16
 %fh_exec_<index> = OpLoad %uint %exec_lo
 %fh_active_<index> = OpINotEqual %bool %fh_exec_<index> %uint_0
 %fh_stored_<index> = OpSelect %uint %fh_active_<index> %fh_merged_<index> %fh_old_<index>
 %fh_stored_float_<index> = OpBitcast %float %fh_stored_<index>
 OpStore %<dst> %fh_stored_float_<index>
-)").ReplaceStr("<index>", index_str).ReplaceStr("<dst>", operand_variable_to_str(inst.dst).value);
+)").ReplaceStr("<index>", index_str).ReplaceStr("<offset>", (param[0] != nullptr && param[0][0] == 'h') ? "16" : "0")
+	   .ReplaceStr("<dst>", operand_variable_to_str(inst.dst).value);
 	*dst_source += source;
 	return true;
 }

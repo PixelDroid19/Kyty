@@ -41,6 +41,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U64);
 KYTY_RECOMPILER_FUNC(Recompile_VCmpClassF32);
 KYTY_RECOMPILER_FUNC(Recompile_DsAtomic_XXX_VaddrVdataOffset);
 KYTY_RECOMPILER_FUNC(Recompile_DsReadB32_VdstVaddrOffset);
+KYTY_RECOMPILER_FUNC(Recompile_DsBpermuteB32_VdstVsrc0Vsrc1);
 KYTY_RECOMPILER_FUNC(Recompile_DsRead2B32_Vdst2VaddrOffset01);
 KYTY_RECOMPILER_FUNC(Recompile_DsWrite2B32_VaddrVdata2Offset01);
 KYTY_RECOMPILER_FUNC(Recompile_DsWrite2B64_VaddrVdata2Offset01);

@@ -2660,6 +2660,53 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset)
 	return true;
 }
 
+// ds_bpermute_b32: the backward lane permute of the gfx10 ISA. Every lane
+// gathers the value of the lane its index names, so the result is one
+// subgroup shuffle with a per-lane source lane. The index is a byte address
+// with the instruction offset added to it and only its bits [6:2] select a
+// lane of the same half wave. A source lane that is disabled reads zero.
+KYTY_RECOMPILER_FUNC(Recompile_DsBpermuteB32_VdstVsrc0Vsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.src_num != 2 || inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 ||
+	    inst.src[0].type != ShaderOperandType::Vgpr || inst.src[1].type != ShaderOperandType::Vgpr ||
+	    inst.src[0].dpp || inst.src[1].dpp)
+	{
+		return false;
+	}
+	const auto index_str = String8::FromPrintf("%u", index);
+	const auto tag       = String8("bpermute_") + index_str;
+	String8             source;
+	if (!operand_load_uint(spirv, inst.src[0], tag + "_index", index_str, &source))
+	{
+		return false;
+	}
+	String8 value;
+	if (!operand_load_uint(spirv, inst.src[1], tag + "_value", index_str, &value))
+	{
+		return false;
+	}
+	const auto text = R"(
+%<t>_offset = OpIAdd %uint %<t>_index %uint_<offset>
+%<t>_lane = OpShiftRightLogical %uint %<t>_offset %uint_2
+%<t>_lane_masked = OpBitwiseAnd %uint %<t>_lane %uint_31
+%<t>_exec = OpLoad %uint %exec_lo
+%<t>_active = OpINotEqual %bool %<t>_exec %uint_0
+%<t>_fetch = OpGroupNonUniformShuffle %uint %<t>_value %<t>_lane_masked
+%<t>_live = OpGroupNonUniformShuffle %uint %<t>_exec %<t>_lane_masked
+%<t>_live_bit = OpINotEqual %bool %<t>_live %uint_0
+%<t>_result = OpSelect %uint %<t>_live_bit %<t>_fetch %uint_0
+%<t>_old = OpLoad %uint %<dst>
+%<t>_stored = OpSelect %uint %<t>_active %<t>_result %<t>_old
+OpStore %<dst> %<t>_stored
+)";
+	*dst_source += source + value +
+	                String8(text).ReplaceStr("<t>", tag)
+	                    .ReplaceStr("<offset>", spirv->GetConstantUint(inst.ds_offset))
+	                    .ReplaceStr("<dst>", operand_variable_to_str(inst.dst).value);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_DsAddU32_VaddrVdataOffset)
 {
 	const auto& inst       = code.GetInstructions().At(index);

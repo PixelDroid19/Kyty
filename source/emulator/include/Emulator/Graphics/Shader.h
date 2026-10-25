@@ -91,6 +91,7 @@ enum class ShaderInstructionType : uint32_t
 	DsSubU32,
 	DsXorB32,
 	DsReadB32,
+	DsBpermuteB32,
 	DsRead2B32,
 	DsRead2St64B32,
 	DsWriteB32,
@@ -456,6 +457,7 @@ enum class ShaderInstructionType : uint32_t
 	// VOP3P fused multiply-add with independently selected input precision.
 	VFmaMixF32,
 	VFmaMixLoF16,
+	VFmaMixHiF16,
 	// RDNA2 dot-product with accumulation in destination register
 	VDot2cF32F16,
 	VDot4cI32I8,
