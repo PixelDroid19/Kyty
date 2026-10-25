@@ -190,80 +190,6 @@ inline bool SdwaWholeWordSupported(const ShaderInstruction& inst)
 	return src0_sel == 6u && dst_sel == 6u && dst_u <= 2u && (control & 0xe000u) == 0u;
 }
 
-// The sub-dword form of a half operation (ISA SDWA fields): the source and
-// the destination name a half of their word, the other half of the destination
-// is zeroed or preserved, the result is clamped and the output modifier
-// negates one half of the result word.
-struct SdwaHalfForm
-{
-	bool     present    = false;
-	uint32_t src_half   = 0;
-	uint32_t dst_half   = 0;
-	uint32_t dst_u      = 0;
-	uint32_t omod       = 0;
-	bool     clamp      = false;
-};
-
-inline SdwaHalfForm SdwaHalfFormOf(const ShaderInstruction& inst)
-{
-	SdwaHalfForm form;
-	if (!inst.vop_sdwa)
-	{
-		return form;
-	}
-	const uint32_t control  = inst.vop_sdwa_ctrl;
-	const uint32_t dst_sel  = (control >> 8u) & 7u;
-	const uint32_t dst_u    = (control >> 11u) & 3u;
-	const uint32_t src0_sel = (control >> 16u) & 7u;
-	const uint32_t omod     = (control >> 14u) & 3u;
-	const bool     sext     = (control & (1u << 19u)) != 0u;
-	if (sext || dst_u > 2u || omod > 2u)
-	{
-		return form;
-	}
-	if (src0_sel != 4u && src0_sel != 5u)
-	{
-		return form;
-	}
-	form.src_half = src0_sel == 5u ? 1u : 0u;
-	if (dst_sel == 4u || dst_sel == 5u)
-	{
-		form.dst_half = dst_sel == 5u ? 1u : 0u;
-	}
-	form.dst_u   = dst_u;
-	form.omod    = omod;
-	form.clamp   = (control & (1u << 13u)) != 0u;
-	form.present = true;
-	return form;
-}
-
-// The store of a half result into the half the sub-dword form names: the other
-// half of the destination is zeroed or preserved.
-inline String8 StoreHalfAt(const ShaderInstruction& inst, const String8& index, const String8& value, uint32_t half,
-                           uint32_t dst_u, uint32_t omod)
-{
-	const String8 text = R"(
-%fh_sdwa_old_float_<index> = OpLoad %float %<dst>
-%fh_sdwa_old_<index> = OpBitcast %uint %fh_sdwa_old_float_<index>
-%fh_sdwa_inserted_<index> = OpBitFieldInsert %uint %fh_sdwa_old_<index> %<value> %uint_<offset> %uint_16
-%fh_sdwa_kept_<index> = OpBitwiseAnd %uint %fh_sdwa_old_<index> %uint_<other_mask>
-%fh_sdwa_masked_<index> = OpBitwiseAnd %uint %fh_sdwa_inserted_<index> %uint_<selected_mask>
-%fh_sdwa_result_<index> = OpSelect %uint %preserve %fh_sdwa_inserted_<index> %fh_sdwa_masked_<index>
-%fh_sdwa_modifier_<index> = OpBitwiseXor %uint %fh_sdwa_result_<index> %uint_<omod_mask>
-%fh_sdwa_stored_<index> = OpSelect %uint %has_modifier %fh_sdwa_modifier_<index> %fh_sdwa_result_<index>
-OpStore %<dst> %fh_sdwa_stored_<index>
-)";
-	return text.ReplaceStr("<index>", index)
-	    .ReplaceStr("<value>", value)
-	    .ReplaceStr("<dst>", operand_variable_to_str(inst.dst).value)
-	    .ReplaceStr("<offset>", half != 0u ? "16" : "0")
-	    .ReplaceStr("<other_mask>", half != 0u ? "0x0000ffff" : "0xffff0000")
-	    .ReplaceStr("<selected_mask>", half != 0u ? "0xffff0000" : "0x0000ffff")
-	    .ReplaceStr("<preserve>", dst_u == 2u ? "%uint_1" : "%uint_0")
-	    .ReplaceStr("<omod_mask>", omod == 1u ? "0x0000ffff" : (omod == 2u ? "0xffff0000" : "0x00000000"))
-	    .ReplaceStr("<has_modifier>", omod != 0u ? "%uint_1" : "%uint_0");
-}
-
 inline bool HasHalfDestinationSelect(ShaderInstructionType type)
 {
 	return type == ShaderInstructionType::VFmaF16 || type == ShaderInstructionType::VMin3F16 ||
@@ -502,7 +428,7 @@ inline String8 Unary(const ShaderInstruction& inst, const char* const* params, c
 }
 
 inline bool LoadHalf(Spirv* spirv, const ShaderInstruction& inst, uint32_t source, const String8& index,
-                     bool flush_input, bool integer, int half_select, String8* text)
+                     bool flush_input, bool integer, String8* text)
 {
 	auto operand = inst.src[source];
 	// SDWA word selects (admitted by SdwaWideningSupported): the operand load
@@ -531,7 +457,7 @@ inline bool LoadHalf(Spirv* spirv, const ShaderInstruction& inst, uint32_t sourc
 		*text += Narrow(spirv, raw, "fh_inline_" + suffix, "inline_" + suffix, 0u, false, false);
 		raw = "fh_inline_" + suffix;
 	}
-	const uint32_t half = half_select >= 0 ? static_cast<uint32_t>(half_select) : ((inst.vop3_op_sel >> source) & 1u);
+	const uint32_t half = (inst.vop3_op_sel >> source) & 1u;
 	if (half != 0u && operand_is_constant(operand)) { return false; }
 	*text += String8(R"(
 %fh_abs_mask_<s> = OpBitwiseXor %uint %uint_0x0000ffff %<abs_sign>
@@ -596,12 +522,9 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	{
 		// Keep the failed contract alongside the generator's final diagnostic.
 		// A generic missing-emitter exit alone cannot identify a mode refusal.
-		std::fprintf(stderr,
-		             "shader fp16 unsupported: stage=%u instruction=%u pc=0x%08" PRIx32 " reason=%s sdwa=0x%08" PRIx32
-		             " dst_sel=%u dst_u=%u omod=%u src0_sel=%u sext=%u clmp=%u\n",
-		             static_cast<unsigned>(code.GetType()), static_cast<unsigned>(inst.type), inst.pc, reason, inst.vop_sdwa_ctrl,
-		             (inst.vop_sdwa_ctrl >> 8u) & 7u, (inst.vop_sdwa_ctrl >> 11u) & 3u, (inst.vop_sdwa_ctrl >> 14u) & 3u,
-		             (inst.vop_sdwa_ctrl >> 16u) & 7u, (inst.vop_sdwa_ctrl >> 19u) & 1u, (inst.vop_sdwa_ctrl >> 13u) & 1u);
+		std::fprintf(stderr, "shader fp16 unsupported: stage=%u instruction=%u pc=0x%08" PRIx32 " reason=%s sdwa=0x%08" PRIx32 "\n",
+		             static_cast<unsigned>(code.GetType()), static_cast<unsigned>(inst.type), inst.pc, reason,
+		             inst.vop_sdwa_ctrl);
 		return false;
 	};
 	const String8 index = String8::FromPrintf("%u", instruction_index);
@@ -621,11 +544,8 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 		return reject("invalid-operand-tuple");
 	}
 	// A whole-word SDWA names the whole source and the whole destination, so it
-	// changes nothing; a widening one reads a half of the source; the half form
-	// names the halves of both operands.
-	const SdwaHalfForm sdwa_form = SdwaHalfFormOf(inst);
-	if (inst.vop_sdwa && !((operation == Operation::ToFloat && SdwaWideningSupported(inst)) || SdwaWholeWordSupported(inst) ||
-	                        sdwa_form.present))
+	// changes nothing; a widening one reads a half of the source.
+	if (inst.vop_sdwa && !((operation == Operation::ToFloat && SdwaWideningSupported(inst)) || SdwaWholeWordSupported(inst)))
 	{
 		return reject("unsupported-sdwa");
 	}
@@ -695,7 +615,7 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 	{
 		for (int source = 0; source < sources; ++source)
 		{
-			if (!LoadHalf(spirv, inst, source, index, arithmetic && (mode.value & 0x40u) == 0u, integer_input, sdwa_form.present ? static_cast<int>(sdwa_form.src_half) : -1, &text))
+			if (!LoadHalf(spirv, inst, source, index, arithmetic && (mode.value & 0x40u) == 0u, integer_input, &text))
 			{
 				return reject("unsupported-source-operand");
 			}
@@ -804,7 +724,7 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 		               arithmetic && (mode.value & 0x80u) == 0u, mode.fp16_overflow,
 		               inst.type == ShaderInstructionType::VFmaF16 ? "fh_residue_<index>" : "");
 	}
-	if (inst.dst.clamp || sdwa_form.clamp)
+	if (inst.dst.clamp)
 	{
 		// Clamp of half results is exact. Handle NaN in bits according to
 		// DX10_CLAMP. IEEE mode ignores OMOD but not CLAMP, as for f32.
@@ -825,12 +745,6 @@ inline bool Emit(uint32_t instruction_index, const ShaderCode& code, String8* ou
 			text = text.ReplaceStr("<nan_result>", mode.dx10_clamp ? "uint_0" : "fh_result_<index>");
 			text += Store(inst, index, "fh_clamped_<index>");
 		}
-	} else if (sdwa_form.present && sdwa_form.dst_half != 0u)
-	{
-		text += StoreHalfAt(inst, index, "fh_result_<index>", sdwa_form.dst_half, sdwa_form.dst_u, sdwa_form.omod);
-	} else if (sdwa_form.present && sdwa_form.omod != 0u)
-	{
-		text += StoreHalfAt(inst, index, "fh_result_<index>", 0u, sdwa_form.dst_u, sdwa_form.omod);
 	} else
 	{
 		text += Store(inst, index, "fh_result_<index>");
