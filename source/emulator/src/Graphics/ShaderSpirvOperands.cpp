@@ -708,6 +708,58 @@ static bool operand_dpp_supported(const ShaderOperand& op)
 // value, while bound_ctrl=0 must leave the destination untouched. The lowering
 // substitutes zero for out-of-range sources, which preserves the destination
 // only through a zero-identity op whose other operand is the destination.
+// The value an out-of-row lane reads. With bound_ctrl=1 the hardware reads
+// zero. With bound_ctrl=0 the lane keeps the destination: either the
+// instruction does not write that lane, or the source reads its own
+// unmodified value and the operation returns it. The lowering picks the
+// substitution that reproduces the reading the operation admits.
+enum class RowDppMode
+{
+	Unsupported,
+	Zero,
+	Input,
+};
+
+// The destination-source shape: the permuted source and the other source are
+// the destination register and the operation is idempotent. A lane that reads
+// outside the row then keeps the destination under both readings of the
+// hardware contract, so the operation may run with the lane's own source
+// value substituted for the missing one.
+static bool fragment_row_dpp_destination_source(const ShaderCode& code, uint32_t index, const ShaderOperand& dpp_source)
+{
+	if (index >= code.GetInstructions().Size())
+	{
+		return false;
+	}
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.dst.type != ShaderOperandType::Vgpr || inst.src_num < 2)
+	{
+		return false;
+	}
+	const bool idempotent = inst.type == ShaderInstructionType::VMaxF32 || inst.type == ShaderInstructionType::VMinF32 ||
+	                        inst.type == ShaderInstructionType::VMaxI32 || inst.type == ShaderInstructionType::VMaxU32 ||
+	                        inst.type == ShaderInstructionType::VMinI32 || inst.type == ShaderInstructionType::VMinU32 ||
+	                        inst.type == ShaderInstructionType::VOrB32 || inst.type == ShaderInstructionType::VXorB32 ||
+	                        inst.type == ShaderInstructionType::VAndB32;
+	if (!idempotent || dpp_source.register_id != inst.dst.register_id)
+	{
+		return false;
+	}
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		const auto& src = inst.src[source];
+		if (src.dpp)
+		{
+			continue;
+		}
+		if (src.type == ShaderOperandType::Vgpr && src.register_id == inst.dst.register_id)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool fragment_row_dpp_wave32_keeps_dst(const ShaderCode& code, uint32_t index, const ShaderOperand& dpp_source)
 {
 	if (dpp_source.dpp_bound_ctrl)
@@ -743,24 +795,25 @@ static bool fragment_row_dpp_wave32_keeps_dst(const ShaderCode& code, uint32_t i
 	return false;
 }
 
-static bool row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const String8& index)
+
+static RowDppMode row_dpp_mode(const Spirv& spirv, const ShaderOperand& op, const String8& index)
 {
 	if (op.type != ShaderOperandType::Vgpr || op.dpp_row_mask != 0xfu || op.dpp_bank_mask != 0xfu || op.swizzle != 6u)
 	{
-		return false;
+		return RowDppMode::Unsupported;
 	}
 	const uint32_t control = op.dpp_ctrl;
 	const bool     row     = (control >= 0x101u && control <= 0x10fu) || (control >= 0x111u && control <= 0x11fu) ||
 	                         (control >= 0x121u && control <= 0x12fu) || control == 0x140u || control == 0x141u;
 	if (!row)
 	{
-		return false;
+		return RowDppMode::Unsupported;
 	}
 	for (const char* c = index.c_str(); *c != '\0'; ++c)
 	{
 		if (*c < '0' || *c > '9')
 		{
-			return false;
+			return RowDppMode::Unsupported;
 		}
 	}
 	const uint32_t inst_index = index.ToUint32();
@@ -768,7 +821,11 @@ static bool row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const
 	const bool     fragment_compute = spirv.UsesFragmentCompute();
 	if (pixel && !fragment_compute && ShaderFragmentWaveInsideRegion(spirv.GetCode(), inst_index))
 	{
-		return !op.dpp_bound_ctrl || control >= 0x121u;
+		const bool admitted = !op.dpp_bound_ctrl || control >= 0x121u;
+		if (!admitted)
+		{
+		}
+		return admitted ? RowDppMode::Zero : RowDppMode::Unsupported;
 	}
 	// Each host subgroup must hold whole guest rows and no ghost lanes: a wave32
 	// fragment, a native wave32 compute wave, or one 32-lane half of a split
@@ -777,7 +834,19 @@ static bool row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const
 	const bool whole_rows = pixel && !fragment_compute
 	                            ? spirv.GetPsInputInfo() != nullptr && spirv.GetPsInputInfo()->required_subgroup_size == 32u
 	                            : spirv.UsesNativeComputeWave();
-	return whole_rows && fragment_row_dpp_wave32_keeps_dst(spirv.GetCode(), inst_index, op);
+	if (!whole_rows)
+	{
+		return RowDppMode::Unsupported;
+	}
+	if (fragment_row_dpp_destination_source(spirv.GetCode(), inst_index, op))
+	{
+		return RowDppMode::Input;
+	}
+	if (!fragment_row_dpp_wave32_keeps_dst(spirv.GetCode(), inst_index, op))
+	{
+		return RowDppMode::Unsupported;
+	}
+	return RowDppMode::Zero;
 }
 
 // Emits the row-class lane permutation for an already-loaded operand inside a
@@ -788,7 +857,7 @@ static bool row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const
 // partial) FI=0 also zeroes sources fetched from EXEC-inactive lanes.
 static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, const String8& result_id,
                                          const String8& input_id, bool input_is_uint, bool exec_guard,
-                                         String8* text)
+                                         bool keep_input, String8* text)
 {
 	String8 head = input_is_uint ? String8("\n        %dpp_bits_<result> = OpCopyObject %uint %<in>\n")
 	                             : String8("\n        %dpp_bits_<result> = OpBitcast %uint %<in>\n");
@@ -801,7 +870,7 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
        %dpp_ok_<result> = OpLogicalAnd %bool %dpp_bounds_<result> %dpp_oob_<result>
   %dpp_clamped_<result> = OpExtInst %uint %GLSL_std_450 UMin %dpp_target_<result> %dpp_last_<result>
 <exec_guard>    %dpp_fetch_<result> = OpGroupNonUniformShuffle %uint %uint_3 %dpp_bits_<result> %dpp_clamped_<result>
-    %dpp_value_<result> = OpSelect %uint <ok> %dpp_fetch_<result> %<zero>
+    %dpp_value_<result> = OpSelect %uint <ok> %dpp_fetch_<result> %<fallback>
 )";
 	// FI=0 substitutes zero when the fetched source lane is EXEC-inactive.
 	// %exec_lane_lo holds this lane's bit (exec_lo is a mask word in compute and
@@ -845,7 +914,8 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 	            .ReplaceStr("<lane_15>", spirv->GetConstantUint(15u))
 	            .ReplaceStr("<lane_16>", spirv->GetConstantUint(16u))
 	            .ReplaceStr("<step>", spirv->GetConstantUint(control & 15u))
-	            .ReplaceStr("<zero>", spirv->GetConstantUint(0u));
+	            .ReplaceStr("<zero>", spirv->GetConstantUint(0u))
+            .ReplaceStr("<fallback>", keep_input ? (String8("%dpp_bits_") + result_id) : spirv->GetConstantUint(0u));
 	return true;
 }
 
@@ -856,7 +926,8 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 {
 	if (!operand_dpp_supported(op))
 	{
-		if (!row_dpp_supported(*spirv, op, index))
+		const RowDppMode mode = row_dpp_mode(*spirv, op, index);
+		if (mode == RowDppMode::Unsupported)
 		{
 			return false;
 		}
@@ -865,7 +936,8 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 		// EXEC is full and the extra shuffle would be a no-op.
 		const bool exec_guard = !op.dpp_fetch_inactive && !(spirv->GetCode().GetType() == ShaderType::Pixel &&
 		                                                    ShaderFragmentWaveInsideRegion(spirv->GetCode(), index.ToUint32()));
-		return operand_dpp_row_permute_uint(spirv, op, result_id, input_id, input_is_uint, exec_guard, text);
+		return operand_dpp_row_permute_uint(spirv, op, result_id, input_id, input_is_uint, exec_guard,
+		                                   mode == RowDppMode::Input, text);
 	}
 	const auto control = op.dpp_ctrl;
 	const auto ctrl    = spirv->GetConstantUint(control);
@@ -946,7 +1018,7 @@ bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, 
 
 	if (op.dpp)
 	{
-		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && row_dpp_mode(*spirv, op, index) == RowDppMode::Unsupported)
 		{
 			return false;
 		}
@@ -1005,7 +1077,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 	EXIT_IF(load == nullptr);
 	if (op.dpp)
 	{
-		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && row_dpp_mode(*spirv, op, index) == RowDppMode::Unsupported)
 		{
 			return false;
 		}
@@ -1125,7 +1197,7 @@ bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id
 	{
 		// DPP transforms source zero before the ALU operation, not only V_MOV.
 		// Keep the full-mask quad-permutation subset shared by all consumers.
-		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && row_dpp_mode(*spirv, op, index) == RowDppMode::Unsupported)
 		{
 			return false;
 		}

@@ -1908,6 +1908,29 @@ Known approximations and debt recorded by this chain:
   fixture used there creates single-mip images, so the test needs a variant
   that creates a mip chain and reads every level back, and it must compare
   each level's rows against the guest bytes of that level of the GFX10 chain.
+- **The row-DPP emitter gap is closed for the destination-source shape.**
+  The hub's first gameplay draw (1920x1080, three colour targets, subgroup 64,
+  pc 0x568) uses `VMaxF32 v8, v8, v8` whose first source carries a row-class
+  DPP (control 0x111, the row bshift, bound_ctrl 0). The emitter refused it:
+  the row-DPP tier admitted a bound_ctrl=0 shift that leaves the row only for
+  the zero-identity operations that keep the destination (or/xor/add), and a
+  maximum does not preserve the destination there.
+  Measured with a temporary tier probe: the module is a compute module with
+  whole rows and a native wave, so the refusal was exactly the
+  keep-destination rule and nothing else.
+  The tier now classifies the operation instead of admitting a fixed set. When
+  the permuted source and the other source are the destination register and
+  the operation is idempotent (min, max, or, xor, and), a lane that reads
+  outside the row keeps the destination under both readings of the hardware
+  contract, so the operation may run with the lane's own source value
+  substituted for the missing one. The lowering selects that value instead of
+  zero for this shape (`RowDppMode::Input`); the proven zero substitution of
+  the keep-destination shapes is unchanged.
+  Verified: the program translates and the run reaches the hub load; the full
+  unit suite passes (2,484 tests, 2,473 passed, 11 skipped, 0 failed). The
+  draw is still refused afterwards by the transport participation proof
+  ("fragment row DPP source participation is unproven (neutral values do not
+  prove helper recovery)"), which is the next gate.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
