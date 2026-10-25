@@ -4,6 +4,44 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Range-query caches invalidate only overlapping spans (2026-10-24)
+
+- **Observed** (beat 'em up gameplay, Intel A770, strict run at the 60 fps
+  present limit): after the record below, `BindVertexBuffers` held 28% of the
+  CP thread and its vertex-buffer `CreateObject` 19.5%, with `Free` 7.4% and
+  `CreateBlock` 4.3%. Temporary counters (removed) showed about 90% of vertex
+  bindings refusing the transient snapshot because the range overlaps a
+  writable storage buffer (compute writes the vertex data), so the binding
+  creates and reclaims objects every draw. Each block create or delete
+  invalidated the overlap-snapshot cache (4,096 slots) and the per-heap
+  adaptive cache (up to 4,096) by scanning every slot: about 3.94 us per call
+  for the two together, plus 1.02 us in the materialization cache.
+- **Fix** (`GpuMemoryRangeQueryCache.h`): `GpuMemoryRangeSpanIndex` keeps the
+  slots of both range caches in ordered sets by span start, one set per span
+  length class (4 KiB, 64 KiB, 1 MiB, 16 MiB, 256 MiB, longer). A class of
+  spans at most `bound` bytes long can only overlap a range from a start
+  within `bound` bytes below it, so invalidation visits only those slots.
+  Store, invalidation and `Reserve` keep the index in step with the slots.
+- **Result:** the two range caches fell from 3.94 to 0.18 us per block call
+  in the intro cutscene; in gameplay (three times the block churn) all three
+  caches together cost about 1.35 us per call, against about 5 us before.
+- **Excluded:** the same index in `GpuMemoryMaterializationCache`, replacing
+  its clean-range replay of the store log. Recording invalidates the same
+  attachment ranges every draw, and the writer's own entries survive those
+  invalidations, so every call walked all of them: in the racing title the
+  index walk took about 42% of the CP thread and the run fell from 60 to
+  12 fps (anime fighter 49 -> 32, isometric roguelike 60 -> 48). The
+  materialization cache keeps its clean-range replay.
+- **Verified:** unit tests pass (2465, with two new range-cache cases: a long
+  query invalidated from its last byte in every length class, and a replaced
+  query invalidated only by its own range), graphics diagnostics integration
+  passes (15). Regression sweep with no stop: racing 60 fps, anime fighter
+  46.7 fps in the tutorial (more frames than the previous sweep), isometric
+  roguelike 60 fps; the insect platformer sequel held 60 fps.
+- **Open:** vertex bindings over GPU-written storage still create and reclaim
+  objects every draw (`multi_vertex_mixed` peer reclaim); that churn, not the
+  invalidation, is the remaining cost.
+
 ## Dirty-page tracker admits 4 GiB of live ranges (2026-10-24)
 
 - **Observed** (beat 'em up intro cutscene and gameplay, Intel A770, strict

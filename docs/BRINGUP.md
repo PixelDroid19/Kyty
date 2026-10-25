@@ -109,6 +109,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Range-query caches invalidate only overlapping spans (2026-10-24)
   - Dirty-page tracker admits 4 GiB of live ranges (2026-10-24)
   - Physical device-address scans visit only partly imported ranges (2026-10-24)
   - Object range queries indexed by block size (2026-10-24)

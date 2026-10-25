@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -126,6 +127,78 @@ private:
 	bool                            m_valid       = false;
 };
 
+// Slots of a range cache by the span they cover, so a range invalidation
+// visits only the slots whose span can overlap it. Spans are grouped by
+// length: a class whose spans are at most `bound` bytes long only holds an
+// overlapping span that starts within `bound` bytes below the range.
+class GpuMemoryRangeSpanIndex final
+{
+	using Span = std::pair<uint64_t, uint64_t>;
+	using Set  = std::set<std::pair<uint64_t, uint32_t>>;
+
+	static constexpr std::array<uint64_t, 5> kClassBounds = {uint64_t {1} << 12u, uint64_t {1} << 16u, uint64_t {1} << 20u,
+	                                                         uint64_t {1} << 24u, uint64_t {1} << 28u};
+
+public:
+	void Clear()
+	{
+		for (auto& spans: m_classes)
+		{
+			spans.clear();
+		}
+	}
+
+	// `previous` is the slot's current span, {0, 0} when it has none.
+	void Store(uint32_t slot, Span previous, Span span)
+	{
+		if (previous.second == 0u)
+		{
+			m_classes[ClassOf(span)].insert({span.first, slot});
+			return;
+		}
+		auto node          = m_classes[ClassOf(previous)].extract({previous.first, slot});
+		node.value().first = span.first;
+		m_classes[ClassOf(span)].insert(std::move(node));
+	}
+
+	void Erase(uint32_t slot, Span span) { m_classes[ClassOf(span)].erase({span.first, slot}); }
+
+	// Slots whose span may overlap [address, end); the caller checks each span.
+	const std::vector<uint32_t>& Candidates(uint64_t address, uint64_t end)
+	{
+		m_candidates.clear();
+		for (size_t c = 0; c < m_classes.size(); ++c)
+		{
+			const auto& spans = m_classes[c];
+			auto        it    = spans.begin();
+			if (c < kClassBounds.size() && address >= kClassBounds[c])
+			{
+				it = spans.lower_bound({address - kClassBounds[c] + 1u, 0u});
+			}
+			for (; it != spans.end() && it->first < end; ++it)
+			{
+				m_candidates.push_back(it->second);
+			}
+		}
+		return m_candidates;
+	}
+
+private:
+	static size_t ClassOf(Span span)
+	{
+		const uint64_t length = span.second - span.first;
+		size_t         c      = 0;
+		while (c < kClassBounds.size() && length > kClassBounds[c])
+		{
+			++c;
+		}
+		return c;
+	}
+
+	std::array<Set, kClassBounds.size() + 1u> m_classes;
+	std::vector<uint32_t>                     m_candidates;
+};
+
 // Bounded direct-mapped memoization for exact range queries. Collisions only
 // replace entries; full-key comparison makes them harmless to correctness.
 //
@@ -187,8 +260,10 @@ public:
 			return;
 		}
 		const size_t slot = static_cast<size_t>(key.Hash()) & (Capacity - 1u);
-		m_entries[slot]   = Entry {m_epoch, key, value};
-		m_spans[slot]     = key.Span();
+		const auto   span = key.Span();
+		m_index.Store(static_cast<uint32_t>(slot), m_spans[slot], span);
+		m_entries[slot] = Entry {m_epoch, key, value};
+		m_spans[slot]   = span;
 	}
 
 	void Invalidate()
@@ -210,10 +285,10 @@ public:
 		{
 			return;
 		}
-		// Every object creation invalidates its range; scan the compact spans
-		// and read a full entry only where its span overlaps.
+		// Every object creation invalidates its range; read a full entry only
+		// where its span overlaps.
 		const uint64_t end = size > std::numeric_limits<uint64_t>::max() - address ? std::numeric_limits<uint64_t>::max() : address + size;
-		for (size_t slot = 0; slot < Capacity; ++slot)
+		for (const uint32_t slot: m_index.Candidates(address, end))
 		{
 			if (m_spans[slot].second <= address || m_spans[slot].first >= end)
 			{
@@ -223,6 +298,7 @@ public:
 			if (!entry.has_value() || entry->epoch != m_epoch || entry->key.Overlaps(address, size))
 			{
 				entry.reset();
+				m_index.Erase(slot, m_spans[slot]);
 				m_spans[slot] = {0u, 0u};
 			}
 		}
@@ -231,6 +307,7 @@ public:
 private:
 	std::array<std::optional<Entry>, Capacity>          m_entries {};
 	std::array<std::pair<uint64_t, uint64_t>, Capacity> m_spans {};
+	GpuMemoryRangeSpanIndex                             m_index;
 	uint64_t                                            m_epoch = 1u;
 };
 
@@ -265,6 +342,7 @@ public:
 		{
 			m_entries.assign(wanted, std::nullopt);
 			m_spans.assign(wanted, {0u, 0u});
+			m_index.Clear();
 		}
 	}
 
@@ -291,8 +369,10 @@ public:
 			return;
 		}
 		const size_t slot = static_cast<size_t>(key.Hash()) & (m_entries.size() - 1u);
-		m_entries[slot]   = Entry {m_epoch, key, value};
-		m_spans[slot]     = key.Span();
+		const auto   span = key.Span();
+		m_index.Store(static_cast<uint32_t>(slot), m_spans[slot], span);
+		m_entries[slot] = Entry {m_epoch, key, value};
+		m_spans[slot]   = span;
 	}
 
 	void InvalidateRange(uint64_t address, uint64_t size)
@@ -302,7 +382,7 @@ public:
 			return;
 		}
 		const uint64_t end = size > std::numeric_limits<uint64_t>::max() - address ? std::numeric_limits<uint64_t>::max() : address + size;
-		for (size_t slot = 0; slot < m_entries.size(); ++slot)
+		for (const uint32_t slot: m_index.Candidates(address, end))
 		{
 			if (m_spans[slot].second <= address || m_spans[slot].first >= end)
 			{
@@ -312,6 +392,7 @@ public:
 			if (!entry.has_value() || entry->epoch != m_epoch || entry->key.Overlaps(address, size))
 			{
 				entry.reset();
+				m_index.Erase(slot, m_spans[slot]);
 				m_spans[slot] = {0u, 0u};
 			}
 		}
@@ -320,6 +401,7 @@ public:
 private:
 	std::vector<std::optional<Entry>>          m_entries;
 	std::vector<std::pair<uint64_t, uint64_t>> m_spans;
+	GpuMemoryRangeSpanIndex                    m_index;
 	uint64_t                                   m_epoch = 1u;
 };
 
