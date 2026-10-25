@@ -380,14 +380,17 @@ inline bool GpuMemoryContentFollowsGuestBytes(GpuMemoryContentOrigin origin)
 // (captured: a 0x30000 storage view at the base of a 0x120000 texture, and a
 // 0x120000 six-layer view over the exact range of a texture of another shape,
 // in recycled allocations that render targets and vertex buffers also
-// describe; and a view inside a 0x1e0000 texture that is the only parent).
-// Only the CPU upload proves the texture holds no bytes newer than guest memory.
+// describe; a view inside a 0x1e0000 texture that is the only parent; and a
+// 0x30000 view inside a 1248x1440 texture invalidated by a write-back, beside a
+// render target and a read-only storage buffer). Only a CPU upload or a
+// write-back invalidation proves the texture holds no bytes newer than guest
+// memory.
 inline bool GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                          GpuMemoryContentOrigin existing_origin, GpuMemoryObjectType incoming_type)
 {
 	return existing_type == GpuMemoryObjectType::Texture &&
 	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals) &&
-	       existing_origin == GpuMemoryContentOrigin::CpuUpload && incoming_type == GpuMemoryObjectType::StorageTexture;
+	       GpuMemoryContentFollowsGuestBytes(existing_origin) && incoming_type == GpuMemoryObjectType::StorageTexture;
 }
 
 // Sampled Texture whose pixels came from a render target (materialized from it,

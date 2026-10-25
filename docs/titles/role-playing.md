@@ -4,6 +4,35 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: storage views on the traveler map (2026-10-25)
+
+- **Symptom.** With the garbage-collector timeout gone (record below),
+  about half of the cold runs stopped on the traveler map with a strict
+  `!create_all_the_same` at `GpuMemoryCreate.cpp:2558`.
+- **First refusal.** A new 0x30000 128x128 eight-level storage view
+  (tile mode 27) inside a recycled allocation that a live render target,
+  a read-only vertex buffer (crossing), a read-only storage buffer whose
+  write-back was complete, and a 1248x1440 sampled texture all describe.
+  The texture's origin was `AliasInvalidation`: a linked view's
+  write-back had already put the newer bytes in guest memory, and the
+  texture reloads them at its next use. `links_cpu_texture` already
+  required `GpuMemoryContentFollowsGuestBytes` and an upload newer than
+  the last device write, but `GpuMemoryAllowsStorageTextureInsideCpuTexture`
+  accepted only `CpuUpload`. It now accepts both origins of
+  `GpuMemoryContentFollowsGuestBytes`, as the sampled-texture-inside
+  case already did.
+- **Second refusal.** Once past that, a 0x60000 view grew over that
+  0x30000 prefix, beside the live render target and a 0x1e8480 read-only
+  CPU-uploaded vertex buffer containing it. The storage-over-caches
+  path links such a buffer (`GpuMemoryAllowsStorageTextureInsideVertexCache`).
+  The storage-array growth path had no case for it, so it now links the
+  buffer too.
+- **Result.** Intel Arc A770, Mesa ANV 26.2.5, `None` optimization,
+  120 s runs on the menus route. With the first change only: one clean
+  run, one stop at the second refusal. With both: 2 runs with no strict
+  stop and no fault. The traveler map renders, and choosing a traveler
+  starts the story load. Unit suite 113/113.
+
 ## Role-playing title: cold-boot garbage-collector timeout from compile stalls (2026-10-25)
 
 - **Symptom.** About 3 of 5 cold-cache strict runs of the menus route
@@ -34,7 +63,7 @@ record. Titles are named descriptively only (`AGENTS.md`).
   `KYTY_SHADER_OPTIMIZATION=Performance` still selects the optimizer.
 - **Result.** No garbage-collector fault in 2 cold runs with `None`.
   The runs now reach the traveler map and expose the next stop: a
-  storage-texture overlap refusal (see below).
+  storage-texture overlap refusal (record above).
 - **Exclusions.**
   - First-parent bisection pointed at the object size-class index
     (c0995a60). Wrong: the fault is intermittent; that commit reverted
