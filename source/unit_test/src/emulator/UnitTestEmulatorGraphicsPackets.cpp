@@ -1001,6 +1001,162 @@ TEST(EmulatorGraphicsPackets, DcbSetUcRegistersIndirectGetSizeMatchesItsWriter)
 	EXPECT_EQ(Gen5::GraphicsDcbSetUcRegistersIndirectGetSize(), 16u);
 }
 
+
+TEST(EmulatorGraphicsPackets, DcbEventWriteGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t agc_event = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x39u, &agc_event);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 4);
+	EXPECT_EQ(Gen5::GraphicsDcbEventWriteGetSize(0x39u), 16u);
+
+	cb.cursor_up = storage;
+	auto* short_form = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x00u, nullptr);
+	ASSERT_NE(short_form, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(Gen5::GraphicsDcbEventWriteGetSize(0x00u), 8u);
+}
+
+TEST(EmulatorGraphicsPackets, AcbEventWriteGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsAcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x00u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(Gen5::GraphicsAcbEventWriteGetSize(), 8u);
+}
+
+TEST(EmulatorGraphicsPackets, AcbAcquireMemGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t agc_base = 0u;
+
+	auto* cmd = Gen5::GraphicsAcbAcquireMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, &agc_base, 0x1000ull, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 8);
+	EXPECT_EQ(Gen5::GraphicsAcbAcquireMemGetSize(), 32u);
+}
+
+TEST(EmulatorGraphicsPackets, AcbCopyDataGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsAcbCopyData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u, 0x1000ull, 0u, 0u, 0x2000ull, 4u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 6);
+	EXPECT_EQ(Gen5::GraphicsAcbCopyDataGetSize(), 24u);
+}
+
+TEST(EmulatorGraphicsPackets, AcbDmaDataGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsAcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u, 0x1000ull, 0u, 0u, 0x2000ull, 0x100u, 0u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 7);
+	EXPECT_EQ(Gen5::GraphicsAcbDmaDataGetSize(), 28u);
+}
+
 TEST(EmulatorGraphicsPackets, CbDispatchMatchesItsReportedHardwarePacketSize)
 {
 	if (!Config::IsInitialized())

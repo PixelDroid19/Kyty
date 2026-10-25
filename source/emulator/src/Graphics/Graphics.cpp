@@ -4267,7 +4267,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 	}
 	if (event_type > 0x3fu) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event_type > 0x3fu condition ignored (continuing)\n"); }
 
-	const bool addressed = address != nullptr && event_type == 0x39u;
+	const bool addressed = address != nullptr && (event_type & 0xfeu) == 0x38u;
 	if (address != nullptr && !addressed)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address supplied for an event without an addressed packet form (continuing)\n");
@@ -4294,6 +4294,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 	cmd[1] = event_type;
 
 	return cmd;
+}
+
+// sceAgcDcbEventWriteGetSize: the event type selects the packet form, the
+// addressed one taking twice the words of the short one.
+uint32_t KYTY_SYSV_ABI GraphicsDcbEventWriteGetSize(uint8_t event_type)
+{
+	return (event_type & 0xfeu) == 0x38u ? 16u : 8u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf)
@@ -4378,6 +4385,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbDmaData(CommandBuffer* buf, uint8_t destinati
 	// The compute queue has no caller-supplied engine selector or parser-block flag.
 	return GraphicsDcbDmaData(buf, 0, destination, destination_cache_policy, destination_address, source,
 	                         source_cache_policy, source_address, byte_count, wait_for_previous, write_confirm, 0);
+}
+
+// sceAgcAcbDmaDataGetSize: the async transfer writes the same packet as the
+// draw command buffer form.
+uint32_t KYTY_SYSV_ABI GraphicsAcbDmaDataGetSize()
+{
+	return 28u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
@@ -4818,9 +4832,16 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 	return GraphicsDcbWaitRegMem(buf, size, compare_function, 0, cache_policy, address, reference, mask, poll_cycles);
 }
 
-uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address)
+uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type)
 {
-	return GraphicsDcbEventWrite(buf, event_type, address);
+	// The async form has no address: its packet is always the short one.
+	return GraphicsDcbEventWrite(buf, event_type, nullptr);
+}
+
+// sceAgcAcbEventWriteGetSize: the async event write is always the short form.
+uint32_t KYTY_SYSV_ABI GraphicsAcbEventWriteGetSize()
+{
+	return 8u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsAcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
@@ -4834,6 +4855,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbAcquireMem(CommandBuffer* buf, uint32_t gcr_c
 {
 	// ACB form fixes engine=1 (ME) and cb_db_op=0.
 	return GraphicsDcbAcquireMem(buf, 1, 0, gcr_cntl, base, size_bytes, poll_cycles);
+}
+
+// sceAgcAcbAcquireMemGetSize: the async acquire writes the same packet as the
+// draw command buffer form.
+uint32_t KYTY_SYSV_ABI GraphicsAcbAcquireMemGetSize()
+{
+	return 32u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsAcbResetQueue(CommandBuffer* buf, uint32_t op)
@@ -4902,6 +4930,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbCopyData(CommandBuffer* buf, uint8_t dst, uin
 	const auto dcb_src = (src == 5 ? static_cast<uint8_t>(5u << 1u) : src);
 	return GraphicsDcbCopyData(buf, dst, dst_cache_policy, dst_address, dcb_src, src_cache_policy, src_address_or_immediate, item_size,
 	                           write_confirm);
+}
+
+// sceAgcAcbCopyDataGetSize: the async copy writes the same packet as the draw
+// command buffer form.
+uint32_t KYTY_SYSV_ABI GraphicsAcbCopyDataGetSize()
+{
+	return 24u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbPushMarker(CommandBuffer* buf, const char* str, uint32_t /*color*/)

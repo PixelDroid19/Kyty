@@ -143,6 +143,11 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("xSAR0LTcRKM", Gen5::GraphicsCbJump);        // sceAgcDcbJump
 	LIB_FUNC("e1DFTg+Sd8U", Gen5::GraphicsCbJump);        // sceAgcAcbJump
 	LIB_FUNC("VEGu4dixjUg", Gen5::GraphicsCbJumpGetSize); // sceAgcDcbJumpGetSize
+	LIB_FUNC("C4l9fB17t8w", Gen5::GraphicsDcbEventWriteGetSize);
+	LIB_FUNC("Y-5vneiBtzk", Gen5::GraphicsAcbEventWriteGetSize);
+	LIB_FUNC("ewobAQeMo5k", Gen5::GraphicsAcbAcquireMemGetSize);
+	LIB_FUNC("CbQh3DKMSno", Gen5::GraphicsAcbCopyDataGetSize);
+	LIB_FUNC("M0ttm8h7SKA", Gen5::GraphicsAcbDmaDataGetSize);
 	LIB_FUNC("PxKWV2fVAps", Gen5::GraphicsAcbDispatchIndirectGetSize);
 	LIB_FUNC("-vnlTPPXPrw", Gen5::GraphicsDcbAcquireMemGetSize);
 	LIB_FUNC("b5u0Jzm8TF8", Gen5::GraphicsDcbCopyDataGetSize);

@@ -274,7 +274,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_ou
 // observed on Gen5 libSceAgc (no op argument on WaitRegMem; slim AcquireMem).
 uint32_t* KYTY_SYSV_ABI GraphicsAcbWaitRegMem(CommandBuffer* buf, uint8_t size, uint8_t compare_function, uint8_t cache_policy,
                                               const volatile void* address, uint64_t reference, uint64_t mask, uint32_t poll_cycles);
-uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type);
 uint32_t* KYTY_SYSV_ABI GraphicsAcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
                                              const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm);
 uint32_t* KYTY_SYSV_ABI GraphicsAcbAcquireMem(CommandBuffer* buf, uint32_t gcr_cntl, const volatile void* base, uint64_t size_bytes,
@@ -296,6 +296,11 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t in
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances);
 uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32_t cache_policy, const void* target, uint32_t size_dw);
 uint32_t KYTY_SYSV_ABI  GraphicsCbJumpGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbDmaDataGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbCopyDataGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbAcquireMemGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbEventWriteGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbEventWriteGetSize(uint8_t event_type);
 uint32_t KYTY_SYSV_ABI GraphicsAcbDispatchIndirectGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsDcbAcquireMemGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsDcbCopyDataGetSize();
