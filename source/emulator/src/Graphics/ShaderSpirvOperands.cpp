@@ -1,5 +1,7 @@
 #include "ShaderSpirvInternal.h"
 
+#include <cstdio>
+
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
 
@@ -528,7 +530,12 @@ SpirvValue operand_variable_to_str(ShaderOperand op, int shift)
 {
 	SpirvValue ret;
 
-	EXIT_IF(op.size <= shift || shift < 0);
+	if (op.size <= shift || shift < 0)
+	{
+		::fprintf(stderr, "operand word out of range: type=%d reg=%d size=%d shift=%d\n", static_cast<int>(op.type),
+		          op.register_id, op.size, shift);
+		EXIT_IF(op.size <= shift || shift < 0);
+	}
 
 	switch (op.type)
 	{
