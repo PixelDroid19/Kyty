@@ -1900,13 +1900,16 @@ Known approximations and debt recorded by this chain:
   points at a load-dependent hang in the hub's own work rather than a fixed
   defect in the copy. Next step: capture the hub frames before the hang and
   compare a run with the new path disabled at the same scripted route.
-- **Capture evidence for the hub is still open.** A run with the native
-  capture directory enabled (same scripted route) reaches the hub as the two
-  runs above do, but no capture is written before the run ends: the capture
-  milestones had not fired yet at that point, so the visual state of the
-  tutorial scene after the alias fix is not scored. Next step: keep the
-  capture-enabled route running until the milestones fire and score the hub
-  frames with `scripts/kyty_capture.py`.
+- **The device lost is intermittent: two of three runs.** A third run with
+  the native capture directory enabled (same scripted route, same build)
+  reaches the hub and keeps running until the 900 s cap with no fence
+  failure, while the two earlier runs die with the queue-8 device lost. The
+  failure is therefore load dependent, not a fixed defect of the new copy.
+- **Capture evidence for the hub is still open.** That third run writes no
+  capture before the cap: the capture milestones had not fired at that point,
+  so the visual state of the tutorial scene after the alias fix is not
+  scored. Next step: keep the capture-enabled route running until the
+  milestones fire and score the hub frames with `scripts/kyty_capture.py`.
 - **Open defect found while measuring the layout.** The guest seed of a
   linear multi-level storage view uploads every level with a halved pitch
   (`Objects/StorageTexture.cpp`, the `mip_pitch` loop in `update_func`),
