@@ -109,6 +109,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
 - [2D Unity action title](titles/2d-unity-action.md)
   - 2D Unity action title: native plugin waits through `_umtx_op` (2026-10-22)
 - [Cross-title records (2026-10-10 onward)](bringup/cross-title.md)
+  - Render-target scaling on the AMD integrated GPU (2026-10-25)
   - Vertex objects cover the declared stream (2026-10-24)
   - In-memory database name ends with an empty parameter list (2026-10-24)
   - Range-cache span index links slots in place (2026-10-24)

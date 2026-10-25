@@ -173,6 +173,9 @@ host contract is in [docs/HOST_RUNTIME.md](docs/HOST_RUNTIME.md).
 - `KYTY_PRESENT_FPS_LIMIT=60` caps host presents per second.
 - `KYTY_RENDER_RESOLUTION_MODE` and the related options select the internal
   render resolution; see [docs/render-resolution.md](docs/render-resolution.md).
+  On integrated GPUs, `KYTY_RENDER_RESOLUTION_SCOPE=RenderTargets` (the
+  launcher's Quality, Balanced and Performance presets) also scales offscreen
+  targets and can raise the frame rate of titles bound by pixel work.
 - `KYTY_PAD_RECORD=<file>` records the pad input of a manual session, and
   `KYTY_PAD_SCRIPT=<file>` replays it; see
   [docs/input-replay.md](docs/input-replay.md).
