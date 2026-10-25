@@ -152,3 +152,13 @@ make a Windows build or runtime path complete. No Windows toolchain is
 available in the current workspace, so Windows runtime support remains
 unverified and must not be inferred from the portable protocol types or from a
 successful non-Windows build.
+
+## Open defects
+
+- `RuntimeDiagnosticsSubsystem`
+  (`source/emulator/src/DevTools/RuntimeSubsystem.cpp:6`) is compiled but never
+  registered. `source/KytyScripts.cpp:190` prepares the worker session and
+  starts the publisher, and `source/KytyScripts.cpp:267` shuts it down, so
+  `Emulator::DevTools::Initialize()` only reports the prepared flag and no
+  subsystem calls it. Suggested direction: delete the subsystem and the
+  `Initialize()` entry point, or register it and move the lifecycle into it.
