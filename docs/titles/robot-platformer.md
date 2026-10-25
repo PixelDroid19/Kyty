@@ -2006,6 +2006,18 @@ Known approximations and debt recorded by this chain:
   destination, and `DST_U` says whether the other half is zeroed or kept
   (`firmware/work/evidence/sdwa-isa.txt`). The half conversion now accepts
   that form and merges the result into the half the fields name.
+- **The hub's pixel program now translates end to end.** With the lane
+  permute, the mixed FMA variants and the narrowing SDWA translated, the hub's
+  first gameplay draw compiles and the run reaches the level's own resources
+  (`hub_crashsite_tutorial`) and its sublevel locator. What remains at that
+  draw is not a translation gap: the run dies with the queue-8 device lost,
+  and the kernel journal records an RCS job timeout with an Xe device
+  coredump (`Tile0: GT0: Engine reset: engine_class=rcs`, `Timedout job:
+  seqno=136669`). The same class was recorded at 01:19, before the permute
+  and the mixed FMA existed, so the hang is not a product of this session's
+  shader work. The coredump of that job is the evidence for the next step:
+  the hub's draw is the first one that runs the fragment transport's compute
+  shade pass at scale, and the hang is in the compute engine.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
