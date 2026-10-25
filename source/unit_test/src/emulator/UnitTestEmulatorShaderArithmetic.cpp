@@ -408,7 +408,7 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 {
 	Initialize();
 	const auto subb = Parse({Sop2Word(0x05u, 3u, 0u, 1u), kEnd}, ShaderType::Vertex);
-	const auto subb_proof = ShaderProveNggFrontBodyLaneLocal(subb, 0u, {});
+	const auto subb_proof = ShaderProveNggFrontBodyLaneLocal(subb, 0u, 64u, {});
 	if (subb_proof.lane_local || subb_proof.refused_pc != 0u || subb_proof.reason == nullptr ||
 	    std::string_view(subb_proof.reason) != "S_SUBB_U32 borrow-in is not modeled by the NGG front proof")
 	{
@@ -416,7 +416,7 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	}
 
 	const auto ashr = Parse({Sop2Word(0x23u, 3u, 0u, 2u), kEnd}, ShaderType::Vertex);
-	const auto ashr_proof = ShaderProveNggFrontBodyLaneLocal(ashr, 0u, {});
+	const auto ashr_proof = ShaderProveNggFrontBodyLaneLocal(ashr, 0u, 64u, {});
 	if (ashr_proof.lane_local || ashr_proof.refused_pc != 0u || ashr_proof.reason == nullptr ||
 	    std::string_view(ashr_proof.reason) != "S_ASHR_I64 pair shifts are not modeled by the NGG front proof")
 	{

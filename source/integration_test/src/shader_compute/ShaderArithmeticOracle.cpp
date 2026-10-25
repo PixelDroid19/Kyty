@@ -274,7 +274,7 @@ bool RunBatch(VulkanComputeProbe& probe, const ShaderComputeInputInfo& input, Op
 	{
 		const std::string name = "v" + std::to_string(kFirstResultVgpr + k);
 		// VGPR results are float-declared slots; the probe reloads them as float and bitcasts to uint.
-		observations.push_back({name + "_low", name + "_high", true});
+		observations.push_back({name, true});
 	}
 
 	Kyty::String8 source;
@@ -457,12 +457,15 @@ int ExecuteRequest(const Arguments& args)
 	input.threads_num[0]  = 64u;
 	input.threads_num[1]  = input.threads_num[2] = 1u;
 	input.thread_ids_num  = 1;
-	if (Kyty::Libs::Graphics::ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
+	if (Kyty::Libs::Graphics::ShaderBuildSplitComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
 	    ShaderComputeWaveLayoutStatus::Supported)
 	{
 		std::fprintf(stderr, "paired64 layout is not supported by the selected device\n");
 		return kExitUnavailable;
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 
 	std::vector<uint32_t> results(args.count);
 	for (uint32_t batch = 0; batch < dispatches; ++batch)

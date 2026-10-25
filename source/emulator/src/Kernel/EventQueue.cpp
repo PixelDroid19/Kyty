@@ -148,7 +148,7 @@ void KernelWaitEqueueClosed(KernelEqueueIdentity identity)
 		{
 			return;
 		}
-		g_equeue_lifetime_changed.Wait(&g_equeue_lifetime_mutex);
+		PthreadInterruptibleWait(&g_equeue_lifetime_changed, &g_equeue_lifetime_mutex);
 	}
 }
 
@@ -259,10 +259,10 @@ int KernelEqueuePrivate::WaitForEvents(KernelEvent* ev, int num, uint32_t micros
 
 		if (micros == 0)
 		{
-			m_cond_var.Wait(&m_mutex);
+			PthreadInterruptibleWait(&m_cond_var, &m_mutex);
 		} else
 		{
-			m_cond_var.WaitFor(&m_mutex, micros - elapsed);
+			PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, micros - elapsed);
 		}
 
 		elapsed = static_cast<uint32_t>(t.GetTimeS() * 1000000.0);
@@ -839,7 +839,7 @@ int KYTY_SYSV_ABI KernelDeleteEqueue(KernelEqueue eq)
 		{
 			break;
 		}
-		g_equeue_lifetime_changed.Wait(&g_equeue_lifetime_mutex);
+		PthreadInterruptibleWait(&g_equeue_lifetime_changed, &g_equeue_lifetime_mutex);
 	}
 	EXIT_IF(g_equeue_lifetimes.erase(eq) != 1);
 	const auto [closing, inserted] = g_closing_equeue_generations.emplace(identity.generation, eq);

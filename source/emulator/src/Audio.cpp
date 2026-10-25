@@ -1,6 +1,7 @@
 #include "Emulator/Audio.h"
 #include "Emulator/AudioHost.h"
 #include "Emulator/AudioVideoBackend.h"
+#include "Emulator/Host/Clock.h"
 #include "Emulator/VideoFrameMemory.h"
 
 #include "Kyty/Core/Common.h"
@@ -278,6 +279,8 @@ int KYTY_SYSV_ABI AudioOutOutputs(AudioOutOutputParam* param, uint32_t num)
 		params[i].data   = param[i].ptr;
 	}
 
+	audio->WaitWhileHostPaused();
+
 	uint32_t samples_num = 0;
 	return audio->AudioOutOutputs(params, num, &samples_num) ? static_cast<int>(samples_num) : AUDIO_OUT_ERROR_INVALID_PORT;
 }
@@ -299,6 +302,8 @@ int KYTY_SYSV_ABI AudioOutOutput(int handle, const void* ptr)
 
 	params[0].handle = HostAudio::Id(handle);
 	params[0].data   = ptr;
+
+	audio->WaitWhileHostPaused();
 
 	uint32_t samples_num = 0;
 	return audio->AudioOutOutputs(params, 1, &samples_num) ? static_cast<int>(samples_num) : AUDIO_OUT_ERROR_INVALID_PORT;
@@ -610,7 +615,7 @@ static void CloseHostSinkLocked(ContextSlot* ctx)
 	ctx->host_handle = 0;
 }
 
-static bool SubmitMixedGrain(int host_handle, const float* mix, uint32_t frames)
+static bool SubmitMixedGrain(int host_handle, const float* mix, uint32_t frames, uint64_t* wake_deadline_us)
 {
 	if (host_handle == 0 || mix == nullptr || frames == 0)
 	{
@@ -629,7 +634,7 @@ static bool SubmitMixedGrain(int host_handle, const float* mix, uint32_t frames)
 	params[0].handle = HostAudio::Id(host_handle);
 	params[0].data   = mix;
 	uint32_t samples = 0;
-	return audio->AudioOutOutputs(params, 1, &samples);
+	return audio->AudioOutQueue(params, 1, &samples, wake_deadline_us);
 }
 
 // sceAudioOut2Initialize (NID g2tViFIohHE)
@@ -799,6 +804,14 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 		return AUDIO_OUT_ERROR_INVALID_FLAG;
 	}
 
+	// Host pause waits happen before g_audio_out2_mutex is taken, so a paused push
+	// cannot stall the other AudioOut2 calls.
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio != nullptr)
+	{
+		audio->WaitWhileHostPaused();
+	}
+
 	std::unique_lock lock(g_audio_out2_mutex);
 	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
 	{
@@ -821,7 +834,10 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 			return AUDIO_OUT_ERROR_PORT_FULL;
 		}
 		lock.unlock();
-		std::this_thread::sleep_for(grain_duration);
+		{
+			Kernel::PthreadInterruptibleScope any_syscall;
+			std::this_thread::sleep_for(grain_duration);
+		}
 		waited_for_queue = true;
 		lock.lock();
 		if (!ctx.used || ctx.generation != context_generation)
@@ -879,7 +895,10 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 		if (blocking != 0 && !waited_for_queue)
 		{
 			lock.unlock();
-			std::this_thread::sleep_for(grain_duration);
+			{
+				Kernel::PthreadInterruptibleScope any_syscall;
+				std::this_thread::sleep_for(grain_duration);
+			}
 			lock.lock();
 			if (!ctx.used || ctx.generation != context_generation)
 			{
@@ -890,9 +909,15 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 	}
 	// Keeping the context lock through submission prevents close/recreate from
 	// rebinding this grain to a recycled sink handle.
-	if (!EnsureHostSinkLocked(&ctx) || !SubmitMixedGrain(ctx.host_handle, mix.data(), grain))
+	uint64_t wake_deadline = 0;
+	if (!EnsureHostSinkLocked(&ctx) || !SubmitMixedGrain(ctx.host_handle, mix.data(), grain, &wake_deadline))
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "AudioOut2: host submit failed for ctx %d\n", handle);
+		// Host shutdown closes the sinks and clears the host audio while guest
+		// threads may still push; only a live host makes a failed submit news.
+		if (audio != nullptr && !audio->ShuttingDown())
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "AudioOut2: host submit failed for ctx %d\n", handle);
+		}
 		return AUDIO_OUT_ERROR_INVALID_PORT;
 	}
 	for (auto* port: consumed_ports)
@@ -901,6 +926,13 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 	}
 	ctx.queue_used++;
 
+	// Pace to the host sink after unlocking: the wait is a safe point, and a
+	// thread stopped there must not hold the context lock.
+	lock.unlock();
+	{
+		Kernel::PthreadInterruptibleScope any_syscall;
+		Kyty::Emulator::HostClock::SleepUntil(wake_deadline);
+	}
 	return OK;
 }
 

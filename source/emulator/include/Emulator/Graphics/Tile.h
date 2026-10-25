@@ -178,13 +178,13 @@ struct TileBc1BufferCopyLayout
 [[nodiscard]] bool TileDetileComputeStyle(const TileDetileRequest& request);
 
 // Regression-only selector for the production CPU dispatcher. This lets the
-// Standard4KB test prove the contiguous-copy branch is selected without adding
-// counters or synchronization to the texture hot path.
+// standard-swizzle tests prove the contiguous-copy branch is selected without
+// adding counters or synchronization to the texture hot path.
 enum class TileDetileProductionPath : uint32_t
 {
 	Unsupported,
 	ComputeStyle,
-	Standard4KBContiguous,
+	StandardContiguous,
 };
 
 [[nodiscard]] TileDetileProductionPath TileDetileGetProductionPathForTesting(const TileDetileRequest& request);

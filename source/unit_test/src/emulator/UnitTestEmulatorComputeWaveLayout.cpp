@@ -57,7 +57,7 @@ static void ExpectRejected(const ShaderComputeWaveRequest& request, const Shader
 {
 	auto       layout = SentinelLayout();
 	const auto before = layout;
-	EXPECT_EQ(ShaderBuildPairedComputeWaveLayout(request, capabilities, &layout), expected_status);
+	EXPECT_EQ(ShaderBuildSplitComputeWaveLayout(request, capabilities, &layout), expected_status);
 	ExpectLayoutUnchanged(layout, before);
 }
 
@@ -67,9 +67,9 @@ TEST(EmulatorComputeWaveLayout, PreservesGuestGroupAndPairsFourWaves)
 	const auto              capabilities = SupportedCapabilities();
 	ShaderComputeWaveLayout layout {};
 
-	ASSERT_EQ(ShaderBuildPairedComputeWaveLayout(request, capabilities, &layout), ShaderComputeWaveLayoutStatus::Supported);
-	EXPECT_EQ(layout.strategy, ShaderComputeWaveStrategy::Paired64On32);
-	EXPECT_EQ(layout.physical_local[0], 128u);
+	ASSERT_EQ(ShaderBuildSplitComputeWaveLayout(request, capabilities, &layout), ShaderComputeWaveLayoutStatus::Supported);
+	EXPECT_EQ(layout.strategy, ShaderComputeWaveStrategy::Split64On32);
+	EXPECT_EQ(layout.physical_local[0], 256u);
 	EXPECT_EQ(layout.physical_local[1], 1u);
 	EXPECT_EQ(layout.physical_local[2], 1u);
 	EXPECT_EQ(layout.guest_local[0], 16u);
@@ -78,7 +78,7 @@ TEST(EmulatorComputeWaveLayout, PreservesGuestGroupAndPairsFourWaves)
 	EXPECT_EQ(layout.guest_wave_size, 64u);
 	EXPECT_EQ(layout.native_subgroup_size, 32u);
 	EXPECT_EQ(layout.waves, 4u);
-	EXPECT_EQ(layout.banks, 2u);
+	EXPECT_EQ(layout.banks, 1u);
 	EXPECT_EQ(layout.lds_dwords, 1664u);
 }
 
@@ -89,7 +89,7 @@ TEST(EmulatorComputeWaveLayout, AcceptsEitherDocumentedWaveLaunchOrder)
 		auto request          = SupportedRequest();
 		request.dispatch_mode = mode;
 		ShaderComputeWaveLayout layout {};
-		EXPECT_EQ(ShaderBuildPairedComputeWaveLayout(request, SupportedCapabilities(), &layout), ShaderComputeWaveLayoutStatus::Supported);
+		EXPECT_EQ(ShaderBuildSplitComputeWaveLayout(request, SupportedCapabilities(), &layout), ShaderComputeWaveLayoutStatus::Supported);
 	}
 }
 
@@ -100,7 +100,7 @@ TEST(EmulatorComputeWaveLayout, MapsVerifiedFullWaveShapesToCheckedPhysicalX)
 		uint32_t local[3];
 		uint32_t physical_x;
 	};
-	const std::array<Case, 3> cases {{{{64, 1, 1}, 32}, {{256, 1, 1}, 128}, {{16, 16, 1}, 128}}};
+	const std::array<Case, 3> cases {{{{64, 1, 1}, 64}, {{256, 1, 1}, 256}, {{16, 16, 1}, 256}}};
 
 	for (const auto& test_case: cases)
 	{
@@ -111,7 +111,7 @@ TEST(EmulatorComputeWaveLayout, MapsVerifiedFullWaveShapesToCheckedPhysicalX)
 		}
 
 		ShaderComputeWaveLayout layout {};
-		ASSERT_EQ(ShaderBuildPairedComputeWaveLayout(request, SupportedCapabilities(), &layout), ShaderComputeWaveLayoutStatus::Supported);
+		ASSERT_EQ(ShaderBuildSplitComputeWaveLayout(request, SupportedCapabilities(), &layout), ShaderComputeWaveLayoutStatus::Supported);
 		EXPECT_EQ(layout.physical_local[0], test_case.physical_x);
 		EXPECT_EQ(layout.physical_local[1], 1u);
 		EXPECT_EQ(layout.physical_local[2], 1u);
@@ -127,13 +127,13 @@ TEST(EmulatorComputeWaveLayout, ZeroGroupsReturnNoWorkWithoutChangingOutput)
 	auto       layout     = SentinelLayout();
 	const auto before     = layout;
 
-	EXPECT_EQ(ShaderBuildPairedComputeWaveLayout(request, SupportedCapabilities(), &layout), ShaderComputeWaveLayoutStatus::NoWork);
+	EXPECT_EQ(ShaderBuildSplitComputeWaveLayout(request, SupportedCapabilities(), &layout), ShaderComputeWaveLayoutStatus::NoWork);
 	ExpectLayoutUnchanged(layout, before);
 }
 
 TEST(EmulatorComputeWaveLayout, RejectsNullOutput)
 {
-	EXPECT_EQ(ShaderBuildPairedComputeWaveLayout(SupportedRequest(), SupportedCapabilities(), nullptr),
+	EXPECT_EQ(ShaderBuildSplitComputeWaveLayout(SupportedRequest(), SupportedCapabilities(), nullptr),
 	          ShaderComputeWaveLayoutStatus::InvalidArgument);
 }
 
@@ -155,7 +155,7 @@ TEST(EmulatorComputeWaveLayout, RejectsInvalidOrOverflowingLocalProducts)
 
 // Since 704f4ad3 a trailing partial wave is admitted: the wave count is the
 // ceiling of the guest invocations over 64 and the missing lanes stay inactive
-// through the valid-lane mask, so each wave still occupies a whole 32-lane bank.
+// from the start (EXEC clear), so each wave still occupies two whole 32-lane host subgroups.
 TEST(EmulatorComputeWaveLayout, AdmitsPartialWavesAndSizesPhysicalXByCeilingWaves)
 {
 	struct Case
@@ -164,7 +164,7 @@ TEST(EmulatorComputeWaveLayout, AdmitsPartialWavesAndSizesPhysicalXByCeilingWave
 		uint32_t waves;
 		uint32_t physical_x;
 	};
-	const std::array<Case, 6> cases {{{1, 1, 32}, {32, 1, 32}, {33, 1, 32}, {64, 1, 32}, {65, 2, 64}, {129, 3, 96}}};
+	const std::array<Case, 6> cases {{{1, 1, 64}, {32, 1, 64}, {33, 1, 64}, {64, 1, 64}, {65, 2, 128}, {129, 3, 192}}};
 
 	for (const auto& test_case: cases)
 	{
@@ -174,7 +174,7 @@ TEST(EmulatorComputeWaveLayout, AdmitsPartialWavesAndSizesPhysicalXByCeilingWave
 		request.local[2] = 1;
 
 		ShaderComputeWaveLayout layout {};
-		ASSERT_EQ(ShaderBuildPairedComputeWaveLayout(request, SupportedCapabilities(), &layout), ShaderComputeWaveLayoutStatus::Supported)
+		ASSERT_EQ(ShaderBuildSplitComputeWaveLayout(request, SupportedCapabilities(), &layout), ShaderComputeWaveLayoutStatus::Supported)
 		    << test_case.invocations;
 		EXPECT_EQ(layout.waves, test_case.waves) << test_case.invocations;
 		EXPECT_EQ(layout.physical_local[0], test_case.physical_x) << test_case.invocations;
@@ -185,12 +185,12 @@ TEST(EmulatorComputeWaveLayout, AdmitsPartialWavesAndSizesPhysicalXByCeilingWave
 TEST(EmulatorComputeWaveLayout, StillChecksHostLimitsForPartialWaves)
 {
 	auto request     = SupportedRequest();
-	request.local[0] = 65; // two waves, 64 physical lanes
+	request.local[0] = 65; // two waves, four host subgroups, 128 physical lanes
 	request.local[1] = 1;
 	request.local[2] = 1;
 
 	auto caps          = SupportedCapabilities();
-	caps.max_subgroups = 1;
+	caps.max_subgroups = 3;
 	ExpectRejected(request, caps, ShaderComputeWaveLayoutStatus::HostLimitExceeded);
 }
 
@@ -210,11 +210,19 @@ TEST(EmulatorComputeWaveLayout, CeilingCannotWrapNonemptyWorkToZero)
 		caps.max_local_size[0] = std::numeric_limits<uint32_t>::max();
 		caps.max_invocations  = std::numeric_limits<uint32_t>::max();
 		caps.max_subgroups    = std::numeric_limits<uint32_t>::max();
+		caps.max_shared_bytes = std::numeric_limits<uint32_t>::max();
+		const uint64_t expected_waves      = (static_cast<uint64_t>(request.local[0]) + 63u) / 64u;
+		const uint64_t expected_physical_x = expected_waves * 64u;
+		// The split width waves * 64 wraps uint32_t for the same last 63 values, which must be refused too.
+		if (expected_physical_x > std::numeric_limits<uint32_t>::max())
+		{
+			ExpectRejected(request, caps, ShaderComputeWaveLayoutStatus::HostLimitExceeded);
+			continue;
+		}
 		ShaderComputeWaveLayout layout {};
-		ASSERT_EQ(ShaderBuildPairedComputeWaveLayout(request, caps, &layout), ShaderComputeWaveLayoutStatus::Supported);
-		const uint64_t expected_waves = (static_cast<uint64_t>(request.local[0]) + 63u) / 64u;
+		ASSERT_EQ(ShaderBuildSplitComputeWaveLayout(request, caps, &layout), ShaderComputeWaveLayoutStatus::Supported);
 		EXPECT_EQ(layout.waves, expected_waves);
-		EXPECT_EQ(layout.physical_local[0], expected_waves * 32u);
+		EXPECT_EQ(layout.physical_local[0], expected_physical_x);
 	}
 }
 
@@ -271,7 +279,7 @@ TEST(EmulatorComputeWaveLayout, RejectsEveryExceededPhysicalAndLdsLimit)
 {
 	auto caps              = SupportedCapabilities();
 	auto request           = SupportedRequest();
-	caps.max_local_size[0] = 127;
+	caps.max_local_size[0] = 255;
 	ExpectRejected(request, caps, ShaderComputeWaveLayoutStatus::HostLimitExceeded);
 
 	caps                   = SupportedCapabilities();
@@ -283,15 +291,15 @@ TEST(EmulatorComputeWaveLayout, RejectsEveryExceededPhysicalAndLdsLimit)
 	ExpectRejected(request, caps, ShaderComputeWaveLayoutStatus::HostLimitExceeded);
 
 	caps                 = SupportedCapabilities();
-	caps.max_invocations = 127;
+	caps.max_invocations = 255;
 	ExpectRejected(request, caps, ShaderComputeWaveLayoutStatus::HostLimitExceeded);
 
 	caps               = SupportedCapabilities();
-	caps.max_subgroups = 3;
+	caps.max_subgroups = 7;
 	ExpectRejected(request, caps, ShaderComputeWaveLayoutStatus::HostLimitExceeded);
 
 	caps                  = SupportedCapabilities();
-	caps.max_shared_bytes = 6655;
+	caps.max_shared_bytes = 6751;
 	ExpectRejected(request, caps, ShaderComputeWaveLayoutStatus::HostLimitExceeded);
 
 	request.lds_dwords    = std::numeric_limits<uint32_t>::max() / 4u + 1u;
@@ -308,7 +316,7 @@ TEST(EmulatorComputeWaveLayout, ChecksEachDispatchAxisAtAndAboveItsLimit)
 		auto request         = SupportedRequest();
 		request.groups[axis] = caps.max_group_count[axis];
 		ShaderComputeWaveLayout layout {};
-		ASSERT_EQ(ShaderBuildPairedComputeWaveLayout(request, caps, &layout), ShaderComputeWaveLayoutStatus::Supported);
+		ASSERT_EQ(ShaderBuildSplitComputeWaveLayout(request, caps, &layout), ShaderComputeWaveLayoutStatus::Supported);
 
 		request.groups[axis] += 1u;
 		ExpectRejected(request, caps, ShaderComputeWaveLayoutStatus::HostLimitExceeded);

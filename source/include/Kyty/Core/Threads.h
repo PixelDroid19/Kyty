@@ -109,6 +109,12 @@ public:
 	void Signal();
 	void SignalAll();
 
+	// Host memory of the native condition object. A waiter sleeps on a word
+	// inside it, which lets code that inspects an interrupted thread tell this
+	// wait apart from the locks around it.
+	[[nodiscard]] const void* NativeObject() const;
+	[[nodiscard]] size_t      NativeObjectSize() const;
+
 	KYTY_CLASS_NO_COPY(CondVar);
 
 private:

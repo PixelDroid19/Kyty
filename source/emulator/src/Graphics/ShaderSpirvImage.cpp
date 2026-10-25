@@ -119,28 +119,10 @@ bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usa
 		}
 	}
 
-	// Sampled and storage images occupy distinct SPIR-V descriptor arrays. The
-	// sampled path has independent 2D and 2D-array bindings; storage images are
-	// still one typed array and must reject a mixed view shape until it receives
-	// the same split representation.
-	if (has_arrayed && has_flat)
-	{
-		if (usage == ShaderTextureUsage::ReadWrite) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage == ShaderTextureUsage::ReadWrite condition ignored (continuing)\n"); }
-		return false;
-	}
-	return has_arrayed;
-}
-
-bool UsesVolumeStorageImages(const ShaderBindResources* bind)
-{
-	if (bind == nullptr) { return false; }
-	for (int i = 0; i < bind->textures2D.textures_num; ++i)
-	{
-		const auto& descriptor = bind->textures2D.desc[i];
-		if (descriptor.usage == ShaderTextureUsage::ReadWrite &&
-		    ShaderResolvedSampledTextureShape(descriptor) == ShaderGen5SampledTextureShape::ThreeDimensional) { return true; }
-	}
-	return false;
+	// Sampled images have independent 2D and 2D-array bindings and storage
+	// images one aliased view per shape (ShaderPlanStorageImages), so a mixed
+	// set has no single arrayed declaration.
+	return has_arrayed && !has_flat;
 }
 
 static bool UsesThreeDimensionalImages(const ShaderBindResources* bind)
@@ -784,17 +766,53 @@ bool UsesMixedSampledImageNumericTypes(const ShaderBindResources* bind)
 	return profile.has_unsigned && profile.has_floating_point;
 }
 
+// Exact SPIR-V formats of the writable uint views, in view-type order after the
+// formatless float type. No integer domain is represented as generic R32ui.
+// StorageImageExtendedFormats is a Vulkan-supported SPIR-V capability;
+// shaderStorageImageExtendedFormats only guarantees format availability. The
+// resource path still queries support for the actual format/usage.
+struct StorageImageUintFormat
+{
+	uint16_t    guest_format;
+	const char* image_format;
+	const char* name;
+	bool        extended;
+};
+static constexpr StorageImageUintFormat STORAGE_IMAGE_UINT_FORMATS[ShaderStorageImagePlan::TYPES - 1] = {
+    {5u, "R8ui", "U8", true},          {11u, "R16ui", "U16", true},     {20u, "R32ui", "U", false},
+    {60u, "Rgba8ui", "U8x4", false}, {62u, "Rg32ui", "U32x2", true}, {75u, "Rgba32ui", "U32x4", false}};
+
+// The view type of a writable Gen5 format: 0 is the formatless float type,
+// 1 + i is STORAGE_IMAGE_UINT_FORMATS[i]. Returns -1 with the refusal reason.
+static int StorageImageViewType(uint16_t format, const char** reason)
+{
+	const auto numeric = VulkanGen5ImageNumericType(format);
+	if (numeric == GuestImageNumericType::SignedInteger)
+	{
+		*reason = "signed writable images require a signed descriptor bank";
+		return -1;
+	}
+	if (numeric == GuestImageNumericType::Unsupported || !VulkanSupportsGen5ImageFormat(GuestImageUsage::Storage, format))
+	{
+		*reason = "unsupported writable image format";
+		return -1;
+	}
+	if (numeric == GuestImageNumericType::FloatingPoint) { return 0; }
+	for (int type = 1; type < ShaderStorageImagePlan::TYPES; ++type)
+	{
+		if (STORAGE_IMAGE_UINT_FORMATS[type - 1].guest_format == format) { return type; }
+	}
+	*reason = "writable uint format has no exact SPIR-V declaration";
+	return -1;
+}
+
 ShaderStorageImagePlan ShaderPlanStorageImages(const ShaderCode& code, const ShaderBindResources* bind)
 {
 	ShaderStorageImagePlan plan {};
+	std::fill(std::begin(plan.descriptor_view), std::end(plan.descriptor_view), static_cast<int8_t>(-1));
 	if (bind == nullptr) { return plan; }
 	const auto& textures = bind->textures2D;
 	plan.has_storage = textures.textures2d_storage_num > 0;
-	if (!Config::IsNextGen())
-	{
-		plan.formatless = plan.has_storage;
-		return plan;
-	}
 	auto reject = [&plan](const char* reason, int descriptor = -1, uint16_t format = 0u, uint32_t pc = 0u)
 	{
 		plan.supported = false;
@@ -809,12 +827,7 @@ ShaderStorageImagePlan ShaderPlanStorageImages(const ShaderCode& code, const Sha
 	{
 		return reject("invalid writable descriptor count");
 	}
-	const bool atomic_alias = code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
 	int writable_count = 0;
-	int first_float = -1;
-	int first_uint = -1;
-	uint16_t uint_format = 0;
-	bool has_flat = false;
 	bool has_array = false;
 	bool has_volume = false;
 	for (int index = 0; index < textures.textures_num; ++index)
@@ -823,53 +836,30 @@ ShaderStorageImagePlan ShaderPlanStorageImages(const ShaderCode& code, const Sha
 		if (descriptor.usage != ShaderTextureUsage::ReadWrite) { continue; }
 		++writable_count;
 		const auto format = descriptor.texture.Format();
-		const auto numeric = VulkanGen5ImageNumericType(format);
-		if (numeric == GuestImageNumericType::SignedInteger)
-		{
-			return reject("signed writable images require a signed descriptor bank", index, format);
-		}
-		if (numeric == GuestImageNumericType::Unsupported || !VulkanSupportsGen5ImageFormat(GuestImageUsage::Storage, format))
-		{
-			return reject("unsupported writable image format", index, format);
-		}
-		const auto shape = ShaderResolvedSampledTextureShape(descriptor);
+		const char* reason = nullptr;
+		// Gen4 binds every storage image as a formatless float 2D view.
+		const bool gen5 = Config::IsNextGen();
+		const int type = gen5 ? StorageImageViewType(format, &reason) : 0;
+		if (type < 0) { return reject(reason, index, format); }
+		const auto shape = gen5 ? ShaderResolvedSampledTextureShape(descriptor) : ShaderGen5SampledTextureShape::TwoDimensional;
 		has_volume |= shape == ShaderGen5SampledTextureShape::ThreeDimensional;
 		has_array |= shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
-		has_flat |= shape == ShaderGen5SampledTextureShape::TwoDimensional;
-		if (static_cast<int>(has_flat) + static_cast<int>(has_array) + static_cast<int>(has_volume) > 1)
-		{
-			return reject("mixed 2D, 2D-array and 3D writable images require separate shape banks", index, format);
-		}
-		if (numeric == GuestImageNumericType::FloatingPoint)
-		{
-			if (first_float < 0) { first_float = index; }
-			continue;
-		}
-		if (atomic_alias && (format != 20u || descriptor.texture.Type() != 9u))
-		{
-			return reject("atomic uint alias requires 2D R32_UINT writable descriptors", index, format);
-		}
-		if (first_uint >= 0 && uint_format != format)
-		{
-			return reject("mixed writable uint formats require separate typed descriptor banks", index, format);
-		}
-		first_uint = index;
-		uint_format = format;
+		const int view = static_cast<int>(shape) * ShaderStorageImagePlan::TYPES + type;
+		plan.descriptor_view[index] = static_cast<int8_t>(view);
+		plan.view_used[view] = true;
+		plan.primary_view = plan.primary_view < 0 ? view : plan.primary_view;
+		plan.formatless |= type == 0;
+		plan.extended_formats |= type > 0 && STORAGE_IMAGE_UINT_FORMATS[type - 1].extended;
 	}
 	if (writable_count != textures.textures2d_storage_num)
 	{
 		return reject("writable descriptor count differs from storage binding count");
 	}
-	if (first_float >= 0 && first_uint >= 0 && !atomic_alias)
-	{
-		return reject("mixed float and uint writable images require the R32 atomic alias or separate typed banks",
-		              first_uint, uint_format);
-	}
-	plan.three_dimensional = has_volume;
+	if (!Config::IsNextGen()) { return plan; }
 	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
 		const auto& inst = code.GetInstructions().At(index);
-		if (ShaderIsImageAtomic(inst.type) && (has_volume || !ShaderImageAtomicResourceSupported(code, index, *bind)))
+		if (ShaderIsImageAtomic(inst.type) && !ShaderImageAtomicResourceSupported(code, index, *bind))
 		{
 			return reject("image atomic requires a proven 2D R32_UINT writable descriptor", -1, 0u, inst.pc);
 		}
@@ -878,27 +868,25 @@ ShaderStorageImagePlan ShaderPlanStorageImages(const ShaderCode& code, const Sha
 			return reject("packed-mip store requires a non-array 2D writable image", -1, 0u, inst.pc);
 		}
 	}
-	plan.unsigned_primary = first_uint >= 0 && first_float < 0;
-	plan.formatless = first_float >= 0;
-	if (plan.unsigned_primary)
-	{
-		// SPIR-V image-format/VkFormat compatibility is exact, not just numeric
-		// class compatibility. No integer domain is represented as generic R32ui.
-		// StorageImageExtendedFormats is a Vulkan-supported SPIR-V capability;
-		// shaderStorageImageExtendedFormats only guarantees format availability.
-		// The resource path still queries support for the actual format/usage.
-		switch (uint_format)
-		{
-			case 5u: plan.image_format = "R8ui"; plan.extended_formats = true; break;
-			case 11u: plan.image_format = "R16ui"; plan.extended_formats = true; break;
-			case 20u: plan.image_format = "R32ui"; break;
-			case 60u: plan.image_format = "Rgba8ui"; break;
-			case 62u: plan.image_format = "Rg32ui"; plan.extended_formats = true; break;
-			case 75u: plan.image_format = "Rgba32ui"; break;
-			default: return reject("writable uint format has no exact SPIR-V declaration", first_uint, uint_format);
-		}
-	}
 	return plan;
+}
+
+ShaderStorageImageView ShaderStorageImageViewOf(const ShaderStorageImagePlan& plan, int view)
+{
+	EXIT_IF(view < 0 || view >= ShaderStorageImagePlan::VIEWS || !plan.view_used[view]);
+	static constexpr const char* SHAPE_NAMES[ShaderStorageImagePlan::SHAPES] = {"", "A", "V"};
+	const int type = view % ShaderStorageImagePlan::TYPES;
+	ShaderStorageImageView result;
+	result.shape = static_cast<ShaderGen5SampledTextureShape>(view / ShaderStorageImagePlan::TYPES);
+	result.unsigned_integer = type != 0;
+	result.image_format = type == 0 ? "Unknown" : STORAGE_IMAGE_UINT_FORMATS[type - 1].image_format;
+	// The primary view keeps the plain names; the others are named by shape and type.
+	const auto name = view == plan.primary_view ? String8("") :
+	                  String8::FromPrintf("%s%s", SHAPE_NAMES[view / ShaderStorageImagePlan::TYPES],
+	                                      type == 0 ? "F" : STORAGE_IMAGE_UINT_FORMATS[type - 1].name);
+	result.image_type = "ImageL" + name;
+	result.variable = "textures2D_L" + name;
+	return result;
 }
 
 static ShaderStorageImagePlan RequireStorageImagePlan(const ShaderCode& code, const ShaderBindResources* bind)
@@ -912,21 +900,22 @@ static ShaderStorageImagePlan RequireStorageImagePlan(const ShaderCode& code, co
 	return plan;
 }
 
-bool UsesUnsignedIntegerStorageImages(const ShaderCode& code, const ShaderBindResources* bind)
+Vector<ShaderStorageImageView> ShaderStorageImageViews(const ShaderCode& code, const ShaderBindResources* bind)
 {
-	return RequireStorageImagePlan(code, bind).unsigned_primary;
+	// WriteHeader calls this before emitting any image declaration. Unsupported
+	// domains terminate before invalid SPIR-V.
+	const auto plan = RequireStorageImagePlan(code, bind);
+	Vector<ShaderStorageImageView> views;
+	for (int view = 0; view < ShaderStorageImagePlan::VIEWS; ++view)
+	{
+		if (plan.view_used[view]) { views.Add(ShaderStorageImageViewOf(plan, view)); }
+	}
+	return views;
 }
 
 bool UsesFormatlessStorageImages(const ShaderCode& code, const ShaderBindResources* bind)
 {
-	// WriteHeader calls this before emitting any image declaration, including
-	// typed-only modules. Unsupported mixes terminate before invalid SPIR-V.
 	return RequireStorageImagePlan(code, bind).formatless;
-}
-
-const char* GetStorageImageFormat(const ShaderCode& code, const ShaderBindResources* bind)
-{
-	return RequireStorageImagePlan(code, bind).image_format;
 }
 
 bool UsesExtendedStorageImageFormats(const ShaderCode& code, const ShaderBindResources* bind)
@@ -934,22 +923,18 @@ bool UsesExtendedStorageImageFormats(const ShaderCode& code, const ShaderBindRes
 	return RequireStorageImagePlan(code, bind).extended_formats;
 }
 
-static bool ResolveStorageImageStoreNumericType(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind,
-                                                int user_data_register_base, bool* uint_alias, bool* uint_values)
+static ShaderStorageImageView StorageImageViewOfDescriptor(const ShaderCode& code, const ShaderBindResources& bind, int descriptor)
 {
-	*uint_alias = false;
-	*uint_values = false;
-	if (Config::IsNextGen())
-	{
-		// WriteHeader has admitted the complete domain. Resolve this particular
-		// writable descriptor for both store forms, preserving descriptor-flow
-		// proofs and avoiding any dependency on sampled numeric classification.
-		const int descriptor = ShaderFindImageStorageTextureDescriptor(code, index, bind, user_data_register_base);
-		if (descriptor < 0) { return false; }
-		*uint_values = VulkanGen5ImageNumericType(bind.textures2D.desc[descriptor].texture.Format()) ==
-		               GuestImageNumericType::UnsignedInteger;
-		*uint_alias = *uint_values && code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap});
-	}
+	const auto plan = RequireStorageImagePlan(code, &bind);
+	return ShaderStorageImageViewOf(plan, plan.descriptor_view[descriptor]);
+}
+
+bool ResolveStorageImageView(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind, int user_data_register_base,
+                             ShaderStorageImageView* view)
+{
+	const int descriptor = ShaderFindImageStorageTextureDescriptor(code, index, bind, user_data_register_base);
+	if (descriptor < 0) { return false; }
+	*view = StorageImageViewOfDescriptor(code, bind, descriptor);
 	return true;
 }
 
@@ -3607,7 +3592,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleCd_VdataVaddr6StSsMimgDmask)
 {
 	// Quad-uniform supplied slopes make per-invocation Grad preserve the
 	// admitted coarse sample's per-quad LOD. Arbitrary CD gradients are refused.
-	if (spirv->GetHostShaderType() != ShaderType::Pixel || !ShaderImageSampleCdHasQuadUniformGradients(code, index))
+	if (spirv->GetCode().GetType() != ShaderType::Pixel || !ShaderImageSampleCdHasQuadUniformGradients(code, index))
 	{
 		return false;
 	}
@@ -4007,12 +3992,8 @@ static bool EmitStorageImageResinfo(const ShaderCode& code, uint32_t index, int 
 	// a single-mip 2D resource has the same dimensions as that view here.
 	if (!Config::IsNextGen() || texture.Type() != 9u || texture.BaseLevel() != 0u || texture.LastLevel() != 0u ||
 	    texture.MaxMip() != 0u || inst.mimg_dimension != 1u || inst.mimg_dmask == 0u || (inst.mimg_dmask & ~3u) != 0u ||
-	    !ImageResinfoHasZeroLod(code, index) || code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd, ShaderInstructionType::ImageAtomicSwap})) { return false; }
-	for (int resource = 0; resource < bind.textures2D.textures_num; ++resource)
-	{
-		const auto& candidate = bind.textures2D.desc[resource];
-		if (candidate.usage == ShaderTextureUsage::ReadWrite && candidate.texture.Type() != 9u) { return false; }
-	}
+	    !ImageResinfoHasZeroLod(code, index)) { return false; }
+	const auto view = StorageImageViewOfDescriptor(code, bind, descriptor_index);
 	const int components = static_cast<int>((inst.mimg_dmask & 1u) + ((inst.mimg_dmask >> 1u) & 1u));
 	const auto storage_constant = spirv->GetConstantUint(static_cast<uint32_t>(storage_index));
 	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != components || storage_constant.StartsWith("unknown_"))
@@ -4024,7 +4005,8 @@ static bool EmitStorageImageResinfo(const ShaderCode& code, uint32_t index, int 
 %storage_resinfo_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %<storage_index>
 %storage_resinfo_image_<index> = OpLoad %ImageL %storage_resinfo_ptr_<index>
 %storage_resinfo_size_<index> = OpImageQuerySize %v2uint %storage_resinfo_image_<index>
-)").ReplaceStr("<index>", index_string).ReplaceStr("<storage_index>", storage_constant);
+)").ReplaceStr("ImageL", view.image_type).ReplaceStr("textures2D_L", view.variable)
+	  .ReplaceStr("<index>", index_string).ReplaceStr("<storage_index>", storage_constant);
 	int destination = 0;
 	for (uint32_t component = 0; component < 2u; ++component)
 	{
@@ -4534,16 +4516,14 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 			return false;
 		}
 
-		bool uint_alias = false;
-		bool uint_images = false;
-		if (!ResolveStorageImageStoreNumericType(code, index, *bind_info, user_data_register_base, &uint_alias, &uint_images))
+		ShaderStorageImageView view;
+		if (!ResolveStorageImageView(code, index, *bind_info, user_data_register_base, &view))
 		{
 			return false;
 		}
-		const bool arrayed           = !uint_alias && UsesArrayed2dImages(bind_info, ShaderTextureUsage::ReadWrite);
-		// The storage bank is one shape (ShaderPlanStorageImages): 2D, 2D array or
-		// 3D. Sampled 3D textures do not change the storage image's dimensionality.
-		const bool three_dimensional = UsesVolumeStorageImages(bind_info);
+		const bool uint_images       = view.unsigned_integer;
+		const bool arrayed           = view.shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
+		const bool three_dimensional = view.shape == ShaderGen5SampledTextureShape::ThreeDimensional;
 		// DIM states how many coordinates the instruction supplies; the T# type
 		// selects the addressing. A 2D-array store supplies (x, y, slice), which a
 		// 3D resource addresses as (x, y, z). A plain 2D store supplies no z.
@@ -4643,8 +4623,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 		    ((arrayed || three_dimensional) ? (array_window_2d ? String8(" %uint_0") : String8::FromPrintf(" %%t721_%u", index)) :
 		                                       String8(""));
 		*dst_source += String8(text)
-		                   .ReplaceStr("ImageL", uint_alias ? "ImageLU" : "ImageL")
-		                   .ReplaceStr("textures2D_L", uint_alias ? "textures2D_LU" : "textures2D_L")
+		                   .ReplaceStr("ImageL", view.image_type)
+		                   .ReplaceStr("textures2D_L", view.variable)
 		                   .ReplaceStr("<array_coordinate_load>", array_coordinate_load)
 		                   .ReplaceStr("<coordinate_type>", (arrayed || three_dimensional) ? "v3uint" : "v2uint")
 		                   .ReplaceStr("<extent_type>", (arrayed || three_dimensional) ? "v3int" : "v2int")
@@ -4690,12 +4670,13 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 		{
 			return false;
 		}
-		bool uint_alias = false;
-		bool uint_images = false;
-		if (!ResolveStorageImageStoreNumericType(code, index, *bind_info, user_data_register_base, &uint_alias, &uint_images))
+		// The plan admits packed-mip stores only when every writable view is 2D.
+		ShaderStorageImageView view;
+		if (!ResolveStorageImageView(code, index, *bind_info, user_data_register_base, &view))
 		{
 			return false;
 		}
+		const bool uint_images = view.unsigned_integer;
 
 		auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1 = operand_variable_to_str(inst.dst, 1);
@@ -4764,8 +4745,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
          %image_store_mip_merge_<index> = OpLabel
 )";
 		*dst_source += String8(text)
-		                   .ReplaceStr("ImageL", uint_alias ? "ImageLU" : "ImageL")
-		                   .ReplaceStr("textures2D_L", uint_alias ? "textures2D_LU" : "textures2D_L")
+		                   .ReplaceStr("ImageL", view.image_type)
+		                   .ReplaceStr("textures2D_L", view.variable)
 		                   .ReplaceStr("<channel_values>", channel_values)
 		                   .ReplaceStr("<texel_conversion>", uint_images ? "OpBitcast" : "OpCopyObject")
 		                   .ReplaceStr("<image_vector>", uint_images ? "v4uint" : "v4float")

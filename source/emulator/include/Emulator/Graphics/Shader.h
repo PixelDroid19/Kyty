@@ -436,6 +436,7 @@ enum class ShaderInstructionType : uint32_t
 	VCvtPknormI16F32,
 	VCvtPkU16U32,
 	VCvtPkI16I32,
+	VCvtPkU8F32,
 	VCvtU32F32,
 	VExpF32,
 	VExpF16,
@@ -1795,6 +1796,9 @@ struct ShaderDynamicSLoadMapping
 	int                            resource_field_offset = 0;
 	uint32_t                       last_consumer_pc      = 0;
 	bool                           raw_vmem_oob_guarded  = false;
+	// The S_LOAD still reads guest memory; the record only names the bound
+	// resource its consumers sample.
+	bool                           guest_load            = false;
 };
 
 struct ShaderDynamicSLoadMappings
@@ -1811,6 +1815,16 @@ struct ShaderAssembledDescriptor
 	uint32_t consumer_pc    = 0;
 	int      register_id    = 0;
 	int      resource_index = 0;
+};
+
+// An image instruction whose T# or S# reaches it only as a scalar copy of a
+// bound descriptor (S_MOV window shifts): the descriptors it reads, keyed by
+// its pc, -1 where the copy does not resolve to one.
+struct ShaderCopiedImageDescriptor
+{
+	uint32_t consumer_pc   = 0;
+	int      texture_index = -1;
+	int      sampler_index = -1;
 };
 
 enum class ShaderTextureUsage
@@ -1864,6 +1878,9 @@ struct ShaderStorageResources
 	bool                       extended[BUFFERS_MAX]                = {};
 	int                        buffers_num   = 0;
 	int                        binding_index = 0;
+	// Per-buffer page flags that translated stores and atomics set (see
+	// ShaderSpirvStorageWriteMask.h); -1 when the module declares none.
+	int write_mask_binding_index = -1;
 };
 
 // Scalar descriptors with no readable dwords are lowered directly to zero.
@@ -2164,6 +2181,7 @@ struct ShaderBindResources
 	// longer holds its user-data value there (redefined, for example from
 	// s_getpc): they read through the runtime V#, never the descriptor slot.
 	Vector<uint32_t> redefined_descriptor_consumers;
+	Vector<ShaderCopiedImageDescriptor> copied_image_descriptors;
 };
 
 [[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
@@ -2177,7 +2195,9 @@ struct ShaderBindResources
 [[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);
 [[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
 	                                                int user_data_register_base);
-void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base);
+class ShaderCodeResourceMemo;
+void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
+                                           const ShaderCodeResourceMemo* memo = nullptr);
 // Bytes read through a dynamically loaded buffer descriptor: the union of every
 // scalar buffer load that consumes the mapping. False when a consumer reads the
 // descriptor another way or at a non-constant offset.
@@ -2299,9 +2319,11 @@ struct ShaderVertexInputInfo
 	// The host stage draws the output of a merged ES+GS geometry pass instead of
 	// running the guest program (SpirvGenerateGeometryPullSource). Its records carry
 	// geometry_pull_parameters parameters; geometry_pull_layer exports the layer.
+	// Each output group holds geometry_pull_waves waves of records.
 	bool     geometry_pull            = false;
 	bool     geometry_pull_layer      = false;
 	uint32_t geometry_pull_parameters = 0;
+	uint32_t geometry_pull_waves      = 0;
 };
 
 // Bind each merged vertex stream as a ReadOnly raw SSBO so untagged MUBUF
@@ -2457,7 +2479,6 @@ struct ShaderComputeInputInfo
 	uint32_t            dispatch_mode      = 0;
 	uint32_t            threads_num[3]     = {0, 0, 0};
 	uint32_t            lds_dwords         = 0;
-	uint32_t            barrier_workspace_dwords = 0;
 	bool                group_id[3]        = {false, false, false};
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;
@@ -2627,18 +2648,17 @@ struct ShaderUserData
 	uint16_t     sharp_resource_count[4];
 };
 
-class ShaderCodeResourceMemo;
-// Cached scalar flows must correspond to their code stream; EUD descriptor code can differ from general code.
+// Cached scalar flows and memos must correspond to their code stream; EUD descriptor code can differ from general code.
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
-                       int user_data_register_base = 0, bool vertex_resource_types = true,
-                       const ShaderCode* eud_descriptor_code = nullptr, const ShaderScalarFlow* cached_code_flow = nullptr,
-                       const ShaderScalarFlow* cached_eud_flow = nullptr, const ShaderCodeResourceMemo* code_memo = nullptr);
+                       int user_data_register_base = 0, bool vertex_resource_types = true, const ShaderCode* eud_descriptor_code = nullptr,
+                       const ShaderScalarFlow* cached_code_flow = nullptr, const ShaderScalarFlow* cached_eud_flow = nullptr,
+                       const ShaderCodeResourceMemo* code_memo = nullptr, const ShaderCodeResourceMemo* eud_code_memo = nullptr);
 
-[[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num,
-                                                   int eud_pointer_register, const ShaderCode* code,
-                                                   int user_data_register_base, uint32_t* required_end_dw,
-                                                   const ShaderScalarFlow* scalar_flow = nullptr);
+[[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num, int eud_pointer_register,
+                                                  const ShaderCode* code, int user_data_register_base, uint32_t* required_end_dw,
+                                                  const ShaderScalarFlow*       scalar_flow = nullptr,
+                                                  const ShaderCodeResourceMemo* memo        = nullptr);
 [[nodiscard]] bool ShaderGen5EudExpandEndDwordsForSharpImages(const ShaderUserData* user_data, int user_sgpr_num,
                                                                const uint32_t* eud_snapshot, uint32_t snapshot_dwords,
                                                                uint32_t* required_end_dw);

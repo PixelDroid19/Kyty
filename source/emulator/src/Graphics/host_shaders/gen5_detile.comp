@@ -143,8 +143,7 @@ void scatter_raw_render(uint x, uint y)
 	{
 		return;
 	}
-	uint within = bpe == 2u ? sw64k_rx_within_2(x % block_w, y % block_h)
-	                        : sw64k_rx_within(x % block_w, y % block_h, bpe);
+	uint within = bpe == 2u ? sw64k_rx_within_2(x, y) : sw64k_rx_within(x, y, bpe);
 	int destination_byte = int(pc.src_byte_offset) + int(block * 65536u + within);
 	if (destination_byte < 0 || uint(destination_byte) > pc.dst_u32_count * 4u - bpe)
 	{
@@ -316,7 +315,8 @@ uint tiled_byte_offset(uint x, uint y)
 		uint xb       = x / block_w;
 		uint yb       = y / block_h;
 		uint blk_idx  = yb * blocks_x + xb;
-		return blk_idx * 65536u + sw64k_rx_within(x % block_w, y % block_h, bpe);
+		// Surface coordinates: the 8 BPE pattern XORs y6, above its 64-row block.
+		return blk_idx * 65536u + sw64k_rx_within(x, y, bpe);
 	}
 	// 1 = Standard64KB
 	if (pc.layout_kind == 1u)

@@ -937,8 +937,11 @@ static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInput
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
 	if (input_info->native_wave_sensitive)
 	{
-		if (input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native ||
-		    input_info->wave_layout.guest_wave_size != 32u || input_info->required_subgroup_size != 32u)
+		// A split guest wave identifies its halves by SubgroupId, so it always requires the exact width.
+		const bool split = input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
+		if (input_info->required_subgroup_size != 32u ||
+		    (split ? input_info->wave_layout.guest_wave_size != 64u
+		           : input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native || input_info->wave_layout.guest_wave_size != 32u))
 		{
 			EXIT("native-wave compute sensitivity has inconsistent guest-width metadata\n");
 		}
@@ -953,26 +956,13 @@ static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInput
 		native_layout.native_subgroup_size = input_info->required_subgroup_size;
 		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
 		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(native_layout, capabilities, &comp_shader_stage_info,
-		                                                     &required_subgroup_size, selection.require_size, cs_shader.At(1)))
+		                                                     &required_subgroup_size, split || selection.require_size, cs_shader.At(1)))
 		{
 			EXIT("native-wave compute layout lacks full subgroups or exceeds exact-width workgroup limits\n");
 		}
 	} else if (input_info->required_subgroup_size != 0u)
 	{
 		EXIT("compute subgroup-size metadata requires a native-wave sensitivity proof\n");
-	} else if (input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
-	{
-		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
-		const uint64_t shared_dwords = static_cast<uint64_t>(input_info->lds_dwords) + input_info->barrier_workspace_dwords;
-		if (shared_dwords * sizeof(uint32_t) > capabilities.max_shared_bytes)
-		{
-			EXIT("paired-wave compute barrier workspace exceeds the Vulkan shared-memory limit\n");
-		}
-		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(input_info->wave_layout, capabilities,
-		                                                     &comp_shader_stage_info, &required_subgroup_size))
-		{
-			EXIT("paired-wave compute layout is unsupported by the enabled Vulkan subgroup features or limits\n");
-		}
 	}
 
 	const auto&                bind                 = input_info->bind;
@@ -1430,7 +1420,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		}
 	}
 
-	if (Config::GetPrintfDirection() != Log::Direction::Silent)
+	if (Log::ShouldLog(Log::Level::Debug) && Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
 		ShaderDbgDumpInputInfo(vs_input_info);
 		ShaderDbgDumpInputInfo(ps_input_info);
@@ -1786,7 +1776,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 
 	Core::LockGuard lock(m_mutex);
 
-	ShaderDbgDumpInputInfo(input_info);
+	if (Log::ShouldLog(Log::Level::Debug) && Config::GetPrintfDirection() != Log::Direction::Silent)
+	{
+		ShaderDbgDumpInputInfo(input_info);
+	}
 
 	auto cs_id = ShaderGetIdCS(cs_regs, input_info);
 
@@ -1875,6 +1868,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 	id.ids.Add(geometry.primitives_per_group);
 	id.ids.Add(geometry.parameter_count);
 	id.ids.Add(geometry.lds_dwords);
+	id.ids.Add(geometry.waves);
 
 	Pipeline p {};
 	p.cs_shader_id   = id;

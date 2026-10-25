@@ -582,8 +582,45 @@ static void* map_reserved_span(uintptr_t address, uint64_t size, int protect, in
 }
 #endif // KYTY_FIXED_NOREPLACE
 
+#ifdef KYTY_FIXED_NOREPLACE
+// Stores in `found` the first `alignment` multiple at or above `address` whose `size` bytes overlap
+// no mapping in the kernel's list, so a refused fixed mapping skips a whole occupied interval
+// instead of probing it once per alignment step. The list is sorted, so reading stops at the gap.
+static bool find_unmapped_span(uintptr_t address, uint64_t size, uint64_t alignment, uintptr_t last_address, uintptr_t* found)
+{
+	FILE* maps = fopen("/proc/self/maps", "re");
+	if (maps == nullptr)
+	{
+		return false;
+	}
+	uintptr_t candidate = address;
+	uintptr_t begin     = 0;
+	uintptr_t end       = 0;
+	bool      fits      = candidate <= last_address;
+	while (fits && fscanf(maps, "%" SCNxPTR "-%" SCNxPTR "%*[^\n]", &begin, &end) == 2)
+	{
+		if (end <= candidate)
+		{
+			continue;
+		}
+		if (begin >= candidate + size)
+		{
+			break;
+		}
+		fits = try_align_up(end, alignment, &candidate) && candidate <= last_address;
+	}
+	fclose(maps);
+	*found = candidate;
+	return fits;
+}
+#endif // KYTY_FIXED_NOREPLACE
+
 static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, uint64_t alignment)
 {
+	if (size == 0 || size > kGuestHeapHi - kGuestHeapLo)
+	{
+		return MAP_FAILED;
+	}
 	if (alignment == 0)
 	{
 		alignment = 0x1000;
@@ -631,13 +668,24 @@ static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, 
 		printf("[mmap_window] prefer=0x%016" PRIxPTR " size=%" PRIu64 " align=0x%" PRIx64 "\n", start, size, alignment);
 	}
 
-	uint64_t attempts = 0;
-	for (uintptr_t a = start; a + size <= kGuestHeapHi && a + size - 1 <= kGuestVaMax; a += alignment)
+	const uintptr_t last_address = std::min<uintptr_t>(kGuestHeapHi - size, kGuestVaMax - (size - 1));
+	uint64_t        attempts     = 0;
+	uintptr_t       a            = start;
+	while (a <= last_address)
 	{
 		attempts++;
 #ifdef KYTY_FIXED_NOREPLACE
 		// NOLINTNEXTLINE
 		void* ptr = mmap(reinterpret_cast<void*>(a), size, protect, MAP_FIXED_NOREPLACE | flags_base, -1, 0);
+		if (ptr == MAP_FAILED)
+		{
+			// Any refusal other than an occupied span repeats at every address.
+			if (errno != EEXIST || alignment > last_address - a || !find_unmapped_span(a + alignment, size, alignment, last_address, &a))
+			{
+				break;
+			}
+			continue;
+		}
 #else
 		void* ptr = map_reserved_span(a, size, protect, flags_base, -1, 0);
 #endif
@@ -1050,6 +1098,57 @@ bool sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset
 #endif
 }
 
+bool sys_virtual_query_shared_backing_data_pages(void* backing, uint64_t backing_offset, uint64_t size, uint64_t page_size,
+                                                 uint8_t* populated)
+{
+	const auto* shared = static_cast<const SharedBacking*>(backing);
+	if (shared == nullptr || populated == nullptr || page_size == 0 || (backing_offset % page_size) != 0 || (size % page_size) != 0 ||
+	    backing_offset > shared->size || size > shared->size - backing_offset)
+	{
+		return false;
+	}
+#if defined(__linux__) && defined(SEEK_DATA) && defined(SEEK_HOLE)
+	if (shared->fd < 0)
+	{
+		return false;
+	}
+	// The memfd's extents skip a hole in one query, where a page-table or
+	// residency walk visits every page of it.
+	std::memset(populated, 0, static_cast<size_t>(size / page_size));
+	const int      saved_errno = errno;
+	const uint64_t end         = backing_offset + size;
+	bool           ok          = true;
+	for (uint64_t cursor = backing_offset; cursor < end;)
+	{
+		const off_t data = ::lseek(shared->fd, static_cast<off_t>(cursor), SEEK_DATA);
+		if (data < 0)
+		{
+			ok = errno == ENXIO;
+			break;
+		}
+		if (static_cast<uint64_t>(data) >= end)
+		{
+			break;
+		}
+		const off_t hole = ::lseek(shared->fd, data, SEEK_HOLE);
+		if (hole <= data)
+		{
+			ok = false;
+			break;
+		}
+		const uint64_t first = static_cast<uint64_t>(data) / page_size * page_size;
+		const uint64_t last  = std::min(end, (static_cast<uint64_t>(hole) + page_size - 1u) / page_size * page_size);
+		std::memset(populated + (first - backing_offset) / page_size, 1, static_cast<size_t>((last - first) / page_size));
+		cursor = last;
+	}
+	errno = saved_errno;
+	return ok;
+#else
+	std::memset(populated, 1, static_cast<size_t>(size / page_size));
+	return true;
+#endif
+}
+
 bool sys_virtual_query_shared_backing_populated_bytes(void* backing, uint64_t* bytes)
 {
 	const auto* shared = static_cast<const SharedBacking*>(backing);
@@ -1101,6 +1200,16 @@ static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t
 		// NOLINTNEXTLINE
 		ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED_NOREPLACE | MAP_SHARED, backing->fd,
 		           static_cast<off_t>(backing_offset));
+		if (ptr == MAP_FAILED)
+		{
+			// Any refusal other than an occupied span repeats at every address.
+			if (errno != EEXIST || alignment > last_address - address ||
+			    !find_unmapped_span(address + alignment, size, alignment, last_address, &address))
+			{
+				break;
+			}
+			continue;
+		}
 #else
 		ptr = map_reserved_span(address, size, protect, MAP_SHARED, backing->fd, static_cast<off_t>(backing_offset));
 #ifdef __APPLE__

@@ -366,11 +366,15 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 		return true;
 	}
 
-	if (!require_size || layout.strategy != ShaderComputeWaveStrategy::Paired64On32 ||
-	    layout.guest_wave_size != kGuestWaveSize || layout.native_subgroup_size != kNativeSubgroupSize || layout.banks != 2 ||
-	    layout.waves == 0 || !capabilities.size_control_enabled || !capabilities.full_subgroups_enabled ||
-	    !capabilities.compute_required_size_supported || !capabilities.compute_ballot_shuffle_supported ||
-	    capabilities.min_subgroup_size > kNativeSubgroupSize || capabilities.max_subgroup_size < kNativeSubgroupSize)
+	// Split waves use two whole 32-lane subgroups and exchange wave-wide values
+	// through workgroup memory.
+	const uint32_t host_subgroups_per_wave = 2u;
+	const uint32_t exchange_dwords         = kShaderSplitWaveExchangeDwords;
+	if (!require_size || layout.strategy != ShaderComputeWaveStrategy::Split64On32 || layout.guest_wave_size != kGuestWaveSize ||
+	    layout.native_subgroup_size != kNativeSubgroupSize || layout.banks != 1u || layout.waves == 0 ||
+	    !capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
+	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > kNativeSubgroupSize ||
+	    capabilities.max_subgroup_size < kNativeSubgroupSize)
 	{
 		return false;
 	}
@@ -385,11 +389,15 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 		}
 	}
 	uint64_t expected_physical_x = 0;
+	uint64_t host_subgroups = 0;
+	uint64_t wave_exchange_dwords = 0;
 	uint64_t lds_bytes = 0;
 	// The trailing guest wave may be partial.
 	if (guest_invocations / kGuestWaveSize + (guest_invocations % kGuestWaveSize != 0u ? 1u : 0u) != layout.waves ||
-	    !MultiplyU64(layout.waves, kNativeSubgroupSize, &expected_physical_x) ||
-	    !MultiplyU64(layout.lds_dwords, sizeof(uint32_t), &lds_bytes))
+	    !MultiplyU64(layout.waves, host_subgroups_per_wave * kNativeSubgroupSize, &expected_physical_x) ||
+	    !MultiplyU64(layout.waves, host_subgroups_per_wave, &host_subgroups) ||
+	    !MultiplyU64(layout.waves, exchange_dwords, &wave_exchange_dwords) ||
+	    !MultiplyU64(wave_exchange_dwords + layout.lds_dwords, sizeof(uint32_t), &lds_bytes))
 	{
 		return false;
 	}
@@ -399,7 +407,7 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	    layout.physical_local[2] != 1 || layout.physical_local[0] > capabilities.max_local_size[0] ||
 	    layout.physical_local[1] > capabilities.max_local_size[1] ||
 	    layout.physical_local[2] > capabilities.max_local_size[2] ||
-	    expected_physical_x > capabilities.max_invocations || layout.waves > capabilities.max_subgroups ||
+	    expected_physical_x > capabilities.max_invocations || host_subgroups > capabilities.max_subgroups ||
 	    lds_bytes > capabilities.max_shared_bytes)
 	{
 		return false;

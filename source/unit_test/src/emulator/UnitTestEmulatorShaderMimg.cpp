@@ -1706,17 +1706,11 @@ void EnableMimgModuleValidation()
 // The descriptor is registered as the T# type defines it: types 12 and 13 in the array bank,
 // 8 and 9 in the flat bank. Format 22 is R32_FLOAT and 20 is R32_UINT.
 Core::String8 EmitValidatedMimgTailModule(const ShaderCode& code, bool writable, bool sampler = false, uint32_t texture_type = 9u,
-                                          uint32_t texture_format = 22u, bool paired_compute_wave = false)
+                                          uint32_t texture_format = 22u)
 {
 	ShaderPixelInputInfo pixel {};
 	ShaderComputeInputInfo compute {};
 	compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
-	if (paired_compute_wave)
-	{
-		compute.threads_num[0] = 64u;
-		compute.thread_ids_num = 1;
-		compute.wave_layout    = {ShaderComputeWaveStrategy::Paired64On32, {64u, 1u, 1u}, {32u, 1u, 1u}, 64u, 32u, 2u, 1u, 0u};
-	}
 	auto& bind = code.GetType() == ShaderType::Pixel ? pixel.bind : compute.bind;
 	const auto shape = ShaderGen5SampledTextureShapeForType(static_cast<uint8_t>(texture_type));
 	const bool array = shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
@@ -2258,37 +2252,6 @@ TEST(EmulatorShaderMimg, EmitsAndValidatesParsedSamplerlessImageModules)
 	    ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorShaderMimg, PackedMipAndOrdinaryStoresRespectEachPairedExecBank)
-{
-	ASSERT_EXIT((
-	                []
-	                {
-		                InitMimgParser();
-		                EnableMimgModuleValidation();
-		                for (const uint32_t opcode: {0x08u, 0x09u})
-		                {
-			                const bool        mip       = opcode == 0x09u;
-			                const auto        code      = ParseMimgTailInstruction(opcode, 0u, 0u, 0xfu, ShaderType::Compute, 0u, 1u);
-			                const auto        source    = EmitValidatedMimgTailModule(code, true, false, 9u, 22u, true);
-			                const std::string operation = mip ? "image_store_mip" : "image_store";
-			                const std::string active    = mip ? operation + "_active_0" : "image_store_enabled_0";
-			                const std::string write     = mip ? operation + "_write_0" : "image_store_write_0";
-			                const std::string merge     = mip ? operation + "_merge_0" : "image_store_merge_0";
-			                for (const char* bank: {"low", "high"})
-			                {
-				                const std::string suffix = "_" + std::string(bank);
-				                const std::string branch =
-				                    "OpBranchConditional %" + active + suffix + " %" + write + suffix + " %" + merge + suffix;
-				                RequireMimgTail(source.ContainsStr(branch.c_str()), "each bank branches on its own active EXEC bit");
-				                RequireMimgTail(source.ContainsStr(("OpImageWrite %t27_0" + suffix).c_str()),
-				                                "each active bank emits its storage write");
-			                }
-		                }
-		                std::_Exit(0);
-	                }()),
-	            ::testing::ExitedWithCode(0), "");
-}
-
 TEST(EmulatorShaderMimg, EmitsAndValidatesParsedSampleWithRealSampler)
 {
 	ASSERT_EXIT(
@@ -2509,6 +2472,57 @@ TEST(EmulatorShaderMimg, KeepsTwoDimensionalAndArrayShapesOutsideTheOneDimension
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, ResolvesSampledDescriptorsThroughShiftedScalarWindows)
+{
+	const auto make = [](bool complete_window)
+	{
+		ShaderCode code;
+		code.SetType(ShaderType::Compute);
+		auto add = [&code](ShaderInstructionType type, ShaderOperand dst, std::initializer_list<ShaderOperand> sources)
+		{
+			ShaderInstruction inst {};
+			inst.pc      = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+			inst.type    = type;
+			inst.dst     = dst;
+			inst.src_num = static_cast<int>(sources.size());
+			int source_index = 0;
+			for (const auto source: sources)
+			{
+				inst.src[source_index++] = source;
+			}
+			code.GetInstructions().Add(inst);
+		};
+		// The T# moves from s[2:9] to s[0:7] and the S# from s[10:13] to s[8:11].
+		for (int pair = 0; pair < 6; ++pair)
+		{
+			if (pair == 3 && !complete_window) { continue; }
+			add(ShaderInstructionType::SMovB64, TileSgpr(pair * 2, 2), {TileSgpr(pair * 2 + 2, 2)});
+		}
+		add(ShaderInstructionType::ImageSampleLz, TileVgpr(4), {TileVgpr(0), TileSgpr(0, 8), TileSgpr(8, 4)});
+		add(ShaderInstructionType::SEndpgm, {}, {});
+		return code;
+	};
+	ShaderBindResources bind {};
+	bind.textures2D.textures_num             = 1;
+	bind.textures2D.desc[0].usage            = ShaderTextureUsage::ReadOnly;
+	bind.textures2D.desc[0].start_register   = 2;
+	bind.samplers.samplers_num               = 1;
+	bind.samplers.start_register[0]          = 10;
+
+	const auto shifted = make(true);
+	const auto& sample = shifted.GetInstructions().At(shifted.GetInstructions().Size() - 2u);
+	ShaderAssociateSampledTextureSamplers(shifted, &bind, 0);
+	EXPECT_EQ(ShaderFindImageSampledTextureDescriptor(sample, bind, 0), 0);
+	EXPECT_EQ(ShaderFindImageSamplerDescriptor(sample, bind, 0), 0);
+	EXPECT_EQ(bind.textures2D.desc[0].sampler_indices_mask, 0x1u);
+
+	const auto partial = make(false);
+	ShaderAssociateSampledTextureSamplers(partial, &bind, 0);
+	const auto& partial_sample = partial.GetInstructions().At(partial.GetInstructions().Size() - 2u);
+	EXPECT_EQ(ShaderFindImageSampledTextureDescriptor(partial_sample, bind, 0), -1);
+	EXPECT_EQ(ShaderFindImageSamplerDescriptor(partial_sample, bind, 0), 0);
 }
 
 UT_END();

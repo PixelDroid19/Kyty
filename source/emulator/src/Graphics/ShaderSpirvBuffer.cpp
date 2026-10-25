@@ -7,10 +7,10 @@
 #include "ShaderStorageAnalysis.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveLds.h"
-#include "Emulator/Graphics/ShaderComputeWaveResourceAnalysis.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -2360,6 +2360,19 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 	return false;
 }
 
+String8 Spirv::EmitGdsCounterPointer(uint16_t byte_offset, const String8& prefix) const
+{
+	// M0[31:16] and the instruction offset are bytes; the storage array holds dwords.
+	const char* p = prefix.c_str();
+	return String8::FromPrintf("%%%s_m0 = OpLoad %%uint %%m0\n"
+	                           "%%%s_base = OpShiftRightLogical %%uint %%%s_m0 %%%s\n"
+	                           "%%%s_byte = OpIAdd %%uint %%%s_base %%%s\n"
+	                           "%%%s_index = OpShiftRightLogical %%uint %%%s_byte %%%s\n"
+	                           "%%%s_ptr = OpAccessChain %%_ptr_StorageBuffer_uint %%gds %%int_0 %%%s_index\n",
+	                           p, p, p, GetConstantUint(16u).c_str(), p, p, GetConstantUint(byte_offset).c_str(), p, p,
+	                           GetConstantUint(2u).c_str(), p, p);
+}
+
 static bool EmitOrdinaryNativeGdsAppend(const ShaderInstruction& inst, uint32_t index, Spirv* spirv, String8* dst_source)
 {
 	const auto* bind_info = spirv == nullptr ? nullptr : spirv->GetBindInfo();
@@ -2396,7 +2409,10 @@ static bool EmitOrdinaryNativeGdsAppend(const ShaderInstruction& inst, uint32_t 
 	source += String8::FromPrintf("%%%s_count_lo = OpBitCount %%uint %%%s_lo\n", tag.c_str(), tag.c_str());
 	source += String8::FromPrintf("%%%s_count_hi = OpBitCount %%uint %%%s_hi\n", tag.c_str(), tag.c_str());
 	source += String8::FromPrintf("%%%s_count = OpIAdd %%uint %%%s_count_lo %%%s_count_hi\n", tag.c_str(), tag.c_str(), tag.c_str());
-	source += String8::FromPrintf("%%%s_elected = OpGroupNonUniformElect %%bool %%%s\n", tag.c_str(), subgroup_scope.c_str());
+	// A split wave's lower half performs the wave's single update.
+	source += spirv->UsesSplitComputeWave()
+	              ? String8::FromPrintf("%%%s_elected = OpFunctionCall %%bool %%split_leader\n", tag.c_str())
+	              : String8::FromPrintf("%%%s_elected = OpGroupNonUniformElect %%bool %%%s\n", tag.c_str(), subgroup_scope.c_str());
 	source += String8::FromPrintf("%%%s_has_active = OpINotEqual %%bool %%%s_count %s\n", tag.c_str(), tag.c_str(), id(zero).c_str());
 	source +=
 	    String8::FromPrintf("%%%s_do_atomic = OpLogicalAnd %%bool %%%s_elected %%%s_has_active\n", tag.c_str(), tag.c_str(), tag.c_str());
@@ -2415,8 +2431,10 @@ static bool EmitOrdinaryNativeGdsAppend(const ShaderInstruction& inst, uint32_t 
 	source += String8::FromPrintf("%%%s_old = OpPhi %%uint %%%s_old_leader %%%s_atomic_do %%%s %%%s_atomic_skip\n", tag.c_str(),
 	                              tag.c_str(), tag.c_str(), zero.c_str(), tag.c_str());
 	// Reconverge before broadcasting the old counter, then preserve inactive destination VGPRs.
-	source += String8::FromPrintf("%%%s_broadcast = OpGroupNonUniformBroadcastFirst %%uint %%%s %%%s_old\n", tag.c_str(),
-	                              subgroup_scope.c_str(), tag.c_str());
+	source += spirv->UsesSplitComputeWave()
+	              ? String8::FromPrintf("%%%s_broadcast = OpFunctionCall %%uint %%split_first %%%s_old\n", tag.c_str(), tag.c_str())
+	              : String8::FromPrintf("%%%s_broadcast = OpGroupNonUniformBroadcastFirst %%uint %%%s %%%s_old\n", tag.c_str(),
+	                                    subgroup_scope.c_str(), tag.c_str());
 	source += "               OpMemoryBarrier %uint_1 %uint_72\n";
 	source += String8::FromPrintf("%%%s_exec_lane = OpLoad %%uint %%exec_lane_lo\n", tag.c_str());
 	source += String8::FromPrintf("%%%s_active = OpINotEqual %%bool %%%s_exec_lane %s\n", tag.c_str(), tag.c_str(), id(zero).c_str());
@@ -2497,6 +2515,70 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
 KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds)
 {
 	return EmitGdsAppend(code, index, spirv, dst_source);
+}
+
+// One compute invocation is one guest lane. The store lands at M0.base + ADDR +
+// offset in bytes (M0 = {base[31:16], size[15:0]}). ADDR + offset beyond
+// M0.size, a misaligned address or one outside the host GDS window is a memory
+// violation on hardware; the store is dropped so the host buffer stays in bounds.
+KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffsetGds)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const auto* bind = spirv->GetBindInfo();
+	if (spirv->GetCsInputInfo() == nullptr || bind == nullptr || !bind->gds_pointers.memory_used ||
+	    !ShaderComputeWaveGdsWriteSupported(inst))
+	{
+		return false;
+	}
+	const auto offset = spirv->GetConstantUint(inst.ds_offset);
+	const auto mask   = spirv->GetConstantUint(0xffffu);
+	const auto shift  = spirv->GetConstantUint(16u);
+	const auto window = spirv->GetConstantUint(static_cast<uint32_t>(kGraphicsGdsDwords));
+	for (const auto* constant: {&offset, &mask, &shift, &window})
+	{
+		if (*constant == "unknown_uint_constant")
+		{
+			return false;
+		}
+	}
+
+	const auto tag  = String8::FromPrintf("gds_write_%u", index);
+	const auto body = String8(R"(
+%<t>_m0 = OpLoad %uint %m0
+%<t>_base = OpShiftRightLogical %uint %<t>_m0 %<shift>
+%<t>_size = OpBitwiseAnd %uint %<t>_m0 %<mask>
+%<t>_address_f = OpLoad %float %<address>
+%<t>_address = OpBitcast %uint %<t>_address_f
+%<t>_relative = OpIAdd %uint %<t>_address %<offset>
+%<t>_address_in = OpULessThan %bool %<t>_address %<t>_size
+%<t>_relative_in = OpULessThan %bool %<t>_relative %<t>_size
+%<t>_byte = OpIAdd %uint %<t>_base %<t>_relative
+%<t>_low_bits = OpBitwiseAnd %uint %<t>_byte %uint_3
+%<t>_aligned = OpIEqual %bool %<t>_low_bits %uint_0
+%<t>_index = OpShiftRightLogical %uint %<t>_byte %uint_2
+%<t>_in_window = OpULessThan %bool %<t>_index %<window>
+%<t>_in_m0 = OpLogicalAnd %bool %<t>_address_in %<t>_relative_in
+%<t>_in_host = OpLogicalAnd %bool %<t>_aligned %<t>_in_window
+%<t>_valid = OpLogicalAnd %bool %<t>_in_m0 %<t>_in_host
+               OpSelectionMerge %<t>_merge None
+               OpBranchConditional %<t>_valid %<t>_store %<t>_merge
+%<t>_store = OpLabel
+%<t>_data_f = OpLoad %float %<data>
+%<t>_data = OpBitcast %uint %<t>_data_f
+%<t>_ptr = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %<t>_index
+               OpStore %<t>_ptr %<t>_data
+               OpBranch %<t>_merge
+%<t>_merge = OpLabel
+)")
+	                      .ReplaceStr("<address>", operand_variable_to_str(inst.src[0]).value)
+	                      .ReplaceStr("<data>", operand_variable_to_str(inst.src[1]).value)
+	                      .ReplaceStr("<offset>", offset)
+	                      .ReplaceStr("<mask>", mask)
+	                      .ReplaceStr("<shift>", shift)
+	                      .ReplaceStr("<window>", window)
+	                      .ReplaceStr("<t>", tag);
+	*dst_source += GateLdsByExec(body, tag);
+	return true;
 }
 
 namespace {
@@ -2650,15 +2732,6 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAtomic_XXX_VaddrVdataOffset)
 	return true;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_DsAtomicIncDec_VaddrOffset)
-{
-	// ISA DS_INC/DEC wrap at DATA0's unsigned limit; the VaddrOffset IR
-	// discarded that source. Refuse this lossy tuple rather than substitute
-	// SPIR-V's unconditional increment/decrement. A correct lowering needs the
-	// data operand retained by the parser and a compare/exchange loop.
-	return false;
-}
-
 KYTY_RECOMPILER_FUNC(Recompile_DsReadB32_VdstVaddrOffset)
 {
 	const auto& inst       = code.GetInstructions().At(index);
@@ -2772,25 +2845,14 @@ String8 DsAddtidIndex(Spirv* spirv, uint16_t offset, const String8& bound, const
 	return text;
 }
 
-// Lane-execution predicate for the shared-LDS path: a plain EXEC word test in
-// virtualized mode, or the bank's mask bit under paired compute waves.
-bool EmitDsAddtidActive(const Spirv* spirv, ShaderWaveBank bank, const String8& tag, String8* dst_source,
-                        String8* active_id)
+// Lane-execution predicate for the addtid paths: a plain EXEC word test.
+void EmitDsAddtidActive(const String8& tag, String8* dst_source, String8* active_id)
 {
-	if (spirv->UsesComputeWaveBanks())
-	{
-		ShaderOperand exec {};
-		exec.type = ShaderOperandType::ExecLo;
-		exec.size = 2;
-		*active_id = "addtid_exec_" + tag;
-		return spirv->EmitComputeWaveMaskBit(exec, bank, *active_id, dst_source);
-	}
 	*active_id = "addtid_active_" + tag;
 	*dst_source += String8::FromPrintf(
 	    "       %%addtid_exec_%s = OpLoad %%uint %%exec_lo\n"
 	    "    %%addtid_active_%s = OpINotEqual %%bool %%addtid_exec_%s %%uint_0\n",
 	    tag.c_str(), tag.c_str(), tag.c_str());
-	return true;
 }
 
 } // namespace
@@ -2836,36 +2898,8 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
 		{
 			return false;
 		}
-		if (spirv->UsesComputeWaveBanks())
-		{
-			for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
-			{
-				const auto data   = spirv->GetComputeWaveRegister(inst.src[0], bank, 0);
-				const auto bname  = bank == ShaderWaveBank::Low ? "low" : "high";
-				if (data.value.IsEmpty())
-				{
-					return false;
-				}
-				const auto tag = String8::FromPrintf("%u_%s", index, bname);
-				String8    active;
-				if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
-				{
-					return false;
-				}
-				*dst_source += String8::FromPrintf(
-				    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
-				if (!EmitDsAddtidLdsStore(data, active, tag, bound, "addtid_tid_" + tag, spirv, inst, dst_source))
-				{
-					return false;
-				}
-			}
-			return true;
-		}
 		String8 active;
-		if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
-		{
-			return false;
-		}
+		EmitDsAddtidActive(index_str, dst_source, &active);
 		*dst_source += String8::FromPrintf("        %%addtid_tidl_%s = OpLoad %%uint %%gl_LocalInvocationIndex\n"
 		                                   "         %%addtid_tid_%s = OpBitwiseAnd %%uint %%addtid_tidl_%s %%uint_63\n",
 		                                   index_str.c_str(), index_str.c_str(), index_str.c_str());
@@ -2878,46 +2912,11 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
 	}
 
 	// Private spill array: compute without an LDS allocation or any graphics
-	// stage. Under paired compute waves each invocation still emulates two
-	// lanes, so the bank loop and TID*4 term are kept — only the storage is
-	// per-invocation instead of the shared %lds array.
+	// stage. The storage is per-invocation instead of the shared %lds array.
 	const auto bound = spirv->GetConstantUint(kDsAddtidSpillDwords);
 	if (bound == "unknown_uint_constant")
 	{
 		return false;
-	}
-	if (spirv->UsesComputeWaveBanks())
-	{
-		for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
-		{
-			const auto data  = spirv->GetComputeWaveRegister(inst.src[0], bank, 0);
-			const auto bname = bank == ShaderWaveBank::Low ? "low" : "high";
-			if (data.value.IsEmpty())
-			{
-				return false;
-			}
-			const auto tag = String8::FromPrintf("%u_%s", index, bname);
-			String8    active;
-			if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
-			{
-				return false;
-			}
-			*dst_source += String8::FromPrintf(
-			    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
-			*dst_source += DsAddtidIndex(spirv, inst.ds_offset, bound, "addtid_tid_" + tag, active, tag);
-			*dst_source += String8::FromPrintf(
-			    "               OpSelectionMerge %%addtid_merge_%s None\n"
-			    "               OpBranchConditional %%addtid_gate_%s %%addtid_then_%s %%addtid_merge_%s\n"
-			    "        %%addtid_then_%s = OpLabel\n"
-			    "         %%addtid_ptr_%s = OpAccessChain %%_ptr_Function_float %%lds_addtid %%addtid_idx_%s\n"
-			    "        %%addtid_dataf_%s = OpLoad %%float %%%s\n"
-			    "               OpStore %%addtid_ptr_%s %%addtid_dataf_%s\n"
-			    "               OpBranch %%addtid_merge_%s\n"
-			    "       %%addtid_merge_%s = OpLabel\n",
-			    tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(),
-			    data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
-		}
-		return true;
 	}
 	const auto data = operand_variable_to_str(inst.src[0]);
 	if (data.value.IsEmpty())
@@ -2925,10 +2924,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
 		return false;
 	}
 	String8 active;
-	if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
-	{
-		return false;
-	}
+	EmitDsAddtidActive(index_str, dst_source, &active);
 	*dst_source += DsAddtidIndex(spirv, inst.ds_offset, bound, String8(), active, index_str);
 	*dst_source += String8::FromPrintf(
 	    "               OpSelectionMerge %%addtid_merge_%s None\n"
@@ -3005,36 +3001,8 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadAddtidB32_VdstOffset)
 		{
 			return false;
 		}
-		if (spirv->UsesComputeWaveBanks())
-		{
-			for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
-			{
-				const auto dst    = spirv->GetComputeWaveRegister(inst.dst, bank, 0);
-				const auto bname  = bank == ShaderWaveBank::Low ? "low" : "high";
-				if (dst.value.IsEmpty())
-				{
-					return false;
-				}
-				const auto tag = String8::FromPrintf("%u_%s", index, bname);
-				String8    active;
-				if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
-				{
-					return false;
-				}
-				*dst_source += String8::FromPrintf(
-				    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
-				if (!EmitDsAddtidLoad(dst, active, tag, bound, "addtid_tid_" + tag, spirv, inst, dst_source))
-				{
-					return false;
-				}
-			}
-			return true;
-		}
 		String8 active;
-		if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
-		{
-			return false;
-		}
+		EmitDsAddtidActive(index_str, dst_source, &active);
 		*dst_source += String8::FromPrintf("        %%addtid_tidl_%s = OpLoad %%uint %%gl_LocalInvocationIndex\n"
 		                                   "         %%addtid_tid_%s = OpBitwiseAnd %%uint %%addtid_tidl_%s %%uint_63\n",
 		                                   index_str.c_str(), index_str.c_str(), index_str.c_str());
@@ -3053,38 +3021,13 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadAddtidB32_VdstOffset)
 	{
 		return false;
 	}
-	if (spirv->UsesComputeWaveBanks())
-	{
-		for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
-		{
-			const auto dst   = spirv->GetComputeWaveRegister(inst.dst, bank, 0);
-			const auto bname = bank == ShaderWaveBank::Low ? "low" : "high";
-			if (dst.value.IsEmpty())
-			{
-				return false;
-			}
-			const auto tag = String8::FromPrintf("%u_%s", index, bname);
-			String8    active;
-			if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
-			{
-				return false;
-			}
-			*dst_source += String8::FromPrintf(
-			    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
-			if (!EmitDsAddtidLoad(dst, active, tag, bound, "addtid_tid_" + tag, spirv, inst, dst_source)) { return false; }
-		}
-		return true;
-	}
 	const auto dst = operand_variable_to_str(inst.dst);
 	if (dst.value.IsEmpty())
 	{
 		return false;
 	}
 	String8 active;
-	if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
-	{
-		return false;
-	}
+	EmitDsAddtidActive(index_str, dst_source, &active);
 	return EmitDsAddtidLoad(dst, active, index_str, bound, String8(), spirv, inst, dst_source);
 }
 
@@ -3168,11 +3111,14 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
                                       String8* dst_source)
 {
 	const uint32_t alignment = components == 1u ? 1u : (components == 2u ? 2u : 4u);
+	const bool     sgpr_dst  = inst.dst.type == ShaderOperandType::Sgpr && inst.dst.size == components && inst.dst.register_id >= 0 &&
+	                      inst.dst.register_id + components <= 106u && (inst.dst.register_id % alignment) == 0u;
+	const bool     vcc_dst   = (inst.dst.type == ShaderOperandType::VccLo && inst.dst.size == static_cast<int>(components) && components <= 2u) ||
+	                     (inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1 && components == 1u);
 	if (!spirv->UsesGuestDeviceAddress() || components == 0u || components > 16u || inst.smem_flags != 0u || inst.src_num != 2 ||
 	    inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].size != 4 || inst.src[0].register_id < 0 || inst.src[0].register_id > 100 ||
-	    (inst.src[0].register_id % 4) != 0 || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != components ||
-	    inst.dst.register_id < 0 || inst.dst.register_id + components > 106u || (inst.dst.register_id % alignment) != 0u ||
-	    inst.src[1].dpp || inst.src[1].absolute || inst.src[1].negate || inst.src[1].swizzle != 6u)
+	    (inst.src[0].register_id % 4) != 0 || (!sgpr_dst && !vcc_dst) || inst.src[1].dpp || inst.src[1].absolute ||
+	    inst.src[1].negate || inst.src[1].swizzle != 6u)
 	{
 		return false;
 	}
@@ -3194,11 +3140,14 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
 	return true;
 }
 
-static bool PixelScalarBufferUsesGuestAddress(const Spirv* spirv, const ShaderInstruction& inst)
+// Pixel programs and the geometry pass read runtime V#s at guest device addresses.
+static bool ScalarBufferUsesGuestAddress(const Spirv* spirv, const ShaderInstruction& inst)
 {
-	const auto* bind = spirv->GetBindInfo();
-	return Config::IsNextGen() && spirv->GetPsInputInfo() != nullptr && bind != nullptr &&
-	       ShaderScalarBufferUsesRuntimeDescriptor(*bind, inst);
+	const auto* bind           = spirv->GetBindInfo();
+	const auto* vertex         = spirv->GetVsInputInfo();
+	const int   user_data_base = vertex != nullptr && vertex->gs_prolog ? 8 : 0;
+	return Config::IsNextGen() && (spirv->GetPsInputInfo() != nullptr || spirv->UsesGeometryCompute()) && bind != nullptr &&
+	       ShaderScalarBufferUsesRuntimeDescriptor(*bind, inst, user_data_base);
 }
 
 static bool RecompileZeroSBufferLoad(const ShaderInstruction& inst, uint32_t components, const ShaderBindResources* bind_info,
@@ -3235,7 +3184,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDword_SdstSvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 1u, dst_source);
 	}
@@ -3296,7 +3245,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx2_Sdst2SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 2u, dst_source);
 	}
@@ -3359,7 +3308,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 4u, dst_source);
 	}
@@ -3521,7 +3470,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 8u, dst_source);
 	}
@@ -3578,7 +3527,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
-	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	if (ScalarBufferUsesGuestAddress(spirv, inst))
 	{
 		return EmitGuestScalarBufferLoad(spirv, inst, index, 16u, dst_source);
 	}

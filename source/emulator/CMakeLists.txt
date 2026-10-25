@@ -38,6 +38,7 @@ file(GLOB runtime_core_src CONFIGURE_DEPENDS
 	src/Log.cpp
 	src/Config.cpp
 	src/GuestRuntimePort.cpp
+	src/GuestCodeRanges.cpp
 	src/GuestMemory.cpp
 	src/GpuMemoryFault.cpp
 	src/AtomicFile.cpp
@@ -243,7 +244,8 @@ target_include_directories(kyty_audio_video_backend PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
 	"${CMAKE_SOURCE_DIR}/include"
 )
-target_link_libraries(kyty_audio_video_backend PUBLIC core PRIVATE libatrac9)
+# The decoder worker runs guest read callbacks, so joining it is a guest safe point.
+target_link_libraries(kyty_audio_video_backend PUBLIC core PRIVATE kyty_kernel libatrac9)
 
 if(MSVC OR MINGW)
 	target_link_libraries(emulator PRIVATE psapi)

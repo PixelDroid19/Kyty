@@ -10,6 +10,8 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
 
+#include <cstring>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -57,6 +59,23 @@ bool StorageBufferUploadRuns(GraphicContext* ctx, void* obj, uint64_t vaddr, uin
 	return true;
 }
 
+// Shader writes flag their pages here (ShaderSpirvStorageWriteMask.h); the
+// mask stays mapped for the write-back that consumes it.
+static void create_write_mask(GraphicContext* ctx, StorageVulkanBuffer* vk_obj)
+{
+	const uint64_t pages  = (vk_obj->guest_size + GpuWritebackPageCache::kDefaultPageSize - 1u) / GpuWritebackPageCache::kDefaultPageSize;
+	auto*          mask   = new VulkanBuffer;
+	mask->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	mask->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+	                        VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+	VulkanCreateBuffer(ctx, pages * sizeof(uint32_t), mask);
+	void* flags = nullptr;
+	VulkanMapMemory(ctx, &mask->memory, &flags);
+	std::memset(flags, 0, pages * sizeof(uint32_t));
+	vk_obj->write_mask = mask;
+	vk_obj->writeback_cache.TrackWrittenPages(static_cast<uint32_t*>(flags));
+}
+
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                          VulkanMemory* mem)
 {
@@ -71,14 +90,16 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->guest_addr = *vaddr;
 	vk_obj->guest_size = *size;
 
-	// Transfer source: a proven full fill is copied into the guest device-address view.
-	vk_obj->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	// Transfers: a proven uniform fill is written by a fill, and copied into the
+	// guest device-address view.
+	vk_obj->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	vk_obj->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 	                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	vk_obj->buffer = nullptr;
 
 	VulkanCreateBuffer(ctx, *size, vk_obj);
 	if (vk_obj->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->buffer == nullptr condition ignored (continuing)\n"); }
+	create_write_mask(ctx, vk_obj);
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
 
@@ -92,11 +113,14 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
 	auto* vk_obj = reinterpret_cast<StorageVulkanBuffer*>(obj);
 
 	EXIT_IF(vk_obj == nullptr);
-	EXIT_IF(vk_obj->buffer == nullptr);
+	EXIT_IF(vk_obj->buffer == nullptr || vk_obj->write_mask == nullptr);
 	EXIT_IF(ctx == nullptr);
 
 	VulkanDeleteBuffer(ctx, vk_obj);
+	VulkanUnmapMemory(ctx, &vk_obj->write_mask->memory);
+	VulkanDeleteBuffer(ctx, vk_obj->write_mask);
 
+	delete vk_obj->write_mask;
 	delete vk_obj;
 }
 

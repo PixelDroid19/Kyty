@@ -49,9 +49,9 @@ bool ShaderNativeWave32PhysicalLocal(const uint32_t (&guest_local)[3], uint32_t 
 	return true;
 }
 
-ShaderComputeWaveLayoutStatus ShaderBuildPairedComputeWaveLayout(const ShaderComputeWaveRequest&      request,
-                                                                 const ShaderComputeWaveCapabilities& capabilities,
-                                                                 ShaderComputeWaveLayout*             layout)
+ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComputeWaveRequest&      request,
+                                                                const ShaderComputeWaveCapabilities& capabilities,
+                                                                ShaderComputeWaveLayout*             layout)
 {
 	if (layout == nullptr)
 	{
@@ -109,31 +109,44 @@ ShaderComputeWaveLayoutStatus ShaderBuildPairedComputeWaveLayout(const ShaderCom
 			return ShaderComputeWaveLayoutStatus::InvalidLocalSize;
 		}
 	}
-	// A trailing partial wave keeps its missing lanes permanently inactive
-	// (see the paired prolog's valid-lane mask).
+	// The padding lanes of a trailing partial wave start with EXEC clear.
 	// Quotient/remainder avoids overflowing the rounding addition for a valid
 	// uint32_t local product near UINT32_MAX.
 	const uint32_t waves            = guest_invocations / kGuestWaveSize + (guest_invocations % kGuestWaveSize != 0u ? 1u : 0u);
 	uint32_t       physical_local_x = 0;
-	if (!MultiplyU32(waves, kNativeSubgroupSize, &physical_local_x))
+	if (!MultiplyU32(waves, kGuestWaveSize, &physical_local_x))
 	{
 		return ShaderComputeWaveLayoutStatus::HostLimitExceeded;
 	}
 
-	uint32_t lds_bytes = 0;
-	if (!MultiplyU32(request.lds_dwords, kLdsDwordBytes, &lds_bytes))
+	uint32_t host_subgroups = 0;
+	if (!MultiplyU32(waves, 2u, &host_subgroups))
+	{
+		return ShaderComputeWaveLayoutStatus::HostLimitExceeded;
+	}
+
+	uint32_t exchange_dwords = 0;
+	if (!MultiplyU32(waves, kShaderSplitWaveExchangeDwords, &exchange_dwords) ||
+	    request.lds_dwords > std::numeric_limits<uint32_t>::max() - exchange_dwords)
+	{
+		return ShaderComputeWaveLayoutStatus::HostLimitExceeded;
+	}
+	const uint32_t shared_dwords = request.lds_dwords + exchange_dwords;
+	uint32_t       lds_bytes     = 0;
+	if (!MultiplyU32(shared_dwords, kLdsDwordBytes, &lds_bytes))
 	{
 		return ShaderComputeWaveLayoutStatus::HostLimitExceeded;
 	}
 
 	if (physical_local_x > capabilities.max_local_size[0] || 1u > capabilities.max_local_size[1] || 1u > capabilities.max_local_size[2] ||
-	    physical_local_x > capabilities.max_invocations || waves > capabilities.max_subgroups || lds_bytes > capabilities.max_shared_bytes)
+	    physical_local_x > capabilities.max_invocations || host_subgroups > capabilities.max_subgroups ||
+	    lds_bytes > capabilities.max_shared_bytes)
 	{
 		return ShaderComputeWaveLayoutStatus::HostLimitExceeded;
 	}
 
 	ShaderComputeWaveLayout candidate {};
-	candidate.strategy             = ShaderComputeWaveStrategy::Paired64On32;
+	candidate.strategy             = ShaderComputeWaveStrategy::Split64On32;
 	candidate.guest_local[0]       = request.local[0];
 	candidate.guest_local[1]       = request.local[1];
 	candidate.guest_local[2]       = request.local[2];
@@ -142,7 +155,7 @@ ShaderComputeWaveLayoutStatus ShaderBuildPairedComputeWaveLayout(const ShaderCom
 	candidate.physical_local[2]    = 1;
 	candidate.guest_wave_size      = kGuestWaveSize;
 	candidate.native_subgroup_size = kNativeSubgroupSize;
-	candidate.banks                = 2;
+	candidate.banks                = 1;
 	candidate.waves                = waves;
 	candidate.lds_dwords           = request.lds_dwords;
 	*layout                        = candidate;

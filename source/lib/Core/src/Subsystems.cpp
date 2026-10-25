@@ -547,6 +547,15 @@ void SubsystemsList::SetActive(SubsystemsList* list) noexcept
 	g_active_subsystems.store(list, std::memory_order_release);
 }
 
+void ShutdownActiveAndQuickExit(int code)
+{
+	if (auto* list = SubsystemsList::Active(); list != nullptr)
+	{
+		list->ShutdownAll();
+	}
+	std::quick_exit(code);
+}
+
 ScopedSubsystemsList::ScopedSubsystemsList(SubsystemsList& list) noexcept: m_previous(SubsystemsList::Active())
 {
 	SubsystemsList::SetActive(&list);

@@ -4,6 +4,158 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: storage views on the traveler map (2026-10-25)
+
+- **Symptom.** With the garbage-collector timeout gone (record below),
+  about half of the cold runs stopped on the traveler map with a strict
+  `!create_all_the_same` at `GpuMemoryCreate.cpp:2558`.
+- **First refusal.** A new 0x30000 128x128 eight-level storage view
+  (tile mode 27) inside a recycled allocation that a live render target,
+  a read-only vertex buffer (crossing), a read-only storage buffer whose
+  write-back was complete, and a 1248x1440 sampled texture all describe.
+  The texture's origin was `AliasInvalidation`: a linked view's
+  write-back had already put the newer bytes in guest memory, and the
+  texture reloads them at its next use. `links_cpu_texture` already
+  required `GpuMemoryContentFollowsGuestBytes` and an upload newer than
+  the last device write, but `GpuMemoryAllowsStorageTextureInsideCpuTexture`
+  accepted only `CpuUpload`. It now accepts both origins of
+  `GpuMemoryContentFollowsGuestBytes`, as the sampled-texture-inside
+  case already did.
+- **Second refusal.** Once past that, a 0x60000 view grew over that
+  0x30000 prefix, beside the live render target and a 0x1e8480 read-only
+  CPU-uploaded vertex buffer containing it. The storage-over-caches
+  path links such a buffer (`GpuMemoryAllowsStorageTextureInsideVertexCache`).
+  The storage-array growth path had no case for it, so it now links the
+  buffer too.
+- **Result.** Intel Arc A770, Mesa ANV 26.2.5, `None` optimization,
+  120 s runs on the menus route. With the first change only: one clean
+  run, one stop at the second refusal. With both: 2 runs with no strict
+  stop and no fault. The traveler map renders, and choosing a traveler
+  starts the story load. Unit suite 113/113.
+
+## Role-playing title: cold-boot garbage-collector timeout from compile stalls (2026-10-25)
+
+- **Symptom.** About 3 of 5 cold-cache strict runs of the menus route
+  (Intel Arc A770, Mesa ANV 26.2.5, `KYTY_SHADER_OPTIMIZATION=Performance`)
+  stopped while loading the traveler map with a guest write fault at
+  address 0. The run status showed about 9.3 s without a present just
+  before the fault.
+- **Guest side.** The faulting store is in the engine's
+  garbage-collector wait for objects pending final destruction: it polls
+  each object's readiness, sleeps, and after 10 s logs the last object
+  not ready and stores through a pointer that is null in this build. The
+  objects become ready only when the render thread's fences advance, so
+  any command-processor stall over 10 s ends the run.
+- **Measured.** Agent counters every 0.5 s: in the stall windows the
+  command processor spends 1.5-2.9 s of every 2 s creating graphics
+  pipelines (50 ms per pipeline on average, up to 1.6 s). The thread
+  profile is 42% driver pipeline creation and 24% `spirv-opt` plus the
+  SPIR-V tools. Translation takes 38-44 ms per module with `Performance`
+  and 8 ms with `None`; driver time per pipeline stays about 30 ms
+  either way.
+- **Offline compile check.** The four largest pixel shaders of the run,
+  compiled alone with and without `spirv-opt -O`: `spirv-opt` costs
+  0.39-0.46 s per module and saves the driver 30-45 ms on ANV and
+  45-50 ms on RADV. RADV's final code differs by less than 1% in
+  instruction count, and two modules use more VGPRs once optimized.
+- **Change.** `scripts/run_guest.lua` defaults `ShaderOptimizationType`
+  to `None`, the configuration and launcher default.
+  `KYTY_SHADER_OPTIMIZATION=Performance` still selects the optimizer.
+- **Result.** No garbage-collector fault in 2 cold runs with `None`.
+  The runs now reach the traveler map and expose the next stop: a
+  storage-texture overlap refusal (record above).
+- **Exclusions.**
+  - First-parent bisection pointed at the object size-class index
+    (c0995a60). Wrong: the fault is intermittent; that commit reverted
+    still faulted, and the "good" run never left the loading screen.
+  - Quad swaps in the pixel mask ballot (`NativeMaskBallot`,
+    `NativeQuadUniform`) instead of quad broadcasts. They cut the
+    slowest role-playing pipeline from 1.6 s to 1.1 s, but ANV took more
+    than 2 minutes on one first-person-puzzle pipeline. Reverted.
+  - Driver cost of the mask emulation, offline on the largest pixel
+    shader (1.0-1.3 s on ANV). Removing every quad broadcast saves 5%.
+    Replacing the wave reductions with `BroadcastFirst` saves nothing.
+    Only removing all collectives halves it, because the mask logic then
+    folds away. The cost is the volume of mask-dependent code, not the
+    collective instructions.
+
+## Role-playing title: blue traveler map from geometry-pass constants (2026-10-22)
+
+- **Symptom.** The traveler-selection map rendered pure blue: the map
+  centre averaged 1/1/124 against 165/151/133 in every capture through
+  89e3b892. The ornate frame was unchanged (189/157/120). Published
+  imagery of this screen shows a sepia parchment map, which the fixed
+  build matches; the earlier 96/81/23 record of 2026-10-20 predates the
+  blue-axis fix and was itself wrong.
+- **Bisection.** Cold-cache strict runs of the menus route (Intel Arc
+  A770, Mesa ANV 26.2.5, about 120 s each): 9a5e91b6, 64d63bb5,
+  c91c2717, 9baebf48 and 2af6ae31 good; a6fc714b and cea70de7 bad.
+  a6fc714b sent the geometry pass's `s_buffer_load` instructions to the
+  guest device-address path whenever the V# was not a bound binding.
+- **Cause.** Bindings record API user-data indices; the merged GS
+  receives user data from `s8`. The scalar-load checks compared a
+  binding's start register with the absolute SGPR, so the grading-volume
+  writer's constant buffer at `s[8:11]` (binding register 0) counted as a
+  runtime descriptor. Its UV constants read back as zero and the volume
+  held only the layer-derived blue. The vector-load check already
+  subtracted the base.
+- **Change.** Both scalar checks (runtime-descriptor classification and
+  the redefinition scan) use the base-aware binding helper; translator
+  version 148. A unit test covers bases 0 and 8 for the scalar check.
+- **Result.** The map centre averages 165/151/132 at a cold boot of the
+  fixed branch, and the captures match the published screen.
+
+## Role-playing title: GPU hang in the story prologue (2026-10-21, open)
+
+- **Symptom.** On the recorded story route about 5 of 10 uninstrumented
+  runs lose the device between frames 1295 and 1914 (xe render engine
+  reset, then the scheduler's job timeout; the emulator sees result -4
+  from a fence or semaphore wait). Intel Arc A770, Mesa ANV 26.2.5,
+  GuC 70.53.0, kernel 7.2.11.
+- **Localization.**
+  - With serial submission and an idle wait after each submit, one
+    command buffer of draws only stayed on the GPU for at least 690 ms,
+    so the stall is work inside one command buffer, not a race between
+    queues.
+  - Two decoded hang dumps show one render pass with tile-based
+    immediate-mode rendering (3x3 tiles): depth-only draws with no pixel
+    shader, then draws whose pixel shader discards (dithered discard, no
+    textures, no loops). The execution-unit rows and samplers report
+    done; fixed-function units do not. The command streamer is stuck on
+    the end-of-batch pipe control after draw 16 in one dump and while
+    sending draw 8 in the other.
+  - Runs that drain the GPU after every draw passed the hang window 6 of
+    6 times (one-sided Fisher p about 0.06; the two groups ran different
+    builds), so draw-level serialization is a lead only.
+- **Excluded.**
+  - Depth bounds: zero in both hung batches, so the related hardware
+    workaround does not apply.
+  - Custom sample locations: the default 1x pattern.
+  - The known tile-pass issue with pixel shaders that read no push
+    constants: every draw that dispatches pixel threads reads at least
+    one constant, and the depth-only draws dispatch none.
+  - Looping shaders: guest disassembly and a SPIR-V loop audit of the
+    hung pipelines.
+  - The volume-lighting dispatch: the hung command buffers contain no
+    dispatch.
+  - Turning tile passes off through a driver option (localization only)
+    is not a fix: 4 of 4 runs hung at boot (26-35 s). The three that
+    reset normally hung in a different command buffer, a post-process
+    pass with three colour fast clears, one draw, a 480x270 dispatch and
+    one draw. That hang persisted with the dispatch skipped (the command
+    streamer stopped at the sample-pattern state before the draw), and
+    those runs never reach the prologue window. The fourth wedged the GPU
+    after nine earlier resets in the same boot, which the option alone
+    does not explain.
+- **Lead.** The three fast clears happen every frame because the
+  post-process targets arrive with an undefined tracked layout, and the
+  emulator clears only undefined colour layouts. This is a churn and cost
+  question, not a cause.
+- **Next.** Multi-run A/B tests in the prologue (about five clean
+  4-minute runs per arm, about 50% hang risk per run) or a driver report
+  with the decoded batches. Both need the maintainer's go-ahead because
+  of the reset and wedge risk.
+
 ## Role-playing title: story starts, cube depth samples and recycled ranges (2026-10-21)
 
 Intel A770, strict runs from the title screen through traveler selection
@@ -227,7 +379,9 @@ the same build showed the symptoms live.
   - Shader compilation still causes multi-second stalls on warm runs: the
     SPIR-V binary cache persists about 50 of about 500 entries per run because
     entries carry the full source as identity (0.3-2.9 MB) against a 16 MiB
-    session write budget.
+    session write budget. Store fixed on 2026-10-22 (binary-only entries,
+    1 GiB store; see "Shader caches" in `docs/bringup/cross-title.md`); not
+    re-measured on this title.
   - About 5,000 samples per run still resolve as `guest-skip-live-cover` on
     addresses other than the display buffers; not yet examined.
   - Frame 1218 of an earlier run lost static props while their shadows
@@ -544,7 +698,24 @@ temporary diagnostics (removed).
     layout of a one-level 512x512 BC3 texture is 0x40000, and the reason
     for the difference is unknown.
 - **Other open items in these runs.**
-  - `!create_all_the_same` at 0x2109b90000 (size 0x120000), 127 s, one run.
+  - `!create_all_the_same` at 0x2109b90000 (size 0x120000), 127 s
+    (`GpuMemoryCreate.cpp:2559` on main). The new object is a storage
+    image. Its 67 parents are a render target that contains the range
+    (0x1c0000 bytes), a read-only storage buffer of exactly the range
+    written back from the GPU, a read-only 0x1fa400-byte storage buffer
+    that contains it, and 64 read-only vertex buffers inside it left by
+    alias invalidation. The range is a recycled allocation that served as
+    a render target and as vertex data.
+  - Recurrence (survey of 2026-10-22): 18 of 303 runs of this title on
+    the 10-20 and 10-21 builds, all with diagnostic switches, stopped on
+    `!create_all_the_same`. In 17 the new object is a storage image
+    (0x2000 to 0xff0000 bytes); the parents mix render targets, textures,
+    storage images, storage buffers, depth targets, and vertex or index
+    buffers. One case is an incoming storage image over a 1920x78 render
+    target whose device content was never published, an index buffer and
+    483 read-only storage buffers. Direction: resolve stale parents of a
+    recycled allocation (retire, or seed from guest memory) before the
+    same-type check, instead of exiting.
   - Device lost (`vkWaitSemaphores` result -4), 103 s, one run of six.
   - A guest write to address 0 (status 139, rip in guest code) at 138 s,
     one run.

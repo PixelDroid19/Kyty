@@ -1,13 +1,16 @@
 #include "Emulator/Kernel/SyncOnAddress.h"
-#include "Emulator/Kernel/Errors.h"
 
+#include "Kyty/Core/Threads.h"
+
+#include "Emulator/Kernel/Errors.h"
+#include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/Time.h"
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Log.h"
 
 #include <algorithm>
 #include <chrono>
 #include <climits>
-#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -21,13 +24,16 @@ KERNEL_LIB_NAME();
 namespace {
 
 constexpr uint32_t kSupportedWaitFlags = 0u;
+constexpr int      kUmtxOpWait           = 2;
+constexpr int      kUmtxOpWake           = 3;
+constexpr int64_t  kNanosecondsPerSecond = 1000000000;
 
 struct AddressWaitState
 {
-	std::mutex              mutex;
-	std::condition_variable cv;
-	uint64_t                generation = 0;
-	uint32_t                waiter_count = 0;
+	Core::Mutex   mutex;
+	Core::CondVar cv;
+	uint64_t      generation   = 0;
+	uint32_t      waiter_count = 0;
 };
 
 std::mutex g_address_map_mutex;
@@ -48,7 +54,7 @@ WaitRegistration RegisterWaiter(uint64_t address)
 		slot = std::make_shared<AddressWaitState>();
 	}
 
-	std::lock_guard state_lock(slot->mutex);
+	Core::LockGuard state_lock(slot->mutex);
 	slot->waiter_count++;
 	return {slot, slot->generation};
 }
@@ -62,7 +68,7 @@ void UnregisterWaiter(uint64_t address, const std::shared_ptr<AddressWaitState>&
 		return;
 	}
 
-	std::lock_guard state_lock(state->mutex);
+	Core::LockGuard state_lock(state->mutex);
 	EXIT_IF(state->waiter_count == 0);
 	state->waiter_count--;
 	if (state->waiter_count == 0)
@@ -74,6 +80,7 @@ void UnregisterWaiter(uint64_t address, const std::shared_ptr<AddressWaitState>&
 int WakeRegisteredWaiters(uint64_t address, int64_t wake_count)
 {
 	std::shared_ptr<AddressWaitState> state;
+	uint32_t                          waiters = 0;
 	{
 		std::unique_lock map_lock(g_address_map_mutex);
 		const auto        it = g_address_states.find(address);
@@ -83,27 +90,83 @@ int WakeRegisteredWaiters(uint64_t address, int64_t wake_count)
 		}
 
 		state = it->second;
-		std::lock_guard state_lock(state->mutex);
+		Core::LockGuard state_lock(state->mutex);
 		state->generation++;
+		waiters = state->waiter_count;
 	}
 
-	const int releases =
-	    (wake_count > 0 && wake_count < INT64_MAX) ? static_cast<int>(std::min<int64_t>(wake_count, INT32_MAX)) : INT32_MAX;
-	if (releases <= 1)
+	// A count of zero or less wakes every waiter, as does any count that covers
+	// all of them; otherwise one signal per released waiter.
+	if (wake_count <= 0 || wake_count >= static_cast<int64_t>(waiters))
 	{
-		state->cv.notify_one();
-	} else if (releases >= INT32_MAX)
+		state->cv.SignalAll();
+		return OK;
+	}
+	for (int64_t i = 0; i < wake_count; i++)
 	{
-		state->cv.notify_all();
-	} else
+		state->cv.Signal();
+	}
+	return OK;
+}
+
+// Rounds up so a timed wait never ends before its deadline, and caps a long
+// one; the caller waits again for the rest.
+uint32_t WaitMicros(std::chrono::nanoseconds remaining)
+{
+	return static_cast<uint32_t>(std::min<int64_t>(std::chrono::ceil<std::chrono::microseconds>(remaining).count(), UINT32_MAX));
+}
+
+// Blocks while the value at address equals expected, until a wake, a change
+// or the relative timeout (null waits indefinitely).
+template <typename T>
+int WaitWhileEqual(uint64_t address, T expected, const std::chrono::nanoseconds* timeout)
+{
+	const auto registration = RegisterWaiter(address);
+	auto*      state        = registration.state.get();
+	auto*      value        = reinterpret_cast<const T*>(address);
+	const auto changed      = [&]()
+	{ return state->generation != registration.generation || __atomic_load_n(value, __ATOMIC_ACQUIRE) != expected; };
+	const auto deadline = std::chrono::steady_clock::now() + (timeout != nullptr ? *timeout : std::chrono::nanoseconds::zero());
+	int        result   = OK;
 	{
-		for (int i = 0; i < releases; i++)
+		Core::LockGuard state_lock(state->mutex);
+		while (!changed())
 		{
-			state->cv.notify_one();
+			if (timeout == nullptr)
+			{
+				PthreadInterruptibleWait(&state->cv, &state->mutex);
+				continue;
+			}
+			const auto remaining = deadline - std::chrono::steady_clock::now();
+			if (remaining <= std::chrono::nanoseconds::zero())
+			{
+				result = KERNEL_ERROR_ETIMEDOUT;
+				break;
+			}
+			PthreadInterruptibleWaitFor(&state->cv, &state->mutex, WaitMicros(remaining));
 		}
 	}
 
-	return OK;
+	UnregisterWaiter(address, registration.state);
+	return result;
+}
+
+int UmtxWait(uint64_t address, uint64_t expected, uint64_t timeout_size, const void* timeout)
+{
+	if (timeout == nullptr)
+	{
+		return WaitWhileEqual(address, expected, nullptr);
+	}
+	// A size above a timespec selects struct _umtx_time (absolute or clock-selected
+	// timeouts); no title has used it yet.
+	EXIT_IF(timeout_size > sizeof(KernelTimespec));
+	const auto* relative = static_cast<const KernelTimespec*>(timeout);
+	if (relative->tv_sec < 0 || relative->tv_nsec < 0 || relative->tv_nsec >= kNanosecondsPerSecond)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	const auto timeout_ns = std::chrono::seconds(relative->tv_sec) + std::chrono::nanoseconds(relative->tv_nsec);
+	return WaitWhileEqual(address, expected, &timeout_ns);
 }
 
 } // namespace
@@ -119,36 +182,14 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWait(uint64_t address, uint32_t expected_va
 	}
 
 	KYTY_LOG_DEBUG("\t address = 0x%016" PRIx64 " expected = 0x%08" PRIx32 " timeout = %p flags = 0x%08" PRIx32 "\n", address,
-	       expected_value, static_cast<const void*>(timeout), flags);
+	               expected_value, static_cast<const void*>(timeout), flags);
 
-	const uint32_t timeout_us = timeout != nullptr ? __atomic_load_n(timeout, __ATOMIC_ACQUIRE) : 0u;
-	const auto registration = RegisterWaiter(address);
-	int        result       = OK;
+	if (timeout == nullptr)
 	{
-		std::unique_lock state_lock(registration.state->mutex);
-		auto*            value = reinterpret_cast<const uint32_t*>(address);
-		const auto       load_value = [&]() { return __atomic_load_n(value, __ATOMIC_ACQUIRE); };
-		if (load_value() == expected_value)
-		{
-			const auto changed = [&]() {
-				return registration.state->generation != registration.generation || load_value() != expected_value;
-			};
-			if (timeout == nullptr)
-			{
-				registration.state->cv.wait(state_lock, changed);
-			} else
-			{
-				const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_us);
-				if (!registration.state->cv.wait_until(state_lock, deadline, changed) && load_value() == expected_value)
-				{
-					result = KERNEL_ERROR_ETIMEDOUT;
-				}
-			}
-		}
+		return WaitWhileEqual(address, expected_value, nullptr);
 	}
-
-	UnregisterWaiter(address, registration.state);
-	return result;
+	const std::chrono::nanoseconds timeout_ns = std::chrono::microseconds(__atomic_load_n(timeout, __ATOMIC_ACQUIRE));
+	return WaitWhileEqual(address, expected_value, &timeout_ns);
 }
 
 int KYTY_SYSV_ABI KernelSyncOnAddressWake(uint64_t address, int64_t wake_count)
@@ -162,6 +203,27 @@ int KYTY_SYSV_ABI KernelSyncOnAddressWake(uint64_t address, int64_t wake_count)
 
 	KYTY_LOG_DEBUG("\t address = 0x%016" PRIx64 " wake_count = %" PRId64 "\n", address, wake_count);
 	return WakeRegisteredWaiters(address, wake_count);
+}
+
+int KernelUmtxOp(void* object, int operation, uint64_t value, uint64_t timeout_size, const void* timeout)
+{
+	PRINT_NAME();
+
+	const auto address = reinterpret_cast<uint64_t>(object);
+	KYTY_LOG_DEBUG("\t object = 0x%016" PRIx64 " op = %d value = 0x%016" PRIx64 " timeout_size = %" PRIu64 " timeout = %p\n", address,
+	               operation, value, timeout_size, timeout);
+	if (address == 0)
+	{
+		return KERNEL_ERROR_EFAULT;
+	}
+	switch (operation)
+	{
+		case kUmtxOpWait: return UmtxWait(address, value, timeout_size, timeout);
+		// The count is an int; a wake releases at least one waiter.
+		case kUmtxOpWake: return WakeRegisteredWaiters(address, std::max<int64_t>(1, static_cast<int32_t>(value)));
+		default: EXIT("unimplemented _umtx_op operation %d\n", operation);
+	}
+	return KERNEL_ERROR_EINVAL;
 }
 
 } // namespace Kyty::Kernel::SyncOnAddress

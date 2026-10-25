@@ -92,7 +92,9 @@ bool ShaderBuildDescriptorLayoutPlan(const ShaderBindResources& bind, ShaderDesc
 	    !Add(&plan, Type::StorageBuffer, bind.gds_pointers.binding_index, ShaderGdsBufferBound(bind.gds_pointers) ? 1 : 0) ||
 	    !Add(&plan, Type::SampledImage, textures.binding_sampled_array_index, textures.textures2d_array_sampled_num) ||
 	    !Add(&plan, Type::SampledImage, textures.binding_sampled_3d_index, textures.textures3d_sampled_num) ||
-	    !Add(&plan, Type::UniformBuffer, bind.vsharp_binding_index, bind.vsharp_uniform_buffer ? 1 : 0))
+	    !Add(&plan, Type::UniformBuffer, bind.vsharp_binding_index, bind.vsharp_uniform_buffer ? 1 : 0) ||
+	    !Add(&plan, Type::StorageBuffer, bind.storage_buffers.write_mask_binding_index,
+	         bind.storage_buffers.write_mask_binding_index >= 0 ? bind.storage_buffers.buffers_num : 0))
 	{
 		return false;
 	}

@@ -24,6 +24,7 @@
 #include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
+#include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/RenderResolutionAlias.h"
 #include "Emulator/Graphics/RenderResolutionDemotion.h"
 #include "Emulator/Graphics/RenderResolutionImageCapability.h"
@@ -37,6 +38,7 @@
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
@@ -54,9 +56,8 @@
 namespace Kyty::Libs::Graphics {
 
 static ComputeColorFillEvents g_compute_color_fills;
-// Pending DCC metadata clears, keyed by the metadata range the guest filled.
-static ComputeColorFillEvents g_color_dcc_clears;
-
+// Pending DCC and CMASK metadata clears, keyed by the metadata range the guest filled.
+static ComputeColorFillEvents g_color_meta_clears;
 
 static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, VkImageLayout new_layout, VkAccessFlags dst_access,
                                  VkPipelineStageFlags dst_stage);
@@ -68,9 +69,9 @@ static bool ComputeColorFillUsesGraphicsQueue(CommandBuffer* buffer)
 	if (queue < 0 || queue >= GraphicContext::QUEUES_NUM) { return false; }
 	const auto& recording = context->queues[queue];
 	const auto& graphics = context->queues[GraphicContext::QUEUE_GFX];
-	// Images use exclusive ownership. A virtual compute queue is supported
-	// here only when it records onto the very same physical graphics queue;
-	// neither queue-family ownership nor cross-queue dependencies are inferred.
+	// A virtual compute queue is supported here only when it records onto the
+	// very same physical graphics queue: depth and stencil clears need a
+	// graphics queue, and no cross-queue dependency is inferred.
 	return recording.vk_queue != nullptr && recording.vk_queue == graphics.vk_queue && recording.family == graphics.family;
 }
 
@@ -218,7 +219,10 @@ static bool ApplyComputeColorFillImages(CommandBuffer* buffer, const ComputeColo
 
 void InvalidateComputeColorFills(const ShaderBindResources& bind)
 {
-	if (g_compute_color_fills.Empty() && g_color_dcc_clears.Empty()) { return; }
+	if (g_compute_color_fills.Empty() && g_color_meta_clears.Empty())
+	{
+		return;
+	}
 	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
 	{
 		if (ShaderStorageUsageIsReadOnly(bind.storage_buffers.usages[i])) { continue; }
@@ -227,11 +231,11 @@ void InvalidateComputeColorFills(const ShaderBindResources& bind)
 		if (resource.Base48() == 0u || size == 0u || resource.Base48() > UINT64_MAX - size)
 		{
 			g_compute_color_fills.DiscardAll();
-			g_color_dcc_clears.DiscardAll();
+			g_color_meta_clears.DiscardAll();
 			return;
 		}
 		g_compute_color_fills.DiscardOverlaps(resource.Base48(), size);
-		g_color_dcc_clears.DiscardOverlaps(resource.Base48(), size);
+		g_color_meta_clears.DiscardOverlaps(resource.Base48(), size);
 	}
 	// A DCC clear survives writable image binds: its consumer re-resolves the
 	// metadata range, which refuses a storage image over that range.
@@ -385,6 +389,34 @@ bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const Comput
 	return GpuMemoryMarkStorageGuestPublished(identity, publication, &fill.words);
 }
 
+bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+{
+	const auto& words = fill.words;
+	if (buffer == nullptr || !std::all_of(words.begin(), words.end(), [&](uint32_t word) { return word == words[0]; }))
+	{
+		return false;
+	}
+	GpuMemoryStorageWriteIdentity identity {};
+	if (!GpuMemoryFindExactWritableStorage(fill.address, fill.size, &identity) || identity.buffer->write_mask == nullptr)
+	{
+		return false;
+	}
+	auto*           cmd = buffer->RecordOutsideRenderPass();
+	VkMemoryBarrier barrier {};
+	barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+	vkCmdFillBuffer(cmd, identity.buffer->buffer, 0, fill.size, words[0]);
+	// Flag every page as the dispatch's stores would, for the write-back.
+	vkCmdFillBuffer(cmd, identity.buffer->write_mask->buffer, 0, VK_WHOLE_SIZE, 1u);
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
+	                     &barrier, 0, nullptr, 0, nullptr);
+	return true;
+}
+
 bool PublishPendingStorageToGuestAddress(CommandBuffer* buffer, SubmissionId* dependency)
 {
 	EXIT_IF(buffer == nullptr || dependency == nullptr);
@@ -513,10 +545,160 @@ bool PropagateComputeUniformDepthFill(CommandBuffer* buffer, const ComputeUnifor
 		const VkImageSubresourceRange  range {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, image->mip_levels, 0u, image->array_layers};
 		vkCmdClearDepthStencilImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1u, &range);
 		TransitionDepthStencilImage(vk_buffer, image, restore_layout);
+		image->content_stamp = VulkanImageNextStamp();
 		cleared = true;
 	}
 	if (cleared) { GpuMemoryResetPlaneHash(fill.address, fill.size, GpuMemoryObjectType::DepthStencilBuffer); }
 	return cleared;
+}
+
+// The stamp of a slice array layer read from guest memory instead of copied from a slice image.
+static constexpr uint64_t kSliceArrayGuestLayer = UINT64_MAX;
+
+// Classifies who holds the current bytes of a depth layer that no slice image renders, under the contract the
+// guest-memory depth sample path applies to a whole surface: physically mapped, and every overlapping object
+// still holds the guest bytes.
+static GpuMemoryDepthD16Source GuestDepthLayerSource(uint64_t addr, uint64_t size)
+{
+	Kernel::Memory::KernelMappedRange mapped {};
+	if (!Kernel::Memory::KernelQueryMappedRange(addr, size, &mapped) || mapped.kind != Kernel::Memory::KernelMappedRangeKind::Physical)
+	{
+		return GpuMemoryDepthD16Source::Unsupported;
+	}
+	uint64_t                 query_addr = addr;
+	uint64_t                 query_size = size;
+	GpuMemoryOverlapSnapshot overlaps {};
+	if (!GpuMemoryQueryOverlaps(&query_addr, &query_size, 1, &overlaps))
+	{
+		return GpuMemoryDepthD16Source::Unsupported;
+	}
+	bool has_texture_parent = false;
+	for (uint32_t entry = 0; entry < overlaps.entry_count; entry++)
+	{
+		has_texture_parent |= overlaps.entries[entry].type == GpuMemoryObjectType::Texture;
+	}
+	GpuMemoryRangeProvenance provenance {};
+	if (has_texture_parent && !GpuMemoryQueryRangeProvenance(addr, size, &provenance))
+	{
+		return GpuMemoryDepthD16Source::Unsupported;
+	}
+	return GpuMemoryClassifyDepthD16Source(overlaps, has_texture_parent ? &provenance : nullptr);
+}
+
+// Records the detiled guest bytes of depth layer `layer` (at addr) into the array, which is in TRANSFER_DST_OPTIMAL.
+// The first read registers the range with the dirty-page tracker, as GPU memory objects do, so the layer is read
+// again only after a CPU write; a read the tracker cannot vouch for is repeated at the next bind.
+static void UploadGuestDepthLayer(CommandBuffer* buffer, VkCommandBuffer vk_buffer, DepthStencilVulkanImage* first, uint32_t layer,
+                                  uint64_t addr, uint64_t size, uint32_t fmt, uint32_t pitch)
+{
+	auto*          array   = first->slice_array;
+	const uint32_t width   = array->extent.width;
+	const uint32_t height  = array->extent.height;
+	const uint32_t bytes   = State::Gen5DepthSampleBytesPerElement(fmt);
+	const bool     depth16 = array->format == VK_FORMAT_D16_UNORM || array->format == VK_FORMAT_D16_UNORM_S8_UINT;
+	const auto     guest   = first->GetGuestExtent();
+	if (bytes != (depth16 ? 2u : 4u) || State::Gen5DepthSampleLayerBytes(fmt, pitch, height) != size || guest.width != width ||
+	    guest.height != height)
+	{
+		EXIT("depth array layer %u at 0x%012" PRIx64 " cannot be read from guest memory: format=%u/%u pitch=%u size=0x%" PRIx64
+		     " extent=%ux%u guest=%ux%u\n",
+		     layer, addr, fmt, static_cast<uint32_t>(array->format), pitch, size, width, height, guest.width, guest.height);
+	}
+	auto& state   = first->slice_array_layers[layer];
+	auto& tracker = GpuDirtyPageTracker::Instance();
+	EXIT_IF(state.guest_size != 0u && (state.guest_addr != addr || state.guest_size != size));
+	if (state.guest_size == 0u && tracker.RegisterRange(addr, size))
+	{
+		state.guest_addr = addr;
+		state.guest_size = size;
+	}
+	const auto           observation = tracker.BeginRead(addr, size);
+	std::vector<uint8_t> linear(static_cast<size_t>(width) * height * bytes);
+	TileConvertDepth64KBToLinear(linear.data(), reinterpret_cast<const void*>(addr), width, height, pitch, bytes, layer);
+	auto*             upload = buffer->UploadRecordingBuffer(linear.data(), linear.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+	VkBufferImageCopy region {};
+	region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, layer, 1u};
+	region.imageExtent      = {width, height, 1u};
+	vkCmdCopyBufferToImage(vk_buffer, upload->buffer, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
+	state.guest_generation = observation.generation;
+	state.stamp            = observation.tracked && tracker.ReadObservationIsStable(addr, size, observation) ? kSliceArrayGuestLayer : 0u;
+}
+
+VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVulkanImage* first, uint64_t addr, uint64_t slice_size,
+                                           uint32_t layers, uint32_t fmt, uint32_t pitch, bool plain_guest_depth)
+{
+	EXIT_IF(buffer == nullptr || first == nullptr || slice_size == 0u);
+	auto*           array     = DepthStencilBufferGetSliceArray(g_render_ctx->GetGraphicCtx(), first, layers);
+	VkCommandBuffer vk_buffer = nullptr;
+	const auto      record    = [&]()
+	{
+		if (vk_buffer == nullptr)
+		{
+			vk_buffer = buffer->RecordOutsideRenderPass();
+			TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		}
+	};
+	for (uint32_t layer = 0; layer < layers; layer++)
+	{
+		const uint64_t           slice_addr = addr + layer * slice_size;
+		DepthStencilVulkanImage* slice      = first;
+		if (layer != 0u)
+		{
+			const auto found = FindDepthStencil(buffer, slice_addr, slice_size, true);
+			slice            = found.IsEmpty() ? nullptr : found.At(0);
+		}
+		if (slice != nullptr && slice->layout == VK_IMAGE_LAYOUT_UNDEFINED)
+		{
+			EXIT("depth array layer %u at 0x%012" PRIx64 " has an unrendered depth slice\n", layer, slice_addr);
+		}
+		// A layer no slice renders holds what guest memory holds, as an unrendered depth surface sampled alone does.
+		if (slice == nullptr)
+		{
+			const auto source = plain_guest_depth ? GuestDepthLayerSource(slice_addr, slice_size) : GpuMemoryDepthD16Source::Unsupported;
+			if (source != GpuMemoryDepthD16Source::Guest)
+			{
+				EXIT("depth array layer %u at 0x%012" PRIx64 " has no depth slice and no guest bytes: plain=%u source=%u\n", layer,
+				     slice_addr, plain_guest_depth ? 1u : 0u, static_cast<uint32_t>(source));
+			}
+			const auto&                   state = first->slice_array_layers[layer];
+			const GpuDirtyReadObservation last_read {state.guest_generation, true};
+			if (state.stamp == kSliceArrayGuestLayer &&
+			    GpuDirtyPageTracker::Instance().ReadObservationIsStable(slice_addr, slice_size, last_read))
+			{
+				continue;
+			}
+			record();
+			UploadGuestDepthLayer(buffer, vk_buffer, first, layer, slice_addr, slice_size, fmt, pitch);
+			continue;
+		}
+		if (slice->format != array->format || slice->extent.width != array->extent.width || slice->extent.height != array->extent.height ||
+		    slice->samples != VK_SAMPLE_COUNT_1_BIT || slice->sample_locations_compatible)
+		{
+			EXIT("depth array layer %u at 0x%012" PRIx64 " does not match layer 0: format=%u/%u extent=%ux%u/%ux%u samples=%u\n", layer,
+			     slice_addr, static_cast<uint32_t>(slice->format), static_cast<uint32_t>(array->format), slice->extent.width,
+			     slice->extent.height, array->extent.width, array->extent.height, static_cast<uint32_t>(slice->samples));
+		}
+		if (first->slice_array_layers[layer].stamp == slice->content_stamp)
+		{
+			continue;
+		}
+		record();
+		const auto slice_layout = slice->layout;
+		TransitionDepthStencilImage(vk_buffer, slice, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		VkImageCopy region {};
+		region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 0u, 1u};
+		region.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, layer, 1u};
+		region.extent         = {array->extent.width, array->extent.height, 1u};
+		vkCmdCopyImage(vk_buffer, slice->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		               1u, &region);
+		TransitionDepthStencilImage(vk_buffer, slice, slice_layout);
+		first->slice_array_layers[layer].stamp = slice->content_stamp;
+	}
+	if (vk_buffer != nullptr)
+	{
+		TransitionDepthStencilImage(vk_buffer, array, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	}
+	return array;
 }
 
 void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth)
@@ -540,10 +722,10 @@ void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInf
 	TransitionDepthStencilImage(vk_buffer, image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 }
 
-bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+bool PublishComputeColorMetaClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
 {
 	// Any other fill of the metadata, including the uncompressed key, ends a pending clear.
-	g_color_dcc_clears.DiscardOverlaps(fill.address, fill.size);
+	g_color_meta_clears.DiscardOverlaps(fill.address, fill.size);
 	ColorDccClearCode code {};
 	ComputeColorFillIdentity identity {};
 	SubmissionId submission;
@@ -554,31 +736,38 @@ bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBuff
 		return false;
 	}
 	const auto observation = GpuDirtyPageTracker::Instance().BeginRead(identity.address, identity.size);
-	return observation.tracked && g_color_dcc_clears.Publish(identity, submission, fill.words, observation);
+	return observation.tracked && g_color_meta_clears.Publish(identity, submission, fill.words, observation);
 }
 
-// Removes the pending clear of the metadata plane at dcc_address and returns it
-// when the same storage incarnation still holds it and it rewrote every key of
-// the width x height surface.
-static bool TakeColorDccClear(CommandBuffer* buffer, uint64_t dcc_address, uint32_t width, uint32_t height, uint32_t bytes_per_element,
-                              ColorDccClearCode* code)
+// Removes the pending fill that starts at meta_address and returns it when the
+// same storage incarnation still holds it unchanged.
+static bool TakeColorMetaClear(CommandBuffer* buffer, uint64_t meta_address, ComputeColorFillIdentity* identity,
+                               ComputeColorFillEvent* event)
 {
-	const auto* pending = g_color_dcc_clears.FindAt(dcc_address);
+	const auto* pending = g_color_meta_clears.FindAt(meta_address);
 	if (pending == nullptr) { return false; }
 	const uint64_t address = pending->identity.address;
 	const uint64_t size    = pending->identity.size;
-	ComputeColorFillIdentity identity {};
 	SubmissionId submission;
-	if (!ResolveComputeColorFillIdentity(address, size, &identity, false, ComputeFillAliases::ExactOnly) ||
+	if (!ResolveComputeColorFillIdentity(address, size, identity, false, ComputeFillAliases::ExactOnly) ||
 	    !buffer->GetSubmissionId(&submission))
 	{
-		g_color_dcc_clears.DiscardOverlaps(address, size);
+		g_color_meta_clears.DiscardOverlaps(address, size);
 		return false;
 	}
-	ComputeColorFillEvent event {};
-	return g_color_dcc_clears.Consume(identity, submission, &event) &&
-	       GpuDirtyPageTracker::Instance().ReadObservationIsStable(address, size, event.cpu_observation) &&
-	       ColorDccFillCoversSurface(address, size, dcc_address, width, height, bytes_per_element) &&
+	return g_color_meta_clears.Consume(*identity, submission, event) &&
+	       GpuDirtyPageTracker::Instance().ReadObservationIsStable(address, size, event->cpu_observation);
+}
+
+// The pending clear of the metadata plane at dcc_address when it rewrote every
+// key of the width x height surface.
+static bool TakeColorDccClear(CommandBuffer* buffer, uint64_t dcc_address, uint32_t width, uint32_t height, uint32_t bytes_per_element,
+                              ColorDccClearCode* code)
+{
+	ComputeColorFillIdentity identity {};
+	ComputeColorFillEvent    event {};
+	return TakeColorMetaClear(buffer, dcc_address, &identity, &event) &&
+	       ColorDccFillCoversSurface(identity.address, identity.size, dcc_address, width, height, bytes_per_element) &&
 	       ColorDccClearCodeFromFill(event.words, code);
 }
 
@@ -619,29 +808,57 @@ static bool DecodeColorDccClear(ColorDccClearCode code, bool alpha_on_msb, VkFor
 	return true;
 }
 
-// A render target bound with DCC reads its pending metadata clear: the clear
-// key, or for the register key the target's clear words, becomes its contents.
-static void ConsumeColorDccClear(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
+// The target's clear words become its contents in the images of its own format.
+static void ClearColorAttachmentToWords(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
 {
-	ColorDccClearCode code {};
-	if (g_color_dcc_clears.Empty() || attachment.dcc_addr == 0u ||
-	    !TakeColorDccClear(buffer, attachment.dcc_addr, attachment.width, attachment.height, attachment.bytes_per_element, &code))
-	{
-		return;
-	}
 	const auto target_format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
 	(void)ClearColorImageAliases(buffer, attachment.base_addr, attachment.size,
 	                             FindComputeColorFillImages(buffer, attachment.base_addr, attachment.size),
 	                             [&](VkFormat format, VkClearColorValue* clear)
 	                             {
-		                             if (code != ColorDccClearCode::Register)
+		                             if (format != target_format || ColorDccClearChannels(format) == 0u)
 		                             {
-			                             return DecodeColorDccClear(code, attachment.dcc_alpha_on_msb, format, clear);
+			                             return false;
 		                             }
-		                             if (format != target_format || ColorDccClearChannels(format) == 0u) { return false; }
 		                             *clear = DecodeGuestColorClearWords(attachment.clear_word0, attachment.clear_word1, format);
 		                             return true;
 	                             });
+}
+
+// A render target bound with DCC reads its pending metadata clear: the clear
+// key, or for the register key the target's clear words, becomes its contents.
+static void ConsumeColorDccClear(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
+{
+	ColorDccClearCode code {};
+	if (g_color_meta_clears.Empty() || attachment.dcc_addr == 0u ||
+	    !TakeColorDccClear(buffer, attachment.dcc_addr, attachment.width, attachment.height, attachment.bytes_per_element, &code))
+	{
+		return;
+	}
+	if (code == ColorDccClearCode::Register)
+	{
+		ClearColorAttachmentToWords(buffer, attachment);
+		return;
+	}
+	(void)ClearColorImageAliases(
+	    buffer, attachment.base_addr, attachment.size, FindComputeColorFillImages(buffer, attachment.base_addr, attachment.size),
+	    [&](VkFormat format, VkClearColorValue* clear) { return DecodeColorDccClear(code, attachment.dcc_alpha_on_msb, format, clear); });
+}
+
+// A fast-clear target bound with a pending CMASK clear reads its clear words
+// in every tile, so they become its contents.
+static void ConsumeColorCmaskClear(CommandBuffer* buffer, const RenderColorAttachmentInfo& attachment)
+{
+	ComputeColorFillIdentity identity {};
+	ComputeColorFillEvent    event {};
+	if (g_color_meta_clears.Empty() || attachment.cmask_addr == 0u ||
+	    !TakeColorMetaClear(buffer, attachment.cmask_addr, &identity, &event) ||
+	    !ColorCmaskFillClearsSurface(event.words, identity.address, identity.size, attachment.cmask_addr, attachment.width,
+	                                 attachment.height))
+	{
+		return;
+	}
+	ClearColorAttachmentToWords(buffer, attachment);
 }
 
 // The first shader access to an image, read or write, follows its pending
@@ -651,9 +868,9 @@ void ConsumeImageColorDccClear(CommandBuffer* buffer, const ColorDccImage& image
 {
 	ColorDccClearCode code {};
 	// The texture unit decodes the clear keys but not the register key.
-	if (g_color_dcc_clears.Empty() || image.dcc_addr == 0u ||
-	    !TakeColorDccClear(buffer, image.dcc_addr, image.width, image.height, image.bytes_per_element, &code) ||
-	    !image.single_surface || code == ColorDccClearCode::Register)
+	if (g_color_meta_clears.Empty() || image.dcc_addr == 0u ||
+	    !TakeColorDccClear(buffer, image.dcc_addr, image.width, image.height, image.bytes_per_element, &code) || !image.single_surface ||
+	    code == ColorDccClearCode::Register)
 	{
 		return;
 	}
@@ -834,12 +1051,15 @@ void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* imag
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
 		image_memory_barrier.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
 
-		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(),
-		                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-		                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-		                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-		                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		                     0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+		const VkPipelineStageFlags src_stage =
+		    VulkanQueueBarrierScope(buffer,
+			                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+			                            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			                        &image_memory_barrier.srcAccessMask);
+		const VkPipelineStageFlags dst_stage = VulkanQueueBarrierScope(
+		    buffer, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		    &image_memory_barrier.dstAccessMask);
+		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 
 		image->layout = image_memory_barrier.newLayout;
 	}
@@ -878,9 +1098,10 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, VulkanImage* image
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
 		image_memory_barrier.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
 
-		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		                     VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-		                     &image_memory_barrier);
+		constexpr VkPipelineStageFlags stages    = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+		const VkPipelineStageFlags     src_stage = VulkanQueueBarrierScope(buffer, stages, &image_memory_barrier.srcAccessMask);
+		const VkPipelineStageFlags     dst_stage = VulkanQueueBarrierScope(buffer, stages, &image_memory_barrier.dstAccessMask);
+		vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 
 		image->layout = image_memory_barrier.newLayout;
 	}
@@ -945,7 +1166,9 @@ void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image
 
 	const VkPipelineStageFlags dst_stage =
 	    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-	vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+	vkCmdPipelineBarrier(buffer->RecordOutsideRenderPass(), VulkanQueueBarrierScope(buffer, src_stage, &image_memory_barrier.srcAccessMask),
+	                     VulkanQueueBarrierScope(buffer, dst_stage, &image_memory_barrier.dstAccessMask), 0, 0, nullptr, 0, nullptr, 1,
+	                     &image_memory_barrier);
 	image->layout = image_memory_barrier.newLayout;
 }
 
@@ -1075,16 +1298,36 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	auto depth_addr_mask   = static_cast<uint64_t>(depth_size.align) - 1;
 	auto htile_addr_mask   = static_cast<uint64_t>(htile_size.align) - 1;
 
+	// DB_DEPTH_VIEW selects the slices a draw renders; the depth, stencil and HTILE bases stay at slice 0 and each
+	// plane's slices follow one another at its single-level slice size. Without
+	// PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX the render target index is zero, so a draw renders only SLICE_START,
+	// whatever SLICE_MAX.
+	const uint64_t slice = z.depth_view.slice_start;
+	const bool     layer_export =
+	    (hw.GetShaderRegisters().m_paClVsOutCntl & (1u << Pm4::PA_CL_VS_OUT_CNTL_USE_VTX_RENDER_TARGET_INDX_SHIFT)) != 0u;
+	if (r->format != VK_FORMAT_UNDEFINED && (slice != 0u || z.depth_view.slice_max != 0u))
+	{
+		if (layer_export && z.depth_view.slice_max != z.depth_view.slice_start)
+		{
+			EXIT("layered depth rendering is not implemented: slices %u..%u\n", z.depth_view.slice_start, z.depth_view.slice_max);
+		}
+		if (!ps5 || z.z_info.num_mip_levels != 0u)
+		{
+			EXIT("depth slice %u is not addressed: ps5=%u mip_levels=%u\n", z.depth_view.slice_start, ps5 ? 1u : 0u,
+			     static_cast<uint32_t>(z.z_info.num_mip_levels));
+		}
+	}
+
 	r->htile                = htile;
 	r->neo                  = neo;
 	r->depth_buffer_size    = depth_size.size;
-	r->depth_buffer_vaddr   = z.z_read_base_addr & ~depth_addr_mask;
+	r->depth_buffer_vaddr   = (z.z_read_base_addr & ~depth_addr_mask) + slice * depth_size.size;
 	r->depth_tile_swizzle   = z.z_read_base_addr & depth_addr_mask;
 	r->stencil_buffer_size  = stencil_size.size;
-	r->stencil_buffer_vaddr = z.stencil_read_base_addr & ~stencil_addr_mask;
+	r->stencil_buffer_vaddr = (z.stencil_read_base_addr & ~stencil_addr_mask) + slice * stencil_size.size;
 	r->stencil_tile_swizzle = z.stencil_read_base_addr & stencil_addr_mask;
 	r->htile_buffer_size    = htile_size.size;
-	r->htile_buffer_vaddr   = z.htile_data_base_addr & ~htile_addr_mask;
+	r->htile_buffer_vaddr   = (z.htile_data_base_addr & ~htile_addr_mask) + slice * htile_size.size;
 	r->htile_tile_swizzle   = z.htile_data_base_addr & htile_addr_mask;
 	r->width                = (ps5 ? depth_extent.width : z.width);
 	r->height               = (ps5 ? depth_extent.height : z.height);
@@ -1260,6 +1503,8 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
 	if (r->vulkan_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->vulkan_buffer == nullptr condition ignored (continuing)\n"); }
+	// Every bind may write the image (draws, clears); sampled copies of it compare this stamp.
+	r->vulkan_buffer->content_stamp = VulkanImageNextStamp();
 	const bool stencil_plane        = r->stencil_buffer_size > 0 && DepthFormatHasStencil(r->format);
 	r->vulkan_buffer->depth_vaddr   = r->depth_buffer_size > 0 ? r->depth_buffer_vaddr : 0u;
 	r->vulkan_buffer->stencil_vaddr = stencil_plane ? r->stencil_buffer_vaddr : 0u;
@@ -1498,13 +1743,18 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		attachment.existing_video_image = video_image.image;
 	}
 
-	// DCC clears are decoded for single-level, single-slice, single-sample targets only.
-	if (rt.info.dcc_compression_enable && rt.attrib2.num_mip_levels == 0u && rt.view.current_mip_level == 0u &&
-	    attachment.image_layers == 1u && attachment.samples == VK_SAMPLE_COUNT_1_BIT)
+	// DCC and CMASK clears are decoded for single-level, single-slice, single-sample targets only.
+	const bool single_surface = rt.attrib2.num_mip_levels == 0u && rt.view.current_mip_level == 0u && attachment.image_layers == 1u &&
+	                            attachment.samples == VK_SAMPLE_COUNT_1_BIT;
+	if (rt.info.dcc_compression_enable && single_surface)
 	{
 		attachment.dcc_addr          = rt.dcc_addr.addr;
 		attachment.dcc_alpha_on_msb  = ColorDccAlphaOnMsb(rt.info.channel_order);
 		attachment.bytes_per_element = render_format.bytes_per_element;
+	}
+	if (rt.info.cmask_fast_clear_enable && single_surface)
+	{
+		attachment.cmask_addr = rt.cmask.addr;
 	}
 	attachment.cmask_fast_clear_enable = rt.info.cmask_fast_clear_enable;
 	attachment.clear_word0             = rt.clear_word0.word0;
@@ -1777,6 +2027,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		attachment.attachment_view   = VulkanImage::VIEW_DEFAULT;
 		ConsumeComputeColorFill(buffer, attachment.base_addr, attachment.size);
 		ConsumeColorDccClear(buffer, attachment);
+		ConsumeColorCmaskClear(buffer, attachment);
 	}
 }
 
@@ -1875,6 +2126,44 @@ static void PreserveExpandedDccAttachment(CommandBuffer* buffer, const HW::Rende
 	// The host render texture already stores expanded color. Retain its exact
 	// backing and submission use; rasterizing the metadata shader would replace
 	// those pixels with an export used only to drive the guest color block.
+}
+
+// CB_COLOR_CONTROL.MODE=ELIMINATE_FAST_CLEAR writes the clear words into the
+// fast-cleared tiles of each bound target and discards the pixel shader's
+// color. A host target holds expanded color once it consumes its pending
+// metadata clear, so binding each fast-clear or DCC target is the whole pass.
+bool GraphicsRenderColorEliminateFastClear(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw)
+{
+	if (hw.GetColorControl().mode != 2u)
+	{
+		return false;
+	}
+	EXIT_IF(buffer == nullptr || buffer->IsInvalid());
+	if (hw.GetColorControl().op != 0xccu)
+	{
+		EXIT("unsupported fast-clear eliminate control: op=0x%x\n", hw.GetColorControl().op);
+	}
+	const auto& z = hw.GetDepthRenderTarget();
+	if (hw.GetDepthControl().z_enable && hw.GetDepthControl().z_write_enable && z.z_info.format != 0 && z.z_write_base_addr != 0)
+	{
+		EXIT("fast-clear eliminate with depth writes is not supported\n");
+	}
+	const auto mask = hw.GetRenderTargetMask() & hw.GetShaderRegisters().m_cbShaderMask;
+	for (uint32_t slot = 0; slot < RenderColorInfo::TARGETS_MAX; ++slot)
+	{
+		const auto& rt = hw.GetRenderTarget(slot);
+		if (((mask >> (slot * 4u)) & 0xfu) == 0u || (!rt.info.cmask_fast_clear_enable && !rt.info.dcc_compression_enable))
+		{
+			continue;
+		}
+		RenderColorInfo color {};
+		if (!DescribeRenderColorSlotInfo(buffer, rt, &color))
+		{
+			EXIT("fast-clear eliminate target is not describable: base=0x%" PRIx64 "\n", rt.base.addr);
+		}
+		MaterializeRenderColorInfo(submit_id, buffer, &color);
+	}
+	return true;
 }
 
 bool GraphicsRenderColorDecompress(CommandBuffer* buffer, const HW::Context& hw)

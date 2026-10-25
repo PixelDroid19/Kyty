@@ -51,7 +51,9 @@ The command writes an ignored directory such as
 
 * `guest-*.log`: the complete guest log;
 * `native_frames/*.png`: emulator-native readbacks of the emulated `VideoOut`
-  source image, never screenshots of the desktop or window compositor;
+  source image, never screenshots of the desktop or window compositor. They
+  are opaque like the presented frame, and downscaling copies pixels without
+  blending;
 * `*.png.json`: per-frame metadata with title/version when the loaded content
   exposes it, build revision, Vulkan format, source extent, present count, and
   capture milestone;

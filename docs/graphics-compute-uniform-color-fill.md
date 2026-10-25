@@ -17,7 +17,11 @@ exact full-range dispatch without partial thread groups. Fill values cannot
 depend on the workgroup-ID register. Instruction addresses and checksums do not
 select this behavior.
 
-The original compute dispatch always executes. Afterwards:
+The buffer write always happens. The dispatch executes, or, when the words
+are one repeated 32-bit value and the range has an exact storage object, a
+transfer fill of that object replaces it and flags every page of the object's
+write mask (`docs/bringup/cross-title.md`, "Proven one-word buffer fills
+recorded as transfer fills"). Afterwards:
 
 - Every exact live color-image alias of the filled range is prevalidated
   before any image clear: render targets and sampled texture copies whose

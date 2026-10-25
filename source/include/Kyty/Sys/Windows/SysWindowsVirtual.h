@@ -32,6 +32,11 @@ bool     sys_virtual_discard_shared_backing_range(void* backing, uint64_t backin
 // Offset of the first populated or swapped-out byte at or after backing_offset,
 // or the backing size when none follows. False when the host cannot tell.
 bool     sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset, uint64_t* next);
+// One byte per page of the page-aligned interval [backing_offset, backing_offset + size):
+// nonzero when the page is populated or swapped out. Hosts without a population
+// query report every page populated.
+bool     sys_virtual_query_shared_backing_data_pages(void* backing, uint64_t backing_offset, uint64_t size, uint64_t page_size,
+                                                     uint8_t* populated);
 // Bytes of the backing that hold a page (st_blocks). False when the host cannot tell.
 bool     sys_virtual_query_shared_backing_populated_bytes(void* backing, uint64_t* bytes);
 int      sys_virtual_export_shared_backing_dma_buf(void* backing, uint64_t backing_offset, uint64_t size);

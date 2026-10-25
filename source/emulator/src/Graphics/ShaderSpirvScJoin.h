@@ -85,6 +85,10 @@ void ScJoinOrderForEmission(const ShaderCode& code, uint32_t join_pc, const Vect
 // backward SBranch that closes a loop containing the exit).
 bool ScJoinIsLoopExitEdge(const ShaderCode& code, const ShaderInstruction& exit_inst);
 
+// True when a forward conditional outside every loop targets S_ENDPGM. Such an
+// edge ends the wave and is emitted as a local early return, never as a join.
+bool ScJoinIsProgramExitEdge(const ShaderCode& code, const ShaderInstruction& inst);
+
 // Guest label at a join PC that is the structured OpLoopMerge target (not an
 // sc_join). Used by WriteLabel to emit loop merges before selection sc_joins.
 bool ScJoinIsLoopMergeLabel(const ShaderCode& code, const ShaderLabel& label);

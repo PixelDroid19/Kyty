@@ -43,6 +43,33 @@ VulkanQueueSelectionResult VulkanSelectCommonRenderQueueFamily(const VulkanQueue
 	return found_common_family ? VulkanQueueSelectionResult::Success : VulkanQueueSelectionResult::NoCommonFamily;
 }
 
+VulkanQueueSelectionResult VulkanSelectComputeOnlyFamily(const VulkanQueueFamilyCapabilities* families, uint32_t count, uint32_t* family)
+{
+	if (families == nullptr || count == 0 || family == nullptr)
+	{
+		return VulkanQueueSelectionResult::InvalidArgument;
+	}
+
+	bool found = false;
+	for (uint32_t candidate = 0; candidate < count; candidate++)
+	{
+		const auto& capabilities = families[candidate];
+		const bool  compute_only =
+		    (capabilities.queue_flags & VK_QUEUE_COMPUTE_BIT) != 0 && (capabilities.queue_flags & VK_QUEUE_GRAPHICS_BIT) == 0;
+		if (capabilities.queue_count == 0 || !compute_only)
+		{
+			continue;
+		}
+		if (!found || capabilities.queue_count > families[*family].queue_count)
+		{
+			*family = candidate;
+			found   = true;
+		}
+	}
+
+	return found ? VulkanQueueSelectionResult::Success : VulkanQueueSelectionResult::NoComputeOnlyFamily;
+}
+
 VulkanQueueSelectionResult VulkanAllocateSharedQueueRoles(uint32_t queue_count, uint32_t max_compute_count,
                                                           VulkanQueueRoleAllocation* allocation)
 {

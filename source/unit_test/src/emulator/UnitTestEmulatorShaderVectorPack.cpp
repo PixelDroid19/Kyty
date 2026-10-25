@@ -360,4 +360,64 @@ TEST(EmulatorShaderVectorPack, RejectsModifiedIntegerPackOperands)
 	}
 }
 
+TEST(EmulatorShaderVectorPack, PacksConvertedFloatIntoSelectedByte)
+{
+	ASSERT_EXIT((
+	                []
+	                {
+		                InitializeNextGenShaderTest();
+		                struct Case
+		                {
+			                uint32_t    value;
+			                uint32_t    select;
+			                uint32_t    expected;
+			                const char* label;
+		                };
+		                // Source bit patterns are 17.0, 200.0, 1.0, 255.0, -5.0 and 300.0. S1[1:0] picks
+		                // the byte and the other three bytes of S2 (0xa5a5a5a5) are kept.
+		                const Case cases[] = {
+		                    {0x41880000u, 0u, 0xa5a5a511u, "seventeen in lane zero"},
+		                    {0x43480000u, 5u, 0xa5a5c8a5u, "select reads only bits 1:0"},
+		                    {0x3f800000u, 7u, 0x01a5a5a5u, "one in lane three"},
+		                    {0x437f0000u, 2u, 0xa5ffa5a5u, "255 in lane two"},
+		                    {0xc0a00000u, 0u, 0xa5a5a500u, "negative value clamps to zero"},
+		                    {0x43960000u, 4u, 0xa5a5a5ffu, "value above 255 clamps"},
+		                };
+		                for (const auto& c: cases)
+		                {
+			                ShaderInstruction pack = MakeIntegerPack(ShaderInstructionType::VCvtPkU8F32, 0u, 7, Vgpr(5), Vgpr(6));
+			                pack.format            = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+			                pack.src_num           = 3;
+			                pack.src[2]            = Vgpr(7);
+			                const auto source      = GeneratePackSource(pack);
+			                if (source.IsEmpty())
+			                {
+				                std::_Exit(2);
+			                }
+
+			                Vector<uint32_t> binary;
+			                Core::String8    error;
+			                if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+			                {
+				                std::fprintf(stderr, "%s\n", error.c_str());
+				                std::_Exit(3);
+			                }
+
+			                const ShaderArithmeticTest::Program program(source.c_str());
+			                ShaderArithmeticTest::Equal(program.Run({{"%v5", c.value},
+							                                         {"%v6", c.select},
+							                                         {"%v7", 0xa5a5a5a5u},
+							                                         {"%exec_lo", 1u},
+							                                         {"%exec_hi", 0u},
+							                                         {"%exec_lane_lo", 1u},
+							                                         {"%exec_lane_hi", 0u},
+							                                         {"%scc", 0u}},
+							                                        "%v7"),
+							                            c.expected, c.label);
+		                }
+		                std::_Exit(0);
+	                }()),
+	            ::testing::ExitedWithCode(0), "");
+}
+
 UT_END();

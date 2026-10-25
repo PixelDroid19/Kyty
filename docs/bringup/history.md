@@ -201,7 +201,8 @@ the opt-in context trace, which produced no output in the test host), so the use
 reproduced; the test is a completion,
 reclaim and liveness regression. Still open: a request queued to a thread that exits before taking the signal is
 never completed, so its 1 MiB stack is retained for the process lifetime (`LibKernel.cpp`, `KernelRaiseException`).
-This repair is not linked to the fishing adventure's startup freeze.
+This repair is not linked to the fishing adventure's startup freeze. Superseded on 2026-10-23 by "Collector context
+requests delivered only at safe points" (cross-title records), which also removes the per-request stack.
 
 **Diagnostic bounds.** The opt-in material trace and the rejected vertex-layout logger now bound their traversals
 to the fixed attribute, resource and sampler arrays while printing the decoded counts unchanged. The vertex input
@@ -1843,7 +1844,8 @@ Open: the remaining Unity title's colour-grading pass loads its constant-buffer 
 40-43, which the guest never writes; they hold two 64-bit guest pointers (deterministic across runs). The bind now
 requests only the 208 proven bytes, but the base is not mapped, so the strict run stops (12-71 s). The September
 binary binds the same slot because the address was readable in its memory layout. Intermittently the same title
-also stalls at boot (main thread after `RequestThreadContext`, another thread in `KernelWaitEventFlag`). A
+also stalls at boot (main thread after `RequestThreadContext`, another thread in `KernelWaitEventFlag`; cause found
+and fixed on 2026-10-23, see "Collector context requests delivered only at safe points" in the cross-title records). A
 Haxe title shows a flickering element while walking and breaking objects (user report, no root cause yet).
 
 ## NGG passthrough front width neutrality (2026-10-03, CPU verified; strict run advances)
@@ -4326,6 +4328,8 @@ zero, with both stencil base addresses zero. `GraphicsState.cpp:146` still
 classifies the enabled test as a missing plane before checking the disabled
 format contract. Trace the format and test-enable interaction before changing
 this classification; the observation alone does not validate stencil output.
+Resolved 2026-10-23: format 0 is STENCIL_INVALID and disables the stencil
+test; see "Stencil test without a stencil format" in the cross-title records.
 
 ## Register-default lookup and context restoration (2026-09-29)
 

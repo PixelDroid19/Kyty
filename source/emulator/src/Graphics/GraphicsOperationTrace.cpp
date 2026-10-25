@@ -299,7 +299,9 @@ void FlushAtExit()
 OperationTraceCollector& ProcessCollector()
 {
 	static OperationTraceCollector collector(ProcessDirectory());
-	static const bool            armed = collector.Enabled() && std::atexit(FlushAtExit) == 0;
+	// atexit covers return from main and exit(); at_quick_exit covers the guest
+	// exit path and window close, which end through quick_exit.
+	static const bool armed = collector.Enabled() && std::atexit(FlushAtExit) == 0 && std::at_quick_exit(FlushAtExit) == 0;
 	(void)armed;
 	return collector;
 }

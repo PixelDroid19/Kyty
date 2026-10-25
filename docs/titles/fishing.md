@@ -4,6 +4,20 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Fishing title: gray rectangles behind the first dialogue portrait (2026-10-23, checked)
+
+- **Observation.** In the first character dialogue, a tan panel behind the
+  character shows flat gray rectangles.
+- **Checked.**
+  - The rectangles are opaque in the flip image (alpha 255), so the capture
+    blend fixed in the anime fighter record does not explain them.
+  - They have different sizes and are each rotated by a different angle
+    inside an axis-aligned panel. Corrupted texture blocks or render-target
+    tiles would form an axis-aligned grid, so this does not look like
+    corruption; it matches drawn content such as pinned paper notes.
+- **Open.** Not compared with a reference image of the same scene. Compare
+  before spending a run on it.
+
 ## Fishing title: command-processor CPU costs (2026-10-14, partly fixed)
 
 - Context: on Intel the fishing title runs its dock scenes (the scripted
@@ -86,4 +100,7 @@ record. Titles are named descriptively only (`AGENTS.md`).
   match by index. Unrelated and pre-existing: some fishing-title launches never
   present a first frame. The build before the rule failed in 2 of 12 launches
   and presented in 5 of 5 short boot checks; three earlier builds showed the
-  same symptom (2026-10-12 and 2026-10-13). Cause unknown.
+  same symptom (2026-10-12 and 2026-10-13). Cause found on 2026-10-23: a
+  collector context request delivered while the thread held a host lock
+  (cross-title record "Collector context requests delivered only at safe
+  points").

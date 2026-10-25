@@ -27,17 +27,7 @@ static void InitializeConfig()
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 }
 
-static ShaderComputeInputInfo PairedInput()
-{
-	ShaderComputeInputInfo input {};
-	input.threads_num[0] = 64u;
-	input.threads_num[1] = input.threads_num[2] = 1u;
-	input.thread_ids_num = 1;
-	input.wave_layout    = {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0};
-	return input;
-}
-
-TEST(EmulatorComputeWaveTernaryAlu, AdmitsPlainAdd3WithScalarWordAndVectorSources)
+TEST(EmulatorComputeWaveTernaryAlu, ClassifiesPlainAdd3WithScalarWordAndVectorSources)
 {
 	// vcc_lo/vcc_hi/v0, s20/vcc_hi/v0, and s20 plus a VOP3 literal plus v0.
 	struct Case
@@ -61,41 +51,10 @@ TEST(EmulatorComputeWaveTernaryAlu, AdmitsPlainAdd3WithScalarWordAndVectorSource
 			    }
 			    const bool banked = ShaderClassifyComputeWaveInstruction(code.GetInstructions().At(0)) ==
 			                        ShaderComputeWaveInstructionKind::BankedAlu;
-			    std::_Exit(banked && ShaderAnalyzeComputeWaveCode(code, PairedInput()).supported ? 0 : 3);
+			    std::_Exit(banked ? 0 : 3);
 		    },
 		    ::testing::ExitedWithCode(0), "");
 	}
-}
-
-// A register spill saves EXEC word by word into VGPR lanes, and a half-precision
-// v_cmpx narrows EXEC on an SDWA-selected word. Words checked with the LLVM
-// gfx1030 disassembler: v_writelane_b32 v19, exec_hi, 39 and
-// v_cmpx_gt_f16_sdwa v7, 0 src0_sel:WORD_1 src1_sel:DWORD.
-TEST(EmulatorComputeWaveTernaryAlu, AdmitsExecSpillAndHalfExecCompare)
-{
-	const uint32_t words[] = {0xd7610013u, 0x00014e7fu, 0x7db900f9u, 0x86050007u, kEnd};
-	EXPECT_EXIT(
-	    {
-		    InitializeConfig();
-		    ShaderCode code;
-		    code.SetType(ShaderType::Compute);
-		    if (!ShaderTryParseBounded(words, sizeof(words), &code) || code.GetInstructions().Size() != 3u)
-		    {
-			    std::_Exit(2);
-		    }
-		    const auto& spill   = code.GetInstructions().At(0);
-		    const auto& compare = code.GetInstructions().At(1);
-		    const bool  decoded = spill.type == ShaderInstructionType::VWritelaneB32 &&
-		                         spill.src[0].type == ShaderOperandType::ExecHi && compare.type == ShaderInstructionType::VCmpxGtF16 &&
-		                         compare.vop_sdwa && compare.src[0].type == ShaderOperandType::Vgpr &&
-		                         compare.src[0].register_id == 7 && compare.src[0].swizzle == 5u;
-		    if (!decoded)
-		    {
-			    std::_Exit(3);
-		    }
-		    std::_Exit(ShaderAnalyzeComputeWaveCode(code, PairedInput()).supported ? 0 : 4);
-	    },
-	    ::testing::ExitedWithCode(0), "");
 }
 
 // The banked ternary path lowers only the plain tuple. Encoding modifiers leave
@@ -109,7 +68,6 @@ TEST(EmulatorComputeWaveTernaryAlu, BankedPathClaimsNoModifiedTuple)
 	};
 	const Case cases[] = {
 	    {kAdd3Word0 | (1u << 15u), kAdd3Word1}, // clamp
-	    {kAdd3Word0 | (1u << 11u), kAdd3Word1}, // op_sel
 	    {kAdd3Word0 | (1u << 8u), kAdd3Word1},  // abs src0
 	    {kAdd3Word0, kAdd3Word1 | (1u << 31u)}, // neg src2
 	    {kAdd3Word0, kAdd3Word1 | (1u << 27u)}, // omod
@@ -132,24 +90,6 @@ TEST(EmulatorComputeWaveTernaryAlu, BankedPathClaimsNoModifiedTuple)
 		    },
 		    ::testing::ExitedWithCode(0), "");
 	}
-}
-
-TEST(EmulatorComputeWaveTernaryAlu, RejectsExecAsADataSource)
-{
-	const uint32_t words[] = {kAdd3Word0, 0x0400d67eu, kEnd}; // exec_lo as data
-	ASSERT_EXIT(
-	    {
-		    InitializeConfig();
-		    ShaderCode code;
-		    code.SetType(ShaderType::Compute);
-		    if (!ShaderTryParseBounded(words, sizeof(words), &code) || code.GetInstructions().At(0).type != ShaderInstructionType::VAdd3U32)
-		    {
-			    std::_Exit(2);
-		    }
-		    const auto result = ShaderAnalyzeComputeWaveCode(code, PairedInput());
-		    std::_Exit(!result.supported && result.unsupported_pc == 0u ? 0 : 3);
-	    },
-	    ::testing::ExitedWithCode(0), "");
 }
 
 UT_END();

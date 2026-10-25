@@ -9,8 +9,7 @@ namespace Kyty::Libs::Graphics {
 
 // Admit only the independently exercised plain binary ALU subset and plain
 // V_ADD3_U32 (VCC words allowed as scalar data within the two-scalar limit).
-// All other forms stay fail-closed so paired-wave lowering never inherits
-// native32 state.
+// All other forms stay fail-closed.
 [[nodiscard]] bool ShaderComputeWaveAluInstructionSupported(const ShaderInstruction& instruction);
 
 } // namespace Kyty::Libs::Graphics

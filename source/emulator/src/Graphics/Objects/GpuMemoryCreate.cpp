@@ -384,20 +384,6 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			}
 		}
 
-		// Page generations are read after BeginRead armed every page, so a write
-		// racing the upload advances its page again and is copied next time.
-		std::vector<uint64_t> page_generations;
-		if (page_fault_tracking && o.object.type == GpuMemoryObjectType::StorageBuffer && dirty_read[0].tracked)
-		{
-			auto& tracker = GpuDirtyPageTracker::Instance();
-			page_generations.resize(tracker.PageCount(h.block.vaddr[0], h.block.size[0]));
-			if (page_generations.size() < 2u ||
-			    !tracker.PageGenerations(h.block.vaddr[0], h.block.size[0], page_generations.data(), page_generations.size()))
-			{
-				page_generations.clear();
-			}
-		}
-
 		for (int vi = 0; vi < h.block.vaddr_num; vi++)
 		{
 			const bool changed = o.hash[vi] != hash[vi];
@@ -431,6 +417,21 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 		if (!need_update)
 		{
 			return;
+		}
+
+		// Page generations are read after BeginRead armed every page and before
+		// the upload, so a write racing the upload advances its page again and
+		// is copied next time. Only an update stores them.
+		std::vector<uint64_t> page_generations;
+		if (page_fault_tracking && o.object.type == GpuMemoryObjectType::StorageBuffer && dirty_read[0].tracked)
+		{
+			auto& tracker = GpuDirtyPageTracker::Instance();
+			page_generations.resize(tracker.PageCount(h.block.vaddr[0], h.block.size[0]));
+			if (page_generations.size() < 2u ||
+			    !tracker.PageGenerations(h.block.vaddr[0], h.block.size[0], page_generations.data(), page_generations.size()))
+			{
+				page_generations.clear();
+			}
 		}
 
 		EXIT_IF(o.update_func == nullptr);
@@ -1552,7 +1553,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				texel_bits_parent_id = create_from_objects ? -1 : obj.object_id;
 				retire_after_copy_ids.Add(obj.object_id);
 			} else if (GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type) ||
-			           GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, h.block.vaddr[0], info.type, vaddr[0]))
+			           GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, info.type))
 			{
 				delete_all = true;
 			} else
@@ -1564,8 +1565,6 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 						overlap = true;
 						break;
 					}
-					case ObjectsRelation(GpuMemoryObjectType::DepthStencilBuffer, OverlapType::Contains,
-					                     GpuMemoryObjectType::DepthStencilBuffer):
 					case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::Crosses, GpuMemoryObjectType::IndexBuffer):
 					case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::Contains, GpuMemoryObjectType::IndexBuffer):
 					case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::IsContainedWithin,
@@ -1626,9 +1625,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			};
 			// A mipmapped storage array grows over its prefix (copied, then retired). The
 			// recycled allocation may still hold a live render target it links, a
-			// CPU-uploaded storage buffer or texture around it (linked), a texture
-			// materialized from that render target (linked beside it) and read-only
-			// VertexBuffers (reclaimed), as for a storage image over caches. The prefix image may only be linked
+			// CPU-uploaded storage buffer, texture or read-only vertex buffer around it
+			// (linked), a texture materialized from that render target (linked beside
+			// it) and read-only VertexBuffers (reclaimed), as for a storage image over caches. The prefix image may only be linked
 			// to parents of the new view, which then link to the grown array instead.
 			Vector<int> storage_growth_ids;
 			Vector<int> storage_growth_reclaim_ids;
@@ -1671,7 +1670,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 				multi_storage_growth =
 				    links_cpu_texture(h, obj) ||
-				    GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type);
+				    GpuMemoryAllowsStorageTextureOverStorageCache(o.object.type, obj.relation, caches_guest_bytes(o), info.type) ||
+				    GpuMemoryAllowsStorageTextureInsideVertexCache(o.object.type, obj.relation, o.read_only, o.content_origin, info.type);
 			}
 			multi_storage_growth = multi_storage_growth && !storage_growth_ids.IsEmpty() &&
 			                       (!storage_growth_links_materialized || storage_growth_links_render_target);
@@ -2142,7 +2142,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					EXIT_IF(h.free);
 					const auto& o = h.info;
 					if (!GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type) &&
-					    !GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, h.block.vaddr[0], info.type, vaddr[0]))
+					    !GpuMemoryAllowsDepthStencilRedeclaration(o.object.type, info.type))
 					{
 						multi_depth_stencil_reclaim = false;
 						break;

@@ -49,9 +49,11 @@ bool BuildWaveProbeSource(const uint32_t* words, size_t byte_count, const Shader
 	}
 	const auto        generated = SpirvGenerateSource(code, nullptr, nullptr, &input);
 	std::string       text(generated.GetDataConst(), generated.Size());
-	const bool        has_lane = text.find("OpDecorate %gl_SubgroupInvocationID BuiltIn SubgroupLocalInvocationId") != std::string::npos;
-	const bool        has_wave = text.find("OpDecorate %gl_SubgroupID BuiltIn SubgroupId") != std::string::npos;
-	const std::string lane     = has_lane ? "%gl_SubgroupInvocationID" : "%mask_probe_lane";
+	// Split programs keep the guest lane in %gl_SubgroupInvocationID and read the host lane from %split_host_lane.
+	const bool        has_split = text.find("OpDecorate %split_host_lane BuiltIn SubgroupLocalInvocationId") != std::string::npos;
+	const bool        has_lane  = has_split || text.find("OpDecorate %gl_SubgroupInvocationID BuiltIn SubgroupLocalInvocationId") != std::string::npos;
+	const bool        has_wave  = text.find("OpDecorate %gl_SubgroupID BuiltIn SubgroupId") != std::string::npos;
+	const std::string lane      = has_split ? "%split_host_lane" : has_lane ? "%gl_SubgroupInvocationID" : "%mask_probe_lane";
 	const std::string wave     = has_wave ? "%gl_SubgroupID" : "%mask_probe_wave";
 	if (text.find("OpCapability GroupNonUniform\n") == std::string::npos &&
 	    !Insert(&text, "OpCapability Shader", "\nOpCapability GroupNonUniform\n", error, true))
@@ -82,7 +84,7 @@ bool BuildWaveProbeSource(const uint32_t* words, size_t byte_count, const Shader
 		return false;
 	}
 	std::string constants;
-	for (const uint32_t value: {0u, 1u, 2u, 3u, 4u, 5u, 32u, 64u})
+	for (const uint32_t value: {0u, 1u, 2u, 3u, 4u, 5u, 32u})
 	{
 		constants += String8::FromPrintf("%%mask_probe_c%u = OpConstant %%uint %u\n", value, value).GetDataConst();
 	}
@@ -112,43 +114,39 @@ bool BuildWaveProbeSource(const uint32_t* words, size_t byte_count, const Shader
 	{
 		return false;
 	}
-	std::string stores = "\n";
+	std::string stores;
 	for (size_t seed = 0; seed < seeds.size(); ++seed)
 	{
 		stores += String8::FromPrintf("OpStore %%%s %%mask_probe_seed_%zu\n", seeds[seed].name.c_str(), seed).c_str();
 	}
-	if (!Insert(&text, "OpStore %scc %uint_0", stores, error, true))
+	// After the prolog publishes the initial EXEC words and before the lane bits are derived from them.
+	if (!Insert(&text, "%mask_exec_initial_lane = ", stores, error))
 	{
 		return false;
 	}
+	// One record per host invocation: subgroup * 32 + host lane is the guest lane index in both layouts.
 	std::string exports = "%mask_probe_lane_id = OpLoad %uint " + lane + "\n%mask_probe_wave_id = OpLoad %uint " + wave +
 	                      "\n"
-	                      "%mask_probe_base = OpIMul %uint %mask_probe_wave_id %mask_probe_c64\n"
-	                      "%mask_probe_logical_0 = OpIAdd %uint %mask_probe_base %mask_probe_lane_id\n"
-	                      "%mask_probe_logical_1 = OpIAdd %uint %mask_probe_logical_0 %mask_probe_c32\n";
-	for (uint32_t bank = 0; bank < 2u; ++bank)
+	                      "%mask_probe_base = OpIMul %uint %mask_probe_wave_id %mask_probe_c32\n"
+	                      "%mask_probe_logical = OpIAdd %uint %mask_probe_base %mask_probe_lane_id\n"
+	                      "%mask_probe_record = OpIMul %uint %mask_probe_logical %mask_probe_stride\n";
+	for (size_t slot = 0; slot < observations.size(); ++slot)
 	{
-		exports +=
-		    String8::FromPrintf("%%mask_probe_record_%u = OpIMul %%uint %%mask_probe_logical_%u %%mask_probe_stride\n", bank, bank).c_str();
-		for (size_t slot = 0; slot < observations.size(); ++slot)
+		const auto& observation = observations[slot];
+		constants               = String8::FromPrintf("%%mask_probe_slot_%zu = OpConstant %%uint %zu\n", slot, slot).c_str();
+		if (!Insert(&text, "%true = OpConstantTrue %bool", constants, error))
 		{
-			const auto& observation = observations[slot];
-			const auto& variable    = bank == 0u ? observation.low : observation.high;
-			constants               = String8::FromPrintf("%%mask_probe_slot_%u_%zu = OpConstant %%uint %zu\n", bank, slot, slot).c_str();
-			if (!Insert(&text, "%true = OpConstantTrue %bool", constants, error))
-			{
-				return false;
-			}
-			exports += String8::FromPrintf("%%mask_probe_loaded_%u_%zu = OpLoad %%%s %%%s\n"
-			                               "%%mask_probe_value_%u_%zu = OpBitcast %%uint %%mask_probe_loaded_%u_%zu\n"
-			                               "%%mask_probe_index_%u_%zu = OpIAdd %%uint %%mask_probe_record_%u %%mask_probe_slot_%u_%zu\n"
-			                               "%%mask_probe_address_%u_%zu = OpAccessChain %%_ptr_StorageBuffer_uint %%mask_probe_buffer "
-			                               "%%mask_probe_c0 %%mask_probe_index_%u_%zu\n"
-			                               "OpStore %%mask_probe_address_%u_%zu %%mask_probe_value_%u_%zu\n",
-			                               bank, slot, observation.floating ? "float" : "uint", variable.c_str(), bank, slot, bank, slot,
-			                               bank, slot, bank, bank, slot, bank, slot, bank, slot, bank, slot, bank, slot)
-			               .c_str();
+			return false;
 		}
+		exports += String8::FromPrintf("%%mask_probe_loaded_%zu = OpLoad %%%s %%%s\n"
+		                               "%%mask_probe_value_%zu = OpBitcast %%uint %%mask_probe_loaded_%zu\n"
+		                               "%%mask_probe_index_%zu = OpIAdd %%uint %%mask_probe_record %%mask_probe_slot_%zu\n"
+		                               "%%mask_probe_address_%zu = OpAccessChain %%_ptr_StorageBuffer_uint %%mask_probe_buffer "
+		                               "%%mask_probe_c0 %%mask_probe_index_%zu\n"
+		                               "OpStore %%mask_probe_address_%zu %%mask_probe_value_%zu\n",
+		                               slot, observation.floating ? "float" : "uint", observation.variable.c_str(), slot, slot, slot,
+		                               slot, slot, slot, slot, slot)
+		               .c_str();
 	}
 	if (!Insert(&text, "OpReturn", exports, error))
 	{

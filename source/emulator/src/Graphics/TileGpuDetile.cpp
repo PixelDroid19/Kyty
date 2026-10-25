@@ -1005,6 +1005,8 @@ TileGpuDetileStatus TileGpuDetileDepthD16Inline(GraphicContext* ctx, CommandBuff
 	ShaderBindResources bind {};
 	bind.storage_buffers.buffers_num = 2;
 	ShaderCalcBindingIndices(&bind);
+	// The host-authored detile module declares no write mask.
+	bind.storage_buffers.write_mask_binding_index                           = -1;
 	VulkanBuffer* descriptor_buffers[2]                                    = {const_cast<VulkanBuffer*>(source_buffer), scratch};
 	VulkanImage*  no_images[DescriptorCache::TEXTURES_SAMPLED_MAX]          = {};
 	int           no_views[DescriptorCache::TEXTURES_SAMPLED_MAX]           = {};
@@ -1117,6 +1119,8 @@ bool StorageTextureCopyRawRenderAlias(GraphicContext* ctx, CommandBuffer* comman
 	ShaderBindResources bind {};
 	bind.storage_buffers.buffers_num = 2;
 	ShaderCalcBindingIndices(&bind);
+	// The host-authored detile module declares no write mask.
+	bind.storage_buffers.write_mask_binding_index                           = -1;
 	VulkanBuffer* descriptor_buffers[2]                                    = {source_buffer, destination_buffer};
 	VulkanImage*  no_images[DescriptorCache::TEXTURES_SAMPLED_MAX]          = {};
 	int           no_views[DescriptorCache::TEXTURES_SAMPLED_MAX]           = {};
@@ -1309,6 +1313,8 @@ bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer*
 	ShaderBindResources bind {};
 	bind.storage_buffers.buffers_num = 2;
 	ShaderCalcBindingIndices(&bind);
+	// The host-authored detile module declares no write mask.
+	bind.storage_buffers.write_mask_binding_index                           = -1;
 	VulkanBuffer* descriptor_buffers[2]                                    = {source_buffer, destination_buffer};
 	VulkanImage*  no_images[DescriptorCache::TEXTURES_SAMPLED_MAX]          = {};
 	int           no_views[DescriptorCache::TEXTURES_SAMPLED_MAX]           = {};

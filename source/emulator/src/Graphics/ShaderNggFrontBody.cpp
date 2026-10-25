@@ -133,12 +133,321 @@ struct ExecShape
 	std::map<unsigned, std::set<int>>  partial;
 	std::map<unsigned, int>            uniform_under;
 	std::map<unsigned, int>            scope;
+	// A compare word moved through a scalar spill slot, and the half (0 low, 1 high) of the pair it is. A restore
+	// of both halves into one pair names the compare again.
+	std::map<std::pair<int, int>, std::pair<CompareMask, unsigned>> spill_compare;
+	std::map<unsigned, std::pair<CompareMask, unsigned>>             restored_compare;
+	// The same for a word of EXEC or of a saved EXEC: the node it holds and the half it is.
+	std::map<std::pair<int, int>, std::pair<int, unsigned>> spill_saved;
+	std::map<unsigned, std::pair<int, unsigned>>             restored_saved;
+	bool operator==(const ExecShape& other) const
+	{
+		return exec == other.exec && position_histories == other.position_histories && saved == other.saved && compare == other.compare &&
+		       partial == other.partial && uniform_under == other.uniform_under && scope == other.scope &&
+		       spill_compare == other.spill_compare && restored_compare == other.restored_compare && spill_saved == other.spill_saved &&
+		       restored_saved == other.restored_saved;
+	}
 };
+
+constexpr uint32_t kNegativeInfinity = 0xff800000u;
+
+bool PlainVgpr(const ShaderOperand& op)
+{
+	return op.type == Operand::Vgpr && op.size == 1 && op.register_id >= 0 && op.register_id < kVgprs && !op.dpp && !op.absolute &&
+	       !op.negate && !op.clamp && op.multiplier == 1.0f;
+}
+
+bool ZeroConstant(const ShaderOperand& op)
+{
+	return op.type == Operand::IntegerInlineConstant && op.constant.u == 0u;
+}
+
+bool PlainVop(const ShaderInstruction& inst)
+{
+	return !inst.vop_sdwa && inst.vop3_op_sel == 0u && inst.vop3_omod == 0u;
+}
+
+bool WritesVgpr(const ShaderInstruction& inst, int vgpr)
+{
+	for (const ShaderOperand* dst: {&inst.dst, &inst.dst2})
+	{
+		unsigned first = 0;
+		unsigned count = 0;
+		if (VgprRange(*dst, &first, &count) && static_cast<unsigned>(vgpr) >= first && static_cast<unsigned>(vgpr) < first + count) { return true; }
+	}
+	return false;
+}
+
+// Whether an instruction writes one of the scalar words [first, first + count); V_CMPX writes only EXEC.
+bool WritesScalar(const ShaderInstruction& inst, unsigned first, unsigned count)
+{
+	if (first == kExecLoWord && ShaderInstructionWritesExec(inst)) { return true; }
+	if (WritesExecOnly(inst.type)) { return false; }
+	for (const ShaderOperand* dst: {&inst.dst, &inst.dst2})
+	{
+		unsigned word  = 0;
+		unsigned words = 0;
+		if (ScalarRange(*dst, &word, &words) && word < first + count && first < word + words) { return true; }
+	}
+	return false;
+}
+
+bool PairOf(const ShaderOperand& op, unsigned* first)
+{
+	unsigned count = 0;
+	return ScalarRange(op, first, &count) && count == 2u;
+}
+
+// A wave maximum feeding a monotone atomic (ShaderFindNggFrontMaxReductions): the indices of its parts.
+struct MaxReduction
+{
+	ShaderLaneReduction lanes;       // from the seed to the EXEC restore, and the two reads
+	uint32_t            compare = 0; // V_CMP of 0 < x: the lanes the any-test counts
+	uint32_t            any     = 0; // V_CMP_GT_U64 of that mask and 0
+	uint32_t            branch  = 0; // S_CBRANCH_VCCZ to the join unless a lane counts
+	uint32_t            join    = 0; // its target
+	uint32_t            combine = 0; // V_MAX_F32 of the reads
+	uint32_t            atomic  = 0; // BUFFER_ATOMIC_UMAX of the combined maximum
+	int                 source  = 0; // x
+};
+
+class MaxReductionMatcher
+{
+public:
+	MaxReductionMatcher(const ShaderCode& code, uint32_t guest_wave_size): m_code(code), m_wave(guest_wave_size)
+	{
+		const auto& instructions = code.GetInstructions();
+		std::map<uint32_t, uint32_t> index_of;
+		for (uint32_t index = 0; index < instructions.Size(); ++index) { index_of[instructions.At(index).pc] = index; }
+		for (uint32_t index = 0; index < instructions.Size(); ++index)
+		{
+			const auto& inst = instructions.At(index);
+			if ((inst.type != Type::SBranch && !StartsWith(inst.type, "SCbranch")) || inst.src_num < 1) { continue; }
+			const int64_t target = static_cast<int64_t>(inst.pc) + 4 + inst.src[0].constant.i;
+			const auto    found  = target >= 0 && target <= UINT32_MAX ? index_of.find(static_cast<uint32_t>(target)) : index_of.end();
+			m_edges.emplace_back(index, found == index_of.end() ? UINT32_MAX : found->second);
+		}
+	}
+
+	bool Match(uint32_t entry, MaxReduction* unit) const
+	{
+		return Region(entry, unit) && Reads(unit) && Store(unit) && AnyTest(unit) && Closed(*unit);
+	}
+
+private:
+	const ShaderInstruction& At(uint32_t index) const { return m_code.GetInstructions().At(index); }
+
+	// The last writer of the scalar words [first, first + count) in [low, from], or UINT32_MAX.
+	uint32_t LastWriter(uint32_t from, uint32_t low, unsigned first, unsigned count) const
+	{
+		for (uint32_t index = from + 1u; index-- > low;)
+		{
+			if (WritesScalar(At(index), first, count)) { return index; }
+		}
+		return UINT32_MAX;
+	}
+
+	// S_CBRANCH_VCCZ join; S_ORN2_SAVEEXEC_B64 e, EXEC; V_CNDMASK_B32 v, -inf, x, e; steps; S_MOV_B64 EXEC, e.
+	bool Region(uint32_t entry, MaxReduction* unit) const
+	{
+		const auto& instructions = m_code.GetInstructions();
+		const auto& enter        = At(entry);
+		unsigned    saved        = 0;
+		if (entry == 0u || entry + 2u >= instructions.Size() || enter.type != Type::SOrn2SaveexecB64 || enter.src_num != 1 ||
+		    enter.src[0].type != Operand::ExecLo || !PairOf(enter.dst, &saved))
+		{
+			return false;
+		}
+		unit->branch = entry - 1u;
+		const auto edge = std::find_if(m_edges.begin(), m_edges.end(), [&](const auto& candidate) { return candidate.first == unit->branch; });
+		if (At(unit->branch).type != Type::SCbranchVccz || edge == m_edges.end() || edge->second == UINT32_MAX || edge->second <= entry) { return false; }
+		unit->join     = edge->second;
+		const auto& seed = At(entry + 1u);
+		unsigned    mask = 0;
+		if (seed.type != Type::VCndmaskB32 || seed.src_num != 3 || !PlainVop(seed) || !PlainVgpr(seed.dst) ||
+		    seed.src[0].type != Operand::LiteralConstant || seed.src[0].constant.u != kNegativeInfinity || !PlainVgpr(seed.src[1]) ||
+		    !PairOf(seed.src[2], &mask) || mask != saved)
+		{
+			return false;
+		}
+		unit->source = seed.src[1].register_id;
+		for (uint32_t index = entry + 2u; index < unit->join; ++index)
+		{
+			const auto& inst = At(index);
+			if (!ShaderInstructionWritesExec(inst)) { continue; }
+			unsigned restored = 0;
+			if (inst.type != Type::SMovB64 || inst.src_num != 1 || !PairOf(inst.src[0], &restored) || restored != saved) { return false; }
+			unit->lanes.op = ShaderLaneReductionOp::MaxF32;
+			return ShaderProveLaneReductionNetwork(m_code, m_wave, entry + 1u, index, &unit->lanes);
+		}
+		return false;
+	}
+
+	// Two reads that together cover every lane, folded by one V_MAX_F32 before either is rewritten.
+	bool Reads(MaxReduction* unit) const
+	{
+		const auto& reads = unit->lanes.reads;
+		const uint64_t every = m_wave == 64u ? ~uint64_t {0} : (uint64_t {1} << m_wave) - 1u;
+		if (reads.size() != 2u || (reads[0].lanes | reads[1].lanes) != every) { return false; }
+		unsigned words[2] = {};
+		for (size_t read = 0; read < 2u; ++read)
+		{
+			const auto& dst   = At(reads[read].index).dst;
+			unsigned    count = 0;
+			if (dst.type != Operand::Sgpr || !ScalarRange(dst, &words[read], &count) || count != 1u) { return false; }
+		}
+		if (words[0] == words[1]) { return false; }
+		for (uint32_t index = reads[0].index + 1u; index < unit->join; ++index)
+		{
+			if (index == reads[1].index) { continue; }
+			const auto& inst   = At(index);
+			unsigned    first  = 0;
+			unsigned    second = 0;
+			unsigned    count  = 0;
+			// Two scalar sources need the SDWA encoding; only its whole-dword identity form is a plain maximum.
+			const bool  plain  = PlainVop(inst) || ShaderComputeWaveSdwaVop2IdentitySupported(inst);
+			const bool  folds  = index > reads[1].index && inst.type == Type::VMaxF32 && inst.src_num == 2 && plain && PlainVgpr(inst.dst) &&
+			                   ScalarRange(inst.src[0], &first, &count) && ScalarRange(inst.src[1], &second, &count) &&
+			                   ((first == words[0] && second == words[1]) || (first == words[1] && second == words[0]));
+			if (folds)
+			{
+				unit->combine = index;
+				return true;
+			}
+			if (WritesScalar(inst, words[0], 1u) || WritesScalar(inst, words[1], 1u) || ShaderInstructionWritesExec(inst)) { return false; }
+		}
+		return false;
+	}
+
+	// After the fold EXEC is only narrowed to the lanes holding the maximum and restored, and the one atomic stores
+	// the maximum, unreturned, at an index the walk proves wave-uniform.
+	bool Store(MaxReduction* unit) const
+	{
+		const int maximum = At(unit->combine).dst.register_id;
+		unit->atomic      = UINT32_MAX;
+		for (uint32_t index = unit->combine + 1u; index < unit->join; ++index)
+		{
+			const auto& inst = At(index);
+			// VDATA names the stored value: an atomic without return writes no VGPR.
+			if (inst.type == Type::BufferAtomicUmax)
+			{
+				constexpr uint8_t kLdsTfeReserved = 0x85u;
+				if (unit->atomic != UINT32_MAX || inst.dst.type != Operand::Vgpr || inst.dst.register_id != maximum || inst.buffer_return_old_value ||
+				    !inst.buffer_idxen || inst.buffer_offen || (inst.buffer_flags & kLdsTfeReserved) != 0u || inst.src_num < 3 ||
+				    inst.src[0].type != Operand::Vgpr)
+				{
+					return false;
+				}
+				unit->atomic = index;
+				continue;
+			}
+			if (WritesVgpr(inst, maximum) || WritesVgpr(inst, unit->source)) { return false; }
+			if (!ShaderInstructionWritesExec(inst)) { continue; }
+			const bool narrows = inst.type == Type::VCmpxEqF32 && inst.src_num == 2 && PlainVop(inst) && PlainVgpr(inst.src[0]) &&
+			                     PlainVgpr(inst.src[1]) &&
+			                     ((inst.src[0].register_id == maximum && inst.src[1].register_id == unit->source) ||
+			                      (inst.src[1].register_id == maximum && inst.src[0].register_id == unit->source));
+			unsigned restored = 0;
+			unsigned saved    = 0;
+			const bool restores = unit->atomic != UINT32_MAX && inst.type == Type::SMovB64 && inst.src_num == 1 && PairOf(inst.src[0], &restored) &&
+			                      PairOf(At(unit->branch + 1u).dst, &saved) && restored == saved;
+			if (!narrows && !restores) { return false; }
+		}
+		return unit->atomic != UINT32_MAX;
+	}
+
+	// VCC at the branch is a & EXEC or a & (u ? EXEC : 0), a = V_CMP_GT_U64 of a compare of 0 < x and 0, all in the
+	// straight line before the branch with EXEC unchanged since the compare.
+	bool AnyTest(MaxReduction* unit) const
+	{
+		const uint32_t both = LastWriter(unit->branch - 1u, 0u, kVccLoWord, 2u);
+		if (both == UINT32_MAX) { return false; }
+		const auto& conjunction = At(both);
+		unsigned    vcc         = 0;
+		if (conjunction.type != Type::SAndB64 || conjunction.src_num != 2 || !PairOf(conjunction.dst, &vcc) || vcc != kVccLoWord) { return false; }
+		for (int side = 0; side < 2; ++side)
+		{
+			unsigned       any_pair = 0;
+			const auto&    other    = conjunction.src[1 - side];
+			const uint32_t any      = PairOf(conjunction.src[side], &any_pair) ? LastWriter(both - 1u, 0u, any_pair, 2u) : UINT32_MAX;
+			if (any == UINT32_MAX || !Counts(any, unit) || !EnabledLanes(other, both, unit->compare + 1u)) { continue; }
+			return true;
+		}
+		return false;
+	}
+
+	// EXEC, or a select of EXEC and 0 written from `low` on (the walk proves its SCC wave-uniform).
+	bool EnabledLanes(const ShaderOperand& op, uint32_t before, uint32_t low) const
+	{
+		unsigned pair = 0;
+		if (op.type == Operand::ExecLo && op.size == 2) { return true; }
+		if (!PairOf(op, &pair) || before <= low) { return false; }
+		const uint32_t writer = LastWriter(before - 1u, low, pair, 2u);
+		if (writer == UINT32_MAX) { return false; }
+		const auto& select = At(writer);
+		return select.type == Type::SCselectB64 && select.src_num == 2 && select.src[0].type == Operand::ExecLo && ZeroConstant(select.src[1]);
+	}
+
+	bool Counts(uint32_t any, MaxReduction* unit) const
+	{
+		const auto& test = At(any);
+		unsigned    vcc  = 0;
+		if (test.type != Type::VCmpGtU64 || test.src_num != 2 || !PairOf(test.src[0], &vcc) || vcc != kVccLoWord || !ZeroConstant(test.src[1]) || any == 0u)
+		{
+			return false;
+		}
+		const uint32_t compare = LastWriter(any - 1u, 0u, kVccLoWord, 2u);
+		if (compare == UINT32_MAX) { return false; }
+		const auto& cmp      = At(compare);
+		const bool  positive = cmp.src_num == 2 && PlainVop(cmp) &&
+		                      ((cmp.type == Type::VCmpLtF32 && ZeroConstant(cmp.src[0]) && PlainVgpr(cmp.src[1]) && cmp.src[1].register_id == unit->source) ||
+		                       (cmp.type == Type::VCmpGtF32 && PlainVgpr(cmp.src[0]) && cmp.src[0].register_id == unit->source && ZeroConstant(cmp.src[1])));
+		if (!positive) { return false; }
+		for (uint32_t index = compare + 1u; index <= unit->atomic; ++index)
+		{
+			if (WritesVgpr(At(index), unit->source)) { return false; }
+			if (index <= unit->branch && ShaderInstructionWritesExec(At(index))) { return false; }
+		}
+		unit->compare = compare;
+		unit->any     = any;
+		return true;
+	}
+
+	// Straight-line code from the compare to the branch, and a region that only its own branches enter or jump
+	// within.
+	bool Closed(const MaxReduction& unit) const
+	{
+		for (const auto& [from, to]: m_edges)
+		{
+			const bool inside = from > unit.branch && from < unit.join;
+			if (inside && (to <= from || to > unit.join)) { return false; }
+			if (!inside && from != unit.branch && to > unit.compare && to < unit.join) { return false; }
+			if (from >= unit.compare && from < unit.branch) { return false; }
+		}
+		return true;
+	}
+
+	const ShaderCode&                          m_code;
+	uint32_t                                   m_wave;
+	std::vector<std::pair<uint32_t, uint32_t>> m_edges; // (branch index, target index or UINT32_MAX)
+};
+
+std::vector<MaxReduction> FindMaxReductions(const ShaderCode& code, uint32_t guest_wave_size)
+{
+	std::vector<MaxReduction> found;
+	const MaxReductionMatcher matcher(code, guest_wave_size);
+	for (uint32_t entry = 0; entry < code.GetInstructions().Size(); ++entry)
+	{
+		MaxReduction unit;
+		if (matcher.Match(entry, &unit)) { found.push_back(std::move(unit)); }
+	}
+	return found;
+}
 
 class Body
 {
 public:
-	ShaderNggFrontBodyProof Run(const ShaderCode& code, uint32_t first_index, const ShaderNggScalarDependencies& wave_scalars);
+	ShaderNggFrontBodyProof Run(const ShaderCode& code, uint32_t first_index, uint32_t guest_wave_size, const ShaderNggScalarDependencies& wave_scalars);
 
 private:
 	bool Fail(const ShaderInstruction& inst, const char* reason)
@@ -176,8 +485,20 @@ private:
 	[[nodiscard]] bool VgprDefined(unsigned vgpr) const;
 	void DefineVgpr(unsigned vgpr);
 	void ForgetScalarShape(const ShaderOperand& op);
+	[[nodiscard]] bool CompareHalf(const ShaderOperand& op, std::pair<CompareMask, unsigned>* half) const;
+	void RestoreCompareWord(const ShaderOperand& op, const std::pair<CompareMask, unsigned>& half);
+	[[nodiscard]] bool SavedHalf(const ShaderOperand& op, std::pair<int, unsigned>* half) const;
+	void RestoreSavedWord(const ShaderOperand& op, const std::pair<int, unsigned>& half);
+	[[nodiscard]] bool ExecRestrictedCompare(const ShaderInstruction& inst, CompareMask* mask) const;
 	void MergeShape(ExecShape* into, const ExecShape& other, uint32_t pc) const;
 	int  ExecAfter(const ShaderInstruction& inst) const;
+	bool FindLoops();
+	bool EnterLoop(uint32_t header);
+	bool CloseLoop(uint32_t header, bool* again);
+	void ExitLoops(uint32_t join);
+	[[nodiscard]] const MaxReduction* ReductionAt(uint32_t index) const;
+	bool MaxReductionPart(const ShaderInstruction& inst, const MaxReduction& unit, bool* done);
+	bool MaxReductionAtomic(const ShaderInstruction& inst);
 
 	ShaderNggFrontBodyProof m_result;
 	FlowState               m_state;
@@ -188,14 +509,35 @@ private:
 		std::bitset<kWords> scalars;
 		std::bitset<kVgprs> vgprs;
 		std::vector<int>    roots; // EXEC node at each branch into this join
+		bool                undefines = false; // its VGPR writes are dead after the join (a wave maximum)
 	};
 	std::map<uint32_t, Region> m_regions;
+	// A loop under analysis, by header index: the state assumed at its header for every iteration, and the
+	// analyzer state on entry that each further pass over the body starts from.
+	struct Loop
+	{
+		uint32_t                      back  = 0;  // index of the back edge
+		int                           lanes = -1; // EXEC node of the lanes still looping
+		unsigned                      passes = 0;
+		FlowState                     state;
+		ExecShape                     shape;
+		std::map<uint32_t, FlowState> pending;
+		std::map<uint32_t, ExecShape> pending_shape;
+		std::map<uint32_t, Region>    regions;
+		std::set<uint32_t>            uniform_targets;
+		// Spill slot taints when the pass began: a write late in the body reaches reads early in the next iteration.
+		std::map<std::pair<int, int>, uint8_t> spills;
+	};
+	std::map<uint32_t, uint32_t> m_back_edges; // header index -> back-edge index
+	std::map<uint32_t, uint32_t> m_loop_ends;  // back-edge index -> header index
+	std::map<uint32_t, Loop>     m_loops;
 	std::map<uint32_t, ExecShape> m_pending_shape;
 	std::set<uint32_t>          m_uniform_targets; // joins also reached by an edge every lane takes
 	ExecPartition               m_partition;
 	ExecShape                   m_shape;
 	// Taint of the scalars every static spill write put in a (VGPR, lane) slot.
 	std::map<std::pair<int, int>, uint8_t> m_spills;
+	std::vector<MaxReduction>              m_reductions;
 	const ShaderCode*       m_code  = nullptr;
 	uint32_t                m_index = 0;
 };
@@ -350,15 +692,18 @@ bool Body::Branch(const ShaderInstruction& inst)
 	// branch on it is uniform for the lanes still inside that EXEC and splits only lanes outside it, as an EXEC
 	// branch does. Unlike an EXEC branch, active lanes take both edges, so the join keeps only what both define.
 	bool exec_split = false;
+	// Host subgroups take a wave maximum's branch apart; its region is admitted as a whole (MaxReduction).
+	const auto* unit      = ReductionAt(m_index);
+	const bool  reduction = unit != nullptr && unit->branch == m_index;
 	if (inst.type == Type::SCbranchVccz || inst.type == Type::SCbranchVccnz)
 	{
 		ShaderOperand vcc {};
 		vcc.type = Operand::VccLo;
 		vcc.size = 2;
 		const auto compare = m_shape.compare.find(kVccLoWord);
-		exec_split = !IsUniformMask(vcc) && compare != m_shape.compare.end() && compare->second.uniform && m_shape.exec >= 0 &&
+		exec_split = !reduction && !IsUniformMask(vcc) && compare != m_shape.compare.end() && compare->second.uniform && m_shape.exec >= 0 &&
 		             m_partition.Descends(m_shape.exec, compare->second.under);
-		if (!IsUniformMask(vcc) && !exec_split) { return Fail(inst, "VCC branch on a comparison that is not wave-uniform"); }
+		if (!IsUniformMask(vcc) && !exec_split && !reduction) { return Fail(inst, "VCC branch on a comparison that is not wave-uniform"); }
 	} else if (inst.type == Type::SCbranchScc0 || inst.type == Type::SCbranchScc1)
 	{
 		if (m_state.scalar[kSccWord] != kClean) { return Fail(inst, "SCC branch on launch-dependent data"); }
@@ -373,7 +718,9 @@ bool Body::Branch(const ShaderInstruction& inst)
 	for (const auto& candidate: m_code->GetInstructions()) { exists = exists || candidate.pc == static_cast<uint32_t>(target); }
 	if (!exists) { return Fail(inst, "branch target is not an instruction"); }
 	const auto join = static_cast<uint32_t>(target);
-	if (divergent || exec_split) { OpenRegion(inst, join); }
+	if (divergent || exec_split || reduction) { OpenRegion(inst, join); }
+	if (reduction) { m_regions[join].undefines = true; }
+	ExitLoops(join);
 	if (!divergent) { m_uniform_targets.insert(join); }
 	const auto found = m_pending.find(join);
 	if (found == m_pending.end())
@@ -393,30 +740,182 @@ bool Body::Branch(const ShaderInstruction& inst)
 // lane of the wave is active, the host once any lane of the subgroup is: after the join such a scalar can hold
 // either value, and a VGPR it wrote is no longer the same in every lane. Vector writes are EXEC-masked, so each
 // lane still holds its own guest value.
+static void AddWrites(const ShaderInstruction& candidate, std::bitset<kWords>* scalars, std::bitset<kVgprs>* vgprs)
+{
+	if (WritesExecOnly(candidate.type)) { return; }
+	for (const ShaderOperand* dst: {&candidate.dst, &candidate.dst2})
+	{
+		unsigned first = 0;
+		unsigned count = 0;
+		if (ScalarRange(*dst, &first, &count))
+		{
+			for (unsigned word = 0; word < count; ++word) { scalars->set(first + word); }
+		} else if (VgprRange(*dst, &first, &count))
+		{
+			for (unsigned word = 0; word < count && first + word < static_cast<unsigned>(kVgprs); ++word) { vgprs->set(first + word); }
+		}
+	}
+	if (IsScalarAlu(candidate.type) && WritesScc(candidate.type)) { scalars->set(kSccWord); }
+	// EXEC is a mask either way; its per-lane bit is tracked exactly.
+	scalars->reset(kExecLoWord);
+	scalars->reset(kExecLoWord + 1u);
+}
+
 void Body::OpenRegion(const ShaderInstruction& inst, uint32_t target)
 {
 	auto& region = m_regions[target];
 	region.roots.push_back(m_shape.exec);
 	for (const auto& candidate: m_code->GetInstructions())
 	{
-		if (candidate.pc <= inst.pc || candidate.pc >= target || WritesExecOnly(candidate.type)) { continue; }
-		for (const ShaderOperand* dst: {&candidate.dst, &candidate.dst2})
+		if (candidate.pc > inst.pc && candidate.pc < target) { AddWrites(candidate, &region.scalars, &region.vgprs); }
+	}
+}
+
+// Back edges are unconditional branches closing properly nested loops entered only through their header.
+bool Body::FindLoops()
+{
+	const auto& instructions = m_code->GetInstructions();
+	std::map<uint32_t, uint32_t> index_of;
+	for (uint32_t index = 0; index < instructions.Size(); ++index) { index_of[instructions.At(index).pc] = index; }
+	std::vector<std::pair<uint32_t, uint32_t>> branches; // (index, target index)
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (inst.type != Type::SBranch && !StartsWith(inst.type, "SCbranch")) { continue; }
+		if (inst.src_num < 1) { return Fail(inst, "branch without a target"); }
+		const int64_t target = static_cast<int64_t>(inst.pc) + 4 + inst.src[0].constant.i;
+		const auto    found  = target >= 0 && target <= UINT32_MAX ? index_of.find(static_cast<uint32_t>(target)) : index_of.end();
+		if (found == index_of.end()) { return Fail(inst, "branch target is not an instruction"); }
+		branches.emplace_back(index, found->second);
+		if (target > static_cast<int64_t>(inst.pc)) { continue; }
+		if (inst.type != Type::SBranch) { return Fail(inst, "only unconditional back edges are supported"); }
+		if (!m_back_edges.emplace(found->second, index).second) { return Fail(inst, "loop with several back edges"); }
+		m_loop_ends[index] = found->second;
+	}
+	for (const auto& [header, back]: m_back_edges)
+	{
+		for (const auto& [other_header, other_back]: m_back_edges)
 		{
-			unsigned first = 0;
-			unsigned count = 0;
-			if (ScalarRange(*dst, &first, &count))
+			const bool disjoint = other_back < header || other_header > back;
+			const bool nested   = (other_header >= header && other_back <= back) || (other_header <= header && other_back >= back);
+			if (!disjoint && !nested) { return Fail(instructions.At(back), "loops overlap"); }
+		}
+		for (const auto& [from, to]: branches)
+		{
+			if (to > header && to <= back && (from < header || from > back)) { return Fail(instructions.At(from), "branch enters a loop below its header"); }
+		}
+	}
+	return true;
+}
+
+// On entry the loop's lanes are EXEC; inside, a node below it stands for the lanes still looping, so what holds for
+// the entry lanes holds for them and every split inside the body divides them. A loop that never writes EXEC runs
+// every iteration and leaves under the EXEC it entered with.
+bool Body::EnterLoop(uint32_t header)
+{
+	const auto& instructions = m_code->GetInstructions();
+	const auto& inst         = instructions.At(header);
+	if (m_shape.exec < 0) { return Fail(inst, "loop entered under an EXEC the proof does not track"); }
+	Loop loop;
+	loop.back = m_back_edges.at(header);
+	bool writes_exec = false;
+	for (uint32_t index = header; index <= loop.back; ++index) { writes_exec = writes_exec || ShaderInstructionWritesExec(instructions.At(index)); }
+	loop.lanes           = writes_exec ? m_partition.Child(m_shape.exec, inst.pc | 1u, true) : m_shape.exec; // odd: no compare has this pc
+	m_shape.exec         = loop.lanes;
+	loop.state           = m_state;
+	loop.shape           = m_shape;
+	loop.pending         = m_pending;
+	loop.pending_shape   = m_pending_shape;
+	loop.regions         = m_regions;
+	loop.uniform_targets = m_uniform_targets;
+	loop.spills          = m_spills;
+	m_loops[header]      = std::move(loop);
+	return true;
+}
+
+// Joins the back edge into the state assumed at the header. The next iteration runs the lanes EXEC holds at the back
+// edge, which must lie below the looping lanes; a VGPR defined for them is defined for the looping lanes of that
+// iteration. When the join adds nothing, the pass over the body held for every iteration; otherwise the body is
+// analysed again from the joined state.
+bool Body::CloseLoop(uint32_t header, bool* again)
+{
+	auto&       loop = m_loops.at(header);
+	const auto& inst = m_code->GetInstructions().At(loop.back);
+	if (m_shape.exec < 0 || !m_partition.Descends(m_shape.exec, loop.lanes))
+	{
+		return Fail(inst, "loop iterates under an EXEC outside the lanes that entered it");
+	}
+	auto       state   = loop.state;
+	const bool changed = state.Merge(m_state);
+	ExecShape  shape   = loop.shape;
+	shape.position_histories |= m_shape.position_histories;
+	const auto keep_common = [](auto* mine, const auto& theirs) {
+		for (auto it = mine->begin(); it != mine->end();)
+		{
+			const auto found = theirs.find(it->first);
+			it = (found != theirs.end() && found->second == it->second) ? std::next(it) : mine->erase(it);
+		}
+	};
+	keep_common(&shape.saved, m_shape.saved);
+	keep_common(&shape.compare, m_shape.compare);
+	keep_common(&shape.uniform_under, m_shape.uniform_under);
+	keep_common(&shape.scope, m_shape.scope);
+	keep_common(&shape.spill_compare, m_shape.spill_compare);
+	keep_common(&shape.restored_compare, m_shape.restored_compare);
+	keep_common(&shape.spill_saved, m_shape.spill_saved);
+	keep_common(&shape.restored_saved, m_shape.restored_saved);
+	std::map<unsigned, std::set<int>> partial;
+	for (unsigned vgpr = 0; vgpr < static_cast<unsigned>(kVgprs); ++vgpr)
+	{
+		const auto mine   = loop.shape.partial.find(vgpr);
+		const auto theirs = m_shape.partial.find(vgpr);
+		if (mine != loop.shape.partial.end() && theirs != m_shape.partial.end())
+		{
+			for (int node: mine->second)
 			{
-				for (unsigned word = 0; word < count; ++word) { region.scalars.set(first + word); }
-			} else if (VgprRange(*dst, &first, &count))
-			{
-				for (unsigned word = 0; word < count && first + word < static_cast<unsigned>(kVgprs); ++word) { region.vgprs.set(first + word); }
+				if (theirs->second.count(node) != 0u) { partial[vgpr].insert(node); }
 			}
 		}
-		if (IsScalarAlu(candidate.type) && WritesScc(candidate.type)) { region.scalars.set(kSccWord); }
+		const bool at_header = loop.state.defined.test(vgpr) || (mine != loop.shape.partial.end() && m_partition.Covers(mine->second, loop.lanes));
+		const bool at_back   = m_state.defined.test(vgpr) || (theirs != m_shape.partial.end() && m_partition.Covers(theirs->second, m_shape.exec));
+		if (at_header && at_back && !state.defined.test(vgpr)) { partial[vgpr].insert(loop.lanes); }
 	}
-	// EXEC is a mask either way; its per-lane bit is tracked exactly.
-	region.scalars.reset(kExecLoWord);
-	region.scalars.reset(kExecLoWord + 1u);
+	shape.partial = std::move(partial);
+	*again        = changed || !(shape == loop.shape) || m_spills != loop.spills;
+	if (!*again)
+	{
+		m_loops.erase(header);
+		return true;
+	}
+	constexpr unsigned kPassesMax = 64;
+	if (++loop.passes > kPassesMax) { return Fail(inst, "loop proof does not converge"); }
+	for (auto it = m_loops.begin(); it != m_loops.end();)
+	{
+		it = it->first > header && it->first <= loop.back ? m_loops.erase(it) : std::next(it);
+	}
+	loop.state        = state;
+	loop.shape        = shape;
+	loop.spills       = m_spills;
+	m_state           = state;
+	m_shape           = shape;
+	m_pending         = loop.pending;
+	m_pending_shape   = loop.pending_shape;
+	m_regions         = loop.regions;
+	m_uniform_targets = loop.uniform_targets;
+	return true;
+}
+
+// A branch out of loops: the guest wave leaves after the iterations of its slowest lane, the host subgroup after
+// those of its own, so anything the loops write can differ at the target, as across a divergent region.
+void Body::ExitLoops(uint32_t join)
+{
+	const auto& instructions = m_code->GetInstructions();
+	for (const auto& [header, loop]: m_loops)
+	{
+		if (join <= instructions.At(loop.back).pc) { continue; }
+		auto& region = m_regions[join];
+		for (uint32_t index = header; index <= loop.back; ++index) { AddWrites(instructions.At(index), &region.scalars, &region.vgprs); }
+	}
 }
 
 void Body::CloseRegions(uint32_t pc)
@@ -430,11 +929,17 @@ void Body::CloseRegions(uint32_t pc)
 		m_state.uniform_mask.reset(word);
 		m_shape.saved.erase(word);
 		m_shape.compare.erase(word);
+		m_shape.restored_compare.erase(word);
+		m_shape.restored_saved.erase(word);
 		m_shape.scope.erase(word);
 	}
 	for (unsigned vgpr = 0; vgpr < static_cast<unsigned>(kVgprs); ++vgpr)
 	{
-		if (region->second.vgprs.test(vgpr)) { m_shape.uniform_under.erase(vgpr); }
+		if (!region->second.vgprs.test(vgpr)) { continue; }
+		m_shape.uniform_under.erase(vgpr);
+		if (!region->second.undefines) { continue; }
+		m_state.defined.reset(vgpr);
+		m_shape.partial.erase(vgpr);
 	}
 	if (region->second.scalars.test(kVccLoWord) || region->second.scalars.test(kVccLoWord + 1u)) { m_state.vcc_uniform = false; }
 	m_state.uniform &= ~region->second.vgprs;
@@ -510,7 +1015,101 @@ void Body::ForgetScalarShape(const ShaderOperand& op)
 			m_shape.saved.erase(base);
 			m_shape.compare.erase(base);
 		}
+		m_shape.restored_compare.erase(word);
+		m_shape.restored_saved.erase(word);
 	}
+}
+
+// The compare pair one scalar word belongs to, and which half of it the word is.
+bool Body::CompareHalf(const ShaderOperand& op, std::pair<CompareMask, unsigned>* half) const
+{
+	unsigned first = 0;
+	unsigned count = 0;
+	if (!ScalarRange(op, &first, &count) || count != 1u) { return false; }
+	for (unsigned part: {0u, 1u})
+	{
+		const auto found = first >= part ? m_shape.compare.find(first - part) : m_shape.compare.end();
+		if (found == m_shape.compare.end()) { continue; }
+		*half = {found->second, part};
+		return true;
+	}
+	return false;
+}
+
+void Body::RestoreCompareWord(const ShaderOperand& op, const std::pair<CompareMask, unsigned>& half)
+{
+	unsigned word  = 0;
+	unsigned count = 0;
+	if (!ScalarRange(op, &word, &count) || count != 1u || word < half.second) { return; }
+	m_shape.restored_compare[word] = half;
+	const unsigned pair     = word - half.second;
+	const auto     low      = m_shape.restored_compare.find(pair);
+	const auto     high     = m_shape.restored_compare.find(pair + 1u);
+	const bool     complete = low != m_shape.restored_compare.end() && high != m_shape.restored_compare.end() &&
+	                      low->second == std::make_pair(half.first, 0u) && high->second == std::make_pair(half.first, 1u);
+	if (complete) { m_shape.compare[pair] = half.first; }
+}
+
+// The EXEC node a scalar word holds half of: a word of EXEC or of a saved EXEC pair.
+bool Body::SavedHalf(const ShaderOperand& op, std::pair<int, unsigned>* half) const
+{
+	if ((op.type == Operand::ExecLo || op.type == Operand::ExecHi) && op.size == 1 && m_shape.exec >= 0)
+	{
+		*half = {m_shape.exec, op.type == Operand::ExecLo ? 0u : 1u};
+		return true;
+	}
+	unsigned first = 0;
+	unsigned count = 0;
+	if (!ScalarRange(op, &first, &count) || count != 1u) { return false; }
+	for (unsigned part: {0u, 1u})
+	{
+		const auto found = first >= part ? m_shape.saved.find(first - part) : m_shape.saved.end();
+		if (found == m_shape.saved.end()) { continue; }
+		*half = {found->second, part};
+		return true;
+	}
+	return false;
+}
+
+void Body::RestoreSavedWord(const ShaderOperand& op, const std::pair<int, unsigned>& half)
+{
+	unsigned word  = 0;
+	unsigned count = 0;
+	if (!ScalarRange(op, &word, &count) || count != 1u || word < half.second) { return; }
+	m_shape.restored_saved[word] = half;
+	const unsigned pair = word - half.second;
+	const auto     low  = m_shape.restored_saved.find(pair);
+	const auto     high = m_shape.restored_saved.find(pair + 1u);
+	if (low != m_shape.restored_saved.end() && high != m_shape.restored_saved.end() && low->second == std::make_pair(half.first, 0u) &&
+	    high->second == std::make_pair(half.first, 1u))
+	{
+		m_shape.saved[pair] = half.first;
+	}
+}
+
+// EXEC & C for a compare C made under an ancestor of EXEC is C evaluated under EXEC: inactive lanes read 0 and active
+// ones were active when C ran. Compilers emit it to restore a spilled compare before a VCC branch, reading EXEC
+// itself or a saved copy of it.
+bool Body::ExecRestrictedCompare(const ShaderInstruction& inst, CompareMask* mask) const
+{
+	if (inst.type != Type::SAndB64 || inst.src_num != 2 || m_shape.exec < 0) { return false; }
+	const auto is_exec = [this](const ShaderOperand& op) {
+		unsigned first = 0;
+		unsigned count = 0;
+		if (op.type == Operand::ExecLo) { return true; }
+		if (!ScalarRange(op, &first, &count) || count != 2u) { return false; }
+		const auto saved = m_shape.saved.find(first);
+		return saved != m_shape.saved.end() && saved->second == m_shape.exec;
+	};
+	const bool exec_first = is_exec(inst.src[0]);
+	if (!exec_first && !is_exec(inst.src[1])) { return false; }
+	unsigned first = 0;
+	unsigned count = 0;
+	if (!ScalarRange(exec_first ? inst.src[1] : inst.src[0], &first, &count) || count != 2u) { return false; }
+	const auto found = m_shape.compare.find(first);
+	if (found == m_shape.compare.end() || !m_partition.Descends(m_shape.exec, found->second.under)) { return false; }
+	*mask = {found->second.compare, m_shape.exec, found->second.uniform};
+	return true;
 }
 
 // EXEC node after a mask-algebra write, or -1 when it is no node of the partition.
@@ -611,6 +1210,17 @@ void Body::MergeShape(ExecShape* into, const ExecShape& other, uint32_t pc) cons
 			it = (found != theirs.end() && found->second == it->second) ? std::next(it) : facts->erase(it);
 		}
 	}
+	const auto keep_common = [](auto* mine, const auto& theirs) {
+		for (auto it = mine->begin(); it != mine->end();)
+		{
+			const auto found = theirs.find(it->first);
+			it = (found != theirs.end() && found->second == it->second) ? std::next(it) : mine->erase(it);
+		}
+	};
+	keep_common(&into->spill_compare, other.spill_compare);
+	keep_common(&into->restored_compare, other.restored_compare);
+	keep_common(&into->spill_saved, other.spill_saved);
+	keep_common(&into->restored_saved, other.restored_saved);
 	std::map<unsigned, std::set<int>> merged;
 	const std::map<unsigned, std::set<int>>* sides[] = {&into->partial, &other.partial};
 	for (const auto* side: sides)
@@ -663,7 +1273,9 @@ bool Body::ScalarAlu(const ShaderInstruction& inst)
 	const bool uniform_and = inst.type == Type::SAndB64 && inst.src_num == 2 && inst.dst.size == 2 &&
 	                         inst.src[0].size == 2 && inst.src[1].size == 2 &&
 	                         IsUniformMask(inst.src[0]) && IsUniformMask(inst.src[1]);
-	const int scope = (taint & kDiverged) != 0u ? SourceScope(inst) : -1;
+	const int   scope = (taint & kDiverged) != 0u ? SourceScope(inst) : -1;
+	CompareMask exec_compare {};
+	const bool  restricted = ExecRestrictedCompare(inst, &exec_compare);
 	Define(inst.dst, taint);
 	Define(inst.dst2, taint);
 	SetScope(inst.dst, scope);
@@ -674,6 +1286,12 @@ bool Body::ScalarAlu(const ShaderInstruction& inst)
 		unsigned first = 0;
 		unsigned count = 0;
 		if (ScalarRange(inst.dst, &first, &count) && count == 2u) { m_shape.saved[first] = exec_copy; }
+	}
+	if (restricted)
+	{
+		unsigned first = 0;
+		unsigned count = 0;
+		if (ScalarRange(inst.dst, &first, &count) && count == 2u) { m_shape.compare[first] = exec_compare; }
 	}
 	if (WritesScc(inst.type)) { m_state.scalar[kSccWord] = taint; }
 	return true;
@@ -772,6 +1390,10 @@ bool Body::ScalarSpill(const ShaderInstruction& inst)
 	if (IsStaticScalarSpillWrite(inst, &vgpr, &lane) && IsScalarSpillStore(*m_code, m_index, vgpr, lane))
 	{
 		m_spills[{vgpr, lane}] |= Taint(inst.src[0]);
+		std::pair<CompareMask, unsigned> half;
+		if (CompareHalf(inst.src[0], &half)) { m_shape.spill_compare[{vgpr, lane}] = half; } else { m_shape.spill_compare.erase({vgpr, lane}); }
+		std::pair<int, unsigned> saved;
+		if (SavedHalf(inst.src[0], &saved)) { m_shape.spill_saved[{vgpr, lane}] = saved; } else { m_shape.spill_saved.erase({vgpr, lane}); }
 		return true;
 	}
 	if (IsStaticScalarSpillRead(inst, &vgpr, &lane) && HasLiveScalarSpill(*m_code, m_index, vgpr, lane))
@@ -779,6 +1401,8 @@ bool Body::ScalarSpill(const ShaderInstruction& inst)
 		const auto slot = m_spills.find({vgpr, lane});
 		if (slot == m_spills.end()) { return Fail(inst, "scalar spill read before the body writes its slot"); }
 		Define(inst.dst, slot->second);
+		if (const auto half = m_shape.spill_compare.find({vgpr, lane}); half != m_shape.spill_compare.end()) { RestoreCompareWord(inst.dst, half->second); }
+		if (const auto half = m_shape.spill_saved.find({vgpr, lane}); half != m_shape.spill_saved.end()) { RestoreSavedWord(inst.dst, half->second); }
 		return true;
 	}
 	return Fail(inst, "lane exchange");
@@ -949,8 +1573,70 @@ bool Body::EndProgram(const ShaderInstruction& inst)
 	return m_shape.position_histories != 0u || Fail(inst, "terminator has no position history");
 }
 
+const MaxReduction* Body::ReductionAt(uint32_t index) const
+{
+	for (const auto& unit: m_reductions)
+	{
+		if (index >= unit.any && index < unit.join) { return &unit; }
+	}
+	return nullptr;
+}
+
+// The parts of a wave maximum the other rules refuse; every other instruction of it takes those rules.
+bool Body::MaxReductionPart(const ShaderInstruction& inst, const MaxReduction& unit, bool* done)
+{
+	*done = true;
+	if (m_index == unit.any)
+	{
+		const auto compare = m_shape.compare.find(kVccLoWord);
+		if (!m_loops.empty()) { return Fail(inst, "wave maximum inside a loop"); }
+		if (m_shape.exec < 0 || compare == m_shape.compare.end() || compare->second.compare != m_code->GetInstructions().At(unit.compare).pc ||
+		    compare->second.under != m_shape.exec)
+		{
+			return Fail(inst, "wave maximum counts lanes outside the EXEC of its region");
+		}
+		// Whether some lane of the subgroup holds 0 < x: it differs between host subgroups.
+		Define(inst.dst, kInfo);
+		return true;
+	}
+	if (m_index == unit.lanes.seed_index || unit.lanes.IsStep(m_index)) { return true; } // folded by the reads
+	for (const auto& read: unit.lanes.reads)
+	{
+		if (read.index != m_index) { continue; }
+		Define(inst.dst, kInfo); // the maximum of the subgroup's lanes
+		return true;
+	}
+	if (m_index == unit.combine) { return m_shape.exec >= 0 ? VectorDestinations(inst, false) : Fail(inst, "wave maximum under an untracked EXEC"); }
+	if (m_index == unit.atomic) { return MaxReductionAtomic(inst); }
+	if (inst.type == Type::Exp && m_index > unit.branch) { return Fail(inst, "export inside a wave maximum region"); }
+	*done = false;
+	return true;
+}
+
+// Every lane that stores must name the same dword: a wave-uniform index into a resource free of launch data.
+bool Body::MaxReductionAtomic(const ShaderInstruction& inst)
+{
+	const auto index = static_cast<unsigned>(inst.src[0].register_id);
+	const auto data  = static_cast<unsigned>(inst.dst.register_id);
+	if (index >= static_cast<unsigned>(kVgprs) || !VgprDefined(index) || !VgprUniformHere(index) || !VgprDefined(data))
+	{
+		return Fail(inst, "wave maximum stored at a lane-dependent address");
+	}
+	for (int source = 1; source < inst.src_num; ++source)
+	{
+		if (Taint(inst.src[source]) != kClean) { return Fail(inst, "wave maximum stored through launch-dependent data"); }
+	}
+	return true;
+}
+
 bool Body::Step(const ShaderInstruction& inst)
 {
+	if (const auto* unit = ReductionAt(m_index); unit != nullptr)
+	{
+		bool       done = false;
+		const bool ok   = MaxReductionPart(inst, *unit, &done);
+		if (done) { return ok; }
+	}
 	switch (inst.type)
 	{
 		case Type::SInstPrefetch:
@@ -977,7 +1663,7 @@ bool Body::Step(const ShaderInstruction& inst)
 	return Vector(inst);
 }
 
-ShaderNggFrontBodyProof Body::Run(const ShaderCode& code, uint32_t first_index, const ShaderNggScalarDependencies& wave_scalars)
+ShaderNggFrontBodyProof Body::Run(const ShaderCode& code, uint32_t first_index, uint32_t guest_wave_size, const ShaderNggScalarDependencies& wave_scalars)
 {
 	m_code                   = &code;
 	const auto& instructions = code.GetInstructions();
@@ -991,6 +1677,13 @@ ShaderNggFrontBodyProof Body::Run(const ShaderCode& code, uint32_t first_index, 
 	m_state.scalar[kExecLoWord + 1u] = kMask;
 	m_state.defined.set(kVertexIdVgpr);
 	m_state.defined.set(kInstanceIdVgpr);
+	if (!FindLoops()) { return m_result; }
+	m_reductions = FindMaxReductions(code, guest_wave_size);
+	if (!m_back_edges.empty() && m_back_edges.begin()->first < first_index)
+	{
+		Fail(instructions.At(m_back_edges.begin()->second), "loop around the prologue");
+		return m_result;
+	}
 	for (uint32_t index = first_index; index < instructions.Size(); ++index)
 	{
 		const auto& inst = instructions.At(index);
@@ -1005,20 +1698,40 @@ ShaderNggFrontBodyProof Body::Run(const ShaderCode& code, uint32_t first_index, 
 		if (m_state.reachable) { CloseRegions(inst.pc); }
 		if (!m_state.reachable) { continue; }
 		m_index = index;
+		if (m_back_edges.count(index) != 0u && m_loops.count(index) == 0u && !EnterLoop(index)) { return m_result; }
+		if (const auto end = m_loop_ends.find(index); end != m_loop_ends.end())
+		{
+			bool again = false;
+			if (!CloseLoop(end->second, &again)) { return m_result; }
+			if (again)
+			{
+				index = end->second - 1u; // the next iteration of the walk is the header
+				continue;
+			}
+			m_state.reachable = false; // the back edge holds: the joined header state covers it
+			continue;
+		}
 		if (!Step(inst)) { return m_result; }
 	}
-	m_result.lane_local = m_state.reachable && m_pending.empty() && m_regions.empty();
+	m_result.lane_local = m_state.reachable && m_pending.empty() && m_regions.empty() && m_loops.empty();
 	if (!m_result.lane_local) { m_result.reason = "program does not reach its terminator"; }
 	return m_result;
 }
 
 } // namespace
 
-ShaderNggFrontBodyProof ShaderProveNggFrontBodyLaneLocal(const ShaderCode& code, uint32_t first_index,
+ShaderNggFrontBodyProof ShaderProveNggFrontBodyLaneLocal(const ShaderCode& code, uint32_t first_index, uint32_t guest_wave_size,
                                                         const ShaderNggScalarDependencies& wave_scalars)
 {
 	Body body;
-	return body.Run(code, first_index, wave_scalars);
+	return body.Run(code, first_index, guest_wave_size, wave_scalars);
+}
+
+ShaderLaneReductions ShaderFindNggFrontMaxReductions(const ShaderCode& code, uint32_t guest_wave_size)
+{
+	ShaderLaneReductions result;
+	for (auto& unit: FindMaxReductions(code, guest_wave_size)) { result.reductions.push_back(std::move(unit.lanes)); }
+	return result;
 }
 
 } // namespace Kyty::Libs::Graphics

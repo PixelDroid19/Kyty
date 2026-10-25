@@ -13,6 +13,7 @@ constexpr int kSgprCount = 104;
 constexpr int16_t kUnknown = -1;
 constexpr int16_t kExtendedLo = ShaderTextureResources::RES_MAX * 8;
 constexpr int16_t kExtendedHi = kExtendedLo + 1;
+constexpr int16_t kFirstSamplerWord = kExtendedHi + 1;
 using Origins = std::array<int16_t, kSgprCount>;
 
 bool ValidRange(int first, int count)
@@ -28,6 +29,11 @@ bool Plain(const ShaderOperand& operand)
 int16_t TextureWord(int descriptor, int field)
 {
 	return static_cast<int16_t>(descriptor * 8 + field);
+}
+
+int16_t SamplerWord(int sampler, int field)
+{
+	return static_cast<int16_t>(kFirstSamplerWord + sampler * 4 + field);
 }
 
 bool ClearInitialRange(int first, int count, int shift, Origins* origins)
@@ -51,7 +57,9 @@ bool InitialOrigins(const ShaderBindResources& bind, int shift, Origins* origins
 	for (int sampler = 0; sampler < bind.samplers.samplers_num; ++sampler)
 	{
 		if (bind.samplers.extended[sampler] || bind.samplers.dynamic_sload[sampler]) { continue; }
-		if (!ClearInitialRange(bind.samplers.start_register[sampler], 4, shift, origins)) { return false; }
+		const int first = bind.samplers.start_register[sampler];
+		if (first < 0 || first > kSgprCount - shift - 4) { return false; }
+		for (int field = 0; field < 4; ++field) { (*origins)[first + shift + field] = SamplerWord(sampler, field); }
 	}
 	for (int pointer = 0; pointer < bind.gds_pointers.pointers_num; ++pointer)
 	{
@@ -117,7 +125,7 @@ int16_t ExtendedWord(const ShaderBindResources& bind, uint32_t offset)
 			continue;
 		}
 		const auto first = static_cast<uint32_t>(bind.samplers.start_register[sampler] - 16);
-		if (offset >= first && offset - first < 4u) { return kUnknown; }
+		if (offset >= first && offset - first < 4u) { return SamplerWord(sampler, static_cast<int>(offset - first)); }
 	}
 	for (int pointer = 0; pointer < bind.gds_pointers.pointers_num; ++pointer)
 	{
@@ -135,19 +143,33 @@ bool TransferLoad(const ShaderInstruction& instruction, const ShaderBindResource
 	{
 		return false;
 	}
+	// The records of one load name disjoint destination blocks (a table load
+	// partitioned into descriptors); words outside them stay unknown.
+	bool mapped = false;
 	for (const auto& mapping: bind.dynamic_sloads.records)
 	{
 		if (mapping.instruction_pc != instruction.pc) { continue; }
-		if (mapping.kind != ShaderDynamicSLoadResourceKind::Texture) { return true; }
-		if (mapping.destination_register != instruction.dst.register_id || mapping.dword_count != count ||
-		    mapping.resource_index < 0 || mapping.resource_index >= bind.textures2D.textures_num ||
-		    mapping.resource_field_offset < 0 || mapping.resource_field_offset > 8 - count) { return false; }
-		for (int word = 0; word < count; ++word)
+		mapped = true;
+		const bool sampler = mapping.kind == ShaderDynamicSLoadResourceKind::Sampler;
+		if (!sampler && mapping.kind != ShaderDynamicSLoadResourceKind::Texture) { continue; }
+		const int first     = mapping.destination_register - instruction.dst.register_id;
+		const int fields    = sampler ? 4 : 8;
+		const int resources = sampler ? bind.samplers.samplers_num : bind.textures2D.textures_num;
+		if (first < 0 || mapping.dword_count <= 0 || mapping.dword_count > count - first || mapping.resource_index < 0 ||
+		    mapping.resource_index >= resources || mapping.resource_field_offset < 0 ||
+		    mapping.resource_field_offset > fields - mapping.dword_count)
 		{
-			(*after)[instruction.dst.register_id + word] = TextureWord(mapping.resource_index, mapping.resource_field_offset + word);
+			if (sampler) { continue; }
+			return false;
 		}
-		return true;
+		for (int word = 0; word < mapping.dword_count; ++word)
+		{
+			const int field = mapping.resource_field_offset + word;
+			(*after)[mapping.destination_register + word] =
+			    sampler ? SamplerWord(mapping.resource_index, field) : TextureWord(mapping.resource_index, field);
+		}
 	}
+	if (mapped) { return true; }
 	const auto& base = instruction.src[0];
 	const auto& offset = instruction.src[1];
 	if (!bind.extended.used || base.type != ShaderOperandType::Sgpr || base.size != 2 || !ValidRange(base.register_id, 2) ||
@@ -257,23 +279,24 @@ bool SameDescriptor(const ShaderTextureResource& left, const ShaderTextureResour
 	return true;
 }
 
-int WritableDescriptor(int descriptor, const ShaderBindResources& bind)
+int DescriptorWithUsage(int descriptor, const ShaderBindResources& bind, ShaderTextureUsage usage)
 {
-	if (bind.textures2D.desc[descriptor].usage == ShaderTextureUsage::ReadWrite) { return descriptor; }
+	if (bind.textures2D.desc[descriptor].usage == usage) { return descriptor; }
 	// A single guest T# can have separate sampled and storage Vulkan bindings.
-	// Preserve its complete guest identity when selecting the writable binding.
-	int writable = -1;
+	// Preserve its complete guest identity when selecting the binding.
+	int match = -1;
 	for (int candidate = 0; candidate < bind.textures2D.textures_num; ++candidate)
 	{
-		if (bind.textures2D.desc[candidate].usage != ShaderTextureUsage::ReadWrite ||
+		if (bind.textures2D.desc[candidate].usage != usage ||
 		    !SameDescriptor(bind.textures2D.desc[descriptor].texture, bind.textures2D.desc[candidate].texture)) { continue; }
-		if (writable >= 0) { return -1; }
-		writable = candidate;
+		if (match >= 0) { return -1; }
+		match = candidate;
 	}
-	return writable;
+	return match;
 }
 
-int DescriptorAt(const Origins& origins, int first, const ShaderBindResources& bind)
+// The bound T# whose eight words reach `first` in order, before usage selection.
+int OriginDescriptorAt(const Origins& origins, int first, const ShaderBindResources& bind)
 {
 	const int origin = origins[first];
 	if (origin < 0 || origin >= bind.textures2D.textures_num * 8 || origin % 8 != 0) { return -1; }
@@ -281,7 +304,34 @@ int DescriptorAt(const Origins& origins, int first, const ShaderBindResources& b
 	{
 		if (origins[first + word] != origin + word) { return -1; }
 	}
-	return WritableDescriptor(origin / 8, bind);
+	return origin / 8;
+}
+
+int DescriptorAt(const Origins& origins, int first, const ShaderBindResources& bind, ShaderTextureUsage usage)
+{
+	const int descriptor = OriginDescriptorAt(origins, first, bind);
+	return descriptor >= 0 ? DescriptorWithUsage(descriptor, bind, usage) : -1;
+}
+
+int SamplerAt(const Origins& origins, const ShaderOperand& operand, const ShaderBindResources& bind)
+{
+	if (operand.type != ShaderOperandType::Sgpr || operand.size != 4 || !ValidRange(operand.register_id, 4)) { return -1; }
+	const int origin = origins[operand.register_id] - kFirstSamplerWord;
+	if (origin < 0 || origin >= bind.samplers.samplers_num * 4 || origin % 4 != 0) { return -1; }
+	for (int word = 1; word < 4; ++word)
+	{
+		if (origins[operand.register_id + word] != origins[operand.register_id] + word) { return -1; }
+	}
+	return origin / 4;
+}
+
+bool ValidBind(const ShaderBindResources& bind, int user_data_register_base)
+{
+	return user_data_register_base >= 0 && user_data_register_base < kSgprCount && bind.direct_sgprs.sgprs_num >= 0 &&
+	       bind.direct_sgprs.sgprs_num <= ShaderDirectSgprsResources::SGPRS_MAX && bind.samplers.samplers_num >= 0 &&
+	       bind.samplers.samplers_num <= ShaderSamplerResources::RES_MAX && bind.gds_pointers.pointers_num >= 0 &&
+	       bind.gds_pointers.pointers_num <= ShaderGdsResources::POINTERS_MAX && bind.textures2D.textures_num > 0 &&
+	       bind.textures2D.textures_num <= ShaderTextureResources::RES_MAX;
 }
 
 bool IsUnmodified(const ShaderCode& code, int first)
@@ -299,25 +349,118 @@ bool IsUnmodified(const ShaderCode& code, int first)
 int ShaderFindImageStorageTextureDescriptor(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind,
                                             int user_data_register_base)
 {
-	if (index >= code.GetInstructions().Size() || user_data_register_base < 0 || user_data_register_base >= kSgprCount ||
-	    bind.direct_sgprs.sgprs_num < 0 || bind.direct_sgprs.sgprs_num > ShaderDirectSgprsResources::SGPRS_MAX ||
-	    bind.samplers.samplers_num < 0 || bind.samplers.samplers_num > ShaderSamplerResources::RES_MAX ||
-	    bind.gds_pointers.pointers_num < 0 || bind.gds_pointers.pointers_num > ShaderGdsResources::POINTERS_MAX ||
-	    bind.textures2D.textures_num <= 0 ||
-	    bind.textures2D.textures_num > ShaderTextureResources::RES_MAX) { return -1; }
+	if (index >= code.GetInstructions().Size() || !ValidBind(bind, user_data_register_base)) { return -1; }
 	const auto& instruction = code.GetInstructions().At(index);
 	if (instruction.src_num < 2 || instruction.src[1].type != ShaderOperandType::Sgpr || instruction.src[1].size != 8 ||
 	    !ValidRange(instruction.src[1].register_id, 8)) { return -1; }
 	const int first = instruction.src[1].register_id;
 	Origins entry;
 	if (!InitialOrigins(bind, user_data_register_base, &entry)) { return -1; }
-	const int direct = DescriptorAt(entry, first, bind);
+	const int direct = DescriptorAt(entry, first, bind, ShaderTextureUsage::ReadWrite);
 	// An unchanged descriptor has the same origin along every control-flow edge,
 	// including indirect edges whose targets this analysis cannot resolve.
 	if (direct >= 0 && IsUnmodified(code, first)) { return direct; }
 	std::vector<FlowState> states;
 	if (!Analyze(code, bind, user_data_register_base, &states) || !states[index].reachable) { return -1; }
-	return DescriptorAt(states[index].words, first, bind);
+	return DescriptorAt(states[index].words, first, bind, ShaderTextureUsage::ReadWrite);
+}
+
+// Every binding field the copy flow and the direct image lookups read; equal
+// layouts give equal ShaderAnalyzeImageCopyReads results for one code.
+std::vector<int32_t> ShaderImageCopyLayout(const ShaderBindResources& bind, int user_data_register_base)
+{
+	std::vector<int32_t> layout {user_data_register_base,      bind.textures2D.textures_num,
+	                             bind.samplers.samplers_num,   bind.gds_pointers.pointers_num,
+	                             bind.direct_sgprs.sgprs_num,  bind.extended.used ? 1 : 0,
+	                             bind.extended.start_register, static_cast<int32_t>(bind.extended.eud_size_dw)};
+	if (!ValidBind(bind, user_data_register_base))
+	{
+		return layout;
+	}
+	for (int descriptor = 0; descriptor < bind.textures2D.textures_num; ++descriptor)
+	{
+		const auto& texture = bind.textures2D.desc[descriptor];
+		layout.insert(layout.end(), {texture.start_register, static_cast<int32_t>(texture.usage), texture.extended ? 1 : 0,
+		                             texture.dynamic_sload ? 1 : 0});
+	}
+	for (int sampler = 0; sampler < bind.samplers.samplers_num; ++sampler)
+	{
+		layout.insert(layout.end(), {bind.samplers.start_register[sampler], bind.samplers.extended[sampler] ? 1 : 0,
+		                             bind.samplers.dynamic_sload[sampler] ? 1 : 0});
+	}
+	for (int pointer = 0; pointer < bind.gds_pointers.pointers_num; ++pointer)
+	{
+		layout.insert(layout.end(), {bind.gds_pointers.start_register[pointer], bind.gds_pointers.extended[pointer] ? 1 : 0});
+	}
+	for (int scalar = 0; scalar < bind.direct_sgprs.sgprs_num; ++scalar)
+	{
+		layout.insert(layout.end(), {bind.direct_sgprs.start_register[scalar], bind.direct_sgprs.absolute_register[scalar] ? 1 : 0});
+	}
+	for (const auto& record: bind.dynamic_sloads.records)
+	{
+		layout.insert(layout.end(), {static_cast<int32_t>(record.kind), record.resource_index, record.destination_register,
+		                             static_cast<int32_t>(record.instruction_pc), record.dword_count, record.resource_field_offset,
+		                             static_cast<int32_t>(record.last_consumer_pc)});
+	}
+	return layout;
+}
+
+std::vector<ShaderImageCopyRead> ShaderAnalyzeImageCopyReads(const ShaderCode& code, const ShaderBindResources& bind,
+                                                             int user_data_register_base)
+{
+	std::vector<ShaderImageCopyRead> reads;
+	if (!ValidBind(bind, user_data_register_base))
+	{
+		return reads;
+	}
+	const auto& instructions = code.GetInstructions();
+	std::vector<FlowState> states;
+	bool analyzed = false;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& instruction = instructions.At(index);
+		if (!ShaderInstructionReadsImageResource(instruction.type) || instruction.src_num < 2 ||
+		    instruction.src[1].type != ShaderOperandType::Sgpr || instruction.src[1].size != 8 ||
+		    !ValidRange(instruction.src[1].register_id, 8)) { continue; }
+		const bool samples = ShaderInstructionUsesImageSampler(instruction.type);
+		const bool texture_found = ShaderFindImageSampledTextureDescriptor(instruction, bind, user_data_register_base) >= 0;
+		const bool sampler_found = !samples || ShaderFindImageSamplerDescriptor(instruction, bind, user_data_register_base) >= 0;
+		if (texture_found && sampler_found) { continue; }
+		// One flow pass serves every unresolved read; shaders without copies never run it.
+		if (!analyzed && !Analyze(code, bind, user_data_register_base, &states))
+		{
+			states.clear();
+		}
+		analyzed = true;
+		if (index >= states.size() || !states[index].reachable) { continue; }
+		const auto& words = states[index].words;
+		const ShaderImageCopyRead read {instruction.pc,
+		                                texture_found ? -1 : OriginDescriptorAt(words, instruction.src[1].register_id, bind),
+		                                sampler_found ? -1 : SamplerAt(words, instruction.src[2], bind)};
+		if (read.texture_descriptor >= 0 || read.sampler_index >= 0)
+		{
+			reads.push_back(read);
+		}
+	}
+	return reads;
+}
+
+void ShaderCollectCopiedImageDescriptors(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
+                                         const ShaderCodeResourceMemo* memo)
+{
+	EXIT_IF(bind == nullptr);
+	bind->copied_image_descriptors.Clear();
+	const auto reads = memo != nullptr ? memo->ImageCopyReads(code, *bind, user_data_register_base)
+	                                   : ShaderAnalyzeImageCopyReads(code, *bind, user_data_register_base);
+	for (const auto& read: reads)
+	{
+		// Usage selection compares descriptor words, which change between draws.
+		const ShaderCopiedImageDescriptor copied {
+		    read.consumer_pc,
+		    read.texture_descriptor >= 0 ? DescriptorWithUsage(read.texture_descriptor, *bind, ShaderTextureUsage::ReadOnly) : -1,
+		    read.sampler_index};
+		if (copied.texture_index >= 0 || copied.sampler_index >= 0) { bind->copied_image_descriptors.Add(copied); }
+	}
 }
 
 } // namespace Kyty::Libs::Graphics

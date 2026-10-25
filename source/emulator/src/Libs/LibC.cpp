@@ -4,6 +4,7 @@
 #include "Kyty/Core/MSpace.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/Subsystems.h"
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Common.h"
@@ -35,7 +36,6 @@
 #include <array>
 #include <atomic>
 #include <cmath>
-#include <condition_variable>
 #include <cstddef>
 #include <clocale>
 #include <cstdarg>
@@ -224,7 +224,12 @@ static KYTY_SYSV_ABI void exit(int code)
 {
 	KYTY_LOG_WARN("guest exit(%d) from 0x%016" PRIx64 "\n", code, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 
-	::exit(code);
+	// exit() runs the guest's atexit and __cxa_atexit handlers on the calling
+	// thread and flushes every stream. The host then ends without its atexit
+	// handlers and static destructors, because other guest threads may still run.
+	cxa_finalize(nullptr);
+	std::fflush(nullptr);
+	Core::ShutdownActiveAndQuickExit(code);
 }
 
 static KYTY_SYSV_ABI void init_env(const ProcessEnvironment::InitParameters* parameters)
@@ -1037,8 +1042,8 @@ static KYTY_SYSV_ABI void c_abort()
 
 namespace {
 
-std::mutex                                       g_static_init_mutex;
-std::condition_variable                          g_static_init_cv;
+Core::Mutex                                      g_static_init_mutex;
+Core::CondVar                                    g_static_init_cv;
 std::unordered_map<const void*, std::thread::id> g_static_init_owner;
 
 } // namespace
@@ -1068,7 +1073,7 @@ static KYTY_SYSV_ABI int c_cxa_guard_acquire(uint64_t* g)
 			return 0;
 		}
 
-		std::unique_lock lock(g_static_init_mutex);
+		Core::LockGuard lock(g_static_init_mutex);
 		val = guard->load(std::memory_order_acquire);
 		if ((val & 0x01) != 0)
 		{
@@ -1087,7 +1092,10 @@ static KYTY_SYSV_ABI int c_cxa_guard_acquire(uint64_t* g)
 			       static_cast<void*>(g));
 			return 0;
 		}
-		g_static_init_cv.wait(lock, [guard] { return (guard->load(std::memory_order_acquire) & 0xFF01) != 0x0100; });
+		while ((guard->load(std::memory_order_acquire) & 0xFF01) == 0x0100)
+		{
+			Kernel::PthreadInterruptibleWait(&g_static_init_cv, &g_static_init_mutex);
+		}
 	}
 }
 static KYTY_SYSV_ABI void c_cxa_guard_release(uint64_t* g)
@@ -1098,12 +1106,12 @@ static KYTY_SYSV_ABI void c_cxa_guard_release(uint64_t* g)
 	}
 	auto* guard = reinterpret_cast<std::atomic<uint64_t>*>(g);
 	{
-		std::lock_guard lock(g_static_init_mutex);
+		Core::LockGuard lock(g_static_init_mutex);
 		const uint64_t  val = guard->load(std::memory_order_relaxed);
 		guard->store((val & ~static_cast<uint64_t>(0xFFFF)) | 0x0001, std::memory_order_release);
 		g_static_init_owner.erase(g);
 	}
-	g_static_init_cv.notify_all();
+	g_static_init_cv.SignalAll();
 }
 static KYTY_SYSV_ABI void c_cxa_guard_abort(uint64_t* g)
 {
@@ -1113,12 +1121,12 @@ static KYTY_SYSV_ABI void c_cxa_guard_abort(uint64_t* g)
 	}
 	auto* guard = reinterpret_cast<std::atomic<uint64_t>*>(g);
 	{
-		std::lock_guard lock(g_static_init_mutex);
+		Core::LockGuard lock(g_static_init_mutex);
 		const uint64_t  val = guard->load(std::memory_order_relaxed);
 		guard->store(val & ~static_cast<uint64_t>(0xFFFF), std::memory_order_release);
 		g_static_init_owner.erase(g);
 	}
-	g_static_init_cv.notify_all();
+	g_static_init_cv.SignalAll();
 }
 
 using execute_once_callback_t = KYTY_SYSV_ABI int (*)(void*, void*, void**);
@@ -1140,11 +1148,12 @@ KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, vo
 	constexpr int once_complete      = 2;
 
 	{
-		std::unique_lock lock(g_static_init_mutex);
-		g_static_init_cv.wait(lock, [flag] {
-			return reinterpret_cast<std::atomic<uint32_t>*>(flag)->load(std::memory_order_acquire) != once_running;
-		});
-		auto* once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
+		Core::LockGuard lock(g_static_init_mutex);
+		auto*           once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
+		while (once_flag->load(std::memory_order_acquire) == once_running)
+		{
+			Kernel::PthreadInterruptibleWait(&g_static_init_cv, &g_static_init_mutex);
+		}
 		if (once_flag->load(std::memory_order_acquire) == once_complete)
 		{
 			return 0;
@@ -1157,12 +1166,12 @@ KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, vo
 	const int result          = callback(flag, context, &callback_result);
 
 	{
-		std::lock_guard lock(g_static_init_mutex);
-		auto*            once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
+		Core::LockGuard lock(g_static_init_mutex);
+		auto*           once_flag = reinterpret_cast<std::atomic<uint32_t>*>(flag);
 		once_flag->store(result != 0 ? once_complete : once_uninitialized, std::memory_order_release);
 		g_static_init_owner.erase(flag);
 	}
-	g_static_init_cv.notify_all();
+	g_static_init_cv.SignalAll();
 	return result != 0 ? 0 : LibKernel::KERNEL_ERROR_EAGAIN;
 }
 
@@ -3371,8 +3380,10 @@ static KYTY_SYSV_ABI void c_locale_RegisterFacet(void* /*self*/) {}
 // locale::_Locimp facet vectors follow the guest runtime: both operations run
 // under the locale lock and take facet references through the facet vtable
 // (+0x10 incref, +0x18 decref returning the facet to delete, +0x08 deleting
-// destructor).
-static std::mutex g_locimp_mutex;
+// destructor). Those calls are guest code, so the lock is taken at a safe point,
+// and it is recursive so a facet destructor that reaches these operations again
+// on the same thread cannot deadlock.
+static std::recursive_mutex g_locimp_mutex;
 
 static void LocimpIncref(void* facet)
 {
@@ -3406,7 +3417,7 @@ static KYTY_SYSV_ABI void c_locimp_copy_ctor(CxxLocimpLayout* self, const CxxLoc
 	self->flag_24     = right->flag_24;
 	self->name        = right->name;
 
-	std::scoped_lock lock(g_locimp_mutex);
+	const auto lock = Kernel::PthreadLockAtSafePoint(g_locimp_mutex);
 	if (self->facet_count == 0)
 	{
 		return;
@@ -3432,7 +3443,7 @@ static KYTY_SYSV_ABI void c_locimp_copy_ctor(CxxLocimpLayout* self, const CxxLoc
 static KYTY_SYSV_ABI void c_locimp_addfac(CxxLocimpLayout* self, void* facet, std::uint64_t id)
 {
 	EXIT_IF(self == nullptr || facet == nullptr);
-	std::scoped_lock lock(g_locimp_mutex);
+	const auto lock = Kernel::PthreadLockAtSafePoint(g_locimp_mutex);
 	if (self->facet_count <= id)
 	{
 		const std::uint64_t count = std::max<std::uint64_t>(id + 1, 40);
@@ -4259,17 +4270,14 @@ static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (*
 	     thrown_exception);
 }
 
-static KYTY_SYSV_ABI int atexit(void (*func)())
+static KYTY_SYSV_ABI int atexit(cxa_destructor_func_t func)
 {
 	PRINT_NAME();
 
 	KYTY_LOG_DEBUG("func = %" PRIx64 "\n", reinterpret_cast<uint64_t>(func));
 
-	int ok = ::atexit(func);
-
-	if (ok != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	return 0;
+	// atexit and __cxa_atexit share one list: exit() runs both, newest first.
+	return cxa_atexit(func, nullptr, nullptr);
 }
 
 static KYTY_SYSV_ABI int libc_printf(VA_ARGS)

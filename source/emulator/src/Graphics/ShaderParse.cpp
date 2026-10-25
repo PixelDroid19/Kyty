@@ -103,7 +103,7 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 			words = shader_parse_vop2(pc, decode_src, decode_ptr, dst, next_gen);
 		} else if ((instruction & 0xF8000000u) == 0xC0000000)
 		{
-			if (next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: next_gen guard ignored (continuing)\n"); }
+			EXIT_NOT_IMPLEMENTED(next_gen);
 			words = shader_parse_smrd(pc, decode_src, decode_ptr, dst, next_gen);
 		} else if ((instruction & 0xC0000000u) == 0x80000000)
 		{
@@ -115,11 +115,11 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 				case 0x32: words = shader_parse_vintrp(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x33: words = shader_parse_vop3p(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x34:
-					if (next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: next_gen guard ignored (continuing)\n"); }
+					EXIT_NOT_IMPLEMENTED(next_gen);
 					words = shader_parse_vop3(pc, decode_src, decode_ptr, dst, next_gen);
 					break;
 				case 0x35:
-					if (!next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !next_gen guard ignored (continuing)\n"); }
+					EXIT_NOT_IMPLEMENTED(!next_gen);
 					words = shader_parse_vop3(pc, decode_src, decode_ptr, dst, next_gen);
 					break;
 				case 0x36: words = shader_parse_ds(pc, decode_src, decode_ptr, dst, next_gen); break;
@@ -128,7 +128,7 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 				case 0x3a: words = shader_parse_mtbuf(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x3c: words = shader_parse_mimg(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x3d:
-					if (!next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !next_gen guard ignored (continuing)\n"); }
+					EXIT_NOT_IMPLEMENTED(!next_gen);
 					words = shader_parse_smem(pc, decode_src, decode_ptr, dst, next_gen);
 					break;
 				case 0x3e: words = shader_parse_exp(pc, decode_src, decode_ptr, dst, next_gen); break;
@@ -155,17 +155,18 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 		{
 			saw_endpgm = true;
 		}
-		const bool setpc_terminator =
-		    allow_setpc_terminator && end != nullptr && ptr == end && !dst->GetInstructions().IsEmpty() &&
-		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).pc == pc &&
-		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).type == ShaderInstructionType::SSetpcB64;
-
 		const uint32_t next_pc = 4u * static_cast<uint32_t>(ptr - src);
 		const bool tail_has_static_entry = end != nullptr
 		                                       ? dst->GetLabels().Contains(
 		                                             next_pc, [](auto label, auto target) { return label.GetDst() >= target; })
 		                                       : dst->GetLabels().Contains(
 		                                             next_pc, [](auto label, auto target) { return label.GetDst() == target; });
+		// Like S_ENDPGM, the continuation jump ends the front unless a branch
+		// reaches later code; the binary's metadata may follow it in the range.
+		const bool setpc_terminator =
+		    allow_setpc_terminator && end != nullptr && !tail_has_static_entry && !dst->GetInstructions().IsEmpty() &&
+		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).pc == pc &&
+		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).type == ShaderInstructionType::SSetpcB64;
 		const bool endpgm_terminator =
 		    instruction == 0xBF810000 && (type == ShaderType::Vertex || type == ShaderType::Pixel || type == ShaderType::Compute) &&
 		    !tail_has_static_entry;

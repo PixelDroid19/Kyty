@@ -10,8 +10,10 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Agent/EventRing.h"
+#include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/DiagnosticDump.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -885,36 +887,96 @@ static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, u
 	             occupancy.used_duplicates, occupancy.largest_duplicate_group);
 }
 
+// Entries in release order: the oldest leads.
+struct TransientFreeList
+{
+	struct TransientBufferEntry* oldest = nullptr;
+	struct TransientBufferEntry* newest = nullptr;
+};
+
+struct TransientBufferEntry
+{
+	VulkanBuffer buffer;
+	void*        mapped         = nullptr;
+	uint64_t     size           = 0;
+	uint32_t     usage          = 0;
+	bool         used           = false;
+	bool         scratch        = false;
+	bool         snapshot_valid = false;
+	// The snapshot is indexed by its base alone and serves any read window it covers.
+	bool         snapshot_covering = false;
+	uint64_t     snapshot_vaddr = 0;
+	uint64_t     snapshot_size  = 0;
+	// Snapshot bytes start here; the bytes before it hold no guest data.
+	uint64_t snapshot_begin = 0;
+	// Bytes at or past this offset are known to be zero.
+	uint64_t nonzero_end = 0;
+	// The dirty tracker covers the snapshot bytes, which match the guest at this write generation.
+	bool     tracked            = false;
+	uint64_t tracked_generation = 0;
+	// Probes the tracked bytes served without a comparison.
+	uint32_t tracked_reuses = 0;
+	// Creation order; the free index hands out the earliest-created fitting entry.
+	uint64_t creation = 0;
+	// Recordings of the shared snapshot pool that bind this entry, and the latest of them.
+	uint32_t leases           = 0;
+	uint64_t lease_generation = 0;
+	// Neighbours among the entries holding the same snapshot key, in commit order.
+	TransientBufferEntry* snapshot_older = nullptr;
+	TransientBufferEntry* snapshot_newer = nullptr;
+	// Position in the free index while the entry is unused, and whether that is
+	// the index of entries that still hold a snapshot.
+	std::map<std::pair<uint64_t, uint64_t>, TransientBufferEntry*>::iterator free_position;
+	bool                                                                     free_indexed  = false;
+	bool                                                                     free_snapshot = false;
+	// A free snapshot's neighbours in its size's release order and in the
+	// pool-wide release order, and the size's list it sits in.
+	TransientBufferEntry*     free_older     = nullptr;
+	TransientBufferEntry*     free_newer     = nullptr;
+	TransientBufferEntry*     released_older = nullptr;
+	TransientBufferEntry*     released_newer = nullptr;
+	struct TransientFreeList* free_list      = nullptr;
+	// Position in the pool's entry list.
+	size_t pool_index = 0;
+};
+
+// Snapshot entries one recording binds. An entry keeps its bytes until every
+// recording that leased it has been reset, so a later command buffer of the
+// queue binds the same buffer (and the descriptor sets keyed by it) while the
+// guest bytes are unchanged.
+struct TransientSnapshotLeases
+{
+	uint64_t                           generation = 0;
+	std::vector<TransientBufferEntry*> entries;
+};
+
 class TransientBufferPool
 {
 	static constexpr uint64_t kMaxSnapshotReadSize = 16u;
+	// A matching snapshot this large is tracked for guest writes, so later probes
+	// skip the comparison. Smaller ones compare faster than page protection costs.
+	static constexpr uint64_t kMinTrackedSnapshotSize = 4096u;
+	// A 3D frame records tens of command buffers (about forty in the fishing
+	// title). Snapshots leased by the last frame or two are kept for the next
+	// probe while the pool can grow; ring constants that return later hold
+	// new bytes, so keeping them longer only costs memory.
+	static constexpr uint64_t kRetainedRecordings = 64u;
+	static constexpr uint64_t kExpiredRecordings  = 4u * kRetainedRecordings;
+	// Snapshot sizes are never zero, so this size marks the key of covering snapshots.
+	static constexpr uint64_t kCoveringKeySize = 0u;
 
-	struct Entry
-	{
-		VulkanBuffer buffer;
-		void*        mapped = nullptr;
-		uint64_t     size   = 0;
-		uint32_t     usage  = 0;
-		bool         used    = false;
-		bool         scratch = false;
-		bool         snapshot_valid = false;
-		uint64_t     snapshot_vaddr = 0;
-		uint64_t     snapshot_size  = 0;
-		// Snapshot bytes start here; the bytes before it hold no guest data.
-		uint64_t     snapshot_begin = 0;
-		// Bytes at or past this offset are known to be zero.
-		uint64_t     nonzero_end    = 0;
-		// Position in the free index while the entry is unused.
-		std::multimap<uint64_t, Entry*>::iterator free_position;
-		bool                                      free_indexed = false;
-	};
+	using Entry     = TransientBufferEntry;
+	using FreeIndex = std::map<std::pair<uint64_t, uint64_t>, Entry*>;
+	// Free snapshots by size; each size lists its entries in release order, so
+	// the first non-empty size at or above a request holds the answer at its head.
+	using FreeSnapshotIndex = std::map<uint64_t, TransientFreeList>;
 
 public:
 	VulkanBuffer* Upload(GraphicContext* ctx, const void* data, uint64_t size, uint32_t usage,
 	                     GpuMemoryTransientBufferAllocationClass allocation_class)
 	{
 		EXIT_IF(ctx == nullptr || data == nullptr || size == 0u || usage == 0u);
-		auto* entry = Acquire(ctx, size, usage, allocation_class, true, nullptr);
+		auto* entry = Acquire(ctx, size, usage, allocation_class);
 		if (entry == nullptr)
 		{
 			return nullptr;
@@ -949,10 +1011,33 @@ public:
 		return buffer;
 	}
 
+	// Shared snapshot pool only: ends the leases of the recording's previous use and starts the next one.
+	void BeginLeases(TransientSnapshotLeases* leases)
+	{
+		ReleaseLeases(leases);
+		leases->generation = ++m_lease_generation;
+	}
+
+	void ReleaseLeases(TransientSnapshotLeases* leases)
+	{
+		EXIT_IF(leases == nullptr);
+		for (auto* entry: leases->entries)
+		{
+			EXIT_IF(entry->leases == 0u);
+			if (--entry->leases == 0u)
+			{
+				entry->used = false;
+				IndexFree(entry);
+			}
+		}
+		leases->entries.clear();
+	}
+
 	VulkanBuffer* Capture(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage, bool zero_tail,
-	                      uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns, bool* reused)
+	                      TransientSnapshotLeases* leases, uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns, bool* reused)
 	{
 		EXIT_IF(ctx == nullptr || validation_ns == nullptr || upload_ns == nullptr || compare_ns == nullptr || reused == nullptr);
+		EXIT_IF(leases == nullptr || leases->generation == 0u);
 		EXIT_IF(read_begin >= size);
 		*validation_ns = 0u;
 		*upload_ns     = 0u;
@@ -975,38 +1060,94 @@ public:
 		// as do the IndexBuffer objects linked under a surface.
 		const auto admission = usage == VK_BUFFER_USAGE_INDEX_BUFFER_BIT ? GpuMemorySnapshotAdmission::IndexView
 		                                                                  : GpuMemorySnapshotAdmission::ReadOnlyOverlaps;
-		Entry* previous = FindSnapshot(vaddr, size, usage, read_begin);
+		// Without a zero tail the GPU reads only [read_begin, size), so any
+		// snapshot of the same base that covers that window serves it. Draws
+		// that bind one vertex stream with different record counts then share
+		// a snapshot instead of each holding the whole prefix of the stream.
+		const bool covering = !zero_tail;
+		DestroyExpired(ctx);
+		SnapshotChain* chain = nullptr;
+		Entry*         previous =
+		    covering ? FindCovering(vaddr, size, usage, read_begin, &chain) : FindSnapshot(vaddr, size, usage, read_begin, &chain);
 		if (previous != nullptr)
 		{
 			bool     matches             = false;
+			bool     admitted            = false;
 			uint64_t reuse_validation_ns = 0u;
-			if (!GpuMemoryCompareSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
-			                                            static_cast<const uint8_t*>(previous->mapped) + read_begin, &matches,
-			                                            &reuse_validation_ns, compare_ns, admission))
+			// A covering snapshot is compared whole, which also arms its write tracking.
+			const uint64_t compare_begin = covering ? previous->snapshot_begin : read_begin;
+			const uint64_t compare_end   = covering ? previous->snapshot_size : size;
+			if (TrackedSnapshotUnwritten(previous, chain))
 			{
-				*validation_ns += reuse_validation_ns;
-				return nullptr;
+				// The bytes still match; only the range's admission is checked again.
+				const auto preflight_start = DebugStatsClock::now();
+				admitted                   = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin, admission);
+				reuse_validation_ns        = static_cast<uint64_t>(
+				    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - preflight_start).count());
+				matches = admitted;
+			} else
+			{
+				const auto observation = BeginTracking(previous, compare_begin, chain);
+				admitted = GpuMemoryCompareSnapshotReadOnlyBuffer(vaddr + compare_begin, compare_end - compare_begin,
+				                                                  static_cast<const uint8_t*>(previous->mapped) + compare_begin, &matches,
+				                                                  &reuse_validation_ns, compare_ns, admission);
+				FinishTracking(previous, chain, observation, admitted && matches);
 			}
 			*validation_ns += reuse_validation_ns;
+			if (!admitted)
+			{
+				return nullptr;
+			}
 			if (matches)
 			{
+				// Recordings still in flight bind at most `size` bytes of this key, so clearing past it is safe.
 				if (zero_tail)
 				{
 					ClearTail(previous, size);
 				}
-				previous->used = true;
-				UnindexFree(previous);
-				previous->buffer.descriptor_range = size;
+				Lease(previous, leases);
+				previous->buffer.descriptor_range = previous->snapshot_size;
 				*reused                           = true;
 				return &previous->buffer;
 			}
 		}
-		bool       created       = false;
-		auto*      entry = Acquire(ctx, size, usage, GpuMemoryTransientBufferAllocationClass::Snapshot, false, nullptr);
+		// A covering capture grows to the union with the base's latest snapshot,
+		// so the next draws of the stream find their windows in it. A union the
+		// snapshot path refuses leaves the draw with its own window.
+		uint64_t capture_begin = read_begin;
+		uint64_t capture_end   = size;
+		if (covering && chain != nullptr)
+		{
+			const uint64_t union_begin = std::min(capture_begin, chain->newest->snapshot_begin);
+			const uint64_t union_end   = std::max(capture_end, chain->newest->snapshot_size);
+			const auto     union_start = DebugStatsClock::now();
+			if (union_end <= kGpuMemoryMaxTransientReadOnlyBytes && (union_begin != capture_begin || union_end != capture_end) &&
+			    GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + union_begin, union_end - union_begin, admission))
+			{
+				capture_begin = union_begin;
+				capture_end   = union_end;
+			}
+			*validation_ns +=
+			    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - union_start).count());
+		}
+		// A key whose bytes changed recycles its own stale entries first, so a
+		// range the guest rewrites every frame keeps its buffers. Snapshots
+		// still leased by recent recordings are recycled only when the pool
+		// cannot grow.
+		bool   created = false;
+		Entry* entry   = TakeFree(m_free, usage, capture_end);
+		if (entry == nullptr && previous != nullptr)
+		{
+			entry = TakeStale(chain, capture_end);
+		}
 		if (entry == nullptr)
 		{
+			entry = TakeAged(usage, capture_end);
+		}
+		if (entry == nullptr && CanCreate(capture_end, usage, GpuMemoryTransientBufferAllocationClass::Snapshot))
+		{
 			const auto preflight_start = DebugStatsClock::now();
-			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin, admission);
+			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr + capture_begin, capture_end - capture_begin, admission);
 			*validation_ns += static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(DebugStatsClock::now() - preflight_start).count());
 			if (!eligible)
@@ -1014,7 +1155,12 @@ public:
 				finish_upload_time();
 				return nullptr;
 			}
-			entry = Acquire(ctx, size, usage, GpuMemoryTransientBufferAllocationClass::Snapshot, true, &created);
+			entry   = Create(ctx, capture_end, usage);
+			created = true;
+		}
+		if (entry == nullptr)
+		{
+			entry = TakeFreeSnapshot(usage, capture_end);
 		}
 		if (entry == nullptr)
 		{
@@ -1024,11 +1170,14 @@ public:
 
 		uint64_t atomic_validation_ns = 0u;
 		uint64_t copy_ns              = 0u;
-		// A refused capture may already have copied part of the range.
-		entry->nonzero_end = std::max(entry->nonzero_end, size);
-		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr + read_begin, size - read_begin,
-		                                            static_cast<uint8_t*>(entry->mapped) + read_begin, &atomic_validation_ns,
-		                                            &copy_ns, admission))
+		// A refused capture may already have copied part of the range, so the
+		// entry's previous snapshot is dropped first.
+		UnindexSnapshot(entry);
+		entry->snapshot_valid = false;
+		entry->nonzero_end    = std::max(entry->nonzero_end, capture_end);
+		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr + capture_begin, capture_end - capture_begin,
+		                                            static_cast<uint8_t*>(entry->mapped) + capture_begin, &atomic_validation_ns, &copy_ns,
+		                                            admission))
 		{
 			*validation_ns += atomic_validation_ns;
 			finish_upload_time();
@@ -1039,14 +1188,15 @@ public:
 			return nullptr;
 		}
 		*validation_ns += atomic_validation_ns;
-		DebugStatsRecordUpload(size - read_begin, copy_ns);
-		UnindexSnapshot(entry);
-		entry->snapshot_valid = true;
-		entry->snapshot_vaddr = vaddr;
-		entry->snapshot_size  = size;
-		entry->snapshot_begin = read_begin;
-		m_snapshots[SnapshotKey {vaddr, size, usage}].push_back(entry);
-		Commit(entry, size, zero_tail);
+		DebugStatsRecordUpload(capture_end - capture_begin, copy_ns);
+		entry->snapshot_valid    = true;
+		entry->snapshot_covering = covering;
+		entry->snapshot_vaddr    = vaddr;
+		entry->snapshot_size     = capture_end;
+		entry->snapshot_begin    = capture_begin;
+		IndexSnapshot(entry);
+		Commit(entry, capture_end, zero_tail);
+		Lease(entry, leases);
 		finish_upload_time();
 		return &entry->buffer;
 	}
@@ -1126,6 +1276,7 @@ public:
 			delete entry;
 			return nullptr;
 		}
+		entry->pool_index = m_entries.size();
 		m_entries.push_back(entry);
 		m_total_bytes += size;
 		return &entry->buffer;
@@ -1147,6 +1298,9 @@ public:
 		for (auto* entry: m_entries)
 		{
 			EXIT_IF(entry == nullptr || (entry->mapped == nullptr && !entry->scratch));
+			// A live lease means a command buffer that binds the entry was not freed.
+			EXIT_IF(entry->leases != 0u);
+			Untrack(entry);
 			if (entry->mapped != nullptr)
 			{
 				VulkanUnmapMemory(ctx, &entry->buffer.memory);
@@ -1158,6 +1312,8 @@ public:
 		m_entries.clear();
 		m_snapshots.clear();
 		m_free.clear();
+		m_free_snapshots.clear();
+		m_released = {};
 		m_usage_entries.clear();
 		m_zero_carriers.clear();
 		m_by_buffer.clear();
@@ -1187,22 +1343,76 @@ private:
 		}
 	};
 
+	// Entries of one snapshot key, linked through the entries themselves so
+	// that a key rewritten by every draw unindexes an entry in constant time.
+	struct SnapshotChain
+	{
+		Entry* oldest = nullptr;
+		Entry* newest = nullptr;
+		// After the guest wrote a tracked snapshot of this key, or tracking was
+		// refused, probes compare bytes for a while. The wait doubles with every
+		// failure, so a key rewritten each frame rarely pays for page protection
+		// and one that settles after loading is tracked again.
+		uint32_t track_failures     = 0;
+		uint32_t probes_until_track = 0;
+	};
+
 	// Latest committed entry first: the one most likely to still match guest memory.
-	Entry* FindSnapshot(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin) const
+	Entry* FindSnapshot(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin, SnapshotChain** chain)
 	{
 		const auto it = m_snapshots.find(SnapshotKey {vaddr, size, usage});
 		if (it == m_snapshots.end())
 		{
 			return nullptr;
 		}
-		for (auto entry = it->second.rbegin(); entry != it->second.rend(); ++entry)
+		*chain = &it->second;
+		for (auto* entry = it->second.newest; entry != nullptr; entry = entry->snapshot_older)
 		{
-			if ((*entry)->snapshot_begin <= read_begin)
+			if (entry->snapshot_begin <= read_begin)
 			{
-				return *entry;
+				return entry;
 			}
 		}
 		return nullptr;
+	}
+
+	// Latest committed entry first that holds the whole read window.
+	Entry* FindCovering(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t read_begin, SnapshotChain** chain)
+	{
+		const auto it = m_snapshots.find(SnapshotKey {vaddr, kCoveringKeySize, usage});
+		if (it == m_snapshots.end())
+		{
+			return nullptr;
+		}
+		*chain = &it->second;
+		for (auto* entry = it->second.newest; entry != nullptr; entry = entry->snapshot_older)
+		{
+			if (entry->snapshot_begin <= read_begin && entry->snapshot_size >= size)
+			{
+				return entry;
+			}
+		}
+		return nullptr;
+	}
+
+	static SnapshotKey KeyOf(const Entry* entry)
+	{
+		return {entry->snapshot_vaddr, entry->snapshot_covering ? kCoveringKeySize : entry->snapshot_size, entry->usage};
+	}
+
+	void IndexSnapshot(Entry* entry)
+	{
+		auto& chain           = m_snapshots[KeyOf(entry)];
+		entry->snapshot_older = chain.newest;
+		entry->snapshot_newer = nullptr;
+		if (chain.newest != nullptr)
+		{
+			chain.newest->snapshot_newer = entry;
+		} else
+		{
+			chain.oldest = entry;
+		}
+		chain.newest = entry;
 	}
 
 	void UnindexSnapshot(Entry* entry)
@@ -1211,74 +1421,275 @@ private:
 		{
 			return;
 		}
-		const auto it = m_snapshots.find(SnapshotKey {entry->snapshot_vaddr, entry->snapshot_size, entry->usage});
+		Untrack(entry);
+		const auto it = m_snapshots.find(KeyOf(entry));
 		EXIT_IF(it == m_snapshots.end());
-		auto&      entries = it->second;
-		const auto indexed = std::find(entries.begin(), entries.end(), entry);
-		EXIT_IF(indexed == entries.end());
-		entries.erase(indexed);
-		if (entries.empty())
+		auto& chain = it->second;
+		if (entry->snapshot_older != nullptr)
+		{
+			entry->snapshot_older->snapshot_newer = entry->snapshot_newer;
+		} else
+		{
+			chain.oldest = entry->snapshot_newer;
+		}
+		if (entry->snapshot_newer != nullptr)
+		{
+			entry->snapshot_newer->snapshot_older = entry->snapshot_older;
+		} else
+		{
+			chain.newest = entry->snapshot_older;
+		}
+		entry->snapshot_older = nullptr;
+		entry->snapshot_newer = nullptr;
+		if (chain.newest == nullptr)
 		{
 			m_snapshots.erase(it);
 		}
 	}
 
-	Entry* Acquire(GraphicContext* ctx, uint64_t size, uint32_t usage, GpuMemoryTransientBufferAllocationClass allocation_class,
-	               bool allow_create, bool* created)
+	static uint64_t TrackedAddress(const Entry* entry) { return entry->snapshot_vaddr + entry->snapshot_begin; }
+	static uint64_t TrackedSize(const Entry* entry) { return entry->snapshot_size - entry->snapshot_begin; }
+
+	// No guest write reached a tracked snapshot since it matched. A written one
+	// is untracked; its key is compared until tracking is tried again.
+	static bool TrackedSnapshotUnwritten(Entry* entry, SnapshotChain* chain)
 	{
-		if (created != nullptr)
+		if (!entry->tracked)
 		{
-			*created = false;
+			return false;
 		}
-		// Prefer exact size; fall back to the smallest free entry that fits.
-		// Descriptor writes use an explicit range (not the full VkBuffer size),
-		// so a larger free slab is valid and distinct sizes do not fragment the
-		// entry ceiling.
-		Entry* entry = nullptr;
-		if (const auto free = m_free.find(usage); free != m_free.end())
+		if (!GpuDirtyPageTracker::Instance().ChangedSince(TrackedAddress(entry), TrackedSize(entry), entry->tracked_generation))
 		{
-			const auto fit = free->second.lower_bound(size);
-			entry          = fit != free->second.end() ? fit->second : nullptr;
+			entry->tracked_reuses++;
+			return true;
 		}
+		// Protection that served enough probes paid for itself: track the key again at once.
+		static constexpr uint32_t kReusesWorthTracking = 16u;
+		if (entry->tracked_reuses >= kReusesWorthTracking)
+		{
+			chain->track_failures = 0u;
+		} else
+		{
+			RefuseTracking(chain);
+		}
+		Untrack(entry);
+		return false;
+	}
 
-		if (entry == nullptr)
-		{
-			if (!allow_create)
-			{
-				return nullptr;
-			}
-			const uint32_t usage_entries = m_usage_entries[usage];
-			if (!GpuMemoryTransientBufferPoolCanAllocate(usage_entries, static_cast<uint32_t>(m_entries.size()), m_total_bytes, size,
-			                                                   allocation_class))
-			{
-				if (allocation_class == GpuMemoryTransientBufferAllocationClass::Critical)
-				{
-					ReportCriticalTransientPoolCapacityReject(size, usage, usage_entries, static_cast<uint32_t>(m_entries.size()),
-					                                          m_total_bytes, MeasureOccupancy(usage));
-				}
-				return nullptr;
-			}
+	static void RefuseTracking(SnapshotChain* chain)
+	{
+		static constexpr uint32_t kMaxTrackFailureShift = 10u;
 
-			entry                         = new Entry;
-			entry->size                   = size;
-			entry->usage                  = usage;
-			entry->buffer.usage           = usage;
-			entry->buffer.memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) |
-			                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
-			entry->nonzero_end            = size;
-			VulkanCreateBuffer(ctx, size, &entry->buffer);
-			VulkanMapMemory(ctx, &entry->buffer.memory, &entry->mapped);
-			EXIT_IF(entry->mapped == nullptr);
-			m_entries.push_back(entry);
-			m_by_buffer.emplace(&entry->buffer, entry);
-			m_usage_entries[usage]++;
-			IndexFree(entry);
-			m_total_bytes += size;
-			if (created != nullptr)
+		chain->track_failures     = std::min(chain->track_failures + 1u, kMaxTrackFailureShift);
+		chain->probes_until_track = 1u << chain->track_failures;
+	}
+
+	// Arms write tracking before a large snapshot is compared, so a write after
+	// the comparison read the bytes advances the observed generation.
+	static GpuDirtyReadObservation BeginTracking(const Entry* entry, uint64_t read_begin, SnapshotChain* chain)
+	{
+		if (read_begin != entry->snapshot_begin || TrackedSize(entry) < kMinTrackedSnapshotSize)
+		{
+			return {};
+		}
+		if (chain->probes_until_track != 0u)
+		{
+			chain->probes_until_track--;
+			return {};
+		}
+		auto& tracker = GpuDirtyPageTracker::Instance();
+		if (!tracker.RegisterRange(TrackedAddress(entry), TrackedSize(entry)))
+		{
+			RefuseTracking(chain);
+			return {};
+		}
+		const auto observation = tracker.BeginRead(TrackedAddress(entry), TrackedSize(entry));
+		if (!observation.tracked)
+		{
+			(void)tracker.UnregisterRange(TrackedAddress(entry), TrackedSize(entry));
+			RefuseTracking(chain);
+		}
+		return observation;
+	}
+
+	static void FinishTracking(Entry* entry, SnapshotChain* chain, const GpuDirtyReadObservation& observation, bool matched)
+	{
+		if (!observation.tracked)
+		{
+			return;
+		}
+		auto& tracker = GpuDirtyPageTracker::Instance();
+		if (matched && tracker.ReadObservationIsStable(TrackedAddress(entry), TrackedSize(entry), observation))
+		{
+			entry->tracked            = true;
+			entry->tracked_generation = observation.generation;
+			entry->tracked_reuses     = 0u;
+			return;
+		}
+		(void)tracker.UnregisterRange(TrackedAddress(entry), TrackedSize(entry));
+		RefuseTracking(chain);
+	}
+
+	static void Untrack(Entry* entry)
+	{
+		if (!entry->tracked)
+		{
+			return;
+		}
+		(void)GpuDirtyPageTracker::Instance().UnregisterRange(TrackedAddress(entry), TrackedSize(entry));
+		entry->tracked = false;
+	}
+
+	// Free entries without a snapshot go first, then snapshots no recent
+	// recording leased. One a later frame may probe again is recycled only
+	// when the pool cannot grow, and then the one released longest ago. Among
+	// equal sizes of the snapshot-free index the earliest-created entry wins,
+	// so a frame that repeats the previous one's uploads binds the same
+	// buffers (and hits the descriptor sets keyed by them).
+	Entry* Acquire(GraphicContext* ctx, uint64_t size, uint32_t usage, GpuMemoryTransientBufferAllocationClass allocation_class)
+	{
+		if (auto* entry = TakeFree(m_free, usage, size); entry != nullptr)
+		{
+			return entry;
+		}
+		if (auto* entry = TakeAged(usage, size); entry != nullptr)
+		{
+			return entry;
+		}
+		if (CanCreate(size, usage, allocation_class))
+		{
+			return Create(ctx, size, usage);
+		}
+		if (auto* entry = TakeFreeSnapshot(usage, size); entry != nullptr)
+		{
+			return entry;
+		}
+		if (allocation_class == GpuMemoryTransientBufferAllocationClass::Critical)
+		{
+			ReportCriticalTransientPoolCapacityReject(size, usage, m_usage_entries[usage], static_cast<uint32_t>(m_entries.size()),
+			                                          m_total_bytes, MeasureOccupancy(usage));
+		}
+		return nullptr;
+	}
+
+	// Prefer exact size; fall back to the smallest free entry that fits.
+	// Descriptor writes use an explicit range (not the full VkBuffer size),
+	// so a larger free slab is valid and distinct sizes do not fragment the
+	// entry ceiling.
+	static Entry* TakeFree(std::unordered_map<uint32_t, FreeIndex>& index, uint32_t usage, uint64_t size)
+	{
+		const auto free = index.find(usage);
+		if (free == index.end())
+		{
+			return nullptr;
+		}
+		const auto fit = free->second.lower_bound({size, 0u});
+		return fit != free->second.end() ? fit->second : nullptr;
+	}
+
+	// The smallest fitting size, and within it the snapshot released longest ago.
+	// Sizes left empty are dropped on the way.
+	Entry* TakeFreeSnapshot(uint32_t usage, uint64_t size)
+	{
+		const auto free = m_free_snapshots.find(usage);
+		if (free == m_free_snapshots.end())
+		{
+			return nullptr;
+		}
+		auto& sizes = free->second;
+		for (auto fit = sizes.lower_bound(size); fit != sizes.end();)
+		{
+			if (fit->second.oldest != nullptr)
 			{
-				*created = true;
+				return fit->second.oldest;
+			}
+			fit = sizes.erase(fit);
+		}
+		return nullptr;
+	}
+
+	// Lists link through one pair of an entry's neighbour fields: the free
+	// pair for a size's list, the released pair for the pool-wide order.
+	static void ListAppend(TransientFreeList* list, Entry* entry, Entry* Entry::* older, Entry* Entry::* newer)
+	{
+		entry->*older = list->newest;
+		entry->*newer = nullptr;
+		if (list->newest != nullptr)
+		{
+			list->newest->*newer = entry;
+		} else
+		{
+			list->oldest = entry;
+		}
+		list->newest = entry;
+	}
+
+	static void ListUnlink(TransientFreeList* list, Entry* entry, Entry* Entry::* older, Entry* Entry::* newer)
+	{
+		Entry* const previous = entry->*older;
+		Entry* const next     = entry->*newer;
+		if (previous != nullptr)
+		{
+			previous->*newer = next;
+		} else
+		{
+			list->oldest = next;
+		}
+		if (next != nullptr)
+		{
+			next->*older = previous;
+		} else
+		{
+			list->newest = previous;
+		}
+		entry->*older = nullptr;
+		entry->*newer = nullptr;
+	}
+
+	static Entry* TakeStale(const SnapshotChain* chain, uint64_t size)
+	{
+		for (auto* entry = chain->oldest; entry != nullptr; entry = entry->snapshot_newer)
+		{
+			if (!entry->used && entry->size >= size)
+			{
+				return entry;
 			}
 		}
+		return nullptr;
+	}
+
+	// The fitting free snapshot released longest ago, unless a recent recording leased it.
+	Entry* TakeAged(uint32_t usage, uint64_t size)
+	{
+		auto* entry = TakeFreeSnapshot(usage, size);
+		return entry != nullptr && entry->lease_generation + kRetainedRecordings <= m_lease_generation ? entry : nullptr;
+	}
+
+	bool CanCreate(uint64_t size, uint32_t usage, GpuMemoryTransientBufferAllocationClass allocation_class)
+	{
+		return GpuMemoryTransientBufferPoolCanAllocate(m_usage_entries[usage], static_cast<uint32_t>(m_entries.size()), m_total_bytes, size,
+		                                               allocation_class);
+	}
+
+	Entry* Create(GraphicContext* ctx, uint64_t size, uint32_t usage)
+	{
+		auto* entry                   = new Entry;
+		entry->size                   = size;
+		entry->usage                  = usage;
+		entry->buffer.usage           = usage;
+		entry->buffer.memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+		                                VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+		entry->nonzero_end            = size;
+		entry->creation               = ++m_creations;
+		VulkanCreateBuffer(ctx, size, &entry->buffer);
+		VulkanMapMemory(ctx, &entry->buffer.memory, &entry->mapped);
+		EXIT_IF(entry->mapped == nullptr);
+		entry->pool_index = m_entries.size();
+		m_entries.push_back(entry);
+		m_by_buffer.emplace(&entry->buffer, entry);
+		m_usage_entries[usage]++;
+		IndexFree(entry);
+		m_total_bytes += size;
 		return entry;
 	}
 
@@ -1323,10 +1734,52 @@ private:
 
 	void DiscardNew(GraphicContext* ctx, Entry* entry)
 	{
-		EXIT_IF(ctx == nullptr || entry == nullptr || entry->used || m_entries.empty() || m_entries.back() != entry ||
-		        m_total_bytes < entry->size);
+		EXIT_IF(entry == nullptr || m_entries.empty() || m_entries.back() != entry);
+		DestroyEntry(ctx, entry);
+	}
+
+	// Snapshots no recording leased for this long are destroyed, a few per
+	// capture, so bytes held for a finished scene return to the budget.
+	void DestroyExpired(GraphicContext* ctx)
+	{
+		static constexpr uint32_t kMaxDestroyedPerCapture = 4u;
+		for (uint32_t i = 0; i < kMaxDestroyedPerCapture && m_released.oldest != nullptr; ++i)
+		{
+			auto* entry = m_released.oldest;
+			if (entry->lease_generation + kExpiredRecordings > m_lease_generation)
+			{
+				return;
+			}
+			UnindexSnapshot(entry);
+			entry->snapshot_valid = false;
+			DestroyEntry(ctx, entry);
+		}
+	}
+
+	// Destroying an entry leaves no empty size list behind, so the free
+	// snapshot index stays bounded by the sizes of live entries.
+	void DropEmptyFreeSize(uint32_t usage, uint64_t size)
+	{
+		const auto free = m_free_snapshots.find(usage);
+		if (free == m_free_snapshots.end())
+		{
+			return;
+		}
+		if (const auto list = free->second.find(size); list != free->second.end() && list->second.oldest == nullptr)
+		{
+			free->second.erase(list);
+		}
+	}
+
+	void DestroyEntry(GraphicContext* ctx, Entry* entry)
+	{
+		EXIT_IF(ctx == nullptr || entry->used || entry->snapshot_valid || entry->scratch || m_total_bytes < entry->size);
+		auto* moved                  = m_entries.back();
+		m_entries[entry->pool_index] = moved;
+		moved->pool_index            = entry->pool_index;
 		m_entries.pop_back();
 		UnindexFree(entry);
+		DropEmptyFreeSize(entry->usage, entry->size);
 		m_by_buffer.erase(&entry->buffer);
 		m_usage_entries[entry->usage]--;
 		m_total_bytes -= entry->size;
@@ -1351,6 +1804,19 @@ private:
 		UnindexFree(entry);
 	}
 
+	void Lease(Entry* entry, TransientSnapshotLeases* leases)
+	{
+		entry->used = true;
+		UnindexFree(entry);
+		if (entry->lease_generation == leases->generation)
+		{
+			return;
+		}
+		entry->lease_generation = leases->generation;
+		entry->leases++;
+		leases->entries.push_back(entry);
+	}
+
 	void ClearTail(Entry* entry, uint64_t size)
 	{
 		const uint64_t tail_bytes = GpuMemoryTransientBufferTailBytes(entry->nonzero_end, size);
@@ -1367,8 +1833,18 @@ private:
 		{
 			return;
 		}
-		entry->free_position = m_free[entry->usage].emplace(entry->size, entry);
-		entry->free_indexed  = true;
+		// Snapshots are ordered by release, so the least recently used one is recycled first.
+		entry->free_snapshot = entry->snapshot_valid;
+		if (entry->free_snapshot)
+		{
+			entry->free_list = &m_free_snapshots[entry->usage][entry->size];
+			ListAppend(entry->free_list, entry, &Entry::free_older, &Entry::free_newer);
+			ListAppend(&m_released, entry, &Entry::released_older, &Entry::released_newer);
+		} else
+		{
+			entry->free_position = m_free[entry->usage].emplace(std::make_pair(entry->size, entry->creation), entry).first;
+		}
+		entry->free_indexed = true;
 	}
 
 	void UnindexFree(Entry* entry)
@@ -1377,24 +1853,68 @@ private:
 		{
 			return;
 		}
-		m_free[entry->usage].erase(entry->free_position);
+		if (entry->free_snapshot)
+		{
+			ListUnlink(entry->free_list, entry, &Entry::free_older, &Entry::free_newer);
+			ListUnlink(&m_released, entry, &Entry::released_older, &Entry::released_newer);
+			entry->free_list = nullptr;
+		} else
+		{
+			m_free[entry->usage].erase(entry->free_position);
+		}
 		entry->free_indexed = false;
 	}
 
 	std::vector<Entry*> m_entries;
 	// Entries holding a valid snapshot, by the guest range and usage they hold.
-	std::unordered_map<SnapshotKey, std::vector<Entry*>, SnapshotKeyHash> m_snapshots;
-	// Unused snapshot and upload entries, by usage and size.
-	std::unordered_map<uint32_t, std::multimap<uint64_t, Entry*>> m_free;
-	std::unordered_map<uint32_t, uint32_t>                        m_usage_entries;
+	std::unordered_map<SnapshotKey, SnapshotChain, SnapshotKeyHash> m_snapshots;
+	// Unused entries without a snapshot, by usage, size and creation order.
+	std::unordered_map<uint32_t, FreeIndex> m_free;
+	// Unused entries holding a snapshot, by usage, size and release order.
+	std::unordered_map<uint32_t, FreeSnapshotIndex> m_free_snapshots;
+	// The same entries in release order across usages.
+	TransientFreeList                                                             m_released;
+	std::unordered_map<uint32_t, uint32_t>                                        m_usage_entries;
 	// The zero carrier each usage holds until the next Reset.
 	std::unordered_map<uint32_t, Entry*>              m_zero_carriers;
 	std::unordered_map<const VulkanBuffer*, Entry*>   m_by_buffer;
 	uint64_t            m_total_bytes = 0;
+	uint64_t                                          m_lease_generation = 0;
+	uint64_t                                          m_creations        = 0;
 };
 
+// A command pool holds one command buffer per submission slot (CommandPool::Create).
+static_assert(kGpuMemoryTransientSnapshotPoolRecordings == CommandProcessorSubmissionSlots::SlotCount);
+
+// Snapshots shared by the command buffers of one command pool (see TransientSnapshotLeases).
+struct TransientSnapshotPool
+{
+	std::mutex          mutex;
+	TransientBufferPool pool;
+};
+
+void TransientSnapshotPoolDestroy(GraphicContext* ctx, VulkanCommandPool* pool)
+{
+	EXIT_IF(pool == nullptr);
+	if (pool->snapshots == nullptr)
+	{
+		return;
+	}
+	pool->snapshots->pool.Destroy(ctx);
+	delete pool->snapshots;
+	pool->snapshots = nullptr;
+}
 
 // CommandBuffer methods (uses TransientBufferPool from Internal.h)
+
+bool CommandBuffer::SupportsGraphics() const
+{
+	EXIT_IF(g_render_ctx == nullptr);
+	EXIT_IF(m_queue < 0 || m_queue >= GraphicContext::QUEUES_NUM);
+
+	const auto* ctx = g_render_ctx->GetGraphicCtx();
+	return ctx->queues[m_queue].family == ctx->queues[GraphicContext::QUEUE_GFX].family;
+}
 
 bool CommandBuffer::IsInvalid() const
 {
@@ -1417,6 +1937,11 @@ void CommandBuffer::Allocate()
 	m_pool = g_command_pool.GetPool(m_queue);
 
 	Core::LockGuard lock(m_pool->mutex);
+
+	if (m_pool->snapshots == nullptr)
+	{
+		m_pool->snapshots = new TransientSnapshotPool;
+	}
 
 	for (uint32_t i = 0; i < m_pool->buffers_count; i++)
 	{
@@ -1447,6 +1972,14 @@ void CommandBuffer::Free()
 	Core::LockGuard lock(m_pool->mutex);
 
 	WaitForFence();
+	if (m_snapshot_leases != nullptr)
+	{
+		auto*                       shared = m_pool->snapshots;
+		std::lock_guard<std::mutex> lock(shared->mutex);
+		shared->pool.ReleaseLeases(m_snapshot_leases);
+		delete m_snapshot_leases;
+		m_snapshot_leases = nullptr;
+	}
 	if (m_transient_buffers != nullptr)
 	{
 		m_transient_buffers->Destroy(g_render_ctx->GetGraphicCtx());
@@ -1471,6 +2004,7 @@ void CommandBuffer::Free()
 		delete m_transient_device_buffers;
 		m_transient_device_buffers = nullptr;
 	}
+	DestroyRecordingUploads();
 
 	m_pool->busy[m_index] = false;
 	MarkCommandBufferResetting();
@@ -1567,6 +2101,12 @@ void CommandBuffer::Begin()
 		std::lock_guard<std::mutex> lock(m_pipeline_lease_mutex);
 		EXIT_IF(m_recording || m_resetting);
 	}
+	if (m_snapshot_leases != nullptr)
+	{
+		auto*                       shared = m_pool->snapshots;
+		std::lock_guard<std::mutex> lock(shared->mutex);
+		shared->pool.BeginLeases(m_snapshot_leases);
+	}
 	if (m_transient_buffers != nullptr)
 	{
 		m_transient_buffers->Reset();
@@ -1583,6 +2123,7 @@ void CommandBuffer::Begin()
 	{
 		m_transient_device_buffers->Reset();
 	}
+	DestroyRecordingUploads();
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -1630,19 +2171,27 @@ VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint
 	                                                         bool* reused)
 {
 	EXIT_IF(IsInvalid());
-	if (m_transient_buffers == nullptr)
+	auto*                       shared = m_pool->snapshots;
+	std::lock_guard<std::mutex> lock(shared->mutex);
+	if (m_snapshot_leases == nullptr)
 	{
-		m_transient_buffers = new TransientBufferPool;
+		m_snapshot_leases = new TransientSnapshotLeases;
+		shared->pool.BeginLeases(m_snapshot_leases);
 	}
-	return m_transient_buffers->Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, read_begin, usage, zero_tail, validation_ns,
-	                                    upload_ns, compare_ns, reused);
+	return shared->pool.Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, read_begin, usage, zero_tail, m_snapshot_leases, validation_ns,
+	                            upload_ns, compare_ns, reused);
 }
 
 bool CommandBuffer::ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
 	                                               uint64_t size, void* dst) const
 {
-	return m_transient_buffers != nullptr &&
-	       m_transient_buffers->ReadSnapshot(storage_buffer, expected_vaddr, offset, size, dst);
+	if (m_snapshot_leases == nullptr)
+	{
+		return false;
+	}
+	auto*                       shared = m_pool->snapshots;
+	std::lock_guard<std::mutex> lock(shared->mutex);
+	return shared->pool.ReadSnapshot(storage_buffer, expected_vaddr, offset, size, dst);
 }
 
 VulkanBuffer* CommandBuffer::AllocateTransientScratchBuffer(uint64_t size, uint32_t usage)
@@ -1676,6 +2225,35 @@ VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32
 	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true);
 }
 
+VulkanBuffer* CommandBuffer::UploadRecordingBuffer(const void* data, uint64_t size, uint32_t usage)
+{
+	EXIT_IF(IsInvalid() || data == nullptr || size == 0u || usage == 0u);
+	auto*                      ctx = g_render_ctx->GetGraphicCtx();
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+	auto*                      upload = new VulkanBuffer;
+	upload->usage                     = usage;
+	upload->memory.property           = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VulkanCreateBuffer(ctx, size, upload);
+	void* mapped = nullptr;
+	VulkanMapMemory(ctx, &upload->memory, &mapped);
+	EXIT_IF(mapped == nullptr);
+	std::memcpy(mapped, data, static_cast<size_t>(size));
+	VulkanUnmapMemory(ctx, &upload->memory);
+	m_recording_uploads.push_back(upload);
+	return upload;
+}
+
+// The previous recording's fence has signalled (Begin) or been waited for (Free).
+void CommandBuffer::DestroyRecordingUploads()
+{
+	for (auto* upload: m_recording_uploads)
+	{
+		VulkanDeleteBuffer(g_render_ctx->GetGraphicCtx(), upload);
+		delete upload;
+	}
+	m_recording_uploads.clear();
+}
+
 void CommandBuffer::DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth)
 {
 	EXIT_IF(depth == nullptr || depth->storage_plane == nullptr);
@@ -1694,6 +2272,7 @@ void CommandBuffer::StoreBackDepthPlanes()
 			EXIT("depth storage plane store-back failed: extent=%ux%u format=%u\n", depth->extent.width, depth->extent.height,
 			     static_cast<uint32_t>(depth->format));
 		}
+		depth->content_stamp = VulkanImageNextStamp();
 	}
 	m_depth_plane_store_backs.clear();
 }

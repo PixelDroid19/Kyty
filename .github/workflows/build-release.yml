@@ -118,59 +118,10 @@ jobs:
           path: dist
           if-no-files-found: error
 
-  build-macos:
-    name: macOS x64
-    runs-on: macos-15-intel
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          lfs: true
-
-      - name: Install dependencies
-        run: brew install ninja
-
-      - name: Build Vulkan 1.4 SDK components
-        uses: humbletim/setup-vulkan-sdk@c25f41106918cde0bf347e6f201277392b3a9e9d # v1.2.1
-        with:
-          vulkan-query-version: 1.4.357.0
-          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Headers, SPIRV-Tools
-          vulkan-use-cache: true
-
-      - name: Configure
-        run: >-
-          cmake -S source -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_OSX_ARCHITECTURES=x86_64
-          -DKYTY_PROJECT_NAME=Emulator
-          -DKYTY_WARNINGS_ARE_ERRORS=OFF
-          -DKYTY_BUILD_LAUNCHER=OFF
-          -DKYTY_BUILD_DEVTOOLS=OFF
-          -DKYTY_BUILD_UNIT_TESTS=OFF
-          -DKYTY_GENERATE_MAP_CSV=OFF
-
-      - name: Build
-        run: cmake --build build --target fc_script --parallel 4
-
-      - name: Stage archive
-        run: |
-          mkdir -p dist
-          cp build/fc_script scripts/run_guest.lua README.md CHANGELOG.md LICENSE dist/
-          chmod +x dist/fc_script
-          cp -L "$VULKAN_SDK/lib/libvulkan.1.dylib" dist/
-          install_name_tool -add_rpath @executable_path dist/fc_script
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: kyty-macos-x64-${{ github.sha }}
-          path: dist
-          if-no-files-found: error
-
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-windows, build-linux, build-macos]
+    needs: [build-windows, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -190,18 +141,22 @@ jobs:
           mkdir release-assets
           win_dir="$(find artifacts -maxdepth 1 -type d -name 'kyty-windows-x64-*' -print -quit)"
           linux_dir="$(find artifacts -maxdepth 1 -type d -name 'kyty-linux-x64-*' -print -quit)"
-          mac_dir="$(find artifacts -maxdepth 1 -type d -name 'kyty-macos-x64-*' -print -quit)"
-          test -n "$win_dir" && test -n "$linux_dir" && test -n "$mac_dir"
+          test -n "$win_dir" && test -n "$linux_dir"
           (cd "$win_dir" && zip -q -r "../../release-assets/kyty-${GITHUB_REF_NAME}-windows-x64.zip" .)
           # The Linux job already archived its package, which keeps the executable bits that artifacts drop.
           cp "$linux_dir/kyty-${GITHUB_REF_NAME}-linux-x64.tar.gz" release-assets/
-          tar -czf "release-assets/kyty-${GITHUB_REF_NAME}-macos-x64.tar.gz" -C "$mac_dir" .
 
       - name: Create immutable release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          gh release create "${GITHUB_REF_NAME}" release-assets/*
-          --verify-tag
-          --title "Kyty ${GITHUB_REF_NAME}"
-          --generate-notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A tag with a prerelease label (v1.2.3-beta.1) publishes a prerelease.
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "${GITHUB_REF_NAME}" release-assets/* \
+            --verify-tag \
+            --title "Kyty ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            "${prerelease[@]}"

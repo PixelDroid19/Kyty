@@ -3541,19 +3541,25 @@ TEST(EmulatorGraphicsState, VertexAndIndexBuffersDeclareReadOnlyGpuUse)
 TEST(EmulatorGraphicsState, TransientBufferPoolReservesCapacityPerUsage)
 {
 	constexpr uint32_t per_usage = kGpuMemoryTransientBufferMaxEntriesPerUsage;
-	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(per_usage - 1u, per_usage, 0u, 0x80u,
-	                                                    GpuMemoryTransientBufferAllocationClass::Snapshot));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(per_usage, per_usage, 0u, 0x80u,
-	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, per_usage * 3u, 0u, 0x80u,
-	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
-	constexpr uint64_t snapshot_limit = kGpuMemoryTransientBufferPoolMaxBytes - kGpuMemoryTransientBufferCriticalReserveBytes;
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, snapshot_limit, 0x80u,
-	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
-	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, snapshot_limit, 0x80u,
-	                                                    GpuMemoryTransientBufferAllocationClass::Critical));
+	EXPECT_TRUE(
+	    GpuMemoryTransientBufferPoolCanAllocate(per_usage - 1u, per_usage, 0u, 0x80u, GpuMemoryTransientBufferAllocationClass::Critical));
+	EXPECT_FALSE(
+	    GpuMemoryTransientBufferPoolCanAllocate(per_usage, per_usage, 0u, 0x80u, GpuMemoryTransientBufferAllocationClass::Critical));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, per_usage * 3u, 0u, 0x80u, GpuMemoryTransientBufferAllocationClass::Critical));
 	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, kGpuMemoryTransientBufferPoolMaxBytes, 0x80u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Critical));
+	// A command pool's shared snapshot pool holds one per-recording budget for every recording in flight.
+	constexpr uint32_t recordings = kGpuMemoryTransientSnapshotPoolRecordings;
+	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(per_usage * recordings - 1u, per_usage, 0u, 0x80u,
+	                                                    GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(per_usage * recordings, per_usage, 0u, 0x80u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, per_usage * 3u * recordings, 0u, 0x80u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, kGpuMemoryTransientBufferPoolMaxBytes, 0x80u,
+	                                                    GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, kGpuMemoryTransientBufferPoolMaxBytes * recordings, 0x80u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
 	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 0u, 0u,
 	                                                     GpuMemoryTransientBufferAllocationClass::Critical));
 }
@@ -4814,7 +4820,7 @@ TEST(EmulatorGraphicsState, RejectsUnsafeNoopPixelElision)
 	EXPECT_FALSE(ShaderPreventsNoopPixelElision(code));
 }
 
-TEST(EmulatorGraphicsState, IgnoresMetadataOnlyStencilControlWithoutStencilPlane)
+TEST(EmulatorGraphicsState, IgnoresStencilControlWithoutStencilFormat)
 {
 	HW::DepthRenderTarget target {};
 	target.stencil_info.tile_stencil_disable = true;
@@ -4829,7 +4835,15 @@ TEST(EmulatorGraphicsState, IgnoresMetadataOnlyStencilControlWithoutStencilPlane
 	HW::DepthControl depth_control {};
 	EXPECT_EQ(State::ValidateStencilPlane(target, render_control, depth_control), State::StencilPlaneValidation::Inactive);
 
-	depth_control.stencil_enable = true;
+	// STENCIL_INVALID disables the stencil test and stencil writes on the depth block.
+	depth_control.stencil_enable        = true;
+	render_control.stencil_clear_enable = true;
+	EXPECT_EQ(State::ValidateStencilPlane(target, render_control, depth_control), State::StencilPlaneValidation::Inactive);
+
+	target.stencil_write_base_addr = 0x1000;
+	EXPECT_EQ(State::ValidateStencilPlane(target, render_control, depth_control), State::StencilPlaneValidation::Inactive);
+
+	target.stencil_info.format = 1;
 	EXPECT_EQ(State::ValidateStencilPlane(target, render_control, depth_control), State::StencilPlaneValidation::MissingReadBase);
 }
 
@@ -4890,6 +4904,18 @@ TEST(EmulatorGraphicsState, ResolvesViewportXyFromScaleAndOffset)
 	EXPECT_FLOAT_EQ(xy2.y, 100.0f);
 	EXPECT_FLOAT_EQ(xy2.width, 200.0f);
 	EXPECT_FLOAT_EQ(xy2.height, 100.0f);
+}
+
+TEST(EmulatorGraphicsState, ResolvesCollapsedViewportToValidOffScreenRect)
+{
+	// Unprogrammed viewport registers are all zero; Vulkan rejects a zero width.
+	for (const auto& xy: {State::ResolveViewportXy(0.0f, 0.0f, -0.0f, 0.0f), State::ResolveViewportXy(960.0f, 960.0f, 0.0f, 540.0f)})
+	{
+		EXPECT_GT(xy.width, 0.0f);
+		EXPECT_GT(xy.height, 0.0f);
+		EXPECT_LE(xy.x + xy.width, 0.0f);
+		EXPECT_LE(xy.y + xy.height, 0.0f);
+	}
 }
 
 TEST(EmulatorGraphicsState, SeparatesHtileMetaClearFromRegisterDepthClear)
@@ -6514,19 +6540,11 @@ TEST(EmulatorGraphicsState, SharesTexelsOnlyBetweenDepthAndMatchingStorage)
 	EXPECT_FALSE(StorageTextureSharesDepthTexels(eight_bit.params, depth.params, true));
 }
 
-TEST(EmulatorGraphicsState, ReclaimsDepthStencilRedeclaredAtTheSameBase)
+TEST(EmulatorGraphicsState, ReclaimsDepthStencilRedeclaredOverAnOlderTarget)
 {
-	constexpr uint64_t base = 0x527430000ull;
-	EXPECT_TRUE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base,
-	                                                     GpuMemoryObjectType::DepthStencilBuffer, base));
-	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base + 0x10000u,
-	                                                      GpuMemoryObjectType::DepthStencilBuffer, base));
-	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::RenderTexture, base,
-	                                                      GpuMemoryObjectType::DepthStencilBuffer, base));
-	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, base,
-	                                                      GpuMemoryObjectType::Texture, base));
-	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, 0u,
-	                                                      GpuMemoryObjectType::DepthStencilBuffer, 0u));
+	EXPECT_TRUE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::RenderTexture, GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsDepthStencilRedeclaration(GpuMemoryObjectType::DepthStencilBuffer, GpuMemoryObjectType::Texture));
 }
 
 TEST(EmulatorGraphicsState, LinksPendingStorageBeforeDepthStencilReuse)
@@ -6675,6 +6693,9 @@ TEST(EmulatorGraphicsState, ReclaimsReadOnlyVertexBuffersUnderStorageTexture)
 	                                                          GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
 	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Equals,
 	                                                          GpuMemoryContentOrigin::CpuUpload, GpuMemoryObjectType::StorageTexture));
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                          GpuMemoryContentOrigin::AliasInvalidation,
+	                                                          GpuMemoryObjectType::StorageTexture));
 	EXPECT_FALSE(GpuMemoryAllowsStorageTextureInsideCpuTexture(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Equals,
 	                                                           GpuMemoryContentOrigin::GpuAliasMaterialization,
 	                                                           GpuMemoryObjectType::StorageTexture));
@@ -7065,6 +7086,8 @@ TEST(EmulatorGraphicsState, GpuWritebackPageCacheCopiesOnlyChangedPagesAndPreser
 	}
 
 	GpuWritebackPageCache cache(PageSize);
+	uint32_t              written[3] {1u, 1u, 1u};
+	cache.TrackWrittenPages(written);
 	cache.Reset(gpu, sizeof(gpu));
 
 	gpu[PageSize + 2u]        = 0xe1u;
@@ -7104,11 +7127,12 @@ TEST(EmulatorGraphicsState, GpuWritebackPageCacheCopiesOnlyChangedPagesAndPreser
 	EXPECT_EQ(notifications.calls, 0u);
 }
 
-TEST(EmulatorGraphicsState, GpuWritebackPageCacheFindsChangedPagesAcrossLargeRanges)
+TEST(EmulatorGraphicsState, GpuWritebackPageCacheComparesOnlyWrittenPages)
 {
 	using namespace Kyty::Libs::Graphics;
 	constexpr uint64_t PageSize = 4096u;
-	constexpr uint64_t Size     = PageSize * 1100u + 100u;
+	constexpr uint64_t   Pages    = 1101u;
+	constexpr uint64_t   Size     = PageSize * (Pages - 1u) + 100u;
 	std::vector<uint8_t> guest(Size);
 	std::vector<uint8_t> gpu(Size);
 	for (uint64_t i = 0; i < Size; ++i)
@@ -7118,27 +7142,37 @@ TEST(EmulatorGraphicsState, GpuWritebackPageCacheFindsChangedPagesAcrossLargeRan
 	}
 
 	GpuWritebackPageCache cache(PageSize);
+	std::vector<uint32_t> written(Pages);
+	cache.TrackWrittenPages(written.data());
 	cache.Reset(gpu.data(), Size);
 
 	const std::vector<uint64_t> pages = {0u, 63u, 64u, 255u, 256u, 777u, 1100u};
 	for (const auto page: pages)
 	{
 		gpu[page * PageSize + 17u] ^= 0xffu;
+		written[page] = 1u;
 	}
+	// A flagged page whose bytes did not change is compared, not copied.
+	written[5] = 1u;
+	// The flags bound the compare: a page the GPU did not flag is never read.
+	gpu[500u * PageSize] ^= 0xffu;
 
-	std::vector<uint64_t> notified;
-	const auto            notify = [](void* opaque, uint64_t address, uint64_t /*size*/)
-	{ static_cast<std::vector<uint64_t>*>(opaque)->push_back(address); };
+	using Notified = std::vector<std::pair<uint64_t, uint64_t>>;
+	Notified   notified;
+	const auto notify = [](void* opaque, uint64_t address, uint64_t size) { static_cast<Notified*>(opaque)->emplace_back(address, size); };
 
 	const auto result = cache.CopyChangedPages(guest.data(), gpu.data(), Size, nullptr, nullptr, 0, notify, &notified);
 	EXPECT_EQ(result.changed_pages, pages.size());
 	EXPECT_EQ(result.copied_bytes, PageSize * (pages.size() - 1u) + 100u);
-	ASSERT_EQ(notified.size(), pages.size());
-	for (size_t i = 0; i < pages.size(); i++)
-	{
-		EXPECT_EQ(notified[i], reinterpret_cast<uint64_t>(guest.data()) + pages[i] * PageSize);
-	}
-	EXPECT_EQ(guest, gpu);
+	// Adjacent changed pages are notified as one run.
+	const auto base = reinterpret_cast<uint64_t>(guest.data());
+	EXPECT_EQ(notified, (Notified {{base, PageSize},
+	                               {base + 63u * PageSize, 2u * PageSize},
+	                               {base + 255u * PageSize, 2u * PageSize},
+	                               {base + 777u * PageSize, PageSize},
+	                               {base + 1100u * PageSize, 100u}}));
+	EXPECT_NE(guest[500u * PageSize], gpu[500u * PageSize]);
+	EXPECT_EQ(std::count(written.begin(), written.end(), 0u), static_cast<std::ptrdiff_t>(Pages));
 
 	notified.clear();
 	EXPECT_FALSE(cache.CopyChangedPages(guest.data(), gpu.data(), Size, nullptr, nullptr, 0, notify, &notified).content_changed);
@@ -7887,6 +7921,20 @@ TEST(EmulatorGraphicsState, ClassifiesOnlyUnambiguousDepthD16Sources)
 	mixed_provenance.entries[0].relation = GpuMemoryOverlapType::Contains;
 	mixed_provenance.entries[1] = uploaded.entries[0];
 	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized, &mixed_provenance), GpuMemoryDepthD16Source::StorageBuffer);
+	// A depth view an earlier storage-backed bind detiled holds no guest bytes:
+	// it is accepted only while the writable buffer that refreshes it holds the range.
+	auto storage_view                      = mixed_provenance;
+	storage_view.entries[1].content_origin = GpuMemoryContentOrigin::Unknown;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized, &storage_view), GpuMemoryDepthD16Source::Unsupported);
+	storage_view.entries[1].storage_depth_view = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized, &storage_view), GpuMemoryDepthD16Source::StorageBuffer);
+	auto read_only_storage                     = materialized;
+	read_only_storage.entries[0].all_read_only = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(read_only_storage, &storage_view), GpuMemoryDepthD16Source::Unsupported);
+	auto lone_view                          = uploaded;
+	lone_view.entries[0].content_origin     = GpuMemoryContentOrigin::Unknown;
+	lone_view.entries[0].storage_depth_view = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(texture, &lone_view), GpuMemoryDepthD16Source::Unsupported);
 	auto stale_cover = texture;
 	stale_cover.total_count = 2u;
 	stale_cover.entry_count = 2u;

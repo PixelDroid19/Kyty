@@ -462,21 +462,7 @@ void GpuMemory::Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
 }
 
-// True when [vaddr, vaddr + size) meets one of the sorted, disjoint ranges.
-static bool OverlapsSortedRanges(const GpuMemoryGuestRanges& ranges, uint64_t vaddr, uint64_t size)
-{
-	const uint64_t end   = vaddr + size;
-	const auto     after = std::lower_bound(ranges.begin(), ranges.end(), end,
-	                                        [](const std::pair<uint64_t, uint64_t>& range, uint64_t value) { return range.first < value; });
-	if (after == ranges.begin())
-	{
-		return false;
-	}
-	const auto& range = *std::prev(after);
-	return range.first + range.second > vaddr;
-}
-
-std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer) const
+std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer) const
 {
 	std::vector<std::pair<int, int>> found;
 	const auto&                      heaps = m_heaps;
@@ -496,7 +482,7 @@ std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(const GpuMemo
 		}
 		for (int block = 0; block < object.block.vaddr_num; block++)
 		{
-			if (object.block.size[block] != 0 && OverlapsSortedRanges(ranges, object.block.vaddr[block], object.block.size[block]))
+			if (object.block.size[block] != 0 && ranges(object.block.vaddr[block], object.block.size[block]))
 			{
 				found.emplace_back(heap_id, object_id);
 				break;
@@ -525,7 +511,7 @@ bool GpuMemory::StorageIsWholeGuestContent(const Object& object)
 	       !tracker.ChangedSince(vaddr, size, info.dirty_generation[0]) && !LabelRangeHasFence(vaddr, size);
 }
 
-bool GpuMemory::PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer,
+bool GpuMemory::PendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
                                         std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
@@ -580,7 +566,7 @@ bool GpuMemory::PendingStorageHasAliases()
 	return false;
 }
 
-void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer)
+void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer)
 {
 	EXIT_IF(ctx == nullptr);
 	Core::LockGuard    backing_lock(m_backing_mutation_mutex);

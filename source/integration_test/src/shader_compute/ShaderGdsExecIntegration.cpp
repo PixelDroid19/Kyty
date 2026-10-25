@@ -36,6 +36,8 @@ constexpr uint32_t     kVcmpxEqU32Opcode = 0xd2u;
 constexpr uint32_t     kVcmpxLeU32Opcode = 0xd3u;
 constexpr uint32_t     kAppendOpcode     = 0x3eu;
 constexpr uint32_t     kConsumeOpcode    = 0x3du;
+constexpr uint32_t     kVlshlrevB32Opcode = 0x1au;
+constexpr uint32_t     kUnwrittenWord     = 0xa5a5a5a5u;
 
 enum class ProbeResult
 {
@@ -111,7 +113,39 @@ std::array<uint32_t, 8> MakeShaderWords(uint32_t opcode, uint32_t comparison_opc
 	};
 }
 
-bool BuildShader(uint32_t opcode, uint32_t comparison_opcode, uint32_t comparison_value, ShaderComputeInputInfo* input,
+bool Assemble(const std::string& source, Kyty::Vector<uint32_t>* binary, std::string* error)
+{
+	Kyty::Core::String8 assembly(source.c_str());
+	Kyty::Core::String8 toolchain_error;
+	if (!Run(assembly, binary, &toolchain_error) || binary->IsEmpty())
+	{
+		*error = toolchain_error.IsEmpty() ? "shader toolchain returned an empty module" : toolchain_error.c_str();
+		return false;
+	}
+	error->clear();
+	return true;
+}
+
+// ISA 10.5: M0 = {base[31:16], size[15:0]} in bytes. Each active lane stores its
+// index at M0.base + lane * 4 + 4; ADDR + offset at or past size is discarded.
+std::array<uint32_t, 10> MakeGdsWriteWords(uint32_t m0, uint32_t comparison_opcode, uint32_t comparison_value)
+{
+	return {
+	    Sop1Move(14u, 14u),                                           // s_mov_b32 s14, s14: materialize the bound GDS pointer SGPR.
+	    Sop1Move(124u, 255u), m0,                                     // s_mov_b32 m0, literal
+	    Vop1Move(2u, 128u + comparison_value),                        // v_mov_b32 v2, inline integer
+	    0x7c000000u | (comparison_opcode << 17u) | (2u << 9u) | 256u, // v_cmpx_u32 vcc, v0, v2
+	    Vop1Move(1u, 256u),                                           // v_mov_b32 v1, v0
+	    (kVlshlrevB32Opcode << 25u) | (128u + 2u),                    // v_lshlrev_b32 v0, 2, v0
+	    0xd8360004u,                                                  // ds_write_b32 v0, v1 offset:4 gds
+	    1u << 8u,
+	    0xbf810000u, // s_endpgm
+	};
+}
+
+// A GDS write fixture is observed in the GDS buffer itself; append/consume
+// fixtures also store their returned reservation (v2) per lane.
+bool BuildShader(const uint32_t* words, uint32_t bytes, bool gds_write, ShaderComputeInputInfo* input,
                  const Kyty::Libs::Graphics::ShaderComputeWaveDispatchPlan& plan, Kyty::Vector<uint32_t>* binary, std::string* error)
 {
 	if (input == nullptr || binary == nullptr || error == nullptr)
@@ -122,10 +156,9 @@ bool BuildShader(uint32_t opcode, uint32_t comparison_opcode, uint32_t compariso
 		}
 		return false;
 	}
-	auto       words = MakeShaderWords(opcode, comparison_opcode, comparison_value);
 	ShaderCode code;
 	code.SetType(Kyty::Libs::Graphics::ShaderType::Compute);
-	if (!Kyty::Libs::Graphics::ShaderTryParseBounded(words.data(), static_cast<uint32_t>(sizeof(words)), &code))
+	if (!Kyty::Libs::Graphics::ShaderTryParseBounded(words, bytes, &code))
 	{
 		*error = "bounded parser rejected GDS EXEC fixture";
 		return false;
@@ -146,6 +179,7 @@ bool BuildShader(uint32_t opcode, uint32_t comparison_opcode, uint32_t compariso
 	}
 	input->bind.gds_pointers.pointers_num      = 1;
 	input->bind.gds_pointers.start_register[0] = 14;
+	input->bind.gds_pointers.memory_used       = gds_write;
 	Kyty::Libs::Graphics::ShaderCalcBindingIndices(&input->bind);
 	if (input->bind.gds_pointers.binding_index != 0 || input->bind.push_constant_size != 16u)
 	{
@@ -155,6 +189,10 @@ bool BuildShader(uint32_t opcode, uint32_t comparison_opcode, uint32_t compariso
 
 	const auto        generated = Kyty::Libs::Graphics::SpirvGenerateSource(code, nullptr, nullptr, input);
 	std::string       source(generated.GetDataConst(), generated.Size());
+	if (gds_write)
+	{
+		return Assemble(source, binary, error);
+	}
 	const std::string main_anchor = "%main       = OpFunction %void None %function_void";
 	const auto        main_start  = source.find(main_anchor);
 	const auto        main_return = main_start == std::string::npos ? std::string::npos : source.find("OpReturn", main_start);
@@ -164,25 +202,19 @@ bool BuildShader(uint32_t opcode, uint32_t comparison_opcode, uint32_t compariso
 		return false;
 	}
 	std::string observation;
-	if (plan.wave_layout.strategy == Kyty::Libs::Graphics::ShaderComputeWaveStrategy::Paired64On32)
+	if (plan.wave_layout.strategy == Kyty::Libs::Graphics::ShaderComputeWaveStrategy::Split64On32)
 	{
+		// One invocation per guest lane; the prolog's logical index is wave * 64 + guest lane.
 		observation = "%gds_probe_group_ptr = OpAccessChain %_ptr_Input_uint %gl_WorkGroupID %uint_0\n"
 		              "%gds_probe_group = OpLoad %uint %gds_probe_group_ptr\n"
 		              "%gds_probe_group_base_half = OpIMul %uint %gds_probe_group %uint_32\n"
-		              "%gds_probe_group_base = OpIMul %uint %gds_probe_group_base_half %uint_2\n"
-		              "%gds_probe_float_low = OpLoad %float %v2_low\n"
-		              "%gds_probe_value_low = OpBitcast %uint %gds_probe_float_low\n"
-		              "%gds_probe_index_low_base = OpIAdd %uint %gds_probe_group_base %wave_lane_id\n"
-		              "%gds_probe_index_low = OpIAdd %uint %gds_probe_index_low_base %uint_1\n"
-		              "%gds_probe_ptr_low = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %gds_probe_index_low\n"
-		              "OpStore %gds_probe_ptr_low %gds_probe_value_low\n"
-		              "%gds_probe_float_high = OpLoad %float %v2_high\n"
-		              "%gds_probe_value_high = OpBitcast %uint %gds_probe_float_high\n"
-		              "%gds_probe_lane_high = OpIAdd %uint %wave_lane_id %uint_32\n"
-		              "%gds_probe_index_high_base = OpIAdd %uint %gds_probe_group_base %gds_probe_lane_high\n"
-		              "%gds_probe_index_high = OpIAdd %uint %gds_probe_index_high_base %uint_1\n"
-		              "%gds_probe_ptr_high = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %gds_probe_index_high\n"
-		              "OpStore %gds_probe_ptr_high %gds_probe_value_high\n";
+		              "%gds_probe_group_base = OpIAdd %uint %gds_probe_group_base_half %gds_probe_group_base_half\n"
+		              "%gds_probe_float = OpLoad %float %v2\n"
+		              "%gds_probe_value = OpBitcast %uint %gds_probe_float\n"
+		              "%gds_probe_index_base = OpIAdd %uint %gds_probe_group_base %native_wave_logical_index\n"
+		              "%gds_probe_index = OpIAdd %uint %gds_probe_index_base %uint_1\n"
+		              "%gds_probe_ptr = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %gds_probe_index\n"
+		              "OpStore %gds_probe_ptr %gds_probe_value\n";
 	} else
 	{
 		observation = "%gds_probe_group_ptr = OpAccessChain %_ptr_Input_uint %gl_WorkGroupID %uint_0\n"
@@ -198,15 +230,7 @@ bool BuildShader(uint32_t opcode, uint32_t comparison_opcode, uint32_t compariso
 		              "OpStore %gds_probe_ptr %gds_probe_value\n";
 	}
 	source.insert(main_return, observation);
-	Kyty::Core::String8 assembly(source.c_str());
-	Kyty::Core::String8 toolchain_error;
-	if (!Run(assembly, binary, &toolchain_error) || binary->IsEmpty())
-	{
-		*error = toolchain_error.IsEmpty() ? "shader toolchain returned an empty module" : toolchain_error.c_str();
-		return false;
-	}
-	error->clear();
-	return true;
+	return Assemble(source, binary, error);
 }
 
 bool CheckVk(VkResult result, const char* operation, std::string* error)
@@ -854,10 +878,11 @@ void RunCase(uint32_t opcode, uint32_t comparison_opcode, uint32_t comparison_va
 	{
 		Fail(std::string(name) + ": fixture expected counter does not match the active-lane delta");
 	}
+	const auto             words = MakeShaderWords(opcode, comparison_opcode, comparison_value);
 	ShaderComputeInputInfo input {};
 	Kyty::Vector<uint32_t> spirv;
 	std::string            error;
-	if (!BuildShader(opcode, comparison_opcode, comparison_value, &input, plan, &spirv, &error))
+	if (!BuildShader(words.data(), static_cast<uint32_t>(sizeof(words)), false, &input, plan, &spirv, &error))
 	{
 		Fail(std::string(name) + ": " + error);
 	}
@@ -944,6 +969,52 @@ void RunCase(uint32_t opcode, uint32_t comparison_opcode, uint32_t comparison_va
 	std::printf("%s PASS\n", name);
 }
 
+void RunGdsWriteCase(uint32_t m0, uint32_t comparison_opcode, uint32_t comparison_value, uint32_t lane_count,
+                     const Kyty::Libs::Graphics::ShaderComputeWaveDispatchPlan& plan, const char* name, GdsExecVulkanProbe* vulkan)
+{
+	const auto             words = MakeGdsWriteWords(m0, comparison_opcode, comparison_value);
+	ShaderComputeInputInfo input {};
+	Kyty::Vector<uint32_t> spirv;
+	std::string            error;
+	if (!BuildShader(words.data(), static_cast<uint32_t>(sizeof(words)), true, &input, plan, &spirv, &error))
+	{
+		Fail(std::string(name) + ": " + error);
+	}
+	std::array<uint32_t, kBufferWords> initial {};
+	initial.fill(kUnwrittenWord);
+	auto           expected = initial;
+	const uint32_t base     = m0 >> 16u;
+	const uint32_t size     = m0 & 0xffffu;
+	for (uint32_t lane = 0; lane < lane_count; ++lane)
+	{
+		const uint32_t relative = lane * 4u + 4u;
+		const uint32_t byte     = base + relative;
+		if (!IsActiveLane(lane, comparison_opcode, comparison_value) || relative >= size || byte % 4u != 0u)
+		{
+			continue;
+		}
+		if (byte / 4u >= kBufferWords)
+		{
+			Fail(std::string(name) + ": fixture writes past the probe buffer");
+		}
+		expected[byte / 4u] = lane;
+	}
+	std::array<uint32_t, kBufferWords> actual {};
+	if (vulkan->Dispatch(spirv, input, 1u, initial, &actual, &error) != ProbeResult::Success)
+	{
+		Fail(std::string(name) + ": Vulkan dispatch failed: " + error);
+	}
+	for (uint32_t word = 0; word < kBufferWords; ++word)
+	{
+		if (actual[word] != expected[word])
+		{
+			Fail(std::string(name) + ": GDS word " + std::to_string(word) + " expected " + std::to_string(expected[word]) + ", got " +
+			     std::to_string(actual[word]));
+		}
+	}
+	std::printf("%s PASS\n", name);
+}
+
 } // namespace
 
 int main()
@@ -970,6 +1041,12 @@ int main()
 	RunCase(kConsumeOpcode, kVcmpxEqU32Opcode, 32u, 41u, 41u, 32u, 1u, vulkan.WavePlan(), "EmptyExecConsume", &vulkan);
 	RunCase(kConsumeOpcode, kVcmpxEqU32Opcode, 1u, 41u, 40u, 32u, 1u, vulkan.WavePlan(), "SingleLaneConsume", &vulkan);
 	RunCase(kConsumeOpcode, kVcmpxLeU32Opcode, 1u, 41u, 39u, 32u, 1u, vulkan.WavePlan(), "TwoLaneConsume", &vulkan);
+	// Lanes 27-31 reach M0.size and are dropped; a misaligned base drops every lane.
+	// No case drops exactly one lane: Mesa 26.2.5 RADV folds that bound into
+	// s_bitset0_b32 on EXEC and loses the narrowed EXEC.
+	RunGdsWriteCase((8u << 16u) | 0x70u, kVcmpxLeU32Opcode, 31u, 32u, vulkan.WavePlan(), "GdsWriteBaseOffsetAndSize", &vulkan);
+	RunGdsWriteCase(0x100u, kVcmpxEqU32Opcode, 5u, 32u, vulkan.WavePlan(), "GdsWriteSingleLane", &vulkan);
+	RunGdsWriteCase((2u << 16u) | 0x100u, kVcmpxLeU32Opcode, 31u, 32u, vulkan.WavePlan(), "GdsWriteMisalignedBaseDrops", &vulkan);
 	if (const auto* native_multi_plan = vulkan.NativeMultiWavePlan(); native_multi_plan != nullptr)
 	{
 		// Each workgroup reserves two lanes from one shared GDS counter. Result
@@ -993,18 +1070,20 @@ int main()
 		RunCase(kConsumeOpcode, kVcmpxEqU32Opcode, 64u, 41u, 41u, 64u, 1u, *paired_plan, "PairedEmptyExecConsume", &vulkan);
 		RunCase(kConsumeOpcode, kVcmpxEqU32Opcode, 33u, 41u, 40u, 64u, 1u, *paired_plan, "PairedSingleHighLaneConsume", &vulkan);
 		RunCase(kConsumeOpcode, kVcmpxLeU32Opcode, 1u, 41u, 39u, 64u, 1u, *paired_plan, "PairedTwoLaneConsume", &vulkan);
+		RunGdsWriteCase((8u << 16u) | 0xf0u, kVcmpxLeU32Opcode, 64u, 64u, *paired_plan, "SplitGdsWriteBaseOffsetAndSize", &vulkan);
+		RunGdsWriteCase(0x200u, kVcmpxEqU32Opcode, 33u, 64u, *paired_plan, "SplitGdsWriteSingleHighLane", &vulkan);
 		if (const auto* paired_multi_plan = vulkan.PairedMultiWavePlan(); paired_multi_plan != nullptr)
 		{
 			RunCase(kAppendOpcode, kVcmpxLeU32Opcode, 1u, 41u, 45u, 64u, 2u, *paired_multi_plan, "PairedTwoWorkgroupAppend", &vulkan);
 			RunCase(kConsumeOpcode, kVcmpxLeU32Opcode, 1u, 41u, 37u, 64u, 2u, *paired_multi_plan, "PairedTwoWorkgroupConsume", &vulkan);
 		} else
 		{
-			std::fprintf(stderr, "Paired64On32 multi-workgroup GDS EXEC fixture unavailable: preflight reason=%u\n",
+			std::fprintf(stderr, "Split64On32 multi-workgroup GDS EXEC fixture unavailable: preflight reason=%u\n",
 			             static_cast<unsigned>(vulkan.PairedMultiWavePreflightReason()));
 		}
 	} else
 	{
-		std::fprintf(stderr, "Paired64On32 GDS EXEC fixture unavailable: preflight reason=%u\n",
+		std::fprintf(stderr, "Split64On32 GDS EXEC fixture unavailable: preflight reason=%u\n",
 		             static_cast<unsigned>(vulkan.PairedWavePreflightReason()));
 	}
 	return 0;

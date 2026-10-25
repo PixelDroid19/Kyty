@@ -435,9 +435,30 @@ struct FakeProtection
 		return !static_cast<FakeProtection*>(context)->fail_release;
 	}
 
+	static bool HostGrantsWrite(void* context, uintptr_t address, size_t size) noexcept
+	{
+		auto*        self  = static_cast<FakeProtection*>(context);
+		const size_t first = (address - self->base) / self->page_size;
+		for (size_t page = 0; page < size / self->page_size; page++)
+		{
+			if ((static_cast<uint32_t>(self->current_modes[first + page]) & static_cast<uint32_t>(Mode::Write)) == 0u)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
 	[[nodiscard]] GpuDirtyPageProtectionOps Ops() noexcept
 	{
 		return {this, &RemoveWriteAndCapture, &RemoveWrite, &Restore, &RestoreSignalSafe, &ReleaseLeases};
+	}
+
+	[[nodiscard]] GpuDirtyPageProtectionOps OpsWithHostQuery() noexcept
+	{
+		auto ops                          = Ops();
+		ops.host_grants_write_signal_safe = &HostGrantsWrite;
+		return ops;
 	}
 };
 
@@ -621,6 +642,31 @@ TEST(EmulatorGraphicsDirtyTracking, RearmSplitsRunsAtOriginalPermissionBoundarie
 	EXPECT_EQ(protection.calls[2].mode, Mode::Read);
 	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
 	EXPECT_EQ(protection.calls.size(), 3u);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
+TEST(EmulatorGraphicsDirtyTracking, RearmRevisitsOnlyBlocksWithWrittenPages)
+{
+	constexpr uint64_t kPages = 130;
+	Mapping            mapping(kPages);
+	ASSERT_NE(mapping.address, 0u);
+	FakeProtection      protection {mapping.address, GetPageSize(), std::vector<Mode>(kPages, Mode::ReadWrite)};
+	GpuDirtyPageTracker tracker(protection.Ops());
+	protection.tracker = &tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	const uintptr_t written = mapping.address + 100u * GetPageSize();
+	ASSERT_TRUE(tracker.HandleWriteFault(written));
+	protection.calls.clear();
+
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	ASSERT_EQ(protection.calls.size(), 1u);
+	EXPECT_EQ(protection.calls[0].address, written);
+	EXPECT_EQ(protection.calls[0].size, GetPageSize());
+	EXPECT_EQ(protection.calls[0].mode, Mode::Read);
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	EXPECT_EQ(protection.calls.size(), 1u);
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
@@ -1088,6 +1134,37 @@ TEST(EmulatorGraphicsDirtyTracking, UnregisterRetainsLateWritableFaultEvidence)
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
+// With a host write query, a restored page keeps no identity: a write that
+// faulted before the restore runs again because the host grants it, and once
+// the guest denies the write the fault is the guest's.
+TEST(EmulatorGraphicsDirtyTracking, RestoredRetiredPageAnswersLateFaultsFromHostProtection)
+{
+	Mapping mapping(2);
+	ASSERT_NE(mapping.address, 0u);
+	FakeProtection      protection {mapping.address, GetPageSize(), std::vector<Mode>(2, Mode::ReadWrite)};
+	GpuDirtyPageTracker tracker(protection.OpsWithHostQuery());
+	protection.tracker = &tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+
+	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address));
+	EXPECT_EQ(protection.signal_safe_calls, 0u);
+	protection.current_modes[1] = Mode::Read;
+	EXPECT_FALSE(tracker.HandleWriteFault(mapping.address + GetPageSize()));
+
+	// A failed restore keeps the identity, whose token still restores the write.
+	protection.current_modes[1] = Mode::ReadWrite;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	protection.fail_next_restore.store(true);
+	EXPECT_FALSE(tracker.UnregisterRange(mapping.address, mapping.size));
+	protection.current_modes[1] = Mode::Read;
+	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address + GetPageSize()));
+	EXPECT_EQ(protection.signal_safe_calls, 1u);
+	EXPECT_EQ(protection.current_modes[1], Mode::ReadWrite);
+}
+
 TEST(EmulatorGraphicsDirtyTracking, ReregisteredRetiredPageRecapturesNativeProtection)
 {
 	Mapping mapping(1);
@@ -1413,6 +1490,48 @@ TEST(EmulatorGraphicsDirtyTracking, NotifyWriteWaitsForConcurrentRetirement)
 	EXPECT_TRUE(notify_result);
 	EXPECT_TRUE(notify_done.load(std::memory_order_acquire));
 	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+}
+
+// A host write over armed pages changes protection once per run of
+// consecutive pages with the same guest protection, and records the write on
+// every page; a later rearm protects them again.
+TEST(EmulatorGraphicsDirtyTracking, HostWriteRestoresEachArmedRunOnce)
+{
+	Mapping mapping(5);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page_size = GetPageSize();
+	FakeProtection      protection(mapping.address, page_size,
+	                               {Mode::ReadWrite, Mode::ReadWrite, Mode::ReadWrite, Mode::ExecuteReadWrite, Mode::ReadWrite});
+	GpuDirtyPageTracker tracker(protection.Ops());
+	// One range per page, so each page keeps its own write evidence.
+	for (uint64_t page = 0; page < 5u; page++)
+	{
+		ASSERT_TRUE(tracker.RegisterRange(mapping.address + page * page_size, page_size));
+	}
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	std::vector<uint64_t> snapshots;
+	for (uint64_t page = 0; page < 5u; page++)
+	{
+		snapshots.push_back(tracker.SnapshotGeneration(mapping.address + page * page_size, page_size));
+	}
+	const uint32_t restores = protection.signal_safe_calls;
+
+	ASSERT_TRUE(tracker.NotifyWrite(mapping.address, 4u * page_size));
+	EXPECT_EQ(protection.signal_safe_calls, restores + 2u);
+	for (uint64_t page = 0; page < 4u; page++)
+	{
+		EXPECT_EQ(protection.current_modes[page], protection.original_modes[page]) << "page " << page;
+		EXPECT_TRUE(tracker.ChangedSince(mapping.address + page * page_size, page_size, snapshots[page])) << "page " << page;
+	}
+	EXPECT_EQ(protection.current_modes[4], Mode::Read);
+	EXPECT_FALSE(tracker.ChangedSince(mapping.address + 4u * page_size, page_size, snapshots[4]));
+
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	for (uint64_t page = 0; page < 5u; page++)
+	{
+		EXPECT_EQ(static_cast<uint32_t>(protection.current_modes[page]) & static_cast<uint32_t>(Mode::Write), 0u) << "page " << page;
+		EXPECT_TRUE(tracker.UnregisterRange(mapping.address + page * page_size, page_size)) << "page " << page;
+	}
 }
 
 // Range admission is bounded by page metadata, not by a fixed range count.

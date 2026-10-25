@@ -117,6 +117,32 @@ TEST(EmulatorVulkanQueueIdentity, PrefersCommonFamilyWithMoreNativeQueueIndices)
 	EXPECT_EQ(selected.index, 0u);
 }
 
+TEST(EmulatorVulkanQueueIdentity, SelectsComputeOnlyFamilyWithMostQueues)
+{
+	const VulkanQueueFamilyCapabilities families[] = {
+	    {1, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, true},
+	    {1, VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, false},
+	    {0, VK_QUEUE_COMPUTE_BIT, false},
+	    {4, VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, false},
+	    {2, VK_QUEUE_TRANSFER_BIT, false},
+	};
+	uint32_t family = UINT32_MAX;
+
+	EXPECT_EQ(VulkanSelectComputeOnlyFamily(families, 5, &family), VulkanQueueSelectionResult::Success);
+	EXPECT_EQ(family, 3u);
+}
+
+TEST(EmulatorVulkanQueueIdentity, ReportsMissingComputeOnlyFamily)
+{
+	const VulkanQueueFamilyCapabilities families[] = {
+	    {1, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT, true},
+	    {2, VK_QUEUE_TRANSFER_BIT, false},
+	};
+	uint32_t family = UINT32_MAX;
+
+	EXPECT_EQ(VulkanSelectComputeOnlyFamily(families, 2, &family), VulkanQueueSelectionResult::NoComputeOnlyFamily);
+}
+
 TEST(EmulatorVulkanQueueIdentity, SharesQueueRolesWhenTheFamilyHasOneQueue)
 {
 	VulkanQueueRoleAllocation allocation;

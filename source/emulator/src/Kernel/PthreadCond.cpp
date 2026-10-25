@@ -7,12 +7,10 @@
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Log.h"
-#include "Emulator/PresentationStats.h"
 
 #include "PthreadInternal.h"
 
 #include <atomic>
-#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
@@ -24,8 +22,7 @@ namespace Kyty::Kernel {
 
 KERNEL_LIB_NAME();
 
-namespace PresentationStats = Kyty::Emulator::PresentationStats;
-namespace GuestRuntimePort  = ::Kyty::Emulator::GuestRuntimePort;
+namespace GuestRuntimePort = ::Kyty::Emulator::GuestRuntimePort;
 
 int KYTY_SYSV_ABI PthreadCondattrDestroy(PthreadCondattr* attr)
 {
@@ -36,16 +33,9 @@ int KYTY_SYSV_ABI PthreadCondattrDestroy(PthreadCondattr* attr)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_condattr_destroy(&(*attr)->p);
-
 	delete *attr;
 	*attr = nullptr;
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondattrInit(PthreadCondattr* attr)
@@ -58,21 +48,7 @@ int KYTY_SYSV_ABI PthreadCondattrInit(PthreadCondattr* attr)
 	}
 
 	*attr = new PthreadCondattrPrivate {};
-
-	int result = pthread_condattr_init(&(*attr)->p);
-
-	switch (result)
-	{
-		case 0: return OK;
-		case ENOMEM:
-			delete *attr;
-			*attr = nullptr;
-			return KERNEL_ERROR_ENOMEM;
-		default:
-			delete *attr;
-			*attr = nullptr;
-			return KERNEL_ERROR_EINVAL;
-	}
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondattrSetclock(PthreadCondattr* attr, KernelClockid clock_id)
@@ -84,36 +60,20 @@ int KYTY_SYSV_ABI PthreadCondattrSetclock(PthreadCondattr* attr, KernelClockid c
 		return KERNEL_ERROR_EINVAL;
 	}
 
+	// Timed waits read the clock themselves, so every guest clock works.
 	KernelClockSource source {};
 	if (!KernelClockSourceFromId(clock_id, &source))
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
-	const clockid_t host_clock = source == KernelClockSource::Realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC;
-	if (pthread_condattr_setclock(&(*attr)->p, host_clock) != 0)
-	{
-		return KERNEL_ERROR_EINVAL;
-	}
-#else
-	// Platforms without pthread_condattr_setclock can only represent the
-	// default realtime contract; reject a different guest clock explicitly.
-	if (source != KernelClockSource::Realtime)
-	{
-		return KERNEL_ERROR_EINVAL;
-	}
-#endif
-
 	(*attr)->clock_id = clock_id;
 	return OK;
 }
 
-// Soft-lock diagnostic: identify which guest condition/mutex a blocked wait
-// uses, and whether Signal/Broadcast ever reaches it.
-// Opt-in via KYTY_SLOT_TRACE=1; only after present>=2200 for event spam, but
-// blocked-waiter slots are always recorded under the env so Flip-idle can dump
-// a waiter that entered CondWait before the present cliff.
+// Blocked-waiter record read by the sync-waits agent command: identify which
+// guest condition/mutex a blocked wait uses, and whether Signal/Broadcast ever
+// reaches it. Opt-in via KYTY_SLOT_TRACE=1.
 struct SlotTraceBlockedWaiter
 {
 	std::atomic<uint64_t> cond {0};
@@ -129,15 +89,12 @@ static SlotTraceBlockedWaiter g_slot_trace_waiters[kSlotTraceWaiterSlots];
 static std::atomic<uint64_t>  g_slot_trace_tracked_cond {0};
 static std::atomic<uint32_t>  g_slot_trace_sig_for_tracked {0};
 static std::atomic<uint32_t>  g_slot_trace_wait_for_tracked {0};
-static std::atomic<uint32_t>  g_slot_trace_sig_after_stall {0};
-static std::atomic<uint64_t>  g_slot_trace_stall_present {0};
 
 struct SlotTraceSigCount
 {
 	std::atomic<uint64_t> cond {0};
 	std::atomic<uint64_t> last_return_addr {0};
 	std::atomic<uint32_t> count {0};
-	std::atomic<uint32_t> after_stall {0};
 };
 static constexpr uint32_t kSlotTraceSigSlots = 16;
 static SlotTraceSigCount  g_slot_trace_sigs[kSlotTraceSigSlots];
@@ -153,7 +110,6 @@ static void slot_trace_note_signal(uint64_t cond_addr, uint64_t return_addr)
 	{
 		return;
 	}
-	const bool after_stall = g_slot_trace_stall_present.load() != 0;
 	for (uint32_t i = 0; i < kSlotTraceSigSlots; i++)
 	{
 		uint64_t cur = g_slot_trace_sigs[i].cond.load();
@@ -161,17 +117,9 @@ static void slot_trace_note_signal(uint64_t cond_addr, uint64_t return_addr)
 		{
 			g_slot_trace_sigs[i].last_return_addr.store(return_addr, std::memory_order_relaxed);
 			g_slot_trace_sigs[i].count.fetch_add(1);
-			if (after_stall)
-			{
-				g_slot_trace_sigs[i].after_stall.fetch_add(1);
-			}
 			if (cond_addr == g_slot_trace_tracked_cond.load())
 			{
 				g_slot_trace_sig_for_tracked.fetch_add(1);
-				if (after_stall)
-				{
-					g_slot_trace_sig_after_stall.fetch_add(1);
-				}
 			}
 			return;
 		}
@@ -182,44 +130,14 @@ static void slot_trace_note_signal(uint64_t cond_addr, uint64_t return_addr)
 			{
 				g_slot_trace_sigs[i].last_return_addr.store(return_addr, std::memory_order_relaxed);
 				g_slot_trace_sigs[i].count.fetch_add(1);
-				if (after_stall)
-				{
-					g_slot_trace_sigs[i].after_stall.fetch_add(1);
-				}
 				if (cond_addr == g_slot_trace_tracked_cond.load())
 				{
 					g_slot_trace_sig_for_tracked.fetch_add(1);
-					if (after_stall)
-					{
-						g_slot_trace_sig_after_stall.fetch_add(1);
-					}
 				}
 				return;
 			}
 		}
 	}
-}
-
-static bool slot_trace_cond_active(PresentationStats::Snapshot* stats_out)
-{
-	if (!slot_trace_env())
-	{
-		return false;
-	}
-	PresentationStats::Snapshot stats {};
-	if (!PresentationStats::GetPort().Query(&stats) || stats.present < 2200ull)
-	{
-		return false;
-	}
-	if (stats_out != nullptr)
-	{
-		*stats_out = stats;
-	}
-	if (g_slot_trace_stall_present.load() == 0 && stats.ms_since_present >= 2000ull)
-	{
-		g_slot_trace_stall_present.store(stats.present);
-	}
-	return true;
 }
 
 static int slot_trace_register_waiter(uint64_t cond, uint64_t mutex, uint64_t ret, uint64_t cond_h, uint64_t mutex_h)
@@ -238,9 +156,7 @@ static int slot_trace_register_waiter(uint64_t cond, uint64_t mutex, uint64_t re
 			g_slot_trace_waiters[i].ret.store(ret);
 			g_slot_trace_waiters[i].cond_h.store(cond_h);
 			g_slot_trace_waiters[i].mutex_h.store(mutex_h);
-			// Prefer the soft-lock worker return range around 0x90173da75.
-			const bool prefer = (ret >= 0x90173d000ull && ret < 0x90173e000ull);
-			if (prefer || g_slot_trace_tracked_cond.load() == 0)
+			if (g_slot_trace_tracked_cond.load() == 0)
 			{
 				if (cond != 0)
 				{
@@ -357,98 +273,22 @@ bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out)
 	return true;
 }
 
-void SlotTraceDumpBlockedCondWaiters()
+// Wakes one waiter, or all of them, that started waiting before this call.
+static void signal_cond_state(PthreadCondState* state, bool all)
 {
-	if (!slot_trace_env())
+	if (state->waiters.load() == 0)
 	{
 		return;
 	}
-	KYTY_LOG_DEBUG("COND_BLOCKED tracked=0x%016" PRIx64 " wait_reg=%u sig_total_trk=%u sig_after_stall=%u\n",
-	               g_slot_trace_tracked_cond.load(), g_slot_trace_wait_for_tracked.load(), g_slot_trace_sig_for_tracked.load(),
-	               g_slot_trace_sig_after_stall.load());
-	for (uint32_t i = 0; i < kSlotTraceWaiterSlots; i++)
+	Core::LockGuard lock(state->lock);
+	state->generation++;
+	if (all)
 	{
-		if (g_slot_trace_waiters[i].live.load() == 0)
-		{
-			continue;
-		}
-		KYTY_LOG_DEBUG("COND_BLOCKED[%u] cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64 " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64
-		               " ret=0x%016" PRIx64 "\n",
-		               i, g_slot_trace_waiters[i].cond.load(), g_slot_trace_waiters[i].cond_h.load(), g_slot_trace_waiters[i].mutex.load(),
-		               g_slot_trace_waiters[i].mutex_h.load(), g_slot_trace_waiters[i].ret.load());
-	}
-	for (uint32_t i = 0; i < kSlotTraceSigSlots; i++)
-	{
-		const uint64_t c = g_slot_trace_sigs[i].cond.load();
-		if (c == 0)
-		{
-			continue;
-		}
-		KYTY_LOG_DEBUG("COND_SIGCNT cond=0x%016" PRIx64 " total=%u after_stall=%u last_ret=0x%016" PRIx64 "\n", c,
-		               g_slot_trace_sigs[i].count.load(), g_slot_trace_sigs[i].after_stall.load(),
-		               g_slot_trace_sigs[i].last_return_addr.load(std::memory_order_relaxed));
-	}
-}
-
-static void slot_trace_cond_event(const char* kind, PthreadCond* guest_cond, PthreadMutex* guest_mutex, uint64_t ret)
-{
-	PresentationStats::Snapshot stats {};
-	if (!slot_trace_cond_active(&stats))
-	{
-		return;
-	}
-
-	const uint64_t cond_addr  = reinterpret_cast<uint64_t>(guest_cond);
-	const uint64_t mutex_addr = reinterpret_cast<uint64_t>(guest_mutex);
-	uint64_t       cond_h     = 0;
-	uint64_t       mutex_h    = 0;
-	if (guest_cond != nullptr)
-	{
-		cond_h = *reinterpret_cast<const volatile uint64_t*>(guest_cond);
-	}
-	if (guest_mutex != nullptr)
-	{
-		mutex_h = *reinterpret_cast<const volatile uint64_t*>(guest_mutex);
-	}
-
-	static std::atomic<uint32_t> wait_n {0};
-	static std::atomic<uint32_t> sig_n {0};
-	static std::atomic<uint32_t> bcast_n {0};
-
-	const uint64_t tracked = g_slot_trace_tracked_cond.load();
-	uint32_t       seq     = 0;
-	if (kind[0] == 'W')
-	{
-		seq = wait_n.fetch_add(1);
-		if (tracked == 0 && cond_addr != 0)
-		{
-			g_slot_trace_tracked_cond.store(cond_addr);
-		}
-		if (seq >= 16u && (seq % 8u) != 0u && cond_addr != tracked)
-		{
-			return;
-		}
-	} else if (kind[0] == 'S')
-	{
-		seq = sig_n.fetch_add(1);
-		if (seq >= 32u && (seq % 16u) != 0u && cond_addr != tracked)
-		{
-			return;
-		}
+		state->cv.SignalAll();
 	} else
 	{
-		seq = bcast_n.fetch_add(1);
-		if (seq >= 16u && (seq % 8u) != 0u && cond_addr != tracked)
-		{
-			return;
-		}
+		state->cv.Signal();
 	}
-
-	KYTY_LOG_DEBUG("COND_TRACE %s n=%u present=%llu ms_p=%llu ret=0x%016" PRIx64 " cond=0x%016" PRIx64 " cond_h=0x%016" PRIx64
-	               " mutex=0x%016" PRIx64 " mutex_h=0x%016" PRIx64 " tracked=0x%016" PRIx64 " sig_trk=%u sig_stall=%u\n",
-	               kind, seq, static_cast<unsigned long long>(stats.present), static_cast<unsigned long long>(stats.ms_since_present), ret,
-	               cond_addr, cond_h, mutex_addr, mutex_h, g_slot_trace_tracked_cond.load(), g_slot_trace_sig_for_tracked.load(),
-	               g_slot_trace_sig_after_stall.load());
 }
 
 int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
@@ -463,7 +303,6 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 
 	const auto ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
 	slot_trace_note_signal(reinterpret_cast<uint64_t>(cond), ret_addr);
-	slot_trace_cond_event("BCAST", cond, nullptr, ret_addr);
 
 	cond = static_cast<PthreadCond*>(pthread_static_objects->CreateObject(cond, PthreadStaticObject::Type::Cond));
 
@@ -474,18 +313,13 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 
 	if (*cond == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_cond_broadcast(&(*cond)->p);
+	signal_cond_state((*cond)->state.get(), true);
 
-	KYTY_LOG_DEBUG("\tcond broadcast: %s, %d\n", (*cond)->name.C_Str(), result);
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	KYTY_LOG_DEBUG("\tcond broadcast: %s\n", (*cond)->name.C_Str());
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondDestroy(PthreadCond* cond)
@@ -502,20 +336,12 @@ int KYTY_SYSV_ABI PthreadCondDestroy(PthreadCond* cond)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_cond_destroy(&(*cond)->p);
+	KYTY_LOG_DEBUG("\tcond destroy: %s\n", (*cond)->name.C_Str());
 
-	KYTY_LOG_DEBUG("\tcond destroy: %s, %d\n", (*cond)->name.C_Str(), result);
-
-	switch (result)
-	{
-		case 0:
-			delete *cond;
-			*cond = nullptr;
-			return OK;
-		case EINVAL: return KERNEL_ERROR_EINVAL;
-		case EBUSY: return KERNEL_ERROR_EBUSY;
-		default: return KERNEL_ERROR_EINVAL;
-	}
+	// Woken waiters still leaving keep their own reference to the state.
+	delete *cond;
+	*cond = nullptr;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr, const char* name)
@@ -539,19 +365,9 @@ int KYTY_SYSV_ABI PthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr
 	created->name     = name;
 	created->clock_id = (*attr)->clock_id;
 
-	int result = pthread_cond_init(&created->p, &(*attr)->p);
-
-	KYTY_LOG_DEBUG("\tcond init: %s, %d\n", created->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\tcond init: %s\n", created->name.C_Str());
 	__atomic_store_n(cond, created, __ATOMIC_RELEASE);
-
-	switch (result)
-	{
-		case 0: return OK;
-		case EAGAIN: return KERNEL_ERROR_EAGAIN;
-		case EINVAL: return KERNEL_ERROR_EINVAL;
-		case ENOMEM: return KERNEL_ERROR_ENOMEM;
-		default: return KERNEL_ERROR_EINVAL;
-	}
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
@@ -560,17 +376,11 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 
 	if (cond == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
-	}
-
-	if (cond == nullptr)
-	{
 		return KERNEL_ERROR_EINVAL;
 	}
 
 	const auto ret_addr = reinterpret_cast<uint64_t>(__builtin_return_address(0));
 	slot_trace_note_signal(reinterpret_cast<uint64_t>(cond), ret_addr);
-	slot_trace_cond_event("SIGNAL", cond, nullptr, ret_addr);
 
 	// Lazily initialize a statically-initialized cond (sentinel), like the other paths.
 	auto* pthread_static_objects = g_pthread_context->GetPthreadStaticObjects();
@@ -579,18 +389,11 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 
 	if (*cond == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_cond_signal(&(*cond)->p);
-
-	// KYTY_LOG_DEBUG("\tcond signal: %s, %d\n", (*cond)->name.C_Str(), result);
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	signal_cond_state((*cond)->state.get(), false);
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread)
@@ -668,26 +471,66 @@ static int resolve_cond_wait(PthreadCond* cond, PthreadMutex* mutex, ResolvedCon
 	return OK;
 }
 
-static int wait_on_resolved_cond(const ResolvedCondWait& resolved, const timespec& deadline)
+// Microseconds until the deadline on the condition's clock, rounded up so a
+// wait never ends early; 0 once it has passed. A far deadline takes several
+// sleeps.
+static uint32_t micros_until(KernelClockid clock_id, const timespec& deadline)
+{
+	constexpr int64_t kLongestSleepSeconds = UINT32_MAX / 1000000;
+
+	KernelTimespec now {};
+	EXIT_IF(KernelClockGettime(clock_id, &now) != OK);
+	const int64_t seconds = static_cast<int64_t>(deadline.tv_sec) - now.tv_sec;
+	if (seconds >= kLongestSleepSeconds)
+	{
+		return UINT32_MAX;
+	}
+	const int64_t nanos = seconds * 1000000000 + (static_cast<int64_t>(deadline.tv_nsec) - now.tv_nsec);
+	return nanos <= 0 ? 0 : static_cast<uint32_t>((nanos + 999) / 1000);
+}
+
+// Releases the guest mutex, waits for a signal sent after this call started or
+// for the deadline (null waits indefinitely), and takes the mutex again. The
+// state is held by value: the condition may be destroyed once this wait wakes.
+static int wait_for_signal(std::shared_ptr<PthreadCondState> state, KernelClockid clock_id, PthreadMutexPrivate* mutex,
+                           const timespec* deadline)
 {
 	uint32_t recursion_count = 0;
-	int      result          = pthread_cond_release_mutex_state(resolved.mutex, &recursion_count);
-	if (result == 0)
+	if (pthread_cond_release_mutex_state(mutex, &recursion_count) != 0)
 	{
-		result = pthread_cond_timedwait(&resolved.cond->p, &resolved.mutex->p, &deadline);
-		// Condition waits reacquire the native mutex on success and timeout. Other
-		// validation errors leave it unchanged, so guest ownership is restored on every return.
-		pthread_cond_restore_mutex_state(resolved.mutex, recursion_count);
+		return KERNEL_ERROR_EPERM;
 	}
 
-	switch (result)
+	int result = OK;
+	state->lock.Lock();
+	const uint64_t generation = state->generation;
+	state->waiters.fetch_add(1);
+	EXIT_IF(pthread_mutex_unlock(&mutex->p) != 0);
+	while (state->generation == generation)
 	{
-		case 0: return OK;
-		case ETIMEDOUT: return KERNEL_ERROR_ETIMEDOUT;
-		case EPERM: return KERNEL_ERROR_EPERM;
-		case EINVAL:
-		default: return KERNEL_ERROR_EINVAL;
+		if (deadline == nullptr)
+		{
+			PthreadInterruptibleWait(&state->cv, &state->lock);
+			continue;
+		}
+		const uint32_t micros = micros_until(clock_id, *deadline);
+		if (micros == 0)
+		{
+			result = KERNEL_ERROR_ETIMEDOUT;
+			break;
+		}
+		(void)PthreadInterruptibleWaitFor(&state->cv, &state->lock, micros);
 	}
+	state->waiters.fetch_sub(1);
+	state->lock.Unlock();
+
+	{
+		// Another guest thread, possibly a stopped one, may hold the mutex.
+		PthreadInterruptibleScope lock_wait(&mutex->p, sizeof(mutex->p));
+		EXIT_IF(pthread_mutex_lock(&mutex->p) != 0);
+	}
+	pthread_cond_restore_mutex_state(mutex, recursion_count);
+	return result;
 }
 
 int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, KernelUseconds usec)
@@ -708,7 +551,7 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, K
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	return wait_on_resolved_cond(resolved, deadline);
+	return wait_for_signal(resolved.cond->state, resolved.cond->clock_id, resolved.mutex, &deadline);
 }
 
 int KYTY_SYSV_ABI PthreadCondTimedwaitAbsolute(PthreadCond* cond, PthreadMutex* mutex, const KernelTimespec* abstime)
@@ -729,7 +572,7 @@ int KYTY_SYSV_ABI PthreadCondTimedwaitAbsolute(PthreadCond* cond, PthreadMutex* 
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	return wait_on_resolved_cond(resolved, deadline);
+	return wait_for_signal(resolved.cond->state, resolved.cond->clock_id, resolved.mutex, &deadline);
 }
 
 namespace {
@@ -810,13 +653,9 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (*cond == nullptr)
+	if (*cond == nullptr || *mutex == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
-	}
-	if (*mutex == nullptr)
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
 	// Peek handles only after CreateObject resolved static sentinels, and only
@@ -828,30 +667,13 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 	{
 		cond_h  = *reinterpret_cast<const volatile uint64_t*>(cond);
 		mutex_h = *reinterpret_cast<const volatile uint64_t*>(mutex);
-		slot_trace_cond_event("WAIT", cond, mutex, ret_addr);
 		waiter_slot = slot_trace_register_waiter(cond_addr, mutex_addr, ret_addr, cond_h, mutex_h);
 	}
 
-	auto*    private_mutex   = *mutex;
-	uint32_t recursion_count = 0;
-	int      result          = pthread_cond_release_mutex_state(private_mutex, &recursion_count);
-	if (result == 0)
-	{
-		result = pthread_cond_wait(&(*cond)->p, &private_mutex->p);
-		pthread_cond_restore_mutex_state(private_mutex, recursion_count);
-	}
+	const int result = wait_for_signal((*cond)->state, (*cond)->clock_id, *mutex, nullptr);
 
 	slot_trace_unregister_waiter(waiter_slot);
-
-	// KYTY_LOG_DEBUG("\tcond wait: %s, %d\n", (*cond)->name.C_Str(), result);
-
-	switch (result)
-	{
-		case 0: return OK;
-		case EPERM: return KERNEL_ERROR_EPERM;
-		case EINVAL:
-		default: return KERNEL_ERROR_EINVAL;
-	}
+	return result;
 }
 
 } // namespace Kyty::Kernel

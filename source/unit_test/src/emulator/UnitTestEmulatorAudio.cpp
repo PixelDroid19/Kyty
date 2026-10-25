@@ -8665,6 +8665,46 @@ TEST(EmulatorAudio, StandardSamplerDefersCallbacksUntilSystemUnlock)
 	EXPECT_EQ(g_sampler_callbacks[0].user_data, 0x11u);
 }
 
+TEST(EmulatorAudio, StandardSamplerDefersCallbacksWhileAnotherSystemIsLocked)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig locked;
+	SamplerRig rendered;
+	ASSERT_TRUE(CreateSamplerRig(&locked));
+	ASSERT_TRUE(CreateSamplerRig(&rendered));
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 2);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* pcm = static_cast<int16_t*>(pcm_storage.Data());
+	pcm[0]    = 1000;
+	pcm[1]    = 2000;
+	SamplerBlock block {};
+	block.data_size   = sizeof(int16_t) * 2;
+	block.num_samples = 2;
+	block.user_data   = 0x11;
+	ASSERT_EQ(SetSamplerFormat(rendered.voice, kWaveformPcmI16, 1, 48000), 0);
+	ASSERT_EQ(AddSamplerBlock(rendered.voice, pcm_storage.Data(), kBlocksFlagReset, block), 0);
+	ASSERT_EQ(SetSamplerCallbackHandler(rendered.voice, reinterpret_cast<uintptr_t>(&SamplerRecordCallback), kCallbackFlagEnd), 0);
+	ASSERT_EQ(RunSamplerEvent(rendered.voice, kSamplerPlayEvent), 0);
+
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+
+	ScopedHostRuntime runtime;
+	g_sampler_callback_count = 0;
+	// A callback run under a held lock could wait for another thread's callback of its system, which may wait for that lock.
+	ASSERT_EQ(Ngs2::Ngs2SystemLock(locked.system), 0);
+	ASSERT_EQ(RenderSamplerGrain(rendered.system, output_storage.Data()), 0);
+	EXPECT_EQ(g_sampler_callback_count, 0u);
+	ASSERT_EQ(Ngs2::Ngs2SystemUnlock(locked.system), 0);
+	ASSERT_EQ(g_sampler_callback_count, 1u);
+	EXPECT_EQ(g_sampler_callbacks[0].user_data, 0x11u);
+}
+
 namespace {
 
 using SteadyClock = std::chrono::steady_clock;

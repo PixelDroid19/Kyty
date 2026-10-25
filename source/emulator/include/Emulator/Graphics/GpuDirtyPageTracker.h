@@ -81,6 +81,9 @@ struct GpuDirtyPageProtectionOps
 	// Ends every lease of the authority (see VirtualMemory::ReleaseWriteLeases). Optional for
 	// operations that never lease through the VM.
 	bool (*release_leases)(void* context, const Core::VirtualMemory::WriteLeaseAuthority* authority) noexcept = nullptr;
+	// Signal-safe: whether the host lets this process write the whole range now. Optional: without it a
+	// retired page keeps its identity for late faults.
+	bool (*host_grants_write_signal_safe)(void* context, uintptr_t address, size_t size) noexcept = nullptr;
 };
 
 // Bounded dirty-page metadata. Registration and protection changes happen on
@@ -114,9 +117,10 @@ public:
 
 	// Called by the exception handler for a write fault. It is async-signal-safe
 	// and never waits: while a fence is held it reports the fault handled without
-	// any change, so the access is executed again. It returns false for
-	// untracked/unarmed addresses and for pages whose guest protection denies
-	// the write.
+	// any change, so the access is executed again. A write that faulted before
+	// its page was restored finds the page writable and is executed again too.
+	// It returns false for other untracked/unarmed addresses and for pages
+	// whose guest protection denies the write.
 	[[nodiscard]] bool HandleWriteFault(uintptr_t address) noexcept;
 	// Access-classified entry from the exception boundary. Write-only tracking
 	// never claims a read or execute fault; Unknown is treated as a write and is
@@ -182,11 +186,11 @@ private:
 		uint64_t             registered_epoch = 0;
 		mutable EdgeEvidence head {};
 		mutable EdgeEvidence tail {};
-		// Block change total read before a rearm found every page armed. A page
-		// leaves Armed only through a write, fallback or authority change that
-		// advances its block, so an equal total proves the range still armed.
-		uint64_t armed_block_changes = 0;
-		bool     armed_proven        = false;
+		// Per block the range spans: the block's change count read before a
+		// rearm found every page of the range in it armed, or kUnprovenBlock. A
+		// page leaves Armed only through a write, fallback or authority change
+		// that advances its block, so an equal count proves those pages armed.
+		std::vector<uint64_t> armed_blocks;
 	};
 	using RangeKey = std::pair<uintptr_t, uintptr_t>;
 
@@ -198,17 +202,19 @@ private:
 		Denied
 	};
 
-	// Fixed, bounded page metadata with 1,048,576 slots. Active and retired
-	// identities share a 524,288-page admission budget; a title's render
-	// targets alone can hold more than 800 MiB, and a refused range loses its
-	// write proof. Tombstones retain probe history; the normal-write hint
-	// bounds conclusive missing-page lookups.
-	// Each range has the same page bound (2 GiB on a 4 KiB host).
-	static constexpr size_t kPageTableSize = 1u << 20u;
+	// Fixed, bounded page metadata with 2,097,152 slots. Active and retired
+	// identities share a 1,048,576-page admission budget; a title's render
+	// targets alone can hold more than 800 MiB, a title can keep more than
+	// 2 GiB of tracked ranges live, and a refused range loses its write proof
+	// (every use then hashes it whole). Tombstones retain probe history; the
+	// normal-write hint bounds conclusive missing-page lookups.
+	// Each range has the same page bound (4 GiB on a 4 KiB host).
+	static constexpr size_t kPageTableSize = 1u << 21u;
 	static constexpr size_t kMaxPages      = kPageTableSize / 2u;
 	// Summaries of kBlockPages consecutive pages answer queries over fully
 	// covered blocks; edge pages are always checked individually.
 	static constexpr size_t   kBlockPages     = 64u;
+	static constexpr uint64_t kUnprovenBlock  = ~uint64_t {0};
 	static constexpr size_t   kBlockTableSize = 1u << 17u;
 	static constexpr uint32_t kNoBlock        = UINT32_MAX;
 	// The high bit reserves the gate for a page/block identity writer after the
@@ -242,7 +248,6 @@ private:
 	[[nodiscard]] const BlockEntry* FindBlock(uintptr_t page) const noexcept;
 	[[nodiscard]] uint32_t          FindOrCreateBlock(uintptr_t page) noexcept;
 	[[nodiscard]] BlockEntry*       BlockOf(const PageEntry* page) noexcept;
-	[[nodiscard]] bool              BlockChangesOf(uintptr_t first, uintptr_t last, uint64_t* changes) const noexcept;
 	[[nodiscard]] RangeEvidence     SegmentEvidence(uintptr_t first_index, uintptr_t last_index) const noexcept;
 	[[nodiscard]] RangeEvidence     RangeEvidenceOf(const RangeKey& range, const RangeRecord& record) const noexcept;
 	[[nodiscard]] bool              RangeIsFallback(const RangeKey& range, const RangeRecord& record) const noexcept;
@@ -266,6 +271,8 @@ private:
 	[[nodiscard]] RestoreResult     RestoreFromAuthority(PageEntry* entry, uintptr_t page) noexcept;
 	[[nodiscard]] bool              FaultMayBeTracked(const PageEntry* entry, uintptr_t page_address) const noexcept;
 	[[nodiscard]] bool              HandleWriteFaultEntered(uintptr_t page_address) noexcept;
+	[[nodiscard]] bool               HandleTrackedWriteFault(uintptr_t page_address) noexcept;
+	[[nodiscard]] bool               HostGrantsWrite(uintptr_t page) const noexcept;
 	[[nodiscard]] bool              NotifyPageWriteEntered(PageEntry* entry, uintptr_t page_address, bool* handled) noexcept;
 	void                            PublishAuthorityChange(const Core::VirtualMemory::WriteLeaseChange& change) noexcept;
 	static void AuthorityBeginChange(void* context, uint64_t address, uint64_t size) noexcept;
@@ -273,6 +280,16 @@ private:
 	                            Core::VirtualMemory::WriteLeaseDecision decision, void* decision_context) noexcept;
 	static void AuthorityEndChange(void* context, const Core::VirtualMemory::WriteLeaseChange& change) noexcept;
 	template <typename Visitor> void VisitWritePages(uintptr_t first, uintptr_t last, const Visitor& visitor) noexcept;
+	// Consecutive pages a host writer claimed from Armed under one restore token.
+	struct WriteRun
+	{
+		uintptr_t first = 0;
+		uintptr_t last  = 0;
+		uint32_t  token = 0;
+		bool      open  = false;
+	};
+	[[nodiscard]] bool              ClaimArmedPageForWrite(PageEntry* entry, uintptr_t page, uint32_t* token) noexcept;
+	void                            RestoreWriteRun(const WriteRun& run) noexcept;
 	[[nodiscard]] bool              NotifyPageWrite(PageEntry* entry, uintptr_t page_address) noexcept;
 	[[nodiscard]] bool              NotifyWritePages(uintptr_t first, uintptr_t last) noexcept;
 	[[nodiscard]] bool              HasHostWriteLocked(uintptr_t first, uintptr_t last) const noexcept;
@@ -295,6 +312,9 @@ private:
 	std::unique_ptr<PageEntry[]>  m_pages;
 	std::unique_ptr<BlockEntry[]> m_blocks;
 	std::map<RangeKey, RangeRecord> m_ranges;
+	// Rearm scratch: each block's change count read before its pages are
+	// visited, kUnprovenBlock once one of them was not found armed.
+	std::vector<uint64_t> m_rearm_block_changes;
 	// Counts every keyed identity, including retained late-fault evidence.
 	// Read and changed only under m_registration_mutex.
 	size_t                        m_page_identity_count = 0;

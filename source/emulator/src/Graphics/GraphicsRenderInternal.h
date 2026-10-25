@@ -420,7 +420,10 @@ private:
 		VulkanBufferDescriptorKey vsharp_uniform_buffer_key                = {};
 		GpuSubmissionHighWater uses;
 		bool                   untracked_use = false;
-		uint64_t               last_use      = 0;
+		// Neighbours in the use order of the sets a trim may release, oldest first.
+		int  lru_older = -1;
+		int  lru_newer = -1;
+		bool in_lru    = false;
 		// Each referenced resource with this set's position in that resource's
 		// reverse-index list, so unindexing removes the set in constant time.
 		std::vector<ResourceSlot> resources;
@@ -435,6 +438,7 @@ private:
 
 	VkDescriptorSetLayout GetOrCreateLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                  CreatePool();
+	const VulkanBuffer*   WriteMaskSink(GraphicContext* gctx);
 
 	static uint32_t CalcHash(const Set& s);
 	static void     CollectResourceIds(const Set& s, std::vector<uint64_t>* ids);
@@ -455,6 +459,8 @@ private:
 	VulkanDescriptorSet* UnindexSet(int index);
 	void                 ReleaseSet(int index);
 	void                 RecordSetUse(int index, CommandBuffer* buffer);
+	void                 LruUnlink(int index);
+	void                 LruAppend(int index);
 	void                 TrimSets();
 	void                 FreeOldestRecycled();
 	template <typename References>
@@ -466,7 +472,8 @@ private:
 	int          m_first_free_set  = -1;
 	int          m_first_free_pool = -1;
 	uint32_t     m_live_sets       = 0;
-	uint64_t     m_use_clock       = 0;
+	int          m_lru_oldest      = -1;
+	int          m_lru_newest      = -1;
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
 	// Live sets by the unique id of each image or buffer they reference.
@@ -481,6 +488,8 @@ private:
 	using RecycledOrder = std::list<VulkanDescriptorSet*>;
 	RecycledOrder                                                               m_recycled_order;
 	std::unordered_map<VkDescriptorSetLayout, std::deque<RecycledOrder::iterator>> m_recycled_sets;
+	// Write-mask target of storage slots whose buffer is not written back.
+	VulkanBuffer m_write_mask_sink;
 };
 
 class SamplerCache
@@ -874,8 +883,9 @@ struct RenderColorAttachmentInfo
 	RenderColorType       type                    = RenderColorType::NoColorOutput;
 	VulkanImage*          vulkan_buffer           = nullptr;
 	uint64_t              base_addr               = 0;
-	// DCC metadata base of a single-level, single-slice target; zero otherwise.
+	// DCC and CMASK metadata bases of a single-level, single-slice target; zero otherwise.
 	uint64_t              dcc_addr                = 0;
+	uint64_t              cmask_addr              = 0;
 	bool                  dcc_alpha_on_msb        = false;
 	uint32_t              bytes_per_element       = 0;
 	bool                  cmask_fast_clear_enable = false;
@@ -1657,6 +1667,9 @@ struct PrimitiveDrawPlan
 extern RenderContext*           g_render_ctx;
 extern thread_local CommandPool g_command_pool;
 
+// Destroys the snapshots of a command pool whose command buffers have all been freed.
+void TransientSnapshotPoolDestroy(GraphicContext* ctx, VulkanCommandPool* pool);
+
 // Test-only context ownership seam. It binds a caller-owned GraphicContext to
 // the private renderer globals and unbinds it only after all thread-local
 // command-pool resources have been destroyed. Do not use from runtime paths.
@@ -1685,6 +1698,12 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, VulkanImage* image);
 void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, VulkanImage* image);
 void GraphicsRenderStorageImageBarrier(CommandBuffer* buffer, VulkanImage* image);
+// The array that a sampled view of depth layers [0, layers) starting at `first` (guest address addr) reads: each layer
+// holds the depth of the slice image at addr + layer * slice_size, copied when that slice changed since its last copy,
+// or, when no slice image is there, the guest bytes of that layer (texture format fmt, pitch in elements), which only
+// a plain_guest_depth view (64 KiB tiled, one level, no MSAA, no metadata) may read.
+VulkanImage* GraphicsRenderDepthSliceArray(CommandBuffer* buffer, DepthStencilVulkanImage* first, uint64_t addr, uint64_t slice_size,
+                                           uint32_t layers, uint32_t fmt, uint32_t pitch, bool plain_guest_depth);
 
 // --- Core (color / dump) ---
 
@@ -1728,6 +1747,10 @@ struct ComputeUniformBufferFill
 };
 [[nodiscard]] bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x, uint32_t group_y,
                                                    uint32_t group_z, ComputeUniformBufferFill* fill);
+// Records a fill of one repeated word as a transfer fill of the exact storage
+// object, with every page flagged written, in place of the dispatch. Returns
+// false, recording nothing, when the dispatch must execute.
+[[nodiscard]] bool RecordComputeUniformFillTransfer(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 // Copies the filled storage object into the guest device-address view in queue
 // order, so later device-address consumers on this queue need no CPU write-back.
 [[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
@@ -1748,9 +1771,9 @@ void               InvalidateComputeColorFills(const ShaderBindResources& bind);
 // A pass that samples its depth attachment cannot CLEAR it, so a first use of the
 // image there receives the first-use clear contents before the pass begins.
 void InitializeReadOnlyDepthFirstUse(CommandBuffer* buffer, const RenderDepthInfo& depth);
-// A proven uniform fill of a DCC metadata range with a clear key is held until
-// a render target or shader image with that metadata base consumes it.
-[[nodiscard]] bool PublishComputeColorDccClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// A proven uniform fill of a DCC or CMASK metadata range with a clear key is
+// held until a render target or shader image with that metadata base consumes it.
+[[nodiscard]] bool PublishComputeColorMetaClear(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 
 // A color image bound to a shader, read or written, whose T# enables DCC.
 struct ColorDccImage
@@ -1783,6 +1806,7 @@ void InvalidateMemoryObject(const RenderColorInfo& r);
 void InvalidateMemoryObject(const RenderDepthInfo& r);
 bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw);
 bool GraphicsRenderColorDecompress(CommandBuffer* buffer, const HW::Context& hw);
+bool                 GraphicsRenderColorEliminateFastClear(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw);
 RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffer* buffer, const RenderColorInfo& color,
                                                              const RenderDepthInfo& depth);
 RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color, const RenderDepthInfo& depth,

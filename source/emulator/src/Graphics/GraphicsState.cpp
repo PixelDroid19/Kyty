@@ -134,17 +134,16 @@ DepthStencilUsage ResolveDepthStencilUsage(const HW::DepthRenderTarget& target, 
 StencilPlaneValidation ValidateStencilPlane(const HW::DepthRenderTarget& target, const HW::RenderControl& render_control,
                                             const HW::DepthControl& depth_control)
 {
-	const bool decompress  = target.z_info.tile_surface_enable && render_control.stencil_compress_disable;
-	const bool plane_declared = target.stencil_info.format != 0 || target.stencil_read_base_addr != 0 ||
-	                            target.stencil_write_base_addr != 0;
-	const bool sample_selection = render_control.copy_centroid || render_control.copy_sample != 0;
-	// Render-control metadata operates on an existing depth/stencil target. It
-	// does not declare a stencil plane when the guest supplied neither format nor
-	// base address.
-	if (!plane_declared)
+	// STENCIL_INVALID declares no stencil surface: the depth block neither tests
+	// nor writes stencil, whatever the enables and base addresses say. Host
+	// drivers rely on this when they leave the test enabled without a stencil
+	// buffer.
+	if (target.stencil_info.format == 0)
 	{
-		return depth_control.stencil_enable ? StencilPlaneValidation::MissingReadBase : StencilPlaneValidation::Inactive;
+		return StencilPlaneValidation::Inactive;
 	}
+	const bool decompress       = target.z_info.tile_surface_enable && render_control.stencil_compress_disable;
+	const bool sample_selection = render_control.copy_centroid || render_control.copy_sample != 0;
 	const bool needs_read  = depth_control.stencil_enable || decompress || render_control.resummarize_enable ||
 	                         render_control.stencil_copy || sample_selection;
 	const bool needs_write = render_control.stencil_clear_enable ||
@@ -210,6 +209,14 @@ DepthTargetExtent ResolveDepthTargetExtent(const HW::DepthRenderTarget& target, 
 
 ViewportXy ResolveViewportXy(float xscale, float xoffset, float yscale, float yoffset)
 {
+	// A zero scale maps every vertex onto one screen line, so no triangle covers
+	// a sample. Vulkan requires a positive width; a 1x1 viewport wholly above and
+	// left of the framebuffer gives the same empty coverage.
+	if (xscale == 0.0f || yscale == 0.0f)
+	{
+		return {-1.0f, -1.0f, 1.0f, 1.0f};
+	}
+
 	ViewportXy xy {};
 	xy.x      = xoffset - xscale;
 	xy.y      = yoffset - yscale;

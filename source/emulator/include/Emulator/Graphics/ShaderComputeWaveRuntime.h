@@ -50,11 +50,11 @@ struct ShaderComputeWaveDispatchPlan
 	uint32_t                group_count[3] {};
 	ShaderComputeWaveLayout wave_layout {};
 	// Wave64 only: a one-lane-per-invocation layout over the original guest
-	// workgroup that passed native resource limits. It may replace the paired
+	// workgroup that passed native resource limits. It may replace the split
 	// layout only after the program itself is proven wave-width independent.
 	bool                    native_equivalent_valid = false;
 	ShaderComputeWaveLayout native_equivalent_layout {};
-	// No paired layout exists; wave_layout is the per-lane route and
+	// No split layout exists; wave_layout is the per-lane route and
 	// admission must prove the program before it runs.
 	bool native_equivalence_required = false;
 	// USE_THREAD_DIMENSIONS: lanes with a global ID past these are inactive.

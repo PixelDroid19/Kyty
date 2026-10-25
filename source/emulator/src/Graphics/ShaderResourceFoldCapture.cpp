@@ -1429,6 +1429,7 @@ void PutDynamicAndAssembled(CanonicalText& out, const ShaderBindResources& bind)
 		out.Put(p + "resource_field_offset", record.resource_field_offset);
 		out.Put(p + "last_consumer_pc", record.last_consumer_pc);
 		out.Put(p + "raw_vmem_oob_guarded", record.raw_vmem_oob_guarded);
+		out.Put(p + "guest_load", record.guest_load);
 	}
 	out.Put("bind.assembled_descriptors.count", bind.assembled_descriptors.Size());
 	index = 0;

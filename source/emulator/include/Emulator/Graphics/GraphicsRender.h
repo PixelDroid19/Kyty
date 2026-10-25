@@ -31,6 +31,7 @@ class CommandBuffer;
 class CommandProcessor;
 class PipelineCache;
 class TransientBufferPool;
+struct TransientSnapshotLeases;
 class DiagnosticDumpWriter;
 struct ShaderNativeWaveInfo;
 struct ShaderProgramSnapshot;
@@ -661,6 +662,8 @@ public:
 		m_has_submission = true;
 	}
 	[[nodiscard]] int GetQueueIndex() const { return m_queue; }
+	// False on a compute-only queue family: no graphics commands or stages.
+	[[nodiscard]] bool SupportsGraphics() const;
 	// Queue timeline the GPU signals with value when this execution completes;
 	// false for an execution without a submission identity.
 	[[nodiscard]] bool GetTimeline(VkDevice* device, VkSemaphore* semaphore, uint64_t* value) const;
@@ -692,11 +695,13 @@ public:
 	// One zero dword shared by every empty descriptor of this recording.
 	VulkanBuffer* UploadTransientZeroCarrier(uint32_t usage);
 	// Captures guest bytes [vaddr + read_begin, vaddr + size) at the same offsets of a buffer of size bytes.
-	// zero_tail keeps the bytes past size zero for consumers that can read beyond it.
+	// zero_tail keeps the bytes past size zero for consumers that can read beyond it. The buffer is shared with the
+	// other recordings of this command pool that capture the same unchanged bytes and stays immutable until this one
+	// is reset.
 	VulkanBuffer* CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint64_t read_begin, uint32_t usage, bool zero_tail,
 	                                             uint64_t* validation_ns, uint64_t* upload_ns, uint64_t* compare_ns, bool* reused);
-	// Reads at most 16 bytes from the immutable guest snapshot already uploaded for this command buffer.
-	// This never rereads guest memory; the buffer must still belong to the current recording.
+	// Reads at most 16 bytes from the immutable guest snapshot this recording already bound.
+	// This never rereads guest memory; the buffer must come from the current recording.
 	[[nodiscard]] bool ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
 	                                               uint64_t size, void* dst) const;
 	// Reusable scratch for commands recorded in this buffer. Callers must order
@@ -708,6 +713,9 @@ public:
 	// Device-local intermediate written and read only by GPU commands of this recording (for example a
 	// geometry pass output), with its own budget. The same ordering and lifetime rules apply.
 	VulkanBuffer* AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage);
+	// Host-visible copy of data that only this recording reads, destroyed when the buffer next begins. For uploads
+	// too large for the transient pools' budget.
+	VulkanBuffer* UploadRecordingBuffer(const void* data, uint64_t size, uint32_t usage);
 	// A dispatch binds a storage view of a depth plane through the depth image's colour copy of it
 	// (DepthStencilVulkanImage::storage_plane); the copy returns to the depth plane once the dispatch is recorded.
 	void DeferDepthPlaneStoreBack(DepthStencilVulkanImage* depth);
@@ -726,6 +734,7 @@ private:
 	[[nodiscard]] bool AttachPipelineLease(VulkanPipeline* pipeline, bool* added);
 	void               MarkCommandBufferResetting();
 	void               ReleasePipelineLeases();
+	void               DestroyRecordingUploads();
 
 	VulkanCommandPool* m_pool    = nullptr;
 	uint32_t           m_index   = static_cast<uint32_t>(-1);
@@ -739,6 +748,8 @@ private:
 	TransientBufferPool* m_transient_scratch_buffers = nullptr;
 	TransientBufferPool* m_transient_copy_buffers    = nullptr;
 	TransientBufferPool* m_transient_device_buffers  = nullptr;
+	TransientSnapshotLeases*   m_snapshot_leases           = nullptr;
+	std::vector<VulkanBuffer*> m_recording_uploads;
 
 	mutable std::mutex           m_pipeline_lease_mutex;
 	std::vector<VulkanPipeline*> m_pipeline_leases;

@@ -413,6 +413,8 @@ KeyboardAction HostInput::ClassifyKeyboardAction(int key_code)
 		case SDLK_RIGHT: return KeyboardAction::Right;
 		case SDLK_Q: return KeyboardAction::L1;
 		case SDLK_E: return KeyboardAction::R1;
+		case SDLK_1: return KeyboardAction::L2;
+		case SDLK_3: return KeyboardAction::R2;
 		case SDLK_TAB:
 		case SDLK_BACKSPACE: return KeyboardAction::Options;
 		default: return KeyboardAction::None;

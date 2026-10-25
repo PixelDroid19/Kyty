@@ -2,6 +2,8 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Kernel/Pthread.h"
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -50,7 +52,7 @@ void VideoOutMaterializationGate::WaitUntilIdle()
 	Core::LockGuard lock(m_mutex);
 	while (m_active_pins != 0)
 	{
-		m_idle_cond_var.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_idle_cond_var, &m_mutex);
 	}
 }
 

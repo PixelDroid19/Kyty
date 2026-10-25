@@ -428,14 +428,6 @@ TEST(EmulatorGraphicsPackets, IdentifiesDefaultIndirectRegisterPlaceholders)
 	EXPECT_FALSE(GraphicsIsDefaultIndirectRegisterPair(0x88f5e915u, Pm4::PA_SC_FOV_WINDOW_LR));
 }
 
-TEST(EmulatorGraphicsPackets, AcceptsObservedFullTargetBarrierInvalidations)
-{
-	EXPECT_TRUE(GraphicsAgcFullTargetBarrierGcrSupported(0x280u));
-	EXPECT_TRUE(GraphicsAgcFullTargetBarrierGcrSupported(0x300u));
-	EXPECT_TRUE(GraphicsAgcFullTargetBarrierGcrSupported(0x8280u));
-	EXPECT_FALSE(GraphicsAgcFullTargetBarrierGcrSupported(0u));
-}
-
 TEST(EmulatorGraphicsPackets, DisablesMissingOrInvalidWaitDiagnosticDeadlines)
 {
 	EXPECT_EQ(ParseSuspendedWaitTimeoutMs(nullptr), 0u);
@@ -1625,8 +1617,9 @@ TEST(EmulatorGraphicsPackets, NestedSelectionAtSharedJoinMergesOnItsOwnScJoinLin
 	auto              outer     = make_branch(0x04, ShaderInstructionType::SCbranchExecz, 0x18); // -> 0x20
 	auto              inner     = make_branch(0x0c, ShaderInstructionType::SCbranchScc0, 0x08);  // -> 0x18
 	auto              else_exit = make_branch(0x14, ShaderInstructionType::SBranch, 0x08);       // -> 0x20
+	// The join is not S_ENDPGM: a branch onto S_ENDPGM is an early return, not a join.
 	ShaderInstruction end;
-	end.pc     = 0x20;
+	end.pc     = 0x24;
 	end.type   = ShaderInstructionType::SEndpgm;
 	end.format = ShaderInstructionFormat::Empty;
 
@@ -1638,6 +1631,7 @@ TEST(EmulatorGraphicsPackets, NestedSelectionAtSharedJoinMergesOnItsOwnScJoinLin
 	code.GetInstructions().Add(else_exit);
 	code.GetInstructions().Add(make_nop(0x18));
 	code.GetInstructions().Add(make_nop(0x1c));
+	code.GetInstructions().Add(make_nop(0x20));
 	code.GetInstructions().Add(end);
 	code.GetLabels().Add(ShaderLabel(outer));
 	code.GetLabels().Add(ShaderLabel(inner));
@@ -3619,7 +3613,37 @@ TEST(EmulatorGraphicsPackets, Sw64kRx8bppWithinBlockIsBijective)
 	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_block_w, 8), 8u);
 	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block_w, 8), 0x10u);
 	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block_w, 8), 0x18u);
-	EXPECT_EQ(TileGetSw64kRxOffset(0, 64, k_block_w, 8), 65536u);
+	// The second block row starts at 64 KiB and folds y6 into bit 11 (x5^y6).
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 64, k_block_w, 8), 65536u + 0x800u);
+}
+
+// 16 BPE follows the published 16-pipe pattern over a 64x64 block; x6 and y6,
+// above the block, fold into bits 10 and 11.
+TEST(EmulatorGraphicsPackets, Sw64kRx16bppFollowsPublishedPattern)
+{
+	constexpr uint32_t k_block = 64u;
+	bool               seen[4096] {};
+	uint32_t           unique = 0;
+	for (uint32_t y = 0; y < k_block; y++)
+	{
+		for (uint32_t x = 0; x < k_block; x++)
+		{
+			const uint64_t off = TileGetSw64kRxOffset(x, y, k_block, 16u);
+			ASSERT_LT(off, 65536u);
+			ASSERT_EQ(off % 16u, 0u);
+			ASSERT_FALSE(seen[off / 16u]);
+			seen[off / 16u] = true;
+			unique++;
+		}
+	}
+	EXPECT_EQ(unique, k_block * k_block);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_block, 16u), 0x10u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_block, 16u), 0x20u);
+	EXPECT_EQ(TileGetSw64kRxOffset(4, 0, k_block, 16u), 0x2000u);
+	EXPECT_EQ(TileGetSw64kRxOffset(8, 0, k_block, 16u), 0x100u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 8, k_block, 16u), 0x4100u);
+	EXPECT_EQ(TileGetSw64kRxOffset(64, 0, 2u * k_block, 16u), 65536u + 0x400u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 64, k_block, 16u), 65536u + 0x800u);
 }
 
 // Detile round-trip: tile a gradient with the inverse of the offset function

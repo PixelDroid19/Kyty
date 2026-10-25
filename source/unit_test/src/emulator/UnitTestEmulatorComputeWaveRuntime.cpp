@@ -23,7 +23,7 @@ static ShaderComputeWaveCapabilities Capabilities()
 static ShaderComputeWaveDispatchPlan SentinelPlan()
 {
 	const ShaderComputeWaveLayout layout {
-	    ShaderComputeWaveStrategy::Paired64On32, {11u, 12u, 13u}, {21u, 22u, 23u}, 31u, 32u, 33u, 34u, 35u};
+	    ShaderComputeWaveStrategy::Split64On32, {11u, 12u, 13u}, {21u, 22u, 23u}, 31u, 32u, 33u, 34u, 35u};
 	return {0xdeadbeefu, {7u, 8u, 9u}, layout};
 }
 
@@ -55,16 +55,16 @@ static void ExpectRejected(const ShaderComputeWavePreflightRequest& request, con
 	ExpectUnchanged(plan, before);
 }
 
-TEST(EmulatorComputeWaveRuntime, BuildsPaired64AndNative32LayoutsWithoutChangingNoWorkOutput)
+TEST(EmulatorComputeWaveRuntime, BuildsSplit64AndNative32LayoutsWithoutChangingNoWorkOutput)
 {
-	for (const auto& shape: std::array<std::array<uint32_t, 2>, 2> {{{64u, 32u}, {256u, 128u}}})
+	for (const auto& shape: std::array<std::array<uint32_t, 2>, 2> {{{64u, 64u}, {256u, 256u}}})
 	{
 		auto request          = Request();
 		request.local_size[0] = shape[0];
 		ShaderComputeWaveDispatchPlan plan {};
 		const auto                    result = ShaderBuildComputeWaveDispatchPlan(request, Capabilities(), &plan);
 		ASSERT_EQ(result.status, ShaderComputeWavePreflightStatus::Supported);
-		EXPECT_EQ(plan.wave_layout.strategy, ShaderComputeWaveStrategy::Paired64On32);
+		EXPECT_EQ(plan.wave_layout.strategy, ShaderComputeWaveStrategy::Split64On32);
 		EXPECT_EQ(plan.wave_layout.physical_local[0], shape[1]);
 		EXPECT_EQ(plan.group_count[0], 2u);
 	}
@@ -161,10 +161,10 @@ TEST(EmulatorComputeWaveRuntime, Gen5ThreadDimensionsLaunchCeilGroupsAndKeepTheT
 	EXPECT_EQ(plan.dispatch_mode & 0x20u, 0u);
 }
 
-// Without the paired-lane host features the plan is not refused outright: the
+// Without the split-lane host features the plan is not refused outright: the
 // per-lane route over the original guest workgroup remains, and admission must
 // then prove the program wave-width independent (native_equivalence_required).
-TEST(EmulatorComputeWaveRuntime, MissingPairedCapabilityFallsBackToTheProvenPerLaneRoute)
+TEST(EmulatorComputeWaveRuntime, MissingSplitCapabilityFallsBackToTheProvenPerLaneRoute)
 {
 	auto request                      = Request();
 	auto capabilities                 = Capabilities();
@@ -185,7 +185,7 @@ TEST(EmulatorComputeWaveRuntime, MissingPairedCapabilityFallsBackToTheProvenPerL
 	EXPECT_EQ(plan.group_count[0], 2u);
 }
 
-TEST(EmulatorComputeWaveRuntime, UnverifiedLaneOrderNeedsThePerLaneRouteToSurviveAPairedRejection)
+TEST(EmulatorComputeWaveRuntime, UnverifiedLaneOrderNeedsThePerLaneRouteToSurviveASplitRejection)
 {
 	auto request       = Request();
 	request.lane_order = ShaderGuestLaneOrder::Unverified;
@@ -197,9 +197,9 @@ TEST(EmulatorComputeWaveRuntime, UnverifiedLaneOrderNeedsThePerLaneRouteToSurviv
 	EXPECT_EQ(plan.wave_layout.strategy, ShaderComputeWaveStrategy::Native);
 }
 
-TEST(EmulatorComputeWaveRuntime, RejectsMissingPairedCapabilityAndUnverifiedLaneOrderWhenNoPerLaneRouteExists)
+TEST(EmulatorComputeWaveRuntime, RejectsMissingSplitCapabilityAndUnverifiedLaneOrderWhenNoPerLaneRouteExists)
 {
-	// A local size beyond the host limits leaves neither route, so the paired
+	// A local size beyond the host limits leaves neither route, so the split
 	// rejection reason is what the caller sees.
 	auto capabilities              = Capabilities();
 	capabilities.max_local_size[0] = 32u;

@@ -13,7 +13,7 @@ enum class ShaderGuestLaneOrder
 enum class ShaderComputeWaveStrategy
 {
 	Native,
-	Paired64On32,
+	Split64On32,
 };
 
 enum class ShaderComputeWaveLayoutStatus
@@ -70,8 +70,13 @@ struct ShaderComputeWaveLayout
 // wave may be partial and the padding lanes start with EXEC clear.
 [[nodiscard]] bool ShaderNativeWave32PhysicalLocal(const uint32_t (&guest_local)[3], uint32_t (&physical_local)[3]) noexcept;
 
-[[nodiscard]] ShaderComputeWaveLayoutStatus ShaderBuildPairedComputeWaveLayout(const ShaderComputeWaveRequest&      request,
-                                                                               const ShaderComputeWaveCapabilities& capabilities,
-                                                                               ShaderComputeWaveLayout*             layout);
+// Workgroup dwords each split guest wave reserves to exchange wave-wide values between its two host subgroups.
+constexpr uint32_t kShaderSplitWaveExchangeDwords = 6u;
+
+// Split wave64 runs each guest wave as two whole 32-lane host subgroups (SubgroupId 2w and 2w+1);
+// the workgroup keeps guest lane order, padded to whole guest waves.
+[[nodiscard]] ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComputeWaveRequest&      request,
+                                                                              const ShaderComputeWaveCapabilities& capabilities,
+                                                                              ShaderComputeWaveLayout*             layout);
 
 } // namespace Kyty::Libs::Graphics

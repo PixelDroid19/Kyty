@@ -83,6 +83,11 @@ private:
 	SubsystemPrivate* m_p;
 };
 
+// Ends the process after the active subsystems have shut down. Host atexit
+// handlers and static destructors are skipped, because guest threads may still
+// run; at_quick_exit handlers still run.
+[[noreturn]] void ShutdownActiveAndQuickExit(int code);
+
 } // namespace Kyty::Core
 
 #endif /* INCLUDE_KYTY_CORE_SUBSYSTEMS_H_ */

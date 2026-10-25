@@ -2,6 +2,11 @@
 
 ## Status
 
+**2026-10-22:** the paired compute backend described in this document was
+removed with the paired wave64 layout. Compute Wave64 runs as split Wave64
+(two 32-wide host subgroups, one guest lane per invocation). The paired
+sections below are kept as history.
+
 The current renderer cannot execute a guest fragment wave wider than the
 host subgroup when the program observes values from both halves. The current
 strict compiler stop is a full-mask OR row shift, followed by a cross-row

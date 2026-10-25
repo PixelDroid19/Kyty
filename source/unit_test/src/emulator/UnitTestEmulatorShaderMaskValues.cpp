@@ -102,12 +102,12 @@ public:
 	using Value = std::array<uint32_t, 4>;
 	using Values = std::vector<Value>;
 
-	explicit Wave(uint32_t width, bool paired = false, bool pixel = false): lanes(paired ? 32 : width), paired(paired), pixel(pixel)
+	explicit Wave(uint32_t width, bool pixel = false): lanes(width), pixel(pixel)
 	{
 		input.threads_num[0] = width;
 		input.threads_num[1] = input.threads_num[2] = 1;
-		input.wave_layout = {paired ? ShaderComputeWaveStrategy::Paired64On32 : ShaderComputeWaveStrategy::Native,
-		                     {width, 1, 1}, {lanes, 1, 1}, width, lanes, paired ? 2u : 1u, 1, 0};
+		input.wave_layout = {ShaderComputeWaveStrategy::Native,
+		                     {width, 1, 1}, {lanes, 1, 1}, width, lanes, 1u, 1, 0};
 		ps.required_subgroup_size = width;
 		ps.native_wave.guest_wave_size = width;
 		if (pixel) { spirv.SetPsInputInfo(&ps); } else { spirv.SetCsInputInfo(&input); }
@@ -120,8 +120,6 @@ public:
 		{
 			Set("%s" + std::to_string(r), 0);
 			Set("%v" + std::to_string(r), 99);
-			Set("%v" + std::to_string(r) + "_low", 99);
-			Set("%v" + std::to_string(r) + "_high", 99);
 		}
 		Set("%gl_SubgroupInvocationID", 0);
 		Set("%wave_lane_id", 0);
@@ -134,8 +132,6 @@ public:
 			values["%gl_SubgroupInvocationID"][lane][0] = lane;
 			values["%wave_lane_id"][lane][0] = lane;
 			values["%v0"][lane][0] = lane + 1000;
-			values["%v0_low"][lane][0] = lane + 1000;
-			values["%v0_high"][lane][0] = lane + 1032;
 		}
 		ShaderCode code;
 		code.SetType(pixel ? ShaderType::Pixel : ShaderType::Compute);
@@ -150,7 +146,7 @@ public:
 	{
 		Set("%exec_lo", static_cast<uint32_t>(mask));
 		Set("%exec_hi", static_cast<uint32_t>(mask >> 32u));
-		if (!paired) { Run(spirv.NativeExecRefresh("test").c_str()); }
+		Run(spirv.NativeExecRefresh("test").c_str());
 	}
 
 	String8 Emit(const ShaderInstruction& instruction)
@@ -167,39 +163,7 @@ public:
 		const auto* func = RecompFunc(instruction.type, instruction.format);
 		if (func == nullptr) { Fail("no production emitter"); }
 		String8 source;
-		bool emitted = false;
-		const auto kind = paired ? ShaderClassifyComputeWaveInstruction(instruction) : ShaderComputeWaveInstructionKind::Unsupported;
-		if (paired && kind == ShaderComputeWaveInstructionKind::Unsupported) { Fail("paired admission rejected fixture"); }
-		if (kind == ShaderComputeWaveInstructionKind::WaveCount)
-		{
-			emitted = spirv.EmitComputeWaveMbcnt(instruction, 0, &source);
-		} else if (kind == ShaderComputeWaveInstructionKind::BankedDpp)
-		{
-			emitted = spirv.EmitComputeWaveDppInstruction(instruction, 0, &source);
-		} else if (kind == ShaderComputeWaveInstructionKind::BankedGeneric || kind == ShaderComputeWaveInstructionKind::BankedGenericLds)
-		{
-			emitted = spirv.EmitComputeWaveGenericInstruction(func, instruction, 0, &source);
-			if (emitted && kind == ShaderComputeWaveInstructionKind::BankedGenericLds)
-			{
-				source += "OpControlBarrier %uint_3 %uint_3 %uint_0x00000108\n";
-			}
-		} else if (kind == ShaderComputeWaveInstructionKind::BankedGenericCompare)
-		{
-			emitted = spirv.EmitComputeWaveGenericCompare(func, instruction, 0, &source);
-		} else if (kind == ShaderComputeWaveInstructionKind::BankedAlu)
-		{
-			emitted = spirv.EmitComputeWaveAluInstruction(instruction, 0, &source);
-		} else if (kind == ShaderComputeWaveInstructionKind::BankedCarry)
-		{
-			emitted = spirv.EmitComputeWaveCarryInstruction(instruction, 0, &source);
-		} else if (kind == ShaderComputeWaveInstructionKind::BankedVector || kind == ShaderComputeWaveInstructionKind::WaveLane ||
-		           kind == ShaderComputeWaveInstructionKind::BankedSdwaExtract)
-		{
-			emitted = spirv.EmitComputeWaveLaneInstruction(instruction, 0, &source);
-		} else
-		{
-			emitted = func->func(0, code, &source, &spirv, func->param, func->scc_check);
-		}
+		const bool emitted = func->func(0, code, &source, &spirv, func->param, func->scc_check);
 		if (!emitted) { Fail("production emitter rejected fixture"); }
 		return spirv.ResolveMaskAccesses(instruction, 0, source);
 	}
@@ -315,7 +279,7 @@ public:
 				{
 					const auto mask = Read(t.at(5))[lane];
 					const uint64_t bits = mask[0] | (uint64_t {mask[1]} << 32);
-					// The paired emitter may compute an unused empty-word result;
+					// The emitter may compute an unused empty-word result;
 					// choosing the maximal undefined value catches an unguarded fetch.
 					r[0] = bits == 0 ? UINT32_MAX : First(bits);
 				} else if (op == "OpGroupNonUniformBroadcast" || op == "OpGroupNonUniformShuffle" || op == "OpGroupNonUniformQuadBroadcast")
@@ -335,7 +299,6 @@ public:
 	}
 
 	uint32_t lanes;
-	bool paired;
 	bool pixel;
 	Spirv spirv;
 	ShaderComputeInputInfo input {};
@@ -357,7 +320,7 @@ private:
 	}
 };
 
-bool ValidateCompleteModule(uint32_t width, bool paired, bool pixel)
+bool ValidateCompleteModule(uint32_t width, bool pixel)
 {
 	ShaderCode code;
 	code.SetType(pixel ? ShaderType::Pixel : ShaderType::Compute);
@@ -368,19 +331,16 @@ bool ValidateCompleteModule(uint32_t width, bool paired, bool pixel)
 	                               Reg(ShaderOperandType::VccLo, 0, 2), {Reg(ShaderOperandType::Vgpr, 0), Literal(0)}));
 	code.GetInstructions().Add(Inst(ShaderInstructionType::SWqmB64, ShaderInstructionFormat::Sdst2Ssrc02,
 	                               Reg(ShaderOperandType::ExecLo, 0, 2), {Reg(ShaderOperandType::ExecLo, 0, 2)}));
-	if (!paired)
-	{
-		code.GetInstructions().Add(Move(Reg(ShaderOperandType::Sgpr, 8, 2), Reg(ShaderOperandType::ExecLo, 0, 2)));
-		code.GetInstructions().Add(Inst(ShaderInstructionType::VCmpEqU64, ShaderInstructionFormat::Sdst2Ssrc02Ssrc12,
-		                               Reg(ShaderOperandType::VccLo, 0, 2),
-		                               {Reg(ShaderOperandType::ExecLo, 0, 2), Reg(ShaderOperandType::Sgpr, 8, 2)}));
-	}
+	code.GetInstructions().Add(Move(Reg(ShaderOperandType::Sgpr, 8, 2), Reg(ShaderOperandType::ExecLo, 0, 2)));
+	code.GetInstructions().Add(Inst(ShaderInstructionType::VCmpEqU64, ShaderInstructionFormat::Sdst2Ssrc02Ssrc12,
+	                               Reg(ShaderOperandType::VccLo, 0, 2),
+	                               {Reg(ShaderOperandType::ExecLo, 0, 2), Reg(ShaderOperandType::Sgpr, 8, 2)}));
 	code.GetInstructions().Add(Inst(ShaderInstructionType::SEndpgm, ShaderInstructionFormat::Empty, {}, {}));
 	for (uint32_t i = 0; i < code.GetInstructions().Size(); ++i) { code.GetInstructions()[i].pc = i * 4; }
 	ShaderComputeInputInfo input {};
 	input.threads_num[0] = width; input.threads_num[1] = input.threads_num[2] = 1;
-	input.wave_layout = {paired ? ShaderComputeWaveStrategy::Paired64On32 : ShaderComputeWaveStrategy::Native,
-	                     {width, 1, 1}, {paired ? 32u : width, 1, 1}, width, paired ? 32u : width, paired ? 2u : 1u, 1, 0};
+	input.wave_layout = {ShaderComputeWaveStrategy::Native,
+	                     {width, 1, 1}, {width, 1, 1}, width, width, 1u, 1, 0};
 	ShaderPixelInputInfo ps {};
 	ps.required_subgroup_size = width;
 	ps.native_wave.guest_wave_size = width;
@@ -389,7 +349,7 @@ bool ValidateCompleteModule(uint32_t width, bool paired, bool pixel)
 	String8 error;
 	if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
 	{
-		std::fprintf(stderr, "mask module width=%u paired=%d pixel=%d: %s\n", width, paired, pixel, error.c_str());
+		std::fprintf(stderr, "mask module width=%u pixel=%d: %s\n", width, pixel, error.c_str());
 		return false;
 	}
 	return true;
@@ -457,83 +417,61 @@ TEST(EmulatorShaderMaskValues, CompareSaveRestoreAndWaterfallUsePackedWords)
 
 TEST(EmulatorShaderMaskValues, NumericMbcntUsesOwnLaneWordAndCorrectHalf)
 {
-	for (bool paired: {false, true})
+	Wave wave(64);
+	for (bool high: {false, true})
 	{
-		Wave wave(64, paired);
-		for (bool high: {false, true})
+		for (uint32_t pattern: {0u, 1u, 0x80000000u, 0xa5c39e71u, UINT32_MAX})
 		{
-			for (uint32_t pattern: {0u, 1u, 0x80000000u, 0xa5c39e71u, UINT32_MAX})
-			{
-				wave.Set("%v1", pattern); wave.Set("%v1_low", pattern); wave.Set("%v1_high", pattern);
-				wave.Execute(Count(high, Reg(ShaderOperandType::Vgpr, 1), Literal(UINT32_MAX - 7u)));
-				for (uint32_t lane = 0; lane < 64; ++lane)
-				{
-					const uint64_t prefix = (uint64_t {1} << lane) - 1u;
-					const uint32_t half = static_cast<uint32_t>(high ? prefix >> 32u : prefix);
-					const auto reg = paired ? (lane < 32 ? "%v2_low" : "%v2_high") : "%v2";
-					EXPECT_EQ(wave.Get(reg, lane % wave.lanes), UINT32_MAX - 7u + Population(pattern & half));
-				}
-			}
-		}
-		for (uint32_t lane = 0; lane < 64; ++lane)
-		{
-			const auto reg = paired ? (lane < 32 ? "%v1_low" : "%v1_high") : "%v1";
-			wave.values[reg][lane % wave.lanes][0] = 1u << (lane % 32);
-		}
-		wave.Execute(Count(false, Reg(ShaderOperandType::Vgpr, 1)));
-		for (uint32_t lane = 0; lane < 64; ++lane)
-		{
-			const auto reg = paired ? (lane < 32 ? "%v2_low" : "%v2_high") : "%v2";
-			EXPECT_EQ(wave.Get(reg, lane % wave.lanes), lane < 32 ? 0u : 1u);
-		}
-	}
-	Wave wave(32);
-	for (uint32_t lane = 0; lane < 32; ++lane) { wave.values["%v1"][lane][0] = 1u << lane; }
-	wave.Execute(Count(false, Reg(ShaderOperandType::Vgpr, 1)));
-	for (uint32_t lane = 0; lane < 32; ++lane) { EXPECT_EQ(wave.Get("%v2", lane), 0u); }
-	wave.Execute(Count(true, Literal(UINT32_MAX), Literal(7)));
-	for (uint32_t lane = 0; lane < 32; ++lane) { EXPECT_EQ(wave.Get("%v2", lane), 7u); }
-}
-
-TEST(EmulatorShaderMaskValues, NumericExecOperandsRemainWordsInNativeAndPairedPaths)
-{
-	constexpr uint64_t mask = 0x8000000100000004ull;
-	for (bool paired: {false, true})
-	{
-		Wave wave(64, paired);
-		wave.SetExec(mask);
-		for (bool high: {false, true})
-		{
-			wave.Set("%v2", 99); wave.Set("%v2_low", 99); wave.Set("%v2_high", 99);
-			wave.Execute(Count(high, Reg(high ? ShaderOperandType::ExecHi : ShaderOperandType::ExecLo), Literal(5)));
+			wave.Set("%v1", pattern);
+			wave.Execute(Count(high, Reg(ShaderOperandType::Vgpr, 1), Literal(UINT32_MAX - 7u)));
 			for (uint32_t lane = 0; lane < 64; ++lane)
 			{
 				const uint64_t prefix = (uint64_t {1} << lane) - 1u;
-				const uint32_t word = static_cast<uint32_t>(high ? mask >> 32u : mask);
 				const uint32_t half = static_cast<uint32_t>(high ? prefix >> 32u : prefix);
-				const auto reg = paired ? (lane < 32 ? "%v2_low" : "%v2_high") : "%v2";
-				EXPECT_EQ(wave.Get(reg, lane % wave.lanes), (mask & (uint64_t {1} << lane)) != 0 ? 5u + Population(word & half) : 99u);
+				EXPECT_EQ(wave.Get("%v2", lane % wave.lanes), UINT32_MAX - 7u + Population(pattern & half));
 			}
 		}
-		const auto direct = Inst(ShaderInstructionType::VAndB32, ShaderInstructionFormat::SVdstSVsrc0SVsrc1,
-		                         Reg(ShaderOperandType::Vgpr, 2), {Reg(ShaderOperandType::ExecLo), Literal(UINT32_MAX)});
-		if (paired)
+	}
+	for (uint32_t lane = 0; lane < 64; ++lane)
+	{
+		wave.values["%v1"][lane % wave.lanes][0] = 1u << (lane % 32);
+	}
+	wave.Execute(Count(false, Reg(ShaderOperandType::Vgpr, 1)));
+	for (uint32_t lane = 0; lane < 64; ++lane)
+	{
+		EXPECT_EQ(wave.Get("%v2", lane % wave.lanes), lane < 32 ? 0u : 1u);
+	}
+	Wave narrow(32);
+	for (uint32_t lane = 0; lane < 32; ++lane) { narrow.values["%v1"][lane][0] = 1u << lane; }
+	narrow.Execute(Count(false, Reg(ShaderOperandType::Vgpr, 1)));
+	for (uint32_t lane = 0; lane < 32; ++lane) { EXPECT_EQ(narrow.Get("%v2", lane), 0u); }
+	narrow.Execute(Count(true, Literal(UINT32_MAX), Literal(7)));
+	for (uint32_t lane = 0; lane < 32; ++lane) { EXPECT_EQ(narrow.Get("%v2", lane), 7u); }
+}
+
+TEST(EmulatorShaderMaskValues, NumericExecOperandsRemainWordsInNativePath)
+{
+	constexpr uint64_t mask = 0x8000000100000004ull;
+	Wave wave(64);
+	wave.SetExec(mask);
+	for (bool high: {false, true})
+	{
+		wave.Set("%v2", 99);
+		wave.Execute(Count(high, Reg(high ? ShaderOperandType::ExecHi : ShaderOperandType::ExecLo), Literal(5)));
+		for (uint32_t lane = 0; lane < 64; ++lane)
 		{
-			// Numeric MBCNT above admits EXEC directly. Generic paired VALU
-			// currently excludes it; never substitute a native emission here.
-			EXPECT_EQ(ShaderClassifyComputeWaveInstruction(direct), ShaderComputeWaveInstructionKind::Unsupported);
-			wave.Execute(Move(Reg(ShaderOperandType::Sgpr, 8, 2), Reg(ShaderOperandType::ExecLo, 0, 2)));
-			wave.Execute(Inst(ShaderInstructionType::VAndB32, ShaderInstructionFormat::SVdstSVsrc0SVsrc1,
-			                  Reg(ShaderOperandType::Vgpr, 2), {Reg(ShaderOperandType::Sgpr, 8), Literal(UINT32_MAX)}));
-		} else
-		{
-			wave.Execute(direct);
+			const uint64_t prefix = (uint64_t {1} << lane) - 1u;
+			const uint32_t word = static_cast<uint32_t>(high ? mask >> 32u : mask);
+			const uint32_t half = static_cast<uint32_t>(high ? prefix >> 32u : prefix);
+			EXPECT_EQ(wave.Get("%v2", lane % wave.lanes), (mask & (uint64_t {1} << lane)) != 0 ? 5u + Population(word & half) : 99u);
 		}
-		for (uint32_t lane: {2u, 32u, 63u})
-		{
-			const auto reg = paired ? (lane < 32 ? "%v2_low" : "%v2_high") : "%v2";
-			EXPECT_EQ(wave.Get(reg, lane % wave.lanes), 4u);
-		}
+	}
+	const auto direct = Inst(ShaderInstructionType::VAndB32, ShaderInstructionFormat::SVdstSVsrc0SVsrc1,
+	                         Reg(ShaderOperandType::Vgpr, 2), {Reg(ShaderOperandType::ExecLo), Literal(UINT32_MAX)});
+	wave.Execute(direct);
+	for (uint32_t lane: {2u, 32u, 63u})
+	{
+		EXPECT_EQ(wave.Get("%v2", lane % wave.lanes), 4u);
 	}
 }
 
@@ -570,33 +508,23 @@ TEST(EmulatorShaderMaskValues, LdsExecGatesConsumeLaneBitsAfterStrategyResolutio
 	                        {}, {Reg(ShaderOperandType::Vgpr, 0), Reg(ShaderOperandType::Vgpr, 1)});
 	for (uint32_t width: {32u, 64u})
 	{
-		for (bool paired: {false, true})
+		Wave wave(width);
+		wave.input.lds_dwords = 4;
+		for (uint64_t mask: {uint64_t {0}, uint64_t {4}, uint64_t {1} << 32, uint64_t {1} << 63})
 		{
-			if (paired && width != 64) { continue; }
-			Wave wave(width, paired);
-			wave.input.lds_dwords = 4;
-			for (uint64_t mask: {uint64_t {0}, uint64_t {4}, uint64_t {1} << 32, uint64_t {1} << 63})
+			wave.Execute(Move(Reg(ShaderOperandType::ExecLo, 0, 2), Literal(static_cast<uint32_t>(mask), 2)));
+			wave.Execute(Move(Reg(ShaderOperandType::ExecHi), Literal(static_cast<uint32_t>(mask >> 32u))));
+			for (const auto& inst: {read, write})
 			{
-				wave.Execute(Move(Reg(ShaderOperandType::ExecLo, 0, 2), Literal(static_cast<uint32_t>(mask), 2)));
-				wave.Execute(Move(Reg(ShaderOperandType::ExecHi), Literal(static_cast<uint32_t>(mask >> 32u))));
-				for (const auto& inst: {read, write})
+				const std::string emitted(wave.Emit(inst).c_str());
+				const auto end = emitted.find("OpSelectionMerge");
+				ASSERT_NE(end, std::string::npos);
+				// Evaluate the production predicate before memory control flow.
+				// The LDS suite owns pointer, bounds and memory-value evaluation.
+				wave.Run(emitted.substr(0, end));
+				for (uint32_t lane = 0; lane < wave.lanes; ++lane)
 				{
-					const std::string emitted(wave.Emit(inst).c_str());
-					for (uint32_t bank = 0; bank < (paired ? 2u : 1u); ++bank)
-					{
-						const std::string suffix = paired ? (bank == 0 ? "_low" : "_high") : "";
-						const auto begin = paired ? emitted.find("%wave_generic_exec_0" + suffix + "_b_word =") : 0u;
-						ASSERT_NE(begin, std::string::npos);
-						const auto end = emitted.find("OpSelectionMerge", begin);
-						ASSERT_NE(end, std::string::npos);
-						// Evaluate the production predicate before memory control flow.
-						// The LDS suite owns pointer, bounds and memory-value evaluation.
-						wave.Run(emitted.substr(begin, end - begin));
-						for (uint32_t lane = 0; lane < wave.lanes; ++lane)
-						{
-							EXPECT_EQ(wave.Get("%lds_active_0" + suffix, lane), (mask >> (lane + 32u * bank)) & 1u);
-						}
-					}
+					EXPECT_EQ(wave.Get("%lds_active_0", lane), (mask >> lane) & 1u);
 				}
 			}
 		}
@@ -656,7 +584,7 @@ TEST(EmulatorShaderMaskValues, MaskBranchesUseBothWordsAndRemainUniformInHelpers
 {
 	for (uint32_t width: {32u, 64u})
 	{
-		Wave wave(width, false, true);
+		Wave wave(width, true);
 		wave.active[0] = false;
 		for (uint64_t mask: {uint64_t {0}, uint64_t {4}, uint64_t {1} << 63})
 		{
@@ -682,7 +610,7 @@ TEST(EmulatorShaderMaskValues, DppFiZeroFiltersSourceBeforeModifiersAndKeepsInac
 	{
 		for (bool alias: {false, true})
 		{
-			Wave wave(32, false, pixel);
+			Wave wave(32, pixel);
 			wave.Set("%v0", 0x12345678u);
 			auto source = Reg(ShaderOperandType::Vgpr, 0);
 			source.dpp = true; source.dpp_row_mask = source.dpp_bank_mask = 15;
@@ -706,7 +634,7 @@ TEST(EmulatorShaderMaskValues, FragmentMaskPackingAndReadfirstRetainHelperValues
 {
 	for (uint32_t real = 0; real < 4; ++real)
 	{
-		Wave wave(32, false, true);
+		Wave wave(32, true);
 		for (uint32_t lane = 0; lane < 4; ++lane) { wave.active[lane] = lane == real; }
 		const uint32_t helper = (real + 1u) % 4u;
 		wave.Execute(Inst(ShaderInstructionType::VCmpEqU32, ShaderInstructionFormat::SmaskVsrc0Vsrc1,
@@ -715,26 +643,6 @@ TEST(EmulatorShaderMaskValues, FragmentMaskPackingAndReadfirstRetainHelperValues
 		wave.Execute(Move(Reg(ShaderOperandType::ExecLo, 0, 2), Reg(ShaderOperandType::VccLo, 0, 2)));
 		wave.Execute(ReadFirst());
 		for (uint32_t lane = 0; lane < 32; ++lane) { EXPECT_EQ(wave.Get("%s0", lane), 1000u + helper); }
-	}
-}
-
-TEST(EmulatorShaderMaskValues, PairedDppFiltersInactiveSourcesAndPreservesAliasedDestination)
-{
-	for (bool alias: {false, true})
-	{
-		Wave wave(64, true);
-		wave.Set("%v0_low", 0x12345678u); wave.Set("%v0_high", 0x87654321u);
-		auto source = Reg(ShaderOperandType::Vgpr, 0);
-		source.dpp = true; source.dpp_row_mask = source.dpp_bank_mask = 15;
-		const auto inst = Inst(ShaderInstructionType::VMovB32, ShaderInstructionFormat::SVdstSVsrc0,
-		                       Reg(ShaderOperandType::Vgpr, alias ? 0 : 2), {source});
-		wave.Execute(inst);
-		wave.SetExec(0x0000000200000002ull);
-		wave.Execute(inst);
-		EXPECT_EQ(wave.Get(alias ? "%v0_low" : "%v2_low", 1), 0u);
-		EXPECT_EQ(wave.Get(alias ? "%v0_high" : "%v2_high", 1), 0u);
-		EXPECT_EQ(wave.Get(alias ? "%v0_low" : "%v2_low", 0), 0x12345678u);
-		EXPECT_EQ(wave.Get(alias ? "%v0_high" : "%v2_high", 0), 0x87654321u);
 	}
 }
 
@@ -781,17 +689,6 @@ TEST(EmulatorShaderMaskValues, CarryResultsArePackedAndInactiveValuesAreRetained
 	}
 }
 
-TEST(EmulatorShaderMaskValues, PairedReadfirstMatchesNativeForSparseAndEmptyMasks)
-{
-	for (uint64_t mask: {uint64_t {0}, uint64_t {4}, uint64_t {1} << 31, uint64_t {1} << 32, uint64_t {1} << 63})
-	{
-		Wave wave(64, true);
-		wave.SetExec(mask);
-		wave.Execute(ReadFirst());
-		for (uint32_t lane = 0; lane < 32; ++lane) { EXPECT_EQ(wave.Get("%s0", lane), 1000u + First(mask)); }
-	}
-}
-
 TEST(EmulatorShaderMaskValues, CompleteProductionModuleAssemblesAndValidates)
 {
 	ASSERT_EXIT(
@@ -808,9 +705,8 @@ TEST(EmulatorShaderMaskValues, CompleteProductionModuleAssemblesAndValidates)
 			    Core::String GetString(const Core::String&) const override { return {}; }
 		    } validation;
 		    Config::Load(validation);
-		    std::_Exit(ValidateCompleteModule(32, false, false) && ValidateCompleteModule(64, false, false) &&
-		                       ValidateCompleteModule(64, true, false) && ValidateCompleteModule(32, false, true) &&
-		                       ValidateCompleteModule(64, false, true) ? 0 : 3);
+		    std::_Exit(ValidateCompleteModule(32, false) && ValidateCompleteModule(64, false) &&
+		                       ValidateCompleteModule(32, true) && ValidateCompleteModule(64, true) ? 0 : 3);
 	    },
 	    ::testing::ExitedWithCode(0), "");
 }

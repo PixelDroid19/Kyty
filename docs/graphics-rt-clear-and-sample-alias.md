@@ -171,7 +171,7 @@ corruption.
 
 | Env | Role |
 | --- | --- |
-| `KYTY_SLOT_TRACE` | Soft-lock dumps (Flip-idle slot table / CondWait). Observation only. |
+| `KYTY_SLOT_TRACE` | Records blocked CondWait waiters and signal counts for `kyty_agent sync-waits`. Observation only. |
 | `KYTY_EOP_TRACE` | Bounded EOP fire / fence address logs. |
 
 Do not enable stub, permissive, or trap-skipping modes as acceptance evidence.

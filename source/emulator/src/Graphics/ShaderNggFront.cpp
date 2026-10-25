@@ -63,7 +63,7 @@ static ShaderNggFrontProof ProvePrologueAndBody(const ShaderCode& code, uint32_t
 			wave_scalars |= proof.wave_dependent_scalars;
 		}
 	}
-	const auto body = ShaderProveNggFrontBodyLaneLocal(code, end + 1u, wave_scalars);
+	const auto body = ShaderProveNggFrontBodyLaneLocal(code, end + 1u, guest_wave_size, wave_scalars);
 	ShaderNggFrontProof front;
 	front.lane_local = body.lane_local;
 	if (!body.lane_local)

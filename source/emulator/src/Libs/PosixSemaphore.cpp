@@ -1,14 +1,16 @@
 #include "Emulator/Libs/PosixSemaphore.h"
 
+#include "Kyty/Core/Threads.h"
+
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
 
-#include "Kyty/Core/Threads.h"
-
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
@@ -44,12 +46,16 @@ public:
 	int Wait()
 	{
 		Core::LockGuard lock(m_mutex);
-		while (m_count <= 0)
+		while (!m_destroyed && m_count <= 0)
 		{
 			m_waiters++;
 			SyncGuest();
-			m_cond_var.WaitFor(&m_mutex, kPosixSemPollMicro);
+			Kernel::PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, kPosixSemPollMicro);
 			m_waiters--;
+		}
+		if (m_destroyed)
+		{
+			return POSIX_EINVAL;
 		}
 		m_count--;
 		SyncGuest();
@@ -59,6 +65,10 @@ public:
 	int TryWait()
 	{
 		Core::LockGuard lock(m_mutex);
+		if (m_destroyed)
+		{
+			return POSIX_EINVAL;
+		}
 		if (m_count <= 0)
 		{
 			SyncGuest();
@@ -79,7 +89,7 @@ public:
 
 		Core::LockGuard lock(m_mutex);
 		const auto      deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(timeout_usec);
-		while (m_count <= 0)
+		while (!m_destroyed && m_count <= 0)
 		{
 			const auto now = std::chrono::steady_clock::now();
 			if (now >= deadline)
@@ -91,8 +101,12 @@ public:
 			const auto slice     = static_cast<uint32_t>(std::min<int64_t>(remain_us, kPosixSemPollMicro));
 			m_waiters++;
 			SyncGuest();
-			m_cond_var.WaitFor(&m_mutex, slice);
+			Kernel::PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, slice);
 			m_waiters--;
+		}
+		if (m_destroyed)
+		{
+			return POSIX_EINVAL;
 		}
 		m_count--;
 		SyncGuest();
@@ -102,6 +116,10 @@ public:
 	int Post()
 	{
 		Core::LockGuard lock(m_mutex);
+		if (m_destroyed)
+		{
+			return POSIX_EINVAL;
+		}
 		if (m_count == kPosixSemValueMax)
 		{
 			return POSIX_EOVERFLOW;
@@ -116,6 +134,15 @@ public:
 	{
 		Core::LockGuard lock(m_mutex);
 		return m_count;
+	}
+
+	// POSIX leaves destroying a semaphore with blocked waiters undefined. They fail
+	// with EINVAL, as a call on a semaphore that no longer exists does.
+	void Destroy()
+	{
+		Core::LockGuard lock(m_mutex);
+		m_destroyed = true;
+		m_cond_var.SignalAll();
 	}
 
 private:
@@ -140,10 +167,11 @@ private:
 	PosixSemGuest* m_guest    = nullptr;
 	int            m_count    = 0;
 	uint32_t       m_waiters = 0;
+	bool           m_destroyed = false;
 };
 
 Core::Mutex                                     g_posix_sem_mutex;
-std::unordered_map<PosixSemGuest*, PosixSemPrivate*> g_posix_sems;
+std::unordered_map<PosixSemGuest*, std::shared_ptr<PosixSemPrivate>> g_posix_sems;
 
 static int SetErrnoReturn(int posix_errno)
 {
@@ -151,7 +179,7 @@ static int SetErrnoReturn(int posix_errno)
 	return -1;
 }
 
-static PosixSemPrivate* LookupSem(void* sem)
+static std::shared_ptr<PosixSemPrivate> LookupSem(void* sem)
 {
 	if (sem == nullptr)
 	{
@@ -173,18 +201,14 @@ int KYTY_SYSV_ABI sem_init(void* sem, int pshared, unsigned int value)
 	}
 
 	auto* guest = static_cast<PosixSemGuest*>(sem);
-	auto* obj   = new PosixSemPrivate(guest, value, static_cast<uint32_t>(pshared));
+	// The old object must stop touching the guest block before the new one initialises it.
+	Core::LockGuard lock(g_posix_sem_mutex);
+	if (auto it = g_posix_sems.find(guest); it != g_posix_sems.end())
 	{
-		Core::LockGuard lock(g_posix_sem_mutex);
-		if (auto it = g_posix_sems.find(guest); it != g_posix_sems.end())
-		{
-			delete it->second;
-			it->second = obj;
-		} else
-		{
-			g_posix_sems.insert({guest, obj});
-		}
+		it->second->Destroy();
+		g_posix_sems.erase(it);
 	}
+	g_posix_sems.insert({guest, std::make_shared<PosixSemPrivate>(guest, value, static_cast<uint32_t>(pshared))});
 	return OK;
 }
 
@@ -195,8 +219,8 @@ int KYTY_SYSV_ABI sem_destroy(void* sem)
 	{
 		return SetErrnoReturn(POSIX_EINVAL);
 	}
-	auto*            guest = static_cast<PosixSemGuest*>(sem);
-	PosixSemPrivate* obj   = nullptr;
+	auto*                            guest = static_cast<PosixSemGuest*>(sem);
+	std::shared_ptr<PosixSemPrivate> obj;
 	{
 		Core::LockGuard lock(g_posix_sem_mutex);
 		const auto      it = g_posix_sems.find(guest);
@@ -207,7 +231,7 @@ int KYTY_SYSV_ABI sem_destroy(void* sem)
 		obj = it->second;
 		g_posix_sems.erase(it);
 	}
-	delete obj;
+	obj->Destroy();
 	guest->magic       = 0;
 	guest->has_waiters = 0;
 	guest->count       = 0;
@@ -218,7 +242,7 @@ int KYTY_SYSV_ABI sem_destroy(void* sem)
 int KYTY_SYSV_ABI sem_wait(void* sem)
 {
 	PRINT_NAME();
-	auto* obj = LookupSem(sem);
+	auto obj = LookupSem(sem);
 	if (obj == nullptr)
 	{
 		return SetErrnoReturn(POSIX_EINVAL);
@@ -230,7 +254,7 @@ int KYTY_SYSV_ABI sem_wait(void* sem)
 int KYTY_SYSV_ABI sem_trywait(void* sem)
 {
 	PRINT_NAME();
-	auto* obj = LookupSem(sem);
+	auto obj = LookupSem(sem);
 	if (obj == nullptr)
 	{
 		return SetErrnoReturn(POSIX_EINVAL);
@@ -285,7 +309,7 @@ int KYTY_SYSV_ABI sem_timedwait(void* sem, const ::Kyty::Kernel::KernelTimespec*
 	{
 		return SetErrnoReturn(POSIX_EINVAL);
 	}
-	auto* obj = LookupSem(sem);
+	auto obj = LookupSem(sem);
 	if (obj == nullptr)
 	{
 		return SetErrnoReturn(POSIX_EINVAL);
@@ -301,7 +325,7 @@ int KYTY_SYSV_ABI sem_reltimedwait_np(void* sem, const ::Kyty::Kernel::KernelTim
 	{
 		return SetErrnoReturn(POSIX_EINVAL);
 	}
-	auto* obj = LookupSem(sem);
+	auto obj = LookupSem(sem);
 	if (obj == nullptr)
 	{
 		return SetErrnoReturn(POSIX_EINVAL);
@@ -313,7 +337,7 @@ int KYTY_SYSV_ABI sem_reltimedwait_np(void* sem, const ::Kyty::Kernel::KernelTim
 int KYTY_SYSV_ABI sem_post(void* sem)
 {
 	PRINT_NAME();
-	auto* obj = LookupSem(sem);
+	auto obj = LookupSem(sem);
 	if (obj == nullptr)
 	{
 		return SetErrnoReturn(POSIX_EINVAL);
@@ -325,7 +349,7 @@ int KYTY_SYSV_ABI sem_post(void* sem)
 int KYTY_SYSV_ABI sem_getvalue(void* sem, int* sval)
 {
 	PRINT_NAME();
-	auto* obj = LookupSem(sem);
+	auto obj = LookupSem(sem);
 	if (obj == nullptr || sval == nullptr)
 	{
 		return SetErrnoReturn(POSIX_EINVAL);

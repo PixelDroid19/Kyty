@@ -45,16 +45,17 @@ inline constexpr size_t kComputePipelineRecipeMaxSpirvWords = 4u * 1024u * 1024u
 using ComputePipelinePrecompileCreate = bool (*)(const ComputePipelineRecipe& recipe);
 
 // Loads the recipes recorded for this title under `directory` and compiles the
-// ones matching this device on background threads, largest module first.
-// Only the first call has an effect.
+// ones matching this device on background threads, largest module first. The
+// title's stores of other translator versions are removed first. Only the first
+// call has an effect.
 void ComputePipelinePrecompileStart(const std::filesystem::path& directory, uint32_t vendor_id, uint32_t device_id,
                                     ComputePipelinePrecompileCreate create);
 // Called by the dispatching thread right before it creates `recipe` itself.
 // Records a recipe not seen before, keeps the background thread from starting
 // it, and waits for a background compile of it that is already running.
 void ComputePipelinePrecompileClaim(const ComputePipelineRecipe& recipe);
-// The per-title recipe directory under the SPIR-V cache root, or an empty path
-// when the title is unknown.
+// The recipe directory of this title and translator version under the SPIR-V
+// cache root, or an empty path when the title is unknown.
 [[nodiscard]] std::filesystem::path ComputePipelinePrecompileDirectory();
 
 } // namespace Kyty::Libs::Graphics

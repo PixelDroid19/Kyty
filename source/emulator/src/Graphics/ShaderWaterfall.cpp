@@ -70,24 +70,33 @@ bool IsBranch(Type type)
 	return type == Type::SBranch || StartsWith(type, "SCbranch");
 }
 
-// No path from instruction `from` reads `word` before writing it. Control flow after `from` must be forward
-// branches only, so one pass in program order sees every path.
+// No path from instruction `from` reads `word` before writing it. One pass in program order sees every path that
+// carries the value: a back edge that carries it must land where the pass already carried it, so following the edge
+// would only repeat what the pass checked.
 bool DeadFrom(const ShaderCode& code, uint32_t from, unsigned word)
 {
 	const auto&                  instructions = code.GetInstructions();
 	std::map<uint32_t, bool>     reaching; // live value arriving at a branch target
+	std::map<uint32_t, bool>     live_at;  // whether the pass carried the value into each instruction
 	bool                         live = true;
 	for (uint32_t index = from; index < instructions.Size(); ++index)
 	{
 		const auto& inst = instructions.At(index);
 		if (const auto target = reaching.find(inst.pc); target != reaching.end()) { live = live || target->second; }
+		live_at[inst.pc] = live;
 		if (live && Reads(inst, word)) { return false; }
 		if (Writes(inst, word)) { live = false; }
 		if (IsBranch(inst.type))
 		{
 			const int64_t target = static_cast<int64_t>(inst.pc) + 4 + inst.src[0].constant.i;
-			if (target <= static_cast<int64_t>(inst.pc)) { return false; }
-			reaching[static_cast<uint32_t>(target)] = reaching[static_cast<uint32_t>(target)] || live;
+			if (target <= static_cast<int64_t>(inst.pc))
+			{
+				const auto carried = live_at.find(static_cast<uint32_t>(target));
+				if (live && (carried == live_at.end() || !carried->second)) { return false; }
+			} else
+			{
+				reaching[static_cast<uint32_t>(target)] = reaching[static_cast<uint32_t>(target)] || live;
+			}
 			if (inst.type == Type::SBranch) { live = false; }
 		} else if (AnyPrefix(inst.type, {"SSetpc", "SSwappc"}))
 		{
@@ -176,25 +185,50 @@ bool MatchWaterfall(const ShaderCode& code, uint32_t head, Waterfall* out)
 	if (next == head + 3u || andn2 == nullptr || exec == nullptr || branch == nullptr || andn2->type != Type::SAndn2B64 ||
 	    andn2->src_num != 2 || !IsSgprPair(andn2->dst) || !SameRegister(andn2->src[0], andn2->dst) || !IsExec(andn2->src[1]) ||
 	    exec->type != Type::SMovB64 || !IsExec(exec->dst) || exec->src_num != 1 || !SameRegister(exec->src[0], andn2->dst) ||
-	    branch->type != Type::SCbranchScc1 || branch->pc + 4 + branch->src[0].constant.i != first->pc)
+	    branch->type != Type::SCbranchScc1)
 	{
 		return false;
 	}
+	// The back edge lands on the head or on waits just before it, which no register read observes.
+	const int64_t loop_target = static_cast<int64_t>(branch->pc) + 4 + branch->src[0].constant.i;
+	bool          target_ok   = loop_target == first->pc;
+	for (uint32_t index_before = head; !target_ok && index_before-- > 0u;)
+	{
+		const auto& prev = instructions.At(index_before);
+		if (prev.type != Type::SWaitcnt) { break; }
+		target_ok = prev.pc == loop_target;
+	}
+	if (!target_ok) { return false; }
 
-	// REST holds EXEC on entry: the nearest earlier write of REST or EXEC copies EXEC into REST, in straight-line code.
-	const auto& rest       = andn2->dst;
-	unsigned    rest_first = 0;
-	unsigned    rest_count = 0;
-	bool        entry_ok   = false;
+	// REST holds EXEC on entry. In straight-line code before the head, the nearest write of REST copies EXEC, or
+	// copies a pair X that EXEC was copied from, with neither EXEC nor X written in between.
+	const auto&          rest       = andn2->dst;
+	unsigned             rest_first = 0;
+	unsigned             rest_count = 0;
+	bool                 entry_ok   = false;
+	const ShaderOperand* source     = nullptr; // X, once the copy into REST is found
 	ScalarRange(rest, &rest_first, &rest_count);
 	for (uint32_t index_before = head; index_before-- > 0u;)
 	{
 		const auto& prev = instructions.At(index_before);
-		if (IsBranch(prev.type) || LabelInRange(code, prev.pc + 4u, first->pc, branch->pc) || WritesExec(prev)) { break; }
+		if (IsBranch(prev.type) || LabelInRange(code, prev.pc + 4u, first->pc, branch->pc)) { break; }
+		const bool copy = prev.type == Type::SMovB64 && prev.src_num == 1;
+		if (source != nullptr)
+		{
+			unsigned source_first = 0;
+			unsigned source_count = 0;
+			ScalarRange(*source, &source_first, &source_count);
+			entry_ok = copy && IsExec(prev.dst) && SameRegister(prev.src[0], *source);
+			if (entry_ok || WritesExec(prev) || Writes(prev, source_first) || Writes(prev, source_first + 1u)) { break; }
+			continue;
+		}
+		if (WritesExec(prev)) { break; }
 		if (Writes(prev, rest_first) || Writes(prev, rest_first + 1u))
 		{
-			entry_ok = prev.type == Type::SMovB64 && SameRegister(prev.dst, rest) && prev.src_num == 1 && IsExec(prev.src[0]);
-			break;
+			if (!copy || !SameRegister(prev.dst, rest) || (!IsExec(prev.src[0]) && !IsSgprPair(prev.src[0]))) { break; }
+			entry_ok = IsExec(prev.src[0]);
+			if (entry_ok) { break; }
+			source = &prev.src[0];
 		}
 	}
 	unsigned scalar_word = 0;

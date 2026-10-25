@@ -71,9 +71,19 @@ public:
 	bool AudioOutClose(Id handle);
 	bool AudioOutValid(Id handle);
 	bool AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume);
+	// Queues one grain per port, then waits until the next grain is due. The
+	// wait is a safe point: callers must not hold a lock a guest thread needs.
 	bool AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_t* samples_num);
+	// Queues like AudioOutOutputs without waiting; *wake_deadline_us receives the
+	// host time, in microseconds, at which the next grain is due.
+	bool AudioOutQueue(const OutputParam* params, uint32_t num, uint32_t* samples_num, uint64_t* wake_deadline_us);
 	bool AudioOutGetStatus(Id handle, int* type, int* channels_num);
 	void SetHostPaused(bool paused);
+	// True once Shutdown has closed the host ports.
+	bool ShuttingDown();
+	// Blocks while host output is paused. Call it before taking any lock a guest
+	// thread could need: the wait is a safe point for guest context requests.
+	void WaitWhileHostPaused();
 
 	Id       AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format);
 	bool     AudioInClose(Id handle);

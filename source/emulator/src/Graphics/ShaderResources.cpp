@@ -7,6 +7,7 @@
 #include "Emulator/Log.h"
 
 #include "Emulator/Graphics/ShaderScalarLiveness.h"
+#include "ShaderControlFlowGraph.h"
 #include "ShaderStorageAnalysis.h"
 
 #include <algorithm>
@@ -61,6 +62,13 @@ int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const
 			return index;
 		}
 	}
+	for (const auto& copied: bind.copied_image_descriptors)
+	{
+		if (copied.consumer_pc == inst.pc && copied.texture_index >= 0)
+		{
+			return copied.texture_index;
+		}
+	}
 	return -1;
 }
 
@@ -95,22 +103,30 @@ int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const Shader
 			return index;
 		}
 	}
+	for (const auto& copied: bind.copied_image_descriptors)
+	{
+		if (copied.consumer_pc == inst.pc && copied.sampler_index >= 0)
+		{
+			return copied.sampler_index;
+		}
+	}
 	return -1;
 }
 
-void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base)
+void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
+                                           const ShaderCodeResourceMemo* memo)
 {
 	EXIT_IF(bind == nullptr);
+	ShaderCollectCopiedImageDescriptors(code, bind, user_data_register_base, memo);
 	for (int index = 0; index < bind->textures2D.textures_num; ++index)
 	{
 		bind->textures2D.desc[index].sampler_indices_mask = 0u;
 	}
-	for (const auto& inst: code.GetInstructions())
+	const ShaderInstructionIndices direct  = memo == nullptr ? ShaderIndexInstructions(code) : ShaderInstructionIndices {};
+	const auto&                    indices = memo != nullptr ? memo->InstructionIndices(code) : direct;
+	for (const uint32_t instruction: indices.image_samplers)
 	{
-		if (!ShaderInstructionUsesImageSampler(inst.type))
-		{
-			continue;
-		}
+		const auto& inst          = code.GetInstructions().At(instruction);
 		const int texture_index = ShaderFindImageSampledTextureDescriptor(inst, *bind, user_data_register_base);
 		const int sampler_index = ShaderFindImageSamplerDescriptor(inst, *bind, user_data_register_base);
 		if (texture_index >= 0 && sampler_index >= 0 && sampler_index < 16)
@@ -324,9 +340,9 @@ static bool ShaderGen5EudAddSharpSpan(int offset_dw, int dwords, int user_sgpr_n
 	                                    required_end_dw);
 }
 
-bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num, int eud_pointer_register,
-                                    const ShaderCode* code, int user_data_register_base, uint32_t* required_end_dw,
-                                    const ShaderScalarFlow* scalar_flow)
+bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num, int eud_pointer_register, const ShaderCode* code,
+                                    int user_data_register_base, uint32_t* required_end_dw, const ShaderScalarFlow* scalar_flow,
+                                    const ShaderCodeResourceMemo* memo)
 {
 	if (user_data == nullptr || required_end_dw == nullptr || user_sgpr_num < 0 ||
 	    user_sgpr_num > HW::UserSgprInfo::SGPRS_MAX || eud_pointer_register < 0 ||
@@ -370,12 +386,17 @@ bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sg
 		}
 		const auto* flow = scalar_flow != nullptr ? scalar_flow : computed_flow.get();
 		const auto& entry_values = flow->holding_entry_value;
-		for (uint32_t index = 0; index < code->GetInstructions().Size() && index < entry_values.size(); ++index)
+		const ShaderInstructionIndices direct       = memo == nullptr ? ShaderIndexInstructions(*code) : ShaderInstructionIndices {};
+		const auto&                    indices      = memo != nullptr ? memo->InstructionIndices(*code) : direct;
+		for (const uint32_t index: indices.descriptor_loads)
 		{
+			if (index >= entry_values.size())
+			{
+				break;
+			}
 			const auto& inst = code->GetInstructions().At(index);
-			const int dwords = inst.type == ShaderInstructionType::SLoadDwordx4 ? 4 :
-			                   (inst.type == ShaderInstructionType::SLoadDwordx8 ? 8 : 0);
-			if (dwords == 0 || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != dwords || inst.src_num < 2 ||
+			const int   dwords = inst.type == ShaderInstructionType::SLoadDwordx4 ? 4 : 8;
+			if (inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != dwords || inst.src_num < 2 ||
 			    !ShaderMatchesEudPointer(inst.src[0], eud_pointer_register, user_data_register_base, entry_values[index]))
 			{
 				continue;
@@ -1128,6 +1149,42 @@ static bool ShaderDynamicSLoadMatchesConsumer(const ShaderInstruction& inst, con
 // or only at unconditional ones when follow_conditional_branches is set: the
 // fall-through path is the next instructions, and a forward target lies in
 // the same scanned range.
+// Adds the consumer at consumer_pc to use; false when it conflicts with the
+// consumers already merged.
+static bool ShaderMergeDynamicSLoadUse(ShaderDynamicSLoadUse* use, const ShaderDynamicSLoadUse& next_use, uint32_t consumer_pc)
+{
+	if (use->found && (use->kind != next_use.kind || use->texture_usage != next_use.texture_usage))
+	{
+		return false;
+	}
+	if (use->found && use->sampled_shape_known && next_use.sampled_shape_known && use->sampled_shape != next_use.sampled_shape)
+	{
+		return false;
+	}
+	const bool operation_sensitive =
+	    use->kind == ShaderDynamicSLoadResourceKind::Sampler ||
+	    (use->kind == ShaderDynamicSLoadResourceKind::Texture && use->texture_usage == ShaderTextureUsage::ReadOnly);
+	const auto sampler_operation = use->found && operation_sensitive && use->sampler_operation != next_use.sampler_operation
+	                                   ? State::ImageSampleOperation::Mixed
+	                                   : next_use.sampler_operation;
+	use->kind = next_use.kind;
+	if (next_use.storage_usage == ShaderStorageUsage::ReadWrite)
+	{
+		use->storage_usage = ShaderStorageUsage::ReadWrite;
+	}
+	use->texture_usage     = next_use.texture_usage;
+	use->sampler_operation = sampler_operation;
+	if (next_use.sampled_shape_known)
+	{
+		use->sampled_shape       = next_use.sampled_shape;
+		use->sampled_shape_known = true;
+	}
+	use->last_consumer_pc     = std::max(use->last_consumer_pc, consumer_pc);
+	use->raw_vmem_oob_guarded = use->raw_vmem_oob_guarded || next_use.raw_vmem_oob_guarded;
+	use->found                = true;
+	return true;
+}
+
 static ShaderDynamicSLoadUse ShaderFindDynamicSLoadUse(const ShaderCode& code, uint32_t index, const ShaderInstruction& sload,
                                                        bool follow_conditional_branches)
 {
@@ -1151,40 +1208,11 @@ static ShaderDynamicSLoadUse ShaderFindDynamicSLoadUse(const ShaderCode& code, u
 		ShaderDynamicSLoadUse next_use {};
 		if (ShaderDynamicSLoadMatchesConsumer(next, sload, &next_use))
 		{
-			if (use.found && (use.kind != next_use.kind || use.texture_usage != next_use.texture_usage))
+			if (!ShaderMergeDynamicSLoadUse(&use, next_use, next.pc))
 			{
 				use.valid = false;
 				break;
 			}
-			if (use.found && use.sampled_shape_known && next_use.sampled_shape_known &&
-			    use.sampled_shape != next_use.sampled_shape)
-			{
-				use.valid = false;
-				break;
-			}
-			const bool operation_sensitive =
-			    use.kind == ShaderDynamicSLoadResourceKind::Sampler ||
-			    (use.kind == ShaderDynamicSLoadResourceKind::Texture && use.texture_usage == ShaderTextureUsage::ReadOnly);
-			const auto sampler_operation =
-			    use.found && operation_sensitive &&
-			            use.sampler_operation != next_use.sampler_operation
-			        ? State::ImageSampleOperation::Mixed
-			        : next_use.sampler_operation;
-			use.kind              = next_use.kind;
-			if (next_use.storage_usage == ShaderStorageUsage::ReadWrite)
-			{
-				use.storage_usage = ShaderStorageUsage::ReadWrite;
-			}
-			use.texture_usage     = next_use.texture_usage;
-			use.sampler_operation = sampler_operation;
-			if (next_use.sampled_shape_known)
-			{
-				use.sampled_shape       = next_use.sampled_shape;
-				use.sampled_shape_known = true;
-			}
-			use.last_consumer_pc   = next.pc;
-			use.raw_vmem_oob_guarded = use.raw_vmem_oob_guarded || next_use.raw_vmem_oob_guarded;
-			use.found              = true;
 		}
 		else if (ShaderInstructionReadsSgprRange(next, sload.dst.register_id, dword_count))
 		{
@@ -1266,6 +1294,57 @@ ShaderEudDescriptorLoads ShaderFindEudDescriptorLoads(const ShaderCode& code)
 	return loads;
 }
 
+ShaderInstructionIndices ShaderIndexInstructions(const ShaderCode& code)
+{
+	ShaderInstructionIndices indices;
+	const auto&              instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (ShaderInstructionIsScalarBufferLoad(inst) || ShaderInstructionIsVectorBufferAccess(inst.type))
+		{
+			indices.buffer_accesses.push_back(index);
+		}
+		if (ShaderInstructionUsesImageSampler(inst.type))
+		{
+			indices.image_samplers.push_back(index);
+		}
+		if (ShaderImageReadReturnsDmaskComponents(inst.type))
+		{
+			indices.image_reads.push_back(index);
+		}
+		if (inst.type == ShaderInstructionType::SLoadDwordx4 || inst.type == ShaderInstructionType::SLoadDwordx8)
+		{
+			indices.descriptor_loads.push_back(index);
+		}
+		if (inst.format == ShaderInstructionFormat::VdstGds || inst.dst.type == ShaderOperandType::M0)
+		{
+			indices.gds_and_m0_writes.push_back(index);
+		}
+		indices.gds_memory = indices.gds_memory || inst.format == ShaderInstructionFormat::VaddrVdataOffsetGds;
+	}
+	return indices;
+}
+
+const ShaderInstructionIndices& ShaderCodeResourceMemo::InstructionIndices(const ShaderCode& code) const
+{
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_instruction_indices_ready)
+		{
+			return m_instruction_indices;
+		}
+	}
+	auto                        indices = ShaderIndexInstructions(code);
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (!m_instruction_indices_ready)
+	{
+		m_instruction_indices       = std::move(indices);
+		m_instruction_indices_ready = true;
+	}
+	return m_instruction_indices;
+}
+
 const ShaderEudDescriptorLoads& ShaderCodeResourceMemo::EudDescriptorLoads(const ShaderCode& code) const
 {
 	{
@@ -1299,13 +1378,16 @@ static bool ShaderDescriptorLoadInPass(const ShaderDynamicSLoadUse& use, ShaderD
 // True when every image instruction that samples through the S# loaded by
 // sload, up to last_consumer_pc, reads a T# that binds nothing.
 static bool ShaderSamplerFeedsOnlyZeroImages(const ShaderCode& code, const ShaderBindResources& bind, const ShaderInstruction& sload,
-                                             uint32_t last_consumer_pc)
+                                             uint32_t last_consumer_pc, const ShaderCodeResourceMemo* memo)
 {
-	bool consumed = false;
-	for (const auto& inst: code.GetInstructions())
+	const ShaderInstructionIndices direct   = memo == nullptr ? ShaderIndexInstructions(code) : ShaderInstructionIndices {};
+	const auto&                    indices  = memo != nullptr ? memo->InstructionIndices(code) : direct;
+	bool                           consumed = false;
+	for (const uint32_t index: indices.image_samplers)
 	{
-		if (inst.pc <= sload.pc || inst.pc > last_consumer_pc || !ShaderInstructionUsesImageSampler(inst.type) || inst.src_num < 3 ||
-		    inst.src[2].type != ShaderOperandType::Sgpr || inst.src[2].register_id != sload.dst.register_id)
+		const auto& inst = code.GetInstructions().At(index);
+		if (inst.pc <= sload.pc || inst.pc > last_consumer_pc || inst.src_num < 3 || inst.src[2].type != ShaderOperandType::Sgpr ||
+		    inst.src[2].register_id != sload.dst.register_id)
 		{
 			continue;
 		}
@@ -1324,7 +1406,8 @@ static bool ShaderSamplerFeedsOnlyZeroImages(const ShaderCode& code, const Shade
 // that binds nothing binds nothing either.
 static bool ShaderAddDynamicScalarResource(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info,
                                            const ShaderInstruction& sload, int offset_dw, const ShaderDynamicSLoadUse& use,
-                                           const HW::UserSgprInfo& user_sgpr, const uint32_t* table, uint32_t instruction_count)
+                                           const HW::UserSgprInfo& user_sgpr, const uint32_t* table, uint32_t instruction_count,
+                                           const ShaderCodeResourceMemo* memo)
 {
 	bool added_resource = false;
 	bool added_mapping = false;
@@ -1351,7 +1434,7 @@ static bool ShaderAddDynamicScalarResource(const ShaderCode& code, ShaderBindRes
 			}
 			break;
 		case ShaderDynamicSLoadResourceKind::Sampler:
-			if (ShaderSamplerFeedsOnlyZeroImages(code, *bind, sload, use.last_consumer_pc))
+			if (ShaderSamplerFeedsOnlyZeroImages(code, *bind, sload, use.last_consumer_pc, memo))
 			{
 				ShaderAddZeroDescriptorLoad(&bind->zero_descriptor_loads, sload.pc, sload.dst.register_id, 4);
 				return true;
@@ -1418,7 +1501,7 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 			continue;
 		}
 
-		if (!ShaderAddDynamicScalarResource(code, bind, info, sload, offset_dw, use, user_sgpr, extended_buffer, instruction_count))
+		if (!ShaderAddDynamicScalarResource(code, bind, info, sload, offset_dw, use, user_sgpr, extended_buffer, instruction_count, memo))
 		{
 			EXIT("unable to materialize dynamic descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u "
 			     "storage=%d textures=%d samplers=%d mappings=%u eud_dw=%u\n",
@@ -1428,6 +1511,17 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 			     static_cast<unsigned>(eud_size_dw));
 		}
 	}
+}
+
+// ShaderDescriptorSLoadDwords, plus a 16-dword load of two 8-dword blocks.
+static int ShaderTableSLoadDwords(const ShaderInstruction& sload)
+{
+	if (sload.type == ShaderInstructionType::SLoadDwordx16 && sload.dst.type == ShaderOperandType::Sgpr && sload.dst.size == 16 &&
+	    sload.src_num >= 2 && sload.src[0].type == ShaderOperandType::Sgpr && sload.src[0].size == 2)
+	{
+		return 16;
+	}
+	return ShaderDescriptorSLoadDwords(sload);
 }
 
 // The pointer pair of a descriptor S_LOAD lies in the shader resource table
@@ -1489,7 +1583,7 @@ static bool ShaderPartitionDescriptorLoad(const ShaderCode& code, uint32_t index
 // descriptors keep their existing paths.
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                         ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base,
-                                        const ShaderScalarFlow& scalar_flow)
+                                        const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo)
 {
 	EXIT_IF(bind == nullptr || info == nullptr);
 	if (srt_size_dw < 2u)
@@ -1502,11 +1596,7 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 	for (uint32_t index = 0; index < instruction_count && index < entry_values.size(); ++index)
 	{
 		const auto& sload       = code.GetInstructions().At(index);
-		const int   dword_count = sload.type == ShaderInstructionType::SLoadDwordx16 && sload.dst.type == ShaderOperandType::Sgpr &&
-		                                    sload.dst.size == 16 && sload.src_num >= 2 && sload.src[0].type == ShaderOperandType::Sgpr &&
-		                                    sload.src[0].size == 2
-		                              ? 16
-		                              : ShaderDescriptorSLoadDwords(sload);
+		const int   dword_count = ShaderTableSLoadDwords(sload);
 		int         offset_dw   = 0;
 		std::vector<ShaderDescriptorBlock> blocks;
 		if (dword_count == 0 || !ShaderLoadsThroughSrtPointer(sload, entry_values[index], srt_size_dw, user_data_register_base, *bind) ||
@@ -1535,7 +1625,7 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 				continue;
 			}
 			if (!ShaderAddDynamicScalarResource(code, bind, info, block.load, offset_dw + block.first_dword, block.use, user_sgpr,
-			                                    table.data(), instruction_count))
+				                                table.data(), instruction_count, memo))
 			{
 				EXIT("unable to materialize SRT pointer descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u textures=%d "
 				     "samplers=%d\n",
@@ -1543,6 +1633,183 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 				     bind->textures2D.textures_num, bind->samplers.samplers_num);
 			}
 		}
+	}
+}
+
+// The consumers of the descriptor block a table load fills, over every CFG
+// path: a read of the block consumes the load only when the load is its last
+// write on every path. Consumers are later matched by PC range, so a read in
+// that range that may see another value makes the use invalid.
+static ShaderDynamicSLoadUse ShaderFindReachingSLoadUse(const ShaderCode& code, const ShaderControlFlowGraph& cfg, uint32_t load_index,
+                                                        const ShaderInstruction& block)
+{
+	constexpr uint8_t kLoad  = 1u;
+	constexpr uint8_t kOther = 2u;
+	const auto&       instructions = code.GetInstructions();
+	const auto&       blocks       = cfg.blocks;
+	const auto        first_index  = [&](uint32_t b) { return b == 0 ? 0u : blocks[b - 1].last + 1u; };
+	const auto        transfer     = [&](uint32_t index, uint8_t holds) -> uint8_t
+	{
+		if (index == load_index)
+		{
+			return kLoad;
+		}
+		return ShaderInstructionWritesSgprRange(instructions.At(index), block.dst.register_id, block.dst.size) ? kOther : holds;
+	};
+
+	// What the block registers hold at each block entry: the load, another value, or both.
+	std::vector<uint8_t>  entry(blocks.size(), 0u);
+	std::vector<uint32_t> work {0u};
+	entry[0] = kOther;
+	while (!work.empty())
+	{
+		const uint32_t b = work.back();
+		work.pop_back();
+		uint8_t holds = entry[b];
+		for (uint32_t index = first_index(b); index <= blocks[b].last; ++index)
+		{
+			holds = transfer(index, holds);
+		}
+		for (const uint32_t succ: blocks[b].succ)
+		{
+			if (succ != kShaderCfgNone && (entry[succ] | holds) != entry[succ])
+			{
+				entry[succ] |= holds;
+				work.push_back(succ);
+			}
+		}
+	}
+
+	ShaderDynamicSLoadUse use {};
+	uint32_t              first_foreign_read = UINT32_MAX;
+	for (uint32_t b = 0; b < blocks.size() && use.valid; ++b)
+	{
+		uint8_t holds = entry[b];
+		if (holds == 0u)
+		{
+			continue;
+		}
+		for (uint32_t index = first_index(b); index <= blocks[b].last && use.valid; ++index)
+		{
+			const auto&           inst     = instructions.At(index);
+			ShaderDynamicSLoadUse next_use {};
+			if (index == load_index || !ShaderInstructionReadsSgprRange(inst, block.dst.register_id, block.dst.size))
+			{
+				holds = transfer(index, holds);
+				continue;
+			}
+			if (holds == kOther)
+			{
+				first_foreign_read = std::min(first_foreign_read, inst.pc);
+			} else
+			{
+				use.valid = holds == kLoad && inst.pc > block.pc && ShaderDynamicSLoadMatchesConsumer(inst, block, &next_use) &&
+				            ShaderMergeDynamicSLoadUse(&use, next_use, inst.pc);
+			}
+			holds = transfer(index, holds);
+		}
+	}
+	if (use.found && first_foreign_read > block.pc && first_foreign_read <= use.last_consumer_pc)
+	{
+		use.valid = false;
+	}
+	return use;
+}
+
+// Keeps the T# and S# blocks of a GS user-data load, analysed as loads of
+// their own; the other words stay plain guest data.
+static void ShaderPartitionGsUserDataLoad(const ShaderCode& code, const ShaderControlFlowGraph& cfg, uint32_t index,
+                                          const ShaderInstruction& sload, int table_offset_dw, int first_dword, int dwords,
+                                          std::vector<ShaderGsUserDataDescriptorLoad>* loads)
+{
+	if (dwords == 16)
+	{
+		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword, 8, loads);
+		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword + 8, 8, loads);
+		return;
+	}
+	ShaderInstruction block = sload;
+	block.type              = dwords == 4 ? ShaderInstructionType::SLoadDwordx4 : ShaderInstructionType::SLoadDwordx8;
+	block.dst.register_id   = sload.dst.register_id + first_dword;
+	block.dst.size          = dwords;
+	const auto use          = ShaderFindReachingSLoadUse(code, cfg, index, block);
+	if (use.valid && use.found && use.kind != ShaderDynamicSLoadResourceKind::StorageBuffer)
+	{
+		loads->push_back({block, table_offset_dw + first_dword, use});
+		return;
+	}
+	if (dwords == 8)
+	{
+		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword, 4, loads);
+		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, table_offset_dw, first_dword + 4, 4, loads);
+	}
+}
+
+std::vector<ShaderGsUserDataDescriptorLoad> ShaderFindGsUserDataDescriptorLoads(const ShaderCode& code)
+{
+	std::vector<ShaderGsUserDataDescriptorLoad> loads;
+	const auto                                  cfg = ShaderBuildControlFlowGraph(code);
+	if (!cfg.Structurable())
+	{
+		return loads;
+	}
+	const auto      flow         = ShaderScalarFlowOf(code);
+	const auto&     entry_values = flow->holding_entry_value;
+	const uint32_t  count        = code.GetInstructions().Size();
+	for (uint32_t index = 0; index < count && index < entry_values.size(); ++index)
+	{
+		const auto& sload       = code.GetInstructions().At(index);
+		const int   dword_count = ShaderTableSLoadDwords(sload);
+		int         offset_dw   = 0;
+		if (dword_count == 0 || sload.src[0].register_id != 0 || !entry_values[index].test(0) || !entry_values[index].test(1) ||
+		    !ShaderGetSmemConstantDwordOffset(sload, &offset_dw) || offset_dw < 0 ||
+		    static_cast<uint32_t>(offset_dw) > kMaxSrtPointerTableDwords - static_cast<uint32_t>(dword_count))
+		{
+			continue;
+		}
+		ShaderPartitionGsUserDataLoad(code, cfg, index, sload, offset_dw, 0, dword_count, &loads);
+	}
+	return loads;
+}
+
+void ShaderBindGsUserDataDescriptors(const ShaderCode& code, const std::vector<ShaderGsUserDataDescriptorLoad>& loads,
+                                     uint64_t table_address, const HW::UserSgprInfo& user_sgpr, ShaderBindResources* bind,
+                                     ShaderParsedUsage* info, const ShaderCodeResourceMemo* memo)
+{
+	EXIT_IF(bind == nullptr || info == nullptr);
+	if (loads.empty())
+	{
+		return;
+	}
+	uint32_t table_dwords = 0;
+	for (const auto& load: loads)
+	{
+		table_dwords = std::max(table_dwords, static_cast<uint32_t>(load.offset_dw + load.block.dst.size));
+	}
+	std::vector<uint32_t> table(table_dwords);
+	if (table_address == 0 || !ShaderSnapshotGuestDescriptorTable(table_address, table_dwords, &table))
+	{
+		EXIT("unreadable GS user-data table: address=0x%016" PRIx64 " dwords=%u\n", table_address, table_dwords);
+	}
+	const uint32_t first_record = bind->dynamic_sloads.records.Size();
+	for (const auto pass: {ShaderDescriptorLoadPass::NonSampler, ShaderDescriptorLoadPass::Sampler})
+	{
+		for (const auto& load: loads)
+		{
+			if (ShaderDescriptorLoadInPass(load.use, pass) &&
+			    !ShaderAddDynamicScalarResource(code, bind, info, load.block, load.offset_dw, load.use, user_sgpr, table.data(),
+			                                    code.GetInstructions().Size(), memo))
+			{
+				EXIT("unable to materialize GS user-data descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u textures=%d "
+				     "samplers=%d\n",
+				     load.block.pc, load.offset_dw, load.block.dst.size, static_cast<unsigned>(load.use.kind),
+				     bind->textures2D.textures_num, bind->samplers.samplers_num);
+			}
+		}
+	}
+	for (uint32_t mapping = first_record; mapping < bind->dynamic_sloads.records.Size(); ++mapping)
+	{
+		bind->dynamic_sloads.records[mapping].guest_load = true;
 	}
 }
 
@@ -1649,14 +1916,20 @@ static int ShaderAddAssembledStorageResource(ShaderStorageResources* resources, 
 // each consumer gets the storage resource its words select, and the V#
 // registers are written with that resource's metadata right before it.
 void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
-	                                             int user_sgpr_num, int user_data_register_base,
-	                                             const ShaderScalarFlow& scalar_flow)
+                                             int user_sgpr_num, int user_data_register_base, const ShaderScalarFlow& scalar_flow,
+                                             const ShaderCodeResourceMemo* memo)
 {
 	EXIT_IF(bind == nullptr);
 	const auto& sources      = scalar_flow.entry_sources;
 	const auto& instructions = code.GetInstructions();
-	for (uint32_t index = 0; index < instructions.Size() && index < sources.size(); ++index)
+	const ShaderInstructionIndices direct       = memo == nullptr ? ShaderIndexInstructions(code) : ShaderInstructionIndices {};
+	const auto&                    indices      = memo != nullptr ? memo->InstructionIndices(code) : direct;
+	for (const uint32_t index: indices.buffer_accesses)
 	{
+		if (index >= sources.size())
+		{
+			break;
+		}
 		const auto& inst       = instructions.At(index);
 		const auto* descriptor = ShaderVectorBufferDescriptor(inst);
 		std::array<uint32_t, 4> words {};
@@ -1694,17 +1967,13 @@ static bool ShaderBufferRegisterNamesBinding(const ShaderBindResources& bind, co
 		{
 			if (bind.zero_sbuffer_resources.start_register[i] == reg) { return true; }
 		}
-		for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
-		{
-			if (bind.storage_buffers.start_register[i] == reg) { return true; }
-		}
-		return false;
+		return ShaderStorageBufferResourceIsBound(bind, inst.src[0], user_data_register_base);
 	}
 	return ShaderStorageBufferResourceIsBound(bind, inst.src[1], user_data_register_base);
 }
 
 void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base,
-                                             const ShaderScalarFlow& scalar_flow)
+                                             const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo)
 {
 	EXIT_IF(bind == nullptr);
 	const auto& holding      = scalar_flow.holding_entry_value;
@@ -1714,8 +1983,14 @@ void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindR
 	{
 		return;
 	}
-	for (uint32_t index = 0; index < instructions.Size() && index < holding.size(); ++index)
+	const ShaderInstructionIndices direct  = memo == nullptr ? ShaderIndexInstructions(code) : ShaderInstructionIndices {};
+	const auto&                    indices = memo != nullptr ? memo->InstructionIndices(code) : direct;
+	for (const uint32_t index: indices.buffer_accesses)
 	{
+		if (index >= holding.size())
+		{
+			break;
+		}
 		const auto& inst   = instructions.At(index);
 		const bool  scalar = ShaderInstructionIsScalarBufferLoad(inst) && inst.src_num >= 1 &&
 		                    inst.src[0].type == ShaderOperandType::Sgpr && inst.src[0].size == 4;
@@ -1757,7 +2032,7 @@ bool ShaderIsDynamicScalarStorageConsumer(const ShaderBindResources& bind, const
 	return false;
 }
 
-bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst)
+bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst, int user_data_register_base)
 {
 	if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num < 1 || inst.src[0].type != ShaderOperandType::Sgpr ||
 	    inst.src[0].size != 4 || ShaderIsDynamicScalarStorageConsumer(bind, inst))
@@ -1768,11 +2043,11 @@ bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, co
 	{
 		return true;
 	}
-	const int reg = inst.src[0].register_id;
-	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	if (ShaderStorageBufferResourceIsBound(bind, inst.src[0], user_data_register_base))
 	{
-		if (bind.storage_buffers.start_register[i] == reg) { return false; }
+		return false;
 	}
+	const int reg = inst.src[0].register_id;
 	for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
 	{
 		if (bind.zero_sbuffer_resources.start_register[i] == reg) { return false; }

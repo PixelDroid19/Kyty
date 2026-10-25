@@ -29,10 +29,6 @@ using Core::File;
 using Core::String;
 
 Core::Mutex               g_diag_mutex;
-// Lazy package imports are rare first-use events. Serializing provider admission
-// prevents a second guest thread from observing an in-progress provider as an
-// exhausted candidate and failing before its exports are registered.
-Core::Mutex               g_lazy_provider_mutex;
 ModuleLoadPlanDiagnostics g_last_diag {};
 
 struct PendingModulePlan
@@ -1086,7 +1082,7 @@ bool PrepareProvidersForExecution(RuntimeLinker* rt)
 	{
 		return false;
 	}
-	Core::LockGuard lazy_provider_lock(g_lazy_provider_mutex);
+	Core::LockGuard admission_lock(rt->AdmissionMutex());
 
 	for (;;)
 	{
@@ -1233,13 +1229,15 @@ void AfterHleSymbolsRegistered(RuntimeLinker* rt)
 	(void)ApplyPlanAfterHle(rt, plan);
 }
 
-bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, SymbolType type)
+void TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, SymbolType type)
 {
 	if (rt == nullptr || (type != SymbolType::Func && type != SymbolType::Object))
 	{
-		return false;
+		return;
 	}
-	Core::LockGuard lazy_provider_lock(g_lazy_provider_mutex);
+	// A thread that waited here resolves its import again, since the provider it
+	// needed may have been admitted meanwhile.
+	Core::LockGuard admission_lock(rt->AdmissionMutex());
 
 	// GetRelocationInfo has already canonicalized the raw ELF identity. Keep
 	// that complete identity intact: the versioned export key is the contract
@@ -1247,7 +1245,7 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 	const String requested_import = import_name;
 	if (rt->Symbols()->HleOwnsCanonicalModule(requested_import))
 	{
-		return false;
+		return;
 	}
 	bool         attempted_this_request[kModuleLoadPlanMaxEntries] {};
 
@@ -1275,7 +1273,7 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 			Core::LockGuard lock(g_diag_mutex);
 			if (g_pending.owner != rt || g_pending.eager || !g_pending.hle_ready || !g_pending.plan.valid)
 			{
-				return false;
+				return;
 			}
 
 			for (uint32_t i = 0; i < g_pending.plan.count; ++i)
@@ -1303,7 +1301,7 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 		if (!found)
 		{
 			ReportLazyProviderEvent("no_candidate", requested_import);
-			return false;
+			return;
 		}
 
 		const String host = String::FromUtf8(entry.host_path);
@@ -1317,14 +1315,15 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 			mark_candidate_exhausted(entry_index);
 			PersistPendingDiagnostics(rt, diag);
 			PublishDiagnostics(diag);
-			return false;
+			return;
 		}
 
 		// Mapping a candidate runs no guest code. Module-info names are loader
 		// labels (for example libSceFios2), while imports use public module names
 		// (Fios2). Resolve the complete versioned NID and verify its owning
 		// program instead of inferring equivalence between those two namespaces.
-		// Only the exact provider is relocated and initialized below.
+		// Only the exact provider is relocated below; its initializers are guest
+		// code, so they run after this lock is released, before first use.
 		Program* provider = rt->FindProgramByFile(host);
 		const bool already_loaded = (provider != nullptr);
 		if (provider == nullptr)
@@ -1359,33 +1358,42 @@ bool TryLoadProviderForLazyImport(RuntimeLinker* rt, const String& import_name, 
 			ReportLazyProviderEvent("already_loaded", requested_import, &entry);
 			PersistPendingDiagnostics(rt, diag);
 			PublishDiagnostics(diag);
-			return true;
+			return;
 		}
 
 		rt->RelocateProgram(provider);
-		const bool defer_initializers = rt->IsRelocationInProgress();
-		if (!defer_initializers)
-		{
-			const int init_result = rt->StartModule(provider, 0, nullptr, nullptr);
-			if (init_result != 0)
-			{
-				ReportLazyProviderEvent("module_init_failed", requested_import, &entry);
-				PushRejection(&diag, "lazy_aborted_module_init");
-				mark_candidate_exhausted(entry_index);
-				PersistPendingDiagnostics(rt, diag);
-				PublishDiagnostics(diag);
-				return false;
-			}
-		}
-
+		rt->MarkLazyStartPending(provider);
 		diag.applied_count++;
 		mark_candidate_exhausted(entry_index);
-		ReportLazyProviderEvent(defer_initializers ? "loaded_deferred_init" : "loaded", requested_import, &entry);
+		ReportLazyProviderEvent("loaded", requested_import, &entry);
 		PersistPendingDiagnostics(rt, diag);
 		PublishDiagnostics(diag);
 		Emulator::Agent::Lifecycle::EmitModuleLoaded(entry.relative_key);
-		return true;
+		return;
 	}
+}
+
+void RecordLazyProviderStart(RuntimeLinker* rt, const String& provider, bool started)
+{
+	ReportLazyProviderEvent(started ? "started" : "module_init_failed", provider);
+	if (started || rt == nullptr)
+	{
+		return;
+	}
+	// Under the admission lock, so this cannot interleave with an admission that
+	// holds a copy of the pending diagnostics.
+	Core::LockGuard           admission_lock(rt->AdmissionMutex());
+	ModuleLoadPlanDiagnostics diag {};
+	{
+		Core::LockGuard lock(g_diag_mutex);
+		if (g_pending.owner != rt)
+		{
+			return;
+		}
+		PushRejection(&g_pending.plan.diag, "lazy_aborted_module_init");
+		diag = g_pending.plan.diag;
+	}
+	PublishDiagnostics(diag);
 }
 
 void ClearPending(RuntimeLinker* rt)

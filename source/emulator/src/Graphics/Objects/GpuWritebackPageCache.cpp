@@ -5,172 +5,34 @@
 #include "Emulator/Graphics/Utils.h"
 
 #include <algorithm>
-#include <atomic>
-#include <condition_variable>
 #include <cstring>
-#include <mutex>
-#include <thread>
 #include <vector>
 
 namespace Kyty::Libs::Graphics {
 
-namespace {
-
-void ComparePages(const uint8_t* a, const uint8_t* b, uint64_t size, uint64_t page_size, uint64_t first, uint64_t last,
-                  uint8_t* changed)
+// Calls visit(offset, bytes, pages) for each run of consecutive changed pages,
+// so a run's write is notified once and its protection changes once.
+template <typename Visit>
+static void VisitChangedRuns(const std::vector<uint8_t>& changed, uint64_t page_size, uint64_t size, const Visit& visit)
 {
-	for (uint64_t page = first; page < last; page++)
+	const uint64_t pages = changed.size();
+	for (uint64_t page = 0; page < pages;)
 	{
+		if (changed[page] == 0u)
+		{
+			page++;
+			continue;
+		}
+		uint64_t end = page + 1u;
+		while (end < pages && changed[end] != 0u)
+		{
+			end++;
+		}
 		const uint64_t offset = page * page_size;
-		const uint64_t bytes  = std::min(page_size, size - offset);
-		changed[page]         = std::memcmp(a + offset, b + offset, static_cast<size_t>(bytes)) != 0 ? 1u : 0u;
+		visit(offset, std::min(end * page_size, size) - offset, end - page);
+		page = end;
 	}
 }
-
-// Compares the pages of large spans on a few helper threads. A completion
-// writes its storage back before it publishes the label the guest waits on,
-// so one thread scanning a multi-megabyte range sits on that wait.
-class PageCompareScanner final
-{
-public:
-	static constexpr uint64_t kChunkPages       = 64u;
-	static constexpr uint64_t kMinParallelPages = 4u * kChunkPages;
-	static constexpr uint32_t kMaxHelpers       = 3u;
-
-	static PageCompareScanner& Instance()
-	{
-		static PageCompareScanner scanner;
-		return scanner;
-	}
-
-	PageCompareScanner(const PageCompareScanner&)            = delete;
-	PageCompareScanner& operator=(const PageCompareScanner&) = delete;
-
-	~PageCompareScanner()
-	{
-		{
-			std::lock_guard<std::mutex> lock(m_mutex);
-			m_stopping = true;
-		}
-		m_ready.notify_all();
-		for (auto& worker: m_workers)
-		{
-			worker.join();
-		}
-	}
-
-	// Sets changed[i] to whether page i of a and b differ.
-	void Scan(const uint8_t* a, const uint8_t* b, uint64_t size, uint64_t page_size, uint8_t* changed)
-	{
-		const uint64_t pages = (size + page_size - 1u) / page_size;
-		if (m_workers.empty() || pages < kMinParallelPages)
-		{
-			ComparePages(a, b, size, page_size, 0, pages, changed);
-			return;
-		}
-
-		std::lock_guard<std::mutex> scan_lock(m_scan_mutex);
-		{
-			std::lock_guard<std::mutex> lock(m_mutex);
-			m_job         = Job {a, b, size, page_size, changed, pages, (pages + kChunkPages - 1u) / kChunkPages};
-			m_done_chunks = 0;
-			m_next_chunk.store(0, std::memory_order_relaxed);
-			m_open = true;
-			m_serial++;
-		}
-		m_ready.notify_all();
-		const uint64_t done = RunChunks();
-
-		std::unique_lock<std::mutex> lock(m_mutex);
-		m_done_chunks += done;
-		// Helpers that joined must leave before the job can be replaced.
-		m_finished.wait(lock, [this] { return m_done_chunks == m_job.chunks && m_active == 0; });
-		m_open = false;
-	}
-
-private:
-	struct Job
-	{
-		const uint8_t* a         = nullptr;
-		const uint8_t* b         = nullptr;
-		uint64_t       size      = 0;
-		uint64_t       page_size = 0;
-		uint8_t*       changed   = nullptr;
-		uint64_t       pages     = 0;
-		uint64_t       chunks    = 0;
-	};
-
-	PageCompareScanner()
-	{
-		const uint32_t helpers = std::min(kMaxHelpers, std::thread::hardware_concurrency() / 4u);
-		for (uint32_t i = 0; i < helpers; i++)
-		{
-			m_workers.emplace_back([this] { WorkerMain(); });
-		}
-	}
-
-	uint64_t RunChunks()
-	{
-		uint64_t done = 0;
-		for (uint64_t chunk = m_next_chunk.fetch_add(1, std::memory_order_relaxed); chunk < m_job.chunks;
-		     chunk          = m_next_chunk.fetch_add(1, std::memory_order_relaxed))
-		{
-			const uint64_t first = chunk * kChunkPages;
-			ComparePages(m_job.a, m_job.b, m_job.size, m_job.page_size, first, std::min(first + kChunkPages, m_job.pages), m_job.changed);
-			done++;
-		}
-		return done;
-	}
-
-	void WorkerMain()
-	{
-		uint64_t                     seen = 0;
-		std::unique_lock<std::mutex> lock(m_mutex);
-		for (;;)
-		{
-			m_ready.wait(lock, [this, &seen] { return m_stopping || m_serial != seen; });
-			if (m_stopping)
-			{
-				return;
-			}
-			seen = m_serial;
-			if (!m_open)
-			{
-				continue;
-			}
-			m_active++;
-			lock.unlock();
-			const uint64_t done = RunChunks();
-			lock.lock();
-			m_done_chunks += done;
-			m_active--;
-			m_finished.notify_one();
-		}
-	}
-
-	std::mutex               m_scan_mutex;
-	std::mutex               m_mutex;
-	std::condition_variable  m_ready;
-	std::condition_variable  m_finished;
-	std::vector<std::thread> m_workers;
-	Job                      m_job;
-	std::atomic<uint64_t>    m_next_chunk {0};
-	uint64_t                 m_done_chunks = 0;
-	uint64_t                 m_serial      = 0;
-	uint32_t                 m_active      = 0;
-	bool                     m_open        = false;
-	bool                     m_stopping    = false;
-};
-
-std::vector<uint8_t> ChangedPages(const std::vector<uint8_t>& snapshot, const uint8_t* source, uint64_t page_size)
-{
-	const uint64_t       size = snapshot.size();
-	std::vector<uint8_t> changed(static_cast<size_t>((size + page_size - 1u) / page_size));
-	PageCompareScanner::Instance().Scan(snapshot.data(), source, size, page_size, changed.data());
-	return changed;
-}
-
-} // namespace
 
 void GpuWritebackPageCache::Reset(const void* source, uint64_t size)
 {
@@ -185,6 +47,26 @@ void GpuWritebackPageCache::Refresh(const void* source, const GpuByteRun& run)
 	EXIT_IF(source == nullptr || run.bytes == 0u || run.offset > m_snapshot.size() || run.bytes > m_snapshot.size() - run.offset);
 	Materialize();
 	std::memcpy(m_snapshot.data() + run.offset, static_cast<const uint8_t*>(source) + run.offset, static_cast<size_t>(run.bytes));
+}
+
+std::vector<uint8_t> GpuWritebackPageCache::TakeChangedPages(const uint8_t* source)
+{
+	EXIT_IF(m_written_pages == nullptr);
+	const uint64_t       size  = m_snapshot.size();
+	const uint64_t       pages = (size + m_page_size - 1u) / m_page_size;
+	std::vector<uint8_t> changed(static_cast<size_t>(pages));
+	for (uint64_t page = 0; page < pages; page++)
+	{
+		if (m_written_pages[page] == 0u)
+		{
+			continue;
+		}
+		m_written_pages[page] = 0u;
+		const uint64_t offset = page * m_page_size;
+		const uint64_t bytes  = std::min(m_page_size, size - offset);
+		changed[page]         = std::memcmp(m_snapshot.data() + offset, source + offset, static_cast<size_t>(bytes)) != 0 ? 1u : 0u;
+	}
+	return changed;
 }
 
 void GpuWritebackPageCache::Materialize()
@@ -202,7 +84,8 @@ void GpuWritebackPageCache::Materialize()
 
 bool GpuWritebackPageCache::AdoptUniform(const UniformWords& words, uint64_t size)
 {
-	EXIT_IF(size == 0u || size % kUniformRecordBytes != 0u);
+	EXIT_IF(size == 0u || size % kUniformRecordBytes != 0u || m_written_pages == nullptr);
+	std::fill_n(m_written_pages, (size + m_page_size - 1u) / m_page_size, 0u);
 	bool changed = true;
 	if (m_snapshot.size() != size)
 	{
@@ -231,19 +114,15 @@ GpuWritebackResult GpuWritebackPageCache::AdoptChangedPages(uint64_t guest_va, c
 	Materialize();
 
 	const auto*        gpu     = static_cast<const uint8_t*>(gpu_src);
-	const auto         changed = ChangedPages(m_snapshot, gpu, m_page_size);
+	const auto         changed = TakeChangedPages(gpu);
 	GpuWritebackResult result;
-	for (uint64_t offset = 0; offset < size; offset += m_page_size)
-	{
-		const uint64_t page_bytes = std::min(m_page_size, size - offset);
-		if (changed[offset / m_page_size] == 0u)
-		{
-			continue;
-		}
-		notify_write(notify_opaque, guest_va + offset, page_bytes);
-		std::memcpy(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(page_bytes));
-		result.changed_pages++;
-	}
+	VisitChangedRuns(changed, m_page_size, size,
+	                 [&](uint64_t offset, uint64_t bytes, uint64_t pages)
+	                 {
+		                 notify_write(notify_opaque, guest_va + offset, bytes);
+		                 std::memcpy(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(bytes));
+		                 result.changed_pages += pages;
+	                 });
 	result.content_changed = result.changed_pages != 0u;
 	return result;
 }
@@ -259,23 +138,18 @@ GpuWritebackResult GpuWritebackPageCache::CopyChangedPages(void* guest_dst, cons
 	auto*       guest    = static_cast<uint8_t*>(guest_dst);
 	const auto* gpu      = static_cast<const uint8_t*>(gpu_src);
 	const auto  guest_va = reinterpret_cast<uint64_t>(guest_dst);
-	const auto  changed  = ChangedPages(m_snapshot, gpu, m_page_size);
+	const auto  changed  = TakeChangedPages(gpu);
 
 	GpuWritebackResult result;
-	for (uint64_t offset = 0; offset < size; offset += m_page_size)
-	{
-		const uint64_t page_bytes = std::min(m_page_size, size - offset);
-		if (changed[offset / m_page_size] == 0u)
-		{
-			continue;
-		}
-
-		notify_write(notify_opaque, guest_va + offset, page_bytes);
-		MemcpySkipAbsoluteRanges(guest + offset, gpu + offset, page_bytes, hole_begin, hole_end, hole_count);
-		std::memcpy(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(page_bytes));
-		result.changed_pages++;
-		result.copied_bytes += page_bytes;
-	}
+	VisitChangedRuns(changed, m_page_size, size,
+	                 [&](uint64_t offset, uint64_t bytes, uint64_t pages)
+	                 {
+		                 notify_write(notify_opaque, guest_va + offset, bytes);
+		                 MemcpySkipAbsoluteRanges(guest + offset, gpu + offset, bytes, hole_begin, hole_end, hole_count);
+		                 std::memcpy(m_snapshot.data() + offset, gpu + offset, static_cast<size_t>(bytes));
+		                 result.changed_pages += pages;
+		                 result.copied_bytes += bytes;
+	                 });
 	result.content_changed = result.changed_pages != 0u;
 	return result;
 }

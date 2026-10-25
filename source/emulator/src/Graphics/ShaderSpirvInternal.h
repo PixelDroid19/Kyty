@@ -38,6 +38,7 @@
 
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderFragmentLaneReduction.h"
+#include "Emulator/Graphics/ShaderStorageImage.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 
 #include "ShaderControlFlowGraph.h"
@@ -92,12 +93,6 @@ struct SpirvValue
 	String8   value;
 };
 
-enum class ShaderWaveBank : uint32_t
-{
-	Low = 0u,
-	High = 1u
-};
-
 enum class PixelInterpolationMode
 {
 	Unused,
@@ -129,10 +124,20 @@ public:
 	void GenerateSource();
 
 	[[nodiscard]] const String8& GetSource() const { return m_source; }
-	// Built by GenerateSource for the structured (non-banked) emission path.
+	// Built by GenerateSource.
 	[[nodiscard]] const ShaderControlFlowGraph& GetControlFlow() const { return m_control_flow; }
-	[[nodiscard]] bool UsesComputeWaveBanks() const;
 	[[nodiscard]] bool UsesNativeComputeWave() const;
+	// Split wave64 (ShaderSpirvSplitWave.cpp): two host subgroups per guest wave on the native per-lane path.
+	[[nodiscard]] bool UsesSplitComputeWave() const;
+	// The SubgroupLocalInvocationId builtin. A split wave keeps the guest lane in %gl_SubgroupInvocationID.
+	[[nodiscard]] String8 HostLaneVariable() const;
+	[[nodiscard]] String8 SplitWaveTypes() const;
+	[[nodiscard]] String8 SplitWaveVariables() const;
+	[[nodiscard]] String8 SplitWaveProlog() const;
+	[[nodiscard]] String8 SplitWaveDsOrder(uint32_t index) const;
+	[[nodiscard]] String8 SplitWaveFunctions() const;
+	void                  CheckSplitWaveCollectives(const String8& body) const;
+	void                  MarkStorageWrites(uint32_t annotations_end, uint32_t main_begin);
 	[[nodiscard]] bool NativeComputeWaveLayoutIsValid() const;
 	[[nodiscard]] bool EmitNativeComputeWaveProlog(String8* output) const;
 	// Architectural EXEC/VCC and SGPR mask destinations always contain packed
@@ -156,44 +161,20 @@ public:
 	[[nodiscard]] bool UsesFragmentPartialWave() const;
 	// The whole-wave OR reductions of a pixel program admitted as FragmentPartialWave; empty otherwise.
 	// Their network steps are not emitted and each read lowers to one subgroup reduction of the seed.
-	[[nodiscard]] const ShaderFragmentLaneReductions& FragmentLaneReductions() const;
-	[[nodiscard]] bool UsesFragmentCompute() const { return m_fragment_compute_info != nullptr; }
+	[[nodiscard]] const ShaderLaneReductions& LaneReductions() const;
 	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.
 	// Compute lowers it onto the shared %lds array; other stages carry it in
 	// a function-local spill array since only the writing lane can observe it.
 	[[nodiscard]] bool UsesDsAddtid() const;
 	[[nodiscard]] bool UsesDsAddtidLds() const;
-	[[nodiscard]] ShaderType GetHostShaderType() const { return UsesFragmentCompute() ? ShaderType::Compute : m_code.GetType(); }
-	void SetFragmentComputeInfo(const ShaderFragmentComputeInfo* info) { m_fragment_compute_info = info; }
 	[[nodiscard]] bool UsesGeometryCompute() const { return m_geometry_compute_info != nullptr; }
 	void SetGeometryComputeInfo(const ShaderGeometryComputeInfo* info) { m_geometry_compute_info = info; }
 	[[nodiscard]] bool EmitGeometryProlog(String8* output) const;
 	[[nodiscard]] bool EmitGeometryExport(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitGeometryAlloc(uint32_t index, String8* output) const;
-	[[nodiscard]] String8 FragmentTransportAnnotations() const;
-	[[nodiscard]] String8 FragmentTransportTypes() const;
-	[[nodiscard]] String8 FragmentTransportVariables() const;
-	[[nodiscard]] String8 FragmentLocalVariables() const;
-	[[nodiscard]] String8 FragmentProlog() const;
-	[[nodiscard]] String8 FragmentEpilog() const;
 	// " tex=...": the resolved T#/S# indices and the bound textures of an image instruction, for a refusal report.
 	[[nodiscard]] String8 ImageBindingSummary(const ShaderInstruction& inst) const;
 	[[nodiscard]] String8 ExportBindingSummary(const ShaderInstruction& inst) const;
-	[[nodiscard]] bool EmitFragmentInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
-	[[nodiscard]] bool EmitFragmentInterpolation(const ShaderInstruction& instruction, ShaderWaveBank bank,
-	                                              const String8& tag, String8* output) const;
-	[[nodiscard]] bool EmitFragmentExport(const ShaderInstruction& instruction, uint32_t index, ShaderWaveBank bank,
-	                                       const String8& tag, String8* output) const;
-	void FindFragmentConstants();
-	[[nodiscard]] bool EmitComputeWaveLaneInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveDppInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
-	[[nodiscard]] bool EmitComputeWavePermutation(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveLdsInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveGdsWrite(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveAluInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveBufferLoadInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveGenericInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
-	                                                     uint32_t index, String8* output);
 	// Emits a per-lane instruction whose SDWA destination selects one byte or word of its VGPR
 	// (ShaderSdwaPartialDestinationSupported): the whole-dword result, then the merge into the prior bits.
 	[[nodiscard]] bool EmitSdwaPartialDestinationInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
@@ -204,16 +185,6 @@ public:
 	[[nodiscard]] String8 MaterializeAssembledDescriptors(const ShaderInstruction& inst) const;
 	[[nodiscard]] String8 EmitMetadataStore(int row, int field, const String8& reg) const;
 	[[nodiscard]] String8 EmitThreadLimitLoad(uint32_t axis, const String8& id) const;
-	[[nodiscard]] bool    UsesBlockDispatch() const;
-	[[nodiscard]] bool    UsesBarrierPhases() const;
-	[[nodiscard]] String8 BarrierPhaseTypes() const;
-	[[nodiscard]] String8 BarrierPhaseJoin() const;
-	void                  BuildBlockDispatch();
-	[[nodiscard]] int     BlockId(uint32_t pc) const;
-	[[nodiscard]] String8 BlockDispatchProlog() const;
-	[[nodiscard]] String8 BlockDispatchBoundary(uint32_t index);
-	[[nodiscard]] bool    BlockDispatchControl(const ShaderInstruction& inst, uint32_t index, String8* output);
-	[[nodiscard]] String8 BlockDispatchEpilog() const;
 	[[nodiscard]] bool    UsesGuestDeviceAddress() const;
 	[[nodiscard]] String8 GuestDeviceAddressTypes(bool ulong_declared) const;
 	[[nodiscard]] String8 GuestDeviceAddressFunction() const;
@@ -221,23 +192,7 @@ public:
 	[[nodiscard]] String8 WrapVertexScalarBufferProbe(const ShaderInstruction& inst, uint32_t index,
 	                                                 uint32_t site, const String8& original);
 	[[nodiscard]] String8 EmitNativeThreadLimitExec() const;
-	[[nodiscard]] bool EmitComputeWaveCarryInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveMbcnt(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveAppend(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] String8 EmitGdsCounterPointer(uint16_t byte_offset, const String8& prefix) const;
-	[[nodiscard]] bool EmitComputeWaveGenericCompare(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
-	                                                 uint32_t index, String8* output);
-	[[nodiscard]] SpirvValue GetComputeWaveRegister(ShaderOperand operand, ShaderWaveBank bank, int word) const;
-	[[nodiscard]] bool EmitComputeWaveOperandUint(const ShaderOperand& operand, ShaderWaveBank bank,
-	                                              const String8& result_id, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveProlog(String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveValidLanes(String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveMaskBit(const ShaderOperand& mask, ShaderWaveBank bank,
-	                                         const String8& result_id, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveBallot(const String8& low_predicate, const String8& high_predicate,
-	                                        const String8& low_result, const String8& high_result, String8* output) const;
-	[[nodiscard]] bool EmitComputeWaveCompareU32(const ShaderInstruction& instruction, uint32_t index,
-	                                            const char* predicate_op, String8* output) const;
 	[[nodiscard]] bool           CanLoadPackedHalfForExport(int export_index, ShaderOperand op) const;
 	[[nodiscard]] bool UsesVertexClipProbe() const
 	{
@@ -353,6 +308,8 @@ public:
 	[[nodiscard]] bool IsIeeeModeEnabled() const { return GetFloatModeControls().ieee_mode; }
 	// MODE.FP_DENORM single-precision field (bits 5:4): bit 5 clear flushes output denormals.
 	[[nodiscard]] bool Float32OutputDenormalsFlushed() const { return (GetFloatModeControls().float_mode & 0x20u) == 0u; }
+	// MODE.FP_DENORM double/half field (bits 7:6): bit 7 clear flushes output denormals.
+	[[nodiscard]] bool Float64Float16OutputDenormalsFlushed() const { return (GetFloatModeControls().float_mode & 0x80u) == 0u; }
 
 	[[nodiscard]] bool EmitPixelRgbaProbe(String8* dst_source, uint32_t index, const String8& value_id,
 	                                      const char* symbol_prefix, bool include_frag_coord = false) const;
@@ -410,7 +367,7 @@ public:
 		for (uint32_t mapping = 0; mapping < m_bind->dynamic_sloads.records.Size(); ++mapping)
 		{
 			const auto& record = m_bind->dynamic_sloads.records.At(mapping);
-			if (record.instruction_pc == instruction_pc && (!found || record.offset_dw < *offset_dw))
+			if (record.instruction_pc == instruction_pc && !record.guest_load && (!found || record.offset_dw < *offset_dw))
 			{
 				*offset_dw = record.offset_dw;
 				found      = true;
@@ -430,7 +387,7 @@ public:
 		for (uint32_t mapping = 0; mapping < dynamic_sloads.records.Size(); ++mapping)
 		{
 			const auto& record = dynamic_sloads.records.At(mapping);
-			if (record.instruction_pc != instruction_pc)
+			if (record.instruction_pc != instruction_pc || record.guest_load)
 			{
 				continue;
 			}
@@ -533,11 +490,10 @@ private:
 	const ShaderVertexInputInfo*  m_vs_input_info = nullptr;
 	const ShaderComputeInputInfo* m_cs_input_info = nullptr;
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
-	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
 	const ShaderGeometryComputeInfo* m_geometry_compute_info = nullptr;
 	mutable int                   m_native_wave_tier = -1;
 	mutable bool                  m_lane_reductions_ready = false;
-	mutable ShaderFragmentLaneReductions m_lane_reductions;
+	mutable ShaderLaneReductions m_lane_reductions;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;
@@ -578,14 +534,17 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load);
 String8 get_scc_check(SccCheck scc_check, int dst_num);
 bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usage);
-// True when the writable (storage) bank holds 3D images; the plan admits one shape per bank.
-bool UsesVolumeStorageImages(const ShaderBindResources* bind);
 bool UsesUnsignedIntegerImages(const ShaderBindResources* bind);
-bool UsesUnsignedIntegerStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
 int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction_index,
                                    const ShaderBindResources& bind, int user_data_register_base);
 bool UsesMixedSampledImageNumericTypes(const ShaderBindResources* bind);
 bool UsesFormatlessStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
+bool UsesExtendedStorageImageFormats(const ShaderCode& code, const ShaderBindResources* bind);
+// The aliased views WriteHeader declares over the storage binding, in view order.
+Vector<ShaderStorageImageView> ShaderStorageImageViews(const ShaderCode& code, const ShaderBindResources* bind);
+// The view through which the writable descriptor of an image instruction is accessed.
+bool ResolveStorageImageView(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind, int user_data_register_base,
+                             ShaderStorageImageView* view);
 bool IsImageInstruction(const ShaderInstruction& inst);
 bool IsSampledImageInstruction(const ShaderInstruction& inst);
 bool IsStorageImageInstruction(const ShaderInstruction& inst);

@@ -81,9 +81,7 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 				// The RDNA2 SOPK table has no opcode 17.
 				KYTY_UNKNOWN_OP();
 			}
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_i_fork treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+			KYTY_NI("s_cbranch_i_fork");
 			break;
 		case 0x12:
 			if (next_gen)
@@ -92,9 +90,7 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 				// dropping it would silently change rounding, denormal or ID behavior.
 				KYTY_UNKNOWN_OP();
 			}
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_getreg_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+			KYTY_NI("s_getreg_b32");
 			break;
 		case 0x13:
 			if (next_gen)
@@ -103,9 +99,7 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 				// dropping it would silently change rounding, denormal or ID behavior.
 				KYTY_UNKNOWN_OP();
 			}
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setreg_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+			KYTY_NI("s_setreg_b32");
 			break;
 		case 0x14:
 			if (next_gen)
@@ -113,9 +107,7 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 				// The RDNA2 SOPK table has no opcode 20.
 				KYTY_UNKNOWN_OP();
 			}
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_getreg_regrd_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+			KYTY_NI("s_getreg_regrd_b32");
 			break;
 		case 0x15:
 			if (next_gen)
@@ -124,9 +116,7 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 				// dropping it would silently change rounding, denormal or ID behavior.
 				KYTY_UNKNOWN_OP();
 			}
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setreg_imm32_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+			KYTY_NI("s_setreg_imm32_b32");
 			break;
 		case 0x17:
 			// s_waitcnt_depctr: VALU/VS dependency-counter wait; a scheduling

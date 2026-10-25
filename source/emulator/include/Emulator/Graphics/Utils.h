@@ -904,6 +904,11 @@ void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image);
 void UtilSetImageLayoutOptimal(VulkanImage* image);
 
 void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffer);
+// A queue family without graphics support can neither name graphics pipeline
+// stages nor graphics access types. Graphics work runs on another queue and is
+// ordered by the host waits, so a barrier recorded there drops those access
+// types and waits on all of that queue's commands instead.
+[[nodiscard]] VkPipelineStageFlags VulkanQueueBarrierScope(const CommandBuffer* buffer, VkPipelineStageFlags stages, VkAccessFlags* access);
 void VulkanDeleteBuffer(GraphicContext* gctx, VulkanBuffer* buffer);
 
 inline std::pair<int, int> UtilCalcMipmapOffset(uint32_t lod, uint32_t width, uint32_t height)
@@ -974,17 +979,17 @@ enum class LabelForceCompleteKind : uint8_t
 	return completion_callback_issued;
 }
 
-[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool current_submission, uint8_t producer_effects,
-                                                                           bool pending_storage_has_aliases)
+[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool same_queue, uint8_t producer_effects,
+                                                                          bool pending_storage_has_aliases)
 {
-	// A label store relies on same-queue GPU ordering until one end-of-batch
+	// A label store relies on same-queue GPU ordering until its submission's
 	// fence publishes it. A write-back may join it only when no pending storage
 	// write has a GPU alias: guest-side readers (memory reads, device-address
 	// views) already wait for pending storage themselves, while aliases are
 	// refreshed only by the write-back. Notification callbacks stay synchronous.
 	constexpr uint8_t guest_store = 1u;
 	constexpr uint8_t write_back  = 2u;
-	if (!current_submission)
+	if (!same_queue)
 	{
 		return false;
 	}

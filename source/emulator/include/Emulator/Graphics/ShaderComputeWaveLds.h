@@ -11,12 +11,11 @@ namespace Kyty::Libs::Graphics {
 // banked LDS emitter. Other admitted LDS accesses take the ordered generic path.
 [[nodiscard]] bool ShaderComputeWaveLdsInstructionSupported(const ShaderInstruction& instruction);
 
-// The exact ds_write_b32 tuple with GDS=1, lowered by the banked GDS store
-// emitter (address M0.base + ADDR + offset).
+// The exact ds_write_b32 tuple with GDS=1 (address M0.base + ADDR + offset).
 [[nodiscard]] bool ShaderComputeWaveGdsWriteSupported(const ShaderInstruction& instruction);
 
-// Exact memory tuple shared by native DS emission and the ordered generic
-// paired path. GDS, legacy opcode aliases and lost atomic operands are refused.
+// Exact memory tuple admitted by native DS emission. GDS, legacy opcode
+// aliases and lost atomic operands are refused.
 [[nodiscard]] bool ShaderLdsMemoryInstructionSupported(const ShaderInstruction& instruction);
 
 } // namespace Kyty::Libs::Graphics

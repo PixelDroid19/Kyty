@@ -1,8 +1,5 @@
 #include "ShaderWaveHintCases.h"
 
-#include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
-#include "Emulator/Graphics/ShaderParse.h"
-
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 #include "ShaderWaveProbeSource.h"
 #include "VulkanComputeProbe.h"
@@ -30,26 +27,18 @@ void RunCase(VulkanComputeProbe& probe)
 	input.threads_num[1] = input.threads_num[2] = 1u;
 	input.thread_ids_num                        = 1u;
 	const ShaderComputeWaveRequest request {{64u, 1u, 1u}, {1u, 1u, 1u}, 0x41u, 0u, ShaderGuestLaneOrder::LinearXFirst};
-	if (ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
+	if (ShaderBuildSplitComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
 	    ShaderComputeWaveLayoutStatus::Supported)
 	{
 		Fail("paired wave64 layout unavailable");
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 
 	const std::array<uint32_t, 4> words {0xbfa00003u, 0x7e0202ffu, 0x12345678u,
 	                                     0xbf810000u}; // s_inst_prefetch m3; v_mov_b32 v1, literal; s_endpgm
-	ShaderCode                    code;
-	code.SetType(ShaderType::Compute);
-	if (!ShaderTryParseBounded(words.data(), sizeof(words), &code))
-	{
-		Fail("bounded parser rejected instruction prefetch fixture");
-	}
-	const auto admission = ShaderAnalyzeComputeWaveCode(code, input);
-	if (!admission.supported)
-	{
-		Fail(admission.reason.c_str());
-	}
-	const std::vector<WaveProbeObservation> observations {{"v1_low", "v1_high", true}};
+	const std::vector<WaveProbeObservation> observations {{"v1", true}};
 	String8                                 source, error;
 	if (!BuildWaveProbeSource(words.data(), sizeof(words), input, observations, {}, &source, &error))
 	{

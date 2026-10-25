@@ -24,7 +24,7 @@ bool BuildWaveMaskProbeSource(uint32_t compare_opcode, uint32_t compare_value, c
 	const std::string                       low     = destination == 106u ? "vcc_lo" : "s" + std::to_string(destination);
 	const std::string                       high    = destination == 106u ? "vcc_hi" : "s" + std::to_string(destination + 1u);
 	const std::vector<WaveProbeObservation> observations {
-	    {low, low}, {high, high}, {"scc", "scc"}, {"exec_lo", "exec_lo"}, {"exec_hi", "exec_hi"}};
+	    {low}, {high}, {"scc"}, {"exec_lo"}, {"exec_hi"}};
 	std::vector<WaveProbeSeed> seeds {{"scc", 1u}};
 	if (exec_seed != nullptr)
 	{

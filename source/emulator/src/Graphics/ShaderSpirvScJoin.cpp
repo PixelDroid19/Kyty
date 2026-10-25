@@ -63,6 +63,8 @@ struct ScJoinMemo
 	uint32_t                                                   disabled     = 0;
 	std::unordered_map<uint64_t, uint32_t>                     reconvergence;
 	std::map<std::tuple<uint32_t, uint32_t, uint32_t>, bool>   nested;
+	bool                                                       sources_ready = false;
+	std::unordered_map<uint32_t, std::vector<uint32_t>>        sources;
 };
 
 ScJoinMemo& sc_join_memo(const ShaderCode& code)
@@ -84,6 +86,8 @@ ScJoinMemo& sc_join_memo(const ShaderCode& code)
 		memo.disabled     = disabled;
 		memo.reconvergence.clear();
 		memo.nested.clear();
+		memo.sources_ready = false;
+		memo.sources.clear();
 	}
 	return memo;
 }
@@ -267,6 +271,32 @@ bool ScJoinIsLoopExitEdge(const ShaderCode& code, const ShaderInstruction& exit_
 		}
 	}
 	return false;
+}
+
+// Reconverging at the program end would open a selection whose merge lies past
+// the constructs enclosing the branch, so the edge returns where it is taken.
+bool ScJoinIsProgramExitEdge(const ShaderCode& code, const ShaderInstruction& inst)
+{
+	if (!instruction_is_conditional_branch(inst) || !operand_is_constant(inst.src[0]))
+	{
+		return false;
+	}
+	const auto&    instructions = code.GetInstructions();
+	const auto     exit         = ShaderLabel(inst);
+	const uint32_t target       = instruction_index(code, exit.GetDst());
+	if (exit.GetDst() <= inst.pc || target >= instructions.Size() || instructions.At(target).type != ShaderInstructionType::SEndpgm)
+	{
+		return false;
+	}
+	for (const auto& label: code.GetLabels())
+	{
+		// A backward edge spanning the branch makes it a loop exit.
+		if (!label.IsDisabled() && label.GetDst() <= inst.pc && label.GetSrc() >= inst.pc)
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 bool ScJoinIsLoopMergeLabel(const ShaderCode& code, const ShaderLabel& label)
@@ -855,15 +885,10 @@ uint32_t ScJoinFindParent(const ShaderCode& code, uint32_t src, uint32_t join_pc
 	return parent;
 }
 
-void ScJoinCollectSources(const ShaderCode& code, uint32_t join_pc, Vector<uint32_t>* out_srcs)
+// Every join's sources come from one pass over the program, indexed by the
+// reconvergence point; emission asks for them at every label.
+static void CollectAllSources(const ShaderCode& code, std::unordered_map<uint32_t, std::vector<uint32_t>>* sources)
 {
-	EXIT_IF(out_srcs == nullptr);
-	out_srcs->Clear();
-	// Zero denotes an unresolved forward reconvergence, never a forward join.
-	if (join_pc == 0)
-	{
-		return;
-	}
 	const auto& instructions = code.GetInstructions();
 	for (uint32_t i = 0; i < instructions.Size(); i++)
 	{
@@ -885,16 +910,42 @@ void ScJoinCollectSources(const ShaderCode& code, uint32_t join_pc, Vector<uint3
 			continue;
 		}
 		// Loop exits keep the guest merge label under OpLoopMerge — never sc_join.
-		if (ScJoinIsLoopExitEdge(code, cand))
+		if (ScJoinIsLoopExitEdge(code, cand) || ScJoinIsProgramExitEdge(code, cand))
 		{
 			continue;
 		}
 		const uint32_t fall_pc = (i + 1 < instructions.Size()) ? instructions.At(i + 1).pc : taken.GetDst();
-		const uint32_t recon   = ScJoinFindReconvergence(code, taken.GetDst(), fall_pc);
-		if (recon == join_pc)
-		{
-			out_srcs->Add(cand.pc);
-		}
+		(*sources)[ScJoinFindReconvergence(code, taken.GetDst(), fall_pc)].push_back(cand.pc);
+	}
+}
+
+void ScJoinCollectSources(const ShaderCode& code, uint32_t join_pc, Vector<uint32_t>* out_srcs)
+{
+	EXIT_IF(out_srcs == nullptr);
+	out_srcs->Clear();
+	// Zero denotes an unresolved forward reconvergence, never a forward join.
+	if (join_pc == 0)
+	{
+		return;
+	}
+	if (!sc_join_memo(code).sources_ready)
+	{
+		std::unordered_map<uint32_t, std::vector<uint32_t>> sources;
+		CollectAllSources(code, &sources);
+		// The collection leaves labels unchanged, so the memo is still current.
+		auto& memo         = sc_join_memo(code);
+		memo.sources       = std::move(sources);
+		memo.sources_ready = true;
+	}
+	const auto& memo  = sc_join_memo(code);
+	const auto  found = memo.sources.find(join_pc);
+	if (found == memo.sources.end())
+	{
+		return;
+	}
+	for (const uint32_t src: found->second)
+	{
+		out_srcs->Add(src);
 	}
 }
 

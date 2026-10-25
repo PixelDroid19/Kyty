@@ -5,7 +5,6 @@
 #include "Kyty/Core/LinkList.h"
 #include "Kyty/Core/Threads.h"
 
-#include "Emulator/Graphics/AsyncJob.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GpuSubmissionCoordinator.h"
@@ -15,11 +14,11 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/HardwareContext.h"
+#include "Emulator/Kernel/Pthread.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -397,8 +396,8 @@ public:
 	[[nodiscard]] bool    FlipIssued() const { return m_flip_issued; }
 	[[nodiscard]] bool    CompletionCallbackIssued() const { return m_completion_callback_sources != 0u; }
 	[[nodiscard]] uint8_t CompletionCallbackSources() const { return m_completion_callback_sources; }
-	// A wait on a plain label store of the current submission was answered by
-	// queue order; the batch still retires that submission before it ends.
+	// A wait on a plain label store of a submission of this queue was answered
+	// by queue order; the batch still retires that submission before it ends.
 	[[nodiscard]] bool TakeConsolidatedPlainWait()
 	{
 		const bool pending        = m_consolidated_plain_wait;
@@ -418,6 +417,8 @@ private:
 	void                 PublishCompletedSubmissions();
 	void                 WaitUntilPublishedUnlessReentrant(SubmissionId submission);
 	SubmissionId         BufferFlushForGpuWait();
+	void                 SubmitRecordedWorkIfGpuIdle();
+	void                 SubmitRecordedDispatchesBeforeDraw();
 
 	struct Counter
 	{
@@ -467,6 +468,12 @@ private:
 	// Which completion callbacks the batch recorded (GraphicsBatchCanDeferSubmissionCompletion bits).
 	uint8_t  m_completion_callback_sources = 0u;
 	bool     m_consolidated_plain_wait     = false;
+	// Draws and dispatches recorded since this processor's last submission.
+	uint32_t        m_operations_since_submit     = 0;
+	// When this processor last submitted a command buffer.
+	std::chrono::steady_clock::time_point m_last_submit_time;
+	// A guest dispatch is recorded in the current command buffer.
+	bool            m_dispatch_recorded           = false;
 	uint64_t m_sumbit_id                   = 0;
 	uint64_t m_synthetic_occlusion_counter = 0;
 	uint32_t m_last_pm4_op                 = 0;
@@ -524,7 +531,7 @@ private:
 class GraphicsRing
 {
 public:
-	GraphicsRing(): m_job1("Thread_Gfx_Draw"), m_job2("Thread_Gfx_Const") { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
+	GraphicsRing() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~GraphicsRing() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(GraphicsRing);
@@ -568,22 +575,25 @@ private:
 		{
 			void Wait()
 			{
-				std::unique_lock<std::mutex> lock(mutex);
-				condition.wait(lock, [&] { return complete; });
+				Core::LockGuard lock(mutex);
+				while (!complete)
+				{
+					Kernel::PthreadInterruptibleWait(&condition, &mutex);
+				}
 			}
 
 			void Signal()
 			{
 				{
-					std::lock_guard<std::mutex> lock(mutex);
+					Core::LockGuard lock(mutex);
 					complete = true;
 				}
-				condition.notify_all();
+				condition.SignalAll();
 			}
 
-			std::mutex              mutex;
-			std::condition_variable condition;
-			bool                    complete = false;
+			Core::Mutex   mutex;
+			Core::CondVar condition;
+			bool          complete = false;
 		};
 
 		CmdBuffer draw_buffer;
@@ -611,9 +621,6 @@ private:
 	Core::List<CmdBatch> m_cmd_batches;
 	bool                 m_done = true;
 	bool                 m_idle = true;
-
-	AsyncJob m_job1;
-	AsyncJob m_job2;
 
 	CommandProcessor* m_cp = nullptr;
 };

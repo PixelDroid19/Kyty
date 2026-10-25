@@ -2,6 +2,8 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Kernel/Pthread.h"
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -74,7 +76,7 @@ VideoOutHostAccessGate::AccessPin VideoOutHostAccessGate::Acquire()
 	m_mutex.Lock();
 	while (m_quiescing)
 	{
-		m_state_changed.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_state_changed, &m_mutex);
 	}
 	EXIT_IF(m_active_accesses == UINT32_MAX);
 	m_active_accesses++;
@@ -138,13 +140,13 @@ VideoOutHostAccessGate::DrainPin VideoOutHostAccessGate::Drain()
 	Core::LockGuard lock(m_mutex);
 	while (m_quiescing)
 	{
-		m_state_changed.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_state_changed, &m_mutex);
 	}
 	m_quiescing = true;
 	m_draining  = true;
 	while (m_active_accesses != 0)
 	{
-		m_state_changed.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_state_changed, &m_mutex);
 	}
 	return DrainPin(this);
 }
@@ -156,7 +158,7 @@ VideoOutHostAccessGate::QuiescePin VideoOutHostAccessGate::FinishDrain()
 	m_draining = false;
 	while (m_active_progress != 0)
 	{
-		m_state_changed.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_state_changed, &m_mutex);
 	}
 	return QuiescePin(this);
 }
@@ -175,12 +177,12 @@ VideoOutHostAccessGate::QuiescePin VideoOutHostAccessGate::Quiesce()
 	m_mutex.Lock();
 	while (m_quiescing)
 	{
-		m_state_changed.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_state_changed, &m_mutex);
 	}
 	m_quiescing = true;
 	while (m_active_accesses != 0 || m_active_progress != 0)
 	{
-		m_state_changed.Wait(&m_mutex);
+		Kernel::PthreadInterruptibleWait(&m_state_changed, &m_mutex);
 	}
 	m_mutex.Unlock();
 	return QuiescePin(this);

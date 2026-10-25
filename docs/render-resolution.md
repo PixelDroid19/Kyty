@@ -22,6 +22,9 @@ The active render-resolution keys are:
   minification to at least that ratio; point-sampled and unnormalized samplers
   keep their guest state. This is a host image-quality option, not a
   resolution setting.
+- `PresentFpsLimit`: caps host presents per second; `0` (default) leaves
+  presentation unpaced. It is a host test aid that bounds GPU load on fast
+  screens, not guest flip pacing.
 
 The matching environment variables are:
 
@@ -32,6 +35,7 @@ The matching environment variables are:
 - `KYTY_PRESENTATION_FILTER`
 - `KYTY_PRESENTATION_FSR_SHARPNESS`
 - `KYTY_TEXTURE_ANISOTROPY`
+- `KYTY_PRESENT_FPS_LIMIT`
 
 The launcher's configuration dialog edits every key above. The scope is
 enabled only in `Fixed` mode and the sharpness only with the `Fsr` filter,

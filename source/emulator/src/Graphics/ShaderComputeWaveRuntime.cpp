@@ -140,8 +140,8 @@ constexpr uint32_t kGen5AllowedNativeBits = kComputeShaderEnable | kOrderMode | 
 	layout_request.lds_dwords    = request.lds_dwords;
 	layout_request.lane_order    = request.lane_order;
 
-	ShaderComputeWaveLayout paired {};
-	auto                    result = LayoutResult(ShaderBuildPairedComputeWaveLayout(layout_request, capabilities, &paired));
+	ShaderComputeWaveLayout split {};
+	auto                    result = LayoutResult(ShaderBuildSplitComputeWaveLayout(layout_request, capabilities, &split));
 	if (result.status == ShaderComputeWavePreflightStatus::Supported && request.tg_size_en)
 	{
 		result = Rejected(ShaderComputeWavePreflightReason::UnsupportedSystemSgpr);
@@ -156,7 +156,7 @@ constexpr uint32_t kGen5AllowedNativeBits = kComputeShaderEnable | kOrderMode | 
 	candidate.native_equivalent_valid = BuildNativeEquivalentLayout(request, capabilities, &candidate.native_equivalent_layout);
 	if (result.status == ShaderComputeWavePreflightStatus::Supported)
 	{
-		candidate.wave_layout = paired;
+		candidate.wave_layout = split;
 	} else if (result.status == ShaderComputeWavePreflightStatus::Rejected && candidate.native_equivalent_valid)
 	{
 		// Only the per-lane route remains; admission must prove the program.
@@ -216,8 +216,8 @@ ShaderComputeWavePreflightResult ShaderBuildComputeWaveDispatchPlan(const Shader
 		return result;
 	}
 
-	// Wave64 runs through the paired-lane layout, or one guest lane per
-	// invocation once the program is proven wave-width independent.
+	// Wave64 runs as two 32-lane subgroups per guest wave (split), or one guest
+	// lane per invocation once the program is proven wave-width independent.
 	if (request.is_next_gen && (request.dispatch_mode & kWave32Enable) == 0u)
 	{
 		return BuildWave64DispatchPlan(request, capabilities, plan);
@@ -232,7 +232,7 @@ ShaderComputeWavePreflightResult ShaderBuildComputeWaveDispatchPlan(const Shader
 	{
 		// Gen5 currently admits only the ordinary group-count modes whose local
 		// lane ordering has a contract. Partial groups, thread counts and other
-		// initiator controls remain fail-closed for both native and paired paths.
+		// initiator controls remain fail-closed for both native and split paths.
 		if ((request.dispatch_mode & ~kGen5AllowedNativeBits) != 0u || (request.dispatch_mode & kComputeShaderEnable) == 0u)
 		{
 			return Rejected(ShaderComputeWavePreflightReason::UnsupportedDispatchMode);

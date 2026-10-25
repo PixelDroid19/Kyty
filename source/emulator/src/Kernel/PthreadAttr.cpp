@@ -267,7 +267,8 @@ int KYTY_SYSV_ABI PthreadAttrGet(Pthread thread, PthreadAttr* attr)
 	// pthread attributes are queried by IL2CPP while registering conservative
 	// GC roots.  The creation template keeps a null stack address when Linux
 	// chooses the native stack, so expose the active pthread mapping instead.
-	// This must agree with the stack pointer captured by KernelRaiseException.
+	// This must agree with the stack pointer captured when a context request
+	// interrupts the thread (PthreadContext.cpp).
 	pthread_attr_t native_attr {};
 	if ((*attr)->stack_addr == nullptr && pthread_getattr_np(thread->p, &native_attr) == 0)
 	{

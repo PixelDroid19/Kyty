@@ -1,19 +1,19 @@
 #include "Emulator/AudioHost.h"
 
 #include "Kyty/Core/DbgAssert.h"
+#include "Kyty/Core/Threads.h"
 
 #include "Emulator/AudioPcm.h"
 #include "Emulator/Host/Clock.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
 
 #include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <climits>
-#include <condition_variable>
 #include <cstdio>
 #include <string>
-#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -73,12 +73,12 @@ public:
 		*port = PortOut {};
 	}
 
-	std::mutex              mutex;
-	std::condition_variable state_changed;
-	bool                    host_paused   = false;
-	bool                    shutting_down = false;
-	PortOut                 out_ports[OUT_PORTS_MAX];
-	PortIn                  in_ports[IN_PORTS_MAX];
+	Core::Mutex   mutex;
+	Core::CondVar state_changed;
+	bool          host_paused   = false;
+	bool          shutting_down = false;
+	PortOut       out_ports[OUT_PORTS_MAX];
+	PortIn        in_ports[IN_PORTS_MAX];
 };
 
 std::shared_ptr<HostAudio> HostAudio::Create(std::string* error)
@@ -103,25 +103,32 @@ HostAudio::~HostAudio()
 
 void HostAudio::Shutdown()
 {
-	std::unique_lock lock(m_impl->mutex);
-	if (m_impl->shutting_down)
 	{
-		return;
+		Core::LockGuard lock(m_impl->mutex);
+		if (m_impl->shutting_down)
+		{
+			return;
+		}
+		m_impl->shutting_down = true;
+		m_impl->host_paused   = false;
+		m_impl->state_changed.SignalAll();
+		for (auto& port: m_impl->out_ports)
+		{
+			Impl::CloseOutputPort(&port);
+		}
 	}
-	m_impl->shutting_down = true;
-	m_impl->host_paused   = false;
-	m_impl->state_changed.notify_all();
-	for (auto& port: m_impl->out_ports)
-	{
-		Impl::CloseOutputPort(&port);
-	}
-	lock.unlock();
 	SDL_QuitSubSystem(SDL_INIT_AUDIO);
+}
+
+bool HostAudio::ShuttingDown()
+{
+	Core::LockGuard lock(m_impl->mutex);
+	return m_impl->shutting_down;
 }
 
 HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t freq, Format format)
 {
-	std::lock_guard lock(m_impl->mutex);
+	Core::LockGuard lock(m_impl->mutex);
 	if (m_impl->shutting_down || !Kyty::Emulator::HostClock::IsPeriodicIntervalValid(samples_num, freq))
 	{
 		return Id::Invalid();
@@ -184,7 +191,7 @@ HostAudio::Id HostAudio::AudioOutOpen(int type, uint32_t samples_num, uint32_t f
 
 bool HostAudio::AudioOutClose(Id handle)
 {
-	std::lock_guard lock(m_impl->mutex);
+	Core::LockGuard lock(m_impl->mutex);
 	if (m_impl->shutting_down || !Impl::IsValid(m_impl->out_ports, handle))
 	{
 		return false;
@@ -195,7 +202,7 @@ bool HostAudio::AudioOutClose(Id handle)
 
 bool HostAudio::AudioOutValid(Id handle)
 {
-	std::lock_guard lock(m_impl->mutex);
+	Core::LockGuard lock(m_impl->mutex);
 	return !m_impl->shutting_down && Impl::IsValid(m_impl->out_ports, handle);
 }
 
@@ -205,7 +212,7 @@ bool HostAudio::AudioOutGetStatus(Id handle, int* type, int* channels_num)
 	{
 		return false;
 	}
-	std::lock_guard lock(m_impl->mutex);
+	Core::LockGuard lock(m_impl->mutex);
 	if (m_impl->shutting_down || !Impl::IsValid(m_impl->out_ports, handle))
 	{
 		return false;
@@ -222,7 +229,7 @@ bool HostAudio::AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume
 	{
 		return false;
 	}
-	std::lock_guard lock(m_impl->mutex);
+	Core::LockGuard lock(m_impl->mutex);
 	if (m_impl->shutting_down || !Impl::IsValid(m_impl->out_ports, handle))
 	{
 		return false;
@@ -253,7 +260,7 @@ bool HostAudio::AudioOutSetVolume(Id handle, uint32_t bitflag, const int* volume
 
 void HostAudio::SetHostPaused(bool paused)
 {
-	std::lock_guard lock(m_impl->mutex);
+	Core::LockGuard lock(m_impl->mutex);
 	if (m_impl->shutting_down || m_impl->host_paused == paused)
 	{
 		return;
@@ -276,78 +283,99 @@ void HostAudio::SetHostPaused(bool paused)
 	}
 	if (!paused)
 	{
-		m_impl->state_changed.notify_all();
+		m_impl->state_changed.SignalAll();
+	}
+}
+
+void HostAudio::WaitWhileHostPaused()
+{
+	Core::LockGuard lock(m_impl->mutex);
+	while (m_impl->host_paused && !m_impl->shutting_down)
+	{
+		Kernel::PthreadInterruptibleWait(&m_impl->state_changed, &m_impl->mutex);
 	}
 }
 
 bool HostAudio::AudioOutOutputs(const OutputParam* params, uint32_t num, uint32_t* samples_num)
 {
-	if (params == nullptr || samples_num == nullptr || num == 0 || num > OUT_PORTS_MAX)
+	uint64_t   wake_deadline = 0;
+	const bool queued        = AudioOutQueue(params, num, samples_num, &wake_deadline);
+	{
+		Kernel::PthreadInterruptibleScope any_syscall;
+		Kyty::Emulator::HostClock::SleepUntil(wake_deadline);
+	}
+	return queued;
+}
+
+bool HostAudio::AudioOutQueue(const OutputParam* params, uint32_t num, uint32_t* samples_num, uint64_t* wake_deadline_us)
+{
+	if (params == nullptr || samples_num == nullptr || wake_deadline_us == nullptr || num == 0 || num > OUT_PORTS_MAX)
 	{
 		return false;
 	}
 
-	std::unique_lock lock(m_impl->mutex);
-	m_impl->state_changed.wait(lock, [this] { return !m_impl->host_paused || m_impl->shutting_down; });
-	if (m_impl->shutting_down)
+	uint64_t wake_deadline = 0;
+	bool     all_queues_ok = true;
 	{
-		return false;
-	}
-	for (uint32_t i = 0; i < num; i++)
-	{
-		if (!Impl::IsValid(m_impl->out_ports, params[i].handle))
+		Core::LockGuard lock(m_impl->mutex);
+		if (m_impl->shutting_down)
 		{
 			return false;
 		}
+		for (uint32_t i = 0; i < num; i++)
+		{
+			if (!Impl::IsValid(m_impl->out_ports, params[i].handle))
+			{
+				return false;
+			}
+		}
+
+		*samples_num       = m_impl->out_ports[params[0].handle.GetId()].samples_num;
+		const uint64_t now = Kyty::Emulator::HostClock::NowMicroseconds();
+		wake_deadline      = now;
+
+		for (uint32_t i = 0; i < num; i++)
+		{
+			auto&          port          = m_impl->out_ports[params[i].handle.GetId()];
+			const uint64_t resync_window = (4'000'000ull * port.samples_num) / port.freq;
+			if (port.next_deadline == 0 || (now > port.next_deadline && now - port.next_deadline > resync_window))
+			{
+				port.next_deadline    = now;
+				port.period_remainder = 0;
+			}
+			port.next_deadline +=
+			    Kyty::Emulator::HostClock::NextPeriodicIntervalMicroseconds(port.samples_num, port.freq, &port.period_remainder);
+			wake_deadline = std::max(wake_deadline, port.next_deadline);
+
+			if (params[i].data == nullptr || port.stream == nullptr)
+			{
+				continue;
+			}
+			if (!AudioPcmApplyChannelVolumes(params[i].data, port.samples_num, static_cast<uint32_t>(port.channels_num), port.pcm_format,
+			                                 port.volume, &port.volume_buffer) ||
+			    port.volume_buffer.size() > static_cast<size_t>(INT_MAX))
+			{
+				return false;
+			}
+
+			const bool queue_ok =
+			    SDL_PutAudioStreamData(port.stream, port.volume_buffer.data(), static_cast<int>(port.volume_buffer.size()));
+			if (!queue_ok && !port.queue_error_logged)
+			{
+				KYTY_LOG_ERROR("Kyty audio output failed: %s\n", SDL_GetError());
+				port.queue_error_logged = true;
+			}
+			all_queues_ok = all_queues_ok && queue_ok;
+		}
 	}
 
-	*samples_num                 = m_impl->out_ports[params[0].handle.GetId()].samples_num;
-	const uint64_t now           = Kyty::Emulator::HostClock::NowMicroseconds();
-	uint64_t       wake_deadline = now;
-	bool           all_queues_ok = true;
-
-	for (uint32_t i = 0; i < num; i++)
-	{
-		auto&          port          = m_impl->out_ports[params[i].handle.GetId()];
-		const uint64_t resync_window = (4'000'000ull * port.samples_num) / port.freq;
-		if (port.next_deadline == 0 || (now > port.next_deadline && now - port.next_deadline > resync_window))
-		{
-			port.next_deadline    = now;
-			port.period_remainder = 0;
-		}
-		port.next_deadline +=
-		    Kyty::Emulator::HostClock::NextPeriodicIntervalMicroseconds(port.samples_num, port.freq, &port.period_remainder);
-		wake_deadline = std::max(wake_deadline, port.next_deadline);
-
-		if (params[i].data == nullptr || port.stream == nullptr)
-		{
-			continue;
-		}
-		if (!AudioPcmApplyChannelVolumes(params[i].data, port.samples_num, static_cast<uint32_t>(port.channels_num), port.pcm_format,
-		                                 port.volume, &port.volume_buffer) ||
-		    port.volume_buffer.size() > static_cast<size_t>(INT_MAX))
-		{
-			return false;
-		}
-
-		const bool queue_ok =
-		    SDL_PutAudioStreamData(port.stream, port.volume_buffer.data(), static_cast<int>(port.volume_buffer.size()));
-		if (!queue_ok && !port.queue_error_logged)
-		{
-			KYTY_LOG_ERROR("Kyty audio output failed: %s\n", SDL_GetError());
-			port.queue_error_logged = true;
-		}
-		all_queues_ok = all_queues_ok && queue_ok;
-	}
-
-	lock.unlock();
-	Kyty::Emulator::HostClock::SleepUntil(wake_deadline);
+	*wake_deadline_us = wake_deadline;
 	return all_queues_ok;
 }
 
 HostAudio::Id HostAudio::AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format)
 {
-	std::lock_guard lock(m_impl->mutex);
+	Core::LockGuard lock(m_impl->mutex);
 	if (m_impl->shutting_down || !Kyty::Emulator::HostClock::IsPeriodicIntervalValid(samples_num, freq))
 	{
 		return Id::Invalid();
@@ -370,7 +398,7 @@ HostAudio::Id HostAudio::AudioInOpen(uint32_t type, uint32_t samples_num, uint32
 
 bool HostAudio::AudioInClose(Id handle)
 {
-	std::lock_guard lock(m_impl->mutex);
+	Core::LockGuard lock(m_impl->mutex);
 	if (m_impl->shutting_down || !Impl::IsValid(m_impl->in_ports, handle))
 	{
 		return false;
@@ -381,7 +409,7 @@ bool HostAudio::AudioInClose(Id handle)
 
 bool HostAudio::AudioInValid(Id handle)
 {
-	std::lock_guard lock(m_impl->mutex);
+	Core::LockGuard lock(m_impl->mutex);
 	return !m_impl->shutting_down && Impl::IsValid(m_impl->in_ports, handle);
 }
 
@@ -395,7 +423,7 @@ uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 	uint32_t freq     = 0;
 	uint64_t deadline = 0;
 	{
-		std::lock_guard lock(m_impl->mutex);
+		Core::LockGuard lock(m_impl->mutex);
 		if (m_impl->shutting_down || !Impl::IsValid(m_impl->in_ports, handle))
 		{
 			return 0;
@@ -416,7 +444,10 @@ uint32_t HostAudio::AudioInInput(Id handle, void* dest)
 		}
 		port.last_input_time = deadline;
 	}
-	Kyty::Emulator::HostClock::SleepUntil(deadline);
+	{
+		Kernel::PthreadInterruptibleScope any_syscall;
+		Kyty::Emulator::HostClock::SleepUntil(deadline);
+	}
 	return samples;
 }
 

@@ -102,9 +102,10 @@ int KYTY_SYSV_ABI PthreadRwlockRdlock(PthreadRwlock* rwlock)
 
 	if (*rwlock == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
+	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
 	int result = pthread_rwlock_rdlock(&(*rwlock)->p);
 
 	// KYTY_LOG_DEBUG("\trwlock rdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
@@ -135,9 +136,10 @@ int KYTY_SYSV_ABI PthreadRwlockTimedrdlock(PthreadRwlock* rwlock, KernelUseconds
 
 	if (*rwlock == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
+	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
 #ifdef __APPLE__
 	timespec timeout {};
 	usec_to_timespec(&timeout, usec);
@@ -180,9 +182,10 @@ int KYTY_SYSV_ABI PthreadRwlockTimedwrlock(PthreadRwlock* rwlock, KernelUseconds
 
 	if (*rwlock == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
+	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
 #ifdef __APPLE__
 	timespec timeout {};
 	usec_to_timespec(&timeout, usec);
@@ -225,7 +228,7 @@ int KYTY_SYSV_ABI PthreadRwlockTryrdlock(PthreadRwlock* rwlock)
 
 	if (*rwlock == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
 	int result = pthread_rwlock_tryrdlock(&(*rwlock)->p);
@@ -259,7 +262,7 @@ int KYTY_SYSV_ABI PthreadRwlockTrywrlock(PthreadRwlock* rwlock)
 
 	if (*rwlock == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
 	int result = pthread_rwlock_trywrlock(&(*rwlock)->p);
@@ -301,7 +304,7 @@ int KYTY_SYSV_ABI PthreadRwlockUnlock(PthreadRwlock* rwlock)
 
 	if (*rwlock == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
 	int result = pthread_rwlock_unlock(&(*rwlock)->p);
@@ -343,9 +346,10 @@ int KYTY_SYSV_ABI PthreadRwlockWrlock(PthreadRwlock* rwlock)
 
 	if (*rwlock == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
+	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
 	int result = pthread_rwlock_wrlock(&(*rwlock)->p);
 
 	// KYTY_LOG_DEBUG("\trwlock wrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
@@ -370,7 +374,7 @@ int KYTY_SYSV_ABI PthreadRwlockattrDestroy(PthreadRwlockattr* attr)
 
 	if (*attr == nullptr)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n");
+		return KERNEL_ERROR_EINVAL;
 	}
 
 	int result = pthread_rwlockattr_destroy(&(*attr)->p);
@@ -388,6 +392,11 @@ int KYTY_SYSV_ABI PthreadRwlockattrDestroy(PthreadRwlockattr* attr)
 int KYTY_SYSV_ABI PthreadRwlockattrInit(PthreadRwlockattr* attr)
 {
 	PRINT_NAME();
+
+	if (attr == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	*attr = new PthreadRwlockattrPrivate {};
 
@@ -420,7 +429,7 @@ int KYTY_SYSV_ABI PthreadRwlockattrGettype(PthreadRwlockattr* attr, int* type)
 {
 	PRINT_NAME();
 
-	if (type == nullptr || attr == nullptr)
+	if (type == nullptr || attr == nullptr || *attr == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
@@ -453,7 +462,7 @@ int KYTY_SYSV_ABI PthreadRwlockattrSettype(PthreadRwlockattr* attr, int type)
 {
 	PRINT_NAME();
 
-	if (attr == nullptr)
+	if (attr == nullptr || *attr == nullptr)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}

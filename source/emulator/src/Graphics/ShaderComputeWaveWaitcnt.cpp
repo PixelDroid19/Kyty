@@ -48,11 +48,6 @@ bool IsLgkmZeroOnlyWait(const ShaderInstruction& instruction)
 
 } // namespace
 
-bool ShaderComputeWaveIsExactWait(const ShaderInstruction& instruction)
-{
-	return IsExactSoppWaitTuple(instruction);
-}
-
 bool ShaderComputeWaveIsLgkmZeroOnlyWait(const ShaderInstruction& instruction)
 {
 	return IsLgkmZeroOnlyWait(instruction);

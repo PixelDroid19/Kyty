@@ -201,6 +201,18 @@ void KYTY_SYSV_ABI CountCxaDestructor(void* arg)
 	}
 }
 
+std::vector<int>* g_exit_list_events = nullptr;
+
+void KYTY_SYSV_ABI RecordExitListAtexitOne(void* /*unused*/)
+{
+	g_exit_list_events->push_back(1);
+}
+
+void KYTY_SYSV_ABI RecordExitListAtexitThree(void* /*unused*/)
+{
+	g_exit_list_events->push_back(3);
+}
+
 void* KYTY_SYSV_ABI SetPthreadKeySpecific(void* arg)
 {
 	auto* context = static_cast<PthreadKeyEntryContext*>(arg);
@@ -1349,6 +1361,35 @@ TEST(EmulatorLibcCxxLocale, CxaAtexitSynchronizesConcurrentRegistration)
 	EXPECT_EQ(callbacks.load(std::memory_order_relaxed), worker_count * registrations_each);
 	finalize(&dso);
 	EXPECT_EQ(callbacks.load(std::memory_order_relaxed), worker_count * registrations_each);
+}
+
+TEST(EmulatorLibcCxxLocale, AtexitSharesTheCxaExitListNewestFirst)
+{
+	EnsureLog();
+	const auto [cxa_atexit, finalize] = ResolveCxaFunctions();
+	ASSERT_NE(cxa_atexit, nullptr);
+	ASSERT_NE(finalize, nullptr);
+	finalize(nullptr);
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* atexit_record = ResolveLibcFunction(&symbols, u"8G2LB+A3rzg");
+	ASSERT_NE(atexit_record, nullptr);
+	using AtexitFunc  = KYTY_SYSV_ABI int (*)(CxaDestructor);
+	auto* libc_atexit = reinterpret_cast<AtexitFunc>(atexit_record->vaddr);
+
+	int                dso = 0;
+	std::vector<int>   events;
+	std::mutex         events_mutex;
+	CxaCallbackContext second {&events, &events_mutex, 2};
+	g_exit_list_events = &events;
+
+	ASSERT_EQ(libc_atexit(RecordExitListAtexitOne), 0);
+	ASSERT_EQ(cxa_atexit(RecordCxaDestructor, &second, &dso), 0);
+	ASSERT_EQ(libc_atexit(RecordExitListAtexitThree), 0);
+	finalize(nullptr);
+	g_exit_list_events = nullptr;
+	EXPECT_EQ(events, (std::vector<int> {3, 2, 1}));
 }
 
 TEST(EmulatorLibcCxxLocale, CtypeCaseTablesInitializeSafelyUnderConcurrentFirstUse)

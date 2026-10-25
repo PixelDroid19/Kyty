@@ -157,6 +157,10 @@ struct SharedBackingSpan
 // one host query clears every span up to the next populated page. Unsupported
 // hosts and query errors leave spans unmarked.
 void           FindUnpopulatedSharedBackingSpans(SharedBacking* backing, SharedBackingSpan* spans, size_t count);
+// Snapshot query: one byte per page of the page-aligned backing interval
+// [backing_offset, backing_offset + size), nonzero when the page is populated
+// or swapped out. Hosts without a population query report every page populated.
+bool           QueryPopulatedSharedBackingPages(SharedBacking* backing, uint64_t backing_offset, uint64_t size, uint8_t* populated);
 // The backing gains a page only when a view first touches it and loses pages
 // only through DiscardSharedBackingRange, so an unchanged population means no
 // page of any view became resident or was dropped in between.
@@ -392,6 +396,11 @@ bool RestoreProtection(uint64_t address, uint64_t size, uint32_t restore_token) 
 // Applies restore_token natively without the VM lock. Only a lease authority that is fenced against
 // guest protection changes (see above) may call it.
 bool RestoreProtectionSignalSafe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+// Signal-safe: true only when the host lets this process write every page of the page-aligned range now.
+// Unmapped or write-denied pages, and hosts without the query (see CanQueryHostWriteSignalSafe), give false.
+// Pages it reports writable may be populated, as the write it vouches for would populate them.
+bool HostGrantsWriteSignalSafe(uint64_t address, uint64_t size) noexcept;
+bool CanQueryHostWriteSignalSafe() noexcept;
 // Ends every lease of `authority` and reapplies the guest protection of those pages. When a page's
 // protection cannot be reapplied, its lease stays without an authority and the call fails; in every
 // case the VM no longer refers to `authority` afterwards.

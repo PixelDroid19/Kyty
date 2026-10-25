@@ -917,8 +917,10 @@ void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, ui
 // offset. Bit equations match the guest render-target layout used by titles
 // that sample intermediate color targets; the previous Mesa 16-pipe ADDRLIB
 // pattern produced horizontal banding and false-color atlas tiles on those
-// surfaces. Block geometry: 4 BPE → 128×128, 8 BPE → 128×64 elements per
-// 64 KiB block (see TileGetRenderTargetSize).
+// surfaces. Block geometry: 4 BPE → 128×128, 8 BPE → 128×64, 16 BPE → 64×64
+// elements per 64 KiB block (see TileGetRenderTargetSize). x and y are surface
+// coordinates: the 8 and 16 BPE patterns XOR in x6/y6, which lie above their
+// block, and every other term masks its own bits.
 static uint32_t Sw64kRxWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_per_element)
 {
 	uint32_t offset = 0;
@@ -974,6 +976,24 @@ static uint32_t Sw64kRxWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_
 		offset ^= (x << 5u) & 0x0300u;
 		offset ^= (x << 6u) & 0x0800u;
 		offset ^= (x << 9u) & 0xa000u;
+		return offset;
+	}
+
+	if (bytes_per_element == 16u)
+	{
+		// x0 y0 x1 y1 | x3^y3 x4^y4 y5^x6 x5^y6 | y2 x2 y3 x4.
+		offset |= (x & 0x1u) << 4u;
+		offset |= (y & 0x1u) << 5u;
+		offset |= (x & 0x2u) << 5u;
+		offset |= (y & 0x2u) << 6u;
+		offset |= ((x ^ y) & 0x8u) << 5u;
+		offset |= ((x ^ y) & 0x10u) << 5u;
+		offset |= (((y >> 5u) ^ (x >> 6u)) & 1u) << 10u;
+		offset |= (((x >> 5u) ^ (y >> 6u)) & 1u) << 11u;
+		offset |= (y & 0x4u) << 10u;
+		offset |= (x & 0x4u) << 11u;
+		offset |= (y & 0x8u) << 11u;
+		offset |= (x & 0x10u) << 11u;
 		return offset;
 	}
 
@@ -1076,7 +1096,11 @@ static uint32_t Sw64kPipeSliceXor(uint32_t slice)
 
 uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t slice)
 {
-	if (bytes_per_element != 1u && bytes_per_element != 2u && bytes_per_element != 4u && bytes_per_element != 8u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported SW_64KB_R_X element size (continuing)\n"); }
+	if (bytes_per_element != 1u && bytes_per_element != 2u && bytes_per_element != 4u && bytes_per_element != 8u &&
+	    bytes_per_element != 16u)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported SW_64KB_R_X element size (continuing)\n");
+	}
 	if (pitch_elems == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u condition ignored (continuing)\n"); }
 
 	static constexpr uint32_t k_block_bytes = 65536u;
@@ -1087,9 +1111,7 @@ uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint
 	const uint32_t xb       = x / block_w;
 	const uint32_t yb       = y / block_h;
 	const uint64_t blk_idx  = static_cast<uint64_t>(yb) * blocks_x + xb;
-	const uint32_t lx       = x % block_w;
-	const uint32_t ly       = y % block_h;
-	return (blk_idx * k_block_bytes) + (Sw64kRxWithinBlockOffset(lx, ly, bytes_per_element) ^ Sw64kPipeSliceXor(slice));
+	return (blk_idx * k_block_bytes) + (Sw64kRxWithinBlockOffset(x, y, bytes_per_element) ^ Sw64kPipeSliceXor(slice));
 }
 
 uint32_t TileGet64KBBlockWidth(uint32_t bytes_per_element)

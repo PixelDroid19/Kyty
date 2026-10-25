@@ -74,8 +74,7 @@ void CheckTerminator(const ShaderCode& code, uint32_t pc)
 	}
 }
 
-String8 Generate(uint32_t opcode, uint32_t registers, uint16_t offset, bool paired, uint32_t lds_dwords = 4,
-                 uint32_t threads = 64)
+String8 Generate(uint32_t opcode, uint32_t registers, uint16_t offset, uint32_t lds_dwords = 4, uint32_t threads = 64)
 {
 	const uint32_t words[] = {0xd8000000u | (opcode << 18u) | offset, registers, 0xbf810000u};
 	ShaderCode code;
@@ -86,7 +85,6 @@ String8 Generate(uint32_t opcode, uint32_t registers, uint16_t offset, bool pair
 	input.threads_num[0] = threads;
 	input.threads_num[1] = input.threads_num[2] = 1;
 	input.lds_dwords = lds_dwords;
-	if (paired) { input.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {threads, 1, 1}, {threads / 2, 1, 1}, 64, 32, 2, threads / 64, lds_dwords}; }
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 	Vector<uint32_t> binary;
 	String8 error;
@@ -96,7 +94,7 @@ String8 Generate(uint32_t opcode, uint32_t registers, uint16_t offset, bool pair
 		             "LDS fixture module failure: pc=0x00000000 opcode=0x%02x registers=0x%08x offset=0x%04x "
 		             "strategy=%s lds_dwords=%u threads=%u\ncase: %s\n"
 		             "condition: ShaderToolchain::Run(source, &binary, &error) && !binary.IsEmpty()\n%s\n",
-		             opcode, registers, static_cast<unsigned>(offset), paired ? "paired64-on32" : "native", lds_dwords, threads,
+		             opcode, registers, static_cast<unsigned>(offset), "native", lds_dwords, threads,
 		             g_fixture_case.c_str(), error.IsEmpty() ? "<empty toolchain error>" : error.c_str());
 		std::fflush(stderr);
 		std::_Exit(3);
@@ -301,41 +299,36 @@ void RunWidths()
 	Initialize();
 	const uint32_t reads[] = {0x36u, 0x76u, 0xfeu, 0xffu};
 	const uint32_t writes[] = {0x0du, 0x4du, 0xdeu, 0xdfu};
-	for (bool paired: {false, true})
+	for (int count = 1; count <= 4; ++count)
 	{
-		for (int count = 1; count <= 4; ++count)
+		for (bool write: {false, true})
 		{
-			for (bool write: {false, true})
+			// Reads deliberately overwrite the address VGPR as their first result.
+			const auto source = Generate(write ? writes[count - 1] : reads[count - 1], write ? 0x100u : 0u, 0);
+			const std::string bank;
+			for (bool active: {false, true})
 			{
-				// Reads deliberately overwrite the address VGPR as their first result.
-				const auto source = Generate(write ? writes[count - 1] : reads[count - 1], write ? 0x100u : 0u, 0, paired);
-				for (const std::string bank: paired ? std::vector<std::string>{"_low", "_high"} : std::vector<std::string>{""})
+				for (uint32_t address: {0u, static_cast<uint32_t>((4 - count) * 4), 16u, 0xfffffffcu})
 				{
-					for (bool active: {false, true})
+					auto state = MakeState(address, active, bank);
+					const auto before = state;
+					Execute(source, bank, &state);
+					const bool valid = active && address < 16;
+					Check(state.accesses == (valid ? static_cast<unsigned>(count) : 0u));
+					for (int word = 0; word < count; ++word)
 					{
-						for (uint32_t address: {0u, static_cast<uint32_t>((4 - count) * 4), 16u, 0xfffffffcu})
-						{
-							auto state = MakeState(address, active, bank);
-							const auto before = state;
-							Execute(source, bank, &state);
-							const bool valid = active && address < 16;
-							Check(state.accesses == (valid ? static_cast<unsigned>(count) : 0u));
-							for (int word = 0; word < count; ++word)
-							{
-								if (write && valid) { Check(state.lds[address / 4 + word] == before.registers.at("%v" + std::to_string(word + 1) + bank)); }
-								if (!write && active) { Check(state.registers.at("%v" + std::to_string(word) + bank) == (valid ? before.lds[address / 4 + word] : 0u)); }
-							}
-							if (!write || !valid) { Check(state.lds == before.lds); }
-							if (!active) { Check(state.registers == before.registers); }
-						}
-						// Partial spans and unaligned addresses exercise host safety only;
-						// this test does not specify their undefined hardware data values.
-						for (uint32_t address: {1u, 12u, 13u})
-						{
-							auto state = MakeState(address, active, bank);
-							Execute(source, bank, &state);
-						}
+						if (write && valid) { Check(state.lds[address / 4 + word] == before.registers.at("%v" + std::to_string(word + 1) + bank)); }
+						if (!write && active) { Check(state.registers.at("%v" + std::to_string(word) + bank) == (valid ? before.lds[address / 4 + word] : 0u)); }
 					}
+					if (!write || !valid) { Check(state.lds == before.lds); }
+					if (!active) { Check(state.registers == before.registers); }
+				}
+				// Partial spans and unaligned addresses exercise host safety only;
+				// this test does not specify their undefined hardware data values.
+				for (uint32_t address: {1u, 12u, 13u})
+				{
+					auto state = MakeState(address, active, bank);
+					Execute(source, bank, &state);
 				}
 			}
 		}
@@ -349,46 +342,39 @@ void RunRead2AndOffsets()
 	// Index 4 denotes an OOB result. The in-range pairs pin DWORD scaling and
 	// exercise the second read after the first result overwrites the address VGPR.
 	const Read2Case cases[] = {{0x0500u, 0, 4}, {0x0005u, 4, 0}, {0x0301u, 1, 3}, {0x0103u, 3, 1}};
-	for (bool paired: {false, true})
+	for (const auto& test: cases)
 	{
-		for (const auto& test: cases)
+		const auto source = Generate(0x37u, 0u, test.offset);
+		const std::string bank;
+		for (bool active: {false, true})
 		{
-			const auto source = Generate(0x37u, 0u, test.offset, paired);
-			for (const std::string bank: paired ? std::vector<std::string>{"_low", "_high"} : std::vector<std::string>{""})
+			auto state = MakeState(0, active, bank);
+			const auto before = state;
+			Execute(source, bank, &state);
+			Check(state.accesses == (active ? (test.first < 4u) + (test.second < 4u) : 0u));
+			Check(state.lds == before.lds);
+			if (active)
 			{
-				for (bool active: {false, true})
-				{
-					auto state = MakeState(0, active, bank);
-					const auto before = state;
-					Execute(source, bank, &state);
-					Check(state.accesses == (active ? (test.first < 4u) + (test.second < 4u) : 0u));
-					Check(state.lds == before.lds);
-					if (active)
-					{
-						Check(state.registers.at("%v0" + bank) == (test.first < 4u ? before.lds[test.first] : 0u));
-						Check(state.registers.at("%v1" + bank) == (test.second < 4u ? before.lds[test.second] : 0u));
-					} else
-					{
-						Check(state.registers == before.registers);
-					}
-				}
+				Check(state.registers.at("%v0" + bank) == (test.first < 4u ? before.lds[test.first] : 0u));
+				Check(state.registers.at("%v1" + bank) == (test.second < 4u ? before.lds[test.second] : 0u));
+			} else
+			{
+				Check(state.registers == before.registers);
 			}
 		}
-		for (uint16_t offset: {4u, 0x100u})
+	}
+	for (uint16_t offset: {4u, 0x100u})
+	{
+		const auto source = Generate(0x36u, 0u, offset);
+		const std::string bank;
+		for (uint32_t address: {0u, 0xffffff00u})
 		{
-			const auto source = Generate(0x36u, 0u, offset, paired);
-			for (const std::string bank: paired ? std::vector<std::string>{"_low", "_high"} : std::vector<std::string>{""})
-			{
-				for (uint32_t address: {0u, 0xffffff00u})
-				{
-					auto state = MakeState(address, true, bank);
-					const auto before = state;
-					Execute(source, bank, &state);
-					const bool valid = address == 0u && offset == 4u;
-					Check(state.accesses == (valid ? 1u : 0u) && state.lds == before.lds);
-					Check(state.registers.at("%v0" + bank) == (valid ? before.lds[1] : 0u));
-				}
-			}
+			auto state = MakeState(address, true, bank);
+			const auto before = state;
+			Execute(source, bank, &state);
+			const bool valid = address == 0u && offset == 4u;
+			Check(state.accesses == (valid ? 1u : 0u) && state.lds == before.lds);
+			Check(state.registers.at("%v0" + bank) == (valid ? before.lds[1] : 0u));
 		}
 	}
 }
@@ -396,41 +382,36 @@ void RunRead2AndOffsets()
 void RunAtomics()
 {
 	Initialize();
-	for (bool paired: {false, true})
+	struct AtomicCase { uint32_t opcode; uint32_t result; };
+	// Independent ISA results for LDS=0x80000010, DATA=0xa0000001.
+	const AtomicCase cases[] = {{0, 0x20000011u}, {1, 0xe000000fu}, {5, 0x80000010u}, {6, 0xa0000001u},
+	                            {7, 0x80000010u}, {8, 0xa0000001u}, {9, 0x80000000u}, {10, 0xa0000011u},
+	                            {11, 0x20000011u}, {0x20, 0x20000011u}, {0x2d, 0xa0000001u}};
+	for (const auto& test: cases)
 	{
-		struct AtomicCase { uint32_t opcode; uint32_t result; };
-		// Independent ISA results for LDS=0x80000010, DATA=0xa0000001.
-		const AtomicCase cases[] = {{0, 0x20000011u}, {1, 0xe000000fu}, {5, 0x80000010u}, {6, 0xa0000001u},
-		                            {7, 0x80000010u}, {8, 0xa0000001u}, {9, 0x80000000u}, {10, 0xa0000011u},
-		                            {11, 0x20000011u}, {0x20, 0x20000011u}, {0x2d, 0xa0000001u}};
-		for (const auto& test: cases)
+		const uint32_t opcode = test.opcode;
+		const bool returns = opcode == 0x20u || opcode == 0x2du;
+		const auto source = Generate(opcode, returns ? 0x04000100u : 0x00000100u, 0);
+		const std::string bank;
+		for (bool active: {false, true})
 		{
-			const uint32_t opcode = test.opcode;
-			const bool returns = opcode == 0x20u || opcode == 0x2du;
-			const auto source = Generate(opcode, returns ? 0x04000100u : 0x00000100u, 0, paired);
-			for (const std::string bank: paired ? std::vector<std::string>{"_low", "_high"} : std::vector<std::string>{""})
+			for (uint32_t address: {12u, 16u, 0xfffffffcu})
 			{
-				for (bool active: {false, true})
-				{
-					for (uint32_t address: {12u, 16u, 0xfffffffcu})
-					{
-						auto state = MakeState(address, active, bank);
-						const auto before = state;
-						Execute(source, bank, &state);
-						const bool valid = active && address == 12u;
-						Check(state.accesses == (valid ? 1u : 0u));
-						if (!valid) { Check(state.lds == before.lds); }
-						if (!active) { Check(state.registers == before.registers); }
-						if (returns && active) { Check(state.registers.at("%v4" + bank) == (valid ? before.lds[3] : 0u)); }
-						if (valid) { Check(state.lds[3] == test.result); }
-					}
-				}
+				auto state = MakeState(address, active, bank);
+				const auto before = state;
+				Execute(source, bank, &state);
+				const bool valid = active && address == 12u;
+				Check(state.accesses == (valid ? 1u : 0u));
+				if (!valid) { Check(state.lds == before.lds); }
+				if (!active) { Check(state.registers == before.registers); }
+				if (returns && active) { Check(state.registers.at("%v4" + bank) == (valid ? before.lds[3] : 0u)); }
+				if (valid) { Check(state.lds[3] == test.result); }
 			}
 		}
 	}
 }
 
-void RunBuffer(uint32_t control, uint32_t second_flags, bool paired, bool next_gen = true, int corrupt = 0)
+void RunBuffer(uint32_t control, uint32_t second_flags, bool next_gen = true, int corrupt = 0)
 {
 	Initialize();
 	Config::SetNextGen(next_gen);
@@ -453,7 +434,6 @@ void RunBuffer(uint32_t control, uint32_t second_flags, bool paired, bool next_g
 	ShaderComputeInputInfo input {};
 	input.threads_num[0] = 64;
 	input.threads_num[1] = input.threads_num[2] = 1;
-	if (paired) { input.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0}; }
 	input.bind.storage_buffers.buffers_num = 1;
 	input.bind.storage_buffers.start_register[0] = 16;
 	input.bind.storage_buffers.sources[0] = ShaderStorageBindingSource::MetadataSharp;
@@ -478,9 +458,9 @@ void RunBuffer(uint32_t control, uint32_t second_flags, bool paired, bool next_g
 	std::_Exit(ShaderToolchain::Run(source, &binary, &error) && !binary.IsEmpty() ? 0 : 3);
 }
 
-void RunMubuf(uint32_t first_flags, uint32_t second_flags, bool paired)
+void RunMubuf(uint32_t first_flags, uint32_t second_flags)
 {
-	RunBuffer(0xe0302000u | first_flags, second_flags, paired);
+	RunBuffer(0xe0302000u | first_flags, second_flags);
 }
 
 ShaderCode ParsePair(uint32_t control, uint32_t registers, bool next_gen)
@@ -657,27 +637,22 @@ void RunFullAtomicOffsets()
 			const auto code = ParsePair(0xd8000000u | (test.opcode << 18u) | offset, registers, true);
 			Check(code.GetInstructions().At(0).ds_offset == offset && ShaderLdsMemoryInstructionSupported(code.GetInstructions().At(0)));
 		}
-		for (bool paired: {false, true})
+		const auto source = Generate(test.opcode, registers, 0x100u, 68);
+		const std::string bank;
+		for (bool active: {false, true})
 		{
-			const auto source = Generate(test.opcode, registers, 0x100u, paired, 68);
-			for (const std::string bank: paired ? std::vector<std::string>{"_low", "_high"} : std::vector<std::string>{""})
+			for (uint32_t address: {12u, 16u, 0xffffff00u})
 			{
-				for (bool active: {false, true})
-				{
-					for (uint32_t address: {12u, 16u, 0xffffff00u})
-					{
-						auto state = MakeState(address, active, bank);
-						state.lds.resize(68, 0x80000010u);
-						const auto before = state;
-						Execute(source, bank, &state);
-						const bool valid = active && address == 12u;
-						auto expected = before.lds;
-						if (valid) { expected[67] = test.result; }
-						Check(state.lds == expected && state.accesses == (valid ? 1u : 0u));
-						if (!active) { Check(state.registers == before.registers); }
-						if (returns && active) { Check(state.registers.at("%v4" + bank) == (valid ? 0x80000010u : 0u)); }
-					}
-				}
+				auto state = MakeState(address, active, bank);
+				state.lds.resize(68, 0x80000010u);
+				const auto before = state;
+				Execute(source, bank, &state);
+				const bool valid = active && address == 12u;
+				auto expected = before.lds;
+				if (valid) { expected[67] = test.result; }
+				Check(state.lds == expected && state.accesses == (valid ? 1u : 0u));
+				if (!active) { Check(state.registers == before.registers); }
+				if (returns && active) { Check(state.registers.at("%v4" + bank) == (valid ? 0x80000010u : 0u)); }
 			}
 		}
 	}
@@ -688,75 +663,61 @@ void RunAddtid(bool shared)
 	Initialize();
 	// 1024 is the existing Function-array capacity, not a new guest LDS domain.
 	const uint32_t bound = shared ? 128u : 1024u;
-	for (bool paired: {false, true})
+	for (bool write: {false, true})
 	{
-		for (bool write: {false, true})
+		for (uint16_t offset: {0u, 0x100u})
 		{
-			for (uint16_t offset: {0u, 0x100u})
+			const std::string module_case = String8::FromPrintf(
+			    "ADDTID storage=%s strategy=native operation=%s offset=0x%04x bound_dwords=%u threads=128",
+			    shared ? "shared" : "private", write ? "write" : "read",
+			    static_cast<unsigned>(offset), bound).c_str();
+			g_fixture_case = module_case + " phase=module";
+			const auto source = Generate(write ? 0xb0u : 0xb1u, write ? 0x100u : 0x04000000u, offset, shared ? bound : 0u, 128);
+			for (uint32_t physical: {0u, 31u, 32u, 63u, 64u, 127u})
 			{
-				const std::string module_case = String8::FromPrintf(
-				    "ADDTID storage=%s strategy=%s operation=%s offset=0x%04x bound_dwords=%u threads=128",
-				    shared ? "shared" : "private", paired ? "paired64-on32" : "native", write ? "write" : "read",
-				    static_cast<unsigned>(offset), bound).c_str();
-				g_fixture_case = module_case + " phase=module";
-				const auto source = Generate(write ? 0xb0u : 0xb1u, write ? 0x100u : 0x04000000u, offset, paired, shared ? bound : 0u, 128);
-				for (uint32_t physical: paired ? std::vector<uint32_t>{0, 31, 32, 63} : std::vector<uint32_t>{0, 31, 32, 63, 64, 127})
+				const std::string bank;
+				const uint32_t logical = physical;
+				const uint32_t tid = shared ? logical % 64u : 0u;
+				struct Address { uint32_t m0; uint32_t word; };
+				const Address addresses[] = {{0, tid + offset / 4u}, {0xffff0004u, tid + offset / 4u + 1u},
+				                             {(bound - tid - 1u) * 4u - offset, bound - 1u},
+				                             {(bound - tid) * 4u - offset, bound}, {0xfffcu, bound}};
+				for (const auto& address: addresses)
 				{
-					for (const std::string bank: paired ? std::vector<std::string>{"_low", "_high"} : std::vector<std::string>{""})
+					for (bool active: {false, true})
 					{
-						const uint32_t logical = paired ? (physical / 32u) * 64u + physical % 32u + (bank == "_high" ? 32u : 0u) : physical;
-						const uint32_t tid = shared || paired ? logical % 64u : 0u;
-						struct Address { uint32_t m0; uint32_t word; };
-						const Address addresses[] = {{0, tid + offset / 4u}, {0xffff0004u, tid + offset / 4u + 1u},
-						                             {(bound - tid - 1u) * 4u - offset, bound - 1u},
-						                             {(bound - tid) * 4u - offset, bound}, {0xfffcu, bound}};
-						for (const auto& address: addresses)
+						auto state = MakeState(0, active, bank);
+						state.lds.resize(shared ? bound : 0u);
+						state.spill.resize(shared ? 0u : bound);
+						auto& memory = shared ? state.lds : state.spill;
+						for (uint32_t i = 0; i < bound; ++i) { memory[i] = 0xc0100000u + i; }
+						state.registers["%m0"] = address.m0;
+						state.registers["%gl_LocalInvocationIndex"] = logical;
+						state.inputs["%wave_lane_id"] = physical % 32u;
+						g_fixture_case = module_case + String8::FromPrintf(
+						    " phase=execute physical=%u logical=%u bank=%s tid=%u m0=0x%08x oracle_word=%u active=%u "
+						    "exec_lo=0x%08x exec_hi=0x%08x",
+						    physical, logical, bank.empty() ? "native" : bank.c_str(), tid, address.m0, address.word,
+						    static_cast<unsigned>(active), state.registers.at("%exec_lo"), 0u).c_str();
+						const auto before = state;
+						Execute(source, bank, &state, true);
+						const bool valid = active && address.word < bound;
+						g_fixture_case += String8::FromPrintf(" phase=check accesses=%u expected_accesses=%u v4=0x%08x old_v4=0x%08x",
+						                                     state.accesses, valid ? 1u : 0u, state.registers.at("%v4" + bank),
+						                                     before.registers.at("%v4" + bank)).c_str();
+						Check(state.accesses == (valid ? 1u : 0u));
+						auto expected = shared ? before.lds : before.spill;
+						if (write && valid) { expected[address.word] = before.registers.at("%v1" + bank); }
+						if (memory != expected)
 						{
-							for (bool active: {false, true})
-							{
-								auto state = MakeState(0, active, bank);
-								state.lds.resize(shared ? bound : 0u);
-								state.spill.resize(shared ? 0u : bound);
-								auto& memory = shared ? state.lds : state.spill;
-								for (uint32_t i = 0; i < bound; ++i) { memory[i] = 0xc0100000u + i; }
-								state.registers["%m0"] = address.m0;
-								state.registers["%gl_LocalInvocationIndex"] = logical;
-								state.inputs["%wave_lane_id"] = physical % 32u;
-								state.inputs["%wave_logical_low"] = (physical / 32u) * 64u + physical % 32u;
-								state.inputs["%wave_logical_high"] = state.inputs["%wave_logical_low"] + 32u;
-								if (paired)
-								{
-									const uint32_t bit = 1u << (physical % 32u);
-									state.registers[bank == "_low" ? "%exec_lo" : "%exec_hi"] = active ? bit : ~bit;
-									state.registers[bank == "_low" ? "%exec_hi" : "%exec_lo"] = active ? 0u : bit;
-								}
-								g_fixture_case = module_case + String8::FromPrintf(
-								    " phase=execute physical=%u logical=%u bank=%s tid=%u m0=0x%08x oracle_word=%u active=%u "
-								    "exec_lo=0x%08x exec_hi=0x%08x",
-								    physical, logical, bank.empty() ? "native" : bank.c_str(), tid, address.m0, address.word,
-								    static_cast<unsigned>(active), state.registers.at("%exec_lo"),
-								    paired ? state.registers.at("%exec_hi") : 0u).c_str();
-								const auto before = state;
-								Execute(source, bank, &state, true);
-								const bool valid = active && address.word < bound;
-								g_fixture_case += String8::FromPrintf(" phase=check accesses=%u expected_accesses=%u v4=0x%08x old_v4=0x%08x",
-								                                     state.accesses, valid ? 1u : 0u, state.registers.at("%v4" + bank),
-								                                     before.registers.at("%v4" + bank)).c_str();
-								Check(state.accesses == (valid ? 1u : 0u));
-								auto expected = shared ? before.lds : before.spill;
-								if (write && valid) { expected[address.word] = before.registers.at("%v1" + bank); }
-								if (memory != expected)
-								{
-									const auto difference = std::mismatch(memory.begin(), memory.end(), expected.begin());
-									g_fixture_case += String8::FromPrintf(" memory_word=%u actual=0x%08x expected=0x%08x",
-									                                     static_cast<unsigned>(difference.first - memory.begin()),
-									                                     *difference.first, *difference.second).c_str();
-								}
-								Check(memory == expected);
-								if (!write && active) { Check(state.registers.at("%v4" + bank) == (valid ? expected[address.word] : 0u)); }
-								if (!active || write) { Check(state.registers == before.registers); }
-							}
+							const auto difference = std::mismatch(memory.begin(), memory.end(), expected.begin());
+							g_fixture_case += String8::FromPrintf(" memory_word=%u actual=0x%08x expected=0x%08x",
+							                                     static_cast<unsigned>(difference.first - memory.begin()),
+							                                     *difference.first, *difference.second).c_str();
 						}
+						Check(memory == expected);
+						if (!write && active) { Check(state.registers.at("%v4" + bank) == (valid ? expected[address.word] : 0u)); }
+						if (!active || write) { Check(state.registers == before.registers); }
 					}
 				}
 			}
@@ -764,7 +725,7 @@ void RunAddtid(bool shared)
 	}
 }
 
-void RunRejectedDs(uint32_t control, ShaderInstructionType expected, bool paired)
+void RunRejectedDs(uint32_t control, ShaderInstructionType expected)
 {
 	Initialize();
 	const uint32_t words[] = {control, 0x00000100u, 0xbf810000u};
@@ -779,87 +740,14 @@ void RunRejectedDs(uint32_t control, ShaderInstructionType expected, bool paired
 	input.threads_num[0] = 64;
 	input.threads_num[1] = input.threads_num[2] = 1;
 	input.lds_dwords = 4;
-	if (paired) { input.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 4}; }
-	if (paired)
-	{
-		const auto analysis = ShaderAnalyzeComputeWaveCode(code, input);
-		Check(!analysis.supported && analysis.unsupported_pc == 0);
-	}
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 	std::_Exit(source.IsEmpty() ? 3 : 0);
 }
 
-// ds_write_b32 with GDS=1 stores at M0.base + ADDR + offset (RDNA2 ISA 3.7,
-// 10.4.3). ADDR + offset at or beyond M0.size, a misaligned address and one
-// outside the host GDS window fault on hardware and must not touch the buffer.
-void RunGdsWrite()
-{
-	Initialize();
-	struct Case { uint32_t m0; uint32_t address; bool active; int word; };
-	// offset 4 is added to every address below; word -1 means dropped.
-	const Case cases[] = {
-	    {0x0000c000u, 4u, true, 2},           // base 0, full 48 KiB window
-	    {0x01000040u, 0u, true, 0x41},        // nonzero base
-	    {0x01000040u, 0x38u, true, 0x4f},     // last dword inside M0.size
-	    {0x01000040u, 0x3cu, true, -1},       // ADDR + offset reaches M0.size
-	    {0x0000c000u, 0xfffffffcu, true, -1}, // ADDR alone beyond M0.size
-	    {0x0000c000u, 2u, true, -1},          // misaligned
-	    {0xbffc0010u, 0u, true, -1},          // beyond the host GDS window
-	    {0x0000c000u, 4u, false, -1},         // inactive lane
-	};
-	const uint32_t words[] = {0xd8360004u, 0x00000100u, 0xbf810000u};
-	ShaderCode code;
-	code.SetType(ShaderType::Compute);
-	if (!ShaderTryParseBounded(words, sizeof(words), &code)) { std::_Exit(2); }
-	CheckTerminator(code, 8);
-	const auto& inst = code.GetInstructions().At(0);
-	Check(inst.type == ShaderInstructionType::DsWriteB32 && inst.format == ShaderInstructionFormat::VaddrVdataOffsetGds &&
-	      inst.ds_offset == 4u && !ShaderLdsMemoryInstructionSupported(inst) && ShaderComputeWaveGdsWriteSupported(inst));
-	Check(ShaderClassifyComputeWaveInstruction(inst) == ShaderComputeWaveInstructionKind::BankedGdsWrite);
-	ShaderComputeInputInfo input {};
-	input.threads_num[0] = 64;
-	input.threads_num[1] = input.threads_num[2] = 1;
-	input.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0};
-	Check(ShaderAnalyzeComputeWaveCode(code, input).supported);
-	input.bind.gds_pointers.memory_used = true;
-	ShaderCalcBindingIndices(&input.bind);
-	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
-	Vector<uint32_t> binary;
-	String8 error;
-	g_fixture_case = error.c_str();
-	if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty()) { Fail(std::string("GDS module: ") + error.c_str()); }
-	for (const auto& test: cases)
-	{
-		for (const std::string bank: {"low", "high"})
-		{
-			State state;
-			state.gds.assign(0x3000u, 0u);
-			state.registers["%exec_lo"] = 0;
-			state.registers["%m0"] = test.m0;
-			for (const std::string other: {"low", "high"})
-			{
-				const std::string stem = "%wave_lds_" + other + "_0";
-				const bool lane = other == bank && test.active;
-				state.inputs[stem + "_address"] = test.address;
-				state.inputs[stem + "_data"] = 0x5a000000u + (other == "low" ? 1u : 2u);
-				state.inputs[stem + "_exec"] = lane ? 1u : 0u;
-			}
-			g_fixture_case = String8::FromPrintf("m0=0x%08x address=0x%08x active=%u bank=%s", test.m0, test.address,
-			                                     static_cast<unsigned>(test.active), bank.c_str()).c_str();
-			ExecuteBody(source.c_str(), "%wave_gds_m0_0 =", "%wave_lds_high_0_gds_merge = OpLabel", "", &state);
-			auto expected = std::vector<uint32_t>(0x3000u, 0u);
-			if (test.word >= 0) { expected[static_cast<size_t>(test.word)] = 0x5a000000u + (bank == "low" ? 1u : 2u); }
-			Check(state.accesses == (test.word >= 0 ? 1u : 0u));
-			Check(state.gds == expected);
-		}
-	}
-	std::_Exit(0);
-}
-
-// ds_ordered_count (DS opcode 0x3f) is GDS-only and its VDST/counter contract is
-// not evidenced. It must be refused at its own PC, never lowered to a barrier
-// that leaves VDST and the ordered counter unchanged.
-void RunOrderedCount(uint32_t control)
+// A DS operation without a lossless IR must be refused at its own PC: for example
+// ds_ordered_count (GDS-only, VDST/counter contract not evidenced) must never be
+// lowered to a barrier that leaves VDST and the ordered counter unchanged.
+void RunRefusedDsDecode(uint32_t control)
 {
 	Initialize();
 	const uint32_t words[] = {control, 0x00000100u, 0xbf810000u};
@@ -872,7 +760,7 @@ void RunOrderedCount(uint32_t control)
 	std::_Exit(0);
 }
 
-void RunSdwa(uint32_t control, bool paired)
+void RunSdwa(uint32_t control)
 {
 	Initialize();
 	const uint32_t words[] = {0x7e0c02f9u, control, 0xbf810000u};
@@ -885,14 +773,13 @@ void RunSdwa(uint32_t control, bool paired)
 	ShaderComputeInputInfo input {};
 	input.threads_num[0] = 64;
 	input.threads_num[1] = input.threads_num[2] = 1;
-	if (paired) { input.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0}; }
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 	Vector<uint32_t> binary;
 	String8 error;
 	std::_Exit(ShaderToolchain::Run(source, &binary, &error) && !binary.IsEmpty() ? 0 : 3);
 }
 
-void RunParsedInteger(bool next_gen, bool vop3, bool subtract, uint32_t sdst, bool paired, int corrupt)
+void RunParsedInteger(bool next_gen, bool vop3, bool subtract, uint32_t sdst, int corrupt)
 {
 	Initialize();
 	Config::SetNextGen(next_gen);
@@ -939,13 +826,6 @@ void RunParsedInteger(bool next_gen, bool vop3, bool subtract, uint32_t sdst, bo
 	ShaderComputeInputInfo input {};
 	input.threads_num[0] = 64;
 	input.threads_num[1] = input.threads_num[2] = 1;
-	if (paired) { input.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0}; }
-	if (paired && !next_gen && corrupt == 0)
-	{
-		const auto analysis = ShaderAnalyzeComputeWaveCode(code, input);
-		Check(!analysis.supported && analysis.unsupported_pc == 0 &&
-		      analysis.reason == "paired instruction has an unsupported second destination");
-	}
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 	if (!next_gen)
 	{
@@ -956,7 +836,7 @@ void RunParsedInteger(bool next_gen, bool vop3, bool subtract, uint32_t sdst, bo
 	std::_Exit(ShaderToolchain::Run(source, &binary, &error) && !binary.IsEmpty() ? 0 : 3);
 }
 
-void RunIntegerTuple(int corrupt, bool paired)
+void RunIntegerTuple(int corrupt)
 {
 	Initialize();
 	ShaderInstruction instruction {};
@@ -990,7 +870,6 @@ void RunIntegerTuple(int corrupt, bool paired)
 	ShaderComputeInputInfo input {};
 	input.threads_num[0] = 64;
 	input.threads_num[1] = input.threads_num[2] = 1;
-	if (paired) { input.wave_layout = {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0}; }
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 	Vector<uint32_t> binary;
 	String8 error;
@@ -1010,9 +889,6 @@ std::string MtbufRejection(uint32_t opcode, bool format = false)
 	else { text << "unknown mtbuf opcode: 0x" << std::hex << opcode << " at addr 0x00000000"; }
 	return text.str();
 }
-
-constexpr const char* kPairedCarryRejection = "paired-wave instruction contract unsupported: pc=0x00000000 reason="
-                                            "paired instruction has an unsupported second destination";
 
 #if defined(_WIN32)
 constexpr int kRejectedExit = 321;
@@ -1039,37 +915,30 @@ TEST(EmulatorShaderLdsBounds, AtomicsDiscardOutOfBoundsAndReturnZeroOnlyToActive
 	ASSERT_EXIT({ RunAtomics(); std::_Exit(0); }, ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorShaderLdsBounds, NativeAndPairedMubufRejectUnmodeledAndReservedFlags)
+TEST(EmulatorShaderLdsBounds, NativeMubufRejectUnmodeledAndReservedFlags)
 {
-	for (bool paired: {false, true})
+	ASSERT_EXIT(RunMubuf(0, 0), ::testing::ExitedWithCode(0), "");
+	ASSERT_EXIT(RunMubuf(0, 1u << 22u), ::testing::ExitedWithCode(0), ""); // SLC hint
+	ASSERT_EXIT(RunMubuf(1u << 15u, 0), ::testing::ExitedWithCode(0), ""); // DLC, ISA table 98
+	for (uint32_t first: {1u << 16u, 1u << 17u})
 	{
-		ASSERT_EXIT(RunMubuf(0, 0, paired), ::testing::ExitedWithCode(0), "");
-		ASSERT_EXIT(RunMubuf(0, 1u << 22u, paired), ::testing::ExitedWithCode(0), ""); // SLC hint
-		ASSERT_EXIT(RunMubuf(1u << 15u, 0, paired), ::testing::ExitedWithCode(0), ""); // DLC, ISA table 98
-		for (uint32_t first: {1u << 16u, 1u << 17u})
-		{
-			EXPECT_EXIT(RunMubuf(first, 0, paired), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::BufferLoadDword, true));
-		}
-		for (uint32_t second: {1u << 23u, 1u << 21u})
-		{
-			EXPECT_EXIT(RunMubuf(0, second, paired), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::BufferLoadDword, true));
-		}
+		EXPECT_EXIT(RunMubuf(first, 0), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::BufferLoadDword, true));
+	}
+	for (uint32_t second: {1u << 23u, 1u << 21u})
+	{
+		EXPECT_EXIT(RunMubuf(0, second), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::BufferLoadDword, true));
 	}
 }
 
-TEST(EmulatorShaderLdsBounds, NativeAndPairedSdwaRejectUnrepresentedControls)
+TEST(EmulatorShaderLdsBounds, NativeSdwaRejectUnrepresentedControls)
 {
-	for (bool paired: {false, true})
+	ASSERT_EXIT(RunSdwa(0x00000616u), ::testing::ExitedWithCode(0), "");
+	for (uint32_t control: {0x00070616u, 0x00400616u, 0x01000616u, 0x00080616u})
 	{
-		ASSERT_EXIT(RunSdwa(0x00000616u, paired), ::testing::ExitedWithCode(0), "");
-		for (uint32_t control: {0x00070616u, 0x00400616u, 0x01000616u, 0x00080616u})
-		{
-			EXPECT_EXIT(RunSdwa(control, paired), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::VMovB32, true));
-		}
+		EXPECT_EXIT(RunSdwa(control), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::VMovB32, true));
 	}
-	// A BYTE_0 destination select is merged by the per-lane emitter; the paired banks have no merge.
-	ASSERT_EXIT(RunSdwa(0x00000016u, false), ::testing::ExitedWithCode(0), "");
-	EXPECT_EXIT(RunSdwa(0x00000016u, true), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::VMovB32, true));
+	// A BYTE_0 destination select is merged by the per-lane emitter.
+	ASSERT_EXIT(RunSdwa(0x00000016u), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorShaderLdsBounds, NativeMtbufPreservesHintsAndRejectsTfeAndD16Aliases)
@@ -1082,13 +951,13 @@ TEST(EmulatorShaderLdsBounds, NativeMtbufPreservesHintsAndRejectsTfeAndD16Aliase
 		const auto expected = ((control >> 16u) & 7u) == 0 ? ShaderInstructionType::TBufferLoadFormatX
 		                      : (((control >> 16u) & 7u) == 1 ? ShaderInstructionType::TBufferLoadFormatXy
 		                                                    : ShaderInstructionType::TBufferLoadFormatXyzw);
-		ASSERT_EXIT(RunBuffer(control, 0, false), ::testing::ExitedWithCode(0), "");
-		ASSERT_EXIT(RunBuffer(control | (1u << 15u), 1u << 22u, false), ::testing::ExitedWithCode(0), "");
-		EXPECT_EXIT(RunBuffer(control, 1u << 23u, false), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(expected, true));
-		EXPECT_EXIT(RunBuffer(control, 1u << 21u, false), ::testing::ExitedWithCode(kRejectedExit), MtbufRejection(((control >> 16u) & 7u) | 8u));
+		ASSERT_EXIT(RunBuffer(control, 0), ::testing::ExitedWithCode(0), "");
+		ASSERT_EXIT(RunBuffer(control | (1u << 15u), 1u << 22u), ::testing::ExitedWithCode(0), "");
+		EXPECT_EXIT(RunBuffer(control, 1u << 23u), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(expected, true));
+		EXPECT_EXIT(RunBuffer(control, 1u << 21u), ::testing::ExitedWithCode(kRejectedExit), MtbufRejection(((control >> 16u) & 7u) | 8u));
 		for (int corrupt = 1; corrupt <= 3; ++corrupt)
 		{
-			EXPECT_EXIT(RunBuffer(control, 0, false, true, corrupt), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(expected));
+			EXPECT_EXIT(RunBuffer(control, 0, true, corrupt), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(expected));
 		}
 	}
 }
@@ -1147,17 +1016,15 @@ TEST(EmulatorShaderLdsBounds, ParsedLegacyCarryAddSubRemainNativeOnlyWithExactTu
 {
 	for (bool subtract: {false, true})
 	{
-		ASSERT_EXIT(RunParsedInteger(false, false, subtract, 106, false, 0), ::testing::ExitedWithCode(0), "");
-		EXPECT_EXIT(RunParsedInteger(false, false, subtract, 106, true, 0), ::testing::ExitedWithCode(kRejectedExit), kPairedCarryRejection);
+		ASSERT_EXIT(RunParsedInteger(false, false, subtract, 106, 0), ::testing::ExitedWithCode(0), "");
 		// Explicit VOP3B destinations: VCC, even SGPR pair and odd VALU pair.
 		for (uint32_t sdst: {106u, 2u, 3u})
 		{
-			ASSERT_EXIT(RunParsedInteger(false, true, subtract, sdst, false, 0), ::testing::ExitedWithCode(0), "");
-			EXPECT_EXIT(RunParsedInteger(false, true, subtract, sdst, true, 0), ::testing::ExitedWithCode(kRejectedExit), kPairedCarryRejection);
+			ASSERT_EXIT(RunParsedInteger(false, true, subtract, sdst, 0), ::testing::ExitedWithCode(0), "");
 		}
 		for (int corrupt = 1; corrupt <= 13; ++corrupt)
 		{
-			EXPECT_EXIT(RunParsedInteger(false, false, subtract, 106, false, corrupt), ::testing::ExitedWithCode(kRejectedExit),
+			EXPECT_EXIT(RunParsedInteger(false, false, subtract, 106, corrupt), ::testing::ExitedWithCode(kRejectedExit),
 			            EmitterRejection(subtract ? ShaderInstructionType::VSubI32 : ShaderInstructionType::VAddI32, true));
 		}
 	}
@@ -1165,66 +1032,47 @@ TEST(EmulatorShaderLdsBounds, ParsedLegacyCarryAddSubRemainNativeOnlyWithExactTu
 
 TEST(EmulatorShaderLdsBounds, ParsedNextGenNoCarryTuplesRetainMalformedRejections)
 {
-	for (bool paired: {false, true})
+	for (bool subtract: {false, true})
 	{
-		for (bool subtract: {false, true})
+		ASSERT_EXIT(RunParsedInteger(true, false, subtract, 0, 0), ::testing::ExitedWithCode(0), "");
+		for (int corrupt = 1; corrupt <= 13; ++corrupt)
 		{
-			ASSERT_EXIT(RunParsedInteger(true, false, subtract, 0, paired, 0), ::testing::ExitedWithCode(0), "");
-			for (int corrupt = 1; corrupt <= 13; ++corrupt)
-			{
-				EXPECT_EXIT(RunParsedInteger(true, false, subtract, 0, paired, corrupt), ::testing::ExitedWithCode(kRejectedExit),
-				            EmitterRejection(subtract ? ShaderInstructionType::VSubI32 : ShaderInstructionType::VAddI32, true));
-			}
+			EXPECT_EXIT(RunParsedInteger(true, false, subtract, 0, corrupt), ::testing::ExitedWithCode(kRejectedExit),
+			            EmitterRejection(subtract ? ShaderInstructionType::VSubI32 : ShaderInstructionType::VAddI32, true));
 		}
 	}
 }
 
-TEST(EmulatorShaderLdsBounds, NativeAndPairedRejectInvalidTuplesBeforeOperandDiscovery)
+TEST(EmulatorShaderLdsBounds, NativeRejectInvalidTuplesBeforeOperandDiscovery)
 {
-	for (bool paired: {false, true})
+	ASSERT_EXIT(RunIntegerTuple(0), ::testing::ExitedWithCode(0), "");
+	for (int corrupt = 1; corrupt <= 7; ++corrupt)
 	{
-		ASSERT_EXIT(RunIntegerTuple(0, paired), ::testing::ExitedWithCode(0), "");
-		for (int corrupt = 1; corrupt <= 7; ++corrupt)
-		{
-			EXPECT_EXIT(RunIntegerTuple(corrupt, paired), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::VAndB32, true));
-		}
+		EXPECT_EXIT(RunIntegerTuple(corrupt), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::VAndB32, true));
 	}
 }
 
-TEST(EmulatorShaderLdsBounds, NativeAndPairedDsRejectGdsReservedAndLossyAliases)
+TEST(EmulatorShaderLdsBounds, NativeDsRejectGdsReservedAndLossyAliases)
 {
-	struct Case { uint32_t control; ShaderInstructionType type; const char* name; };
-	const Case cases[] = {{0xd8350000u, ShaderInstructionType::DsWriteB32, "DsWriteB32"},
-	                      {0xd8780000u, ShaderInstructionType::DsWriteB32, "DsWriteB32"},
-	                      {0xd80c0000u, ShaderInstructionType::DsIncU32, "DsIncU32"},
-	                      {0xd8100000u, ShaderInstructionType::DsDecU32, "DsDecU32"}};
-	for (bool paired: {false, true})
+	EXPECT_EXIT(RunRejectedDs(0xd8350000u, ShaderInstructionType::DsWriteB32), ::testing::ExitedWithCode(kRejectedExit),
+	            EmitterRejection(ShaderInstructionType::DsWriteB32));
+	// ds_write_b8, ds_inc/dec_u32, ds_sub_rtn_u32 and ds_rsub_u32 have no lossless IR, so decoding refuses them.
+	for (uint32_t control: {0xd8780000u, 0xd80c0000u, 0xd8100000u, 0xd8840000u, 0xd8080000u})
 	{
-		for (const auto& test: cases)
-		{
-			const std::string reason = paired ? std::string("paired-wave instruction contract unsupported: pc=0x00000000 reason=instruction ") +
-			                                        test.name + " is outside the paired compute-wave admission set"
-			                                  : EmitterRejection(test.type);
-			EXPECT_EXIT(RunRejectedDs(test.control, test.type, paired), ::testing::ExitedWithCode(kRejectedExit), reason);
-		}
+		EXPECT_EXIT(RunRefusedDsDecode(control), ::testing::ExitedWithCode(kRejectedExit), "");
 	}
 }
 
 TEST(EmulatorShaderLdsBounds, NativeGdsWriteIsRefusedNotLoweredToLds)
 {
-	EXPECT_EXIT(RunRejectedDs(0xd8360000u, ShaderInstructionType::DsWriteB32, false), ::testing::ExitedWithCode(kRejectedExit),
+	EXPECT_EXIT(RunRejectedDs(0xd8360000u, ShaderInstructionType::DsWriteB32), ::testing::ExitedWithCode(kRejectedExit),
 	            EmitterRejection(ShaderInstructionType::DsWriteB32));
-}
-
-TEST(EmulatorShaderLdsBounds, PairedGdsWriteStoresOnlyInsideM0AndTheHostWindow)
-{
-	EXPECT_EXIT(RunGdsWrite(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorShaderLdsBounds, OrderedCountDsIsRefusedNotLoweredToBarrier)
 {
 	// DS opcode 0x3f with gds=1: 0xd8000000 | (0x3f << 18) | (1 << 17).
-	EXPECT_EXIT(RunOrderedCount(0xd8fe0000u), ::testing::ExitedWithCode(kRejectedExit), "");
+	EXPECT_EXIT(RunRefusedDsDecode(0xd8fe0000u), ::testing::ExitedWithCode(kRejectedExit), "");
 }
 
 TEST(EmulatorShaderLdsBounds, CanonicalEndAndVop3UsedSourcesPassWithoutLiveTailExceptions)

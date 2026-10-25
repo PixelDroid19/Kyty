@@ -4,6 +4,108 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Robot platformer: logo particles through a split geometry pass (2026-10-22)
+
+- **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, `generic.pad`,
+  `KYTY_RUN_MEMORY_HIGH=14G`, translator version 147; one boot with a
+  cold SPIR-V cache and one warm boot.
+- **Cost.** The studio-logo stretch (presents about 950-1100) dissolves
+  the logo into particles through merged ES+GS draws that run as the
+  geometry compute pass. In the paired layout the hot particle module
+  compiled offline in 47 s (6,726 spills, 20,407 fills, 128 KiB scratch,
+  2,144 live registers) and the stretch ran at about 2.8 fps.
+- **Change.** The geometry pass runs in the split layout: one guest lane
+  per invocation, each guest wave64 spanning two 32-wide host subgroups.
+  The prologue writes `v0`-`v5` and `v8` per lane, exports and
+  `GS_ALLOC_REQ` are per lane, and guest lane 0 of each wave leads the
+  allocation. The first split run stopped at a `v_add_i32` whose source
+  is a DPP `row_shr:1` with BOUND_CTRL=1; row DPP is now translated in
+  native and split compute waves (cross-title record of the same date).
+- **Result.** The two split modules of the stretch compile offline in
+  15.0 s and 7.4 s (3,085 and 2,939 spills, 32 KiB scratch, 896 and 809
+  live). The warm boot runs the stretch at 6.3-9.4 fps (agent samples)
+  and ends clean at the 150 s cap; captures at presents 955, 1048, 1068
+  and 1105 show the logo and its particle dissolve.
+- **Recheck at version 148.** After the GS user-data base fix a cold
+  boot holds at present 887 for the rest of a 180 s run while shaders
+  compile; the next warm boot runs the stretch at 7.5-8.9 fps, shows the
+  logo at presents 1055 and 1086, and ends clean at 150 s.
+- **Holds attributed (2026-10-22).** Two loading holds in the warm boot,
+  presents 850-905 (0.24 fps sample) and 1106-1112 (0.1-0.6 fps), came
+  with both precompile workers compiling stale paired recipes from older
+  translator versions (profiled at frame 872). With versioned recipe
+  directories the warm boot's frame-time p99 is 0.33 s and its longest
+  hold (5.8 s) is the title's own level load (cross-title record
+  "Shader caches", 2026-10-22).
+- **Open.** About 3,000 spills remain per module.
+
+## Robot platformer: paired compute compile cost (2026-10-21, closed 2026-10-22)
+
+- **Outcome.** The direction below landed as split Wave64 compute
+  dispatch, and the paired layout was removed (cross-title record
+  "Shader translator: paired wave64 layout removed", 2026-10-22). The
+  split modules still carry about 3,000 spills each.
+
+- **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, HEAD 89e3b892,
+  scripted route from logo to worldmap; a first boot with empty SPIR-V
+  and Mesa caches, then a second boot with the caches it left.
+- **Black picture near frame 850: the run memory guard again.** The run
+  cgroup peaked at 11.1 GB (`journalctl --user` "Consumed" line) against
+  the 7 GB `MemoryHigh` of those runs. Under reclaim throttling one paired
+  lighting kernel took 98 s to compile in-game against 40 s offline. With
+  `KYTY_RUN_MEMORY_HIGH=14G` and `KYTY_RUN_MEMORY_MAX=16G` the throttling
+  disappears. Each heavy compile peaks at about 1.34 GB of resident memory,
+  and the two background workers can run two at once.
+- **Cold boot.** Frame 1 holds for about 4 minutes while 18 compute
+  pipelines are created; the same lighting kernel took 103 s in-game
+  without throttling (40 s offline, difference not explained). The title
+  then runs at about 17 FPS to frame 842 and stalls again while about nine
+  kernels of 7-14 s each compile.
+- **Second boot with recipes.** Frame 559 at 45 s with 44 background
+  compiles, a 10 s hitch at frame 846, frame 1404, then the wait on the
+  stall kernel recorded on 2026-10-19 (436,742 SPIR-V words, a
+  workgroup of four guest waves). Its recipe from this HEAD compiles
+  offline in 270 s (338,833 instructions, 18,796 spills, 41,805 fills);
+  the recipe recorded on 2026-10-19 took 496 s.
+- **Cost model.** gdb samples of the offline compile sit in the Intel
+  compiler's register coalescing, pre-allocation scheduler liveness,
+  interference-graph rebuilds and spill selection: the time is the
+  register allocator's spill iterations. The same SPIR-V compiled with a
+  forced smaller subgroup (a cost bound, not a correct program) gives each
+  value half the register footprint:
+
+  | Kernel | Subgroup 32 | Subgroup 16 | Subgroup 8 |
+  | --- | --- | --- | --- |
+  | Stall kernel | 270 s, 18,796 spills | 6.8 s, 2,867 spills | 5.1 s, 1,842 spills |
+  | Lighting kernel, 335,039 words | 28.5 s, 6,184 spills, 1,271 live | 5.2 s, 2,448 spills, 647 live | 4.0 s, 1,224 spills, 346 live |
+
+- **Excluded compile reductions** (offline, temporary translator variants
+  of the 28.5 s kernel):
+
+  | Variant | Compile | Spills | Note |
+  | --- | --- | --- | --- |
+  | EXEC forced full | 25.5 s | 6,163 | 1,243 live registers |
+  | Scalar register loads as subgroup broadcasts | 51.4 s | 6,372 | slower |
+  | Scalar registers in workgroup memory | 34.7 s | 6,732 | slower |
+  | Scalar registers and half of the VGPR halves in workgroup memory | 31.1 s | 6,072 | 34,144 bytes; the 171 halves would not fit in 64 KiB |
+  | Driver spilling rate 5 / 20 (localization only) | 26.1 s / 33.0 s | | |
+
+- **Native layout excluded again.** The three largest paired guest kernels
+  dumped in these runs (2,378-2,707 instructions, BVH traversal) are
+  refused at a `v_mov_b32` with a DPP16 control that is not a quad permute
+  ("operand is not representable per lane"). Each also holds 44
+  `v_readlane_b32` whose lane comes from `s_ff1_i32_b64` over a 64-bit
+  mask, 36 `v_writelane_b32` and 9 `v_readfirstlane_b32`. Which host
+  module each of them became was not recorded.
+- **Direction.** Run each 32-lane half of a guest wave in its own 32-wide
+  host subgroup, one guest lane per invocation with replicated scalar
+  state, and exchange values between the halves through LDS where a mask
+  becomes scalar data, at `v_readlane`/`v_readfirstlane`, and where one
+  half must see the other's LDS writes. The expected compile cost is near
+  the subgroup-16 bound. Risk: the exchange spins without a Vulkan
+  forward-progress guarantee, so replicated scalar state that diverges
+  would hang the GPU.
+
 ## Robot platformer: worldmap stall and dark top-left quadrant (2026-10-17)
 
 - **Route (Intel Arc A770, Mesa ANV, strict).** Logo, title, "Continue",
@@ -265,7 +367,9 @@ record. Titles are named descriptively only (`AGENTS.md`).
     Mesa 26.2.5, strict). Every compute pipeline creation records a recipe
     (SPIR-V, stage flags, required subgroup size, push range, descriptor
     layout plan, vendor and device) under
-    `<spirv cache>/compute-pipelines/<title>-<version>/`, written before the
+    `<spirv cache>/compute-pipelines/<title>-<version>-t<translator>-g<geometry>/`
+    (translator versions added 2026-10-22; other versions are removed at
+    start), written before the
     blocking compile so a run that stalls in a compile still records it;
     the store is bounded at 2,048 recipes and 256 MiB. At the first compute
     pipeline of the next boot two workers compile the recipes of this
@@ -304,14 +408,18 @@ record. Titles are named descriptively only (`AGENTS.md`).
   - Caveat for experiments: diagnostic environment switches that change
     code generation are not part of the SPIR-V cache key; use a separate
     `KYTY_SPIRV_CACHE` directory for each variant.
-- **Defect found, not fixed: unit test hang in CI.**
+- **Unit test hang in CI (fixed in PR #20).**
   `EmulatorGraphicsDirtyTracking.SlotAndMappingChangesWaitForAFaultInFlight`
   (`UnitTestEmulatorGraphicsDirtyTracking.cpp:1728`) hung once in the
-  DevTools ON job and passed on rerun; it passes 200 of 200 local runs.
-  Direction: bound the wait in the test and report which side never
-  signalled.
-- **Defect found, not fixed: layered depth targets.** In the same frames a
-  lighting kernel samples a 16-layer D32 array (1536x1536, shadow cascades)
+  DevTools ON job and passed on rerun; it passed 200 of 200 local runs.
+  Cause: the test joined the slot-release thread before ending its fenced
+  unmap. `BeginUnmap` holds the publisher fence, and the release waits for
+  it in `AcquireIdentityWriter`, so the test deadlocked whenever the unmap
+  thread was admitted first. The test now ends the unmap before joining.
+- **Layered depth targets (fixed 2026-10-22: every slice is its own depth
+  image, and a sampled array view is assembled from the slice images).** In
+  the same frames a lighting kernel samples a 16-layer D32 array
+  (1536x1536, shadow cascades)
   whose cascades the guest renders as single-slice depth views at one base
   (`DB_DEPTH_VIEW` slices 0..0 and 1..1). `DescribeRenderDepthInfo` reads
   `slice_start` and `slice_max`, but the depth backing is one layer, so both
@@ -494,6 +602,16 @@ record. Titles are named descriptively only (`AGENTS.md`).
   - Publishing past those aliases (temporary, unsafe) cut the interval from
     211 to 175 ms, but `WAIT_REG_MEM` time rose from 4 to 47 ms: the guest
     then waits for GPU completion instead. Excluded as a standalone fix.
+  - Publishing past only the aliases the write-back leaves untouched
+    (storage textures, GPU-owned render targets) is safe but moves the wait
+    as well: device-address draws stop waiting and `WAIT_REG_MEM` time rises
+    from about 2 to 12 s per 26 s window; blocked time per draw stays near
+    290 us and frame p50 stays at 100 ms. The label waits cannot join their
+    batch because pending storage still has aliases the write-back refreshes:
+    a texture of the same range the device wrote after the storage (about
+    half) and depth images crossing it. Excluded. The render engine is busy
+    only 22-31% of the time (DRM fdinfo), so the frame is serialised by these
+    waits, not GPU-bound.
   - Frame time is CPU recording plus GPU execution serialised by the
     guest's own waits, so GPU time of the paired programs is on the
     critical path. A rigorous alias design (retire superseded pool
@@ -517,7 +635,8 @@ record. Titles are named descriptively only (`AGENTS.md`).
     tile-9 storage textures 4 KB apart. New; open. Direction: define the
     relation for same-shape storage textures that cross (evict or copy the
     older one) instead of refusing.
-  - Racing title: `GraphicsRenderBind.cpp:4193` depth-reference binding.
+  - Racing title: "unsupported depth-reference image binding"
+    (`GraphicsRenderBind.cpp:4193` then, `:4308` on c57e20a4).
     Seen before on 10-16.
   - Cartoon title: `GraphicsRun.cpp:1372` indirect register packet at
     address 0x100000001. Seen in the sandbox title on 10-16.
@@ -878,7 +997,8 @@ record. Titles are named descriptively only (`AGENTS.md`).
       intermittent boot stall, which also reproduces on older binaries.
   - Unit tests: 2,413 pass. The one failure is the known intermittent
     `StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
-    timeout (see the 2026-10-11 entry); it passes alone 3/3.
+    timeout (see the 2026-10-11 entry); it passes alone 3/3. Fixed since
+    (ad8d4c76).
 - Open: per-draw structures grow with the table (`ShaderPixelInputInfo`
   6,392 bytes, `ShaderVertexInputInfo` 8,984 bytes), and `BindDescriptors`
   zero-initializes and scans the full arrays rather than the bound counts.

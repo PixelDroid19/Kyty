@@ -115,7 +115,7 @@ bool SupportsWaveProbe(const ShaderComputeWaveVulkanState& planned)
 	const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(planned);
 	const ShaderComputeWaveRequest request {{64, 1, 1}, {1, 1, 1}, 0x41, 0, ShaderGuestLaneOrder::LinearXFirst};
 	ShaderComputeWaveLayout layout {};
-	return ShaderBuildPairedComputeWaveLayout(request, capabilities, &layout) == ShaderComputeWaveLayoutStatus::Supported;
+	return ShaderBuildSplitComputeWaveLayout(request, capabilities, &layout) == ShaderComputeWaveLayoutStatus::Supported;
 }
 
 } // namespace

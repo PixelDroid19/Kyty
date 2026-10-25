@@ -109,9 +109,9 @@ const LaneSets* Known(const Network& network, const ShaderOperand& operand)
 	return found == network.end() ? nullptr : &found->second;
 }
 
-// D = S0 | S1 with S0 optionally row-shifted. A lane whose shift leaves the row keeps D or takes zero
-// (BOUND_CTRL); with D the unshifted source both give that source's value, so the bit's meaning never matters.
-bool OrStep(const ShaderInstruction& inst, uint32_t lanes, Network* network)
+// D = S0 op S1 with S0 optionally row-shifted. A lane whose shift leaves the row keeps D, which is the unshifted
+// source, or takes zero (BOUND_CTRL), the identity of OR but not of a maximum.
+bool FoldStep(const ShaderInstruction& inst, ShaderLaneReductionOp op, uint32_t lanes, Network* network)
 {
 	if (inst.src_num != 2 || inst.format != ShaderInstructionFormat::SVdstSVsrc0SVsrc1 || inst.vop3_op_sel != 0u) { return false; }
 	const auto& shifted = inst.src[0];
@@ -121,7 +121,7 @@ bool OrStep(const ShaderInstruction& inst, uint32_t lanes, Network* network)
 	const auto* right = Known(*network, other);
 	if (left == nullptr || right == nullptr) { return false; }
 	if (shifted.dpp && (!RowControl(shifted.dpp_ctrl) || shifted.dpp_row_mask != 15u || shifted.dpp_bank_mask != 15u ||
-	                    inst.dst.register_id != other.register_id))
+	                    inst.dst.register_id != other.register_id || (shifted.dpp_bound_ctrl && op != ShaderLaneReductionOp::Or)))
 	{
 		return false;
 	}
@@ -155,10 +155,10 @@ bool PermuteStep(const ShaderInstruction& inst, uint32_t lanes, Network* network
 	return true;
 }
 
-bool Step(const ShaderInstruction& inst, uint32_t lanes, Network* network)
+bool Step(const ShaderInstruction& inst, ShaderLaneReductionOp op, uint32_t lanes, Network* network)
 {
 	if (!PlainVector(inst)) { return false; }
-	if (inst.type == Type::VOrB32) { return OrStep(inst, lanes, network); }
+	if (inst.type == (op == ShaderLaneReductionOp::Or ? Type::VOrB32 : Type::VMaxF32)) { return FoldStep(inst, op, lanes, network); }
 	if (inst.type == Type::VPermlane16B32 || inst.type == Type::VPermlanex16B32) { return PermuteStep(inst, lanes, network); }
 	return false;
 }
@@ -469,22 +469,38 @@ bool NetworkDead(const ShaderCode& code, const ShaderFragmentMaskFlow& masks, ui
 	return true;
 }
 
-bool ProveReduction(const ShaderCode& code, const ShaderFragmentMaskFlow& masks, uint32_t entry, uint32_t restore,
-                    ShaderFragmentLaneReduction* reduction)
+bool ProveReduction(const ShaderCode& code, const ShaderFragmentMaskFlow& masks, uint32_t seed_index, uint32_t restore,
+                    ShaderLaneReduction* reduction)
 {
-	const auto&    instructions = code.GetInstructions();
-	const uint32_t seed_index   = entry + 1u;
+	const auto& instructions = code.GetInstructions();
 	// The region proof made the seed V_CNDMASK_B32 0, x, cond with cond inside the region's EXEC; the
 	// mask flow adds that cond holds only covered lanes.
 	if (!masks.live_condition[seed_index]) { return false; }
-	const uint32_t wave_lanes = masks.guest_wave_size;
-	const int      seed       = instructions.At(seed_index).dst.register_id;
-	Network        network;
-	auto&          own = network[seed];
-	for (uint32_t lane = 0; lane < wave_lanes; ++lane) { own[lane] = uint64_t {1} << lane; }
+	if (!ShaderProveLaneReductionNetwork(code, masks.guest_wave_size, seed_index, restore, reduction)) { return false; }
+	VectorSet live;
+	live.set(static_cast<size_t>(reduction->seed));
+	for (const uint32_t step: reduction->steps) { live.set(static_cast<size_t>(instructions.At(step).dst.register_id)); }
+	return NetworkDead(code, masks, reduction->reads.back().index + 1u, live);
+}
+
+} // namespace
+
+bool ShaderProveLaneReductionNetwork(const ShaderCode& code, uint32_t guest_wave_size, uint32_t seed_index, uint32_t restore,
+                                     ShaderLaneReduction* reduction)
+{
+	const auto& instructions = code.GetInstructions();
+	if (guest_wave_size > kLanes || seed_index >= restore || restore >= instructions.Size()) { return false; }
+	const int seed = instructions.At(seed_index).dst.register_id;
+	Network   network;
+	auto&     own = network[seed];
+	for (uint32_t lane = 0; lane < guest_wave_size; ++lane) { own[lane] = uint64_t {1} << lane; }
+	reduction->steps.clear();
 	for (uint32_t index = seed_index + 1u; index < restore; ++index)
 	{
-		if (!Step(instructions.At(index), wave_lanes, &network)) { return false; }
+		const auto& inst = instructions.At(index);
+		if (ShaderReductionRegionScalarLoad(inst) && !ShaderInstructionWritesExec(inst)) { continue; }
+		if (!Step(inst, reduction->op, guest_wave_size, &network)) { return false; }
+		reduction->steps.push_back(index);
 	}
 	VectorSet live;
 	for (const auto& [reg, sets]: network)
@@ -494,35 +510,35 @@ bool ProveReduction(const ShaderCode& code, const ShaderFragmentMaskFlow& masks,
 	}
 	// The reads follow the restore, before anything can change the seed register; an independent
 	// instruction may sit between them.
-	uint32_t after = restore + 1u;
+	reduction->reads.clear();
 	for (uint32_t cursor = restore + 1u; cursor < instructions.Size() && !LabelAt(code, instructions.At(cursor).pc); ++cursor)
 	{
 		const auto& inst  = instructions.At(cursor);
 		uint64_t    lanes = 0;
-		if (NetworkRead(inst, network, wave_lanes, &lanes))
+		if (NetworkRead(inst, network, guest_wave_size, &lanes))
 		{
 			reduction->reads.push_back({cursor, lanes});
-			after = cursor + 1u;
 			continue;
 		}
 		if (!Independent(inst, live)) { break; }
 	}
-	if (reduction->reads.empty() || !NetworkDead(code, masks, after, live)) { return false; }
 	reduction->seed_index = seed_index;
 	reduction->restore    = restore;
 	reduction->seed       = seed;
-	return true;
+	return !reduction->reads.empty();
 }
 
-} // namespace
-
-bool ShaderFragmentLaneReductions::IsStep(uint32_t index) const
+bool ShaderLaneReduction::IsStep(uint32_t index) const
 {
-	return std::any_of(reductions.begin(), reductions.end(),
-	                   [index](const auto& reduction) { return index > reduction.seed_index && index < reduction.restore; });
+	return std::find(steps.begin(), steps.end(), index) != steps.end();
 }
 
-const ShaderFragmentLaneReduction* ShaderFragmentLaneReductions::ReadAt(uint32_t index, uint64_t* lanes) const
+bool ShaderLaneReductions::IsStep(uint32_t index) const
+{
+	return std::any_of(reductions.begin(), reductions.end(), [index](const auto& reduction) { return reduction.IsStep(index); });
+}
+
+const ShaderLaneReduction* ShaderLaneReductions::ReadAt(uint32_t index, uint64_t* lanes) const
 {
 	for (const auto& reduction: reductions)
 	{
@@ -536,9 +552,9 @@ const ShaderFragmentLaneReduction* ShaderFragmentLaneReductions::ReadAt(uint32_t
 	return nullptr;
 }
 
-ShaderFragmentLaneReductions ShaderFindFragmentLaneReductions(const ShaderCode& code, const ShaderFragmentMaskFlow& masks)
+ShaderLaneReductions ShaderFindFragmentLaneReductions(const ShaderCode& code, const ShaderFragmentMaskFlow& masks)
 {
-	ShaderFragmentLaneReductions result;
+	ShaderLaneReductions result;
 	if (code.GetType() != ShaderType::Pixel || !masks.lane_local || masks.exec_full.size() != code.GetInstructions().Size() ||
 	    (masks.guest_wave_size != 32u && masks.guest_wave_size != 64u))
 	{
@@ -552,14 +568,15 @@ ShaderFragmentLaneReductions ShaderFindFragmentLaneReductions(const ShaderCode& 
 	const Type  entry_type   = wave32 ? Type::SOrn2SaveexecB32 : Type::SOrn2SaveexecB64;
 	for (uint32_t entry = 0; entry < instructions.Size(); ++entry)
 	{
+		uint32_t seed    = 0;
 		uint32_t restore = 0;
-		if (instructions.At(entry).type == entry_type) { }
-		if (instructions.At(entry).type != entry_type || !ShaderFragmentNeutralRegionEnd(program, masks.guest_wave_size, entry, &restore))
+		if (instructions.At(entry).type != entry_type ||
+		    !ShaderFragmentNeutralRegionBounds(program, masks.guest_wave_size, entry, &seed, &restore))
 		{
 			continue;
 		}
-		ShaderFragmentLaneReduction reduction;
-		if (ProveReduction(program, masks, entry, restore, &reduction)) { result.reductions.push_back(std::move(reduction)); }
+		ShaderLaneReduction reduction;
+		if (ProveReduction(program, masks, seed, restore, &reduction)) { result.reductions.push_back(std::move(reduction)); }
 	}
 	return result;
 }

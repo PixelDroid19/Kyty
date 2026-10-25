@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdlib>
+#include <vector>
 
 UT_BEGIN(EmulatorShaderResourcePointers);
 
@@ -456,6 +457,101 @@ TEST(EmulatorShaderResourcePointers, ZeroSBufferLoadToVccHiEmitsValidStoreBefore
 	Config::Load(restore);
 	EXPECT_TRUE(valid) << error.c_str();
 	EXPECT_FALSE(binary.IsEmpty());
+}
+
+static ShaderInstruction GsUserDataLoad(uint32_t pc, ShaderInstructionType type, int dst, int dwords, uint32_t offset_bytes)
+{
+	ShaderInstruction load {};
+	load.pc                   = pc;
+	load.type                 = type;
+	load.dst                  = {.type = ShaderOperandType::Sgpr, .register_id = dst, .size = dwords};
+	load.src[0]               = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	load.src[1].type          = ShaderOperandType::LiteralConstant;
+	load.src[1].constant.u    = offset_bytes;
+	load.src_num              = 2;
+	return load;
+}
+
+static ShaderInstruction GsUserDataBranch(uint32_t pc, ShaderInstructionType type, uint32_t target)
+{
+	ShaderInstruction branch {};
+	branch.pc                 = pc;
+	branch.type               = type;
+	branch.format             = ShaderInstructionFormat::Label;
+	branch.src[0].type        = ShaderOperandType::LiteralConstant;
+	branch.src[0].constant.i  = static_cast<int32_t>(target - pc - 4u);
+	branch.src_num            = 1;
+	return branch;
+}
+
+static ShaderInstruction GsUserDataSample(uint32_t pc)
+{
+	ShaderInstruction sample {};
+	sample.pc     = pc;
+	sample.type   = ShaderInstructionType::ImageSampleLz;
+	sample.dst    = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	sample.src[0] = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 2};
+	sample.src[1] = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
+	sample.src[2] = {.type = ShaderOperandType::Sgpr, .register_id = 32, .size = 4};
+	sample.src_num = 3;
+	return sample;
+}
+
+static ShaderCode GsUserDataProgram(const std::vector<ShaderInstruction>& instructions)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	for (const auto& inst: instructions)
+	{
+		code.GetInstructions().Add(inst);
+		if (ShaderInstructionHasStaticBranchTarget(inst.type))
+		{
+			code.GetLabels().Add(ShaderLabel(inst));
+		}
+	}
+	return code;
+}
+
+// A T# and S# loaded through the s[0:1] user-data address bind for every
+// sample the load reaches, including one past an unconditional branch.
+TEST(EmulatorShaderResourcePointers, GsUserDataDescriptorsReachConsumersPastBranches)
+{
+	ShaderInstruction end {};
+	end.pc   = 32;
+	end.type = ShaderInstructionType::SEndpgm;
+	const auto code  = GsUserDataProgram({GsUserDataLoad(0, ShaderInstructionType::SLoadDwordx8, 8, 8, 32),
+	                                      GsUserDataLoad(8, ShaderInstructionType::SLoadDwordx4, 32, 4, 64),
+	                                      GsUserDataBranch(16, ShaderInstructionType::SCbranchScc0, 28), GsUserDataSample(20),
+	                                      GsUserDataBranch(24, ShaderInstructionType::SBranch, 32), GsUserDataSample(28), end});
+	const auto loads = ShaderFindGsUserDataDescriptorLoads(code);
+	ASSERT_EQ(loads.size(), 2u);
+	EXPECT_EQ(loads[0].use.kind, ShaderDynamicSLoadResourceKind::Texture);
+	EXPECT_EQ(loads[0].offset_dw, 8);
+	EXPECT_EQ(loads[0].use.last_consumer_pc, 28u);
+	EXPECT_EQ(loads[1].use.kind, ShaderDynamicSLoadResourceKind::Sampler);
+	EXPECT_EQ(loads[1].offset_dw, 16);
+	EXPECT_EQ(loads[1].use.last_consumer_pc, 28u);
+}
+
+// A sample that sees the loaded T# on one path only binds nothing.
+TEST(EmulatorShaderResourcePointers, GsUserDataDescriptorClobberedOnOnePathIsNotBound)
+{
+	ShaderInstruction clobber {};
+	clobber.pc          = 20;
+	clobber.type        = ShaderInstructionType::SMovB32;
+	clobber.dst         = {.type = ShaderOperandType::Sgpr, .register_id = 9, .size = 1};
+	clobber.src[0].type = ShaderOperandType::IntegerInlineConstant;
+	clobber.src_num     = 1;
+	ShaderInstruction end {};
+	end.pc   = 28;
+	end.type = ShaderInstructionType::SEndpgm;
+	const auto code  = GsUserDataProgram({GsUserDataLoad(0, ShaderInstructionType::SLoadDwordx8, 8, 8, 0),
+	                                      GsUserDataLoad(8, ShaderInstructionType::SLoadDwordx4, 32, 4, 32),
+	                                      GsUserDataBranch(16, ShaderInstructionType::SCbranchScc0, 24), clobber, GsUserDataSample(24),
+	                                      end});
+	const auto loads = ShaderFindGsUserDataDescriptorLoads(code);
+	ASSERT_EQ(loads.size(), 1u);
+	EXPECT_EQ(loads[0].use.kind, ShaderDynamicSLoadResourceKind::Sampler);
 }
 
 UT_END();

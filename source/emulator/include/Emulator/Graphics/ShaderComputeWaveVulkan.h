@@ -104,7 +104,7 @@ struct ShaderNativeSubgroupSelection
 
 // On success, `required` owns the required-size node that is prepended to the
 // existing stage pNext chain when required. Native wave32 callers may omit the
-// node only after selecting an exact default width; paired64 always requires it.
+// node only after selecting an exact default width; split wave64 always requires it.
 // Native guest coordinates reconstructed from subgroup IDs require full
 // subgroups: SPIR-V 1.6 guarantees these for the admitted X dimension, while
 // older modules require the explicitly enabled computeFullSubgroups feature.

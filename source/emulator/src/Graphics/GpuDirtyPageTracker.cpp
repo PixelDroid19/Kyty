@@ -90,6 +90,11 @@ bool DefaultRestoreSignalSafe(void*, uintptr_t address, size_t size, uint32_t re
 	return Core::VirtualMemory::RestoreProtectionSignalSafe(address, size, restore_token);
 }
 
+bool DefaultHostGrantsWriteSignalSafe(void*, uintptr_t address, size_t size) noexcept
+{
+	return Core::VirtualMemory::HostGrantsWriteSignalSafe(address, size);
+}
+
 bool DefaultReleaseLeases(void*, const Core::VirtualMemory::WriteLeaseAuthority* authority) noexcept
 {
 	return Core::VirtualMemory::ReleaseWriteLeases(authority);
@@ -98,9 +103,11 @@ bool DefaultReleaseLeases(void*, const Core::VirtualMemory::WriteLeaseAuthority*
 } // namespace
 
 GpuDirtyPageTracker::GpuDirtyPageTracker(bool enabled)
-    : GpuDirtyPageTracker(GpuDirtyPageProtectionOps {nullptr, &DefaultRemoveWriteAndCapture, &DefaultRemoveWrite, &DefaultRestore,
-                                                     &DefaultRestoreSignalSafe, &DefaultReleaseLeases},
-                          enabled)
+    : GpuDirtyPageTracker(
+          GpuDirtyPageProtectionOps {nullptr, &DefaultRemoveWriteAndCapture, &DefaultRemoveWrite, &DefaultRestore,
+		                             &DefaultRestoreSignalSafe, &DefaultReleaseLeases,
+		                             Core::VirtualMemory::CanQueryHostWriteSignalSafe() ? &DefaultHostGrantsWriteSignalSafe : nullptr},
+          enabled)
 {
 }
 
@@ -428,12 +435,28 @@ void GpuDirtyPageTracker::ReleasePageSlot(PageEntry* entry) noexcept
 	const uint32_t block = entry->block.exchange(kNoBlock, std::memory_order_acq_rel);
 	entry->key.store(kTombstoneKey, std::memory_order_release);
 	--m_page_identity_count;
+	// A tombstone followed by an empty slot continues no probe chain, so it and
+	// the tombstones before it become empty and absent lookups stay short.
+	auto slot = static_cast<size_t>(entry - m_pages.get());
+	while (m_pages[slot].key.load(std::memory_order_relaxed) == kTombstoneKey &&
+	       m_pages[(slot + 1u) & (kPageTableSize - 1u)].key.load(std::memory_order_relaxed) == 0)
+	{
+		m_pages[slot].key.store(0, std::memory_order_release);
+		slot = (slot - 1u) & (kPageTableSize - 1u);
+	}
 	if (block < kBlockTableSize)
 	{
 		m_blocks[block].page_mask.fetch_and(~(uint64_t {1} << ((page / m_page_size) % kBlockPages)), std::memory_order_relaxed);
 		if (m_blocks[block].pages.fetch_sub(1, std::memory_order_acq_rel) == 1u)
 		{
 			m_blocks[block].key.store(kBlockTombstoneKey, std::memory_order_release);
+			size_t block_slot = block;
+			while (m_blocks[block_slot].key.load(std::memory_order_relaxed) == kBlockTombstoneKey &&
+			       m_blocks[(block_slot + 1u) & (kBlockTableSize - 1u)].key.load(std::memory_order_relaxed) == 0)
+			{
+				m_blocks[block_slot].key.store(0, std::memory_order_release);
+				block_slot = (block_slot - 1u) & (kBlockTableSize - 1u);
+			}
 		}
 	}
 	LowerFence();
@@ -513,28 +536,6 @@ GpuDirtyPageTracker::BlockEntry* GpuDirtyPageTracker::BlockOf(const PageEntry* p
 {
 	const uint32_t block = page->block.load(std::memory_order_acquire);
 	return block < kBlockTableSize ? &m_blocks[block] : nullptr;
-}
-
-// Total change count of the blocks spanning pages [first, last]. Counts only
-// grow, so an equal total means none of them changed. False when a page has no
-// block.
-bool GpuDirtyPageTracker::BlockChangesOf(uintptr_t first, uintptr_t last, uint64_t* changes) const noexcept
-{
-	*changes                    = 0;
-	const uintptr_t last_index  = last / m_page_size;
-	for (uintptr_t index = first / m_page_size - (first / m_page_size) % kBlockPages;; index += kBlockPages)
-	{
-		const auto* block = FindBlock(index * m_page_size);
-		if (block == nullptr)
-		{
-			return false;
-		}
-		*changes += block->changes.load(std::memory_order_acquire);
-		if (last_index - index < kBlockPages)
-		{
-			return true;
-		}
-	}
 }
 
 GpuDirtyPageTracker::RangeEvidence GpuDirtyPageTracker::SegmentEvidence(uintptr_t first_index, uintptr_t last_index) const noexcept
@@ -697,6 +698,9 @@ bool GpuDirtyPageTracker::RestoreRetirementRun(uintptr_t first, uintptr_t last, 
 {
 	const size_t size = last - first + m_page_size;
 	const bool batch_restored = m_protection_ops.restore(m_protection_ops.context, first, size, token);
+	// A restored run needs no late-fault identity: such a fault finds its page
+	// writable again and runs again (see HandleWriteFault).
+	const bool release = batch_restored && m_protection_ops.host_grants_write_signal_safe != nullptr;
 	if (!batch_restored)
 	{
 		for (uintptr_t page = first;; page += m_page_size)
@@ -713,6 +717,10 @@ bool GpuDirtyPageTracker::RestoreRetirementRun(uintptr_t first, uintptr_t last, 
 		if (auto* entry = FindPage(page); entry != nullptr)
 		{
 			entry->protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Retired), std::memory_order_release);
+			if (release)
+			{
+				ReleasePageSlot(entry);
+			}
 		}
 		if (page == last || page > last - m_page_size)
 		{
@@ -1072,20 +1080,47 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 		// its protection page.
 		return false;
 	}
-	// A registered range proven armed is not walked page by page again until
-	// one of its blocks changes.
-	const auto record        = m_ranges.find(RangeKey {address, end});
-	uint64_t   block_changes = 0;
-	const bool provable      = record != m_ranges.end() && BlockChangesOf(first, last, &block_changes);
-	if (provable && record->second.armed_proven && record->second.armed_block_changes == block_changes)
+	// The pages of a registered range in a block proven armed are not walked
+	// again until that block changes.
+	const auto      record      = m_ranges.find(RangeKey {address, end});
+	const uintptr_t first_block = first / m_page_size / kBlockPages;
+	const uintptr_t last_block  = last / m_page_size / kBlockPages;
+	auto&           seen        = m_rearm_block_changes;
+	bool            provable    = record != m_ranges.end();
+	bool            all_proven  = provable;
+	if (provable)
+	{
+		auto& proofs = record->second.armed_blocks;
+		proofs.resize(last_block - first_block + 1u, kUnprovenBlock);
+		seen.resize(proofs.size());
+		for (uintptr_t block = first_block; block <= last_block; block++)
+		{
+			const auto* entry = FindBlock(block * kBlockPages * m_page_size);
+			if (entry == nullptr)
+			{
+				provable = false;
+				break;
+			}
+			seen[block - first_block] = entry->changes.load(std::memory_order_acquire);
+			all_proven                = all_proven && proofs[block - first_block] == seen[block - first_block];
+		}
+	}
+	if (provable && all_proven)
 	{
 		return true;
 	}
-	if (record != m_ranges.end())
+	auto proven = [&](uintptr_t page) noexcept
 	{
-		record->second.armed_proven = false;
-	}
-	bool all_armed = provable;
+		const uintptr_t block = page / m_page_size / kBlockPages - first_block;
+		return provable && seen[block] != kUnprovenBlock && record->second.armed_blocks[block] == seen[block];
+	};
+	auto unprove = [&](uintptr_t begin, uintptr_t finish) noexcept
+	{
+		for (uintptr_t block = begin / m_page_size / kBlockPages; provable && block <= finish / m_page_size / kBlockPages; block++)
+		{
+			seen[block - first_block] = kUnprovenBlock;
+		}
+	};
 	auto finalize_arming = [this](uintptr_t page, PageEntry* entry) noexcept
 	{
 		for (;;)
@@ -1272,6 +1307,16 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 
 	for (uintptr_t page = first; page <= last;)
 	{
+		if (proven(page))
+		{
+			const uintptr_t next_block = (page / m_page_size / kBlockPages + 1u) * kBlockPages;
+			if (next_block > last / m_page_size)
+			{
+				break;
+			}
+			page = next_block * m_page_size;
+			continue;
+		}
 		auto* entry = FindPage(page);
 		if (entry == nullptr)
 		{
@@ -1290,7 +1335,10 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 		        expected, static_cast<uint32_t>(needs_capture ? GpuDirtyProtectionState::Capturing : GpuDirtyProtectionState::Arming),
 		                                                     std::memory_order_acq_rel, std::memory_order_acquire))
 		{
-			all_armed = all_armed && expected == static_cast<uint32_t>(GpuDirtyProtectionState::Armed);
+			if (expected != static_cast<uint32_t>(GpuDirtyProtectionState::Armed))
+			{
+				unprove(page, page);
+			}
 			if (page == last || page > last - m_page_size)
 			{
 				break;
@@ -1298,7 +1346,6 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 			page += m_page_size;
 			continue;
 		}
-		all_armed = false;
 
 		if (needs_capture)
 		{
@@ -1322,6 +1369,7 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 				}
 				run_last = next_page;
 			}
+			unprove(run_start, run_last);
 			const size_t run_size = run_last - run_start + m_page_size;
 			const auto change = m_protection_ops.remove_write_and_capture(m_protection_ops.context, run_start, run_size,
 			                                                                capture_pages, this, &m_authority);
@@ -1375,6 +1423,7 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 			}
 			run_last = next_page;
 		}
+		unprove(run_start, run_last);
 		const size_t run_size = run_last - run_start + m_page_size;
 
 		if (!m_protection_ops.remove_write(m_protection_ops.context, run_start, run_size, token, &m_authority))
@@ -1439,10 +1488,9 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 		}
 		page = run_last + m_page_size;
 	}
-	if (all_armed)
+	for (size_t block = 0; provable && block < seen.size(); block++)
 	{
-		record->second.armed_block_changes = block_changes;
-		record->second.armed_proven        = true;
+		record->second.armed_blocks[block] = seen[block];
 	}
 	return true;
 }
@@ -1469,7 +1517,20 @@ bool GpuDirtyPageTracker::HandleWriteFault(uintptr_t address) noexcept
 		return false;
 	}
 	const uintptr_t page_address = PageStart(address);
-	// A page without metadata was never armed. Registration precedes arming.
+	// A write that faulted before its page was restored may find the identity
+	// already released. The restored page grants the write, so it runs again.
+	return HandleTrackedWriteFault(page_address) || HostGrantsWrite(page_address);
+}
+
+bool GpuDirtyPageTracker::HostGrantsWrite(uintptr_t page) const noexcept
+{
+	return m_protection_ops.host_grants_write_signal_safe != nullptr &&
+	       m_protection_ops.host_grants_write_signal_safe(m_protection_ops.context, page, m_page_size);
+}
+
+bool GpuDirtyPageTracker::HandleTrackedWriteFault(uintptr_t page_address) noexcept
+{
+	// A page without metadata is not armed. Registration precedes arming.
 	const PageEntry* entry = FindPage(page_address);
 	if (entry == nullptr)
 	{
@@ -1701,14 +1762,110 @@ bool GpuDirtyPageTracker::NotifyPageWriteEntered(PageEntry* entry, uintptr_t pag
 	return true;
 }
 
+// The caller is an announced restorer. Takes an armed page whose guest
+// protection grants writes into a batched restore; every other state is left to
+// NotifyPageWrite, which handles each transition.
+bool GpuDirtyPageTracker::ClaimArmedPageForWrite(PageEntry* entry, uintptr_t page, uint32_t* token) noexcept
+{
+	uint32_t state = static_cast<uint32_t>(GpuDirtyProtectionState::Armed);
+	if (entry->key.load(std::memory_order_acquire) != page || entry->refs.load(std::memory_order_acquire) == 0u ||
+	    !entry->protection_state.compare_exchange_strong(state, static_cast<uint32_t>(GpuDirtyProtectionState::Disarming),
+	                                                     std::memory_order_acq_rel, std::memory_order_acquire))
+	{
+		return false;
+	}
+	// As in NotifyPageWriteEntered, the slot may have been recycled since the walk
+	// resolved it; never apply another page's token.
+	if (entry->key.load(std::memory_order_acquire) != page || entry->original_mode_valid.load(std::memory_order_acquire) == 0u ||
+	    !ModeGrantsWrite(entry->original_mode.load(std::memory_order_acquire)))
+	{
+		entry->protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Armed), std::memory_order_release);
+		return false;
+	}
+	*token = entry->original_token.load(std::memory_order_acquire);
+	return true;
+}
+
+// One restore for the whole run, then each page leaves Disarming as
+// NotifyPageWriteEntered would leave it.
+void GpuDirtyPageTracker::RestoreWriteRun(const WriteRun& run) noexcept
+{
+	const bool restored =
+	    m_protection_ops.restore_signal_safe(m_protection_ops.context, run.first, run.last - run.first + m_page_size, run.token);
+	for (uintptr_t page = run.first;; page += m_page_size)
+	{
+		auto* entry = FindPage(page);
+		entry->protection_state.store(static_cast<uint32_t>(restored ? GpuDirtyProtectionState::Writable : GpuDirtyProtectionState::Armed),
+		                              std::memory_order_release);
+		if (!restored)
+		{
+			MarkPageFallback(entry);
+		}
+		if (page == run.last)
+		{
+			break;
+		}
+	}
+}
+
+// Consecutive armed pages under one restore token share one restore, so a host
+// write of N pages changes protection once instead of N times. The restorer is
+// announced only while a run is open and is left before any per-page notify,
+// which announces itself.
 bool GpuDirtyPageTracker::NotifyWritePages(uintptr_t first, uintptr_t last) noexcept
 {
-	bool handled = false;
-	VisitWritePages(first, last, [this, &handled](PageEntry* entry, uintptr_t page) noexcept
+	bool     handled = false;
+	WriteRun run;
+	auto     close_run = [&]() noexcept
 	{
-		const bool page_handled = NotifyPageWrite(entry, page);
-		handled = handled || page_handled;
-	});
+		if (run.open)
+		{
+			RestoreWriteRun(run);
+			run.open = false;
+			LeaveRestorer();
+		}
+	};
+	VisitWritePages(first, last,
+	                [&](PageEntry* entry, uintptr_t page) noexcept
+	                {
+		                if (run.open && page != run.last + m_page_size)
+		                {
+			                close_run();
+		                }
+		                if (!run.open)
+		                {
+			                EnterRestorer();
+		                }
+		                uint32_t token = 0;
+		                if (!ClaimArmedPageForWrite(entry, page, &token))
+		                {
+			                if (run.open)
+			                {
+				                close_run();
+			                } else
+			                {
+				                LeaveRestorer();
+			                }
+			                const bool page_handled = NotifyPageWrite(entry, page);
+			                handled                 = handled || page_handled;
+			                return;
+		                }
+		                MarkPageWrite(entry);
+		                handled = true;
+		                if (run.open && token != run.token)
+		                {
+			                // Still announced: this page opens the next run.
+			                RestoreWriteRun(run);
+			                run.open = false;
+		                }
+		                if (!run.open)
+		                {
+			                run = {page, page, token, true};
+			                return;
+		                }
+		                run.last = page;
+	                });
+	close_run();
 	return handled;
 }
 

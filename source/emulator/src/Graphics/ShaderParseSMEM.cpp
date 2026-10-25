@@ -36,10 +36,6 @@ KYTY_SHADER_PARSER(shader_parse_smem)
 
 	uint32_t size = 2;
 
-	if (glc != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: glc != 0 condition ignored (continuing)\n"); }
-	if (dlc != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dlc != 0 condition ignored (continuing)\n"); }
-	if (inst.src[0].type == ShaderOperandType::LiteralConstant) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].type == ShaderOperandType::LiteralConstant condition ignored (continuing)\n"); }
-	if (inst.src[1].type == ShaderOperandType::LiteralConstant) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[1].type == ShaderOperandType::LiteralConstant condition ignored (continuing)\n"); }
 
 	if (inst.src[1].type == ShaderOperandType::Null)
 	{

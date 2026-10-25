@@ -646,6 +646,34 @@ TEST(EmulatorTileDetile, Standard64KB4bppProductionMatchesReference)
 	ExpectDetilePathsMatch(k_w, k_h, pitch, k_bpp, TileDetileLayout::Standard64KB, tiled);
 }
 
+// 261 x 261 crosses a 64 KiB block in both directions and leaves a partial
+// 16-byte run on every row for each element size below 16 bytes.
+TEST(EmulatorTileDetile, Standard64KBEveryElementSizeMatchesReference)
+{
+	constexpr uint32_t k_w = 261u;
+	constexpr uint32_t k_h = 261u;
+	for (uint32_t bpp: {1u, 2u, 4u, 8u, 16u})
+	{
+		const uint32_t       pitch       = TileAlign64KBPitch(k_w, bpp);
+		const uint32_t       block_w     = TileGet64KBBlockWidth(bpp);
+		const uint32_t       block_h     = 65536u / (block_w * bpp);
+		const uint64_t       tiled_bytes = static_cast<uint64_t>(pitch / block_w) * ((k_h + block_h - 1u) / block_h) * 65536u;
+		std::vector<uint8_t> linear(static_cast<size_t>(k_w) * k_h * bpp);
+		for (size_t i = 0; i < linear.size(); ++i)
+		{
+			linear[i] = static_cast<uint8_t>((i * 17u + 31u) & 0xffu);
+		}
+		std::vector<uint8_t> tiled(static_cast<size_t>(tiled_bytes), 0u);
+		FillTiledFromLinear(&tiled, linear, k_w, k_h, pitch, bpp, TileDetileLayout::Standard64KB);
+		std::vector<uint8_t> production(linear.size(), 0xBBu);
+		const auto           request =
+		    MakeRequest(production.data(), tiled.data(), k_w, k_h, pitch, k_w, bpp, TileDetileLayout::Standard64KB, tiled_bytes);
+		EXPECT_EQ(TileDetileGetProductionPathForTesting(request), TileDetileProductionPath::StandardContiguous);
+		ASSERT_TRUE(TileDetile(request));
+		EXPECT_EQ(production, linear) << "bpp=" << bpp;
+	}
+}
+
 TEST(EmulatorTileDetile, Standard4KB4bppProductionMatchesReference)
 {
 	constexpr uint32_t k_w      = 40u;
@@ -705,7 +733,7 @@ TEST(EmulatorTileDetile, Standard4KBContiguousProductionPreservesDestinationPitc
 	                                     TileDetileLayout::Standard4KB, tiled_bytes);
 	const auto production_request = MakeRequest(production.data(), tiled.data(), k_width, k_height, k_src_pitch, k_dst_pitch, k_bpp,
 	                                            TileDetileLayout::Standard4KB, tiled_bytes);
-	EXPECT_EQ(TileDetileGetProductionPathForTesting(production_request), TileDetileProductionPath::Standard4KBContiguous);
+	EXPECT_EQ(TileDetileGetProductionPathForTesting(production_request), TileDetileProductionPath::StandardContiguous);
 	ASSERT_TRUE(TileDetileReference(ref_request));
 	ASSERT_TRUE(TileDetile(production_request));
 	EXPECT_EQ(production, reference);
@@ -751,7 +779,7 @@ TEST(EmulatorTileDetile, Standard4KBProductionContiguousPathRemainsBounded)
 
 	// The production selector is the exact branch used by TileDetile; assert it
 	// before the bounded counter/timing guard so this test is not timing-only.
-	ASSERT_EQ(TileDetileGetProductionPathForTesting(production_request), TileDetileProductionPath::Standard4KBContiguous);
+	ASSERT_EQ(TileDetileGetProductionPathForTesting(production_request), TileDetileProductionPath::StandardContiguous);
 	// The counter proves both bounded loops actually run, while the loose timing
 	// bound catches a gross regression without imposing a host-specific
 	// microbenchmark threshold.

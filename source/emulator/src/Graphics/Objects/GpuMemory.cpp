@@ -976,7 +976,7 @@ void GpuMemoryCompleteSubmission(SubmissionId submission)
 	g_gpu_memory->CompleteSubmission(submission);
 }
 
-void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer)
+void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
 	EXIT_IF(ctx == nullptr);
@@ -984,7 +984,7 @@ void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRa
 	g_gpu_memory->WriteBackStorageRanges(ctx, ranges, consumer);
 }
 
-bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer,
+bool GpuMemoryPendingStorageWriteBack(GpuMemoryGuestRangeQuery ranges, GpuQueueId consumer,
                                       std::vector<GpuMemoryStoragePublication>* publishable, SubmissionId* dependency)
 {
 	EXIT_IF(g_gpu_memory == nullptr);

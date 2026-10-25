@@ -77,6 +77,8 @@ uint64_t ReadU64(const uint8_t* bytes)
 	return value;
 }
 
+// The 128-bit key is the whole identity of a source entry: storing the source
+// itself made entries up to ten times larger than their binaries.
 XXH128_hash_t SourceKey(const String8& source, uint32_t optimization, bool validation_enabled)
 {
 	std::vector<uint8_t> canonical;
@@ -177,6 +179,8 @@ struct SpirvBinaryCacheStore::State
 	std::filesystem::path  root;
 	SpirvBinaryCacheLimits limits;
 	size_t                 session_bytes_attempted = 0;
+	size_t                 usage                   = 0;
+	bool                   usage_known             = false;
 	mutable std::mutex     write_mutex;
 
 	mutable std::mutex                                             queue_mutex;
@@ -222,8 +226,7 @@ SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::Load(const String8& source, ui
                                                        Vector<uint32_t>* binary)
 {
 	const auto key = SourceKey(source, optimization, validation_enabled);
-	return LoadEntry(reinterpret_cast<const uint8_t*>(source.GetDataConst()), source.Size(), optimization, validation_enabled, key.low64,
-	                 key.high64, k_source_extension, binary);
+	return LoadEntry(nullptr, 0, optimization, validation_enabled, key.low64, key.high64, k_source_extension, binary);
 }
 
 SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadModule(const ShaderModuleKey& key, bool validation_enabled, Vector<uint32_t>* binary)
@@ -342,16 +345,14 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::Store(const String8& source, 
                                                          const Vector<uint32_t>& binary)
 {
 	const auto key = SourceKey(source, optimization, validation_enabled);
-	return StoreEntry(reinterpret_cast<const uint8_t*>(source.GetDataConst()), source.Size(), optimization, validation_enabled, key.low64,
-	                  key.high64, k_source_extension, binary);
+	return StoreEntry(nullptr, 0, optimization, validation_enabled, key.low64, key.high64, k_source_extension, binary);
 }
 
 SpirvBinaryCacheQueueResult SpirvBinaryCacheStore::QueueStore(const String8& source, uint32_t optimization, bool validation_enabled,
                                                               const Vector<uint32_t>& binary)
 {
 	const auto key = SourceKey(source, optimization, validation_enabled);
-	return QueueEntry(reinterpret_cast<const uint8_t*>(source.GetDataConst()), source.Size(), optimization, validation_enabled, key.low64,
-	                  key.high64, k_source_extension, binary);
+	return QueueEntry(nullptr, 0, optimization, validation_enabled, key.low64, key.high64, k_source_extension, binary);
 }
 
 SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreModule(const ShaderModuleKey& key, bool validation_enabled,
@@ -555,52 +556,60 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreEntry(const uint8_t* ide
 		return SpirvBinaryCacheStoreResult::Failed;
 	}
 
-	size_t     usage         = CacheUsage(m_state->root);
-	const auto existing_size = std::filesystem::file_size(path, error);
-	if (!error && existing_size <= usage)
+	// Scan the directory once per session and again only to evict: a scan per
+	// write stalls the write-behind queue once the cache holds thousands of entries.
+	if (!m_state->usage_known)
 	{
-		usage -= static_cast<size_t>(existing_size);
+		m_state->usage       = CacheUsage(m_state->root);
+		m_state->usage_known = true;
 	}
+	const auto   existing_size = std::filesystem::file_size(path, error);
+	const size_t replaced      = !error && existing_size <= m_state->usage ? static_cast<size_t>(existing_size) : 0;
 	error.clear();
+	const auto over_budget = [this, replaced, entry_size]
+	{ return m_state->usage - replaced > m_state->limits.max_total_bytes - entry_size; };
 
-	struct Candidate
+	if (over_budget())
 	{
-		std::filesystem::path           path;
-		std::filesystem::file_time_type time;
-		size_t                          size;
-	};
-	std::vector<Candidate> candidates;
-	for (std::filesystem::directory_iterator it(m_state->root, error), end; !error && it != end; it.increment(error))
-	{
-		if (!it->is_regular_file(error) || error || !IsCacheEntry(it->path()) || it->path() == path)
+		struct Candidate
 		{
+			std::filesystem::path           path;
+			std::filesystem::file_time_type time;
+			size_t                          size;
+		};
+		std::vector<Candidate> candidates;
+		for (std::filesystem::directory_iterator it(m_state->root, error), end; !error && it != end; it.increment(error))
+		{
+			if (!it->is_regular_file(error) || error || !IsCacheEntry(it->path()) || it->path() == path)
+			{
+				error.clear();
+				continue;
+			}
+			const auto size = it->file_size(error);
+			const auto time = it->last_write_time(error);
+			if (!error)
+			{
+				candidates.push_back({it->path(), time, static_cast<size_t>(size)});
+			}
 			error.clear();
-			continue;
 		}
-		const auto size = it->file_size(error);
-		const auto time = it->last_write_time(error);
-		if (!error)
+		std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b)
+		          { return a.time != b.time ? a.time < b.time : a.path.string() < b.path.string(); });
+		for (const auto& candidate: candidates)
 		{
-			candidates.push_back({it->path(), time, static_cast<size_t>(size)});
+			if (!over_budget())
+			{
+				break;
+			}
+			std::filesystem::remove(candidate.path, error);
+			if (!error && candidate.size <= m_state->usage - replaced)
+			{
+				m_state->usage -= candidate.size;
+			}
+			error.clear();
 		}
-		error.clear();
 	}
-	std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b)
-	          { return a.time != b.time ? a.time < b.time : a.path.string() < b.path.string(); });
-	for (const auto& candidate: candidates)
-	{
-		if (usage <= m_state->limits.max_total_bytes - entry_size)
-		{
-			break;
-		}
-		std::filesystem::remove(candidate.path, error);
-		if (!error && candidate.size <= usage)
-		{
-			usage -= candidate.size;
-		}
-		error.clear();
-	}
-	if (usage > m_state->limits.max_total_bytes - entry_size)
+	if (over_budget())
 	{
 		return SpirvBinaryCacheStoreResult::BudgetExceeded;
 	}
@@ -633,8 +642,10 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreEntry(const uint8_t* ide
 	m_state->session_bytes_attempted += entry_size;
 	if (!AtomicFileWrite(path, data.data(), data.size()))
 	{
+		m_state->usage_known = false;
 		return SpirvBinaryCacheStoreResult::Failed;
 	}
+	m_state->usage = m_state->usage - replaced + entry_size;
 	return SpirvBinaryCacheStoreResult::Written;
 }
 

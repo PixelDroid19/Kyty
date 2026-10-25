@@ -163,6 +163,10 @@ struct KernelPhysicalSpan
 // Snapshot query: marks each span that one physical mapping covers and whose
 // entire backing interval is known to contain no populated host pages.
 void KernelFindUnpopulatedPhysicalSpans(KernelPhysicalSpan* spans, size_t count);
+// Snapshot query: one byte per page of direct memory [phys_addr, phys_addr + size),
+// nonzero when the page is populated or swapped out. Hosts without a population
+// query report every page populated.
+[[nodiscard]] bool   KernelQueryPopulatedPhysicalPages(uint64_t phys_addr, uint64_t size, uint8_t* populated);
 int KYTY_SYSV_ABI    KernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size);
 int KYTY_SYSV_ABI    KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
 int KYTY_SYSV_ABI    KernelBatchMap2(void* entries, int entry_count, int* processed_out, int flags);

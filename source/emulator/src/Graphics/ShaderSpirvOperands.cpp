@@ -22,7 +22,7 @@ namespace Kyty::Libs::Graphics {
 namespace {
 
 // These aliases distinguish an explicit numeric operand from a template's
-// implicit per-invocation EXEC test, including in the paired bank rewriter.
+// implicit per-invocation EXEC test.
 String8 PackedMaskName(const String8& name)
 {
 	return name == "exec_lo" || name == "exec_hi" ? "packed_" + name : name;
@@ -52,15 +52,17 @@ String8 ReplaceMaskToken(const String8& source, const String8& from, const Strin
 
 bool Spirv::NativeWave32() const
 {
-	return !UsesComputeWaveBanks() &&
-	       ((GetCsInputInfo() != nullptr && GetCsInputInfo()->wave_layout.guest_wave_size == 32u) ||
+	return ((GetCsInputInfo() != nullptr && GetCsInputInfo()->wave_layout.guest_wave_size == 32u) ||
 	        (GetVsInputInfo() != nullptr && GetVsInputInfo()->native_wave.guest_wave_size == 32u) ||
 	        (GetPsInputInfo() != nullptr && GetPsInputInfo()->native_wave.guest_wave_size == 32u));
 }
 
 bool Spirv::EmitNativeMaskBit(const ShaderOperand& mask, const String8& result, String8* output) const
 {
-	if (UsesComputeWaveBanks() || output == nullptr || (mask.size != 2 && mask.size != 1)) { return false; }
+	if (output == nullptr || (mask.size != 2 && mask.size != 1))
+	{
+		return false;
+	}
 	const auto lo = operand_numeric_variable_to_str(mask, mask.size == 1 ? -1 : 0);
 	if (lo.type != SpirvType::Uint) { return false; }
 	const bool pair = mask.size == 2 && !NativeWave32();
@@ -103,7 +105,7 @@ OpStore %execz %mask_exec_z_<tag>
 
 String8 Spirv::NativeQuadUniform(const String8& value, const String8& type, const String8& result) const
 {
-	EXIT_IF(GetHostShaderType() != ShaderType::Pixel);
+	EXIT_IF(m_code.GetType() != ShaderType::Pixel);
 	// Non-quad collectives can return undefined values in Vulkan helpers.
 	// Transfer the real members' uniform result back to every lane of the quad.
 	// Constant broadcast indices remain valid with pre-SPIR-V-1.5 toolchains.
@@ -125,7 +127,11 @@ String8 Spirv::NativeQuadUniform(const String8& value, const String8& type, cons
 
 String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result) const
 {
-	if (GetHostShaderType() != ShaderType::Pixel)
+	if (UsesSplitComputeWave())
+	{
+		return "%" + result + " = OpFunctionCall %v4uint %split_ballot %" + predicate + "\n";
+	}
+	if (m_code.GetType() != ShaderType::Pixel)
 	{
 		return "%" + result + " = OpGroupNonUniformBallot %v4uint %uint_3 %" + predicate + "\n";
 	}
@@ -155,7 +161,7 @@ String8 Spirv::NativeMaskBallot(const String8& predicate, const String8& result)
 
 String8 Spirv::NativeValidPixelBallot(const String8& result) const
 {
-	EXIT_IF(GetHostShaderType() != ShaderType::Pixel);
+	EXIT_IF(m_code.GetType() != ShaderType::Pixel);
 	// A helper is no valid pixel; with maximal reconvergence it is active and votes false.
 	return String8(R"(
 %<r>_exec = OpLoad %uint %exec_lane_lo
@@ -170,58 +176,57 @@ String8 Spirv::NativeValidPixelBallot(const String8& result) const
 String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index, const String8& source) const
 {
 	String8 result = source;
-	if (!UsesComputeWaveBanks())
+	const auto name   = Core::EnumName8(inst.type);
+	const auto tag    = String8::FromPrintf("%u", index);
+	if (!name.StartsWith("S"))
 	{
-		const auto name = Core::EnumName8(inst.type);
-		const auto tag = String8::FromPrintf("%u", index);
-		if (!name.StartsWith("S"))
-		{
-			// Only implicit EXEC loads have these names. Numeric loads and EXECZ
-			// use packed_exec_* until this adapter (or the paired adapter) finishes.
-			result = ReplaceMaskToken(result, "OpLoad %uint %exec_lo", "OpLoad %uint %exec_lane_lo");
-			result = ReplaceMaskToken(result, "OpLoad %uint %exec_hi", "OpLoad %uint %exec_lane_hi");
-		}
-		if (inst.type == ShaderInstructionType::VCndmaskB32)
-		{
-			String8 bit;
-			EXIT_IF(!EmitNativeMaskBit(inst.src[2], "t22_" + tag, &bit));
-			const auto pointer = inst.src[2].size == 1 ? operand_variable_to_str(inst.src[2]) : operand_variable_to_str(inst.src[2], 0);
-			const auto old = "%t22_" + tag + " = OpLoad %uint %" + pointer.value;
-			const auto lane_old = ReplaceMaskToken(ReplaceMaskToken(old, "%exec_lo", "%exec_lane_lo"), "%exec_hi", "%exec_lane_hi");
-			EXIT_IF(!result.ContainsStr(lane_old));
-			result = result.ReplaceStr(lane_old, bit);
-		}
+		// Only implicit EXEC loads have these names. Numeric loads and EXECZ
+		// use packed_exec_* until this adapter finishes.
+		result = ReplaceMaskToken(result, "OpLoad %uint %exec_lo", "OpLoad %uint %exec_lane_lo");
+		result = ReplaceMaskToken(result, "OpLoad %uint %exec_hi", "OpLoad %uint %exec_lane_hi");
+	}
+	if (inst.type == ShaderInstructionType::VCndmaskB32)
+	{
+		String8 bit;
+		EXIT_IF(!EmitNativeMaskBit(inst.src[2], "t22_" + tag, &bit));
+		const auto pointer  = inst.src[2].size == 1 ? operand_variable_to_str(inst.src[2]) : operand_variable_to_str(inst.src[2], 0);
+		const auto old      = "%t22_" + tag + " = OpLoad %uint %" + pointer.value;
+		const auto lane_old = ReplaceMaskToken(ReplaceMaskToken(old, "%exec_lo", "%exec_lane_lo"), "%exec_hi", "%exec_lane_hi");
+		EXIT_IF(!result.ContainsStr(lane_old));
+		result = result.ReplaceStr(lane_old, bit);
+	}
 
-		ShaderOperand mask {};
-		const bool cmpx = name.StartsWith("VCmpx");
-		if (cmpx)
+	ShaderOperand mask {};
+	const bool    cmpx = name.StartsWith("VCmpx");
+	if (cmpx)
+	{
+		mask.type = ShaderOperandType::ExecLo;
+		mask.size = 2;
+	} else if (name.StartsWith("VCmp"))
+	{
+		mask = inst.dst;
+	} else if (inst.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1 ||
+	           inst.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2 ||
+	           inst.format == ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair)
+	{
+		mask = inst.dst2;
+	}
+	if (mask.type != ShaderOperandType::Unknown)
+	{
+		const auto        lo    = mask.size == 1 ? operand_variable_to_str(mask) : operand_variable_to_str(mask, 0);
+		const auto        hi    = mask.size == 2 ? operand_variable_to_str(mask, 1) : SpirvValue {};
+		const std::string store = "OpStore %" + std::string(lo.value.c_str()) + " %";
+		std::string       text(result.c_str());
+		const auto        begin = text.find(store);
+		if (begin != std::string::npos)
 		{
-			mask.type = ShaderOperandType::ExecLo;
-			mask.size = 2;
-		} else if (name.StartsWith("VCmp"))
-		{
-			mask = inst.dst;
-		} else if (inst.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1 ||
-		           inst.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2 ||
-		           inst.format == ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair)
-		{
-			mask = inst.dst2;
-		}
-		if (mask.type != ShaderOperandType::Unknown)
-		{
-			const auto lo = mask.size == 1 ? operand_variable_to_str(mask) : operand_variable_to_str(mask, 0);
-			const auto hi = mask.size == 2 ? operand_variable_to_str(mask, 1) : SpirvValue {};
-			const std::string store = "OpStore %" + std::string(lo.value.c_str()) + " %";
-			std::string text(result.c_str());
-			const auto begin = text.find(store);
-			if (begin != std::string::npos)
-			{
-				const auto value_begin = begin + store.size() - 1;
-				const auto end = text.find_first_of(" \t\r\n", value_begin);
-				const auto value = String8(text.substr(value_begin, end - value_begin).c_str());
-				// The collective stays outside software-EXEC control flow. Capture
-				// incoming EXEC before the first store, including EXEC destinations.
-				const auto packed = String8(R"(
+			const auto value_begin = begin + store.size() - 1;
+			const auto end         = text.find_first_of(" \t\r\n", value_begin);
+			const auto value       = String8(text.substr(value_begin, end - value_begin).c_str());
+			// The collective stays outside software-EXEC control flow. Capture
+			// incoming EXEC before the first store, including EXEC destinations.
+			const auto packed =
+			    String8(R"(
 %mask_out_exec_<tag> = OpLoad %uint %exec_lane_lo
 %mask_out_live_<tag> = OpINotEqual %bool %mask_out_exec_<tag> %uint_0
 %mask_out_pred_<tag> = OpINotEqual %bool <value> %uint_0
@@ -231,44 +236,47 @@ String8 Spirv::ResolveMaskAccesses(const ShaderInstruction& inst, uint32_t index
 %mask_out_hi_<tag> = OpCompositeExtract %uint %mask_out_ballot_<tag> 1
 OpStore %<lo> %mask_out_lo_<tag>
 <store_hi>
-)").ReplaceStr("<ballot>", NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
-				   .ReplaceStr("<store_hi>", !hi.value.IsEmpty() && !NativeWave32() ? "OpStore %<hi> %mask_out_hi_<tag>" : "")
-				   .ReplaceStr("<lo>", lo.value).ReplaceStr("<hi>", hi.value).ReplaceStr("<value>", value).ReplaceStr("<tag>", tag);
-				text.replace(begin, end - begin, packed.c_str());
-				result = String8(text.c_str());
-				if (!hi.value.IsEmpty())
-				{
-					result = ReplaceMaskToken(result, "OpStore %" + hi.value + " %uint_0", "");
-				}
-			} else
+)")
+			        .ReplaceStr("<ballot>", NativeMaskBallot("mask_out_active_" + tag, "mask_out_ballot_" + tag))
+			        .ReplaceStr("<store_hi>", !hi.value.IsEmpty() && !NativeWave32() ? "OpStore %<hi> %mask_out_hi_<tag>" : "")
+			        .ReplaceStr("<lo>", lo.value)
+			        .ReplaceStr("<hi>", hi.value)
+			        .ReplaceStr("<value>", value)
+			        .ReplaceStr("<tag>", tag);
+			text.replace(begin, end - begin, packed.c_str());
+			result = String8(text.c_str());
+			if (!hi.value.IsEmpty())
 			{
-				// The always-true CMPX is a no-op on EXEC. Every other mask
-				// producer must expose its result store to this adapter.
-				EXIT_IF(inst.type != ShaderInstructionType::VCmpxTruF32);
+				result = ReplaceMaskToken(result, "OpStore %" + hi.value + " %uint_0", "");
 			}
-		}
-		const bool exec_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz;
-		const bool vcc_branch = inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz;
-		if (exec_branch || vcc_branch)
+		} else
 		{
-			const String8 mask_name = exec_branch ? "exec" : "vcc";
-			const auto load = "OpLoad %uint %" + mask_name + "_lo";
-			const auto pre = String8("%branch_mask_lo_<tag> = OpLoad %uint %<mask>_lo\n"
-			                         "%branch_mask_hi_<tag> = OpLoad %uint %<mask>_hi\n")
-			                     .ReplaceStr("<mask>", mask_name).ReplaceStr("<tag>", tag);
-			result = pre + result.ReplaceStr(load, String8("OpBitwiseOr %uint %branch_mask_lo_<tag> <high>")
-			                                          .ReplaceStr("<high>", NativeWave32() ? "%uint_0" : "%branch_mask_hi_<tag>")
-			                                          .ReplaceStr("<tag>", tag));
-			// Packed masks are wave-uniform, including in helpers. Re-voting the
-			// already uniform decision could make a helper branch on an undefined
-			// subgroup result and leave its real quad peers behind.
-			result = ReplaceMaskToken(result, "OpGroupNonUniformAny %bool %uint_3 %cc_lane_b_" + tag,
-			                          "OpCopyObject %bool %cc_lane_b_" + tag);
+			// The always-true CMPX is a no-op on EXEC. Every other mask
+			// producer must expose its result store to this adapter.
+			EXIT_IF(inst.type != ShaderInstructionType::VCmpxTruF32);
 		}
-		if (cmpx || result.ContainsStr("OpStore %exec_lo ") || result.ContainsStr("OpStore %exec_hi "))
-		{
-			result += NativeExecRefresh(tag);
-		}
+	}
+	const bool exec_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz;
+	const bool vcc_branch  = inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz;
+	if (exec_branch || vcc_branch)
+	{
+		const String8 mask_name = exec_branch ? "exec" : "vcc";
+		const auto    load      = "OpLoad %uint %" + mask_name + "_lo";
+		const auto    pre       = String8("%branch_mask_lo_<tag> = OpLoad %uint %<mask>_lo\n"
+		                                  "%branch_mask_hi_<tag> = OpLoad %uint %<mask>_hi\n")
+		                              .ReplaceStr("<mask>", mask_name)
+		                              .ReplaceStr("<tag>", tag);
+		result = pre + result.ReplaceStr(load, String8("OpBitwiseOr %uint %branch_mask_lo_<tag> <high>")
+		                                           .ReplaceStr("<high>", NativeWave32() ? "%uint_0" : "%branch_mask_hi_<tag>")
+		                                           .ReplaceStr("<tag>", tag));
+		// Packed masks are wave-uniform, including in helpers. Re-voting the
+		// already uniform decision could make a helper branch on an undefined
+		// subgroup result and leave its real quad peers behind.
+		result = ReplaceMaskToken(result, "OpGroupNonUniformAny %bool %uint_3 %cc_lane_b_" + tag, "OpCopyObject %bool %cc_lane_b_" + tag);
+	}
+	if (cmpx || result.ContainsStr("OpStore %exec_lo ") || result.ContainsStr("OpStore %exec_hi "))
+	{
+		result += NativeExecRefresh(tag);
 	}
 	return result.ReplaceStr("%packed_exec_", "%exec_");
 }
@@ -718,7 +726,7 @@ static bool fragment_row_dpp_wave32_keeps_dst(const ShaderCode& code, uint32_t i
 	return false;
 }
 
-static bool fragment_row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const String8& index)
+static bool row_dpp_supported(const Spirv& spirv, const ShaderOperand& op, const String8& index)
 {
 	if (op.type != ShaderOperandType::Vgpr || op.dpp_row_mask != 0xfu || op.dpp_bank_mask != 0xfu || op.swizzle != 6u)
 	{
@@ -727,7 +735,7 @@ static bool fragment_row_dpp_supported(const Spirv& spirv, const ShaderOperand& 
 	const uint32_t control = op.dpp_ctrl;
 	const bool     row     = (control >= 0x101u && control <= 0x10fu) || (control >= 0x111u && control <= 0x11fu) ||
 	                         (control >= 0x121u && control <= 0x12fu) || control == 0x140u || control == 0x141u;
-	if (!row || (op.dpp_bound_ctrl && control < 0x121u))
+	if (!row)
 	{
 		return false;
 	}
@@ -739,13 +747,16 @@ static bool fragment_row_dpp_supported(const Spirv& spirv, const ShaderOperand& 
 		}
 	}
 	const uint32_t inst_index = index.ToUint32();
-	if (ShaderFragmentWaveInsideRegion(spirv.GetCode(), inst_index))
+	const bool     pixel      = spirv.GetCode().GetType() == ShaderType::Pixel;
+	if (pixel && ShaderFragmentWaveInsideRegion(spirv.GetCode(), inst_index))
 	{
-		return true;
+		return !op.dpp_bound_ctrl || control >= 0x121u;
 	}
-	const auto* pixel = spirv.GetPsInputInfo();
-	return pixel != nullptr && pixel->required_subgroup_size == 32u &&
-	       fragment_row_dpp_wave32_keeps_dst(spirv.GetCode(), inst_index, op);
+	// Each host subgroup must hold whole guest rows and no ghost lanes: a wave32
+	// fragment, a native wave32 compute wave, or one 32-lane half of a split wave64.
+	const bool whole_rows = pixel ? spirv.GetPsInputInfo() != nullptr && spirv.GetPsInputInfo()->required_subgroup_size == 32u
+	                              : spirv.UsesNativeComputeWave();
+	return whole_rows && fragment_row_dpp_wave32_keeps_dst(spirv.GetCode(), inst_index, op);
 }
 
 // Emits the row-class lane permutation for an already-loaded operand inside a
@@ -760,7 +771,7 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 {
 	String8 head = input_is_uint ? String8("\n        %dpp_bits_<result> = OpCopyObject %uint %<in>\n")
 	                             : String8("\n        %dpp_bits_<result> = OpBitcast %uint %<in>\n");
-	static const char* permutation = R"(      %dpp_lane_<result> = OpLoad %uint %gl_SubgroupInvocationID
+	static const char* permutation = R"(      %dpp_lane_<result> = OpLoad %uint %<host_lane>
       %dpp_ssize_<result> = OpLoad %uint %gl_SubgroupSize
       %dpp_last_<result> = OpISub %uint %dpp_ssize_<result> %uint_1
      %dpp_local_<result> = OpBitwiseAnd %uint %dpp_lane_<result> %<lane_15>
@@ -773,8 +784,7 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 )";
 	// FI=0 substitutes zero when the fetched source lane is EXEC-inactive.
 	// %exec_lo holds this lane's bit; shuffling it by the source lane index
-	// yields the source lane's bit, mirroring %wave_dpp_source_exec in the
-	// banked compute path.
+	// yields the source lane's bit.
 	static const char* exec_guard_text =
 	    R"( %dpp_exlo_<result> = OpLoad %uint %exec_lo
  %dpp_srclive_<result> = OpGroupNonUniformShuffle %uint %uint_3 %dpp_exlo_<result> %dpp_clamped_<result>
@@ -803,6 +813,7 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 		                     : "    %dpp_bounds_<result> = OpUGreaterThanEqual %bool %dpp_local_<result> %<step>\n";
 	}
 	*text = (head + String8(permutation))
+	            .ReplaceStr("<host_lane>", spirv->HostLaneVariable())
 	            .ReplaceStr("<target>", target)
 	            .ReplaceStr("<exec_guard>", exec_guard ? String8(exec_guard_text) : String8())
 	            .ReplaceStr("<ok>", exec_guard ? String8("%dpp_okg_<result>") : String8("%dpp_ok_<result>"))
@@ -823,15 +834,15 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 {
 	if (!operand_dpp_supported(op))
 	{
-		if (spirv->GetHostShaderType() != ShaderType::Pixel || !fragment_row_dpp_supported(*spirv, op, index))
+		if (!row_dpp_supported(*spirv, op, index))
 		{
 			return false;
 		}
 		// Outside a proven region EXEC may be partial; FI=0 must then zero
 		// sources fetched from EXEC-inactive lanes. Inside a proven region
 		// EXEC is full and the extra shuffle would be a no-op.
-		const bool exec_guard = !op.dpp_fetch_inactive &&
-		                        !ShaderFragmentWaveInsideRegion(spirv->GetCode(), index.ToUint32());
+		const bool exec_guard = !op.dpp_fetch_inactive && !(spirv->GetCode().GetType() == ShaderType::Pixel &&
+		                                                    ShaderFragmentWaveInsideRegion(spirv->GetCode(), index.ToUint32()));
 		return operand_dpp_row_permute_uint(spirv, op, result_id, input_id, input_is_uint, exec_guard, text);
 	}
 	const auto control = op.dpp_ctrl;
@@ -839,28 +850,25 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 
 	String8 head = input_is_uint ? String8("\n        %dpp_bits_<result> = OpCopyObject %uint %<in>\n")
 	                             : String8("\n        %dpp_bits_<result> = OpBitcast %uint %<in>\n");
-	static const char* permutation = R"(        %dpp_lane_<result> = OpLoad %uint %gl_SubgroupInvocationID
+	static const char* permutation = R"(        %dpp_lane_<result> = OpLoad %uint %<host_lane>
        %dpp_local_<result> = OpBitwiseAnd %uint %dpp_lane_<result> %<three>
        %dpp_shift_<result> = OpShiftLeftLogical %uint %dpp_local_<result> %<one>
        %dpp_table_<result> = OpShiftRightLogical %uint %<ctrl> %dpp_shift_<result>
       %dpp_select_<result> = OpBitwiseAnd %uint %dpp_table_<result> %<three>
 <exchange>
 )";
-	if (!spirv->UsesComputeWaveBanks())
-	{
-		// FI=0 filters the source image before routing, not the destination.
-		// QuadBroadcast still supplies native fragment helper participation.
-		head = head.ReplaceStr("%dpp_bits_<result>", "%dpp_unfiltered_<result>");
-		head += R"(%dpp_source_exec_<result> = OpLoad %uint %exec_lo
+	// FI=0 filters the source image before routing, not the destination.
+	// QuadBroadcast still supplies native fragment helper participation.
+	head = head.ReplaceStr("%dpp_bits_<result>", "%dpp_unfiltered_<result>");
+	head += R"(%dpp_source_exec_<result> = OpLoad %uint %exec_lo
 %dpp_source_on_<result> = OpINotEqual %bool %dpp_source_exec_<result> %uint_0
 %dpp_bits_<result> = OpSelect %uint %dpp_source_on_<result> %dpp_unfiltered_<result> %uint_0
 )";
-	}
 	// Fragment quad operations keep helper invocations participating. A general
 	// shuffle may treat them as inactive, losing values needed at primitive edges.
 	// Constant broadcast indices also work with pre-SPIR-V-1.5 toolchains.
 	String8 exchange;
-	if (spirv->GetHostShaderType() == ShaderType::Pixel)
+	if (spirv->GetCode().GetType() == ShaderType::Pixel)
 	{
 		uint32_t selected_lanes = 0;
 		for (uint32_t lane = 0; lane < 4; ++lane)
@@ -895,22 +903,9 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
       %dpp_target_<result> = OpBitwiseOr %uint %dpp_base_<result> %dpp_select_<result>
        %dpp_value_<result> = OpGroupNonUniformShuffle %uint %uint_3 %dpp_bits_<result> %dpp_target_<result>
 )";
-		if (spirv->UsesComputeWaveBanks())
-		{
-			// FI=0 substitutes zero for an inactive source before ALU modifiers.
-			// The bank rewriter resolves this mask alias to the architectural
-			// word, independently of its ordinary per-destination EXEC loads.
-			exchange = exchange.ReplaceStr("%dpp_value_<result> =", "%dpp_fetched_<result> =");
-			exchange += R"(
-    %dpp_exec_word_<result> = OpLoad %uint %wave_dpp_source_exec
-     %dpp_exec_bit_<result> = OpShiftLeftLogical %uint %<one> %dpp_target_<result>
-    %dpp_exec_mask_<result> = OpBitwiseAnd %uint %dpp_exec_word_<result> %dpp_exec_bit_<result>
-  %dpp_source_live_<result> = OpINotEqual %bool %dpp_exec_mask_<result> %<zero>
-       %dpp_value_<result> = OpSelect %uint %dpp_source_live_<result> %dpp_fetched_<result> %<zero>
-)";
-		}
 	}
 	*text = (head + String8(permutation))
+	                     .ReplaceStr("<host_lane>", spirv->HostLaneVariable())
 	                     .ReplaceStr("<exchange>", exchange)
 	                     .ReplaceStr("<result>", result_id)
 	                     .ReplaceStr("<in>", input_id)
@@ -929,7 +924,7 @@ bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, 
 
 	if (op.dpp)
 	{
-		if (!operand_dpp_supported(op) && !fragment_row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
 		{
 			return false;
 		}
@@ -988,7 +983,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 	EXIT_IF(load == nullptr);
 	if (op.dpp)
 	{
-		if (!operand_dpp_supported(op) && !fragment_row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
 		{
 			return false;
 		}
@@ -1108,7 +1103,7 @@ bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id
 	{
 		// DPP transforms source zero before the ALU operation, not only V_MOV.
 		// Keep the full-mask quad-permutation subset shared by all consumers.
-		if (!operand_dpp_supported(op) && !fragment_row_dpp_supported(*spirv, op, index))
+		if (!operand_dpp_supported(op) && !row_dpp_supported(*spirv, op, index))
 		{
 			return false;
 		}

@@ -1,4 +1,5 @@
 #include "Emulator/AudioVideoBackend.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
 
 #include <algorithm>
@@ -212,6 +213,8 @@ static void FreeState(Decoder::State* state)
 	state->condition.notify_all();
 	if (state->worker.joinable())
 	{
+		// The decode worker runs guest read callbacks, so waiting for it is a safe point.
+		Kernel::PthreadInterruptibleScope any_syscall;
 		state->worker.join();
 	}
 	if (state->resampler != nullptr)
@@ -1038,7 +1041,7 @@ bool Decoder::ReadVideoFrame(VideoFrame* frame)
 	return false;
 #else
 	std::unique_lock<std::mutex> lock(state_->mutex);
-	if (state_->status != Status::Ok || state_->video == nullptr)
+	if (state_->video == nullptr)
 	{
 		return false;
 	}
@@ -1068,7 +1071,7 @@ bool Decoder::ReadAudioFrame(AudioFrame* frame)
 	return false;
 #else
 	std::unique_lock<std::mutex> lock(state_->mutex);
-	if (state_->status != Status::Ok || state_->audio == nullptr)
+	if (state_->audio == nullptr)
 	{
 		return false;
 	}
@@ -1098,7 +1101,7 @@ bool Decoder::TryReadVideoFrame(VideoFrame* frame)
 	return false;
 #else
 	std::lock_guard<std::mutex> lock(state_->mutex);
-	if (state_->status != Status::Ok || state_->video == nullptr || state_->video_queue.empty())
+	if (state_->video == nullptr || state_->video_queue.empty())
 	{
 		return false;
 	}
@@ -1121,7 +1124,7 @@ bool Decoder::TryReadAudioFrame(AudioFrame* frame)
 #else
 	{
 		std::lock_guard<std::mutex> lock(state_->mutex);
-		if (state_->status != Status::Ok || state_->audio == nullptr || state_->audio_queue.empty())
+		if (state_->audio == nullptr || state_->audio_queue.empty())
 		{
 			return false;
 		}
@@ -1152,6 +1155,8 @@ bool Decoder::Seek(uint64_t time_ms)
 	state->condition.notify_all();
 	if (state->worker.joinable())
 	{
+		// The decode worker runs guest read callbacks, so waiting for it is a safe point.
+		Kernel::PthreadInterruptibleScope any_syscall;
 		state->worker.join();
 	}
 	{
@@ -1360,16 +1365,18 @@ bool ElementaryVideoDecoder::Drain()
 	return false;
 #else
 	auto* state = state_.get();
+	bool  sent  = true;
 	if (!state->drained)
 	{
-		state->drained = true;
-		if (avcodec_send_packet(state->context, nullptr) < 0)
+		sent           = avcodec_send_packet(state->context, nullptr) >= 0;
+		state->drained = sent;
+		if (!sent)
 		{
 			state->error = "drain video decoder";
-			return false;
 		}
 	}
-	return CollectPictures(state);
+	// Pictures the codec already finished are kept even when the drain send failed.
+	return CollectPictures(state) && sent;
 #endif
 }
 

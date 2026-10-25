@@ -46,7 +46,7 @@ void RunExecBranchCase(VulkanComputeProbe& probe, const ShaderComputeInputInfo& 
 	                                                   0xbe8803ffu, // alternate arm: s_mov_b32 s8, alternate_marker
 	                                                   test.alternate_marker,
 	                                                   0xbf810000u}; // s_endpgm (shared join)
-	const std::vector<WaveProbeObservation> observations {{"s8", "s8"}, {"exec_lo", "exec_lo"}, {"exec_hi", "exec_hi"}, {"execz", "execz"}};
+	const std::vector<WaveProbeObservation> observations {{"s8"}, {"exec_lo"}, {"exec_hi"}, {"execz"}};
 
 	String8 source;
 	String8 error;
@@ -110,11 +110,14 @@ void RunWaveBranchCases(VulkanComputeProbe& probe)
 	input.threads_num[1] = input.threads_num[2] = 1;
 	input.thread_ids_num                        = 1;
 	const ShaderComputeWaveRequest request {{128, 1, 1}, {1, 1, 1}, 0x41, 0, ShaderGuestLaneOrder::LinearXFirst};
-	if (ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
+	if (ShaderBuildSplitComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
 	    ShaderComputeWaveLayoutStatus::Supported)
 	{
 		Fail("two-wave paired layout must be supported after wave initialization");
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 
 	const ExecBranchCase cases[] = {
 	    {"PairedExeczUpperOnlyVersusEmpty", 0xbf880003u, 0xec000001u, 0xec000000u, 0xec000001u, 0xec000000u},

@@ -12,8 +12,8 @@ namespace Ps5Util {
 
 // IL2CPP's conservative collector asks PS5Util to interrupt a peer thread
 // before it waits for that thread's register-context acknowledgement. The
-// accompanying PS5Util PRX installs the signal-30 handler and owns the
-// suspend/resume semaphores; libkernel owns delivery to that handler.
+// collector installs the signal-30 handler and owns the suspend/resume
+// semaphores; libkernel owns delivery to that handler.
 static KYTY_SYSV_ABI int RequestThreadContext(void* thread)
 {
 	PRINT_NAME();

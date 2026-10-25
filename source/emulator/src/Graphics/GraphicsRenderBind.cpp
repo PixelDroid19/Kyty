@@ -2612,14 +2612,20 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
 		                                                  tail_fetched);
+		VkDeviceSize offset   = 0;
 		if (vertices == nullptr)
 		{
-			vertices = static_cast<VulkanBuffer*>(
-			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, address, size, VertexBufferGpuObject()));
+			// Draws sharing a vertex pool fetch it from a different record each; one object over the
+			// declared stream, bound at the draw's record, serves them all instead of one per window.
+			const uint64_t declared     = ShaderBufferByteSize(buffer_info.stride, buffer_info.num_records);
+			const bool     whole_stream = declared != 0u && declared <= kGpuMemoryMaxTransientReadOnlyBytes;
+			const uint64_t object_addr  = whole_stream ? buffer_info.addr : address;
+			vertices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, object_addr,
+			                                                            whole_stream ? declared : size, VertexBufferGpuObject()));
+			offset   = address - object_addr;
 		}
 		if (vertices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertices == nullptr condition ignored (continuing)\n"); }
 
-		VkDeviceSize offset = 0;
 		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &vertices->buffer, &offset);
 	}
 }
@@ -3169,8 +3175,6 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				r.UpdateAddress44(i);
 			}
 		}
-
-		if (((gen5 ? r.Base48() : r.Base44()) >> 32u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ((gen5 ? r.Base48() : r.Base44()) >> 32u) != 0 condition ignored (continuing)\n"); }
 
 		(*sgprs)[0] = r.fields[0];
 		(*sgprs)[1] = r.fields[1];
@@ -3725,6 +3729,20 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					}
 				}
 				tex = dtex.At(static_cast<int>(alias_index));
+				// Each rendered slice of a depth array is its own image (DescribeRenderDepthInfo).
+				if (gen5 && arrayed_2d && view_layers > 1u && !textures.desc[i].textures2d_without_sampler)
+				{
+					if (!depth_exact || base_array != 0u)
+					{
+						EXIT("sampled depth array is not resolved: exact=%u base_array=%u layers=%u addr=0x%012" PRIx64 "\n",
+						     depth_exact ? 1u : 0u, base_array, view_layers, static_cast<uint64_t>(addr));
+					}
+					// The guest-memory depth sample contract: metadata (HTILE) or MSAA would change what the layer bytes mean.
+					const bool plain_guest_depth = tile == 24u && levels == 1u && !r.MsaaDepth() && r.MetaAddr() == 0u;
+					tex = GraphicsRenderDepthSliceArray(buffer, static_cast<DepthStencilVulkanImage*>(tex), addr, size.size, view_layers,
+					                                    fmt, pitch, plain_guest_depth);
+					materialize = "depth-slice-array";
+				}
 				// Vulkan has no storage depth image: a dispatch addresses the depth plane through the image's colour
 				// copy, seeded here and stored back once the dispatch is recorded, so the stencil plane is untouched.
 				if (depth_exact && compute_stage && textures.desc[i].textures2d_without_sampler &&
@@ -4299,10 +4317,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						const auto& e = provenance.entries[pe];
 						state_written += std::snprintf(
 						    parent_state + state_written, sizeof(parent_state) - static_cast<size_t>(state_written),
-						    " obj%u=%u/%u:origin%u:seq%" PRIu64 ":submit%" PRIu64 ":cpu%" PRIu64 ":gpu%" PRIu64 ":in_use%d:deps_done%d:wb%d", pe,
-						    static_cast<uint32_t>(e.type), static_cast<uint32_t>(e.relation), static_cast<uint32_t>(e.content_origin),
+						    " obj%u=%u/%u:origin%u:seq%" PRIu64 ":submit%" PRIu64 ":cpu%" PRIu64 ":gpu%" PRIu64
+						    ":in_use%d:deps_done%d:wb%d:storage_view%d",
+						    pe, static_cast<uint32_t>(e.type), static_cast<uint32_t>(e.relation), static_cast<uint32_t>(e.content_origin),
 						    e.content_sequence, e.submit_id, e.cpu_update_time, e.gpu_update_time, e.in_use ? 1 : 0,
-						    e.dependencies_complete ? 1 : 0, e.write_back_capable ? 1 : 0);
+						    e.dependencies_complete ? 1 : 0, e.write_back_capable ? 1 : 0, e.storage_depth_view ? 1 : 0);
 					}
 				}
 				EXIT("unsupported depth-reference image binding: operation=%u shape=%u numeric=%u view=%u format=%u tile=%u "
@@ -4530,7 +4549,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 			RecordDrawMaterialTraceTexture(material_trace, i, textures.desc[i], r, addr, width, height, pitch, depth, tex,
 			                               sampled_views[*sampled_index], trace_provenance, &textures, &samplers);
-			if (std::getenv("KYTY_DUMP_VIDEO_BIND") != nullptr && gen5 && (fmt == 1u || fmt == 14u))
+			static const bool dump_video_bind = std::getenv("KYTY_DUMP_VIDEO_BIND") != nullptr;
+			if (dump_video_bind && gen5 && (fmt == 1u || fmt == 14u))
 			{
 				const uint64_t bind_addr = static_cast<uint64_t>(addr);
 				const bool     video_va  = bind_addr >= 0x6c000000ull && bind_addr <= 0x6e000000ull;
@@ -5159,7 +5179,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 				auto* storage_image = textures2d_storage[i];
 				const auto old_layout = storage_image->layout;
 				GraphicsRenderStorageImageBarrier(buffer, storage_image);
-				if (std::getenv("KYTY_DUMP_STORAGE_IMAGE") != nullptr)
+				static const bool dump_storage_image = std::getenv("KYTY_DUMP_STORAGE_IMAGE") != nullptr;
+				if (dump_storage_image)
 				{
 					static std::atomic_uint storage_image_logs {0};
 					const unsigned         ordinal = storage_image_logs.fetch_add(1, std::memory_order_relaxed);

@@ -51,6 +51,22 @@ enum class ColorDccClearCode: uint8_t
 	return fill_size >= keys;
 }
 
+// Single-sample color CMASK holds one nibble per 8x8 pixel tile; nibble 0
+// marks a fast-cleared tile, which the color block reads as
+// CB_COLOR_CLEAR_WORD0/1. A zero fill from the CMASK base that reaches every
+// tile's nibble fast-clears the whole surface.
+[[nodiscard]] inline bool ColorCmaskFillClearsSurface(const std::array<uint32_t, 4>& words, uint64_t fill_address, uint64_t fill_size,
+                                                      uint64_t cmask_address, uint32_t width, uint32_t height)
+{
+	if (cmask_address == 0u || fill_address != cmask_address || width == 0u || height == 0u ||
+	    (words[0] | words[1] | words[2] | words[3]) != 0u)
+	{
+		return false;
+	}
+	const uint64_t tiles = static_cast<uint64_t>((width + 7u) / 8u) * ((height + 7u) / 8u);
+	return fill_size >= (tiles + 1u) / 2u;
+}
+
 // COMP_SWAP STD (0) and ALT (1) keep alpha in the most significant channel of
 // a multi-channel color surface; STD_REV (2) and ALT_REV (3) do not.
 [[nodiscard]] constexpr bool ColorDccAlphaOnMsb(uint32_t comp_swap)

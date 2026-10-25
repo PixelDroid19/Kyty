@@ -87,7 +87,7 @@ static ShaderInstruction EndProgram(uint32_t pc)
 	return inst;
 }
 
-static void AppendWaterfallBody(WaterfallFixture* fixture)
+static void AppendWaterfallBody(WaterfallFixture* fixture, uint32_t back_edge_target = UINT32_MAX)
 {
 	auto& code = fixture->code;
 	const auto head = fixture->head_pc;
@@ -153,7 +153,7 @@ static void AppendWaterfallBody(WaterfallFixture* fixture)
 	code.GetInstructions().Add(restore_exec);
 
 	fixture->branch_pc = head + 24u;
-	const auto branch  = BranchTo(fixture->branch_pc, head, ShaderInstructionType::SCbranchScc1);
+	const auto branch  = BranchTo(fixture->branch_pc, back_edge_target == UINT32_MAX ? head : back_edge_target, ShaderInstructionType::SCbranchScc1);
 	code.GetInstructions().Add(branch);
 	code.GetLabels().Add(ShaderLabel(branch));
 
@@ -251,6 +251,42 @@ static ShaderInstruction ScalarWrite(uint32_t pc, uint32_t destination)
 	inst.src[0].constant.u     = 0u;
 	inst.src_num               = 1;
 	return inst;
+}
+
+// EXEC is restored from s[24:25] and REST copies that pair; the back edge lands on a wait just before the head.
+// `overwrite_source` writes s25 between the two copies.
+static WaterfallFixture WaterfallEnteredThroughCopiedExec(bool overwrite_source)
+{
+	WaterfallFixture fixture {};
+	auto&            instructions = fixture.code.GetInstructions();
+	ShaderInstruction exec_from_source {};
+	exec_from_source.pc      = 0u;
+	exec_from_source.type    = ShaderInstructionType::SMovB64;
+	exec_from_source.format  = ShaderInstructionFormat::Sdst2Ssrc02;
+	exec_from_source.dst     = ExecPair();
+	exec_from_source.src[0]  = Sgpr(24u, 2u);
+	exec_from_source.src_num = 1;
+	instructions.Add(exec_from_source);
+	uint32_t pc = 4u;
+	if (overwrite_source)
+	{
+		instructions.Add(ScalarWrite(pc, 25u));
+		pc += 4u;
+	}
+	auto rest_from_source = exec_from_source;
+	rest_from_source.pc   = pc;
+	rest_from_source.dst  = Sgpr(fixture.rest_register, 2u);
+	instructions.Add(rest_from_source);
+	ShaderInstruction wait {};
+	wait.pc                = pc + 4u;
+	wait.type              = ShaderInstructionType::SWaitcnt;
+	wait.format            = ShaderInstructionFormat::Imm;
+	wait.src[0].type       = ShaderOperandType::LiteralConstant;
+	wait.src_num           = 1;
+	instructions.Add(wait);
+	fixture.head_pc = wait.pc + 4u;
+	AppendWaterfallBody(&fixture, wait.pc);
+	return fixture;
 }
 
 static ShaderInstruction M0Write(uint32_t pc)
@@ -455,6 +491,39 @@ TEST(EmulatorShaderWaterfall, RefusesLiveScalarAndImplicitM0AlongForwardBranchPa
 
 	ShaderLowerWaterfallMoves(&m0_fixture.code);
 	ExpectWaterfallRetained(m0_fixture);
+}
+
+TEST(EmulatorShaderWaterfall, LowersLoopsEnteredThroughWaitsAndCopiedExecPairsBeforeLaterLoops)
+{
+	auto fixture = WaterfallEnteredThroughCopiedExec(false);
+	// A later loop overwrites the scalar before it reads anything: the value is dead on its back edge as well.
+	fixture.code.GetInstructions().RemoveAt(fixture.code.GetInstructions().Size() - 1u);
+	const uint32_t later = fixture.branch_pc + 4u;
+	fixture.code.GetInstructions().Add(ScalarWrite(later, fixture.scalar_register));
+	const auto back_edge = BranchTo(later + 4u, later, ShaderInstructionType::SCbranchScc1);
+	fixture.code.GetInstructions().Add(back_edge);
+	fixture.code.GetLabels().Add(ShaderLabel(back_edge));
+	fixture.code.GetInstructions().Add(EndProgram(later + 8u));
+	ShaderLowerWaterfallMoves(&fixture.code);
+	EXPECT_FALSE(HasType(fixture.code, ShaderInstructionType::VReadfirstlaneB32));
+	const auto* move = AtPc(fixture.code, fixture.move_pc);
+	ASSERT_NE(move, nullptr);
+	EXPECT_EQ(move->src_num, 2);
+
+	auto overwritten = WaterfallEnteredThroughCopiedExec(true);
+	ShaderLowerWaterfallMoves(&overwritten.code);
+	EXPECT_TRUE(HasType(overwritten.code, ShaderInstructionType::VReadfirstlaneB32)) << "REST no longer equals EXEC";
+
+	// A back edge to before the loop carries the scalar to code the pass never saw it reach.
+	auto enclosed = ValidWaterfall();
+	enclosed.code.GetInstructions().RemoveAt(enclosed.code.GetInstructions().Size() - 1u);
+	const auto outer = BranchTo(enclosed.branch_pc + 4u, 0u, ShaderInstructionType::SCbranchScc0);
+	enclosed.code.GetInstructions().Add(outer);
+	enclosed.code.GetLabels().Add(ShaderLabel(outer));
+	enclosed.code.GetInstructions().Add(EndProgram(enclosed.branch_pc + 8u));
+	enclosed.original_instruction_count = enclosed.code.GetInstructions().Size();
+	ShaderLowerWaterfallMoves(&enclosed.code);
+	ExpectWaterfallRetained(enclosed);
 }
 
 TEST(EmulatorShaderWaterfall, RefusesAnExternalEntryIntoTheLoopBody)

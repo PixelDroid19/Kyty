@@ -1,36 +1,42 @@
-#include "Emulator/Kernel/Pthread.h"
-#include "Emulator/Kernel/RetailKernel.h"
+#include "Kyty/Core/File.h"
+#include "Kyty/Core/Threads.h"
+#include "Kyty/Core/VirtualMemory.h"
+#include "Kyty/UnitTest.h"
+
+#include "Emulator/Config.h"
+#include "Emulator/GuestCodeRanges.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/FileSystem.h"
-#include "Kyty/Core/File.h"
 #include "Emulator/Kernel/Memory.h"
+#include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/Semaphore.h"
-#include "Emulator/Config.h"
-#include "Emulator/PresentationStats.h"
-#include "Emulator/VideoFrameMemory.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/KernelException.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/PosixSemaphore.h"
-#include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Loader/GuestCall.h"
-#include "Emulator/GuestRuntimePort.h"
+#include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
-#include "Kyty/Core/VirtualMemory.h"
-#include "Kyty/UnitTest.h"
+#include "Emulator/PresentationStats.h"
+#include "Emulator/VideoFrameMemory.h"
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <future>
 #include <limits>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#include <sys/mman.h>
 #include <unistd.h>
 #endif
 
@@ -284,6 +290,11 @@ TEST(EmulatorKernelProcess, DeleteSemaphoreWakesBlockedWaiter)
 namespace {
 
 std::atomic<uint32_t> g_context_handler_calls {0};
+// The handler runs on the thread the request was raised on.
+thread_local std::atomic<uint32_t>* t_context_handler_calls = nullptr;
+// While set, the handler keeps the thread inside it, as a collector keeps a
+// stopped thread.
+thread_local std::atomic_bool* t_context_hold = nullptr;
 
 // Guest signal-30 handler: PS5Util's collector handshake receives (signum, ucontext, 0).
 int KYTY_SYSV_ABI CountContextHandler(int signum, void* context, void* /*unused*/)
@@ -291,22 +302,26 @@ int KYTY_SYSV_ABI CountContextHandler(int signum, void* context, void* /*unused*
 	if (signum == 30 && context != nullptr)
 	{
 		g_context_handler_calls.fetch_add(1, std::memory_order_acq_rel);
+		if (t_context_handler_calls != nullptr)
+		{
+			t_context_handler_calls->fetch_add(1, std::memory_order_acq_rel);
+		}
+		while (t_context_hold != nullptr && t_context_hold->load(std::memory_order_acquire))
+		{
+			std::this_thread::yield();
+		}
 	}
 	return 0;
 }
 
-} // namespace
-
-// Two raisers deliver overlapping context requests to two spinning targets. Every raise
-// reclaims the requests whose trampolines published completion, so a completion published
-// while a trampoline still runs on its request-owned stack frees live memory. The targets
-// must keep running afterwards and every earlier request must be reclaimed by the last raise.
-TEST(EmulatorKernelProcess, OverlappingContextRequestsCompleteAndReclaim)
+// A signal takes one handler per process, so later tests find it installed.
+bool InstallCountContextHandler()
 {
-	EnsureKernelProcessSubsystems();
-
 	Loader::SymbolDatabase symbols;
-	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
+	if (!Libs::Init(U"libkernel_1", &symbols))
+	{
+		return false;
+	}
 	Loader::SymbolResolve query {};
 	query.library              = U"libkernel";
 	query.library_version      = 1;
@@ -315,86 +330,427 @@ TEST(EmulatorKernelProcess, OverlappingContextRequestsCompleteAndReclaim)
 	query.module_version_minor = 1;
 	query.type                 = Loader::SymbolType::Func;
 	query.name                 = U"WkwEd3N7w0Y";
-	const auto* install = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
-	ASSERT_NE(install, nullptr);
-	using InstallFunc = int(KYTY_SYSV_ABI*)(int, void*);
+	const auto* install        = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	if (install == nullptr)
+	{
+		return false;
+	}
+	using InstallFunc   = int(KYTY_SYSV_ABI*)(int, void*);
 	const int installed = reinterpret_cast<InstallFunc>(install->vaddr)(30, reinterpret_cast<void*>(&CountContextHandler));
-	ASSERT_TRUE(installed == OK || installed == LibKernel::KERNEL_ERROR_EAGAIN);
+	return installed == OK || installed == LibKernel::KERNEL_ERROR_EAGAIN;
+}
 
-	// Kernel threads enter their entry through the guest runtime port; run it on the real guest stack.
-	struct ScopedGuestThreadEntry
+// Thread entries and the handler run through the guest runtime port.
+struct ScopedContextRuntimePort
+{
+	ScopedContextRuntimePort()
 	{
-		ScopedGuestThreadEntry() { Emulator::GuestRuntimePort::Install({nullptr, nullptr, nullptr, Loader::GuestCall::InvokeOnStack}); }
-		~ScopedGuestThreadEntry() { Emulator::GuestRuntimePort::Install({}); }
-	} guest_thread_entry;
+		Emulator::GuestRuntimePort::Install({nullptr, Loader::GuestCall::Invoke, nullptr, Loader::GuestCall::InvokeOnStack});
+	}
+	~ScopedContextRuntimePort() { Emulator::GuestRuntimePort::Install({}); }
+	ScopedContextRuntimePort(const ScopedContextRuntimePort&)            = delete;
+	ScopedContextRuntimePort& operator=(const ScopedContextRuntimePort&) = delete;
+};
 
-	std::atomic_bool release = false;
-	Kernel::Pthread  targets[2] = {nullptr, nullptr};
-	for (auto& target: targets)
+struct ContextTarget
+{
+	std::atomic<uint32_t> calls {0};
+	std::atomic_bool      sleep {true};
+	std::atomic_bool      release {false};
+};
+
+// Sleeps in the kernel, a safe point, or spins in host code, which is not one.
+void* KYTY_SYSV_ABI RunContextTarget(void* arg)
+{
+	auto* target            = static_cast<ContextTarget*>(arg);
+	t_context_handler_calls = &target->calls;
+	while (!target->release.load(std::memory_order_acquire))
 	{
-		ASSERT_EQ(Kernel::PthreadCreate(&target, nullptr, HoldPthreadUntilReleased, &release, "context-target"), OK);
-		ASSERT_NE(target, nullptr);
+		if (target->sleep.load(std::memory_order_acquire))
+		{
+			Kernel::KernelUsleep(100);
+		} else
+		{
+			std::this_thread::yield();
+		}
+	}
+	t_context_handler_calls = nullptr;
+	return nullptr;
+}
+
+struct StoppedWaiterTarget
+{
+	Core::Mutex           mutex;
+	Core::CondVar         cond_var;
+	bool                  done = false;
+	std::atomic<uint32_t> calls {0};
+	std::atomic_bool      hold {true};
+};
+
+// Waits on the condition, a safe point, until done.
+void* KYTY_SYSV_ABI RunConditionWaiter(void* arg)
+{
+	auto* target            = static_cast<StoppedWaiterTarget*>(arg);
+	t_context_handler_calls = &target->calls;
+	t_context_hold          = &target->hold;
+	{
+		Core::LockGuard lock(target->mutex);
+		while (!target->done)
+		{
+			Kernel::PthreadInterruptibleWait(&target->cond_var, &target->mutex);
+		}
+	}
+	t_context_handler_calls = nullptr;
+	t_context_hold          = nullptr;
+	return nullptr;
+}
+
+struct StoppedGuestWaiterTarget
+{
+	Kernel::PthreadMutex  mutex = nullptr;
+	Kernel::PthreadCond   cond  = nullptr;
+	bool                  done  = false;
+	std::atomic<uint32_t> calls {0};
+	std::atomic_bool      hold {true};
+};
+
+// Waits on the guest condition, a safe point, until done.
+void* KYTY_SYSV_ABI RunGuestConditionWaiter(void* arg)
+{
+	auto* target            = static_cast<StoppedGuestWaiterTarget*>(arg);
+	t_context_handler_calls = &target->calls;
+	t_context_hold          = &target->hold;
+	EXPECT_EQ(Kernel::PthreadMutexLock(&target->mutex), OK);
+	while (!target->done)
+	{
+		EXPECT_EQ(Kernel::PthreadCondWait(&target->cond, &target->mutex), OK);
+	}
+	EXPECT_EQ(Kernel::PthreadMutexUnlock(&target->mutex), OK);
+	t_context_handler_calls = nullptr;
+	t_context_hold          = nullptr;
+	return nullptr;
+}
+
+template <class Mutex>
+struct LockWaiterTarget
+{
+	Mutex                 mutex;
+	std::atomic<uint32_t> calls {0};
+	std::atomic_bool      locked {false};
+};
+
+// Blocks on a mutex another thread holds, a safe point, until it is released.
+template <class Mutex>
+void* KYTY_SYSV_ABI RunLockWaiter(void* arg)
+{
+	auto* target            = static_cast<LockWaiterTarget<Mutex>*>(arg);
+	t_context_handler_calls = &target->calls;
+	{
+		const auto lock = Kernel::PthreadLockAtSafePoint(target->mutex);
+		target->locked.store(true, std::memory_order_release);
+	}
+	t_context_handler_calls = nullptr;
+	return nullptr;
+}
+
+bool WaitForContextCalls(const std::atomic<uint32_t>& calls, uint32_t expected)
+{
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (calls.load(std::memory_order_acquire) < expected)
+	{
+		if (std::chrono::steady_clock::now() > deadline)
+		{
+			return false;
+		}
+		std::this_thread::yield();
+	}
+	return true;
+}
+
+} // namespace
+
+// Two raisers keep requesting the context of two sleeping threads. Each raise
+// follows the previous delivery, which may still be running, so every request
+// must be delivered exactly once and the threads must keep running afterwards.
+TEST(EmulatorKernelProcess, ContextRequestsReachSleepingThreads)
+{
+	EnsureKernelProcessSubsystems();
+	ASSERT_TRUE(InstallCountContextHandler());
+	ScopedContextRuntimePort port;
+
+	ContextTarget   targets[2];
+	Kernel::Pthread threads[2] = {nullptr, nullptr};
+	for (int i = 0; i < 2; i++)
+	{
+		ASSERT_EQ(Kernel::PthreadCreate(&threads[i], nullptr, RunContextTarget, &targets[i], "context-target"), OK);
 	}
 
-	constexpr uint32_t kRaisesPerTarget = 400;
-	g_context_handler_calls.store(0, std::memory_order_release);
+	constexpr uint32_t    kRaisesPerTarget = 200;
 	std::atomic<uint32_t> failures {0};
-	std::atomic<int>      first_error {OK};
-	auto raiser = [&](Kernel::Pthread target)
+	auto                  raiser = [&](int index)
 	{
-		for (uint32_t i = 0; i < kRaisesPerTarget; ++i)
+		for (uint32_t raised = 1; raised <= kRaisesPerTarget; raised++)
 		{
-			const uint32_t before = g_context_handler_calls.load(std::memory_order_acquire);
-			const int      raised = LibKernel::KernelRaiseException(target, 30);
-			if (raised != OK)
+			if (LibKernel::KernelRaiseException(threads[index], 30) != OK || !WaitForContextCalls(targets[index].calls, raised))
 			{
-				first_error.store(raised, std::memory_order_relaxed);
 				failures.fetch_add(1, std::memory_order_relaxed);
 				return;
 			}
-			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-			while (g_context_handler_calls.load(std::memory_order_acquire) == before)
-			{
-				if (std::chrono::steady_clock::now() > deadline)
-				{
-					failures.fetch_add(1, std::memory_order_relaxed);
-					return;
-				}
-				std::this_thread::yield();
-			}
 		}
 	};
-	std::thread first(raiser, targets[0]);
-	std::thread second(raiser, targets[1]);
+	std::thread first(raiser, 0);
+	std::thread second(raiser, 1);
 	first.join();
 	second.join();
-	EXPECT_EQ(failures.load(), 0u) << "installed=" << installed << " first raise error=" << first_error.load();
-	EXPECT_EQ(g_context_handler_calls.load(), 2u * kRaisesPerTarget);
+	EXPECT_EQ(failures.load(), 0u);
 
-	// Both targets still run their loop after every context restoration.
-	release.store(true, std::memory_order_release);
-	for (auto& target: targets)
+	for (int i = 0; i < 2; i++)
 	{
-		EXPECT_EQ(Kernel::PthreadJoin(target, nullptr), OK);
+		EXPECT_TRUE(WaitForContextCalls(targets[i].calls, kRaisesPerTarget));
+		EXPECT_EQ(targets[i].calls.load(), kRaisesPerTarget);
+		targets[i].release.store(true, std::memory_order_release);
+		EXPECT_EQ(Kernel::PthreadJoin(threads[i], nullptr), OK);
 	}
+	// A finished thread takes no more requests.
+	EXPECT_EQ(LibKernel::KernelRaiseException(threads[0], 30), LibKernel::KERNEL_ERROR_ESRCH);
+}
 
-	// A final raise reclaims everything that completed before it; only itself may remain.
-	std::atomic_bool last_release = false;
-	Kernel::Pthread  last         = nullptr;
-	ASSERT_EQ(Kernel::PthreadCreate(&last, nullptr, HoldPthreadUntilReleased, &last_release, "context-last"), OK);
+// Host code outside an interruptible wait is not a safe point: the request
+// waits there and is delivered once the thread blocks in the kernel.
+TEST(EmulatorKernelProcess, ContextRequestWaitsForSafePoint)
+{
+	EnsureKernelProcessSubsystems();
+	ASSERT_TRUE(InstallCountContextHandler());
+	ScopedContextRuntimePort port;
+
+	ContextTarget target;
+	target.sleep.store(false, std::memory_order_release);
+	Kernel::Pthread thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, RunContextTarget, &target, "context-spin"), OK);
+
+	ASSERT_EQ(LibKernel::KernelRaiseException(thread, 30), OK);
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	EXPECT_EQ(target.calls.load(), 0u);
+
+	target.sleep.store(true, std::memory_order_release);
+	EXPECT_TRUE(WaitForContextCalls(target.calls, 1));
+	target.release.store(true, std::memory_order_release);
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(target.calls.load(), 1u);
+}
+
+// A host lock taken through PthreadLockAtSafePoint is a safe point while it
+// blocks: the sleep must be on a word inside the mutex object.
+template <class Mutex>
+void ExpectContextRequestReachesLockWaiter()
+{
+	LockWaiterTarget<Mutex> target;
+	std::unique_lock        held(target.mutex);
+	Kernel::Pthread         thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, RunLockWaiter<Mutex>, &target, "lock-waiter"), OK);
+
+	ASSERT_EQ(LibKernel::KernelRaiseException(thread, 30), OK);
+	EXPECT_TRUE(WaitForContextCalls(target.calls, 1));
+	EXPECT_FALSE(target.locked.load(std::memory_order_acquire));
+
+	held.unlock();
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_TRUE(target.locked.load(std::memory_order_acquire));
+	EXPECT_EQ(target.calls.load(), 1u);
+}
+
+TEST(EmulatorKernelProcess, ContextRequestReachesLockWaiter)
+{
+	EnsureKernelProcessSubsystems();
+	ASSERT_TRUE(InstallCountContextHandler());
+	ScopedContextRuntimePort port;
+
+	ExpectContextRequestReachesLockWaiter<std::mutex>();
+	ExpectContextRequestReachesLockWaiter<std::recursive_mutex>();
+}
+
+// Guest code is a safe point. The request interrupts a guest loop, and the loop
+// resumes with its registers intact once the handler returns.
+TEST(EmulatorKernelProcess, ContextRequestInterruptsGuestCode)
+{
+	EnsureKernelProcessSubsystems();
+	ASSERT_TRUE(InstallCountContextHandler());
+	ScopedContextRuntimePort port;
+
+	// mov rax, [rdi]; test rax, rax; je <mov>; ret
+	constexpr uint8_t kSpinUntilSet[] = {0x48, 0x8B, 0x07, 0x48, 0x85, 0xC0, 0x74, 0xF8, 0xC3};
+	constexpr size_t  kPageSize       = 4096;
+	// Guest code lives low in the address space, like the loader's programs.
+	constexpr uint64_t kGuestCodeAddress = 0x0000'0e00'0000'0000ull;
+	void*              code              = mmap(reinterpret_cast<void*>(kGuestCodeAddress), kPageSize, PROT_READ | PROT_WRITE,
+	                                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+	ASSERT_EQ(code, reinterpret_cast<void*>(kGuestCodeAddress));
+	std::memcpy(code, kSpinUntilSet, sizeof(kSpinUntilSet));
+	ASSERT_EQ(mprotect(code, kPageSize, PROT_READ | PROT_EXEC), 0);
+	const auto begin = reinterpret_cast<uint64_t>(code);
+	Emulator::GuestCodeRanges::Add(begin, begin + kPageSize);
+
+	std::atomic<uint64_t> flag {0};
+	Kernel::Pthread       thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, reinterpret_cast<Kernel::pthread_entry_func_t>(code), &flag, "context-guest"), OK);
+
 	const uint32_t before = g_context_handler_calls.load(std::memory_order_acquire);
-	ASSERT_EQ(LibKernel::KernelRaiseException(last, 30), OK);
-	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-	while (g_context_handler_calls.load(std::memory_order_acquire) == before && std::chrono::steady_clock::now() < deadline)
+	ASSERT_EQ(LibKernel::KernelRaiseException(thread, 30), OK);
+	EXPECT_TRUE(WaitForContextCalls(g_context_handler_calls, before + 1));
+
+	flag.store(7, std::memory_order_release);
+	void* value = nullptr;
+	EXPECT_EQ(Kernel::PthreadJoin(thread, &value), OK);
+	EXPECT_EQ(reinterpret_cast<uint64_t>(value), 7u);
+
+	Emulator::GuestCodeRanges::Remove(begin, begin + kPageSize);
+	EXPECT_EQ(munmap(code, kPageSize), 0);
+}
+
+// A collector keeps a stopped thread inside its handler, here inside a
+// condition wait, and may itself wait for the thread that signals that
+// condition. The signal must not wait for the stopped waiter to leave, which
+// glibc's condition variable before 2.41 does once a newer waiter has joined.
+TEST(EmulatorKernelProcess, ConditionSignalDoesNotWaitForStoppedWaiter)
+{
+	EnsureKernelProcessSubsystems();
+	ASSERT_TRUE(InstallCountContextHandler());
+	ScopedContextRuntimePort port;
+
+	StoppedWaiterTarget target;
+	Kernel::Pthread     thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, RunConditionWaiter, &target, "condition-waiter"), OK);
+	ASSERT_EQ(LibKernel::KernelRaiseException(thread, 30), OK);
+	EXPECT_TRUE(WaitForContextCalls(target.calls, 1));
+
+	// The first signal goes to the stopped waiter; a second waiter then joins.
+	target.cond_var.Signal();
+	std::atomic_bool second_waiting {false};
+	std::thread      second(
+	    [&target, &second_waiting]()
+	    {
+		    Core::LockGuard lock(target.mutex);
+		    second_waiting.store(true, std::memory_order_release);
+		    (void)target.cond_var.WaitFor(&target.mutex, 5'000'000);
+	    });
+	while (!second_waiting.load(std::memory_order_acquire))
 	{
 		std::this_thread::yield();
 	}
-	EXPECT_EQ(g_context_handler_calls.load(), before + 1u);
-	EXPECT_LE(LibKernel::KernelHostContextRequestsPending(), 1u);
-	last_release.store(true, std::memory_order_release);
-	EXPECT_EQ(Kernel::PthreadJoin(last, nullptr), OK);
+	{
+		// Taking the mutex proves the second waiter released it inside its wait.
+		Core::LockGuard lock(target.mutex);
+	}
+	auto signal = std::async(std::launch::async, [&target]() { target.cond_var.Signal(); });
+	EXPECT_EQ(signal.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+
+	target.hold.store(false, std::memory_order_release);
+	signal.wait();
+	{
+		Core::LockGuard lock(target.mutex);
+		target.done = true;
+	}
+	target.cond_var.SignalAll();
+	second.join();
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(target.calls.load(), 1u);
+}
+
+// The same holds for guest condition variables, which a collector may signal
+// while it keeps their waiters stopped.
+TEST(EmulatorKernelProcess, GuestConditionSignalDoesNotWaitForStoppedWaiter)
+{
+	EnsureKernelProcessSubsystems();
+	ASSERT_TRUE(InstallCountContextHandler());
+	ScopedContextRuntimePort port;
+
+	StoppedGuestWaiterTarget target;
+	ASSERT_EQ(Kernel::PthreadMutexInit(&target.mutex, nullptr, nullptr), OK);
+	ASSERT_EQ(Kernel::PthreadCondInit(&target.cond, nullptr, nullptr), OK);
+	Kernel::Pthread thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, RunGuestConditionWaiter, &target, "guest-condition-waiter"), OK);
+	ASSERT_EQ(LibKernel::KernelRaiseException(thread, 30), OK);
+	EXPECT_TRUE(WaitForContextCalls(target.calls, 1));
+
+	// The first signal goes to the stopped waiter; a second waiter then joins.
+	EXPECT_EQ(Kernel::PthreadCondSignal(&target.cond), OK);
+	std::atomic_bool second_waiting {false};
+	std::thread      second(
+	    [&target, &second_waiting]()
+	    {
+		    EXPECT_EQ(Kernel::PthreadMutexLock(&target.mutex), OK);
+		    second_waiting.store(true, std::memory_order_release);
+		    (void)Kernel::PthreadCondTimedwait(&target.cond, &target.mutex, 5'000'000);
+		    EXPECT_EQ(Kernel::PthreadMutexUnlock(&target.mutex), OK);
+	    });
+	while (!second_waiting.load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+	// Taking the mutex proves the second waiter released it inside its wait.
+	EXPECT_EQ(Kernel::PthreadMutexLock(&target.mutex), OK);
+	EXPECT_EQ(Kernel::PthreadMutexUnlock(&target.mutex), OK);
+	auto signal = std::async(std::launch::async, [&target]() { return Kernel::PthreadCondSignal(&target.cond); });
+	EXPECT_EQ(signal.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+
+	target.hold.store(false, std::memory_order_release);
+	EXPECT_EQ(signal.get(), OK);
+	EXPECT_EQ(Kernel::PthreadMutexLock(&target.mutex), OK);
+	target.done = true;
+	EXPECT_EQ(Kernel::PthreadMutexUnlock(&target.mutex), OK);
+	EXPECT_EQ(Kernel::PthreadCondBroadcast(&target.cond), OK);
+	second.join();
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(target.calls.load(), 1u);
+	EXPECT_EQ(Kernel::PthreadCondDestroy(&target.cond), OK);
+	EXPECT_EQ(Kernel::PthreadMutexDestroy(&target.mutex), OK);
 }
 #endif
+
+// Guest code entries are page sets: adds merge with the entries they touch, and
+// a removal cuts out exactly the pages it covers. The addresses are test-only,
+// far from the guest code that other tests map, and are removed again.
+TEST(EmulatorKernelProcess, GuestCodeRangesTrackPagesAcrossAddAndRemove)
+{
+	constexpr uint64_t kPageSize = 4096;
+	constexpr uint64_t kBase     = 0x0000'0f80'0000'0000ull;
+	const auto         page      = [](uint64_t index) { return kBase + index * kPageSize; };
+
+	Emulator::GuestCodeRanges::Add(page(0), page(2));
+	Emulator::GuestCodeRanges::Add(page(1), page(4));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(0) - 1));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(0)));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(4) - 1));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(4)));
+
+	// Removing the middle leaves both sides in the set.
+	Emulator::GuestCodeRanges::Remove(page(1), page(2));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(0)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(1)));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(2)));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(3)));
+
+	// One removal trims the entries at its edges and drops the one inside it.
+	Emulator::GuestCodeRanges::Add(page(8), page(10));
+	Emulator::GuestCodeRanges::Add(page(12), page(14));
+	Emulator::GuestCodeRanges::Remove(page(3), page(13));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(2)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(3)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(9)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(12)));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(13)));
+
+	// A range that was never added changes nothing.
+	Emulator::GuestCodeRanges::Remove(page(20), page(22));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(20)));
+	EXPECT_TRUE(Emulator::GuestCodeRanges::Contains(page(0)));
+
+	Emulator::GuestCodeRanges::Remove(page(0), page(3));
+	Emulator::GuestCodeRanges::Remove(page(13), page(14));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(0)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(2)));
+	EXPECT_FALSE(Emulator::GuestCodeRanges::Contains(page(13)));
+}
 
 TEST(EmulatorKernelProcess, PthreadPriorityRoundTripsGuestValue)
 {
@@ -1636,6 +1992,46 @@ TEST(EmulatorKernelProcess, PosixSemInitPostWaitDestroy)
 	EXPECT_EQ(Posix::sem_wait(&guest), OK);
 	EXPECT_EQ(Posix::sem_destroy(&guest), OK);
 	EXPECT_EQ(guest.magic, 0);
+}
+
+// Destroying a semaphore wakes a blocked waiter, which fails with EINVAL.
+TEST(EmulatorKernelProcess, PosixSemDestroyWakesBlockedWaiter)
+{
+	EnsureKernelProcessSubsystems();
+	struct GuestSem
+	{
+		uint16_t magic;
+		uint16_t nameid;
+		uint32_t has_waiters;
+		uint32_t count;
+		uint32_t flags;
+	};
+	static_assert(sizeof(GuestSem) == 16);
+	auto guest = std::make_shared<GuestSem>();
+
+	ASSERT_EQ(Posix::sem_init(guest.get(), 0, 0), OK);
+
+	auto        waiter_result = std::make_shared<std::promise<int>>();
+	auto        result        = waiter_result->get_future();
+	std::thread waiter(
+	    [guest, waiter_result]
+	    {
+		    const int rc = Posix::sem_wait(guest.get());
+		    waiter_result->set_value(rc == OK ? OK : *Posix::GetErrorAddr());
+	    });
+	// Detached so a waiter that never wakes fails the test instead of hanging it in join().
+	waiter.detach();
+
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+	while (guest->has_waiters == 0 && std::chrono::steady_clock::now() < deadline)
+	{
+		std::this_thread::yield();
+	}
+	ASSERT_EQ(guest->has_waiters, 1u);
+
+	ASSERT_EQ(Posix::sem_destroy(guest.get()), OK);
+	ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+	EXPECT_EQ(result.get(), Posix::POSIX_EINVAL);
 }
 
 UT_END();

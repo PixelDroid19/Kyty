@@ -26,11 +26,14 @@ void RunLdsCase(VulkanComputeProbe& probe, bool only_upper_lane)
 	input.thread_ids_num                        = 1;
 	input.lds_dwords                            = 1;
 	const ShaderComputeWaveRequest request {{128, 1, 1}, {1, 1, 1}, 0x41, 1, ShaderGuestLaneOrder::LinearXFirst};
-	if (ShaderBuildPairedComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
+	if (ShaderBuildSplitComputeWaveLayout(request, probe.WaveCapabilities(), &input.wave_layout) !=
 	    ShaderComputeWaveLayoutStatus::Supported)
 	{
 		Fail("two-wave shared LDS layout unavailable");
 	}
+	// Production marks every split dispatch wave-sensitive with an exact 32-wide subgroup.
+	input.native_wave_sensitive  = true;
+	input.required_subgroup_size = 32u;
 	// Guest instructions initialize counter only from logical lane0, restore
 	// full EXEC and synchronize both waves. No test-only LDS initialization or
 	// substituted atomic/barrier lowering is involved.
@@ -50,7 +53,7 @@ void RunLdsCase(VulkanComputeProbe& probe, bool only_upper_lane)
 	                          0xbefe04c1u, 0xbf8a0000u, // restore full EXEC; s_barrier
 	                          0xd8d80000u, 0x04000001u, // ds_read_b32 v4,v1
 	                          0xbf810000u});
-	const std::vector<WaveProbeObservation> observations {{"v3_low", "v3_high", true}, {"v4_low", "v4_high", true}};
+	const std::vector<WaveProbeObservation> observations {{"v3", true}, {"v4", true}};
 	String8                                 source, error;
 	if (!BuildWaveProbeSource(words.data(), words.size() * sizeof(uint32_t), input, observations, {}, &source, &error))
 	{

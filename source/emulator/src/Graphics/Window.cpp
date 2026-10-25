@@ -13,15 +13,11 @@
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Audio.h"
 #include "Emulator/Config.h"
-#include "Emulator/Ports/AudioPausePort.h"
-#include "Emulator/Ports/ControllerInputPort.h"
-#include "Emulator/Ports/KeyboardTextPort.h"
 #include "Emulator/Graphics/DebugOverlay.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/ImageAsset.h"
-#include "Emulator/Host/KeyboardInput.h"
 #include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/PresentationScaler.h"
@@ -34,12 +30,18 @@
 #include "Emulator/Host/HostInput.h"
 #include "Emulator/Host/HostVulkanWindow.h"
 #include "Emulator/Host/HostWindow.h"
+#include "Emulator/Host/KeyboardInput.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/AudioPausePort.h"
+#include "Emulator/Ports/ControllerInputPort.h"
+#include "Emulator/Ports/KeyboardTextPort.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/SystemContentPort.h"
 
 #include "KytyBuildInfo.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -48,6 +50,7 @@
 #include <set>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 #include <vulkan/vk_platform.h>
 
@@ -233,6 +236,8 @@ struct WindowContext
 	bool          graphic_initialized = false;
 	Core::CondVar graphic_initialized_condvar;
 	NativeCaptureState native_capture;
+
+	std::chrono::steady_clock::time_point next_present_time;
 };
 
 static WindowContext* g_window_ctx = nullptr;
@@ -506,6 +511,11 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 			return;
 		}
 		pixels = std::move(converted);
+	}
+	// The swapchain presents opaque, so flip alpha never reaches the screen; the capture shows what is displayed.
+	for (size_t alpha = 3; alpha < pixels.size(); alpha += 4)
+	{
+		pixels[alpha] = 255u;
 	}
 	if (milestone == NativeCaptureMilestone::FirstPresent)
 	{
@@ -917,6 +927,8 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 			case ::Kyty::Emulator::Host::KeyboardAction::Right: button = ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT; break;
 			case ::Kyty::Emulator::Host::KeyboardAction::L1: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L1; break;
 			case ::Kyty::Emulator::Host::KeyboardAction::R1: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R1; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::L2: button = ::Kyty::Emulator::Ports::PAD_BUTTON_L2; break;
+			case ::Kyty::Emulator::Host::KeyboardAction::R2: button = ::Kyty::Emulator::Ports::PAD_BUTTON_R2; break;
 			case ::Kyty::Emulator::Host::KeyboardAction::Options: button = ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS; break;
 			case ::Kyty::Emulator::Host::KeyboardAction::None: break;
 		}
@@ -1752,9 +1764,32 @@ static bool VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surface, Vulk
 
 	qs.family_used[selection.family] = allocation.family_used;
 	qs.graphics.Add(make_queue(allocation.graphics_index));
-	for (uint32_t i = 0; i < allocation.compute_count; i++)
+
+	// A single common queue would run every compute submission behind queued
+	// graphics work, so compute moves to a compute-only family that runs beside it.
+	uint32_t compute_family = UINT32_MAX;
+	if (selected.queue_count == 1 &&
+	    VulkanSelectComputeOnlyFamily(capabilities.GetData(), capabilities.Size(), &compute_family) == VulkanQueueSelectionResult::Success)
 	{
-		qs.compute.Add(make_queue(allocation.compute_first_index + i));
+		const auto&    compute = capabilities[compute_family];
+		const uint32_t count   = std::min<uint32_t>(compute.queue_count, GraphicContext::QUEUE_COMPUTE_NUM);
+		for (uint32_t i = 0; i < count; i++)
+		{
+			QueueInfo queue;
+			queue.family   = compute_family;
+			queue.index    = i;
+			queue.compute  = true;
+			queue.transfer = true;
+			queue.present  = compute.present;
+			qs.compute.Add(queue);
+		}
+		qs.family_used[compute_family] = count;
+	} else
+	{
+		for (uint32_t i = 0; i < allocation.compute_count; i++)
+		{
+			qs.compute.Add(make_queue(allocation.compute_first_index + i));
+		}
 	}
 	qs.transfer.Add(make_queue(allocation.transfer_index));
 	qs.present.Add(make_queue(allocation.present_index));
@@ -2588,6 +2623,16 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 		get_queue(GraphicContext::QUEUE_COMPUTE_START + id, queues.compute.At(id % queues.compute.Size()));
 	}
 
+	for (const auto& queue: ctx->queues)
+	{
+		const uint32_t* begin = ctx->resource_families;
+		const uint32_t* end   = begin + ctx->resource_family_count;
+		if (std::find(begin, end, queue.family) == end)
+		{
+			ctx->resource_families[ctx->resource_family_count++] = queue.family;
+		}
+	}
+
 	VulkanQueueIdentity identities[GraphicContext::QUEUES_NUM] {};
 	uint32_t            lock_indices[GraphicContext::QUEUES_NUM] {};
 	for (int id = 0; id < GraphicContext::QUEUES_NUM; id++)
@@ -3209,7 +3254,7 @@ void WindowWaitForGraphicInitialized()
 
 	while (!g_window_ctx->graphic_initialized)
 	{
-		g_window_ctx->graphic_initialized_condvar.Wait(&g_window_ctx->mutex);
+		Kernel::PthreadInterruptibleWait(&g_window_ctx->graphic_initialized_condvar, &g_window_ctx->mutex);
 	}
 }
 
@@ -3246,11 +3291,7 @@ void WindowRun()
 
 	DebugOverlayShutdown(&g_window_ctx->graphic_ctx);
 
-	if (auto* subsystems = Core::SubsystemsList::Active(); subsystems != nullptr)
-	{
-		subsystems->ShutdownAll();
-	}
-	std::_Exit(0);
+	Core::ShutdownActiveAndQuickExit(0);
 }
 
 VkSurfaceCapabilitiesKHR* VulkanGetSurfaceCapabilities()
@@ -3428,6 +3469,27 @@ static void WindowAcquireSwapchainImage()
 	DebugStatsRecordAcquire(static_cast<uint64_t>(acquire_ns));
 }
 
+// PresentFpsLimit caps host presents (0 = unpaced). A late present restarts the
+// schedule instead of bursting to catch up.
+static void WindowPacePresentRate()
+{
+	const uint32_t limit = Config::GetPresentFpsLimit();
+	if (limit == 0)
+	{
+		return;
+	}
+	const auto period = std::chrono::nanoseconds(1'000'000'000 / limit);
+	auto&      next   = g_window_ctx->next_present_time;
+	const auto now    = std::chrono::steady_clock::now();
+	if (next <= now)
+	{
+		next = now + period;
+		return;
+	}
+	std::this_thread::sleep_until(next);
+	next += period;
+}
+
 // Presents swapchain->current_index once render_finished is signalled.
 static void WindowQueuePresent(VkSemaphore* render_finished)
 {
@@ -3462,6 +3524,7 @@ static void WindowQueuePresent(VkSemaphore* render_finished)
 	}
 	const auto present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
 	DebugStatsRecordPresent(static_cast<uint64_t>(present_ns));
+	WindowPacePresentRate();
 }
 
 void WindowDrawBuffer(VideoOutVulkanImage* image)

@@ -4,6 +4,106 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Sandbox title: snapshot comparisons in the world (2026-10-24, improved)
+
+- **Observation (Intel A770, strict, 60 fps present limit, world-entry route,
+  profile 225-265 s).** In the world the command processor spends about
+  100-108 ms per frame on about 4300 draws (23.8 us/draw); waits are below
+  1 ms. Sampling the command-processor thread put 12.5% of it in the
+  comparison of transient read-only snapshots against guest memory, 93% of
+  that in `memcmp`.
+- **Cause.** A temporary per-probe count showed about 30 000 snapshots of
+  16 KiB or more per 400 000 probes, averaging about 490 KB, matching guest
+  memory on almost every probe and compared in full each time.
+- **Change.** A matching snapshot of at least 4 KiB is registered with the
+  dirty page tracker before its comparison and reused without one until a
+  write reaches its range (`TransientBufferPool`, `GraphicsRenderCommandBuffer.cpp`).
+  The admission check still runs on every probe, so unpublished GPU writes
+  are still refused. A key whose tracking fails waits a number of probes that
+  doubles with each quick failure, up to 1024; a key whose tracked bytes
+  served at least 16 probes is tracked again at once after a write. A
+  capture now drops the entry's previous snapshot before copying, so a
+  refused copy never leaves partial bytes indexed.
+- **Verified.** 20.8 us/draw (89.6 ms per frame at the same draw count),
+  `memcmp` gone from the comparison profile; world draws textured. Racing
+  (60 fps menu), fishing (dock) and beat 'em up (intro) reach their usual
+  states with no stop. Unit 2459/2459, integration 74/74.
+- **Excluded on the way.** A sticky "compare only" mark per key (no retry)
+  tracked only a third of the large probes: keys rewritten during loading
+  kept the mark in the world.
+- **Open.** The remaining per-draw cost: descriptor and storage preparation,
+  admission checks (`TransientReadOnlyOverlapsAllowedLocked`, `FindBlocks`),
+  `GpuMemory::CreateObject`, shader input parsing and about 380 Vulkan
+  submits per frame.
+
+## Sandbox title: GPU hang on the first world frame (2026-10-23, fixed)
+
+- **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
+  world-entry route).** About two seconds after the player spawned, the
+  kernel reset the render engine ("Timedout job", always the same GuC
+  context) and the run stopped with `VK_ERROR_DEVICE_LOST` on queue 8. Nine
+  of eleven runs without instrumentation hung. In every submit-fault report
+  the unfinished command buffer was the post-processing and UI pass of the
+  first world frame. All eleven queues share one queue family and run on the
+  render engine, so the reset alone does not name the queue.
+- **Cause.** With the Vulkan validation layer (core checks; no emulator
+  instrumentation) the run still hung, and the layer reported one error in
+  the whole run, at the hang: the depth slice array
+  (`DepthStencilBufferGetSliceArray`) had TRANSFER_DST and SAMPLED usage only,
+  but was transitioned to and sampled in DEPTH_STENCIL_READ_ONLY_OPTIMAL, a
+  layout valid only for images with depth-stencil attachment usage
+  (VUID-VkImageMemoryBarrier-oldLayout-01210). The shadow cascades are first
+  sampled through that array on the first world frame.
+- **Change.** The array is created with depth-stencil attachment usage, as
+  sampled depth views already are (`Texture.cpp`).
+- **Verified.** A validation run reports no error and reaches and draws the
+  world. Three runs (one with validation, two without) hold the world with no
+  engine reset, where nine of eleven hung before. Unit 2446/2446,
+  integration 74/74.
+- **Excluded on the way.**
+  - Runaway guest loops: the five guest shaders with loops in that command
+    buffer (three pixel shaders bounded by constant-buffer values, a histogram
+    compute whose counter stops at 255, a 3D blur bounded by its radius)
+    translate to bounded loops. Skipping them, all five compute dispatches or
+    the other post-processing pixel shaders still hung; a skip also feeds its
+    consumers stale data, so these runs exclude little on their own.
+  - GPU-side waits: the renderer records no event waits and no Vulkan
+    indirect commands.
+  - The `condition ignored` warnings before the hang appear in clean runs too.
+  - Localizing by timing did not work: a fence-polling watcher and per-command
+    buffer markers (top and bottom of pipe, or top only) each gave clean runs.
+    The validation layer did not hide the hang.
+  - A stop on the "Get started" menu in earlier runs that day was host input
+    reaching the window during the runs, not an emulator defect.
+- **Open.** The driver path that turns the invalid layout into a hang was not
+  examined; the device core dump was not read.
+
+## Sandbox title: shadow cascades bound as slice ranges (2026-10-23, fixed)
+
+- **Observation (Intel A770, Mesa ANV, strict run, 60 fps present limit,
+  world-entry route).** After the depth-slice change of 2026-10-22 the title
+  stopped with "layered depth rendering is not implemented" right after the
+  player spawned. Temporary logging (removed) showed the shadow cascades on
+  the 2048x2048 D32 target bound with `DB_DEPTH_VIEW` slices 0..3, 1..3, 2..3
+  and 3..3: each pass starts at its cascade and keeps SLICE_MAX at 3, and
+  none sets `PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX`.
+- **Contract.** Without that bit the render target index is zero, so a draw
+  renders only SLICE_START; SLICE_MAX only bounds the indices an exported
+  layer could select. The colour path already applies this rule
+  (`CollapseRenderColorLayersWithoutLayerExport`).
+- **Change.** `DescribeRenderDepthInfo` refuses a slice range only when the
+  draw exports a layer index. Otherwise the pass renders the single slice
+  SLICE_START, exactly as a single-slice view does.
+- **Excluded.** Making each range a layered depth image over
+  SLICE_START..SLICE_MAX: the overlapping ranges reclaimed each other's
+  images on every pass, the cascades lost their content and the world ran at
+  5.5 fps. One run with that experiment ended in a GPU hang on queue 8.
+- **Verified.** Two 150-170 s strict runs reach the world with no stop, at
+  7-8 fps in world, with terrain and shadows as before the depth-slice
+  change. Only the case that used to stop changes behaviour.
+- **Open.** A depth slice range with an exported layer index still stops; no
+  title has reached it.
+
 ## Sandbox title: drifting dark patch on terrain (2026-10-16, open)
 
 - Observed (Intel, strict, world-entry route, no input after the spawn): from about frame

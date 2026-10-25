@@ -428,19 +428,24 @@ void VerifyRenderTargetIndexAliasContract()
 	candidate_index.Insert(0x200020u, 0x10u, 7);
 	candidate_index.Insert(0x2ffff0u, 0x20u, 9);
 	auto retained_candidates = candidate_index.FindAll(0x200000u, 0x100u);
-	Expect(retained_candidates.Size() == 2u && retained_candidates.Contains(7) && retained_candidates.Contains(9),
-	       "single-bucket candidates are unique and still include bucket false positives");
+	Expect(retained_candidates.Size() == 1u && retained_candidates.Contains(7),
+	       "candidates are unique and leave out blocks the range does not reach");
 	candidate_index.Erase(0x200010u, 0x10u, 7);
-	Expect(retained_candidates.Size() == 2u && retained_candidates.Contains(7),
-	       "retained candidate result survives index mutation");
+	Expect(retained_candidates.Size() == 1u && retained_candidates.Contains(7), "retained candidate result survives index mutation");
 	retained_candidates.Add(11);
 	const auto current_candidates = candidate_index.FindAll(0x200000u, 0x100u);
-	Expect(current_candidates.Size() == 1u && current_candidates.Contains(9) && !current_candidates.Contains(11),
-	       "caller mutation cannot change the indexed candidate bucket");
+	Expect(current_candidates.Size() == 1u && current_candidates.Contains(7) && !current_candidates.Contains(11),
+	       "an object stays a candidate through its remaining block, and caller mutation cannot change the index");
 	const auto spanning_candidates = candidate_index.FindAll(0x2ffff0u, 0x20u);
 	Expect(spanning_candidates.Size() == 1u && spanning_candidates.Contains(9),
 	       "multi-bucket queries still deduplicate spanning objects");
 	Expect(candidate_index.FindAll(0x400000u, 0x10u).IsEmpty(), "absent bucket has no candidates");
+	candidate_index.Insert(0x10000000u, 0x2000000u, 21);
+	candidate_index.Insert(0x11ffff00u, 0x100u, 22);
+	const auto tail_candidates = candidate_index.FindAll(0x11fffff0u, 0x10u);
+	Expect(tail_candidates.Size() == 2u && tail_candidates.Contains(21) && tail_candidates.Contains(22),
+	       "a large block starting far before the range is still found");
+	Expect(candidate_index.FindAll(0x12000000u, 0x10u).IsEmpty(), "blocks ending at the range start are not candidates");
 	GpuWriteHistoryConfigureForTesting(0x4000u, 0x100u);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaData, 0x2000u, 0x20u, 1u, 0u, 0u);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::WriteData, 0x4040u, 0x20u, 2u, 0u, 0u);
@@ -2464,16 +2469,27 @@ void VerifyBoundedShaderDecode()
 	ShaderParseFusedFront(terminal_setpc, sizeof(terminal_setpc), &code);
 	Expect(code.GetInstructions().Size() == 1u && code.GetInstructions().At(0).type == ShaderInstructionType::SSetpcB64,
 	       "registered fused front accepts an exact-range indirect terminator");
-	static const uint32_t setpc_then_endpgm[] = {0xbe802000u, 0xbf810000u};
+	// s_cbranch_scc0 over the setpc keeps the s_endpgm reachable.
+	static const uint32_t setpc_then_endpgm[] = {0xbf840001u, 0xbe802000u, 0xbf810000u};
 	ShaderMappedData branched_front_map {};
 	branched_front_map.code_size_bytes = sizeof(setpc_then_endpgm);
 	ShaderMapUserData(reinterpret_cast<uint64_t>(setpc_then_endpgm), branched_front_map);
 	Expect(ShaderRegisterContinuation(reinterpret_cast<uint64_t>(setpc_then_endpgm), reinterpret_cast<uint64_t>(terminated)),
 	       "mapped front with in-range control flow registers its continuation");
 	ShaderParseFusedFront(setpc_then_endpgm, sizeof(setpc_then_endpgm), &code);
-	Expect(code.GetInstructions().Size() == 2u && code.GetInstructions().At(1).type == ShaderInstructionType::SEndpgm,
+	Expect(code.GetInstructions().Size() == 3u && code.GetInstructions().At(2).type == ShaderInstructionType::SEndpgm,
 	       "in-range code after setpc remains available to other control-flow paths");
 	Expect(!ShaderHasTerminalSetpc(code), "non-terminal setpc does not authorize continuation linearization");
+	// Words that are not instructions, standing in for the binary's trailing metadata.
+	static const uint32_t setpc_then_metadata[] = {0xbe802000u, 0xffffffffu, 0xffffffffu};
+	ShaderMappedData metadata_front_map {};
+	metadata_front_map.code_size_bytes = sizeof(setpc_then_metadata);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(setpc_then_metadata), metadata_front_map);
+	Expect(ShaderRegisterContinuation(reinterpret_cast<uint64_t>(setpc_then_metadata), reinterpret_cast<uint64_t>(terminated)),
+	       "front with trailing metadata registers its continuation");
+	ShaderParseFusedFront(setpc_then_metadata, sizeof(setpc_then_metadata), &code);
+	Expect(code.GetInstructions().Size() == 1u && ShaderHasTerminalSetpc(code),
+	       "registered fused front ends at an unbranched setpc before trailing metadata");
 	ShaderMappedData replacement {};
 	replacement.code_size_bytes = sizeof(terminal_setpc);
 	ShaderMapUserData(reinterpret_cast<uint64_t>(terminal_setpc), replacement);

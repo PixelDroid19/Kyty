@@ -18,7 +18,13 @@ struct Buffer
 	std::array<uint64_t, 8> guest {};
 	std::array<uint64_t, 8> gpu {};
 	GpuWritebackPageCache cache {16};
+	// One flag per 16-byte page; each copy treats every page as GPU-written.
+	std::array<uint32_t, 4> written {};
 	LabelStoragePublication publication;
+
+	Buffer() { cache.TrackWrittenPages(written.data()); }
+	Buffer(const Buffer&)            = delete;
+	Buffer& operator=(const Buffer&) = delete;
 
 	uint64_t Address(size_t offset = 0) { return reinterpret_cast<uint64_t>(guest.data()) + offset; }
 	void Upload(const LabelFenceRegistry& registry)
@@ -27,6 +33,7 @@ struct Buffer
 	}
 	GpuWritebackResult Copy(const LabelFenceRegistry& registry)
 	{
+		written.fill(1u);
 		return publication.Copy(registry, guest.data(), gpu.data(), sizeof(guest), &cache, IgnoreWrite, nullptr);
 	}
 };
@@ -66,6 +73,7 @@ TEST(EmulatorLabelPublication, DevicePublishedWriteBackKeepsLaterCpuStores)
 	buffer.guest[0] = 7;
 	buffer.guest[1] = 9;
 	GpuWritebackResult result;
+	buffer.written.fill(1u);
 	ASSERT_TRUE(buffer.publication.AdoptDevice(buffer.Address(), buffer.gpu.data(), sizeof(buffer.guest), &buffer.cache, IgnoreWrite,
 	                                           nullptr, &result));
 	EXPECT_TRUE(result.content_changed);
@@ -80,6 +88,8 @@ TEST(EmulatorLabelPublication, OlderBackingRemainsExcludedAfterNewerBackingPubli
 	LabelFenceRegistry registry;
 	Buffer buffer;
 	GpuWritebackPageCache older_cache(16);
+	std::array<uint32_t, 4> older_written {};
+	older_cache.TrackWrittenPages(older_written.data());
 	LabelStoragePublication older_publication;
 	std::array<uint64_t, 8> older_gpu {};
 	older_publication.Upload(registry, older_gpu.data(), buffer.guest.data(), sizeof(buffer.guest), {{0, sizeof(buffer.guest)}},
@@ -92,9 +102,11 @@ TEST(EmulatorLabelPublication, OlderBackingRemainsExcludedAfterNewerBackingPubli
 	(void)buffer.Copy(registry);
 	ASSERT_EQ(buffer.guest[0], 2u);
 	older_gpu[0] = 3;
+	older_written.fill(1u);
 	(void)older_publication.Copy(registry, buffer.guest.data(), older_gpu.data(), sizeof(buffer.guest), &older_cache, IgnoreWrite, nullptr);
 	EXPECT_EQ(buffer.guest[0], 2u);
 	older_gpu[1] = 4;
+	older_written.fill(1u);
 	(void)older_publication.Copy(registry, buffer.guest.data(), older_gpu.data(), sizeof(buffer.guest), &older_cache, IgnoreWrite, nullptr);
 	EXPECT_EQ(buffer.guest[0], 2u);
 	EXPECT_EQ(buffer.guest[1], 4u);
@@ -174,6 +186,7 @@ TEST(EmulatorLabelPublication, CpuStoreBetweenNotificationAndPublicationCannotBe
 			*race->injected = true;
 		}
 	};
+	buffer.written.fill(1u);
 	(void)buffer.publication.Copy(registry, buffer.guest.data(), buffer.gpu.data(), sizeof(buffer.guest), &buffer.cache,
 	                              cpu_store, &race);
 	EXPECT_TRUE(injected);

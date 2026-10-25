@@ -21,9 +21,10 @@ struct ShaderModuleKey;
 
 struct SpirvBinaryCacheLimits
 {
-	size_t max_total_bytes       = 64u * 1024u * 1024u;
+	// Room for the translated working sets of several titles in the shared default root.
+	size_t max_total_bytes       = 1024u * 1024u * 1024u;
 	size_t max_entry_bytes       = 4u * 1024u * 1024u;
-	size_t session_write_budget  = 16u * 1024u * 1024u;
+	size_t session_write_budget  = 256u * 1024u * 1024u;
 	size_t max_pending_entries   = 64u;
 	size_t max_pending_bytes     = 8u * 1024u * 1024u;
 	size_t max_completed_entries = 1024u;

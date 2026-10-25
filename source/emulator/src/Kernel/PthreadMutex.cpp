@@ -21,7 +21,10 @@ int KYTY_SYSV_ABI PthreadMutexattrInit(PthreadMutexattr* attr)
 {
 	// PRINT_NAME();
 
-	if (attr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (attr == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	*attr = new PthreadMutexattrPrivate {};
 
@@ -42,7 +45,10 @@ int KYTY_SYSV_ABI PthreadMutexattrDestroy(PthreadMutexattr* attr)
 {
 	// PRINT_NAME();
 
-	if (attr == nullptr || *attr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (attr == nullptr || *attr == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	int result = pthread_mutexattr_destroy(&(*attr)->p);
 
@@ -61,7 +67,10 @@ int KYTY_SYSV_ABI PthreadMutexattrSettype(PthreadMutexattr* attr, int type)
 {
 	// PRINT_NAME();
 
-	if (attr == nullptr || *attr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (attr == nullptr || *attr == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	int ptype = PTHREAD_MUTEX_DEFAULT;
 	switch (type)
@@ -88,7 +97,10 @@ int KYTY_SYSV_ABI PthreadMutexattrSetprotocol([[maybe_unused]] PthreadMutexattr*
 {
 	// PRINT_NAME();
 
-	if (attr == nullptr || *attr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (attr == nullptr || *attr == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	[[maybe_unused]] int pprotocol = PTHREAD_PRIO_NONE;
 	switch (protocol)
@@ -201,7 +213,10 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (*mutex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (*mutex == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	auto* private_mutex = *mutex;
 	if (PthreadMutexHeldByCaller(private_mutex))
@@ -226,6 +241,7 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex)
 	if (result == EBUSY)
 	{
 		KYTY_GUEST_WAIT(PthreadWaitKind::Mutex, mutex);
+		PthreadInterruptibleScope lock_wait(&private_mutex->p, sizeof(private_mutex->p));
 		result = pthread_mutex_lock(&private_mutex->p);
 	}
 
@@ -260,7 +276,10 @@ int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex)
 	EXIT_IF(pthread_static_objects == nullptr);
 	mutex = static_cast<PthreadMutex*>(pthread_static_objects->CreateObject(mutex, PthreadStaticObject::Type::Mutex));
 
-	if (*mutex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (*mutex == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	auto* private_mutex = *mutex;
 	if (PthreadMutexHeldByCaller(private_mutex))
@@ -305,7 +324,10 @@ int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec
 	EXIT_IF(pthread_static_objects == nullptr);
 	mutex = static_cast<PthreadMutex*>(pthread_static_objects->CreateObject(mutex, PthreadStaticObject::Type::Mutex));
 
-	if (*mutex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (*mutex == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	auto* private_mutex = *mutex;
 	if (PthreadMutexHeldByCaller(private_mutex) && private_mutex->type == MUTEX_TYPE_RECURSIVE)
@@ -324,7 +346,11 @@ int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	const int result = pthread_mutex_timedlock(&private_mutex->p, &deadline);
+	int result = 0;
+	{
+		PthreadInterruptibleScope lock_wait(&private_mutex->p, sizeof(private_mutex->p));
+		result = pthread_mutex_timedlock(&private_mutex->p, &deadline);
+	}
 #endif
 	if (result == 0)
 	{
@@ -358,7 +384,10 @@ int KYTY_SYSV_ABI PthreadMutexUnlock(PthreadMutex* mutex)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (*mutex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (*mutex == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	auto* private_mutex = *mutex;
 	if (!PthreadMutexHeldByCaller(private_mutex))

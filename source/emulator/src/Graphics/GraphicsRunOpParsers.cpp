@@ -13,6 +13,7 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Log.h"
+#include "Emulator/Profiler.h"
 
 #include <atomic>
 #include <cinttypes>
@@ -57,173 +58,35 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 	bool custom = (cmd_id == 0xc0061050);
 	RequirePacketBody(cmd_id, dw, custom ? 7u : 6u);
 
-	uint32_t                  cache_action = buffer[0] & 0x7fffffffu;
-	uint64_t                  size_lo      = buffer[1];
-	uint32_t                  size_hi      = buffer[2];
-	uint64_t                  base_lo      = buffer[3];
-	uint32_t                  base_hi      = buffer[4];
-	uint32_t                  poll         = buffer[5];
-	[[maybe_unused]] uint32_t gcr_cntl     = (custom ? buffer[6] : 0);
+	const uint32_t cache_action = buffer[0] & 0x7fffffffu;
+	const uint64_t size         = ((static_cast<uint64_t>(buffer[2]) << 32u) | buffer[1]) << 8u;
+	const uint64_t base         = ((static_cast<uint64_t>(buffer[4]) << 32u) | buffer[3]) << 8u;
+	// buffer[5] (poll interval) and buffer[6] (custom GCR_CNTL) only tune how the
+	// hardware waits and which caches it touches; the barriers below order them all.
 
-	uint32_t target_mask     = cache_action & 0x00007FC0u;
-	uint32_t extended_action = cache_action & 0x2E000000u;
-	uint32_t action          = ((cache_action & 0x00C00000u) >> 0x12u) | ((cache_action & 0x00058000u) >> 0xfu);
+	constexpr uint32_t ColorTargets = 0x00003FC0u; // CB0..CB7_DEST_BASE_ENA
+	constexpr uint32_t DepthTarget  = 0x00004000u; // DB_DEST_BASE_ENA
+	constexpr uint32_t L2WriteBack  = 0x00040000u; // TC_WB_ACTION_ENA
+	const uint32_t     target_mask  = cache_action & (ColorTargets | DepthTarget);
 
-	// EXIT_NOT_IMPLEMENTED(stall_mode != 1);
-	if (size_hi != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size_hi != 0 condition ignored (continuing)\n"); }
-	if (base_hi != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_hi != 0 condition ignored (continuing)\n"); }
-	if (poll != 10) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: poll != 10 condition ignored (continuing)\n"); }
-
-	switch (cache_action)
+	// A zero size is the full range (AGC encodes size_bytes == -1 that way). Ranged
+	// targets move the host images in that range to their sampled layout; anything
+	// else is a full memory barrier.
+	if (size == 0u || target_mask == 0u)
 	{
-		case 0x02c40040:
-		case 0x02c43fc0:
-		case 0x02c47fc0:
-		{
-			// target_mask:     0x00000040 (rt0), 0x00003fc0 (all rt), 0x00007fc0 (all rt and depth)
-			// extended_action: 0x02000000 (FlushAndInvalidateCbCache)
-			// action:          0x38 (WriteBackAndInvalidateL1andL2)
-			EXIT_IF(target_mask != 0x00000040 && target_mask != 0x00003FC0 && target_mask != 0x00007FC0);
-			EXIT_IF(extended_action != 0x02000000);
-			EXIT_IF(action != 0x38);
-			if (size_lo == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size_lo == 0 condition ignored (continuing)\n"); }
-			if (base_lo == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_lo == 0 condition ignored (continuing)\n"); }
-
-			cp->RenderTextureBarrier(base_lo << 8u, size_lo << 8u);
-			cp->WriteBack();
-		}
-		break;
-		case 0x02003fc0:
-		{
-			// target_mask:     0x00003FC0 (all rt)
-			// extended_action: 0x02000000 (FlushAndInvalidateCbCache)
-			// action:          0x00 (none)
-			EXIT_IF(target_mask != 0x00003FC0);
-			EXIT_IF(extended_action != 0x02000000);
-			EXIT_IF(action != 0x00);
-			if (size_lo == 0)
-			{
-				cp->MemoryBarrier();
-			} else
-			{
-				if (base_lo == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_lo == 0 condition ignored (continuing)\n"); }
-				cp->RenderTextureBarrier(base_lo << 8u, size_lo << 8u);
-			}
-		}
-		break;
-		case 0x00C40000:
-		{
-			// target_mask:     0x00000000 (none)
-			// extended_action: 0x00000000 (none)
-			// action:          0x38 (WriteBackAndInvalidateL1andL2)
-			EXIT_IF(target_mask != 0x00000000);
-			EXIT_IF(extended_action != 0x00000000);
-			EXIT_IF(action != 0x38);
-			if (size_lo != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size_lo != 1 condition ignored (continuing)\n"); }
-			if (base_lo != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_lo != 0 condition ignored (continuing)\n"); }
-
-			cp->MemoryBarrier();
-			cp->WriteBack();
-		}
-		break;
-		case 0x00400000:
-		{
-			// target_mask:     0x00000000 (none)
-			// extended_action: 0x00000000 (none)
-			// action:          0x10 (InvalidateL1)
-			EXIT_IF(target_mask != 0x00000000);
-			EXIT_IF(extended_action != 0x00000000);
-			EXIT_IF(action != 0x10);
-			if (size_lo != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size_lo != 1 condition ignored (continuing)\n"); }
-			if (base_lo != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_lo != 0 condition ignored (continuing)\n"); }
-
-			cp->MemoryBarrier();
-		}
-		break;
-		case 0x04c44000:
-		{
-			// target_mask:     0x00004000 (Depth Target)
-			// extended_action: 0x04000000 (FlushAndInvalidateDbCache)
-			// action:          0x38 (WriteBackAndInvalidateL1andL2)
-			EXIT_IF(target_mask != 0x00004000);
-			EXIT_IF(extended_action != 0x04000000);
-			EXIT_IF(action != 0x38);
-
-			cp->DepthStencilBarrier(base_lo << 8u, size_lo << 8u);
-			cp->WriteBack();
-		}
-		break;
-
-		case 0x06007fc0:
-		{
-			// target_mask:     0x00007fc0 (all rt and depth)
-			// extended_action: 0x06000000 (Flush Cb & Db)
-			// action:          0x00 (none)
-			// Gen5 emits the same GL0/GL1 invalidate bits with an additional
-			// 0x8000 cache-control qualifier on this full-target barrier.
-			if (!GraphicsAgcFullTargetBarrierGcrSupported(gcr_cntl))
-			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported full-target barrier (continuing)\n");
-			}
-			// AGC size_bytes == -1 encodes as size_lo == 0 (full range). The base
-			// dword is still written from the guest pointer (observed post-Play
-			// frontier: base_lo=1, size_lo=0). Only a non-zero size selects a
-			// ranged barrier, which is not yet supported for this cache action.
-			if (size_lo != 0)
-			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported full-target barrier (continuing)\n");
-			}
-
-			EXIT_IF(target_mask != 0x00007fc0);
-			EXIT_IF(extended_action != 0x06000000);
-			EXIT_IF(action != 0x00);
-
-			cp->MemoryBarrier();
-		}
-		break;
-
-		case 0x00007fc0:
-		{
-			// target_mask:     0x00007fc0 (all rt and depth)
-			// extended_action: none
-			// action:          none
-			// Observed immediately after the post-Play WaitMem fence advances
-			// into the loading path (cache_action word is only the target mask).
-			EXIT_IF(target_mask != 0x00007fc0);
-			EXIT_IF(extended_action != 0x00000000);
-			EXIT_IF(action != 0x00);
-
-			cp->MemoryBarrier();
-		}
-		break;
-
-		case 0x02007fc0:
-		{
-			// target_mask:     0x00007fc0 (all rt and depth)
-			// extended_action: 0x02000000 (FlushAndInvalidateCbCache)
-			// action:          0x00 (none)
-			// Sibling of 0x02003fc0 (all rt only) already handled above.
-			EXIT_IF(target_mask != 0x00007fc0);
-			EXIT_IF(extended_action != 0x02000000);
-			EXIT_IF(action != 0x00);
-
-			if (size_lo == 0)
-			{
-				cp->MemoryBarrier();
-			} else
-			{
-				if (base_lo == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_lo == 0 condition ignored (continuing)\n"); }
-				cp->RenderTextureBarrier(base_lo << 8u, size_lo << 8u);
-			}
-		}
-		break;
-
-		case 0x00000000:
-			// No-op / simple cache sync (all fields zero) — plain barrier.
-			cp->MemoryBarrier();
-			break;
-
-		default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown barrier (continuing)\n");
+		cp->MemoryBarrier();
+	}
+	if (size != 0u && (target_mask & ColorTargets) != 0u)
+	{
+		cp->RenderTextureBarrier(base, size);
+	}
+	if (size != 0u && (target_mask & DepthTarget) != 0u)
+	{
+		cp->DepthStencilBarrier(base, size);
+	}
+	if ((cache_action & L2WriteBack) != 0u)
+	{
+		cp->WriteBack();
 	}
 
 	// ACQUIRE_MEM is a GPU ordering operation. Keep its Vulkan barrier in the
@@ -1125,6 +988,16 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 		auto value      = indirect_buffer[1];
 		if (GraphicsIsDefaultIndirectRegisterPair(cmd_offset, value))
 		{
+			continue;
+		}
+		// A guest that copies a register-defaults entry unchanged leaves that state at its default; another value
+		// asks for behavior no register models.
+		if (GraphicsIsVirtualUcRegister(cmd_offset))
+		{
+			if (value != 0u)
+			{
+				EXIT("virtual uc register 0x%08" PRIx32 " holds a non-default value 0x%08" PRIx32 "\n", cmd_offset, value);
+			}
 			continue;
 		}
 		if (cmd_offset >= Pm4::UC_NUM)

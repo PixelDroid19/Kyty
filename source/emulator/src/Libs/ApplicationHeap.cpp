@@ -1,15 +1,17 @@
 #include "Emulator/Libs/ApplicationHeap.h"
 
-#include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Core/DbgAssert.h"
+#include "Kyty/Core/Threads.h"
+#include "Kyty/Core/VirtualMemory.h"
+
 #include "Emulator/GuestRuntimePort.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/GuestCall.h"
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
-#include <atomic>
 #include <mutex>
-#include <condition_variable>
 #include <thread>
 
 #ifdef KYTY_EMU_ENABLED
@@ -47,11 +49,11 @@ RuntimeApi GetApi()
 static thread_local bool g_in_guest_allocator = false;
 
 enum class StartupState { Empty, Initializing, Ready };
-std::mutex   g_startup_mutex;
+Core::Mutex     g_startup_mutex;
 StartupState g_startup_state = StartupState::Empty;
 uint64_t     g_startup_parameters = 0;
 std::thread::id g_startup_thread;
-std::condition_variable g_startup_changed;
+Core::CondVar   g_startup_changed;
 
 // Only the common, size-gated prefixes are read. The replacement record is
 // distinct from the direct kernel API: its header precedes init/fini and the
@@ -204,13 +206,16 @@ bool InitializeProcessHeap(uint64_t process_parameters)
 	if (empty) { return true; }
 	if (!IsValidApi(&api)) { return Fail("malloc replacement lacks malloc or free"); }
 	{
-		std::unique_lock lock(g_startup_mutex);
+		Core::LockGuard lock(g_startup_mutex);
 		if (g_startup_state == StartupState::Initializing && g_startup_thread == std::this_thread::get_id())
 		{
 			return g_startup_parameters == process_parameters ||
 			       Fail("re-entered with different process parameters 0x%llx", static_cast<unsigned long long>(process_parameters));
 		}
-		g_startup_changed.wait(lock, [] { return g_startup_state != StartupState::Initializing; });
+		while (g_startup_state == StartupState::Initializing)
+		{
+			Kernel::PthreadInterruptibleWait(&g_startup_changed, &g_startup_mutex);
+		}
 		if (g_startup_state != StartupState::Empty)
 		{
 			return (g_startup_parameters == process_parameters && g_startup_state == StartupState::Ready) ||
@@ -228,11 +233,11 @@ bool InitializeProcessHeap(uint64_t process_parameters)
 	{
 		(void)Emulator::GuestRuntimePort::Invoke(replacement.initialize, 0, 0, 0);
 	}
-	std::lock_guard lock(g_startup_mutex);
+	Core::LockGuard lock(g_startup_mutex);
 	g_startup_thread = {};
 	RegisterApi(api.slots);
 	g_startup_state = StartupState::Ready;
-	g_startup_changed.notify_all();
+	g_startup_changed.SignalAll();
 	return true;
 }
 
@@ -349,9 +354,12 @@ bool Free(void* ptr)
 
 void Reset()
 {
-	std::unique_lock lock(g_startup_mutex);
+	Core::LockGuard lock(g_startup_mutex);
 	EXIT_IF(g_startup_state == StartupState::Initializing && g_startup_thread == std::this_thread::get_id());
-	g_startup_changed.wait(lock, [] { return g_startup_state != StartupState::Initializing; });
+	while (g_startup_state == StartupState::Initializing)
+	{
+		g_startup_changed.Wait(&g_startup_mutex);
+	}
 	g_startup_state       = StartupState::Empty;
 	g_startup_parameters  = 0;
 	g_startup_thread     = {};

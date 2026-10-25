@@ -640,6 +640,18 @@ int DescriptorCache::FindSet(const Set& s)
 	return -1;
 }
 
+// Called under m_mutex. Shaders may write any slot, so every slot needs a mask.
+const VulkanBuffer* DescriptorCache::WriteMaskSink(GraphicContext* gctx)
+{
+	if (m_write_mask_sink.buffer == nullptr)
+	{
+		m_write_mask_sink.usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		m_write_mask_sink.memory.property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		VulkanCreateBuffer(gctx, 16u, &m_write_mask_sink);
+	}
+	return &m_write_mask_sink;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
                                                     const int* textures2d_sampled_view, VulkanImage** textures2d_sampled_depth,
@@ -821,6 +833,15 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		buffer_info[i].offset = 0;
 		EXIT_IF(storage_buffers[i]->descriptor_range == 0u);
 		buffer_info[i].range  = storage_buffers[i]->descriptor_range;
+	}
+
+	const bool             write_mask = bind.storage_buffers.write_mask_binding_index >= 0;
+	VkDescriptorBufferInfo write_mask_info[BUFFERS_MAX] {};
+	for (int i = 0; write_mask && i < storage_buffers_num; i++)
+	{
+		const VulkanBuffer* mask  = storage_buffers[i]->write_mask != nullptr ? storage_buffers[i]->write_mask : WriteMaskSink(gctx);
+		write_mask_info[i].buffer = mask->buffer;
+		write_mask_info[i].range  = mask->descriptor_range;
 	}
 
 	VkDescriptorImageInfo texture2d_sampled_info[TEXTURES_SAMPLED_MAX] {};
@@ -1141,6 +1162,22 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		binding_num++;
 	}
 
+	if (write_mask && storage_buffers_num > 0)
+	{
+		EXIT_IF(binding_num >= B_MAX);
+		descriptor_write[binding_num].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptor_write[binding_num].pNext            = nullptr;
+		descriptor_write[binding_num].dstSet           = new_set->set;
+		descriptor_write[binding_num].dstBinding       = bind.storage_buffers.write_mask_binding_index;
+		descriptor_write[binding_num].dstArrayElement  = 0;
+		descriptor_write[binding_num].descriptorType   = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		descriptor_write[binding_num].descriptorCount  = storage_buffers_num;
+		descriptor_write[binding_num].pBufferInfo      = write_mask_info;
+		descriptor_write[binding_num].pImageInfo       = nullptr;
+		descriptor_write[binding_num].pTexelBufferView = nullptr;
+		binding_num++;
+	}
+
 	vkUpdateDescriptorSets(gctx->device, binding_num, descriptor_write, 0, nullptr);
 
 	nset.set = new_set;
@@ -1211,6 +1248,7 @@ void DescriptorCache::IndexSet(int index)
 
 VulkanDescriptorSet* DescriptorCache::UnindexSet(int index)
 {
+	LruUnlink(index);
 	auto& set = m_sets[index];
 	EXIT_IF(set.set == nullptr);
 	for (const auto& resource: set.resources)
@@ -1258,15 +1296,62 @@ void DescriptorCache::ReleaseSet(int index)
 	Free(released);
 }
 
+// A set with an untracked use cannot tell when it is idle, so it never joins the trim order.
 void DescriptorCache::RecordSetUse(int index, CommandBuffer* buffer)
 {
-	auto& set    = m_sets[index];
-	set.last_use = ++m_use_clock;
+	LruUnlink(index);
+	auto&        set = m_sets[index];
 	SubmissionId submission {};
 	if (buffer == nullptr || !buffer->GetSubmissionId(&submission) || set.uses.RecordUse(submission) != GpuDeferredDeletionResult::Success)
 	{
 		set.untracked_use = true;
 	}
+	if (!set.untracked_use)
+	{
+		LruAppend(index);
+	}
+}
+
+void DescriptorCache::LruUnlink(int index)
+{
+	auto& set = m_sets[index];
+	if (!set.in_lru)
+	{
+		return;
+	}
+	if (set.lru_older != -1)
+	{
+		m_sets[set.lru_older].lru_newer = set.lru_newer;
+	} else
+	{
+		m_lru_oldest = set.lru_newer;
+	}
+	if (set.lru_newer != -1)
+	{
+		m_sets[set.lru_newer].lru_older = set.lru_older;
+	} else
+	{
+		m_lru_newest = set.lru_older;
+	}
+	set.lru_older = -1;
+	set.lru_newer = -1;
+	set.in_lru    = false;
+}
+
+void DescriptorCache::LruAppend(int index)
+{
+	auto& set     = m_sets[index];
+	set.lru_older = m_lru_newest;
+	set.lru_newer = -1;
+	set.in_lru    = true;
+	if (m_lru_newest != -1)
+	{
+		m_sets[m_lru_newest].lru_newer = index;
+	} else
+	{
+		m_lru_oldest = index;
+	}
+	m_lru_newest = index;
 }
 
 // Sets are otherwise released only with a resource they reference, so long-lived
@@ -1287,20 +1372,9 @@ void DescriptorCache::TrimSets()
 		{
 			return;
 		}
-		std::vector<std::pair<uint64_t, int>> candidates;
-		for (int index = 0; index < static_cast<int>(m_sets.Size()); index++)
+		for (uint32_t i = 0; i < TRIM_SETS && m_lru_oldest != -1; i++)
 		{
-			const auto& set = m_sets.At(index);
-			if (set.set != nullptr && !set.untracked_use && !set.uses.Dependencies().empty())
-			{
-				candidates.emplace_back(set.last_use, index);
-			}
-		}
-		const size_t count = std::min<size_t>(candidates.size(), TRIM_SETS);
-		std::partial_sort(candidates.begin(), candidates.begin() + static_cast<ptrdiff_t>(count), candidates.end());
-		for (size_t i = 0; i < count; i++)
-		{
-			const int index = candidates[i].second;
+			const int index = m_lru_oldest;
 			retired.push_back({m_sets.At(index).uses.Dependencies(), UnindexSet(index)});
 		}
 	}
@@ -1418,6 +1492,8 @@ void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
 	m_first_free_set  = -1;
 	m_first_free_pool = -1;
 	m_live_sets       = 0;
+	m_lru_oldest      = -1;
+	m_lru_newest      = -1;
 }
 
 VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind)

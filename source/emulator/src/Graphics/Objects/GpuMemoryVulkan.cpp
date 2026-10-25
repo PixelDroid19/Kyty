@@ -32,6 +32,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -370,6 +371,21 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource
 	return false;
 }
 
+// Dedicated allocations stay mapped from their first map until they are freed,
+// like pooled blocks. Unmapping changes the process page tables, which costs a
+// TLB shootdown on every core that runs one of its threads.
+struct DedicatedMappings
+{
+	std::mutex                                mutex;
+	std::unordered_map<VkDeviceMemory, void*> mapped;
+};
+
+static DedicatedMappings& GetDedicatedMappings()
+{
+	static auto* mappings = new DedicatedMappings;
+	return *mappings;
+}
+
 void VulkanFree(GraphicContext* ctx, VulkanMemory* mem)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -383,6 +399,12 @@ void VulkanFree(GraphicContext* ctx, VulkanMemory* mem)
 		mem->pool_block = nullptr;
 	} else
 	{
+		{
+			auto&           mappings = GetDedicatedMappings();
+			std::lock_guard lock(mappings.mutex);
+			// Freeing a mapped allocation unmaps it.
+			mappings.mapped.erase(mem->memory);
+		}
 		vkFreeMemory(ctx->device, mem->memory, nullptr);
 	}
 
@@ -407,7 +429,19 @@ void VulkanMapMemory(GraphicContext* ctx, VulkanMemory* mem, void** data)
 		*data = block->mapped + mem->offset;
 		return;
 	}
-	vkMapMemory(ctx->device, mem->memory, mem->offset, mem->requirements.size, 0, data);
+	auto&           mappings = GetDedicatedMappings();
+	std::lock_guard lock(mappings.mutex);
+	void*&          mapped = mappings.mapped[mem->memory];
+	if (mapped == nullptr)
+	{
+		const VkResult result = vkMapMemory(ctx->device, mem->memory, 0, VK_WHOLE_SIZE, 0, &mapped);
+		if (result != VK_SUCCESS || mapped == nullptr)
+		{
+			EXIT("vkMapMemory failed: result=%d size=%" PRIu64 "\n", static_cast<int>(result),
+			     static_cast<uint64_t>(mem->requirements.size));
+		}
+	}
+	*data = static_cast<uint8_t*>(mapped) + mem->offset;
 }
 
 void VulkanUnmapMemory(GraphicContext* ctx, VulkanMemory* mem)
@@ -417,11 +451,8 @@ void VulkanUnmapMemory(GraphicContext* ctx, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(mem == nullptr);
 
-	// Pooled host-visible blocks stay persistently mapped.
-	if (mem->pool_block == nullptr)
-	{
-		vkUnmapMemory(ctx->device, mem->memory);
-	}
+	// Pooled blocks and dedicated allocations stay mapped until they are freed.
+	EXIT_IF(mem->memory == nullptr);
 }
 
 void VulkanBindImageMemory(GraphicContext* ctx, VulkanImage* image, VulkanMemory* mem)

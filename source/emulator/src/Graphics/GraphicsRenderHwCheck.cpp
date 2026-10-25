@@ -192,7 +192,12 @@ static void rt_check(const HW::RenderTarget& rt)
 		{
 			if (rt.attrib2.width == 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib2.width == 0x00000000 condition ignored (continuing)\n"); }
 			if (rt.attrib2.height == 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib2.height == 0x00000000 condition ignored (continuing)\n"); }
-			if (rt.attrib2.num_mip_levels != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib2.num_mip_levels != 0x00000000 condition ignored (continuing)\n"); }
+			if (rt.attrib2.num_mip_levels != 0x00000000 && rt.attrib3.tile_mode != 0x0000001b)
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+				               "WARNING: rt.attrib2.num_mip_levels != 0x00000000 && rt.attrib3.tile_mode != 0x0000001b condition ignored "
+				               "(continuing)\n");
+			}
 			if (rt.attrib3.depth != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib3.depth != 0x00000000 condition ignored (continuing)\n"); }
 			if (rt.attrib3.tile_mode != 0x0000001b) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib3.tile_mode != 0x0000001b condition ignored (continuing)\n"); }
 			if (rt.attrib3.dimension != 0x00000001) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.attrib3.dimension != 0x00000001 condition ignored (continuing)\n"); }
@@ -304,7 +309,11 @@ static void validate_depth_plane(const HW::DepthRenderTarget& z)
 		if (z.z_info.plane_compression != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.z_info.plane_compression != 0 condition ignored (continuing)\n"); }
 		return;
 	}
-	if (z.z_info.format != 0x00000003) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.z_info.format != 0x00000003 condition ignored (continuing)\n"); }
+	if (z.z_info.format != 0x00000001 && z.z_info.format != 0x00000003)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+		               "WARNING: z.z_info.format != 0x00000001 && z.z_info.format != 0x00000003 condition ignored (continuing)\n");
+	}
 	(void)decode_guest_sample_count(z.z_info.num_samples);
 	if (z.z_info.expclear_enabled) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.z_info.expclear_enabled condition ignored (continuing)\n"); }
 	if (z.z_info.zrange_precision != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.z_info.zrange_precision != 1 condition ignored (continuing)\n"); }
@@ -349,7 +358,6 @@ static State::StencilPlaneValidation validate_stencil_plane(const HW::DepthRende
 	if (validation == State::StencilPlaneValidation::MissingReadBase) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: validation == State::StencilPlaneValidation::MissingReadBase condition ignored (continuing)\n"); }
 	if (validation == State::StencilPlaneValidation::MissingWriteBase) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: validation == State::StencilPlaneValidation::MissingWriteBase condition ignored (continuing)\n"); }
 	if (validation == State::StencilPlaneValidation::MismatchedBases) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: validation == State::StencilPlaneValidation::MismatchedBases condition ignored (continuing)\n"); }
-	if (z.stencil_info.format == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.stencil_info.format == 0 condition ignored (continuing)\n"); }
 	if (z.stencil_info.tile_stencil_disable != true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.stencil_info.tile_stencil_disable != true condition ignored (continuing)\n"); }
 	if (z.stencil_info.expclear_enabled) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.stencil_info.expclear_enabled condition ignored (continuing)\n"); }
 	if (z.stencil_info.partially_resident) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.stencil_info.partially_resident condition ignored (continuing)\n"); }
@@ -402,8 +410,6 @@ static void z_check(const HW::DepthRenderTarget& target, const HW::RenderControl
 
 	const bool ps5 = Config::IsNextGen();
 	validate_depth_target_layout(z, ps5);
-	if (z.depth_view.slice_start != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.depth_view.slice_start != 0 condition ignored (continuing)\n"); }
-	if (z.depth_view.slice_max != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.depth_view.slice_max != 0 condition ignored (continuing)\n"); }
 	if (z.depth_view.current_mip_level != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.depth_view.current_mip_level != 0 condition ignored (continuing)\n"); }
 	if (z.depth_view.depth_write_disable) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.depth_view.depth_write_disable condition ignored (continuing)\n"); }
 	if (ps5)
@@ -708,7 +714,8 @@ void aa_check_for_attachment_samples(const HW::Context& hw, VkSampleCountFlagBit
 	// Preserve the values for sample-shading selection in the pipeline and let
 	// the rasterizer use the effective attachment count instead of rejecting a
 	// valid draw because an EQAA field describes a lower anchor/iteration count.
-	if (scan_mode.msaa_enable && std::getenv("KYTY_DUMP_AA_REGS") != nullptr)
+	static const bool dump_aa_regs = std::getenv("KYTY_DUMP_AA_REGS") != nullptr;
+	if (scan_mode.msaa_enable && dump_aa_regs)
 	{
 		static bool dumped_eqaa_mapping = false;
 		if (!dumped_eqaa_mapping)
@@ -861,7 +868,7 @@ void hw_print(const HW::Context& hw)
 	const auto& aa   = hw.GetAaSampleControl();
 	const auto& ac   = hw.GetAaConfig();
 
-	if (Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent)
+	if (Kyty::Log::ShouldLog(Kyty::Log::Level::Debug) && Kyty::Log::GetDirection() != Kyty::Log::Direction::Silent)
 	{
 		KYTY_LOG_DEBUG("Context\n");
 		KYTY_LOG_DEBUG("\t GetRenderTargetMask()   = 0x%08" PRIx32 "\n", hw.GetRenderTargetMask());

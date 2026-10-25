@@ -14,18 +14,19 @@
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Config.h"
 #include "Emulator/GpuMemoryFault.h"
+#include "Emulator/GuestCodeRanges.h"
 #include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/Elf.h"
-#include "Emulator/Loader/GuestProgramName.h"
 #include "Emulator/Loader/GuestCall.h"
+#include "Emulator/Loader/GuestProgramName.h"
 #include "Emulator/Loader/Instrumentation.h"
 #include "Emulator/Loader/Jit.h"
 #include "Emulator/Loader/MissingImport.h"
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/SymbolDatabase.h"
-#include "Emulator/Validation/DomainValidators.h"
 #include "Emulator/Log.h"
+#include "Emulator/Validation/DomainValidators.h"
 
 #include <atomic>
 #include <cstdio>
@@ -132,32 +133,11 @@ uint64_t RuntimeLinker::GetProcessParametersForPort()
 	return address;
 }
 
+// The guest code set holds the executable segments of every loaded program and
+// the kernel's executable mappings, and answers without the runtime lock.
 bool RuntimeLinker::IsExecutableAddressForPort(uint64_t address)
 {
-	auto* runtime = AcquireCurrentRuntimeForUse();
-	if (runtime == nullptr) { return false; }
-	bool executable = false;
-	{
-		Core::LockGuard lock(runtime->m_mutex);
-		for (const auto* program: runtime->m_programs)
-		{
-			if (program->elf == nullptr || address < program->base_vaddr) { continue; }
-			const auto relative = address - program->base_vaddr;
-			const auto* phdr = program->elf->GetPhdr();
-			for (uint16_t i = 0; i < program->elf->GetEhdr()->e_phnum; ++i)
-			{
-				if (phdr[i].p_type == PT_LOAD && (phdr[i].p_flags & PF_X) != 0 &&
-				    relative >= phdr[i].p_vaddr && relative - phdr[i].p_vaddr < phdr[i].p_memsz)
-				{
-					executable = true;
-					break;
-				}
-			}
-			if (executable) { break; }
-		}
-	}
-	ReleaseCurrentRuntimeForUse(runtime);
-	return executable;
+	return Emulator::GuestCodeRanges::Contains(address);
 }
 
 void RuntimeLinker::SetCurrentRuntimeUnpublishedHookForTesting(void (*hook)(void*), void* context)
@@ -619,6 +599,13 @@ static Core::VirtualMemory::Mode get_mode(Elf64_Word flags)
 	}
 }
 
+// Executable PT_LOAD segments stay recorded as guest code while the program is
+// mapped, so a signal handler can classify an interrupted instruction.
+static bool is_guest_code_segment(const Elf64_Phdr& phdr)
+{
+	return phdr.p_type == PT_LOAD && phdr.p_memsz != 0 && Core::VirtualMemory::IsExecute(get_mode(phdr.p_flags));
+}
+
 struct FrameS
 {
 	FrameS*   next;
@@ -1041,12 +1028,10 @@ static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmpre
 
 	// KYTY_PROFILER_BLOCK("patch");
 
-	if (!ri.resolved && ri.type == SymbolType::Object)
+	if (!ri.resolved && ri.type == SymbolType::Object && program->rt != nullptr)
 	{
-		if (program->rt != nullptr && ModuleLifecycleCoordinator::TryLoadProviderForLazyImport(program->rt, ri.name, ri.type))
-		{
-			ri = GetRelocationInfo(r, program);
-		}
+		ModuleLifecycleCoordinator::TryLoadProviderForLazyImport(program->rt, ri.name, ri.type);
+		ri = GetRelocationInfo(r, program);
 	}
 
 	if (ri.resolved)
@@ -1150,9 +1135,9 @@ static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_ind
 	{
 		EmitTracedPltRelocation(rel_index, ri);
 	}
-	if (!ri.resolved && program->rt != nullptr &&
-	    ModuleLifecycleCoordinator::TryLoadProviderForLazyImport(program->rt, ri.name, ri.type))
+	if (!ri.resolved && program->rt != nullptr)
 	{
+		ModuleLifecycleCoordinator::TryLoadProviderForLazyImport(program->rt, ri.name, ri.type);
 		ri = GetRelocationInfo(program->dynamic_info->jmprela_table + rel_index, program);
 	}
 	if (!ri.resolved || ri.value == 0)
@@ -1166,6 +1151,12 @@ static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_ind
 		        requester.utf8_str().GetData(), (unsigned long long)rel_index,
 		        (void*)program->dynamic_info->jmprela_table, (unsigned long)program->dynamic_info->jmprela_table_size);
 		EXIT("can't resolve lazy PLT import: %s\n", clean_name.C_Str());
+	}
+	// Before the slot is patched: later calls skip this resolver, and none may
+	// reach a lazy provider whose initializers have not finished.
+	if (program->rt != nullptr)
+	{
+		program->rt->StartLazyProviderAt(ri.value);
 	}
 	// PatchReplace reports whether the slot changed. A relocation that already
 	// installed this exact target is valid and must remain idempotent here.
@@ -1636,6 +1627,8 @@ void RuntimeLinker::UnloadProgram(Program* program)
 	{
 		DeleteProgram(m_programs.At(index));
 		m_programs.RemoveAt(index);
+		// A thread waiting for its initializers sees that it is gone.
+		m_lazy_start_changed.SignalAll();
 	} else
 	{
 		EXIT("program not found");
@@ -2005,16 +1998,92 @@ void RuntimeLinker::Clear()
 	delete m_symbols;
 	m_symbols = nullptr;
 	m_relocated = false;
-	m_relocation_depth.store(0, std::memory_order_release);
 	m_static_tls_size  = 0;
 	g_next_tls_module_id = 1;
 	g_tls_main_program = nullptr;
 	Config::ResetGuestPlatform();
 }
 
-bool RuntimeLinker::IsRelocationInProgress() const
+void RuntimeLinker::MarkLazyStartPending(Program* program)
 {
-	return m_relocation_depth.load(std::memory_order_acquire) != 0;
+	Core::LockGuard lock(m_mutex);
+	EXIT_IF(program == nullptr || !m_programs.Contains(program) || program->lazy_start != LazyStartState::None);
+	program->lazy_start = LazyStartState::Pending;
+}
+
+void RuntimeLinker::StartLazyProviderAt(uint64_t vaddr)
+{
+	if (auto* program = FindProgramByAddr(vaddr); program != nullptr)
+	{
+		StartLazyProvider(program);
+	}
+}
+
+void RuntimeLinker::StartLazyProvider(Program* program)
+{
+	const uint64_t self = Core::Thread::GetHostThreadId();
+	{
+		Core::LockGuard lock(m_mutex);
+		for (;;)
+		{
+			if (!m_programs.Contains(program) || program->lazy_start == LazyStartState::None ||
+			    program->lazy_start == LazyStartState::Started)
+			{
+				return;
+			}
+			if (program->lazy_start == LazyStartState::Pending)
+			{
+				break;
+			}
+			// An initializer that reaches its own provider again continues, as a
+			// recursive ELF initializer does.
+			if (program->lazy_starter == self)
+			{
+				return;
+			}
+			// The initializers are guest code and may be stopped by a collector.
+			Kernel::PthreadInterruptibleWait(&m_lazy_start_changed, &m_mutex);
+		}
+		program->lazy_start   = LazyStartState::Starting;
+		program->lazy_starter = self;
+	}
+	FinishLazyStart(program, StartModule(program, 0, nullptr, nullptr));
+}
+
+void RuntimeLinker::StartPendingLazyProviders()
+{
+	Vector<Program*> unstarted;
+	{
+		Core::LockGuard lock(m_mutex);
+		for (auto* p: m_programs)
+		{
+			if (p->lazy_start == LazyStartState::Pending || p->lazy_start == LazyStartState::Starting)
+			{
+				unstarted.Add(p);
+			}
+		}
+	}
+	for (auto* program: unstarted)
+	{
+		StartLazyProvider(program);
+	}
+}
+
+void RuntimeLinker::FinishLazyStart(Program* program, int result)
+{
+	const auto file_name = program->file_name.FilenameWithoutDirectory();
+	if (result != 0)
+	{
+		// The provider stays loaded and bound, as sceKernelLoadStartModule leaves
+		// a module whose module_start fails.
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: lazy provider %s module_start() = %d\n", file_name.C_Str(), result);
+	}
+	{
+		Core::LockGuard lock(m_mutex);
+		program->lazy_start = LazyStartState::Started;
+		m_lazy_start_changed.SignalAll();
+	}
+	ModuleLifecycleCoordinator::RecordLazyProviderStart(this, file_name, result == 0);
 }
 
 void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* program, SymbolRecord* out_info, bool* bind_self)
@@ -2482,76 +2551,66 @@ void RuntimeLinker::StackTrace(uint64_t frame_ptr)
 	}
 }
 
-void RuntimeLinker::StartAllModules()
-{
-	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
-
-	Core::LockGuard lock(m_mutex);
-
-	Vector<Program*>              shared_programs;
-	Vector<ModuleStartDescriptor> descriptors;
-	for (auto* p: m_programs)
-	{
-		if (p->elf->IsShared())
-		{
-			EXIT_IF(p->dynamic_info == nullptr);
-			ModuleStartDescriptor descriptor {};
-			descriptor.file_name = p->file_name.FilenameWithoutDirectory();
-			if (p->dynamic_info->so_name != nullptr)
-			{
-				descriptor.so_name = String::FromUtf8(p->dynamic_info->so_name);
-			}
-			for (const auto* dependency: p->dynamic_info->needed)
-			{
-				if (dependency != nullptr)
-				{
-					descriptor.needed.Add(String::FromUtf8(dependency));
-				}
-			}
-			shared_programs.Add(p);
-			descriptors.Add(std::move(descriptor));
-		}
-	}
-
-	for (const uint32_t index: LoaderBuildModuleStartOrder(descriptors))
-	{
-		StartModule(shared_programs[index], 0, nullptr, nullptr);
-	}
-}
-
 void RuntimeLinker::StartAllModulesOnStack(void* stack_top)
 {
 	EXIT_IF(stack_top == nullptr);
 
-	Core::LockGuard lock(m_mutex);
-
-	Vector<Program*>               shared_programs;
-	Vector<ModuleStartDescriptor> descriptors;
-	for (auto* p: m_programs)
+	Vector<Program*> ordered;
+	Vector<Program*> claimed;
 	{
-		if (p->elf->IsShared())
+		Core::LockGuard lock(m_mutex);
+
+		Vector<Program*>              shared_programs;
+		Vector<ModuleStartDescriptor> descriptors;
+		for (auto* p: m_programs)
 		{
-			ModuleStartDescriptor descriptor {};
-			descriptor.file_name = p->file_name;
-			if (p->dynamic_info->so_name != nullptr)
+			if (p->elf->IsShared())
 			{
-				descriptor.so_name = String::FromUtf8(p->dynamic_info->so_name);
-			}
-			for (const auto* dependency: p->dynamic_info->needed)
-			{
-				if (dependency != nullptr)
+				ModuleStartDescriptor descriptor {};
+				descriptor.file_name = p->file_name;
+				if (p->dynamic_info->so_name != nullptr)
 				{
-					descriptor.needed.Add(String::FromUtf8(dependency));
+					descriptor.so_name = String::FromUtf8(p->dynamic_info->so_name);
 				}
+				for (const auto* dependency: p->dynamic_info->needed)
+				{
+					if (dependency != nullptr)
+					{
+						descriptor.needed.Add(String::FromUtf8(dependency));
+					}
+				}
+				shared_programs.Add(p);
+				descriptors.Add(std::move(descriptor));
 			}
-			shared_programs.Add(p);
-			descriptors.Add(std::move(descriptor));
+		}
+
+		for (const uint32_t index: LoaderBuildModuleStartOrder(descriptors))
+		{
+			ordered.Add(shared_programs[index]);
+		}
+		// Providers admitted while relocating are shared programs, so this order
+		// starts them after their dependencies too.
+		const uint64_t self = Core::Thread::GetHostThreadId();
+		for (auto* p: ordered)
+		{
+			if (p->lazy_start == LazyStartState::Pending)
+			{
+				p->lazy_start   = LazyStartState::Starting;
+				p->lazy_starter = self;
+				claimed.Add(p);
+			}
 		}
 	}
 
-	for (const uint32_t index: LoaderBuildModuleStartOrder(descriptors))
+	// Initializers are guest code: one may wait for a thread that needs this
+	// lock (TLS, lazy binding), so they run without it.
+	for (auto* program: ordered)
 	{
-		StartModuleOnStack(shared_programs[index], 0, nullptr, nullptr, stack_top);
+		const int result = StartModuleOnStack(program, 0, nullptr, nullptr, stack_top);
+		if (claimed.Contains(program))
+		{
+			FinishLazyStart(program, result);
+		}
 	}
 }
 
@@ -2559,14 +2618,21 @@ void RuntimeLinker::StopAllModules()
 {
 	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
 
-	Core::LockGuard lock(m_mutex);
-
-	for (auto* p: m_programs)
+	Vector<Program*> shared_programs;
 	{
-		if (p->elf->IsShared())
+		Core::LockGuard lock(m_mutex);
+		for (auto* p: m_programs)
 		{
-			StopModule(p, 0, nullptr, nullptr);
+			if (p->elf->IsShared())
+			{
+				shared_programs.Add(p);
+			}
 		}
+	}
+
+	for (auto* program: shared_programs)
+	{
+		StopModule(program, 0, nullptr, nullptr);
 	}
 }
 
@@ -2582,7 +2648,12 @@ int RuntimeLinker::StartModuleOnStack(Program* program, size_t args, const void*
 	EXIT_IF(program->elf == nullptr);
 	EXIT_IF(!program->elf->IsShared());
 
-	EXIT_IF(!m_programs.Contains(program));
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(!m_programs.Contains(program));
+	}
+	// A module may have bound to providers admitted while it was relocated.
+	StartPendingLazyProviders();
 	NormalizeModuleStartArguments(program, &args, &argp);
 
 	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
@@ -2612,8 +2683,10 @@ int RuntimeLinker::StopModule(Program* program, size_t args, const void* argp, m
 	EXIT_IF(program->dynamic_info == nullptr);
 	EXIT_IF(program->elf == nullptr);
 	EXIT_IF(!program->elf->IsShared());
-
-	EXIT_IF(!m_programs.Contains(program));
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(!m_programs.Contains(program));
+	}
 
 	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "---" DEFAULT "\n");
 	KYTY_LOG_DEBUG(FG_BRIGHT_YELLOW "--- Stop module: " BG_BLUE BOLD "%s" BG_DEFAULT NO_BOLD DEFAULT "\n", program->file_name.C_Str());
@@ -2883,6 +2956,12 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 					Core::VirtualMemory::FlushInstructionCache(segment_addr, segment_memory_size);
 				}
 			}
+
+			if (is_guest_code_segment(phdr[i]))
+			{
+				Emulator::GuestCodeRanges::Add(segment_addr, segment_addr + segment_memory_size);
+				program->guest_code_registered = true;
+			}
 		}
 
 		if (phdr[i].p_type == PT_TLS && phdr[i].p_memsz != 0)
@@ -2963,6 +3042,21 @@ void RuntimeLinker::DeleteProgram(Program* p)
 			delete per_thread;
 			p->rt->m_dynamic_tlss.Remove(p->tls.module_id);
 		}
+	}
+
+	if (p->guest_code_registered)
+	{
+		const auto* ehdr = p->elf->GetEhdr();
+		const auto* phdr = p->elf->GetPhdr();
+		for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
+		{
+			if (is_guest_code_segment(phdr[i]))
+			{
+				const uint64_t segment_addr = phdr[i].p_vaddr + p->base_vaddr;
+				Emulator::GuestCodeRanges::Remove(segment_addr, segment_addr + get_aligned_size(phdr + i));
+			}
+		}
+		p->guest_code_registered = false;
 	}
 
 	if (p->base_vaddr != 0 || p->base_size != 0)
@@ -3208,10 +3302,6 @@ void RuntimeLinker::Relocate(Program* program)
 	KYTY_LOADER_PROFILE_FUNCTION();
 
 	EXIT_IF(program == nullptr);
-	if (program->rt != nullptr)
-	{
-		program->rt->m_relocation_depth.fetch_add(1, std::memory_order_acq_rel);
-	}
 
 	if (g_invalid_memory == 0)
 	{
@@ -3234,11 +3324,6 @@ void RuntimeLinker::Relocate(Program* program)
 	relocate_all(program->dynamic_info->jmprela_table, program->dynamic_info->jmprela_table_size, program, true);
 
 	RegisterProgramEhFrame(program);
-
-	if (program->rt != nullptr)
-	{
-		program->rt->m_relocation_depth.fetch_sub(1, std::memory_order_acq_rel);
-	}
 }
 
 Program* RuntimeLinker::FindProgram(const ModuleId& m, const LibraryId& l)
