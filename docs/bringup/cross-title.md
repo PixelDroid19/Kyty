@@ -4,6 +4,27 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Storage page generations are read only for an upload (2026-10-24)
+
+- **Observed** (beat 'em up, Intel A770, strict runs at the 60 fps present
+  limit): `GpuDirtyPageTracker::PageGenerations` held 4.3% of the CP thread
+  in gameplay and 23.9% in a window of the intro cutscene, always under
+  `GpuMemory::Update` from `CreateObject`. `Update` read one generation per
+  4 KiB page of every tracked storage buffer it checked, before knowing
+  whether the buffer changed; a clean buffer returned without using them.
+  The upload itself (`update_func`) took 0.5% of the gameplay profile.
+- **Fix** (`GpuMemoryCreate.cpp`): the generations are read after the
+  unchanged-buffer return, still after `BeginRead` armed the pages and before
+  the upload, so the changed-page runs and the stored generations are the
+  same as before.
+- **Result:** `PageGenerations` no longer appears in the cutscene profile. In
+  that cutscene the CP thread is mostly idle and the frame rate (23-29 fps)
+  did not move; no gameplay window was reached in the measured runs.
+- **Verified:** unit tests pass (2465), graphics diagnostics integration
+  passes (15). Sweep with no stop: racing 60 fps, anime fighter 45.7 fps in
+  the tutorial (45.7-48.9 in earlier runs), fishing dock 20.3-20.4 fps (19.1-23.6
+  across today's runs on earlier builds).
+
 ## Range-query caches invalidate only overlapping spans (2026-10-24)
 
 - **Observed** (beat 'em up gameplay, Intel A770, strict run at the 60 fps
