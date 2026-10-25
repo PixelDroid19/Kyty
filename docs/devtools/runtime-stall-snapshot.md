@@ -89,8 +89,8 @@ queue that hangs shows as its own stuck lane; a running guest that never
 writes the label gets no verdict.
 
 `guest_deadlock` (always medium confidence): every guest thread is parked in a
-blocking wait, no command lane is busy except on `RegisterMemoryWait`, and
-nothing has changed for 10 s
+blocking wait, no host lane (command, GPU queue, present) is busy except a
+command lane on `RegisterMemoryWait`, and nothing has changed for 10 s
 (suspected) / 30 s (confirmed). Any guest thread that could not be tracked
 rules the verdict out. Guest threads are never stall candidates on their own:
 a thread busy in guest code for a long time is normal.

@@ -253,11 +253,11 @@ void PushStalledLanes(const ObservationInput& input, const StallSettings& settin
 	return loss.progress.capacity[guest].total == 0u && loss.progress.rejected_update[guest].total == 0u;
 }
 
-// Every guest thread parked in a blocking wait while the command processor has
-// had nothing to run but waits on guest memory: the guest waits for something
-// nothing will signal. A running guest thread or a busy command lane rules it
-// out, and so does any untracked guest thread, which might be the one still
-// running.
+// Every guest thread parked in a blocking wait while the host has had nothing
+// to run but waits on guest memory: the guest waits for something nothing will
+// signal. A running guest thread or any other busy host lane (command, GPU
+// queue, present) rules it out, and so does any untracked guest thread, which
+// might be the one still running.
 [[nodiscard]] StallCandidate FindGuestDeadlock(const ObservationInput& input, const StallSettings& settings,
                                                uint64_t not_before_ns) noexcept
 {
@@ -271,17 +271,13 @@ void PushStalledLanes(const ObservationInput& input, const StallSettings& settin
 	{
 		const auto&    e   = input.progress.entries[i];
 		const uint64_t age = LaneAge(e.record, input.sample_time_ns, not_before_ns);
-		if (e.key.domain == Domain::CommandProcessor)
+		if (!IsGuestThread(e))
 		{
 			if (!WaitsOnGuestMemory(e) && LaneBusy(e.record))
 			{
 				return {};
 			}
 			quiet_ns = age < quiet_ns ? age : quiet_ns;
-			continue;
-		}
-		if (!IsGuestThread(e))
-		{
 			continue;
 		}
 		if (static_cast<ProgressState>(e.record.state) != ProgressState::Waiting)

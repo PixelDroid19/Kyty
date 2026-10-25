@@ -177,6 +177,13 @@ TEST(DevToolsClassifier, CommandWorkRulesOutGuestDeadlock)
 	AddLane(&busy, Domain::CommandProcessor, OperationCode::PipelineCompile, 2, 9, 98'000'000'000ull);
 	EXPECT_EQ(Observe(busy, settings, &state).category, StallCategory::None);
 
+	// A present still in flight can wake threads parked on the flip.
+	auto presenting = MakeBaseInput(100'000'000'000ull);
+	AddGuestThread(&presenting, 1, OperationCode::EventQueueWait, 70'000'000'000ull);
+	AddIdleCommandLane(&presenting, 2, 70'000'000'000ull);
+	AddLane(&presenting, Domain::Presentation, OperationCode::PresentationPresent, 3, 9, 98'000'000'000ull);
+	EXPECT_EQ(Observe(presenting, settings, &state).category, StallCategory::None);
+
 	// Batches that keep completing are progress the guest waits on.
 	auto recent = MakeBaseInput(100'000'000'000ull);
 	AddGuestThread(&recent, 1, OperationCode::EventQueueWait, 70'000'000'000ull);
