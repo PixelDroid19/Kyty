@@ -1208,6 +1208,35 @@ TEST(AgentRunnerHost, StopsAnIsolatedProcessGroupAndKeepsItsOutput)
 	EXPECT_NE(log.find("err\n"), std::string::npos);
 }
 
+TEST(AgentRunnerHost, LeaderExitStopsWhatItLeftInItsGroup)
+{
+	ScopedTestDirectory directory("agent-runner-host");
+	auto                host = CreateSystemRunnerHost();
+	ASSERT_NE(host, nullptr);
+	LaunchSpec spec;
+	spec.argv     = {"/bin/sh", "-c", "sleep 30 & echo $!; exit 0"};
+	spec.cwd      = directory.Path().string();
+	spec.env      = {{"PATH", "/usr/bin:/bin"}};
+	spec.log_path = (directory.Path() / "child.log").string();
+	std::string error;
+	ASSERT_TRUE(host->Launch(spec, &error)) << error;
+	double deadline = host->Now() + 5.0;
+	while (!host->PollChild().has_value() && host->Now() < deadline)
+	{
+		host->Sleep(0.02);
+	}
+	ASSERT_EQ(host->PollChild().value_or(-1), 0);
+	const auto left_behind = static_cast<pid_t>(std::stol(ReadFile(spec.log_path)));
+	ASSERT_GT(left_behind, 0);
+	// Killed, then reaped by its new parent.
+	deadline = host->Now() + 5.0;
+	while (::kill(left_behind, 0) == 0 && host->Now() < deadline)
+	{
+		host->Sleep(0.02);
+	}
+	EXPECT_NE(::kill(left_behind, 0), 0);
+}
+
 TEST(AgentRunnerHost, MissingAgentSocketIsATransportFailure)
 {
 	ScopedTestDirectory directory("agent-runner-host");

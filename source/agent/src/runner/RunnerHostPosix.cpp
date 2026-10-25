@@ -243,9 +243,16 @@ public:
 		{
 			return m_exit;
 		}
-		int         status = 0;
-		const pid_t rc     = ::waitpid(m_pid, &status, WNOHANG);
-		if (rc == m_pid)
+		siginfo_t info {};
+		if (::waitid(P_PID, static_cast<id_t>(m_pid), &info, WEXITED | WNOHANG | WNOWAIT) != 0 || info.si_pid != m_pid)
+		{
+			return m_exit;
+		}
+		// The leader is not reaped yet, so its group id cannot be reused: the
+		// kill reaches only processes the run left behind in its session.
+		(void)::killpg(static_cast<pid_t>(m_pid), SIGKILL);
+		int status = 0;
+		if (::waitpid(static_cast<pid_t>(m_pid), &status, 0) == m_pid)
 		{
 			m_exit = WIFSIGNALED(status) ? -WTERMSIG(status) : WEXITSTATUS(status);
 		}
