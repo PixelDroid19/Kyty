@@ -57628,7 +57628,12 @@ SQLITE_PRIVATE int sqlite3PagerSavepoint(Pager *pPager, int op, int iSavepoint){
 ** participate in shared-cache.
 */
 SQLITE_PRIVATE const char *sqlite3PagerFilename(Pager *pPager, int nullIfMemDb){
-  return (nullIfMemDb && pPager->memDb) ? "" : pPager->zFilename;
+  /* BEGIN KYTY */
+  /* sqlite3_uri_parameter() reads past the name, so the empty name must end
+  ** with an empty parameter list instead of a merged string literal. */
+  static const char zEmptyUri[4] = {0, 0, 0, 0};
+  return (nullIfMemDb && pPager->memDb) ? zEmptyUri : pPager->zFilename;
+  /* END KYTY */
 }
 
 /*

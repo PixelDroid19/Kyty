@@ -4,6 +4,33 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## In-memory database name ends with an empty parameter list (2026-10-24)
+
+- **Observed** (Linux, executables linked with LLD): `GpuMemory::DbgInit`
+  stopped at `GpuMemoryDbg.cpp:42` because `Connection::CreateInMemory`
+  failed. `sqlite3_open_v2(":memory:")` returned `SQLITE_ERROR` with
+  "unknown cipher 'textkey'". `sqlite3PagerFilename` returned a `""` literal
+  for an in-memory database, and `CodecConfigureFromUri` passed it to
+  `sqlite3_uri_parameter`, which reads the URI parameters after the name.
+  The bytes after the literal belong to whatever string the linker placed
+  next: with bfd it was a zero, with LLD's merged literals it was a
+  `cipher`/`textkey` pair. 14 of 113 tests failed this way.
+- **Fix** (`3rdparty/sqlite/src/sqlite3.c`): the in-memory name is a
+  zero-filled static array, so the parameter list after it is empty
+  whatever the linker does with literals.
+- **Verified:** with LLD all 113 tests pass, including the graphics
+  diagnostics integration.
+- **Open (build):** the executables rely on bfd exporting every symbol that
+  a linked shared library also defines (4471 dynamic symbols in
+  `fc_script`). Kyty replaces `operator new`/`delete`
+  (`lib/Core/src/MemoryAlloc.cpp:784`) and links libstdc++ statically; LLD
+  exports 19 symbols by default, so a block allocated on one side was freed
+  on the other and 62 unit tests stopped at the `mem_block_magic` check
+  (`MemoryAlloc.cpp:91`). Passing a `--dynamic-list` of the dependencies'
+  defined symbols restores the same export set and every test passes.
+  Direction: make the export explicit in the build (for example a
+  generated dynamic list) before LLD becomes a supported linker.
+
 ## Storage page generations are read only for an upload (2026-10-24)
 
 - **Observed** (beat 'em up, Intel A770, strict runs at the 60 fps present
