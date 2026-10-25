@@ -16,6 +16,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+// Kyty::Core::File declares these names; File.h may already be included.
+#undef CreateDirectory
+#undef DeleteFile
+#undef CopyFile
+#undef MoveFile
 #else
 #include <sys/resource.h>
 #include <unistd.h>
