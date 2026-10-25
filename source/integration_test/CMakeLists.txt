@@ -211,7 +211,7 @@ set_tests_properties(KytyShaderComputeIntegration.PairedWave64 PROPERTIES
 	SKIP_RETURN_CODE 77
 )
 
-# External operand endpoint for the integer instruction oracle (scripts/kyty_hardware_oracle.py).
+# External operand endpoint for the integer instruction oracle (`kyty_agent hardware-oracle`).
 # Deliberately not a CTest case: it needs a Vulkan 1.4 device with paired-wave capability and
 # exits 77 when that is absent. Run it through the oracle CLI.
 add_executable(kyty_shader_arithmetic_oracle

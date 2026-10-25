@@ -216,7 +216,7 @@ created through the **Create Version** workflow.
    gates `KytyArchitectureBoundaryIntegration.Repository`,
    `KytyArchiveDagIntegration.Repository` and
    `KytyHostShaders.CheckedInIncludes`, the `kyty_unit_test` suites, and
-   `scripts/kyty_playable_regression.py`.
+   `kyty_agent playable-regression`.
 4. Re-run the affected titles and the titles sharing the path; confirm no
    regression against the documented frontier.
 5. Document commands, environment, results and untested limits.
@@ -228,8 +228,8 @@ A boot, a window or one rendered frame does not mean a title is supported. A
 that reaches the stated state and holds it. Diagnostic input, stubs, permissive
 GPU skips and console logging are not supported runtime modes. Reports name the
 commit, host, GPU, driver, workload, duration and known limitations; graphics
-claims need captures scored with `scripts/kyty_capture.py`, and gameplay claims
-need `scripts/kyty_playable_regression.py`.
+claims need captures scored with `kyty_agent capture-run`, and gameplay claims
+need `kyty_agent playable-regression`.
 
 ## Runtime diagnostics
 
