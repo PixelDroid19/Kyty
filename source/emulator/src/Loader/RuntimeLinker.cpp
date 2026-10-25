@@ -41,8 +41,16 @@
 // Host libgcc unwinder registration. Guest modules execute natively on the
 // host; publishing each module's .eh_frame lets the host unwinder find FDEs for
 // guest PCs so C++ exceptions can unwind guest frames (required by IL2CPP
-// titles, which throw/catch managed exceptions through __cxa_throw).
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+// titles, which throw/catch managed exceptions through __cxa_throw). MinGW's
+// libgcc unwinds with SEH and has no such registry, so guest frames stay opaque
+// to host exceptions on Windows.
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__)) && KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+#define KYTY_HOST_FRAME_REGISTRY 1
+#else
+#define KYTY_HOST_FRAME_REGISTRY 0
+#endif
+
+#if KYTY_HOST_FRAME_REGISTRY
 extern "C" void __register_frame(const void* begin);
 extern "C" void __deregister_frame(const void* begin);
 #endif
@@ -3236,7 +3244,7 @@ static void InstallRelocateHandler(Program* program)
 // relocations so the CIE personality indirection through the GOT is resolved.
 void RuntimeLinker::RegisterProgramEhFrame(Program* program)
 {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if KYTY_HOST_FRAME_REGISTRY
 	if (program == nullptr || program->elf == nullptr || program->eh_frame_registered)
 	{
 		return;
@@ -3283,7 +3291,7 @@ void RuntimeLinker::RegisterProgramEhFrame(Program* program)
 
 void RuntimeLinker::UnregisterProgramEhFrame(Program* program)
 {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if KYTY_HOST_FRAME_REGISTRY
 	if (program == nullptr || !program->eh_frame_registered || program->eh_frame_vaddr == 0)
 	{
 		return;
