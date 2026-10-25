@@ -125,6 +125,62 @@ TEST(EmulatorGpuMemoryRangeQueryCache, AdjacentRangeDoesNotInvalidate)
 	EXPECT_EQ(value, 4);
 }
 
+TEST(EmulatorGpuMemoryRangeQueryCache, RangeInvalidationReachesLongQueriesFromTheirLastByte)
+{
+	GpuMemoryRangeQueryCache<int, 4096> cache;
+
+	// One query per span length class, 4 GiB apart; invalidating only the last byte of one query drops only that one.
+	constexpr uint64_t     kSizes[] = {0x100u, 0x8000u, 0x80000u, 0x800000u, 0x8000000u, 0x40000000u};
+	constexpr int          kCount   = static_cast<int>(sizeof(kSizes) / sizeof(kSizes[0]));
+	GpuMemoryRangeQueryKey queries[kCount];
+	for (int i = 0; i < kCount; ++i)
+	{
+		const uint64_t address[] = {(static_cast<uint64_t>(i) + 1u) << 32u};
+		const uint64_t size[]    = {kSizes[i]};
+		queries[i]               = GpuMemoryRangeQueryKey::Create(address, size, 1, false);
+		cache.Store(queries[i], i);
+	}
+
+	int value = 0;
+	for (int i = 0; i < kCount; ++i)
+	{
+		ASSERT_TRUE(cache.Lookup(queries[i], &value));
+		cache.InvalidateRange(((static_cast<uint64_t>(i) + 1u) << 32u) + kSizes[i] - 1u, 1u);
+		EXPECT_FALSE(cache.Lookup(queries[i], &value));
+		for (int j = i + 1; j < kCount; ++j)
+		{
+			EXPECT_TRUE(cache.Lookup(queries[j], &value));
+		}
+	}
+}
+
+TEST(EmulatorGpuMemoryRangeQueryCache, ReplacedQueryIsInvalidatedByItsOwnRangeOnly)
+{
+	// One slot: the second store replaces the first query.
+	GpuMemoryRangeQueryCache<int, 1> cache;
+
+	const uint64_t long_address[]  = {0x10000000u};
+	const uint64_t long_size[]     = {0x4000000u};
+	const uint64_t short_address[] = {0x80000000u};
+	const uint64_t short_size[]    = {0x100u};
+	const auto     long_query      = GpuMemoryRangeQueryKey::Create(long_address, long_size, 1, false);
+	const auto     short_query     = GpuMemoryRangeQueryKey::Create(short_address, short_size, 1, false);
+	cache.Store(long_query, 1);
+	cache.Store(short_query, 2);
+
+	int value = 0;
+	cache.InvalidateRange(0x13000000u, 0x10u);
+	ASSERT_TRUE(cache.Lookup(short_query, &value));
+	EXPECT_EQ(value, 2);
+
+	cache.InvalidateRange(0x800000f0u, 0x10u);
+	EXPECT_FALSE(cache.Lookup(short_query, &value));
+
+	cache.Store(long_query, 3);
+	cache.InvalidateRange(0x13000000u, 0x10u);
+	EXPECT_FALSE(cache.Lookup(long_query, &value));
+}
+
 TEST(EmulatorGpuMemoryRangeQueryCache, MaterializationCacheReusesOnlyTheExactGpuUse)
 {
 	GpuMemoryMaterializationCache<int, 8> cache;

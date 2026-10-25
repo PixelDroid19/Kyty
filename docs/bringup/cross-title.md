@@ -16,6 +16,114 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## In-memory database name ends with an empty parameter list (2026-10-24)
+
+- **Observed** (Linux, executables linked with LLD): `GpuMemory::DbgInit`
+  stopped at `GpuMemoryDbg.cpp:42` because `Connection::CreateInMemory`
+  failed. `sqlite3_open_v2(":memory:")` returned `SQLITE_ERROR` with
+  "unknown cipher 'textkey'". `sqlite3PagerFilename` returned a `""` literal
+  for an in-memory database, and `CodecConfigureFromUri` passed it to
+  `sqlite3_uri_parameter`, which reads the URI parameters after the name.
+  The bytes after the literal belong to whatever string the linker placed
+  next: with bfd it was a zero, with LLD's merged literals it was a
+  `cipher`/`textkey` pair. 14 of 113 tests failed this way.
+- **Fix** (`3rdparty/sqlite/src/sqlite3.c`): the in-memory name is a
+  zero-filled static array, so the parameter list after it is empty
+  whatever the linker does with literals.
+- **Verified:** with LLD all 113 tests pass, including the graphics
+  diagnostics integration.
+- **Open (build):** the executables rely on bfd exporting every symbol that
+  a linked shared library also defines (4471 dynamic symbols in
+  `fc_script`). Kyty replaces `operator new`/`delete`
+  (`lib/Core/src/MemoryAlloc.cpp:784`) and links libstdc++ statically; LLD
+  exports 19 symbols by default, so a block allocated on one side was freed
+  on the other and 62 unit tests stopped at the `mem_block_magic` check
+  (`MemoryAlloc.cpp:91`). Passing a `--dynamic-list` of the dependencies'
+  defined symbols restores the same export set and every test passes.
+  Direction: make the export explicit in the build (for example a
+  generated dynamic list) before LLD becomes a supported linker.
+
+## Range-cache span index links slots in place (2026-10-24)
+
+- **Observed** (anime fighter, Intel A770, strict run at the 60 fps present
+  limit): with the ordered-set span index of the record below, the two range
+  caches held 4.1% of the CP thread inclusive, and the set's tree insert and
+  rebalance 5.5% as a leaf, because every store and invalidation allocated or
+  moved a tree node.
+- **Fix** (`GpuMemoryRangeQueryCache.h`): each length class hashes span
+  starts into 1,024 buckets as wide as the class bound, and slots are linked
+  into their bucket in place (one link per slot, no allocation). A range
+  visits the buckets that can hold an overlapping start, at most 1,024 per
+  class, plus the single list of spans longer than 256 MiB; the caller still
+  checks every candidate span as before.
+- **Result:** in the fighter the range caches fell to 1.3% inclusive and the
+  tree leaf to 1.5% (what remains belongs to other users of `std::set`).
+- **Verified:** unit tests pass (2465, including the two span-index cases of
+  the record below), all 113 tests pass. Sweep with no stop: racing 60 fps,
+  anime fighter 53.1 fps in the tutorial (45.7-48.9 before), isometric
+  roguelike 60 fps, insect platformer sequel 60 fps, fishing dock 21.6 fps
+  (inside its 19.1-23.6 band), beat 'em up intro cutscene 25.8 fps
+  (video-paced, 23-29).
+
+## Storage page generations are read only for an upload (2026-10-24)
+
+- **Observed** (beat 'em up, Intel A770, strict runs at the 60 fps present
+  limit): `GpuDirtyPageTracker::PageGenerations` held 4.3% of the CP thread
+  in gameplay and 23.9% in a window of the intro cutscene, always under
+  `GpuMemory::Update` from `CreateObject`. `Update` read one generation per
+  4 KiB page of every tracked storage buffer it checked, before knowing
+  whether the buffer changed; a clean buffer returned without using them.
+  The upload itself (`update_func`) took 0.5% of the gameplay profile.
+- **Fix** (`GpuMemoryCreate.cpp`): the generations are read after the
+  unchanged-buffer return, still after `BeginRead` armed the pages and before
+  the upload, so the changed-page runs and the stored generations are the
+  same as before.
+- **Result:** `PageGenerations` no longer appears in the cutscene profile. In
+  that cutscene the CP thread is mostly idle and the frame rate (23-29 fps)
+  did not move; no gameplay window was reached in the measured runs.
+- **Verified:** unit tests pass (2465), graphics diagnostics integration
+  passes (15). Sweep with no stop: racing 60 fps, anime fighter 45.7 fps in
+  the tutorial (45.7-48.9 in earlier runs), fishing dock 20.3-20.4 fps (19.1-23.6
+  across today's runs on earlier builds).
+
+## Range-query caches invalidate only overlapping spans (2026-10-24)
+
+- **Observed** (beat 'em up gameplay, Intel A770, strict run at the 60 fps
+  present limit): after the record below, `BindVertexBuffers` held 28% of the
+  CP thread and its vertex-buffer `CreateObject` 19.5%, with `Free` 7.4% and
+  `CreateBlock` 4.3%. Temporary counters (removed) showed about 90% of vertex
+  bindings refusing the transient snapshot because the range overlaps a
+  writable storage buffer (compute writes the vertex data), so the binding
+  creates and reclaims objects every draw. Each block create or delete
+  invalidated the overlap-snapshot cache (4,096 slots) and the per-heap
+  adaptive cache (up to 4,096) by scanning every slot: about 3.94 us per call
+  for the two together, plus 1.02 us in the materialization cache.
+- **Fix** (`GpuMemoryRangeQueryCache.h`): `GpuMemoryRangeSpanIndex` keeps the
+  slots of both range caches in ordered sets by span start, one set per span
+  length class (4 KiB, 64 KiB, 1 MiB, 16 MiB, 256 MiB, longer). A class of
+  spans at most `bound` bytes long can only overlap a range from a start
+  within `bound` bytes below it, so invalidation visits only those slots.
+  Store, invalidation and `Reserve` keep the index in step with the slots.
+- **Result:** the two range caches fell from 3.94 to 0.18 us per block call
+  in the intro cutscene; in gameplay (three times the block churn) all three
+  caches together cost about 1.35 us per call, against about 5 us before.
+- **Excluded:** the same index in `GpuMemoryMaterializationCache`, replacing
+  its clean-range replay of the store log. Recording invalidates the same
+  attachment ranges every draw, and the writer's own entries survive those
+  invalidations, so every call walked all of them: in the racing title the
+  index walk took about 42% of the CP thread and the run fell from 60 to
+  12 fps (anime fighter 49 -> 32, isometric roguelike 60 -> 48). The
+  materialization cache keeps its clean-range replay.
+- **Verified:** unit tests pass (2465, with two new range-cache cases: a long
+  query invalidated from its last byte in every length class, and a replaced
+  query invalidated only by its own range), graphics diagnostics integration
+  passes (15). Regression sweep with no stop: racing 60 fps, anime fighter
+  46.7 fps in the tutorial (more frames than the previous sweep), isometric
+  roguelike 60 fps; the insect platformer sequel held 60 fps.
+- **Open:** vertex bindings over GPU-written storage still create and reclaim
+  objects every draw (`multi_vertex_mixed` peer reclaim); that churn, not the
+  invalidation, is the remaining cost.
+
 ## Dirty-page tracker admits 4 GiB of live ranges (2026-10-24)
 
 - **Observed** (beat 'em up intro cutscene and gameplay, Intel A770, strict

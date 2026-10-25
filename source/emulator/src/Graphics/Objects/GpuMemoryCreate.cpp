@@ -384,20 +384,6 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			}
 		}
 
-		// Page generations are read after BeginRead armed every page, so a write
-		// racing the upload advances its page again and is copied next time.
-		std::vector<uint64_t> page_generations;
-		if (page_fault_tracking && o.object.type == GpuMemoryObjectType::StorageBuffer && dirty_read[0].tracked)
-		{
-			auto& tracker = GpuDirtyPageTracker::Instance();
-			page_generations.resize(tracker.PageCount(h.block.vaddr[0], h.block.size[0]));
-			if (page_generations.size() < 2u ||
-			    !tracker.PageGenerations(h.block.vaddr[0], h.block.size[0], page_generations.data(), page_generations.size()))
-			{
-				page_generations.clear();
-			}
-		}
-
 		for (int vi = 0; vi < h.block.vaddr_num; vi++)
 		{
 			const bool changed = o.hash[vi] != hash[vi];
@@ -431,6 +417,21 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 		if (!need_update)
 		{
 			return;
+		}
+
+		// Page generations are read after BeginRead armed every page and before
+		// the upload, so a write racing the upload advances its page again and
+		// is copied next time. Only an update stores them.
+		std::vector<uint64_t> page_generations;
+		if (page_fault_tracking && o.object.type == GpuMemoryObjectType::StorageBuffer && dirty_read[0].tracked)
+		{
+			auto& tracker = GpuDirtyPageTracker::Instance();
+			page_generations.resize(tracker.PageCount(h.block.vaddr[0], h.block.size[0]));
+			if (page_generations.size() < 2u ||
+			    !tracker.PageGenerations(h.block.vaddr[0], h.block.size[0], page_generations.data(), page_generations.size()))
+			{
+				page_generations.clear();
+			}
 		}
 
 		EXIT_IF(o.update_func == nullptr);
