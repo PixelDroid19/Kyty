@@ -4,6 +4,29 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Vertex objects cover the declared stream (2026-10-24)
+
+- **Observed** (beat 'em up gameplay, Intel A770, strict runs at the 60 fps
+  present limit, replaying a user-recorded route that reaches combat at
+  about 79 s): vertex bindings over GPU-written storage cannot use a
+  transient snapshot and create a GPU vertex object instead. Temporary
+  counters (removed) over 100,000 such binds: two vertex V#s, each a
+  288 KiB pool, gave about 5,700 distinct windows each, because every draw
+  shifts the stream base by its vertex offset and ends it at its own last
+  record. Each window was a new object that reclaimed the crossing peer:
+  25,582 objects for 100,000 binds.
+- **Fix** (`BindVertexBuffers`, `GraphicsRenderBind.cpp`): when the declared
+  stream (stride times records) is at most the read-only transient limit
+  (4 MiB), the vertex object covers the whole declared stream from the V#
+  base, and the draw's shifted start becomes the bind offset. Every draw of
+  the pool then takes the exact-match reuse path. Fetches stay inside the
+  records the V# declares. Larger streams keep the per-draw window.
+- **Result:** 239 vertex objects for 100,000 binds. Over the same replayed
+  route, the gameplay window between the 60 s and 120 s status reports
+  presented 1,824 frames against 1,674 (+9%), and the run ended at 35.3 fps
+  against 31.8. Captures match frame for frame in content.
+- **Verified:** all 113 tests pass.
+
 ## In-memory database name ends with an empty parameter list (2026-10-24)
 
 - **Observed** (Linux, executables linked with LLD): `GpuMemory::DbgInit`

@@ -2612,14 +2612,20 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, read_begin,
 		                                                  tail_fetched);
+		VkDeviceSize offset   = 0;
 		if (vertices == nullptr)
 		{
-			vertices = static_cast<VulkanBuffer*>(
-			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, address, size, VertexBufferGpuObject()));
+			// Draws sharing a vertex pool fetch it from a different record each; one object over the
+			// declared stream, bound at the draw's record, serves them all instead of one per window.
+			const uint64_t declared     = ShaderBufferByteSize(buffer_info.stride, buffer_info.num_records);
+			const bool     whole_stream = declared != 0u && declared <= kGpuMemoryMaxTransientReadOnlyBytes;
+			const uint64_t object_addr  = whole_stream ? buffer_info.addr : address;
+			vertices = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, object_addr,
+			                                                            whole_stream ? declared : size, VertexBufferGpuObject()));
+			offset   = address - object_addr;
 		}
 		if (vertices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertices == nullptr condition ignored (continuing)\n"); }
 
-		VkDeviceSize offset = 0;
 		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &vertices->buffer, &offset);
 	}
 }
