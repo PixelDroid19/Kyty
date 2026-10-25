@@ -1,8 +1,10 @@
 # Beat 'em up
 
+Title: PPSA28311 - Absolum.
+
 Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
-record. Titles are named descriptively only (`AGENTS.md`).
+record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
 ## Beat 'em up: device-address write-back waits (2026-10-14, open, measured)
 

@@ -471,7 +471,7 @@ hypothesis*. Then remove the code from that experiment before coding the next.
 - **Performance.** Never compare FPS under Console logging to Silent; record
   logging mode, resolution, and shader-cache state.
 - **Scratch evidence.** Save logs under untracked `_scratch_playable/` or a
-  session scratch dir. Never commit guest paths, title IDs, screenshots, or raw
+  session scratch dir. Never commit guest paths, screenshots, or raw
   multi-megabyte logs.
 
 ### Red → green → strict
@@ -708,8 +708,8 @@ perform unrelated mass refactors.
 
 The following prompt is the canonical brief for an auxiliary agent. Give the
 agent a private guest root through `KYTY_GUEST_ROOT`; never paste that path,
-title identifiers, binaries, keys, save data, shaders, textures, screenshots,
-or logs into tracked files or commit messages.
+binaries, keys, save data, shaders, textures, screenshots, or logs into tracked
+files or commit messages. Records name titles as `PPSA06084 - Superliminal`.
 
 ```text
 You are a senior emulator/runtime engineer working inside the Kyty repository.
@@ -890,7 +890,7 @@ NON-NEGOTIABLE RULES
 - AMD, Intel, NVIDIA, and Apple are capability inputs, never correctness
   policy switches. Select strategies from features, limits, formats, queues,
   and tested semantic alternatives.
-- Do not add private fixture paths, title IDs, keys, binaries, saves, assets,
+- Do not add private fixture paths, keys, binaries, saves, assets,
   screenshots, crash dumps, or raw logs to Git. Keep them under an ignored
   local directory and refer to them only as `$KYTY_GUEST_ROOT`.
 - Do not use a commit message that identifies the private workload. Describe
@@ -917,15 +917,14 @@ change; do not leave permanent forwarding aliases or duplicate semantics.
 
 REFERENCE MATERIAL
 
-Use reference material only for behavioral facts, architecture patterns, and
-test ideas. Every imported claim must be verified with a local capture or a
-focused test before it affects Kyty behavior. Do not copy incompatible code,
-private assets, proprietary SDK material, firmware, keys, decrypted content, or
-implementation details that cannot be relicensed into Kyty.
+Reference material may supply behavioral facts, algorithms, architecture
+patterns, and test ideas. Every imported claim must be verified with a local
+capture or a focused test before it affects Kyty behavior. Do not copy code,
+private assets, proprietary SDK material, firmware, keys, or decrypted content.
 
-For each confirmed fact, record the provenance, license, behavior learned, and
-the local evidence that proves it. Reimplement confirmed behavior using Kyty's
-own types, boundaries, and diagnostics.
+For each confirmed fact, record the behavior learned and the local evidence
+that proves it, without naming the reference project. Reimplement confirmed
+behavior using Kyty's own types, boundaries, and diagnostics.
 
 HANDOFF REPORT TEMPLATE
 
@@ -1156,10 +1155,10 @@ ctest --test-dir _build_linux --output-on-failure -R KytyBringUpIntegration
 
 ## External references and licensing
 
-Reference implementations may establish names, concepts, architecture patterns,
-and test ideas. Kyty is MIT-licensed; do not copy GPL implementation code into
-this repository. Record the behavioral fact and provenance, then implement it
-against Kyty's own types after verifying it locally.
+Reference implementations may supply names, concepts, algorithms, architecture
+patterns, and test ideas. Kyty is MIT-licensed; do not copy their code into this
+repository. Record the behavioral fact and its local evidence, without naming
+the reference, then implement it against Kyty's own types.
 
 Use PS5-focused references for guest ABI and AGC evidence, mature emulators for
 renderer/capability architecture, and official Vulkan documentation for host API
