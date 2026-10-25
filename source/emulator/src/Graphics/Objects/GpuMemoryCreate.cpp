@@ -1947,7 +1947,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			bool multi_raw_render_composite = false;
 			if (!multi_raw_render_alias && buffer != nullptr && vaddr_num == 1 &&
 			    info.type == GpuMemoryObjectType::StorageTexture &&
-			    StorageTextureCanCompositeRawRenderDestination(info.params, vaddr[0], size[0]))
+			    (StorageTextureCanCompositeRawRenderDestination(info.params, vaddr[0], size[0]) ||
+			     StorageTextureCanCompositeLinearMipRawRenderDestination(info.params, vaddr[0], size[0])))
 			{
 				const uint64_t neo = info.params[StorageTextureObject::PARAM_NEO];
 				auto describe = [&](int id, StorageTextureRawRenderSource* source)
@@ -2875,7 +2876,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		}
 		EXIT_IF(!StorageTextureCompositeRawRenderAliases(ctx, buffer, sources,
 		                                                  static_cast<StorageTextureVulkanImage*>(o.object.obj),
-		                                                  vaddr[0], size[0]));
+		                                                  o.params, vaddr[0], size[0]));
 	}
 
 	if (info.type == GpuMemoryObjectType::StorageBuffer && vaddr_num == 1)

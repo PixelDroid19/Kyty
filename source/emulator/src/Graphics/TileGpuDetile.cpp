@@ -6,6 +6,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Objects/StorageTexture.h"
+#include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/Window.h"
@@ -1249,18 +1250,52 @@ bool StorageTextureRawRenderSourceImageMatches(const StorageTextureRawRenderSour
 
 bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer* command_buffer,
                                              const Vector<StorageTextureRawRenderSource>& sources,
-                                             VulkanImage* destination, uint64_t address, uint64_t size)
+                                             VulkanImage* destination, const uint64_t* destination_params,
+                                             uint64_t address, uint64_t size)
 {
+	// A linear view with several levels stores its chain in guest memory and
+	// uploads every level into the image on its own. The mip backing keeps one
+	// image mip per level; the stacked atlas packs them into one image.
+	Vector<BufferImageCopy> linear_mip_regions;
+	uint32_t                linear_mip_width       = 0;
+	uint32_t                linear_mip_height      = 0;
+	uint32_t                linear_mip_bytes       = 0;
+	const bool              linear_mip_mip_backing = destination_params != nullptr &&
+	                           StorageTextureUsesMipBacking(destination_params, StorageTextureGuestIsGen5());
+	const bool              linear_mip             = destination_params != nullptr &&
+	                           StorageTexturePlanLinearMipUpload(destination_params, size, linear_mip_mip_backing,
+	                                                             &linear_mip_regions, &linear_mip_width,
+	                                                             &linear_mip_height, &linear_mip_bytes);
 	if (ctx == nullptr || command_buffer == nullptr || command_buffer->IsInvalid() || sources.IsEmpty() ||
 	    destination == nullptr || destination->image == VK_NULL_HANDLE ||
-	    destination->format != VK_FORMAT_R16G16B16A16_UNORM || destination->samples != VK_SAMPLE_COUNT_1_BIT ||
-	    destination->array_layers != 1u || destination->mip_levels != 1u ||
-	    destination->extent.width != destination->guest_extent.width ||
-	    destination->extent.height != destination->guest_extent.height ||
+	    destination->samples != VK_SAMPLE_COUNT_1_BIT || destination->array_layers != 1u ||
 	    (destination->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
-	    size != static_cast<uint64_t>(destination->extent.width) * destination->extent.height * 8u ||
 	    size == 0u || size > INT32_MAX || address > INT64_MAX || (size & 3u) != 0u ||
 	    !StorageTextureRawRenderSourceCovers(sources.At(0), address, size) || ctx->physical_device == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	if (linear_mip)
+	{
+		if (destination->extent.width != linear_mip_width || destination->extent.height != linear_mip_height ||
+		    VulkanColorTexelBytes(destination->format) != linear_mip_bytes)
+		{
+			return false;
+		}
+		if (linear_mip_mip_backing)
+		{
+			if (destination->mip_levels < static_cast<uint32_t>(linear_mip_regions.Size()))
+			{
+				return false;
+			}
+		} else if (destination->mip_levels != 1u)
+		{
+			return false;
+		}
+	} else if (destination->format != VK_FORMAT_R16G16B16A16_UNORM || destination->mip_levels != 1u ||
+	           destination->extent.width != destination->guest_extent.width ||
+	           destination->extent.height != destination->guest_extent.height ||
+	           size != static_cast<uint64_t>(destination->extent.width) * destination->extent.height * 8u)
 	{
 		return false;
 	}
@@ -1373,8 +1408,15 @@ bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer*
 	before_upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u,
 	                     1u, &before_upload, 0u, nullptr, 0u, nullptr);
-	UtilBufferToImage(command_buffer, destination_buffer, destination->extent.width, destination,
-	                  static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
+	if (linear_mip)
+	{
+		UtilBufferToImage(command_buffer, destination_buffer, destination, linear_mip_regions,
+		                  static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
+	} else
+	{
+		UtilBufferToImage(command_buffer, destination_buffer, destination->extent.width, destination,
+		                  static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
+	}
 	return true;
 }
 

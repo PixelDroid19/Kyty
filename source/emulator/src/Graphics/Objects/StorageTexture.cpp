@@ -795,6 +795,11 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 	        same_layer && params[PARAM_SKIP_SEED] == other[PARAM_SKIP_SEED]);
 }
 
+bool StorageTextureGuestIsGen5()
+{
+	return GuestIsGen5();
+}
+
 bool StorageTextureUsesMipBacking(const uint64_t* params, bool gen5)
 {
 	if (params == nullptr)
@@ -1373,6 +1378,141 @@ bool StorageTextureCanCompositeRawRenderDestination(const uint64_t* params, uint
 	       params[StorageTextureObject::PARAM_PITCH] == width && size == width * height * 8u &&
 	       NormalizeStorageTextureSwizzle(params[StorageTextureObject::PARAM_FORMAT], params[StorageTextureObject::PARAM_SWIZZLE]) ==
 	           DstSel(4, 5, 6, 7);
+}
+
+bool StorageTexturePlanLinearMipUpload(const uint64_t* params, uint64_t size, bool mip_backing,
+                                       Vector<BufferImageCopy>* regions, uint32_t* image_width,
+                                       uint32_t* image_height, uint32_t* bytes_per_element)
+{
+	if (params == nullptr || regions == nullptr || image_width == nullptr || image_height == nullptr ||
+	    bytes_per_element == nullptr)
+	{
+		return false;
+	}
+	regions->Clear();
+	*image_width       = 0;
+	*image_height      = 0;
+	*bytes_per_element = 0;
+	const uint64_t fmt    = (params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
+	const uint64_t width  = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
+	const uint64_t height = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
+	const uint64_t levels = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
+	const uint64_t pitch  = params[StorageTextureObject::PARAM_PITCH];
+	// The linear mip chain contract only covers explicit Gen5 formats with a
+	// byte pitch that aligns a level row, and a view whose rows are exactly as
+	// wide as the descriptor.
+	if (fmt == 0u || ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt)) || width == 0u || height == 0u ||
+	    width > UINT32_MAX || height > UINT32_MAX || levels < 2u || levels > 16u || pitch != width)
+	{
+		return false;
+	}
+	const uint32_t bpp = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
+	if (bpp == 0u || 256u % bpp != 0u || size == 0u || size > INT32_MAX)
+	{
+		return false;
+	}
+	// GFX10 linear mip chains (addrlib HwlComputeSurfaceInfoLinear): each
+	// level's element pitch is aligned to 256 bytes and the levels are stored
+	// from the smallest to level 0. TileGetTextureSize2 must report exactly
+	// that chain; anything else (a table entry or another layout) is not this
+	// destination shape.
+	TileSizeOffset chain_sizes[16] {};
+	TileSizeAlign  reported {};
+	TileGetTextureSize2(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+	                    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), 0u, &reported, chain_sizes, nullptr);
+	const uint64_t pitch_align = 256u / bpp;
+	uint64_t       chain_total = 0;
+	uint64_t       offsets[16] {};
+	uint64_t       row_pitches[16] {};
+	uint64_t       level_sizes[16] {};
+	for (uint32_t level = levels; level-- > 0u;)
+	{
+		const uint64_t mip_width  = std::max<uint64_t>(width >> level, 1u);
+		const uint64_t mip_height = std::max<uint64_t>(height >> level, 1u);
+		const uint64_t row_pitch  = (mip_width + pitch_align - 1u) & ~(pitch_align - 1u);
+		const uint64_t level_size = row_pitch * mip_height * bpp;
+		offsets[level]     = chain_total;
+		row_pitches[level] = row_pitch;
+		level_sizes[level] = level_size;
+		chain_total += level_size;
+	}
+	if (reported.size == 0u || reported.size != ((chain_total + 255u) & ~uint64_t {255}) || reported.size > size)
+	{
+		return false;
+	}
+	for (uint32_t level = 0u; level < levels; level++)
+	{
+		if (chain_sizes[level].offset != offsets[level] || chain_sizes[level].size != level_sizes[level] ||
+		    offsets[level] % 4u != 0u)
+		{
+			return false;
+		}
+	}
+	// A mip backing keeps every level in its own image mip; the stacked atlas
+	// packs them into one image at per-level offsets.
+	const uint64_t real_height = mip_backing ? height : height + height / 2u;
+	if (real_height > UINT32_MAX)
+	{
+		return false;
+	}
+	Vector<BufferImageCopy> planned;
+	for (uint32_t level = 0u; level < levels; level++)
+	{
+		const uint64_t mip_width  = std::max<uint64_t>(width >> level, 1u);
+		const uint64_t mip_height = std::max<uint64_t>(height >> level, 1u);
+		const uint64_t row_bytes  = row_pitches[level] * bpp;
+		if (offsets[level] > size || mip_height > (size - offsets[level]) / row_bytes ||
+		    mip_width * bpp > size - offsets[level] - (mip_height - 1u) * row_bytes)
+		{
+			return false;
+		}
+		BufferImageCopy region {};
+		region.offset    = static_cast<uint32_t>(offsets[level]);
+		region.pitch     = static_cast<uint32_t>(row_pitches[level]);
+		region.width     = static_cast<uint32_t>(mip_width);
+		region.height    = static_cast<uint32_t>(mip_height);
+		if (mip_backing)
+		{
+			region.dst_level = level;
+		} else
+		{
+			const auto atlas = UtilCalcMipmapOffset(level, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+			if (atlas.first < 0 || atlas.second < 0 || static_cast<uint64_t>(atlas.first) + mip_width > width ||
+			    static_cast<uint64_t>(atlas.second) + mip_height > real_height)
+			{
+				return false;
+			}
+			region.dst_level = 0u;
+			region.dst_x     = atlas.first;
+			region.dst_y     = atlas.second;
+		}
+		planned.Add(region);
+	}
+	for (const auto& region: planned)
+	{
+		regions->Add(region);
+	}
+	*image_width       = static_cast<uint32_t>(width);
+	*image_height      = static_cast<uint32_t>(real_height);
+	*bytes_per_element = bpp;
+	return true;
+}
+
+bool StorageTextureCanCompositeLinearMipRawRenderDestination(const uint64_t* params, uint64_t address, uint64_t size)
+{
+	if (params == nullptr || address % 65536u != 0u || size == 0u || size > INT32_MAX ||
+	    params[StorageTextureObject::PARAM_TILE] != 0u || params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u ||
+	    params[StorageTextureObject::PARAM_DEPTH] != 1u || params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u ||
+	    params[StorageTextureObject::PARAM_SKIP_SEED] != 0u)
+	{
+		return false;
+	}
+	Vector<BufferImageCopy> regions;
+	uint32_t                image_width       = 0;
+	uint32_t                image_height      = 0;
+	uint32_t                bytes_per_element = 0;
+	return StorageTexturePlanLinearMipUpload(params, size, StorageTextureUsesMipBacking(params, GuestIsGen5()), &regions,
+	                                          &image_width, &image_height, &bytes_per_element);
 }
 
 void StorageTextureCopyRenderAlias(CommandBuffer* buffer, VulkanImage* source, VulkanImage* destination,

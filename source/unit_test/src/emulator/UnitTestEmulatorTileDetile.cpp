@@ -1155,7 +1155,7 @@ TEST(EmulatorTileDetile, GpuRawRenderAliasCompositionPreservesMixedFormatBytes)
 		ASSERT_FALSE(command.IsInvalid());
 		command.Begin();
 		ASSERT_TRUE(StorageTextureCompositeRawRenderAliases(&vulkan.context, &command, sources, destination.Get(),
-		                                                  base, expected.size()));
+		                                                  nullptr, base, expected.size()));
 		command.End();
 		command.Execute();
 		command.WaitForFence();

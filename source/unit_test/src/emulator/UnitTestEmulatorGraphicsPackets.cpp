@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
@@ -4900,6 +4901,72 @@ TEST(EmulatorGraphicsPackets, SizesDynamicDisplayThinBgraSurface)
 	EXPECT_EQ(layout.align, 65536u);
 	EXPECT_EQ(padded[0].width, 896u);
 	EXPECT_EQ(padded[0].height, 512u);
+}
+
+// A linear tile-0 storage view with several levels keeps its GFX10 mip chain
+// in guest memory (smallest level first, 256-byte-aligned rows) and uploads
+// each level into the stacked host image at its atlas offset.
+TEST(EmulatorGraphicsPackets, PlansLinearMipStorageUploadAtlas)
+{
+	TileInit();
+	uint64_t params[11] {};
+	params[StorageTextureObject::PARAM_FORMAT]        = 71ull << 16u;
+	params[StorageTextureObject::PARAM_PITCH]         = 960u;
+	params[StorageTextureObject::PARAM_WIDTH_HEIGHT]  = (960ull << 32u) | 540u;
+	params[StorageTextureObject::PARAM_LEVELS]        = (1ull << 32u) | 6u;
+	params[StorageTextureObject::PARAM_TILE]          = 0u;
+	params[StorageTextureObject::PARAM_NEO]           = 1u;
+	params[StorageTextureObject::PARAM_SWIZZLE]       = 4012u;
+	params[StorageTextureObject::PARAM_RESOURCE_TYPE] = 9u;
+	params[StorageTextureObject::PARAM_DEPTH]         = 1u;
+	params[StorageTextureObject::PARAM_BASE_ARRAY]    = 0u;
+	params[StorageTextureObject::PARAM_SKIP_SEED]     = 0u;
+
+	Vector<BufferImageCopy> regions;
+	uint32_t                width  = 0;
+	uint32_t                height = 0;
+	uint32_t                bpp    = 0;
+	ASSERT_TRUE(StorageTexturePlanLinearMipUpload(params, 5550080u, false, &regions, &width, &height, &bpp));
+	EXPECT_EQ(width, 960u);
+	EXPECT_EQ(height, 810u);
+	EXPECT_EQ(bpp, 8u);
+	ASSERT_EQ(regions.Size(), 6);
+
+	const uint64_t offsets[6] = {1402880u, 366080u, 89600u, 20992u, 4096u, 0u};
+	const uint32_t pitches[6] = {960u, 480u, 256u, 128u, 64u, 32u};
+	const uint32_t widths[6]  = {960u, 480u, 240u, 120u, 60u, 30u};
+	const uint32_t heights[6] = {540u, 270u, 135u, 67u, 33u, 16u};
+	const int      atlas_x[6] = {0, 0, 480, 480, 600, 600};
+	const int      atlas_y[6] = {0, 540, 540, 675, 675, 708};
+	for (int level = 0; level < 6; level++)
+	{
+		EXPECT_EQ(static_cast<uint64_t>(regions.At(level).offset), offsets[level]) << level;
+		EXPECT_EQ(regions.At(level).pitch, pitches[level]) << level;
+		EXPECT_EQ(regions.At(level).width, widths[level]) << level;
+		EXPECT_EQ(regions.At(level).height, heights[level]) << level;
+		EXPECT_EQ(regions.At(level).dst_x, atlas_x[level]) << level;
+		EXPECT_EQ(regions.At(level).dst_y, atlas_y[level]) << level;
+	}
+
+	EXPECT_FALSE(StorageTexturePlanLinearMipUpload(params, 5528880u, false, &regions, &width, &height, &bpp));
+
+	// A mip backing keeps every level in its own image mip.
+	ASSERT_TRUE(StorageTexturePlanLinearMipUpload(params, 5550080u, true, &regions, &width, &height, &bpp));
+	EXPECT_EQ(width, 960u);
+	EXPECT_EQ(height, 540u);
+	ASSERT_EQ(regions.Size(), 6);
+	for (int level = 0; level < 6; level++)
+	{
+		EXPECT_EQ(regions.At(level).dst_level, static_cast<uint32_t>(level)) << level;
+		EXPECT_EQ(regions.At(level).dst_x, 0) << level;
+		EXPECT_EQ(regions.At(level).dst_y, 0) << level;
+	}
+
+	params[StorageTextureObject::PARAM_PITCH] = 1024u;
+	EXPECT_FALSE(StorageTexturePlanLinearMipUpload(params, 5550080u, false, &regions, &width, &height, &bpp));
+	EXPECT_FALSE(StorageTextureCanCompositeLinearMipRawRenderDestination(params, 0x53aa00000ull, 5550080u));
+	params[StorageTextureObject::PARAM_PITCH] = 960u;
+	EXPECT_TRUE(StorageTextureCanCompositeLinearMipRawRenderDestination(params, 0x53aa00000ull, 5550080u));
 }
 
 // Display-thin UI atlases place texel (0,0) at byte 0 in the tiled buffer;

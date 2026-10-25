@@ -1845,3 +1845,66 @@ Known approximations and debt recorded by this chain:
   measured for this view (5.55 MB for 960x540) is larger than the image bytes,
   so the size alone cannot validate the destination shape. The raw copy must
   derive per-level offsets from the layout, not from the range.
+
+- **The mixed-view storage alias is resolved: the composite raw path admits a
+  linear multi-level destination.** The blocker above was a guest-seeded
+  StorageTexture over mixed views (four StorageTextures, four RenderTextures
+  and one sampled Texture) whose guest range is `0x53aa00000` +
+  `0x54b000` (5,550,080 bytes) and whose descriptor is format 71 (RGBA16F),
+  960x540, pitch 960, base level 1, six levels, tile 0, resource type 9.
+  The composite path already copies the newest covering writer into a
+  destination by byte identity; only the destination shape was refused.
+  Measured facts that shaped the fix:
+  - The range size is exactly the GFX10 linear mip chain of that descriptor:
+    levels are stored smallest first, each level's row pitch is aligned to
+    256 bytes and the chain totals 5,528,880 bytes, 5,550,080 after the
+    256-byte alignment of the whole chain. The planner derives the per-level
+    offsets, pitches and sizes from that contract and refuses any descriptor
+    whose reported layout is not exactly that chain.
+  - The host image is a mip backing, not a stacked atlas: on Gen5 a linear
+    (tile 0) view with several levels is one mipmapped image (ten host mips
+    for a 960x540 base), so every level is uploaded into its own image mip
+    (`dst_level = level`) and the image extent is the base extent. The earlier
+    assumption of one stacked image (`real_height = height + height/2`) applies
+    only to layouts that keep the single-level atlas, and the copy refused the
+    destination because of it.
+  - The copy itself is unchanged: the scatter kernel writes the source image's
+    texels at their guest addresses into a scratch buffer that holds the
+    destination's guest bytes, and the upload then reads that buffer per
+    level. Byte identity holds because the guest range is shared by every
+    view: the destination sees the writer's bytes at the same addresses.
+  Changes: `StorageTexturePlanLinearMipUpload` and
+  `StorageTextureCanCompositeLinearMipRawRenderDestination`
+  (`Objects/StorageTexture.cpp`), the composite copy takes the destination
+  parameters and uploads per level (`TileGpuDetile.cpp`), the create path
+  admits the shape (`Objects/GpuMemoryCreate.cpp`). A unit test checks the
+  planned regions of the measured descriptor for both the mip backing and the
+  stacked atlas.
+- **Verification of the alias fix.** Strict run, SDL offscreen, scripted
+  route, 900 s cap, Intel Arc A770, Mesa ANV 26.2.5: the run no longer stops
+  at the mixed-view create. It reaches the tutorial (`Level has started:
+  intro_next`, `sublevel_locator_hub [hub_crashsite_tutorial]`) and keeps
+  running past the level start into the hub loading phase, which the title
+  never reached before. The focused unit tests (`EmulatorTileDetile.*`,
+  `EmulatorGraphicsPackets.PlansLinearMipStorageUploadAtlas`) pass.
+- **Open: the run ends with a device lost at the hub load.** The runs that
+  clear the alias later fail with `vkWaitForFences failed: result=-4` on
+  queue 8 (slot 3, sequence 99372 with the instrumented build; slot 6,
+  sequence 95791 with the clean build), and the kernel journal records no Xe
+  engine reset for that window. This is the recorded queue-8 device-lost class
+  of the graphics handoff ("a real `VK_ERROR_DEVICE_LOST` fence wait on
+  queue 8, slot 2" for this title), not the earlier RCS job timeout, and the
+  title reached the hub only after the alias stopped blocking it. Whether the
+  new copy contributes is not established: two runs agree on the failure, but
+  both carry the new path, and the slot and sequence differ, so the evidence
+  points at a load-dependent hang in the hub's own work rather than a fixed
+  defect in the copy. Next step: capture the hub frames before the hang and
+  compare a run with the new path disabled at the same scripted route.
+- **Open defect found while measuring the layout.** The guest seed of a
+  linear multi-level storage view uploads every level with a halved pitch
+  (`Objects/StorageTexture.cpp`, the `mip_pitch` loop in `update_func`),
+  while the GFX10 chain stores the level rows with the 256-byte aligned
+  pitch. Levels whose width is not a multiple of the alignment (120, 60, 30
+  texels for the measured descriptor) are therefore read from the wrong
+  offsets. The composite path writes the correct rows, so the measured view
+  is not affected, but any other guest-seeded view of the same chain is.

@@ -44,6 +44,7 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - Robot platformer: transition crash was a non-indexed transport draw (2026-10-24, fixed)
   - Robot platformer: 64-bit DS write2 and read2 stores (2026-10-24)
   - Robot platformer: mixed-view storage alias blocks the tutorial (2026-10-24, open)
+  - Robot platformer: composite raw path admits a linear multi-level destination (2026-10-25, fixed)
   - Robot platformer: load-window cost per draw stage (2026-10-24)
   - Robot platformer: logo particles through a split geometry pass (2026-10-22)
   - Robot platformer: paired compute compile cost (2026-10-21, closed 2026-10-22)
