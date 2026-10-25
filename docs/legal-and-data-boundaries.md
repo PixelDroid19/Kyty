@@ -7,8 +7,8 @@ games, keys, decrypted executables, or proprietary decompilation.
 ## You must
 
 - Keep private dumps, saves, keys, and scratch logs **outside Git**.
-- Reference fixtures only as `$KYTY_GUEST_ROOT`, `$KYTY_GAMES_ROOT`, or anonymous
-  `case_*` ids in shared summaries.
+- Reference fixture locations only as `$KYTY_GUEST_ROOT` or `$KYTY_GAMES_ROOT`;
+  name a title by its PS5 content ID and public name, `PPSA06084 - Superliminal`.
 - Obtain and decrypt content only where your jurisdiction permits.
 - Record behavioral facts with local captures or tests before implementing guest
   contracts.
@@ -17,7 +17,7 @@ games, keys, decrypted executables, or proprietary decompilation.
 
 - Search the network or chat for copyrighted dumps, keys, or title-specific
   binaries to "unblock" a run.
-- Commit absolute guest paths, title IDs, screenshots, or multi-megabyte logs.
+- Commit absolute guest paths, screenshots, or multi-megabyte logs.
 - Paste GPL implementation code from other emulators into Kyty (MIT tree).
 - Treat `KYTY_BRINGUP_MODE=unsafe`, `KYTY_AUTO_CROSS`, or missing-import stubs
   as compatibility acceptance.
