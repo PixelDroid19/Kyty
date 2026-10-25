@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
-#include <set>
 #include <utility>
 #include <vector>
 
@@ -130,73 +129,125 @@ private:
 // Slots of a range cache by the span they cover, so a range invalidation
 // visits only the slots whose span can overlap it. Spans are grouped by
 // length: a class whose spans are at most `bound` bytes long only holds an
-// overlapping span that starts within `bound` bytes below the range.
+// overlapping span that starts within `bound` bytes below the range. Each
+// class hashes span starts into buckets of `bound` bytes; slots are linked in
+// place, so storing and erasing never allocate.
 class GpuMemoryRangeSpanIndex final
 {
-	using Span = std::pair<uint64_t, uint64_t>;
-	using Set  = std::set<std::pair<uint64_t, uint32_t>>;
+	static constexpr std::array<uint32_t, 5> kClassShifts = {12u, 16u, 20u, 24u, 28u};
+	static constexpr size_t                  kClasses     = kClassShifts.size() + 1u;
+	static constexpr uint64_t                kBuckets     = 1024u;
+	static constexpr int32_t                 kNone        = -1;
 
-	static constexpr std::array<uint64_t, 5> kClassBounds = {uint64_t {1} << 12u, uint64_t {1} << 16u, uint64_t {1} << 20u,
-	                                                         uint64_t {1} << 24u, uint64_t {1} << 28u};
+	struct Link
+	{
+		int32_t  prev   = kNone;
+		int32_t  next   = kNone;
+		uint32_t list   = 0;
+		bool     linked = false;
+	};
 
 public:
+	GpuMemoryRangeSpanIndex() { m_heads.fill(kNone); }
+
 	void Clear()
 	{
-		for (auto& spans: m_classes)
-		{
-			spans.clear();
-		}
+		m_heads.fill(kNone);
+		m_links.assign(m_links.size(), Link {});
 	}
 
-	// `previous` is the slot's current span, {0, 0} when it has none.
-	void Store(uint32_t slot, Span previous, Span span)
+	void Store(uint32_t slot, std::pair<uint64_t, uint64_t> span)
 	{
-		if (previous.second == 0u)
+		if (slot >= m_links.size())
 		{
-			m_classes[ClassOf(span)].insert({span.first, slot});
-			return;
+			m_links.resize(static_cast<size_t>(slot) + 1u);
 		}
-		auto node          = m_classes[ClassOf(previous)].extract({previous.first, slot});
-		node.value().first = span.first;
-		m_classes[ClassOf(span)].insert(std::move(node));
+		Unlink(slot);
+		const uint64_t length = span.second - span.first;
+		size_t         c      = 0;
+		while (c < kClassShifts.size() && length > (uint64_t {1} << kClassShifts[c]))
+		{
+			++c;
+		}
+		LinkTo(slot, ListOf(c, c < kClassShifts.size() ? span.first >> kClassShifts[c] : 0u));
 	}
 
-	void Erase(uint32_t slot, Span span) { m_classes[ClassOf(span)].erase({span.first, slot}); }
+	void Erase(uint32_t slot)
+	{
+		if (slot < m_links.size())
+		{
+			Unlink(slot);
+		}
+	}
 
 	// Slots whose span may overlap [address, end); the caller checks each span.
 	const std::vector<uint32_t>& Candidates(uint64_t address, uint64_t end)
 	{
 		m_candidates.clear();
-		for (size_t c = 0; c < m_classes.size(); ++c)
+		for (size_t c = 0; c < kClassShifts.size(); ++c)
 		{
-			const auto& spans = m_classes[c];
-			auto        it    = spans.begin();
-			if (c < kClassBounds.size() && address >= kClassBounds[c])
+			const uint32_t shift = kClassShifts[c];
+			const uint64_t bound = uint64_t {1} << shift;
+			const uint64_t first = (address >= bound ? address - bound + 1u : 0u) >> shift;
+			const uint64_t count = std::min(((end - 1u) >> shift) - first + 1u, kBuckets);
+			for (uint64_t bucket = first; bucket < first + count; ++bucket)
 			{
-				it = spans.lower_bound({address - kClassBounds[c] + 1u, 0u});
-			}
-			for (; it != spans.end() && it->first < end; ++it)
-			{
-				m_candidates.push_back(it->second);
+				Collect(ListOf(c, bucket));
 			}
 		}
+		Collect(ListOf(kClassShifts.size(), 0u));
 		return m_candidates;
 	}
 
 private:
-	static size_t ClassOf(Span span)
+	static size_t ListOf(size_t c, uint64_t bucket) { return c * kBuckets + static_cast<size_t>(bucket & (kBuckets - 1u)); }
+
+	void Collect(size_t list)
 	{
-		const uint64_t length = span.second - span.first;
-		size_t         c      = 0;
-		while (c < kClassBounds.size() && length > kClassBounds[c])
+		for (int32_t slot = m_heads[list]; slot != kNone; slot = m_links[static_cast<size_t>(slot)].next)
 		{
-			++c;
+			m_candidates.push_back(static_cast<uint32_t>(slot));
 		}
-		return c;
 	}
 
-	std::array<Set, kClassBounds.size() + 1u> m_classes;
-	std::vector<uint32_t>                     m_candidates;
+	void LinkTo(uint32_t slot, size_t list)
+	{
+		auto& link  = m_links[slot];
+		link.prev   = kNone;
+		link.next   = m_heads[list];
+		link.list   = static_cast<uint32_t>(list);
+		link.linked = true;
+		if (link.next != kNone)
+		{
+			m_links[static_cast<size_t>(link.next)].prev = static_cast<int32_t>(slot);
+		}
+		m_heads[list] = static_cast<int32_t>(slot);
+	}
+
+	void Unlink(uint32_t slot)
+	{
+		auto& link = m_links[slot];
+		if (!link.linked)
+		{
+			return;
+		}
+		if (link.prev != kNone)
+		{
+			m_links[static_cast<size_t>(link.prev)].next = link.next;
+		} else
+		{
+			m_heads[link.list] = link.next;
+		}
+		if (link.next != kNone)
+		{
+			m_links[static_cast<size_t>(link.next)].prev = link.prev;
+		}
+		link = Link {};
+	}
+
+	std::array<int32_t, kClasses * kBuckets> m_heads {};
+	std::vector<Link>                        m_links;
+	std::vector<uint32_t>                    m_candidates;
 };
 
 // Bounded direct-mapped memoization for exact range queries. Collisions only
@@ -261,7 +312,7 @@ public:
 		}
 		const size_t slot = static_cast<size_t>(key.Hash()) & (Capacity - 1u);
 		const auto   span = key.Span();
-		m_index.Store(static_cast<uint32_t>(slot), m_spans[slot], span);
+		m_index.Store(static_cast<uint32_t>(slot), span);
 		m_entries[slot] = Entry {m_epoch, key, value};
 		m_spans[slot]   = span;
 	}
@@ -298,7 +349,7 @@ public:
 			if (!entry.has_value() || entry->epoch != m_epoch || entry->key.Overlaps(address, size))
 			{
 				entry.reset();
-				m_index.Erase(slot, m_spans[slot]);
+				m_index.Erase(slot);
 				m_spans[slot] = {0u, 0u};
 			}
 		}
@@ -370,7 +421,7 @@ public:
 		}
 		const size_t slot = static_cast<size_t>(key.Hash()) & (m_entries.size() - 1u);
 		const auto   span = key.Span();
-		m_index.Store(static_cast<uint32_t>(slot), m_spans[slot], span);
+		m_index.Store(static_cast<uint32_t>(slot), span);
 		m_entries[slot] = Entry {m_epoch, key, value};
 		m_spans[slot]   = span;
 	}
@@ -392,7 +443,7 @@ public:
 			if (!entry.has_value() || entry->epoch != m_epoch || entry->key.Overlaps(address, size))
 			{
 				entry.reset();
-				m_index.Erase(slot, m_spans[slot]);
+				m_index.Erase(slot);
 				m_spans[slot] = {0u, 0u};
 			}
 		}

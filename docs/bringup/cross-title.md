@@ -31,6 +31,28 @@ record. Titles are named descriptively only (`AGENTS.md`).
   Direction: make the export explicit in the build (for example a
   generated dynamic list) before LLD becomes a supported linker.
 
+## Range-cache span index links slots in place (2026-10-24)
+
+- **Observed** (anime fighter, Intel A770, strict run at the 60 fps present
+  limit): with the ordered-set span index of the record below, the two range
+  caches held 4.1% of the CP thread inclusive, and the set's tree insert and
+  rebalance 5.5% as a leaf, because every store and invalidation allocated or
+  moved a tree node.
+- **Fix** (`GpuMemoryRangeQueryCache.h`): each length class hashes span
+  starts into 1,024 buckets as wide as the class bound, and slots are linked
+  into their bucket in place (one link per slot, no allocation). A range
+  visits the buckets that can hold an overlapping start, at most 1,024 per
+  class, plus the single list of spans longer than 256 MiB; the caller still
+  checks every candidate span as before.
+- **Result:** in the fighter the range caches fell to 1.3% inclusive and the
+  tree leaf to 1.5% (what remains belongs to other users of `std::set`).
+- **Verified:** unit tests pass (2465, including the two span-index cases of
+  the record below), all 113 tests pass. Sweep with no stop: racing 60 fps,
+  anime fighter 53.1 fps in the tutorial (45.7-48.9 before), isometric
+  roguelike 60 fps, insect platformer sequel 60 fps, fishing dock 21.6 fps
+  (inside its 19.1-23.6 band), beat 'em up intro cutscene 25.8 fps
+  (video-paced, 23-29).
+
 ## Storage page generations are read only for an upload (2026-10-24)
 
 - **Observed** (beat 'em up, Intel A770, strict runs at the 60 fps present
