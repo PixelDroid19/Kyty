@@ -1910,11 +1910,16 @@ Known approximations and debt recorded by this chain:
   so the visual state of the tutorial scene after the alias fix is not
   scored. Next step: keep the capture-enabled route running until the
   milestones fire and score the hub frames with `scripts/kyty_capture.py`.
-- **Open defect found while measuring the layout.** The guest seed of a
-  linear multi-level storage view uploads every level with a halved pitch
-  (`Objects/StorageTexture.cpp`, the `mip_pitch` loop in `update_func`),
-  while the GFX10 chain stores the level rows with the 256-byte aligned
-  pitch. Levels whose width is not a multiple of the alignment (120, 60, 30
-  texels for the measured descriptor) are therefore read from the wrong
-  offsets. The composite path writes the correct rows, so the measured view
-  is not affected, but any other guest-seeded view of the same chain is.
+- **Fixed: the guest seed of a linear mip chain read the level rows from the
+  wrong offsets.** The guest seed of a linear multi-level storage view
+  uploaded every level with a halved pitch (`Objects/StorageTexture.cpp`, the
+  `mip_pitch` loop in `update_func`), while the GFX10 chain stores the level
+  rows with the 256-byte aligned pitch. Levels whose width is not a multiple
+  of the alignment (120, 60, 30 texels for the measured descriptor) were read
+  from the wrong offsets. The seed now takes the level row pitch from the
+  layout itself (the padded sizes of `TileGetTextureSize2`), which is the
+  single source of truth for the chain, and the unit test locks the aligned
+  pitches of the measured descriptor (960, 480, 256, 128, 64, 32). Verified
+  by the full unit suite (2,482 tests, 2,471 passed, 11 skipped, 0 failed)
+  and the boundary gate; the title-level effect of the corrected seed is not
+  yet observed.

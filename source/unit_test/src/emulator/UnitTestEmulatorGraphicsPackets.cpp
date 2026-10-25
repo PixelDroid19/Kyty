@@ -4950,6 +4950,16 @@ TEST(EmulatorGraphicsPackets, PlansLinearMipStorageUploadAtlas)
 
 	EXPECT_FALSE(StorageTexturePlanLinearMipUpload(params, 5528880u, false, &regions, &width, &height, &bpp));
 
+	// The layout is the single source of truth for the level rows: a GFX10
+	// linear chain aligns every level pitch to 256 bytes.
+	TileSizeOffset level_sizes[6] {};
+	TilePaddedSize padded_sizes[6] {};
+	TileGetTextureSize2(71u, 960u, 540u, 960u, 6u, 0u, nullptr, level_sizes, padded_sizes);
+	for (uint32_t level = 0u; level < 6u; level++)
+	{
+		EXPECT_EQ(padded_sizes[level].width, pitches[level]) << level;
+	}
+
 	// A mip backing keeps every level in its own image mip.
 	ASSERT_TRUE(StorageTexturePlanLinearMipUpload(params, 5550080u, true, &regions, &width, &height, &bpp));
 	EXPECT_EQ(width, 960u);

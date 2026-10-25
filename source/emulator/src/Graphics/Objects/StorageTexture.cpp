@@ -328,10 +328,11 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	}
 
 	TileSizeOffset level_sizes[16];
+	TilePaddedSize padded_sizes[16];
 
 	if (fmt != 0)
 	{
-		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, nullptr);
+		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, padded_sizes);
 	} else
 	{
 		TileGetTextureSize(dfmt, nfmt, width, height, pitch, levels, tile, neo, nullptr, level_sizes, nullptr);
@@ -342,6 +343,11 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	uint32_t mip_width  = width;
 	uint32_t mip_height = height;
 	uint32_t mip_pitch  = pitch;
+	// A GFX10 linear mip chain stores every level with its row pitch aligned to
+	// 256 bytes. The halved pitch of the other layouts would read the rows of
+	// such a level from the wrong offsets.
+	const uint32_t format_bpp = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
+	const bool     linear_chain = tile == 0 && levels > 1u && format_bpp != 0u && 256u % format_bpp == 0u;
 
 	// A mip backing has real levels and nothing is packed into an atlas. Linear guest memory holds
 	// every level; the tiled layouts have no level layout here, so guest memory seeds level 0 only and
@@ -360,7 +366,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		regions[i].offset    = level_sizes[i].offset;
 		regions[i].width     = mip_width;
 		regions[i].height    = mip_height;
-		regions[i].pitch     = mip_pitch;
+		regions[i].pitch     = linear_chain ? padded_sizes[i].width : mip_pitch;
 		regions[i].dst_level = mip_backing ? i : 0;
 		regions[i].dst_x     = mipmap_offset.first;
 		regions[i].dst_y     = mipmap_offset.second;
