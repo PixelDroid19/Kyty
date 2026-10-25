@@ -915,7 +915,7 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 	            .ReplaceStr("<lane_16>", spirv->GetConstantUint(16u))
 	            .ReplaceStr("<step>", spirv->GetConstantUint(control & 15u))
 	            .ReplaceStr("<zero>", spirv->GetConstantUint(0u))
-            .ReplaceStr("<fallback>", keep_input ? (String8("%dpp_bits_") + result_id) : spirv->GetConstantUint(0u));
+	            .ReplaceStr("<fallback>", keep_input ? (String8("dpp_bits_") + result_id) : spirv->GetConstantUint(0u));
 	return true;
 }
 

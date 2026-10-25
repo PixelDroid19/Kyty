@@ -1956,6 +1956,17 @@ Known approximations and debt recorded by this chain:
   waits, 15.8 s in uploads, 3.3 s in hashing, 3.2 s in write-backs and
   0.9 s in detiles; the pipeline lookups cost 0.27 s over 203,605 hits. The
   rate is still set by host work per frame, not by the device.
+- **The packed mixed FMA of the gfx10 family is decoded.** The hub's pixel
+  program also reaches a VOP3P opcode the parser refused: `0x21`. The gfx10
+  opcode table (the decoding chart LLVM publishes from the ISA) names `0x20`
+  as `V_FMA_MIX_F32` (the mixed scalar FMA the engine already emits) and
+  `0x21` as `V_FMA_MIXLO_F16`, the same mixed FMA with a half destination
+  written to the low half of the destination register. The parser now decodes
+  the opcode into its own instruction type and the emitter lowers it with the
+  engine's half contract: the selected sources at their selected precision,
+  binary32 intermediates with the addition residue recovered, one rounding to
+  half, and the low half of the destination written while the high half is
+  kept. The translation is not yet observed in a run.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
