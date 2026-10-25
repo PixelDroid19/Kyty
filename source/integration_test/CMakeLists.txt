@@ -768,82 +768,51 @@ set_tests_properties(KytyAgentTransport.NativeRoundTrip PROPERTIES
 
 add_executable(kyty_architecture_boundary_integration
 	src/ArchitectureBoundaryIntegration.cpp
+	src/ArchitectureBoundaryCheck.cpp
 )
-if(WIN32)
-	target_link_libraries(kyty_architecture_boundary_integration PRIVATE shell32)
-endif()
 
-set(KYTY_ARCHITECTURE_BOUNDARY_CHECKER "${CMAKE_SOURCE_DIR}/../scripts/check_emulator_boundaries.py")
-
-add_test(
-	NAME KytyArchitectureBoundaryChecker.SyntheticFixtures
-	COMMAND "${Python3_EXECUTABLE}" "${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}" --self-test
-)
-set_tests_properties(KytyArchitectureBoundaryChecker.SyntheticFixtures PROPERTIES TIMEOUT 15)
-
-add_test(
-	NAME KytyGraphicsTables.Provenance
-	COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../scripts/check_graphics_tables.py"
-		"${CMAKE_SOURCE_DIR}/emulator/src/Graphics/Tables/manifest.sha256"
-)
-set_tests_properties(KytyGraphicsTables.Provenance PROPERTIES TIMEOUT 15)
-
-add_test(
-	NAME KytyGraphicsTables.SyntheticFixtures
-	COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../scripts/check_graphics_tables.py" --self-test
-)
-set_tests_properties(KytyGraphicsTables.SyntheticFixtures PROPERTIES TIMEOUT 15)
-
-set(KYTY_GRAPHICS_TABLES_GENERATOR "${CMAKE_SOURCE_DIR}/../scripts/generate_graphics_tables.py")
-
-add_test(
-	NAME KytyGraphicsTables.Regeneration
-	COMMAND "${Python3_EXECUTABLE}" "${KYTY_GRAPHICS_TABLES_GENERATOR}" --self-test
-)
-set_tests_properties(KytyGraphicsTables.Regeneration PROPERTIES TIMEOUT 15)
-
-add_test(
-	NAME KytyGraphicsTables.DerivedOutputsMatch
-	COMMAND "${Python3_EXECUTABLE}" "${KYTY_GRAPHICS_TABLES_GENERATOR}" --check
-)
-set_tests_properties(KytyGraphicsTables.DerivedOutputsMatch PROPERTIES TIMEOUT 15)
-
-# The normal build consumes the checked-in SPIR-V include and intentionally
-# does not require shader tools. When a developer or CI host has both tools,
-# expose exact source/blob validation through CTest instead.
-find_program(KYTY_GEN5_DETILE_GLSLC NAMES glslc)
-find_program(KYTY_GEN5_DETILE_SPIRV_VAL NAMES spirv-val)
-if(KYTY_GEN5_DETILE_GLSLC AND KYTY_GEN5_DETILE_SPIRV_VAL)
+# The normal build consumes the checked-in shader includes and intentionally
+# does not require shader tools. When a developer or CI host has them, expose
+# exact source/include validation through CTest instead.
+find_program(KYTY_GLSLC NAMES glslc)
+find_program(KYTY_SPIRV_VAL NAMES spirv-val)
+find_program(KYTY_SPIRV_DIS NAMES spirv-dis)
+find_program(KYTY_GLSLANG NAMES glslangValidator)
+if(KYTY_GLSLC AND KYTY_SPIRV_VAL AND KYTY_SPIRV_DIS AND KYTY_GLSLANG)
 	add_test(
-		NAME KytyGen5DetileShader.CheckedInSpirv
-		COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../scripts/check_gen5_detile_shader.py" --check
-			--compiler "${KYTY_GEN5_DETILE_GLSLC}" --validator "${KYTY_GEN5_DETILE_SPIRV_VAL}"
+		NAME KytyHostShaders.CheckedInIncludes
+		COMMAND "${CMAKE_COMMAND}" -DKYTY_SHADER_MODE=check
+			"-DKYTY_SHADER_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/host-shader-check"
+			-P "${CMAKE_SOURCE_DIR}/cmake/HostShaderBlobs.cmake"
 	)
-	set_tests_properties(KytyGen5DetileShader.CheckedInSpirv PROPERTIES TIMEOUT 30)
+	set_tests_properties(KytyHostShaders.CheckedInIncludes PROPERTIES TIMEOUT 60)
 else()
-	message(STATUS "Gen5 detile shader CTest disabled: glslc and/or spirv-val not found")
+	message(STATUS "Host shader CTest disabled: glslc, spirv-val, spirv-dis or glslangValidator not found")
 endif()
 
 add_test(
 	NAME KytyArchitectureBoundaryIntegration.Repository
-	COMMAND $<TARGET_FILE:kyty_architecture_boundary_integration>
-		"${Python3_EXECUTABLE}" "${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}" "${CMAKE_SOURCE_DIR}" --strict
+	COMMAND $<TARGET_FILE:kyty_architecture_boundary_integration> "${CMAKE_SOURCE_DIR}" --strict
 )
 set_tests_properties(KytyArchitectureBoundaryIntegration.Repository PROPERTIES
 	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 15
 )
 
-set(KYTY_ARCHIVE_DAG_CHECKER "${CMAKE_SOURCE_DIR}/../scripts/check_archive_dag.py")
-
-add_test(
-	NAME KytyArchiveDagIntegration.Repository
-	COMMAND "${Python3_EXECUTABLE}" "${KYTY_ARCHIVE_DAG_CHECKER}" "${CMAKE_BINARY_DIR}" "${CMAKE_SOURCE_DIR}"
-)
-set_tests_properties(KytyArchiveDagIntegration.Repository PROPERTIES
-	FIXTURES_REQUIRED KytyIntegrationBinaries
-	TIMEOUT 15
-)
+# The archive check reads static archives with the host nm and ar tools.
+if(NOT WIN32)
+	add_executable(kyty_archive_dag_integration
+		src/ArchiveDagIntegration.cpp
+	)
+	add_test(
+		NAME KytyArchiveDagIntegration.Repository
+		COMMAND $<TARGET_FILE:kyty_archive_dag_integration> "${CMAKE_BINARY_DIR}" "${CMAKE_SOURCE_DIR}"
+	)
+	set_tests_properties(KytyArchiveDagIntegration.Repository PROPERTIES
+		FIXTURES_REQUIRED KytyIntegrationBinaries
+		TIMEOUT 15
+	)
+endif()
 
 set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_bringup_integration
@@ -869,6 +838,9 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_host_platform_integration
 	kyty_architecture_boundary_integration
 )
+if(NOT WIN32)
+	list(APPEND KYTY_INTEGRATION_TEST_TARGETS kyty_archive_dag_integration)
+endif()
 
 add_test(
 	NAME KytyIntegration._build

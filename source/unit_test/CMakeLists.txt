@@ -30,6 +30,7 @@ endif()
 		"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorGraphicsDirtyTracking.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorExactStagingPool.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/src/emulator/UnitTestEmulatorVideoOutResolution.cpp"
+		"${CMAKE_SOURCE_DIR}/integration_test/src/ArchitectureBoundaryCheck.cpp"
 	)
 
 # These suites exercise POSIX process, descriptor and environment primitives

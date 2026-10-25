@@ -28,6 +28,7 @@
             vulkan-headers
             spirv-tools
             shaderc
+            glslang
             ffmpeg
             alsa-lib
             libpulseaudio

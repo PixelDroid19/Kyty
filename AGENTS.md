@@ -212,8 +212,10 @@ created through the **Create Version** workflow.
 1. Review the complete diff for scope, secrets, private data, generated files
    and leftover `DIAG` code.
 2. Build every affected target in your own build directory.
-3. Run the relevant tests and the gate scripts for the touched domain:
-   `scripts/check_emulator_boundaries.py`, `scripts/check_graphics_tables.py`,
+3. Run the relevant tests and the gates for the touched domain: the CTest
+   gates `KytyArchitectureBoundaryIntegration.Repository`,
+   `KytyArchiveDagIntegration.Repository` and
+   `KytyHostShaders.CheckedInIncludes`, the `kyty_unit_test` suites, and
    `scripts/kyty_playable_regression.py`.
 4. Re-run the affected titles and the titles sharing the path; confirm no
    regression against the documented frontier.

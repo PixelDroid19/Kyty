@@ -60,6 +60,8 @@ UT_LINK(EmulatorGuestMemory);
 UT_LINK(EmulatorLibCTime);
 UT_LINK(EmulatorGraphicsPackets);
 UT_LINK(EmulatorTileDetile);
+UT_LINK(EmulatorGraphicsTables);
+UT_LINK(ArchitectureBoundary);
 UT_LINK(EmulatorKernelProcess);
 UT_LINK(EmulatorKernelLifetimes);
 UT_LINK(EmulatorAmprRead);
