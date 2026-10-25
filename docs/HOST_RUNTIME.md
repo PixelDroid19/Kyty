@@ -23,6 +23,26 @@ on motion, focus loss or exit from fullscreen. Minimized windows suspend the
 render loop. Resize, restore and focus events update runtime state instead of
 being inferred from frame failures.
 
+### Keyboard virtual pad
+
+Outside text entry the keyboard drives a connected virtual pad:
+
+| Key | Pad input |
+| --- | --- |
+| `Z`, `Space`, `Enter` | Cross |
+| `X` | Circle |
+| `C` | Square |
+| `V` | Triangle |
+| Arrow keys | D-pad |
+| `Q` / `E` | L1 / R1 |
+| `1` / `3` | L2 / R2 |
+| `Tab`, `Backspace` | Options |
+
+A held `1` or `3` reports the trigger button and full analog travel (255), so
+titles that read either the button bit or the analog value see a pressed
+trigger. `Escape` is also mapped to Circle, but the exit command above consumes
+it first.
+
 ### Text entry
 
 Text entry sends keys to the guest IME instead of the keyboard's virtual pad,
