@@ -4,6 +4,52 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named descriptively only (`AGENTS.md`).
 
+## Role-playing title: cold-boot garbage-collector timeout from compile stalls (2026-10-25)
+
+- **Symptom.** About 3 of 5 cold-cache strict runs of the menus route
+  (Intel Arc A770, Mesa ANV 26.2.5, `KYTY_SHADER_OPTIMIZATION=Performance`)
+  stopped while loading the traveler map with a guest write fault at
+  address 0. The run status showed about 9.3 s without a present just
+  before the fault.
+- **Guest side.** The faulting store is in the engine's
+  garbage-collector wait for objects pending final destruction: it polls
+  each object's readiness, sleeps, and after 10 s logs the last object
+  not ready and stores through a pointer that is null in this build. The
+  objects become ready only when the render thread's fences advance, so
+  any command-processor stall over 10 s ends the run.
+- **Measured.** Agent counters every 0.5 s: in the stall windows the
+  command processor spends 1.5-2.9 s of every 2 s creating graphics
+  pipelines (50 ms per pipeline on average, up to 1.6 s). The thread
+  profile is 42% driver pipeline creation and 24% `spirv-opt` plus the
+  SPIR-V tools. Translation takes 38-44 ms per module with `Performance`
+  and 8 ms with `None`; driver time per pipeline stays about 30 ms
+  either way.
+- **Offline compile check.** The four largest pixel shaders of the run,
+  compiled alone with and without `spirv-opt -O`: `spirv-opt` costs
+  0.39-0.46 s per module and saves the driver 30-45 ms on ANV and
+  45-50 ms on RADV. RADV's final code differs by less than 1% in
+  instruction count, and two modules use more VGPRs once optimized.
+- **Change.** `scripts/run_guest.lua` defaults `ShaderOptimizationType`
+  to `None`, the configuration and launcher default.
+  `KYTY_SHADER_OPTIMIZATION=Performance` still selects the optimizer.
+- **Result.** No garbage-collector fault in 2 cold runs with `None`.
+  The runs now reach the traveler map and expose the next stop: a
+  storage-texture overlap refusal (see below).
+- **Exclusions.**
+  - First-parent bisection pointed at the object size-class index
+    (c0995a60). Wrong: the fault is intermittent; that commit reverted
+    still faulted, and the "good" run never left the loading screen.
+  - Quad swaps in the pixel mask ballot (`NativeMaskBallot`,
+    `NativeQuadUniform`) instead of quad broadcasts. They cut the
+    slowest role-playing pipeline from 1.6 s to 1.1 s, but ANV took more
+    than 2 minutes on one first-person-puzzle pipeline. Reverted.
+  - Driver cost of the mask emulation, offline on the largest pixel
+    shader (1.0-1.3 s on ANV). Removing every quad broadcast saves 5%.
+    Replacing the wave reductions with `BroadcastFirst` saves nothing.
+    Only removing all collectives halves it, because the mask logic then
+    folds away. The cost is the volume of mask-dependent code, not the
+    collective instructions.
+
 ## Role-playing title: blue traveler map from geometry-pass constants (2026-10-22)
 
 - **Symptom.** The traveler-selection map rendered pure blue: the map
