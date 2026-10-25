@@ -1931,6 +1931,31 @@ Known approximations and debt recorded by this chain:
   draw is still refused afterwards by the transport participation proof
   ("fragment row DPP source participation is unproven (neutral values do not
   prove helper recovery)"), which is the next gate.
+- **The single-level composite destination is generalized.** The hub's own
+  resources then needed a linear single-level view (format 71, 960x540, pitch
+  960, tile 0, one level) over a range of `0x3f4800` bytes at
+  `0x53af4b700`, with nine mixed parents. The composite admission refused it
+  for three narrow reasons: it named one format id (65), it demanded the
+  range be exactly the image bytes, and it demanded a 64 KB aligned start.
+  The admission now names the contract instead: a linear single-level view
+  whose pitch is its width, whose texel size the copy supports, whose swizzle
+  is the identity, and whose range covers the image. The range may start
+  inside a block (the copy addresses the guest bytes, not blocks) and may
+  extend past the image. The copy checks the image against the view's extent
+  and texel size instead of one format.
+- **Visual evidence after the alias and DPP fixes.** A native capture of the
+  world map scene (present 1742, 1280x720, A2R10G10B10) scores healthy:
+  entropy 4.41, 412 colour bins, no stripes, no blowout, sparkle 0.35%. The
+  frame shows the planet, the asteroid field and the nebula without the
+  streaked corruption the excluded guest-seed experiment produced, so the
+  copy path that seeds the mixed-view storage view does not corrupt the
+  image.
+- **Measured rate with the merged upstream range-cache work.** An agent
+  performance snapshot over 127 s of the run reports 1,741 presents, a
+  frame time of p50 41 ms, p95 116 ms and p99 190 ms, with 41.1 s in fence
+  waits, 15.8 s in uploads, 3.3 s in hashing, 3.2 s in write-backs and
+  0.9 s in detiles; the pipeline lookups cost 0.27 s over 203,605 hits. The
+  rate is still set by host work per frame, not by the device.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence

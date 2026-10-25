@@ -1368,22 +1368,33 @@ bool StorageTextureRawRenderSourceCovers(const StorageTextureRawRenderSource& so
 	return true;
 }
 
+// A linear single-level view is a raw byte window over the guest range: the
+// copy reproduces the writer's bytes at the same addresses, and the image
+// reads them row by row. The view names the row stride (its pitch must be the
+// width), the texel size and the identity swizzle; the range may start inside
+// a block and may extend past the image.
 bool StorageTextureCanCompositeRawRenderDestination(const uint64_t* params, uint64_t address, uint64_t size)
 {
-	if (params == nullptr || address % 65536u != 0u || size == 0u || size > INT32_MAX ||
+	if (params == nullptr || size == 0u || size > INT32_MAX ||
 	    params[StorageTextureObject::PARAM_TILE] != 0u || params[StorageTextureObject::PARAM_LEVELS] != 1u ||
 	    params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u || params[StorageTextureObject::PARAM_DEPTH] != 1u ||
-	    params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u || params[StorageTextureObject::PARAM_SKIP_SEED] != 0u ||
-	    (params[StorageTextureObject::PARAM_FORMAT] >> 16u) != 65u)
+	    params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u || params[StorageTextureObject::PARAM_SKIP_SEED] != 0u)
 	{
 		return false;
 	}
 	const uint64_t width  = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
 	const uint64_t height = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
-	return width != 0u && height != 0u && width <= UINT32_MAX / 8u && height <= UINT32_MAX / (width * 8u) &&
-	       params[StorageTextureObject::PARAM_PITCH] == width && size == width * height * 8u &&
-	       NormalizeStorageTextureSwizzle(params[StorageTextureObject::PARAM_FORMAT], params[StorageTextureObject::PARAM_SWIZZLE]) ==
-	           DstSel(4, 5, 6, 7);
+	const uint32_t bpp    = ShaderGen5TextureBytesPerElement(
+        static_cast<uint32_t>((params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu));
+	if (width == 0u || height == 0u || bpp == 0u || bpp > 8u || width > UINT32_MAX / bpp ||
+	    height > UINT32_MAX / (width * bpp) || params[StorageTextureObject::PARAM_PITCH] != width ||
+	    size < width * height * bpp ||
+	    NormalizeStorageTextureSwizzle(params[StorageTextureObject::PARAM_FORMAT], params[StorageTextureObject::PARAM_SWIZZLE]) !=
+	        DstSel(4, 5, 6, 7))
+	{
+		return false;
+	}
+	return true;
 }
 
 bool StorageTexturePlanLinearMipUpload(const uint64_t* params, uint64_t size, bool mip_backing,

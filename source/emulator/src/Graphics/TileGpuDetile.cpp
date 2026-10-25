@@ -1292,12 +1292,35 @@ bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer*
 		{
 			return false;
 		}
-	} else if (destination->format != VK_FORMAT_R16G16B16A16_UNORM || destination->mip_levels != 1u ||
-	           destination->extent.width != destination->guest_extent.width ||
-	           destination->extent.height != destination->guest_extent.height ||
-	           size != static_cast<uint64_t>(destination->extent.width) * destination->extent.height * 8u)
+	} else if (destination->mip_levels != 1u)
 	{
 		return false;
+	} else
+	{
+		// A single-level linear destination holds the guest bytes row by row: the
+		// image extent is the view's extent, the texel size is the view's texel
+		// size, and the range may extend past the image.
+		uint64_t width  = destination->extent.width;
+		uint64_t height = destination->extent.height;
+		uint32_t bpp    = VulkanColorTexelBytes(destination->format);
+		if (destination_params != nullptr)
+		{
+			width  = destination_params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
+			height = destination_params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
+			const uint32_t guest_bpp = ShaderGen5TextureBytesPerElement(
+			    static_cast<uint32_t>((destination_params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu));
+			if (guest_bpp == 0u || guest_bpp != bpp)
+			{
+				return false;
+			}
+		}
+		if (bpp == 0u || destination->extent.width != width || destination->extent.height != height ||
+		    destination->extent.width != destination->guest_extent.width ||
+		    destination->extent.height != destination->guest_extent.height || width == 0u || height == 0u ||
+		    size < width * height * bpp)
+		{
+			return false;
+		}
 	}
 	VkPhysicalDeviceProperties properties {};
 	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
