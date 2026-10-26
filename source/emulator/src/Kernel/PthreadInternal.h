@@ -7,11 +7,13 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/VideoFrameMemory.h"
 
 #include <atomic>
 #include <ctime>
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -121,6 +123,10 @@ struct PthreadPrivate
 	std::atomic_int      guest_priority {700};
 	uint64_t             guest_stack_base = 0;
 	uint64_t             guest_stack_size = 0;
+	// HLE code keeps host locals on the guest stack, and the kernel fails its
+	// writes into a page dirty tracking made read-only with EFAULT instead of a
+	// fault the tracker could serve. The stack stays host-written while it runs.
+	std::optional<Emulator::VideoFrameMemory::HostWriteLease> stack_write_lease;
 	// The HLE wait the thread is blocked in (see PthreadWaitScope).
 	std::atomic_uint8_t  wait_kind {0};
 	std::atomic_uint64_t wait_object {0};

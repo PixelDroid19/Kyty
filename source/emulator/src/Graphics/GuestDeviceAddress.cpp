@@ -304,26 +304,27 @@ void DropChunks(VkDevice device, Registry* registry, uint64_t base, Range* range
 	}
 }
 
-// Copies guest memory into a snapshot using the dirty tracker's read protocol
-// (arm write protection, copy, validate the generation). Returns false when
-// the range is not tracked, since a snapshot could then go stale unnoticed.
+// Copies guest memory into a snapshot taken under armed write protection.
+// The snapshot keeps the generation observed before arming: a page the CPU
+// writes during or after the copy advances past it, so ChangedSince reports
+// the chunk and the next prepare refreshes it. Memory the guest writes
+// continuously (thread stacks) never holds one generation across the copy.
+// Returns false when the range is not tracked, since a snapshot could then go
+// stale unnoticed.
 bool SnapshotGuest(void* copy, uint64_t guest, uint64_t size, uint64_t* generation)
 {
-	auto& tracker = GpuDirtyPageTracker::Instance();
-	for (int attempt = 0; attempt < 8; attempt++)
+	auto&          tracker = GpuDirtyPageTracker::Instance();
+	const uint64_t before  = tracker.SnapshotGeneration(guest, size);
+	// A host write in flight (a guest thread stack, file I/O) refuses arming;
+	// the snapshot is still valid because ChangedSince keeps reporting the range
+	// changed. The second arm covers a write that ended before the check.
+	const bool armed = tracker.PrepareForRead(guest, size) || tracker.HasHostWrite(guest, size) || tracker.PrepareForRead(guest, size);
+	if (!armed || !Core::VirtualMemory::CopyFromGuest(copy, guest, size))
 	{
-		const auto observation = tracker.BeginRead(guest, size);
-		if (!observation.tracked || !Core::VirtualMemory::CopyFromGuest(copy, guest, size))
-		{
-			return false;
-		}
-		if (tracker.ReadObservationIsStable(guest, size, observation))
-		{
-			*generation = observation.generation;
-			return true;
-		}
+		return false;
 	}
-	return false;
+	*generation = before;
+	return true;
 }
 
 void DestroyTable(VkDevice device, const Table& table)

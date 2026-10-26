@@ -5,11 +5,15 @@
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/FiberOwnership.h"
 #include "Emulator/Kernel/Trace.h"
+#include "Emulator/VideoFrameMemory.h"
 
 #include <chrono>
 #include <cinttypes>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <thread>
+#include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -29,6 +33,30 @@ thread_local FiberObject*    g_thread_return_fiber = nullptr;
 thread_local FiberObject*    g_starting_fiber      = nullptr;
 thread_local FiberObject*    g_pending_idle_fiber  = nullptr;
 thread_local FiberCpuContext g_thread_fiber_context {};
+
+// HLE code keeps host locals on the running fiber's stack, like a thread
+// stack (see PthreadPrivate::stack_write_lease). A context stays host-written
+// from initialization until its fiber is finalized or initialized again.
+using ContextLeases = std::unordered_map<const FiberObject*, std::unique_ptr<Emulator::VideoFrameMemory::HostWriteLease>>;
+std::mutex     g_context_leases_mutex;
+ContextLeases* g_context_leases = new ContextLeases;
+
+void FiberLeaseContext(const FiberObject* fiber, void* addr_context, uint64_t size_context)
+{
+	std::lock_guard<std::mutex> lock(g_context_leases_mutex);
+	g_context_leases->erase(fiber);
+	if (addr_context != nullptr)
+	{
+		g_context_leases->emplace(
+		    fiber, std::make_unique<Emulator::VideoFrameMemory::HostWriteLease>(reinterpret_cast<uint64_t>(addr_context), size_context));
+	}
+}
+
+void FiberReleaseContext(const FiberObject* fiber)
+{
+	std::lock_guard<std::mutex> lock(g_context_leases_mutex);
+	g_context_leases->erase(fiber);
+}
 
 void FiberSetCurrentFiber(FiberObject* fiber)
 {
@@ -250,6 +278,7 @@ int32_t KYTY_SYSV_ABI FiberInitialize(FiberObject* fiber, const char* name, Fibe
 	{
 		*static_cast<uint64_t*>(addr_context) = FIBER_STACK_MAGIC;
 	}
+	FiberLeaseContext(fiber, addr_context, size_context);
 
 	KYTY_LOG_DEBUG("\t fiber init: %s, entry = 0x%016" PRIx64 ", context = 0x%016" PRIx64 ", size = %" PRIu64 "\n", fiber->name,
 	       reinterpret_cast<uint64_t>(entry), reinterpret_cast<uint64_t>(addr_context), size_context);
@@ -304,6 +333,7 @@ int32_t KYTY_SYSV_ABI FiberFinalize(FiberObject* fiber)
 	{
 		return FIBER_ERROR_STATE;
 	}
+	FiberReleaseContext(fiber);
 	return OK;
 }
 
