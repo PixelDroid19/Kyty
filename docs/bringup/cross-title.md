@@ -38,7 +38,9 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   declares the unsigned banks sized by the shape totals
   (`ShaderSpirvGenerator.cpp:1284-1318`, `1863-1896`), so the binding is
   statically used even when no descriptor of that shape carries the unsigned
-  tag.
+  tag. The draw-time bank is chosen from the texture descriptor's own format
+  (`GraphicsRenderBind.cpp:4485-4516`), so a resource table rewritten after
+  pipeline creation can also select a bank whose static count left it empty.
 - **Open.** Whether the unwritten descriptor contributes to the queue-8
   device lost is not established: the hub draw executes and the loss surfaces
   later at a fence wait. Next: capture the complete validation message with
