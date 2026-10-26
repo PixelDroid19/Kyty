@@ -128,6 +128,17 @@ struct PadVibrationParam
 	uint8_t small_motor;
 };
 
+struct PadLightBarParam
+{
+	uint8_t red;
+	uint8_t green;
+	uint8_t blue;
+	uint8_t reserve;
+};
+
+static_assert(sizeof(PadVibrationParam) == 2);
+static_assert(sizeof(PadLightBarParam) == 4);
+
 // The guest reads these records at fixed offsets. The 120-byte ScePadData layout
 // and the 28-byte controller information agree with the independently documented
 // native layouts (the sizes also bound every memset below).
@@ -148,12 +159,17 @@ static_assert(offsetof(PadData, device_unique_data) == 0x6C);
 static_assert(sizeof(PadControllerInformation) == 0x1C);
 static_assert(sizeof(PadExtControllerInformation) == 0x40);
 
-// Resting acceleration of a motionless virtual pad. The native record reports
-// acceleration in G (observed on hardware; another HLE scales host m/s^2 to G
-// the same way), so gravity is about 1.0, never 9.8. A zero sample can look like
-// a disconnected IMU; the axis is the one this HLE already used, not verified
-// against a physical DualSense.
-constexpr float kRestingAccelerationZ = 1.0f;
+// Touch surface reported by PadGetControllerInformation; touch coordinates
+// stay inside it.
+constexpr uint16_t kTouchResolutionX = 1920;
+constexpr uint16_t kTouchResolutionY = 943;
+
+// A gap longer than this between gyro samples (a pause, a reconnect) is not
+// integrated into the orientation.
+constexpr uint64_t kMaxGyroGapNs = 100'000'000;
+
+// Light-bar colour of user 1 (blue), shown until the guest sets its own.
+constexpr uint8_t kUserLightBar[3] = {0, 0, 255};
 
 static GameController* g_controller = nullptr;
 
@@ -1247,6 +1263,8 @@ void GameController::CheckActive()
 		// Retire only the old physical source; the keyboard state stays held
 		// across physical-controller changes.
 		m_physical_state = {};
+		m_sensors        = {};
+		m_last_gyro_ns   = 0;
 		m_active_id      = next_active;
 		m_connected      = next_connected;
 		if (next_connected)
@@ -1350,6 +1368,89 @@ void GameController::Axis(int id, Controller::Axis axis, int value)
 	}
 }
 
+// Advances the orientation quaternion (x, y, z, w) by a body-frame angular
+// velocity over dt: q' = q + dt/2 * q * (w, 0), then renormalized.
+static void IntegrateOrientation(float* q, const float* w, float dt)
+{
+	const float h  = 0.5f * dt;
+	const float qx = q[0];
+	const float qy = q[1];
+	const float qz = q[2];
+	const float qw = q[3];
+	q[0] += h * (qw * w[0] + qy * w[2] - qz * w[1]);
+	q[1] += h * (qw * w[1] + qz * w[0] - qx * w[2]);
+	q[2] += h * (qw * w[2] + qx * w[1] - qy * w[0]);
+	q[3] -= h * (qx * w[0] + qy * w[1] + qz * w[2]);
+	const float length = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+	for (int i = 0; i < 4; i++)
+	{
+		q[i] /= length;
+	}
+}
+
+void GameController::Motion(int id, MotionSensor sensor, float x, float y, float z, uint64_t timestamp_ns)
+{
+	Core::LockGuard lock(m_mutex);
+
+	if (id != m_active_id || id == CONTROLLER_KEYBOARD_ID)
+	{
+		return;
+	}
+
+	if (sensor == MotionSensor::Acceleration)
+	{
+		m_sensors.acceleration[0] = x;
+		m_sensors.acceleration[1] = y;
+		m_sensors.acceleration[2] = z;
+		return;
+	}
+
+	m_sensors.angular_velocity[0] = x;
+	m_sensors.angular_velocity[1] = y;
+	m_sensors.angular_velocity[2] = z;
+	if (m_last_gyro_ns != 0 && timestamp_ns > m_last_gyro_ns && timestamp_ns - m_last_gyro_ns <= kMaxGyroGapNs)
+	{
+		IntegrateOrientation(m_sensors.orientation, m_sensors.angular_velocity, static_cast<float>(timestamp_ns - m_last_gyro_ns) * 1e-9f);
+	}
+	m_last_gyro_ns = timestamp_ns;
+}
+
+void GameController::Touch(int id, int finger, bool down, float x, float y)
+{
+	Core::LockGuard lock(m_mutex);
+
+	if (id != m_active_id || id == CONTROLLER_KEYBOARD_ID || finger < 0 || finger > 1)
+	{
+		return;
+	}
+
+	auto& touch = m_sensors.touch[finger];
+	if (!down)
+	{
+		touch.down = false;
+		return;
+	}
+	if (!touch.down)
+	{
+		// Each new contact takes the next id in 1..127.
+		m_last_touch_id = static_cast<uint8_t>(m_last_touch_id % 127 + 1);
+		touch.id        = m_last_touch_id;
+		touch.down      = true;
+	}
+	touch.x = static_cast<uint16_t>(std::clamp(x, 0.0f, 1.0f) * (kTouchResolutionX - 1));
+	touch.y = static_cast<uint16_t>(std::clamp(y, 0.0f, 1.0f) * (kTouchResolutionY - 1));
+}
+
+void GameController::ResetOrientation()
+{
+	Core::LockGuard lock(m_mutex);
+
+	m_sensors.orientation[0] = 0.0f;
+	m_sensors.orientation[1] = 0.0f;
+	m_sensors.orientation[2] = 0.0f;
+	m_sensors.orientation[3] = 1.0f;
+}
+
 void GameController::GetConnectionInfo(bool* flag, int* count)
 {
 	EXIT_IF(flag == nullptr);
@@ -1371,7 +1472,8 @@ void GameController::ReadState(ControllerState* state, bool* flag, int* count)
 
 	*flag  = m_connected;
 	*count = m_connected_count;
-	*state = GetLastState();
+	*state         = GetLastState();
+	state->sensors = m_sensors;
 }
 
 int GameController::ReadStates(ControllerState* states, int states_num, bool* flag, int* count)
@@ -1419,6 +1521,11 @@ int GameController::ReadStates(ControllerState* states, int states_num, bool* fl
 		ret_num        = 1;
 	}
 
+	for (int i = 0; i < ret_num; i++)
+	{
+		states[i].sensors = m_sensors;
+	}
+
 	return ret_num;
 }
 
@@ -1453,6 +1560,20 @@ void ControllerAxis(int id, Axis axis, int value)
 void ControllerSessionEnd()
 {
 	g_pad_record.Finish();
+}
+
+void ControllerMotion(int id, MotionSensor sensor, float x, float y, float z, uint64_t timestamp_ns)
+{
+	EXIT_IF(g_controller == nullptr);
+
+	g_controller->Motion(id, sensor, x, y, z, timestamp_ns);
+}
+
+void ControllerTouch(int id, int finger, bool down, float x, float y)
+{
+	EXIT_IF(g_controller == nullptr);
+
+	g_controller->Touch(id, finger, down, x, y);
 }
 
 // SCE_PAD_ERROR_* (public Sony codes; used for ordinary guest failures, not EXIT).
@@ -1517,6 +1638,8 @@ static int PadOpenCore(int user_id, int type, int index, const void* param, bool
 	}
 
 	g_pad_opened = true;
+	// The pad shows its user's colour until the guest sets another.
+	::Kyty::Emulator::Ports::ControllerFeedbackPort::LightBar(kUserLightBar[0], kUserLightBar[1], kUserLightBar[2]);
 
 	return kPrimaryHandle;
 }
@@ -1633,8 +1756,10 @@ int KYTY_SYSV_ABI PadResetOrientation(int handle)
 		return PAD_ERROR_INVALID_HANDLE;
 	}
 
-	// PadReadState and PadRead expose the neutral host orientation, so there is
-	// no calibration state to retain after a reset.
+	EXIT_IF(g_controller == nullptr);
+
+	// The orientation integrated from the gyro restarts from identity.
+	g_controller->ResetOrientation();
 	return OK;
 }
 
@@ -1746,6 +1871,39 @@ int KYTY_SYSV_ABI PadDeviceClassParseData(int handle, const PadData* data, void*
 	return OK;
 }
 
+// Motion and touch fields of one record. Touches fill the record's slots in
+// order, so a lone second finger reads as the first touch.
+static void FillPadSensors(const ControllerSensors& sensors, PadData* data)
+{
+	data->orientation_x      = sensors.orientation[0];
+	data->orientation_y      = sensors.orientation[1];
+	data->orientation_z      = sensors.orientation[2];
+	data->orientation_w      = sensors.orientation[3];
+	data->acceleration_x     = sensors.acceleration[0];
+	data->acceleration_y     = sensors.acceleration[1];
+	data->acceleration_z     = sensors.acceleration[2];
+	data->angular_velocity_x = sensors.angular_velocity[0];
+	data->angular_velocity_y = sensors.angular_velocity[1];
+	data->angular_velocity_z = sensors.angular_velocity[2];
+
+	uint8_t touch_num = 0;
+	for (const auto& touch: sensors.touch)
+	{
+		if (!touch.down)
+		{
+			continue;
+		}
+		auto& x  = (touch_num == 0 ? data->touch_data_touch0_x : data->touch_data_touch1_x);
+		auto& y  = (touch_num == 0 ? data->touch_data_touch0_y : data->touch_data_touch1_y);
+		auto& id = (touch_num == 0 ? data->touch_data_touch0_id : data->touch_data_touch1_id);
+		x        = touch.x;
+		y        = touch.y;
+		id       = touch.id;
+		touch_num++;
+	}
+	data->touch_data_touch_num = touch_num;
+}
+
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 {
 	PRINT_NAME();
@@ -1837,23 +1995,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	data->analog_buttons_r2      = script_trigger(PAD_BUTTON_R2, state.axes[static_cast<int>(Axis::TriggerRight)], state.buttons);
 	AgentPadApplyToButtonsAndAxes(true, &data->buttons, &data->left_stick_x, &data->left_stick_y, &data->right_stick_x,
 	                              &data->right_stick_y, &data->analog_buttons_l2, &data->analog_buttons_r2);
-	data->orientation_x          = 0.0f;
-	data->orientation_y          = 0.0f;
-	data->orientation_z          = 0.0f;
-	data->orientation_w          = 1.0f;
-	data->acceleration_x         = 0.0f;
-	data->acceleration_y         = 0.0f;
-	data->acceleration_z         = kRestingAccelerationZ;
-	data->angular_velocity_x     = 0.0f;
-	data->angular_velocity_y     = 0.0f;
-	data->angular_velocity_z     = 0.0f;
-	data->touch_data_touch_num   = 0;
-	data->touch_data_touch0_x    = 0;
-	data->touch_data_touch0_y    = 0;
-	data->touch_data_touch0_id   = 1;
-	data->touch_data_touch1_x    = 0;
-	data->touch_data_touch1_y    = 0;
-	data->touch_data_touch1_id   = 2;
+	FillPadSensors(state.sensors, data);
 	data->connected              = true;
 	// Always refresh timestamp so held samples still look live to edge/time logic.
 	data->timestamp              = now_ts;
@@ -1916,23 +2058,7 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 		// large num cannot collapse release/press/release into one HLE invocation.
 		AgentPadApplyToButtonsAndAxes(i == 0, &data[i].buttons, &data[i].left_stick_x, &data[i].left_stick_y, &data[i].right_stick_x,
 		                              &data[i].right_stick_y, &data[i].analog_buttons_l2, &data[i].analog_buttons_r2);
-		data[i].orientation_x          = 0.0f;
-		data[i].orientation_y          = 0.0f;
-		data[i].orientation_z          = 0.0f;
-		data[i].orientation_w          = 1.0f;
-		data[i].acceleration_x         = 0.0f;
-		data[i].acceleration_y         = 0.0f;
-		data[i].acceleration_z         = kRestingAccelerationZ;
-		data[i].angular_velocity_x     = 0.0f;
-		data[i].angular_velocity_y     = 0.0f;
-		data[i].angular_velocity_z     = 0.0f;
-		data[i].touch_data_touch_num   = 0;
-		data[i].touch_data_touch0_x    = 0;
-		data[i].touch_data_touch0_y    = 0;
-		data[i].touch_data_touch0_id   = 1;
-		data[i].touch_data_touch1_x    = 0;
-		data[i].touch_data_touch1_y    = 0;
-		data[i].touch_data_touch1_id   = 2;
+		FillPadSensors(states[i].sensors, &data[i]);
 		data[i].connected              = connected || script_active;
 		data[i].timestamp              = states[i].time;
 		data[i].connected_count        = (connected_count > 0 ? connected_count : (script_active ? 1 : 0));
@@ -2001,6 +2127,8 @@ int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param)
 	KYTY_LOG_DEBUG("\t large_motor = %d\n", static_cast<int>(param->large_motor));
 	KYTY_LOG_DEBUG("\t small_motor = %d\n", static_cast<int>(param->small_motor));
 
+	// The motors keep this strength until the next call.
+	::Kyty::Emulator::Ports::ControllerFeedbackPort::Vibration(param->large_motor, param->small_motor);
 	return OK;
 }
 
@@ -2013,6 +2141,7 @@ int KYTY_SYSV_ABI PadResetLightBar(int handle)
 		return PAD_ERROR_INVALID_HANDLE;
 	}
 
+	::Kyty::Emulator::Ports::ControllerFeedbackPort::LightBar(kUserLightBar[0], kUserLightBar[1], kUserLightBar[2]);
 	return OK;
 }
 
@@ -2029,6 +2158,9 @@ int KYTY_SYSV_ABI PadSetLightBar(int handle, const PadLightBarParam* param)
 		return PAD_ERROR_INVALID_ARG;
 	}
 
+	KYTY_LOG_DEBUG("\t rgb = %d %d %d\n", static_cast<int>(param->red), static_cast<int>(param->green), static_cast<int>(param->blue));
+
+	::Kyty::Emulator::Ports::ControllerFeedbackPort::LightBar(param->red, param->green, param->blue);
 	return OK;
 }
 

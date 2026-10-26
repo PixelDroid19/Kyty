@@ -762,6 +762,61 @@ static void ApplyStick(int id, ::Kyty::Emulator::Ports::Axis axis_x, ::Kyty::Emu
 	::Kyty::Emulator::Ports::ControllerInputPort::Axis(id, axis_y, axes.y);
 }
 
+// Latest gamepad feedback the guest asked for. Guest threads write it; the window event loop applies it, because that
+// thread owns the gamepads. Vibration packs large << 8 | small; the light bar packs a set flag and r << 16 | g << 8 | b.
+struct PadFeedback
+{
+	static constexpr uint32_t LIGHT_BAR_SET = 1u << 24;
+
+	std::atomic<uint32_t> vibration {0};
+	std::atomic<uint32_t> light_bar {0};
+	std::atomic<uint64_t> generation {0};
+};
+
+static PadFeedback g_pad_feedback;
+static uint64_t    g_applied_pad_feedback = 0;
+
+static void SetPadVibration(uint8_t large_motor, uint8_t small_motor)
+{
+	g_pad_feedback.vibration.store((static_cast<uint32_t>(large_motor) << 8u) | small_motor);
+	g_pad_feedback.generation.fetch_add(1);
+}
+
+static void SetPadLightBar(uint8_t red, uint8_t green, uint8_t blue)
+{
+	g_pad_feedback.light_bar.store(PadFeedback::LIGHT_BAR_SET | (static_cast<uint32_t>(red) << 16u) |
+	                               (static_cast<uint32_t>(green) << 8u) | blue);
+	g_pad_feedback.generation.fetch_add(1);
+}
+
+static void ApplyPadFeedback(int id)
+{
+	const uint32_t vibration = g_pad_feedback.vibration.load();
+	const uint32_t light_bar = g_pad_feedback.light_bar.load();
+	// 257 maps 0..255 onto SDL's 0..0xFFFF; the large motor is the low-frequency one.
+	::Kyty::Emulator::Host::HostInput::RumbleController(id, static_cast<uint16_t>((vibration >> 8u) * 257u),
+	                                                    static_cast<uint16_t>((vibration & 0xffu) * 257u));
+	if ((light_bar & PadFeedback::LIGHT_BAR_SET) != 0)
+	{
+		::Kyty::Emulator::Host::HostInput::SetControllerLed(id, static_cast<uint8_t>(light_bar >> 16u),
+		                                                    static_cast<uint8_t>(light_bar >> 8u), static_cast<uint8_t>(light_bar));
+	}
+}
+
+static void UpdatePadFeedback()
+{
+	const uint64_t generation = g_pad_feedback.generation.load();
+	if (generation == g_applied_pad_feedback)
+	{
+		return;
+	}
+	g_applied_pad_feedback = generation;
+	for (const int id: g_connected_gamepads)
+	{
+		ApplyPadFeedback(id);
+	}
+}
+
 // Forwards the keyboard source's button changes and any stick movement, keys and mouse look alike.
 static void ApplyKeyboardControls(const ::Kyty::Emulator::Host::ControlChange& change)
 {
@@ -798,6 +853,7 @@ bool game_init(GameApi* game, const Core::Timer& timer, void* data)
 	game->data1 = pdata;
 	game->data2 = ::Kyty::Emulator::Host::HostInput::Create();
 	LoadInputProfile();
+	::Kyty::Emulator::Ports::ControllerFeedbackPort::Install({&SetPadVibration, &SetPadLightBar});
 
 	game->m_screen_width  = ctx->screen_width;
 	game->m_screen_height = ctx->screen_height;
@@ -811,6 +867,7 @@ bool game_init(GameApi* game, const Core::Timer& timer, void* data)
 
 bool game_render_and_update(GameApi* game, const Core::Timer& /*timer*/)
 {
+	UpdatePadFeedback();
 	return RenderAndUpdate(game);
 }
 
@@ -820,6 +877,7 @@ bool game_close(GameApi* game)
 
 	EXIT_IF(!game->data1 || !game->data2);
 
+	::Kyty::Emulator::Ports::ControllerFeedbackPort::Install({});
 	delete (static_cast<GameApiPrivateStruct*>(game->data1));
 	delete (static_cast<::Kyty::Emulator::Host::HostInput*>(game->data2));
 
@@ -1099,6 +1157,22 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 		       static_cast<int>(f->button), f->timestamp_seconds);
 	}
 #endif
+	if (f->sensor != ::Kyty::Emulator::Host::ControllerSensor::Invalid)
+	{
+		const auto sensor = (f->sensor == ::Kyty::Emulator::Host::ControllerSensor::Acceleration
+		                         ? ::Kyty::Emulator::Ports::MotionSensor::Acceleration
+		                         : ::Kyty::Emulator::Ports::MotionSensor::AngularVelocity);
+		::Kyty::Emulator::Ports::ControllerInputPort::Motion(f->id, sensor, f->sensor_data[0], f->sensor_data[1], f->sensor_data[2],
+		                                                     f->sensor_timestamp_ns);
+		return;
+	}
+
+	if (f->touchpad)
+	{
+		::Kyty::Emulator::Ports::ControllerInputPort::Touch(f->id, f->touch_finger, f->touch_down, f->touch_x, f->touch_y);
+		return;
+	}
+
 	if (f->remapped)
 	{
 		// SDL has already updated the active mapping. Subsequent axis/button
@@ -1124,6 +1198,7 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 		}
 		g_connected_gamepads.insert(id);
 		::Kyty::Emulator::Ports::ControllerInputPort::Connect(id);
+		ApplyPadFeedback(id);
 	}
 
 	if (f->removed)
@@ -1557,6 +1632,8 @@ void game_process_event(GameApi* game, double time_s)
 		}
 
 		case ::Kyty::Emulator::Host::InputEventType::ControllerDevice:
+		case ::Kyty::Emulator::Host::InputEventType::ControllerSensor:
+		case ::Kyty::Emulator::Host::InputEventType::ControllerTouchpad:
 		{
 			EventController c = event->controller;
 			c.timestamp_seconds = time_s;

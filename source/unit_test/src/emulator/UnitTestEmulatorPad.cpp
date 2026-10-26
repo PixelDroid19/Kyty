@@ -3,8 +3,10 @@
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/ControllerInputPort.h"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 
 UT_BEGIN(EmulatorPad);
@@ -38,6 +40,13 @@ constexpr int     kInvalidHandle = static_cast<int>(0x80920003u);
 uint32_t Load32(const uint8_t* record, size_t offset)
 {
 	uint32_t value = 0;
+	std::memcpy(&value, record + offset, sizeof(value));
+	return value;
+}
+
+uint16_t Load16(const uint8_t* record, size_t offset)
+{
+	uint16_t value = 0;
 	std::memcpy(&value, record + offset, sizeof(value));
 	return value;
 }
@@ -293,6 +302,126 @@ TEST(EmulatorPad, OutputAndSensorCallsValidateTheirHandleAndArguments)
 	EXPECT_EQ(PadSetLightBar(99, nullptr), kInvalidHandle);
 	EXPECT_EQ(PadSetMotionSensorState(1, true), 0);
 	EXPECT_EQ(PadSetMotionSensorState(99, true), kInvalidHandle);
+}
+
+TEST(EmulatorPad, ActiveGamepadMotionAndTouchReachTheRecord)
+{
+	EnsurePadSubsystems();
+
+	constexpr int physical_id = 43;
+	ControllerConnect(physical_id);
+	ASSERT_EQ(PadInit(), 0);
+	ASSERT_EQ(PadOpen(1, 0, 0, nullptr), 1);
+
+	ControllerMotion(physical_id, MotionSensor::Acceleration, 0.25f, 0.75f, -0.5f, 0);
+	// 1 rad/s about Z for 0.1 s turns the pad by 0.1 rad: q = (0, 0, sin 0.05, cos 0.05).
+	ControllerMotion(physical_id, MotionSensor::AngularVelocity, 0.0f, 0.0f, 1.0f, 1'000'000'000);
+	ControllerMotion(physical_id, MotionSensor::AngularVelocity, 0.0f, 0.0f, 1.0f, 1'050'000'000);
+	ControllerMotion(physical_id, MotionSensor::AngularVelocity, 0.0f, 0.0f, 1.0f, 1'100'000'000);
+	// Samples of a gamepad that is not the active one are ignored.
+	ControllerMotion(physical_id + 1, MotionSensor::Acceleration, 9.0f, 9.0f, 9.0f, 0);
+	// The second finger alone reads as the first touch.
+	ControllerTouch(physical_id, 1, true, 0.5f, 1.0f);
+
+	alignas(uint64_t) std::array<uint8_t, kPadDataBytes> record {};
+	ASSERT_EQ(PadReadState(1, reinterpret_cast<PadData*>(record.data())), 0);
+	EXPECT_FLOAT_EQ(LoadFloat(record.data(), 0x1c), 0.25f);
+	EXPECT_FLOAT_EQ(LoadFloat(record.data(), 0x20), 0.75f);
+	EXPECT_FLOAT_EQ(LoadFloat(record.data(), 0x24), -0.5f);
+	EXPECT_FLOAT_EQ(LoadFloat(record.data(), 0x30), 1.0f);
+	EXPECT_NEAR(LoadFloat(record.data(), 0x14), std::sin(0.05f), 1e-3f);
+	EXPECT_NEAR(LoadFloat(record.data(), 0x18), std::cos(0.05f), 1e-3f);
+	EXPECT_EQ(record[0x34], 1u);
+	EXPECT_EQ(Load16(record.data(), 0x3c), 959u);
+	EXPECT_EQ(Load16(record.data(), 0x3e), 942u);
+	const uint8_t first_id = record[0x40];
+	EXPECT_GE(first_id, 1u);
+	EXPECT_LE(first_id, 127u);
+
+	ControllerTouch(physical_id, 0, true, 0.0f, 0.0f);
+	alignas(uint64_t) std::array<uint8_t, 64 * kPadDataBytes> history {};
+	const int read = PadRead(1, reinterpret_cast<PadData*>(history.data()), 64);
+	ASSERT_GE(read, 1);
+	const uint8_t* latest = history.data() + (read - 1) * kPadDataBytes;
+	EXPECT_EQ(latest[0x34], 2u);
+	EXPECT_EQ(Load16(latest, 0x3c), 0u);
+	EXPECT_EQ(Load16(latest, 0x44), 959u);
+	EXPECT_EQ(latest[0x48], first_id);
+	EXPECT_NE(latest[0x40], first_id);
+
+	EXPECT_EQ(PadResetOrientation(1), 0);
+	ControllerTouch(physical_id, 0, false, 0.0f, 0.0f);
+	ControllerTouch(physical_id, 1, false, 0.0f, 0.0f);
+	ASSERT_EQ(PadReadState(1, reinterpret_cast<PadData*>(record.data())), 0);
+	EXPECT_EQ(LoadFloat(record.data(), 0x14), 0.0f);
+	EXPECT_EQ(LoadFloat(record.data(), 0x18), 1.0f);
+	EXPECT_EQ(record[0x34], 0u);
+
+	// Without the gamepad the record reads as a motionless pad again.
+	ControllerDisconnect(physical_id);
+	ASSERT_EQ(PadReadState(1, reinterpret_cast<PadData*>(record.data())), 0);
+	ExpectCleanPadRecord(record.data());
+}
+
+struct FeedbackSeen
+{
+	int     vibrations = 0;
+	uint8_t large      = 0;
+	uint8_t small      = 0;
+	int     light_bars = 0;
+	uint8_t rgb[3]     = {};
+};
+
+FeedbackSeen g_feedback_seen;
+
+TEST(EmulatorPad, VibrationAndLightBarReachTheFeedbackPort)
+{
+	EnsurePadSubsystems();
+
+	ASSERT_EQ(PadInit(), 0);
+	ASSERT_EQ(PadOpen(1, 0, 0, nullptr), 1);
+
+	g_feedback_seen = {};
+	::Kyty::Emulator::Ports::ControllerFeedbackPort::Install(
+	    {[](uint8_t large, uint8_t small)
+	     {
+		     g_feedback_seen.vibrations++;
+		     g_feedback_seen.large = large;
+		     g_feedback_seen.small = small;
+	     },
+	     [](uint8_t red, uint8_t green, uint8_t blue)
+	     {
+		     g_feedback_seen.light_bars++;
+		     g_feedback_seen.rgb[0] = red;
+		     g_feedback_seen.rgb[1] = green;
+		     g_feedback_seen.rgb[2] = blue;
+	     }});
+
+	const std::array<uint8_t, 2> vibration {200, 50};
+	EXPECT_EQ(PadSetVibration(1, reinterpret_cast<const PadVibrationParam*>(vibration.data())), 0);
+	EXPECT_EQ(g_feedback_seen.vibrations, 1);
+	EXPECT_EQ(g_feedback_seen.large, 200u);
+	EXPECT_EQ(g_feedback_seen.small, 50u);
+
+	const std::array<uint8_t, 4> light_bar {10, 20, 30, 0};
+	EXPECT_EQ(PadSetLightBar(1, reinterpret_cast<const PadLightBarParam*>(light_bar.data())), 0);
+	EXPECT_EQ(g_feedback_seen.light_bars, 1);
+	EXPECT_EQ(g_feedback_seen.rgb[0], 10u);
+	EXPECT_EQ(g_feedback_seen.rgb[1], 20u);
+	EXPECT_EQ(g_feedback_seen.rgb[2], 30u);
+
+	// A reset restores the user 1 colour, blue.
+	EXPECT_EQ(PadResetLightBar(1), 0);
+	EXPECT_EQ(g_feedback_seen.light_bars, 2);
+	EXPECT_EQ(g_feedback_seen.rgb[0], 0u);
+	EXPECT_EQ(g_feedback_seen.rgb[1], 0u);
+	EXPECT_EQ(g_feedback_seen.rgb[2], 255u);
+
+	// A failed call asks for nothing.
+	EXPECT_EQ(PadSetVibration(99, reinterpret_cast<const PadVibrationParam*>(vibration.data())), kInvalidHandle);
+	EXPECT_EQ(g_feedback_seen.vibrations, 1);
+
+	::Kyty::Emulator::Ports::ControllerFeedbackPort::Install({});
 }
 
 UT_END();

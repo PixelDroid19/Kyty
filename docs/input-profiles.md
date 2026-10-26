@@ -120,6 +120,26 @@ mouse look is on with sensitivity 1 and no inversion, and `device` is empty.
 
 A keyboard L2 or R2 reports the trigger button and full analog travel (255).
 
+## Gamepad feedback and sensors
+
+These follow the active gamepad and need no profile settings.
+
+- **Vibration.** `scePadSetVibration` drives the gamepad motors: the large
+  motor runs the low-frequency (heavy) motor and the small one the
+  high-frequency motor, with 0..255 scaled onto 0..0xFFFF. A strength holds
+  until the guest's next call.
+- **Light bar.** `scePadSetLightBar` sets the gamepad LED. Opening the pad and
+  `scePadResetLightBar` show the user 1 colour, blue.
+- **Motion.** Opening a gamepad enables its accelerometer and gyroscope when it
+  has them. The pad record reports acceleration in G and angular velocity in
+  rad/s, in the gamepad's own axes. The orientation quaternion integrates the
+  gyroscope; `scePadResetOrientation` restarts it from identity. A source
+  without sensors, such as the keyboard, reads as a motionless pad.
+- **Touchpad.** Up to two fingers on the gamepad touchpad reach the record on
+  the 1920 x 943 surface that `scePadGetControllerInformation` reports. Each
+  new contact takes the next touch id in 1..127. The touchpad click is the
+  `touchpad` button.
+
 ## Limits
 
 - Pad routes record a stick only as full travel past half deflection, so a
@@ -127,3 +147,14 @@ A keyboard L2 or R2 reports the trigger button and full analog travel (255).
   not recorded ([input replay](input-replay.md)).
 - Sticks and triggers cannot be remapped to buttons, and buttons cannot drive
   sticks on a gamepad.
+- Vibration that the guest holds unchanged for more than about 65 s stops:
+  the host gamepad layer caps one rumble request at that length.
+- Motion has no accelerometer tilt correction and no angular-velocity
+  deadband; `scePadSetTiltCorrectionState` and
+  `scePadSetAngularVelocityDeadbandState` are accepted and have no effect, so
+  the integrated orientation can drift.
+- The axes of a motionless keyboard pad (gravity on +Z) are not verified
+  against a physical gamepad, whose resting reading follows its own axes.
+- Adaptive-trigger effects are accepted and ignored.
+- Vibration, light bar, motion and touchpad are verified with SDL virtual
+  gamepads only, not with a physical gamepad.

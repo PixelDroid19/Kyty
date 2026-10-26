@@ -100,6 +100,7 @@ UT_LINK(EmulatorVideoOutFlipPending);
 UT_LINK(EmulatorVideoOutLifecycle);
 UT_LINK(EmulatorControllerSources);
 UT_LINK(EmulatorInputProfile);
+UT_LINK(EmulatorHostInput);
 UT_LINK(EmulatorFileSystemPath);
 UT_LINK(EmulatorFileDescriptors);
 UT_LINK(EmulatorPlayGo);
