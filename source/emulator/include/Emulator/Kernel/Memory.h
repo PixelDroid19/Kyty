@@ -172,6 +172,14 @@ int KYTY_SYSV_ABI    KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1,
 int KYTY_SYSV_ABI    KernelBatchMap2(void* entries, int entry_count, int* processed_out, int flags);
 int KYTY_SYSV_ABI    KernelBatchMap(void* entries, int entry_count, int* processed_out);
 int KYTY_SYSV_ABI    KernelAvailableFlexibleMemorySize(size_t* size);
+int KYTY_SYSV_ABI    KernelSetPrtAperture(int index, void* addr, size_t len);
+int KYTY_SYSV_ABI    KernelGetPrtAperture(int index, void** addr, size_t* len);
+// Partially resident texture pages are 64 KiB; a GPU read of an unmapped page
+// inside a PRT aperture returns zero instead of faulting.
+constexpr uint64_t kKernelPrtPageSize = 64u * 1024u;
+[[nodiscard]] bool   KernelRangeInPrtAperture(uint64_t vaddr, uint64_t size);
+// Every PRT page of the range is either inside one physical mapping or unmapped inside a PRT aperture.
+[[nodiscard]] bool   KernelRangeResidentOrPrt(uint64_t vaddr, uint64_t size);
 // Configured flexible size for Gen5 queries (same budget as available for now).
 int KYTY_SYSV_ABI    KernelConfiguredFlexibleMemorySize(uint64_t* size);
 int KYTY_SYSV_ABI    KernelMprotect(const void* addr, size_t len, int prot);

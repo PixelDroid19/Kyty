@@ -338,6 +338,7 @@ static void cleanup_thread(void* arg)
 
 	Core::mem_guest_thread_leave();
 	ReleaseThreadErrorAddr();
+	thread->stack_write_lease.reset();
 
 	thread->almost_done = true;
 }
@@ -360,6 +361,7 @@ static void* run_thread(void* arg)
 	EXIT_IF(thread->attr == nullptr || thread->attr->stack_addr == nullptr || thread->attr->stack_size == 0);
 	auto* stack_top = reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(thread->attr->stack_addr) + thread->attr->stack_size) &
 	                                          ~static_cast<uintptr_t>(0xf));
+	thread->stack_write_lease.emplace(reinterpret_cast<uint64_t>(thread->attr->stack_addr), thread->attr->stack_size);
 	PthreadStartContext(thread);
 	{
 		const Emulator::Ports::ScopedProgress guest(Emulator::Ports::ProgressLane::GuestThread);

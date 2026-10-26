@@ -610,6 +610,9 @@ enum class ShaderInstructionType : uint32_t
 	SPackLhB32B16,
 	SPackHhB32B16,
 	SAbsdiffI32,
+	SBitset0B32,
+	ImageGather4C,
+	VFfblB32,
 
 	ZMax
 };
@@ -962,8 +965,10 @@ struct ShaderOperand
 	bool              negate      = false;
 	bool              clamp       = false;
 	// SDWA channel select (GCN/RDNA): 0-3 = BYTE_n, 4-5 = WORD_n, 6 = DWORD.
-	// Applied as zero-extend extract when loading the operand for recompile.
-	uint8_t swizzle = 6;
+	// Applied as an extract when loading the operand for recompile: zero-extend,
+	// or sign-extend when the SDWA SEXT bit of the source is set.
+	uint8_t swizzle   = 6;
+	bool    sdwa_sext = false;
 	// DPP (data-parallel primitive) sources read a VGPR from another wave lane.
 	// Keep its routing controls in the IR; they cannot be folded into a register.
 	bool     dpp                = false;
@@ -978,7 +983,7 @@ struct ShaderOperand
 	bool operator==(const ShaderOperand& other) const
 	{
 		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size &&
-		       swizzle == other.swizzle && dpp == other.dpp && dpp_ctrl == other.dpp_ctrl && dpp_row_mask == other.dpp_row_mask &&
+		       swizzle == other.swizzle && sdwa_sext == other.sdwa_sext && dpp == other.dpp && dpp_ctrl == other.dpp_ctrl && dpp_row_mask == other.dpp_row_mask &&
 		       dpp_bank_mask == other.dpp_bank_mask && dpp_fetch_inactive == other.dpp_fetch_inactive &&
 		       dpp_bound_ctrl == other.dpp_bound_ctrl && dpp_unmodeled_bits == other.dpp_unmodeled_bits;
 	}

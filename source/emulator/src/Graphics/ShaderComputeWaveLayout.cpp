@@ -20,6 +20,7 @@ constexpr uint32_t kDeferredDispatchControl =
     kPartialThreadgroup | kForceStartAtZero | kOrderedAppendEnable | kOrderedAppendMode | kUseThreadDimensions;
 constexpr uint32_t kGuestWaveSize      = 64u;
 constexpr uint32_t kNativeSubgroupSize = 32u;
+constexpr uint32_t kSplitNarrowLanes   = 16u;
 constexpr uint32_t kLdsDwordBytes      = 4u;
 
 [[nodiscard]] bool MultiplyU32(uint32_t a, uint32_t b, uint32_t* product) noexcept
@@ -77,9 +78,15 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	// GFX10.3's ORDER_MODE selects ordered versus out-of-order wave launch. Both
 	// values preserve the dispatch grid and do not alter this layout decision.
 
+	// 16-lane subgroups halve the host registers each guest value occupies:
+	// on Intel a large kernel at width 32 spends minutes in register
+	// allocation, at width 16 seconds.
+	const uint32_t part_lanes = capabilities.min_subgroup_size <= kSplitNarrowLanes && capabilities.max_subgroup_size >= kSplitNarrowLanes
+	                                ? kSplitNarrowLanes
+	                                : kNativeSubgroupSize;
 	if (!capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
-	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > kNativeSubgroupSize ||
-	    capabilities.max_subgroup_size < kNativeSubgroupSize)
+	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > part_lanes ||
+	    capabilities.max_subgroup_size < part_lanes)
 	{
 		return ShaderComputeWaveLayoutStatus::MissingHostCapability;
 	}
@@ -120,13 +127,13 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	}
 
 	uint32_t host_subgroups = 0;
-	if (!MultiplyU32(waves, 2u, &host_subgroups))
+	if (!MultiplyU32(waves, kGuestWaveSize / part_lanes, &host_subgroups))
 	{
 		return ShaderComputeWaveLayoutStatus::HostLimitExceeded;
 	}
 
 	uint32_t exchange_dwords = 0;
-	if (!MultiplyU32(waves, kShaderSplitWaveExchangeDwords, &exchange_dwords) ||
+	if (!MultiplyU32(waves, ShaderSplitWaveExchangeDwords(part_lanes), &exchange_dwords) ||
 	    request.lds_dwords > std::numeric_limits<uint32_t>::max() - exchange_dwords)
 	{
 		return ShaderComputeWaveLayoutStatus::HostLimitExceeded;
@@ -154,7 +161,7 @@ ShaderComputeWaveLayoutStatus ShaderBuildSplitComputeWaveLayout(const ShaderComp
 	candidate.physical_local[1]    = 1;
 	candidate.physical_local[2]    = 1;
 	candidate.guest_wave_size      = kGuestWaveSize;
-	candidate.native_subgroup_size = kNativeSubgroupSize;
+	candidate.native_subgroup_size = part_lanes;
 	candidate.banks                = 1;
 	candidate.waves                = waves;
 	candidate.lds_dwords           = request.lds_dwords;

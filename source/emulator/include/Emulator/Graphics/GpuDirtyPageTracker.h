@@ -139,6 +139,10 @@ public:
 	// Zero is the no-op token (disabled tracking or an empty/invalid range).
 	[[nodiscard]] uint64_t BeginHostWrite(uintptr_t address, size_t size) noexcept;
 	void EndHostWrite(uint64_t token) noexcept;
+	// Whether a host-write token overlaps [address, address + size). Rearming
+	// such a range is refused, and ChangedSince reports it changed until the
+	// token ends and its writes are published.
+	[[nodiscard]] bool HasHostWrite(uintptr_t address, size_t size) const noexcept;
 
 	[[nodiscard]] uint64_t             SnapshotGeneration(uintptr_t address, size_t size) const noexcept;
 	[[nodiscard]] bool                 ChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept;

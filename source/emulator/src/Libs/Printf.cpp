@@ -551,7 +551,7 @@ static inline unsigned int _strnlen_s(const char* str, size_t maxsize)
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* format, VaList* va_list)
+static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* format, VaList* caller_args)
 {
 	// A null format is invalid input from the guest; report the C error return
 	// instead of dereferencing it.
@@ -559,6 +559,11 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 	{
 		return -1;
 	}
+
+	// The guest library formats from a copy of the caller's va_list, so callers
+	// may reuse one va_list, e.g. vsnprintf(nullptr, 0, ...) to size a buffer.
+	VaList  args    = *caller_args;
+	VaList* va_list = &args;
 
 	Vector<char> buffer;
 
@@ -1232,12 +1237,15 @@ void PutConversion(WideSink* sink, const WideSpec& spec, VaList* va_list)
 
 } // namespace
 
-int FormatWide(uint16_t* out, size_t out_count, const uint16_t* format, VaList* va_list)
+int FormatWide(uint16_t* out, size_t out_count, const uint16_t* format, VaList* caller_args)
 {
 	if (format == nullptr)
 	{
 		return -1;
 	}
+	// Formats from a copy of the caller's va_list, as the narrow engine does.
+	VaList  args    = *caller_args;
+	VaList* va_list = &args;
 	WideSink sink(out, out_count);
 	for (const uint16_t* cursor = format; *cursor != 0;)
 	{

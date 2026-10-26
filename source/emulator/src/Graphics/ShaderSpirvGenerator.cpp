@@ -1,5 +1,6 @@
 #include "Kyty/Core/MagicEnum.h"
 #include "ShaderSpirvInternal.h"
+#include "ShaderSpirvScJoin.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveSdwa.h"
 
@@ -338,9 +339,9 @@ void Spirv::GenerateSource()
 		if (!ShaderInstructionPerLaneLoweringPreconditions(inst))
 		{
 			EXIT("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64 " pc=0x%08" PRIx32
-			     " reason=lowering-preconditions src_num=%d mimg_address_num=%d sopp=0x%02x raw=0x%08" PRIx32 "\n",
+			     " reason=lowering-preconditions src_num=%d mimg_address_num=%d sopp=0x%02x raw=0x%08" PRIx32 " sdwa=0x%08" PRIx32 "\n",
 			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<uint64_t>(inst.format), inst.pc,
-			     inst.src_num, inst.mimg_address_num, static_cast<unsigned>(inst.sopp_opcode), inst.raw_word);
+			     inst.src_num, inst.mimg_address_num, static_cast<unsigned>(inst.sopp_opcode), inst.raw_word, inst.vop_sdwa_ctrl);
 		}
 	}
 	if (UsesNativeComputeWave() && !NativeComputeWaveLayoutIsValid())
@@ -1980,20 +1981,13 @@ void Spirv::WriteGlobalVariables()
 		case ShaderType::Compute:
 			if (m_cs_input_info != nullptr)
 			{
-				if (UsesNativeComputeWave())
-				{
-					// WorkgroupSize takes precedence over LocalSize in Vulkan;
-					// both must describe physical invocations, not guest lanes.
-					const auto* physical = m_cs_input_info->wave_layout.physical_local;
-					vars.Add(String8::FromPrintf("%%gl_WorkGroupSize = OpConstantComposite %%v3uint %%%s %%%s %%%s",
-					                             GetConstantUint(physical[0]).c_str(), GetConstantUint(physical[1]).c_str(),
-					                             GetConstantUint(physical[2]).c_str()));
-				} else
-				{
-					vars.Add(String8::FromPrintf("%%gl_WorkGroupSize = OpConstantComposite %%v3uint %%uint_%u %%uint_%u %%uint_%u",
-					                             m_cs_input_info->threads_num[0], m_cs_input_info->threads_num[1],
-					                             m_cs_input_info->threads_num[2]));
-				}
+				// WorkgroupSize takes precedence over LocalSize in Vulkan;
+				// both must describe physical invocations, not guest lanes.
+				const auto* local =
+				    UsesNativeComputeWave() ? m_cs_input_info->wave_layout.physical_local : m_cs_input_info->threads_num;
+				vars.Add(String8::FromPrintf("%%gl_WorkGroupSize = OpConstantComposite %%v3uint %%%s %%%s %%%s",
+				                             GetConstantUint(local[0]).c_str(), GetConstantUint(local[1]).c_str(),
+				                             GetConstantUint(local[2]).c_str()));
 			}
 			m_source += String8(compute_variables).ReplaceStr("<Variables>", vars.Concat("\n" + String8(' ', 15)));
 			break;
@@ -2050,6 +2044,10 @@ void Spirv::WriteLocalVariables()
 	m_source += comment;
 	m_source += "%exec_lane_lo = OpVariable %_ptr_Function_uint Function\n"
 	            "%exec_lane_hi = OpVariable %_ptr_Function_uint Function\n";
+	for (const auto& skip: ScJoinSkips(m_code))
+	{
+		m_source += String8::FromPrintf("%%join_skip_%04" PRIx32 " = OpVariable %%_ptr_Function_bool Function %%false\n", skip.branch);
+	}
 
 	for (const auto& c: m_variables)
 	{
@@ -3470,7 +3468,7 @@ void Spirv::FindConstants()
 		if (inst.type == ShaderInstructionType::VCmpClassF32)
 		{
 			for (uint32_t value = 0; value < 10u; ++value) { AddConstantUint(value); }
-			for (const uint32_t mask: {0x7f800000u, 0x007fffffu, 0x00400000u, 0x80000000u}) { AddConstantUint(mask); }
+			for (const uint32_t mask: {0x7f800000u, 0x007fffffu, 0x00400000u, 0x80000000u, 0x7fffffffu}) { AddConstantUint(mask); }
 		}
 		if (inst.type == ShaderInstructionType::ImageBvhIntersectRay)
 		{

@@ -3255,13 +3255,15 @@ static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& ins
 	return true;
 }
 
-// Pixel programs and the geometry pass read runtime V#s at guest device addresses.
+// Pixel, compute and geometry-pass programs read runtime V#s at guest device addresses.
 static bool ScalarBufferUsesGuestAddress(const Spirv* spirv, const ShaderInstruction& inst)
 {
 	const auto* bind           = spirv->GetBindInfo();
 	const auto* vertex         = spirv->GetVsInputInfo();
 	const int   user_data_base = vertex != nullptr && vertex->gs_prolog ? 8 : 0;
-	return Config::IsNextGen() && (spirv->GetPsInputInfo() != nullptr || spirv->UsesGeometryCompute()) && bind != nullptr &&
+	const bool  stage          = spirv->GetPsInputInfo() != nullptr || spirv->UsesGeometryCompute() ||
+	                    spirv->GetCode().GetType() == ShaderType::Compute;
+	return Config::IsNextGen() && stage && bind != nullptr &&
 	       ShaderScalarBufferUsesRuntimeDescriptor(*bind, inst, user_data_base);
 }
 

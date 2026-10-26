@@ -3840,6 +3840,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		// Before assembly, whose resources reuse their consumer's register.
 		ShaderCollectRedefinedBufferDescriptors(*code, bind, user_data_register_base, *code_flow, code_memo);
 		ShaderCollectAssembledBufferDescriptors(*code, bind, user_sgpr, user_sgpr_num, user_data_register_base, *code_flow, code_memo);
+		ShaderCollectNestedCopiedBufferDescriptors(*code, bind, user_sgpr, user_data->srt_size_dw, user_data_register_base, *code_flow,
+		                                           code_memo);
 	}
 }
 
@@ -4588,7 +4590,7 @@ static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBin
 		{
 			return true;
 		}
-		if (ShaderScalarLoadNeedsGuestAddress(inst, bind))
+		if (ShaderScalarLoadNeedsGuestAddress(inst, bind) || ShaderScalarBufferUsesRuntimeDescriptor(bind, inst))
 		{
 			return true;
 		}
@@ -4779,7 +4781,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			} else
 			{
 				info->native_wave_sensitive  = true;
-				info->required_subgroup_size = 32u;
+				info->required_subgroup_size = info->wave_layout.native_subgroup_size;
 			}
 		}
 		// Compute parsing preserves byte PCs relative to this dispatch's start.

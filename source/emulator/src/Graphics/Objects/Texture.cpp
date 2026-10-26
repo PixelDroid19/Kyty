@@ -17,6 +17,7 @@
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
 
@@ -181,6 +182,30 @@ static VkImageUsageFlags get_usage()
 	return vk_usage;
 }
 
+static bool LayerIsPhysical(uint64_t vaddr, uint64_t size)
+{
+	Kernel::Memory::KernelMappedRange mapped {};
+	return Kernel::Memory::KernelQueryMappedRange(vaddr, size, &mapped) && mapped.kind == Kernel::Memory::KernelMappedRangeKind::Physical;
+}
+
+// Copies the resident pages of a layer whose other pages are unmapped inside a
+// PRT aperture; the GPU reads those as zero.
+static void StagePartiallyResidentLayer(uint64_t vaddr, uint64_t size, std::vector<uint8_t>* staged)
+{
+	staged->assign(static_cast<size_t>(size), 0u);
+	for (uint64_t offset = 0; offset < size; offset += Kernel::Memory::kKernelPrtPageSize)
+	{
+		const uint64_t page = std::min(Kernel::Memory::kKernelPrtPageSize, size - offset);
+		if (LayerIsPhysical(vaddr + offset, page))
+		{
+			std::memcpy(staged->data() + offset, reinterpret_cast<const void*>(vaddr + offset), static_cast<size_t>(page));
+		} else if (!Kernel::Memory::KernelRangeInPrtAperture(vaddr + offset, page))
+		{
+			EXIT("depth upload reads unmapped memory outside a PRT aperture: addr=0x%012" PRIx64 "\n", vaddr + offset);
+		}
+	}
+}
+
 // Layered depth surfaces stack whole 64 KiB-blocked slices contiguously;
 // each layer detiles into `linear` and fills its own array layer.
 static void upload_depth_layers(GraphicContext* ctx, TextureVulkanImage* image, uint64_t vaddr, uint64_t size,
@@ -193,11 +218,18 @@ static void upload_depth_layers(GraphicContext* ctx, TextureVulkanImage* image, 
 		EXIT("depth upload exceeds its source: format=%u %ux%u pitch=%u layers=%u size=0x%" PRIx64 "\n", fmt, width, height, pitch, layers,
 		     size);
 	}
-	const uint32_t bytes = State::Gen5DepthSampleBytesPerElement(fmt);
+	const uint32_t       bytes = State::Gen5DepthSampleBytesPerElement(fmt);
+	std::vector<uint8_t> staged;
 	for (uint32_t layer = 0; layer < layers; layer++)
 	{
-		TileConvertDepth64KBToLinear(linear->data(), reinterpret_cast<const void*>(vaddr + layer * layer_bytes), width, height, pitch,
-		                            bytes, layer);
+		const uint64_t layer_addr = vaddr + layer * layer_bytes;
+		const void*    source     = reinterpret_cast<const void*>(layer_addr);
+		if (!LayerIsPhysical(layer_addr, layer_bytes))
+		{
+			StagePartiallyResidentLayer(layer_addr, layer_bytes, &staged);
+			source = staged.data();
+		}
+		TileConvertDepth64KBToLinear(linear->data(), source, width, height, pitch, bytes, layer);
 		UtilFillDepthImage(ctx, image, linear->data(), linear->size(), width, layout, layer);
 	}
 }

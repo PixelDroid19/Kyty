@@ -1349,6 +1349,10 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 		buf.with_api_flip       = with_api_flip;
 		buf.completion          = completion;
 		buf.decode_completion   = decode_completion;
+		if (m_decode_released && decode_completion != nullptr)
+		{
+			decode_completion->Signal();
+		}
 
 		m_cmd_batches.Add(buf);
 		// A drain must see queued work before the worker wakes to dequeue it.
@@ -1586,6 +1590,49 @@ static void WaitForSuspendedRun(CommandProcessor* cp, CommandProcessor::Suspende
 	WaitForSuspendedRuns(cp, suspended);
 }
 
+static bool SuspendedRunsHaveGpuProducer(CommandProcessor* cp, const CommandProcessor::SuspendedRun* first,
+                                         const CommandProcessor::SuspendedRun* second)
+{
+	for (const auto* suspended: {first, second})
+	{
+		if (suspended == nullptr)
+		{
+			continue;
+		}
+		SubmissionDependency dependency;
+		if (cp->FindSuspendedWaitProducer(suspended->address, suspended->size, suspended->reference, suspended->mask,
+		                                  &dependency) == GpuSubmissionResult::Success)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void GraphicsRing::SetDecodeReleased(const CmdBatch* current, bool released)
+{
+	EXIT_IF(current == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+	m_decode_released = released;
+	if (!released)
+	{
+		return;
+	}
+	if (current->decode_completion != nullptr)
+	{
+		current->decode_completion->Signal();
+	}
+	FOR_LIST (index, m_cmd_batches)
+	{
+		const auto& queued = m_cmd_batches.At(index);
+		if (queued.decode_completion != nullptr)
+		{
+			queued.decode_completion->Signal();
+		}
+	}
+}
+
 GraphicsRing::CmdBatch GraphicsRing::GetCmdBatch()
 {
 	Core::LockGuard lock(m_mutex);
@@ -1719,7 +1766,19 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				auto* draw_wait     = draw.blocked ? &draw.suspended : nullptr;
 				EXIT_IF(constant_wait == nullptr && draw_wait == nullptr);
 				cp->RunUnlock();
+				// Decode cannot pass a wait that no submitted GPU work satisfies, as
+				// on hardware; the submitters must return because their next store
+				// or submission may be the awaited value.
+				const bool host_producer = !SuspendedRunsHaveGpuProducer(cp, constant_wait, draw_wait);
+				if (host_producer)
+				{
+					ring->SetDecodeReleased(&buf, true);
+				}
 				WaitForSuspendedRuns(cp, constant_wait, draw_wait);
+				if (host_producer)
+				{
+					ring->SetDecodeReleased(&buf, false);
+				}
 				cp->RunLock();
 			}
 			if (buf.completion == GraphicsSubmissionCompletion::QueuedGraphicsInterrupt)

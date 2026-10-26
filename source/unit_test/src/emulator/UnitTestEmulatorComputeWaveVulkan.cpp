@@ -135,9 +135,10 @@ TEST(EmulatorComputeWaveVulkan, SplitLayoutRequiresEveryCoreCapability)
 	EXPECT_EQ(SplitStatus(no_ballot_shuffle), ShaderComputeWaveLayoutStatus::MissingHostCapability);
 }
 
-TEST(EmulatorComputeWaveVulkan, SplitLayoutRequiresExactSize32InQueriedRange)
+TEST(EmulatorComputeWaveVulkan, SplitLayoutRequiresItsExactPartWidthInQueriedRange)
 {
-	const uint32_t ranges[][2] = {{8, 32}, {32, 64}};
+	// The split runs 16-lane parts when the host range holds 16, else 32-lane parts.
+	const uint32_t ranges[][3] = {{8, 32, 16}, {16, 16, 16}, {32, 64, 32}};
 	for (const auto& range: ranges)
 	{
 		auto state              = CoreOnlyState();
@@ -152,7 +153,7 @@ TEST(EmulatorComputeWaveVulkan, SplitLayoutRequiresExactSize32InQueriedRange)
 		stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
 		VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required {};
 		ASSERT_TRUE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required));
-		EXPECT_EQ(required.requiredSubgroupSize, 32u);
+		EXPECT_EQ(required.requiredSubgroupSize, range[2]);
 		EXPECT_NE(stage.flags & VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT, 0u);
 	}
 
@@ -205,7 +206,7 @@ TEST(EmulatorComputeWaveVulkan, ChainsRequiredSizeStateWithoutDroppingExistingSt
 	EXPECT_EQ(stage.pNext, &required);
 	EXPECT_EQ(required.pNext, &prior_state);
 	EXPECT_EQ(required.sType, VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT);
-	EXPECT_EQ(required.requiredSubgroupSize, 32u);
+	EXPECT_EQ(required.requiredSubgroupSize, 16u);
 	EXPECT_NE(stage.flags & VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT, 0u);
 	EXPECT_EQ(stage.flags & VK_PIPELINE_SHADER_STAGE_CREATE_ALLOW_VARYING_SUBGROUP_SIZE_BIT_EXT, 0u);
 }

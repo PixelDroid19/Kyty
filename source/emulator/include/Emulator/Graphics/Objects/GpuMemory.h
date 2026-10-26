@@ -1011,11 +1011,15 @@ enum class GpuMemoryDepthD16Source : uint8_t
 	StorageBuffer,
 };
 
-// stale_render_textures: render targets over the range that the caller has
-// proven cannot hold the sample (another extent left after the guest reused
-// the memory). They do not own the bytes; every one of them must be counted.
+// stale_render_textures, stale_storage_textures: render targets and storage
+// images over the range that the caller has proven cannot hold the sample
+// (another extent left after the guest reused the memory). They do not own
+// the bytes; every one of them must be counted. A storage buffer that covers
+// only part of the range owns no newer bytes once it is read-only or idle,
+// which the provenance must show.
 [[nodiscard]] inline GpuMemoryDepthD16Source GpuMemoryClassifyDepthD16Source(
-    const GpuMemoryOverlapSnapshot& snapshot, const GpuMemoryRangeProvenance* provenance = nullptr, uint32_t stale_render_textures = 0u)
+    const GpuMemoryOverlapSnapshot& snapshot, const GpuMemoryRangeProvenance* provenance = nullptr, uint32_t stale_render_textures = 0u,
+    uint32_t stale_storage_textures = 0u)
 {
 	if (snapshot.total_count == 0u)
 	{
@@ -1032,6 +1036,8 @@ enum class GpuMemoryDepthD16Source : uint8_t
 	const GpuMemoryOverlapEntry* storage = nullptr;
 	uint32_t                     counted = 0u;
 	uint32_t                     render_textures = 0u;
+	uint32_t                     storage_textures = 0u;
+	uint32_t                     partial_storage  = 0u;
 	for (uint32_t index = 0; index < snapshot.entry_count; ++index)
 	{
 		const auto& entry = snapshot.entries[index];
@@ -1050,6 +1056,17 @@ enum class GpuMemoryDepthD16Source : uint8_t
 			render_textures += entry.count;
 			continue;
 		}
+		if (entry.type == GpuMemoryObjectType::StorageTexture && stale_storage_textures != 0u)
+		{
+			storage_textures += entry.count;
+			continue;
+		}
+		if (entry.type == GpuMemoryObjectType::StorageBuffer &&
+		    (entry.relation == GpuMemoryOverlapType::IsContainedWithin || entry.relation == GpuMemoryOverlapType::Crosses))
+		{
+			partial_storage += entry.count;
+			continue;
+		}
 		if (entry.count != 1u)
 		{
 			return GpuMemoryDepthD16Source::Unsupported;
@@ -1064,12 +1081,12 @@ enum class GpuMemoryDepthD16Source : uint8_t
 			return GpuMemoryDepthD16Source::Unsupported;
 		}
 	}
-	if (counted != snapshot.total_count || render_textures != stale_render_textures)
+	if (counted != snapshot.total_count || render_textures != stale_render_textures || storage_textures != stale_storage_textures)
 	{
 		return GpuMemoryDepthD16Source::Unsupported;
 	}
 	bool storage_depth_views = false;
-	if (texture != nullptr)
+	if (texture != nullptr || partial_storage != 0u)
 	{
 		// A large range can hit the provenance scan's page cap after it has
 		// already found every object. The independent, complete overlap count
@@ -1087,6 +1104,11 @@ enum class GpuMemoryDepthD16Source : uint8_t
 				storage_depth_views = true;
 			} else if (object.type == GpuMemoryObjectType::Texture &&
 			           (object.content_origin != GpuMemoryContentOrigin::CpuUpload || object.write_back_capable))
+			{
+				return GpuMemoryDepthD16Source::Unsupported;
+			} else if (object.type == GpuMemoryObjectType::StorageBuffer &&
+			           (object.relation == GpuMemoryOverlapType::IsContainedWithin || object.relation == GpuMemoryOverlapType::Crosses) &&
+			           object.in_use && !object.read_only)
 			{
 				return GpuMemoryDepthD16Source::Unsupported;
 			}
@@ -1126,7 +1148,9 @@ enum class GpuMemoryDepthD16Source : uint8_t
 	{
 		return storage->all_read_only ? GpuMemoryDepthD16Source::Guest : GpuMemoryDepthD16Source::StorageBuffer;
 	}
-	return texture != nullptr || render_textures != 0u ? GpuMemoryDepthD16Source::Guest : GpuMemoryDepthD16Source::Unsupported;
+	return texture != nullptr || render_textures != 0u || storage_textures != 0u || partial_storage != 0u
+	           ? GpuMemoryDepthD16Source::Guest
+	           : GpuMemoryDepthD16Source::Unsupported;
 }
 
 enum class GpuMemoryMutationAction : uint8_t

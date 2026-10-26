@@ -90,6 +90,11 @@ void InitializeConfig()
 	Kyty::Config::Load(validation);
 }
 
+uint32_t Bitset0Word(uint32_t destination, uint32_t source)
+{
+	return (0x17du << 23u) | (destination << 16u) | (0x1bu << 8u) | source;
+}
+
 uint32_t Bitset1Word(uint32_t destination, uint32_t source)
 {
 	return (0x17du << 23u) | (destination << 16u) | (0x1du << 8u) | source;
@@ -263,7 +268,7 @@ int RunProgramBaseProbe(const ProgramBaseProbe& probe, const VulkanComputeProbe&
 std::vector<ProbeCase> MakeCases()
 {
 	std::vector<ProbeCase> cases;
-	cases.reserve(84);
+	cases.reserve(87);
 	const auto bitset_expectation = [](uint32_t result) { return std::array<uint32_t, 4> {result, kSeedScc, kSeedExecLo, kSeedExecHi}; };
 	const uint32_t endpgm = kEndProgram;
 
@@ -272,6 +277,10 @@ std::vector<ProbeCase> MakeCases()
 	cases.push_back({"BitsetWrapsIndex32", {Bitset1Word(9, 160), endpgm}, {{9, 8}}, 9, bitset_expectation(9), {}});
 	cases.push_back({"BitsetAliasedIndexDestination", {Bitset1Word(17, 17), endpgm}, {{17, 31}}, 17,
 	                 bitset_expectation(0x8000001fu), {}});
+	cases.push_back({"BitsetClearInline31", {Bitset0Word(9, 159), endpgm}, {{9, 0xffffffffu}}, 9, bitset_expectation(0x7fffffffu), {}});
+	cases.push_back({"BitsetClearWrapsIndex32", {Bitset0Word(9, 161), endpgm}, {{9, 3}}, 9, bitset_expectation(1), {}});
+	cases.push_back({"BitsetClearAliasedIndexDestination", {Bitset0Word(17, 17), endpgm}, {{17, 0x8000001fu}}, 17,
+	                 bitset_expectation(0x0000001fu), {}});
 
 	const auto compare_expectation = [](uint32_t scc) { return std::array<uint32_t, 4> {0, scc, kSeedExecLo, kSeedExecHi}; };
 	auto compare_words = [](uint32_t source0, uint32_t source1) {

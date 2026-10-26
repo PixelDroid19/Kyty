@@ -15,6 +15,8 @@
 
 #include "Emulator/Graphics/Shader.h"
 
+#include <vector>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -80,6 +82,21 @@ int ScJoinNestingDepth(const ShaderCode& code, uint32_t src, uint32_t join_pc, c
 // Order sources deepest-first for emission (children before parents).
 void ScJoinOrderForEmission(const ShaderCode& code, uint32_t join_pc, const Vector<uint32_t>& sc_join_srcs,
                             Vector<uint32_t>* out_order);
+
+// A forward conditional in the taken arm of a diamond that jumps over the
+// diamond's join to the end of the join's straight-line head. The head is
+// reached from both arms, so no selection construct can own it: emission
+// reconverges the branch's arm at the join and runs the head only when the
+// branch was not taken, through a flag the branch sets.
+struct ScJoinSkip
+{
+	uint32_t branch = 0; // the conditional
+	uint32_t join   = 0; // diamond join, first instruction of the head
+	uint32_t target = 0; // branch target, first instruction after the head
+};
+
+// Every join skip of the program, in branch order.
+const std::vector<ScJoinSkip>& ScJoinSkips(const ShaderCode& code);
 
 // True when a forward conditional is a structured loop exit (jumps past a
 // backward SBranch that closes a loop containing the exit).

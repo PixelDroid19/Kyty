@@ -200,6 +200,8 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 	{Recompile_ImageGetResinfo_VdataVaddrStDmask,           ShaderInstructionType::ImageGetResinfo,     ShaderInstructionFormat::VdataVaddrStDmask,              {""}},
 	{Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask,      ShaderInstructionType::ImageGather4,        ShaderInstructionFormat::Vdata4Vaddr3StSsMimgDmask,      {""}},
 	{Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask,      ShaderInstructionType::ImageGather4,        ShaderInstructionFormat::VdataVaddr4StSsMimgDmask,       {""}},
+	{Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask,      ShaderInstructionType::ImageGather4C,       ShaderInstructionFormat::VdataVaddr4StSsMimgDmask,       {""}},
+	{Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask,      ShaderInstructionType::ImageGather4C,       ShaderInstructionFormat::VdataVaddr6StSsMimgDmask,       {""}},
 	{Recompile_ImageSample_Vdata1Vaddr3StSsDmask1,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1,         {""}},
     {Recompile_ImageSample_Vdata1Vaddr3StSsDmask2,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2,         {""}},
     {Recompile_ImageSample_Vdata1Vaddr3StSsDmask4,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata1Vaddr3StSsDmask4,         {""}},
@@ -403,6 +405,8 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_SMovB32_SVdstSVsrc0,            ShaderInstructionType::SMovkI32,            ShaderInstructionFormat::SVdstSVsrc0, {""}},
     {Recompile_SMulkI32_SVdstSVsrc0,           ShaderInstructionType::SMulkI32,            ShaderInstructionFormat::SVdstSVsrc0, {""}},
     {Recompile_V_XXX_B32_SVdstSVsrc0,          ShaderInstructionType::VBfrevB32,           ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpBitReverse %uint %t0_<index>"}},
+    // FindILsb of a zero word is -1, the no-ones result of V_FFBL_B32.
+    {Recompile_V_XXX_B32_SVdstSVsrc0,          ShaderInstructionType::VFfblB32,            ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpExtInst %uint %GLSL_std_450 FindILsb %t0_<index>"}},
     {Recompile_V_XXX_B32_SVdstSVsrc0,          ShaderInstructionType::VNotB32,             ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpNot %uint %t0_<index>"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0,          ShaderInstructionType::VCeilF32,            ShaderInstructionFormat::SVdstSVsrc0, {"%t_<index> = OpExtInst %float %GLSL_std_450 Ceil %t0_<index>"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0,          ShaderInstructionType::VCosF32,             ShaderInstructionFormat::SVdstSVsrc0, {"%tr_<index> = OpFMul %float %t0_<index> %float_2pi", "%t_<index> = OpExtInst %float %GLSL_std_450 Cos %tr_<index>"}},
@@ -697,6 +701,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_SPackB32B16, ShaderInstructionType::SPackLlB32B16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_SPackB32B16, ShaderInstructionType::SPackLhB32B16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_SPackB32B16, ShaderInstructionType::SPackHhB32B16, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
+    {Recompile_SBitset0B32, ShaderInstructionType::SBitset0B32, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_SBitset1B32, ShaderInstructionType::SBitset1B32, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_SGetpcB64, ShaderInstructionType::SGetpcB64, ShaderInstructionFormat::Sdst2, {""}},
 

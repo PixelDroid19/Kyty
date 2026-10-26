@@ -21,6 +21,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <array>
 #include <mutex>
 #include <vector>
 
@@ -3619,6 +3620,87 @@ int KYTY_SYSV_ABI KernelAvailableFlexibleMemorySize(size_t* size)
 	KYTY_LOG_DEBUG("\t *size = 0x%016" PRIx64 "\n", *size);
 
 	return OK;
+}
+
+// PRT apertures 0..SCE_KERNEL_MAX_PRT_APERTURE_INDEX (2): GPU address ranges
+// whose unmapped pages read as partially resident texture pages.
+struct PrtAperture
+{
+	uint64_t addr = 0;
+	size_t   len  = 0;
+};
+constexpr int                                 kMaxPrtApertureIndex = 2;
+static std::array<PrtAperture, kMaxPrtApertureIndex + 1> g_prt_apertures;
+static std::mutex                             g_prt_apertures_mutex;
+
+int KYTY_SYSV_ABI KernelSetPrtAperture(int index, void* addr, size_t len)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t index = %d, addr = 0x%016" PRIx64 ", len = 0x%016" PRIx64 "\n", index, reinterpret_cast<uint64_t>(addr),
+	               static_cast<uint64_t>(len));
+
+	if (index < 0 || index > kMaxPrtApertureIndex)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	std::lock_guard lock(g_prt_apertures_mutex);
+	g_prt_apertures[index] = {reinterpret_cast<uint64_t>(addr), len};
+	return OK;
+}
+
+int KYTY_SYSV_ABI KernelGetPrtAperture(int index, void** addr, size_t* len)
+{
+	PRINT_NAME();
+
+	if (index < 0 || index > kMaxPrtApertureIndex || addr == nullptr || len == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	std::lock_guard lock(g_prt_apertures_mutex);
+	*addr = reinterpret_cast<void*>(g_prt_apertures[index].addr);
+	*len  = g_prt_apertures[index].len;
+	return OK;
+}
+
+bool KernelRangeInPrtAperture(uint64_t vaddr, uint64_t size)
+{
+	std::lock_guard lock(g_prt_apertures_mutex);
+	for (const auto& aperture: g_prt_apertures)
+	{
+		if (aperture.len != 0 && vaddr >= aperture.addr && size <= aperture.len && vaddr - aperture.addr <= aperture.len - size)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool KernelRangeResidentOrPrt(uint64_t vaddr, uint64_t size)
+{
+	if (size == 0 || vaddr > UINT64_MAX - (size - 1u))
+	{
+		return false;
+	}
+	const uint64_t end = vaddr + size;
+	for (uint64_t page = vaddr; page < end;)
+	{
+		const uint64_t page_end = std::min(end, (page & ~(kKernelPrtPageSize - 1u)) + kKernelPrtPageSize);
+		KernelMappedRange mapped {};
+		if (KernelQueryMappedRange(page, page_end - page, &mapped))
+		{
+			if (mapped.kind != KernelMappedRangeKind::Physical)
+			{
+				return false;
+			}
+		} else if (!KernelRangeInPrtAperture(page, page_end - page))
+		{
+			return false;
+		}
+		page = page_end;
+	}
+	return true;
 }
 
 int KYTY_SYSV_ABI KernelConfiguredFlexibleMemorySize(uint64_t* size)

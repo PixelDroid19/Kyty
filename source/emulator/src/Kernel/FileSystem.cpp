@@ -27,6 +27,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -2252,28 +2253,12 @@ int KYTY_SYSV_ABI KernelRmdir(const char* path)
 	return OK;
 }
 
-static uint32_t AprStableFileId(const char* guest_path)
-{
-	// FNV-1a 32-bit over the guest path bytes. Stable across runs; not a firmware
-	// hash — only needs to be unique enough for subsequent APR look-ups by id.
-	uint32_t hash = 2166136261u;
-	if (guest_path != nullptr)
-	{
-		for (const unsigned char* p = reinterpret_cast<const unsigned char*>(guest_path); *p != 0; ++p)
-		{
-			hash ^= *p;
-			hash *= 16777619u;
-		}
-	}
-	if (hash == 0)
-	{
-		hash = 1;
-	}
-	return hash;
-}
-
 static Core::Mutex                          g_apr_mutex;
 static std::unordered_map<uint32_t, String>  g_apr_id_to_host;
+// One id per resolved guest path, handed out in resolution order: ids hashed from the path collide among the
+// hundreds of thousands of files a title can resolve, and a colliding file would read the other's bytes.
+static std::unordered_map<std::string, uint32_t> g_apr_path_to_id;
+static uint32_t                                  g_apr_next_file_id = 1;
 static uint32_t                             g_apr_next_submission_id = 1;
 static std::unordered_map<uint32_t, uint64_t> g_apr_submissions; // id → cmd (diagnostic)
 
@@ -2660,66 +2645,6 @@ bool AprTryGetHostPath(uint32_t file_id, String* out_host_path)
 	return true;
 }
 
-int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids, uint64_t* sizes)
-{
-	PRINT_NAME();
-
-	EXIT_IF(g_mount_points == nullptr);
-
-	KYTY_LOG_DEBUG("\t paths = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(paths));
-	KYTY_LOG_DEBUG("\t count = %" PRIu64 "\n", count);
-	KYTY_LOG_DEBUG("\t ids   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ids));
-	KYTY_LOG_DEBUG("\t sizes = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(sizes));
-
-	// sizes is optional (ResolveFilepathsToIds variants pass null).
-	if (paths == nullptr || count == 0 || count > 1024)
-	{
-		return KERNEL_ERROR_EINVAL;
-	}
-
-	for (uint64_t i = 0; i < count; ++i)
-	{
-		const char* guest_path = paths[i];
-		if (guest_path == nullptr)
-		{
-			return KERNEL_ERROR_EFAULT;
-		}
-
-		KYTY_LOG_DEBUG("\t [%llu] path = %s\n", static_cast<unsigned long long>(i), guest_path);
-
-		const String path_s         = String::FromUtf8(guest_path);
-		const auto   real_file_name = ResolveExistingHostFile(path_s, g_mount_points->GetRealFilename(path_s));
-		if (!Core::File::IsFileExisting(real_file_name))
-		{
-			KYTY_LOG_DEBUG("\t file not found: %s\n", real_file_name.C_Str());
-			return KERNEL_ERROR_ENOENT;
-		}
-
-		const uint64_t file_size = Core::File::Size(real_file_name);
-		const uint32_t file_id   = AprStableFileId(guest_path);
-		if (sizes != nullptr)
-		{
-			sizes[i] = file_size;
-		}
-		if (ids != nullptr)
-		{
-			ids[i] = file_id;
-		}
-		{
-			Core::LockGuard lock(g_apr_mutex);
-			g_apr_id_to_host[file_id] = real_file_name;
-		}
-		KYTY_LOG_DEBUG("\t [%llu] id = 0x%08" PRIx32 " size = %" PRIu64 "\n", static_cast<unsigned long long>(i), file_id, file_size);
-	}
-
-	return OK;
-}
-
-int KYTY_SYSV_ABI KernelAprResolveFilepathsToIds(const char* const* paths, uint64_t count, uint32_t* ids)
-{
-	return KernelAprResolveFilepathsToIdsAndFileSizes(paths, count, ids, nullptr);
-}
-
 static int AprResolveOnePath(const char* guest_path, uint32_t* out_id, uint64_t* out_size)
 {
 	if (guest_path == nullptr || guest_path[0] == '\0')
@@ -2736,8 +2661,19 @@ static int AprResolveOnePath(const char* guest_path, uint32_t* out_id, uint64_t*
 	{
 		return KERNEL_ERROR_ENOENT;
 	}
-	const uint32_t file_id   = AprStableFileId(guest_path);
 	const uint64_t file_size = Core::File::Size(real_file_name);
+	uint32_t       file_id   = 0;
+	{
+		Core::LockGuard lock(g_apr_mutex);
+		const auto [it, inserted] = g_apr_path_to_id.emplace(guest_path, g_apr_next_file_id);
+		if (inserted)
+		{
+			EXIT_IF(g_apr_next_file_id == UINT32_MAX);
+			g_apr_next_file_id++;
+		}
+		file_id                   = it->second;
+		g_apr_id_to_host[file_id] = real_file_name;
+	}
 	if (out_id != nullptr)
 	{
 		*out_id = file_id;
@@ -2746,8 +2682,6 @@ static int AprResolveOnePath(const char* guest_path, uint32_t* out_id, uint64_t*
 	{
 		*out_size = file_size;
 	}
-	Core::LockGuard lock(g_apr_mutex);
-	g_apr_id_to_host[file_id] = real_file_name;
 	return OK;
 }
 
@@ -2780,7 +2714,7 @@ static void AprJoinPrefix(const char* prefix, const char* path, char* out, size_
 }
 
 static int AprResolveBatch(const char* prefix, const char* const* paths, uint64_t count, uint32_t* ids, uint64_t* sizes,
-                           int32_t* results)
+                           uint32_t* error_index, int32_t* results)
 {
 	if (paths == nullptr || count == 0 || count > 1024)
 	{
@@ -2817,6 +2751,10 @@ static int AprResolveBatch(const char* prefix, const char* const* paths, uint64_
 			}
 			if (results == nullptr)
 			{
+				if (error_index != nullptr)
+				{
+					*error_index = static_cast<uint32_t>(i);
+				}
 				return rc;
 			}
 		}
@@ -2824,37 +2762,51 @@ static int AprResolveBatch(const char* prefix, const char* const* paths, uint64_
 	return results != nullptr ? static_cast<int>(success_count) : first_error;
 }
 
-int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIds(const char* prefix, const char* const* paths, uint64_t count, uint32_t* ids)
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizes(const char* const* paths, uint64_t count, uint32_t* ids, uint64_t* sizes,
+                                                             uint32_t* error_index)
 {
 	PRINT_NAME();
-	return AprResolveBatch(prefix, paths, count, ids, nullptr, nullptr);
+	return AprResolveBatch(nullptr, paths, count, ids, sizes, error_index, nullptr);
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsToIds(const char* const* paths, uint64_t count, uint32_t* ids, uint32_t* error_index)
+{
+	PRINT_NAME();
+	return AprResolveBatch(nullptr, paths, count, ids, nullptr, error_index, nullptr);
+}
+
+int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIds(const char* prefix, const char* const* paths, uint64_t count, uint32_t* ids,
+                                                           uint32_t* error_index)
+{
+	PRINT_NAME();
+	return AprResolveBatch(prefix, paths, count, ids, nullptr, error_index, nullptr);
 }
 
 int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(const char* prefix, const char* const* paths, uint64_t count,
-                                                                       uint32_t* ids, uint64_t* sizes)
+                                                                       uint32_t* ids, uint64_t* sizes, uint32_t* error_index)
 {
 	PRINT_NAME();
-	return AprResolveBatch(prefix, paths, count, ids, sizes, nullptr);
+	return AprResolveBatch(prefix, paths, count, ids, sizes, error_index, nullptr);
 }
 
 int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsForEach(const char* const* paths, uint64_t count, uint32_t* ids, int32_t* results)
 {
 	PRINT_NAME();
-	return AprResolveBatch(nullptr, paths, count, ids, nullptr, results);
+	return AprResolveBatch(nullptr, paths, count, ids, nullptr, nullptr, results);
 }
 
 int KYTY_SYSV_ABI KernelAprResolveFilepathsToIdsAndFileSizesForEach(const char* const* paths, uint64_t count, uint32_t* ids,
                                                                     uint64_t* sizes, int32_t* results)
 {
 	PRINT_NAME();
-	return AprResolveBatch(nullptr, paths, count, ids, sizes, results);
+	return AprResolveBatch(nullptr, paths, count, ids, sizes, nullptr, results);
 }
 
 int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsForEach(const char* prefix, const char* const* paths, uint64_t count,
                                                                   uint32_t* ids, int32_t* results)
 {
 	PRINT_NAME();
-	return AprResolveBatch(prefix, paths, count, ids, nullptr, results);
+	return AprResolveBatch(prefix, paths, count, ids, nullptr, nullptr, results);
 }
 
 int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach(const char* prefix, const char* const* paths,
@@ -2862,7 +2814,7 @@ int KYTY_SYSV_ABI KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach(co
                                                                               int32_t* results)
 {
 	PRINT_NAME();
-	return AprResolveBatch(prefix, paths, count, ids, sizes, results);
+	return AprResolveBatch(prefix, paths, count, ids, sizes, nullptr, results);
 }
 
 int KYTY_SYSV_ABI KernelAprGetFileSize(uint32_t file_id, uint64_t* size)

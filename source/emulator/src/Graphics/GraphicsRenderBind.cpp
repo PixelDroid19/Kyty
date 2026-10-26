@@ -4068,17 +4068,32 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// The overlap query may adjust the range: snapshot the span for
 				// object creation before it runs.
 				depth_span_size = query_size;
-				const bool physical_ok = span_ok && Kernel::Memory::KernelQueryMappedRange(addr, query_size, &mapped) &&
-				                         mapped.kind == Kernel::Memory::KernelMappedRangeKind::Physical;
+				// Layers may be separate mappings, and pages of a partially resident
+				// array may be unmapped inside a PRT aperture, where they read as zero.
+				(void)Kernel::Memory::KernelQueryMappedRange(addr, query_size, &mapped);
+				const bool physical_ok = span_ok && Kernel::Memory::KernelRangeResidentOrPrt(addr, query_size);
 				const bool overlaps_ok = GpuMemoryQueryOverlaps(&query_addr, &query_size, 1u, &overlaps);
-				bool has_texture_parent = false;
-				bool has_render_texture = false;
+				bool has_texture_parent  = false;
+				bool has_render_texture  = false;
+				bool has_storage_texture = false;
+				bool has_partial_storage = false;
+				// A storage image that only crosses the range starts elsewhere, so it cannot be this surface.
+				uint32_t crossing_storage_textures = 0u;
 				if (overlaps_ok)
 				{
 					for (uint32_t entry = 0u; entry < overlaps.entry_count; entry++)
 					{
 						has_texture_parent |= overlaps.entries[entry].type == GpuMemoryObjectType::Texture;
 						has_render_texture |= overlaps.entries[entry].type == GpuMemoryObjectType::RenderTexture;
+						has_storage_texture |= overlaps.entries[entry].type == GpuMemoryObjectType::StorageTexture;
+						if (overlaps.entries[entry].type == GpuMemoryObjectType::StorageTexture &&
+						    overlaps.entries[entry].relation == GpuMemoryOverlapType::Crosses)
+						{
+							crossing_storage_textures += overlaps.entries[entry].count;
+						}
+						has_partial_storage |= overlaps.entries[entry].type == GpuMemoryObjectType::StorageBuffer &&
+						                       (overlaps.entries[entry].relation == GpuMemoryOverlapType::IsContainedWithin ||
+						                        overlaps.entries[entry].relation == GpuMemoryOverlapType::Crosses);
 					}
 				}
 				// Only a render target that can hold this sample owns the range; one of
@@ -4095,10 +4110,26 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					}
 					stale_render_textures = stale ? covers.Size() : 0u;
 				}
+				// Storage images likewise: one of another extent holds an earlier use of the range. They are
+				// counted over the range the overlap query settled on; the lookup leaves out crossing ones.
+				uint32_t stale_storage_textures = crossing_storage_textures;
+				if (has_storage_texture)
+				{
+					const auto views = FindOverlappingStorageTextures(buffer, query_addr, query_size);
+					bool       stale = !views.IsEmpty();
+					for (const auto* view: views)
+					{
+						const auto extent = view->GetGuestExtent();
+						stale = stale && !Gen5SurfaceExtentMayHoldSample(extent.width, extent.height, width, height, 1u, false);
+					}
+					stale_storage_textures += stale ? views.Size() : 0u;
+				}
+				const bool               needs_provenance = has_texture_parent || has_partial_storage;
 				GpuMemoryRangeProvenance provenance {};
-				const bool provenance_ok = !has_texture_parent || GpuMemoryQueryRangeProvenance(addr, depth_span_size, &provenance);
+				const bool provenance_ok = !needs_provenance || GpuMemoryQueryRangeProvenance(addr, depth_span_size, &provenance);
 				depth_source = overlaps_ok && provenance_ok
-				                   ? GpuMemoryClassifyDepthD16Source(overlaps, has_texture_parent ? &provenance : nullptr, stale_render_textures)
+				                   ? GpuMemoryClassifyDepthD16Source(overlaps, needs_provenance ? &provenance : nullptr, stale_render_textures,
+				                                                     stale_storage_textures)
 				                   : GpuMemoryDepthD16Source::Unsupported;
 				// The storage-backed detile is a 16-bit equation.
 				const bool source_ok = depth_source == GpuMemoryDepthD16Source::Guest ||

@@ -2695,6 +2695,91 @@ TEST(EmulatorGraphicsPackets, NestedSelectionAtSharedJoinMergesOnItsOwnScJoinLin
 	EXPECT_LT(outer_link, guest_join);
 }
 
+// A conditional in the taken arm of a diamond jumps over the diamond's join to
+// the end of the join's straight-line head. The head is reached from both arms,
+// so no selection may own it; the observed program failed pipeline creation
+// with a branch into a selection construct past its header.
+TEST(EmulatorGraphicsPackets, ConditionalSkippingDiamondJoinHeadIsStructured)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+
+	auto make_nop = [](uint32_t pc)
+	{
+		ShaderInstruction inst;
+		inst.pc                = pc;
+		inst.type              = ShaderInstructionType::SInstPrefetch;
+		inst.format            = ShaderInstructionFormat::Imm;
+		inst.src_num           = 1;
+		inst.src[0].type       = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.u = 0;
+		return inst;
+	};
+
+	auto make_branch = [](uint32_t pc, ShaderInstructionType type, int32_t imm)
+	{
+		ShaderInstruction inst;
+		inst.pc                = pc;
+		inst.type              = type;
+		inst.format            = ShaderInstructionFormat::Label;
+		inst.src_num           = 1;
+		inst.src[0].type       = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.i = imm;
+		return inst;
+	};
+
+	auto diamond   = make_branch(0x04, ShaderInstructionType::SCbranchScc1, 0x0c); // -> 0x14
+	auto else_exit = make_branch(0x10, ShaderInstructionType::SBranch, 0x10);      // -> 0x24
+	auto skip      = make_branch(0x18, ShaderInstructionType::SCbranchScc0, 0x10); // -> 0x2c
+	ShaderInstruction end;
+	end.pc     = 0x30;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	code.GetInstructions().Add(make_nop(0x00));
+	code.GetInstructions().Add(diamond);
+	code.GetInstructions().Add(make_nop(0x08));
+	code.GetInstructions().Add(make_nop(0x0c));
+	code.GetInstructions().Add(else_exit);
+	code.GetInstructions().Add(make_nop(0x14));
+	code.GetInstructions().Add(skip);
+	code.GetInstructions().Add(make_nop(0x1c));
+	code.GetInstructions().Add(make_nop(0x20));
+	code.GetInstructions().Add(make_nop(0x24));
+	code.GetInstructions().Add(make_nop(0x28));
+	code.GetInstructions().Add(make_nop(0x2c));
+	code.GetInstructions().Add(end);
+	code.GetLabels().Add(ShaderLabel(diamond));
+	code.GetLabels().Add(ShaderLabel(else_exit));
+	code.GetLabels().Add(ShaderLabel(skip));
+
+	const auto& skips = ScJoinSkips(code);
+	ASSERT_EQ(skips.size(), 1u);
+	EXPECT_EQ(skips[0].branch, 0x18u);
+	EXPECT_EQ(skips[0].join, 0x24u);
+	EXPECT_EQ(skips[0].target, 0x2cu);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 1;
+	input.threads_num[1] = 1;
+	input.threads_num[2] = 1;
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	ScopedShaderValidation validation;
+	ASSERT_TRUE(Config::ShaderValidationEnabled());
+	Vector<uint32_t> binary;
+	String8          error;
+	ASSERT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
+
 TEST(EmulatorGraphicsPackets, ClassifiesGen5FourComponent32BitBufferFormats)
 {
 	EXPECT_FALSE(ShaderIsGen5FourComponent32BitBufferFormat(74));
@@ -6734,7 +6819,9 @@ TEST(EmulatorGraphicsPackets, MaterializesArrayedGen5ImageLoadAndStoreCoordinate
 	EXPECT_NE(source.FindIndex("%ImageSA = OpTypeImage %uint 2D 0 1 0 1 Unknown"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%ImageL = OpTypeImage %uint 2D 0 1 0 2 R32ui"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpCompositeConstruct %v3uint"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpImageFetch %v4uint"), Core::STRING8_INVALID_INDEX);
+	// The load reads the storage view of the T# the shader also writes.
+	EXPECT_NE(source.FindIndex("OpImageRead %v4uint"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpImageFetch"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpBitcast %float"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpBitcast %uint"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpImageWrite"), Core::STRING8_INVALID_INDEX);

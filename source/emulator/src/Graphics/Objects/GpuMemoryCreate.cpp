@@ -1585,6 +1585,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					// Texture alias coexists. Peer Texture overlaps are handled by
 					// GpuMemoryAllowsTextureContainedInSurface above (link, not reclaim).
 					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::StorageBuffer):
+					// VideoOut refuses a registration that overlaps a registered buffer, so an
+					// overlapping scanout image belongs to an unregistered set: the new one replaces it.
+					case ObjectsRelation(GpuMemoryObjectType::VideoOutBuffer, OverlapType::Equals, GpuMemoryObjectType::VideoOutBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VideoOutBuffer, OverlapType::Crosses, GpuMemoryObjectType::VideoOutBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VideoOutBuffer, OverlapType::Contains, GpuMemoryObjectType::VideoOutBuffer):
+					case ObjectsRelation(GpuMemoryObjectType::VideoOutBuffer, OverlapType::IsContainedWithin,
+					                     GpuMemoryObjectType::VideoOutBuffer):
 					{
 						delete_all = true;
 						break;

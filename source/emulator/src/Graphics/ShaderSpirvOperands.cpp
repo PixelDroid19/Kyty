@@ -638,9 +638,10 @@ bool operand_is_exec(ShaderOperand op)
 	return false;
 }
 
-// SDWA SEL (GCN/RDNA): zero-extend BYTE_n / WORD_n from a uint register value.
+// SDWA SEL (GCN/RDNA): zero- or sign-extend BYTE_n / WORD_n from a uint register value.
 // sel 6 (DWORD) is a no-op. Returns SPIR-V that writes <result_id> from <input_id>.
-static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_id, const String8& index, uint8_t sel)
+static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_id, const String8& index, uint8_t sel,
+                                 bool sign_extend)
 {
 	if (sel == 6u)
 	{
@@ -680,7 +681,8 @@ static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_
 		default: break;
 	}
 
-	return String8("%<result_id> = OpBitFieldUExtract %uint %<input_id> %uint_<off> %uint_<cnt>\n")
+	return String8("%<result_id> = <extract> %uint %<input_id> %uint_<off> %uint_<cnt>\n")
+	    .ReplaceStr("<extract>", sign_extend ? "OpBitFieldSExtract" : "OpBitFieldUExtract")
 	    .ReplaceStr("<result_id>", result_id)
 	    .ReplaceStr("<input_id>", input_id)
 	    .ReplaceStr("<off>", String8::FromPrintf("%u", offset))
@@ -717,6 +719,8 @@ enum class RowDppMode
 {
 	Unsupported,
 	Zero,
+	// x + -0.0 == x for every float x, so a float add keeps the destination.
+	NegativeZero,
 	Input,
 };
 
@@ -772,11 +776,18 @@ static bool fragment_row_dpp_wave32_keeps_dst(const ShaderCode& code, uint32_t i
 	}
 	const auto& inst = code.GetInstructions().At(index);
 	if (inst.type != ShaderInstructionType::VOrB32 && inst.type != ShaderInstructionType::VXorB32 &&
-	    inst.type != ShaderInstructionType::VAddI32)
+	    inst.type != ShaderInstructionType::VAddI32 && inst.type != ShaderInstructionType::VAddF32)
 	{
 		return false;
 	}
 	if (inst.dst.type != ShaderOperandType::Vgpr || inst.src_num != 2)
+	{
+		return false;
+	}
+	// A float add returns the destination only without input or output modifiers.
+	const auto unmodified = [](const ShaderOperand& operand)
+	{ return !operand.absolute && !operand.negate && !operand.clamp && operand.multiplier == 1.0f; };
+	if (inst.type == ShaderInstructionType::VAddF32 && !(unmodified(inst.dst) && unmodified(inst.src[0]) && unmodified(inst.src[1])))
 	{
 		return false;
 	}
@@ -804,7 +815,8 @@ static RowDppMode row_dpp_mode(const Spirv& spirv, const ShaderOperand& op, cons
 	}
 	const uint32_t control = op.dpp_ctrl;
 	const bool     row     = (control >= 0x101u && control <= 0x10fu) || (control >= 0x111u && control <= 0x11fu) ||
-	                         (control >= 0x121u && control <= 0x12fu) || control == 0x140u || control == 0x141u;
+	                         (control >= 0x121u && control <= 0x12fu) || control == 0x140u || control == 0x141u ||
+	                         (control >= 0x160u && control <= 0x16fu);
 	if (!row)
 	{
 		return RowDppMode::Unsupported;
@@ -846,7 +858,8 @@ static RowDppMode row_dpp_mode(const Spirv& spirv, const ShaderOperand& op, cons
 	{
 		return RowDppMode::Unsupported;
 	}
-	return RowDppMode::Zero;
+	const bool float_add = spirv.GetCode().GetInstructions().At(inst_index).type == ShaderInstructionType::VAddF32;
+	return float_add && !op.dpp_bound_ctrl ? RowDppMode::NegativeZero : RowDppMode::Zero;
 }
 
 // Emits the row-class lane permutation for an already-loaded operand inside a
@@ -857,7 +870,7 @@ static RowDppMode row_dpp_mode(const Spirv& spirv, const ShaderOperand& op, cons
 // partial) FI=0 also zeroes sources fetched from EXEC-inactive lanes.
 static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, const String8& result_id,
                                          const String8& input_id, bool input_is_uint, bool exec_guard,
-                                         bool keep_input, String8* text)
+                                         RowDppMode mode, String8* text)
 {
 	String8 head = input_is_uint ? String8("\n        %dpp_bits_<result> = OpCopyObject %uint %<in>\n")
 	                             : String8("\n        %dpp_bits_<result> = OpBitcast %uint %<in>\n");
@@ -884,7 +897,12 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 )";
 	const uint32_t control = op.dpp_ctrl;
 	String8          target;
-	if (control == 0x140u || control == 0x141u)
+	if (control >= 0x160u)
+	{
+		// row_xmask: XOR the lane within its row; the source never leaves the row.
+		target = String8("    %dpp_target_<result> = OpBitwiseXor %uint %dpp_lane_<result> %<step>\n"
+		                 "    %dpp_bounds_<result> = OpCopyObject %bool %true\n");
+	} else if (control == 0x140u || control == 0x141u)
 	{
 		target = String8("    %dpp_target_<result> = OpBitwiseXor %uint %dpp_lane_<result> %<mirror>\n"
 		                 "    %dpp_bounds_<result> = OpCopyObject %bool %true\n")
@@ -915,7 +933,9 @@ static bool operand_dpp_row_permute_uint(Spirv* spirv, const ShaderOperand& op, 
 	            .ReplaceStr("<lane_16>", spirv->GetConstantUint(16u))
 	            .ReplaceStr("<step>", spirv->GetConstantUint(control & 15u))
 	            .ReplaceStr("<zero>", spirv->GetConstantUint(0u))
-	            .ReplaceStr("<fallback>", keep_input ? (String8("dpp_bits_") + result_id) : spirv->GetConstantUint(0u));
+	            .ReplaceStr("<fallback>", mode == RowDppMode::Input          ? String8("dpp_bits_") + result_id
+	                                      : mode == RowDppMode::NegativeZero ? spirv->GetConstantUint(0x80000000u)
+	                                                                         : spirv->GetConstantUint(0u));
 	return true;
 }
 
@@ -936,8 +956,7 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 		// EXEC is full and the extra shuffle would be a no-op.
 		const bool exec_guard = !op.dpp_fetch_inactive && !(spirv->GetCode().GetType() == ShaderType::Pixel &&
 		                                                    ShaderFragmentWaveInsideRegion(spirv->GetCode(), index.ToUint32()));
-		return operand_dpp_row_permute_uint(spirv, op, result_id, input_id, input_is_uint, exec_guard,
-		                                   mode == RowDppMode::Input, text);
+		return operand_dpp_row_permute_uint(spirv, op, result_id, input_id, input_is_uint, exec_guard, mode, text);
 	}
 	const auto control = op.dpp_ctrl;
 	const auto ctrl    = spirv->GetConstantUint(control);
@@ -1185,7 +1204,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 
 	if (need_swizzle)
 	{
-		*load += String8(' ', 10) + sdwa_swizzle_uint(raw_id, result_id, index, op.swizzle);
+		*load += String8(' ', 10) + sdwa_swizzle_uint(raw_id, result_id, index, op.swizzle, op.sdwa_sext);
 	}
 	return true;
 }

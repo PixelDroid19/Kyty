@@ -1960,6 +1960,17 @@ void GpuDirtyPageTracker::EndHostWrite(uint64_t token) noexcept
 	EXIT("Unknown host-write lease\n");
 }
 
+bool GpuDirtyPageTracker::HasHostWrite(uintptr_t address, size_t size) const noexcept
+{
+	const uintptr_t end = RangeEnd(address, size);
+	if (!Enabled() || end == 0)
+	{
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(*m_registration_mutex);
+	return HasHostWriteLocked(PageStart(address), PageStart(end - 1u));
+}
+
 uint64_t GpuDirtyPageTracker::SnapshotGeneration(uintptr_t address, size_t size) const noexcept
 {
 	const uintptr_t end = RangeEnd(address, size);

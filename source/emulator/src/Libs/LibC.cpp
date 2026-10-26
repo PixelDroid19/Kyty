@@ -433,6 +433,13 @@ static KYTY_SYSV_ABI void c_quick_exit(int code)
 	// Unlike exit(), no guest atexit handlers run and no streams are flushed.
 	Core::ShutdownActiveAndQuickExit(code);
 }
+// Gen5 libc_v1 _Exit — NID wZi5ly2guNw: ends the process without running any
+// exit handler, the same host action as quick_exit.
+static KYTY_SYSV_ABI void c_Exit(int code)
+{
+	KYTY_LOG_WARN("guest _Exit(%d) from 0x%016" PRIx64 "\n", code, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	Core::ShutdownActiveAndQuickExit(code);
+}
 // Gen5 libc_v1 strtok (oVkZ8W8-Q8A): host uses strtok_r with a per-thread save pointer.
 static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
 {
@@ -443,13 +450,42 @@ static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
 // C++ operator new/delete, same ownership as libc malloc.
 static constexpr uint8_t g_cxx_nothrow = 0;
 
+// Guest handler installed by std::set_new_handler (0 when none).
+static std::atomic<uint64_t> g_new_handler {0};
+
+// Gen5 libc_v1 _ZSt15set_new_handlerPFvvE — NID RqeErO3cFHU. The guest library
+// swaps one global pointer atomically and returns the previous handler.
+static KYTY_SYSV_ABI uint64_t cxx_set_new_handler(uint64_t handler)
+{
+	return g_new_handler.exchange(handler);
+}
+
+// operator new retries an exhausted heap once per call of the installed
+// handler, which frees memory or does not return.
+static void* cxx_allocate(size_t size)
+{
+	for (;;)
+	{
+		if (void* ptr = allocate_with_owner(size != 0 ? size : 1); ptr != nullptr)
+		{
+			return ptr;
+		}
+		const uint64_t handler = g_new_handler.load();
+		if (handler == 0)
+		{
+			return nullptr;
+		}
+		Loader::GuestCall::Invoke(handler, 0, 0, 0);
+	}
+}
+
 static KYTY_SYSV_ABI void* cxx_new(size_t size)
 {
-	return allocate_with_owner(size != 0 ? size : 1);
+	return cxx_allocate(size);
 }
 static KYTY_SYSV_ABI void* cxx_new_nothrow(size_t size, const void* /*nothrow_tag*/)
 {
-	return allocate_with_owner(size != 0 ? size : 1);
+	return cxx_allocate(size);
 }
 static KYTY_SYSV_ABI void cxx_delete(void* p)
 {
@@ -470,11 +506,11 @@ static KYTY_SYSV_ABI void cxx_delete_sized_aligned(void* p, size_t /*size*/, siz
 }
 static KYTY_SYSV_ABI void* cxx_new_array(size_t size)
 {
-	return allocate_with_owner(size != 0 ? size : 1);
+	return cxx_allocate(size);
 }
 static KYTY_SYSV_ABI void* cxx_new_array_nothrow(size_t size, const void* /*nothrow_tag*/)
 {
-	return allocate_with_owner(size != 0 ? size : 1);
+	return cxx_allocate(size);
 }
 static KYTY_SYSV_ABI void cxx_delete_array(void* p)
 {
@@ -708,6 +744,33 @@ constexpr std::array<const char*, 21> g_c_locale_times = {
 static KYTY_SYSV_ABI const unsigned short* c_Getpctype()
 {
 	return g_c_locale_ctype.data() + 1;
+}
+
+// _Getctype(): the ctype vector, returned in registers: the classification table and a zero delete flag.
+struct CxxCtypevec
+{
+	const unsigned short* table;
+	std::uint64_t         delete_flag;
+};
+
+static KYTY_SYSV_ABI CxxCtypevec c_Getctype()
+{
+	return {c_Getpctype(), 0};
+}
+
+// _Getcvt(): the conversion vector of the "C" locale, returned through the caller's buffer: two 32-bit ones followed
+// by 32 zero bytes.
+struct CxxCvtvec
+{
+	std::uint32_t words[2];
+	std::uint8_t  reserved[32];
+};
+
+static_assert(sizeof(CxxCvtvec) == 0x28);
+
+static KYTY_SYSV_ABI CxxCvtvec c_Getcvt()
+{
+	return {{1, 1}, {}};
 }
 
 static KYTY_SYSV_ABI const char* const* c_Getptimes()
@@ -3348,6 +3411,10 @@ static KYTY_SYSV_ABI void c_Xout_of_range(const char* msg)
 {
 	ThrowLogicError(&g_typeinfo_out_of_range, msg);
 }
+static KYTY_SYSV_ABI void c_Xruntime_error(const char* msg)
+{
+	ThrowLogicError(&g_typeinfo_runtime_error, msg);
+}
 static KYTY_SYSV_ABI void c_Xlength_error(const char* msg)
 {
 	ThrowLogicError(&g_typeinfo_length_error, msg);
@@ -3405,6 +3472,12 @@ static KYTY_SYSV_ABI void* c_locale_Getgloballocale()
 }
 
 static KYTY_SYSV_ABI void* c_locale_CreateClassicLocimp()
+{
+	return &g_classic_locimp;
+}
+
+// std::locale::_Init(bool do_incref) — the global Locimp, which is the static classic one; its incref slot is a no-op.
+static KYTY_SYSV_ABI void* c_locale_InitIncref(bool /*do_incref*/)
 {
 	return &g_classic_locimp;
 }
@@ -3509,6 +3582,110 @@ static KYTY_SYSV_ABI void c_locimp_addfac(CxxLocimpLayout* self, void* facet, st
 		LocimpRelease(self->facet_vec[id]);
 	}
 	self->facet_vec[id] = facet;
+}
+
+// locale::_Locimp::_New_Locimp(const _Locimp&): a heap copy of the implementation, built as the copy constructor does.
+static KYTY_SYSV_ABI CxxLocimpLayout* c_locimp_new_locimp(const CxxLocimpLayout* right)
+{
+	auto* self = static_cast<CxxLocimpLayout*>(cxx_new(sizeof(CxxLocimpLayout)));
+	c_locimp_copy_ctor(self, right);
+	return self;
+}
+
+// _Locinfo::_Locinfo_ctor(_Locinfo*, const char*): the runtime only knows the "C" locale. It saves the name of the
+// current locale at +0x08 and +0x10, and an empty or "C" name selects it; any other name is refused.
+static const char g_locinfo_c_name[] = "C";
+
+static KYTY_SYSV_ABI void c_locinfo_ctor(void* self, const char* name)
+{
+	EXIT_IF(self == nullptr);
+	auto* saved = static_cast<const char**>(self);
+	saved[1]    = g_locinfo_c_name;
+	if (name == nullptr || (name[0] != '\0' && std::strcmp(name, g_locinfo_c_name) != 0))
+	{
+		ThrowLogicError(&g_typeinfo_runtime_error, "bad locale name");
+	}
+	saved[2] = g_locinfo_c_name;
+}
+
+// ios_base::_Addstd(ios_base*): a standard stream takes the first free or own slot of seven (an eighth absorbs the
+// rest), records it in _Stdstr (+0x08) and counts one more open of that slot.
+struct CxxStdStreams
+{
+	std::mutex    mutex;
+	const void*   streams[9] {};
+	std::int8_t   opens[9] {};
+};
+
+static CxxStdStreams g_std_streams;
+
+static KYTY_SYSV_ABI void c_Ios_base_addstd(void* self)
+{
+	EXIT_IF(self == nullptr);
+	std::lock_guard lock(g_std_streams.mutex);
+	std::uint64_t   index = 1;
+	while (index < 8 && g_std_streams.streams[index] != self && g_std_streams.streams[index] != nullptr)
+	{
+		index++;
+	}
+	static_cast<std::uint64_t*>(self)[1] = index;
+	g_std_streams.streams[index]          = self;
+	g_std_streams.opens[index]++;
+}
+
+// ios_base::_Ios_base_dtor(ios_base*): once the last open of a standard stream (or any other stream) ends, every
+// registered callback sees erase_event (0), the iword/pword and callback lists are freed, and a locale other than the
+// classic one drops its implementation reference and is deleted.
+struct CxxIosCallback
+{
+	CxxIosCallback* next;
+	std::int32_t    index;
+	std::uint64_t   function;
+};
+
+struct CxxIosArray
+{
+	CxxIosArray* next;
+};
+
+static KYTY_SYSV_ABI void c_Ios_base_dtor(void* self)
+{
+	EXIT_IF(self == nullptr);
+	auto*               words  = static_cast<std::uint64_t*>(self);
+	const std::uint64_t stdstr = words[1];
+	if (stdstr != 0 && stdstr < 9 && --g_std_streams.opens[stdstr] > 0)
+	{
+		return;
+	}
+	auto* calls = reinterpret_cast<CxxIosCallback*>(words[7]);
+	for (auto* call = calls; call != nullptr; call = call->next)
+	{
+		Loader::GuestCall::Invoke(call->function, 0, reinterpret_cast<std::uint64_t>(self), static_cast<std::uint32_t>(call->index));
+	}
+	for (auto* array = reinterpret_cast<CxxIosArray*>(words[6]); array != nullptr;)
+	{
+		auto* next = array->next;
+		cxx_delete_sized(array, 0x20);
+		array = next;
+	}
+	words[6] = 0;
+	for (auto* call = reinterpret_cast<CxxIosCallback*>(words[7]); call != nullptr;)
+	{
+		auto* next = call->next;
+		cxx_delete_sized(call, sizeof(CxxIosCallback));
+		call = next;
+	}
+	words[7]     = 0;
+	auto* locale = reinterpret_cast<CxxLocaleLayout*>(words[8]);
+	if (locale == nullptr || locale == &g_sce_classic_locale)
+	{
+		return;
+	}
+	if (locale->ptr != nullptr)
+	{
+		LocimpRelease(locale->ptr);
+	}
+	cxx_delete_sized(locale, sizeof(CxxLocaleLayout));
 }
 
 static KYTY_SYSV_ABI void c_cxa_pure_virtual()
@@ -5224,6 +5401,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("DQbtGaBKlaw", LibC::c_strnlen_s);
 	LIB_FUNC("Ezzq78ZgHPs", LibC::c_wcschr);
 	LIB_FUNC("g3ShSirD50I", LibC::c_wcsrchr);
+	LIB_FUNC("x9uumWcxhXU", LibC::c_wcsspn);
+	LIB_FUNC("H4MCONF+Gps", LibC::c_wcspbrk);
+	LIB_FUNC("Zf7ewes1VtY", LibC::c_std_find_trivial_4);
+	LIB_FUNC("3sssb+7Wn9M", LibC::c_std_find_trivial_8);
 	LIB_FUNC("KZm8HUIX2Rw", LibC::c_wcscat);
 	LIB_FUNC("6f5f-qx4ucA", LibC::c_wcscpy_s);
 	LIB_FUNC("Ye20uNnlglA", LibC::c_abs);
@@ -5270,7 +5451,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("TVfbf1sXt0A", &LibC::g_classic_cerr);
 	LIB_OBJECT("5PfqUBaQf4g", &LibC::g_classic_cout);
 	// Facet ::id Objects — eboot imports (Ps5Nid / ps5_names).
-	LIB_OBJECT("VmqsS6auJzo", &LibC::g_ctype_wchar_id);
+	LIB_OBJECT_ALIASES(&LibC::g_ctype_wchar_id, "VmqsS6auJzo", "b61-ZHIQuns");
 	LIB_OBJECT("irGo1yaJ-vM", &LibC::g_collate_wchar_id);
 	LIB_OBJECT("E14mW8pVpoE", &LibC::g_num_put_char_id);
 	LIB_OBJECT("7brRfHVVAlI", &LibC::g_collate_char_id);
@@ -5278,7 +5459,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("-mLzBSk-VGs", &LibC::g_num_get_char_id);
 	LIB_OBJECT("a54t8+k7KpY", &LibC::g_time_get_char_id);
 	LIB_OBJECT("BamOsNbUcn4", &LibC::g_time_put_char_id);
-	LIB_OBJECT("FjZCPmK0SbA", &LibC::g_codecvt_wchar_id);
+	LIB_OBJECT_ALIASES(&LibC::g_codecvt_wchar_id, "FjZCPmK0SbA", "OVV3+UimpiY");
 	LIB_OBJECT("u2MAta5SS84", &LibC::g_codecvt_char32_id);
 	// std::codecvt<char, char, mbstate_t>::id — eVFYZnYNDo0.
 	LIB_OBJECT("eVFYZnYNDo0", &LibC::g_codecvt_char_id);
@@ -5362,8 +5543,16 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("QJ5xVfKkni0", LibC::c_wmemcmp16);
 	// Captured Gen5 locale setup: no args, returns a Locimp-like object.
 	LIB_FUNC("9rMML086SEE", LibC::c_locale_CreateClassicLocimp);
+	LIB_FUNC("Mt6co-yzyjg", LibC::c_locale_InitIncref);
+	LIB_FUNC("ynwqogpIbL0", LibC::c_locimp_new_locimp);
+	LIB_FUNC("K+YIrBadUlc", LibC::c_locinfo_ctor);
+	LIB_FUNC("LfjFksmiu4Y", LibC::c_Ios_base_addstd);
+	LIB_FUNC("Ze2I81YNykw", LibC::c_Ios_base_dtor);
+	LIB_FUNC("gwAf8VMkXS0", LibC::c_Getctype);
+	LIB_FUNC("HHXmPak83kQ", LibC::c_Getcvt);
+	LIB_FUNC("Rlnw-UcmA5k", LibC::c_Xruntime_error); // std::__sce_v2::_Xruntime_error
 	LIB_FUNC("WViwxtEKxHk", LibC::c_locimp_copy_ctor);
-	LIB_FUNC("uuga3RipCKQ", LibC::c_locimp_addfac);
+	LIB_FUNC_ALIASES(LibC::c_locimp_addfac, "uuga3RipCKQ", "7KPYZ-jSAto");
 	// std::locale::classic() returns the process-wide classic locale object.
 	LIB_FUNC("Uq5K8tl8I9U", LibC::c_locale_classic);
 	LIB_FUNC("QxqK-IdpumU", LibC::c_Getpmbstate);
@@ -5386,10 +5575,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC_ALIASES(LibC::c_Unlock_shared_ptr_spin_lock, "1HYEoANqZ1w", "ySAwp2f9rqM");
 	LIB_FUNC("kALvdgEv5ME", LibC::c_Locksyslock);
 	LIB_FUNC("9nf8joUTSaQ", LibC::c_Unlocksyslock);
-	LIB_FUNC("hEQ2Yi4PJXA", LibC::c_locale_Getgloballocale);
+	LIB_FUNC_ALIASES(LibC::c_locale_Getgloballocale, "hEQ2Yi4PJXA", "xE51MX+B2G4");
 	LIB_FUNC("hqi8yMOCmG0", LibC::c_locale_InitTemporaryInfo);
-	LIB_FUNC("p6LrHjIQMdk", LibC::c_locale_DestroyTemporaryInfo);
-	LIB_FUNC("QW2jL1J5rwY", LibC::c_locale_RegisterFacet);
+	LIB_FUNC_ALIASES(LibC::c_locale_DestroyTemporaryInfo, "p6LrHjIQMdk", "taOj6NIm7DM");
+	LIB_FUNC_ALIASES(LibC::c_locale_RegisterFacet, "QW2jL1J5rwY", "aFxknk3hTog");
 	LIB_FUNC("zr094EQ39Ww", LibC::c_cxa_pure_virtual);
 	LIB_FUNC("tyHd3P7oDrU", LibC::c_exception_doraise);
 	// std::uncaught_exception — Q1BL70XVV0o after classic-locale probe.
@@ -5503,6 +5692,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("McsGnqV6yRE", LibC::cxx_delete_nothrow); // operator delete(void*, const std::nothrow_t&)
 	LIB_FUNC("CkY0AVa-frg", LibC::c_get_new_handler);  // std::get_new_handler()
 	LIB_OBJECT("NLwJ3q+64bY", &LibC::g_cxx_nothrow); // std::nothrow
+	LIB_FUNC("RqeErO3cFHU", LibC::cxx_set_new_handler);
 	// Gen5 libc_v1 — public NID cfAXurvfl5o is __cxa_allocate_exception (not
 	// operator new). Mis-binding it to cxx_new corrupts the throw path.
 	LIB_FUNC("cfAXurvfl5o", LibC::cxa_allocate_exception);
@@ -5582,7 +5772,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("8u8lPzUEq+U", LibC::c_memchr);
 	LIB_FUNC("fnUEjBCNRVU", LibC::c_memchr);
 	// Unique wide-mem HLE from bringup (NID does not collide with HEAD Objects).
-	LIB_FUNC("Al8MZJh-4hM", LibC::c_wmemset);
+	LIB_FUNC("Al8MZJh-4hM", LibC::c_wmemset16);
 	LIB_FUNC("5TjaJwkLWxE", LibC::c_bcmp);
 	LIB_FUNC("kiZSXIWd9vg", LibC::c_strcpy);
 	// Gen5 strcpy_s — NID 5Xa2ACNECdo (next hard-abort after thread stack reprotect).
@@ -5678,6 +5868,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("SHlt7EhOtqA", LibC::c_fgetpos);
 	LIB_FUNC("7PkSz+qnTto", LibC::c_fsetpos);
 	LIB_FUNC("qdGFBoLVNKI", LibC::c_quick_exit);
+	LIB_FUNC("wZi5ly2guNw", LibC::c_Exit);
 	// IL2CPP libc_v1 imports — CRT/Dinkumware internals.
 	LIB_FUNC("vZkmJmvqueY", LibC::c_Lockfilelock);
 	LIB_FUNC("0x7rx8TKy2Y", LibC::c_Unlockfilelock);
@@ -5751,6 +5942,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("V02oFv+-JzA", LibC::c_isinf);
 	// Gen5 libc_v1 __signbit — standard double predicate ABI.
 	LIB_FUNC("Rw4J-22tu1U", LibC::c_signbit);
+	LIB_FUNC("CjQROLB88a4", LibC::c_signbitf);
 	// Gen5 libc_v1 __fpclassifyd — translate host categories to guest values.
 	LIB_FUNC("qlWiRfOJx1A", LibC::c_fpclassifyd);
 	// Gen5 libc_v1 float math (NIDs from name→NID hash).
@@ -5804,9 +5996,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Z2tTVqGDPGQ", LibC::c_cxa_thread_atexit);
 	// Gen5 __cxa_dynamic_cast — guest Construct ConditionOrAction→Action.
 	LIB_FUNC("hMAe+TWS9mQ", LibC::cxa_dynamic_cast);
-	LIB_FUNC("ozMAr28BwSY", LibC::c_Xout_of_range);
+	LIB_FUNC_ALIASES(LibC::c_Xout_of_range, "ozMAr28BwSY", "bRPUrNROyOI");
 	LIB_FUNC("Pu0Ecyk-7FU", LibC::c_Xrange_error);
-	LIB_FUNC("tQIo+GIPklo", LibC::c_Xlength_error);
+	LIB_FUNC_ALIASES(LibC::c_Xlength_error, "tQIo+GIPklo", "d08RCvZNNR8");
 
 	// setjmp / longjmp (bound directly to host — no C++ wrapper)
 	#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS

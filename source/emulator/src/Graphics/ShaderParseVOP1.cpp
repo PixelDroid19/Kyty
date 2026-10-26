@@ -60,6 +60,7 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	}
 
 	inst.src[0].swizzle  = static_cast<uint8_t>(src0_sel);
+	inst.src[0].sdwa_sext = sdwa && ((buffer[1] >> 19u) & 1u) != 0u;
 	inst.src[0].absolute = (src0_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);
 	inst.src[0].dpp = dpp;
@@ -235,7 +236,7 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x37: inst.type = ShaderInstructionType::VNotB32; break;
 		case 0x38: inst.type = ShaderInstructionType::VBfrevB32; break;
 		case 0x39: KYTY_NI("v_ffbh_u32"); break;
-		case 0x3A: KYTY_NI("v_ffbl_b32"); break;
+		case 0x3A: inst.type = ShaderInstructionType::VFfblB32; break;
 		case 0x3B: KYTY_NI("v_ffbh_i32"); break;
 		case 0x3C: KYTY_NI("v_frexp_exp_i32_f64"); break;
 		case 0x3D: KYTY_NI("v_frexp_mant_f64"); break;

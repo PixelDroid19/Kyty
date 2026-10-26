@@ -294,7 +294,8 @@ RenderShaderCoordinateUsage AnalyzeResolutionShaderUsage(const ShaderCode& code)
 	usage.texel_offset_sampling = code.HasAnyOf({ShaderInstructionType::ImageSampleO, ShaderInstructionType::ImageSampleLzO});
 	for (const auto& inst: code.GetInstructions())
 	{
-		usage.texel_offset_sampling = usage.texel_offset_sampling || (inst.type == ShaderInstructionType::ImageGather4 && inst.mimg_offset);
+		const bool gather = inst.type == ShaderInstructionType::ImageGather4 || inst.type == ShaderInstructionType::ImageGather4C;
+		usage.texel_offset_sampling = usage.texel_offset_sampling || (gather && inst.mimg_offset);
 	}
 	return usage;
 }
