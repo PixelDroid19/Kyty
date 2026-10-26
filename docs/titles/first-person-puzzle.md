@@ -6,6 +6,26 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## First-person puzzle title: zero-record vertex buffers stop the menu (2026-10-26, open)
+
+- **Observation.** `main` at ad9cdac6, Intel Arc A770, Linux 7.2.11, strict,
+  60 fps limit, no input on the main menu. With a SPIR-V, Mesa and XDG cache
+  accumulated over three earlier 95 s runs, the run stops at about 86 s on
+  `unsupported vertex input layout: resources=2 buffers=0`
+  (`GraphicsRenderPipeline.cpp:503`). Seen in 3 of 3 runs on that cache.
+  It does not reproduce on a cold cache: one 100 s run, plus a 900 s menu idle
+  that reached frame 35278.
+- **Trigger.** `KYTY_VIL_LOG=1` shows two vertex V#s that both have
+  `num_records=0`, stride 48, dst VGPRs 9/4 and 13/3, and formats
+  dfmt 9 / nfmt 2 and dfmt 8 / nfmt 7. `VulkanBuildVertexInputLayout` builds
+  no buffer for them but keeps both resources, so the layout check refuses
+  the pipeline.
+- **Direction.** Hardware returns zero for every fetch outside
+  `num_records`, so a zero-record V# is a valid guest state. The layout
+  should bind it like an out-of-range fetch (a zero-filled binding) rather
+  than refuse it. Separately, it is still open why only the warm cache
+  reaches this draw.
+
 ## First-person puzzle title: scalar-join sources per label (2026-10-22)
 
 - **Observation.** Cold boot, Intel, 40 s sampled on the command-processor
