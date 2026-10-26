@@ -809,6 +809,39 @@ TEST(EmulatorSaveData, CommitNativeNidValidatesPointerAndSucceeds)
 	EXPECT_EQ(commit_fn(commit_param), 0);
 }
 
+TEST(EmulatorSaveData, BackupValidatesRequestAndPublishesCompletionEvent)
+{
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libSaveData_1", &symbols));
+	const auto* record = symbols.Find(SaveDataFunc(u"z1JA8-iJt3k"));
+	ASSERT_NE(record, nullptr);
+
+	using BackupFn = int(KYTY_SYSV_ABI*)(const void*);
+	auto* backup = reinterpret_cast<BackupFn>(record->vaddr);
+	EXPECT_EQ(backup(nullptr), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+
+	Libs::SaveData::SaveDataDirName dir_name {};
+	std::memcpy(dir_name.data, "slot1", 6);
+	int32_t  user_id = 7;
+	uint64_t dir_ptr = reinterpret_cast<uint64_t>(&dir_name);
+	uint8_t  request[0x40] = {};
+	std::memcpy(request + 0x00u, &user_id, sizeof(user_id));
+	std::memcpy(request + 0x10u, &dir_ptr, sizeof(dir_ptr));
+	EXPECT_EQ(backup(request), 0);
+
+	uint8_t event[0x60] = {};
+	EXPECT_EQ(Libs::SaveData::SaveDataGetEventResult(nullptr, event), 0);
+	uint32_t type       = 0;
+	int32_t  error_code = 0;
+	int32_t  event_user = 0;
+	std::memcpy(&type, event + 0x00u, sizeof(type));
+	std::memcpy(&error_code, event + 0x04u, sizeof(error_code));
+	std::memcpy(&event_user, event + 0x08u, sizeof(event_user));
+	EXPECT_EQ(type, 2u);
+	EXPECT_EQ(error_code, 0);
+	EXPECT_EQ(event_user, 7);
+}
+
 TEST(EmulatorSaveData, DeleteTransactionResourceTracksCreateHandles)
 {
 	using namespace Libs::SaveData;

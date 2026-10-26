@@ -3221,6 +3221,48 @@ TEST(EmulatorAudio, QueriesDefaultNgs2SystemBufferContract)
 	EXPECT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, nullptr), static_cast<int32_t>(0x804a0053u));
 }
 
+TEST(EmulatorAudio, ResetsNgs2SystemOptionToNativeDefaults)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	EXPECT_EQ(Ngs2::Ngs2SystemResetOption(nullptr), static_cast<int32_t>(0x804a8010u));
+
+	GuestReadableBlock option_storage(0x90);
+	ASSERT_TRUE(option_storage.IsValid());
+	std::memset(option_storage.Data(), 0xa5, 0x90);
+	auto* option = reinterpret_cast<Ngs2::Ngs2SystemOption*>(option_storage.Data());
+	ASSERT_EQ(Ngs2::Ngs2SystemResetOption(option), 0);
+
+	const auto* raw = static_cast<const uint8_t*>(option_storage.Data());
+	uint64_t    size = 0;
+	uint32_t    max_grain = 0;
+	uint32_t    num_grain = 0;
+	uint32_t    sample_rate = 0;
+	uint32_t    max_voice_channels = 0;
+	std::memcpy(&size, raw + 0x00u, sizeof(size));
+	std::memcpy(&max_grain, raw + 0x6cu, sizeof(max_grain));
+	std::memcpy(&num_grain, raw + 0x70u, sizeof(num_grain));
+	std::memcpy(&sample_rate, raw + 0x74u, sizeof(sample_rate));
+	std::memcpy(&max_voice_channels, raw + 0x78u, sizeof(max_voice_channels));
+	EXPECT_EQ(size, 0x90u);
+	EXPECT_EQ(max_grain, 512u);
+	EXPECT_EQ(num_grain, 256u);
+	EXPECT_EQ(sample_rate, 48000u);
+	EXPECT_EQ(max_voice_channels, 8u);
+	for (size_t i = 0x08u; i < 0x6cu; i++)
+	{
+		EXPECT_EQ(raw[i], 0u);
+	}
+	for (size_t i = 0x7cu; i < 0x90u; i++)
+	{
+		EXPECT_EQ(raw[i], 0u);
+	}
+}
+
 TEST(EmulatorAudio, Ngs2QueryRejectsReadOnlyOutputWithoutWriting)
 {
 	if (!Config::IsInitialized())

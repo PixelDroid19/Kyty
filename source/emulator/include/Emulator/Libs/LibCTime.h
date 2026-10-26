@@ -39,6 +39,9 @@ KYTY_SYSV_ABI GuestTm* c_localtime_s(const int64_t* t, GuestTm* result);
 KYTY_SYSV_ABI size_t c_strftime(char* s, size_t n, const char* f, const GuestTm* tmv);
 KYTY_SYSV_ABI size_t c_wcsftime(uint16_t* s, size_t n, const uint16_t* f, const GuestTm* tmv);
 KYTY_SYSV_ABI char* c_asctime(const GuestTm* tmv);
+// C11 Annex K asctime_s: returns EINVAL when the destination is null, smaller
+// than the 26-byte asctime form, or the time is null.
+KYTY_SYSV_ABI int c_asctime_s(char* buffer, size_t size, const GuestTm* tmv);
 KYTY_SYSV_ABI char* c_ctime(const int64_t* t);
 
 } // namespace Kyty::Libs::LibC::Time

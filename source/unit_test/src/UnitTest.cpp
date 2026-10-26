@@ -85,6 +85,8 @@ UT_LINK(EmulatorIme);
 UT_LINK(EmulatorLibcString);
 UT_LINK(EmulatorLoaderTls);
 UT_LINK(EmulatorModuleLoad);
+UT_LINK(EmulatorJson2);
+UT_LINK(EmulatorLibcFilesystem);
 UT_LINK(EmulatorNeutralPorts);
 UT_LINK(EmulatorApplicationHeap);
 UT_LINK(EmulatorLibcHeap);

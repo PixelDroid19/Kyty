@@ -27,6 +27,8 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 
 
@@ -35,6 +37,22 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+// A sampled descriptor declares SHADER_READ_ONLY_OPTIMAL; an image still in
+// UNDEFINED means no transition was recorded for this submission. Trace the
+// resource when the validation layer is localizing such a bind.
+static void TraceUndefinedSampledImage(const VulkanImage* image, const char* list, int index)
+{
+	static const bool enabled = std::getenv("KYTY_DESC_LAYOUT_TRACE") != nullptr;
+	if (!enabled || image == nullptr || image->layout != VK_IMAGE_LAYOUT_UNDEFINED)
+	{
+		return;
+	}
+	std::fprintf(stderr,
+	             "KYTY_DESC_LAYOUT_TRACE list=%s index=%d image=%p type=%d format=%d extent=%ux%u mips=%u layers=%u usage=0x%x\n",
+	             list, index, reinterpret_cast<const void*>(image->image), static_cast<int>(image->type), static_cast<int>(image->format),
+	             image->extent.width, image->extent.height, image->mip_levels, image->array_layers, static_cast<unsigned>(image->usage));
+}
 
 // DescriptorCache, DeleteFramebuffer/Descriptor, stencil + Find* helpers
 
@@ -810,6 +828,39 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 	}
 	nset.hash = CalcHash(nset);
 
+	// A GPU-owned render target starts UNDEFINED and may be sampled before any
+	// pass writes it. The descriptor's declared layout still applies, so record
+	// the discard transition here; the cached-set return must not skip it.
+	auto transition_undefined_sampled = [&](VulkanImage** images, int count)
+	{
+		for (int i = 0; i < count; i++)
+		{
+			auto* image = images[i];
+			if (image == nullptr || image->layout != VK_IMAGE_LAYOUT_UNDEFINED)
+			{
+				continue;
+			}
+			const auto layout = IsStorageAliasedSampledImage(image, textures2d_storage, textures2d_storage_num)
+			                        ? VK_IMAGE_LAYOUT_GENERAL
+			                        : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			UtilTransitionColorImageLayout(buffer, image, layout);
+		}
+	};
+	transition_undefined_sampled(textures2d_sampled, textures2d_sampled_num);
+	transition_undefined_sampled(textures2d_array_sampled, textures2d_array_sampled_num);
+	transition_undefined_sampled(textures3d_sampled, textures3d_sampled_num);
+	transition_undefined_sampled(textures2d_sampled_uint, textures2d_sampled_uint_num);
+	transition_undefined_sampled(textures2d_array_sampled_uint, textures2d_array_sampled_uint_num);
+	transition_undefined_sampled(textures3d_sampled_uint, textures3d_sampled_uint_num);
+	for (int i = 0; i < textures2d_storage_num; i++)
+	{
+		auto* image = textures2d_storage[i];
+		if (image != nullptr && image->layout == VK_IMAGE_LAYOUT_UNDEFINED)
+		{
+			UtilTransitionColorImageLayout(buffer, image, VK_IMAGE_LAYOUT_GENERAL);
+		}
+	}
+
 	if (const int found = FindSet(nset); found != -1)
 	{
 		RecordSetUse(found, buffer);
@@ -954,6 +1005,15 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(CommandBuffer* buffer, Stage
 		                                                   ? VK_IMAGE_LAYOUT_GENERAL
 		                                                   : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
+
+	for (int i = 0; i < textures2d_sampled_num; i++) { TraceUndefinedSampledImage(textures2d_sampled[i], "2d-sampled", i); }
+	for (int i = 0; i < nset.textures2d_sampled_depth_num; i++) { TraceUndefinedSampledImage(textures2d_sampled_depth[i], "2d-sampled-depth", i); }
+	for (int i = 0; i < textures2d_array_sampled_num; i++) { TraceUndefinedSampledImage(textures2d_array_sampled[i], "2d-array-sampled", i); }
+	for (int i = 0; i < textures3d_sampled_num; i++) { TraceUndefinedSampledImage(textures3d_sampled[i], "3d-sampled", i); }
+	for (int i = 0; i < textures2d_sampled_uint_num; i++) { TraceUndefinedSampledImage(textures2d_sampled_uint[i], "2d-sampled-uint", i); }
+	for (int i = 0; i < textures2d_array_sampled_uint_num; i++) { TraceUndefinedSampledImage(textures2d_array_sampled_uint[i], "2d-array-sampled-uint", i); }
+	for (int i = 0; i < textures3d_sampled_uint_num; i++) { TraceUndefinedSampledImage(textures3d_sampled_uint[i], "3d-sampled-uint", i); }
+	for (int i = 0; i < textures2d_storage_num; i++) { TraceUndefinedSampledImage(textures2d_storage[i], "2d-storage", i); }
 
 	VkDescriptorBufferInfo vsharp_buffer_info {};
 	if (vsharp_uniform_buffer)

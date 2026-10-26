@@ -2267,6 +2267,12 @@ struct GraphicsGeRawRegister;
 [[nodiscard]] uint32_t ShaderVertexGuestWaveSize(const GraphicsGeRawRegister& stages, bool next_gen, bool gs_front);
 [[nodiscard]] bool ShaderUsesNativeWaveState(const ShaderCode& code);
 [[nodiscard]] ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t guest_wave_size);
+// True for the fragment participation refusals: they name a source lane that a
+// narrower or varying host subgroup cannot represent. An exact guest-width
+// subgroup executes every guest lane, so those refusals do not apply there.
+// Semantic refusals (a mask used as a number, an invalid operand form) are not
+// participation refusals and stay fatal at every width.
+[[nodiscard]] bool ShaderNativeWaveParticipationRefusal(const char* reason);
 
 // ShaderAnalyzeNativeWave once per immutable program and guest width. The analysis walks the
 // whole program (mask flow to a fixpoint, 0.1-3 ms) and must not run per draw.

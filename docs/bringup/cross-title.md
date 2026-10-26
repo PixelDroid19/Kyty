@@ -16,6 +16,31 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## GDS backing shared across queue families (2026-10-26)
+
+- **Observed** (robot platformer, Intel Arc A770, Mesa ANV 26.2.5, strict,
+  1280x720, `fc_script` with the first-gameplay route): once the Gen5
+  AGC/AgcDriver HLE implementations let the title issue its GDS work, startup
+  stopped immediately at `GDS queue-family migration is unsupported: owner=1
+  requested=0` (`GdsBuffer::Init`). The first command buffer touched GDS on a
+  compute family and the next one on the graphics family.
+- **Cause:** the guard predates concurrent resource sharing. With more than one
+  queue family the context creates every image and buffer with
+  `VK_SHARING_MODE_CONCURRENT` (`VulkanApplyResourceSharing`), so one GDS
+  backing needs no ownership transfer. The guard could only fire in a context
+  that already shares resources concurrently; otherwise every queue reports the
+  same family.
+- **Change:** `GdsBuffer::Init` no longer tracks an owner family; the sharing
+  mode and the recorded barriers are unchanged. This does not qualify exclusive
+  ownership migration: cross-family ordering still relies on the guest's waits
+  and labels, as for every other concurrent buffer.
+- **Verified:** the red run exited at initialization (status 65). After the
+  change a bounded strict run reaches `StartLevel title` at 0:44 and loads the
+  worldmap (3.4 s) with no fatal stop in its 180 s window; a 300 s warm-cache
+  run then runs `intro_next` and starts the crash-site tutorial load;
+  `kyty_gds_transfer_integration` passes and the full unit suite reports 2519
+  tests, 2505 passed, 0 failed.
+
 ## Render-target scaling on the AMD integrated GPU (2026-10-25)
 
 - **Question:** the AMD Radeon 610M (RADV, 2 compute units) ran the slowest

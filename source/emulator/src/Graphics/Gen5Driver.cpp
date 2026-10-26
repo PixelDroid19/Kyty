@@ -259,8 +259,7 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs, 
 }
 
 int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
-{
-	PRINT_NAME();
+{	PRINT_NAME();
 			KYTY_LOG_DEBUG("\t queue  = 0x%08" PRIx32 "\n", queue);
 			KYTY_LOG_DEBUG("\t packet = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet));
 
@@ -283,6 +282,69 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
 	return Kernel::OK;
 }
 
+int KYTY_SYSV_ABI GraphicsDriverAgrSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs,
+                                                    const uint32_t* dcb_sizes_in_dwords, uint32_t count)
+{
+	PRINT_NAME();
+
+	return GraphicsDriverSubmitMultiDcbs(dcb_gpu_addrs, dcb_sizes_in_dwords, count);
+}
+
+int KYTY_SYSV_ABI GraphicsDriverSubmitMultiAcbs(uint32_t queue, const Packet* const* packets,
+                                                 const uint32_t* sizes_in_dwords, uint32_t count)
+{
+	PRINT_NAME();
+
+	if (count == 0)
+	{
+		return Kernel::OK;
+	}
+	if (packets == nullptr || sizes_in_dwords == nullptr)
+	{
+		return Kernel::KERNEL_ERROR_EINVAL;
+	}
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const Packet* packet = packets[i];
+		if (packet == nullptr || packet->pad[0] != 0)
+		{
+			return Kernel::KERNEL_ERROR_EINVAL;
+		}
+		if (packet->addr != nullptr && sizes_in_dwords[i] != 0)
+		{
+			GraphicsDbgDumpDcb("a", sizes_in_dwords[i], packet->addr);
+			if (!GraphicsRunSubmitAgcAsync(queue, packet->addr, sizes_in_dwords[i]))
+			{
+				EXIT("AGC async submission exceeds available independent queues\n");
+			}
+		}
+	}
+	return Kernel::OK;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverDeleteEqEvent(Kernel::EventQueue::KernelEqueue eq, int id)
+{
+	PRINT_NAME();
+
+	if (eq == nullptr)
+	{
+		return Kernel::KERNEL_ERROR_EBADF;
+	}
+
+	return GraphicsRenderDeleteEqEvent(eq, id);
+}
+
+uint32_t KYTY_SYSV_ABI GraphicsDriverGetEqEventType(const Kernel::EventQueue::KernelEvent* ev)
+{
+	PRINT_NAME();
+
+	if (ev == nullptr)
+	{
+		return 0;
+	}
+	return static_cast<uint32_t>(static_cast<uint64_t>(ev->data) >> 16u);
+}
+
 int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(Kernel::EventQueue::KernelEqueue eq, int id, void* udata)
 {
 	PRINT_NAME();
@@ -302,6 +364,32 @@ uint32_t KYTY_SYSV_ABI GraphicsDriverGetEqContextId(const Kernel::EventQueue::Ke
 	EXIT_NOT_IMPLEMENTED(ev->filter != Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
 	constexpr uint32_t kContextIdMask = 0x07ffffffu; // the ReleaseMem field width
 	return static_cast<uint32_t>(ev->data) & kContextIdMask;
+}
+
+// Astro 01.018 AgcDriver fakelib stubs. Each shipped body returns a constant
+// without touching its arguments; all NIDs in a group share that value.
+int KYTY_SYSV_ABI GraphicsDriverResourceApiUnavailable()
+{
+	PRINT_NAME();
+	return static_cast<int>(0x8a6c9018u);
+}
+
+int KYTY_SYSV_ABI GraphicsDriverDebugApiUnavailable()
+{
+	PRINT_NAME();
+	return static_cast<int>(0x8a6c1000u);
+}
+
+int KYTY_SYSV_ABI GraphicsDriverStatusDisabled()
+{
+	PRINT_NAME();
+	return 0;
+}
+
+int KYTY_SYSV_ABI GraphicsDriverShaderDebuggingStatus()
+{
+	PRINT_NAME();
+	return 1;
 }
 
 } // namespace Gen5Driver

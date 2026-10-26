@@ -3297,6 +3297,567 @@ TEST(EmulatorGraphicsPackets, ReportsDcbStallAndDmaDataPacketSizes)
 	EXPECT_EQ(Gen5::GraphicsDcbDmaDataGetSize(), 28u);
 }
 
+TEST(EmulatorGraphicsPackets, ReportsAgcGetSizeHelpers)
+{
+	// Values follow the shipped libSceAgc bodies. DrawIndexAuto/DrawIndex and
+	// the indirect register setters reserve the Kyty writer packet, which is
+	// larger than the AGC size in those cases.
+	EXPECT_EQ(Gen5::GraphicsAcbAcquireMemGetSize(), 32u);
+	EXPECT_EQ(Gen5::GraphicsAcbCopyDataGetSize(), 24u);
+	EXPECT_EQ(Gen5::GraphicsAcbDispatchIndirectGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsAcbDmaDataGetSize(), 28u);
+	EXPECT_EQ(Gen5::GraphicsAcbEventWriteGetSize(), 8u);
+
+	EXPECT_EQ(Gen5::GraphicsCbSetShRegistersDirectGetSize(0), 0u);
+	EXPECT_EQ(Gen5::GraphicsCbSetShRegistersDirectGetSize(3), 36u);
+
+	EXPECT_EQ(Gen5::GraphicsDcbAcquireMemGetSize(), 32u);
+	EXPECT_EQ(Gen5::GraphicsDcbCopyDataGetSize(), 24u);
+	EXPECT_EQ(Gen5::GraphicsDcbDispatchIndirectGetSize(), 12u);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexAutoGetSize(), 28u);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexGetSize(), 28u);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexIndirectGetSize(), 20u);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexOffsetGetSize(), 20u);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndirectGetSize(), 20u);
+
+	EXPECT_EQ(Gen5::GraphicsDcbEventWriteGetSize(0x37), 8u);
+	EXPECT_EQ(Gen5::GraphicsDcbEventWriteGetSize(0x38), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbEventWriteGetSize(0x39), 16u);
+
+	EXPECT_EQ(Gen5::GraphicsDcbGetLodStatsGetSize(), 20u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetCxRegisterDirectGetSize(), 12u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetCxRegistersIndirectGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexBufferGetSize(), 12u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexCountGetSize(), 8u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexSizeGetSize(), 8u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetNumInstancesGetSize(), 8u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetShRegisterDirectGetSize(), 12u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetShRegistersIndirectGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetUcRegisterDirectGetSize(), 12u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetUcRegistersIndirectGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbWriteDataGetSize(0), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbWriteDataGetSize(4), 32u);
+
+	EXPECT_EQ(Gen5::GraphicsDcbRewindGetSize(), 8u);
+	EXPECT_EQ(Gen5::GraphicsAcbRewindGetSize(), 8u);
+	EXPECT_EQ(Gen5::GraphicsDcbCondExecGetSize(), 20u);
+	EXPECT_EQ(Gen5::GraphicsAcbCondExecGetSize(), 20u);
+
+	EXPECT_EQ(Gen5::GraphicsAcbAtomicGdsGetSize(), 44u);
+	EXPECT_EQ(Gen5::GraphicsAcbAtomicMemGetSize(), 36u);
+	EXPECT_EQ(Gen5::GraphicsAcbPrimeUtcl2GetSize(), 20u);
+	EXPECT_EQ(Gen5::GraphicsAcbQueueEndOfShaderActionGetSize(), 32u);
+	EXPECT_EQ(Gen5::GraphicsCbCondWriteGetSize(), 36u);
+	EXPECT_EQ(Gen5::GraphicsCbQueueEndOfPipeActionGetSize(), 32u);
+	EXPECT_EQ(Gen5::GraphicsCbSetUcRegisterRangeDirectGetSize(0), 8u);
+	EXPECT_EQ(Gen5::GraphicsCbSetUcRegisterRangeDirectGetSize(3), 20u);
+	EXPECT_EQ(Gen5::GraphicsCbSetUcRegistersDirectGetSize(0), 0u);
+	EXPECT_EQ(Gen5::GraphicsCbSetUcRegistersDirectGetSize(3), 36u);
+	EXPECT_EQ(Gen5::GraphicsDcbAtomicGdsGetSize(), 44u);
+	EXPECT_EQ(Gen5::GraphicsDcbAtomicMemGetSize(), 36u);
+	EXPECT_EQ(Gen5::GraphicsDcbBeginOcclusionQueryGetSize(0), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbBeginOcclusionQueryGetSize(1), 288u);
+	EXPECT_EQ(Gen5::GraphicsDcbBeginOcclusionQueryGetSize(2), 0u);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexIndirectMultiGetSize(), 64u);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexMultiInstancedGetSize(), 60u);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndirectMultiGetSize(), 64u);
+	EXPECT_EQ(Gen5::GraphicsDcbEndOcclusionQueryGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbPrimeUtcl2GetSize(), 20u);
+	EXPECT_EQ(Gen5::GraphicsDcbQueueEndOfShaderActionGetSize(), 32u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetBaseDispatchIndirectArgsGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetBaseDrawIndirectArgsGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetBoolPredicationEnableGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexIndirectArgsGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetPredicationDisableGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetZPassPredicationEnableGetSize(), 16u);
+}
+
+// Values and masks come from the Astro 01.018 libSceAgc patch bodies. Kyty's
+// indirect-register and write-data writers use the custom IT_NOP/R_* form, so
+// the patches must cover both that layout and the hardware layout.
+TEST(EmulatorGraphicsPackets, PatchesAgcIndirectRegisterAndWriteDataPackets)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t cx_custom[4] = {KYTY_PM4(4, Pm4::IT_NOP, Pm4::R_CX_REGS_INDIRECT), 1u, 0, 0};
+	EXPECT_EQ(Gen5::GraphicsSetCxRegIndirectPatchSetNumRegisters(cx_custom, 0x2345u), 0);
+	EXPECT_EQ(cx_custom[1], 0x2345u);
+
+	uint32_t cx_hw[5] = {0xc0039f00u, 0, 0, 0, 0};
+	EXPECT_EQ(Gen5::GraphicsSetCxRegIndirectPatchSetNumRegisters(cx_hw, 0x2345u), 0);
+	EXPECT_EQ(cx_hw[3], 0u);
+	EXPECT_EQ(cx_hw[4], 0x2345u);
+
+	uint32_t sh_custom[4] = {KYTY_PM4(4, Pm4::IT_NOP, Pm4::R_SH_REGS_INDIRECT), 0, 0, 0};
+	uint32_t uc_custom[4] = {KYTY_PM4(4, Pm4::IT_NOP, Pm4::R_UC_REGS_INDIRECT), 0, 0, 0};
+	EXPECT_EQ(Gen5::GraphicsSetShRegIndirectPatchSetNumRegisters(sh_custom, 7u), 0);
+	EXPECT_EQ(Gen5::GraphicsSetUcRegIndirectPatchSetNumRegisters(uc_custom, 9u), 0);
+	EXPECT_EQ(sh_custom[1], 7u);
+	EXPECT_EQ(uc_custom[1], 9u);
+
+	uint32_t sh_hw[5] = {0xc0036300u, 0, 0, 0, 0};
+	uint32_t uc_hw[5] = {0xc0036400u, 0, 0, 0, 0};
+	EXPECT_EQ(Gen5::GraphicsSetShRegIndirectPatchSetNumRegisters(sh_hw, 3u), 0);
+	EXPECT_EQ(Gen5::GraphicsSetUcRegIndirectPatchSetNumRegisters(uc_hw, 5u), 0);
+	EXPECT_EQ(sh_hw[4], 3u);
+	EXPECT_EQ(uc_hw[4], 5u);
+
+	uint32_t wrong_op[4] = {KYTY_PM4(4, Pm4::IT_NOP, Pm4::R_DRAW_RESET), 0, 0, 0};
+	EXPECT_EQ(Gen5::GraphicsSetCxRegIndirectPatchSetNumRegisters(wrong_op, 1u), static_cast<int>(0x8a6c000cu));
+
+	uint32_t wd_custom[6] = {KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WRITE_DATA), 4u, 0, 0, 0x11111111u, 0x22222222u};
+	EXPECT_EQ(Gen5::GraphicsAgcAsyncWriteDataPatchSetAddressOrOffset(wd_custom, 0x0000000123456789ull), 0);
+	EXPECT_EQ(wd_custom[2], 0x23456789u);
+	EXPECT_EQ(wd_custom[3], 1u);
+	EXPECT_EQ(Gen5::GraphicsAgcAsyncWriteDataPatchSetCachePolicy(wd_custom, 2u), 0);
+	EXPECT_EQ(wd_custom[1], 0x0204u);
+	EXPECT_EQ(Gen5::GraphicsAgcAsyncWriteDataPatchSetDst(wd_custom, 5u), 0);
+	EXPECT_EQ(wd_custom[1], 0x0205u);
+
+	uint32_t wd_hw[5] = {0xc0033700u, 0, 0, 0, 0};
+	EXPECT_EQ(Gen5::GraphicsAgcAsyncWriteDataPatchSetAddressOrOffset(wd_hw, 0x000000023456789aull), 0);
+	EXPECT_EQ(Gen5::GraphicsAgcAsyncWriteDataPatchSetCachePolicy(wd_hw, 2u), 0);
+	EXPECT_EQ(Gen5::GraphicsAgcAsyncWriteDataPatchSetDst(wd_hw, 5u), 0);
+	EXPECT_EQ(wd_hw[1], 0x04000500u);
+	EXPECT_EQ(wd_hw[2], 0x3456789au);
+	EXPECT_EQ(wd_hw[3], 2u);
+}
+
+TEST(EmulatorGraphicsPackets, PatchesAgcControlPackets)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t nop[2] = {0xc0012a00u, 0xdeadbeefu};
+	EXPECT_EQ(Gen5::GraphicsSetNop(nop), 0);
+	EXPECT_EQ(nop[0], 0xc0011000u);
+	EXPECT_EQ(nop[1], 0xdeadbeefu);
+
+	uint32_t rewind[2] = {KYTY_PM4(2, Pm4::IT_REWIND, 0u), 0};
+	EXPECT_EQ(Gen5::GraphicsAgcRewindPatchSetRewindState(rewind, 1u), 0);
+	EXPECT_EQ(rewind[1], 0x80000000u);
+	EXPECT_EQ(Gen5::GraphicsAgcRewindPatchSetRewindState(rewind, 0u), 0);
+	EXPECT_EQ(rewind[1], 0u);
+
+	uint32_t cond[8] = {};
+	cond[0]           = KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u);
+	cond[1]           = 0x11111111u;
+	cond[2]           = 0x22222222u;
+	cond[3]           = 0xdeadbeefu;
+	EXPECT_EQ(Gen5::GraphicsAgcCondExecPatchSetCommandAddress(cond, 0x0000000123456789ull), 0);
+	EXPECT_EQ(cond[1], 0x23456789u);
+	EXPECT_EQ(cond[2], 1u);
+	EXPECT_EQ(Gen5::GraphicsAgcCondExecPatchSetEnd(cond, cond + 8), 0);
+	EXPECT_EQ(cond[3], 0xdeadbeefu);
+	EXPECT_EQ(cond[4], 3u);
+
+	uint32_t branch[14] = {};
+	branch[0]           = KYTY_PM4(14, Pm4::IT_INDIRECT_BUFFER, 0u);
+	branch[1]           = 0x201u;
+	EXPECT_EQ(Gen5::GraphicsAgcBranchPatchSetCompareAddress(branch, 0x0000000123456789ull), 0);
+	EXPECT_EQ(branch[1], 0x201u);
+	EXPECT_EQ(branch[2], 0x23456788u);
+	EXPECT_EQ(branch[3], 1u);
+
+	uint32_t acquire_custom[8] = {KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_ACQUIRE_MEM), 0};
+	uint32_t acquire_hw[8]     = {0xc0065800u, 0};
+	EXPECT_EQ(Gen5::GraphicsAgcAcquireMemSetEngine(acquire_custom, 1u), 0);
+	EXPECT_EQ(Gen5::GraphicsAgcAcquireMemSetEngine(acquire_hw, 0u), 0);
+	EXPECT_EQ(acquire_custom[1], 0x80000000u);
+	EXPECT_EQ(acquire_hw[1], 0u);
+}
+
+TEST(EmulatorGraphicsPackets, ReportsAgcPacketPayloadRanges)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t packet[4] = {0xc0027600u, 0xaaaaaaaa, 0xbbbbbbbb, 0xcccccccc};
+
+	Gen5::GraphicsAgcPayloadRange range {};
+	EXPECT_EQ(Gen5::GraphicsGetDataPacketPayloadRange(&range, packet, 0), 0);
+	EXPECT_EQ(reinterpret_cast<const volatile uint32_t*>(range.payload), packet + 1);
+	EXPECT_EQ(range.size, 12u);
+
+	EXPECT_EQ(Gen5::GraphicsGetDataPacketPayloadRange(&range, packet, 1), 0);
+	EXPECT_EQ(reinterpret_cast<const volatile uint32_t*>(range.payload), packet + 2);
+	EXPECT_EQ(range.size, 8u);
+
+	uint32_t empty[1] = {0xffff2200u};
+	EXPECT_EQ(Gen5::GraphicsGetDataPacketPayloadRange(&range, empty, 0), 0);
+	EXPECT_EQ(range.payload, nullptr);
+	EXPECT_EQ(range.size, 0u);
+}
+
+TEST(EmulatorGraphicsPackets, SetsPacketPredicationOverRanges)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t stream[5] = {KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0xdeadbeefu,
+	                      KYTY_PM4(3, Pm4::IT_NOP, Pm4::R_ZERO), 0x11111111u, 0x22222222u};
+	EXPECT_EQ(Gen5::GraphicsSetPacketPredicationRange(stream, stream + 5, 1u), 0);
+	EXPECT_EQ(stream[0] & 1u, 1u);
+	EXPECT_EQ(stream[1], 0xdeadbeefu);
+	EXPECT_EQ(stream[2] & 1u, 1u);
+	EXPECT_EQ(stream[3], 0x11111111u);
+	EXPECT_EQ(stream[4], 0x22222222u);
+
+	EXPECT_EQ(Gen5::GraphicsSetPacketPredicationRange(stream, stream + 5, 0u), 0);
+	EXPECT_EQ(stream[0] & 1u, 0u);
+	EXPECT_EQ(stream[2] & 1u, 0u);
+
+	uint32_t special[2] = {0x3fff1000u, KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO)};
+	EXPECT_EQ(Gen5::GraphicsSetPacketPredicationRange(special, special + 2, 1u), 0);
+	EXPECT_EQ(special[0] & 1u, 1u);
+	EXPECT_EQ(special[1] & 1u, 1u);
+}
+
+TEST(EmulatorGraphicsPackets, UpdatesPrimStateRegisters)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t cx[4] = {Pm4::VGT_SHADER_STAGES_EN, 0u, Pm4::VGT_GS_OUT_PRIM_TYPE, 0xffffffffu};
+	uint32_t uc[6] = {Pm4::GE_CNTL, 0u, Pm4::GE_USER_VGPR_EN, 0u, Pm4::VGT_PRIMITIVE_TYPE, 0xffffffffu};
+
+	EXPECT_EQ(Gen5::GraphicsUpdatePrimState(cx, uc, 4u), 0);
+	EXPECT_EQ(cx[3], 0xfffffffau);
+	EXPECT_EQ(uc[5], 0xffffffe4u);
+
+	cx[1] = 0x20u;
+	cx[3] = 0xffffffffu;
+	EXPECT_EQ(Gen5::GraphicsUpdatePrimState(cx, uc, 7u), 0);
+	EXPECT_EQ(cx[3], 0xffffffffu);
+	EXPECT_EQ(uc[5], 0xffffffe7u);
+
+	cx[1] = 0u;
+	cx[3] = 0xffffffffu;
+	EXPECT_EQ(Gen5::GraphicsUpdatePrimState(cx, uc, 7u), 0);
+	EXPECT_EQ(cx[3], 0xfffffffbu);
+	EXPECT_EQ(Gen5::GraphicsUpdatePrimState(cx, uc, 17u), 0);
+	EXPECT_EQ(cx[3], 0xfffffffcu);
+	EXPECT_EQ(Gen5::GraphicsUpdatePrimState(cx, uc, 99u), 0);
+	EXPECT_EQ(cx[3], 0xfffffffau);
+
+	EXPECT_EQ(Gen5::GraphicsUpdatePrimState(nullptr, nullptr, 1u), 0);
+}
+
+TEST(EmulatorGraphicsPackets, WritesAgcCondExecAndRewindPackets)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+	auto* buffer   = reinterpret_cast<Gen5::CommandBuffer*>(&cb);
+
+	uint32_t* dcb_cond = Gen5::GraphicsDcbCondExec(buffer, 0x0000000123456789ull, 3u);
+	ASSERT_NE(dcb_cond, nullptr);
+	EXPECT_EQ(dcb_cond[0], KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u));
+	EXPECT_EQ(dcb_cond[1], 0x23456788u);
+	EXPECT_EQ(dcb_cond[2], 1u);
+	EXPECT_EQ(dcb_cond[3], 0u);
+	EXPECT_EQ(dcb_cond[4], 3u);
+
+	uint32_t* acb_cond = Gen5::GraphicsAcbCondExec(buffer, 0x000000023456789aull, 5u);
+	ASSERT_NE(acb_cond, nullptr);
+	EXPECT_EQ(acb_cond[0], KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u));
+	EXPECT_EQ(acb_cond[1], 0x34567898u);
+	EXPECT_EQ(acb_cond[2], 2u);
+	EXPECT_EQ(acb_cond[4], 5u);
+
+	uint32_t* dcb_rewind = Gen5::GraphicsDcbRewind(buffer, 1u);
+	ASSERT_NE(dcb_rewind, nullptr);
+	EXPECT_EQ(dcb_rewind[0], KYTY_PM4(2, Pm4::IT_REWIND, 0u));
+	EXPECT_EQ(dcb_rewind[1], 0x80000000u);
+
+	uint32_t* acb_rewind = Gen5::GraphicsAcbRewind(buffer, 1u, 1u);
+	ASSERT_NE(acb_rewind, nullptr);
+	EXPECT_EQ(acb_rewind[0], KYTY_PM4(2, Pm4::IT_REWIND, 0u));
+	EXPECT_EQ(acb_rewind[1], 0x81000000u);
+}
+
+TEST(EmulatorGraphicsPackets, WritesAgcUcRegisterAndIndexIndirectPackets)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[32] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 32;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 32;
+	auto* buffer   = reinterpret_cast<Gen5::CommandBuffer*>(&cb);
+
+	const uint32_t values[3] = {0x11111111u, 0x22222222u, 0x33333333u};
+	uint32_t*      range     = Gen5::GraphicsCbSetUcRegisterRangeDirect(buffer, 0x1234u, values, 3u);
+	ASSERT_NE(range, nullptr);
+	EXPECT_EQ(range[0], KYTY_PM4(5, Pm4::IT_SET_UCONFIG_REG, 0u));
+	EXPECT_EQ(range[1], 0x1234u);
+	EXPECT_EQ(range[2], 0x11111111u);
+	EXPECT_EQ(range[3], 0x22222222u);
+	EXPECT_EQ(range[4], 0x33333333u);
+
+	const ShaderRegister regs[4] = {{0x10u, 0xaaaaaaaau}, {0x11u, 0xbbbbbbbbu}, {0x12u, 0xccccccccu}, {0x20u, 0xddddddddu}};
+	uint32_t*           uc       = Gen5::GraphicsCbSetUcRegistersDirect(buffer, regs, 4u);
+	ASSERT_NE(uc, nullptr);
+	EXPECT_EQ(uc[0], KYTY_PM4(5, Pm4::IT_SET_UCONFIG_REG, 0u));
+	EXPECT_EQ(uc[1], 0x10u);
+	EXPECT_EQ(uc[2], 0xaaaaaaaau);
+	EXPECT_EQ(uc[3], 0xbbbbbbbbu);
+	EXPECT_EQ(uc[4], 0xccccccccu);
+	EXPECT_EQ(uc[5], KYTY_PM4(3, Pm4::IT_SET_UCONFIG_REG, 0u));
+	EXPECT_EQ(uc[6], 0x20u);
+	EXPECT_EQ(uc[7], 0xddddddddu);
+
+	uint32_t* index_args = Gen5::GraphicsDcbSetIndexIndirectArgs(buffer, 0x0000000123456789ull, 0x12345u);
+	ASSERT_NE(index_args, nullptr);
+	EXPECT_EQ(index_args[0], KYTY_PM4(4, Pm4::IT_SET_INDEX_INDIRECT_ARGS, 0u));
+	EXPECT_EQ(index_args[1], 0x23456780u);
+	EXPECT_EQ(index_args[2], 1u);
+	EXPECT_EQ(index_args[3], 0x2345u);
+}
+
+TEST(EmulatorGraphicsPackets, ForwardsAgcAcbPacketsToTheirDcbWriters)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[64] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 64;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 64;
+	auto* buffer   = reinterpret_cast<Gen5::CommandBuffer*>(&cb);
+
+	uint8_t record[32] = {};
+	ASSERT_EQ(Gen5::GraphicsDriverRegisterWorkloadStream(0x20u, record), 0);
+
+	const uint32_t workloads[2] = {1u, 2u};
+	uint32_t*      active       = Gen5::GraphicsAcbSetWorkloadsActive(buffer, 0x20u, workloads, 2u);
+	ASSERT_NE(active, nullptr);
+	EXPECT_EQ(active[0], KYTY_PM4(18, Pm4::IT_NOP, Pm4::R_ZERO));
+	EXPECT_EQ(active[1], 0x20u);
+	EXPECT_EQ(active[2], 0x6u);
+	EXPECT_EQ(active[3], 0u);
+
+	uint32_t* complete = Gen5::GraphicsAcbSetWorkloadComplete(buffer, 0x20u, 1u);
+	ASSERT_NE(complete, nullptr);
+	EXPECT_EQ(complete[0], KYTY_PM4(12, Pm4::IT_NOP, Pm4::R_ZERO));
+	EXPECT_EQ(complete[1], 0x20u);
+	EXPECT_EQ(complete[2], 1u);
+
+	uint32_t* wait = Gen5::GraphicsAcbWaitUntilSafeForRendering(buffer, 0x1234u, 2u);
+	ASSERT_NE(wait, nullptr);
+	EXPECT_EQ(wait[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE));
+	EXPECT_EQ(wait[1], 0x1234u);
+	EXPECT_EQ(wait[2], 2u);
+
+	uint32_t* flip = Gen5::GraphicsAcbSetFlip(buffer, 0x1234u, 2, 1u, 0x55);
+	ASSERT_NE(flip, nullptr);
+	EXPECT_EQ(flip[0], KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_FLIP));
+	EXPECT_EQ(flip[1], 0x1234u);
+
+	EXPECT_EQ(Gen5::GraphicsDriverUnregisterWorkloadStream(0x20u), 0);
+}
+
+TEST(EmulatorGraphicsPackets, WritesAgcPrimeUtcl2AndCondWritePackets)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[32] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 32;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 32;
+	auto* buffer   = reinterpret_cast<Gen5::CommandBuffer*>(&cb);
+
+	uint32_t* dcb_prime = Gen5::GraphicsDcbPrimeUtcl2(buffer, 3u, 1u, 0x0000123456789abcull, 0x2345u);
+	ASSERT_NE(dcb_prime, nullptr);
+	EXPECT_EQ(dcb_prime[0], KYTY_PM4(5, Pm4::IT_PRIME_UTCL2, 0u));
+	EXPECT_EQ(dcb_prime[1], 0x4000000bu);
+	EXPECT_EQ(dcb_prime[2], 0x56788000u);
+	EXPECT_EQ(dcb_prime[3], 0x1234u);
+	EXPECT_EQ(dcb_prime[4], 0x2345u);
+
+	uint32_t* acb_prime = Gen5::GraphicsAcbPrimeUtcl2(buffer, 3u, 1u, 0x0000123456789abcull, 0x2345u);
+	ASSERT_NE(acb_prime, nullptr);
+	EXPECT_EQ(acb_prime[0], KYTY_PM4(5, Pm4::IT_PRIME_UTCL2, 0u));
+	EXPECT_EQ(acb_prime[1], 0x0bu);
+
+	uint32_t* cond_write = Gen5::GraphicsCbCondWrite(buffer, 2u, 3u, 0x1122334455667788ull, 0x99u,
+	                                                 0xaabbccddeeff0011ull, 0x44u, 0x55u);
+	ASSERT_NE(cond_write, nullptr);
+	EXPECT_EQ(cond_write[0], KYTY_PM4(9, Pm4::IT_COND_WRITE, 0u));
+	EXPECT_EQ(cond_write[1], 0x312u);
+	EXPECT_EQ(cond_write[2], 0xeeff0011u);
+	EXPECT_EQ(cond_write[3], 0xaabbccddu);
+	EXPECT_EQ(cond_write[4], 0x44u);
+	EXPECT_EQ(cond_write[5], 0x55u);
+	EXPECT_EQ(cond_write[6], 0x55667788u);
+	EXPECT_EQ(cond_write[7], 0x11223344u);
+	EXPECT_EQ(cond_write[8], 0x99u);
+}
+
+TEST(EmulatorGraphicsPackets, PatchesAgcJumpAndBranchTargets)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t jump[4] = {KYTY_PM4(4, Pm4::IT_INDIRECT_BUFFER, 0u), 0, 0, 0};
+	EXPECT_EQ(Gen5::GraphicsAgcJumpPatchTarget(jump, 2u, 0x0000000123456789ull, 0x12345u), 0);
+	EXPECT_EQ(jump[1], 0x23456788u);
+	EXPECT_EQ(jump[2], 1u);
+	EXPECT_EQ(jump[3], 0x20012345u);
+
+	uint32_t branch[14] = {};
+	branch[0]           = KYTY_PM4(14, Pm4::IT_INDIRECT_BUFFER, 0u);
+	EXPECT_EQ(Gen5::GraphicsAgcBranchPatchSetThenTarget(branch, 1u, 0x000000023456789aull, 0x54321u), 0);
+	EXPECT_EQ(branch[8], 0x34567898u);
+	EXPECT_EQ(branch[9], 2u);
+	EXPECT_EQ(branch[10], 0x10054321u);
+
+	EXPECT_EQ(Gen5::GraphicsAgcBranchPatchSetElseTarget(branch, 3u, 0x00000003456789abull, 0xabcdefu), 0);
+	EXPECT_EQ(branch[10], 0x10054321u);
+	EXPECT_EQ(branch[11], 0x456789a8u);
+	EXPECT_EQ(branch[12], 3u);
+	EXPECT_EQ(branch[13], 0x300bcdefu);
+
+	uint32_t wrong[4] = {KYTY_PM4(4, Pm4::IT_NOP, Pm4::R_ZERO), 0, 0, 0};
+	EXPECT_EQ(Gen5::GraphicsAgcJumpPatchTarget(wrong, 0u, 0, 0), static_cast<int>(0x8a6c000cu));
+	EXPECT_EQ(Gen5::GraphicsAgcBranchPatchSetThenTarget(wrong, 0u, 0, 0), static_cast<int>(0x8a6c000cu));
+	EXPECT_EQ(Gen5::GraphicsAgcBranchPatchSetElseTarget(wrong, 0u, 0, 0), static_cast<int>(0x8a6c000cu));
+}
+
+// Workload stream ids are 0x20-0x3f in the shipped AgcDriver bodies; the
+// registered bit is (id & 0x1f).
+TEST(EmulatorGraphicsPackets, RegistersAndUnregistersWorkloadStreams)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint8_t record[32] = {};
+
+	EXPECT_EQ(Gen5::GraphicsDriverRegisterWorkloadStream(0x1fu, record), static_cast<int>(0x8a6c0033u));
+	EXPECT_EQ(Gen5::GraphicsDriverRegisterWorkloadStream(0x40u, record), static_cast<int>(0x8a6c0033u));
+	EXPECT_EQ(Gen5::GraphicsDriverRegisterWorkloadStream(0x20u, nullptr), static_cast<int>(0x8a6c0035u));
+	EXPECT_EQ(Gen5::GraphicsDriverRegisterWorkloadStream(0x20u, record), 0);
+	EXPECT_EQ(Gen5::GraphicsDriverRegisterWorkloadStream(0x20u, nullptr), static_cast<int>(0x8a6c0033u));
+	EXPECT_EQ(Gen5::GraphicsDriverRegisterWorkloadStream(0x3fu, record), 0);
+
+	EXPECT_EQ(Gen5::GraphicsDriverUnregisterWorkloadStream(0x1fu), static_cast<int>(0x8a6c0033u));
+	EXPECT_EQ(Gen5::GraphicsDriverUnregisterWorkloadStream(0x21u), static_cast<int>(0x8a6c003au));
+	EXPECT_EQ(Gen5::GraphicsDriverUnregisterWorkloadStream(0x20u), 0);
+	EXPECT_EQ(Gen5::GraphicsDriverUnregisterWorkloadStream(0x20u), static_cast<int>(0x8a6c003au));
+	EXPECT_EQ(Gen5::GraphicsDriverUnregisterWorkloadStream(0x3fu), 0);
+}
+
+// Astro 01.018 AgcDriver fakelib stubs return these constants verbatim.
+TEST(EmulatorGraphicsPackets, ReportsAgcDriverFakelibStubs)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	EXPECT_EQ(Gen5Driver::GraphicsDriverResourceApiUnavailable(), static_cast<int>(0x8a6c9018u));
+	EXPECT_EQ(Gen5Driver::GraphicsDriverDebugApiUnavailable(), static_cast<int>(0x8a6c1000u));
+	EXPECT_EQ(Gen5Driver::GraphicsDriverStatusDisabled(), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverShaderDebuggingStatus(), 1);
+}
+
 // Observed post-Play: guest encodes WaitMem/ReleaseMem with a placeholder then
 // patches the address through GetDataPacketPayloadAddress. WaitMem stores the
 // 64-bit address in the first body dwords (cmd+1); ReleaseMem stores it after
@@ -10910,6 +11471,399 @@ TEST(EmulatorGraphicsPackets, GuestAddressRawLoadsWithoutStorageBindingsOmitOnly
 			EXPECT_FALSE(binary.IsEmpty());
 		}
 	}
+}
+
+TEST(EmulatorGraphicsPackets, WritesAgcMarkerSpanAndAtomicMemPackets)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[64] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 64;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 64;
+	auto* buffer   = reinterpret_cast<Gen5::CommandBuffer*>(&cb);
+
+	uint32_t* dcb_span = Gen5::GraphicsDcbSetMarkerSpan(buffer, "AB", 2u, 0x12345678u);
+	ASSERT_NE(dcb_span, nullptr);
+	EXPECT_EQ(dcb_span[0], 0xc0027904u);
+	EXPECT_EQ(dcb_span[1], 0x342u);
+	EXPECT_EQ(dcb_span[2], 0xc000a8c2u);
+	EXPECT_EQ(dcb_span[3], 0x00004241u);
+
+	uint32_t* acb_marker = Gen5::GraphicsAcbSetMarker(buffer, "AB", 0u);
+	ASSERT_NE(acb_marker, nullptr);
+	EXPECT_EQ(acb_marker[0], 0xc0027900u);
+	EXPECT_EQ(acb_marker[1], 0x342u);
+	EXPECT_EQ(acb_marker[2], 0xc0008000u);
+	EXPECT_EQ(acb_marker[3], 0x00004241u);
+
+	uint32_t* acb_push_span = Gen5::GraphicsAcbPushMarkerSpan(buffer, "ABCDEFGH", 8u, 0u);
+	ASSERT_NE(acb_push_span, nullptr);
+	EXPECT_EQ(acb_push_span[0], 0xc0027900u);
+	EXPECT_EQ(acb_push_span[2], 0xc1010000u);
+	EXPECT_EQ(acb_push_span[3], 0x44434241u);
+	EXPECT_EQ(acb_push_span[4], 0xc0033700u);
+	EXPECT_EQ(acb_push_span[5], 0x6010000u);
+	EXPECT_EQ(acb_push_span[6], 0xc343u);
+	EXPECT_EQ(acb_push_span[7], 0u);
+	EXPECT_EQ(acb_push_span[8], 0x48474645u);
+
+	uint32_t* acb_atomic = Gen5::GraphicsAcbAtomicMem(buffer, 0x12u, 0x5u, 0x1122334455667788ull, 2u,
+	                                                  0x99aabbccddeeff00ull, 0x0123456789abcdefull, 0x1000u);
+	ASSERT_NE(acb_atomic, nullptr);
+	EXPECT_EQ(acb_atomic[0], 0xc0071e00u);
+	EXPECT_EQ(acb_atomic[1], 0x04000512u);
+	EXPECT_EQ(acb_atomic[2], 0x55667788u);
+	EXPECT_EQ(acb_atomic[3], 0x11223344u);
+	EXPECT_EQ(acb_atomic[4], 0xddeeff00u);
+	EXPECT_EQ(acb_atomic[5], 0x99aabbccu);
+	EXPECT_EQ(acb_atomic[6], 0x89abcdefu);
+	EXPECT_EQ(acb_atomic[7], 0x01234567u);
+	EXPECT_EQ(acb_atomic[8], 0x40u);
+
+	uint32_t* dcb_atomic = Gen5::GraphicsDcbAtomicMem(buffer, 1u, 0x22u, 0x3u, 1u, 0x123456789abcdef0ull,
+	                                                  0x0f0e0d0c0b0a0908ull, 0x0706050403020100ull, 0x40000u);
+	ASSERT_NE(dcb_atomic, nullptr);
+	EXPECT_EQ(dcb_atomic[0], 0xc0071e00u);
+	EXPECT_EQ(dcb_atomic[1], 0x42000322u);
+	EXPECT_EQ(dcb_atomic[2], 0x9abcdef0u);
+	EXPECT_EQ(dcb_atomic[3], 0x12345678u);
+	EXPECT_EQ(dcb_atomic[8], 0xfffu);
+
+	EXPECT_EQ(Gen5::GraphicsDcbSetMarkerSpan(nullptr, "AB", 2u, 0u), nullptr);
+	EXPECT_EQ(Gen5::GraphicsAcbAtomicMem(nullptr, 0u, 0u, 0u, 0u, 0u, 0u, 0u), nullptr);
+}
+
+TEST(EmulatorGraphicsPackets, WritesUnnamedAstroAtomicGdsPackets)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[64] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 64;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 64;
+	auto* buffer   = reinterpret_cast<Gen5::CommandBuffer*>(&cb);
+
+	uint32_t* acb = Gen5::GraphicsAcbAtomicGds(buffer, 0x246u, 1, 1u, 0x2au, 0x123456789abcull, 0xdef0u,
+	                                           0x12345678u, 0x89abcdefu, 0x1122334455667788ull,
+	                                           0x99aabbccddeeff00ull);
+	ASSERT_NE(acb, nullptr);
+	EXPECT_EQ(acb[0], 0xc0091d00u);
+	EXPECT_EQ(acb[1], 0x130046u);
+	EXPECT_EQ(acb[2], 0x12au);
+	EXPECT_EQ(acb[3], 0x9abcu);
+	EXPECT_EQ(acb[4], 0xdef0u);
+	EXPECT_EQ(acb[5], 0x00340078u);
+	EXPECT_EQ(acb[6], 0x89abcdefu);
+	EXPECT_EQ(acb[7], 0x55667788u);
+	EXPECT_EQ(acb[8], 0x11223344u);
+	EXPECT_EQ(acb[9], 0xddeeff00u);
+	EXPECT_EQ(acb[10], 0x99aabbccu);
+
+	uint32_t* dcb = Gen5::GraphicsDcbAtomicGds(buffer, 2u, 0x66u, 2, 0u, 5u, 0x7788u, 0x5566u, 0xaabbccddu,
+	                                           0x01020304u, 0xdeadbeeffeedfaceull, 0x0123456789abcdefull);
+	ASSERT_NE(dcb, nullptr);
+	EXPECT_EQ(dcb[0], 0xc0091d00u);
+	EXPECT_EQ(dcb[1], 0x80140066u);
+	EXPECT_EQ(dcb[2], 0x5u);
+	EXPECT_EQ(dcb[3], 0x7788u);
+	EXPECT_EQ(dcb[4], 0x5566u);
+	EXPECT_EQ(dcb[5], 0x00bb00ddu);
+	EXPECT_EQ(dcb[6], 0x01020304u);
+	EXPECT_EQ(dcb[7], 0xfeedfaceu);
+	EXPECT_EQ(dcb[8], 0xdeadbeefu);
+	EXPECT_EQ(dcb[9], 0x89abcdefu);
+	EXPECT_EQ(dcb[10], 0x01234567u);
+
+	EXPECT_EQ(Gen5::GraphicsAcbAtomicGds(nullptr, 0u, 0, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u), nullptr);
+	EXPECT_EQ(Gen5::GraphicsDcbAtomicGds(nullptr, 0u, 0u, 0, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u), nullptr);
+}
+
+TEST(EmulatorGraphicsPackets, TracksAmmSemaphoreLabels)
+{
+	uint64_t label = 0;
+	EXPECT_EQ(Gen5::GraphicsAgcGetSemaphoreLabel(0u, &label), 0x8a6c0049u);
+	EXPECT_EQ(Gen5::GraphicsAgcSetAmmSemaphoreMemory(0x12345678u, 0x4000u), 0x8a6c0002u);
+	EXPECT_EQ(Gen5::GraphicsAgcSetAmmSemaphoreMemory(0x100000u, 0x800u), 0x8a6c0002u);
+	EXPECT_EQ(Gen5::GraphicsAgcSetAmmSemaphoreMemory(0x100000u, 0x4000u), 0u);
+	EXPECT_EQ(Gen5::GraphicsAgcSetAmmSemaphoreMemory(0x200000u, 0x4000u), 0x8a6c0048u);
+
+	EXPECT_EQ(Gen5::GraphicsAgcGetSemaphoreLabel(0u, &label), 0u);
+	EXPECT_EQ(label, 0x100000u);
+	EXPECT_EQ(Gen5::GraphicsAgcGetSemaphoreLabel(0x100000000ull, &label), 0u);
+	EXPECT_EQ(label, 0x100000u);
+	EXPECT_EQ(Gen5::GraphicsAgcGetSemaphoreLabel(0x1ffu, &label), 0u);
+	EXPECT_EQ(label, 0x103fe0u);
+	EXPECT_EQ(Gen5::GraphicsAgcGetSemaphoreLabel(0x200u, &label), 0x8a6c000bu);
+}
+
+TEST(EmulatorGraphicsPackets, ExpandsDefaultCxStateFlatFromRegisterDefaults)
+{
+	uint32_t values[0x400] {};
+	EXPECT_EQ(Gen5::GraphicsAgcGetDefaultCxStateFlat(values, 0u, 0x400u, 0u), 0u);
+	EXPECT_EQ(values[Pm4::DB_RENDER_CONTROL], 0u);
+	EXPECT_EQ(values[Pm4::CB_TARGET_MASK], 0x0000000fu);
+	EXPECT_EQ(values[Pm4::PA_CL_VTE_CNTL], 0x0000043fu);
+	EXPECT_EQ(values[Pm4::CB_BLEND0_CONTROL], 0x20010001u);
+	EXPECT_EQ(values[0x3ffu], 0u);
+
+	uint32_t single = 0xdeadbeefu;
+	EXPECT_EQ(Gen5::GraphicsAgcGetDefaultCxStateFlat(&single, Pm4::CB_BLEND0_CONTROL, Pm4::CB_BLEND0_CONTROL + 1u, 3u),
+	          0u);
+	EXPECT_EQ(single, 0x20010001u);
+
+	EXPECT_EQ(Gen5::GraphicsAgcGetDefaultCxStateFlat(nullptr, 0u, 0x10u, 0u), 0u);
+	EXPECT_EQ(Gen5::GraphicsAgcGetDefaultCxStateFlat(&single, 0x10u, 0x10u, 0u), 0u);
+	EXPECT_EQ(Gen5::GraphicsAgcGetDefaultCxStateFlat(&single, 0u, 0x401u, 0u), 0u);
+	EXPECT_EQ(single, 0x20010001u);
+}
+
+TEST(EmulatorGraphicsPackets, ValidatesAgcDriverMultiSubmitArguments)
+{
+	struct TestPacket
+	{
+		uint32_t* addr;
+		uint32_t  dw_num;
+		uint8_t   pad[4];
+	};
+	static_assert(sizeof(TestPacket) == 16);
+
+	TestPacket       empty {nullptr, 0, {0, 0, 0, 0}};
+	const TestPacket* packets[] = {&empty};
+	uint32_t          sizes[]   = {4u};
+
+	auto as_packets = [](const TestPacket* const* p) {
+		return reinterpret_cast<const Gen5Driver::Packet* const*>(p);
+	};
+
+	EXPECT_EQ(Gen5Driver::GraphicsDriverSubmitMultiAcbs(0x20u, nullptr, sizes, 1u), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverSubmitMultiAcbs(0x20u, as_packets(packets), nullptr, 1u),
+	          Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverSubmitMultiAcbs(0x20u, nullptr, nullptr, 0u), 0);
+
+	const TestPacket* null_entry[] = {nullptr};
+	EXPECT_EQ(Gen5Driver::GraphicsDriverSubmitMultiAcbs(0x20u, as_packets(null_entry), sizes, 1u),
+	          Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	TestPacket        bad {nullptr, 0, {1, 0, 0, 0}};
+	const TestPacket* bad_entry[] = {&bad};
+	EXPECT_EQ(Gen5Driver::GraphicsDriverSubmitMultiAcbs(0x20u, as_packets(bad_entry), sizes, 1u),
+	          Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	EXPECT_EQ(Gen5Driver::GraphicsDriverAgrSubmitMultiDcbs(nullptr, nullptr, 0u), 0);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverAgrSubmitMultiDcbs(nullptr, nullptr, 1u),
+	          Libs::LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorGraphicsPackets, ReadsAgcDriverEqEventFields)
+{
+	EXPECT_EQ(Gen5Driver::GraphicsDriverGetEqEventType(nullptr), 0u);
+
+	Kyty::Kernel::EventQueue::KernelEvent event {};
+	event.filter = Kyty::Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS;
+	event.data   = static_cast<intptr_t>(0x123456789abcu);
+	EXPECT_EQ(Gen5Driver::GraphicsDriverGetEqEventType(&event), 0x12345678u);
+
+	EXPECT_EQ(Gen5Driver::GraphicsDriverDeleteEqEvent(nullptr, 0x48), Libs::LibKernel::KERNEL_ERROR_EBADF);
+}
+
+TEST(EmulatorGraphicsPackets, WritesAgcMemSemaphoreAndWorkloadInactivePackets)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[64] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 64;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 64;
+	auto* buffer   = reinterpret_cast<Gen5::CommandBuffer*>(&cb);
+
+	uint32_t* dcb_sem = Gen5::GraphicsDcbMemSemaphore(buffer, 0x123456789abcdef8ull, 1u, 0u, 0u);
+	ASSERT_NE(dcb_sem, nullptr);
+	EXPECT_EQ(dcb_sem[0], 0xc0027904u);
+	EXPECT_EQ(dcb_sem[1], 0x342u);
+	EXPECT_EQ(dcb_sem[2], 0xc9025678u);
+	EXPECT_EQ(dcb_sem[3], 0x9abcdef8u);
+	EXPECT_EQ(dcb_sem[4], 0xc0023900u);
+	EXPECT_EQ(dcb_sem[5], 0x9abcdef8u);
+	EXPECT_EQ(dcb_sem[6], 0x12345678u);
+	EXPECT_EQ(dcb_sem[7], 0x00010000u);
+
+	uint32_t* acb_mode6 = Gen5::GraphicsAcbMemSemaphore(buffer, 0x123456789abcdef8ull, 0u, 1u, 6u);
+	ASSERT_NE(acb_mode6, nullptr);
+	EXPECT_EQ(acb_mode6[0], 0xc0027900u);
+	EXPECT_EQ(acb_mode6[2], 0xc9015678u);
+	EXPECT_EQ(acb_mode6[4], KYTY_PM4(3, Pm4::IT_NOP, 0u));
+	EXPECT_EQ(acb_mode6[7], 0xc0023900u);
+	EXPECT_EQ(acb_mode6[10], 0xc0100000u);
+
+	uint32_t* acb_mode7 = Gen5::GraphicsAcbMemSemaphore(buffer, 0x123456789abcdef8ull, 0u, 0u, 7u);
+	ASSERT_NE(acb_mode7, nullptr);
+	EXPECT_EQ(acb_mode7[4], 0xc0023900u);
+	EXPECT_EQ(acb_mode7[7], 0xe0000000u);
+	EXPECT_EQ(acb_mode7[8], 0xc0017904u);
+	EXPECT_EQ(acb_mode7[9], 0x342u);
+	EXPECT_EQ(acb_mode7[10], 0xc9000000u);
+
+	uint8_t record[32] = {};
+	ASSERT_EQ(Gen5::GraphicsDriverRegisterWorkloadStream(0x21u, record), 0);
+	uint32_t* dcb_inactive = Gen5::GraphicsDcbSetWorkloadStreamInactive(buffer, 0x21u);
+	ASSERT_NE(dcb_inactive, nullptr);
+	EXPECT_EQ(dcb_inactive[0], 0xc0027904u);
+	EXPECT_EQ(dcb_inactive[1], 0x342u);
+	EXPECT_EQ(dcb_inactive[2], 0xcc000021u);
+	EXPECT_EQ(dcb_inactive[3], 0u);
+	EXPECT_EQ(dcb_inactive[4], 0xc0033704u);
+	EXPECT_EQ(dcb_inactive[5], 0x6010000u);
+	EXPECT_EQ(dcb_inactive[6], 0xc343u);
+	EXPECT_EQ(dcb_inactive[7], 0u);
+	EXPECT_EQ(dcb_inactive[8], 0u);
+	EXPECT_EQ(Gen5::GraphicsAcbSetWorkloadStreamInactive(buffer, 0x22u), nullptr);
+	EXPECT_EQ(Gen5::GraphicsDcbSetWorkloadStreamInactive(buffer, 0x1fu), nullptr);
+
+	uint32_t* acb_inactive = Gen5::GraphicsAcbSetWorkloadStreamInactive(buffer, 0x21u);
+	ASSERT_NE(acb_inactive, nullptr);
+	EXPECT_EQ(acb_inactive[0], 0xc0027900u);
+	EXPECT_EQ(acb_inactive[4], 0xc0033700u);
+
+	ASSERT_EQ(Gen5::GraphicsDriverUnregisterWorkloadStream(0x21u), 0);
+	EXPECT_EQ(Gen5::GraphicsDcbSetWorkloadStreamInactive(buffer, 0x21u), nullptr);
+	EXPECT_EQ(Gen5::GraphicsAcbMemSemaphore(nullptr, 0u, 0u, 0u, 0u), nullptr);
+}
+
+TEST(EmulatorGraphicsPackets, WritesAgcMultiDrawPackets)
+{
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t             storage[64] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 64;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 64;
+	auto* buffer   = reinterpret_cast<Gen5::CommandBuffer*>(&cb);
+
+	uint32_t* indirect = Gen5::GraphicsDcbDrawIndirectMulti(buffer, 3u, 0u, 100u, 0x100000004ull, 5u, 0u);
+	ASSERT_NE(indirect, nullptr);
+	EXPECT_EQ(indirect[0], 0xc0017904u);
+	EXPECT_EQ(indirect[1], 0x342u);
+	EXPECT_EQ(indirect[2], 0xc6000008u);
+	EXPECT_EQ(indirect[3], 0xc0082c00u);
+	EXPECT_EQ(indirect[4], 3u);
+	EXPECT_EQ(indirect[5], 0x00000280u);
+	EXPECT_EQ(indirect[6], 0x00000280u);
+	EXPECT_EQ(indirect[7], 0x00000280u);
+	EXPECT_EQ(indirect[8], 100u);
+	EXPECT_EQ(indirect[9], 4u);
+	EXPECT_EQ(indirect[10], 1u);
+	EXPECT_EQ(indirect[11], 5u);
+	EXPECT_EQ(indirect[12], 2u);
+	EXPECT_EQ(indirect[13], 0xc0017904u);
+	EXPECT_EQ(indirect[14], 0x342u);
+	EXPECT_EQ(indirect[15], 0xc6000000u);
+
+	uint32_t* indexed = Gen5::GraphicsDcbDrawIndexIndirectMulti(buffer, 7u, 1u, 200u, 0x200000008ull, 6u, 1u);
+	ASSERT_NE(indexed, nullptr);
+	EXPECT_EQ(indexed[2], 0xc6000005u);
+	EXPECT_EQ(indexed[3], 0xc0083800u);
+	EXPECT_EQ(indexed[4], 7u);
+	EXPECT_EQ(indexed[5], 0x0000008cu);
+	EXPECT_EQ(indexed[6], 0x00000280u);
+	EXPECT_EQ(indexed[7], 0x40000280u);
+	EXPECT_EQ(indexed[8], 200u);
+	EXPECT_EQ(indexed[9], 8u);
+	EXPECT_EQ(indexed[10], 2u);
+	EXPECT_EQ(indexed[11], 6u);
+	EXPECT_EQ(indexed[12], 0u);
+	EXPECT_EQ(indexed[13], 0xc0017904u);
+	EXPECT_EQ(indexed[15], 0xc6000000u);
+
+	uint32_t* instanced = Gen5::GraphicsDcbDrawIndexMultiInstanced(buffer, 6u, 0xaaaa0000bbbb0000ull, 0xcccc0000dddd0000ull,
+	                                                               0, 0u);
+	ASSERT_NE(instanced, nullptr);
+	EXPECT_EQ(instanced[2], 0xc6000006u);
+	EXPECT_EQ(instanced[3], 0xc0073a00u);
+	EXPECT_EQ(instanced[4], 6u);
+	EXPECT_EQ(instanced[5], 0xbbbb0000u);
+	EXPECT_EQ(instanced[6], 0xaaaa0000u);
+	EXPECT_EQ(instanced[7], 1u);
+	EXPECT_EQ(instanced[8], 0xdddd0000u);
+	EXPECT_EQ(instanced[9], 0xcccc0000u);
+	EXPECT_EQ(instanced[10], 0u);
+	EXPECT_EQ(instanced[11], 0x80u);
+	EXPECT_EQ(instanced[12], 0xc0017904u);
+	EXPECT_EQ(instanced[14], 0xc6000000u);
+
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndirectMulti(nullptr, 0u, 0u, 0u, 0u, 0u, 0u), nullptr);
 }
 
 UT_END();

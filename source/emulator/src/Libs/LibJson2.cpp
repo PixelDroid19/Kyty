@@ -213,6 +213,13 @@ struct JsonArray
 	std::vector<JsonValue*>* items = nullptr;
 };
 
+struct JsonArrayIterator
+{
+	JsonValue** slot = nullptr;
+};
+
+static_assert(sizeof(JsonArrayIterator) == 8);
+
 struct JsonObject
 {
 	std::map<std::string, JsonValue*>* members = nullptr;
@@ -1250,6 +1257,235 @@ static JsonValue* KYTY_SYSV_ABI JsonValueAssign(JsonValue* self, const JsonValue
 	return self;
 }
 
+// Empty fallbacks returned by the Value getters for non-matching types, as the
+// shipped library returns its global empty String/Array/Object.
+static JsonString* JsonEmptyString()
+{
+	static JsonString empty = [] { JsonString out {}; out.data = JsonAllocateString("", 0); return out; }();
+	return &empty;
+}
+
+static JsonArray* JsonEmptyArray()
+{
+	static std::vector<JsonValue*> items;
+	static JsonArray               empty {&items};
+	return &empty;
+}
+
+static JsonObject* JsonEmptyObject()
+{
+	static std::map<std::string, JsonValue*> members;
+	static JsonObject                        empty {&members};
+	return &empty;
+}
+
+// Array iterator ABI: the sret block holds the address of the current element
+// slot, so begin/end, ++, * and != share a single 8-byte representation.
+void* KYTY_SYSV_ABI JsonArrayBegin(void* out, const void* self)
+{
+	PRINT_NAME();
+	const auto* array    = static_cast<const JsonArray*>(self);
+	auto*       iterator = static_cast<JsonArrayIterator*>(out);
+	iterator->slot = (array != nullptr && array->items != nullptr && !array->items->empty()) ? array->items->data() : nullptr;
+	return out;
+}
+
+void* KYTY_SYSV_ABI JsonArrayEnd(void* out, const void* self)
+{
+	PRINT_NAME();
+	const auto* array    = static_cast<const JsonArray*>(self);
+	auto*       iterator = static_cast<JsonArrayIterator*>(out);
+	iterator->slot = (array != nullptr && array->items != nullptr) ? array->items->data() + array->items->size() : nullptr;
+	return out;
+}
+
+const void* KYTY_SYSV_ABI JsonArrayIteratorDeref(const void* iter)
+{
+	const auto* iterator = static_cast<const JsonArrayIterator*>(iter);
+	return (iterator != nullptr && iterator->slot != nullptr) ? *iterator->slot : JsonNullValue();
+}
+
+void* KYTY_SYSV_ABI JsonArrayIteratorIncrement(void* iter)
+{
+	auto* iterator = static_cast<JsonArrayIterator*>(iter);
+	if (iterator != nullptr && iterator->slot != nullptr)
+	{
+		++iterator->slot;
+	}
+	return iter;
+}
+
+bool KYTY_SYSV_ABI JsonArrayIteratorNotEqual(const void* lhs, const void* rhs)
+{
+	const auto* lhs_iterator = static_cast<const JsonArrayIterator*>(lhs);
+	const auto* rhs_iterator = static_cast<const JsonArrayIterator*>(rhs);
+	if (lhs_iterator == nullptr || rhs_iterator == nullptr || lhs_iterator->slot == nullptr || rhs_iterator->slot == nullptr)
+	{
+		return false;
+	}
+	return lhs_iterator->slot != rhs_iterator->slot;
+}
+
+void KYTY_SYSV_ABI JsonArrayIteratorDestroy(void* /*iter*/) {}
+
+const void* KYTY_SYSV_ABI JsonValueGetString(const void* self)
+{
+	PRINT_NAME();
+	const auto* value = static_cast<const JsonValue*>(self);
+	if (value != nullptr && value->type == JsonValueTypeString)
+	{
+		return value->ptr;
+	}
+	return JsonEmptyString();
+}
+
+const void* KYTY_SYSV_ABI JsonValueGetArray(const void* self)
+{
+	PRINT_NAME();
+	const auto* value = static_cast<const JsonValue*>(self);
+	if (value != nullptr && value->type == JsonValueTypeArray)
+	{
+		return value->ptr;
+	}
+	return JsonEmptyArray();
+}
+
+const void* KYTY_SYSV_ABI JsonValueGetObject(const void* self)
+{
+	PRINT_NAME();
+	const auto* value = static_cast<const JsonValue*>(self);
+	if (value != nullptr && value->type == JsonValueTypeObject)
+	{
+		return value->ptr;
+	}
+	return JsonEmptyObject();
+}
+
+const void* KYTY_SYSV_ABI JsonValueGetUInteger(const void* self)
+{
+	PRINT_NAME();
+	static const uint64_t zero = 0;
+	const auto*           value = static_cast<const JsonValue*>(self);
+	if (value != nullptr && (value->type == JsonValueTypeInteger || value->type == JsonValueTypeUInteger))
+	{
+		return &value->uinteger;
+	}
+	return &zero;
+}
+
+// Object iterator ABI: the guest iterator slot holds a heap box with the map
+// and current position. Dereference fills a guest std::pair layout in the box
+// (String at +0, Value at +8) and returns its address; every operation is HLE,
+// so the tree layout of the shipped library is not part of the contract.
+struct JsonObjectPair
+{
+	JsonString key;
+	JsonValue  value;
+};
+
+static_assert(sizeof(JsonObjectPair) == 40);
+static_assert(offsetof(JsonObjectPair, value) == sizeof(JsonString));
+
+struct JsonObjectIterator
+{
+	const std::map<std::string, JsonValue*>* members = nullptr;
+	size_t                                 index   = 0;
+	JsonObjectPair                         pair {};
+};
+
+static_assert(offsetof(JsonObjectIterator, pair) % alignof(JsonValue) == 0);
+
+static JsonObjectIterator* JsonObjectIteratorAlloc(const JsonObject* object)
+{
+	auto* box = new (std::nothrow) JsonObjectIterator {};
+	if (box != nullptr && object != nullptr)
+	{
+		box->members = object->members;
+	}
+	return box;
+}
+
+void* KYTY_SYSV_ABI JsonObjectBegin(void* out, const void* self)
+{
+	PRINT_NAME();
+	const auto* object = static_cast<const JsonObject*>(self);
+	auto**      slot   = static_cast<JsonObjectIterator**>(out);
+	*slot              = nullptr;
+	if (object == nullptr || object->members == nullptr || object->members->empty())
+	{
+		return out;
+	}
+	*slot = JsonObjectIteratorAlloc(object);
+	return out;
+}
+
+void* KYTY_SYSV_ABI JsonObjectEnd(void* out, const void* self)
+{
+	PRINT_NAME();
+	const auto* object = static_cast<const JsonObject*>(self);
+	auto**      slot   = static_cast<JsonObjectIterator**>(out);
+	*slot              = nullptr;
+	if (object == nullptr || object->members == nullptr || object->members->empty())
+	{
+		return out;
+	}
+	auto* box = JsonObjectIteratorAlloc(object);
+	if (box != nullptr)
+	{
+		box->index = box->members->size();
+	}
+	*slot = box;
+	return out;
+}
+
+const void* KYTY_SYSV_ABI JsonObjectIteratorDeref(const void* iter)
+{
+	auto* box = *static_cast<JsonObjectIterator* const*>(iter);
+	static JsonObjectPair empty {};
+	if (box == nullptr || box->members == nullptr || box->index >= box->members->size())
+	{
+		return &empty;
+	}
+	auto current = box->members->begin();
+	std::advance(current, static_cast<std::ptrdiff_t>(box->index));
+	box->pair.key.data = const_cast<char*>(current->first.c_str());
+	box->pair.value    = (current->second != nullptr ? *current->second : JsonValue {});
+	return &box->pair;
+}
+
+void* KYTY_SYSV_ABI JsonObjectIteratorIncrement(void* iter)
+{
+	auto** slot = static_cast<JsonObjectIterator**>(iter);
+	auto*  box  = *slot;
+	if (box != nullptr && box->members != nullptr && box->index < box->members->size())
+	{
+		++box->index;
+	}
+	return iter;
+}
+
+bool KYTY_SYSV_ABI JsonObjectIteratorNotEqual(const void* lhs, const void* rhs)
+{
+	auto* left  = *static_cast<JsonObjectIterator* const*>(lhs);
+	auto* right = *static_cast<JsonObjectIterator* const*>(rhs);
+	if (left == nullptr || right == nullptr)
+	{
+		return false;
+	}
+	return left->members != right->members || left->index != right->index;
+}
+
+void KYTY_SYSV_ABI JsonObjectIteratorDestroy(void* iter)
+{
+	auto** slot = static_cast<JsonObjectIterator**>(iter);
+	if (*slot != nullptr)
+	{
+		delete *slot;
+		*slot = nullptr;
+	}
+}
+
+
 } // namespace Json2
 
 LIB_DEFINE(InitJson2_1)
@@ -1298,6 +1534,22 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("wLsJlmgEIaI", Json2::JsonValueReferValueKey);
 	LIB_FUNC("+drDFyAS6u4", Json2::JsonInitializerSetGlobalNullAccessCallback);
 	LIB_FUNC("00oCq0RwSAY", Json2::JsonInitializerSetGlobalNullAccessCallback);
+	LIB_FUNC("bcH5EnFE2xY", Json2::JsonArrayBegin);
+	LIB_FUNC("WXF2ihRF+B8", Json2::JsonArrayEnd);
+	LIB_FUNC("wcgr5mte7T8", Json2::JsonArrayIteratorDeref);
+	LIB_FUNC("w5+VCznos5E", Json2::JsonArrayIteratorIncrement);
+	LIB_FUNC("5AZPp99ogrc", Json2::JsonArrayIteratorNotEqual);
+	LIB_FUNC("9yLjn46Ypfs", Json2::JsonArrayIteratorDestroy);
+	LIB_FUNC("epJ6x2LV0kU", Json2::JsonValueGetString);
+	LIB_FUNC("ONT8As5R1ug", Json2::JsonValueGetArray);
+	LIB_FUNC("IlsmvBtMkak", Json2::JsonValueGetObject);
+	LIB_FUNC("sn4HNCtNRzY", Json2::JsonValueGetUInteger);
+	LIB_FUNC("xhAcaIwnrgk", Json2::JsonObjectBegin);
+	LIB_FUNC("ivMCitpSQNk", Json2::JsonObjectEnd);
+	LIB_FUNC("ZCd6IYoD3Bc", Json2::JsonObjectIteratorDeref);
+	LIB_FUNC("DlWmn2ZQuWY", Json2::JsonObjectIteratorIncrement);
+	LIB_FUNC("+isUKw4zud4", Json2::JsonObjectIteratorNotEqual);
+	LIB_FUNC("hoINmSMlYjI", Json2::JsonObjectIteratorDestroy);
 }
 
 } // namespace Kyty::Libs

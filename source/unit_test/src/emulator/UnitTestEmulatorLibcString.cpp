@@ -387,4 +387,65 @@ TEST(EmulatorLibcString, VsnprintfNullBufferOrFormat)
 	EXPECT_EQ(GuestVsnprintf(nullptr, 0, format, args_measure, 1), 4);
 }
 
+TEST(EmulatorLibcString, ResolvedC16ConversionsMatchFirmwareStateMachine)
+{
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+
+	using C16RToMB = int(KYTY_SYSV_ABI*)(char*, uint16_t, void*);
+	using MBRToC16 = size_t(KYTY_SYSV_ABI*)(uint16_t*, const char*, size_t, void*);
+	const auto c16rtomb = ResolveLibcExport<C16RToMB>(&symbols, "c16rtomb");
+	const auto mbrtoc16 = ResolveLibcExport<MBRToC16>(&symbols, "mbrtoc16");
+	ASSERT_NE(c16rtomb, nullptr);
+	ASSERT_NE(mbrtoc16, nullptr);
+
+	uint8_t state[16] = {};
+	char    bytes[8]  = {};
+	EXPECT_EQ(c16rtomb(bytes, 'A', state), 1);
+	EXPECT_EQ(bytes[0], 'A');
+	EXPECT_EQ(c16rtomb(bytes, 0x20ac, state), 3);
+	EXPECT_EQ(bytes[0], static_cast<char>(0xe2));
+	EXPECT_EQ(bytes[1], static_cast<char>(0x82));
+	EXPECT_EQ(bytes[2], static_cast<char>(0xac));
+	EXPECT_EQ(c16rtomb(bytes, 0, state), 1);
+	EXPECT_EQ(bytes[0], 0);
+
+	uint8_t pair_state[16] = {};
+	EXPECT_EQ(c16rtomb(bytes, 0xd83d, pair_state), 0);
+	EXPECT_EQ(c16rtomb(bytes, 0xde00, pair_state), 4);
+	EXPECT_EQ(bytes[0], static_cast<char>(0xf0));
+	EXPECT_EQ(bytes[1], static_cast<char>(0x9f));
+	EXPECT_EQ(bytes[2], static_cast<char>(0x98));
+	EXPECT_EQ(bytes[3], static_cast<char>(0x80));
+	EXPECT_EQ(c16rtomb(bytes, 0xd83d, pair_state), 0);
+	EXPECT_EQ(c16rtomb(bytes, 'A', pair_state), -1);
+	uint8_t null_state[16] = {};
+	EXPECT_EQ(c16rtomb(nullptr, 0x20ac, null_state), 1);
+
+	uint8_t  decode_state[16] = {};
+	uint16_t unit             = 0;
+	EXPECT_EQ(mbrtoc16(&unit, "A", 1, decode_state), 1u);
+	EXPECT_EQ(unit, 'A');
+	const char nul[1] = {0};
+	EXPECT_EQ(mbrtoc16(&unit, nul, 1, decode_state), 0u);
+	EXPECT_EQ(unit, 0);
+
+	const char emoji[] = "\xF0\x9F\x98\x80";
+	EXPECT_EQ(mbrtoc16(&unit, emoji, 4, decode_state), 4u);
+	EXPECT_EQ(unit, 0xd83du);
+	EXPECT_EQ(mbrtoc16(&unit, "x", 1, decode_state), static_cast<size_t>(-3));
+	EXPECT_EQ(unit, 0xdc00u);
+
+	uint8_t incomplete_state[16] = {};
+	EXPECT_EQ(mbrtoc16(&unit, "\xF0\x9F", 2, incomplete_state), static_cast<size_t>(-2));
+	EXPECT_EQ(mbrtoc16(&unit, "\x98\x80", 2, incomplete_state), 2u);
+	EXPECT_EQ(unit, 0xd83du);
+
+	uint8_t invalid_state[16] = {};
+	errno = 0;
+	EXPECT_EQ(mbrtoc16(&unit, "\x80", 1, invalid_state), static_cast<size_t>(-1));
+	EXPECT_EQ(errno, 86);
+	EXPECT_EQ(mbrtoc16(nullptr, "A", 1, decode_state), 1u);
+}
+
 UT_END();

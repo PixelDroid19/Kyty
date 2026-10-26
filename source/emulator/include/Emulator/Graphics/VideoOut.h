@@ -144,6 +144,10 @@ KYTY_SYSV_ABI int  VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status)
 KYTY_SYSV_ABI int VideoOutIsFlipPending(int handle);
 KYTY_SYSV_ABI int VideoOutGetVblankStatus(int handle, VideoOutVblankStatus* status);
 KYTY_SYSV_ABI int VideoOutSetWindowModeMargins(int handle, int top, int bottom);
+struct VideoOutLatencyControl;
+KYTY_SYSV_ABI int VideoOutAllowOutputResolutionWqhdDetection(int handle);
+KYTY_SYSV_ABI int VideoOutLatencyControlWaitBeforeInput(int handle, const VideoOutLatencyControl* control, uint32_t* timeout_usec);
+KYTY_SYSV_ABI int VideoOutLatencyMeasureSetStartPoint(int handle, int64_t flip_arg);
 // Gen5 color / output status (success HLE; no fabricated display modes).
 struct VideoOutOutputStatus;
 struct VideoOutColorSettings;

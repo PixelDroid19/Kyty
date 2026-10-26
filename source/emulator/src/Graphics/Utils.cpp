@@ -1044,6 +1044,17 @@ void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image)
 	buffer.WaitForFence();
 }
 
+void UtilTransitionColorImageLayout(CommandBuffer* buffer, VulkanImage* image, uint64_t dst_layout)
+{
+	if (buffer == nullptr || image == nullptr || image->image == nullptr || image->layout == static_cast<VkImageLayout>(dst_layout))
+	{
+		return;
+	}
+	auto* cmd = buffer->RecordOutsideRenderPass();
+	set_image_layout(buffer, cmd, image, 0, image->mip_levels, VK_IMAGE_ASPECT_COLOR_BIT, image->layout,
+	                 static_cast<VkImageLayout>(dst_layout));
+}
+
 void UtilSetImageLayoutOptimal(VulkanImage* image)
 {
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
