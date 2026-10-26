@@ -151,10 +151,6 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("0ZOG0jc9nRg", Gen5::GraphicsAcbRewindGetSize);
 	LIB_FUNC("ou16V5hh5sg", Gen5::GraphicsDcbCondExecGetSize);
 	LIB_FUNC("ozKzBP4aki4", Gen5::GraphicsAcbCondExecGetSize);
-	LIB_FUNC("zfcxg-ewMK8", Gen5::GraphicsDcbRewind);
-	LIB_FUNC("DwICrVxerkY", Gen5::GraphicsAcbRewind);
-	LIB_FUNC("BIPexNBSGog", Gen5::GraphicsDcbCondExec);
-	LIB_FUNC("qyM2bxYFPAk", Gen5::GraphicsAcbCondExec);
 	LIB_FUNC("C4l9fB17t8w", Gen5::GraphicsDcbEventWriteGetSize);
 	LIB_FUNC("Y-5vneiBtzk", Gen5::GraphicsAcbEventWriteGetSize);
 	LIB_FUNC("ewobAQeMo5k", Gen5::GraphicsAcbAcquireMemGetSize);
