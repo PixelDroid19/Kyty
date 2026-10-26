@@ -683,6 +683,33 @@ static KYTY_SYSV_ABI const unsigned short* c_Getpctype()
 	return g_c_locale_ctype.data() + 1;
 }
 
+// _Getctype(): the ctype vector, returned in registers: the classification table and a zero delete flag.
+struct CxxCtypevec
+{
+	const unsigned short* table;
+	std::uint64_t         delete_flag;
+};
+
+static KYTY_SYSV_ABI CxxCtypevec c_Getctype()
+{
+	return {c_Getpctype(), 0};
+}
+
+// _Getcvt(): the conversion vector of the "C" locale, returned through the caller's buffer: two 32-bit ones followed
+// by 32 zero bytes.
+struct CxxCvtvec
+{
+	std::uint32_t words[2];
+	std::uint8_t  reserved[32];
+};
+
+static_assert(sizeof(CxxCvtvec) == 0x28);
+
+static KYTY_SYSV_ABI CxxCvtvec c_Getcvt()
+{
+	return {{1, 1}, {}};
+}
+
 static KYTY_SYSV_ABI const char* const* c_Getptimes()
 {
 	return g_c_locale_times.data();
@@ -3321,6 +3348,10 @@ static KYTY_SYSV_ABI void c_Xout_of_range(const char* msg)
 {
 	ThrowLogicError(&g_typeinfo_out_of_range, msg);
 }
+static KYTY_SYSV_ABI void c_Xruntime_error(const char* msg)
+{
+	ThrowLogicError(&g_typeinfo_runtime_error, msg);
+}
 static KYTY_SYSV_ABI void c_Xlength_error(const char* msg)
 {
 	ThrowLogicError(&g_typeinfo_length_error, msg);
@@ -3378,6 +3409,12 @@ static KYTY_SYSV_ABI void* c_locale_Getgloballocale()
 }
 
 static KYTY_SYSV_ABI void* c_locale_CreateClassicLocimp()
+{
+	return &g_classic_locimp;
+}
+
+// std::locale::_Init(bool do_incref) — the global Locimp, which is the static classic one; its incref slot is a no-op.
+static KYTY_SYSV_ABI void* c_locale_InitIncref(bool /*do_incref*/)
 {
 	return &g_classic_locimp;
 }
@@ -3482,6 +3519,110 @@ static KYTY_SYSV_ABI void c_locimp_addfac(CxxLocimpLayout* self, void* facet, st
 		LocimpRelease(self->facet_vec[id]);
 	}
 	self->facet_vec[id] = facet;
+}
+
+// locale::_Locimp::_New_Locimp(const _Locimp&): a heap copy of the implementation, built as the copy constructor does.
+static KYTY_SYSV_ABI CxxLocimpLayout* c_locimp_new_locimp(const CxxLocimpLayout* right)
+{
+	auto* self = static_cast<CxxLocimpLayout*>(cxx_new(sizeof(CxxLocimpLayout)));
+	c_locimp_copy_ctor(self, right);
+	return self;
+}
+
+// _Locinfo::_Locinfo_ctor(_Locinfo*, const char*): the runtime only knows the "C" locale. It saves the name of the
+// current locale at +0x08 and +0x10, and an empty or "C" name selects it; any other name is refused.
+static const char g_locinfo_c_name[] = "C";
+
+static KYTY_SYSV_ABI void c_locinfo_ctor(void* self, const char* name)
+{
+	EXIT_IF(self == nullptr);
+	auto* saved = static_cast<const char**>(self);
+	saved[1]    = g_locinfo_c_name;
+	if (name == nullptr || (name[0] != '\0' && std::strcmp(name, g_locinfo_c_name) != 0))
+	{
+		ThrowLogicError(&g_typeinfo_runtime_error, "bad locale name");
+	}
+	saved[2] = g_locinfo_c_name;
+}
+
+// ios_base::_Addstd(ios_base*): a standard stream takes the first free or own slot of seven (an eighth absorbs the
+// rest), records it in _Stdstr (+0x08) and counts one more open of that slot.
+struct CxxStdStreams
+{
+	std::mutex    mutex;
+	const void*   streams[9] {};
+	std::int8_t   opens[9] {};
+};
+
+static CxxStdStreams g_std_streams;
+
+static KYTY_SYSV_ABI void c_Ios_base_addstd(void* self)
+{
+	EXIT_IF(self == nullptr);
+	std::lock_guard lock(g_std_streams.mutex);
+	std::uint64_t   index = 1;
+	while (index < 8 && g_std_streams.streams[index] != self && g_std_streams.streams[index] != nullptr)
+	{
+		index++;
+	}
+	static_cast<std::uint64_t*>(self)[1] = index;
+	g_std_streams.streams[index]          = self;
+	g_std_streams.opens[index]++;
+}
+
+// ios_base::_Ios_base_dtor(ios_base*): once the last open of a standard stream (or any other stream) ends, every
+// registered callback sees erase_event (0), the iword/pword and callback lists are freed, and a locale other than the
+// classic one drops its implementation reference and is deleted.
+struct CxxIosCallback
+{
+	CxxIosCallback* next;
+	std::int32_t    index;
+	std::uint64_t   function;
+};
+
+struct CxxIosArray
+{
+	CxxIosArray* next;
+};
+
+static KYTY_SYSV_ABI void c_Ios_base_dtor(void* self)
+{
+	EXIT_IF(self == nullptr);
+	auto*               words  = static_cast<std::uint64_t*>(self);
+	const std::uint64_t stdstr = words[1];
+	if (stdstr != 0 && stdstr < 9 && --g_std_streams.opens[stdstr] > 0)
+	{
+		return;
+	}
+	auto* calls = reinterpret_cast<CxxIosCallback*>(words[7]);
+	for (auto* call = calls; call != nullptr; call = call->next)
+	{
+		Loader::GuestCall::Invoke(call->function, 0, reinterpret_cast<std::uint64_t>(self), static_cast<std::uint32_t>(call->index));
+	}
+	for (auto* array = reinterpret_cast<CxxIosArray*>(words[6]); array != nullptr;)
+	{
+		auto* next = array->next;
+		cxx_delete_sized(array, 0x20);
+		array = next;
+	}
+	words[6] = 0;
+	for (auto* call = reinterpret_cast<CxxIosCallback*>(words[7]); call != nullptr;)
+	{
+		auto* next = call->next;
+		cxx_delete_sized(call, sizeof(CxxIosCallback));
+		call = next;
+	}
+	words[7]     = 0;
+	auto* locale = reinterpret_cast<CxxLocaleLayout*>(words[8]);
+	if (locale == nullptr || locale == &g_sce_classic_locale)
+	{
+		return;
+	}
+	if (locale->ptr != nullptr)
+	{
+		LocimpRelease(locale->ptr);
+	}
+	cxx_delete_sized(locale, sizeof(CxxLocaleLayout));
 }
 
 static KYTY_SYSV_ABI void c_cxa_pure_virtual()
@@ -4622,7 +4763,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("TVfbf1sXt0A", &LibC::g_classic_cerr);
 	LIB_OBJECT("5PfqUBaQf4g", &LibC::g_classic_cout);
 	// Facet ::id Objects — eboot imports (Ps5Nid / ps5_names).
-	LIB_OBJECT("VmqsS6auJzo", &LibC::g_ctype_wchar_id);
+	LIB_OBJECT_ALIASES(&LibC::g_ctype_wchar_id, "VmqsS6auJzo", "b61-ZHIQuns");
 	LIB_OBJECT("irGo1yaJ-vM", &LibC::g_collate_wchar_id);
 	LIB_OBJECT("E14mW8pVpoE", &LibC::g_num_put_char_id);
 	LIB_OBJECT("7brRfHVVAlI", &LibC::g_collate_char_id);
@@ -4630,7 +4771,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("-mLzBSk-VGs", &LibC::g_num_get_char_id);
 	LIB_OBJECT("a54t8+k7KpY", &LibC::g_time_get_char_id);
 	LIB_OBJECT("BamOsNbUcn4", &LibC::g_time_put_char_id);
-	LIB_OBJECT("FjZCPmK0SbA", &LibC::g_codecvt_wchar_id);
+	LIB_OBJECT_ALIASES(&LibC::g_codecvt_wchar_id, "FjZCPmK0SbA", "OVV3+UimpiY");
 	LIB_OBJECT("u2MAta5SS84", &LibC::g_codecvt_char32_id);
 	// std::codecvt<char, char, mbstate_t>::id — eVFYZnYNDo0.
 	LIB_OBJECT("eVFYZnYNDo0", &LibC::g_codecvt_char_id);
@@ -4714,8 +4855,16 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("QJ5xVfKkni0", LibC::c_wmemcmp16);
 	// Captured Gen5 locale setup: no args, returns a Locimp-like object.
 	LIB_FUNC("9rMML086SEE", LibC::c_locale_CreateClassicLocimp);
+	LIB_FUNC("Mt6co-yzyjg", LibC::c_locale_InitIncref);
+	LIB_FUNC("ynwqogpIbL0", LibC::c_locimp_new_locimp);
+	LIB_FUNC("K+YIrBadUlc", LibC::c_locinfo_ctor);
+	LIB_FUNC("LfjFksmiu4Y", LibC::c_Ios_base_addstd);
+	LIB_FUNC("Ze2I81YNykw", LibC::c_Ios_base_dtor);
+	LIB_FUNC("gwAf8VMkXS0", LibC::c_Getctype);
+	LIB_FUNC("HHXmPak83kQ", LibC::c_Getcvt);
+	LIB_FUNC("Rlnw-UcmA5k", LibC::c_Xruntime_error); // std::__sce_v2::_Xruntime_error
 	LIB_FUNC("WViwxtEKxHk", LibC::c_locimp_copy_ctor);
-	LIB_FUNC("uuga3RipCKQ", LibC::c_locimp_addfac);
+	LIB_FUNC_ALIASES(LibC::c_locimp_addfac, "uuga3RipCKQ", "7KPYZ-jSAto");
 	// std::locale::classic() returns the process-wide classic locale object.
 	LIB_FUNC("Uq5K8tl8I9U", LibC::c_locale_classic);
 	LIB_FUNC("QxqK-IdpumU", LibC::c_Getpmbstate);
@@ -4738,10 +4887,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC_ALIASES(LibC::c_Unlock_shared_ptr_spin_lock, "1HYEoANqZ1w", "ySAwp2f9rqM");
 	LIB_FUNC("kALvdgEv5ME", LibC::c_Locksyslock);
 	LIB_FUNC("9nf8joUTSaQ", LibC::c_Unlocksyslock);
-	LIB_FUNC("hEQ2Yi4PJXA", LibC::c_locale_Getgloballocale);
+	LIB_FUNC_ALIASES(LibC::c_locale_Getgloballocale, "hEQ2Yi4PJXA", "xE51MX+B2G4");
 	LIB_FUNC("hqi8yMOCmG0", LibC::c_locale_InitTemporaryInfo);
-	LIB_FUNC("p6LrHjIQMdk", LibC::c_locale_DestroyTemporaryInfo);
-	LIB_FUNC("QW2jL1J5rwY", LibC::c_locale_RegisterFacet);
+	LIB_FUNC_ALIASES(LibC::c_locale_DestroyTemporaryInfo, "p6LrHjIQMdk", "taOj6NIm7DM");
+	LIB_FUNC_ALIASES(LibC::c_locale_RegisterFacet, "QW2jL1J5rwY", "aFxknk3hTog");
 	LIB_FUNC("zr094EQ39Ww", LibC::c_cxa_pure_virtual);
 	LIB_FUNC("tyHd3P7oDrU", LibC::c_exception_doraise);
 	// std::uncaught_exception — Q1BL70XVV0o after classic-locale probe.
@@ -5126,9 +5275,9 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Z2tTVqGDPGQ", LibC::c_cxa_thread_atexit);
 	// Gen5 __cxa_dynamic_cast — guest Construct ConditionOrAction→Action.
 	LIB_FUNC("hMAe+TWS9mQ", LibC::cxa_dynamic_cast);
-	LIB_FUNC("ozMAr28BwSY", LibC::c_Xout_of_range);
+	LIB_FUNC_ALIASES(LibC::c_Xout_of_range, "ozMAr28BwSY", "bRPUrNROyOI");
 	LIB_FUNC("Pu0Ecyk-7FU", LibC::c_Xrange_error);
-	LIB_FUNC("tQIo+GIPklo", LibC::c_Xlength_error);
+	LIB_FUNC_ALIASES(LibC::c_Xlength_error, "tQIo+GIPklo", "d08RCvZNNR8");
 
 	// setjmp / longjmp (bound directly to host — no C++ wrapper)
 	#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
