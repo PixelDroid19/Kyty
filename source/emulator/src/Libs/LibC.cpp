@@ -427,6 +427,13 @@ static KYTY_SYSV_ABI void c_quick_exit(int code)
 	// Unlike exit(), no guest atexit handlers run and no streams are flushed.
 	Core::ShutdownActiveAndQuickExit(code);
 }
+// Gen5 libc_v1 _Exit — NID wZi5ly2guNw: ends the process without running any
+// exit handler, the same host action as quick_exit.
+static KYTY_SYSV_ABI void c_Exit(int code)
+{
+	KYTY_LOG_WARN("guest _Exit(%d) from 0x%016" PRIx64 "\n", code, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
+	Core::ShutdownActiveAndQuickExit(code);
+}
 // Gen5 libc_v1 strtok (oVkZ8W8-Q8A): host uses strtok_r with a per-thread save pointer.
 static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
 {
@@ -437,13 +444,42 @@ static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
 // C++ operator new/delete, same ownership as libc malloc.
 static constexpr uint8_t g_cxx_nothrow = 0;
 
+// Guest handler installed by std::set_new_handler (0 when none).
+static std::atomic<uint64_t> g_new_handler {0};
+
+// Gen5 libc_v1 _ZSt15set_new_handlerPFvvE — NID RqeErO3cFHU. The guest library
+// swaps one global pointer atomically and returns the previous handler.
+static KYTY_SYSV_ABI uint64_t cxx_set_new_handler(uint64_t handler)
+{
+	return g_new_handler.exchange(handler);
+}
+
+// operator new retries an exhausted heap once per call of the installed
+// handler, which frees memory or does not return.
+static void* cxx_allocate(size_t size)
+{
+	for (;;)
+	{
+		if (void* ptr = allocate_with_owner(size != 0 ? size : 1); ptr != nullptr)
+		{
+			return ptr;
+		}
+		const uint64_t handler = g_new_handler.load();
+		if (handler == 0)
+		{
+			return nullptr;
+		}
+		Loader::GuestCall::Invoke(handler, 0, 0, 0);
+	}
+}
+
 static KYTY_SYSV_ABI void* cxx_new(size_t size)
 {
-	return allocate_with_owner(size != 0 ? size : 1);
+	return cxx_allocate(size);
 }
 static KYTY_SYSV_ABI void* cxx_new_nothrow(size_t size, const void* /*nothrow_tag*/)
 {
-	return allocate_with_owner(size != 0 ? size : 1);
+	return cxx_allocate(size);
 }
 static KYTY_SYSV_ABI void cxx_delete(void* p)
 {
@@ -462,11 +498,11 @@ static KYTY_SYSV_ABI void cxx_delete_sized_aligned(void* p, size_t /*size*/, siz
 }
 static KYTY_SYSV_ABI void* cxx_new_array(size_t size)
 {
-	return allocate_with_owner(size != 0 ? size : 1);
+	return cxx_allocate(size);
 }
 static KYTY_SYSV_ABI void* cxx_new_array_nothrow(size_t size, const void* /*nothrow_tag*/)
 {
-	return allocate_with_owner(size != 0 ? size : 1);
+	return cxx_allocate(size);
 }
 static KYTY_SYSV_ABI void cxx_delete_array(void* p)
 {
@@ -4717,6 +4753,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("DQbtGaBKlaw", LibC::c_strnlen_s);
 	LIB_FUNC("Ezzq78ZgHPs", LibC::c_wcschr);
 	LIB_FUNC("g3ShSirD50I", LibC::c_wcsrchr);
+	LIB_FUNC("x9uumWcxhXU", LibC::c_wcsspn);
+	LIB_FUNC("H4MCONF+Gps", LibC::c_wcspbrk);
+	LIB_FUNC("Zf7ewes1VtY", LibC::c_std_find_trivial_4);
+	LIB_FUNC("3sssb+7Wn9M", LibC::c_std_find_trivial_8);
 	LIB_FUNC("KZm8HUIX2Rw", LibC::c_wcscat);
 	LIB_FUNC("6f5f-qx4ucA", LibC::c_wcscpy_s);
 	LIB_FUNC("Ye20uNnlglA", LibC::c_abs);
@@ -4998,6 +5038,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);         // operator new(size_t)
 	LIB_FUNC("ryUxD-60bKM", LibC::cxx_new_nothrow); // operator new(size_t, const std::nothrow_t&)
 	LIB_OBJECT("NLwJ3q+64bY", &LibC::g_cxx_nothrow); // std::nothrow
+	LIB_FUNC("RqeErO3cFHU", LibC::cxx_set_new_handler);
 	// Gen5 libc_v1 — public NID cfAXurvfl5o is __cxa_allocate_exception (not
 	// operator new). Mis-binding it to cxx_new corrupts the throw path.
 	LIB_FUNC("cfAXurvfl5o", LibC::cxa_allocate_exception);
@@ -5150,6 +5191,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("SHlt7EhOtqA", LibC::c_fgetpos);
 	LIB_FUNC("7PkSz+qnTto", LibC::c_fsetpos);
 	LIB_FUNC("qdGFBoLVNKI", LibC::c_quick_exit);
+	LIB_FUNC("wZi5ly2guNw", LibC::c_Exit);
 	// IL2CPP libc_v1 imports — CRT/Dinkumware internals.
 	LIB_FUNC("vZkmJmvqueY", LibC::c_Lockfilelock);
 	LIB_FUNC("0x7rx8TKy2Y", LibC::c_Unlockfilelock);
@@ -5222,6 +5264,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("V02oFv+-JzA", LibC::c_isinf);
 	// Gen5 libc_v1 __signbit — standard double predicate ABI.
 	LIB_FUNC("Rw4J-22tu1U", LibC::c_signbit);
+	LIB_FUNC("CjQROLB88a4", LibC::c_signbitf);
 	// Gen5 libc_v1 __fpclassifyd — translate host categories to guest values.
 	LIB_FUNC("qlWiRfOJx1A", LibC::c_fpclassifyd);
 	// Gen5 libc_v1 float math (NIDs from name→NID hash).

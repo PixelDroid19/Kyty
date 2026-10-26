@@ -77,6 +77,48 @@ KYTY_SYSV_ABI uint16_t* c_wcsrchr(const uint16_t* s, uint16_t c)
 	}
 }
 
+KYTY_SYSV_ABI size_t c_wcsspn(const uint16_t* s, const uint16_t* accept)
+{
+	size_t length = 0;
+	while (s[length] != 0 && c_wcschr(accept, s[length]) != nullptr)
+	{
+		length++;
+	}
+	return length;
+}
+
+KYTY_SYSV_ABI uint16_t* c_wcspbrk(const uint16_t* s, const uint16_t* accept)
+{
+	for (; *s != 0; s++)
+	{
+		if (c_wcschr(accept, *s) != nullptr)
+		{
+			return const_cast<uint16_t*>(s);
+		}
+	}
+	return nullptr;
+}
+
+// Linear searches the C++ library's std::find calls for trivially comparable
+// elements: the first element equal to value, or last when none is.
+KYTY_SYSV_ABI const uint32_t* c_std_find_trivial_4(const uint32_t* first, const uint32_t* last, uint32_t value)
+{
+	while (first != last && *first != value)
+	{
+		first++;
+	}
+	return first;
+}
+
+KYTY_SYSV_ABI const uint64_t* c_std_find_trivial_8(const uint64_t* first, const uint64_t* last, uint64_t value)
+{
+	while (first != last && *first != value)
+	{
+		first++;
+	}
+	return first;
+}
+
 KYTY_SYSV_ABI uint16_t* c_wcscat(uint16_t* dst, const uint16_t* src)
 {
 	uint16_t* end = dst + c_wcslen(dst);
