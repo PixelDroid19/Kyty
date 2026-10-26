@@ -981,26 +981,32 @@ static ComputePipelineRecipe BuildComputePipelineRecipe(const ShaderComputeInput
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
 	if (input_info->native_wave_sensitive)
 	{
-		// A split guest wave identifies its halves by SubgroupId, so it always requires the exact width.
+		// A split guest wave identifies its parts by SubgroupId, so it always requires the exact width.
 		const bool split = input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
-		if (input_info->required_subgroup_size != 32u ||
-		    (split ? input_info->wave_layout.guest_wave_size != 64u
-		           : input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native || input_info->wave_layout.guest_wave_size != 32u))
+		if (split ? input_info->wave_layout.guest_wave_size != 64u ||
+		                input_info->required_subgroup_size != input_info->wave_layout.native_subgroup_size
+		          : input_info->required_subgroup_size != 32u || input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native ||
+		                input_info->wave_layout.guest_wave_size != 32u)
 		{
 			EXIT("native-wave compute sensitivity has inconsistent guest-width metadata\n");
 		}
-		const auto selection = ShaderSelectNativeSubgroup(gctx->compute_wave_vulkan_state, VK_SHADER_STAGE_COMPUTE_BIT,
-		                                                   gctx->subgroup_size, input_info->required_subgroup_size,
-		                                                   false, false, cs_shader.At(1) >= 0x00010600u);
-		if (!selection.supported)
+		bool require_size = split;
+		if (!split)
 		{
-			EXIT("native-wave compute shader requires exact subgroup width 32, unavailable from the default width or enabled compute subgroup-size control\n");
+			const auto selection = ShaderSelectNativeSubgroup(gctx->compute_wave_vulkan_state, VK_SHADER_STAGE_COMPUTE_BIT,
+			                                                   gctx->subgroup_size, input_info->required_subgroup_size,
+			                                                   false, false, cs_shader.At(1) >= 0x00010600u);
+			if (!selection.supported)
+			{
+				EXIT("native-wave compute shader requires exact subgroup width 32, unavailable from the default width or enabled compute subgroup-size control\n");
+			}
+			require_size = selection.require_size;
 		}
 		auto native_layout = input_info->wave_layout;
 		native_layout.native_subgroup_size = input_info->required_subgroup_size;
 		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
 		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(native_layout, capabilities, &comp_shader_stage_info,
-		                                                     &required_subgroup_size, split || selection.require_size, cs_shader.At(1)))
+		                                                     &required_subgroup_size, require_size, cs_shader.At(1)))
 		{
 			EXIT("native-wave compute layout lacks full subgroups or exceeds exact-width workgroup limits\n");
 		}

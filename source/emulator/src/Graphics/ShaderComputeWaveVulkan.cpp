@@ -366,18 +366,19 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 		return true;
 	}
 
-	// Split waves use two whole 32-lane subgroups and exchange wave-wide values
-	// through workgroup memory.
-	const uint32_t host_subgroups_per_wave = 2u;
-	const uint32_t exchange_dwords         = kShaderSplitWaveExchangeDwords;
+	// Split waves use two whole 32-lane or four whole 16-lane subgroups and
+	// exchange wave-wide values through workgroup memory.
+	const uint32_t part_lanes = layout.native_subgroup_size;
 	if (!require_size || layout.strategy != ShaderComputeWaveStrategy::Split64On32 || layout.guest_wave_size != kGuestWaveSize ||
-	    layout.native_subgroup_size != kNativeSubgroupSize || layout.banks != 1u || layout.waves == 0 ||
+	    (part_lanes != 16u && part_lanes != 32u) || layout.banks != 1u || layout.waves == 0 ||
 	    !capabilities.size_control_enabled || !capabilities.full_subgroups_enabled || !capabilities.compute_required_size_supported ||
-	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > kNativeSubgroupSize ||
-	    capabilities.max_subgroup_size < kNativeSubgroupSize)
+	    !capabilities.compute_ballot_shuffle_supported || capabilities.min_subgroup_size > part_lanes ||
+	    capabilities.max_subgroup_size < part_lanes)
 	{
 		return false;
 	}
+	const uint32_t host_subgroups_per_wave = kGuestWaveSize / part_lanes;
+	const uint32_t exchange_dwords         = ShaderSplitWaveExchangeDwords(part_lanes);
 
 	uint64_t guest_invocations = 1;
 	for (uint32_t axis = 0; axis < 3; ++axis)
@@ -394,7 +395,7 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	uint64_t lds_bytes = 0;
 	// The trailing guest wave may be partial.
 	if (guest_invocations / kGuestWaveSize + (guest_invocations % kGuestWaveSize != 0u ? 1u : 0u) != layout.waves ||
-	    !MultiplyU64(layout.waves, host_subgroups_per_wave * kNativeSubgroupSize, &expected_physical_x) ||
+	    !MultiplyU64(layout.waves, kGuestWaveSize, &expected_physical_x) ||
 	    !MultiplyU64(layout.waves, host_subgroups_per_wave, &host_subgroups) ||
 	    !MultiplyU64(layout.waves, exchange_dwords, &wave_exchange_dwords) ||
 	    !MultiplyU64(wave_exchange_dwords + layout.lds_dwords, sizeof(uint32_t), &lds_bytes))
@@ -403,7 +404,7 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	}
 
 	if (expected_physical_x != layout.physical_local[0] || layout.physical_local[0] == 0 ||
-	    (layout.physical_local[0] % kNativeSubgroupSize) != 0 || layout.physical_local[1] != 1 ||
+	    (layout.physical_local[0] % part_lanes) != 0 || layout.physical_local[1] != 1 ||
 	    layout.physical_local[2] != 1 || layout.physical_local[0] > capabilities.max_local_size[0] ||
 	    layout.physical_local[1] > capabilities.max_local_size[1] ||
 	    layout.physical_local[2] > capabilities.max_local_size[2] ||
@@ -421,7 +422,7 @@ bool ShaderComputeWaveVulkanAttachRequiredSubgroupSize(
 	// Attach our node at the head rather than replacing an existing stage chain.
 	required->sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT;
 	required->pNext               = const_cast<void*>(stage->pNext);
-	required->requiredSubgroupSize = kNativeSubgroupSize;
+	required->requiredSubgroupSize = part_lanes;
 	stage->pNext                  = required;
 	stage->flags |= VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT;
 	stage->flags &= ~VK_PIPELINE_SHADER_STAGE_CREATE_ALLOW_VARYING_SUBGROUP_SIZE_BIT_EXT;

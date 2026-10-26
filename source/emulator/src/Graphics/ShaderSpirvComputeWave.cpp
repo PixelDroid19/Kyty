@@ -16,15 +16,20 @@ constexpr uint32_t kNativeSubgroupSize = 32u;
 
 bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
 {
-	if (input == nullptr || !input->native_wave_sensitive || input->required_subgroup_size != kNativeSubgroupSize ||
-	    input->thread_ids_num < 0 || input->thread_ids_num > 3 || input->thread_limits_used != input->bind.thread_limits_used)
+	if (input == nullptr || !input->native_wave_sensitive || input->thread_ids_num < 0 || input->thread_ids_num > 3 ||
+	    input->thread_limits_used != input->bind.thread_limits_used)
 	{
 		return false;
 	}
 
 	const auto& layout = input->wave_layout;
 	const bool  split  = layout.strategy == ShaderComputeWaveStrategy::Split64On32;
-	if (split ? layout.guest_wave_size != kGuestWaveSize || layout.native_subgroup_size != kNativeSubgroupSize || layout.waves == 0u
+	if (input->required_subgroup_size != (split ? layout.native_subgroup_size : kNativeSubgroupSize))
+	{
+		return false;
+	}
+	if (split ? layout.guest_wave_size != kGuestWaveSize || (layout.native_subgroup_size != 16u && layout.native_subgroup_size != 32u) ||
+	                layout.waves == 0u
 	          : layout.strategy != ShaderComputeWaveStrategy::Native || layout.guest_wave_size != kNativeSubgroupSize ||
 	                (layout.native_subgroup_size != 0u && layout.native_subgroup_size != kNativeSubgroupSize) || layout.waves != 0u)
 	{
@@ -108,7 +113,7 @@ bool Spirv::EmitNativeComputeWaveProlog(String8* output) const
 	}
 
 	const auto& local   = m_cs_input_info->wave_layout.guest_local;
-	const auto  wave    = GetConstantUint(kNativeSubgroupSize);
+	const auto  wave    = GetConstantUint(UsesSplitComputeWave() ? SplitWavePartLanes() : kNativeSubgroupSize);
 	const auto  size_x  = GetConstantUint(local[0]);
 	const auto  size_y  = GetConstantUint(local[1]);
 	const auto  size_xy = GetConstantUint(local[0] * local[1]);

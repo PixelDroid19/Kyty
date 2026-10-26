@@ -128,8 +128,10 @@ public:
 	// Built by GenerateSource.
 	[[nodiscard]] const ShaderControlFlowGraph& GetControlFlow() const { return m_control_flow; }
 	[[nodiscard]] bool UsesNativeComputeWave() const;
-	// Split wave64 (ShaderSpirvSplitWave.cpp): two host subgroups per guest wave on the native per-lane path.
+	// Split wave64 (ShaderSpirvSplitWave.cpp): two or four host subgroups per guest wave on the native per-lane path.
 	[[nodiscard]] bool UsesSplitComputeWave() const;
+	// Guest lanes per host subgroup of a split wave: 32 or 16.
+	[[nodiscard]] uint32_t SplitWavePartLanes() const;
 	// The SubgroupLocalInvocationId builtin. A split wave keeps the guest lane in %gl_SubgroupInvocationID.
 	[[nodiscard]] String8 HostLaneVariable() const;
 	[[nodiscard]] String8 SplitWaveTypes() const;

@@ -3793,9 +3793,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 // the shuffle follows it, and targets past the host subgroup (the ghost lanes
 // of the guest wave64) read the proven zero. FI and BOUND_CTRL are irrelevant
 // there: the region runs with full EXEC and every target stays inside a row.
-// Split compute holds one guest lane per invocation and exchanges the two
-// halves through %split_read, so PERMLANE follows a selector that may name a
-// lane in the other half of the guest wave.
+// Split compute holds one guest lane per invocation, so PERMLANE follows a
+// selector in guest lane space: inside a 32-lane part it is a shuffle, and
+// v_permlanex16 between 16-lane parts reads the other part through
+// %split_lane_read.
 static bool RecompileSplitPermlane16(uint32_t index, const ShaderCode& code, String8* dst_source, Spirv* spirv, bool x16)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -3819,7 +3820,7 @@ static bool RecompileSplitPermlane16(uint32_t index, const ShaderCode& code, Str
         <load0>
         <load1>
         <load2>
-          %perm_lane_<index> = OpLoad %uint %split_host_lane
+          %perm_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
          %perm_local_<index> = OpBitwiseAnd %uint %perm_lane_<index> %uint_15
         %perm_second_<index> = OpUGreaterThanEqual %bool %perm_local_<index> %uint_8
          %perm_table_<index> = OpSelect %uint %perm_second_<index> %perm_src2_<index> %perm_src1_<index>
@@ -3827,11 +3828,10 @@ static bool RecompileSplitPermlane16(uint32_t index, const ShaderCode& code, Str
          %perm_shift_<index> = OpShiftLeftLogical %uint %perm_nibble_<index> %uint_2
        %perm_shifted_<index> = OpShiftRightLogical %uint %perm_table_<index> %perm_shift_<index>
       %perm_selected_<index> = OpBitwiseAnd %uint %perm_shifted_<index> %uint_15
-           %perm_row_<index> = OpBitwiseAnd %uint %perm_lane_<index> %uint_16
+           %perm_row_<index> = OpBitwiseAnd %uint %perm_lane_<index> %split_c48
         %perm_row_in_<index> = OpBitwiseXor %uint %perm_row_<index> %uint_<row_xor>
         %perm_target_<index> = OpBitwiseOr %uint %perm_row_in_<index> %perm_selected_<index>
-     %dpp_perm_value_<index> = OpGroupNonUniformShuffle %uint %uint_3 %perm_src0_<index> %perm_target_<index>
-          %perm_exec_<index> = OpLoad %uint %exec_lane_lo
+<exchange>          %perm_exec_<index> = OpLoad %uint %exec_lane_lo
          %perm_write_<index> = OpINotEqual %bool %perm_exec_<index> %uint_0
            %perm_old_<index> = OpLoad %float %<dst>
         %perm_old_u_<index> = OpBitcast %uint %perm_old_<index>
@@ -3839,7 +3839,14 @@ static bool RecompileSplitPermlane16(uint32_t index, const ShaderCode& code, Str
      %perm_resultf_<index> = OpBitcast %float %perm_result_<index>
                OpStore %<dst> %perm_resultf_<index>
 )";
+	const uint32_t part_lanes = spirv->SplitWavePartLanes();
+	const String8  exchange =
+	    x16 && part_lanes == 16u
+	        ? String8("%dpp_perm_value_<index> = OpFunctionCall %uint %split_lane_read %perm_src0_<index> %perm_target_<index>\n")
+	        : String8("%perm_host_target_<index> = OpBitwiseAnd %uint %perm_target_<index> %split_lanes_mask\n"
+	                  "%dpp_perm_value_<index> = OpGroupNonUniformShuffle %uint %uint_3 %perm_src0_<index> %perm_host_target_<index>\n");
 	*dst_source += String8(text)
+	                   .ReplaceStr("<exchange>", exchange)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<load2>", load2)

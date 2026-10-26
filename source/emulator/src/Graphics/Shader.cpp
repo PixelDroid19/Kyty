@@ -4756,7 +4756,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			} else
 			{
 				info->native_wave_sensitive  = true;
-				info->required_subgroup_size = 32u;
+				info->required_subgroup_size = info->wave_layout.native_subgroup_size;
 			}
 		}
 		// Compute parsing preserves byte PCs relative to this dispatch's start.
