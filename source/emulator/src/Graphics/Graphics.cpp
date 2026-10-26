@@ -3756,32 +3756,15 @@ uint32_t KYTY_SYSV_ABI GraphicsDcbDmaDataGetSize()
 	return 7u * sizeof(uint32_t);
 }
 
-uint32_t KYTY_SYSV_ABI GraphicsAcbAcquireMemGetSize()
-{
-	// AGC returns 0x20 or 0x40 for Trinity; Kyty encodes the 8-dword form.
-	return 8u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsAcbCopyDataGetSize()
-{
-	return 6u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsAcbDispatchIndirectGetSize()
-{
-	return 4u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsAcbDmaDataGetSize()
-{
-	return 7u * sizeof(uint32_t);
-}
 
+// sceAgcAcbEventWriteGetSize: the async form has no address, so its packet is
+// always the short two-dword form.
 uint32_t KYTY_SYSV_ABI GraphicsAcbEventWriteGetSize()
 {
-	// AGC reports 8. The shared writer can emit the 4-dword addressed form,
-	// so reserve 16 to keep it inside the guest buffer.
-	return 4u * sizeof(uint32_t);
+	return 8u;
 }
 
 uint32_t KYTY_SYSV_ABI GraphicsCbSetShRegistersDirectGetSize(uint32_t num_regs)
@@ -3790,134 +3773,43 @@ uint32_t KYTY_SYSV_ABI GraphicsCbSetShRegistersDirectGetSize(uint32_t num_regs)
 	return 12u * num_regs;
 }
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbAcquireMemGetSize()
-{
-	// AGC returns 0x20 or 0x40 for Trinity; Kyty encodes the 8-dword form.
-	return 8u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbCopyDataGetSize()
-{
-	return 6u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbDispatchIndirectGetSize()
-{
-	return 3u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoGetSize()
-{
-	// AGC body returns 0xc; the Kyty writer reserves 7 dwords.
-	return 7u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexGetSize()
-{
-	// AGC body returns 0x18; the Kyty writer reserves 7 dwords.
-	return 7u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirectGetSize()
-{
-	return 5u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexOffsetGetSize()
-{
-	return 5u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndirectGetSize()
-{
-	return 5u * sizeof(uint32_t);
-}
-
-uint32_t KYTY_SYSV_ABI GraphicsDcbEventWriteGetSize(uint32_t event_type)
-{
-	return ((event_type & 0xfeu) == 0x38u) ? 4u * sizeof(uint32_t) : 2u * sizeof(uint32_t);
-}
 
 uint32_t KYTY_SYSV_ABI GraphicsDcbGetLodStatsGetSize()
 {
 	return 5u * sizeof(uint32_t);
 }
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirectGetSize()
-{
-	return 3u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirectGetSize()
-{
-	return 5u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexBufferGetSize()
-{
-	return 3u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexCountGetSize()
-{
-	return 2u * sizeof(uint32_t);
-}
 
 uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexSizeGetSize()
 {
-	// AGC body returns 0xc; the Kyty writer reserves 2 dwords.
-	return 3u * sizeof(uint32_t);
+	return 8u;
 }
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbSetNumInstancesGetSize()
-{
-	return 2u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbSetShRegisterDirectGetSize()
-{
-	return 3u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirectGetSize()
-{
-	return 5u * sizeof(uint32_t);
-}
 
 uint32_t KYTY_SYSV_ABI GraphicsDcbSetUcRegisterDirectGetSize()
 {
 	return 3u * sizeof(uint32_t);
 }
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirectGetSize()
-{
-	return 5u * sizeof(uint32_t);
-}
 
 uint32_t KYTY_SYSV_ABI GraphicsDcbWriteDataGetSize(uint32_t num_dwords)
 {
 	return 4u * num_dwords + 4u * sizeof(uint32_t);
 }
 
-uint32_t KYTY_SYSV_ABI GraphicsDcbRewindGetSize()
-{
-	return 2u * sizeof(uint32_t);
-}
 
-uint32_t KYTY_SYSV_ABI GraphicsAcbRewindGetSize()
-{
-	return 2u * sizeof(uint32_t);
-}
-
-uint32_t KYTY_SYSV_ABI GraphicsDcbCondExecGetSize()
-{
-	return 5u * sizeof(uint32_t);
-}
-
-uint32_t KYTY_SYSV_ABI GraphicsAcbCondExecGetSize()
-{
-	return 5u * sizeof(uint32_t);
-}
 
 uint32_t KYTY_SYSV_ABI GraphicsAcbAtomicGdsGetSize()
 {
@@ -4469,102 +4361,7 @@ int KYTY_SYSV_ABI GraphicsUpdatePrimState(volatile uint32_t* cx_regs, volatile u
 	return OK;
 }
 
-// sceAgcDcbCondExec (NID BIPexNBSGog).
-uint32_t* KYTY_SYSV_ABI GraphicsDcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t block_dwords)
-{
-	PRINT_NAME();
 
-			KYTY_LOG_DEBUG("\t address      = 0x%016" PRIx64 "\n", address);
-			KYTY_LOG_DEBUG("\t block_dwords = %" PRIu32 "\n", block_dwords);
-
-	if (buf == nullptr)
-	{
-		return nullptr;
-	}
-	auto* cmd = buf->AllocateDW(5);
-	if (cmd == nullptr)
-	{
-		return nullptr;
-	}
-
-	cmd[0] = KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u);
-	cmd[1] = static_cast<uint32_t>(address & 0xfffffffcu);
-	cmd[2] = static_cast<uint32_t>((address >> 32u) & 0xffffffffu);
-	cmd[3] = 0;
-	cmd[4] = block_dwords & 0x3fffu;
-	return cmd;
-}
-
-// sceAgcAcbCondExec (NID qyM2bxYFPAk).
-uint32_t* KYTY_SYSV_ABI GraphicsAcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t block_dwords)
-{
-	PRINT_NAME();
-
-			KYTY_LOG_DEBUG("\t address      = 0x%016" PRIx64 "\n", address);
-			KYTY_LOG_DEBUG("\t block_dwords = %" PRIu32 "\n", block_dwords);
-
-	if (buf == nullptr)
-	{
-		return nullptr;
-	}
-	auto* cmd = buf->AllocateDW(5);
-	if (cmd == nullptr)
-	{
-		return nullptr;
-	}
-
-	cmd[0] = KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u);
-	cmd[1] = static_cast<uint32_t>(address & 0xfffffffcu);
-	cmd[2] = static_cast<uint32_t>((address >> 32u) & 0xffffffffu);
-	cmd[3] = 0;
-	cmd[4] = block_dwords & 0x3fffu;
-	return cmd;
-}
-
-// sceAgcDcbRewind (NID zfcxg-ewMK8).
-uint32_t* KYTY_SYSV_ABI GraphicsDcbRewind(CommandBuffer* buf, uint32_t state)
-{
-	PRINT_NAME();
-
-			KYTY_LOG_DEBUG("\t state = %" PRIu32 "\n", state & 1u);
-
-	if (buf == nullptr)
-	{
-		return nullptr;
-	}
-	auto* cmd = buf->AllocateDW(2);
-	if (cmd == nullptr)
-	{
-		return nullptr;
-	}
-
-	cmd[0] = KYTY_PM4(2, Pm4::IT_REWIND, 0u);
-	cmd[1] = (state & 1u) << 31u;
-	return cmd;
-}
-
-// sceAgcAcbRewind (NID DwICrVxerkY). `flags` drives bit 24; AGC semantics of
-// that bit are not documented, so it is forwarded verbatim.
-uint32_t* KYTY_SYSV_ABI GraphicsAcbRewind(CommandBuffer* buf, uint32_t state, uint32_t flags)
-{
-	PRINT_NAME();
-
-			KYTY_LOG_DEBUG("\t state = %" PRIu32 " flags = %" PRIu32 "\n", state & 1u, flags & 1u);
-
-	if (buf == nullptr)
-	{
-		return nullptr;
-	}
-	auto* cmd = buf->AllocateDW(2);
-	if (cmd == nullptr)
-	{
-		return nullptr;
-	}
-
-	cmd[0] = KYTY_PM4(2, Pm4::IT_REWIND, 0u);
-	cmd[1] = ((state & 1u) << 31u) | ((flags & 1u) << 24u);
-	return cmd;
-}
 
 int KYTY_SYSV_ABI GraphicsAgcDriverUnknownKRzWekV120()
 {
@@ -5402,12 +5199,6 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 	return cmd;
 }
 
-// GraphicsDcbSetIndexSizeGetSize: the packet the writer above emits. The game reserves
-// this many bytes before calling the writer, so the two must agree.
-uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexSizeGetSize()
-{
-	return 8u;
-}
 
 static bool draw_index_auto_modifier_supported(uint64_t modifier)
 {
@@ -6137,11 +5928,6 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_
 	return GraphicsDcbEventWrite(buf, event_type, nullptr);
 }
 
-// sceAgcAcbEventWriteGetSize: the async event write is always the short form.
-uint32_t KYTY_SYSV_ABI GraphicsAcbEventWriteGetSize()
-{
-	return 8u;
-}
 
 uint32_t* KYTY_SYSV_ABI GraphicsAcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
                                              const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm)

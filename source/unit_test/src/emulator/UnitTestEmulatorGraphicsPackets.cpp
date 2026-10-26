@@ -3306,7 +3306,7 @@ TEST(EmulatorGraphicsPackets, ReportsAgcGetSizeHelpers)
 	EXPECT_EQ(Gen5::GraphicsAcbCopyDataGetSize(), 24u);
 	EXPECT_EQ(Gen5::GraphicsAcbDispatchIndirectGetSize(), 16u);
 	EXPECT_EQ(Gen5::GraphicsAcbDmaDataGetSize(), 28u);
-	EXPECT_EQ(Gen5::GraphicsAcbEventWriteGetSize(), 16u);
+	EXPECT_EQ(Gen5::GraphicsAcbEventWriteGetSize(), 8u);
 
 	EXPECT_EQ(Gen5::GraphicsCbSetShRegistersDirectGetSize(0), 0u);
 	EXPECT_EQ(Gen5::GraphicsCbSetShRegistersDirectGetSize(3), 36u);
@@ -3326,15 +3326,15 @@ TEST(EmulatorGraphicsPackets, ReportsAgcGetSizeHelpers)
 
 	EXPECT_EQ(Gen5::GraphicsDcbGetLodStatsGetSize(), 20u);
 	EXPECT_EQ(Gen5::GraphicsDcbSetCxRegisterDirectGetSize(), 12u);
-	EXPECT_EQ(Gen5::GraphicsDcbSetCxRegistersIndirectGetSize(), 20u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetCxRegistersIndirectGetSize(), 16u);
 	EXPECT_EQ(Gen5::GraphicsDcbSetIndexBufferGetSize(), 12u);
 	EXPECT_EQ(Gen5::GraphicsDcbSetIndexCountGetSize(), 8u);
-	EXPECT_EQ(Gen5::GraphicsDcbSetIndexSizeGetSize(), 12u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexSizeGetSize(), 8u);
 	EXPECT_EQ(Gen5::GraphicsDcbSetNumInstancesGetSize(), 8u);
 	EXPECT_EQ(Gen5::GraphicsDcbSetShRegisterDirectGetSize(), 12u);
-	EXPECT_EQ(Gen5::GraphicsDcbSetShRegistersIndirectGetSize(), 20u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetShRegistersIndirectGetSize(), 16u);
 	EXPECT_EQ(Gen5::GraphicsDcbSetUcRegisterDirectGetSize(), 12u);
-	EXPECT_EQ(Gen5::GraphicsDcbSetUcRegistersIndirectGetSize(), 20u);
+	EXPECT_EQ(Gen5::GraphicsDcbSetUcRegistersIndirectGetSize(), 16u);
 	EXPECT_EQ(Gen5::GraphicsDcbWriteDataGetSize(0), 16u);
 	EXPECT_EQ(Gen5::GraphicsDcbWriteDataGetSize(4), 32u);
 

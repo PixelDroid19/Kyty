@@ -214,7 +214,6 @@ uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirectGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexOffsetGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndirectGetSize();
-uint32_t KYTY_SYSV_ABI GraphicsDcbEventWriteGetSize(uint32_t event_type);
 uint32_t KYTY_SYSV_ABI GraphicsDcbGetLodStatsGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirectGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirectGetSize();
@@ -227,9 +226,6 @@ uint32_t KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirectGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsDcbSetUcRegisterDirectGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirectGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsDcbWriteDataGetSize(uint32_t num_dwords);
-// sceAgcDcbRewindGetSize / sceAgcAcbRewindGetSize: fixed 2-dword packet.
-uint32_t KYTY_SYSV_ABI GraphicsDcbRewindGetSize();
-uint32_t KYTY_SYSV_ABI GraphicsAcbRewindGetSize();
 // sceAgcDcbCondExecGetSize / sceAgcAcbCondExecGetSize: fixed 5-dword packet.
 uint32_t KYTY_SYSV_ABI GraphicsDcbCondExecGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsAcbCondExecGetSize();
@@ -291,9 +287,6 @@ int KYTY_SYSV_ABI GraphicsUpdatePrimState(volatile uint32_t* cx_regs, volatile u
 // sceAgcDcbCondExec / sceAgcAcbCondExec (NIDs BIPexNBSGog, qyM2bxYFPAk).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t block_dwords);
 uint32_t* KYTY_SYSV_ABI GraphicsAcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t block_dwords);
-// sceAgcDcbRewind / sceAgcAcbRewind (NIDs zfcxg-ewMK8, DwICrVxerkY).
-uint32_t* KYTY_SYSV_ABI GraphicsDcbRewind(CommandBuffer* buf, uint32_t state);
-uint32_t* KYTY_SYSV_ABI GraphicsAcbRewind(CommandBuffer* buf, uint32_t state, uint32_t flags);
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
 int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();
 // PS5 Pro / Trinity GPU mode query (NID BfBDZGbti7A). Base Prospero reports 0.

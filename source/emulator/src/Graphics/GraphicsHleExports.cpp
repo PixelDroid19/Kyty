@@ -180,29 +180,6 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("0ZOG0jc9nRg", Gen5::GraphicsAcbRewindGetSize);
 	LIB_FUNC("ou16V5hh5sg", Gen5::GraphicsDcbCondExecGetSize);
 	LIB_FUNC("ozKzBP4aki4", Gen5::GraphicsAcbCondExecGetSize);
-	LIB_FUNC("C4l9fB17t8w", Gen5::GraphicsDcbEventWriteGetSize);
-	LIB_FUNC("Y-5vneiBtzk", Gen5::GraphicsAcbEventWriteGetSize);
-	LIB_FUNC("ewobAQeMo5k", Gen5::GraphicsAcbAcquireMemGetSize);
-	LIB_FUNC("CbQh3DKMSno", Gen5::GraphicsAcbCopyDataGetSize);
-	LIB_FUNC("M0ttm8h7SKA", Gen5::GraphicsAcbDmaDataGetSize);
-	LIB_FUNC("PxKWV2fVAps", Gen5::GraphicsAcbDispatchIndirectGetSize);
-	LIB_FUNC("-vnlTPPXPrw", Gen5::GraphicsDcbAcquireMemGetSize);
-	LIB_FUNC("b5u0Jzm8TF8", Gen5::GraphicsDcbCopyDataGetSize);
-	LIB_FUNC("w8HVkEeXPv8", Gen5::GraphicsDcbDispatchIndirectGetSize);
-	LIB_FUNC("WrdP9Zxx3lQ", Gen5::GraphicsDcbDrawIndexAutoGetSize);
-	LIB_FUNC("6ee9Hd3EWXQ", Gen5::GraphicsDcbDrawIndexGetSize);
-	LIB_FUNC("mStuvI0zOtc", Gen5::GraphicsDcbDrawIndexIndirectGetSize);
-	LIB_FUNC("qMlfB1ZhMDc", Gen5::GraphicsDcbDrawIndexOffsetGetSize);
-	LIB_FUNC("cxPZ4Wgvdj8", Gen5::GraphicsDcbDrawIndirectGetSize);
-	LIB_FUNC("1DeUNpRIDDA", Gen5::GraphicsDcbSetCxRegisterDirectGetSize);
-	LIB_FUNC("GBCh3zCihoU", Gen5::GraphicsDcbSetCxRegistersIndirectGetSize);
-	LIB_FUNC("j4emHHndCPY", Gen5::GraphicsDcbSetIndexBufferGetSize);
-	LIB_FUNC("mljzuGDZRQ4", Gen5::GraphicsDcbSetIndexCountGetSize);
-	LIB_FUNC("ca4KPvp0qLQ", Gen5::GraphicsDcbSetIndexSizeGetSize);
-	LIB_FUNC("6DFuRKT4C9w", Gen5::GraphicsDcbSetNumInstancesGetSize);
-	LIB_FUNC("QhPDD513V0w", Gen5::GraphicsDcbSetShRegisterDirectGetSize);
-	LIB_FUNC("nNlUtdDDvZ0", Gen5::GraphicsDcbSetShRegistersIndirectGetSize);
-	LIB_FUNC("UQGTw4xRlcM", Gen5::GraphicsDcbSetUcRegistersIndirectGetSize);
 	LIB_FUNC("b-oySn+G2tE", Gen5::GraphicsCbJumpGetSize); // sceAgcAcbJumpGetSize
 	LIB_FUNC("w1KFAHVqpaU", Gen5::GraphicsCbBranch);        // sceAgcCbBranch
 	LIB_FUNC("uZW-mqsxkrM", Gen5::GraphicsCbBranchGetSize); // sceAgcCbBranchGetSize
@@ -276,14 +253,6 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("s+VGAMDQ0AQ", Gen5::GraphicsGetDataPacketPayloadRange);
 	LIB_FUNC("n8vgpaQg6dA", Gen5::GraphicsSetPacketPredicationRange);
 	LIB_FUNC("Y3ymLfZ1384", Gen5::GraphicsUpdatePrimState);
-	LIB_FUNC("BIPexNBSGog", Gen5::GraphicsDcbCondExec);
-	LIB_FUNC("qyM2bxYFPAk", Gen5::GraphicsAcbCondExec);
-	LIB_FUNC("ou16V5hh5sg", Gen5::GraphicsDcbCondExecGetSize);
-	LIB_FUNC("ozKzBP4aki4", Gen5::GraphicsAcbCondExecGetSize);
-	LIB_FUNC("zfcxg-ewMK8", Gen5::GraphicsDcbRewind);
-	LIB_FUNC("DwICrVxerkY", Gen5::GraphicsAcbRewind);
-	LIB_FUNC("QIXCsbipds0", Gen5::GraphicsDcbRewindGetSize);
-	LIB_FUNC("0ZOG0jc9nRg", Gen5::GraphicsAcbRewindGetSize);
 	LIB_FUNC("hcIxS8pmXF4", Gen5::GraphicsAcbAtomicGdsGetSize);
 	LIB_FUNC("da1Sm8-QDoU", Gen5::GraphicsAcbAtomicMemGetSize);
 	LIB_FUNC("eCjKaqeeQ5s", Gen5::GraphicsAcbPrimeUtcl2GetSize);
