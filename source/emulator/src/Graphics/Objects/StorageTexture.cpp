@@ -69,7 +69,7 @@ static bool IsR32SingleComponentStorageFormat(uint32_t fmt)
 // identity mapping, whatever their guest selector.
 static bool IsIdentityViewStorageFormat(uint32_t fmt)
 {
-	return fmt == 5u || fmt == 7u || fmt == 11u || fmt == 13u || fmt == 14u || fmt == 62u;
+	return fmt == 5u || fmt == 7u || fmt == 11u || fmt == 13u || fmt == 14u || fmt == 18u || fmt == 62u;
 }
 
 // `format` is the packed PARAM_FORMAT (fmt << 16 | dfmt << 8 | nfmt).

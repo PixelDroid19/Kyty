@@ -18,7 +18,7 @@ namespace Kyty::Libs::Graphics {
 struct ShaderStorageImagePlan
 {
 	static constexpr int SHAPES = 3;
-	static constexpr int TYPES = 7; // formatless float, then the exact uint formats
+	static constexpr int TYPES = 8; // formatless float, then the exact uint formats
 	static constexpr int VIEWS = SHAPES * TYPES;
 
 	bool supported = true;
