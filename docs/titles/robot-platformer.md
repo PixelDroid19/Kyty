@@ -2076,14 +2076,39 @@ Known approximations and debt recorded by this chain:
   split-wave16 branches reaches three presented frames (`frame 4`,
   `present 3`, then `phase=stalled` with no present for 54 s) and writes no
   shader log past its first pixel programs. The kernel journal records no
-  RCS reset for that process and the log has no `vkWaitForFences` failure,
-  so the block is on the host before any hub shader. The last recorded error
-  event before the stall is `gfx_storage_frontier` with
-  `src=metadata r=metadata_only`. No shader that contains `ds_bpermute_b32`
-  executes before the stall, so the lane-permute fix is not involved. Next
-  step: capture the emulator process thread stacks (the first snapshot caught
-  the timeout wrapper) and A/B the HLE-only merge against the split-wave16
-  merge to isolate the block.
+  RCS reset for that process and the log has no `vkWaitForFences` failure.
+  The last recorded error event before the stall is `gfx_storage_frontier`
+  with `src=metadata r=metadata_only`. No shader that contains
+  `ds_bpermute_b32` executes before the stall, so the lane-permute fix is not
+  involved. The next run captured the process thread stacks (record below),
+  which exclude host shader compilation as the block; the A/B of the HLE-only
+  merge against the split-wave16 merge is still open.
+- **The boot stop is a guest lock wait; no shader compiles during it
+  (2026-10-26).** A bounded strict run of the same merged build (translator
+  160, 1280x720, offscreen) reproduces `frame 1`, `present 0` and
+  `phase=booting` for more than 100 s. A gdb all-stop of the emulator process
+  at 180 s, taken by suspending the traced child with `SIGSTOP` and dumping
+  every thread, shows all 91 threads parked: the window thread in
+  `Kyty::Libs::VideoOut::FlipQueue::Flip` waiting for a present, the graphics
+  ring batch thread in `WaitForSuspendedRuns`, the label manager, both
+  async-job threads and the SPIR-V cache worker on their own condition
+  variables, and the only Vulkan frames are idle `pthread_cond_wait`
+  positions of the disk-pool threads inside
+  `libvulkan_intel.so`/`libvulkan_radeon.so`. No thread is translating or
+  compiling a shader, so the compile-storm explanation is excluded.
+  Every guest thread waits on a kernel object: the guest main thread
+  (entry 0) is in `PthreadMutexLock` on the guest mutex at `0x37d453360`,
+  eight job threads wait on guest semaphore 6 from RVA `0x1081a9f`, one
+  thread waits on semaphore 4 and the rest wait on engine condition
+  variables. The blocking site is RVA `0x2a4ac2` of the guest image (a call
+  through the pthread mutex wrapper at `0x640`, return address `0x2a4ac7`)
+  inside a frame-timing function reached from `0x2a37c8` and `0x29fe11`. The
+  guest stops before submitting the next frame because a contended guest
+  lock is never released; this capture does not yet say whether the missing
+  release depends on a GPU completion or on the guest's own job system.
+  Next: read `PthreadMutexPrivate::owner` of the stalled mutex (the guest
+  address is stable across runs) to name the holder, and A/B the HLE-only
+  merge at `7dd05019` against this tree.
 - **The narrowing SDWA is translated.** The hub's pixel program also uses
   `vcvt_f16_f32` with a sub-dword addressing modifier, which the half
   arithmetic refused. The ISA's SDWA fields give the contract: the source is
