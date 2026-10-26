@@ -1721,6 +1721,8 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("kBJzF8x4SyE", Memory::KernelBatchMap2);
 	LIB_FUNC("2SKEx6bSq-4", Memory::KernelBatchMap);
 	LIB_FUNC("aNz11fnnzi4", Memory::KernelAvailableFlexibleMemorySize);
+	LIB_FUNC("BohYr-F7-is", Memory::KernelSetPrtAperture);
+	LIB_FUNC("L0v2Go5jOuM", Memory::KernelGetPrtAperture);
 	LIB_FUNC("n1-v6FgU7MQ", Memory::KernelConfiguredFlexibleMemorySize);
 	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
 	LIB_FUNC("mkgXxsoxWHg", Memory::KernelClearVirtualRangeName);

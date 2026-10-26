@@ -4068,11 +4068,17 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// The overlap query may adjust the range: snapshot the span for
 				// object creation before it runs.
 				depth_span_size = query_size;
-				const bool physical_ok = span_ok && Kernel::Memory::KernelQueryMappedRange(addr, query_size, &mapped) &&
-				                         mapped.kind == Kernel::Memory::KernelMappedRangeKind::Physical;
+				// Layers may be separate mappings, and pages of a partially resident
+				// array may be unmapped inside a PRT aperture, where they read as zero.
+				(void)Kernel::Memory::KernelQueryMappedRange(addr, query_size, &mapped);
+				const bool physical_ok = span_ok && Kernel::Memory::KernelRangeResidentOrPrt(addr, query_size);
 				const bool overlaps_ok = GpuMemoryQueryOverlaps(&query_addr, &query_size, 1u, &overlaps);
-				bool has_texture_parent = false;
-				bool has_render_texture = false;
+				bool has_texture_parent  = false;
+				bool has_render_texture  = false;
+				bool has_storage_texture = false;
+				bool has_partial_storage = false;
+				// A storage image that only crosses the range starts elsewhere, so it cannot be this surface.
+				uint32_t crossing_storage_textures = 0u;
 				if (overlaps_ok)
 				{
 					for (uint32_t entry = 0u; entry < overlaps.entry_count; entry++)
