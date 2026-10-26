@@ -41,6 +41,15 @@ public:
 	[[nodiscard]] bool Stop() noexcept;
 	[[nodiscard]] bool Active() const noexcept;
 
+	// Progress lanes may be updated from any thread; Publish snapshots them
+	// under the same lock so a sample never mixes two lane states. Hot paths
+	// should not call these directly: sample owned counters from one thread.
+	[[nodiscard]] bool RegisterProgress(ProgressKey key, ProgressToken* out) noexcept;
+	[[nodiscard]] bool SubmitProgress(ProgressToken token, const ProgressUpdate& update) noexcept;
+	[[nodiscard]] bool CompleteProgress(ProgressToken token, uint64_t epoch) noexcept;
+	void               CloseProgress(ProgressToken token) noexcept;
+	void               NoteUntrackedProgress(Domain domain) noexcept;
+
 private:
 	struct State;
 	std::unique_ptr<State> state_;

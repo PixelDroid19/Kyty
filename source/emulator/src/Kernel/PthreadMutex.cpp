@@ -346,8 +346,11 @@ int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	int result = 0;
+	// Only a contended lock is recorded as a wait; the uncontended path stays cheap.
+	int result = pthread_mutex_trylock(&private_mutex->p);
+	if (result == EBUSY)
 	{
+		KYTY_GUEST_WAIT(PthreadWaitKind::Mutex, mutex);
 		PthreadInterruptibleScope lock_wait(&private_mutex->p, sizeof(private_mutex->p));
 		result = pthread_mutex_timedlock(&private_mutex->p, &deadline);
 	}

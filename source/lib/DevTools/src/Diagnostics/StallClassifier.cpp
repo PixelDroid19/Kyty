@@ -71,52 +71,114 @@ namespace {
 	}
 }
 
-struct ActiveLane
+// Guest-thread lanes stay open while the thread lives; they feed the guest
+// deadlock rule only, never the busy-lane rules.
+[[nodiscard]] bool IsGuestThread(const ProgressSnapshotEntry& entry) noexcept
 {
-	Domain   domain      = Domain::Unknown;
-	uint64_t instance    = 0;
-	uint64_t correlation = 0;
-	uint32_t operation   = 0;
-	uint64_t last_change = 0;
-	bool     waiting     = false;
-	bool     active      = false;
+	return entry.key.domain == Domain::GuestThread;
+}
+
+// A command lane parked on WAIT_REG_MEM waits for memory the guest writes: it
+// is guest-paced, so only the guest deadlock rule judges it.
+[[nodiscard]] bool WaitsOnGuestMemory(const ProgressSnapshotEntry& entry) noexcept
+{
+	return entry.key.domain == Domain::CommandProcessor &&
+	       entry.record.operation == static_cast<uint32_t>(OperationCode::RegisterMemoryWait);
+}
+
+[[nodiscard]] bool LaneBusy(const ProgressRecord& record) noexcept
+{
+	const auto st = static_cast<ProgressState>(record.state);
+	return (st == ProgressState::Active || st == ProgressState::Waiting) && record.submitted > record.completed;
+}
+
+[[nodiscard]] uint64_t Age(uint64_t since_ns, uint64_t sample_ns) noexcept
+{
+	return sample_ns > since_ns ? sample_ns - since_ns : 0u;
+}
+
+[[nodiscard]] uint64_t LaneAge(const ProgressRecord& record, uint64_t sample_ns, uint64_t not_before_ns) noexcept
+{
+	return Age(record.last_change_ns > not_before_ns ? record.last_change_ns : not_before_ns, sample_ns);
+}
+
+[[nodiscard]] StallCategory CategoryForDomain(Domain domain) noexcept
+{
+	switch (domain)
+	{
+		case Domain::GpuQueue: return StallCategory::GpuStall;
+		case Domain::CommandProcessor:
+		case Domain::Renderer: return StallCategory::CommandProcessorStall;
+		case Domain::Presentation:
+		case Domain::VideoOut: return StallCategory::PresentationStall;
+		case Domain::Hle: return StallCategory::HleStall;
+		default: return StallCategory::UnknownStall;
+	}
+}
+
+// Lower rank is closer to the root cause: a hung GPU queue also keeps the
+// command processor and presentation lanes busy, and those keep HLE waits busy.
+[[nodiscard]] uint32_t CauseRank(Domain domain) noexcept
+{
+	switch (domain)
+	{
+		case Domain::GpuQueue: return 0;
+		case Domain::CommandProcessor: return 1;
+		case Domain::Renderer: return 2;
+		case Domain::Presentation: return 3;
+		case Domain::VideoOut: return 4;
+		case Domain::Hle: return 5;
+		default: return 6;
+	}
+}
+
+struct StallCandidate
+{
+	StallCategory                category     = StallCategory::None;
+	const ProgressSnapshotEntry* lane         = nullptr;
+	uint64_t                     age_ns       = 0;
+	uint64_t                     suspected_ns = 0;
+	uint64_t                     confirmed_ns = 0;
 };
 
-[[nodiscard]] bool FindStalledHle(const ProgressSnapshot& progress, ActiveLane* out) noexcept
+// Picks the busy lane that has not changed for longer than its suspicion
+// threshold and is closest to the root cause; older lanes win ties.
+[[nodiscard]] StallCandidate FindStalledLane(const ObservationInput& input, const StallSettings& settings,
+                                             uint64_t not_before_ns) noexcept
 {
-	if (out == nullptr)
+	StallCandidate best {};
+	for (uint32_t i = 0; i < input.progress.count && i < MaxProgressSnapshotEntries; ++i)
 	{
-		return false;
-	}
-	for (uint32_t i = 0; i < progress.count && i < MaxProgressSnapshotEntries; ++i)
-	{
-		const auto& e = progress.entries[i];
-		if (e.key.domain != Domain::Hle)
+		const auto& e = input.progress.entries[i];
+		if (IsGuestThread(e) || WaitsOnGuestMemory(e) || !LaneBusy(e.record))
 		{
 			continue;
 		}
-		const auto st = static_cast<ProgressState>(e.record.state);
-		if ((st == ProgressState::Active || st == ProgressState::Waiting) && e.record.submitted > e.record.completed)
+		const uint64_t age = LaneAge(e.record, input.sample_time_ns, not_before_ns);
+		const uint64_t sus = ThresholdSuspected(settings, e.key.domain, e.record.operation);
+		if (age < sus)
 		{
-			out->domain      = Domain::Hle;
-			out->instance    = e.key.instance;
-			out->correlation = e.record.correlation;
-			out->operation   = e.record.operation;
-			out->last_change = e.record.last_change_ns;
-			out->waiting     = (st == ProgressState::Waiting);
-			out->active      = true;
-			return true;
+			continue;
+		}
+		const bool better = best.lane == nullptr || CauseRank(e.key.domain) < CauseRank(best.lane->key.domain) ||
+		                    (CauseRank(e.key.domain) == CauseRank(best.lane->key.domain) && age > best.age_ns);
+		if (better)
+		{
+			best.category     = CategoryForDomain(e.key.domain);
+			best.lane         = &e;
+			best.age_ns       = age;
+			best.suspected_ns = sus;
+			best.confirmed_ns = ThresholdConfirmed(settings, e.key.domain, e.record.operation);
 		}
 	}
-	return false;
+	return best;
 }
 
-[[nodiscard]] bool AnyActiveProgress(const ProgressSnapshot& progress) noexcept
+[[nodiscard]] bool AnyBusyLane(const ProgressSnapshot& progress) noexcept
 {
 	for (uint32_t i = 0; i < progress.count && i < MaxProgressSnapshotEntries; ++i)
 	{
-		const auto st = static_cast<ProgressState>(progress.entries[i].record.state);
-		if (st == ProgressState::Active || st == ProgressState::Waiting)
+		if (!IsGuestThread(progress.entries[i]) && LaneBusy(progress.entries[i].record))
 		{
 			return true;
 		}
@@ -124,40 +186,31 @@ struct ActiveLane
 	return false;
 }
 
-[[nodiscard]] uint64_t FingerprintInput(const ObservationInput& input, StallCategory category) noexcept
+// Causal fingerprint: what is stuck, not when it was sampled. A lane that
+// completes and stalls again on a later epoch is a new stall.
+[[nodiscard]] uint64_t Fingerprint(const StallCandidate& candidate, uint64_t heartbeat_ns) noexcept
 {
-	// Causal fingerprint: category + process + progress identity (no sample times).
 	struct Compact
 	{
+		uint32_t version;
 		uint16_t category;
-		uint8_t  liveness;
-		uint8_t  termination;
-		uint8_t  error;
-		uint8_t  code_valid;
-		uint32_t code;
-		uint32_t progress_count;
-		uint64_t keys[32];
-		uint64_t submitted[32];
-		uint64_t completed[32];
-		uint32_t operations[32];
-		uint16_t states[32];
+		uint16_t reserved;
+		uint64_t instance_key;
+		uint64_t submitted;
+		uint64_t operation;
+		uint64_t heartbeat_ns;
 	} compact {};
-	compact.category       = static_cast<uint16_t>(category);
-	compact.liveness       = static_cast<uint8_t>(input.process.liveness);
-	compact.termination    = static_cast<uint8_t>(input.process.termination);
-	compact.error          = static_cast<uint8_t>(input.process.error);
-	compact.code_valid     = input.process.code_valid;
-	compact.code           = input.process.code;
-	const uint32_t n       = (input.progress.count < 32u) ? input.progress.count : 32u;
-	compact.progress_count = n;
-	for (uint32_t i = 0; i < n; ++i)
+	compact.version  = 1;
+	compact.category = static_cast<uint16_t>(candidate.category);
+	if (candidate.lane != nullptr)
 	{
-		const auto& e    = input.progress.entries[i];
-		compact.keys[i]  = e.record.instance_key;
-		compact.submitted[i]  = e.record.submitted;
-		compact.completed[i]  = e.record.completed;
-		compact.operations[i] = e.record.operation;
-		compact.states[i]     = e.record.state;
+		compact.instance_key = candidate.lane->record.instance_key;
+		compact.submitted    = candidate.lane->record.submitted;
+		compact.operation    = candidate.lane->record.operation;
+	}
+	if (candidate.category == StallCategory::WorkerUnresponsive)
+	{
+		compact.heartbeat_ns = heartbeat_ns;
 	}
 	return Crc64Ecma(&compact, sizeof(compact));
 }
@@ -175,6 +228,100 @@ void PushEvidence(SuspectedEvidence* suspected, StallFact fact) noexcept
 	} else
 	{
 		suspected->evidence_truncated = 1u;
+	}
+}
+
+void PushStalledLanes(const ObservationInput& input, const StallSettings& settings, uint64_t not_before_ns,
+                      SuspectedEvidence* suspected) noexcept
+{
+	for (uint32_t i = 0; i < input.progress.count && i < MaxProgressSnapshotEntries; ++i)
+	{
+		const auto& e = input.progress.entries[i];
+		if (IsGuestThread(e) || WaitsOnGuestMemory(e) || !LaneBusy(e.record) ||
+		    LaneAge(e.record, input.sample_time_ns, not_before_ns) < ThresholdSuspected(settings, e.key.domain, e.record.operation))
+		{
+			continue;
+		}
+		PushEvidence(suspected, StallFact {e.key.domain, static_cast<uint16_t>(e.record.operation), e.record.state,
+		                                   e.key.instance, e.record.correlation});
+	}
+}
+
+[[nodiscard]] bool GuestLanesComplete(const LossSnapshot& loss) noexcept
+{
+	const auto guest = static_cast<uint32_t>(Domain::GuestThread);
+	return loss.progress.capacity[guest].total == 0u && loss.progress.rejected_update[guest].total == 0u;
+}
+
+// Every guest thread parked in a blocking wait while the host has had nothing
+// to run but waits on guest memory: the guest waits for something nothing will
+// signal. A running guest thread or any other busy host lane (command, GPU
+// queue, present) rules it out, and so does any untracked guest thread, which
+// might be the one still running.
+[[nodiscard]] StallCandidate FindGuestDeadlock(const ObservationInput& input, const StallSettings& settings,
+                                               uint64_t not_before_ns) noexcept
+{
+	if (!GuestLanesComplete(input.loss))
+	{
+		return {};
+	}
+	StallCandidate best {};
+	uint64_t       quiet_ns = UINT64_MAX;
+	for (uint32_t i = 0; i < input.progress.count && i < MaxProgressSnapshotEntries; ++i)
+	{
+		const auto&    e   = input.progress.entries[i];
+		const uint64_t age = LaneAge(e.record, input.sample_time_ns, not_before_ns);
+		if (!IsGuestThread(e))
+		{
+			if (!WaitsOnGuestMemory(e) && LaneBusy(e.record))
+			{
+				return {};
+			}
+			quiet_ns = age < quiet_ns ? age : quiet_ns;
+			continue;
+		}
+		if (static_cast<ProgressState>(e.record.state) != ProgressState::Waiting)
+		{
+			return {};
+		}
+		quiet_ns = age < quiet_ns ? age : quiet_ns;
+		if (best.lane == nullptr || age > best.age_ns)
+		{
+			best.lane   = &e;
+			best.age_ns = age;
+		}
+	}
+	if (best.lane == nullptr)
+	{
+		return {};
+	}
+	const auto operation = best.lane->record.operation;
+	best.category        = StallCategory::GuestDeadlock;
+	best.age_ns          = quiet_ns;
+	best.suspected_ns    = ThresholdSuspected(settings, Domain::GuestThread, operation);
+	best.confirmed_ns    = ThresholdConfirmed(settings, Domain::GuestThread, operation);
+	return best.age_ns >= best.suspected_ns ? best : StallCandidate {};
+}
+
+// Evidence code is the wait kind a guest thread is parked in, or the operation
+// of a command lane waiting on guest memory.
+void PushGuestWaits(const ObservationInput& input, SuspectedEvidence* suspected) noexcept
+{
+	for (uint32_t i = 0; i < input.progress.count && i < MaxProgressSnapshotEntries; ++i)
+	{
+		const auto& e = input.progress.entries[i];
+		if (WaitsOnGuestMemory(e))
+		{
+			PushEvidence(suspected, StallFact {e.key.domain, static_cast<uint16_t>(e.record.operation), e.record.state,
+			                                   e.key.instance, e.record.correlation});
+			continue;
+		}
+		if (!IsGuestThread(e))
+		{
+			continue;
+		}
+		PushEvidence(suspected, StallFact {e.key.domain, static_cast<uint16_t>(e.record.auxiliary[0]), e.record.state,
+		                                   e.key.instance, e.record.correlation});
 	}
 }
 
@@ -252,29 +399,39 @@ StallResult Observe(const ObservationInput& input, const StallSettings& settings
 	}
 
 	const bool loss_blocks_high = LossPreventsHigh(input.loss);
-	const bool heartbeat_stale =
-	    (input.heartbeat_ns == 0u) ||
-	    (input.sample_time_ns > input.heartbeat_ns && (input.sample_time_ns - input.heartbeat_ns) >= settings.heartbeat_stale_ns);
 
-	ActiveLane hle {};
-	const bool hle_stalled = FindStalledHle(input.progress, &hle);
-
-	StallCategory candidate = StallCategory::HealthyIdle;
-	if (heartbeat_stale && !AnyActiveProgress(input.progress))
+	// A stale heartbeat means the lane data is stale too: the process stopped
+	// publishing, so no lane verdict can be trusted.
+	StallCandidate candidate {};
+	const bool     heartbeat_missing = input.heartbeat_ns == 0u;
+	const uint64_t heartbeat_age     = Age(input.heartbeat_ns, input.sample_time_ns);
+	const bool     heartbeat_stale   = heartbeat_missing || heartbeat_age >= settings.heartbeat_stale_ns;
+	if (state->heartbeat_stale && !heartbeat_stale)
 	{
-		candidate = StallCategory::WorkerUnresponsive;
-	} else if (hle_stalled)
+		state->resumed_heartbeat_ns = input.heartbeat_ns;
+	}
+	state->heartbeat_stale = heartbeat_stale;
+	if (heartbeat_stale)
 	{
-		candidate = StallCategory::HleStall;
-	} else if (!AnyActiveProgress(input.progress))
-	{
-		candidate = StallCategory::HealthyIdle;
+		candidate.category     = StallCategory::WorkerUnresponsive;
+		candidate.age_ns       = heartbeat_age;
+		candidate.suspected_ns = settings.heartbeat_stale_ns;
+		candidate.confirmed_ns = settings.confirmed_after_ns > settings.heartbeat_stale_ns ? settings.confirmed_after_ns
+		                                                                                  : settings.heartbeat_stale_ns;
 	} else
 	{
-		candidate = StallCategory::UnknownStall;
+		candidate = FindStalledLane(input, settings, state->resumed_heartbeat_ns);
+		if (candidate.category == StallCategory::None)
+		{
+			candidate = FindGuestDeadlock(input, settings, state->resumed_heartbeat_ns);
+		}
+	}
+	if (candidate.category == StallCategory::None && !AnyBusyLane(input.progress))
+	{
+		candidate.category = StallCategory::HealthyIdle;
 	}
 
-	const uint64_t fingerprint = FingerprintInput(input, candidate);
+	const uint64_t fingerprint = Fingerprint(candidate, input.heartbeat_ns);
 	if (state->causal_fingerprint != fingerprint)
 	{
 		state->causal_fingerprint = fingerprint;
@@ -283,28 +440,25 @@ StallResult Observe(const ObservationInput& input, const StallSettings& settings
 		state->confirmed_ns       = 0;
 		state->suspected          = SuspectedEvidence {};
 		state->suspected.causal_fingerprint    = fingerprint;
-		state->suspected.category              = candidate;
+		state->suspected.category              = candidate.category;
 		state->suspected.sample_time_ns        = input.sample_time_ns;
 		state->suspected.heartbeat_ns          = input.heartbeat_ns;
 		state->suspected.max_loss_monotonic_ns = input.loss.max_loss_monotonic_ns;
-		if (hle_stalled)
+		if (candidate.category == StallCategory::GuestDeadlock)
 		{
-			PushEvidence(&state->suspected, StallFact {Domain::Hle, 1, 0, hle.instance, hle.correlation});
+			PushGuestWaits(input, &state->suspected);
+		} else if (candidate.category != StallCategory::WorkerUnresponsive)
+		{
+			PushStalledLanes(input, settings, state->resumed_heartbeat_ns, &state->suspected);
 		}
 	}
-
-	const uint64_t elapsed =
-	    (input.sample_time_ns >= state->first_observed_ns) ? (input.sample_time_ns - state->first_observed_ns) : 0u;
-
-	uint64_t sus_ns = settings.suspected_after_ns;
-	uint64_t conf_ns = settings.confirmed_after_ns;
-	if (hle_stalled)
+	// Without a heartbeat there is no age to measure; time the observation.
+	if (heartbeat_missing)
 	{
-		sus_ns  = ThresholdSuspected(settings, Domain::Hle, hle.operation);
-		conf_ns = ThresholdConfirmed(settings, Domain::Hle, hle.operation);
+		candidate.age_ns = Age(state->first_observed_ns, input.sample_time_ns);
 	}
 
-	if (candidate == StallCategory::HealthyIdle)
+	if (candidate.category == StallCategory::HealthyIdle)
 	{
 		result.category   = StallCategory::HealthyIdle;
 		result.confidence = loss_blocks_high ? Confidence::Medium : Confidence::High;
@@ -313,7 +467,8 @@ StallResult Observe(const ObservationInput& input, const StallSettings& settings
 		return result;
 	}
 
-	if (elapsed < sus_ns)
+	// Busy lanes younger than their threshold are work in flight, not a stall.
+	if (candidate.category == StallCategory::None || candidate.age_ns < candidate.suspected_ns)
 	{
 		result.category   = StallCategory::None;
 		result.confidence = Confidence::Low;
@@ -326,7 +481,7 @@ StallResult Observe(const ObservationInput& input, const StallSettings& settings
 		state->suspected.confidence = Confidence::Medium;
 	}
 
-	result.category     = candidate;
+	result.category     = candidate.category;
 	result.suspected_ns = state->suspected_ns;
 	result.confidence   = Confidence::Medium;
 	result.evidence_total  = state->suspected.evidence_total;
@@ -337,14 +492,16 @@ StallResult Observe(const ObservationInput& input, const StallSettings& settings
 		result.evidence[i] = state->suspected.evidence[i];
 	}
 
-	if (elapsed >= conf_ns)
+	if (candidate.age_ns >= candidate.confirmed_ns)
 	{
 		if (state->confirmed_ns == 0u)
 		{
 			state->confirmed_ns = input.sample_time_ns;
 		}
 		result.confirmed_ns = state->confirmed_ns;
-		result.confidence   = loss_blocks_high ? Confidence::Medium : Confidence::High;
+		// Without a wait graph a guest deadlock is inferred, not proven.
+		const bool inferred = candidate.category == StallCategory::GuestDeadlock;
+		result.confidence   = loss_blocks_high || inferred ? Confidence::Medium : Confidence::High;
 		// Live stall remains nonterminal — keep sampling.
 		result.terminal = 0;
 	}

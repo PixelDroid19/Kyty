@@ -1,8 +1,8 @@
 # Kyty graphics captures
 
-`scripts/kyty_capture.py` is the reproducible graphics-debugging entry point.
-It is deliberately small enough to run today and has a stable JSON manifest so
-new probes can be added without changing the workflow.
+`kyty_agent capture-run` is the reproducible graphics-debugging entry point.
+It launches the emulator, drives it through the agent socket and writes a
+stable JSON manifest, so new probes can be added without changing the workflow.
 
 The design follows the useful part of emulator GPU devtools: capture a bounded
 frame window, keep the command/configuration evidence beside the image, and
@@ -10,7 +10,7 @@ make the visual gate deterministic. It is not a substitute for RenderDoc; when
 RenderDoc is available, use the same capture window and keep its frame capture
 beside the Kyty manifest.
 
-The separate playable gate accepts `--runtime-cwd` for an existing writable
+The separate playable gate (`kyty_agent playable-regression`) accepts `--runtime-cwd` for an existing writable
 runtime directory and `--guest-script` for an independently located Lua input.
 Both default to the usual repository layout; relative overrides are resolved
 against the repository, not the selected cwd. Use these with `--fc-script` and
@@ -31,7 +31,8 @@ environment variable reaches the child.
 
 ```bash
 export KYTY_GUEST_ROOT=/path/to/private/guest/root
-python3 scripts/kyty_capture.py capture \
+kyty_agent capture-run \
+  --guest-root "$KYTY_GUEST_ROOT" \
   --build _build_linux \
   --min-frame 1250 \
   --samples 3 \
@@ -42,7 +43,7 @@ python3 scripts/kyty_capture.py capture \
   --videoout-evidence \
   --tex-probe \
   --lightbuf-probe 1 \
-  --key-at 700:x \
+  --pad-at 700:cross \
   --baseline _scratch_playable/captures/baseline.json
 ```
 
@@ -64,7 +65,7 @@ The private guest root is used to start the process but is never written to the
 manifest. Continuous `--auto-cross` is disabled by default because it can keep
 activating gameplay or menus after startup. Explicitly enabling it marks the
 manifest as `diagnostic_input`; it is discovery-only, never gameplay
-acceptance. Use `kyty_playable_regression.py` with an external scene/action
+acceptance. Use `kyty_agent playable-regression` with an external scene/action
 checkpoint for acceptance. Its startup profile and checkpoint supply bounded
 input sequences, each followed by clearing the pad overlay. Phase labels inferred
 from frame rate are diagnostic observations, not scene classifications.
@@ -95,22 +96,20 @@ This is diagnostic evidence, not a compatibility run. If the guest never reaches
 `--min-frame`, the command now writes an `incomplete` manifest with the error,
 log, and any screenshots already captured instead of discarding the session.
 
-The capture runner arms `KYTY_NATIVE_CAPTURE_FIRST_PRESENT=1` and uses a
-trigger file for later samples. The emulator waits for the presentation submit
-fence, reads the source image through `UtilFillBuffer`, and emits a structured
-`KYTY_NATIVE_CAPTURE` log line. This keeps the pixel source inside the
-emulator; the external runner only coordinates timing and manifest collection.
+The runner starts the child with a private `KYTY_AGENT_ENDPOINT`, follows the
+presented frame through the agent `status` call and takes every sample with the
+agent `capture` call. The emulator waits for the presentation submit fence and
+reads the source image through `UtilFillBuffer`, so the pixel source stays
+inside the emulator; the runner only coordinates timing and manifest collection.
+It does not read frame numbers or capture events from the guest log, so a run
+with debug logging off is observed the same way. Inherited
+`KYTY_NATIVE_CAPTURE_*` settings are dropped from the child environment. The
+manifest records `host.runner`, `config.capture_source` and any failed agent
+captures in `capture_errors`; `startup_captures` stays empty.
 
-For **realtime agent control** without Python or `xdotool`, start the emulator
-with `KYTY_AGENT_ENDPOINT` and use the native `kyty_agent` CLI (`docs/agent-tools.md`).
-That path talks to the emulator over a local endpoint for `status`,
-`capture`, pad edges, and structured events while the guest is running.
-
-`--key-at FRAME:KEY` still schedules a single press/release edge through
-`xdotool` when that host exposes a controllable window. Prefer `kyty_agent pad`
-when the agent socket is available. If host input control is unavailable, the
-manifest records `input_error` instead of claiming that an input edge was
-delivered.
+`--pad-at FRAME:BUTTON` sends one agent `pad_tap` once the presented frame
+reaches `FRAME`. Each delivery is recorded under `input` with its result, so a
+refused tap is visible instead of being claimed as delivered.
 
 Strict captures refuse `KYTY_STUB_MISSING` and `KYTY_GFX_PERMISSIVE`. Use
 `--allow-diagnostics` only for an exploratory run and do not use that manifest
@@ -119,8 +118,8 @@ as a compatibility result.
 ## Score and compare without rerunning
 
 ```bash
-python3 scripts/kyty_capture.py score _scratch_playable/captures/frame-000.png --gate
-python3 scripts/kyty_capture.py compare \
+kyty_agent score-image _scratch_playable/captures/frame-000.png --gate
+kyty_agent compare-captures \
   --baseline _scratch_playable/captures/baseline.json \
   --current _scratch_playable/captures/capture.json
 ```
@@ -144,7 +143,7 @@ interpretation, not a per-title color override.
 
 ## Playable scene and action checkpoints
 
-`kyty_playable_regression.py --scene-checkpoint <external-contract.json>` requires
+`kyty_agent playable-regression --scene-checkpoint <external-contract.json>` requires
 an independently reviewed `kyty_scene_checkpoint_v1` contract. The contract pins
 before/after reference PNGs by SHA-256 and names an anonymous fixture and scene
 `kind`. Only `gameplay` can pass gameplay acceptance. Keep the contract and its
@@ -154,7 +153,7 @@ The contract declares normalized `scene_regions` with RGB error tolerances and
 a `response` region with expected before/after appearance, pixel-change threshold
 and minimum changed ratio. Its bounded `action` specifies a pad sequence,
 consumption milestones, minimum additional presents and settling time. The exact
-field contract lives in `scripts/kyty_scene_checkpoint.py`. Reference images are
+field contract lives in `source/agent/src/runner/SceneCheckpoint.cpp`. Reference images are
 never generated by the runner from its own candidate baseline.
 
 Acceptance binds fresh emulator-native captures to the current child's capture
@@ -180,8 +179,9 @@ Add new evidence in one of three places:
 2. **Manifest field**: add a sanitized scalar or list under `captures` or
    `config`; never write private guest paths, title IDs, or raw dumps to a
    tracked file.
-3. **Metric/gate**: add a deterministic function in `kyty_capture.py` and a
-   focused unit fixture for it before using it in a strict workflow.
+3. **Metric/gate**: add a deterministic function in
+   `source/agent/src/runner/CaptureMetrics.cpp` and a focused `AgentRunner`
+   unit fixture for it before using it in a strict workflow.
 
 This keeps one command, one artifact directory, and one machine-readable
 contract while allowing later PM4 snapshots, resource graphs, RenderDoc links,

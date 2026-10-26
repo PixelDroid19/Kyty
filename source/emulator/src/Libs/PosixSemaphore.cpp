@@ -46,12 +46,17 @@ public:
 	int Wait()
 	{
 		Core::LockGuard lock(m_mutex);
-		while (!m_destroyed && m_count <= 0)
+		if (!m_destroyed && m_count <= 0)
 		{
-			m_waiters++;
-			SyncGuest();
-			Kernel::PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, kPosixSemPollMicro);
-			m_waiters--;
+			// One record for the whole wait: the poll slices are not progress.
+			KYTY_GUEST_WAIT(Kernel::PthreadWaitKind::Semaphore, m_guest);
+			while (!m_destroyed && m_count <= 0)
+			{
+				m_waiters++;
+				SyncGuest();
+				Kernel::PthreadInterruptibleWaitFor(&m_cond_var, &m_mutex, kPosixSemPollMicro);
+				m_waiters--;
+			}
 		}
 		if (m_destroyed)
 		{

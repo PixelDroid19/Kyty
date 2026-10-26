@@ -12,7 +12,7 @@ file(GLOB emulator_src CONFIGURE_DEPENDS
 # target is the composition root (host entry points, agent server, profiler
 # wrapper) plus the interface headers. The archive boundaries below are the
 # CMake-side projection of the domain boundaries enforced by
-# scripts/check_emulator_boundaries.py.
+# integration_test/src/ArchitectureBoundaryCheck.cpp.
 file(GLOB kernel_src CONFIGURE_DEPENDS src/Kernel/*.cpp)
 file(GLOB hle_src CONFIGURE_DEPENDS src/Libs/*.cpp)
 file(GLOB loader_src CONFIGURE_DEPENDS src/Loader/*.cpp)

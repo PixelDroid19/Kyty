@@ -191,8 +191,9 @@ current framing and aspect-ratio policy.
   (`scaling_applied: true`), yet it measured 7.1, 4.1 and 3.6 fps against
   6.9, 4.1 and 3.8 fps at `Native`, with the GPU about 80% busy in both.
 - The shaders live in `source/emulator/src/Graphics/Shaders`.
-  `scripts/build_presentation_fsr_shaders.py` regenerates the embedded SPIR-V
-  in `PresentationFsrShaders.inc` (requires `glslangValidator`).
+  `cmake -DKYTY_SHADER_MODE=write -DKYTY_SHADER_WORK_DIR=<scratch> -P
+  source/cmake/HostShaderBlobs.cmake` regenerates the embedded SPIR-V in
+  `PresentationFsrShaders.inc` (requires `glslangValidator`).
 - Verified on Intel with a 1920x1080 window. The beat 'em up presented a
   1280x720 final image and was upscaled to 1920x1080. Its mean channel values
   matched a bilinear upscale of the same frame to within 0.004. The racing

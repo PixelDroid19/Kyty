@@ -1,3 +1,6 @@
+#include "Kyty/Agent/Runner/JsonValue.h"
+#include "Kyty/Agent/Runner/Md5.h"
+#include "Kyty/Agent/Runner/OperationGraph.h"
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Graphics/GraphicsOperationTrace.h"
@@ -13,8 +16,8 @@ UT_BEGIN(EmulatorGraphicsOperationTrace);
 
 using namespace Libs::Graphics;
 
-// Golden producer contract, byte-identical to GOLDEN_INPUT and GOLDEN_META in
-// scripts/tests/test_operation_graph.py.
+// Golden producer contract; the offline `kyty_agent operation-graph` consumer
+// must accept exactly this pair.
 static const char* const kGoldenInput =
     "{\"schema\":\"kyty_operation_graph_input_v1\",\"records\":["
     "{\"id\":\"op0\",\"kind\":\"draw\",\"spans\":["
@@ -121,6 +124,33 @@ TEST(EmulatorGraphicsOperationTrace, DrawAndDispatchEncodeToTheGoldenProducerDoc
 	const auto docs = collector.Encode();
 	EXPECT_EQ(docs.input, std::string(kGoldenInput));
 	EXPECT_EQ(docs.meta, std::string(kGoldenMeta));
+}
+
+TEST(EmulatorGraphicsOperationTrace, GoldenProducerPairBuildsTheCrossDrawEdge)
+{
+	namespace Runner = Kyty::Agent::Runner;
+	const std::string input(kGoldenInput);
+	EXPECT_EQ(Runner::Md5Hex(input.data(), input.size()), "862d69cca795f7de144947efea015b54");
+
+	Runner::Json document;
+	Runner::Json meta_document;
+	Runner::Json meta;
+	Runner::Json graph;
+	std::string  error;
+	ASSERT_TRUE(Runner::ParseJson(input, &document, &error)) << error;
+	ASSERT_TRUE(Runner::ParseJson(kGoldenMeta, &meta_document, &error)) << error;
+	ASSERT_TRUE(Runner::ParseTraceMeta(meta_document, &meta, &error)) << error;
+	ASSERT_TRUE(Runner::BuildOperationGraph(document, meta, &graph, &error)) << error;
+
+	ASSERT_EQ(graph["edges"].Size(), 1u);
+	const Runner::Json& edge = graph["edges"][0];
+	EXPECT_EQ(edge["from"].AsString(), "op0");
+	EXPECT_EQ(edge["to"].AsString(), "op1");
+	EXPECT_EQ(edge["resource"].AsString(), "guest");
+	EXPECT_EQ(edge["offset"].AsInt(), 12288);
+	EXPECT_EQ(edge["size"].AsInt(), 32);
+	EXPECT_FALSE(graph["completeness"]["traced_operations_complete"].AsBool());
+	EXPECT_EQ(graph["completeness"]["not_traced_kinds"][0].AsString(), "auto_draw");
 }
 
 TEST(EmulatorGraphicsOperationTrace, RecordCapTruncatesAndNeverSkipsAnOperation)

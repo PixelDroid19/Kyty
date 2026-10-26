@@ -16,6 +16,7 @@
 #include "Emulator/GuestCodeRanges.h"
 #include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/ProgressPort.h"
 
 #include <atomic>
 #include <cerrno>
@@ -186,6 +187,25 @@ static uint64_t guest_caller_return(const void* direct, const uint64_t* callers)
 	return address;
 }
 
+// Waits that end only when another thread or the emulator acts; a sleep ends
+// by itself and does not count as parked.
+static bool GuestWaitFor(PthreadWaitKind kind, Emulator::Ports::GuestWait* out)
+{
+	using Emulator::Ports::GuestWait;
+	switch (kind)
+	{
+		case PthreadWaitKind::Mutex: *out = GuestWait::Mutex; return true;
+		case PthreadWaitKind::Cond: *out = GuestWait::Cond; return true;
+		case PthreadWaitKind::Semaphore: *out = GuestWait::Semaphore; return true;
+		case PthreadWaitKind::EventFlag: *out = GuestWait::EventFlag; return true;
+		case PthreadWaitKind::EventQueue: *out = GuestWait::EventQueue; return true;
+		case PthreadWaitKind::Join: *out = GuestWait::Join; return true;
+		case PthreadWaitKind::Rwlock: *out = GuestWait::Rwlock; return true;
+		case PthreadWaitKind::Address: *out = GuestWait::Address; return true;
+		default: return false;
+	}
+}
+
 PthreadWaitScope::PthreadWaitScope(PthreadWaitKind kind, const void* object, const void* guest_return, const void* frame)
 {
 	auto* self = g_pthread_self;
@@ -203,10 +223,20 @@ PthreadWaitScope::PthreadWaitScope(PthreadWaitKind kind, const void* object, con
 	self->wait_return.store(guest_caller_return(guest_return, callers), std::memory_order_relaxed);
 	self->wait_kind.store(static_cast<uint8_t>(kind), std::memory_order_release);
 	m_active = true;
+	Emulator::Ports::GuestWait wait {};
+	m_blocking = GuestWaitFor(kind, &wait);
+	if (m_blocking)
+	{
+		Emulator::Ports::ProgressPort::BeginGuestWait(wait);
+	}
 }
 
 PthreadWaitScope::~PthreadWaitScope()
 {
+	if (m_blocking)
+	{
+		Emulator::Ports::ProgressPort::EndGuestWait();
+	}
 	if (m_active)
 	{
 		g_pthread_self->wait_kind.store(0u, std::memory_order_release);
@@ -331,8 +361,11 @@ static void* run_thread(void* arg)
 	auto* stack_top = reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(thread->attr->stack_addr) + thread->attr->stack_size) &
 	                                          ~static_cast<uintptr_t>(0xf));
 	PthreadStartContext(thread);
-	ret = reinterpret_cast<void*>(GuestRuntimePort::InvokeOnStack(reinterpret_cast<uint64_t>(thread->entry),
-	                                                               reinterpret_cast<uint64_t>(thread->arg), 0, 0, stack_top));
+	{
+		const Emulator::Ports::ScopedProgress guest(Emulator::Ports::ProgressLane::GuestThread);
+		ret = reinterpret_cast<void*>(GuestRuntimePort::InvokeOnStack(reinterpret_cast<uint64_t>(thread->entry),
+		                                                               reinterpret_cast<uint64_t>(thread->arg), 0, 0, stack_top));
+	}
 
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
 	pthread_cleanup_pop(1);

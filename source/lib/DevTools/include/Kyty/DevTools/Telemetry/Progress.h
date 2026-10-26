@@ -113,6 +113,8 @@ public:
 	bool Advance(ProgressToken token, const ProgressUpdate& update) noexcept;
 	bool Complete(ProgressToken token, uint64_t epoch, uint64_t now_ns) noexcept;
 	void Close(ProgressToken token) noexcept;
+	// Records a lane the caller could not track, so samples carry the loss.
+	void NoteUntracked(Domain domain) noexcept;
 	bool Snapshot(ProgressToken token, ProgressRecord* out) const noexcept;
 	bool SnapshotAll(ProgressSnapshot* out) const noexcept;
 	ProgressLossSnapshot SnapshotLoss() const noexcept;
