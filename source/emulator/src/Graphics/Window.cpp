@@ -2329,6 +2329,9 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features_12.bufferDeviceAddress = guest_device_address ? VK_TRUE : VK_FALSE;
 	// Vertex stages export the render-target layer (ShaderLayer).
 	device_features_12.shaderOutputLayer = supported_12.shaderOutputLayer;
+	// Translated programs declare Float16 and Int16 for packed 16-bit arithmetic.
+	device_features_12.shaderFloat16 = supported_12.shaderFloat16;
+	device_features.shaderInt16      = supported_features.shaderInt16;
 	// Core since Vulkan 1.2 and mandatory there.
 	EXIT_IF(supported_12.timelineSemaphore == VK_FALSE);
 	device_features_12.timelineSemaphore = VK_TRUE;
