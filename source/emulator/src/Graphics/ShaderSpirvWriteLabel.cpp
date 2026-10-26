@@ -192,6 +192,25 @@ void Spirv::WriteLabel(int index)
 	bool skip_branch_to_next = false;
 	int  labels_num          = 0;
 
+	// Join skips: the skipping arm reconverges before the join; the head they
+	// skip ends at the guard merge, which clears the flag for the next pass.
+	for (const auto& skip: ScJoinSkips(m_code))
+	{
+		if (skip.join == inst.pc)
+		{
+			m_source += String8::FromPrintf("               OpBranch %%join_skip_arm_%04" PRIx32 "\n"
+			                                "       %%join_skip_arm_%04" PRIx32 " = OpLabel\n",
+			                                skip.branch, skip.branch);
+		}
+		if (skip.target == inst.pc)
+		{
+			m_source += String8::FromPrintf("               OpBranch %%join_skip_guard_%04" PRIx32 "\n"
+			                                "       %%join_skip_guard_%04" PRIx32 " = OpLabel\n"
+			                                "               OpStore %%join_skip_%04" PRIx32 " %%false\n",
+			                                skip.branch, skip.branch, skip.branch);
+		}
+	}
+
 	// ----- Phase 1: loop-merge guest labels --------------------------------
 	// Must precede sc_joins so OpLoopMerge targets stay inside the outer selection.
 	for (uint32_t i = 0; i < loop_merges.Size(); i++)
@@ -345,6 +364,20 @@ void Spirv::WriteLabel(int index)
 		{
 			label.Disable();
 			break;
+		}
+	}
+
+	for (const auto& skip: ScJoinSkips(m_code))
+	{
+		if (skip.join == inst.pc)
+		{
+			m_source += String8::FromPrintf("%%join_skip_v_%04" PRIx32 " = OpLoad %%bool %%join_skip_%04" PRIx32 "\n"
+			                                "               OpSelectionMerge %%join_skip_guard_%04" PRIx32 " None\n"
+			                                "               OpBranchConditional %%join_skip_v_%04" PRIx32
+			                                " %%join_skip_guard_%04" PRIx32 " %%join_skip_head_%04" PRIx32 "\n"
+			                                "       %%join_skip_head_%04" PRIx32 " = OpLabel\n",
+			                                skip.branch, skip.branch, skip.branch, skip.branch, skip.branch, skip.branch,
+			                                skip.branch);
 		}
 	}
 

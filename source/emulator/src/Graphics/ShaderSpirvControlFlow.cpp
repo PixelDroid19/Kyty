@@ -557,9 +557,27 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		label_str = label.ToString();
 	}
 
+	// Skips the diamond join's head: record the vote and reconverge at the join.
+	static const char* text_join_skip = R"(
+        <param0>
+        <param1>
+               OpStore %join_skip_<skip> %cc_b_<index>
+               OpSelectionMerge %join_skip_arm_<skip> None
+               OpBranchConditional %cc_b_<index> %join_skip_arm_<skip> %t230_<index>
+        %t230_<index> = OpLabel
+)";
+	for (const auto& skip: ScJoinSkips(code))
+	{
+		if (skip.branch == inst.pc)
+		{
+			text = text_join_skip;
+		}
+	}
+
 	*dst_source += String8(text)
 	                   .ReplaceStr("<param0>", branch_param[0])
 	                   .ReplaceStr("<param1>", branch_param[1])
+	                   .ReplaceStr("<skip>", String8::FromPrintf("%04" PRIx32, inst.pc))
 	                   .ReplaceStr("<merge>", label_merge)
 	                   .ReplaceStr("<backedge>", String8::FromPrintf("%04" PRIx32, loop_backedge))
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))

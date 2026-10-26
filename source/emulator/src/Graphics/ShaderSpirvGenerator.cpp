@@ -1,5 +1,6 @@
 #include "Kyty/Core/MagicEnum.h"
 #include "ShaderSpirvInternal.h"
+#include "ShaderSpirvScJoin.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveSdwa.h"
 
@@ -2050,6 +2051,10 @@ void Spirv::WriteLocalVariables()
 	m_source += comment;
 	m_source += "%exec_lane_lo = OpVariable %_ptr_Function_uint Function\n"
 	            "%exec_lane_hi = OpVariable %_ptr_Function_uint Function\n";
+	for (const auto& skip: ScJoinSkips(m_code))
+	{
+		m_source += String8::FromPrintf("%%join_skip_%04" PRIx32 " = OpVariable %%_ptr_Function_bool Function %%false\n", skip.branch);
+	}
 
 	for (const auto& c: m_variables)
 	{

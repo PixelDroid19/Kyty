@@ -65,6 +65,8 @@ struct ScJoinMemo
 	std::map<std::tuple<uint32_t, uint32_t, uint32_t>, bool>   nested;
 	bool                                                       sources_ready = false;
 	std::unordered_map<uint32_t, std::vector<uint32_t>>        sources;
+	bool                                                       skips_ready = false;
+	std::vector<ScJoinSkip>                                    skips;
 };
 
 ScJoinMemo& sc_join_memo(const ShaderCode& code)
@@ -88,6 +90,8 @@ ScJoinMemo& sc_join_memo(const ShaderCode& code)
 		memo.nested.clear();
 		memo.sources_ready = false;
 		memo.sources.clear();
+		memo.skips_ready = false;
+		memo.skips.clear();
 	}
 	return memo;
 }
@@ -885,6 +889,18 @@ uint32_t ScJoinFindParent(const ShaderCode& code, uint32_t src, uint32_t join_pc
 	return parent;
 }
 
+static bool IsJoinSkipBranch(const ShaderCode& code, uint32_t pc)
+{
+	for (const auto& skip: ScJoinSkips(code))
+	{
+		if (skip.branch == pc)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 // Every join's sources come from one pass over the program, indexed by the
 // reconvergence point; emission asks for them at every label.
 static void CollectAllSources(const ShaderCode& code, std::unordered_map<uint32_t, std::vector<uint32_t>>* sources)
@@ -911,6 +927,11 @@ static void CollectAllSources(const ShaderCode& code, std::unordered_map<uint32_
 		}
 		// Loop exits keep the guest merge label under OpLoopMerge — never sc_join.
 		if (ScJoinIsLoopExitEdge(code, cand) || ScJoinIsProgramExitEdge(code, cand))
+		{
+			continue;
+		}
+		// A join skip's arm reconverges at the diamond join, not at its target.
+		if (IsJoinSkipBranch(code, cand.pc))
 		{
 			continue;
 		}
@@ -947,6 +968,115 @@ void ScJoinCollectSources(const ShaderCode& code, uint32_t join_pc, Vector<uint3
 	{
 		out_srcs->Add(src);
 	}
+}
+
+// True when no instruction from index first up to end_pc ends a block; the
+// PCs in that range that an enabled label targets go to targets.
+static bool StraightLine(const ShaderCode& code, uint32_t first, uint32_t end_pc,
+                         const std::unordered_map<uint32_t, std::vector<uint32_t>>& label_sources, std::vector<uint32_t>* targets)
+{
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t i = first; i < instructions.Size() && instructions.At(i).pc < end_pc; i++)
+	{
+		const auto& inst = instructions.At(i);
+		if (instruction_is_block_terminator(inst))
+		{
+			return false;
+		}
+		if (label_sources.count(inst.pc) != 0)
+		{
+			targets->push_back(inst.pc);
+		}
+	}
+	return true;
+}
+
+// The branch at index i must have a single-source target after a straight-line
+// range holding one label: the join, whose only source is an S_BRANCH ending
+// the other arm of a diamond whose straight-line taken arm leads to the branch.
+static bool FindJoinSkip(const ShaderCode& code, uint32_t i, const std::unordered_map<uint32_t, std::vector<uint32_t>>& label_sources,
+                         ScJoinSkip* skip)
+{
+	const auto& instructions = code.GetInstructions();
+	const auto& branch       = instructions.At(i);
+	const auto  target       = ShaderLabel(branch).GetDst();
+	const auto  target_found = label_sources.find(target);
+	if (target <= branch.pc || target_found == label_sources.end() || target_found->second.size() != 1)
+	{
+		return false;
+	}
+	std::vector<uint32_t> heads;
+	if (!StraightLine(code, i + 1, target, label_sources, &heads) || heads.size() != 1)
+	{
+		return false;
+	}
+	const uint32_t join         = heads[0];
+	const auto&    join_sources = label_sources.at(join);
+	if (join_sources.size() != 1 || join_sources[0] >= branch.pc)
+	{
+		return false;
+	}
+	const uint32_t else_end = instruction_index(code, join_sources[0]);
+	if (else_end + 1 >= instructions.Size() || instructions.At(else_end).type != ShaderInstructionType::SBranch)
+	{
+		return false;
+	}
+	const uint32_t arm       = instructions.At(else_end + 1).pc;
+	const auto     arm_found = label_sources.find(arm);
+	if (arm_found == label_sources.end() || arm_found->second.size() != 1 || arm_found->second[0] >= join_sources[0])
+	{
+		return false;
+	}
+	const uint32_t header = instruction_index(code, arm_found->second[0]);
+	if (header >= instructions.Size() || !instruction_is_conditional_branch(instructions.At(header)))
+	{
+		return false;
+	}
+	std::vector<uint32_t> arm_labels;
+	if (!StraightLine(code, else_end + 1, branch.pc, label_sources, &arm_labels) || arm_labels.size() != 1 ||
+	    code.ReadBlock(join).is_discard)
+	{
+		return false;
+	}
+	*skip = {branch.pc, join, target};
+	return true;
+}
+
+static void CollectJoinSkips(const ShaderCode& code, std::vector<ScJoinSkip>* skips)
+{
+	std::unordered_map<uint32_t, std::vector<uint32_t>> label_sources;
+	for (const auto& label: code.GetLabels())
+	{
+		if (!label.IsDisabled())
+		{
+			label_sources[label.GetDst()].push_back(label.GetSrc());
+		}
+	}
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t i = 0; i < instructions.Size(); i++)
+	{
+		const auto& branch = instructions.At(i);
+		ScJoinSkip  skip;
+		if (instruction_is_conditional_branch(branch) && operand_is_constant(branch.src[0]) &&
+		    FindJoinSkip(code, i, label_sources, &skip))
+		{
+			skips->push_back(skip);
+		}
+	}
+}
+
+const std::vector<ScJoinSkip>& ScJoinSkips(const ShaderCode& code)
+{
+	if (!sc_join_memo(code).skips_ready)
+	{
+		std::vector<ScJoinSkip> skips;
+		CollectJoinSkips(code, &skips);
+		// The collection leaves labels unchanged, so the memo is still current.
+		auto& memo       = sc_join_memo(code);
+		memo.skips       = std::move(skips);
+		memo.skips_ready = true;
+	}
+	return sc_join_memo(code).skips;
 }
 
 String8 ScJoinMergeName(uint32_t join_pc, uint32_t src_pc)
