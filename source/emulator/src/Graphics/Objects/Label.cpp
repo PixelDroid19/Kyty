@@ -42,6 +42,9 @@ struct LabelCallbacks
 	uint32_t*                  dst_gpu_addr32       = nullptr;
 	uint32_t                   value32              = 0;
 	uint64_t                   store_bytes          = 0;
+	// A GPU-owned destination can be released before the fence fires; a plain
+	// host variable cannot. Record which kind this label points at.
+	bool           dst_tracked = false;
 	LabelCallback callback_1 = nullptr;
 	LabelCallback callback_2 = nullptr;
 	uint64_t                   args[LABEL_ARGS_MAX] = {};
@@ -463,31 +466,46 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 		allow_store.Add(write);
 	}
 
-	// Phase 2: publish EOP fence values after all WriteBacks.
+	// Phase 2: publish EOP fence values after all WriteBacks. The allocation
+	// check takes the GPU memory lock, which the release path takes before this
+	// manager's mutex; validate first, then store under the publication lock.
 	for (int i = 0; i < static_cast<int>(fired_labels.Size()); i++)
 	{
-		Core::LockGuard publication_lock(m_mutex);
-		auto& label = fired_labels.At(i);
-		if (allow_store.At(i) && label.dst_gpu_addr64 != nullptr)
+		auto&      label   = fired_labels.At(i);
+		const bool wants64 = allow_store.At(i) && label.dst_gpu_addr64 != nullptr;
+		const bool wants32 = allow_store.At(i) && label.dst_gpu_addr32 != nullptr;
+		const bool store64 =
+		    wants64 && (!label.dst_tracked || GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(label.dst_gpu_addr64), sizeof(uint64_t)) ==
+		                                       GpuMemoryRangeValidationStatus::Valid);
+		const bool store32 =
+		    wants32 && (!label.dst_tracked || GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(label.dst_gpu_addr32), sizeof(uint32_t)) ==
+		                                       GpuMemoryRangeValidationStatus::Valid);
 		{
-			*label.dst_gpu_addr64 = label.value64;
+			Core::LockGuard publication_lock(m_mutex);
+			if (store64)
+			{
+				*label.dst_gpu_addr64 = label.value64;
 
-			KYTY_LOG_DEBUG(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%016" PRIx64 "\n" FG_DEFAULT,
-			       reinterpret_cast<uint64_t>(label.dst_gpu_addr64), label.value64);
+				KYTY_LOG_DEBUG(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%016" PRIx64 "\n" FG_DEFAULT,
+				               reinterpret_cast<uint64_t>(label.dst_gpu_addr64), label.value64);
+			}
+			if (store32)
+			{
+				*label.dst_gpu_addr32 = label.value32;
+
+				KYTY_LOG_DEBUG(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%08" PRIx32 "\n" FG_DEFAULT,
+				               reinterpret_cast<uint64_t>(label.dst_gpu_addr32), label.value32);
+			}
+			if (label.store_bytes != 0)
+			{
+				const auto address = label.dst_gpu_addr64 != nullptr ? reinterpret_cast<uint64_t>(label.dst_gpu_addr64)
+				                                                       : reinterpret_cast<uint64_t>(label.dst_gpu_addr32);
+				m_fence_holes.Complete(address, label.store_bytes);
+			}
 		}
-
-		if (allow_store.At(i) && label.dst_gpu_addr32 != nullptr)
+		if ((wants64 && !store64) || (wants32 && !store32))
 		{
-			*label.dst_gpu_addr32 = label.value32;
-
-			KYTY_LOG_DEBUG(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%08" PRIx32 "\n" FG_DEFAULT,
-			       reinterpret_cast<uint64_t>(label.dst_gpu_addr32), label.value32);
-		}
-		if (label.store_bytes != 0)
-		{
-			const auto address = label.dst_gpu_addr64 != nullptr ? reinterpret_cast<uint64_t>(label.dst_gpu_addr64)
-			                                                       : reinterpret_cast<uint64_t>(label.dst_gpu_addr32);
-			m_fence_holes.Complete(address, label.store_bytes);
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: label destination released before publication, write skipped\n");
 		}
 	}
 
@@ -538,12 +556,18 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 						continue;
 					}
 					const auto& label = fired_labels.At(i);
-					if (label.dst_gpu_addr64 != nullptr)
+					if (label.dst_gpu_addr64 != nullptr &&
+					    (!label.dst_tracked ||
+					     GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(label.dst_gpu_addr64), sizeof(uint64_t)) ==
+					         GpuMemoryRangeValidationStatus::Valid))
 					{
 						KYTY_LOG_DEBUG( "EOP_FENCE64 addr=0x%016" PRIx64 " val=0x%016" PRIx64 "\n",
 						             reinterpret_cast<uint64_t>(label.dst_gpu_addr64), *label.dst_gpu_addr64);
 					}
-					if (label.dst_gpu_addr32 != nullptr)
+					if (label.dst_gpu_addr32 != nullptr &&
+					    (!label.dst_tracked ||
+					     GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(label.dst_gpu_addr32), sizeof(uint32_t)) ==
+					         GpuMemoryRangeValidationStatus::Valid))
 					{
 						KYTY_LOG_DEBUG( "EOP_FENCE32 addr=0x%016" PRIx64 " val=0x%08" PRIx32 "\n",
 						             reinterpret_cast<uint64_t>(label.dst_gpu_addr32), *label.dst_gpu_addr32);
@@ -774,6 +798,10 @@ Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint6
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(args == nullptr);
 
+	const bool dst_tracked =
+	    dst_gpu_addr != nullptr && GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(dst_gpu_addr), sizeof(uint64_t)) ==
+	                                   GpuMemoryRangeValidationStatus::Valid;
+
 	Core::LockGuard lock(m_mutex);
 
 	auto* label = new Label;
@@ -784,6 +812,7 @@ Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint6
 	label->callbacks.dst_gpu_addr32 = nullptr;
 	label->callbacks.value32        = 0;
 	label->callbacks.store_bytes    = dst_gpu_addr == nullptr ? 0 : sizeof(uint64_t);
+	label->callbacks.dst_tracked    = dst_tracked;
 	label->event                    = nullptr;
 	label->device                   = ctx->device;
 	label->callbacks.callback_1     = callback_1;
@@ -820,6 +849,10 @@ Label* LabelManager::Create32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint3
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(args == nullptr);
 
+	const bool dst_tracked =
+	    dst_gpu_addr != nullptr && GpuMemoryValidateAllocatedRange(reinterpret_cast<uint64_t>(dst_gpu_addr), sizeof(uint32_t)) ==
+	                                   GpuMemoryRangeValidationStatus::Valid;
+
 	Core::LockGuard lock(m_mutex);
 
 	auto* label = new Label;
@@ -830,6 +863,7 @@ Label* LabelManager::Create32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint3
 	label->callbacks.dst_gpu_addr64 = nullptr;
 	label->callbacks.value64        = 0;
 	label->callbacks.store_bytes    = dst_gpu_addr == nullptr ? 0 : LabelDwordStoreSizeBytes(dst_word_count);
+	label->callbacks.dst_tracked    = dst_tracked;
 	label->event                    = nullptr;
 	label->device                   = ctx->device;
 	label->callbacks.callback_1     = callback_1;

@@ -134,6 +134,7 @@ int WaitWhileEqual(uint64_t address, T expected, const std::chrono::nanoseconds*
 		{
 			if (timeout == nullptr)
 			{
+				KYTY_GUEST_WAIT(PthreadWaitKind::Address, value);
 				PthreadInterruptibleWait(&state->cv, &state->mutex);
 				continue;
 			}

@@ -332,6 +332,11 @@ void ProgressRegistry::Close(ProgressToken token) noexcept
 	inventory_generation_.fetch_add(1u, std::memory_order_relaxed);
 }
 
+void ProgressRegistry::NoteUntracked(Domain domain) noexcept
+{
+	NoteCapacity(domain, MonotonicNowNs());
+}
+
 bool ProgressRegistry::Snapshot(ProgressToken token, ProgressRecord* out) const noexcept
 {
 	if (out == nullptr || !TokenMatches(token))

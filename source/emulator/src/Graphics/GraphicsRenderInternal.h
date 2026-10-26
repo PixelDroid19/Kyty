@@ -178,6 +178,8 @@ struct PipelineDynamicParameters
 };
 #pragma pack(pop)
 
+struct FragmentTransportPasses;
+
 struct VulkanPipeline
 {
 	VkPipelineLayout                pipeline_layout = nullptr;
@@ -185,6 +187,9 @@ struct VulkanPipeline
 	const PipelineStaticParameters* static_params   = nullptr;
 	PipelineDynamicParameters*      dynamic_params  = nullptr;
 	VkExtent2D                      framebuffer_extent {};
+	// Set when the draw runs through the fragment wave transport. The record
+	// path then uses capture/shade/resolve passes instead of this pipeline.
+	FragmentTransportPasses* transport = nullptr;
 };
 
 // A cache entry remains alive while a recorded executable command buffer can
@@ -287,6 +292,7 @@ private:
 		ShaderId                   ps_shader_id;
 		ShaderId                   cs_shader_id;
 		VulkanPipeline*            pipeline       = nullptr;
+		FragmentTransportPasses*   transport      = nullptr;
 		PipelineStaticParameters*  static_params  = nullptr;
 		PipelineDynamicParameters* dynamic_params = nullptr;
 		PipelineLifetimeState      lifetime;

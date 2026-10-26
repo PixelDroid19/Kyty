@@ -45,9 +45,10 @@ struct SupervisorOptions
 	uint64_t           handshake_timeout_ns = 5'000'000'000ull;
 	// When non-zero, stop sampling after this many samples (tests / self-test).
 	uint64_t           max_samples         = 0;
-	// When true, force one bundle on first confirmed stall then continue.
-	// Production always continues after live stall capture.
-	uint8_t            capture_stall_once  = 1;
+	// One bundle per distinct confirmed stall (a new stuck lane or a new
+	// epoch of the same lane), up to this many per run. Sampling always
+	// continues after a capture.
+	uint32_t           max_stall_bundles   = 8;
 };
 
 [[nodiscard]] SupervisorResult RunSupervisor(const SupervisorOptions& options) noexcept;

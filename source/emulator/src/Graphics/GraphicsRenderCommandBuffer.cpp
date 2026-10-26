@@ -29,6 +29,7 @@
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/ProgressPort.h"
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
@@ -54,6 +55,11 @@ namespace Kyty::Libs::Graphics {
 // CommandBuffer methods + TransientBufferPool
 
 namespace {
+
+// One transport set holds the five host transport buffers; a recording needs
+// one set per draw tile, and tiles are bounded per draw.
+constexpr uint32_t kTransportBindingsMax = 5;
+constexpr uint32_t kTransportSetsMax     = 1024;
 
 VulkanSubmitAttemptTrail g_submit_fault_trail;
 
@@ -1227,7 +1233,7 @@ public:
 	}
 
 	// A device-local scratch is never mapped: only commands recorded in this buffer read and write it.
-	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage, bool device_local)
+	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage, bool device_local, bool allow_reuse = true)
 	{
 		if (ctx == nullptr || size == 0u || usage == 0u)
 		{
@@ -1241,7 +1247,7 @@ public:
 			{
 				usage_entries++;
 			}
-			if (candidate->scratch && candidate->usage == usage && candidate->size >= size &&
+			if (allow_reuse && candidate->scratch && candidate->usage == usage && candidate->size >= size &&
 			    (best == nullptr || candidate->size < best->size))
 			{
 				best = candidate;
@@ -2004,6 +2010,11 @@ void CommandBuffer::Free()
 		delete m_transient_device_buffers;
 		m_transient_device_buffers = nullptr;
 	}
+	if (m_transport_descriptor_pool != VK_NULL_HANDLE)
+	{
+		vkDestroyDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, nullptr);
+		m_transport_descriptor_pool = VK_NULL_HANDLE;
+	}
 	DestroyRecordingUploads();
 
 	m_pool->busy[m_index] = false;
@@ -2123,6 +2134,10 @@ void CommandBuffer::Begin()
 	{
 		m_transient_device_buffers->Reset();
 	}
+	if (m_transport_descriptor_pool != VK_NULL_HANDLE)
+	{
+		vkResetDescriptorPool(g_render_ctx->GetGraphicCtx()->device, m_transport_descriptor_pool, 0);
+	}
 	DestroyRecordingUploads();
 
 	auto* buffer = m_pool->buffers[m_index];
@@ -2215,14 +2230,44 @@ VulkanBuffer* CommandBuffer::AllocateTransientCopyBuffer(uint64_t size)
 	                                         VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
 }
 
-VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage)
+VulkanBuffer* CommandBuffer::AllocateTransientDeviceBuffer(uint64_t size, uint32_t usage, bool allow_reuse)
 {
 	EXIT_IF(IsInvalid());
 	if (m_transient_device_buffers == nullptr)
 	{
 		m_transient_device_buffers = new TransientBufferPool;
 	}
-	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true);
+	return m_transient_device_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage, true, allow_reuse);
+}
+
+VkDescriptorSet CommandBuffer::AllocateTransportDescriptorSet(VkDescriptorSetLayout layout)
+{
+	EXIT_IF(IsInvalid());
+	EXIT_IF(layout == VK_NULL_HANDLE);
+	if (m_transport_descriptor_pool == VK_NULL_HANDLE)
+	{
+		VkDescriptorPoolSize size {};
+		size.type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		size.descriptorCount = kTransportSetsMax * kTransportBindingsMax;
+		VkDescriptorPoolCreateInfo info {};
+		info.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		info.maxSets       = kTransportSetsMax;
+		info.poolSizeCount = 1;
+		info.pPoolSizes    = &size;
+		const auto result  = vkCreateDescriptorPool(g_render_ctx->GetGraphicCtx()->device, &info, nullptr, &m_transport_descriptor_pool);
+		if (result != VK_SUCCESS)
+		{
+			m_transport_descriptor_pool = VK_NULL_HANDLE;
+			return VK_NULL_HANDLE;
+		}
+	}
+	VkDescriptorSetAllocateInfo info {};
+	info.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	info.descriptorPool     = m_transport_descriptor_pool;
+	info.descriptorSetCount = 1;
+	info.pSetLayouts        = &layout;
+	VkDescriptorSet set     = VK_NULL_HANDLE;
+	return vkAllocateDescriptorSets(g_render_ctx->GetGraphicCtx()->device, &info, &set) == VK_SUCCESS ? set : VK_NULL_HANDLE;
 }
 
 VulkanBuffer* CommandBuffer::UploadRecordingBuffer(const void* data, uint64_t size, uint32_t usage)
@@ -2581,6 +2626,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 	{
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
+		const ::Kyty::Emulator::Ports::ScopedProgress progress(::Kyty::Emulator::Ports::ProgressLane::FenceWait);
 		const auto wait_start  = DebugStatsClock::now();
 		const auto wait_result = VulkanCallAndPublishOnSuccess(
 		    [&]

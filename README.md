@@ -131,7 +131,8 @@ cmake --build build --target fc_script --parallel 4
 The resulting executable is `build/fc_script.exe` on Windows and
 `build/fc_script` on Linux. Set `-DKYTY_BUILD_LAUNCHER=ON` to also build the
 desktop launcher, which lists installed workloads, starts them and offers
-themes and personalization.
+themes and personalization; see [docs/launcher-themes.md](docs/launcher-themes.md)
+for add-on themes and the layouts.
 
 ## Running a lawful test workload
 
@@ -153,8 +154,10 @@ contain private information; sanitize them before sharing a report.
 
 ### Keyboard and controllers
 
-A connected game controller is used directly. Without one, the keyboard drives
-a virtual pad:
+A connected game controller is used directly, and the keyboard and mouse
+drive a virtual pad beside it. Bindings, mouse look, stick deadzones and the
+controller to use come from an [input profile](docs/input-profiles.md),
+edited in the launcher under Settings › Controls; the default one is:
 
 | Key | Pad input |
 | --- | --- |
@@ -164,11 +167,16 @@ a virtual pad:
 | `V` | Triangle |
 | Arrow keys | D-pad |
 | `Q` / `E` | L1 / R1 |
-| `1` / `3` | L2 / R2 (full trigger travel) |
+| `1`, right mouse button / `3`, left mouse button | L2 / R2 (full trigger travel) |
+| `F` / `H` | L3 / R3 |
 | `Tab`, `Backspace` | Options |
+| `T` | Touchpad |
+| `W`, `A`, `S`, `D` | Left stick |
+| `I`, `J`, `K`, `L`, mouse motion | Right stick |
 
-`F11` or `Alt+Enter` toggles fullscreen, `F9` pauses presentation and audio,
-`F2` toggles text entry for a guest keyboard, and `Escape` exits. The full
+`F3` captures the mouse for camera look and mouse buttons, `F11` or
+`Alt+Enter` toggles fullscreen, `F9` pauses presentation and audio, `F2`
+toggles text entry for a guest keyboard, and `Escape` exits. The full
 host contract is in [docs/HOST_RUNTIME.md](docs/HOST_RUNTIME.md).
 
 ### Useful runtime options

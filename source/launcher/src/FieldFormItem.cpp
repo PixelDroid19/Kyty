@@ -93,7 +93,7 @@ void FieldFormItem::AddFields(const QVector<EditorField>& fields, bool custom_on
 		connect(row, &FieldRowItem::PadRequested, this, &FieldFormItem::OpenPad);
 		connect(row, &FieldRowItem::BrowseRequested, this, &FieldFormItem::Browse);
 		connect(row, &FieldRowItem::ListRequested, this, &FieldFormItem::OpenList);
-		connect(row, &FieldRowItem::FocusRequested, this, &FieldFormItem::FocusKey);
+		connect(row, &FieldRowItem::FocusRequested, this, [this](const QString& key) { FocusKey(key); });
 		m_rows << row;
 		m_custom_only << custom_only;
 	}
@@ -267,12 +267,13 @@ void FieldFormItem::FocusFirst()
 	}
 }
 
-void FieldFormItem::FocusKey(const QString& key)
+void FieldFormItem::FocusKey(const QString& key, int index)
 {
 	const auto* row = RowFor(key);
 	if (row != nullptr && row->Shown() && !row->FocusItems().isEmpty())
 	{
-		FocusItem(row->FocusItems().first());
+		const auto items = row->FocusItems();
+		FocusItem(items.at(std::clamp<qsizetype>(index, 0, items.size() - 1)));
 		return;
 	}
 	FocusFirst();

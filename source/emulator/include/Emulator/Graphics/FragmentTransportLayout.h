@@ -76,6 +76,8 @@ struct KernelParameters
 
 static_assert(sizeof(KernelParameters) == 28u);
 
+inline constexpr uint32_t KERNEL_PARAMETER_BYTES = sizeof(KernelParameters);
+
 [[nodiscard]] KernelParameters GetKernelParameters(const Layout& layout) noexcept;
 
 enum class Failure

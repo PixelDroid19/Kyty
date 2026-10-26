@@ -1,6 +1,8 @@
 #include "FieldControls.h"
 
 #include "Accessibility.h"
+#include "GamepadInput.h"
+#include "LauncherBackend.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -11,6 +13,7 @@
 #include <QSGTextNode>
 
 #include <algorithm>
+#include <cmath>
 
 // Sizes in units.
 constexpr qreal RING_WIDTH    = 3;
@@ -26,6 +29,12 @@ constexpr qreal MODULE_RING   = 2;
 constexpr qreal MODULE_INSET  = 12;
 constexpr qreal TICK_SIZE     = 20;
 constexpr qreal TICK_RADIUS   = 5;
+constexpr qreal STICK_DOT     = 12;
+constexpr qreal STICK_RAW_DOT = 8;
+constexpr qreal STICK_GAP     = 16;
+
+// The stick preview follows the stick this often while it is on screen.
+constexpr int STICK_POLL_MS = 33;
 
 namespace {
 
@@ -266,5 +275,160 @@ QSGNode* ModuleRowItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
 	const auto   label = m_path + (m_present ? QString() : tr("  (missing)"));
 	SetTextLine(node->second, QFontMetricsF(font).elidedText(label, Qt::ElideMiddle, text.width()), font,
 	            m_present ? theme->TextPrimary() : theme->TextMuted(), text);
+	return node;
+}
+
+BindingItem::BindingItem(QQuickItem* parent): FieldControlItem(parent) {}
+
+void BindingItem::SetText(const QString& text, bool bound)
+{
+	if (text != m_text || bound != m_bound)
+	{
+		m_text  = text;
+		m_bound = bound;
+		update();
+	}
+}
+
+void BindingItem::keyPressEvent(QKeyEvent* event)
+{
+	// □ on a controller arrives as E, like the other pages' second action.
+	if (event->key() == Qt::Key_E || event->key() == Qt::Key_Delete)
+	{
+		emit Cleared();
+		return;
+	}
+	FieldControlItem::keyPressEvent(event);
+}
+
+QSGNode* BindingItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)
+{
+	auto*       node  = ControlNodeFor(old_node, window());
+	const auto* theme = Theme::Instance();
+	const qreal u     = theme->U();
+
+	node->box->Update(window(), boundingRect(),
+	                  BoxStyle(this, Hovered(), Hovered() ? theme->GlassStrong() : theme->Glass(), BOX_RADIUS * u));
+	const auto text = boundingRect().adjusted(INSET * u, 0, -INSET * u, 0);
+	// A long binding steps down to the small font before it is cut short.
+	const auto body = BodyFont();
+	const auto font = TextWidth(m_text, body) <= text.width() ? body : SceneFont(theme->FontSmall());
+	SetTextLine(node->first, QFontMetricsF(font).elidedText(m_text, Qt::ElideRight, text.width()), font,
+	            m_bound ? theme->TextPrimary() : theme->TextMuted(), text);
+	return node;
+}
+
+namespace {
+
+// The game's view of a stick: nothing inside the deadzone, the rest of the travel stretched to the full range. The
+// emulator applies the same rule.
+QPointF GameStick(QPointF raw, qreal deadzone, bool invert_x, bool invert_y)
+{
+	const qreal magnitude = std::hypot(raw.x(), raw.y());
+	if (magnitude <= deadzone)
+	{
+		return {};
+	}
+	const qreal scale = std::min<qreal>(1, (magnitude - deadzone) / (1 - deadzone)) / magnitude;
+	return {raw.x() * scale * (invert_x ? -1 : 1), raw.y() * scale * (invert_y ? -1 : 1)};
+}
+
+class StickNode: public GroupNode
+{
+public:
+	explicit StickNode(QQuickWindow* window)
+	{
+		for (auto*& circle: circles)
+		{
+			circle = new RoundedBoxNode;
+			appendChildNode(circle);
+		}
+		readout = window->createTextNode();
+		appendChildNode(readout);
+	}
+
+	// The stick's range, the deadzone, where the stick points and where the game sees it.
+	RoundedBoxNode* circles[4] {};
+	QSGTextNode*    readout = nullptr;
+};
+
+} // namespace
+
+StickPreviewItem::StickPreviewItem(QQuickItem* parent): QQuickItem(parent)
+{
+	setFlag(ItemHasContents);
+	m_timer.setInterval(STICK_POLL_MS);
+	connect(&m_timer, &QTimer::timeout, this, &StickPreviewItem::Poll);
+	connect(Theme::Instance(), &Theme::UChanged, this, &QQuickItem::update);
+	// Items start visible and only report changes; hiding the row or the page stops the polling.
+	m_timer.start();
+}
+
+void StickPreviewItem::SetTuning(bool right, qreal deadzone, bool invert_x, bool invert_y)
+{
+	m_right    = right;
+	m_deadzone = deadzone;
+	m_invert_x = invert_x;
+	m_invert_y = invert_y;
+	update();
+}
+
+void StickPreviewItem::itemChange(ItemChange change, const ItemChangeData& value)
+{
+	QQuickItem::itemChange(change, value);
+	if (change == ItemVisibleHasChanged)
+	{
+		if (value.boolValue)
+		{
+			m_timer.start();
+		} else
+		{
+			m_timer.stop();
+		}
+	}
+}
+
+void StickPreviewItem::Poll()
+{
+	const auto raw = LauncherBackend::Instance()->Gamepad()->StickPosition(m_right);
+	if (raw != m_raw)
+	{
+		m_raw = raw;
+		update();
+	}
+}
+
+QSGNode* StickPreviewItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)
+{
+	auto*       node  = old_node != nullptr ? static_cast<StickNode*>(old_node) : new StickNode(window());
+	const auto* theme = Theme::Instance();
+	const qreal u     = theme->U();
+	const qreal dpr   = window()->effectiveDevicePixelRatio();
+
+	const qreal   size   = height();
+	const QPointF centre(size / 2, size / 2);
+	const qreal   reach  = size / 2;
+	auto          circle = [&](RoundedBoxNode* box, QPointF at, qreal radius, const QColor& fill, const QColor& border)
+	{
+		RoundedBoxNode::Style style;
+		style.fill         = fill;
+		style.border       = border;
+		style.border_width = border.isValid() ? 1 : 0;
+		style.radius       = radius;
+		style.dpr          = dpr;
+		box->Update(window(), QRectF(at.x() - radius, at.y() - radius, 2 * radius, 2 * radius), style);
+	};
+	const auto game = GameStick(m_raw, m_deadzone, m_invert_x, m_invert_y);
+	circle(node->circles[0], centre, reach, theme->Glass(), theme->GlassBorder());
+	circle(node->circles[1], centre, std::max<qreal>(1, reach * m_deadzone), theme->GlassStrong(), theme->GlassBorder());
+	circle(node->circles[2], centre + m_raw * (reach - STICK_RAW_DOT * u / 2), STICK_RAW_DOT * u / 2, theme->TextMuted(), QColor());
+	circle(node->circles[3], centre + game * (reach - STICK_DOT * u / 2), STICK_DOT * u / 2, theme->Accent(), QColor());
+
+	const QRectF text(size + STICK_GAP * u, 0, std::max<qreal>(0, width() - size - STICK_GAP * u), size);
+	const auto   pad = LauncherBackend::Instance()->ControllerName();
+	const auto   readout =
+	    pad.isEmpty() ? tr("Connect a controller to try the stick.")
+	                  : tr("%1 · the game sees %2, %3").arg(pad, QString::number(game.x(), 'f', 2), QString::number(-game.y(), 'f', 2));
+	SetTextBlock(node->readout, readout, SceneFont(theme->FontSmall()), theme->TextSecondary(), text, Qt::AlignLeft | Qt::AlignVCenter);
 	return node;
 }

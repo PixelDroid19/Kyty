@@ -1,8 +1,11 @@
 #include "SettingsPageItem.h"
 
+#include "BindingCaptureItem.h"
+#include "ControlsPanelItem.h"
 #include "EditorFields.h"
 #include "FieldFormItem.h"
 #include "FocusButtonItem.h"
+#include "GamepadInput.h"
 #include "LauncherBackend.h"
 #include "SceneNodes.h"
 #include "SettingsRailItem.h"
@@ -12,6 +15,7 @@
 #include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QQuickWindow>
+#include <QSGImageNode>
 #include <QSGRectangleNode>
 #include <QSGTextNode>
 
@@ -28,6 +32,7 @@ constexpr qreal MAX_CONTENT    = 780;
 constexpr qreal TEXT_SPACING   = 6;
 constexpr qreal INFO_SPACING   = 8;
 constexpr qreal INFO_LABEL     = 132;
+constexpr qreal SCREENSHOT     = 90;
 constexpr qreal DOT            = 8;
 constexpr qreal DOT_SPACING    = 8;
 constexpr qreal BUTTONS_GAP    = 16;
@@ -47,6 +52,7 @@ enum Category
 	Shaders,
 	Logs,
 	Emulator,
+	Controls,
 	Interface,
 	CATEGORY_COUNT
 };
@@ -85,15 +91,23 @@ SettingsPageItem::SettingsPageItem(QQuickItem* parent): QQuickItem(parent)
 {
 	setFlag(ItemHasContents);
 	setFlag(ItemIsFocusScope);
+	// A new theme builds the page again, so the screenshot is read once. The theme was checked when it was read; a
+	// picture that still fails to load only leaves the screenshot out.
+	if (const auto* pack = LauncherBackend::Instance()->CurrentTheme(); pack != nullptr && !pack->screenshot.isEmpty())
+	{
+		m_screenshot = QImage(pack->screenshot);
+	}
 
 	m_rail = new SettingsRailItem(this);
 	m_rail->SetEntries({{tr("Graphics"), SettingsIcon::Graphics},
 	                    {tr("Shaders"), SettingsIcon::Shaders},
 	                    {tr("Logs and dumps"), SettingsIcon::Logs},
 	                    {tr("Emulator"), SettingsIcon::Emulator},
+	                    {tr("Controls"), SettingsIcon::Controls},
 	                    {tr("Interface"), SettingsIcon::Interface}});
 	connect(m_rail, &SettingsRailItem::CurrentChanged, this, &SettingsPageItem::ShowCategory);
 	connect(m_rail, &SettingsRailItem::Entered, this, &SettingsPageItem::Enter);
+	connect(m_rail, &QQuickItem::activeFocusChanged, this, &SettingsPageItem::UpdateStickNavigation);
 
 	auto add_button = [this](const QString& text)
 	{
@@ -106,26 +120,59 @@ SettingsPageItem::SettingsPageItem(QQuickItem* parent): QQuickItem(parent)
 	m_search      = add_button(tr("Search automatically"));
 	m_log         = add_button(tr("Open last log"));
 	m_defaults    = add_button(tr("Restore defaults"));
+	m_duplicate   = add_button(tr("Duplicate profile"));
+	m_delete      = add_button(tr("Delete profile"));
+	m_delete->SetDanger(true);
 	connect(m_choose, &FocusButtonItem::Activated, this, &SettingsPageItem::ProgramRequested);
 	connect(m_search, &FocusButtonItem::Activated, backend, [backend]() { backend->SetEmulatorPath(QString()); });
 	connect(m_log, &FocusButtonItem::Activated, backend, &LauncherBackend::OpenLog);
 	connect(m_defaults, &FocusButtonItem::Activated, this, &SettingsPageItem::RestoreDefaults);
-
-	// The keyboard covers the whole page, so it is created after the form to draw over it.
-	m_pad  = new TextPadItem;
-	m_form = new FieldFormItem(m_pad, this);
-	m_pad->setParentItem(this);
-	m_pad->setParent(this);
-	connect(m_form, &FieldFormItem::Edited, this, &SettingsPageItem::Edited);
-	connect(m_form, &FieldFormItem::TopReached, this,
-	        [this]()
+	connect(m_duplicate, &FocusButtonItem::Activated, this,
+	        [this]() { ProfileAction(&LauncherBackend::DuplicateProfile, QStringLiteral("profile_name")); });
+	connect(m_delete, &FocusButtonItem::Activated, this, &SettingsPageItem::DeleteActivated);
+	// Leaving Delete profile takes its question back.
+	connect(m_delete, &QQuickItem::activeFocusChanged, this,
+	        [this](bool focused)
 	        {
-		        const auto buttons = Buttons();
-		        if (!buttons.isEmpty())
+		        if (!focused && m_confirm_delete)
 		        {
-			        buttons.first()->forceActiveFocus(Qt::OtherFocusReason);
+			        m_confirm_delete = false;
+			        m_delete->SetText(tr("Delete profile"));
 		        }
 	        });
+
+	// The keyboard covers the whole page, so it is created after the form and the controls to draw over them.
+	m_pad      = new TextPadItem;
+	m_form     = new FieldFormItem(m_pad, this);
+	m_controls = new ControlsPanelItem(m_pad, this);
+	m_pad->setParentItem(this);
+	m_pad->setParent(this);
+	m_capture = new BindingCaptureItem(backend->Gamepad(), this);
+	connect(m_form, &FieldFormItem::Edited, this, &SettingsPageItem::Edited);
+	connect(m_controls, &ControlsPanelItem::Edited, this, &SettingsPageItem::ControlsEdited);
+	connect(m_controls, &ControlsPanelItem::CaptureRequested, this,
+	        [this](const QString& key, bool gamepad) { m_capture->OpenFor(key, ControlsPanelItem::ControlTitle(key), gamepad); });
+	connect(m_capture, &BindingCaptureItem::Captured, this, &SettingsPageItem::Captured);
+	connect(m_capture, &BindingCaptureItem::Closed, this, [this]() { m_controls->FocusKey(m_capture->Key(), m_capture->ForGamepad()); });
+	connect(backend, &LauncherBackend::DevicesChanged, this,
+	        [this]()
+	        {
+		        if (m_rail->Current() == Controls)
+		        {
+			        m_controls->SetValues(LauncherBackend::Instance()->ControlsFields());
+		        }
+		        polish();
+	        });
+	auto to_buttons = [this]()
+	{
+		const auto buttons = Buttons();
+		if (!buttons.isEmpty())
+		{
+			buttons.first()->forceActiveFocus(Qt::OtherFocusReason);
+		}
+	};
+	connect(m_form, &FieldFormItem::TopReached, this, to_buttons);
+	connect(m_controls, &ControlsPanelItem::TopReached, this, to_buttons);
 
 	m_save_timer.setSingleShot(true);
 	m_save_timer.setInterval(SAVE_DELAY);
@@ -170,6 +217,11 @@ void SettingsPageItem::GoTo(const Place& place)
 		FocusDefault();
 		return;
 	}
+	if (place.category == Controls)
+	{
+		m_controls->FocusKey(place.key, false);
+		return;
+	}
 	m_form->FocusKey(place.key);
 }
 
@@ -196,6 +248,24 @@ QVector<FocusButtonItem*> SettingsPageItem::Buttons() const
 	{
 		buttons << m_defaults;
 	}
+	if (m_rail->Current() == Controls)
+	{
+		const auto values   = LauncherBackend::Instance()->ControlsFields();
+		const bool is_default = values.value("input_profile").toString() == QLatin1String(InputProfiles::DEFAULT_ID);
+		const bool usable     = values.value("profile_error").toString().isEmpty();
+		if (usable)
+		{
+			buttons << m_duplicate;
+		}
+		if (!is_default || !usable)
+		{
+			buttons << m_defaults;
+		}
+		if (!is_default)
+		{
+			buttons << m_delete;
+		}
+	}
 	return buttons;
 }
 
@@ -205,6 +275,7 @@ void SettingsPageItem::ShowCategory()
 	m_status.clear();
 	m_error.clear();
 	m_pad->Close();
+	m_capture->Close();
 	m_form->Clear();
 	switch (category)
 	{
@@ -216,13 +287,35 @@ void SettingsPageItem::ShowCategory()
 		case Interface: m_form->AddFields(EditorFields(FieldGroup::Interface)); break;
 		default: break;
 	}
-	m_form->SetValues(EmulatorCategory() ? m_global : LauncherBackend::Instance()->LauncherFields());
+	auto* backend = LauncherBackend::Instance();
+	UpdateStickNavigation();
+	m_form->setVisible(category != Controls);
+	m_controls->setVisible(category == Controls);
+	if (category == Controls)
+	{
+		m_controls->SetValues(backend->ControlsFields());
+	} else
+	{
+		m_form->SetValues(EmulatorCategory() ? m_global : backend->LauncherFields());
+	}
 	m_form->ScrollToTop();
 	polish();
 }
 
+// Inside the controls the left stick is there to be tried out, so only the D-pad moves between them.
+void SettingsPageItem::UpdateStickNavigation()
+{
+	const bool trying = isVisible() && m_rail->Current() == Controls && !m_rail->hasActiveFocus();
+	LauncherBackend::Instance()->Gamepad()->SetStickNavigation(!trying);
+}
+
 void SettingsPageItem::Enter()
 {
+	if (m_rail->Current() == Controls)
+	{
+		m_controls->FocusFirst();
+		return;
+	}
 	if (m_form->HasControls())
 	{
 		m_form->FocusFirst();
@@ -250,6 +343,53 @@ void SettingsPageItem::Edited(const QString& key)
 	polish();
 }
 
+void SettingsPageItem::ControlsEdited(const QString& key, const QVariant& value)
+{
+	auto* backend = LauncherBackend::Instance();
+	m_status.clear();
+	m_last_key = key;
+	m_error    = backend->SetControlsField(key, value);
+	m_controls->SetValues(backend->ControlsFields());
+	polish();
+}
+
+void SettingsPageItem::Captured(const QString& key, const QString& name)
+{
+	auto binding = m_controls->Values().value(key).toMap();
+	// The input replaces what the binding had; a profile file may still list several.
+	binding[m_capture->ForGamepad() ? QStringLiteral("buttons") : QStringLiteral("keys")] = QStringList {name};
+	ControlsEdited(key, binding);
+}
+
+void SettingsPageItem::ProfileAction(QString (LauncherBackend::*action)(), const QString& key)
+{
+	auto* backend = LauncherBackend::Instance();
+	m_status.clear();
+	m_error    = (backend->*action)();
+	m_last_key = key;
+	m_controls->SetValues(backend->ControlsFields());
+	// The focus stays among the buttons, on the first one the new profile has.
+	if (const auto buttons = Buttons(); !buttons.isEmpty())
+	{
+		buttons.first()->forceActiveFocus(Qt::OtherFocusReason);
+	}
+	polish();
+}
+
+void SettingsPageItem::DeleteActivated()
+{
+	if (!m_confirm_delete)
+	{
+		m_confirm_delete = true;
+		m_delete->SetText(tr("Delete “%1”? Select again").arg(m_controls->Values().value("profile_name").toString()));
+		polish();
+		return;
+	}
+	m_confirm_delete = false;
+	m_delete->SetText(tr("Delete profile"));
+	ProfileAction(&LauncherBackend::DeleteProfile, QStringLiteral("input_profile"));
+}
+
 void SettingsPageItem::SaveGlobal()
 {
 	m_save_timer.stop();
@@ -260,6 +400,12 @@ void SettingsPageItem::SaveGlobal()
 
 void SettingsPageItem::RestoreDefaults()
 {
+	if (m_rail->Current() == Controls)
+	{
+		ProfileAction(&LauncherBackend::ResetProfile, QStringLiteral("input_profile"));
+		m_status = m_error.isEmpty() ? tr("The profile has the default controls again.") : QString();
+		return;
+	}
 	const auto defaults = LauncherBackend::Instance()->FieldsFor(-1);
 	auto       values   = m_global;
 	for (const auto& field: EditorFields(m_rail->Current() == Graphics  ? FieldGroup::Display
@@ -336,7 +482,7 @@ void SettingsPageItem::keyPressEvent(QKeyEvent* event)
 		case Qt::Key_Down:
 			if (on_buttons)
 			{
-				m_form->FocusFirst();
+				Enter();
 				return;
 			}
 			break;
@@ -348,6 +494,10 @@ void SettingsPageItem::keyPressEvent(QKeyEvent* event)
 void SettingsPageItem::itemChange(ItemChange change, const ItemChangeData& value)
 {
 	QQuickItem::itemChange(change, value);
+	if (change == ItemVisibleHasChanged)
+	{
+		UpdateStickNavigation();
+	}
 	// Leaving the page keeps what was changed, and coming back shows what is saved.
 	if (change == ItemVisibleHasChanged && !value.boolValue && m_save_timer.isActive())
 	{
@@ -361,6 +511,7 @@ void SettingsPageItem::geometryChange(const QRectF& new_geometry, const QRectF& 
 	if (new_geometry.size() != old_geometry.size())
 	{
 		m_pad->setSize(new_geometry.size());
+		m_capture->setSize(new_geometry.size());
 		polish();
 	}
 }
@@ -397,6 +548,7 @@ void SettingsPageItem::updatePolish()
 	const int   category = m_rail->Current();
 	m_texts.clear();
 	m_dots.clear();
+	m_screenshot_rect = {};
 
 	// The categories under the page's title.
 	const auto title_font = SceneFont(theme->FontTitle(), QFont::DemiBold);
@@ -410,7 +562,7 @@ void SettingsPageItem::updatePolish()
 	const qreal   x                      = margin + (RAIL_WIDTH + COLUMN_GAP) * u;
 	const qreal   width                  = std::clamp<qreal>(this->width() - margin - x, 0, MAX_CONTENT * u);
 	qreal         y                      = TOP * u;
-	const QString titles[CATEGORY_COUNT] = {tr("Graphics"), tr("Shaders"), tr("Logs and dumps"), tr("Emulator"), tr("Interface")};
+	const QString titles[CATEGORY_COUNT] = {tr("Graphics"), tr("Shaders"), tr("Logs and dumps"), tr("Emulator"), tr("Controls"), tr("Interface")};
 	m_texts << TextAt(QRectF(x, y, width, TITLE_HEIGHT * u), titles[std::clamp(category, 0, CATEGORY_COUNT - 1)], title_font,
 	                  theme->TextPrimary(), QTextOption::NoWrap);
 	y += TITLE_HEIGHT * u;
@@ -460,6 +612,20 @@ void SettingsPageItem::updatePolish()
 			}
 			break;
 		}
+		case Controls:
+		{
+			add_block(tr("The keys, mouse and controller buttons every game gets, kept in profiles. Games use the chosen profile from "
+			             "their next start; changes are saved as you make them."),
+			          theme->TextMuted());
+			const auto controller = backend->ControllerName();
+			AddInfo(tr("Controller"), controller.isEmpty() ? tr("None connected") : controller, theme->TextSecondary(),
+			        controller.isEmpty() ? QColor() : theme->Ok(), x, width, &y);
+			AddInfo(tr("Profiles folder"), backend->ProfilesFolder(), theme->TextSecondary(), QColor(), x, width, &y);
+			// On Default, duplicating is the way forward.
+			m_duplicate->SetPrimary(m_controls->Values().value("input_profile").toString() == QLatin1String(InputProfiles::DEFAULT_ID));
+			add_block(backend->ControlsFields().value("profile_error").toString(), theme->Danger());
+			break;
+		}
 		case Interface:
 		{
 			add_block(tr("How the launcher looks and behaves. Every change applies at once."), theme->TextMuted());
@@ -467,6 +633,33 @@ void SettingsPageItem::updatePolish()
 			AddInfo(tr("Controller"), controller.isEmpty() ? tr("None connected. Keyboard and mouse work everywhere.") : controller,
 			        theme->TextSecondary(), controller.isEmpty() ? QColor() : theme->Ok(), x, width, &y);
 			AddInfo(tr("Settings file"), backend->SettingsFile(), theme->TextSecondary(), QColor(), x, width, &y);
+			AddInfo(tr("Themes folder"), ThemesFolder(), theme->TextSecondary(), QColor(), x, width, &y);
+			if (const auto* pack = backend->CurrentTheme(); pack != nullptr)
+			{
+				QStringList about {pack->name};
+				if (!pack->version.isEmpty())
+				{
+					about << pack->version;
+				}
+				if (!pack->author.isEmpty())
+				{
+					about << tr("by %1").arg(pack->author);
+				}
+				if (!pack->license.isEmpty())
+				{
+					about << pack->license;
+				}
+				AddInfo(tr("Style"), about.join(QStringLiteral(" · ")), theme->TextSecondary(), QColor(), x, width, &y);
+				if (!m_screenshot.isNull())
+				{
+					// As tall as SCREENSHOT, as wide as its shape asks, within the value column.
+					const qreal height = SCREENSHOT * u;
+					const qreal shown  = std::min(width - INFO_LABEL * u, height * m_screenshot.width() / m_screenshot.height());
+					y += INFO_SPACING * u;
+					m_screenshot_rect = QRectF(x + INFO_LABEL * u, y, std::max<qreal>(0, shown), height);
+					y += height;
+				}
+			}
 			break;
 		}
 		default: break;
@@ -475,7 +668,7 @@ void SettingsPageItem::updatePolish()
 	add_block(m_status, theme->Ok());
 
 	const auto buttons = Buttons();
-	for (auto* button: {m_choose, m_search, m_log, m_defaults})
+	for (auto* button: {m_choose, m_search, m_log, m_defaults, m_duplicate, m_delete})
 	{
 		button->setVisible(buttons.contains(button));
 	}
@@ -493,8 +686,11 @@ void SettingsPageItem::updatePolish()
 	}
 
 	y += FORM_GAP * u;
-	m_form->setPosition(QPointF(x, y));
-	m_form->setSize(QSizeF(width, std::max<qreal>(0, height() - FORM_BOTTOM * u - y)));
+	for (QQuickItem* content: {static_cast<QQuickItem*>(m_form), static_cast<QQuickItem*>(m_controls)})
+	{
+		content->setPosition(QPointF(x, y));
+		content->setSize(QSizeF(width, std::max<qreal>(0, height() - FORM_BOTTOM * u - y)));
+	}
 
 	m_generation++;
 	update();
@@ -531,6 +727,10 @@ QSGNode* SettingsPageItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeDat
 		style.dpr    = window()->effectiveDevicePixelRatio();
 		box->Update(window(), dot.rect, style);
 		node->appendChildNode(box);
+	}
+	if (!m_screenshot_rect.isEmpty())
+	{
+		node->appendChildNode(CreateTextureNode(window(), window()->createTextureFromImage(m_screenshot), m_screenshot_rect));
 	}
 	for (const auto& text: m_texts)
 	{

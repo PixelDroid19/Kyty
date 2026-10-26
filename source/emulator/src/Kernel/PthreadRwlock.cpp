@@ -105,8 +105,14 @@ int KYTY_SYSV_ABI PthreadRwlockRdlock(PthreadRwlock* rwlock)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
-	int result = pthread_rwlock_rdlock(&(*rwlock)->p);
+	// Only a contended lock is recorded as a wait; the uncontended path stays cheap.
+	int result = pthread_rwlock_tryrdlock(&(*rwlock)->p);
+	if (result == EBUSY)
+	{
+		KYTY_GUEST_WAIT(PthreadWaitKind::Rwlock, rwlock);
+		PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
+		result = pthread_rwlock_rdlock(&(*rwlock)->p);
+	}
 
 	// KYTY_LOG_DEBUG("\trwlock rdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
@@ -139,19 +145,24 @@ int KYTY_SYSV_ABI PthreadRwlockTimedrdlock(PthreadRwlock* rwlock, KernelUseconds
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
 #ifdef __APPLE__
-	timespec timeout {};
-	usec_to_timespec(&timeout, usec);
-	const int result = pthread_rwlock_timedrdlock(&(*rwlock)->p, &timeout);
+	timespec wait_limit {};
+	usec_to_timespec(&wait_limit, usec);
 #else
-	timespec deadline {};
-	if (!relative_usec_to_absolute_timespec(0, usec, &deadline))
+	timespec wait_limit {};
+	if (!relative_usec_to_absolute_timespec(0, usec, &wait_limit))
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	const int result = pthread_rwlock_timedrdlock(&(*rwlock)->p, &deadline);
 #endif
+	// Only a contended lock is recorded as a wait; the uncontended path stays cheap.
+	int result = pthread_rwlock_tryrdlock(&(*rwlock)->p);
+	if (result == EBUSY)
+	{
+		KYTY_GUEST_WAIT(PthreadWaitKind::Rwlock, rwlock);
+		PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
+		result = pthread_rwlock_timedrdlock(&(*rwlock)->p, &wait_limit);
+	}
 
 	// KYTY_LOG_DEBUG("\trwlock timedrdlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
@@ -185,19 +196,24 @@ int KYTY_SYSV_ABI PthreadRwlockTimedwrlock(PthreadRwlock* rwlock, KernelUseconds
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
 #ifdef __APPLE__
-	timespec timeout {};
-	usec_to_timespec(&timeout, usec);
-	const int result = pthread_rwlock_timedwrlock(&(*rwlock)->p, &timeout);
+	timespec wait_limit {};
+	usec_to_timespec(&wait_limit, usec);
 #else
-	timespec deadline {};
-	if (!relative_usec_to_absolute_timespec(0, usec, &deadline))
+	timespec wait_limit {};
+	if (!relative_usec_to_absolute_timespec(0, usec, &wait_limit))
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	const int result = pthread_rwlock_timedwrlock(&(*rwlock)->p, &deadline);
 #endif
+	// Only a contended lock is recorded as a wait; the uncontended path stays cheap.
+	int result = pthread_rwlock_trywrlock(&(*rwlock)->p);
+	if (result == EBUSY)
+	{
+		KYTY_GUEST_WAIT(PthreadWaitKind::Rwlock, rwlock);
+		PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
+		result = pthread_rwlock_timedwrlock(&(*rwlock)->p, &wait_limit);
+	}
 
 	// KYTY_LOG_DEBUG("\trwlock timedwrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 
@@ -349,8 +365,14 @@ int KYTY_SYSV_ABI PthreadRwlockWrlock(PthreadRwlock* rwlock)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
-	int result = pthread_rwlock_wrlock(&(*rwlock)->p);
+	// Only a contended lock is recorded as a wait; the uncontended path stays cheap.
+	int result = pthread_rwlock_trywrlock(&(*rwlock)->p);
+	if (result == EBUSY)
+	{
+		KYTY_GUEST_WAIT(PthreadWaitKind::Rwlock, rwlock);
+		PthreadInterruptibleScope lock_wait(&(*rwlock)->p, sizeof((*rwlock)->p));
+		result = pthread_rwlock_wrlock(&(*rwlock)->p);
+	}
 
 	// KYTY_LOG_DEBUG("\trwlock wrlock: %s, %d\n", (*rwlock)->name.C_Str(), result);
 

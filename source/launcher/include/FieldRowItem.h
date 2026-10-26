@@ -15,6 +15,11 @@ class ModuleRowItem;
 class TextFieldItem;
 class ToggleItem;
 
+// What a choice of the list named list in LauncherBackend::Choices() shows for value.
+[[nodiscard]] QString ChoiceDisplay(const char* list, const QString& value);
+// What a key or mouse button of an input profile shows as.
+[[nodiscard]] QString KeyDisplay(const QString& name);
+
 // Number fields take whole numbers up to 99999.
 constexpr int NUMBER_DIGITS = 5;
 

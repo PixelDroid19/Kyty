@@ -6,6 +6,7 @@
 #include "FocusButtonItem.h"
 #include "FolderTabsItem.h"
 #include "GameGridItem.h"
+#include "GamePageItem.h"
 #include "GameTableItem.h"
 #include "HeroRowItem.h"
 #include "LauncherBackend.h"
@@ -13,6 +14,7 @@
 #include "TextFieldItem.h"
 #include "TextPadItem.h"
 #include "Theme.h"
+#include "TileRowItem.h"
 
 #include <QHoverEvent>
 #include <QKeyEvent>
@@ -29,10 +31,11 @@
 // Sizes in units.
 constexpr qreal HEADER_TOP       = 26;
 constexpr qreal HEADER_SPACING   = 4;
-constexpr qreal STATUS_TOP       = 34;
-constexpr qreal STATUS_SPACING   = 22;
-constexpr qreal DOT              = 8;
-constexpr qreal DOT_GAP          = 8;
+// Kept clear at the header's right for the window's top bar.
+constexpr qreal TOP_BAR_ROOM     = 480;
+constexpr qreal ROW_TOP          = 8;
+constexpr qreal ROW_LABEL_GAP    = 14;
+constexpr qreal ROW_PAGE_GAP     = 4;
 constexpr qreal HERO_TOP         = 20;
 // Smallest cover width for each cover size, in the order of its choices.
 constexpr qreal COVER_SIZES[]    = {104, 128, 168};
@@ -95,13 +98,6 @@ public:
 			*text = window->createTextNode();
 			appendChildNode(*text);
 		}
-		for (int i = 0; i < 2; i++)
-		{
-			dots[i] = new RoundedBoxNode;
-			appendChildNode(dots[i]);
-			status[i] = window->createTextNode();
-			appendChildNode(status[i]);
-		}
 		underline = window->createRectangleNode();
 		appendChildNode(underline);
 		switch_mark = new RoundedBoxNode;
@@ -119,8 +115,6 @@ public:
 	QSGTextNode*      hero_label  = nullptr;
 	QSGTextNode*      placeholder = nullptr;
 	QSGTextNode*      empty       = nullptr;
-	RoundedBoxNode*   dots[2] {};
-	QSGTextNode*      status[2] {};
 	QSGRectangleNode* underline   = nullptr;
 	RoundedBoxNode*   switch_mark = nullptr;
 	QSGOpacityNode*   icon_opacity[ICON_COUNT] {};
@@ -135,16 +129,24 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 	setAcceptedMouseButtons(Qt::LeftButton);
 	setAcceptHoverEvents(true);
 
-	m_hero = new HeroRowItem(this);
-	m_tabs = new FolderTabsItem(this);
-	m_search = new TextFieldItem(this);
+	m_browse = new QQuickItem(this);
+	m_hero   = new HeroRowItem(m_browse);
+	m_tabs   = new FolderTabsItem(m_browse);
+	m_search = new TextFieldItem(m_browse);
 	m_search->SetFramed(false);
 	SetAccessible(m_search, QAccessible::EditableText, tr("Search by name or serial"));
-	m_grid  = new GameGridItem(this);
-	m_table = new GameTableItem(this);
-	m_add   = new FocusButtonItem(this);
+	m_grid  = new GameGridItem(m_browse);
+	m_table = new GameTableItem(m_browse);
+	m_add   = new FocusButtonItem(m_browse);
 	m_add->SetText(tr("Add game"));
 	m_add->SetPrimary(true);
+	m_game_page = new GamePageItem(this);
+	m_game_page->setVisible(false);
+	m_row     = new TileRowItem(this);
+	m_console = LauncherBackend::Instance()->LayoutName() == QLatin1String("Console");
+	m_row->setVisible(m_console);
+	m_browse->setVisible(!m_console);
+	m_game_page->SetShowsArt(!m_console);
 	// Over everything else on the page.
 	m_menu = new ActionMenuItem(this);
 	m_pad  = new TextPadItem(this);
@@ -152,8 +154,7 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 	auto*      backend = LauncherBackend::Instance();
 	const auto cover   = backend->Choices().value("cover_size").toStringList().indexOf(backend->Look("cover_size").toString());
 	m_grid->SetCoverLook(COVER_SIZES[std::max<qsizetype>(0, cover)], backend->Look("show_titles").toBool());
-	connect(m_hero, &HeroRowItem::Activated, this,
-	        [this](int index) { emit RunRequested(m_recent.value(index).toMap().value("row").toInt()); });
+	connect(m_hero, &HeroRowItem::Activated, this, [this](int index) { OpenGamePage(m_recent.value(index).toMap().value("row").toInt()); });
 	connect(m_hero, &HeroRowItem::MenuRequested, this, [this](int index) { OpenMenu(m_recent.value(index).toMap().value("row").toInt()); });
 	connect(m_hero, &HeroRowItem::CurrentIndexChanged, this, &LibraryPageItem::UpdateFocusedGame);
 	connect(m_hero, &QQuickItem::activeFocusChanged, this, &LibraryPageItem::UpdateFocusedGame);
@@ -164,13 +165,49 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 	connect(m_search, &QQuickItem::activeFocusChanged, this, [this]() { update(); });
 	connect(m_grid, &GameGridItem::CurrentIndexChanged, this, &LibraryPageItem::UpdateFocusedGame);
 	connect(m_table, &GameTableItem::CurrentIndexChanged, this, &LibraryPageItem::UpdateFocusedGame);
-	auto run  = [this](int index) { emit RunRequested(m_visible_games.value(index).toMap().value("row").toInt()); };
+	auto open = [this](int index) { OpenGamePage(m_visible_games.value(index).toMap().value("row").toInt()); };
 	auto menu = [this](int index) { OpenMenu(m_visible_games.value(index).toMap().value("row").toInt()); };
-	connect(m_grid, &GameGridItem::Activated, this, run);
+	connect(m_grid, &GameGridItem::Activated, this, open);
 	connect(m_grid, &GameGridItem::MenuRequested, this, menu);
-	connect(m_table, &GameTableItem::Activated, this, run);
+	connect(m_table, &GameTableItem::Activated, this, open);
 	connect(m_table, &GameTableItem::MenuRequested, this, menu);
 	connect(m_add, &FocusButtonItem::Activated, this, &LibraryPageItem::AddRequested);
+	connect(m_game_page, &GamePageItem::RunRequested, this, &LibraryPageItem::RunRequested);
+	connect(m_game_page, &GamePageItem::EditRequested, this, &LibraryPageItem::EditRequested);
+	connect(m_game_page, &GamePageItem::MenuRequested, this, &LibraryPageItem::OpenMenu);
+	connect(m_game_page, &GamePageItem::ActionRequested, this, &LibraryPageItem::ActionRequested);
+	connect(m_game_page, &PageItem::Closed, this, &LibraryPageItem::CloseGamePage);
+	connect(m_row, &TileRowItem::CurrentIndexChanged, this, &LibraryPageItem::ShowRowGame);
+	connect(m_row, &TileRowItem::Activated, this,
+	        [this](int index)
+	        {
+		        if (index < m_visible_games.size())
+		        {
+			        OpenGamePage(m_visible_games.at(index).toMap().value("row").toInt());
+			        return;
+		        }
+		        emit AddRequested();
+	        });
+	connect(m_row, &TileRowItem::MenuRequested, this, menu);
+	// The focus tells which of the row and the page below it the user is on.
+	connect(m_game_page, &QQuickItem::activeFocusChanged, this,
+	        [this]()
+	        {
+		        if (m_console && m_game_page->hasActiveFocus() && !m_hub_open)
+		        {
+			        m_hub_open = true;
+			        emit HintsChanged();
+		        }
+	        });
+	connect(m_row, &QQuickItem::activeFocusChanged, this,
+	        [this]()
+	        {
+		        if (m_row->hasActiveFocus() && m_hub_open)
+		        {
+			        m_hub_open = false;
+			        emit HintsChanged();
+		        }
+	        });
 	connect(m_menu, &ActionMenuItem::Chosen, this, &LibraryPageItem::MenuChosen);
 	connect(m_menu, &ActionMenuItem::ShownChanged, this,
 	        [this]()
@@ -206,7 +243,7 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 		        {
 			        return;
 		        }
-		        if (m_pad->Key() == QLatin1String("section"))
+		        if (m_pad->Key() == QLatin1String("section") || m_console)
 		        {
 			        FocusGames();
 			        return;
@@ -218,9 +255,17 @@ LibraryPageItem::LibraryPageItem(QQuickItem* parent): QQuickItem(parent)
 	Refresh();
 }
 
-QVariantList LibraryPageItem::Hints()
+QVariantList LibraryPageItem::Hints() const
 {
-	return {QVariantMap {{"pad", QStringLiteral("✕")}, {"key", QStringLiteral("Enter")}, {"text", tr("Run")}},
+	if (ShowsGamePage())
+	{
+		return m_game_page->Hints();
+	}
+	if (m_console)
+	{
+		return RowHints();
+	}
+	return {QVariantMap {{"pad", QStringLiteral("✕")}, {"key", QStringLiteral("Enter")}, {"text", tr("Open")}},
 	        QVariantMap {{"pad", QStringLiteral("△")}, {"key", QStringLiteral("O")}, {"text", tr("Options")}},
 	        QVariantMap {{"pad", QStringLiteral("□")}, {"key", QStringLiteral("E")}, {"text", tr("Edit")}},
 	        QVariantMap {{"pad", QStringLiteral("L1 R1")}, {"key", QStringLiteral("PgUp/PgDn")}, {"text", tr("Switch section")}},
@@ -235,6 +280,77 @@ QQuickItem* LibraryPageItem::GameView() const
 		return m_table;
 	}
 	return m_grid;
+}
+
+QVariantList LibraryPageItem::RowHints() const
+{
+	return {QVariantMap {{"pad", QStringLiteral("✕")}, {"key", QStringLiteral("Enter")}, {"text", tr("Open")}},
+	        QVariantMap {{"pad", QStringLiteral("△")}, {"key", QStringLiteral("O")}, {"text", tr("Options")}},
+	        QVariantMap {{"pad", QStringLiteral("□")}, {"key", QStringLiteral("E")}, {"text", tr("Edit")}},
+	        QVariantMap {{"pad", QStringLiteral("L1 R1")}, {"key", QStringLiteral("PgUp/PgDn")}, {"text", tr("Switch section")}},
+	        QVariantMap {{"key", QStringLiteral("Ctrl+F")}, {"text", tr("Search")}}};
+}
+
+QQuickItem* LibraryPageItem::FocusTarget() const
+{
+	if (ShowsGamePage())
+	{
+		return m_game_page;
+	}
+	return m_console ? m_row : GameView();
+}
+
+bool LibraryPageItem::ShowsGamePage() const
+{
+	return m_console ? m_hub_open : m_game_page->isVisible();
+}
+
+int LibraryPageItem::GamePageRow() const
+{
+	return ShowsGamePage() ? m_game_page->Row() : -1;
+}
+
+void LibraryPageItem::OpenGamePage(int row)
+{
+	const auto game = m_games.value(row).toMap();
+	if (game.isEmpty())
+	{
+		return;
+	}
+	SelectRow(row);
+	m_game_page->SetGame(game, m_recent.value(0).toMap().value("row", -1).toInt() == row);
+	m_game_page->setVisible(true);
+	m_browse->setVisible(false);
+	m_hub_open = m_console;
+	m_game_page->FocusDefault();
+	UpdateFocusedGame();
+	update();
+	emit HintsChanged();
+}
+
+void LibraryPageItem::CloseGamePage()
+{
+	if (!ShowsGamePage())
+	{
+		return;
+	}
+	const int row = m_game_page->Row();
+	if (m_console)
+	{
+		m_hub_open = false;
+		m_row->forceActiveFocus();
+		update();
+		emit HintsChanged();
+		return;
+	}
+	m_game_page->setVisible(false);
+	m_browse->setVisible(true);
+	SelectRow(row);
+	FocusGames();
+	UpdateFocusedGame();
+	polish();
+	update();
+	emit HintsChanged();
 }
 
 QString LibraryPageItem::SearchText() const
@@ -252,6 +368,28 @@ void LibraryPageItem::Refresh()
 	m_tabs->SetFolders(backend->Folders());
 	m_add->setVisible(m_games.isEmpty());
 	Filter();
+	if (m_console)
+	{
+		ShowRowGame();
+		return;
+	}
+	if (!ShowsGamePage())
+	{
+		return;
+	}
+	// Rows move when games are deleted or moved, so the open game is found again by its folder.
+	const auto basedir = m_game_page->Game().value("basedir");
+	for (const auto& entry: m_games)
+	{
+		const auto game = entry.toMap();
+		if (game.value("basedir") == basedir)
+		{
+			m_game_page->SetGame(game, m_recent.value(0).toMap().value("row", -1) == game.value("row"));
+			UpdateFocusedGame();
+			return;
+		}
+	}
+	CloseGamePage();
 }
 
 void LibraryPageItem::Filter()
@@ -300,6 +438,7 @@ void LibraryPageItem::Filter()
 	const bool shown = !m_visible_games.isEmpty();
 	m_grid->SetGames(m_visible_games);
 	m_table->SetGames(m_visible_games);
+	m_row->SetGames(m_visible_games);
 	m_grid->setVisible(!table && shown);
 	m_table->setVisible(table && shown);
 	UpdateFocusedGame();
@@ -332,7 +471,13 @@ void LibraryPageItem::SortGames(QVariantList* games)
 void LibraryPageItem::UpdateFocusedGame()
 {
 	QVariantMap game;
-	if (m_hero->hasActiveFocus())
+	if (m_console)
+	{
+		game = m_visible_games.value(m_row->CurrentIndex()).toMap();
+	} else if (ShowsGamePage())
+	{
+		game = m_game_page->Game();
+	} else if (m_hero->hasActiveFocus())
 	{
 		game = m_recent.value(m_hero->CurrentIndex()).toMap();
 	} else
@@ -372,6 +517,26 @@ void LibraryPageItem::SelectRow(int row)
 	const int current = std::max(0, index);
 	m_grid->SetCurrentIndex(current);
 	m_table->SetCurrentIndex(current);
+	m_row->SetCurrentIndex(current);
+}
+
+// The page below the row follows its selection, and leaves with the add tile.
+void LibraryPageItem::ShowRowGame()
+{
+	if (!m_console)
+	{
+		return;
+	}
+	const auto game = m_visible_games.value(m_row->CurrentIndex()).toMap();
+	m_game_page->setVisible(!game.isEmpty());
+	if (!game.isEmpty())
+	{
+		m_game_page->SetGame(game, m_recent.value(0).toMap().value("row", -1) == game.value("row"));
+	} else if (m_hub_open)
+	{
+		CloseGamePage();
+	}
+	UpdateFocusedGame();
 }
 
 void LibraryPageItem::FocusDefault()
@@ -381,7 +546,13 @@ void LibraryPageItem::FocusDefault()
 
 void LibraryPageItem::FocusGames()
 {
-	if (!m_visible_games.isEmpty())
+	if (ShowsGamePage())
+	{
+		m_game_page->forceActiveFocus();
+	} else if (m_console)
+	{
+		m_row->forceActiveFocus();
+	} else if (!m_visible_games.isEmpty())
 	{
 		GameView()->forceActiveFocus();
 	} else if (m_add->isVisible())
@@ -395,6 +566,11 @@ void LibraryPageItem::FocusGames()
 
 void LibraryPageItem::FocusSearch()
 {
+	if (m_console)
+	{
+		OpenSearchPad();
+		return;
+	}
 	m_search->forceActiveFocus();
 	m_search->SelectAll();
 }
@@ -427,8 +603,45 @@ void LibraryPageItem::SearchReturn()
 		FocusGames();
 		return;
 	}
+	OpenSearchPad();
+}
+
+void LibraryPageItem::OpenSearchPad()
+{
 	m_pad->SetText(m_search->Text());
 	m_pad->OpenFor(QStringLiteral("search"), tr("Search games"));
+}
+
+// Keys of the Console layout's row; Up is left to the window, which goes to the top bar.
+bool LibraryPageItem::RowKey(QKeyEvent* event)
+{
+	const int  key  = event->key();
+	const auto game = m_visible_games.value(m_row->CurrentIndex()).toMap();
+	if (key == Qt::Key_PageUp || key == Qt::Key_PageDown)
+	{
+		ChangeFolder(key == Qt::Key_PageUp ? -1 : 1);
+	} else if (key == Qt::Key_Slash || (key == Qt::Key_F && (event->modifiers() & Qt::ControlModifier) != 0))
+	{
+		OpenSearchPad();
+	} else if (key == Qt::Key_Down && !game.isEmpty())
+	{
+		OpenGamePage(game.value("row").toInt());
+	} else if (key == Qt::Key_E && !game.isEmpty())
+	{
+		emit EditRequested(game.value("row").toInt());
+	} else if ((key == Qt::Key_O || key == Qt::Key_Menu) && !game.isEmpty())
+	{
+		OpenMenu(game.value("row").toInt());
+	} else if (key == Qt::Key_Escape && !m_search->Text().isEmpty())
+	{
+		// Escape clears the search first.
+		m_search->SetText(QString());
+		Filter();
+	} else
+	{
+		return false;
+	}
+	return true;
 }
 
 void LibraryPageItem::OpenMenu(int row)
@@ -597,7 +810,27 @@ bool LibraryPageItem::GameKey(QKeyEvent* event)
 
 void LibraryPageItem::keyPressEvent(QKeyEvent* event)
 {
-	const auto* focus      = window() != nullptr ? window()->activeFocusItem() : nullptr;
+	const auto* focus = window() != nullptr ? window()->activeFocusItem() : nullptr;
+	// A game's page uses its own keys and leaves the rest to the window; in the row layout Up past its top goes
+	// back to the row.
+	if (ShowsGamePage())
+	{
+		if (m_console && event->key() == Qt::Key_Up && m_game_page->hasActiveFocus())
+		{
+			CloseGamePage();
+			return;
+		}
+		event->ignore();
+		return;
+	}
+	if (m_console)
+	{
+		if (focus != m_row || !RowKey(event))
+		{
+			event->ignore();
+		}
+		return;
+	}
 	const bool  games_view = focus == m_grid || focus == m_table;
 	// L1 and R1 (PageUp and PageDown) switch folders from the tabs and the games.
 	if ((games_view || focus == m_tabs) && (event->key() == Qt::Key_PageUp || event->key() == Qt::Key_PageDown))
@@ -637,7 +870,7 @@ int LibraryPageItem::SwitchAt(QPointF point) const
 
 void LibraryPageItem::mousePressEvent(QMouseEvent* event)
 {
-	const int index = SwitchAt(event->position());
+	const int index = ShowsGamePage() || m_console ? -1 : SwitchAt(event->position());
 	if (index < 0)
 	{
 		event->ignore();
@@ -651,7 +884,7 @@ void LibraryPageItem::mousePressEvent(QMouseEvent* event)
 
 void LibraryPageItem::hoverMoveEvent(QHoverEvent* event)
 {
-	SetHoveredSwitch(SwitchAt(event->position()));
+	SetHoveredSwitch(ShowsGamePage() || m_console ? -1 : SwitchAt(event->position()));
 }
 
 void LibraryPageItem::hoverLeaveEvent(QHoverEvent* /*event*/)
@@ -694,14 +927,6 @@ void LibraryPageItem::itemChange(ItemChange change, const ItemChangeData& value)
 	}
 }
 
-QStringList LibraryPageItem::StatusTexts() const
-{
-	const auto* backend    = LauncherBackend::Instance();
-	const auto  controller = backend->ControllerName();
-	return {backend->IsEmulatorReady() ? tr("Emulator ready") : tr("Emulator not found"),
-	        controller.isEmpty() ? tr("No controller") : controller};
-}
-
 QString LibraryPageItem::EmptyText() const
 {
 	if (m_games.isEmpty())
@@ -727,16 +952,8 @@ void LibraryPageItem::updatePolish()
 	Geometry    g;
 
 	const auto  small        = SmallFont();
-	const auto  texts        = StatusTexts();
 	const qreal status_line  = LineHeight(small);
-	qreal       status_width = STATUS_SPACING * u;
-	for (const auto& text: texts)
-	{
-		status_width += (DOT + DOT_GAP) * u + TextWidth(text, small);
-	}
-	g.status = QRectF(w - margin - status_width, STATUS_TOP * u, status_width, status_line);
-
-	const qreal header_width = std::max<qreal>(0, g.status.left() - gap - margin);
+	const qreal header_width = std::max<qreal>(0, w - 2 * margin - TOP_BAR_ROOM * u);
 	g.title                  = QRectF(margin, HEADER_TOP * u, header_width, LineHeight(TitleFont()));
 	g.details = QRectF(margin, g.title.bottom() + HEADER_SPACING * u, header_width, std::ceil(theme->FontSmall() * 1.5));
 
@@ -796,6 +1013,19 @@ void LibraryPageItem::updatePolish()
 	g.empty_text             = QRectF(grid.center().x() - empty_width / 2, empty_top, empty_width, text_height);
 	m_add->setPosition(QPointF(std::round(grid.center().x() - m_add->width() / 2), g.empty_text.bottom() + EMPTY_SPACING * u));
 
+	m_browse->setSize(size());
+	m_game_page->setSize(size());
+	if (m_console)
+	{
+		// The section's name over the row, the row, then the selected game's page down to the bottom.
+		g.row_label = QRectF(margin, ROW_TOP * u, std::max<qreal>(0, w - 2 * margin), status_line);
+		m_row->setPosition(QPointF(margin, g.row_label.bottom() + ROW_LABEL_GAP * u));
+		m_row->setSize(QSizeF(std::max<qreal>(0, w - margin), TileRowItem::RowHeight()));
+		const qreal page_top = m_row->y() + m_row->height() + ROW_PAGE_GAP * u;
+		m_game_page->setPosition(QPointF(0, page_top));
+		m_game_page->setSize(QSizeF(w, std::max<qreal>(0, h - page_top)));
+		g.empty_text = QRectF(margin, page_top, g.row_label.width(), h - page_top);
+	}
 	m_menu->setSize(size());
 	m_pad->setSize(size());
 	m_geometry = g;
@@ -816,6 +1046,12 @@ void LibraryPageItem::updatePolish()
 
 QSGNode* LibraryPageItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)
 {
+	// A game's page draws everything itself.
+	if (ShowsGamePage() && !m_console)
+	{
+		delete old_node;
+		return nullptr;
+	}
 	auto* node = static_cast<LibraryNode*>(old_node);
 	if (node == nullptr)
 	{
@@ -827,6 +1063,23 @@ QSGNode* LibraryPageItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData
 	const qreal dpr     = window()->effectiveDevicePixelRatio();
 	const auto& g       = m_geometry;
 	const auto  small   = SmallFont();
+
+	if (m_console)
+	{
+		// Only the section, its count and the search; the row and the game's page draw themselves.
+		auto label = QStringLiteral("%1  ·  %2").arg(m_folder.value("title").toString()).arg(m_visible_games.size());
+		if (!m_search->Text().trimmed().isEmpty())
+		{
+			label += QStringLiteral("  ·  “%1”").arg(m_search->Text().trimmed());
+		}
+		SetTextLine(node->hero_label, label, small, theme->TextSecondary(), g.row_label);
+		node->empty->clear();
+		if (m_visible_games.isEmpty())
+		{
+			SetTextBlock(node->empty, EmptyText(), BodyFont(), theme->TextSecondary(), g.empty_text);
+		}
+		return node;
+	}
 
 	// The focused game's name over its own artwork, as on the console's home screen.
 	auto title = m_focused_game.value("title").toString();
@@ -857,24 +1110,6 @@ QSGNode* LibraryPageItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData
 		details.prepend(QStringLiteral("★"));
 	}
 	SetTextLine(node->details, details.join(QStringLiteral("  ·  ")), small, theme->TextSecondary(), g.details);
-
-	const auto   texts = StatusTexts();
-	const QColor dots[2] {backend->IsEmulatorReady() ? theme->Ok() : theme->Danger(),
-	                      backend->ControllerName().isEmpty() ? theme->TextMuted() : theme->Ok()};
-	qreal        x = g.status.left();
-	for (int i = 0; i < 2; i++)
-	{
-		const qreal           dot = DOT * u;
-		RoundedBoxNode::Style style;
-		style.fill   = dots[i];
-		style.radius = dot / 2;
-		style.dpr    = dpr;
-		node->dots[i]->Update(window(), QRectF(x, g.status.center().y() - dot / 2, dot, dot), style);
-		const qreal text_x = x + dot + DOT_GAP * u;
-		const qreal width  = TextWidth(texts.at(i), small);
-		SetTextLine(node->status[i], texts.at(i), small, theme->TextSecondary(), QRectF(text_x, g.status.top(), width, g.status.height()));
-		x = text_x + width + STATUS_SPACING * u;
-	}
 
 	node->hero_label->clear();
 	if (ShowsRecent())

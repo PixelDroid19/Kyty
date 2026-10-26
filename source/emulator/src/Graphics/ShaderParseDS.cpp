@@ -37,6 +37,28 @@ void DecodeDsWrite2(ShaderInstruction* inst, ShaderInstructionType type, uint32_
 	inst->ds_offset = static_cast<uint16_t>((offset1 << 8u) | offset0);
 }
 
+// ds_write2[st64]_b64: DATA0 and DATA1 each hold a 64-bit value in a register
+// pair; the offsets stay packed in ds_offset and are scaled by the caller.
+void DecodeDsWrite2B64(ShaderInstruction* inst, ShaderInstructionType type, uint32_t addr, uint32_t data0, uint32_t data1, uint32_t offset0,
+                       uint32_t offset1)
+{
+	DecodeDsWrite2(inst, type, addr, data0, data1, offset0, offset1);
+	inst->src[1].size = 2;
+	inst->src[2].size = 2;
+}
+
+// ds_read2[st64]_b64: two qwords from the packed offsets into four destination dwords.
+void DecodeDsRead2B64(ShaderInstruction* inst, ShaderInstructionType type, uint32_t vdst, uint32_t addr, uint32_t offset0, uint32_t offset1)
+{
+	inst->type      = type;
+	inst->format    = ShaderInstructionFormat::Vdst2VaddrOffset01;
+	inst->dst       = operand_parse(vdst + 256);
+	inst->dst.size  = 4;
+	inst->src[0]    = operand_parse(addr + 256);
+	inst->src_num   = 1;
+	inst->ds_offset = static_cast<uint16_t>((offset1 << 8u) | offset0);
+}
+
 // ds_read_b32/b64/b96/b128: consecutive dwords at ADDR + offset into VDST.
 void DecodeDsRead(ShaderInstruction* inst, uint32_t vdst, uint32_t addr, uint16_t offset, int dwords)
 {
@@ -279,8 +301,12 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 		case 0x4D:
 			DecodeDsWrite(&inst, addr, data0, DsSingleOffset(offset0, offset1), 2);
 			break;
-		case 0x4E: KYTY_NI("ds_write2_b64"); break;
-		case 0x4F: KYTY_NI("ds_write2st64_b64"); break;
+		case 0x4E:
+			DecodeDsWrite2B64(&inst, ShaderInstructionType::DsWrite2B64, addr, data0, data1, offset0, offset1);
+			break;
+		case 0x4F:
+			DecodeDsWrite2B64(&inst, ShaderInstructionType::DsWrite2St64B64, addr, data0, data1, offset0, offset1);
+			break;
 		case 0x50: KYTY_NI("ds_cmpst_b64"); break;
 		case 0x51: KYTY_NI("ds_cmpst_f64"); break;
 		case 0x52: KYTY_NI("ds_min_f64"); break;
@@ -308,8 +334,12 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 		case 0x76:
 			DecodeDsRead(&inst, vdst, addr, DsSingleOffset(offset0, offset1), 2);
 			break;
-		case 0x77: KYTY_NI("ds_read2_b64"); break;
-		case 0x78: KYTY_NI("ds_read2st64_b64"); break;
+		case 0x77:
+			DecodeDsRead2B64(&inst, ShaderInstructionType::DsRead2B64, vdst, addr, offset0, offset1);
+			break;
+		case 0x78:
+			DecodeDsRead2B64(&inst, ShaderInstructionType::DsRead2St64B64, vdst, addr, offset0, offset1);
+			break;
 		case 0x7E:
 			EXIT("unsupported DS conditional exchange: opcode=0x%02x next_gen=%u\n", opcode, next_gen ? 1u : 0u);
 			break;
@@ -328,6 +358,23 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 		case 0x8D: KYTY_NI("ds_write_src2_b32"); break;
 		case 0x92: KYTY_NI("ds_min_src2_f32"); break;
 		case 0x93: KYTY_NI("ds_max_src2_f32"); break;
+		case 0xB3:
+		{
+			// ds_bpermute_b32: the backward lane permute. Each lane gathers the
+			// value of the lane its index names; the index is a byte address with
+			// the offset added to it, and only its bits [6:2] select a lane of
+			// the same half wave. A disabled source lane reads zero.
+			EXIT_NOT_IMPLEMENTED(gds != 0);
+			inst.type      = ShaderInstructionType::DsBpermuteB32;
+			inst.format    = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.dst       = operand_parse(vdst + 256);
+			inst.dst.size  = 1;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src[1]    = operand_parse(data0 + 256);
+			inst.src_num   = 2;
+			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
+		}
 		case 0xB0:
 			// ds_write_addtid_b32: LDS[M0[15:0] + offset + TID*4] = DATA0 (no ADDR field).
 			if (gds != 0) { KYTY_NI("ds_write_addtid_b32_gds"); break; }

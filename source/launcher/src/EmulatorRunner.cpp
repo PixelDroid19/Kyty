@@ -80,7 +80,7 @@ QString LuaQuote(QString text)
 	return "'" + text + "'";
 }
 
-bool CreateLuaScript(const Kyty::Configuration& info, const QString& file_name)
+bool CreateLuaScript(const Kyty::Configuration& info, const QString& input_profile_file, const QString& file_name)
 {
 	QFile file(file_name);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
@@ -116,6 +116,7 @@ bool CreateLuaScript(const Kyty::Configuration& info, const QString& file_name)
 	s << "\t SpirvDebugPrintfEnabled = " << (info.spirv_debug_printf_enabled ? "true" : "false") << ";\n";
 	s << "\t PipelineDumpEnabled = " << (info.pipeline_dump_enabled ? "true" : "false") << ";\n";
 	s << "\t PipelineDumpFolder = " << LuaQuote(info.pipeline_dump_folder) << ";\n";
+	s << "\t InputProfileFile = " << LuaQuote(input_profile_file) << ";\n";
 	s << "}\n";
 
 	s << KYTY_INIT << "(cfg);\n";
@@ -287,7 +288,7 @@ void EmulatorRunner::OnProbeFailed()
 	emit Probed(false, {}, QCoreApplication::translate("Launcher", "The emulator could not be started."));
 }
 
-QString EmulatorRunner::Start(const Kyty::Configuration& info, const QString& mode)
+QString EmulatorRunner::Start(const Kyty::Configuration& info, const QString& mode, const QString& input_profile_file)
 {
 	if (IsBusy())
 	{
@@ -302,7 +303,7 @@ QString EmulatorRunner::Start(const Kyty::Configuration& info, const QString& mo
 	const auto      dir = f.absoluteDir();
 
 	const auto lua_file_name = dir.filePath(KYTY_LUA_FILE);
-	if (!CreateLuaScript(info, lua_file_name))
+	if (!CreateLuaScript(info, input_profile_file, lua_file_name))
 	{
 		return QCoreApplication::translate("Launcher", "Can't create file:\n") + lua_file_name;
 	}

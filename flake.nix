@@ -12,7 +12,7 @@
     in
     {
       devShells.${system} = {
-        # Build and test toolchain for the C++ emulator and the Python tools.
+        # Build and test toolchain for the C++ emulator and its tools.
         default = pkgs.mkShell {
           # The project sets its own warning flags; the wrapper's format hardening
           # turns the vendored profiler's -Wno-format into an error.
@@ -22,12 +22,12 @@
             ninja
             pkg-config
             gcc
-            python3
             git
             vulkan-loader
             vulkan-headers
             spirv-tools
             shaderc
+            glslang
             ffmpeg
             alsa-lib
             libpulseaudio

@@ -17,8 +17,8 @@ namespace Kyty::Libs::Graphics {
 
 bool Spirv::UsesSplitComputeWave() const
 {
-	return m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->native_wave_sensitive &&
-	       m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
+	return (m_code.GetType() == ShaderType::Compute || UsesFragmentCompute()) && m_cs_input_info != nullptr &&
+	       m_cs_input_info->native_wave_sensitive && m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Split64On32;
 }
 
 String8 Spirv::HostLaneVariable() const

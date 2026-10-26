@@ -40,6 +40,13 @@ spans titles goes in `docs/bringup/cross-title.md`.
   - UE4 JRPG startup frontier (2026-10-07, not gameplay)
 - [Robot platformer](titles/robot-platformer.md)
   - Robot platformer: Gen5 AGC HLE run reaches the tutorial level load (2026-10-26)
+  - Robot platformer: fragment wave transport executes (2026-10-24)
+  - Robot platformer: gameplay level stops at the fragment transport gate (2026-10-24)
+  - Robot platformer: transition crash was a non-indexed transport draw (2026-10-24, fixed)
+  - Robot platformer: 64-bit DS write2 and read2 stores (2026-10-24)
+  - Robot platformer: mixed-view storage alias blocks the tutorial (2026-10-24, open)
+  - Robot platformer: composite raw path admits a linear multi-level destination (2026-10-25, fixed)
+  - Robot platformer: load-window cost per draw stage (2026-10-24)
   - Robot platformer: logo particles through a split geometry pass (2026-10-22)
   - Robot platformer: paired compute compile cost (2026-10-21, closed 2026-10-22)
   - Robot platformer: worldmap stall and dark top-left quadrant (2026-10-17)
@@ -584,7 +591,7 @@ live".
 - **Gates.** `check_emulator_boundaries.py source --strict` and the
   graphics-table, boundary-fixture and detile-SPIR-V ctest gates pass. The
   focused graphics unit suites pass (896 tests).
-  `kyty_playable_regression.py` cannot run on this host: it has no private
+  The playable regression cannot run on this host: it has no private
   profile or guest root.
 
 ### Main regression sweep after the #18 merge (2026-10-17)

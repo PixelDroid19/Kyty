@@ -180,10 +180,7 @@ A refused replay (missing, out-of-order, or unreadable read) halts through the
 production `EXIT` path with a nonzero status. The replay reader prints the
 machine token first.
 
-The wrapper `scripts/kyty_resource_fold_replay.py` delegates both `validate` and
-`replay` to the CLI. It takes `--binary` or `KYTY_RESOURCE_FOLD_REPLAY_BIN`, and
-returns 6 when the CLI is unavailable. It performs no validation of its own.
-`validate` is the CLI's schema and safe-input check, not a replay.
+`--validate-only` is the CLI's schema and safe-input check, not a replay.
 
 ## Limits and claims
 

@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/FragmentTransportCapture.h"
 #include "Emulator/Graphics/FragmentTransportLayout.h"
 #include "Emulator/Graphics/FragmentTransportResolve.h"
+#include "Emulator/Graphics/FragmentTransportShade.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Shader.h"
@@ -16,6 +17,7 @@
 #include "ShaderSpirvToolchain.h"
 
 #include <algorithm>
+#include <cstdio>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -115,6 +117,184 @@ String8 DrawState(const PipelineStaticParameters& state, const VkExtent2D& exten
 
 } // namespace
 
+uint32_t FragmentTransportInitialVgprs(const ShaderPixelInputInfo& pixel)
+{
+	return InitialVgprCount(pixel);
+}
+
+uint32_t FragmentTransportLaneWords(const ShaderCode& code, const ShaderPixelInputInfo& pixel)
+{
+	return 1u + InitialVgprCount(pixel) + FragmentTransport::BuildLanePacking(code, pixel).words;
+}
+
+bool FragmentTransportBuildShadeModule(const ShaderCode& code, const ShaderPixelInputInfo& pixel, uint32_t user_sgpr_count,
+                                       uint32_t lds_dwords, Vector<uint32_t>* binary, String8* error)
+{
+	EXIT_IF(binary == nullptr || error == nullptr);
+	binary->Clear();
+	error->Clear();
+
+	ShaderFragmentComputeInfo info;
+	info.descriptor_set     = kTransportDescriptorSet;
+	info.input_binding      = kWaveInputBinding;
+	info.output_binding     = kWaveOutputBinding;
+	info.control_binding    = 1u;
+	info.initial_vgpr_count = InitialVgprCount(pixel);
+	info.user_sgpr_count    = user_sgpr_count;
+	info.parameter_state    = ShaderFragmentParameterState::Virtualized;
+
+	ShaderComputeInputInfo compute;
+	compute.wave_layout.strategy             = ShaderComputeWaveStrategy::Split64On32;
+	compute.wave_layout.guest_local[0]       = 64u;
+	compute.wave_layout.guest_local[1]       = 1u;
+	compute.wave_layout.guest_local[2]       = 1u;
+	compute.wave_layout.physical_local[0]    = 64u;
+	compute.wave_layout.physical_local[1]    = 1u;
+	compute.wave_layout.physical_local[2]    = 1u;
+	compute.wave_layout.guest_wave_size      = 64u;
+	compute.wave_layout.native_subgroup_size = 32u;
+	compute.wave_layout.banks                = 1u;
+	compute.wave_layout.waves                = 1u;
+	compute.wave_layout.lds_dwords           = lds_dwords;
+	compute.native_wave_sensitive            = true;
+	compute.required_subgroup_size           = 32u;
+	compute.threads_num[0]                   = 64u;
+	compute.threads_num[1]                   = 1u;
+	compute.threads_num[2]                   = 1u;
+	compute.lds_dwords                       = lds_dwords;
+	compute.float_mode                       = pixel.float_mode;
+	compute.dx10_clamp                       = pixel.dx10_clamp;
+	compute.ieee_mode                        = pixel.ieee_mode;
+	compute.fp_mode_known                    = true;
+	compute.fp16_overflow                    = pixel.fp16_overflow;
+	compute.fp16_overflow_known              = pixel.fp16_overflow_known;
+
+	const auto source = SpirvGenerateFragmentComputeSource(code, pixel, compute, info);
+	if (source.StartsWith("OpKyty"))
+	{
+		*error = source;
+		return false;
+	}
+	return ShaderToolchain::Run(source, binary, error);
+}
+
+namespace {
+
+VkDescriptorSetLayout CreateEmptySetLayout(VkDevice device)
+{
+	VkDescriptorSetLayoutCreateInfo info {};
+	info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	info.bindingCount = 0;
+	VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+	return vkCreateDescriptorSetLayout(device, &info, nullptr, &layout) == VK_SUCCESS ? layout : VK_NULL_HANDLE;
+}
+
+} // namespace
+
+bool FragmentTransportCreateShadePipeline(VkDevice device, VkPipelineCache pipeline_cache, const ShaderBindResources& ps_bind,
+                                          const Vector<uint32_t>& binary, bool require_subgroup_size,
+                                          VkDescriptorSetLayout transport_layout, VkPipelineLayout* layout, VkPipeline* pipeline)
+{
+	EXIT_IF(layout == nullptr || pipeline == nullptr || binary.IsEmpty());
+	*layout   = nullptr;
+	*pipeline = nullptr;
+	if (g_render_ctx == nullptr || transport_layout == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	auto* gctx = g_render_ctx->GetGraphicCtx();
+	if (gctx == nullptr || gctx->device != device)
+	{
+		return false;
+	}
+
+	const VkDescriptorSetLayout empty_layout = CreateEmptySetLayout(device);
+	if (empty_layout == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+
+	ShaderDescriptorLayoutPlan plan;
+	const bool                 bind_requires_set = ShaderBindRequiresDescriptorSet(ps_bind);
+	const bool                 plan_ok           = ShaderBuildDescriptorLayoutPlan(ps_bind, &plan);
+	const bool                 has_ps_set        = bind_requires_set && plan_ok;
+	VkDescriptorSetLayout      ps_layout         = empty_layout;
+	if (has_ps_set)
+	{
+		ps_layout = g_render_ctx->GetDescriptorCache()->GetDescriptorSetLayout(DescriptorCache::Stage::Compute, plan);
+	}
+	const uint32_t ps_slot = ps_bind.descriptor_set_slot;
+	if (ps_slot >= 2u || (has_ps_set && ps_layout == VK_NULL_HANDLE))
+	{
+		vkDestroyDescriptorSetLayout(device, empty_layout, nullptr);
+		return false;
+	}
+
+	VkDescriptorSetLayout sets[3] = {empty_layout, empty_layout, transport_layout};
+	if (has_ps_set)
+	{
+		sets[ps_slot] = ps_layout;
+	}
+
+	VkPushConstantRange push_constant {};
+	uint32_t            push_constant_count = 0;
+	if (!ps_bind.vsharp_uniform_buffer && ps_bind.push_constant_size > 0)
+	{
+		push_constant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+		push_constant.offset     = ps_bind.push_constant_offset;
+		push_constant.size       = ps_bind.push_constant_size;
+		push_constant_count      = 1;
+	}
+
+	VkPipelineLayoutCreateInfo layout_info {};
+	layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	layout_info.setLayoutCount         = 3;
+	layout_info.pSetLayouts            = sets;
+	layout_info.pushConstantRangeCount = push_constant_count;
+	layout_info.pPushConstantRanges    = push_constant_count != 0 ? &push_constant : nullptr;
+	VkResult result = vkCreatePipelineLayout(device, &layout_info, nullptr, layout);
+
+	VkShaderModule module = VK_NULL_HANDLE;
+	if (result == VK_SUCCESS)
+	{
+		VkShaderModuleCreateInfo module_info {};
+		module_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		module_info.codeSize = binary.Size() * sizeof(uint32_t);
+		module_info.pCode    = binary.GetDataConst();
+		result               = vkCreateShaderModule(device, &module_info, nullptr, &module);
+	}
+	if (result == VK_SUCCESS)
+	{
+		VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required {};
+		required.sType                = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT;
+		required.requiredSubgroupSize = 32;
+
+		VkPipelineShaderStageCreateInfo stage {};
+		stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stage.pNext  = require_subgroup_size ? &required : nullptr;
+		stage.flags  = require_subgroup_size ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT : 0;
+		stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+		stage.module = module;
+		stage.pName  = "main";
+
+		VkComputePipelineCreateInfo pipeline_info {};
+		pipeline_info.sType        = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+		pipeline_info.stage        = stage;
+		pipeline_info.layout       = *layout;
+		pipeline_info.basePipelineIndex = -1;
+		result                     = vkCreateComputePipelines(device, pipeline_cache, 1, &pipeline_info, nullptr, pipeline);
+	}
+	if (module != VK_NULL_HANDLE) { vkDestroyShaderModule(device, module, nullptr); }
+	vkDestroyDescriptorSetLayout(device, empty_layout, nullptr);
+	if (result != VK_SUCCESS)
+	{
+		if (*layout != VK_NULL_HANDLE) { vkDestroyPipelineLayout(device, *layout, nullptr); }
+		*layout   = nullptr;
+		*pipeline = nullptr;
+	}
+	return result == VK_SUCCESS;
+}
+
 FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, const ShaderPixelInputInfo& pixel, uint32_t user_sgpr_count,
                                                       const PipelineStaticParameters& state, const VkExtent2D& extent)
 {
@@ -175,9 +355,14 @@ FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, co
 	const char* missing = FragmentTransport::MissingHostCapability(*context);
 	ShaderPixelInputInfo resolved = pixel;
 	resolved.input_num            = SpirvResolvePixelParameterCount(code, pixel.input_num);
-	ShaderFragmentComputeInfo info {kTransportDescriptorSet, kWaveInputBinding, kWaveOutputBinding,
-	                                InitialVgprCount(pixel), user_sgpr_count,   ShaderFragmentParameterState::Virtualized};
-	const uint32_t            lane_words = 1u + info.initial_vgpr_count + resolved.input_num * 16u;
+	ShaderFragmentComputeInfo info;
+	info.descriptor_set     = kTransportDescriptorSet;
+	info.input_binding      = kWaveInputBinding;
+	info.output_binding     = kWaveOutputBinding;
+	info.initial_vgpr_count = InitialVgprCount(pixel);
+	info.user_sgpr_count    = user_sgpr_count;
+	info.parameter_state    = ShaderFragmentParameterState::Virtualized;
+	const uint32_t            lane_words = 1u + info.initial_vgpr_count + FragmentTransport::BuildLanePacking(code, resolved).words;
 	const auto                limits     = HostLimits(*context);
 
 	facts += String8::FromPrintf("missing_host_capability=%s ", missing != nullptr ? missing : "none");

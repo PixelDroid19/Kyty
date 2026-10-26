@@ -241,7 +241,7 @@ TEST(EmulatorControllerSources, ActiveControllerHandoffPreservesKeyboardAndRetir
 	EXPECT_EQ(history[1].buttons, PAD_BUTTON_CROSS | PAD_BUTTON_TRIANGLE);
 }
 
-TEST(EmulatorControllerSources, SingleSourceKeepsAxisPriorityAndContinuousReports)
+TEST(EmulatorControllerSources, AxesFollowTheFarthestDeflectedSourceAndReportContinuously)
 {
 	GameController controller;
 	controller.Connect(CONTROLLER_KEYBOARD_ID);
@@ -250,8 +250,12 @@ TEST(EmulatorControllerSources, SingleSourceKeepsAxisPriorityAndContinuousReport
 	EXPECT_EQ(Current(controller).axes[static_cast<int>(Axis::LeftX)], 0);
 	controller.Connect(10);
 	controller.Axis(10, Axis::LeftX, 230);
-	controller.Axis(CONTROLLER_KEYBOARD_ID, Axis::LeftX, 10);
+	EXPECT_EQ(Current(controller).axes[static_cast<int>(Axis::LeftX)], 0);
+	controller.Axis(CONTROLLER_KEYBOARD_ID, Axis::LeftX, 128);
 	EXPECT_EQ(Current(controller).axes[static_cast<int>(Axis::LeftX)], 230);
+	// Mouse look on the keyboard source moves the right stick while the gamepad's rests.
+	controller.Axis(CONTROLLER_KEYBOARD_ID, Axis::RightX, 255);
+	EXPECT_EQ(Current(controller).axes[static_cast<int>(Axis::RightX)], 255);
 	EXPECT_EQ(Current(controller).buttons, PAD_BUTTON_CROSS);
 	ControllerState history[64];
 	ReadHistory(controller, history);
@@ -259,6 +263,7 @@ TEST(EmulatorControllerSources, SingleSourceKeepsAxisPriorityAndContinuousReport
 	EXPECT_EQ(history[0].buttons, PAD_BUTTON_CROSS);
 	controller.Disconnect(10);
 	EXPECT_EQ(Current(controller).axes[static_cast<int>(Axis::LeftX)], 128);
+	EXPECT_EQ(Current(controller).axes[static_cast<int>(Axis::RightX)], 255);
 	controller.Disconnect(CONTROLLER_KEYBOARD_ID);
 	EXPECT_EQ(Current(controller).buttons, 0u);
 }

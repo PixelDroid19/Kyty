@@ -828,6 +828,30 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	std::_Exit(0);
 }
 
+[[noreturn]] void RunSdwaHalfDestination(ShaderType stage = ShaderType::Pixel)
+{
+	Initialize();
+	const auto run = [](const Program& program, uint32_t exec_lane)
+	{
+		return program.Run({{"%v0", 0x3c004000u}, {"%v3", 0x38004000u}, {"%v8", 0xdeadbeefu},
+		                    {"%exec_lo", exec_lane != 0u ? UINT32_MAX : 0u}, {"%exec_hi", 0u},
+		                    {"%exec_lane_lo", exec_lane}, {"%exec_lane_hi", 0u}},
+		                   "%v8");
+	};
+	// V_MIN_F16 v8, v3, v0 as the hub encodes it: both sources read WORD_1,
+	// the result fills WORD_0 and DST_U=2 preserves WORD_1.
+	const Program preserve(Emit(Parse({0x741000f9u, 0x05051403u, kEnd}, stage)).c_str());
+	Equal(run(preserve, 1u), 0xdead3800u, "sdwa half destination preserves the other half");
+	Equal(run(preserve, 0u), 0xdeadbeefu, "inactive sdwa half destination");
+	// DST_U=0 pads the word DST_SEL did not select with zeros.
+	const Program zero(Emit(Parse({0x741000f9u, 0x05051403u & ~(3u << 11u), kEnd}, stage)).c_str());
+	Equal(run(zero, 1u), 0x00003800u, "sdwa half destination zeroes the other half");
+	// DST_SEL=WORD_1 writes the high half; DST_U=2 preserves the low half.
+	const Program high(Emit(Parse({0x741000f9u, (0x05051403u & ~(7u << 8u)) | (5u << 8u), kEnd}, stage)).c_str());
+	Equal(run(high, 1u), 0x3800beefu, "sdwa high half destination preserves the low half");
+	std::_Exit(0);
+}
+
 enum class Rejected
 {
 	OpSel, Sdwa, Dpp, Omod, Round, RoundDown, RoundZero, Ieee, UnknownComputeMode,
@@ -1130,6 +1154,13 @@ TEST(EmulatorShaderArithmetic, CanonicalFp16EncodingsAssembleAndValidate) { ASSE
 TEST(EmulatorShaderArithmetic, Fp16NarrowingValuesRoundingAndExec) { ASSERT_EXIT(RunNarrowing(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, Fp16UnaryAndConversionValues) { ASSERT_EXIT(RunHalfValues(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, Fp16TernaryHalfSelectAndFusedValues) { ASSERT_EXIT(RunTernaryAndMinMax(), ::testing::ExitedWithCode(0), ""); }
+TEST(EmulatorShaderArithmetic, Fp16SdwaHalfDestinationReadsAndPreservesHalves)
+{
+	for (const auto stage: {ShaderType::Pixel, ShaderType::Compute})
+	{
+		ASSERT_EXIT(RunSdwaHalfDestination(stage), ::testing::ExitedWithCode(0), "");
+	}
+}
 TEST(EmulatorShaderArithmetic, BfeDefinedForEveryMaskedOffsetAndWidth) { ASSERT_EXIT(RunBfe(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, ComputeFp16EncodingsAssembleAndValidate)
 {

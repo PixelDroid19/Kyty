@@ -1,3 +1,15 @@
+## GDS is shared across queue families (2026-10-24)
+
+- **Observed.** After compute queues moved to a compute-only family, a title
+  that initializes GDS on a compute queue and later binds it on the graphics
+  queue stopped at boot with `GDS queue-family migration is unsupported`.
+- **Cause and fix.** The GDS buffer is created through the common buffer path,
+  which already applies concurrent sharing across every used family; the
+  first-use family check still treated it as exclusively owned. The check and
+  the owner field are removed.
+- **Verified.** A strict boot on Intel A770 passes the publisher card, the
+  studio logo and the title, and loads the intro level.
+
 # Cross-title records (2026-10-10 onward)
 
 Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
@@ -4861,3 +4873,29 @@ preparation and 2.670 seconds of texture preparation; these nested measurements
 must not be added to their parent. The different binaries and independent runs
 do not isolate the cause of the rate difference. Completed multi-workload
 acceptance remains open.
+
+## Unverified ISA leads from a fork comparison (2026-10-24)
+
+- **Context.** A comparison against a derivative tree surfaced four general
+  instruction contracts that our decoder still refuses. They are secondary
+  implementation leads to verify against the published ISA and a live trace,
+  not evidence-backed contracts, and none is the current platformer blocker.
+  - `ds_cmpst_rtn_b32` (opcode 0x30): returns the pre-compare value and stores
+    only on match.
+  - 64-bit returning LDS forms (`ds_min_rtn_u64`, `ds_max_rtn_u64`,
+    `ds_cmpst_rtn_b64`, opcodes around 0x68-0x70), including the 64-bit source
+    width.
+  - D16 XY/XYZ formatted buffer loads and stores (MUBUF forms 0x80-0x87).
+  - Raw D16 depth bits through integer image loads (an integer view over a live
+    depth target), which matches the open defect recorded for integer T# over
+    depth binds.
+  The same review confirmed that no existing derivative implements the
+  level-aware linear R32F composite seed this title's tutorial needs; the
+  mixed-view storage alias remains a local design task.
+- **Lineage.** The reviewed derivative tree belongs to an unrelated project
+  lineage: it uses different top-level paths (`src/graphics`, `src/kernel`) and
+  shares no commit with our repository, so merging it is neither possible nor
+  appropriate. Its synchronisations also mention two split-wave leads worth
+  verifying later: sharing SMEM load results across emulated wave64 halves and
+  allocating split-wave dispatcher spill IDs in program order. Both overlap
+  files we own; treat them as leads, never as patches.

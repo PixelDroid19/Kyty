@@ -3,8 +3,10 @@
 
 #include "Common.h"
 
+#include <QPointF>
 #include <QQuickItem>
 #include <QString>
+#include <QTimer>
 #include <QVariantAnimation>
 
 // The editor's single-value controls. Each reports what the user asked for and shows whatever value the editor
@@ -103,6 +105,59 @@ private:
 	QString m_path;
 	bool    m_present  = false;
 	bool    m_selected = false;
+};
+
+// What one control is bound to on one kind of device; activating it asks for a new binding, □ or Delete clears it.
+class BindingItem: public FieldControlItem
+{
+	Q_OBJECT
+	KYTY_QT_CLASS_NO_COPY(BindingItem);
+
+signals:
+	void Cleared();
+
+public:
+	explicit BindingItem(QQuickItem* parent = nullptr);
+	~BindingItem() override = default;
+
+	// bound is false when text only says that nothing is bound.
+	void SetText(const QString& text, bool bound);
+
+protected:
+	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
+	void     keyPressEvent(QKeyEvent* event) override;
+
+private:
+	QString m_text;
+	bool    m_bound = false;
+};
+
+// Where one of the controller's sticks points and where the game sees it after the deadzone and inversion,
+// read from the controller while the item is on screen.
+class StickPreviewItem: public QQuickItem
+{
+	Q_OBJECT
+	KYTY_QT_CLASS_NO_COPY(StickPreviewItem);
+
+public:
+	explicit StickPreviewItem(QQuickItem* parent = nullptr);
+	~StickPreviewItem() override = default;
+
+	void SetTuning(bool right, qreal deadzone, bool invert_x, bool invert_y);
+
+protected:
+	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
+	void     itemChange(ItemChange change, const ItemChangeData& value) override;
+
+private:
+	void Poll();
+
+	QTimer  m_timer;
+	bool    m_right    = false;
+	qreal   m_deadzone = 0;
+	bool    m_invert_x = false;
+	bool    m_invert_y = false;
+	QPointF m_raw;
 };
 
 #endif /* LAUNCHER_INCLUDE_FIELD_CONTROLS_H_ */

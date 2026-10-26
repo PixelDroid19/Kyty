@@ -150,7 +150,7 @@ bool ScoreNativePng(const char* path, FrameScoreMetrics* out)
 	out->width  = png.width;
 	out->height = png.height;
 
-	// World crop ~full frame minus HUD strip (matches kyty_capture DEFAULT_WORLD_CROP intent).
+	// World crop ~full frame minus HUD strip.
 	const uint32_t x0 = png.width / 20u;
 	const uint32_t x1 = png.width - png.width / 20u;
 	const uint32_t y0 = png.height / 10u;

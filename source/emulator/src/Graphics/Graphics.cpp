@@ -5202,6 +5202,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegisterDirect(CommandBuffer* buf, Shade
 	return cmd;
 }
 
+// GraphicsDcbSetShRegisterDirectGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetShRegisterDirectGetSize()
+{
+	return 12u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirect(CommandBuffer* buf, ShaderRegister reg)
 {
 	PRINT_NAME();
@@ -5224,6 +5231,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirect(CommandBuffer* buf, Shade
 	cmd[2] = reg.value;
 
 	return cmd;
+}
+
+// GraphicsDcbSetCxRegisterDirectGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirectGetSize()
+{
+	return 12u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegisterDirect(CommandBuffer* buf, ShaderRegister reg)
@@ -5280,6 +5294,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirect(CommandBuffer* buf, co
 	return cmd;
 }
 
+// GraphicsDcbSetCxRegistersIndirectGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirectGetSize()
+{
+	return 16u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs)
 {
 	PRINT_NAME();
@@ -5308,6 +5329,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirect(CommandBuffer* buf, co
 	cmd[3] = (vaddr >> 32u) & 0xffffffffu;
 
 	return cmd;
+}
+
+// GraphicsDcbSetShRegistersIndirectGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirectGetSize()
+{
+	return 16u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs)
@@ -5340,6 +5368,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirect(CommandBuffer* buf, co
 	return cmd;
 }
 
+// GraphicsDcbSetUcRegistersIndirectGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirectGetSize()
+{
+	return 16u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t index_size, uint8_t cache_policy)
 {
 	PRINT_NAME();
@@ -5365,6 +5400,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 	cmd[1] = index_size;
 
 	return cmd;
+}
+
+// GraphicsDcbSetIndexSizeGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexSizeGetSize()
+{
+	return 8u;
 }
 
 static bool draw_index_auto_modifier_supported(uint64_t modifier)
@@ -5405,6 +5447,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 	cmd[6] = 0;
 
 	return cmd;
+}
+
+// GraphicsDcbDrawIndexAutoGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoGetSize()
+{
+	return 28u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoWithBase(CommandBuffer* buf, uint32_t base_vertex, uint32_t index_count,
@@ -5455,6 +5504,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t 
 	return cmd;
 }
 
+// GraphicsDcbDrawIndexOffsetGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexOffsetGetSize()
+{
+	return 20u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_count, const void* index_addr, uint64_t modifier)
 {
 	PRINT_NAME();
@@ -5490,6 +5546,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_
 	return cmd;
 }
 
+// GraphicsDcbDrawIndexGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexGetSize()
+{
+	return 28u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address)
 {
 	PRINT_NAME();
@@ -5503,7 +5566,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 	}
 	if (event_type > 0x3fu) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event_type > 0x3fu condition ignored (continuing)\n"); }
 
-	const bool addressed = address != nullptr && event_type == 0x39u;
+	const bool addressed = address != nullptr && (event_type & 0xfeu) == 0x38u;
 	if (address != nullptr && !addressed)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address supplied for an event without an addressed packet form (continuing)\n");
@@ -5530,6 +5593,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 	cmd[1] = event_type;
 
 	return cmd;
+}
+
+// sceAgcDcbEventWriteGetSize: the event type selects the packet form, the
+// addressed one taking twice the words of the short one.
+uint32_t KYTY_SYSV_ABI GraphicsDcbEventWriteGetSize(uint8_t event_type)
+{
+	return (event_type & 0xfeu) == 0x38u ? 16u : 8u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf)
@@ -5616,6 +5686,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbDmaData(CommandBuffer* buf, uint8_t destinati
 	                         source_cache_policy, source_address, byte_count, wait_for_previous, write_confirm, 0);
 }
 
+// sceAgcAcbDmaDataGetSize: the async transfer writes the same packet as the
+// draw command buffer form.
+uint32_t KYTY_SYSV_ABI GraphicsAcbDmaDataGetSize()
+{
+	return 28u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
                                               const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles)
 {
@@ -5668,6 +5745,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
 	cmd[7] = gcr_cntl;
 
 	return cmd;
+}
+
+// GraphicsDcbAcquireMemGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbAcquireMemGetSize()
+{
+	return 32u;
 }
 
 struct ContextStatePacketLayout
@@ -5784,6 +5868,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t
 	return cmd;
 }
 
+// GraphicsDcbDispatchIndirectGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbDispatchIndirectGetSize()
+{
+	return 12u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsAcbDispatchIndirect(CommandBuffer* buf, const volatile void* indirect_args, uint32_t modifier)
 {
 	PRINT_NAME();
@@ -5805,6 +5896,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbDispatchIndirect(CommandBuffer* buf, const vo
 	cmd[2] = static_cast<uint32_t>(address >> 32u);
 	cmd[3] = (modifier & 0xa038u) | 0x41u;
 	return cmd;
+}
+
+// GraphicsAcbDispatchIndirectGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsAcbDispatchIndirectGetSize()
+{
+	return 16u;
 }
 
 static uint32_t extract_modifier_bits(uint32_t modifier, uint32_t start, uint32_t count)
@@ -5886,6 +5984,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_
 	return cmd;
 }
 
+// GraphicsDcbDrawIndexIndirectGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirectGetSize()
+{
+	return 20u;
+}
+
 // sceAgcDcbDrawIndirect: IT_DRAW_INDIRECT from SetBaseIndirect args. The
 // non-indexed form patches no index-location register.
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier)
@@ -5914,6 +6019,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndirect(CommandBuffer* buf, uint32_t dat
 	cmd[3] = static_cast<uint32_t>(patch_offsets >> 32u);
 	cmd[4] = decode_indirect_draw_initiator(modifier);
 	return cmd;
+}
+
+// GraphicsDcbDrawIndirectGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndirectGetSize()
+{
+	return 20u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
@@ -6019,9 +6131,16 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbWaitRegMem(CommandBuffer* buf, uint8_t size, 
 	return GraphicsDcbWaitRegMem(buf, size, compare_function, 0, cache_policy, address, reference, mask, poll_cycles);
 }
 
-uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address)
+uint32_t* KYTY_SYSV_ABI GraphicsAcbEventWrite(CommandBuffer* buf, uint8_t event_type)
 {
-	return GraphicsDcbEventWrite(buf, event_type, address);
+	// The async form has no address: its packet is always the short one.
+	return GraphicsDcbEventWrite(buf, event_type, nullptr);
+}
+
+// sceAgcAcbEventWriteGetSize: the async event write is always the short form.
+uint32_t KYTY_SYSV_ABI GraphicsAcbEventWriteGetSize()
+{
+	return 8u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsAcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
@@ -6035,6 +6154,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbAcquireMem(CommandBuffer* buf, uint32_t gcr_c
 {
 	// ACB form fixes engine=1 (ME) and cb_db_op=0.
 	return GraphicsDcbAcquireMem(buf, 1, 0, gcr_cntl, base, size_bytes, poll_cycles);
+}
+
+// sceAgcAcbAcquireMemGetSize: the async acquire writes the same packet as the
+// draw command buffer form.
+uint32_t KYTY_SYSV_ABI GraphicsAcbAcquireMemGetSize()
+{
+	return 32u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsAcbResetQueue(CommandBuffer* buf, uint32_t op)
@@ -6088,6 +6214,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbCopyData(CommandBuffer* buf, uint8_t dst, uin
 	return cmd;
 }
 
+// GraphicsDcbCopyDataGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbCopyDataGetSize()
+{
+	return 24u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsAcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src,
                                             uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size,
                                             uint8_t write_confirm)
@@ -6096,6 +6229,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsAcbCopyData(CommandBuffer* buf, uint8_t dst, uin
 	const auto dcb_src = (src == 5 ? static_cast<uint8_t>(5u << 1u) : src);
 	return GraphicsDcbCopyData(buf, dst, dst_cache_policy, dst_address, dcb_src, src_cache_policy, src_address_or_immediate, item_size,
 	                           write_confirm);
+}
+
+// sceAgcAcbCopyDataGetSize: the async copy writes the same packet as the draw
+// command buffer form.
+uint32_t KYTY_SYSV_ABI GraphicsAcbCopyDataGetSize()
+{
+	return 24u;
 }
 
 uint32_t* KYTY_SYSV_ABI GraphicsDcbPushMarker(CommandBuffer* buf, const char* str, uint32_t /*color*/)
@@ -6721,6 +6861,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t i
 	return cmd;
 }
 
+// GraphicsDcbSetIndexBufferGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexBufferGetSize()
+{
+	return 12u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count)
 {
 	PRINT_NAME();
@@ -6741,6 +6888,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t in
 	return cmd;
 }
 
+// GraphicsDcbSetIndexCountGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexCountGetSize()
+{
+	return 8u;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances)
 {
 	PRINT_NAME();
@@ -6759,6 +6913,13 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t 
 	cmd[0] = KYTY_PM4(2, Pm4::IT_NUM_INSTANCES, 0u);
 	cmd[1] = num_instances;
 	return cmd;
+}
+
+// GraphicsDcbSetNumInstancesGetSize: the packet the writer above emits. The game reserves
+// this many bytes before calling the writer, so the two must agree.
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetNumInstancesGetSize()
+{
+	return 8u;
 }
 
 // INDIRECT_BUFFER for sceAgcDcbJump/sceAgcAcbJump: the target address, then its
@@ -6784,6 +6945,127 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32
 	cmd[3]             = size_dw | (mode << 20u) | (1u << 23u) | (cache_policy << 28u);
 	return cmd;
 }
+
+// sceAgcDcbRewind: the rewind packet of the draw command buffer. Only the
+// lowest flag bit reaches the packet.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbRewind(CommandBuffer* buf, int32_t flags)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_REWIND, 0u);
+	cmd[1] = (static_cast<uint32_t>(flags) & 1u) << 31u;
+	return cmd;
+}
+
+// GraphicsDcbRewindGetSize: the size of the packet the writer above emits.
+uint32_t KYTY_SYSV_ABI GraphicsDcbRewindGetSize()
+{
+	return 8u;
+}
+
+
+
+// sceAgcAcbRewind: the rewind packet of the async command buffer. It also
+// names the queue the rewind applies to.
+uint32_t* KYTY_SYSV_ABI GraphicsAcbRewind(CommandBuffer* buf, int32_t flags, uint8_t queue)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(2, Pm4::IT_REWIND, 0u);
+	cmd[1] = (static_cast<uint32_t>(flags) & 1u) << 31u | (static_cast<uint32_t>(queue) & 1u) << 24u;
+	return cmd;
+}
+
+// GraphicsAcbRewindGetSize: the size of the packet the writer above emits.
+uint32_t KYTY_SYSV_ABI GraphicsAcbRewindGetSize()
+{
+	return 8u;
+}
+
+
+
+// sceAgcDcbCondExec: the conditional execution packet. It names the address
+// the execution jumps to and the count of the following packets to skip.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t count)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u);
+	cmd[1] = static_cast<uint32_t>(address) & 0xfffffffcu;
+	cmd[2] = static_cast<uint32_t>(address >> 32u);
+	cmd[3] = 0u;
+	cmd[4] = count & 0x3fffu;
+	return cmd;
+}
+
+// GraphicsDcbCondExecGetSize: the size of the packet the writer above emits.
+uint32_t KYTY_SYSV_ABI GraphicsDcbCondExecGetSize()
+{
+	return 20u;
+}
+
+
+// sceAgcAcbCondExec: the conditional execution packet of the async command
+// buffer. Its layout is the one of the draw command buffer.
+uint32_t* KYTY_SYSV_ABI GraphicsAcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t count)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(5);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	cmd[0] = KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u);
+	cmd[1] = static_cast<uint32_t>(address) & 0xfffffffcu;
+	cmd[2] = static_cast<uint32_t>(address >> 32u);
+	cmd[3] = 0u;
+	cmd[4] = count & 0x3fffu;
+	return cmd;
+}
+
+// GraphicsAcbCondExecGetSize: the size of the packet the writer above emits.
+uint32_t KYTY_SYSV_ABI GraphicsAcbCondExecGetSize()
+{
+	return 20u;
+}
+
+
 
 uint32_t KYTY_SYSV_ABI GraphicsCbJumpGetSize()
 {
@@ -6939,3 +7221,7 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_ou
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED
+
+
+
+

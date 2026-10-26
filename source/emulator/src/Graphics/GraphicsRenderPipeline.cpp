@@ -3,6 +3,7 @@
 
 #include "GraphicsRenderInternal.h"
 #include "GraphicsRenderPipelineLimits.h"
+#include "ShaderSpirvToolchain.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -16,6 +17,11 @@
 #include "Emulator/Graphics/ComputePipelinePrecompile.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/DiagnosticDump.h"
+#include "Emulator/Graphics/FragmentTransportCapture.h"
+#include "Emulator/Graphics/FragmentTransportLayout.h"
+#include "Emulator/Graphics/FragmentTransportResolve.h"
+#include "Emulator/Graphics/FragmentTransportRuntime.h"
+#include "Emulator/Graphics/FragmentTransportShade.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
@@ -37,11 +43,13 @@
 #include "Emulator/Graphics/VulkanVertexInputLayout.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/ProgressPort.h"
 #include "Emulator/Profiler.h"
 
 #include "spirv/unified1/spirv.hpp"
 
 #include <algorithm>
+#include <mutex>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -321,12 +329,30 @@ static void CreateLayout(VkDescriptorSetLayout* set_layouts, uint32_t* set_layou
 	}
 }
 
+// Placeholder set for guest stages a host shader does not read. It stays alive
+// for the device lifetime, so pipelines keep a stable layout identity.
+static VkDescriptorSetLayout EmptyDescriptorSetLayout(VkDevice device)
+{
+	static std::once_flag    once;
+	static VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+	std::call_once(once,
+	               [device]
+	               {
+		               VkDescriptorSetLayoutCreateInfo info {};
+		               info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		               info.bindingCount = 0;
+		               vkCreateDescriptorSetLayout(device, &info, nullptr, &layout);
+	               });
+	return layout;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const ShaderVertexInputInfo* vs_input_info,
                                               const Vector<uint32_t>& vs_shader, const ShaderPixelInputInfo* ps_input_info,
                                               const Vector<uint32_t>& ps_shader, const Vector<uint32_t>& geometry_shader,
                                               const PipelineStaticParameters* static_params,
-                                              PipelineDynamicParameters* dynamic_params)
+                                              PipelineDynamicParameters* dynamic_params, VkDescriptorSetLayout transport_layout,
+                                              bool host_pixel_shader)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(render_pass == nullptr);
@@ -405,7 +431,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	                                          VK_SHADER_STAGE_VERTEX_BIT, vertex_ops, vs_shader.At(1),
 	                                          ShaderVertexNggFrontRefusal(*vs_input_info));
 	ShaderNativeSubgroupSelection fragment_mapping;
-	if (has_fragment_stage)
+	if (has_fragment_stage && !host_pixel_shader)
 	{
 		fragment_mapping = select_native(ps_input_info->native_wave, ps_input_info->required_subgroup_size,
 		                                 VK_SHADER_STAGE_FRAGMENT_BIT, fragment_ops, ps_shader.At(1), String8());
@@ -448,7 +474,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		EXIT_IF(!ShaderAttachNativeSubgroup(gctx->compute_wave_vulkan_state, vertex_mapping, &vert_shader_stage_info,
 		                                    &vert_required_subgroup_size));
 	}
-	if (fragment_ops != 0u)
+	if (fragment_ops != 0u && !host_pixel_shader)
 	{
 		EXIT_IF(!ShaderAttachNativeSubgroup(gctx->compute_wave_vulkan_state, fragment_mapping, &frag_shader_stage_info,
 		                                    &frag_required_subgroup_size));
@@ -728,14 +754,32 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	VkDescriptorSetLayout set_layouts[3]  = {};
 	uint32_t              set_layouts_num = 0;
 
-	VkPushConstantRange push_constant_info[2];
+	VkPushConstantRange push_constant_info[3];
 	uint32_t            push_constant_info_num = 0;
 
 	CreateLayout(set_layouts, &set_layouts_num, push_constant_info, &push_constant_info_num, vs_input_info->bind,
 	             /*additional_params->vs_bind,*/ VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
-	CreateLayout(set_layouts, &set_layouts_num, push_constant_info, &push_constant_info_num, ps_input_info->bind,
-	             /*additional_params->ps_bind,*/ VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
-	if (vs_input_info->clip_probe.enabled || ps_input_info->input0_probe.enabled)
+	if (!host_pixel_shader)
+	{
+		CreateLayout(set_layouts, &set_layouts_num, push_constant_info, &push_constant_info_num, ps_input_info->bind,
+		             /*additional_params->ps_bind,*/ VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
+	}
+	if (transport_layout != VK_NULL_HANDLE)
+	{
+		// The host capture and resolve shaders read only the transport set, at
+		// index two; missing guest sets stay as empty layouts.
+		while (set_layouts_num < 2u)
+		{
+			set_layouts[set_layouts_num++] = EmptyDescriptorSetLayout(gctx->device);
+		}
+		EXIT_IF(set_layouts_num != 2u);
+		set_layouts[set_layouts_num++] = transport_layout;
+		push_constant_info[push_constant_info_num].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		push_constant_info[push_constant_info_num].offset     = 0;
+		push_constant_info[push_constant_info_num].size       = FragmentTransport::KERNEL_PARAMETER_BYTES;
+		push_constant_info_num++;
+	}
+	if (transport_layout == VK_NULL_HANDLE && (vs_input_info->clip_probe.enabled || ps_input_info->input0_probe.enabled))
 	{
 		const uint32_t descriptor_set = vs_input_info->clip_probe.enabled ? vs_input_info->clip_probe_descriptor_set
 		                                                               : ps_input_info->input0_probe_descriptor_set;
@@ -1253,6 +1297,12 @@ void PipelineCache::DeletePipelineInternal(uint32_t id)
 	vkDestroyPipeline(gctx->device, p.pipeline->pipeline, nullptr);
 	vkDestroyPipelineLayout(gctx->device, p.pipeline->pipeline_layout, nullptr);
 
+	if (p.transport != nullptr)
+	{
+		p.transport->resolve = nullptr;
+		FragmentTransportDestroyPasses(p.transport);
+		p.transport = nullptr;
+	}
 	delete p.pipeline;
 	p = {};
 }
@@ -1394,6 +1444,203 @@ static const VulkanImage* ResolutionScaledFramebufferImage(const RenderColorInfo
 	return image != nullptr && image->IsResolutionScaled() ? image : nullptr;
 }
 
+static uint32_t TransportColorMask(const PipelineStaticParameters& state)
+{
+	uint32_t mask = 0;
+	for (uint32_t target = 0; target < std::min(state.color_targets_num, 8u); ++target)
+	{
+		mask |= (state.color_mask[target] & 15u) << (target * 4u);
+	}
+	return mask;
+}
+
+static bool TransportColorTargetsWritable(const RenderColorInfo& color)
+{
+	for (uint32_t target = 0; target < std::min(color.targets_num, 8u); ++target)
+	{
+		if (!RenderColorSlotActive(color, target))
+		{
+			continue;
+		}
+		switch (color.attachment[target].attachment_format)
+		{
+			case VK_FORMAT_R16_UINT:
+			case VK_FORMAT_R16G16_UINT:
+			case VK_FORMAT_R16G16B16A16_UINT:
+			case VK_FORMAT_R32_UINT:
+			case VK_FORMAT_R16_SINT:
+			case VK_FORMAT_R16G16_SINT:
+			case VK_FORMAT_R16G16B16A16_SINT:
+			case VK_FORMAT_R32_SINT: return false;
+			default: break;
+		}
+	}
+	return true;
+}
+
+static bool TransportLoadOpsPreserve(const VulkanFramebuffer& framebuffer)
+{
+	if (framebuffer.depth_load_op == VK_ATTACHMENT_LOAD_OP_CLEAR)
+	{
+		return false;
+	}
+	for (uint32_t target = 0; target < std::min(framebuffer.color_count, VulkanFramebuffer::TARGETS_MAX); ++target)
+	{
+		if (framebuffer.color_load_op[target] == VK_ATTACHMENT_LOAD_OP_CLEAR)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// One transported draw state: the host capture and resolve graphics pipelines
+// plus the split compute pass that shades captured lanes. The resolve pipeline
+// carries the guest draw's fixed-function state so depth, stencil, blending and
+// MRT writes apply exactly once per pixel.
+static FragmentTransportPasses* CreateFragmentTransportPasses(VulkanFramebuffer* framebuffer, const RenderColorInfo& color,
+                                                              const ShaderVertexInputInfo& vs_input, const Vector<uint32_t>& vs_shader,
+                                                              const ShaderPixelInputInfo& ps_input, const ShaderCode& ps_code,
+                                                              const Vector<uint32_t>& geometry_shader,
+                                                              const PipelineStaticParameters& static_params,
+                                                              PipelineDynamicParameters* dynamic_params, uint32_t user_sgprs,
+                                                              uint32_t lds_dwords, const String8& requirement_facts)
+{
+	auto* gctx = g_render_ctx->GetGraphicCtx();
+	if (gctx == nullptr)
+	{
+		return nullptr;
+	}
+	if (static_params.rasterization_samples != VK_SAMPLE_COUNT_1_BIT)
+	{
+		EXIT("fragment transport needs single-sample rasterization: %s\n", requirement_facts.c_str());
+	}
+	if (!TransportLoadOpsPreserve(*framebuffer))
+	{
+		EXIT("fragment transport cannot begin a clearing pass yet: %s\n", requirement_facts.c_str());
+	}
+	if (!TransportColorTargetsWritable(color))
+	{
+		EXIT("fragment transport has no integer color export interface: %s\n", requirement_facts.c_str());
+	}
+	const VkDescriptorSetLayout transport_layout = FragmentTransportDescriptorSetLayout();
+	if (transport_layout == VK_NULL_HANDLE)
+	{
+		EXIT("fragment transport descriptor layout is unavailable: %s\n", requirement_facts.c_str());
+	}
+
+	ShaderFragmentComputeInfo info;
+	info.descriptor_set     = 2u;
+	info.input_binding      = 3u;
+	info.output_binding     = 4u;
+	info.initial_vgpr_count = FragmentTransportInitialVgprs(ps_input);
+	info.user_sgpr_count    = user_sgprs;
+	info.parameter_state    = ShaderFragmentParameterState::Virtualized;
+
+	const uint32_t resolved_inputs = SpirvResolvePixelParameterCount(ps_code, ps_input.input_num);
+
+	Vector<uint32_t> capture_binary;
+	Vector<uint32_t> resolve_binary;
+	Vector<uint32_t> shade_binary;
+	String8          error;
+	ShaderPixelInputInfo capture_input = ps_input;
+	capture_input.input_num            = resolved_inputs;
+	const auto capture_source          = FragmentTransport::GenerateCaptureSource(ps_code, capture_input, info);
+	if (capture_source.StartsWith("OpKyty"))
+	{
+		uint32_t interp_count = 0;
+		int      first_interp = -1;
+		for (uint32_t i = 0; i < ps_code.GetInstructions().Size(); ++i)
+		{
+			const auto& instruction = ps_code.GetInstructions().At(i);
+			if (instruction.type == ShaderInstructionType::VInterpP1F32 || instruction.type == ShaderInstructionType::VInterpP2F32 ||
+			    instruction.type == ShaderInstructionType::VInterpMovF32)
+			{
+				++interp_count;
+				if (first_interp < 0)
+				{
+					first_interp = static_cast<int>(instruction.src[1].constant.u);
+				}
+			}
+		}
+		EXIT("fragment transport capture inputs are unavailable: %s custom=%u scale=%u interp=%u/%d %s\n", capture_source.TrimRight().c_str(),
+		     ps_input.custom_interpolation.Enabled() ? 1u : 0u, ps_input.host_to_guest_scale.IsIdentity() ? 1u : 0u, interp_count, first_interp,
+		     requirement_facts.c_str());
+	}
+	if (!ShaderToolchain::Run(capture_source, &capture_binary, &error))
+	{
+		EXIT("fragment transport capture assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
+	}
+	const auto resolve_source = FragmentTransport::GenerateResolveSource(2u, TransportColorMask(static_params));
+	if (!ShaderToolchain::Run(resolve_source, &resolve_binary, &error))
+	{
+		EXIT("fragment transport resolve assembly failed: %s %s\n", error.c_str(), requirement_facts.c_str());
+	}
+	if (!FragmentTransportBuildShadeModule(ps_code, ps_input, user_sgprs, lds_dwords, &shade_binary, &error))
+	{
+		EXIT("fragment transport shade compilation failed: %s %s\n", error.c_str(), requirement_facts.c_str());
+	}
+
+	auto* passes            = new FragmentTransportPasses;
+	passes->lane_words      = FragmentTransportLaneWords(ps_code, ps_input);
+	passes->initial_vgpr    = info.initial_vgpr_count;
+	passes->capture_static  = new PipelineStaticParameters(static_params);
+	passes->capture_dynamic = new PipelineDynamicParameters(*dynamic_params);
+	passes->capture_static->depth_test_enable        = false;
+	passes->capture_static->depth_write_enable       = false;
+	passes->capture_static->depth_bounds_test_enable = false;
+	passes->capture_static->stencil_test_enable      = false;
+	passes->capture_static->depth_bias_enable        = false;
+	passes->capture_static->sample_shading_enable    = false;
+	for (uint32_t target = 0; target < 8u; ++target)
+	{
+		passes->capture_static->color_mask[target]   = 0;
+		passes->capture_static->blend_enable[target] = false;
+	}
+
+	passes->capture = CreatePipelineInternal(framebuffer->render_pass, &vs_input, vs_shader, &ps_input, capture_binary, geometry_shader,
+	                                         passes->capture_static, passes->capture_dynamic, transport_layout, true);
+	passes->resolve = CreatePipelineInternal(framebuffer->render_pass, &vs_input, vs_shader, &ps_input, resolve_binary, geometry_shader,
+	                                         &static_params, dynamic_params, transport_layout, true);
+	if (passes->capture == nullptr || passes->resolve == nullptr)
+	{
+		EXIT("fragment transport pipeline creation failed: %s\n", requirement_facts.c_str());
+	}
+	if (!FragmentTransportCreateShadePipeline(gctx->device, gctx->pipeline_cache, ps_input.bind, shade_binary, true, transport_layout,
+	                                          &passes->shade_layout, &passes->shade))
+	{
+		EXIT("fragment transport split compute pipeline creation failed: %s\n", requirement_facts.c_str());
+	}
+	return passes;
+}
+
+namespace {
+
+// Another command thread may hold the cache through a long compile; waiting
+// for it counts as compiling, not as a stuck command batch.
+class PipelineCacheLock
+{
+public:
+	// NOLINTNEXTLINE(google-runtime-references)
+	explicit PipelineCacheLock(Core::Mutex& mutex): m_mutex(mutex)
+	{
+		if (!m_mutex.TryLock())
+		{
+			const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
+			m_mutex.Lock();
+		}
+	}
+
+	~PipelineCacheLock() { m_mutex.Unlock(); }
+
+	KYTY_CLASS_NO_COPY(PipelineCacheLock);
+
+private:
+	Core::Mutex& m_mutex;
+};
+
+} // namespace
+
 VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, VulkanFramebuffer* framebuffer, RenderColorInfo* color,
                                               RenderDepthInfo* depth,
                                               const ShaderVertexInputInfo* vs_input_info, HW::Context* ctx, HW::Shader* sh_ctx,
@@ -1407,7 +1654,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	EXIT_IF(depth == nullptr);
 	EXIT_IF(color == nullptr);
 
-	Core::LockGuard lock(m_mutex);
+	const PipelineCacheLock lock(m_mutex);
 
 	const auto&                vs_regs = sh_ctx->GetVs();
 	const auto&                ps_regs = sh_ctx->GetPs();
@@ -1622,6 +1869,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 	}
 
 	const auto miss_start = DebugStatsClock::now();
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
 	for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
 	{
 		if (!RenderColorSlotActive(*color, rt))
@@ -1670,24 +1918,6 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		        static_cast<uint32_t>(vs_input_info->export_count) * 4u + 4u > limits.maxGeometryInputComponents);
 	}
 
-	if (ps_input_info->stage_enabled)
-	{
-		const auto ps_transport_code = ShaderParsePS(&ps_regs, &sh_regs);
-		const auto requirement       = FragmentTransportRequire(ps_transport_code, *ps_input_info,
-                                                          static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr), *p.static_params,
-                                                          framebuffer->extent);
-		if (requirement.required)
-		{
-			char dump_note[160] {};
-			if (const char* dump_dir = std::getenv("KYTY_TRANSPORT_DUMP"); dump_dir != nullptr && dump_dir[0] != '\0')
-			{
-				std::snprintf(dump_note, sizeof(dump_note), " (transport dump: %s)",
-				              ShaderDumpGuestProgram(dump_dir, "ps", ps_regs.ps_regs.chksum, ps_regs.ps_regs.data_addr, ps_transport_code).c_str());
-			}
-			EXIT("fragment wave transport is required by the pixel stage but the renderer does not select it yet: %s%s\n",
-			     requirement.facts.c_str(), dump_note);
-		}
-	}
 
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
@@ -1707,6 +1937,52 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 		                                    return ShaderRecompileVS(vs_code, vs_input_info);
 	                                    });
 	DebugStatsRecordShaderTranslationCache(vs_translation.hit, vs_translation.evicted);
+
+	if (ps_input_info->stage_enabled)
+	{
+		const auto ps_transport_code = ShaderParsePS(&ps_regs, &sh_regs);
+		const auto requirement       = FragmentTransportRequire(ps_transport_code, *ps_input_info,
+		                                                        static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr), *p.static_params,
+		                                                        framebuffer->extent);
+		if (requirement.required)
+		{
+			ShaderTranslationCacheResult transport_geometry;
+			if (ps_input_info->custom_interpolation.Enabled())
+			{
+				transport_geometry = translation_cache->GetOrCompile(
+				    ShaderModuleKey::Create(ps_id, ShaderModuleStage::Geometry, optimization, next_gen),
+				    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info); });
+				EXIT_IF(transport_geometry.binary.IsEmpty());
+			}
+			auto* passes = CreateFragmentTransportPasses(framebuffer, *color, *vs_input_info, vs_translation.binary, *ps_input_info,
+			                                             ps_transport_code, transport_geometry.binary, *p.static_params, p.dynamic_params,
+			                                             static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr),
+			                                             ps_transport_code.GetPixelExtraLdsDwords(), requirement.facts);
+			const uint32_t transport_slot = FindAvailableSlot();
+			p.pipeline                    = passes->resolve;
+			p.transport                   = passes;
+			p.pipeline->transport         = passes;
+			p.pipeline->framebuffer_extent = framebuffer->extent;
+			if (transport_slot < m_pipelines.Size())
+			{
+				if (m_pipelines[static_cast<int>(transport_slot)].pipeline != nullptr)
+				{
+					DebugStatsRecordPipelineEviction();
+					DeletePipelineInternal(transport_slot);
+				}
+				m_pipelines[static_cast<int>(transport_slot)] = p;
+			} else
+			{
+				EXIT_IF(transport_slot != m_pipelines.Size());
+				m_pipelines.Add(p);
+			}
+			AttachPipelineLease(recording_buffer, m_pipelines[static_cast<int>(transport_slot)]);
+			m_driver_cache_dirty = true;
+			SaveDriverCacheIfDue();
+			return m_pipelines[static_cast<int>(transport_slot)].pipeline;
+		}
+	}
+
 	ShaderTranslationCacheResult ps_translation;
 	if (ps_input_info->stage_enabled)
 	{
@@ -1744,7 +2020,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, V
 
 	const uint32_t slot = FindAvailableSlot();
 	p.pipeline = CreatePipelineInternal(framebuffer->render_pass, vs_input_info, vs_translation.binary, ps_input_info,
-	                                    ps_translation.binary, geometry_translation.binary, p.static_params, p.dynamic_params);
+	                                    ps_translation.binary, geometry_translation.binary, p.static_params, p.dynamic_params,
+	                                    VK_NULL_HANDLE, false);
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 	p.pipeline->framebuffer_extent = framebuffer->extent;
@@ -1781,7 +2058,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 	EXIT_IF(cs_regs == nullptr);
 	EXIT_IF(sh_regs == nullptr);
 
-	Core::LockGuard lock(m_mutex);
+	const PipelineCacheLock lock(m_mutex);
 
 	if (Log::ShouldLog(Log::Level::Debug) && Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
@@ -1817,6 +2094,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(CommandBuffer* recording_buffer, c
 	}
 
 	const auto miss_start = DebugStatsClock::now();
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
 
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
@@ -1867,7 +2145,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 
 	EXIT_IF(recording_buffer == nullptr || input_info == nullptr || vs_regs == nullptr || sh_regs == nullptr);
 
-	Core::LockGuard lock(m_mutex);
+	const PipelineCacheLock lock(m_mutex);
 
 	auto id = ShaderGetIdVS(vs_regs, input_info);
 	id.ids.Add(0x47454f31u); // GEO1: merged ES+GS compute pass.
@@ -1893,6 +2171,7 @@ VulkanPipeline* PipelineCache::CreateGeometryPipeline(CommandBuffer* recording_b
 	}
 
 	const auto miss_start = DebugStatsClock::now();
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase compile(::Kyty::Emulator::Ports::CommandPhase::PipelineCompile);
 	const auto code       = ShaderParseVS(vs_regs, sh_regs, input_info);
 	const auto host       = SpirvGeometryComputeHostInfo(code, *input_info, geometry);
 

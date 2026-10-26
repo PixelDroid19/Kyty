@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
@@ -259,6 +260,1040 @@ TEST(EmulatorGraphicsPackets, EncodesDispatch)
 	EXPECT_EQ(command[2], 3u);
 	EXPECT_EQ(command[3], 4u);
 	EXPECT_EQ(command[4], 0x41u);
+}
+
+
+TEST(EmulatorGraphicsPackets, AcbDispatchIndirectGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsAcbDispatchIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), &agc_indirect, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 4);
+	EXPECT_EQ(Gen5::GraphicsAcbDispatchIndirectGetSize(), 16u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsAcbDispatchIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), &agc_indirect, 0x1234u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 4);
+	EXPECT_EQ(Gen5::GraphicsAcbDispatchIndirectGetSize(), 16u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbAcquireMemGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbAcquireMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u, 0u, &agc_base, 0x1000ull, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 8);
+	EXPECT_EQ(Gen5::GraphicsDcbAcquireMemGetSize(), 32u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbAcquireMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 0u, 0u, &agc_base, 0x2000ull, 4u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 8);
+	EXPECT_EQ(Gen5::GraphicsDcbAcquireMemGetSize(), 32u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbCopyDataGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbCopyData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u, 0x1000ull, 0u, 0u, 0x2000ull, 4u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 6);
+	EXPECT_EQ(Gen5::GraphicsDcbCopyDataGetSize(), 24u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbCopyData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u, 0x3000ull, 0u, 0u, 0x4000ull, 2u, 0u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 6);
+	EXPECT_EQ(Gen5::GraphicsDcbCopyDataGetSize(), 24u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbDispatchIndirectGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbDispatchIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 3);
+	EXPECT_EQ(Gen5::GraphicsDcbDispatchIndirectGetSize(), 12u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbDispatchIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x20u, 0u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 3);
+	EXPECT_EQ(Gen5::GraphicsDcbDispatchIndirectGetSize(), 12u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbDrawIndexAutoGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbDrawIndexAuto(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 3u, 0x80000000ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 7);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexAutoGetSize(), 28u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbDrawIndexAuto(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 6u, 0x80000000ull);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 7);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexAutoGetSize(), 28u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbDrawIndexGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbDrawIndex(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 3u, &agc_base, 0ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 7);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexGetSize(), 28u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbDrawIndex(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 9u, &agc_base, 0ull);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 7);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexGetSize(), 28u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbDrawIndexIndirectGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbDrawIndexIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexIndirectGetSize(), 20u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbDrawIndexIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x20u, 0ull);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexIndirectGetSize(), 20u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbDrawIndexOffsetGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbDrawIndexOffset(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u, 3u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexOffsetGetSize(), 20u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbDrawIndexOffset(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4u, 6u, 0u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndexOffsetGetSize(), 20u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbDrawIndirectGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbDrawIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndirectGetSize(), 20u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbDrawIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x20u, 0ull);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndirectGetSize(), 20u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbSetCxRegisterDirectGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbSetCxRegisterDirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), agc_reg);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 3);
+	EXPECT_EQ(Gen5::GraphicsDcbSetCxRegisterDirectGetSize(), 12u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbSetCxRegisterDirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), agc_reg);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 3);
+	EXPECT_EQ(Gen5::GraphicsDcbSetCxRegisterDirectGetSize(), 12u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbSetCxRegistersIndirectGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbSetCxRegistersIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), &agc_reg, 1u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 4);
+	EXPECT_EQ(Gen5::GraphicsDcbSetCxRegistersIndirectGetSize(), 16u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbSetCxRegistersIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), &agc_reg, 4u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 4);
+	EXPECT_EQ(Gen5::GraphicsDcbSetCxRegistersIndirectGetSize(), 16u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbSetIndexBufferGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbSetIndexBuffer(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x1000ull);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 3);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexBufferGetSize(), 12u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbSetIndexBuffer(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x2000ull);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 3);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexBufferGetSize(), 12u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbSetIndexCountGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbSetIndexCount(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 3u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexCountGetSize(), 8u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbSetIndexCount(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 6u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexCountGetSize(), 8u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbSetIndexSizeGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbSetIndexSize(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 2u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexSizeGetSize(), 8u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbSetIndexSize(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4u, 0u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(Gen5::GraphicsDcbSetIndexSizeGetSize(), 8u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbSetNumInstancesGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbSetNumInstances(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(Gen5::GraphicsDcbSetNumInstancesGetSize(), 8u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbSetNumInstances(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(Gen5::GraphicsDcbSetNumInstancesGetSize(), 8u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbSetShRegisterDirectGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbSetShRegisterDirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), agc_reg);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 3);
+	EXPECT_EQ(Gen5::GraphicsDcbSetShRegisterDirectGetSize(), 12u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbSetShRegisterDirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), agc_reg);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 3);
+	EXPECT_EQ(Gen5::GraphicsDcbSetShRegisterDirectGetSize(), 12u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbSetShRegistersIndirectGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbSetShRegistersIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), &agc_reg, 1u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 4);
+	EXPECT_EQ(Gen5::GraphicsDcbSetShRegistersIndirectGetSize(), 16u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbSetShRegistersIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), &agc_reg, 4u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 4);
+	EXPECT_EQ(Gen5::GraphicsDcbSetShRegistersIndirectGetSize(), 16u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbSetUcRegistersIndirectGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	Kyty::Libs::Graphics::ShaderRegister agc_reg {};
+	agc_reg.offset = 0u;
+	agc_reg.value  = 1u;
+	uint32_t       agc_base  = 0u;
+	uint32_t       agc_indirect = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbSetUcRegistersIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), &agc_reg, 1u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 4);
+	EXPECT_EQ(Gen5::GraphicsDcbSetUcRegistersIndirectGetSize(), 16u);
+
+	cb.cursor_up = storage;
+	auto* edge = Gen5::GraphicsDcbSetUcRegistersIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&cb), &agc_reg, 4u);
+	ASSERT_NE(edge, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 4);
+	EXPECT_EQ(Gen5::GraphicsDcbSetUcRegistersIndirectGetSize(), 16u);
+}
+
+
+TEST(EmulatorGraphicsPackets, DcbEventWriteGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t agc_event = 0u;
+
+	auto* cmd = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x39u, &agc_event);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 4);
+	EXPECT_EQ(Gen5::GraphicsDcbEventWriteGetSize(0x39u), 16u);
+
+	cb.cursor_up = storage;
+	auto* short_form = Gen5::GraphicsDcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x00u, nullptr);
+	ASSERT_NE(short_form, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(Gen5::GraphicsDcbEventWriteGetSize(0x00u), 8u);
+}
+
+TEST(EmulatorGraphicsPackets, AcbEventWriteGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsAcbEventWrite(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x00u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(Gen5::GraphicsAcbEventWriteGetSize(), 8u);
+}
+
+TEST(EmulatorGraphicsPackets, AcbAcquireMemGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	uint32_t agc_base = 0u;
+
+	auto* cmd = Gen5::GraphicsAcbAcquireMem(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, &agc_base, 0x1000ull, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 8);
+	EXPECT_EQ(Gen5::GraphicsAcbAcquireMemGetSize(), 32u);
+}
+
+TEST(EmulatorGraphicsPackets, AcbCopyDataGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsAcbCopyData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u, 0x1000ull, 0u, 0u, 0x2000ull, 4u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 6);
+	EXPECT_EQ(Gen5::GraphicsAcbCopyDataGetSize(), 24u);
+}
+
+TEST(EmulatorGraphicsPackets, AcbDmaDataGetSizeMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsAcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0u, 0u, 0x1000ull, 0u, 0u, 0x2000ull, 0x100u, 0u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 7);
+	EXPECT_EQ(Gen5::GraphicsAcbDmaDataGetSize(), 28u);
+}
+
+
+TEST(EmulatorGraphicsPackets, DcbRewindMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsDcbRewind(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_REWIND, 0u));
+	EXPECT_EQ(cmd[1], 0x80000000u);
+	EXPECT_EQ(Gen5::GraphicsDcbRewindGetSize(), 8u);
+
+	cb.cursor_up = storage;
+	auto* masked = Gen5::GraphicsDcbRewind(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x1e);
+	ASSERT_NE(masked, nullptr);
+	EXPECT_EQ(masked[1], 0u);
+}
+
+TEST(EmulatorGraphicsPackets, AcbRewindMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsAcbRewind(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1, 1);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 2);
+	EXPECT_EQ(cmd[0], KYTY_PM4(2, Pm4::IT_REWIND, 0u));
+	EXPECT_EQ(cmd[1], 0x81000000u);
+	EXPECT_EQ(Gen5::GraphicsAcbRewindGetSize(), 8u);
+}
+
+TEST(EmulatorGraphicsPackets, DcbCondExecMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsDcbCondExec(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x12345678ull, 5u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u));
+	EXPECT_EQ(cmd[1], 0x12345678u & 0xfffffffcu);
+	EXPECT_EQ(cmd[2], 0u);
+	EXPECT_EQ(cmd[3], 0u);
+	EXPECT_EQ(cmd[4], 5u);
+	EXPECT_EQ(Gen5::GraphicsDcbCondExecGetSize(), 20u);
+
+	cb.cursor_up = storage;
+	auto* wide = Gen5::GraphicsDcbCondExec(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x12345678ull, 0xffffu);
+	ASSERT_NE(wide, nullptr);
+	EXPECT_EQ(wide[4], 0x3fffu);
+}
+
+TEST(EmulatorGraphicsPackets, AcbCondExecMatchesItsWriter)
+{
+	InitCommandBufferTestRuntime();
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[16] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 16;
+
+	auto* cmd = Gen5::GraphicsAcbCondExec(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0x12345678ull, 5u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_COND_EXEC, 0u));
+	EXPECT_EQ(cmd[1], 0x12345678u & 0xfffffffcu);
+	EXPECT_EQ(cmd[4], 5u);
+	EXPECT_EQ(Gen5::GraphicsAcbCondExecGetSize(), 20u);
 }
 
 TEST(EmulatorGraphicsPackets, CbDispatchMatchesItsReportedHardwarePacketSize)
@@ -5463,6 +6498,82 @@ TEST(EmulatorGraphicsPackets, SizesDynamicDisplayThinBgraSurface)
 	EXPECT_EQ(padded[0].height, 512u);
 }
 
+// A linear tile-0 storage view with several levels keeps its GFX10 mip chain
+// in guest memory (smallest level first, 256-byte-aligned rows) and uploads
+// each level into the stacked host image at its atlas offset.
+TEST(EmulatorGraphicsPackets, PlansLinearMipStorageUploadAtlas)
+{
+	TileInit();
+	uint64_t params[11] {};
+	params[StorageTextureObject::PARAM_FORMAT]        = 71ull << 16u;
+	params[StorageTextureObject::PARAM_PITCH]         = 960u;
+	params[StorageTextureObject::PARAM_WIDTH_HEIGHT]  = (960ull << 32u) | 540u;
+	params[StorageTextureObject::PARAM_LEVELS]        = (1ull << 32u) | 6u;
+	params[StorageTextureObject::PARAM_TILE]          = 0u;
+	params[StorageTextureObject::PARAM_NEO]           = 1u;
+	params[StorageTextureObject::PARAM_SWIZZLE]       = 4012u;
+	params[StorageTextureObject::PARAM_RESOURCE_TYPE] = 9u;
+	params[StorageTextureObject::PARAM_DEPTH]         = 1u;
+	params[StorageTextureObject::PARAM_BASE_ARRAY]    = 0u;
+	params[StorageTextureObject::PARAM_SKIP_SEED]     = 0u;
+
+	Vector<BufferImageCopy> regions;
+	uint32_t                width  = 0;
+	uint32_t                height = 0;
+	uint32_t                bpp    = 0;
+	ASSERT_TRUE(StorageTexturePlanLinearMipUpload(params, 5550080u, false, &regions, &width, &height, &bpp));
+	EXPECT_EQ(width, 960u);
+	EXPECT_EQ(height, 810u);
+	EXPECT_EQ(bpp, 8u);
+	ASSERT_EQ(regions.Size(), 6);
+
+	const uint64_t offsets[6] = {1402880u, 366080u, 89600u, 20992u, 4096u, 0u};
+	const uint32_t pitches[6] = {960u, 480u, 256u, 128u, 64u, 32u};
+	const uint32_t widths[6]  = {960u, 480u, 240u, 120u, 60u, 30u};
+	const uint32_t heights[6] = {540u, 270u, 135u, 67u, 33u, 16u};
+	const int      atlas_x[6] = {0, 0, 480, 480, 600, 600};
+	const int      atlas_y[6] = {0, 540, 540, 675, 675, 708};
+	for (int level = 0; level < 6; level++)
+	{
+		EXPECT_EQ(static_cast<uint64_t>(regions.At(level).offset), offsets[level]) << level;
+		EXPECT_EQ(regions.At(level).pitch, pitches[level]) << level;
+		EXPECT_EQ(regions.At(level).width, widths[level]) << level;
+		EXPECT_EQ(regions.At(level).height, heights[level]) << level;
+		EXPECT_EQ(regions.At(level).dst_x, atlas_x[level]) << level;
+		EXPECT_EQ(regions.At(level).dst_y, atlas_y[level]) << level;
+	}
+
+	EXPECT_FALSE(StorageTexturePlanLinearMipUpload(params, 5528880u, false, &regions, &width, &height, &bpp));
+
+	// The layout is the single source of truth for the level rows: a GFX10
+	// linear chain aligns every level pitch to 256 bytes.
+	TileSizeOffset level_sizes[6] {};
+	TilePaddedSize padded_sizes[6] {};
+	TileGetTextureSize2(71u, 960u, 540u, 960u, 6u, 0u, nullptr, level_sizes, padded_sizes);
+	for (uint32_t level = 0u; level < 6u; level++)
+	{
+		EXPECT_EQ(padded_sizes[level].width, pitches[level]) << level;
+	}
+
+	// A mip backing keeps every level in its own image mip.
+	ASSERT_TRUE(StorageTexturePlanLinearMipUpload(params, 5550080u, true, &regions, &width, &height, &bpp));
+	EXPECT_EQ(width, 960u);
+	EXPECT_EQ(height, 540u);
+	ASSERT_EQ(regions.Size(), 6);
+	for (int level = 0; level < 6; level++)
+	{
+		EXPECT_EQ(regions.At(level).dst_level, static_cast<uint32_t>(level)) << level;
+		EXPECT_EQ(regions.At(level).dst_x, 0) << level;
+		EXPECT_EQ(regions.At(level).dst_y, 0) << level;
+	}
+
+	params[StorageTextureObject::PARAM_PITCH] = 1024u;
+	EXPECT_FALSE(StorageTexturePlanLinearMipUpload(params, 5550080u, false, &regions, &width, &height, &bpp));
+	EXPECT_FALSE(StorageTextureCanCompositeLinearMipRawRenderDestination(params, 0x53aa00000ull, 5550080u));
+	params[StorageTextureObject::PARAM_PITCH] = 960u;
+	EXPECT_TRUE(StorageTextureCanCompositeLinearMipRawRenderDestination(params, 0x53aa00000ull, 5550080u));
+}
+
 // Display-thin UI atlases place texel (0,0) at byte 0 in the tiled buffer;
 // detiling must place those four bytes at linear (0,0).
 TEST(EmulatorGraphicsPackets, DetilesDisplayThinBgraOriginTexel)
@@ -8603,6 +9714,83 @@ TEST(EmulatorGraphicsPackets, Gen5DsWrite2St64B32ScalesOffsetsBySixtyFourDwords)
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
 	EXPECT_NE(source.FindIndex("OpIAdd %uint %lds_addr_u_0 %uint_0x00000100"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpIAdd %uint %lds_addr_u_0 %uint_0x00000200"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_uint_constant"), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompileCS(code, &input).IsEmpty());
+}
+
+TEST(EmulatorGraphicsPackets, Gen5DsWrite2B64StoresBothRegisterPairsAtQwordScaledOffsets)
+{
+	// ds_write2_b64 v0, v[2:3], v[4:5] offset0:0 offset1:1. Each data operand is a
+	// register pair and each offset is scaled by the qword size.
+	const uint32_t shader[] = {0xd9380100u, 0x00040200u, 0xbf810000u};
+	const auto     code     = ParseGen5DsPair(shader);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::DsWrite2B64);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::VaddrVdata2Offset01);
+	ASSERT_EQ(instruction.src_num, 3);
+	EXPECT_EQ(instruction.src[0].register_id, 0);
+	EXPECT_EQ(instruction.src[1].register_id, 2);
+	EXPECT_EQ(instruction.src[1].size, 2);
+	EXPECT_EQ(instruction.src[2].register_id, 4);
+	EXPECT_EQ(instruction.src[2].size, 2);
+	EXPECT_EQ(instruction.ds_offset, 0x0100u);
+	EXPECT_TRUE(ShaderLdsMemoryInstructionSupported(instruction));
+
+	auto       input  = Gen5DsPairInput();
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v3"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_uint_constant"), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompileCS(code, &input).IsEmpty());
+}
+
+TEST(EmulatorGraphicsPackets, Gen5DsWrite2St64B64ScalesQwordOffsetsBySixtyFour)
+{
+	// ds_write2st64_b64 v0, v[2:3], v[4:5] offset0:1 offset1:2 -> qword offsets
+	// scaled by 64: byte offsets 512/516 and 1024/1028.
+	const uint32_t shader[] = {0xd93c0201u, 0x00040200u, 0xbf810000u};
+	const auto     code     = ParseGen5DsPair(shader);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::DsWrite2St64B64);
+	EXPECT_EQ(instruction.ds_offset, 0x0201u);
+	EXPECT_TRUE(ShaderLdsMemoryInstructionSupported(instruction));
+
+	auto       input  = Gen5DsPairInput();
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("OpIAdd %uint %lds_addr_u_0 %uint_0x00000200"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpIAdd %uint %lds_addr_u_0 %uint_0x00000400"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("unknown_uint_constant"), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompileCS(code, &input).IsEmpty());
+}
+
+TEST(EmulatorGraphicsPackets, Gen5DsRead2B64LoadsTwoQwordsIntoFourRegisters)
+{
+	// ds_read2_b64 v[4:7], v0 offset0:0 offset1:1 -> the two qwords land in
+	// v4/v5 and v6/v7.
+	const uint32_t shader[] = {0xd9dc0100u, 0x04000000u, 0xbf810000u};
+	const auto     code     = ParseGen5DsPair(shader);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& instruction = code.GetInstructions().At(0);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::DsRead2B64);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::Vdst2VaddrOffset01);
+	EXPECT_EQ(instruction.dst.register_id, 4);
+	EXPECT_EQ(instruction.dst.size, 4);
+	EXPECT_EQ(instruction.ds_offset, 0x0100u);
+	EXPECT_TRUE(ShaderLdsMemoryInstructionSupported(instruction));
+
+	auto       input  = Gen5DsPairInput();
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_NE(source.FindIndex("OpStore %v4 %lds_data_f_0_read2b64_0_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v5 %lds_data_f_0_read2b64_0_1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v6 %lds_data_f_0_read2b64_1_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v7 %lds_data_f_0_read2b64_1_1"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("unknown_uint_constant"), Core::STRING8_INVALID_INDEX);
 	EXPECT_FALSE(ShaderRecompileCS(code, &input).IsEmpty());
 }

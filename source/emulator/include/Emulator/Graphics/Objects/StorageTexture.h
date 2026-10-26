@@ -6,6 +6,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
+#include "Emulator/Graphics/Utils.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -83,6 +84,10 @@ public:
 // render-target (27) and Standard64KB (9) tilings follow it. Tile 9 is a different layout on Gen4, so
 // the colour case needs `gen5`. Every other layout keeps the single-level atlas.
 [[nodiscard]] bool StorageTextureUsesMipBacking(const uint64_t* params, bool gen5);
+// The guest platform decides the Gen5 layout contracts. Object identity is
+// evaluated before a platform is chosen (tools, tests): an unknown platform is
+// not Gen5.
+[[nodiscard]] bool StorageTextureGuestIsGen5();
 // Levels of the host image behind a mip backing (0 when there is none). A depth chain has exactly the
 // descriptor's levels. A colour chain carries every level its extent allows: captured descriptors
 // address levels past MAX_MIP (a downsample loop stores to level 6 of a MAX_MIP = 5 resource, into the
@@ -148,9 +153,19 @@ struct StorageTextureRawRenderSource
 	                                                    uint64_t address, uint64_t size);
 [[nodiscard]] bool StorageTextureCanCompositeRawRenderDestination(const uint64_t* storage_params,
 	                                                               uint64_t address, uint64_t size);
+// A linear (tile 0) view with several levels is one stacked image: guest
+// memory stores the levels as a GFX10 linear mip chain and the host image
+// keeps them as row rectangles at per-level atlas offsets. Plan the upload
+// regions and the stacked extent from the descriptor alone.
+[[nodiscard]] bool StorageTexturePlanLinearMipUpload(const uint64_t* storage_params, uint64_t size, bool mip_backing,
+	                                                  Vector<BufferImageCopy>* regions, uint32_t* image_width,
+	                                                  uint32_t* image_height, uint32_t* bytes_per_element);
+[[nodiscard]] bool StorageTextureCanCompositeLinearMipRawRenderDestination(const uint64_t* storage_params,
+	                                                                        uint64_t address, uint64_t size);
 [[nodiscard]] bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer* buffer,
 	                                                         const Vector<StorageTextureRawRenderSource>& sources,
-	                                                         VulkanImage* destination, uint64_t address,
+	                                                         VulkanImage* destination,
+	                                                         const uint64_t* destination_params, uint64_t address,
 	                                                         uint64_t size);
 
 struct StorageTextureArrayViewRange

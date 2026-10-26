@@ -302,8 +302,8 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal, uint32_t in
 void GdsBuffer::Init(GraphicContext* ctx, CommandBuffer* buffer)
 {
 	EXIT_IF(ctx == nullptr || buffer == nullptr);
-	// Every resource is shared CONCURRENT across the context's queue families
-	// (VulkanApplyResourceSharing), so GDS needs no queue-family ownership.
+	// The buffer is created with concurrent sharing across every used family,
+	// so the first queue that needs it does not own it exclusively.
 	if (m_buffer == nullptr)
 	{
 		m_buffer = new VulkanBuffer;

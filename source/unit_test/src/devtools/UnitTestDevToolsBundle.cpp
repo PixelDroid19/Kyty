@@ -319,6 +319,9 @@ TEST(DevToolsBundle, ManifestPreservesSuspectedAndConfirmedEvidence)
 	EXPECT_NE(p.find("gpu_stall"), std::string::npos);
 	EXPECT_NE(p.find("suspected_ns"), std::string::npos);
 	EXPECT_NE(p.find("confirmed_ns"), std::string::npos);
+	// Both stored evidence entries are separate array elements.
+	EXPECT_NE(p.find("},{\"domain\""), std::string::npos);
+	EXPECT_EQ(p.find("}{"), std::string::npos);
 }
 
 TEST(DevToolsBundle, StatusDecodeErrorPreservesLastCoherentEvidence)

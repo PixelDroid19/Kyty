@@ -80,6 +80,8 @@ const QVector<EditorField> INTERFACE_FIELDS = {
     {"language", QT_TRANSLATE_NOOP("EditorPageItem", "Language"), FieldType::Choice, "language"},
     {"color_scheme", QT_TRANSLATE_NOOP("EditorPageItem", "Theme"), FieldType::Choice, "color_scheme", false, nullptr,
 	 QT_TRANSLATE_NOOP("EditorPageItem", "Appearance")},
+    {"theme", QT_TRANSLATE_NOOP("EditorPageItem", "Style"), FieldType::Choice, "theme"},
+    {"layout", QT_TRANSLATE_NOOP("EditorPageItem", "Layout"), FieldType::Choice, "layout"},
     {"accent", QT_TRANSLATE_NOOP("EditorPageItem", "Accent colour"), FieldType::Choice, "accent"},
     {"interface_size", QT_TRANSLATE_NOOP("EditorPageItem", "Interface size"), FieldType::Choice, "interface_size"},
     {"animations", QT_TRANSLATE_NOOP("EditorPageItem", "Animations"), FieldType::Choice, "animations"},
@@ -91,6 +93,11 @@ const QVector<EditorField> INTERFACE_FIELDS = {
     {"sort", QT_TRANSLATE_NOOP("EditorPageItem", "Sort games by"), FieldType::Choice, "sort"},
     {"on_launch", QT_TRANSLATE_NOOP("EditorPageItem", "When a game starts"), FieldType::Choice, "on_launch"},
     {"window_mode", QT_TRANSLATE_NOOP("EditorPageItem", "Launcher window"), FieldType::Choice, "window_mode"},
+    {"start_on", QT_TRANSLATE_NOOP("EditorPageItem", "Opens on"), FieldType::Choice, "start_on"},
+    {"ui_sounds", QT_TRANSLATE_NOOP("EditorPageItem", "Interface sounds"), FieldType::Toggle, nullptr, false, nullptr,
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Sound")},
+    {"ui_volume", QT_TRANSLATE_NOOP("EditorPageItem", "Sound volume"), FieldType::Choice, "ui_volume", false,
+	 [](const QVariantMap& f) { return f.value("ui_sounds").toBool(); }},
 };
 
 struct Help
@@ -117,12 +124,16 @@ const Help HELP[] = {
     {"command_buffer_dump_enabled",
 	 QT_TRANSLATE_NOOP("EditorPageItem", "Writes the game's GPU commands to disk, for debugging. Uses a lot of space.")},
     {"pipeline_dump_enabled", QT_TRANSLATE_NOOP("EditorPageItem", "Writes the game's graphics pipelines to disk, for debugging.")},
+    {"theme", QT_TRANSLATE_NOOP("EditorPageItem", "Add-on themes are folders with a theme.ini inside the themes folder above, found when the launcher starts. Their colours win over the accent colour.")},
     {"interface_size", QT_TRANSLATE_NOOP("EditorPageItem", "Scales every text and control of the launcher.")},
     {"animations", QT_TRANSLATE_NOOP("EditorPageItem", "Reduced keeps page changes and stops what moves on its own.")},
     {"show_recent", QT_TRANSLATE_NOOP("EditorPageItem", "Hidden when the window is too small to show it with a row of covers.")},
     {"sort", QT_TRANSLATE_NOOP("EditorPageItem", "In your own order, games move with Move up and Move down in their options.")},
     {"on_launch", QT_TRANSLATE_NOOP("EditorPageItem", "Minimizing leaves the screen and the graphics card to the game.")},
     {"window_mode", QT_TRANSLATE_NOOP("EditorPageItem", "How the launcher opens. Full screen suits a TV.")},
+    {"start_on", QT_TRANSLATE_NOOP("EditorPageItem", "The last game played opens on its page, ready to continue.")},
+    {"layout", QT_TRANSLATE_NOOP("EditorPageItem", "Console puts the pages in tabs on top and the games in one row, the selected game's page below it. An add-on theme may choose the layout.")},
+    {"ui_sounds", QT_TRANSLATE_NOOP("EditorPageItem", "Short sounds when you move, select, go back and start a game.")},
 };
 
 } // namespace

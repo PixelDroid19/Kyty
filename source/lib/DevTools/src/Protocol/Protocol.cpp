@@ -664,6 +664,21 @@ ProtocolResult ReadPublicationHeartbeat(ConstMappingView mapping, uint64_t* out_
 	return ProtocolResult::Ok;
 }
 
+ProtocolResult ReadHandshakeState(ConstMappingView mapping, HandshakeState* out) noexcept
+{
+	if (!MappingOk(mapping.data, mapping.size) || out == nullptr)
+	{
+		return ProtocolResult::InvalidArgument;
+	}
+	const auto hdr = ValidateHeader(mapping.data);
+	if (hdr != ProtocolResult::Ok)
+	{
+		return hdr;
+	}
+	*out = LoadHandshakeState(mapping.data);
+	return ProtocolResult::Ok;
+}
+
 ProtocolResult ReadTimeline(ConstMappingView mapping, ProtocolReadLossState* loss_state,
                             TimelineSnapshot* out) noexcept
 {

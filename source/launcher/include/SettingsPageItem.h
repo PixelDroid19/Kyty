@@ -4,14 +4,18 @@
 #include "Common.h"
 #include "PageLayout.h"
 
+#include <QImage>
 #include <QQuickItem>
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
 #include <QVector>
 
+class BindingCaptureItem;
+class ControlsPanelItem;
 class FieldFormItem;
 class FocusButtonItem;
+class LauncherBackend;
 class SettingsRailItem;
 class TextPadItem;
 
@@ -65,6 +69,11 @@ private:
 	void ShowCategory();
 	void Enter();
 	void Edited(const QString& key);
+	void ControlsEdited(const QString& key, const QVariant& value);
+	void UpdateStickNavigation();
+	void Captured(const QString& key, const QString& name);
+	void ProfileAction(QString (LauncherBackend::*action)(), const QString& key);
+	void DeleteActivated();
 	void SaveGlobal();
 	void RestoreDefaults();
 	void AddInfo(const QString& label, const QString& value, const QColor& color, const QColor& dot, qreal x, qreal width, qreal* y);
@@ -76,11 +85,17 @@ private:
 
 	SettingsRailItem* m_rail     = nullptr;
 	FieldFormItem*    m_form     = nullptr;
+	ControlsPanelItem* m_controls = nullptr;
 	TextPadItem*      m_pad      = nullptr;
 	FocusButtonItem*  m_choose   = nullptr;
 	FocusButtonItem*  m_search   = nullptr;
 	FocusButtonItem*  m_log      = nullptr;
 	FocusButtonItem*  m_defaults = nullptr;
+	FocusButtonItem*  m_duplicate = nullptr;
+	FocusButtonItem*  m_delete    = nullptr;
+	BindingCaptureItem* m_capture = nullptr;
+	// Delete profile was selected once and waits for the second time that confirms it.
+	bool m_confirm_delete = false;
 	// The global emulator settings, saved a moment after the last change.
 	QVariantMap               m_global;
 	QTimer                    m_save_timer;
@@ -90,6 +105,9 @@ private:
 	QRectF                    m_divider;
 	QVector<PageLayout::Text> m_texts;
 	QVector<Dot>              m_dots;
+	// The chosen add-on theme's screenshot, and where it shows; an empty rect hides it.
+	QImage                    m_screenshot;
+	QRectF                    m_screenshot_rect;
 	// Bumped whenever m_texts is replaced, so the nodes are built again.
 	int m_generation = 0;
 };

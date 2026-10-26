@@ -145,7 +145,7 @@ bool Spirv::EmitNativeComputeWaveProlog(String8* output) const
 
 bool Spirv::UsesFragmentWaveTier() const
 {
-	if (m_code.GetType() != ShaderType::Pixel)
+	if (UsesFragmentCompute() || m_code.GetType() != ShaderType::Pixel)
 	{
 		return false;
 	}
@@ -160,7 +160,7 @@ bool Spirv::UsesFragmentWaveTier() const
 
 bool Spirv::UsesFragmentPartialWave() const
 {
-	return m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr &&
+	return !UsesFragmentCompute() && m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr &&
 	       m_ps_input_info->native_wave.proof == ShaderNativeWaveProof::FragmentPartialWave &&
 	       m_ps_input_info->native_wave.refusal_reason == nullptr;
 }

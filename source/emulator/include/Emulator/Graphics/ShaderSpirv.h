@@ -40,6 +40,8 @@ struct ShaderFragmentComputeInfo
 	uint32_t                     descriptor_set     = 1;
 	uint32_t                     input_binding      = 0;
 	uint32_t                     output_binding     = 1;
+	// Optional transport control buffer; word two is the active wave count.
+	uint32_t                     control_binding    = UINT32_MAX;
 	uint32_t                     initial_vgpr_count = 0;
 	uint32_t                     user_sgpr_count    = UINT32_MAX;
 	ShaderFragmentParameterState parameter_state    = ShaderFragmentParameterState::Captured;
@@ -97,6 +99,11 @@ struct ShaderGeometryComputeInfo
 uint32_t SpirvResolvePixelParameterCount(const ShaderCode& code, uint32_t register_count);
 String8 SpirvGenerateSource(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info, const ShaderPixelInputInfo* ps_input_info,
                             const ShaderComputeInputInfo* cs_input_info);
+// Emits a guest pixel program as a split Wave64 compute module over the
+// captured per-lane records described by ShaderFragmentComputeInfo.
+String8 SpirvGenerateFragmentComputeSource(const ShaderCode& code, const ShaderPixelInputInfo& ps_input_info,
+                                           const ShaderComputeInputInfo& cs_input_info,
+                                           const ShaderFragmentComputeInfo& fragment_compute_info);
 // Highest vertex parameter the program exports, or the declared count when larger.
 uint32_t SpirvResolveVertexParameterCount(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info);
 // `code` is the linked ES+GS program; `vs_input_info` its fused-front input with

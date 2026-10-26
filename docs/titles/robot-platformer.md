@@ -61,6 +61,157 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   is a runtime frontier, not a playability claim, and the run ends on the
   transport refusal rather than gameplay acceptance.
 
+## Robot platformer: fragment wave transport executes (2026-10-24)
+
+- **Runtime.** A pixel program refused by native fragment admission now runs as
+  host passes: a capture draw over the covered lanes, scan and pack compute
+  kernels that assemble guest 64-lane waves, the split-Wave64 shade compute
+  module over the guest pixel resources, and a resolve draw that applies the
+  draw's original fixed-function state. Capture, shade and resolve pipelines
+  live with the draw state in the pipeline cache; the five transport regions
+  share one device-local allocation, so every draw of a recording reuses it
+  inside the 64 MiB scratch pool.
+- **Verified.** With the transport selected, the flyby's transported draws
+  recorded every tile (20-row bands planned to 39 MB, 35-word lane records
+  after parameter packing) and the run presented frames past the previous
+  gate, up to frames 2530-2660. Captures of those frames score healthy.
+- **Module contract fixed.** The generated module listed `gl_HelperInvocation`
+  in its entry-point interface without declaring it, and the fragment mask
+  accessor loaded the packed EXEC alias that only the write adapter renames;
+  both left undefined ids and the driver rejected the pipeline. Lane records
+  now hold only the interpolation forms the program reads (4 words per
+  interpolated parameter, 12 per `v_interp_mov` source, none for attributes the
+  program never interpolates), and the shade prolog reads pack's active-wave
+  count from the transport control buffer so dispatched groups past it exit
+  immediately. Capture and resolve also need the transport descriptor set
+  bound at index two; without it the host faults in the driver at the first
+  draw.
+- **Split compute pipeline admission fixed.** A transported pixel program failed
+  split compute pipeline creation with `VK_ERROR_UNKNOWN` (-13). The generated
+  module was invalid SPIR-V that the assembler accepts without validation:
+  - a program with two `s_endpgm` sites reused one set of output-store ids;
+  - the discard tail (`s_mov exec, 0`; null export; `s_endpgm`) emitted no
+    terminator, leaving the last block unterminated;
+  - an integer SDWA swizzle was written on the same line as its `OpLoad`, so the
+    assembler dropped it as trailing text.
+
+  Each epilog now carries its instruction index, an empty `s_endpgm` emits
+  `OpReturn`, the epilog base reference uses the indexed id, and integer loads
+  end with a newline. The dumped modules assemble and `spirv-val` clean after
+  these changes. The row-DPP FI=0 guard also shuffled `%exec_lo`, a mask word in
+  compute and split waves; it now shuffles the per-lane `%exec_lane_lo`.
+- **On-device.** With those fixes the flyby's programs created their split
+  compute pipelines and rendered 13,830 tiles: the 39,499-word module and the
+  131,944-word row-DPP module (lane_words 33) both ran capture, scan, pack,
+  shade and resolve per band.
+- **Default-location capture.** A reused program drawn as a depth-only pass
+  (`input_num=0`, `system_inputs=0`, `write_mask=0`) enables no interpolators,
+  yet its code names attributes 1-3. The native pixel pipeline resolves the
+  input count from those `v_interp` attributes, and resolves a default setting
+  to attribute `i` at location `i`; the transport now does the same:
+  - the capture receives the resolved input count, not the draw's register
+    count;
+  - input locations come from the decoded interpolator when custom
+    interpolation is off;
+  - a pair without an enabled barycentric field (and without custom
+    interpolation) uses the perspective-center default instead of being
+    refused;
+  - a rejected capture names its exact admission clause.
+
+  The transport also passes the guest pixel program's LDS size into the shade
+  compute instead of zero dwords (`ExtraLdsDwords`).
+- **On-device, depth-only draw admitted.** The depth-only program now creates a
+  131,548-word shade module (17 lane words) and the run rendered past the
+  previous 13,830-tile gate to 15,482 tiles with four transported programs.
+- **Host SIGSEGV at label publication (fixed).** Those runs then exited with
+  SIGSEGV. A gdb reproduction stopped in `LabelManager::FireCallbacks` at the
+  EOP store `*dst_gpu_addr64 = value64`: the destination range was validated
+  when the label was created, but the GPU allocation could be released before
+  the fence fired. A destination that validated as a GPU allocation at creation
+  now re-validates at publication; a released one is skipped with a bounded
+  warning, while a plain host destination stores as before. Validating every
+  destination instead stalled the guest at frame 27, so the label records at
+  creation whether its destination is GPU-tracked. The check also runs outside
+  the label manager's mutex at both creation and publication: taking the GPU
+  memory lock under that mutex inverts the release path's lock order and
+  stalls the guest (frame 6 with the first version). A run with this fix is the
+  current check.
+- **Offline suite.** `EmulatorFragmentTransport` now runs in the unit build
+  (it was compiled but never force-linked from the runner): capture, shade and
+  resolve modules assemble and `spirv-val`-validate, and the lane packing
+  follows the draw's interpolator source (`v_interp_mov` costs four words as a
+  parameter and twelve per-vertex). The suite also exposed a real gap for the
+  depth-only draw: the shade generator registered a zero-length VGPR range when
+  a program had no initial VGPRs and aborted; it now registers none. The
+  runtime result of the depth-only program is the current frontier.
+- **Transition crash: a non-indexed transport draw, not a GPU hang (fixed).**
+  The earlier record attributed the exit at the flyby/hub transition to a
+  render-engine hang. The kernel journal shows no engine reset at those
+  crashes: the process died from a host fault inside the Intel driver (read at
+  `0xf8`), captured as a userspace core. `GraphicsRenderDrawIndexAuto` had no
+  fragment-transport branch, so the first non-indexed draw whose pixel program
+  requires the wave64 transport bound the transport resolve pipeline and issued
+  a plain `vkCmdDraw`; the driver dereferenced the resulting null pipeline
+  state. The indexed path already recorded the transport; the recording is now
+  shared and each path replays its own geometry. The RCS resets recorded
+  earlier and below belong to other runs, not to this crash.
+- **Parser gap seen from the pause menu.** Pressing options during the flyby
+  reaches a shader with VOP3P opcode `0x21`, which the parser rejects
+  (`ShaderParseVOP3P.cpp`). The plain route does not reach it; the opcode is
+  still unimplemented.
+
+## Robot platformer: gameplay level stops at the fragment transport gate (2026-10-24)
+
+- **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, SDL offscreen video,
+  scripted route (cross every 3 s from the first pad poll), 600 s cap, HEAD
+  e214bc69; one cold boot and one boot on the caches it left. Native PNG
+  captures and agent samples only.
+- **Warm boot removes the cold compiles.** The first present appeared inside
+  the agent's ready window, presents 362-1034 ran at 23-30 fps, and the
+  run wrote no Mesa shader-cache entries and two SPIR-V entries. The cold
+  boot of the same tree held twice for 90 s and more than 120 s while it
+  compiled pipelines and wrote more than 50 Mesa entries. Loading the same
+  scenes therefore no longer pays a translation or pipeline compile; the
+  remaining load time is the game's own resource work.
+- **Guest-reported loads** (`LoadLevelResources`, warm boot): title level at
+  0:45, worldmap 4.98 s, the intro flyby 14.87 s, and the first gameplay hub
+  8.61 s. The guest's timer includes the GPU waits its loader performs, so
+  these are not pure file reads.
+- **First strict fail: the first gameplay draw.** The hub level starts and
+  the renderer stops in `GraphicsRenderPipeline.cpp:1680`:
+  `fragment wave transport is required by the pixel stage but the renderer
+  does not select it yet`. Facts:
+  `native_admission{guest=64 proof=3 host=unavailable mapping=0 mask_ops=1
+  pc=0x568 reason=fragment row DPP source participation is unproven (neutral
+  values do not prove helper recovery)}` and `draw{extent=1920x1080
+  samples=1 color_targets=3 write_mask=0x00000037 depth=1 depth_write=1
+  blend0=1 input_num=5 system_inputs=0x1b02 subgroup=64}`. The run exited
+  with code 65. This is the first blocker after startup: the level loads,
+  but its first pixel program needs a guest wave64 transport that the
+  renderer computes but does not execute (`docs/fragment-wave-execution.md`).
+- **Fragment-compute module validated (2026-10-24).** The refused pixel
+  program now translates to a split Wave64 compute module of 94,932 SPIR-V
+  words that assembles and validates. The module reads the captured per-lane
+  record and writes the 34-word result lane. Three general emitter gaps
+  surfaced: a VOP3 integer operation carries CLAMP, which integer results
+  ignore; PERMLANE on the split layout needs the two halves' exchange (a split
+  read); and a row DPP with BOUND_CTRL=1 is admitted when each host subgroup
+  holds whole guest rows. The renderer still refuses the draw; the
+  capture/scan/pack/shade/resolve runtime is the next step.
+- **Visual state before the stop.** Captures show the publisher card, the
+  studio logo, the tunnel with the lit ship, and the asteroid-field intro
+  scene without visible corruption. The later gameplay scene is not rendered
+  because the pipeline is refused.
+- **Frame cost in the same warm run** (agent interval of 30 s during the
+  load-to-interactive transition): 290 presents, 64,913 draws, 26,411
+  dispatches, 16,729 submissions and 7,830 fence waits (13.6 s of the 30 s),
+  with 14.9 GB hashed, 2.43 GB uploaded and frame-time p50 98 ms. The
+  command processor and its fence waits, not GPU execution, set the rate.
+- **Guest particle warning.** During the intro the guest logs
+  `JsParticle heap memory is full!` with a 36 MiB heap while it renders at
+  10-25 fps. It is a guest allocation failure and is not yet shown to be an
+  emulator defect; a native-rate run must show whether it persists.
+
 ## Robot platformer: logo particles through a split geometry pass (2026-10-22)
 
 - **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, `generic.pad`,
@@ -1595,3 +1746,375 @@ Known approximations and debt recorded by this chain:
   as a mask (a numeric use is refused, an EXEC assignment is accepted); it is sound for refusals but imprecise.
 - `KYTY_DUMP_VIDEOOUT` writes present-source PNGs only for 8-bit and FP16 formats; the reference workload presents a
   10-bit format, so that dump (and the paired `KYTY_DUMP_RT`) produces nothing there.
+
+## Robot platformer: non-indexed transport and 64-bit DS writes (2026-10-24)
+
+- **Evidence for the transition crash.** A gated in-process core capture (a
+  temporary build that restores the default fault action so the system keeps
+  the fault context; not committed) symbolized the driver frames, and the Kyty
+  frame resolved to `GraphicsRenderDrawIndexAuto` at the plain `vkCmdDraw`. The
+  kernel journal for the same timestamps contains no Xe reset: this was a host
+  driver fault, not a render-engine hang.
+- **Fix: non-indexed transport draws.** The capture/shade/resolve recording is
+  extracted into one helper. Indexed draws replay the guest index snapshot;
+  non-indexed draws replay `draw_count` vertices from the resolved first vertex.
+  Both use the same band planning and fixed-function state.
+- **Fix: `ds_write2[st64]_b64`.** The tutorial level's pixel program uses
+  `ds_write2st64_b64` (opcode 0x4F), which the decoder refused. Both opcodes now
+  decode with two-dword data pairs; the offsets stay packed like the b32 form
+  and scale by 8 bytes (times 64 for st64). The SPIR-V LDS recompiler stores
+  both pairs, the wave-LDS path re-emits the raw opcode, and the module declares
+  the offset constants. Two packet tests cover the tuple and the qword scaling.
+- **Fix: `ds_read2[st64]_b64`.** The same level also loads two qwords per
+  instruction (opcode 0x77). Both read opcodes decode into a four-dword
+  destination, reuse the qword-scaled offsets and are re-emitted on the
+  wave-LDS path; a packet test checks that the two qwords land in four
+  destination registers.
+- **Verification.** Strict run, SDL offscreen, scripted route, 900 s cap, Intel
+  Arc A770, Mesa ANV 26.2.5: the transition crash is gone and the tutorial
+  level loads (5.3 s), which the title never reached before. The DS packet
+  tests, `check_emulator_boundaries.py` and `check_graphics_tables.py` pass.
+- **Current frontier: new guest-seeded StorageTexture over mixed views.** With
+  the DS gaps closed, the level runs its gameplay resource setup. The guest
+  reports its particle heap full (`JsParticle heap memory is full!`, 36813 KB of
+  36864 KB) and a strict `!create_all_the_same` stop follows in the memory
+  create path. Measured facts (temporary diagnostic, not committed):
+  - The new object is a StorageTexture, guest-seeded
+    (`PARAM_SKIP_SEED = 0`), `neo = 1`, `levels = 0x1_00000006`, resource type 9,
+    depth 1, base array 0, one range.
+  - Its nine parents are four StorageTextures (IsContainedWithin, Contains,
+    Crosses), four RenderTextures (Crosses, Contains twice, IsContainedWithin)
+    and one sampled Texture (IsContainedWithin, CPU upload). Every parent
+    reports `in_use` and no pending write-back function, but the four
+    RenderTexture parents and the sampled Texture have
+    `gpu_update_time > cpu_update_time`, and only some parents' submission
+    dependencies are complete; one StorageTexture parent was materialized from
+    a device image.
+  - `multi_storage_texture_alias` refuses this shape correctly: seeding the new
+    image from guest bytes would miss the render targets' pending device writes.
+    The overwritten-storage and single-format-redescription policies do not
+    apply either.
+  The intended mechanism is the composite raw-render path (newest complete
+  covering writer as baseline, newer GPU writers replayed in write order), but
+  its destination shape does not admit this view: it requires a single-level
+  64-bit-uint image (`PARAM_LEVELS == 1`, format 65, `size == width * height *
+  8`), while this one is a linear R32F mip tail (format 71, `base_level = 1`,
+  six levels, 960x540 starting from a 1920x1080 chain, size 5.55 MB). Coverage
+  itself is available: parent 80 (RenderTexture, Contains) describes and covers
+  the whole range and parent 103 (StorageTexture, Contains) also covers it;
+  the other parents describe but do not cover.
+  The existing raw copy is specialized (B10G11R11 to R16F, tile 27, one level),
+  so admitting this view needs a level-aware linear composite seed path
+  (per-level newest-writer selection and ordered replay), not a predicate
+  relaxation. The particle-heap warning stays an open guest-side observation;
+  the RCS timeout seen in one earlier build was not reproduced and both remain
+  recorded.
+- **Visual state and rate after the DS fixes.** Native captures at present 1343
+  (intro flyby) and 2985 (tutorial loading, ship scene) both score healthy
+  (first: entropy 4.03, 739 colour bins, no stripe, white 0.33%, sparkle 1.1%)
+  and show the logo, ship and asteroid field without visible corruption. The
+  same agent sample reports 5.6 fps at present 1343; performance is a separate
+  open item. The tutorial still stops at the mixed-view storage alias above.
+- **Measured load-window cost.** An agent performance window over present
+  1282 to 1571 (103.993 s, 2.78 presents per second while the tutorial loads)
+  records per frame: 292 draws, 82 dispatches, 51 submits and command buffers,
+  about 1,390 upload calls (6.6 MB) and 52 MB hashed. Attribution from the
+  same window's timers: draw state setup 31 ms, resource binding 12.5 ms,
+  descriptor finalize/storage/texture 11 ms, dispatch write-back 9.4 ms and
+  fence waits 41 ms per frame. The many upload calls are individually cheap
+  (0.3 s in total); the sampled frame-time p50 is 38 ms, so the multi-second
+  stalls sit outside the recorded draw frame. CPU draw and submission work,
+  not GPU execution, sets this rate.
+- **Excluded: dropped label publications.** A lost EOP fence value could have
+  stalled the guest's particle free list, so the label path was checked first:
+  across five 900-second runs the "label destination released before
+  publication" warning never fired, and no store was skipped. The particle-heap
+  warning is not caused by a dropped fence store.
+- **Implementation map for the mixed-view storage seed.** Measured call
+  sites: `GraphicsRenderBind.cpp` builds `StorageTextureObject` (including
+  `skip_seed` from the binder mask) and calls `GpuMemoryCreateObject`;
+  `ShaderComputeStorageSeedSkipMask` (`GraphicsRenderDraw.cpp`) proves a
+  write-only, fully covered base extent; `ValidateUploadedStorageSeedCoverage`
+  (`GraphicsRenderBind.cpp`) cross-checks the guest coverage buffer against
+  `Width5+1 x Height5+1`; `GpuMemoryCreate.cpp` classifies the overlap and
+  refuses mixed parents whose device writes are unpublished.
+  Two admissible directions, both general:
+  1. Publish pending device writes for the aliased range before the guest seed
+     (materialize through the existing write-back/materialization path with the
+     recording queue as consumer), then link every view. The per-range
+     `WriteBackStorageRanges` entry exists but only collects writable storage,
+     so render-target publication would need the materialization path and a
+     create-time ordering point.
+  2. Prove per-level coverage for a linear mipmapped destination so the image
+     can be created without a guest seed, mirroring the write-only proof for a
+     single base extent.
+  Neither may copy between differing formats. The current refusal is correct
+  until one of these exists.
+  Measured with a probe ahead of the write-only check: the view is bound in a
+  compute dispatch (write-without-sampler, dispatch mode 0x41), the
+  write-only proof bit is zero, and the guest supplies no tile coverage for
+  the binding (`coverage = 0x0`, origin and bounds absent). The proof route is
+  therefore unavailable for this shape.
+  The materialization cache stores creation recipes, not byte copies, and the
+  render-target parents remain device-only, so their content never exists in
+  guest bytes to publish. Publishing writes to guest memory is therefore not a
+  valid seed source. A linear view over that memory needs a GPU-side raw copy
+  with format reinterpretation into the linear destination, which is what the
+  composite raw path does for its supported destination shape. Extending that
+  path is the correct direction; guest-byte seeding cannot represent this
+  alias.
+  Next gap behind the alias, measured with the temporary link: the run passes
+  the resource create and stops in the fragment stage on a shader emitter
+  rejection for `VMaxF32 v8, v8, v8` (format 0x20405, raw 0x201010fa) even
+  though the min/max emitter exists, so the operand form is what the emitter
+  declines. A probe at the emitter's failure points shows why: the first
+  source is a VGPR with `dpp` set while the destination and second source are
+  plain VGPRs of the same register. The unsupported part is the DPP control,
+  not the min/max operation. The row-DPP tier admits an out-of-row source with
+  `bound_ctrl=0` only for zero-identity ALU shapes that keep the destination
+  (or/xor/add); a maximum does not preserve the destination there, so the
+  refusal is deliberate. Closing it needs either a predicated DPP lowering for
+  non-keep-dst operations or the split-wave transport path for this program,
+  not a new emitter.
+  Excluded: linking the mixed parents with the ordinary guest seed. A
+  temporary policy let the create proceed with the guest upload for this shape:
+  the level passed the resource create and ran without an engine reset (present
+  3046, loading phase), but the captured frame shows bright streaked corruption
+  above the ship where the earlier frame had none. Guest bytes do not represent
+  the parents' device content; the strict refusal is correct and the seed must
+  copy from that content.
+  Excluded: skipping the seed for this shape. Temporarily forcing an unseeded
+  create for tile-0 format-71 multi-level storage views let the level pass the
+  create, then produced a real RCS job timeout (Xe engine reset, device
+  coredump, `vkWaitForFences -4`, queue 8 slot 0 sequence 97393). The view is
+  read before being fully written, so the seed and its ordering are required.
+  Narrowing from the same measurement: one StorageTexture parent (id 103)
+  describes and covers the whole range, and another (id 129) covers it as well.
+  The seed can therefore come from a storage image of the same family, which is
+  a same-format image copy, not a conversion from a render target. The missing
+  piece is a copy path whose destination is linear and multi-level: the existing
+  raw copy writes destination blocks, and the composite admission still demands
+  a single-level 64-bit-uint destination. Extending the destination shape and
+  writing rows instead of blocks is the concrete work.
+  Layout note for that extension: a linear (tile 0) storage view with levels
+  above one is created as one stacked image (`real_height = height + height/2`
+  and per-level offsets from the same layout helpers), while the guest range
+  measured for this view (5.55 MB for 960x540) is larger than the image bytes,
+  so the size alone cannot validate the destination shape. The raw copy must
+  derive per-level offsets from the layout, not from the range.
+
+- **The mixed-view storage alias is resolved: the composite raw path admits a
+  linear multi-level destination.** The blocker above was a guest-seeded
+  StorageTexture over mixed views (four StorageTextures, four RenderTextures
+  and one sampled Texture) whose guest range is `0x53aa00000` +
+  `0x54b000` (5,550,080 bytes) and whose descriptor is format 71 (RGBA16F),
+  960x540, pitch 960, base level 1, six levels, tile 0, resource type 9.
+  The composite path already copies the newest covering writer into a
+  destination by byte identity; only the destination shape was refused.
+  Measured facts that shaped the fix:
+  - The range size is exactly the GFX10 linear mip chain of that descriptor:
+    levels are stored smallest first, each level's row pitch is aligned to
+    256 bytes and the chain totals 5,528,880 bytes, 5,550,080 after the
+    256-byte alignment of the whole chain. The planner derives the per-level
+    offsets, pitches and sizes from that contract and refuses any descriptor
+    whose reported layout is not exactly that chain.
+  - The host image is a mip backing, not a stacked atlas: on Gen5 a linear
+    (tile 0) view with several levels is one mipmapped image (ten host mips
+    for a 960x540 base), so every level is uploaded into its own image mip
+    (`dst_level = level`) and the image extent is the base extent. The earlier
+    assumption of one stacked image (`real_height = height + height/2`) applies
+    only to layouts that keep the single-level atlas, and the copy refused the
+    destination because of it.
+  - The copy itself is unchanged: the scatter kernel writes the source image's
+    texels at their guest addresses into a scratch buffer that holds the
+    destination's guest bytes, and the upload then reads that buffer per
+    level. Byte identity holds because the guest range is shared by every
+    view: the destination sees the writer's bytes at the same addresses.
+  Changes: `StorageTexturePlanLinearMipUpload` and
+  `StorageTextureCanCompositeLinearMipRawRenderDestination`
+  (`Objects/StorageTexture.cpp`), the composite copy takes the destination
+  parameters and uploads per level (`TileGpuDetile.cpp`), the create path
+  admits the shape (`Objects/GpuMemoryCreate.cpp`). A unit test checks the
+  planned regions of the measured descriptor for both the mip backing and the
+  stacked atlas.
+- **Verification of the alias fix.** Strict run, SDL offscreen, scripted
+  route, 900 s cap, Intel Arc A770, Mesa ANV 26.2.5: the run no longer stops
+  at the mixed-view create. It reaches the tutorial (`Level has started:
+  intro_next`, `sublevel_locator_hub [hub_crashsite_tutorial]`) and keeps
+  running past the level start into the hub loading phase, which the title
+  never reached before. The focused unit tests (`EmulatorTileDetile.*`,
+  `EmulatorGraphicsPackets.PlansLinearMipStorageUploadAtlas`) pass.
+- **Open: the run ends with a device lost at the hub load.** The runs that
+  clear the alias later fail with `vkWaitForFences failed: result=-4` on
+  queue 8 (slot 3, sequence 99372 with the instrumented build; slot 6,
+  sequence 95791 with the clean build), and the kernel journal records no Xe
+  engine reset for that window. This is the recorded queue-8 device-lost class
+  of the graphics handoff ("a real `VK_ERROR_DEVICE_LOST` fence wait on
+  queue 8, slot 2" for this title), not the earlier RCS job timeout, and the
+  title reached the hub only after the alias stopped blocking it. Whether the
+  new copy contributes is not established: two runs agree on the failure, but
+  both carry the new path, and the slot and sequence differ, so the evidence
+  points at a load-dependent hang in the hub's own work rather than a fixed
+  defect in the copy. Next step: capture the hub frames before the hang and
+  compare a run with the new path disabled at the same scripted route.
+- **Next test to write: the mip-backing destination at the Vulkan level.**
+  The composite copy is proven for the single-level destination by
+  `EmulatorTileDetile` (a source pair and a destination image, compared
+  against the expected tiled bytes), but the new mip-backing destination is
+  only proven by the layout planner and by the title no longer stopping. The
+  fixture used there creates single-mip images, so the test needs a variant
+  that creates a mip chain and reads every level back, and it must compare
+  each level's rows against the guest bytes of that level of the GFX10 chain.
+- **The row-DPP emitter gap is closed for the destination-source shape.**
+  The hub's first gameplay draw (1920x1080, three colour targets, subgroup 64,
+  pc 0x568) uses `VMaxF32 v8, v8, v8` whose first source carries a row-class
+  DPP (control 0x111, the row bshift, bound_ctrl 0). The emitter refused it:
+  the row-DPP tier admitted a bound_ctrl=0 shift that leaves the row only for
+  the zero-identity operations that keep the destination (or/xor/add), and a
+  maximum does not preserve the destination there.
+  Measured with a temporary tier probe: the module is a compute module with
+  whole rows and a native wave, so the refusal was exactly the
+  keep-destination rule and nothing else.
+  The tier now classifies the operation instead of admitting a fixed set. When
+  the permuted source and the other source are the destination register and
+  the operation is idempotent (min, max, or, xor, and), a lane that reads
+  outside the row keeps the destination under both readings of the hardware
+  contract, so the operation may run with the lane's own source value
+  substituted for the missing one. The lowering selects that value instead of
+  zero for this shape (`RowDppMode::Input`); the proven zero substitution of
+  the keep-destination shapes is unchanged.
+  Verified: the program translates and the run reaches the hub load; the full
+  unit suite passes (2,484 tests, 2,473 passed, 11 skipped, 0 failed). The
+  draw is still refused afterwards by the transport participation proof
+  ("fragment row DPP source participation is unproven (neutral values do not
+  prove helper recovery)"), which is the next gate.
+- **The single-level composite destination is generalized.** The hub's own
+  resources then needed a linear single-level view (format 71, 960x540, pitch
+  960, tile 0, one level) over a range of `0x3f4800` bytes at
+  `0x53af4b700`, with nine mixed parents. The composite admission refused it
+  for three narrow reasons: it named one format id (65), it demanded the
+  range be exactly the image bytes, and it demanded a 64 KB aligned start.
+  The admission now names the contract instead: a linear single-level view
+  whose pitch is its width, whose texel size the copy supports, whose swizzle
+  is the identity, and whose range covers the image. The range may start
+  inside a block (the copy addresses the guest bytes, not blocks) and may
+  extend past the image. The copy checks the image against the view's extent
+  and texel size instead of one format.
+- **Visual evidence after the alias and DPP fixes.** A native capture of the
+  world map scene (present 1742, 1280x720, A2R10G10B10) scores healthy:
+  entropy 4.41, 412 colour bins, no stripes, no blowout, sparkle 0.35%. The
+  frame shows the planet, the asteroid field and the nebula without the
+  streaked corruption the excluded guest-seed experiment produced, so the
+  copy path that seeds the mixed-view storage view does not corrupt the
+  image.
+- **Measured rate with the merged upstream range-cache work.** An agent
+  performance snapshot over 127 s of the run reports 1,741 presents, a
+  frame time of p50 41 ms, p95 116 ms and p99 190 ms, with 41.1 s in fence
+  waits, 15.8 s in uploads, 3.3 s in hashing, 3.2 s in write-backs and
+  0.9 s in detiles; the pipeline lookups cost 0.27 s over 203,605 hits. The
+  rate is still set by host work per frame, not by the device.
+- **The packed mixed FMA of the gfx10 family is decoded.** The hub's pixel
+  program also reaches a VOP3P opcode the parser refused: `0x21`. The gfx10
+  opcode table (the decoding chart LLVM publishes from the ISA) names `0x20`
+  as `V_FMA_MIX_F32` (the mixed scalar FMA the engine already emits) and
+  `0x21` as `V_FMA_MIXLO_F16`, the same mixed FMA with a half destination
+  written to the low half of the destination register. The parser now decodes
+  the opcode into its own instruction type and the emitter lowers it with the
+  engine's half contract: the selected sources at their selected precision,
+  binary32 intermediates with the addition residue recovered, one rounding to
+  half, and the low half of the destination written while the high half is
+  kept. The translation is not yet observed in a run.
+- **The AGC commands the game imports are being filled in.** The game
+  reserves the space of a command with the writer's GetSize before it calls
+  the writer, and eighteen writers of the draw command buffer had no such
+  export, so the guest reserved the wrong amount and the emulator's packet
+  did not fit in it. The rewind and conditional execution commands of both
+  command buffers were missing as well, so the guest could not run them at
+  all. Each implementation follows the AGC module's own body: the packet
+  words it writes, and the size its size function reports, are the evidence
+  kept in `firmware/work/evidence/`.
+  The inventory of missing exports is now measured against the tree itself
+  (`firmware/abi/astro-imports-missing.csv`): 124 exports are really
+  missing, 58 of them AGC commands, 25 libc, 21 AGC driver, 13 JSON and 3
+  video out. The earlier count of 245 included ninety exports the tree does
+  register under a second registration style.
+- **The gfx10 lane permute and the mixed FMA variants are translated.** The
+  hub's pixel program reached two instructions the emulator did not know:
+  `ds_bpermute_b32` (opcode 0xb3) and `V_FMA_MIXHI_F16` (VOP3P 0x22). The
+  official gfx10 ISA (the RDNA 1.0 instruction set architecture, sections
+  10.4.4 and 12.10) gives both contracts, kept in
+  `firmware/work/evidence/`:
+  - `ds_bpermute_b32` is a gather: every lane takes the value of the lane its
+    index names, the index is a byte address with the instruction offset added
+    to it, only its bits [6:2] select a lane of the same half wave, and a
+    disabled source lane reads zero. One subgroup shuffle with a per-lane
+    source lane reproduces it.
+  - `V_FMA_MIXLO_F16` and `V_FMA_MIXHI_F16` are the mixed FMA of the
+    selected sources with the result in the low or the high half of the
+    destination. The emulator now decodes both and merges the half the opcode
+    names.
+  With those translated the run reaches the hub's own resources and then
+  fails with the device lost described below, so the hub's first gameplay
+  draw now executes.
+- **The narrowing SDWA is translated.** The hub's pixel program also uses
+  `vcvt_f16_f32` with a sub-dword addressing modifier, which the half
+  arithmetic refused. The ISA's SDWA fields give the contract: the source is
+  read as a whole word and the result is written to one half of the
+  destination, and `DST_U` says whether the other half is zeroed or kept
+  (`firmware/work/evidence/sdwa-isa.txt`). The half conversion now accepts
+  that form and merges the result into the half the fields name.
+- **The hub's pixel program now translates end to end.** With the lane
+  permute, the mixed FMA variants and the narrowing SDWA translated, the hub's
+  first gameplay draw compiles and the run reaches the level's own resources
+  (`hub_crashsite_tutorial`) and its sublevel locator. What remains at that
+  draw is not a translation gap: the run dies with the queue-8 device lost,
+  and the kernel journal records an RCS job timeout with an Xe device
+  coredump (`Tile0: GT0: Engine reset: engine_class=rcs`, `Timedout job:
+  seqno=136669`). The same class was recorded at 01:19, before the permute
+  and the mixed FMA existed, so the hang is not a product of this session's
+  shader work. The coredump of that job is the evidence for the next step:
+  the hub's draw is the first one that runs the fragment transport's compute
+  shade pass at scale, and the hang is in the compute engine.
+- **The instruction dump accepts the modifiers of the mixed-precision
+  operations.** The dump refused a negate or absolute modifier on an inline
+  constant, which those operations carry; it now shows the modifier with the
+  value.
+- **The half sub-dword form is translated (fixed 2026-10-25).** The hub's
+  half minimum carries the SDWA control `0x05051403` (ISA fields in
+  `firmware/work/evidence/sdwa-f16-isa.txt`): WORD_1 of both sources,
+  WORD_0 of the destination, DST_U=2 (preserve the other half), no output
+  modifier and no clamp. The operand loader already applies the source word
+  selects; the half emitter now admits that form and leaves the destination
+  merge to the generator's per-lane SDWA pass, which implements DST_SEL and
+  DST_U under the EXEC guard. A first attempt merged the destination in the
+  half store as well and the per-lane pass merged it a second time, which
+  corrupted the result (for WORD_1 it moved the new low half into the high
+  half). Translator 153; unit test
+  `EmulatorShaderArithmetic.Fp16SdwaHalfDestinationReadsAndPreservesHalves`
+  covers both source word selects, preserved/zeroed/high-half destinations
+  and the inactive lane. The 335 shader and packet tests pass. The hub run
+  with this translator is pending.
+  Still open: the half compare family has no not-equal entry.
+- **The device lost is intermittent: two of three runs.** A third run with
+  the native capture directory enabled (same scripted route, same build)
+  reaches the hub and keeps running until the 900 s cap with no fence
+  failure, while the two earlier runs die with the queue-8 device lost. The
+  failure is therefore load dependent, not a fixed defect of the new copy.
+- **Capture evidence for the hub is still open.** That third run writes no
+  capture before the cap: the capture milestones had not fired at that point,
+  so the visual state of the tutorial scene after the alias fix is not
+  scored. Next step: keep the capture-enabled route running until the
+  milestones fire and score the hub frames with `scripts/kyty_capture.py`.
+- **Fixed: the guest seed of a linear mip chain read the level rows from the
+  wrong offsets.** The guest seed of a linear multi-level storage view
+  uploaded every level with a halved pitch (`Objects/StorageTexture.cpp`, the
+  `mip_pitch` loop in `update_func`), while the GFX10 chain stores the level
+  rows with the 256-byte aligned pitch. Levels whose width is not a multiple
+  of the alignment (120, 60, 30 texels for the measured descriptor) were read
+  from the wrong offsets. The seed now takes the level row pitch from the
+  layout itself (the padded sizes of `TileGetTextureSize2`), which is the
+  single source of truth for the chain, and the unit test locks the aligned
+  pitches of the measured descriptor (960, 480, 256, 128, 64, 32). Verified
+  by the full unit suite (2,482 tests, 2,471 passed, 11 skipped, 0 failed)
+  and the boundary gate; the title-level effect of the corrected seed is not
+  yet observed.

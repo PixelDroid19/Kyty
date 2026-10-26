@@ -1,4 +1,4 @@
-/* This file is auto-generated */
+/* Rows are re-derived from their tiling family layout by unit_test/src/emulator/UnitTestEmulatorGraphicsTables.cpp */
 
 static const TextureInfo2 infos_0_56[] = {
 // clang-format off

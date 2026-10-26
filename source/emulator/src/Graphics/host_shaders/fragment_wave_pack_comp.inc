@@ -1,4 +1,4 @@
-// Auto-generated from fragment_wave_pack.comp with scripts/check_fragment_transport_shaders.py --write.
+// Auto-generated from fragment_wave_pack.comp with source/cmake/HostShaderBlobs.cmake.
 // Do not edit by hand.
 constexpr uint32_t kFragmentWavePackSpirv[1603] = {
 	0x07230203u, 0x00010600u, 0x000d000bu, 0x000001e7u, 0x00000000u, 0x00020011u,

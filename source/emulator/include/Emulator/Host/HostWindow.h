@@ -33,6 +33,8 @@ public:
 
 	void               SetCursorVisible(bool visible);
 	void               UpdateCursorPolicy(bool temporary_visibility = false);
+	// Relative mouse mode for camera look: the cursor hides and stays inside the window.
+	[[nodiscard]] bool SetMouseCaptured(bool captured);
 	[[nodiscard]] bool ToggleFullscreen();
 
 	KYTY_CLASS_NO_COPY(HostWindow);

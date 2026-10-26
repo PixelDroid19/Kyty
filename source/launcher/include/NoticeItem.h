@@ -19,6 +19,8 @@ public:
 
 	// Shows text, replacing any message still shown, and starts the time to hide it again.
 	void Show(const QString& text);
+	// The message on screen, empty when none is.
+	[[nodiscard]] QString ShownText() const { return isVisible() ? m_text : QString(); }
 
 protected:
 	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
