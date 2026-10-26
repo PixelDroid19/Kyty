@@ -4905,7 +4905,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("8u8lPzUEq+U", LibC::c_memchr);
 	LIB_FUNC("fnUEjBCNRVU", LibC::c_memchr);
 	// Unique wide-mem HLE from bringup (NID does not collide with HEAD Objects).
-	LIB_FUNC("Al8MZJh-4hM", LibC::c_wmemset);
+	LIB_FUNC("Al8MZJh-4hM", LibC::c_wmemset16);
 	LIB_FUNC("5TjaJwkLWxE", LibC::c_bcmp);
 	LIB_FUNC("kiZSXIWd9vg", LibC::c_strcpy);
 	// Gen5 strcpy_s — NID 5Xa2ACNECdo (next hard-abort after thread stack reprotect).

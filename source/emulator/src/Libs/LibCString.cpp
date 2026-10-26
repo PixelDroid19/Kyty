@@ -290,9 +290,18 @@ KYTY_SYSV_ABI wchar_t* c_wmemmove(wchar_t* d, const wchar_t* s, size_t n)
 {
 	return std::wmemmove(d, s, n);
 }
-KYTY_SYSV_ABI wchar_t* c_wmemset(wchar_t* s, wchar_t c, size_t n)
+KYTY_SYSV_ABI char16_t* c_wmemset16(char16_t* d, char16_t c, size_t n)
 {
-	return std::wmemset(s, c, n);
+	if (n == 0)
+	{
+		return d;
+	}
+	EXIT_IF(d == nullptr);
+	for (size_t i = 0; i < n; i++)
+	{
+		d[i] = c;
+	}
+	return d;
 }
 // Gen5 strcpy_s — NID 5Xa2ACNECdo: dest, destsz, src. Returns 0 on success.
 KYTY_SYSV_ABI int c_strcpy_s(char* d, size_t destsz, const char* s)

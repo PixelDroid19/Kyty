@@ -133,7 +133,7 @@ int                KYTY_SYSV_ABI c_wmemcmp16(const char16_t* lhs, const char16_t
 char16_t*          KYTY_SYSV_ABI c_wmemcpy16(char16_t* dst, const char16_t* src, size_t count);
 wchar_t*           KYTY_SYSV_ABI c_wmemcpy(wchar_t* dst, const wchar_t* src, size_t count);
 wchar_t*           KYTY_SYSV_ABI c_wmemmove(wchar_t* dst, const wchar_t* src, size_t count);
-wchar_t*           KYTY_SYSV_ABI c_wmemset(wchar_t* dst, wchar_t value, size_t count);
+char16_t*          KYTY_SYSV_ABI c_wmemset16(char16_t* dst, char16_t value, size_t count);
 int                KYTY_SYSV_ABI c_strcpy_s(char* dst, size_t dst_size, const char* src);
 char*              KYTY_SYSV_ABI c_strncpy(char* dst, const char* src, size_t count);
 int                KYTY_SYSV_ABI c_strcmp(const char* lhs, const char* rhs);
