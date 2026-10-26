@@ -1430,6 +1430,21 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// before compute writes.
 				overlap                = true;
 				render_alias_parent_id = obj.object_id;
+			} else if (o.object.type == GpuMemoryObjectType::RenderTexture && info.type == GpuMemoryObjectType::StorageTexture &&
+			           o.device_write_time == 0u && o.content_origin == GpuMemoryContentOrigin::Unknown)
+			{
+				// The device never wrote this render target, so its image holds no content
+				// and the storage view seeds from guest bytes (captured: a pixel program
+				// with only a null export targets a 12-level chain and stores into it).
+				overlap = true;
+			} else if (o.object.type == GpuMemoryObjectType::StorageTexture && info.type == GpuMemoryObjectType::StorageTexture &&
+			           obj.relation == OverlapType::Contains && h.block.vaddr_num == 1 && vaddr_num == 1 &&
+			           StorageTextureViewsMipTail(o.params, h.block.vaddr[0], info.params, vaddr[0], size[0]))
+			{
+				// One image over the mip tail block of a storage chain reaches the levels
+				// the chain's descriptor cannot (captured: a 64x64 view storing the 1x1
+				// level past the last level of a 9-level 512x512 block chain). Link both.
+				overlap = true;
 			} else if (GpuMemoryAllowsStorageTextureContainedInRenderTarget(o.object.type, obj.relation, info.type))
 			{
 				// A storage view inside a live render target reuses its guest
