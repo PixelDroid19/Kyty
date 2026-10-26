@@ -1843,6 +1843,8 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	LIB_FUNC("EgmLo6EWgso", Posix::pthread_rwlock_unlock);
 	LIB_FUNC("+L98PIbGttk", Kernel::PthreadRwlockUnlock);
 	LIB_FUNC("mqdNorrB+gI", Kernel::PthreadRwlockWrlock);
+	LIB_FUNC("iPtZRWICjrM", Kernel::PthreadRwlockTimedrdlock);
+	LIB_FUNC("adh--6nIqTk", Kernel::PthreadRwlockTimedwrlock);
 	// Gen5 rwlock / attr NIDs observed as strict Unpatched imports.
 	LIB_FUNC("bIHoZCTomsI", Kernel::PthreadRwlockTrywrlock);
 	// Gen5 scePthreadRwlockTryrdlock — NID XD3mDeybCnk.
