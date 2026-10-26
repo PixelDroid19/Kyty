@@ -373,6 +373,7 @@ static bool ShaderInstructionIsPureLaneAlu(const ShaderInstruction& inst)
 		case ShaderInstructionType::VMulF32:
 		case ShaderInstructionType::VMulHiI32:
 		case ShaderInstructionType::VMulHiU32:
+		case ShaderInstructionType::VMulI32I24:
 		case ShaderInstructionType::VMulLoI32:
 		case ShaderInstructionType::VMulLoU32:
 		case ShaderInstructionType::VMulU32U24:

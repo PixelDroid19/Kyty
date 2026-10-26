@@ -538,6 +538,7 @@ enum class ShaderInstructionType : uint32_t
 	VMulU16,
 	VMulHiI32,
 	VMulHiU32,
+	VMulI32I24,
 	VMulLoI32,
 	VMulLoU32,
 	VMulU32U24,

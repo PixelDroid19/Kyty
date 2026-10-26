@@ -5372,12 +5372,16 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1)
 
 	auto dst_value   = operand_variable_to_str(inst.dst);
 	auto dst2_value0 = operand_variable_to_str(inst.dst2, 0);
-	auto dst2_value1 = operand_variable_to_str(inst.dst2, 1);
 
 	if (operand_is_exec(inst.dst2)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst2) condition ignored (continuing)\n"); }
 
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 	if (dst2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+
+	// A wave32 carry writes one word; the adjacent scalar word keeps its value.
+	const auto clear_high = spirv->NativeWave32()
+	                            ? String8 {}
+	                            : String8("OpStore %<dst2_1> %uint_0").ReplaceStr("<dst2_1>", operand_variable_to_str(inst.dst2, 1).value);
 
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
@@ -5406,12 +5410,12 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1)
                OpStore %<dst> %carry_dst_<index>
         %t213_<index> = OpSelect %uint %exec_lo_b_<index> %t208_<index> %uint_0
                OpStore %<dst2_0> %t213_<index>
-               OpStore %<dst2_1> %uint_0
+               <clear_high>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<dst2_0>", dst2_value0.value)
-	                   .ReplaceStr("<dst2_1>", dst2_value1.value)
+	                   .ReplaceStr("<clear_high>", clear_high)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<param>", param[0])

@@ -163,7 +163,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 			break;
 		case 0x07: KYTY_NI("v_mul_legacy_f32"); break;
 		case 0x08: inst.type = ShaderInstructionType::VMulF32; break;
-		case 0x09: KYTY_NI("v_mul_i32_i24"); break;
+		case 0x09: inst.type = ShaderInstructionType::VMulI32I24; break;
 		case 0x0A: KYTY_NI("v_mul_hi_i32_i24"); break;
 		case 0x0C: KYTY_NI("v_mul_hi_u32_u24"); break;
 		case 0x0D:

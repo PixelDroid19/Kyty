@@ -103,9 +103,12 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 		case 0x18: // s_cbranch_cdbguser
 		case 0x19: // s_cbranch_cdbgsys_or_user
 		case 0x1A: // s_cbranch_cdbgsys_and_user
+		case 0x23: // s_waitcnt_depctr
 			// Scheduling, cache and performance hints have no architectural effect on a
 			// translated shader, and with no attached GPU debugger COND_DBG_SYS/USER stay
-			// clear so the debug branches are never taken. Emitters skip these Imm records.
+			// clear so the debug branches are never taken. A dependency-counter wait only
+			// orders hardware pipelines that the host already orders. Emitters skip these
+			// Imm records.
 			inst.type              = ShaderInstructionType::SBarrier;
 			inst.format            = ShaderInstructionFormat::Imm;
 			inst.src[0].type       = ShaderOperandType::LiteralConstant;

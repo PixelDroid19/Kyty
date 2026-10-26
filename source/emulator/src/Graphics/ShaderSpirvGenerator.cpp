@@ -3060,7 +3060,8 @@ void Spirv::WriteFunctions()
 	}
 
 	if (m_code.HasAnyOf({ShaderInstructionType::VMulHiI32, ShaderInstructionType::VMulLoI32, ShaderInstructionType::VMulLoU32, ShaderInstructionType::VMulHiU32,
-	                     ShaderInstructionType::VMadU32U24, ShaderInstructionType::VMulU32U24, ShaderInstructionType::SMulHiU32}))
+	                     ShaderInstructionType::VMadU32U24, ShaderInstructionType::VMulU32U24, ShaderInstructionType::VMulI32I24,
+	                     ShaderInstructionType::SMulHiU32}))
 	{
 		m_source += FUNC_MUL_EXTENDED;
 	}

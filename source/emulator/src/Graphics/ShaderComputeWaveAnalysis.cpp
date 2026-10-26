@@ -530,14 +530,12 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 			return false;
 		}
 		// Partial destination updates are not represented by the ordinary operand
-		// path. Source SEXT is applied by the operand extract; it is admitted for
-		// the integer consumers of a sign-extended field: the signed convert, the
-		// move and the signed compares.
-		const auto name           = ShaderInstructionTypeName(instruction.type);
-		const bool signed_compare = compare && name.size() >= 3u && name.substr(name.size() - 3u) == "I32";
-		if ((!compare && ((control >> 8u) & 7u) != 6u) ||
-		    ((control & ((1u << 19u) | (1u << 27u))) != 0u && !ShaderComputeWaveSdwaSignedConvertSupported(instruction) &&
-		     !ShaderComputeWaveSdwaExtractSupported(instruction) && !signed_compare))
+		// path. Source SEXT is applied by the operand extract of every loader; it
+		// is admitted for the consumers that read their sources as integers.
+		const auto name             = ShaderInstructionTypeName(instruction.type);
+		const auto suffix           = name.size() >= 3u ? name.substr(name.size() - 3u) : name;
+		const bool integer_consumer = suffix == "I32" || suffix == "U32" || suffix == "B32";
+		if ((!compare && ((control >> 8u) & 7u) != 6u) || ((control & ((1u << 19u) | (1u << 27u))) != 0u && !integer_consumer))
 		{
 			return false;
 		}
@@ -552,14 +550,14 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 		case ShaderInstructionType::VOrB32:
 		case ShaderInstructionType::VXorB32:
 		case ShaderInstructionType::VAddI32:
-		case ShaderInstructionType::VSubI32: integer_sources = 2; break;
+		case ShaderInstructionType::VSubI32:
+		case ShaderInstructionType::VSubrevI32: integer_sources = 2; break;
 		case ShaderInstructionType::VAdd3U32: integer_sources = 3; break;
 		default: break;
 	}
 	if (integer_sources != 0)
 	{
-		const bool carry = (instruction.type == ShaderInstructionType::VAddI32 || instruction.type == ShaderInstructionType::VSubI32) &&
-		                   instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
+		const bool carry = instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
 		// Legacy VOP2/VOP3 add/sub have a real native carry/borrow emitter.
 		// This is a VALU mask destination, so odd SGPR pairs remain legal.
 		const bool destination_valid = carry ? IsMaskDestination(instruction.dst2) : IsUnusedDestination(instruction.dst2);
@@ -986,8 +984,7 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 {
 	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
 	// The native legacy carry emitter does not implement paired mask packing.
-	if ((instruction.type == ShaderInstructionType::VAddI32 || instruction.type == ShaderInstructionType::VSubI32) &&
-	    instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1) { return false; }
+	if (instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1) { return false; }
 	if (ShaderComputeWaveSdwaSignedConvertSupported(instruction)) { return true; }
 	if (ShaderIsImageAtomic(instruction.type)) { return ShaderImageAtomicSupported(instruction); }
 	const auto name   = ShaderInstructionTypeName(instruction.type);
