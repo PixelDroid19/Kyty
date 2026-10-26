@@ -3660,6 +3660,34 @@ TEST(EmulatorGraphicsState, RunsFsrOnlyForPresentationUpscales)
 	EXPECT_FLOAT_EQ(PresentationFsrSharpnessStops(0), 2.0f);
 }
 
+TEST(EmulatorGraphicsState, PrefiltersPresentationDownscalesLargerThanTwoToOne)
+{
+	// 4K presented in a 720p window is a 3:1 blit at texel centres: the extra pass is a half-size copy.
+	const auto quarter = PresentationDownscaleExtent({3840, 2160}, {1280, 720});
+	EXPECT_EQ(quarter.width, 1920u);
+	EXPECT_EQ(quarter.height, 1080u);
+	// Only the axes beyond 2:1 are halved; the other keeps its extent.
+	const auto wide = PresentationDownscaleExtent({3840, 2160}, {1600, 1440});
+	EXPECT_EQ(wide.width, 1920u);
+	EXPECT_EQ(wide.height, 2160u);
+	const auto odd = PresentationDownscaleExtent({3000, 2000}, {1000, 700});
+	EXPECT_EQ(odd.width, 1500u);
+	EXPECT_EQ(odd.height, 1000u);
+	// 2:1 and smaller reductions already average a box, and degenerate extents have nothing to filter.
+	for (const auto pair: {std::pair<VkExtent2D, VkExtent2D> {{3840, 2160}, {1920, 1080}},
+	                       {{2560, 1440}, {1280, 720}},
+	                       {{3840, 2160}, {2560, 1440}},
+	                       {{1920, 1080}, {1280, 720}},
+	                       {{1280, 720}, {1280, 720}},
+	                       {{1280, 720}, {1920, 1080}},
+	                       {{0, 720}, {1280, 720}}})
+	{
+		const auto extent = PresentationDownscaleExtent(pair.first, pair.second);
+		EXPECT_EQ(extent.width, 0u);
+		EXPECT_EQ(extent.height, 0u);
+	}
+}
+
 TEST(EmulatorGraphicsState, KeepsColorExportsLogicalForPhysicalAttachmentOrder)
 {
 	for (uint32_t channel_order = 0; channel_order < 4; channel_order++)

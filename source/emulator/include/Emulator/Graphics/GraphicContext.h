@@ -70,6 +70,7 @@ namespace Kyty::Libs::Graphics {
 }
 
 struct PresentationEncodeStage;
+struct PresentationDownscaleStage;
 struct PresentationFsrStage;
 struct TransientSnapshotPool;
 
@@ -86,6 +87,8 @@ struct VulkanSwapchain
 	uint32_t       current_index              = 0;
 	// sRGB encoding stage for linear-light present sources; owned by PresentationScaler.
 	PresentationEncodeStage* encode_stage = nullptr;
+	// 2:1 prefilter stage for present downscales; owned by PresentationScaler.
+	PresentationDownscaleStage* downscale_stage = nullptr;
 	// FSR 1.0 passes of the Fsr presentation filter; owned by PresentationScaler.
 	PresentationFsrStage* fsr_stage = nullptr;
 };

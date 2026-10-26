@@ -61,6 +61,13 @@ struct PresentationEncodeStage
 	VulkanMemory memory;
 };
 
+// One half-resolution copy for present downscales larger than 2:1 on an axis.
+struct PresentationDownscaleStage
+{
+	VulkanImage  image {VulkanImageType::Unknown};
+	VulkanMemory memory;
+};
+
 namespace {
 
 void DestroyEncodeStage(GraphicContext* context, VulkanSwapchain* swapchain)
@@ -97,6 +104,43 @@ PresentationEncodeStage* EnsureEncodeStage(GraphicContext* context, VulkanSwapch
 	stage->image.extent = {descriptor.extent.width, descriptor.extent.height};
 	stage->image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
 	swapchain->encode_stage = stage;
+	return stage;
+}
+
+void DestroyDownscaleStage(GraphicContext* context, VulkanSwapchain* swapchain)
+{
+	if (swapchain->downscale_stage == nullptr) { return; }
+	vkDestroyImage(context->device, swapchain->downscale_stage->image.image, nullptr);
+	VulkanFree(context, &swapchain->downscale_stage->memory);
+	delete swapchain->downscale_stage;
+	swapchain->downscale_stage = nullptr;
+}
+
+// The stage is recreated whenever the source format or the selected half extent changes; swapchain recreation
+// waits for the device to idle, so a stage of an old extent is no longer read by any present here.
+PresentationDownscaleStage* EnsureDownscaleStage(GraphicContext* context, VulkanSwapchain* swapchain, VkFormat format, VkExtent2D extent)
+{
+	auto* stage = swapchain->downscale_stage;
+	if (stage != nullptr && stage->image.format == format && stage->image.extent.width == extent.width &&
+	    stage->image.extent.height == extent.height)
+	{
+		return stage;
+	}
+	DestroyDownscaleStage(context, swapchain);
+	VulkanImageDescriptor descriptor {};
+	descriptor.extent = {extent.width, extent.height, 1};
+	descriptor.format = format;
+	descriptor.usage  = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	stage             = new PresentationDownscaleStage;
+	if (!VulkanCreateDeviceImage(context, VulkanBuildImageCreateInfo(descriptor), &stage->image, &stage->memory))
+	{
+		delete stage;
+		return nullptr;
+	}
+	stage->image.format = format;
+	stage->image.extent = extent;
+	stage->image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+	swapchain->downscale_stage = stage;
 	return stage;
 }
 
@@ -170,6 +214,31 @@ bool PresentationNeedsEncodeStage(VkFormat source_format, VkFormat swapchain_for
 	return PresentationSourceHoldsLinearLight(source_format) && !IsSrgbFormat(swapchain_format);
 }
 
+VkExtent2D PresentationDownscaleExtent(VkExtent2D source, VkExtent2D target)
+{
+	if (source.width == 0 || source.height == 0 || target.width == 0 || target.height == 0)
+	{
+		return {0, 0};
+	}
+	// Only the axes that shrink by more than 2:1 need the extra pass.
+	const bool wide = source.width > 2u * target.width;
+	const bool high = source.height > 2u * target.height;
+	if (!wide && !high)
+	{
+		return {0, 0};
+	}
+	VkExtent2D extent = source;
+	if (wide)
+	{
+		extent.width = (source.width + 1u) / 2u;
+	}
+	if (high)
+	{
+		extent.height = (source.height + 1u) / 2u;
+	}
+	return extent;
+}
+
 PresentationScaleStatus PresentationScalerBlitFinalImage(CommandBuffer* command_buffer, GraphicContext* context, VulkanImage* source,
                                                          VulkanSwapchain* destination)
 {
@@ -209,6 +278,23 @@ PresentationScaleStatus PresentationScalerBlitFinalImage(CommandBuffer* command_
 		                             Config::GetPresentationFsrSharpness(), &destination->fsr_stage)
 		           ? PresentationScaleStatus::Success
 		           : PresentationScaleStatus::UnsupportedFilter;
+	}
+	// A 3:1 blit samples texel centres, so the game's one-texel dither survives as a static beat. Halve the source
+	// first: the final blit is then at most 2:1, whose bilinear footprint is a 2x2 box.
+	const VkExtent2D prefilter = PresentationDownscaleExtent(source->extent, destination->swapchain_extent);
+	const VkFormatFeatureFlags prefilter_features =
+	    VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+	if (filter == VK_FILTER_LINEAR && prefilter.width != 0 && FormatSupports(context->physical_device, source->format, prefilter_features))
+	{
+		if (auto* stage = EnsureDownscaleStage(context, destination, source->format, prefilter); stage != nullptr)
+		{
+			auto* cmd = command_buffer->RecordOutsideRenderPass();
+			// The previous present may still be reading this stage on the same queue.
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 0, nullptr);
+			UtilBlitImageTo(command_buffer, source, stage->image.image, stage->image.extent, VK_FILTER_LINEAR);
+			stage->image.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			source              = &stage->image;
+		}
 	}
 	if (!PresentationNeedsEncodeStage(source->format, destination->swapchain_format))
 	{

@@ -35,6 +35,11 @@ enum class PresentationScaleStatus : uint8_t
 // into sRGB destinations), which darkens the image. Linear-light sources therefore go through the sRGB twin first and
 // reach the swapchain by a bit-exact copy; already-encoded sources and sRGB swapchains blit directly.
 [[nodiscard]] bool     PresentationNeedsEncodeStage(VkFormat source_format, VkFormat swapchain_format);
+// A 3:1 or larger downscale sampled at texel centres keeps the game's one-texel
+// dither as a static beat. Halving the source first makes the final blit at
+// most 2:1, whose bilinear footprint is a 2x2 box that cancels it. Returns
+// {0,0} when the source is not larger than twice the target on either axis.
+[[nodiscard]] VkExtent2D PresentationDownscaleExtent(VkExtent2D source, VkExtent2D target);
 
 [[nodiscard]] PresentationScaleStatus PresentationScalerBlitFinalImage(CommandBuffer* command_buffer, GraphicContext* context,
                                                                        VulkanImage* source, VulkanSwapchain* destination);
