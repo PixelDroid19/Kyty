@@ -872,6 +872,10 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer,
                        const Vector<VkBufferImageCopy>& regions, uint64_t src_layout);
 void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
+// A descriptor samples color images in SHADER_READ_ONLY_OPTIMAL (or GENERAL when storage aliases it). A GPU-owned
+// render target starts UNDEFINED and its first consumer may be such a descriptor, which is a layout error even though
+// the texels are never read. Record the discard transition to the declared layout before the draw.
+void UtilTransitionColorImageLayout(CommandBuffer* buffer, VulkanImage* image, uint64_t dst_layout);
 // Copy the raw 32-bit texels of a single-sample, single-layer image into another of the same extent through a
 // transient buffer, one of them D32 depth (or the depth plane of D32S8, whose stencil it keeps) and the other R32 or
 // B10G11R11 color. Returns false for any other pair.
