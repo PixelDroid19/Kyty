@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "PageLayout.h"
 
+#include <QImage>
 #include <QQuickItem>
 #include <QTimer>
 #include <QVariantList>
@@ -90,6 +91,9 @@ private:
 	QRectF                    m_divider;
 	QVector<PageLayout::Text> m_texts;
 	QVector<Dot>              m_dots;
+	// The chosen add-on theme's screenshot, and where it shows; an empty rect hides it.
+	QImage                    m_screenshot;
+	QRectF                    m_screenshot_rect;
 	// Bumped whenever m_texts is replaced, so the nodes are built again.
 	int m_generation = 0;
 };

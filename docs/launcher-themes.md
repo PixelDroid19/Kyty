@@ -63,7 +63,8 @@ start = start.wav
   and `glitch_cyan`. A theme's accent wins over the accent setting.
 - `font` is a `.ttf` or `.otf` file used for the whole interface.
 - `background` is a `.png`, `.jpg` or `.webp` picture drawn behind the pages;
-  `screenshot` takes the same formats. Pictures may be at most 8192 × 8192.
+  `screenshot` takes the same formats and shows under Style in Settings ›
+  Interface while the theme is in use. Pictures may be at most 8192 × 8192.
 - `layout` picks the launcher's layout while the theme is in use, over the
   Layout setting.
 - `[Sounds]` replaces any of the interface sounds with a `.wav` file; the
