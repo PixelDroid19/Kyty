@@ -854,12 +854,16 @@ bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction)
 	// VOPC SDWA has scalar destination fields, not the VOP2 destination-select
 	// fields. Admit DWORD sources without sign extension or reserved controls.
 	constexpr uint32_t unsupported_sdwa = (1u << 19u) | (1u << 22u) | (1u << 27u) | (1u << 30u);
+	// abs and neg on the classified float only move its sign bit.
+	ShaderOperand value = instruction.src[0];
+	value.absolute      = false;
+	value.negate        = false;
 	return instruction.type == ShaderInstructionType::VCmpClassF32 &&
 	       instruction.format == ShaderInstructionFormat::SmaskVsrc0Vsrc1 && instruction.src_num == 2 &&
 	       instruction.vop3_op_sel == 0u && instruction.vop3_omod == 0u &&
 	       (!instruction.vop_sdwa || (instruction.vop_sdwa_ctrl & unsupported_sdwa) == 0u) &&
 	       IsUnusedDestination(instruction.dst2) && IsScalarPairVariable(dst) && dst.type != ShaderOperandType::ExecLo &&
-	       IsTask3MaskSource(instruction.src[0]) && IsTask3MaskSource(instruction.src[1]);
+	       IsTask3MaskSource(value) && IsTask3MaskSource(instruction.src[1]);
 }
 
 bool ShaderComputeWaveGenericCompareSupported(const ShaderInstruction& instruction)

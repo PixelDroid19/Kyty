@@ -3470,7 +3470,7 @@ void Spirv::FindConstants()
 		if (inst.type == ShaderInstructionType::VCmpClassF32)
 		{
 			for (uint32_t value = 0; value < 10u; ++value) { AddConstantUint(value); }
-			for (const uint32_t mask: {0x7f800000u, 0x007fffffu, 0x00400000u, 0x80000000u}) { AddConstantUint(mask); }
+			for (const uint32_t mask: {0x7f800000u, 0x007fffffu, 0x00400000u, 0x80000000u, 0x7fffffffu}) { AddConstantUint(mask); }
 		}
 		if (inst.type == ShaderInstructionType::ImageBvhIntersectRay)
 		{
