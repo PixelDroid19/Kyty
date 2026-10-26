@@ -4085,6 +4085,15 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					{
 						has_texture_parent |= overlaps.entries[entry].type == GpuMemoryObjectType::Texture;
 						has_render_texture |= overlaps.entries[entry].type == GpuMemoryObjectType::RenderTexture;
+						has_storage_texture |= overlaps.entries[entry].type == GpuMemoryObjectType::StorageTexture;
+						if (overlaps.entries[entry].type == GpuMemoryObjectType::StorageTexture &&
+						    overlaps.entries[entry].relation == GpuMemoryOverlapType::Crosses)
+						{
+							crossing_storage_textures += overlaps.entries[entry].count;
+						}
+						has_partial_storage |= overlaps.entries[entry].type == GpuMemoryObjectType::StorageBuffer &&
+						                       (overlaps.entries[entry].relation == GpuMemoryOverlapType::IsContainedWithin ||
+						                        overlaps.entries[entry].relation == GpuMemoryOverlapType::Crosses);
 					}
 				}
 				// Only a render target that can hold this sample owns the range; one of
@@ -4101,10 +4110,26 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					}
 					stale_render_textures = stale ? covers.Size() : 0u;
 				}
+				// Storage images likewise: one of another extent holds an earlier use of the range. They are
+				// counted over the range the overlap query settled on; the lookup leaves out crossing ones.
+				uint32_t stale_storage_textures = crossing_storage_textures;
+				if (has_storage_texture)
+				{
+					const auto views = FindOverlappingStorageTextures(buffer, query_addr, query_size);
+					bool       stale = !views.IsEmpty();
+					for (const auto* view: views)
+					{
+						const auto extent = view->GetGuestExtent();
+						stale = stale && !Gen5SurfaceExtentMayHoldSample(extent.width, extent.height, width, height, 1u, false);
+					}
+					stale_storage_textures += stale ? views.Size() : 0u;
+				}
+				const bool               needs_provenance = has_texture_parent || has_partial_storage;
 				GpuMemoryRangeProvenance provenance {};
-				const bool provenance_ok = !has_texture_parent || GpuMemoryQueryRangeProvenance(addr, depth_span_size, &provenance);
+				const bool provenance_ok = !needs_provenance || GpuMemoryQueryRangeProvenance(addr, depth_span_size, &provenance);
 				depth_source = overlaps_ok && provenance_ok
-				                   ? GpuMemoryClassifyDepthD16Source(overlaps, has_texture_parent ? &provenance : nullptr, stale_render_textures)
+				                   ? GpuMemoryClassifyDepthD16Source(overlaps, needs_provenance ? &provenance : nullptr, stale_render_textures,
+				                                                     stale_storage_textures)
 				                   : GpuMemoryDepthD16Source::Unsupported;
 				// The storage-backed detile is a 16-bit equation.
 				const bool source_ok = depth_source == GpuMemoryDepthD16Source::Guest ||
