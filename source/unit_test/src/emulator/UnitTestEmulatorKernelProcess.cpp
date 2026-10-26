@@ -1461,7 +1461,7 @@ TEST(EmulatorKernelProcess, AprReadAndCompletionExecuteAtSubmitInRecordOrder)
 	Kernel::FileSystem::Mount(root, U"/app0/");
 	const char* paths[] = {"/app0/payload.bin"};
 	uint32_t file_id = 0;
-	ASSERT_EQ(Kernel::FileSystem::KernelAprResolveFilepathsToIds(paths, 1, &file_id), OK);
+	ASSERT_EQ(Kernel::FileSystem::KernelAprResolveFilepathsToIds(paths, 1, &file_id, nullptr), OK);
 	Kernel::FileSystem::FileStat apr_stat {};
 	ASSERT_EQ(Kernel::FileSystem::KernelAprGetFileStat(file_id, &apr_stat), OK);
 	EXPECT_EQ(apr_stat.st_flags, 0u);
