@@ -249,6 +249,8 @@ void LauncherWindow::Rebuild()
 	const auto place  = m_settings->CurrentPlace();
 	const int  row    = m_library->FocusedGame().value("row", -1).toInt();
 	const int  opened = m_library->GamePageRow();
+	// A notice shown just before, such as why a theme was turned back, outlives the old items.
+	const auto notice = m_notice->ShownText();
 	for (QQuickItem* item: contentItem()->childItems())
 	{
 		item->setParentItem(nullptr);
@@ -257,6 +259,10 @@ void LauncherWindow::Rebuild()
 	BuildItems();
 	Layout();
 	StateChanged();
+	if (!notice.isEmpty())
+	{
+		m_notice->Show(notice);
+	}
 	if (opened >= 0)
 	{
 		m_library->OpenGamePage(opened);
