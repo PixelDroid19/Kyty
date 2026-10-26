@@ -61,6 +61,8 @@ struct ShaderDynamicSLoadUse
 	uint32_t                    last_consumer_pc   = 0;
 	bool                        raw_vmem_oob_guarded = false;
 	bool                        sampled_shape_known = false;
+	// Every read consumer fetches texels without a sampler, so a storage view can serve it.
+	bool                        storage_readable   = false;
 	bool                        found              = false;
 	bool                        valid              = true;
 };
@@ -119,6 +121,55 @@ struct ShaderInstructionIndices
 // start register or binding layout. Each memo belongs to one immutable code object and is shared
 // by every draw of that program; a null memo analyzes the code directly. Entry
 // values passed to DirectImageUse must come from this code's own scalar flow.
+// A T# or S# that a fused GS program loads, at a constant table dword, through
+// the GS user-data address it receives in s[0:1] (block: its part of the load).
+struct ShaderGsUserDataDescriptorLoad
+{
+	ShaderInstruction     block;
+	int                   offset_dw = 0;
+	ShaderDynamicSLoadUse use;
+};
+
+// Part of a T# that a load writes: block is its part of the load, offset_dw
+// its first table dword and field_offset its first T# dword.
+struct ShaderNestedTexturePiece
+{
+	ShaderInstruction block;
+	int               offset_dw    = 0;
+	int               field_offset = 0;
+};
+
+// An image consumer whose T# scalar moves assemble, within its CFG block, from
+// parts of loads of eight consecutive dwords of one table.
+struct ShaderNestedCopiedTexture
+{
+	uint32_t                              consumer  = 0;
+	int                                   offset_dw = 0;
+	std::vector<ShaderNestedTexturePiece> pieces;
+};
+
+// A buffer consumer whose V# dwords come, on every path and through at least
+// one scalar move, from loads of four consecutive dwords of one table.
+struct ShaderNestedCopiedBuffer
+{
+	uint32_t consumer  = 0;
+	int      offset_dw = 0;
+};
+
+// Descriptors a program loads, at constant table dwords, through a table
+// pointer that a scalar load at pointer_index reads, at pointer_offset_dw, out
+// of an SRT pointer table; that load is the only write of the base reaching
+// each descriptor load.
+struct ShaderNestedTableLoad
+{
+	uint32_t                                    pointer_index     = 0;
+	int                                         pointer_offset_dw = 0;
+	std::vector<ShaderGsUserDataDescriptorLoad> loads;
+	std::vector<ShaderNestedCopiedTexture>      copied_textures;
+	std::vector<ShaderNestedCopiedBuffer>       copied_buffers;
+};
+[[nodiscard]] std::vector<ShaderNestedTableLoad> ShaderFindNestedTableLoads(const ShaderCode& code);
+
 class ShaderCodeResourceMemo
 {
 public:
@@ -131,6 +182,7 @@ public:
 	[[nodiscard]] const std::vector<ShaderDynamicSLoadUse>& DescriptorSLoadUses(const ShaderCode& code) const;
 	[[nodiscard]] const ShaderEudDescriptorLoads&           EudDescriptorLoads(const ShaderCode& code) const;
 	[[nodiscard]] const ShaderInstructionIndices&           InstructionIndices(const ShaderCode& code) const;
+	[[nodiscard]] const std::vector<ShaderNestedTableLoad>& NestedTableLoads(const ShaderCode& code) const;
 	[[nodiscard]] ShaderDynamicSLoadSpan DynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping) const;
 	// Copy-flow reads for the binding layout of `bind` (ShaderImageCopyLayout).
 	[[nodiscard]] std::vector<ShaderImageCopyRead> ImageCopyReads(const ShaderCode& code, const ShaderBindResources& bind,
@@ -148,6 +200,8 @@ private:
 	mutable bool                                                    m_eud_descriptor_loads_ready = false;
 	mutable ShaderInstructionIndices                                m_instruction_indices;
 	mutable bool                                                    m_instruction_indices_ready = false;
+	mutable std::vector<ShaderNestedTableLoad>                      m_nested_table_loads;
+	mutable bool                                                    m_nested_table_loads_ready = false;
 	// Keyed by load PC, last consumer PC, destination register and dword count.
 	mutable std::map<std::tuple<uint32_t, uint32_t, int, int>, ShaderDynamicSLoadSpan> m_dynamic_sload_spans;
 	mutable std::map<std::vector<int32_t>, std::vector<ShaderImageCopyRead>>           m_image_copy_reads;
@@ -196,18 +250,15 @@ void ShaderCollectRedefinedBufferDescriptors(const ShaderCode& code, ShaderBindR
 void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                              int user_sgpr_num, int user_data_register_base, const ShaderScalarFlow& scalar_flow,
                                              const ShaderCodeResourceMemo* memo);
+// Binds, like assembled descriptors, each V# scalar moves copy out of a table
+// that an SRT pointer table selects (ShaderNestedCopiedBuffer).
+void ShaderCollectNestedCopiedBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
+                                                uint16_t srt_size_dw, int user_data_register_base, const ShaderScalarFlow& scalar_flow,
+                                                const ShaderCodeResourceMemo* memo);
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                         ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base,
                                         const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo);
 
-// A T# or S# that a fused GS program loads, at a constant table dword, through
-// the GS user-data address it receives in s[0:1] (block: its part of the load).
-struct ShaderGsUserDataDescriptorLoad
-{
-	ShaderInstruction     block;
-	int                   offset_dw = 0;
-	ShaderDynamicSLoadUse use;
-};
 // Draw-independent analysis of the program code.
 std::vector<ShaderGsUserDataDescriptorLoad> ShaderFindGsUserDataDescriptorLoads(const ShaderCode& code);
 // Binds what the loads read from the draw's table; the loads keep reading

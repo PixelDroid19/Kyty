@@ -6258,7 +6258,9 @@ TEST(EmulatorGraphicsPackets, MaterializesArrayedGen5ImageLoadAndStoreCoordinate
 	EXPECT_NE(source.FindIndex("%ImageSA = OpTypeImage %uint 2D 0 1 0 1 Unknown"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%ImageL = OpTypeImage %uint 2D 0 1 0 2 R32ui"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpCompositeConstruct %v3uint"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpImageFetch %v4uint"), Core::STRING8_INVALID_INDEX);
+	// The load reads the storage view of the T# the shader also writes.
+	EXPECT_NE(source.FindIndex("OpImageRead %v4uint"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpImageFetch"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpBitcast %float"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpBitcast %uint"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpImageWrite"), Core::STRING8_INVALID_INDEX);

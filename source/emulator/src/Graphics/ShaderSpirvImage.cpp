@@ -4025,12 +4025,17 @@ static bool EmitStorageImageResinfo(const ShaderCode& code, uint32_t index, int 
 	const auto& inst = code.GetInstructions().At(index);
 	const auto& bind = *spirv->GetBindInfo();
 	const auto& texture = bind.textures2D.desc[descriptor_index].texture;
-	// A storage view has one mip. Only a proven level-zero spatial query of
-	// a single-mip 2D resource has the same dimensions as that view here.
-	if (!Config::IsNextGen() || texture.Type() != 9u || texture.BaseLevel() != 0u || texture.LastLevel() != 0u ||
-	    texture.MaxMip() != 0u || inst.mimg_dimension != 1u || inst.mimg_dmask == 0u || (inst.mimg_dmask & ~3u) != 0u ||
+	// A storage view has one mip, the T# base level, and the query's LOD is
+	// relative to that level. Only a proven LOD-zero spatial query of a 2D or
+	// 2D-array T# that selects a single level has the same width and height as
+	// that view.
+	const bool flat  = texture.Type() == 9u && inst.mimg_dimension == 1u;
+	const bool array = texture.Type() == 13u && inst.mimg_dimension == 5u;
+	if (!Config::IsNextGen() || !(flat || array) || texture.BaseLevel() != texture.LastLevel() ||
+	    inst.mimg_dmask == 0u || (inst.mimg_dmask & ~3u) != 0u ||
 	    !ImageResinfoHasZeroLod(code, index)) { return false; }
 	const auto view = StorageImageViewOfDescriptor(code, bind, descriptor_index);
+	if ((view.shape == ShaderGen5SampledTextureShape::TwoDimensionalArray) != array) { return false; }
 	const int components = static_cast<int>((inst.mimg_dmask & 1u) + ((inst.mimg_dmask >> 1u) & 1u));
 	const auto storage_constant = spirv->GetConstantUint(static_cast<uint32_t>(storage_index));
 	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != components || storage_constant.StartsWith("unknown_"))
@@ -4041,8 +4046,9 @@ static bool EmitStorageImageResinfo(const ShaderCode& code, uint32_t index, int 
 	*dst_source += String8(R"(
 %storage_resinfo_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %<storage_index>
 %storage_resinfo_image_<index> = OpLoad %ImageL %storage_resinfo_ptr_<index>
-%storage_resinfo_size_<index> = OpImageQuerySize %v2uint %storage_resinfo_image_<index>
+%storage_resinfo_size_<index> = OpImageQuerySize %<size_type> %storage_resinfo_image_<index>
 )").ReplaceStr("ImageL", view.image_type).ReplaceStr("textures2D_L", view.variable)
+	  .ReplaceStr("<size_type>", array ? "v3uint" : "v2uint")
 	  .ReplaceStr("<index>", index_string).ReplaceStr("<storage_index>", storage_constant);
 	int destination = 0;
 	for (uint32_t component = 0; component < 2u; ++component)
@@ -4277,6 +4283,126 @@ OpStore %<destination> %image_resinfo_component_f_<index>_<component>
 	return true;
 }
 
+// A texel load from a T# the shader also writes reads its storage view. The
+// components follow DST_SEL as for formatted loads; a texel outside the view
+// reads as zero.
+static bool EmitStorageImageLoad(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind, int user_data_register_base,
+                                 uint8_t dmask, Spirv* spirv, String8* dst_source)
+{
+	const auto& inst          = code.GetInstructions().At(index);
+	const int   storage_index = ResolveStorageTextureArrayIndex(code, index, bind, user_data_register_base);
+	ShaderStorageImageView view;
+	if (inst.mimg_explicit_lod || storage_index < 0 || !ResolveStorageImageView(code, index, bind, user_data_register_base, &view))
+	{
+		return false;
+	}
+	const bool arrayed           = view.shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
+	const bool three_dimensional = view.shape == ShaderGen5SampledTextureShape::ThreeDimensional;
+	if (three_dimensional && inst.mimg_dimension != 2u && inst.mimg_dimension != 5u)
+	{
+		return false;
+	}
+	const bool     array_window_2d  = arrayed && inst.mimg_dimension == 1u;
+	const uint32_t coordinate_count = (arrayed || three_dimensional) ? 3u : 2u;
+	const auto     storage_constant = spirv->GetConstantUint(static_cast<uint32_t>(storage_index));
+	const auto     zero_component   = view.unsigned_integer ? spirv->GetConstantUint(0u) : spirv->GetConstantFloat(0.0f);
+	const auto     one_component    = view.unsigned_integer ? spirv->GetConstantUint(1u) : spirv->GetConstantFloat(1.0f);
+	if (storage_constant.StartsWith("unknown_") || zero_component.StartsWith("unknown_") || one_component.StartsWith("unknown_"))
+	{
+		return false;
+	}
+
+	const auto index_string = String8::FromPrintf("%u", index);
+	String8    coordinates;
+	String8    bounds;
+	for (uint32_t component = 0; component < coordinate_count; component++)
+	{
+		if (component == 2u && array_window_2d)
+		{
+			coordinates += " %uint_0";
+			bounds += String8::FromPrintf("%%storage_load_in_bounds_%u_2 = OpCopyObject %%bool %%storage_load_in_bounds_%u_1\n", index,
+			                              index);
+			continue;
+		}
+		const auto address = mimg_address_to_str(inst, static_cast<int>(component));
+		if (address.type != SpirvType::Float)
+		{
+			return false;
+		}
+		bounds += String8::FromPrintf("%%storage_load_f_%u_%u = OpLoad %%float %%%s\n"
+		                              "%%storage_load_c_%u_%u = OpBitcast %%uint %%storage_load_f_%u_%u\n"
+		                              "%%storage_load_extent_%u_%u = OpCompositeExtract %%uint %%storage_load_extent_u_%u %u\n"
+		                              "%%storage_load_inside_%u_%u = OpULessThan %%bool %%storage_load_c_%u_%u %%storage_load_extent_%u_%u\n",
+		                              index, component, address.value.c_str(), index, component, index, component, index, component,
+		                              index, component, index, component, index, component, index, component, index, component);
+		bounds += component == 0u ? String8::FromPrintf("%%storage_load_in_bounds_%u_0 = OpCopyObject %%bool %%storage_load_inside_%u_0\n",
+		                                                index, index)
+		                          : String8::FromPrintf("%%storage_load_in_bounds_%u_%u = OpLogicalAnd %%bool "
+		                                                "%%storage_load_in_bounds_%u_%u %%storage_load_inside_%u_%u\n",
+		                                                index, component, index, component - 1u, index, component);
+		coordinates += String8::FromPrintf(" %%storage_load_c_%u_%u", index, component);
+	}
+
+	static const char* text = R"(
+%storage_load_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %<storage_index>
+%storage_load_image_<index> = OpLoad %ImageL %storage_load_ptr_<index>
+%storage_load_extent_i_<index> = OpImageQuerySize %<extent_type> %storage_load_image_<index>
+%storage_load_extent_u_<index> = OpBitcast %<coordinate_type> %storage_load_extent_i_<index>
+<bounds>%storage_load_coordinate_<index> = OpCompositeConstruct %<coordinate_type><coordinates>
+%storage_load_zero_<index> = OpCompositeConstruct %<image_vector> %<zero> %<zero> %<zero> %<zero>
+OpBranch %storage_load_head_<index>
+%storage_load_head_<index> = OpLabel
+OpSelectionMerge %storage_load_merge_<index> None
+OpBranchConditional %storage_load_in_bounds_<index>_<last> %storage_load_read_<index> %storage_load_merge_<index>
+%storage_load_read_<index> = OpLabel
+%storage_load_texel_<index> = OpImageRead %<image_vector> %storage_load_image_<index> %storage_load_coordinate_<index>
+OpBranch %storage_load_merge_<index>
+%storage_load_merge_<index> = OpLabel
+%storage_load_result_<index> = OpPhi %<image_vector> %storage_load_texel_<index> %storage_load_read_<index> %storage_load_zero_<index> %storage_load_head_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("ImageL", view.image_type)
+	                   .ReplaceStr("textures2D_L", view.variable)
+	                   .ReplaceStr("<bounds>", bounds)
+	                   .ReplaceStr("<coordinates>", coordinates)
+	                   .ReplaceStr("<coordinate_type>", coordinate_count == 3u ? "v3uint" : "v2uint")
+	                   .ReplaceStr("<extent_type>", coordinate_count == 3u ? "v3int" : "v2int")
+	                   .ReplaceStr("<image_vector>", view.unsigned_integer ? "v4uint" : "v4float")
+	                   .ReplaceStr("<zero>", zero_component)
+	                   .ReplaceStr("<last>", String8::FromPrintf("%u", coordinate_count - 1u))
+	                   .ReplaceStr("<storage_index>", storage_constant)
+	                   .ReplaceStr("<index>", index_string);
+
+	const int   descriptor_index = ShaderFindImageStorageTextureDescriptor(code, index, bind, user_data_register_base);
+	const auto& texture          = bind.textures2D.desc[descriptor_index].texture;
+	const bool  swizzle          = ShaderStorageTextureSwizzleInShader(texture);
+	int         destination      = 0;
+	for (uint32_t component = 0; component < 4; component++)
+	{
+		if ((dmask & (1u << component)) == 0)
+		{
+			continue;
+		}
+		const auto dst = operand_variable_to_str(inst.dst, destination++);
+		if (dst.type != SpirvType::Float)
+		{
+			return false;
+		}
+		const uint32_t select = swizzle ? GetDstSel(texture.DstSelXYZW(), component) : component + 4u;
+		const auto     value  = select >= 4u ? String8::FromPrintf("%%storage_load_scalar_%u_%u", index, component)
+		                                     : String8("%") + (select == 1u ? one_component : zero_component);
+		if (select >= 4u)
+		{
+			*dst_source += String8::FromPrintf("%%storage_load_scalar_%u_%u = OpCompositeExtract %%%s %%storage_load_result_%u %u\n", index,
+			                                   component, view.unsigned_integer ? "uint" : "float", index, select - 4u);
+		}
+		*dst_source += String8::FromPrintf("%%storage_load_value_%u_%u = %s %%float %s\nOpStore %%%s %%storage_load_value_%u_%u\n", index,
+		                                   component, view.unsigned_integer ? "OpBitcast" : "OpCopyObject", value.c_str(),
+		                                   dst.value.c_str(), index, component);
+	}
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_VdataVaddr3StDmask)
 {
 	if (ViolatesOneDimensionalArrayContract(code, index, spirv))
@@ -4289,6 +4415,13 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_VdataVaddr3StDmask)
 	if (bind_info == nullptr)
 	{
 		return false;
+	}
+	const auto* vs_info                 = spirv->GetVsInputInfo();
+	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
+	if (bind_info->textures2D.textures2d_storage_num > 0 &&
+	    ShaderFindImageStorageTextureDescriptor(code, index, *bind_info, user_data_register_base) >= 0)
+	{
+		return EmitStorageImageLoad(code, index, *bind_info, user_data_register_base, dmask, spirv, dst_source);
 	}
 	// DIM 4 supplies (x, slice[, mip]) for a 1D-array T# (RDNA2 ISA table 42). It fetches the one
 	// host row of the slice's array layer.
