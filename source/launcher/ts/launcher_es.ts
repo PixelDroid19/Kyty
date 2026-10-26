@@ -197,6 +197,221 @@
     </message>
 </context>
 <context>
+    <name>ControlsPanelItem</name>
+    <message>
+        <source>✕ Cross</source>
+        <translation>✕ Equis</translation>
+    </message>
+    <message>
+        <source>○ Circle</source>
+        <translation>○ Círculo</translation>
+    </message>
+    <message>
+        <source>□ Square</source>
+        <translation>□ Cuadrado</translation>
+    </message>
+    <message>
+        <source>△ Triangle</source>
+        <translation>△ Triángulo</translation>
+    </message>
+    <message>
+        <source>D-pad ↑</source>
+        <translation>Cruceta ↑</translation>
+    </message>
+    <message>
+        <source>D-pad up</source>
+        <translation>Cruceta arriba</translation>
+    </message>
+    <message>
+        <source>D-pad ↓</source>
+        <translation>Cruceta ↓</translation>
+    </message>
+    <message>
+        <source>D-pad down</source>
+        <translation>Cruceta abajo</translation>
+    </message>
+    <message>
+        <source>D-pad ←</source>
+        <translation>Cruceta ←</translation>
+    </message>
+    <message>
+        <source>D-pad left</source>
+        <translation>Cruceta izquierda</translation>
+    </message>
+    <message>
+        <source>D-pad →</source>
+        <translation>Cruceta →</translation>
+    </message>
+    <message>
+        <source>D-pad right</source>
+        <translation>Cruceta derecha</translation>
+    </message>
+    <message>
+        <source>Options</source>
+        <translation>Options</translation>
+    </message>
+    <message>
+        <source>Touchpad</source>
+        <translation>Panel táctil</translation>
+    </message>
+    <message>
+        <source>Left stick left</source>
+        <translation>Stick izquierdo a la izquierda</translation>
+    </message>
+    <message>
+        <source>Left stick right</source>
+        <translation>Stick izquierdo a la derecha</translation>
+    </message>
+    <message>
+        <source>Left stick up</source>
+        <translation>Stick izquierdo arriba</translation>
+    </message>
+    <message>
+        <source>Left stick down</source>
+        <translation>Stick izquierdo abajo</translation>
+    </message>
+    <message>
+        <source>Right stick left</source>
+        <translation>Stick derecho a la izquierda</translation>
+    </message>
+    <message>
+        <source>Right stick right</source>
+        <translation>Stick derecho a la derecha</translation>
+    </message>
+    <message>
+        <source>Right stick up</source>
+        <translation>Stick derecho arriba</translation>
+    </message>
+    <message>
+        <source>Right stick down</source>
+        <translation>Stick derecho abajo</translation>
+    </message>
+    <message>
+        <source>Profile name</source>
+        <translation>Nombre del perfil</translation>
+    </message>
+    <message>
+        <source>Controller</source>
+        <translation>Mando</translation>
+    </message>
+    <message>
+        <source>Keyboard and mouse</source>
+        <translation>Teclado y ratón</translation>
+    </message>
+    <message>
+        <source>Sticks and triggers</source>
+        <translation>Sticks y gatillos</translation>
+    </message>
+    <message>
+        <source>Mouse</source>
+        <translation>Ratón</translation>
+    </message>
+    <message>
+        <source>Profile</source>
+        <translation>Perfil</translation>
+    </message>
+    <message>
+        <source>Left stick</source>
+        <translation>Stick izquierdo</translation>
+    </message>
+    <message>
+        <source>Right stick</source>
+        <translation>Stick derecho</translation>
+    </message>
+    <message>
+        <source>%1 dead zone</source>
+        <translation>%1: zona muerta</translation>
+    </message>
+    <message>
+        <source>Invert %1 across</source>
+        <translation>%1: invertir en horizontal</translation>
+    </message>
+    <message>
+        <source>Invert %1 up and down</source>
+        <translation>%1: invertir en vertical</translation>
+    </message>
+    <message>
+        <source>Trigger press point</source>
+        <translation>Umbral de los gatillos</translation>
+    </message>
+    <message>
+        <source>Look with the mouse</source>
+        <translation>Mirar con el ratón</translation>
+    </message>
+    <message>
+        <source>Mouse sensitivity</source>
+        <translation>Sensibilidad del ratón</translation>
+    </message>
+    <message>
+        <source>Invert the mouse up and down</source>
+        <translation>Invertir el ratón en vertical</translation>
+    </message>
+    <message>
+        <source>Trigger</source>
+        <translation>Gatillo</translation>
+    </message>
+    <message>
+        <source>Not bound</source>
+        <translation>Sin asignar</translation>
+    </message>
+    <message>
+        <source>%1, controller</source>
+        <translation>%1, mando</translation>
+    </message>
+    <message>
+        <source>%1, keyboard and mouse</source>
+        <translation>%1, teclado y ratón</translation>
+    </message>
+    <message>
+        <source>Choose a box, then press the key or button to use. Delete or □ clears it.</source>
+        <translation>Elige una casilla y pulsa la tecla o el botón que quieras usar. Supr o □ la vacía.</translation>
+    </message>
+    <message>
+        <source>Default is the emulator&apos;s own layout and can&apos;t be changed; duplicate it to make a profile of your own.</source>
+        <translation>Default es la distribución propia del emulador y no se puede cambiar; duplícalo para crear un perfil propio.</translation>
+    </message>
+    <message>
+        <source>Dead zone</source>
+        <translation>Zona muerta</translation>
+    </message>
+    <message>
+        <source>Invert across</source>
+        <translation>Invertir en horizontal</translation>
+    </message>
+    <message>
+        <source>Invert up and down</source>
+        <translation>Invertir en vertical</translation>
+    </message>
+    <message>
+        <source>Press point</source>
+        <translation>Umbral de pulsación</translation>
+    </message>
+    <message>
+        <source>L2 and R2</source>
+        <translation>L2 y R2</translation>
+    </message>
+    <message>
+        <source>How far L2 and R2 must be pulled to count as pressed. Movements of a stick smaller than its dead zone are ignored, so a worn stick does not drift.</source>
+        <translation>Cuánto hay que apretar L2 y R2 para que cuenten como pulsados. Los movimientos de un stick menores que su zona muerta se ignoran, para que un stick gastado no derive.</translation>
+    </message>
+    <message>
+        <source>In the game, F3 captures the mouse; while it is captured, moving it moves the right stick.</source>
+        <translation>En el juego, F3 captura el ratón; mientras está capturado, moverlo mueve el stick derecho.</translation>
+    </message>
+    <message>
+        <source>Mouse look</source>
+        <translation>Mirar con el ratón</translation>
+    </message>
+    <message>
+        <source>Sensitivity</source>
+        <translation>Sensibilidad</translation>
+    </message>
+    <message>
+        <source>Name</source>
+        <translation>Nombre</translation>
+    </message>
+</context>
+<context>
     <name>EditorPageItem</name>
     <message>
         <source>Name</source>
@@ -412,167 +627,167 @@
     </message>
     <message>
         <source>Profile</source>
-        <translation>Perfil</translation>
+        <translation type="vanished">Perfil</translation>
     </message>
     <message>
         <source>Profile name</source>
-        <translation>Nombre del perfil</translation>
+        <translation type="vanished">Nombre del perfil</translation>
     </message>
     <message>
         <source>Controller</source>
-        <translation>Mando</translation>
+        <translation type="vanished">Mando</translation>
     </message>
     <message>
         <source>Left stick</source>
-        <translation>Stick izquierdo</translation>
+        <translation type="vanished">Stick izquierdo</translation>
     </message>
     <message>
         <source>Left stick dead zone</source>
-        <translation>Zona muerta del stick izquierdo</translation>
+        <translation type="vanished">Zona muerta del stick izquierdo</translation>
     </message>
     <message>
         <source>Invert left stick across</source>
-        <translation>Invertir eje X izquierdo</translation>
+        <translation type="vanished">Invertir eje X izquierdo</translation>
     </message>
     <message>
         <source>Invert left stick up and down</source>
-        <translation>Invertir eje Y izquierdo</translation>
+        <translation type="vanished">Invertir eje Y izquierdo</translation>
     </message>
     <message>
         <source>Right stick</source>
-        <translation>Stick derecho</translation>
+        <translation type="vanished">Stick derecho</translation>
     </message>
     <message>
         <source>Right stick dead zone</source>
-        <translation>Zona muerta del stick derecho</translation>
+        <translation type="vanished">Zona muerta del stick derecho</translation>
     </message>
     <message>
         <source>Invert right stick across</source>
-        <translation>Invertir eje X derecho</translation>
+        <translation type="vanished">Invertir eje X derecho</translation>
     </message>
     <message>
         <source>Invert right stick up and down</source>
-        <translation>Invertir eje Y derecho</translation>
+        <translation type="vanished">Invertir eje Y derecho</translation>
     </message>
     <message>
         <source>Trigger press point</source>
-        <translation>Umbral de los gatillos</translation>
+        <translation type="vanished">Umbral de los gatillos</translation>
     </message>
     <message>
         <source>Look with the mouse</source>
-        <translation>Mirar con el ratón</translation>
+        <translation type="vanished">Mirar con el ratón</translation>
     </message>
     <message>
         <source>Mouse</source>
-        <translation>Ratón</translation>
+        <translation type="vanished">Ratón</translation>
     </message>
     <message>
         <source>Mouse sensitivity</source>
-        <translation>Sensibilidad del ratón</translation>
+        <translation type="vanished">Sensibilidad del ratón</translation>
     </message>
     <message>
         <source>Invert mouse up and down</source>
-        <translation>Invertir el ratón en vertical</translation>
+        <translation type="vanished">Invertir el ratón en vertical</translation>
     </message>
     <message>
         <source>✕ Cross</source>
-        <translation>✕ Equis</translation>
+        <translation type="vanished">✕ Equis</translation>
     </message>
     <message>
         <source>Buttons</source>
-        <translation>Botones</translation>
+        <translation type="vanished">Botones</translation>
     </message>
     <message>
         <source>○ Circle</source>
-        <translation>○ Círculo</translation>
+        <translation type="vanished">○ Círculo</translation>
     </message>
     <message>
         <source>□ Square</source>
-        <translation>□ Cuadrado</translation>
+        <translation type="vanished">□ Cuadrado</translation>
     </message>
     <message>
         <source>△ Triangle</source>
-        <translation>△ Triángulo</translation>
+        <translation type="vanished">△ Triángulo</translation>
     </message>
     <message>
         <source>D-pad up</source>
-        <translation>Cruceta arriba</translation>
+        <translation type="vanished">Cruceta arriba</translation>
     </message>
     <message>
         <source>D-pad down</source>
-        <translation>Cruceta abajo</translation>
+        <translation type="vanished">Cruceta abajo</translation>
     </message>
     <message>
         <source>D-pad left</source>
-        <translation>Cruceta izquierda</translation>
+        <translation type="vanished">Cruceta izquierda</translation>
     </message>
     <message>
         <source>D-pad right</source>
-        <translation>Cruceta derecha</translation>
+        <translation type="vanished">Cruceta derecha</translation>
     </message>
     <message>
         <source>L1</source>
-        <translation>L1</translation>
+        <translation type="vanished">L1</translation>
     </message>
     <message>
         <source>R1</source>
-        <translation>R1</translation>
+        <translation type="vanished">R1</translation>
     </message>
     <message>
         <source>L2</source>
-        <translation>L2</translation>
+        <translation type="vanished">L2</translation>
     </message>
     <message>
         <source>R2</source>
-        <translation>R2</translation>
+        <translation type="vanished">R2</translation>
     </message>
     <message>
         <source>L3</source>
-        <translation>L3</translation>
+        <translation type="vanished">L3</translation>
     </message>
     <message>
         <source>R3</source>
-        <translation>R3</translation>
+        <translation type="vanished">R3</translation>
     </message>
     <message>
         <source>Options</source>
-        <translation>Options</translation>
+        <translation type="vanished">Options</translation>
     </message>
     <message>
         <source>Touchpad</source>
-        <translation>Panel táctil</translation>
+        <translation type="vanished">Panel táctil</translation>
     </message>
     <message>
         <source>Left stick left</source>
-        <translation>Stick izquierdo a la izquierda</translation>
+        <translation type="vanished">Stick izquierdo a la izquierda</translation>
     </message>
     <message>
         <source>Left stick right</source>
-        <translation>Stick izquierdo a la derecha</translation>
+        <translation type="vanished">Stick izquierdo a la derecha</translation>
     </message>
     <message>
         <source>Left stick up</source>
-        <translation>Stick izquierdo arriba</translation>
+        <translation type="vanished">Stick izquierdo arriba</translation>
     </message>
     <message>
         <source>Left stick down</source>
-        <translation>Stick izquierdo abajo</translation>
+        <translation type="vanished">Stick izquierdo abajo</translation>
     </message>
     <message>
         <source>Right stick left</source>
-        <translation>Stick derecho a la izquierda</translation>
+        <translation type="vanished">Stick derecho a la izquierda</translation>
     </message>
     <message>
         <source>Right stick right</source>
-        <translation>Stick derecho a la derecha</translation>
+        <translation type="vanished">Stick derecho a la derecha</translation>
     </message>
     <message>
         <source>Right stick up</source>
-        <translation>Stick derecho arriba</translation>
+        <translation type="vanished">Stick derecho arriba</translation>
     </message>
     <message>
         <source>Right stick down</source>
-        <translation>Stick derecho abajo</translation>
+        <translation type="vanished">Stick derecho abajo</translation>
     </message>
     <message>
         <source>The folder that holds the game&apos;s files.</source>
@@ -648,31 +863,31 @@
     </message>
     <message>
         <source>Every game uses the profile chosen here. Default is the emulator&apos;s own layout and can&apos;t be changed; duplicate it to make a profile of your own.</source>
-        <translation>Todos los juegos usan el perfil elegido aquí. Default es la distribución propia del emulador y no se puede cambiar; duplícalo para crear un perfil propio.</translation>
+        <translation type="vanished">Todos los juegos usan el perfil elegido aquí. Default es la distribución propia del emulador y no se puede cambiar; duplícalo para crear un perfil propio.</translation>
     </message>
     <message>
         <source>Any controller uses the first one connected. Choosing one keeps the game on it while it is connected.</source>
-        <translation>Cualquier mando usa el primero que se conecte. Si eliges uno, el juego lo usa mientras siga conectado.</translation>
+        <translation type="vanished">Cualquier mando usa el primero que se conecte. Si eliges uno, el juego lo usa mientras siga conectado.</translation>
     </message>
     <message>
         <source>Move the stick: the outer dot is where it is, the filled dot what the game sees after the dead zone. On this page the left stick does not move between settings; the D-pad does.</source>
-        <translation>Mueve el stick: el punto exterior es su posición y el punto relleno lo que ve el juego tras la zona muerta. En esta página el stick izquierdo no cambia de ajuste; la cruceta sí.</translation>
+        <translation type="vanished">Mueve el stick: el punto exterior es su posición y el punto relleno lo que ve el juego tras la zona muerta. En esta página el stick izquierdo no cambia de ajuste; la cruceta sí.</translation>
     </message>
     <message>
         <source>Movements smaller than this are ignored, so a worn stick does not drift.</source>
-        <translation>Los movimientos menores que esto se ignoran, para que un stick gastado no derive.</translation>
+        <translation type="vanished">Los movimientos menores que esto se ignoran, para que un stick gastado no derive.</translation>
     </message>
     <message>
         <source>How far L2 and R2 must be pulled to count as pressed.</source>
-        <translation>Cuánto hay que apretar L2 y R2 para que cuenten como pulsados.</translation>
+        <translation type="vanished">Cuánto hay que apretar L2 y R2 para que cuenten como pulsados.</translation>
     </message>
     <message>
         <source>In the game, F3 captures the mouse; while it is captured, moving it moves the right stick.</source>
-        <translation>En el juego, F3 captura el ratón; mientras está capturado, moverlo mueve el stick derecho.</translation>
+        <translation type="vanished">En el juego, F3 captura el ratón; mientras está capturado, moverlo mueve el stick derecho.</translation>
     </message>
     <message>
         <source>Choose a box, then press the key or button to use. Delete or □ clears it.</source>
-        <translation>Elige una casilla y pulsa la tecla o el botón que quieras usar. Supr o □ la vacía.</translation>
+        <translation type="vanished">Elige una casilla y pulsa la tecla o el botón que quieras usar. Supr o □ la vacía.</translation>
     </message>
     <message>
         <source>Language</source>
@@ -991,19 +1206,19 @@
     </message>
     <message>
         <source>Trigger</source>
-        <translation>Gatillo</translation>
+        <translation type="vanished">Gatillo</translation>
     </message>
     <message>
         <source>Not bound</source>
-        <translation>Sin asignar</translation>
+        <translation type="vanished">Sin asignar</translation>
     </message>
     <message>
         <source>%1, keyboard and mouse</source>
-        <translation>%1, teclado y ratón</translation>
+        <translation type="vanished">%1, teclado y ratón</translation>
     </message>
     <message>
         <source>%1, controller</source>
-        <translation>%1, mando</translation>
+        <translation type="vanished">%1, mando</translation>
     </message>
     <message>
         <source>No modules found yet. Set the game folder, then rescan.</source>
@@ -1015,23 +1230,23 @@
     </message>
     <message>
         <source>Left stick</source>
-        <translation>Stick izquierdo</translation>
+        <translation type="vanished">Stick izquierdo</translation>
     </message>
     <message>
         <source>Right stick</source>
-        <translation>Stick derecho</translation>
+        <translation type="vanished">Stick derecho</translation>
     </message>
     <message>
         <source>%1 on the controller</source>
-        <translation>%1 en el mando</translation>
+        <translation type="vanished">%1 en el mando</translation>
     </message>
     <message>
         <source>Keyboard and mouse</source>
-        <translation>Teclado y ratón</translation>
+        <translation type="vanished">Teclado y ratón</translation>
     </message>
     <message>
         <source>Controller</source>
-        <translation>Mando</translation>
+        <translation type="vanished">Mando</translation>
     </message>
     <message>
         <source>The last game played</source>

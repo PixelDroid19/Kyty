@@ -29,15 +29,22 @@ uses the active profile from its next start.
 - **Controller** lists every connected gamepad and updates on hot-plug.
   Choosing one stores its GUID in `gamepad.device`; **Any controller** stores
   an empty string.
-- Each stick has a dead zone, X and Y invert, and a live preview of the
-  connected pad that shows the raw position and what the game sees after the
-  dead zone. While the form has focus, the left stick does not move between
-  settings so it can be tried; the D-pad still does.
-- **Buttons** has a keyboard-and-mouse box and, for the first 16 controls, a
-  controller box. Selecting a box waits 5 s for a key, mouse button or
+- Under the profile, four tabs share one drawing of the guest controller. Each
+  control sits beside it with a line to its part; the focused control's part
+  is outlined, and the parts the connected pad holds down light up. L1 and R1
+  (Page Up and Page Down) change the tab.
+- **Controller** and **Keyboard and mouse** hold one box per control: the 16
+  buttons around the drawing and, on the keyboard tab, the stick directions as
+  two crosses under it. Selecting a box waits 5 s for a key, mouse button or
   controller button; Escape cancels, the reserved keys are refused, and
   Delete or □ clears the box. A box holds one name; lists of several names
   are kept until the box is changed.
+- **Sticks and triggers** has a card per stick with its dead zone, X and Y
+  invert, and a live preview of the connected pad that shows the raw position
+  and what the game sees after the dead zone; the trigger press point sits
+  under the drawing. While a control has focus, the left stick does not move
+  between controls so it can be tried; the D-pad still does.
+- **Mouse** turns mouse look on and sets its sensitivity and Y invert.
 
 ## Format
 

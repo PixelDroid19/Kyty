@@ -1,6 +1,7 @@
 #include "SettingsPageItem.h"
 
 #include "BindingCaptureItem.h"
+#include "ControlsPanelItem.h"
 #include "EditorFields.h"
 #include "FieldFormItem.h"
 #include "FocusButtonItem.h"
@@ -11,7 +12,6 @@
 #include "TextPadItem.h"
 #include "Theme.h"
 
-#include <QCoreApplication>
 #include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QQuickWindow>
@@ -141,41 +141,38 @@ SettingsPageItem::SettingsPageItem(QQuickItem* parent): QQuickItem(parent)
 		        }
 	        });
 
-	// The keyboard covers the whole page, so it is created after the form to draw over it.
-	m_pad  = new TextPadItem;
-	m_form = new FieldFormItem(m_pad, this);
+	// The keyboard covers the whole page, so it is created after the form and the controls to draw over them.
+	m_pad      = new TextPadItem;
+	m_form     = new FieldFormItem(m_pad, this);
+	m_controls = new ControlsPanelItem(m_pad, this);
 	m_pad->setParentItem(this);
 	m_pad->setParent(this);
 	m_capture = new BindingCaptureItem(backend->Gamepad(), this);
 	connect(m_form, &FieldFormItem::Edited, this, &SettingsPageItem::Edited);
-	connect(m_form, &FieldFormItem::CaptureRequested, this,
-	        [this](const QString& key, bool gamepad)
-	        {
-		        const auto& fields = EditorFields(FieldGroup::Controls);
-		        const auto  field  = std::find_if(fields.begin(), fields.end(), [&](const EditorField& f) { return key == QLatin1String(f.key); });
-		        m_capture->OpenFor(key, field == fields.end() ? key : QCoreApplication::translate("EditorPageItem", field->label), gamepad);
-	        });
+	connect(m_controls, &ControlsPanelItem::Edited, this, &SettingsPageItem::ControlsEdited);
+	connect(m_controls, &ControlsPanelItem::CaptureRequested, this,
+	        [this](const QString& key, bool gamepad) { m_capture->OpenFor(key, ControlsPanelItem::ControlTitle(key), gamepad); });
 	connect(m_capture, &BindingCaptureItem::Captured, this, &SettingsPageItem::Captured);
-	connect(m_capture, &BindingCaptureItem::Closed, this,
-	        [this]() { m_form->FocusKey(m_capture->Key(), m_capture->ForGamepad() ? 1 : 0); });
+	connect(m_capture, &BindingCaptureItem::Closed, this, [this]() { m_controls->FocusKey(m_capture->Key(), m_capture->ForGamepad()); });
 	connect(backend, &LauncherBackend::DevicesChanged, this,
 	        [this]()
 	        {
 		        if (m_rail->Current() == Controls)
 		        {
-			        m_form->SetValues(LauncherBackend::Instance()->ControlsFields());
+			        m_controls->SetValues(LauncherBackend::Instance()->ControlsFields());
 		        }
 		        polish();
 	        });
-	connect(m_form, &FieldFormItem::TopReached, this,
-	        [this]()
-	        {
-		        const auto buttons = Buttons();
-		        if (!buttons.isEmpty())
-		        {
-			        buttons.first()->forceActiveFocus(Qt::OtherFocusReason);
-		        }
-	        });
+	auto to_buttons = [this]()
+	{
+		const auto buttons = Buttons();
+		if (!buttons.isEmpty())
+		{
+			buttons.first()->forceActiveFocus(Qt::OtherFocusReason);
+		}
+	};
+	connect(m_form, &FieldFormItem::TopReached, this, to_buttons);
+	connect(m_controls, &ControlsPanelItem::TopReached, this, to_buttons);
 
 	m_save_timer.setSingleShot(true);
 	m_save_timer.setInterval(SAVE_DELAY);
@@ -218,6 +215,11 @@ void SettingsPageItem::GoTo(const Place& place)
 	if (place.key.isEmpty())
 	{
 		FocusDefault();
+		return;
+	}
+	if (place.category == Controls)
+	{
+		m_controls->FocusKey(place.key, false);
 		return;
 	}
 	m_form->FocusKey(place.key);
@@ -281,14 +283,21 @@ void SettingsPageItem::ShowCategory()
 		case Shaders: m_form->AddFields(Fields(FieldGroup::Shaders)); break;
 		case Logs: m_form->AddFields(Fields(FieldGroup::Logs)); break;
 		case Emulator: m_form->AddFields(Fields(FieldGroup::Program)); break;
-		// Not editor sections, so their headings divide the category itself.
-		case Controls: m_form->AddFields(EditorFields(FieldGroup::Controls)); break;
+		// Not an editor section, so its headings divide the category itself.
 		case Interface: m_form->AddFields(EditorFields(FieldGroup::Interface)); break;
 		default: break;
 	}
 	auto* backend = LauncherBackend::Instance();
 	UpdateStickNavigation();
-	m_form->SetValues(EmulatorCategory() ? m_global : category == Controls ? backend->ControlsFields() : backend->LauncherFields());
+	m_form->setVisible(category != Controls);
+	m_controls->setVisible(category == Controls);
+	if (category == Controls)
+	{
+		m_controls->SetValues(backend->ControlsFields());
+	} else
+	{
+		m_form->SetValues(EmulatorCategory() ? m_global : backend->LauncherFields());
+	}
 	m_form->ScrollToTop();
 	polish();
 }
@@ -302,6 +311,11 @@ void SettingsPageItem::UpdateStickNavigation()
 
 void SettingsPageItem::Enter()
 {
+	if (m_rail->Current() == Controls)
+	{
+		m_controls->FocusFirst();
+		return;
+	}
 	if (m_form->HasControls())
 	{
 		m_form->FocusFirst();
@@ -317,11 +331,6 @@ void SettingsPageItem::Enter()
 void SettingsPageItem::Edited(const QString& key)
 {
 	m_last_key = key;
-	if (m_rail->Current() == Controls)
-	{
-		ControlsEdited(key);
-		return;
-	}
 	if (!EmulatorCategory())
 	{
 		// A new theme or language makes the window build its pages again, this one included.
@@ -334,21 +343,22 @@ void SettingsPageItem::Edited(const QString& key)
 	polish();
 }
 
-void SettingsPageItem::ControlsEdited(const QString& key)
+void SettingsPageItem::ControlsEdited(const QString& key, const QVariant& value)
 {
 	auto* backend = LauncherBackend::Instance();
 	m_status.clear();
-	m_error = backend->SetControlsField(key, m_form->Values().value(key));
-	m_form->SetValues(backend->ControlsFields());
+	m_last_key = key;
+	m_error    = backend->SetControlsField(key, value);
+	m_controls->SetValues(backend->ControlsFields());
 	polish();
 }
 
 void SettingsPageItem::Captured(const QString& key, const QString& name)
 {
-	auto binding = m_form->Values().value(key).toMap();
-	// The input replaces what the cell had; a profile file may still list several.
+	auto binding = m_controls->Values().value(key).toMap();
+	// The input replaces what the binding had; a profile file may still list several.
 	binding[m_capture->ForGamepad() ? QStringLiteral("buttons") : QStringLiteral("keys")] = QStringList {name};
-	m_form->SetField(key, binding);
+	ControlsEdited(key, binding);
 }
 
 void SettingsPageItem::ProfileAction(QString (LauncherBackend::*action)(), const QString& key)
@@ -357,7 +367,7 @@ void SettingsPageItem::ProfileAction(QString (LauncherBackend::*action)(), const
 	m_status.clear();
 	m_error    = (backend->*action)();
 	m_last_key = key;
-	m_form->SetValues(backend->ControlsFields());
+	m_controls->SetValues(backend->ControlsFields());
 	// The focus stays among the buttons, on the first one the new profile has.
 	if (const auto buttons = Buttons(); !buttons.isEmpty())
 	{
@@ -371,7 +381,7 @@ void SettingsPageItem::DeleteActivated()
 	if (!m_confirm_delete)
 	{
 		m_confirm_delete = true;
-		m_delete->SetText(tr("Delete “%1”? Select again").arg(m_form->Values().value("profile_name").toString()));
+		m_delete->SetText(tr("Delete “%1”? Select again").arg(m_controls->Values().value("profile_name").toString()));
 		polish();
 		return;
 	}
@@ -472,7 +482,7 @@ void SettingsPageItem::keyPressEvent(QKeyEvent* event)
 		case Qt::Key_Down:
 			if (on_buttons)
 			{
-				m_form->FocusFirst();
+				Enter();
 				return;
 			}
 			break;
@@ -612,7 +622,7 @@ void SettingsPageItem::updatePolish()
 			        controller.isEmpty() ? QColor() : theme->Ok(), x, width, &y);
 			AddInfo(tr("Profiles folder"), backend->ProfilesFolder(), theme->TextSecondary(), QColor(), x, width, &y);
 			// On Default, duplicating is the way forward.
-			m_duplicate->SetPrimary(m_form->Values().value("input_profile").toString() == QLatin1String(InputProfiles::DEFAULT_ID));
+			m_duplicate->SetPrimary(m_controls->Values().value("input_profile").toString() == QLatin1String(InputProfiles::DEFAULT_ID));
 			add_block(backend->ControlsFields().value("profile_error").toString(), theme->Danger());
 			break;
 		}
@@ -676,8 +686,11 @@ void SettingsPageItem::updatePolish()
 	}
 
 	y += FORM_GAP * u;
-	m_form->setPosition(QPointF(x, y));
-	m_form->setSize(QSizeF(width, std::max<qreal>(0, height() - FORM_BOTTOM * u - y)));
+	for (QQuickItem* content: {static_cast<QQuickItem*>(m_form), static_cast<QQuickItem*>(m_controls)})
+	{
+		content->setPosition(QPointF(x, y));
+		content->setSize(QSizeF(width, std::max<qreal>(0, height() - FORM_BOTTOM * u - y)));
+	}
 
 	m_generation++;
 	update();

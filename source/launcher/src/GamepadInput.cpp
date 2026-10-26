@@ -331,6 +331,26 @@ QPointF GamepadInput::StickPosition(bool right) const
 	        Axis(m_pad, right ? SDL_GAMEPAD_AXIS_RIGHTY : SDL_GAMEPAD_AXIS_LEFTY)};
 }
 
+qreal GamepadInput::TriggerPosition(bool right) const
+{
+	return std::max(0.0, Axis(m_pad, right ? SDL_GAMEPAD_AXIS_RIGHT_TRIGGER : SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
+}
+
+QStringList GamepadInput::HeldButtons() const
+{
+	QStringList held;
+	for (int b = 0; m_pad != nullptr && b < SDL_GAMEPAD_BUTTON_COUNT; b++)
+	{
+		const auto  button = static_cast<SDL_GamepadButton>(b);
+		const char* name   = SDL_GetGamepadButton(m_pad, button) ? SDL_GetGamepadStringForButton(button) : nullptr;
+		if (name != nullptr)
+		{
+			held << QString::fromLatin1(name);
+		}
+	}
+	return held;
+}
+
 void GamepadInput::BeginCapture()
 {
 	m_capturing    = true;

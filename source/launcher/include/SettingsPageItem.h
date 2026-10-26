@@ -12,6 +12,7 @@
 #include <QVector>
 
 class BindingCaptureItem;
+class ControlsPanelItem;
 class FieldFormItem;
 class FocusButtonItem;
 class LauncherBackend;
@@ -68,7 +69,7 @@ private:
 	void ShowCategory();
 	void Enter();
 	void Edited(const QString& key);
-	void ControlsEdited(const QString& key);
+	void ControlsEdited(const QString& key, const QVariant& value);
 	void UpdateStickNavigation();
 	void Captured(const QString& key, const QString& name);
 	void ProfileAction(QString (LauncherBackend::*action)(), const QString& key);
@@ -84,6 +85,7 @@ private:
 
 	SettingsRailItem* m_rail     = nullptr;
 	FieldFormItem*    m_form     = nullptr;
+	ControlsPanelItem* m_controls = nullptr;
 	TextPadItem*      m_pad      = nullptr;
 	FocusButtonItem*  m_choose   = nullptr;
 	FocusButtonItem*  m_search   = nullptr;
