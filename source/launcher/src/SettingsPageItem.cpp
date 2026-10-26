@@ -467,6 +467,24 @@ void SettingsPageItem::updatePolish()
 			AddInfo(tr("Controller"), controller.isEmpty() ? tr("None connected. Keyboard and mouse work everywhere.") : controller,
 			        theme->TextSecondary(), controller.isEmpty() ? QColor() : theme->Ok(), x, width, &y);
 			AddInfo(tr("Settings file"), backend->SettingsFile(), theme->TextSecondary(), QColor(), x, width, &y);
+			AddInfo(tr("Themes folder"), ThemesFolder(), theme->TextSecondary(), QColor(), x, width, &y);
+			if (const auto* pack = backend->CurrentTheme(); pack != nullptr)
+			{
+				QStringList about {pack->name};
+				if (!pack->version.isEmpty())
+				{
+					about << pack->version;
+				}
+				if (!pack->author.isEmpty())
+				{
+					about << tr("by %1").arg(pack->author);
+				}
+				if (!pack->license.isEmpty())
+				{
+					about << pack->license;
+				}
+				AddInfo(tr("Style"), about.join(QStringLiteral(" · ")), theme->TextSecondary(), QColor(), x, width, &y);
+			}
 			break;
 		}
 		default: break;

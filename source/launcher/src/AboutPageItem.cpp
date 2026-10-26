@@ -1,5 +1,6 @@
 #include "AboutPageItem.h"
 
+#include "LauncherBackend.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -35,8 +36,10 @@ struct Control
 const Control CONTROLS[] = {
     {QT_TRANSLATE_NOOP("AboutPageItem", "Move"), QT_TRANSLATE_NOOP("AboutPageItem", "Arrow keys"),
 	 QT_TRANSLATE_NOOP("AboutPageItem", "D-pad or left stick"), QT_TRANSLATE_NOOP("AboutPageItem", "Click")},
-    {QT_TRANSLATE_NOOP("AboutPageItem", "Run a game"), QT_TRANSLATE_NOOP("AboutPageItem", "Enter"), "✕",
-	 QT_TRANSLATE_NOOP("AboutPageItem", "Double-click")},
+    {QT_TRANSLATE_NOOP("AboutPageItem", "Open a game's page"), QT_TRANSLATE_NOOP("AboutPageItem", "Enter"), "✕",
+	 QT_TRANSLATE_NOOP("AboutPageItem", "Click")},
+    {QT_TRANSLATE_NOOP("AboutPageItem", "Run a game"), QT_TRANSLATE_NOOP("AboutPageItem", "Enter on its page"),
+	 QT_TRANSLATE_NOOP("AboutPageItem", "✕ on its page"), QT_TRANSLATE_NOOP("AboutPageItem", "Play on its page")},
     {QT_TRANSLATE_NOOP("AboutPageItem", "Options"), "O", "△ / Start", QT_TRANSLATE_NOOP("AboutPageItem", "Right-click")},
     {QT_TRANSLATE_NOOP("AboutPageItem", "Edit a game"), "E", "□", QT_TRANSLATE_NOOP("AboutPageItem", "Options, then Edit")},
     {QT_TRANSLATE_NOOP("AboutPageItem", "Switch section"), "PgUp / PgDn", "L1 / R1", QT_TRANSLATE_NOOP("AboutPageItem", "Click a section")},
@@ -57,6 +60,8 @@ AboutPageItem::AboutPageItem(QQuickItem* parent): PageItem(MAX_WIDTH, TOP, SPACI
 {
 	m_mascot_clip = new QQuickItem(this);
 	m_mascot_clip->setClip(true);
+	// The controls table shows the symbols of the controller connected.
+	connect(LauncherBackend::Instance(), &LauncherBackend::StateChanged, this, &AboutPageItem::Recompose);
 }
 
 QVariantList AboutPageItem::Hints() const
@@ -166,7 +171,7 @@ void AboutPageItem::AddControls(PageLayout* layout) const
 	add_row(header, header_font, theme->TextMuted());
 	for (const auto& control: CONTROLS)
 	{
-		const QString cells[COLUMNS] = {tr(control.action), tr(control.keys), tr(control.pad), tr(control.mouse)};
+		const QString cells[COLUMNS] = {tr(control.action), tr(control.keys), LauncherBackend::Instance()->PadText(tr(control.pad)), tr(control.mouse)};
 		add_row(cells, body_font, theme->TextPrimary());
 	}
 	const qreal height = y - ROW_SPACING * u + padding - top;

@@ -15,6 +15,8 @@ constexpr int IDLE_INTERVAL_MS = 250;
 constexpr qint64 REPEAT_DELAY_MS    = 400;
 constexpr qint64 REPEAT_INTERVAL_MS = 110;
 constexpr double STICK_DEADZONE     = 0.5;
+// Holding the back button this long opens the power menu instead of going back.
+constexpr qint64 HOLD_MS = 700;
 
 namespace {
 
@@ -129,7 +131,10 @@ void GamepadInput::Poll()
 	for (int i = 0; i < BUTTON_COUNT; i++)
 	{
 		const bool down = SDL_GetGamepadButton(m_pad, BUTTONS[i].button);
-		if (down && !m_button_down[i] && deliver)
+		if (BUTTONS[i].key == Qt::Key_Escape)
+		{
+			PollBack(down, m_button_down[i], now, deliver);
+		} else if (down && !m_button_down[i] && deliver)
 		{
 			Tap(BUTTONS[i].key);
 		}
@@ -170,6 +175,80 @@ void GamepadInput::Poll()
 		}
 		m_direction_down[d] = true;
 	}
+}
+
+// Back goes on release, so a hold can become the power menu without going back first.
+void GamepadInput::PollBack(bool down, bool was_down, qint64 now, bool deliver)
+{
+	if (down && !was_down)
+	{
+		m_back_down_at = now;
+		m_back_held    = false;
+		return;
+	}
+	if (down && !m_back_held && now - m_back_down_at >= HOLD_MS)
+	{
+		m_back_held = true;
+		if (deliver)
+		{
+			Tap(Qt::Key_PowerOff);
+		}
+		return;
+	}
+	if (!down && was_down && !m_back_held && deliver)
+	{
+		Tap(Qt::Key_Escape);
+	}
+}
+
+QStringList GamepadInput::ButtonLabels() const
+{
+	static const QStringList playstation = {QStringLiteral("✕"), QStringLiteral("○"), QStringLiteral("□"), QStringLiteral("△")};
+	QStringList              labels;
+	for (const auto button: {SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_NORTH})
+	{
+		switch (m_pad != nullptr ? SDL_GetGamepadButtonLabel(m_pad, button) : SDL_GAMEPAD_BUTTON_LABEL_UNKNOWN)
+		{
+			case SDL_GAMEPAD_BUTTON_LABEL_A: labels << QStringLiteral("A"); break;
+			case SDL_GAMEPAD_BUTTON_LABEL_B: labels << QStringLiteral("B"); break;
+			case SDL_GAMEPAD_BUTTON_LABEL_X: labels << QStringLiteral("X"); break;
+			case SDL_GAMEPAD_BUTTON_LABEL_Y: labels << QStringLiteral("Y"); break;
+			case SDL_GAMEPAD_BUTTON_LABEL_CROSS: labels << QStringLiteral("✕"); break;
+			case SDL_GAMEPAD_BUTTON_LABEL_CIRCLE: labels << QStringLiteral("○"); break;
+			case SDL_GAMEPAD_BUTTON_LABEL_SQUARE: labels << QStringLiteral("□"); break;
+			case SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE: labels << QStringLiteral("△"); break;
+			// No controller, or one SDL cannot name: the PlayStation symbol in that place.
+			default: labels << playstation.at(labels.size()); break;
+		}
+	}
+	switch (m_pad != nullptr ? SDL_GetGamepadType(m_pad) : SDL_GAMEPAD_TYPE_PS5)
+	{
+		case SDL_GAMEPAD_TYPE_XBOX360:
+		case SDL_GAMEPAD_TYPE_XBOXONE: labels << QStringLiteral("LB") << QStringLiteral("RB"); break;
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+		case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: labels << QStringLiteral("L") << QStringLiteral("R"); break;
+		default: labels << QStringLiteral("L1") << QStringLiteral("R1"); break;
+	}
+	return labels;
+}
+
+int GamepadInput::BatteryPercent() const
+{
+	if (m_pad == nullptr)
+	{
+		return -1;
+	}
+	int        percent = -1;
+	const auto state   = SDL_GetGamepadPowerInfo(m_pad, &percent);
+	const bool battery = state == SDL_POWERSTATE_ON_BATTERY || state == SDL_POWERSTATE_CHARGING || state == SDL_POWERSTATE_CHARGED;
+	return battery ? percent : -1;
+}
+
+bool GamepadInput::Charging() const
+{
+	return m_pad != nullptr && SDL_GetGamepadPowerInfo(m_pad, nullptr) == SDL_POWERSTATE_CHARGING;
 }
 
 void GamepadInput::Tap(int key) const

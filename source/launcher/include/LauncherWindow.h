@@ -4,12 +4,14 @@
 #include "Common.h"
 #include "FileChooser.h"
 
+#include <QPointer>
 #include <QQuickWindow>
 #include <QTimer>
 #include <QVariantAnimation>
 #include <QVariantMap>
 
 class AboutPageItem;
+class ActionMenuItem;
 class BackgroundItem;
 class EditorPageItem;
 class GameBackdropItem;
@@ -19,9 +21,11 @@ class LibraryPageItem;
 class NoticeItem;
 class SettingsPageItem;
 class SidebarItem;
+class TopBarItem;
 
-// The launcher's window and page switcher. Each page handles its own keys; the sidebar moves between pages, and
-// Left that no page uses moves to the sidebar.
+// The launcher's window and page switcher. Each page handles its own keys. In the Sidebar layout the sidebar moves
+// between pages and Left that no page uses moves to it; in the Console layout the top bar's tabs do. Up that no
+// page uses moves to the top bar.
 class LauncherWindow: public QQuickWindow
 {
 	Q_OBJECT
@@ -51,10 +55,12 @@ private:
 	void UpdateLive();
 	void UpdatePage();
 	void UpdateBackdrop();
-	void ShowPage(Page page);
+	// focus_page false keeps the focus where it is, on the top bar's tabs.
+	void ShowPage(Page page, bool focus_page = true);
 	[[nodiscard]] QQuickItem* PageFor(Page page) const;
 	void                      Reveal(Page previous);
 	void FocusPage();
+	void OpenLastGame();
 	void OpenEditor(int row, const QVariantMap& fields);
 	void AddFolder(const QString& folder);
 	void RunGame(int row);
@@ -63,8 +69,12 @@ private:
 	void ReportFolderImported(int added, int found, const QString& error);
 	void RestoreGeometry();
 	void                      ApplyWindowMode();
+	void                      OpenPowerMenu();
+	void                      PowerChosen(const QString& action);
 
 	Page              m_page    = Page::Library;
+	// The Console layout: tabs on the top bar instead of the sidebar.
+	bool              m_console = false;
 	bool              m_running = false;
 	// A new theme or language arrived while the editor was open.
 	bool m_rebuild_pending = false;
@@ -82,6 +92,10 @@ private:
 	AboutPageItem*    m_about    = nullptr;
 	HintBarItem*      m_hints    = nullptr;
 	NoticeItem*       m_notice   = nullptr;
+	TopBarItem*       m_topbar   = nullptr;
+	ActionMenuItem*   m_power    = nullptr;
+	// Gets the focus back when the power menu closes.
+	QPointer<QQuickItem> m_power_return;
 	FileChooser       m_add_chooser;
 	FileChooser       m_program_chooser;
 	// Lets Kit's hop finish before the window steps aside for a game.

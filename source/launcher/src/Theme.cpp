@@ -60,8 +60,18 @@ void Theme::SetMotion(Motion motion)
 
 // Each accent in a lighter tone for the dark palette and a deeper one for the light palette, so text in it keeps
 // its contrast on either.
+void Theme::SetCustomColors(const QHash<QString, QColor>& dark, const QHash<QString, QColor>& light)
+{
+	m_custom_dark  = dark;
+	m_custom_light = light;
+}
+
 QColor Theme::Accent() const
 {
+	if (const auto& custom = m_dark ? m_custom_dark : m_custom_light; custom.contains(QStringLiteral("accent")))
+	{
+		return custom.value(QStringLiteral("accent"));
+	}
 	switch (m_accent)
 	{
 		case AccentColor::Blue: break;

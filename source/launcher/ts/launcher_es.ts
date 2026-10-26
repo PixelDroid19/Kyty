@@ -29,7 +29,7 @@
     </message>
     <message>
         <source>Double-click</source>
-        <translation>Doble clic</translation>
+        <translation type="vanished">Doble clic</translation>
     </message>
     <message>
         <source>Options</source>
@@ -122,6 +122,22 @@
     <message>
         <source>Games are started by the Kyty emulator. The launcher only keeps the list of games and their settings.</source>
         <translation>Los juegos los inicia el emulador Kyty. El launcher solo guarda la lista de juegos y sus ajustes.</translation>
+    </message>
+    <message>
+        <source>Open a game&apos;s page</source>
+        <translation>Abrir la página de un juego</translation>
+    </message>
+    <message>
+        <source>Enter on its page</source>
+        <translation>Enter en su página</translation>
+    </message>
+    <message>
+        <source>✕ on its page</source>
+        <translation>✕ en su página</translation>
+    </message>
+    <message>
+        <source>Play on its page</source>
+        <translation>Jugar en su página</translation>
     </message>
 </context>
 <context>
@@ -457,6 +473,46 @@
         <source>This game runs with the emulator settings from Settings. Turn on custom emulator settings to change them for this game only.</source>
         <translation>Este juego usa los ajustes del emulador de Configuración. Activa los ajustes propios para cambiarlos solo en este juego.</translation>
     </message>
+    <message>
+        <source>Style</source>
+        <translation>Estilo</translation>
+    </message>
+    <message>
+        <source>Layout</source>
+        <translation>Diseño</translation>
+    </message>
+    <message>
+        <source>Opens on</source>
+        <translation>Abrir en</translation>
+    </message>
+    <message>
+        <source>Interface sounds</source>
+        <translation>Sonidos de interfaz</translation>
+    </message>
+    <message>
+        <source>Sound</source>
+        <translation>Sonido</translation>
+    </message>
+    <message>
+        <source>Sound volume</source>
+        <translation>Volumen de los sonidos</translation>
+    </message>
+    <message>
+        <source>Add-on themes are folders with a theme.ini inside the themes folder above, found when the launcher starts. Their colours win over the accent colour.</source>
+        <translation>Los temas complementarios son carpetas con un theme.ini dentro de la carpeta de temas de arriba; se buscan al iniciar el launcher. Sus colores mandan sobre el color de acento.</translation>
+    </message>
+    <message>
+        <source>The last game played opens on its page, ready to continue.</source>
+        <translation>El último juego jugado se abre en su página, listo para continuar.</translation>
+    </message>
+    <message>
+        <source>Console puts the pages in tabs on top and the games in one row, the selected game&apos;s page below it. An add-on theme may choose the layout.</source>
+        <translation>Consola pone las páginas en pestañas arriba y los juegos en una fila, con la página del juego elegido debajo. Un tema complementario puede elegir el diseño.</translation>
+    </message>
+    <message>
+        <source>Short sounds when you move, select, go back and start a game.</source>
+        <translation>Sonidos cortos al moverte, seleccionar, volver y arrancar un juego.</translation>
+    </message>
 </context>
 <context>
     <name>FieldRowItem</name>
@@ -688,12 +744,119 @@
         <source>No parameters file selected.</source>
         <translation>No hay archivo de parámetros.</translation>
     </message>
+    <message>
+        <source>The last game played</source>
+        <translation>El último juego jugado</translation>
+    </message>
+    <message>
+        <source>Sidebar</source>
+        <translation>Barra lateral</translation>
+    </message>
+    <message>
+        <source>Quiet</source>
+        <translation>Bajo</translation>
+    </message>
+    <message>
+        <source>Loud</source>
+        <translation>Alto</translation>
+    </message>
+    <message>
+        <source>The library</source>
+        <translation>La biblioteca</translation>
+    </message>
 </context>
 <context>
     <name>GameGridItem</name>
     <message>
         <source>Running</source>
         <translation>En ejecución</translation>
+    </message>
+</context>
+<context>
+    <name>GamePageItem</name>
+    <message>
+        <source>Not recorded yet</source>
+        <translation>Aún sin registrar</translation>
+    </message>
+    <message>
+        <source>Not played yet</source>
+        <translation>Aún sin jugar</translation>
+    </message>
+    <message>
+        <source>Under a minute</source>
+        <translation>Menos de un minuto</translation>
+    </message>
+    <message>
+        <source>%1 min</source>
+        <translation>%1 min</translation>
+    </message>
+    <message>
+        <source>%1 h %2 min</source>
+        <translation>%1 h %2 min</translation>
+    </message>
+    <message>
+        <source>Select</source>
+        <translation>Seleccionar</translation>
+    </message>
+    <message>
+        <source>Options</source>
+        <translation>Opciones</translation>
+    </message>
+    <message>
+        <source>Game settings</source>
+        <translation>Ajustes del juego</translation>
+    </message>
+    <message>
+        <source>Back</source>
+        <translation>Volver</translation>
+    </message>
+    <message>
+        <source>Continue where you left off</source>
+        <translation>Continuar donde lo dejaste</translation>
+    </message>
+    <message>
+        <source>Last played %1</source>
+        <translation>Jugado por última vez %1</translation>
+    </message>
+    <message>
+        <source>Play time</source>
+        <translation>Tiempo jugado</translation>
+    </message>
+    <message>
+        <source>Its own settings</source>
+        <translation>Ajustes propios</translation>
+    </message>
+    <message>
+        <source>The global settings</source>
+        <translation>Los ajustes globales</translation>
+    </message>
+    <message>
+        <source>Screen %1</source>
+        <translation>Pantalla %1</translation>
+    </message>
+    <message>
+        <source>Folder and data</source>
+        <translation>Carpeta y datos</translation>
+    </message>
+    <message>
+        <source>In no section</source>
+        <translation>En ninguna sección</translation>
+    </message>
+    <message>
+        <source>Stop game</source>
+        <translation>Detener juego</translation>
+    </message>
+    <message>
+        <source>Continue</source>
+        <translation>Continuar</translation>
+    </message>
+    <message>
+        <source>Play</source>
+        <translation>Jugar</translation>
+    </message>
+    <message>
+        <source>Open game folder</source>
+        <translation>Abrir la carpeta del juego</translation>
     </message>
 </context>
 <context>
@@ -806,6 +969,30 @@
         <source>A game started while the folder was read; nothing was added.</source>
         <translation>Se inició un juego mientras se leía la carpeta; no se añadió nada.</translation>
     </message>
+    <message>
+        <source>Kyty</source>
+        <translation>Kyty</translation>
+    </message>
+    <message>
+        <source>%1 · Add-on</source>
+        <translation>%1 · Complemento</translation>
+    </message>
+    <message>
+        <source>%1 · Can&apos;t be used</source>
+        <translation>%1 · No se puede usar</translation>
+    </message>
+    <message>
+        <source>The theme %1 is no longer installed.</source>
+        <translation>El tema %1 ya no está instalado.</translation>
+    </message>
+    <message>
+        <source>The theme %1 can&apos;t be used: %2</source>
+        <translation>El tema %1 no se puede usar: %2</translation>
+    </message>
+    <message>
+        <source>The theme %1 can&apos;t be used: its font cannot be read.</source>
+        <translation>El tema %1 no se puede usar: no se puede leer su fuente.</translation>
+    </message>
 </context>
 <context>
     <name>LauncherWindow</name>
@@ -844,6 +1031,46 @@
     <message>
         <source>Added %1 of the %2 games found.</source>
         <translation>Se añadieron %1 de los %2 juegos encontrados.</translation>
+    </message>
+    <message>
+        <source>Games</source>
+        <translation>Juegos</translation>
+    </message>
+    <message>
+        <source>Settings</source>
+        <translation>Ajustes</translation>
+    </message>
+    <message>
+        <source>About</source>
+        <translation>Acerca de</translation>
+    </message>
+    <message>
+        <source>Quit</source>
+        <translation>Salir</translation>
+    </message>
+    <message>
+        <source>Leave full screen</source>
+        <translation>Salir de pantalla completa</translation>
+    </message>
+    <message>
+        <source>Full screen</source>
+        <translation>Pantalla completa</translation>
+    </message>
+    <message>
+        <source>Restart the launcher</source>
+        <translation>Reiniciar el launcher</translation>
+    </message>
+    <message>
+        <source>Close</source>
+        <translation>Cerrar</translation>
+    </message>
+    <message>
+        <source>Power</source>
+        <translation>Apagado</translation>
+    </message>
+    <message>
+        <source>The launcher could not be started again.</source>
+        <translation>No se pudo volver a iniciar el launcher.</translation>
     </message>
 </context>
 <context>
@@ -926,15 +1153,15 @@
     </message>
     <message>
         <source>Emulator ready</source>
-        <translation>Emulador listo</translation>
+        <translation type="vanished">Emulador listo</translation>
     </message>
     <message>
         <source>Emulator not found</source>
-        <translation>Emulador no encontrado</translation>
+        <translation type="vanished">Emulador no encontrado</translation>
     </message>
     <message>
         <source>No controller</source>
-        <translation>Sin mando</translation>
+        <translation type="vanished">Sin mando</translation>
     </message>
     <message>
         <source>No games yet. Add a game folder to start your library.</source>
@@ -963,6 +1190,10 @@
     <message>
         <source>Search by name or serial</source>
         <translation>Buscar por nombre o serie</translation>
+    </message>
+    <message>
+        <source>Open</source>
+        <translation>Abrir</translation>
     </message>
 </context>
 <context>
@@ -1078,6 +1309,18 @@
         <source>Settings file</source>
         <translation>Archivo de ajustes</translation>
     </message>
+    <message>
+        <source>Themes folder</source>
+        <translation>Carpeta de temas</translation>
+    </message>
+    <message>
+        <source>by %1</source>
+        <translation>de %1</translation>
+    </message>
+    <message>
+        <source>Style</source>
+        <translation>Estilo</translation>
+    </message>
 </context>
 <context>
     <name>SidebarItem</name>
@@ -1122,6 +1365,88 @@
     </message>
 </context>
 <context>
+    <name>ThemePack</name>
+    <message>
+        <source>Line %1 of theme.ini is not a key = value inside a [section].</source>
+        <translation>La línea %1 de theme.ini no es un clave = valor dentro de una [sección].</translation>
+    </message>
+    <message>
+        <source>The file %1 is missing.</source>
+        <translation>Falta el archivo %1.</translation>
+    </message>
+    <message>
+        <source>The file %1 is outside the theme&apos;s folder.</source>
+        <translation>El archivo %1 está fuera de la carpeta del tema.</translation>
+    </message>
+    <message>
+        <source>The file %1 must be one of: %2.</source>
+        <translation>El archivo %1 debe ser uno de: %2.</translation>
+    </message>
+    <message>
+        <source>The file %1 is larger than %2 MB.</source>
+        <translation>El archivo %1 ocupa más de %2 MB.</translation>
+    </message>
+    <message>
+        <source>[%1] has an unknown colour %2.</source>
+        <translation>[%1] tiene un color desconocido %2.</translation>
+    </message>
+    <message>
+        <source>%1 in [%2] is not a colour like #rrggbb or #aarrggbb.</source>
+        <translation>%1 en [%2] no es un color como #rrggbb o #aarrggbb.</translation>
+    </message>
+    <message>
+        <source>theme.ini has an unknown section [%1].</source>
+        <translation>theme.ini tiene una sección desconocida [%1].</translation>
+    </message>
+    <message>
+        <source>The theme is made for another version of the launcher (api %1).</source>
+        <translation>El tema es para otra versión del launcher (api %1).</translation>
+    </message>
+    <message>
+        <source>[Theme] has an unknown key %1.</source>
+        <translation>[Theme] tiene una clave desconocida %1.</translation>
+    </message>
+    <message>
+        <source>%1 is longer than %2 characters.</source>
+        <translation>%1 tiene más de %2 caracteres.</translation>
+    </message>
+    <message>
+        <source>[Theme] has no name.</source>
+        <translation>[Theme] no tiene nombre.</translation>
+    </message>
+    <message>
+        <source>layout must be Sidebar or Console.</source>
+        <translation>layout debe ser Sidebar o Console.</translation>
+    </message>
+    <message>
+        <source>The picture %1 cannot be read or is larger than %2 × %2.</source>
+        <translation>La imagen %1 no se puede leer o es mayor que %2 × %2.</translation>
+    </message>
+    <message>
+        <source>[Sounds] has an unknown sound %1.</source>
+        <translation>[Sounds] tiene un sonido desconocido %1.</translation>
+    </message>
+    <message>
+        <source>The folder name may only hold letters, digits, dots, dashes and underscores.</source>
+        <translation>El nombre de la carpeta solo puede tener letras, dígitos, puntos, guiones y guiones bajos.</translation>
+    </message>
+    <message>
+        <source>theme.ini is larger than %1 KB.</source>
+        <translation>theme.ini ocupa más de %1 KB.</translation>
+    </message>
+    <message>
+        <source>theme.ini cannot be read.</source>
+        <translation>No se puede leer theme.ini.</translation>
+    </message>
+</context>
+<context>
+    <name>TileRowItem</name>
+    <message>
+        <source>Add game</source>
+        <translation>Añadir juego</translation>
+    </message>
+</context>
+<context>
     <name>ToggleItem</name>
     <message>
         <source>On</source>
@@ -1130,6 +1455,36 @@
     <message>
         <source>Off</source>
         <translation>No</translation>
+    </message>
+</context>
+<context>
+    <name>TopBarItem</name>
+    <message>
+        <source>Emulator ready</source>
+        <translation>Emulador listo</translation>
+    </message>
+    <message>
+        <source>Emulator not found</source>
+        <translation>Emulador no encontrado</translation>
+    </message>
+    <message>
+        <source>Controller %1%</source>
+        <translation>Mando %1%</translation>
+    </message>
+    <message>
+        <source>Search</source>
+        <translation>Buscar</translation>
+    </message>
+    <message>
+        <source>Power</source>
+        <translation>Apagado</translation>
+    </message>
+</context>
+<context>
+    <name>UiSounds</name>
+    <message>
+        <source>%1 holds no sound.</source>
+        <translation>%1 no contiene sonido.</translation>
     </message>
 </context>
 </TS>

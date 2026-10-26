@@ -4,6 +4,7 @@
 #include "Configuration.h"
 #include "ConfigurationFields.h"
 #include "GamepadInput.h"
+#include "UiSounds.h"
 #include "Psf.h"
 #include "Theme.h"
 
@@ -14,6 +15,8 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontDatabase>
+#include <QGuiApplication>
 #include <QLocale>
 #include <QMap>
 #include <QSet>
@@ -43,6 +46,8 @@ constexpr int  MAX_IMPORTED_GAMES    = 512;
 constexpr int SECTION_NAME_MAX = 40;
 // The colour scheme and language that follow the desktop's.
 constexpr char SYSTEM_CHOICE[] = "System";
+// The launcher's own look, which needs no add-on theme.
+constexpr char OWN_THEME[] = "Kyty";
 
 namespace {
 
@@ -142,7 +147,8 @@ QVariantMap LookDefaults()
 {
 	return {{"accent", "Blue"},       {"interface_size", "Normal"}, {"animations", "Full"}, {"background", "Artwork"},
 	        {"cover_size", "Medium"}, {"show_titles", true},        {"show_recent", true},  {"on_launch", "Minimize"},
-	        {"sort", "Manual"},       {"window_mode", "Windowed"}};
+	        {"sort", "Manual"},       {"window_mode", "Windowed"},  {"start_on", "LastGame"},
+	        {"theme", OWN_THEME},     {"layout", "Sidebar"},        {"ui_sounds", true},    {"ui_volume", "Medium"}};
 }
 
 // Scale of every size for each interface_size, in the order of its choices.
@@ -151,12 +157,14 @@ constexpr qreal INTERFACE_SCALES[] = {0.88, 1, 1.14, 1.3};
 } // namespace
 
 LauncherBackend::LauncherBackend(QObject* parent)
-    : QObject(parent), m_gamepad(new GamepadInput(this)), m_run_modes(EmulatorRunner::RunModes())
+    : QObject(parent), m_gamepad(new GamepadInput(this)), m_sounds(new UiSounds(this)), m_run_modes(EmulatorRunner::RunModes())
 {
 	Q_ASSERT(g_backend == nullptr);
 	g_backend = this;
 	m_import_pool.setMaxThreadCount(1);
 	m_import_pool.setThreadPriority(QThread::IdlePriority);
+	m_default_font = QGuiApplication::font();
+	m_themes       = FindThemePacks();
 
 	Load();
 	ApplyColorScheme();
@@ -189,6 +197,43 @@ void LauncherBackend::AttachWindow(QWindow* window)
 QString LauncherBackend::ControllerName() const
 {
 	return m_gamepad->ControllerName();
+}
+
+QString LauncherBackend::PadText(const QString& text) const
+{
+	// The hints are written with a PlayStation controller's symbols, in the order ButtonLabels() gives them.
+	static const QStringList written = {QStringLiteral("✕"), QStringLiteral("○"), QStringLiteral("□"),
+	                                    QStringLiteral("△"), QStringLiteral("L1"), QStringLiteral("R1")};
+	const auto               labels  = m_gamepad->ButtonLabels();
+	QString                  result;
+	for (qsizetype i = 0; i < text.size(); i++)
+	{
+		const auto found = std::find_if(written.cbegin(), written.cend(), [&](const QString& symbol) { return QStringView(text).mid(i).startsWith(symbol); });
+		if (found == written.cend())
+		{
+			result += text.at(i);
+			continue;
+		}
+		result += labels.at(found - written.cbegin());
+		i += found->size() - 1;
+	}
+	return result;
+}
+
+int LauncherBackend::ControllerBattery() const
+{
+	return m_gamepad->BatteryPercent();
+}
+
+bool LauncherBackend::ControllerCharging() const
+{
+	return m_gamepad->Charging();
+}
+
+QString LauncherBackend::LayoutName() const
+{
+	const auto* theme = CurrentTheme();
+	return theme != nullptr && !theme->layout.isEmpty() ? theme->layout : m_look.value("layout").toString();
 }
 
 void LauncherBackend::Load()
@@ -302,6 +347,10 @@ QVariantMap LauncherBackend::GameToMap(int row) const
 	item["lastRun"]  = info.last_run;
 	item["playTime"] = info.play_time;
 	item["favorite"] = info.favorite;
+	item["customSettings"] = info.custom_settings;
+	// The size the game runs at, which is the global one unless it has its own settings.
+	const auto& shown = info.custom_settings ? info : m_global;
+	item["screen"]    = QString("%1 × %2").arg(shown.screen_width).arg(shown.screen_height);
 	return item;
 }
 
@@ -415,6 +464,15 @@ QVariantMap LauncherBackend::Choices() const
 	choices["on_launch"]      = QStringList {"Minimize", "KeepOpen"};
 	choices["sort"]           = QStringList {"Manual", "ByName", "LastPlayed", "PlayTime"};
 	choices["window_mode"]    = QStringList {"Windowed", "Maximized", "FullScreen"};
+	choices["start_on"]       = QStringList {"LastGame", "Library"};
+	choices["layout"]         = QStringList {"Sidebar", "Console"};
+	choices["ui_volume"]      = QStringList {"Quiet", "Medium", "Loud"};
+	QStringList themes {OWN_THEME};
+	for (const auto& theme: m_themes)
+	{
+		themes << theme.id;
+	}
+	choices["theme"] = themes;
 	return choices;
 }
 
@@ -453,6 +511,98 @@ void LauncherBackend::ApplyLook()
 	auto*      theme   = Theme::Instance();
 	theme->SetAccent(static_cast<Theme::AccentColor>(choices.value("accent").toStringList().indexOf(m_look.value("accent").toString())));
 	theme->SetMotion(static_cast<Theme::Motion>(choices.value("animations").toStringList().indexOf(m_look.value("animations").toString())));
+	// Quiet, Medium and Loud, in the order of their choices.
+	constexpr float GAINS[] = {0.35F, 0.65F, 1.0F};
+	const auto      volume  = choices.value("ui_volume").toStringList().indexOf(m_look.value("ui_volume").toString());
+	m_sounds->SetGain(m_look.value("ui_sounds").toBool() ? GAINS[std::max<qsizetype>(0, volume)] : 0);
+	ApplyTheme();
+}
+
+QString LauncherBackend::ChoiceLabel(const QString& value) const
+{
+	if (value == QLatin1String(OWN_THEME))
+	{
+		return tr("Kyty");
+	}
+	for (const auto& theme: m_themes)
+	{
+		if (theme.id == value)
+		{
+			return theme.error.isEmpty() ? tr("%1 · Add-on").arg(theme.name) : tr("%1 · Can't be used").arg(theme.name);
+		}
+	}
+	return {};
+}
+
+const ThemePack* LauncherBackend::CurrentTheme() const
+{
+	const auto id = m_look.value("theme").toString();
+	for (const auto& theme: m_themes)
+	{
+		if (theme.id == id && theme.error.isEmpty())
+		{
+			return &theme;
+		}
+	}
+	return nullptr;
+}
+
+// Puts the chosen add-on theme's colours and font in place, or the launcher's own when it has none or fails.
+void LauncherBackend::ApplyTheme()
+{
+	auto* theme = Theme::Instance();
+	if (m_theme_font >= 0)
+	{
+		QFontDatabase::removeApplicationFont(m_theme_font);
+		m_theme_font = -1;
+		QGuiApplication::setFont(m_default_font);
+	}
+	theme->SetCustomColors({}, {});
+	m_sounds->SetFiles({});
+	const auto id = m_look.value("theme").toString();
+	if (id == QLatin1String(OWN_THEME))
+	{
+		return;
+	}
+	const auto found = std::find_if(m_themes.cbegin(), m_themes.cend(), [&id](const ThemePack& pack) { return pack.id == id; });
+	if (found == m_themes.cend())
+	{
+		ThemeUnusable(tr("The theme %1 is no longer installed.").arg(id));
+		return;
+	}
+	if (!found->error.isEmpty())
+	{
+		ThemeUnusable(tr("The theme %1 can't be used: %2").arg(found->name, found->error));
+		return;
+	}
+	if (!found->font.isEmpty())
+	{
+		m_theme_font        = QFontDatabase::addApplicationFont(found->font);
+		const auto families = QFontDatabase::applicationFontFamilies(m_theme_font);
+		if (families.isEmpty())
+		{
+			ThemeUnusable(tr("The theme %1 can't be used: its font cannot be read.").arg(found->name));
+			return;
+		}
+		auto font = m_default_font;
+		font.setFamilies(families);
+		QGuiApplication::setFont(font);
+	}
+	if (const auto error = m_sounds->SetFiles(found->sounds); !error.isEmpty())
+	{
+		ThemeUnusable(tr("The theme %1 can't be used: %2").arg(found->name, error));
+		return;
+	}
+	theme->SetCustomColors(found->dark, found->light);
+}
+
+// The launcher's own look comes back and is remembered; the window hears why once its event loop runs.
+void LauncherBackend::ThemeUnusable(const QString& message)
+{
+	m_look["theme"] = QString(OWN_THEME);
+	ApplyTheme();
+	Save();
+	QMetaObject::invokeMethod(this, [this, message]() { emit ThemeFailed(message); }, Qt::QueuedConnection);
 }
 
 void LauncherBackend::SetLauncherField(const QString& key, const QVariant& value)

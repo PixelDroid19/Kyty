@@ -1,5 +1,6 @@
 #include "BackgroundItem.h"
 
+#include "LauncherBackend.h"
 #include "SceneNodes.h"
 #include "Theme.h"
 
@@ -9,12 +10,19 @@
 #include <QSGRectangleNode>
 #include <QSGTransformNode>
 
+#include <algorithm>
+
 // The accent band leans like the light behind the console's home screen tiles.
 constexpr float BAND_ANGLE = 18;
 
 BackgroundItem::BackgroundItem(QQuickItem* parent): QQuickItem(parent)
 {
 	setFlag(ItemHasContents);
+	// The theme was checked when it was read, so a picture that still fails to load only leaves the gradients.
+	if (const auto* theme = LauncherBackend::Instance()->CurrentTheme(); theme != nullptr && !theme->background.isEmpty())
+	{
+		m_picture = QImage(theme->background);
+	}
 }
 
 void BackgroundItem::geometryChange(const QRectF& new_geometry, const QRectF& old_geometry)
@@ -34,6 +42,12 @@ QSGNode* BackgroundItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData*
 	{
 		base = window()->createRectangleNode();
 		base->setColor(Theme::Instance()->Background());
+		if (!m_picture.isNull())
+		{
+			auto* picture = CreateTextureNode(window(), window()->createTextureFromImage(m_picture), {});
+			picture->setFiltering(QSGTexture::Linear);
+			base->appendChildNode(picture);
+		}
 
 		const QColor accent = Theme::Instance()->Accent();
 		QColor       faint  = accent;
@@ -57,7 +71,7 @@ QSGNode* BackgroundItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData*
 
 	// Tall enough that the rotated top and bottom edges stay off screen; only the faded sides show.
 	const QRectF band_rect(-w * 0.15, -h, w * 0.8, h * 3);
-	auto*        band = static_cast<QSGTransformNode*>(base->firstChild());
+	auto*        band = static_cast<QSGTransformNode*>(base->lastChild()->previousSibling());
 	QMatrix4x4   matrix;
 	matrix.translate(static_cast<float>(band_rect.center().x()), static_cast<float>(band_rect.center().y()));
 	matrix.rotate(BAND_ANGLE, 0, 0, 1);
@@ -66,5 +80,16 @@ QSGNode* BackgroundItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData*
 	static_cast<QSGImageNode*>(band->firstChild())->setRect(band_rect);
 
 	static_cast<QSGImageNode*>(base->lastChild())->setRect(QRectF(0, h * 0.55, w, h * 0.45));
+
+	if (band != base->firstChild() && !m_picture.isNull() && w > 0 && h > 0)
+	{
+		// Covers the window and crops the picture's overflow, centred.
+		auto*       picture = static_cast<QSGImageNode*>(base->firstChild());
+		const QSizeF source = m_picture.size();
+		const qreal  scale  = std::max(w / source.width(), h / source.height());
+		const QSizeF shown(w / scale, h / scale);
+		picture->setRect(boundingRect());
+		picture->setSourceRect(QRectF(QPointF((source.width() - shown.width()) / 2, (source.height() - shown.height()) / 2), shown));
+	}
 	return base;
 }

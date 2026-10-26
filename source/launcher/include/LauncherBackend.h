@@ -5,7 +5,9 @@
 #include "Configuration.h"
 #include "EmulatorRunner.h"
 #include "GameLibrary.h"
+#include "ThemePack.h"
 
+#include <QFont>
 #include <QObject>
 #include <QRect>
 #include <QString>
@@ -19,6 +21,7 @@
 
 class GamepadInput;
 class QWindow;
+class UiSounds;
 
 // The object the pages use: the library, the editor, the emulator, the controller and persistence.
 class LauncherBackend: public QObject
@@ -38,6 +41,8 @@ signals:
 	void AppearanceChanged();
 	// The settings could not be written to file, so the last changes are lost when the launcher closes.
 	void SaveFailed(const QString& file);
+	// The chosen add-on theme cannot be used, so the launcher's own look is back; message says why.
+	void ThemeFailed(const QString& message);
 
 public:
 	explicit LauncherBackend(QObject* parent = nullptr);
@@ -59,6 +64,16 @@ public:
 	[[nodiscard]] bool         IsRunning() const { return m_runner.IsBusy(); }
 	[[nodiscard]] int          RunningRow() const { return m_running_row; }
 	[[nodiscard]] QString      ControllerName() const;
+	// text with the PlayStation button symbols it is written with (✕ ○ □ △ L1 R1) shown as the connected
+	// controller prints them.
+	[[nodiscard]] QString PadText(const QString& text) const;
+	// The controller's charge in percent, or -1 when unknown or none is connected.
+	[[nodiscard]] int  ControllerBattery() const;
+	[[nodiscard]] bool ControllerCharging() const;
+	// The interface sounds, at the volume the settings ask for.
+	[[nodiscard]] UiSounds* Sounds() const { return m_sounds; }
+	// Sidebar or Console: the add-on theme's layout when it names one, otherwise the layout setting.
+	[[nodiscard]] QString      LayoutName() const;
 	[[nodiscard]] bool         IsTableView() const { return m_table_view; }
 	[[nodiscard]] QString      LogPath() const { return m_runner.LogPath(); }
 	[[nodiscard]] QString      SettingsFile() const { return m_settings_file; }
@@ -67,10 +82,14 @@ public:
 	// The launcher's own settings in the same form: run mode, colour scheme, language, look and library layout.
 	[[nodiscard]] QVariantMap LauncherFields() const;
 	// One of the look and library settings: accent, interface_size, animations, background, cover_size,
-	// show_titles, show_recent or on_launch.
+	// show_titles, show_recent, on_launch, sort, window_mode, start_on, theme, layout, ui_sounds or ui_volume.
 	[[nodiscard]] QVariant Look(const QString& key) const { return m_look.value(key); }
 	// How much interface_size grows or shrinks every size.
 	[[nodiscard]] qreal InterfaceScale() const;
+	// The name shown for a choice the launcher does not list itself, such as an add-on theme, or an empty string.
+	[[nodiscard]] QString ChoiceLabel(const QString& value) const;
+	// The add-on theme in use, or null for the launcher's own look.
+	[[nodiscard]] const ThemePack* CurrentTheme() const;
 
 	QVariantMap FieldsFor(int row) const;
 	QVariantMap Choices() const;
@@ -115,12 +134,15 @@ private:
 	void         ApplyColorScheme();
 	void         ApplyLanguage();
 	void               ApplyLook();
+	void               ApplyTheme();
+	void               ThemeUnusable(const QString& message);
 	[[nodiscard]] bool IsValidLook(const QString& key, const QVariant& value) const;
 
 	GameLibrary        m_library;
 	Kyty::Configuration m_global;
 	EmulatorRunner     m_runner;
 	GamepadInput*      m_gamepad = nullptr;
+	UiSounds*          m_sounds  = nullptr;
 	QString            m_settings_file;
 	QString            m_emulator_override;
 	QString            m_emulator_version;
@@ -131,6 +153,10 @@ private:
 	QString             m_color_scheme;
 	QString             m_language;
 	QVariantMap         m_look;
+	QVector<ThemePack>  m_themes;
+	// The font of a theme added to the application, and the font the launcher had before any theme.
+	int                 m_theme_font = -1;
+	QFont               m_default_font;
 	QTranslator         m_translator;
 	int                m_running_row       = -1;
 	// When the running library game started, in milliseconds since the epoch; its play time grows when it ends.
