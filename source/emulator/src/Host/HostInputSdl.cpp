@@ -54,6 +54,12 @@ namespace {
 		case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return ControllerButton::DpadDown;
 		case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return ControllerButton::DpadLeft;
 		case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return ControllerButton::DpadRight;
+		case SDL_GAMEPAD_BUTTON_MISC1: return ControllerButton::Misc1;
+		case SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1: return ControllerButton::Paddle1;
+		case SDL_GAMEPAD_BUTTON_LEFT_PADDLE1: return ControllerButton::Paddle2;
+		case SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2: return ControllerButton::Paddle3;
+		case SDL_GAMEPAD_BUTTON_LEFT_PADDLE2: return ControllerButton::Paddle4;
+		case SDL_GAMEPAD_BUTTON_TOUCHPAD: return ControllerButton::Touchpad;
 		default: return ControllerButton::Invalid;
 	}
 }
@@ -314,6 +320,13 @@ bool HostInput::OpenController(int device_id, int* instance_id)
 	return true;
 }
 
+std::string HostInput::ControllerGuid(int device_id)
+{
+	char text[33] = {};
+	SDL_GUIDToString(SDL_GetGamepadGUIDForID(static_cast<SDL_JoystickID>(device_id)), text, sizeof(text));
+	return text;
+}
+
 void HostInput::CloseController(int instance_id)
 {
 	if (SDL_Gamepad* gamepad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(instance_id)); gamepad != nullptr)
@@ -325,16 +338,6 @@ void HostInput::CloseController(int instance_id)
 const char* HostInput::LastError() const
 {
 	return SDL_GetError();
-}
-
-int HostInput::NormalizeAxis(ControllerAxis axis, int value)
-{
-	const bool trigger = axis == ControllerAxis::TriggerLeft || axis == ControllerAxis::TriggerRight;
-	const int  min     = trigger ? 0 : -32768;
-	const int  max     = 32767;
-	const int  clamped = std::clamp(value, min, max);
-	const int  scaled  = (255 * (clamped - min)) / (max - min);
-	return std::clamp(scaled, 0, 255);
 }
 
 bool HostInput::IsEscapeKey(int key_code)
@@ -367,6 +370,36 @@ bool HostInput::IsTextEntryToggleKey(int key_code)
 	return key_code == SDLK_F2;
 }
 
+bool HostInput::IsMouseCaptureKey(int key_code)
+{
+	return key_code == SDLK_F3;
+}
+
+bool HostInput::IsReservedScanCode(int scan_code)
+{
+	switch (scan_code)
+	{
+		case SDL_SCANCODE_ESCAPE:
+		case SDL_SCANCODE_F1:
+		case SDL_SCANCODE_F2:
+		case SDL_SCANCODE_F3:
+		case SDL_SCANCODE_F9:
+		case SDL_SCANCODE_F11: return true;
+		default: return false;
+	}
+}
+
+int HostInput::ScanCodeFromName(const char* name)
+{
+	return static_cast<int>(SDL_GetScancodeFromName(name));
+}
+
+ControllerButton HostInput::ControllerButtonFromName(const char* name)
+{
+	const SDL_GamepadButton button = SDL_GetGamepadButtonFromString(name);
+	return button == SDL_GAMEPAD_BUTTON_INVALID ? ControllerButton::Invalid : TranslateControllerButton(static_cast<Uint8>(button));
+}
+
 uint16_t HostInput::KeyboardHidUsage(int scan_code)
 {
 	// SDL scancodes are the USB HID keyboard usages (usage page 0x07).
@@ -394,31 +427,6 @@ uint16_t HostInput::KeyboardTextCharacter(int key_code, uint16_t modifiers)
 bool HostInput::HasAltModifier(uint16_t modifiers)
 {
 	return (modifiers & SDL_KMOD_ALT) != 0;
-}
-
-KeyboardAction HostInput::ClassifyKeyboardAction(int key_code)
-{
-	switch (key_code)
-	{
-		case SDLK_RETURN:
-		case SDLK_SPACE:
-		case SDLK_Z: return KeyboardAction::Cross;
-		case SDLK_ESCAPE:
-		case SDLK_X: return KeyboardAction::Circle;
-		case SDLK_C: return KeyboardAction::Square;
-		case SDLK_V: return KeyboardAction::Triangle;
-		case SDLK_UP: return KeyboardAction::Up;
-		case SDLK_DOWN: return KeyboardAction::Down;
-		case SDLK_LEFT: return KeyboardAction::Left;
-		case SDLK_RIGHT: return KeyboardAction::Right;
-		case SDLK_Q: return KeyboardAction::L1;
-		case SDLK_E: return KeyboardAction::R1;
-		case SDLK_1: return KeyboardAction::L2;
-		case SDLK_3: return KeyboardAction::R2;
-		case SDLK_TAB:
-		case SDLK_BACKSPACE: return KeyboardAction::Options;
-		default: return KeyboardAction::None;
-	}
 }
 
 } // namespace Kyty::Emulator::Host

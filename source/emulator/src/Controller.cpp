@@ -1224,8 +1224,8 @@ void GameController::CheckActive()
 	bool next_connected = false;
 	int  next_active    = CONTROLLER_KEYBOARD_ID;
 
-	// A real SDL controller owns axes and its own buttons when present. The
-	// keyboard remains an independent button source and is merged in Button().
+	// A real SDL controller is the active physical source when present. The
+	// keyboard remains an independent source; AddSourceState() merges both.
 	for (uint32_t i = 0; i < m_connected_ids.Size(); i++)
 	{
 		const int id = m_connected_ids.At(i);
@@ -1244,15 +1244,11 @@ void GameController::CheckActive()
 
 	if (m_connected != next_connected || (next_connected && m_active_id != next_active))
 	{
-		// Retire only the old physical source. Keyboard buttons remain held
-		// across physical-controller changes; axis ownership still follows the
-		// active controller and starts neutral on a change.
-		m_physical_state            = {};
-		const auto keyboard_buttons = m_keyboard_state.buttons;
-		m_keyboard_state            = {};
-		m_keyboard_state.buttons    = keyboard_buttons;
-		m_active_id                 = next_active;
-		m_connected                 = next_connected;
+		// Retire only the old physical source; the keyboard state stays held
+		// across physical-controller changes.
+		m_physical_state = {};
+		m_active_id      = next_active;
+		m_connected      = next_connected;
 		if (next_connected)
 		{
 			m_connected_count++;
@@ -1264,9 +1260,17 @@ void GameController::CheckActive()
 
 void GameController::AddSourceState()
 {
-	auto state    = (m_active_id == CONTROLLER_KEYBOARD_ID ? m_keyboard_state : m_physical_state);
+	const ControllerState rest {};
+	ControllerState       state;
 	state.time    = Kernel::KernelGetProcessTime();
 	state.buttons = m_keyboard_state.buttons | m_physical_state.buttons;
+	// Each axis follows the source deflected farthest from rest, so mouse look and keys work beside a gamepad.
+	for (int i = 0; i < static_cast<int>(Controller::Axis::AxisMax); i++)
+	{
+		const int keyboard = m_keyboard_state.axes[i];
+		const int physical = m_physical_state.axes[i];
+		state.axes[i]      = std::abs(keyboard - rest.axes[i]) > std::abs(physical - rest.axes[i]) ? keyboard : physical;
+	}
 	if (state.axes[static_cast<int>(Controller::Axis::TriggerLeft)] > 0)
 	{
 		state.buttons |= PAD_BUTTON_L2;
@@ -1332,7 +1336,7 @@ void GameController::Axis(int id, Controller::Axis axis, int value)
 {
 	Core::LockGuard lock(m_mutex);
 
-	if (m_active_id == id)
+	if (m_active_id == id || id == CONTROLLER_KEYBOARD_ID)
 	{
 		auto& state = (id == CONTROLLER_KEYBOARD_ID ? m_keyboard_state : m_physical_state);
 

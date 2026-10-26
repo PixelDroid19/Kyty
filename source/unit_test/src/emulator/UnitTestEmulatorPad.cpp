@@ -2,7 +2,6 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Controller.h"
-#include "Emulator/Host/KeyboardInput.h"
 #include "Emulator/Log.h"
 
 #include <array>
@@ -126,70 +125,6 @@ TEST(EmulatorPad, KeyboardButtonsRemainVisibleWithPhysicalController)
 
 	ControllerButton(CONTROLLER_KEYBOARD_ID, PAD_BUTTON_CROSS, false);
 	ControllerDisconnect(physical_id);
-}
-
-// Pure keyboard seam: A/D/W/S press and release map to left stick; opposites
-// neutralize to 128; reset returns neutral. Key codes match SDL letter values.
-TEST(EmulatorPad, KeyboardMovementKeyPressReleaseMapsLeftStick)
-{
-	using namespace Kyty::Emulator::Host;
-
-	KeyboardLeftStickState state {};
-
-	auto press_a = ApplyKeyboardLeftStickKey(state, 'a', true);
-	EXPECT_TRUE(press_a.handled);
-	EXPECT_TRUE(press_a.changed);
-	EXPECT_EQ(press_a.axes.x, 0);
-	EXPECT_EQ(press_a.axes.y, 128);
-
-	auto release_a = ApplyKeyboardLeftStickKey(state, 'a', false);
-	EXPECT_TRUE(release_a.handled);
-	EXPECT_TRUE(release_a.changed);
-	EXPECT_EQ(release_a.axes.x, 128);
-	EXPECT_EQ(release_a.axes.y, 128);
-
-	auto press_d = ApplyKeyboardLeftStickKey(state, 'd', true);
-	EXPECT_TRUE(press_d.handled);
-	EXPECT_TRUE(press_d.changed);
-	EXPECT_EQ(press_d.axes.x, 255);
-
-	auto press_a_with_d = ApplyKeyboardLeftStickKey(state, 'a', true);
-	EXPECT_TRUE(press_a_with_d.handled);
-	EXPECT_TRUE(press_a_with_d.changed);
-	EXPECT_EQ(press_a_with_d.axes.x, 128);
-
-	EXPECT_TRUE(ApplyKeyboardLeftStickKey(state, 'a', false).handled);
-	EXPECT_TRUE(ApplyKeyboardLeftStickKey(state, 'd', false).handled);
-
-	auto press_w = ApplyKeyboardLeftStickKey(state, 'w', true);
-	EXPECT_TRUE(press_w.handled);
-	EXPECT_EQ(press_w.axes.y, 0);
-
-	auto press_s = ApplyKeyboardLeftStickKey(state, 's', true);
-	EXPECT_TRUE(press_s.handled);
-	EXPECT_EQ(press_s.axes.y, 128);
-
-	EXPECT_TRUE(ApplyKeyboardLeftStickKey(state, 'w', false).handled);
-	auto only_s = ApplyKeyboardLeftStickKey(state, 's', true);
-	EXPECT_TRUE(only_s.handled);
-	EXPECT_EQ(only_s.axes.y, 255);
-	EXPECT_TRUE(ApplyKeyboardLeftStickKey(state, 's', false).handled);
-
-	// Unknown key is not handled.
-	auto ignored = ApplyKeyboardLeftStickKey(state, 'z', true);
-	EXPECT_FALSE(ignored.handled);
-	EXPECT_FALSE(ignored.changed);
-
-	// Hold left then reset.
-	ASSERT_TRUE(ApplyKeyboardLeftStickKey(state, 'a', true).handled);
-	auto reset = ResetKeyboardLeftStick(state);
-	EXPECT_TRUE(reset.changed);
-	EXPECT_EQ(reset.axes.x, 128);
-	EXPECT_EQ(reset.axes.y, 128);
-	EXPECT_FALSE(state.left);
-	EXPECT_FALSE(state.right);
-	EXPECT_FALSE(state.up);
-	EXPECT_FALSE(state.down);
 }
 
 TEST(EmulatorPad, KeyboardAxesAreReturnedByPadReadState)
