@@ -81,6 +81,7 @@ LIB_DEFINE(InitTextToSpeech2_1);
 LIB_DEFINE(InitWriteThrottling_1);
 LIB_DEFINE(InitSyncOnAddress_1);
 LIB_DEFINE(InitVideodec2_1);
+LIB_DEFINE(InitSystemGesture_1);
 
 bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s)
 {
@@ -141,6 +142,7 @@ bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_CHECK(U"libSceTextToSpeech2_1", InitTextToSpeech2_1);
 	LIB_CHECK(U"libkernel_write_throttling_1", InitWriteThrottling_1);
 	LIB_CHECK(U"libkernel_sync_on_address_1", InitSyncOnAddress_1);
+	LIB_CHECK(U"libSceSystemGesture_1", InitSystemGesture_1);
 
 	return false;
 }
@@ -197,6 +199,7 @@ void InitAll(::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_LOAD(InitWriteThrottling_1);
 	LIB_LOAD(InitSyncOnAddress_1);
 	LIB_LOAD(InitVideodec2_1);
+	LIB_LOAD(InitSystemGesture_1);
 
 	// libSceLibcInternal exports the system C runtime that libc is built on;
 	// modules that link it directly import the same NIDs under its identity.
