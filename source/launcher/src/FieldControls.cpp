@@ -310,7 +310,9 @@ QSGNode* BindingItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*
 	node->box->Update(window(), boundingRect(),
 	                  BoxStyle(this, Hovered(), Hovered() ? theme->GlassStrong() : theme->Glass(), BOX_RADIUS * u));
 	const auto text = boundingRect().adjusted(INSET * u, 0, -INSET * u, 0);
-	const auto font = BodyFont();
+	// A long binding steps down to the small font before it is cut short.
+	const auto body = BodyFont();
+	const auto font = TextWidth(m_text, body) <= text.width() ? body : SceneFont(theme->FontSmall());
 	SetTextLine(node->first, QFontMetricsF(font).elidedText(m_text, Qt::ElideRight, text.width()), font,
 	            m_bound ? theme->TextPrimary() : theme->TextMuted(), text);
 	return node;

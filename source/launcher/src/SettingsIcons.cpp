@@ -1,5 +1,7 @@
 #include "SettingsIcons.h"
 
+#include "ControllerDrawing.h"
+
 #include <QPainter>
 #include <QPainterPath>
 #include <QtMath>
@@ -280,45 +282,67 @@ void PaintEmulator(QPainter* p, qreal t, const QColor& ink, const QColor& accent
 	}
 }
 
-// A controller whose left stick circles while one face button after another lights up.
+// The guest pad: it rocks gently and now and then buzzes, the left stick circles, the right one flicks, the face
+// buttons light one after another and the light bar breathes.
 void PaintControls(QPainter* p, qreal t, const QColor& ink, const QColor& accent)
 {
-	QPainterPath body;
-	body.moveTo(0.3, 0.3);
-	body.lineTo(0.7, 0.3);
-	body.cubicTo(0.86, 0.3, 0.93, 0.5, 0.94, 0.66);
-	body.cubicTo(0.95, 0.8, 0.82, 0.83, 0.75, 0.73);
-	body.lineTo(0.68, 0.63);
-	body.lineTo(0.32, 0.63);
-	body.lineTo(0.25, 0.73);
-	body.cubicTo(0.18, 0.83, 0.05, 0.8, 0.06, 0.66);
-	body.cubicTo(0.07, 0.5, 0.14, 0.3, 0.3, 0.3);
-	p->setPen(Line(ink));
+	constexpr qreal WIDTH = 0.9;
+	const bool      live  = t > 0;
+	const qreal     rock  = live ? 3.5 * std::sin(t * 2 * M_PI / 3.2) : 0;
+	const qreal     buzz  = live && Phase(t, 4.8) > 0.9 ? 0.012 * std::sin(t * 2 * M_PI * 14) : 0;
+	p->save();
+	p->translate(0.5 + buzz, 0.5);
+	p->rotate(rock);
+	p->scale(WIDTH, WIDTH);
+	// The body's outline spans 0.075 to 0.645 of its height; centre that on the icon.
+	p->translate(-0.5, -0.36);
+	const qreal stroke = STROKE / WIDTH;
+
+	p->setPen(Line(ink, stroke));
 	p->setBrush(Qt::NoBrush);
-	p->drawPath(body);
+	p->drawPath(ControllerBody());
+	p->setPen(Line(WithAlpha(ink, 0.7), stroke * 0.7));
+	p->drawRoundedRect(QRectF(0.36, 0.13, 0.28, 0.14), 0.03, 0.03);
 
-	// The cross on the left, the sticks between, the four face buttons on the right.
-	p->drawLine(QPointF(0.2, 0.46), QPointF(0.3, 0.46));
-	p->drawLine(QPointF(0.25, 0.41), QPointF(0.25, 0.51));
-	const QPointF left_stick(0.39, 0.55);
-	const QPointF right_stick(0.61, 0.55);
-	p->drawEllipse(left_stick, 0.06, 0.06);
-	p->drawEllipse(right_stick, 0.06, 0.06);
+	const qreal breath = live ? 0.5 + 0.5 * std::sin(t * 2 * M_PI / 2) : 0.5;
+	p->setPen(Line(WithAlpha(accent, 0.35 + 0.65 * breath), stroke * 0.8));
+	p->drawLine(QPointF(0.322, 0.15), QPointF(0.322, 0.25));
+	p->drawLine(QPointF(0.678, 0.15), QPointF(0.678, 0.25));
 
-	const qreal   angle = t * 2 * M_PI / 2.4;
-	const qreal   reach = t > 0 ? 0.03 : 0;
-	const QPointF tip   = left_stick + QPointF(std::cos(angle), std::sin(angle)) * reach;
+	const QPointF cross(0.2, 0.25);
+	p->setPen(Line(ink, stroke));
+	p->drawLine(cross - QPointF(0.065, 0), cross + QPointF(0.065, 0));
+	p->drawLine(cross - QPointF(0, 0.065), cross + QPointF(0, 0.065));
+
+	const QPointF sticks[] = {{0.36, 0.385}, {0.64, 0.385}};
+	const qreal   orbit    = t * 2 * M_PI / 2.4;
+	const qreal   reach    = live ? 0.032 * Smooth(t / 0.6) : 0;
+	const qreal   flick    = live ? 0.032 * std::pow(std::max<qreal>(0, std::sin(t * 2 * M_PI / 1.7)), 3) : 0;
+	const QPointF caps[]   = {sticks[0] + QPointF(std::cos(orbit), std::sin(orbit)) * reach, sticks[1] + QPointF(flick, 0)};
+	for (int i = 0; i < 2; i++)
+	{
+		p->setPen(Line(ink, stroke * 0.85));
+		p->setBrush(Qt::NoBrush);
+		p->drawEllipse(sticks[i], 0.065, 0.065);
+		p->setPen(Qt::NoPen);
+		p->setBrush(accent);
+		p->drawEllipse(caps[i], 0.034, 0.034);
+	}
+
+	// Each face button flashes in turn and fades before the next one lights.
+	const QPointF face(0.8, 0.25);
+	const QPointF buttons[] = {face + QPointF(0, -0.062), face + QPointF(0.062, 0), face + QPointF(0, 0.062), face + QPointF(-0.062, 0)};
+	const qreal   step      = t / 0.45;
+	const int     lit       = live ? static_cast<int>(std::fmod(step, 4)) : -1;
+	const qreal   fade      = 1 - (step - std::floor(step));
 	p->setPen(Qt::NoPen);
-	p->setBrush(accent);
-	p->drawEllipse(tip, 0.028, 0.028);
-
-	const QPointF buttons[] = {{0.75, 0.39}, {0.81, 0.45}, {0.75, 0.51}, {0.69, 0.45}};
-	const int     lit       = t > 0 ? static_cast<int>(std::fmod(t / 0.6, 4)) : -1;
 	for (int i = 0; i < 4; i++)
 	{
-		p->setBrush(i == lit ? accent : WithAlpha(ink, 0.55));
-		p->drawEllipse(buttons[i], 0.024, 0.024);
+		const QColor rest = WithAlpha(ink, 0.6);
+		p->setBrush(i == lit ? WithAlpha(accent, 0.45 + 0.55 * fade) : rest);
+		p->drawEllipse(buttons[i], i == lit ? 0.034 : 0.028, i == lit ? 0.034 : 0.028);
 	}
+	p->restore();
 }
 
 // A sun that turns into a crescent moon and back, its rays drawing in as the stars fade.

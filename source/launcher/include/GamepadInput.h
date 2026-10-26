@@ -59,6 +59,10 @@ public:
 	void SetPreferredDevice(const QString& guid);
 	// Where the left or right stick points, from -1 to 1 on each axis, before any deadzone.
 	[[nodiscard]] QPointF StickPosition(bool right) const;
+	// How far the left or right trigger is pulled, from 0 to 1.
+	[[nodiscard]] qreal TriggerPosition(bool right) const;
+	// The buttons held down, named as in the input profile format.
+	[[nodiscard]] QStringList HeldButtons() const;
 	// While capturing, buttons are reported through ButtonCaptured instead of moving through the pages.
 	void BeginCapture();
 	void EndCapture();

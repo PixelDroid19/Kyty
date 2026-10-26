@@ -844,10 +844,6 @@ QVariantMap LauncherBackend::ControlsFields() const
 		fields[prefix + QStringLiteral("_deadzone")] = QString::number(stick.value("deadzone").toDouble());
 		fields[prefix + QStringLiteral("_invert_x")] = stick.value("invert_x").toBool();
 		fields[prefix + QStringLiteral("_invert_y")] = stick.value("invert_y").toBool();
-		fields[prefix + QStringLiteral("_stick")]    = QVariantMap {{"deadzone", stick.value("deadzone").toDouble()},
-		                                                            {"invert_x", stick.value("invert_x").toBool()},
-		                                                            {"invert_y", stick.value("invert_y").toBool()},
-		                                                            {"right", prefix == QLatin1String("right")}};
 	}
 	fields["trigger_deadzone"]  = QString::number(gamepad.value("trigger_deadzone").toDouble());
 	fields["mouse_look"]        = mouse.value("look").toBool();

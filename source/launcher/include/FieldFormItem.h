@@ -28,8 +28,6 @@ signals:
 	void Edited(const QString& key);
 	// Up was pressed on the first control.
 	void TopReached();
-	// A binding field asks the owner to wait for a key or mouse button, or with gamepad for a controller button.
-	void CaptureRequested(const QString& key, bool gamepad);
 
 public:
 	// Text fields edited with a controller type on pad, which covers the owner's page.

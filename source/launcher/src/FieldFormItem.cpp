@@ -94,7 +94,6 @@ void FieldFormItem::AddFields(const QVector<EditorField>& fields, bool custom_on
 		connect(row, &FieldRowItem::BrowseRequested, this, &FieldFormItem::Browse);
 		connect(row, &FieldRowItem::ListRequested, this, &FieldFormItem::OpenList);
 		connect(row, &FieldRowItem::FocusRequested, this, [this](const QString& key) { FocusKey(key); });
-		connect(row, &FieldRowItem::CaptureRequested, this, &FieldFormItem::CaptureRequested);
 		m_rows << row;
 		m_custom_only << custom_only;
 	}

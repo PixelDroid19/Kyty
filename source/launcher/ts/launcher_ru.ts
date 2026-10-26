@@ -199,6 +199,221 @@
     </message>
 </context>
 <context>
+    <name>ControlsPanelItem</name>
+    <message>
+        <source>✕ Cross</source>
+        <translation>✕ Крест</translation>
+    </message>
+    <message>
+        <source>○ Circle</source>
+        <translation>○ Круг</translation>
+    </message>
+    <message>
+        <source>□ Square</source>
+        <translation>□ Квадрат</translation>
+    </message>
+    <message>
+        <source>△ Triangle</source>
+        <translation>△ Треугольник</translation>
+    </message>
+    <message>
+        <source>D-pad ↑</source>
+        <translation>Крестовина ↑</translation>
+    </message>
+    <message>
+        <source>D-pad up</source>
+        <translation>Крестовина вверх</translation>
+    </message>
+    <message>
+        <source>D-pad ↓</source>
+        <translation>Крестовина ↓</translation>
+    </message>
+    <message>
+        <source>D-pad down</source>
+        <translation>Крестовина вниз</translation>
+    </message>
+    <message>
+        <source>D-pad ←</source>
+        <translation>Крестовина ←</translation>
+    </message>
+    <message>
+        <source>D-pad left</source>
+        <translation>Крестовина влево</translation>
+    </message>
+    <message>
+        <source>D-pad →</source>
+        <translation>Крестовина →</translation>
+    </message>
+    <message>
+        <source>D-pad right</source>
+        <translation>Крестовина вправо</translation>
+    </message>
+    <message>
+        <source>Options</source>
+        <translation>Options</translation>
+    </message>
+    <message>
+        <source>Touchpad</source>
+        <translation>Сенсорная панель</translation>
+    </message>
+    <message>
+        <source>Left stick left</source>
+        <translation>Левый стик влево</translation>
+    </message>
+    <message>
+        <source>Left stick right</source>
+        <translation>Левый стик вправо</translation>
+    </message>
+    <message>
+        <source>Left stick up</source>
+        <translation>Левый стик вверх</translation>
+    </message>
+    <message>
+        <source>Left stick down</source>
+        <translation>Левый стик вниз</translation>
+    </message>
+    <message>
+        <source>Right stick left</source>
+        <translation>Правый стик влево</translation>
+    </message>
+    <message>
+        <source>Right stick right</source>
+        <translation>Правый стик вправо</translation>
+    </message>
+    <message>
+        <source>Right stick up</source>
+        <translation>Правый стик вверх</translation>
+    </message>
+    <message>
+        <source>Right stick down</source>
+        <translation>Правый стик вниз</translation>
+    </message>
+    <message>
+        <source>Profile name</source>
+        <translation>Название профиля</translation>
+    </message>
+    <message>
+        <source>Controller</source>
+        <translation>Геймпад</translation>
+    </message>
+    <message>
+        <source>Keyboard and mouse</source>
+        <translation>Клавиатура и мышь</translation>
+    </message>
+    <message>
+        <source>Sticks and triggers</source>
+        <translation>Стики и курки</translation>
+    </message>
+    <message>
+        <source>Mouse</source>
+        <translation>Мышь</translation>
+    </message>
+    <message>
+        <source>Profile</source>
+        <translation>Профиль</translation>
+    </message>
+    <message>
+        <source>Left stick</source>
+        <translation>Левый стик</translation>
+    </message>
+    <message>
+        <source>Right stick</source>
+        <translation>Правый стик</translation>
+    </message>
+    <message>
+        <source>%1 dead zone</source>
+        <translation>%1: мёртвая зона</translation>
+    </message>
+    <message>
+        <source>Invert %1 across</source>
+        <translation>%1: инверсия по горизонтали</translation>
+    </message>
+    <message>
+        <source>Invert %1 up and down</source>
+        <translation>%1: инверсия по вертикали</translation>
+    </message>
+    <message>
+        <source>Trigger press point</source>
+        <translation>Порог нажатия курков</translation>
+    </message>
+    <message>
+        <source>Look with the mouse</source>
+        <translation>Обзор мышью</translation>
+    </message>
+    <message>
+        <source>Mouse sensitivity</source>
+        <translation>Чувствительность мыши</translation>
+    </message>
+    <message>
+        <source>Invert the mouse up and down</source>
+        <translation>Инверсия Y мыши</translation>
+    </message>
+    <message>
+        <source>Trigger</source>
+        <translation>Курок</translation>
+    </message>
+    <message>
+        <source>Not bound</source>
+        <translation>Не назначено</translation>
+    </message>
+    <message>
+        <source>%1, controller</source>
+        <translation>%1, геймпад</translation>
+    </message>
+    <message>
+        <source>%1, keyboard and mouse</source>
+        <translation>%1, клавиатура и мышь</translation>
+    </message>
+    <message>
+        <source>Choose a box, then press the key or button to use. Delete or □ clears it.</source>
+        <translation>Выберите поле и нажмите нужную клавишу или кнопку. Delete или □ очищает его.</translation>
+    </message>
+    <message>
+        <source>Default is the emulator&apos;s own layout and can&apos;t be changed; duplicate it to make a profile of your own.</source>
+        <translation>Default — раскладка самого эмулятора, её нельзя изменить; сделайте копию, чтобы создать свой профиль.</translation>
+    </message>
+    <message>
+        <source>Dead zone</source>
+        <translation>Мёртвая зона</translation>
+    </message>
+    <message>
+        <source>Invert across</source>
+        <translation>Инверсия по горизонтали</translation>
+    </message>
+    <message>
+        <source>Invert up and down</source>
+        <translation>Инверсия по вертикали</translation>
+    </message>
+    <message>
+        <source>Press point</source>
+        <translation>Порог нажатия</translation>
+    </message>
+    <message>
+        <source>L2 and R2</source>
+        <translation>L2 и R2</translation>
+    </message>
+    <message>
+        <source>How far L2 and R2 must be pulled to count as pressed. Movements of a stick smaller than its dead zone are ignored, so a worn stick does not drift.</source>
+        <translation>Насколько нужно нажать L2 и R2, чтобы нажатие засчиталось. Движения стика меньше его мёртвой зоны игнорируются, чтобы изношенный стик не дрейфовал.</translation>
+    </message>
+    <message>
+        <source>In the game, F3 captures the mouse; while it is captured, moving it moves the right stick.</source>
+        <translation>В игре F3 захватывает мышь; пока она захвачена, её движение двигает правый стик.</translation>
+    </message>
+    <message>
+        <source>Mouse look</source>
+        <translation>Обзор мышью</translation>
+    </message>
+    <message>
+        <source>Sensitivity</source>
+        <translation>Чувствительность</translation>
+    </message>
+    <message>
+        <source>Name</source>
+        <translation>Название</translation>
+    </message>
+</context>
+<context>
     <name>EditorPageItem</name>
     <message>
         <source>Name</source>
@@ -414,167 +629,167 @@
     </message>
     <message>
         <source>Profile</source>
-        <translation>Профиль</translation>
+        <translation type="vanished">Профиль</translation>
     </message>
     <message>
         <source>Profile name</source>
-        <translation>Название профиля</translation>
+        <translation type="vanished">Название профиля</translation>
     </message>
     <message>
         <source>Controller</source>
-        <translation>Геймпад</translation>
+        <translation type="vanished">Геймпад</translation>
     </message>
     <message>
         <source>Left stick</source>
-        <translation>Левый стик</translation>
+        <translation type="vanished">Левый стик</translation>
     </message>
     <message>
         <source>Left stick dead zone</source>
-        <translation>Мёртвая зона левого стика</translation>
+        <translation type="vanished">Мёртвая зона левого стика</translation>
     </message>
     <message>
         <source>Invert left stick across</source>
-        <translation>Инверсия X левого стика</translation>
+        <translation type="vanished">Инверсия X левого стика</translation>
     </message>
     <message>
         <source>Invert left stick up and down</source>
-        <translation>Инверсия Y левого стика</translation>
+        <translation type="vanished">Инверсия Y левого стика</translation>
     </message>
     <message>
         <source>Right stick</source>
-        <translation>Правый стик</translation>
+        <translation type="vanished">Правый стик</translation>
     </message>
     <message>
         <source>Right stick dead zone</source>
-        <translation>Мёртвая зона правого стика</translation>
+        <translation type="vanished">Мёртвая зона правого стика</translation>
     </message>
     <message>
         <source>Invert right stick across</source>
-        <translation>Инверсия X правого стика</translation>
+        <translation type="vanished">Инверсия X правого стика</translation>
     </message>
     <message>
         <source>Invert right stick up and down</source>
-        <translation>Инверсия Y правого стика</translation>
+        <translation type="vanished">Инверсия Y правого стика</translation>
     </message>
     <message>
         <source>Trigger press point</source>
-        <translation>Порог нажатия курков</translation>
+        <translation type="vanished">Порог нажатия курков</translation>
     </message>
     <message>
         <source>Look with the mouse</source>
-        <translation>Обзор мышью</translation>
+        <translation type="vanished">Обзор мышью</translation>
     </message>
     <message>
         <source>Mouse</source>
-        <translation>Мышь</translation>
+        <translation type="vanished">Мышь</translation>
     </message>
     <message>
         <source>Mouse sensitivity</source>
-        <translation>Чувствительность мыши</translation>
+        <translation type="vanished">Чувствительность мыши</translation>
     </message>
     <message>
         <source>Invert mouse up and down</source>
-        <translation>Инверсия Y мыши</translation>
+        <translation type="vanished">Инверсия Y мыши</translation>
     </message>
     <message>
         <source>✕ Cross</source>
-        <translation>✕ Крест</translation>
+        <translation type="vanished">✕ Крест</translation>
     </message>
     <message>
         <source>Buttons</source>
-        <translation>Кнопки</translation>
+        <translation type="vanished">Кнопки</translation>
     </message>
     <message>
         <source>○ Circle</source>
-        <translation>○ Круг</translation>
+        <translation type="vanished">○ Круг</translation>
     </message>
     <message>
         <source>□ Square</source>
-        <translation>□ Квадрат</translation>
+        <translation type="vanished">□ Квадрат</translation>
     </message>
     <message>
         <source>△ Triangle</source>
-        <translation>△ Треугольник</translation>
+        <translation type="vanished">△ Треугольник</translation>
     </message>
     <message>
         <source>D-pad up</source>
-        <translation>Крестовина вверх</translation>
+        <translation type="vanished">Крестовина вверх</translation>
     </message>
     <message>
         <source>D-pad down</source>
-        <translation>Крестовина вниз</translation>
+        <translation type="vanished">Крестовина вниз</translation>
     </message>
     <message>
         <source>D-pad left</source>
-        <translation>Крестовина влево</translation>
+        <translation type="vanished">Крестовина влево</translation>
     </message>
     <message>
         <source>D-pad right</source>
-        <translation>Крестовина вправо</translation>
+        <translation type="vanished">Крестовина вправо</translation>
     </message>
     <message>
         <source>L1</source>
-        <translation>L1</translation>
+        <translation type="vanished">L1</translation>
     </message>
     <message>
         <source>R1</source>
-        <translation>R1</translation>
+        <translation type="vanished">R1</translation>
     </message>
     <message>
         <source>L2</source>
-        <translation>L2</translation>
+        <translation type="vanished">L2</translation>
     </message>
     <message>
         <source>R2</source>
-        <translation>R2</translation>
+        <translation type="vanished">R2</translation>
     </message>
     <message>
         <source>L3</source>
-        <translation>L3</translation>
+        <translation type="vanished">L3</translation>
     </message>
     <message>
         <source>R3</source>
-        <translation>R3</translation>
+        <translation type="vanished">R3</translation>
     </message>
     <message>
         <source>Options</source>
-        <translation>Options</translation>
+        <translation type="vanished">Options</translation>
     </message>
     <message>
         <source>Touchpad</source>
-        <translation>Сенсорная панель</translation>
+        <translation type="vanished">Сенсорная панель</translation>
     </message>
     <message>
         <source>Left stick left</source>
-        <translation>Левый стик влево</translation>
+        <translation type="vanished">Левый стик влево</translation>
     </message>
     <message>
         <source>Left stick right</source>
-        <translation>Левый стик вправо</translation>
+        <translation type="vanished">Левый стик вправо</translation>
     </message>
     <message>
         <source>Left stick up</source>
-        <translation>Левый стик вверх</translation>
+        <translation type="vanished">Левый стик вверх</translation>
     </message>
     <message>
         <source>Left stick down</source>
-        <translation>Левый стик вниз</translation>
+        <translation type="vanished">Левый стик вниз</translation>
     </message>
     <message>
         <source>Right stick left</source>
-        <translation>Правый стик влево</translation>
+        <translation type="vanished">Правый стик влево</translation>
     </message>
     <message>
         <source>Right stick right</source>
-        <translation>Правый стик вправо</translation>
+        <translation type="vanished">Правый стик вправо</translation>
     </message>
     <message>
         <source>Right stick up</source>
-        <translation>Правый стик вверх</translation>
+        <translation type="vanished">Правый стик вверх</translation>
     </message>
     <message>
         <source>Right stick down</source>
-        <translation>Правый стик вниз</translation>
+        <translation type="vanished">Правый стик вниз</translation>
     </message>
     <message>
         <source>The folder that holds the game&apos;s files.</source>
@@ -650,31 +865,31 @@
     </message>
     <message>
         <source>Every game uses the profile chosen here. Default is the emulator&apos;s own layout and can&apos;t be changed; duplicate it to make a profile of your own.</source>
-        <translation>Все игры используют выбранный здесь профиль. Default — раскладка самого эмулятора, её нельзя изменить; сделайте копию, чтобы создать свой профиль.</translation>
+        <translation type="vanished">Все игры используют выбранный здесь профиль. Default — раскладка самого эмулятора, её нельзя изменить; сделайте копию, чтобы создать свой профиль.</translation>
     </message>
     <message>
         <source>Any controller uses the first one connected. Choosing one keeps the game on it while it is connected.</source>
-        <translation>«Любой геймпад» — первый подключённый. Если выбрать конкретный, игра использует его, пока он подключён.</translation>
+        <translation type="vanished">«Любой геймпад» — первый подключённый. Если выбрать конкретный, игра использует его, пока он подключён.</translation>
     </message>
     <message>
         <source>Move the stick: the outer dot is where it is, the filled dot what the game sees after the dead zone. On this page the left stick does not move between settings; the D-pad does.</source>
-        <translation>Подвигайте стик: внешняя точка — его положение, закрашенная — то, что видит игра после мёртвой зоны. На этой странице левый стик не переключает настройки; это делает крестовина.</translation>
+        <translation type="vanished">Подвигайте стик: внешняя точка — его положение, закрашенная — то, что видит игра после мёртвой зоны. На этой странице левый стик не переключает настройки; это делает крестовина.</translation>
     </message>
     <message>
         <source>Movements smaller than this are ignored, so a worn stick does not drift.</source>
-        <translation>Движения меньше этого значения игнорируются, чтобы изношенный стик не дрейфовал.</translation>
+        <translation type="vanished">Движения меньше этого значения игнорируются, чтобы изношенный стик не дрейфовал.</translation>
     </message>
     <message>
         <source>How far L2 and R2 must be pulled to count as pressed.</source>
-        <translation>Насколько нужно нажать L2 и R2, чтобы нажатие засчиталось.</translation>
+        <translation type="vanished">Насколько нужно нажать L2 и R2, чтобы нажатие засчиталось.</translation>
     </message>
     <message>
         <source>In the game, F3 captures the mouse; while it is captured, moving it moves the right stick.</source>
-        <translation>В игре F3 захватывает мышь; пока она захвачена, её движение двигает правый стик.</translation>
+        <translation type="vanished">В игре F3 захватывает мышь; пока она захвачена, её движение двигает правый стик.</translation>
     </message>
     <message>
         <source>Choose a box, then press the key or button to use. Delete or □ clears it.</source>
-        <translation>Выберите поле и нажмите нужную клавишу или кнопку. Delete или □ очищает его.</translation>
+        <translation type="vanished">Выберите поле и нажмите нужную клавишу или кнопку. Delete или □ очищает его.</translation>
     </message>
     <message>
         <source>Language</source>
@@ -993,19 +1208,19 @@
     </message>
     <message>
         <source>Trigger</source>
-        <translation>Курок</translation>
+        <translation type="vanished">Курок</translation>
     </message>
     <message>
         <source>Not bound</source>
-        <translation>Не назначено</translation>
+        <translation type="vanished">Не назначено</translation>
     </message>
     <message>
         <source>%1, keyboard and mouse</source>
-        <translation>%1, клавиатура и мышь</translation>
+        <translation type="vanished">%1, клавиатура и мышь</translation>
     </message>
     <message>
         <source>%1, controller</source>
-        <translation>%1, геймпад</translation>
+        <translation type="vanished">%1, геймпад</translation>
     </message>
     <message>
         <source>No modules found yet. Set the game folder, then rescan.</source>
@@ -1017,23 +1232,23 @@
     </message>
     <message>
         <source>Left stick</source>
-        <translation>Левый стик</translation>
+        <translation type="vanished">Левый стик</translation>
     </message>
     <message>
         <source>Right stick</source>
-        <translation>Правый стик</translation>
+        <translation type="vanished">Правый стик</translation>
     </message>
     <message>
         <source>%1 on the controller</source>
-        <translation>%1 на геймпаде</translation>
+        <translation type="vanished">%1 на геймпаде</translation>
     </message>
     <message>
         <source>Keyboard and mouse</source>
-        <translation>Клавиатура и мышь</translation>
+        <translation type="vanished">Клавиатура и мышь</translation>
     </message>
     <message>
         <source>Controller</source>
-        <translation>Геймпад</translation>
+        <translation type="vanished">Геймпад</translation>
     </message>
     <message>
         <source>The last game played</source>
