@@ -3943,6 +3943,27 @@ static void ClearUnreadAttribData(ShaderVertexInputInfo* info, const ShaderVerte
 	}
 }
 
+static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, const ShaderBindResources& bind);
+
+// A scalar load whose base is a pointer the program computed (VCC or an SGPR
+// outside the user-data window) has no binding-time mapping: it reads guest
+// memory at run time.
+static bool ShaderHasComputedPointerScalarLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_base,
+                                               int user_data_count)
+{
+	const auto& instructions = code.GetInstructions();
+	return std::any_of(instructions.begin(), instructions.end(),
+	                   [&](const ShaderInstruction& inst)
+	                   {
+		                   const bool computed_base =
+		                       inst.src_num >= 1 && (inst.src[0].type == ShaderOperandType::VccLo ||
+		                                             (inst.src[0].type == ShaderOperandType::Sgpr &&
+		                                              (inst.src[0].register_id < user_data_base ||
+		                                               inst.src[0].register_id + 1 >= user_data_base + user_data_count)));
+		                   return computed_base && ShaderScalarLoadNeedsGuestAddress(inst, bind);
+	                   });
+}
+
 void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
                           const GraphicsGeRawRegister* shader_stages)
 {
@@ -4056,7 +4077,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			info->bind.program_base_used   = vs_isa->HasAnyOf({ShaderInstructionType::SGetpcB64});
 			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
 			info->bind.device_address_used =
-			    ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) || ShaderHasGlobalMemoryLoad(*vs_isa);
+			    ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) || ShaderHasGlobalMemoryLoad(*vs_isa) ||
+			    ShaderHasComputedPointerScalarLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase, static_cast<int>(user_sgpr_num));
 		}
 	} else
 	{
