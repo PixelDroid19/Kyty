@@ -2039,7 +2039,7 @@ Known approximations and debt recorded by this chain:
   video out. The earlier count of 245 included ninety exports the tree does
   register under a second registration style.
 - **The gfx10 lane permute and the mixed FMA variants are translated.** The
-  hub's pixel program reached two instructions the emulator did not know:
+  hub's programs reached two instructions the emulator did not know:
   `ds_bpermute_b32` (opcode 0xb3) and `V_FMA_MIXHI_F16` (VOP3P 0x22). The
   official gfx10 ISA (the RDNA 1.0 instruction set architecture, sections
   10.4.4 and 12.10) gives both contracts, kept in
@@ -2047,8 +2047,23 @@ Known approximations and debt recorded by this chain:
   - `ds_bpermute_b32` is a gather: every lane takes the value of the lane its
     index names, the index is a byte address with the instruction offset added
     to it, only its bits [6:2] select a lane of the same half wave, and a
-    disabled source lane reads zero. One subgroup shuffle with a per-lane
-    source lane reproduces it.
+    disabled source lane reads zero. The host subgroup that holds the
+    destination lane also holds every lane its half-wave index can name, so a
+    native shuffle reaches the source; split compute with 16-lane parts puts
+    one half in two host subgroups, and the full guest lane then goes through
+    the wave exchange (`firmware/work/evidence/ds-bpermute-spirv-contract.txt`,
+    `rdnai1-ds-bpermute-shade-compute-spirv`).
+  - The first emitter named no execution scope: the hub's shade compute
+    rejected its module at assembly (`Expected operand for
+    OpGroupNonUniformShuffle`), and validation then rejected the destination
+    merge because the float VGPR variable was loaded as `uint`. Translator
+    160 names the subgroup scope, declares the shuffle capability, bitcasts
+    the destination, and reads split compute lanes through `%split_read`.
+    Unit tests
+    `EmulatorShaderArithmetic.DsBpermuteShuffleNamesTheSubgroupScope` and
+    `EmulatorShaderArithmetic.DsBpermuteSplitWaveReadsGuestLanesThroughTheWaveExchange`
+    assemble and validate both strategies. The hub run with translator 160 is
+    pending.
   - `V_FMA_MIXLO_F16` and `V_FMA_MIXHI_F16` are the mixed FMA of the
     selected sources with the result in the low or the high half of the
     destination. The emulator now decodes both and merges the half the opcode

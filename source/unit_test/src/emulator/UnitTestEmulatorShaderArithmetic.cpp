@@ -132,7 +132,7 @@ void CheckDeclaredModuleIds(const ShaderCode& code, const Core::String8& source)
 }
 
 Core::String8 Emit(const ShaderCode& code, uint8_t float_mode = 0xc0u, bool ieee = false, bool dx10 = false, bool validate = false,
-                   Fp16Overflow overflow = Fp16Overflow::Disabled)
+                   Fp16Overflow overflow = Fp16Overflow::Disabled, bool split_wave = false)
 {
 	// These are explicit synthetic initial controls, including known-disabled
 	// FP16_OVFL for the original fixtures. Production defaults remain unknown.
@@ -154,6 +154,12 @@ Core::String8 Emit(const ShaderCode& code, uint8_t float_mode = 0xc0u, bool ieee
 	compute.fp16_overflow_known = overflow_known;
 	compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
 	compute.wave_layout = {ShaderComputeWaveStrategy::Native, {1, 1, 1}, {1, 1, 1}, 32, 32, 1, 1, 0};
+	if (split_wave)
+	{
+		compute.native_wave_sensitive  = true;
+		compute.required_subgroup_size = 32;
+		compute.wave_layout            = {ShaderComputeWaveStrategy::Split64On32, {1, 1, 1}, {64, 1, 1}, 64, 32, 1, 1, 0};
+	}
 	const bool cs = code.GetType() == ShaderType::Compute;
 	const auto source = SpirvGenerateSource(code, nullptr, cs ? nullptr : &input, cs ? &compute : nullptr);
 	if (source.IsEmpty()) { Fail("empty production shader"); }
@@ -898,6 +904,53 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	std::_Exit(0);
 }
 
+[[noreturn]] void RunDsBpermuteAssembly(bool split)
+{
+	Initialize();
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderInstruction inst {};
+	inst.pc                 = 0;
+	inst.type               = ShaderInstructionType::DsBpermuteB32;
+	inst.format             = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	inst.src_num            = 2;
+	inst.dst.type           = ShaderOperandType::Vgpr;
+	inst.dst.register_id    = 8;
+	inst.dst.size           = 1;
+	inst.src[0].type        = ShaderOperandType::Vgpr;
+	inst.src[0].register_id = 0;
+	inst.src[0].size        = 1;
+	inst.src[1].type        = ShaderOperandType::Vgpr;
+	inst.src[1].register_id = 1;
+	inst.src[1].size        = 1;
+	code.GetInstructions().Add(inst);
+	ShaderInstruction end {};
+	end.type = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+	const auto source = Emit(code, 0xc0u, false, false, true, Fp16Overflow::Disabled, split);
+	if (split)
+	{
+		// One guest wave spans several host subgroups, so a subgroup shuffle
+		// cannot reach every source lane and the exchange must carry it. The
+		// wave64 permute stays inside the source lane's 32-lane half.
+		if (source.FindIndex("OpFunctionCall %uint %split_read %bpermute_0_published %bpermute_0_lane") ==
+		        Core::STRING8_INVALID_INDEX ||
+		    source.FindIndex("OpBitwiseAnd %uint %bpermute_0_guest %uint_32") == Core::STRING8_INVALID_INDEX ||
+		    source.FindIndex("OpGroupNonUniformShuffle") != Core::STRING8_INVALID_INDEX)
+		{
+			Fail("split ds_bpermute must read guest half-wave lanes through the wave exchange");
+		}
+		std::_Exit(0);
+	}
+	if (source.FindIndex("OpGroupNonUniformShuffle %uint %uint_3 %bpermute_0_value") == Core::STRING8_INVALID_INDEX ||
+	    source.FindIndex("OpGroupNonUniformShuffle %uint %uint_3 %bpermute_0_own") == Core::STRING8_INVALID_INDEX)
+	{
+		Fail("ds_bpermute must name the subgroup scope in both shuffles");
+	}
+	std::_Exit(0);
+}
+
 enum class Rejected
 {
 	OpSel, Sdwa, Dpp, Omod, Round, RoundDown, RoundZero, Ieee, UnknownComputeMode,
@@ -1210,6 +1263,14 @@ TEST(EmulatorShaderArithmetic, Fp16SdwaHalfDestinationReadsAndPreservesHalves)
 TEST(EmulatorShaderArithmetic, HalfCompareWritesOnlyTheMaskWordsTheDestinationNames)
 {
 	ASSERT_EXIT(RunHalfCompareMaskDestination(), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, DsBpermuteShuffleNamesTheSubgroupScope)
+{
+	ASSERT_EXIT(RunDsBpermuteAssembly(false), ::testing::ExitedWithCode(0), "");
+}
+TEST(EmulatorShaderArithmetic, DsBpermuteSplitWaveReadsGuestLanesThroughTheWaveExchange)
+{
+	ASSERT_EXIT(RunDsBpermuteAssembly(true), ::testing::ExitedWithCode(0), "");
 }
 TEST(EmulatorShaderArithmetic, BfeDefinedForEveryMaskedOffsetAndWidth) { ASSERT_EXIT(RunBfe(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, ComputeFp16EncodingsAssembleAndValidate)

@@ -2674,6 +2674,11 @@ KYTY_RECOMPILER_FUNC(Recompile_DsBpermuteB32_VdstVsrc0Vsrc1)
 	{
 		return false;
 	}
+	const auto destination = operand_variable_to_str(inst.dst);
+	if (destination.type != SpirvType::Float || destination.value.IsEmpty())
+	{
+		return false;
+	}
 	const auto index_str = String8::FromPrintf("%u", index);
 	const auto tag       = String8("bpermute_") + index_str;
 	String8             source;
@@ -2686,24 +2691,56 @@ KYTY_RECOMPILER_FUNC(Recompile_DsBpermuteB32_VdstVsrc0Vsrc1)
 	{
 		return false;
 	}
-	const auto text = R"(
-%<t>_offset = OpIAdd %uint %<t>_index %uint_<offset>
-%<t>_lane = OpShiftRightLogical %uint %<t>_offset %uint_2
-%<t>_lane_masked = OpBitwiseAnd %uint %<t>_lane %uint_31
-%<t>_exec = OpLoad %uint %exec_lo
-%<t>_active = OpINotEqual %bool %<t>_exec %uint_0
-%<t>_fetch = OpGroupNonUniformShuffle %uint %<t>_value %<t>_lane_masked
-%<t>_live = OpGroupNonUniformShuffle %uint %<t>_exec %<t>_lane_masked
+	// Split compute spreads one guest wave over several host subgroups, so only
+	// %split_read reaches a lane in another part. In wave64 the permute addresses
+	// 32 lanes of the current half (ISA 10.4.4), so the guest lane supplies the
+	// half and the index only its five low lane bits.
+	const bool split = spirv->UsesSplitComputeWave();
+	String8     lane;
+	if (split)
+	{
+		lane = String8(R"(
+%<t>_lane_bits = OpBitwiseAnd %uint %<t>_shift %uint_31
+%<t>_guest = OpLoad %uint %gl_SubgroupInvocationID
+%<t>_half = OpBitwiseAnd %uint %<t>_guest %uint_32
+%<t>_lane = OpBitwiseOr %uint %<t>_half %<t>_lane_bits
+)").ReplaceStr("<t>", tag);
+	} else
+	{
+		lane = String8("%<t>_lane = OpBitwiseAnd %uint %<t>_shift %uint_31\n").ReplaceStr("<t>", tag);
+	}
+	const auto exchange =
+	    split ? String8(R"(
+%<t>_own = OpLoad %uint %exec_lane_lo
+%<t>_active = OpINotEqual %bool %<t>_own %uint_0
+%<t>_published = OpSelect %uint %<t>_active %<t>_value %uint_0
+%<t>_result = OpFunctionCall %uint %split_read %<t>_published %<t>_lane
+)").ReplaceStr("<t>", tag)
+	          : String8(R"(
+%<t>_own = OpLoad %uint %exec_lane_lo
+%<t>_active = OpINotEqual %bool %<t>_own %uint_0
+%<t>_fetch = OpGroupNonUniformShuffle %uint %uint_3 %<t>_value %<t>_lane
+%<t>_live = OpGroupNonUniformShuffle %uint %uint_3 %<t>_own %<t>_lane
 %<t>_live_bit = OpINotEqual %bool %<t>_live %uint_0
 %<t>_result = OpSelect %uint %<t>_live_bit %<t>_fetch %uint_0
-%<t>_old = OpLoad %uint %<dst>
+)").ReplaceStr("<t>", tag);
+	const auto text = String8(R"(
+%<t>_offset = OpIAdd %uint %<t>_index %<offset>
+%<t>_shift = OpShiftRightLogical %uint %<t>_offset %uint_2
+<lane>
+<exchange>
+%<t>_old_typed = OpLoad %float %<dst>
+%<t>_old = OpBitcast %uint %<t>_old_typed
 %<t>_stored = OpSelect %uint %<t>_active %<t>_result %<t>_old
-OpStore %<dst> %<t>_stored
-)";
-	*dst_source += source + value +
-	                String8(text).ReplaceStr("<t>", tag)
-	                    .ReplaceStr("<offset>", spirv->GetConstantUint(inst.ds_offset))
-	                    .ReplaceStr("<dst>", operand_variable_to_str(inst.dst).value);
+%<t>_stored_typed = OpBitcast %float %<t>_stored
+OpStore %<dst> %<t>_stored_typed
+)")
+	                 .ReplaceStr("<t>", tag)
+	                 .ReplaceStr("<offset>", spirv->GetConstantUint(inst.ds_offset))
+	                 .ReplaceStr("<lane>", lane)
+	                 .ReplaceStr("<exchange>", exchange)
+	                 .ReplaceStr("<dst>", destination.value);
+	*dst_source += source + value + text;
 	return true;
 }
 
