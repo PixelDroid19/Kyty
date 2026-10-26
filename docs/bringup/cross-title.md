@@ -16,6 +16,38 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## A declared unsigned sampled bank is left unwritten (2026-10-26)
+
+- **Observed.** A validation run of robot platformer (PPSA21567) at
+  `hub_crashsite_tutorial` reports a draw whose descriptor set was never
+  updated at set 0, binding 7, index 0. The layout assigns, for a pixel stage
+  that also binds storage buffers, storage 0, sampled 1, storage images 2,
+  array 3, 3D 4, sampled uint 5, array uint 6, 3D uint 7 and depth 8, so the
+  report matches the 3D unsigned bank; the full validation message (which
+  names the descriptor type) is not yet captured, so that identity is a
+  match, not a conclusion.
+- **Cause.** `ShaderBuildDescriptorLayoutPlan` declares all three unsigned
+  sampled banks whenever the bind holds any unsigned sampled texture, and
+  sizes each declared bank with the shape's total descriptor count
+  (`ShaderDescriptorLayoutPlan.cpp:64-75`). `DescriptorCache::BindDescriptors`
+  only writes a shape's unsigned bank when that same shape has an unsigned
+  texture (`GraphicsRenderDescriptor.cpp:695-720`), so a bank the layout
+  retains for the module's unsigned load path is left unwritten when the
+  unsigned resources live in another shape. The generated module keeps the
+  numeric selection for mixed binds (`ShaderSpirvImage.cpp:4098`, `4438`) and
+  declares the unsigned banks sized by the shape totals
+  (`ShaderSpirvGenerator.cpp:1284-1318`, `1863-1896`), so the binding is
+  statically used even when no descriptor of that shape carries the unsigned
+  tag.
+- **Open.** Whether the unwritten descriptor contributes to the queue-8
+  device lost is not established: the hub draw executes and the loss surfaces
+  later at a fence wait. Next: capture the complete validation message with
+  `KYTY_SHADER_VALIDATION=1` at the hub, then write every declared unsigned
+  bank with valid unsigned views for its shape (a 1x1 R32_UINT 2D, array and
+  3D placeholder held by the descriptor cache, bound when the shape has no
+  unsigned texture), or mark the empty declaration partially bound, and
+  measure both options on the same scripted route.
+
 ## A suspended batch waits for the command processor (2026-10-26)
 
 - **Observed.** On Intel Arc A770 (Mesa ANV 26.2.5) the merged runtime stopped
