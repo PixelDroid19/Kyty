@@ -108,24 +108,26 @@ KYTY_RECOMPILER_FUNC(Recompile_VFmaMixLoF16)
 	}
 	const String8 index_str = String8::FromPrintf("%u", index);
 	String8       source;
+	// A source read as binary32 enters the half operation as a half: it is
+	// loaded as <tag>_wide, converted and widened back into <tag> so the fused
+	// operation sees the hardware's input.
+	const auto reads_binary32 = [&](uint32_t operand) { return (inst.vop3p_op_sel_hi & (1u << operand)) == 0u; };
 	for (uint32_t operand = 0; operand < 3u; ++operand)
 	{
 		const String8 tag = String8::FromPrintf("h%u_", operand) + index_str;
-		if (!LoadMixedFloat(spirv, inst, operand, tag, &source))
+		if (!LoadMixedFloat(spirv, inst, operand, reads_binary32(operand) ? tag + "_wide" : tag, &source))
 		{
 			return false;
 		}
 	}
-	// A source read as binary32 enters the half operation as a half: convert it
-	// and widen it back so the fused operation sees the hardware's input.
 	for (uint32_t operand = 0; operand < 3u; ++operand)
 	{
-		if ((inst.vop3p_op_sel_hi & (1u << operand)) != 0u)
+		if (!reads_binary32(operand))
 		{
 			continue;
 		}
 		const String8 tag = String8::FromPrintf("h%u_", operand) + index_str;
-		source += String8("%<t>_bits = OpBitcast %uint %<t>\n").ReplaceStr("<t>", tag);
+		source += String8("%<t>_bits = OpBitcast %uint %<t>_wide\n").ReplaceStr("<t>", tag);
 		source += F16Arithmetic::Narrow(spirv, tag + "_bits", tag + "_half", tag, 0u, (mode.value & 0x80u) == 0u,
 		                                mode.fp16_overflow, "");
 		source += F16Arithmetic::Expand(tag + "_half", tag + "_narrow", tag);
