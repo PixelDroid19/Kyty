@@ -200,8 +200,6 @@ public:
 		return true;
 	}
 
-	void ResetComma() noexcept { need_comma_ = false; }
-
 private:
 	bool CommaIfNeeded() noexcept
 	{
@@ -374,11 +372,6 @@ private:
 		for (uint16_t i = 0; i < n; ++i)
 		{
 			const StallFact& f = in.result->evidence[i];
-			j.ResetComma();
-			if (i > 0)
-			{
-				// After first element, JsonBuilder needs comma via need_comma from previous EndObject.
-			}
 			if (!j.BeginObject() || !j.Key("domain") || !j.String(DomainName(f.domain)) || !j.Key("code") ||
 			    !j.U64(f.code) || !j.Key("flags") || !j.U64(f.flags) || !j.Key("instance") || !j.U64(f.instance) ||
 			    !j.Key("correlation") || !j.U64(f.correlation) || !j.EndObject())
