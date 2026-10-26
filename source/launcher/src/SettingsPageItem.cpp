@@ -12,6 +12,7 @@
 #include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QQuickWindow>
+#include <QSGImageNode>
 #include <QSGRectangleNode>
 #include <QSGTextNode>
 
@@ -28,6 +29,7 @@ constexpr qreal MAX_CONTENT    = 780;
 constexpr qreal TEXT_SPACING   = 6;
 constexpr qreal INFO_SPACING   = 8;
 constexpr qreal INFO_LABEL     = 132;
+constexpr qreal SCREENSHOT     = 90;
 constexpr qreal DOT            = 8;
 constexpr qreal DOT_SPACING    = 8;
 constexpr qreal BUTTONS_GAP    = 16;
@@ -85,6 +87,12 @@ SettingsPageItem::SettingsPageItem(QQuickItem* parent): QQuickItem(parent)
 {
 	setFlag(ItemHasContents);
 	setFlag(ItemIsFocusScope);
+	// A new theme builds the page again, so the screenshot is read once. The theme was checked when it was read; a
+	// picture that still fails to load only leaves the screenshot out.
+	if (const auto* pack = LauncherBackend::Instance()->CurrentTheme(); pack != nullptr && !pack->screenshot.isEmpty())
+	{
+		m_screenshot = QImage(pack->screenshot);
+	}
 
 	m_rail = new SettingsRailItem(this);
 	m_rail->SetEntries({{tr("Graphics"), SettingsIcon::Graphics},
@@ -397,6 +405,7 @@ void SettingsPageItem::updatePolish()
 	const int   category = m_rail->Current();
 	m_texts.clear();
 	m_dots.clear();
+	m_screenshot_rect = {};
 
 	// The categories under the page's title.
 	const auto title_font = SceneFont(theme->FontTitle(), QFont::DemiBold);
@@ -467,6 +476,33 @@ void SettingsPageItem::updatePolish()
 			AddInfo(tr("Controller"), controller.isEmpty() ? tr("None connected. Keyboard and mouse work everywhere.") : controller,
 			        theme->TextSecondary(), controller.isEmpty() ? QColor() : theme->Ok(), x, width, &y);
 			AddInfo(tr("Settings file"), backend->SettingsFile(), theme->TextSecondary(), QColor(), x, width, &y);
+			AddInfo(tr("Themes folder"), ThemesFolder(), theme->TextSecondary(), QColor(), x, width, &y);
+			if (const auto* pack = backend->CurrentTheme(); pack != nullptr)
+			{
+				QStringList about {pack->name};
+				if (!pack->version.isEmpty())
+				{
+					about << pack->version;
+				}
+				if (!pack->author.isEmpty())
+				{
+					about << tr("by %1").arg(pack->author);
+				}
+				if (!pack->license.isEmpty())
+				{
+					about << pack->license;
+				}
+				AddInfo(tr("Style"), about.join(QStringLiteral(" · ")), theme->TextSecondary(), QColor(), x, width, &y);
+				if (!m_screenshot.isNull())
+				{
+					// As tall as SCREENSHOT, as wide as its shape asks, within the value column.
+					const qreal height = SCREENSHOT * u;
+					const qreal shown  = std::min(width - INFO_LABEL * u, height * m_screenshot.width() / m_screenshot.height());
+					y += INFO_SPACING * u;
+					m_screenshot_rect = QRectF(x + INFO_LABEL * u, y, std::max<qreal>(0, shown), height);
+					y += height;
+				}
+			}
 			break;
 		}
 		default: break;
@@ -531,6 +567,10 @@ QSGNode* SettingsPageItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeDat
 		style.dpr    = window()->effectiveDevicePixelRatio();
 		box->Update(window(), dot.rect, style);
 		node->appendChildNode(box);
+	}
+	if (!m_screenshot_rect.isEmpty())
+	{
+		node->appendChildNode(CreateTextureNode(window(), window()->createTextureFromImage(m_screenshot), m_screenshot_rect));
 	}
 	for (const auto& text: m_texts)
 	{

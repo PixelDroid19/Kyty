@@ -29,7 +29,7 @@
     </message>
     <message>
         <source>Double-click</source>
-        <translation>Двойной щелчок</translation>
+        <translation type="vanished">Двойной щелчок</translation>
     </message>
     <message>
         <source>Options</source>
@@ -122,6 +122,22 @@
     <message>
         <source>Games are started by the Kyty emulator. The launcher only keeps the list of games and their settings.</source>
         <translation>Игры запускает эмулятор Kyty. Лаунчер хранит только список игр и их настройки.</translation>
+    </message>
+    <message>
+        <source>Open a game&apos;s page</source>
+        <translation>Открыть страницу игры</translation>
+    </message>
+    <message>
+        <source>Enter on its page</source>
+        <translation>Enter на её странице</translation>
+    </message>
+    <message>
+        <source>✕ on its page</source>
+        <translation>✕ на её странице</translation>
+    </message>
+    <message>
+        <source>Play on its page</source>
+        <translation>«Играть» на её странице</translation>
     </message>
 </context>
 <context>
@@ -457,6 +473,46 @@
         <source>This game runs with the emulator settings from Settings. Turn on custom emulator settings to change them for this game only.</source>
         <translation>Эта игра использует настройки эмулятора из раздела «Настройки». Включите свои настройки, чтобы изменить их только для этой игры.</translation>
     </message>
+    <message>
+        <source>Style</source>
+        <translation>Стиль</translation>
+    </message>
+    <message>
+        <source>Layout</source>
+        <translation>Макет</translation>
+    </message>
+    <message>
+        <source>Opens on</source>
+        <translation>Открывать</translation>
+    </message>
+    <message>
+        <source>Interface sounds</source>
+        <translation>Звуки интерфейса</translation>
+    </message>
+    <message>
+        <source>Sound</source>
+        <translation>Звук</translation>
+    </message>
+    <message>
+        <source>Sound volume</source>
+        <translation>Громкость звуков</translation>
+    </message>
+    <message>
+        <source>Add-on themes are folders with a theme.ini inside the themes folder above, found when the launcher starts. Their colours win over the accent colour.</source>
+        <translation>Темы-дополнения — это папки с файлом theme.ini внутри папки тем, указанной выше; они находятся при запуске лаунчера. Их цвета важнее цвета акцента.</translation>
+    </message>
+    <message>
+        <source>The last game played opens on its page, ready to continue.</source>
+        <translation>Последняя игра открывается на своей странице, готовая к продолжению.</translation>
+    </message>
+    <message>
+        <source>Console puts the pages in tabs on top and the games in one row, the selected game&apos;s page below it. An add-on theme may choose the layout.</source>
+        <translation>«Консоль» размещает страницы во вкладках сверху, а игры — в одном ряду, со страницей выбранной игры под ним. Тема-дополнение может выбрать макет.</translation>
+    </message>
+    <message>
+        <source>Short sounds when you move, select, go back and start a game.</source>
+        <translation>Короткие звуки при перемещении, выборе, возврате и запуске игры.</translation>
+    </message>
 </context>
 <context>
     <name>FieldRowItem</name>
@@ -688,12 +744,119 @@
         <source>No parameters file selected.</source>
         <translation>Файл параметров не выбран.</translation>
     </message>
+    <message>
+        <source>The last game played</source>
+        <translation>Последняя игра</translation>
+    </message>
+    <message>
+        <source>Sidebar</source>
+        <translation>Боковая панель</translation>
+    </message>
+    <message>
+        <source>Quiet</source>
+        <translation>Тихо</translation>
+    </message>
+    <message>
+        <source>Loud</source>
+        <translation>Громко</translation>
+    </message>
+    <message>
+        <source>The library</source>
+        <translation>Библиотеку</translation>
+    </message>
 </context>
 <context>
     <name>GameGridItem</name>
     <message>
         <source>Running</source>
         <translation>Запущена</translation>
+    </message>
+</context>
+<context>
+    <name>GamePageItem</name>
+    <message>
+        <source>Not recorded yet</source>
+        <translation>Ещё не записано</translation>
+    </message>
+    <message>
+        <source>Not played yet</source>
+        <translation>Ещё не запускалась</translation>
+    </message>
+    <message>
+        <source>Under a minute</source>
+        <translation>Меньше минуты</translation>
+    </message>
+    <message>
+        <source>%1 min</source>
+        <translation>%1 мин</translation>
+    </message>
+    <message>
+        <source>%1 h %2 min</source>
+        <translation>%1 ч %2 мин</translation>
+    </message>
+    <message>
+        <source>Select</source>
+        <translation>Выбрать</translation>
+    </message>
+    <message>
+        <source>Options</source>
+        <translation>Параметры</translation>
+    </message>
+    <message>
+        <source>Game settings</source>
+        <translation>Настройки игры</translation>
+    </message>
+    <message>
+        <source>Back</source>
+        <translation>Назад</translation>
+    </message>
+    <message>
+        <source>Continue where you left off</source>
+        <translation>Продолжить с того же места</translation>
+    </message>
+    <message>
+        <source>Last played %1</source>
+        <translation>Последний запуск %1</translation>
+    </message>
+    <message>
+        <source>Play time</source>
+        <translation>Время в игре</translation>
+    </message>
+    <message>
+        <source>Its own settings</source>
+        <translation>Собственные настройки</translation>
+    </message>
+    <message>
+        <source>The global settings</source>
+        <translation>Общие настройки</translation>
+    </message>
+    <message>
+        <source>Screen %1</source>
+        <translation>Экран %1</translation>
+    </message>
+    <message>
+        <source>Folder and data</source>
+        <translation>Папка и данные</translation>
+    </message>
+    <message>
+        <source>In no section</source>
+        <translation>Ни в одном разделе</translation>
+    </message>
+    <message>
+        <source>Stop game</source>
+        <translation>Остановить игру</translation>
+    </message>
+    <message>
+        <source>Continue</source>
+        <translation>Продолжить</translation>
+    </message>
+    <message>
+        <source>Play</source>
+        <translation>Играть</translation>
+    </message>
+    <message>
+        <source>Open game folder</source>
+        <translation>Открыть папку игры</translation>
     </message>
 </context>
 <context>
@@ -806,6 +969,30 @@
         <source>A game started while the folder was read; nothing was added.</source>
         <translation>Во время чтения папки запустилась игра; ничего не добавлено.</translation>
     </message>
+    <message>
+        <source>Kyty</source>
+        <translation>Kyty</translation>
+    </message>
+    <message>
+        <source>%1 · Add-on</source>
+        <translation>%1 · Дополнение</translation>
+    </message>
+    <message>
+        <source>%1 · Can&apos;t be used</source>
+        <translation>%1 · Нельзя использовать</translation>
+    </message>
+    <message>
+        <source>The theme %1 is no longer installed.</source>
+        <translation>Тема %1 больше не установлена.</translation>
+    </message>
+    <message>
+        <source>The theme %1 can&apos;t be used: %2</source>
+        <translation>Тему %1 нельзя использовать: %2</translation>
+    </message>
+    <message>
+        <source>The theme %1 can&apos;t be used: its font cannot be read.</source>
+        <translation>Тему %1 нельзя использовать: не удаётся прочитать её шрифт.</translation>
+    </message>
 </context>
 <context>
     <name>LauncherWindow</name>
@@ -844,6 +1031,46 @@
     <message>
         <source>Added %1 of the %2 games found.</source>
         <translation>Добавлено %1 из %2 найденных игр.</translation>
+    </message>
+    <message>
+        <source>Games</source>
+        <translation>Игры</translation>
+    </message>
+    <message>
+        <source>Settings</source>
+        <translation>Настройки</translation>
+    </message>
+    <message>
+        <source>About</source>
+        <translation>О программе</translation>
+    </message>
+    <message>
+        <source>Quit</source>
+        <translation>Выйти</translation>
+    </message>
+    <message>
+        <source>Leave full screen</source>
+        <translation>Выйти из полноэкранного режима</translation>
+    </message>
+    <message>
+        <source>Full screen</source>
+        <translation>Полный экран</translation>
+    </message>
+    <message>
+        <source>Restart the launcher</source>
+        <translation>Перезапустить лаунчер</translation>
+    </message>
+    <message>
+        <source>Close</source>
+        <translation>Закрыть</translation>
+    </message>
+    <message>
+        <source>Power</source>
+        <translation>Питание</translation>
+    </message>
+    <message>
+        <source>The launcher could not be started again.</source>
+        <translation>Не удалось снова запустить лаунчер.</translation>
     </message>
 </context>
 <context>
@@ -926,15 +1153,15 @@
     </message>
     <message>
         <source>Emulator ready</source>
-        <translation>Эмулятор готов</translation>
+        <translation type="vanished">Эмулятор готов</translation>
     </message>
     <message>
         <source>Emulator not found</source>
-        <translation>Эмулятор не найден</translation>
+        <translation type="vanished">Эмулятор не найден</translation>
     </message>
     <message>
         <source>No controller</source>
-        <translation>Нет геймпада</translation>
+        <translation type="vanished">Нет геймпада</translation>
     </message>
     <message>
         <source>No games yet. Add a game folder to start your library.</source>
@@ -963,6 +1190,10 @@
     <message>
         <source>Search by name or serial</source>
         <translation>Поиск по названию или номеру</translation>
+    </message>
+    <message>
+        <source>Open</source>
+        <translation>Открыть</translation>
     </message>
 </context>
 <context>
@@ -1078,6 +1309,18 @@
         <source>Settings file</source>
         <translation>Файл настроек</translation>
     </message>
+    <message>
+        <source>Themes folder</source>
+        <translation>Папка тем</translation>
+    </message>
+    <message>
+        <source>by %1</source>
+        <translation>автор: %1</translation>
+    </message>
+    <message>
+        <source>Style</source>
+        <translation>Стиль</translation>
+    </message>
 </context>
 <context>
     <name>SidebarItem</name>
@@ -1122,6 +1365,88 @@
     </message>
 </context>
 <context>
+    <name>ThemePack</name>
+    <message>
+        <source>Line %1 of theme.ini is not a key = value inside a [section].</source>
+        <translation>Строка %1 в theme.ini — не «ключ = значение» внутри [раздела].</translation>
+    </message>
+    <message>
+        <source>The file %1 is missing.</source>
+        <translation>Файл %1 отсутствует.</translation>
+    </message>
+    <message>
+        <source>The file %1 is outside the theme&apos;s folder.</source>
+        <translation>Файл %1 находится вне папки темы.</translation>
+    </message>
+    <message>
+        <source>The file %1 must be one of: %2.</source>
+        <translation>Файл %1 должен быть одного из типов: %2.</translation>
+    </message>
+    <message>
+        <source>The file %1 is larger than %2 MB.</source>
+        <translation>Файл %1 больше %2 МБ.</translation>
+    </message>
+    <message>
+        <source>[%1] has an unknown colour %2.</source>
+        <translation>В [%1] неизвестный цвет %2.</translation>
+    </message>
+    <message>
+        <source>%1 in [%2] is not a colour like #rrggbb or #aarrggbb.</source>
+        <translation>%1 в [%2] — не цвет вида #rrggbb или #aarrggbb.</translation>
+    </message>
+    <message>
+        <source>theme.ini has an unknown section [%1].</source>
+        <translation>В theme.ini неизвестный раздел [%1].</translation>
+    </message>
+    <message>
+        <source>The theme is made for another version of the launcher (api %1).</source>
+        <translation>Тема сделана для другой версии лаунчера (api %1).</translation>
+    </message>
+    <message>
+        <source>[Theme] has an unknown key %1.</source>
+        <translation>В [Theme] неизвестный ключ %1.</translation>
+    </message>
+    <message>
+        <source>%1 is longer than %2 characters.</source>
+        <translation>%1 длиннее %2 символов.</translation>
+    </message>
+    <message>
+        <source>[Theme] has no name.</source>
+        <translation>В [Theme] нет имени.</translation>
+    </message>
+    <message>
+        <source>layout must be Sidebar or Console.</source>
+        <translation>layout должен быть Sidebar или Console.</translation>
+    </message>
+    <message>
+        <source>The picture %1 cannot be read or is larger than %2 × %2.</source>
+        <translation>Изображение %1 не читается или больше %2 × %2.</translation>
+    </message>
+    <message>
+        <source>[Sounds] has an unknown sound %1.</source>
+        <translation>В [Sounds] неизвестный звук %1.</translation>
+    </message>
+    <message>
+        <source>The folder name may only hold letters, digits, dots, dashes and underscores.</source>
+        <translation>Имя папки может содержать только буквы, цифры, точки, дефисы и подчёркивания.</translation>
+    </message>
+    <message>
+        <source>theme.ini is larger than %1 KB.</source>
+        <translation>theme.ini больше %1 КБ.</translation>
+    </message>
+    <message>
+        <source>theme.ini cannot be read.</source>
+        <translation>Не удаётся прочитать theme.ini.</translation>
+    </message>
+</context>
+<context>
+    <name>TileRowItem</name>
+    <message>
+        <source>Add game</source>
+        <translation>Добавить игру</translation>
+    </message>
+</context>
+<context>
     <name>ToggleItem</name>
     <message>
         <source>On</source>
@@ -1130,6 +1455,36 @@
     <message>
         <source>Off</source>
         <translation>Выкл.</translation>
+    </message>
+</context>
+<context>
+    <name>TopBarItem</name>
+    <message>
+        <source>Emulator ready</source>
+        <translation>Эмулятор готов</translation>
+    </message>
+    <message>
+        <source>Emulator not found</source>
+        <translation>Эмулятор не найден</translation>
+    </message>
+    <message>
+        <source>Controller %1%</source>
+        <translation>Геймпад %1%</translation>
+    </message>
+    <message>
+        <source>Search</source>
+        <translation>Поиск</translation>
+    </message>
+    <message>
+        <source>Power</source>
+        <translation>Питание</translation>
+    </message>
+</context>
+<context>
+    <name>UiSounds</name>
+    <message>
+        <source>%1 holds no sound.</source>
+        <translation>%1 не содержит звука.</translation>
     </message>
 </context>
 </TS>

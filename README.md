@@ -131,7 +131,8 @@ cmake --build build --target fc_script --parallel 4
 The resulting executable is `build/fc_script.exe` on Windows and
 `build/fc_script` on Linux. Set `-DKYTY_BUILD_LAUNCHER=ON` to also build the
 desktop launcher, which lists installed workloads, starts them and offers
-themes and personalization.
+themes and personalization; see [docs/launcher-themes.md](docs/launcher-themes.md)
+for add-on themes and the layouts.
 
 ## Running a lawful test workload
 

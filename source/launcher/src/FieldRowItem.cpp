@@ -129,6 +129,12 @@ const ChoiceText CHOICE_TEXTS[] = {
     {"Windowed", QT_TRANSLATE_NOOP("FieldRowItem", "A window")},
     {"Maximized", QT_TRANSLATE_NOOP("FieldRowItem", "Maximized")},
     {"FullScreen", QT_TRANSLATE_NOOP("FieldRowItem", "Full screen")},
+    {"LastGame", QT_TRANSLATE_NOOP("FieldRowItem", "The last game played")},
+    {"Sidebar", QT_TRANSLATE_NOOP("FieldRowItem", "Sidebar")},
+    {"Console", QT_TRANSLATE_NOOP("FieldRowItem", "Console")},
+    {"Quiet", QT_TRANSLATE_NOOP("FieldRowItem", "Quiet")},
+    {"Loud", QT_TRANSLATE_NOOP("FieldRowItem", "Loud")},
+    {"Library", QT_TRANSLATE_NOOP("FieldRowItem", "The library")},
 };
 
 QString ChoiceDisplay(const QString& value)
@@ -140,7 +146,8 @@ QString ChoiceDisplay(const QString& value)
 			return choice.translated ? QCoreApplication::translate("FieldRowItem", choice.text) : QString::fromUtf8(choice.text);
 		}
 	}
-	return value;
+	const auto label = LauncherBackend::Instance()->ChoiceLabel(value);
+	return label.isEmpty() ? value : label;
 }
 
 QFont SmallFont()
