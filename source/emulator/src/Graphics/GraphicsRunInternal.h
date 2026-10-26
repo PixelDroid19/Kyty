@@ -611,8 +611,11 @@ private:
 	static CmdBuffer SnapshotCommandBuffer(uint32_t* data, uint32_t num_dw);
 
 	CmdBatch GetCmdBatch();
+	void     SetDecodeReleased(const CmdBatch* current, bool released);
 
 	Core::Mutex          m_mutex;
+	// Set while decode waits on a value no submitted GPU work produces.
+	bool                 m_decode_released = false;
 	// Only the ring thread touches it: a deferred completion it still pumps while idle.
 	bool                 m_async_completion_pending = false;
 	Core::CondVar        m_cond_var;
