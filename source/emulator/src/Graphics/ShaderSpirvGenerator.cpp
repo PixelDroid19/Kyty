@@ -1981,20 +1981,13 @@ void Spirv::WriteGlobalVariables()
 		case ShaderType::Compute:
 			if (m_cs_input_info != nullptr)
 			{
-				if (UsesNativeComputeWave())
-				{
-					// WorkgroupSize takes precedence over LocalSize in Vulkan;
-					// both must describe physical invocations, not guest lanes.
-					const auto* physical = m_cs_input_info->wave_layout.physical_local;
-					vars.Add(String8::FromPrintf("%%gl_WorkGroupSize = OpConstantComposite %%v3uint %%%s %%%s %%%s",
-					                             GetConstantUint(physical[0]).c_str(), GetConstantUint(physical[1]).c_str(),
-					                             GetConstantUint(physical[2]).c_str()));
-				} else
-				{
-					vars.Add(String8::FromPrintf("%%gl_WorkGroupSize = OpConstantComposite %%v3uint %%uint_%u %%uint_%u %%uint_%u",
-					                             m_cs_input_info->threads_num[0], m_cs_input_info->threads_num[1],
-					                             m_cs_input_info->threads_num[2]));
-				}
+				// WorkgroupSize takes precedence over LocalSize in Vulkan;
+				// both must describe physical invocations, not guest lanes.
+				const auto* local =
+				    UsesNativeComputeWave() ? m_cs_input_info->wave_layout.physical_local : m_cs_input_info->threads_num;
+				vars.Add(String8::FromPrintf("%%gl_WorkGroupSize = OpConstantComposite %%v3uint %%%s %%%s %%%s",
+				                             GetConstantUint(local[0]).c_str(), GetConstantUint(local[1]).c_str(),
+				                             GetConstantUint(local[2]).c_str()));
 			}
 			m_source += String8(compute_variables).ReplaceStr("<Variables>", vars.Concat("\n" + String8(' ', 15)));
 			break;
