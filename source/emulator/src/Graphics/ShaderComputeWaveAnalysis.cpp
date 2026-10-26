@@ -529,11 +529,15 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 		{
 			return false;
 		}
-		// Partial destination updates and sign extension are not represented by
-		// the ordinary operand path. The explicit signed-convert emitter is the
-		// sole currently implemented SEXT exception.
+		// Partial destination updates are not represented by the ordinary operand
+		// path. Source SEXT is applied by the operand extract; it is admitted for
+		// the integer consumers of a sign-extended field: the signed convert, the
+		// move and the signed compares.
+		const auto name           = ShaderInstructionTypeName(instruction.type);
+		const bool signed_compare = compare && name.size() >= 3u && name.substr(name.size() - 3u) == "I32";
 		if ((!compare && ((control >> 8u) & 7u) != 6u) ||
-		    ((control & ((1u << 19u) | (1u << 27u))) != 0u && !ShaderComputeWaveSdwaSignedConvertSupported(instruction)))
+		    ((control & ((1u << 19u) | (1u << 27u))) != 0u && !ShaderComputeWaveSdwaSignedConvertSupported(instruction) &&
+		     !ShaderComputeWaveSdwaExtractSupported(instruction) && !signed_compare))
 		{
 			return false;
 		}

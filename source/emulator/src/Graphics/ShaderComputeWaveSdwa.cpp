@@ -60,7 +60,8 @@ bool ShaderComputeWaveSdwaExtractSupported(const ShaderInstruction& instruction)
 	{
 		return false;
 	}
-	if ((instruction.vop_sdwa_ctrl & kSdwaExtractFixedMask) != kSdwaExtractFixedBits ||
+	// SEXT (bit 19) sign-extends the selected source field.
+	if ((instruction.vop_sdwa_ctrl & kSdwaExtractFixedMask & ~(1u << 19u)) != kSdwaExtractFixedBits ||
 	    ((instruction.vop_sdwa_ctrl >> 16u) & 0x7u) == kSdwaSelectReserved)
 	{
 		return false;

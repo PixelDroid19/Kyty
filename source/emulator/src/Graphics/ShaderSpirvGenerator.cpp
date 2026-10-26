@@ -338,9 +338,9 @@ void Spirv::GenerateSource()
 		if (!ShaderInstructionPerLaneLoweringPreconditions(inst))
 		{
 			EXIT("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64 " pc=0x%08" PRIx32
-			     " reason=lowering-preconditions src_num=%d mimg_address_num=%d sopp=0x%02x raw=0x%08" PRIx32 "\n",
+			     " reason=lowering-preconditions src_num=%d mimg_address_num=%d sopp=0x%02x raw=0x%08" PRIx32 " sdwa=0x%08" PRIx32 "\n",
 			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<uint64_t>(inst.format), inst.pc,
-			     inst.src_num, inst.mimg_address_num, static_cast<unsigned>(inst.sopp_opcode), inst.raw_word);
+			     inst.src_num, inst.mimg_address_num, static_cast<unsigned>(inst.sopp_opcode), inst.raw_word, inst.vop_sdwa_ctrl);
 		}
 	}
 	if (UsesNativeComputeWave() && !NativeComputeWaveLayoutIsValid())

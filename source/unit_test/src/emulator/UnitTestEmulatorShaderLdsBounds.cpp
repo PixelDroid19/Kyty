@@ -769,7 +769,7 @@ void RunSdwa(uint32_t control)
 	if (!ShaderTryParseBounded(words, sizeof(words), &code)) { std::_Exit(2); }
 	CheckTerminator(code, 8);
 	Check(code.GetInstructions().At(0).type == ShaderInstructionType::VMovB32);
-	Check(ShaderInstructionLoweringPreconditions(code.GetInstructions().At(0)) == (control == 0x00000616u));
+	Check(ShaderInstructionLoweringPreconditions(code.GetInstructions().At(0)) == ((control & ~(1u << 19u)) == 0x00000616u));
 	ShaderComputeInputInfo input {};
 	input.threads_num[0] = 64;
 	input.threads_num[1] = input.threads_num[2] = 1;
@@ -933,7 +933,9 @@ TEST(EmulatorShaderLdsBounds, NativeMubufRejectUnmodeledAndReservedFlags)
 TEST(EmulatorShaderLdsBounds, NativeSdwaRejectUnrepresentedControls)
 {
 	ASSERT_EXIT(RunSdwa(0x00000616u), ::testing::ExitedWithCode(0), "");
-	for (uint32_t control: {0x00070616u, 0x00400616u, 0x01000616u, 0x00080616u})
+	// SEXT (bit 19) sign-extends the selected source field.
+	ASSERT_EXIT(RunSdwa(0x00080616u), ::testing::ExitedWithCode(0), "");
+	for (uint32_t control: {0x00070616u, 0x00400616u, 0x01000616u})
 	{
 		EXPECT_EXIT(RunSdwa(control), ::testing::ExitedWithCode(kRejectedExit), EmitterRejection(ShaderInstructionType::VMovB32, true));
 	}

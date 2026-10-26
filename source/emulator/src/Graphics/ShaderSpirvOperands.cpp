@@ -638,9 +638,10 @@ bool operand_is_exec(ShaderOperand op)
 	return false;
 }
 
-// SDWA SEL (GCN/RDNA): zero-extend BYTE_n / WORD_n from a uint register value.
+// SDWA SEL (GCN/RDNA): zero- or sign-extend BYTE_n / WORD_n from a uint register value.
 // sel 6 (DWORD) is a no-op. Returns SPIR-V that writes <result_id> from <input_id>.
-static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_id, const String8& index, uint8_t sel)
+static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_id, const String8& index, uint8_t sel,
+                                 bool sign_extend)
 {
 	if (sel == 6u)
 	{
@@ -680,7 +681,8 @@ static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_
 		default: break;
 	}
 
-	return String8("%<result_id> = OpBitFieldUExtract %uint %<input_id> %uint_<off> %uint_<cnt>\n")
+	return String8("%<result_id> = <extract> %uint %<input_id> %uint_<off> %uint_<cnt>\n")
+	    .ReplaceStr("<extract>", sign_extend ? "OpBitFieldSExtract" : "OpBitFieldUExtract")
 	    .ReplaceStr("<result_id>", result_id)
 	    .ReplaceStr("<input_id>", input_id)
 	    .ReplaceStr("<off>", String8::FromPrintf("%u", offset))
@@ -1185,7 +1187,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 
 	if (need_swizzle)
 	{
-		*load += String8(' ', 10) + sdwa_swizzle_uint(raw_id, result_id, index, op.swizzle);
+		*load += String8(' ', 10) + sdwa_swizzle_uint(raw_id, result_id, index, op.swizzle, op.sdwa_sext);
 	}
 	return true;
 }

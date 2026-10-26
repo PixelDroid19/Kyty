@@ -5187,28 +5187,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32ToInteger_SVdstSVsrc0)
 	return true;
 }
 
-static bool LoadIntegerConversionSource(Spirv* spirv, const ShaderInstruction& instruction, const String8& index, String8* output)
-{
-	if (!instruction.vop_sdwa || (instruction.vop_sdwa_ctrl & (1u << 19u)) == 0u)
-	{
-		return operand_load_uint(spirv, instruction.src[0], "t0_<index>", index, output);
-	}
-	if (!ShaderComputeWaveSdwaSignedConvertSupported(instruction) ||
-	    !operand_load_uint(spirv, instruction.src[0], "sdwa_convert_bits_<index>", index, output))
-	{
-		return false;
-	}
-	const uint32_t select = instruction.src[0].swizzle;
-	const uint32_t width = select < 4u ? 8u : (select < 6u ? 16u : 32u);
-	// The unsigned loader has positioned the selected bits at bit zero.
-	// Extend their sign before the integer-to-float conversion, not afterwards.
-	*output += String8("\n%sdwa_convert_int_<index> = OpBitcast %int %sdwa_convert_bits_<index>\n"
-	                   "%sdwa_convert_signed_<index> = OpBitFieldSExtract %int %sdwa_convert_int_<index> %uint_0 %<width>\n"
-	                   "%t0_<index> = OpBitcast %uint %sdwa_convert_signed_<index>\n")
-	               .ReplaceStr("<index>", index).ReplaceStr("<width>", spirv->GetConstantUint(width));
-	return true;
-}
-
 /* XXX: U32, I32, UbyteX, F16 */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtF32_XXX_SVdstSVsrc0)
 {
@@ -5224,7 +5202,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32_XXX_SVdstSVsrc0)
 
 	String8 load0;
 
-	if (!LoadIntegerConversionSource(spirv, inst, index_str, &load0))
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
 		return false;
 	}
