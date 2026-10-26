@@ -36,6 +36,7 @@
 #include "Emulator/Ports/AudioPausePort.h"
 #include "Emulator/Ports/ControllerInputPort.h"
 #include "Emulator/Ports/KeyboardTextPort.h"
+#include "Emulator/Ports/ProgressPort.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/SystemContentPort.h"
 
@@ -3400,6 +3401,7 @@ static void WindowAcquireSwapchainImage()
 {
 	constexpr uint64_t host_wait_timeout_ns = 10000000000ULL;
 
+	const ::Kyty::Emulator::Ports::ScopedProgress progress(::Kyty::Emulator::Ports::ProgressLane::Present);
 	bool just_shown = false;
 	if (g_window_ctx->host_window->IsHidden())
 	{
@@ -3506,6 +3508,7 @@ static void WindowQueuePresent(VkSemaphore* render_finished)
 
 	const auto& queue = g_window_ctx->graphic_ctx.queues[GraphicContext::QUEUE_PRESENT];
 
+	const ::Kyty::Emulator::Ports::ScopedProgress progress(::Kyty::Emulator::Ports::ProgressLane::Present);
 	const auto present_start = std::chrono::steady_clock::now();
 	{
 		EXIT_IF(queue.mutex == nullptr);

@@ -261,6 +261,37 @@ refresh measure its nested page-discovery and snapshot stages. Counts and
 times use the same snapshot window as other performance metrics. Nested times
 and concurrent processors overlap; do not add them as exclusive frame costs.
 
+## Runner commands
+
+These commands take no `--endpoint`: they launch the emulator, or score files,
+on their own and talk to the child through a private agent socket. Running
+`kyty_agent` without arguments lists their options.
+
+- `score-image IMAGE.png [--gate]` and `compare-captures --current M --baseline M`
+  score and compare native captures without a run (`docs/graphics-captures.md`).
+- `capture-run --guest-root DIR ...` writes a capture manifest from a bounded run
+  (`docs/graphics-captures.md`).
+- `playable-regression ...` runs the strict playable gates against a profile,
+  a baseline and an optional external scene checkpoint.
+- `operation-graph INPUT ...` builds the offline producer/consumer graph
+  (`docs/devtools/offline-contract-tools.md`).
+- `games-matrix [--games-root DIR] [--discover-only] [--mode strict|bringup] ...`
+  launches every package root (a directory holding `eboot.bin`) once, with
+  startup, present, total and stability deadlines. Cases get anonymous IDs and
+  every string in the summary is stripped of host paths and title identifiers.
+  Each case reports an `outcome` (`interactive`, `presenting`,
+  `video_initialized`, `runtime_started`, `controlled_timeout`, `guest_exit`,
+  `launch_failed`, `loader_failed`, `unsupported`, `host_crash` or
+  `invalid_fixture`) and the first frontier it stopped at. A child that the
+  runner itself terminated after the agent was ready is a controlled stop, never
+  a loader failure, whatever exit status the signal produced. The parent's
+  `KYTY_PRESENT_FPS_LIMIT` reaches the child; permissive and bring-up switches
+  do not unless `--mode bringup` is explicit.
+
+Runner exit codes: `0` pass, `1` a gate or case failed, `2` usage or tooling
+error, `3` playable baseline missing. `operation-graph` uses `1` for invalid
+input or an unreadable/unwritable file and `2` for usage.
+
 ## Stable behavior
 
 - Protocol and payload limits are versioned in

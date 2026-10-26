@@ -228,9 +228,11 @@ created through the **Create Version** workflow.
 1. Review the complete diff for scope, secrets, private data, generated files
    and leftover `DIAG` code.
 2. Build every affected target in your own build directory.
-3. Run the relevant tests and the gate scripts for the touched domain:
-   `scripts/check_emulator_boundaries.py`, `scripts/check_graphics_tables.py`,
-   `scripts/kyty_playable_regression.py`.
+3. Run the relevant tests and the gates for the touched domain: the CTest
+   gates `KytyArchitectureBoundaryIntegration.Repository`,
+   `KytyArchiveDagIntegration.Repository` and
+   `KytyHostShaders.CheckedInIncludes`, the `kyty_unit_test` suites, and
+   `kyty_agent playable-regression`.
 4. Re-run the affected titles and the titles sharing the path; confirm no
    regression against the documented frontier.
 5. Document commands, environment, results and untested limits.
@@ -242,8 +244,8 @@ A boot, a window or one rendered frame does not mean a title is supported. A
 that reaches the stated state and holds it. Diagnostic input, stubs, permissive
 GPU skips and console logging are not supported runtime modes. Reports name the
 commit, host, GPU, driver, workload, duration and known limitations; graphics
-claims need captures scored with `scripts/kyty_capture.py`, and gameplay claims
-need `scripts/kyty_playable_regression.py`.
+claims need captures scored with `kyty_agent capture-run`, and gameplay claims
+need `kyty_agent playable-regression`.
 
 ## Runtime diagnostics
 

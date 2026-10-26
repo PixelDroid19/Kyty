@@ -47,8 +47,9 @@ jobs:
               -DBUILD_TESTING=ON
             cmake --build build --parallel 2
             ctest --test-dir build --output-on-failure --parallel 2 --timeout 300 \
-              --tests-regex "^(KytyUnitTest|KytyArchitectureBoundaryChecker[.]SyntheticFixtures|KytyGraphicsTables[.](Provenance|SyntheticFixtures|Regeneration|DerivedOutputsMatch)|KytyGen5DetileShader[.]CheckedInSpirv|KytyAgentTransport[.]NativeRoundTrip)$"
-            python3 scripts/check_emulator_boundaries.py source --strict
+              --tests-regex "^(KytyUnitTest|KytyHostShaders[.]CheckedInIncludes|KytyAgentTransport[.]NativeRoundTrip)$"
+            cmake --build build --parallel 2 --target kyty_architecture_boundary_integration
+            build/integration_test/kyty_architecture_boundary_integration source --strict
           '
 
       - name: Build Vulkan integration executables

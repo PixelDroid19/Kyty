@@ -1,19 +1,17 @@
 # Offline contract tools
 
-Two standalone Python tools under `scripts/` check graphics contracts without
-running a title. Neither is a compatibility result, a synchronization proof, or
-a hardware measurement beyond what each section states. They use only the Python
-standard library and read only the files you pass. Keep every input and output
-file outside Git. Captures are private evidence.
+Two standalone tools check graphics contracts without running a title. Neither
+is a compatibility result, a synchronization proof, or a hardware measurement
+beyond what each section states. They read only the files you pass. Keep every
+input and output file outside Git. Captures are private evidence.
 
 Run the tests with:
 
 ```bash
-python3 -I scripts/tests/test_operation_graph.py
-python3 -I scripts/tests/test_hardware_oracle.py
+kyty_unit_test --gtest_filter='AgentOperationGraph*:AgentHardwareOracle*:EmulatorGraphicsOperationTrace*'
 ```
 
-## 1. Operation dependency graph (`kyty_operation_graph.py`)
+## 1. Operation dependency graph (`kyty_agent operation-graph`)
 
 Builds a diagnostic graph from ordered operation records. Each record is a
 draw, dispatch, DMA or resolve with explicit resource spans.
@@ -28,7 +26,7 @@ draw, dispatch, DMA or resolve with explicit resource spans.
 - Later records never satisfy an earlier read.
 
 ```bash
-python3 scripts/kyty_operation_graph.py operations.json --json graph.json --dot graph.dot
+kyty_agent operation-graph operations.json --json graph.json --dot graph.dot
 ```
 
 Input schema `kyty_operation_graph_input_v1`:
@@ -70,7 +68,7 @@ The DOT rendering keeps names in disjoint namespaces: operation nodes are
 `"op:<id>"` and generated external sources are `"ext:<resource>"`. An operation
 id such as `external:vb` cannot collide with the external source for `vb`.
 
-CLI exit status: 0 success, 1 invalid input or unreadable/unwritable file.
+CLI exit status: 0 success, 1 invalid input or unreadable/unwritable file, 2 usage error.
 
 ## Live producer (opt-in, default off)
 
@@ -156,7 +154,7 @@ from it is not a complete account of the frame.
 **Adapter.** Pass the sidecar with `--meta`:
 
 ```bash
-python3 scripts/kyty_operation_graph.py <stem>.operations.input.json \
+kyty_agent operation-graph <stem>.operations.input.json \
     --meta <stem>.operations.meta.json --json graph.json
 ```
 
@@ -172,7 +170,7 @@ the trace was not truncated, no operation was dropped, and no record is
 incomplete. The untraced kinds are always listed. A graph is never reported as
 complete for the whole frame.
 
-## 2. Integer instruction oracle (`kyty_hardware_oracle.py`)
+## 2. Integer instruction oracle (`kyty_agent hardware-oracle`)
 
 Compares the integer results of one arithmetic instruction across two backends
 for the same operand pairs: native AMD gfx1030 execution, and a Vulkan endpoint
@@ -223,7 +221,7 @@ Build and run (root-owned; the commands are not run by this document):
 
 ```bash
 cmake --build <build-dir> --target kyty_shader_arithmetic_oracle
-python3 scripts/kyty_hardware_oracle.py vulkan-run --op mulhi --input-file /abs/pairs.bin \
+kyty_agent hardware-oracle vulkan-run --op mulhi --input-file /abs/pairs.bin \
     --wave-width 64 --out-dir /abs/new-run-dir --endpoint /abs/<build-dir>/kyty_shader_arithmetic_oracle
 ```
 
@@ -256,7 +254,7 @@ limit. Each batch builds its own program, because the operands are literals in
 the guest code. Pipelines are therefore not shared across batches.
 
 **Capability and exit status.** The endpoint exits 77 when the compute capability
-is unavailable before any dispatch. The Python side reports `endpoint_unavailable`
+is unavailable before any dispatch. The oracle reports `endpoint_unavailable`
 with exit 3. Exit 2 is a refused request (`endpoint_refused`). Any other failure
 is `endpoint_error`. On every failure, the endpoint writes no output and no
 metadata, so a failed run cannot produce a measured result.
@@ -268,7 +266,7 @@ report is written only after every dispatch succeeded, with `measured` true. The
 `subgroup_size` is 32, the host subgroup width of each half of a split wave64.
 The driver's default subgroup size is recorded separately and is not conflated
 with it. `physical_device` is the selected device name, restricted to printable
-characters the validator accepts. The Python side checks that `dispatches` equals
+characters the validator accepts. The oracle checks that `dispatches` equals
 `ceil(pairs / 16)`. A subgroup difference is reported as
 `subgroup_mode: differs_qualified`.
 
@@ -302,14 +300,15 @@ oracle, and it does not decide the comparison.
 **Statuses.** `measured` means the device or endpoint produced outputs that
 passed validation. `unavailable` means no hardware or endpoint exists here, and it
 never carries a comparison or artifact. Other failure statuses are
-`unsupported_architecture`, `compile_failed`, `asm_check_failed`,
+`compile_failed`, `asm_check_failed`,
 `compiler_version_unreadable`, `device_error`, `device_metadata_invalid`,
 `wave_width_mismatch`, `arch_mismatch`, `timeout`, `output_size_mismatch`,
 `endpoint_error`, `endpoint_refused`, `endpoint_unavailable`, `endpoint_metadata_invalid`,
 `endpoint_not_measured`, `output_invalid` (the output is not a regular file) and
 `output_size_mismatch` (the output is not exactly four bytes per pair).
 
-**Files.** Outputs go to a new or empty directory outside the repository, which
+**Files.** Outputs go to a new or empty directory outside the source tree the
+agent was built from, which
 is never overwritten. The summary printed to stdout contains counts, status,
 artifact and comparison, but no host paths. Raw inputs, outputs, logs and the
 binary stay in the output directory.
@@ -319,8 +318,10 @@ mismatch, 2 for a usage error, 3 for `unavailable`, and 4 for an I/O error.
 
 **Status.** The probe and the unavailable path have been exercised on a host
 without `/dev/kfd` and `hipcc`. The native kernel has not been compiled, and no
-device has run it. The Vulkan endpoint source and target exist and have not been
-built or run by this change; the root owns that build. The tests use labeled fake
-runners that write files and check parsing, argument construction, exit-status
-mapping and comparison rules. They do not measure hardware or run the endpoint.
-No measured result exists in this tree.
+AMD device has run it. The Vulkan endpoint has been built and run through
+`vulkan-run` on an Intel Arc A770 (Mesa ANV): all five operations were measured
+and matched their host reference, and `compare` of two such results reported a
+match. That run is not a native comparison, because no native result exists.
+The `AgentHardwareOracle` unit tests use a fake runner host that writes files and
+checks parsing, argument construction, exit-status mapping and comparison rules.
+They do not measure hardware or run the endpoint.

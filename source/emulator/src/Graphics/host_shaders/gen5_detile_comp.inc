@@ -1,4 +1,4 @@
-// Auto-generated from gen5_detile.comp with scripts/check_gen5_detile_shader.py --write.
+// Auto-generated from gen5_detile.comp with source/cmake/HostShaderBlobs.cmake.
 // Do not edit by hand.
 constexpr uint32_t kGen5DetileCompSpirv[5006] = {
 	0x07230203u, 0x00010600u, 0x000d000bu, 0x00000bd0u, 0x00000000u, 0x00020011u,

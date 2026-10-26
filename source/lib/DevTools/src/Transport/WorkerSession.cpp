@@ -243,4 +243,35 @@ bool WorkerSession::Active() const noexcept
 	return state_ != nullptr && state_->telemetry != nullptr && state_->telemetry->Active();
 }
 
+bool WorkerSession::RegisterProgress(ProgressKey key, ProgressToken* out) noexcept
+{
+	return state_ != nullptr && state_->telemetry != nullptr && state_->telemetry->RegisterProgress(key, out);
+}
+
+bool WorkerSession::SubmitProgress(ProgressToken token, const ProgressUpdate& update) noexcept
+{
+	return state_ != nullptr && state_->telemetry != nullptr && state_->telemetry->SubmitProgress(token, update);
+}
+
+bool WorkerSession::CompleteProgress(ProgressToken token, uint64_t epoch) noexcept
+{
+	return state_ != nullptr && state_->telemetry != nullptr && state_->telemetry->CompleteProgress(token, epoch);
+}
+
+void WorkerSession::CloseProgress(ProgressToken token) noexcept
+{
+	if (state_ != nullptr && state_->telemetry != nullptr)
+	{
+		state_->telemetry->CloseProgress(token);
+	}
+}
+
+void WorkerSession::NoteUntrackedProgress(Domain domain) noexcept
+{
+	if (state_ != nullptr && state_->telemetry != nullptr)
+	{
+		state_->telemetry->NoteUntrackedProgress(domain);
+	}
+}
+
 } // namespace Kyty::DevTools

@@ -23,7 +23,7 @@ ocultar entradas no soportadas.
 | Geometría tile 64 KiB | `TileGet64KBBlockWidth` y `TileAlign64KBPitch` | Render targets y texturas ya no copian tablas de ancho de bloque. Formatos desconocidos fallan explícitamente. |
 | PNG RGBA8 | `UtilWriteRgba8Png` | Capturas nativas y artefactos del agente usan un único encoder. |
 | Escritura atómica host | `AtomicFileWrite` | Pipeline cache, caché SPIR-V y SaveDataMemory comparten temporal único y reemplazo atómico. |
-| Runners Python | `scripts/kyty_runner_common.py` | Matrix, playable y capture comparten entorno estricto, socket, identidad del agente, proceso-grupo y terminación. |
+| Runners de `kyty_agent` | `RunnerHost`, `BuildChildEnvironment` y `RunnerSupport` en `source/agent/src/runner/` | Matrix, playable y capture comparten entorno estricto, socket, identidad del agente, proceso-grupo y terminación. |
 | Escape JSON del agente | `Kyty/Agent/Json.h` | CLI y protocolo comparten el mismo encoder; no queda un `JsonEscape` local. |
 | Inicialización de memoria virtual | `CoreSubsystem` | Kernel Memory declara la dependencia y ya no reinicializa el estado global. |
 | SaveData portable | `SaveDataPaths` y `SaveDataMemoryStore` | Un root por título y un archivo por `(usuario, slot)`; Setup/Get/Set/Sync usan el mismo backend y límites exactos. |
@@ -103,10 +103,6 @@ _build_linux/fc_script scripts/run_unit_tests.lua \
 
 # Suite completa: 909 aprobadas y 1 omitida de forma intencional en Linux
 _build_linux/fc_script scripts/run_unit_tests.lua --gtest_color=no
-
-python3 scripts/test_kyty_runner_common.py
-python3 scripts/test_kyty_playable_regression.py
-python3 scripts/test_kyty_games_matrix.py
 ```
 
 La validación funcional de un título sigue siendo independiente de estos

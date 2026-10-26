@@ -215,6 +215,8 @@ enum class PthreadWaitKind : uint8_t
 	EventQueue,
 	Sleep,
 	Join,
+	Rwlock,
+	Address,
 };
 
 // Records the calling guest thread's wait (kind, guest object, guest return
@@ -232,7 +234,8 @@ public:
 	PthreadWaitScope& operator=(const PthreadWaitScope&) = delete;
 
 private:
-	bool m_active = false;
+	bool m_active   = false;
+	bool m_blocking = false;
 };
 
 #define KYTY_GUEST_WAIT(kind, object)                                                                                                     \

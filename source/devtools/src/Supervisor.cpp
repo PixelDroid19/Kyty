@@ -271,11 +271,36 @@ SupervisorResult RunSupervisor(const SupervisorOptions& options) noexcept
 	settings.suspected_after_ns = options.suspicion_ns;
 	settings.confirmed_after_ns = options.confirmation_ns;
 	settings.heartbeat_stale_ns = options.suspicion_ns;
+	// The worker gives up on a fence or swapchain wait after 10 s and exits;
+	// confirm those waits before that so the bundle names the stuck wait.
+	constexpr uint64_t kHostWaitSuspectedNs = 2'000'000'000ull;
+	constexpr uint64_t kHostWaitConfirmedNs = 8'000'000'000ull;
+	const uint64_t     host_wait_suspected  = options.suspicion_ns < kHostWaitSuspectedNs ? options.suspicion_ns : kHostWaitSuspectedNs;
+	const uint64_t     host_wait_confirmed  = options.confirmation_ns < kHostWaitConfirmedNs ? options.confirmation_ns : kHostWaitConfirmedNs;
+	settings.overrides[0] = {Domain::GpuQueue, static_cast<uint32_t>(OperationCode::FenceWait), host_wait_suspected, host_wait_confirmed};
+	settings.overrides[1] = {Domain::Presentation, static_cast<uint32_t>(OperationCode::PresentationPresent), host_wait_suspected,
+	                         host_wait_confirmed};
+	// A synchronous pipeline compile holds the command processor legitimately;
+	// only a compile far past the slowest observed ones is reported.
+	constexpr uint64_t kCompileSuspectedNs = 60'000'000'000ull;
+	constexpr uint64_t kCompileConfirmedNs = 180'000'000'000ull;
+	settings.overrides[2] = {Domain::CommandProcessor, static_cast<uint32_t>(OperationCode::PipelineCompile),
+	                         options.suspicion_ns > kCompileSuspectedNs ? options.suspicion_ns : kCompileSuspectedNs,
+	                         options.confirmation_ns > kCompileConfirmedNs ? options.confirmation_ns : kCompileConfirmedNs};
+	// Every guest thread parked with no command work is a deadlock only once
+	// it outlasts long guest-paced pauses (asset streaming behind a wait).
+	constexpr uint64_t kGuestQuietSuspectedNs = 10'000'000'000ull;
+	constexpr uint64_t kGuestQuietConfirmedNs = 30'000'000'000ull;
+	settings.overrides[3] = {Domain::GuestThread, static_cast<uint32_t>(OperationCode::ExecutionBoundary),
+	                         options.suspicion_ns > kGuestQuietSuspectedNs ? options.suspicion_ns : kGuestQuietSuspectedNs,
+	                         options.confirmation_ns > kGuestQuietConfirmedNs ? options.confirmation_ns : kGuestQuietConfirmedNs};
+	settings.override_count = 4;
 
 	ProgressPublication last_pub {};
 	TimelineSnapshot    last_tl {};
 	bool                have_pub          = false;
-	bool                stall_bundle_done = false;
+	uint32_t            stall_bundles     = 0;
+	uint64_t            bundled_stall     = 0;
 	uint64_t            bundle_gen        = 1;
 	uint64_t            samples           = 0;
 	uint64_t            last_heartbeat_ns = 0;
@@ -375,19 +400,23 @@ SupervisorResult RunSupervisor(const SupervisorOptions& options) noexcept
 			in.heartbeat_ns = 0u;
 		}
 
-		StallResult sr = Observe(in, settings, &clf);
+		// A worker that closed its handshake is shutting down and no longer
+		// publishes; the terminal observation decides how the run ended.
+		HandshakeState handshake = HandshakeState::Uninitialized;
+		const bool     closing   = ReadHandshakeState(mapping.View(), &handshake) == ProtocolResult::Ok &&
+		                     handshake == HandshakeState::WorkerClosing;
+		const StallResult sr = closing ? StallResult {} : Observe(in, settings, &clf);
 
-		if (!stall_bundle_done && sr.category != StallCategory::None && sr.category != StallCategory::HealthyIdle &&
-		    sr.confirmed_ns != 0u && have_pub)
+		const bool new_stall = sr.category != StallCategory::None && sr.category != StallCategory::HealthyIdle &&
+		                       sr.confirmed_ns != 0u && clf.causal_fingerprint != bundled_stall;
+		if (new_stall && have_pub && stall_bundles < options.max_stall_bundles)
 		{
 			WaitGraphSnapshot wg {};
+			bundled_stall = clf.causal_fingerprint;
 			if (WriteStallBundle(options.absolute_output_dir, last_pub, last_tl, wg, clf, sr, obs.status, health,
 			                     BundleTrigger::ConfirmedStall, bundle_gen++, &result))
 			{
-				if (options.capture_stall_once)
-				{
-					stall_bundle_done = true;
-				}
+				++stall_bundles;
 			} else
 			{
 				result.outcome = SupervisorOutcome::BundleError;
@@ -474,7 +503,7 @@ int RunSelfTest(const char* synthetic_mode, const char* absolute_output_dir, uin
 	// Bound runtime for blocked-lane capture.
 	const uint64_t window_ms = confirmed_ms + cleanup_ms;
 	opt.max_samples          = (window_ms * 1'000'000ull) / opt.sample_period_ns + 5u;
-	opt.capture_stall_once   = 1;
+	opt.max_stall_bundles    = 1;
 
 	SupervisorResult r = RunSupervisor(opt);
 

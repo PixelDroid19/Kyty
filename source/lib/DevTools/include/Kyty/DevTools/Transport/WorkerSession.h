@@ -35,6 +35,11 @@ public:
 	[[nodiscard]] bool Publish() noexcept;
 	[[nodiscard]] bool Stop() noexcept;
 	[[nodiscard]] bool Active() const noexcept;
+	[[nodiscard]] bool RegisterProgress(ProgressKey key, ProgressToken* out) noexcept;
+	[[nodiscard]] bool SubmitProgress(ProgressToken token, const ProgressUpdate& update) noexcept;
+	[[nodiscard]] bool CompleteProgress(ProgressToken token, uint64_t epoch) noexcept;
+	void               CloseProgress(ProgressToken token) noexcept;
+	void               NoteUntrackedProgress(Domain domain) noexcept;
 
 private:
 	struct State;

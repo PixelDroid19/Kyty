@@ -28,6 +28,7 @@
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Log.h"
+#include "Emulator/Ports/ProgressPort.h"
 #include "Emulator/Profiler.h"
 
 #include "GraphicsRunTrace.h"
@@ -1525,6 +1526,7 @@ static void WaitForSuspendedRuns(CommandProcessor* cp, CommandProcessor::Suspend
 	EXIT_IF(cp == nullptr);
 	EXIT_IF(first == nullptr && second == nullptr);
 
+	const ::Kyty::Emulator::Ports::ScopedCommandPhase wait(::Kyty::Emulator::Ports::CommandPhase::RegisterWait);
 	for (;;)
 	{
 		if ((first != nullptr && SuspendedRunReady(*first)) || (second != nullptr && SuspendedRunReady(*second)))
@@ -1651,6 +1653,7 @@ void GraphicsRing::ThreadBatchRun(void* data)
 	{
 		CmdBatch buf = ring->GetCmdBatch();
 
+		const ::Kyty::Emulator::Ports::ScopedProgress progress(::Kyty::Emulator::Ports::ProgressLane::GraphicsCommands);
 		cp->RunLock();
 		{
 			cp->BufferInit();
@@ -1828,6 +1831,7 @@ void ComputeRing::ThreadRun(void* data)
 
 		ring->m_mutex.Unlock();
 
+		const ::Kyty::Emulator::Ports::ScopedProgress progress(::Kyty::Emulator::Ports::ProgressLane::ComputeCommands);
 		cp->RunLock();
 		{
 			cp->BufferInit();

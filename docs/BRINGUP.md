@@ -582,7 +582,7 @@ live".
 - **Gates.** `check_emulator_boundaries.py source --strict` and the
   graphics-table, boundary-fixture and detile-SPIR-V ctest gates pass. The
   focused graphics unit suites pass (896 tests).
-  `kyty_playable_regression.py` cannot run on this host: it has no private
+  The playable regression cannot run on this host: it has no private
   profile or guest root.
 
 ### Main regression sweep after the #18 merge (2026-10-17)
