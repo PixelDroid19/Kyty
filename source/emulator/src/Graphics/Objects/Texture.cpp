@@ -265,7 +265,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	const bool three_dimensional = resource_type == 10u;
 	const bool arrayed_2d        = resource_type == 13u || resource_type == 11u;
 
-	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	// Depth views are sampled in DEPTH_STENCIL_READ_ONLY_OPTIMAL (their descriptors
+	// and the GPU detile use it); upload into the layout the descriptor names.
+	const VkImageLayout vk_layout = depth_view ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	// A writable StorageBuffer parent owns the authoritative D16 tile bytes.
 	// The renderer records its detile and upload in the active graphics command
 	// buffer immediately after creation; do not clear or read stale guest bytes

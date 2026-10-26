@@ -1057,6 +1057,18 @@ bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, 
 
 	if (op.negate || op.absolute) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op.negate || op.absolute condition ignored (continuing)\n"); }
 
+	// SDWA BYTE/WORD selects (and SEXT) operate on the raw 32-bit register image.
+	if (op.swizzle != 6u)
+	{
+		String8 uint_load;
+		if (!operand_load_uint(spirv, op, "si_" + result_id, index, &uint_load))
+		{
+			return false;
+		}
+		*load = uint_load + String8(' ', 10) + String8("%<result_id> = OpBitcast %int %si_<result_id>").ReplaceStr("<result_id>", result_id);
+		return true;
+	}
+
 	if (operand_is_constant(op))
 	{
 		String8 id = spirv->GetConstant(op);

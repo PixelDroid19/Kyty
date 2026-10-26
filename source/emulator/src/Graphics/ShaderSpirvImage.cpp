@@ -781,8 +781,9 @@ struct StorageImageUintFormat
 	bool        extended;
 };
 static constexpr StorageImageUintFormat STORAGE_IMAGE_UINT_FORMATS[ShaderStorageImagePlan::TYPES - 1] = {
-    {5u, "R8ui", "U8", true},          {11u, "R16ui", "U16", true},     {20u, "R32ui", "U", false},
-    {60u, "Rgba8ui", "U8x4", false}, {62u, "Rg32ui", "U32x2", true}, {75u, "Rgba32ui", "U32x4", false}};
+    {5u, "R8ui", "U8", true},          {11u, "R16ui", "U16", true},     {18u, "Rg8ui", "U8x2", true},
+    {20u, "R32ui", "U", false},        {60u, "Rgba8ui", "U8x4", false}, {62u, "Rg32ui", "U32x2", true},
+    {75u, "Rgba32ui", "U32x4", false}};
 
 // The view type of a writable Gen5 format: 0 is the formatless float type,
 // 1 + i is STORAGE_IMAGE_UINT_FORMATS[i]. Returns -1 with the refusal reason.

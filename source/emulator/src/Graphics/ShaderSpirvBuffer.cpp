@@ -3927,6 +3927,22 @@ String8 Spirv::MaterializeAssembledDescriptors(const ShaderInstruction& inst) co
 			source += String8::FromPrintf("OpStore %%%s %%%s\n", variable.value.c_str(), id.c_str());
 		}
 	}
+	// A constant S# takes its sampler's metadata the same way.
+	for (const auto& constant: m_bind->constant_samplers)
+	{
+		if (constant.consumer_pc != inst.pc)
+		{
+			continue;
+		}
+		const int row = m_bind->storage_buffers.buffers_num + m_bind->textures2D.textures_num * 2 + constant.sampler_index;
+		for (int field = 0; field < 4; ++field)
+		{
+			const auto variable = operand_variable_to_str(inst.src[2], field);
+			const auto id       = String8::FromPrintf("constant_ssharp_%u_%d", inst.pc, field);
+			source += EmitMetadataLoad(row, field, id);
+			source += String8::FromPrintf("OpStore %%%s %%%s\n", variable.value.c_str(), id.c_str());
+		}
+	}
 	return source;
 }
 

@@ -72,6 +72,9 @@ public:
 // format, or the exact range with a different extent: a recycled allocation
 // whose texels mean nothing in the other layout.
 [[nodiscard]] bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool exact_range);
+// A one-level view of exactly the mip tail block of a 64 KiB-swizzled storage chain with the same element format.
+[[nodiscard]] bool StorageTextureViewsMipTail(const uint64_t* chain, uint64_t chain_address, const uint64_t* view, uint64_t view_address,
+                                              uint64_t view_size);
 // The same over a render target: a different texel size, or the exact range
 // with a different extent.
 [[nodiscard]] bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool exact_range);

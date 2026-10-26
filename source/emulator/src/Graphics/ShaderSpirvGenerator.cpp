@@ -2343,7 +2343,7 @@ void Spirv::WriteLocalVariables()
 			}
 			for (int i = 0; i < m_bind->samplers.samplers_num; ++i)
 			{
-				if (!m_bind->samplers.extended[i] && reg >= m_bind->samplers.start_register[i] &&
+				if (!m_bind->samplers.extended[i] && !m_bind->samplers.dynamic_sload[i] && reg >= m_bind->samplers.start_register[i] &&
 				    reg < m_bind->samplers.start_register[i] + 4)
 				{
 					return true;
@@ -3062,7 +3062,8 @@ void Spirv::WriteFunctions()
 	}
 
 	if (m_code.HasAnyOf({ShaderInstructionType::VMulHiI32, ShaderInstructionType::VMulLoI32, ShaderInstructionType::VMulLoU32, ShaderInstructionType::VMulHiU32,
-	                     ShaderInstructionType::VMadU32U24, ShaderInstructionType::VMulU32U24, ShaderInstructionType::SMulHiU32}))
+	                     ShaderInstructionType::VMadU32U24, ShaderInstructionType::VMulU32U24, ShaderInstructionType::VMulI32I24,
+	                     ShaderInstructionType::SMulHiU32}))
 	{
 		m_source += FUNC_MUL_EXTENDED;
 	}

@@ -69,7 +69,7 @@ static bool IsR32SingleComponentStorageFormat(uint32_t fmt)
 // identity mapping, whatever their guest selector.
 static bool IsIdentityViewStorageFormat(uint32_t fmt)
 {
-	return fmt == 5u || fmt == 7u || fmt == 11u || fmt == 13u || fmt == 14u || fmt == 62u;
+	return fmt == 5u || fmt == 7u || fmt == 11u || fmt == 13u || fmt == 14u || fmt == 18u || fmt == 62u;
 }
 
 // `format` is the packed PARAM_FORMAT (fmt << 16 | dfmt << 8 | nfmt).
@@ -862,6 +862,30 @@ bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* in
 {
 	return existing[StorageTextureObject::PARAM_FORMAT] != incoming[StorageTextureObject::PARAM_FORMAT] ||
 	       (exact_range && existing[StorageTextureObject::PARAM_WIDTH_HEIGHT] != incoming[StorageTextureObject::PARAM_WIDTH_HEIGHT]);
+}
+
+bool StorageTextureViewsMipTail(const uint64_t* chain, uint64_t chain_address, const uint64_t* view, uint64_t view_address,
+                                uint64_t view_size)
+{
+	const auto chain_levels = static_cast<uint32_t>(chain[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu);
+	if (chain[StorageTextureObject::PARAM_TILE] != 9u || view[StorageTextureObject::PARAM_TILE] != 9u ||
+	    chain[StorageTextureObject::PARAM_FORMAT] != view[StorageTextureObject::PARAM_FORMAT] ||
+	    (view[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu) != 1u || view[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u ||
+	    view[StorageTextureObject::PARAM_DEPTH] != 1u || !StorageTextureUsesMipBacking(chain, true))
+	{
+		return false;
+	}
+	Gen5TextureMipLayout layout {};
+	const auto           fmt = static_cast<uint32_t>(chain[StorageTextureObject::PARAM_FORMAT] >> 16u);
+	if (!Gen5GetStandard64KBTextureMipLayout(fmt, static_cast<uint32_t>(chain[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u),
+	                                         static_cast<uint32_t>(chain[StorageTextureObject::PARAM_WIDTH_HEIGHT]),
+	                                         static_cast<uint32_t>(chain[StorageTextureObject::PARAM_PITCH]), chain_levels, &layout) ||
+	    layout.first_tail_level >= layout.levels)
+	{
+		return false;
+	}
+	const auto& tail = layout.level[layout.first_tail_level];
+	return view_address == chain_address + tail.tiled_offset && view_size == tail.tiled_size;
 }
 
 bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool exact_range)

@@ -3,6 +3,7 @@
 #include "ShaderLaneFlow.h"
 
 #include <map>
+#include <set>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -38,10 +39,15 @@ bool Covers(const ShaderOperand& op, unsigned word)
 	return ScalarRange(op, &first, &count) && word >= first && word < first + count;
 }
 
-// M0 also feeds LDS/GDS addressing, interpolation, messages and the relative moves without naming it.
-bool ReadsM0Implicitly(Type type)
+// M0 also feeds LDS/GDS addressing, interpolation, messages and the relative moves without naming it. A relative
+// move this pass lowered reads its lane's index from src[1] instead.
+bool ReadsM0Implicitly(const ShaderInstruction& inst)
 {
-	return AnyPrefix(type, {"Ds", "VInterp", "SSendmsg", "VMovrel", "SMovrel"});
+	if (AnyPrefix(inst.type, {"VMovrels", "VMovreld"}) && inst.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1)
+	{
+		return false;
+	}
+	return AnyPrefix(inst.type, {"Ds", "VInterp", "SSendmsg", "VMovrel", "SMovrel"});
 }
 
 bool Reads(const ShaderInstruction& inst, unsigned word)
@@ -50,7 +56,7 @@ bool Reads(const ShaderInstruction& inst, unsigned word)
 	{
 		if (Covers(inst.src[source], word)) { return true; }
 	}
-	return word == kM0Word && ReadsM0Implicitly(inst.type);
+	return word == kM0Word && ReadsM0Implicitly(inst);
 }
 
 bool Writes(const ShaderInstruction& inst, unsigned word)
@@ -70,11 +76,25 @@ bool IsBranch(Type type)
 	return type == Type::SBranch || StartsWith(type, "SCbranch");
 }
 
-// No path from instruction `from` reads `word` before writing it. One pass in program order sees every path that
-// carries the value: a back edge that carries it must land where the pass already carried it, so following the edge
-// would only repeat what the pass checked.
-bool DeadFrom(const ShaderCode& code, uint32_t from, unsigned word)
+bool DeadFromChecked(const ShaderCode& code, uint32_t from, unsigned word, std::set<uint32_t>* started);
+
+// A back edge carries the live value to `target_pc`, before or inside the pass: check the paths from there too.
+bool DeadAlongBackEdge(const ShaderCode& code, uint32_t target_pc, unsigned word, std::set<uint32_t>* started)
 {
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		if (instructions.At(index).pc == target_pc) { return DeadFromChecked(code, index, word, started); }
+	}
+	return false;
+}
+
+// No path from instruction `from` reads `word` before writing it. One pass in program order sees every path that
+// carries the value forward; a back edge that carries it where the pass did not is followed from its target. A pass
+// already started from that instruction covers it, so loops end.
+bool DeadFromChecked(const ShaderCode& code, uint32_t from, unsigned word, std::set<uint32_t>* started)
+{
+	if (!started->insert(from).second) { return true; }
 	const auto&                  instructions = code.GetInstructions();
 	std::map<uint32_t, bool>     reaching; // live value arriving at a branch target
 	std::map<uint32_t, bool>     live_at;  // whether the pass carried the value into each instruction
@@ -92,7 +112,11 @@ bool DeadFrom(const ShaderCode& code, uint32_t from, unsigned word)
 			if (target <= static_cast<int64_t>(inst.pc))
 			{
 				const auto carried = live_at.find(static_cast<uint32_t>(target));
-				if (live && (carried == live_at.end() || !carried->second)) { return false; }
+				if (live && (carried == live_at.end() || !carried->second) &&
+				    (target < 0 || !DeadAlongBackEdge(code, static_cast<uint32_t>(target), word, started)))
+				{
+					return false;
+				}
 			} else
 			{
 				reaching[static_cast<uint32_t>(target)] = reaching[static_cast<uint32_t>(target)] || live;
@@ -107,6 +131,12 @@ bool DeadFrom(const ShaderCode& code, uint32_t from, unsigned word)
 		}
 	}
 	return true;
+}
+
+bool DeadFrom(const ShaderCode& code, uint32_t from, unsigned word)
+{
+	std::set<uint32_t> started;
+	return DeadFromChecked(code, from, word, &started);
 }
 
 bool LabelInRange(const ShaderCode& code, uint32_t first_pc, uint32_t last_pc, uint32_t except_src)
@@ -136,14 +166,16 @@ struct Waterfall
 //   v_readfirstlane_b32 s, index
 //   v_cmpx_eq_u32 s, index          ; EXEC = remaining lanes with this index
 //   s_mov_b32 m0, s
-//   v_movrels_b32 dst, base ...     ; dst = VGPR[base + m0]
+//   v_movrels_b32 dst, base ...     ; dst = VGPR[base + m0], or
+//   v_movreld_b32 base, src ...     ; VGPR[base + m0] = src
 //   s_andn2_b64 rest, rest, exec
 //   s_mov_b64 exec, rest
 //   s_cbranch_scc1 head
 //
-// Every lane active at the head ends with dst = VGPR[base + its own index], however the lanes are grouped into waves,
-// and the loop leaves REST and EXEC empty and SCC clear. Only S and M0 keep a value chosen by one lane, so both must be
-// dead after the loop.
+// Every lane active at the head ends with the moves applied at its own index, however the lanes are grouped into
+// waves, and the loop leaves REST and EXEC empty and SCC clear. A lane's index is read once, before its moves, so no
+// move may follow one that can overwrite it. Only S and M0 keep a value chosen by one lane, so both must be dead after
+// the loop.
 bool MatchWaterfall(const ShaderCode& code, uint32_t head, Waterfall* out)
 {
 	const auto& instructions = code.GetInstructions();
@@ -169,15 +201,20 @@ bool MatchWaterfall(const ShaderCode& code, uint32_t head, Waterfall* out)
 		return false;
 	}
 
-	uint32_t next = head + 3u;
-	for (const ShaderInstruction* move = at(next); move != nullptr && move->type == Type::VMovrelsB32; move = at(++next))
+	uint32_t next          = head + 3u;
+	bool     index_written = false;
+	for (const ShaderInstruction* move = at(next);
+	     move != nullptr && (move->type == Type::VMovrelsB32 || move->type == Type::VMovreldB32); move = at(++next))
 	{
-		if (move->src_num != 1 || move->vop_sdwa || move->dst.type != Operand::Vgpr || move->dst.size != 1 ||
+		if (index_written || move->src_num != 1 || move->vop_sdwa || move->dst.type != Operand::Vgpr || move->dst.size != 1 ||
 		    move->src[0].type != Operand::Vgpr || move->src[0].size != 1 || move->src[0].dpp || move->src[0].negate ||
-		    move->src[0].absolute || move->dst.clamp || move->dst.register_id == index.register_id)
+		    move->src[0].absolute || move->dst.clamp)
 		{
 			return false;
 		}
+		// A destination-relative move reaches every VGPR from its base up.
+		index_written = move->type == Type::VMovrelsB32 ? move->dst.register_id == index.register_id
+		                                                : move->dst.register_id <= index.register_id;
 	}
 	const auto* andn2  = at(next);
 	const auto* exec   = at(next + 1u);
@@ -257,9 +294,12 @@ void ShaderLowerWaterfallMoves(ShaderCode* code)
 		Waterfall loop;
 		if (!MatchWaterfall(*code, head, &loop)) { continue; }
 		const uint32_t branch_pc = instructions.At(loop.branch).pc;
-		for (auto& label: code->GetLabels())
+		for (auto* labels: {&code->GetLabels(), &code->GetIndirectLabels()})
 		{
-			if (label.GetSrc() == branch_pc) { label.Disable(); }
+			for (auto& label: *labels)
+			{
+				if (label.GetSrc() == branch_pc) { label.Disable(); }
+			}
 		}
 		for (uint32_t move = loop.head + 3u; move < loop.moves_end; ++move)
 		{

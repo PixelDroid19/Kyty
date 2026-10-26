@@ -373,6 +373,7 @@ static bool ShaderInstructionIsPureLaneAlu(const ShaderInstruction& inst)
 		case ShaderInstructionType::VMulF32:
 		case ShaderInstructionType::VMulHiI32:
 		case ShaderInstructionType::VMulHiU32:
+		case ShaderInstructionType::VMulI32I24:
 		case ShaderInstructionType::VMulLoI32:
 		case ShaderInstructionType::VMulLoU32:
 		case ShaderInstructionType::VMulU32U24:
@@ -3611,6 +3612,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	{
 		ShaderCollectPointerTableResources(*code, bind, user_sgpr, info, user_data->srt_size_dw, user_data_register_base, *code_flow,
 		                                   code_memo);
+		ShaderCollectConstantSamplers(*code, bind, info, user_data_register_base, code_memo);
 	}
 
 	// Gen5 metadata is advisory: some shaders address an S# descriptor directly
@@ -3967,6 +3969,27 @@ static void ClearUnreadAttribData(ShaderVertexInputInfo* info, const ShaderVerte
 	}
 }
 
+static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, const ShaderBindResources& bind);
+
+// A scalar load whose base is a pointer the program computed (VCC or an SGPR
+// outside the user-data window) has no binding-time mapping: it reads guest
+// memory at run time.
+static bool ShaderHasComputedPointerScalarLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_base,
+                                               int user_data_count)
+{
+	const auto& instructions = code.GetInstructions();
+	return std::any_of(instructions.begin(), instructions.end(),
+	                   [&](const ShaderInstruction& inst)
+	                   {
+		                   const bool computed_base =
+		                       inst.src_num >= 1 && (inst.src[0].type == ShaderOperandType::VccLo ||
+		                                             (inst.src[0].type == ShaderOperandType::Sgpr &&
+		                                              (inst.src[0].register_id < user_data_base ||
+		                                               inst.src[0].register_id + 1 >= user_data_base + user_data_count)));
+		                   return computed_base && ShaderScalarLoadNeedsGuestAddress(inst, bind);
+	                   });
+}
+
 void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
                           const GraphicsGeRawRegister* shader_stages)
 {
@@ -4080,7 +4103,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			info->bind.program_base_used   = vs_isa->HasAnyOf({ShaderInstructionType::SGetpcB64});
 			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
 			info->bind.device_address_used =
-			    ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) || ShaderHasGlobalMemoryLoad(*vs_isa);
+			    ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) || ShaderHasGlobalMemoryLoad(*vs_isa) ||
+			    ShaderHasComputedPointerScalarLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase, static_cast<int>(user_sgpr_num));
 		}
 	} else
 	{
@@ -4760,10 +4784,10 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			const auto& native = program->NativeEquivalence();
 			if (!native.supported)
 			{
-				EXIT("wave64 dispatch has no paired layout and is not wave-width independent: mode=0x%08" PRIx32
+				EXIT("wave64 dispatch has no paired layout and is not wave-width independent: cs=0x%016" PRIx64 " mode=0x%08" PRIx32
 				     " local=%ux%ux%u pc=0x%08" PRIx32 " reason=%s\n",
-				     dispatch_mode, info->threads_num[0], info->threads_num[1], info->threads_num[2], native.unsupported_pc,
-				     native.reason.c_str());
+				     regs->cs_regs.chksum, dispatch_mode, info->threads_num[0], info->threads_num[1], info->threads_num[2],
+				     native.unsupported_pc, native.reason.c_str());
 			}
 			if (!NativeEquivalenceFitsWorkgroup(native, *info))
 			{
@@ -5766,6 +5790,13 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 		ids->Add(record.consumer_pc);
 		ids->Add(static_cast<uint32_t>(record.register_id));
 		ids->Add(static_cast<uint32_t>(record.resource_index));
+	}
+
+	ids->Add(bind.constant_samplers.Size());
+	for (const auto& record: bind.constant_samplers)
+	{
+		ids->Add(record.consumer_pc);
+		ids->Add(static_cast<uint32_t>(record.sampler_index));
 	}
 
 	ids->Add(bind.redefined_descriptor_consumers.Size());

@@ -17,6 +17,7 @@
 #include <climits>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -110,6 +111,13 @@ int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const Shader
 		if (copied.consumer_pc == inst.pc && copied.sampler_index >= 0)
 		{
 			return copied.sampler_index;
+		}
+	}
+	for (const auto& constant: bind.constant_samplers)
+	{
+		if (constant.consumer_pc == inst.pc)
+		{
+			return constant.sampler_index;
 		}
 	}
 	return -1;
@@ -1240,24 +1248,17 @@ static bool ShaderMergeDynamicSLoadUse(ShaderDynamicSLoadUse* use, const ShaderD
 	return true;
 }
 
-static ShaderDynamicSLoadUse ShaderFindDynamicSLoadUse(const ShaderCode& code, uint32_t index, const ShaderInstruction& sload,
-                                                       bool follow_conditional_branches)
+static ShaderDynamicSLoadUse ShaderFindDynamicSLoadUse(const ShaderCode& code, uint32_t index, const ShaderInstruction& sload)
 {
 	const int dword_count = sload.dst.size;
 	ShaderDynamicSLoadUse use {};
 	for (uint32_t next_index = index + 1; next_index < code.GetInstructions().Size(); ++next_index)
 	{
 		const auto& next = code.GetInstructions().At(next_index);
-		const bool branch = ShaderInstructionHasStaticBranchTarget(next.type);
 		if (next.type == ShaderInstructionType::Unknown || next.type == ShaderInstructionType::SEndpgm ||
-		    next.type == ShaderInstructionType::SSetpcB64 ||
-		    (branch && (!follow_conditional_branches || next.type == ShaderInstructionType::SBranch)))
+		    next.type == ShaderInstructionType::SSetpcB64 || ShaderInstructionHasStaticBranchTarget(next.type))
 		{
 			break;
-		}
-		if (branch)
-		{
-			continue;
 		}
 
 		ShaderDynamicSLoadUse next_use {};
@@ -1314,7 +1315,7 @@ const std::vector<ShaderDynamicSLoadUse>& ShaderCodeResourceMemo::DescriptorSLoa
 		const auto& sload = code.GetInstructions().At(index);
 		if (ShaderDescriptorSLoadDwords(sload) != 0)
 		{
-			uses[index] = ShaderFindDynamicSLoadUse(code, index, sload, false);
+			uses[index] = ShaderFindDynamicSLoadUse(code, index, sload);
 		}
 	}
 	std::lock_guard<std::mutex> lock(m_mutex);
@@ -1569,7 +1570,7 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 			continue;
 		}
 
-		const auto use = memo_uses != nullptr ? (*memo_uses)[index] : ShaderFindDynamicSLoadUse(code, index, sload, false);
+		const auto use = memo_uses != nullptr ? (*memo_uses)[index] : ShaderFindDynamicSLoadUse(code, index, sload);
 		if (!use.valid || !use.found || !ShaderDescriptorLoadInPass(use, pass))
 		{
 			continue;
@@ -1617,37 +1618,74 @@ static bool ShaderLoadsThroughSrtPointer(const ShaderInstruction& sload, const s
 	return entry_values.test(static_cast<size_t>(reg)) && entry_values.test(static_cast<size_t>(reg + 1));
 }
 
-struct ShaderDescriptorBlock
-{
-	ShaderInstruction     load;
-	int                   first_dword = 0;
-	ShaderDynamicSLoadUse use;
-};
+static ShaderDynamicSLoadUse ShaderFindReachingSLoadUse(const ShaderCode& code, const ShaderControlFlowGraph& cfg, uint32_t load_index,
+                                                        const ShaderInstruction& block);
 
 // Splits the destination of a pointer-table load into descriptors with
 // consumers: a block used as one T# or S# stays whole, an 8-dword block may
 // also hold two S#, and a 16-dword load is two 8-dword halves. Each block is
-// analysed as its own load of the same PC.
-static bool ShaderPartitionDescriptorLoad(const ShaderCode& code, uint32_t index, const ShaderInstruction& sload, int first_dword,
-                                          int dwords, std::vector<ShaderDescriptorBlock>* blocks)
+// analysed as its own load of the same PC, over every CFG path.
+static bool ShaderPartitionDescriptorLoad(const ShaderCode& code, const ShaderControlFlowGraph& cfg, uint32_t index,
+                                          const ShaderInstruction& sload, int first_dword, int dwords,
+                                          std::vector<ShaderDescriptorBlock>* blocks)
 {
 	if (dwords == 16)
 	{
-		return ShaderPartitionDescriptorLoad(code, index, sload, first_dword, 8, blocks) &&
-		       ShaderPartitionDescriptorLoad(code, index, sload, first_dword + 8, 8, blocks);
+		return ShaderPartitionDescriptorLoad(code, cfg, index, sload, first_dword, 8, blocks) &&
+		       ShaderPartitionDescriptorLoad(code, cfg, index, sload, first_dword + 8, 8, blocks);
 	}
 	ShaderInstruction block = sload;
 	block.type              = dwords == 4 ? ShaderInstructionType::SLoadDwordx4 : ShaderInstructionType::SLoadDwordx8;
 	block.dst.register_id   = sload.dst.register_id + first_dword;
 	block.dst.size          = dwords;
-	const auto use          = ShaderFindDynamicSLoadUse(code, index, block, true);
-	if (use.valid && use.found && use.kind != ShaderDynamicSLoadResourceKind::StorageBuffer)
+	const auto use          = ShaderFindReachingSLoadUse(code, cfg, index, block);
+	// A V# that is only read stays a runtime descriptor read through guest
+	// device addressing; a written one needs a binding, which that path lacks.
+	const bool bound_kind = use.kind != ShaderDynamicSLoadResourceKind::StorageBuffer || use.storage_usage == ShaderStorageUsage::ReadWrite;
+	if (use.valid && use.found && bound_kind)
 	{
 		blocks->push_back({block, first_dword, use});
 		return true;
 	}
-	return dwords == 8 && ShaderPartitionDescriptorLoad(code, index, sload, first_dword, 4, blocks) &&
-	       ShaderPartitionDescriptorLoad(code, index, sload, first_dword + 4, 4, blocks);
+	return dwords == 8 && ShaderPartitionDescriptorLoad(code, cfg, index, sload, first_dword, 4, blocks) &&
+	       ShaderPartitionDescriptorLoad(code, cfg, index, sload, first_dword + 4, 4, blocks);
+}
+
+static std::vector<ShaderDescriptorBlock> ShaderPartitionTableLoad(const ShaderCode& code, const ShaderControlFlowGraph& cfg,
+                                                                   uint32_t index)
+{
+	std::vector<ShaderDescriptorBlock> blocks;
+	const auto&                        sload = code.GetInstructions().At(index);
+	if (!cfg.Structurable() || !ShaderPartitionDescriptorLoad(code, cfg, index, sload, 0, ShaderTableSLoadDwords(sload), &blocks))
+	{
+		blocks.clear();
+	}
+	return blocks;
+}
+
+const std::vector<ShaderDescriptorBlock>& ShaderCodeResourceMemo::TableLoadBlocks(const ShaderCode& code, uint32_t index) const
+{
+	std::shared_ptr<const ShaderControlFlowGraph> cfg;
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		const auto                  found = m_table_load_blocks.find(index);
+		if (found != m_table_load_blocks.end())
+		{
+			return found->second;
+		}
+		cfg = m_cfg;
+	}
+	if (cfg == nullptr)
+	{
+		cfg = std::make_shared<const ShaderControlFlowGraph>(ShaderBuildControlFlowGraph(code));
+	}
+	auto                        blocks = ShaderPartitionTableLoad(code, *cfg, index);
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (m_cfg == nullptr)
+	{
+		m_cfg = cfg;
+	}
+	return m_table_load_blocks.emplace(index, std::move(blocks)).first->second;
 }
 
 // The dwords of a nested table that its loads and copied T#s read, or with
@@ -1833,12 +1871,17 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 		const auto& sload       = code.GetInstructions().At(index);
 		const int   dword_count = ShaderTableSLoadDwords(sload);
 		int         offset_dw   = 0;
-		std::vector<ShaderDescriptorBlock> blocks;
 		if (dword_count == 0 || !ShaderLoadsThroughSrtPointer(sload, entry_values[index], srt_size_dw, user_data_register_base, *bind) ||
 		    !ShaderGetSmemConstantDwordOffset(sload, &offset_dw) || offset_dw < 0 ||
 		    static_cast<uint32_t>(dword_count) > kMaxSrtPointerTableDwords ||
-		    static_cast<uint32_t>(offset_dw) > kMaxSrtPointerTableDwords - static_cast<uint32_t>(dword_count) ||
-		    !ShaderPartitionDescriptorLoad(code, index, sload, 0, dword_count, &blocks))
+		    static_cast<uint32_t>(offset_dw) > kMaxSrtPointerTableDwords - static_cast<uint32_t>(dword_count))
+		{
+			continue;
+		}
+		const auto direct_blocks =
+		    memo == nullptr ? ShaderPartitionTableLoad(code, ShaderBuildControlFlowGraph(code), index) : std::vector<ShaderDescriptorBlock> {};
+		const auto& blocks = memo != nullptr ? memo->TableLoadBlocks(code, index) : direct_blocks;
+		if (blocks.empty())
 		{
 			continue;
 		}
@@ -1869,6 +1912,229 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 			}
 		}
 	}
+	}
+}
+
+// The value a scalar instruction writes into its single destination SGPR when
+// every source is a constant.
+static bool ShaderConstantSgprWrite(const ShaderInstruction& inst, uint32_t* value)
+{
+	const auto constant = [](const ShaderOperand& operand)
+	{
+		return (operand.type == ShaderOperandType::IntegerInlineConstant || operand.type == ShaderOperandType::LiteralConstant) &&
+		       operand.multiplier == 1.0f && !operand.absolute && !operand.negate;
+	};
+	if (inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != 1)
+	{
+		return false;
+	}
+	if ((inst.type == ShaderInstructionType::SMovB32 || inst.type == ShaderInstructionType::SMovkI32) && inst.src_num == 1 &&
+	    constant(inst.src[0]))
+	{
+		*value = inst.src[0].constant.u;
+		return true;
+	}
+	if (inst.type == ShaderInstructionType::SBfmB32 && inst.src_num == 2 && constant(inst.src[0]) && constant(inst.src[1]))
+	{
+		// RDNA2 ISA: D.u = ((1 << S0.u[4:0]) - 1) << S1.u[4:0].
+		*value = ((uint32_t {1} << (inst.src[0].constant.u & 31u)) - 1u) << (inst.src[1].constant.u & 31u);
+		return true;
+	}
+	return false;
+}
+
+struct ShaderConstantSgprState
+{
+	std::array<uint32_t, kShaderScalarLivenessSgprs> values {};
+	std::bitset<kShaderScalarLivenessSgprs>          known;
+	bool                                             reachable = false;
+	bool                                             queued    = false;
+};
+
+static void ShaderForgetSgprs(const ShaderOperand& operand, ShaderConstantSgprState* state)
+{
+	if (operand.type != ShaderOperandType::Sgpr)
+	{
+		return;
+	}
+	for (int reg = std::max(operand.register_id, 0); reg < operand.register_id + operand.size && reg < kShaderScalarLivenessSgprs; ++reg)
+	{
+		state->known.reset(static_cast<size_t>(reg));
+	}
+}
+
+static void ShaderMergeConstantSgprs(uint32_t index, const ShaderConstantSgprState& outgoing, std::vector<ShaderConstantSgprState>* states,
+                                     std::vector<uint32_t>* work)
+{
+	auto& state = (*states)[index];
+	auto  known = outgoing.known;
+	if (state.reachable)
+	{
+		known &= state.known;
+		for (int reg = 0; reg < kShaderScalarLivenessSgprs; ++reg)
+		{
+			if (known.test(static_cast<size_t>(reg)) && state.values[static_cast<size_t>(reg)] != outgoing.values[static_cast<size_t>(reg)])
+			{
+				known.reset(static_cast<size_t>(reg));
+			}
+		}
+	}
+	const bool changed = !state.reachable || known != state.known;
+	state.values    = outgoing.values;
+	state.known     = known;
+	state.reachable = true;
+	if (changed && !state.queued)
+	{
+		state.queued = true;
+		work->push_back(index);
+	}
+}
+
+// A forward flow of the SGPR words constant scalar writes leave; joins keep a
+// word only when every incoming path agrees on it.
+std::vector<ShaderConstantSamplerRead> ShaderFindConstantSamplerReads(const ShaderCode& code)
+{
+	std::vector<ShaderConstantSamplerRead> reads;
+	const auto&                            instructions = code.GetInstructions();
+	const auto                             indices      = ShaderIndexInstructions(code);
+	if (indices.image_samplers.empty() || instructions.Size() == 0)
+	{
+		return reads;
+	}
+	std::unordered_map<uint32_t, uint32_t> by_pc;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		by_pc.emplace(instructions.At(index).pc, index);
+	}
+	std::vector<ShaderConstantSgprState> states(instructions.Size());
+	std::vector<uint32_t>                work;
+	ShaderMergeConstantSgprs(0, ShaderConstantSgprState {}, &states, &work);
+	while (!work.empty())
+	{
+		const uint32_t index = work.back();
+		work.pop_back();
+		states[index].queued = false;
+		const auto& inst     = instructions.At(index);
+		// Calls and computed jumps leave the static flow: no word is proven.
+		if (inst.type == ShaderInstructionType::SSetpcB64 || inst.type == ShaderInstructionType::SSwappcB64)
+		{
+			return {};
+		}
+		auto outgoing = states[index];
+		ShaderForgetSgprs(inst.dst, &outgoing);
+		ShaderForgetSgprs(inst.dst2, &outgoing);
+		uint32_t value = 0;
+		if (ShaderConstantSgprWrite(inst, &value))
+		{
+			outgoing.values[static_cast<size_t>(inst.dst.register_id)] = value;
+			outgoing.known.set(static_cast<size_t>(inst.dst.register_id));
+		}
+		if (ShaderInstructionHasStaticBranchTarget(inst.type))
+		{
+			const auto target = by_pc.find(ShaderLabel(inst).GetDst());
+			if (target == by_pc.end())
+			{
+				return {};
+			}
+			ShaderMergeConstantSgprs(target->second, outgoing, &states, &work);
+			if (inst.type == ShaderInstructionType::SBranch)
+			{
+				continue;
+			}
+		}
+		if (inst.type != ShaderInstructionType::SEndpgm && index + 1u < instructions.Size())
+		{
+			ShaderMergeConstantSgprs(index + 1u, outgoing, &states, &work);
+		}
+	}
+	for (const uint32_t index: indices.image_samplers)
+	{
+		const auto& inst  = instructions.At(index);
+		const auto& state = states[index];
+		const int   first = inst.src[2].register_id;
+		if (!state.reachable || inst.src_num < 3 || inst.src[2].type != ShaderOperandType::Sgpr || inst.src[2].size != 4 || first < 0 ||
+		    first + 4 > kShaderScalarLivenessSgprs)
+		{
+			continue;
+		}
+		ShaderConstantSamplerRead read {index, {}};
+		bool                      known = true;
+		for (int field = 0; field < 4 && known; ++field)
+		{
+			known                     = state.known.test(static_cast<size_t>(first + field));
+			read.resource.fields[field] = state.values[static_cast<size_t>(first + field)];
+		}
+		if (known)
+		{
+			reads.push_back(read);
+		}
+	}
+	return reads;
+}
+
+const std::vector<ShaderConstantSamplerRead>& ShaderCodeResourceMemo::ConstantSamplerReads(const ShaderCode& code) const
+{
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_constant_sampler_reads_ready)
+		{
+			return m_constant_sampler_reads;
+		}
+	}
+	auto                        reads = ShaderFindConstantSamplerReads(code);
+	std::lock_guard<std::mutex> lock(m_mutex);
+	if (!m_constant_sampler_reads_ready)
+	{
+		m_constant_sampler_reads       = std::move(reads);
+		m_constant_sampler_reads_ready = true;
+	}
+	return m_constant_sampler_reads;
+}
+
+void ShaderCollectConstantSamplers(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info,
+                                   int user_data_register_base, const ShaderCodeResourceMemo* memo)
+{
+	EXIT_IF(bind == nullptr || info == nullptr);
+	bind->constant_samplers.Clear();
+	const auto  direct = memo == nullptr ? ShaderFindConstantSamplerReads(code) : std::vector<ShaderConstantSamplerRead> {};
+	const auto& reads  = memo != nullptr ? memo->ConstantSamplerReads(code) : direct;
+	for (const auto& read: reads)
+	{
+		const auto& inst     = code.GetInstructions().At(read.instruction);
+		const auto& resource = read.resource;
+		if (ShaderFindImageSamplerDescriptor(inst, *bind, user_data_register_base) >= 0)
+		{
+			continue;
+		}
+		const auto operation     = ShaderInstructionSamplerOperation(inst.type);
+		int        sampler_index = -1;
+		for (int index = 0; index < bind->samplers.samplers_num; ++index)
+		{
+			if (bind->samplers.dynamic_sload[index] && ShaderSamplerResourcesEqual(bind->samplers.samplers[index], resource) &&
+			    bind->samplers.operations[index] == operation)
+			{
+				sampler_index = index;
+				break;
+			}
+		}
+		if (sampler_index < 0)
+		{
+			if (bind->samplers.samplers_num >= ShaderSamplerResources::RES_MAX)
+			{
+				EXIT("shader sampler resource capacity exceeded by a constant sampler: pc=0x%08" PRIx32 "\n", inst.pc);
+			}
+			// The words live in the program, not in user data: bind them like a
+			// loaded S#, from the recorded fields.
+			sampler_index                                = bind->samplers.samplers_num++;
+			bind->samplers.samplers[sampler_index]       = resource;
+			bind->samplers.operations[sampler_index]     = operation;
+			bind->samplers.slots[sampler_index]          = -1;
+			bind->samplers.start_register[sampler_index] = inst.src[2].register_id - user_data_register_base;
+			bind->samplers.extended[sampler_index]       = false;
+			bind->samplers.dynamic_sload[sampler_index]  = true;
+			info->samplers++;
+		}
+		bind->constant_samplers.Add(ShaderConstantSampler {inst.pc, sampler_index});
 	}
 }
 
