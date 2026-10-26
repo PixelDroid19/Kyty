@@ -12,6 +12,7 @@ enum class SettingsIcon
 	Shaders,
 	Logs,
 	Emulator,
+	Controls,
 	Interface
 };
 

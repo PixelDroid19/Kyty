@@ -7,6 +7,9 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
+#include <limits>
+
 // Poll rate while a controller is attached and the launcher is in use.
 constexpr int ACTIVE_INTERVAL_MS = 16;
 // Poll rate otherwise, enough to notice a controller being plugged in.
@@ -39,6 +42,20 @@ constexpr ButtonBinding BUTTONS[] = {
 
 // Direction order matches the arrays in GamepadInput.
 constexpr int DIRECTION_KEYS[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+
+static_assert(SDL_GAMEPAD_BUTTON_COUNT <= 32, "capture keeps one bit per button");
+
+QString GuidOf(SDL_JoystickID id)
+{
+	char text[33] = {};
+	SDL_GUIDToString(SDL_GetGamepadGUIDForID(id), text, sizeof(text));
+	return QString::fromLatin1(text);
+}
+
+double Axis(SDL_Gamepad* pad, SDL_GamepadAxis axis)
+{
+	return pad != nullptr ? std::max(-1.0, SDL_GetGamepadAxis(pad, axis) / 32767.0) : 0.0;
+}
 
 } // namespace
 
@@ -110,22 +127,40 @@ void GamepadInput::Poll()
 	SDL_Event event;
 	while (SDL_PollEvent(&event))
 	{
-		if (event.type == SDL_EVENT_GAMEPAD_ADDED && m_pad == nullptr)
+		if (event.type != SDL_EVENT_GAMEPAD_ADDED && event.type != SDL_EVENT_GAMEPAD_REMOVED)
 		{
-			OpenController(event.gdevice.which);
-		} else if (event.type == SDL_EVENT_GAMEPAD_REMOVED && m_pad != nullptr && !SDL_GamepadConnected(m_pad))
+			continue;
+		}
+		if (m_pad != nullptr && !SDL_GamepadConnected(m_pad))
 		{
 			CloseController();
 		}
+		// A new controller replaces the open one only when it is the preferred one and the open one is not.
+		const bool better = event.type == SDL_EVENT_GAMEPAD_ADDED && m_pad != nullptr && !m_preferred.isEmpty() &&
+		                    SameDevice(GuidOf(event.gdevice.which), m_preferred) &&
+		                    !SameDevice(GuidOf(SDL_GetGamepadID(m_pad)), m_preferred);
+		if (better)
+		{
+			CloseController();
+		}
+		if (m_pad == nullptr)
+		{
+			OpenPreferred();
+		}
+		emit DevicesChanged();
 	}
 
 	if (m_pad == nullptr)
 	{
 		return;
 	}
-
 	// Button and stick state is tracked even when input is not delivered, so a press held across a focus change does not fire late.
-	const bool deliver = m_window != nullptr && m_window->isActive();
+	// Decided before the capture, which may end in this poll with the captured button still down.
+	const bool deliver = m_window != nullptr && m_window->isActive() && !m_capturing;
+	if (m_capturing)
+	{
+		PollCapture();
+	}
 	const auto now     = m_clock.elapsed();
 
 	for (int i = 0; i < BUTTON_COUNT; i++)
@@ -141,8 +176,8 @@ void GamepadInput::Poll()
 		m_button_down[i] = down;
 	}
 
-	const double x = SDL_GetGamepadAxis(m_pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0;
-	const double y = SDL_GetGamepadAxis(m_pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0;
+	const double x = m_stick_navigation ? SDL_GetGamepadAxis(m_pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0 : 0;
+	const double y = m_stick_navigation ? SDL_GetGamepadAxis(m_pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0 : 0;
 
 	const bool directions[DIRECTION_COUNT] = {
 	    SDL_GetGamepadButton(m_pad, SDL_GAMEPAD_BUTTON_DPAD_UP) || y < -STICK_DEADZONE,
@@ -160,7 +195,7 @@ void GamepadInput::Poll()
 		}
 		if (!m_direction_down[d])
 		{
-			m_next_repeat[d] = now + REPEAT_DELAY_MS;
+			m_next_repeat[d] = deliver ? now + REPEAT_DELAY_MS : std::numeric_limits<qint64>::max();
 			if (deliver)
 			{
 				Tap(DIRECTION_KEYS[d]);
@@ -183,7 +218,8 @@ void GamepadInput::PollBack(bool down, bool was_down, qint64 now, bool deliver)
 	if (down && !was_down)
 	{
 		m_back_down_at = now;
-		m_back_held    = false;
+		// A press that was not delivered, such as a captured one, does not go back when it is released.
+		m_back_held = !deliver;
 		return;
 	}
 	if (down && !m_back_held && now - m_back_down_at >= HOLD_MS)
@@ -251,6 +287,110 @@ bool GamepadInput::Charging() const
 	return m_pad != nullptr && SDL_GetGamepadPowerInfo(m_pad, nullptr) == SDL_POWERSTATE_CHARGING;
 }
 
+QVector<GamepadInput::Device> GamepadInput::Devices() const
+{
+	QVector<Device> devices;
+	if (!m_sdl_ready)
+	{
+		return devices;
+	}
+	int   count = 0;
+	auto* ids   = SDL_GetGamepads(&count);
+	for (int i = 0; i < count; i++)
+	{
+		const char* name = SDL_GetGamepadNameForID(ids[i]);
+		devices << Device {GuidOf(ids[i]), name != nullptr ? QString::fromUtf8(name) : QStringLiteral("Controller")};
+	}
+	SDL_free(ids);
+	return devices;
+}
+
+void GamepadInput::SetPreferredDevice(const QString& guid)
+{
+	if (guid == m_preferred)
+	{
+		return;
+	}
+	m_preferred = guid;
+	if (m_pad != nullptr && (guid.isEmpty() || SameDevice(GuidOf(SDL_GetGamepadID(m_pad)), guid)))
+	{
+		return;
+	}
+	const auto devices = Devices();
+	const bool present = std::any_of(devices.begin(), devices.end(), [&](const Device& device) { return SameDevice(device.guid, guid); });
+	if (m_pad == nullptr || present)
+	{
+		CloseController();
+		OpenPreferred();
+	}
+}
+
+QPointF GamepadInput::StickPosition(bool right) const
+{
+	return {Axis(m_pad, right ? SDL_GAMEPAD_AXIS_RIGHTX : SDL_GAMEPAD_AXIS_LEFTX),
+	        Axis(m_pad, right ? SDL_GAMEPAD_AXIS_RIGHTY : SDL_GAMEPAD_AXIS_LEFTY)};
+}
+
+void GamepadInput::BeginCapture()
+{
+	m_capturing    = true;
+	m_capture_down = 0;
+	// Buttons already held, such as the one that opened the capture, are not captured.
+	for (int b = 0; m_pad != nullptr && b < SDL_GAMEPAD_BUTTON_COUNT; b++)
+	{
+		m_capture_down |= SDL_GetGamepadButton(m_pad, static_cast<SDL_GamepadButton>(b)) ? 1u << b : 0u;
+	}
+}
+
+void GamepadInput::EndCapture()
+{
+	m_capturing = false;
+	// A direction held since before the capture must not start repeating now.
+	for (int d = 0; d < DIRECTION_COUNT; d++)
+	{
+		if (m_direction_down[d])
+		{
+			m_next_repeat[d] = std::numeric_limits<qint64>::max();
+		}
+	}
+}
+
+void GamepadInput::PollCapture()
+{
+	quint32 down = 0;
+	for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++)
+	{
+		down |= SDL_GetGamepadButton(m_pad, static_cast<SDL_GamepadButton>(b)) ? 1u << b : 0u;
+	}
+	const quint32 pressed = down & ~m_capture_down;
+	m_capture_down        = down;
+	for (int b = 0; pressed != 0 && b < SDL_GAMEPAD_BUTTON_COUNT; b++)
+	{
+		const char* name = (pressed & (1u << b)) != 0 ? SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(b)) : nullptr;
+		if (name != nullptr)
+		{
+			emit ButtonCaptured(QString::fromLatin1(name));
+			return;
+		}
+	}
+}
+
+bool GamepadInput::SameDevice(const QString& a, const QString& b)
+{
+	if (a.size() != b.size())
+	{
+		return false;
+	}
+	for (int i = 0; i < a.size(); i++)
+	{
+		if ((i < 4 || i >= 8) && a.at(i).toLower() != b.at(i).toLower())
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 void GamepadInput::Tap(int key) const
 {
 	if (m_window == nullptr)
@@ -272,6 +412,26 @@ void GamepadInput::OpenController(quint32 joystick_id)
 	m_name           = name != nullptr ? QString::fromUtf8(name) : QStringLiteral("Controller");
 	UpdateInterval();
 	emit ControllerChanged(m_name);
+}
+
+void GamepadInput::OpenPreferred()
+{
+	int   count = 0;
+	auto* ids   = SDL_GetGamepads(&count);
+	int   pick  = count > 0 ? 0 : -1;
+	for (int i = 0; i < count && !m_preferred.isEmpty(); i++)
+	{
+		if (SameDevice(GuidOf(ids[i]), m_preferred))
+		{
+			pick = i;
+			break;
+		}
+	}
+	if (pick >= 0)
+	{
+		OpenController(ids[pick]);
+	}
+	SDL_free(ids);
 }
 
 void GamepadInput::CloseController()

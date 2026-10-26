@@ -7,6 +7,12 @@ bool Is(const QVariantMap& values, const char* key, const char* value)
 	return values.value(key).toString() == QLatin1String(value);
 }
 
+// Default is the emulator's own layout, and a damaged profile has nothing to edit: both show only the profile list.
+bool Editable(const QVariantMap& values)
+{
+	return !Is(values, "input_profile", "Default") && values.value("profile_error").toString().isEmpty();
+}
+
 const QVector<EditorField> GAME_FIELDS = {
     {"name", QT_TRANSLATE_NOOP("EditorPageItem", "Name"), FieldType::Text, nullptr, false, nullptr,
 	 QT_TRANSLATE_NOOP("EditorPageItem", "General")},
@@ -100,6 +106,54 @@ const QVector<EditorField> INTERFACE_FIELDS = {
 	 [](const QVariantMap& f) { return f.value("ui_sounds").toBool(); }},
 };
 
+const QVector<EditorField> CONTROL_FIELDS = {
+    {"input_profile", QT_TRANSLATE_NOOP("EditorPageItem", "Profile"), FieldType::Choice, "input_profile", false, nullptr,
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Profile")},
+    {"profile_name", QT_TRANSLATE_NOOP("EditorPageItem", "Profile name"), FieldType::Text, nullptr, false, Editable},
+    {"input_device", QT_TRANSLATE_NOOP("EditorPageItem", "Controller"), FieldType::Choice, "input_device", false, Editable,
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Controller")},
+    {"left_stick", QT_TRANSLATE_NOOP("EditorPageItem", "Left stick"), FieldType::Stick},
+    {"left_deadzone", QT_TRANSLATE_NOOP("EditorPageItem", "Left stick dead zone"), FieldType::Choice, "deadzone", false, Editable},
+    {"left_invert_x", QT_TRANSLATE_NOOP("EditorPageItem", "Invert left stick across"), FieldType::Toggle, nullptr, false, Editable},
+    {"left_invert_y", QT_TRANSLATE_NOOP("EditorPageItem", "Invert left stick up and down"), FieldType::Toggle, nullptr, false, Editable},
+    {"right_stick", QT_TRANSLATE_NOOP("EditorPageItem", "Right stick"), FieldType::Stick},
+    {"right_deadzone", QT_TRANSLATE_NOOP("EditorPageItem", "Right stick dead zone"), FieldType::Choice, "deadzone", false, Editable},
+    {"right_invert_x", QT_TRANSLATE_NOOP("EditorPageItem", "Invert right stick across"), FieldType::Toggle, nullptr, false, Editable},
+    {"right_invert_y", QT_TRANSLATE_NOOP("EditorPageItem", "Invert right stick up and down"), FieldType::Toggle, nullptr, false, Editable},
+    {"trigger_deadzone", QT_TRANSLATE_NOOP("EditorPageItem", "Trigger press point"), FieldType::Choice, "deadzone", false, Editable},
+    {"mouse_look", QT_TRANSLATE_NOOP("EditorPageItem", "Look with the mouse"), FieldType::Toggle, nullptr, false, Editable,
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Mouse")},
+    {"mouse_sensitivity", QT_TRANSLATE_NOOP("EditorPageItem", "Mouse sensitivity"), FieldType::Choice, "sensitivity", false,
+	 [](const QVariantMap& f) { return Editable(f) && f.value("mouse_look").toBool(); }},
+    {"mouse_invert_y", QT_TRANSLATE_NOOP("EditorPageItem", "Invert mouse up and down"), FieldType::Toggle, nullptr, false,
+	 [](const QVariantMap& f) { return Editable(f) && f.value("mouse_look").toBool(); }},
+    {"bind.cross", QT_TRANSLATE_NOOP("EditorPageItem", "✕ Cross"), FieldType::Binding, nullptr, false, Editable,
+	 QT_TRANSLATE_NOOP("EditorPageItem", "Buttons")},
+    {"bind.circle", QT_TRANSLATE_NOOP("EditorPageItem", "○ Circle"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.square", QT_TRANSLATE_NOOP("EditorPageItem", "□ Square"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.triangle", QT_TRANSLATE_NOOP("EditorPageItem", "△ Triangle"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.up", QT_TRANSLATE_NOOP("EditorPageItem", "D-pad up"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.down", QT_TRANSLATE_NOOP("EditorPageItem", "D-pad down"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.left", QT_TRANSLATE_NOOP("EditorPageItem", "D-pad left"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.right", QT_TRANSLATE_NOOP("EditorPageItem", "D-pad right"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.l1", QT_TRANSLATE_NOOP("EditorPageItem", "L1"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.r1", QT_TRANSLATE_NOOP("EditorPageItem", "R1"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.l2", QT_TRANSLATE_NOOP("EditorPageItem", "L2"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.r2", QT_TRANSLATE_NOOP("EditorPageItem", "R2"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.l3", QT_TRANSLATE_NOOP("EditorPageItem", "L3"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.r3", QT_TRANSLATE_NOOP("EditorPageItem", "R3"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.options", QT_TRANSLATE_NOOP("EditorPageItem", "Options"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.touchpad", QT_TRANSLATE_NOOP("EditorPageItem", "Touchpad"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.left-stick-left", QT_TRANSLATE_NOOP("EditorPageItem", "Left stick left"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.left-stick-right", QT_TRANSLATE_NOOP("EditorPageItem", "Left stick right"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.left-stick-up", QT_TRANSLATE_NOOP("EditorPageItem", "Left stick up"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.left-stick-down", QT_TRANSLATE_NOOP("EditorPageItem", "Left stick down"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.right-stick-left", QT_TRANSLATE_NOOP("EditorPageItem", "Right stick left"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.right-stick-right", QT_TRANSLATE_NOOP("EditorPageItem", "Right stick right"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.right-stick-up", QT_TRANSLATE_NOOP("EditorPageItem", "Right stick up"), FieldType::Binding, nullptr, false, Editable},
+    {"bind.right-stick-down", QT_TRANSLATE_NOOP("EditorPageItem", "Right stick down"), FieldType::Binding, nullptr, false, Editable},
+};
+
 struct Help
 {
 	const char* key;
@@ -134,6 +188,13 @@ const Help HELP[] = {
     {"start_on", QT_TRANSLATE_NOOP("EditorPageItem", "The last game played opens on its page, ready to continue.")},
     {"layout", QT_TRANSLATE_NOOP("EditorPageItem", "Console puts the pages in tabs on top and the games in one row, the selected game's page below it. An add-on theme may choose the layout.")},
     {"ui_sounds", QT_TRANSLATE_NOOP("EditorPageItem", "Short sounds when you move, select, go back and start a game.")},
+    {"input_profile", QT_TRANSLATE_NOOP("EditorPageItem", "Every game uses the profile chosen here. Default is the emulator's own layout and can't be changed; duplicate it to make a profile of your own.")},
+    {"input_device", QT_TRANSLATE_NOOP("EditorPageItem", "Any controller uses the first one connected. Choosing one keeps the game on it while it is connected.")},
+    {"left_stick", QT_TRANSLATE_NOOP("EditorPageItem", "Move the stick: the outer dot is where it is, the filled dot what the game sees after the dead zone. On this page the left stick does not move between settings; the D-pad does.")},
+    {"left_deadzone", QT_TRANSLATE_NOOP("EditorPageItem", "Movements smaller than this are ignored, so a worn stick does not drift.")},
+    {"trigger_deadzone", QT_TRANSLATE_NOOP("EditorPageItem", "How far L2 and R2 must be pulled to count as pressed.")},
+    {"mouse_look", QT_TRANSLATE_NOOP("EditorPageItem", "In the game, F3 captures the mouse; while it is captured, moving it moves the right stick.")},
+    {"bind.cross", QT_TRANSLATE_NOOP("EditorPageItem", "Choose a box, then press the key or button to use. Delete or □ clears it.")},
 };
 
 } // namespace
@@ -161,6 +222,7 @@ const QVector<EditorField>& EditorFields(FieldGroup group)
 		case FieldGroup::Modules: return MODULE_FIELDS;
 		case FieldGroup::Program: return PROGRAM_FIELDS;
 		case FieldGroup::Interface: return INTERFACE_FIELDS;
+		case FieldGroup::Controls: return CONTROL_FIELDS;
 	}
 	return GAME_FIELDS;
 }

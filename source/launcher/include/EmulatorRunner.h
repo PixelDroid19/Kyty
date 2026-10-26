@@ -37,9 +37,9 @@ public:
 	// The file that receives the emulator's output in direct mode; empty before the first run.
 	[[nodiscard]] const QString& LogPath() const { return m_log_path; }
 
-	// Writes the run scripts for info and starts them with the given mode from RunModes().
-	// Returns an error text, or an empty string on success.
-	QString Start(const Kyty::Configuration& info, const QString& mode);
+	// Writes the run scripts for info and starts them with the given mode from RunModes(); the emulator reads its
+	// controls from the input profile file. Returns an error text, or an empty string on success.
+	QString Start(const Kyty::Configuration& info, const QString& mode, const QString& input_profile_file);
 
 	// Asks the running game to close, and kills it if it does not.
 	void Stop();

@@ -280,6 +280,47 @@ void PaintEmulator(QPainter* p, qreal t, const QColor& ink, const QColor& accent
 	}
 }
 
+// A controller whose left stick circles while one face button after another lights up.
+void PaintControls(QPainter* p, qreal t, const QColor& ink, const QColor& accent)
+{
+	QPainterPath body;
+	body.moveTo(0.3, 0.3);
+	body.lineTo(0.7, 0.3);
+	body.cubicTo(0.86, 0.3, 0.93, 0.5, 0.94, 0.66);
+	body.cubicTo(0.95, 0.8, 0.82, 0.83, 0.75, 0.73);
+	body.lineTo(0.68, 0.63);
+	body.lineTo(0.32, 0.63);
+	body.lineTo(0.25, 0.73);
+	body.cubicTo(0.18, 0.83, 0.05, 0.8, 0.06, 0.66);
+	body.cubicTo(0.07, 0.5, 0.14, 0.3, 0.3, 0.3);
+	p->setPen(Line(ink));
+	p->setBrush(Qt::NoBrush);
+	p->drawPath(body);
+
+	// The cross on the left, the sticks between, the four face buttons on the right.
+	p->drawLine(QPointF(0.2, 0.46), QPointF(0.3, 0.46));
+	p->drawLine(QPointF(0.25, 0.41), QPointF(0.25, 0.51));
+	const QPointF left_stick(0.39, 0.55);
+	const QPointF right_stick(0.61, 0.55);
+	p->drawEllipse(left_stick, 0.06, 0.06);
+	p->drawEllipse(right_stick, 0.06, 0.06);
+
+	const qreal   angle = t * 2 * M_PI / 2.4;
+	const qreal   reach = t > 0 ? 0.03 : 0;
+	const QPointF tip   = left_stick + QPointF(std::cos(angle), std::sin(angle)) * reach;
+	p->setPen(Qt::NoPen);
+	p->setBrush(accent);
+	p->drawEllipse(tip, 0.028, 0.028);
+
+	const QPointF buttons[] = {{0.75, 0.39}, {0.81, 0.45}, {0.75, 0.51}, {0.69, 0.45}};
+	const int     lit       = t > 0 ? static_cast<int>(std::fmod(t / 0.6, 4)) : -1;
+	for (int i = 0; i < 4; i++)
+	{
+		p->setBrush(i == lit ? accent : WithAlpha(ink, 0.55));
+		p->drawEllipse(buttons[i], 0.024, 0.024);
+	}
+}
+
 // A sun that turns into a crescent moon and back, its rays drawing in as the stars fade.
 void PaintInterface(QPainter* p, qreal t, const QColor& ink, const QColor& accent)
 {
@@ -341,6 +382,7 @@ QImage PaintSettingsIcon(SettingsIcon icon, int px, qreal seconds, const QColor&
 		case SettingsIcon::Shaders: PaintShaders(&painter, seconds, ink, accent); break;
 		case SettingsIcon::Logs: PaintLogs(&painter, seconds, ink, accent); break;
 		case SettingsIcon::Emulator: PaintEmulator(&painter, seconds, ink, accent); break;
+		case SettingsIcon::Controls: PaintControls(&painter, seconds, ink, accent); break;
 		case SettingsIcon::Interface: PaintInterface(&painter, seconds, ink, accent); break;
 	}
 	return image;

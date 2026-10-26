@@ -17,7 +17,9 @@ enum class FieldGroup
 	Modules,
 	// The launcher's own settings, kept apart from the emulator's.
 	Program,
-	Interface
+	Interface,
+	// The active controls profile.
+	Controls
 };
 
 [[nodiscard]] const QVector<EditorField>& EditorFields(FieldGroup group);
