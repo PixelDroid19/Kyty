@@ -2109,6 +2109,19 @@ Known approximations and debt recorded by this chain:
   Next: read `PthreadMutexPrivate::owner` of the stalled mutex (the guest
   address is stable across runs) to name the holder, and A/B the HLE-only
   merge at `7dd05019` against this tree.
+- **The HLE-only merge presents; the merged tree alone stops (A/B,
+  2026-10-26).** The same strict route on the HLE-only tree (`7dd05019`,
+  built from its own worktree) reaches `phase=interactive` and presents
+  continuously for the whole 420 s window: frame 3375 and present 3374 at
+  the last sample, with one `loading` sample in between. The merged tree
+  stops at `frame 1`/`present 0` (record above). The 16-lane work itself is
+  not the prime suspect: a 2026-10-24 run on this host presented frames 1343
+  and 2985 of the crash-site scene with the 16-lane parts. Since the HLE-only
+  tree predates the split-wave16 branch, the block is in the merge of the two
+  trees, i.e. in the kernel, libc and fault-delivery changes that came with
+  the second parent (`2a198ab0`).
+  Next: read the stalled mutex owner on the merged tree and test the merge's
+  kernel/fault commits against the merged tree.
 - **The narrowing SDWA is translated.** The hub's pixel program also uses
   `vcvt_f16_f32` with a sub-dword addressing modifier, which the half
   arithmetic refused. The ISA's SDWA fields give the contract: the source is
