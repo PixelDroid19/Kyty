@@ -1436,6 +1436,16 @@ struct FragmentTransportGeometry
 // Capture the covered lanes exactly as rasterized, shade them as guest waves in
 // compute, then resolve through the draw's fixed-function state. Indexed and
 // non-indexed draws differ only in how each band replays its geometry.
+// A pixel program with only null exports writes no color whatever the CB masks
+// say (its pipeline masks every attachment), so its targets keep their content.
+static void InvalidateDrawnColorTargets(const RenderColorInfo& color, const ShaderPixelInputInfo& ps_input_info)
+{
+	if (!ps_input_info.has_only_null_exports)
+	{
+		InvalidateMemoryObject(color);
+	}
+}
+
 void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buffer, HW::Shader* sh_ctx, VulkanFramebuffer* framebuffer,
                                          RenderColorInfo* color_info, RenderDepthInfo* depth_info,
                                          const VulkanSampleLocationState& sample_locations, const ShaderVertexInputInfo& vs_input_info,
@@ -1542,7 +1552,7 @@ void GraphicsRenderFragmentTransportDraw(uint64_t submit_id, CommandBuffer* buff
 	}
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), *color_info);
-	InvalidateMemoryObject(*color_info);
+	InvalidateDrawnColorTargets(*color_info, ps_input_info);
 	InvalidateMemoryObject(*depth_info);
 }
 
@@ -2033,7 +2043,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
 
-	InvalidateMemoryObject(color_info);
+	InvalidateDrawnColorTargets(color_info, ps_input_info);
 	InvalidateMemoryObject(depth_info);
 	DebugStatsRecordDrawCommandEmission(DrawStageElapsedNs(command_emission_start));
 }
@@ -3204,7 +3214,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
 
-	InvalidateMemoryObject(color_info);
+	InvalidateDrawnColorTargets(color_info, ps_input_info);
 	InvalidateMemoryObject(depth_info);
 	DebugStatsRecordDrawCommandEmission(DrawStageElapsedNs(command_emission_start));
 }
