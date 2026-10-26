@@ -11,6 +11,7 @@
 #include <bitset>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <tuple>
 #include <unordered_map>
@@ -117,6 +118,16 @@ struct ShaderInstructionIndices
 
 [[nodiscard]] ShaderInstructionIndices ShaderIndexInstructions(const ShaderCode& code);
 
+// An image read whose S# SGPRs hold the same constant words on every path to
+// it (an inline sampler the program assembles with scalar moves).
+struct ShaderConstantSamplerRead
+{
+	uint32_t              instruction = 0;
+	ShaderSamplerResource resource;
+};
+
+[[nodiscard]] std::vector<ShaderConstantSamplerRead> ShaderFindConstantSamplerReads(const ShaderCode& code);
+
 // Results of the resource analyses that depend only on the program code and a
 // start register or binding layout. Each memo belongs to one immutable code object and is shared
 // by every draw of that program; a null memo analyzes the code directly. Entry
@@ -170,6 +181,16 @@ struct ShaderNestedTableLoad
 };
 [[nodiscard]] std::vector<ShaderNestedTableLoad> ShaderFindNestedTableLoads(const ShaderCode& code);
 
+// A descriptor-sized part of a pointer-table load and its consumers.
+struct ShaderDescriptorBlock
+{
+	ShaderInstruction     load;
+	int                   first_dword = 0;
+	ShaderDynamicSLoadUse use;
+};
+
+struct ShaderControlFlowGraph;
+
 class ShaderCodeResourceMemo
 {
 public:
@@ -183,6 +204,10 @@ public:
 	[[nodiscard]] const ShaderEudDescriptorLoads&           EudDescriptorLoads(const ShaderCode& code) const;
 	[[nodiscard]] const ShaderInstructionIndices&           InstructionIndices(const ShaderCode& code) const;
 	[[nodiscard]] const std::vector<ShaderNestedTableLoad>& NestedTableLoads(const ShaderCode& code) const;
+	[[nodiscard]] const std::vector<ShaderConstantSamplerRead>& ConstantSamplerReads(const ShaderCode& code) const;
+	// Descriptor blocks of the pointer-table load at index; empty when a part
+	// of it has no consumer it alone defines.
+	[[nodiscard]] const std::vector<ShaderDescriptorBlock>& TableLoadBlocks(const ShaderCode& code, uint32_t index) const;
 	[[nodiscard]] ShaderDynamicSLoadSpan DynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping) const;
 	// Copy-flow reads for the binding layout of `bind` (ShaderImageCopyLayout).
 	[[nodiscard]] std::vector<ShaderImageCopyRead> ImageCopyReads(const ShaderCode& code, const ShaderBindResources& bind,
@@ -202,6 +227,10 @@ private:
 	mutable bool                                                    m_instruction_indices_ready = false;
 	mutable std::vector<ShaderNestedTableLoad>                      m_nested_table_loads;
 	mutable bool                                                    m_nested_table_loads_ready = false;
+	mutable std::vector<ShaderConstantSamplerRead>                  m_constant_sampler_reads;
+	mutable bool                                                    m_constant_sampler_reads_ready = false;
+	mutable std::shared_ptr<const ShaderControlFlowGraph>           m_cfg;
+	mutable std::map<uint32_t, std::vector<ShaderDescriptorBlock>>  m_table_load_blocks;
 	// Keyed by load PC, last consumer PC, destination register and dword count.
 	mutable std::map<std::tuple<uint32_t, uint32_t, int, int>, ShaderDynamicSLoadSpan> m_dynamic_sload_spans;
 	mutable std::map<std::vector<int32_t>, std::vector<ShaderImageCopyRead>>           m_image_copy_reads;
@@ -258,6 +287,9 @@ void ShaderCollectNestedCopiedBufferDescriptors(const ShaderCode& code, ShaderBi
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                         ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base,
                                         const ShaderScalarFlow& scalar_flow, const ShaderCodeResourceMemo* memo);
+// Binds each S# the shader assembles from constants right before its image read.
+void ShaderCollectConstantSamplers(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info,
+                                   int user_data_register_base, const ShaderCodeResourceMemo* memo);
 
 // Draw-independent analysis of the program code.
 std::vector<ShaderGsUserDataDescriptorLoad> ShaderFindGsUserDataDescriptorLoads(const ShaderCode& code);

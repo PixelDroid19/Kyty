@@ -1845,6 +1845,14 @@ struct ShaderCopiedImageDescriptor
 	int      sampler_index = -1;
 };
 
+// An S# the shader assembles from constants (an inline sampler): the image
+// read at consumer_pc samples through sampler resource sampler_index.
+struct ShaderConstantSampler
+{
+	uint32_t consumer_pc   = 0;
+	int      sampler_index = -1;
+};
+
 enum class ShaderTextureUsage
 {
 	Unknown,
@@ -2200,6 +2208,7 @@ struct ShaderBindResources
 	// s_getpc): they read through the runtime V#, never the descriptor slot.
 	Vector<uint32_t> redefined_descriptor_consumers;
 	Vector<ShaderCopiedImageDescriptor> copied_image_descriptors;
+	Vector<ShaderConstantSampler>       constant_samplers;
 };
 
 [[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,

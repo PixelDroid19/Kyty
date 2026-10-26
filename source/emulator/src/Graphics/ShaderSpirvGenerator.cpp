@@ -2341,7 +2341,7 @@ void Spirv::WriteLocalVariables()
 			}
 			for (int i = 0; i < m_bind->samplers.samplers_num; ++i)
 			{
-				if (!m_bind->samplers.extended[i] && reg >= m_bind->samplers.start_register[i] &&
+				if (!m_bind->samplers.extended[i] && !m_bind->samplers.dynamic_sload[i] && reg >= m_bind->samplers.start_register[i] &&
 				    reg < m_bind->samplers.start_register[i] + 4)
 				{
 					return true;

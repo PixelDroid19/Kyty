@@ -3587,6 +3587,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	{
 		ShaderCollectPointerTableResources(*code, bind, user_sgpr, info, user_data->srt_size_dw, user_data_register_base, *code_flow,
 		                                   code_memo);
+		ShaderCollectConstantSamplers(*code, bind, info, user_data_register_base, code_memo);
 	}
 
 	// Gen5 metadata is advisory: some shaders address an S# descriptor directly
@@ -4758,10 +4759,10 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			const auto& native = program->NativeEquivalence();
 			if (!native.supported)
 			{
-				EXIT("wave64 dispatch has no paired layout and is not wave-width independent: mode=0x%08" PRIx32
+				EXIT("wave64 dispatch has no paired layout and is not wave-width independent: cs=0x%016" PRIx64 " mode=0x%08" PRIx32
 				     " local=%ux%ux%u pc=0x%08" PRIx32 " reason=%s\n",
-				     dispatch_mode, info->threads_num[0], info->threads_num[1], info->threads_num[2], native.unsupported_pc,
-				     native.reason.c_str());
+				     regs->cs_regs.chksum, dispatch_mode, info->threads_num[0], info->threads_num[1], info->threads_num[2],
+				     native.unsupported_pc, native.reason.c_str());
 			}
 			if (!NativeEquivalenceFitsWorkgroup(native, *info))
 			{
@@ -5764,6 +5765,13 @@ static void ShaderGetBindIds(ShaderIdWriter* ids, const ShaderBindResources& bin
 		ids->Add(record.consumer_pc);
 		ids->Add(static_cast<uint32_t>(record.register_id));
 		ids->Add(static_cast<uint32_t>(record.resource_index));
+	}
+
+	ids->Add(bind.constant_samplers.Size());
+	for (const auto& record: bind.constant_samplers)
+	{
+		ids->Add(record.consumer_pc);
+		ids->Add(static_cast<uint32_t>(record.sampler_index));
 	}
 
 	ids->Add(bind.redefined_descriptor_consumers.Size());
