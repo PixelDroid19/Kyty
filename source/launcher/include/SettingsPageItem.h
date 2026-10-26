@@ -11,8 +11,10 @@
 #include <QVariantMap>
 #include <QVector>
 
+class BindingCaptureItem;
 class FieldFormItem;
 class FocusButtonItem;
+class LauncherBackend;
 class SettingsRailItem;
 class TextPadItem;
 
@@ -66,6 +68,11 @@ private:
 	void ShowCategory();
 	void Enter();
 	void Edited(const QString& key);
+	void ControlsEdited(const QString& key);
+	void UpdateStickNavigation();
+	void Captured(const QString& key, const QString& name);
+	void ProfileAction(QString (LauncherBackend::*action)(), const QString& key);
+	void DeleteActivated();
 	void SaveGlobal();
 	void RestoreDefaults();
 	void AddInfo(const QString& label, const QString& value, const QColor& color, const QColor& dot, qreal x, qreal width, qreal* y);
@@ -82,6 +89,11 @@ private:
 	FocusButtonItem*  m_search   = nullptr;
 	FocusButtonItem*  m_log      = nullptr;
 	FocusButtonItem*  m_defaults = nullptr;
+	FocusButtonItem*  m_duplicate = nullptr;
+	FocusButtonItem*  m_delete    = nullptr;
+	BindingCaptureItem* m_capture = nullptr;
+	// Delete profile was selected once and waits for the second time that confirms it.
+	bool m_confirm_delete = false;
 	// The global emulator settings, saved a moment after the last change.
 	QVariantMap               m_global;
 	QTimer                    m_save_timer;

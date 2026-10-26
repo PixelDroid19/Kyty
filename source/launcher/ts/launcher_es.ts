@@ -156,6 +156,47 @@
     </message>
 </context>
 <context>
+    <name>BindingCaptureItem</name>
+    <message>
+        <source>No controller is connected.</source>
+        <translation>No hay ningún mando conectado.</translation>
+    </message>
+    <message>
+        <source>Press a button on the controller.</source>
+        <translation>Pulsa un botón del mando.</translation>
+    </message>
+    <message>
+        <source>Press a key on the keyboard, or click a mouse button.</source>
+        <translation>Pulsa una tecla del teclado o haz clic con un botón del ratón.</translation>
+    </message>
+    <message>
+        <source>%1 is kept for the emulator&apos;s own commands.</source>
+        <translation>%1 está reservada para los comandos del emulador.</translation>
+    </message>
+    <message>
+        <source>Press a controller button for %1</source>
+        <translation>Pulsa un botón del mando para %1</translation>
+    </message>
+    <message>
+        <source>Press a key or click for %1</source>
+        <translation>Pulsa una tecla o haz clic para %1</translation>
+    </message>
+    <message numerus="yes">
+        <source>Esc on the keyboard cancels · %n s left</source>
+        <translation>
+            <numerusform>Esc en el teclado cancela · queda %n s</numerusform>
+            <numerusform>Esc en el teclado cancela · quedan %n s</numerusform>
+        </translation>
+    </message>
+    <message numerus="yes">
+        <source>Esc cancels · %n s left</source>
+        <translation>
+            <numerusform>Esc cancela · queda %n s</numerusform>
+            <numerusform>Esc cancela · quedan %n s</numerusform>
+        </translation>
+    </message>
+</context>
+<context>
     <name>EditorPageItem</name>
     <message>
         <source>Name</source>
@@ -370,6 +411,170 @@
         <translation>Ventana del launcher</translation>
     </message>
     <message>
+        <source>Profile</source>
+        <translation>Perfil</translation>
+    </message>
+    <message>
+        <source>Profile name</source>
+        <translation>Nombre del perfil</translation>
+    </message>
+    <message>
+        <source>Controller</source>
+        <translation>Mando</translation>
+    </message>
+    <message>
+        <source>Left stick</source>
+        <translation>Stick izquierdo</translation>
+    </message>
+    <message>
+        <source>Left stick dead zone</source>
+        <translation>Zona muerta del stick izquierdo</translation>
+    </message>
+    <message>
+        <source>Invert left stick across</source>
+        <translation>Invertir eje X izquierdo</translation>
+    </message>
+    <message>
+        <source>Invert left stick up and down</source>
+        <translation>Invertir eje Y izquierdo</translation>
+    </message>
+    <message>
+        <source>Right stick</source>
+        <translation>Stick derecho</translation>
+    </message>
+    <message>
+        <source>Right stick dead zone</source>
+        <translation>Zona muerta del stick derecho</translation>
+    </message>
+    <message>
+        <source>Invert right stick across</source>
+        <translation>Invertir eje X derecho</translation>
+    </message>
+    <message>
+        <source>Invert right stick up and down</source>
+        <translation>Invertir eje Y derecho</translation>
+    </message>
+    <message>
+        <source>Trigger press point</source>
+        <translation>Umbral de los gatillos</translation>
+    </message>
+    <message>
+        <source>Look with the mouse</source>
+        <translation>Mirar con el ratón</translation>
+    </message>
+    <message>
+        <source>Mouse</source>
+        <translation>Ratón</translation>
+    </message>
+    <message>
+        <source>Mouse sensitivity</source>
+        <translation>Sensibilidad del ratón</translation>
+    </message>
+    <message>
+        <source>Invert mouse up and down</source>
+        <translation>Invertir el ratón en vertical</translation>
+    </message>
+    <message>
+        <source>✕ Cross</source>
+        <translation>✕ Equis</translation>
+    </message>
+    <message>
+        <source>Buttons</source>
+        <translation>Botones</translation>
+    </message>
+    <message>
+        <source>○ Circle</source>
+        <translation>○ Círculo</translation>
+    </message>
+    <message>
+        <source>□ Square</source>
+        <translation>□ Cuadrado</translation>
+    </message>
+    <message>
+        <source>△ Triangle</source>
+        <translation>△ Triángulo</translation>
+    </message>
+    <message>
+        <source>D-pad up</source>
+        <translation>Cruceta arriba</translation>
+    </message>
+    <message>
+        <source>D-pad down</source>
+        <translation>Cruceta abajo</translation>
+    </message>
+    <message>
+        <source>D-pad left</source>
+        <translation>Cruceta izquierda</translation>
+    </message>
+    <message>
+        <source>D-pad right</source>
+        <translation>Cruceta derecha</translation>
+    </message>
+    <message>
+        <source>L1</source>
+        <translation>L1</translation>
+    </message>
+    <message>
+        <source>R1</source>
+        <translation>R1</translation>
+    </message>
+    <message>
+        <source>L2</source>
+        <translation>L2</translation>
+    </message>
+    <message>
+        <source>R2</source>
+        <translation>R2</translation>
+    </message>
+    <message>
+        <source>L3</source>
+        <translation>L3</translation>
+    </message>
+    <message>
+        <source>R3</source>
+        <translation>R3</translation>
+    </message>
+    <message>
+        <source>Options</source>
+        <translation>Options</translation>
+    </message>
+    <message>
+        <source>Touchpad</source>
+        <translation>Panel táctil</translation>
+    </message>
+    <message>
+        <source>Left stick left</source>
+        <translation>Stick izquierdo a la izquierda</translation>
+    </message>
+    <message>
+        <source>Left stick right</source>
+        <translation>Stick izquierdo a la derecha</translation>
+    </message>
+    <message>
+        <source>Left stick up</source>
+        <translation>Stick izquierdo arriba</translation>
+    </message>
+    <message>
+        <source>Left stick down</source>
+        <translation>Stick izquierdo abajo</translation>
+    </message>
+    <message>
+        <source>Right stick left</source>
+        <translation>Stick derecho a la izquierda</translation>
+    </message>
+    <message>
+        <source>Right stick right</source>
+        <translation>Stick derecho a la derecha</translation>
+    </message>
+    <message>
+        <source>Right stick up</source>
+        <translation>Stick derecho arriba</translation>
+    </message>
+    <message>
+        <source>Right stick down</source>
+        <translation>Stick derecho abajo</translation>
+    </message>
+    <message>
         <source>The folder that holds the game&apos;s files.</source>
         <translation>La carpeta que contiene los archivos del juego.</translation>
     </message>
@@ -440,6 +645,34 @@
     <message>
         <source>How the launcher opens. Full screen suits a TV.</source>
         <translation>Cómo se abre el launcher. Pantalla completa va bien en un televisor.</translation>
+    </message>
+    <message>
+        <source>Every game uses the profile chosen here. Default is the emulator&apos;s own layout and can&apos;t be changed; duplicate it to make a profile of your own.</source>
+        <translation>Todos los juegos usan el perfil elegido aquí. Default es la distribución propia del emulador y no se puede cambiar; duplícalo para crear un perfil propio.</translation>
+    </message>
+    <message>
+        <source>Any controller uses the first one connected. Choosing one keeps the game on it while it is connected.</source>
+        <translation>Cualquier mando usa el primero que se conecte. Si eliges uno, el juego lo usa mientras siga conectado.</translation>
+    </message>
+    <message>
+        <source>Move the stick: the outer dot is where it is, the filled dot what the game sees after the dead zone. On this page the left stick does not move between settings; the D-pad does.</source>
+        <translation>Mueve el stick: el punto exterior es su posición y el punto relleno lo que ve el juego tras la zona muerta. En esta página el stick izquierdo no cambia de ajuste; la cruceta sí.</translation>
+    </message>
+    <message>
+        <source>Movements smaller than this are ignored, so a worn stick does not drift.</source>
+        <translation>Los movimientos menores que esto se ignoran, para que un stick gastado no derive.</translation>
+    </message>
+    <message>
+        <source>How far L2 and R2 must be pulled to count as pressed.</source>
+        <translation>Cuánto hay que apretar L2 y R2 para que cuenten como pulsados.</translation>
+    </message>
+    <message>
+        <source>In the game, F3 captures the mouse; while it is captured, moving it moves the right stick.</source>
+        <translation>En el juego, F3 captura el ratón; mientras está capturado, moverlo mueve el stick derecho.</translation>
+    </message>
+    <message>
+        <source>Choose a box, then press the key or button to use. Delete or □ clears it.</source>
+        <translation>Elige una casilla y pulsa la tecla o el botón que quieras usar. Supr o □ la vacía.</translation>
     </message>
     <message>
         <source>Language</source>
@@ -729,6 +962,26 @@
         <translation>Pantalla completa</translation>
     </message>
     <message>
+        <source>Left click</source>
+        <translation>Clic izquierdo</translation>
+    </message>
+    <message>
+        <source>Middle click</source>
+        <translation>Clic central</translation>
+    </message>
+    <message>
+        <source>Right click</source>
+        <translation>Clic derecho</translation>
+    </message>
+    <message>
+        <source>Mouse back button</source>
+        <translation>Botón atrás del ratón</translation>
+    </message>
+    <message>
+        <source>Mouse forward button</source>
+        <translation>Botón adelante del ratón</translation>
+    </message>
+    <message>
         <source>Rescan files</source>
         <translation>Volver a buscar</translation>
     </message>
@@ -737,12 +990,48 @@
         <translation>Examinar…</translation>
     </message>
     <message>
+        <source>Trigger</source>
+        <translation>Gatillo</translation>
+    </message>
+    <message>
+        <source>Not bound</source>
+        <translation>Sin asignar</translation>
+    </message>
+    <message>
+        <source>%1, keyboard and mouse</source>
+        <translation>%1, teclado y ratón</translation>
+    </message>
+    <message>
+        <source>%1, controller</source>
+        <translation>%1, mando</translation>
+    </message>
+    <message>
         <source>No modules found yet. Set the game folder, then rescan.</source>
         <translation>Aún no hay módulos. Elige la carpeta del juego y vuelve a buscar.</translation>
     </message>
     <message>
         <source>No parameters file selected.</source>
         <translation>No hay archivo de parámetros.</translation>
+    </message>
+    <message>
+        <source>Left stick</source>
+        <translation>Stick izquierdo</translation>
+    </message>
+    <message>
+        <source>Right stick</source>
+        <translation>Stick derecho</translation>
+    </message>
+    <message>
+        <source>%1 on the controller</source>
+        <translation>%1 en el mando</translation>
+    </message>
+    <message>
+        <source>Keyboard and mouse</source>
+        <translation>Teclado y ratón</translation>
+    </message>
+    <message>
+        <source>Controller</source>
+        <translation>Mando</translation>
     </message>
     <message>
         <source>The last game played</source>
@@ -879,6 +1168,105 @@
     </message>
 </context>
 <context>
+    <name>InputProfiles</name>
+    <message>
+        <source>%1.%2 is not a known field</source>
+        <translation>%1.%2 no es un campo conocido</translation>
+    </message>
+    <message>
+        <source>%1.%2 is missing</source>
+        <translation>Falta %1.%2</translation>
+    </message>
+    <message>
+        <source>%1.%2 must be true or false</source>
+        <translation>%1.%2 debe ser true o false</translation>
+    </message>
+    <message>
+        <source>%1.%2 must be a number from %3 to %4</source>
+        <translation>%1.%2 debe ser un número de %3 a %4</translation>
+    </message>
+    <message>
+        <source>%1: &apos;%2&apos; is not a key name</source>
+        <translation>%1: &apos;%2&apos; no es un nombre de tecla</translation>
+    </message>
+    <message>
+        <source>%1: &apos;%2&apos; is reserved for a host command</source>
+        <translation>%1: &apos;%2&apos; está reservada para un comando del emulador</translation>
+    </message>
+    <message>
+        <source>%1: &apos;%2&apos; is not a gamepad button name</source>
+        <translation>%1: &apos;%2&apos; no es un nombre de botón de mando</translation>
+    </message>
+    <message>
+        <source>%1 must be a list of names</source>
+        <translation>%1 debe ser una lista de nombres</translation>
+    </message>
+    <message>
+        <source>gamepad.device must be a string</source>
+        <translation>gamepad.device debe ser una cadena</translation>
+    </message>
+    <message>
+        <source>gamepad.%1 must be an object</source>
+        <translation>gamepad.%1 debe ser un objeto</translation>
+    </message>
+    <message>
+        <source>profile.schema must be &apos;%1&apos;</source>
+        <translation>profile.schema debe ser &apos;%1&apos;</translation>
+    </message>
+    <message>
+        <source>profile.name must be a non-empty string</source>
+        <translation>profile.name debe ser una cadena no vacía</translation>
+    </message>
+    <message>
+        <source>profile.%1 must be an object</source>
+        <translation>profile.%1 debe ser un objeto</translation>
+    </message>
+    <message>
+        <source>Cannot create the profiles folder %1.</source>
+        <translation>No se puede crear la carpeta de perfiles %1.</translation>
+    </message>
+    <message>
+        <source>The file is larger than %1 KB.</source>
+        <translation>El archivo ocupa más de %1 KB.</translation>
+    </message>
+    <message>
+        <source>The file cannot be read.</source>
+        <translation>No se puede leer el archivo.</translation>
+    </message>
+    <message>
+        <source>Not valid JSON: %1</source>
+        <translation>JSON no válido: %1</translation>
+    </message>
+    <message>
+        <source>profile must be an object</source>
+        <translation>el perfil debe ser un objeto</translation>
+    </message>
+    <message>
+        <source>Cannot write %1.</source>
+        <translation>No se puede escribir %1.</translation>
+    </message>
+    <message>
+        <source>A profile name has at most %1 characters.</source>
+        <translation>El nombre de un perfil tiene como máximo %1 caracteres.</translation>
+    </message>
+    <message>
+        <source>There are already %1 profiles.</source>
+        <translation>Ya hay %1 perfiles.</translation>
+    </message>
+    <message>
+        <source>%1 copy</source>
+        <translation>%1 copia</translation>
+    </message>
+    <message>
+        <source>The Default profile cannot be deleted.</source>
+        <translation>El perfil Default no se puede eliminar.</translation>
+    </message>
+    <message>
+        <source>Cannot delete %1.</source>
+        <translation>No se puede eliminar %1.</translation>
+    </message>
+</context>
+<context>
     <name>Launcher</name>
     <message>
         <source>Please fill all mandatory fields</source>
@@ -938,6 +1326,22 @@
         <translation>Sin apartado</translation>
     </message>
     <message>
+        <source>The profiles folder cannot be written.</source>
+        <translation>No se puede escribir en la carpeta de perfiles.</translation>
+    </message>
+    <message>
+        <source>The profile %1 is no longer there.</source>
+        <translation>El perfil %1 ya no existe.</translation>
+    </message>
+    <message>
+        <source>This profile can&apos;t be used. Restore defaults to repair it.</source>
+        <translation>Este perfil no se puede usar. Restablece los valores para repararlo.</translation>
+    </message>
+    <message>
+        <source>Default can&apos;t be changed. Duplicate it to make a profile of your own.</source>
+        <translation>Default no se puede cambiar. Duplícalo para crear un perfil propio.</translation>
+    </message>
+    <message>
         <source>A game is running. Changes can be saved after it closes.</source>
         <translation>Hay un juego en ejecución. Los cambios se podrán guardar cuando se cierre.</translation>
     </message>
@@ -948,6 +1352,14 @@
     <message>
         <source>A game is already running.</source>
         <translation>Ya hay un juego en ejecución.</translation>
+    </message>
+    <message>
+        <source>The controls profile %1 can&apos;t be used: %2 Choose another one or repair it in Settings › Controls.</source>
+        <translation>El perfil de controles %1 no se puede usar: %2 Elige otro o repáralo en Configuración › Controles.</translation>
+    </message>
+    <message>
+        <source>its file is missing.</source>
+        <translation>falta su archivo.</translation>
     </message>
     <message>
         <source>The game stopped unexpectedly.</source>
@@ -980,6 +1392,90 @@
     <message>
         <source>%1 · Can&apos;t be used</source>
         <translation>%1 · No se puede usar</translation>
+    </message>
+    <message>
+        <source>A profile needs a name.</source>
+        <translation>Un perfil necesita un nombre.</translation>
+    </message>
+    <message>
+        <source>Unknown control %1.</source>
+        <translation>Control desconocido %1.</translation>
+    </message>
+    <message>
+        <source>Unknown controls setting %1.</source>
+        <translation>Ajuste de controles desconocido %1.</translation>
+    </message>
+    <message>
+        <source>Back</source>
+        <translation>Atrás</translation>
+    </message>
+    <message>
+        <source>Guide</source>
+        <translation>Guía</translation>
+    </message>
+    <message>
+        <source>Start</source>
+        <translation>Start</translation>
+    </message>
+    <message>
+        <source>Left stick press</source>
+        <translation>Pulsar stick izquierdo</translation>
+    </message>
+    <message>
+        <source>Right stick press</source>
+        <translation>Pulsar stick derecho</translation>
+    </message>
+    <message>
+        <source>D-pad up</source>
+        <translation>Cruceta arriba</translation>
+    </message>
+    <message>
+        <source>D-pad down</source>
+        <translation>Cruceta abajo</translation>
+    </message>
+    <message>
+        <source>D-pad left</source>
+        <translation>Cruceta izquierda</translation>
+    </message>
+    <message>
+        <source>D-pad right</source>
+        <translation>Cruceta derecha</translation>
+    </message>
+    <message>
+        <source>Extra button</source>
+        <translation>Botón extra</translation>
+    </message>
+    <message>
+        <source>Touchpad</source>
+        <translation>Panel táctil</translation>
+    </message>
+    <message>
+        <source>Paddle 1</source>
+        <translation>Paleta 1</translation>
+    </message>
+    <message>
+        <source>Paddle 2</source>
+        <translation>Paleta 2</translation>
+    </message>
+    <message>
+        <source>Paddle 3</source>
+        <translation>Paleta 3</translation>
+    </message>
+    <message>
+        <source>Paddle 4</source>
+        <translation>Paleta 4</translation>
+    </message>
+    <message>
+        <source>%1 %</source>
+        <translation>%1 %</translation>
+    </message>
+    <message>
+        <source>Any controller</source>
+        <translation>Cualquier mando</translation>
+    </message>
+    <message>
+        <source>A controller that is not connected</source>
+        <translation>Un mando que no está conectado</translation>
     </message>
     <message>
         <source>The theme %1 is no longer installed.</source>
@@ -1222,6 +1718,10 @@
         <translation>Emulador</translation>
     </message>
     <message>
+        <source>Controls</source>
+        <translation>Controles</translation>
+    </message>
+    <message>
         <source>Interface</source>
         <translation>Interfaz</translation>
     </message>
@@ -1242,6 +1742,14 @@
         <translation>Restablecer valores</translation>
     </message>
     <message>
+        <source>Duplicate profile</source>
+        <translation>Duplicar perfil</translation>
+    </message>
+    <message>
+        <source>Delete profile</source>
+        <translation>Eliminar perfil</translation>
+    </message>
+    <message>
         <source>Select</source>
         <translation>Elegir</translation>
     </message>
@@ -1250,8 +1758,16 @@
         <translation>Volver</translation>
     </message>
     <message>
+        <source>Delete “%1”? Select again</source>
+        <translation>¿Eliminar «%1»? Vuelve a seleccionar</translation>
+    </message>
+    <message>
         <source>Saved. Games without custom settings use these from their next start.</source>
         <translation>Guardado. Los juegos sin ajustes propios los usarán desde su próximo inicio.</translation>
+    </message>
+    <message>
+        <source>The profile has the default controls again.</source>
+        <translation>El perfil vuelve a tener los controles predeterminados.</translation>
     </message>
     <message>
         <source>Settings</source>
@@ -1292,6 +1808,18 @@
     <message>
         <source>Program</source>
         <translation>Programa</translation>
+    </message>
+    <message>
+        <source>The keys, mouse and controller buttons every game gets, kept in profiles. Games use the chosen profile from their next start; changes are saved as you make them.</source>
+        <translation>Las teclas, el ratón y los botones del mando que recibe cada juego, guardados en perfiles. Los juegos usan el perfil elegido desde su próximo inicio; los cambios se guardan al hacerlos.</translation>
+    </message>
+    <message>
+        <source>None connected</source>
+        <translation>Ninguno conectado</translation>
+    </message>
+    <message>
+        <source>Profiles folder</source>
+        <translation>Carpeta de perfiles</translation>
     </message>
     <message>
         <source>How the launcher looks and behaves. Every change applies at once.</source>
@@ -1343,6 +1871,17 @@
     <message>
         <source>Quit</source>
         <translation>Salir</translation>
+    </message>
+</context>
+<context>
+    <name>StickPreviewItem</name>
+    <message>
+        <source>Connect a controller to try the stick.</source>
+        <translation>Conecta un mando para probar el stick.</translation>
+    </message>
+    <message>
+        <source>%1 · the game sees %2, %3</source>
+        <translation>%1 · el juego ve %2, %3</translation>
     </message>
 </context>
 <context>

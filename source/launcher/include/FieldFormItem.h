@@ -28,6 +28,8 @@ signals:
 	void Edited(const QString& key);
 	// Up was pressed on the first control.
 	void TopReached();
+	// A binding field asks the owner to wait for a key or mouse button, or with gamepad for a controller button.
+	void CaptureRequested(const QString& key, bool gamepad);
 
 public:
 	// Text fields edited with a controller type on pad, which covers the owner's page.
@@ -46,7 +48,8 @@ public:
 
 	// Scrolls to the top and focuses the first control.
 	void FocusFirst();
-	void FocusKey(const QString& key);
+	// Focuses the field's control at index among its controls, or its first one.
+	void FocusKey(const QString& key, int index = 0);
 	void ScrollToTop();
 
 protected:

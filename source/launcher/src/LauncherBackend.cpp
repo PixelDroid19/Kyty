@@ -4,9 +4,9 @@
 #include "Configuration.h"
 #include "ConfigurationFields.h"
 #include "GamepadInput.h"
-#include "UiSounds.h"
 #include "Psf.h"
 #include "Theme.h"
+#include "UiSounds.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -17,6 +17,7 @@
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QGuiApplication>
+#include <QJsonArray>
 #include <QLocale>
 #include <QMap>
 #include <QSet>
@@ -29,19 +30,19 @@
 #include <algorithm>
 #include <memory>
 
-constexpr char CONF_FILE_NAME[]      = "Kyty.ini";
-constexpr char CONF_ORG_NAME[]       = "Kyty";
-constexpr char CONF_APP_NAME[]       = "Kyty";
-constexpr char SETTINGS_LAUNCHER[]   = "Launcher";
-constexpr char SETTINGS_WINDOW[]     = "Window";
-constexpr char SETTINGS_GLOBAL[]     = "GlobalConfiguration";
-constexpr int  RECENT_COUNT          = 5;
+constexpr char CONF_FILE_NAME[]    = "Kyty.ini";
+constexpr char CONF_ORG_NAME[]     = "Kyty";
+constexpr char CONF_APP_NAME[]     = "Kyty";
+constexpr char SETTINGS_LAUNCHER[] = "Launcher";
+constexpr char SETTINGS_WINDOW[]   = "Window";
+constexpr char SETTINGS_GLOBAL[]   = "GlobalConfiguration";
+constexpr int  RECENT_COUNT        = 5;
 // Upper bound for executables listed from a game directory, so the editor list stays usable.
-constexpr int  MAX_LISTED_ELFS       = 512;
+constexpr int MAX_LISTED_ELFS = 512;
 // Bounds for importing a folder of games: how deep game folders are looked for, and how much is walked.
-constexpr int  IMPORT_DEPTH          = 3;
-constexpr int  MAX_IMPORT_DIRS       = 4096;
-constexpr int  MAX_IMPORTED_GAMES    = 512;
+constexpr int IMPORT_DEPTH       = 3;
+constexpr int MAX_IMPORT_DIRS    = 4096;
+constexpr int MAX_IMPORTED_GAMES = 512;
 // Longer section names would not fit their tab.
 constexpr int SECTION_NAME_MAX = 40;
 // The colour scheme and language that follow the desktop's.
@@ -145,14 +146,96 @@ LauncherBackend* g_backend = nullptr;
 // The look and library settings with their defaults; each is stored under its key in the launcher group.
 QVariantMap LookDefaults()
 {
-	return {{"accent", "Blue"},       {"interface_size", "Normal"}, {"animations", "Full"}, {"background", "Artwork"},
-	        {"cover_size", "Medium"}, {"show_titles", true},        {"show_recent", true},  {"on_launch", "Minimize"},
-	        {"sort", "Manual"},       {"window_mode", "Windowed"},  {"start_on", "LastGame"},
-	        {"theme", OWN_THEME},     {"layout", "Sidebar"},        {"ui_sounds", true},    {"ui_volume", "Medium"}};
+	return {{"accent", "Blue"},       {"interface_size", "Normal"}, {"animations", "Full"},   {"background", "Artwork"},
+	        {"cover_size", "Medium"}, {"show_titles", true},        {"show_recent", true},    {"on_launch", "Minimize"},
+	        {"sort", "Manual"},       {"window_mode", "Windowed"},  {"start_on", "LastGame"}, {"theme", OWN_THEME},
+	        {"layout", "Sidebar"},    {"ui_sounds", true},          {"ui_volume", "Medium"}};
 }
 
 // Scale of every size for each interface_size, in the order of its choices.
 constexpr qreal INTERFACE_SCALES[] = {0.88, 1, 1.14, 1.3};
+
+// The deadzones offered, in steps of 5 % up to the format's 90 %, and the mouse sensitivities.
+QStringList DeadzoneChoices()
+{
+	QStringList choices;
+	for (int percent = 0; percent <= 90; percent += 5)
+	{
+		choices << QString::number(percent / 100.0);
+	}
+	return choices;
+}
+
+const QStringList SENSITIVITY_CHOICES = {"0.1", "0.25", "0.5", "0.75", "1", "1.25", "1.5", "2", "3", "4", "5", "7.5", "10"};
+
+QStringList Names(const QJsonValue& list)
+{
+	QStringList names;
+	for (const auto& name: list.toArray())
+	{
+		names << name.toString();
+	}
+	return names;
+}
+
+// Sets the profile member that one of the controls page's fields shows; returns an error, or an empty string.
+QString ApplyControlsField(QJsonObject* json, const QString& key, const QVariant& value)
+{
+	auto gamepad = json->value("gamepad").toObject();
+	auto mouse   = json->value("mouse").toObject();
+	if (key == QLatin1String("profile_name"))
+	{
+		if (value.toString().trimmed().isEmpty())
+		{
+			return LauncherBackend::tr("A profile needs a name.");
+		}
+		(*json)["name"] = value.toString().trimmed();
+		return {};
+	}
+	if (key == QLatin1String("input_device"))
+	{
+		gamepad["device"] = value.toString();
+	} else if (key == QLatin1String("trigger_deadzone"))
+	{
+		gamepad["trigger_deadzone"] = value.toDouble();
+	} else if (key.startsWith(QLatin1String("left_")) || key.startsWith(QLatin1String("right_")))
+	{
+		// left_deadzone, right_invert_x and the like: the member of that stick.
+		const auto stick_key = key.section(QLatin1Char('_'), 0, 0) + QStringLiteral("_stick");
+		const auto member    = key.section(QLatin1Char('_'), 1);
+		auto       stick     = gamepad.value(stick_key).toObject();
+		stick[member]        = member == QLatin1String("deadzone") ? QJsonValue(value.toDouble()) : QJsonValue(value.toBool());
+		gamepad[stick_key]   = stick;
+	} else if (key.startsWith(QLatin1String("mouse_")))
+	{
+		const auto member = key.mid(6);
+		mouse[member]     = member == QLatin1String("sensitivity") ? QJsonValue(value.toDouble()) : QJsonValue(value.toBool());
+	} else if (key.startsWith(QLatin1String("bind.")))
+	{
+		const auto control = key.mid(5);
+		const auto index   = InputProfiles::ControlNames().indexOf(control);
+		if (index < 0)
+		{
+			return LauncherBackend::tr("Unknown control %1.").arg(control);
+		}
+		const auto binding  = value.toMap();
+		auto       keys     = json->value("keyboard").toObject();
+		keys[control]       = QJsonArray::fromStringList(binding.value("keys").toStringList());
+		(*json)["keyboard"] = keys;
+		if (index < InputProfiles::BUTTON_CONTROL_COUNT)
+		{
+			auto buttons       = gamepad.value("buttons").toObject();
+			buttons[control]   = QJsonArray::fromStringList(binding.value("buttons").toStringList());
+			gamepad["buttons"] = buttons;
+		}
+	} else
+	{
+		return LauncherBackend::tr("Unknown controls setting %1.").arg(key);
+	}
+	(*json)["gamepad"] = gamepad;
+	(*json)["mouse"]   = mouse;
+	return {};
+}
 
 } // namespace
 
@@ -174,6 +257,7 @@ LauncherBackend::LauncherBackend(QObject* parent)
 	connect(&m_runner, &EmulatorRunner::Probed, this, &LauncherBackend::OnProbed);
 	connect(&m_runner, &EmulatorRunner::Finished, this, &LauncherBackend::OnFinished);
 	connect(m_gamepad, &GamepadInput::ControllerChanged, this, &LauncherBackend::StateChanged);
+	connect(m_gamepad, &GamepadInput::DevicesChanged, this, &LauncherBackend::DevicesChanged);
 
 	m_runner.Probe(m_emulator_override);
 }
@@ -202,13 +286,14 @@ QString LauncherBackend::ControllerName() const
 QString LauncherBackend::PadText(const QString& text) const
 {
 	// The hints are written with a PlayStation controller's symbols, in the order ButtonLabels() gives them.
-	static const QStringList written = {QStringLiteral("✕"), QStringLiteral("○"), QStringLiteral("□"),
+	static const QStringList written = {QStringLiteral("✕"), QStringLiteral("○"),  QStringLiteral("□"),
 	                                    QStringLiteral("△"), QStringLiteral("L1"), QStringLiteral("R1")};
 	const auto               labels  = m_gamepad->ButtonLabels();
 	QString                  result;
 	for (qsizetype i = 0; i < text.size(); i++)
 	{
-		const auto found = std::find_if(written.cbegin(), written.cend(), [&](const QString& symbol) { return QStringView(text).mid(i).startsWith(symbol); });
+		const auto found = std::find_if(written.cbegin(), written.cend(),
+		                                [&](const QString& symbol) { return QStringView(text).mid(i).startsWith(symbol); });
 		if (found == written.cend())
 		{
 			result += text.at(i);
@@ -228,6 +313,32 @@ int LauncherBackend::ControllerBattery() const
 bool LauncherBackend::ControllerCharging() const
 {
 	return m_gamepad->Charging();
+}
+
+QString LauncherBackend::PadButtonText(const QString& button) const
+{
+	// The face and shoulder buttons in the order ButtonLabels() gives them.
+	static const QStringList labelled = {"a", "b", "x", "y", "leftshoulder", "rightshoulder"};
+	if (const auto index = labelled.indexOf(button); index >= 0)
+	{
+		return m_gamepad->ButtonLabels().at(index);
+	}
+	const QMap<QString, QString> names = {{"back", tr("Back")},
+	                                      {"guide", tr("Guide")},
+	                                      {"start", tr("Start")},
+	                                      {"leftstick", tr("Left stick press")},
+	                                      {"rightstick", tr("Right stick press")},
+	                                      {"dpup", tr("D-pad up")},
+	                                      {"dpdown", tr("D-pad down")},
+	                                      {"dpleft", tr("D-pad left")},
+	                                      {"dpright", tr("D-pad right")},
+	                                      {"misc1", tr("Extra button")},
+	                                      {"touchpad", tr("Touchpad")},
+	                                      {"paddle1", tr("Paddle 1")},
+	                                      {"paddle2", tr("Paddle 2")},
+	                                      {"paddle3", tr("Paddle 3")},
+	                                      {"paddle4", tr("Paddle 4")}};
+	return names.value(button, button);
 }
 
 QString LauncherBackend::LayoutName() const
@@ -252,12 +363,13 @@ void LauncherBackend::Load()
 	}
 
 	settings->beginGroup(SETTINGS_LAUNCHER);
-	m_emulator_override  = settings->value("emulator_path").toString();
-	m_run_mode           = settings->value("run_mode", EmulatorRunner::DIRECT_MODE).toString();
-	m_table_view         = settings->value("table_view", false).toBool();
-	m_color_scheme       = settings->value("color_scheme", SYSTEM_CHOICE).toString();
-	m_language           = settings->value("language", SYSTEM_CHOICE).toString();
-	m_look               = LookDefaults();
+	m_emulator_override = settings->value("emulator_path").toString();
+	m_run_mode          = settings->value("run_mode", EmulatorRunner::DIRECT_MODE).toString();
+	m_table_view        = settings->value("table_view", false).toBool();
+	m_color_scheme      = settings->value("color_scheme", SYSTEM_CHOICE).toString();
+	m_language          = settings->value("language", SYSTEM_CHOICE).toString();
+	m_input_profile     = settings->value("input_profile", InputProfiles::DEFAULT_ID).toString();
+	m_look              = LookDefaults();
 	for (auto it = m_look.begin(); it != m_look.end(); ++it)
 	{
 		// A value edited by hand that the launcher does not know keeps the default.
@@ -268,6 +380,13 @@ void LauncherBackend::Load()
 		}
 	}
 	settings->endGroup();
+
+	// The profiles sit next to the settings file, so a portable Kyty.ini keeps its profiles beside it.
+	if (const auto error = m_profiles.Load(QFileInfo(m_settings_file).absolutePath() + QStringLiteral("/input-profiles")); !error.isEmpty())
+	{
+		qWarning("%s", qPrintable(error));
+	}
+	SetActiveProfile(m_profiles.Find(m_input_profile) != nullptr ? m_input_profile : QString(InputProfiles::DEFAULT_ID));
 
 	settings->beginGroup(SETTINGS_WINDOW);
 	if (settings->contains("width") && settings->contains("height"))
@@ -294,6 +413,7 @@ void LauncherBackend::Save()
 	settings->setValue("table_view", m_table_view);
 	settings->setValue("color_scheme", m_color_scheme);
 	settings->setValue("language", m_language);
+	settings->setValue("input_profile", m_input_profile);
 	for (auto it = m_look.cbegin(); it != m_look.cend(); ++it)
 	{
 		settings->setValue(it.key(), it.value());
@@ -333,20 +453,20 @@ QVariantMap LauncherBackend::GameToMap(int row) const
 	const auto& info = *game.config;
 
 	QVariantMap item;
-	item["row"]      = row;
-	item["name"]     = info.name;
-	item["sections"] = info.sections;
-	item["title"]    = game.param.title;
-	item["serial"]   = game.param.serial;
-	item["region"]   = game.param.region;
-	item["version"]  = game.param.version;
-	item["basedir"]  = info.basedir;
-	item["icon"]     = ArtworkProvider::Url(game.icon);
-	item["picture"]  = ArtworkProvider::Url(game.picture);
-	item["running"]  = row == m_running_row;
-	item["lastRun"]  = info.last_run;
-	item["playTime"] = info.play_time;
-	item["favorite"] = info.favorite;
+	item["row"]            = row;
+	item["name"]           = info.name;
+	item["sections"]       = info.sections;
+	item["title"]          = game.param.title;
+	item["serial"]         = game.param.serial;
+	item["region"]         = game.param.region;
+	item["version"]        = game.param.version;
+	item["basedir"]        = info.basedir;
+	item["icon"]           = ArtworkProvider::Url(game.icon);
+	item["picture"]        = ArtworkProvider::Url(game.picture);
+	item["running"]        = row == m_running_row;
+	item["lastRun"]        = info.last_run;
+	item["playTime"]       = info.play_time;
+	item["favorite"]       = info.favorite;
 	item["customSettings"] = info.custom_settings;
 	// The size the game runs at, which is the global one unless it has its own settings.
 	const auto& shown = info.custom_settings ? info : m_global;
@@ -421,7 +541,7 @@ QVariantMap LauncherBackend::FieldsFor(int row) const
 {
 	if (row < 0 || row >= m_library.Count())
 	{
-		const Kyty::Configuration defaults{};
+		const Kyty::Configuration defaults {};
 		return ConfigurationToFields(defaults);
 	}
 	return ConfigurationToFields(*m_library.At(row).config);
@@ -473,6 +593,29 @@ QVariantMap LauncherBackend::Choices() const
 		themes << theme.id;
 	}
 	choices["theme"] = themes;
+
+	choices["deadzone"]    = DeadzoneChoices();
+	choices["sensitivity"] = SENSITIVITY_CHOICES;
+	QStringList profiles;
+	for (const auto& profile: m_profiles.List())
+	{
+		profiles << profile.id;
+	}
+	choices["input_profile"] = profiles;
+	// Any controller, the ones connected, and the one the profile names when it is not connected.
+	QStringList devices {QString()};
+	for (const auto& device: m_gamepad->Devices())
+	{
+		devices << device.guid;
+	}
+	const auto* active = ActiveProfile();
+	const auto  saved  = active != nullptr ? active->json.value("gamepad").toObject().value("device").toString() : QString();
+	if (!saved.isEmpty() &&
+	    std::none_of(devices.cbegin(), devices.cend(), [&](const QString& guid) { return GamepadInput::SameDevice(guid, saved); }))
+	{
+		devices << saved;
+	}
+	choices["input_device"] = devices;
 	return choices;
 }
 
@@ -518,8 +661,44 @@ void LauncherBackend::ApplyLook()
 	ApplyTheme();
 }
 
-QString LauncherBackend::ChoiceLabel(const QString& value) const
+QString LauncherBackend::ChoiceLabel(const QString& list, const QString& value) const
 {
+	if (list == QLatin1String("deadzone"))
+	{
+		return tr("%1 %").arg(qRound(value.toDouble() * 100));
+	}
+	if (list == QLatin1String("sensitivity"))
+	{
+		return QStringLiteral("%1×").arg(value);
+	}
+	if (list == QLatin1String("input_profile"))
+	{
+		const auto* profile = m_profiles.Find(value);
+		if (profile == nullptr || !profile->error.isEmpty())
+		{
+			return tr("%1 · Can't be used").arg(value);
+		}
+		return profile->json.value("name").toString();
+	}
+	if (list == QLatin1String("input_device"))
+	{
+		if (value.isEmpty())
+		{
+			return tr("Any controller");
+		}
+		for (const auto& device: m_gamepad->Devices())
+		{
+			if (GamepadInput::SameDevice(device.guid, value))
+			{
+				return device.name;
+			}
+		}
+		return tr("A controller that is not connected");
+	}
+	if (list != QLatin1String("theme"))
+	{
+		return {};
+	}
 	if (value == QLatin1String(OWN_THEME))
 	{
 		return tr("Kyty");
@@ -634,6 +813,140 @@ void LauncherBackend::SetLauncherField(const QString& key, const QVariant& value
 	emit StateChanged();
 }
 
+const InputProfiles::Profile* LauncherBackend::ActiveProfile() const
+{
+	return m_profiles.Find(m_input_profile);
+}
+
+// The launcher moves with the controller the profile names, so the one being set up is the one tested.
+void LauncherBackend::SetActiveProfile(const QString& id)
+{
+	m_input_profile     = id;
+	const auto* profile = ActiveProfile();
+	m_gamepad->SetPreferredDevice(
+	    profile != nullptr && profile->error.isEmpty() ? profile->json.value("gamepad").toObject().value("device").toString() : QString());
+}
+
+QVariantMap LauncherBackend::ControlsFields() const
+{
+	const auto* profile = ActiveProfile();
+	QVariantMap fields;
+	fields["input_profile"] = m_input_profile;
+	fields["profile_error"] = profile == nullptr ? tr("The profiles folder cannot be written.") : profile->error;
+	// A profile that cannot be used shows Default's controls, which Restore defaults gives it.
+	const auto json        = profile != nullptr && profile->error.isEmpty() ? profile->json : InputProfiles::DefaultJson();
+	const auto gamepad     = json.value("gamepad").toObject();
+	const auto mouse       = json.value("mouse").toObject();
+	const auto keyboard    = json.value("keyboard").toObject();
+	const auto buttons     = gamepad.value("buttons").toObject();
+	fields["profile_name"] = json.value("name").toString();
+	fields["input_device"] = gamepad.value("device").toString();
+	for (const char* side: {"left", "right"})
+	{
+		const QString prefix                         = QString::fromLatin1(side);
+		const auto    stick                          = gamepad.value(prefix + QStringLiteral("_stick")).toObject();
+		fields[prefix + QStringLiteral("_deadzone")] = QString::number(stick.value("deadzone").toDouble());
+		fields[prefix + QStringLiteral("_invert_x")] = stick.value("invert_x").toBool();
+		fields[prefix + QStringLiteral("_invert_y")] = stick.value("invert_y").toBool();
+		fields[prefix + QStringLiteral("_stick")]    = QVariantMap {{"deadzone", stick.value("deadzone").toDouble()},
+		                                                            {"invert_x", stick.value("invert_x").toBool()},
+		                                                            {"invert_y", stick.value("invert_y").toBool()},
+		                                                            {"right", prefix == QLatin1String("right")}};
+	}
+	fields["trigger_deadzone"]  = QString::number(gamepad.value("trigger_deadzone").toDouble());
+	fields["mouse_look"]        = mouse.value("look").toBool();
+	fields["mouse_sensitivity"] = QString::number(mouse.value("sensitivity").toDouble());
+	fields["mouse_invert_y"]    = mouse.value("invert_y").toBool();
+	const auto& controls        = InputProfiles::ControlNames();
+	for (int i = 0; i < controls.size(); i++)
+	{
+		fields[QStringLiteral("bind.") + controls.at(i)] = QVariantMap {{"keys", Names(keyboard.value(controls.at(i)))},
+		                                                                {"buttons", Names(buttons.value(controls.at(i)))},
+		                                                                {"pad", i < InputProfiles::BUTTON_CONTROL_COUNT}};
+	}
+	return fields;
+}
+
+QString LauncherBackend::SetControlsField(const QString& key, const QVariant& value)
+{
+	if (key == QLatin1String("input_profile"))
+	{
+		if (m_profiles.Find(value.toString()) == nullptr)
+		{
+			return tr("The profile %1 is no longer there.").arg(value.toString());
+		}
+		SetActiveProfile(value.toString());
+		Save();
+		return {};
+	}
+	const auto* profile = ActiveProfile();
+	if (profile == nullptr || !profile->error.isEmpty())
+	{
+		return tr("This profile can't be used. Restore defaults to repair it.");
+	}
+	if (profile->id == QLatin1String(InputProfiles::DEFAULT_ID))
+	{
+		return tr("Default can't be changed. Duplicate it to make a profile of your own.");
+	}
+	auto json = profile->json;
+	if (const auto error = ApplyControlsField(&json, key, value); !error.isEmpty())
+	{
+		return error;
+	}
+	const auto id = profile->id;
+	if (const auto error = m_profiles.Save(id, json); !error.isEmpty())
+	{
+		return error;
+	}
+	if (key == QLatin1String("input_device"))
+	{
+		SetActiveProfile(id);
+	}
+	return {};
+}
+
+QString LauncherBackend::DuplicateProfile()
+{
+	QString id;
+	if (const auto error = m_profiles.Duplicate(m_input_profile, &id); !error.isEmpty())
+	{
+		return error;
+	}
+	SetActiveProfile(id);
+	Save();
+	return {};
+}
+
+QString LauncherBackend::DeleteProfile()
+{
+	if (const auto error = m_profiles.Remove(m_input_profile); !error.isEmpty())
+	{
+		return error;
+	}
+	SetActiveProfile(InputProfiles::DEFAULT_ID);
+	Save();
+	return {};
+}
+
+QString LauncherBackend::ResetProfile()
+{
+	const auto* profile = ActiveProfile();
+	if (profile == nullptr)
+	{
+		return tr("The profiles folder cannot be written.");
+	}
+	auto       json = InputProfiles::DefaultJson();
+	const auto name = profile->json.value("name").toString();
+	json["name"]    = profile->error.isEmpty() && !name.isEmpty() ? name : profile->id;
+	const auto id   = profile->id;
+	if (const auto error = m_profiles.Save(id, json); !error.isEmpty())
+	{
+		return error;
+	}
+	SetActiveProfile(id);
+	return {};
+}
+
 void LauncherBackend::ApplyColorScheme()
 {
 	auto scheme = Theme::Scheme::System;
@@ -669,7 +982,7 @@ QVariantMap LauncherBackend::SaveGame(int row, const QVariantMap& fields)
 
 	if (row < 0)
 	{
-		auto* info = new Kyty::Configuration;
+		auto*      info  = new Kyty::Configuration;
 		const auto error = ApplyFields(fields, info);
 		if (!error.isEmpty())
 		{
@@ -783,9 +1096,15 @@ QString LauncherBackend::StartGame(const QVariantMap& fields, int row)
 	{
 		return error;
 	}
+	const auto* profile = ActiveProfile();
+	if (profile == nullptr || !profile->error.isEmpty())
+	{
+		return tr("The controls profile %1 can't be used: %2 Choose another one or repair it in Settings › Controls.")
+		    .arg(m_input_profile, profile == nullptr ? tr("its file is missing.") : profile->error);
+	}
 	// A mode saved on another host may be missing here; Direct is always available.
 	const auto mode  = m_run_modes.contains(m_run_mode) ? m_run_mode : QString(EmulatorRunner::DIRECT_MODE);
-	const auto error = m_runner.Start(info, mode);
+	const auto error = m_runner.Start(info, mode, m_profiles.FilePath(profile->id));
 	if (!error.isEmpty())
 	{
 		return error;
@@ -837,7 +1156,7 @@ void LauncherBackend::OnProbed(bool found, const QString& version, const QString
 
 QVariantMap LauncherBackend::DetectGame(const QString& folder) const
 {
-	const Kyty::Configuration defaults{};
+	const Kyty::Configuration defaults {};
 	QVariantMap               fields = ConfigurationToFields(defaults);
 
 	const QDir dir(folder);
@@ -850,11 +1169,11 @@ QVariantMap LauncherBackend::DetectGame(const QString& folder) const
 	fields["param_file"] = param_file;
 
 	// The main executable of a dump is eboot.bin; select it when it is present.
-	const auto elfs = ScanElfs(folder, {});
+	const auto   elfs = ScanElfs(folder, {});
 	QVariantList selected;
 	for (const auto& entry: elfs)
 	{
-		auto item = entry.toMap();
+		auto item        = entry.toMap();
 		item["selected"] = item.value("path").toString() == "eboot.bin";
 		selected << item;
 	}
@@ -889,7 +1208,7 @@ QString LauncherBackend::ImportFolder(const QString& folder)
 	m_import_pool.start(
 	    [this, folder, listed]
 	    {
-		    const auto       found = FindGameFolders(folder);
+		    const auto         found = FindGameFolders(folder);
 		    QList<QVariantMap> games;
 		    for (const auto& path: found)
 		    {
@@ -898,8 +1217,7 @@ QString LauncherBackend::ImportFolder(const QString& folder)
 				    games << DetectGame(path);
 			    }
 		    }
-		    QMetaObject::invokeMethod(
-		        this, [this, games, count = found.size()] { AddImported(games, count); }, Qt::QueuedConnection);
+		    QMetaObject::invokeMethod(this, [this, games, count = found.size()] { AddImported(games, count); }, Qt::QueuedConnection);
 	    });
 	return {};
 }
@@ -965,7 +1283,7 @@ QVariantList LauncherBackend::ScanElfs(const QString& basedir, const QVariantLis
 	QMap<QString, QVariantMap> entries;
 	for (const auto& entry: current)
 	{
-		auto item = entry.toMap();
+		auto       item = entry.toMap();
 		const auto path = item.value("path").toString();
 		item["present"] = found.contains(path);
 		entries.insert(path, item);

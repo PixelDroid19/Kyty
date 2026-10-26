@@ -9,9 +9,11 @@
 #include <QVariantMap>
 #include <QVector>
 
+class BindingItem;
 class ChoiceItem;
 class FocusButtonItem;
 class ModuleRowItem;
+class StickPreviewItem;
 class TextFieldItem;
 class ToggleItem;
 
@@ -27,6 +29,11 @@ enum class FieldType
 	Path,
 	Modules,
 	Params,
+	// What one guest control is bound to: a keyboard cell and, for buttons, a controller cell. The value is a map
+	// of keys and buttons lists, and pad, whether the control binds on a controller.
+	Binding,
+	// A live view of one of the controller's sticks; the value is a map of right, deadzone, invert_x and invert_y.
+	Stick,
 };
 
 // One field of the editor's form. Texts are untranslated; the editor translates them in its own context.
@@ -59,6 +66,8 @@ signals:
 	void BrowseRequested(const QString& key, bool folder);
 	void ListRequested(const QString& key);
 	void FocusRequested(const QString& key);
+	// A binding cell asks for a new key or mouse button, or with gamepad for a controller button.
+	void CaptureRequested(const QString& key, bool gamepad);
 
 public:
 	FieldRowItem(const EditorField& field, QQuickItem* parent);
@@ -81,6 +90,7 @@ public:
 
 protected:
 	QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
+	void     keyPressEvent(QKeyEvent* event) override;
 	void     mousePressEvent(QMouseEvent* event) override;
 	void     mouseReleaseEvent(QMouseEvent* event) override;
 	void     hoverEnterEvent(QHoverEvent* event) override;
@@ -93,6 +103,9 @@ private:
 	void  ShowModules(const QVariantList& modules);
 	void  Step(int delta);
 	void  ToggleModule(int index);
+	void  ShowBinding(const QString& help);
+	void  ClearBinding(bool gamepad);
+	void  PlaceBinding(const QRectF& rect);
 	[[nodiscard]] bool HasFocusWithin() const;
 
 	EditorField      m_field;
@@ -110,6 +123,9 @@ private:
 	// Browse on a path field, Rescan on the modules.
 	FocusButtonItem*          m_button = nullptr;
 	QVector<ModuleRowItem*>   m_modules;
+	BindingItem*              m_keys_cell = nullptr;
+	BindingItem*              m_pad_cell  = nullptr;
+	StickPreviewItem*         m_stick     = nullptr;
 	QVector<PageLayout::Text> m_texts;
 	// The part of the row under its heading, which lights up.
 	QRectF m_body;

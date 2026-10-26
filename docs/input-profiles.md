@@ -14,6 +14,31 @@ profile into `kyty_run.lua`. `Default` always exists and cannot be deleted.
 An invalid file stops the emulator at startup with an error that names the
 field. Nothing falls back to defaults silently.
 
+## Editing profiles in the launcher
+
+Settings › Controls edits the profiles. One profile is active for every game;
+there is no per-title profile. Changes are saved as they are made, and a game
+uses the active profile from its next start.
+
+- **Profile** chooses the active profile. `Default` is read-only; **Duplicate
+  profile** copies the shown profile under a new name, **Delete profile** asks
+  for a second selection before it removes the file, and **Restore defaults**
+  rewrites the shown profile with the `Default` bindings. A file that does not
+  follow the format is listed as unusable with the field at fault until it is
+  restored or removed.
+- **Controller** lists every connected gamepad and updates on hot-plug.
+  Choosing one stores its GUID in `gamepad.device`; **Any controller** stores
+  an empty string.
+- Each stick has a dead zone, X and Y invert, and a live preview of the
+  connected pad that shows the raw position and what the game sees after the
+  dead zone. While the form has focus, the left stick does not move between
+  settings so it can be tried; the D-pad still does.
+- **Buttons** has a keyboard-and-mouse box and, for the first 16 controls, a
+  controller box. Selecting a box waits 5 s for a key, mouse button or
+  controller button; Escape cancels, the reserved keys are refused, and
+  Delete or □ clears the box. A box holds one name; lists of several names
+  are kept until the box is changed.
+
 ## Format
 
 ```json

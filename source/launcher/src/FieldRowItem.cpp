@@ -11,6 +11,7 @@
 
 #include <QCoreApplication>
 #include <QFontMetricsF>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QQuickWindow>
 #include <QSGTextNode>
@@ -32,6 +33,8 @@ constexpr qreal MODULE_SPACING  = 6;
 constexpr qreal PARAM_SPACING   = 4;
 constexpr qreal PARAM_KEY_WIDTH = 200;
 constexpr qreal PARAM_GAP       = 12;
+constexpr qreal CELL_GAP        = 10;
+constexpr qreal STICK_SIZE      = 96;
 
 constexpr int MAX_PARAMS = 200;
 
@@ -137,8 +140,13 @@ const ChoiceText CHOICE_TEXTS[] = {
     {"Library", QT_TRANSLATE_NOOP("FieldRowItem", "The library")},
 };
 
-QString ChoiceDisplay(const QString& value)
+// The backend names the values of its own lists first, so an input profile called Normal is not shown as a size.
+QString ChoiceDisplay(const char* list, const QString& value)
 {
+	if (const auto label = LauncherBackend::Instance()->ChoiceLabel(QString::fromLatin1(list), value); !label.isEmpty())
+	{
+		return label;
+	}
 	for (const auto& choice: CHOICE_TEXTS)
 	{
 		if (value == QLatin1String(choice.value))
@@ -146,8 +154,27 @@ QString ChoiceDisplay(const QString& value)
 			return choice.translated ? QCoreApplication::translate("FieldRowItem", choice.text) : QString::fromUtf8(choice.text);
 		}
 	}
-	const auto label = LauncherBackend::Instance()->ChoiceLabel(value);
-	return label.isEmpty() ? value : label;
+	return value;
+}
+
+const ChoiceText MOUSE_TEXTS[] = {
+    {"Mouse Left", QT_TRANSLATE_NOOP("FieldRowItem", "Left click")},
+    {"Mouse Middle", QT_TRANSLATE_NOOP("FieldRowItem", "Middle click")},
+    {"Mouse Right", QT_TRANSLATE_NOOP("FieldRowItem", "Right click")},
+    {"Mouse X1", QT_TRANSLATE_NOOP("FieldRowItem", "Mouse back button")},
+    {"Mouse X2", QT_TRANSLATE_NOOP("FieldRowItem", "Mouse forward button")},
+};
+
+QString KeyDisplay(const QString& name)
+{
+	for (const auto& mouse: MOUSE_TEXTS)
+	{
+		if (name == QLatin1String(mouse.value))
+		{
+			return QCoreApplication::translate("FieldRowItem", mouse.text);
+		}
+	}
+	return name;
 }
 
 QFont SmallFont()
@@ -187,8 +214,7 @@ FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuick
 			connect(m_toggle, &FieldControlItem::Activated, this, [this, key]() { emit Edited(key, !m_value.toBool()); });
 			break;
 		case FieldType::Choice:
-			m_choices = LauncherBackend::Instance()->Choices().value(field.choices).toStringList();
-			m_choice  = new ChoiceItem(this);
+			m_choice = new ChoiceItem(this);
 			connect(m_choice, &FieldControlItem::Activated, this, &FieldRowItem::Step);
 			connect(m_choice, &FieldControlItem::ListRequested, this, [this, key]() { emit ListRequested(key); });
 			break;
@@ -199,6 +225,17 @@ FieldRowItem::FieldRowItem(const EditorField& field, QQuickItem* parent): QQuick
 			        [this, key]() { emit Edited(key, LauncherBackend::Instance()->ScanElfs(m_basedir, m_value.toList())); });
 			break;
 		case FieldType::Params: break;
+		case FieldType::Binding:
+			m_keys_cell = new BindingItem(this);
+			m_pad_cell  = new BindingItem(this);
+			connect(m_keys_cell, &FieldControlItem::Activated, this, [this, key]() { emit CaptureRequested(key, false); });
+			connect(m_pad_cell, &FieldControlItem::Activated, this, [this, key]() { emit CaptureRequested(key, true); });
+			connect(m_keys_cell, &BindingItem::Cleared, this, [this]() { ClearBinding(false); });
+			connect(m_pad_cell, &BindingItem::Cleared, this, [this]() { ClearBinding(true); });
+			// FocusItems() leaves the controller cell out until the value says it is used.
+			connect(m_pad_cell, &QQuickItem::activeFocusChanged, this, &QQuickItem::update);
+			break;
+		case FieldType::Stick: m_stick = new StickPreviewItem(this); break;
 	}
 
 	if (field.type == FieldType::Text || field.type == FieldType::Path)
@@ -242,7 +279,7 @@ QStringList FieldRowItem::ChoiceTexts() const
 	QStringList texts;
 	for (const auto& choice: m_choices)
 	{
-		texts << ChoiceDisplay(choice);
+		texts << ChoiceDisplay(m_field.choices, choice);
 	}
 	return texts;
 }
@@ -262,9 +299,11 @@ QVector<QQuickItem*> FieldRowItem::FocusItems() const
 {
 	QVector<QQuickItem*> items;
 	for (QQuickItem* item: {static_cast<QQuickItem*>(m_input), static_cast<QQuickItem*>(m_toggle), static_cast<QQuickItem*>(m_choice),
-	                        static_cast<QQuickItem*>(m_minus), static_cast<QQuickItem*>(m_plus), static_cast<QQuickItem*>(m_button)})
+	                        static_cast<QQuickItem*>(m_minus), static_cast<QQuickItem*>(m_plus), static_cast<QQuickItem*>(m_button),
+	                        static_cast<QQuickItem*>(m_keys_cell), static_cast<QQuickItem*>(m_pad_cell)})
 	{
-		if (item != nullptr)
+		// A control that binds on the keyboard only has no controller cell to move to.
+		if (item != nullptr && (item != m_pad_cell || m_value.toMap().value("pad").toBool()))
 		{
 			items << item;
 		}
@@ -281,6 +320,11 @@ void FieldRowItem::SetValues(const QVariantMap& values, bool shown)
 	m_shown   = shown;
 	m_value   = values.value(m_field.key);
 	m_basedir = values.value("basedir").toString();
+	if (m_field.type == FieldType::Choice)
+	{
+		// Some lists change while the form is open, such as the connected controllers.
+		m_choices = LauncherBackend::Instance()->Choices().value(m_field.choices).toStringList();
+	}
 	setVisible(shown);
 	ShowValue();
 }
@@ -309,10 +353,12 @@ void FieldRowItem::ShowValue()
 			m_toggle->SetOn(m_value.toBool());
 			break;
 		case FieldType::Choice:
-			SetAccessible(m_choice, QAccessible::ComboBox, Translated(m_field.label),
-			              help.isEmpty() ? ChoiceDisplay(m_value.toString()) : ChoiceDisplay(m_value.toString()) + ". " + help);
-			m_choice->SetValue(ChoiceDisplay(m_value.toString()));
+		{
+			const auto shown = ChoiceDisplay(m_field.choices, m_value.toString());
+			SetAccessible(m_choice, QAccessible::ComboBox, Translated(m_field.label), help.isEmpty() ? shown : shown + ". " + help);
+			m_choice->SetValue(shown);
 			break;
+		}
 		case FieldType::Modules: ShowModules(m_value.toList()); break;
 		case FieldType::Params:
 			// Read again only when the file changes, since every edit in the form passes through here.
@@ -323,7 +369,51 @@ void FieldRowItem::ShowValue()
 				    m_params_file.isEmpty() ? QVariantList() : LauncherBackend::Instance()->ParamEntries(m_params_file).mid(0, MAX_PARAMS);
 			}
 			break;
+		case FieldType::Binding: ShowBinding(help); break;
+		case FieldType::Stick:
+		{
+			const auto tuning = m_value.toMap();
+			m_stick->SetTuning(tuning.value("right").toBool(), tuning.value("deadzone").toReal(), tuning.value("invert_x").toBool(),
+			                   tuning.value("invert_y").toBool());
+			break;
+		}
 	}
+}
+
+void FieldRowItem::ShowBinding(const QString& help)
+{
+	const auto  binding = m_value.toMap();
+	const auto* backend = LauncherBackend::Instance();
+	QStringList keys;
+	for (const auto& name: binding.value("keys").toStringList())
+	{
+		keys << KeyDisplay(name);
+	}
+	QStringList buttons;
+	// L2 and R2 always follow the controller's triggers; buttons bound to them come on top.
+	const QString key = m_field.key;
+	if (key == QLatin1String("bind.l2") || key == QLatin1String("bind.r2"))
+	{
+		buttons << tr("Trigger");
+	}
+	for (const auto& name: binding.value("buttons").toStringList())
+	{
+		buttons << backend->PadButtonText(name);
+	}
+	const auto separator = QStringLiteral(" · ");
+	m_keys_cell->SetText(keys.isEmpty() ? tr("Not bound") : keys.join(separator), !keys.isEmpty());
+	m_pad_cell->SetText(buttons.isEmpty() ? tr("Not bound") : buttons.join(separator), !buttons.isEmpty());
+	m_pad_cell->setVisible(binding.value("pad").toBool());
+	const auto label = Translated(m_field.label);
+	SetAccessible(m_keys_cell, QAccessible::Button, tr("%1, keyboard and mouse").arg(label), help);
+	SetAccessible(m_pad_cell, QAccessible::Button, tr("%1, controller").arg(label), help);
+}
+
+void FieldRowItem::ClearBinding(bool gamepad)
+{
+	auto binding = m_value.toMap();
+	binding[gamepad ? "buttons" : "keys"] = QStringList();
+	emit Edited(m_field.key, binding);
 }
 
 void FieldRowItem::ShowModules(const QVariantList& modules)
@@ -462,6 +552,16 @@ qreal FieldRowItem::PlaceControl(const QRectF& rect)
 		m_choice->setPosition(rect.topLeft());
 		m_choice->setSize(rect.size());
 	}
+	if (m_keys_cell != nullptr)
+	{
+		PlaceBinding(rect);
+	}
+	if (m_stick != nullptr)
+	{
+		m_stick->setPosition(rect.topLeft());
+		m_stick->setSize(QSizeF(rect.width(), STICK_SIZE * u));
+		return STICK_SIZE * u;
+	}
 
 	if (m_field.type == FieldType::Modules)
 	{
@@ -507,6 +607,35 @@ qreal FieldRowItem::PlaceControl(const QRectF& rect)
 		return y - PARAM_SPACING * u - rect.top();
 	}
 	return rect.height();
+}
+
+// The keyboard cell in the first half, the controller's in the second; a stick direction names its stick there.
+void FieldRowItem::PlaceBinding(const QRectF& rect)
+{
+	const auto* theme = Theme::Instance();
+	const qreal gap   = CELL_GAP * theme->U();
+	const qreal cell  = std::max<qreal>(0, (rect.width() - gap) / 2);
+	const QRectF second(rect.left() + cell + gap, rect.top(), cell, rect.height());
+	m_keys_cell->setPosition(rect.topLeft());
+	m_keys_cell->setSize(QSizeF(cell, rect.height()));
+	m_pad_cell->setPosition(second.topLeft());
+	m_pad_cell->setSize(second.size());
+	const QString key = m_field.key;
+	if (!m_value.toMap().value("pad").toBool())
+	{
+		const auto stick = key.startsWith(QLatin1String("bind.left-stick")) ? tr("Left stick") : tr("Right stick");
+		m_texts << Line(second.adjusted(gap, 0, 0, 0), tr("%1 on the controller").arg(stick), SmallFont(), theme->TextMuted());
+	}
+	// The first row of the list says which column is which, on the line of its heading.
+	if (m_field.heading != nullptr)
+	{
+		const auto font   = SmallFont();
+		const qreal above = std::ceil(QFontMetricsF(SceneFont(theme->FontSmall(), QFont::DemiBold)).height()) + HEADING_GAP * theme->U() +
+		                    ROW_INSET_Y * theme->U();
+		const qreal top   = rect.top() - above;
+		m_texts << Line(QRectF(rect.left(), top, cell, LineHeight(font)), tr("Keyboard and mouse"), font, theme->TextMuted());
+		m_texts << Line(QRectF(second.left(), top, cell, LineHeight(font)), tr("Controller"), font, theme->TextMuted());
+	}
 }
 
 QSGNode* FieldRowItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)
@@ -555,6 +684,23 @@ QSGNode* FieldRowItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
 		node->texts->appendChildNode(text_node);
 	}
 	return node;
+}
+
+// Left and Right move between a binding's two cells; anything else goes on to the form.
+void FieldRowItem::keyPressEvent(QKeyEvent* event)
+{
+	const bool pad = m_value.toMap().value("pad").toBool();
+	if (m_keys_cell != nullptr && pad && event->key() == Qt::Key_Right && m_keys_cell->hasActiveFocus())
+	{
+		m_pad_cell->forceActiveFocus(Qt::TabFocusReason);
+		return;
+	}
+	if (m_keys_cell != nullptr && event->key() == Qt::Key_Left && m_pad_cell->hasActiveFocus())
+	{
+		m_keys_cell->forceActiveFocus(Qt::BacktabFocusReason);
+		return;
+	}
+	event->ignore();
 }
 
 void FieldRowItem::mousePressEvent(QMouseEvent* event)

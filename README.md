@@ -156,8 +156,8 @@ contain private information; sanitize them before sharing a report.
 
 A connected game controller is used directly, and the keyboard and mouse
 drive a virtual pad beside it. Bindings, mouse look, stick deadzones and the
-controller to use come from an [input profile](docs/input-profiles.md); the
-default one is:
+controller to use come from an [input profile](docs/input-profiles.md),
+edited in the launcher under Settings › Controls; the default one is:
 
 | Key | Pad input |
 | --- | --- |
