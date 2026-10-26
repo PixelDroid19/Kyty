@@ -246,7 +246,8 @@ static std::vector<uint8_t> ShaderGetMetadataSgprLiveness(const ShaderCode& code
 
 bool ShaderInstructionReadsImageResource(ShaderInstructionType type)
 {
-	return type == ShaderInstructionType::ImageGetResinfo || type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageLoad || type == ShaderInstructionType::ImageSample ||
+	return type == ShaderInstructionType::ImageGetResinfo || type == ShaderInstructionType::ImageGather4 ||
+	       type == ShaderInstructionType::ImageGather4C || type == ShaderInstructionType::ImageLoad || type == ShaderInstructionType::ImageSample ||
 	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
 	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleO ||
 	       type == ShaderInstructionType::ImageSampleB || type == ShaderInstructionType::ImageSampleDrefLz ||
@@ -261,7 +262,8 @@ bool ShaderInstructionWritesImageResource(ShaderInstructionType type)
 
 bool ShaderInstructionUsesImageSampler(ShaderInstructionType type)
 {
-	return type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageSample ||
+	return type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageGather4C ||
+	       type == ShaderInstructionType::ImageSample ||
 	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
 	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleO ||
 	       type == ShaderInstructionType::ImageSampleB || type == ShaderInstructionType::ImageSampleDrefLz ||

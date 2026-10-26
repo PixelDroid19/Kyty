@@ -133,6 +133,8 @@ static bool UsesThreeDimensionalImages(const ShaderBindResources* bind)
 bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst)
 {
 	if ((inst.type == ShaderInstructionType::ImageGetResinfo && inst.format == ShaderInstructionFormat::VdataVaddrStDmask) ||
+	    (inst.type == ShaderInstructionType::ImageGather4C && (inst.format == ShaderInstructionFormat::VdataVaddr4StSsMimgDmask ||
+	                                                           inst.format == ShaderInstructionFormat::VdataVaddr6StSsMimgDmask)) ||
 	    (inst.type == ShaderInstructionType::ImageGather4 && (inst.format == ShaderInstructionFormat::Vdata4Vaddr3StSsMimgDmask ||
 	                                                          inst.format == ShaderInstructionFormat::VdataVaddr4StSsMimgDmask)) ||
 	    (inst.type == ShaderInstructionType::ImageLoad && inst.format == ShaderInstructionFormat::VdataVaddr3StDmask))
@@ -944,6 +946,7 @@ bool IsImageInstruction(const ShaderInstruction& inst)
 	{
 		case ShaderInstructionType::ImageGetResinfo:
 		case ShaderInstructionType::ImageGather4:
+		case ShaderInstructionType::ImageGather4C:
 		case ShaderInstructionType::ImageLoad:
 		case ShaderInstructionType::ImageSample:
 		case ShaderInstructionType::ImageSampleL:
@@ -968,6 +971,7 @@ bool IsSampledImageInstruction(const ShaderInstruction& inst)
 	{
 		case ShaderInstructionType::ImageGetResinfo:
 		case ShaderInstructionType::ImageGather4:
+		case ShaderInstructionType::ImageGather4C:
 		case ShaderInstructionType::ImageLoad:
 		case ShaderInstructionType::ImageSample:
 		case ShaderInstructionType::ImageSampleL:
@@ -3838,7 +3842,28 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask)
 	if (inst.mimg_dmask == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.mimg_dmask == 0 condition ignored (continuing)\n"); }
 	if (inst.dst.size != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != 4 condition ignored (continuing)\n"); }
 
-	const int  first      = inst.mimg_offset ? 1 : 0;
+	// IMAGE_GATHER4_C* compares each gathered texel with the reference that
+	// follows the offset, using S# DEPTH_COMPARE_FUNC, before returning it.
+	const bool compare    = inst.type == ShaderInstructionType::ImageGather4C;
+	const int  reference  = inst.mimg_offset ? 1 : 0;
+	const int  first      = reference + (compare ? 1 : 0);
+	String8    compare_text;
+	if (compare)
+	{
+		const auto* vs_info       = spirv->GetVsInputInfo();
+		const int   sampler_index = ShaderFindImageSamplerDescriptor(inst, *bind_info, vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
+		if (sampler_index < 0 || UsesUnsignedIntegerImages(bind_info))
+		{
+			return false;
+		}
+		compare_text = EmitImageSampleCLzCompare(index, bind_info->samplers.samplers[sampler_index].DepthCompareFunc());
+		const auto dref = mimg_address_to_str(inst, reference);
+		if (compare_text.IsEmpty() || dref.type != SpirvType::Float)
+		{
+			return false;
+		}
+		*dst_source += String8::FromPrintf("%%image_dref_reference_%u = OpLoad %%float %%%s\n", index, dref.value.c_str());
+	}
 	const auto x          = mimg_address_to_str(inst, first);
 	const auto y          = mimg_address_to_str(inst, first + 1);
 	const auto z          = mimg_address_to_str(inst, first + 2);
@@ -3922,6 +3947,18 @@ OpBranchConditional %image_gather_is_array_<index> %image_gather_array_<index> %
 	{
 		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component_index));
 		if (dst.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (compare)
+		{
+			const auto index_string_tap = index_string + String8::FromPrintf("_%u", component_index);
+			*dst_source += String8::FromPrintf("%%image_dref_texel_%u_%u = OpCompositeExtract %%float %s %u\n", index,
+			                                   component_index, result.c_str(), component_index);
+			*dst_source += String8(compare_text)
+			                   .ReplaceStr("%image_dref_texel_" + index_string, "%image_dref_texel_" + index_string_tap)
+			                   .ReplaceStr("%image_dref_passes_" + index_string, "%image_dref_passes_" + index_string_tap)
+			                   .ReplaceStr("%image_dref_result_" + index_string, "%image_dref_result_" + index_string_tap);
+			*dst_source += String8::FromPrintf("OpStore %%%s %%image_dref_result_%u_%u\n", dst.value.c_str(), index, component_index);
+			continue;
+		}
 		*dst_source += String8(R"(
 %image_gather_component_<index>_<component> = OpCompositeExtract %<image_scalar> <result> <component>
 %image_gather_component_f_<index>_<component> = <scalar_to_float> %float %image_gather_component_<index>_<component>

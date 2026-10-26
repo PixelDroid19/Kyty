@@ -119,7 +119,12 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 		case 0x18: KYTY_NI("s_flbit_i32_i64"); break;
 		case 0x19: KYTY_NI("s_sext_i32_i8"); break;
 		case 0x1A: KYTY_NI("s_sext_i32_i16"); break;
-		case 0x1B: KYTY_NI("s_bitset0_b32"); break;
+		case 0x1B:
+			inst.type    = ShaderInstructionType::SBitset0B32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src[1]  = inst.dst;
+			inst.src_num = 2;
+			break;
 		case 0x1C: KYTY_NI("s_bitset0_b64"); break;
 		case 0x1D:
 			inst.type    = ShaderInstructionType::SBitset1B32;

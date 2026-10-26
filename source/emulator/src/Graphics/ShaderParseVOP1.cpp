@@ -235,7 +235,7 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 		case 0x37: inst.type = ShaderInstructionType::VNotB32; break;
 		case 0x38: inst.type = ShaderInstructionType::VBfrevB32; break;
 		case 0x39: KYTY_NI("v_ffbh_u32"); break;
-		case 0x3A: KYTY_NI("v_ffbl_b32"); break;
+		case 0x3A: inst.type = ShaderInstructionType::VFfblB32; break;
 		case 0x3B: KYTY_NI("v_ffbh_i32"); break;
 		case 0x3C: KYTY_NI("v_frexp_exp_i32_f64"); break;
 		case 0x3D: KYTY_NI("v_frexp_mant_f64"); break;

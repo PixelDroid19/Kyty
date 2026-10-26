@@ -522,7 +522,21 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x4C: KYTY_NI("image_gather4_c_l"); break;
 		case 0x4D: KYTY_NI("image_gather4_c_b"); break;
 		case 0x4E: KYTY_NI("image_gather4_c_b_cl"); break;
-		case 0x4F: KYTY_NI("image_gather4_c_lz"); break;
+		case 0x4F:
+		case 0x5F:
+			// image_gather4_c_lz and image_gather4_c_lz_o: the depth reference follows the offset.
+			EXIT_NOT_IMPLEMENTED(dmask == 0);
+			inst.type        = ShaderInstructionType::ImageGather4C;
+			inst.mimg_offset = opcode == 0x5Fu;
+			inst.src[0].size = nsa != 0u ? 1 : (inst.mimg_offset ? 6 : 4);
+			inst.src[1].size = 8;
+			inst.src[2].size = 4;
+			inst.src_num     = 3;
+			inst.dst.size    = 4;
+			inst.format      = nsa != 0u || inst.mimg_offset ? ShaderInstructionFormat::VdataVaddr6StSsMimgDmask
+			                                                 : ShaderInstructionFormat::VdataVaddr4StSsMimgDmask;
+			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
+			break;
 		case 0x50: KYTY_NI("image_gather4_o"); break;
 		case 0x51: KYTY_NI("image_gather4_cl_o"); break;
 		case 0x54: KYTY_NI("image_gather4_l_o"); break;
@@ -533,7 +547,6 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x5C: KYTY_NI("image_gather4_c_l_o"); break;
 		case 0x5D: KYTY_NI("image_gather4_c_b_o"); break;
 		case 0x5E: KYTY_NI("image_gather4_c_b_cl_o"); break;
-		case 0x5F: KYTY_NI("image_gather4_c_lz_o"); break;
 		case 0x60: KYTY_NI("image_get_lod"); break;
 		case 0x22:
 		case 0x68:

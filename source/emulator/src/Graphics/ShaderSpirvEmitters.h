@@ -49,6 +49,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsRead2B64_Vdst2VaddrOffset01);
 KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset);
 KYTY_RECOMPILER_FUNC(Recompile_DsReadAddtidB32_VdstOffset);
 KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty);
+KYTY_RECOMPILER_FUNC(Recompile_SBitset0B32);
 KYTY_RECOMPILER_FUNC(Recompile_SBitset1B32);
 KYTY_RECOMPILER_FUNC(Recompile_SAbsI32);
 KYTY_RECOMPILER_FUNC(Recompile_ImageAtomic);

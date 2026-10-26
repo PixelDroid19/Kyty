@@ -610,6 +610,9 @@ enum class ShaderInstructionType : uint32_t
 	SPackLhB32B16,
 	SPackHhB32B16,
 	SAbsdiffI32,
+	SBitset0B32,
+	ImageGather4C,
+	VFfblB32,
 
 	ZMax
 };
