@@ -2071,7 +2071,33 @@ Known approximations and debt recorded by this chain:
   With those translated the run reaches the hub's own resources and then
   fails with the device lost described below, so the hub's first gameplay
   draw now executes.
-- **The merged tree stops presenting before the hub (open, 2026-10-26).** A
+- **A suspended submitter must not pass the command processor (fixed,
+  2026-10-26).** The merged tree stopped at `frame 1`/`present 0`. The guest
+  main thread waited on a guest mutex whose owner polled the title's
+  `Gpu::GpuDevice::EopEq` event queue (`KernelEqueuePrivate::WaitForEvents`,
+  eight events, 1 µs), and all three command processors were parked in
+  `WaitForSuspendedRuns`. The `KYTY_WAIT_TIMEOUT_MS` deadline named the waits:
+  8-byte `WAIT_REG_MEM` on `0x40b5faa40`, `0x40b5fc140` and `0x40b5fc1c0`,
+  value 0, reference 1, mask `0xffffffff`, function 3 (equal), queues 6/7/8,
+  with no pending GPU producer. The wait trace shows `0x40b5fc140` is a CPU
+  store: 77 suspensions and no end-of-pipe label for it in the same window.
+  The early release of the suspended batch's decode completion let its
+  submitter take the lock ahead of the thread that writes that label, so the
+  label never arrived, the end-of-pipe event could not fire and the ring
+  stayed parked. Only queued submitters return now; the suspended batch waits
+  until decode consumes its stream. Verified on the strict route: reverting the
+  early release for every batch gives 586 presents at 45 s, one ~90 s stall
+  that recovered, and 2157 presents at 360 s; the narrowed fix gives 3832
+  presents at 360 s with no stall (HLE-only control `7dd05019`: 3374 presents
+  at 420 s). Reverting the split-wave16 commit `2a198ab0` or the APR file-id
+  commit `bc2a646d` alone did not change the stop, and a debug-level run
+  (slower host timing) reached `ps_logo` before a later deadline, which
+  confirms the stop is a race on submit/decode timing rather than a lost
+  device. Demon's Souls, which the early release was added for, still returns
+  the queued submitters; the suspended batch's own release is not exercised by
+  that title's recorded deadlock (the value came from a thread blocked
+  submitting the next batch) and remains unverified on that title here.
+- **The merged tree stops presenting before the hub (resolved, 2026-10-26).** A
   bounded translator-160 run on the tree that merges the HLE runtime and the
   split-wave16 branches reaches three presented frames (`frame 4`,
   `present 3`, then `phase=stalled` with no present for 54 s) and writes no
@@ -2082,7 +2108,8 @@ Known approximations and debt recorded by this chain:
   `ds_bpermute_b32` executes before the stall, so the lane-permute fix is not
   involved. The next run captured the process thread stacks (record below),
   which exclude host shader compilation as the block; the A/B of the HLE-only
-  merge against the split-wave16 merge is still open.
+  merge against the split-wave16 merge is recorded below and led to the
+  submit/decode race fixed in the newest record.
 - **The boot stop is a guest lock wait; no shader compiles during it
   (2026-10-26).** A bounded strict run of the same merged build (translator
   160, 1280x720, offscreen) reproduces `frame 1`, `present 0` and
@@ -2118,10 +2145,12 @@ Known approximations and debt recorded by this chain:
   not the prime suspect: a 2026-10-24 run on this host presented frames 1343
   and 2985 of the crash-site scene with the 16-lane parts. Since the HLE-only
   tree predates the split-wave16 branch, the block is in the merge of the two
-  trees, i.e. in the kernel, libc and fault-delivery changes that came with
-  the second parent (`2a198ab0`).
-  Next: read the stalled mutex owner on the merged tree and test the merge's
-  kernel/fault commits against the merged tree.
+  trees, i.e. in the 25 commits of the second parent's branch (its tip is the
+  split-wave16 shader commit `2a198ab0`; the kernel, libc and fault-delivery
+  work is inside that range).
+  Next: the mutex owner was read and the commit A/B ran; reverts of
+  `2a198ab0` and `bc2a646d` did not change the stop, and the decode-release
+  path in `6aa58ed2` did. The narrowed fix and its run are the newest record.
 - **The narrowing SDWA is translated.** The hub's pixel program also uses
   `vcvt_f16_f32` with a sub-dword addressing modifier, which the half
   arithmetic refused. The ISA's SDWA fields give the contract: the source is

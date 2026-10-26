@@ -16,6 +16,29 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## A suspended batch waits for the command processor (2026-10-26)
+
+- **Observed.** On Intel Arc A770 (Mesa ANV 26.2.5) the merged runtime stopped
+  presenting at boot (`frame 1`, `present 0`) while a guest thread held a
+  mutex whose owner polled its end-of-pipe event queue, and every command
+  processor was parked in `WaitForSuspendedRuns`. The `KYTY_WAIT_TIMEOUT_MS`
+  deadline named 8-byte `WAIT_REG_MEM` waits (function equal, reference 1) on
+  CPU-written labels with no pending GPU producer; `KYTY_WAIT_TRACE` recorded
+  77 suspensions and no end-of-pipe label for one of them.
+- **Cause.** `GraphicsRing::SetDecodeReleased` signaled the decode completion
+  of the batch suspended at the wait as well as the queued batches. The
+  suspended batch's completion interrupt follows the packets after the wait,
+  so the command processor cannot have consumed them yet; returning its
+  submitter let the title take a lock ahead of the thread that stores the
+  awaited value, and the wait never resolved.
+- **Change.** While decode waits on a value no submitted GPU work writes, only
+  queued batches' submitters return. The suspended batch keeps waiting until
+  decode continues, matching the command processor's in-order consumption.
+- **Verified.** Robot platformer (PPSA21567), strict 420 s run: 3832 presents
+  in 360 s with no stall; the HLE-only merge control presents 3374 in 420 s.
+  Reverting the whole release instead gives 586 presents at 45 s, one ~90 s
+  stall that recovers, and 2157 presents at 360 s.
+
 ## GDS backing shared across queue families (2026-10-26)
 
 - **Observed** (robot platformer, Intel Arc A770, Mesa ANV 26.2.5, strict,

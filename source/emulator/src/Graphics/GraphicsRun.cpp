@@ -1619,10 +1619,12 @@ void GraphicsRing::SetDecodeReleased(const CmdBatch* current, bool released)
 	{
 		return;
 	}
-	if (current->decode_completion != nullptr)
-	{
-		current->decode_completion->Signal();
-	}
+	// The suspended batch keeps waiting: its completion interrupt follows the
+	// packets after the wait, so the CP can only consume them once the value
+	// lands. Its submitter must not observe completion first, or the title can
+	// take a lock ahead of the thread that stores the awaited value. Queued
+	// submitters return instead, because the ring cannot decode them until the
+	// wait resolves and one of them may carry the CPU store.
 	FOR_LIST (index, m_cmd_batches)
 	{
 		const auto& queued = m_cmd_batches.At(index);
@@ -1766,9 +1768,10 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				auto* draw_wait     = draw.blocked ? &draw.suspended : nullptr;
 				EXIT_IF(constant_wait == nullptr && draw_wait == nullptr);
 				cp->RunUnlock();
-				// Decode cannot pass a wait that no submitted GPU work satisfies, as
-				// on hardware; the submitters must return because their next store
-				// or submission may be the awaited value.
+				// Decode cannot pass a wait that no submitted GPU work satisfies.
+				// Queued submitters return because their next store or submission
+				// may be the awaited value; the suspended batch keeps waiting for
+				// the command processor to consume its stream.
 				const bool host_producer = !SuspendedRunsHaveGpuProducer(cp, constant_wait, draw_wait);
 				if (host_producer)
 				{
