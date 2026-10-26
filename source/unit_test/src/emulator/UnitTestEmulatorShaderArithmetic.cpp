@@ -852,6 +852,52 @@ std::array<uint32_t, 2> SignedBfe64Reference(uint32_t low, uint32_t high, uint32
 	std::_Exit(0);
 }
 
+[[noreturn]] void RunHalfCompareMaskDestination()
+{
+	Initialize();
+	// V_CMP_NEQ_F16 with an SDWA destination names one mask dword (vcc_hi in
+	// the hub's program); a plain compare names the VCC pair.
+	const auto emit = [](ShaderOperandType dst_type, int dst_size)
+	{
+		ShaderCode code;
+		code.SetType(ShaderType::Pixel);
+		ShaderInstruction inst {};
+		inst.pc                 = 0;
+		inst.type               = ShaderInstructionType::VCmpNeqF16;
+		inst.format             = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
+		inst.src_num            = 2;
+		inst.src[0].type        = ShaderOperandType::IntegerInlineConstant;
+		inst.src[0].constant.u  = 0u;
+		inst.src[1].type        = ShaderOperandType::Vgpr;
+		inst.src[1].register_id = 15;
+		inst.src[1].size        = 1;
+		inst.dst.type           = dst_type;
+		inst.dst.size           = dst_size;
+		inst.dst.register_id    = 0;
+		code.GetInstructions().Add(inst);
+		ShaderInstruction end {};
+		end.type = ShaderInstructionType::SEndpgm;
+		end.format = ShaderInstructionFormat::Empty;
+		code.GetInstructions().Add(end);
+		return Emit(code, 0xc0u, false, false, true);
+	};
+	const auto stores = [](const Core::String8& source, const char* text)
+	{
+		return source.FindIndex(text) != Core::STRING8_INVALID_INDEX;
+	};
+	const auto single = emit(ShaderOperandType::VccHi, 1);
+	if (!stores(single, "OpStore %vcc_hi %mask_out_lo_0") || stores(single, "OpStore %vcc_lo %mask_out_lo_0"))
+	{
+		Fail("a compare that names one mask word must not write the other");
+	}
+	const auto pair = emit(ShaderOperandType::VccLo, 2);
+	if (!stores(pair, "OpStore %vcc_lo %mask_out_lo_0") || !stores(pair, "OpStore %vcc_hi %mask_out_hi_0"))
+	{
+		Fail("a two-word compare must write both mask words");
+	}
+	std::_Exit(0);
+}
+
 enum class Rejected
 {
 	OpSel, Sdwa, Dpp, Omod, Round, RoundDown, RoundZero, Ieee, UnknownComputeMode,
@@ -1160,6 +1206,10 @@ TEST(EmulatorShaderArithmetic, Fp16SdwaHalfDestinationReadsAndPreservesHalves)
 	{
 		ASSERT_EXIT(RunSdwaHalfDestination(stage), ::testing::ExitedWithCode(0), "");
 	}
+}
+TEST(EmulatorShaderArithmetic, HalfCompareWritesOnlyTheMaskWordsTheDestinationNames)
+{
+	ASSERT_EXIT(RunHalfCompareMaskDestination(), ::testing::ExitedWithCode(0), "");
 }
 TEST(EmulatorShaderArithmetic, BfeDefinedForEveryMaskedOffsetAndWidth) { ASSERT_EXIT(RunBfe(), ::testing::ExitedWithCode(0), ""); }
 TEST(EmulatorShaderArithmetic, ComputeFp16EncodingsAssembleAndValidate)

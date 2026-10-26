@@ -2039,7 +2039,19 @@ Known approximations and debt recorded by this chain:
   covers both source word selects, preserved/zeroed/high-half destinations
   and the inactive lane. The 335 shader and packet tests pass. The hub run
   with this translator is pending.
-  Still open: the half compare family has no not-equal entry.
+  Translator 154 fixes the compare's mask destination: the hub's
+  `v_cmp_neq_f16` at pc 0x998 names `vcc_hi` alone, and the half compare
+  emitter wrote two mask words, so it read the second word of a one-word
+  destination. Every VCC-writing compare emitter now stores only the words
+  the destination names; the F32 and integer emitters already did. The
+  not-equal dispatch entry itself existed since the earlier gfx10 gap fix,
+  so the open item was the destination shape, not the entry. Evidence:
+  `firmware/work/evidence/cmp-mask-destination-isa.txt`
+  (`rdnai1-isa-vopc-sdwa-mask-destination`) and the strict-run logs that
+  reported the missing emitter and then the out-of-range word. Unit test
+  `EmulatorShaderArithmetic.HalfCompareWritesOnlyTheMaskWordsTheDestinationNames`
+  covers the one-word and the pair destinations. The hub run with
+  translator 154 is pending.
 - **The device lost is intermittent: two of three runs.** A third run with
   the native capture directory enabled (same scripted route, same build)
   reaches the hub and keeps running until the 900 s cap with no fence
