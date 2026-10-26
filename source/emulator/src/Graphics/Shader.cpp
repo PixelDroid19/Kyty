@@ -1081,6 +1081,31 @@ static bool ShaderFragmentRunsAsPartialWave(const ShaderCode& code, const Shader
 	return true;
 }
 
+bool ShaderNativeWaveParticipationRefusal(const char* reason)
+{
+	if (reason == nullptr)
+	{
+		return false;
+	}
+	static constexpr const char* kParticipation[] = {
+	    "fragment wave append/consume lacks a participating-lane proof",
+	    "fragment mask packing after an export or indirect jump lacks a quad participation proof",
+	    "READFIRSTLANE target quad is not proven to retain a participating real member",
+	    "READLANE physical source may be unavailable or in an all-helper quad",
+	    "fragment permutation source participation is unproven",
+	    "fragment DPP after an export or indirect jump lacks a quad participation proof",
+	    "fragment row DPP source participation is unproven (neutral values do not prove helper recovery)",
+	};
+	for (const auto* candidate: kParticipation)
+	{
+		if (std::strcmp(reason, candidate) == 0)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t guest_wave_size)
 {
 	ShaderNativeWaveInfo info;

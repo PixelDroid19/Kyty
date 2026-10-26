@@ -40,6 +40,7 @@
 #include <clocale>
 #include <cstdarg>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -55,6 +56,11 @@
 #include <typeinfo>
 #include <unordered_map>
 #include <vector>
+
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 // Host Itanium C++ ABI / unwinder. Guest code executes natively on the host,
 // so guest C++ exceptions are serviced by the real host libstdc++/libgcc
@@ -447,10 +453,12 @@ static KYTY_SYSV_ABI void* cxx_new_nothrow(size_t size, const void* /*nothrow_ta
 }
 static KYTY_SYSV_ABI void cxx_delete(void* p)
 {
-	if (!free_by_owner(p))
+	if (p == nullptr)
 	{
-		EXIT("ApplicationHeap delete failed\n");
+		return;
 	}
+	// c_free also resolves memalign pointers to their original allocation.
+	c_free(p);
 }
 static KYTY_SYSV_ABI void cxx_delete_sized(void* p, size_t /*size*/)
 {
@@ -478,6 +486,25 @@ static KYTY_SYSV_ABI void cxx_delete_array(void* p)
 static KYTY_SYSV_ABI void cxx_delete_array_sized(void* p, size_t /*size*/)
 {
 	cxx_delete_array(p);
+}
+
+// libc++ _ZnwmSt11align_val_t: aligned operator new. c_memalign keeps the
+// allocation in the same owner/tracking table as plain new/delete.
+void* cxx_new_aligned(size_t size, size_t alignment)
+{
+	return c_memalign(alignment, size != 0 ? size : 1);
+}
+
+// libc++ _ZdlPvRKSt9nothrow_t: the nothrow tag does not affect deallocation.
+void cxx_delete_nothrow(void* p)
+{
+	cxx_delete(p);
+}
+
+// libc++ _ZSt15get_new_handlerv: Kyty installs no replacement new handler.
+void* c_get_new_handler()
+{
+	return nullptr;
 }
 
 static std::atomic<uint32_t>* c_atomic_4_ref(uint32_t* value)
@@ -4490,6 +4517,627 @@ static KYTY_SYSV_ABI void c_throw_cpp_error(int err)
 	EXIT("std::_Throw_Cpp_error(%d)\n", err);
 }
 
+// libc++ _ZSt19_Throw_bad_weak_ptrv / _ZSt19_Throw_future_errorRKSt10error_code
+// / _ZSt25_Rethrow_future_exceptionSt13exception_ptr /
+// _ZSt26__throw_bad_variant_accessv. These are terminal error paths in the
+// guest libc++ runtime; like _Throw_Cpp_error they cannot unwind through HLE.
+void cxx_throw_bad_weak_ptr()
+{
+	EXIT("std::__throw_bad_weak_ptr()\n");
+}
+
+void cxx_throw_future_error(const void* error_code)
+{
+	int32_t value = 0;
+	if (error_code != nullptr)
+	{
+		std::memcpy(&value, error_code, sizeof(value));
+	}
+	EXIT("std::__throw_future_error(%d)\n", value);
+}
+
+void cxx_rethrow_future_exception(const void* exception_ptr)
+{
+	EXIT("std::__rethrow_future_exception(%p)\n", exception_ptr);
+}
+
+void cxx_throw_bad_variant_access()
+{
+	EXIT("std::__throw_bad_variant_access()\n");
+}
+
+// libc++ _ZNSt13runtime_errorD1Ev and friends: the exception object embeds a
+// std::string at offset 0x10 (size at 0x20, capacity at 0x28). Allocations of
+// 0x1000 bytes or more keep the original pointer 8 bytes before the data.
+static void cxx_destroy_exception_string(void* self)
+{
+	auto*    obj      = static_cast<uint8_t*>(self);
+	uint64_t capacity = 0;
+	std::memcpy(&capacity, obj + 0x28, sizeof(capacity));
+	if (capacity >= 0x10u)
+	{
+		void* data = nullptr;
+		std::memcpy(&data, obj + 0x10, sizeof(data));
+		void* allocation = data;
+		if (capacity >= 0x1000u)
+		{
+			std::memcpy(&allocation, static_cast<uint8_t*>(data) - 8, sizeof(allocation));
+		}
+		cxx_delete(allocation);
+	}
+	const uint64_t small_capacity = 0xf;
+	const uint64_t empty_size     = 0;
+	std::memcpy(obj + 0x28, &small_capacity, sizeof(small_capacity));
+	std::memcpy(obj + 0x20, &empty_size, sizeof(empty_size));
+	obj[0x10] = 0;
+}
+
+void cxx_runtime_error_dtor(void* self)
+{
+	if (self != nullptr)
+	{
+		cxx_destroy_exception_string(self);
+	}
+}
+
+void cxx_invalid_argument_dtor(void* self)
+{
+	if (self != nullptr)
+	{
+		cxx_destroy_exception_string(self);
+	}
+}
+
+void cxx_future_error_dtor(void* self)
+{
+	if (self != nullptr)
+	{
+		cxx_destroy_exception_string(self);
+	}
+}
+
+// UTF-16 <-> UTF-8 state carried in the 16-byte guest mbstate_t. The firmware
+// libc uses byte 10 as the pending flag: 1 for a pending c16rtomb high
+// surrogate and 0x10 for a pending mbrtoc16 high code unit. The leading eight
+// bytes hold the accumulated scalar value.
+static uint64_t c16_load_state(const void* state)
+{
+	uint64_t value = 0;
+	std::memcpy(&value, state, sizeof(value));
+	return value;
+}
+
+static void c16_store_state(void* state, uint64_t value)
+{
+	std::memcpy(state, &value, sizeof(value));
+}
+
+static uint8_t c16_pending(const void* state)
+{
+	return static_cast<const uint8_t*>(state)[10];
+}
+
+static void c16_set_pending(void* state, uint8_t pending)
+{
+	auto* bytes = static_cast<uint8_t*>(state);
+	bytes[10]   = pending;
+	bytes[11]   = 0;
+}
+
+// Gen5 libc_v1 c16rtomb — NID EOLQfNZ9HpE.
+int c_c16rtomb(char* out, uint16_t c16, void* state)
+{
+	if (state == nullptr)
+	{
+		return -1;
+	}
+	if (out == nullptr)
+	{
+		c16 = 0;
+	}
+
+	uint32_t code_point = 0;
+	if (c16_pending(state) == 0)
+	{
+		if (static_cast<uint16_t>(c16 + 0x2400u) >= 0xfc00u)
+		{
+			c16_set_pending(state, 1);
+			c16_store_state(state, static_cast<uint64_t>(c16) * 0x400u + 0xfca10000u);
+			return 0;
+		}
+		code_point = c16;
+	} else
+	{
+		if (static_cast<uint16_t>(c16 + 0x2000u) < 0xfc00u)
+		{
+			return -1;
+		}
+		c16_set_pending(state, 0);
+		code_point = (static_cast<uint32_t>(c16) - 0xdc00u) | static_cast<uint32_t>(c16_load_state(state));
+	}
+
+	uint8_t local[8] = {};
+	auto*   dst      = (out != nullptr ? reinterpret_cast<uint8_t*>(out) : local);
+	if (code_point < 0x80u)
+	{
+		dst[0] = static_cast<uint8_t>(code_point);
+		return 1;
+	}
+	if (code_point < 0x800u)
+	{
+		dst[0] = static_cast<uint8_t>(0xc0u | (code_point >> 6u));
+		dst[1] = static_cast<uint8_t>(0x80u | (code_point & 0x3fu));
+		return 2;
+	}
+	if (code_point < 0x10000u)
+	{
+		dst[0] = static_cast<uint8_t>(0xe0u | (code_point >> 12u));
+		dst[1] = static_cast<uint8_t>(0x80u | ((code_point >> 6u) & 0x3fu));
+		dst[2] = static_cast<uint8_t>(0x80u | (code_point & 0x3fu));
+		return 3;
+	}
+	if (code_point < 0x200000u)
+	{
+		dst[0] = static_cast<uint8_t>(0xf0u | (code_point >> 18u));
+		dst[1] = static_cast<uint8_t>(0x80u | ((code_point >> 12u) & 0x3fu));
+		dst[2] = static_cast<uint8_t>(0x80u | ((code_point >> 6u) & 0x3fu));
+		dst[3] = static_cast<uint8_t>(0x80u | (code_point & 0x3fu));
+		return 4;
+	}
+	if (code_point < 0x4000000u)
+	{
+		dst[0] = static_cast<uint8_t>(0xf8u | (code_point >> 24u));
+		dst[1] = static_cast<uint8_t>(0x80u | ((code_point >> 18u) & 0x3fu));
+		dst[2] = static_cast<uint8_t>(0x80u | ((code_point >> 12u) & 0x3fu));
+		dst[3] = static_cast<uint8_t>(0x80u | ((code_point >> 6u) & 0x3fu));
+		dst[4] = static_cast<uint8_t>(0x80u | (code_point & 0x3fu));
+		return 5;
+	}
+	dst[0] = static_cast<uint8_t>(0xfcu | (code_point >> 30u));
+	dst[1] = static_cast<uint8_t>(0x80u | ((code_point >> 24u) & 0x3fu));
+	dst[2] = static_cast<uint8_t>(0x80u | ((code_point >> 18u) & 0x3fu));
+	dst[3] = static_cast<uint8_t>(0x80u | ((code_point >> 12u) & 0x3fu));
+	dst[4] = static_cast<uint8_t>(0x80u | ((code_point >> 6u) & 0x3fu));
+	dst[5] = static_cast<uint8_t>(0x80u | (code_point & 0x3fu));
+	return 6;
+}
+
+// Gen5 libc_v1 mbrtoc16 — NID ogPDBoLmCcA. Note the firmware's high-surrogate
+// join keeps the value encoded at +0x3fc0 before OR 0xd800; reproduced as-is.
+size_t c_mbrtoc16(uint16_t* out, const char* input, size_t size, void* state)
+{
+	if (state == nullptr)
+	{
+		errno = Posix::POSIX_EILSEQ;
+		return static_cast<size_t>(-1);
+	}
+	const char* src = input;
+	if (src == nullptr)
+	{
+		src  = "";
+		size = 1;
+		out  = nullptr;
+	}
+
+	uint64_t value   = c16_load_state(state);
+	uint8_t  pending = c16_pending(state);
+	if (pending == 0x10u)
+	{
+		if (out != nullptr)
+		{
+			*out = static_cast<uint16_t>((value & 0x3ffu) | 0xdc00u);
+		}
+		c16_set_pending(state, 0);
+		return static_cast<size_t>(-3);
+	}
+
+	for (size_t i = 0;; i++)
+	{
+		if (i == size)
+		{
+			c16_store_state(state, value);
+			c16_set_pending(state, pending);
+			return static_cast<size_t>(-2);
+		}
+		const auto byte = static_cast<uint8_t>(src[i]);
+		if (pending == 0)
+		{
+			if ((byte & 0x80u) == 0)
+			{
+				value = byte;
+			} else if ((byte & 0xe0u) == 0xc0u)
+			{
+				value   = byte & 0x1fu;
+				pending = 1;
+			} else if ((byte & 0xf0u) == 0xe0u)
+			{
+				value   = byte & 0x0fu;
+				pending = 2;
+			} else if ((byte & 0xf8u) == 0xf0u)
+			{
+				value   = byte & 0x07u;
+				pending = 3;
+			} else if ((~byte & 0xfcu) == 0)
+			{
+				value   = byte & 0x03u;
+				pending = 5;
+			} else if ((byte & 0xfcu) == 0xf8u)
+			{
+				value   = byte & 0x03u;
+				pending = 4;
+			} else
+			{
+				errno = Posix::POSIX_EILSEQ;
+				return static_cast<size_t>(-1);
+			}
+		} else
+		{
+			if ((byte & 0xc0u) != 0x80u)
+			{
+				errno = Posix::POSIX_EILSEQ;
+				return static_cast<size_t>(-1);
+			}
+			pending = static_cast<uint8_t>(pending - 1u);
+			value   = (value << 6u) | (byte & 0x3fu);
+		}
+
+		if (pending == 0)
+		{
+			if (value >= 0x110000u)
+			{
+				errno = Posix::POSIX_EILSEQ;
+				return static_cast<size_t>(-1);
+			}
+			if (value > 0xffffu)
+			{
+				if (out != nullptr)
+				{
+					*out = static_cast<uint16_t>((static_cast<uint32_t>(value >> 10u) + 0x3fc0u) | 0xd800u);
+				}
+				c16_set_pending(state, 0x10);
+				return i + 1;
+			}
+			if (out != nullptr)
+			{
+				*out = static_cast<uint16_t>(value);
+			}
+			c16_set_pending(state, 0);
+			return value != 0 ? i + 1 : 0;
+		}
+	}
+}
+
+// Guest libc++ std::filesystem internals. The public API links against these
+// helpers, so they preserve the firmware's error conventions: Sony 0x8002xxxx
+// results are reported as their low 16-bit errno, except _File_size which
+// stores the raw kernel code. Directory streams are opaque to the guest.
+namespace {
+
+struct FsDirStream
+{
+	std::filesystem::directory_iterator iterator;
+};
+
+struct FsErrorCode
+{
+	int32_t     value;
+	const void* category;
+};
+
+int FsModeFileType(uint32_t mode)
+{
+	switch (mode & 0xf000u)
+	{
+		case 0x1000u: return 6;
+		case 0x2000u: return 5;
+		case 0x4000u: return 2;
+		case 0x6000u: return 4;
+		case 0x8000u: return 1;
+		case 0xa000u: return 3;
+		case 0xc000u: return 7;
+		default: return 8;
+	}
+}
+
+bool FsNotFoundErrno(int error)
+{
+	return error == 2 /*ENOENT*/ || error == 20 /*ENOTDIR*/ || error == 22 /*EINVAL*/ || error == 63 /*ENAMETOOLONG*/;
+}
+
+int FsStatus(const char* path, uint32_t* permissions, int* error, bool follow_links)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	std::error_code ec;
+	const auto      status = follow_links ? std::filesystem::status(path, ec) : std::filesystem::symlink_status(path, ec);
+	if (ec || status.type() == std::filesystem::file_type::not_found)
+	{
+		const int code = ec ? (ec.value() & 0xffff) : 2;
+		if (error != nullptr)
+		{
+			*error = code;
+		}
+		return FsNotFoundErrno(code) ? -1 : 0;
+	}
+	if (permissions != nullptr)
+	{
+		*permissions = static_cast<uint32_t>(status.permissions()) & 0x0fffu;
+	}
+	if (error != nullptr)
+	{
+		*error = 0;
+	}
+	switch (status.type())
+	{
+		case std::filesystem::file_type::regular: return 1;
+		case std::filesystem::file_type::directory: return 2;
+		case std::filesystem::file_type::symlink: return 3;
+		case std::filesystem::file_type::block: return 4;
+		case std::filesystem::file_type::character: return 5;
+		case std::filesystem::file_type::fifo: return 6;
+		case std::filesystem::file_type::socket: return 7;
+		default: return 8;
+	}
+#else
+	struct stat info {};
+	const int   result = follow_links ? ::stat(path, &info) : ::lstat(path, &info);
+	if (result != 0)
+	{
+		const int code = errno & 0xffff;
+		if (error != nullptr)
+		{
+			*error = code;
+		}
+		return FsNotFoundErrno(code) ? -1 : 0;
+	}
+	if (permissions != nullptr)
+	{
+		*permissions = static_cast<uint32_t>(info.st_mode) & 0x0fffu;
+	}
+	if (error != nullptr)
+	{
+		*error = 0;
+	}
+	return FsModeFileType(static_cast<uint32_t>(info.st_mode));
+#endif
+}
+
+char* FsReadDir(char* buffer, void* opaque, int* type)
+{
+	if (type != nullptr)
+	{
+		*type = 8;
+	}
+	buffer[0] = 0;
+	auto* stream = static_cast<FsDirStream*>(opaque);
+	if (stream == nullptr)
+	{
+		return buffer;
+	}
+	std::error_code ec;
+	while (stream->iterator != std::filesystem::directory_iterator())
+	{
+		const std::string name = stream->iterator->path().filename().string();
+		stream->iterator.increment(ec);
+		if (ec)
+		{
+			break;
+		}
+		if (name.empty() || name == "." || name == "..")
+		{
+			continue;
+		}
+		std::strncpy(buffer, name.c_str(), 259);
+		buffer[259] = 0;
+		break;
+	}
+	return buffer;
+}
+
+void* FsOpenDir(char* buffer, const char* path, int* error, int* type)
+{
+	std::error_code ec;
+	std::filesystem::directory_iterator iterator(path, ec);
+	if (ec)
+	{
+		if (error != nullptr)
+		{
+			*error = ec.value() & 0xffff;
+		}
+		return nullptr;
+	}
+	auto* stream = new (std::nothrow) FsDirStream {std::move(iterator)};
+	if (stream == nullptr)
+	{
+		if (error != nullptr)
+		{
+			*error = 12; // ENOMEM
+		}
+		return nullptr;
+	}
+	if (error != nullptr)
+	{
+		*error = 0;
+	}
+	FsReadDir(buffer, stream, type);
+	if (buffer[0] == 0)
+	{
+		delete stream;
+		return nullptr;
+	}
+	return stream;
+}
+
+} // namespace
+
+// _ZNSt10filesystem9_Open_dirERA260_cPKcRiRNS_9file_typeE — NID 8iuHpl+kg8A.
+void* c_fs_open_dir(char* buffer, const char* path, int* error, int* type)
+{
+	return FsOpenDir(buffer, path, error, type);
+}
+
+// _ZNSt10filesystem9_Read_dirERA260_cPvRNS_9file_typeE — NID w5CGykBBU5M.
+char* c_fs_read_dir(char* buffer, void* stream, int* type)
+{
+	return FsReadDir(buffer, stream, type);
+}
+
+// _ZNSt10filesystem10_Close_dirEPv — NID xGbaQPsHCFI.
+void c_fs_close_dir(void* stream)
+{
+	delete static_cast<FsDirStream*>(stream);
+}
+
+// _ZNSt10filesystem5_StatEPKcPNS_5permsEPi — NID 8KeeeFcEdls.
+int c_fs_stat(const char* path, uint32_t* permissions, int* error)
+{
+	return FsStatus(path, permissions, error, true);
+}
+
+// _ZNSt10filesystem6_LstatEPKcPNS_5permsEPi — NID tizCFt051h8.
+int c_fs_lstat(const char* path, uint32_t* permissions, int* error)
+{
+	return FsStatus(path, permissions, error, false);
+}
+
+// _ZNSt10filesystem10_File_sizeEPKcPi — NID 3U2eeEqUwR0. Unlike the other
+// helpers this stores the raw Sony kernel error code in *error.
+uint64_t c_fs_file_size(const char* path, int* error)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	std::error_code ec;
+	const auto      size = std::filesystem::file_size(path, ec);
+	if (ec)
+	{
+		if (error != nullptr)
+		{
+			*error = static_cast<int>(0x80020000u | (ec.value() & 0xffff));
+		}
+		return static_cast<uint64_t>(-1);
+	}
+#else
+	struct stat info {};
+	if (::stat(path, &info) != 0)
+	{
+		if (error != nullptr)
+		{
+			*error = static_cast<int>(0x80020000u | (errno & 0xffff));
+		}
+		return static_cast<uint64_t>(-1);
+	}
+	const auto size = static_cast<uint64_t>(info.st_size);
+#endif
+	if (error != nullptr)
+	{
+		*error = 0;
+	}
+	return size;
+}
+
+// _ZNSt10filesystem9_Make_dirEPKcS1_ — NID x7pQExTeqBY. The second path, when
+// present, supplies the permissions; EEXIST is reported as success.
+int c_fs_make_dir(const char* path, const char* permissions_source)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	std::error_code ec;
+	std::filesystem::perms mode = std::filesystem::perms::all;
+	if (permissions_source != nullptr)
+	{
+		const auto status = std::filesystem::status(permissions_source, ec);
+		if (ec || status.type() == std::filesystem::file_type::not_found)
+		{
+			return -(ec ? (ec.value() & 0xffff) : 2);
+		}
+		mode = status.permissions();
+	}
+	if (std::filesystem::create_directory(path, mode, ec))
+	{
+		return 1;
+	}
+	return ec ? -(ec.value() & 0xffff) : 0;
+#else
+	mode_t mode = 0777;
+	if (permissions_source != nullptr)
+	{
+		struct stat info {};
+		if (::stat(permissions_source, &info) != 0)
+		{
+			return -(errno & 0xffff);
+		}
+		mode = info.st_mode;
+	}
+	if (::mkdir(path, mode) == 0)
+	{
+		return 1;
+	}
+	if (errno == 17 /*EEXIST*/)
+	{
+		return 0;
+	}
+	return -(errno & 0xffff);
+#endif
+}
+
+// _ZNSt10filesystem11_Remove_dirEPKc — NID YDQxE4cIwa4.
+bool c_fs_remove_dir(const char* path)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	std::error_code ec;
+	return std::filesystem::remove(path, ec) && !ec;
+#else
+	return ::rmdir(path) == 0;
+#endif
+}
+
+// _ZNSt10filesystem7_RenameEPKcS1_ — NID srwl1hhFoUI.
+int c_fs_rename(const char* from, const char* to)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	std::error_code ec;
+	std::filesystem::rename(from, to, ec);
+	return ec ? (ec.value() & 0xffff) : 0;
+#else
+	return ::rename(from, to) == 0 ? 0 : (errno & 0xffff);
+#endif
+}
+
+// _ZNSt10filesystem7_UnlinkEPKc — NID Iok1WdvAROg.
+int c_fs_unlink(const char* path)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	std::error_code ec;
+	const bool removed = std::filesystem::remove(path, ec);
+	return (removed && !ec) ? 0 : (ec ? (ec.value() & 0xffff) : 2);
+#else
+	return ::unlink(path) == 0 ? 0 : (errno & 0xffff);
+#endif
+}
+
+// _ZNSt10filesystem12_Current_getERA260_c — NID 8VKAqiw7lC0. The guest libc
+// reports the virtual root as its working directory.
+bool c_fs_current_get(char* buffer)
+{
+	buffer[0] = '/';
+	buffer[1] = 0;
+	return true;
+}
+
+// _ZNSt10filesystem18_Xfilesystem_error* — NIDs B0CeIhQty7Y, C6-7Mo5WbwU,
+// Wut42WAe7Rw. Throwing cannot cross the HLE boundary; report and stop.
+void c_fs_throw_error(const char* what, FsErrorCode error)
+{
+	EXIT("std::filesystem_error: %s (error %d)\n", what != nullptr ? what : "", error.value);
+}
+
+void c_fs_throw_error_path(const char* what, const void* /*path*/, FsErrorCode error)
+{
+	EXIT("std::filesystem_error: %s (error %d)\n", what != nullptr ? what : "", error.value);
+}
+
+void c_fs_throw_error_paths(const char* what, const void* /*path1*/, const void* /*path2*/, FsErrorCode error)
+{
+	EXIT("std::filesystem_error: %s (error %d)\n", what != nullptr ? what : "", error.value);
+}
+
 // Gen5 libc_v1 _ZSt9terminatev — NID qYhnoevd9bI.
 static KYTY_SYSV_ABI void c_terminate()
 {
@@ -4846,8 +5494,14 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Xnrfb2-WhVw", LibC::c_strnstr);
 	LIB_FUNC("WDpobjImAb4", LibC::c_wcsstr);
 	LIB_FUNC("E8wCoUEbfzk", LibC::c_wcsncmp);
+	// Gen5 libc_v1 UTF-16 code-unit conversions.
+	LIB_FUNC("EOLQfNZ9HpE", LibC::c_c16rtomb);
+	LIB_FUNC("ogPDBoLmCcA", LibC::c_mbrtoc16);
 	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);         // operator new(size_t)
 	LIB_FUNC("ryUxD-60bKM", LibC::cxx_new_nothrow); // operator new(size_t, const std::nothrow_t&)
+	LIB_FUNC("3yxLpdKD0RA", LibC::cxx_new_aligned); // operator new(size_t, std::align_val_t)
+	LIB_FUNC("McsGnqV6yRE", LibC::cxx_delete_nothrow); // operator delete(void*, const std::nothrow_t&)
+	LIB_FUNC("CkY0AVa-frg", LibC::c_get_new_handler);  // std::get_new_handler()
 	LIB_OBJECT("NLwJ3q+64bY", &LibC::g_cxx_nothrow); // std::nothrow
 	// Gen5 libc_v1 — public NID cfAXurvfl5o is __cxa_allocate_exception (not
 	// operator new). Mis-binding it to cxx_new corrupts the throw path.
@@ -4856,6 +5510,29 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete);               // operator delete(void*)
 	LIB_FUNC("lYDzBVE5mZs", LibC::cxx_delete_sized);         // operator delete(void*, size_t)
 	LIB_FUNC("nwujzxOPXzQ", LibC::cxx_delete_sized_aligned); // operator delete(void*, size_t, align_val_t)
+	// libc++ exception destructors and terminal throw helpers.
+	LIB_FUNC("uBlwRfRb-CM", LibC::cxx_runtime_error_dtor);      // std::runtime_error::~runtime_error()
+	LIB_FUNC("oQDS9nX05Qg", LibC::cxx_invalid_argument_dtor);    // std::invalid_argument::~invalid_argument()
+	LIB_FUNC("fuyXHeERajE", LibC::cxx_future_error_dtor);       // std::future_error::~future_error()
+	LIB_FUNC("BnMAMrsfVWo", LibC::cxx_throw_bad_weak_ptr);      // std::__throw_bad_weak_ptr()
+	LIB_FUNC("PjwbqtUehPU", LibC::cxx_throw_future_error);      // std::__throw_future_error(error_code)
+	LIB_FUNC("DNbsDRZ-ntI", LibC::cxx_rethrow_future_exception); // std::__rethrow_future_exception(exception_ptr)
+	LIB_FUNC("9G6z-nF6njg", LibC::cxx_throw_bad_variant_access); // std::__throw_bad_variant_access()
+	// libc++ std::filesystem internals.
+	LIB_FUNC("8iuHpl+kg8A", LibC::c_fs_open_dir);
+	LIB_FUNC("w5CGykBBU5M", LibC::c_fs_read_dir);
+	LIB_FUNC("xGbaQPsHCFI", LibC::c_fs_close_dir);
+	LIB_FUNC("8KeeeFcEdls", LibC::c_fs_stat);
+	LIB_FUNC("tizCFt051h8", LibC::c_fs_lstat);
+	LIB_FUNC("3U2eeEqUwR0", LibC::c_fs_file_size);
+	LIB_FUNC("x7pQExTeqBY", LibC::c_fs_make_dir);
+	LIB_FUNC("YDQxE4cIwa4", LibC::c_fs_remove_dir);
+	LIB_FUNC("srwl1hhFoUI", LibC::c_fs_rename);
+	LIB_FUNC("Iok1WdvAROg", LibC::c_fs_unlink);
+	LIB_FUNC("8VKAqiw7lC0", LibC::c_fs_current_get);
+	LIB_FUNC("B0CeIhQty7Y", LibC::c_fs_throw_error);
+	LIB_FUNC("C6-7Mo5WbwU", LibC::c_fs_throw_error_path);
+	LIB_FUNC("Wut42WAe7Rw", LibC::c_fs_throw_error_paths);
 	// Gen5 libc_v1 C++ EH — guest throw path after initialization.
 	// vkuuLfhnSZI: __cxa_throw (rdi=obj, rsi=typeinfo, rdx=dtor; ud2 after).
 	LIB_FUNC("vkuuLfhnSZI", LibC::cxa_throw);
@@ -5026,6 +5703,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Av3zjWi64Kw", LibC::Time::c_strftime);
 	LIB_FUNC("XbVXpf5WF28", LibC::Time::c_wcsftime);
 	LIB_FUNC("jT3xiGpA3B4", LibC::Time::c_asctime);
+	LIB_FUNC("qPe7-h5Jnuc", LibC::Time::c_asctime_s);
 	LIB_FUNC("0uAUs3hYuG4", LibC::Time::c_ctime);
 
 	// math (double)

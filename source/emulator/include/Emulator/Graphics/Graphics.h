@@ -117,6 +117,13 @@ int KYTY_SYSV_ABI   GraphicsBuildDescriptorTableOrInterpolantMapping(uint64_t ou
 // setup path.
 int KYTY_SYSV_ABI   GraphicsBuildDescriptorTable(uint64_t output, uint64_t descriptor, uint64_t source, uint64_t arg3,
                                                  uint64_t arg4, uint64_t arg5);
+// k0E7vkgqAuE: write one packed state entry per guest descriptor, matching it
+// against the shader output-semantic masks.
+uint64_t KYTY_SYSV_ABI GraphicsAgcBuildDescriptorState(uint64_t output, uint64_t descriptor, uint64_t source);
+// sceAgcGetGsOversubscription (NKIzURsgV7I): fills a Uc + a Sh register
+// descriptor that control geometry-shader oversubscription.
+int KYTY_SYSV_ABI GraphicsAgcGetGsOversubscription(ShaderRegister* result, const Shader* gs, int32_t work_items,
+                                                   float scaling);
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2(uint32_t ver);
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2Internal(uint32_t ver);
 int KYTY_SYSV_ABI   GraphicsCreateShader(Shader** dst, void* header, const volatile void* code);
@@ -190,6 +197,103 @@ uint32_t KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParserGetSize();
 uint32_t KYTY_SYSV_ABI GraphicsCbWaitOnAddressGetSize(uint32_t label_size);
 // sceAgcDcbDmaDataGetSize (NID 2ccJz9LQI+w): fixed 7-dword packet.
 uint32_t KYTY_SYSV_ABI GraphicsDcbDmaDataGetSize();
+// AGC GetSize helpers (bytes). Values come from the shipped libSceAgc bodies.
+// Where Kyty's writer reserves a larger packet, the larger value wins so the
+// guest buffer cannot be under-allocated.
+uint32_t KYTY_SYSV_ABI GraphicsAcbAcquireMemGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbCopyDataGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbDispatchIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbDmaDataGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbEventWriteGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsCbSetShRegistersDirectGetSize(uint32_t num_regs);
+uint32_t KYTY_SYSV_ABI GraphicsDcbAcquireMemGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbCopyDataGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDispatchIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexAutoGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexOffsetGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbEventWriteGetSize(uint32_t event_type);
+uint32_t KYTY_SYSV_ABI GraphicsDcbGetLodStatsGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexBufferGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexCountGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexSizeGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetNumInstancesGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetShRegisterDirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetUcRegisterDirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirectGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbWriteDataGetSize(uint32_t num_dwords);
+// sceAgcDcbRewindGetSize / sceAgcAcbRewindGetSize: fixed 2-dword packet.
+uint32_t KYTY_SYSV_ABI GraphicsDcbRewindGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbRewindGetSize();
+// sceAgcDcbCondExecGetSize / sceAgcAcbCondExecGetSize: fixed 5-dword packet.
+uint32_t KYTY_SYSV_ABI GraphicsDcbCondExecGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbCondExecGetSize();
+// Remaining AGC GetSize helpers (bytes) from the Astro 01.018 bodies.
+uint32_t KYTY_SYSV_ABI GraphicsAcbAtomicGdsGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbAtomicMemGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbPrimeUtcl2GetSize();
+uint32_t KYTY_SYSV_ABI GraphicsAcbQueueEndOfShaderActionGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsCbCondWriteGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsCbQueueEndOfPipeActionGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsCbSetUcRegisterRangeDirectGetSize(uint32_t num_registers);
+uint32_t KYTY_SYSV_ABI GraphicsCbSetUcRegistersDirectGetSize(uint32_t num_registers);
+uint32_t KYTY_SYSV_ABI GraphicsDcbAtomicGdsGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbAtomicMemGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbBeginOcclusionQueryGetSize(uint32_t mode);
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirectMultiGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndexMultiInstancedGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbDrawIndirectMultiGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbEndOcclusionQueryGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbPrimeUtcl2GetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbQueueEndOfShaderActionGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetBaseDispatchIndirectArgsGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetBaseDrawIndirectArgsGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetBoolPredicationEnableGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetIndexIndirectArgsGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetPredicationDisableGetSize();
+uint32_t KYTY_SYSV_ABI GraphicsDcbSetZPassPredicationEnableGetSize();
+// AGC patch/helper family from the Astro 01.018 libSceAgc bodies. Error
+// 0x8a6c000c means the packet opcode is not the one the patch expects.
+int KYTY_SYSV_ABI GraphicsSetNop(uint32_t* cmd);
+int KYTY_SYSV_ABI GraphicsSetCxRegIndirectPatchSetNumRegisters(uint32_t* cmd, uint32_t num_regs);
+int KYTY_SYSV_ABI GraphicsSetShRegIndirectPatchSetNumRegisters(uint32_t* cmd, uint32_t num_regs);
+int KYTY_SYSV_ABI GraphicsSetUcRegIndirectPatchSetNumRegisters(uint32_t* cmd, uint32_t num_regs);
+int KYTY_SYSV_ABI GraphicsAgcAsyncWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset);
+int KYTY_SYSV_ABI GraphicsAgcAsyncWriteDataPatchSetCachePolicy(uint32_t* cmd, uint32_t cache_policy);
+int KYTY_SYSV_ABI GraphicsAgcAsyncWriteDataPatchSetDst(uint32_t* cmd, uint32_t dst);
+// sceAgcRewindPatchSetRewindState / sceAgcAsyncRewindPatchSetRewindState.
+int KYTY_SYSV_ABI GraphicsAgcRewindPatchSetRewindState(uint32_t* cmd, uint32_t state);
+// sceAgcCondExecPatchSetCommandAddress / ...Async... and ...PatchSetEnd. `end`
+// is the first dword past the conditional block.
+int KYTY_SYSV_ABI GraphicsAgcCondExecPatchSetCommandAddress(uint32_t* cmd, uint64_t address);
+int KYTY_SYSV_ABI GraphicsAgcCondExecPatchSetEnd(uint32_t* cmd, const uint32_t* end);
+// sceAgcBranchPatchSetCompareAddress (NID GXBlM-ekzrI).
+int KYTY_SYSV_ABI GraphicsAgcBranchPatchSetCompareAddress(uint32_t* cmd, uint64_t address);
+// sceAgcAcquireMemSetEngine (NID W0WEyog0f74).
+int KYTY_SYSV_ABI GraphicsAgcAcquireMemSetEngine(uint32_t* cmd, uint32_t engine);
+// sceAgcGetDataPacketPayloadRange (NID s+VGAMDQ0AQ).
+struct GraphicsAgcPayloadRange
+{
+	const volatile void* payload;
+	uint64_t             size;
+};
+int KYTY_SYSV_ABI GraphicsGetDataPacketPayloadRange(GraphicsAgcPayloadRange* range, const uint32_t* cmd, uint32_t mode);
+// sceAgcSetRangePredication (NID n8vgpaQg6dA).
+int KYTY_SYSV_ABI GraphicsSetPacketPredicationRange(uint32_t* begin, uint32_t* end, uint32_t predication);
+// sceAgcUpdatePrimState (NID Y3ymLfZ1384): patches VGT_GS_OUT_PRIM_TYPE and
+// VGT_PRIMITIVE_TYPE inside the ShaderRegister arrays returned by CreatePrimState.
+int KYTY_SYSV_ABI GraphicsUpdatePrimState(volatile uint32_t* cx_regs, volatile uint32_t* uc_regs, uint32_t prim_type);
+// sceAgcDcbCondExec / sceAgcAcbCondExec (NIDs BIPexNBSGog, qyM2bxYFPAk).
+uint32_t* KYTY_SYSV_ABI GraphicsDcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t block_dwords);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbCondExec(CommandBuffer* buf, uint64_t address, uint32_t block_dwords);
+// sceAgcDcbRewind / sceAgcAcbRewind (NIDs zfcxg-ewMK8, DwICrVxerkY).
+uint32_t* KYTY_SYSV_ABI GraphicsDcbRewind(CommandBuffer* buf, uint32_t state);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbRewind(CommandBuffer* buf, uint32_t state, uint32_t flags);
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
 int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();
 // PS5 Pro / Trinity GPU mode query (NID BfBDZGbti7A). Base Prospero reports 0.
@@ -198,6 +302,8 @@ uint64_t KYTY_SYSV_ABI GraphicsGetIsTrinityMode();
 int KYTY_SYSV_ABI GraphicsDebugRaiseException(uint32_t exception_id);
 // sceAgcDriverRegisterWorkloadStream (NID 3AyTaWcF-H8): register a Gen5 workload stream descriptor.
 int KYTY_SYSV_ABI GraphicsDriverRegisterWorkloadStream(uint32_t stream_id, const void* stream);
+// sceAgcDriverUnregisterWorkloadStream (NID n5ElQVYsU1A).
+int KYTY_SYSV_ABI GraphicsDriverUnregisterWorkloadStream(uint32_t stream_id);
 
 uint32_t GraphicsGetShRegistersPacketSize(const ShaderRegister* regs, uint32_t num_regs);
 uint32_t GraphicsEncodeShRegisters(uint32_t* cmd, uint32_t capacity_dw, const ShaderRegister* regs, uint32_t num_regs);
@@ -214,6 +320,27 @@ uint64_t* GraphicsResolveWaitMemAddressFromPrecedingRelease(const uint32_t* wait
 uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, uint32_t offset, const uint32_t* values,
                                                            uint32_t num_values);
 uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegistersDirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs);
+// sceAgcCbSetUcRegisterRangeDirect (NID MDLD5Ly94Xk) and
+// sceAgcCbSetUcRegistersDirect (NID 03RZmELWWzw): SET_UCONFIG_REG packets.
+uint32_t* KYTY_SYSV_ABI GraphicsCbSetUcRegisterRangeDirect(CommandBuffer* buf, uint32_t offset, const uint32_t* values,
+                                                           uint32_t num_values);
+uint32_t* KYTY_SYSV_ABI GraphicsCbSetUcRegistersDirect(CommandBuffer* buf, const volatile ShaderRegister* regs, uint32_t num_regs);
+// sceAgcDcbSetIndexIndirectArgs (NID 0o3VDdtA6nM): 4-dword packet, address at
+// dwords 1-2 and count at dword 3.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexIndirectArgs(CommandBuffer* buf, uint64_t args_address, uint32_t count);
+// sceAgcDcbPrimeUtcl2 / sceAgcAcbPrimeUtcl2 (NIDs jt3pl7EN17o, szG7hz2yEhA).
+// 5-dword packet: engine/mode, 16KB-aligned address and size.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbPrimeUtcl2(CommandBuffer* buf, uint32_t engine, uint32_t mode, uint64_t address, uint32_t size);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbPrimeUtcl2(CommandBuffer* buf, uint32_t engine, uint32_t mode, uint64_t address, uint32_t size);
+// sceAgcCbCondWrite (NID 7toV+elXqNM): 9-dword COND_WRITE packet.
+uint32_t* KYTY_SYSV_ABI GraphicsCbCondWrite(CommandBuffer* buf, uint32_t function, uint32_t mode, uint64_t value_a,
+                                            uint32_t value_b, uint64_t value_c, uint32_t value_d, uint32_t value_e);
+// AGC 0x3F jump/branch field patches exported without a catalog name:
+// 7Wa3aeJgeVU patches the then-target, rP5xLdOf26k the else-target and
+// Ikfdt-rIqCE the 4-dword jump. All take (cache_policy, target, size_dw).
+int KYTY_SYSV_ABI GraphicsAgcJumpPatchTarget(uint32_t* cmd, uint32_t cache_policy, uint64_t target, uint32_t size_dw);
+int KYTY_SYSV_ABI GraphicsAgcBranchPatchSetThenTarget(uint32_t* cmd, uint32_t cache_policy, uint64_t target, uint32_t size_dw);
+int KYTY_SYSV_ABI GraphicsAgcBranchPatchSetElseTarget(uint32_t* cmd, uint32_t cache_policy, uint64_t target, uint32_t size_dw);
 uint32_t* KYTY_SYSV_ABI GraphicsCbDispatch(CommandBuffer* buf, uint32_t group_x, uint32_t group_y, uint32_t group_z, uint32_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action, uint16_t gcr_cntl, uint8_t dst, uint8_t cache_policy,
                                              const volatile Label* address, uint8_t data_sel, uint64_t data, uint16_t gds_offset,
@@ -224,6 +351,15 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitUntilSafeForRendering(CommandBuffer* buf,
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadsActive(CommandBuffer* buf, uint32_t stream_id, const uint32_t* workload_ids,
                                                       uint32_t workload_count);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadComplete(CommandBuffer* buf, uint32_t stream_id, uint32_t workload_id);
+// ACB variants share the DCB packet; the real builders only flip a packet bit
+// that Kyty's software command processor does not distinguish.
+uint32_t* KYTY_SYSV_ABI GraphicsAcbSetWorkloadsActive(CommandBuffer* buf, uint32_t stream_id, const uint32_t* workload_ids,
+                                                      uint32_t workload_count);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbSetWorkloadComplete(CommandBuffer* buf, uint32_t stream_id, uint32_t workload_id);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbWaitUntilSafeForRendering(CommandBuffer* buf, uint32_t video_out_handle,
+                                                             uint32_t display_buffer_index);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbSetFlip(CommandBuffer* buf, uint32_t video_out_handle, int32_t display_buffer_index,
+                                           uint32_t flip_mode, int64_t flip_arg);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirect(CommandBuffer* buf, ShaderRegister reg);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegisterDirect(CommandBuffer* buf, ShaderRegister reg);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegisterDirect(CommandBuffer* buf, ShaderRegister reg);
@@ -291,6 +427,68 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbCopyData(CommandBuffer* buf, uint8_t dst, uin
                                             uint8_t write_confirm);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbPushMarker(CommandBuffer* buf, const char* str, uint32_t color);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbPopMarker(CommandBuffer* buf);
+// sceAgcAcbSetMarker (NID xAeBOa0A3kk) and the span forms (NIDs pxx-GoOSdw4,
+// 8Kly1JrJUlw, BYcSvEsINWU, N7M3+N-sBCw): AgcDriver user-data marker packets.
+// The span builders take an explicit byte length instead of a NUL-terminated
+// string and map color bits into the user-data register value.
+uint32_t* KYTY_SYSV_ABI GraphicsAcbSetMarker(CommandBuffer* buf, const char* label, uint32_t color);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbSetMarkerSpan(CommandBuffer* buf, const char* data, uint32_t size, uint32_t color);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbPushMarkerSpan(CommandBuffer* buf, const char* data, uint32_t size, uint32_t color);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetMarkerSpan(CommandBuffer* buf, const char* data, uint32_t size, uint32_t color);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbPushMarkerSpan(CommandBuffer* buf, const char* data, uint32_t size, uint32_t color);
+// sceAgcAcbAtomicMem / sceAgcDcbAtomicMem (NIDs XKKuA6VkSRc, 1-gUn1PI4Sw):
+// 9-dword ATOMIC_MEM packet. Header bits 30-31 exist only on the DCB form;
+// bits 0-6 carry the atomic op, 8-11 the cache policy and 25-26 the memory type.
+// Size is encoded in 64-byte units and saturates at 0xfff.
+uint32_t* KYTY_SYSV_ABI GraphicsAcbAtomicMem(CommandBuffer* buf, uint32_t op, uint32_t cache_policy, uint64_t address,
+                                             uint32_t mem_type, uint64_t src, uint64_t src2, uint32_t size);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbAtomicMem(CommandBuffer* buf, uint32_t op_hi, uint32_t op, uint32_t cache_policy,
+                                             uint32_t mem_type, uint64_t address, uint64_t src, uint64_t src2, uint32_t size);
+// sceAgcAcbMemSemaphore / sceAgcDcbMemSemaphore (NIDs q4VuU-QsLOE,
+// G0jrLdvEqDw): user-data address packet, 4-dword MEM_SEMAPHORE and optional
+// bracket packets for modes 6 and 7.
+uint32_t* KYTY_SYSV_ABI GraphicsAcbMemSemaphore(CommandBuffer* buf, uint64_t address, uint8_t acquire, uint8_t release,
+                                                uint32_t mode);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbMemSemaphore(CommandBuffer* buf, uint64_t address, uint8_t acquire, uint8_t release,
+                                                uint32_t mode);
+// Astro imports two unnamed AtomicGds writers (NIDs gQkqkLttcpw, zARR5aCmkoY)
+// that share the 11-dword 0xC0091D00 layout but pack the flag word differently
+// from the older named exports: bits 5/6 are duplicated into 18/20, bit 9 moves
+// to 16, and the ACB form has no queue bits.
+uint32_t* KYTY_SYSV_ABI GraphicsAcbAtomicGds(CommandBuffer* buf, uint32_t flags, int32_t engine_flag,
+                                             uint32_t cache_policy, uint32_t op, uint64_t address_low,
+                                             uint16_t address_high, uint32_t mask, uint32_t data, uint64_t src,
+                                             uint64_t src2);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbAtomicGds(CommandBuffer* buf, uint32_t queue, uint32_t flags, int32_t engine_flag,
+                                             uint32_t cache_policy, uint32_t op, uint16_t address_low,
+                                             uint16_t address_high, uint32_t mask, uint32_t data, uint64_t src,
+                                             uint64_t src2);
+// sceAgcSetAmmSemaphoreMemory / sceAgcGetSemaphoreLabel (NIDs OQTgEXyihvA,
+// hFQ9pUxoLQ4): AMM semaphore labels are 0x20-byte slots in the registered
+// range. Returns the 0x8a6c00xx Agc status codes.
+uint64_t KYTY_SYSV_ABI GraphicsAgcSetAmmSemaphoreMemory(uint64_t base, uint64_t size);
+uint64_t KYTY_SYSV_ABI GraphicsAgcGetSemaphoreLabel(uint64_t oh, uint64_t* label);
+// sceAgcGetDefaultCxStateFlat (NID AAeX-U5-P3M): expands the default Cx
+// register state for [start, end) in the flat 0x400-entry context register
+// space; registers without a modeled default read back as zero.
+uint64_t KYTY_SYSV_ABI GraphicsAgcGetDefaultCxStateFlat(uint32_t* out, uint32_t start, uint32_t end,
+                                                        uint32_t state_index);
+// sceAgcAcb/DcbSetWorkloadStreamInactive (NIDs FcgdDM3MB+k, FneFypEDRgY):
+// user-data write of the stream's inactive mask; invalid ids, unregistered
+// streams and allocation failures return nullptr.
+uint32_t* KYTY_SYSV_ABI GraphicsAcbSetWorkloadStreamInactive(CommandBuffer* buf, uint32_t stream_id);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetWorkloadStreamInactive(CommandBuffer* buf, uint32_t stream_id);
+// sceAgcDcbDrawIndirectMulti / DrawIndexIndirectMulti / DrawIndexMultiInstanced
+// (NIDs kUlvghKs-mA, ypVBz4uPKcQ, Rlx+bykm0r0): user-data brackets around the
+// hardware multi-draw packet. `flags` selects the count/index register fields.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndirectMulti(CommandBuffer* buf, uint32_t data_offset, uint32_t index_size,
+                                                     uint32_t max_index_count, uint64_t indirect_args, uint32_t draw_count,
+                                                     uint64_t flags);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirectMulti(CommandBuffer* buf, uint32_t data_offset, uint32_t index_size,
+                                                          uint32_t max_index_count, uint64_t indirect_args, uint32_t draw_count,
+                                                          uint64_t flags);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexMultiInstanced(CommandBuffer* buf, uint32_t index_count, uint64_t index_address,
+                                                           uint64_t instance_address, int32_t instance_offset, uint64_t flags);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t index_addr);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances);
@@ -316,9 +514,26 @@ struct Packet;
 int KYTY_SYSV_ABI GraphicsDriverSubmitDcb(const Packet* packet);
 int KYTY_SYSV_ABI GraphicsDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs, const uint32_t* dcb_sizes_in_dwords,
                                                  uint32_t count);
+int KYTY_SYSV_ABI GraphicsDriverAgrSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs,
+                                                    const uint32_t* dcb_sizes_in_dwords, uint32_t count);
 int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet);
+// sceAgcDriverSubmitMultiAcbs (NID HF3YllT3mXU): the wrapper passes a packet
+// pointer and a separate dword-size array; every entry is an async ACB.
+int KYTY_SYSV_ABI GraphicsDriverSubmitMultiAcbs(uint32_t queue, const Packet* const* packets,
+                                                 const uint32_t* sizes_in_dwords, uint32_t count);
 int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(Kernel::EventQueue::KernelEqueue eq, int id, void* udata);
+int KYTY_SYSV_ABI GraphicsDriverDeleteEqEvent(Kernel::EventQueue::KernelEqueue eq, int id);
 uint32_t KYTY_SYSV_ABI GraphicsDriverGetEqContextId(const Kernel::EventQueue::KernelEvent* ev);
+// sceAgcDriverGetEqEventType (NID 5CdQTZIQPxM) reads the current graphics
+// event's data (sceKernelGetEventData) and returns its upper half.
+uint32_t KYTY_SYSV_ABI GraphicsDriverGetEqEventType(const Kernel::EventQueue::KernelEvent* ev);
+// Astro 01.018 AgcDriver fakelib stubs: these NIDs return a constant without
+// inspecting their arguments. 0x8a6c9018 covers the resource/GDS inspection
+// group, 0x8a6c1000 the capture/validation group, 0 the status queries.
+int KYTY_SYSV_ABI GraphicsDriverResourceApiUnavailable();
+int KYTY_SYSV_ABI GraphicsDriverDebugApiUnavailable();
+int KYTY_SYSV_ABI GraphicsDriverStatusDisabled();
+int KYTY_SYSV_ABI GraphicsDriverShaderDebuggingStatus();
 int KYTY_SYSV_ABI GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(size_t* size, uint32_t max_resources,
                                                                                  uint32_t max_owners);
 int KYTY_SYSV_ABI GraphicsDriverInitResourceRegistration(void* memory, size_t size, uint32_t max_owners);

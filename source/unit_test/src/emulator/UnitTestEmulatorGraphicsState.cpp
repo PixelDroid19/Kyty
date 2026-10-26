@@ -5008,6 +5008,13 @@ TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
 	query.type                 = Loader::SymbolType::Func;
 
 	EXPECT_NE(symbols.Find(query), nullptr);
+
+	query.name = U"w7Ipp9Xl7hg";
+	EXPECT_NE(symbols.Find(query), nullptr);
+	query.name = U"eb-gvTYQcoY";
+	EXPECT_NE(symbols.Find(query), nullptr);
+	query.name = U"MCJ8SkzsQxY";
+	EXPECT_NE(symbols.Find(query), nullptr);
 }
 
 // Gen5 ACB/DCB sizing helpers and Trinity query contracts used at boot.
@@ -5071,6 +5078,43 @@ TEST(EmulatorGraphicsState, ResolvesGen5AgcAndDriverExports)
 	EXPECT_TRUE(resolve(u"XlNp7jzGiPo", u"AgcDriver", u"AgcDriver"));
 	EXPECT_TRUE(resolve(u"MM4IZSEYytQ", u"AgcDriver", u"AgcDriver"));
 	EXPECT_TRUE(resolve(u"dbOlWdppb4o", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"ewobAQeMo5k", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"WrdP9Zxx3lQ", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"p9tI+yTvx68", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"K2mciNVxUCE", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"whb1RL7K4Ss", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"s+VGAMDQ0AQ", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"BIPexNBSGog", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"zfcxg-ewMK8", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"n5ElQVYsU1A", u"AgcDriver", u"AgcDriver"));
+	EXPECT_TRUE(resolve(u"5l3IfCFJxBs", u"AgcDriver", u"AgcDriver"));
+	EXPECT_TRUE(resolve(u"ICaGtkEIXTk", u"AgcDriver", u"AgcDriver"));
+	EXPECT_TRUE(resolve(u"rJUyMrDdxJg", u"AgcDriver", u"AgcDriver"));
+	EXPECT_TRUE(resolve(u"xAeBOa0A3kk", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"pxx-GoOSdw4", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"8Kly1JrJUlw", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"BYcSvEsINWU", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"N7M3+N-sBCw", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"XKKuA6VkSRc", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"1-gUn1PI4Sw", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"q4VuU-QsLOE", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"G0jrLdvEqDw", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"FcgdDM3MB+k", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"FneFypEDRgY", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"kUlvghKs-mA", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"ypVBz4uPKcQ", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"Rlx+bykm0r0", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"gQkqkLttcpw", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"zARR5aCmkoY", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"OQTgEXyihvA", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"hFQ9pUxoLQ4", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"AAeX-U5-P3M", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"NKIzURsgV7I", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"k0E7vkgqAuE", u"Agc", u"Agc"));
+	EXPECT_TRUE(resolve(u"+T8Xo6LtFJI", u"AgcDriver", u"AgcDriver"));
+	EXPECT_TRUE(resolve(u"HF3YllT3mXU", u"AgcDriver", u"AgcDriver"));
+	EXPECT_TRUE(resolve(u"DL2RXaXOy88", u"AgcDriver", u"AgcDriver"));
+	EXPECT_TRUE(resolve(u"5CdQTZIQPxM", u"AgcDriver", u"AgcDriver"));
 	EXPECT_FALSE(resolve(u"dbOlWdppb4o", u"Graphics5", u"Graphics5"));
 	EXPECT_EQ(Gen5Driver::GraphicsDriverSetTFRing(reinterpret_cast<const volatile void*>(0x10000), 0x3fff8), OK);
 	EXPECT_EQ(Gen5Driver::GraphicsDriverSetHsOffchipParam(0, 0x1ff, 0), OK);
@@ -5116,6 +5160,157 @@ TEST(EmulatorGraphicsState, BuildsGraphics5DescriptorTableForDefaultAndMaskedEnt
 	EXPECT_EQ(GraphicsBuildDescriptorTable(reinterpret_cast<uint64_t>(output), reinterpret_cast<uint64_t>(descriptor),
 	                                       reinterpret_cast<uint64_t>(source), 0, 0, 0),
 	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorGraphicsState, BuildsAgcDescriptorStateEntriesFromSemanticMasks)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	using Kyty::Libs::Graphics::Gen5::GraphicsAgcBuildDescriptorState;
+
+	uint64_t output[4] {};
+	uint8_t  descriptor[0x58] {};
+	uint8_t  source[0x58] {};
+	uint32_t masks[4]   = {};
+	uint32_t entries[4] = {};
+	const uint16_t mask_count = 4;
+	uint32_t entry_count = 1;
+	const uint64_t masks_address   = reinterpret_cast<uint64_t>(masks);
+	const uint64_t entries_address = reinterpret_cast<uint64_t>(entries);
+	std::memcpy(descriptor + 0x38u, &masks_address, sizeof(masks_address));
+	std::memcpy(descriptor + 0x56u, &mask_count, sizeof(mask_count));
+	std::memcpy(source + 0x30u, &entries_address, sizeof(entries_address));
+	std::memcpy(source + 0x50u, &entry_count, sizeof(entry_count));
+
+	const auto build = [&] {
+		return GraphicsAgcBuildDescriptorState(reinterpret_cast<uint64_t>(output),
+		                                       reinterpret_cast<uint64_t>(descriptor),
+		                                       reinterpret_cast<uint64_t>(source));
+	};
+
+	// Normal-mode descriptor with a matching semantic.
+	entries[0] = 0x01000000u;
+	masks[0]   = 0x00000000u;
+	masks[1]   = 0x00000101u;
+	EXPECT_EQ(build(), 0u);
+	EXPECT_EQ(output[0], 0x0000042010000000ull);
+
+	// Special-mode descriptor with a matching semantic.
+	entries[0] = 0x00340001u;
+	masks[0]   = 0x00340001u;
+	masks[1]   = 0u;
+	EXPECT_EQ(build(), 0u);
+	EXPECT_EQ(output[0], 0x0308000010000000ull);
+
+	// Special-mode descriptor without a matching semantic.
+	entries[0] = 0x00340002u;
+	EXPECT_EQ(build(), 0u);
+	EXPECT_EQ(output[0], 0x0318002010000000ull);
+
+	// Normal-mode descriptor without a matching semantic.
+	entries[0] = 0x00000004u;
+	EXPECT_EQ(build(), 0u);
+	EXPECT_EQ(output[0], 0x0000002010000000ull);
+
+	// default_value_hi selects the unit bits; all four entries hit their mask.
+	entry_count = 4;
+	std::memcpy(source + 0x50u, &entry_count, sizeof(entry_count));
+	entries[0]  = 0x10000005u;
+	entries[1]  = 0x40000006u;
+	entries[2]  = 0x80000007u;
+	entries[3]  = 0xc0000008u;
+	masks[0]    = 0x00000005u;
+	masks[1]    = 0x00000006u;
+	masks[2]    = 0x00000007u;
+	masks[3]    = 0x00000008u;
+	EXPECT_EQ(build(), 0u);
+	EXPECT_EQ(output[0], 0x0000010010000000ull);
+	EXPECT_EQ(output[1], 0x0000000010000001ull);
+	EXPECT_EQ(output[2], 0x0000000010000002ull);
+	EXPECT_EQ(output[3], 0x0000000010000003ull);
+
+	EXPECT_EQ(GraphicsAgcBuildDescriptorState(0, reinterpret_cast<uint64_t>(descriptor),
+	                                          reinterpret_cast<uint64_t>(source)), 0u);
+	EXPECT_EQ(GraphicsAgcBuildDescriptorState(reinterpret_cast<uint64_t>(output), 0, 0), 0u);
+	entry_count = 0;
+	std::memcpy(source + 0x50u, &entry_count, sizeof(entry_count));
+	output[0]   = 0xfeedfaceu;
+	EXPECT_EQ(build(), 0u);
+	EXPECT_EQ(output[0], 0xfeedfaceu);
+	entry_count = 33;
+	std::memcpy(source + 0x50u, &entry_count, sizeof(entry_count));
+	EXPECT_EQ(build(), 0u);
+	EXPECT_EQ(output[0], 0xfeedfaceu);
+}
+
+TEST(EmulatorGraphicsState, ComputesGsOversubscriptionFromShaderOccupancy)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	using Kyty::Libs::Graphics::Gen5::GraphicsAgcGetGsOversubscription;
+	using Kyty::Libs::Graphics::Shader;
+	using Kyty::Libs::Graphics::ShaderRegister;
+	using Kyty::Libs::Graphics::ShaderSpecialRegs;
+
+	ShaderRegister cx[5] = {{Kyty::Libs::Graphics::Pm4::VGT_GS_ONCHIP_CNTL, 1u << 11u},
+	                        {Kyty::Libs::Graphics::Pm4::GE_NGG_SUBGRP_CNTL, 32u},
+	                        {Kyty::Libs::Graphics::Pm4::SPI_VS_OUT_CONFIG, 0u},
+	                        {Kyty::Libs::Graphics::Pm4::PA_CL_VS_OUT_CNTL, 0u},
+	                        {Kyty::Libs::Graphics::Pm4::GE_MAX_OUTPUT_PER_SUBGROUP, 32u}};
+	ShaderSpecialRegs specials {};
+	Shader            shader {};
+	shader.cx_registers           = cx;
+	shader.num_cx_registers       = 5;
+	shader.specials               = &specials;
+	specials.vgt_shader_stages_en = {Kyty::Libs::Graphics::Pm4::VGT_SHADER_STAGES_EN, 0x400000u};
+
+	ShaderRegister out[2] {};
+	EXPECT_EQ(GraphicsAgcGetGsOversubscription(out, &shader, 0, std::numeric_limits<float>::quiet_NaN()), OK);
+	EXPECT_EQ(out[0].offset, 0x260u);
+	EXPECT_EQ(out[0].value, 0u);
+	EXPECT_EQ(out[1].offset, 0x81u);
+	EXPECT_EQ(out[1].value, 0u);
+
+	EXPECT_EQ(GraphicsAgcGetGsOversubscription(out, &shader, -1, std::numeric_limits<float>::quiet_NaN()), OK);
+	EXPECT_EQ(out[0].value, 0x7ffu);
+	EXPECT_EQ(out[1].value, 0x7f0000u);
+
+	EXPECT_EQ(GraphicsAgcGetGsOversubscription(out, &shader, 65536, 0.5f), OK);
+	EXPECT_EQ(out[0].value, 0x7ffu);
+	EXPECT_EQ(out[1].value, 0x200000u);
+
+	EXPECT_EQ(GraphicsAgcGetGsOversubscription(out, &shader, 65536, 0.0f), OK);
+	EXPECT_EQ(out[0].value, 0u);
+	EXPECT_EQ(out[1].value, 0u);
+
+	cx[2].value = 0x3cu;
+	EXPECT_EQ(GraphicsAgcGetGsOversubscription(out, &shader, 4096, 0.5f), OK);
+	EXPECT_EQ(out[0].value, 0x3ffu);
+	EXPECT_EQ(out[1].value, 0x7f0000u);
+
+	specials.vgt_shader_stages_en.value = 0u;
+	EXPECT_EQ(GraphicsAgcGetGsOversubscription(out, &shader, 4096, 0.5f), OK);
+	EXPECT_EQ(out[0].value, 0u);
+	EXPECT_EQ(out[1].value, 0u);
+
+	ShaderRegister sentinel[2] = {{1u, 2u}, {3u, 4u}};
+	EXPECT_EQ(GraphicsAgcGetGsOversubscription(nullptr, &shader, 65536, 1.0f),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(GraphicsAgcGetGsOversubscription(sentinel, &shader, 65536, std::numeric_limits<float>::quiet_NaN()),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	shader.num_cx_registers = 4;
+	EXPECT_EQ(GraphicsAgcGetGsOversubscription(sentinel, &shader, 65536, 1.0f),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(sentinel[0].offset, 1u);
+	EXPECT_EQ(sentinel[1].value, 4u);
 }
 
 // WaitFlipDone body observed post-Play: handle=0, index=3 while Open() left

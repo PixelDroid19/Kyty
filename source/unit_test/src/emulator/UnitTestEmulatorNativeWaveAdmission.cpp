@@ -1073,6 +1073,52 @@ TEST(EmulatorNativeWaveAdmission, PartialWaveRefusesObservedNetworkValues)
 	row_refusal(Reduction({Clear(9), Clear(10)}, 3));
 }
 
+TEST(EmulatorNativeWaveAdmission, ExactGuestWidthOnlySupersedesParticipationRefusals)
+{
+	const char* participation[] = {
+	    "fragment wave append/consume lacks a participating-lane proof",
+	    "fragment mask packing after an export or indirect jump lacks a quad participation proof",
+	    "READFIRSTLANE target quad is not proven to retain a participating real member",
+	    "READLANE physical source may be unavailable or in an all-helper quad",
+	    "fragment permutation source participation is unproven",
+	    "fragment DPP after an export or indirect jump lacks a quad participation proof",
+	    "fragment row DPP source participation is unproven (neutral values do not prove helper recovery)",
+	};
+	for (const auto* reason: participation) { EXPECT_TRUE(ShaderNativeWaveParticipationRefusal(reason)) << reason; }
+	EXPECT_FALSE(ShaderNativeWaveParticipationRefusal(nullptr));
+	EXPECT_FALSE(ShaderNativeWaveParticipationRefusal("fragment numeric mask observation lacks an all-helper/unavailable-quad proof"));
+	EXPECT_FALSE(ShaderNativeWaveParticipationRefusal("guest wave width is not established by stage control"));
+
+	// AMD-like: the device pins a fragment subgroup to the guest's 64 lanes.
+	auto state = Host();
+	state.min_subgroup_size = 32;
+	state.max_subgroup_size = 64;
+	auto mapping = ShaderSelectNativeSubgroup(state, VK_SHADER_STAGE_FRAGMENT_BIT, 32, 64, false, false, true);
+	ASSERT_TRUE(mapping.supported);
+	EXPECT_EQ(mapping.size, 64u);
+	EXPECT_TRUE(mapping.require_size);
+	// Intel-like: fragment sizes stop at 32, so the same program needs transport.
+	state.max_subgroup_size = 32;
+	state.fragment_required_size_supported = false;
+	mapping = ShaderSelectNativeSubgroup(state, VK_SHADER_STAGE_FRAGMENT_BIT, 32, 64, false, false, true);
+	EXPECT_FALSE(mapping.supported);
+}
+
+TEST(EmulatorNativeWaveAdmission, NeutralRegionParticipationRefusalIsWidthOnlyButNumericEscapeIsNot)
+{
+	const auto region = ShaderAnalyzeNativeWave(NeutralRegion(), 64);
+	ASSERT_NE(region.refusal_reason, nullptr);
+	EXPECT_TRUE(ShaderNativeWaveParticipationRefusal(region.refusal_reason)) << region.refusal_reason;
+
+	auto escaped = NeutralRegion();
+	auto move = Unary(ShaderInstructionType::VMovB32, Operand(ShaderOperandType::Vgpr, 12), Operand(ShaderOperandType::Sgpr, 36));
+	move.pc = 20;
+	escaped.GetInstructions().Add(move);
+	const auto numeric = ShaderAnalyzeNativeWave(escaped, 64);
+	ASSERT_NE(numeric.refusal_reason, nullptr);
+	EXPECT_FALSE(ShaderNativeWaveParticipationRefusal(numeric.refusal_reason)) << numeric.refusal_reason;
+}
+
 TEST(EmulatorNativeWaveAdmission, ReductionReadsMayFollowInstructionsThatNameNoNetworkRegister)
 {
 	const auto unrelated = Unary(ShaderInstructionType::VMovB32, Operand(ShaderOperandType::Vgpr, 12), Constant(1));

@@ -380,7 +380,14 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		                                                  wave.proof == ShaderNativeWaveProof::FragmentPartialWave,
 		                                                  wave.proof == ShaderNativeWaveProof::FragmentNeutral32,
 		                                                  spirv_version >= 0x00010600u);
-		const char* reason = wave.refusal_reason;
+		// Every guest lane exists in an exact-width subgroup, so a participation
+		// refusal does not apply there. Semantic refusals still stop the draw.
+		// DIAG-WAVEEXACT: temporary switch to isolate the exact-width acceptance.
+		const bool  diag_exact_off = std::getenv("KYTY_DIAG_EXACT_WAVE_OFF") != nullptr;
+		const bool  exact_host = !diag_exact_off && wave.proof == ShaderNativeWaveProof::ExactSubgroup && selection.supported &&
+		                        selection.size == wave.guest_wave_size;
+		const char* reason = exact_host && ShaderNativeWaveParticipationRefusal(wave.refusal_reason) ? nullptr
+		                                                                                            : wave.refusal_reason;
 		if (reason == nullptr && wave.proof == ShaderNativeWaveProof::Unclassified) { reason = "unclassified guest wave"; }
 		if (reason == nullptr && requested != 0 && requested != wave.guest_wave_size) { reason = "inconsistent guest width metadata"; }
 		if (reason == nullptr && !selection.supported) { reason = "exact guest lane map or explicit width-neutral proof unavailable"; }

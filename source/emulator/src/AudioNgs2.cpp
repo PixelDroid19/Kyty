@@ -45,14 +45,21 @@ LIB_NAME("Ngs2", "Ngs2");
 
 struct Ngs2SystemOption
 {
-	size_t   size              = 0;
-	char     name[16]          = {};
-	uint32_t flags             = 0;
-	uint32_t max_grain_samples = 0;
-	uint32_t num_grain_samples = 0;
-	uint32_t sample_rate       = 0;
-	uint32_t reserved[6]       = {};
+	size_t   size                     = 0;
+	char     name[64]                 = {};
+	uint64_t job_scheduler_options[4] = {};
+	uint32_t flags                    = 0;
+	uint32_t max_grain_samples        = 0;
+	uint32_t num_grain_samples        = 0;
+	uint32_t sample_rate              = 0;
+	uint32_t max_voice_channels       = 0;
+	uint32_t reserved[5]              = {};
 };
+static_assert(sizeof(Ngs2SystemOption) == 0x90);
+static_assert(offsetof(Ngs2SystemOption, max_grain_samples) == 0x6c);
+static_assert(offsetof(Ngs2SystemOption, num_grain_samples) == 0x70);
+static_assert(offsetof(Ngs2SystemOption, sample_rate) == 0x74);
+static_assert(offsetof(Ngs2SystemOption, max_voice_channels) == 0x78);
 
 struct Ngs2RackOption
 {
@@ -444,6 +451,7 @@ static_assert(sizeof(Ngs2WaveformInfo) == 232);
 
 namespace {
 
+constexpr int32_t kNgs2InvalidOutAddress    = static_cast<int32_t>(0x804a8010u);
 constexpr int32_t kNgs2InvalidOut           = static_cast<int32_t>(0x804a0053u);
 constexpr int32_t kNgs2InvalidOption        = static_cast<int32_t>(0x804a0081u);
 constexpr int32_t kNgs2InvalidSystem        = static_cast<int32_t>(0x804a0201u);
@@ -2834,6 +2842,25 @@ static void Ngs2DispatchCallback(const std::shared_ptr<Ngs2SystemRecord>& system
 }
 
 } // namespace
+
+// sceNgs2SystemResetOption (NID AQkj7C0f3PY): the shipped module copies a
+// 0x90-byte default option (size, 512/256 grain samples, 48 kHz, 8 channels).
+int KYTY_SYSV_ABI Ngs2SystemResetOption(Ngs2SystemOption* option)
+{
+	PRINT_NAME();
+
+	if (!Ngs2IsGuestWritable(option, sizeof(Ngs2SystemOption)))
+	{
+		return kNgs2InvalidOutAddress;
+	}
+	Ngs2SystemOption defaults {};
+	defaults.size               = sizeof(Ngs2SystemOption);
+	defaults.max_grain_samples  = kNgs2DefaultMaxGrainSamples;
+	defaults.num_grain_samples  = kNgs2DefaultGrainSamples;
+	defaults.sample_rate        = kNgs2DefaultSampleRate;
+	defaults.max_voice_channels = 8;
+	return Ngs2WriteGuest(option, defaults) ? OK : kNgs2InvalidOutAddress;
+}
 
 int KYTY_SYSV_ABI Ngs2SystemQueryBufferSize(const Ngs2SystemOption* option, Ngs2ContextBufferInfo* buffer_info)
 {

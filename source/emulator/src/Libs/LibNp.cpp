@@ -527,6 +527,8 @@ int KYTY_SYSV_ABI Terminate()
 // no caller buffer length. Reject the incomplete contract without writing a
 // fabricated empty intent.
 static constexpr int np_game_intent_error_invalid_argument = static_cast<int32_t>(0x80553804u);
+static constexpr int np_game_intent_error_not_initialized  = static_cast<int32_t>(0x80553802u);
+static constexpr int np_game_intent_error_value_not_found  = static_cast<int32_t>(0x80553807u);
 
 int KYTY_SYSV_ABI ReceiveIntent(void* out)
 {
@@ -534,11 +536,31 @@ int KYTY_SYSV_ABI ReceiveIntent(void* out)
 	return np_game_intent_error_invalid_argument;
 }
 
+// sceNpGameIntentGetPropertyValueString — NID rPl0INNc-M8. Intent payloads are
+// never populated because ReceiveIntent has no proven layout, so every lookup
+// lands on the empty-value path the shipped body reports as VALUE_NOT_FOUND.
+int KYTY_SYSV_ABI GetPropertyValueString(const void* intent_data, const char* key, char* value, uint64_t value_size)
+{
+	PRINT_NAME();
+
+	if (!g_initialized.load(std::memory_order_acquire))
+	{
+		return np_game_intent_error_not_initialized;
+	}
+	if (intent_data == nullptr || key == nullptr || key[0] == '\0' || value == nullptr || value_size == 0)
+	{
+		return np_game_intent_error_invalid_argument;
+	}
+	value[0] = '\0';
+	return np_game_intent_error_value_not_found;
+}
+
 LIB_DEFINE(InitNpGameIntent_1)
 {
 	LIB_FUNC("m87BHxt-H60", Initialize);
 	LIB_FUNC("0HBYxYAjmf0", Terminate);
 	LIB_FUNC("jEIXUAr9XE8", ReceiveIntent);
+	LIB_FUNC("rPl0INNc-M8", GetPropertyValueString);
 }
 
 } // namespace Kyty::Libs::NpGameIntent

@@ -6,6 +6,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -38,6 +39,25 @@ static KYTY_SYSV_ABI int UserServiceInitialize(const void* /*params*/)
 {
 	PRINT_NAME();
 
+	return OK;
+}
+
+// sceUserServiceInitialize2 — NID az-0R6eviZ0. The shipped body accepts ids
+// 0x100..0x2ff and reports a repeated call as ALREADY_INITIALIZED.
+static std::atomic<bool> g_initialize2_done {false};
+
+static KYTY_SYSV_ABI int UserServiceInitialize2(int32_t param, const void* /*params*/)
+{
+	PRINT_NAME();
+
+	if (static_cast<uint32_t>(param - 0x100) > 0x1ffu)
+	{
+		return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+	}
+	if (g_initialize2_done.exchange(true, std::memory_order_acq_rel))
+	{
+		return USER_SERVICE_ERROR_ALREADY_INITIALIZED;
+	}
 	return OK;
 }
 
@@ -294,6 +314,7 @@ LIB_DEFINE(InitUserService_1_PlatformPrivacyWs1)
 LIB_DEFINE(InitUserService_1)
 {
 	LIB_FUNC("j3YMu1MVNNo", UserService::UserServiceInitialize);
+	LIB_FUNC("az-0R6eviZ0", UserService::UserServiceInitialize2);
 	LIB_FUNC("bwFjS+bX9mA", UserService::UserServiceTerminate);
 	LIB_FUNC("CdWp0oHWGr0", UserService::UserServiceGetInitialUser);
 	LIB_FUNC("yH17Q6NWtVg", UserService::UserServiceGetEvent);

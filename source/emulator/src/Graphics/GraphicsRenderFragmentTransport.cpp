@@ -139,7 +139,17 @@ FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, co
 	                              VK_SUBGROUP_FEATURE_QUAD_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;
 	const bool mask_ops = (context->subgroup_stages & VK_SHADER_STAGE_FRAGMENT_BIT) != 0 &&
 	                      (context->subgroup_operations & kMaskOps) == kMaskOps;
-	if (native.refusal_reason == nullptr && mapping.supported && mask_ops &&
+	// A participation refusal only says that a narrower host subgroup misses
+	// guest source lanes. When the device pins the exact guest width every lane
+	// is a real host invocation, so the refusal does not apply; semantic
+	// refusals (a mask used as a number and the like) still do.
+	// DIAG-WAVEEXACT: temporary switch to isolate the exact-width acceptance.
+	const bool  diag_exact_off = std::getenv("KYTY_DIAG_EXACT_WAVE_OFF") != nullptr;
+	const bool  exact_host = !diag_exact_off && native.proof == ShaderNativeWaveProof::ExactSubgroup && mapping.supported &&
+	                        mapping.size == native.guest_wave_size;
+	const char* refusal = exact_host && ShaderNativeWaveParticipationRefusal(native.refusal_reason) ? nullptr
+	                                                                                               : native.refusal_reason;
+	if (refusal == nullptr && mapping.supported && mask_ops &&
 	    (pixel.required_subgroup_size == 0u || native.proof == ShaderNativeWaveProof::LaneLocal ||
 	     native.proof == ShaderNativeWaveProof::QuadLocal || context->shader_maximal_reconvergence_enabled))
 	{
@@ -153,10 +163,10 @@ FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, co
 	String8 facts = String8::FromPrintf("native_admission{guest=%u proof=%u host=%s mapping=%u mask_ops=%u pc=0x%x reason=%s} ",
 	                                    native.guest_wave_size, static_cast<uint32_t>(native.proof), host_width.c_str(),
 	                                    mapping.supported ? 1u : 0u, mask_ops ? 1u : 0u, native.refusal_pc,
-	                                    native.refusal_reason != nullptr ? native.refusal_reason :
+	                                    refusal != nullptr ? refusal :
 	                                    (!mapping.supported ? "exact lane map or explicit width-neutral proof unavailable" : "emitted feature unavailable"));
 	facts += DrawState(state, extent, pixel);
-	if (native.refusal_reason != nullptr)
+	if (refusal != nullptr)
 	{
 		requirement.facts = facts;
 		return requirement;

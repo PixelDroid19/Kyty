@@ -302,17 +302,8 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal, uint32_t in
 void GdsBuffer::Init(GraphicContext* ctx, CommandBuffer* buffer)
 {
 	EXIT_IF(ctx == nullptr || buffer == nullptr);
-	const int queue_index = buffer->GetQueueIndex();
-	EXIT_IF(queue_index < 0 || queue_index >= GraphicContext::QUEUES_NUM);
-	const uint32_t family = ctx->queues[queue_index].family;
-	if (m_queue_family == VK_QUEUE_FAMILY_IGNORED)
-	{
-		m_queue_family = family;
-	}
-	if (m_queue_family != family)
-	{
-		EXIT("GDS queue-family migration is unsupported: owner=%u requested=%u\n", m_queue_family, family);
-	}
+	// Every resource is shared CONCURRENT across the context's queue families
+	// (VulkanApplyResourceSharing), so GDS needs no queue-family ownership.
 	if (m_buffer == nullptr)
 	{
 		m_buffer = new VulkanBuffer;
@@ -581,7 +572,6 @@ void GdsBuffer::ReleaseForTesting(GraphicContext* ctx)
 		delete m_buffer;
 		m_buffer = nullptr;
 	}
-	m_queue_family = VK_QUEUE_FAMILY_IGNORED;
 }
 
 void CommandPool::Create(int id)

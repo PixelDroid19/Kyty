@@ -50,6 +50,8 @@ constexpr uint32_t IT_COPY_DATA                 = 0x40;
 constexpr uint32_t IT_CP_DMA                    = 0x41;
 constexpr uint32_t IT_PFP_SYNC_ME               = 0x42;
 constexpr uint32_t IT_SURFACE_SYNC              = 0x43;
+// AGC COND_WRITE (sceAgcCbCondWrite, NID 7toV+elXqNM).
+constexpr uint32_t IT_COND_WRITE                = 0x45;
 constexpr uint32_t IT_EVENT_WRITE               = 0x46;
 constexpr uint32_t IT_EVENT_WRITE_EOP           = 0x47;
 constexpr uint32_t IT_EVENT_WRITE_EOS           = 0x48;
@@ -58,6 +60,7 @@ constexpr uint32_t IT_DMA_DATA                  = 0x50;
 constexpr uint32_t IT_ONE_REG_WRITE             = 0x57;
 constexpr uint32_t IT_ACQUIRE_MEM               = 0x58;
 constexpr uint32_t IT_REWIND                    = 0x59;
+constexpr uint32_t IT_PRIME_UTCL2               = 0x5D;
 constexpr uint32_t IT_SET_CONFIG_REG            = 0x68;
 constexpr uint32_t IT_SET_CONTEXT_REG           = 0x69;
 constexpr uint32_t IT_SET_SH_REG                = 0x76;
@@ -73,6 +76,8 @@ constexpr uint32_t IT_WAIT_ON_DE_COUNTER_DIFF   = 0x88;
 constexpr uint32_t IT_GET_LOD_STATS             = 0x8E;
 constexpr uint32_t IT_DISPATCH_DRAW_PREAMBLE    = 0x8C;
 constexpr uint32_t IT_DISPATCH_DRAW             = 0x8D;
+// AGC SET_INDEX_INDIRECT_ARGS (sceAgcDcbSetIndexIndirectArgs, NID 0o3VDdtA6nM).
+constexpr uint32_t IT_SET_INDEX_INDIRECT_ARGS   = 0x91;
 
 /* Custom codes. Implemented via IT_NOP */
 

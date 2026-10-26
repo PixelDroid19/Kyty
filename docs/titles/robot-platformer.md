@@ -6,6 +6,61 @@ Records moved verbatim from `docs/BRINGUP.md`, newest first. The bring-up
 manual keeps the invariants, methodology, frontier and an index of every
 record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
 
+## Robot platformer: Gen5 AGC HLE run reaches the tutorial level load (2026-10-26)
+
+- **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, `fc_script` with
+  `scripts/run_guest.lua` and `scripts/input/reach_first_gameplay.pad`,
+  `KYTY_RUN_MEMORY_HIGH=14G`, 1280x720. The first run had a cold SPIR-V cache;
+  the 300 s run below reused the `~/.cache/kyty` cache the first one filled.
+- **Startup fix.** The first strict run aborted at once in `GdsBuffer::Init`
+  with `GDS queue-family migration is unsupported: owner=1 requested=0`. The
+  Gen5 AGC/AgcDriver HLE set now issues the title's GDS work on both a compute
+  and the graphics queue family, and the owner guard predated Kyty's concurrent
+  resource sharing. The guard is gone; see
+  [GDS backing shared across queue families](../bringup/cross-title.md).
+- **Result (300 s window, exit 124 on the cap).** No fatal stop. The title
+  runs `ps_logo` at 0:08 and `title` at 0:38 (guest clock), chooses the
+  worldmap, runs `intro_next` (12.6 s load) and starts the crash-site tutorial
+  load (`SubLevelLocator sublevel_locator_hub [hub_crashsite_tutorial]`, 4.5 s
+  load) before the cap.
+- **600 s run (exit 65).** With `KYTY_RUN_MEMORY_HIGH=16G`,
+  `KYTY_RUN_MEMORY_MAX=18G` and `KYTY_DUMP_VIDEOOUT=1`, the title passes
+  `hub_crashsite_tutorial` (4.6 s load), restores the sublevel locator and
+  renders the crash-site scene: the present dumps at frames 1800 and 2600
+  show the star field, ringed planet, asteroids and the blue crystals with
+  the red/white aim markers. It then stops on the next draw at
+  `GraphicsRenderPipeline.cpp:1680`: `fragment wave transport is required by
+  the pixel stage ... native_admission{guest=64 proof=3 host=unavailable
+  mapping=0 mask_ops=1 pc=0x568 reason=fragment row DPP source participation
+  is unproven (neutral values do not prove helper recovery)} draw{extent=1920x1080
+  samples=1 color_targets=3 write_mask=0x00000037 depth=1 depth_write=1
+  blend0=1 input_num=5 system_inputs=0x1b02 subgroup=64}`. The program fails
+  the native proof itself (row DPP), so the stop is not Intel-only; the
+  fragment wave transport is the open item recorded in this file and in the
+  graphics handoff.
+- **Why the partial-wave fallback also refuses (shader dump).** With
+  `KYTY_TRANSPORT_DUMP` the stop wrote the guest program to local scratch
+  (1,524 instructions). At `0x55c`-`0x5a8` it runs a canonical whole-wave OR
+  reduction: `S_ORN2_SAVEEXEC_B64`, `V_CNDMASK` seed, four row-shift `V_OR`
+  steps, `V_PERMLANEX16`, `V_OR`, restore EXEC, `V_READLANE s8, v37, 31`,
+  `V_READLANE s9, v37, 63` and `S_OR s72, s8, s9`; `s72` feeds predicates at
+  `0xc20` and `0xec8`. Lane 63 belongs to the second 32-lane half, so a
+  32-wide host wave cannot form the guest reduction; the partial-wave proof
+  correctly refuses this program even though it accepts reductions that do
+  not read across the two halves. This is the exact input the
+  capture/shade/resolve contract must provide (raw lane banks, allocated
+  lanes and coverage), not a missing import.
+- **Observation.** After the worldmap load the title prints its own
+  `GFX_: JsParticle heap memory is full!` 65 times with the heap at about
+  36,800 KB of 36,864 KB. The same guest message was already recorded from the
+  intro level in the 2026-10-13 TUNNEL_ENABLE entry (32 lines) and remains
+  uninvestigated; it is a guest message, not an emulator refusal.
+- **Limits.** The 300 s window was log-only (`PrintfDirection = Silent`). The
+  600 s window's present dumps are raw local evidence, not sanitized
+  captures, a frame score or input acceptance: rendering the crash-site scene
+  is a runtime frontier, not a playability claim, and the run ends on the
+  transport refusal rather than gameplay acceptance.
+
 ## Robot platformer: logo particles through a split geometry pass (2026-10-22)
 
 - **Setup.** Intel Arc A770, Mesa ANV 26.2.5, strict, `generic.pad`,
