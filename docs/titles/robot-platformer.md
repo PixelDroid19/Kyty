@@ -2062,8 +2062,8 @@ Known approximations and debt recorded by this chain:
     Unit tests
     `EmulatorShaderArithmetic.DsBpermuteShuffleNamesTheSubgroupScope` and
     `EmulatorShaderArithmetic.DsBpermuteSplitWaveReadsGuestLanesThroughTheWaveExchange`
-    assemble and validate both strategies. The hub run with translator 160 is
-    pending.
+    assemble and validate both strategies. The first translator-160 run does
+    not reach the hub; it stops at the stall recorded below.
   - `V_FMA_MIXLO_F16` and `V_FMA_MIXHI_F16` are the mixed FMA of the
     selected sources with the result in the low or the high half of the
     destination. The emulator now decodes both and merges the half the opcode
@@ -2071,6 +2071,19 @@ Known approximations and debt recorded by this chain:
   With those translated the run reaches the hub's own resources and then
   fails with the device lost described below, so the hub's first gameplay
   draw now executes.
+- **The merged tree stops presenting before the hub (open, 2026-10-26).** A
+  bounded translator-160 run on the tree that merges the HLE runtime and the
+  split-wave16 branches reaches three presented frames (`frame 4`,
+  `present 3`, then `phase=stalled` with no present for 54 s) and writes no
+  shader log past its first pixel programs. The kernel journal records no
+  RCS reset for that process and the log has no `vkWaitForFences` failure,
+  so the block is on the host before any hub shader. The last recorded error
+  event before the stall is `gfx_storage_frontier` with
+  `src=metadata r=metadata_only`. No shader that contains `ds_bpermute_b32`
+  executes before the stall, so the lane-permute fix is not involved. Next
+  step: capture the emulator process thread stacks (the first snapshot caught
+  the timeout wrapper) and A/B the HLE-only merge against the split-wave16
+  merge to isolate the block.
 - **The narrowing SDWA is translated.** The hub's pixel program also uses
   `vcvt_f16_f32` with a sub-dword addressing modifier, which the half
   arithmetic refused. The ISA's SDWA fields give the contract: the source is
