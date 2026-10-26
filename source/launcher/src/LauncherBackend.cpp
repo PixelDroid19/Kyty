@@ -247,11 +247,11 @@ LauncherBackend::LauncherBackend(QObject* parent)
 	m_import_pool.setMaxThreadCount(1);
 	m_import_pool.setThreadPriority(QThread::IdlePriority);
 	m_default_font = QGuiApplication::font();
-	m_themes       = FindThemePacks();
 
 	Load();
 	ApplyColorScheme();
 	ApplyLanguage();
+	ReadAddOns();
 	ApplyLook();
 
 	connect(&m_runner, &EmulatorRunner::Probed, this, &LauncherBackend::OnProbed);
@@ -372,21 +372,16 @@ void LauncherBackend::Load()
 	m_look              = LookDefaults();
 	for (auto it = m_look.begin(); it != m_look.end(); ++it)
 	{
-		// A value edited by hand that the launcher does not know keeps the default.
+		// A value edited by hand that the launcher does not know keeps the default. A theme is checked when it is
+		// applied instead, so one that is no longer installed brings a notice saying why.
 		const auto value = settings->value(it.key(), it.value());
-		if (IsValidLook(it.key(), value))
+		const bool theme = it.key() == QLatin1String("theme") && !value.toString().isEmpty();
+		if (theme || IsValidLook(it.key(), value))
 		{
 			*it = it.value().typeId() == QMetaType::Bool ? QVariant(value.toBool()) : QVariant(value.toString());
 		}
 	}
 	settings->endGroup();
-
-	// The profiles sit next to the settings file, so a portable Kyty.ini keeps its profiles beside it.
-	if (const auto error = m_profiles.Load(QFileInfo(m_settings_file).absolutePath() + QStringLiteral("/input-profiles")); !error.isEmpty())
-	{
-		qWarning("%s", qPrintable(error));
-	}
-	SetActiveProfile(m_profiles.Find(m_input_profile) != nullptr ? m_input_profile : QString(InputProfiles::DEFAULT_ID));
 
 	settings->beginGroup(SETTINGS_WINDOW);
 	if (settings->contains("width") && settings->contains("height"))
@@ -798,6 +793,7 @@ void LauncherBackend::SetLauncherField(const QString& key, const QVariant& value
 	{
 		m_language = text;
 		ApplyLanguage();
+		ReadAddOns();
 		emit LanguageChanged();
 	} else if (IsValidLook(key, value))
 	{
@@ -958,6 +954,18 @@ void LauncherBackend::ApplyColorScheme()
 		scheme = Theme::Scheme::Light;
 	}
 	Theme::Instance()->SetColorScheme(scheme);
+}
+
+// Themes and profiles explain their faults to the user, so they are read again in each interface language.
+void LauncherBackend::ReadAddOns()
+{
+	m_themes = FindThemePacks();
+	// The profiles sit next to the settings file, so a portable Kyty.ini keeps its profiles beside it.
+	if (const auto error = m_profiles.Load(QFileInfo(m_settings_file).absolutePath() + QStringLiteral("/input-profiles")); !error.isEmpty())
+	{
+		qWarning("%s", qPrintable(error));
+	}
+	SetActiveProfile(m_profiles.Find(m_input_profile) != nullptr ? m_input_profile : QString(InputProfiles::DEFAULT_ID));
 }
 
 void LauncherBackend::ApplyLanguage()

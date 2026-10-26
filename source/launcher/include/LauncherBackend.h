@@ -152,6 +152,7 @@ private:
 	void                                        AddImported(const QList<QVariantMap>& games, int found);
 	void                                        ApplyColorScheme();
 	void                                        ApplyLanguage();
+	void                                        ReadAddOns();
 	void                                        ApplyLook();
 	void                                        ApplyTheme();
 	void                                        ThemeUnusable(const QString& message);
