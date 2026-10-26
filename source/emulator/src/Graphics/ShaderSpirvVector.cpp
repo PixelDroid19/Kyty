@@ -4414,13 +4414,14 @@ static bool EmitMovrelsDynamic(int index, const ShaderOperand& dst, int base, co
 	return true;
 }
 
-// VGPR[base + m0] = src lowered to a conditional store per candidate; any
+// VGPR[base + offset] = src lowered to a conditional store per candidate; any
 // other offset names no register, so the write is unobservable.
+// |offset_load| defines %rel_m0_<index> (M0, or a waterfall's per-lane index).
 // |src_load| holds the operand fetch block (or the movrelsd select chain) and
-// |src_id| the float id it produces; it may reference the m0 load emitted
+// |src_id| the float id it produces; it may reference the offset load emitted
 // first, so the source is evaluated once before the gated stores.
-static bool EmitMovreldDynamic(int index, int base, const String8& src_load, const String8& src_id, const Vector<int>& candidates,
-                               String8* dst_source)
+static bool EmitMovreldDynamic(int index, int base, const String8& offset_load, const String8& src_load, const String8& src_id,
+                               const Vector<int>& candidates, String8* dst_source)
 {
 	String8 stores;
 	for (const auto reg: candidates)
@@ -4433,12 +4434,12 @@ static bool EmitMovreldDynamic(int index, int base, const String8& src_load, con
 		                              index, reg, reg, index, reg, index, reg - base, index, reg, index, reg, index, index, reg,
 		                              index, reg, src_id.c_str(), index, reg, reg, index, reg);
 	}
-	*dst_source += String8::FromPrintf("%%rel_m0_%d = OpLoad %%uint %%m0\n"
-	                                   "%%rel_exec_%d = OpLoad %%uint %%exec_lo\n"
+	*dst_source += offset_load;
+	*dst_source += String8::FromPrintf("%%rel_exec_%d = OpLoad %%uint %%exec_lo\n"
 	                                   "%%rel_execb_%d = OpINotEqual %%bool %%rel_exec_%d %%uint_0\n"
 	                                   "%s"
 	                                   "%s",
-	                                   index, index, index, index, src_load.c_str(), stores.c_str());
+	                                   index, index, index, src_load.c_str(), stores.c_str());
 	return true;
 }
 
@@ -4552,6 +4553,23 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovreldB32_SVdstSVsrc0)
 	{
 		return false;
 	}
+	String8 src_load;
+	String8 index_str = String8::FromPrintf("%d", index);
+	// Waterfall lowering carries the current lane index in src[1], as for V_MOVRELS.
+	if (inst.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1)
+	{
+		if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || inst.src[1].type != ShaderOperandType::Vgpr ||
+		    inst.src[1].size != 1 || inst.src[1].dpp || inst.src[1].negate || inst.src[1].absolute ||
+		    !operand_load_float(spirv, inst.src[0], "rel_src_" + index_str, index_str, &src_load))
+		{
+			return false;
+		}
+		const auto offset_load = String8::FromPrintf("%%rel_lane_%u = OpLoad %%float %%v%d\n"
+		                                             "%%rel_m0_%u = OpBitcast %%uint %%rel_lane_%u\n",
+		                                             index, inst.src[1].register_id, index, index);
+		return EmitMovreldDynamic(index, inst.dst.register_id, offset_load, src_load, "%rel_src_" + index_str,
+		                          MovrelCandidateRegisters(code, inst.dst.register_id), dst_source);
+	}
 	if (MovrelProvenLiteralM0(code, index, &m0))
 	{
 		uint64_t      rel = 0;
@@ -4568,14 +4586,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovreldB32_SVdstSVsrc0)
 	{
 		return false;
 	}
-	String8 src_load;
-	String8 index_str = String8::FromPrintf("%d", index);
-	if (!operand_load_float(spirv, inst.src[0], "rel_src_<index>", index_str, &src_load))
+	if (!operand_load_float(spirv, inst.src[0], "rel_src_" + index_str, index_str, &src_load))
 	{
 		return false;
 	}
-	return EmitMovreldDynamic(index, inst.dst.register_id, src_load, "%rel_src_" + index_str,
-	                          MovrelReachableRegisters(code, index, inst.dst.register_id), dst_source);
+	return EmitMovreldDynamic(index, inst.dst.register_id, String8::FromPrintf("%%rel_m0_%d = OpLoad %%uint %%m0\n", index), src_load,
+	                          "%rel_src_" + index_str, MovrelReachableRegisters(code, index, inst.dst.register_id), dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMovrelsdB32_SVdstSVsrc0)
@@ -4628,8 +4644,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovrelsdB32_SVdstSVsrc0)
 	}
 	// EmitMovreldDynamic emits the m0 load first, so the select chain can
 	// consume %rel_m0_<index> directly.
-	return EmitMovreldDynamic(index, inst.dst.register_id, chain, acc, MovrelReachableRegisters(code, index, inst.dst.register_id),
-	                          dst_source);
+	return EmitMovreldDynamic(index, inst.dst.register_id, String8::FromPrintf("%%rel_m0_%d = OpLoad %%uint %%m0\n", index), chain,
+	                          acc, MovrelReachableRegisters(code, index, inst.dst.register_id), dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMovB32_SVdstSVsrc0)
