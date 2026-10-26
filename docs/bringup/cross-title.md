@@ -41,6 +41,10 @@ record. Titles are named by PS5 content ID and public name (`AGENTS.md`).
   tag. The draw-time bank is chosen from the texture descriptor's own format
   (`GraphicsRenderBind.cpp:4485-4516`), so a resource table rewritten after
   pipeline creation can also select a bank whose static count left it empty.
+  The mirror case exists: when every texture of one shape is unsigned in a
+  mixed bind, the writer sets that shape's signed count to zero while the
+  plan still declares the signed bank with the shape total
+  (`GraphicsRenderDescriptor.cpp:700-706`).
 - **Open.** Whether the unwritten descriptor contributes to the queue-8
   device lost is not established: the hub draw executes and the loss surfaces
   later at a fence wait. Next: capture the complete validation message with
